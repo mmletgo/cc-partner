@@ -155,7 +155,230 @@ const STALE_RULES = [
       return null;
     },
   },
+  {
+    id: 'docs-lan-configurable-mode',
+    test(relPath, content) {
+      if (!isDocsUserFacing(relPath)) return null;
+      // 产品只有一种固定 LAN 行为；禁止可切换暴露/只读模式、mode DTO、LAN 权限 capability token。
+      const banned = [
+        {
+          re: /\bLAN\s+mode\b/i,
+          msg: 'docs must not describe configurable LAN mode (fixed unauthenticated LAN only)',
+        },
+        {
+          re: /\blan\.mode\b/i,
+          msg: 'docs must not document lan.mode config (fixed unauthenticated LAN only)',
+        },
+        {
+          re: /\blan\.permission\b|\blan\.auth\b/i,
+          msg: 'docs must not document lan.permission / lan.auth capability tokens',
+        },
+        {
+          re: /LAN\s+permission\s+capability|capability\s+token[^.\n]{0,60}LAN|LAN[^.\n]{0,60}capability\s+token/i,
+          msg: 'docs must not document LAN permission capability tokens',
+        },
+        {
+          re: /可切换[^。\n]{0,24}LAN|LAN[^。\n]{0,24}可切换/,
+          msg: 'docs must not describe switchable LAN exposure modes',
+        },
+        {
+          re: /暴露模式/,
+          msg: 'docs must not describe LAN 暴露模式 as a product mode',
+        },
+        {
+          re: /只读模式/,
+          msg: 'docs must not describe LAN 只读模式 as a product mode',
+        },
+      ];
+      for (const rule of banned) {
+        if (!rule.re.test(content)) continue;
+        // 允许“禁止/不得/不提供 … 模式”这类否定说明，避免工程指令自伤。
+        if (hasLanNegationContext(content, rule.re)) continue;
+        return rule.msg;
+      }
+      return null;
+    },
+  },
+  {
+    id: 'docs-lan-route-authorization',
+    test(relPath, content) {
+      if (!isDocsUserFacing(relPath)) return null;
+      // 禁止“每条 /api 路由有设备级授权效果”的矩阵叙事；保留 retry class 表（含 read-only 类名）。
+      const banned = [
+        {
+          re: /route\s+authorization\s+matrix/i,
+          msg: 'docs must not define a route authorization matrix for LAN APIs',
+        },
+        {
+          re: /per[- ]route\s+(auth(?:orization)?|permission)\b/i,
+          msg: 'docs must not claim per-route authorization/permission for LAN APIs',
+        },
+        {
+          re: /\bauth(?:orization)?\s+effect\b/i,
+          msg: 'docs must not add authorization/effect columns to the P2P route inventory',
+        },
+        {
+          re: /路由授权矩阵|按路由[^。\n]{0,20}授权|设备级[^。\n]{0,12}授权/,
+          msg: 'docs must not define per-route/device authorization for LAN APIs',
+        },
+      ];
+      for (const rule of banned) {
+        if (!rule.re.test(content)) continue;
+        if (hasLanNegationContext(content, rule.re)) continue;
+        return rule.msg;
+      }
+      return null;
+    },
+  },
+  {
+    id: 'docs-lan-peer-identity-claims',
+    test(relPath, content) {
+      if (!isDocsUserFacing(relPath)) return null;
+      // 禁止把通过 socket gate 的 peer 写成身份意义上的“已认证/可信/安全设备”。
+      // 刻意不匹配 Windows Defender「高级安全」产品名；只盯身份断言短语。
+      const banned = [
+        {
+          re: /authenticated\s+LAN\s+peers?|LAN\s+peers?\s+are\s+authenticated|peers?\s+are\s+(authenticated|trusted)\b/i,
+          msg: 'docs must not claim LAN peers are authenticated/trusted identities',
+        },
+        {
+          re: /\b(trusted|secure)\s+devices?\b/i,
+          msg: 'docs must not call LAN peers trusted/secure devices (identity claim)',
+        },
+        {
+          re: /(局域网|LAN)[^。.\n]{0,24}(已认证|可信设备|安全设备)|(已认证|可信设备|安全设备)[^。.\n]{0,24}(局域网|LAN|peer)/i,
+          msg: 'docs must not claim LAN peers are 已认证/可信设备/安全设备',
+        },
+        {
+          re: /是可信设备|为可信设备|作为可信设备|是安全设备|为安全设备/,
+          msg: 'docs must not claim peers are 可信/安全设备',
+        },
+      ];
+      for (const rule of banned) {
+        if (!rule.re.test(content)) continue;
+        if (hasLanNegationContext(content, rule.re)) continue;
+        return rule.msg;
+      }
+      return null;
+    },
+  },
+  {
+    id: 'docs-lan-vague-trust',
+    test(relPath, content) {
+      if (!isDocsUserFacing(relPath)) return null;
+      // 模糊“可信局域网”产品信任声称必须换成固定无身份风险声明。
+      if (/个人可信局域网/.test(content)) {
+        return 'replace “个人可信局域网” with fixed no-identity LAN risk wording';
+      }
+      if (/可信局域网/.test(content)) {
+        return 'replace “可信局域网” with fixed no-identity LAN risk wording';
+      }
+      if (/trusted personal LAN/i.test(content)) {
+        return 'replace “trusted personal LAN” with fixed no-identity LAN risk wording';
+      }
+      if (/\btrusted LAN\b/i.test(content)) {
+        return 'replace “trusted LAN” with fixed no-identity LAN risk wording';
+      }
+      return null;
+    },
+  },
+  {
+    id: 'docs-lan-fixed-risk-required',
+    test(relPath, content) {
+      // PRD 与运维文档必须出现固定无身份风险声明（中文或英文等价）。
+      const n = normalizeRel(relPath);
+      if (n !== 'docs/prd.md' && n !== 'docs/development/backend-operations.md') {
+        return null;
+      }
+      if (hasFixedLanRiskStatement(content)) return null;
+      return 'must include fixed no-identity LAN risk statement (Chinese fixed phrase or English equivalent)';
+    },
+  },
+  {
+    id: 'docs-lan-firewall-guidance',
+    test(relPath, content) {
+      // README / backend-operations 防火墙指引必须同时写 UDP 5353 与实际/首选 TCP 端口。
+      const n = normalizeRel(relPath);
+      if (n !== 'README.md' && n !== 'docs/development/backend-operations.md') {
+        return null;
+      }
+      const hasUdp5353 = /UDP\s*\*?\*?5353\*?\*?|\*?\*?5353\*?\*?[^.\n]{0,40}UDP|UDP[^.\n]{0,40}\*?\*?5353\*?\*?/i.test(
+        content,
+      );
+      const hasTcpPort =
+        /\b62116\b/.test(content) ||
+        /actual\s+(TCP\s+)?port|TCP\s+\*?\*?actual|实际.*(?:TCP\s*)?端口|实际端口/i.test(
+          content,
+        );
+      if (!hasUdp5353 || !hasTcpPort) {
+        return 'firewall guidance must mention UDP 5353 and actual/preferred TCP port (62116)';
+      }
+      return null;
+    },
+  },
 ];
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   LAN 边界相关文档既要禁止“模式/已认证”等正向错误叙事，又允许“禁止写模式”
+ *   这类工程否定句；否则 CLAUDE/计划指令会自伤。
+ *
+ * Code Logic（这个函数做什么）:
+ *   在 content 中定位 re 的首次命中，检查命中行前后各 1 行是否含否定措辞；
+ *   命中否定上下文则返回 true（调用方应跳过该规则）。
+ * @param {string} content
+ * @param {RegExp} re
+ * @returns {boolean}
+ */
+function hasLanNegationContext(content, re) {
+  const lines = content.split(/\r?\n/);
+  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
+  const globalRe = new RegExp(re.source, flags);
+  for (let i = 0; i < lines.length; i++) {
+    globalRe.lastIndex = 0;
+    if (!globalRe.test(lines[i])) continue;
+    // 前后各 1 行；去掉 markdown 粗体标记，便于匹配 **no** / **not**。
+    const window = [lines[i - 1] ?? '', lines[i], lines[i + 1] ?? '']
+      .join(' ')
+      .replace(/\*\*/g, '');
+    if (
+      /禁止|不得|勿|不要|避免|不提供|不实现|不增加|不新增|不引入|不描述|不得写|禁止写|\bmust not\b|\bdo not\b|\bdoes not\b|\bnever\b|\bwithout\b|\bno\b|\bnot\b|\bneither\b/i.test(
+        window,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   PRD 与运维文档必须固定声明“无调用者身份校验”的剩余风险，防止产品文案回退到
+ *   模糊“可信局域网”叙事。
+ *
+ * Code Logic（这个函数做什么）:
+ *   匹配固定中文风险句或英文等价句；允许分号/逗号/句号轻微标点差异。
+ * @param {string} content
+ * @returns {boolean}
+ */
+function hasFixedLanRiskStatement(content) {
+  if (
+    /同一可达网络中的任何设备均可读取、写入和执行[；;,.，]?\s*系统不验证调用者身份/.test(
+      content,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /Any device on the same reachable network can read,\s*write,\s*and execute[；;,.，]?\s*the system does not verify caller identity/i.test(
+      content,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Business Logic: 路径比较需兼容 Windows 分隔符与相对路径写法。
@@ -482,6 +705,47 @@ function firstMatchingLine(content, rule) {
       rule.id === 'mdns-caps-prefix' &&
       /encode_mdns_capabilities/.test(lines[i]) &&
       /caps=/.test(lines[i])
+    ) {
+      return i + 1;
+    }
+    if (
+      rule.id === 'docs-lan-configurable-mode' &&
+      (/\bLAN\s+mode\b|\blan\.mode\b|\blan\.permission\b|\blan\.auth\b|暴露模式|只读模式|可切换/i.test(
+        lines[i],
+      ) ||
+        /LAN\s+permission\s+capability|capability\s+token/i.test(lines[i]))
+    ) {
+      return i + 1;
+    }
+    if (
+      rule.id === 'docs-lan-route-authorization' &&
+      /route\s+authorization|per[- ]route\s+(auth|permission)|auth(?:orization)?\s+effect|路由授权|按路由|设备级/i.test(
+        lines[i],
+      )
+    ) {
+      return i + 1;
+    }
+    if (
+      rule.id === 'docs-lan-peer-identity-claims' &&
+      /(authenticated|trusted device|secure device|已认证|可信设备|安全设备)/i.test(lines[i])
+    ) {
+      return i + 1;
+    }
+    if (
+      rule.id === 'docs-lan-vague-trust' &&
+      /(可信局域网|个人可信局域网|trusted personal LAN|trusted LAN)/i.test(lines[i])
+    ) {
+      return i + 1;
+    }
+    if (
+      rule.id === 'docs-lan-fixed-risk-required' &&
+      /(LAN|局域网|mobile|trust|风险|identity|peer)/i.test(lines[i])
+    ) {
+      return i + 1;
+    }
+    if (
+      rule.id === 'docs-lan-firewall-guidance' &&
+      /(firewall|防火墙|5353|62116|UDP|TCP|port|端口)/i.test(lines[i])
     ) {
       return i + 1;
     }
@@ -912,8 +1176,10 @@ function runSelfTest() {
   caseRun(
     'valid-file-link',
     {
-      'README.md': '# Title\n\nSee [prd](docs/prd.md).\n',
-      'docs/prd.md': '# PRD\n\nHello.\n',
+      'README.md':
+        '# Title\n\nSee [prd](docs/prd.md).\n\nFirewall: UDP 5353 and TCP 62116.\n',
+      'docs/prd.md':
+        '# PRD\n\n同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。\n',
     },
     { expectFail: false },
   );
@@ -923,8 +1189,9 @@ function runSelfTest() {
     'valid-anchors',
     {
       'README.md':
-        '# Title\n\n## Install\n\nJump [down](#install).\n\nSee [prd section](docs/prd.md#features).\n',
-      'docs/prd.md': '# PRD\n\n## Features\n\nText.\n',
+        '# Title\n\n## Install\n\nJump [down](#install).\n\nSee [prd section](docs/prd.md#features).\n\nFirewall: UDP 5353 + actual TCP port 62116.\n',
+      'docs/prd.md':
+        '# PRD\n\n## Features\n\n同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。\n',
     },
     { expectFail: false },
   );
@@ -958,7 +1225,7 @@ function runSelfTest() {
     'ignore-external',
     {
       'README.md':
-        '# T\n\n[a](https://example.com/x)\n[b](mailto:a@b.c)\n',
+        '# T\n\n[a](https://example.com/x)\n[b](mailto:a@b.c)\n\nFirewall: UDP 5353 and TCP 62116.\n',
     },
     { expectFail: false },
   );
@@ -1028,7 +1295,8 @@ function runSelfTest() {
   caseRun(
     'superpowers-skipped-when-not-listed',
     {
-      'README.md': '# T\n\nOk preferred port 62116.\n',
+      'README.md':
+        '# T\n\nOk preferred port 62116.\n\nFirewall: UDP 5353 and actual TCP port.\n',
       'docs/superpowers/plans/old.md': '# Old\n\ntauri-action dynamic stuff\n',
     },
     { expectFail: false },
@@ -1045,6 +1313,81 @@ function runSelfTest() {
       expectFail: true,
       mustMatch: [/src-tauri\/CLAUDE\.md:\d+:.*encode_mdns_capabilities|bare comma-separated/],
     },
+  );
+
+  // 无效：模糊“可信局域网” + authenticated LAN peers + LAN mode + lan.permission
+  caseRun(
+    'banned-lan-trust-modes',
+    {
+      'README.md':
+        '# T\n\n面向个人可信局域网。Authenticated LAN peers are trusted devices.\nLAN mode: read-only. Capability: lan.permission.\n',
+    },
+    {
+      expectFail: true,
+      mustMatch: [
+        /README\.md:\d+:.*(可信局域网|authenticated|LAN mode|lan\.permission|trusted)/i,
+      ],
+    },
+  );
+
+  // 无效：docs/prd.md 缺少固定无身份风险声明
+  caseRun(
+    'missing-fixed-risk-prd',
+    {
+      'docs/prd.md':
+        '# PRD\n\nMobile Workbench uses LAN HTTP without tokens.\n',
+    },
+    {
+      expectFail: true,
+      mustMatch: [/docs\/prd\.md:\d+:.*fixed no-identity LAN risk/],
+    },
+  );
+
+  // 无效：backend-operations 缺少固定风险声明
+  caseRun(
+    'missing-fixed-risk-ops',
+    {
+      'docs/development/backend-operations.md':
+        '# Backend Operations\n\nFirewall: UDP 5353 and TCP 62116.\n',
+    },
+    {
+      expectFail: true,
+      mustMatch: [
+        /docs\/development\/backend-operations\.md:\d+:.*fixed no-identity LAN risk/,
+      ],
+    },
+  );
+
+  // 有效：固定风险 + 无 mode 语言 + 防火墙端口齐全
+  caseRun(
+    'valid-fixed-lan-boundary',
+    {
+      'docs/prd.md': [
+        '# PRD',
+        '',
+        '同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。',
+        '',
+        '产品只有一种固定局域网行为，不提供可切换暴露或只读产品模式。',
+        '',
+      ].join('\n'),
+      'docs/development/backend-operations.md': [
+        '# Backend Operations',
+        '',
+        'Any device on the same reachable network can read, write, and execute; the system does not verify caller identity.',
+        '',
+        'Firewall: allow UDP 5353 and the actual TCP port (preferred 62116, increment when occupied).',
+        '',
+      ].join('\n'),
+      'README.md': [
+        '# T',
+        '',
+        'Local/LAN only. No caller identity checks.',
+        '',
+        'Firewall: UDP 5353 + actual TCP port (preferred 62116).',
+        '',
+      ].join('\n'),
+    },
+    { expectFail: false },
   );
 
   // CLI：README 推荐已从 dispatch 删除的子命令 → 失败

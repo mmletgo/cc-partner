@@ -231,11 +231,13 @@ fn render_doctor_json(snapshot: &DoctorSnapshot) -> Result<String, AppError> {
 /// 渲染人类可读 doctor 文本。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     无 `--json` 时用户需要一眼看到 overall 状态、异常检查与日志路径，且不得暴露原始 home。
+///     无 `--json` 时用户需要一眼看到 overall 状态、异常检查、通配监听与固定 LAN 风险，
+///     且不得暴露原始 home 或 control token。
 ///
 /// Code Logic（这个函数做什么）:
-///     输出 status 摘要、backend 状态（stopped 标为 normal）、仅 warning/error 检查表、
-///     log 路径与 recent errors（摘要不超出 JSON 已脱敏字段）。
+///     输出 status 摘要、backend 状态（stopped 标为 normal）、实际端口与 wildcard 监听、
+///     固定无身份风险声明、仅 warning/error 检查表、log 路径与 recent errors
+///     （摘要不超出 JSON 已脱敏字段；永不打印 control token）。
 fn render_doctor_text(snapshot: &DoctorSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
@@ -261,9 +263,27 @@ fn render_doctor_text(snapshot: &DoctorSnapshot) -> String {
         if let Some(pid) = snapshot.backend.pid {
             if let Some(port) = snapshot.backend.port {
                 lines.push(format!("  pid={pid} port={port}"));
+            } else {
+                lines.push(format!("  pid={pid}"));
             }
+        } else if let Some(port) = snapshot.backend.port {
+            lines.push(format!("  port={port}"));
         }
     }
+
+    // 固定 LAN 风险：通配监听 + 无调用者身份校验（不打印 control token）
+    match snapshot.backend.port {
+        Some(port) => lines.push(format!(
+            "listener: wildcard 0.0.0.0 (actual http port={port})"
+        )),
+        None => lines.push(
+            "listener: wildcard 0.0.0.0 (actual http port unavailable)".to_string(),
+        ),
+    }
+    lines.push(
+        "risk: 同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份"
+            .to_string(),
+    );
 
     let problems = collect_problem_checks(snapshot);
     if problems.is_empty() {
@@ -1279,6 +1299,44 @@ mod tests {
         assert!(text.contains("peer request timed out"));
         assert!(!text.contains("/Users/"));
         assert!(!text.contains("alice"));
+    }
+
+    /// 验证 doctor 文本包含通配监听、实际端口与固定无身份 LAN 风险。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     操作者必须从 doctor 看到真实暴露面：wildcard listener、实际 HTTP 端口、
+    ///     以及“可达网络任意设备可读写执行且不验证身份”的固定风险，且永不打印 control token。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     渲染带 port 的 fixture，断言 wildcard/port/固定中文风险存在，
+    ///     且不含“安全/已认证/可信设备/control token”等禁用词。
+    #[test]
+    fn doctor_text_includes_wildcard_listener_and_fixed_lan_risk() {
+        let mut snapshot = doctor_text_fixture();
+        snapshot.backend.port = Some(62116);
+        snapshot.backend.pid = Some(4242);
+        snapshot.backend.state = "running".to_string();
+        snapshot.backend.health = DoctorCheck::new(
+            DoctorCheckStatus::Ok,
+            "backend.running",
+            "backend is running",
+        );
+        let text = super::render_doctor_text(&snapshot);
+        assert!(
+            text.contains("listener: wildcard 0.0.0.0 (actual http port=62116)"),
+            "doctor must report wildcard listener and actual port: {text}"
+        );
+        assert!(
+            text.contains("同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份"),
+            "doctor must include fixed no-identity risk: {text}"
+        );
+        assert!(text.contains("port=62116"));
+        assert!(!text.contains("安全"));
+        assert!(!text.contains("已认证"));
+        assert!(!text.contains("可信设备"));
+        assert!(!text.to_lowercase().contains("control token"));
+        assert!(!text.contains("expected-token"));
+        assert!(!text.contains("controlToken"));
     }
 
     /// 验证 probe/构造失败映射退出码 2。

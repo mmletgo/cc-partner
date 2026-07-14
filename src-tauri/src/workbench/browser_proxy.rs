@@ -4,7 +4,8 @@
 //!     Workbench Browser tab 需要把项目设备上的本机 dev server 包装为桌面端和手机端都能访问的同源预览地址。
 //!
 //! Code Logic（这个模块做什么）:
-//!     管理短期 preview session，并在后续实现中按 previewId 把 HTTP/WebSocket 请求转发到安全的上游目标。
+//!     管理短期 preview session，按 previewId 把 HTTP/WebSocket 请求转发到安全的上游目标；
+//!     在 registry 成功解析 live session 之后，才允许 opaque iframe 的 `Origin: null`。
 
 use crate::net::routes::ApiError;
 use crate::state::AppState;
@@ -207,15 +208,14 @@ impl WorkbenchBrowserPreviewRegistry {
         preview
     }
 
-    /// 创建测试用本机 preview。
+    /// 创建测试/smoke 用本机 preview。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     registry 单元测试只关心 previewId 与 TTL，不应依赖真实 HTTP server 端口。
+    ///     registry 单元测试与 bound smoke 只关心 previewId 与 TTL，不应依赖真实 HTTP server 端口。
     ///
     /// Code Logic（这个函数做什么）:
     ///     以固定端口调用 create_local，保持测试调用简洁稳定。
-    #[cfg(test)]
-    fn create_local_for_test(
+    pub fn create_local_for_test(
         &self,
         project_id: &str,
         worktree_id: Option<&str>,
@@ -229,15 +229,14 @@ impl WorkbenchBrowserPreviewRegistry {
         )
     }
 
-    /// 强制测试会话过期。
+    /// 强制测试/smoke 会话过期。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     过期清理不能让测试等待 30 分钟，必须能直接制造过期 session。
     ///
     /// Code Logic（这个函数做什么）:
     ///     在写锁内把目标 session 的 expires_at 调整到过去，并同步设置过期毫秒时间戳。
-    #[cfg(test)]
-    fn force_expire_for_test(&self, preview_id: &str) {
+    pub fn force_expire_for_test(&self, preview_id: &str) {
         if let Some(session) = self
             .inner
             .write()
@@ -349,7 +348,12 @@ pub async fn proxy_workbench_browser_request(
     req: Request<Body>,
     route_prefix: &'static str,
 ) -> Result<Response, ApiError> {
-    let session = lookup_preview_or_not_found(&state.workbench_browser_previews, &preview_id)?;
+    // 会话查找 + Origin 最终裁决（null 仅 live session；非 null 必须同源）。
+    let session = accept_preview_request_with_origin(
+        &state.workbench_browser_previews,
+        &preview_id,
+        req.headers(),
+    )?;
     if is_websocket_upgrade(req.headers()) {
         return proxy_workbench_browser_websocket(state, session, tail_path, req).await;
     }
@@ -370,6 +374,54 @@ fn lookup_preview_or_not_found(
     registry
         .lookup(preview_id)
         .ok_or_else(|| ApiError::not_found("预览会话不存在或已过期"))
+}
+
+/// 在 live preview session 查找成功后执行 Origin 最终判定。
+///
+/// Business Logic（为什么需要这个函数）:
+///     opaque sandbox iframe 可能发送 `Origin: null`；该例外只能绑定有效 preview session，
+///     不能在全局 guard 对未知/过期 previewId 直接放行。同时对非 null Origin 做会话层同源复检，
+///     防止未来子路由漏挂全局 guard 时跨站 + 有效 previewId 直达上游。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 Origin：缺失（native）允许；字面 `null` 允许；其它非 null 必须与 Host 规范化同源
+///     （复用 `lan_guard::is_same_origin_with_host`），否则 403。缺少 Host 时 fail-closed 403。
+///     调用方必须先 `lookup_preview_or_not_found`。
+fn enforce_preview_origin_after_session_lookup(headers: &HeaderMap) -> Result<(), ApiError> {
+    match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        None => Ok(()),
+        Some(origin) if origin.trim().eq_ignore_ascii_case("null") => Ok(()),
+        Some(origin) => {
+            let host = headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .filter(|h| !h.trim().is_empty())
+                .ok_or_else(|| ApiError::forbidden("预览请求缺少 Host，无法校验同源 Origin"))?;
+            if crate::net::lan_guard::is_same_origin_with_host(origin, host) {
+                Ok(())
+            } else {
+                Err(ApiError::forbidden("预览请求跨站 Origin 不被允许"))
+            }
+        }
+    }
+}
+
+/// 在 preview session 查找前后统一评估 Origin（生产入口与测试/smoke 共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     未知/过期 previewId 即使带 `Origin: null` 也必须失败；有效 session 才允许 null；
+///     非 null Origin 必须同源。生产 proxy 与 unit/smoke 必须走同一裁决路径。
+///
+/// Code Logic（这个函数做什么）:
+///     先 lookup；失败直接返回 404；成功再执行 `enforce_preview_origin_after_session_lookup`。
+pub fn accept_preview_request_with_origin(
+    registry: &WorkbenchBrowserPreviewRegistry,
+    preview_id: &str,
+    headers: &HeaderMap,
+) -> Result<BrowserPreviewSession, ApiError> {
+    let session = lookup_preview_or_not_found(registry, preview_id)?;
+    enforce_preview_origin_after_session_lookup(headers)?;
+    Ok(session)
 }
 
 /// 转发普通 HTTP preview 请求。
@@ -1341,7 +1393,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("http://127.0.0.1/proxy")
-            .body(Body::from(vec![b'x'; 32 * 1024 * 1024 + 1]))
+            .body(Body::from(vec![b'x'; PROXY_BODY_LIMIT_BYTES + 1]))
             .unwrap();
 
         let error = proxy_http_request_for_session(
@@ -1355,6 +1407,61 @@ mod tests {
 
         assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(*upstream_hits.lock().unwrap(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     边界回归：恰好等于 PROXY_BODY_LIMIT_BYTES 的 body 必须仍被接受并转发，
+    ///     防止 limit 实现写成 `<` 导致合法 32 MiB 请求被误杀。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造恰好 32 MiB 的 POST body，断言 proxy 成功且 upstream 收到 1 次请求。
+    #[tokio::test]
+    async fn http_proxy_accepts_exact_body_limit_and_forwards() {
+        let upstream_hits = std::sync::Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/upload",
+                any(
+                    |State(hits): State<std::sync::Arc<Mutex<usize>>>| async move {
+                        *hits.lock().unwrap() += 1;
+                        "ok"
+                    },
+                ),
+            )
+            .with_state(upstream_hits.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let registry = WorkbenchBrowserPreviewRegistry::new();
+        let preview = registry.create_local(
+            "project-a".to_string(),
+            None,
+            format!("http://{addr}/"),
+            62116,
+        );
+        let session = registry.lookup(&preview.preview_id).unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/proxy")
+            .body(Body::from(vec![b'x'; PROXY_BODY_LIMIT_BYTES]))
+            .unwrap();
+
+        let response = proxy_http_request_for_session(
+            session,
+            "upload".to_string(),
+            req,
+            DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
+        )
+        .await
+        .expect("exact PROXY_BODY_LIMIT_BYTES body must be accepted");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*upstream_hits.lock().unwrap(), 1);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1543,5 +1650,85 @@ mod tests {
             .headers()
             .get(HeaderName::from_static("proxy-authorization"))
             .is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试模块）:
+    ///     opaque iframe 的 `Origin: null` 只能绑定 live preview session，未知/过期 id 必须失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖有效 previewId 接受 HTTP/WS 语义的 null Origin；未知与过期 previewId 拒绝 null Origin。
+    mod opaque_origin_matrix {
+        use super::*;
+
+        fn null_origin_headers() -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+            headers
+        }
+
+        fn same_origin_headers() -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:62116"));
+            headers.insert(
+                header::ORIGIN,
+                HeaderValue::from_static("http://127.0.0.1:62116"),
+            );
+            headers
+        }
+
+        #[test]
+        fn valid_preview_id_accepts_opaque_origin_null_for_http_and_websocket() {
+            let registry = WorkbenchBrowserPreviewRegistry::new();
+            let preview =
+                registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
+            let headers = null_origin_headers();
+
+            let session = accept_preview_request_with_origin(&registry, &preview.preview_id, &headers)
+                .expect("live preview should accept Origin:null");
+            assert_eq!(session.preview_id, preview.preview_id);
+
+            // WebSocket 与 HTTP 共用同一会话后 Origin 判定。
+            enforce_preview_origin_after_session_lookup(&headers)
+                .expect("websocket path should also accept Origin:null after session lookup");
+        }
+
+        #[test]
+        fn valid_preview_id_accepts_same_origin_and_rejects_cross_origin() {
+            let registry = WorkbenchBrowserPreviewRegistry::new();
+            let preview =
+                registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
+
+            let session =
+                accept_preview_request_with_origin(&registry, &preview.preview_id, &same_origin_headers())
+                    .expect("live preview should accept same-origin non-null Origin");
+            assert_eq!(session.preview_id, preview.preview_id);
+
+            let mut cross = HeaderMap::new();
+            cross.insert(header::HOST, HeaderValue::from_static("127.0.0.1:62116"));
+            cross.insert(
+                header::ORIGIN,
+                HeaderValue::from_static("http://evil.example"),
+            );
+            let err = accept_preview_request_with_origin(&registry, &preview.preview_id, &cross)
+                .expect_err("cross-origin must fail at session layer even with live preview");
+            assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[test]
+        fn unknown_or_expired_preview_id_with_origin_null_fails() {
+            let registry = WorkbenchBrowserPreviewRegistry::new();
+            let headers = null_origin_headers();
+
+            let err = accept_preview_request_with_origin(&registry, "missing-preview", &headers)
+                .expect_err("unknown preview + null Origin must fail");
+            assert_eq!(err.status(), StatusCode::NOT_FOUND);
+
+            let preview =
+                registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
+            registry.force_expire_for_test(&preview.preview_id);
+            let err = accept_preview_request_with_origin(&registry, &preview.preview_id, &headers)
+                .expect_err("expired preview + null Origin must fail");
+            assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        }
     }
 }

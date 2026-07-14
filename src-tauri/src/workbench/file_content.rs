@@ -542,6 +542,27 @@ mod tests {
             .expect_err("oversized save rejected");
         assert!(err.to_string().contains("上限"));
         assert_eq!(fs::read_to_string(&path).expect("read old"), "old");
+        assert_eq!(count_note_temp_files(&dir), 0, "超限保存不得留下临时文件");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     边界回归：恰好等于 MAX_EDITABLE_TEXT_BYTES 的内容必须可保存，防止上限实现写成 `>=`。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     保存恰好 5 MiB 的 ASCII 文本，断言成功且目标文件长度等于上限。
+    #[test]
+    fn save_text_file_atomic_accepts_exact_editable_size() {
+        let dir = temp_dir();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, "old").expect("write old");
+        let base_hash = sha256_file_hex(&path).expect("base hash");
+        let content = "a".repeat(MAX_EDITABLE_TEXT_BYTES as usize);
+        save_text_file_atomic(&path, &content, &base_hash).expect("exact limit save");
+        assert_eq!(
+            fs::metadata(&path).expect("meta").len(),
+            MAX_EDITABLE_TEXT_BYTES
+        );
+        assert_eq!(fs::read_to_string(&path).expect("read saved"), content);
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -194,6 +194,7 @@ export function LanFirewallDependencyCard(props: LanFirewallDependencyCardProps)
       </Card.Header>
       <Card.Body className={styles.body}>
         <p className={styles.description}>{t('settings:lanFirewall.description')}</p>
+        <p className={styles.notice}>{t('settings:lanFirewall.riskNotice')}</p>
         <p className={styles.notice}>{t('settings:lanFirewall.manualNotice')}</p>
 
         {status ? (

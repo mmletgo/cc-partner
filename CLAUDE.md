@@ -7,7 +7,7 @@
 支持 Mac/Windows/Ubuntu 的 **local-first 多设备项目工作台**（Tauri 2 + Rust + React）。核心能力：
 
 1. **Workbench** — 本机/局域网远端项目、worktree、终端、文件、Git、自动化
-2. **Mobile Workbench** — 可信局域网 `/mobile` 浏览器远程操作
+2. **Mobile Workbench** — 局域网 `/mobile` 浏览器远程操作（无调用者身份校验；可达网络任意设备可读写执行）
 3. **Orchestrator** — 项目级任务队列、可见 Runner、验证 evidence 与 full-auto 交付
 4. **独立后端 CLI** — `cc-partner-backend start|status|doctor|stop`（远端可无 GUI）
 5. **全局 Inbox（Attention）** — 实时阻塞投影；只导航到权威界面

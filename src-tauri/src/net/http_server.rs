@@ -14,14 +14,16 @@
 
 use crate::backend::control::{self, BackendControlFile};
 use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErrorCode, P2pResult};
+use crate::net::lan_guard::{browser_request_guard, lan_socket_gate, require_loopback_peer};
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     attention, cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator,
     scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
+use crate::transfer::CHUNK_SIZE;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Extension};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension};
 use axum::http::{header, HeaderValue, Request, Response, StatusCode};
 use axum::routing::{any, get, post};
 use axum::Json;
@@ -69,17 +71,21 @@ struct StopBackendResponse {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     stop CLI 必须能通过本机 HTTP route 唤醒 `serve` 主循环优雅关闭，而不是直接 kill 进程。
-///     该接口既可能被局域网对端触达，也接受本机 CLI 调用，所有错误路径必须返回统一的 P2P 错误信封，
-///     不能把原始 axum `StatusCode`（无 body、无 code token、无 request_id）漏给客户端。
+///     该接口是本机进程生命周期控制，不是 LAN 业务 API：必须同时满足 loopback peer 与 control-file token，
+///     即使持有 token 也不能从局域网对端关闭后端。所有错误路径返回统一的 P2P 错误信封。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取当前控制文件并校验 controlToken；控制文件不可读或 token 不匹配都视为未授权，返回
-///     `unauthorized`（401）信封；notifier 不可用（无 receiver / 未安装）时返回 `unavailable`（503）信封，
-///     并把 retryable 置 true，提示调用方可以稍后重试；成功触发 shutdown 后返回 `{ok:true}`。
+///     1) 先用 `ConnectInfo` 真实 peer 要求 Loopback（非 loopback → 403 `forbidden`，不读 token）；
+///     2) 再读取控制文件并比较 controlToken（不可读或 token 不匹配 → 401 `unauthorized`）；
+///     3) notifier 不可用时返回 503 `unavailable`（retryable=true）；成功触发 shutdown 后返回 `{ok:true}`。
 async fn stop_backend_control(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Extension(context): Extension<P2pRequestContext>,
     Json(request): Json<StopBackendRequest>,
 ) -> P2pResult<Json<StopBackendResponse>> {
+    // 生命周期边界：loopback 必须先于 token 比较，避免非本机 peer 触发控制文件读取路径。
+    require_loopback_peer(peer.ip(), &context)?;
+
     let control = control::read_control_file()
         .map_err(|_| P2pError::from_code("控制文件不可读", P2pErrorCode::Unauthorized, &context))?;
     if !backend_stop_token_matches(&request, control.as_ref()) {
@@ -384,7 +390,12 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         )
         // P2P 文件传输协议（M5）：init/chunk/complete/status；X-Chunk-Offset + complete 握手
         .route("/api/transfer/init", post(transfer::transfer_init))
-        .route("/api/transfer/chunk/:id", post(transfer::transfer_chunk))
+        // chunk 路由本地上限 = CHUNK_SIZE（960 KiB），在 receiver 落盘校验前拒绝更大 body；
+        // 外层仍保留全局 32 MiB DefaultBodyLimit，不复制成全路由策略表。
+        .route(
+            "/api/transfer/chunk/:id",
+            post(transfer::transfer_chunk).layer(DefaultBodyLimit::max(CHUNK_SIZE)),
+        )
         .route(
             "/api/transfer/complete/:id",
             post(transfer::transfer_complete),
@@ -789,10 +800,20 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // 永远拿到稳定的 {error, code, request_id, retryable, details} 结构。放在 request_id_middleware
         // 之内，使其能从 extensions 读到 P2pRequestContext 并写入信封。
         .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+        // 浏览器 Host/Origin/Content-Type 门禁：socket gate 之后、body limit/handler 之前。
+        // 读取 AppState.actual_http_port 与 device_id 受控 mDNS 名；不发送 CORS 头。
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            browser_request_guard,
+        ))
+        // 固定 LAN socket peer 门禁：仅信任 ConnectInfo 真实 peer，忽略代理 header；
+        // Denied/缺失 peer 在 handler 前返回 403。放在 request_id 内层，以便拒绝响应可复用 request context。
+        .layer(axum::middleware::from_fn(lan_socket_gate))
         // P2P/mobile API 请求 ID 边界：所有请求自动获得 X-CC-Request-Id（客户端带入或服务端生成 UUID），
         // 注入 P2pRequestContext 供 handler 使用，并打开带 `request_id` 字段的 tracing span。
-        // 放在最外层，使其覆盖全部 /api 路由 + /mobile SPA fallback，便于把移动端静态资源请求
-        // 也纳入统一追踪（响应 header 同样回写，方便前端调试）。
+        // 放在最外层（相对业务 middleware），使其覆盖全部 /api 路由 + /mobile SPA fallback。
+        // axum 最后 .layer 最外：请求顺序 ConnectInfo → request_id → lan_socket_gate
+        // → browser_request_guard → envelope → body limit → handler。
         .layer(axum::middleware::from_fn(request_id_middleware))
         .with_state(state.clone());
 
@@ -806,10 +827,16 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
     let actual_port = listener.local_addr()?.port();
     state.actual_http_port.store(actual_port, Ordering::SeqCst);
 
-    // 后台运行 axum serve（serve 持有 listener 与 app 所有权，直到进程退出）
+    // 后台运行 axum serve（serve 持有 listener 与 app 所有权，直到进程退出）。
+    // 必须使用 into_make_service_with_connect_info，否则 lan_socket_gate / stop 拿不到真实 peer。
     // axum::serve 返回的 future 为 Send，可直接 spawn 到 tokio runtime。
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             // 仅记录脱敏摘要，不写请求 payload
             crate::backend::logging::OperationLog::new(
                 "http",
@@ -890,9 +917,11 @@ async fn bind_preferred_http_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::lan_guard::{browser_guard_params, browser_request_guard_with_params};
     use crate::workbench::file_content::MAX_EDITABLE_TEXT_BYTES;
     use crate::workbench::remote_protocol::RemoteSaveTextReq;
     use std::ffi::OsString;
+    use std::net::Ipv4Addr;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
 
@@ -999,6 +1028,28 @@ mod tests {
         }
     }
 
+    /// 返回测试用 loopback ConnectInfo。
+    ///
+    /// Business Logic（为什么需要这个辅助）:
+    ///     stop handler 在 token 比较前要求真实 loopback peer；直接调用 handler 时需注入 ConnectInfo。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `127.0.0.1:9` 的 ConnectInfo。
+    fn stop_loopback_peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 9)))
+    }
+
+    /// 返回测试用 LAN ConnectInfo（非 loopback）。
+    ///
+    /// Business Logic（为什么需要这个辅助）:
+    ///     覆盖“持有合法 token 但从 LAN peer 调用 stop 必须拒绝”的路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `192.168.1.50:9` 的 ConnectInfo。
+    fn stop_lan_peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo(SocketAddr::from((Ipv4Addr::new(192, 168, 1, 50), 9)))
+    }
+
     /// 验证 backend stop 控制接口拒绝错误 token 并返回 unauthorized 信封。
     ///
     /// Business Logic（为什么需要这个测试）:
@@ -1006,7 +1057,7 @@ mod tests {
     ///     失败路径必须返回统一的 P2P 错误信封（携带 code/request_id），而不是原始 axum StatusCode。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造控制文件与错误请求，断言 handler 返回 401 unauthorized 信封，request_id 与 ctx 一致。
+    ///     以 loopback peer 构造控制文件与错误请求，断言 handler 返回 401 unauthorized 信封。
     #[test]
     fn backend_stop_control_rejects_invalid_token() {
         let _home = install_test_home();
@@ -1020,11 +1071,50 @@ mod tests {
             .enable_all()
             .build()
             .expect("应能创建测试 runtime")
-            .block_on(stop_backend_control(Extension(stop_ctx()), Json(request)));
+            .block_on(stop_backend_control(
+                stop_loopback_peer(),
+                Extension(stop_ctx()),
+                Json(request),
+            ));
 
         let err = result.expect_err("错误 token 必须返回错误");
         assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(err.envelope().code, "unauthorized");
+        assert_eq!(err.envelope().request_id, "req-stop-test");
+        assert!(!err.envelope().retryable);
+    }
+
+    /// 验证 backend stop 即使 token 正确也拒绝非 loopback peer。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     stop 是本机生命周期控制；LAN 对端即使读到 control token 也不得关闭后端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入合法 control 文件，以 192.168.1.50 peer + 正确 token 调用 handler，
+    ///     断言 403 forbidden 且不依赖 notifier 状态。
+    #[test]
+    fn backend_stop_rejects_non_loopback_even_with_valid_token() {
+        let _home = install_test_home();
+        let control = backend_stop_control_file_for_test();
+        control::write_control_file(&control).expect("应能写入测试控制文件");
+        let request = StopBackendRequest {
+            control_token: control.control_token.clone(),
+        };
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("应能创建测试 runtime")
+            .block_on(stop_backend_control(
+                stop_lan_peer(),
+                Extension(stop_ctx()),
+                Json(request),
+            ));
+
+        let err = result.expect_err("非 loopback 必须拒绝");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.envelope().code, "forbidden");
+        assert_eq!(err.envelope().error, "不支持的网络来源");
         assert_eq!(err.envelope().request_id, "req-stop-test");
         assert!(!err.envelope().retryable);
     }
@@ -1068,7 +1158,11 @@ mod tests {
             .enable_all()
             .build()
             .expect("应能创建测试 runtime")
-            .block_on(stop_backend_control(Extension(stop_ctx()), Json(request)));
+            .block_on(stop_backend_control(
+                stop_loopback_peer(),
+                Extension(stop_ctx()),
+                Json(request),
+            ));
 
         let err = result.expect_err("notifier 缺失必须返回错误");
         assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1084,7 +1178,7 @@ mod tests {
     ///     该路径同样属于可重试瞬时错误，必须返回 P2P 错误信封并标记 retryable=true。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     安装一个无 receiver 的 watch sender，调用 route 并断言返回 503 unavailable 信封，retryable=true。
+    ///     安装一个无 receiver 的 watch sender，以 loopback peer 调用 route 并断言 503 unavailable。
     #[test]
     fn backend_stop_control_returns_non_success_when_notifier_send_fails() {
         let _home = install_test_home();
@@ -1101,7 +1195,11 @@ mod tests {
             .enable_all()
             .build()
             .expect("应能创建测试 runtime")
-            .block_on(stop_backend_control(Extension(stop_ctx()), Json(request)));
+            .block_on(stop_backend_control(
+                stop_loopback_peer(),
+                Extension(stop_ctx()),
+                Json(request),
+            ));
 
         control::clear_shutdown_notifier();
         let err = result.expect_err("notifier 发送失败必须返回错误");
@@ -1259,23 +1357,74 @@ mod tests {
         assert!(body.len() < BODY_LIMIT_BYTES);
     }
 
-    /// 构造一个与生产 Router 同样的 middleware 栈（DefaultBodyLimit + request_id_middleware）的最小测试 Router。
+    /// 构造一个与生产 Router 同样的 middleware 栈的最小测试 Router。
     ///
     /// Business Logic（为什么需要这个辅助）:
     ///     `start_http_server` 内联了 Router 构造并需要 AppState，无法直接拿来跑 oneshot。
     ///     用一个简单 `ok` handler 替代真实 health/workbench handler，聚焦验证 middleware 栈在 router 层确实生效。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造路由 `/probe` + `/mobile` 占位 handler，依次套 `DefaultBodyLimit` 和 `request_id_middleware`，
-    ///     模拟 `start_http_server` 中 `.layer(DefaultBodyLimit).layer(from_fn(request_id_middleware))` 顺序。
+    ///     构造 `/probe` 占位 handler（GET/POST），layer 顺序（last=outermost）对齐生产：
+    ///     DefaultBodyLimit → envelope_fallback → lan_socket_gate → request_id_middleware。
+    ///     request_id 测试会注入 loopback ConnectInfo，避免 gate 拒绝。
     fn middleware_test_router() -> Router {
         async fn ok() -> (StatusCode, &'static str) {
             (StatusCode::OK, "ok")
         }
+        /// POST probe 必须消费 body，DefaultBodyLimit 只在 body 被提取/读取时触发 413。
+        async fn ok_post(body: axum::body::Bytes) -> (StatusCode, &'static str) {
+            let _ = body;
+            (StatusCode::OK, "ok")
+        }
+        let params = browser_guard_params("device-a", 62116);
         Router::new()
-            .route("/probe", get(ok))
+            .route("/probe", get(ok).post(ok_post))
             .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
+            .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let params = params.clone();
+                async move { browser_request_guard_with_params(params, req, next).await }
+            }))
+            .layer(axum::middleware::from_fn(lan_socket_gate))
             .layer(axum::middleware::from_fn(request_id_middleware))
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     全局 32 MiB DefaultBodyLimit 触发的 413 必须被错误信封兜底，客户端才能稳定解析
+    ///     `payload_too_large`，而不是拿到 axum 裸状态码/非 JSON body。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     通过与生产一致的 middleware 栈 POST `BODY_LIMIT_BYTES + 1` 字节 body，
+    ///     断言 HTTP 413 且 body 为 P2P 错误信封（code=payload_too_large, retryable=false）。
+    #[tokio::test]
+    async fn default_body_limit_rejects_oversized_body_with_error_envelope() {
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        let router = middleware_test_router();
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/probe")
+            .header("host", "127.0.0.1:62116")
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(vec![0u8; BODY_LIMIT_BYTES + 1]))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 1))));
+        let response = router.oneshot(request).await.expect("router 不可失败");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().get("x-cc-request-id").is_some());
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("应能读取 413 body");
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("413 必须包成 JSON 错误信封");
+        assert_eq!(body["code"], "payload_too_large");
+        assert_eq!(body["retryable"], false);
+        assert!(body["error"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(body["request_id"].as_str().is_some_and(|s| !s.is_empty()));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1289,10 +1438,15 @@ mod tests {
     async fn health_like_route_returns_request_id_header() {
         use tower::ServiceExt;
         let router = middleware_test_router();
-        let request = Request::builder()
+        let mut request = Request::builder()
             .uri("/probe")
+            .header("host", "127.0.0.1:62116")
             .body(Body::empty())
             .unwrap();
+        // 生产 serve 会注入 ConnectInfo；oneshot 测试需手动注入 loopback peer。
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 1))));
         let response = router.oneshot(request).await.expect("router 不可失败");
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -1315,11 +1469,15 @@ mod tests {
     async fn health_like_route_echoes_client_request_id() {
         use tower::ServiceExt;
         let router = middleware_test_router();
-        let request = Request::builder()
+        let mut request = Request::builder()
             .uri("/probe")
+            .header("host", "127.0.0.1:62116")
             .header("x-cc-request-id", "trace-abc-001")
             .body(Body::empty())
             .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 1))));
         let response = router.oneshot(request).await.expect("router 不可失败");
 
         assert_eq!(

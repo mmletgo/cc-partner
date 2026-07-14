@@ -52,6 +52,20 @@ impl ApiError {
         }
     }
 
+    /// 构造 403 API 错误。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     preview proxy 会话层对跨站 Origin 做防御纵深拒绝时需要明确 403，而不是 400/404。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用传入消息创建 status=403 的 ApiError。
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
     /// 构造 400 API 错误。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -204,6 +218,7 @@ pub(crate) fn api_error_to_p2p(
         StatusCode::BAD_REQUEST
         | StatusCode::PAYLOAD_TOO_LARGE
         | StatusCode::UNPROCESSABLE_ENTITY => P2pErrorCode::Validation,
+        StatusCode::FORBIDDEN => P2pErrorCode::Forbidden,
         StatusCode::NOT_FOUND => P2pErrorCode::NotFound,
         StatusCode::CONFLICT => P2pErrorCode::Conflict,
         StatusCode::SERVICE_UNAVAILABLE => P2pErrorCode::Unavailable,

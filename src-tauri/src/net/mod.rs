@@ -12,6 +12,9 @@
 pub mod discovery;
 pub mod error_response;
 pub mod http_server;
+pub mod lan_guard;
+/// S1 Task 6 集成 smoke harness（绑定端口 + injected peer 证据矩阵）。
+pub mod lan_trust_boundary_harness;
 pub mod peer_client;
 pub mod peer_error;
 pub mod protocol;

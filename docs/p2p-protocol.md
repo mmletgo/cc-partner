@@ -11,6 +11,36 @@ extracts literal `/api/...` paths from `http_server.rs` and from this document's
 path column, then fails on any mismatch. **Adding or renaming a route requires
 updating both the router and the table below in the same change.**
 
+## Trust boundary (fixed, unauthenticated LAN)
+
+cc-partner P2P/Mobile/Workbench/Orchestrator HTTP is **local/LAN only** and has
+**one** fixed access behavior:
+
+- Business routes do **not** authenticate caller identity. Any socket peer in the
+  supported loopback/LAN ranges may read, write, and execute without credentials.
+- Peer IP is taken only from TCP `ConnectInfo` (never forwarded headers). Supported
+  ranges: IPv4 loopback / RFC1918 / IPv4 link-local, IPv6 loopback / ULA /
+  link-local; IPv4-mapped IPv6 is normalized first.
+- Listener may be wildcard `0.0.0.0` + actual TCP port (preferred **62116**,
+  increment on conflict). Discovery uses mDNS UDP **5353**.
+- Request guards: Host allow-list + actual port, Origin rules (native missing
+  Origin allowed; ordinary APIs reject `Origin: null`; live Browser Preview may
+  accept opaque null Origin only for that preview path), Content-Type simple-write
+  rejection on ordinary APIs.
+- Resource caps stay domain-specific (global **32 MiB**, transfer chunk **960 KiB**,
+  text **5 MiB**, preview proxy **32 MiB**) — not a per-route authorization matrix.
+- `POST /api/backend/control/stop` is local lifecycle only (loopback + control-file
+  token). Business routes never require that token.
+- Protocol capabilities (`attention.v1`, `errors.envelope.v1`, …) describe wire
+  format / route existence only. There is **no** LAN permission capability token
+  and no capability negotiation for LAN access. Old and new native peers remain
+  credential-free.
+
+Remaining risk wording (product/operator docs): 同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份. English equivalent: Any device on the same reachable network can read, write, and execute; the system does not verify caller identity.
+
+Do **not** document configurable LAN modes, route authorization matrices, or claim
+that LAN peers are authenticated / trusted / secure devices.
+
 ## Retry classes
 
 Every route is assigned exactly one class:
