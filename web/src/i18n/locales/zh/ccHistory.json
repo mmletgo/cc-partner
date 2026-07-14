@@ -34,5 +34,9 @@
   "projectListAriaLabel": "Claude 项目列表",
   "promptListAriaLabel": "Prompt 时间线",
   "deleteTitle": "删除 Prompt？",
-  "lastOccurred": "最近 {{time}}"
+  "lastOccurred": "最近 {{time}}",
+  "refreshFailed": "刷新采集失败：{{error}}",
+  "refreshFailedGeneric": "刷新采集失败",
+  "syncFailed": "同步失败：{{error}}",
+  "syncFailedGeneric": "同步失败"
 }

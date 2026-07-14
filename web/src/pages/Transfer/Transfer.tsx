@@ -2,37 +2,77 @@
  * Transfer 页面 - 局域网文件传输
  *
  * Business Logic（为什么需要这个页面）:
- *   cc-partner 的核心场景之一是把文件快速在多台设备之间搬运。
- *   用户需要在一个屏幕里同时看到：选哪台目标设备、当前正在传什么、历史完成情况。
- *   该页面是 File Transfer 路由（/transfer）下的主视图，让用户通过
- *   选择器 + 拖拽完成一次发送，并通过自动刷新的任务列表监控进展。
+ *   用户需要在一个屏幕里完成：选目标设备、选本机文件路径、发送、监控进度与取消。
+ *   路径必须来自原生 dialog/drag，展示 basename，完整路径仅内存保存并透传后端。
  *
  * Code Logic（这个页面做什么）:
- *   - 顶部 page header：标题 + 副标题，描述当前页面的能力
- *   - 发送区：设备下拉（来自 devicesApi.list）+ 文件选择按钮 + 拖拽 dropzone
- *   - 任务列表：调用 transferApi.list() 拉取，3 秒 setInterval 刷新
- *   - API 失败 / 返回空时展示空状态和错误提示（含重试按钮）
- *   - 状态计数 Pill（活跃/已完成/失败）实时反映任务分布
+ *   - 设备 5s / 任务 3s visibility-aware polling；刷新失败保留已有数组
+ *   - 选中文件存 {path,name}；Enter/Space/点击走 pickTransferFile；native drop 只取首路径
+ *   - handleSendClick 用 sendingRef 同步门闩防双击，await transferApi.send 后 force runTasksNow
+ *   - pending/transferring 仅传 onCancel；cancellingIdsRef 同步门闩 + taskActionErrors 行级反馈
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, DragEvent } from 'react';
+import type { ChangeEvent, KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill } from '@/components/primitives';
 import { TransferItem } from '@/components/domain';
 import { devicesApi } from '@/api/devices';
 import { transferApi } from '@/api/transfer';
+import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import type { Device, TransferTask } from '@/lib/types';
 import { SendIcon, UploadIcon } from '@/lib/icons';
+import { pickTransferFile, subscribeTransferFileDrops } from './transferFileSelection';
 import styles from './Transfer.module.css';
 
-// 3 秒轮询间隔，平衡实时性与后端压力
-const REFRESH_INTERVAL_MS = 3000;
+const TASK_REFRESH_INTERVAL_MS = 3000;
+const DEVICE_REFRESH_INTERVAL_MS = 5000;
 
 type LoadState = 'loading' | 'success' | 'error';
 
 /**
- * Transfer 页面主组件
+ * Business Logic（为什么需要这个类型）:
+ *   发送只需要绝对路径与展示用 basename，不能用浏览器 File（无可靠路径）。
+ *
+ * Code Logic（这个类型做什么）:
+ *   path 为不透明 UTF-8 绝对路径；name 为 basename 展示。
+ */
+interface SelectedTransferFile {
+  path: string;
+  name: string;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   UI 只能展示 basename，不得暴露完整绝对路径。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按最后一次 / 或 \\ 切分路径，得到文件名；路径本身不做改写。
+ */
+function basenameFromPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  const parts = normalized.split('/');
+  const last = parts[parts.length - 1] ?? '';
+  return last.length > 0 ? last : path;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   错误对象可能是 Error 或未知 reject，需要稳定可读文案。
+ *
+ * Code Logic（这个函数做什么）:
+ *   Error 取 message，其余 String()。
+ */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   局域网文件传输主视图：设备选择、路径选择、发送、任务监控与取消。
+ *
+ * Code Logic（这个组件做什么）:
+ *   挂载 visibility polling、native drop 订阅，管理 send/cancel 状态机并渲染列表。
  */
 export function Transfer() {
   const { t } = useTranslation(['transfer', 'common']);
@@ -49,123 +89,245 @@ export function Transfer() {
   const [tasksError, setTasksError] = useState<string | null>(null);
 
   // ── 文件选择 / 拖拽 ──
-  const [pickedFileName, setPickedFileName] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<SelectedTransferFile | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+
+  // ── 发送 / 取消动作状态 ──
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [cancellingIds, setCancellingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [taskActionErrors, setTaskActionErrors] = useState<Record<string, string>>({});
+  /** 同步门闩：双击 send 在 re-render 前也不可重入（仅 React state 不够） */
+  const sendingRef = useRef(false);
+  /** 同步门闩：双击 cancel 在 re-render 前也不可重入 */
+  const cancellingIdsRef = useRef<Set<string>>(new Set());
+  /** 组件挂载守卫：异步 loader 写 state 前检查 */
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   /**
-   * 拉取设备列表；API 失败或返回空时设为空数组并提示错误
+   * Business Logic（为什么需要这个函数）:
+   *   设备下拉需要与后端发现列表对齐；刷新失败不得清空已成功数据。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 devicesApi.list；成功写数组；失败保留 prev 并标 error；卸载后不 setState。
    */
   const loadDevices = useCallback(async () => {
     try {
       const data = await devicesApi.list();
-      setDevices(Array.isArray(data) ? data : []);
-      if (Array.isArray(data) && data.length > 0) {
-        setSelectedDeviceId((prev) => prev || data[0]!.id);
+      if (!mountedRef.current) return;
+      const next = Array.isArray(data) ? data : [];
+      setDevices(next);
+      if (next.length > 0) {
+        setSelectedDeviceId((prev) => prev || next[0]!.id);
       }
       setDevicesState('success');
       setDevicesError(null);
     } catch (err) {
-      setDevices([]);
+      if (!mountedRef.current) return;
       setDevicesState('error');
-      setDevicesError(t('transfer:deviceLoadFailed', { error: err instanceof Error ? err.message : String(err) }));
+      setDevicesError(t('transfer:deviceLoadFailed', { error: errorMessage(err) }));
+      // 保留已有 devices，不覆盖为空
     }
   }, [t]);
 
   /**
-   * 拉取传输任务列表；API 失败或返回空时设为空数组并提示错误
+   * Business Logic（为什么需要这个函数）:
+   *   任务列表是发送/取消后的权威进度源；刷新失败保留旧列表。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 transferApi.list；成功写数组；失败保留 prev 并标 error；卸载后不 setState。
    */
   const loadTasks = useCallback(async () => {
     try {
       const data = await transferApi.list();
+      if (!mountedRef.current) return;
       setTasks(Array.isArray(data) ? data : []);
       setTasksState('success');
       setTasksError(null);
     } catch (err) {
-      setTasks([]);
+      if (!mountedRef.current) return;
       setTasksState('error');
-      setTasksError(t('transfer:taskLoadFailed', { error: err instanceof Error ? err.message : String(err) }));
+      setTasksError(t('transfer:taskLoadFailed', { error: errorMessage(err) }));
+      // 保留已有 tasks，不覆盖为空
     }
   }, [t]);
 
-  // 首次挂载拉取设备
-  /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
-  useEffect(() => {
-    void loadDevices();
-  }, [loadDevices]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  const { runNow: runTasksNow } = useVisibilityPolling(loadTasks, {
+    intervalMs: TASK_REFRESH_INTERVAL_MS,
+  });
 
-  // 首次挂载拉取任务，并设置 3 秒轮询
-  /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
-  useEffect(() => {
-    void loadTasks();
-    const timer = window.setInterval(() => {
-      void loadTasks();
-    }, REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [loadTasks]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  useVisibilityPolling(loadDevices, {
+    intervalMs: DEVICE_REFRESH_INTERVAL_MS,
+  });
 
   // ── 状态计数（按 status 分组） ──
   const statusCounts = useMemo(() => {
     return tasks.reduce(
-      (acc, t) => {
-        if (t.status === 'transferring' || t.status === 'pending') acc.active += 1;
-        else if (t.status === 'completed') acc.completed += 1;
-        else if (t.status === 'failed' || t.status === 'cancelled') acc.failed += 1;
+      (acc, task) => {
+        if (task.status === 'transferring' || task.status === 'pending') acc.active += 1;
+        else if (task.status === 'completed') acc.completed += 1;
+        else if (task.status === 'failed' || task.status === 'cancelled') acc.failed += 1;
         return acc;
       },
       { active: 0, completed: 0, failed: 0 },
     );
   }, [tasks]);
 
-  // ── 文件选择处理 ──
-  const handleFilePick = useCallback((e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) setPickedFileName(file.name);
-  }, []);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   原生路径选中后需要只展示 basename，完整路径仅用于 send。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 selectedFile，可选清理/设置多文件 notice。
+   */
+  const applySelectedPath = useCallback((path: string, multi: boolean) => {
+    setSelectedFile({ path, name: basenameFromPath(path) });
+    setSendError(null);
+    setSelectionNotice(multi ? t('transfer:firstFileOnly') : null);
+  }, [t]);
 
-  const handlePickClick = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   浏览按钮与 dropzone 键盘操作需要打开原生单文件选择器。
+   *
+   * Code Logic（这个函数做什么）:
+   *   await pickTransferFile；取消(null)保留原选择；成功写 {path,name}。
+   */
+  const handlePickClick = useCallback(async () => {
+    const path = await pickTransferFile();
+    if (path == null) return;
+    applySelectedPath(path, false);
+  }, [applySelectedPath]);
 
-  // ── 拖拽支持 ──
-  const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(true);
-  }, []);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   dropzone 需支持键盘可达，Enter/Space 打开原生选择器。
+   *
+   * Code Logic（这个函数做什么）:
+   *   拦截 Enter/Space，preventDefault 后触发 handlePickClick。
+   */
+  const handleDropzoneKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      void handlePickClick();
+    },
+    [handlePickClick],
+  );
 
-  const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-  }, []);
+  // 挂载时订阅 native drag-drop；卸载时 unlisten
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
 
-  const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) setPickedFileName(file.name);
-  }, []);
+    void (async () => {
+      const stop = await subscribeTransferFileDrops((paths) => {
+        if (!active) return;
+        const first = paths[0];
+        if (!first) return;
+        setIsDragOver(false);
+        applySelectedPath(first, paths.length > 1);
+      });
+      if (!active) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+    })();
 
-  // ── 设备下拉变更 ──
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [applySelectedPath]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户切换目标设备时更新下拉选中项。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写 selectedDeviceId。
+   */
   const handleDeviceChange = useCallback((e: ChangeEvent<HTMLSelectElement>) => {
     setSelectedDeviceId(e.target.value);
   }, []);
 
-  // ── 发送按钮（当前仅记录所选文件，预留接入 transferApi.send） ──
-  const handleSendClick = useCallback(() => {
-    if (!pickedFileName || !selectedDeviceId) return;
-    // 真实实现应调用 transferApi.send(selectedDeviceId, filePath)
-    // 此处仅在控制台提示，待后端接口完成后接入
-    console.info('[Transfer] would send', pickedFileName, 'to', selectedDeviceId);
-  }, [pickedFileName, selectedDeviceId]);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户确认发送后必须真实调用 send_transfer，成功后强制刷新任务列表（不得只 join 旧 poll）；
+   *   双击不得在 re-render 前发出第二次 send。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 sendingRef 同步门闩 + sending 状态；await transferApi.send；
+   *   成功清空选择并 runTasksNow({force:true})；失败保留选择；finally 释放门闩。
+   */
+  const handleSendClick = useCallback(async () => {
+    if (!selectedFile || !selectedDeviceId || sendingRef.current) return;
+    sendingRef.current = true;
+    setSending(true);
+    setSendError(null);
+    try {
+      await transferApi.send(selectedDeviceId, selectedFile.path);
+      setSelectedFile(null);
+      setSelectionNotice(null);
+      await runTasksNow({ force: true });
+    } catch (err) {
+      setSendError(t('transfer:sendFailed', { error: errorMessage(err) }));
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  }, [selectedFile, selectedDeviceId, runTasksNow, t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户可取消 pending/transferring 任务，失败需行级提示且保留任务；
+   *   双击不得在 re-render 前发出第二次 cancel。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 cancellingIdsRef 同步门闩；await cancel；成功 force runTasksNow；失败写 taskActionErrors。
+   */
+  const handleCancelTask = useCallback(
+    async (taskId: string) => {
+      if (cancellingIdsRef.current.has(taskId)) return;
+      cancellingIdsRef.current.add(taskId);
+      setCancellingIds(new Set(cancellingIdsRef.current));
+      setTaskActionErrors((prev) => {
+        if (!(taskId in prev)) return prev;
+        const next = { ...prev };
+        delete next[taskId];
+        return next;
+      });
+      try {
+        await transferApi.cancel(taskId);
+        await runTasksNow({ force: true });
+      } catch (err) {
+        setTaskActionErrors((prev) => ({
+          ...prev,
+          [taskId]: t('transfer:cancelFailed', { error: errorMessage(err) }),
+        }));
+      } finally {
+        cancellingIdsRef.current.delete(taskId);
+        setCancellingIds(new Set(cancellingIdsRef.current));
+      }
+    },
+    [runTasksNow, t],
+  );
 
   const dropzoneClasses = [styles.dropzone, isDragOver ? styles.dropzoneOver : '']
     .filter(Boolean)
     .join(' ');
+
+  const pickedName = selectedFile?.name ?? null;
+  const canSend = Boolean(selectedFile && selectedDeviceId) && !sending;
 
   return (
     <div className={styles.page}>
@@ -187,9 +349,9 @@ export function Transfer() {
                 value={selectedDeviceId}
                 onChange={handleDeviceChange}
                 aria-label={t('transfer:selectDevice')}
-                disabled={devicesState === 'loading'}
+                disabled={devicesState === 'loading' && devices.length === 0}
               >
-                {devicesState === 'loading' ? (
+                {devicesState === 'loading' && devices.length === 0 ? (
                   <option value="">{t('transfer:loading')}</option>
                 ) : devices.length === 0 ? (
                   <option value="">{t('transfer:noDevices')}</option>
@@ -208,24 +370,25 @@ export function Transfer() {
           </label>
 
           <div className={styles.pickerCol}>
-            <input
-              ref={fileInputRef}
-              type="file"
-              className={styles.hiddenInput}
-              onChange={handleFilePick}
-            />
             <Button
               variant="primary"
               size="md"
               icon={<SendIcon />}
-              onClick={handleSendClick}
-              disabled={!pickedFileName || !selectedDeviceId}
+              onClick={() => void handleSendClick()}
+              disabled={!canSend}
+              loading={sending}
+              aria-busy={sending || undefined}
             >
-              {pickedFileName
-                ? t('transfer:sendFile', { file: pickedFileName })
+              {pickedName
+                ? t('transfer:sendFile', { file: pickedName })
                 : t('transfer:pickFile')}
             </Button>
-            <Button variant="secondary" size="md" onClick={handlePickClick}>
+            <Button
+              variant="secondary"
+              size="md"
+              onClick={() => void handlePickClick()}
+              disabled={sending}
+            >
               {t('transfer:browse')}
             </Button>
           </div>
@@ -233,10 +396,24 @@ export function Transfer() {
 
         <div
           className={dropzoneClasses}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          onClick={handlePickClick}
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsDragOver(true);
+          }}
+          onDragLeave={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsDragOver(false);
+          }}
+          onDrop={(e) => {
+            // 浏览器 HTML5 drop 不提供原生绝对路径；真实路径来自 Tauri onDragDropEvent。
+            e.preventDefault();
+            e.stopPropagation();
+            setIsDragOver(false);
+          }}
+          onClick={() => void handlePickClick()}
+          onKeyDown={handleDropzoneKeyDown}
           role="button"
           tabIndex={0}
           aria-label={t('transfer:dropAria')}
@@ -245,12 +422,24 @@ export function Transfer() {
             <UploadIcon size={20} />
           </span>
           <p className={styles.dropTitle}>
-            {pickedFileName
-              ? t('transfer:dropTitlePicked', { file: pickedFileName })
+            {pickedName
+              ? t('transfer:dropTitlePicked', { file: pickedName })
               : t('transfer:dropTitleEmpty')}
           </p>
           <p className={styles.dropHint}>{t('transfer:chunkHint')}</p>
         </div>
+
+        {selectionNotice ? (
+          <p className={styles.notice} role="alert">
+            {selectionNotice}
+          </p>
+        ) : null}
+
+        {sendError ? (
+          <p className={styles.alert} role="alert">
+            {sendError}
+          </p>
+        ) : null}
 
         {devicesState === 'error' ? (
           <p className={styles.notice} role="status">
@@ -289,35 +478,34 @@ export function Transfer() {
           </div>
         ) : (
           <ul className={styles.taskList}>
-            {tasks.map((task) => (
-              <li key={task.id}>
-                <TransferItem
-                  task={{
-                    id: task.id,
-                    fileName: task.fileName,
-                    fileSize: task.fileSize,
-                    direction: task.direction,
-                    status: task.status,
-                    progress: task.progress,
-                    peerDevice: task.peerDeviceName,
-                    speed: task.speed,
-                    errorMessage: task.errorMessage,
-                  }}
-                  onPause={() => {
-                    /* 预留：调用后端暂停接口 */
-                  }}
-                  onCancel={() => {
-                    void transferApi.cancel(task.id).catch(() => undefined);
-                  }}
-                  onRetry={() => {
-                    /* 预留：调用后端重试接口 */
-                  }}
-                  onOpen={() => {
-                    /* 预留：调起系统文件管理器 */
-                  }}
-                />
-              </li>
-            ))}
+            {tasks.map((task) => {
+              const canCancel = task.status === 'pending' || task.status === 'transferring';
+              const actionError = taskActionErrors[task.id];
+              return (
+                <li key={task.id} className={styles.taskRow}>
+                  <TransferItem
+                    task={{
+                      id: task.id,
+                      fileName: task.fileName,
+                      fileSize: task.fileSize,
+                      direction: task.direction,
+                      status: task.status,
+                      progress: task.progress,
+                      peerDevice: task.peerDeviceName,
+                      speed: task.speed,
+                      errorMessage: task.errorMessage,
+                    }}
+                    onCancel={canCancel ? () => void handleCancelTask(task.id) : undefined}
+                    cancelling={cancellingIds.has(task.id)}
+                  />
+                  {actionError ? (
+                    <p className={styles.rowAlert} role="alert">
+                      {actionError}
+                    </p>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         )}
 
@@ -335,7 +523,11 @@ export function Transfer() {
 }
 
 /**
- * 任务列表骨架屏（loading 态）
+ * Business Logic（为什么需要这个函数）:
+ *   首屏任务加载时需要骨架屏，避免空白闪烁。
+ *
+ * Code Logic（这个函数做什么）:
+ *   渲染三条静态骨架行，aria-busy=true。
  */
 function TaskListSkeleton() {
   const { t } = useTranslation(['transfer']);

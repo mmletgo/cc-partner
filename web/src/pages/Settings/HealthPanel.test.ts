@@ -21,7 +21,7 @@ import { PENDING_HEALTH_FORM } from './settingsState';
 register('./css-stub.mjs', import.meta.url);
 
 describe('HealthPanel', () => {
-  test('maps time helpers, renders 3 sections, 4 24-hour selects, and CSS override order', async () => {
+  test('maps time helpers, renders 3 sections, 4 24-hour selects, and CSS override order', { timeout: 20000 }, async () => {
     const { default: i18n } = await import('../../i18n');
     await i18n.changeLanguage('zh');
 

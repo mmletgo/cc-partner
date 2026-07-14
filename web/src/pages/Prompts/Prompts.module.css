@@ -126,6 +126,25 @@
   font-size: var(--text-sm);
 }
 
+.noticeBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-warm);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.noticeText {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  flex: 1 1 auto;
+}
+
 /* ── 网格 ── */
 .gridSection {
   display: flex;

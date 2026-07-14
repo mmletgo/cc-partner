@@ -54,7 +54,10 @@ describe('backendLifecycle', () => {
   test('App close choice listener and i18n keys enforce GUI vs full close paths', () => {
     const appSource = readFileSync(join(process.cwd(), 'src', 'App.tsx'), 'utf8');
 
-    const backendCloseListenerStart = appSource.indexOf('function BackendCloseChoiceListener()');
+    // T5 起 export function + props；T5 关闭路径经 flushPendingWritesThenClose 门闩
+    const backendCloseListenerStart = appSource.search(
+      /(?:export\s+)?function\s+BackendCloseChoiceListener\s*\(/,
+    );
     const appComponentStart = appSource.indexOf('export default function App()', backendCloseListenerStart);
     assert(backendCloseListenerStart >= 0, 'App.tsx 必须定义 BackendCloseChoiceListener');
     assert(appComponentStart > backendCloseListenerStart, 'App.tsx 必须在 App 组件前定义 BackendCloseChoiceListener');
@@ -76,14 +79,24 @@ describe('backendLifecycle', () => {
     );
     assert(appSource.includes('preventDefault()'), 'App.tsx 必须 preventDefault 阻止直接关闭');
     assert(appSource.includes('backendApi.stop()'), 'App.tsx 必须在完整关闭路径调用 backendApi.stop()');
+    assert(
+      appSource.includes('flushPendingWritesThenClose'),
+      'App.tsx 关闭路径必须经 flushPendingWritesThenClose 门闩',
+    );
 
     const guiOnlyHandler = appSource.match(
       /handleGuiOnlyClose\s*=\s*async\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s*\}/,
     );
     assert(guiOnlyHandler !== null, 'App.tsx 必须定义 handleGuiOnlyClose');
     assert(
-      !guiOnlyHandler[1].includes('backendApi.stop()'),
-      '仅关闭 GUI 路径不能调用 backendApi.stop()',
+      guiOnlyHandler[1].includes("flushPendingWritesThenClose('gui'") ||
+        guiOnlyHandler[1].includes('flushPendingWritesThenClose("gui"'),
+      '仅关闭 GUI 路径必须 flushPendingWritesThenClose(gui)',
+    );
+    assert(
+      !guiOnlyHandler[1].includes("mode: 'full'") &&
+        !guiOnlyHandler[1].includes('flushPendingWritesThenClose(\'full\''),
+      '仅关闭 GUI 路径不能走 full close',
     );
 
     const fullCloseHandler = appSource.match(
@@ -91,9 +104,14 @@ describe('backendLifecycle', () => {
     );
     assert(fullCloseHandler !== null, 'App.tsx 必须定义 handleFullClose');
     assert(
-      fullCloseHandler[1].includes('backendApi.stop()') &&
-        fullCloseHandler[1].includes('backendApi.exitGui()'),
-      '前后端都关闭路径必须先 stop backend 再退出 GUI',
+      fullCloseHandler[1].includes("flushPendingWritesThenClose('full'") ||
+        fullCloseHandler[1].includes('flushPendingWritesThenClose("full"'),
+      '前后端都关闭路径必须 flushPendingWritesThenClose(full)',
+    );
+    assert(
+      fullCloseHandler[1].includes('backendApi.stop') &&
+        fullCloseHandler[1].includes('backendApi.exitGui'),
+      '前后端都关闭路径必须注入 stop 与 exitGui',
     );
 
     for (const locale of [readCommonLocale('en'), readCommonLocale('zh')]) {

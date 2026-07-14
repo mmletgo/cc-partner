@@ -86,6 +86,8 @@ interface HealthPanelProps {
   applying: boolean;
   /** 错误提示 */
   error: string | null;
+  /** 默认配置是否可用（不可用时禁用「恢复默认」） */
+  canResetDefaults?: boolean;
 }
 
 interface ToggleRowProps {
@@ -279,6 +281,7 @@ export function HealthPanel({
   onApply,
   applying,
   error,
+  canResetDefaults = true,
 }: HealthPanelProps) {
   const { t } = useTranslation(['settings', 'health', 'common']);
 
@@ -374,7 +377,13 @@ export function HealthPanel({
 
         {/* 按钮组 */}
         <div className={styles.aboutActions}>
-          <Button variant="ghost" size="md" onClick={onResetDefaults} disabled={applying}>
+          <Button
+            variant="ghost"
+            size="md"
+            onClick={onResetDefaults}
+            disabled={applying || !canResetDefaults}
+            title={canResetDefaults ? undefined : t('settings:resource.defaultsUnavailable')}
+          >
             {t('settings:action.resetDefault')}
           </Button>
           <Button variant="primary" size="md" onClick={onApply} disabled={applying}>

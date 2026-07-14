@@ -8,5 +8,6 @@
   "fetchSelfFailed": "Failed to load device info",
   "fetchListFailed": "Failed to load devices",
   "lastSeenPrefix": "Last seen",
-  "cardAria": "Device {{name}}"
+  "cardAria": "Device {{name}}",
+  "staleRefreshFailed": "Device list refresh failed; showing last known data"
 }

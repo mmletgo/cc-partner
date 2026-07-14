@@ -3,14 +3,12 @@
  *
  * Business Logic（为什么需要这个组件）:
  *   文件传输列表需要为每个传输任务渲染一行可视单元，展示文件名/方向/进度/对端/状态/速度，
- *   并根据状态提供对应的操作（暂停/继续/取消/重试/打开）。统一的行布局让用户
- *   在同时进行多个传输时仍能一眼看清每条任务的进展。
+ *   并根据后端真实支持的动作提供操作按钮。当前后端仅有 cancel，不得渲染 pause/retry/open 占位。
  *
  * Code Logic（这个组件做什么）:
- *   - 基于 Card（flat）渲染，2px 左边框 + 12% 透明背景色根据 status 变化
- *   - 左侧方向图标（Send/Download），中间文件名/对端/进度条，右侧 Pill+速度+操作按钮
- *   - 内部工具函数 formatBytes / formatSpeed 把字节数和带宽格式化为人类可读单位
- *   - 不同 status 渲染不同按钮组（transferring=Pause+X, failed=Retry, completed=Open）
+ *   - 基于 Card（flat）渲染，2px 左边框 + 状态色背景
+ *   - 左侧方向图标，中间文件名/对端/进度条，右侧 Pill+速度+操作按钮
+ *   - 每个动作按钮仅在对应回调存在时渲染，避免 no-op UI
  */
 
 import { memo, useCallback } from 'react';
@@ -45,6 +43,8 @@ export interface TransferItemProps {
   onCancel?: () => void;
   onRetry?: () => void;
   onOpen?: () => void;
+  /** 取消进行中时禁用取消按钮并标 aria-busy */
+  cancelling?: boolean;
   className?: string;
   style?: CSSProperties;
 }
@@ -74,7 +74,11 @@ const STATUS_BORDER = {
 } as const;
 
 /**
- * 把字节数格式化为人类可读字符串（1.5 MB / 230 KB / 1.0 GB）
+ * Business Logic（为什么需要这个函数）:
+ *   传输列表需要把字节数显示为人类可读单位，便于判断文件规模与进度。
+ *
+ * Code Logic（这个函数做什么）:
+ *   把非负字节数格式化为 B/KB/MB/GB/TB 字符串。
  */
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
@@ -91,7 +95,11 @@ function formatBytes(bytes: number): string {
 }
 
 /**
- * 把字节/秒格式化为带宽字符串（1.2 MB/s）
+ * Business Logic（为什么需要这个函数）:
+ *   transferring 状态需要显示实时带宽，帮助用户判断链路是否正常。
+ *
+ * Code Logic（这个函数做什么）:
+ *   把字节/秒格式化为「单位/s」字符串。
  */
 function formatSpeed(bytesPerSec: number): string {
   if (!Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return '0 B/s';
@@ -99,9 +107,23 @@ function formatSpeed(bytesPerSec: number): string {
 }
 
 /**
- * 渲染文件传输列表项
+ * Business Logic（为什么需要这个函数）:
+ *   列表行需要根据任务状态与可用回调渲染安全的操作入口。
+ *
+ * Code Logic（这个函数做什么）:
+ *   渲染文件名/进度/状态，并仅在回调存在时显示 pause/resume/cancel/retry/open。
  */
-function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen, className, style }: TransferItemProps) {
+function TransferItemInner({
+  task,
+  onPause,
+  onResume,
+  onCancel,
+  onRetry,
+  onOpen,
+  cancelling = false,
+  className,
+  style,
+}: TransferItemProps) {
   const { t } = useTranslation(['common']);
   const tone = STATUS_TONE[task.status];
   const label = t(`common:status.transfer.${task.status}`);
@@ -168,37 +190,41 @@ function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen,
               <span className={styles.speed}>{formatSpeed(task.speed)}</span>
             ) : null}
             <div className={styles.actions}>
-              {task.status === 'transferring' ? (
-                <>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    icon={<PauseIcon />}
-                    onClick={handlePause}
-                    aria-label={t('common:action.pause')}
-                    title={t('common:action.pause')}
-                  />
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    icon={<XIcon />}
-                    onClick={handleCancel}
-                    aria-label={t('common:action.cancel')}
-                    title={t('common:action.cancel')}
-                  />
-                </>
+              {task.status === 'transferring' && onPause ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<PauseIcon />}
+                  onClick={handlePause}
+                  aria-label={t('common:action.pause')}
+                  title={t('common:action.pause')}
+                />
               ) : null}
-              {task.status === 'pending' ? (
+              {task.status === 'transferring' && onCancel ? (
+                <Button
+                  variant="danger"
+                  size="sm"
+                  icon={<XIcon />}
+                  onClick={handleCancel}
+                  disabled={cancelling}
+                  aria-busy={cancelling || undefined}
+                  aria-label={t('common:action.cancel')}
+                  title={t('common:action.cancel')}
+                />
+              ) : null}
+              {task.status === 'pending' && onCancel ? (
                 <Button
                   variant="ghost"
                   size="sm"
                   icon={<XIcon />}
                   onClick={handleCancel}
+                  disabled={cancelling}
+                  aria-busy={cancelling || undefined}
                   aria-label={t('common:action.cancel')}
                   title={t('common:action.cancel')}
                 />
               ) : null}
-              {task.status === 'failed' ? (
+              {task.status === 'failed' && onRetry ? (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -222,7 +248,7 @@ function TransferItemInner({ task, onPause, onResume, onCancel, onRetry, onOpen,
                   {t('common:action.continue')}
                 </Button>
               ) : null}
-              {task.status === 'completed' ? (
+              {task.status === 'completed' && onOpen ? (
                 <Button
                   variant="ghost"
                   size="sm"

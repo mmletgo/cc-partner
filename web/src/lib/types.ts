@@ -83,6 +83,37 @@ export interface TransferTask {
   completedAt?: string;
 }
 
+/**
+ * 发起传输后后端立即返回的受理结果（对齐 Rust send_transfer JSON）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   前端 send 按钮需要确认任务已被后端 spawn，并用 id 定位新任务；
+ *   不能再把返回值误当成完整 TransferTask。
+ *
+ * Code Logic（字段说明）:
+ *   accepted 恒为 true；deviceId/filePath 回显请求；id 为新 transfer_id。
+ */
+export interface SendTransferResult {
+  accepted: true;
+  deviceId: string;
+  filePath: string;
+  id: string;
+}
+
+/**
+ * 取消传输后后端返回的确认结果（对齐 Rust cancel_transfer JSON）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   取消是逐任务 busy 动作，前端需用 id 确认哪条任务取消成功。
+ *
+ * Code Logic（字段说明）:
+ *   ok 恒为 true；id 为被取消的 taskId。任务不存在时后端 reject，不返回本结构。
+ */
+export interface CancelTransferResult {
+  ok: true;
+  id: string;
+}
+
 export interface AppConfig {
   deviceId: string;
   deviceName: string;

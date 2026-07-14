@@ -39,6 +39,8 @@ interface AutomationSettingsPanelProps {
   onResetDefaults: () => void;
   /** 保存回调 */
   onSave: () => void;
+  /** 默认配置是否可用（不可用时禁用「恢复默认」） */
+  canResetDefaults?: boolean;
 }
 
 interface ToggleRowProps {
@@ -107,9 +109,11 @@ export function AutomationSettingsPanel({
   onChange,
   onResetDefaults,
   onSave,
+  canResetDefaults = true,
 }: AutomationSettingsPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
-  const resetDisabled = saving || !isAutomationFormDirty(form, defaults);
+  const resetDisabled =
+    saving || !canResetDefaults || !isAutomationFormDirty(form, defaults);
 
   return (
     <>
@@ -219,6 +223,9 @@ export function AutomationSettingsPanel({
                 size="md"
                 onClick={onResetDefaults}
                 disabled={resetDisabled}
+                title={
+                  canResetDefaults ? undefined : t('settings:resource.defaultsUnavailable')
+                }
               >
                 {t('settings:action.resetDefault')}
               </Button>

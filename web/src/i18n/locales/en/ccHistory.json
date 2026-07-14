@@ -36,5 +36,9 @@
   "projectListAriaLabel": "Claude project list",
   "promptListAriaLabel": "Prompt timeline",
   "deleteTitle": "Delete prompt?",
-  "lastOccurred": "Last {{time}}"
+  "lastOccurred": "Last {{time}}",
+  "refreshFailed": "Refresh failed: {{error}}",
+  "refreshFailedGeneric": "Refresh failed",
+  "syncFailed": "Sync failed: {{error}}",
+  "syncFailedGeneric": "Sync failed"
 }

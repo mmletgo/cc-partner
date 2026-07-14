@@ -27,7 +27,10 @@
     "placeholder": "点击后按下快捷键",
     "recording": "按下新的快捷键…",
     "recordingHelper": "正在记录按键；Esc 取消，Delete 清空。",
-    "screenshot": { "label": "截图快捷键", "helper": "框选区域并复制到剪贴板。" }
+    "screenshot": {
+      "label": "截图快捷键",
+      "helper": "框选区域并复制到剪贴板。"
+    }
   },
   "sync": {
     "enabled": "启用",
@@ -36,11 +39,26 @@
   "cloudSync": {
     "title": "云端同步",
     "subtitle": "通过 GitHub 私有仓库跨网络同步。需在本机已配置 git 访问权限（SSH key 或 HTTPS 凭证）。",
-    "repoUrl": { "label": "仓库地址", "helper": "如 git@github.com:user/repo.git 或 HTTPS URL。" },
-    "branch": { "label": "分支（可选）", "helper": "留空则使用仓库默认分支。" },
-    "enabled": { "label": "启用云端同步", "helper": "将 Prompt、CC 历史与 SSH 配置同步到 GitHub 仓库；CLAUDE.md 仅支持手动推送。" },
-    "auto": { "label": "自动定时同步", "helper": "按设定间隔自动同步。" },
-    "interval": { "label": "同步间隔", "helper": "自动同步的间隔时间，单位秒。" },
+    "repoUrl": {
+      "label": "仓库地址",
+      "helper": "如 git@github.com:user/repo.git 或 HTTPS URL。"
+    },
+    "branch": {
+      "label": "分支（可选）",
+      "helper": "留空则使用仓库默认分支。"
+    },
+    "enabled": {
+      "label": "启用云端同步",
+      "helper": "将 Prompt、CC 历史与 SSH 配置同步到 GitHub 仓库；CLAUDE.md 仅支持手动推送。"
+    },
+    "auto": {
+      "label": "自动定时同步",
+      "helper": "按设定间隔自动同步。"
+    },
+    "interval": {
+      "label": "同步间隔",
+      "helper": "自动同步的间隔时间，单位秒。"
+    },
     "testConnection": "测试连接",
     "testing": "测试中…",
     "apply": "应用配置",
@@ -58,10 +76,22 @@
   "githubTrending": {
     "title": "AI 能力（Claude CLI）",
     "subtitle": "配置本机 Claude Code CLI，供 GitHub 周热门项目解说和 Prompt 优化共用。GitHub 解说会本地缓存；Prompt 优化只展示和复制当前结果。",
-    "aiEnabled": { "label": "启用 GitHub 项目解说", "helper": "关闭后首页仍展示 GitHub 原始简介；Prompt 优化仍会使用下方 CLI 路径和模型进行单次调用。" },
-    "claudeCliPath": { "label": "Claude CLI 路径", "helper": "用于 GitHub 解说和 Prompt 优化；可填写 claude，或完整路径如 /home/you/.local/bin/claude。" },
-    "claudeModel": { "label": "模型", "helper": "用于 GitHub 解说和 Prompt 优化的 Claude Code CLI 模型别名或完整模型名，默认 sonnet。" },
-    "cacheTtlHours": { "label": "缓存时长（小时）", "helper": "默认 24 小时；仅作用于 GitHub 周热门抓取与解说缓存，Prompt 优化不缓存。" },
+    "aiEnabled": {
+      "label": "启用 GitHub 项目解说",
+      "helper": "关闭后首页仍展示 GitHub 原始简介；Prompt 优化仍会使用下方 CLI 路径和模型进行单次调用。"
+    },
+    "claudeCliPath": {
+      "label": "Claude CLI 路径",
+      "helper": "用于 GitHub 解说和 Prompt 优化；可填写 claude，或完整路径如 /home/you/.local/bin/claude。"
+    },
+    "claudeModel": {
+      "label": "模型",
+      "helper": "用于 GitHub 解说和 Prompt 优化的 Claude Code CLI 模型别名或完整模型名，默认 sonnet。"
+    },
+    "cacheTtlHours": {
+      "label": "缓存时长（小时）",
+      "helper": "默认 24 小时；仅作用于 GitHub 周热门抓取与解说缓存，Prompt 优化不缓存。"
+    },
     "appliedConfig": "已应用配置",
     "testCli": "测试 Claude CLI",
     "testing": "测试中…",
@@ -233,7 +263,10 @@
   },
   "permission": {
     "title": "权限管理",
-    "checking": "正在检查权限状态…"
+    "checking": "正在检查权限状态…",
+    "recheck": "重新检查",
+    "loadFailed": "权限状态加载失败：{{error}}",
+    "unknownError": "未知错误"
   },
   "action": {
     "apply": "应用配置",
@@ -249,5 +282,12 @@
     "checkFailed": "检查更新失败",
     "loadConfigFailed": "加载配置失败",
     "startDownloadFailed": "启动下载失败"
+  },
+  "resource": {
+    "retry": "重试",
+    "retrying": "重试中…",
+    "loadFailed": "该分区加载失败：{{error}}",
+    "versionLoadFailed": "版本信息加载失败：{{error}}",
+    "defaultsUnavailable": "默认配置不可用，暂无法恢复默认"
   }
 }

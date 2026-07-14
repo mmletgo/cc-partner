@@ -8,12 +8,13 @@
  *   今日活跃/休息占比如何,并能直接进入完整配置项。
  *
  * Code Logic（这个组件做什么）:
- *   - refresh:并行取 status + stats + detail(startOfDay 起);每 30s 轮询刷新
- *   - 将运行状态派生成概览卡片、进度条、指标网格和图表面板
- *   - 开关 enabled / 暂停 paused:乐观更新本地 status,后端失败回滚
+ *   - refresh:并行取 status + stats + detail(startOfDay 起);每 5s 可见性感知轮询
+ *   - 首屏 status 失败展示可重试错误；刷新失败保留数据 + stale 横幅
+ *   - 开关 enabled / 暂停 paused:乐观更新本地 status,后端失败回滚并可见提示
  *   - hooks 全部在 early return 之前(项目规则 20)
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button, Card, Pill, ProgressBar } from '@/components/primitives';
@@ -25,8 +26,8 @@ import styles from './Health.module.css';
 import { StatsChart } from './StatsChart';
 import { HabitStatsCard } from './HabitStatsCard';
 
-/** 页面刷新间隔(ms) */
-const REFRESH_INTERVAL_MS = 30000;
+/** 页面网络刷新间隔(ms)；HealthOverlay 本地倒计时不属于本轮询 */
+const REFRESH_INTERVAL_MS = 5000;
 
 /**
  * 将运行时 phase 映射为完整静态 i18n key 字面量(i18next v26 的 t() 对动态
@@ -109,7 +110,24 @@ const formatClock = (seconds: number): string => {
 };
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   错误对象形态不统一，UI 需要稳定可读文案。
+ *
+ * Code Logic（这个函数做什么）:
+ *   Error 取 message，其余 String()。
+ */
+function healthErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
  * Health 页面组件
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   用户需要看到健康监测是否正常、连续工作是否接近阈值，并能进入配置。
+ *
+ * Code Logic（这个组件做什么）:
+ *   可见性轮询 status/stats；首屏失败展示可重试错误；刷新失败保留数据 + stale 横幅。
  *
  * @returns Health 路由的根容器
  */
@@ -122,22 +140,28 @@ export function Health() {
   const [config, setConfig] = useState<HealthConfig | null>(null);
   const [habitStats, setHabitStats] = useState<HabitStats | null>(null);
   const [loading, setLoading] = useState(true);
+  /** 首屏/刷新失败可见文案；有 status 时表示 stale */
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  /** toggle 失败用户可见提示 */
+  const [actionError, setActionError] = useState<string | null>(null);
   const [nowTs, setNowTs] = useState(() => Math.floor(Date.now() / 1000));
+  /** 同步读取最新 status，供 refresh 失败分支判断 stale vs 首屏失败 */
+  const statusRef = useRef<HealthStatus | null>(null);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   /**
-   * 刷新状态 + 今日统计 + 今日活动明细图表 + 配置 + 习惯统计。
-   * startOfDay 取「本地当日 0 点」的秒级时间戳(先把 Date 的时/分/秒/毫秒清零,再取整秒),
-   * 作为 get_activity_stats / get_activity_detail 的 sinceTs。
-   * config 用于 HabitStatsCard 的 waterEnabled / waterIntervalSeconds / retainDays 派生展示。
+   * Business Logic（为什么需要这个函数）:
+   *   用户需要看到健康监测是否正常；首屏全失败必须可重试，刷新失败保留数据并标 stale。
    *
-   * 分两组容错,均用 Promise.allSettled 逐项容错:主数据(status/stats/detail)任一失败
-   * 不影响其他项;习惯统计 + 配置独立 try/catch,失败只记日志,不影响主页面(习惯统计是
-   * 辅助展示)。任一组失败都保证 setNowTs + setLoading(false) 执行,避免页面卡 loading。
+   * Code Logic（这个函数做什么）:
+   *   并行取 status/stats/detail + config/habit；status 成功清 refreshError；
+   *   status 失败：有旧 status 则 stale 文案，否则 loadFailed；始终结束 loading。
    */
   const refresh = useCallback(async () => {
     const startOfDay = getLocalStartOfDayTs();
-    // 主数据用 allSettled 逐项容错:getStats/getDetail 失败不影响 status 展示,
-    // 避免"任一 reject 就 loading 卡死"。
     const [statusRes, statsRes, detailRes] = await Promise.allSettled([
       healthApi.getStatus(),
       healthApi.getStats(startOfDay),
@@ -145,8 +169,12 @@ export function Health() {
     ]);
     if (statusRes.status === 'fulfilled') {
       setStatus(statusRes.value);
+      setRefreshError(null);
     } else {
       console.error('加载健康状态失败', statusRes.reason);
+      setRefreshError(
+        statusRef.current ? t('health:staleRefreshFailed') : t('health:loadFailed'),
+      );
     }
     if (statsRes.status === 'fulfilled') {
       setStats(statsRes.value);
@@ -159,7 +187,6 @@ export function Health() {
       console.error('加载活动明细失败', detailRes.reason);
     }
 
-    // 习惯统计 + 配置独立容错,失败不阻塞主页面
     try {
       const [nextConfig, nextHabit] = await Promise.all([
         healthApi.getConfig(),
@@ -173,45 +200,83 @@ export function Health() {
 
     setNowTs(Math.floor(Date.now() / 1000));
     setLoading(false);
-  }, []);
+  }, [t]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect,setState 在 await 后异步执行 */
-  useEffect(() => {
-    void refresh();
-    const id = setInterval(refresh, REFRESH_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [refresh]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  // 健康页网络刷新：5s 可见性感知轮询；HealthOverlay 本地倒计时不变
+  const { runNow: runHealthNow } = useVisibilityPolling(refresh, {
+    intervalMs: REFRESH_INTERVAL_MS,
+  });
 
-  /** 切换监测开关:乐观更新本地 status,后端失败时回滚 enabled 并提示 */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   首屏失败与 stale 横幅上的「重试」需立即强制刷新。
+   *
+   * Code Logic（这个函数做什么）:
+   *   force runNow 并对 rejection 静默（错误已写 refreshError）。
+   */
+  const handleRetryRefresh = useCallback(() => {
+    void runHealthNow({ force: true }).catch(() => undefined);
+  }, [runHealthNow]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   切换监测开关必须乐观更新；失败回滚并给用户可见错误。
+   *
+   * Code Logic（这个函数做什么）:
+   *   记 prev、写 enabled、await API；失败回滚并 setActionError。
+   */
   const toggleEnabled = useCallback(async () => {
     if (!status) return;
     const prev = status.enabled;
     const next = !prev;
+    setActionError(null);
     setStatus({ ...status, enabled: next });
     try {
       await healthApi.toggleEnabled(next);
     } catch (e) {
       console.error('toggle_health_enabled failed, rolling back', e);
       setStatus((s) => (s ? { ...s, enabled: prev } : s));
+      setActionError(t('health:toggleFailed', { error: healthErrorMessage(e) }));
     }
-  }, [status]);
+  }, [status, t]);
 
-  /** 切换暂停/恢复:乐观更新本地 status,后端失败时回滚 paused 并提示 */
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   暂停/恢复同样需乐观更新与失败可见。
+   *
+   * Code Logic（这个函数做什么）:
+   *   记 prev、写 paused、await API；失败回滚并 setActionError。
+   */
   const togglePaused = useCallback(async () => {
     if (!status) return;
     const prev = status.paused;
     const next = !prev;
+    setActionError(null);
     setStatus({ ...status, paused: next });
     try {
       await healthApi.togglePaused(next);
     } catch (e) {
       console.error('toggle_health_paused failed, rolling back', e);
       setStatus((s) => (s ? { ...s, paused: prev } : s));
+      setActionError(t('health:toggleFailed', { error: healthErrorMessage(e) }));
     }
-  }, [status]);
+  }, [status, t]);
 
-  if (loading || !status) return <div className={styles.loading}>{t('common:loading')}</div>;
+  // hooks 全部在 early return 之前
+  if (loading) {
+    return <div className={styles.loading}>{t('common:loading')}</div>;
+  }
+
+  if (!status) {
+    return (
+      <div className={styles.errorPanel} role="alert">
+        <p className={styles.errorText}>{refreshError ?? t('health:loadFailed')}</p>
+        <Button variant="secondary" size="md" onClick={handleRetryRefresh}>
+          {t('common:action.retry')}
+        </Button>
+      </div>
+    );
+  }
 
   const elapsedSeconds = status.windowStartTs ? Math.max(0, nowTs - status.windowStartTs) : 0;
   const workProgress = status.workWindowSeconds > 0 ? elapsedSeconds / status.workWindowSeconds : 0;
@@ -251,6 +316,21 @@ export function Health() {
             </Button>
           </div>
         </header>
+
+        {refreshError ? (
+          <div className={styles.staleBanner} role="status" data-testid="health-stale-banner">
+            <p className={styles.staleText}>{refreshError}</p>
+            <Button variant="secondary" size="sm" onClick={handleRetryRefresh}>
+              {t('common:action.retry')}
+            </Button>
+          </div>
+        ) : null}
+
+        {actionError ? (
+          <p className={styles.toggleError} role="alert" data-testid="health-toggle-error">
+            {actionError}
+          </p>
+        ) : null}
 
         <Card variant="outlined" padding="md" className={styles.overviewCard}>
           <Card.Header className={styles.cardHeader}>
