@@ -171,6 +171,17 @@ impl OrchestratorSchedulerTelemetry {
     }
 }
 
+impl Default for OrchestratorRuntime {
+    /// Business Logic（为什么需要这个函数）:
+    ///     框架与派生代码可能通过 Default 构造运行时，语义与 new 一致。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `Self::new()`。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrchestratorRuntime {
     /// Business Logic（为什么需要这个函数）:
     ///     scheduler 启动时需要创建一份新的取消令牌供后台循环和 AppState 共享。
@@ -352,7 +363,8 @@ async fn claim_tasks_for_dispatch(
         for candidate in &candidates {
             seen.insert(candidate.task.project_id.clone());
         }
-        seen.len().min(crate::orchestrator::claim::CLAIM_PROJECT_LIMIT) as u64
+        seen.len()
+            .min(crate::orchestrator::claim::CLAIM_PROJECT_LIMIT) as u64
     };
 
     let preflight = preflight_claim_candidates(candidates).await?;
@@ -645,13 +657,8 @@ mod tests {
             .unwrap();
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(false, 4),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(false, 4), &mut cursor, None)
+            .await
             .unwrap();
         let persisted = repo.get_task("task-queued").await.unwrap();
 
@@ -706,13 +713,8 @@ mod tests {
         }
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 3),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3), &mut cursor, None)
+            .await
             .unwrap();
 
         assert_eq!(
@@ -789,13 +791,8 @@ mod tests {
         .await;
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 3),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3), &mut cursor, None)
+            .await
             .unwrap();
         let backlog = repo.get_task("backlog-idle").await.unwrap();
         let rework_blocked = repo.get_task("rework-blocked").await.unwrap();
@@ -842,13 +839,8 @@ mod tests {
         assert_eq!(moved.run_state, OrchestratorRunState::Idle);
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 3),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 3), &mut cursor, None)
+            .await
             .unwrap();
         let persisted = repo.get_task(&created.id).await.unwrap();
 
@@ -909,13 +901,8 @@ mod tests {
 
         // max=1：若不回收 stale Preparing，queued-next 永远无法领取。
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 1),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1), &mut cursor, None)
+            .await
             .unwrap();
         let stale = repo.get_task("stale-prep").await.unwrap();
 
@@ -963,13 +950,8 @@ mod tests {
         .await;
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 1),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1), &mut cursor, None)
+            .await
             .unwrap();
         let persisted = repo.get_task("todo-invalid-workflow").await.unwrap();
 
@@ -1010,13 +992,8 @@ mod tests {
         }
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 2),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 2), &mut cursor, None)
+            .await
             .unwrap();
 
         assert_eq!(
@@ -1060,13 +1037,8 @@ mod tests {
         .await;
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 1),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1), &mut cursor, None)
+            .await
             .unwrap();
 
         assert_eq!(claimed.len(), 1);
@@ -1121,13 +1093,8 @@ mod tests {
             .unwrap();
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 5),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 5), &mut cursor, None)
+            .await
             .unwrap();
 
         assert_eq!(claimed.len(), 1);
@@ -1171,13 +1138,8 @@ mod tests {
         .await;
 
         let mut cursor = None;
-        let claimed = claim_tasks_for_dispatch(
-            &repo,
-            &global_config(true, 1),
-            &mut cursor,
-            None,
-        )
-        .await
+        let claimed = claim_tasks_for_dispatch(&repo, &global_config(true, 1), &mut cursor, None)
+            .await
             .unwrap();
 
         assert_eq!(claimed.len(), 1);

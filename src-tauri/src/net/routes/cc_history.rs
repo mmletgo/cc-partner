@@ -585,10 +585,7 @@ pub async fn cc_sync_items(
 ///
 /// Code Logic（这个函数做什么）:
 ///     validate_id_list → get_many_for_sync → 保序收集 + 估算响应字节。
-async fn items_impl(
-    repo: &ClaudeHistoryRepo,
-    req: CcItemsReq,
-) -> Result<CcItemsResp, RouteFail> {
+async fn items_impl(repo: &ClaudeHistoryRepo, req: CcItemsReq) -> Result<CcItemsResp, RouteFail> {
     validate_id_list(&req.ids)?;
 
     let map = repo.get_many_for_sync(&req.ids).await?;
@@ -631,10 +628,7 @@ async fn items_impl(
         missing_ids.len()
     );
 
-    Ok(CcItemsResp {
-        items,
-        missing_ids,
-    })
+    Ok(CcItemsResp { items, missing_ids })
 }
 
 /// POST /api/cc-history/sync/push-batch：批量 merge + 事务 upsert。
@@ -818,12 +812,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_fail(
-            err,
-            StatusCode::BAD_REQUEST,
-            CODE_INVALID_CURSOR,
-            false,
-        );
+        assert_fail(err, StatusCode::BAD_REQUEST, CODE_INVALID_CURSOR, false);
     }
 
     /// 默认 limit=256、max=512；limit+1 内部判定 done/next_cursor。
@@ -940,14 +929,9 @@ mod tests {
         }
 
         let long = "x".repeat(CC_ID_MAX_BYTES + 1);
-        let oversized = items_impl(
-            &repo,
-            CcItemsReq {
-                ids: vec![long],
-            },
-        )
-        .await
-        .unwrap_err();
+        let oversized = items_impl(&repo, CcItemsReq { ids: vec![long] })
+            .await
+            .unwrap_err();
         match oversized {
             RouteFail::Validation(m) => assert!(m.contains("256")),
             _ => panic!("257-byte id must be Validation"),
@@ -960,14 +944,9 @@ mod tests {
         let repo = setup_repo().await;
         let mut row = sample_row("big", "", 1);
         row.content = "a".repeat(CC_CONTENT_MAX_BYTES + 1);
-        let err = push_batch_impl(
-            &repo,
-            CcPushBatchReq {
-                items: vec![row],
-            },
-        )
-        .await
-        .unwrap_err();
+        let err = push_batch_impl(&repo, CcPushBatchReq { items: vec![row] })
+            .await
+            .unwrap_err();
         assert_fail(
             err,
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1059,7 +1038,7 @@ mod tests {
         assert_eq!(accepted, 128);
 
         let check = repo
-            .get_many_for_sync(&vec!["row-000".into(), "row-127".into()])
+            .get_many_for_sync(&["row-000".into(), "row-127".into()])
             .await
             .unwrap();
         assert_eq!(check.get("row-000").unwrap().content, "new");

@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// 单次 claim 候选 SELECT 的硬上限（含 keyset 分页页大小）。
+/// spawn_blocking 中可注入的 workflow resolver 函数类型别名（降低 clippy type_complexity）。
+type WorkflowResolverFn = dyn Fn(&Path) -> Result<ResolvedWorkflow, AppError> + Send + Sync;
+
 pub const CLAIM_CANDIDATE_LIMIT: u32 = 256;
 
 /// 阶段 B 解析 WORKFLOW.md 时允许的最大不同 project 数。
@@ -129,9 +132,10 @@ pub struct ClaimCasOutcome {
 pub async fn preflight_claim_candidates(
     candidates: Vec<ClaimCandidate>,
 ) -> Result<ClaimPreflight, AppError> {
-    preflight_claim_candidates_with_resolver(candidates, Arc::new(|path: &Path| {
-        resolve_project_workflow(path)
-    }))
+    preflight_claim_candidates_with_resolver(
+        candidates,
+        Arc::new(|path: &Path| resolve_project_workflow(path)),
+    )
     .await
 }
 
@@ -144,7 +148,7 @@ pub async fn preflight_claim_candidates(
 ///     传入的 `resolver`（在 spawn_blocking 中调用）。
 pub async fn preflight_claim_candidates_with_resolver(
     candidates: Vec<ClaimCandidate>,
-    resolver: Arc<dyn Fn(&Path) -> Result<ResolvedWorkflow, AppError> + Send + Sync>,
+    resolver: Arc<WorkflowResolverFn>,
 ) -> Result<ClaimPreflight, AppError> {
     let exhausted = (candidates.len() as u32) >= CLAIM_CANDIDATE_LIMIT;
     let next_cursor = candidates.last().map(ClaimCandidate::to_scan_cursor);
@@ -279,22 +283,19 @@ mod tests {
             project_path: PathBuf::from("/tmp/b"),
         };
 
-        let resolver: Arc<dyn Fn(&Path) -> Result<ResolvedWorkflow, AppError> + Send + Sync> =
-            Arc::new(|path: &Path| {
-                if path.ends_with("b") {
-                    return Err(AppError::generic("invalid workflow fixture"));
-                }
-                let mut wf = ResolvedWorkflow::built_in_default();
-                wf.active_states = vec![OrchestratorWorkflowState::Todo];
-                Ok(wf)
-            });
+        let resolver: Arc<WorkflowResolverFn> = Arc::new(|path: &Path| {
+            if path.ends_with("b") {
+                return Err(AppError::generic("invalid workflow fixture"));
+            }
+            let mut wf = ResolvedWorkflow::built_in_default();
+            wf.active_states = vec![OrchestratorWorkflowState::Todo];
+            Ok(wf)
+        });
 
-        let preflight = preflight_claim_candidates_with_resolver(
-            vec![c_todo, c_rework, c_bad],
-            resolver,
-        )
-        .await
-        .expect("preflight");
+        let preflight =
+            preflight_claim_candidates_with_resolver(vec![c_todo, c_rework, c_bad], resolver)
+                .await
+                .expect("preflight");
 
         assert_eq!(
             preflight
@@ -322,13 +323,12 @@ mod tests {
         let (release_tx, release_rx) = oneshot::channel::<()>();
         let release_rx = Arc::new(Mutex::new(Some(release_rx)));
 
-        let resolver: Arc<dyn Fn(&Path) -> Result<ResolvedWorkflow, AppError> + Send + Sync> =
-            Arc::new(move |_path: &Path| {
-                if let Some(rx) = release_rx.lock().expect("lock").take() {
-                    let _ = rx.blocking_recv();
-                }
-                Ok(ResolvedWorkflow::built_in_default())
-            });
+        let resolver: Arc<WorkflowResolverFn> = Arc::new(move |_path: &Path| {
+            if let Some(rx) = release_rx.lock().expect("lock").take() {
+                let _ = rx.blocking_recv();
+            }
+            Ok(ResolvedWorkflow::built_in_default())
+        });
 
         let candidates = vec![ClaimCandidate {
             task: sample_task("slow-1", "proj-slow", 1, "2026-07-05T00:00:01Z"),
@@ -352,10 +352,7 @@ mod tests {
         assert_eq!(concurrent, "ok");
 
         let _ = release_tx.send(());
-        let preflight = preflight_handle
-            .await
-            .expect("join")
-            .expect("preflight ok");
+        let preflight = preflight_handle.await.expect("join").expect("preflight ok");
         assert_eq!(preflight.eligible.len(), 1);
     }
 
