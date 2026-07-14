@@ -18,7 +18,7 @@
 
 .loading {
   padding: var(--space-8);
-  color: var(--fg-muted);
+  color: var(--muted);
 }
 
 .errorPanel {

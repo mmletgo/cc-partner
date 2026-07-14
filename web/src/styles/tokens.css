@@ -164,4 +164,5 @@
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
   --shadow-window: 0 18px 56px rgba(0, 0, 0, 0.5);
+  --shadow-card-hover: 0 6px 20px rgba(0, 0, 0, 0.28);
 }

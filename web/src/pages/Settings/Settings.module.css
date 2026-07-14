@@ -181,7 +181,7 @@
 }
 
 .timeSelect:hover:not(:disabled) {
-  border-color: var(--border-strong);
+  border-color: var(--border);
 }
 
 .timeSelect:focus-visible {
@@ -244,7 +244,7 @@
 }
 
 .textarea:hover {
-  border-color: var(--border-strong);
+  border-color: var(--border);
 }
 
 .textarea:focus-visible {

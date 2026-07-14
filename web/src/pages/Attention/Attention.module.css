@@ -63,14 +63,14 @@
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--bg-2);
+  background: var(--bg);
   color: var(--fg-2);
   font-size: var(--text-sm);
 }
 
 .bannerError {
   border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
-  background: color-mix(in srgb, var(--danger) 8%, var(--bg-2));
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg));
   color: var(--fg);
 }
 
@@ -117,7 +117,7 @@
   padding: var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--bg-1, var(--bg-2));
+  background: var(--surface);
   color: inherit;
   text-align: left;
   cursor: pointer;
@@ -126,7 +126,7 @@
 
 .item:hover {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-  background: var(--bg-2);
+  background: var(--bg);
 }
 
 .item:focus-visible,
@@ -161,7 +161,7 @@
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-3);
   font-size: var(--text-xs);
-  color: var(--fg-3, var(--fg-2));
+  color: var(--meta);
 }
 
 .metaChip {
@@ -211,9 +211,9 @@
   border-radius: var(--radius-md);
   background: linear-gradient(
     90deg,
-    var(--bg-2) 0%,
-    color-mix(in srgb, var(--bg-2) 60%, var(--fg-3, var(--border)) 40%) 50%,
-    var(--bg-2) 100%
+    var(--bg) 0%,
+    color-mix(in srgb, var(--bg) 60%, var(--meta) 40%) 50%,
+    var(--bg) 100%
   );
   background-size: 200% 100%;
   animation: shimmer 1.2s ease-in-out infinite;
@@ -230,5 +230,5 @@
 
 .statusText {
   font-size: var(--text-xs);
-  color: var(--fg-3, var(--fg-2));
+  color: var(--meta);
 }
