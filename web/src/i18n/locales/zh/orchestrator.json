@@ -286,5 +286,23 @@
       "readError": "读取失败",
       "unknown": "未知"
     }
+  },
+  "notifications": {
+    "humanReview": {
+      "title": "有任务等待审核",
+      "body": "有任务等待人工审核。请打开待处理事项查看详情。"
+    },
+    "blocked": {
+      "title": "有任务已阻塞",
+      "body": "有任务已进入阻塞状态。请打开待处理事项查看详情。"
+    },
+    "remoteOutboxFailed": {
+      "title": "远端任务投递失败",
+      "body": "有远端任务投递失败。请打开待处理事项查看详情。"
+    },
+    "taskDone": {
+      "title": "有任务已完成",
+      "body": "有任务已完成。可在自动化看板中查看。"
+    }
   }
 }

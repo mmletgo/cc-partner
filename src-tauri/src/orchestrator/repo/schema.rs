@@ -76,6 +76,13 @@ impl OrchestratorRepo {
         ensure_column(pool, "orchestrator_tasks", "last_runtime_event", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "last_runtime_message", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "prepare_claim_token", "TEXT").await?;
+        ensure_column(
+            pool,
+            "orchestrator_tasks",
+            "state_version",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
         if added_workflow_state || added_run_state {
             backfill_split_state_from_legacy_status(pool).await?;
         }
@@ -100,6 +107,14 @@ impl OrchestratorRepo {
         ] {
             sqlx::query(statement).execute(pool).await?;
         }
+        // 旧 outbox 表缺 state_version 时补列，默认 0。
+        ensure_column(
+            pool,
+            "orchestrator_remote_outbox",
+            "state_version",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
         // 旧库仅有 request_id 主键时补齐 project_id / request_fingerprint，并把 project_id 回填为任务归属。
         migrate_remote_task_create_request_scope(pool).await?;
         Ok(())

@@ -206,6 +206,43 @@ export function AutomationSettingsPanel({
               onToggle={(autoPushMain) => onChange({ ...form, autoPushMain })}
             />
           </div>
+        </Card.Body>
+      </Card>
+
+      <Card variant="flat" padding="md">
+        <Card.Header>
+          <h2 className={styles.sectionTitle}>{t('settings:automation.notificationsTitle')}</h2>
+        </Card.Header>
+        <Card.Body padding="md">
+          <p className={styles.helper}>{t('settings:automation.notificationsDescription')}</p>
+          <div className={styles.toggleList}>
+            <ToggleRow
+              label={t('settings:automation.notifyHumanReview')}
+              helper={t('settings:automation.notifyHumanReviewHint')}
+              checked={form.notifyHumanReview}
+              onToggle={(notifyHumanReview) => onChange({ ...form, notifyHumanReview })}
+            />
+            <ToggleRow
+              label={t('settings:automation.notifyBlocked')}
+              helper={t('settings:automation.notifyBlockedHint')}
+              checked={form.notifyBlocked}
+              onToggle={(notifyBlocked) => onChange({ ...form, notifyBlocked })}
+            />
+            <ToggleRow
+              label={t('settings:automation.notifyRemoteOutboxFailed')}
+              helper={t('settings:automation.notifyRemoteOutboxFailedHint')}
+              checked={form.notifyRemoteOutboxFailed}
+              onToggle={(notifyRemoteOutboxFailed) =>
+                onChange({ ...form, notifyRemoteOutboxFailed })
+              }
+            />
+            <ToggleRow
+              label={t('settings:automation.notifyTaskDone')}
+              helper={t('settings:automation.notifyTaskDoneHint')}
+              checked={form.notifyTaskDone}
+              onToggle={(notifyTaskDone) => onChange({ ...form, notifyTaskDone })}
+            />
+          </div>
 
           <div className={styles.footer}>
             <div className={styles.footerLeft}>

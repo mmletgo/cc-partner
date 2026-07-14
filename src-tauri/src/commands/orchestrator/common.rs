@@ -1345,6 +1345,15 @@ pub(crate) async fn block_task_with_reason(
         .orchestrator_repo
         .block_task_if_verifying(task_id, reason)
         .await?;
+    if task.status == OrchestratorTaskStatus::Blocked
+        && task.blocked_reason.as_deref() == Some(reason)
+    {
+        crate::orchestrator::notifications::emit_task_operational_notification(
+            state,
+            crate::orchestrator::models::OperationalNotificationKind::Blocked,
+            &task,
+        );
+    }
     Ok(OrchestratorTaskDto::from(task))
 }
 
@@ -1480,6 +1489,11 @@ pub(crate) async fn block_task_with_delivery_error(
                 &reason,
             )
             .await?;
+        crate::orchestrator::notifications::emit_task_operational_notification(
+            state,
+            crate::orchestrator::models::OperationalNotificationKind::Blocked,
+            &task,
+        );
     }
     Ok(OrchestratorTaskDto::from(task))
 }
@@ -1513,6 +1527,25 @@ pub(crate) async fn run_delivery_for_task(
     match crate::orchestrator::delivery::deliver_task(&delivery_context, task_id).await {
         Ok(summary) => {
             tracing::debug!(task_id = %task_id, stages = ?summary.stages, "Orchestrator 自动交付完成");
+            // delivery 成功后可能是 Done 或中途 Blocked；从权威 row 读 state_version 再发运营通知。
+            if let Ok(row) = state.orchestrator_repo.get_task(task_id).await {
+                if row.status == OrchestratorTaskStatus::Done
+                    && row.workflow_state
+                        == crate::orchestrator::models::OrchestratorWorkflowState::Done
+                {
+                    crate::orchestrator::notifications::emit_task_operational_notification(
+                        state,
+                        crate::orchestrator::models::OperationalNotificationKind::TaskDone,
+                        &row,
+                    );
+                } else if row.status == OrchestratorTaskStatus::Blocked {
+                    crate::orchestrator::notifications::emit_task_operational_notification(
+                        state,
+                        crate::orchestrator::models::OperationalNotificationKind::Blocked,
+                        &row,
+                    );
+                }
+            }
             Ok(summary.task)
         }
         Err(err) => block_task_with_delivery_error(state, task_id, err).await,
@@ -1610,6 +1643,11 @@ pub(crate) async fn block_task_with_repair_runner_error(
     };
     let task = if let Some(task) = blocked {
         repo.add_event(task_id, "blocked", &reason, None).await?;
+        crate::orchestrator::notifications::emit_task_operational_notification(
+            state,
+            crate::orchestrator::models::OperationalNotificationKind::Blocked,
+            &task,
+        );
         task
     } else {
         repo.get_task(task_id).await?

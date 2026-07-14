@@ -15,6 +15,7 @@ use crate::backend::control::{self, BackendControlFile};
 use crate::backend::control_api::WorkbenchLaunchSummaryDto;
 use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
 use crate::commands::orchestrator::OrchestratorRuntimeSnapshotDto;
+use crate::orchestrator::models::OperationalNotificationSnapshot;
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateRequest, ConfigUpdateResponse, RuntimeConfigPatch,
     RuntimeOwnerStatus,
@@ -718,6 +719,25 @@ impl BackendControlClient {
                 control_token: self.control_token.clone(),
                 after_owner_instance_id: after.map(|c| c.owner_instance_id.clone()),
                 after_sequence: after.map(|c| c.sequence),
+            },
+        )
+        .await
+    }
+
+    /// 经 control API 拉取运营通知 baseline snapshot。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI handshake 必须从 sidecar owner 拿 opaque 当前态 + asOfCursor，禁止读本机空 repo。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `operational-notifications/snapshot`；查询允许一次 control-file 刷新。
+    pub async fn operational_notification_snapshot(
+        &self,
+    ) -> Result<OperationalNotificationSnapshot, AppError> {
+        self.query_with_optional_refresh(
+            "operational-notifications/snapshot",
+            &ControlAuthBody {
+                control_token: self.control_token.clone(),
             },
         )
         .await

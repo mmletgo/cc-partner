@@ -91,6 +91,10 @@ const automation = (
   autoPushTaskBranch: false,
   autoMergeToMain: false,
   autoPushMain: false,
+  notifyHumanReview: true,
+  notifyBlocked: true,
+  notifyRemoteOutboxFailed: true,
+  notifyTaskDone: false,
   ...partial,
 });
 
@@ -778,6 +782,38 @@ describe('Settings safe save preserves concurrent edits', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     expect(commands.value).toBe('npm test\nnpm run lint\nnpm run build');
+  });
+
+  test('saves operational notification preference toggles', async () => {
+    updateAutomationConfig.mockResolvedValue(
+      automation({ notifyTaskDone: true, notifyHumanReview: false }),
+    );
+    searchParamsState.value = new URLSearchParams('tab=automation');
+    renderSettings();
+
+    const taskDoneToggle = await screen.findByRole('switch', {
+      name: 'settings:automation.notifyTaskDone',
+    });
+    const humanReviewToggle = screen.getByRole('switch', {
+      name: 'settings:automation.notifyHumanReview',
+    });
+
+    expect(taskDoneToggle.getAttribute('aria-checked')).toBe('false');
+    expect(humanReviewToggle.getAttribute('aria-checked')).toBe('true');
+
+    fireEvent.click(taskDoneToggle);
+    fireEvent.click(humanReviewToggle);
+    fireEvent.click(screen.getByRole('button', { name: 'settings:action.apply' }));
+
+    await waitFor(() => {
+      expect(updateAutomationConfig).toHaveBeenCalledTimes(1);
+    });
+    const patch = updateAutomationConfig.mock.calls[0][0] as {
+      notifyTaskDone?: boolean;
+      notifyHumanReview?: boolean;
+    };
+    expect(patch.notifyTaskDone).toBe(true);
+    expect(patch.notifyHumanReview).toBe(false);
   });
 });
 

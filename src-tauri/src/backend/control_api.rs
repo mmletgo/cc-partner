@@ -23,6 +23,8 @@ use crate::backup::{
 use crate::commands::orchestrator::{
     get_orchestrator_runtime_snapshot_for_state_with_request_id, OrchestratorRuntimeSnapshotDto,
 };
+use crate::orchestrator::models::OperationalNotificationSnapshot;
+use crate::orchestrator::notifications::capture_operational_notification_snapshot;
 use crate::commands::transfer::prepare_transfer_open_for_state;
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateResponse, OrchestratorRuntimeSummary, RuntimeConfigPatch,
@@ -628,6 +630,43 @@ pub struct ControlEventsRequest {
 pub struct ControlEventsCatchUpResponse {
     pub messages: Vec<RuntimeRelayMessage>,
     pub latest: BackendRuntimeCursor,
+}
+
+/// 运营通知 snapshot 请求（仅 controlToken）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI handshake 经 loopback+token 拉取当前 opaque baseline，无业务入参。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase `controlToken`。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOperationalNotificationSnapshotRequest {
+    pub control_token: String,
+}
+
+/// 返回运营通知 baseline snapshot（稳定 asOfCursor）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GUI 冷启动/Gap 需要 owner 当前 HumanReview/Blocked/Done/outboxFailed opaque 状态 + 事件游标，
+///     建立 no-notify baseline；控制面 only，不进 LAN capabilities。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → `capture_operational_notification_snapshot`（cursor 稳定窗口）。
+pub async fn control_operational_notification_snapshot(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOperationalNotificationSnapshotRequest>,
+) -> P2pResult<Json<OperationalNotificationSnapshot>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    let snapshot = capture_operational_notification_snapshot(&state)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.operational_notification_snapshot")
+        })?;
+    ensure_response_within_limit(&snapshot, &context)?;
+    Ok(Json(snapshot))
 }
 
 /// 返回 sidecar 权威 Orchestrator runtime snapshot。

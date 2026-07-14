@@ -14,6 +14,7 @@ import { WorkbenchDependencyProvider } from './hooks/useWorkbenchDependency';
 import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBuffers';
 import { AttentionProvider } from './hooks/useAttention';
 import { ScratchpadAutosaveProvider } from './hooks/ScratchpadAutosaveProvider';
+import { OperationalNotificationCoordinator } from './hooks/useOperationalNotifications';
 import { attentionApi } from './api/attention';
 import { checkNotificationGranted } from './lib/notification';
 import { backendApi } from './api/backend';
@@ -500,6 +501,8 @@ export default function App() {
                   <WorkbenchTerminalBuffersProvider>
                     <AttentionProvider loadSnapshot={attentionApi.listSnapshot}>
                       <ScratchpadAutosaveProvider>
+                        {/* 运营通知协调器挂在 providers 内，可失效 Attention 并读路由前台抑制 */}
+                        <OperationalNotificationCoordinator />
                         <AppShell />
                       </ScratchpadAutosaveProvider>
                     </AttentionProvider>

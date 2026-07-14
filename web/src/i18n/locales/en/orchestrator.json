@@ -286,5 +286,23 @@
       "readError": "Read error",
       "unknown": "Unknown"
     }
+  },
+  "notifications": {
+    "humanReview": {
+      "title": "A task is waiting for review",
+      "body": "A task is waiting for human review. Open Attention for details."
+    },
+    "blocked": {
+      "title": "A task is blocked",
+      "body": "A task is blocked. Open Attention for details."
+    },
+    "remoteOutboxFailed": {
+      "title": "Remote task delivery failed",
+      "body": "A remote task delivery failed. Open Attention for details."
+    },
+    "taskDone": {
+      "title": "A task is completed",
+      "body": "A task is completed. Check the automation board for details."
+    }
   }
 }

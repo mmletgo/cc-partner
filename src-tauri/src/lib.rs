@@ -414,6 +414,7 @@ pub fn run() {
             orchestrator_cmd::create_orchestrator_task_view,
             orchestrator_cmd::move_orchestrator_task_workflow_state,
             orchestrator_cmd::get_orchestrator_runtime_snapshot,
+            orchestrator_cmd::get_operational_notification_snapshot,
             orchestrator_cmd::start_orchestrator_task_view,
             orchestrator_cmd::request_orchestrator_task_rework_view,
             orchestrator_cmd::deliver_reviewed_orchestrator_task_view,

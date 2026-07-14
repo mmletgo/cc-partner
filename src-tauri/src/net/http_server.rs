@@ -432,6 +432,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             ),
         )
         .route(
+            "/api/backend/control/operational-notifications/snapshot",
+            post(crate::backend::control_api::control_operational_notification_snapshot).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
             "/api/backend/control/events/catch-up",
             post(crate::backend::control_api::control_events_catch_up).layer(
                 axum::extract::DefaultBodyLimit::max(

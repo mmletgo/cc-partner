@@ -47,13 +47,15 @@ pub use remote::{
     retry_orchestrator_remote_outbox,
 };
 pub use runtime::{
-    __cmd__abort_orchestrator_task_view, __cmd__get_orchestrator_runtime_snapshot,
-    __cmd__queue_orchestrator_task_view, __cmd__retry_orchestrator_task_view,
-    __tauri_command_name_abort_orchestrator_task_view,
+    __cmd__abort_orchestrator_task_view, __cmd__get_operational_notification_snapshot,
+    __cmd__get_orchestrator_runtime_snapshot, __cmd__queue_orchestrator_task_view,
+    __cmd__retry_orchestrator_task_view, __tauri_command_name_abort_orchestrator_task_view,
+    __tauri_command_name_get_operational_notification_snapshot,
     __tauri_command_name_get_orchestrator_runtime_snapshot,
     __tauri_command_name_queue_orchestrator_task_view,
     __tauri_command_name_retry_orchestrator_task_view, abort_orchestrator_task_view,
-    get_orchestrator_runtime_snapshot, queue_orchestrator_task_view, retry_orchestrator_task_view,
+    get_operational_notification_snapshot, get_orchestrator_runtime_snapshot,
+    queue_orchestrator_task_view, retry_orchestrator_task_view,
 };
 pub use tasks::{
     __cmd__cancel_orchestrator_task_view, __cmd__create_orchestrator_task,

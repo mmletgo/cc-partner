@@ -19,6 +19,14 @@ export interface OrchestratorAutomationConfig {
   autoPushTaskBranch: boolean;
   autoMergeToMain: boolean;
   autoPushMain: boolean;
+  /** 系统通知：Human Review 等待审核（默认开） */
+  notifyHumanReview: boolean;
+  /** 系统通知：任务阻塞（默认开） */
+  notifyBlocked: boolean;
+  /** 系统通知：远端 outbox 投递失败（默认开） */
+  notifyRemoteOutboxFailed: boolean;
+  /** 系统通知：任务完成（默认关） */
+  notifyTaskDone: boolean;
 }
 
 /** Orchestrator 自动化配置更新 patch；verificationCommands 由 textarea 多行文本提交给后端归一化。 */
@@ -30,6 +38,10 @@ export interface OrchestratorAutomationConfigPatch {
   autoPushTaskBranch?: boolean;
   autoMergeToMain?: boolean;
   autoPushMain?: boolean;
+  notifyHumanReview?: boolean;
+  notifyBlocked?: boolean;
+  notifyRemoteOutboxFailed?: boolean;
+  notifyTaskDone?: boolean;
 }
 
 /**

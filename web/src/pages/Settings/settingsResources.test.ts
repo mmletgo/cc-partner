@@ -125,6 +125,10 @@ function automation(
     autoPushTaskBranch: false,
     autoMergeToMain: false,
     autoPushMain: false,
+    notifyHumanReview: true,
+    notifyBlocked: true,
+    notifyRemoteOutboxFailed: true,
+    notifyTaskDone: false,
     ...partial,
   };
 }

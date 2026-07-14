@@ -96,6 +96,8 @@ pub struct OrchestratorRemoteOutboxRow {
     pub status: RemoteOutboxStatus,
     pub remote_task_id: Option<String>,
     pub last_error: Option<String>,
+    /// Failed 状态 revision；每次进入 failed 时 +1，供 operational 去重。
+    pub state_version: i64,
     pub created_at: String,
     pub updated_at: String,
     pub sent_at: Option<String>,
@@ -164,6 +166,7 @@ impl OrchestratorRemoteOutboxRow {
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
             sent_at: self.sent_at.clone(),
+            // state_version 仅运营通知内部使用，不暴露给 UI DTO
         }
     }
 }
@@ -335,10 +338,15 @@ pub async fn dispatch_remote_outbox_once(state: &AppState) -> Result<usize, AppE
                     .await?;
             }
             Err(RemoteOutboxDispatchError::Protocol(message)) => {
-                state
+                let failed = state
                     .orchestrator_repo
                     .mark_remote_outbox_failed(&claimed.id, &message)
                     .await?;
+                if failed.status == RemoteOutboxStatus::Failed {
+                    crate::orchestrator::notifications::emit_outbox_failed_operational_notification(
+                        state, &failed,
+                    );
+                }
             }
         }
     }

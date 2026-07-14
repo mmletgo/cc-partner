@@ -398,8 +398,13 @@ impl RuntimeEventRelay {
 ///     Deliver / DropDuplicate / RequestResync。
 #[derive(Debug, Clone, PartialEq)]
 pub enum RelayClientAction {
-    /// 向前端投递业务事件（原始 event 名 + payload）。
-    Deliver { event: String, payload: Value },
+    /// 向前端投递业务事件（原始 event 名 + payload + owner/sequence 游标）。
+    Deliver {
+        event: String,
+        payload: Value,
+        owner_instance_id: String,
+        sequence: u64,
+    },
     /// 同 owner 重复 sequence，丢弃。
     DropDuplicate,
     /// 需要 terminal replay + runtime snapshot 后以最新游标重新 attach。
@@ -475,10 +480,15 @@ impl GuiEventRelayState {
                     }
                 }
                 self.cursor = Some(BackendRuntimeCursor {
-                    owner_instance_id,
+                    owner_instance_id: owner_instance_id.clone(),
                     sequence,
                 });
-                RelayClientAction::Deliver { event, payload }
+                RelayClientAction::Deliver {
+                    event,
+                    payload,
+                    owner_instance_id,
+                    sequence,
+                }
             }
         }
     }

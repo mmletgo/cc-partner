@@ -283,6 +283,13 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
                 &task.id,
             )
             .await?;
+            if review_transition.transitioned {
+                crate::orchestrator::notifications::emit_task_operational_notification(
+                    state,
+                    crate::orchestrator::models::OperationalNotificationKind::HumanReview,
+                    &review_transition.task,
+                );
+            }
             return Ok(OrchestratorTaskDto::from(review_transition.task));
         }
 

@@ -120,8 +120,36 @@ pub async fn run_gui_owner_event_relay(ui: Arc<dyn BackendUi>, cancel: Cancellat
             Ok(batch) => {
                 for message in batch.messages {
                     match relay_state.on_message(message) {
-                        RelayClientAction::Deliver { event, payload } => {
-                            ui.emit(&event, payload);
+                        RelayClientAction::Deliver {
+                            event,
+                            payload,
+                            owner_instance_id,
+                            sequence,
+                        } => {
+                            // 运营通知需要附带 owner/sequence，供 GUI handshake 按游标 baseline/dedupe。
+                            if event
+                                == crate::orchestrator::notifications::OPERATIONAL_NOTIFICATION_EVENT
+                            {
+                                let mut enriched = match payload {
+                                    serde_json::Value::Object(map) => map,
+                                    other => {
+                                        let mut map = serde_json::Map::new();
+                                        map.insert("payload".into(), other);
+                                        map
+                                    }
+                                };
+                                enriched.insert(
+                                    "ownerInstanceId".into(),
+                                    serde_json::Value::String(owner_instance_id),
+                                );
+                                enriched.insert(
+                                    "sequence".into(),
+                                    serde_json::Value::Number(sequence.into()),
+                                );
+                                ui.emit(&event, serde_json::Value::Object(enriched));
+                            } else {
+                                ui.emit(&event, payload);
+                            }
                         }
                         RelayClientAction::DropDuplicate => {}
                         RelayClientAction::RequestResync {

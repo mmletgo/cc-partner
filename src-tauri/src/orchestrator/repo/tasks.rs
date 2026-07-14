@@ -18,10 +18,10 @@ use crate::orchestrator::claim::{
 };
 use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
-    OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
-    OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState, SplitTaskState,
-    EVIDENCE_KIND_REPAIR_PROMPT,
+    OperationalNotificationEvent, OperationalNotificationKind, OrchestratorAttemptPhase,
+    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorProjectConfigDto,
+    OrchestratorRunState, OrchestratorTaskAttemptRow, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorWorkflowState, SplitTaskState, EVIDENCE_KIND_REPAIR_PROMPT,
 };
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
@@ -49,9 +49,9 @@ impl OrchestratorRepo {
                   workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
                   external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
                   transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-                  last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, created_at, \
-                  updated_at, started_at, finished_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
+                  state_version, created_at, updated_at, started_at, finished_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&row.id)
             .bind(&row.project_id)
@@ -82,6 +82,7 @@ impl OrchestratorRepo {
             .bind(&row.prepare_claim_token)
             .bind(&row.blocked_reason)
             .bind(row.attempt)
+            .bind(row.state_version)
             .bind(&row.created_at)
             .bind(&row.updated_at)
             .bind(&row.started_at)
@@ -746,7 +747,8 @@ impl OrchestratorRepo {
         let result = with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, updated_at = ? \
+                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, blocked_reason = ?, \
+                     state_version = state_version + 1, updated_at = ? \
                  WHERE status = ? AND run_state = ? AND updated_at < ? \
                    AND project_id IN (SELECT id FROM workbench_projects WHERE kind = 'local')",
             )
@@ -812,20 +814,42 @@ impl OrchestratorRepo {
     ) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(status);
+        // Blocked/Done 进入可通知终态时 bump state_version，供 operational 去重。
+        let bump_version = matches!(
+            status,
+            OrchestratorTaskStatus::Blocked | OrchestratorTaskStatus::Done
+        );
         with_shared_write_lease(&self.gate, async {
-            sqlx::query(
-                "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
-                 WHERE id = ?",
-            )
-            .bind(status.as_str())
-            .bind(split_state.workflow_state.as_str())
-            .bind(split_state.run_state.as_str())
-            .bind(blocked_reason)
-            .bind(now)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await
+            if bump_version {
+                sqlx::query(
+                    "UPDATE orchestrator_tasks \
+                     SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, \
+                         state_version = state_version + 1, updated_at = ? \
+                     WHERE id = ?",
+                )
+                .bind(status.as_str())
+                .bind(split_state.workflow_state.as_str())
+                .bind(split_state.run_state.as_str())
+                .bind(blocked_reason)
+                .bind(now)
+                .bind(task_id)
+                .execute(&self.pool)
+                .await
+            } else {
+                sqlx::query(
+                    "UPDATE orchestrator_tasks \
+                     SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
+                     WHERE id = ?",
+                )
+                .bind(status.as_str())
+                .bind(split_state.workflow_state.as_str())
+                .bind(split_state.run_state.as_str())
+                .bind(blocked_reason)
+                .bind(now)
+                .bind(task_id)
+                .execute(&self.pool)
+                .await
+            }
         }).await?;
         self.get_task(task_id).await
     }
@@ -842,7 +866,8 @@ impl OrchestratorRepo {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ?, finished_at = ? \
+                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, \
+                     state_version = state_version + 1, updated_at = ?, finished_at = ? \
                  WHERE id = ? AND status = ?",
             )
             .bind(OrchestratorTaskStatus::Done.as_str())
@@ -863,7 +888,8 @@ impl OrchestratorRepo {
     ///     自动交付失败后任务应进入 Blocked；但用户终止状态优先，失败兜底不得覆盖 Aborted。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅当当前状态仍为 Delivering 时写入 Blocked 和 blocked_reason；未命中时返回当前任务。
+    ///     仅当当前状态仍为 Delivering 时写入 Blocked 和 blocked_reason，并 bump state_version；
+    ///     未命中时返回当前任务。
     pub async fn block_task_if_delivering(
         &self,
         task_id: &str,
@@ -874,7 +900,8 @@ impl OrchestratorRepo {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
+                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, \
+                     state_version = state_version + 1, updated_at = ? \
                  WHERE id = ? AND status = ?",
             )
             .bind(OrchestratorTaskStatus::Blocked.as_str())
@@ -894,7 +921,8 @@ impl OrchestratorRepo {
     ///     验证阶段失败应进入 Blocked；但用户可能在验证运行期间终止任务，失败处理不能覆盖 Aborted。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅当当前状态仍为 Verifying 时写入 Blocked 和 blocked_reason；未命中时返回当前任务。
+    ///     仅当当前状态仍为 Verifying 时写入 Blocked 和 blocked_reason，并 bump state_version；
+    ///     未命中时返回当前任务。
     pub async fn block_task_if_verifying(
         &self,
         task_id: &str,
@@ -905,7 +933,8 @@ impl OrchestratorRepo {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
+                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, \
+                     state_version = state_version + 1, updated_at = ? \
                  WHERE id = ? AND status = ?",
             )
             .bind(OrchestratorTaskStatus::Blocked.as_str())
@@ -936,21 +965,41 @@ impl OrchestratorRepo {
     ) -> Result<Option<OrchestratorTaskRow>, AppError> {
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(next_status);
+        // 进入 Blocked 时 bump，使 operational 去重键 {kind,id,version} 前进。
+        let bump_version = next_status == OrchestratorTaskStatus::Blocked;
         let result = with_shared_write_lease(&self.gate, async {
-            sqlx::query(
-                "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
-                 WHERE id = ? AND status = ?",
-            )
-            .bind(next_status.as_str())
-            .bind(split_state.workflow_state.as_str())
-            .bind(split_state.run_state.as_str())
-            .bind(blocked_reason)
-            .bind(now)
-            .bind(task_id)
-            .bind(expected_status.as_str())
-            .execute(&self.pool)
-            .await
+            if bump_version {
+                sqlx::query(
+                    "UPDATE orchestrator_tasks \
+                     SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, \
+                         state_version = state_version + 1, updated_at = ? \
+                     WHERE id = ? AND status = ?",
+                )
+                .bind(next_status.as_str())
+                .bind(split_state.workflow_state.as_str())
+                .bind(split_state.run_state.as_str())
+                .bind(blocked_reason)
+                .bind(now)
+                .bind(task_id)
+                .bind(expected_status.as_str())
+                .execute(&self.pool)
+                .await
+            } else {
+                sqlx::query(
+                    "UPDATE orchestrator_tasks \
+                     SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
+                     WHERE id = ? AND status = ?",
+                )
+                .bind(next_status.as_str())
+                .bind(split_state.workflow_state.as_str())
+                .bind(split_state.run_state.as_str())
+                .bind(blocked_reason)
+                .bind(now)
+                .bind(task_id)
+                .bind(expected_status.as_str())
+                .execute(&self.pool)
+                .await
+            }
         }).await?;
 
         if result.rows_affected() == 1 {
@@ -966,7 +1015,7 @@ impl OrchestratorRepo {
     ///
     /// Code Logic（这个函数做什么）:
     ///     执行 `UPDATE ... WHERE id=? AND status=?`，命中时按调用方传入的 split state 与 attempt phase 更新；
-    ///     未命中时确认任务仍存在并返回 None，避免迟到 verifier 覆盖 Abort 或其它并发状态。
+    ///     进入 HumanReview/Blocked 时 bump state_version；未命中返回 None。
     #[allow(clippy::too_many_arguments)]
     pub async fn try_transition_task_split_state(
         &self,
@@ -979,23 +1028,44 @@ impl OrchestratorRepo {
         blocked_reason: Option<&str>,
     ) -> Result<Option<OrchestratorTaskRow>, AppError> {
         let now = Utc::now().to_rfc3339();
+        let bump_version = workflow_state == OrchestratorWorkflowState::HumanReview
+            || next_status == OrchestratorTaskStatus::Blocked;
         let result = with_shared_write_lease(&self.gate, async {
-            sqlx::query(
-                "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
-                     blocked_reason = ?, updated_at = ? \
-                 WHERE id = ? AND status = ?",
-            )
-            .bind(next_status.as_str())
-            .bind(workflow_state.as_str())
-            .bind(run_state.as_str())
-            .bind(attempt_phase.map(|phase| phase.as_str()))
-            .bind(blocked_reason)
-            .bind(now)
-            .bind(task_id)
-            .bind(expected_status.as_str())
-            .execute(&self.pool)
-            .await
+            if bump_version {
+                sqlx::query(
+                    "UPDATE orchestrator_tasks \
+                     SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                         blocked_reason = ?, state_version = state_version + 1, updated_at = ? \
+                     WHERE id = ? AND status = ?",
+                )
+                .bind(next_status.as_str())
+                .bind(workflow_state.as_str())
+                .bind(run_state.as_str())
+                .bind(attempt_phase.map(|phase| phase.as_str()))
+                .bind(blocked_reason)
+                .bind(now)
+                .bind(task_id)
+                .bind(expected_status.as_str())
+                .execute(&self.pool)
+                .await
+            } else {
+                sqlx::query(
+                    "UPDATE orchestrator_tasks \
+                     SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                         blocked_reason = ?, updated_at = ? \
+                     WHERE id = ? AND status = ?",
+                )
+                .bind(next_status.as_str())
+                .bind(workflow_state.as_str())
+                .bind(run_state.as_str())
+                .bind(attempt_phase.map(|phase| phase.as_str()))
+                .bind(blocked_reason)
+                .bind(now)
+                .bind(task_id)
+                .bind(expected_status.as_str())
+                .execute(&self.pool)
+                .await
+            }
         })
         .await?;
 
@@ -1461,5 +1531,63 @@ impl OrchestratorRepo {
         blocked_reason: Option<&str>,
     ) -> Result<OrchestratorTaskRow, AppError> {
         self.set_task_status(task_id, status, blocked_reason).await
+    }
+
+    /// 列出当前可通知的隐私安全 opaque 状态（≤limit，按 updated_at DESC）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     owner control snapshot 需要最多 1000 条当前 HumanReview/Blocked/taskDone/outboxFailed，
+    ///     供 GUI baseline 去重；不得返回 title/goal/project 正文。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     UNION 四类 opaque 行，ORDER BY occurred_at DESC LIMIT limit+1；截断后返回 (items, truncated)。
+    ///     taskDone 仅 workflow_state=done（排除 HumanReview 的 legacy status=done）。
+    pub async fn list_operational_notification_items(
+        &self,
+        limit: i64,
+    ) -> Result<(Vec<OperationalNotificationEvent>, bool), AppError> {
+        let limit = limit.clamp(0, 1000);
+        if limit == 0 {
+            return Ok((Vec::new(), false));
+        }
+        let fetch_limit = limit + 1;
+        let rows = sqlx::query(
+            "SELECT kind, opaque_source_id, state_version, occurred_at FROM ( \
+               SELECT 'humanReview' AS kind, id AS opaque_source_id, state_version, updated_at AS occurred_at \
+                 FROM orchestrator_tasks WHERE workflow_state = ? \
+               UNION ALL \
+               SELECT 'blocked', id, state_version, updated_at \
+                 FROM orchestrator_tasks WHERE status = ? \
+               UNION ALL \
+               SELECT 'taskDone', id, state_version, updated_at \
+                 FROM orchestrator_tasks WHERE status = ? AND workflow_state = ? \
+               UNION ALL \
+               SELECT 'remoteOutboxFailed', id, state_version, updated_at \
+                 FROM orchestrator_remote_outbox WHERE status = ? \
+             ) \
+             ORDER BY occurred_at DESC, opaque_source_id ASC \
+             LIMIT ?",
+        )
+        .bind(OrchestratorWorkflowState::HumanReview.as_str())
+        .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(OrchestratorTaskStatus::Done.as_str())
+        .bind(OrchestratorWorkflowState::Done.as_str())
+        .bind(RemoteOutboxStatus::Failed.as_str())
+        .bind(fetch_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let truncated = rows.len() as i64 > limit;
+        let mut items = Vec::with_capacity(rows.len().min(limit as usize));
+        for row in rows.into_iter().take(limit as usize) {
+            let kind_text: String = row.try_get("kind")?;
+            items.push(OperationalNotificationEvent {
+                kind: OperationalNotificationKind::from_str(&kind_text)?,
+                opaque_source_id: row.try_get("opaque_source_id")?,
+                state_version: row.try_get("state_version")?,
+                occurred_at: row.try_get("occurred_at")?,
+            });
+        }
+        Ok((items, truncated))
     }
 }

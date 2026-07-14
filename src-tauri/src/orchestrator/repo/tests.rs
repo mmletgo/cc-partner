@@ -3181,3 +3181,184 @@ async fn discard_failed_remote_outbox() {
         assert_eq!(persisted.last_error.as_deref(), Some("prior error"));
     }
 }
+
+/// 进入 HumanReview 时 state_version 必须 +1，供 operational 去重。
+///
+/// Business Logic（为什么需要这个测试）:
+///     同一任务再次进入 HR 时必须换 version，否则 GUI 会丢未来通知。
+///
+/// Code Logic（这个测试做什么）:
+///     Verifying→HR split 转移两次，断言 state_version 从 0→1→2。
+#[tokio::test]
+async fn operational_notification_event_bumps_state_version_on_human_review() {
+    let (_pool, repo) = setup_repo().await;
+    let mut row = task_row("task-hr", "proj", OrchestratorTaskStatus::Verifying);
+    row.state_version = 0;
+    repo.create_task(&row).await.unwrap();
+
+    let first = repo
+        .try_transition_task_split_state(
+            "task-hr",
+            OrchestratorTaskStatus::Verifying,
+            OrchestratorTaskStatus::Done,
+            OrchestratorWorkflowState::HumanReview,
+            OrchestratorRunState::Idle,
+            Some(OrchestratorAttemptPhase::Succeeded),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("transition");
+    assert_eq!(first.state_version, 1);
+    assert_eq!(first.workflow_state, OrchestratorWorkflowState::HumanReview);
+
+    // 再回到 Verifying 后再次进 HR
+    repo.set_task_status("task-hr", OrchestratorTaskStatus::Verifying, None)
+        .await
+        .unwrap();
+    let second = repo
+        .try_transition_task_split_state(
+            "task-hr",
+            OrchestratorTaskStatus::Verifying,
+            OrchestratorTaskStatus::Done,
+            OrchestratorWorkflowState::HumanReview,
+            OrchestratorRunState::Idle,
+            Some(OrchestratorAttemptPhase::Succeeded),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("second transition");
+    assert_eq!(second.state_version, 2);
+}
+
+/// Blocked 与 finish_task_done 必须 bump state_version。
+///
+/// Business Logic（为什么需要这个测试）:
+///     Blocked/Done 是运营通知 kind，version 不前进会导致去重键卡住。
+///
+/// Code Logic（这个测试做什么）:
+///     Delivering→Blocked 再 Delivering→Done，断言 version 递增。
+#[tokio::test]
+async fn operational_notification_event_bumps_state_version_on_blocked_and_done() {
+    let (_pool, repo) = setup_repo().await;
+    let row = task_row("task-bd", "proj", OrchestratorTaskStatus::Delivering);
+    repo.create_task(&row).await.unwrap();
+
+    let blocked = repo
+        .block_task_if_delivering("task-bd", "delivery failed")
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, OrchestratorTaskStatus::Blocked);
+    assert_eq!(blocked.state_version, 1);
+
+    repo.set_task_status("task-bd", OrchestratorTaskStatus::Delivering, None)
+        .await
+        .unwrap();
+    let done = repo.finish_task_done("task-bd").await.unwrap();
+    assert_eq!(done.status, OrchestratorTaskStatus::Done);
+    assert!(done.state_version >= 2);
+}
+
+/// snapshot 列表只含 opaque 字段且 HR 不与 taskDone 双计。
+///
+/// Business Logic（为什么需要这个测试）:
+///     baseline 不得泄露 title，且 HumanReview(status=done) 不得再计 taskDone。
+///
+/// Code Logic（这个测试做什么）:
+///     插入 HR/Blocked/Done/outboxFailed，list items 断言 kind 集合与 opaque id，无 title。
+#[tokio::test]
+async fn operational_notification_snapshot_lists_privacy_safe_current_items() {
+    use crate::orchestrator::models::OperationalNotificationKind;
+    let (_pool, repo) = setup_repo().await;
+
+    let mut hr = task_row("t-hr", "p", OrchestratorTaskStatus::Done);
+    hr.workflow_state = OrchestratorWorkflowState::HumanReview;
+    hr.title = "SECRET_TITLE".into();
+    hr.state_version = 3;
+    hr.updated_at = "2026-07-15T03:00:00Z".into();
+    repo.create_task(&hr).await.unwrap();
+
+    let mut blocked = task_row("t-bl", "p", OrchestratorTaskStatus::Blocked);
+    blocked.state_version = 1;
+    blocked.updated_at = "2026-07-15T02:00:00Z".into();
+    repo.create_task(&blocked).await.unwrap();
+
+    let mut done = task_row("t-done", "p", OrchestratorTaskStatus::Done);
+    done.workflow_state = OrchestratorWorkflowState::Done;
+    done.state_version = 5;
+    done.updated_at = "2026-07-15T01:00:00Z".into();
+    repo.create_task(&done).await.unwrap();
+
+    let pending_item = repo
+        .insert_remote_outbox_pending(
+            "dev",
+            "Dev",
+            "/remote/path",
+            None,
+            r#"{"title":"SECRET_OUTBOX"}"#,
+        )
+        .await
+        .unwrap();
+    let outbox_id = pending_item.id.clone();
+    repo.claim_remote_outbox_item_as_sending(&outbox_id)
+        .await
+        .unwrap();
+    let failed = repo
+        .mark_remote_outbox_failed(&outbox_id, "protocol")
+        .await
+        .unwrap();
+    assert_eq!(failed.state_version, 1);
+
+    let (items, truncated) = repo
+        .list_operational_notification_items(1000)
+        .await
+        .unwrap();
+    assert!(!truncated);
+    let kinds: Vec<_> = items.iter().map(|i| i.kind).collect();
+    assert!(kinds.contains(&OperationalNotificationKind::HumanReview));
+    assert!(kinds.contains(&OperationalNotificationKind::Blocked));
+    assert!(kinds.contains(&OperationalNotificationKind::TaskDone));
+    assert!(kinds.contains(&OperationalNotificationKind::RemoteOutboxFailed));
+    // HR 不得双计为 taskDone
+    let task_done_ids: Vec<_> = items
+        .iter()
+        .filter(|i| i.kind == OperationalNotificationKind::TaskDone)
+        .map(|i| i.opaque_source_id.as_str())
+        .collect();
+    assert_eq!(task_done_ids, vec!["t-done"]);
+    let hr_item = items
+        .iter()
+        .find(|i| i.kind == OperationalNotificationKind::HumanReview)
+        .unwrap();
+    assert_eq!(hr_item.opaque_source_id, "t-hr");
+    assert_eq!(hr_item.state_version, 3);
+    let text = serde_json::to_string(&items).unwrap();
+    assert!(!text.contains("SECRET_TITLE"));
+    assert!(!text.contains("SECRET_OUTBOX"));
+}
+
+/// snapshot limit 截断：>1000 时 truncated=true 且条数=1000。
+///
+/// Business Logic（为什么需要这个测试）:
+///     owner snapshot 合同硬上限 1000，防止 GUI baseline 无界膨胀。
+///
+/// Code Logic（这个测试做什么）:
+///     插入 1001 条 Blocked，list(1000) 断言 len=1000 且 truncated。
+#[tokio::test]
+async fn operational_notification_snapshot_truncates_at_max_1000() {
+    let (_pool, repo) = setup_repo().await;
+    for i in 0..1001 {
+        let mut row = task_row(&format!("t{i:04}"), "p", OrchestratorTaskStatus::Blocked);
+        row.updated_at = format!("2026-07-15T00:00:{:02}.000Z", i % 60);
+        row.state_version = 1;
+        repo.create_task(&row).await.unwrap();
+    }
+    let (items, truncated) = repo
+        .list_operational_notification_items(1000)
+        .await
+        .unwrap();
+    assert!(truncated);
+    assert_eq!(items.len(), 1000);
+}
+

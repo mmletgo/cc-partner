@@ -783,6 +783,14 @@ pub struct OrchestratorRuntimePatch {
     pub auto_merge_to_main: Option<bool>,
     #[serde(default)]
     pub auto_push_main: Option<bool>,
+    #[serde(default)]
+    pub notify_human_review: Option<bool>,
+    #[serde(default)]
+    pub notify_blocked: Option<bool>,
+    #[serde(default)]
+    pub notify_remote_outbox_failed: Option<bool>,
+    #[serde(default)]
+    pub notify_task_done: Option<bool>,
 }
 
 impl OrchestratorRuntimePatch {
@@ -814,6 +822,18 @@ impl OrchestratorRuntimePatch {
         }
         if let Some(v) = self.auto_push_main {
             orch.auto_push_main = v;
+        }
+        if let Some(v) = self.notify_human_review {
+            orch.notify_human_review = v;
+        }
+        if let Some(v) = self.notify_blocked {
+            orch.notify_blocked = v;
+        }
+        if let Some(v) = self.notify_remote_outbox_failed {
+            orch.notify_remote_outbox_failed = v;
+        }
+        if let Some(v) = self.notify_task_done {
+            orch.notify_task_done = v;
         }
         Ok(())
     }

@@ -554,6 +554,7 @@ mod tests {
             status,
             remote_task_id: None,
             last_error: last_error.map(str::to_string),
+            state_version: 0,
             created_at: "2026-07-11T08:00:00Z".to_string(),
             updated_at: updated_at.to_string(),
             sent_at: None,

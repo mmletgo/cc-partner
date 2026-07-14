@@ -117,6 +117,10 @@ pub async fn update_orchestrator_config(
                 auto_push_task_branch: patch.auto_push_task_branch,
                 auto_merge_to_main: patch.auto_merge_to_main,
                 auto_push_main: patch.auto_push_main,
+                notify_human_review: patch.notify_human_review,
+                notify_blocked: patch.notify_blocked,
+                notify_remote_outbox_failed: patch.notify_remote_outbox_failed,
+                notify_task_done: patch.notify_task_done,
             }),
             ..Default::default()
         })
@@ -210,6 +214,10 @@ mod tests {
             auto_push_task_branch: true,
             auto_merge_to_main: true,
             auto_push_main: true,
+            notify_human_review: true,
+            notify_blocked: true,
+            notify_remote_outbox_failed: true,
+            notify_task_done: false,
         });
         let patch = OrchestratorAutomationConfigPatch {
             enabled: Some(true),
@@ -219,6 +227,10 @@ mod tests {
             auto_push_task_branch: None,
             auto_merge_to_main: Some(false),
             auto_push_main: None,
+            notify_human_review: None,
+            notify_blocked: None,
+            notify_remote_outbox_failed: None,
+            notify_task_done: None,
         };
 
         let dto =
@@ -254,6 +266,10 @@ mod tests {
             auto_push_task_branch: true,
             auto_merge_to_main: false,
             auto_push_main: true,
+            notify_human_review: true,
+            notify_blocked: true,
+            notify_remote_outbox_failed: true,
+            notify_task_done: false,
         };
         let mut cfg = test_app_config(original.clone());
         let patch = OrchestratorAutomationConfigPatch {

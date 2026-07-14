@@ -34,6 +34,10 @@ pub struct OrchestratorAutomationConfigDto {
     pub auto_push_task_branch: bool,
     pub auto_merge_to_main: bool,
     pub auto_push_main: bool,
+    pub notify_human_review: bool,
+    pub notify_blocked: bool,
+    pub notify_remote_outbox_failed: bool,
+    pub notify_task_done: bool,
 }
 
 /// Orchestrator 自动化配置更新 patch。
@@ -53,6 +57,10 @@ pub struct OrchestratorAutomationConfigPatch {
     pub auto_push_task_branch: Option<bool>,
     pub auto_merge_to_main: Option<bool>,
     pub auto_push_main: Option<bool>,
+    pub notify_human_review: Option<bool>,
+    pub notify_blocked: Option<bool>,
+    pub notify_remote_outbox_failed: Option<bool>,
+    pub notify_task_done: Option<bool>,
 }
 
 impl From<OrchestratorAutomationConfig> for OrchestratorAutomationConfigDto {
@@ -72,6 +80,10 @@ impl From<OrchestratorAutomationConfig> for OrchestratorAutomationConfigDto {
             auto_push_task_branch: config.auto_push_task_branch,
             auto_merge_to_main: config.auto_merge_to_main,
             auto_push_main: config.auto_push_main,
+            notify_human_review: config.notify_human_review,
+            notify_blocked: config.notify_blocked,
+            notify_remote_outbox_failed: config.notify_remote_outbox_failed,
+            notify_task_done: config.notify_task_done,
         }
     }
 }
@@ -172,6 +184,18 @@ pub fn apply_orchestrator_config_patch(
     if let Some(auto_push_main) = patch.auto_push_main {
         next.auto_push_main = auto_push_main;
     }
+    if let Some(v) = patch.notify_human_review {
+        next.notify_human_review = v;
+    }
+    if let Some(v) = patch.notify_blocked {
+        next.notify_blocked = v;
+    }
+    if let Some(v) = patch.notify_remote_outbox_failed {
+        next.notify_remote_outbox_failed = v;
+    }
+    if let Some(v) = patch.notify_task_done {
+        next.notify_task_done = v;
+    }
 
     Ok(next)
 }
@@ -198,6 +222,10 @@ mod tests {
             auto_push_task_branch: true,
             auto_merge_to_main: false,
             auto_push_main: true,
+            notify_human_review: true,
+            notify_blocked: true,
+            notify_remote_outbox_failed: true,
+            notify_task_done: false,
         }
     }
 
@@ -234,6 +262,10 @@ mod tests {
             auto_push_task_branch: None,
             auto_merge_to_main: Some(true),
             auto_push_main: None,
+            notify_human_review: None,
+            notify_blocked: None,
+            notify_remote_outbox_failed: None,
+            notify_task_done: None,
         };
 
         let updated = apply_orchestrator_config_patch(&current, patch).expect("patch should pass");
@@ -374,6 +406,10 @@ mod tests {
             auto_push_task_branch: false,
             auto_merge_to_main: true,
             auto_push_main: false,
+            notify_human_review: true,
+            notify_blocked: false,
+            notify_remote_outbox_failed: true,
+            notify_task_done: true,
         });
 
         let value = serde_json::to_value(dto).expect("dto should serialize");
@@ -384,5 +420,9 @@ mod tests {
         assert_eq!(value["autoPushTaskBranch"], false);
         assert_eq!(value["autoMergeToMain"], true);
         assert_eq!(value["autoPushMain"], false);
+        assert_eq!(value["notifyHumanReview"], true);
+        assert_eq!(value["notifyBlocked"], false);
+        assert_eq!(value["notifyRemoteOutboxFailed"], true);
+        assert_eq!(value["notifyTaskDone"], true);
     }
 }
