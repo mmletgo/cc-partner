@@ -1422,9 +1422,11 @@ export function useSettingsController(): UseSettingsControllerResult {
     }
   }, [t]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
   useEffect(() => {
     void handleRefreshRecoveryJobs();
   }, [handleRefreshRecoveryJobs]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
    * 导出可验证备份包。

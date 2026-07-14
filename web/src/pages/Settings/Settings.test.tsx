@@ -226,12 +226,17 @@ vi.mock('@/api/sync', async () => {
       trigger: () => triggerLanSync(),
     },
     backupApi: {
-      create: (...args: unknown[]) => createBackup(...args),
-      inspect: (...args: unknown[]) => inspectBackup(...args),
-      restore: (...args: unknown[]) => restoreBackup(...args),
-      listJobs: (...args: unknown[]) => listJobs(...args),
+      create: ((...args: Parameters<typeof createBackup>) =>
+        createBackup(...args)) as typeof createBackup,
+      inspect: ((...args: Parameters<typeof inspectBackup>) =>
+        inspectBackup(...args)) as typeof inspectBackup,
+      restore: ((...args: Parameters<typeof restoreBackup>) =>
+        restoreBackup(...args)) as typeof restoreBackup,
+      listJobs: ((...args: Parameters<typeof listJobs>) =>
+        listJobs(...args)) as typeof listJobs,
       listBackups: vi.fn(async () => []),
-      rollback: (...args: unknown[]) => rollbackJob(...args),
+      rollback: ((...args: Parameters<typeof rollbackJob>) =>
+        rollbackJob(...args)) as typeof rollbackJob,
     },
     pickBackupExportPath: () => pickExport(),
     pickBackupArchivePath: () => pickArchive(),

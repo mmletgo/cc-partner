@@ -8,10 +8,8 @@
  *   re-export 组件、类型与 resolveVersionCopyText。
  */
 
-export {
-  VersionHistoryDrawer,
-  resolveVersionCopyText,
-} from './VersionHistoryDrawer';
+export { VersionHistoryDrawer } from './VersionHistoryDrawer';
+export { resolveVersionCopyText } from './versionHistoryUtils';
 export type {
   VersionHistoryDrawerProps,
   VersionHistoryNamespace,

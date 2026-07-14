@@ -51,23 +51,6 @@ function formatVersionTime(value: string): string {
 }
 
 /**
- * Business Logic（为什么需要这个函数）:
- *   列表与复制操作需要可读正文预览。
- *
- * Code Logic（这个函数做什么）:
- *   优先 content，其次 contentPreview；空则空串。
- */
-export function resolveVersionCopyText(version: ContentVersion): string {
-  if (typeof version.content === 'string' && version.content.length > 0) {
-    return version.content;
-  }
-  if (typeof version.contentPreview === 'string') {
-    return version.contentPreview;
-  }
-  return '';
-}
-
-/**
  * 渲染版本历史抽屉
  *
  * Business Logic（为什么需要这个组件）:
