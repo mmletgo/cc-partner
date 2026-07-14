@@ -395,11 +395,7 @@ pub(crate) async fn get_workflow_document_for_state(
 ) -> Result<WorkflowDocument, AppError> {
     let project = get_orchestrator_workbench_project(state, project_id).await?;
     if project.kind == "remote" {
-        return get_remote_workflow_document(state, &project, WorkflowDocumentRemoteOp::Get {
-            content: None,
-            expected_hash: None,
-        })
-        .await;
+        return get_remote_workflow_document(state, &project, WorkflowDocumentRemoteOp::Get).await;
     }
     get_local_owner_workflow_document(&project)
 }
@@ -421,7 +417,6 @@ pub(crate) async fn validate_workflow_document_for_state(
             &project,
             WorkflowDocumentRemoteOp::Validate {
                 content: Some(content.to_string()),
-                expected_hash: None,
             },
         )
         .await;
@@ -524,13 +519,9 @@ fn require_local_project_path(project: &WorkbenchProjectRow) -> Result<std::path
 
 /// remote workflow document 操作类型。
 enum WorkflowDocumentRemoteOp {
-    Get {
-        content: Option<String>,
-        expected_hash: Option<String>,
-    },
+    Get,
     Validate {
         content: Option<String>,
-        expected_hash: Option<String>,
     },
     Save {
         content: Option<String>,
@@ -551,12 +542,12 @@ async fn get_remote_workflow_document(
     let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
     let client = RemoteOrchestratorClient::new();
     let result = match op {
-        WorkflowDocumentRemoteOp::Get { .. } => {
+        WorkflowDocumentRemoteOp::Get => {
             client
                 .get_workflow_document(&context.base_url, &context.remote_project_id)
                 .await
         }
-        WorkflowDocumentRemoteOp::Validate { content, .. } => {
+        WorkflowDocumentRemoteOp::Validate { content } => {
             let content = content.unwrap_or_default();
             client
                 .validate_workflow_document(
