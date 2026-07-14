@@ -661,6 +661,11 @@ describe('useWorkbenchTerminalController — create / rename / close session', (
       await result.current.loadSessions(project.id);
       await flushMicrotasks();
     });
+    // Drain deferred activeSession.name → draft sync (setTimeout 0) before the user edit.
+    // Otherwise that pending timer overwrites the draft with the server name.
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
 
     await act(async () => {
       result.current.setSessionNameDraft('new-name');
