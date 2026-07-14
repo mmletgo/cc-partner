@@ -1,12 +1,12 @@
-//! S5 Backend Scale 集成测试：claim 三阶段、慢 workflow 不占库、CAS 竞态与扫描公平性。
+//! S5 Backend Scale 集成测试：S5 后端规模化集成测试：claim 三阶段、慢 workflow、CAS 竞态、扫描公平性与 CC History mixed-version。
 //!
 //! Business Logic（为什么需要这个测试文件）:
-//!     生产单连接池下，事务内 WORKFLOW.md IO 会饿死其它查询；必须用集成测试锁死
-//!     “preflight 期间 DB 可读、并发 CAS 不重复 claim、无效窗后 cursor 前进/回绕”。
+//!     生产单连接池下，事务内 WORKFLOW.md IO 会饿死其它查询；CC History 分页协议
+//!     必须在 new↔new / new↔legacy / 畸形响应下行为正确。本文件锁死这些边界。
 //!
 //! Code Logic（这个文件做什么）:
-//!     使用内存 SQLite + 临时项目目录构造 fixture，覆盖 orchestrator_claim_* 场景。
-
+//!     1) orchestrator_claim_*：内存/文件 SQLite fixture 覆盖 preflight/CAS/cursor
+//!     2) cc_history_mixed_version_*：委托 app_lib::mixed_version_harness
 use app_lib::orchestrator::claim::{
     preflight_claim_candidates, preflight_claim_candidates_with_resolver, ClaimCandidate,
     ClaimScanCursor, CLAIM_CANDIDATE_LIMIT,
@@ -434,4 +434,29 @@ async fn orchestrator_claim_compat_entry_claims_default_workflow() {
     assert_eq!(claimed[0].id, "task-1");
     assert_eq!(claimed[0].status, OrchestratorTaskStatus::Preparing);
     assert!(claimed[0].prepare_claim_token.is_some());
+}
+
+// --- CC History mixed-version (Task 6) ---
+/// new↔new 仅 paged。
+#[test]
+fn cc_history_mixed_version_new_to_new_uses_only_paged_routes() {
+    app_lib::mixed_version_harness::assert_new_to_new_uses_only_paged_routes();
+}
+
+/// new↔legacy 仅 legacy。
+#[test]
+fn cc_history_mixed_version_new_to_legacy_uses_only_legacy_routes() {
+    app_lib::mixed_version_harness::assert_new_to_legacy_uses_only_legacy_routes();
+}
+
+/// 畸形 paged 失败本轮。
+#[test]
+fn cc_history_mixed_version_malformed_paged_fails_round_not_empty_success() {
+    app_lib::mixed_version_harness::assert_malformed_paged_fails_round_not_empty_success();
+}
+
+/// legacy body 对新服务端仍可用。
+#[test]
+fn cc_history_mixed_version_legacy_bodies_work_against_new_server() {
+    app_lib::mixed_version_harness::assert_legacy_bodies_work_against_new_server();
 }
