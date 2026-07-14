@@ -314,21 +314,46 @@ export function createWorkbenchTerminalBufferStore(
    *   同帧多次 append 只需一次 React 重渲染；生产用 rAF，测试注入 scheduler。
    *
    * Code Logic（这个函数做什么）:
-   *   若尚无 pending frame，则 schedule；回调校验 generation 后 bump revision 并 notify 一次。
+   *   若尚无 pending frame 则 schedule。先登记 wrappedCancel，再调用 schedule，避免同步
+   *   scheduler（callback 在返回前已执行）把已清空的 cancel 句柄再次写回并卡住后续通知。
+   *   回调入口清掉本轮 pending token；generation 校验后 bump revision 并 notify 一次。
    */
   const scheduleNotify = (sessionId: string, session: SessionRingBuffer): void => {
     if (session.scheduledCancel) return;
 
     const scheduledGeneration = session.generation;
-    session.scheduledCancel = frameScheduler.schedule(() => {
-      const current = sessions.get(sessionId);
-      if (!current || current.generation !== scheduledGeneration) {
-        return;
+    let active = true;
+    let cancelFromScheduler: () => void = () => {};
+
+    const wrappedCancel = (): void => {
+      if (!active) return;
+      active = false;
+      cancelFromScheduler();
+      if (session.scheduledCancel === wrappedCancel) {
+        session.scheduledCancel = null;
       }
-      current.scheduledCancel = null;
+    };
+
+    // 先绑定 pending token，同步 callback 才能正确识别并清空
+    session.scheduledCancel = wrappedCancel;
+
+    cancelFromScheduler = frameScheduler.schedule(() => {
+      const current = sessions.get(sessionId);
+      // 回调入口先清 pending，防止同步/异步路径留下 stale cancel
+      if (current && current.scheduledCancel === wrappedCancel) {
+        current.scheduledCancel = null;
+      }
+      if (!active) return;
+      active = false;
+      if (!current || current.generation !== scheduledGeneration) return;
       current.revision += 1;
       notify(sessionId);
     });
+
+    // 同步 scheduler 时 callback 已跑完并清空；若仍挂着本轮 token 则强制清除
+    if (!active && session.scheduledCancel === wrappedCancel) {
+      session.scheduledCancel = null;
+    }
   };
 
   /**
@@ -369,13 +394,13 @@ export function createWorkbenchTerminalBufferStore(
       };
     },
     append(sessionId, chunk) {
+      // 空 chunk 不改内容，也不调度 notify，避免无意义 revision+1 / re-render
+      if (chunk.length === 0) return;
       const session = ensureSession(sessionId);
-      if (chunk.length > 0) {
-        session.chunks.push(chunk);
-        session.length += chunk.length;
-        session.materialized = null;
-        trimSessionBuffer(session, maxChars);
-      }
+      session.chunks.push(chunk);
+      session.length += chunk.length;
+      session.materialized = null;
+      trimSessionBuffer(session, maxChars);
       scheduleNotify(sessionId, session);
     },
     reset(sessionId) {

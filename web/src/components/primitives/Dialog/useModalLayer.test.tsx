@@ -211,6 +211,113 @@ describe('useModalLayer', () => {
     expectFocused(last);
   });
 
+  test('Tab trap wraps when focus is on surface (tabIndex=-1)', async () => {
+    const user = userEvent.setup();
+    render(<ControllableHarness />);
+    await user.click(screen.getByTestId('trigger'));
+    const first = screen.getByTestId('layer-first');
+    const last = screen.getByTestId('layer-last');
+    const surface = screen.getByTestId('layer-surface');
+    await waitFor(() => expectFocused(first));
+
+    surface.focus();
+    expectFocused(surface);
+
+    await user.tab({ shift: true });
+    expectFocused(last);
+
+    surface.focus();
+    expectFocused(surface);
+    await user.tab();
+    expectFocused(first);
+  });
+
+  test('contenteditable inside surface participates in Tab trap', async () => {
+    const user = userEvent.setup();
+
+    function ContentEditableHarness(): ReactElement {
+      const [open, setOpen] = useState(true);
+      const surfaceRef = useRef<HTMLDivElement | null>(null);
+      useModalLayer({
+        open,
+        surfaceRef,
+        closeOnEscape: true,
+        onClose: () => setOpen(false),
+      });
+      return createPortal(
+        <div data-testid="layer-root">
+          <div
+            ref={surfaceRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="layer"
+            tabIndex={-1}
+            data-testid="layer-surface"
+          >
+            <button type="button" data-testid="layer-first">
+              first
+            </button>
+            <div contentEditable data-testid="layer-editable" suppressContentEditableWarning>
+              edit
+            </div>
+            <button type="button" data-testid="layer-last">
+              last
+            </button>
+          </div>
+        </div>,
+        document.body,
+      );
+    }
+
+    render(
+      <>
+        <div data-testid="page">page</div>
+        <ContentEditableHarness />
+      </>,
+    );
+
+    const first = screen.getByTestId('layer-first');
+    const editable = screen.getByTestId('layer-editable');
+    const last = screen.getByTestId('layer-last');
+    await waitFor(() => expectFocused(first));
+
+    await user.tab();
+    expectFocused(editable);
+    await user.tab();
+    expectFocused(last);
+    await user.tab();
+    expectFocused(first);
+  });
+
+  test('late body siblings become inert while modal is open', async () => {
+    const user = userEvent.setup();
+    render(<ControllableHarness />);
+    await user.click(screen.getByTestId('trigger'));
+    const root = screen.getByTestId('layer-root');
+    await waitFor(() => {
+      expectBodySiblingsHidden(root);
+    });
+
+    const late = document.createElement('div');
+    late.setAttribute('data-testid', 'late-toast');
+    late.textContent = 'toast';
+    document.body.appendChild(late);
+
+    await waitFor(() => {
+      expect(late.getAttribute('aria-hidden')).toBe('true');
+    });
+    const lateHtml = late as HTMLElement & { inert?: boolean };
+    expect(lateHtml.inert === true || late.hasAttribute('inert')).toBe(true);
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => {
+      expect(screen.queryByTestId('layer-surface')).toBeNull();
+    });
+    expect(late.getAttribute('aria-hidden')).not.toBe('true');
+
+    late.remove();
+  });
+
   test('Escape calls onClose when closeOnEscape is true', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

@@ -316,4 +316,71 @@ describe('workbenchTerminalBuffer', () => {
     assert(store.getBuffer('seeded') === 'hello-seed', 'initialBuffers should seed session content');
     assert(store.getRevision('seeded') === 0, 'seeded session starts at revision 0');
   });
+
+  test('empty append does not schedule notify or bump revision', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+
+    let notifications = 0;
+    store.subscribe('session-empty', () => {
+      notifications += 1;
+    });
+
+    store.append('session-empty', '');
+    assert(frames.pendingCount() === 0, 'empty append must not schedule a frame');
+    assert(store.getRevision('session-empty') === 0, 'empty append must not create/bump revision');
+    assert(store.getBuffer('session-empty') === '', 'empty append must not seed buffer content');
+    assert(notifications === 0, 'empty append must not notify subscribers');
+
+    frames.flush();
+    assert(frames.pendingCount() === 0, 'flush after empty append stays idle');
+    assert(store.getRevision('session-empty') === 0, 'flush must not bump revision after empty append');
+    assert(notifications === 0, 'flush must not notify after empty append');
+
+    // Non-empty append still works after empty no-ops
+    store.append('session-empty', 'data');
+    assert(frames.pendingCount() === 1, 'non-empty append should schedule after empty no-op');
+    frames.flush();
+    assert(store.getBuffer('session-empty') === 'data', 'non-empty append should store content');
+    assert(store.getRevision('session-empty') === 1, 'non-empty append should bump revision once');
+    assert(notifications === 1, 'non-empty append should notify once');
+  });
+
+  test('synchronous frame scheduler still allows subsequent appends to notify', () => {
+    /**
+     * Business Logic（为什么需要这个 scheduler）:
+     *   同步 schedule（callback 在返回 cancel 前已执行）会复现 scheduledCancel 粘住的回归：
+     *   若赋值发生在 sync callback 清空之后，后续 append 永远跳过 schedule。
+     *
+     * Code Logic（这个 scheduler 做什么）:
+     *   schedule 立即执行 callback 再返回 no-op cancel。
+     */
+    const syncScheduler: TerminalFrameScheduler = {
+      schedule(callback: () => void): () => void {
+        callback();
+        return () => {};
+      },
+    };
+
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: syncScheduler,
+    });
+
+    let notifications = 0;
+    store.subscribe('session-sync', () => {
+      notifications += 1;
+    });
+
+    store.append('session-sync', 'first');
+    assert(store.getBuffer('session-sync') === 'first', 'sync scheduler should apply first append content');
+    assert(store.getRevision('session-sync') === 1, 'first sync append should bump revision immediately');
+    assert(notifications === 1, 'first sync append should notify immediately');
+
+    store.append('session-sync', 'second');
+    assert(store.getBuffer('session-sync') === 'firstsecond', 'second append must concatenate after sync flush');
+    assert(store.getRevision('session-sync') === 2, 'second sync append must bump revision again');
+    assert(notifications === 2, 'second sync append must notify again (scheduledCancel must not stick)');
+  });
 });

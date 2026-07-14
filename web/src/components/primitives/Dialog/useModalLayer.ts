@@ -7,8 +7,10 @@
  *
  * Code Logic（这个 hook 做什么）:
  *   维护模块级 openLayers 栈；open 时锁定 body 滚动、按顶层同步背景 inert/aria-hidden、
- *   聚焦 initialFocusRef 或首个可聚焦元素（否则 surface tabIndex=-1）；仅顶层处理 Escape/Tab；
- *   close/unmount 时恢复属性、滚动与触发元素焦点。
+ *   启动 body childList MutationObserver 使晚到 sibling 立即 inert；
+ *   聚焦 initialFocusRef 或首个可聚焦元素（否则 surface tabIndex=-1）；仅顶层处理 Escape/Tab
+ *   （current 不在 focusables 列表或在边缘时 wrap）；close/unmount 时恢复属性、滚动与触发元素焦点，
+ *   最后一层关闭时断开 observer。
  */
 
 import { useEffect, useRef, type RefObject } from 'react';
@@ -37,6 +39,12 @@ const previousInert = new WeakMap<Element, boolean>();
 let scrollLockCount = 0;
 let previousBodyOverflow = '';
 
+/**
+ * 模态打开期间观察 body 晚到 sibling（toast portal 等）的单一 MutationObserver。
+ * 首层打开时启动，最后一层关闭时断开，避免重复 observer。
+ */
+let bodySiblingObserver: MutationObserver | null = null;
+
 const FOCUSABLE_SELECTOR = [
   'a[href]',
   'button:not([disabled])',
@@ -44,6 +52,10 @@ const FOCUSABLE_SELECTOR = [
   'select:not([disabled])',
   'textarea:not([disabled])',
   '[tabindex]:not([tabindex="-1"])',
+  '[contenteditable]:not([contenteditable="false"])',
+  'summary',
+  'audio[controls]',
+  'video[controls]',
 ].join(',');
 
 /**
@@ -189,6 +201,47 @@ function syncBackgroundInert(): void {
 }
 
 /**
+ * 启动 body 子节点 MutationObserver（模态打开期间晚到 sibling 立即 inert）
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   模态打开后 toast/portal 可能后挂到 document.body；若不观察，这些节点会逃出 inert，
+ *   键盘与辅助技术可从模态跳到背景。
+ *
+ * Code Logic（这个函数做什么）:
+ *   模块级单一 observer：childList only 监听 document.body；变更时调用 syncBackgroundInert；
+ *   若已启动则 no-op。
+ */
+function startBodySiblingObserver(): void {
+  if (bodySiblingObserver || typeof MutationObserver === 'undefined') {
+    return;
+  }
+  bodySiblingObserver = new MutationObserver(() => {
+    if (openLayers.length === 0) {
+      return;
+    }
+    syncBackgroundInert();
+  });
+  bodySiblingObserver.observe(document.body, { childList: true });
+}
+
+/**
+ * 停止 body 子节点 MutationObserver
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   全部模态关闭后无需继续监视 body，避免无意义回调与测试泄漏。
+ *
+ * Code Logic（这个函数做什么）:
+ *   disconnect 并清空模块级 observer 引用。
+ */
+function stopBodySiblingObserver(): void {
+  if (!bodySiblingObserver) {
+    return;
+  }
+  bodySiblingObserver.disconnect();
+  bodySiblingObserver = null;
+}
+
+/**
  * 引用计数锁定 body 滚动
  *
  * Business Logic（为什么需要这个函数）:
@@ -312,6 +365,8 @@ export function useModalLayer(options: ModalLayerOptions): void {
     registeredRef.current = true;
     lockBodyScroll();
     syncBackgroundInert();
+    // 首层打开时启动 body sibling observer；后续层复用同一实例
+    startBodySiblingObserver();
 
     // 等 portal/children 提交后再聚焦
     const focusFrame = window.requestAnimationFrame(() => {
@@ -320,6 +375,14 @@ export function useModalLayer(options: ModalLayerOptions): void {
 
     /**
      * 顶层键盘处理：Escape 关闭；Tab 在 surface 内循环
+     *
+     * Business Logic（为什么需要这个函数）:
+     *   顶层模态必须独占 Escape/Tab，且焦点不能从 surface 自身或未列入 focusables 的节点逃出。
+     *
+     * Code Logic（这个函数做什么）:
+     *   Escape 按 closeOnEscape 关闭；Tab 时若无 focusables 则钉在 surface；
+     *   若 current 在 surface 外、等于 surface，或不在 focusables 列表，则按方向 wrap 到 first/last；
+     *   在列表内部且非边缘时放行浏览器默认 Tab。
      */
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (!isTopLayer(surface)) {
@@ -350,16 +413,19 @@ export function useModalLayer(options: ModalLayerOptions): void {
       const first = focusables[0];
       const last = focusables[focusables.length - 1];
       const current = document.activeElement as HTMLElement | null;
+      const index = current ? focusables.indexOf(current) : -1;
+      const outsideOrUnlisted =
+        !current || !surface.contains(current) || index === -1;
 
       if (event.shiftKey) {
-        if (current === first || !surface.contains(current)) {
+        if (outsideOrUnlisted || index === 0) {
           event.preventDefault();
           last.focus();
         }
         return;
       }
 
-      if (current === last || !surface.contains(current)) {
+      if (outsideOrUnlisted || index === focusables.length - 1) {
         event.preventDefault();
         first.focus();
       }
@@ -378,6 +444,10 @@ export function useModalLayer(options: ModalLayerOptions): void {
         }
         syncBackgroundInert();
         unlockBodyScroll();
+        // 最后一层关闭时停止 body sibling observer
+        if (openLayers.length === 0) {
+          stopBodySiblingObserver();
+        }
         registeredRef.current = false;
       }
 

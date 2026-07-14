@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
  *
  * Code Logic（这个测试文件做什么）:
  *   读取 Settings 目录源码，断言 panels 无 @/api / Api. / invoke 运输面，
- *   controller 无 activeTab 大块 panel 树，Settings 壳层消费 controller 与三个 panel。
+ *   controller 无 activeTab 大块 panel 树，Settings 壳层消费 controller 与全部 extracted panels。
  */
 
 const dir = new URL('./', import.meta.url);
@@ -32,6 +32,8 @@ function readSettingsSource(relativePath: string): string {
 const generalPanel = readSettingsSource('SettingsGeneralPanel.tsx');
 const syncPanel = readSettingsSource('SettingsSyncPanel.tsx');
 const depsPanel = readSettingsSource('SettingsDependenciesPanel.tsx');
+const aiPanel = readSettingsSource('SettingsAiPanel.tsx');
+const aboutPanel = readSettingsSource('SettingsAboutPanel.tsx');
 const controller = readSettingsSource('useSettingsController.ts');
 const settingsShell = readSettingsSource('Settings.tsx');
 
@@ -39,6 +41,8 @@ const PANEL_SOURCES: Array<{ name: string; source: string }> = [
   { name: 'SettingsGeneralPanel.tsx', source: generalPanel },
   { name: 'SettingsSyncPanel.tsx', source: syncPanel },
   { name: 'SettingsDependenciesPanel.tsx', source: depsPanel },
+  { name: 'SettingsAiPanel.tsx', source: aiPanel },
+  { name: 'SettingsAboutPanel.tsx', source: aboutPanel },
 ];
 
 describe('Settings panel ownership (no transport)', () => {
@@ -68,6 +72,8 @@ describe('Settings controller ownership (no tab JSX trees)', () => {
     expect(controller).not.toContain('<SettingsGeneralPanel');
     expect(controller).not.toContain('<SettingsSyncPanel');
     expect(controller).not.toContain('<SettingsDependenciesPanel');
+    expect(controller).not.toContain('<SettingsAiPanel');
+    expect(controller).not.toContain('<SettingsAboutPanel');
   });
 });
 
@@ -77,6 +83,8 @@ describe('Settings shell composition', () => {
     expect(settingsShell).toContain('SettingsGeneralPanel');
     expect(settingsShell).toContain('SettingsSyncPanel');
     expect(settingsShell).toContain('SettingsDependenciesPanel');
+    expect(settingsShell).toContain('SettingsAiPanel');
+    expect(settingsShell).toContain('SettingsAboutPanel');
   });
 
   test('Settings.tsx does not directly import production transport modules for core orchestration', () => {

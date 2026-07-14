@@ -4,11 +4,13 @@
  * Business Logic（为什么需要）:
  *   移动端首载不得携带 xterm/CodeMirror/Tiptap/Recharts；桌面/移动 initial graph
  *   需有可 CI 验证的 gzip 预算，避免后续回归把重型依赖重新打进入口。
+ *   预算必须覆盖 JS 静态闭包 **与** 入口 HTML 直接引用的 CSS，CSS 增长同样触发门禁。
  *
  * Code Logic（做什么）:
- *   读取 Vite 构建写出的 `dist/.vite/cc-bundle-contract.json`（entries + chunks），
- *   对每个入口沿静态 imports（排除 dynamicImports）求闭包，对闭包内 JS 文件做 gzip
- *   求和并比对预算；mobile 闭包的 moduleIds 匹配禁止列表则失败。导出纯函数供 fixture 测试。
+ *   读取 Vite 构建写出的 `dist/.vite/cc-bundle-contract.json`（entries + chunks + entryStyles），
+ *   必要时再从 dist 入口 HTML 解析 stylesheet href；对每个入口沿静态 imports（排除
+ *   dynamicImports）求闭包，对闭包内 JS 与入口 CSS 分别 gzip 后求和并比对预算；
+ *   mobile 闭包的 moduleIds 匹配禁止列表则失败。导出纯函数供 fixture 测试。
  *
  * Usage:
  *   node scripts/check-bundle-contract.mjs
@@ -38,6 +40,79 @@ export const MOBILE_FORBIDDEN_PATTERNS = [
   /(?:^|[/\\])codemirror(?:[/\\]|$)/i,
   /(?:^|[/\\])recharts(?:[/\\]|$)/i,
 ];
+
+/**
+ * 从 HTML 中提取相对 stylesheet href。
+ *
+ * Business Logic:
+ *   生产 HTML 通过 `<link rel="stylesheet">` 挂载首载 CSS；预算必须计入这些文件。
+ *
+ * Code Logic:
+ *   扫描全部 `<link>` 标签，要求 rel=stylesheet，读取 href；去掉 leading `/`，
+ *   忽略绝对 URL 与 data URL，去重保序。
+ *
+ * @param {string} html
+ * @returns {string[]}
+ */
+export function extractStylesheetHrefs(html) {
+  /** @type {string[]} */
+  const hrefs = [];
+  if (typeof html !== 'string' || html.length === 0) {
+    return hrefs;
+  }
+  const linkTagRe = /<link\b[^>]*>/gi;
+  let match = linkTagRe.exec(html);
+  while (match) {
+    const tag = match[0];
+    if (/\brel\s*=\s*["']stylesheet["']/i.test(tag)) {
+      const hrefMatch = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i);
+      if (hrefMatch) {
+        let href = hrefMatch[1].trim();
+        if (href && !/^(?:https?:)?\/\//i.test(href) && !href.startsWith('data:')) {
+          href = href.replace(/^\//, '');
+          if (href && !hrefs.includes(href)) {
+            hrefs.push(href);
+          }
+        }
+      }
+    }
+    match = linkTagRe.exec(html);
+  }
+  return hrefs;
+}
+
+/**
+ * 规范化入口 CSS 文件列表（字符串、去重、保序）。
+ *
+ * Business Logic:
+ *   合同与选项可能提供重复/空值，需稳定化为可 gzip 的路径列表。
+ *
+ * Code Logic:
+ *   过滤非字符串与空串，按首次出现去重。
+ *
+ * @param {unknown} files
+ * @returns {string[]}
+ */
+export function normalizeCssFiles(files) {
+  if (!Array.isArray(files)) {
+    return [];
+  }
+  /** @type {string[]} */
+  const out = [];
+  const seen = new Set();
+  for (const item of files) {
+    if (typeof item !== 'string') {
+      continue;
+    }
+    const fileName = item.replace(/^\//, '').trim();
+    if (!fileName || seen.has(fileName)) {
+      continue;
+    }
+    seen.add(fileName);
+    out.push(fileName);
+  }
+  return out;
+}
 
 /**
  * 沿静态 import 边收集 chunk 闭包。
@@ -82,7 +157,7 @@ export function collectStaticClosure(entryFile, chunks) {
 }
 
 /**
- * 对 chunk 文件内容做 gzip 后求和。
+ * 对文件内容做 gzip 后求和。
  *
  * Business Logic:
  *   预算以传输体积近似值（gzip）衡量，避免 raw size 失真。
@@ -153,11 +228,12 @@ export function formatBudgetKiB(bytes) {
  * 分析 bundle 合同，返回 entry 报告与诊断列表。
  *
  * Business Logic:
- *   CI 需要单一函数同时覆盖预算与 mobile 依赖泄漏。
+ *   CI 需要单一函数同时覆盖预算（JS 静态闭包 + 入口 HTML CSS）与 mobile 依赖泄漏。
  *
  * Code Logic:
- *   对 entries.main / entries.mobile 求静态闭包 → gzip 求和 → 比预算；
- *   对 mobile 闭包聚合 moduleIds 做 forbidden 检查。
+ *   对 entries.main / entries.mobile 求静态闭包 → JS gzip；
+ *   取 entryStyles（options 优先，否则 contract）→ CSS gzip；
+ *   total = js + css 比预算；对 mobile 闭包聚合 moduleIds 做 forbidden 检查。
  *
  * @param {{
  *   entries?: Record<string, string>,
@@ -167,14 +243,24 @@ export function formatBudgetKiB(bytes) {
  *     dynamicImports?: string[],
  *     moduleIds?: string[],
  *   }>,
+ *   entryStyles?: Record<string, string[]>,
  * }} contract
  * @param {{
  *   readFile: (fileName: string) => Buffer | string,
  *   budgets?: { main?: number, mobile?: number },
+ *   entryStyles?: Record<string, string[]>,
  * }} options
  * @returns {{
  *   diagnostics: string[],
- *   entryReports: Record<string, { entryFile: string, closure: string[], gzipBytes: number, budgetBytes: number }>,
+ *   entryReports: Record<string, {
+ *     entryFile: string,
+ *     closure: string[],
+ *     cssFiles: string[],
+ *     jsGzipBytes: number,
+ *     cssGzipBytes: number,
+ *     gzipBytes: number,
+ *     budgetBytes: number,
+ *   }>,
  * }}
  */
 export function analyzeBundleContract(contract, options) {
@@ -184,10 +270,20 @@ export function analyzeBundleContract(contract, options) {
     main: options.budgets?.main ?? DESKTOP_MAIN_BUDGET_BYTES,
     mobile: options.budgets?.mobile ?? MOBILE_INITIAL_BUDGET_BYTES,
   };
+  /** @type {Record<string, string[]>} */
+  const entryStylesSource = options.entryStyles ?? contract?.entryStyles ?? {};
 
   /** @type {string[]} */
   const diagnostics = [];
-  /** @type {Record<string, { entryFile: string, closure: string[], gzipBytes: number, budgetBytes: number }>} */
+  /** @type {Record<string, {
+   *   entryFile: string,
+   *   closure: string[],
+   *   cssFiles: string[],
+   *   jsGzipBytes: number,
+   *   cssGzipBytes: number,
+   *   gzipBytes: number,
+   *   budgetBytes: number,
+   * }>} */
   const entryReports = {};
 
   for (const entryName of ['main', 'mobile']) {
@@ -202,24 +298,31 @@ export function analyzeBundleContract(contract, options) {
       continue;
     }
     const closure = [...closureSet].sort();
+    const cssFiles = normalizeCssFiles(entryStylesSource[entryName]);
     const budgetBytes = budgets[entryName];
-    let gzipBytes = 0;
+    let jsGzipBytes = 0;
+    let cssGzipBytes = 0;
     try {
-      gzipBytes = sumGzipBytes(closure, options.readFile);
+      jsGzipBytes = sumGzipBytes(closure, options.readFile);
+      cssGzipBytes = cssFiles.length > 0 ? sumGzipBytes(cssFiles, options.readFile) : 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      diagnostics.push(`${entryName} failed to read chunk files: ${message}`);
+      diagnostics.push(`${entryName} failed to read chunk/css files: ${message}`);
       continue;
     }
+    const gzipBytes = jsGzipBytes + cssGzipBytes;
     entryReports[entryName] = {
       entryFile,
       closure,
+      cssFiles,
+      jsGzipBytes,
+      cssGzipBytes,
       gzipBytes,
       budgetBytes,
     };
     if (gzipBytes > budgetBytes) {
       diagnostics.push(
-        `${entryName} initial graph over budget: size=${gzipBytes}B budget=${budgetBytes}B (${formatBudgetKiB(budgetBytes)}) entry=${entryFile} chunks=${closure.length}`,
+        `${entryName} initial graph over budget: size=${gzipBytes}B (js=${jsGzipBytes}B css=${cssGzipBytes}B) budget=${budgetBytes}B (${formatBudgetKiB(budgetBytes)}) entry=${entryFile} chunks=${closure.length} cssFiles=${cssFiles.length}`,
       );
     }
   }
@@ -250,13 +353,14 @@ export function analyzeBundleContract(contract, options) {
 }
 
 /**
- * CLI 入口：读取 dist 合同与 chunk 文件并 exit 0/1。
+ * CLI 入口：读取 dist 合同与 chunk/CSS 文件并 exit 0/1。
  *
  * Business Logic:
  *   构建后必须失败于超预算或依赖泄漏，防止坏包进入 CI/发版。
  *
  * Code Logic:
- *   定位 web/dist/.vite/cc-bundle-contract.json，相对 dist 读 chunk，打印报告。
+ *   定位 web/dist/.vite/cc-bundle-contract.json；优先用 dist 入口 HTML 解析 stylesheet
+ *   作为 entryStyles 真源（覆盖合同内列表），相对 dist 读文件，打印 JS/CSS 分项报告。
  */
 function main() {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -271,7 +375,11 @@ function main() {
     process.exit(1);
   }
 
-  /** @type {{ entries?: Record<string, string>, chunks?: Record<string, object> }} */
+  /** @type {{
+   *   entries?: Record<string, string>,
+   *   chunks?: Record<string, object>,
+   *   entryStyles?: Record<string, string[]>,
+   * }} */
   let contract;
   try {
     contract = JSON.parse(readFileSync(contractPath, 'utf8'));
@@ -281,14 +389,36 @@ function main() {
     process.exit(1);
   }
 
+  /** @type {Record<string, string[]>} */
+  const entryStyles = { ...(contract.entryStyles ?? {}) };
+  /** @type {Array<[string, string]>} */
+  const htmlEntryMap = [
+    ['main', 'index.html'],
+    ['mobile', 'mobile.html'],
+  ];
+  for (const [entryName, htmlName] of htmlEntryMap) {
+    const htmlPath = resolve(distDir, htmlName);
+    if (!existsSync(htmlPath)) {
+      continue;
+    }
+    try {
+      entryStyles[entryName] = extractStylesheetHrefs(readFileSync(htmlPath, 'utf8'));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`failed to read entry HTML ${htmlName}: ${message}`);
+      process.exit(1);
+    }
+  }
+
   const result = analyzeBundleContract(contract, {
     readFile: (fileName) => readFileSync(resolve(distDir, fileName)),
+    entryStyles,
   });
 
   for (const [entryName, report] of Object.entries(result.entryReports)) {
     const ok = report.gzipBytes <= report.budgetBytes ? 'OK' : 'OVER';
     console.log(
-      `[${ok}] ${entryName}: gzip=${report.gzipBytes}B / budget=${report.budgetBytes}B (${formatBudgetKiB(report.budgetBytes)}) chunks=${report.closure.length} entry=${report.entryFile}`,
+      `[${ok}] ${entryName}: gzip=${report.gzipBytes}B (js=${report.jsGzipBytes}B css=${report.cssGzipBytes}B) / budget=${report.budgetBytes}B (${formatBudgetKiB(report.budgetBytes)}) chunks=${report.closure.length} cssFiles=${report.cssFiles.length} entry=${report.entryFile}`,
     );
   }
 
