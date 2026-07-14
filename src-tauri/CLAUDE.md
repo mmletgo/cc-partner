@@ -515,7 +515,9 @@ cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1
 cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
 cargo test --locked --test pty_smoke -- --nocapture --test-threads=1
 cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1
-# S6 quality_faults：batch rollback / busy_timeout 有界 / peer 响应丢失幂等收敛（test-only inject seam，无生产 env 故障开关）
+# S6 quality_faults L2：batch rollback / busy_timeout 有界 / peer 响应丢失幂等收敛 /
+# malformed transfer status|complete DTO fail-closed（test-only inject seam，无生产 env 故障开关）。
+# LAN 真实 socket 矩阵不在此重复，见 lan_trust_boundary_smoke；L3 真机见 docs/development/real-device-certification.md
 cargo test --locked --test quality_faults -- --nocapture --test-threads=1
 cargo check --locked --bins
 ```
@@ -528,7 +530,7 @@ export CC_PARTNER_SMOKE_KEEP=1
 mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 ```
 
-相关文件：`tests/backend_cli_smoke.rs`（start/health/status/stop、sequential + concurrent duplicate start、start 与 direct serve 并发 PID 归属、stale control）、`tests/backend_doctor_smoke.rs`（doctor --json pure JSON / exit 0|1|2 / privacy sentinel / core-path unhealthy / malformed recent-errors degraded）、`tests/pty_smoke.rs`（原生 shell echo/exit + 生产 helper 绑定的 Unix process-group / Windows detached flags + PTY RAII child cleanup）、`tests/lan_trust_boundary_smoke.rs` + `src/net/lan_trust_boundary_harness.rs`（固定 LAN 边界绑定服务器矩阵 + injected peer 证据）、`tests/quality_faults.rs`（batch inject_fail_at 整批 rollback、短 busy_timeout 有界写锁失败、peer complete 响应丢失 + status 幂等收敛与稳定 code）、`tests/support/mod.rs`（隔离根、CLI 硬超时、PID cleanup、diagnostics）。
+相关文件：`tests/backend_cli_smoke.rs`（start/health/status/stop、sequential + concurrent duplicate start、start 与 direct serve 并发 PID 归属、stale control）、`tests/backend_doctor_smoke.rs`（doctor --json pure JSON / exit 0|1|2 / privacy sentinel / core-path unhealthy / malformed recent-errors degraded）、`tests/pty_smoke.rs`（原生 shell echo/exit + 生产 helper 绑定的 Unix process-group / Windows detached flags + PTY RAII child cleanup）、`tests/lan_trust_boundary_smoke.rs` + `src/net/lan_trust_boundary_harness.rs`（固定 LAN 边界绑定服务器矩阵 + injected peer 证据）、`tests/quality_faults.rs`（batch inject_fail_at 整批 rollback、短 busy_timeout 有界写锁失败、peer complete 响应丢失 + status 幂等收敛与稳定 code、malformed transfer status/complete DTO → InvalidResponse；Cross-Platform Smoke 已串行执行）、`tests/support/mod.rs`（隔离根、CLI 硬超时、PID cleanup、diagnostics）。L3 真机矩阵见 `docs/development/real-device-certification.md`（未执行项保持 NOT VERIFIED）。
 
 ### CI 触发与矩阵
 

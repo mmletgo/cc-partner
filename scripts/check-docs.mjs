@@ -16,6 +16,9 @@
  *   - README 代码块中的命令名需命中 package scripts / CLI 分发 / 仓库脚本白名单。
  *   - CLI 子命令白名单只从 `src-tauri/src/backend/cli.rs` 的 `dispatch` match arms
  *     解析，不预置硬编码命令；源缺失或解析失败使检查失败。
+ *   - 用户文档中引用的 `E2E-` / `L2-` / `L3-` evidence ID 必须存在于
+ *     `docs/development/quality-matrix.json`（只做 ID 存在性，不重复完整矩阵校验；
+ *     完整校验见 `scripts/check-quality-traceability.mjs`）。
  *   - 无参数时默认扫描全部 git 跟踪的 Markdown，仅排除 docs/superpowers/**。
  *   - 忽略 http(s)/mailto 外链；不检查 docs/superpowers/** 历史设计记录。
  *   - `--self-test` 用临时 Markdown fixture 覆盖正/反例，失败时打印 file:line。
@@ -40,12 +43,85 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadKnownEvidenceIds } from './check-quality-traceability.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 
 /** CLI 源（dispatch match arms 是子命令唯一权威）。 */
 const CLI_SOURCE_REL = 'src-tauri/src/backend/cli.rs';
+
+/** 文档可引用的自动化/真机 evidence ID（不含 L0；L0 由矩阵自身与 unit 守卫）。 */
+const EVIDENCE_ID_RE = /\b((?:E2E|L2|L3)-[A-Z0-9]+(?:-[A-Z0-9]+)*)\b/g;
+
+/**
+ * 从 Markdown 抽出 E2E/L2/L3 evidence ID 引用。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   人类文档会链接稳定 test ID；写错 ID 会导致 coverage 断链且完整矩阵校验发现不了。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用正则扫描全文，返回去重后的 ID 列表（保持首次出现顺序）。
+ *
+ * @param {string} content
+ * @returns {string[]}
+ */
+function extractEvidenceIds(content) {
+  /** @type {string[]} */
+  const ids = [];
+  /** @type {Set<string>} */
+  const seen = new Set();
+  EVIDENCE_ID_RE.lastIndex = 0;
+  let m;
+  while ((m = EVIDENCE_ID_RE.exec(content)) !== null) {
+    const id = m[1];
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * 校验文档中引用的 evidence ID 是否在 quality-matrix 中。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   Docs workflow 只需轻量确认「文档写的 ID 真的登记过」，不重复 JSON schema 校验。
+ *
+ * Code Logic（这个函数做什么）:
+ *   扫描 content 中的 E2E-/L2-/L3- ID；若 knownIds 非空且 ID 不在集合内则报 finding。
+ *   knownIds 为空（矩阵缺失）时不报错，由 traceability 门禁单独失败。
+ *
+ * @param {string} relFile
+ * @param {string} content
+ * @param {Set<string>} knownIds
+ * @returns {Finding[]}
+ */
+function checkEvidenceIdRefs(relFile, content, knownIds) {
+  /** @type {Finding[]} */
+  const findings = [];
+  if (!knownIds || knownIds.size === 0) return findings;
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    EVIDENCE_ID_RE.lastIndex = 0;
+    let m;
+    while ((m = EVIDENCE_ID_RE.exec(line)) !== null) {
+      const id = m[1];
+      if (!knownIds.has(id)) {
+        findings.push(
+          finding(
+            relFile,
+            i + 1,
+            `unknown evidence id ${id} (not in docs/development/quality-matrix.json)`,
+          ),
+        );
+      }
+    }
+  }
+  return findings;
+}
 
 /** docs/superpowers 下的历史 plan/spec 不参与当前文档守卫。 */
 
@@ -1054,6 +1130,11 @@ function checkFile(relFile, slugIndex, allow, opts = {}) {
   findings.push(...checkLinks(abs, relFile, stripped, lineMap, slugIndex));
   findings.push(...checkStaleClaims(relFile, content));
   findings.push(...checkReadmeCommands(relFile, content, allow));
+  const knownIds =
+    opts.knownEvidenceIds instanceof Set
+      ? opts.knownEvidenceIds
+      : loadKnownEvidenceIds(repoRoot);
+  findings.push(...checkEvidenceIdRefs(relFile, content, knownIds));
   return findings;
 }
 
@@ -1074,6 +1155,7 @@ function checkAll(targets) {
 
   /** @type {Map<string, Map<string, number>>} */
   const slugIndex = new Map();
+  const knownEvidenceIds = loadKnownEvidenceIds(repoRoot);
 
   // 第一轮：索引标题
   for (const rel of targets) {
@@ -1086,7 +1168,7 @@ function checkAll(targets) {
   }
 
   for (const rel of targets) {
-    all.push(...checkFile(rel, slugIndex, allow, {}));
+    all.push(...checkFile(rel, slugIndex, allow, { knownEvidenceIds }));
   }
   return all;
 }
@@ -1389,6 +1471,50 @@ function runSelfTest() {
     },
     { expectFail: false },
   );
+
+  // evidence ID：文档引用不存在的 E2E/L2/L3 ID → 失败
+  {
+    const name = 'unknown-evidence-id';
+    const known = new Set(['E2E-TRANSFER-001', 'L2-LAN-TRUST-BOUNDARY-001']);
+    const findings = checkEvidenceIdRefs(
+      'docs/development/testing.md',
+      [
+        '# Testing',
+        '',
+        'Covered: E2E-TRANSFER-001 and L2-LAN-TRUST-BOUNDARY-001.',
+        'Missing: E2E-NOT-REGISTERED-001 should fail.',
+        '',
+      ].join('\n'),
+      known,
+    );
+    if (findings.length === 0) {
+      failures.push(`${name}: expected failure for unknown evidence id`);
+    } else {
+      const blob = findings.map((f) => f.message).join('\n');
+      if (!/E2E-NOT-REGISTERED-001/.test(blob)) {
+        failures.push(`${name}: diagnostics missing unknown id:\n  ${blob}`);
+      }
+      if (/E2E-TRANSFER-001/.test(blob)) {
+        failures.push(`${name}: known id should not fail:\n  ${blob}`);
+      }
+    }
+  }
+
+  // evidence ID：已知 ID 通过
+  {
+    const name = 'known-evidence-id';
+    const known = new Set(['E2E-TRANSFER-001', 'L3-DUAL-HOST-LAN-001']);
+    const findings = checkEvidenceIdRefs(
+      'docs/development/testing.md',
+      'See E2E-TRANSFER-001 and L3-DUAL-HOST-LAN-001.\n',
+      known,
+    );
+    if (findings.length !== 0) {
+      failures.push(
+        `${name}: expected ok, got ${findings.map((f) => f.message).join('; ')}`,
+      );
+    }
+  }
 
   // CLI：README 推荐已从 dispatch 删除的子命令 → 失败
   {

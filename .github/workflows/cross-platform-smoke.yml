@@ -191,6 +191,20 @@ jobs:
           cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1 \
             2>&1 | tee "${{ runner.temp }}/cargo-logs/lan-trust-boundary-smoke.log"
 
+      - name: Quality faults L2 (batch/busy/peer/malformed DTO)
+        id: quality_faults
+        working-directory: src-tauri
+        shell: bash
+        timeout-minutes: 12
+        env:
+          RUST_BACKTRACE: '1'
+        run: |
+          set -euo pipefail
+          # S6 L2：事务 rollback / busy 有界 / peer 幂等收敛 / malformed DTO fail-closed
+          # 不验证 GUI、WSL、多机 mDNS；串行避免端口/池竞争
+          cargo test --locked --test quality_faults -- --nocapture --test-threads=1 \
+            2>&1 | tee "${{ runner.temp }}/cargo-logs/quality-faults.log"
+
       # 无条件清理：只读 smoke 目录下 control 文件，停止记录的 PID，写出诊断
       # 注意：case 失败时 Rust harness 已在 case_dir/diagnostics 留下 control/summary 快照；
       # 本步骤只清理残留 PID，绝不删除 case_dir/diagnostics 或 cargo-logs。
@@ -336,6 +350,7 @@ jobs:
           DOCTOR="$(mark '${{ steps.doctor_smoke.outcome }}')"
           PTY="$(mark '${{ steps.pty_smoke.outcome }}')"
           LAN="$(mark '${{ steps.lan_boundary_smoke.outcome }}')"
+          FAULTS="$(mark '${{ steps.quality_faults.outcome }}')"
           CLEAN="$(mark '${{ steps.cleanup.outcome }}')"
 
           {
@@ -354,6 +369,7 @@ jobs:
             echo "| backend doctor + privacy smoke | ${DOCTOR} |"
             echo "| native PTY echo/exit smoke | ${PTY} |"
             echo "| LAN trust boundary smoke | ${LAN} |"
+            echo "| quality faults L2 (batch/busy/peer/DTO) | ${FAULTS} |"
             echo "| cleanup / diagnostics | ${CLEAN} |"
             echo ""
             echo "### Explicitly NOT VERIFIED (transactional runtime: real disk-full hardware, GUI global-shortcut conflicts, real updater install/restart) / NOT VERIFIED — hosted runner scope"
@@ -365,9 +381,11 @@ jobs:
             echo "| macOS permission dialogs | NOT VERIFIED — hosted runner scope |"
             echo "| multi-host mDNS / phone QR / multi-device P2P | NOT VERIFIED — hosted runner scope |"
             echo "| real public-peer path on production NIC | NOT VERIFIED — do not treat X-Forwarded-For injection as production evidence |"
+            echo "| 1GiB dual-host transfer/resume | NOT VERIFIED — L3 only |"
             echo ""
             echo "Isolation: \`CC_PARTNER_SMOKE_ROOT=${CC_PARTNER_SMOKE_ROOT}\` · \`RUST_BACKTRACE=1\`."
             echo "Doctor: pure JSON stdout; exit 0/1 expected on normal paths; core-path fixture must be unhealthy/2; privacy sentinels must not leak."
             echo "LAN boundary: bound loopback server + labeled injected peer evidence; browser L1 Playwright owned by S6."
+            echo "L3 inventory: docs/development/real-device-certification.md (all missing devices remain NOT VERIFIED)."
             echo "No \`continue-on-error\`; required checks above block on failure."
           } >> "${GITHUB_STEP_SUMMARY}"

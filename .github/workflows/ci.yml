@@ -84,6 +84,11 @@ jobs:
       - name: Module boundary ratchet
         run: node scripts/check-module-boundaries.mjs
 
+      - name: Quality matrix traceability (self-test + matrix)
+        run: |
+          node scripts/check-quality-traceability.mjs --self-test
+          node scripts/check-quality-traceability.mjs
+
       - name: Frontend build (tsc 类型检查 + vite build)
         run: cd web && npm run build
 

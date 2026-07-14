@@ -1,10 +1,21 @@
-//! S6 Quality Faults 集成测试：批事务 rollback、SQLite busy 有界超时、peer 响应丢失幂等收敛。
+//! S6 Quality Faults 集成测试（L2）：批事务 rollback、SQLite busy 有界超时、
+//! peer 响应丢失幂等收敛、malformed HTTP DTO fail-closed。
 //!
 //! Business Logic（为什么需要这个测试文件）:
-//!     生产路径上的 batch 写、连接池 busy 与 transfer complete 响应丢失必须在 L2 用可复现
-//!     故障注入验证：整批 rollback、有界等待、幂等收敛到成功，且错误分类走稳定 code。
-//!     故障 seam 仅 test-only 参数（inject_fail_at / 短 backoff policy / mock peer），
-//!     禁止生产环境变量打开故障。
+//!     生产路径上的 batch 写、连接池 busy、transfer complete 响应丢失与对端畸形 DTO
+//!     必须在 L2 用可复现故障注入验证：整批 rollback、有界等待、幂等收敛、
+//!     InvalidResponse fail-closed（不得当业务成功）。故障 seam 仅 test-only 参数
+//!     （inject_fail_at / 短 backoff policy / mock peer），禁止生产环境变量打开故障。
+//!
+//! L2 coverage map（稳定 ID 见 `docs/development/quality-matrix.json`）:
+//!     - `L2-FAULT-BATCH-001` / `L2-FAULT-BUSY-001` / `L2-FAULT-PEER-001`：本文件 T4 用例
+//!     - `L2-FAULT-DTO-001`：本文件 malformed transfer status/complete 响应
+//!     - `L2-LAN-BOUNDARY-001`：**不在本文件重复**；权威自动化矩阵见
+//!       `tests/lan_trust_boundary_smoke.rs` + `lan_trust_boundary_harness`
+//!       （无凭据 loopback/mobile 读写、Host/Origin、stop loopback+token、
+//!       injected public/XFF peer；真实多机 mDNS/公网 NIC = L3 NOT VERIFIED）
+//!     - Transfer send Tauri command / Settings 部分失败：前端 L1 harness；
+//!       本文件不造第二套 GUI/AppState 假件。
 //!
 //! Code Logic（这个文件做什么）:
 //!     1) fail_row_n_in_batch_rolls_back_all：ClaudeHistoryRepo inject_fail_at 中途失败 → COUNT=0
@@ -12,6 +23,8 @@
 //!        → 并发写在有界时间内 locked/busy，释放后写成功
 //!     3) peer_response_lost_after_commit_converges_idempotently：axum mock complete 恒 timeout
 //!        信封 + status=completed → transfer_complete_with_policy 收敛 Ok(true)，并校验稳定 code
+//!     4) malformed_transfer_status_dto_is_invalid_response：status 返回非 DTO shape → InvalidResponse
+//!     5) malformed_transfer_complete_body_is_invalid_response：complete 非 JSON body → InvalidResponse
 
 use app_lib::{
     ClaudeHistoryRepo, ClaudeHistoryRow, PeerCallError, PeerClient, TransferCompletePolicy,
@@ -308,5 +321,165 @@ async fn peer_response_lost_after_commit_converges_idempotently() {
     assert!(
         complete_hits.load(Ordering::SeqCst) >= 2,
         "complete endpoint should be hit for classify + converge paths"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     transfer status 若返回非 JSON body，客户端必须 fail-closed 为 `InvalidResponse`，
+///     禁止把任意文本当成功进度或驱动 complete 收敛。
+///
+/// Code Logic（这个测试做什么）:
+///     axum mock GET `/api/transfer/status/:id` 返回 200 + plain text；
+///     `PeerClient::transfer_status_typed` 必须 `Err(InvalidResponse)`。
+#[tokio::test]
+async fn malformed_transfer_status_dto_is_invalid_response() {
+    let app = axum::Router::new().route(
+        "/api/transfer/status/:id",
+        axum::routing::get(|| async move {
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                "not-json-status-body",
+            )
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("bind mock");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve mock");
+    });
+    let base_url = format!("http://{addr}");
+    let client = PeerClient::new();
+
+    let err = client
+        .transfer_status_typed(&base_url, "tid-bad-dto")
+        .await
+        .expect_err("non-JSON status body must not decode as success");
+    match &err {
+        PeerCallError::InvalidResponse { reason, .. } => {
+            assert!(
+                !reason.is_empty(),
+                "InvalidResponse must carry a non-empty reason for diagnostics"
+            );
+        }
+        other => panic!("expected PeerCallError::InvalidResponse, got: {other}"),
+    }
+    assert_eq!(
+        err.code(),
+        None,
+        "InvalidResponse is not a business code branch"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     transfer complete 若返回非 JSON 错误体，客户端必须归类 InvalidResponse，
+///     不得依赖本地化文案、不得静默当 success。
+///
+/// Code Logic（这个测试做什么）:
+///     axum mock POST complete 返回 500 + plain text；
+///     `transfer_complete_with_policy(status_fallback=false)` → InvalidResponse。
+#[tokio::test]
+async fn malformed_transfer_complete_body_is_invalid_response() {
+    let app = axum::Router::new().route(
+        "/api/transfer/complete/:id",
+        axum::routing::post(|| async move {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "upstream blew up with free text",
+            )
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("bind mock");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve mock");
+    });
+    let base_url = format!("http://{addr}");
+    let client = PeerClient::new();
+
+    let policy = TransferCompletePolicy {
+        max_attempts: 1,
+        base_backoff: Duration::from_millis(5),
+        status_fallback: false,
+    };
+    let err = client
+        .transfer_complete_with_policy(&base_url, "tid-bad-body", policy)
+        .await
+        .expect_err("non-JSON complete body must surface InvalidResponse");
+    match &err {
+        PeerCallError::InvalidResponse { .. } => {}
+        other => panic!("expected PeerCallError::InvalidResponse, got: {other}"),
+    }
+    assert_eq!(err.code(), None);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     complete 200 响应字段类型错误时必须 fail-closed，禁止把字符串 success 当业务完成。
+///
+/// Code Logic（这个测试做什么）:
+///     POST complete 返回 200 + `{success:"yes"}`；typed ChunkResp 反序列化失败 → InvalidResponse。
+#[tokio::test]
+async fn malformed_transfer_complete_shape_is_invalid_response() {
+    let app = axum::Router::new().route(
+        "/api/transfer/complete/:id",
+        axum::routing::post(|| async move {
+            axum::Json(serde_json::json!({
+                "success": "yes",
+                "received_bytes": 0
+            }))
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("bind mock");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve mock");
+    });
+    let base_url = format!("http://{addr}");
+    let client = PeerClient::new();
+
+    let policy = TransferCompletePolicy {
+        max_attempts: 1,
+        base_backoff: Duration::from_millis(5),
+        status_fallback: false,
+    };
+    let err = client
+        .transfer_complete_with_policy(&base_url, "tid-bad-shape", policy)
+        .await
+        .expect_err("wrong complete DTO shape must surface InvalidResponse");
+    match &err {
+        PeerCallError::InvalidResponse { .. } => {}
+        other => panic!("expected PeerCallError::InvalidResponse, got: {other}"),
+    }
+    assert_eq!(err.code(), None);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     防止 quality_faults 静默漂移丢失 LAN 边界 L2 入口；真实 socket 矩阵由独立
+///     smoke 执行，本用例只做路径/符号存在性与产品边界注释契约，避免重复绑定端口。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 `lan_trust_boundary_harness::INJECTED_PEER_EVIDENCE` 标签常量非空，
+///     并文档化「不得把 injected peer 当真实公网 NIC 证据」的产品边界。
+#[test]
+fn lan_boundary_l2_entry_is_documented_not_duplicated() {
+    // 产品边界：无身份鉴权；LAN 全读写；stop 仅 loopback+token。
+    // 真实多机 mDNS / 手机 QR / 公网 peer → L3 NOT VERIFIED（见 real-device-certification.md）。
+    let label = app_lib::lan_trust_boundary_harness::INJECTED_PEER_EVIDENCE;
+    assert_eq!(
+        label, "INJECTED_PEER_EVIDENCE",
+        "injected peer evidence label must stay stable for smoke diagnostics"
+    );
+    assert!(
+        !label.to_ascii_lowercase().contains("verified production"),
+        "label must not imply production multi-host verification"
     );
 }
