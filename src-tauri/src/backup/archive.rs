@@ -584,7 +584,7 @@ mod tests {
         let file = File::open(&path).unwrap();
         let mut archive = ZipArchive::new(file).unwrap();
         // 重新打包篡改版
-        let mut new_files = BTreeMap::new();
+        let mut new_files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         new_files.insert("prompts/items.json".into(), b"[1]".to_vec());
         let mut bad_manifest = sample_manifest();
         // 故意写入错误哈希
