@@ -13,6 +13,89 @@
 //!       对外 DTO 用 `TransferTaskDto`（camelCase + 派生字段 progress，对齐前端 TS 类型）。
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// 发送端恢复操作类型（retry / resume）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     同一 clientOperationId 不得把 retry 与 resume、或两个不同 logical task 混为同一操作。
+///
+/// Code Logic（这个枚举做什么）:
+///     参与 canonical payload hash 的 kind 字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferRecoveryKind {
+    /// 全量重试（可 mint 新 protocol transfer id）
+    Retry,
+    /// 断点续传（复用稳定 protocol transfer id）
+    Resume,
+}
+
+impl TransferRecoveryKind {
+    /// 稳定小写字符串。
+    ///
+    /// Business Logic: payload hash 与日志需要稳定 token。
+    /// Code Logic: 返回 `retry` / `resume`。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Resume => "resume",
+        }
+    }
+}
+
+/// 源文件指纹（size + mtime + sha256）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     resume/retry 必须拒绝 TOCTOU 下源文件被替换；mtime 不可用时靠 size+SHA。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 size、可选 mtime_ns、sha256 hex。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFingerprint {
+    /// 文件字节大小
+    pub size: u64,
+    /// 修改时间纳秒（不可用为 None）
+    pub mtime_ns: Option<u64>,
+    /// 文件 SHA256 hex
+    pub sha256: String,
+}
+
+/// 计算发送端恢复操作的 canonical payload hash。
+///
+/// Business Logic（为什么需要这个函数）:
+///     same clientOperationId 必须绑定固定语义：kind + logical identity + peer + 预期 protocol id。
+///
+/// Code Logic（这个函数做什么）:
+///     固定 key 顺序的 JSON 字节做 SHA256 hex（不含 clientOperationId 本身）。
+pub fn canonical_recovery_payload_hash(
+    kind: TransferRecoveryKind,
+    logical_transfer_id: &str,
+    source_path: &str,
+    peer_device_id: &str,
+    protocol_transfer_id: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "kind": kind.as_str(),
+        "logicalTransferId": logical_transfer_id,
+        "peerDeviceId": peer_device_id,
+        "protocolTransferId": protocol_transfer_id,
+        "sourcePath": source_path,
+    });
+    // serde_json::Map 插入顺序不稳定；用手写稳定字节。
+    let stable = format!(
+        "{{\"kind\":\"{}\",\"logicalTransferId\":{},\"peerDeviceId\":{},\"protocolTransferId\":{},\"sourcePath\":{}}}",
+        kind.as_str(),
+        serde_json::to_string(logical_transfer_id).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(peer_device_id).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(protocol_transfer_id).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(source_path).unwrap_or_else(|_| "\"\"".into()),
+    );
+    let _ = payload; // 文档意图：字段集合与 stable 一致
+    let digest = Sha256::digest(stable.as_bytes());
+    format!("{digest:x}")
+}
 
 /// 传输任务状态枚举。serde 以 lowercase 序列化，与 Python Enum.value 一致。
 ///

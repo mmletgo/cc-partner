@@ -15,7 +15,7 @@
 //!     - remove：任务终态后移除（completed/failed/cancelled），持久化到 transfer_history
 //!     - list：返回全部活跃任务快照（按 created_at 倒序，对照 Python list_tasks）
 
-use crate::models::transfer::{TransferStatus, TransferTask};
+use crate::models::transfer::{TransferFailure, TransferPhase, TransferStatus, TransferTask};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
@@ -245,7 +245,13 @@ impl TransferRegistry {
         }
     }
 
-    /// 标记任务完成：设置 status=Completed 并回填 completed_at。
+    /// 标记任务完成：status=Completed、phase=Completed 并回填 completed_at。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     发送/接收终态需要同时更新 coarse status 与细粒度 phase。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写锁设置 Completed、清 failure、可选改 file_path、transferred=size。
     pub fn mark_completed(&self, id: &str, completed_at: String, final_path: Option<String>) {
         if let Some(entry) = self
             .inner
@@ -254,6 +260,8 @@ impl TransferRegistry {
             .get_mut(id)
         {
             entry.task.status = TransferStatus::Completed;
+            entry.task.phase = Some(TransferPhase::Completed);
+            entry.task.failure = None;
             entry.task.completed_at = Some(completed_at);
             if let Some(p) = final_path {
                 entry.task.file_path = p;
@@ -262,8 +270,31 @@ impl TransferRegistry {
         }
     }
 
-    /// 标记任务失败：status=Failed + completed_at + 错误信息可选（错误信息通过事件 emit）。
+    /// 标记任务失败：status=Failed + 默认可重试 failure。
+    ///
+    /// Business Logic: 兼容旧调用；默认 retryable=true 以便用户可 retry。
+    /// Code Logic: 委托 mark_failed_with 写入默认 TransferFailure。
     pub fn mark_failed(&self, id: &str, completed_at: String) {
+        self.mark_failed_with(
+            id,
+            completed_at,
+            TransferFailure {
+                stage: crate::models::transfer::TransferFailureStage::Unknown,
+                code: "transfer_failed".into(),
+                retryable: true,
+                message: "传输失败".into(),
+            },
+        );
+    }
+
+    /// 标记任务失败并写入结构化 failure/phase。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     retry/resume 决策依赖 failure.retryable 与 phase；仅 coarse status 不够。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     status=Failed、phase=Failed、failure=给定结构、completed_at 写入。
+    pub fn mark_failed_with(&self, id: &str, completed_at: String, failure: TransferFailure) {
         if let Some(entry) = self
             .inner
             .write()
@@ -271,11 +302,28 @@ impl TransferRegistry {
             .get_mut(id)
         {
             entry.task.status = TransferStatus::Failed;
+            entry.task.phase = Some(TransferPhase::Failed);
+            entry.task.failure = Some(failure);
             entry.task.completed_at = Some(completed_at);
         }
     }
 
-    /// 标记任务取消：status=Cancelled + completed_at。
+    /// 更新任务 phase（保持 coarse status 由调用方另设）。
+    ///
+    /// Business Logic: connecting/transferring/finalizing 等细粒度阶段驱动 UI。
+    /// Code Logic: 写锁更新 phase 字段。
+    pub fn set_phase(&self, id: &str, phase: TransferPhase) {
+        if let Some(entry) = self
+            .inner
+            .write()
+            .expect("transfer registry 写锁中毒")
+            .get_mut(id)
+        {
+            entry.task.phase = Some(phase);
+        }
+    }
+
+    /// 标记任务取消：status=Cancelled + phase=Cancelled + completed_at。
     pub fn mark_cancelled(&self, id: &str, completed_at: String) {
         if let Some(entry) = self
             .inner
@@ -284,6 +332,7 @@ impl TransferRegistry {
             .get_mut(id)
         {
             entry.task.status = TransferStatus::Cancelled;
+            entry.task.phase = Some(TransferPhase::Cancelled);
             entry.task.completed_at = Some(completed_at);
         }
     }

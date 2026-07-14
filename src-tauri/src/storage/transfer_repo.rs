@@ -381,6 +381,246 @@ impl TransferRepo {
         })
         .await
     }
+
+    /// 按发送端全局 clientOperationId 查询 attempt 行。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     幂等重放与对账都只认 clientOperationId，不认 requestId。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `SELECT ... WHERE client_operation_id=?`；无行 `Ok(None)`。
+    pub async fn get_by_client_operation_id(
+        &self,
+        client_operation_id: &str,
+    ) -> Result<Option<TransferTask>, AppError> {
+        let id = client_operation_id.trim();
+        if id.is_empty() {
+            return Ok(None);
+        }
+        let sql = format!(
+            "SELECT {TRANSFER_SELECT_COLUMNS} FROM transfer_history WHERE client_operation_id = ?"
+        );
+        let row = sqlx::query(&sql)
+            .bind(id)
+            .fetch_optional(&self.db)
+            .await?;
+        Ok(row.map(|r| Self::row_to_task(&r)))
+    }
+
+    /// 统计同一 logical_transfer_id 的 attempt 行数（含历史终态）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     并发幂等测试需要断言“同 op 只创建一个 attempt 增量”。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `COUNT(*) WHERE logical_transfer_id=?`。
+    pub async fn count_attempts_for_logical(
+        &self,
+        logical_transfer_id: &str,
+    ) -> Result<u32, AppError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS c FROM transfer_history WHERE logical_transfer_id = ?",
+        )
+        .bind(logical_transfer_id)
+        .fetch_one(&self.db)
+        .await?;
+        let c: i64 = row.try_get("c").unwrap_or(0);
+        Ok(c.max(0) as u32)
+    }
+
+    /// 列出启动可恢复的 insert-before-spawn 行（Queued + Pending + Send + 有 client_operation_id）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim 落库后 spawn 前 crash 时，owner 重启必须恢复这些行，避免永远卡在 Queued。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查 phase=queued（或 NULL 且 status=pending）且 direction=send 且 client_operation_id 非空。
+    pub async fn list_recoverable_queued_sends(&self) -> Result<Vec<TransferTask>, AppError> {
+        let sql = format!(
+            "SELECT {TRANSFER_SELECT_COLUMNS} FROM transfer_history \
+             WHERE direction = 'send' \
+               AND status = 'pending' \
+               AND client_operation_id IS NOT NULL \
+               AND (phase = 'queued' OR phase IS NULL OR phase = '') \
+             ORDER BY created_at ASC"
+        );
+        let rows = sqlx::query(&sql).fetch_all(&self.db).await?;
+        Ok(rows.iter().map(Self::row_to_task).collect())
+    }
+
+    /// 发送端事务 claim：全局唯一 clientOperationId + payload hash。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     同一用户意图（retry/resume）可能因超时被重复提交；必须保证只有一个 winner
+    ///     能 spawn 网络工作，same id+same hash 回放，different hash 冲突。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     1) 校验 client_operation_id 非空；2) 已有行同 hash → Replay，异 hash → Conflict；
+    ///     3) 无行 INSERT（unique index 并发下 rows_affected/冲突回读）；
+    ///     4) Fresh 返回已落库 Queued 快照。
+    pub async fn claim_sender_operation(
+        &self,
+        client_operation_id: &str,
+        payload_hash: &str,
+        task: &TransferTask,
+    ) -> Result<SenderClaimOutcome, AppError> {
+        let op_id = normalize_client_operation_id(client_operation_id)?;
+        if payload_hash.trim().is_empty() {
+            return Err(AppError::validation(
+                "operation_payload_hash 不能为空".to_string(),
+            ));
+        }
+        if let Some(existing) = self.get_by_client_operation_id(&op_id).await? {
+            return Ok(classify_existing_claim(&existing, payload_hash));
+        }
+
+        let mut snapshot = task.clone();
+        snapshot.client_operation_id = Some(op_id.clone());
+        snapshot.operation_payload_hash = Some(payload_hash.to_string());
+        if snapshot.phase.is_none() {
+            snapshot.phase = Some(TransferPhase::Queued);
+        }
+        if snapshot.status != TransferStatus::Pending
+            && snapshot.status != TransferStatus::Transferring
+        {
+            // claim 入口应是 Queued/Pending；防御性归一。
+            snapshot.status = TransferStatus::Pending;
+            snapshot.phase = Some(TransferPhase::Queued);
+        }
+        snapshot.normalize_recovery_identity();
+
+        // 仅 INSERT（不用 ON CONFLICT 覆盖其它 attempt）。唯一索引冲突 → 回读分类。
+        let insert_result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO transfer_history \
+                 (id, filename, file_path, size, sha256, direction, peer_device_id, status, \
+                  transferred_bytes, created_at, completed_at, \
+                  phase, failure_stage, failure_code, failure_retryable, failure_message, \
+                  attempt, logical_transfer_id, attempt_id, protocol_transfer_id, \
+                  client_operation_id, operation_payload_hash) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&snapshot.id)
+            .bind(&snapshot.filename)
+            .bind(&snapshot.file_path)
+            .bind(snapshot.size as i64)
+            .bind(&snapshot.sha256)
+            .bind(snapshot.direction.as_str())
+            .bind(&snapshot.peer_device_id)
+            .bind(snapshot.status.as_str())
+            .bind(snapshot.transferred_bytes as i64)
+            .bind(&snapshot.created_at)
+            .bind(&snapshot.completed_at)
+            .bind(snapshot.phase.map(TransferPhase::as_str))
+            .bind(snapshot.failure.as_ref().map(|f| f.stage.as_str()))
+            .bind(snapshot.failure.as_ref().map(|f| f.code.as_str()))
+            .bind(
+                snapshot
+                    .failure
+                    .as_ref()
+                    .map(|f| if f.retryable { 1_i64 } else { 0_i64 }),
+            )
+            .bind(snapshot.failure.as_ref().map(|f| f.message.as_str()))
+            .bind(snapshot.attempt.max(1) as i64)
+            .bind(if snapshot.logical_transfer_id.is_empty() {
+                snapshot.id.as_str()
+            } else {
+                snapshot.logical_transfer_id.as_str()
+            })
+            .bind(if snapshot.attempt_id.is_empty() {
+                snapshot.id.as_str()
+            } else {
+                snapshot.attempt_id.as_str()
+            })
+            .bind(if snapshot.protocol_transfer_id.is_empty() {
+                snapshot.id.as_str()
+            } else {
+                snapshot.protocol_transfer_id.as_str()
+            })
+            .bind(&snapshot.client_operation_id)
+            .bind(&snapshot.operation_payload_hash)
+            .execute(&self.db)
+            .await
+            .map_err(AppError::from)
+        })
+        .await;
+
+        match insert_result {
+            Ok(_) => {
+                let loaded = self
+                    .get_by_id(&snapshot.id)
+                    .await?
+                    .ok_or_else(|| AppError::generic("claim 后读取 attempt 失败"))?;
+                Ok(SenderClaimOutcome::Fresh(loaded))
+            }
+            Err(e) => {
+                // 并发 claim：唯一索引冲突 → 回读既有行。
+                if let Some(existing) = self.get_by_client_operation_id(&op_id).await? {
+                    return Ok(classify_existing_claim(&existing, payload_hash));
+                }
+                // 也可能是主键 id 冲突（极罕见）；上抛原错误。
+                Err(e)
+            }
+        }
+    }
+}
+
+/// 发送端 claim 结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     调用方必须在 Fresh 时才 spawn；Replay 回放已记录 task；Conflict 拒绝不同 payload。
+///
+/// Code Logic（这个枚举做什么）:
+///     Fresh/Replay 携带 task 快照；Conflict 不携带另一 task 的敏感细节给远程。
+#[derive(Debug, Clone)]
+pub enum SenderClaimOutcome {
+    /// 首次 claim 成功，允许 spawn。
+    Fresh(TransferTask),
+    /// 同 id + 同 payload，返回既有 attempt。
+    Replay(TransferTask),
+    /// 同 id + 不同 payload。
+    Conflict { existing: TransferTask },
+}
+
+/// 规范化 clientOperationId（与 workbench ledger 同约束）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     空/过长/非 ASCII 幂等键会破坏唯一索引语义与跨端回放。
+///
+/// Code Logic（这个函数做什么）:
+///     trim 后 1..=128 可打印 ASCII。
+pub fn normalize_client_operation_id(raw: &str) -> Result<String, AppError> {
+    let id = raw.trim();
+    if id.is_empty() {
+        return Err(AppError::validation(
+            "clientOperationId 不能为空".to_string(),
+        ));
+    }
+    if id.len() > 128 {
+        return Err(AppError::validation(
+            "clientOperationId 过长（最多 128 字节）".to_string(),
+        ));
+    }
+    if !id.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+        return Err(AppError::validation(
+            "clientOperationId 仅允许可打印 ASCII".to_string(),
+        ));
+    }
+    Ok(id.to_string())
+}
+
+/// 已有行与请求 hash 分类。
+///
+/// Business Logic: same id 必须按 payload fingerprint 区分回放与冲突。
+/// Code Logic: hash 相等 → Replay；否则 Conflict。
+fn classify_existing_claim(existing: &TransferTask, payload_hash: &str) -> SenderClaimOutcome {
+    match existing.operation_payload_hash.as_deref() {
+        Some(h) if h == payload_hash => SenderClaimOutcome::Replay(existing.clone()),
+        // legacy 空 hash：拒绝当作通配符，按冲突处理（fail-closed）。
+        _ => SenderClaimOutcome::Conflict {
+            existing: existing.clone(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -590,5 +830,128 @@ mod tests {
             msg.contains("UNIQUE") || msg.contains("unique") || msg.contains("constraint"),
             "expected unique constraint error, got {msg}"
         );
+    }
+
+
+    /// 同 client_operation_id + 同 payload → Replay，不同 payload → Conflict。
+    #[tokio::test]
+    async fn claim_same_id_same_payload_replays_different_conflicts() {
+        let repo = setup_upgraded_repo().await;
+        let task = TransferTask {
+            filename: "a.bin".into(),
+            file_path: "/tmp/a.bin".into(),
+            size: 1,
+            sha256: "aa".into(),
+            direction: TransferDirection::Send,
+            peer_device_id: "peer".into(),
+            status: TransferStatus::Pending,
+            created_at: "2026-07-14T02:00:00Z".into(),
+            phase: Some(TransferPhase::Queued),
+            attempt: 2,
+            logical_transfer_id: "logical-x".into(),
+            attempt_id: "attempt-x".into(),
+            protocol_transfer_id: "proto-x".into(),
+            client_operation_id: Some("op-claim-1".into()),
+            operation_payload_hash: Some("hash-aaa".into()),
+            ..TransferTask::recovery_defaults("attempt-x")
+        };
+        let fresh = repo
+            .claim_sender_operation("op-claim-1", "hash-aaa", &task)
+            .await
+            .unwrap();
+        assert!(matches!(fresh, super::SenderClaimOutcome::Fresh(_)));
+
+        let replay = repo
+            .claim_sender_operation("op-claim-1", "hash-aaa", &task)
+            .await
+            .unwrap();
+        match replay {
+            super::SenderClaimOutcome::Replay(t) => {
+                assert_eq!(t.id, "attempt-x");
+                assert_eq!(t.client_operation_id.as_deref(), Some("op-claim-1"));
+            }
+            other => panic!("expected Replay, got {other:?}"),
+        }
+
+        let conflict = repo
+            .claim_sender_operation("op-claim-1", "hash-bbb", &task)
+            .await
+            .unwrap();
+        assert!(matches!(conflict, super::SenderClaimOutcome::Conflict { .. }));
+    }
+
+    /// 并发同 id claim 仅一条 Fresh winner。
+    #[tokio::test]
+    async fn concurrent_unique_claim_only_one_fresh() {
+        let repo = std::sync::Arc::new(setup_upgraded_repo().await);
+        let make = |id: &str| TransferTask {
+            filename: "c.bin".into(),
+            file_path: "/tmp/c.bin".into(),
+            size: 2,
+            sha256: "bb".into(),
+            direction: TransferDirection::Send,
+            peer_device_id: "peer".into(),
+            status: TransferStatus::Pending,
+            created_at: "2026-07-14T03:00:00Z".into(),
+            phase: Some(TransferPhase::Queued),
+            attempt: 2,
+            logical_transfer_id: "logical-c".into(),
+            attempt_id: id.into(),
+            protocol_transfer_id: "proto-c".into(),
+            client_operation_id: Some("op-concurrent".into()),
+            operation_payload_hash: Some("hash-c".into()),
+            ..TransferTask::recovery_defaults(id)
+        };
+        let r1 = repo.clone();
+        let r2 = repo.clone();
+        let (a, b) = tokio::join!(
+            async move { r1.claim_sender_operation("op-concurrent", "hash-c", &make("id-a")).await.unwrap() },
+            async move { r2.claim_sender_operation("op-concurrent", "hash-c", &make("id-b")).await.unwrap() },
+        );
+        let fresh_count = [&a, &b]
+            .iter()
+            .filter(|o| matches!(o, super::SenderClaimOutcome::Fresh(_)))
+            .count();
+        let replay_count = [&a, &b]
+            .iter()
+            .filter(|o| matches!(o, super::SenderClaimOutcome::Replay(_)))
+            .count();
+        assert_eq!(fresh_count, 1, "exactly one Fresh");
+        assert_eq!(replay_count, 1, "other must Replay");
+        assert_eq!(
+            repo.count_attempts_for_logical("logical-c").await.unwrap(),
+            1
+        );
+    }
+
+    /// get_by_client_operation_id 与 list_recoverable_queued_sends。
+    #[tokio::test]
+    async fn get_by_client_op_and_list_recoverable_queued() {
+        let repo = setup_upgraded_repo().await;
+        let task = TransferTask {
+            filename: "q.bin".into(),
+            file_path: "/tmp/q.bin".into(),
+            size: 3,
+            sha256: "cc".into(),
+            direction: TransferDirection::Send,
+            peer_device_id: "peer".into(),
+            status: TransferStatus::Pending,
+            created_at: "2026-07-14T04:00:00Z".into(),
+            phase: Some(TransferPhase::Queued),
+            attempt: 2,
+            logical_transfer_id: "logical-q".into(),
+            attempt_id: "attempt-q".into(),
+            protocol_transfer_id: "proto-q".into(),
+            client_operation_id: Some("op-q".into()),
+            operation_payload_hash: Some("hash-q".into()),
+            ..TransferTask::recovery_defaults("attempt-q")
+        };
+        repo.claim_sender_operation("op-q", "hash-q", &task)
+            .await
+            .unwrap();
+        let by_op = repo.get_by_client_operation_id("op-q").await.unwrap().unwrap();
+        assert_eq!(by_op.id, "attempt-q");
+        let recoverable = repo.list_recoverable_queued_sends().await.unwrap();
+        assert!(recoverable.iter().any(|t| t.id == "attempt-q"));
     }
 }

@@ -28,6 +28,16 @@ pub use storage::ScratchpadRepo;
 // S6 quality_faults：peer 响应丢失幂等收敛 + 稳定 code 分类需直连 PeerClient。
 pub use net::peer_client::{PeerClient, TransferCompletePolicy};
 pub use net::peer_error::PeerCallError;
+// N5 transfer recovery smoke：claim / capability 黑盒验证。
+pub use models::transfer::{
+    canonical_recovery_payload_hash, TransferDirection, TransferFailure, TransferFailureStage,
+    TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
+};
+pub use net::protocol::{
+    server_protocol_info, CAPABILITY_TRANSFER_RESUME_V1, PROTOCOL_VERSION_V1,
+};
+pub use storage::transfer_repo::SenderClaimOutcome;
+pub use storage::TransferRepo;
 mod claude_cli;
 mod claude_code_assets;
 pub mod cloud_sync;
@@ -272,6 +282,8 @@ pub fn run() {
             transfer_cmd::list_transfers,
             transfer_cmd::send_transfer,
             transfer_cmd::cancel_transfer,
+            transfer_cmd::retry_transfer,
+            transfer_cmd::resume_transfer,
             screenshot_cmd::start_region_capture,
             screenshot_cmd::get_region_snapshot,
             screenshot_cmd::save_clipboard_image,

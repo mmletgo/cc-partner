@@ -3721,6 +3721,7 @@ pub fn resolve_filename(dir: &Path, filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::TransferRepo;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Once;
@@ -3839,6 +3840,8 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // N5 recovery 列：幂等升级（与生产 ensure_schema 一致）。
+        TransferRepo::ensure_schema(&pool).await.unwrap();
 
         let config = AppConfig {
             device_id: "device-test".to_string(),
@@ -4844,6 +4847,7 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
+        TransferRepo::ensure_schema(&state.db).await.expect("ensure recovery schema");
 
         let retry = handle_complete(&state, &transfer_id)
             .await
@@ -4945,6 +4949,7 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
+        TransferRepo::ensure_schema(&state.db).await.expect("ensure recovery schema");
 
         let init_err = handle_init(
             &state,
@@ -5080,6 +5085,7 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
+        TransferRepo::ensure_schema(&state.db).await.expect("ensure recovery schema");
 
         let init_err = handle_init(
             &state,
@@ -5729,6 +5735,7 @@ mod tests {
         .execute(&state.db)
         .await
         .expect("recreate history");
+        TransferRepo::ensure_schema(&state.db).await.expect("ensure recovery schema");
 
         let retry = handle_chunk(&state, &transfer_id, 0, payload.to_vec())
             .await

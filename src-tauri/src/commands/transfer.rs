@@ -1,7 +1,8 @@
 //! commands/transfer.rs — 文件传输命令（本地前端 invoke）
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     前端传输面板通过 invoke 调用：列出传输任务（活跃+历史）、发起发送、取消任务。
+//!     前端传输面板通过 invoke 调用：列出传输任务（活跃+历史）、发起发送、取消任务、
+//!     幂等 retry/resume（clientOperationId）。
 //!     对照 Python `/api/transfer/tasks`、`/api/transfer/send`、`DELETE /api/transfer/tasks/{id}`。
 //!
 //! Code Logic（这个模块做什么）:
@@ -10,6 +11,7 @@
 //!     - `send_transfer`：调 `transfer::sender::start_sending`（内部 spawn 异步任务），
 //!       立即返回 `{accepted, deviceId, filePath}`。
 //!     - `cancel_transfer`：触发 CancellationToken，返回 `{ok, id}`。
+//!     - `retry_transfer` / `resume_transfer`：本机 owner 路径幂等 claim 后 spawn。
 
 use crate::error::AppError;
 use crate::models::transfer::TransferTaskDto;
@@ -77,4 +79,48 @@ pub async fn cancel_transfer(
         return Err(AppError::not_found(format!("传输任务不存在: {task_id}")));
     }
     Ok(serde_json::json!({ "ok": true, "id": task_id }))
+}
+
+/// 幂等重新传输（新 protocol id，同 logical transfer）。
+///
+/// Business Logic（为什么需要这个命令）:
+///     失败且可重试的发送任务需要用户显式“重新传输”；同一 clientOperationId 不得重复 attempt。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `sender::retry_transfer`；返回新/回放 attempt 的 DTO。
+#[tauri::command]
+pub async fn retry_transfer(
+    state: State<'_, AppState>,
+    task_id: String,
+    client_operation_id: String,
+) -> Result<TransferTaskDto, AppError> {
+    let task = sender::retry_transfer(
+        state.inner().clone(),
+        task_id,
+        client_operation_id,
+    )
+    .await?;
+    Ok(task.to_dto(None))
+}
+
+/// 幂等断点续传（复用稳定 protocol transfer id）。
+///
+/// Business Logic（为什么需要这个命令）:
+///     有 resume metadata 且对端支持时从 checkpoint 继续；旧 peer 返回 unsupported。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `sender::resume_transfer`；返回新/回放 attempt 的 DTO。
+#[tauri::command]
+pub async fn resume_transfer(
+    state: State<'_, AppState>,
+    task_id: String,
+    client_operation_id: String,
+) -> Result<TransferTaskDto, AppError> {
+    let task = sender::resume_transfer(
+        state.inner().clone(),
+        task_id,
+        client_operation_id,
+    )
+    .await?;
+    Ok(task.to_dto(None))
 }

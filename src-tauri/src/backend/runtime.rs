@@ -611,6 +611,23 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                     }
                 });
             }
+            // N5：恢复 insert-before-spawn 的 transfer Queued claim 行。
+            {
+                let transfer_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    match crate::transfer::sender::recover_pending_claimed_operations(&transfer_state)
+                        .await
+                    {
+                        Ok(n) if n > 0 => {
+                            tracing::info!("已恢复 {n} 个 transfer insert-before-spawn Queued 任务");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("恢复 pending transfer claim 失败: {e}");
+                        }
+                    }
+                });
+            }
             // 周期性 tombstone → deletion floor GC（与同步结束后的 best-effort 互补）
             {
                 let gc_state = state.clone();
