@@ -63,6 +63,7 @@ impl RemoteOutboxStatus {
     ///
     /// Code Logic（这个函数做什么）:
     ///     解析数据库状态字符串；未知状态返回 AppError。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Result<Self, AppError> {
         match value {
             "pending" => Ok(Self::Pending),
