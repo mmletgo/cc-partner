@@ -1,19 +1,26 @@
 /**
- * Workbench project/worktree/session/path/save 运行时 schema。
+ * Workbench project/worktree/session/path/save/file 运行时 schema。
  *
  * Business Logic（为什么需要这个模块）:
  *   工作台关键 DTO 损坏不得覆盖 active project/worktree 状态或文件保存基线。
  *
  * Code Logic（这个模块做什么）:
- *   解码 Project/Worktree/Session/PathInfo/SaveTextResult 关键结构。
+ *   解码 Project/Worktree/Session/PathInfo/SaveTextResult/FileNode/OpenFile 关键结构。
  */
 
 import type {
+  WorkbenchCsvPreview,
+  WorkbenchFileCapabilities,
+  WorkbenchFileNode,
   WorkbenchGitStatus,
+  WorkbenchImagePreview,
+  WorkbenchOpenFile,
   WorkbenchPathInfo,
   WorkbenchProject,
   WorkbenchSaveTextResult,
   WorkbenchSession,
+  WorkbenchSqlitePreview,
+  WorkbenchTextContent,
   WorkbenchWorktree,
 } from '../types/workbench';
 import {
@@ -22,6 +29,7 @@ import {
   nullableDecoder,
   numberDecoder,
   objectDecoder,
+  optionalDecoder,
   stringDecoder,
   type Decoder,
 } from '../runtimeSchema';
@@ -152,5 +160,124 @@ export const workbenchSaveTextResultDecoder: Decoder<WorkbenchSaveTextResult> = 
     metadata: workbenchPathInfoDecoder,
     baseHash: stringDecoder,
     baseModifiedAt: nullableDecoder(stringDecoder),
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   文件树叶子节点只需必填 metadata，避免深度 children 递归膨胀。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   校验 name/path/kind/size/modifiedAt；不解码嵌套 children。
+ */
+const workbenchFileNodeLeafDecoder: Decoder<WorkbenchFileNode> = objectDecoder(
+  'WorkbenchFileNodeLeaf',
+  {
+    name: stringDecoder,
+    path: stringDecoder,
+    kind: stringDecoder,
+    size: nullableDecoder(numberDecoder),
+    modifiedAt: nullableDecoder(stringDecoder),
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   目录列表写入文件树前必须拒绝残缺节点，避免 path/kind 污染展开态。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   校验必填 metadata；children 仅一层浅校验（叶子无再嵌套 children）。
+ */
+export const workbenchFileNodeDecoder: Decoder<WorkbenchFileNode> = objectDecoder(
+  'WorkbenchFileNode',
+  {
+    name: stringDecoder,
+    path: stringDecoder,
+    kind: stringDecoder,
+    size: nullableDecoder(numberDecoder),
+    modifiedAt: nullableDecoder(stringDecoder),
+    children: optionalDecoder(nullableDecoder(arrayDecoder(workbenchFileNodeLeafDecoder))),
+  },
+);
+
+/** 文件节点列表 decoder。 */
+export const workbenchFileNodesDecoder: Decoder<WorkbenchFileNode[]> = arrayDecoder(
+  workbenchFileNodeDecoder,
+);
+
+const workbenchFileCapabilitiesDecoder: Decoder<WorkbenchFileCapabilities> = objectDecoder(
+  'WorkbenchFileCapabilities',
+  {
+    canPreview: booleanDecoder,
+    canEdit: booleanDecoder,
+    canFormat: booleanDecoder,
+    mustValidateBeforeSave: booleanDecoder,
+    // 前向兼容 string，再收敛为 WorkbenchFileMode 联合。
+    defaultMode: stringDecoder as Decoder<WorkbenchFileCapabilities['defaultMode']>,
+    availableModes: arrayDecoder(stringDecoder) as Decoder<
+      WorkbenchFileCapabilities['availableModes']
+    >,
+  },
+);
+
+const workbenchTextContentDecoder: Decoder<WorkbenchTextContent> = objectDecoder(
+  'WorkbenchTextContent',
+  {
+    content: stringDecoder,
+    baseHash: stringDecoder,
+    baseModifiedAt: nullableDecoder(stringDecoder),
+  },
+);
+
+const workbenchImagePreviewDecoder: Decoder<WorkbenchImagePreview> = objectDecoder(
+  'WorkbenchImagePreview',
+  {
+    dataUrl: stringDecoder,
+    mime: stringDecoder,
+    width: nullableDecoder(numberDecoder),
+    height: nullableDecoder(numberDecoder),
+  },
+);
+
+const workbenchCsvPreviewDecoder: Decoder<WorkbenchCsvPreview> = objectDecoder(
+  'WorkbenchCsvPreview',
+  {
+    columns: arrayDecoder(stringDecoder),
+    rows: arrayDecoder(arrayDecoder(stringDecoder)),
+    truncated: booleanDecoder,
+  },
+);
+
+const workbenchSqlitePreviewDecoder: Decoder<WorkbenchSqlitePreview> = objectDecoder(
+  'WorkbenchSqlitePreview',
+  {
+    tables: arrayDecoder(stringDecoder),
+    selectedTable: nullableDecoder(stringDecoder),
+    columns: arrayDecoder(stringDecoder),
+    rows: arrayDecoder(arrayDecoder(stringDecoder)),
+    truncated: booleanDecoder,
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   打开文件结果驱动 tab 能力与保存基线，损坏 payload 不得写入编辑器状态。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 metadata/detectedType/capabilities 与可空 text/image/csv/sqlite 载荷。
+ */
+export const workbenchOpenFileDecoder: Decoder<WorkbenchOpenFile> = objectDecoder(
+  'WorkbenchOpenFile',
+  {
+    metadata: workbenchPathInfoDecoder,
+    // 前向兼容 string，再收敛为 WorkbenchDetectedFileType 联合。
+    detectedType: stringDecoder as Decoder<WorkbenchOpenFile['detectedType']>,
+    capabilities: workbenchFileCapabilitiesDecoder,
+    text: nullableDecoder(workbenchTextContentDecoder),
+    image: nullableDecoder(workbenchImagePreviewDecoder),
+    csv: nullableDecoder(workbenchCsvPreviewDecoder),
+    sqlite: nullableDecoder(workbenchSqlitePreviewDecoder),
+    truncated: booleanDecoder,
+    notice: nullableDecoder(stringDecoder),
   },
 );

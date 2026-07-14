@@ -10,6 +10,7 @@
 
 import type {
   OrchestratorAttemptPhase,
+  OrchestratorEvidence,
   OrchestratorRemoteOutboxItem,
   OrchestratorRemoteOutboxStatus,
   OrchestratorRemoteRuntimeStatus,
@@ -268,3 +269,43 @@ export const orchestratorTaskViewListResponseDecoder: Decoder<{ views: Orchestra
   objectDecoder('OrchestratorTaskViewListResponse', {
     views: orchestratorTaskViewListDecoder,
   });
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   任务详情 evidence 时间线依赖完整 id/kind/content，残缺项不得进入详情态。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 OrchestratorEvidence 全部必填 string 字段（kind 允许前向 string）。
+ */
+export const orchestratorEvidenceDecoder: Decoder<OrchestratorEvidence> = objectDecoder(
+  'OrchestratorEvidence',
+  {
+    id: stringDecoder,
+    taskId: stringDecoder,
+    kind: stringDecoder,
+    title: stringDecoder,
+    summary: stringDecoder,
+    content: stringDecoder,
+    createdAt: stringDecoder,
+  },
+);
+
+/** evidence 列表 decoder。 */
+export const orchestratorEvidenceListDecoder: Decoder<OrchestratorEvidence[]> = arrayDecoder(
+  orchestratorEvidenceDecoder,
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   项目刷新结果驱动 dispatched 提示，损坏字段不得伪造领取成功。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 projectId 与 dispatched 计数。
+ */
+export const orchestratorProjectRefreshResultDecoder: Decoder<{
+  projectId: string;
+  dispatched: number;
+}> = objectDecoder('OrchestratorProjectRefreshResult', {
+  projectId: stringDecoder,
+  dispatched: numberDecoder,
+});

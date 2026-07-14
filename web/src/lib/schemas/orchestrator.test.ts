@@ -5,6 +5,9 @@
 import { describe, expect, test } from 'vitest';
 import { ContractDecodeError } from '../runtimeSchema';
 import {
+  orchestratorEvidenceDecoder,
+  orchestratorEvidenceListDecoder,
+  orchestratorProjectRefreshResultDecoder,
   orchestratorRemoteOutboxItemDecoder,
   orchestratorRuntimeSnapshotDecoder,
   orchestratorTaskDecoder,
@@ -82,8 +85,23 @@ const validOutbox = {
   sentAt: null,
 };
 
+const validEvidence = {
+  id: 'e1',
+  taskId: 't1',
+  kind: 'verifier',
+  title: 'tests',
+  summary: 'passed',
+  content: 'ok',
+  createdAt: '2026-07-13T00:00:00.000Z',
+};
+
+const validRefresh = {
+  projectId: 'p1',
+  dispatched: 2,
+};
+
 describe('orchestrator schemas', () => {
-  test('decodes task/runtime/outbox/taskView', () => {
+  test('decodes task/runtime/outbox/taskView/evidence/refresh', () => {
     expect(orchestratorTaskDecoder.decode(validTask).id).toBe('t1');
     expect(orchestratorRuntimeSnapshotDecoder.decode(validRuntime).remoteStatus).toBe('local');
     expect(orchestratorRemoteOutboxItemDecoder.decode(validOutbox).status).toBe('failed');
@@ -96,6 +114,9 @@ describe('orchestrator schemas', () => {
         item: validOutbox,
       }),
     ).toMatchObject({ origin: 'pendingRemote' });
+    expect(orchestratorEvidenceDecoder.decode(validEvidence).kind).toBe('verifier');
+    expect(orchestratorEvidenceListDecoder.decode([validEvidence])).toHaveLength(1);
+    expect(orchestratorProjectRefreshResultDecoder.decode(validRefresh).dispatched).toBe(2);
   });
 
   test('malformed workflowState fails', () => {
@@ -107,6 +128,18 @@ describe('orchestrator schemas', () => {
   test('malformed remoteStatus fails', () => {
     expect(() =>
       orchestratorRuntimeSnapshotDecoder.decode({ ...validRuntime, remoteStatus: 'online' }),
+    ).toThrow(ContractDecodeError);
+  });
+
+  test('malformed evidence content fails', () => {
+    expect(() =>
+      orchestratorEvidenceDecoder.decode({ ...validEvidence, content: 12 }),
+    ).toThrow(ContractDecodeError);
+  });
+
+  test('malformed refresh dispatched fails', () => {
+    expect(() =>
+      orchestratorProjectRefreshResultDecoder.decode({ ...validRefresh, dispatched: '2' }),
     ).toThrow(ContractDecodeError);
   });
 });

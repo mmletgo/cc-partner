@@ -12,6 +12,8 @@
 
 import { invoke, invokeDecoded } from './client';
 import {
+  workbenchFileNodesDecoder,
+  workbenchOpenFileDecoder,
   workbenchPathInfoDecoder,
   workbenchProjectDecoder,
   workbenchProjectsDecoder,
@@ -25,20 +27,16 @@ import type {
   ResumeClaudeSessionResult,
   SessionPreview,
   SessionSearchHit,
-  WorkbenchFileNode,
   WorkbenchFormatResult,
   WorkbenchBrowserDiscovery,
   WorkbenchBrowserPreview,
   WorkbenchGitCommit,
   WorkbenchHtmlAsset,
   WorkbenchMergeResult,
-  WorkbenchOpenFile,
   WorkbenchPathInfo,
-  WorkbenchProject,
   WorkbenchRemoteDirectoryEntry,
   WorkbenchRemotePathInfo,
   WorkbenchRemoteRoot,
-  WorkbenchSession,
   WorkbenchSqlitePreview,
 } from '@/lib/types';
 
@@ -81,9 +79,15 @@ export const workbenchApi = {
     info: (deviceId: string, path: string) =>
       invoke<WorkbenchRemotePathInfo>('get_workbench_remote_path_info', { deviceId, path }),
 
-    /** 直接打开局域网设备上的远端项目目录，并返回可加入最近项目列表的 DTO。 */
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   打开远端项目目录后写入最近项目列表，损坏 DTO 不得进入项目 rail。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded open_workbench_remote_project → WorkbenchProject。
+     */
     openProject: (deviceId: string, path: string) =>
-      invoke<WorkbenchProject>('open_workbench_remote_project', { deviceId, path }),
+      invokeDecoded('open_workbench_remote_project', { deviceId, path }, workbenchProjectDecoder),
   },
 
   worktrees: {
@@ -260,9 +264,15 @@ export const workbenchApi = {
         sessionId,
       }),
 
-    /** 重命名 terminal window。 */
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   重命名 terminal window 后 tab 标签依赖返回 session；残缺 name 不得覆盖当前 tab。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded rename_workbench_session → WorkbenchSession。
+     */
     rename: (sessionId: string, name: string) =>
-      invoke<WorkbenchSession>('rename_workbench_session', { sessionId, name }),
+      invokeDecoded('rename_workbench_session', { sessionId, name }, workbenchSessionDecoder),
   },
 
   claudeSessions: {
@@ -292,13 +302,23 @@ export const workbenchApi = {
   },
 
   files: {
-    /** 列出项目内目录的一级子节点；path 为空表示项目根。 */
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   文件树展开依赖目录节点；残缺 path/kind 不得写入 childrenByPath。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded list_workbench_dir → WorkbenchFileNode[]；path 空表示项目根。
+     */
     listDir: (projectId: string, path?: string, worktreeId?: string | null) =>
-      invoke<WorkbenchFileNode[]>('list_workbench_dir', {
-        projectId,
-        worktreeId: worktreeId ?? null,
-        path: path ?? null,
-      }),
+      invokeDecoded(
+        'list_workbench_dir',
+        {
+          projectId,
+          worktreeId: worktreeId ?? null,
+          path: path ?? null,
+        },
+        workbenchFileNodesDecoder,
+      ),
 
     /**
      * Business Logic（为什么需要这个函数）:
@@ -318,13 +338,23 @@ export const workbenchApi = {
         workbenchPathInfoDecoder,
       ),
 
-    /** 打开项目内文件，返回类型能力与可用内容或预览。 */
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   打开文件写入 tab 的能力与 baseHash 基线，损坏 payload 不得进入编辑器。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded open_workbench_file → WorkbenchOpenFile。
+     */
     open: (projectId: string, path: string, worktreeId?: string | null) =>
-      invoke<WorkbenchOpenFile>('open_workbench_file', {
-        projectId,
-        worktreeId: worktreeId ?? null,
-        path,
-      }),
+      invokeDecoded(
+        'open_workbench_file',
+        {
+          projectId,
+          worktreeId: worktreeId ?? null,
+          path,
+        },
+        workbenchOpenFileDecoder,
+      ),
 
     /**
      * Business Logic（为什么需要这个函数）:
