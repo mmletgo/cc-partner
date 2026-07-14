@@ -13,18 +13,64 @@ export type MobileWorkbenchPanel =
   | 'automation'
   | 'settings';
 
-const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
-  'projects',
-  'attention',
-  'automation',
-  'terminal',
-  'browser',
-  'files',
-  'git',
-  'worktrees',
-  'prompt',
-  'settings',
+/**
+ * 移动端主导航任务分组 id。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   十个扁平 panel 增加导航负担；按任务分组后仍映射既有 MobileWorkbenchPanel，不引入第二套路由。
+ *
+ * Code Logic（联合形态）:
+ *   projects/attention/work/automation/more 五个稳定分组 id。
+ */
+export type MobileWorkbenchNavGroupId =
+  | 'projects'
+  | 'attention'
+  | 'work'
+  | 'automation'
+  | 'more';
+
+/**
+ * 移动端主导航分组。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   Drawer/rail 需要按组渲染 section + 组内 panel 入口，并保证每个 panel 恰好出现一次。
+ *
+ * Code Logic（字段说明）:
+ *   id 为分组；panels 为该组包含的 MobileWorkbenchPanel 只读列表。
+ */
+export interface MobileWorkbenchNavGroup {
+  id: MobileWorkbenchNavGroupId;
+  panels: readonly MobileWorkbenchPanel[];
+}
+
+/**
+ * 软键盘/viewport 派生的 shell 尺寸提示。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   软键盘弹出时 visualViewport 变矮，shell 与终端需压缩高度并保留顶部菜单可见。
+ *
+ * Code Logic（字段说明）:
+ *   shellHeight/keyboardInset 为 CSS 像素；landscape 表示宽>高。
+ */
+export interface MobileViewportLayoutHints {
+  shellHeight: number;
+  keyboardInset: number;
+  landscape: boolean;
+  terminalMinHeight: number;
+}
+
+/** 设计合同：Projects / Attention / Work / Automation / More 映射，每个 panel 恰好一次。 */
+const MOBILE_WORKBENCH_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
+  { id: 'projects', panels: ['projects', 'worktrees'] },
+  { id: 'attention', panels: ['attention'] },
+  { id: 'work', panels: ['terminal', 'browser', 'files', 'git', 'prompt'] },
+  { id: 'automation', panels: ['automation'] },
+  { id: 'more', panels: ['settings'] },
 ];
+
+/** 由分组扁平化得到的 panel 顺序，保证与分组合同一致。 */
+const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] =
+  MOBILE_WORKBENCH_NAV_GROUPS.flatMap((group) => group.panels);
 
 export type MobileWorktreeStatusKind = 'clean' | 'dirty' | 'conflict';
 
@@ -173,10 +219,106 @@ export function getInitialMobileWorkbenchPanel(): MobileWorkbenchPanel {
  *   移动端 Workbench 的 shell 导航、测试和后续面板扩展需要共享同一份项目级面板顺序，避免自动化入口被误放到 worktree 快捷切换器。
  *
  * Code Logic（这个函数做什么）:
- *   返回只读的移动端主面板顺序；attention 固定为 projects 后第二项，automation 为项目级同级面板。
+ *   返回由导航分组扁平化得到的只读主面板顺序；每个 panel 恰好出现一次。
  */
 export function getMobileWorkbenchPanelOrder(): readonly MobileWorkbenchPanel[] {
   return MOBILE_WORKBENCH_PANEL_ORDER;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Drawer/rail 需要按任务分组渲染导航，降低十个扁平入口的扫描成本。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回固定的 Projects/Attention/Work/Automation/More 分组合同（只读）。
+ */
+export function getMobileWorkbenchNavGroups(): readonly MobileWorkbenchNavGroup[] {
+  return MOBILE_WORKBENCH_NAV_GROUPS;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   选中 panel 时要高亮所属分组，且深链/测试需要从 panel 反查 group。
+ *
+ * Code Logic（这个函数做什么）:
+ *   遍历分组表，返回包含该 panel 的 group id；未命中时抛错（合同完整性守卫）。
+ */
+export function getMobileNavGroupIdForPanel(
+  panel: MobileWorkbenchPanel,
+): MobileWorkbenchNavGroupId {
+  for (const group of MOBILE_WORKBENCH_NAV_GROUPS) {
+    if (group.panels.includes(panel)) {
+      return group.id;
+    }
+  }
+  throw new Error(`Panel ${panel} is not mapped to any mobile nav group`);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   软键盘占用 visualViewport 下方时，shell 需要知道 inset，避免菜单被顶走或覆盖终端输入。
+ *
+ * Code Logic（这个函数做什么）:
+ *   keyboardInset = max(0, layoutViewportHeight - visualViewportHeight - visualViewportOffsetTop)。
+ */
+export function computeMobileKeyboardInset(
+  layoutViewportHeight: number,
+  visualViewportHeight: number,
+  visualViewportOffsetTop: number,
+): number {
+  const inset =
+    layoutViewportHeight - visualViewportHeight - Math.max(0, visualViewportOffsetTop);
+  return Math.max(0, Math.round(inset));
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   横屏时终端应优先占可视高度；竖屏保留常规比例，并在软键盘弹出后压缩。
+ *
+ * Code Logic（这个函数做什么）:
+ *   基于可用高度（viewportHeight - keyboardInset）与 landscape 计算 terminalMinHeight。
+ */
+export function computeMobileTerminalMinHeight(
+  viewportWidth: number,
+  viewportHeight: number,
+  keyboardInset: number,
+): number {
+  const available = Math.max(0, viewportHeight - Math.max(0, keyboardInset));
+  const landscape = viewportWidth > viewportHeight;
+  const ratio = landscape ? 0.72 : 0.48;
+  return Math.max(160, Math.round(available * ratio));
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   shell CSS 变量需要一次计算 keyboard inset、shell 高度与终端优先高度，避免组件内散落公式。
+ *
+ * Code Logic（这个函数做什么）:
+ *   组合 visualViewport/layout 尺寸，返回 MobileViewportLayoutHints。
+ */
+export function computeMobileViewportLayoutHints(
+  layoutViewportWidth: number,
+  layoutViewportHeight: number,
+  visualViewportHeight: number | null,
+  visualViewportOffsetTop: number,
+): MobileViewportLayoutHints {
+  const vvHeight =
+    visualViewportHeight != null && Number.isFinite(visualViewportHeight)
+      ? visualViewportHeight
+      : layoutViewportHeight;
+  const keyboardInset = computeMobileKeyboardInset(
+    layoutViewportHeight,
+    vvHeight,
+    visualViewportOffsetTop,
+  );
+  const shellHeight = Math.max(0, Math.round(vvHeight));
+  const landscape = layoutViewportWidth > layoutViewportHeight;
+  const terminalMinHeight = computeMobileTerminalMinHeight(
+    layoutViewportWidth,
+    shellHeight,
+    keyboardInset,
+  );
+  return { shellHeight, keyboardInset, landscape, terminalMinHeight };
 }
 
 /**

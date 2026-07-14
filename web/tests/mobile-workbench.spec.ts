@@ -400,9 +400,19 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
     await expect(drawer).toHaveCount(0);
     await expect(openNav).toBeFocused();
 
-    // Projects → Attention → Terminal → Files → Automation
+    // 分组导航：Projects/Attention/Work/Automation/More；每个 panel 入口仍可点
     await openNav.click();
-    await page.getByRole('dialog').getByRole('button', { name: /^项目/ }).click();
+    const drawerOpen = page.getByRole('dialog');
+    await expect(drawerOpen.getByText('工作', { exact: true })).toBeVisible();
+    await expect(drawerOpen.getByText('更多', { exact: true })).toBeVisible();
+    await expect(drawerOpen.locator('[data-nav-group="projects"]')).toBeVisible();
+    await expect(drawerOpen.locator('[data-nav-group="work"]')).toBeVisible();
+    await expect(drawerOpen.locator('[data-nav-group="more"]')).toBeVisible();
+    // 无 bottom nav
+    await expect(page.locator('[data-testid="mobile-bottom-nav"]')).toHaveCount(0);
+
+    // Projects → Attention → Terminal → Files → Automation
+    await drawerOpen.getByRole('button', { name: /^项目/ }).click();
     const projectCard = page.getByRole('button', { name: /mobile-demo/ });
     await expect(projectCard).toBeVisible({ timeout: 10_000 });
 
@@ -511,5 +521,48 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
     await expect(page.getByText('状态可能已过期')).toBeVisible({ timeout: 15_000 });
     // 列表仍保留
     await expect(page.getByText('Review delivery')).toBeVisible();
+  });
+});
+
+test.describe('E2E-MOBILE-001 landscape 844x390 shell', () => {
+  test.use({ viewport: { width: 844, height: 390 } });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   844×390 横屏须写入 shell 高度 token、保留可见导航（宽屏 rail 或窄屏顶部菜单），不引入 bottom nav。
+   *
+   * Code Logic（这个测试做什么）:
+   *   打开 /mobile；≥820 时断言 rail 导航；shell data-landscape；无 bottom nav。
+   */
+  test('keeps visible navigation and landscape shell tokens without bottom nav', async ({
+    page,
+    backendHarness,
+  }) => {
+    const project = makeMobileProject();
+    const worktree = makeMobileWorktree(project.id);
+    const session = makeMobileSession(project.id, worktree.id);
+    await page.addInitScript(() => {
+      window.localStorage.setItem('cp-lang', 'zh');
+      window.localStorage.setItem('cp-theme', 'light');
+    });
+    registerMobileRoutes(backendHarness, { project, worktree, session });
+
+    await page.goto('/mobile');
+    // 844≥820：宽屏 rail 常驻；菜单按钮隐藏但导航仍可见
+    await expect(page.getByRole('navigation', { name: /移动端工作台面板/ }).first()).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect(page.locator('[data-testid="mobile-bottom-nav"]')).toHaveCount(0);
+    await expect(page.getByTestId('mobile-open-navigation')).toBeHidden();
+
+    const shell = page.getByTestId('mobile-workbench-shell');
+    await expect(shell).toBeVisible();
+    await expect
+      .poll(async () => shell.getAttribute('data-landscape'), { timeout: 5_000 })
+      .toBe('true');
+    const shellHeight = await shell.evaluate((el) =>
+      getComputedStyle(el).getPropertyValue('--mobile-shell-height').trim(),
+    );
+    expect(shellHeight.length).toBeGreaterThan(0);
   });
 });

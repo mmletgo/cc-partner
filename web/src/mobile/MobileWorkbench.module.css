@@ -3,17 +3,24 @@
 }
 
 .shell {
-  min-height: 100dvh;
+  /* visualViewport 驱动的 shell 高度；软键盘弹出时由 JS 写入 --mobile-shell-height */
+  height: var(--mobile-shell-height, 100dvh);
+  min-height: 0;
+  max-height: var(--mobile-shell-height, 100dvh);
   color: var(--fg);
   background: var(--bg);
   display: grid;
   grid-template-rows: auto 1fr;
   overflow: hidden;
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--mobile-keyboard-inset, 0px));
+  box-sizing: border-box;
 }
 
 .topbar {
   min-height: calc(var(--space-12) + var(--space-2));
-  padding: env(safe-area-inset-top) var(--space-3) var(--space-2);
+  padding: max(env(safe-area-inset-top, 0px), var(--space-2))
+    max(env(safe-area-inset-right, 0px), var(--space-3)) var(--space-2)
+    max(env(safe-area-inset-left, 0px), var(--space-3));
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -22,6 +29,8 @@
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
+  /* 软键盘打开时顶部菜单仍须可见，不随内容滚走 */
+  flex: 0 0 auto;
 }
 
 .menuButton,
@@ -95,11 +104,15 @@
   width: min(82vw, calc(var(--sidebar-width) + var(--space-20)));
   max-width: 100%;
   box-sizing: border-box;
-  padding: calc(env(safe-area-inset-top) + var(--space-3)) var(--space-3) var(--space-4);
+  padding: calc(env(safe-area-inset-top, 0px) + var(--space-3))
+    max(env(safe-area-inset-right, 0px), var(--space-3))
+    calc(env(safe-area-inset-bottom, 0px) + var(--space-4))
+    max(env(safe-area-inset-left, 0px), var(--space-3));
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
   background: var(--surface);
+  overflow: auto;
 }
 
 .drawerHeader,
@@ -117,6 +130,32 @@
 
 .navList {
   display: grid;
+  gap: var(--space-4);
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.navGroup {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.navGroupLabel {
+  padding: 0 var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  /* 分组标题不可聚焦，仅作 aria-labelledby 关联 */
+  user-select: none;
+}
+
+.navGroupItems {
+  display: grid;
   gap: var(--space-1);
 }
 
@@ -125,7 +164,7 @@
   min-height: calc(var(--space-8) + var(--space-2));
   padding: var(--space-2) var(--space-3);
   display: grid;
-  grid-template-columns: var(--space-5) minmax(0, 1fr);
+  grid-template-columns: var(--space-5) minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-2);
   color: var(--fg-2);
@@ -876,7 +915,16 @@
 }
 
 .mobileTerminalPanel {
-  min-height: calc(100dvh - var(--space-24) - var(--space-12));
+  /* 竖屏默认；横屏/软键盘时由 shell 的 --mobile-terminal-min-height 提升优先级 */
+  min-height: var(--mobile-terminal-min-height, calc(100dvh - var(--space-24) - var(--space-12)));
+}
+
+.shell[data-landscape='true'] .mobileTerminalPanel {
+  min-height: var(--mobile-terminal-min-height, 72dvh);
+}
+
+.shell[data-keyboard-open='true'] .mobileTerminalPanel {
+  min-height: var(--mobile-terminal-min-height, 40dvh);
 }
 
 .mobileTerminalPanel[data-fullscreen='true'] {

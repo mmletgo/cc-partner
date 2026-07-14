@@ -362,6 +362,13 @@
       "automation": "自动化",
       "settings": "设置"
     },
+    "navGroups": {
+      "projects": "项目",
+      "attention": "待处理",
+      "work": "工作",
+      "automation": "自动化",
+      "more": "更多"
+    },
     "placeholders": {
       "projects": {
         "title": "项目",

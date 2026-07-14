@@ -117,4 +117,39 @@ describe('WorkbenchInspector keyboard semantics', () => {
     fireEvent.keyDown(screen.getByRole('tab', { name: 'Git 历史' }), { key: 'End' });
     expect(setInspectorTab).toHaveBeenCalledWith('history');
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   1024×768 堆叠布局下 inspector 入口仍须可发现，tablist 不能因窄高被卸载或隐藏。
+   *
+   * Code Logic（这个测试做什么）:
+   *   在 1024×768 约束容器中渲染 inspector，断言 tablist/tabs 可见且仍可键盘切换。
+   */
+  test('inspector remains discoverable inside a 1024x768 constrained viewport', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 });
+
+    const { setInspectorTab } = renderInspector('files');
+    const host = screen.getByRole('tablist', { name: '工作台右侧栏' }).parentElement;
+    expect(host).toBeTruthy();
+    if (host) {
+      host.style.width = '1024px';
+      host.style.maxHeight = '768px';
+      host.style.overflow = 'auto';
+    }
+
+    const tablist = screen.getByRole('tablist', { name: '工作台右侧栏' });
+    const filesTab = screen.getByRole('tab', { name: '项目文件夹' });
+    const historyTab = screen.getByRole('tab', { name: 'Git 历史' });
+
+    expect(tablist).toBeTruthy();
+    expect(filesTab.getAttribute('tabindex')).toBe('0');
+    expect(historyTab.getAttribute('tabindex')).toBe('-1');
+    // getClientRects 在 jsdom 中常为空，改用 visibility/ display 合同
+    expect(window.getComputedStyle(tablist).display).not.toBe('none');
+    expect(window.getComputedStyle(filesTab).visibility).not.toBe('hidden');
+
+    fireEvent.keyDown(filesTab, { key: 'ArrowRight' });
+    expect(setInspectorTab).toHaveBeenCalledWith('history');
+  });
 });

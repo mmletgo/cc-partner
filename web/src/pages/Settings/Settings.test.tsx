@@ -806,3 +806,71 @@ describe('Settings safe save preserves concurrent edits', () => {
     expect(commands.value).toBe('npm test\nnpm run lint\nnpm run build');
   });
 });
+
+describe('Settings narrow tablist deep-link a11y', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   ≤680px 深链打开 Settings 时，tablist/tab/tabpanel 语义与 roving tabindex 必须可用，
+   *   且选中 tab 只由 tablist 自身 scrollTo，不滚动页面主容器。
+   *
+   * Code Logic（这个测试做什么）:
+   *   挂载前 polyfill Element.scrollTo；深链 tab=about，断言 ARIA、tabIndex、方向键与 tablist.scrollTo。
+   */
+  test('deep-link about tab uses tablist scrollTo and roving keyboard', async () => {
+    searchParamsState.value = new URLSearchParams('tab=about');
+    const pageScrollTo = vi.fn();
+    Object.defineProperty(window, 'scrollTo', {
+      configurable: true,
+      value: pageScrollTo,
+    });
+
+    const tablistScrollTo = vi.fn(function tablistScrollToImpl(
+      this: HTMLElement,
+      arg?: ScrollToOptions | number,
+    ) {
+      if (typeof arg === 'object' && arg && typeof arg.left === 'number') {
+        this.scrollLeft = arg.left;
+      }
+    });
+    const originalScrollTo = HTMLElement.prototype.scrollTo;
+    HTMLElement.prototype.scrollTo = tablistScrollTo as typeof HTMLElement.prototype.scrollTo;
+
+    try {
+      renderSettings();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('settings-tablist')).toBeTruthy();
+      });
+
+      await waitFor(() => {
+        expect(tablistScrollTo).toHaveBeenCalled();
+      });
+      expect(pageScrollTo).not.toHaveBeenCalled();
+
+      const aboutTab = screen.getByRole('tab', { name: 'settings:tabs.about' });
+      const generalTab = screen.getByRole('tab', { name: 'settings:tabs.general' });
+      expect(aboutTab.getAttribute('aria-selected')).toBe('true');
+      expect(aboutTab.getAttribute('tabindex')).toBe('0');
+      expect(generalTab.getAttribute('tabindex')).toBe('-1');
+      expect(aboutTab.getAttribute('aria-controls')).toBe('settings-panel-about');
+      expect(screen.getByRole('tabpanel').id).toBe('settings-panel-about');
+
+      // 切换到 automation 再 Arrow，验证 roving + 再次 scrollTo
+      fireEvent.click(screen.getByTestId('settings-tab-automation'));
+      await waitFor(() => {
+        expect(
+          screen.getByRole('tab', { name: 'settings:tabs.automation' }).getAttribute(
+            'aria-selected',
+          ),
+        ).toBe('true');
+      });
+      const automationTab = screen.getByRole('tab', { name: 'settings:tabs.automation' });
+      fireEvent.keyDown(automationTab, { key: 'ArrowLeft' });
+      await waitFor(() => {
+        expect(setSearchParamsMock).toHaveBeenCalled();
+      });
+    } finally {
+      HTMLElement.prototype.scrollTo = originalScrollTo;
+    }
+  });
+});

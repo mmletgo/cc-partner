@@ -557,14 +557,21 @@
     grid-template-columns: 1fr;
   }
 
+  /* 窄屏 tablist 自身横向滚动；深链选中 tab 由 Settings.tsx 对 tablist.scrollTo，不滚动页面 */
   .tabs {
     align-self: stretch;
+    max-width: 100%;
     overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    scroll-padding-inline: var(--space-2);
   }
 
   .tab,
   .tabActive {
-    flex: 1 0 auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 
   .metaRow,

@@ -367,6 +367,13 @@
       "settings": "Settings",
       "attention": "Attention"
     },
+    "navGroups": {
+      "projects": "Projects",
+      "attention": "Attention",
+      "work": "Work",
+      "automation": "Automation",
+      "more": "More"
+    },
     "placeholders": {
       "projects": {
         "title": "Projects",
