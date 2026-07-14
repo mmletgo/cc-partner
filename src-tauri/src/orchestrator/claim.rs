@@ -243,10 +243,7 @@ pub async fn preflight_claim_candidates_with_resolver(
         }
         (prev, true)
     } else if exhausted {
-        (
-            candidates.last().map(ClaimCandidate::to_scan_cursor),
-            true,
-        )
+        (candidates.last().map(ClaimCandidate::to_scan_cursor), true)
     } else {
         (candidates.last().map(ClaimCandidate::to_scan_cursor), false)
     };

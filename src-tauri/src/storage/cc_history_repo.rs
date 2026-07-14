@@ -318,10 +318,7 @@ impl ClaudeHistoryRepo {
                 ids.len()
             )));
         }
-        let placeholders = (0..ids.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
+        let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT id, project_path, project_name, session_id, content, git_branch, cc_version, \
              occurred_at, device_id, vector_clock, created_at, updated_at, deleted \
@@ -350,10 +347,7 @@ impl ClaudeHistoryRepo {
     ///     空切片返回 0；否则显式 begin，逐条 INSERT OR REPLACE，全部成功后 commit；
     ///     中途 Err 时 Transaction drop 自动 rollback，调用方看到错误且 earlier rows 未提交。
     ///     语义与 bulk_upsert 相同（REPLACE），与 bulk_ingest 的 IGNORE 严格分离。
-    pub async fn upsert_merged_batch(
-        &self,
-        items: &[ClaudeHistoryRow],
-    ) -> Result<usize, AppError> {
+    pub async fn upsert_merged_batch(&self, items: &[ClaudeHistoryRow]) -> Result<usize, AppError> {
         self.upsert_merged_batch_inner(items, None).await
     }
 
@@ -695,7 +689,12 @@ mod tests {
             }
             // 页内 id 升序
             for w in page.windows(2) {
-                assert!(w[0].id < w[1].id, "page not sorted: {} >= {}", w[0].id, w[1].id);
+                assert!(
+                    w[0].id < w[1].id,
+                    "page not sorted: {} >= {}",
+                    w[0].id,
+                    w[1].id
+                );
             }
             for s in &page {
                 assert!(
@@ -758,7 +757,9 @@ mod tests {
         assert_eq!(map.len(), 80);
         for i in 0..80 {
             let id = format!("ex-{i:03}");
-            let got = map.get(&id).unwrap_or_else(|| panic!("missing existing {id}"));
+            let got = map
+                .get(&id)
+                .unwrap_or_else(|| panic!("missing existing {id}"));
             assert_eq!(got.content, format!("body-{i}"));
             assert_eq!(got.vector_clock.get("d1"), Some(&((i as u64) + 1)));
         }
@@ -844,9 +845,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n2, 1);
-        assert_eq!(
-            repo.get("m2").await.unwrap().unwrap().content,
-            "fresh"
-        );
+        assert_eq!(repo.get("m2").await.unwrap().unwrap().content, "fresh");
     }
 }

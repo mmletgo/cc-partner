@@ -12,9 +12,7 @@ use crate::backend::ui::HeadlessBackendUi;
 use crate::cc::engine::cc_sync_with_peer;
 use crate::cc::merger::merge_cc_history;
 use crate::cc::models::ClaudeHistoryRow;
-use crate::config::{
-    AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
-};
+use crate::config::{AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
 use crate::models::device::Device;
 use crate::net::peer_client::PeerClient;
 use crate::net::protocol::{CAPABILITY_CC_HISTORY_PAGED_SYNC_V1, PROTOCOL_VERSION_V1};
@@ -103,10 +101,7 @@ async fn manifest_page_handler(
     let mut rows: Vec<ClaudeHistoryRow> = st.store.rows.lock().unwrap().values().cloned().collect();
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     let start = match after_id {
-        Some(id) => rows
-            .iter()
-            .position(|r| r.id > id)
-            .unwrap_or(rows.len()),
+        Some(id) => rows.iter().position(|r| r.id > id).unwrap_or(rows.len()),
         None => 0,
     };
     let page: Vec<_> = rows.into_iter().skip(start).take(256).collect();
@@ -335,7 +330,9 @@ async fn build_local_state(device_id: &str) -> AppState {
         github_trending: GithubTrendingConfig::default(),
     };
     // S3 ConfigRuntime + UpdateRuntime；与 config 共享同一 Arc。
-    let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(config.clone()));
+    let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
+        config.clone(),
+    ));
     let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(config, store));
     let config = config_runtime.shared_value();
 
@@ -606,14 +603,8 @@ async fn assert_item_too_large_halves_and_isolates_poison_async() {
     let store = PeerStore::default();
     {
         let mut g = store.rows.lock().unwrap();
-        g.insert(
-            "good-a".into(),
-            sample_row("good-a", "peer", "ok-a", 1),
-        );
-        g.insert(
-            "good-b".into(),
-            sample_row("good-b", "peer", "ok-b", 1),
-        );
+        g.insert("good-a".into(), sample_row("good-a", "peer", "ok-a", 1));
+        g.insert("good-b".into(), sample_row("good-b", "peer", "ok-b", 1));
         let mut poison = sample_row("poison", "peer", "x", 1);
         poison.content = "P".repeat(CC_CONTENT_MAX_BYTES + 8);
         g.insert("poison".into(), poison);

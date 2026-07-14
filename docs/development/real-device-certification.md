@@ -39,18 +39,18 @@ fabricate PASS from CI, Playwright, or single-host smoke.
 **App version baseline:** `0.6.7`  
 **Commit baseline (branch tip when matrix was authored; certification commit SHA
 is reported after `test: certify cross surface quality matrix` lands):**
-`987ec3c32b18f83c231e4b7921c18dc850cd1409`
+`b0e13467384a1d13d832bfcee40456cff82c90e4`
 
 All L3 surfaces below were **not** executed as packaged real-device
 certification in this Task 10 session. Status is therefore **NOT VERIFIED**.
 
 | ID | Surface | appVersion | commit | OS build | status | evidence | date | expiresAt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| L3-MACOS-GUI-PERMISSIONS-001 | macOS packaged GUI launch; screen/accessibility/input/notification grant-deny-retry; screenshot clipboard | 0.6.7 | 987ec3c… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-WINDOWS-GUI-001 | Windows packaged GUI; file transfer path/dialog; native terminal | 0.6.7 | 987ec3c… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-WINDOWS-WSL-001 | Windows WSL + tmux Workbench terminal recovery | 0.6.7 | 987ec3c… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-UBUNTU-GUI-001 | Ubuntu AppImage/deb GUI; terminal + file flows | 0.6.7 | 987ec3c… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-DUAL-HOST-LAN-001 | Two physical hosts same LAN: mDNS; native P2P + mobile credential-free R/W; public peer / XFF / Host / Origin / WS / remote stop rejection; 1GiB transfer + resume | 0.6.7 | 987ec3c… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-MACOS-GUI-PERMISSIONS-001 | macOS packaged GUI launch; screen/accessibility/input/notification grant-deny-retry; screenshot clipboard | 0.6.7 | b0e1346… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-WINDOWS-GUI-001 | Windows packaged GUI; file transfer path/dialog; native terminal | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-WINDOWS-WSL-001 | Windows WSL + tmux Workbench terminal recovery | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-UBUNTU-GUI-001 | Ubuntu AppImage/deb GUI; terminal + file flows | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-DUAL-HOST-LAN-001 | Two physical hosts same LAN: mDNS; native P2P + mobile credential-free R/W; public peer / XFF / Host / Origin / WS / remote stop rejection; 1GiB transfer + resume | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
 
 ### What automated layers already cover (not L3)
 

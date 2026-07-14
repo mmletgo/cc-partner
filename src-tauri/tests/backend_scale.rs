@@ -364,11 +364,7 @@ async fn orchestrator_claim_cursor_skips_invalid_window_then_wraps() {
             continue;
         }
         let preflight = preflight_claim_candidates(page).await.unwrap();
-        if let Some(c) = preflight
-            .eligible
-            .iter()
-            .find(|c| c.task.id == "good-task")
-        {
+        if let Some(c) = preflight.eligible.iter().find(|c| c.task.id == "good-task") {
             good_eligible = Some(vec![c.clone()]);
             break;
         }

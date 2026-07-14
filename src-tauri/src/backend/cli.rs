@@ -276,13 +276,10 @@ fn render_doctor_text(snapshot: &DoctorSnapshot) -> String {
         Some(port) => lines.push(format!(
             "listener: wildcard 0.0.0.0 (actual http port={port})"
         )),
-        None => lines.push(
-            "listener: wildcard 0.0.0.0 (actual http port unavailable)".to_string(),
-        ),
+        None => lines.push("listener: wildcard 0.0.0.0 (actual http port unavailable)".to_string()),
     }
     lines.push(
-        "risk: 同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份"
-            .to_string(),
+        "risk: 同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份".to_string(),
     );
 
     let problems = collect_problem_checks(snapshot);

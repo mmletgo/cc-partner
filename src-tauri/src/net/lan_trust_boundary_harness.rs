@@ -821,7 +821,11 @@ async fn run_matrix_async() {
 
     println!("=== LAN trust boundary smoke matrix PASS ===");
     println!("NOTE: multi-host mDNS / phone QR / real public peer path = NOT VERIFIED here");
-    println!("NOTE: preview registry live/expired + Origin:null HTTP/WS-headers verified on bound stack");
-    println!("NOTE: real WebSocket bridge to Vite upstream = NOT VERIFIED here (session layer only)");
+    println!(
+        "NOTE: preview registry live/expired + Origin:null HTTP/WS-headers verified on bound stack"
+    );
+    println!(
+        "NOTE: real WebSocket bridge to Vite upstream = NOT VERIFIED here (session layer only)"
+    );
     println!("NOTE: browser L1 Playwright = S6 ownership (not duplicated)");
 }

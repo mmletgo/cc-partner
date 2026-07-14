@@ -18,7 +18,9 @@
       ],
       "command": "cd web && npm test -- src/lib/runtimeSchema.test.ts src/lib/schemas",
       "ciJob": "frontend-unit",
-      "platforms": ["node-linux"],
+      "platforms": [
+        "node-linux"
+      ],
       "exclusions": [
         "Tauri WebView IPC host",
         "real multi-host LAN payloads"
@@ -36,7 +38,9 @@
       ],
       "command": "cd web && npm run test:e2e -- transfer.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real Tauri file dialog",
         "multi-host LAN transfer",
@@ -55,7 +59,9 @@
       ],
       "command": "cd web && npm run test:e2e -- scratchpad.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real tray/GUI close path",
         "multi-device scratchpad sync"
@@ -73,7 +79,9 @@
       ],
       "command": "cd web && npm run test:e2e -- prompts.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real P2P prompt sync",
         "packaged desktop GUI"
@@ -91,7 +99,9 @@
       ],
       "command": "cd web && npm run test:e2e -- permissions.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real macOS permission dialogs",
         "system notification center",
@@ -110,7 +120,9 @@
       ],
       "command": "cd web && npm run test:e2e -- settings.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real updater install/restart",
         "real dependency install side effects"
@@ -128,7 +140,9 @@
       ],
       "command": "cd web && npm run test:e2e -- workbench.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real native PTY/tmux host",
         "multi-host remote project ownership",
@@ -147,7 +161,9 @@
       ],
       "command": "cd web && npm run test:e2e -- mobile-workbench.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux-viewport-390x844"],
+      "platforms": [
+        "chromium-linux-viewport-390x844"
+      ],
       "exclusions": [
         "phone QR second-device browser",
         "real multi-host mobile relay",
@@ -166,7 +182,9 @@
       ],
       "command": "cd web && npm run test:e2e -- lan-boundary.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real ConnectInfo peer classification",
         "multi-host mDNS discovery",
@@ -186,7 +204,9 @@
       ],
       "command": "cd web && npm run test:e2e -- attention.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real multi-device outbox delivery",
         "packaged desktop GUI"
@@ -204,7 +224,9 @@
       ],
       "command": "cd web && npm run test:e2e -- core-integrity.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real Tauri dialog plugin host",
         "multi-host LAN"
@@ -222,7 +244,9 @@
       ],
       "command": "cd web && npm run test:e2e -- frontend-foundation.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "packaged desktop GUI",
         "real system a11y trees outside Chromium"
@@ -240,7 +264,9 @@
       ],
       "command": "cd web && npm run test:e2e -- screenshot-overlay.spec.ts",
       "ciJob": "frontend-e2e",
-      "platforms": ["chromium-linux"],
+      "platforms": [
+        "chromium-linux"
+      ],
       "exclusions": [
         "real screen capture / system clipboard",
         "macOS permission dialogs"
@@ -402,7 +428,7 @@
         "browser mock substitute",
         "CI Playwright claim"
       ],
-      "commit": "987ec3c32b18f83c231e4b7921c18dc850cd1409",
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
       "version": "0.6.7",
       "date": "2026-07-14",
       "expiresAt": "2026-10-12",
@@ -431,7 +457,7 @@
         "browser mock substitute",
         "WSL + tmux (see L3-WINDOWS-WSL-001)"
       ],
-      "commit": "987ec3c32b18f83c231e4b7921c18dc850cd1409",
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
       "version": "0.6.7",
       "date": "2026-07-14",
       "expiresAt": "2026-10-12",
@@ -459,7 +485,7 @@
         "hosted runner smoke claims WSL",
         "native Windows terminal only (see L3-WINDOWS-GUI-001)"
       ],
-      "commit": "987ec3c32b18f83c231e4b7921c18dc850cd1409",
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
       "version": "0.6.7",
       "date": "2026-07-14",
       "expiresAt": "2026-10-12",
@@ -488,7 +514,7 @@
         "browser mock substitute",
         "ubuntu CI headless quality is not packaged GUI cert"
       ],
-      "commit": "987ec3c32b18f83c231e4b7921c18dc850cd1409",
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
       "version": "0.6.7",
       "date": "2026-07-14",
       "expiresAt": "2026-10-12",
@@ -518,7 +544,7 @@
         "X-Forwarded-For spoof as public peer evidence",
         "identity auth (product has none)"
       ],
-      "commit": "987ec3c32b18f83c231e4b7921c18dc850cd1409",
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
       "version": "0.6.7",
       "date": "2026-07-14",
       "expiresAt": "2026-10-12",
