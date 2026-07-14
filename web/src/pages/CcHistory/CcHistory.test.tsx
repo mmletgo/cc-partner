@@ -373,3 +373,116 @@ describe('CcHistory stale response guards', () => {
     });
   });
 });
+
+describe('CcHistory action failure recovery', () => {
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   动作失败合同需要一条已加载的历史 Prompt 作为操作对象。
+   *
+   * Code Logic（这个函数做什么）:
+   *   mock 单项目 + 单 prompt 并等待卡片渲染完成。
+   */
+  async function renderWithOnePrompt(
+    item: CcHistoryItem = buildPrompt({ id: 'keep-1', content: 'KEEP-ME-PROMPT' }),
+  ): Promise<CcHistoryItem> {
+    const project = buildProject({
+      projectPath: item.projectPath,
+      projectName: item.projectName,
+      count: 1,
+    });
+    fakeCcHistoryApi.listProjects.mockResolvedValue([project]);
+    fakeCcHistoryApi.listPrompts.mockResolvedValue([item]);
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(item.content)).toBeTruthy();
+    });
+    return item;
+  }
+
+  test('保存到 Prompt 失败显示 alert 与可重试，不静默', async () => {
+    const item = await renderWithOnePrompt(
+      buildPrompt({ id: 'save-fail', content: 'SAVE-FAIL-PROMPT' }),
+    );
+    fakePromptsApi.create.mockRejectedValue(new Error('prompt-create-down'));
+
+    fireEvent.click(screen.getByRole('button', { name: '转存为 Prompt' }));
+
+    await waitFor(() => {
+      expect(fakePromptsApi.create).toHaveBeenCalled();
+      expect(screen.getByRole('alert')).toBeTruthy();
+      expect(screen.getByText(/转存到 Prompt 失败|保存到 Prompt/)).toBeTruthy();
+      expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+    });
+
+    // 条目本身仍在
+    expect(screen.getByText(item.content)).toBeTruthy();
+
+    fakePromptsApi.create.mockResolvedValue({ id: 'new-prompt' });
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+
+    await waitFor(() => {
+      expect(fakePromptsApi.create).toHaveBeenCalledTimes(2);
+      expect(screen.getByText(/已转存到 Prompt 库/)).toBeTruthy();
+    });
+  });
+
+  test('删除失败回滚列表项并提供重试', async () => {
+    const item = await renderWithOnePrompt(
+      buildPrompt({ id: 'del-fail', content: 'DELETE-FAIL-PROMPT' }),
+    );
+    fakeCcHistoryApi.remove.mockRejectedValue(new Error('delete-offline'));
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '删除' })).toBeTruthy();
+      expect(screen.getByText(/确认要从历史中删除/)).toBeTruthy();
+    });
+
+    // 确认弹层中的危险删除按钮
+    const confirmButtons = screen.getAllByRole('button', { name: '删除' });
+    fireEvent.click(confirmButtons[confirmButtons.length - 1]);
+
+    await waitFor(() => {
+      expect(fakeCcHistoryApi.remove).toHaveBeenCalledWith('del-fail');
+    });
+
+    // 失败后条目回滚可见
+    await waitFor(() => {
+      expect(screen.getByText(item.content)).toBeTruthy();
+      expect(screen.getByRole('alert')).toBeTruthy();
+      expect(screen.getByText(/删除失败/)).toBeTruthy();
+      expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+    });
+
+    // 重试再次调用 remove
+    fakeCcHistoryApi.remove.mockResolvedValue({ ok: true });
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+
+    await waitFor(() => {
+      expect(fakeCcHistoryApi.remove).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText(item.content)).toBeNull();
+    });
+  });
+
+  test('成功删除不暴露假 Undo', async () => {
+    const item = await renderWithOnePrompt(
+      buildPrompt({ id: 'del-ok', content: 'DELETE-OK-PROMPT' }),
+    );
+    fakeCcHistoryApi.remove.mockResolvedValue({ ok: true });
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    await waitFor(() => {
+      expect(screen.getByText(/确认要从历史中删除/)).toBeTruthy();
+    });
+    const confirmButtons = screen.getAllByRole('button', { name: '删除' });
+    fireEvent.click(confirmButtons[confirmButtons.length - 1]);
+
+    await waitFor(() => {
+      expect(fakeCcHistoryApi.remove).toHaveBeenCalledWith('del-ok');
+      expect(screen.queryByText(item.content)).toBeNull();
+    });
+
+    expect(screen.queryByRole('button', { name: /撤销|Undo/i })).toBeNull();
+    expect(screen.queryByText(/撤销|Undo/i)).toBeNull();
+  });
+});

@@ -13,6 +13,64 @@ export interface MobileFileDirtySnapshot {
 
 export type MobileGitPanelAction = 'commit' | 'push' | 'merge';
 
+/**
+ * 移动端 Git/worktree mutation UI 相位。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   unknown 后必须进入 reconciling 对账，禁止盲重放；ambiguous 保持 unknown 并锁动作。
+ *
+ * Code Logic（联合形态）:
+ *   idle/busy/reconciling/unknown；confirmed 不作为持久相位（成功后回 idle）。
+ */
+export type MobileMutationPhase = 'idle' | 'busy' | 'reconciling' | 'unknown';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   envelope.succeeded 可立即推进 UI；unknown 先 reconciling，对账后再 confirmed / failed / unknown。
+ *
+ * Code Logic（这个函数做什么）:
+ *   reconcileResult 为 null 表示对账进行中；终态成功/失败分别返回 confirmed*；否则 unknown。
+ */
+export function resolveMobileMutationPhase(
+  envelopeKind: 'succeeded' | 'unknown',
+  reconcileResult: 'confirmedSucceeded' | 'confirmedFailed' | 'unknown' | null,
+): 'confirmedSucceeded' | 'confirmedFailed' | MobileMutationPhase {
+  if (envelopeKind === 'succeeded') return 'confirmedSucceeded';
+  if (reconcileResult === null) return 'reconciling';
+  if (reconcileResult === 'confirmedSucceeded') return 'confirmedSucceeded';
+  if (reconcileResult === 'confirmedFailed') return 'confirmedFailed';
+  return 'unknown';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   unknown/reconciling 期间禁止用新 clientOperationId 盲重放，必须复用原 id。
+ *
+ * Code Logic（这个函数做什么）:
+ *   phase 为 reconciling|unknown 且已有 id 时返回既有 id；否则返回 nextId。
+ */
+export function pickMobileMutationOperationId(
+  phase: MobileMutationPhase,
+  existingId: string | null,
+  nextId: string,
+): string {
+  if ((phase === 'reconciling' || phase === 'unknown') && existingId) {
+    return existingId;
+  }
+  return nextId;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   unknown 相位必须禁用动作，防止用户生成新 ID 再发一次。
+ *
+ * Code Logic（这个函数做什么）:
+ *   phase 为 busy|reconciling|unknown 时返回 true。
+ */
+export function isMobileMutationActionLocked(phase: MobileMutationPhase): boolean {
+  return phase === 'busy' || phase === 'reconciling' || phase === 'unknown';
+}
+
 export interface MobileWorktreeRemovalPlan {
   nextWorktrees: WorkbenchWorktree[];
   nextActive: WorkbenchWorktree | null;

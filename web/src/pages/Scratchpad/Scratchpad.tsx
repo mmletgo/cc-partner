@@ -71,12 +71,27 @@ function formatLocalDateTime(value: string): string {
 }
 
 /**
+ * 速记本 openPage / 同步 reload 的导航上下文。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   快速切页时旧 getPage 响应不得覆盖最新选中页；同步 reload 不得清掉用户新 draft。
+ *
+ * Code Logic（字段说明）:
+ *   pageId 为目标页；navigationSeq 为单调导航序号。
+ */
+type ScratchpadNavigationTarget = {
+  pageId: string;
+  navigationSeq: number;
+};
+
+/**
  * Business Logic（为什么需要）:
  *   用户需要一个可随手记录、自动保留内容的多页面速记空间。
  *
  * Code Logic（做什么）:
  *   管理页面列表、当前页、标题草稿、正文草稿和保存/同步状态；
  *   正文保存走常驻 queue.schedule/flushPage，卸载时 void queue.flushAll()。
+ *   openPage 用 {pageId,navigationSeq} 丢弃过期响应；同步 reload 在 draftVersion>0 时保留 draft。
  */
 export function Scratchpad() {
   const { t } = useTranslation(['scratchpad', 'common']);
@@ -102,6 +117,12 @@ export function Scratchpad() {
   const currentPageIdRef = useRef<string | null>(null);
   const historyRequestSeqRef = useRef(0);
   const conflictRequestSeqRef = useRef(0);
+  /** 单调递增导航序号：仅最新 seq 的 open 可写 UI。 */
+  const navigationSeqRef = useRef(0);
+  /** 当前导航目标 pageId（可能尚在加载）。 */
+  const activeTargetPageIdRef = useRef<string | null>(null);
+  /** 当前页本地编辑代数；>0 表示相对最近一次 hydrate/flush 有未对账 draft。 */
+  const draftVersionRef = useRef(0);
 
   const autosaveSnapshot = useSyncExternalStore(
     queue.subscribe,
@@ -128,11 +149,48 @@ export function Scratchpad() {
   }, [autosaveError, error, t]);
 
   /**
+   * Business Logic（为什么需要这个函数）:
+   *   openPage 成功后需要统一判定是否仍是最新导航目标，并决定是否保留本地 draft。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 navigationSeq + active target；同页且 draftVersion>0 且允许保留时只更新 baseline 元数据。
+   */
+  const commitOpenedPage = useCallback(
+    (
+      page: ScratchpadPage,
+      target: ScratchpadNavigationTarget,
+      allowPreserveDraft: boolean,
+    ): boolean => {
+      if (navigationSeqRef.current !== target.navigationSeq) return false;
+      if (activeTargetPageIdRef.current !== target.pageId) return false;
+      if (page.id !== target.pageId) return false;
+
+      const isSamePage = currentPageIdRef.current === page.id;
+      const preserveDraft = allowPreserveDraft && isSamePage && draftVersionRef.current > 0;
+
+      currentPageIdRef.current = page.id;
+      setCurrentPage(page);
+      setPendingClear(false);
+      setPendingDelete(false);
+
+      if (!preserveDraft) {
+        textRef.current = page.content;
+        setTitleDraft(page.title);
+        setText(page.content);
+        draftVersionRef.current = 0;
+      }
+      return true;
+    },
+    [],
+  );
+
+  /**
    * Business Logic（为什么需要）:
    *   切页、删除、同步前必须保存用户尚未落库的正文，避免内容丢失。
    *
    * Code Logic（做什么）:
    *   对当前 pageId 调用 queue.flushPage；无当前页时直接返回。
+   *   若 pending 已全部落库且正文与 queue 快照一致，将 draftVersion 归零，允许后续 sync hydrate。
    */
   const flushPendingSave = useCallback(async () => {
     const pageId = currentPageIdRef.current;
@@ -141,6 +199,9 @@ export function Scratchpad() {
       await queue.flushPage(pageId);
       const snap = queue.getSnapshot().pages[pageId];
       if (snap && snap.savedVersion >= snap.pendingVersion && !snap.error) {
+        if (textRef.current === snap.content) {
+          draftVersionRef.current = 0;
+        }
         setStatus(t('scratchpad:savedAt', { time: new Date().toLocaleTimeString() }));
         const latestPages = await scratchpadApi.listPages();
         setPages(latestPages);
@@ -172,13 +233,17 @@ export function Scratchpad() {
    *   保存失败后用户需要可重试，且不得丢弃 pending 正文。
    *
    * Code Logic（做什么）:
-   *   对当前页再次 flushPage；成功后刷新列表与状态。
+   *   对当前页再次 flushPage；成功后刷新列表与状态；内容已落库且匹配时归零 draftVersion。
    */
   const handleRetrySave = useCallback(async () => {
     if (!currentPageId) return;
     setError(null);
     try {
       await queue.flushPage(currentPageId);
+      const snap = queue.getSnapshot().pages[currentPageId];
+      if (snap && snap.savedVersion >= snap.pendingVersion && !snap.error && textRef.current === snap.content) {
+        draftVersionRef.current = 0;
+      }
       setStatus(t('scratchpad:savedAt', { time: new Date().toLocaleTimeString() }));
       const latestPages = await scratchpadApi.listPages();
       setPages(latestPages);
@@ -212,25 +277,39 @@ export function Scratchpad() {
    *   页面切换或刷新列表后，编辑区必须展示指定页面的最新正文。
    *
    * Code Logic（做什么）:
-   *   读取页面详情并同步 currentPage/titleDraft/text/ref 状态；刷新冲突标记。
+   *   以 {pageId,navigationSeq} 发起 getPage；仅最新 navigationSeq 且 active target 匹配时提交 UI。
+   *   allowPreserveDraft 时同页 draftVersion>0 只更新 baseline，不覆盖本地正文/标题草稿。
+   *   成功提交后关闭版本历史抽屉并刷新冲突标记。
    */
   const openPage = useCallback(
-    async (pageId: string) => {
-      const page = await scratchpadApi.getPage(pageId);
-      currentPageIdRef.current = page.id;
-      textRef.current = page.content;
-      setCurrentPage(page);
-      setTitleDraft(page.title);
-      setText(page.content);
-      setPendingClear(false);
-      setPendingDelete(false);
-      setHistoryOpen(false);
-      setVersions([]);
-      setVersionsError(null);
-      void refreshConflictFlag(page.id);
-      return page;
+    async (pageId: string, options?: { allowPreserveDraft?: boolean }) => {
+      const navigationSeq = navigationSeqRef.current + 1;
+      navigationSeqRef.current = navigationSeq;
+      activeTargetPageIdRef.current = pageId;
+      const target: ScratchpadNavigationTarget = { pageId, navigationSeq };
+      const allowPreserveDraft = Boolean(options?.allowPreserveDraft);
+
+      try {
+        const page = await scratchpadApi.getPage(pageId);
+        if (commitOpenedPage(page, target, allowPreserveDraft)) {
+          setHistoryOpen(false);
+          setVersions([]);
+          setVersionsError(null);
+          void refreshConflictFlag(page.id);
+        }
+        return page;
+      } catch (err) {
+        if (
+          navigationSeqRef.current === navigationSeq
+          && activeTargetPageIdRef.current === pageId
+        ) {
+          throw err;
+        }
+        // 过期请求的失败不得写入当前目标页 error
+        return null;
+      }
     },
-    [refreshConflictFlag],
+    [commitOpenedPage, refreshConflictFlag],
   );
 
   /**
@@ -238,17 +317,27 @@ export function Scratchpad() {
    *   用户首次进入或删除最后一页后仍需要可编辑页面。
    *
    * Code Logic（做什么）:
-   *   创建默认标题页面，刷新列表，并打开新页面。
+   *   创建默认标题页面，刷新列表，并打开新页面；递增 navigationSeq 使在途 openPage 失效。
    */
   const createAndOpenDefaultPage = useCallback(async () => {
+    const navigationSeq = navigationSeqRef.current + 1;
+    navigationSeqRef.current = navigationSeq;
+
     const page = await scratchpadApi.createPage(t('scratchpad:newPage'));
+    activeTargetPageIdRef.current = page.id;
     const latestPages = await scratchpadApi.listPages();
     setPages(latestPages);
+
+    if (navigationSeqRef.current !== navigationSeq) {
+      return page;
+    }
+
     currentPageIdRef.current = page.id;
     textRef.current = page.content;
     setCurrentPage(page);
     setTitleDraft(page.title);
     setText(page.content);
+    draftVersionRef.current = 0;
     setPendingClear(false);
     setPendingDelete(false);
     setHistoryOpen(false);
@@ -265,9 +354,10 @@ export function Scratchpad() {
    *
    * Code Logic（做什么）:
    *   拉取页面列表，优先打开 preferPageId；不存在则打开最新页；列表为空时创建默认页。
+   *   allowPreserveDraft 透传给 openPage，供同步 reload 保留用户编辑中的 draft。
    */
   const reloadPages = useCallback(
-    async (preferPageId?: string | null) => {
+    async (preferPageId?: string | null, options?: { allowPreserveDraft?: boolean }) => {
       const latestPages = await scratchpadApi.listPages();
       if (latestPages.length === 0) {
         setPages([]);
@@ -276,7 +366,7 @@ export function Scratchpad() {
 
       setPages(latestPages);
       const targetPage = latestPages.find((page) => page.id === preferPageId) ?? latestPages[0];
-      return openPage(targetPage.id);
+      return openPage(targetPage.id, { allowPreserveDraft: options?.allowPreserveDraft });
     },
     [createAndOpenDefaultPage, openPage],
   );
@@ -338,12 +428,13 @@ export function Scratchpad() {
    *   用户输入正文时应立即看到文本变化，并由系统自动保存。
    *
    * Code Logic（做什么）:
-   *   更新本地正文状态，记录 ref，并按当前 pageId 调度 debounce 保存。
+   *   更新本地正文状态，递增 draftVersion，记录 ref，并按当前 pageId 调度 debounce 保存。
    */
   const handleContentChange = useCallback(
     (value: string) => {
       setText(value);
       textRef.current = value;
+      draftVersionRef.current += 1;
       if (currentPageId) {
         scheduleContentSave(currentPageId, value);
       }
@@ -356,20 +447,29 @@ export function Scratchpad() {
    *   用户需要在多页速记本之间切换上下文。
    *
    * Code Logic（做什么）:
-   *   切页前 await flushPage 当前页，再 getPage 目标页。
+   *   切页前 await flushPage 当前页，再 openPage 目标页。
+   *   不因全局 loading 锁死切页；仅跳过已是当前导航目标的重复选择。
+   *   loading/error 归属目标 page：过期失败不写当前 error。
    */
   const handleSelectPage = useCallback(
     async (pageId: string) => {
-      if (pageId === currentPageId || loading) return;
+      if (pageId === activeTargetPageIdRef.current) return;
       setError(null);
       try {
         await flushPendingSave();
-        await openPage(pageId);
+        // flush 期间若用户又点了其它页，仍以本次意图打开；更晚的 openPage 会以更高 seq 覆盖。
+        const page = await openPage(pageId);
+        if (page === null && activeTargetPageIdRef.current === pageId) {
+          // openPage 仅在过期失败时返回 null；当前目标失败应已 throw。
+          return;
+        }
       } catch (err) {
-        setError(getErrorMessage(err, t('scratchpad:loadFailed')));
+        if (activeTargetPageIdRef.current === pageId) {
+          setError(getErrorMessage(err, t('scratchpad:loadFailed')));
+        }
       }
     },
-    [currentPageId, flushPendingSave, loading, openPage, t],
+    [flushPendingSave, openPage, t],
   );
 
   /**
@@ -470,12 +570,13 @@ export function Scratchpad() {
    *   用户确认清空后应立即看到空白页面，并由自动保存持久化。
    *
    * Code Logic（做什么）:
-   *   将正文置空，按当前 pageId 调度保存。
+   *   将正文置空，递增 draftVersion，按当前 pageId 调度保存。
    */
   const confirmClear = useCallback(() => {
     if (!currentPageId) return;
     setText('');
     textRef.current = '';
+    draftVersionRef.current += 1;
     setPendingClear(false);
     scheduleContentSave(currentPageId, '');
   }, [currentPageId, scheduleContentSave]);
@@ -547,7 +648,7 @@ export function Scratchpad() {
    *
    * Code Logic（做什么）:
    *   同步前 flush 当前页待保存内容，并发调用 LAN 与 GitHub 云同步；
-   *   汇总两路结果，最后刷新列表和当前页，避免其中一路失败阻断另一路。
+   *   汇总两路结果，最后刷新列表和当前页；reload 允许保留同步期间新产生的 draft。
    */
   const handleSync = useCallback(async () => {
     setSyncing(true);
@@ -559,7 +660,7 @@ export function Scratchpad() {
         scratchpadApi.sync(),
         configApi.triggerCloudSync(),
       ]);
-      await reloadPages(currentPageIdRef.current);
+      await reloadPages(currentPageIdRef.current, { allowPreserveDraft: true });
 
       const statusParts: string[] = [];
       const failureParts: string[] = [];

@@ -1072,6 +1072,7 @@ function EditPromptCard({
               tags={draft.tags}
               onChange={(tags) => onChange({ ...draft, tags })}
               placeholder={t('prompts:tagInputPlaceholder')}
+              ariaLabel={t('prompts:tagInputAriaLabel')}
             />
           </div>
         </Card.Body>

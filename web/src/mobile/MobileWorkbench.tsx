@@ -1,14 +1,28 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
-import { httpWorkbenchTransport } from '@/api/workbenchHttp';
+import {
+  createHttpOrchestratorClientRequestId,
+  httpWorkbenchTransport,
+  workbenchHttp,
+} from '@/api/workbenchHttp';
+import {
+  isMutationSucceeded,
+  isMutationUnknown,
+  WorkbenchMutationUnknownError,
+} from '@/lib/asyncState/mutationOutcome';
 import { useAttention } from '@/hooks/attentionContext';
 import type {
   AttentionItem,
+  MutationIntent,
   WorkbenchProject,
   WorkbenchSession,
   WorkbenchWorktree,
 } from '@/lib/types';
+import {
+  buildMergeRemoveAuthority,
+  reconcileWorkbenchMutation,
+} from '@/lib/workbenchMutationReconciliation';
 import type { MobileAutomationExecutionContext } from './components/MobileAutomationPanel';
 import { MobileAttentionPanel } from './components/MobileAttentionPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
@@ -23,10 +37,17 @@ import {
   canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
   getInitialMobileWorkbenchPanel,
+  getMobileConnectionCachedAt,
+  markMobileConnectionOffline,
+  markMobileConnectionOnline,
   selectMobilePanelForProject,
   selectMobileWorktreeWorkspacePanel,
   selectPreferredMobileSession,
   selectPreferredMobileWorktree,
+  shouldRefreshMobilePanelOnReconnect,
+  shouldSkipMobileProjectReload,
+  type MobileConnectionState,
+  type MobileProjectDetailStatus,
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
 import {
@@ -140,7 +161,9 @@ export function MobileWorkbench(): ReactElement {
   const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
   const [activeSession, setActiveSession] = useState<WorkbenchSession | null>(null);
   const [projectsLoading, setProjectsLoading] = useState<boolean>(false);
-  const [projectDetailsLoading, setProjectDetailsLoading] = useState<boolean>(false);
+  const [projectDetailStatus, setProjectDetailStatus] =
+    useState<MobileProjectDetailStatus>('idle');
+  const [connectionState, setConnectionState] = useState<MobileConnectionState | null>(null);
   const [worktreeOperationBusy, setWorktreeOperationBusy] = useState<boolean>(false);
   const [worktreeSwitcherOpen, setWorktreeSwitcherOpen] = useState<boolean>(false);
   // files 首次打开后保持挂载（hidden），以便 dirty snapshot 在切走后仍可用于 context guard
@@ -158,6 +181,7 @@ export function MobileWorkbench(): ReactElement {
   const [attentionFocusOutboxId, setAttentionFocusOutboxId] = useState<string | null>(null);
   const projectsRequestIdRef = useRef<number>(0);
   const projectDetailsRequestIdRef = useRef<number>(0);
+  const projectDetailsAbortRef = useRef<AbortController | null>(null);
   const worktreesRequestIdRef = useRef<number>(0);
   const sessionsRequestIdRef = useRef<number>(0);
   const activeProjectRef = useRef<WorkbenchProject | null>(null);
@@ -166,9 +190,12 @@ export function MobileWorkbench(): ReactElement {
   const worktreeOperationCountRef = useRef<number>(0);
   const sessionsRef = useRef<WorkbenchSession[]>([]);
   const projectsRef = useRef<WorkbenchProject[]>([]);
+  const panelRef = useRef<MobileWorkbenchPanel>(getInitialMobileWorkbenchPanel());
+  const connectionStateRef = useRef<MobileConnectionState | null>(null);
   const { t } = useTranslation(['workbench', 'attention']);
   const { snapshot: attentionSnapshot, refresh: refreshAttention } = useAttention();
   const attentionTotal = attentionSnapshot?.counts.total ?? null;
+  const projectDetailsLoading = projectDetailStatus === 'loading';
 
   const panelPlaceholders: Record<MobileWorkbenchPanel, { title: string; label: string }> = {
     projects: {
@@ -239,6 +266,35 @@ export function MobileWorkbench(): ReactElement {
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
+
+  useEffect(() => {
+    panelRef.current = panel;
+  }, [panel]);
+
+  useEffect(() => {
+    connectionStateRef.current = connectionState;
+  }, [connectionState]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   读成功时推进 online；失败时标 offline，供状态栏与恢复刷新判定。
+   *
+   * Code Logic（这个函数做什么）:
+   *   success=true 写 online；否则写 offline（保留既有 since）。
+   */
+  const noteConnectionOutcome = useCallback((success: boolean, lastError?: string): void => {
+    const now = Date.now();
+    const prev = connectionStateRef.current;
+    if (success) {
+      const next = markMobileConnectionOnline(now);
+      connectionStateRef.current = next;
+      setConnectionState(next);
+      return;
+    }
+    const next = markMobileConnectionOffline(lastError ?? 'offline', now, prev);
+    connectionStateRef.current = next;
+    setConnectionState(next);
+  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -365,15 +421,18 @@ export function MobileWorkbench(): ReactElement {
       const nextProjects = await httpWorkbenchTransport.projects.list();
       if (projectsRequestIdRef.current !== requestId) return;
       setProjects(nextProjects);
+      noteConnectionOutcome(true);
     } catch (reason) {
       if (projectsRequestIdRef.current !== requestId) return;
-      setError(getErrorMessage(reason));
+      const message = getErrorMessage(reason);
+      setError(message);
+      noteConnectionOutcome(false, message);
     } finally {
       if (projectsRequestIdRef.current === requestId) {
         setProjectsLoading(false);
       }
     }
-  }, []);
+  }, [noteConnectionOutcome]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -463,20 +522,28 @@ export function MobileWorkbench(): ReactElement {
    */
   const selectProject = useCallback(async (
     project: WorkbenchProject,
-    options: { nextPanel?: MobileWorkbenchPanel } = {},
+    options: { nextPanel?: MobileWorkbenchPanel; forceReload?: boolean } = {},
   ): Promise<boolean> => {
     const nextPanel = options.nextPanel ?? 'terminal';
     if (!canSelectMobileProject(project)) {
       projectDetailsRequestIdRef.current += 1;
-      setProjectDetailsLoading(false);
+      projectDetailsAbortRef.current?.abort();
+      setProjectDetailStatus('idle');
       setError(t('workbench:mobile.projectPanel.unsupportedProjectKind'));
       return false;
     }
-    if (activeProject?.id === project.id) {
+    // 同项目早退仅 ready；error/loading 必须允许重试
+    if (
+      !options.forceReload &&
+      shouldSkipMobileProjectReload(activeProject?.id ?? null, project.id, projectDetailStatus)
+    ) {
       setPanel(nextPanel);
       return true;
     }
-    if (!confirmFileContextSwitch(createMobileFilePanelContext(project, null))) {
+    if (
+      activeProject?.id !== project.id &&
+      !confirmFileContextSwitch(createMobileFilePanelContext(project, null))
+    ) {
       return false;
     }
 
@@ -485,22 +552,29 @@ export function MobileWorkbench(): ReactElement {
     setError(null);
     activeProjectRef.current = project;
     setActiveProject(project);
-    setWorktrees([]);
-    activeWorktreeRef.current = null;
-    setActiveWorktree(null);
-    setSessions([]);
-    sessionsRef.current = [];
-    setActiveSession(null);
+    if (activeProject?.id !== project.id) {
+      setWorktrees([]);
+      activeWorktreeRef.current = null;
+      setActiveWorktree(null);
+      setSessions([]);
+      sessionsRef.current = [];
+      setActiveSession(null);
+    }
+
+    projectDetailsAbortRef.current?.abort();
+    const abortController = new AbortController();
+    projectDetailsAbortRef.current = abortController;
 
     const requestId = projectDetailsRequestIdRef.current + 1;
     projectDetailsRequestIdRef.current = requestId;
-    setProjectDetailsLoading(true);
+    setProjectDetailStatus('loading');
 
     try {
       const [nextWorktrees, nextSessions] = await Promise.all([
         httpWorkbenchTransport.worktrees.list(project.id),
         httpWorkbenchTransport.sessions.list(project.id),
       ]);
+      if (abortController.signal.aborted) return false;
       if (projectDetailsRequestIdRef.current !== requestId) return false;
 
       const nextActiveWorktree = selectPreferredMobileWorktree(nextWorktrees);
@@ -516,17 +590,38 @@ export function MobileWorkbench(): ReactElement {
       setSessions(nextSessions);
       setActiveSession(nextActiveSession);
       setPanel(nextPanel);
+      setProjectDetailStatus('ready');
+      noteConnectionOutcome(true);
       return true;
     } catch (reason) {
+      if (abortController.signal.aborted) return false;
       if (projectDetailsRequestIdRef.current !== requestId) return false;
-      setError(getErrorMessage(reason));
+      const message = getErrorMessage(reason);
+      setError(message || t('workbench:mobile.projectPanel.detailError'));
+      setProjectDetailStatus('error');
+      noteConnectionOutcome(false, message);
       return false;
-    } finally {
-      if (projectDetailsRequestIdRef.current === requestId) {
-        setProjectDetailsLoading(false);
-      }
     }
-  }, [activeProject?.id, confirmFileContextSwitch, t]);
+  }, [
+    activeProject?.id,
+    confirmFileContextSwitch,
+    noteConnectionOutcome,
+    projectDetailStatus,
+    t,
+  ]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   详情 error 后用户必须能显式重试当前项目，而不是同项目 early return。
+   *
+   * Code Logic（这个函数做什么）:
+   *   对 activeProject forceReload selectProject。
+   */
+  const handleReloadProjectDetails = useCallback((): void => {
+    const project = activeProjectRef.current;
+    if (!project) return;
+    void selectProject(project, { forceReload: true, nextPanel: panelRef.current });
+  }, [selectProject]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -737,6 +832,7 @@ export function MobileWorkbench(): ReactElement {
       if (!shouldMerge) return false;
 
       const operationProjectId = activeProjectRef.current?.id ?? null;
+      const clientOperationId = createHttpOrchestratorClientRequestId();
       const endWorktreeOperation = beginWorktreeOperation();
       try {
         const result = await runMobileWorktreeMergeFlow({
@@ -746,7 +842,66 @@ export function MobileWorkbench(): ReactElement {
           confirmActiveWorktreeChange: (nextActive) =>
             handleConfirmActiveWorktreeChange(nextActive),
           mergeWorktree: async () => {
-            await httpWorkbenchTransport.worktrees.merge(sourceWorktree.id);
+            const envelope = await workbenchHttp.git.merge({
+              worktreeId: sourceWorktree.id,
+              clientOperationId,
+            });
+            if (isMutationSucceeded(envelope)) return;
+            if (isMutationUnknown(envelope)) {
+              const ledger = await workbenchHttp.git
+                .getMutationOperation(envelope.clientOperationId)
+                .catch(() => null);
+              await refreshWorktrees({
+                expectedProjectId: operationProjectId ?? undefined,
+              });
+              const intent: MutationIntent | null = ledger?.intent ?? null;
+              if (ledger?.state === 'succeeded') return;
+              if (ledger?.state === 'failed') {
+                throw new Error(t('workbench:errors.mergeWorktree'));
+              }
+              if (intent?.kind === 'merge' && operationProjectId) {
+                try {
+                  const latest = await httpWorkbenchTransport.worktrees.list(operationProjectId);
+                  let mainCommitHashes: string[] | undefined;
+                  const main = latest.find((item) => item.isMain) ?? null;
+                  if (main) {
+                    try {
+                      const mainCommits = await httpWorkbenchTransport.git.listCommits(
+                        operationProjectId,
+                        main.id,
+                        100,
+                      );
+                      mainCommitHashes = mainCommits.map((commit) => commit.hash);
+                    } catch {
+                      mainCommitHashes = undefined;
+                    }
+                  }
+                  const authority = buildMergeRemoveAuthority(intent, latest, {
+                    mainCommitHashes,
+                  });
+                  const confirmed = reconcileWorkbenchMutation(intent, ledger, authority);
+                  if (confirmed === 'confirmedSucceeded') return;
+                  if (confirmed === 'confirmedFailed') {
+                    throw new Error(t('workbench:errors.mergeWorktree'));
+                  }
+                } catch (inner) {
+                  if (inner instanceof Error && inner.message === t('workbench:errors.mergeWorktree')) {
+                    throw inner;
+                  }
+                  // keep unknown
+                }
+              } else if (intent) {
+                const confirmed = reconcileWorkbenchMutation(intent, ledger, {});
+                if (confirmed === 'confirmedSucceeded') return;
+                if (confirmed === 'confirmedFailed') {
+                  throw new Error(t('workbench:errors.mergeWorktree'));
+                }
+              }
+              throw new WorkbenchMutationUnknownError(
+                envelope.clientOperationId,
+                t('workbench:errors.mutationUnknown'),
+              );
+            }
           },
           applyMergeSuccess: async (plan) => {
             if (activeProjectRef.current?.id !== operationProjectId) return;
@@ -885,11 +1040,49 @@ export function MobileWorkbench(): ReactElement {
     return () => {
       projectsRequestIdRef.current += 1;
       projectDetailsRequestIdRef.current += 1;
+      projectDetailsAbortRef.current?.abort();
       worktreesRequestIdRef.current += 1;
       sessionsRequestIdRef.current += 1;
     };
   }, [loadProjects]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   从 offline/reconnecting 恢复 online 后应刷新当前可见 panel 权威数据。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   比较 prev connection 与 online；按 panel 刷新 projects/worktrees/sessions。
+   */
+  const previousConnectionKindRef = useRef<MobileConnectionState['kind'] | null>(null);
+  useEffect(() => {
+    const prevKind = previousConnectionKindRef.current;
+    const nextKind = connectionState?.kind ?? null;
+    previousConnectionKindRef.current = nextKind;
+    if (!connectionState || connectionState.kind !== 'online') return;
+    if (prevKind !== 'offline' && prevKind !== 'reconnecting') return;
+    if (
+      !shouldRefreshMobilePanelOnReconnect(
+        prevKind === 'offline'
+          ? { kind: 'offline', lastError: '', since: 0 }
+          : { kind: 'reconnecting', attempt: 0, cachedSince: null },
+        connectionState,
+      )
+    ) {
+      return;
+    }
+    const currentPanel = panelRef.current;
+    const projectId = activeProjectRef.current?.id;
+    if (!projectId) {
+      void loadProjects();
+      return;
+    }
+    if (currentPanel === 'projects' || currentPanel === 'settings') return;
+    void refreshWorktrees({ expectedProjectId: projectId });
+    if (currentPanel === 'terminal') {
+      void refreshSessions();
+    }
+  }, [connectionState, loadProjects, refreshSessions, refreshWorktrees]);
 
   /* eslint-disable react-hooks/set-state-in-effect -- files 首次激活后保持挂载以保留 dirty 草稿 */
   useEffect(() => {
@@ -905,18 +1098,32 @@ export function MobileWorkbench(): ReactElement {
     </p>
   );
 
+  const projectDetailRetry =
+    projectDetailStatus === 'error' && activeProject ? (
+      <button
+        type="button"
+        className={styles.secondaryButton}
+        onClick={handleReloadProjectDetails}
+      >
+        {t('workbench:mobile.projectPanel.reload')}
+      </button>
+    ) : null;
+
   const panelContent =
     panel === 'projects' ? (
-      <MobileProjectPanel
-        projects={projects}
-        activeProjectId={activeProject?.id ?? null}
-        loading={projectsLoading}
-        error={error}
-        onSelect={(project) => {
-          void selectProject(project);
-        }}
-        onRefresh={handleRefreshProjects}
-      />
+      <>
+        <MobileProjectPanel
+          projects={projects}
+          activeProjectId={activeProject?.id ?? null}
+          loading={projectsLoading || projectDetailStatus === 'loading'}
+          error={error}
+          onSelect={(project) => {
+            void selectProject(project);
+          }}
+          onRefresh={handleRefreshProjects}
+        />
+        {projectDetailRetry}
+      </>
     ) : panel === 'attention' ? (
       <MobileAttentionPanel
         onOpenItem={(item) => {
@@ -1003,13 +1210,16 @@ export function MobileWorkbench(): ReactElement {
           <div className={styles.placeholder}>{placeholder.label}</div>
         )}
         {error ? (
-          <p className={styles.panelError}>
+          <p className={styles.panelError} role="alert">
             <span>{t('workbench:mobile.projectPanel.error')}</span>
             <span>{error}</span>
           </p>
         ) : null}
+        {projectDetailRetry}
       </section>
     );
+
+  const connectionCachedAt = getMobileConnectionCachedAt(connectionState);
 
   return (
     <MobileWorkbenchShell
@@ -1022,6 +1232,8 @@ export function MobileWorkbench(): ReactElement {
       onWorktreeStatusClick={handleOpenWorktreeSwitcher}
       onPanelChange={handlePanelChange}
       attentionTotal={attentionTotal}
+      connectionState={connectionState}
+      connectionCachedAt={connectionCachedAt}
     >
       {panelContent}
       <MobileWorktreeQuickSwitch

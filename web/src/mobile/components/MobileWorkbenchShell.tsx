@@ -24,6 +24,7 @@ import {
   getMobileWorkbenchPanelOrder,
   openMobileNav,
   selectMobilePanel,
+  type MobileConnectionState,
   type MobileWorkbenchPanel,
 } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
@@ -69,6 +70,10 @@ export interface MobileWorkbenchShellProps {
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
   /** Attention 总数；0/null 不显示 badge，规则与桌面 formatAttentionBadgeCount 一致。 */
   attentionTotal?: number | null;
+  /** 弱网连接态；offline/reconnecting 时展示缓存时间。 */
+  connectionState?: MobileConnectionState | null;
+  /** 可展示的缓存起点 epoch ms。 */
+  connectionCachedAt?: number | null;
   children: ReactNode;
 }
 
@@ -162,6 +167,8 @@ export function MobileWorkbenchShell({
   onWorktreeStatusClick,
   onPanelChange,
   attentionTotal = null,
+  connectionState = null,
+  connectionCachedAt = null,
   children,
 }: MobileWorkbenchShellProps): ReactElement {
   const [isNavOpen, setIsNavOpen] = useState<boolean>(() => getInitialMobileNavOpen());
@@ -170,6 +177,24 @@ export function MobileWorkbenchShell({
   const worktreeStatusLabel = worktree ?? t('workbench:mobile.status.worktree');
   const attentionBadge =
     attentionTotal == null ? null : formatAttentionBadgeCount(attentionTotal);
+  const connectionLabel =
+    connectionState?.kind === 'online'
+      ? t('workbench:mobile.connection.online')
+      : connectionState?.kind === 'reconnecting'
+        ? t('workbench:mobile.connection.reconnecting')
+        : connectionState?.kind === 'offline'
+          ? t('workbench:mobile.connection.offline')
+          : null;
+  const cachedLabel =
+    connectionCachedAt != null && connectionState?.kind !== 'online'
+      ? t('workbench:mobile.connection.cachedAt', {
+          time: new Date(connectionCachedAt).toLocaleString(),
+        })
+      : null;
+  const offlineError =
+    connectionState?.kind === 'offline'
+      ? t('workbench:mobile.connection.lastError', { error: connectionState.lastError })
+      : null;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -293,7 +318,22 @@ export function MobileWorkbenchShell({
             <span className={styles.statusPill}>{worktreeStatusLabel}</span>
           )}
           <span className={styles.statusPill}>{session ?? t('workbench:mobile.status.session')}</span>
+          {connectionLabel ? (
+            <span
+              className={styles.statusPill}
+              role={connectionState?.kind === 'offline' ? 'status' : undefined}
+              data-connection={connectionState?.kind}
+            >
+              {connectionLabel}
+              {cachedLabel ? ` · ${cachedLabel}` : ''}
+            </span>
+          ) : null}
         </div>
+        {offlineError ? (
+          <p className={styles.panelState} role="status">
+            {offlineError}
+          </p>
+        ) : null}
         {children}
       </main>
     </div>

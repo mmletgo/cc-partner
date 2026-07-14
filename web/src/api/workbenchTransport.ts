@@ -190,10 +190,36 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
     list: (projectId) => workbenchApi.worktrees.list(projectId),
     create: (projectId, branchName, baseBranch) =>
       workbenchApi.worktrees.create(projectId, branchName, baseBranch),
-    commit: (worktreeId, message) => workbenchApi.worktrees.commit(worktreeId, message),
-    push: (worktreeId) => workbenchApi.worktrees.push(worktreeId),
-    merge: (worktreeId) => workbenchApi.worktrees.merge(worktreeId),
-    remove: (worktreeId, force) => workbenchApi.worktrees.remove(worktreeId, force),
+    // Business Logic: transport 旧签名仍返回权威 value；envelope unknown 暂抛错，完整对账由 desktop controller / T6-T7 处理。
+    // Code Logic: 生成临时 clientOperationId 调用 workbenchApi；succeeded 解包 value，unknown 抛中文错误。
+    commit: async (worktreeId, message) => {
+      const envelope = await workbenchApi.worktrees.commit(
+        worktreeId,
+        message,
+        crypto.randomUUID(),
+      );
+      if (envelope.kind === 'succeeded') return envelope.value;
+      throw new Error('操作结果未知，请刷新后人工核对');
+    },
+    push: async (worktreeId) => {
+      const envelope = await workbenchApi.worktrees.push(worktreeId, crypto.randomUUID());
+      if (envelope.kind === 'succeeded') return envelope.value;
+      throw new Error('操作结果未知，请刷新后人工核对');
+    },
+    merge: async (worktreeId) => {
+      const envelope = await workbenchApi.worktrees.merge(worktreeId, crypto.randomUUID());
+      if (envelope.kind === 'succeeded') return envelope.value;
+      throw new Error('操作结果未知，请刷新后人工核对');
+    },
+    remove: async (worktreeId, force) => {
+      const envelope = await workbenchApi.worktrees.remove(
+        worktreeId,
+        force ?? false,
+        crypto.randomUUID(),
+      );
+      if (envelope.kind === 'succeeded') return envelope.value;
+      throw new Error('操作结果未知，请刷新后人工核对');
+    },
   },
   sessions: {
     list: (projectId) => workbenchApi.sessions.list(projectId ?? undefined),

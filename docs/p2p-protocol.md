@@ -93,6 +93,7 @@ advertised capabilities are:
 - `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
 - `sync.manifest.v2` — bounded Prompt / SSH target / Scratchpad content sync (`POST /api/sync/prompts/{manifest-page,items,push-batch,ack-delete-epoch}`, `/api/ssh-target/sync/{...}`, `/api/scratchpad/sync/{...}`); token ships with transactional bulk upsert + request ledger + apply_merge_batch + dedicated watermark ack
 - `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
+- `workbench.mutation-outcome.v1` — Workbench Git mutation envelope (`succeeded|unknown`) + durable operation ledger query (`POST /api/workbench/worktrees/mutation-operation`); token ships with commit/push/merge/remove envelope responses
 
 ### Semantics of `errors.envelope.v1` (important)
 
@@ -187,10 +188,11 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/worktrees/list` | `routes/workbench.rs` | none (reconciles existing worktrees into SQLite) | read-only | — |
 | POST | `/api/workbench/worktrees/create` | `routes/workbench.rs` | `git worktree add` + new SQLite row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry until a worktree-create idempotency key lands |
 | POST | `/api/workbench/worktrees/get` | `routes/workbench.rs` | none | read-only | — |
-| POST | `/api/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | no-transport-retry | replay can create a second empty commit or rerun the Claude message generator |
-| POST | `/api/workbench/worktrees/push` | `routes/workbench.rs` | `git push` of the task branch | no-transport-retry | network replay after a timeout can race the remote and surface a spurious failure |
-| POST | `/api/workbench/worktrees/merge` | `routes/workbench.rs` | `git merge --no-ff`, conflict resolution, branch delete | no-transport-retry | irreversible; replay after partial completion can corrupt the merge |
-| POST | `/api/workbench/worktrees/remove` | `routes/workbench.rs` | `git worktree remove` + row delete | no-transport-retry | destructive |
+| POST | `/api/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | requires-idempotency-key | when body carries `clientOperationId`: UNIQUE ledger (`workbench_mutation_operations`) same id/same payload replays; different payload → conflict; response is `workbench.mutation-outcome.v1` envelope. when id omitted: legacy raw worktree DTO for old peers (no envelope) |
+| POST | `/api/workbench/worktrees/push` | `routes/workbench.rs` | `git push` of the task branch | requires-idempotency-key | same ledger/envelope contract as commit; remote-ref postcondition for reconcile |
+| POST | `/api/workbench/worktrees/merge` | `routes/workbench.rs` | `git merge --no-ff`, conflict resolution, branch delete | requires-idempotency-key | same ledger/envelope contract; source/main HEAD intent |
+| POST | `/api/workbench/worktrees/remove` | `routes/workbench.rs` | `git worktree remove` + row delete | requires-idempotency-key | same ledger/envelope contract; exact worktree identity intent |
+| POST | `/api/workbench/worktrees/mutation-operation` | `routes/workbench.rs` | none; reads durable ledger by `clientOperationId` | read-only | capability `workbench.mutation-outcome.v1` |
 | POST | `/api/workbench/git/commits` | `routes/workbench.rs` | none; `git log` read | read-only | — |
 | POST | `/api/workbench/files/list-dir` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/workbench/files/info` | `routes/workbench.rs` | none | read-only | — |
@@ -202,7 +204,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/files/create-dir` | `routes/workbench.rs` | creates a worktree-relative directory | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry until a create-idempotency key lands |
 | POST | `/api/workbench/files/rename` | `routes/workbench.rs` | irreversible `fs::rename` inside worktree root | no-transport-retry | source path disappears; replay after timeout can fail or rename the wrong target |
 | POST | `/api/workbench/files/delete` | `routes/workbench.rs` | irreversible delete inside worktree root | no-transport-retry | destructive |
-| GET | `/api/workbench/events` | `routes/workbench.rs` | none; NDJSON event stream | read-only | — |
+| GET | `/api/workbench/events` | `routes/workbench.rs` | none; NDJSON event stream with typed heartbeat every 15s (`{"type":"heartbeat","sentAt":"<RFC3339>"}`) | read-only | client uses lifecycle + per-connection abort; 35s watchdog aborts only the child connection and reconnects while lifecycle remains active; business frames and heartbeats both reset the watchdog |
 | POST | `/api/workbench/sessions/list` | `routes/workbench.rs` | `restore_persisted_sessions` may recreate missing tmux windows for persisted session rows | no-transport-retry | `local_list_workbench_sessions` → `restore_persisted_sessions` may spawn a PTY/tmux window for each persisted row. The registry now guards restore with an atomic `try_claim_restore` placeholder (Finding 5) so concurrent list requests no longer double-restore the same row, but a transport-layer replay still triggers real subprocess spawns and tmux window creation with no per-request dedupe key; callers surface the failure and let the user re-list explicitly |
 | POST | `/api/workbench/sessions/create` | `routes/workbench.rs` | new tmux window / PTY + SQLite window row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry until a session-create idempotency key lands |
 | POST | `/api/workbench/sessions/replay` | `routes/workbench.rs` | none; reads ring buffer | read-only | — |
@@ -227,10 +229,11 @@ the router so the inventory check matches exactly.
 | POST | `/api/mobile/workbench/projects/open` | `routes/workbench.rs` | upserts a `local` project row keyed by canonical path | naturally-idempotent | reuses same project id for same path |
 | POST | `/api/mobile/workbench/worktrees/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/worktrees/create` | `routes/workbench.rs` | `git worktree add` + new SQLite row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry |
-| POST | `/api/mobile/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | no-transport-retry | — |
-| POST | `/api/mobile/workbench/worktrees/push` | `routes/workbench.rs` | `git push` | no-transport-retry | — |
-| POST | `/api/mobile/workbench/worktrees/merge` | `routes/workbench.rs` | `git merge --no-ff` + cleanup | no-transport-retry | — |
-| POST | `/api/mobile/workbench/worktrees/remove` | `routes/workbench.rs` | `git worktree remove` + row delete | no-transport-retry | destructive |
+| POST | `/api/mobile/workbench/worktrees/commit` | `routes/workbench.rs` | `git add -A` + `git commit` | requires-idempotency-key | mobile shares the same `clientOperationId` ledger/envelope as P2P commit |
+| POST | `/api/mobile/workbench/worktrees/push` | `routes/workbench.rs` | `git push` | requires-idempotency-key | same ledger/envelope |
+| POST | `/api/mobile/workbench/worktrees/merge` | `routes/workbench.rs` | `git merge --no-ff` + cleanup | requires-idempotency-key | same ledger/envelope |
+| POST | `/api/mobile/workbench/worktrees/remove` | `routes/workbench.rs` | `git worktree remove` + row delete | requires-idempotency-key | same ledger/envelope |
+| POST | `/api/mobile/workbench/worktrees/mutation-operation` | `routes/workbench.rs` | none; reads durable ledger by `clientOperationId` | read-only | mobile ledger query for unknown envelope reconciliation |
 | POST | `/api/mobile/workbench/git/commits` | `routes/workbench.rs` | none; `git log` read | read-only | — |
 | POST | `/api/mobile/workbench/files/list-dir` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/files/info` | `routes/workbench.rs` | none | read-only | — |

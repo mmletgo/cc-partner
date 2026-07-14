@@ -21,6 +21,7 @@ use crate::error::AppError;
 use crate::hotkey::{
     compensate_screenshot_hotkey_os, replace_screenshot_hotkey_os, GlobalShortcutBackend,
 };
+use crate::workbench::operation_ledger::MutationTransportClass;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -247,6 +248,25 @@ enum ControlCallOutcome<T> {
     Ok(T),
     Failed(AppError),
     Uncertain(AppError),
+}
+
+/// Workbench mutation control 错误：确定失败 vs 不确定传输。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     workbench mutation 需要把 Uncertain 与 Failed 区分，禁止自动重放；
+///     不确定结果必须经 envelope unknown 上抛，不能折叠成普通 AppError 让调用方误重试。
+///
+/// Code Logic（这个枚举做什么）:
+///     Failed 携带确定失败的 AppError；Uncertain 仅携带传输类别（Timeout/Network）。
+#[derive(Debug)]
+pub enum MutationControlError {
+    /// 确定失败：请求未到达 handler 或业务明确拒绝。
+    Failed(AppError),
+    /// 传输不确定：禁止自动重放，由上层构造成 unknown envelope。
+    Uncertain {
+        /// 传输分类（timeout / network）。
+        transport: MutationTransportClass,
+    },
 }
 
 /// GUI 侧 Backend control 客户端。
@@ -510,39 +530,90 @@ impl BackendControlClient {
         Ok((owner, result))
     }
 
+    /// 经 control API 代理 Workbench mutation，区分 Failed 与 Uncertain。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     workbench mutation 需要把 Uncertain 与 Failed 区分，禁止自动重放；
+    ///     不确定传输必须映射为 unknown envelope，不能像旧 API 那样折叠成 AppError。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     与 `workbench_op_with_owner_value` 相同 path/body/`send_once`；Ok→result Value；
+    ///     Failed→`MutationControlError::Failed`；Uncertain→Timeout 若 AppError 为 Timeout 否则 Network；
+    ///     成功路径校验 owner_instance_id 非空。
+    pub async fn workbench_mutation_op_value(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<serde_json::Value, MutationControlError> {
+        let (_owner, result) = self.workbench_op_outcome_value(op, payload).await?;
+        Ok(result)
+    }
+
     /// 经 control API 代理 Workbench 操作，返回 ownerInstanceId 与原始 result。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     workbench_op / workbench_op_value / with_owner 共享唯一 mutate 发送路径。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     POST workbench 或 workbench/data；send_once 不自动重试；校验 owner 非空。
+    ///     POST workbench 或 workbench/data；send_once 不自动重试；校验 owner 非空；
+    ///     非 mutation 路径把 Uncertain 折叠为 AppError（禁止调用方自动重放）。
     async fn workbench_op_with_owner_value(
         &self,
         op: &str,
         payload: impl Serialize,
     ) -> Result<(String, serde_json::Value), AppError> {
+        match self.workbench_op_outcome_value(op, payload).await {
+            Ok(v) => Ok(v),
+            Err(MutationControlError::Failed(e)) => Err(e),
+            Err(MutationControlError::Uncertain { transport }) => {
+                Err(AppError::unavailable(format!(
+                    "control_response_uncertain: {}",
+                    transport.as_str()
+                )))
+            }
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     mutation 与普通 workbench_op 共享发送路径，但 mutation 需要保留 Uncertain。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST workbench 路径；解析 ControlWorkbenchResponseBody；校验 owner；
+    ///     Uncertain 按 AppError::Timeout 映射 Timeout，否则 Network。
+    async fn workbench_op_outcome_value(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<(String, serde_json::Value), MutationControlError> {
         let path = workbench_control_path(op);
         let timeout = workbench_control_timeout(op);
         let body = ControlWorkbenchRequestBody {
             control_token: self.control_token.clone(),
             op: op.to_string(),
-            payload: serde_json::to_value(payload)
-                .map_err(|e| AppError::generic(format!("序列化 workbench payload 失败: {e}")))?,
+            payload: match serde_json::to_value(payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(MutationControlError::Failed(AppError::generic(format!(
+                        "序列化 workbench payload 失败: {e}"
+                    ))));
+                }
+            },
         };
         let resp: ControlWorkbenchResponseBody = match self.send_once(path, &body, timeout).await {
             ControlCallOutcome::Ok(v) => v,
-            ControlCallOutcome::Failed(e) => return Err(e),
+            ControlCallOutcome::Failed(e) => return Err(MutationControlError::Failed(e)),
             ControlCallOutcome::Uncertain(e) => {
-                return Err(AppError::unavailable(format!(
-                    "control_response_uncertain: {e}"
-                )));
+                let transport = match e {
+                    AppError::Timeout(_) => MutationTransportClass::Timeout,
+                    _ => MutationTransportClass::Network,
+                };
+                return Err(MutationControlError::Uncertain { transport });
             }
         };
         if resp.owner_instance_id.trim().is_empty() {
-            return Err(AppError::generic(
+            return Err(MutationControlError::Failed(AppError::generic(
                 "workbench control 响应缺少 ownerInstanceId",
-            ));
+            )));
         }
         Ok((resp.owner_instance_id, resp.result))
     }

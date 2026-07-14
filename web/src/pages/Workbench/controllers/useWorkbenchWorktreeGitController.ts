@@ -32,12 +32,30 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { workbenchApi } from '@/api/workbench';
+import {
+  createOperationKey,
+  isCurrentOperation,
+  nextOperationSequence,
+  type WorkbenchOperationKey,
+} from '@/lib/asyncState/operationContext';
+import {
+  isMutationSucceeded,
+  isMutationUnknown,
+} from '@/lib/asyncState/mutationOutcome';
+import {
+  buildMergeRemoveAuthority,
+  reconcileWorkbenchMutation,
+  type WorkbenchMutationReconcileResult,
+} from '@/lib/workbenchMutationReconciliation';
 import { isLatestRequest } from '../workbenchFiles';
 import type {
+  MutationIntent,
+  MutationKind,
   WorkbenchGitCommit,
   WorkbenchMergeProgressEvent,
   WorkbenchMergeStage,
   WorkbenchMergeStageId,
+  WorkbenchMutationEnvelope,
   WorkbenchWorktree,
 } from '@/lib/types';
 import {
@@ -55,6 +73,22 @@ import type { WorkbenchTerminalBridge } from './useWorkbenchTerminalController';
 export type WorktreeBusyKind = 'create' | 'commit' | 'push' | 'merge' | 'remove';
 
 /**
+ * unknown 后保留的稳定 operation 锁。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   timeout/network 后禁止 mint 新 clientOperationId 盲重放；必须 same-id 重试/对账。
+ *
+ * Code Logic（字段说明）:
+ *   kind 为 mutation 种类；projectId/worktreeId 限定上下文；clientOperationId 复用。
+ */
+export type WorktreeUnknownMutationLock = {
+  kind: Exclude<MutationKind, never>;
+  projectId: string;
+  worktreeId: string;
+  clientOperationId: string;
+};
+
+/**
  * 一键合并自动隐藏阶段条的延迟；与原 Workbench.tsx 内部常量保持一致。
  */
 const MERGE_STAGE_AUTO_DISMISS_MS = 2500;
@@ -68,7 +102,8 @@ export type WorkbenchWorktreeGitErrorKey =
   | 'pushWorktree'
   | 'mergeWorktree'
   | 'removeWorktree'
-  | 'gitHistory';
+  | 'gitHistory'
+  | 'mutationUnknown';
 
 /**
  * controller 输入：窄 API + 回调 + 外部 bridge，避免吞并 Projects / Sessions / Terminal buffer context。
@@ -120,6 +155,10 @@ export interface WorkbenchWorktreeGitControllerResult {
   // ---- 渲染数据 ----
   worktrees: WorkbenchWorktree[];
   worktreeBusy: WorktreeBusyKind | null;
+  /**
+   * unknown 后仍持有的 stable clientOperationId 锁；非 null 时禁止 mint 新 id。
+   */
+  unknownMutationLock: WorktreeUnknownMutationLock | null;
   worktreeError: string | null;
   createWorktreeOpen: boolean;
   createWorktreeBranchPrefix: WorktreeBranchPrefix;
@@ -185,6 +224,8 @@ export function useWorkbenchWorktreeGitController(
 
   const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
   const [worktreeBusy, setWorktreeBusy] = useState<WorktreeBusyKind | null>(null);
+  const [unknownMutationLock, setUnknownMutationLock] =
+    useState<WorktreeUnknownMutationLock | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
   const [createWorktreeOpen, setCreateWorktreeOpen] = useState<boolean>(false);
   const [createWorktreeBranchPrefix, setCreateWorktreeBranchPrefix] =
@@ -208,6 +249,9 @@ export function useWorkbenchWorktreeGitController(
   // 用单调 request seq 丢弃过期响应，避免 create/remove/merge 后被慢速 list 回写旧状态。
   const worktreeListRequestSeqRef = useRef<Record<string, number>>({});
   const gitHistoryRequestSeqRef = useRef<Record<string, number>>({});
+  // Business Logic: Git mutation 的 success/catch/finally 必须绑定发起时的 project/worktree/sequence，
+  // 防止旧异步结果污染用户已切换到的新上下文。
+  const mutationSequenceRef = useRef(0);
 
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
@@ -216,6 +260,17 @@ export function useWorkbenchWorktreeGitController(
   useEffect(() => {
     activeWorktreeIdRef.current = activeWorktreeId;
   }, [activeWorktreeId]);
+
+  // Business Logic: 用户切换 project/worktree 后，挂起 mutation 的 UI busy/error/unknown 锁不得粘在新上下文。
+  // Code Logic: 递增 sequence 使旧 settlement 过期，并清空 worktreeBusy/worktreeError/unknownMutationLock。
+  /* eslint-disable react-hooks/set-state-in-effect -- context 切换时必须同步清空 busy/error/lock，避免旧 UI 粘到新上下文 */
+  useEffect(() => {
+    mutationSequenceRef.current = nextOperationSequence(mutationSequenceRef.current);
+    setWorktreeBusy(null);
+    setWorktreeError(null);
+    setUnknownMutationLock(null);
+  }, [activeProjectId, activeWorktreeId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     mergeProgressWorktreeIdRef.current = mergeProgressWorktreeId;
@@ -436,18 +491,175 @@ export function useWorkbenchWorktreeGitController(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   发起 mutation 时绑定 project/worktree + 单调 sequence，供 settlement 守卫。
+   *
+   * Code Logic（这个函数做什么）:
+   *   递增 mutationSequenceRef 并返回 WorkbenchOperationKey；worktreeId 可为 null（create 项目级）。
+   */
+  const beginMutationOperation = useCallback(
+    (projectId: string, worktreeId: string | null): WorkbenchOperationKey => {
+      const sequence = nextOperationSequence(mutationSequenceRef.current);
+      mutationSequenceRef.current = sequence;
+      return createOperationKey(projectId, worktreeId, sequence);
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   success/catch/finally 每个写入点都必须确认仍处于发起操作时的上下文。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用当前 active project/worktree + 最新 sequence 与 settled key 比较。
+   */
+  const isSettledCurrent = useCallback((settled: WorkbenchOperationKey): boolean => {
+    const current = createOperationKey(
+      activeProjectIdRef.current ?? '',
+      activeWorktreeIdRef.current,
+      mutationSequenceRef.current,
+    );
+    return isCurrentOperation(current, settled);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   unknown 后禁止 mint 新 id；同 kind+context 复用 lock 中的 clientOperationId。
+   *
+   * Code Logic（这个函数做什么）:
+   *   lock 匹配 kind/project/worktree 时返回既有 id；否则 mint UUID。
+   */
+  const resolveClientOperationId = useCallback(
+    (
+      kind: WorktreeUnknownMutationLock['kind'],
+      projectId: string,
+      worktreeId: string,
+      lock: WorktreeUnknownMutationLock | null,
+    ): string => {
+      if (
+        lock
+        && lock.kind === kind
+        && lock.projectId === projectId
+        && lock.worktreeId === worktreeId
+      ) {
+        return lock.clientOperationId;
+      }
+      return crypto.randomUUID();
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   unknown 是 worktree 级共享锁；仅同 kind reconcile/终态可清锁，sibling 成功/失败绝不能丢弃原锁。
+   *
+   * Code Logic（这个函数做什么）:
+   *   仅当当前 lock.kind 等于给定 kind 时置 null，否则保留原锁。
+   */
+  const clearUnknownMutationLockForKind = useCallback(
+    (kind: WorktreeUnknownMutationLock['kind']): void => {
+      setUnknownMutationLock((prev) => (prev && prev.kind === kind ? null : prev));
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   非 null unknownMutationLock 期间禁止 sibling kind 发起 Fresh claim。
+   *
+   * Code Logic（这个函数做什么）:
+   *   lock 为空或 kind 匹配时返回 true；否则 false。
+   */
+  const isMutationKindAllowedUnderUnknownLock = useCallback(
+    (kind: WorktreeUnknownMutationLock['kind']): boolean => {
+      if (!unknownMutationLock) return true;
+      return unknownMutationLock.kind === kind;
+    },
+    [unknownMutationLock],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   envelope.unknown 后禁止盲重放；ledger 终态优先，否则 authority 矩阵对账。
+   *
+   * Code Logic（这个函数做什么）:
+   *   查询 getMutationOperation；刷新 worktrees；merge 填充 source 存在性 + mainContainsSourceHead
+   *   （main listCommits）；remove 填充 identity；commit/push 缺 head 权威时依赖 ledger 终态。
+   */
+  const reconcileUnknownMutation = useCallback(
+    async (
+      clientOperationId: string,
+      projectId: string,
+      worktreeId: string,
+      settled: WorkbenchOperationKey,
+    ): Promise<WorkbenchMutationReconcileResult> => {
+      const ledger = await workbenchApi.worktrees
+        .getMutationOperation(clientOperationId)
+        .catch(() => null);
+      if (!isSettledCurrent(settled)) return 'unknown';
+
+      // ledger 终态可直接确认，不必先刷新 authority（仍刷新列表以便 UI 一致）。
+      invalidateWorktreeListRequests(projectId);
+      invalidateGitHistoryRequests(projectId, worktreeId);
+      await loadWorktrees(projectId);
+      if (!isSettledCurrent(settled)) return 'unknown';
+
+      const intent: MutationIntent | null = ledger?.intent ?? null;
+      if (!intent) {
+        if (ledger?.state === 'succeeded') return 'confirmedSucceeded';
+        if (ledger?.state === 'failed') return 'confirmedFailed';
+        return 'unknown';
+      }
+
+      if (ledger?.state === 'succeeded' || ledger?.state === 'failed') {
+        return reconcileWorkbenchMutation(intent, ledger, {});
+      }
+
+      if (intent.kind === 'merge' || intent.kind === 'remove') {
+        try {
+          const latest = await workbenchApi.worktrees.list(projectId);
+          if (!isSettledCurrent(settled)) return 'unknown';
+          let mainCommitHashes: string[] | undefined;
+          if (intent.kind === 'merge') {
+            const main = latest.find((item) => item.isMain) ?? null;
+            if (main) {
+              try {
+                const commits = await workbenchApi.git.listCommits(projectId, main.id, 100);
+                if (!isSettledCurrent(settled)) return 'unknown';
+                mainCommitHashes = commits.map((commit) => commit.hash);
+              } catch {
+                mainCommitHashes = undefined;
+              }
+            }
+          }
+          const authority = buildMergeRemoveAuthority(intent, latest, { mainCommitHashes });
+          return reconcileWorkbenchMutation(intent, ledger, authority);
+        } catch {
+          return 'unknown';
+        }
+      }
+
+      // commit/push：前端无 head 权威字段 → 保持 unknown（除非 ledger 终态，已在上方处理）。
+      return reconcileWorkbenchMutation(intent, ledger, {});
+    },
+    [
+      invalidateGitHistoryRequests,
+      invalidateWorktreeListRequests,
+      isSettledCurrent,
+      loadWorktrees,
+    ],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户填入分支后缀并提交；先创建 worktree，再通过 terminalBridge.createSessionForWorktree 创建并注册
    *   关联终端 session（不 focus），然后刷新 worktree 列表、切到新 worktree，最后再 focus 该 session。
    *
    * Code Logic（这个函数做什么）:
    *   1. 校验 active project、remoteWriteDisabled、composeWorktreeBranchName 非空；
-   *   2. setWorktreeBusy('create')，调用 worktrees.create；
-   *   3. project 切换则丢弃；否则 terminalBridge.createSessionForWorktree（注册 session，bridge 此时
-   *      因新 worktree 尚未 active 而不 focus）；
-   *   4. loadWorktrees、setActiveWorktreeId(created.id)，随后显式 focusSession(sessionId)（此时 active
-   *      已正确，焦点不会错落在旧 worktree 上下文）；
-   *   5. 成功时关闭表单、清空 draft；失败时 markRequestFailure + worktreeError；
-   *   6. finally 清空 worktreeBusy。
+   *   2. beginMutationOperation 绑定 project + 当前 active worktree + sequence；
+   *   3. setWorktreeBusy('create')，调用 worktrees.create；
+   *   4. 每个 success/catch/finally 写入点 isSettledCurrent 守卫（含 setActiveWorktreeId / focusSession）；
+   *   5. 同 project 内 worktree 切换也会 bump sequence，旧 create 不得偷换 active。
    *
    *   注意：session 创建交给 terminalBridge.createSessionForWorktree，controller 不直接调用 sessions.create，
    *   避免与终端域 session 状态管理重复。
@@ -461,11 +673,13 @@ export function useWorkbenchWorktreeGitController(
       createWorktreeBranchSuffixDraft,
     );
     if (!branchName) return;
+    // create 绑定发起时的 project + active worktree（可 null）；同 project 内 worktree 切换会使 settled 过期。
+    const settled = beginMutationOperation(projectId, activeWorktreeIdRef.current);
     try {
       setWorktreeBusy('create');
       setWorktreeError(null);
       const created = await workbenchApi.worktrees.create(projectId, branchName, null);
-      if (activeProjectIdRef.current !== projectId) return;
+      if (!isSettledCurrent(settled)) return;
       // Business Logic: session 创建/注册通过终端域 bridge 完成；bridge 只在目标 worktree 已是 active 时
       // 才 focus。此时新 worktree 还未成为 active（setActiveWorktreeId 在下方），故 bridge 内不会 focus；
       // 我们拿到 sessionId 后，在 setActiveWorktreeId(created.id) 之后再显式 focusSession，保证焦点落在
@@ -476,35 +690,42 @@ export function useWorkbenchWorktreeGitController(
       } catch {
         // bridge 内部已处理错误；这里吞掉以避免中断 worktree 列表刷新。
       }
-      if (activeProjectIdRef.current !== projectId) return;
+      if (!isSettledCurrent(settled)) return;
       // Business Logic: create 成功后作废旧 list，防止慢速 worktree list 覆盖新建结果。
       invalidateWorktreeListRequests(projectId);
       await loadWorktrees(projectId);
-      if (activeProjectIdRef.current !== projectId) return;
-      setActiveWorktreeId(created.id);
-      // Business Logic: worktree 已激活为 active 后，再把刚创建的 session 设为焦点。若期间 project 已切走
-      // 则跳过（focus 会落到错误上下文）。
-      if (createdSessionId && activeProjectIdRef.current === projectId) {
-        void terminalBridge.focusSession(createdSessionId);
-      }
+      if (!isSettledCurrent(settled)) return;
+      // 先关表单/清 busy（仍 current），再切 active：切 active 会 bump sequence 使 settled 过期。
       setCreateWorktreeOpen(false);
       setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
       setCreateWorktreeBranchSuffixDraft('');
+      setWorktreeBusy(null);
+      setActiveWorktreeId(created.id);
+      // Business Logic: worktree 切到新建后，再把刚创建的 session 设为焦点。
+      // focus 本身按 sessionId 操作；若用户已手动切走，后续 focus 仍可能短暂落到新 session，可接受。
+      if (createdSessionId) {
+        void terminalBridge.focusSession(createdSessionId);
+      }
+      return;
     } catch (error) {
-      if (activeProjectIdRef.current !== projectId) return;
+      if (!isSettledCurrent(settled)) return;
       markRequestFailure(projectId, error);
       setWorktreeError(
         displayErrorMessage(error, translateError('createWorktree'), desktopUnavailableMessage),
       );
     } finally {
-      setWorktreeBusy(null);
+      if (isSettledCurrent(settled)) {
+        setWorktreeBusy(null);
+      }
     }
   }, [
+    beginMutationOperation,
     createWorktreeBranchPrefix,
     createWorktreeBranchSuffixDraft,
     desktopUnavailableMessage,
     displayErrorMessage,
     invalidateWorktreeListRequests,
+    isSettledCurrent,
     loadWorktrees,
     markRequestFailure,
     remoteWriteDisabled,
@@ -518,11 +739,10 @@ export function useWorkbenchWorktreeGitController(
    *   用户提交当前 worktree 的全部改动；提交后刷新 worktree 状态与 Git 历史（如当前在 history tab）。
    *
    * Code Logic（这个函数做什么）:
-   *   1. 校验 activeWorktree、remoteWriteDisabled；
-   *   2. setWorktreeBusy('commit')，调用 worktrees.commit(worktreeId, null)；
-   *   3. 成功时 loadWorktrees + 按需 loadGitHistory；
-   *   4. 失败时 markRequestFailure + loadWorktrees + 按需 loadGitHistory + worktreeError；
-   *   5. finally 清空 worktreeBusy。
+   *   1. 校验 activeWorktree、remoteWriteDisabled；mint clientOperationId + operation key；
+   *   2. setWorktreeBusy('commit')，调用 worktrees.commit(..., clientOperationId)；
+   *   3. succeeded 且 current → 刷新列表/历史；unknown 且 current → 对账、不盲重放；
+   *   4. catch/finally 仅在 isSettledCurrent 时写 error/busy。
    */
   const handleCommitWorktree = useCallback(async (): Promise<void> => {
     const worktreeId = activeWorktreeIdRef.current;
@@ -530,35 +750,124 @@ export function useWorkbenchWorktreeGitController(
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    // unknown 共享锁：sibling kind 禁止 Fresh claim / 清锁。
+    if (!isMutationKindAllowedUnderUnknownLock('commit')) return;
+    const settled = beginMutationOperation(projectId, worktreeId);
+    const clientOperationId = resolveClientOperationId(
+      'commit',
+      projectId,
+      worktreeId,
+      unknownMutationLock,
+    );
     try {
       setWorktreeBusy('commit');
       setWorktreeError(null);
-      await workbenchApi.worktrees.commit(worktreeId, null);
-      invalidateWorktreeListRequests(projectId);
-      invalidateGitHistoryRequests(projectId, worktreeId);
-      await loadWorktrees(projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
+      // 若仍持有 unknown 锁：只对账，不 mint 新 id、不二次执行。
+      if (
+        unknownMutationLock
+        && unknownMutationLock.kind === 'commit'
+        && unknownMutationLock.clientOperationId === clientOperationId
+      ) {
+        const confirmed = await reconcileUnknownMutation(
+          clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('commit');
+          setWorktreeError(null);
+          if (inspectorTab === 'history') await loadGitHistory();
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('commit');
+          setWorktreeError(translateError('commitWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'commit',
+            projectId,
+            worktreeId,
+            clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+        return;
+      }
+
+      const envelope: WorkbenchMutationEnvelope<WorkbenchWorktree> =
+        await workbenchApi.worktrees.commit(worktreeId, null, clientOperationId);
+      if (!isSettledCurrent(settled)) return;
+
+      if (isMutationSucceeded(envelope)) {
+        clearUnknownMutationLockForKind('commit');
+        invalidateWorktreeListRequests(projectId);
+        invalidateGitHistoryRequests(projectId, worktreeId);
+        await loadWorktrees(projectId);
+        if (!isSettledCurrent(settled)) return;
+        if (inspectorTab === 'history') await loadGitHistory();
+        return;
+      }
+
+      if (isMutationUnknown(envelope)) {
+        // loadWorktrees 会清 worktreeError，故 unknown 文案在对账结束后再写。
+        const confirmed = await reconcileUnknownMutation(
+          envelope.clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('commit');
+          setWorktreeError(null);
+          if (inspectorTab === 'history') await loadGitHistory();
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('commit');
+          setWorktreeError(translateError('commitWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'commit',
+            projectId,
+            worktreeId,
+            clientOperationId: envelope.clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+      }
     } catch (error) {
+      if (!isSettledCurrent(settled)) return;
+      clearUnknownMutationLockForKind('commit');
       markRequestFailure(projectId, error);
       await loadWorktrees(projectId);
+      if (!isSettledCurrent(settled)) return;
       if (inspectorTab === 'history') await loadGitHistory();
+      if (!isSettledCurrent(settled)) return;
       setWorktreeError(
         displayErrorMessage(error, translateError('commitWorktree'), desktopUnavailableMessage),
       );
     } finally {
-      setWorktreeBusy(null);
+      if (isSettledCurrent(settled)) {
+        setWorktreeBusy(null);
+      }
     }
   }, [
+    beginMutationOperation,
+    clearUnknownMutationLockForKind,
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
+    isSettledCurrent,
     loadGitHistory,
     loadWorktrees,
     markRequestFailure,
+    reconcileUnknownMutation,
     remoteWriteDisabled,
+    resolveClientOperationId,
     translateError,
+    unknownMutationLock,
   ]);
 
   /**
@@ -566,7 +875,7 @@ export function useWorkbenchWorktreeGitController(
    *   用户推送当前 worktree 分支到 upstream；推送后刷新 worktree 状态与 Git 历史（如当前在 history tab）。
    *
    * Code Logic（这个函数做什么）:
-   *   与 handleCommitWorktree 类似，区别是不在失败路径强制 loadGitHistory（与原 Workbench.tsx 行为一致）。
+   *   与 handleCommitWorktree 相同 envelope/context 守卫；失败路径不强制 loadGitHistory。
    */
   const handlePushWorktree = useCallback(async (): Promise<void> => {
     const worktreeId = activeWorktreeIdRef.current;
@@ -574,33 +883,116 @@ export function useWorkbenchWorktreeGitController(
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    if (!isMutationKindAllowedUnderUnknownLock('push')) return;
+    const settled = beginMutationOperation(projectId, worktreeId);
+    const clientOperationId = resolveClientOperationId(
+      'push',
+      projectId,
+      worktreeId,
+      unknownMutationLock,
+    );
     try {
       setWorktreeBusy('push');
       setWorktreeError(null);
-      await workbenchApi.worktrees.push(worktreeId);
-      invalidateWorktreeListRequests(projectId);
-      invalidateGitHistoryRequests(projectId, worktreeId);
-      await loadWorktrees(projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
+      if (
+        unknownMutationLock
+        && unknownMutationLock.kind === 'push'
+        && unknownMutationLock.clientOperationId === clientOperationId
+      ) {
+        const confirmed = await reconcileUnknownMutation(
+          clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('push');
+          setWorktreeError(null);
+          if (inspectorTab === 'history') await loadGitHistory();
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('push');
+          setWorktreeError(translateError('pushWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'push',
+            projectId,
+            worktreeId,
+            clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+        return;
+      }
+
+      const envelope = await workbenchApi.worktrees.push(worktreeId, clientOperationId);
+      if (!isSettledCurrent(settled)) return;
+
+      if (isMutationSucceeded(envelope)) {
+        clearUnknownMutationLockForKind('push');
+        invalidateWorktreeListRequests(projectId);
+        invalidateGitHistoryRequests(projectId, worktreeId);
+        await loadWorktrees(projectId);
+        if (!isSettledCurrent(settled)) return;
+        if (inspectorTab === 'history') await loadGitHistory();
+        return;
+      }
+
+      if (isMutationUnknown(envelope)) {
+        const confirmed = await reconcileUnknownMutation(
+          envelope.clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('push');
+          setWorktreeError(null);
+          if (inspectorTab === 'history') await loadGitHistory();
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('push');
+          setWorktreeError(translateError('pushWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'push',
+            projectId,
+            worktreeId,
+            clientOperationId: envelope.clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+      }
     } catch (error) {
+      if (!isSettledCurrent(settled)) return;
+      clearUnknownMutationLockForKind('push');
       markRequestFailure(projectId, error);
       setWorktreeError(
         displayErrorMessage(error, translateError('pushWorktree'), desktopUnavailableMessage),
       );
     } finally {
-      setWorktreeBusy(null);
+      if (isSettledCurrent(settled)) {
+        setWorktreeBusy(null);
+      }
     }
   }, [
+    beginMutationOperation,
+    clearUnknownMutationLockForKind,
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
+    isSettledCurrent,
     loadGitHistory,
     loadWorktrees,
     markRequestFailure,
+    reconcileUnknownMutation,
     remoteWriteDisabled,
+    resolveClientOperationId,
     translateError,
+    unknownMutationLock,
   ]);
 
   /**
@@ -609,13 +1001,9 @@ export function useWorkbenchWorktreeGitController(
    *
    * Code Logic（这个函数做什么）:
    *   1. 校验非主 worktree、remoteWriteDisabled、用户确认；
-   *   2. clearMergeStageDismissTimer、setWorktreeBusy('merge')、初始化 checkSource running 阶段；
-   *   3. 调用 worktrees.merge，成功时把最终阶段写入、按需 auto-dismiss、loadWorktrees + loadSessions(bridge)、
-   *      clearBuffersForWorktree(bridge)、refreshProjectSessionStats、按需 loadGitHistory；
-   *   4. 失败时 markRequestFailure、把当前 running 阶段标 failed、loadWorktrees + loadSessions(bridge)、worktreeError；
-   *   5. finally 清空 worktreeBusy。
-   *
-   *   注意：session 刷新与 buffer 清理通过 terminalBridge 显式完成，绝不直接 mutate terminal state。
+   *   2. mint operation key + clientOperationId；初始化 merge 阶段；
+   *   3. envelope succeeded 且 current → 写阶段/刷新 sessions/buffers；
+   *   4. unknown 且 current → 对账、不盲重放；catch/finally 均 isSettledCurrent 守卫。
    */
   const handleMergeWorktree = useCallback(async (): Promise<void> => {
     const worktreeId = activeWorktreeIdRef.current;
@@ -623,12 +1011,20 @@ export function useWorkbenchWorktreeGitController(
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    if (!isMutationKindAllowedUnderUnknownLock('merge')) return;
     // Business Logic: 仅功能 worktree（非 main）允许 merge；主工作区没有合并目标。
     const current = worktrees.find((worktree) => worktree.id === worktreeId);
     if (!current || current.isMain) return;
     if (!confirmAction(translateWorktreeMessage('mergeConfirm', { name: current.name }))) {
       return;
     }
+    const settled = beginMutationOperation(projectId, worktreeId);
+    const clientOperationId = resolveClientOperationId(
+      'merge',
+      projectId,
+      worktreeId,
+      unknownMutationLock,
+    );
     try {
       clearMergeStageDismissTimer();
       setWorktreeBusy('merge');
@@ -644,20 +1040,93 @@ export function useWorkbenchWorktreeGitController(
           },
         ]),
       );
-      const result = await workbenchApi.worktrees.merge(worktreeId);
-      const finalStages = formatWorkbenchMergeStages(result.stages);
-      setMergeStages(finalStages);
-      if (shouldAutoDismissMergeStages(finalStages)) {
-        scheduleMergeStagePanelDismiss(worktreeId);
+
+      if (
+        unknownMutationLock
+        && unknownMutationLock.kind === 'merge'
+        && unknownMutationLock.clientOperationId === clientOperationId
+      ) {
+        const confirmed = await reconcileUnknownMutation(
+          clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('merge');
+          setWorktreeError(null);
+          await terminalBridge.loadSessions(projectId);
+          terminalBridge.clearBuffersForWorktree(worktreeId);
+          void refreshProjectSessionStats(projectId);
+          if (inspectorTab === 'history') await loadGitHistory();
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('merge');
+          setWorktreeError(translateError('mergeWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'merge',
+            projectId,
+            worktreeId,
+            clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+        return;
       }
-      invalidateWorktreeListRequests(projectId);
-      invalidateGitHistoryRequests(projectId, worktreeId);
-      await loadWorktrees(projectId);
-      await terminalBridge.loadSessions(projectId);
-      terminalBridge.clearBuffersForWorktree(worktreeId);
-      void refreshProjectSessionStats(projectId);
-      if (inspectorTab === 'history') await loadGitHistory();
+
+      const envelope = await workbenchApi.worktrees.merge(worktreeId, clientOperationId);
+      if (!isSettledCurrent(settled)) return;
+
+      if (isMutationSucceeded(envelope)) {
+        clearUnknownMutationLockForKind('merge');
+        const finalStages = formatWorkbenchMergeStages(envelope.value.stages);
+        setMergeStages(finalStages);
+        if (shouldAutoDismissMergeStages(finalStages)) {
+          scheduleMergeStagePanelDismiss(worktreeId);
+        }
+        invalidateWorktreeListRequests(projectId);
+        invalidateGitHistoryRequests(projectId, worktreeId);
+        await loadWorktrees(projectId);
+        if (!isSettledCurrent(settled)) return;
+        await terminalBridge.loadSessions(projectId);
+        terminalBridge.clearBuffersForWorktree(worktreeId);
+        void refreshProjectSessionStats(projectId);
+        if (inspectorTab === 'history') await loadGitHistory();
+        return;
+      }
+
+      if (isMutationUnknown(envelope)) {
+        const confirmed = await reconcileUnknownMutation(
+          envelope.clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('merge');
+          setWorktreeError(null);
+          await terminalBridge.loadSessions(projectId);
+          terminalBridge.clearBuffersForWorktree(worktreeId);
+          void refreshProjectSessionStats(projectId);
+          if (inspectorTab === 'history') await loadGitHistory();
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('merge');
+          setWorktreeError(translateError('mergeWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'merge',
+            projectId,
+            worktreeId,
+            clientOperationId: envelope.clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+      }
     } catch (error) {
+      if (!isSettledCurrent(settled)) return;
+      clearUnknownMutationLockForKind('merge');
       markRequestFailure(projectId, error);
       const message = displayErrorMessage(
         error,
@@ -674,28 +1143,39 @@ export function useWorkbenchWorktreeGitController(
         );
       });
       await loadWorktrees(projectId);
+      if (!isSettledCurrent(settled)) return;
       await terminalBridge.loadSessions(projectId);
+      if (!isSettledCurrent(settled)) return;
       setWorktreeError(message);
     } finally {
-      setWorktreeBusy(null);
+      if (isSettledCurrent(settled)) {
+        setWorktreeBusy(null);
+      }
     }
   }, [
+    beginMutationOperation,
+    clearUnknownMutationLockForKind,
     clearMergeStageDismissTimer,
     desktopUnavailableMessage,
     displayErrorMessage,
     inspectorTab,
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
+    isSettledCurrent,
     loadGitHistory,
     loadWorktrees,
     markRequestFailure,
     confirmAction,
+    reconcileUnknownMutation,
     refreshProjectSessionStats,
     remoteWriteDisabled,
+    resolveClientOperationId,
     scheduleMergeStagePanelDismiss,
     terminalBridge,
     translateError,
     translateWorktreeMessage,
+    unknownMutationLock,
     worktrees,
   ]);
 
@@ -704,16 +1184,11 @@ export function useWorkbenchWorktreeGitController(
    *   用户移除非主 worktree；移除前需用户确认，移除后切到剩余 worktree 并刷新列表。
    *
    * Code Logic（这个函数做什么）:
-   *   1. 校验非主 worktree、remoteWriteDisabled、用户确认；
-   *   2. setWorktreeBusy('remove')，调用 worktrees.remove(worktreeId)；
-   *   3. 若 active 仍是被移除的 worktree，则切到剩余的第一个；
-   *   4. loadWorktrees；失败时 markRequestFailure + worktreeError；
-   *   5. finally 清空 worktreeBusy。
+   *   mint/reuse operation key + clientOperationId；envelope succeeded 且 current 才切 active/刷新；
+   *   unknown 对账并保留 same-id 锁；catch/finally 均 isSettledCurrent 守卫。
    *
    *   注意：remove 不直接清理 terminal session/buffer；后端会在 remove_workbench_worktree 时关闭关联
-   *   session，随后页面通过 terminal-status 事件或下一次 loadSessions 同步状态。这与抽取前的原 Workbench.tsx
-   *   （eae5bef 行 2244–2275）行为完全一致——原 remove 也只 setActiveWorktreeId + loadWorktrees，不做 buffer/
-   *   session 清理（merge 才做）。Codex 二次评审 Finding 3 已确认这不是回归。
+   *   session，随后页面通过 terminal-status 事件或下一次 loadSessions 同步状态。
    */
   const handleRemoveWorktree = useCallback(async (): Promise<void> => {
     const worktreeId = activeWorktreeIdRef.current;
@@ -721,42 +1196,139 @@ export function useWorkbenchWorktreeGitController(
     if (remoteWriteDisabled) return;
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    if (!isMutationKindAllowedUnderUnknownLock('remove')) return;
     const current = worktrees.find((worktree) => worktree.id === worktreeId);
     if (!current || current.isMain) return;
     if (!confirmAction(translateWorktreeMessage('removeConfirm', { name: current.name }))) {
       return;
     }
+    const settled = beginMutationOperation(projectId, worktreeId);
+    const clientOperationId = resolveClientOperationId(
+      'remove',
+      projectId,
+      worktreeId,
+      unknownMutationLock,
+    );
     try {
       setWorktreeBusy('remove');
       setWorktreeError(null);
-      await workbenchApi.worktrees.remove(worktreeId, false);
-      if (activeWorktreeIdRef.current === worktreeId) {
-        const next = worktrees.find((worktree) => worktree.id !== worktreeId);
-        setActiveWorktreeId(next?.id ?? null);
+
+      if (
+        unknownMutationLock
+        && unknownMutationLock.kind === 'remove'
+        && unknownMutationLock.clientOperationId === clientOperationId
+      ) {
+        const confirmed = await reconcileUnknownMutation(
+          clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('remove');
+          setWorktreeError(null);
+          setWorktreeBusy(null);
+          if (activeWorktreeIdRef.current === worktreeId) {
+            const next = worktrees.find((worktree) => worktree.id !== worktreeId);
+            setActiveWorktreeId(next?.id ?? null);
+          }
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('remove');
+          setWorktreeError(translateError('removeWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'remove',
+            projectId,
+            worktreeId,
+            clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+        return;
       }
-      invalidateWorktreeListRequests(projectId);
-      invalidateGitHistoryRequests(projectId, worktreeId);
-      await loadWorktrees(projectId);
+
+      const envelope = await workbenchApi.worktrees.remove(
+        worktreeId,
+        false,
+        clientOperationId,
+      );
+      if (!isSettledCurrent(settled)) return;
+
+      if (isMutationSucceeded(envelope)) {
+        clearUnknownMutationLockForKind('remove');
+        // 先清 busy，再切 active worktree：切 active 会使 settled.worktreeId 不再匹配 current。
+        setWorktreeBusy(null);
+        if (activeWorktreeIdRef.current === worktreeId) {
+          const next = worktrees.find((worktree) => worktree.id !== worktreeId);
+          setActiveWorktreeId(next?.id ?? null);
+        }
+        invalidateWorktreeListRequests(projectId);
+        invalidateGitHistoryRequests(projectId, worktreeId);
+        await loadWorktrees(projectId);
+        return;
+      }
+
+      if (isMutationUnknown(envelope)) {
+        const confirmed = await reconcileUnknownMutation(
+          envelope.clientOperationId,
+          projectId,
+          worktreeId,
+          settled,
+        );
+        if (!isSettledCurrent(settled)) return;
+        if (confirmed === 'confirmedSucceeded') {
+          clearUnknownMutationLockForKind('remove');
+          setWorktreeError(null);
+          setWorktreeBusy(null);
+          if (activeWorktreeIdRef.current === worktreeId) {
+            const next = worktrees.find((worktree) => worktree.id !== worktreeId);
+            setActiveWorktreeId(next?.id ?? null);
+          }
+        } else if (confirmed === 'confirmedFailed') {
+          clearUnknownMutationLockForKind('remove');
+          setWorktreeError(translateError('removeWorktree'));
+        } else {
+          setUnknownMutationLock({
+            kind: 'remove',
+            projectId,
+            worktreeId,
+            clientOperationId: envelope.clientOperationId,
+          });
+          setWorktreeError(translateError('mutationUnknown'));
+        }
+      }
     } catch (error) {
+      if (!isSettledCurrent(settled)) return;
+      clearUnknownMutationLockForKind('remove');
       markRequestFailure(projectId, error);
       setWorktreeError(
         displayErrorMessage(error, translateError('removeWorktree'), desktopUnavailableMessage),
       );
     } finally {
-      setWorktreeBusy(null);
+      if (isSettledCurrent(settled)) {
+        setWorktreeBusy(null);
+      }
     }
   }, [
+    beginMutationOperation,
+    clearUnknownMutationLockForKind,
     desktopUnavailableMessage,
     displayErrorMessage,
     invalidateGitHistoryRequests,
     invalidateWorktreeListRequests,
+    isMutationKindAllowedUnderUnknownLock,
+    isSettledCurrent,
     loadWorktrees,
     markRequestFailure,
     confirmAction,
+    reconcileUnknownMutation,
     remoteWriteDisabled,
+    resolveClientOperationId,
     setActiveWorktreeId,
     translateError,
     translateWorktreeMessage,
+    unknownMutationLock,
     worktrees,
   ]);
 
@@ -794,6 +1366,7 @@ export function useWorkbenchWorktreeGitController(
   return {
     worktrees,
     worktreeBusy,
+    unknownMutationLock,
     worktreeError,
     createWorktreeOpen,
     createWorktreeBranchPrefix,

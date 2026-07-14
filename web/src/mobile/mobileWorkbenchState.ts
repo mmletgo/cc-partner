@@ -28,12 +28,133 @@ const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
 
 export type MobileWorktreeStatusKind = 'clean' | 'dirty' | 'conflict';
 
+/**
+ * 移动端项目详情加载状态机。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   首次详情失败后同项目必须可重试；ready 才允许同项目早退。
+ *
+ * Code Logic（联合形态）:
+ *   idle=未选；loading=在途；ready=权威就绪；error=失败可重试。
+ */
+export type MobileProjectDetailStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+/**
+ * 移动端连接态（online / reconnecting / offline）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   弱网下需展示缓存时间与离线原因，恢复后刷新可见 panel。
+ *
+ * Code Logic（联合形态）:
+ *   online 带 lastSucceededAt；reconnecting 带 attempt 与可选 cachedSince；offline 带 lastError/since。
+ */
+export type MobileConnectionState =
+  | { kind: 'online'; lastSucceededAt: number }
+  | { kind: 'reconnecting'; attempt: number; cachedSince: number | null }
+  | { kind: 'offline'; lastError: string; since: number };
+
 export interface MobileTerminalChromeVisibility {
   panelHeader: boolean;
   windowTabs: boolean;
   paneActions: boolean;
   terminalSurface: boolean;
   exitFullscreen: boolean;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   同项目早退只允许 ready，避免 error/loading 时点击项目无法重试详情。
+ *
+ * Code Logic（这个函数做什么）:
+ *   active 与 next 同 id 且 status===ready 时返回 true。
+ */
+export function shouldSkipMobileProjectReload(
+  activeProjectId: string | null,
+  nextProjectId: string,
+  detailStatus: MobileProjectDetailStatus,
+): boolean {
+  return activeProjectId === nextProjectId && detailStatus === 'ready';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   读成功需要把连接态收敛到 online，供状态栏显示最近成功时间。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 { kind:'online', lastSucceededAt: now }。
+ */
+export function markMobileConnectionOnline(now: number): MobileConnectionState {
+  return { kind: 'online', lastSucceededAt: now };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   自动重连过程中要保留最后成功缓存时间，便于展示“缓存于 …”。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 prev 提取 cachedSince（online→lastSucceededAt；reconnecting→cachedSince；offline→null）。
+ */
+export function markMobileConnectionReconnecting(
+  attempt: number,
+  prev: MobileConnectionState | null,
+): MobileConnectionState {
+  const cachedSince =
+    prev?.kind === 'online'
+      ? prev.lastSucceededAt
+      : prev?.kind === 'reconnecting'
+        ? prev.cachedSince
+        : null;
+  return { kind: 'reconnecting', attempt, cachedSince };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   明确 offline 后状态栏展示错误与 since；若已是 offline 则保留原始 since。
+ *
+ * Code Logic（这个函数做什么）:
+ *   prev 已是 offline 时只更新 lastError；否则写入 since=now。
+ */
+export function markMobileConnectionOffline(
+  lastError: string,
+  now: number,
+  prev: MobileConnectionState | null,
+): MobileConnectionState {
+  if (prev?.kind === 'offline') {
+    return { kind: 'offline', lastError, since: prev.since };
+  }
+  return { kind: 'offline', lastError, since: now };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   从 reconnecting/offline 回到 online 时，需要刷新当前可见 panel 的权威数据。
+ *
+ * Code Logic（这个函数做什么）:
+ *   prev 非 online 且 next 为 online 时返回 true。
+ */
+export function shouldRefreshMobilePanelOnReconnect(
+  prev: MobileConnectionState | null,
+  next: MobileConnectionState,
+): boolean {
+  if (next.kind !== 'online') return false;
+  if (!prev || prev.kind === 'online') return false;
+  return true;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   状态栏需要稳定取缓存起点：online 用 lastSucceededAt，reconnecting 用 cachedSince。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回可展示的 epoch ms 或 null。
+ */
+export function getMobileConnectionCachedAt(
+  connection: MobileConnectionState | null,
+): number | null {
+  if (!connection) return null;
+  if (connection.kind === 'online') return connection.lastSucceededAt;
+  if (connection.kind === 'reconnecting') return connection.cachedSince;
+  return null;
 }
 
 /**

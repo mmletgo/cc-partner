@@ -227,26 +227,59 @@ async fn dispatch_workbench_op(
         "worktrees.commit" => {
             let worktree_id = required_string(&payload, "worktreeId")?;
             let message = optional_string(&payload, "message");
-            let item =
-                workbench::commit_workbench_worktree_for_state(state, worktree_id, message).await?;
+            let client_operation_id = required_string(&payload, "clientOperationId")?;
+            let item = workbench::commit_workbench_worktree_for_state(
+                state,
+                worktree_id,
+                message,
+                client_operation_id,
+            )
+            .await?;
             Ok(serde_json::to_value(item)?)
         }
         "worktrees.push" => {
             let worktree_id = required_string(&payload, "worktreeId")?;
-            let item = workbench::push_workbench_worktree_for_state(state, worktree_id).await?;
+            let client_operation_id = required_string(&payload, "clientOperationId")?;
+            let item = workbench::push_workbench_worktree_for_state(
+                state,
+                worktree_id,
+                client_operation_id,
+            )
+            .await?;
             Ok(serde_json::to_value(item)?)
         }
         "worktrees.merge" => {
             let worktree_id = required_string(&payload, "worktreeId")?;
-            let item = workbench::merge_workbench_worktree_for_state(state, worktree_id).await?;
+            let client_operation_id = required_string(&payload, "clientOperationId")?;
+            let item = workbench::merge_workbench_worktree_for_state(
+                state,
+                worktree_id,
+                client_operation_id,
+            )
+            .await?;
             Ok(serde_json::to_value(item)?)
         }
         "worktrees.remove" => {
             let worktree_id = required_string(&payload, "worktreeId")?;
             let force = optional_bool(&payload, "force");
-            let value =
-                workbench::remove_workbench_worktree_for_state(state, worktree_id, force).await?;
-            Ok(value)
+            let client_operation_id = required_string(&payload, "clientOperationId")?;
+            let value = workbench::remove_workbench_worktree_for_state(
+                state,
+                worktree_id,
+                force,
+                client_operation_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(value)?)
+        }
+        "worktrees.mutation_operation" => {
+            let client_operation_id = required_string(&payload, "clientOperationId")?;
+            let item = workbench::get_workbench_mutation_operation_for_state(
+                state,
+                client_operation_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(item)?)
         }
         "git.commits" => {
             let project_id = required_string(&payload, "projectId")?;

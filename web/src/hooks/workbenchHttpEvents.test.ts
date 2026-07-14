@@ -1,6 +1,8 @@
-import { describe, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   parseWorkbenchNdjsonChunk,
+  parseWorkbenchNdjsonFrames,
+  WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
   type WorkbenchNdjsonParserState,
 } from './useWorkbenchHttpEvents';
 
@@ -60,5 +62,180 @@ describe('workbenchHttpEvents', () => {
       'terminalOutput chunk should preserve split Chinese text',
     );
     assert(secondEvents[1]?.type === 'terminalStatus', 'second event should be terminalStatus');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   typed heartbeat 必须在业务解码前识别，否则 client watchdog 永不重置或抛不支持事件。
+   *
+   * Code Logic（这个测试做什么）:
+   *   解析 heartbeat 与 terminalOutput 混合帧，断言 frames 含 heartbeat 且业务 chunk 仍过滤掉 heartbeat。
+   */
+  test('parses typed heartbeat frames before business events', () => {
+    const state: WorkbenchNdjsonParserState = { pending: '' };
+    const chunk =
+      '{"type":"heartbeat","sentAt":"2026-07-15T00:00:00Z"}\n' +
+      '{"type":"terminalOutput","payload":{"sessionId":"s1","chunk":"x","seq":1,"ts":1}}\n';
+
+    const frames = parseWorkbenchNdjsonFrames(state, chunk);
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toEqual({
+      kind: 'heartbeat',
+      sentAt: '2026-07-15T00:00:00Z',
+    });
+    expect(frames[1]?.kind).toBe('event');
+
+    const state2: WorkbenchNdjsonParserState = { pending: '' };
+    const eventsOnly = parseWorkbenchNdjsonChunk(state2, chunk);
+    expect(eventsOnly).toHaveLength(1);
+    expect(eventsOnly[0]?.type).toBe('terminalOutput');
+  });
+});
+
+describe('workbenchHttpEvents watchdog contract', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   半开连接 35s 无帧必须只 abort 当前连接并在 lifecycle 仍活跃时重连；
+   *   heartbeat 与业务帧都要重置 watchdog。
+   *
+   * Code Logic（这个测试做什么）:
+   *   用可控 ReadableStream + fake timers 模拟 hook 内 connect 语义：
+   *   先发 heartbeat，推进 34s 不 abort；再静默 35s 触发 child abort 并二次 fetch。
+   */
+  test('watchdog aborts child after silence and reconnects while lifecycle active', async () => {
+    vi.useFakeTimers();
+
+    type StreamController = ReadableStreamDefaultController<Uint8Array>;
+    const controllers: StreamController[] = [];
+    let fetchCount = 0;
+
+    const mockFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCount += 1;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controllers.push(controller);
+          init?.signal?.addEventListener('abort', () => {
+            try {
+              controller.error(new DOMException('The operation was aborted.', 'AbortError'));
+            } catch {
+              // already closed
+            }
+          });
+        },
+      });
+      return Promise.resolve({
+        ok: true,
+        body: stream,
+      } as Response);
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    // 内联复刻 hook 的 lifecycle/child/watchdog 合同，避免把 React hook 绑进 node 环境。
+    const lifecycle = new AbortController();
+    const reconnectDelayMs = 10;
+    const watchdogMs = WORKBENCH_HTTP_EVENT_WATCHDOG_MS;
+    let stopped = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const encoder = new TextEncoder();
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   测试需要与生产 hook 相同的重连调度语义。
+     *
+     * Code Logic（这个函数做什么）:
+     *   lifecycle 未结束时延迟调用 connect。
+     */
+    function scheduleReconnect(): void {
+      if (stopped || lifecycle.signal.aborted) return;
+      reconnectTimer = setTimeout(() => {
+        void connect();
+      }, reconnectDelayMs);
+    }
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   测试连接体必须与 production：child abort + watchdog 重置一致。
+     *
+     * Code Logic（这个函数做什么）:
+     *   fetch events，读 frames，heartbeat/业务都 resetWatchdog；结束 scheduleReconnect。
+     */
+    async function connect(): Promise<void> {
+      if (stopped || lifecycle.signal.aborted) return;
+      const connection = new AbortController();
+      const onLife = (): void => connection.abort();
+      lifecycle.signal.addEventListener('abort', onLife);
+      let watchdog: ReturnType<typeof setTimeout> | null = null;
+      /**
+       * Business Logic（为什么需要这个函数）:
+       *   任何完整 frame 都证明连接存活。
+       *
+       * Code Logic（这个函数做什么）:
+       *   重置 watchdog；触发时仅 abort child。
+       */
+      const resetWatchdog = (): void => {
+        if (watchdog) clearTimeout(watchdog);
+        watchdog = setTimeout(() => connection.abort(), watchdogMs);
+      };
+      resetWatchdog();
+      try {
+        const response = await fetch('/api/workbench/events', {
+          method: 'GET',
+          signal: connection.signal,
+        });
+        if (!response.body) throw new Error('no body');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        const state: WorkbenchNdjsonParserState = { pending: '' };
+        while (!stopped && !lifecycle.signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          const chunk = decoder.decode(value, { stream: true });
+          parseWorkbenchNdjsonFrames(state, chunk).forEach(() => {
+            resetWatchdog();
+          });
+        }
+      } catch {
+        if (lifecycle.signal.aborted) return;
+      } finally {
+        if (watchdog) clearTimeout(watchdog);
+        lifecycle.signal.removeEventListener('abort', onLife);
+        if (!lifecycle.signal.aborted && !stopped) scheduleReconnect();
+      }
+    }
+
+    void connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchCount).toBe(1);
+
+    // heartbeat 重置 watchdog
+    controllers[0]?.enqueue(
+      encoder.encode('{"type":"heartbeat","sentAt":"2026-07-15T00:00:00Z"}\n'),
+    );
+    await vi.advanceTimersByTimeAsync(watchdogMs - 1_000);
+    expect(fetchCount).toBe(1);
+
+    // 业务帧也重置
+    controllers[0]?.enqueue(
+      encoder.encode(
+        '{"type":"terminalOutput","payload":{"sessionId":"s","chunk":"a","seq":1,"ts":1}}\n',
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(watchdogMs - 1_000);
+    expect(fetchCount).toBe(1);
+
+    // 静默满 watchdog → child abort → reconnect
+    await vi.advanceTimersByTimeAsync(watchdogMs + reconnectDelayMs + 5);
+    expect(fetchCount).toBe(2);
+
+    stopped = true;
+    lifecycle.abort();
+    if (reconnectTimer) clearTimeout(reconnectTimer);
   });
 });

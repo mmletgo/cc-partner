@@ -20,6 +20,7 @@
   "contentPlaceholder": "Prompt 内容…",
   "contentAriaLabel": "Prompt 内容",
   "tagInputPlaceholder": "输入标签后按 Enter 添加",
+  "tagInputAriaLabel": "Prompt 标签",
   "skeletonAriaLabel": "加载 Prompts",
   "createFailed": "创建失败：{{error}}",
   "createFailedGeneric": "创建 Prompt 失败",

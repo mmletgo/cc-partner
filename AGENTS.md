@@ -46,6 +46,7 @@ cc-partner/
 │   │   │   │   ├── Tag/          # 可关闭 chip
 │   │   │   │   ├── Pill/         # 状态标签
 │   │   │   │   ├── StatusDot/    # online/offline/busy/away
+│   │   │   │   ├── StatusMessage/ # 异步反馈 live region（success=status / danger=alert）
 │   │   │   │   ├── ProgressBar/
 │   │   │   │   ├── Dialog/       # portal 模态 + useModalLayer（focus trap/Escape/inert/scroll lock）
 │   │   │   │   └── Drawer/       # 侧滑模态（side left/right，复用 useModalLayer）
@@ -164,7 +165,7 @@ primitives  →  layout  →  domain  →  page
 
 | 层级 | 职责 | 例子 |
 |------|------|------|
-| **primitives** | 单一 UI 元素，无业务语义，无数据依赖 | Button, Card, Input, Tag, Pill, StatusDot, ProgressBar, Dialog, Drawer |
+| **primitives** | 单一 UI 元素，无业务语义，无数据依赖 | Button, Card, Input, Tag, Pill, StatusDot, StatusMessage, ProgressBar, Dialog, Drawer |
 | **layout** | 页面结构骨架，无业务数据 | AppShell, Window, TitleBar, Sidebar, NavItem, ThemeToggle, RouteErrorBoundary || **domain** | 组合 primitives + layout，承担具体业务对象的展示/交互 | PromptCard, DeviceCard, TransferItem, PermissionCard |
 | **page** | 一个路由对应一个页面，组合 domain 组件 + 数据 hook | Home, Transfer, Prompts, ... |
 
@@ -251,6 +252,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | Tag | color, onClose | 标签 chip |
 | Pill | tone, dot | 状态标签 |
 | StatusDot | status, size | 设备在线状态点 |
+| StatusMessage | tone, live?, action? | 异步反馈 live region；`success/info/warn`→`role=status`，`danger`→`role=alert`；阻断失败恰好一次 alert |
 | ProgressBar | value, tone, size | 进度条 |
 | Dialog | open, titleId, onClose, closeOnEscape?, closeOnBackdrop?, initialFocusRef? | portal 模态；surface `role=dialog aria-modal`；共享 `useModalLayer`（focus trap / Escape / 背景 inert 引用计数 / body scroll lock / 关闭恢复触发焦点）；禁止业务页自建 focus trap |
 | Drawer | Dialog props + side?: left\|right | 侧滑模态抽屉；窄屏导航/详情侧栏；复用同一层栈合同 |

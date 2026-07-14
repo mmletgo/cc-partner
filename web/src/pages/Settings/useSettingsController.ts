@@ -7,9 +7,10 @@
  *
  * Code Logic（这个 hook 做什么）:
  *   集中管理 settingsResources 加载/重试、各 tab 表单 dirty/save/reset、权限与更新状态；
- *   返回 shell 与各 panel 所需字段，不渲染 tab JSX 树。
+ *   六个可保存资源（General/CloudSync/GitHub·AI/PromptOptimizer/Health/Automation）使用
+ *   `saveAttempt` 合同保护并发编辑；返回 shell 与各 panel 所需字段，不渲染 tab JSX 树。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -33,6 +34,11 @@ import {
 } from '@/api/sync';
 import { usePermissions } from '@/hooks/usePermissions';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
+import {
+  createSaveAttempt,
+  resolveSaveFailure,
+  resolveSaveSuccess,
+} from '@/lib/asyncState/saveAttempt';
 import {
   createSettingsResourceApi,
   isResourceReady,
@@ -537,6 +543,52 @@ export function useSettingsController(): UseSettingsControllerResult {
   const [resourceResults, setResourceResults] = useState<SettingsResourceResults | null>(null);
   const [retryingGroup, setRetryingGroup] = useState<SettingsResourceGroup | null>(null);
 
+  /**
+   * 各表单资源的 editVersion / requestSeq。
+   * 用户每次编辑递增 editVersion；submit 捕获 attempt；旧 seq 的 success/error 不改当前态。
+   */
+  const generalEditVersionRef = useRef(0);
+  const generalRequestSeqRef = useRef(0);
+  const cloudSyncEditVersionRef = useRef(0);
+  const cloudSyncRequestSeqRef = useRef(0);
+  const githubTrendingEditVersionRef = useRef(0);
+  const githubTrendingRequestSeqRef = useRef(0);
+  const promptOptimizerEditVersionRef = useRef(0);
+  const promptOptimizerRequestSeqRef = useRef(0);
+  const healthEditVersionRef = useRef(0);
+  const healthRequestSeqRef = useRef(0);
+  const automationEditVersionRef = useRef(0);
+  const automationRequestSeqRef = useRef(0);
+
+  /** 最新 draft/baseline 同步快照，供 await 后读取，避免闭包陈旧 */
+  const stateRef = useRef(state);
+  const initialStateRef = useRef(initialState);
+  const cloudSyncFormRef = useRef(cloudSyncForm);
+  const cloudSyncRef = useRef(cloudSync);
+  const githubTrendingFormRef = useRef(githubTrendingForm);
+  const githubTrendingConfigRef = useRef(githubTrendingConfig);
+  const promptOptimizerFormRef = useRef(promptOptimizerForm);
+  const promptOptimizerConfigRef = useRef(promptOptimizerConfig);
+  const healthFormRef = useRef(healthForm);
+  const healthConfigRef = useRef(healthConfig);
+  const automationFormRef = useRef(automationForm);
+  const initialAutomationFormRef = useRef(initialAutomationForm);
+  // 将最新表单快照写入 ref，供 await 后的 saveAttempt 解析读取；不得在 render 体直接写 ref.current
+  useEffect(() => {
+    stateRef.current = state;
+    initialStateRef.current = initialState;
+    cloudSyncFormRef.current = cloudSyncForm;
+    cloudSyncRef.current = cloudSync;
+    githubTrendingFormRef.current = githubTrendingForm;
+    githubTrendingConfigRef.current = githubTrendingConfig;
+    promptOptimizerFormRef.current = promptOptimizerForm;
+    promptOptimizerConfigRef.current = promptOptimizerConfig;
+    healthFormRef.current = healthForm;
+    healthConfigRef.current = healthConfig;
+    automationFormRef.current = automationForm;
+    initialAutomationFormRef.current = initialAutomationForm;
+  });
+
   // macOS 权限状态（设置页手动授权入口，持续轮询以反映用户在系统设置的变更）
   const {
     status: permStatus,
@@ -702,7 +754,12 @@ export function useSettingsController(): UseSettingsControllerResult {
    * @param partial 待合并的字段
    */
   const patchState = useCallback((partial: Partial<SettingsState>) => {
-    setState((prev) => ({ ...prev, ...partial }));
+    setState((prev) => {
+      const next = { ...prev, ...partial };
+      stateRef.current = next;
+      return next;
+    });
+    generalEditVersionRef.current += 1;
     // 用户继续编辑时清掉上一次保存错误，避免陈旧 alert 误导
     setSaveError(null);
   }, []);
@@ -732,10 +789,16 @@ export function useSettingsController(): UseSettingsControllerResult {
    * @param value 新的按键字符串
    */
   const handleShortcutChange = useCallback((id: string, value: string) => {
-    setState((prev) => ({
-      ...prev,
-      shortcuts: prev.shortcuts.map((s) => (s.id === id ? { ...s, value } : s)),
-    }));
+    setState((prev) => {
+      const next = {
+        ...prev,
+        shortcuts: prev.shortcuts.map((s) => (s.id === id ? { ...s, value } : s)),
+      };
+      stateRef.current = next;
+      return next;
+    });
+    generalEditVersionRef.current += 1;
+    setSaveError(null);
   }, []);
 
   /**
@@ -748,7 +811,13 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   只改 Prompt 优化表单中的 hotkey 字段，等待用户点击“应用配置”再持久化。
    */
   const handlePromptOptimizerShortcutChange = useCallback((value: string) => {
-    setPromptOptimizerForm((prev) => ({ ...prev, hotkey: value }));
+    setPromptOptimizerForm((prev) => {
+      const next = { ...prev, hotkey: value };
+      promptOptimizerFormRef.current = next;
+      return next;
+    });
+    promptOptimizerEditVersionRef.current += 1;
+    setPromptOptimizerSettingsError(null);
   }, []);
 
   /**
@@ -830,7 +899,10 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   使用加载阶段从后端取得的默认配置快照更新表单；是否需要保存仍由 isDirty 重新计算。
    */
   const handleResetDefaults = () => {
+    stateRef.current = defaultState;
+    generalEditVersionRef.current += 1;
     setState(defaultState);
+    setSaveError(null);
   };
 
   /**
@@ -855,27 +927,58 @@ export function useSettingsController(): UseSettingsControllerResult {
    *
    * Business Logic（为什么需要这个函数）:
    *   用户应用常规偏好；失败时必须保留脏表单与本地修改，不能整页卸载成 loadError。
+   *   保存期间继续编辑时，响应不得覆盖新草稿。
    *
    * Code Logic（这个函数做什么）:
-   *   update_config 成功写 initialState/savedAt 并清 saveError；
-   *   失败只 setSaveError，不碰 loadError / state / initialState。
+   *   捕获 SaveAttempt → update_config → resolveSaveSuccess/Failure；
+   *   成功总是更新 baseline，仅 version/snapshot 未变时 hydrate draft；失败 scoped 到 saveError。
    */
   const handleSave = async () => {
+    const snapshot: SettingsState = {
+      ...stateRef.current,
+      shortcuts: stateRef.current.shortcuts.map((s) => ({ ...s })),
+    };
+    const attempt = createSaveAttempt(
+      ++generalRequestSeqRef.current,
+      snapshot,
+      generalEditVersionRef.current,
+    );
     setSaving(true);
     setSaveError(null);
     try {
-      const updatedConfig = await configApi.update(buildConfigUpdate(state, initialState));
-      const savedState = settingsStateFromConfig(updatedConfig);
-      setState(savedState);
-      // 保存成功后，把已保存快照更新为当前 state，使 isDirty 归零
-      setInitialState(savedState);
+      const updatedConfig = await configApi.update(
+        buildConfigUpdate(attempt.submittedSnapshot, initialStateRef.current),
+      );
+      const serverState = settingsStateFromConfig(updatedConfig);
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: generalRequestSeqRef.current,
+        currentDraft: stateRef.current,
+        currentEditVersion: generalEditVersionRef.current,
+        serverValue: serverState,
+        currentBaseline: initialStateRef.current,
+      });
+      if (!resolution.applied) return;
+      initialStateRef.current = resolution.baseline;
+      stateRef.current = resolution.draft;
+      setInitialState(resolution.baseline);
+      setState(resolution.draft);
       setSavedAt(new Date());
       setSaveError(null);
     } catch (err) {
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: generalRequestSeqRef.current,
+        currentDraft: stateRef.current,
+        currentBaseline: initialStateRef.current,
+      });
+      if (!failure.applied) return;
       // 局部错误：保留脏草稿，暴露 localized 文案供 panel 展示
       setSaveError(err instanceof Error ? err.message : t('error.saveFailed'));
     } finally {
-      setSaving(false);
+      if (attempt.requestSeq === generalRequestSeqRef.current) {
+        setSaving(false);
+      }
     }
   };
 
@@ -1298,7 +1401,13 @@ export function useSettingsController(): UseSettingsControllerResult {
    * @param partial 待合并的字段
    */
   const patchCloudSyncForm = useCallback((partial: Partial<CloudSyncForm>) => {
-    setCloudSyncForm((prev) => ({ ...prev, ...partial }));
+    setCloudSyncForm((prev) => {
+      const next = { ...prev, ...partial };
+      cloudSyncFormRef.current = next;
+      return next;
+    });
+    cloudSyncEditVersionRef.current += 1;
+    setCloudSyncError(null);
   }, []);
 
   /**
@@ -1311,6 +1420,8 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   使用加载时保存的默认表单快照覆盖当前表单；是否落盘仍由用户点击“应用配置”决定。
    */
   const handleResetCloudSyncDefaults = useCallback(() => {
+    cloudSyncFormRef.current = defaultCloudSyncForm;
+    cloudSyncEditVersionRef.current += 1;
     setCloudSyncForm(defaultCloudSyncForm);
     setCloudSyncError(null);
   }, [defaultCloudSyncForm]);
@@ -1339,18 +1450,57 @@ export function useSettingsController(): UseSettingsControllerResult {
 
   /**
    * 云端同步「应用配置」：把当前表单值提交到后端，并用返回值刷新已应用配置
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   同步配置需整体落盘；保存期间继续编辑时不得被旧响应回填。
+   *
+   * Code Logic（这个函数做什么）:
+   *   捕获 SaveAttempt → updateCloudSyncConfig → resolveSaveSuccess/Failure。
    */
   const handleApplyCloudSync = async () => {
+    const snapshot: CloudSyncForm = { ...cloudSyncFormRef.current };
+    const attempt = createSaveAttempt(
+      ++cloudSyncRequestSeqRef.current,
+      snapshot,
+      cloudSyncEditVersionRef.current,
+    );
     setApplying(true);
     setCloudSyncError(null);
     try {
-      const updated = await configApi.updateCloudSyncConfig(cloudSyncFormToUpdate(cloudSyncForm));
+      const updated = await configApi.updateCloudSyncConfig(cloudSyncFormToUpdate(attempt.submittedSnapshot));
+      const serverForm = cloudSyncConfigToForm(updated);
+      const baselineForm = cloudSyncRef.current
+        ? cloudSyncConfigToForm(cloudSyncRef.current)
+        : attempt.submittedSnapshot;
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: cloudSyncRequestSeqRef.current,
+        currentDraft: cloudSyncFormRef.current,
+        currentEditVersion: cloudSyncEditVersionRef.current,
+        serverValue: serverForm,
+        currentBaseline: baselineForm,
+      });
+      if (!resolution.applied) return;
+      cloudSyncRef.current = updated;
+      cloudSyncFormRef.current = resolution.draft;
       setCloudSync(updated);
-      setCloudSyncForm(cloudSyncConfigToForm(updated));
+      setCloudSyncForm(resolution.draft);
     } catch (err) {
+      const baselineForm = cloudSyncRef.current
+        ? cloudSyncConfigToForm(cloudSyncRef.current)
+        : attempt.submittedSnapshot;
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: cloudSyncRequestSeqRef.current,
+        currentDraft: cloudSyncFormRef.current,
+        currentBaseline: baselineForm,
+      });
+      if (!failure.applied) return;
       setCloudSyncError(err instanceof Error ? err.message : t('settings:cloudSync.applyFailed'));
     } finally {
-      setApplying(false);
+      if (attempt.requestSeq === cloudSyncRequestSeqRef.current) {
+        setApplying(false);
+      }
     }
   };
 
@@ -1651,7 +1801,13 @@ export function useSettingsController(): UseSettingsControllerResult {
    * 更新 Claude CLI / AI 表单字段
    */
   const patchGithubTrendingForm = useCallback((partial: Partial<GithubTrendingForm>) => {
-    setGithubTrendingForm((prev) => ({ ...prev, ...partial }));
+    setGithubTrendingForm((prev) => {
+      const next = { ...prev, ...partial };
+      githubTrendingFormRef.current = next;
+      return next;
+    });
+    githubTrendingEditVersionRef.current += 1;
+    setGithubTrendingError(null);
   }, []);
 
   /**
@@ -1664,29 +1820,70 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   使用加载时保存的默认表单快照覆盖当前表单；持久化仍由“应用配置”按钮完成。
    */
   const handleResetGithubTrendingDefaults = useCallback(() => {
+    githubTrendingFormRef.current = defaultGithubTrendingForm;
+    githubTrendingEditVersionRef.current += 1;
     setGithubTrendingForm(defaultGithubTrendingForm);
     setGithubTrendingError(null);
   }, [defaultGithubTrendingForm]);
 
   /**
    * Claude CLI / AI「应用配置」：保存 GitHub 解说开关、Claude CLI 路径、模型与缓存设置
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   AI 配置需整体落盘；保存期间继续编辑时不得被旧响应回填。
+   *
+   * Code Logic（这个函数做什么）:
+   *   捕获 SaveAttempt → updateConfig → resolveSaveSuccess/Failure。
    */
   const handleApplyGithubTrending = async () => {
+    const snapshot: GithubTrendingForm = { ...githubTrendingFormRef.current };
+    const attempt = createSaveAttempt(
+      ++githubTrendingRequestSeqRef.current,
+      snapshot,
+      githubTrendingEditVersionRef.current,
+    );
     setApplyingGithubTrending(true);
     setGithubTrendingError(null);
     try {
       const updated = await githubTrendingApi.updateConfig({
-        aiEnabled: githubTrendingForm.aiEnabled,
-        claudeCliPath: githubTrendingForm.claudeCliPath.trim() || 'claude',
-        claudeModel: githubTrendingForm.claudeModel.trim() || 'sonnet',
-        cacheTtlHours: githubTrendingForm.cacheTtlHours,
+        aiEnabled: attempt.submittedSnapshot.aiEnabled,
+        claudeCliPath: attempt.submittedSnapshot.claudeCliPath.trim() || 'claude',
+        claudeModel: attempt.submittedSnapshot.claudeModel.trim() || 'sonnet',
+        cacheTtlHours: attempt.submittedSnapshot.cacheTtlHours,
       });
+      const serverForm = githubTrendingConfigToForm(updated);
+      const baselineForm = githubTrendingConfigRef.current
+        ? githubTrendingConfigToForm(githubTrendingConfigRef.current)
+        : attempt.submittedSnapshot;
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: githubTrendingRequestSeqRef.current,
+        currentDraft: githubTrendingFormRef.current,
+        currentEditVersion: githubTrendingEditVersionRef.current,
+        serverValue: serverForm,
+        currentBaseline: baselineForm,
+      });
+      if (!resolution.applied) return;
+      githubTrendingConfigRef.current = updated;
+      githubTrendingFormRef.current = resolution.draft;
       setGithubTrendingConfig(updated);
-      setGithubTrendingForm(githubTrendingConfigToForm(updated));
+      setGithubTrendingForm(resolution.draft);
     } catch (err) {
+      const baselineForm = githubTrendingConfigRef.current
+        ? githubTrendingConfigToForm(githubTrendingConfigRef.current)
+        : attempt.submittedSnapshot;
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: githubTrendingRequestSeqRef.current,
+        currentDraft: githubTrendingFormRef.current,
+        currentBaseline: baselineForm,
+      });
+      if (!failure.applied) return;
       setGithubTrendingError(err instanceof Error ? err.message : t('settings:githubTrending.applyFailed'));
     } finally {
-      setApplyingGithubTrending(false);
+      if (attempt.requestSeq === githubTrendingRequestSeqRef.current) {
+        setApplyingGithubTrending(false);
+      }
     }
   };
 
@@ -1715,7 +1912,13 @@ export function useSettingsController(): UseSettingsControllerResult {
    * 更新 Workbench Prompt 优化设置表单字段
    */
   const patchPromptOptimizerForm = useCallback((partial: Partial<PromptOptimizerSettingsForm>) => {
-    setPromptOptimizerForm((prev) => ({ ...prev, ...partial }));
+    setPromptOptimizerForm((prev) => {
+      const next = { ...prev, ...partial };
+      promptOptimizerFormRef.current = next;
+      return next;
+    });
+    promptOptimizerEditVersionRef.current += 1;
+    setPromptOptimizerSettingsError(null);
   }, []);
 
   /**
@@ -1728,29 +1931,64 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   用加载时保存的默认表单快照覆盖当前表单；持久化仍由「应用配置」完成。
    */
   const handleResetPromptOptimizerSettingsDefaults = useCallback(() => {
+    promptOptimizerFormRef.current = defaultPromptOptimizerForm;
+    promptOptimizerEditVersionRef.current += 1;
     setPromptOptimizerForm(defaultPromptOptimizerForm);
     setPromptOptimizerSettingsError(null);
   }, [defaultPromptOptimizerForm]);
 
   /**
    * Workbench Prompt 优化「应用配置」：保存页面内快捷键与自动填入语言
+   *
+   * Business Logic（为什么需要这个函数）:
+   *   Prompt 优化偏好需落盘；保存期间继续编辑时不得被旧响应回填。
+   *
+   * Code Logic（这个函数做什么）:
+   *   捕获 SaveAttempt → configApi.update → resolveSaveSuccess/Failure。
    */
   const handleApplyPromptOptimizerSettings = async () => {
+    const snapshot: PromptOptimizerSettingsForm = { ...promptOptimizerFormRef.current };
+    const attempt = createSaveAttempt(
+      ++promptOptimizerRequestSeqRef.current,
+      snapshot,
+      promptOptimizerEditVersionRef.current,
+    );
     setApplyingPromptOptimizer(true);
     setPromptOptimizerSettingsError(null);
     try {
       const updated = await configApi.update(
-        promptOptimizerSettingsFormToUpdate(promptOptimizerForm),
+        promptOptimizerSettingsFormToUpdate(attempt.submittedSnapshot),
       );
-      const savedForm = promptOptimizerSettingsConfigToForm(updated);
-      setPromptOptimizerConfig(savedForm);
-      setPromptOptimizerForm(savedForm);
+      const serverForm = promptOptimizerSettingsConfigToForm(updated);
+      const baselineForm = promptOptimizerConfigRef.current ?? attempt.submittedSnapshot;
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: promptOptimizerRequestSeqRef.current,
+        currentDraft: promptOptimizerFormRef.current,
+        currentEditVersion: promptOptimizerEditVersionRef.current,
+        serverValue: serverForm,
+        currentBaseline: baselineForm,
+      });
+      if (!resolution.applied) return;
+      promptOptimizerConfigRef.current = resolution.baseline;
+      promptOptimizerFormRef.current = resolution.draft;
+      setPromptOptimizerConfig(resolution.baseline);
+      setPromptOptimizerForm(resolution.draft);
     } catch (err) {
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: promptOptimizerRequestSeqRef.current,
+        currentDraft: promptOptimizerFormRef.current,
+        currentBaseline: promptOptimizerConfigRef.current ?? attempt.submittedSnapshot,
+      });
+      if (!failure.applied) return;
       setPromptOptimizerSettingsError(
         err instanceof Error ? err.message : t('settings:promptOptimizerSettings.applyFailed'),
       );
     } finally {
-      setApplyingPromptOptimizer(false);
+      if (attempt.requestSeq === promptOptimizerRequestSeqRef.current) {
+        setApplyingPromptOptimizer(false);
+      }
     }
   };
 
@@ -1760,7 +1998,13 @@ export function useSettingsController(): UseSettingsControllerResult {
    * @param partial 待合并的字段
    */
   const patchHealthForm = useCallback((partial: Partial<HealthForm>) => {
-    setHealthForm((prev) => ({ ...prev, ...partial }));
+    setHealthForm((prev) => {
+      const next = { ...prev, ...partial };
+      healthFormRef.current = next;
+      return next;
+    });
+    healthEditVersionRef.current += 1;
+    setHealthError(null);
   }, []);
 
   /**
@@ -1773,6 +2017,8 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   用加载时保存的默认表单快照覆盖当前表单；持久化仍由「应用配置」完成。
    */
   const handleResetHealthDefaults = useCallback(() => {
+    healthFormRef.current = defaultHealthForm;
+    healthEditVersionRef.current += 1;
     setHealthForm(defaultHealthForm);
     setHealthError(null);
   }, [defaultHealthForm]);
@@ -1782,19 +2028,55 @@ export function useSettingsController(): UseSettingsControllerResult {
    *
    * Business Logic（为什么需要这个函数）:
    *   健康配置需整体覆盖式回写（后端 update_health_config 不做部分合并），
-   *   提交后用后端返回值刷新已应用快照与表单，保证 UI 与后端一致。
+   *   提交后用后端返回值刷新已应用快照；保存期间新编辑不得被回填覆盖。
+   *
+   * Code Logic（这个函数做什么）:
+   *   捕获 SaveAttempt → healthApi.updateConfig → resolveSaveSuccess/Failure。
    */
   const handleApplyHealth = async () => {
+    const snapshot: HealthForm = { ...healthFormRef.current };
+    const attempt = createSaveAttempt(
+      ++healthRequestSeqRef.current,
+      snapshot,
+      healthEditVersionRef.current,
+    );
     setApplyingHealth(true);
     setHealthError(null);
     try {
-      const updated = await healthApi.updateConfig(healthForm);
+      const updated = await healthApi.updateConfig(attempt.submittedSnapshot);
+      const serverForm = healthConfigToForm(updated);
+      const baselineForm = healthConfigRef.current
+        ? healthConfigToForm(healthConfigRef.current)
+        : attempt.submittedSnapshot;
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: healthRequestSeqRef.current,
+        currentDraft: healthFormRef.current,
+        currentEditVersion: healthEditVersionRef.current,
+        serverValue: serverForm,
+        currentBaseline: baselineForm,
+      });
+      if (!resolution.applied) return;
+      healthConfigRef.current = updated;
+      healthFormRef.current = resolution.draft;
       setHealthConfig(updated);
-      setHealthForm(healthConfigToForm(updated));
+      setHealthForm(resolution.draft);
     } catch (err) {
+      const baselineForm = healthConfigRef.current
+        ? healthConfigToForm(healthConfigRef.current)
+        : attempt.submittedSnapshot;
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: healthRequestSeqRef.current,
+        currentDraft: healthFormRef.current,
+        currentBaseline: baselineForm,
+      });
+      if (!failure.applied) return;
       setHealthError(err instanceof Error ? err.message : t('settings:health.applyFailed'));
     } finally {
-      setApplyingHealth(false);
+      if (attempt.requestSeq === healthRequestSeqRef.current) {
+        setApplyingHealth(false);
+      }
     }
   };
 
@@ -1805,9 +2087,11 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   自动化 tab 是受控表单，用户改动任一字段后应清掉上次保存成功/失败提示，避免旧状态误导当前编辑。
    *
    * Code Logic（这个函数做什么）:
-   *   接收完整 nextForm 写入状态，同时重置 saved/error 标记；是否 dirty 由 automationDirty 派生计算。
+   *   接收完整 nextForm 写入状态并递增 editVersion，同时重置 saved/error 标记。
    */
   const handleAutomationFormChange = useCallback((nextForm: AutomationSettingsForm) => {
+    automationFormRef.current = nextForm;
+    automationEditVersionRef.current += 1;
     setAutomationForm(nextForm);
     setAutomationError(null);
     setAutomationSaved(false);
@@ -1823,6 +2107,8 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   使用加载阶段保存的 defaultAutomationForm 覆盖当前表单，并清理保存状态提示。
    */
   const handleResetAutomationDefaults = useCallback(() => {
+    automationFormRef.current = defaultAutomationForm;
+    automationEditVersionRef.current += 1;
     setAutomationForm(defaultAutomationForm);
     setAutomationError(null);
     setAutomationSaved(false);
@@ -1832,26 +2118,56 @@ export function useSettingsController(): UseSettingsControllerResult {
    * Orchestrator 自动化「应用配置」：提交自动化表单到后端并刷新基准快照
    *
    * Business Logic（为什么需要这个函数）:
-   *   自动化配置由 Phase 1 后端命令持久化；保存成功后 UI 必须以返回值为准，展示后端归一化后的验证命令。
+   *   自动化配置由 Phase 1 后端命令持久化；保存成功后更新 baseline，
+   *   保存期间的新编辑必须保留且 dirty 继续为 true。
    *
    * Code Logic（这个函数做什么）:
-   *   把表单转成 update patch 调用 update_orchestrator_config；成功后用返回 DTO 重新生成 form/initial，
-   *   失败则展示错误并保留用户当前输入。
+   *   捕获 SaveAttempt → update_orchestrator_config → resolveSaveSuccess/Failure；
+   *   成功时 baseline=server form，仅未继续编辑时 hydrate draft；失败 scoped 到 automationError。
    */
   const handleSaveAutomation = async () => {
+    const snapshot: AutomationSettingsForm = { ...automationFormRef.current };
+    const attempt = createSaveAttempt(
+      ++automationRequestSeqRef.current,
+      snapshot,
+      automationEditVersionRef.current,
+    );
     setSavingAutomation(true);
     setAutomationError(null);
     setAutomationSaved(false);
     try {
-      const updated = await orchestratorConfigApi.update(automationFormToPatch(automationForm));
-      const savedForm = automationConfigToForm(updated);
-      setAutomationForm(savedForm);
-      setInitialAutomationForm(savedForm);
-      setAutomationSaved(true);
+      const updated = await orchestratorConfigApi.update(
+        automationFormToPatch(attempt.submittedSnapshot),
+      );
+      const serverForm = automationConfigToForm(updated);
+      const resolution = resolveSaveSuccess({
+        attempt,
+        currentRequestSeq: automationRequestSeqRef.current,
+        currentDraft: automationFormRef.current,
+        currentEditVersion: automationEditVersionRef.current,
+        serverValue: serverForm,
+        currentBaseline: initialAutomationFormRef.current,
+      });
+      if (!resolution.applied) return;
+      initialAutomationFormRef.current = resolution.baseline;
+      automationFormRef.current = resolution.draft;
+      setInitialAutomationForm(resolution.baseline);
+      setAutomationForm(resolution.draft);
+      // 仅当 draft 已与 baseline 对齐时展示 saved 提示；否则仍有未保存编辑
+      setAutomationSaved(!resolution.dirty);
     } catch (err) {
+      const failure = resolveSaveFailure({
+        attempt,
+        currentRequestSeq: automationRequestSeqRef.current,
+        currentDraft: automationFormRef.current,
+        currentBaseline: initialAutomationFormRef.current,
+      });
+      if (!failure.applied) return;
       setAutomationError(err instanceof Error ? err.message : t('settings:automation.applyFailed'));
     } finally {
-      setSavingAutomation(false);
+      if (attempt.requestSeq === automationRequestSeqRef.current) {
+        setSavingAutomation(false);
+      }
     }
   };
 

@@ -339,6 +339,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 设备离线后重新上线，同步应能恢复
 - 关键前端 IPC/HTTP 成功体在写入 UI 状态前经 runtime schema **fail-closed** 解码；畸形/未知必填失败不得用 payload 原文刷状态，错误只暴露 contract/path/primitive kind（及 request id），不序列化业务 payload；legacy 默认值必须在对应 schema 字段显式声明
 - Prompt / 速记本 / Settings 等写路径：乐观更新在 API reject 时必须回滚或保留 dirty 草稿并提供重试；关闭 GUI 前 flush 全部 pending write，flush 失败中止关闭
+- **Safe-save / operation context**：Settings/ClaudeMd 等编辑保存持有 `editVersion` + `requestSeq`；success 总是更新 baseline，仅 version 未变且 draft 仍等于 submittedSnapshot 时才 hydrate 回填；旧 seq 的 success/error 不改当前态。Workbench Git 等长操作以 `WorkbenchOperationKey` / `isCurrentOperation` 守卫，切换 project/worktree 后旧 success/catch/finally 不得写新 context；mutation timeout/network 结果为 `unknown`，只按稳定 `clientOperationId` 对账，禁止盲重放
+- **Mobile transport**：query overall 默认 15s（含 decode）、mutation 30s、longMutation 180s；query/只读 POST 对 timeout/network 最多重试 2 次（页面可见且非 callerAbort）；project/worktree/context 切换 abort 旧 query；mutation 仅在稳定 operation id + 幂等/ledger 对账时可重送
+- **Accessible async feedback**：异步成功用 `StatusMessage` `role=status`（polite），阻断失败用 `role=alert`（assertive）恰好一次；busy 按钮保持稳定 accessible name；`TagInput` 必须接收 `ariaLabel` 或 `ariaLabelledBy` 其一，placeholder 不充当名称
 - 质量证据分层（L0 合同 / L1 浏览器 mock / L2 后端与 smoke / L3 真机）以 `docs/development/quality-matrix.json` 登记；未执行的真机项保持 `NOT VERIFIED`，不得用 L1 mock 宣称 GUI/系统权限/双机 LAN 已认证
 
 ## 4. 技术架构

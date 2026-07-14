@@ -179,6 +179,39 @@ function testGitHistoryActionAvailability(): void {
 
 /**
  * Business Logic（为什么需要这个测试）:
+ *   unknownMutationLock 必须作为共享锁：仅锁定 kind 可 reconcile，其余 sibling 必须禁用。
+ *
+ * Code Logic（这个测试做什么）:
+ *   commit lock 时 canCommit 仍 true；canPush/canMerge/canRemove 为 false；无 lock 时保持原可用性。
+ */
+function testUnknownMutationLockSharedAcrossMutationKinds(): void {
+  const feature = { ...mainWorktree, id: 'feature', isMain: false, branch: 'feature/a' };
+  const commitLock = {
+    kind: 'commit' as const,
+    projectId: 'p1',
+    worktreeId: 'feature',
+    clientOperationId: 'op-commit',
+  };
+
+  if (!canCommitWorktree(feature, null, commitLock)) {
+    throw new Error('expected locked kind to remain enabled for same-id reconcile');
+  }
+  if (canPushWorktree(feature, null, commitLock)) {
+    throw new Error('expected commit lock to disable sibling push');
+  }
+  if (canMergeWorktree(feature, null, commitLock)) {
+    throw new Error('expected commit lock to disable sibling merge');
+  }
+  if (canRemoveWorktree(feature, null, commitLock)) {
+    throw new Error('expected commit lock to disable sibling remove');
+  }
+  if (!canPushWorktree(feature, null, null)) {
+    throw new Error('expected no lock to keep push available');
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个测试）:
  *   新建 worktree 的分支名来自页面内输入框，空白输入不能触发后端创建，用户输入两侧空格应自动清理。
  *
  * Code Logic（这个测试做什么）:
@@ -455,6 +488,7 @@ describe('workbenchWorktrees', () => {
     testWorktreeStatusTone();
     testCanCommitWorktreeIgnoresStaleCleanStatus();
     testGitHistoryActionAvailability();
+    testUnknownMutationLockSharedAcrossMutationKinds();
     testNormalizeWorktreeBranchName();
     testComposeWorktreeBranchName();
     await testCreateWorktreeWithTerminalWindowCreatesSessionForNewWorktree();

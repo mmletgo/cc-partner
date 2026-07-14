@@ -66,6 +66,21 @@
   font-size: var(--text-sm);
 }
 
+/* 动作失败（转存/删除）alert 表面 + 重试 */
+.actionError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
 /* ── 主体双栏 ── */
 .body {
   display: grid;

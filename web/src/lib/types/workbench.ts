@@ -123,6 +123,122 @@ export interface WorkbenchWorktree {
   updatedAt: string;
 }
 
+/**
+ * 不确定传输类别（与 asyncState/mutationOutcome 对齐）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   timeout/network 无法区分 not-started 与已执行，前端必须标 unknown 并对账。
+ *
+ * Code Logic（联合形态）:
+ *   wire 用小写 token：timeout | network。
+ */
+export type MutationTransportClass = 'timeout' | 'network';
+
+/**
+ * Workbench mutation 成功通道 envelope（与 Rust WorkbenchMutationEnvelopeDto 对齐）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   commit/push/merge/remove 在 uncertain transport 下不能猜成失败或成功，只能 succeeded | unknown。
+ *
+ * Code Logic（联合形态）:
+ *   succeeded 带权威 value；unknown 仅带 clientOperationId 与可选 transportClass。
+ */
+export type WorkbenchMutationEnvelope<T> =
+  | { kind: 'succeeded'; value: T; clientOperationId: string }
+  | {
+      kind: 'unknown';
+      clientOperationId: string;
+      transportClass?: MutationTransportClass;
+    };
+
+/** mutation 种类（ledger / wire 小写 token）。 */
+export type MutationKind = 'commit' | 'push' | 'merge' | 'remove';
+
+/** ledger 状态。 */
+export type MutationState = 'claimed' | 'running' | 'succeeded' | 'failed';
+
+/**
+ * reconciliation intent（执行前捕获，与 Rust MutationIntent camelCase 对齐）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   unknown 后必须按精确后置条件确认，不能用 message 代替 tree/ref/identity。
+ *
+ * Code Logic（联合形态）:
+ *   tag=kind 的 camelCase 联合。
+ */
+export type MutationIntent =
+  | {
+      kind: 'commit';
+      projectId: string;
+      worktreeId: string;
+      beforeHead: string | null;
+      expectedTree: string;
+    }
+  | {
+      kind: 'push';
+      projectId: string;
+      worktreeId: string;
+      localRef: string;
+      remoteRef: string;
+      localHead: string;
+    }
+  | {
+      kind: 'merge';
+      projectId: string;
+      sourceWorktreeId: string;
+      sourceHead: string;
+      mainHead: string;
+    }
+  | {
+      kind: 'remove';
+      projectId: string;
+      worktreeId: string;
+      path: string;
+      branch: string | null;
+    };
+
+/**
+ * ledger 中的一条 operation 记录（对齐 Rust WorkbenchMutationOperationDto）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   unknown 后前端按 clientOperationId 查询 owning sidecar ledger，取得 intent/state。
+ *
+ * Code Logic（字段说明）:
+ *   outcome 为成功时的权威 value JSON；失败时为 null。
+ */
+export type WorkbenchMutationOperation = {
+  clientOperationId: string;
+  kind: MutationKind;
+  payloadHash: string;
+  intent: MutationIntent;
+  state: MutationState;
+  outcome: unknown | null;
+  errorMessage: string | null;
+  projectId: string | null;
+  worktreeId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * 权威 Git/worktree 状态快照，供纯 confirm 矩阵使用。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   对账只看精确后置条件，不猜 message 或列表文案。
+ *
+ * Code Logic（字段说明）:
+ *   字段均可空；缺失时 confirm 返回 unknown。
+ */
+export type MutationAuthoritySnapshot = {
+  head?: string | null;
+  headTree?: string | null;
+  headParent?: string | null;
+  remoteRefHead?: string | null;
+  mainContainsSourceHead?: boolean | null;
+  sourceWorktreePresent?: boolean | null;
+  worktreeIdentityPresent?: boolean | null;
+};
+
 /** Workbench 浏览器预览候选来源。 */
 export type WorkbenchBrowserTargetSource =
   | 'remembered'

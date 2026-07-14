@@ -7,7 +7,7 @@
 //!     monofile 前部共享定义。
 
 use crate::backend::authority::RuntimeRole;
-use crate::backend::control_client::BackendControlClient;
+use crate::backend::control_client::{BackendControlClient, MutationControlError};
 use crate::error::AppError;
 use crate::models::device::Device;
 use crate::state::AppState;
@@ -15,6 +15,7 @@ use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchGitStatusDto, WorkbenchPathInfo, WorkbenchProjectDto,
     WorkbenchProjectRow, WorkbenchSessionDto, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
 };
+use crate::workbench::operation_ledger::WorkbenchMutationEnvelopeDto;
 use crate::workbench::sessions::pane_count_for_row;
 use crate::workbench::{
     file_content, file_preview, fs as workbench_fs, git as workbench_git, projects,
@@ -48,6 +49,38 @@ pub(crate) async fn proxy_workbench_if_gui<T: DeserializeOwned>(
     }
     let client = BackendControlClient::from_control_file()?;
     Ok(Some(client.workbench_op(op, payload).await?))
+}
+
+/// GuiClient 时代理 workbench mutation 并保留 uncertain→unknown envelope。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GuiClient 不得在本地执行 workbench mutation；代理到 sidecar 时若传输不确定，
+///     必须保留 unknown envelope（禁止自动重放），不能把 Uncertain 折叠成普通 AppError。
+///
+/// Code Logic（这个函数做什么）:
+///     非 GuiClient 返回 `Ok(None)`；GuiClient 调 `workbench_mutation_op_value`：
+///     Ok→反序列化 envelope；Uncertain→`WorkbenchMutationEnvelopeDto::unknown`；Failed→Err。
+pub(crate) async fn proxy_workbench_mutation_if_gui<T: DeserializeOwned>(
+    state: &AppState,
+    op: &str,
+    payload: impl Serialize,
+    client_operation_id: &str,
+) -> Result<Option<WorkbenchMutationEnvelopeDto<T>>, AppError> {
+    if state.runtime_role != RuntimeRole::GuiClient {
+        return Ok(None);
+    }
+    let client = BackendControlClient::from_control_file()?;
+    match client.workbench_mutation_op_value(op, payload).await {
+        Ok(value) => {
+            let env: WorkbenchMutationEnvelopeDto<T> = serde_json::from_value(value)
+                .map_err(|e| AppError::generic(format!("mutation envelope 解析失败 ({op}): {e}")))?;
+            Ok(Some(env))
+        }
+        Err(MutationControlError::Uncertain { transport }) => Ok(Some(
+            WorkbenchMutationEnvelopeDto::unknown(client_operation_id, Some(transport)),
+        )),
+        Err(MutationControlError::Failed(e)) => Err(e),
+    }
 }
 
 pub(crate) const COMMIT_MESSAGE_TIMEOUT_SECS: u64 = 180;

@@ -104,7 +104,9 @@
     "projectPanel": {
       "title": "项目",
       "error": "加载失败",
-      "unsupportedProjectKind": "手机端暂不支持打开该项目类型"
+      "unsupportedProjectKind": "手机端暂不支持打开该项目类型",
+      "reload": "重新加载项目",
+      "detailError": "项目详情加载失败"
     },
     "browser": {
       "title": "移动端项目预览"
@@ -181,7 +183,9 @@
       "committing": "提交中",
       "pushing": "推送中",
       "merging": "合并中",
-      "commitMeta": "{{author}} · {{date}}"
+      "commitMeta": "{{author}} · {{date}}",
+      "reconciling": "核对结果中…",
+      "retryReconcile": "重新核对"
     },
     "worktreePanel": {
       "title": "Worktrees",
@@ -192,7 +196,9 @@
       "merging": "合并中",
       "removing": "移除中",
       "sync": "同步",
-      "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。"
+      "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。",
+      "reconciling": "核对结果中…",
+      "retryReconcile": "重新核对"
     },
     "promptPanel": {
       "title": "Prompt",
@@ -393,6 +399,13 @@
         "title": "设置",
         "label": "移动端"
       }
+    },
+    "connection": {
+      "online": "已连接",
+      "reconnecting": "重新连接中…",
+      "offline": "离线",
+      "cachedAt": "缓存于 {{time}}",
+      "lastError": "最后错误：{{error}}"
     }
   },
   "worktrees": {
@@ -640,6 +653,8 @@
     "createPath": "创建路径失败",
     "copyPath": "复制路径失败",
     "renamePath": "重命名失败",
-    "deletePath": "删除失败"
+    "deletePath": "删除失败",
+    "mutationUnknown": "操作结果未知，请刷新后人工核对",
+    "mutationFailed": "操作失败，可以重新发起。"
   }
 }

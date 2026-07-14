@@ -37,15 +37,17 @@ pub use files::{
 
 pub use git::{
     __cmd__commit_workbench_worktree, __cmd__create_workbench_worktree,
-    __cmd__list_workbench_git_commits, __cmd__list_workbench_worktrees,
-    __cmd__merge_workbench_worktree, __cmd__push_workbench_worktree,
+    __cmd__get_workbench_mutation_operation, __cmd__list_workbench_git_commits,
+    __cmd__list_workbench_worktrees, __cmd__merge_workbench_worktree, __cmd__push_workbench_worktree,
     __cmd__remove_workbench_worktree, __tauri_command_name_commit_workbench_worktree,
     __tauri_command_name_create_workbench_worktree,
+    __tauri_command_name_get_workbench_mutation_operation,
     __tauri_command_name_list_workbench_git_commits, __tauri_command_name_list_workbench_worktrees,
     __tauri_command_name_merge_workbench_worktree, __tauri_command_name_push_workbench_worktree,
     __tauri_command_name_remove_workbench_worktree, commit_workbench_worktree,
-    create_workbench_worktree, list_workbench_git_commits, list_workbench_worktrees,
-    merge_workbench_worktree, push_workbench_worktree, remove_workbench_worktree,
+    create_workbench_worktree, get_workbench_mutation_operation, list_workbench_git_commits,
+    list_workbench_worktrees, merge_workbench_worktree, push_workbench_worktree,
+    remove_workbench_worktree,
 };
 
 pub use projects::{
@@ -114,10 +116,13 @@ pub(crate) use files::{
 
 pub(crate) use git::{
     commit_workbench_worktree_for_state, create_workbench_worktree_for_state,
-    list_workbench_git_commits_for_state, local_commit_workbench_worktree,
+    get_workbench_mutation_operation_for_state, list_workbench_git_commits_for_state,
+    local_commit_workbench_worktree, local_commit_workbench_worktree_with_ledger,
     local_create_workbench_worktree, local_list_workbench_git_commits,
-    local_merge_workbench_worktree, local_open_workbench_file, local_push_workbench_worktree,
-    local_remove_workbench_worktree, merge_workbench_worktree_for_state,
+    local_merge_workbench_worktree, local_merge_workbench_worktree_with_ledger,
+    local_open_workbench_file, local_push_workbench_worktree,
+    local_push_workbench_worktree_with_ledger, local_remove_workbench_worktree,
+    local_remove_workbench_worktree_with_ledger, merge_workbench_worktree_for_state,
     open_workbench_file_for_state, push_workbench_worktree_for_state,
     remove_workbench_worktree_for_state,
 };

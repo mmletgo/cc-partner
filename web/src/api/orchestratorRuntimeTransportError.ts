@@ -14,12 +14,21 @@
  * 传输错误分类。
  *
  * Business Logic（为什么需要这个类型）:
- *   仅 network 才可在存在 remote live 缓存时展示 offline warm cache；protocol/unknown 不得关键词推断 offline。
+ *   Mobile HTTP 与 runtime adapter 需要可判别的 transport kind；
+ *   仅 network 才可在存在 remote live 缓存时展示 offline warm cache；
+ *   protocol/timeout/callerAbort/decode/unknown 不得关键词推断 offline。
  *
  * Code Logic（取值说明）:
- *   network=传输/连通失败；protocol=HTTP 非 2xx 或契约层失败；unknown=无法结构化分类。
+ *   network=传输/连通失败；protocol=HTTP 非 2xx；timeout=整体预算耗尽；
+ *   callerAbort=调用方 AbortSignal；decode=成功体 JSON/schema 失败；unknown=无法结构化分类。
  */
-export type OrchestratorRuntimeTransportKind = 'network' | 'protocol' | 'unknown';
+export type OrchestratorRuntimeTransportKind =
+  | 'network'
+  | 'protocol'
+  | 'timeout'
+  | 'callerAbort'
+  | 'decode'
+  | 'unknown';
 
 /**
  * OrchestratorRuntimeTransportError（runtime 传输错误）。
