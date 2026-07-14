@@ -208,15 +208,14 @@ impl WorkbenchBrowserPreviewRegistry {
         preview
     }
 
-    /// 创建测试用本机 preview。
+    /// 创建测试/smoke 用本机 preview。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     registry 单元测试只关心 previewId 与 TTL，不应依赖真实 HTTP server 端口。
+    ///     registry 单元测试与 bound smoke 只关心 previewId 与 TTL，不应依赖真实 HTTP server 端口。
     ///
     /// Code Logic（这个函数做什么）:
     ///     以固定端口调用 create_local，保持测试调用简洁稳定。
-    #[cfg(test)]
-    fn create_local_for_test(
+    pub fn create_local_for_test(
         &self,
         project_id: &str,
         worktree_id: Option<&str>,
@@ -230,15 +229,14 @@ impl WorkbenchBrowserPreviewRegistry {
         )
     }
 
-    /// 强制测试会话过期。
+    /// 强制测试/smoke 会话过期。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     过期清理不能让测试等待 30 分钟，必须能直接制造过期 session。
     ///
     /// Code Logic（这个函数做什么）:
     ///     在写锁内把目标 session 的 expires_at 调整到过去，并同步设置过期毫秒时间戳。
-    #[cfg(test)]
-    fn force_expire_for_test(&self, preview_id: &str) {
+    pub fn force_expire_for_test(&self, preview_id: &str) {
         if let Some(session) = self
             .inner
             .write()
@@ -350,9 +348,12 @@ pub async fn proxy_workbench_browser_request(
     req: Request<Body>,
     route_prefix: &'static str,
 ) -> Result<Response, ApiError> {
-    let session = lookup_preview_or_not_found(&state.workbench_browser_previews, &preview_id)?;
-    // 全局 guard 仅延期 null Origin；此处在 live session 确认后才真正允许 opaque origin。
-    enforce_preview_origin_after_session_lookup(req.headers())?;
+    // 会话查找 + Origin 最终裁决（null 仅 live session；非 null 必须同源）。
+    let session = accept_preview_request_with_origin(
+        &state.workbench_browser_previews,
+        &preview_id,
+        req.headers(),
+    )?;
     if is_websocket_upgrade(req.headers()) {
         return proxy_workbench_browser_websocket(state, session, tail_path, req).await;
     }
@@ -379,32 +380,41 @@ fn lookup_preview_or_not_found(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     opaque sandbox iframe 可能发送 `Origin: null`；该例外只能绑定有效 preview session，
-///     不能在全局 guard 对未知/过期 previewId 直接放行。
+///     不能在全局 guard 对未知/过期 previewId 直接放行。同时对非 null Origin 做会话层同源复检，
+///     防止未来子路由漏挂全局 guard 时跨站 + 有效 previewId 直达上游。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 Origin：缺失（native）允许；字面 `null` 允许；其它非 null Origin 在此不再二次拦截
-///     （全局 guard 已拒绝跨站）。若未来绕过全局 guard 的调用路径出现非 null 跨站，仍依赖全局层。
-///     本函数在 session 已确认的前提下接受 null；调用方必须先 `lookup_preview_or_not_found`。
+///     读取 Origin：缺失（native）允许；字面 `null` 允许；其它非 null 必须与 Host 规范化同源
+///     （复用 `lan_guard::is_same_origin_with_host`），否则 403。缺少 Host 时 fail-closed 403。
+///     调用方必须先 `lookup_preview_or_not_found`。
 fn enforce_preview_origin_after_session_lookup(headers: &HeaderMap) -> Result<(), ApiError> {
     match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
         None => Ok(()),
         Some(origin) if origin.trim().eq_ignore_ascii_case("null") => Ok(()),
         Some(origin) => {
-            // 全局 guard 已要求同源或缺失；此处仅防御性放行非 null（同源）Origin。
-            let _ = origin;
-            Ok(())
+            let host = headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .filter(|h| !h.trim().is_empty())
+                .ok_or_else(|| ApiError::forbidden("预览请求缺少 Host，无法校验同源 Origin"))?;
+            if crate::net::lan_guard::is_same_origin_with_host(origin, host) {
+                Ok(())
+            } else {
+                Err(ApiError::forbidden("预览请求跨站 Origin 不被允许"))
+            }
         }
     }
 }
 
-/// 在 preview session 查找前后统一评估 opaque Origin（供测试与入口复用）。
+/// 在 preview session 查找前后统一评估 Origin（生产入口与测试/smoke 共用）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     未知/过期 previewId 即使带 `Origin: null` 也必须失败；有效 session 才允许 null。
+///     未知/过期 previewId 即使带 `Origin: null` 也必须失败；有效 session 才允许 null；
+///     非 null Origin 必须同源。生产 proxy 与 unit/smoke 必须走同一裁决路径。
 ///
 /// Code Logic（这个函数做什么）:
 ///     先 lookup；失败直接返回 404；成功再执行 `enforce_preview_origin_after_session_lookup`。
-fn accept_preview_request_with_origin(
+pub fn accept_preview_request_with_origin(
     registry: &WorkbenchBrowserPreviewRegistry,
     preview_id: &str,
     headers: &HeaderMap,
@@ -1656,6 +1666,16 @@ mod tests {
             headers
         }
 
+        fn same_origin_headers() -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:62116"));
+            headers.insert(
+                header::ORIGIN,
+                HeaderValue::from_static("http://127.0.0.1:62116"),
+            );
+            headers
+        }
+
         #[test]
         fn valid_preview_id_accepts_opaque_origin_null_for_http_and_websocket() {
             let registry = WorkbenchBrowserPreviewRegistry::new();
@@ -1670,6 +1690,28 @@ mod tests {
             // WebSocket 与 HTTP 共用同一会话后 Origin 判定。
             enforce_preview_origin_after_session_lookup(&headers)
                 .expect("websocket path should also accept Origin:null after session lookup");
+        }
+
+        #[test]
+        fn valid_preview_id_accepts_same_origin_and_rejects_cross_origin() {
+            let registry = WorkbenchBrowserPreviewRegistry::new();
+            let preview =
+                registry.create_local_for_test("project-a", None, "http://127.0.0.1:5173/");
+
+            let session =
+                accept_preview_request_with_origin(&registry, &preview.preview_id, &same_origin_headers())
+                    .expect("live preview should accept same-origin non-null Origin");
+            assert_eq!(session.preview_id, preview.preview_id);
+
+            let mut cross = HeaderMap::new();
+            cross.insert(header::HOST, HeaderValue::from_static("127.0.0.1:62116"));
+            cross.insert(
+                header::ORIGIN,
+                HeaderValue::from_static("http://evil.example"),
+            );
+            let err = accept_preview_request_with_origin(&registry, &preview.preview_id, &cross)
+                .expect_err("cross-origin must fail at session layer even with live preview");
+            assert_eq!(err.status(), StatusCode::FORBIDDEN);
         }
 
         #[test]

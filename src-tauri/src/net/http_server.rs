@@ -14,10 +14,7 @@
 
 use crate::backend::control::{self, BackendControlFile};
 use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErrorCode, P2pResult};
-use crate::net::lan_guard::{
-    browser_guard_params, browser_request_guard, browser_request_guard_with_params, lan_socket_gate,
-    require_loopback_peer,
-};
+use crate::net::lan_guard::{browser_request_guard, lan_socket_gate, require_loopback_peer};
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     attention, cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator,
@@ -34,7 +31,7 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::io::{Error as IoError, ErrorKind};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Component, Path};
 use std::sync::atomic::Ordering;
 use tower::service_fn;
@@ -920,9 +917,11 @@ async fn bind_preferred_http_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::lan_guard::{browser_guard_params, browser_request_guard_with_params};
     use crate::workbench::file_content::MAX_EDITABLE_TEXT_BYTES;
     use crate::workbench::remote_protocol::RemoteSaveTextReq;
     use std::ffi::OsString;
+    use std::net::Ipv4Addr;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
 

@@ -18,10 +18,13 @@ use crate::net::lan_guard::{
 };
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::transfer::CHUNK_SIZE;
+use crate::workbench::browser_proxy::{
+    accept_preview_request_with_origin, WorkbenchBrowserPreviewRegistry,
+};
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, State};
-use axum::http::{Method, Request, StatusCode};
-use axum::response::Response;
+use axum::http::{header, HeaderMap, Method, Request, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -57,15 +60,17 @@ struct StopResponse {
 /// 绑定 smoke 服务器句柄。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     集成测试需要知道实际端口、stop token，并在结束后释放 listener。
+///     集成测试需要知道实际端口、stop token、preview registry，并在结束后释放 listener。
 ///
 /// Code Logic（这个结构做什么）:
-///     持有 base URL、实际端口、token、shutdown 发送端与 join handle。
+///     持有 base URL、实际端口、token、共享 preview registry、shutdown 发送端与 join handle。
 pub struct BoundSmokeServer {
     pub base_url: String,
     pub port: u16,
     pub stop_token: String,
     pub device_id: String,
+    /// 与 serve 栈共享的 preview registry（live/expired 场景由 smoke 直接写入）。
+    pub preview_registry: WorkbenchBrowserPreviewRegistry,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
@@ -88,12 +93,14 @@ impl BoundSmokeServer {
     }
 }
 
-/// smoke 共享状态：stop token + 业务写是否到达 handler。
+/// smoke 共享状态：stop token + 业务写是否到达 handler + 真实 preview registry。
 #[derive(Clone)]
 struct SmokeState {
     stop_token: String,
     write_reached: Arc<AtomicBool>,
     stop_reached: Arc<AtomicBool>,
+    /// 真实 browser preview registry：bound smoke 验证 null Origin 仅在 live session 后放行。
+    preview_registry: WorkbenchBrowserPreviewRegistry,
 }
 
 /// 启动绑定到 loopback 临时端口的边界 smoke 服务器。
@@ -112,10 +119,12 @@ pub async fn spawn_bound_smoke_server() -> BoundSmokeServer {
     let port = addr.port();
     let device_id = "smoke-device".to_string();
     let stop_token = "smoke-control-token-fixed".to_string();
+    let preview_registry = WorkbenchBrowserPreviewRegistry::new();
     let state = SmokeState {
         stop_token: stop_token.clone(),
         write_reached: Arc::new(AtomicBool::new(false)),
         stop_reached: Arc::new(AtomicBool::new(false)),
+        preview_registry: preview_registry.clone(),
     };
     let params = browser_guard_params(&device_id, port);
     let app = smoke_router(params, state.clone());
@@ -139,6 +148,7 @@ pub async fn spawn_bound_smoke_server() -> BoundSmokeServer {
         port,
         stop_token,
         device_id,
+        preview_registry,
         shutdown_tx: Some(shutdown_tx),
         join: Some(join),
     }
@@ -202,24 +212,60 @@ async fn smoke_save_text_handler(State(state): State<SmokeState>) -> Json<Value>
     Json(serde_json::json!({"ok": true, "route": "save_text"}))
 }
 
-/// preview proxy probe：仅证明全局 guard 对 null Origin 延期。
+/// preview proxy probe：真实 registry 会话裁决 + Origin 最终判定。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     有效 preview session 的 opaque Origin:null 最终裁决在 browser_proxy unit 矩阵；
-///     集成层确认全局 middleware 不会在 proxy path 上提前拒绝 null Origin。
+///     bound smoke 必须证明：全局 guard 延期 null Origin 后，handler 用真实 registry
+///     在 live session 上接受 null，并对 unknown/expired 返回 404；非 null 跨站在会话层 403。
 ///
 /// Code Logic（这个函数做什么）:
-///     返回 previewId/path 与 unit-level 标注。
+///     直接调用生产 `accept_preview_request_with_origin`：lookup registry → null/同源 Origin 终判；
+///     成功返回 JSON；失败映射 ApiError 状态码。WS upgrade 头仅验证会话层，不桥接上游。
 async fn smoke_preview_proxy_handler(
+    State(state): State<SmokeState>,
     Path((preview_id, path)): Path<(String, String)>,
-) -> Json<Value> {
-    Json(serde_json::json!({
-        "ok": true,
-        "route": "preview_proxy",
-        "previewId": preview_id,
-        "path": path,
-        "sessionValidation": "unit_level_in_browser_proxy"
-    }))
+    req: Request<Body>,
+) -> Response {
+    match accept_preview_request_with_origin(&state.preview_registry, &preview_id, req.headers()) {
+        Ok(session) => {
+            let is_ws = is_websocket_upgrade_headers(req.headers());
+            Json(serde_json::json!({
+                "ok": true,
+                "route": "preview_proxy",
+                "previewId": session.preview_id,
+                "path": path,
+                "sessionValidation": "registry_live_session",
+                "websocketUpgrade": is_ws
+            }))
+            .into_response()
+        }
+        Err(err) => err.into_response(),
+    }
+}
+
+/// 识别 WebSocket upgrade 请求头（smoke 不桥接上游，只验证会话层）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     smoke 需要覆盖 WS upgrade 头 + Origin:null 的会话裁决，但不必真连 Vite。
+///
+/// Code Logic（这个函数做什么）:
+///     Connection 含 upgrade 且 Upgrade=websocket（大小写不敏感）。
+fn is_websocket_upgrade_headers(headers: &HeaderMap) -> bool {
+    let has_connection_upgrade = headers.get_all(header::CONNECTION).iter().any(|value| {
+        value
+            .to_str()
+            .map(|raw| {
+                raw.split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
+            })
+            .unwrap_or(false)
+    });
+    let has_websocket_upgrade = headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+    has_connection_upgrade && has_websocket_upgrade
 }
 
 /// transfer chunk probe：消费 body 以触发 limit。
@@ -521,29 +567,129 @@ async fn run_matrix_async() {
         println!("[ok] bound simple Content-Type ordinary write rejected");
     }
 
-    // 4i preview proxy Origin:null 延期进入 handler（会话裁决 unit-level）
+    // 4i preview proxy：真实 registry + Origin:null / expired / WS upgrade 头
     {
+        let live = server.preview_registry.create_local_for_test(
+            "smoke-project",
+            None,
+            "http://127.0.0.1:5173/",
+        );
+        // live + Origin:null → 200
         let resp = client
             .get(format!(
-                "{}/api/workbench/browser/proxy/live-session/index.html",
+                "{}/api/workbench/browser/proxy/{}/index.html",
+                server.base_url, live.preview_id
+            ))
+            .header("host", &host)
+            .header("origin", "null")
+            .send()
+            .await
+            .expect("preview live null");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "live preview + Origin:null must succeed"
+        );
+        let body: Value = resp.json().await.expect("json");
+        assert_eq!(body["route"], "preview_proxy");
+        assert_eq!(body["sessionValidation"], "registry_live_session");
+        assert_eq!(body["previewId"], live.preview_id);
+        assert_eq!(body["websocketUpgrade"], false);
+        println!("[ok] bound live preview Origin:null HTTP accepted via real registry");
+
+        // unknown + Origin:null → 404（不得访问其它 /api/* 已在 4g 覆盖）
+        let resp = client
+            .get(format!(
+                "{}/api/workbench/browser/proxy/missing-preview/index.html",
                 server.base_url
             ))
             .header("host", &host)
             .header("origin", "null")
             .send()
             .await
-            .expect("preview null");
+            .expect("preview missing null");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "unknown preview + Origin:null must 404"
+        );
+        println!("[ok] bound unknown preview Origin:null rejected 404");
+
+        // expired + Origin:null → 404
+        let expired = server.preview_registry.create_local_for_test(
+            "smoke-project",
+            None,
+            "http://127.0.0.1:5173/",
+        );
+        server
+            .preview_registry
+            .force_expire_for_test(&expired.preview_id);
+        let resp = client
+            .get(format!(
+                "{}/api/workbench/browser/proxy/{}/index.html",
+                server.base_url, expired.preview_id
+            ))
+            .header("host", &host)
+            .header("origin", "null")
+            .send()
+            .await
+            .expect("preview expired null");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "expired preview + Origin:null must 404"
+        );
+        println!("[ok] bound expired preview Origin:null rejected 404");
+
+        // live + WS upgrade 头 + Origin:null → 会话层 200（不桥接上游）
+        let ws_live = server.preview_registry.create_local_for_test(
+            "smoke-project",
+            None,
+            "http://127.0.0.1:5173/",
+        );
+        let resp = client
+            .get(format!(
+                "{}/api/workbench/browser/proxy/{}/@vite/client",
+                server.base_url, ws_live.preview_id
+            ))
+            .header("host", &host)
+            .header("origin", "null")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .send()
+            .await
+            .expect("preview ws null");
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "preview proxy Origin:null deferred into handler"
+            "live preview WS upgrade headers + Origin:null must pass session layer"
         );
         let body: Value = resp.json().await.expect("json");
-        assert_eq!(body["route"], "preview_proxy");
-        assert_eq!(body["sessionValidation"], "unit_level_in_browser_proxy");
+        assert_eq!(body["sessionValidation"], "registry_live_session");
+        assert_eq!(body["websocketUpgrade"], true);
         println!(
-            "[ok] bound preview Origin:null HTTP deferred (session validation: unit-level browser_proxy)"
+            "[ok] bound live preview WS upgrade headers + Origin:null accepted (no upstream bridge)"
         );
+
+        // live + 跨站 Origin → 403（会话层防御纵深；全局 guard 也会挡，此处走 bound stack）
+        let resp = client
+            .get(format!(
+                "{}/api/workbench/browser/proxy/{}/index.html",
+                server.base_url, live.preview_id
+            ))
+            .header("host", &host)
+            .header("origin", "http://evil.example")
+            .send()
+            .await
+            .expect("preview cross origin");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "live preview + cross-origin must 403"
+        );
+        println!("[ok] bound live preview cross-origin rejected 403");
     }
 
     // 4j stop: loopback + valid token
@@ -585,6 +731,7 @@ async fn run_matrix_async() {
             stop_token: server.stop_token.clone(),
             write_reached: Arc::new(AtomicBool::new(false)),
             stop_reached: Arc::new(AtomicBool::new(false)),
+            preview_registry: server.preview_registry.clone(),
         };
         let router = smoke_router(params, state);
         let mut request = Request::builder()
@@ -621,6 +768,7 @@ async fn run_matrix_async() {
             stop_token: server.stop_token.clone(),
             write_reached: Arc::new(AtomicBool::new(false)),
             stop_reached: Arc::new(AtomicBool::new(false)),
+            preview_registry: server.preview_registry.clone(),
         };
         let router = smoke_router(params, state);
         let mut request = Request::builder()
@@ -647,6 +795,7 @@ async fn run_matrix_async() {
             stop_token: server.stop_token.clone(),
             write_reached: Arc::new(AtomicBool::new(false)),
             stop_reached: Arc::new(AtomicBool::new(false)),
+            preview_registry: server.preview_registry.clone(),
         };
         let router = smoke_router(params, state);
         let mut request = Request::builder()
@@ -672,6 +821,7 @@ async fn run_matrix_async() {
 
     println!("=== LAN trust boundary smoke matrix PASS ===");
     println!("NOTE: multi-host mDNS / phone QR / real public peer path = NOT VERIFIED here");
-    println!("NOTE: preview session registry + WebSocket upgrade = unit-level (browser_proxy / lan_guard)");
+    println!("NOTE: preview registry live/expired + Origin:null HTTP/WS-headers verified on bound stack");
+    println!("NOTE: real WebSocket bridge to Vite upstream = NOT VERIFIED here (session layer only)");
     println!("NOTE: browser L1 Playwright = S6 ownership (not duplicated)");
 }

@@ -111,7 +111,7 @@ fn classify_ipv4(ip: Ipv4Addr) -> LanPeerScope {
 fn classify_ipv6(ip: Ipv6Addr) -> LanPeerScope {
     if ip.is_loopback() {
         LanPeerScope::Loopback
-    } else if is_ipv6_ula(ip) || ip.is_unicast_link_local() {
+    } else if is_ipv6_ula(ip) || is_ipv6_unicast_link_local(ip) {
         LanPeerScope::Lan
     } else {
         LanPeerScope::Denied
@@ -127,6 +127,18 @@ fn classify_ipv6(ip: Ipv6Addr) -> LanPeerScope {
 ///     检查最高 7 位是否为 `0b1111110`（首字节 0xfc 或 0xfd）。
 fn is_ipv6_ula(ip: Ipv6Addr) -> bool {
     (ip.octets()[0] & 0xfe) == 0xfc
+}
+
+/// 判断 IPv6 是否为 unicast link-local（fe80::/10）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     link-local 是局域网链路地址，必须与 RFC1918/ULA 同样视为支持范围；
+///     且 MSRV 1.77.2 不能依赖较新的 `Ipv6Addr::is_unicast_link_local`。
+///
+/// Code Logic（这个函数做什么）:
+///     检查最高 10 位是否为 `0b1111111010`（首 16 位与 0xffc0 掩码后等于 0xfe80）。
+fn is_ipv6_unicast_link_local(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
 /// 要求 peer 为 loopback（backend stop 生命周期控制）。
@@ -276,7 +288,7 @@ enum RequestPathKind {
 /// Code Logic（这个枚举做什么）:
 ///     Missing / SameOrigin / OpaqueNull / CrossOrigin。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OriginClass {
+pub(crate) enum OriginClass {
     Missing,
     SameOrigin,
     OpaqueNull,
@@ -335,17 +347,14 @@ pub fn parse_http_host_header(host: &str) -> Option<(String, Option<u16>)> {
 /// Code Logic（这个函数做什么）:
 ///     去尾点后大小写不敏感比较 localhost/受控名；否则解析 IP 并用 `classify_peer_ip` 要求 Loopback/Lan。
 pub fn is_allowed_browser_hostname(hostname: &str, controlled_mdns_host: &str) -> bool {
-    let host = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = normalize_hostname_label(hostname);
     if host.is_empty() {
         return false;
     }
     if host == "localhost" {
         return true;
     }
-    let controlled = controlled_mdns_host
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+    let controlled = normalize_hostname_label(controlled_mdns_host);
     if host == controlled {
         return true;
     }
@@ -358,27 +367,113 @@ pub fn is_allowed_browser_hostname(hostname: &str, controlled_mdns_host: &str) -
     }
 }
 
+/// 规范化 hostname：去尾点 + ASCII 小写。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Host 允许列表与 Origin 同源比较必须使用同一套主机名规范化，避免浏览器大小写/尾点形态误杀合法同源请求。
+///
+/// Code Logic（这个函数做什么）:
+///     trim → 去掉尾部 `.` → `to_ascii_lowercase`。
+fn normalize_hostname_label(hostname: &str) -> String {
+    hostname.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// 把 Host 头解析为可与 Origin 比较的规范 authority（host[:port]）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     浏览器 Origin 通常是小写 host 且无尾点；Host 头可能是 `LocalHost:port` / `cc-x.local.:port` / `[::1]:port`。
+///     同源判定必须对两者规范化后再比，否则 fail-closed 误杀合法 mobile/浏览器写。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 Host → 主机名小写去尾点；IPv6 用方括号形式；有端口时拼 `host:port`。
+///     解析失败返回 None。
+pub fn canonical_http_authority(host_header: &str) -> Option<String> {
+    let (hostname, port) = parse_http_host_header(host_header)?;
+    let host = normalize_hostname_label(&hostname);
+    if host.is_empty() {
+        return None;
+    }
+    // IPv6 字面量在 Origin/Host 中必须以 [addr] 形式出现。
+    let host_for_url = if host.parse::<Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    match port {
+        Some(p) => Some(format!("{host_for_url}:{p}")),
+        None => Some(host_for_url),
+    }
+}
+
+/// 把 Origin 值规范化为可比较的 `scheme://authority`（仅 http/https）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     同源比较不能依赖原始字符串字面量相等；host 大小写与尾点差异必须归一，且不得放宽跨站。
+///
+/// Code Logic（这个函数做什么）:
+///     手工解析 `scheme://authority`（不依赖 url crate，保持 MSRV/依赖面最小）；
+///     scheme 仅 http/https（小写）；authority 走 `canonical_http_authority`（host 小写去尾点、IPv6 方括号、端口保留）。
+///     含 path/query/userinfo 的 Origin 视为非法。失败返回 None。
+fn canonical_origin_value(origin: &str) -> Option<String> {
+    let value = origin.trim();
+    let (scheme_raw, rest) = value.split_once("://")?;
+    let scheme = scheme_raw.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    // Origin 规范只有 scheme://host[:port]，不得含 path/query/userinfo。
+    if rest.contains('/') || rest.contains('?') || rest.contains('#') || rest.contains('@') {
+        return None;
+    }
+    let authority = canonical_http_authority(rest)?;
+    Some(format!("{scheme}://{authority}"))
+}
+
 /// 分类 Origin 头。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     同源浏览器、native 无 Origin、opaque null 与跨站必须分支处理。
 ///
 /// Code Logic（这个函数做什么）:
-///     缺失 → Missing；字面 `null` → OpaqueNull；等于 `http://{Host}` → SameOrigin；否则 CrossOrigin。
-fn classify_request_origin(origin: Option<&str>, host_header: &str) -> OriginClass {
+///     缺失 → Missing；字面 `null` → OpaqueNull；规范化后 scheme+authority 与
+///     `http://{canonical Host}` 相等 → SameOrigin；否则 CrossOrigin。
+///     仅接受 http Origin 与本服务 Host 对齐（本服务固定明文 HTTP）。
+pub fn classify_request_origin(origin: Option<&str>, host_header: &str) -> OriginClass {
     match origin {
         None => OriginClass::Missing,
         Some(raw) => {
             let value = raw.trim();
             if value.eq_ignore_ascii_case("null") {
                 OriginClass::OpaqueNull
-            } else if value == format!("http://{host_header}") {
-                OriginClass::SameOrigin
+            } else if let (Some(origin_canon), Some(host_authority)) = (
+                canonical_origin_value(value),
+                canonical_http_authority(host_header),
+            ) {
+                let expected = format!("http://{host_authority}");
+                if origin_canon == expected {
+                    OriginClass::SameOrigin
+                } else {
+                    OriginClass::CrossOrigin
+                }
             } else {
                 OriginClass::CrossOrigin
             }
         }
     }
+}
+
+/// 判断非 null Origin 是否与 Host 精确同源（规范化后）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     preview 会话层需要对非 null Origin 做防御纵深：全局 guard 漏挂时仍拒绝跨站。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 `classify_request_origin`；仅 SameOrigin 为 true。
+pub fn is_same_origin_with_host(origin: &str, host_header: &str) -> bool {
+    matches!(
+        classify_request_origin(Some(origin), host_header),
+        OriginClass::SameOrigin
+    )
 }
 
 /// 分类请求路径。
@@ -1040,6 +1135,46 @@ mod tests {
                 &ctx,
             )
             .expect("同源 mobile 写应通过");
+        }
+
+        #[test]
+        fn same_origin_comparison_normalizes_host_case_and_trailing_dot() {
+            let params = sample_browser_params();
+            let ctx = P2pRequestContext {
+                request_id: "req-same-origin-normalize".into(),
+            };
+            let cases = [
+                ("LocalHost:62116", "http://localhost:62116"),
+                ("CC-Device-A.local.:62116", "http://cc-device-a.local:62116"),
+                ("cc-device-a.local:62116", "http://CC-Device-A.local.:62116"),
+                ("[::1]:62116", "http://[::1]:62116"),
+            ];
+            for (host, origin) in cases {
+                evaluate_browser_request(
+                    &Method::POST,
+                    "/api/mobile/workbench/files/save-text",
+                    Some(host),
+                    Some(origin),
+                    Some("application/json"),
+                    &params,
+                    &ctx,
+                )
+                .unwrap_or_else(|e| {
+                    panic!("规范化后应同源: host={host} origin={origin} err={e:?}")
+                });
+            }
+            // 跨站在规范化后仍必须拒绝。
+            let err = evaluate_browser_request(
+                &Method::POST,
+                "/api/mobile/workbench/files/save-text",
+                Some("LocalHost:62116"),
+                Some("http://evil.example:62116"),
+                Some("application/json"),
+                &params,
+                &ctx,
+            )
+            .expect_err("规范化不得放宽跨站");
+            assert_eq!(err.status(), StatusCode::FORBIDDEN);
         }
 
         #[test]
