@@ -36,7 +36,7 @@ import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersCon
 import { useAttention } from '@/hooks/useAttention';
 import {
   BrowserIcon, EditIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
-  PlusIcon, RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
+  RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
 } from '@/lib/icons';
 import type { PromptOptimizerFillLanguage } from '@/lib/types';
 import styles from './Workbench.module.css';
@@ -58,6 +58,7 @@ import { useWorkbenchSessionSearchController } from './controllers/useWorkbenchS
 import { WorkbenchTerminalArea } from './WorkbenchTerminalArea';
 import { WorkbenchInspector } from './WorkbenchInspector';
 import type { WorkbenchInspectorTab } from './WorkbenchInspector';
+import { WorkbenchSessionTabs } from './WorkbenchSessionTabs';
 import { WorkbenchStatusCard } from './WorkbenchStatusCard';
 import { WorkbenchWorktreeBar } from './WorkbenchWorktreeBar';
 import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';
@@ -867,51 +868,19 @@ export function Workbench() {
               ariaLabel={t('workbench:terminalTabs')}
               actionsAriaLabel={t('workbench:paneActions')}
               tabs={
-                <div className={styles.sessionTabs} role="tablist">
-                  {scopedSessions.map((session) => (
-                    <div
-                      key={session.id}
-                      className={styles.sessionTab}
-                      role="tab"
-                      tabIndex={0}
-                      aria-selected={session.id === activeSessionId}
-                      data-active={session.id === activeSessionId || undefined}
-                      onClick={() => focusSession(session.id)}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Enter' && event.key !== ' ') return;
-                        event.preventDefault();
-                        focusSession(session.id);
-                      }}
-                    >
-                      <span className={styles.sessionDot} data-status={session.status} />
-                      <span className={styles.sessionName}>{session.name}</span>
-                      <Button
-                        variant="icon"
-                        icon={<XIcon />}
-                        title={t('workbench:closeTerminal')}
-                        aria-label={t('workbench:closeTerminal')}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void handleCloseSession(session.id);
-                        }}
-                      />
-                    </div>
-                  ))}
-                  <Button
-                    className={styles.newSessionButton}
-                    variant="secondary"
-                    size="sm"
-                    icon={<PlusIcon />}
-                    title={t('workbench:newSession')}
-                    aria-label={t('workbench:newSession')}
-                    data-workbench-responsive-action="true"
-                    loading={sessionBusy}
-                    disabled={!activeProjectId || !activeWorktree || remoteWriteDisabled}
-                    onClick={() => void handleCreateSession()}
-                  >
-                    <span data-workbench-responsive-label="true">{t('workbench:newSession')}</span>
-                  </Button>
-                </div>
+                <WorkbenchSessionTabs
+                  sessions={scopedSessions}
+                  activeSessionId={activeSessionId}
+                  sessionBusy={sessionBusy}
+                  canCreate={Boolean(activeProjectId && activeWorktree && !remoteWriteDisabled)}
+                  onFocusSession={(sessionId) => {
+                    void focusSession(sessionId);
+                  }}
+                  onCloseSession={handleCloseSession}
+                  onCreateSession={() => {
+                    void handleCreateSession();
+                  }}
+                />
               }
               actions={
                 <>

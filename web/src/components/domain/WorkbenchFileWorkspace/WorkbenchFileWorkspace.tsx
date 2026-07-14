@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button } from '@/components/primitives';
 import { CheckIcon, RefreshIcon, TerminalIcon, XIcon } from '@/lib/icons';
+import { getRovingTabIndex, type RovingTabKey } from '@/lib/rovingTablist';
 import type { WorkbenchFileMode, WorkbenchOpenFile } from '@/lib/types';
 import { WorkbenchCsvPreview } from '../WorkbenchCsvPreview';
 import type { WorkbenchHtmlMode } from '../WorkbenchHtmlPreview';
@@ -281,28 +282,27 @@ export function WorkbenchFileWorkspace(props: WorkbenchFileWorkspaceProps): Reac
         return;
       }
 
-      let nextIndex: number;
-
+      // ArrowUp/Down 保持文件 tabs 既有纵向等价语义，映射到共享 Left/Right contract。
+      let rovingKey: RovingTabKey;
       switch (event.key) {
         case 'ArrowRight':
         case 'ArrowDown':
-          nextIndex = (currentIndex + 1) % tabs.length;
+          rovingKey = 'ArrowRight';
           break;
         case 'ArrowLeft':
         case 'ArrowUp':
-          nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+          rovingKey = 'ArrowLeft';
           break;
         case 'Home':
-          nextIndex = 0;
-          break;
         case 'End':
-          nextIndex = tabs.length - 1;
+          rovingKey = event.key;
           break;
         default:
           return;
       }
 
       event.preventDefault();
+      const nextIndex = getRovingTabIndex(currentIndex, rovingKey, tabs.length);
       const nextTab = tabs[nextIndex];
       onActivate(nextTab.id);
       focusTabButton(nextTab.id);

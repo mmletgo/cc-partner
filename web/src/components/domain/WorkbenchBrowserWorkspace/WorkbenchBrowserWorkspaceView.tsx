@@ -153,7 +153,11 @@ export function WorkbenchBrowserWorkspaceView({
   /* eslint-enable react-hooks/set-state-in-effect */
 
   return (
-    <section className={styles.workspace} aria-label={t('workbench:browserPreview.title')}>
+    <section
+      className={styles.workspace}
+      aria-label={t('workbench:browserPreview.title')}
+      data-testid="workbench-browser-workspace"
+    >
       <header className={styles.toolbar}>
         <div className={styles.heading}>
           <BrowserIcon />
@@ -202,7 +206,7 @@ export function WorkbenchBrowserWorkspaceView({
         </Button>
       </div>
       {error ? <div className={styles.error}>{error}</div> : null}
-      {discovery?.targets.length ? (
+      {discovery?.targets?.length ? (
         <div className={styles.targets}>
           {discovery.targets.map((target) => (
             <button
