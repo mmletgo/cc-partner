@@ -10,25 +10,78 @@
  *   - 选中文件存 {path,name}；Enter/Space/点击走 pickTransferFile；native drop 只取首路径
  *   - handleSendClick 用 sendingRef 同步门闩防双击，await transferApi.send 后 force runTasksNow
  *   - pending/transferring 仅传 onCancel；cancellingIdsRef 同步门闩 + taskActionErrors 行级反馈
+ *   - Tauri 环境下 listen transfer:progress 与 completed/failed/cancelled，fail-closed 解码后 merge
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { listen } from '@tauri-apps/api/event';
 import { Button, Card, Pill } from '@/components/primitives';
 import { TransferItem } from '@/components/domain';
 import { devicesApi } from '@/api/devices';
 import { transferApi } from '@/api/transfer';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
+import { classifyTransportFault, planFaultRecovery } from '@/lib/faultRecovery';
 import type { Device, TransferTask } from '@/lib/types';
 import { SendIcon, UploadIcon } from '@/lib/icons';
+import { ContractDecodeError } from '@/lib/runtimeSchema';
+import {
+  decodeTransferProgressEvent,
+  decodeTransferStatusEvent,
+  mergeTransferProgressEvent,
+  mergeTransferStatusEvent,
+} from '@/lib/transferProgress';
 import { pickTransferFile, subscribeTransferFileDrops } from './transferFileSelection';
 import styles from './Transfer.module.css';
 
 const TASK_REFRESH_INTERVAL_MS = 3000;
 const DEVICE_REFRESH_INTERVAL_MS = 5000;
 
+/** 终态事件名：completed / failed / cancelled 共用 StatusPayload。 */
+const TRANSFER_STATUS_EVENTS = [
+  'transfer:completed',
+  'transfer:failed',
+  'transfer:cancelled',
+] as const;
+
 type LoadState = 'loading' | 'success' | 'error';
+
+interface TauriInternalsWindow extends Window {
+  __TAURI_INTERNALS__?: {
+    transformCallback?: unknown;
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   普通浏览器调试环境没有 Tauri event internals，页面不得注册不可用的桌面事件。
+ *
+ * Code Logic（这个函数做什么）:
+ *   检测 window.__TAURI_INTERNALS__.transformCallback 是否为函数。
+ */
+function canListenToTauriEvents(): boolean {
+  const internals = (window as TauriInternalsWindow).__TAURI_INTERNALS__;
+  return typeof internals?.transformCallback === 'function';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   解码失败只允许日志暴露 contract/path，禁止打印 payload。
+ *
+ * Code Logic（这个函数做什么）:
+ *   ContractDecodeError 输出 contract + path；其它错误仅输出安全 message。
+ */
+function warnTransferEventDecodeFailure(eventName: string, reason: unknown): void {
+  if (reason instanceof ContractDecodeError) {
+    console.warn(
+      `[transfer] skip ${eventName}: contract=${reason.contract} path=${reason.path}`,
+    );
+    return;
+  }
+  const message = reason instanceof Error ? reason.message : String(reason);
+  console.warn(`[transfer] skip ${eventName}: ${message}`);
+}
 
 /**
  * Business Logic（为什么需要这个类型）:
@@ -72,7 +125,8 @@ function errorMessage(err: unknown): string {
  *   局域网文件传输主视图：设备选择、路径选择、发送、任务监控与取消。
  *
  * Code Logic（这个组件做什么）:
- *   挂载 visibility polling、native drop 订阅，管理 send/cancel 状态机并渲染列表。
+ *   挂载 visibility polling、native drop 与 transfer progress/status 事件订阅，
+ *   管理 send/cancel 状态机并渲染列表。
  */
 export function Transfer() {
   const { t } = useTranslation(['transfer', 'common']);
@@ -140,10 +194,11 @@ export function Transfer() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   任务列表是发送/取消后的权威进度源；刷新失败保留旧列表。
+   *   任务列表是发送/取消后的权威进度源；刷新失败按故障分类决定 keepStale 或 fail-closed 清空。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 transferApi.list；成功写数组；失败保留 prev 并标 error；卸载后不 setState。
+   *   调用 transferApi.list；成功写数组；失败经 classifyTransportFault + planFaultRecovery：
+   *   clear 清空 tasks，keepStale/none 保留 prev；错误文案优先用稳定 code；卸载后不 setState。
    */
   const loadTasks = useCallback(async () => {
     try {
@@ -154,9 +209,22 @@ export function Transfer() {
       setTasksError(null);
     } catch (err) {
       if (!mountedRef.current) return;
+      const classification = classifyTransportFault(err);
+      setTasks((prev) => {
+        const plan = planFaultRecovery({
+          classification,
+          hasCache: prev.length > 0,
+          optimisticApplied: false,
+        });
+        if (plan.clearCache) {
+          return [];
+        }
+        return prev;
+      });
       setTasksState('error');
-      setTasksError(t('transfer:taskLoadFailed', { error: errorMessage(err) }));
-      // 保留已有 tasks，不覆盖为空
+      const displayError =
+        classification.code !== 'UNKNOWN_FAULT' ? classification.code : errorMessage(err);
+      setTasksError(t('transfer:taskLoadFailed', { error: displayError }));
     }
   }, [t]);
 
@@ -248,6 +316,57 @@ export function Transfer() {
       unlisten?.();
     };
   }, [applySelectedPath]);
+
+  // 挂载时订阅 transfer progress / 终态事件；解码失败 fail-closed 跳过
+  useEffect(() => {
+    if (!canListenToTauriEvents()) return undefined;
+
+    const unlistenProgress = listen('transfer:progress', (event) => {
+      setTasks((prev) => {
+        const next = mergeTransferProgressEvent(prev, event.payload);
+        if (next != null) {
+          return next;
+        }
+        // merge 返回 null：再 decode 一次仅用于安全日志（不打印 payload）
+        try {
+          decodeTransferProgressEvent(event.payload);
+        } catch (reason) {
+          warnTransferEventDecodeFailure('transfer:progress', reason);
+          return prev;
+        }
+        console.warn('[transfer] skip transfer:progress: merge rejected');
+        return prev;
+      });
+    });
+
+    const unlistenStatuses = TRANSFER_STATUS_EVENTS.map((eventName) =>
+      listen(eventName, (event) => {
+        setTasks((prev) => {
+          const next = mergeTransferStatusEvent(prev, event.payload);
+          if (next != null) {
+            return next;
+          }
+          try {
+            decodeTransferStatusEvent(event.payload);
+            // 结构合法但 status 非 TransferStatus 枚举 → fail-closed
+            console.warn(
+              `[transfer] skip ${eventName}: unknown status (contract=TransferStatusEvent)`,
+            );
+          } catch (reason) {
+            warnTransferEventDecodeFailure(eventName, reason);
+          }
+          return prev;
+        });
+      }),
+    );
+
+    return () => {
+      void unlistenProgress.then((fn) => fn());
+      for (const pending of unlistenStatuses) {
+        void pending.then((fn) => fn());
+      }
+    };
+  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:

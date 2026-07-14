@@ -8,6 +8,7 @@ import {
   cancelTransferResultDecoder,
   sendTransferResultDecoder,
   transferProgressEventDecoder,
+  transferStatusEventDecoder,
   transferTaskDecoder,
   transferTasksDecoder,
 } from './transfer';
@@ -59,6 +60,37 @@ describe('transfer schemas', () => {
         filePath: 'p',
         id: 'i',
       }),
+    ).toThrow(ContractDecodeError);
+  });
+
+  test('decodes status event with optional errorMessage', () => {
+    expect(
+      transferStatusEventDecoder.decode({
+        id: 'id1',
+        status: 'failed',
+        errorMessage: 'boom',
+      }),
+    ).toEqual({
+      id: 'id1',
+      status: 'failed',
+      errorMessage: 'boom',
+    });
+    expect(
+      transferStatusEventDecoder.decode({
+        id: 'id1',
+        status: 'completed',
+      }),
+    ).toEqual({
+      id: 'id1',
+      status: 'completed',
+      errorMessage: undefined,
+    });
+  });
+
+  test('malformed status event fails closed', () => {
+    expect(() => transferStatusEventDecoder.decode({ id: 'id1' })).toThrow(ContractDecodeError);
+    expect(() =>
+      transferStatusEventDecoder.decode({ id: 1, status: 'completed' }),
     ).toThrow(ContractDecodeError);
   });
 });
