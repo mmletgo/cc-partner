@@ -11,5 +11,6 @@
   "orchestrator": "自动化",
   "devices": "设备",
   "settings": "设置",
-  "health": "健康提醒"
+  "health": "健康提醒",
+  "primaryNav": "主导航"
 }

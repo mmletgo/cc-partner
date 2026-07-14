@@ -13,12 +13,27 @@ import { readFileSync } from 'node:fs';
  *   - 读取 Workbench.tsx 源码，断言它不再直接调用 workbenchApi.sessions/files/worktrees/git 的方法；
  *   - 断言不再直接订阅 terminal-output / terminal-status / merge-progress / worktree-* 等 Tauri 事件；
  *   - 断言不再持有名为 workbenchController 的页面级 state 对象（控制器分散到各 useXxxController）；
- *   - 断言总行数 ≤ 1200。
+ *   - 断言总行数 ≤ 1200；
+ *   - 断言 controllers/index.ts 恰好导出七个 useWorkbench*Controller，且页面不存在 useWorkbenchController 聚合。
  */
 
 const WORKBENCH_PATH = new URL('./Workbench.tsx', import.meta.url);
+const CONTROLLERS_INDEX_PATH = new URL('./controllers/index.ts', import.meta.url);
 const workbenchSource = readFileSync(WORKBENCH_PATH, 'utf8');
+const controllersIndexSource = readFileSync(CONTROLLERS_INDEX_PATH, 'utf8');
 const workbenchLineCount = workbenchSource.split('\n').length;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Workbench 域逻辑必须只由七个命名 controller 承担，测试需要从 barrel 源码提取 hook 导出清单。
+ *
+ * Code Logic（这个函数做什么）:
+ *   匹配 `export { useWorkbench...Controller }` 形态的命名导出并返回去重后的名称列表。
+ */
+function extractWorkbenchControllerExports(source: string): string[] {
+  const matches = source.matchAll(/\b(useWorkbench\w+Controller)\b/g);
+  return Array.from(new Set(Array.from(matches, (match) => match[1]))).sort();
+}
 
 describe('Workbench.tsx source ownership (Task 8 inspector extraction)', () => {
   test('does not import or call workbenchApi directly', () => {
@@ -47,13 +62,30 @@ describe('Workbench.tsx source ownership (Task 8 inspector extraction)', () => {
   });
 
   test('stays within the 1200-line target', () => {
-    // Attention deep-link/not-found refresh 接线后页面略超历史 1200 上限；
-    // 仍禁止无界膨胀，硬顶放到 1250，后续 controller 抽取应压回。
-    expect(workbenchLineCount).toBeLessThanOrEqual(1250);
+    // Workbench.tsx 必须保持 ≤1200 行；域逻辑下沉到七个 controller，禁止页面无界膨胀。
+    expect(workbenchLineCount).toBeLessThanOrEqual(1200);
   });
 
   test('delegates inspector rendering to WorkbenchInspector', () => {
     // 页面只组合检查器外壳；具体 tabs / 文件树 / Git 图由子组件渲染。
     expect(workbenchSource).toContain('WorkbenchInspector');
+  });
+
+  test('owns exactly seven workbench domain controllers and terminal leaf views', () => {
+    const expectedControllers = [
+      'useWorkbenchAutomationController',
+      'useWorkbenchFileController',
+      'useWorkbenchProjectController',
+      'useWorkbenchPromptOptimizerController',
+      'useWorkbenchSessionSearchController',
+      'useWorkbenchTerminalController',
+      'useWorkbenchWorktreeGitController',
+    ].sort();
+    const actualControllers = extractWorkbenchControllerExports(controllersIndexSource);
+    expect(actualControllers).toEqual(expectedControllers);
+    expect(controllersIndexSource).not.toContain('useWorkbenchController');
+    expect(workbenchSource).not.toContain('useWorkbenchController');
+    expect(workbenchSource).toContain('WorkbenchSessionTabs');
+    expect(workbenchSource).toContain('WorkbenchTerminalArea');
   });
 });

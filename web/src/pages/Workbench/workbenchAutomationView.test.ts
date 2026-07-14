@@ -49,10 +49,44 @@ describe('workbenchAutomationView', () => {
   const workbenchSource = readFileSync(new URL('./Workbench.tsx', import.meta.url), 'utf8');
   const workbenchFilesSource = readFileSync(new URL('./workbenchFiles.ts', import.meta.url), 'utf8');
   const workbenchStyles = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
-  const orchestratorSource = readFileSync(new URL('../Orchestrator/Orchestrator.tsx', import.meta.url), 'utf8');
+  // S4 拆分后：组合壳 + controller + pure helpers + views 共同构成 Orchestrator 合同真源
+  const orchestratorShellSource = readFileSync(new URL('../Orchestrator/Orchestrator.tsx', import.meta.url), 'utf8');
+  const orchestratorControllerSource = readFileSync(
+    new URL('../Orchestrator/controllers/useOrchestratorController.ts', import.meta.url),
+    'utf8',
+  );
+  const orchestratorHelpersSource = readFileSync(
+    new URL('../Orchestrator/orchestratorViewHelpers.ts', import.meta.url),
+    'utf8',
+  );
+  const orchestratorDrawerSource = readFileSync(
+    new URL('../Orchestrator/views/OrchestratorTaskDrawer.tsx', import.meta.url),
+    'utf8',
+  );
+  const orchestratorCreateSource = readFileSync(
+    new URL('../Orchestrator/views/OrchestratorCreateDialog.tsx', import.meta.url),
+    'utf8',
+  );
+  const orchestratorBoardSource = readFileSync(
+    new URL('../Orchestrator/views/OrchestratorBoard.tsx', import.meta.url),
+    'utf8',
+  );
+  const orchestratorOutboxSource = readFileSync(
+    new URL('../Orchestrator/views/OrchestratorOutbox.tsx', import.meta.url),
+    'utf8',
+  );
+  const orchestratorSource = [
+    orchestratorShellSource,
+    orchestratorControllerSource,
+    orchestratorHelpersSource,
+    orchestratorDrawerSource,
+    orchestratorCreateSource,
+    orchestratorBoardSource,
+    orchestratorOutboxSource,
+  ].join('\n');
   const orchestratorStyles = readFileSync(new URL('../Orchestrator/Orchestrator.module.css', import.meta.url), 'utf8');
   const orchestratorLibSource = readFileSync(new URL('../../lib/orchestrator.ts', import.meta.url), 'utf8');
-  const typesSource = readFileSync(new URL('../../lib/types.ts', import.meta.url), 'utf8');
+  const typesSource = readFileSync(new URL('../../lib/types/orchestrator.ts', import.meta.url), 'utf8');
   const appShellSource = readFileSync(
     new URL('../../components/layout/AppShell/AppShell.tsx', import.meta.url),
     'utf8',
@@ -216,7 +250,7 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    "orchestratorTaskProgressMessage(selectedTaskView, t)",
+    'orchestratorTaskProgressMessage(selectedTaskView, t)',
     'Orchestrator task detail renders progress copy for running/verifying/repairing attempts',
   );
   assertContains(
@@ -226,13 +260,18 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    '<OrchestratorDialogPortal>',
-    'Orchestrator task detail and evidence should render in a body-level side panel',
+    '<Drawer',
+    'Orchestrator task detail and evidence should render in the shared Drawer primitive',
   );
   assertContains(
     orchestratorSource,
-    'className={styles.taskDrawerOverlay}',
-    'Orchestrator task detail opens from the board as a side drawer overlay',
+    'className={styles.taskDrawer}',
+    'Orchestrator task detail opens from the board as a side drawer surface',
+  );
+  assertContains(
+    orchestratorSource,
+    'titleId="orchestrator-task-drawer-title"',
+    'Orchestrator task detail drawer exposes an accessible title id',
   );
   assertContains(
     orchestratorSource,
@@ -401,23 +440,48 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    'role="dialog"',
-    'Orchestrator task creation should render as an accessible dialog',
+    '<Dialog',
+    'Orchestrator task creation should render through the shared Dialog primitive',
   );
   assertContains(
+    orchestratorSource,
+    'titleId="orchestrator-create-dialog-title"',
+    'Orchestrator task creation dialog exposes an accessible title id',
+  );
+  assertContains(
+    orchestratorSource,
+    'const busy = Boolean(creatingAction) || completingPrompt;',
+    'Orchestrator create dialog derives busy from creatingAction/completingPrompt',
+  );
+  assertContains(
+    orchestratorSource,
+    'closeOnEscape={!busy}',
+    'Orchestrator create dialog blocks Escape while creating or completing prompt',
+  );
+  assertContains(
+    orchestratorSource,
+    'closeOnBackdrop={!busy}',
+    'Orchestrator create dialog blocks backdrop close while creating or completing prompt',
+  );
+  assertContains(
+    orchestratorSource,
+    'initialFocusRef={completionPromptRef}',
+    'Orchestrator create dialog focuses the AI prompt field via Dialog initialFocusRef',
+  );
+  assertNotContains(
     orchestratorSource,
     "import { createPortal } from 'react-dom';",
-    'desktop Orchestrator task creation dialog should use a body portal to escape Workbench scroll and terminal layers',
+    'desktop Orchestrator must not keep a local createPortal import after Dialog/Drawer migration',
   );
-  assertContains(
+  assertNotContains(
     orchestratorSource,
     'createPortal(',
-    'desktop Orchestrator task creation dialog should render through a React portal',
+    'desktop Orchestrator must not call createPortal after Dialog/Drawer migration',
   );
-  assertContains(
+  assertNotContains(
     orchestratorSource,
-    'document.body',
-    'desktop Orchestrator task creation dialog should render at document.body level',
+    'window.addEventListener',
+    'desktop Orchestrator must not attach window keydown Escape listeners after Dialog/Drawer migration',
   );
   assertContains(
     orchestratorSource,
@@ -426,13 +490,18 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorStyles,
-    '.createDialogOverlay',
-    'Orchestrator task creation dialog should have an overlay style boundary',
+    '.createDialog',
+    'Orchestrator task creation dialog should keep surface style class for Dialog className merge',
   );
-  assertContains(
+  assertNotContains(
     orchestratorStyles,
-    'z-index: calc(var(--z-modal) + 1);',
-    'Orchestrator task creation dialog overlay should sit above Workbench terminal fullscreen modal layer',
+    '.createDialogOverlay',
+    'Orchestrator create dialog overlay styles are owned by Dialog primitive after migration',
+  );
+  assertNotContains(
+    orchestratorStyles,
+    '.taskDrawerOverlay',
+    'Orchestrator task drawer overlay styles are owned by Drawer primitive after migration',
   );
   assertNotContains(
     orchestratorSource,

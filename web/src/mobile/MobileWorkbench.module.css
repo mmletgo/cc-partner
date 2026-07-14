@@ -81,6 +81,7 @@
   text-overflow: ellipsis;
 }
 
+/* 历史遮罩类：窄屏导航改用 Drawer 原语自带 backdrop，保留选择器供宽屏隐藏规则兼容。 */
 .backdrop {
   position: fixed;
   inset: 0;
@@ -89,18 +90,16 @@
   transition: all var(--motion-fast) var(--ease-standard);
 }
 
+/* 作为 Drawer surface className：定位/层级由 Drawer 原语负责，这里只保留内容排版。 */
 .drawer {
-  position: fixed;
-  inset: 0 auto 0 0;
   width: min(82vw, calc(var(--sidebar-width) + var(--space-20)));
+  max-width: 100%;
+  box-sizing: border-box;
   padding: calc(env(safe-area-inset-top) + var(--space-3)) var(--space-3) var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
   background: var(--surface);
-  border-right: 1px solid var(--border-soft);
-  box-shadow: var(--shadow-lg);
-  z-index: var(--z-modal);
 }
 
 .drawerHeader,
@@ -649,6 +648,7 @@
   border-radius: var(--radius-md);
 }
 
+/* 历史 overlay：创建任务改用 Dialog 原语自带 backdrop；保留类名供静态合同兼容。 */
 .mobileDialogOverlay {
   position: fixed;
   inset: 0;
@@ -660,8 +660,11 @@
   background: color-mix(in oklab, var(--fg) 42%, transparent);
 }
 
+/* 作为 Dialog surface className：底部 sheet 对齐，portal/层级由 Dialog 负责。 */
 .mobileDialog {
+  align-self: flex-end;
   width: min(100%, 720px);
+  max-width: 100%;
   max-height: calc(100dvh - var(--space-8));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -1118,6 +1121,7 @@
   outline-offset: 2px;
 }
 
+/* 历史 quick switch 遮罩：改用 Dialog 原语 backdrop 后不再挂载。 */
 .quickSwitchBackdrop {
   position: fixed;
   inset: 0;
@@ -1133,9 +1137,12 @@
   outline-offset: calc(-1 * var(--space-2));
 }
 
+/* 作为 Dialog surface className：固定贴底 sheet，避免 Dialog 默认居中卡片形态。 */
 .quickSwitchSheet {
   position: fixed;
   inset: auto 0 0;
+  width: 100%;
+  max-width: none;
   max-height: min(86dvh, calc(var(--space-24) * 7));
   padding: var(--space-4) var(--space-3) calc(env(safe-area-inset-bottom) + var(--space-4));
   display: grid;
@@ -1147,7 +1154,6 @@
   border-radius: var(--radius-md) var(--radius-md) 0 0;
   box-shadow: var(--shadow-lg);
   overflow: hidden;
-  z-index: var(--z-modal);
   transition: all var(--motion-fast) var(--ease-standard);
 }
 

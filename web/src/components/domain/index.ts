@@ -2,11 +2,13 @@
  * Domain 业务组件统一入口（barrel）
  *
  * Business Logic（为什么需要这个入口）:
- *   页面层（pages/）按需 import 业务组件时只需 `import { PromptCard, DeviceCard } from '@/components/domain'`，
- *   避免页面层关心具体子路径。
+ *   页面层可按需 import 轻量业务组件，避免关心具体子路径。
+ *   重型 Workbench 编辑器/预览/工作区不得从本 barrel 同步 re-export，
+ *   否则 eager 消费者（如 AppShell）会把 CodeMirror/Tiptap 打入 main initial graph。
  *
  * Code Logic（这个入口做什么）:
- *   统一 re-export 业务组件及其类型。
+ *   只 re-export 侧栏/卡片等轻量组件及其类型；Workbench 重模块请深路径 import：
+ *   `@/components/domain/WorkbenchFileWorkspace` 等。
  */
 
 export { PromptCard } from './PromptCard';
@@ -50,26 +52,3 @@ export { WorkbenchProjectRail } from './WorkbenchProjectRail';
 export { WorkbenchDependencyCard } from './WorkbenchDependencyCard';
 export { LanFirewallDependencyCard } from './LanFirewallDependencyCard';
 export type { LanFirewallDependencyCardProps } from './LanFirewallDependencyCard';
-export { WorkbenchImagePreview } from './WorkbenchImagePreview';
-export type { WorkbenchImagePreviewProps } from './WorkbenchImagePreview';
-export { WorkbenchCsvPreview } from './WorkbenchCsvPreview';
-export type { WorkbenchCsvPreviewProps } from './WorkbenchCsvPreview';
-export { WorkbenchHtmlPreview } from './WorkbenchHtmlPreview';
-export type { WorkbenchHtmlMode, WorkbenchHtmlPreviewProps } from './WorkbenchHtmlPreview';
-export { WorkbenchSqlitePreview } from './WorkbenchSqlitePreview';
-export type { WorkbenchSqlitePreviewProps } from './WorkbenchSqlitePreview';
-export { WorkbenchFileWorkspace } from './WorkbenchFileWorkspace';
-export type {
-  WorkbenchFileWorkspaceProps,
-  WorkbenchOpenFileTab,
-} from './WorkbenchFileWorkspace';
-export { WorkbenchSessionSearch } from './WorkbenchSessionSearch';
-export type { WorkbenchSessionSearchProps } from './WorkbenchSessionSearch';
-export {
-  WorkbenchBrowserWorkspace,
-  getWorkbenchBrowserFrameSrc,
-} from './WorkbenchBrowserWorkspace';
-export type {
-  WorkbenchBrowserSurface,
-  WorkbenchBrowserWorkspaceProps,
-} from './WorkbenchBrowserWorkspace';

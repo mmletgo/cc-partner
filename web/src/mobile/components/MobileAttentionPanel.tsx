@@ -230,7 +230,7 @@ export function MobileAttentionPanel({
                             </span>
                           ) : null}
                         </div>
-                        <p className={styles.actionLabel}>{t(actionKey)}</p>
+                        <span className={styles.actionLabel}>{t(actionKey)}</span>
                       </button>
                     </li>
                   );

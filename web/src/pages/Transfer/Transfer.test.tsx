@@ -63,7 +63,7 @@ vi.mock('@/hooks/useVisibilityPolling', () => ({
     let entry = pollingRegistrations.find((item) => item.options.intervalMs === options.intervalMs);
     if (!entry) {
       const taskRef = { current: task };
-      const runNow = vi.fn(async (_options?: RunNowOptions) => {
+      const runNow = vi.fn(async () => {
         await taskRef.current();
       }) as unknown as RunNowFn;
       entry = { taskRef, options, runNow, started: false };

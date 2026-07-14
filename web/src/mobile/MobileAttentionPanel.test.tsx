@@ -208,4 +208,28 @@ describe('MobileAttentionPanel', () => {
     expect(source.includes('deliver')).toBe(false);
     expect(source.includes('Request Rework')).toBe(false);
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   桌面与移动端 DOM 语义一致：每行只有一个 button，动作文案为内部 span，禁止嵌套可交互控件。
+   *
+   * Code Logic（这个测试做什么）:
+   *   渲染单条目，断言 item button 内无 nested button / role=button，动作标签为 span。
+   */
+  test('each mobile attention row is a single button without nested interactive controls', () => {
+    const snapshot: AttentionSnapshot = {
+      generatedAt: '2026-07-11T10:00:00.000Z',
+      counts: { total: 1, decision: 1, blocked: 0, environment: 0 },
+      items: [buildItem()],
+    };
+    mockAttentionValue = buildContext({ snapshot });
+    renderPanel(<MobileAttentionPanel onOpenItem={vi.fn()} />);
+
+    const row = screen.getByRole('button', { name: /Review payment edge/i });
+    expect(row.tagName).toBe('BUTTON');
+    expect(row.querySelectorAll('button').length).toBe(0);
+    expect(row.querySelectorAll('[role="button"]').length).toBe(0);
+    const action = row.querySelector('[class*="actionLabel"]');
+    expect(action?.tagName).toBe('SPAN');
+  });
 });

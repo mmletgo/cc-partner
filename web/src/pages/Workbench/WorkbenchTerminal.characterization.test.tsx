@@ -168,11 +168,152 @@ describe('Workbench terminal domain (characterization)', () => {
       }
     });
 
-    // terminalLayer 仍存在（常驻语义），仅 data-hidden 切换；browser workspace 挂载。
+    // terminalLayer 仍存在（常驻语义），仅 data-hidden 切换；browser workspace 挂载（lazy）。
     const terminalLayerAfter = document.querySelector('[class*="terminalLayer"]');
     expect(terminalLayerAfter).toBeTruthy();
     expect(terminalLayerAfter?.getAttribute('data-hidden')).toBe('true');
-    expect(screen.getByTestId('workbench-browser-workspace')).toBeTruthy();
+    await waitFor(() => {
+      if (!screen.queryByTestId('workbench-browser-workspace')) {
+        throw new Error('browser workspace not mounted');
+      }
+    });
+  });
+
+  test('session tabs use roving tabIndex and activate with Arrow/Home/End', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const sessions = [
+      buildSession({ id: 's1', name: 'shell-1' }),
+      buildSession({ id: 's2', name: 'shell-2' }),
+      buildSession({ id: 's3', name: 'shell-3' }),
+    ];
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'list_workbench_projects':
+          return [project];
+        case 'list_workbench_worktrees':
+          return [worktree];
+        case 'list_workbench_sessions':
+          return sessions;
+        case 'list_workbench_git_commits':
+          return [];
+        case 'list_workbench_dir':
+          return [];
+        case 'focus_workbench_session':
+          return { ok: true, sessionId: call.args.sessionId };
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: project.id }),
+      buildDependencyContextValue(),
+    );
+    await waitForInvoke('focus_workbench_session');
+
+    const tab1 = screen.getByRole('tab', { name: /shell-1/ });
+    const tab2 = screen.getByRole('tab', { name: /shell-2/ });
+    const tab3 = screen.getByRole('tab', { name: /shell-3/ });
+    expect(tab1.getAttribute('tabindex')).toBe('0');
+    expect(tab2.getAttribute('tabindex')).toBe('-1');
+    expect(tab3.getAttribute('tabindex')).toBe('-1');
+    // close 是 sibling 按钮，不嵌套在 tab 内
+    expect(tab1.querySelector('button')).toBeNull();
+
+    tab1.focus();
+    fireEvent.keyDown(tab1, { key: 'ArrowRight' });
+    await waitFor(() => {
+      if (screen.getByRole('tab', { name: /shell-2/ }).getAttribute('aria-selected') !== 'true') {
+        throw new Error('ArrowRight did not activate shell-2');
+      }
+    });
+    expect(invokeCallsFor('focus_workbench_session').some((c) => c.args.sessionId === 's2')).toBe(
+      true,
+    );
+
+    fireEvent.keyDown(screen.getByRole('tab', { name: /shell-2/ }), { key: 'End' });
+    await waitFor(() => {
+      if (screen.getByRole('tab', { name: /shell-3/ }).getAttribute('aria-selected') !== 'true') {
+        throw new Error('End did not activate shell-3');
+      }
+    });
+
+    fireEvent.keyDown(screen.getByRole('tab', { name: /shell-3/ }), { key: 'Home' });
+    await waitFor(() => {
+      if (screen.getByRole('tab', { name: /shell-1/ }).getAttribute('aria-selected') !== 'true') {
+        throw new Error('Home did not activate shell-1');
+      }
+    });
+
+    fireEvent.keyDown(screen.getByRole('tab', { name: /shell-1/ }), { key: 'ArrowLeft' });
+    await waitFor(() => {
+      if (screen.getByRole('tab', { name: /shell-3/ }).getAttribute('aria-selected') !== 'true') {
+        throw new Error('ArrowLeft wrap did not activate shell-3');
+      }
+    });
+  });
+
+  test('closing selected session focuses adjacent tab or new-session button', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    let liveSessions = [
+      buildSession({ id: 's1', name: 'shell-1' }),
+      buildSession({ id: 's2', name: 'shell-2' }),
+    ];
+    setInvokeHandler((call) => {
+      switch (call.cmd) {
+        case 'list_workbench_projects':
+          return [project];
+        case 'list_workbench_worktrees':
+          return [worktree];
+        case 'list_workbench_sessions':
+          return liveSessions;
+        case 'list_workbench_git_commits':
+          return [];
+        case 'list_workbench_dir':
+          return [];
+        case 'focus_workbench_session':
+          return { ok: true, sessionId: call.args.sessionId };
+        case 'close_workbench_session':
+          liveSessions = liveSessions.filter((session) => session.id !== call.args.sessionId);
+          return { ok: true };
+        default:
+          return { ok: true };
+      }
+    });
+
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [project], activeProjectId: project.id }),
+      buildDependencyContextValue(),
+    );
+    await waitForInvoke('focus_workbench_session');
+
+    const tablist = screen.getByRole('tablist', { name: '终端会话' });
+    const closeInTabs = () =>
+      Array.from(tablist.querySelectorAll('button')).filter(
+        (node) => node.getAttribute('aria-label') === '关闭终端',
+      );
+    expect(closeInTabs().length).toBe(2);
+    // 关闭当前选中 s1，焦点应落到相邻 s2
+    fireEvent.click(closeInTabs()[0]);
+    await waitForInvoke('close_workbench_session');
+    await waitFor(() => {
+      const next = document.getElementById('workbench-session-tab-s2');
+      if (document.activeElement !== next) {
+        throw new Error(`expected focus on s2 tab, got ${document.activeElement?.id ?? 'none'}`);
+      }
+    });
+
+    // 再关最后一个，焦点落到新建终端
+    fireEvent.click(closeInTabs()[0]);
+    await waitForInvoke('close_workbench_session');
+    await waitFor(() => {
+      const next = document.getElementById('workbench-session-tab-new');
+      if (document.activeElement !== next) {
+        throw new Error(`expected focus on new session, got ${document.activeElement?.id ?? 'none'}`);
+      }
+    });
   });
 
   test('terminal-status event updates session status in inspector card', async () => {

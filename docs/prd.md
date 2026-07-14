@@ -492,3 +492,20 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 应用内更新：检查/下载/安装使用 generation 状态机；安装失败可保留已下载包重试
 - 健康提醒：数值与免打扰格式由后端强制校验；非法输入不改变已保存配置与运行时状态
 - 本能力不涉及 SQLite schema 变更
+
+
+## 前端基础、无障碍与性能合同（S4）
+
+**描述**：桌面与 mobile 前端共享可自动验证的 design token、模态、键盘、错误隔离、拆包与巨型页所有权边界。
+
+**功能点 / 约束**：
+- 颜色/间距/圆角/阴影仅使用 `tokens.css` 已定义 token；`prefers-reduced-motion: reduce` 下全局归零 animation/transition duration
+- 产品模态统一 `Dialog`/`Drawer` 原语：portal、focus trap、Escape、背景 inert、scroll lock、关闭焦点恢复；业务页禁止手写 focus trap
+- 路由级 `RouteErrorBoundary` + lazy routes：单页 render 失败不得拖垮 AppShell；DEV 提供 `/__cp_route_error_fixture` 崩溃恢复夹具供 E2E
+- desktop main initial ≤ 320 KiB gzip；mobile initial ≤ 280 KiB gzip；mobile initial 禁止 xterm/Tiptap/CodeMirror/Recharts；生产默认无 sourcemap
+- Settings / 桌面 Orchestrator / Mobile Automation 按 controller + pure views 拆分：views 无 API/transport，controllers 无 board/modal JSX
+- Workbench 仅七个域 controller，页面组合层 ≤1200 行；终端 window tabs 使用 roving tablist（Arrow/Home/End）
+- Attention 列表每行仅一个 tab stop（单 button，动作文案为 span）
+- 侧栏 `WorkbenchProjectRail` 为项目导航权威入口；添加来源/远端选择走共享 Dialog
+- 验证：`npm run check:css-tokens && npm run check:i18n && npm run lint && npm run build && npm run check:bundle && npm test && npm run test:e2e`；E2E foundation 冒烟 `frontend-foundation.spec.ts`；手动 VoiceOver/NVDA 覆盖 Dialog/Drawer/Attention/终端 tabs
+

@@ -23,3 +23,13 @@
   text-transform: uppercase;
   color: var(--meta);
 }
+
+/* prefers-reduced-motion: 保留状态变化，取消位移/闪烁/shimmer 动效 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,13 +1,17 @@
-import { describe, test } from 'vitest';
-import { register } from 'node:module';
+// @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, test } from 'vitest';
 import { createElement } from 'react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ComponentType, ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import type { WorkbenchProject, WorkbenchWorktree } from '@/lib/types';
 import type { MobileWorkbenchPanel } from './mobileWorkbenchState';
 
-register('../pages/Settings/css-stub.mjs', import.meta.url);
+const MOBILE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 type TestableMobileWorkbenchShellProps = {
   panel: MobileWorkbenchPanel;
@@ -99,93 +103,163 @@ function createWorktree(
   };
 }
 
+afterEach(() => {
+  cleanup();
+  document.body.style.overflow = '';
+});
+
 describe('MobileWorktreeQuickSwitch', () => {
-  test('renders dialog, worktree list, states, and shell nav via renderToStaticMarkup', async () => {
-    const { default: i18n } = await import('../i18n');
-    await i18n.changeLanguage('zh');
-    const { MobileWorktreeQuickSwitch } = await import('./components/MobileWorktreeQuickSwitch');
-    const { MobileWorkbenchShell } = await import('./components/MobileWorkbenchShell');
-
-    const t = i18n.getFixedT('zh', 'workbench') as TFunction<'workbench'>;
-    const baseProps = {
-      open: true,
-      project: createProject(),
-      worktrees: [
-        createWorktree({ id: 'main', name: 'main', isMain: true }),
-        createWorktree({
-          id: 'feature',
-          name: 'feature/mobile',
-          branch: 'feature/mobile',
-          status: {
-            branch: 'feature/mobile',
-            changed: 2,
-            ahead: 0,
-            behind: 0,
-            conflicts: 1,
-            clean: false,
-            canPush: false,
-          },
-        }),
-      ],
-      activeWorktreeId: 'feature',
-      t,
-      onClose: () => undefined,
-      onSelect: () => undefined,
-      onPanelChange: () => undefined,
-      onRefresh: () => undefined,
-    };
-
-    const closedMarkup = renderToStaticMarkup(
-      createElement(MobileWorktreeQuickSwitch, { ...baseProps, open: false }),
+  test('source consumes Dialog primitive without raw dialog role', () => {
+    const source = readFileSync(
+      path.join(MOBILE_DIR, 'components/MobileWorktreeQuickSwitch.tsx'),
+      'utf8',
     );
-    assertEqual(closedMarkup, '', 'closed quick switch should render nothing');
-
-    const openMarkup = renderToStaticMarkup(createElement(MobileWorktreeQuickSwitch, baseProps));
-    assertIncludes(openMarkup, 'role="dialog"', 'quick switch should render dialog role');
-    assertIncludes(openMarkup, 'aria-modal="true"', 'quick switch should be modal');
-    assertIncludes(openMarkup, 'aria-current="true"', 'active worktree should use aria-current');
-    assertIncludes(openMarkup, '切换 Worktree', 'quick switch should render title');
-    assertIncludes(openMarkup, 'main', 'quick switch should render main worktree');
-    assertIncludes(openMarkup, '主工作区', 'quick switch should render main badge');
-    assertIncludes(openMarkup, 'feature/mobile', 'quick switch should render feature worktree');
-    assertIncludes(openMarkup, '1 处冲突', 'status label should use mobile status helper semantics');
-
-    const noProjectMarkup = renderToStaticMarkup(
-      createElement(MobileWorktreeQuickSwitch, { ...baseProps, project: null, worktrees: [] }),
-    );
-    assertIncludes(noProjectMarkup, '先选择项目', 'quick switch should render no-project state');
-
-    const emptyMarkup = renderToStaticMarkup(
-      createElement(MobileWorktreeQuickSwitch, { ...baseProps, worktrees: [] }),
-    );
-    assertIncludes(emptyMarkup, '暂无 worktree', 'quick switch should render empty state');
-
-    const TestableMobileWorkbenchShell = MobileWorkbenchShell as ComponentType<
-      TestableMobileWorkbenchShellProps
-    >;
-    const shellMarkup = renderToStaticMarkup(
-      createElement(
-        TestableMobileWorkbenchShell,
-        {
-          panel: 'terminal',
-          project: 'cc-partner',
-          worktree: 'feature/mobile',
-          session: 'shell',
-          worktreeStatusDisabled: true,
-          onWorktreeStatusClick: () => undefined,
-          onPanelChange: () => undefined,
-        },
-        createElement('section', null, 'panel'),
-      ),
-    );
-    assertIncludes(shellMarkup, 'aria-haspopup="dialog"', 'worktree status pill should open a dialog');
-    assertIncludes(shellMarkup, 'disabled=""', 'disabled worktree status button should be disabled');
-    assertIncludes(shellMarkup, 'feature/mobile', 'worktree status button should render worktree name');
-    assertIncludes(shellMarkup, '自动化', 'mobile shell navigation should expose automation as a panel');
-    assertEqual(
-      openMarkup.includes('自动化') ? 'present' : 'absent',
-      'absent',
-      'quick switch should not contain automation entry',
-    );
+    assertIncludes(source, '<Dialog', 'quick switch should render shared Dialog');
+    assertIncludes(source, "from '@/components/primitives'", 'quick switch should import primitives');
+    assertIncludes(source, 'titleId', 'quick switch Dialog should wire titleId');
+    if (/role\s*=\s*["']dialog["']/.test(source)) {
+      throw new Error('quick switch should not hand-write role=dialog');
+    }
+    if (/aria-modal\s*=\s*["']true["']/.test(source)) {
+      throw new Error('quick switch should not hand-write aria-modal');
+    }
+    if (source.includes("window.addEventListener('keydown'")) {
+      throw new Error('quick switch Escape should be owned by Dialog, not local listener');
+    }
   });
+
+  test(
+    'renders dialog, worktree list, states, and shell nav',
+    async () => {
+      const { default: i18n } = await import('../i18n');
+      await i18n.changeLanguage('zh');
+      const { MobileWorktreeQuickSwitch } = await import('./components/MobileWorktreeQuickSwitch');
+      const { MobileWorkbenchShell } = await import('./components/MobileWorkbenchShell');
+
+      const t = i18n.getFixedT('zh', 'workbench') as TFunction<'workbench'>;
+      const baseProps = {
+        open: true,
+        project: createProject(),
+        worktrees: [
+          createWorktree({ id: 'main', name: 'main', isMain: true }),
+          createWorktree({
+            id: 'feature',
+            name: 'feature/mobile',
+            branch: 'feature/mobile',
+            status: {
+              branch: 'feature/mobile',
+              changed: 2,
+              ahead: 0,
+              behind: 0,
+              conflicts: 1,
+              clean: false,
+              canPush: false,
+            },
+          }),
+        ],
+        activeWorktreeId: 'feature',
+        t,
+        onClose: () => undefined,
+        onSelect: () => undefined,
+        onPanelChange: () => undefined,
+        onRefresh: () => undefined,
+      };
+
+      const closedMarkup = renderToStaticMarkup(
+        createElement(MobileWorktreeQuickSwitch, { ...baseProps, open: false }),
+      );
+      assertEqual(closedMarkup, '', 'closed quick switch should render nothing');
+
+      // Dialog portal 挂到 document.body，须用 jsdom + Testing Library，不能依赖 renderToStaticMarkup。
+      const { unmount } = render(createElement(MobileWorktreeQuickSwitch, baseProps));
+      const dialog = await screen.findByRole('dialog');
+      assertIncludes(
+        dialog.getAttribute('aria-modal') ?? '',
+        'true',
+        'quick switch should be modal via Dialog primitive',
+      );
+      assertIncludes(dialog.textContent ?? '', '切换 Worktree', 'quick switch should render title');
+      assertIncludes(dialog.textContent ?? '', 'main', 'quick switch should render main worktree');
+      assertIncludes(dialog.textContent ?? '', '主工作区', 'quick switch should render main badge');
+      assertIncludes(
+        dialog.textContent ?? '',
+        'feature/mobile',
+        'quick switch should render feature worktree',
+      );
+      assertIncludes(
+        dialog.textContent ?? '',
+        '1 处冲突',
+        'status label should use mobile status helper semantics',
+      );
+      if (dialog.querySelector('[aria-current="true"]') == null) {
+        throw new Error('active worktree should use aria-current');
+      }
+      assertEqual(
+        (dialog.textContent ?? '').includes('自动化') ? 'present' : 'absent',
+        'absent',
+        'quick switch should not contain automation entry',
+      );
+      unmount();
+
+      const { unmount: unmountNoProject } = render(
+        createElement(MobileWorktreeQuickSwitch, {
+          ...baseProps,
+          project: null,
+          worktrees: [],
+        }),
+      );
+      assertIncludes(
+        (await screen.findByRole('dialog')).textContent ?? '',
+        '先选择项目',
+        'quick switch should render no-project state',
+      );
+      unmountNoProject();
+
+      const { unmount: unmountEmpty } = render(
+        createElement(MobileWorktreeQuickSwitch, { ...baseProps, worktrees: [] }),
+      );
+      assertIncludes(
+        (await screen.findByRole('dialog')).textContent ?? '',
+        '暂无 worktree',
+        'quick switch should render empty state',
+      );
+      unmountEmpty();
+
+      const TestableMobileWorkbenchShell = MobileWorkbenchShell as ComponentType<
+        TestableMobileWorkbenchShellProps
+      >;
+      const shellMarkup = renderToStaticMarkup(
+        createElement(
+          TestableMobileWorkbenchShell,
+          {
+            panel: 'terminal',
+            project: 'cc-partner',
+            worktree: 'feature/mobile',
+            session: 'shell',
+            worktreeStatusDisabled: true,
+            onWorktreeStatusClick: () => undefined,
+            onPanelChange: () => undefined,
+          },
+          createElement('section', null, 'panel'),
+        ),
+      );
+      assertIncludes(
+        shellMarkup,
+        'aria-haspopup="dialog"',
+        'worktree status pill should open a dialog',
+      );
+      assertIncludes(shellMarkup, 'disabled=""', 'disabled worktree status button should be disabled');
+      assertIncludes(
+        shellMarkup,
+        'feature/mobile',
+        'worktree status button should render worktree name',
+      );
+      assertIncludes(
+        shellMarkup,
+        '自动化',
+        'mobile shell navigation should expose automation as a panel',
+      );
+    },
+    20_000,
+  );
 });

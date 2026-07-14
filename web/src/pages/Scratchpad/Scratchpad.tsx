@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useTranslation } from 'react-i18next';
 import { configApi } from '@/api/config';
 import { scratchpadApi } from '@/api/scratchpad';
-import { Button, Card, Input } from '@/components/primitives';
+import { Button, Card, Dialog, Input } from '@/components/primitives';
 import { useScratchpadAutosave } from '@/hooks/scratchpadAutosaveContext';
 import { CopyIcon, PlusIcon, SyncIcon, TrashIcon, XIcon } from '@/lib/icons';
 import type { ScratchpadPage, ScratchpadPageSummary } from '@/lib/types';
@@ -659,47 +659,53 @@ export function Scratchpad() {
         </section>
       </div>
 
-      {pendingClear ? (
-        <div className={styles.modalMask} role="dialog" aria-modal="true" aria-labelledby="clear-title">
-          <Card variant="elevated" className={styles.modal}>
-            <h3 id="clear-title" className={styles.modalTitle}>
-              {t('scratchpad:clearConfirmTitle')}
-            </h3>
-            <p className={styles.modalText}>{t('scratchpad:clearConfirmText')}</p>
-            <div className={styles.modalActions}>
-              <Button variant="secondary" size="sm" icon={<XIcon />} onClick={cancelClear}>
-                {t('common:action.cancel')}
-              </Button>
-              <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={confirmClear}>
-                {t('scratchpad:clear')}
-              </Button>
-            </div>
-          </Card>
-        </div>
-      ) : null}
+      <Dialog
+        open={pendingClear}
+        titleId="clear-title"
+        onClose={cancelClear}
+        className={styles.modal}
+      >
+        <Card variant="elevated" className={styles.modalCard}>
+          <h3 id="clear-title" className={styles.modalTitle}>
+            {t('scratchpad:clearConfirmTitle')}
+          </h3>
+          <p className={styles.modalText}>{t('scratchpad:clearConfirmText')}</p>
+          <div className={styles.modalActions}>
+            <Button variant="secondary" size="sm" icon={<XIcon />} onClick={cancelClear}>
+              {t('common:action.cancel')}
+            </Button>
+            <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={confirmClear}>
+              {t('scratchpad:clear')}
+            </Button>
+          </div>
+        </Card>
+      </Dialog>
 
-      {pendingDelete ? (
-        <div className={styles.modalMask} role="dialog" aria-modal="true" aria-labelledby="delete-title">
-          <Card variant="elevated" className={styles.modal}>
-            <h3 id="delete-title" className={styles.modalTitle}>
-              {t('scratchpad:deleteConfirmTitle')}
-            </h3>
-            <p className={styles.modalText}>
-              {t('scratchpad:deleteConfirmText', {
-                title: currentPage?.title ?? t('scratchpad:untitledPage'),
-              })}
-            </p>
-            <div className={styles.modalActions}>
-              <Button variant="secondary" size="sm" icon={<XIcon />} onClick={cancelDelete}>
-                {t('common:action.cancel')}
-              </Button>
-              <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={() => void confirmDelete()}>
-                {t('scratchpad:deletePage')}
-              </Button>
-            </div>
-          </Card>
-        </div>
-      ) : null}
+      <Dialog
+        open={pendingDelete}
+        titleId="delete-title"
+        onClose={cancelDelete}
+        className={styles.modal}
+      >
+        <Card variant="elevated" className={styles.modalCard}>
+          <h3 id="delete-title" className={styles.modalTitle}>
+            {t('scratchpad:deleteConfirmTitle')}
+          </h3>
+          <p className={styles.modalText}>
+            {t('scratchpad:deleteConfirmText', {
+              title: currentPage?.title ?? t('scratchpad:untitledPage'),
+            })}
+          </p>
+          <div className={styles.modalActions}>
+            <Button variant="secondary" size="sm" icon={<XIcon />} onClick={cancelDelete}>
+              {t('common:action.cancel')}
+            </Button>
+            <Button variant="danger" size="sm" icon={<TrashIcon />} onClick={() => void confirmDelete()}>
+              {t('scratchpad:deletePage')}
+            </Button>
+          </div>
+        </Card>
+      </Dialog>
     </div>
   );
 }

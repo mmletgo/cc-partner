@@ -1,5 +1,6 @@
 {
   "title": "File Transfer",
+  "eyebrow": "Transfer",
   "lead": "Pick a target device, then drag or click to send files. All transfers run over the LAN, with resume support and SHA256 verification.",
   "fieldLabel": "Target device",
   "selectDevice": "Select target device",

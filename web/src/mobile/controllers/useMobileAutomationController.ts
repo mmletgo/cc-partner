@@ -1,0 +1,1230 @@
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import type { RefObject } from 'react';
+import { useTranslation } from 'react-i18next';
+import { toRuntimeLoadError } from '@/api/orchestratorRuntimeTransportError';
+import {
+  createHttpOrchestratorClientRequestId,
+  httpOrchestratorTransport,
+} from '@/api/workbenchHttp';
+import type { HttpCreateOrchestratorTaskAction } from '@/api/workbenchHttp';
+import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
+import {
+  splitOrchestratorTaskViews,
+  upsertOrchestratorTaskView,
+} from '@/lib/orchestratorRemote';
+import type { OrchestratorRenderableTask } from '@/lib/orchestratorRemote';
+import type {
+  OrchestratorAttemptPhase,
+  OrchestratorEvidence,
+  OrchestratorRemoteOutboxItem,
+  OrchestratorRemoteOutboxStatus,
+  OrchestratorRemoteRuntimeStatus,
+  OrchestratorRunState,
+  OrchestratorRuntimeDisplayState,
+  OrchestratorTask,
+  OrchestratorTaskView,
+  OrchestratorWorkflowState,
+  WorkbenchProject,
+} from '@/lib/types';
+import {
+  applyMobileRuntimeSnapshotFailure,
+  applyMobileRuntimeSnapshotSuccess,
+  beginMobileRuntimeSnapshotLoad,
+  emptyMobileRuntimeDisplayState,
+  nextMobileRuntimeSnapshotRequestSeq,
+  resetMobileRuntimeSnapshotStore,
+  selectMobileRuntimeDisplayForProject,
+  type OwnedMobileRuntimeDisplayState,
+} from '../mobileRuntimeSnapshotStore';
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   详情「打开执行现场」需要把 task 绑定的 worktree/session 交给 MobileWorkbench 现有 terminal 面板。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述一次从自动化详情跳转到终端执行现场所需的 project/worktree/session 标识。
+ */
+export interface MobileAutomationExecutionContext {
+  projectId: string;
+  worktreeId: string | null;
+  sessionId: string | null;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   移动端自动化面板由 MobileWorkbench 注入项目上下文与 Attention 聚焦回调。
+ *
+ * Code Logic（这个类型做什么）:
+ *   定义面板入参：active project、执行现场打开回调，以及 task/outbox focus 与结果回报。
+ */
+export interface MobileAutomationPanelProps {
+  project: WorkbenchProject | null;
+  onOpenExecutionContext?: (context: MobileAutomationExecutionContext) => void;
+  /** Attention 跳转：聚焦真实任务详情/Evidence。 */
+  focusTaskId?: string | null;
+  /** Attention 跳转：聚焦 failed outbox 行。 */
+  focusOutboxId?: string | null;
+  /** 聚焦结果回调：missing 时父级刷新 Inbox 并回到 Attention。 */
+  onFocusResult?: (result: {
+    status: 'found' | 'missing';
+    entity: 'task' | 'outbox';
+    id: string;
+  }) => void;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   controller 入参与面板 props 对齐，便于 Panel 直接透传。
+ *
+ * Code Logic（这个类型做什么）:
+ *   复用 MobileAutomationPanelProps 作为 hook 参数别名。
+ */
+export type UseMobileAutomationControllerParams = MobileAutomationPanelProps;
+
+export type MobileAutomationTaskGroups = Record<
+  OrchestratorWorkflowState,
+  OrchestratorRenderableTask[]
+>;
+
+export interface MobileAutomationCreateActionConfig {
+  createAction: HttpCreateOrchestratorTaskAction;
+  labelKey: MobileAutomationCreateActionLabelKey;
+  statusKey: MobileAutomationCreateActionStatusKey;
+}
+
+export type MobileAutomationCreateActionLabelKey =
+  | 'workbench:mobile.automationPanel.createBacklog'
+  | 'workbench:mobile.automationPanel.createTodo'
+  | 'workbench:mobile.automationPanel.createStart';
+
+export type MobileAutomationCreateActionStatusKey =
+  | 'workbench:mobile.automationPanel.createdBacklog'
+  | 'workbench:mobile.automationPanel.createdTodo'
+  | 'workbench:mobile.automationPanel.createdStart';
+
+type MobileAutomationEvidenceKindLabelKey =
+  | 'orchestrator:evidence.kind.developmentAttempt'
+  | 'orchestrator:evidence.kind.verificationOutput'
+  | 'orchestrator:evidence.kind.verificationReview'
+  | 'orchestrator:evidence.kind.repairPrompt'
+  | 'orchestrator:evidence.kind.remoteOutbox'
+  | 'orchestrator:evidence.kind.delivery'
+  | 'orchestrator:evidence.kind.generic';
+
+export const MOBILE_AUTOMATION_WORKFLOW_STATES: readonly OrchestratorWorkflowState[] = [
+  'backlog',
+  'todo',
+  'inProgress',
+  'humanReview',
+  'rework',
+  'merging',
+  'done',
+  'canceled',
+];
+
+export const MOBILE_AUTOMATION_CREATE_ACTIONS: readonly MobileAutomationCreateActionConfig[] = [
+  {
+    createAction: 'backlog',
+    labelKey: 'workbench:mobile.automationPanel.createBacklog',
+    statusKey: 'workbench:mobile.automationPanel.createdBacklog',
+  },
+  {
+    createAction: 'todo',
+    labelKey: 'workbench:mobile.automationPanel.createTodo',
+    statusKey: 'workbench:mobile.automationPanel.createdTodo',
+  },
+  {
+    createAction: 'start',
+    labelKey: 'workbench:mobile.automationPanel.createStart',
+    statusKey: 'workbench:mobile.automationPanel.createdStart',
+  },
+];
+
+export const MOBILE_AUTOMATION_WORKFLOW_LABEL_KEYS: Record<
+  OrchestratorWorkflowState,
+  `workbench:mobile.automationPanel.workflow.${OrchestratorWorkflowState}`
+> = {
+  backlog: 'workbench:mobile.automationPanel.workflow.backlog',
+  todo: 'workbench:mobile.automationPanel.workflow.todo',
+  inProgress: 'workbench:mobile.automationPanel.workflow.inProgress',
+  humanReview: 'workbench:mobile.automationPanel.workflow.humanReview',
+  rework: 'workbench:mobile.automationPanel.workflow.rework',
+  merging: 'workbench:mobile.automationPanel.workflow.merging',
+  done: 'workbench:mobile.automationPanel.workflow.done',
+  canceled: 'workbench:mobile.automationPanel.workflow.canceled',
+};
+
+export const MOBILE_AUTOMATION_RUN_LABEL_KEYS: Record<
+  OrchestratorRunState,
+  `workbench:mobile.automationPanel.runState.${OrchestratorRunState}`
+> = {
+  idle: 'workbench:mobile.automationPanel.runState.idle',
+  queued: 'workbench:mobile.automationPanel.runState.queued',
+  preparing: 'workbench:mobile.automationPanel.runState.preparing',
+  running: 'workbench:mobile.automationPanel.runState.running',
+  verifying: 'workbench:mobile.automationPanel.runState.verifying',
+  retrying: 'workbench:mobile.automationPanel.runState.retrying',
+  blocked: 'workbench:mobile.automationPanel.runState.blocked',
+  delivering: 'workbench:mobile.automationPanel.runState.delivering',
+};
+
+export const MOBILE_AUTOMATION_ATTEMPT_PHASE_LABEL_KEYS: Record<
+  OrchestratorAttemptPhase,
+  `workbench:mobile.automationPanel.attemptPhase.${OrchestratorAttemptPhase}`
+> = {
+  preparingWorkspace: 'workbench:mobile.automationPanel.attemptPhase.preparingWorkspace',
+  buildingPrompt: 'workbench:mobile.automationPanel.attemptPhase.buildingPrompt',
+  launchingRunner: 'workbench:mobile.automationPanel.attemptPhase.launchingRunner',
+  initializingSession: 'workbench:mobile.automationPanel.attemptPhase.initializingSession',
+  streaming: 'workbench:mobile.automationPanel.attemptPhase.streaming',
+  finishing: 'workbench:mobile.automationPanel.attemptPhase.finishing',
+  succeeded: 'workbench:mobile.automationPanel.attemptPhase.succeeded',
+  failed: 'workbench:mobile.automationPanel.attemptPhase.failed',
+  timedOut: 'workbench:mobile.automationPanel.attemptPhase.timedOut',
+  stalled: 'workbench:mobile.automationPanel.attemptPhase.stalled',
+  canceledByReconciliation:
+    'workbench:mobile.automationPanel.attemptPhase.canceledByReconciliation',
+};
+
+export const MOBILE_AUTOMATION_PENDING_STATUS_LABEL_KEYS: Record<
+  OrchestratorRemoteOutboxStatus,
+  `workbench:mobile.automationPanel.pendingStatus.${OrchestratorRemoteOutboxStatus}`
+> = {
+  pending: 'workbench:mobile.automationPanel.pendingStatus.pending',
+  sending: 'workbench:mobile.automationPanel.pendingStatus.sending',
+  mirrored: 'workbench:mobile.automationPanel.pendingStatus.mirrored',
+  failed: 'workbench:mobile.automationPanel.pendingStatus.failed',
+  discarded: 'workbench:mobile.automationPanel.pendingStatus.discarded',
+};
+
+const MOBILE_AUTOMATION_EVIDENCE_KIND_LABEL_KEYS = {
+  developmentAttempt: 'orchestrator:evidence.kind.developmentAttempt',
+  verificationOutput: 'orchestrator:evidence.kind.verificationOutput',
+  verificationReview: 'orchestrator:evidence.kind.verificationReview',
+  repairPrompt: 'orchestrator:evidence.kind.repairPrompt',
+  remoteOutbox: 'orchestrator:evidence.kind.remoteOutbox',
+  delivery: 'orchestrator:evidence.kind.delivery',
+} as const satisfies Record<string, MobileAutomationEvidenceKindLabelKey>;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 Orchestrator HTTP 请求失败时需要给用户展示后端返回的可读错误，而不是只显示 unknown。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读取 Error.message；如果抛出值不是 Error，则转成字符串作为兜底展示。
+ */
+export function getErrorMessage(reason: unknown): string {
+  if (reason instanceof Error && reason.message.trim()) return reason.message;
+  return String(reason);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   远端离线创建落入 outbox 时仍应在手机端展示用户填写的任务标题，避免只看到设备路径。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 outbox requestJson 中解析 title；解析失败时使用远端项目路径兜底。
+ */
+export function pendingRemoteTaskTitle(item: OrchestratorRemoteOutboxItem): string {
+  try {
+    const value = JSON.parse(item.requestJson) as { title?: unknown };
+    if (typeof value.title === 'string' && value.title.trim()) return value.title.trim();
+  } catch {
+    // requestJson 来自本机 outbox，异常时展示路径兜底即可。
+  }
+  return item.remoteProjectPath;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   自动化面板需要按固定 workflow 泳道展示真实任务，即使后端返回顺序变化也保持稳定。
+ *
+ * Code Logic（这个函数做什么）:
+ *   初始化每个 workflowState 的空数组，供后续单次遍历追加渲染任务。
+ */
+export function createEmptyMobileAutomationGroups(): MobileAutomationTaskGroups {
+  return MOBILE_AUTOMATION_WORKFLOW_STATES.reduce<MobileAutomationTaskGroups>((groups, state) => {
+    groups[state] = [];
+    return groups;
+  }, {} as MobileAutomationTaskGroups);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   手机端自动化列表必须是桌面 workflow board 的 compact grouped-list，而不是 legacy status 平铺。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 task.task.workflowState 把 local/remote 真实任务加入对应分组；pendingRemote 不会传入本函数。
+ */
+export function groupMobileAutomationTasks(
+  tasks: OrchestratorRenderableTask[],
+): MobileAutomationTaskGroups {
+  const groupedTasks = createEmptyMobileAutomationGroups();
+  for (const task of tasks) {
+    groupedTasks[task.task.workflowState].push(task);
+  }
+  return groupedTasks;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   任务列表刷新后应保留用户正在查看的详情，但如果任务已不在列表中则关闭详情避免展示过期数据。
+ *
+ * Code Logic（这个函数做什么）:
+ *   local/remote 按 task.id 匹配最新 view；pendingRemote 和空选择都返回 null。
+ */
+export function resolveSelectedTaskViewAfterRefresh(
+  current: OrchestratorTaskView | null,
+  nextViews: OrchestratorTaskView[],
+): OrchestratorTaskView | null {
+  if (!current || current.origin === 'pendingRemote') return null;
+  return nextViews.find((view) => view.origin !== 'pendingRemote' && view.task.id === current.task.id) ?? null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Runner runtime 字段可能尚未被后端关联，移动端必须显示 unknown fallback 而不是空白。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对 null、undefined 和空白字符串返回 fallback；其它字符串 trim 后展示。
+ */
+export function runtimeValue(value: string | null | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Evidence 时间线需要展示可读时间；无效时间不能让详情崩溃。
+ *
+ * Code Logic（这个函数做什么）:
+ *   使用浏览器本地化时间格式化 ISO 字符串；解析失败时返回原始值。
+ */
+export function formatAutomationTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   runtime 状态条需要把后端 remoteStatus 映射成移动端可本地化的文案 key。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按四态返回 workbench mobile automation i18n key；offline 主文案为中性“离线”。
+ */
+export function mobileRuntimeStatusLabelKey(
+  status: OrchestratorRemoteRuntimeStatus,
+):
+  | 'workbench:mobile.automationPanel.runtimeStatusLive'
+  | 'workbench:mobile.automationPanel.runtimeStatusOffline'
+  | 'workbench:mobile.automationPanel.runtimeStatusUnsupported'
+  | 'workbench:mobile.automationPanel.runtimeStatusUnavailable' {
+  // display state 的 remoteStatus 已把本机 local 归一为 null，此处只处理远端四态。
+  switch (status) {
+    case 'live':
+      return 'workbench:mobile.automationPanel.runtimeStatusLive';
+    case 'offline':
+      return 'workbench:mobile.automationPanel.runtimeStatusOffline';
+    case 'unsupported':
+      return 'workbench:mobile.automationPanel.runtimeStatusUnsupported';
+    case 'unavailable':
+      return 'workbench:mobile.automationPanel.runtimeStatusUnavailable';
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   缓存时间需要可读展示，帮助用户判断 offline 快照新旧。
+ *
+ * Code Logic（这个函数做什么）:
+ *   复用 evidence 时间格式化 helper。
+ */
+export function formatRuntimeTimestamp(value: string): string {
+  return formatAutomationTimestamp(value);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   详情面板只支持真实 local/remote 任务，pendingRemote outbox 不应触发 evidence 或 action。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 task view union 中安全提取 task；pendingRemote 或空值返回 null。
+ */
+export function getTaskFromView(view: OrchestratorTaskView | null): OrchestratorTask | null {
+  if (!view || view.origin === 'pendingRemote') return null;
+  return view.task;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 evidence 列表需要复用 Orchestrator namespace 文案，但组件主 namespace 是 workbench。
+ *
+ * Code Logic（这个函数做什么）:
+ *   把后端 evidence kind 映射为带 namespace 的字面量 i18n key；未知 kind 使用 generic。
+ */
+export function mobileAutomationEvidenceKindLabelKey(
+  kind: string,
+): MobileAutomationEvidenceKindLabelKey {
+  return (
+    MOBILE_AUTOMATION_EVIDENCE_KIND_LABEL_KEYS[
+      kind as keyof typeof MOBILE_AUTOMATION_EVIDENCE_KIND_LABEL_KEYS
+    ] ?? 'orchestrator:evidence.kind.generic'
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   面板壳层只负责 header / error / runtime strip 组合，需要窄的数据与动作包。
+ *
+ * Code Logic（这个类型做什么）:
+ *   聚合壳层渲染所需的 id、状态、runtime 显示与刷新/创建入口回调。
+ */
+export interface MobileAutomationShellProps {
+  titleId: string;
+  runtimeTitleId: string;
+  hasProject: boolean;
+  loading: boolean;
+  error: string | null;
+  status: string | null;
+  isListEmpty: boolean;
+  runtimeDisplay: OrchestratorRuntimeDisplayState;
+  runtimeStatusLabel: string;
+  showRuntimeCachedHint: boolean;
+  onRefresh: () => void;
+  onOpenCreateDialog: () => void;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   任务列表视图只渲染 grouped-list，不持有 transport 或业务 state。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述可见泳道、分组任务、选中 id、unknown 文案与选中回调。
+ */
+export interface MobileAutomationTaskListProps {
+  visibleWorkflowStates: readonly OrchestratorWorkflowState[];
+  groupedTasks: MobileAutomationTaskGroups;
+  selectedTaskId: string | null;
+  unknownLabel: string;
+  onSelectTaskView: (view: OrchestratorTaskView) => void;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   任务详情视图展示 goal/runtime/evidence 与打开执行现场，不含 API 调用。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述选中任务、evidence 状态、执行现场可用性与关闭/打开回调。
+ */
+export interface MobileAutomationTaskDetailProps {
+  selectedTask: OrchestratorTask | null;
+  detailTitleId: string;
+  unknownLabel: string;
+  evidenceItems: OrchestratorEvidence[];
+  evidenceLoading: boolean;
+  evidenceError: string | null;
+  canOpenExecutionContext: boolean;
+  onCloseDetails: () => void;
+  onOpenExecutionContext: () => void;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   创建任务弹窗只负责表单与 Dialog chrome，状态与 HTTP 留在 controller。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述 dialog open、表单字段、busy 态、create actions 与事件回调。
+ */
+export interface MobileAutomationCreateDialogProps {
+  open: boolean;
+  dialogTitleId: string;
+  promptDraftRef: RefObject<HTMLTextAreaElement | null>;
+  creating: boolean;
+  completingPrompt: boolean;
+  creatingAction: HttpCreateOrchestratorTaskAction | null;
+  promptDraft: string;
+  title: string;
+  goal: string;
+  acceptanceCriteria: string;
+  canCompletePrompt: boolean;
+  canSubmit: boolean;
+  createActions: readonly MobileAutomationCreateActionConfig[];
+  onClose: () => void;
+  onPromptDraftChange: (value: string) => void;
+  onTitleChange: (value: string) => void;
+  onGoalChange: (value: string) => void;
+  onAcceptanceCriteriaChange: (value: string) => void;
+  onCompletePrompt: () => void;
+  onCreateTask: (
+    createAction: HttpCreateOrchestratorTaskAction,
+    statusKey: MobileAutomationCreateActionStatusKey,
+  ) => void;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   pending remote outbox 列表与 Retry/Discard 动作渲染需要窄 props。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述 pending 条目、聚焦 id、busy id 与 retry/discard 回调。
+ */
+export interface MobileAutomationOutboxProps {
+  pendingRemoteItems: OrchestratorRemoteOutboxItem[];
+  focusedOutboxId: string | null;
+  outboxActionId: string | null;
+  onRetry: (outboxId: string) => void;
+  onDiscard: (outboxId: string) => void;
+}
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   Panel 组合层一次解构 shell + 四个视图 props，避免再触碰业务 state。
+ *
+ * Code Logic（这个类型做什么）:
+ *   汇总 controller 返回的五组 props bundle。
+ */
+export interface UseMobileAutomationControllerResult {
+  shell: MobileAutomationShellProps;
+  taskList: MobileAutomationTaskListProps;
+  taskDetail: MobileAutomationTaskDetailProps;
+  createDialog: MobileAutomationCreateDialogProps;
+  outbox: MobileAutomationOutboxProps;
+}
+
+/**
+ * useMobileAutomationController（移动端自动化面板控制器）
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   移动端自动化面板需要把 transport、runtime store、任务选择与创建幂等逻辑集中在一处，
+ *   让 TaskList/Detail/CreateDialog/Outbox 保持纯展示，便于静态所有权合同与后续扩展。
+ *
+ * Code Logic（这个函数做什么）:
+ *   持有全部 state/effect/handler 与 HTTP/runtime 调用；返回 shell + 四个视图的 typed props bundles。
+ *   不渲染 Dialog / 任务行 map 等大块 JSX。
+ */
+export function useMobileAutomationController({
+  project,
+  onOpenExecutionContext,
+  focusTaskId = null,
+  focusOutboxId = null,
+  onFocusResult,
+}: UseMobileAutomationControllerParams): UseMobileAutomationControllerResult {
+  const { t } = useTranslation(['workbench', 'orchestrator']);
+  const [taskViews, setTaskViews] = useState<OrchestratorTaskView[]>([]);
+  const [selectedTaskView, setSelectedTaskView] = useState<OrchestratorTaskView | null>(null);
+  const [focusedOutboxId, setFocusedOutboxId] = useState<string | null>(null);
+  const appliedFocusTaskIdRef = useRef<string | null>(null);
+  const appliedFocusOutboxIdRef = useRef<string | null>(null);
+  const [evidenceItems, setEvidenceItems] = useState<OrchestratorEvidence[]>([]);
+  const [evidenceLoading, setEvidenceLoading] = useState<boolean>(false);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [title, setTitle] = useState<string>('');
+  const [goal, setGoal] = useState<string>('');
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState<string>('');
+  const [createDialogOpen, setCreateDialogOpen] = useState<boolean>(false);
+  const [promptDraft, setPromptDraft] = useState<string>('');
+  const [loading, setLoading] = useState<boolean>(false);
+  const [outboxActionId, setOutboxActionId] = useState<string | null>(null);
+  const [creatingAction, setCreatingAction] =
+    useState<HttpCreateOrchestratorTaskAction | null>(null);
+  const [completingPrompt, setCompletingPrompt] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [runtimeDisplayState, setRuntimeDisplay] = useState<OwnedMobileRuntimeDisplayState>(
+    () => emptyMobileRuntimeDisplayState(false),
+  );
+  const requestIdRef = useRef<number>(0);
+  const evidenceRequestIdRef = useRef<number>(0);
+  const activeProjectIdRef = useRef<string | null>(null);
+  /**
+   * 一次逻辑创建提交的幂等键：表单内容不变的重试复用；成功/取消/表单变更后清空。
+   */
+  const createClientRequestIdRef = useRef<string | null>(null);
+  const createClientRequestFingerprintRef = useRef<string | null>(null);
+  const promptDraftRef = useRef<HTMLTextAreaElement | null>(null);
+  const titleId = useId();
+  const dialogTitleId = useId();
+  const detailTitleId = useId();
+  const runtimeTitleId = useId();
+  const hasProject = Boolean(project);
+  // Render 阶段隔离：A→B 首帧 effect 尚未重置 state 时，不得展示旧项目 runtime 快照。
+  const runtimeDisplay = selectMobileRuntimeDisplayForProject(
+    runtimeDisplayState,
+    project?.id ?? null,
+  );
+  const creating = creatingAction !== null;
+  const trimmedPromptDraft = promptDraft.trim();
+  const trimmedTitle = title.trim();
+  const trimmedGoal = goal.trim();
+  const trimmedAcceptanceCriteria = acceptanceCriteria.trim();
+  const selectedTask = getTaskFromView(selectedTaskView);
+  const unknownLabel = t('workbench:mobile.automationPanel.unknown');
+  const { tasks, pendingRemoteItems } = useMemo(
+    () => splitOrchestratorTaskViews(taskViews),
+    [taskViews],
+  );
+  const groupedTasks = useMemo(() => groupMobileAutomationTasks(tasks), [tasks]);
+  const visibleWorkflowStates = useMemo(
+    () => MOBILE_AUTOMATION_WORKFLOW_STATES.filter((state) => groupedTasks[state].length > 0),
+    [groupedTasks],
+  );
+  const taskCount = tasks.length;
+  const pendingCount = pendingRemoteItems.length;
+  const isListEmpty = !loading && taskCount === 0 && pendingCount === 0;
+  const canCompletePrompt = Boolean(
+    hasProject &&
+      trimmedPromptDraft &&
+      !completingPrompt &&
+      !creating &&
+      !loading,
+  );
+  const canSubmit = Boolean(
+    hasProject &&
+      trimmedTitle &&
+      trimmedGoal &&
+      trimmedAcceptanceCriteria &&
+      !creating &&
+      !completingPrompt &&
+      !loading,
+  );
+  const canOpenExecutionContext = Boolean(
+    selectedTask &&
+      onOpenExecutionContext &&
+      (selectedTask.worktreeId || selectedTask.sessionId),
+  );
+  const runtimeStatusLabel = useMemo(() => {
+    // local 成功：display remoteStatus 归一为 null，但 snapshot.remoteStatus 仍是 local。
+    if (runtimeDisplay.snapshot?.remoteStatus === 'local') {
+      return t('workbench:mobile.automationPanel.runtimeStatusLocal');
+    }
+    const statusValue = runtimeDisplay.remoteStatus;
+    if (!statusValue) {
+      // cold offline / 未知：中性未知，不声称“显示缓存”。
+      return t('workbench:mobile.automationPanel.runtimeStatusUnknown');
+    }
+    return t(mobileRuntimeStatusLabelKey(statusValue));
+  }, [runtimeDisplay.remoteStatus, runtimeDisplay.snapshot, t]);
+  // 仅 warm offline（有 snapshot + cachedAt）展示缓存提示；cold offline 不声称有缓存。
+  const showRuntimeCachedHint =
+    runtimeDisplay.remoteStatus === 'offline' &&
+    runtimeDisplay.snapshot !== null &&
+    runtimeDisplay.cachedAt !== null;
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   自动化任务列表需要手动刷新和项目切换时自动刷新，并防止旧项目响应覆盖当前项目。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 projectId 调用 HTTP list route；用递增 request id 和 active project ref 做 stale guard。
+   */
+  const loadTasks = useCallback(async (projectId: string): Promise<void> => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    setLoading(true);
+    setError(null);
+
+    try {
+      const nextTaskViews = await httpOrchestratorTransport.tasks.listViews(projectId);
+      if (requestIdRef.current !== requestId) return;
+      if (activeProjectIdRef.current !== projectId) return;
+      setTaskViews(nextTaskViews);
+      setSelectedTaskView((current) => resolveSelectedTaskViewAfterRefresh(current, nextTaskViews));
+    } catch (reason) {
+      if (requestIdRef.current !== requestId) return;
+      if (activeProjectIdRef.current !== projectId) return;
+      setError(`${t('workbench:mobile.automationPanel.errors.list')}: ${getErrorMessage(reason)}`);
+    } finally {
+      if (requestIdRef.current === requestId && activeProjectIdRef.current === projectId) {
+        setLoading(false);
+      }
+    }
+  }, [t]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   项目切换或手动刷新时需要拉取 remote-aware runtime snapshot，并与任务列表解耦。
+   *
+   * Code Logic（这个函数做什么）:
+   *   通过模块 store 生成 request seq、调用 mobile HTTP route，成功/失败归并显示缓存；缓存不驱动动作。
+   */
+  const loadRuntimeSnapshot = useCallback(async (projectId: string): Promise<void> => {
+    const requestSeq = nextMobileRuntimeSnapshotRequestSeq(projectId);
+    // 同项目 refresh 可保留本项目 live 缓存作骨架；跨项目时 begin 只会读到目标 project 缓存。
+    setRuntimeDisplay(beginMobileRuntimeSnapshotLoad(projectId));
+    try {
+      const snapshot = await httpOrchestratorTransport.getRuntimeSnapshot(projectId);
+      if (activeProjectIdRef.current !== projectId) return;
+      const next = applyMobileRuntimeSnapshotSuccess(projectId, requestSeq, snapshot);
+      // next 已 stamp projectId；active 守卫后再 set，避免旧项目响应写入。
+      if (next && activeProjectIdRef.current === projectId) setRuntimeDisplay(next);
+    } catch (reason) {
+      if (activeProjectIdRef.current !== projectId) return;
+      // 必须保留 adapter 的 OrchestratorRuntimeTransportError.kind；
+      // 用 new Error(message) 会抹掉 network，warm offline 缓存永远不可达。
+      const next = applyMobileRuntimeSnapshotFailure(
+        projectId,
+        requestSeq,
+        toRuntimeLoadError(reason),
+      );
+      if (next && activeProjectIdRef.current === projectId) setRuntimeDisplay(next);
+    }
+  }, []);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- 项目切换时必须同步自动化任务上下文 */
+  useEffect(() => {
+    const projectId = project?.id ?? null;
+    activeProjectIdRef.current = projectId;
+    requestIdRef.current += 1;
+    evidenceRequestIdRef.current += 1;
+    appliedFocusTaskIdRef.current = null;
+    appliedFocusOutboxIdRef.current = null;
+    setTaskViews([]);
+    setSelectedTaskView(null);
+    setFocusedOutboxId(null);
+    setEvidenceItems([]);
+    setEvidenceError(null);
+    setEvidenceLoading(false);
+    setError(null);
+    setStatus(null);
+    setLoading(false);
+    setCreatingAction(null);
+    setCompletingPrompt(false);
+    setCreateDialogOpen(false);
+    setPromptDraft('');
+    setTitle('');
+    setGoal('');
+    setAcceptanceCriteria('');
+    // 同步重置为归属新项目的空/loading 态，避免 effect 间首帧串台（render selector 是双保险）。
+    setRuntimeDisplay(
+      projectId
+        ? emptyMobileRuntimeDisplayState(true, null, projectId)
+        : emptyMobileRuntimeDisplayState(false),
+    );
+
+    if (projectId) {
+      void loadTasks(projectId);
+      void loadRuntimeSnapshot(projectId);
+    } else {
+      resetMobileRuntimeSnapshotStore();
+    }
+  }, [loadRuntimeSnapshot, loadTasks, project?.id]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   Attention 跳转到 automation 后需要在列表加载完成时聚焦 task 或 outbox；找不到则回报 missing。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   在非 loading 时匹配 focusTaskId/focusOutboxId；成功选中详情或高亮 outbox，失败回调 onFocusResult(missing)。
+   */
+  useEffect(() => {
+    if (loading) return;
+    if (!project?.id) return;
+
+    if (focusTaskId && appliedFocusTaskIdRef.current !== focusTaskId) {
+      appliedFocusTaskIdRef.current = focusTaskId;
+      const match = taskViews.find(
+        (view) => view.origin !== 'pendingRemote' && view.task.id === focusTaskId,
+      );
+      if (match) {
+        setSelectedTaskView(match);
+        onFocusResult?.({ status: 'found', entity: 'task', id: focusTaskId });
+      } else {
+        setSelectedTaskView(null);
+        onFocusResult?.({ status: 'missing', entity: 'task', id: focusTaskId });
+      }
+    }
+
+    if (focusOutboxId && appliedFocusOutboxIdRef.current !== focusOutboxId) {
+      appliedFocusOutboxIdRef.current = focusOutboxId;
+      const match = pendingRemoteItems.find((item) => item.id === focusOutboxId);
+      if (match) {
+        setFocusedOutboxId(focusOutboxId);
+        onFocusResult?.({ status: 'found', entity: 'outbox', id: focusOutboxId });
+      } else {
+        setFocusedOutboxId(null);
+        onFocusResult?.({ status: 'missing', entity: 'outbox', id: focusOutboxId });
+      }
+    }
+  }, [
+    focusOutboxId,
+    focusTaskId,
+    loading,
+    onFocusResult,
+    pendingRemoteItems,
+    project?.id,
+    taskViews,
+  ]);
+
+  useEffect(() => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId || !selectedTask) {
+      evidenceRequestIdRef.current += 1;
+      setEvidenceItems([]);
+      setEvidenceError(null);
+      setEvidenceLoading(false);
+      return;
+    }
+
+    const taskId = selectedTask.id;
+    const requestId = evidenceRequestIdRef.current + 1;
+    evidenceRequestIdRef.current = requestId;
+    setEvidenceLoading(true);
+    setEvidenceError(null);
+    setEvidenceItems([]);
+
+    httpOrchestratorTransport.tasks.listEvidence(projectId, taskId)
+      .then((items) => {
+        if (evidenceRequestIdRef.current !== requestId) return;
+        if (activeProjectIdRef.current !== projectId) return;
+        if (getTaskFromView(selectedTaskView)?.id !== taskId) return;
+        setEvidenceItems(items);
+      })
+      .catch((reason: unknown) => {
+        if (evidenceRequestIdRef.current !== requestId) return;
+        if (activeProjectIdRef.current !== projectId) return;
+        setEvidenceError(
+          `${t('workbench:mobile.automationPanel.errors.evidence')}: ${getErrorMessage(reason)}`,
+        );
+      })
+      .finally(() => {
+        if (evidenceRequestIdRef.current === requestId && activeProjectIdRef.current === projectId) {
+          setEvidenceLoading(false);
+        }
+      });
+  }, [selectedTask, selectedTaskView, t]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户点击刷新时需要重新读取当前项目的任务列表与 runtime 状态，未选项目不应发起请求。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验当前 project id，存在时并行调用 loadTasks 与 loadRuntimeSnapshot。
+   */
+  const handleRefresh = useCallback((): void => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    void loadTasks(projectId);
+    void loadRuntimeSnapshot(projectId);
+  }, [loadRuntimeSnapshot, loadTasks]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Automation 面板对 failed outbox 点 Retry 时，应在本机把条目回到 pending、刷新列表，
+   *   并立即失效全局 Inbox 投影。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 project 与 busy 状态，调用 httpOrchestratorTransport.outbox.retry，
+   *   成功后 loadTasks 并 requestAttentionInvalidation。
+   */
+  const handleRetryRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      setOutboxActionId(outboxId);
+      setError(null);
+      try {
+        await httpOrchestratorTransport.outbox.retry(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await loadTasks(projectId);
+        requestAttentionInvalidation();
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.retryOutbox')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [loadTasks, outboxActionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机 Automation 面板对 failed outbox 点 Discard 时，需要确认后进入 discarded 审计终态，
+   *   并从 Inbox 移除对应 failed outbox 投影。
+   *
+   * Code Logic（这个函数做什么）:
+   *   window.confirm 后调用 outbox.discard，成功后 loadTasks 并 requestAttentionInvalidation。
+   */
+  const handleDiscardRemoteOutbox = useCallback(
+    async (outboxId: string): Promise<void> => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || outboxActionId) return;
+      const confirmed = window.confirm(t('workbench:mobile.automationPanel.pendingDiscardConfirm'));
+      if (!confirmed) return;
+      setOutboxActionId(outboxId);
+      setError(null);
+      try {
+        await httpOrchestratorTransport.outbox.discard(projectId, outboxId);
+        if (activeProjectIdRef.current !== projectId) return;
+        await loadTasks(projectId);
+        requestAttentionInvalidation();
+      } catch (reason) {
+        if (activeProjectIdRef.current !== projectId) return;
+        setError(
+          `${t('workbench:mobile.automationPanel.errors.discardOutbox')}: ${getErrorMessage(reason)}`,
+        );
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setOutboxActionId(null);
+        }
+      }
+    },
+    [loadTasks, outboxActionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机端创建任务入口需要从列表页进入独立弹窗，避免表单常驻挤占任务队列空间。
+   *
+   * Code Logic（这个函数做什么）:
+   *   打开创建弹窗并清理上一轮状态提示；表单草稿保留，让用户误关前可继续编辑。
+   */
+  const handleOpenCreateDialog = useCallback((): void => {
+    if (!activeProjectIdRef.current) return;
+    // 打开新弹窗视为新逻辑提交周期，清空旧幂等键。
+    createClientRequestIdRef.current = null;
+    createClientRequestFingerprintRef.current = null;
+    setError(null);
+    setStatus(null);
+    setCreateDialogOpen(true);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   弹窗关闭应避免打断正在创建或 AI 完善的请求，防止用户误以为操作已取消。
+   *
+   * Code Logic（这个函数做什么）:
+   *   若没有 pending 请求则关闭 dialog 并清空逻辑提交幂等键；请求中忽略关闭动作。
+   */
+  const handleCloseCreateDialog = useCallback((): void => {
+    if (creating || completingPrompt) return;
+    createClientRequestIdRef.current = null;
+    createClientRequestFingerprintRef.current = null;
+    setCreateDialogOpen(false);
+  }, [creating, completingPrompt]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户常会只输入一句简单需求，手机端也应能像桌面端一样让 AI 结构化生成任务标题、目标和验收标准。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验当前项目和 prompt 后调用 HTTP complete-prompt route；成功时把返回的三字段填入创建表单。
+   */
+  const handleCompletePrompt = useCallback(async (): Promise<void> => {
+    const projectId = activeProjectIdRef.current;
+    const workingDirectory = project?.kind === 'local' ? project.path : null;
+    if (!projectId) {
+      setError(t('workbench:mobile.automationPanel.noProject'));
+      return;
+    }
+    if (!trimmedPromptDraft) {
+      setError(t('workbench:mobile.automationPanel.errors.promptRequired'));
+      return;
+    }
+
+    setCompletingPrompt(true);
+    setError(null);
+    setStatus(null);
+    try {
+      const completed = await httpOrchestratorTransport.tasks.completePrompt({
+        projectId,
+        prompt: trimmedPromptDraft,
+        workingDirectory,
+      });
+      if (activeProjectIdRef.current !== projectId) return;
+      setTitle(completed.title.trim());
+      setGoal(completed.goal.trim());
+      setAcceptanceCriteria(completed.acceptanceCriteria.trim());
+    } catch (reason) {
+      if (activeProjectIdRef.current !== projectId) return;
+      setError(
+        `${t('workbench:mobile.automationPanel.errors.completePrompt')}: ${getErrorMessage(reason)}`,
+      );
+    } finally {
+      if (activeProjectIdRef.current === projectId) {
+        setCompletingPrompt(false);
+      }
+    }
+  }, [project, t, trimmedPromptDraft]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机端创建任务必须显式支持 Backlog、Todo 和 Start 三种业务动作，与桌面 workflow board 对齐。
+   *   响应丢失后用户重试必须复用同一 clientRequestId，避免 owner 侧重复建任务。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验项目和表单；按表单指纹在逻辑提交周期内复用 clientRequestId；调用 HTTP createView；
+   *   成功后清空弹窗与幂等键，失败保留键供重试。
+   */
+  const handleCreateTask = useCallback(async (
+    createAction: HttpCreateOrchestratorTaskAction,
+    statusKey: MobileAutomationCreateActionStatusKey,
+  ): Promise<void> => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) {
+      setError(t('workbench:mobile.automationPanel.noProject'));
+      return;
+    }
+    if (!trimmedTitle || !trimmedGoal || !trimmedAcceptanceCriteria) {
+      setError(t('workbench:mobile.automationPanel.errors.required'));
+      return;
+    }
+
+    // 表单内容指纹：任一字段变化视为新逻辑提交，重新 mint 幂等键。
+    const fingerprint = [
+      projectId,
+      trimmedTitle,
+      trimmedGoal,
+      trimmedAcceptanceCriteria,
+      createAction,
+    ].join('\u0001');
+    if (
+      createClientRequestIdRef.current === null
+      || createClientRequestFingerprintRef.current !== fingerprint
+    ) {
+      createClientRequestIdRef.current = createHttpOrchestratorClientRequestId();
+      createClientRequestFingerprintRef.current = fingerprint;
+    }
+    const clientRequestId = createClientRequestIdRef.current;
+
+    setCreatingAction(createAction);
+    setError(null);
+    setStatus(null);
+    try {
+      const createdTaskView = await httpOrchestratorTransport.tasks.createView({
+        projectId,
+        title: trimmedTitle,
+        goal: trimmedGoal,
+        acceptanceCriteria: trimmedAcceptanceCriteria,
+        priority: 0,
+        createAction,
+        clientRequestId,
+      });
+      if (activeProjectIdRef.current !== projectId) return;
+      setTaskViews((current) => upsertOrchestratorTaskView(current, createdTaskView));
+      if (createdTaskView.origin !== 'pendingRemote') {
+        setSelectedTaskView(createdTaskView);
+      }
+      setTitle('');
+      setGoal('');
+      setAcceptanceCriteria('');
+      setPromptDraft('');
+      createClientRequestIdRef.current = null;
+      createClientRequestFingerprintRef.current = null;
+      setCreateDialogOpen(false);
+      setStatus(t(statusKey));
+    } catch (reason) {
+      if (activeProjectIdRef.current !== projectId) return;
+      setError(
+        `${t('workbench:mobile.automationPanel.errors.create')}: ${getErrorMessage(reason)}`,
+      );
+    } finally {
+      if (activeProjectIdRef.current === projectId) {
+        setCreatingAction(null);
+      }
+    }
+  }, [t, trimmedAcceptanceCriteria, trimmedGoal, trimmedTitle]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   任务详情里的“打开执行现场”应进入现有 terminal 面板，而不是创建第二套终端模型。
+   *
+   * Code Logic（这个函数做什么）:
+   *   从当前选中任务取 project/worktree/session id，经父组件回调切换 MobileWorkbench 的 active 上下文。
+   */
+  const handleOpenExecutionContext = useCallback((): void => {
+    if (!selectedTask || !onOpenExecutionContext) return;
+    onOpenExecutionContext({
+      projectId: project?.id ?? selectedTask.projectId,
+      worktreeId: selectedTask.worktreeId,
+      sessionId: selectedTask.sessionId,
+    });
+  }, [onOpenExecutionContext, project?.id, selectedTask]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   列表点击真实任务应展开详情，而不是拖拽改状态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   将选中 task view 写入 selectedTaskView state。
+   */
+  const handleSelectTaskView = useCallback((view: OrchestratorTaskView): void => {
+    setSelectedTaskView(view);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户关闭详情后应回到纯列表，避免残留过期 evidence 区域。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清空 selectedTaskView。
+   */
+  const handleCloseDetails = useCallback((): void => {
+    setSelectedTaskView(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   创建弹窗表单字段变更时需要同步清理成功 status，避免旧提示误导用户。
+   *
+   * Code Logic（这个函数做什么）:
+   *   更新对应字段 state 并 setStatus(null)。
+   */
+  const handlePromptDraftChange = useCallback((value: string): void => {
+    setPromptDraft(value);
+    setStatus(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   标题字段编辑时清理 status，避免“创建成功”文案与草稿并存。
+   *
+   * Code Logic（这个函数做什么）:
+   *   setTitle 并清空 status。
+   */
+  const handleTitleChange = useCallback((value: string): void => {
+    setTitle(value);
+    setStatus(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   目标字段编辑时清理 status。
+   *
+   * Code Logic（这个函数做什么）:
+   *   setGoal 并清空 status。
+   */
+  const handleGoalChange = useCallback((value: string): void => {
+    setGoal(value);
+    setStatus(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   验收标准字段编辑时清理 status。
+   *
+   * Code Logic（这个函数做什么）:
+   *   setAcceptanceCriteria 并清空 status。
+   */
+  const handleAcceptanceCriteriaChange = useCallback((value: string): void => {
+    setAcceptanceCriteria(value);
+    setStatus(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Outbox 视图需要 fire-and-forget 包装，避免在 JSX 内直接 await。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 handleRetryRemoteOutbox 并忽略 Promise。
+   */
+  const handleRetryOutbox = useCallback((outboxId: string): void => {
+    void handleRetryRemoteOutbox(outboxId);
+  }, [handleRetryRemoteOutbox]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Outbox 视图需要 fire-and-forget 包装 discard。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 handleDiscardRemoteOutbox 并忽略 Promise。
+   */
+  const handleDiscardOutbox = useCallback((outboxId: string): void => {
+    void handleDiscardRemoteOutbox(outboxId);
+  }, [handleDiscardRemoteOutbox]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   CreateDialog 按钮点击后应触发 AI 完善，不在视图层持有 Promise 状态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   fire-and-forget 调用 handleCompletePrompt。
+   */
+  const handleCompletePromptClick = useCallback((): void => {
+    void handleCompletePrompt();
+  }, [handleCompletePrompt]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   CreateDialog 三个创建按钮需要把 createAction/statusKey 交给 controller 执行。
+   *
+   * Code Logic（这个函数做什么）:
+   *   fire-and-forget 调用 handleCreateTask。
+   */
+  const handleCreateTaskClick = useCallback((
+    createAction: HttpCreateOrchestratorTaskAction,
+    statusKey: MobileAutomationCreateActionStatusKey,
+  ): void => {
+    void handleCreateTask(createAction, statusKey);
+  }, [handleCreateTask]);
+
+  return {
+    shell: {
+      titleId,
+      runtimeTitleId,
+      hasProject,
+      loading,
+      error,
+      status,
+      isListEmpty,
+      runtimeDisplay,
+      runtimeStatusLabel,
+      showRuntimeCachedHint,
+      onRefresh: handleRefresh,
+      onOpenCreateDialog: handleOpenCreateDialog,
+    },
+    taskList: {
+      visibleWorkflowStates,
+      groupedTasks,
+      selectedTaskId: selectedTask?.id ?? null,
+      unknownLabel,
+      onSelectTaskView: handleSelectTaskView,
+    },
+    taskDetail: {
+      selectedTask,
+      detailTitleId,
+      unknownLabel,
+      evidenceItems,
+      evidenceLoading,
+      evidenceError,
+      canOpenExecutionContext,
+      onCloseDetails: handleCloseDetails,
+      onOpenExecutionContext: handleOpenExecutionContext,
+    },
+    createDialog: {
+      open: createDialogOpen,
+      dialogTitleId,
+      promptDraftRef,
+      creating,
+      completingPrompt,
+      creatingAction,
+      promptDraft,
+      title,
+      goal,
+      acceptanceCriteria,
+      canCompletePrompt,
+      canSubmit,
+      createActions: MOBILE_AUTOMATION_CREATE_ACTIONS,
+      onClose: handleCloseCreateDialog,
+      onPromptDraftChange: handlePromptDraftChange,
+      onTitleChange: handleTitleChange,
+      onGoalChange: handleGoalChange,
+      onAcceptanceCriteriaChange: handleAcceptanceCriteriaChange,
+      onCompletePrompt: handleCompletePromptClick,
+      onCreateTask: handleCreateTaskClick,
+    },
+    outbox: {
+      pendingRemoteItems,
+      focusedOutboxId,
+      outboxActionId,
+      onRetry: handleRetryOutbox,
+      onDiscard: handleDiscardOutbox,
+    },
+  };
+}

@@ -46,9 +46,12 @@ cc-partner/
 │   │   │   │   ├── Tag/          # 可关闭 chip
 │   │   │   │   ├── Pill/         # 状态标签
 │   │   │   │   ├── StatusDot/    # online/offline/busy/away
-│   │   │   │   └── ProgressBar/
+│   │   │   │   ├── ProgressBar/
+│   │   │   │   ├── Dialog/       # portal 模态 + useModalLayer（focus trap/Escape/inert/scroll lock）
+│   │   │   │   └── Drawer/       # 侧滑模态（side left/right，复用 useModalLayer）
 │   │   │   ├── layout/           # 布局组件
 │   │   │   │   ├── AppShell/     # 完整应用外壳（TitleBar + Sidebar + main）
+│   │   │   │   ├── RouteErrorBoundary/ # 路由错误隔离（pathname reset，保留 shell）
 │   │   │   │   ├── Window/       # 模拟 macOS 窗口
 │   │   │   │   ├── TitleBar/     # traffic lights + 拖拽区
 │   │   │   │   ├── Sidebar/
@@ -161,9 +164,8 @@ primitives  →  layout  →  domain  →  page
 
 | 层级 | 职责 | 例子 |
 |------|------|------|
-| **primitives** | 单一 UI 元素，无业务语义，无数据依赖 | Button, Card, Input, Tag, Pill, StatusDot, ProgressBar |
-| **layout** | 页面结构骨架，无业务数据 | AppShell, Window, TitleBar, Sidebar, NavItem, ThemeToggle |
-| **domain** | 组合 primitives + layout，承担具体业务对象的展示/交互 | PromptCard, DeviceCard, TransferItem, PermissionCard |
+| **primitives** | 单一 UI 元素，无业务语义，无数据依赖 | Button, Card, Input, Tag, Pill, StatusDot, ProgressBar, Dialog, Drawer |
+| **layout** | 页面结构骨架，无业务数据 | AppShell, Window, TitleBar, Sidebar, NavItem, ThemeToggle, RouteErrorBoundary || **domain** | 组合 primitives + layout，承担具体业务对象的展示/交互 | PromptCard, DeviceCard, TransferItem, PermissionCard |
 | **page** | 一个路由对应一个页面，组合 domain 组件 + 数据 hook | Home, Transfer, Prompts, ... |
 
 ### 4.2 ⚠️ 核心开发规范（必读）
@@ -250,6 +252,10 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | Pill | tone, dot | 状态标签 |
 | StatusDot | status, size | 设备在线状态点 |
 | ProgressBar | value, tone, size | 进度条 |
+| Dialog | open, titleId, onClose, closeOnEscape?, closeOnBackdrop?, initialFocusRef? | portal 模态；surface `role=dialog aria-modal`；共享 `useModalLayer`（focus trap / Escape / 背景 inert 引用计数 / body scroll lock / 关闭恢复触发焦点）；禁止业务页自建 focus trap |
+| Drawer | Dialog props + side?: left\|right | 侧滑模态抽屉；窄屏导航/详情侧栏；复用同一层栈合同 |
+
+> Frontend foundation 合同：`npm run check:css-tokens` / `check:i18n` / `check:bundle`；巨型页 controller/view 所有权见 `web/CLAUDE.md`；E2E 冒烟 `npm run test:e2e -- frontend-foundation.spec.ts`（Dialog 焦点、mobile Drawer Escape、Attention 单 tab stop、终端 arrow、路由崩溃恢复、reduced-motion）。手动 VoiceOver/NVDA 覆盖同类路径。禁止 Redux/Zustand/CSS framework/第三方 modal 库。
 
 **layout（布局）**：
 
@@ -262,6 +268,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | NavItem | icon, label, to, badge | 路由导航项 |
 | ThemeToggle | - | 主题切换按钮 |
 | WorkbenchWorkspaceNav | ariaLabel, actionsAriaLabel, tabs, actions | Workbench 终端/文件预览/自动化共享导航栏 |
+| RouteErrorBoundary | resetKey, onRetry?, children | 路由级错误隔离：保留 AppShell/providers，pathname 作 resetKey，生产不展示 stack |
 
 **domain（业务）**：
 
@@ -360,6 +367,7 @@ export function ComponentName() { ... }
 ### 5.8 React Hooks 顺序（必读）
 
 所有 hooks（`useState` / `useCallback` / `useMemo` / `useEffect` / 自定义 hooks / Workbench controllers）**必须放在所有 early return（loading/error/空态守卫）之前**。条件分支或 `return` 之后再调 hooks 会破坏调用顺序，运行时 crash（React error #310）。Workbench 页面的 7 个 controller 也必须在 `Workbench.tsx` early return 前无条件调用。
+禁止新增名为 `useWorkbenchController` 的页面级聚合 hook；`Workbench.tsx` 行数硬顶 **1200**。Settings/Orchestrator/MobileAutomation 拆分后 views 不得 import `@/api/*`，controllers 不得承载 board/modal JSX。
 
 ## 6. 工作流
 
@@ -471,7 +479,7 @@ git tag v<版本号> && git push origin v<版本号>  # 触发 release-tauri.yml
 
 1. **Rust**：`src-tauri/src/commands/<module>.rs` 加 `#[tauri::command]`，`lib.rs` `invoke_handler!` 注册；P2P 则 `net/routes/` 加路由并按 `src-tauri/CLAUDE.md` 的 7 步清单更新 `docs/p2p-protocol.md` + 能力 token
 2. **前端**：`web/src/api/<module>.ts` 加 `invoke` 或 mobile HTTP 封装
-3. **类型**：Rust DTO `#[serde(rename_all="camelCase")]`（P2P 部分路由仍 snake_case，见后端约定）对齐 `web/src/lib/types.ts`
+3. **类型**：Rust DTO `#[serde(rename_all="camelCase")]`（P2P 部分路由仍 snake_case，见后端约定）对齐 `web/src/lib/types/`（兼容 barrel `web/src/lib/types.ts`）
 
 ### 8.4 事件订阅（Tauri emit/listen）
 

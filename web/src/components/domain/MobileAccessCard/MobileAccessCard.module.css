@@ -41,7 +41,7 @@
 }
 
 .warning {
-  color: var(--warning);
+  color: var(--warn);
 }
 
 .state {

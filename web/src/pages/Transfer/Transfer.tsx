@@ -333,7 +333,7 @@ export function Transfer() {
     <div className={styles.page}>
       {/* 页面头部 */}
       <header className={styles.pageHeader}>
-        <span className={styles.eyebrow}>Transfer</span>
+        <span className={styles.eyebrow}>{t('transfer:eyebrow')}</span>
         <h1 className={styles.title}>{t('transfer:title')}</h1>
         <p className={styles.lead}>{t('transfer:lead')}</p>
       </header>

@@ -1,20 +1,19 @@
 /* App 顶层关闭确认弹窗样式
  * Business Logic: GUI 关闭时需要阻止默认退出并让用户选择是否停止后台 sidecar。
- * Code Logic: 使用固定遮罩 + Card 容器承载三按钮选择，全部视觉值来自 design token。
+ * Code Logic: 共享 Dialog 提供 portal/backdrop/focus trap；本模块只约束 surface 宽度与 Card 内容样式，全部视觉值来自 design token。
  */
-
-.closeDialogBackdrop {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-modal);
-  display: grid;
-  place-items: center;
-  padding: var(--space-6);
-  background: color-mix(in oklab, var(--fg) 42%, transparent);
-}
 
 .closeDialog {
   width: min(100%, 440px);
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.closeDialogCard {
+  width: 100%;
   box-shadow: var(--shadow-window);
 }
 
@@ -41,4 +40,12 @@
   color: var(--danger);
   font-size: var(--text-sm);
   line-height: 1.5;
+}
+
+/* lazy route Suspense 占位：保持 main 区域有稳定加载反馈 */
+.routeLoading {
+  padding: var(--space-6);
+  color: var(--muted);
+  font-size: var(--text-base);
+  font-family: var(--font-body);
 }

@@ -22,7 +22,8 @@ import { MobileWorkbench } from './MobileWorkbench';
  *   提供终端输出缓存，并挂载共享 Attention Provider（Inbox badge/列表）。
  *
  * Code Logic（这个组件做什么）:
- *   懒初始化 terminal buffer store；启用 NDJSON HTTP event hook；
+ *   懒初始化 session 级 ring-buffer store（options API，默认 rAF 帧批处理）；
+ *   启用 NDJSON HTTP event hook；
  *   用 AttentionProvider(loadSnapshot=attentionHttpApi) 与 WorkbenchDependencyProvider 包裹 MobileWorkbench。
  */
 export function MobileApp(): ReactElement {

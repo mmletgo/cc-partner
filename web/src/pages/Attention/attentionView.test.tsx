@@ -188,10 +188,10 @@ describe('AttentionView contracts', () => {
     const snapshot = buildSnapshot([buildItem()]);
     const { onNavigate } = renderView({ snapshot });
     const action = screen.getByTestId('attention-action-orchestrator:human-review:task-1');
-    const styles = getComputedStyle(action);
     // min sizes set in CSS module; jsdom may not compute CSS modules fully — assert attribute/class presence
     expect(action.className).toMatch(/action/);
-    expect(action.getAttribute('type')).toBe('button');
+    expect(action.tagName).toBe('SPAN');
+    expect(action.getAttribute('aria-hidden')).toBe('true');
     fireEvent.click(action);
     expect(onNavigate).toHaveBeenCalledWith(
       '/workbench?projectId=proj-1&view=automation&taskId=task-1',
@@ -202,8 +202,18 @@ describe('AttentionView contracts', () => {
       '/workbench?projectId=proj-1&view=automation&taskId=task-1',
     );
     expect(screen.queryByRole('button', { name: /Deliver|Retry|Discard|安装|交付|重试|放弃/i })).toBeNull();
-    // min hit target declared in stylesheet
-    expect(styles.minWidth === '' || styles.minWidth === '44px' || true).toBe(true);
+  });
+
+  test('each attention row is a single interactive button without nested controls', () => {
+    const snapshot = buildSnapshot([buildItem()]);
+    renderView({ snapshot });
+    const row = screen.getByTestId('attention-item-orchestrator:human-review:task-1');
+    expect(row.tagName).toBe('BUTTON');
+    expect(row.querySelectorAll('button').length).toBe(0);
+    expect(row.querySelectorAll('[role="button"]').length).toBe(0);
+    expect(row.querySelector('[data-testid="attention-action-orchestrator:human-review:task-1"]')?.tagName).toBe(
+      'SPAN',
+    );
   });
 
   test('uses semantic headings/list structure without assertive whole-list live region', () => {

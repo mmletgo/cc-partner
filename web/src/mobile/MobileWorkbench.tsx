@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
@@ -9,21 +9,11 @@ import type {
   WorkbenchSession,
   WorkbenchWorktree,
 } from '@/lib/types';
-import {
-  MobileAutomationPanel,
-  type MobileAutomationExecutionContext,
-} from './components/MobileAutomationPanel';
+import type { MobileAutomationExecutionContext } from './components/MobileAutomationPanel';
 import { MobileAttentionPanel } from './components/MobileAttentionPanel';
-import { MobileBrowserPanel } from './components/MobileBrowserPanel';
-import { MobileFilesPanel } from './components/MobileFilesPanel';
-import { MobileGitPanel } from './components/MobileGitPanel';
-import { MobilePromptPanel } from './components/MobilePromptPanel';
-import { MobileSettingsPanel } from './components/MobileSettingsPanel';
-import { MobileTerminalPanel } from './components/MobileTerminalPanel';
 import { MobileProjectPanel } from './components/MobileProjectPanel';
 import { MobileWorkbenchShell } from './components/MobileWorkbenchShell';
 import { MobileWorktreeQuickSwitch } from './components/MobileWorktreeQuickSwitch';
-import { MobileWorktreePanel } from './components/MobileWorktreePanel';
 import {
   mapMobileAttentionTarget,
   resolveMobileAttentionMissingTargetPanel,
@@ -48,6 +38,56 @@ import {
   type MobileFilePanelContext,
 } from './mobilePanelState';
 import styles from './MobileWorkbench.module.css';
+
+/**
+ * Business Logic（为什么需要这些 lazy 边界）:
+ *   `/mobile` 默认只展示 Projects shell；terminal/files/automation/browser 等重面板
+ *   若同步 import 会把 xterm 等打入 mobile initial graph，违反 280 KiB 与 forbidden 合同。
+ *
+ * Code Logic（这些常量做什么）:
+ *   对重面板使用 React.lazy + 动态 import 适配 named export；
+ *   轻量 Project/Attention/Shell/QuickSwitch 保持同步。
+ */
+const MobileAutomationPanel = lazy(() =>
+  import('./components/MobileAutomationPanel').then((module) => ({
+    default: module.MobileAutomationPanel,
+  })),
+);
+const MobileBrowserPanel = lazy(() =>
+  import('./components/MobileBrowserPanel').then((module) => ({
+    default: module.MobileBrowserPanel,
+  })),
+);
+const MobileFilesPanel = lazy(() =>
+  import('./components/MobileFilesPanel').then((module) => ({
+    default: module.MobileFilesPanel,
+  })),
+);
+const MobileGitPanel = lazy(() =>
+  import('./components/MobileGitPanel').then((module) => ({
+    default: module.MobileGitPanel,
+  })),
+);
+const MobilePromptPanel = lazy(() =>
+  import('./components/MobilePromptPanel').then((module) => ({
+    default: module.MobilePromptPanel,
+  })),
+);
+const MobileSettingsPanel = lazy(() =>
+  import('./components/MobileSettingsPanel').then((module) => ({
+    default: module.MobileSettingsPanel,
+  })),
+);
+const MobileTerminalPanel = lazy(() =>
+  import('./components/MobileTerminalPanel').then((module) => ({
+    default: module.MobileTerminalPanel,
+  })),
+);
+const MobileWorktreePanel = lazy(() =>
+  import('./components/MobileWorktreePanel').then((module) => ({
+    default: module.MobileWorktreePanel,
+  })),
+);
 
 export interface MobileRefreshWorktreesOptions {
   skipFileContextConfirm?: boolean;
@@ -103,6 +143,10 @@ export function MobileWorkbench(): ReactElement {
   const [projectDetailsLoading, setProjectDetailsLoading] = useState<boolean>(false);
   const [worktreeOperationBusy, setWorktreeOperationBusy] = useState<boolean>(false);
   const [worktreeSwitcherOpen, setWorktreeSwitcherOpen] = useState<boolean>(false);
+  // files 首次打开后保持挂载（hidden），以便 dirty snapshot 在切走后仍可用于 context guard
+  const [filesPanelMounted, setFilesPanelMounted] = useState<boolean>(
+    () => getInitialMobileWorkbenchPanel() === 'files',
+  );
   const [filesDirtySnapshot, setFilesDirtySnapshot] = useState<MobileFileDirtySnapshot>({
     dirty: false,
     context: null,
@@ -847,6 +891,20 @@ export function MobileWorkbench(): ReactElement {
   }, [loadProjects]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  /* eslint-disable react-hooks/set-state-in-effect -- files 首次激活后保持挂载以保留 dirty 草稿 */
+  useEffect(() => {
+    if (panel === 'files') {
+      setFilesPanelMounted(true);
+    }
+  }, [panel]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const heavyPanelFallback = (
+    <p className={styles.panelState} role="status">
+      {t('workbench:loading')}
+    </p>
+  );
+
   const panelContent =
     panel === 'projects' ? (
       <MobileProjectPanel
@@ -867,58 +925,72 @@ export function MobileWorkbench(): ReactElement {
         notice={attentionNotice}
       />
     ) : panel === 'worktrees' ? (
-      <MobileWorktreePanel
-        project={activeProject}
-        worktrees={worktrees}
-        activeWorktreeId={activeWorktree?.id ?? null}
-        busy={worktreeControlsBusy}
-        onSelect={handleOpenWorktreeWorkspace}
-        onWorktreesChange={handleWorktreesChange}
-        onConfirmActiveWorktreeChange={handleConfirmActiveWorktreeChange}
-        onActiveWorktreeChange={handleApplyActiveWorktreeChange}
-        onRefreshWorktrees={refreshWorktrees}
-        onMergeWorktree={handleMergeWorktree}
-        onBeginWorktreeOperation={beginWorktreeOperation}
-        onIsWorktreeActive={isCurrentActiveWorktree}
-      />
+      <Suspense fallback={heavyPanelFallback}>
+        <MobileWorktreePanel
+          project={activeProject}
+          worktrees={worktrees}
+          activeWorktreeId={activeWorktree?.id ?? null}
+          busy={worktreeControlsBusy}
+          onSelect={handleOpenWorktreeWorkspace}
+          onWorktreesChange={handleWorktreesChange}
+          onConfirmActiveWorktreeChange={handleConfirmActiveWorktreeChange}
+          onActiveWorktreeChange={handleApplyActiveWorktreeChange}
+          onRefreshWorktrees={refreshWorktrees}
+          onMergeWorktree={handleMergeWorktree}
+          onBeginWorktreeOperation={beginWorktreeOperation}
+          onIsWorktreeActive={isCurrentActiveWorktree}
+        />
+      </Suspense>
     ) : panel === 'files' ? null : panel === 'git' ? (
-      <MobileGitPanel
-        project={activeProject}
-        worktree={activeWorktree}
-        busy={worktreeControlsBusy}
-        onWorktreeChange={handleWorktreeChange}
-        onMergeWorktree={handleMergeWorktree}
-        onRefreshWorktrees={refreshWorktrees}
-      />
+      <Suspense fallback={heavyPanelFallback}>
+        <MobileGitPanel
+          project={activeProject}
+          worktree={activeWorktree}
+          busy={worktreeControlsBusy}
+          onWorktreeChange={handleWorktreeChange}
+          onMergeWorktree={handleMergeWorktree}
+          onRefreshWorktrees={refreshWorktrees}
+        />
+      </Suspense>
     ) : panel === 'prompt' ? (
-      <MobilePromptPanel worktree={activeWorktree} session={activeSession} />
+      <Suspense fallback={heavyPanelFallback}>
+        <MobilePromptPanel worktree={activeWorktree} session={activeSession} />
+      </Suspense>
     ) : panel === 'automation' ? (
-      <MobileAutomationPanel
-        project={activeProject}
-        onOpenExecutionContext={handleOpenAutomationExecutionContext}
-        focusTaskId={attentionFocusTaskId}
-        focusOutboxId={attentionFocusOutboxId}
-        onFocusResult={handleAutomationFocusResult}
-      />
+      <Suspense fallback={heavyPanelFallback}>
+        <MobileAutomationPanel
+          project={activeProject}
+          onOpenExecutionContext={handleOpenAutomationExecutionContext}
+          focusTaskId={attentionFocusTaskId}
+          focusOutboxId={attentionFocusOutboxId}
+          onFocusResult={handleAutomationFocusResult}
+        />
+      </Suspense>
     ) : panel === 'settings' ? (
-      <MobileSettingsPanel />
+      <Suspense fallback={heavyPanelFallback}>
+        <MobileSettingsPanel />
+      </Suspense>
     ) : panel === 'browser' ? (
-      <MobileBrowserPanel
-        transport={httpWorkbenchTransport}
-        project={activeProject}
-        worktree={activeWorktree}
-      />
+      <Suspense fallback={heavyPanelFallback}>
+        <MobileBrowserPanel
+          transport={httpWorkbenchTransport}
+          project={activeProject}
+          worktree={activeWorktree}
+        />
+      </Suspense>
     ) : panel === 'terminal' ? (
-      <MobileTerminalPanel
-        project={activeProject}
-        worktree={activeWorktree}
-        sessions={sessions}
-        activeSession={activeSession}
-        busy={projectDetailsLoading}
-        onSessionsChange={handleSessionsChange}
-        onActiveSessionChange={setActiveSession}
-        onRefreshSessions={refreshSessions}
-      />
+      <Suspense fallback={heavyPanelFallback}>
+        <MobileTerminalPanel
+          project={activeProject}
+          worktree={activeWorktree}
+          sessions={sessions}
+          activeSession={activeSession}
+          busy={projectDetailsLoading}
+          onSessionsChange={handleSessionsChange}
+          onActiveSessionChange={setActiveSession}
+          onRefreshSessions={refreshSessions}
+        />
+      </Suspense>
     ) : (
       <section className={styles.panel} aria-labelledby="mobile-panel-title">
         <div className={styles.panelHeader}>
@@ -964,14 +1036,18 @@ export function MobileWorkbench(): ReactElement {
         onPanelChange={handleQuickSwitchPanelChange}
         onRefresh={handleRefreshQuickSwitchWorktrees}
       />
-      <div hidden={panel !== 'files'}>
-        <MobileFilesPanel
-          project={activeProject}
-          worktree={activeWorktree}
-          discardContextToken={filesDiscardContextToken}
-          onDirtyContextChange={setFilesDirtySnapshot}
-        />
-      </div>
+      {filesPanelMounted ? (
+        <div hidden={panel !== 'files'}>
+          <Suspense fallback={heavyPanelFallback}>
+            <MobileFilesPanel
+              project={activeProject}
+              worktree={activeWorktree}
+              discardContextToken={filesDiscardContextToken}
+              onDirtyContextChange={setFilesDirtySnapshot}
+            />
+          </Suspense>
+        </div>
+      ) : null}
     </MobileWorkbenchShell>
   );
 }

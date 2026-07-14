@@ -104,7 +104,7 @@ function CcHistoryCardInner({
           ) : null}
           {item.ccVersion ? (
             <span className={styles.version} title={t('ccHistory:ccVersion', { version: item.ccVersion })}>
-              v{item.ccVersion}
+              {`v${item.ccVersion}`}
             </span>
           ) : null}
           <div className={styles.actions}>

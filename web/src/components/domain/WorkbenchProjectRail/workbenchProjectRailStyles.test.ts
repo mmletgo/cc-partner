@@ -34,4 +34,12 @@ describe('workbenchProjectRailStyles', () => {
     assertContains(css, '.sourceOption > svg {', 'source option icon style exists');
     assertContains(css, 'flex: 0 0 auto;', 'source option icon should not shrink');
   });
+
+  test('empty CTA and status text styles support discovery IA', () => {
+    const css = readFileSync(new URL('./WorkbenchProjectRail.module.css', import.meta.url), 'utf8');
+    assertContains(css, '.emptyExplanation {', 'empty explanation style exists');
+    assertContains(css, '.emptyActions {', 'empty actions container style exists');
+    assertContains(css, '.emptyCta {', 'empty CTA style exists');
+    assertContains(css, '.projectStatusText {', 'project status text style exists');
+  });
 });

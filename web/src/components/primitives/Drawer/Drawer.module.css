@@ -1,0 +1,52 @@
+/* Drawer 原子组件样式
+ * 颜色/间距/圆角/阴影/层级全部使用 design token
+ */
+
+.root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+}
+
+.root[data-side='left'] {
+  justify-content: flex-start;
+}
+
+.root[data-side='right'] {
+  justify-content: flex-end;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklab, var(--bg) 42%, transparent);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+
+.surface {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(620px, calc(100vw - var(--space-8)));
+  height: 100%;
+  overflow: auto;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: var(--shadow-window);
+  outline: none;
+}
+
+.sideRight {
+  border-left: 1px solid var(--border);
+}
+
+.sideLeft {
+  border-right: 1px solid var(--border);
+}
+
+.surface:focus-visible {
+  box-shadow: var(--shadow-window), 0 0 0 2px var(--accent-soft);
+}

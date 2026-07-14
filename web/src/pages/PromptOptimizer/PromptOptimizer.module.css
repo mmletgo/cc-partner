@@ -63,7 +63,7 @@
   font-size: var(--text-sm);
   line-height: var(--leading-relaxed);
   color: var(--fg);
-  background: var(--bg-primary);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   outline: none;
@@ -78,7 +78,7 @@
 
 .input::placeholder,
 .resultText::placeholder {
-  color: var(--fg-muted);
+  color: var(--muted);
 }
 
 .input:disabled {
@@ -89,7 +89,7 @@
 .statusRow {
   min-height: 20px;
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--muted);
 }
 
 .error {
