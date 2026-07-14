@@ -3,19 +3,16 @@
 use crate::claude_cli;
 use crate::error::AppError;
 use crate::orchestrator::models::OrchestratorTaskRow;
+use crate::orchestrator::review_diff::{
+    collect_review_diff_for_worktree, render_review_diff_text,
+};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::Path;
-use std::process::Command as StdCommand;
 
 const VERIFIER_TIMEOUT_SECS: u64 = 300;
 const MAX_DIFF_CONTEXT_BYTES: usize = 96 * 1024;
-const MAX_UNTRACKED_FILE_BYTES: usize = 16 * 1024;
-const MAX_UNTRACKED_FILES: usize = 20;
 const DIFF_TRUNCATED_MARKER: &str = "[diff truncated]";
-const UNTRACKED_FILE_TRUNCATED_MARKER: &str = "[untracked file truncated]";
-const UNTRACKED_FILES_OMITTED_MARKER: &str = "[untracked files omitted]";
 const VERIFIER_REVIEW_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
@@ -276,147 +273,12 @@ pub async fn run_verifier_claude(
 ///     verifier 需要看到 worktree 的真实改动范围，尤其是验证命令失败时用于判断是否应继续修复。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取 status、unstaged diff、staged diff 和未跟踪文本文件片段；任一 git 调用失败返回基础设施错误；
-///     最终内容按全局字节上限截断并标记。
+///     复用 review_diff 有界 snapshot（staged/unstaged/untracked/unborn 同一语义），渲染为文本后再按
+///     verifier prompt 全局字节上限截断并标记。
 pub fn collect_worktree_diff(cwd: &Path) -> Result<String, AppError> {
-    let status = run_git_capture(cwd, &["status", "--short"])?;
-    let unstaged_stat = run_git_capture(cwd, &["diff", "--stat"])?;
-    let unstaged_diff = run_git_capture(cwd, &["diff", "--no-ext-diff", "--no-color"])?;
-    let staged_stat = run_git_capture(cwd, &["diff", "--cached", "--stat"])?;
-    let staged_diff = run_git_capture(cwd, &["diff", "--cached", "--no-ext-diff", "--no-color"])?;
-    let untracked = collect_untracked_file_context(cwd)?;
-    let context = format!(
-        "$ git status --short\n{}\n\n\
-$ git diff --stat\n{}\n\n\
-$ git diff --no-ext-diff --no-color\n{}\n\n\
-$ git diff --cached --stat\n{}\n\n\
-$ git diff --cached --no-ext-diff --no-color\n{}\n\n\
-$ git ls-files --others --exclude-standard\n{}\n",
-        empty_placeholder(&status),
-        empty_placeholder(&unstaged_stat),
-        empty_placeholder(&unstaged_diff),
-        empty_placeholder(&staged_stat),
-        empty_placeholder(&staged_diff),
-        empty_placeholder(&untracked)
-    );
+    let snapshot = collect_review_diff_for_worktree("verifier", cwd, None)?;
+    let context = render_review_diff_text(&snapshot);
     Ok(truncate_diff_context(&context, MAX_DIFF_CONTEXT_BYTES))
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     git diff 读取失败属于 verifier 基础设施失败，需要清晰暴露失败命令和输出。
-///
-/// Code Logic（这个函数做什么）:
-///     在 cwd 下执行 git 子命令，成功返回 stdout，非零或 spawn/read 失败转 AppError。
-fn run_git_capture(cwd: &Path, args: &[&str]) -> Result<String, AppError> {
-    let output = StdCommand::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|err| {
-            AppError::generic(format!(
-                "读取 worktree diff 失败: git {}: {err}",
-                args.join(" ")
-            ))
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(AppError::generic(format!(
-            "读取 worktree diff 失败: git {}: {}",
-            args.join(" "),
-            detail
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim_end()
-        .to_string())
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     新增文件通常保持 untracked 状态，verifier 只看 git diff 会完全看不到其内容，容易误判任务是否完成。
-///
-/// Code Logic（这个函数做什么）:
-///     使用 git ls-files 找到未跟踪文件；最多读取固定数量的普通文本文件片段，跳过 symlink、目录和二进制文件。
-fn collect_untracked_file_context(cwd: &Path) -> Result<String, AppError> {
-    let raw = run_git_capture(cwd, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    let paths = raw
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .collect::<Vec<_>>();
-    if paths.is_empty() {
-        return Ok(String::new());
-    }
-
-    let mut sections = Vec::new();
-    let mut omitted = 0usize;
-    for path in paths {
-        if sections.len() >= MAX_UNTRACKED_FILES {
-            omitted += 1;
-            continue;
-        }
-        sections.push(render_untracked_file_context(cwd, path)?);
-    }
-    if omitted > 0 {
-        sections.push(format!("{UNTRACKED_FILES_OMITTED_MARKER} count={omitted}"));
-    }
-    Ok(sections.join("\n\n"))
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     verifier 需要看到未跟踪源码的正文，但不能因为 symlink、二进制或超大文件把敏感/无用内容塞进 prompt。
-///
-/// Code Logic（这个函数做什么）:
-///     读取单个未跟踪普通文本文件，按 UTF-8 边界截断；非普通文本用可审计占位说明。
-fn render_untracked_file_context(cwd: &Path, relative_path: &str) -> Result<String, AppError> {
-    let path = cwd.join(relative_path);
-    let metadata = fs::symlink_metadata(&path).map_err(|err| {
-        AppError::generic(format!("读取未跟踪文件元数据失败: {relative_path}: {err}"))
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Ok(format!(
-            "$ untracked file {relative_path}\n(symlink omitted)"
-        ));
-    }
-    if !metadata.is_file() {
-        return Ok(format!(
-            "$ untracked file {relative_path}\n(non-file omitted)"
-        ));
-    }
-
-    let bytes = fs::read(&path)
-        .map_err(|err| AppError::generic(format!("读取未跟踪文件失败: {relative_path}: {err}")))?;
-    let Ok(content) = std::str::from_utf8(&bytes) else {
-        return Ok(format!(
-            "$ untracked file {relative_path}\n(binary omitted bytes={})",
-            bytes.len()
-        ));
-    };
-    let rendered = truncate_utf8_content(content, MAX_UNTRACKED_FILE_BYTES);
-    let truncated_note = if rendered.len() < content.len() {
-        format!(
-            "\n{UNTRACKED_FILE_TRUNCATED_MARKER} omitted_bytes={}",
-            content.len().saturating_sub(rendered.len())
-        )
-    } else {
-        String::new()
-    };
-    Ok(format!(
-        "$ untracked file {relative_path}\n```text\n{rendered}{truncated_note}\n```"
-    ))
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     空 diff/status 也应在 verifier prompt 中可读，避免模型误以为上下文缺失。
-///
-/// Code Logic（这个函数做什么）:
-///     空白字符串替换为 `(empty)`，非空保留原文。
-fn empty_placeholder(value: &str) -> &str {
-    if value.trim().is_empty() {
-        "(empty)"
-    } else {
-        value
-    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -612,7 +474,23 @@ mod tests {
     ///     创建临时 git repo，制造 staged 修改和 untracked 文件，断言 collect_worktree_diff 同时包含两类内容。
     #[test]
     fn collect_worktree_diff_includes_staged_and_untracked_changes() {
+        use std::fs;
+        use std::process::Command as StdCommand;
+
         let dir = tempfile::tempdir().expect("tempdir");
+        let run_git_test_command = |cwd: &Path, args: &[&str]| {
+            let output = StdCommand::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
         run_git_test_command(dir.path(), &["init"]);
         fs::write(dir.path().join("README.md"), "base\n").expect("write readme");
         run_git_test_command(dir.path(), &["add", "README.md"]);
@@ -638,28 +516,9 @@ mod tests {
 
         let context = collect_worktree_diff(dir.path()).expect("diff context");
 
-        assert!(context.contains("$ git diff --cached --no-ext-diff --no-color"));
+        assert!(context.contains("review-diff snapshot"));
         assert!(context.contains("+staged line"));
-        assert!(context.contains("$ untracked file generated.rs"));
+        assert!(context.contains("generated.rs"));
         assert!(context.contains("pub fn generated() -> bool"));
-    }
-
-    /// Business Logic（为什么需要这个函数）:
-    ///     git 相关测试需要快速初始化临时仓库并失败即暴露 stderr，避免 verifier diff 测试静默误判。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     在 cwd 下执行 git 命令，断言退出成功。
-    fn run_git_test_command(cwd: &Path, args: &[&str]) {
-        let output = StdCommand::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 }

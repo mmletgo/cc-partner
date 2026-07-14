@@ -634,6 +634,44 @@ pub struct OrchestratorEvidenceDto {
     pub created_at: String,
 }
 
+/// Human Review 有界 diff 快照。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Human Review / Deliver 前需要展示任务 worktree 的只读改动，并用 digest 检测审阅后漂移。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 task/base/head 身份、有界文件列表、总文件数、截断标记，以及与展示截断无关的 review_digest。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorReviewDiff {
+    pub task_id: String,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub files: Vec<ReviewDiffFile>,
+    pub total_files: u32,
+    pub truncated: bool,
+    pub review_digest: String,
+}
+
+/// Review diff 中的单文件条目。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端 Changes tab 需要路径、状态、增删统计和可选 patch；二进制与超限文件只能展示元数据。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 repo-relative path、status、additions/deletions、可选 patch 与 binary/truncated 标记。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewDiffFile {
+    pub path: String,
+    pub status: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub patch: Option<String>,
+    pub binary: bool,
+    pub truncated: bool,
+}
+
 impl OrchestratorTaskRow {
     /// Business Logic（为什么需要这个函数）:
     ///     split state 扩展后，既有命令和测试构造任务时需要统一的内部默认值，避免每个调用点重复填充运行元数据。

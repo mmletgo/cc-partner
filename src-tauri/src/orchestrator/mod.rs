@@ -18,6 +18,7 @@ pub mod prompt;
 pub mod remote_client;
 pub mod remote_protocol;
 pub mod repo;
+pub mod review_diff;
 pub mod runner;
 pub mod scheduler;
 pub mod state;
