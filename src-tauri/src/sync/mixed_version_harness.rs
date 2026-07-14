@@ -269,10 +269,7 @@ async fn spawn_peer(st: PeerState) -> (String, HitCounters, PeerStore) {
             post(empty_v2_manifest_page),
         )
         .route("/api/ssh-target/sync/items", post(empty_v2_items))
-        .route(
-            "/api/ssh-target/sync/push-batch",
-            post(empty_v2_push_batch),
-        )
+        .route("/api/ssh-target/sync/push-batch", post(empty_v2_push_batch))
         .route(
             "/api/ssh-target/sync/ack-delete-epoch",
             post(empty_v2_ack_delete_epoch),
@@ -282,10 +279,7 @@ async fn spawn_peer(st: PeerState) -> (String, HitCounters, PeerStore) {
             post(empty_v2_manifest_page),
         )
         .route("/api/scratchpad/sync/items", post(empty_v2_items))
-        .route(
-            "/api/scratchpad/sync/push-batch",
-            post(empty_v2_push_batch),
-        )
+        .route("/api/scratchpad/sync/push-batch", post(empty_v2_push_batch))
         .route(
             "/api/scratchpad/sync/ack-delete-epoch",
             post(empty_v2_ack_delete_epoch),
@@ -393,7 +387,10 @@ async fn build_local_state(device_id: &str) -> AppState {
         config_runtime,
         db: pool.clone(),
         maintenance_gate: maintenance_gate.clone(),
-        prompt_repo: Arc::new(PromptRepo::with_gate(pool.clone(), maintenance_gate.clone())),
+        prompt_repo: Arc::new(PromptRepo::with_gate(
+            pool.clone(),
+            maintenance_gate.clone(),
+        )),
         transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
         claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
         scratchpad_repo: Arc::new(ScratchpadRepo::with_gate(
@@ -621,7 +618,11 @@ pub async fn assert_legacy_peer_network_failure_is_typed_not_empty_success() {
         | SyncDomainOutcome::Unreachable { .. }
         | SyncDomainOutcome::ResourceLimit { .. }
         | SyncDomainOutcome::Partial { .. } => {}
-        SyncDomainOutcome::Succeeded { pulled, pushed, unchanged } => {
+        SyncDomainOutcome::Succeeded {
+            pulled,
+            pushed,
+            unchanged,
+        } => {
             panic!("expected typed failure, got Succeeded pulled={pulled} pushed={pushed} unchanged={unchanged}");
         }
     }

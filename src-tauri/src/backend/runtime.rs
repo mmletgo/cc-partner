@@ -581,8 +581,7 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
             {
                 let reclaim_state = state.clone();
                 tauri::async_runtime::spawn(async move {
-                    let service =
-                        crate::backup::restore::BackupRestoreService::new(reclaim_state);
+                    let service = crate::backup::restore::BackupRestoreService::new(reclaim_state);
                     match service.reclaim_on_startup().await {
                         Ok(n) if n > 0 => {
                             tracing::warn!("已回收 {n} 个卡住的 recovery Applying 任务为 Failed");

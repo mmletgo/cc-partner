@@ -575,13 +575,7 @@ impl BackupRestoreService {
                 "进程中断：恢复应用阶段崩溃（无 pre-restore 备份路径）"
             };
             self.job_repo
-                .update_status(
-                    &job.id,
-                    RecoveryJobStatus::Failed,
-                    None,
-                    Some(msg),
-                    &now,
-                )
+                .update_status(&job.id, RecoveryJobStatus::Failed, None, Some(msg), &now)
                 .await?;
             reclaimed += 1;
         }
@@ -647,12 +641,10 @@ async fn reapply_floors_to_live_on_tx(
     for floor in floors {
         match floor.domain.as_str() {
             FLOOR_DOMAIN_PROMPTS => {
-                let row = sqlx::query(
-                    "SELECT id, vector_clock, deleted FROM prompts WHERE id = ?",
-                )
-                .bind(&floor.item_id)
-                .fetch_optional(&mut **tx)
-                .await?;
+                let row = sqlx::query("SELECT id, vector_clock, deleted FROM prompts WHERE id = ?")
+                    .bind(&floor.item_id)
+                    .fetch_optional(&mut **tx)
+                    .await?;
                 if let Some(r) = row {
                     use sqlx::Row;
                     let deleted: i64 = r.try_get("deleted")?;
@@ -703,12 +695,11 @@ async fn reapply_floors_to_live_on_tx(
                 }
             }
             FLOOR_DOMAIN_SCRATCHPAD => {
-                let row = sqlx::query(
-                    "SELECT id, vector_clock, deleted FROM scratchpad WHERE id = ?",
-                )
-                .bind(&floor.item_id)
-                .fetch_optional(&mut **tx)
-                .await?;
+                let row =
+                    sqlx::query("SELECT id, vector_clock, deleted FROM scratchpad WHERE id = ?")
+                        .bind(&floor.item_id)
+                        .fetch_optional(&mut **tx)
+                        .await?;
                 if let Some(r) = row {
                     use sqlx::Row;
                     let deleted: i64 = r.try_get("deleted")?;
@@ -869,15 +860,13 @@ pub async fn rollback_from_pre_restore_backup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backup::archive::{
-        sha256_hex, write_test_archive, ArchiveManifest, FORMAT_VERSION,
-    };
+    use crate::backup::archive::{sha256_hex, write_test_archive, ArchiveManifest, FORMAT_VERSION};
     use crate::storage::content_version_repo::{ContentVersion, ContentVersionRepo, KIND_CONFLICT};
     use crate::storage::deletion_floor_repo::DeletionFloorRepo;
     use crate::storage::maintenance_gate::DatabaseMaintenanceGate;
     use crate::storage::PromptRepo;
     use crate::sync::apply_merge::{
-        arm_apply_merge_fail_point, clear_apply_merge_fail_point, apply_fail_test_lock,
+        apply_fail_test_lock, arm_apply_merge_fail_point, clear_apply_merge_fail_point,
         ApplyMergeFailPoint,
     };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -952,7 +941,8 @@ mod tests {
         use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
         use crate::storage::{
             ClaudeHistoryRepo, ClaudeMdRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
-            WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+            WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+            WorkbenchWorktreeRepo,
         };
         use crate::transfer::registry::TransferRegistry;
         use std::sync::atomic::AtomicU16;
@@ -1091,7 +1081,13 @@ mod tests {
         (state, tmp)
     }
 
-    fn sample_prompt(id: &str, device: &str, content: &str, vc: u64, updated_at: &str) -> PromptRow {
+    fn sample_prompt(
+        id: &str,
+        device: &str,
+        content: &str,
+        vc: u64,
+        updated_at: &str,
+    ) -> PromptRow {
         let mut vector_clock = HashMap::new();
         vector_clock.insert(device.to_string(), vc);
         PromptRow {
@@ -1338,10 +1334,7 @@ mod tests {
             "{:?}",
             job.error_summary
         );
-        assert_eq!(
-            job.pre_restore_backup_path.as_deref(),
-            Some("/pre.zip")
-        );
+        assert_eq!(job.pre_restore_backup_path.as_deref(), Some("/pre.zip"));
     }
 
     #[tokio::test]

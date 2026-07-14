@@ -414,11 +414,11 @@ pub async fn run_tombstone_gc_best_effort(state: &AppState) -> Result<usize, App
     use crate::storage::sync_watermark_repo::SyncWatermarkRepo;
 
     let now = chrono::Utc::now().to_rfc3339();
-    let floors =
-        DeletionFloorRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
-    let watermarks =
-        SyncWatermarkRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
-    let result = floors.run_production_tombstone_gc(&watermarks, &now).await?;
+    let floors = DeletionFloorRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
+    let watermarks = SyncWatermarkRepo::with_gate(state.db.clone(), state.maintenance_gate.clone());
+    let result = floors
+        .run_production_tombstone_gc(&watermarks, &now)
+        .await?;
     if result.deleted > 0 {
         tracing::info!(
             "tombstone GC: compacted={} skipped={}",
