@@ -79,13 +79,14 @@ export function Workbench() {
   const { t } = useTranslation(['workbench', 'common', 'promptOptimizer', 'attention']);
   const location = useLocation();
   const navigate = useNavigate();
-  const { status: dependencyStatus } = useWorkbenchDependency();
+  const { status: dependencyStatus, check: checkDependency } = useWorkbenchDependency();
   const {
     projects,
     activeProjectId,
     activeProject,
     selectProject,
     refreshProjectSessionStats,
+    chooseAndAddProject,
   } = useWorkbenchProjects();
   const { resetBuffer: resetTerminalBuffer, removeBuffer: removeTerminalBuffer } =
     useWorkbenchTerminalBuffers();
@@ -634,6 +635,29 @@ export function Workbench() {
     '--prompt-panel-top': `${promptPanelPosition.top}px`,
   } as CSSProperties;
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   零项目空态主 CTA 复用侧栏/rail 同一套「添加本机项目」流程，避免另起一套。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 projects context 的 chooseAndAddProject。
+   */
+  const handleEmptyAddLocal = useCallback(() => {
+    void chooseAndAddProject();
+  }, [chooseAndAddProject]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   零项目次级动作「检查 tmux 依赖」应 recheck 并跳到 Settings 依赖 tab。
+   *
+   * Code Logic（这个函数做什么）:
+   *   void checkDependency() 后 navigate `/settings?tab=dependencies`。
+   */
+  const handleEmptyCheckTmux = useCallback(() => {
+    void checkDependency();
+    navigate('/settings?tab=dependencies');
+  }, [checkDependency, navigate]);
+
   // 三模式：零项目聚焦 CTA / 有项目未选中「继续工作」/ active 项目完整 chrome。
   // 全部 hooks 已在上方无条件调用，early return 不破坏 hooks 顺序。
   if (projects.length === 0) {
@@ -643,6 +667,10 @@ export function Workbench() {
         launchSummary={launchSummary}
         onRefreshLaunchSummary={() => {
           void refreshLaunchSummary();
+        }}
+        emptyActions={{
+          onAddLocal: handleEmptyAddLocal,
+          onCheckTmux: handleEmptyCheckTmux,
         }}
       />
     );
@@ -1006,7 +1034,7 @@ export function Workbench() {
         </div>
       </main>
 
-      <aside className={styles.inspectorPane}>
+      <aside className={styles.inspectorPane} data-testid="workbench-inspector">
         <WorkbenchStatusCard
           activeProject={activeProject}
           activeWorktree={activeWorktree}

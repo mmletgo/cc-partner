@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useRef, useState } from 'react';
-import type { ReactElement, ReactNode } from 'react';
+import type { ReactElement, ReactNode, RefObject } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Dialog, Pill, StatusMessage } from '@/components/primitives';
@@ -36,10 +36,34 @@ import styles from './Workbench.module.css';
 
 export type WorkbenchLaunchSurfaceMode = 'empty' | 'continue';
 
+/**
+ * 零项目空态动作回调。远端选择 Dialog 仍由 LaunchSurface 托管；
+ * onConnectRemote 由表面层注入为「打开 picker」，页面层只提供本机添加与 tmux 检查。
+ */
+export interface WorkbenchEmptyStateActions {
+  /** 添加本机项目（复用 projects context 的 chooseAndAddProject）。 */
+  onAddLocal: () => void;
+  /** 打开远端项目选择器（由 LaunchSurface 注入 open-picker 回调）。 */
+  onConnectRemote: () => void;
+  /** 检查 tmux 依赖并导航 Settings 依赖 tab。 */
+  onCheckTmux: () => void;
+}
+
+/** 页面层注入的空态动作（不含远端 picker 打开，picker 由 LaunchSurface 托管）。 */
+export type WorkbenchEmptyStatePageActions = Pick<
+  WorkbenchEmptyStateActions,
+  'onAddLocal' | 'onCheckTmux'
+>;
+
 export interface WorkbenchLaunchSurfaceProps {
   mode: WorkbenchLaunchSurfaceMode;
   launchSummary: WorkbenchLaunchSummaryState;
   onRefreshLaunchSummary: () => void;
+  /**
+   * 零项目聚焦空态动作回调；mode=empty 时由页面注入 add-local / check-tmux。
+   * 空态纯视图只消费回调，不直接触发 projects/dependency mutation API。
+   */
+  emptyActions?: WorkbenchEmptyStatePageActions;
 }
 
 /**
@@ -129,15 +153,52 @@ function LaunchSectionCard<T>({
 
 /**
  * Business Logic（为什么需要这个组件）:
+ *   零项目时只能展示聚焦 CTA，不能夹带禁用 toolbar / 空终端 / inspector。
+ *
+ * Code Logic（这个组件做什么）:
+ *   纯展示：一句解释 + 三个动作按钮；全部交互走 props 回调，不读 projects/dependency context。
+ */
+function WorkbenchEmptyStateView({
+  onAddLocal,
+  onConnectRemote,
+  onCheckTmux,
+  addLocalButtonRef,
+}: WorkbenchEmptyStateActions & {
+  addLocalButtonRef: RefObject<HTMLButtonElement | null>;
+}): ReactElement {
+  const { t } = useTranslation(['workbench']);
+  return (
+    <main className={styles.launchEmptyMain}>
+      <h1 className={styles.launchTitle}>{t('workbench:launch.emptyTitle')}</h1>
+      <p className={styles.launchExplanation}>{t('workbench:launch.emptyExplanation')}</p>
+      <div className={styles.launchEmptyActions}>
+        <Button ref={addLocalButtonRef} variant="primary" onClick={onAddLocal}>
+          {t('workbench:launch.addLocal')}
+        </Button>
+        <Button variant="secondary" onClick={onConnectRemote}>
+          {t('workbench:launch.connectRemote')}
+        </Button>
+        <Button variant="ghost" onClick={onCheckTmux}>
+          {t('workbench:launch.checkTmux')}
+        </Button>
+      </div>
+    </main>
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个组件）:
  *   Workbench 在无 active project 时的主表面：零项目聚焦 CTA 或「继续工作」摘要。
  *
  * Code Logic（这个组件做什么）:
- *   组合 Attention provider、projects/dependency context、launchSummary props 与 deep link 导航。
+ *   mode=empty：只渲染纯空态视图 + 远端选择 Dialog，动作来自 emptyActions 回调；
+ *   mode=continue：组合 Attention / launchSummary section 与 deep link 导航。
  */
 export function WorkbenchLaunchSurface({
   mode,
   launchSummary,
   onRefreshLaunchSummary,
+  emptyActions,
 }: WorkbenchLaunchSurfaceProps): ReactElement {
   const { t } = useTranslation(['workbench', 'attention']);
   const navigate = useNavigate();
@@ -152,10 +213,10 @@ export function WorkbenchLaunchSurface({
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   零项目与空态共用「添加本机项目」流程。
+   *   继续工作 section 空态仍需要「添加本机项目」快捷入口。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 chooseAndAddProject；成功后由 projects context 选中项目，页面切到 active chrome。
+   *   调用 chooseAndAddProject；成功后由 projects context 选中项目。
    */
   const handleAddLocal = useCallback(() => {
     void chooseAndAddProject();
@@ -166,9 +227,9 @@ export function WorkbenchLaunchSurface({
    *   连接远端项目必须复用现有 RemoteProjectPicker，不新增 API。
    *
    * Code Logic（这个函数做什么）:
-   *   打开远端 Dialog。
+   *   打开远端 Dialog；纯空态 onConnectRemote 固定绑定此函数。
    */
-  const handleOpenRemote = useCallback(() => {
+  const handleOpenRemotePicker = useCallback(() => {
     setRemoteOpenBusy(false);
     setRemotePickerOpen(true);
   }, []);
@@ -243,23 +304,20 @@ export function WorkbenchLaunchSurface({
   const attentionTotal = attentionCounts?.total ?? 0;
 
   if (mode === 'empty') {
+    // 纯空态只吃回调：本机/tmux 优先页面注入；远端连接固定打开本表面托管的 picker。
+    const emptyViewActions: WorkbenchEmptyStateActions = {
+      onAddLocal: emptyActions?.onAddLocal ?? handleAddLocal,
+      onConnectRemote: handleOpenRemotePicker,
+      onCheckTmux: emptyActions?.onCheckTmux ?? handleCheckTmux,
+    };
     return (
       <div className={styles.launchPage} data-testid="workbench-launch-empty">
-        <main className={styles.launchEmptyMain}>
-          <h1 className={styles.launchTitle}>{t('workbench:launch.emptyTitle')}</h1>
-          <p className={styles.launchExplanation}>{t('workbench:launch.emptyExplanation')}</p>
-          <div className={styles.launchEmptyActions}>
-            <Button ref={addLocalButtonRef} variant="primary" onClick={handleAddLocal}>
-              {t('workbench:launch.addLocal')}
-            </Button>
-            <Button variant="secondary" onClick={handleOpenRemote}>
-              {t('workbench:launch.connectRemote')}
-            </Button>
-            <Button variant="ghost" onClick={handleCheckTmux}>
-              {t('workbench:launch.checkTmux')}
-            </Button>
-          </div>
-        </main>
+        <WorkbenchEmptyStateView
+          onAddLocal={emptyViewActions.onAddLocal}
+          onConnectRemote={emptyViewActions.onConnectRemote}
+          onCheckTmux={emptyViewActions.onCheckTmux}
+          addLocalButtonRef={addLocalButtonRef}
+        />
         <Dialog
           open={remotePickerOpen}
           titleId="workbench-launch-remote-picker-title"

@@ -1312,12 +1312,15 @@
   gap: var(--space-5);
 }
 
+/* 零项目聚焦空态：垂直居中，仅 CTA + 一句解释，无 chrome 占位。 */
 .launchEmptyMain {
   flex: 1;
   justify-content: center;
   align-items: center;
   text-align: center;
   max-width: 520px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .launchHeader {
@@ -1347,8 +1350,10 @@
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
+  align-items: center;
   gap: var(--space-3);
   margin-top: var(--space-4);
+  width: 100%;
 }
 
 .launchAttentionCard {

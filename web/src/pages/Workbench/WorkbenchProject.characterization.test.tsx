@@ -93,6 +93,28 @@ describe('Workbench project domain (characterization)', () => {
     expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
   });
 
+  test('no project shows focused actions without terminal chrome', async () => {
+    setInvokeHandler(() => ({ ok: true }));
+    renderWorkbench(
+      buildProjectsContextValue({ projects: [], activeProjectId: null }),
+      buildDependencyContextValue(),
+    );
+    await settle();
+
+    // Design §5：零项目只保留三个聚焦 CTA + 一句解释，不渲染禁用 toolbar / 空终端 / inspector。
+    expect(screen.getByRole('button', { name: '添加本机项目' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '连接远端项目' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '检查 tmux 依赖' })).toBeTruthy();
+    expect(
+      screen.getByText('项目添加后可管理终端、文件、Git 与自动化'),
+    ).toBeTruthy();
+    expect(screen.queryByTestId('terminal-pane')).toBeNull();
+    expect(screen.queryByTestId('workbench-inspector')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Worktree 管理' })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: '终端会话' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '文件预览' })).toBeNull();
+  });
+
   test('active project still renders normal Workbench chrome', async () => {
     const project = buildLocalProject({ name: 'demo-project' });
     const worktree = buildWorktree({ id: 'wt-main', name: 'main', branch: 'main' });
@@ -125,6 +147,8 @@ describe('Workbench project domain (characterization)', () => {
     expect(screen.queryByTestId('workbench-launch-continue')).toBeNull();
     expect(screen.queryByTestId('workbench-launch-empty')).toBeNull();
     expect(screen.getByText(`${project.deviceName} · ${project.path}`)).toBeTruthy();
+    expect(screen.getAllByTestId('terminal-pane').length).toBeGreaterThan(0);
+    expect(screen.getByTestId('workbench-inspector')).toBeTruthy();
     expect(invokeCallsFor('get_workbench_launch_summary')).toHaveLength(0);
   });
 
