@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-14T07:55:44.463Z",
+  "generatedAt": "2026-07-14T08:49:22.178Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -18,25 +18,6 @@
   "files": {
     "src-tauri/src/backend/logging.rs": {
       "lines": 2502
-    },
-    "src-tauri/src/commands/orchestrator.rs": {
-      "lines": 4901
-    },
-    "src-tauri/src/commands/workbench.rs": {
-      "lines": 5281,
-      "exception": {
-        "owner": "workbench-backend",
-        "reason": "Workbench commands monorepo pending Task 8 directory-module split by projects/sessions/files/git/browser",
-        "expiresAt": "2026-10-12"
-      }
-    },
-    "src-tauri/src/orchestrator/repo.rs": {
-      "lines": 6557,
-      "exception": {
-        "owner": "orchestrator-backend",
-        "reason": "OrchestratorRepo monorepo pending Task 8 split into repo/{mod,schema,tasks,attempts,evidence,remote}",
-        "expiresAt": "2026-10-12"
-      }
     },
     "src-tauri/src/transfer/receiver.rs": {
       "lines": 6107,
@@ -62,7 +43,7 @@
       "lines": 1363
     },
     "web/src/pages/Settings/useSettingsController.ts": {
-      "lines": 1588,
+      "lines": 1604,
       "exception": {
         "owner": "frontend-settings",
         "reason": "Settings controller residual after panel split; further domain controllers deferred past S4",
