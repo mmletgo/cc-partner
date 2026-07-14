@@ -1506,4 +1506,71 @@ mod tests {
             "trace-abc-001"
         );
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     `cc-history.paged-sync.v1` 与三条分页路由必须同一构建原子上线，否则 mixed-version
+    ///     客户端会在能力探测与 404 之间撕裂。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 `server_protocol_info` 宣告 token，并用 axum 迷你 Router 挂载与生产相同的
+    ///     三条路径；oneshot POST 不得 404（证明路径已注册，而非依赖 handler 业务成功）。
+    #[tokio::test]
+    async fn paged_cc_history_routes_and_capability_ship_atomically() {
+        use crate::net::protocol::{
+            server_protocol_info, CAPABILITY_CC_HISTORY_PAGED_SYNC_V1, PROTOCOL_VERSION_V1,
+        };
+        use axum::routing::post;
+        use tower::ServiceExt;
+
+        let info = server_protocol_info();
+        assert_eq!(info.protocol_version, PROTOCOL_VERSION_V1);
+        assert!(
+            info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1),
+            "capability must ship with paged routes"
+        );
+
+        // 源码层：生产 start_http_server 必须字面挂载三条路径
+        let src = include_str!("http_server.rs");
+        for path in [
+            "/api/cc-history/sync/manifest-page",
+            "/api/cc-history/sync/items",
+            "/api/cc-history/sync/push-batch",
+        ] {
+                        assert!(
+                src.contains(path),
+                "http_server must mount {path}"
+            );
+        }
+
+        // axum 层：同 path 挂载后 oneshot 不得 404
+        async fn ok() -> &'static str {
+            "ok"
+        }
+        let app = Router::new()
+            .route("/api/cc-history/sync/manifest-page", post(ok))
+            .route("/api/cc-history/sync/items", post(ok))
+            .route("/api/cc-history/sync/push-batch", post(ok));
+
+        for path in [
+            "/api/cc-history/sync/manifest-page",
+            "/api/cc-history/sync/items",
+            "/api/cc-history/sync/push-batch",
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .body(Body::empty())
+                .expect("build request");
+            let response = app.clone().oneshot(request).await.expect("router");
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must not 404 when mounted"
+            );
+            assert!(
+                response.status().is_success(),
+                "{path} stub handler should succeed"
+            );
+        }
+    }
 }

@@ -61,6 +61,7 @@ and gate the client call behind `PeerProtocolInfo::supports(...)`. The current
 advertised capabilities are:
 
 - `attention.v1` — Mobile Attention snapshot (`GET /api/mobile/attention`)
+- `cc-history.paged-sync.v1` — bounded CC History paged sync (`POST /api/cc-history/sync/{manifest-page,items,push-batch}`); token and the three routes ship atomically
 - `errors.envelope.v1` — standard error envelope wire format
 - `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
 - `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
@@ -79,9 +80,10 @@ route access or route existence. Concretely:
   Confirming route existence is a separate concern (health/version probe or
   handling 404). Do not use `supports("errors.envelope.v1")` as a proxy for
   "new routes are available".
-- Route-specific capabilities (`attention.v1`, `orchestrator.runtime-snapshot.v1`,
-  `transfer.complete.v1`, …) ship as **independent** tokens alongside their own
-  routes and must not reuse `errors.envelope.v1` to mean "new routes supported".
+- Route-specific capabilities (`attention.v1`, `cc-history.paged-sync.v1`,
+  `orchestrator.runtime-snapshot.v1`, `transfer.complete.v1`, …) ship as
+  **independent** tokens alongside their own routes and must not reuse
+  `errors.envelope.v1` to mean "new routes supported".
 
 The existing capability gate (`peer_client::require_capability`) is therefore a
 **format** gate when used with `errors.envelope.v1`, and a **route** gate when
@@ -109,8 +111,11 @@ the router so the inventory check matches exactly.
 | POST | `/api/transfer/chunk/:id` | `routes/transfer.rs` | writes bytes at offset, finalizes when complete | no-transport-retry | the final chunk triggers `finalize_transfer` which atomically places the tmp file into its final path via hard_link(tmp,final) no-replace commit (receive_dir lock; fallback rename_no_replace) and removes the registry entry; a transport-layer replay of the same final-chunk request previously hit a missing registry entry and returned `success:false`. The receiver now guards finalize with a per-`transfer_id` singleflight lock + a short-lived terminal tombstone, so a duplicate final chunk returns the first finalize's result — but middle chunks still mutate the tmp file at arbitrary offsets and there is no per-offset dedupe, so transport-layer retries must be disabled; callers surface the failure and let the user re-initiate |
 | POST | `/api/transfer/complete/:id` | `routes/transfer.rs` | SHA256 verify + atomic place when bytes are complete (incl. size=0 / full-tmp resume) | naturally-idempotent | capability-gated by `transfer.complete.v1`; sender only calls when peer advertises the token; legacy peers without it use last-chunk finalize for non-empty transfers and fail size=0/full-tmp as unsupported; tombstone makes replay return the first terminal outcome; client does bounded retries on network/5xx then status fallback |
 | GET | `/api/transfer/status/:id` | `routes/transfer.rs` | none | read-only | — |
-| POST | `/api/cc-history/sync/pull` | `routes/cc_history.rs` | none | read-only | — |
-| POST | `/api/cc-history/sync/push` | `routes/cc_history.rs` | upserts CC history rows after merge | naturally-idempotent | per-row `merge_cc_history` + `bulk_upsert`; replay converges |
+| POST | `/api/cc-history/sync/pull` | `routes/cc_history.rs` | none | read-only | legacy full-summary pull retained for mixed-version peers that lack `cc-history.paged-sync.v1` |
+| POST | `/api/cc-history/sync/push` | `routes/cc_history.rs` | upserts CC history rows after merge | naturally-idempotent | legacy full-body push; per-row `merge_cc_history` + `bulk_upsert`; replay converges |
+| POST | `/api/cc-history/sync/manifest-page` | `routes/cc_history.rs` | none; keyset page of `{id,vector_clock}` summaries | read-only | capability-gated by `cc-history.paged-sync.v1`; body `{cursor?,limit?}` snake_case; default limit 256, max 512; response `{summaries,next_cursor,done}`; **cursor is opaque** (base64url JSON `{v:1,last_id}`) — clients must not parse; illegal cursor → 400 `cc_history.invalid_cursor`; route body limit 8 MiB |
+| POST | `/api/cc-history/sync/items` | `routes/cc_history.rs` | none; returns existing full rows for requested ids | read-only | capability-gated by `cc-history.paged-sync.v1`; body `{ids:string[]}` max 128, each id ≤256 UTF-8 bytes, no blanks/dupes; response ordered `{items,missing_ids}`; estimated response ≤8 MiB else 413 `cc_history.batch_too_large` (`retryable=false`); single content >1 MiB → 422 `cc_history.item_too_large`; clients may bisect a 413 batch down to one id |
+| POST | `/api/cc-history/sync/push-batch` | `routes/cc_history.rs` | merge + **single-transaction** upsert of a batch | naturally-idempotent | capability-gated by `cc-history.paged-sync.v1`; body `{items:ClaudeHistoryRow[]}` max 128 / 8 MiB estimate / 1 MiB content; `merge_cc_history` then `upsert_merged_batch` (all-or-nothing — **no partial accepted**); returns `{accepted}`; same limits/error codes as items; replay converges via vector-clock merge |
 | POST | `/api/ssh-target/sync/pull` | `routes/ssh_target_sync.rs` | none | read-only | — |
 | POST | `/api/ssh-target/sync/push` | `routes/ssh_target_sync.rs` | upserts SSH target rows after merge | naturally-idempotent | per-row `merge_ssh_target` + `bulk_upsert`; replay converges |
 | POST | `/api/scratchpad/sync/pull` | `routes/scratchpad_sync.rs` | none | read-only | — |
@@ -209,6 +214,23 @@ the router so the inventory check matches exactly.
 | POST | `/api/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; reads owning-device local runtime snapshot | read-only | capability-gated by `orchestrator.runtime-snapshot.v1`; body snake_case `{project_id}` only; rejects remote shortcuts |
 | POST | `/api/mobile/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; remote-aware runtime snapshot for mobile browser | read-only | body camelCase `{projectId}`; reuses Tauri four-state helper; never exposes owner P2P base URL |
 | GET | `/api/orchestrator/config` | `routes/orchestrator.rs` | none | read-only | — |
+
+## CC History paged sync contract (`cc-history.paged-sync.v1`)
+
+New↔new peers use the three routes above when health advertises
+`cc-history.paged-sync.v1`. The token and routes ship in the same build.
+
+| Topic | Contract |
+| --- | --- |
+| Capability gate | Client reads `/api/health` first. **Only** when `supports("cc-history.paged-sync.v1")` is true may it call manifest-page / items / push-batch. |
+| v0 / mixed-version fallback | Peers without the token keep using legacy `POST /api/cc-history/sync/pull` and `/push`. New servers still mount those legacy routes. Clients must not probe paged paths and treat 404 as capability. |
+| Cursor opacity | `cursor` / `next_cursor` are opaque server tokens (base64url of `{v:1,last_id}`). Clients pass them through unchanged and must not parse, invent, or resume across process restarts. |
+| Limits | Manifest default 256 / max 512; items & push-batch max **128** rows; single `content` ≤ **1 MiB** UTF-8; single request/response estimate ≤ **8 MiB**; single id ≤ **256** UTF-8 bytes; blank/duplicate ids rejected. |
+| Error codes | `400 cc_history.invalid_cursor`; `413 cc_history.batch_too_large` (`retryable=false`); `422 cc_history.item_too_large`; validation → `400` with stable domain action. |
+| Partial batch | push-batch is **all-or-nothing** in one DB transaction. There is no partial `accepted` subset for a failed batch. |
+| Retry / restart-from-zero | Interrupted paged rounds do **not** persist remote cursors. The next sync restarts summary exchange from the first page. Vector-clock merge + upsert make replaying whole batches safe. On `batch_too_large` the client may bisect the id list down to one; a single `item_too_large` ends that round for the offending item (no silent skip). |
+| Metrics privacy | Process-local `RuntimeMetrics` may record fixed names such as `cc_history.sync_batch.*` / `cc_history.sync_round_ms` and orchestrator claim counters. Metrics stay in-process / sanitized tracing only — **no** telemetry upload, and **never** content, paths, project/device names, host, SQL, or credentials. |
+| SQLite pool | Production remains `max_connections(1)` with WAL and `busy_timeout=5s` unless a separate Task 8 load-gate commit documents evidence to raise it to **2** (never 3+). |
 
 ## Notes on the mandatory classifications
 
