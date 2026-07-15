@@ -162,6 +162,7 @@ pub fn ssh_to_summary(row: &SshTargetRow) -> SyncSummary<String> {
 ///
 /// Business Logic: 失败不得伪装成功；支持 v2 时走 plan，否则 typed legacy。
 /// Code Logic: supports_v2 分支；不重复 health（由 engine 注入 base_url/capability）。
+///     Peer 出站超时由 `PeerTimeoutClass` 在 peer_client helper 侧分类（Metadata/Mutation）。
 pub async fn ssh_target_sync_with_peer(
     state: &AppState,
     device: &crate::models::device::Device,

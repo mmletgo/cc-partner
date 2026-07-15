@@ -135,9 +135,40 @@ pub struct AppState {
             HashMap<String, Arc<RwLock<crate::workbench::claude_sessions::WorktreeSessionIndex>>>,
         >,
     >,
-    /// 每个 worktree 的文件监听句柄，key 同 workbench_claude_session_indexes。
-    /// 监听失败时该 key 不存在（降级为每次重扫）。
-    pub workbench_claude_session_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    /// 每个 worktree 的 Claude session 文件监听运行时，key 同 workbench_claude_session_indexes。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     每个 worktree 的 watcher 必须与取消令牌、debounce/scan 句柄同生命周期；项目移除与
+    ///     进程 shutdown 要能 cancel/abort 全部后台任务再 drop watcher，避免幽灵重扫。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     `Mutex<HashMap<String, ClaudeSessionWatcherRuntime>>`；监听失败时该 key 不存在
+    ///     （降级为每次搜索重扫）。
+    pub workbench_claude_session_watchers: Arc<
+        Mutex<HashMap<String, crate::workbench::claude_sessions::ClaudeSessionWatcherRuntime>>,
+    >,
+    /// Claude session 索引 singleflight 表：key = worktree canonical，value = watch Receiver。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     同一 worktree 并发搜索时只允许一次阻塞扫描，其余调用共享结果，避免重复 CPU/IO。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     tokio Mutex 保护 HashMap；leader 插入 Receiver(None)，完成后 send Some 并 remove。
+    pub workbench_claude_session_index_inflight: Arc<
+        tokio::sync::Mutex<
+            HashMap<String, crate::workbench::claude_sessions::ClaudeSessionIndexInflightRx>,
+        >,
+    >,
+    /// Claude session 索引 per-key dispose 世代，防止 dispose 后 concurrent ensure 写回幽灵索引。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     用户移除项目时可能正有搜索在 singleflight 扫描中；扫描结束后若仍 insert/spawn watcher，
+    ///     会留下已删除项目的幽灵索引与 notify 运行时。世代计数让 finish 路径识别“扫描期间已被 dispose”。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     `Mutex<HashMap<String, u64>>`；dispose 时 key 的 epoch+1；ensure 在 leader/回退路径
+    ///     捕获 start_epoch，finish_scan_and_insert 在 insert/watcher 前比对，世代变化则 no-op。
+    pub workbench_claude_session_index_dispose_epochs: Arc<Mutex<HashMap<String, u64>>>,
     /// 进程内有界本地运行时指标（耗时/计数/EWMA）；不上传、不记录正文/路径/凭据。
     pub runtime_metrics: Arc<RuntimeMetrics>,
     /// 运行时角色：sidecar=`HeadlessOwner`（唯一 Workbench/runtime owner），GUI=`GuiClient`（仅代理）。

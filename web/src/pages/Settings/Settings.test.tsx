@@ -407,20 +407,41 @@ vi.mock('react-i18next', () => ({
 }));
 
 const searchParamsState = { value: new URLSearchParams() };
-const setSearchParamsMock = vi.fn((update: unknown) => {
-  if (typeof update === 'function') {
-    const next = (update as (prev: URLSearchParams) => URLSearchParams)(searchParamsState.value);
-    searchParamsState.value = next;
-  } else if (update instanceof URLSearchParams) {
-    searchParamsState.value = update;
-  }
-});
+const setSearchParamsMock = vi.fn();
 
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  const React = await import('react');
   return {
     ...actual,
-    useSearchParams: () => [searchParamsState.value, setSearchParamsMock],
+    /**
+     * Business Logic（为什么需要这个 mock）:
+     *   Settings 以 URL ?tab= 为真源；测试需能在 click/setActiveTab 后触发重渲染。
+     *
+     * Code Logic（这个 mock 做什么）:
+     *   用 useState 镜像 searchParamsState，setSearchParams 同时更新模块状态与 React state。
+     */
+    useSearchParams: () => {
+      const [params, setParams] = React.useState(
+        () => new URLSearchParams(searchParamsState.value.toString()),
+      );
+      const setSearchParams = (
+        update: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams),
+        _opts?: unknown,
+      ) => {
+        setSearchParamsMock(update, _opts);
+        setParams(() => {
+          const base = new URLSearchParams(searchParamsState.value.toString());
+          const next =
+            typeof update === 'function'
+              ? (update as (p: URLSearchParams) => URLSearchParams)(base)
+              : update;
+          searchParamsState.value = next;
+          return next;
+        });
+      };
+      return [params, setSearchParams] as const;
+    },
   };
 });
 

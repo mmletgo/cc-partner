@@ -6,23 +6,30 @@
  *   是无意义的 jsonl 文件名，无法快速找回之前某段对话继续。本组件提供一个类似
  *   Spotlight/VS Code Command Palette 的浮层，让用户在当前 worktree 范围内按标题
  *   或对话内容搜索 Claude session，预览最近对话后一键新建 window 执行 resume。
+ *   搜索结果为有界 DTO；索引因预算截断时展示非阻塞诊断横幅，不把 truncated 当硬错误。
  *
  * Code Logic（这个组件做什么）:
  *   受控浮层（open/onClose）经共享 Dialog 提供 portal/backdrop/focus trap/列表 Esc 关闭；
- *   内部维护 query/hits/activeIndex/preview 等 state；useEffect 监听 query+scope 做
- *   300ms debounce 搜索；input 的 onKeyDown 处理 ↑↓ 导航 / ⏎ 进入 preview；
- *   preview 内 Esc 返回列表（closeOnEscape={!previewHit}）；选中后切到 preview 视图
- *   渲染最近 20 条对话，底部 resume 按钮回调父组件刷新 sessions 并 focus 新 window。
- *   hooks 全部声明在任何条件渲染之前（AGENTS.md 第 20 条）。
+ *   内部维护 query/hits/truncated/diagnostics/activeIndex/preview 等 state；useEffect 监听
+ *   query+scope 做 300ms debounce 搜索；消费 SessionSearchResult.items 渲染列表，
+ *   在列表上方按 diagnostics.status 展示 truncated/unavailable 横幅；input 的 onKeyDown
+ *   处理 ↑↓ 导航 / ⏎ 进入 preview；preview 内 Esc 返回列表（closeOnEscape={!previewHit}）；
+ *   选中后切到 preview 视图渲染最近 20 条对话，底部 resume 按钮回调父组件刷新 sessions
+ *   并 focus 新 window。hooks 全部声明在任何条件渲染之前（AGENTS.md 第 20 条）。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { workbenchApi } from '@/api/workbench';
 import { Button, Dialog } from '@/components/primitives';
 import { SearchIcon } from '@/lib/icons';
-import type { SessionPreview, SessionSearchHit } from '@/lib/types';
+import type {
+  SessionPreview,
+  SessionSearchDiagnostics,
+  SessionSearchHit,
+} from '@/lib/types';
 import styles from './WorkbenchSessionSearch.module.css';
 
 export interface WorkbenchSessionSearchProps {
@@ -132,6 +139,35 @@ function renderHighlighted(text: string, query: string): ReactNode {
 }
 
 /**
+ * 把后端截断 reason token 映射为 i18n 短标签。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   用户需要知道是哪类预算导致索引截断，而不是只看到原始 token。
+ *
+ * Code Logic（这个函数做什么）:
+ *   已知 reason → sessionSearch.reason* key；未知 reason 返回 null（省略展示）。
+ */
+function mapSearchReasonLabel(
+  reason: string,
+  t: TFunction<['workbench', 'common']>,
+): string | null {
+  switch (reason) {
+    case 'max_files':
+      return t('workbench:sessionSearch.reasonMaxFiles');
+    case 'max_file_bytes':
+      return t('workbench:sessionSearch.reasonMaxFileBytes');
+    case 'max_jsonl_line_bytes':
+      return t('workbench:sessionSearch.reasonMaxLineBytes');
+    case 'max_total_bytes':
+      return t('workbench:sessionSearch.reasonMaxTotalBytes');
+    case 'max_session_chars':
+      return t('workbench:sessionSearch.reasonMaxSessionChars');
+    default:
+      return null;
+  }
+}
+
+/**
  * 渲染 WorkbenchSessionSearch Command Palette 浮层。
  *
  * Business Logic（为什么需要这个函数）:
@@ -149,6 +185,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
 
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SessionSearchHit[]>([]);
+  const [truncated, setTruncated] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<SessionSearchDiagnostics | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -170,6 +208,7 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
   /**
    * 执行一次搜索请求（供 debounce 与重试按钮复用）。
    * 用序号防竞态：仅最后一次请求的结果会被写入 state。
+   * 成功写入 items + truncated/diagnostics；失败清空 hits 与诊断。
    */
   const runSearch = useCallback(() => {
     if (!projectId || !open) return;
@@ -180,7 +219,9 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
       .search(projectId, worktreeId, query)
       .then((result) => {
         if (searchSeqRef.current !== seq) return;
-        setHits(result);
+        setHits(result.items);
+        setTruncated(result.truncated || result.diagnostics.status === 'truncated');
+        setDiagnostics(result.diagnostics);
         setActiveIndex(0);
       })
       .catch((err: unknown) => {
@@ -188,6 +229,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
         const message = err instanceof Error ? err.message : String(err);
         setError(message || t('workbench:sessionSearch.error'));
         setHits([]);
+        setTruncated(false);
+        setDiagnostics(null);
       })
       .finally(() => {
         if (searchSeqRef.current !== seq) return;
@@ -222,12 +265,14 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     return () => clearTimeout(focusTimer);
   }, [open]);
 
-  /** 关闭浮层时重置 query（下次打开从空搜索开始） */
+  /** 关闭浮层时重置 query/诊断（下次打开从空搜索开始） */
   useEffect(() => {
     if (open) return;
     setQuery('');
     setHits([]);
     setError(null);
+    setTruncated(false);
+    setDiagnostics(null);
   }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -281,6 +326,8 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
           // 清理自身状态，避免下次打开残留
           setQuery('');
           setHits([]);
+          setTruncated(false);
+          setDiagnostics(null);
           setActiveIndex(0);
           setError(null);
           setPreviewHit(null);
@@ -375,10 +422,44 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
   );
 
   /**
+   * 截断/不可用诊断横幅（非阻塞，不替代结果列表）。
+   * Business Logic：预算截断或对端缺诊断时提示结果可能不完整；unavailable 优先于 truncated。
+   * Code Logic：status===unavailable → unavailable 文案；否则 truncated flag/status → 截断文案 + 可选 reason 标签。
+   */
+  const diagnosticsNotice = useMemo((): ReactNode => {
+    if (!diagnostics) return null;
+    if (diagnostics.status === 'unavailable') {
+      return (
+        <div className={styles.notice} role="status" data-testid="session-search-diagnostics-notice">
+          {t('workbench:sessionSearch.diagnosticsUnavailable')}
+        </div>
+      );
+    }
+    if (truncated || diagnostics.status === 'truncated') {
+      const reasonLabels = diagnostics.reasons
+        .map((reason) => mapSearchReasonLabel(reason, t))
+        .filter((label): label is string => Boolean(label));
+      return (
+        <div className={styles.notice} role="status" data-testid="session-search-diagnostics-notice">
+          <div>{t('workbench:sessionSearch.truncatedNotice')}</div>
+          {reasonLabels.length > 0 ? (
+            <ul className={styles.noticeReasons}>
+              {reasonLabels.map((label) => (
+                <li key={label}>{label}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      );
+    }
+    return null;
+  }, [diagnostics, truncated, t]);
+
+  /**
    * 渲染搜索视图主体（loading / error / empty / results 四态分支）。
    * Business Logic：按 spec 4.5 三态处理，让用户在任何状态下都有明确反馈与下一步。
    * Code Logic：依次判断 loading（首屏扫描中）、error（带重试按钮）、empty、
-   *   以及命中列表（分组标签 + resultItem）。
+   *   以及命中列表（诊断横幅 + 分组标签 + resultItem）；空列表但有诊断时仍展示横幅。
    */
   const renderBody = (): ReactNode => {
     // ── 四态：loading / error / empty / results ──
@@ -402,14 +483,18 @@ export function WorkbenchSessionSearch(props: WorkbenchSessionSearchProps): Reac
     }
     if (hits.length === 0) {
       return (
-        <div className={styles.stateBox}>
-          <div className={styles.stateTitle}>{t('workbench:sessionSearch.empty')}</div>
-          <div className={styles.stateHint}>{t('workbench:sessionSearch.emptyHint')}</div>
-        </div>
+        <>
+          {diagnosticsNotice}
+          <div className={styles.stateBox}>
+            <div className={styles.stateTitle}>{t('workbench:sessionSearch.empty')}</div>
+            <div className={styles.stateHint}>{t('workbench:sessionSearch.emptyHint')}</div>
+          </div>
+        </>
       );
     }
     return (
       <>
+        {diagnosticsNotice}
         <div className={styles.groupLabel}>
           {t('workbench:sessionSearch.groupRecent', {
             name: worktreeName || 'main',

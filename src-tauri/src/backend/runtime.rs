@@ -532,6 +532,8 @@ pub async fn build_app_state_with_role(
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        workbench_claude_session_index_dispose_epochs: Arc::new(Mutex::new(std::collections::HashMap::new())),
         runtime_metrics: Arc::new(RuntimeMetrics::new()),
         runtime_role,
         event_bus,
@@ -699,6 +701,9 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     if cleaned > 0 {
         tracing::info!("工作台会话已清理: {cleaned}");
     }
+
+    // Claude session 索引 watcher：cancel + abort debounce/scan 句柄，再 drop watcher/index。
+    crate::workbench::claude_sessions::shutdown_all_claude_session_indexes(state);
 
     // 同步路径：cancel + abort 全部 remote event bridge，避免关机后 ghost reconnect。
     // 测试路径可 await `RemoteEventBridgeRegistry::shutdown_all` 等待任务自然退出。

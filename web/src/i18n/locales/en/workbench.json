@@ -507,7 +507,14 @@
     "footerResume": "Resume in new window",
     "footerClose": "Close",
     "roleUser": "You",
-    "roleAssistant": "Claude"
+    "roleAssistant": "Claude",
+    "truncatedNotice": "Index truncated (budget reached); results may be incomplete",
+    "diagnosticsUnavailable": "Peer did not provide truncation diagnostics",
+    "reasonMaxFiles": "Max files",
+    "reasonMaxFileBytes": "Max file size",
+    "reasonMaxLineBytes": "Max line size",
+    "reasonMaxTotalBytes": "Max total bytes",
+    "reasonMaxSessionChars": "Max session text"
   },
   "markdownEditor": {
     "modeBar": "Markdown edit mode",

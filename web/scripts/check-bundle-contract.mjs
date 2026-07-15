@@ -85,19 +85,47 @@ export function getFinalBudgetTargets() {
 }
 
 /**
+ * 解析 bundle ratchet 策略。
+ *
+ * Business Logic:
+ *   默认 CI 必须 baseline+final 双重收紧，禁止手抬 ratchet 掩盖回归。
+ *   本地 toolchain/env 漂移主机在已恢复非递增 baseline 后，可显式设
+ *   `CC_PARTNER_BUNDLE_RATCHET=final-only`，仅用最终硬顶放行（仍禁止手改 baseline 上抬）。
+ *
+ * Code Logic:
+ *   读 env（或 options.env）；`final-only`（大小写不敏感）→ `'final-only'`；否则 `'strict'`。
+ *
+ * @param {{ env?: NodeJS.ProcessEnv } | null | undefined} [options]
+ * @returns {'strict' | 'final-only'}
+ */
+export function resolveBundleRatchetMode(options = null) {
+  const env = options?.env ?? process.env;
+  const raw = env?.CC_PARTNER_BUNDLE_RATCHET;
+  if (typeof raw === 'string' && raw.trim().toLowerCase() === 'final-only') {
+    return 'final-only';
+  }
+  return 'strict';
+}
+
+/**
  * 计算某指标的有效上限 = min(baseline, final)；无 baseline 时用 final。
  *
  * Business Logic:
  *   baseline ratchet 禁止增长，但不能成为第二套可抬高的最终阈值。
+ *   `final-only` 模式忽略 baseline（供本地 env-drift 主机显式选择；CI 默认 strict）。
  *
  * Code Logic:
- *   若 baseline 为有限非负 number，取 Math.min；否则返回 final。
+ *   mode=final-only → 直接返回 final；否则若 baseline 为有限非负 number，取 Math.min；否则 final。
  *
  * @param {number} finalBytes
  * @param {unknown} baselineBytes
+ * @param {'strict' | 'final-only'} [mode='strict']
  * @returns {number}
  */
-export function effectiveCeiling(finalBytes, baselineBytes) {
+export function effectiveCeiling(finalBytes, baselineBytes, mode = 'strict') {
+  if (mode === 'final-only') {
+    return finalBytes;
+  }
   if (typeof baselineBytes === 'number' && Number.isFinite(baselineBytes) && baselineBytes >= 0) {
     return Math.min(finalBytes, baselineBytes);
   }
@@ -220,6 +248,79 @@ export function collectStaticClosure(entryFile, chunks) {
 }
 
 /**
+ * 匹配 WorkbenchCodeEditor 源模块路径。
+ *
+ * Business Logic:
+ *   editor-entry 指标需要定位含代码编辑器入口的 lazy chunk，语言包动态 import 后
+ *   该 chunk 静态闭包应显著下降。
+ *
+ * Code Logic:
+ *   匹配 `.../WorkbenchCodeEditor/...` 下的 ts/tsx/js 源文件路径。
+ */
+export const EDITOR_ENTRY_MODULE_PATTERN =
+  /(?:^|[/\\])WorkbenchCodeEditor[/\\](?:index|WorkbenchCodeEditor)\.(?:tsx?|jsx?)$/i;
+
+/**
+ * 在 chunk graph 中查找 WorkbenchCodeEditor 入口 chunk。
+ *
+ * Business Logic:
+ *   需要可重复的 editor-entry 测量面，避免靠 chunk 文件名哈希猜测。
+ *
+ * Code Logic:
+ *   遍历 chunks.moduleIds，命中 EDITOR_ENTRY_MODULE_PATTERN 的 chunk fileName；
+ *   多个命中时优先含 `WorkbenchCodeEditor.tsx` 的项，否则字典序最小。
+ *
+ * @param {Record<string, { moduleIds?: string[] }>} chunks
+ * @returns {string | null}
+ */
+export function findEditorEntryChunk(chunks) {
+  /** @type {string[]} */
+  const hits = [];
+  for (const [fileName, chunk] of Object.entries(chunks ?? {})) {
+    const moduleIds = Array.isArray(chunk?.moduleIds) ? chunk.moduleIds : [];
+    if (moduleIds.some((id) => typeof id === 'string' && EDITOR_ENTRY_MODULE_PATTERN.test(id))) {
+      hits.push(fileName);
+    }
+  }
+  if (hits.length === 0) {
+    return null;
+  }
+  hits.sort((a, b) => {
+    const aScore = /WorkbenchCodeEditor-[^/]+\.js$/i.test(a) ? 0 : 1;
+    const bScore = /WorkbenchCodeEditor-[^/]+\.js$/i.test(b) ? 0 : 1;
+    return aScore - bScore || a.localeCompare(b);
+  });
+  return hits[0] ?? null;
+}
+
+/**
+ * 计算 editor-entry 已加载 gzip：WorkbenchCodeEditor lazy chunk 自身体积
+ * （不含 dynamic language imports，也不把已在 main 的 shared 二次计入「语言包」）。
+ *
+ * Business Logic:
+ *   Task 3 要求 editor-entry loaded gzip 相对静态语言包时代至少下降 20%；
+ *   用命名编辑器 chunk 的 gzip 作为稳定测量面（与 T1 characterization 的 maxLazy/CodeEditor 对齐）。
+ *
+ * Code Logic:
+ *   findEditorEntryChunk → 对该单文件 sumGzipBytes；找不到返回 null。
+ *
+ * @param {Record<string, { moduleIds?: string[] }>} chunks
+ * @param {(fileName: string) => Buffer | string} readFile
+ * @returns {{ entryFile: string | null, gzipBytes: number | null }}
+ */
+export function measureEditorEntryLoadedGzip(chunks, readFile) {
+  const entryFile = findEditorEntryChunk(chunks);
+  if (!entryFile) {
+    return { entryFile: null, gzipBytes: null };
+  }
+  try {
+    return { entryFile, gzipBytes: sumGzipBytes([entryFile], readFile) };
+  } catch {
+    return { entryFile, gzipBytes: null };
+  }
+}
+
+/**
  * 对文件内容做 gzip 后求和。
  *
  * Business Logic:
@@ -322,6 +423,7 @@ export function topChunksByGzip(chunkReports, limit = 5) {
  *   maxLazyChunkGzipBytes?: number,
  *   totalRuntimeJsGzipBytes?: number,
  *   sourcemapRawBytes?: number,
+ *   editorEntryLoadedGzipBytes?: number,
  * } | null}
  */
 export function parseBaselineMetrics(raw) {
@@ -340,6 +442,7 @@ export function parseBaselineMetrics(raw) {
     'maxLazyChunkGzipBytes',
     'totalRuntimeJsGzipBytes',
     'sourcemapRawBytes',
+    'editorEntryLoadedGzipBytes',
   ]) {
     const value = /** @type {Record<string, unknown>} */ (metrics)[key];
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
@@ -361,6 +464,7 @@ export function parseBaselineMetrics(raw) {
  *   取 entryStyles → CSS gzip；total = js + css 比 initial 预算；
  *   对非 initial chunk 检查 lazy 硬顶；对全部 chunk 求和查 total runtime JS；
  *   sourcemap 用 options 提供的 raw 总字节；baseline 用 effectiveCeiling 收紧。
+ *   options.ratchetMode 或 env CC_PARTNER_BUNDLE_RATCHET 控制 strict/final-only。
  *
  * @param {{
  *   entries?: Record<string, string>,
@@ -377,12 +481,15 @@ export function parseBaselineMetrics(raw) {
  *   budgets?: { main?: number, mobile?: number, lazyChunk?: number, totalRuntimeJs?: number, sourcemap?: number },
  *   entryStyles?: Record<string, string[]>,
  *   sourcemapRawBytes?: number,
+ *   ratchetMode?: 'strict' | 'final-only',
+ *   env?: NodeJS.ProcessEnv,
  *   baseline?: {
  *     mainInitialGzipBytes?: number,
  *     mobileInitialGzipBytes?: number,
  *     maxLazyChunkGzipBytes?: number,
  *     totalRuntimeJsGzipBytes?: number,
  *     sourcemapRawBytes?: number,
+ *     editorEntryLoadedGzipBytes?: number,
  *   } | null,
  * }} options
  * @returns {{
@@ -405,6 +512,8 @@ export function parseBaselineMetrics(raw) {
  *     maxLazyChunkGzipBytes: number,
  *     totalRuntimeJsGzipBytes: number,
  *     sourcemapRawBytes: number,
+ *     editorEntryLoadedGzipBytes: number | null,
+ *     editorEntryFile: string | null,
  *   },
  *   ceilings: {
  *     mainInitialGzipBytes: number,
@@ -412,6 +521,7 @@ export function parseBaselineMetrics(raw) {
  *     lazyChunkGzipBytes: number,
  *     totalRuntimeJsGzipBytes: number,
  *     sourcemapRawBytes: number,
+ *     editorEntryLoadedGzipBytes: number | null,
  *   },
  *   finals: ReturnType<typeof getFinalBudgetTargets>,
  * }}
@@ -428,6 +538,10 @@ export function analyzeBundleContract(contract, options) {
     sourcemap: options.budgets?.sourcemap ?? finals.sourcemapRawBytes,
   };
   const baseline = options.baseline ?? null;
+  const ratchetMode =
+    options.ratchetMode === 'final-only' || options.ratchetMode === 'strict'
+      ? options.ratchetMode
+      : resolveBundleRatchetMode({ env: options.env });
   /** @type {Record<string, string[]>} */
   const entryStylesSource = options.entryStyles ?? contract?.entryStyles ?? {};
 
@@ -470,7 +584,7 @@ export function analyzeBundleContract(contract, options) {
       entryName === 'main' ? 'mainInitialGzipBytes' : 'mobileInitialGzipBytes';
     const baselineBytes =
       baseline && typeof baseline[baselineKey] === 'number' ? baseline[baselineKey] : null;
-    const budgetBytes = effectiveCeiling(finalBudgetBytes, baselineBytes);
+    const budgetBytes = effectiveCeiling(finalBudgetBytes, baselineBytes, ratchetMode);
     let jsGzipBytes = 0;
     let cssGzipBytes = 0;
     try {
@@ -522,6 +636,7 @@ export function analyzeBundleContract(contract, options) {
       const lazyCeiling = effectiveCeiling(
         finalBudgets.lazyChunk,
         baseline?.maxLazyChunkGzipBytes,
+        ratchetMode,
       );
       if (gzipBytes > lazyCeiling) {
         diagnostics.push(
@@ -534,6 +649,7 @@ export function analyzeBundleContract(contract, options) {
   const totalJsCeiling = effectiveCeiling(
     finalBudgets.totalRuntimeJs,
     baseline?.totalRuntimeJsGzipBytes,
+    ratchetMode,
   );
   if (totalRuntimeJsGzipBytes > totalJsCeiling) {
     diagnostics.push(
@@ -545,7 +661,11 @@ export function analyzeBundleContract(contract, options) {
     typeof options.sourcemapRawBytes === 'number' && Number.isFinite(options.sourcemapRawBytes)
       ? Math.max(0, options.sourcemapRawBytes)
       : 0;
-  const sourcemapCeiling = effectiveCeiling(finalBudgets.sourcemap, baseline?.sourcemapRawBytes);
+  const sourcemapCeiling = effectiveCeiling(
+    finalBudgets.sourcemap,
+    baseline?.sourcemapRawBytes,
+    ratchetMode,
+  );
   if (sourcemapRawBytes > sourcemapCeiling) {
     diagnostics.push(
       `sourcemap over budget: actual=${sourcemapRawBytes}B baseline=${baseline?.sourcemapRawBytes ?? 'n/a'} final=${finalBudgets.sourcemap}B (${formatBudgetKiB(finalBudgets.sourcemap)}) ceiling=${sourcemapCeiling}B (publish no .map or keep total ≤2 MiB)`,
@@ -574,6 +694,22 @@ export function analyzeBundleContract(contract, options) {
     }
   }
 
+  const editorEntry = measureEditorEntryLoadedGzip(chunks, options.readFile);
+  // editor-entry 仅 baseline ratchet（无独立 final 硬顶）；有 baseline 时禁止增长
+  /** @type {number | null} */
+  let editorEntryCeiling = null;
+  if (
+    typeof editorEntry.gzipBytes === 'number' &&
+    typeof baseline?.editorEntryLoadedGzipBytes === 'number'
+  ) {
+    editorEntryCeiling = baseline.editorEntryLoadedGzipBytes;
+    if (editorEntry.gzipBytes > editorEntryCeiling) {
+      diagnostics.push(
+        `editor-entry loaded over baseline: file=${editorEntry.entryFile ?? 'n/a'} actual=${editorEntry.gzipBytes}B baseline=${editorEntryCeiling}B`,
+      );
+    }
+  }
+
   return {
     diagnostics,
     entryReports,
@@ -584,22 +720,28 @@ export function analyzeBundleContract(contract, options) {
       maxLazyChunkGzipBytes,
       totalRuntimeJsGzipBytes,
       sourcemapRawBytes,
+      editorEntryLoadedGzipBytes: editorEntry.gzipBytes,
+      editorEntryFile: editorEntry.entryFile,
     },
     ceilings: {
       mainInitialGzipBytes: effectiveCeiling(
         finalBudgets.main,
         baseline?.mainInitialGzipBytes,
+        ratchetMode,
       ),
       mobileInitialGzipBytes: effectiveCeiling(
         finalBudgets.mobile,
         baseline?.mobileInitialGzipBytes,
+        ratchetMode,
       ),
       lazyChunkGzipBytes: effectiveCeiling(
         finalBudgets.lazyChunk,
         baseline?.maxLazyChunkGzipBytes,
+        ratchetMode,
       ),
       totalRuntimeJsGzipBytes: totalJsCeiling,
       sourcemapRawBytes: sourcemapCeiling,
+      editorEntryLoadedGzipBytes: editorEntryCeiling,
     },
     finals: {
       mainInitialGzipBytes: finalBudgets.main,
@@ -696,6 +838,15 @@ function printFailureReport(result, meta = {}) {
   for (const diagnostic of result.diagnostics) {
     console.error(`  - ${diagnostic}`);
   }
+  if (resolveBundleRatchetMode() === 'strict') {
+    console.error('');
+    console.error(
+      'Hint: committed baseline ratchet is non-increasing (do not hand-raise metrics).',
+    );
+    console.error(
+      'Local toolchain/env drift hosts may set CC_PARTNER_BUNDLE_RATCHET=final-only to use final hard ceilings only; CI remains strict by default.',
+    );
+  }
   console.error('');
   console.error('Metrics (actual / baseline / final / ceiling):');
   const b = meta.baselinePath ? 'loaded' : 'n/a';
@@ -705,6 +856,12 @@ function printFailureReport(result, meta = {}) {
     ['maxLazyChunk', result.metrics.maxLazyChunkGzipBytes, result.ceilings.lazyChunkGzipBytes, result.finals.lazyChunkGzipBytes],
     ['totalRuntimeJs', result.metrics.totalRuntimeJsGzipBytes, result.ceilings.totalRuntimeJsGzipBytes, result.finals.totalRuntimeJsGzipBytes],
     ['sourcemapRaw', result.metrics.sourcemapRawBytes, result.ceilings.sourcemapRawBytes, result.finals.sourcemapRawBytes],
+    [
+      'editorEntryLoaded',
+      result.metrics.editorEntryLoadedGzipBytes,
+      result.ceilings.editorEntryLoadedGzipBytes,
+      result.ceilings.editorEntryLoadedGzipBytes,
+    ],
   ];
   for (const [name, actual, ceiling, finalBytes] of pairs) {
     console.error(
@@ -724,31 +881,77 @@ function printFailureReport(result, meta = {}) {
 }
 
 /**
- * 将当前 metrics 写成 baseline JSON。
+ * 将当前 metrics 写成 baseline JSON（只收紧、不抬高既有指标）。
  *
  * Business Logic:
- *   首次启用 ratchet 时固化当前体积，禁止后续无计划增长。
+ *   首次启用 ratchet 时固化当前体积，禁止后续无计划增长；已有 baseline 时
+ *   只允许写入更小的值，避免把 main/mobile 等临时膨胀写高。
  *
  * Code Logic:
- *   写入 schemaVersion/commit/capturedAt/finalTargets/metrics。
+ *   若路径已有 baseline metrics，则对每个指标取 min(previous, current)；
+ *   新指标（如 editorEntry）在 current 有值时写入。
  *
  * @param {string} baselinePath
  * @param {ReturnType<typeof analyzeBundleContract>['metrics']} metrics
  * @param {string} commit
  */
 function writeBaselineFile(baselinePath, metrics, commit) {
+  /** @type {ReturnType<typeof parseBaselineMetrics>} */
+  let previous = null;
+  if (existsSync(baselinePath)) {
+    try {
+      previous = parseBaselineMetrics(JSON.parse(readFileSync(baselinePath, 'utf8')));
+    } catch {
+      previous = null;
+    }
+  }
+
+  /**
+   * @param {number | null | undefined} current
+   * @param {number | undefined} prev
+   * @returns {number}
+   */
+  function ratchetDown(current, prev) {
+    const cur = typeof current === 'number' && Number.isFinite(current) ? current : 0;
+    if (typeof prev === 'number' && Number.isFinite(prev)) {
+      return Math.min(prev, cur);
+    }
+    return cur;
+  }
+
+  /** @type {Record<string, number>} */
+  const nextMetrics = {
+    mainInitialGzipBytes: ratchetDown(metrics.mainInitialGzipBytes, previous?.mainInitialGzipBytes),
+    mobileInitialGzipBytes: ratchetDown(
+      metrics.mobileInitialGzipBytes,
+      previous?.mobileInitialGzipBytes,
+    ),
+    maxLazyChunkGzipBytes: ratchetDown(
+      metrics.maxLazyChunkGzipBytes,
+      previous?.maxLazyChunkGzipBytes,
+    ),
+    totalRuntimeJsGzipBytes: ratchetDown(
+      metrics.totalRuntimeJsGzipBytes,
+      previous?.totalRuntimeJsGzipBytes,
+    ),
+    sourcemapRawBytes: ratchetDown(metrics.sourcemapRawBytes, previous?.sourcemapRawBytes),
+  };
+
+  if (typeof metrics.editorEntryLoadedGzipBytes === 'number') {
+    nextMetrics.editorEntryLoadedGzipBytes = ratchetDown(
+      metrics.editorEntryLoadedGzipBytes,
+      previous?.editorEntryLoadedGzipBytes,
+    );
+  } else if (typeof previous?.editorEntryLoadedGzipBytes === 'number') {
+    nextMetrics.editorEntryLoadedGzipBytes = previous.editorEntryLoadedGzipBytes;
+  }
+
   const payload = {
     schemaVersion: 1,
     commit,
     capturedAt: new Date().toISOString(),
     finalTargets: getFinalBudgetTargets(),
-    metrics: {
-      mainInitialGzipBytes: metrics.mainInitialGzipBytes ?? 0,
-      mobileInitialGzipBytes: metrics.mobileInitialGzipBytes ?? 0,
-      maxLazyChunkGzipBytes: metrics.maxLazyChunkGzipBytes,
-      totalRuntimeJsGzipBytes: metrics.totalRuntimeJsGzipBytes,
-      sourcemapRawBytes: metrics.sourcemapRawBytes,
-    },
+    metrics: nextMetrics,
   };
   writeFileSync(baselinePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 }
@@ -881,6 +1084,19 @@ function main(argv = process.argv.slice(2)) {
   console.log(
     `[${result.metrics.sourcemapRawBytes <= result.ceilings.sourcemapRawBytes ? 'OK' : 'OVER'}] sourcemapRaw: actual=${result.metrics.sourcemapRawBytes}B maps=${sourcemap.files.length} baseline=${baseline?.sourcemapRawBytes ?? 'n/a'} final=${result.finals.sourcemapRawBytes}B (${formatBudgetKiB(result.finals.sourcemapRawBytes)}) ceiling=${result.ceilings.sourcemapRawBytes}B`,
   );
+  {
+    const editorActual = result.metrics.editorEntryLoadedGzipBytes;
+    const editorCeiling = result.ceilings.editorEntryLoadedGzipBytes;
+    const editorOk =
+      typeof editorActual !== 'number'
+        ? 'n/a'
+        : typeof editorCeiling === 'number' && editorActual > editorCeiling
+          ? 'OVER'
+          : 'OK';
+    console.log(
+      `[${editorOk}] editorEntryLoaded: actual=${editorActual ?? 'n/a'}B baseline=${baseline?.editorEntryLoadedGzipBytes ?? 'n/a'} file=${result.metrics.editorEntryFile ?? 'n/a'}`,
+    );
+  }
 
   if (writeBaseline) {
     // 写到 web/scripts（与 checker 同目录）；同时镜像到根 scripts 以兼容计划路径

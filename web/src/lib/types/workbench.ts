@@ -642,6 +642,41 @@ export interface SessionSearchHit {
 }
 
 /**
+ * Claude session 搜索索引诊断（对齐后端 SessionSearchDiagnosticsDto，camelCase）。
+ * 说明扫描是否因预算截断、以及文件/字节消耗，供 UI 展示非阻塞提示。
+ */
+export interface SessionSearchDiagnostics {
+  /**
+   * 诊断状态：ok | truncated | unavailable（或其它前向兼容字符串）
+   */
+  status: 'ok' | 'truncated' | 'unavailable' | string;
+  /**
+   * 截断原因 token 列表，如 max_files / max_file_bytes / max_jsonl_line_bytes /
+   * max_total_bytes / max_session_chars
+   */
+  reasons: string[];
+  /** 扫描阶段考虑过的文件数 */
+  filesConsidered: number;
+  /** 实际进入索引的文件数 */
+  filesIndexed: number;
+  /** 累计读取字节数 */
+  bytesRead: number;
+}
+
+/**
+ * Claude session 有界搜索结果（对齐后端 SessionSearchResultDto，camelCase）。
+ * 由 search_claude_sessions 返回：items 为命中列表，truncated/diagnostics 描述预算截断。
+ */
+export interface SessionSearchResult {
+  /** 命中条目（最多 50 条） */
+  items: SessionSearchHit[];
+  /** 是否因预算截断（与 diagnostics.status 可能叠加） */
+  truncated: boolean;
+  /** 索引/扫描诊断 */
+  diagnostics: SessionSearchDiagnostics;
+}
+
+/**
  * Claude session preview 单条消息（对齐后端 SessionPreviewMessageDto）。
  */
 export interface SessionPreviewMessage {

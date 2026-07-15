@@ -21,13 +21,16 @@ import {
   collectSourcemapRawBytes,
   effectiveCeiling,
   extractStylesheetHrefs,
+  findEditorEntryChunk,
   findForbiddenModules,
   formatBudgetKiB,
   getFinalBudgetTargets,
   LAZY_CHUNK_BUDGET_BYTES,
+  measureEditorEntryLoadedGzip,
   MOBILE_FORBIDDEN_PATTERNS,
   normalizeCssFiles,
   parseBaselineMetrics,
+  resolveBundleRatchetMode,
   SOURCEMAP_BUDGET_BYTES,
   sumGzipBytes,
   topChunksByGzip,
@@ -146,6 +149,50 @@ describe('collectStaticClosure', () => {
   it('handles missing chunk ids without throwing', () => {
     const closure = collectStaticClosure('assets/missing.js', {});
     assert.deepEqual([...closure], []);
+  });
+});
+
+describe('findEditorEntryChunk / measureEditorEntryLoadedGzip', () => {
+  it('locates WorkbenchCodeEditor chunk and measures its gzip', () => {
+    const chunks = {
+      'assets/WorkbenchCodeEditor-abc.js': {
+        moduleIds: [
+          '/src/components/domain/WorkbenchCodeEditor/WorkbenchCodeEditor.tsx',
+          '/src/components/domain/WorkbenchCodeEditor/workbenchCodeEditorLanguage.ts',
+        ],
+        imports: ['assets/shared.js'],
+        dynamicImports: ['assets/lang-yaml.js'],
+      },
+      'assets/lang-yaml.js': {
+        moduleIds: ['/node_modules/@codemirror/lang-yaml/dist/index.js'],
+        imports: [],
+        dynamicImports: [],
+      },
+      'assets/shared.js': {
+        moduleIds: ['/src/styles/tokens.css'],
+        imports: [],
+        dynamicImports: [],
+      },
+    };
+    assert.equal(findEditorEntryChunk(chunks), 'assets/WorkbenchCodeEditor-abc.js');
+    const files = {
+      'assets/WorkbenchCodeEditor-abc.js': makeSource(8000, 'E'),
+      'assets/lang-yaml.js': makeSource(4000, 'Y'),
+      'assets/shared.js': makeSource(1000, 'S'),
+    };
+    const measured = measureEditorEntryLoadedGzip(chunks, (name) => Buffer.from(files[name], 'utf8'));
+    assert.equal(measured.entryFile, 'assets/WorkbenchCodeEditor-abc.js');
+    assert.equal(
+      measured.gzipBytes,
+      gzipSync(Buffer.from(files['assets/WorkbenchCodeEditor-abc.js'], 'utf8')).byteLength,
+    );
+  });
+
+  it('returns null when editor chunk is absent', () => {
+    assert.equal(findEditorEntryChunk({}), null);
+    const measured = measureEditorEntryLoadedGzip({}, () => Buffer.from(''));
+    assert.equal(measured.entryFile, null);
+    assert.equal(measured.gzipBytes, null);
   });
 });
 
@@ -395,6 +442,64 @@ describe('extended budgets (lazy / total JS / sourcemap / baseline)', () => {
     assert.equal(effectiveCeiling(100, null), 100);
     assert.equal(effectiveCeiling(100, undefined), 100);
     assert.equal(effectiveCeiling(100, -1), 100);
+    assert.equal(effectiveCeiling(100, 80, 'final-only'), 100);
+    assert.equal(effectiveCeiling(100, 150, 'final-only'), 100);
+  });
+
+  it('resolveBundleRatchetMode defaults strict and accepts final-only', () => {
+    assert.equal(resolveBundleRatchetMode({ env: {} }), 'strict');
+    assert.equal(resolveBundleRatchetMode({ env: { CC_PARTNER_BUNDLE_RATCHET: 'strict' } }), 'strict');
+    assert.equal(
+      resolveBundleRatchetMode({ env: { CC_PARTNER_BUNDLE_RATCHET: 'final-only' } }),
+      'final-only',
+    );
+    assert.equal(
+      resolveBundleRatchetMode({ env: { CC_PARTNER_BUNDLE_RATCHET: ' FINAL-ONLY ' } }),
+      'final-only',
+    );
+  });
+
+  it('final-only ratchet mode ignores baseline and keeps final hard ceilings', () => {
+    const contract = buildContractFixture();
+    const noisy = Array.from({ length: 8000 }, (_, i) => String.fromCharCode(32 + (i % 90))).join('');
+    const files = buildFixtureFiles({
+      'assets/main.js': noisy,
+      'assets/mobile.js': makeSource(1000, 'B'),
+      'assets/shared.js': noisy,
+    });
+    const actualMain = sumGzipBytes(['assets/main.js', 'assets/shared.js'], (f) =>
+      Buffer.from(files[f], 'utf8'),
+    );
+    const strict = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      budgets: {
+        main: 320 * 1024,
+        mobile: 280 * 1024,
+      },
+      baseline: {
+        mainInitialGzipBytes: Math.max(1, actualMain - 10),
+      },
+      ratchetMode: 'strict',
+    });
+    assert.ok(strict.diagnostics.some((d) => /main initial graph over budget/i.test(d)));
+
+    const finalOnly = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      budgets: {
+        main: 320 * 1024,
+        mobile: 280 * 1024,
+      },
+      baseline: {
+        mainInitialGzipBytes: Math.max(1, actualMain - 10),
+      },
+      ratchetMode: 'final-only',
+    });
+    assert.equal(
+      finalOnly.diagnostics.some((d) => /main initial graph over budget/i.test(d)),
+      false,
+      `final-only should ignore baseline; got: ${finalOnly.diagnostics.join('\n')}`,
+    );
+    assert.equal(finalOnly.entryReports.main.budgetBytes, 320 * 1024);
   });
 
   it('fails individual lazy chunk over final 700 KiB budget', () => {

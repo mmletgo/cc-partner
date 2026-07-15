@@ -154,7 +154,8 @@ pub fn scratchpad_to_summary(row: &ScratchpadRow) -> SyncSummary<String> {
 /// 与单个对端同步全部速记本页面，返回 typed domain outcome。
 ///
 /// Business Logic: 失败不得伪装成功；支持 v2 时走 plan，否则 typed legacy。
-/// Code Logic: supports_v2 分支；不重复 health。
+/// Code Logic: supports_v2 分支；不重复 health（由 engine 注入 capability）。
+///     Peer 出站超时由 `PeerTimeoutClass` 在 peer_client helper 侧分类（Metadata/Mutation）。
 pub async fn scratchpad_sync_with_peer(
     state: &AppState,
     device: &crate::models::device::Device,

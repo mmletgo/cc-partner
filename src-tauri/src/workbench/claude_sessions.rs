@@ -8,26 +8,428 @@
 //!     让前端能在「当前 worktree 范围」内按标题或对话内容搜索目标 session，选中后一键 resume。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `build_session_index`：单文件流式解析，提取 ClaudeSessionIndex（标题=lastPrompt 回退首条 user、
-//!       user 文本、assistant 文本、最近 20 条消息、元信息），过滤 slash/bash 命令，2 秒超时跳过。
-//!     - `scan_worktree_sessions`：扫描 worktree path 对应 encoded-cwd 目录，组装 WorktreeSessionIndex。
-//!     - `search_sessions`：按 spec 2.3 语义搜索（空 query 全部倒序 / 关键词命中优先级 + limit + preview snippets）。
-//!     - `ensure_worktree_session_index_scanned`：lazy 初始化内存索引 + 启动 notify 文件监听（debounce 500ms），
-//!       监听失败降级为每次重扫。
+//!     - `ClaudeIndexBudget` + 有界 `read_line_bounded`：限制文件数/单文件/行长/总字节/session 字符，
+//!       候选按 mtime desc + path asc 排序后截断，diagnostics 暴露 stable reason token。
+//!     - `build_session_index(_with_budget)`：单文件有界流式解析，提取 ClaudeSessionIndex（标题=lastPrompt
+//!       回退首条 user、user/assistant 文本、最近 20 条消息、元信息），过滤 slash/bash，2 秒超时跳过。
+//!     - `scan_worktree_sessions(_with_budget|_at)`：扫描 worktree 对应 encoded-cwd 目录，组装
+//!       带 truncated/diagnostics 的 WorktreeSessionIndex。
+//!     - `search_sessions` / `search_sessions_result`：spec 2.3 搜索；后者包装 SessionSearchResult DTO。
+//!     - `ensure_worktree_session_index_scanned`（async）：singleflight + spawn_blocking 扫描 +
+//!       notify 文件监听（debounce 500ms）；监听失败降级为每次重扫。
+//!     - watcher 将 create/modify/delete/rename/uncertain 映射为 index upsert/remove/rename/bounded rescan；
+//!       owner 侧 `ClaudeSessionWatcherRuntime` 聚合 watcher+cancel+handles；项目移除/shutdown 先 dispose。
+//!     - `decode_session_search_response_body`：混部 dual-decode（v2 对象或 legacy 数组）。
 
 use crate::cc::collector::claude_projects_dir;
 use crate::state::AppState;
 use crate::workbench::claude_path::encode_claude_project_path;
 use chrono::Utc;
+use notify::event::{ModifyKind, RemoveKind, RenameMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime};
+use tokio_util::sync::CancellationToken;
 
 /// 单文件解析超时（2 秒）。活跃 session 可能几 MB，超时则跳过避免阻塞扫描。
 const SINGLE_FILE_PARSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Diagnostics status：完整成功。
+pub const DIAG_STATUS_OK: &str = "ok";
+/// Diagnostics status：至少一个预算触发截断。
+pub const DIAG_STATUS_TRUNCATED: &str = "truncated";
+/// Diagnostics status：旧端/未知，无法提供预算诊断。
+pub const DIAG_STATUS_UNAVAILABLE: &str = "unavailable";
+
+/// 单次 Claude session 索引扫描的资源预算。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户 worktree 下可能堆积成千上万 jsonl、超大 transcript 或异常长行；无界扫描会拖垮
+///     sidecar 内存与 tokio 响应。预算把扫描约束在可预测的资源上限内，并在 diagnostics 暴露截断原因。
+///
+/// Code Logic（这个结构体做什么）:
+///     持有文件数、单文件字节、jsonl 行字节、总字节与 session 文本 Unicode scalar 上限；Default 给出生产默认。
+#[derive(Debug, Clone, Copy)]
+pub struct ClaudeIndexBudget {
+    /// 最多索引的 jsonl 文件数（按 mtime desc + path asc 排序后截断）。
+    pub max_files: usize,
+    /// 单文件 metadata 长度上限；超过则整文件跳过。
+    pub max_file_bytes: u64,
+    /// 单行 jsonl 最大读取字节；超过则丢弃该行并记 reason。
+    pub max_jsonl_line_bytes: usize,
+    /// 一次扫描累计读取字节上限；下一个文件会超则停止。
+    pub max_total_bytes: u64,
+    /// 单个 session 的 title+user+assistant 文本 Unicode scalar 总预算。
+    pub max_session_chars: usize,
+}
+
+impl Default for ClaudeIndexBudget {
+    /// 生产默认预算。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     搜索/监听热路径与测试需要统一的默认上限，避免调用方到处硬编码。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 max_files=10_000、max_file_bytes=64MiB、max_jsonl_line_bytes=1MiB、
+    ///     max_total_bytes=512MiB、max_session_chars=1_000_000。
+    fn default() -> Self {
+        Self {
+            max_files: 10_000,
+            max_file_bytes: 64 * 1024 * 1024,
+            max_jsonl_line_bytes: 1024 * 1024,
+            max_total_bytes: 512 * 1024 * 1024,
+            max_session_chars: 1_000_000,
+        }
+    }
+}
+
+/// 单文件解析时的预算命中结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     扫描层需要把「行过长 / session 文本截断 / 文件过大」等 reason 汇总到 diagnostics。
+///
+/// Code Logic（这个结构体做什么）:
+///     记录 reasons、实际读取字节，以及是否因 max_file_bytes 整文件跳过。
+#[derive(Debug, Clone, Default)]
+pub struct SessionFileBudgetOutcome {
+    pub reasons: Vec<String>,
+    pub bytes_read: u64,
+    pub skipped_entire_file: bool,
+}
+
+/// 搜索结果诊断信息（稳定 reason token）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端/远端需要知道结果是否因预算截断，以及扫描计数，便于展示「部分结果」而非静默丢数。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 序列化；status ∈ {ok, truncated, unavailable}；reasons 如 max_files 等稳定 token。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchDiagnostics {
+    pub status: String,
+    pub reasons: Vec<String>,
+    pub files_considered: u64,
+    pub files_indexed: u64,
+    pub bytes_read: u64,
+}
+
+impl SessionSearchDiagnostics {
+    /// 构造「完整成功」诊断。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     未触发任何预算时需要统一的 ok 诊断对象。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     status=ok，空 reasons，填入计数。
+    pub fn ok(files_considered: u64, files_indexed: u64, bytes_read: u64) -> Self {
+        Self {
+            status: DIAG_STATUS_OK.to_string(),
+            reasons: Vec::new(),
+            files_considered,
+            files_indexed,
+            bytes_read,
+        }
+    }
+
+    /// 构造「预算截断」诊断。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     任一预算命中时前端需展示 truncated 与 reason 列表。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     status=truncated，reasons 去重保序。
+    pub fn truncated(
+        reasons: Vec<String>,
+        files_considered: u64,
+        files_indexed: u64,
+        bytes_read: u64,
+    ) -> Self {
+        Self {
+            status: DIAG_STATUS_TRUNCATED.to_string(),
+            reasons: dedupe_reasons(reasons),
+            files_considered,
+            files_indexed,
+            bytes_read,
+        }
+    }
+
+    /// 构造「旧端不可用」诊断。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     混部解码旧 `Vec<SessionSearchHit>` 时没有预算信息，需显式 unavailable。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     status=unavailable，空 reasons，计数全 0。
+    pub fn unavailable() -> Self {
+        Self {
+            status: DIAG_STATUS_UNAVAILABLE.to_string(),
+            reasons: Vec::new(),
+            files_considered: 0,
+            files_indexed: 0,
+            bytes_read: 0,
+        }
+    }
+}
+
+/// 搜索 API 返回 DTO：命中列表 + 截断标记 + 诊断。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     仅返回 `Vec<SessionSearchHit>` 无法表达预算截断；新 DTO 让本机/远端/混部客户端统一消费。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase；items 为命中，truncated 与 diagnostics 反映索引扫描侧预算。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchResult {
+    pub items: Vec<SessionSearchHit>,
+    pub truncated: bool,
+    pub diagnostics: SessionSearchDiagnostics,
+}
+
+/// 把旧版 `Vec<SessionSearchHit>` 包装成新 DTO（无预算信息）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     新客户端对旧服务端时，body 仍是数组；需要合成 truncated=false + unavailable 诊断，避免解析失败。
+///
+/// Code Logic（这个函数做什么）:
+///     包装 items，truncated=false，diagnostics=unavailable，计数 0。
+pub fn synthesize_legacy_session_search_result(
+    items: Vec<SessionSearchHit>,
+) -> SessionSearchResult {
+    SessionSearchResult {
+        items,
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    }
+}
+
+/// 双形态解码搜索响应：新 DTO 对象或旧数组。
+///
+/// Business Logic（为什么需要这个函数）:
+///     混部期间远端可能返回 v2 对象或 legacy 数组，客户端必须都能解析。
+///
+/// Code Logic（这个函数做什么）:
+///     先 `SessionSearchResult`，失败再 `Vec<SessionSearchHit>` 并 synthesize；都失败返回 serde 错误。
+pub fn decode_session_search_response_body(
+    bytes: &[u8],
+) -> Result<SessionSearchResult, serde_json::Error> {
+    match serde_json::from_slice::<SessionSearchResult>(bytes) {
+        Ok(v) => Ok(v),
+        Err(first_err) => match serde_json::from_slice::<Vec<SessionSearchHit>>(bytes) {
+            Ok(items) => Ok(synthesize_legacy_session_search_result(items)),
+            Err(_) => Err(first_err),
+        },
+    }
+}
+
+/// 去重 reason 列表并保持首次出现顺序。
+///
+/// Business Logic（为什么需要这个函数）:
+///     同一 reason 可能在多文件重复出现，diagnostics 只需稳定去重列表。
+///
+/// Code Logic（这个函数做什么）:
+///     O(n) 线性去重。
+fn dedupe_reasons(reasons: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in reasons {
+        if !out.iter().any(|x| x == &r) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// 按 Unicode scalar 预算截断字符串（只在 char 边界切断）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     max_session_chars 以 Unicode scalar 计数；截断必须落在 char 边界，避免 panic/半字符。
+///
+/// Code Logic（这个函数做什么）:
+///     chars().count() ≤ max 时原样 to_string，否则 take(max_chars) collect。
+pub fn truncate_to_char_budget(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        s.chars().take(max_chars).collect()
+    }
+}
+
+/// 在 title → user → assistant 顺序上分配 session 字符预算并截断。
+///
+/// Business Logic（为什么需要这个函数）:
+///     超大对话全文会撑爆内存索引；优先保留 title，再 user，最后 assistant。
+///
+/// Code Logic（这个函数做什么）:
+///     顺序扣减 remaining，返回截断后三元组与是否发生截断。
+fn apply_session_char_budget(
+    title: String,
+    user_text: String,
+    assistant_text: String,
+    max_session_chars: usize,
+) -> (String, String, String, bool) {
+    let mut remaining = max_session_chars;
+    let mut truncated = false;
+
+    let title_chars = title.chars().count();
+    let title_out = if title_chars <= remaining {
+        remaining = remaining.saturating_sub(title_chars);
+        title
+    } else {
+        truncated = true;
+        let out = truncate_to_char_budget(&title, remaining);
+        remaining = 0;
+        out
+    };
+
+    let user_chars = user_text.chars().count();
+    let user_out = if user_chars <= remaining {
+        remaining = remaining.saturating_sub(user_chars);
+        user_text
+    } else {
+        truncated = true;
+        let out = truncate_to_char_budget(&user_text, remaining);
+        remaining = 0;
+        out
+    };
+
+    let assistant_chars = assistant_text.chars().count();
+    let assistant_out = if assistant_chars <= remaining {
+        assistant_text
+    } else {
+        truncated = true;
+        truncate_to_char_budget(&assistant_text, remaining)
+    };
+
+    (title_out, user_out, assistant_out, truncated)
+}
+
+/// 从 BufRead 精确 drain 到并包含下一个 '\\n'（不越过下一行）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     超长行丢弃时必须停在换行符，否则会吞掉后续合法 jsonl 行。
+///
+/// Code Logic（这个函数做什么）:
+///     用 fill_buf/consume 只消耗到首个 '\\n'（含），返回丢弃字节数；永不整行大分配。
+fn drain_until_newline<R: BufRead>(reader: &mut R) -> std::io::Result<u64> {
+    let mut discarded = 0u64;
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(discarded);
+        }
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let n = pos + 1;
+            reader.consume(n);
+            discarded = discarded.saturating_add(n as u64);
+            return Ok(discarded);
+        }
+        let n = buf.len();
+        reader.consume(n);
+        discarded = discarded.saturating_add(n as u64);
+    }
+}
+
+/// 有界读取一行：最多分配 max_bytes+1，超长行丢弃内容并 drain 至换行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     异常/恶意 jsonl 可能含数 MiB 无换行长行；`BufRead::lines()` 会整行分配导致 OOM。
+///
+/// Code Logic（这个函数做什么）:
+///     逐字节/缓冲累积至 max_bytes+1 或 '\\n'；超长则 drain_until_newline 丢弃剩余；
+///     返回 (Option<String UTF-8 lossy 行>, 读取字节数, 是否超长)。
+fn read_line_bounded<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<(Option<String>, u64, bool)> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut bytes_read: u64 = 0;
+    let cap = max_bytes.saturating_add(1);
+
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            break;
+        }
+        if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+            // 本缓冲内含换行：只吃到换行
+            let take_n = pos + 1;
+            if buf.len() + take_n > cap {
+                // 加上本段会超过 cap → 超长行
+                // 先不把超长内容放进 buf；consume 到换行并记 overflow
+                reader.consume(take_n);
+                bytes_read = bytes_read.saturating_add(take_n as u64);
+                return Ok((None, bytes_read, true));
+            }
+            buf.extend_from_slice(&chunk[..take_n]);
+            reader.consume(take_n);
+            bytes_read = bytes_read.saturating_add(take_n as u64);
+            break;
+        }
+        // 本缓冲无换行
+        let available = chunk.len();
+        if buf.len() >= cap {
+            // 已超 cap 且仍无换行：丢弃本缓冲并继续 drain
+            reader.consume(available);
+            bytes_read = bytes_read.saturating_add(available as u64);
+            let extra = drain_until_newline(reader)?;
+            bytes_read = bytes_read.saturating_add(extra);
+            return Ok((None, bytes_read, true));
+        }
+        let room = cap - buf.len();
+        if available <= room {
+            buf.extend_from_slice(chunk);
+            reader.consume(available);
+            bytes_read = bytes_read.saturating_add(available as u64);
+            // 继续读更多
+        } else {
+            // 只填到 cap，然后 drain 剩余至换行
+            buf.extend_from_slice(&chunk[..room]);
+            reader.consume(room);
+            bytes_read = bytes_read.saturating_add(room as u64);
+            let extra = drain_until_newline(reader)?;
+            bytes_read = bytes_read.saturating_add(extra);
+            return Ok((None, bytes_read, true));
+        }
+    }
+
+    if bytes_read == 0 && buf.is_empty() {
+        return Ok((None, 0, false));
+    }
+    // buf 可能以 \n 结尾；cap 溢出已在上面 return
+    if buf.len() > max_bytes {
+        // 整行（含 \n）刚好落在 max+1：仍视为超长
+        return Ok((None, bytes_read, true));
+    }
+    if buf.ends_with(b"\n") {
+        buf.pop();
+        if buf.ends_with(b"\r") {
+            buf.pop();
+        }
+    }
+    let line = String::from_utf8_lossy(&buf).into_owned();
+    Ok((Some(line), bytes_read, false))
+}
+
+/// 把 reason 追加到列表（若尚不存在）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     多处预算命中路径需要稳定地记录 reason token。
+///
+/// Code Logic（这个函数做什么）:
+///     若不存在则 push。
+fn push_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|r| r == reason) {
+        reasons.push(reason.to_string());
+    }
+}
 
 /// 搜索命中上下文片段单侧字符数。
 const PREVIEW_SNIPPET_RADIUS: usize = 30;
@@ -100,10 +502,11 @@ pub struct ClaudeSessionIndex {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     搜索范围限定在当前 active worktree，需要把该 worktree 下所有 session 聚合成一张表，
-///     并记录 encoded_cwd 与扫描时间供文件监听回调复用。
+///     并记录 encoded_cwd 与扫描时间供文件监听回调复用；同时携带预算截断诊断供搜索 DTO 透传。
 ///
 /// Code Logic（这个结构体做什么）:
-///     不 Serialize（仅供内存索引使用）；sessions 以 session_id 为 key 便于单文件增量更新。
+///     不 Serialize（仅供内存索引使用）；sessions 以 session_id 为 key 便于单文件增量更新；
+///     truncated + diagnostics 描述最近一次全量/预算扫描的结果。
 #[derive(Debug, Clone)]
 pub struct WorktreeSessionIndex {
     // 保留 worktree_path 便于调试与未来扩展（当前索引内部未直接读取）。
@@ -112,6 +515,10 @@ pub struct WorktreeSessionIndex {
     pub encoded_cwd: String,
     pub sessions: HashMap<String, ClaudeSessionIndex>,
     pub last_scan_at: String,
+    /// 最近一次扫描是否触发任一预算截断。
+    pub truncated: bool,
+    /// 最近一次扫描诊断（status/reasons/计数）。
+    pub diagnostics: SessionSearchDiagnostics,
 }
 
 /// 搜索命中结果（spec 3.2）。
@@ -122,7 +529,7 @@ pub struct WorktreeSessionIndex {
 /// Code Logic（这个结构体做什么）:
 ///     camelCase 序列化对齐前端 SessionSearchHit；title_hit/user_hit/assistant_hit 标记命中字段。
 ///     同时派生 Deserialize，因为 remote shortcut 命令需要反序列化远端设备的搜索响应。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSearchHit {
     pub session_id: String,
@@ -275,23 +682,54 @@ fn is_command_text(text: &str) -> bool {
     trimmed.starts_with('/') || trimmed.starts_with('!')
 }
 
-/// 从单个 jsonl 文件构建一个 ClaudeSessionIndex（spec 2.2）。
+/// 从单个 jsonl 文件构建一个 ClaudeSessionIndex（默认预算，兼容旧调用/测试）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     既有单测与增量刷新路径只需索引本身，不关心预算 outcome；保留无 budget 签名。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `build_session_index_with_budget(path, &Default::default())` 并丢弃 outcome。
+pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
+    build_session_index_with_budget(path, &ClaudeIndexBudget::default()).map(|(idx, _)| idx)
+}
+
+/// 按预算从单个 jsonl 构建 ClaudeSessionIndex。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     一个 jsonl 文件 = 一次 Claude 会话的完整 transcript。搜索索引需要从每个文件提取标题、
-///     user 文本、assistant 文本、最近 20 条消息和首末活动时间。
+///     user 文本、assistant 文本、最近 20 条消息和首末活动时间；同时遵守文件/行/字符预算避免 OOM。
 ///
 /// Code Logic（这个函数做什么）:
-///     流式 BufReader::lines() 逐行解析，单行失败跳过不阻断；每读一行检查 2 秒超时；
-///     收集 last-prompt（取最后一条作 title）、所有 user 文本（过滤 slash/bash 命令）、
-///     assistant 文本、(role,text,timestamp) 三元组；组装 ClaudeSessionIndex，
-///     recent_messages 按 timestamp 升序取尾部 20 条，title 缺失回退首条 user 文本。
-pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
+///     1. metadata 超过 max_file_bytes → None + skipped_entire_file + reason max_file_bytes；
+///     2. 有界 read_line_bounded 逐行，超长行丢弃并记 max_jsonl_line_bytes；
+///     3. 2 秒超时跳过整文件；
+///     4. 组装后按 title→user→assistant 顺序应用 max_session_chars；
+///     5. recent_messages 仍最多 20。
+pub fn build_session_index_with_budget(
+    path: &Path,
+    budget: &ClaudeIndexBudget,
+) -> Option<(ClaudeSessionIndex, SessionFileBudgetOutcome)> {
     let session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())?;
+
+    let mut outcome = SessionFileBudgetOutcome::default();
+
+    let meta = std::fs::metadata(path)
+        .inspect_err(|err| {
+            tracing::warn!(
+                "读取 Claude session transcript metadata 失败 {:?}: {err}",
+                path
+            );
+        })
+        .ok()?;
+    if meta.len() > budget.max_file_bytes {
+        push_reason(&mut outcome.reasons, "max_file_bytes");
+        outcome.skipped_entire_file = true;
+        return None;
+    }
 
     let file = std::fs::File::open(path)
         .inspect_err(|err| {
@@ -299,8 +737,7 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
         })
         .ok()?;
 
-    use std::io::{BufRead, BufReader};
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let start = Instant::now();
 
     let mut last_prompt: Option<String> = None;
@@ -308,13 +745,12 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
     let mut user_parts: Vec<String> = Vec::new();
     let mut assistant_parts: Vec<String> = Vec::new();
     let mut messages: Vec<RecentMessage> = Vec::new();
-    let mut timestamps: Vec<String> = Vec::new();
     let mut cwd: Option<String> = None;
     let mut git_branch: Option<String> = None;
     let mut first_activity_at: String = String::new();
     let mut last_activity_at: String = String::new();
 
-    for line_res in reader.lines() {
+    loop {
         if start.elapsed() > SINGLE_FILE_PARSE_TIMEOUT {
             tracing::warn!(
                 "解析 Claude session transcript 超时（>{:?}），跳过 {:?}",
@@ -323,12 +759,25 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
             );
             return None;
         }
-        let line = match line_res {
-            Ok(l) => l,
-            Err(err) => {
-                tracing::warn!("读取 jsonl 行失败 {:?}: {err}", path);
-                continue;
-            }
+        let (line_opt, line_bytes, overflow) =
+            match read_line_bounded(&mut reader, budget.max_jsonl_line_bytes) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!("读取 jsonl 行失败 {:?}: {err}", path);
+                    break;
+                }
+            };
+        outcome.bytes_read = outcome.bytes_read.saturating_add(line_bytes);
+        if line_opt.is_none() && line_bytes == 0 {
+            break; // EOF
+        }
+        if overflow {
+            push_reason(&mut outcome.reasons, "max_jsonl_line_bytes");
+            continue;
+        }
+        let line = match line_opt {
+            Some(l) => l,
+            None => continue,
         };
         let parsed: JsonlLine = match serde_json::from_str(&line) {
             Ok(p) => p,
@@ -404,12 +853,10 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
                 if last_activity_at.as_str() < ts {
                     last_activity_at = ts.to_string();
                 }
-                timestamps.push(ts.to_string());
             }
         }
     }
 
-    let _ = &timestamps; // 仅用于明确意图，首末时间已直接计算
     let title = last_prompt.or(first_user_text).unwrap_or_default();
     let message_count = messages.len() as u32;
 
@@ -421,37 +868,78 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
         messages
     };
 
-    Some(ClaudeSessionIndex {
-        session_id,
-        title,
-        transcript_path: path.to_path_buf(),
-        first_activity_at,
-        last_activity_at,
-        message_count,
-        user_text: user_parts.join("\n"),
-        assistant_text: assistant_parts.join("\n"),
-        recent_messages,
-        cwd,
-        git_branch,
-    })
+    let user_text = user_parts.join("\n");
+    let assistant_text = assistant_parts.join("\n");
+    let (title, user_text, assistant_text, char_truncated) =
+        apply_session_char_budget(title, user_text, assistant_text, budget.max_session_chars);
+    if char_truncated {
+        push_reason(&mut outcome.reasons, "max_session_chars");
+    }
+
+    Some((
+        ClaudeSessionIndex {
+            session_id,
+            title,
+            transcript_path: path.to_path_buf(),
+            first_activity_at,
+            last_activity_at,
+            message_count,
+            user_text,
+            assistant_text,
+            recent_messages,
+            cwd,
+            git_branch,
+        },
+        outcome,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // worktree 扫描
 // ---------------------------------------------------------------------------
 
-/// 扫描指定 worktree path 对应的 Claude session 索引（spec 3.1）。
+/// 扫描指定 worktree path 对应的 Claude session 索引（默认预算）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     搜索范围限定在当前 active worktree，需要把该 worktree 下所有 session jsonl 解析成内存索引。
 ///
 /// Code Logic（这个函数做什么）:
-///     1. canonicalize worktree_path（失败用原 path）；
-///     2. encoded_cwd = encode_claude_project_path(canonical)；
-///     3. claude_projects_dir = ~/.claude/projects；
-///     4. target_dir = claude_projects_dir.join(encoded_cwd)，不存在返回空索引；
-///     5. 逐文件 build_session_index（单文件超时跳过），组装 WorktreeSessionIndex。
+///     委托 `scan_worktree_sessions_with_budget(path, &Default::default())`。
 pub fn scan_worktree_sessions(worktree_path: &Path) -> WorktreeSessionIndex {
+    scan_worktree_sessions_with_budget(worktree_path, &ClaudeIndexBudget::default())
+}
+
+/// 按预算扫描 worktree 对应 Claude session 目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     生产热路径与单测都需要可注入预算的扫描，以在超大目录下有界返回并暴露 truncated diagnostics。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 ~/.claude/projects/<encoded> 后委托 `scan_worktree_sessions_at`。
+pub fn scan_worktree_sessions_with_budget(
+    worktree_path: &Path,
+    budget: &ClaudeIndexBudget,
+) -> WorktreeSessionIndex {
+    let projects = claude_projects_dir();
+    scan_worktree_sessions_at(worktree_path, projects.as_deref(), budget)
+}
+
+/// 可注入 projects 根目录的扫描入口（测试与默认路径共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单测不能污染真实 `~/.claude/projects`，需要把 projects 根指到临时目录；
+///     生产路径则传入 `claude_projects_dir()`。
+///
+/// Code Logic（这个函数做什么）:
+///     1. canonicalize worktree；2. encode cwd；3. 列 *.jsonl 候选 (mtime, path)；
+///     4. 排序 mtime desc + path asc；5. 应用 max_files；
+///     6. 逐文件检查 max_file_bytes / max_total_bytes，有界 parse；
+///     7. 组装 sessions + truncated + diagnostics。
+pub fn scan_worktree_sessions_at(
+    worktree_path: &Path,
+    projects_dir: Option<&Path>,
+    budget: &ClaudeIndexBudget,
+) -> WorktreeSessionIndex {
     let canonical = worktree_path
         .canonicalize()
         .unwrap_or_else(|_| worktree_path.to_path_buf());
@@ -459,29 +947,95 @@ pub fn scan_worktree_sessions(worktree_path: &Path) -> WorktreeSessionIndex {
     let encoded_cwd = encode_claude_project_path(&canonical_str);
 
     let mut sessions: HashMap<String, ClaudeSessionIndex> = HashMap::new();
+    let mut reasons: Vec<String> = Vec::new();
+    let mut files_considered: u64 = 0;
+    let mut files_indexed: u64 = 0;
+    let mut bytes_read: u64 = 0;
+    let mut truncated = false;
 
-    if let Some(projects_dir) = claude_projects_dir() {
+    if let Some(projects_dir) = projects_dir {
         let target_dir = projects_dir.join(&encoded_cwd);
         if target_dir.is_dir() {
+            // 收集候选：(mtime, path)
+            let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&target_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                         continue;
                     }
-                    if let Some(index) = build_session_index(&path) {
+                    let mtime = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    candidates.push((mtime, path));
+                }
+            }
+            files_considered = candidates.len() as u64;
+
+            // mtime desc, path asc
+            candidates.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| a.1.to_string_lossy().cmp(&b.1.to_string_lossy()))
+            });
+
+            if candidates.len() > budget.max_files {
+                candidates.truncate(budget.max_files);
+                push_reason(&mut reasons, "max_files");
+                truncated = true;
+            }
+
+            for (_mtime, path) in candidates {
+                let meta_len = match std::fs::metadata(&path) {
+                    Ok(m) => m.len(),
+                    Err(_) => continue,
+                };
+                if meta_len > budget.max_file_bytes {
+                    push_reason(&mut reasons, "max_file_bytes");
+                    truncated = true;
+                    continue;
+                }
+                if bytes_read.saturating_add(meta_len) > budget.max_total_bytes {
+                    push_reason(&mut reasons, "max_total_bytes");
+                    truncated = true;
+                    break;
+                }
+
+                match build_session_index_with_budget(&path, budget) {
+                    Some((index, outcome)) => {
+                        bytes_read = bytes_read.saturating_add(outcome.bytes_read.max(meta_len));
+                        for r in outcome.reasons {
+                            push_reason(&mut reasons, &r);
+                            truncated = true;
+                        }
                         sessions.insert(index.session_id.clone(), index);
+                        files_indexed = files_indexed.saturating_add(1);
+                    }
+                    None => {
+                        // 超时/打开失败/整文件跳过：若 skipped 会在 build 内记 reason，但 None 丢 outcome。
+                        // 再检一次 metadata 以记录 max_file_bytes（双重保险已在上面处理）。
+                        if meta_len > budget.max_file_bytes {
+                            push_reason(&mut reasons, "max_file_bytes");
+                            truncated = true;
+                        }
                     }
                 }
             }
         }
     }
 
+    let diagnostics = if truncated {
+        SessionSearchDiagnostics::truncated(reasons, files_considered, files_indexed, bytes_read)
+    } else {
+        SessionSearchDiagnostics::ok(files_considered, files_indexed, bytes_read)
+    };
+
     WorktreeSessionIndex {
         worktree_path: canonical,
         encoded_cwd,
         sessions,
         last_scan_at: Utc::now().to_rfc3339(),
+        truncated,
+        diagnostics,
     }
 }
 
@@ -636,6 +1190,25 @@ pub fn search_sessions(
     hits
 }
 
+/// 在索引上搜索并包装为带 diagnostics 的 SessionSearchResult。
+///
+/// Business Logic（为什么需要这个函数）:
+///     命令层/远端路由需要返回 `{items, truncated, diagnostics}`，截断语义来自索引扫描而非搜索 limit。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 search_sessions，复制 index.truncated 与 index.diagnostics。
+pub fn search_sessions_result(
+    index: &WorktreeSessionIndex,
+    query: &str,
+    limit: usize,
+) -> SessionSearchResult {
+    SessionSearchResult {
+        items: search_sessions(index, query, limit),
+        truncated: index.truncated,
+        diagnostics: index.diagnostics.clone(),
+    }
+}
+
 /// 计算命中的优先级数值（越小越靠前）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -682,30 +1255,568 @@ fn make_hit(
 }
 
 // ---------------------------------------------------------------------------
-// AppState 集成 + 文件监听（Task 1.2）
+// AppState 集成 + 文件监听（Task 1.2 / N7 Task 5 lifecycle）
 // ---------------------------------------------------------------------------
 
 /// worktree session 索引的内存共享句柄类型别名。
 pub type SharedWorktreeSessionIndex = Arc<RwLock<WorktreeSessionIndex>>;
 
-/// 确保 worktree 的 session 索引已扫描并启动文件监听（lazy 初始化）。
+/// singleflight 进行中扫描的 watch 接收端。
+///
+/// Business Logic（为什么需要这个类型）:
+///     同一 worktree 并发搜索时只应跑一次阻塞扫描；后续调用者等待同一结果。
+///
+/// Code Logic（这个类型做什么）:
+///     `watch::Receiver<Option<Result<SharedWorktreeSessionIndex, String>>>`，None=进行中，Some=完成。
+pub type ClaudeSessionIndexInflightRx =
+    tokio::sync::watch::Receiver<Option<Result<SharedWorktreeSessionIndex, String>>>;
+
+/// 单个 worktree 的 Claude session 文件监听运行时。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     watcher 不能只存 RecommendedWatcher：trailing debounce 与 spawn_blocking 扫描是后台任务，
+///     项目移除/进程退出时必须 cancel+abort 后才能 drop，否则会幽灵写回已删除索引。
+///
+/// Code Logic（这个结构体做什么）:
+///     聚合 watcher、CancellationToken、debounce 计时器与 trailing/scan JoinHandle；
+///     `force_dispose` 取消令牌、abort 全部句柄并 drop watcher。
+pub struct ClaudeSessionWatcherRuntime {
+    /// notify 文件监听器（drop 即停止监听）
+    watcher: RecommendedWatcher,
+    /// 后台 trailing/scan 任务共享取消令牌
+    cancel: CancellationToken,
+    /// 应用层 debounce 上次处理时刻（与回调共享 Arc；字段保留所有权共置）
+    #[allow(dead_code)]
+    last_refresh: Arc<Mutex<Instant>>,
+    /// trailing 延迟重扫句柄（最多一个）
+    pending_trailing: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    /// 进行中的 leading/scan spawn 句柄
+    pending_scans: Arc<Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>>,
+}
+
+impl ClaudeSessionWatcherRuntime {
+    /// 取消并清理该运行时的全部后台任务。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目移除或 shutdown 时必须停止监听与 pending 重扫，避免写回陈旧/已移除索引。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     cancel 令牌 → abort trailing → abort pending scans → drop self（watcher）。
+    pub fn force_dispose(self) {
+        self.cancel.cancel();
+        if let Ok(mut pending) = self.pending_trailing.lock() {
+            if let Some(handle) = pending.take() {
+                handle.abort();
+            }
+        }
+        if let Ok(mut scans) = self.pending_scans.lock() {
+            for handle in scans.drain(..) {
+                handle.abort();
+            }
+        }
+        // drop watcher at end of scope
+        drop(self.watcher);
+    }
+
+    /// 测试/诊断：是否已发出取消。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     生命周期测试需要确认 dispose 后 token 已 cancel。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 cancel.is_cancelled()。
+    #[cfg(test)]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+/// watcher 事件映射后的索引动作。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     notify 事件种类与路径语义复杂（delete/rename/uncertain）；先映射为有限动作再应用，
+///     才能用纯函数测试 delete/rename/rescan 语义。
+///
+/// Code Logic（这个枚举做什么）:
+///     Upsert 重扫路径；Remove 按 session_id 删除；Rename=删旧+加新；BoundedRescan 全量有界重扫；Ignore 忽略。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionWatchPlan {
+    /// 对指定 jsonl 路径增量重索引
+    Upsert(Vec<PathBuf>),
+    /// 按 session_id（jsonl stem）从索引删除
+    Remove(Vec<String>),
+    /// rename：先删旧 id，再 upsert 新路径
+    Rename {
+        remove_ids: Vec<String>,
+        upsert_paths: Vec<PathBuf>,
+    },
+    /// 不确定事件：对 watch root 做一次有界全量重扫
+    BoundedRescan,
+    /// 忽略（域外路径 / access 等）
+    Ignore,
+}
+
+/// 把路径规范化到 owning watch root 内；域外返回 None。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     首次搜索某 worktree 时才建索引（lazy），避免启动时全量扫描拖慢。建索引后启动 notify 监听，
-///     jsonl 文件新增/修改时 debounce 500ms 后增量更新内存索引；监听失败降级为下次搜索时重扫。
+///     notify 可能上报任意路径；只处理当前 worktree transcript 目录内的文件，避免误改索引。
 ///
 /// Code Logic（这个函数做什么）:
-///     1. 取 worktree_path canonical string 作为 key；
-///     2. 读 indexes HashMap，已有 → 直接返回 clone；
-///     3. 无 → scan_worktree_sessions 建索引（**不持锁**，扫描可能耗时）；
-///     4. 短暂持写锁 insert 并 double-check（防并发重复扫描），写锁立即释放；
-///     5. **不持任何锁**调 spawn_session_watcher 启动文件监听（失败降级）。
+///     优先 canonicalize；删除后不存在则 parent canonicalize + file_name；`starts_with(root)` 校验。
+pub fn normalize_path_inside_root(path: &Path, root: &Path) -> Option<PathBuf> {
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let normalized = if path.exists() {
+        path.canonicalize().ok()?
+    } else {
+        let parent = path.parent()?;
+        let file_name = path.file_name()?;
+        let parent_canon = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        parent_canon.join(file_name)
+    };
+    if normalized.starts_with(&root_canon) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+/// 从 jsonl 路径提取 session_id（文件 stem）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     delete/rename-from 事件需要按 session_id 从内存索引移除。
+///
+/// Code Logic（这个函数做什么）:
+///     扩展名须为 jsonl；stem 非空 trim 后返回。
+fn session_id_from_jsonl_path(path: &Path) -> Option<String> {
+    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        return None;
+    }
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 过滤并规范化 watch root 内的 jsonl 路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Create/Modify/Rename 目标只关心 root 内 jsonl。
+///
+/// Code Logic（这个函数做什么）:
+///     normalize_path_inside_root + 扩展名 jsonl，保序去重。
+fn filter_jsonl_inside_root(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in paths {
+        let Some(normalized) = normalize_path_inside_root(path, root) else {
+            continue;
+        };
+        if normalized.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if !out.iter().any(|p| p == &normalized) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+/// 过滤 root 内路径并提取 session_id 列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Remove/Rename-from 需要 session_id 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     normalize 后取 stem，保序去重。
+fn filter_session_ids_inside_root(paths: &[PathBuf], root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for path in paths {
+        let Some(normalized) = normalize_path_inside_root(path, root) else {
+            continue;
+        };
+        let Some(id) = session_id_from_jsonl_path(&normalized) else {
+            continue;
+        };
+        if !out.iter().any(|x| x == &id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// 将 notify 事件映射为 SessionWatchPlan。
+///
+/// Business Logic（为什么需要这个函数）:
+///     delete 必须删索引、rename 必须删旧+加新、不确定事件只触发一次有界 rescan；
+///     这是 watcher 正确性的核心，必须可单测。
+///
+/// Code Logic（这个函数做什么）:
+///     规范化路径到 root 内；Create/Data/Metadata → Upsert；Remove → Remove；
+///     Rename From/To/Both → 对应 Remove/Upsert/Rename；Any/Other/Modify(Any|Other) → BoundedRescan；
+///     Access 与空有效路径 → Ignore。
+pub fn classify_session_watch_event(
+    kind: &EventKind,
+    paths: &[PathBuf],
+    watch_root: &Path,
+) -> SessionWatchPlan {
+    match kind {
+        EventKind::Access(_) => SessionWatchPlan::Ignore,
+        EventKind::Create(_) => {
+            let upsert = filter_jsonl_inside_root(paths, watch_root);
+            if upsert.is_empty() {
+                SessionWatchPlan::Ignore
+            } else {
+                SessionWatchPlan::Upsert(upsert)
+            }
+        }
+        EventKind::Remove(RemoveKind::Any | RemoveKind::File | RemoveKind::Other) => {
+            let ids = filter_session_ids_inside_root(paths, watch_root);
+            if ids.is_empty() {
+                // 目录删除或无法识别：有界 rescan 收敛
+                if paths
+                    .iter()
+                    .any(|p| normalize_path_inside_root(p, watch_root).is_some())
+                {
+                    SessionWatchPlan::BoundedRescan
+                } else {
+                    SessionWatchPlan::Ignore
+                }
+            } else {
+                SessionWatchPlan::Remove(ids)
+            }
+        }
+        EventKind::Remove(RemoveKind::Folder) => {
+            if paths
+                .iter()
+                .any(|p| normalize_path_inside_root(p, watch_root).is_some())
+            {
+                SessionWatchPlan::BoundedRescan
+            } else {
+                SessionWatchPlan::Ignore
+            }
+        }
+        EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Metadata(_)) => {
+            let upsert = filter_jsonl_inside_root(paths, watch_root);
+            if upsert.is_empty() {
+                SessionWatchPlan::Ignore
+            } else {
+                SessionWatchPlan::Upsert(upsert)
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(mode)) => {
+            classify_rename_event(*mode, paths, watch_root)
+        }
+        EventKind::Modify(ModifyKind::Any)
+        | EventKind::Modify(ModifyKind::Other)
+        | EventKind::Any
+        | EventKind::Other => {
+            // 不确定事件：只要有 root 内路径或 paths 为空（后端未给路径）都请求有界 rescan
+            if paths.is_empty()
+                || paths
+                    .iter()
+                    .any(|p| normalize_path_inside_root(p, watch_root).is_some())
+            {
+                SessionWatchPlan::BoundedRescan
+            } else {
+                SessionWatchPlan::Ignore
+            }
+        }
+    }
+}
+
+/// 映射 rename 子事件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     rename 在不同 OS 上拆成 From/To/Both；必须稳定收敛为 remove old + index new。
+///
+/// Code Logic（这个函数做什么）:
+///     From→Remove；To→Upsert；Both→Rename(paths[0], paths[1])；Any/Other 按路径存在性推断。
+fn classify_rename_event(
+    mode: RenameMode,
+    paths: &[PathBuf],
+    watch_root: &Path,
+) -> SessionWatchPlan {
+    match mode {
+        RenameMode::From => {
+            let ids = filter_session_ids_inside_root(paths, watch_root);
+            if ids.is_empty() {
+                SessionWatchPlan::Ignore
+            } else {
+                SessionWatchPlan::Remove(ids)
+            }
+        }
+        RenameMode::To => {
+            let upsert = filter_jsonl_inside_root(paths, watch_root);
+            if upsert.is_empty() {
+                SessionWatchPlan::Ignore
+            } else {
+                SessionWatchPlan::Upsert(upsert)
+            }
+        }
+        RenameMode::Both => {
+            let from = paths.first().cloned();
+            let to = paths.get(1).cloned();
+            let remove_ids = from
+                .as_ref()
+                .map(|p| filter_session_ids_inside_root(std::slice::from_ref(p), watch_root))
+                .unwrap_or_default();
+            let upsert_paths = to
+                .as_ref()
+                .map(|p| filter_jsonl_inside_root(std::slice::from_ref(p), watch_root))
+                .unwrap_or_default();
+            if remove_ids.is_empty() && upsert_paths.is_empty() {
+                SessionWatchPlan::Ignore
+            } else if remove_ids.is_empty() {
+                SessionWatchPlan::Upsert(upsert_paths)
+            } else if upsert_paths.is_empty() {
+                SessionWatchPlan::Remove(remove_ids)
+            } else {
+                SessionWatchPlan::Rename {
+                    remove_ids,
+                    upsert_paths,
+                }
+            }
+        }
+        RenameMode::Any | RenameMode::Other => {
+            // 不确定 rename：两路径 → Both 语义；单路径按存在性；否则 BoundedRescan
+            if paths.len() >= 2 {
+                return classify_rename_event(RenameMode::Both, paths, watch_root);
+            }
+            if let Some(path) = paths.first() {
+                let Some(normalized) = normalize_path_inside_root(path, watch_root) else {
+                    return SessionWatchPlan::Ignore;
+                };
+                if normalized.exists() {
+                    let upsert = filter_jsonl_inside_root(&[normalized], watch_root);
+                    if upsert.is_empty() {
+                        SessionWatchPlan::Ignore
+                    } else {
+                        SessionWatchPlan::Upsert(upsert)
+                    }
+                } else {
+                    let ids = filter_session_ids_inside_root(&[normalized], watch_root);
+                    if ids.is_empty() {
+                        SessionWatchPlan::BoundedRescan
+                    } else {
+                        SessionWatchPlan::Remove(ids)
+                    }
+                }
+            } else {
+                SessionWatchPlan::BoundedRescan
+            }
+        }
+    }
+}
+
+/// 将 SessionWatchPlan 应用到内存索引（阻塞，供 spawn_blocking / 测试调用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     事件映射与索引更新解耦；delete/rename/rescan 语义在此落地。
+///
+/// Code Logic（这个函数做什么）:
+///     Remove 写锁删 id；Upsert 走 refresh_sessions_from_paths；Rename 先删后 upsert；
+///     BoundedRescan 走 refresh_all_sessions。
+pub fn apply_session_watch_plan(
+    shared: &SharedWorktreeSessionIndex,
+    worktree_canonical: &Path,
+    watch_dir: &Path,
+    plan: SessionWatchPlan,
+) {
+    match plan {
+        SessionWatchPlan::Ignore => {}
+        SessionWatchPlan::Remove(ids) => {
+            let mut guard = match shared.write() {
+                Ok(g) => g,
+                Err(err) => {
+                    tracing::warn!("session index 写锁中毒，跳过 delete: {err}");
+                    return;
+                }
+            };
+            for id in ids {
+                guard.sessions.remove(&id);
+            }
+            guard.last_scan_at = Utc::now().to_rfc3339();
+        }
+        SessionWatchPlan::Upsert(paths) => {
+            if paths.is_empty() {
+                return;
+            }
+            refresh_sessions_from_paths(shared, worktree_canonical, watch_dir, &paths);
+        }
+        SessionWatchPlan::Rename {
+            remove_ids,
+            upsert_paths,
+        } => {
+            {
+                let mut guard = match shared.write() {
+                    Ok(g) => g,
+                    Err(err) => {
+                        tracing::warn!("session index 写锁中毒，跳过 rename remove: {err}");
+                        return;
+                    }
+                };
+                for id in remove_ids {
+                    guard.sessions.remove(&id);
+                }
+                guard.last_scan_at = Utc::now().to_rfc3339();
+            }
+            if !upsert_paths.is_empty() {
+                refresh_sessions_from_paths(shared, worktree_canonical, watch_dir, &upsert_paths);
+            }
+        }
+        SessionWatchPlan::BoundedRescan => {
+            refresh_all_sessions(shared, watch_dir);
+        }
+    }
+}
+
+/// 读取指定 worktree key 的 dispose 世代。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ensure 扫描前后需要比对世代，识别“扫描期间项目已被移除”。
+///
+/// Code Logic（这个函数做什么）:
+///     读 `workbench_claude_session_index_dispose_epochs`；缺失 key 视为 0；锁中毒时返回 0 并 warn。
+fn dispose_epoch_for_key(state: &AppState, key: &str) -> u64 {
+    match state.workbench_claude_session_index_dispose_epochs.lock() {
+        Ok(map) => map.get(key).copied().unwrap_or(0),
+        Err(err) => {
+            tracing::warn!("session dispose epochs 锁中毒，按 0 处理 key={key}: {err}");
+            0
+        }
+    }
+}
+
+/// 提升 key 的 dispose 世代（单调 +1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     dispose 必须让任何 in-flight scan 在完成后看到世代变化，从而拒绝写回。
+///
+/// Code Logic（这个函数做什么）:
+///     写锁 entry.or_insert(0) 后 saturating_add(1)。
+fn bump_dispose_epoch(state: &AppState, key: &str) {
+    match state.workbench_claude_session_index_dispose_epochs.lock() {
+        Ok(mut map) => {
+            let entry = map.entry(key.to_string()).or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+        Err(err) => {
+            tracing::warn!("session dispose epochs 写锁中毒，无法 bump key={key}: {err}");
+        }
+    }
+}
+
+/// 仅清 watcher / indexes / inflight 工件，不 bump dispose 世代。
+///
+/// Business Logic（为什么需要这个函数）:
+///     finish 路径在 insert 后发现已被 dispose 时需撤回刚写入的工件，但世代已由 dispose 提升，不可再 bump。
+///
+/// Code Logic（这个函数做什么）:
+///     force_dispose watcher；indexes.remove；try_lock 清 inflight entry。
+fn purge_session_index_artifacts(state: &AppState, key: &str) {
+    if let Ok(mut watchers) = state.workbench_claude_session_watchers.lock() {
+        if let Some(runtime) = watchers.remove(key) {
+            runtime.force_dispose();
+        }
+    }
+    if let Ok(mut indexes) = state.workbench_claude_session_indexes.write() {
+        indexes.remove(key);
+    }
+    if let Ok(mut inflight) = state.workbench_claude_session_index_inflight.try_lock() {
+        inflight.remove(key);
+    }
+}
+
+/// 按 worktree 路径列表清理 session 索引与 watcher 运行时。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户移除项目时，相关 worktree 的索引与后台监听应立即停止，避免继续占用资源或写回。
+///
+/// Code Logic（这个函数做什么）:
+///     对每个 path canonicalize 为 key，bump dispose epoch，force_dispose watcher，
+///     并清 indexes/inflight 条目（raw key 亦尝试一次，防止 canonicalize 前后不一致）。
+pub fn dispose_session_indexes_for_worktree_paths(state: &AppState, worktree_paths: &[PathBuf]) {
+    for path in worktree_paths {
+        let key = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        dispose_session_index_by_key(state, &key);
+        // 也尝试 raw 字符串 key（防止 canonicalize 前后不一致的历史条目）
+        let raw = path.to_string_lossy().to_string();
+        if raw != key {
+            dispose_session_index_by_key(state, &raw);
+        }
+    }
+}
+
+/// 关闭全部 Claude session 索引与 watcher（进程 shutdown）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     后端退出时必须 cancel 所有 debounce/scan 任务并 drop watcher，避免幽灵任务与句柄泄漏。
+///
+/// Code Logic（这个函数做什么）:
+///     drain watchers 并 force_dispose；clear indexes / dispose epochs；best-effort 清 inflight（try_lock）。
+pub fn shutdown_all_claude_session_indexes(state: &AppState) {
+    let runtimes: Vec<ClaudeSessionWatcherRuntime> = {
+        let mut map = match state.workbench_claude_session_watchers.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!("shutdown session watchers 锁中毒: {err}");
+                return;
+            }
+        };
+        map.drain().map(|(_, runtime)| runtime).collect()
+    };
+    for runtime in runtimes {
+        runtime.force_dispose();
+    }
+    if let Ok(mut indexes) = state.workbench_claude_session_indexes.write() {
+        indexes.clear();
+    } else {
+        tracing::warn!("shutdown session indexes 写锁中毒");
+    }
+    if let Ok(mut epochs) = state.workbench_claude_session_index_dispose_epochs.lock() {
+        epochs.clear();
+    } else {
+        tracing::warn!("shutdown session dispose epochs 锁中毒");
+    }
+    // inflight 是 tokio Mutex；shutdown 路径 best-effort try_lock，避免阻塞退出
+    if let Ok(mut inflight) = state.workbench_claude_session_index_inflight.try_lock() {
+        inflight.clear();
+    }
+}
+
+/// 按 key 移除单个索引 + runtime，并提升 dispose 世代。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单 worktree 清理与失败降级共用同一移除语义；必须让并发 ensure 无法写回幽灵索引。
+///
+/// Code Logic（这个函数做什么）:
+///     bump dispose epoch → purge watcher/indexes/inflight。
+fn dispose_session_index_by_key(state: &AppState, key: &str) {
+    bump_dispose_epoch(state, key);
+    purge_session_index_artifacts(state, key);
+}
+
+/// 确保 worktree 的 session 索引已扫描并启动文件监听（lazy + singleflight + spawn_blocking）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     首次搜索某 worktree 时才建索引（lazy），避免启动时全量扫描拖慢。扫描可能阻塞数秒，
+///     必须放在 spawn_blocking 以免卡住 tokio；并发请求必须 singleflight 共享一次扫描。
+///
+/// Code Logic（这个函数做什么）:
+///     1. 快路径：indexes 读锁命中直接返回；
+///     2. 捕获 dispose start_epoch；
+///     3. 锁 inflight map：已有 Receiver → 等待 Some；否则创建 watch(None) 并成为 leader；
+///     4. leader/回退：`finish_scan_and_insert(start_epoch)`（spawn_blocking + epoch 守卫 insert）；
+///     5. leader send Some(Ok) 并 remove inflight。
 ///
 /// **为何写锁不活到函数末尾（防死锁）**：
-///     spawn_session_watcher 的失败分支会调 remove_index_on_failure，后者再次获取同一个
-///     `RwLock` 的写锁。标准库 RwLock 不支持写锁重入，若本函数在调用 spawn_session_watcher 时
-///     仍持有写锁，将必然死锁。故写锁只在 insert 时短暂持有，调用 spawn_session_watcher 前已释放。
-pub fn ensure_worktree_session_index_scanned(
+///     spawn_session_watcher 失败分支会再取同一 indexes 写锁；标准库 RwLock 不支持重入。
+pub async fn ensure_worktree_session_index_scanned(
     state: &AppState,
     worktree_path: &Path,
 ) -> SharedWorktreeSessionIndex {
@@ -714,7 +1825,7 @@ pub fn ensure_worktree_session_index_scanned(
         .unwrap_or_else(|_| worktree_path.to_path_buf());
     let key = canonical.to_string_lossy().to_string();
 
-    // 快速路径：读锁查缓存，已有索引直接返回
+    // 快速路径
     {
         let indexes = state
             .workbench_claude_session_indexes
@@ -725,29 +1836,195 @@ pub fn ensure_worktree_session_index_scanned(
         }
     }
 
-    // 慢路径：先建索引（不持锁，扫描可能耗时）
-    let index = scan_worktree_sessions(&canonical);
-    let shared = Arc::new(RwLock::new(index));
+    // 在进入 inflight 前捕获 dispose 世代；扫描期间 dispose 会 bump，finish 据此 no-op
+    let start_epoch = dispose_epoch_for_key(state, &key);
 
-    // 短暂持写锁 insert 并 double-check（防止并发重复扫描时两个线程都建索引）
+    // singleflight：注册或加入
+    let (is_leader, mut rx, tx_opt) = {
+        let mut map = state.workbench_claude_session_index_inflight.lock().await;
+        if let Some(existing_rx) = map.get(&key) {
+            (false, existing_rx.clone(), None)
+        } else {
+            let (tx, rx) =
+                tokio::sync::watch::channel(None::<Result<SharedWorktreeSessionIndex, String>>);
+            map.insert(key.clone(), rx.clone());
+            (true, rx, Some(tx))
+        }
+    };
+
+    if !is_leader {
+        // follower：等待 leader 结果；失败则回退自扫
+        loop {
+            let current = rx.borrow().clone();
+            if let Some(result) = current {
+                match result {
+                    Ok(shared) => return shared,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Claude session singleflight 扫描失败，follower 回退自扫 key={key}: {err}"
+                        );
+                        break;
+                    }
+                }
+            }
+            if rx.changed().await.is_err() {
+                // sender dropped
+                break;
+            }
+        }
+        // 回退：再看缓存，否则自己扫（仍 spawn_blocking）
+        {
+            let indexes = state
+                .workbench_claude_session_indexes
+                .read()
+                .expect("session indexes 读锁中毒");
+            if let Some(existing) = indexes.get(&key) {
+                return Arc::clone(existing);
+            }
+        }
+        // 回退路径重新捕获 epoch（dispose 可能已发生）
+        let fallback_epoch = dispose_epoch_for_key(state, &key);
+        return finish_scan_and_insert(state, &key, &canonical, fallback_epoch).await;
+    }
+
+    // leader
+    let shared = finish_scan_and_insert(state, &key, &canonical, start_epoch).await;
+    if let Some(tx) = tx_opt {
+        let _ = tx.send(Some(Ok(Arc::clone(&shared))));
+    }
     {
+        let mut map = state.workbench_claude_session_index_inflight.lock().await;
+        map.remove(&key);
+    }
+    shared
+}
+
+/// 构造未写入缓存的空索引句柄（dispose 竞态 no-op 返回值）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     扫描期间 key 已被 dispose 时，调用方仍需要一个 Shared 句柄，但绝不能写入 indexes 或启 watcher。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 Arc 包装的空 WorktreeSessionIndex（truncated=false，diagnostics=unavailable）。
+fn empty_uncached_session_index(canonical: &Path) -> SharedWorktreeSessionIndex {
+    Arc::new(RwLock::new(WorktreeSessionIndex {
+        worktree_path: canonical.to_path_buf(),
+        encoded_cwd: encode_claude_project_path(&canonical.to_string_lossy()),
+        sessions: HashMap::new(),
+        last_scan_at: Utc::now().to_rfc3339(),
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    }))
+}
+
+/// leader/回退路径：spawn_blocking 扫描 + dispose-epoch 守卫的 insert + watcher。
+///
+/// Business Logic（为什么需要这个函数）:
+///     singleflight leader 与 follower 失败回退共用同一插入路径；若扫描期间项目已被 dispose，
+///     必须禁止写回索引/启动 watcher，否则会留下幽灵资源。
+///
+/// Code Logic（这个函数做什么）:
+///     1. （测试）可选 mid-scan barrier；
+///     2. spawn_blocking 默认扫描；
+///     3. 写锁下比对 start_epoch 与当前 dispose epoch：变化则不 insert；
+///     4. double-check 已有 entry 则复用且不重复 spawn watcher；
+///     5. 仅本路径新 insert 时 spawn watcher，并在 spawn 前后再检 epoch，必要时 purge。
+async fn finish_scan_and_insert(
+    state: &AppState,
+    key: &str,
+    canonical: &Path,
+    start_epoch: u64,
+) -> SharedWorktreeSessionIndex {
+    // 测试钩子：让 dispose 能在 scan 进行中介入
+    #[cfg(test)]
+    {
+        scan_test_hooks_wait_before_scan().await;
+    }
+
+    // 扫描前再检一次：若已 dispose，跳过阻塞扫描直接返回
+    if dispose_epoch_for_key(state, key) != start_epoch {
+        tracing::debug!(
+            "Claude session 扫描前检测到 dispose，跳过 insert key={key} start_epoch={start_epoch}"
+        );
+        return empty_uncached_session_index(canonical);
+    }
+
+    let canonical_owned = canonical.to_path_buf();
+    let scan_result =
+        tokio::task::spawn_blocking(move || scan_worktree_sessions(&canonical_owned)).await;
+
+    let index = match scan_result {
+        Ok(idx) => idx,
+        Err(err) => {
+            tracing::warn!("Claude session spawn_blocking 扫描 join 失败 key={key}: {err}");
+            // 失败时返回空索引（若未 dispose 仍可插入，避免永久卡死）
+            WorktreeSessionIndex {
+                worktree_path: canonical.to_path_buf(),
+                encoded_cwd: encode_claude_project_path(&canonical.to_string_lossy()),
+                sessions: HashMap::new(),
+                last_scan_at: Utc::now().to_rfc3339(),
+                truncated: false,
+                diagnostics: SessionSearchDiagnostics::unavailable(),
+            }
+        }
+    };
+
+    let shared = Arc::new(RwLock::new(index));
+    let mut inserted = false;
+    let to_return = {
+        // 写锁内原子判定 dispose + double-check
+        if dispose_epoch_for_key(state, key) != start_epoch {
+            tracing::debug!(
+                "Claude session 扫描后 dispose 世代变化，跳过 insert key={key} start_epoch={start_epoch}"
+            );
+            return empty_uncached_session_index(canonical);
+        }
         let mut indexes = state
             .workbench_claude_session_indexes
             .write()
             .expect("session indexes 写锁中毒");
-        if let Some(existing) = indexes.get(&key) {
-            // 另一个线程已经建好索引，用它，丢弃我们刚建的（让 Arc 析构）
-            return Arc::clone(existing);
+        // 再检 epoch（dispose 可能在等写锁时发生）
+        if dispose_epoch_for_key(state, key) != start_epoch {
+            tracing::debug!(
+                "Claude session 写锁内 dispose 世代变化，跳过 insert key={key} start_epoch={start_epoch}"
+            );
+            return empty_uncached_session_index(canonical);
         }
-        indexes.insert(key.clone(), Arc::clone(&shared));
-    }
+        if let Some(existing) = indexes.get(key) {
+            Arc::clone(existing)
+        } else {
+            indexes.insert(key.to_string(), Arc::clone(&shared));
+            inserted = true;
+            Arc::clone(&shared)
+        }
+    };
     // 写锁已释放
 
-    // 启动文件监听（不持锁，失败时 remove_index_on_failure 自己获取写锁不会重入死锁）
-    spawn_session_watcher(state, &key, &canonical, &shared);
-
-    shared
+    // 仅本路径新写入缓存时启动 watcher；复用已有 index 不 thrash watcher
+    if inserted {
+        if dispose_epoch_for_key(state, key) != start_epoch {
+            // insert 与 dispose 竞态：撤回缓存与可能已注册的 watcher
+            purge_session_index_artifacts(state, key);
+            return empty_uncached_session_index(canonical);
+        }
+        spawn_session_watcher(state, key, canonical, &to_return);
+        if dispose_epoch_for_key(state, key) != start_epoch {
+            purge_session_index_artifacts(state, key);
+            return empty_uncached_session_index(canonical);
+        }
+    }
+    to_return
 }
+
+#[cfg(test)]
+#[path = "claude_sessions_scan_test_hooks.rs"]
+mod scan_test_hooks;
+
+#[cfg(test)]
+async fn scan_test_hooks_wait_before_scan() {
+    scan_test_hooks::wait_before_scan().await;
+}
+
 
 /// 为指定 worktree 启动 notify 文件监听。
 ///
@@ -756,8 +2033,10 @@ pub fn ensure_worktree_session_index_scanned(
 ///
 /// Code Logic（这个函数做什么）:
 ///     用 notify::RecommendedWatcher 监听 ~/.claude/projects/<encoded_cwd>/ 目录（RecursiveMode::NonRecursive），
-///     poll_interval=500ms 控制 poll backend 轮询频率；回调内再做一层应用层 **leading + trailing debounce**
-///     （见 DEBOUNCE_INTERVAL 注释），对 Create/Modify 的 jsonl 文件 spawn_blocking 重扫并更新对应 HashMap entry。
+///     poll_interval=500ms 控制 poll backend 轮询频率；回调内 classify_session_watch_event 映射
+///     create/modify/delete/rename/uncertain，再做 **leading + trailing debounce** 后
+///     spawn_blocking 应用 plan。watcher + cancel + debounce/scan handles 一并写入
+///     `ClaudeSessionWatcherRuntime`。
 ///     **降级语义（spec 5.1）**：watcher 创建失败或 watch 失败时，必须从 workbench_claude_session_indexes
 ///     移除该 key 的索引，保证下次 ensure_worktree_session_index_scanned 命中不到缓存而重走慢路径重扫。
 fn spawn_session_watcher(
@@ -789,23 +2068,29 @@ fn spawn_session_watcher(
         return;
     }
 
-    // 回调闭包捕获共享索引 Arc 与 worktree canonical（用于重扫新文件）
     let index_handle = Arc::clone(shared);
     let watch_dir_for_cb = watch_dir.clone();
     let worktree_canonical_owned = worktree_canonical.to_path_buf();
 
-    // 应用层 debounce 计时器：记录"上次重扫时刻"。初始化为很久以前，保证首次事件走 leading 立即处理。
-    let last_refresh = Arc::new(std::sync::Mutex::new(
+    let cancel = CancellationToken::new();
+    let last_refresh = Arc::new(Mutex::new(
         Instant::now() - DEBOUNCE_INTERVAL - Duration::from_secs(1),
     ));
+    let pending_trailing: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(None));
+    let pending_scans: Arc<Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
-    // trailing 兜底任务句柄：累积期内每次新事件都 abort 旧的并 spawn 新的，保证 trailing 永远是
-    // 「最后一次事件后 DEBOUNCE_INTERVAL」。None 表示当前无 pending 的兜底任务。
-    let pending_trailing: Arc<std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let cancel_cb = cancel.clone();
+    let last_refresh_cb = Arc::clone(&last_refresh);
+    let pending_trailing_cb = Arc::clone(&pending_trailing);
+    let pending_scans_cb = Arc::clone(&pending_scans);
 
     let watcher: Result<RecommendedWatcher, notify::Error> = Watcher::new(
         move |res: Result<notify::Event, notify::Error>| {
+            if cancel_cb.is_cancelled() {
+                return;
+            }
             let event = match res {
                 Ok(e) => e,
                 Err(err) => {
@@ -813,27 +2098,44 @@ fn spawn_session_watcher(
                     return;
                 }
             };
-            // 只关心 Create/Modify，且路径扩展名为 jsonl
-            let is_relevant = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
-            if !is_relevant {
-                return;
-            }
-            let jsonl_paths: Vec<PathBuf> = event
-                .paths
-                .into_iter()
-                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
-                .collect();
-            if jsonl_paths.is_empty() {
+            let plan = classify_session_watch_event(&event.kind, &event.paths, &watch_dir_for_cb);
+            if matches!(plan, SessionWatchPlan::Ignore) {
                 return;
             }
 
-            // 应用层 leading + trailing debounce。
-            // - leading：距上次重扫 ≥ DEBOUNCE_INTERVAL → 立即重扫，更新 last，并取消 pending trailing。
-            // - trailing：< DEBOUNCE_INTERVAL → 不立即重扫，但 abort 旧的 trailing 任务并 spawn 新的
-            //   「DEBOUNCE_INTERVAL 后重扫」任务，保证最后一次事件后 500ms 必定兜底重扫（不漏内容）。
-            // 锁获取顺序固定为「先 last，后 pending」，避免与其它路径交叉死锁。
+            // Remove/Rename 立即应用（索引正确性优先）；Upsert/BoundedRescan 走 leading+trailing debounce。
+            let immediate = matches!(
+                plan,
+                SessionWatchPlan::Remove(_) | SessionWatchPlan::Rename { .. }
+            );
+
+            if immediate {
+                if let Ok(mut pending) = pending_trailing_cb.lock() {
+                    if let Some(handle) = pending.take() {
+                        handle.abort();
+                    }
+                }
+                let index_for_task = Arc::clone(&index_handle);
+                let dir = watch_dir_for_cb.clone();
+                let worktree = worktree_canonical_owned.clone();
+                let cancel_task = cancel_cb.clone();
+                let scans = Arc::clone(&pending_scans_cb);
+                let handle = tauri::async_runtime::spawn_blocking(move || {
+                    if cancel_task.is_cancelled() {
+                        return;
+                    }
+                    apply_session_watch_plan(&index_for_task, &worktree, &dir, plan);
+                });
+                if let Ok(mut list) = scans.lock() {
+                    // tauri JoinHandle 无 is_finished；dispose 时统一 abort，此处只登记。
+                    list.push(handle);
+                }
+                return;
+            }
+
+            // 应用层 leading + trailing debounce（Upsert / BoundedRescan）。
             let should_process_now = {
-                let mut last = match last_refresh.lock() {
+                let mut last = match last_refresh_cb.lock() {
                     Ok(g) => g,
                     Err(err) => {
                         tracing::warn!("debounce 计时器锁中毒，跳本次重扫: {err}");
@@ -849,8 +2151,7 @@ fn spawn_session_watcher(
             };
 
             if should_process_now {
-                // leading：立即处理。先取消 pending trailing（如果有），避免兜底任务紧随其后重复重扫。
-                if let Ok(mut pending) = pending_trailing.lock() {
+                if let Ok(mut pending) = pending_trailing_cb.lock() {
                     if let Some(handle) = pending.take() {
                         handle.abort();
                     }
@@ -858,12 +2159,20 @@ fn spawn_session_watcher(
                 let index_for_task = Arc::clone(&index_handle);
                 let dir = watch_dir_for_cb.clone();
                 let worktree = worktree_canonical_owned.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    refresh_sessions_from_paths(&index_for_task, &worktree, &dir, &jsonl_paths);
+                let cancel_task = cancel_cb.clone();
+                let scans = Arc::clone(&pending_scans_cb);
+                let handle = tauri::async_runtime::spawn_blocking(move || {
+                    if cancel_task.is_cancelled() {
+                        return;
+                    }
+                    apply_session_watch_plan(&index_for_task, &worktree, &dir, plan);
                 });
+                if let Ok(mut list) = scans.lock() {
+                    list.push(handle);
+                };
             } else {
-                // trailing：abort 旧的 trailing 任务（若有），再 spawn 一个 500ms 后执行的兜底重扫。
-                let mut pending = match pending_trailing.lock() {
+                // trailing：不确定/高频 upsert 合并为一次有界全量 rescan（debounce 窗口末尾）
+                let mut pending = match pending_trailing_cb.lock() {
                     Ok(g) => g,
                     Err(err) => {
                         tracing::warn!("debounce trailing 锁中毒，跳本次兜底安排: {err}");
@@ -875,20 +2184,38 @@ fn spawn_session_watcher(
                 }
                 let index_clone = Arc::clone(&index_handle);
                 let dir_clone = watch_dir_for_cb.clone();
-                let pending_clone = Arc::clone(&pending_trailing);
+                let worktree_clone = worktree_canonical_owned.clone();
+                let pending_clone = Arc::clone(&pending_trailing_cb);
+                let cancel_task = cancel_cb.clone();
+                let scans = Arc::clone(&pending_scans_cb);
+                // trailing 统一有界 rescan，保证窗口内 delete+create 混合事件最终一致
+                let trailing_plan = SessionWatchPlan::BoundedRescan;
                 let handle = tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(DEBOUNCE_INTERVAL).await;
-                    // sleep 结束：先把自己的句柄从 pending 清掉（表示已执行，不再可 abort），
-                    // 再 spawn_blocking 全量重扫（兜底，保证 debounce 窗口内所有变更最终都被刷新，
-                    // 不依赖事件累积的路径集合），await 确保重扫完成。
+                    tokio::select! {
+                        _ = cancel_task.cancelled() => return,
+                        _ = tokio::time::sleep(DEBOUNCE_INTERVAL) => {}
+                    }
+                    if cancel_task.is_cancelled() {
+                        return;
+                    }
                     if let Ok(mut p) = pending_clone.lock() {
                         p.take();
                     }
-                    tauri::async_runtime::spawn_blocking(move || {
-                        refresh_all_sessions(&index_clone, &dir_clone);
-                    })
-                    .await
-                    .ok();
+                    let cancel_scan = cancel_task.clone();
+                    let scan_handle = tauri::async_runtime::spawn_blocking(move || {
+                        if cancel_scan.is_cancelled() {
+                            return;
+                        }
+                        apply_session_watch_plan(
+                            &index_clone,
+                            &worktree_clone,
+                            &dir_clone,
+                            trailing_plan,
+                        );
+                    });
+                    if let Ok(mut list) = scans.lock() {
+                        list.push(scan_handle);
+                    }
                 });
                 *pending = Some(handle);
             }
@@ -899,7 +2226,6 @@ fn spawn_session_watcher(
     let mut watcher = match watcher {
         Ok(w) => w,
         Err(err) => {
-            // 降级：移除已写入的索引，下次搜索会重扫（spec 5.1）
             remove_index_on_failure(state, key);
             tracing::warn!(
                 "启动 Claude session 文件监听失败，已移除索引（下次搜索将重扫）key={key}: {err}"
@@ -909,7 +2235,6 @@ fn spawn_session_watcher(
     };
 
     if let Err(err) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
-        // 降级：移除已写入的索引，下次搜索会重扫（spec 5.1）
         remove_index_on_failure(state, key);
         tracing::warn!(
             "监听 Claude session 目录失败，已移除索引（下次搜索将重扫）{:?}: {err}",
@@ -918,19 +2243,28 @@ fn spawn_session_watcher(
         return;
     }
 
-    // 存入 watchers HashMap（key 同 indexes）
+    let runtime = ClaudeSessionWatcherRuntime {
+        watcher,
+        cancel,
+        last_refresh,
+        pending_trailing,
+        pending_scans,
+    };
     let mut watchers = state
         .workbench_claude_session_watchers
         .lock()
         .expect("session watchers 锁中毒");
-    watchers.insert(key.to_string(), watcher);
+    // 同 key 旧 runtime（极少见）先 dispose
+    if let Some(old) = watchers.insert(key.to_string(), runtime) {
+        old.force_dispose();
+    }
     tracing::info!(
         "已启动 Claude session 文件监听 key={key} dir={:?}",
         watch_dir
     );
 }
 
-/// 监听失败降级时从 indexes 缓存移除指定 worktree 的索引（spec 5.1）。
+/// 监听失败降级时从 indexes/watchers 缓存移除指定 worktree 的索引（spec 5.1）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     watcher 创建/启动失败时，索引已写入 workbench_claude_session_indexes，若不移除，
@@ -938,18 +2272,10 @@ fn spawn_session_watcher(
 ///     spec 5.1 要求监听失败降级为每次搜索重扫，故必须删除该 key。
 ///
 /// Code Logic（这个函数做什么）:
-///     持写锁删除 indexes 中 key 对应的 entry；失败（如锁中毒）只 warn 不 panic。
+///     dispose_session_index_by_key：清 runtime（若有）与 indexes entry。
 fn remove_index_on_failure(state: &AppState, key: &str) {
-    let mut indexes = match state.workbench_claude_session_indexes.write() {
-        Ok(g) => g,
-        Err(err) => {
-            tracing::warn!("移除 session 索引时写锁中毒（key={key}）: {err}");
-            return;
-        }
-    };
-    if indexes.remove(key).is_some() {
-        tracing::info!("监听失败已移除 worktree session 索引缓存（下次搜索重扫）key={key}");
-    }
+    dispose_session_index_by_key(state, key);
+    tracing::info!("监听失败已移除 worktree session 索引缓存（下次搜索重扫）key={key}");
 }
 
 /// 重扫指定 jsonl 路径并更新内存索引。
@@ -958,40 +2284,29 @@ fn remove_index_on_failure(state: &AppState, key: &str) {
 ///     notify 回调收到文件变化事件后，需要把对应 session 的索引刷新，保证搜索结果新鲜。
 ///
 /// Code Logic（这个函数做什么）:
-///     对每个路径调 build_session_index（成功则 upsert，失败则从索引移除该 session）；
-///     同时扫描目录里可能新增的其它 jsonl 文件（兜底），更新 last_scan_at。
+///     **先在写锁外**用默认预算 parse 变更路径与兜底新文件，再短暂持写锁原子 apply；
+///     成功 upsert、失败按 stem 移除；更新 last_scan_at。
 fn refresh_sessions_from_paths(
     shared: &SharedWorktreeSessionIndex,
     worktree_canonical: &Path,
     dir: &Path,
     changed_paths: &[PathBuf],
 ) {
-    let mut guard = match shared.write() {
-        Ok(g) => g,
-        Err(err) => {
-            tracing::warn!("session index 写锁中毒，跳过增量更新: {err}");
-            return;
-        }
-    };
-
+    // 锁外解析变更路径（默认预算）
+    let mut parsed: Vec<(String, Option<ClaudeSessionIndex>)> = Vec::new();
     for path in changed_paths {
-        match build_session_index(path) {
-            Some(index) => {
-                guard.sessions.insert(index.session_id.clone(), index);
-            }
-            None => {
-                // 文件可能被删除或解析失败，按 stem 移除
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let stem = stem.trim().to_string();
-                    if !stem.is_empty() {
-                        guard.sessions.remove(&stem);
-                    }
-                }
-            }
-        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        let index = build_session_index(path);
+        parsed.push((stem, index));
     }
 
-    // 兜底：扫描目录里可能新增但未在事件 paths 里的 jsonl
+    // 锁外收集「可能新增」的 jsonl（不查现有 map，写锁内再过滤）
+    let mut extras: Vec<ClaudeSessionIndex> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -1002,31 +2317,132 @@ fn refresh_sessions_from_paths(
                 Some(s) if !s.trim().is_empty() => s.trim().to_string(),
                 _ => continue,
             };
-            if guard.sessions.contains_key(&stem) {
+            // 已在 changed_paths 处理过的跳过
+            if parsed.iter().any(|(s, _)| s == &stem) {
                 continue;
             }
             if let Some(index) = build_session_index(&p) {
-                guard.sessions.insert(index.session_id.clone(), index);
+                extras.push(index);
             }
         }
     }
 
-    // 保持 worktree_path / encoded_cwd 不变（重扫不改根），只刷新 last_scan_at
+    let mut guard = match shared.write() {
+        Ok(g) => g,
+        Err(err) => {
+            tracing::warn!("session index 写锁中毒，跳过增量更新: {err}");
+            return;
+        }
+    };
+
+    for (stem, index_opt) in parsed {
+        match index_opt {
+            Some(index) => {
+                guard.sessions.insert(index.session_id.clone(), index);
+            }
+            None => {
+                if !stem.is_empty() {
+                    guard.sessions.remove(&stem);
+                }
+            }
+        }
+    }
+    for index in extras {
+        if !guard.sessions.contains_key(&index.session_id) {
+            guard.sessions.insert(index.session_id.clone(), index);
+        }
+    }
+
     guard.last_scan_at = Utc::now().to_rfc3339();
-    let _ = worktree_canonical; // 留作未来按 canonical 校验 cwd 用
+    let _ = worktree_canonical;
 }
 
 /// 全量重扫指定目录下所有 jsonl，重建 sessions HashMap（trailing 兜底专用）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     debounce 窗口内可能先后有多个不同 jsonl 文件变更，若 trailing 只重扫最后一批事件路径，
-///     较早变更的文件会被漏掉（它们已在 sessions HashMap 里，增量逻辑会跳过）。
-///     trailing 兜底必须全量重扫，保证 debounce 窗口内所有变更最终都被刷新。
+///     较早变更的文件会被漏掉。trailing 兜底必须全量重扫。
 ///
 /// Code Logic（这个函数做什么）:
-///     持写锁后枚举 dir 下所有 *.jsonl，逐个 build_session_index，**整体替换** sessions HashMap
-///     （而非增量 upsert），确保被删除的 session 也能被清理；最后更新 last_scan_at。
+///     读锁取 worktree_path/encoded_cwd；**锁外**用默认预算扫描目录构建新 HashMap + diagnostics；
+///     再写锁原子 swap sessions/truncated/diagnostics/last_scan_at。
 fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
+    let (worktree_path, encoded_cwd) = {
+        let guard = match shared.read() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!("session index 读锁中毒，跳过全量重扫: {err}");
+                return;
+            }
+        };
+        (guard.worktree_path.clone(), guard.encoded_cwd.clone())
+    };
+
+    let budget = ClaudeIndexBudget::default();
+    // 直接扫 dir（dir 已是 projects/<encoded>）；构造伪 projects 父目录以复用排序/预算逻辑
+    // 更直接：在 dir 上复刻候选排序 + 预算
+    let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mtime = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            candidates.push((mtime, p));
+        }
+    }
+    let files_considered = candidates.len() as u64;
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.to_string_lossy().cmp(&b.1.to_string_lossy()))
+    });
+
+    let mut reasons: Vec<String> = Vec::new();
+    let mut truncated = false;
+    if candidates.len() > budget.max_files {
+        candidates.truncate(budget.max_files);
+        push_reason(&mut reasons, "max_files");
+        truncated = true;
+    }
+
+    let mut new_sessions: HashMap<String, ClaudeSessionIndex> = HashMap::new();
+    let mut files_indexed: u64 = 0;
+    let mut bytes_read: u64 = 0;
+    for (_mtime, path) in candidates {
+        let meta_len = match std::fs::metadata(&path) {
+            Ok(m) => m.len(),
+            Err(_) => continue,
+        };
+        if meta_len > budget.max_file_bytes {
+            push_reason(&mut reasons, "max_file_bytes");
+            truncated = true;
+            continue;
+        }
+        if bytes_read.saturating_add(meta_len) > budget.max_total_bytes {
+            push_reason(&mut reasons, "max_total_bytes");
+            truncated = true;
+            break;
+        }
+        if let Some((index, outcome)) = build_session_index_with_budget(&path, &budget) {
+            bytes_read = bytes_read.saturating_add(outcome.bytes_read.max(meta_len));
+            for r in outcome.reasons {
+                push_reason(&mut reasons, &r);
+                truncated = true;
+            }
+            new_sessions.insert(index.session_id.clone(), index);
+            files_indexed = files_indexed.saturating_add(1);
+        }
+    }
+
+    let diagnostics = if truncated {
+        SessionSearchDiagnostics::truncated(reasons, files_considered, files_indexed, bytes_read)
+    } else {
+        SessionSearchDiagnostics::ok(files_considered, files_indexed, bytes_read)
+    };
+
     let mut guard = match shared.write() {
         Ok(g) => g,
         Err(err) => {
@@ -1034,498 +2450,22 @@ fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
             return;
         }
     };
-
-    let mut new_sessions: HashMap<String, ClaudeSessionIndex> = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Some(index) = build_session_index(&p) {
-                new_sessions.insert(index.session_id.clone(), index);
-            }
-        }
-    }
-
     guard.sessions = new_sessions;
+    guard.truncated = truncated;
+    guard.diagnostics = diagnostics;
     guard.last_scan_at = Utc::now().to_rfc3339();
+    // 保持 path/encoded 不变
+    let _ = (worktree_path, encoded_cwd);
 }
 
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 单测：`claude_sessions_test.rs`（文件名含 test，module-boundary 门禁排除）
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
-mod tests {
-    //! claude_sessions 单测：覆盖 jsonl 解析、worktree 扫描、搜索语义、文件监听降级。
-
-    use super::*;
-    use std::fs;
-    use std::io::Write;
-
-    /// 生成唯一临时目录路径（避免并发测试竞争，参考 Phase 0 flaky test 教训）。
-    ///
-    /// Business Logic（为什么需要这个函数）:
-    ///     多个测试用同一固定路径会并发竞争，必须每个测试用唯一路径。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     temp_dir + 函数名 + 进程 id + 纳秒时间组合，保证跨测试跨运行唯一。
-    fn unique_temp_dir(test_name: &str) -> PathBuf {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
-            "cc-partner-claude-sessions-{}-{}-{}",
-            test_name,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        ));
-        fs::create_dir_all(&dir).expect("创建临时目录失败");
-        dir
-    }
-
-    /// 写一个 jsonl 文件（每行一个 JSON 对象），返回文件路径。
-    ///
-    /// Business Logic（为什么需要这个函数）:
-    ///     测试需要构造 Claude transcript 文件来验证解析逻辑。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     在 dir 下创建 session_id.jsonl，逐行写入 lines。
-    fn write_jsonl(dir: &Path, session_id: &str, lines: &[&str]) -> PathBuf {
-        let path = dir.join(format!("{session_id}.jsonl"));
-        let mut f = fs::File::create(&path).expect("创建 jsonl 失败");
-        for line in lines {
-            writeln!(f, "{line}").expect("写入 jsonl 行失败");
-        }
-        path
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     WorktreeSessionIndex 的 encoded_cwd 必须复用 Phase 0 的 encode_claude_project_path 共享 helper，
-    ///     否则扫描会落到错误的 transcript 目录。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造一个不存在的 worktree path，扫描后断言 encoded_cwd 字段等于 helper 直接编码结果。
-    #[test]
-    fn encode_uses_shared_helper() {
-        let tmp = unique_temp_dir("encode_uses_shared_helper");
-        let worktree = tmp.join("my-project");
-        let index = scan_worktree_sessions(&worktree);
-        let canonical = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
-        let expected = encode_claude_project_path(&canonical.to_string_lossy());
-        assert_eq!(index.encoded_cwd, expected);
-        assert!(index.sessions.is_empty());
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     session 标题应取 lastPrompt（最后一条 last-prompt 行），让用户看到最近一次输入的摘要。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造含两条 last-prompt 行的 jsonl，断言 title = 最后一条 lastPrompt。
-    #[test]
-    fn parse_extracts_last_prompt_as_title() {
-        let tmp = unique_temp_dir("parse_extracts_last_prompt_as_title");
-        let path = write_jsonl(
-            &tmp,
-            "sess-1",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":"first prompt"},"timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/p"}"#,
-                r#"{"type":"last-prompt","lastPrompt":"earlier summary"}"#,
-                r#"{"type":"last-prompt","lastPrompt":"final summary"}"#,
-            ],
-        );
-        let index = build_session_index(&path).expect("应解析成功");
-        assert_eq!(index.title, "final summary");
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     无 last-prompt 行时标题应回退为第一条有效 user 文本，保证无 lastPrompt 的旧 transcript 也有可读标题。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造无 last-prompt 行的 jsonl，断言 title = 第一条 user 文本。
-    #[test]
-    fn parse_falls_back_to_first_user_when_no_last_prompt() {
-        let tmp = unique_temp_dir("parse_falls_back_to_first_user_when_no_last_prompt");
-        let path = write_jsonl(
-            &tmp,
-            "sess-2",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":"first user text"},"timestamp":"2026-01-01T00:00:00Z"}"#,
-                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]},"timestamp":"2026-01-01T00:01:00Z"}"#,
-            ],
-        );
-        let index = build_session_index(&path).expect("应解析成功");
-        assert_eq!(index.title, "first user text");
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     user 的 content 是纯字符串时必须正确提取文本进 user_text 和 recent_messages。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造 content 为 string 的 user 行，断言 user_text 含该文本。
-    #[test]
-    fn parse_extracts_user_text_from_string_content() {
-        let tmp = unique_temp_dir("parse_extracts_user_text_from_string_content");
-        let path = write_jsonl(
-            &tmp,
-            "sess-3",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":"hello from string"},"timestamp":"2026-01-01T00:00:00Z"}"#,
-            ],
-        );
-        let index = build_session_index(&path).expect("应解析成功");
-        assert!(index.user_text.contains("hello from string"));
-        assert_eq!(index.message_count, 1);
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     user 的 content 是数组时（带 text 块）必须只取 type==text 块拼接，忽略 tool_result 等其它块。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造 content 为含 text 和 tool_result 块的数组，断言 user_text 只含 text 块内容。
-    #[test]
-    fn parse_extracts_user_text_from_array_text_blocks() {
-        let tmp = unique_temp_dir("parse_extracts_user_text_from_array_text_blocks");
-        let path = write_jsonl(
-            &tmp,
-            "sess-4",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"array user text"},{"type":"tool_result","content":"noise"}]},"timestamp":"2026-01-01T00:00:00Z"}"#,
-            ],
-        );
-        let index = build_session_index(&path).expect("应解析成功");
-        assert!(index.user_text.contains("array user text"));
-        assert!(!index.user_text.contains("noise"));
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     assistant 文本只应包含 text 块，thinking 和 tool_use 必须被忽略，避免内部推理噪声进搜索。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造 assistant 行含 text/thinking/tool_use 块，断言 assistant_text 只含 text 块。
-    #[test]
-    fn parse_extracts_assistant_text_ignoring_thinking_and_tool_use() {
-        let tmp = unique_temp_dir("parse_extracts_assistant_text_ignoring_thinking_and_tool_use");
-        let path = write_jsonl(
-            &tmp,
-            "sess-5",
-            &[
-                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal"},{"type":"text","text":"visible reply"},{"type":"tool_use","name":"Bash","input":{}}]},"timestamp":"2026-01-01T00:01:00Z"}"#,
-            ],
-        );
-        let index = build_session_index(&path).expect("应解析成功");
-        assert!(index.assistant_text.contains("visible reply"));
-        assert!(!index.assistant_text.contains("internal"));
-        assert!(!index.assistant_text.contains("tool_use"));
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     `/help`、`!ls` 这类命令不应进入 user_text 和 recent_messages，避免污染搜索结果。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造含 slash 和 bash 命令的 user 行，断言它们不进 user_text 与 recent_messages。
-    #[test]
-    fn parse_ignores_slash_and_bash_commands() {
-        let tmp = unique_temp_dir("parse_ignores_slash_and_bash_commands");
-        let path = write_jsonl(
-            &tmp,
-            "sess-6",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":"/clear"},"timestamp":"2026-01-01T00:00:00Z"}"#,
-                r#"{"type":"user","message":{"role":"user","content":"!ls -la"},"timestamp":"2026-01-01T00:01:00Z"}"#,
-                r#"{"type":"user","message":{"role":"user","content":"real question"},"timestamp":"2026-01-01T00:02:00Z"}"#,
-            ],
-        );
-        let index = build_session_index(&path).expect("应解析成功");
-        assert!(!index.user_text.contains("/clear"));
-        assert!(!index.user_text.contains("!ls"));
-        assert!(index.user_text.contains("real question"));
-        // 只有 real question 一条进了 recent
-        assert_eq!(index.message_count, 1);
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     jsonl 可能含 malformed 行（被截断、非法 JSON），解析必须跳过它们不 panic，正常行仍要解析。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造含非法 JSON 行的 jsonl，断言不 panic 且正常 user 文本仍被提取。
-    #[test]
-    fn parse_skips_malformed_lines_without_panicking() {
-        let tmp = unique_temp_dir("parse_skips_malformed_lines_without_panicking");
-        let path = write_jsonl(
-            &tmp,
-            "sess-7",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":"good line"},"timestamp":"2026-01-01T00:00:00Z"}"#,
-                "this is not json {{{",
-                "",
-                r#"{"type":"user","message":{"role":"user","content":"another good"},"timestamp":"2026-01-01T00:01:00Z"}"#,
-            ],
-        );
-        let index = build_session_index(&path).expect("应解析成功");
-        assert!(index.user_text.contains("good line"));
-        assert!(index.user_text.contains("another good"));
-        assert_eq!(index.message_count, 2);
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     空 query 应返回全部 session 并按 last_activity_at 倒序，让最近活动的 session 排在最前。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造一个含 3 个不同活动时间 session 的 WorktreeSessionIndex，空 query 搜索断言顺序为最新到最旧。
-    #[test]
-    fn search_empty_query_returns_all_sorted_by_last_activity_desc() {
-        let tmp = unique_temp_dir("search_empty_query_returns_all_sorted_by_last_activity_desc");
-        let _p1 = write_jsonl(
-            &tmp,
-            "old",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":"old"},"timestamp":"2026-01-01T00:00:00Z"}"#,
-            ],
-        );
-        let _p2 = write_jsonl(
-            &tmp,
-            "mid",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":"mid"},"timestamp":"2026-06-01T00:00:00Z"}"#,
-            ],
-        );
-        let _p3 = write_jsonl(
-            &tmp,
-            "new",
-            &[
-                r#"{"type":"user","message":{"role":"user","content":"new"},"timestamp":"2026-07-01T00:00:00Z"}"#,
-            ],
-        );
-
-        let mut sessions = HashMap::new();
-        for entry in fs::read_dir(&tmp).unwrap().flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                if let Some(idx) = build_session_index(&p) {
-                    sessions.insert(idx.session_id.clone(), idx);
-                }
-            }
-        }
-        let index = WorktreeSessionIndex {
-            worktree_path: tmp.clone(),
-            encoded_cwd: "test".to_string(),
-            sessions,
-            last_scan_at: Utc::now().to_rfc3339(),
-        };
-
-        let hits = search_sessions(&index, "", 50);
-        assert_eq!(hits.len(), 3);
-        // 最新的 new 排第一
-        assert_eq!(hits[0].session_id, "new");
-        assert_eq!(hits[1].session_id, "mid");
-        assert_eq!(hits[2].session_id, "old");
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     关键词命中应按 title_hit > user_hit > assistant_hit 优先级排序，帮助用户更快定位。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造三个 session 分别在 title/user/assistant 命中同一关键词，断言排序为 title、user、assistant。
-    #[test]
-    fn search_keyword_prioritizes_title_hit_over_user_over_assistant() {
-        let tmp = unique_temp_dir("search_keyword_prioritizes_title");
-        // s-title：title（lastPrompt）命中 "fix"，user 文本不含 fix
-        let _p1 = write_jsonl(
-            &tmp,
-            "s-title",
-            &[
-                r#"{"type":"last-prompt","lastPrompt":"fix auth bug"}"#,
-                r#"{"type":"user","message":{"role":"user","content":"misc question"},"timestamp":"2026-01-01T00:00:00Z"}"#,
-            ],
-        );
-        // s-user：title（lastPrompt）不含 fix，user 文本命中 "fix"
-        let _p2 = write_jsonl(
-            &tmp,
-            "s-user",
-            &[
-                r#"{"type":"last-prompt","lastPrompt":"deploy notes"}"#,
-                r#"{"type":"user","message":{"role":"user","content":"please fix the login"},"timestamp":"2026-01-01T00:00:00Z"}"#,
-            ],
-        );
-        // s-assistant：title 与 user 都不含 fix，assistant 文本命中 "fix"
-        let _p3 = write_jsonl(
-            &tmp,
-            "s-assistant",
-            &[
-                r#"{"type":"last-prompt","lastPrompt":"random topic"}"#,
-                r#"{"type":"user","message":{"role":"user","content":"hello there"},"timestamp":"2026-01-01T00:00:00Z"}"#,
-                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will fix that now"}]},"timestamp":"2026-01-01T00:00:00Z"}"#,
-            ],
-        );
-
-        let mut sessions = HashMap::new();
-        for entry in fs::read_dir(&tmp).unwrap().flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                if let Some(idx) = build_session_index(&p) {
-                    sessions.insert(idx.session_id.clone(), idx);
-                }
-            }
-        }
-        let index = WorktreeSessionIndex {
-            worktree_path: tmp.clone(),
-            encoded_cwd: "test".to_string(),
-            sessions,
-            last_scan_at: Utc::now().to_rfc3339(),
-        };
-
-        let hits = search_sessions(&index, "fix", 50);
-        assert_eq!(hits.len(), 3);
-        assert_eq!(hits[0].session_id, "s-title");
-        assert!(hits[0].title_hit);
-        assert_eq!(hits[1].session_id, "s-user");
-        assert!(!hits[1].title_hit);
-        assert!(hits[1].user_hit);
-        assert_eq!(hits[2].session_id, "s-assistant");
-        assert!(hits[2].assistant_hit);
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     limit 应截断结果数量，防止超长列表。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造 3 个 session，limit=2 断言只返回 2 条。
-    #[test]
-    fn search_respects_limit() {
-        let tmp = unique_temp_dir("search_respects_limit");
-        for i in 0..3 {
-            let line = format!(
-                r#"{{"type":"user","message":{{"role":"user","content":"item {i}"}},"timestamp":"2026-01-0{i}T00:00:00Z"}}"#
-            );
-            let _ = write_jsonl(&tmp, &format!("s{i}"), &[line.as_str()]);
-        }
-
-        let mut sessions = HashMap::new();
-        for entry in fs::read_dir(&tmp).unwrap().flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                if let Some(idx) = build_session_index(&p) {
-                    sessions.insert(idx.session_id.clone(), idx);
-                }
-            }
-        }
-        let index = WorktreeSessionIndex {
-            worktree_path: tmp.clone(),
-            encoded_cwd: "test".to_string(),
-            sessions,
-            last_scan_at: Utc::now().to_rfc3339(),
-        };
-
-        let hits = search_sessions(&index, "", 2);
-        assert_eq!(hits.len(), 2);
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     preview_snippets 应取命中位置前后各 30 字符的上下文片段，帮助用户预判是否是目标 session。
-    ///     且片段必须保留原文大小写（不能返回全小写文本，否则用户预览失真）。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造一段含大小写的 user 文本（"foo Target bar"），用小写关键词 "target" 搜索，
-    ///     断言 preview_snippets 非空、含关键词、且保留原文大写 "Target"。
-    #[test]
-    fn search_preview_snippets_extract_context_around_hit() {
-        let tmp = unique_temp_dir("search_preview_snippets_extract_context_around_hit");
-        // 构造一段足够长的文本，关键词在中间，且含大小写以验证片段保留原文大小写
-        let prefix = "x".repeat(40);
-        let suffix = "y".repeat(40);
-        let content = format!("{prefix}foo Target bar{suffix}");
-        let line = format!(
-            r#"{{"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-01-01T00:00:00Z"}}"#,
-            serde_json::Value::String(content)
-        );
-        let path = write_jsonl(&tmp, "s-snippet", &[&line]);
-
-        let mut sessions = HashMap::new();
-        if let Some(idx) = build_session_index(&path) {
-            sessions.insert(idx.session_id.clone(), idx);
-        }
-        let index = WorktreeSessionIndex {
-            worktree_path: tmp.clone(),
-            encoded_cwd: "test".to_string(),
-            sessions,
-            last_scan_at: Utc::now().to_rfc3339(),
-        };
-
-        // 用小写关键词搜索，应命中大写的 "Target"
-        let hits = search_sessions(&index, "target", 50);
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].user_hit);
-        assert!(!hits[0].preview_snippets.is_empty());
-        let snippet = &hits[0].preview_snippets[0];
-        // 片段应包含关键词（小写匹配命中大写原文）
-        assert!(snippet.to_lowercase().contains("target"));
-        // 关键：片段保留原文大小写，不是全小写
-        assert!(
-            snippet.contains("Target"),
-            "snippet 应保留原文大小写，实际: {snippet}"
-        );
-        // 片段长度应 <= 关键词长度 + 前后各 30 字符
-        assert!(
-            snippet.chars().count()
-                <= "foo Target bar".chars().count() + 2 * PREVIEW_SNIPPET_RADIUS
-        );
-        // 应包含关键词前面的部分上下文
-        assert!(snippet.contains('x'));
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     recent_messages 上限为 20（spec 3.1），超过时只保留按时间排序的尾部 20 条，
-    ///     保证 preview 面板数据量可控。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     构造一个含 25 条 user/assistant 交替消息的 jsonl（带递增 timestamp），调用
-    ///     build_session_index，断言 recent_messages.len() == 20，message_count == 25，
-    ///     且 recent_messages 恰好是最后 20 条（首条文本含序号 6，末条含序号 25）。
-    #[test]
-    fn recent_messages_capped_at_twenty() {
-        let tmp = unique_temp_dir("recent_messages_capped_at_twenty");
-        let mut lines: Vec<String> = Vec::new();
-        // 25 条 user/assistant 交替消息，timestamp 递增，文本带序号便于断言尾部
-        for i in 1..=25 {
-            let role = if i % 2 == 1 { "user" } else { "assistant" };
-            let text = format!("msg-{i:02}");
-            let ts = format!("2026-01-01T00:{:02}:00Z", i); // 每分钟一条，严格递增
-            let content = if role == "user" {
-                format!(r#""{}""#, text)
-            } else {
-                format!(r#"[{{"type":"text","text":"{}"}}]"#, text)
-            };
-            lines.push(format!(
-                r#"{{"type":"{role}","message":{{"role":"{role}","content":{content}}},"timestamp":"{ts}"}}"#
-            ));
-        }
-        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        let path = write_jsonl(&tmp, "sess-many", &line_refs);
-
-        let index = build_session_index(&path).expect("应解析成功");
-        // message_count 记录全部有效消息（25 条，user 13 + assistant 12）
-        assert_eq!(index.message_count, 25, "message_count 应为全部消息数");
-        // recent_messages 被截断为 20
-        assert_eq!(
-            index.recent_messages.len(),
-            RECENT_MESSAGES_MAX,
-            "recent_messages 应被截断为 {}",
-            RECENT_MESSAGES_MAX
-        );
-        // 首条应是序号 6（25-20+1=6），末条是序号 25
-        assert_eq!(
-            index.recent_messages[0].text, "msg-06",
-            "recent_messages 首条应是按时间排序的第 6 条"
-        );
-        assert_eq!(
-            index.recent_messages[19].text, "msg-25",
-            "recent_messages 末条应是最后一条"
-        );
-        // 首末时间戳也应是第 6 条和第 25 条的时间
-        assert_eq!(index.recent_messages[0].timestamp, "2026-01-01T00:06:00Z");
-        assert_eq!(index.recent_messages[19].timestamp, "2026-01-01T00:25:00Z");
-    }
-}
+#[path = "claude_sessions_test.rs"]
+mod tests;

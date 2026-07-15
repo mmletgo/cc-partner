@@ -71,6 +71,29 @@
   border-radius: var(--radius-sm);
 }
 
+/* ── 有界索引截断/诊断非阻塞提示 ── */
+.notice {
+  margin: var(--space-2) var(--space-4) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--warn) 35%, var(--border-soft));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--warn) 12%, var(--surface));
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.noticeReasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--fg-muted-readable);
+  font-size: var(--text-xs);
+}
+
 /* ── Preview Header（预览视图） ── */
 .previewContainer {
   flex: 1;

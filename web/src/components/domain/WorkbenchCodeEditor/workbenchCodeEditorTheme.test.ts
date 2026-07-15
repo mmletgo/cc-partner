@@ -1,6 +1,6 @@
-import { describe, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { getWorkbenchCodeEditorLanguageExtensions } from './workbenchCodeEditorLanguage';
+import { loadWorkbenchLanguage } from './workbenchCodeEditorLanguage';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -21,12 +21,16 @@ function assertContains(source: string, expected: string, message: string): void
  *
  * Code Logic（这个测试做什么）:
  *   读取组件、theme 和 CSS 源码，断言主题通过 theme prop 注入，背景/gutter/active line 读取设计 token，
- *   同时 CSS 不再声明 `.cm-gutters`/`.cm-activeLine` 颜色覆盖。
+ *   同时 CSS 不再声明 `.cm-gutters`/`.cm-activeLine` 颜色覆盖；YAML 走动态语言 loader。
  */
 describe('workbenchCodeEditorTheme', () => {
-  test('One Dark Pro theme prop and design tokens own CodeMirror colors while CSS keeps layout only', () => {
+  test('One Dark Pro theme prop and design tokens own CodeMirror colors while CSS keeps layout only', async () => {
     const editorSource = readFileSync(new URL('./WorkbenchCodeEditor.tsx', import.meta.url), 'utf8');
     const themeSource = readFileSync(new URL('./workbenchCodeEditorTheme.ts', import.meta.url), 'utf8');
+    const languageSource = readFileSync(
+      new URL('./workbenchCodeEditorLanguage.ts', import.meta.url),
+      'utf8',
+    );
     const cssSource = readFileSync(new URL('./WorkbenchCodeEditor.module.css', import.meta.url), 'utf8');
 
     assertContains(themeSource, "foreground: '#abb2bf'", 'One Dark Pro foreground is configured');
@@ -42,10 +46,14 @@ describe('workbenchCodeEditorTheme', () => {
     assertContains(themeSource, 'syntaxHighlighting(WORKBENCH_ONE_DARK_PRO_HIGHLIGHT)', 'CodeMirror syntax highlighting extension is exported');
     assertContains(editorSource, 'theme={WORKBENCH_CODE_EDITOR_THEME}', 'Custom CodeMirror theme is passed through @uiw theme prop');
     assertContains(editorSource, 'WORKBENCH_ONE_DARK_PRO_SYNTAX_EXTENSION', 'One Dark Pro syntax extension is injected into the editor');
+    assertContains(editorSource, 'loadWorkbenchLanguage', 'Language extensions load asynchronously');
+    assertContains(
+      languageSource,
+      "import('@codemirror/lang-yaml')",
+      'YAML language is registered via explicit dynamic import map',
+    );
 
-    if (getWorkbenchCodeEditorLanguageExtensions('yaml').length === 0) {
-      throw new Error('YAML language extension should be registered');
-    }
+    await expect(loadWorkbenchLanguage('yaml')).resolves.toBeTruthy();
 
     if (cssSource.includes('.cm-gutters') || cssSource.includes('.cm-activeLine')) {
       throw new Error('CodeMirror internal color selectors should be owned by the One Dark Pro theme extension');
