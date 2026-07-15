@@ -30,6 +30,7 @@ import {
   MOBILE_FORBIDDEN_PATTERNS,
   normalizeCssFiles,
   parseBaselineMetrics,
+  resolveBundleRatchetMode,
   SOURCEMAP_BUDGET_BYTES,
   sumGzipBytes,
   topChunksByGzip,
@@ -441,6 +442,64 @@ describe('extended budgets (lazy / total JS / sourcemap / baseline)', () => {
     assert.equal(effectiveCeiling(100, null), 100);
     assert.equal(effectiveCeiling(100, undefined), 100);
     assert.equal(effectiveCeiling(100, -1), 100);
+    assert.equal(effectiveCeiling(100, 80, 'final-only'), 100);
+    assert.equal(effectiveCeiling(100, 150, 'final-only'), 100);
+  });
+
+  it('resolveBundleRatchetMode defaults strict and accepts final-only', () => {
+    assert.equal(resolveBundleRatchetMode({ env: {} }), 'strict');
+    assert.equal(resolveBundleRatchetMode({ env: { CC_PARTNER_BUNDLE_RATCHET: 'strict' } }), 'strict');
+    assert.equal(
+      resolveBundleRatchetMode({ env: { CC_PARTNER_BUNDLE_RATCHET: 'final-only' } }),
+      'final-only',
+    );
+    assert.equal(
+      resolveBundleRatchetMode({ env: { CC_PARTNER_BUNDLE_RATCHET: ' FINAL-ONLY ' } }),
+      'final-only',
+    );
+  });
+
+  it('final-only ratchet mode ignores baseline and keeps final hard ceilings', () => {
+    const contract = buildContractFixture();
+    const noisy = Array.from({ length: 8000 }, (_, i) => String.fromCharCode(32 + (i % 90))).join('');
+    const files = buildFixtureFiles({
+      'assets/main.js': noisy,
+      'assets/mobile.js': makeSource(1000, 'B'),
+      'assets/shared.js': noisy,
+    });
+    const actualMain = sumGzipBytes(['assets/main.js', 'assets/shared.js'], (f) =>
+      Buffer.from(files[f], 'utf8'),
+    );
+    const strict = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      budgets: {
+        main: 320 * 1024,
+        mobile: 280 * 1024,
+      },
+      baseline: {
+        mainInitialGzipBytes: Math.max(1, actualMain - 10),
+      },
+      ratchetMode: 'strict',
+    });
+    assert.ok(strict.diagnostics.some((d) => /main initial graph over budget/i.test(d)));
+
+    const finalOnly = analyzeBundleContract(contract, {
+      readFile: (fileName) => Buffer.from(files[fileName], 'utf8'),
+      budgets: {
+        main: 320 * 1024,
+        mobile: 280 * 1024,
+      },
+      baseline: {
+        mainInitialGzipBytes: Math.max(1, actualMain - 10),
+      },
+      ratchetMode: 'final-only',
+    });
+    assert.equal(
+      finalOnly.diagnostics.some((d) => /main initial graph over budget/i.test(d)),
+      false,
+      `final-only should ignore baseline; got: ${finalOnly.diagnostics.join('\n')}`,
+    );
+    assert.equal(finalOnly.entryReports.main.budgetBytes, 320 * 1024);
   });
 
   it('fails individual lazy chunk over final 700 KiB budget', () => {

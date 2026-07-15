@@ -10,10 +10,10 @@
     "sourcemapRawBytes": 2097152
   },
   "metrics": {
-    "mainInitialGzipBytes": 187711,
-    "mobileInitialGzipBytes": 160774,
-    "maxLazyChunkGzipBytes": 150207,
-    "totalRuntimeJsGzipBytes": 980787,
+    "mainInitialGzipBytes": 183007,
+    "mobileInitialGzipBytes": 157573,
+    "maxLazyChunkGzipBytes": 150206,
+    "totalRuntimeJsGzipBytes": 960692,
     "sourcemapRawBytes": 0,
     "editorEntryLoadedGzipBytes": 33882
   }
