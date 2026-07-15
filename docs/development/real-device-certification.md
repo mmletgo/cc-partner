@@ -217,3 +217,15 @@ cd src-tauri
 cargo test --locked --test quality_faults -- --nocapture --test-threads=1
 cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1
 ```
+
+
+## N8 freeze (2026-07-16)
+
+- subjectCommit: `7db9b8899f1f8a19cf3aec0c8b6cf519bd4c7319`
+- subjectTag: `subject-0.7.0-macos-aarch64-4`
+- rcWorkflowRunId: `29429534980`
+- claimProfile: `macos-aarch64-beta` / claimMode: `platform-beta`
+- production DMG: `cc-partner_0.7.0_aarch64.dmg` sha256 `f9be87d6ba47a7a564beba8926aef17f56fad4c6ae6e10d89d1e7189358b4790`
+- inventory: `docs/development/evidence/rc/inventory.json`
+- L3 GUI/VoiceOver executions: not yet written (still NOT VERIFIED until T3/T4)
+
