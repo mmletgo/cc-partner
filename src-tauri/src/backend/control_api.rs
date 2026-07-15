@@ -1845,6 +1845,37 @@ mod tests {
         assert_eq!(req.action, TransferOpenAction::Reveal);
     }
 
+    /// Orchestrator deliver/review-diff/workflow control body 必须 camelCase 对齐。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GuiClient control client 与 owner handler 共用 contract；字段名漂移会导致静默丢 digest/hash。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化 deliver / review-diff / workflow save 请求体并断言字段。
+    #[test]
+    fn orchestrator_control_request_bodies_deserialize_camel_case() {
+        let deliver_raw = r#"{"controlToken":"tok","projectId":"p1","taskId":"t1","expectedReviewDigest":"abc"}"#;
+        let deliver: ControlOrchestratorDeliverReviewedRequest =
+            serde_json::from_str(deliver_raw).expect("deliver body");
+        assert_eq!(deliver.control_token, "tok");
+        assert_eq!(deliver.project_id, "p1");
+        assert_eq!(deliver.task_id, "t1");
+        assert_eq!(deliver.expected_review_digest.as_deref(), Some("abc"));
+
+        let diff_raw = r#"{"controlToken":"tok","projectId":"p1","taskId":"t1"}"#;
+        let diff: ControlOrchestratorReviewDiffRequest =
+            serde_json::from_str(diff_raw).expect("review-diff body");
+        assert_eq!(diff.project_id, "p1");
+        assert_eq!(diff.task_id, "t1");
+
+        let save_raw =
+            r#"{"controlToken":"tok","projectId":"p1","expectedHash":"h1","content":"---\n"}"#;
+        let save: ControlWorkflowDocumentSaveRequest =
+            serde_json::from_str(save_raw).expect("workflow save body");
+        assert_eq!(save.expected_hash, "h1");
+        assert_eq!(save.content, "---\n");
+    }
+
     /// CAS 经 control 路径：正确 generation 成功，旧 generation 冲突。
     ///
     /// Business Logic（为什么需要这个测试）:
