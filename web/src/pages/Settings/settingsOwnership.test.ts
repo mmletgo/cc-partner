@@ -94,6 +94,28 @@ describe('Settings controller ownership (no tab JSX trees)', () => {
     expect(controller).not.toContain('<SettingsAiPanel');
     expect(controller).not.toContain('<SettingsAboutPanel');
   });
+
+  test('useSettingsController composes domain controllers under controllers/', () => {
+    expect(controller).toContain("from './controllers/useSettingsResources'");
+    expect(controller).toContain("from './controllers/useSettingsFormSaves'");
+    expect(controller).toContain("from './controllers/useSettingsUpdatePermissions'");
+  });
+});
+
+describe('Settings domain controllers ownership (no panel JSX)', () => {
+  test.each([
+    'controllers/useSettingsResources.ts',
+    'controllers/useSettingsFormSaves.ts',
+    'controllers/useSettingsUpdatePermissions.ts',
+  ])('%s must not render tab panel JSX', (relativePath) => {
+    const source = readSettingsSource(relativePath);
+    expect(source).not.toContain('role="tabpanel"');
+    expect(source).not.toContain('<SettingsGeneralPanel');
+    expect(source).not.toContain('<SettingsSyncPanel');
+    expect(source).not.toContain('<SettingsDependenciesPanel');
+    expect(source).not.toContain('<SettingsAiPanel');
+    expect(source).not.toContain('<SettingsAboutPanel');
+  });
 });
 
 describe('Settings shell composition', () => {
