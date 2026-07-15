@@ -554,25 +554,31 @@ impl BackupRestoreService {
         self.job_repo.list_recent(limit).await
     }
 
-    /// 将崩溃遗留的 `Applying` 任务诚实标记为 Failed。
+    /// 将崩溃遗留的 `Preparing`/`Applying` 任务诚实标记为 Failed。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     进程在 apply 中途崩溃后，job 可能永远停在 Applying；不得伪装成功，应提示可回退。
+    ///     进程在 insert_preparing 之后、Applying 之前，或 apply 中途崩溃后，job 可能永远停在
+    ///     Preparing/Applying；不得伪装成功，应提示可回退/可重试。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     扫描 recent jobs；Applying → Failed，错误摘要依据是否存在 pre-restore 备份路径。
+    ///     扫描 recent jobs；Preparing 或 Applying → Failed，错误摘要依据状态与 pre-restore 路径。
     pub async fn reclaim_stuck_applying_jobs(&self) -> Result<usize, AppError> {
         let jobs = self.job_repo.list_recent(200).await?;
         let now = chrono::Utc::now().to_rfc3339();
         let mut reclaimed = 0usize;
         for job in jobs {
-            if job.status != RecoveryJobStatus::Applying {
-                continue;
-            }
-            let msg = if job.pre_restore_backup_path.is_some() {
-                "进程中断：恢复应用阶段崩溃；可从 pre-restore 备份回退"
-            } else {
-                "进程中断：恢复应用阶段崩溃（无 pre-restore 备份路径）"
+            let msg = match job.status {
+                RecoveryJobStatus::Applying => {
+                    if job.pre_restore_backup_path.is_some() {
+                        "进程中断：恢复应用阶段崩溃；可从 pre-restore 备份回退"
+                    } else {
+                        "进程中断：恢复应用阶段崩溃（无 pre-restore 备份路径）"
+                    }
+                }
+                RecoveryJobStatus::Preparing => {
+                    "进程中断：恢复准备阶段崩溃（insert_preparing 后未进入 Applying）"
+                }
+                _ => continue,
             };
             self.job_repo
                 .update_status(&job.id, RecoveryJobStatus::Failed, None, Some(msg), &now)
@@ -584,7 +590,7 @@ impl BackupRestoreService {
 
     /// 启动时回收卡住任务（Headless 后台入口）。
     ///
-    /// Business Logic: 后端启动后不应遗留永久 Applying。
+    /// Business Logic: 后端启动后不应遗留永久 Preparing/Applying。
     /// Code Logic: 委托 `reclaim_stuck_applying_jobs`。
     pub async fn reclaim_on_startup(&self) -> Result<usize, AppError> {
         self.reclaim_stuck_applying_jobs().await
@@ -1341,6 +1347,29 @@ mod tests {
             job.error_summary
         );
         assert_eq!(job.pre_restore_backup_path.as_deref(), Some("/pre.zip"));
+    }
+
+    #[tokio::test]
+    async fn reclaim_stuck_preparing_marks_failed() {
+        let (state, _tmp) = setup_restore_state().await;
+        let service = BackupRestoreService::new(state.clone());
+        service
+            .job_repo
+            .insert_preparing("stuck-prep", Some("/a.zip"), "[\"prompts\"]", "merge", "t0")
+            .await
+            .unwrap();
+        let n = service.reclaim_stuck_applying_jobs().await.unwrap();
+        assert_eq!(n, 1);
+        let job = service.job_repo.get("stuck-prep").await.unwrap().unwrap();
+        assert_eq!(job.status, RecoveryJobStatus::Failed);
+        assert!(
+            job.error_summary
+                .as_deref()
+                .unwrap_or("")
+                .contains("准备阶段"),
+            "{:?}",
+            job.error_summary
+        );
     }
 
     #[tokio::test]

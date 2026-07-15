@@ -517,31 +517,51 @@ export function Transfer() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   timeout/network 后先 getOperation 对账，终态才释放动作锁；pending 保持 reconciling。
+   *   timeout/network 后先 getOperation 对账，终态才释放动作锁；pending 有界轮询直至收敛。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 transferApi.getOperation；succeeded/failed/notFound 清 reconciling 并 force 刷新；
-   *   pending 保持 reconciling；查询失败也保持 reconciling。
+   *   有界轮询 transferApi.getOperation；succeeded/failed/notFound 清 reconciling 并 force 刷新；
+   *   pending 退避重试，耗尽后释放 reconciling 但保留 clientOperationId 供再次对账；
+   *   查询失败保持 reconciling 并展示错误。
    */
   const reconcilePendingRecovery = useCallback(
     async (taskId: string, clientOperationId: string) => {
       setReconciling(taskId, true);
+      const maxAttempts = 12;
+      const delayMs = 1500;
       try {
-        const status = await transferApi.getOperation(clientOperationId);
-        if (!mountedRef.current) return;
-        if (status.status === 'pending') {
-          // 仍未收敛：保持 reconciling + 保留 clientOperationId，不盲重放
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          if (!mountedRef.current) return;
+          const status = await transferApi.getOperation(clientOperationId);
+          if (!mountedRef.current) return;
+          if (status.status === 'pending') {
+            if (attempt + 1 >= maxAttempts) {
+              // 耗尽后仍 pending：释放 reconciling、保留 clientOperationId，避免永久卡死
+              setReconciling(taskId, false);
+              setTaskActionErrors((prev) => ({
+                ...prev,
+                [taskId]: t('transfer:retryFailed', {
+                  error: 'operation still pending; retry reconcile',
+                }),
+              }));
+              return;
+            }
+            await new Promise<void>((resolve) => {
+              window.setTimeout(resolve, delayMs);
+            });
+            continue;
+          }
+          // 终态（succeeded/failed/notFound）释放意图并刷新列表
+          clearPendingRecovery(taskId);
+          setReconciling(taskId, false);
+          await runTasksNow({ force: true });
+          if (status.status === 'failed') {
+            setTaskActionErrors((prev) => ({
+              ...prev,
+              [taskId]: t('transfer:retryFailed', { error: status.code }),
+            }));
+          }
           return;
-        }
-        // 终态（succeeded/failed/notFound）释放意图并刷新列表
-        clearPendingRecovery(taskId);
-        setReconciling(taskId, false);
-        await runTasksNow({ force: true });
-        if (status.status === 'failed') {
-          setTaskActionErrors((prev) => ({
-            ...prev,
-            [taskId]: t('transfer:retryFailed', { error: status.code }),
-          }));
         }
       } catch (err) {
         if (!mountedRef.current) return;
