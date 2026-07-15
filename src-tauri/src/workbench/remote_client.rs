@@ -11,7 +11,9 @@
 use crate::error::AppError;
 use crate::net::protocol::PeerProtocolInfo;
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
-use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
+use crate::workbench::claude_sessions::{
+    decode_session_search_response_body, SessionPreview, SessionSearchResult,
+};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchRemoteDirectoryEntryDto,
@@ -1098,18 +1100,27 @@ impl RemoteWorkbenchClient {
     ///     本机在 remote shortcut 上搜索历史 Claude 会话时，transcript 解析必须在项目所在设备完成。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     POST `{base_url}/api/workbench/claude-sessions/search`，用 short timeout 解析搜索命中列表。
+    ///     POST `{base_url}/api/workbench/claude-sessions/search`，short timeout；
+    ///     先按 JSON Value 取成功 body，再 `decode_session_search_response_body` 兼容
+    ///     v2 对象 DTO 与 legacy `Vec<SessionSearchHit>` 数组。
     pub async fn search_claude_sessions(
         &self,
         base_url: &str,
         req: RemoteSearchClaudeSessionsReq,
-    ) -> Result<Vec<SessionSearchHit>, AppError> {
-        self.post_json(
-            endpoint_url(base_url, "/api/workbench/claude-sessions/search"),
-            &req,
-            RemoteRequestTimeoutKind::Short,
-        )
-        .await
+    ) -> Result<SessionSearchResult, AppError> {
+        let value: serde_json::Value = self
+            .post_json(
+                endpoint_url(base_url, "/api/workbench/claude-sessions/search"),
+                &req,
+                RemoteRequestTimeoutKind::Short,
+            )
+            .await?;
+        let bytes = serde_json::to_vec(&value).map_err(|e| {
+            AppError::generic(format!("远端 Claude session 搜索响应再序列化失败: {e}"))
+        })?;
+        decode_session_search_response_body(&bytes).map_err(|e| {
+            AppError::generic(format!("远端 Claude session 搜索响应解码失败: {e}"))
+        })
     }
 
     /// 读取远端单个 Claude session 的 preview 详情。

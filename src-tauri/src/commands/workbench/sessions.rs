@@ -10,8 +10,8 @@ use crate::claude_cli;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::claude_sessions::{
-    ensure_worktree_session_index_scanned, search_sessions, to_session_preview, ClaudeSessionIndex,
-    SessionPreview, SessionSearchHit,
+    ensure_worktree_session_index_scanned, search_sessions_result, to_session_preview,
+    ClaudeSessionIndex, SessionPreview, SessionSearchResult,
 };
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchPathInfo, WorkbenchSessionDto, WorkbenchSessionRow,
@@ -1285,14 +1285,14 @@ pub async fn delete_workbench_path(
 ///     remote shortcut 则把搜索请求转发到项目所在设备解析 transcript，避免本机读取不到远端文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 project row；local 分支解析 worktree_path 后 lazy 建索引并取读锁调用 search_sessions（limit 50）；
-///     remote 分支解析 inner worktreeId 后委托 remote_client，并映射 inner sessionId 为本机 remote sessionId。
+///     读 project row；local 分支 await ensure（singleflight+spawn_blocking）后读锁 search_sessions_result；
+///     remote 分支委托 remote_client（双形态解码为 SessionSearchResult）。
 pub(crate) async fn search_claude_sessions_for_state(
     state: &AppState,
     project_id: &str,
     worktree_id: Option<&str>,
     query: &str,
-) -> Result<Vec<SessionSearchHit>, AppError> {
+) -> Result<SessionSearchResult, AppError> {
     let project = get_project(state, project_id).await?;
     if project.kind == "remote" {
         let context = ensure_remote_project_context(state, &project).await?;
@@ -1310,15 +1310,16 @@ pub(crate) async fn search_claude_sessions_for_state(
     }
     // local 分支
     let worktree = resolve_worktree(state, &project, worktree_id).await?;
-    let shared = ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path));
+    let shared =
+        ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path)).await;
     let index = shared.read().expect("session index 读锁中毒");
-    Ok(search_sessions(&index, query, 50))
+    Ok(search_sessions_result(&index, query, 50))
 }
 
 /// 搜索 worktree 范围内的 Claude Code 历史 session。
 ///
 /// Business Logic（为什么需要这个命令）:
-///     桌面端搜索面板需要按关键词返回本机或远端历史 Claude 会话。
+///     桌面端搜索面板需要按关键词返回本机或远端历史 Claude 会话（含 truncated/diagnostics）。
 ///
 /// Code Logic（这个命令做什么）:
 ///     Tauri command 解包 State 后委托 for_state helper。
@@ -1328,7 +1329,7 @@ pub async fn search_claude_sessions(
     project_id: String,
     worktree_id: Option<String>,
     query: String,
-) -> Result<Vec<SessionSearchHit>, AppError> {
+) -> Result<SessionSearchResult, AppError> {
     if let Some(v) = proxy_workbench_if_gui(state.inner(), "claude.search", serde_json::json!({ "projectId": project_id.clone(), "worktreeId": worktree_id.clone(), "query": query.clone() })).await? {
         return Ok(v);
     }
@@ -1368,7 +1369,8 @@ pub(crate) async fn get_claude_session_preview_for_state(
     }
     // local 分支
     let worktree = resolve_worktree(state, &project, worktree_id).await?;
-    let shared = ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path));
+    let shared =
+        ensure_worktree_session_index_scanned(state, std::path::Path::new(&worktree.path)).await;
     let index = shared.read().expect("session index 读锁中毒");
     let claude_index: &ClaudeSessionIndex = index
         .sessions

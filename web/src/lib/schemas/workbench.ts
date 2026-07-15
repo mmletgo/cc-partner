@@ -14,6 +14,9 @@ import type {
   MutationKind,
   MutationState,
   MutationTransportClass,
+  SessionSearchDiagnostics,
+  SessionSearchHit,
+  SessionSearchResult,
   WorkbenchCsvPreview,
   WorkbenchFileCapabilities,
   WorkbenchFileNode,
@@ -566,5 +569,61 @@ export const workbenchLaunchSummaryDecoder: Decoder<WorkbenchLaunchSummaryWire> 
       workbenchLaunchDeviceItemDecoder,
     ),
     generatedAt: stringDecoder,
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   Session 搜索命中条目驱动 Command Palette 列表；残缺字段不得渲染假结果。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 SessionSearchHit 的 camelCase 字段与 previewSnippets 数组。
+ */
+export const sessionSearchHitDecoder: Decoder<SessionSearchHit> = objectDecoder(
+  'SessionSearchHit',
+  {
+    sessionId: stringDecoder,
+    title: stringDecoder,
+    titleHit: booleanDecoder,
+    userHit: booleanDecoder,
+    assistantHit: booleanDecoder,
+    firstActivityAt: stringDecoder,
+    lastActivityAt: stringDecoder,
+    messageCount: numberDecoder,
+    previewSnippets: arrayDecoder(stringDecoder),
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   有界索引诊断告诉 UI 是否截断；损坏诊断不得被当成“完整结果”。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   status 用 string 前向兼容；reasons 为 string[]；计数/字节为 number。
+ */
+export const sessionSearchDiagnosticsDecoder: Decoder<SessionSearchDiagnostics> = objectDecoder(
+  'SessionSearchDiagnostics',
+  {
+    status: stringDecoder,
+    reasons: arrayDecoder(stringDecoder),
+    filesConsidered: numberDecoder,
+    filesIndexed: numberDecoder,
+    bytesRead: numberDecoder,
+  },
+);
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   search_claude_sessions 现返回有界 DTO；旧数组形状必须 fail-closed 拒绝。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 items + truncated + diagnostics 完整 SessionSearchResult。
+ */
+export const sessionSearchResultDecoder: Decoder<SessionSearchResult> = objectDecoder(
+  'SessionSearchResult',
+  {
+    items: arrayDecoder(sessionSearchHitDecoder),
+    truncated: booleanDecoder,
+    diagnostics: sessionSearchDiagnosticsDecoder,
   },
 );

@@ -138,6 +138,18 @@ pub struct AppState {
     /// 每个 worktree 的文件监听句柄，key 同 workbench_claude_session_indexes。
     /// 监听失败时该 key 不存在（降级为每次重扫）。
     pub workbench_claude_session_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    /// Claude session 索引 singleflight 表：key = worktree canonical，value = watch Receiver。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     同一 worktree 并发搜索时只允许一次阻塞扫描，其余调用共享结果，避免重复 CPU/IO。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     tokio Mutex 保护 HashMap；leader 插入 Receiver(None)，完成后 send Some 并 remove。
+    pub workbench_claude_session_index_inflight: Arc<
+        tokio::sync::Mutex<
+            HashMap<String, crate::workbench::claude_sessions::ClaudeSessionIndexInflightRx>,
+        >,
+    >,
     /// 进程内有界本地运行时指标（耗时/计数/EWMA）；不上传、不记录正文/路径/凭据。
     pub runtime_metrics: Arc<RuntimeMetrics>,
     /// 运行时角色：sidecar=`HeadlessOwner`（唯一 Workbench/runtime owner），GUI=`GuiClient`（仅代理）。

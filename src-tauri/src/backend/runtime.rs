@@ -532,6 +532,7 @@ pub async fn build_app_state_with_role(
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         runtime_metrics: Arc::new(RuntimeMetrics::new()),
         runtime_role,
         event_bus,

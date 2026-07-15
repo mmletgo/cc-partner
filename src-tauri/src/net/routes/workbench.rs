@@ -50,7 +50,7 @@ use crate::workbench::browser_proxy::{
     proxy_workbench_browser_request, DESKTOP_BROWSER_PROXY_ROUTE_PREFIX,
     MOBILE_BROWSER_PROXY_ROUTE_PREFIX,
 };
-use crate::workbench::claude_sessions::{SessionPreview, SessionSearchHit};
+use crate::workbench::claude_sessions::{SessionPreview, SessionSearchResult};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto,
@@ -1889,16 +1889,17 @@ pub async fn mobile_stream_prompt_optimizer_to_session(
 ///
 /// Code Logic（这个函数做什么）:
 ///     接收远端 local projectId/worktreeId/query，确认 projectId 是本机 local 后委托命令层
-///     search_claude_sessions_for_state（local 分支），返回搜索命中列表（sessionId 为 Claude transcript UUID，无需包装）。
+///     search_claude_sessions_for_state（local 分支），返回 `SessionSearchResult` DTO
+///     （items + truncated + diagnostics；sessionId 为 Claude transcript UUID，无需包装）。
 pub async fn search_claude_sessions(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSearchClaudeSessionsReq>,
-) -> P2pResult<Json<Vec<SessionSearchHit>>> {
+) -> P2pResult<Json<SessionSearchResult>> {
     ensure_remote_gateway_local_project_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
-    let hits = search_claude_sessions_for_state(
+    let result = search_claude_sessions_for_state(
         &state,
         &req.project_id,
         req.worktree_id.as_deref(),
@@ -1906,7 +1907,7 @@ pub async fn search_claude_sessions(
     )
     .await
     .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.claude_sessions.search"))?;
-    Ok(Json(hits))
+    Ok(Json(result))
 }
 
 /// 读取远端单个 Claude session 的 preview 详情。

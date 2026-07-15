@@ -24,6 +24,7 @@ import {
   workbenchProjectsDecoder,
   workbenchRemoveResultDecoder,
   workbenchSaveTextResultDecoder,
+  sessionSearchResultDecoder,
   workbenchSessionDecoder,
   workbenchSessionsDecoder,
   workbenchWorktreeDecoder,
@@ -32,7 +33,7 @@ import {
 import type {
   ResumeClaudeSessionResult,
   SessionPreview,
-  SessionSearchHit,
+  SessionSearchResult,
   WorkbenchFormatResult,
   WorkbenchBrowserDiscovery,
   WorkbenchBrowserPreview,
@@ -364,13 +365,27 @@ export const workbenchApi = {
   },
 
   claudeSessions: {
-    /** 搜索当前 worktree 范围的 Claude session；query 为空返回全部（倒序，最多 50 条）。 */
-    search: (projectId: string, worktreeId: string | null, query: string) =>
-      invoke<SessionSearchHit[]>('search_claude_sessions', {
-        projectId,
-        worktreeId,
-        query,
-      }),
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Command Palette 需要有界 session 搜索结果，并感知索引截断诊断。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded search_claude_sessions → SessionSearchResult（items/truncated/diagnostics）。
+     */
+    search: (
+      projectId: string,
+      worktreeId: string | null,
+      query: string,
+    ): Promise<SessionSearchResult> =>
+      invokeDecoded(
+        'search_claude_sessions',
+        {
+          projectId,
+          worktreeId,
+          query,
+        },
+        sessionSearchResultDecoder,
+      ),
 
     /** 取某 Claude session 的最近 20 条对话 + 元信息，用于 preview 面板。 */
     preview: (projectId: string, worktreeId: string | null, sessionId: string) =>
