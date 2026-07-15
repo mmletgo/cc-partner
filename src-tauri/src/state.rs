@@ -135,9 +135,18 @@ pub struct AppState {
             HashMap<String, Arc<RwLock<crate::workbench::claude_sessions::WorktreeSessionIndex>>>,
         >,
     >,
-    /// 每个 worktree 的文件监听句柄，key 同 workbench_claude_session_indexes。
-    /// 监听失败时该 key 不存在（降级为每次重扫）。
-    pub workbench_claude_session_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    /// 每个 worktree 的 Claude session 文件监听运行时，key 同 workbench_claude_session_indexes。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     每个 worktree 的 watcher 必须与取消令牌、debounce/scan 句柄同生命周期；项目移除与
+    ///     进程 shutdown 要能 cancel/abort 全部后台任务再 drop watcher，避免幽灵重扫。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     `Mutex<HashMap<String, ClaudeSessionWatcherRuntime>>`；监听失败时该 key 不存在
+    ///     （降级为每次搜索重扫）。
+    pub workbench_claude_session_watchers: Arc<
+        Mutex<HashMap<String, crate::workbench::claude_sessions::ClaudeSessionWatcherRuntime>>,
+    >,
     /// Claude session 索引 singleflight 表：key = worktree canonical，value = watch Receiver。
     ///
     /// Business Logic（为什么需要这个字段）:
