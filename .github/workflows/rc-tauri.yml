@@ -206,13 +206,28 @@ jobs:
             exit 1
           }
           BUNDLE_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
-          if ls "$BUNDLE_DIR"/*.app.tar.gz >/dev/null 2>&1; then
-            cp "$BUNDLE_DIR"/*.app.tar.gz "rc-assets/harness/updater-harness_aarch64.app.tar.gz"
+          mkdir -p rc-assets/harness
+          shopt -s nullglob
+          app_tars=("$BUNDLE_DIR"/*.app.tar.gz)
+          if [ ${#app_tars[@]} -gt 0 ]; then
+            # Prefer harness-named tar; fall back to first
+            src="${app_tars[0]}"
+            for f in "${app_tars[@]}"; do
+              if [[ "$(basename "$f")" == *harness* || "$(basename "$f")" == *certification* ]]; then
+                src="$f"
+                break
+              fi
+            done
+            cp "$src" "rc-assets/harness/updater-harness_aarch64.app.tar.gz"
+            if [ -f "${src}.sig" ]; then
+              cp "${src}.sig" "rc-assets/harness/updater-harness_aarch64.app.tar.gz.sig"
+            fi
           fi
           for dmg in src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg; do
             [ -f "$dmg" ] || continue
             cp "$dmg" "rc-assets/harness/updater-harness_$(basename "$dmg")"
           done
+          ls -la rc-assets/harness/
           # Restore production conf on workspace (artifacts already collected)
           cp /tmp/cc-partner-harness/tauri.conf.production.json src-tauri/tauri.conf.json
           ls -la rc-assets/harness/ || true
