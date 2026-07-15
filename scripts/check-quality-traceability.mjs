@@ -1817,6 +1817,50 @@ export function runSelfTest() {
     );
   });
 
+  caseRun('load-nested-evidence-executions-from-disk', () => {
+    const nestedRoot = mkdtempSync(join(tmpdir(), 'quality-nested-ev-'));
+    const passPath = join(
+      nestedRoot,
+      'docs/development/evidence/L3-MACOS-GUI-PERMISSIONS-001/macos-aarch64/execution.json',
+    );
+    const failPath = join(
+      nestedRoot,
+      'docs/development/evidence/L3-MACOS-VOICEOVER-001/macos-aarch64/execution.json',
+    );
+    mkdirSync(dirname(passPath), { recursive: true });
+    mkdirSync(dirname(failPath), { recursive: true });
+    writeFileSync(
+      passPath,
+      JSON.stringify({
+        stableId: 'L3-MACOS-GUI-PERMISSIONS-001',
+        artifactMatrixId: 'macos-aarch64',
+        result: 'PASS',
+        subjectCommit: subject,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      failPath,
+      JSON.stringify({
+        stableId: 'L3-MACOS-VOICEOVER-001',
+        artifactMatrixId: 'macos-aarch64',
+        result: 'FAIL',
+        subjectCommit: subject,
+      }),
+      'utf8',
+    );
+    const loaded = loadEvidenceExecutions(nestedRoot);
+    assert(
+      loaded['L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64']?.result === 'PASS',
+      `expected nested PASS load, keys=${Object.keys(loaded).join(',')}`,
+    );
+    assert(
+      loaded['L3-MACOS-VOICEOVER-001@macos-aarch64']?.result === 'FAIL',
+      `expected nested FAIL load, keys=${Object.keys(loaded).join(',')}`,
+    );
+    rmSync(nestedRoot, { recursive: true, force: true });
+  });
+
   rmSync(dir, { recursive: true, force: true });
 
   if (failures.length > 0) {

@@ -145,47 +145,160 @@ jobs:
             echo "RC run must come from rc-tauri.yml (got $RUN_PATH)" >&2
             exit 1
           fi
-          # Evidence ref path allowlist + fixed SHA
-          # Allowed paths: docs/development/evidence/**, quality-matrix, real-device-certification, release-claim, README
-          git fetch origin "$EVIDENCE_REF" --depth=1 || git fetch origin "refs/heads/${EVIDENCE_REF}" --depth=1 || true
-          EVIDENCE_SHA=$(git rev-parse "$EVIDENCE" 2>/dev/null || true)
-          if [[ -z "$EVIDENCE_SHA" ]]; then
-            # try as remote ref tip later; still require exact expected SHA object available
-            if ! git cat-file -e "${EVIDENCE}^{commit}" 2>/dev/null; then
-              echo "expectedEvidenceCommit object not present locally" >&2
-              exit 1
-            fi
-            EVIDENCE_SHA="$EVIDENCE"
-          fi
-          if [[ "${EVIDENCE_SHA,,}" != "${EVIDENCE,,}" ]]; then
-            echo "evidence ref does not resolve to expectedEvidenceCommit" >&2
+          # Subject + evidence objects must resolve (no soft-skip)
+          if ! git cat-file -e "${SUBJECT}^{commit}" 2>/dev/null; then
+            echo "subjectCommit object not present after checkout" >&2
             exit 1
           fi
-          # Docs-only path allowlist for evidence commit vs subject
-          git fetch origin "$SUBJECT" --depth=1 || true
-          if git cat-file -e "${SUBJECT}^{commit}" 2>/dev/null; then
-            CHANGED=$(git diff --name-only "$SUBJECT" "$EVIDENCE" || true)
-            while IFS= read -r f; do
-              [ -z "$f" ] && continue
-              case "$f" in
-                README.md|docs/development/quality-matrix.json|docs/development/real-device-certification.md|docs/development/release-claim.json|docs/development/evidence/*) ;;
-                *)
-                  echo "evidence commit path not allowlisted: $f" >&2
-                  exit 1
-                  ;;
-              esac
-            done <<< "$CHANGED"
+          git fetch origin "$EVIDENCE" 2>/dev/null || true
+          if ! git cat-file -e "${EVIDENCE}^{commit}" 2>/dev/null; then
+            echo "expectedEvidenceCommit object not present" >&2
+            exit 1
           fi
-          # Require beta claim GO from checker (FAIL/NO-GO blocks publish)
-          node scripts/check-quality-traceability.mjs             --claim-mode platform-beta             --claim-profile macos-aarch64-beta             --subject-commit "$SUBJECT"             --subject-tag "$TAG"             --rc-run-id "$RC_RUN"             --evidence-ref "$EVIDENCE" | tee /tmp/beta-claim-check.log
+
+          # M2-R1: evidenceRef tip must equal frozen expectedEvidenceCommit (no tip drift)
+          REF_TIP=""
+          if [[ "$EVIDENCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            # Allow passing the frozen evidence commit itself as the ref
+            if [[ "${EVIDENCE_REF,,}" != "${EVIDENCE,,}" ]]; then
+              echo "evidenceRef SHA must equal expectedEvidenceCommit when ref is a commit" >&2
+              exit 1
+            fi
+            REF_TIP="$EVIDENCE"
+          else
+            FETCHED_REF=0
+            if git fetch origin "+refs/heads/${EVIDENCE_REF}:refs/remotes/origin/${EVIDENCE_REF}" 2>/dev/null; then
+              FETCHED_REF=1
+            elif git fetch origin "+refs/tags/${EVIDENCE_REF}:refs/tags/${EVIDENCE_REF}" 2>/dev/null; then
+              FETCHED_REF=1
+            elif git fetch origin "+refs/${EVIDENCE_REF}:refs/remotes/origin/${EVIDENCE_REF}" 2>/dev/null; then
+              FETCHED_REF=1
+            fi
+            if [[ "$FETCHED_REF" -ne 1 ]]; then
+              echo "failed to fetch protected evidenceRef: ${EVIDENCE_REF}" >&2
+              exit 1
+            fi
+            for cand in \
+              "refs/remotes/origin/${EVIDENCE_REF}" \
+              "origin/${EVIDENCE_REF}" \
+              "refs/tags/${EVIDENCE_REF}" \
+              "refs/heads/${EVIDENCE_REF}"; do
+              if TIP=$(git rev-parse "${cand}^{commit}" 2>/dev/null); then
+                REF_TIP="$TIP"
+                break
+              fi
+            done
+            if [[ -z "$REF_TIP" ]]; then
+              echo "cannot resolve evidenceRef tip for ${EVIDENCE_REF}" >&2
+              exit 1
+            fi
+          fi
+          if [[ "${REF_TIP,,}" != "${EVIDENCE,,}" ]]; then
+            echo "evidenceRef tip ${REF_TIP} != expectedEvidenceCommit ${EVIDENCE}" >&2
+            exit 1
+          fi
+
+          # Docs-only path allowlist: evidence commit may only differ on allowed docs paths vs subject
+          CHANGED=$(git diff --name-only "$SUBJECT" "$EVIDENCE")
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              README.md|docs/development/quality-matrix.json|docs/development/real-device-certification.md|docs/development/release-claim.json|docs/development/evidence/*) ;;
+              *)
+                echo "evidence commit path not allowlisted: $f" >&2
+                exit 1
+                ;;
+            esac
+          done <<< "$CHANGED"
+
+          # Explicit claim document guards from the frozen evidence commit
+          if git show "${EVIDENCE}:docs/development/release-claim.json" >/tmp/release-claim.json 2>/dev/null; then
+            DECISION=$(node -e 'const c=JSON.parse(require("fs").readFileSync("/tmp/release-claim.json","utf8")); process.stdout.write(String(c.decision||""))')
+            if [[ "$DECISION" != "GO" ]]; then
+              echo "release-claim.decision must be GO (got ${DECISION:-empty})" >&2
+              exit 1
+            fi
+          else
+            echo "release-claim.json missing on expectedEvidenceCommit; refusing publish" >&2
+            exit 1
+          fi
+          if git show "${EVIDENCE}:docs/development/evidence/rc/publish-bundle-frozen.json" >/tmp/pub-freeze.json 2>/dev/null; then
+            AUTH=$(node -e 'const c=JSON.parse(require("fs").readFileSync("/tmp/pub-freeze.json","utf8")); process.stdout.write(String(c.publishAuthorized))')
+            if [[ "$AUTH" == "false" ]]; then
+              echo "publish-bundle-frozen.publishAuthorized is false; refusing publish" >&2
+              exit 1
+            fi
+          fi
+
+          # M2-R2: evaluate claim/executions from evidence tree using gate tooling
+          # (workflow dispatch SHA has fixed nested loader; subject freeze may not)
+          mkdir -p /tmp/rc-inventory
+          gh run download "$RC_RUN" -n rc-macos-aarch64-inventory -D /tmp/rc-inventory
+          if [[ ! -f /tmp/rc-inventory/inventory.json ]]; then
+            echo "missing RC inventory.json for claim GO gate" >&2
+            exit 1
+          fi
+
+          GATE_SHA="${GITHUB_SHA:-}"
+          if [[ -n "$GATE_SHA" ]]; then
+            git fetch origin "$GATE_SHA" 2>/dev/null || true
+          fi
+          COMPOSITE=$(mktemp -d)
+          # Prefer dispatch-ref tree for checker scripts; fall back to evidence tree scripts
+          if [[ -n "$GATE_SHA" ]] && git cat-file -e "${GATE_SHA}^{commit}" 2>/dev/null; then
+            git archive "$GATE_SHA" | tar -x -C "$COMPOSITE"
+          else
+            git archive "$EVIDENCE" | tar -x -C "$COMPOSITE"
+          fi
+          # Overlay frozen evidence docs (claim + nested executions) onto the composite tree
+          git archive "$EVIDENCE" \
+            docs/development/evidence \
+            docs/development/release-claim.json \
+            2>/dev/null | tar -x -C "$COMPOSITE" || {
+              # partial archive if some paths missing — still require claim above
+              mkdir -p "$COMPOSITE/docs/development"
+              git show "${EVIDENCE}:docs/development/release-claim.json" \
+                >"$COMPOSITE/docs/development/release-claim.json"
+              git archive "$EVIDENCE" docs/development/evidence 2>/dev/null \
+                | tar -x -C "$COMPOSITE" || true
+            }
+
+          set +e
+          (
+            cd "$COMPOSITE"
+            node scripts/check-quality-traceability.mjs \
+              --claim-mode platform-beta \
+              --claim-profile macos-aarch64-beta \
+              --subject-commit "$SUBJECT" \
+              --subject-tag "$SUBJECT_TAG" \
+              --rc-run-id "$RC_RUN" \
+              --evidence-ref "$EVIDENCE_REF" \
+              --expected-evidence-commit "$EVIDENCE" \
+              --release-claim docs/development/release-claim.json \
+              --rc-inventory /tmp/rc-inventory/inventory.json
+          ) > /tmp/beta-claim-check.log 2>&1
+          CLAIM_EXIT=$?
+          set -e
+          cat /tmp/beta-claim-check.log || true
+          rm -rf "$COMPOSITE"
+
+          if [[ "$CLAIM_EXIT" -ne 0 ]]; then
+            echo "beta claim checker exit=${CLAIM_EXIT}; refusing publish" >&2
+            exit 1
+          fi
           if grep -q 'NO-GO' /tmp/beta-claim-check.log; then
             echo "beta claim is NO-GO; refusing publish" >&2
+            exit 1
+          fi
+          if ! grep -q 'GO' /tmp/beta-claim-check.log; then
+            echo "beta claim checker did not report GO; refusing publish" >&2
             exit 1
           fi
           if grep -qi 'missing required execution\|result must be PASS' /tmp/beta-claim-check.log; then
             echo "beta claim missing PASS executions; refusing publish" >&2
             exit 1
           fi
+
           echo "beta_tag=$BETA_TAG" >> "$GITHUB_OUTPUT"
           echo "subject_commit=$SUBJECT" >> "$GITHUB_OUTPUT"
 
