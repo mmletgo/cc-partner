@@ -31,7 +31,11 @@ declare global {
     __coreIntegrityTestApi?: {
       setPermissionFail: (fail: boolean) => void;
       setPromptFailMode: (mode: 'none' | 'create' | 'update' | 'delete') => void;
-      getLastSendArgs: () => { deviceId?: string; filePath?: string } | null;
+      getLastSendArgs: () => {
+        deviceId?: string;
+        filePath?: string;
+        clientOperationId?: string;
+      } | null;
       getLastCancelTaskId: () => string | null;
       getTasks: () => unknown[];
     };
@@ -94,7 +98,11 @@ async function installTransferMocks(page: Page): Promise<void> {
     };
 
     let tasks: CoreTransferTask[] = [];
-    let lastSendArgs: { deviceId?: string; filePath?: string } | null = null;
+    let lastSendArgs: {
+      deviceId?: string;
+      filePath?: string;
+      clientOperationId?: string;
+    } | null = null;
     let lastCancelTaskId: string | null = null;
     let taskSeq = 0;
 
@@ -151,7 +159,8 @@ async function installTransferMocks(page: Page): Promise<void> {
         if (cmd === 'send_transfer') {
           const deviceId = String(args?.deviceId ?? '');
           const filePath = String(args?.filePath ?? '');
-          lastSendArgs = { deviceId, filePath };
+          const clientOperationId = String(args?.clientOperationId ?? '');
+          lastSendArgs = { deviceId, filePath, clientOperationId };
           taskSeq += 1;
           const id = `task-${taskSeq}`;
           const fileName = filePath.split(/[/\\]/).pop() || filePath;
@@ -551,7 +560,10 @@ test.describe('Core product integrity', () => {
     await expect(page.getByRole('button', { name: '重试' })).toHaveCount(0);
 
     const sendArgs = await page.evaluate(() => window.__coreIntegrityTestApi?.getLastSendArgs());
-    expect(sendArgs).toEqual({ deviceId: 'peer-1', filePath: '/tmp/report.txt' });
+    expect(sendArgs?.deviceId).toBe('peer-1');
+    expect(sendArgs?.filePath).toBe('/tmp/report.txt');
+    expect(typeof sendArgs?.clientOperationId).toBe('string');
+    expect((sendArgs?.clientOperationId ?? '').length).toBeGreaterThan(0);
 
     await page.getByRole('button', { name: '取消' }).click();
     await expect(page.getByText('已取消').first()).toBeVisible({ timeout: 5_000 });

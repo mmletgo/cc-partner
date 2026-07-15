@@ -10,8 +10,8 @@
 //!     成功后本地单事务提交 completed，uncertain 保持 pending 不提供 retry。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `start_sending(state, device_id, file_path)`：在调用方线程内 spawn 异步任务，
-//!       立即返回 transfer_id（命令层 send_transfer 用）。
+//!     - `start_sending(state, device_id, file_path, client_operation_id)`：先 claim 再 spawn，
+//!       same clientOperationId+payload 幂等回放 task id；立即返回 transfer_id。
 //!     - `retry_transfer` / `resume_transfer`：校验父任务状态/指纹/能力 → claim → registry.add → spawn。
 //!     - `recover_pending_claimed_operations`：owner 启动时恢复 insert-before-spawn 的 Queued 行。
 //!     - `get_transfer_operation`：按 clientOperationId 查发送端 ledger；Finalizing uncertain 时
@@ -23,9 +23,9 @@
 
 use crate::error::AppError;
 use crate::models::transfer::{
-    canonical_recovery_payload_hash, SourceFingerprint, TransferDirection, TransferFailure,
-    TransferFailureStage, TransferOperationStatus, TransferPhase, TransferRecoveryKind,
-    TransferStatus, TransferTask,
+    canonical_recovery_payload_hash, canonical_send_payload_hash, SourceFingerprint,
+    TransferDirection, TransferFailure, TransferFailureStage, TransferOperationStatus, TransferPhase,
+    TransferRecoveryKind, TransferStatus, TransferTask,
 };
 use crate::net::peer_error::PeerCallError;
 use crate::net::protocol::{CAPABILITY_TRANSFER_COMPLETE_V1, CAPABILITY_TRANSFER_RESUME_V1};
@@ -90,14 +90,16 @@ struct StatusPayload {
 ///     立即返回 transfer_id 供前端追踪。对照 Python `send_file`。
 ///
 /// Code Logic:
-///     1. 校验文件存在并取 size/filename；
-///     2. 生成 transfer_id（UUID），构造 TransferTask（status=Pending）；
-///     3. registry.add(task)；spawn 异步任务（持有 AppState clone 与 cancel_token clone）；
-///     4. 任务内：init → 分块发送循环（检查 cancel）→ emit completed + 写历史 / emit failed。
-pub fn start_sending(
+///     1. 校验文件存在并取 size/filename/SHA256；
+///     2. 计算 send payload hash（kind=send + peer + sourcePath，不含随机 UUID）；
+///     3. claim_sender_operation：Fresh → insert Queued + spawn；Replay → 回放 task id
+///        （终态直接返回 id；非终态 ensure_replayed_attempt_running）；Conflict → 409；
+///     4. 返回 accepted 侧的 local task id。
+pub async fn start_sending(
     state: AppState,
     device_id: String,
     file_path: String,
+    client_operation_id: String,
 ) -> Result<String, AppError> {
     let path = Path::new(&file_path);
     if !path.exists() {
@@ -112,9 +114,12 @@ pub fn start_sending(
 
     // 同步计算 SHA256（发送前必须已知，用于 init 元数据与对端校验）
     let sha256 = calculate_sha256(path)?;
+    // 首次 send 的 hash 不得折入随机 transfer/protocol UUID，否则 lost ACK 重放会 Conflict。
+    let payload_hash = canonical_send_payload_hash(&file_path, &device_id);
     let transfer_id = Uuid::new_v4().to_string();
 
-    let task = TransferTask {
+    // Fresh claim 候选：protocol id 与 local task id 相同；Replay 忽略本候选 id。
+    let claim_task = TransferTask {
         id: transfer_id.clone(),
         filename: filename.clone(),
         file_path: file_path.clone(),
@@ -127,41 +132,57 @@ pub fn start_sending(
         transferred_bytes: 0,
         created_at: now_iso(),
         completed_at: None,
-        ..TransferTask::recovery_defaults(&transfer_id)
+        phase: Some(TransferPhase::Queued),
+        failure: None,
+        attempt: 1,
+        logical_transfer_id: transfer_id.clone(),
+        attempt_id: transfer_id.clone(),
+        protocol_transfer_id: transfer_id.clone(),
+        client_operation_id: Some(client_operation_id.clone()),
+        operation_payload_hash: Some(payload_hash.clone()),
     };
 
-    // 注册任务（附带 CancellationToken），spawn 前先 add 以便 cancel 命令可立即生效
-    state.transfers.add(task.clone());
+    let outcome = state
+        .transfer_repo
+        .claim_sender_operation(&client_operation_id, &payload_hash, &claim_task)
+        .await?;
 
-    // 取 cancel_token（spawn 任务循环中每块前检查）
-    let cancel_token = state
-        .transfers
-        .cancel_token(&transfer_id)
-        .unwrap_or_default();
-
-    // spawn 异步发送任务（不阻塞命令返回）
-    // TransferRegistry 内部为 Arc，Clone 廉价；这里 deref 取出内部值传给循环。
-    let registry = (*state.transfers).clone();
-    // 在 move 进闭包前 clone 一份 transfer_id 供函数返回值使用
-    let returned_id = transfer_id.clone();
-    // 首次 send：protocol id 与 local task id 相同。
-    let protocol_transfer_id = transfer_id.clone();
-    tokio::spawn(async move {
-        run_send_loop(
-            state,
-            registry,
-            protocol_transfer_id,
-            transfer_id,
-            device_id,
-            file_path,
-            file_size,
-            sha256,
-            cancel_token,
-        )
-        .await;
-    });
-
-    Ok(returned_id)
+    match outcome {
+        SenderClaimOutcome::Fresh(task) => {
+            // spawn 前再检源文件（TOCTOU）；变化则 mark failed 并 conflict。
+            let path = Path::new(&task.file_path);
+            let (size2, sha2, _) = recheck_source_fingerprint(path, &task)?;
+            if size2 != file_size || sha2 != sha256 {
+                let mut failed = task.clone();
+                failed.status = TransferStatus::Failed;
+                failed.phase = Some(TransferPhase::Failed);
+                failed.failure = Some(TransferFailure {
+                    stage: TransferFailureStage::Source,
+                    code: "source_changed".into(),
+                    retryable: true,
+                    message: "spawn 前源文件 fingerprint 已变化".into(),
+                });
+                failed.completed_at = Some(now_iso());
+                state.transfer_repo.record(&failed).await?;
+                return Err(AppError::conflict("source_changed: 源文件已变化"));
+            }
+            let returned_id = task.id.clone();
+            spawn_claimed_send(state, task, size2, sha2);
+            Ok(returned_id)
+        }
+        SenderClaimOutcome::Replay(task) => {
+            // 同 id+payload：终态直接回放 task id（lost ACK 后 UI 可 force 刷新列表）；
+            // 非终态 ensure 运行中（registry miss 则 re-spawn）。
+            if is_terminal_status(task.status) {
+                return Ok(task.id);
+            }
+            let running = ensure_replayed_attempt_running(state, task).await?;
+            Ok(running.id)
+        }
+        SenderClaimOutcome::Conflict { .. } => Err(AppError::conflict(
+            "operationIdConflict: clientOperationId 已绑定不同 payload",
+        )),
+    }
 }
 
 /// 幂等 retry：同一 logical transfer 新建 attempt，可 mint 新 protocol_transfer_id。
@@ -1539,8 +1560,9 @@ mod tests {
 
     use super::*;
     use crate::models::transfer::{
-        canonical_recovery_payload_hash, TransferDirection, TransferFailure, TransferFailureStage,
-        TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
+        canonical_recovery_payload_hash, canonical_send_payload_hash, TransferDirection,
+        TransferFailure, TransferFailureStage, TransferPhase, TransferRecoveryKind, TransferStatus,
+        TransferTask,
     };
     use crate::net::protocol::CAPABILITY_TRANSFER_RESUME_V1;
     use crate::storage::transfer_repo::{SenderClaimOutcome, TransferRepo};
@@ -1886,5 +1908,117 @@ mod tests {
         let list = repo.list_recoverable_queued_sends().await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "A");
+    }
+
+    /// 首次 send payload hash 只绑定 peer+path，不含随机 UUID。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     lost ACK 重放同 clientOperationId 必须命中 Replay，不得 Conflict。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同 path/peer 两次 hash 相等；改 path 则不等。
+    #[test]
+    fn first_send_payload_hash_stable_without_transfer_id() {
+        let a = canonical_send_payload_hash("/tmp/a.bin", "peer-1");
+        let b = canonical_send_payload_hash("/tmp/a.bin", "peer-1");
+        assert_eq!(a, b);
+        let other = canonical_send_payload_hash("/tmp/b.bin", "peer-1");
+        assert_ne!(a, other);
+        let other_peer = canonical_send_payload_hash("/tmp/a.bin", "peer-2");
+        assert_ne!(a, other_peer);
+    }
+
+    /// 首次 send：同 clientOperationId + 同 payload → Fresh 后 Replay 同一 task id。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     首次 send lost ACK 重放不得创建第二份 attempt。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim Fresh 一次；同 hash 再 claim → Replay 且 id 相同。
+    #[tokio::test]
+    async fn first_send_same_op_replays_task_id() {
+        let repo = memory_repo().await;
+        let hash = canonical_send_payload_hash("/tmp/a.bin", "peer-1");
+        let make = |id: &str| TransferTask {
+            filename: "a.bin".into(),
+            file_path: "/tmp/a.bin".into(),
+            size: 4,
+            sha256: "abcd".into(),
+            direction: TransferDirection::Send,
+            peer_device_id: "peer-1".into(),
+            status: TransferStatus::Pending,
+            created_at: "2026-07-15T00:00:00Z".into(),
+            phase: Some(TransferPhase::Queued),
+            attempt: 1,
+            logical_transfer_id: id.into(),
+            attempt_id: id.into(),
+            protocol_transfer_id: id.into(),
+            client_operation_id: Some("op-send-1".into()),
+            operation_payload_hash: Some(hash.clone()),
+            ..TransferTask::recovery_defaults(id)
+        };
+        let fresh = repo
+            .claim_sender_operation("op-send-1", &hash, &make("task-a"))
+            .await
+            .unwrap();
+        let fresh_id = match fresh {
+            SenderClaimOutcome::Fresh(t) => t.id,
+            other => panic!("expected Fresh, got {other:?}"),
+        };
+        let replay = repo
+            .claim_sender_operation("op-send-1", &hash, &make("task-b"))
+            .await
+            .unwrap();
+        match replay {
+            SenderClaimOutcome::Replay(t) => assert_eq!(t.id, fresh_id),
+            other => panic!("expected Replay, got {other:?}"),
+        }
+    }
+
+    /// 首次 send：同 clientOperationId + 不同 path → Conflict。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     同一操作键不得绑定另一文件意图。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim path-a 后 path-b 同 op → Conflict。
+    #[tokio::test]
+    async fn first_send_same_op_different_payload_conflicts() {
+        let repo = memory_repo().await;
+        let hash_a = canonical_send_payload_hash("/tmp/a.bin", "peer-1");
+        let hash_b = canonical_send_payload_hash("/tmp/b.bin", "peer-1");
+        assert_ne!(hash_a, hash_b);
+        let task_a = TransferTask {
+            filename: "a.bin".into(),
+            file_path: "/tmp/a.bin".into(),
+            size: 1,
+            sha256: "aa".into(),
+            direction: TransferDirection::Send,
+            peer_device_id: "peer-1".into(),
+            status: TransferStatus::Pending,
+            created_at: "2026-07-15T00:00:00Z".into(),
+            phase: Some(TransferPhase::Queued),
+            attempt: 1,
+            logical_transfer_id: "task-a".into(),
+            attempt_id: "task-a".into(),
+            protocol_transfer_id: "task-a".into(),
+            client_operation_id: Some("op-send-mix".into()),
+            operation_payload_hash: Some(hash_a.clone()),
+            ..TransferTask::recovery_defaults("task-a")
+        };
+        repo.claim_sender_operation("op-send-mix", &hash_a, &task_a)
+            .await
+            .unwrap();
+        let task_b = TransferTask {
+            file_path: "/tmp/b.bin".into(),
+            filename: "b.bin".into(),
+            operation_payload_hash: Some(hash_b.clone()),
+            ..task_a
+        };
+        let conflict = repo
+            .claim_sender_operation("op-send-mix", &hash_b, &task_b)
+            .await
+            .unwrap();
+        assert!(matches!(conflict, SenderClaimOutcome::Conflict { .. }));
     }
 }

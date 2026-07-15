@@ -9,8 +9,8 @@
 //! Code Logic（这个模块做什么）:
 //!     - `list_transfers`：合并 registry 活跃任务 + transfer_history 历史，按 created_at 倒序，
 //!       转为 TransferTaskDto（camelCase）返回。
-//!     - `send_transfer`：调 `transfer::sender::start_sending`（内部 spawn 异步任务），
-//!       立即返回 `{accepted, deviceId, filePath}`。
+//!     - `send_transfer`：调 `transfer::sender::start_sending`（clientOperationId claim 后 spawn），
+//!       立即返回 `{accepted, deviceId, filePath, id}`。
 //!     - `cancel_transfer`：触发 CancellationToken，返回 `{ok, id}`。
 //!     - `retry_transfer` / `resume_transfer` / `send_transfer` / `cancel_transfer` /
 //!       `get_transfer_operation`：owner 本地执行；GuiClient 经 loopback control 代理（与 N1 sidecar sole owner 一致）。
@@ -53,22 +53,33 @@ pub async fn list_transfers(state: State<'_, AppState>) -> Result<Vec<TransferTa
     Ok(all.iter().map(|t| t.to_dto(None)).collect())
 }
 
-/// 发起文件发送：异步 spawn，立即返回 transfer_id。
+/// 发起文件发送：clientOperationId claim 后 spawn，立即返回 transfer_id。
 ///
-/// Business Logic: 前端选择文件与目标设备后调用；后端 spawn 异步发送任务并立即返回，
-///     前端通过 listen('transfer:progress') 等事件追踪进度。对照 Python `/api/transfer/send`。
+/// Business Logic: 前端选择文件与目标设备后调用；稳定 clientOperationId 保证 lost ACK
+///     不重复发送。后端 claim 后 spawn 异步任务并立即返回，前端通过
+///     listen('transfer:progress') 等事件追踪进度。对照 Python `/api/transfer/send`。
+///
+/// Code Logic: GuiClient → control `transfer/send`；owner → `sender::start_sending`。
 #[tauri::command]
 pub async fn send_transfer(
     state: State<'_, AppState>,
     device_id: String,
     file_path: String,
+    client_operation_id: String,
 ) -> Result<serde_json::Value, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         let client = BackendControlClient::from_control_file()?;
-        return client.send_transfer(&device_id, &file_path).await;
+        return client
+            .send_transfer(&device_id, &file_path, &client_operation_id)
+            .await;
     }
-    let transfer_id =
-        sender::start_sending(state.inner().clone(), device_id.clone(), file_path.clone())?;
+    let transfer_id = sender::start_sending(
+        state.inner().clone(),
+        device_id.clone(),
+        file_path.clone(),
+        client_operation_id,
+    )
+    .await?;
     tracing::info!("已发起传输任务 {transfer_id} → {device_id}");
     Ok(serde_json::json!({
         "accepted": true,

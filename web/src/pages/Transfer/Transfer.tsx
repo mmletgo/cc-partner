@@ -9,9 +9,9 @@
  * Code Logic（这个页面做什么）:
  *   - 设备 5s / 任务 3s visibility-aware polling；刷新失败保留已有数组
  *   - 选中文件存 {path,name}；Enter/Space/点击走 pickTransferFile；native drop 只取首路径
- *   - handleSendClick 用 sendingRef 同步门闩防双击，await transferApi.send 后 force runTasksNow
+ *   - handleSendClick 用 sendingRef 同步门闩；mint/复用稳定 clientOperationId 调 send
  *   - pending/transferring 传 onCancel；failed 传 resume 或 retry；receive completed 传 open/reveal
- *   - retry/resume 稳定 clientOperationId；uncertain → reconciling + getOperation，不盲重放
+ *   - 首次 send 与 retry/resume 均稳定 clientOperationId；uncertain → getOperation，不盲重放
  *   - 历史按 active/needs-attention/recent-completed 分区，空组省略
  *   - Tauri 环境下 listen transfer:progress 与 completed/failed/cancelled，fail-closed 解码后 merge
  */
@@ -65,6 +65,12 @@ type RecoveryKind = 'retry' | 'resume';
 interface PendingRecovery {
   clientOperationId: string;
   kind: RecoveryKind;
+}
+
+/** 首次 send 意图：同 device+path 在 pending/uncertain 期间复用 clientOperationId。 */
+interface PendingSendIntent {
+  intentKey: string;
+  clientOperationId: string;
 }
 
 interface TauriInternalsWindow extends Window {
@@ -182,6 +188,8 @@ export function Transfer() {
   const recoveryBusyRef = useRef<Set<string>>(new Set());
   /** 稳定 clientOperationId：user intent 在 pending/unknown 期间复用 */
   const pendingRecoveriesRef = useRef<Record<string, PendingRecovery>>({});
+  /** 首次 send 意图：同 device+path 在 uncertain 期间复用 clientOperationId */
+  const pendingSendIntentRef = useRef<PendingSendIntent | null>(null);
   /** 组件挂载守卫：异步 loader 写 state 前检查 */
   const mountedRef = useRef(true);
 
@@ -462,23 +470,73 @@ export function Transfer() {
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户确认发送后必须真实调用 send_transfer，成功后强制刷新任务列表（不得只 join 旧 poll）；
-   *   双击不得在 re-render 前发出第二次 send。
+   *   双击不得在 re-render 前发出第二次 send；lost ACK 必须复用稳定 clientOperationId。
    *
    * Code Logic（这个函数做什么）:
-   *   用 sendingRef 同步门闩 + sending 状态；await transferApi.send；
-   *   成功清空选择并 runTasksNow({force:true})；失败保留选择；finally 释放门闩。
+   *   用 sendingRef 同步门闩 + sending 状态；按 device+path mint/复用 clientOperationId；
+   *   await transferApi.send；成功清空选择与 pending intent 并 force runTasksNow；
+   *   uncertain 保留 intent 并 getOperation 对账；definitive 失败保留选择；finally 释放门闩。
    */
   const handleSendClick = useCallback(async () => {
     if (!selectedFile || !selectedDeviceId || sendingRef.current) return;
     sendingRef.current = true;
     setSending(true);
     setSendError(null);
+
+    const intentKey = `${selectedDeviceId}\0${selectedFile.path}`;
+    const existing = pendingSendIntentRef.current;
+    const clientOperationId =
+      existing && existing.intentKey === intentKey
+        ? existing.clientOperationId
+        : mintTransferClientOperationId();
+    pendingSendIntentRef.current = { intentKey, clientOperationId };
+
     try {
-      await transferApi.send(selectedDeviceId, selectedFile.path);
+      await transferApi.send(selectedDeviceId, selectedFile.path, clientOperationId);
+      pendingSendIntentRef.current = null;
       setSelectedFile(null);
       setSelectionNotice(null);
       await runTasksNow({ force: true });
     } catch (err) {
+      if (isTransferOutcomeUncertain(err)) {
+        // lost ACK：保留 clientOperationId，先对账再 force 刷新，禁止 mint 新 id 盲重放
+        try {
+          const maxAttempts = 12;
+          const delayMs = 1500;
+          for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            if (!mountedRef.current) return;
+            const status = await transferApi.getOperation(clientOperationId);
+            if (!mountedRef.current) return;
+            if (status.status === 'pending') {
+              if (attempt + 1 >= maxAttempts) break;
+              await new Promise<void>((resolve) => {
+                window.setTimeout(resolve, delayMs);
+              });
+              continue;
+            }
+            // 终态（succeeded/failed/notFound）清 intent 并刷新列表
+            pendingSendIntentRef.current = null;
+            await runTasksNow({ force: true });
+            if (status.status === 'failed') {
+              setSendError(t('transfer:sendFailed', { error: status.code }));
+            } else if (status.status === 'succeeded') {
+              setSelectedFile(null);
+              setSelectionNotice(null);
+            }
+            return;
+          }
+          setSendError(
+            t('transfer:sendFailed', {
+              error: 'operation still pending; retry reconcile',
+            }),
+          );
+        } catch (reconcileErr) {
+          setSendError(t('transfer:sendFailed', { error: errorMessage(reconcileErr) }));
+        }
+        return;
+      }
+      // definitive 失败：清 intent，允许用户改文件/设备后重新 mint
+      pendingSendIntentRef.current = null;
       setSendError(t('transfer:sendFailed', { error: errorMessage(err) }));
     } finally {
       sendingRef.current = false;

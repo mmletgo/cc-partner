@@ -8,7 +8,7 @@
  *
  * Code Logic（这个模块做什么）:
  *   list → list_transfers → TransferTask[]（runtime decode）；
- *   send → send_transfer → SendTransferResult；
+ *   send → send_transfer({deviceId,filePath,clientOperationId}) → SendTransferResult；
  *   cancel → cancel_transfer → CancelTransferResult；
  *   retry/resume → retry_transfer/resume_transfer → TransferTask；
  *   getOperation → get_transfer_operation → TransferOperationStatus；
@@ -104,14 +104,22 @@ export const transferApi = {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户选定目标设备与文件路径后发起发送；后端 spawn 异步任务并立即受理。
+   *   用户选定目标设备与文件路径后发起发送；稳定 clientOperationId 保证 lost ACK 不双发。
    *
    * Code Logic（这个函数做什么）:
-   *   invokeDecoded send_transfer({ deviceId, filePath })，返回 SendTransferResult。
+   *   invokeDecoded send_transfer({ deviceId, filePath, clientOperationId })，返回 SendTransferResult。
    *   filePath 作为不透明 UTF-8 透传，不做分隔符改写或 URI decode。
    */
-  send: (deviceId: string, filePath: string): Promise<SendTransferResult> =>
-    invokeDecoded('send_transfer', { deviceId, filePath }, sendTransferResultDecoder),
+  send: (
+    deviceId: string,
+    filePath: string,
+    clientOperationId: string,
+  ): Promise<SendTransferResult> =>
+    invokeDecoded(
+      'send_transfer',
+      { deviceId, filePath, clientOperationId },
+      sendTransferResultDecoder,
+    ),
 
   /**
    * Business Logic（为什么需要这个函数）:

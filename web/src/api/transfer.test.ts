@@ -98,11 +98,12 @@ describe('transferApi', () => {
     };
     mockInvoke.mockResolvedValueOnce(payload);
 
-    const result = await transferApi.send('device-a', windowsPath);
+    const result = await transferApi.send('device-a', windowsPath, 'op-send-1');
 
     expect(mockInvoke).toHaveBeenCalledWith('send_transfer', {
       deviceId: 'device-a',
       filePath: windowsPath,
+      clientOperationId: 'op-send-1',
     });
     expect(result).toEqual(payload);
     expect(result.filePath).toBe(windowsPath);
@@ -234,7 +235,8 @@ describe('transferApi', () => {
 
   test('source wires invokeDecoded to recovery and open result DTOs', () => {
     const source = readFileSync(new URL('./transfer.ts', import.meta.url), 'utf8');
-    expect(source).toContain("invokeDecoded('send_transfer'");
+    expect(source).toContain("'send_transfer'");
+    expect(source).toContain('clientOperationId');
     expect(source).toContain("invokeDecoded('cancel_transfer'");
     expect(source).toContain("invokeDecoded('list_transfers'");
     expect(source).toContain("'retry_transfer'");

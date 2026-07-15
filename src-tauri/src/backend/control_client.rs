@@ -77,6 +77,7 @@ struct ControlTransferSendBody {
     control_token: String,
     device_id: String,
     file_path: String,
+    client_operation_id: String,
 }
 
 /// transfer retry/resume control body。
@@ -1241,6 +1242,7 @@ impl BackendControlClient {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     GuiClient 不得本进程 spawn send loop；claim/registry 仅 owner 持有。
+    ///     稳定 clientOperationId 保证 lost ACK 同意图幂等。
     ///
     /// Code Logic（这个函数做什么）:
     ///     POST `transfer/send`；返回 accepted JSON；mutation 不自动重试。
@@ -1248,11 +1250,13 @@ impl BackendControlClient {
         &self,
         device_id: &str,
         file_path: &str,
+        client_operation_id: &str,
     ) -> Result<serde_json::Value, AppError> {
         let body = ControlTransferSendBody {
             control_token: self.control_token.clone(),
             device_id: device_id.to_string(),
             file_path: file_path.to_string(),
+            client_operation_id: client_operation_id.to_string(),
         };
         match self.send_once("transfer/send", &body, MUTATE_TIMEOUT).await {
             ControlCallOutcome::Ok(v) => Ok(v),

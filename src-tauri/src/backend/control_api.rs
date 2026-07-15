@@ -1211,13 +1211,15 @@ pub async fn control_transfer_prepare_open(
 /// transfer send 请求体。
 ///
 /// Business Logic: GuiClient 不得在本进程 claim/spawn；必须代理到 owner registry。
-/// Code Logic: camelCase controlToken + deviceId + filePath。
+///     clientOperationId 保证 lost ACK 后同意图幂等，禁止盲双发。
+/// Code Logic: camelCase controlToken + deviceId + filePath + clientOperationId。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlTransferSendRequest {
     pub control_token: String,
     pub device_id: String,
     pub file_path: String,
+    pub client_operation_id: String,
 }
 
 /// transfer retry/resume 请求体。
@@ -1254,10 +1256,11 @@ pub struct ControlTransferCancelRequest {
     pub task_id: String,
 }
 
-/// owner 路径：发起发送（spawn 后立即返回 accepted）。
+/// owner 路径：发起发送（claim 后 spawn，立即返回 accepted）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     sidecar 是唯一 runtime owner；GUI 代理 send 避免双 registry 双 drive。
+///     clientOperationId claim 防止 lost ACK 导致重复发送。
 ///
 /// Code Logic（这个函数做什么）:
 ///     authorize → require_owner → sender::start_sending → `{accepted,deviceId,filePath,id}`。
@@ -1276,7 +1279,9 @@ pub async fn control_transfer_send(
         state.clone(),
         request.device_id.clone(),
         request.file_path.clone(),
+        request.client_operation_id,
     )
+    .await
     .map_err(|e| P2pError::from_app_error(e, &context, "control.transfer_send"))?;
     let body = serde_json::json!({
         "accepted": true,

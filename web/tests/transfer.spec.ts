@@ -147,8 +147,18 @@ test.describe('E2E-TRANSFER-001 Transfer critical journey', () => {
     expect(sendCalls[0]).toMatchObject({
       type: 'invoke',
       command: 'send_transfer',
-      args: { deviceId: PEER.id, filePath: ABSOLUTE_PATH },
+      args: {
+        deviceId: PEER.id,
+        filePath: ABSOLUTE_PATH,
+      },
     });
+    const sendArgs = sendCalls[0]?.args as {
+      deviceId?: string;
+      filePath?: string;
+      clientOperationId?: string;
+    };
+    expect(typeof sendArgs.clientOperationId).toBe('string');
+    expect((sendArgs.clientOperationId ?? '').length).toBeGreaterThan(0);
 
     // 未实现 pause/retry/open：任务行仅 cancel（scope 到任务列表，避免侧栏/壳层同名按钮干扰）
     const taskList = page.getByRole('list').filter({ hasText: 'report.txt' });

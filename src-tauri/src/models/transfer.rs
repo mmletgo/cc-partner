@@ -99,6 +99,24 @@ pub fn canonical_recovery_payload_hash(
     format!("{digest:x}")
 }
 
+/// 计算首次发送意图的 canonical payload hash。
+///
+/// Business Logic（为什么需要这个函数）:
+///     首次 send 也必须带稳定 clientOperationId；lost ACK 重放同 id 不得再 spawn 第二份传输。
+///     hash 只绑定 kind=send + peer + sourcePath，**不得**折入随机 transfer/protocol UUID。
+///
+/// Code Logic（这个函数做什么）:
+///     固定 key 顺序的 JSON 字节做 SHA256 hex（不含 clientOperationId 本身）。
+pub fn canonical_send_payload_hash(source_path: &str, peer_device_id: &str) -> String {
+    let stable = format!(
+        "{{\"kind\":\"send\",\"peerDeviceId\":{},\"sourcePath\":{}}}",
+        serde_json::to_string(peer_device_id).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(source_path).unwrap_or_else(|_| "\"\"".into()),
+    );
+    let digest = Sha256::digest(stable.as_bytes());
+    format!("{digest:x}")
+}
+
 /// 传输任务状态枚举。serde 以 lowercase 序列化，与 Python Enum.value 一致。
 ///
 /// Business Logic: 文件传输是多阶段过程，需精确跟踪当前所处状态以驱动 UI 与断点续传判定。
