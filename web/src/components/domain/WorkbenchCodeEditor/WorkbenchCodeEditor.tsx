@@ -8,15 +8,16 @@
  * Code Logic（这个组件做什么）:
  *   - 封装 @uiw/react-codemirror，统一 CodeMirror 的基础 setup、随应用主题变化的编辑器背景和 100% 高度布局
  *   - 单独注入 One Dark Pro 语法高亮扩展，避免 @uiw 默认 light theme 覆盖工作台视觉背景
- *   - 根据 language prop 通过 useMemo 计算语言扩展，未知语言返回空数组并按纯文本渲染
+ *   - 通过 loadWorkbenchLanguage 异步加载语言扩展；加载中/失败按纯文本可编辑渲染；request sequence 丢弃过期 Promise
  *   - 将 CodeMirror 的 onChange value 透传给调用方，由上层负责保存、脏状态和文件生命周期
  */
 
 import CodeMirror from '@uiw/react-codemirror';
 import type { BasicSetupOptions } from '@uiw/react-codemirror';
-import { useCallback, useMemo } from 'react';
+import type { Extension } from '@codemirror/state';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
-import { getWorkbenchCodeEditorLanguageExtensions } from './workbenchCodeEditorLanguage';
+import { loadWorkbenchLanguage } from './workbenchCodeEditorLanguage';
 import {
   WORKBENCH_CODE_EDITOR_THEME,
   WORKBENCH_ONE_DARK_PRO_SYNTAX_EXTENSION,
@@ -46,8 +47,9 @@ const WORKBENCH_CODE_EDITOR_BASIC_SETUP: BasicSetupOptions = {
  *   切换只读和编辑模式，避免页面层重复配置 CodeMirror。
  *
  * Code Logic（这个组件做什么）:
- *   使用 useMemo 按 language 缓存语言扩展并追加 One Dark Pro syntax highlight，渲染带自定义 theme prop 的 100% 高度 CodeMirror，
- *   并启用行号、折叠 gutter、当前行高亮、括号匹配和搜索快捷键；内容变化时只把最新字符串回传给 onChange。
+ *   用 request sequence + loadWorkbenchLanguage 异步装入语言扩展；加载中/失败时 languageExtension=null
+ *   （纯文本）但仍保持 theme 与 One Dark Pro syntax 扩展；渲染带自定义 theme prop 的 100% 高度
+ *   CodeMirror，并启用行号、折叠 gutter、当前行高亮、括号匹配和搜索快捷键。
  */
 export function WorkbenchCodeEditor({
   value,
@@ -55,9 +57,38 @@ export function WorkbenchCodeEditor({
   readOnly = false,
   onChange,
 }: WorkbenchCodeEditorProps): ReactElement {
+  const [languageExtension, setLanguageExtension] = useState<Extension | null>(null);
+  const languageRequestSeqRef = useRef(0);
+
+  useEffect(() => {
+    const requestSeq = languageRequestSeqRef.current + 1;
+    languageRequestSeqRef.current = requestSeq;
+    // 切换语言时先退回纯文本，避免短暂显示错误高亮
+    setLanguageExtension(null);
+
+    void loadWorkbenchLanguage(language).then(
+      (extension) => {
+        if (languageRequestSeqRef.current !== requestSeq) {
+          return;
+        }
+        setLanguageExtension(extension);
+      },
+      () => {
+        // import 失败：保持纯文本可编辑，不阻塞文件查看
+        if (languageRequestSeqRef.current !== requestSeq) {
+          return;
+        }
+        setLanguageExtension(null);
+      },
+    );
+  }, [language]);
+
   const extensions = useMemo(
-    () => [...getWorkbenchCodeEditorLanguageExtensions(language), WORKBENCH_ONE_DARK_PRO_SYNTAX_EXTENSION],
-    [language],
+    () => [
+      ...(languageExtension ? [languageExtension] : []),
+      WORKBENCH_ONE_DARK_PRO_SYNTAX_EXTENSION,
+    ],
+    [languageExtension],
   );
   const handleChange = useCallback(
     (next: string) => {

@@ -21,10 +21,12 @@ import {
   collectSourcemapRawBytes,
   effectiveCeiling,
   extractStylesheetHrefs,
+  findEditorEntryChunk,
   findForbiddenModules,
   formatBudgetKiB,
   getFinalBudgetTargets,
   LAZY_CHUNK_BUDGET_BYTES,
+  measureEditorEntryLoadedGzip,
   MOBILE_FORBIDDEN_PATTERNS,
   normalizeCssFiles,
   parseBaselineMetrics,
@@ -146,6 +148,50 @@ describe('collectStaticClosure', () => {
   it('handles missing chunk ids without throwing', () => {
     const closure = collectStaticClosure('assets/missing.js', {});
     assert.deepEqual([...closure], []);
+  });
+});
+
+describe('findEditorEntryChunk / measureEditorEntryLoadedGzip', () => {
+  it('locates WorkbenchCodeEditor chunk and measures its gzip', () => {
+    const chunks = {
+      'assets/WorkbenchCodeEditor-abc.js': {
+        moduleIds: [
+          '/src/components/domain/WorkbenchCodeEditor/WorkbenchCodeEditor.tsx',
+          '/src/components/domain/WorkbenchCodeEditor/workbenchCodeEditorLanguage.ts',
+        ],
+        imports: ['assets/shared.js'],
+        dynamicImports: ['assets/lang-yaml.js'],
+      },
+      'assets/lang-yaml.js': {
+        moduleIds: ['/node_modules/@codemirror/lang-yaml/dist/index.js'],
+        imports: [],
+        dynamicImports: [],
+      },
+      'assets/shared.js': {
+        moduleIds: ['/src/styles/tokens.css'],
+        imports: [],
+        dynamicImports: [],
+      },
+    };
+    assert.equal(findEditorEntryChunk(chunks), 'assets/WorkbenchCodeEditor-abc.js');
+    const files = {
+      'assets/WorkbenchCodeEditor-abc.js': makeSource(8000, 'E'),
+      'assets/lang-yaml.js': makeSource(4000, 'Y'),
+      'assets/shared.js': makeSource(1000, 'S'),
+    };
+    const measured = measureEditorEntryLoadedGzip(chunks, (name) => Buffer.from(files[name], 'utf8'));
+    assert.equal(measured.entryFile, 'assets/WorkbenchCodeEditor-abc.js');
+    assert.equal(
+      measured.gzipBytes,
+      gzipSync(Buffer.from(files['assets/WorkbenchCodeEditor-abc.js'], 'utf8')).byteLength,
+    );
+  });
+
+  it('returns null when editor chunk is absent', () => {
+    assert.equal(findEditorEntryChunk({}), null);
+    const measured = measureEditorEntryLoadedGzip({}, () => Buffer.from(''));
+    assert.equal(measured.entryFile, null);
+    assert.equal(measured.gzipBytes, null);
   });
 });
 
