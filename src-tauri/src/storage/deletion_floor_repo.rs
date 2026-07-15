@@ -7,6 +7,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - 幂等建表；upsert/get/list；
+//!     - `merge_floor_monotonic` / `upsert_merge_monotonic_on_tx`：Merge restore 单调合并 floor；
 //!     - `apply_deletion_floor` 用向量时钟比较决定 DeleteWins / KeepHistoryButDeleted / AcceptLive；
 //!     - `tombstone_gc_eligible` / `compact_tombstones_to_floors` 纯结构 + 水位辅助。
 
@@ -17,7 +18,7 @@ use crate::storage::sync_request_ledger_repo::{
 };
 use crate::storage::sync_watermark_repo::{SyncWatermarkRepo, DEFAULT_ACTIVE_PEER_WINDOW_DAYS};
 use crate::sync::protocol::content_sha256_hex;
-use crate::sync::vector_clock::{compare, ClockOrder};
+use crate::sync::vector_clock::{compare, merge, ClockOrder};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
@@ -149,9 +150,61 @@ impl DeletionFloorRepo {
         Ok(())
     }
 
+    /// 单调合并两条 floor：保留因果上更强的删除下限。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Merge restore 不得用备份中较旧的 floor 覆盖本机更新的 floor，否则会把已压缩
+    ///     删除的删除下限降级，导致中间版本 live 被 AcceptLive 复活。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `compare(incoming.delete_vector_clock, local.delete_vector_clock)`：
+    ///     - After → 采用 incoming；
+    ///     - Before / Equal → 保留 local；
+    ///     - Concurrent → 分量 max 合并时钟，`delete_epoch` 取 max，元数据取较新 created_at。
+    ///     调用方须保证 domain/item_id 一致；本函数以 local 的 PK 字段为准。
+    pub fn merge_floor_monotonic(local: &DeletionFloor, incoming: &DeletionFloor) -> DeletionFloor {
+        match compare(
+            &incoming.delete_vector_clock,
+            &local.delete_vector_clock,
+        ) {
+            ClockOrder::After => DeletionFloor {
+                domain: local.domain.clone(),
+                item_id: local.item_id.clone(),
+                delete_vector_clock: incoming.delete_vector_clock.clone(),
+                delete_epoch: incoming.delete_epoch,
+                content_hash: incoming.content_hash.clone(),
+                created_at: incoming.created_at.clone(),
+            },
+            ClockOrder::Before | ClockOrder::Equal => local.clone(),
+            ClockOrder::Concurrent => {
+                let prefer_incoming = incoming.created_at > local.created_at;
+                DeletionFloor {
+                    domain: local.domain.clone(),
+                    item_id: local.item_id.clone(),
+                    delete_vector_clock: merge(
+                        &local.delete_vector_clock,
+                        &incoming.delete_vector_clock,
+                    ),
+                    delete_epoch: local.delete_epoch.max(incoming.delete_epoch),
+                    content_hash: if prefer_incoming {
+                        incoming.content_hash.clone()
+                    } else {
+                        local.content_hash.clone()
+                    },
+                    created_at: if prefer_incoming {
+                        incoming.created_at.clone()
+                    } else {
+                        local.created_at.clone()
+                    },
+                }
+            }
+        }
+    }
+
     /// 在事务内 upsert floor。
     ///
-    /// Business Logic: GC 在删除完整 tombstone 的同一事务写入 floor。
+    /// Business Logic: GC 在删除完整 tombstone 的同一事务写入 floor；ReplaceDomain
+    ///     restore 清空后 bulk 写回也走此路径。
     /// Code Logic: INSERT OR REPLACE。
     #[allow(dead_code)] // intentional public API for GC same-tx write
     pub async fn upsert_on_tx(
@@ -173,6 +226,27 @@ impl DeletionFloorRepo {
         .execute(&mut **tx)
         .await?;
         Ok(())
+    }
+
+    /// 在事务内单调合并写入 floor，返回最终生效的 floor。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Merge restore 导入备份 floors 时必须与本地 floor 做因果单调合并；
+    ///     无本地行时才直接落库备份 floor。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `get_on_tx` → 无则 `upsert_on_tx(incoming)`；有则 `merge_floor_monotonic`
+    ///     后 `upsert_on_tx`；返回生效 floor 供 reapply 使用。
+    pub async fn upsert_merge_monotonic_on_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        incoming: &DeletionFloor,
+    ) -> Result<DeletionFloor, AppError> {
+        let effective = match Self::get_on_tx(tx, &incoming.domain, &incoming.item_id).await? {
+            None => incoming.clone(),
+            Some(local) => Self::merge_floor_monotonic(&local, incoming),
+        };
+        Self::upsert_on_tx(tx, &effective).await?;
+        Ok(effective)
     }
 
     /// 非事务 upsert（测试/单写路径）。

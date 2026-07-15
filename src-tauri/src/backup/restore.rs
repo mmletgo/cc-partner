@@ -323,10 +323,12 @@ impl BackupRestoreService {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     Merge 必须走与 live sync 相同的向量时钟/conflict-copy；Replace 清空领域后 bulk 导入；
-    ///     floors 恢复后要对 live 行再应用 floor 决策；content_versions 必须可往返。
+    ///     floors 在 Merge 下与本地单调合并（禁止旧备份降级新本地下限），Replace 可整域替换；
+    ///     生效 floors 恢复后要对 live 行再应用 floor 决策；content_versions 必须可往返。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     inspect 取 manifest 哈希 → 再验 SHA 读 entry → 预构建 merge plan → 单事务写入。
+    ///     inspect 取 manifest 哈希 → 再验 SHA 读 entry → 预构建 merge plan → 单事务写入；
+    ///     floors：Merge 走 `upsert_merge_monotonic_on_tx`，Replace 走 `upsert_on_tx`。
     async fn apply_domains_in_transaction(
         &self,
         permit: &DatabaseWritePermit,
@@ -515,24 +517,20 @@ impl BackupRestoreService {
             .await?;
         }
         if let Some(items) = floors {
+            // Merge：与本地 floor 单调合并，禁止旧备份 floor 降级新本地下限；
+            // ReplaceDomain：领域已清空，直接 REPLACE 写回备份 floor。
+            let mut effective_floors: Vec<DeletionFloor> = Vec::with_capacity(items.len());
             for floor in &items {
-                let vc = serde_json::to_string(&floor.delete_vector_clock)?;
-                sqlx::query(
-                    "INSERT OR REPLACE INTO sync_deletion_floors
-                     (domain, item_id, delete_vector_clock, delete_epoch, content_hash, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?)",
-                )
-                .bind(&floor.domain)
-                .bind(&floor.item_id)
-                .bind(vc)
-                .bind(floor.delete_epoch as i64)
-                .bind(&floor.content_hash)
-                .bind(&floor.created_at)
-                .execute(&mut *tx)
-                .await?;
+                let effective = if matches!(mode, RestoreMode::Merge) {
+                    DeletionFloorRepo::upsert_merge_monotonic_on_tx(&mut tx, floor).await?
+                } else {
+                    DeletionFloorRepo::upsert_on_tx(&mut tx, floor).await?;
+                    floor.clone()
+                };
+                effective_floors.push(effective);
             }
-            // M7: floors 落库后，对同事务内 live 行再应用 DeleteWins / KeepHistoryButDeleted。
-            reapply_floors_to_live_on_tx(&mut tx, &items).await?;
+            // M7: 以最终生效 floor 再应用 DeleteWins / KeepHistoryButDeleted 到 live。
+            reapply_floors_to_live_on_tx(&mut tx, &effective_floors).await?;
         }
         if let Some(versions) = content_versions {
             for version in &versions {
@@ -1430,5 +1428,103 @@ mod tests {
             .await
             .unwrap();
         assert!(floor_row.is_some());
+    }
+
+    /// Merge restore 不得用较旧备份 floor 覆盖较新本地 floor（防删除复活）。
+    ///
+    /// Business Logic: local {A:5} + backup {A:3} → 本地仍支配；live {A:4} 仍 DeleteWins。
+    #[tokio::test]
+    async fn merge_restore_preserves_monotonic_deletion_floors() {
+        let (state, tmp) = setup_restore_state().await;
+        let floors = DeletionFloorRepo::new(state.db.clone());
+
+        // 本地较新 floor {A:5}
+        let mut local_vc = HashMap::new();
+        local_vc.insert("A".to_string(), 5u64);
+        floors
+            .upsert(&DeletionFloor {
+                domain: FLOOR_DOMAIN_PROMPTS.into(),
+                item_id: "p-mono".into(),
+                delete_vector_clock: local_vc.clone(),
+                delete_epoch: 10,
+                content_hash: "local-hash".into(),
+                created_at: "2024-06-02T00:00:00+00:00".into(),
+            })
+            .await
+            .unwrap();
+
+        // live 中间版本 {A:4}（应被 floor {A:5} 支配为 DeleteWins）
+        let live = sample_prompt("p-mono", "A", "should-stay-deleted", 4, "2024-05-01T00:00:00+00:00");
+        let live_vc = live.vector_clock.clone();
+        state
+            .prompt_repo
+            .bulk_upsert(std::slice::from_ref(&live))
+            .await
+            .unwrap();
+
+        // 备份较旧 floor {A:3}
+        let mut backup_vc = HashMap::new();
+        backup_vc.insert("A".to_string(), 3u64);
+        let backup_floor = DeletionFloor {
+            domain: FLOOR_DOMAIN_PROMPTS.into(),
+            item_id: "p-mono".into(),
+            delete_vector_clock: backup_vc,
+            delete_epoch: 3,
+            content_hash: "backup-hash".into(),
+            created_at: "2024-05-01T00:00:00+00:00".into(),
+        };
+        let mut files = BTreeMap::new();
+        files.insert(
+            "deletionFloors/items.json".to_string(),
+            serde_json::to_vec_pretty(&[backup_floor]).unwrap(),
+        );
+        let archive = tmp.path().join("floors-older.zip");
+        let manifest = ArchiveManifest {
+            format_version: FORMAT_VERSION,
+            created_at: "t".into(),
+            device_id: "dev".into(),
+            domains: vec![DOMAIN_DELETION_FLOORS.into()],
+            files: BTreeMap::new(),
+        };
+        write_test_archive(&archive, &manifest, &files).unwrap();
+
+        let service = BackupRestoreService::new(state.clone());
+        let exclusive = state.maintenance_gate.acquire_exclusive().await;
+        let permit = DatabaseMaintenanceGate::exclusive_permit(&exclusive);
+        service
+            .apply_domains_in_transaction(
+                &permit,
+                &archive,
+                &[DOMAIN_DELETION_FLOORS.into()],
+                RestoreMode::Merge,
+            )
+            .await
+            .unwrap();
+        drop(permit);
+        drop(exclusive);
+
+        let kept = floors
+            .get(FLOOR_DOMAIN_PROMPTS, "p-mono")
+            .await
+            .unwrap()
+            .expect("floor must remain");
+        assert_eq!(
+            kept.delete_vector_clock.get("A").copied(),
+            Some(5),
+            "merge restore 不得把本地 floor {{A:5}} 降级为备份 {{A:3}}"
+        );
+        assert_eq!(kept.delete_epoch, 10);
+        assert_eq!(kept.content_hash, "local-hash");
+
+        // 中间 live {A:4} 仍被支配 → DeleteWins，且 reapply 后必须 deleted
+        assert_eq!(
+            DeletionFloorRepo::apply_deletion_floor(&kept, &live_vc),
+            DeletionFloorDecision::DeleteWins
+        );
+        let got = state.prompt_repo.get("p-mono").await.unwrap().unwrap();
+        assert!(
+            got.deleted,
+            "effective floor {{A:5}} 对 live {{A:4}} 必须 DeleteWins 并标记 deleted"
+        );
     }
 }
