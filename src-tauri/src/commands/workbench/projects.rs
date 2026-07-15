@@ -299,7 +299,8 @@ pub async fn open_workbench_remote_project(
 ///     用户可从工作台列表移除项目，但这不应删除磁盘上的真实项目文件夹。
 ///
 /// Code Logic（这个函数做什么）:
-///     先关闭该项目下仍存在的会话并销毁可重连后端，再删除 SQLite 项目与会话记录，返回轻量 ok 对象。
+///     先 dispose 项目/worktree 对应的 Claude session 索引 watcher runtime，再关闭会话并销毁
+///     可重连后端，最后删除 SQLite 项目与会话记录，返回轻量 ok 对象。
 #[tauri::command]
 pub async fn remove_workbench_project(
     state: State<'_, AppState>,
@@ -314,7 +315,22 @@ pub async fn remove_workbench_project(
     {
         return Ok(v);
     }
-    let _ = get_project(&state, &project_id).await?;
+    let project = get_project(&state, &project_id).await?;
+    let worktree_rows = state
+        .workbench_worktree_repo
+        .list_by_project(&project_id)
+        .await?;
+    let mut session_index_paths: Vec<std::path::PathBuf> =
+        vec![std::path::PathBuf::from(&project.path)];
+    for row in &worktree_rows {
+        session_index_paths.push(std::path::PathBuf::from(&row.path));
+    }
+    // 先停 watcher/cancel pending，再删 DB，避免幽灵重扫写回已移除项目索引。
+    crate::workbench::claude_sessions::dispose_session_indexes_for_worktree_paths(
+        state.inner(),
+        &session_index_paths,
+    );
+
     let session_rows = state.workbench_session_repo.list(Some(&project_id)).await?;
     for row in session_rows {
         let _ = state.workbench_sessions.close(&row.id);

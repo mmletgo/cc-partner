@@ -14,18 +14,22 @@
 //!     - `search_sessions`：按 spec 2.3 语义搜索（空 query 全部倒序 / 关键词命中优先级 + limit + preview snippets）。
 //!     - `ensure_worktree_session_index_scanned`：lazy 初始化内存索引 + 启动 notify 文件监听（debounce 500ms），
 //!       监听失败降级为每次重扫。
+//!     - watcher 将 create/modify/delete/rename/uncertain 映射为 index upsert/remove/rename/bounded rescan；
+//!       owner 侧 `ClaudeSessionWatcherRuntime` 聚合 watcher+cancel+handles；项目移除/shutdown 先 dispose。
 
 use crate::cc::collector::claude_projects_dir;
 use crate::state::AppState;
 use crate::workbench::claude_path::encode_claude_project_path;
 use chrono::Utc;
+use notify::event::{ModifyKind, RemoveKind, RenameMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
+use tokio_util::sync::CancellationToken;
 
 /// 单文件解析超时（2 秒）。活跃 session 可能几 MB，超时则跳过避免阻塞扫描。
 const SINGLE_FILE_PARSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1242,7 +1246,7 @@ fn make_hit(
 }
 
 // ---------------------------------------------------------------------------
-// AppState 集成 + 文件监听（Task 1.2）
+// AppState 集成 + 文件监听（Task 1.2 / N7 Task 5 lifecycle）
 // ---------------------------------------------------------------------------
 
 /// worktree session 索引的内存共享句柄类型别名。
@@ -1257,6 +1261,484 @@ pub type SharedWorktreeSessionIndex = Arc<RwLock<WorktreeSessionIndex>>;
 ///     `watch::Receiver<Option<Result<SharedWorktreeSessionIndex, String>>>`，None=进行中，Some=完成。
 pub type ClaudeSessionIndexInflightRx =
     tokio::sync::watch::Receiver<Option<Result<SharedWorktreeSessionIndex, String>>>;
+
+/// 单个 worktree 的 Claude session 文件监听运行时。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     watcher 不能只存 RecommendedWatcher：trailing debounce 与 spawn_blocking 扫描是后台任务，
+///     项目移除/进程退出时必须 cancel+abort 后才能 drop，否则会幽灵写回已删除索引。
+///
+/// Code Logic（这个结构体做什么）:
+///     聚合 watcher、CancellationToken、debounce 计时器与 trailing/scan JoinHandle；
+///     `force_dispose` 取消令牌、abort 全部句柄并 drop watcher。
+pub struct ClaudeSessionWatcherRuntime {
+    /// notify 文件监听器（drop 即停止监听）
+    watcher: RecommendedWatcher,
+    /// 后台 trailing/scan 任务共享取消令牌
+    cancel: CancellationToken,
+    /// 应用层 debounce 上次处理时刻（与回调共享 Arc；字段保留所有权共置）
+    #[allow(dead_code)]
+    last_refresh: Arc<Mutex<Instant>>,
+    /// trailing 延迟重扫句柄（最多一个）
+    pending_trailing: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    /// 进行中的 leading/scan spawn 句柄
+    pending_scans: Arc<Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>>,
+}
+
+impl ClaudeSessionWatcherRuntime {
+    /// 取消并清理该运行时的全部后台任务。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     项目移除或 shutdown 时必须停止监听与 pending 重扫，避免写回陈旧/已移除索引。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     cancel 令牌 → abort trailing → abort pending scans → drop self（watcher）。
+    pub fn force_dispose(self) {
+        self.cancel.cancel();
+        if let Ok(mut pending) = self.pending_trailing.lock() {
+            if let Some(handle) = pending.take() {
+                handle.abort();
+            }
+        }
+        if let Ok(mut scans) = self.pending_scans.lock() {
+            for handle in scans.drain(..) {
+                handle.abort();
+            }
+        }
+        // drop watcher at end of scope
+        drop(self.watcher);
+    }
+
+    /// 测试/诊断：是否已发出取消。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     生命周期测试需要确认 dispose 后 token 已 cancel。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 cancel.is_cancelled()。
+    #[cfg(test)]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+/// watcher 事件映射后的索引动作。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     notify 事件种类与路径语义复杂（delete/rename/uncertain）；先映射为有限动作再应用，
+///     才能用纯函数测试 delete/rename/rescan 语义。
+///
+/// Code Logic（这个枚举做什么）:
+///     Upsert 重扫路径；Remove 按 session_id 删除；Rename=删旧+加新；BoundedRescan 全量有界重扫；Ignore 忽略。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionWatchPlan {
+    /// 对指定 jsonl 路径增量重索引
+    Upsert(Vec<PathBuf>),
+    /// 按 session_id（jsonl stem）从索引删除
+    Remove(Vec<String>),
+    /// rename：先删旧 id，再 upsert 新路径
+    Rename {
+        remove_ids: Vec<String>,
+        upsert_paths: Vec<PathBuf>,
+    },
+    /// 不确定事件：对 watch root 做一次有界全量重扫
+    BoundedRescan,
+    /// 忽略（域外路径 / access 等）
+    Ignore,
+}
+
+/// 把路径规范化到 owning watch root 内；域外返回 None。
+///
+/// Business Logic（为什么需要这个函数）:
+///     notify 可能上报任意路径；只处理当前 worktree transcript 目录内的文件，避免误改索引。
+///
+/// Code Logic（这个函数做什么）:
+///     优先 canonicalize；删除后不存在则 parent canonicalize + file_name；`starts_with(root)` 校验。
+pub fn normalize_path_inside_root(path: &Path, root: &Path) -> Option<PathBuf> {
+    let root_canon = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf());
+    let normalized = if path.exists() {
+        path.canonicalize().ok()?
+    } else {
+        let parent = path.parent()?;
+        let file_name = path.file_name()?;
+        let parent_canon = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        parent_canon.join(file_name)
+    };
+    if normalized.starts_with(&root_canon) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+/// 从 jsonl 路径提取 session_id（文件 stem）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     delete/rename-from 事件需要按 session_id 从内存索引移除。
+///
+/// Code Logic（这个函数做什么）:
+///     扩展名须为 jsonl；stem 非空 trim 后返回。
+fn session_id_from_jsonl_path(path: &Path) -> Option<String> {
+    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        return None;
+    }
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 过滤并规范化 watch root 内的 jsonl 路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Create/Modify/Rename 目标只关心 root 内 jsonl。
+///
+/// Code Logic（这个函数做什么）:
+///     normalize_path_inside_root + 扩展名 jsonl，保序去重。
+fn filter_jsonl_inside_root(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in paths {
+        let Some(normalized) = normalize_path_inside_root(path, root) else {
+            continue;
+        };
+        if normalized.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if !out.iter().any(|p| p == &normalized) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+/// 过滤 root 内路径并提取 session_id 列表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Remove/Rename-from 需要 session_id 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     normalize 后取 stem，保序去重。
+fn filter_session_ids_inside_root(paths: &[PathBuf], root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for path in paths {
+        let Some(normalized) = normalize_path_inside_root(path, root) else {
+            continue;
+        };
+        let Some(id) = session_id_from_jsonl_path(&normalized) else {
+            continue;
+        };
+        if !out.iter().any(|x| x == &id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// 将 notify 事件映射为 SessionWatchPlan。
+///
+/// Business Logic（为什么需要这个函数）:
+///     delete 必须删索引、rename 必须删旧+加新、不确定事件只触发一次有界 rescan；
+///     这是 watcher 正确性的核心，必须可单测。
+///
+/// Code Logic（这个函数做什么）:
+///     规范化路径到 root 内；Create/Data/Metadata → Upsert；Remove → Remove；
+///     Rename From/To/Both → 对应 Remove/Upsert/Rename；Any/Other/Modify(Any|Other) → BoundedRescan；
+///     Access 与空有效路径 → Ignore。
+pub fn classify_session_watch_event(
+    kind: &EventKind,
+    paths: &[PathBuf],
+    watch_root: &Path,
+) -> SessionWatchPlan {
+    match kind {
+        EventKind::Access(_) => SessionWatchPlan::Ignore,
+        EventKind::Create(_) => {
+            let upsert = filter_jsonl_inside_root(paths, watch_root);
+            if upsert.is_empty() {
+                SessionWatchPlan::Ignore
+            } else {
+                SessionWatchPlan::Upsert(upsert)
+            }
+        }
+        EventKind::Remove(RemoveKind::Any | RemoveKind::File | RemoveKind::Other) => {
+            let ids = filter_session_ids_inside_root(paths, watch_root);
+            if ids.is_empty() {
+                // 目录删除或无法识别：有界 rescan 收敛
+                if paths
+                    .iter()
+                    .any(|p| normalize_path_inside_root(p, watch_root).is_some())
+                {
+                    SessionWatchPlan::BoundedRescan
+                } else {
+                    SessionWatchPlan::Ignore
+                }
+            } else {
+                SessionWatchPlan::Remove(ids)
+            }
+        }
+        EventKind::Remove(RemoveKind::Folder) => {
+            if paths
+                .iter()
+                .any(|p| normalize_path_inside_root(p, watch_root).is_some())
+            {
+                SessionWatchPlan::BoundedRescan
+            } else {
+                SessionWatchPlan::Ignore
+            }
+        }
+        EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Metadata(_)) => {
+            let upsert = filter_jsonl_inside_root(paths, watch_root);
+            if upsert.is_empty() {
+                SessionWatchPlan::Ignore
+            } else {
+                SessionWatchPlan::Upsert(upsert)
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(mode)) => classify_rename_event(*mode, paths, watch_root),
+        EventKind::Modify(ModifyKind::Any)
+        | EventKind::Modify(ModifyKind::Other)
+        | EventKind::Any
+        | EventKind::Other => {
+            // 不确定事件：只要有 root 内路径或 paths 为空（后端未给路径）都请求有界 rescan
+            if paths.is_empty()
+                || paths
+                    .iter()
+                    .any(|p| normalize_path_inside_root(p, watch_root).is_some())
+            {
+                SessionWatchPlan::BoundedRescan
+            } else {
+                SessionWatchPlan::Ignore
+            }
+        }
+    }
+}
+
+/// 映射 rename 子事件。
+///
+/// Business Logic（为什么需要这个函数）:
+///     rename 在不同 OS 上拆成 From/To/Both；必须稳定收敛为 remove old + index new。
+///
+/// Code Logic（这个函数做什么）:
+///     From→Remove；To→Upsert；Both→Rename(paths[0], paths[1])；Any/Other 按路径存在性推断。
+fn classify_rename_event(
+    mode: RenameMode,
+    paths: &[PathBuf],
+    watch_root: &Path,
+) -> SessionWatchPlan {
+    match mode {
+        RenameMode::From => {
+            let ids = filter_session_ids_inside_root(paths, watch_root);
+            if ids.is_empty() {
+                SessionWatchPlan::Ignore
+            } else {
+                SessionWatchPlan::Remove(ids)
+            }
+        }
+        RenameMode::To => {
+            let upsert = filter_jsonl_inside_root(paths, watch_root);
+            if upsert.is_empty() {
+                SessionWatchPlan::Ignore
+            } else {
+                SessionWatchPlan::Upsert(upsert)
+            }
+        }
+        RenameMode::Both => {
+            let from = paths.first().cloned();
+            let to = paths.get(1).cloned();
+            let remove_ids = from
+                .as_ref()
+                .map(|p| filter_session_ids_inside_root(std::slice::from_ref(p), watch_root))
+                .unwrap_or_default();
+            let upsert_paths = to
+                .as_ref()
+                .map(|p| filter_jsonl_inside_root(std::slice::from_ref(p), watch_root))
+                .unwrap_or_default();
+            if remove_ids.is_empty() && upsert_paths.is_empty() {
+                SessionWatchPlan::Ignore
+            } else if remove_ids.is_empty() {
+                SessionWatchPlan::Upsert(upsert_paths)
+            } else if upsert_paths.is_empty() {
+                SessionWatchPlan::Remove(remove_ids)
+            } else {
+                SessionWatchPlan::Rename {
+                    remove_ids,
+                    upsert_paths,
+                }
+            }
+        }
+        RenameMode::Any | RenameMode::Other => {
+            // 不确定 rename：两路径 → Both 语义；单路径按存在性；否则 BoundedRescan
+            if paths.len() >= 2 {
+                return classify_rename_event(RenameMode::Both, paths, watch_root);
+            }
+            if let Some(path) = paths.first() {
+                let Some(normalized) = normalize_path_inside_root(path, watch_root) else {
+                    return SessionWatchPlan::Ignore;
+                };
+                if normalized.exists() {
+                    let upsert = filter_jsonl_inside_root(&[normalized], watch_root);
+                    if upsert.is_empty() {
+                        SessionWatchPlan::Ignore
+                    } else {
+                        SessionWatchPlan::Upsert(upsert)
+                    }
+                } else {
+                    let ids = filter_session_ids_inside_root(&[normalized], watch_root);
+                    if ids.is_empty() {
+                        SessionWatchPlan::BoundedRescan
+                    } else {
+                        SessionWatchPlan::Remove(ids)
+                    }
+                }
+            } else {
+                SessionWatchPlan::BoundedRescan
+            }
+        }
+    }
+}
+
+/// 将 SessionWatchPlan 应用到内存索引（阻塞，供 spawn_blocking / 测试调用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     事件映射与索引更新解耦；delete/rename/rescan 语义在此落地。
+///
+/// Code Logic（这个函数做什么）:
+///     Remove 写锁删 id；Upsert 走 refresh_sessions_from_paths；Rename 先删后 upsert；
+///     BoundedRescan 走 refresh_all_sessions。
+pub fn apply_session_watch_plan(
+    shared: &SharedWorktreeSessionIndex,
+    worktree_canonical: &Path,
+    watch_dir: &Path,
+    plan: SessionWatchPlan,
+) {
+    match plan {
+        SessionWatchPlan::Ignore => {}
+        SessionWatchPlan::Remove(ids) => {
+            let mut guard = match shared.write() {
+                Ok(g) => g,
+                Err(err) => {
+                    tracing::warn!("session index 写锁中毒，跳过 delete: {err}");
+                    return;
+                }
+            };
+            for id in ids {
+                guard.sessions.remove(&id);
+            }
+            guard.last_scan_at = Utc::now().to_rfc3339();
+        }
+        SessionWatchPlan::Upsert(paths) => {
+            if paths.is_empty() {
+                return;
+            }
+            refresh_sessions_from_paths(shared, worktree_canonical, watch_dir, &paths);
+        }
+        SessionWatchPlan::Rename {
+            remove_ids,
+            upsert_paths,
+        } => {
+            {
+                let mut guard = match shared.write() {
+                    Ok(g) => g,
+                    Err(err) => {
+                        tracing::warn!("session index 写锁中毒，跳过 rename remove: {err}");
+                        return;
+                    }
+                };
+                for id in remove_ids {
+                    guard.sessions.remove(&id);
+                }
+                guard.last_scan_at = Utc::now().to_rfc3339();
+            }
+            if !upsert_paths.is_empty() {
+                refresh_sessions_from_paths(
+                    shared,
+                    worktree_canonical,
+                    watch_dir,
+                    &upsert_paths,
+                );
+            }
+        }
+        SessionWatchPlan::BoundedRescan => {
+            refresh_all_sessions(shared, watch_dir);
+        }
+    }
+}
+
+/// 按 worktree 路径列表清理 session 索引与 watcher 运行时。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户移除项目时，相关 worktree 的索引与后台监听应立即停止，避免继续占用资源或写回。
+///
+/// Code Logic（这个函数做什么）:
+///     对每个 path canonicalize 为 key，remove runtime.force_dispose，并清 indexes/inflight 条目。
+pub fn dispose_session_indexes_for_worktree_paths(state: &AppState, worktree_paths: &[PathBuf]) {
+    for path in worktree_paths {
+        let key = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        dispose_session_index_by_key(state, &key);
+        // 也尝试 raw 字符串 key（防止 canonicalize 前后不一致的历史条目）
+        let raw = path.to_string_lossy().to_string();
+        if raw != key {
+            dispose_session_index_by_key(state, &raw);
+        }
+    }
+}
+
+/// 关闭全部 Claude session 索引与 watcher（进程 shutdown）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     后端退出时必须 cancel 所有 debounce/scan 任务并 drop watcher，避免幽灵任务与句柄泄漏。
+///
+/// Code Logic（这个函数做什么）:
+///     drain watchers 并 force_dispose；clear indexes；best-effort 清 inflight（try_lock）。
+pub fn shutdown_all_claude_session_indexes(state: &AppState) {
+    let runtimes: Vec<ClaudeSessionWatcherRuntime> = {
+        let mut map = match state.workbench_claude_session_watchers.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!("shutdown session watchers 锁中毒: {err}");
+                return;
+            }
+        };
+        map.drain().map(|(_, runtime)| runtime).collect()
+    };
+    for runtime in runtimes {
+        runtime.force_dispose();
+    }
+    if let Ok(mut indexes) = state.workbench_claude_session_indexes.write() {
+        indexes.clear();
+    } else {
+        tracing::warn!("shutdown session indexes 写锁中毒");
+    }
+    // inflight 是 tokio Mutex；shutdown 路径 best-effort try_lock，避免阻塞退出
+    if let Ok(mut inflight) = state.workbench_claude_session_index_inflight.try_lock() {
+        inflight.clear();
+    }
+}
+
+/// 按 key 移除单个索引 + runtime。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单 worktree 清理与失败降级共用同一移除语义。
+///
+/// Code Logic（这个函数做什么）:
+///     取走 watcher runtime 并 force_dispose；indexes.remove(key)。
+fn dispose_session_index_by_key(state: &AppState, key: &str) {
+    if let Ok(mut watchers) = state.workbench_claude_session_watchers.lock() {
+        if let Some(runtime) = watchers.remove(key) {
+            runtime.force_dispose();
+        }
+    }
+    if let Ok(mut indexes) = state.workbench_claude_session_indexes.write() {
+        indexes.remove(key);
+    }
+}
 
 /// 确保 worktree 的 session 索引已扫描并启动文件监听（lazy + singleflight + spawn_blocking）。
 ///
@@ -1408,8 +1890,10 @@ async fn finish_scan_and_insert(
 ///
 /// Code Logic（这个函数做什么）:
 ///     用 notify::RecommendedWatcher 监听 ~/.claude/projects/<encoded_cwd>/ 目录（RecursiveMode::NonRecursive），
-///     poll_interval=500ms 控制 poll backend 轮询频率；回调内再做一层应用层 **leading + trailing debounce**
-///     （见 DEBOUNCE_INTERVAL 注释），对 Create/Modify 的 jsonl 文件 spawn_blocking 重扫并更新对应 HashMap entry。
+///     poll_interval=500ms 控制 poll backend 轮询频率；回调内 classify_session_watch_event 映射
+///     create/modify/delete/rename/uncertain，再做 **leading + trailing debounce** 后
+///     spawn_blocking 应用 plan。watcher + cancel + debounce/scan handles 一并写入
+///     `ClaudeSessionWatcherRuntime`。
 ///     **降级语义（spec 5.1）**：watcher 创建失败或 watch 失败时，必须从 workbench_claude_session_indexes
 ///     移除该 key 的索引，保证下次 ensure_worktree_session_index_scanned 命中不到缓存而重走慢路径重扫。
 fn spawn_session_watcher(
@@ -1441,23 +1925,29 @@ fn spawn_session_watcher(
         return;
     }
 
-    // 回调闭包捕获共享索引 Arc 与 worktree canonical（用于重扫新文件）
     let index_handle = Arc::clone(shared);
     let watch_dir_for_cb = watch_dir.clone();
     let worktree_canonical_owned = worktree_canonical.to_path_buf();
 
-    // 应用层 debounce 计时器：记录"上次重扫时刻"。初始化为很久以前，保证首次事件走 leading 立即处理。
-    let last_refresh = Arc::new(std::sync::Mutex::new(
+    let cancel = CancellationToken::new();
+    let last_refresh = Arc::new(Mutex::new(
         Instant::now() - DEBOUNCE_INTERVAL - Duration::from_secs(1),
     ));
+    let pending_trailing: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(None));
+    let pending_scans: Arc<Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
-    // trailing 兜底任务句柄：累积期内每次新事件都 abort 旧的并 spawn 新的，保证 trailing 永远是
-    // 「最后一次事件后 DEBOUNCE_INTERVAL」。None 表示当前无 pending 的兜底任务。
-    let pending_trailing: Arc<std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let cancel_cb = cancel.clone();
+    let last_refresh_cb = Arc::clone(&last_refresh);
+    let pending_trailing_cb = Arc::clone(&pending_trailing);
+    let pending_scans_cb = Arc::clone(&pending_scans);
 
     let watcher: Result<RecommendedWatcher, notify::Error> = Watcher::new(
         move |res: Result<notify::Event, notify::Error>| {
+            if cancel_cb.is_cancelled() {
+                return;
+            }
             let event = match res {
                 Ok(e) => e,
                 Err(err) => {
@@ -1465,27 +1955,48 @@ fn spawn_session_watcher(
                     return;
                 }
             };
-            // 只关心 Create/Modify，且路径扩展名为 jsonl
-            let is_relevant = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
-            if !is_relevant {
-                return;
-            }
-            let jsonl_paths: Vec<PathBuf> = event
-                .paths
-                .into_iter()
-                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
-                .collect();
-            if jsonl_paths.is_empty() {
+            let plan =
+                classify_session_watch_event(&event.kind, &event.paths, &watch_dir_for_cb);
+            if matches!(plan, SessionWatchPlan::Ignore) {
                 return;
             }
 
-            // 应用层 leading + trailing debounce。
-            // - leading：距上次重扫 ≥ DEBOUNCE_INTERVAL → 立即重扫，更新 last，并取消 pending trailing。
-            // - trailing：< DEBOUNCE_INTERVAL → 不立即重扫，但 abort 旧的 trailing 任务并 spawn 新的
-            //   「DEBOUNCE_INTERVAL 后重扫」任务，保证最后一次事件后 500ms 必定兜底重扫（不漏内容）。
-            // 锁获取顺序固定为「先 last，后 pending」，避免与其它路径交叉死锁。
+            // Remove/Rename 立即应用（索引正确性优先）；Upsert/BoundedRescan 走 leading+trailing debounce。
+            let immediate = matches!(
+                plan,
+                SessionWatchPlan::Remove(_) | SessionWatchPlan::Rename { .. }
+            );
+
+            if immediate {
+                if let Ok(mut pending) = pending_trailing_cb.lock() {
+                    if let Some(handle) = pending.take() {
+                        handle.abort();
+                    }
+                }
+                let index_for_task = Arc::clone(&index_handle);
+                let dir = watch_dir_for_cb.clone();
+                let worktree = worktree_canonical_owned.clone();
+                let cancel_task = cancel_cb.clone();
+                let scans = Arc::clone(&pending_scans_cb);
+                let handle = tauri::async_runtime::spawn_blocking(move || {
+                    if cancel_task.is_cancelled() {
+                        return;
+                    }
+                    apply_session_watch_plan(&index_for_task, &worktree, &dir, plan);
+                });
+                match scans.lock() {
+                    Ok(mut list) => {
+                        // tauri JoinHandle 无 is_finished；dispose 时统一 abort，此处只登记。
+                        list.push(handle);
+                    }
+                    Err(_) => {}
+                }
+                return;
+            }
+
+            // 应用层 leading + trailing debounce（Upsert / BoundedRescan）。
             let should_process_now = {
-                let mut last = match last_refresh.lock() {
+                let mut last = match last_refresh_cb.lock() {
                     Ok(g) => g,
                     Err(err) => {
                         tracing::warn!("debounce 计时器锁中毒，跳本次重扫: {err}");
@@ -1501,8 +2012,7 @@ fn spawn_session_watcher(
             };
 
             if should_process_now {
-                // leading：立即处理。先取消 pending trailing（如果有），避免兜底任务紧随其后重复重扫。
-                if let Ok(mut pending) = pending_trailing.lock() {
+                if let Ok(mut pending) = pending_trailing_cb.lock() {
                     if let Some(handle) = pending.take() {
                         handle.abort();
                     }
@@ -1510,12 +2020,21 @@ fn spawn_session_watcher(
                 let index_for_task = Arc::clone(&index_handle);
                 let dir = watch_dir_for_cb.clone();
                 let worktree = worktree_canonical_owned.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    refresh_sessions_from_paths(&index_for_task, &worktree, &dir, &jsonl_paths);
+                let cancel_task = cancel_cb.clone();
+                let scans = Arc::clone(&pending_scans_cb);
+                let handle = tauri::async_runtime::spawn_blocking(move || {
+                    if cancel_task.is_cancelled() {
+                        return;
+                    }
+                    apply_session_watch_plan(&index_for_task, &worktree, &dir, plan);
                 });
+                match scans.lock() {
+                    Ok(mut list) => list.push(handle),
+                    Err(_) => {}
+                };
             } else {
-                // trailing：abort 旧的 trailing 任务（若有），再 spawn 一个 500ms 后执行的兜底重扫。
-                let mut pending = match pending_trailing.lock() {
+                // trailing：不确定/高频 upsert 合并为一次有界全量 rescan（debounce 窗口末尾）
+                let mut pending = match pending_trailing_cb.lock() {
                     Ok(g) => g,
                     Err(err) => {
                         tracing::warn!("debounce trailing 锁中毒，跳本次兜底安排: {err}");
@@ -1527,20 +2046,39 @@ fn spawn_session_watcher(
                 }
                 let index_clone = Arc::clone(&index_handle);
                 let dir_clone = watch_dir_for_cb.clone();
-                let pending_clone = Arc::clone(&pending_trailing);
+                let worktree_clone = worktree_canonical_owned.clone();
+                let pending_clone = Arc::clone(&pending_trailing_cb);
+                let cancel_task = cancel_cb.clone();
+                let scans = Arc::clone(&pending_scans_cb);
+                // trailing 统一有界 rescan，保证窗口内 delete+create 混合事件最终一致
+                let trailing_plan = SessionWatchPlan::BoundedRescan;
                 let handle = tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(DEBOUNCE_INTERVAL).await;
-                    // sleep 结束：先把自己的句柄从 pending 清掉（表示已执行，不再可 abort），
-                    // 再 spawn_blocking 全量重扫（兜底，保证 debounce 窗口内所有变更最终都被刷新，
-                    // 不依赖事件累积的路径集合），await 确保重扫完成。
+                    tokio::select! {
+                        _ = cancel_task.cancelled() => return,
+                        _ = tokio::time::sleep(DEBOUNCE_INTERVAL) => {}
+                    }
+                    if cancel_task.is_cancelled() {
+                        return;
+                    }
                     if let Ok(mut p) = pending_clone.lock() {
                         p.take();
                     }
-                    tauri::async_runtime::spawn_blocking(move || {
-                        refresh_all_sessions(&index_clone, &dir_clone);
-                    })
-                    .await
-                    .ok();
+                    let cancel_scan = cancel_task.clone();
+                    let scan_handle = tauri::async_runtime::spawn_blocking(move || {
+                        if cancel_scan.is_cancelled() {
+                            return;
+                        }
+                        apply_session_watch_plan(
+                            &index_clone,
+                            &worktree_clone,
+                            &dir_clone,
+                            trailing_plan,
+                        );
+                    });
+                    match scans.lock() {
+                        Ok(mut list) => list.push(scan_handle),
+                        Err(_) => {}
+                    }
                 });
                 *pending = Some(handle);
             }
@@ -1551,7 +2089,6 @@ fn spawn_session_watcher(
     let mut watcher = match watcher {
         Ok(w) => w,
         Err(err) => {
-            // 降级：移除已写入的索引，下次搜索会重扫（spec 5.1）
             remove_index_on_failure(state, key);
             tracing::warn!(
                 "启动 Claude session 文件监听失败，已移除索引（下次搜索将重扫）key={key}: {err}"
@@ -1561,7 +2098,6 @@ fn spawn_session_watcher(
     };
 
     if let Err(err) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
-        // 降级：移除已写入的索引，下次搜索会重扫（spec 5.1）
         remove_index_on_failure(state, key);
         tracing::warn!(
             "监听 Claude session 目录失败，已移除索引（下次搜索将重扫）{:?}: {err}",
@@ -1570,19 +2106,28 @@ fn spawn_session_watcher(
         return;
     }
 
-    // 存入 watchers HashMap（key 同 indexes）
+    let runtime = ClaudeSessionWatcherRuntime {
+        watcher,
+        cancel,
+        last_refresh,
+        pending_trailing,
+        pending_scans,
+    };
     let mut watchers = state
         .workbench_claude_session_watchers
         .lock()
         .expect("session watchers 锁中毒");
-    watchers.insert(key.to_string(), watcher);
+    // 同 key 旧 runtime（极少见）先 dispose
+    if let Some(old) = watchers.insert(key.to_string(), runtime) {
+        old.force_dispose();
+    }
     tracing::info!(
         "已启动 Claude session 文件监听 key={key} dir={:?}",
         watch_dir
     );
 }
 
-/// 监听失败降级时从 indexes 缓存移除指定 worktree 的索引（spec 5.1）。
+/// 监听失败降级时从 indexes/watchers 缓存移除指定 worktree 的索引（spec 5.1）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     watcher 创建/启动失败时，索引已写入 workbench_claude_session_indexes，若不移除，
@@ -1590,18 +2135,10 @@ fn spawn_session_watcher(
 ///     spec 5.1 要求监听失败降级为每次搜索重扫，故必须删除该 key。
 ///
 /// Code Logic（这个函数做什么）:
-///     持写锁删除 indexes 中 key 对应的 entry；失败（如锁中毒）只 warn 不 panic。
+///     dispose_session_index_by_key：清 runtime（若有）与 indexes entry。
 fn remove_index_on_failure(state: &AppState, key: &str) {
-    let mut indexes = match state.workbench_claude_session_indexes.write() {
-        Ok(g) => g,
-        Err(err) => {
-            tracing::warn!("移除 session 索引时写锁中毒（key={key}）: {err}");
-            return;
-        }
-    };
-    if indexes.remove(key).is_some() {
-        tracing::info!("监听失败已移除 worktree session 索引缓存（下次搜索重扫）key={key}");
-    }
+    dispose_session_index_by_key(state, key);
+    tracing::info!("监听失败已移除 worktree session 索引缓存（下次搜索重扫）key={key}");
 }
 
 /// 重扫指定 jsonl 路径并更新内存索引。
@@ -2863,5 +3400,245 @@ mod tests {
         assert_eq!(result.diagnostics.files_indexed, 2);
         assert_eq!(result.diagnostics.bytes_read, 100);
         assert!(result.diagnostics.reasons.iter().any(|r| r == "max_files"));
+    }
+
+    /// 构造带两个 session 的共享索引，便于 delete/rename 断言。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     watcher 生命周期测试需要可写内存索引。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 tmp 下写两个 jsonl，构建 SharedWorktreeSessionIndex。
+    fn make_shared_index_with_two_sessions(
+        label: &str,
+    ) -> (PathBuf, PathBuf, SharedWorktreeSessionIndex, PathBuf, PathBuf) {
+        let root = unique_temp_dir(label);
+        let worktree = root.join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        let watch_dir = root.join("sessions");
+        fs::create_dir_all(&watch_dir).unwrap();
+        let path_a = write_jsonl(
+            &watch_dir,
+            "sess-a",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"alpha"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            ],
+        );
+        let path_b = write_jsonl(
+            &watch_dir,
+            "sess-b",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"beta"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            ],
+        );
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "sess-a".into(),
+            build_session_index(&path_a).expect("a"),
+        );
+        sessions.insert(
+            "sess-b".into(),
+            build_session_index(&path_b).expect("b"),
+        );
+        let index = WorktreeSessionIndex {
+            worktree_path: worktree.clone(),
+            encoded_cwd: "enc".into(),
+            sessions,
+            last_scan_at: "t0".into(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::ok(2, 2, 0),
+        };
+        (
+            worktree,
+            watch_dir,
+            Arc::new(RwLock::new(index)),
+            path_a,
+            path_b,
+        )
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     删除 jsonl 后旧 session 必须从索引消失，否则搜索会展示幽灵会话。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     classify Remove 事件 → apply plan → 断言 sess-a 消失、sess-b 仍在。
+    #[test]
+    fn watcher_delete_removes_session_from_index() {
+        let (worktree, watch_dir, shared, path_a, _path_b) =
+            make_shared_index_with_two_sessions("watcher_delete");
+        // 模拟删除文件后 notify 上报 Remove
+        fs::remove_file(&path_a).unwrap();
+        let plan = classify_session_watch_event(
+            &EventKind::Remove(RemoveKind::File),
+            &[path_a.clone()],
+            &watch_dir,
+        );
+        assert_eq!(
+            plan,
+            SessionWatchPlan::Remove(vec!["sess-a".into()]),
+            "delete 应映射为 Remove"
+        );
+        apply_session_watch_plan(&shared, &worktree, &watch_dir, plan);
+        let guard = shared.read().unwrap();
+        assert!(
+            !guard.sessions.contains_key("sess-a"),
+            "删除后 sess-a 必须消失"
+        );
+        assert!(
+            guard.sessions.contains_key("sess-b"),
+            "未删除的 sess-b 应保留"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     rename 必须删旧 id 并索引新文件，否则旧路径幽灵 + 新路径缺失。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     rename sess-a → sess-c；classify Both → apply → 断言 a 消失、c 出现。
+    #[test]
+    fn watcher_rename_removes_old_and_adds_new() {
+        let (worktree, watch_dir, shared, path_a, _path_b) =
+            make_shared_index_with_two_sessions("watcher_rename");
+        let path_c = watch_dir.join("sess-c.jsonl");
+        fs::rename(&path_a, &path_c).unwrap();
+        let plan = classify_session_watch_event(
+            &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            &[path_a.clone(), path_c.clone()],
+            &watch_dir,
+        );
+        match &plan {
+            SessionWatchPlan::Rename {
+                remove_ids,
+                upsert_paths,
+            } => {
+                assert_eq!(remove_ids, &vec!["sess-a".to_string()]);
+                assert_eq!(upsert_paths.len(), 1);
+                assert_eq!(
+                    upsert_paths[0].file_name().and_then(|s| s.to_str()),
+                    Some("sess-c.jsonl")
+                );
+            }
+            other => panic!("期望 Rename，得到 {other:?}"),
+        }
+        apply_session_watch_plan(&shared, &worktree, &watch_dir, plan);
+        let guard = shared.read().unwrap();
+        assert!(
+            !guard.sessions.contains_key("sess-a"),
+            "rename 后旧 id 必须移除"
+        );
+        assert!(
+            guard.sessions.contains_key("sess-c"),
+            "rename 后新 id 必须出现"
+        );
+        assert_eq!(
+            guard.sessions.get("sess-c").map(|s| s.title.as_str()),
+            Some("alpha")
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     域外路径绝不能改写当前 worktree 索引。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 watch_dir 外的 jsonl 上报 Remove，断言 Ignore 且索引不变。
+    #[test]
+    fn watcher_delete_ignores_paths_outside_root() {
+        let (worktree, watch_dir, shared, _path_a, _path_b) =
+            make_shared_index_with_two_sessions("watcher_outside");
+        let outside_root = unique_temp_dir("watcher_outside_peer");
+        let outside = write_jsonl(
+            &outside_root,
+            "sess-x",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            ],
+        );
+        let plan = classify_session_watch_event(
+            &EventKind::Remove(RemoveKind::File),
+            &[outside],
+            &watch_dir,
+        );
+        assert_eq!(plan, SessionWatchPlan::Ignore);
+        apply_session_watch_plan(&shared, &worktree, &watch_dir, plan);
+        let guard = shared.read().unwrap();
+        assert_eq!(guard.sessions.len(), 2);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     不确定事件必须收敛为一次有界 rescan，而不是 silently drop。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     EventKind::Any → BoundedRescan；删文件后 apply rescan 收敛索引。
+    #[test]
+    fn watcher_uncertain_event_requests_bounded_rescan() {
+        let (worktree, watch_dir, shared, path_a, _path_b) =
+            make_shared_index_with_two_sessions("watcher_uncertain");
+        fs::remove_file(&path_a).unwrap();
+        let plan =
+            classify_session_watch_event(&EventKind::Any, &[path_a.clone()], &watch_dir);
+        assert_eq!(plan, SessionWatchPlan::BoundedRescan);
+        apply_session_watch_plan(&shared, &worktree, &watch_dir, plan);
+        let guard = shared.read().unwrap();
+        assert!(
+            !guard.sessions.contains_key("sess-a"),
+            "rescan 后已删文件对应 session 应消失"
+        );
+        assert!(guard.sessions.contains_key("sess-b"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     shutdown/cancel 后不得再有 trailing 后台任务执行写回。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 CancellationToken + select 模拟 trailing 任务；cancel 后断言 flag 未置位。
+    #[tokio::test]
+    async fn watcher_shutdown_cancels_pending_background_task() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cancel = CancellationToken::new();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran2 = Arc::clone(&ran);
+        let cancel2 = cancel.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            tokio::select! {
+                _ = cancel2.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+            if cancel2.is_cancelled() {
+                return;
+            }
+            ran2.store(true, Ordering::SeqCst);
+        });
+
+        // 模拟 force_dispose：cancel + abort
+        cancel.cancel();
+        handle.abort();
+        // 给调度器一点时间确认任务不会跑完
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            cancel.is_cancelled(),
+            "dispose 后 token 必须 cancelled"
+        );
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "取消后 trailing 任务不得执行写回"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     normalize 必须拒绝 root 外路径，接受 root 内路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 root 内外各建文件，断言 inside Some / outside None。
+    #[test]
+    fn normalize_path_inside_root_filters_outsiders() {
+        let root = unique_temp_dir("normalize_root");
+        let inside = root.join("a.jsonl");
+        fs::write(&inside, b"{}\n").unwrap();
+        let outside_root = unique_temp_dir("normalize_out");
+        let outside = outside_root.join("b.jsonl");
+        fs::write(&outside, b"{}\n").unwrap();
+        assert!(normalize_path_inside_root(&inside, &root).is_some());
+        assert!(normalize_path_inside_root(&outside, &root).is_none());
     }
 }
