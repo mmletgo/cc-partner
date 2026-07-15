@@ -760,9 +760,7 @@ export function Scratchpad() {
       setRestoringVersionId(version.id);
       setVersionsError(null);
       try {
-        // 未落库草稿 flush 失败时不得继续 restore：否则后端/编辑器被历史覆盖，
-        // 队列仍保留失败草稿，后续编辑或 flushAll 重试会丢掉或再覆盖刚恢复的版本。
-        await flushPendingSave();
+        await flushPendingSave(); // flush 失败不得 restore，防草稿与历史互相覆盖
         const restored = await scratchpadApi.restoreVersion(pageId, version.id);
         if (currentPageIdRef.current === restored.id) {
           currentPageIdRef.current = restored.id;
