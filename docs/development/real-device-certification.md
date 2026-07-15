@@ -68,25 +68,72 @@ embedded in the manifest.
 Missing device, missing binary, or unrun checklist → **`NOT VERIFIED`**. Do not
 fabricate PASS from CI, Playwright, or single-host smoke.
 
+## Frozen Apple Silicon candidate (N8 Task 2 local)
+
+Local freeze-ready candidate prepared on host `arm64` after integrated L0–L2
+gates. **No remote tag push, no RC dispatch, no publish** until the operator
+explicitly authorizes network actions.
+
+| Field | Value |
+| --- | --- |
+| appVersion | `0.7.0` |
+| subjectCommit | `15f23372b9bc9fce86a4062c3725cbb71d638446` |
+| planned subjectTag | `subject-0.7.0-macos-aarch64` (must **not** match stable `v*` push trigger) |
+| planned betaTag (later) | `v0.7.0-beta.1` (must differ from subjectTag; prerelease only) |
+| planned evidenceRef | `evidence/n8-0.7.0-macos-aarch64` |
+| host arch | `arm64` (confirmed `uname -m`) |
+| RC workflow run id | **not assigned** — blocked pending authorized tag push + `rc-tauri.yml` dispatch |
+| product/checker/workflow mutation | **frozen for this candidate** after `subjectCommit`; only allowlisted evidence paths may diverge |
+| L0–L2 gates | **local PASS** on freeze-ready tree (see Task 2 report) |
+| L3 executions | **not run** — remain honest `NOT VERIFIED` |
+
+Required operator commands after authorization (do not invent run IDs):
+
+```bash
+# From a clone that contains subjectCommit on origin after branch push (if needed):
+git tag -a subject-0.7.0-macos-aarch64 15f23372b9bc9fce86a4062c3725cbb71d638446 -m "N8 subject freeze 0.7.0 macos-aarch64"
+git push origin refs/tags/subject-0.7.0-macos-aarch64
+
+gh api \
+  --method POST \
+  -H "Accept: application/vnd.github+json" \
+  /repos/<owner>/<repo>/actions/workflows/rc-tauri.yml/dispatches \
+  -f ref='subject-0.7.0-macos-aarch64' \
+  -f 'inputs[subjectTag]=subject-0.7.0-macos-aarch64' \
+  -f 'inputs[subjectCommit]=15f23372b9bc9fce86a4062c3725cbb71d638446'
+```
+
+After RC succeeds: verify `head_sha`/`conclusion`, download
+`rc-macos-aarch64-production` / `rc-macos-aarch64-harness` /
+`rc-macos-aarch64-inventory`, confirm live retention, inventory SHA, and
+production contamination scan. Create protected docs-only evidence ref only for
+allowlisted paths under `README.md`,
+`docs/development/{quality-matrix.json,real-device-certification.md,release-claim.json}`
+and `docs/development/evidence/**`. Do **not** publish beta in this task.
+
 ## Matrix (current)
 
 **Recorded at:** 2026-07-15  
 **Infrastructure baseline:** N8 Task 1 (checker/RC/beta gate/harness)  
-**App version baseline:** `0.6.7`  
-**Canonical row commit baseline:** `b0e13467384a1d13d832bfcee40456cff82c90e4`
+**App version baseline:** `0.7.0`  
+**subjectCommit (product freeze):** `15f23372b9bc9fce86a4062c3725cbb71d638446`  
+**Canonical row commit baseline:** still unexecuted; matrix rows below remain
+`NOT VERIFIED` until Tasks 3–4 write architecture executions.
 
 All L3 surfaces below remain **not** executed as packaged real-device
 certification until Tasks 3–4. Canonical status is therefore **NOT VERIFIED**.
-Architecture executions for `macos-aarch64` are not yet written.
+Architecture executions for `macos-aarch64` are not yet written. Deferred
+platforms (Windows, WSL, Ubuntu, Intel Mac, dual-host, iOS, Android, NVDA) stay
+`NOT VERIFIED` and do not block this beta profile.
 
 | ID | Surface | appVersion | commit | OS build | status | evidence | date | expiresAt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| L3-MACOS-GUI-PERMISSIONS-001 | macOS packaged GUI launch; screen/accessibility/input/notification grant-deny-retry; screenshot clipboard; updater via loopback harness | 0.6.7 | b0e1346… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-MACOS-VOICEOVER-001 | macOS VoiceOver: LAN disclosure, Home/Trending, Workbench, Dialog/Drawer, live region, terminal, Attention, Human Review, WORKFLOW | 0.6.7 | b0e1346… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-WINDOWS-GUI-001 | Windows packaged GUI; file transfer path/dialog; native terminal | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-WINDOWS-WSL-001 | Windows WSL + tmux Workbench terminal recovery | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-UBUNTU-GUI-001 | Ubuntu AppImage/deb GUI; terminal + file flows | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
-| L3-DUAL-HOST-LAN-001 | Two physical hosts same LAN: mDNS; native P2P + mobile credential-free R/W; public peer / XFF / Host / Origin / WS / remote stop rejection; **1GiB transfer: mid-stream disconnect + process restart + resume from confirmed offset + SHA-256 match** | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-MACOS-GUI-PERMISSIONS-001 | macOS packaged GUI launch; screen/accessibility/input/notification grant-deny-retry; screenshot clipboard; updater via loopback harness | 0.7.0 | 15f2337… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
+| L3-MACOS-VOICEOVER-001 | macOS VoiceOver: LAN disclosure, Home/Trending, Workbench, Dialog/Drawer, live region, terminal, Attention, Human Review, WORKFLOW | 0.7.0 | 15f2337… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
+| L3-WINDOWS-GUI-001 | Windows packaged GUI; file transfer path/dialog; native terminal | 0.7.0 | 15f2337… | n/a | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
+| L3-WINDOWS-WSL-001 | Windows WSL + tmux Workbench terminal recovery | 0.7.0 | 15f2337… | n/a | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
+| L3-UBUNTU-GUI-001 | Ubuntu AppImage/deb GUI; terminal + file flows | 0.7.0 | 15f2337… | n/a | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
+| L3-DUAL-HOST-LAN-001 | Two physical hosts same LAN: mDNS; native P2P + mobile credential-free R/W; public peer / XFF / Host / Origin / WS / remote stop rejection; **1GiB transfer: mid-stream disconnect + process restart + resume from confirmed offset + SHA-256 match** | 0.7.0 | 15f2337… | n/a | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
 
 ### What automated layers already cover (not L3)
 
