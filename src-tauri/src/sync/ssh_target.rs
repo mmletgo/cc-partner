@@ -122,8 +122,10 @@ pub fn merge_ssh_with_conflicts(
 
 use crate::state::AppState;
 use crate::sync::apply_merge::apply_ssh_pull_items;
-use crate::sync::engine::mid_batch_fail_outcome;
-use crate::sync::engine::{fetch_complete_remote_manifest, peer_error_to_domain_outcome};
+use crate::sync::engine::{
+    fetch_complete_remote_manifest, incomplete_items_outcome, mid_batch_fail_outcome,
+    peer_error_to_domain_outcome,
+};
 use crate::sync::protocol::{
     compute_sync_plan, decide_acked_delete_epoch, max_delete_epoch_from_summaries,
     SyncDomainOutcome, SyncSummary, PUSH_BATCH_ITEMS,
@@ -259,9 +261,15 @@ async fn ssh_sync_v2(
                 }
             }
         }
+        // missing_ids 非空：已落库的 items 保留，但禁止 Succeeded / delete-epoch ack
+        if let Some(o) =
+            incomplete_items_outcome(&resp.missing_ids, pulled.saturating_add(pushed))
+        {
+            return o;
+        }
     }
 
-    // 完整 manifest + apply 成功后：有正文末批携带 ack；无正文走专用 ack-delete-epoch
+    // 完整 manifest + apply 成功（含 items 无 missing）后：有正文末批携带 ack；无正文走专用 ack-delete-epoch
     let ack_epoch = decide_acked_delete_epoch(true, true, max_remote_epoch);
     let claimed = state.device_id.as_str();
 

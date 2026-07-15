@@ -378,12 +378,15 @@ pub fn validate_page_not_truncated<K>(page: &SyncManifestPage<K>) -> Result<(), 
 /// 仅在 manifest 完整且 apply 成功后才允许推进 peer 的 delete watermark。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     未拉完远端 manifest 或中途 apply 失败时，客户端不得向对端 ack delete_epoch，
-///     否则对端可能把尚未传播到本机的 tombstone 当成“全网已收齐”而 GC 掉。
+///     未拉完远端 manifest、items 返回 non-empty `missing_ids`、或中途 apply 失败时，
+///     客户端不得向对端 ack delete_epoch，否则对端可能把尚未传播到本机的 tombstone
+///     当成“全网已收齐”而 GC 掉。
 ///
 /// Code Logic（这个函数做什么）:
 ///     `manifest_complete && apply_ok` → `Some(max_epoch)`（含 0，表示该域当前无删除/水位底）；
 ///     任一条件失败 → `None`（本轮 push 不得携带 acked_delete_epoch）。
+///     调用方：items `missing_ids` 非空时必须把 `apply_ok=false`（或直接走
+///     `incomplete_items_outcome` 提前 return，根本不调用本函数）。
 pub fn decide_acked_delete_epoch(
     manifest_complete: bool,
     apply_ok: bool,

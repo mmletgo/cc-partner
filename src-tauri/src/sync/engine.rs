@@ -591,9 +591,15 @@ async fn prompt_sync_v2(
                 }
             }
         }
+        // missing_ids 非空：已落库的 items 保留，但禁止 Succeeded / delete-epoch ack
+        if let Some(o) =
+            incomplete_items_outcome(&resp.missing_ids, pulled.saturating_add(pushed))
+        {
+            return o;
+        }
     }
 
-    // 完整 manifest + apply 成功 → 允许在末批 ack
+    // 完整 manifest + apply 成功（含 items 无 missing）→ 允许在末批 ack
     let ack_epoch = decide_acked_delete_epoch(true, true, max_remote_epoch);
     let claimed = state.device_id.as_str();
 
@@ -812,6 +818,31 @@ pub fn mid_batch_fail_outcome(applied: u32, code: impl Into<String>) -> SyncDoma
     }
 }
 
+/// items 响应含 missing_ids 时视为拉取不完整，禁止领域成功与 delete-epoch ack。
+///
+/// Business Logic（为什么需要这个函数）:
+///     peer 在 manifest 中宣告了 id，但 items 未返回正文，说明本轮 fetch 不完整。
+///     若仍报 Succeeded 并推进 acked_delete_epoch，对端可能把本机尚未拿到的
+///     tombstone 当成“全网已收齐”而 GC 掉。
+///
+/// Code Logic（这个函数做什么）:
+///     missing_ids 空 → None（调用方继续 push/ack）；
+///     非空 → Some(mid_batch_fail_outcome(applied, "items_missing_ids:count=N"))，
+///     调用方必须 return 且不得再 decide_acked_delete_epoch(true, true, ...)。
+pub fn incomplete_items_outcome(
+    missing_ids: &[String],
+    applied: u32,
+) -> Option<SyncDomainOutcome> {
+    if missing_ids.is_empty() {
+        None
+    } else {
+        Some(mid_batch_fail_outcome(
+            applied,
+            format!("items_missing_ids:count={}", missing_ids.len()),
+        ))
+    }
+}
+
 /// 将本机 CLAUDE.md 版本推送给所有在线对端，不执行远端 pull。
 ///
 /// Business Logic: CLAUDE.md 页手动推送，不先 pull 覆盖本机。
@@ -891,6 +922,47 @@ mod tests {
             }
             other => panic!("expected ProtocolError, got {other:?}"),
         }
+    }
+
+    /// missing_ids 非空必须阻断领域成功，且 delete-epoch ack 不得推进。
+    ///
+    /// Business Logic: 证明 incomplete_items_outcome + decide_acked_delete_epoch
+    ///     在 items 不完整时不会伪装 Succeeded / 推进水位。
+    /// Code Logic: 空 missing → None；非空 applied>0 → Partial；applied=0 → ProtocolError；
+    ///     apply_ok=false 时 decide_acked_delete_epoch 返回 None。
+    #[test]
+    fn missing_ids_blocks_success_and_delete_ack() {
+        assert!(incomplete_items_outcome(&[], 0).is_none());
+        assert!(incomplete_items_outcome(&[], 5).is_none());
+
+        let partial = incomplete_items_outcome(&["gone".into()], 2).expect("must fail");
+        match partial {
+            SyncDomainOutcome::Partial { applied, failed } => {
+                assert_eq!(applied, 2);
+                assert_eq!(failed.len(), 1);
+                assert!(
+                    failed[0].code.contains("items_missing_ids"),
+                    "code={}",
+                    failed[0].code
+                );
+                assert!(failed[0].code.contains("count=1"));
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+
+        let protocol = incomplete_items_outcome(&["a".into(), "b".into()], 0).expect("must fail");
+        match protocol {
+            SyncDomainOutcome::ProtocolError { code } => {
+                assert!(code.contains("items_missing_ids"));
+                assert!(code.contains("count=2"));
+            }
+            other => panic!("expected ProtocolError, got {other:?}"),
+        }
+
+        // missing_ids 等价于 apply_ok=false：禁止 ack
+        assert_eq!(decide_acked_delete_epoch(true, false, 42), None);
+        // 仅完整 fetch 才可 ack
+        assert_eq!(decide_acked_delete_epoch(true, true, 42), Some(42));
     }
 
     /// 构造 Succeeded 领域报告。

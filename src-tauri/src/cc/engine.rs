@@ -279,9 +279,10 @@ async fn cc_sync_paged_with_peer(state: &AppState, base_url: &str) -> Result<(),
 
     let mut pulled = 0usize;
     let mut isolated_poison = false;
+    let mut incomplete_missing = false;
     for chunk in need_pull.chunks(CC_ITEM_BATCH_LIMIT) {
         let ids = chunk.to_vec();
-        let (items, poison) = fetch_items_with_halving(state, base_url, ids).await?;
+        let (items, poison, missing) = fetch_items_with_halving(state, base_url, ids).await?;
         if !items.is_empty() {
             let batch_start = Instant::now();
             let est: usize = items.iter().map(estimate_row_bytes).sum();
@@ -323,6 +324,11 @@ async fn cc_sync_paged_with_peer(state: &AppState, base_url: &str) -> Result<(),
             }
             record_batch_metrics(state, n as u64, est as u64, batch_start.elapsed());
         }
+        if missing {
+            // 已落库的好 items 保留；本轮不得继续 push/伪装成功。
+            incomplete_missing = true;
+            break;
+        }
         if poison {
             // 好数据已落库；结束本轮，禁止把毒丸伪装成空成功继续扫后续批。
             isolated_poison = true;
@@ -331,6 +337,9 @@ async fn cc_sync_paged_with_peer(state: &AppState, base_url: &str) -> Result<(),
     }
     if pulled > 0 {
         tracing::info!("分页拉取并更新了 {pulled} 条 CC 历史");
+    }
+    if incomplete_missing {
+        return Err("items 返回 missing_ids，本轮拉取不完整".to_string());
     }
     if isolated_poison {
         state
@@ -436,16 +445,18 @@ async fn fetch_all_remote_manifest_pages(
 /// Code Logic（这个函数做什么）:
 ///     栈式拆分 ids；成功合并 items；`batch_too_large|item_too_large && len>1` → 对半入栈；
 ///     `item_too_large && len==1` → 丢弃该 id、记 isolated=true、不写 content/id；
-///     返回 `(items, isolated_poison)`。
+///     任一响应 `missing_ids` 非空 → 记 incomplete=true（仍保留已返回 items）；
+///     返回 `(items, isolated_poison, incomplete_missing)`。
 async fn fetch_items_with_halving(
     state: &AppState,
     base_url: &str,
     ids: Vec<String>,
-) -> Result<(Vec<ClaudeHistoryRow>, bool), String> {
+) -> Result<(Vec<ClaudeHistoryRow>, bool, bool), String> {
     // 迭代拆批：async 递归需 Box::pin，这里用栈避免无限尺寸 future。
     let mut stack: Vec<Vec<String>> = vec![ids];
     let mut out = Vec::new();
     let mut isolated_poison = false;
+    let mut incomplete_missing = false;
     while let Some(chunk) = stack.pop() {
         if chunk.is_empty() {
             continue;
@@ -461,6 +472,14 @@ async fn fetch_items_with_halving(
                     batch_start.elapsed(),
                 );
                 out.extend(resp.items);
+                // missing_ids：manifest 宣告了 id 但正文缺失，本轮拉取不完整，不得伪装成功。
+                if !resp.missing_ids.is_empty() {
+                    incomplete_missing = true;
+                    tracing::warn!(
+                        count = resp.missing_ids.len(),
+                        "items 返回 missing_ids，本轮拉取不完整"
+                    );
+                }
             }
             Err(e) if (is_batch_too_large(&e) || is_item_too_large(&e)) && chunk.len() > 1 => {
                 let mid = chunk.len() / 2;
@@ -478,7 +497,7 @@ async fn fetch_items_with_halving(
             Err(e) => return Err(format!("items 失败: {e}")),
         }
     }
-    Ok((out, isolated_poison))
+    Ok((out, isolated_poison, incomplete_missing))
 }
 
 /// push-batch；遇 `batch_too_large` **或** 多 ID `item_too_large` 对半拆分直至 1。

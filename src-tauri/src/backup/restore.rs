@@ -1511,12 +1511,12 @@ mod tests {
         assert_eq!(
             kept.delete_vector_clock.get("A").copied(),
             Some(5),
-            "merge restore 不得把本地 floor {{A:5}} 降级为备份 {{A:3}}"
+            "merge restore 不得把本地 floor A=5 降级为备份 A=3"
         );
         assert_eq!(kept.delete_epoch, 10);
         assert_eq!(kept.content_hash, "local-hash");
 
-        // 中间 live {A:4} 仍被支配 → DeleteWins，且 reapply 后必须 deleted
+        // 中间 live A=4 仍被支配 → DeleteWins，且 reapply 后必须 deleted
         assert_eq!(
             DeletionFloorRepo::apply_deletion_floor(&kept, &live_vc),
             DeletionFloorDecision::DeleteWins
@@ -1524,7 +1524,7 @@ mod tests {
         let got = state.prompt_repo.get("p-mono").await.unwrap().unwrap();
         assert!(
             got.deleted,
-            "effective floor {{A:5}} 对 live {{A:4}} 必须 DeleteWins 并标记 deleted"
+            "effective floor A=5 对 live A=4 必须 DeleteWins 并标记 deleted"
         );
     }
 }
