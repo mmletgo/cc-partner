@@ -57,7 +57,7 @@ src/
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
 ├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、claim 有界候选/cursor（`claim.rs`）、scheduler、Workbench 可见 Runner、Prompt 生成、验证与交付 [已实现]
 ├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator + orchestrator/workbench dependency source；Tauri `list_attention_items` 与 Mobile `GET /api/mobile/attention` 共享 helper；能力 token `attention.v1` [已实现]
-├── transfer/          — 分块传输 + SHA256 + 断点续传 + 幂等 retry/resume claim + sender operation 对账（`transfer.resume.v1`）[M5/N5 T2+T3]
+├── transfer/          — 分块传输 + SHA256 + 断点续传 + 幂等 retry/resume claim + sender operation 对账（`transfer.resume.v1`）；`receiver/` 为目录模块（`mod`/`validation`/`chunk_io`/`resume`/`finalize`，公共 API 仍为 `crate::transfer::receiver`）[M5/N5 T2+T3]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
 ├── permissions/       — macOS 权限 FFI（CGPreflight/CGRequest/CGEventTap） [M7 已实现]
