@@ -275,6 +275,7 @@ fn parse_raw_diff_into(
         let old_mode = parts[0];
         let new_mode = parts[1];
         let old_oid = parts[2];
+        let new_oid = parts[3];
         let status_code = parts[4].chars().next().unwrap_or('M');
 
         if i >= bytes.len() {
@@ -291,7 +292,14 @@ fn parse_raw_diff_into(
         } else {
             new_mode.to_string()
         };
-        let (binary, new_content_hash) = content_hash_for_path(cwd, &path, status == "deleted")?;
+        // symlink/gitlink 不得用空哈希：否则 retarget/submodule 漂移 digest 不变。
+        let (binary, new_content_hash) = content_hash_for_entry(
+            cwd,
+            &path,
+            status == "deleted",
+            new_mode,
+            new_oid,
+        )?;
         // 对 deleted/modified 优先使用 raw 的 old oid；若全 0 再尝试 base:path
         let old_blob_oid = if old_oid.chars().all(|c| c == '0') {
             lookup_blob_oid(cwd, base_tree, &path).unwrap_or_else(|| old_oid.to_string())
@@ -532,10 +540,56 @@ fn compute_review_digest(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     raw diff 条目可能是普通 blob / symlink / gitlink；digest 必须反映真实内容身份。
+///
+/// Code Logic（这个函数做什么）:
+///     deleted → 空哈希；gitlink(160000) → hash(new_oid)；symlink(120000) → hash(链接目标)；
+///     普通文件 → streaming content hash。
+fn content_hash_for_entry(
+    cwd: &Path,
+    path: &str,
+    deleted: bool,
+    new_mode: &str,
+    new_oid: &str,
+) -> Result<(bool, String), AppError> {
+    if deleted {
+        return Ok((false, sha256_hex_of_bytes(b"")));
+    }
+    // git submodule / gitlink：digest 绑定 new OID，避免 HEAD 漂移不可见。
+    if new_mode == "160000" {
+        return Ok((true, sha256_hex_of_bytes(new_oid.as_bytes())));
+    }
+    let abs = cwd.join(path);
+    if !abs.exists() {
+        // 无工作树文件时仍用 new_oid 占位（staged-only 变更）
+        if !new_oid.chars().all(|c| c == '0') {
+            return Ok((true, sha256_hex_of_bytes(new_oid.as_bytes())));
+        }
+        return Ok((false, sha256_hex_of_bytes(b"")));
+    }
+    let metadata = fs::symlink_metadata(&abs)
+        .map_err(|err| AppError::generic(format!("读取文件元数据失败: {path}: {err}")))?;
+    if metadata.file_type().is_symlink() || new_mode == "120000" {
+        let target = fs::read_link(&abs)
+            .map_err(|err| AppError::generic(format!("读取 symlink 目标失败: {path}: {err}")))?;
+        let target_bytes = target.to_string_lossy().into_owned().into_bytes();
+        return Ok((true, sha256_hex_of_bytes(&target_bytes)));
+    }
+    if !metadata.is_file() {
+        // 目录等非文件：用 mode+path 绑定，避免全空哈希碰撞
+        return Ok((
+            true,
+            sha256_hex_of_bytes(format!("{new_mode}:{path}").as_bytes()),
+        ));
+    }
+    content_hash_for_path(cwd, path, false)
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     new/dirty/untracked 内容必须以 streaming hash 进入 digest，展示截断不能影响身份。
 ///
 /// Code Logic（这个函数做什么）:
-///     deleted 返回空内容哈希；否则流式读文件，顺带用 NUL 字节探测 binary。
+///     deleted 返回空内容哈希；否则流式读普通文件，顺带用 NUL 字节探测 binary。
 fn content_hash_for_path(
     cwd: &Path,
     path: &str,
@@ -550,8 +604,17 @@ fn content_hash_for_path(
     }
     let metadata = fs::symlink_metadata(&abs)
         .map_err(|err| AppError::generic(format!("读取文件元数据失败: {path}: {err}")))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Ok((true, sha256_hex_of_bytes(b"")));
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(&abs)
+            .map_err(|err| AppError::generic(format!("读取 symlink 目标失败: {path}: {err}")))?;
+        let target_bytes = target.to_string_lossy().into_owned().into_bytes();
+        return Ok((true, sha256_hex_of_bytes(&target_bytes)));
+    }
+    if !metadata.is_file() {
+        return Ok((
+            true,
+            sha256_hex_of_bytes(format!("mode:{path}").as_bytes()),
+        ));
     }
     let file = File::open(&abs)
         .map_err(|err| AppError::generic(format!("打开文件失败: {path}: {err}")))?;

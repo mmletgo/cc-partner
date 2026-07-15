@@ -452,11 +452,14 @@ pub fn classify_status(
     health_ok: bool,
     error: Option<String>,
 ) -> BackendStatus {
+    // Stale 仅表示「控制文件残留但 pid 已死」。pid 存活而 health 瞬时失败仍为 Running，
+    // 禁止误删 control 导致 serve lock 孤儿（Codex: 瞬时 health 切断控制面）。
     let kind = if error.is_some() {
         BackendStatusKind::Error
     } else if control.is_none() {
         BackendStatusKind::Stopped
-    } else if process_alive && health_ok {
+    } else if process_alive {
+        let _ = health_ok; // health 失败时仍 Running；调用方可再 probe health
         BackendStatusKind::Running
     } else {
         BackendStatusKind::Stale
@@ -762,18 +765,21 @@ mod tests {
         assert_eq!(status.kind, BackendStatusKind::Stale);
     }
 
-    /// 验证只有 pid 和健康检查都正常时才是 running。
+    /// 验证 pid 存活时即使 health 失败仍为 running（瞬时 health 不得拆控制面）。
     ///
     /// Business Logic（为什么需要这个测试）:
-    ///     GUI/CLI 只有在后端进程存在且 HTTP 健康检查通过时才能把后端展示为可用。
+    ///     单次 health 超时不得把仍存活的 owner 标 Stale 并删除控制文件。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造控制文件并传入进程存活、健康检查成功且无错误，断言分类结果为 Running 并保留控制文件内容。
+    ///     process_alive=true、health_ok=false → Running；process_alive=false → Stale。
     #[test]
-    fn classify_status_reports_running_only_when_pid_and_health_are_ok() {
+    fn classify_status_reports_running_when_pid_alive_even_if_health_fails() {
         let control = BackendControlFile::for_test(1234, 62116, "device-a");
-        let status = classify_status(Some(control.clone()), true, true, None);
+        let status = classify_status(Some(control.clone()), true, false, None);
         assert_eq!(status.kind, BackendStatusKind::Running);
         assert_eq!(status.control.unwrap().pid, 1234);
+
+        let status_ok = classify_status(Some(control.clone()), true, true, None);
+        assert_eq!(status_ok.kind, BackendStatusKind::Running);
     }
 }
