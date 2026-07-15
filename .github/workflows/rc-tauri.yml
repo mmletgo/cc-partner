@@ -45,13 +45,14 @@ jobs:
       subject_commit: ${{ steps.check.outputs.subject_commit }}
       subject_tag: ${{ steps.check.outputs.subject_tag }}
     steps:
-      - name: Checkout subject tag
+      - name: Checkout subject tag (tags only)
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.subjectTag }}
+          # Refuse branch/SHA fallthrough — only a real tag ref may enter RC.
+          ref: refs/tags/${{ inputs.subjectTag }}
           fetch-depth: 0
 
-      - name: Prove tag peels to subjectCommit
+      - name: Prove protected subject tag peels to subjectCommit
         id: check
         shell: bash
         run: |
@@ -62,8 +63,18 @@ jobs:
             echo "subjectCommit must be 40-hex" >&2
             exit 1
           fi
+          # RC only accepts protected subject tags — never branch names or bare SHAs.
+          if [[ ! "$TAG" =~ ^subject-[A-Za-z0-9._-]+$ ]]; then
+            echo "subjectTag must match subject-<name> (got $TAG)" >&2
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "subjectTag is not a git tag under refs/tags/ (branches/SHAs rejected)" >&2
+            exit 1
+          fi
+          # Peel ONLY via refs/tags/ — no generic rev-parse fallback
+          TAG_SHA=$(git rev-list -n 1 "refs/tags/${TAG}")
           HEAD_SHA=$(git rev-parse HEAD)
-          TAG_SHA=$(git rev-list -n 1 "refs/tags/${TAG}" 2>/dev/null || git rev-parse "$TAG^{commit}")
           echo "HEAD=$HEAD_SHA"
           echo "TAG_PEEL=$TAG_SHA"
           echo "EXPECTED=$EXPECTED"

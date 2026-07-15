@@ -263,19 +263,53 @@ jobs:
                 | tar -x -C "$COMPOSITE" || true
             }
 
+          # Bind claim check to the production inventory package SHA (not an unbound optional).
+          PACKAGE_SHA=$(node -e '
+            const inv = require("/tmp/rc-inventory/inventory.json");
+            const assets = Array.isArray(inv.assets) ? inv.assets : [];
+            const prod = assets.find(
+              (a) =>
+                a &&
+                a.releasable === true &&
+                typeof a.sha256 === "string" &&
+                /dmg|\.app\.tar\.gz/i.test(String(a.name || "")),
+            );
+            if (!prod) {
+              console.error("no releasable production dmg/app.tar.gz in inventory");
+              process.exit(2);
+            }
+            process.stdout.write(String(prod.sha256).toLowerCase());
+          ')
+          APP_VERSION=$(node -e '
+            const inv = require("/tmp/rc-inventory/inventory.json");
+            const v = inv.appVersion || inv.version || "";
+            process.stdout.write(String(v));
+          ')
+          if [[ -z "$PACKAGE_SHA" || ! "$PACKAGE_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "failed to resolve production packageSha256 from RC inventory" >&2
+            exit 1
+          fi
+
           set +e
           (
             cd "$COMPOSITE"
-            node scripts/check-quality-traceability.mjs \
-              --claim-mode platform-beta \
-              --claim-profile macos-aarch64-beta \
-              --subject-commit "$SUBJECT" \
-              --subject-tag "$SUBJECT_TAG" \
-              --rc-run-id "$RC_RUN" \
-              --evidence-ref "$EVIDENCE_REF" \
-              --expected-evidence-commit "$EVIDENCE" \
-              --release-claim docs/development/release-claim.json \
+            CLAIM_CMD=(
+              node scripts/check-quality-traceability.mjs
+              --claim-mode platform-beta
+              --claim-profile macos-aarch64-beta
+              --subject-commit "$SUBJECT"
+              --subject-tag "$SUBJECT_TAG"
+              --rc-run-id "$RC_RUN"
+              --evidence-ref "$EVIDENCE_REF"
+              --expected-evidence-commit "$EVIDENCE"
+              --release-claim docs/development/release-claim.json
               --rc-inventory /tmp/rc-inventory/inventory.json
+              --package-sha256 "$PACKAGE_SHA"
+            )
+            if [[ -n "$APP_VERSION" ]]; then
+              CLAIM_CMD+=(--app-version "$APP_VERSION")
+            fi
+            "${CLAIM_CMD[@]}"
           ) > /tmp/beta-claim-check.log 2>&1
           CLAIM_EXIT=$?
           set -e
