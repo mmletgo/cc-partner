@@ -48,13 +48,36 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | `L2-BACKEND-DOCTOR-SMOKE-001` | L2 | `src-tauri/tests/backend_doctor_smoke.rs` |
 | `L2-PTY-SMOKE-001` | L2 | `src-tauri/tests/pty_smoke.rs` |
 | `L2-TRANSACTIONAL-RUNTIME-001` | L2 | `src-tauri/tests/transactional_runtime_smoke.rs` |
-| `L3-MACOS-GUI-PERMISSIONS-001` | L3 | Packaged macOS GUI + permission grant/deny/retry + screenshot clipboard — **NOT VERIFIED** ([real-device-certification.md](real-device-certification.md)) |
+| `L3-MACOS-GUI-PERMISSIONS-001` | L3 | Packaged macOS GUI + permission grant/deny/retry + screenshot clipboard — **NOT VERIFIED** (canonical aggregate; architecture executions under `macos-aarch64-beta` only) ([real-device-certification.md](real-device-certification.md)) |
+| `L3-MACOS-VOICEOVER-001` | L3 | Packaged macOS VoiceOver semantic/focus journey on same Apple Silicon candidate — **NOT VERIFIED** (depends on matching GUI execution for beta profile) |
 | `L3-WINDOWS-GUI-001` | L3 | Packaged Windows GUI / transfer dialog / native terminal — **NOT VERIFIED** |
 | `L3-WINDOWS-WSL-001` | L3 | Windows WSL + tmux Workbench recovery — **NOT VERIFIED** (separate from native terminal) |
 | `L3-UBUNTU-GUI-001` | L3 | AppImage/deb GUI + terminal/files — **NOT VERIFIED** |
 | `L3-DUAL-HOST-LAN-001` | L3 | Two physical hosts: mDNS, credential-free native/mobile R/W, boundary reject, remote stop reject, **1GiB mid-transfer disconnect + process restart + resume + SHA-256** — **NOT VERIFIED** (deferred; L2 smoke is not a substitute) |
 
 Honest L3 row schema (version, commit, OS build, status, evidence, date, 90-day expiry) and the full NOT VERIFIED inventory: [`real-device-certification.md`](real-device-certification.md). Do **not** invent caller identity auth. LAN product semantics remain credential-free for legal loopback/LAN peers; Host/Origin/Content-Type and socket peer class are deployment boundaries, not identity.
+
+### Architecture-level PASS vs aggregate NOT VERIFIED
+
+Fixed claim profile **`macos-aarch64-beta`** (`claimMode=platform-beta`) may GO when:
+
+- `L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64` execution is artifact-backed PASS (≤90 days)
+- `L3-MACOS-VOICEOVER-001@macos-aarch64` execution is PASS on the **same** subject/RC/package SHA
+
+even if the **canonical** quality-matrix rows for those IDs remain `NOT VERIFIED` / aggregate `PARTIAL` because Intel Mac (`macos-x86_64`) was never executed. Checker owns required IDs/matrices; callers cannot pass arbitrary allowlists. Windows / WSL / Ubuntu / dual-host / mobile / NVDA stay explicit `NOT VERIFIED` and **do not** block this beta profile.
+
+Validate profile contract:
+
+```bash
+node scripts/check-quality-traceability.mjs --self-test
+node scripts/check-quality-traceability.mjs --claim-mode platform-beta --claim-profile macos-aarch64-beta \
+  --subject-commit <40hex> --subject-tag <tag> --rc-run-id <id> --evidence-ref <ref>
+```
+
+RC / beta publish workflows (do **not** repurpose stable `release-tauri.yml` for beta):
+
+- [`.github/workflows/rc-tauri.yml`](../../.github/workflows/rc-tauri.yml) — single matrix `macos-aarch64` RC + non-releasable updater harness
+- [`.github/workflows/release-tauri-beta.yml`](../../.github/workflows/release-tauri-beta.yml) — prerelease-only Apple Silicon assets; no `latest.json`
 
 ## Workflow matrix
 
@@ -65,14 +88,18 @@ Honest L3 row schema (version, commit, OS build, status, evidence, date, 90-day 
 | Frontend lint + build + static gates | `cd web && npm run lint` · `npm run build` · token/bundle/module gates · `node scripts/check-quality-traceability.mjs` | `quality` (`CI`) | Same as above | ESLint + `tsc -b` + Vite production bundle + CSS token / bundle / module / quality-matrix gates | Not a substitute for unit/E2E or L3 |
 | Ubuntu full quality (Rust) | `cd src-tauri && cargo fmt --check` · `cargo clippy --all-targets --locked -- -D warnings` · `cargo test --locked` | `quality` (`CI`) | Same as above | fmt / clippy (deny warnings) / full `cargo test` on **ubuntu-22.04** (incl. `L2-QUALITY-FAULTS-001`) | Not macOS/Windows process or path smoke |
 | macOS / Windows smoke | See [local smoke](#local-cross-platform-smoke) | `smoke (macos-latest\|windows-latest)` (`Cross-Platform Smoke`) | Related PR path filter; daily `schedule` UTC `18:23`; `workflow_dispatch` | Backend CLI lifecycle, doctor `--json`, native PTY, **LAN trust boundary smoke**, **quality_faults L2**, transactional runtime, logs rotation/sanitize, focused unit + `cargo check --bins` | **NOT VERIFIED on hosted runners:** WSL + tmux; GUI / WebView; macOS permission dialogs; multi-host mDNS / phone QR / multi-device P2P; real public-peer NIC path; 1GiB dual-host transfer |
-| Release installers | Local: `./start.sh build` (dev); formal: tag only | `build` / `publish-release` / `assemble-latest-json` (`Build & Release (Tauri)`) | Push tag `v*` | Platform installers + `.sig` + `latest.json` assembly | **Not** a quality substitute for `CI` or Cross-Platform Smoke |
+| Release installers (stable) | Local: `./start.sh build` (dev); formal: tag only | `build` / `publish-release` / `assemble-latest-json` (`Build & Release (Tauri)`) | Push tag `v*` | Multi-platform installers + `.sig` + `latest.json` assembly | **Not** a quality substitute for `CI` or Cross-Platform Smoke; **not** the beta path |
+| RC candidate (macOS arm64 beta infra) | Dispatch only | `validate-subject` / `build-macos-aarch64` (`RC Tauri (macOS arm64)`) | `workflow_dispatch` with subjectTag + subjectCommit | Immutable `macos-aarch64` production + non-releasable updater harness inventory | No Windows/Linux/Intel jobs; no publish; no `latest.json` |
+| Beta prerelease (macOS arm64 only) | Dispatch only after GO | `gate` (`Release Tauri Beta (macOS arm64)`) | `workflow_dispatch` with frozen subject/RC/evidence/profile/betaTag | Apple Silicon prerelease assets only | No stable tag; no `latest.json`; no harness publish; no Windows/Linux/Intel assets |
 | Documentation facts + matrix ID refs | `node scripts/check-docs.mjs` · `node scripts/check-docs.mjs --self-test` · `node scripts/check-quality-traceability.mjs` | `docs` (`Docs`) | PR/push `master` path filter on Markdown, quality-matrix, docs/traceability checkers, workflow | Relative links, fence balance, scoped stale claims, README command allowlist, evidence ID existence | Not a substitute for product CI/smoke; skips `docs/superpowers/**` |
 
 Workflows:
 
 - [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — name **CI**
 - [`.github/workflows/cross-platform-smoke.yml`](../../.github/workflows/cross-platform-smoke.yml) — name **Cross-Platform Smoke**
-- [`.github/workflows/release-tauri.yml`](../../.github/workflows/release-tauri.yml) — name **Build & Release (Tauri)**
+- [`.github/workflows/release-tauri.yml`](../../.github/workflows/release-tauri.yml) — name **Build & Release (Tauri)** (stable multi-platform; **not** used for macos-aarch64-beta)
+- [`.github/workflows/rc-tauri.yml`](../../.github/workflows/rc-tauri.yml) — name **RC Tauri (macOS arm64)**
+- [`.github/workflows/release-tauri-beta.yml`](../../.github/workflows/release-tauri-beta.yml) — name **Release Tauri Beta (macOS arm64)**
 - [`.github/workflows/docs.yml`](../../.github/workflows/docs.yml) — name **Docs**
 
 ## Local frontend

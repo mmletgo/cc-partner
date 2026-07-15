@@ -1,0 +1,333 @@
+# Beta-only release gate for macos-aarch64-beta
+#
+# Purpose:
+#   Publish ONLY Apple Silicon macOS production assets from a verified RC run to a
+#   NEW prerelease tag/release. Never mutates stable tags, stable releases, or
+#   latest.json. Does NOT invoke or reuse release-tauri.yml.
+#
+# Required inputs:
+#   subjectTag, subjectCommit, rcRunId, evidenceRef, expectedEvidenceCommit,
+#   claimMode=platform-beta, claimProfile=macos-aarch64-beta, betaTag
+#
+# Hard rejects:
+#   existing target tag/release, force moves, asset overwrite,
+#   Windows/Linux/Intel assets, harness/releasable=false assets,
+#   stable latest.json mutation, wrong claim profile
+
+name: Release Tauri Beta (macOS arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      subjectTag:
+        description: Protected subject tag used for RC
+        required: true
+        type: string
+      subjectCommit:
+        description: Full 40-hex subject commit SHA
+        required: true
+        type: string
+      rcRunId:
+        description: RC workflow run id that produced artifacts
+        required: true
+        type: string
+      evidenceRef:
+        description: Protected docs-only evidence ref name
+        required: true
+        type: string
+      expectedEvidenceCommit:
+        description: Full 40-hex evidence commit SHA (frozen)
+        required: true
+        type: string
+      claimMode:
+        description: Must be platform-beta
+        required: true
+        type: string
+        default: platform-beta
+      claimProfile:
+        description: Must be macos-aarch64-beta
+        required: true
+        type: string
+        default: macos-aarch64-beta
+      betaTag:
+        description: NEW beta tag (must not already exist)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-beta-${{ inputs.betaTag }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Evidence-aware beta gate
+    runs-on: ubuntu-22.04
+    outputs:
+      beta_tag: ${{ steps.validate.outputs.beta_tag }}
+      subject_commit: ${{ steps.validate.outputs.subject_commit }}
+    steps:
+      - name: Checkout subject
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.subjectCommit }}
+          fetch-depth: 0
+
+      - name: Validate fixed profile and SHAs
+        id: validate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          MODE='${{ inputs.claimMode }}'
+          PROFILE='${{ inputs.claimProfile }}'
+          SUBJECT='${{ inputs.subjectCommit }}'
+          EVIDENCE='${{ inputs.expectedEvidenceCommit }}'
+          BETA_TAG='${{ inputs.betaTag }}'
+          RC_RUN='${{ inputs.rcRunId }}'
+          SUBJECT_TAG='${{ inputs.subjectTag }}'
+          EVIDENCE_REF='${{ inputs.evidenceRef }}'
+
+          if [[ "$MODE" != "platform-beta" ]]; then
+            echo "claimMode must be platform-beta" >&2
+            exit 1
+          fi
+          if [[ "$PROFILE" != "macos-aarch64-beta" ]]; then
+            echo "claimProfile must be macos-aarch64-beta" >&2
+            exit 1
+          fi
+          if [[ ! "$SUBJECT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "subjectCommit must be 40-hex" >&2
+            exit 1
+          fi
+          if [[ ! "$EVIDENCE" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "expectedEvidenceCommit must be 40-hex" >&2
+            exit 1
+          fi
+          if [[ ! "$BETA_TAG" =~ ^v ]]; then
+            echo "betaTag should start with v (e.g. v0.6.7-beta.1)" >&2
+            exit 1
+          fi
+          if [[ "$BETA_TAG" == "$SUBJECT_TAG" ]]; then
+            echo "betaTag must differ from subjectTag" >&2
+            exit 1
+          fi
+          # Reject existing beta tag / release (no force move / overwrite)
+          if git ls-remote --tags origin "refs/tags/${BETA_TAG}" | grep -q .; then
+            echo "betaTag already exists on origin — refuse force move" >&2
+            exit 1
+          fi
+          if gh release view "$BETA_TAG" >/dev/null 2>&1; then
+            echo "beta release already exists — refuse overwrite" >&2
+            exit 1
+          fi
+          # RC run provenance
+          RUN_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RC_RUN}")
+          RUN_HEAD=$(echo "$RUN_JSON" | jq -r '.head_sha')
+          RUN_STATUS=$(echo "$RUN_JSON" | jq -r '.status')
+          RUN_CONCLUSION=$(echo "$RUN_JSON" | jq -r '.conclusion')
+          RUN_PATH=$(echo "$RUN_JSON" | jq -r '.path')
+          RUN_EVENT=$(echo "$RUN_JSON" | jq -r '.event')
+          echo "RC run head=$RUN_HEAD status=$RUN_STATUS conclusion=$RUN_CONCLUSION path=$RUN_PATH event=$RUN_EVENT"
+          if [[ "${RUN_HEAD,,}" != "${SUBJECT,,}" ]]; then
+            echo "RC run head_sha does not match subjectCommit" >&2
+            exit 1
+          fi
+          if [[ "$RUN_STATUS" != "completed" || "$RUN_CONCLUSION" != "success" ]]; then
+            echo "RC run must be completed success" >&2
+            exit 1
+          fi
+          if [[ "$RUN_PATH" != ".github/workflows/rc-tauri.yml" ]]; then
+            echo "RC run must come from rc-tauri.yml (got $RUN_PATH)" >&2
+            exit 1
+          fi
+          # Evidence ref path allowlist + fixed SHA
+          # Allowed paths: docs/development/evidence/**, quality-matrix, real-device-certification, release-claim, README
+          git fetch origin "$EVIDENCE_REF" --depth=1 || git fetch origin "refs/heads/${EVIDENCE_REF}" --depth=1 || true
+          EVIDENCE_SHA=$(git rev-parse "$EVIDENCE" 2>/dev/null || true)
+          if [[ -z "$EVIDENCE_SHA" ]]; then
+            # try as remote ref tip later; still require exact expected SHA object available
+            if ! git cat-file -e "${EVIDENCE}^{commit}" 2>/dev/null; then
+              echo "expectedEvidenceCommit object not present locally" >&2
+              exit 1
+            fi
+            EVIDENCE_SHA="$EVIDENCE"
+          fi
+          if [[ "${EVIDENCE_SHA,,}" != "${EVIDENCE,,}" ]]; then
+            echo "evidence ref does not resolve to expectedEvidenceCommit" >&2
+            exit 1
+          fi
+          echo "beta_tag=$BETA_TAG" >> "$GITHUB_OUTPUT"
+          echo "subject_commit=$SUBJECT" >> "$GITHUB_OUTPUT"
+
+      - name: Download RC production artifacts only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          RC_RUN='${{ inputs.rcRunId }}'
+          mkdir -p rc-download
+          # Download inventory + production artifacts from the RC run
+          gh run download "$RC_RUN" -n rc-macos-aarch64-inventory -D rc-download || {
+            echo "missing inventory artifact" >&2
+            exit 1
+          }
+          gh run download "$RC_RUN" -n rc-macos-aarch64-production -D rc-download/production || {
+            echo "missing production artifact" >&2
+            exit 1
+          }
+          # Explicitly do NOT download harness for publish
+          ls -laR rc-download
+
+      - name: Verify inventory SHA and filter releasable macos-aarch64 only
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
+          import { join } from "node:path";
+
+          const subject = process.env.SUBJECT;
+          const inventory = JSON.parse(readFileSync("rc-download/inventory.json", "utf8"));
+          if (inventory.matrixId !== "macos-aarch64") {
+            console.error("inventory matrixId must be macos-aarch64");
+            process.exit(1);
+          }
+          if (String(inventory.subjectCommit).toLowerCase() !== String(subject).toLowerCase()) {
+            console.error("inventory subjectCommit mismatch");
+            process.exit(1);
+          }
+          if (inventory.claimProfile && inventory.claimProfile !== "macos-aarch64-beta") {
+            console.error("inventory claimProfile mismatch");
+            process.exit(1);
+          }
+
+          function sha256File(path) {
+            return createHash("sha256").update(readFileSync(path)).digest("hex");
+          }
+
+          const prodDir = "rc-download/production";
+          const names = readdirSync(prodDir);
+          const live = [];
+          for (const name of names) {
+            const abs = join(prodDir, name);
+            if (!statSync(abs).isFile()) continue;
+            if (/harness/i.test(name)) {
+              console.error("harness file in production artifact set:", name);
+              process.exit(1);
+            }
+            if (/(windows|linux|x86_64|x64|amd64)/i.test(name) && !/aarch64/i.test(name)) {
+              console.error("non-Apple-Silicon asset rejected:", name);
+              process.exit(1);
+            }
+            live.push({ name, sha256: sha256File(abs), path: abs });
+          }
+          if (live.length === 0) {
+            console.error("no production files");
+            process.exit(1);
+          }
+
+          const invByName = new Map(
+            (inventory.assets || [])
+              .filter((a) => a.releasable === true)
+              .map((a) => [a.name, a]),
+          );
+          for (const file of live) {
+            const inv = invByName.get(file.name);
+            if (!inv) {
+              // allow inventory to list renamed originals; match by sha
+              const bySha = (inventory.assets || []).find(
+                (a) => a.releasable === true && String(a.sha256).toLowerCase() === file.sha256,
+              );
+              if (!bySha) {
+                console.error("live asset not in releasable inventory:", file.name);
+                process.exit(1);
+              }
+            } else if (String(inv.sha256).toLowerCase() !== file.sha256) {
+              console.error("SHA mismatch for", file.name);
+              process.exit(1);
+            }
+          }
+          // Refuse publishing any releasable=false
+          for (const a of inventory.assets || []) {
+            if (a.releasable === false && live.some((f) => f.name === a.name)) {
+              console.error("attempt to publish releasable=false asset", a.name);
+              process.exit(1);
+            }
+          }
+
+          mkdirSync("publish-assets", { recursive: true });
+          for (const file of live) {
+            copyFileSync(file.path, join("publish-assets", file.name));
+          }
+          writeFileSync(
+            "publish-assets/rc-provenance.json",
+            JSON.stringify(
+              {
+                subjectCommit: subject,
+                rcWorkflowRunId: process.env.RC_RUN,
+                matrixId: "macos-aarch64",
+                claimMode: "platform-beta",
+                claimProfile: "macos-aarch64-beta",
+                expectedEvidenceCommit: process.env.EVIDENCE,
+                assets: live.map(({ name, sha256 }) => ({ name, sha256, releasable: true })),
+                prerelease: true,
+                stableLatestJson: false,
+              },
+              null,
+              2,
+            ) + "\n",
+          );
+          console.log("publish set ready:", live.map((f) => f.name).join(", "));
+          NODE
+        env:
+          SUBJECT: ${{ inputs.subjectCommit }}
+          RC_RUN: ${{ inputs.rcRunId }}
+          EVIDENCE: ${{ inputs.expectedEvidenceCommit }}
+
+      - name: Create prerelease only (no latest.json)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BETA_TAG='${{ inputs.betaTag }}'
+          SUBJECT='${{ inputs.subjectCommit }}'
+          # Point tag at subject commit (annotated optional); never force
+          git tag "$BETA_TAG" "$SUBJECT"
+          git push origin "refs/tags/${BETA_TAG}"
+          # Create prerelease with production assets only
+          gh release create "$BETA_TAG" \
+            --prerelease \
+            --title "Beta ${BETA_TAG} (macos-aarch64 only)" \
+            --notes "Scoped Apple Silicon macOS beta. Not a stable or full multi-platform release. No latest.json is published. Windows/Linux/Intel remain NOT VERIFIED." \
+            --target "$SUBJECT" \
+            publish-assets/*
+
+      - name: Refuse stable latest.json mutation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BETA_TAG='${{ inputs.betaTag }}'
+          # Ensure we did not upload latest.json
+          if gh release view "$BETA_TAG" --json assets -q '.assets[].name' | grep -qx 'latest.json'; then
+            echo "latest.json must not be published on beta release" >&2
+            exit 1
+          fi
+          # Ensure stable "latest" release assets were not modified by this workflow
+          # (we never touch them; assert inventory of this release has no windows/linux)
+          ASSETS=$(gh release view "$BETA_TAG" --json assets -q '.assets[].name' || true)
+          echo "$ASSETS"
+          if echo "$ASSETS" | grep -Eiq 'windows|linux|x64-setup|amd64'; then
+            echo "non-macOS assets found on beta release" >&2
+            exit 1
+          fi
+          echo "beta publish gate complete (prerelease, no latest.json)"

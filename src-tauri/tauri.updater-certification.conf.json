@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "cc-partner",
+  "identifier": "com.cc-partner.app",
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "http://127.0.0.1:62190/latest.json"
+      ],
+      "dangerousInsecureTransportProtocol": true
+    }
+  },
+  "bundle": {
+    "createUpdaterArtifacts": true
+  },
+  "_ccPartnerCertification": {
+    "marker": "updater-certification-harness",
+    "releasable": false,
+    "note": "Loopback-only updater harness merge config. Must never enter production release assets."
+  }
+}

@@ -14,9 +14,39 @@ Authoritative machine-readable rows live in
 [`quality-matrix.json`](./quality-matrix.json). Hosted-runner exclusions remain
 in [`testing.md`](./testing.md).
 
+## Fixed beta profile (infrastructure)
+
+Current executable claim profile (N8):
+
+| Field | Value |
+| --- | --- |
+| claimMode | `platform-beta` |
+| claimProfile | `macos-aarch64-beta` |
+| selectedMatrixIds | `macos-aarch64` only |
+| requiredExecutions | `L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64`, `L3-MACOS-VOICEOVER-001@macos-aarch64` |
+| evidence validity | 90 days from execution |
+| release upper bound | prerelease-only Apple Silicon assets; **no** stable `latest.json` |
+
+**Architecture vs aggregate:** an Apple Silicon execution may be PASS while the
+canonical quality-matrix row stays `NOT VERIFIED` / aggregate `PARTIAL` because
+Intel Mac was never run. The checker consumes matching architecture manifests
+only; it does **not** promote aggregate prose to full PASS. Deferred platforms
+(Windows, WSL, Ubuntu, Intel Mac, dual-host, iOS, Android, NVDA) remain
+`NOT VERIFIED` and do not block `macos-aarch64-beta`.
+
+Infrastructure (must be in `subjectCommit` before freeze):
+
+- `scripts/check-quality-traceability.mjs` — fixed profile dependency closure + self-tests
+- `.github/workflows/rc-tauri.yml` — single-matrix RC + non-releasable harness
+- `.github/workflows/release-tauri-beta.yml` — beta-only evidence-aware publish gate
+- `scripts/prepare-updater-certification-harness.mjs` + `serve-updater-certification.mjs` + `src-tauri/tauri.updater-certification.conf.json`
+
+Stable multi-platform publish remains `.github/workflows/release-tauri.yml` and is
+**not** invoked for this beta profile.
+
 ## Certification row schema
 
-Each row records:
+Each **canonical** matrix row records:
 
 | Field | Meaning |
 | --- | --- |
@@ -29,24 +59,30 @@ Each row records:
 | date | UTC date of execution (`YYYY-MM-DD`) |
 | expiresAt | `date + 90 days`; after expiry the row is historical only |
 
+Each **architecture execution** manifest (under `docs/development/evidence/<ID>/`)
+additionally binds: `artifactMatrixId`, full `subjectCommit`, RC run id, package
+filename/SHA, redacted `deviceClass`, checklist, and relative artifact SHAs.
+`evidenceCommit` is resolved from the protected evidence ref and is **not**
+embedded in the manifest.
+
 Missing device, missing binary, or unrun checklist → **`NOT VERIFIED`**. Do not
 fabricate PASS from CI, Playwright, or single-host smoke.
 
 ## Matrix (current)
 
-**Recorded at:** 2026-07-14  
-**Branch:** `sdd/s6-quality-architecture-governance`  
+**Recorded at:** 2026-07-15  
+**Infrastructure baseline:** N8 Task 1 (checker/RC/beta gate/harness)  
 **App version baseline:** `0.6.7`  
-**Commit baseline (branch tip when matrix was authored; certification commit SHA
-is reported after `test: certify cross surface quality matrix` lands):**
-`b0e13467384a1d13d832bfcee40456cff82c90e4`
+**Canonical row commit baseline:** `b0e13467384a1d13d832bfcee40456cff82c90e4`
 
-All L3 surfaces below were **not** executed as packaged real-device
-certification in this Task 10 session. Status is therefore **NOT VERIFIED**.
+All L3 surfaces below remain **not** executed as packaged real-device
+certification until Tasks 3–4. Canonical status is therefore **NOT VERIFIED**.
+Architecture executions for `macos-aarch64` are not yet written.
 
 | ID | Surface | appVersion | commit | OS build | status | evidence | date | expiresAt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| L3-MACOS-GUI-PERMISSIONS-001 | macOS packaged GUI launch; screen/accessibility/input/notification grant-deny-retry; screenshot clipboard | 0.6.7 | b0e1346… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-MACOS-GUI-PERMISSIONS-001 | macOS packaged GUI launch; screen/accessibility/input/notification grant-deny-retry; screenshot clipboard; updater via loopback harness | 0.6.7 | b0e1346… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
+| L3-MACOS-VOICEOVER-001 | macOS VoiceOver: LAN disclosure, Home/Trending, Workbench, Dialog/Drawer, live region, terminal, Attention, Human Review, WORKFLOW | 0.6.7 | b0e1346… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
 | L3-WINDOWS-GUI-001 | Windows packaged GUI; file transfer path/dialog; native terminal | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
 | L3-WINDOWS-WSL-001 | Windows WSL + tmux Workbench terminal recovery | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
 | L3-UBUNTU-GUI-001 | Ubuntu AppImage/deb GUI; terminal + file flows | 0.6.7 | b0e1346… | n/a | **NOT VERIFIED** | none | 2026-07-14 | 2026-10-12 |
@@ -105,23 +141,27 @@ current tree not re-certified.”
 
 The following remain **NOT VERIFIED** until a real-device pass is recorded:
 
-1. macOS packaged GUI launch and WebView
+1. macOS packaged GUI launch and WebView (Apple Silicon execution planned for N8; Intel unexecuted)
 2. macOS screen recording / accessibility / input monitoring / notification dialogs (grant, deny, retry)
 3. macOS region screenshot → clipboard round-trip on real display
-4. Windows packaged GUI launch and WebView
-5. Windows file transfer path picker / receive directory dialogs
-6. Windows native terminal (non-WSL) interactive shell in Workbench
-7. Windows WSL distribution + tmux Workbench session recovery
-8. Ubuntu AppImage GUI
-9. Ubuntu deb package GUI
-10. Ubuntu terminal + file tree flows in packaged app
-11. Two physical hosts mDNS discovery (`_cc-partner._tcp`)
-12. Two physical hosts native P2P credential-free read/write/actions
-13. Two physical hosts mobile `/mobile` credential-free read/write/actions from a second device
-14. Real public-peer / non-LAN NIC path rejection on production interfaces
-15. Production XFF/Host/Origin/WebSocket boundary on multi-homed hosts (beyond injected L2 evidence)
-16. Remote backend stop rejection from a second physical host (valid token still forbidden)
-17. 1GiB file transfer: mid-stream disconnect + process restart + resume from confirmed offset + SHA-256 match across two physical hosts (`L3-DUAL-HOST-LAN-001`, deferred from N5; remains **NOT VERIFIED**)
+4. macOS VoiceOver semantic journey on packaged candidate (`L3-MACOS-VOICEOVER-001`)
+5. macOS Intel (`macos-x86_64`) GUI/permissions + VoiceOver (deferred; not in current beta)
+6. Windows packaged GUI launch and WebView
+7. Windows file transfer path picker / receive directory dialogs
+8. Windows native terminal (non-WSL) interactive shell in Workbench
+9. Windows WSL distribution + tmux Workbench session recovery
+10. Windows NVDA accessibility
+11. Ubuntu AppImage GUI
+12. Ubuntu deb package GUI
+13. Ubuntu terminal + file tree flows in packaged app
+14. Two physical hosts mDNS discovery (`_cc-partner._tcp`)
+15. Two physical hosts native P2P credential-free read/write/actions
+16. Two physical hosts mobile `/mobile` credential-free read/write/actions from a second device
+17. Real public-peer / non-LAN NIC path rejection on production interfaces
+18. Production XFF/Host/Origin/WebSocket boundary on multi-homed hosts (beyond injected L2 evidence)
+19. Remote backend stop rejection from a second physical host (valid token still forbidden)
+20. 1GiB file transfer: mid-stream disconnect + process restart + resume from confirmed offset + SHA-256 match across two physical hosts (`L3-DUAL-HOST-LAN-001`, deferred from N5; remains **NOT VERIFIED**)
+21. Physical iOS Safari / Android Chrome mobile workbench
 
 ## How to re-run L2 automation (not L3)
 
