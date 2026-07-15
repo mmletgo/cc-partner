@@ -8,20 +8,6 @@
 //!     让前端能在「当前 worktree 范围」内按标题或对话内容搜索目标 session，选中后一键 resume。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `ClaudeIndexBudget` + 有界 `read_line_bounded`：限制文件数/单文件/行长/总字节/session 字符，
-//!       候选按 mtime desc + path asc 排序后截断，diagnostics 暴露 stable reason token。
-//!     - `build_session_index(_with_budget)`：单文件有界流式解析，提取 ClaudeSessionIndex（标题=lastPrompt
-//!       回退首条 user、user/assistant 文本、最近 20 条消息、元信息），过滤 slash/bash，2 秒超时跳过。
-//!     - `scan_worktree_sessions(_with_budget|_at)`：扫描 worktree 对应 encoded-cwd 目录，组装
-//!       带 truncated/diagnostics 的 WorktreeSessionIndex。
-//!     - `search_sessions` / `search_sessions_result`：spec 2.3 搜索；后者包装 SessionSearchResult DTO。
-//!     - `ensure_worktree_session_index_scanned`（async）：singleflight + spawn_blocking 扫描 +
-//!       notify 文件监听（debounce 500ms）；监听失败降级为每次重扫。
-//!     - watcher 将 create/modify/delete/rename/uncertain 映射为 index upsert/remove/rename/bounded rescan；
-//!       owner 侧 `ClaudeSessionWatcherRuntime` 聚合 watcher+cancel+handles；项目移除/shutdown 先 dispose。
-//!       BoundedRescan/Upsert 对已索引且 size+mtime 未变的 jsonl **跳过 reparse**（指纹在 ClaudeSessionIndex）；
-//!       delete/rename/新建仍正确收敛；磁盘已删文件在 BoundedRescan 新 map 中自然剔除。
-//!     - `decode_session_search_response_body`：混部 dual-decode（v2 对象或 legacy 数组）。
 
 use crate::cc::collector::claude_projects_dir;
 use crate::state::AppState;
@@ -49,12 +35,7 @@ pub const DIAG_STATUS_UNAVAILABLE: &str = "unavailable";
 
 /// 单次 Claude session 索引扫描的资源预算。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     用户 worktree 下可能堆积成千上万 jsonl、超大 transcript 或异常长行；无界扫描会拖垮
-///     sidecar 内存与 tokio 响应。预算把扫描约束在可预测的资源上限内，并在 diagnostics 暴露截断原因。
 ///
-/// Code Logic（这个结构体做什么）:
-///     持有文件数、单文件字节、jsonl 行字节、总字节与 session 文本 Unicode scalar 上限；Default 给出生产默认。
 #[derive(Debug, Clone, Copy)]
 pub struct ClaudeIndexBudget {
     /// 最多索引的 jsonl 文件数（按 mtime desc + path asc 排序后截断）。
@@ -91,11 +72,7 @@ impl Default for ClaudeIndexBudget {
 
 /// 单文件解析时的预算命中结果。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     扫描层需要把「行过长 / session 文本截断 / 文件过大」等 reason 汇总到 diagnostics。
 ///
-/// Code Logic（这个结构体做什么）:
-///     记录 reasons、实际读取字节，以及是否因 max_file_bytes 整文件跳过。
 #[derive(Debug, Clone, Default)]
 pub struct SessionFileBudgetOutcome {
     pub reasons: Vec<String>,
@@ -105,11 +82,7 @@ pub struct SessionFileBudgetOutcome {
 
 /// 搜索结果诊断信息（稳定 reason token）。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     前端/远端需要知道结果是否因预算截断，以及扫描计数，便于展示「部分结果」而非静默丢数。
 ///
-/// Code Logic（这个结构体做什么）:
-///     camelCase 序列化；status ∈ {ok, truncated, unavailable}；reasons 如 max_files 等稳定 token。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSearchDiagnostics {
@@ -180,11 +153,7 @@ impl SessionSearchDiagnostics {
 
 /// 搜索 API 返回 DTO：命中列表 + 截断标记 + 诊断。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     仅返回 `Vec<SessionSearchHit>` 无法表达预算截断；新 DTO 让本机/远端/混部客户端统一消费。
 ///
-/// Code Logic（这个结构体做什么）:
-///     camelCase；items 为命中，truncated 与 diagnostics 反映索引扫描侧预算。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSearchResult {
@@ -195,11 +164,7 @@ pub struct SessionSearchResult {
 
 /// 把旧版 `Vec<SessionSearchHit>` 包装成新 DTO（无预算信息）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     新客户端对旧服务端时，body 仍是数组；需要合成 truncated=false + unavailable 诊断，避免解析失败。
 ///
-/// Code Logic（这个函数做什么）:
-///     包装 items，truncated=false，diagnostics=unavailable，计数 0。
 pub fn synthesize_legacy_session_search_result(
     items: Vec<SessionSearchHit>,
 ) -> SessionSearchResult {
@@ -212,11 +177,7 @@ pub fn synthesize_legacy_session_search_result(
 
 /// 双形态解码搜索响应：新 DTO 对象或旧数组。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     混部期间远端可能返回 v2 对象或 legacy 数组，客户端必须都能解析。
 ///
-/// Code Logic（这个函数做什么）:
-///     先 `SessionSearchResult`，失败再 `Vec<SessionSearchHit>` 并 synthesize；都失败返回 serde 错误。
 pub fn decode_session_search_response_body(
     bytes: &[u8],
 ) -> Result<SessionSearchResult, serde_json::Error> {
@@ -231,11 +192,7 @@ pub fn decode_session_search_response_body(
 
 /// 去重 reason 列表并保持首次出现顺序。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     同一 reason 可能在多文件重复出现，diagnostics 只需稳定去重列表。
 ///
-/// Code Logic（这个函数做什么）:
-///     O(n) 线性去重。
 fn dedupe_reasons(reasons: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     for r in reasons {
@@ -248,11 +205,7 @@ fn dedupe_reasons(reasons: Vec<String>) -> Vec<String> {
 
 /// 按 Unicode scalar 预算截断字符串（只在 char 边界切断）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     max_session_chars 以 Unicode scalar 计数；截断必须落在 char 边界，避免 panic/半字符。
 ///
-/// Code Logic（这个函数做什么）:
-///     chars().count() ≤ max 时原样 to_string，否则 take(max_chars) collect。
 pub fn truncate_to_char_budget(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -266,11 +219,7 @@ pub fn truncate_to_char_budget(s: &str, max_chars: usize) -> String {
 
 /// 在 title → user → assistant 顺序上分配 session 字符预算并截断。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     超大对话全文会撑爆内存索引；优先保留 title，再 user，最后 assistant。
 ///
-/// Code Logic（这个函数做什么）:
-///     顺序扣减 remaining，返回截断后三元组与是否发生截断。
 fn apply_session_char_budget(
     title: String,
     user_text: String,
@@ -315,11 +264,7 @@ fn apply_session_char_budget(
 
 /// 从 BufRead 精确 drain 到并包含下一个 '\\n'（不越过下一行）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     超长行丢弃时必须停在换行符，否则会吞掉后续合法 jsonl 行。
 ///
-/// Code Logic（这个函数做什么）:
-///     用 fill_buf/consume 只消耗到首个 '\\n'（含），返回丢弃字节数；永不整行大分配。
 fn drain_until_newline<R: BufRead>(reader: &mut R) -> std::io::Result<u64> {
     let mut discarded = 0u64;
     loop {
@@ -341,12 +286,7 @@ fn drain_until_newline<R: BufRead>(reader: &mut R) -> std::io::Result<u64> {
 
 /// 有界读取一行：最多分配 max_bytes+1，超长行丢弃内容并 drain 至换行。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     异常/恶意 jsonl 可能含数 MiB 无换行长行；`BufRead::lines()` 会整行分配导致 OOM。
 ///
-/// Code Logic（这个函数做什么）:
-///     逐字节/缓冲累积至 max_bytes+1 或 '\\n'；超长则 drain_until_newline 丢弃剩余；
-///     返回 (Option<String UTF-8 lossy 行>, 读取字节数, 是否超长)。
 fn read_line_bounded<R: BufRead>(
     reader: &mut R,
     max_bytes: usize,
@@ -422,11 +362,7 @@ fn read_line_bounded<R: BufRead>(
 
 /// 把 reason 追加到列表（若尚不存在）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     多处预算命中路径需要稳定地记录 reason token。
 ///
-/// Code Logic（这个函数做什么）:
-///     若不存在则 push。
 fn push_reason(reasons: &mut Vec<String>, reason: &str) {
     if !reasons.iter().any(|r| r == reason) {
         reasons.push(reason.to_string());
@@ -462,12 +398,7 @@ const DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 单条最近消息（用于 preview 面板）。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     用户选中某条 session 后需要在 preview 面板看到最近对话的纯文本摘要，role 标签帮助区分 user/assistant。
 ///
-/// Code Logic（这个结构体做什么）:
-///     camelCase 序列化对齐前端 SessionPreviewMessage；text 是已过滤 thinking/tool_use 的纯文本。
-///     同时派生 Deserialize，因为它是 SessionPreview 的字段，需要随 preview 响应一起反序列化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecentMessage {
@@ -478,12 +409,7 @@ pub struct RecentMessage {
 
 /// 单个 Claude session 的索引数据。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     搜索需要在内存中同时比对标题、user 文本、assistant 文本，preview 需要 recent_messages，
-///     排序需要首末活动时间。一个结构体聚合避免反复读 jsonl。
 ///
-/// Code Logic（这个结构体做什么）:
-///     camelCase 序列化对齐前端 SessionPreview；user_text/assistant_text 是拼接后供子串搜索用的全文。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeSessionIndex {
@@ -508,13 +434,7 @@ pub struct ClaudeSessionIndex {
 
 /// 一个 worktree path 的完整索引。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     搜索范围限定在当前 active worktree，需要把该 worktree 下所有 session 聚合成一张表，
-///     并记录 encoded_cwd 与扫描时间供文件监听回调复用；同时携带预算截断诊断供搜索 DTO 透传。
 ///
-/// Code Logic（这个结构体做什么）:
-///     不 Serialize（仅供内存索引使用）；sessions 以 session_id 为 key 便于单文件增量更新；
-///     truncated + diagnostics 描述最近一次全量/预算扫描的结果。
 #[derive(Debug, Clone)]
 pub struct WorktreeSessionIndex {
     // 保留 worktree_path 便于调试与未来扩展（当前索引内部未直接读取）。
@@ -531,12 +451,7 @@ pub struct WorktreeSessionIndex {
 
 /// 搜索命中结果（spec 3.2）。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     前端列表项需要知道命中在哪些字段，preview_snippets 提供命中上下文片段用于展示。
 ///
-/// Code Logic（这个结构体做什么）:
-///     camelCase 序列化对齐前端 SessionSearchHit；title_hit/user_hit/assistant_hit 标记命中字段。
-///     同时派生 Deserialize，因为 remote shortcut 命令需要反序列化远端设备的搜索响应。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSearchHit {
@@ -553,14 +468,7 @@ pub struct SessionSearchHit {
 
 /// Claude session preview 数据（给前端 preview 面板用）。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     用户在搜索结果列表选中某条 session 后，preview 面板需要展示该 session 的标题、
-///     cwd、git 分支、首末活动时间、消息总数以及最近对话消息（role + 纯文本 + 时间戳），
-///     帮助用户在 resume 前确认这是目标会话。该数据由 jsonl transcript 解析得到。
 ///
-/// Code Logic（这个结构体做什么）:
-///     camelCase 序列化对齐前端 SessionPreview；recent_messages 是已过滤 thinking/tool_use 的纯文本消息。
-///     同时派生 Deserialize，因为 remote shortcut 命令需要反序列化远端设备的响应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionPreview {
@@ -576,13 +484,7 @@ pub struct SessionPreview {
 
 /// 把 ClaudeSessionIndex 转成 SessionPreview（给前端 preview 面板）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     内存索引中的 ClaudeSessionIndex 既用于搜索也用于 preview，但 preview 面板不需要
-///     user_text/assistant_text 全文与 transcript_path 等内部字段，需要一个精简投影。
 ///
-/// Code Logic（这个函数做什么）:
-///     从 ClaudeSessionIndex 映射出 SessionPreview，丢弃 user_text/assistant_text/transcript_path，
-///     保留 preview 面板需要的元信息与 recent_messages（克隆）。
 pub fn to_session_preview(index: &ClaudeSessionIndex) -> SessionPreview {
     SessionPreview {
         session_id: index.session_id.clone(),
@@ -602,12 +504,7 @@ pub fn to_session_preview(index: &ClaudeSessionIndex) -> SessionPreview {
 
 /// jsonl 单行的宽松反序列化结构（未知字段忽略，缺失字段用 default）。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     Claude Code jsonl 行字段会随版本演进变化，本模块只关心 type/message/timestamp/cwd/gitBranch/lastPrompt
-///     等提取相关字段，其余一律忽略，避免字段变更导致反序列化失败。
 ///
-/// Code Logic（这个结构体做什么）:
-///     用 serde default 容错；last_prompt 仅 last-prompt 行有。
 #[derive(Debug, Default, Deserialize)]
 struct JsonlLine {
     #[serde(default, rename = "type")]
@@ -635,14 +532,7 @@ struct RawMessage {
 
 /// 从 message.content 提取纯文本（spec 2.2）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     user 输入可能是纯字符串，也可能是 content blocks 数组；assistant 回复通常是含 text/thinking/tool_use
-///     的数组。提取规则需要统一：string 直接返回，array 只取 type==text 的 text 字段，忽略 thinking/tool_use。
 ///
-/// Code Logic（这个函数做什么）:
-///     - content 是 String → trim 后非空返回；
-///     - content 是 Array → 遍历 object 元素，type=="text" 的取 text 字段拼接，trim 后非空返回；
-///     - 其它（null/number/object 等）→ None。
 pub fn extract_text_from_content(content: &serde_json::Value) -> Option<String> {
     match content {
         serde_json::Value::String(s) => {
@@ -680,11 +570,7 @@ pub fn extract_text_from_content(content: &serde_json::Value) -> Option<String> 
 
 /// 判断文本是否为需要过滤的命令（slash `/` 或 bash `!` 开头）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     user 文本里 `/clear`、`!ls` 这类是 Claude Code 的命令而非真正对话内容，纳入搜索会污染结果。
 ///
-/// Code Logic（这个函数做什么）:
-///     trim 后以 `/` 或 `!` 开头返回 true。
 fn is_command_text(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with('/') || trimmed.starts_with('!')
@@ -692,27 +578,14 @@ fn is_command_text(text: &str) -> bool {
 
 /// 从单个 jsonl 文件构建一个 ClaudeSessionIndex（默认预算，兼容旧调用/测试）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     既有单测与增量刷新路径只需索引本身，不关心预算 outcome；保留无 budget 签名。
 ///
-/// Code Logic（这个函数做什么）:
-///     委托 `build_session_index_with_budget(path, &Default::default())` 并丢弃 outcome。
 pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
     build_session_index_with_budget(path, &ClaudeIndexBudget::default()).map(|(idx, _)| idx)
 }
 
 /// 按预算从单个 jsonl 构建 ClaudeSessionIndex。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     一个 jsonl 文件 = 一次 Claude 会话的完整 transcript。搜索索引需要从每个文件提取标题、
-///     user 文本、assistant 文本、最近 20 条消息和首末活动时间；同时遵守文件/行/字符预算避免 OOM。
 ///
-/// Code Logic（这个函数做什么）:
-///     1. metadata 超过 max_file_bytes → None + skipped_entire_file + reason max_file_bytes；
-///     2. 有界 read_line_bounded 逐行，超长行丢弃并记 max_jsonl_line_bytes；
-///     3. 2 秒超时跳过整文件；
-///     4. 组装后按 title→user→assistant 顺序应用 max_session_chars；
-///     5. recent_messages 仍最多 20。
 pub fn build_session_index_with_budget(
     path: &Path,
     budget: &ClaudeIndexBudget,
@@ -907,11 +780,7 @@ pub fn build_session_index_with_budget(
 
 /// 从 metadata 提取 (size, mtime_ns) 指纹。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     watcher rescan/upsert 需要廉价判断磁盘文件是否相对内存索引未变，避免每次事件 O(N) 全量 reparse。
 ///
-/// Code Logic（这个函数做什么）:
-///     返回 `meta.len()` 与 `modified()` 相对 UNIX_EPOCH 的纳秒；mtime 不可用时为 None。
 fn session_file_fingerprint_from_meta(meta: &std::fs::Metadata) -> (u64, Option<u64>) {
     let size = meta.len();
     let mtime_ns = meta.modified().ok().and_then(|t| {
@@ -924,11 +793,7 @@ fn session_file_fingerprint_from_meta(meta: &std::fs::Metadata) -> (u64, Option<
 
 /// 读取路径的 size+mtime 指纹；metadata 失败返回 None。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     Upsert 变更路径在 reparse 前需要对照索引指纹；metadata 失败时应走 reparse/删除收敛。
 ///
-/// Code Logic（这个函数做什么）:
-///     `metadata(path)` 成功则委托 `session_file_fingerprint_from_meta`。
 fn read_session_file_fingerprint(path: &Path) -> Option<(u64, Option<u64>)> {
     let meta = std::fs::metadata(path).ok()?;
     Some(session_file_fingerprint_from_meta(&meta))
@@ -936,11 +801,7 @@ fn read_session_file_fingerprint(path: &Path) -> Option<(u64, Option<u64>)> {
 
 /// 判断两份 size+mtime 指纹是否一致（可跳过 reparse）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     size+mtime 未变时内容可视为未变；mtime 缺失时 fail-closed，强制 reparse 保证正确性。
 ///
-/// Code Logic（这个函数做什么）:
-///     两侧 mtime_ns 均为 Some 且 size/mtime 全等时返回 true，否则 false。
 fn fingerprints_match(
     indexed_size: u64,
     indexed_mtime_ns: Option<u64>,
@@ -955,11 +816,7 @@ fn fingerprints_match(
 
 /// 判断索引条目是否与磁盘指纹一致，可跳过 reparse。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     BoundedRescan 需要对照已索引 ClaudeSessionIndex 与磁盘 metadata。
 ///
-/// Code Logic（这个函数做什么）:
-///     委托 `fingerprints_match` 比较 index.source_* 与磁盘指纹。
 fn session_index_matches_fingerprint(
     index: &ClaudeSessionIndex,
     size: u64,
@@ -974,22 +831,14 @@ fn session_index_matches_fingerprint(
 
 /// 扫描指定 worktree path 对应的 Claude session 索引（默认预算）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     搜索范围限定在当前 active worktree，需要把该 worktree 下所有 session jsonl 解析成内存索引。
 ///
-/// Code Logic（这个函数做什么）:
-///     委托 `scan_worktree_sessions_with_budget(path, &Default::default())`。
 pub fn scan_worktree_sessions(worktree_path: &Path) -> WorktreeSessionIndex {
     scan_worktree_sessions_with_budget(worktree_path, &ClaudeIndexBudget::default())
 }
 
 /// 按预算扫描 worktree 对应 Claude session 目录。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     生产热路径与单测都需要可注入预算的扫描，以在超大目录下有界返回并暴露 truncated diagnostics。
 ///
-/// Code Logic（这个函数做什么）:
-///     解析 ~/.claude/projects/<encoded> 后委托 `scan_worktree_sessions_at`。
 pub fn scan_worktree_sessions_with_budget(
     worktree_path: &Path,
     budget: &ClaudeIndexBudget,
@@ -1000,15 +849,7 @@ pub fn scan_worktree_sessions_with_budget(
 
 /// 可注入 projects 根目录的扫描入口（测试与默认路径共用）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     单测不能污染真实 `~/.claude/projects`，需要把 projects 根指到临时目录；
-///     生产路径则传入 `claude_projects_dir()`。
 ///
-/// Code Logic（这个函数做什么）:
-///     1. canonicalize worktree；2. encode cwd；3. 列 *.jsonl 候选 (mtime, path)；
-///     4. 排序 mtime desc + path asc；5. 应用 max_files；
-///     6. 逐文件检查 max_file_bytes / max_total_bytes，有界 parse；
-///     7. 组装 sessions + truncated + diagnostics。
 pub fn scan_worktree_sessions_at(
     worktree_path: &Path,
     projects_dir: Option<&Path>,
@@ -1119,14 +960,7 @@ pub fn scan_worktree_sessions_at(
 
 /// 从指定文本中收集 query（小写）的命中上下文片段（spec 3.2 preview_snippets）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     前端列表项需要展示命中处前后各 30 字符的上下文片段，帮助用户判断是否是目标 session。
-///     片段必须保留原文大小写（用户看到的预览要和真实 transcript 一致），故匹配用小写、截取用原文。
 ///
-/// Code Logic（这个函数做什么）:
-///     把原始文本转成 char 数组（chars_orig）及其 ASCII 小写镜像（chars_lower，用 to_ascii_lowercase
-///     保证 1:1 映射避免 Unicode lower 展开导致的下标错位），在 chars_lower 上定位 query_lower 的命中位置，
-///     再用同样的下标区间从 chars_orig 截取片段，去重后追加到 out（最多 max_total 段）。
 fn collect_snippets(
     text_original: &str,
     query_lower: &str,
@@ -1165,13 +999,7 @@ fn collect_snippets(
 
 /// 在指定 worktree 的索引里搜索（spec 2.3）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     前端搜索面板需要按关键词返回命中 session，空关键词返回最近活动 session。
 ///
-/// Code Logic（这个函数做什么）:
-///     - query trim 后为空 → 返回全部 session，按 last_activity_at 倒序（ISO 字符串字典序 = 时间序），limit 截断；
-///     - query 非空 → title/user/assistant 任一命中才保留，按 title_hit>user_hit>assistant_hit 优先级 +
-///       last_activity_at 倒序排序，limit 截断；preview_snippets 在 title/user_text/assistant_text 找命中片段（最多 3 段）。
 pub fn search_sessions(
     index: &WorktreeSessionIndex,
     query: &str,
@@ -1266,11 +1094,7 @@ pub fn search_sessions(
 
 /// 在索引上搜索并包装为带 diagnostics 的 SessionSearchResult。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     命令层/远端路由需要返回 `{items, truncated, diagnostics}`，截断语义来自索引扫描而非搜索 limit。
 ///
-/// Code Logic（这个函数做什么）:
-///     调用 search_sessions，复制 index.truncated 与 index.diagnostics。
 pub fn search_sessions_result(
     index: &WorktreeSessionIndex,
     query: &str,
@@ -1285,11 +1109,7 @@ pub fn search_sessions_result(
 
 /// 计算命中的优先级数值（越小越靠前）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     排序规则是 title 命中优先于 user 命中优先于 assistant 命中，需要一个可比的数值。
 ///
-/// Code Logic（这个函数做什么）:
-///     title 命中→0，否则 user 命中→1，否则 assistant 命中→2。
 fn hit_priority(title_hit: bool, user_hit: bool, assistant_hit: bool) -> u8 {
     if title_hit {
         0
@@ -1304,11 +1124,7 @@ fn hit_priority(title_hit: bool, user_hit: bool, assistant_hit: bool) -> u8 {
 
 /// 从 session 构造一个 SessionSearchHit（不含 preview_snippets，调用方填充）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     空 query 和关键词命中两条路径都需要构造 hit，避免重复字段拷贝。
 ///
-/// Code Logic（这个函数做什么）:
-///     映射 ClaudeSessionIndex 字段到 SessionSearchHit，preview_snippets 留空由调用方注入。
 fn make_hit(
     session: &ClaudeSessionIndex,
     title_hit: bool,
@@ -1337,23 +1153,13 @@ pub type SharedWorktreeSessionIndex = Arc<RwLock<WorktreeSessionIndex>>;
 
 /// singleflight 进行中扫描的 watch 接收端。
 ///
-/// Business Logic（为什么需要这个类型）:
-///     同一 worktree 并发搜索时只应跑一次阻塞扫描；后续调用者等待同一结果。
 ///
-/// Code Logic（这个类型做什么）:
-///     `watch::Receiver<Option<Result<SharedWorktreeSessionIndex, String>>>`，None=进行中，Some=完成。
 pub type ClaudeSessionIndexInflightRx =
     tokio::sync::watch::Receiver<Option<Result<SharedWorktreeSessionIndex, String>>>;
 
 /// 单个 worktree 的 Claude session 文件监听运行时。
 ///
-/// Business Logic（为什么需要这个结构体）:
-///     watcher 不能只存 RecommendedWatcher：trailing debounce 与 spawn_blocking 扫描是后台任务，
-///     项目移除/进程退出时必须 cancel+abort 后才能 drop，否则会幽灵写回已删除索引。
 ///
-/// Code Logic（这个结构体做什么）:
-///     聚合 watcher、CancellationToken、debounce 计时器与 trailing/scan JoinHandle；
-///     `force_dispose` 取消令牌、abort 全部句柄并 drop watcher。
 pub struct ClaudeSessionWatcherRuntime {
     /// notify 文件监听器（drop 即停止监听）
     watcher: RecommendedWatcher,
@@ -1407,12 +1213,7 @@ impl ClaudeSessionWatcherRuntime {
 
 /// watcher 事件映射后的索引动作。
 ///
-/// Business Logic（为什么需要这个枚举）:
-///     notify 事件种类与路径语义复杂（delete/rename/uncertain）；先映射为有限动作再应用，
-///     才能用纯函数测试 delete/rename/rescan 语义。
 ///
-/// Code Logic（这个枚举做什么）:
-///     Upsert 重扫路径；Remove 按 session_id 删除；Rename=删旧+加新；BoundedRescan 全量有界重扫；Ignore 忽略。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionWatchPlan {
     /// 对指定 jsonl 路径增量重索引
@@ -1432,11 +1233,7 @@ pub enum SessionWatchPlan {
 
 /// 把路径规范化到 owning watch root 内；域外返回 None。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     notify 可能上报任意路径；只处理当前 worktree transcript 目录内的文件，避免误改索引。
 ///
-/// Code Logic（这个函数做什么）:
-///     优先 canonicalize；删除后不存在则 parent canonicalize + file_name；`starts_with(root)` 校验。
 pub fn normalize_path_inside_root(path: &Path, root: &Path) -> Option<PathBuf> {
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let normalized = if path.exists() {
@@ -1458,11 +1255,7 @@ pub fn normalize_path_inside_root(path: &Path, root: &Path) -> Option<PathBuf> {
 
 /// 从 jsonl 路径提取 session_id（文件 stem）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     delete/rename-from 事件需要按 session_id 从内存索引移除。
 ///
-/// Code Logic（这个函数做什么）:
-///     扩展名须为 jsonl；stem 非空 trim 后返回。
 fn session_id_from_jsonl_path(path: &Path) -> Option<String> {
     if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
         return None;
@@ -1475,11 +1268,7 @@ fn session_id_from_jsonl_path(path: &Path) -> Option<String> {
 
 /// 过滤并规范化 watch root 内的 jsonl 路径。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     Create/Modify/Rename 目标只关心 root 内 jsonl。
 ///
-/// Code Logic（这个函数做什么）:
-///     normalize_path_inside_root + 扩展名 jsonl，保序去重。
 fn filter_jsonl_inside_root(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for path in paths {
@@ -1498,11 +1287,7 @@ fn filter_jsonl_inside_root(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
 
 /// 过滤 root 内路径并提取 session_id 列表。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     Remove/Rename-from 需要 session_id 列表。
 ///
-/// Code Logic（这个函数做什么）:
-///     normalize 后取 stem，保序去重。
 fn filter_session_ids_inside_root(paths: &[PathBuf], root: &Path) -> Vec<String> {
     let mut out = Vec::new();
     for path in paths {
@@ -1521,14 +1306,7 @@ fn filter_session_ids_inside_root(paths: &[PathBuf], root: &Path) -> Vec<String>
 
 /// 将 notify 事件映射为 SessionWatchPlan。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     delete 必须删索引、rename 必须删旧+加新、不确定事件只触发一次有界 rescan；
-///     这是 watcher 正确性的核心，必须可单测。
 ///
-/// Code Logic（这个函数做什么）:
-///     规范化路径到 root 内；Create/Data/Metadata → Upsert；Remove → Remove；
-///     Rename From/To/Both → 对应 Remove/Upsert/Rename；Any/Other/Modify(Any|Other) → BoundedRescan；
-///     Access 与空有效路径 → Ignore。
 pub fn classify_session_watch_event(
     kind: &EventKind,
     paths: &[PathBuf],
@@ -1601,11 +1379,7 @@ pub fn classify_session_watch_event(
 
 /// 映射 rename 子事件。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     rename 在不同 OS 上拆成 From/To/Both；必须稳定收敛为 remove old + index new。
 ///
-/// Code Logic（这个函数做什么）:
-///     From→Remove；To→Upsert；Both→Rename(paths[0], paths[1])；Any/Other 按路径存在性推断。
 fn classify_rename_event(
     mode: RenameMode,
     paths: &[PathBuf],
@@ -1685,12 +1459,7 @@ fn classify_rename_event(
 
 /// 将 SessionWatchPlan 应用到内存索引（阻塞，供 spawn_blocking / 测试调用）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     事件映射与索引更新解耦；delete/rename/rescan 语义在此落地。
 ///
-/// Code Logic（这个函数做什么）:
-///     Remove 写锁删 id；Upsert 走 refresh_sessions_from_paths；Rename 先删后 upsert；
-///     BoundedRescan 走 refresh_all_sessions。
 pub fn apply_session_watch_plan(
     shared: &SharedWorktreeSessionIndex,
     worktree_canonical: &Path,
@@ -1747,11 +1516,7 @@ pub fn apply_session_watch_plan(
 
 /// 读取指定 worktree key 的 dispose 世代。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     ensure 扫描前后需要比对世代，识别“扫描期间项目已被移除”。
 ///
-/// Code Logic（这个函数做什么）:
-///     读 `workbench_claude_session_index_dispose_epochs`；缺失 key 视为 0；锁中毒时返回 0 并 warn。
 fn dispose_epoch_for_key(state: &AppState, key: &str) -> u64 {
     match state.workbench_claude_session_index_dispose_epochs.lock() {
         Ok(map) => map.get(key).copied().unwrap_or(0),
@@ -1764,11 +1529,7 @@ fn dispose_epoch_for_key(state: &AppState, key: &str) -> u64 {
 
 /// 提升 key 的 dispose 世代（单调 +1）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     dispose 必须让任何 in-flight scan 在完成后看到世代变化，从而拒绝写回。
 ///
-/// Code Logic（这个函数做什么）:
-///     写锁 entry.or_insert(0) 后 saturating_add(1)。
 fn bump_dispose_epoch(state: &AppState, key: &str) {
     match state.workbench_claude_session_index_dispose_epochs.lock() {
         Ok(mut map) => {
@@ -1783,11 +1544,7 @@ fn bump_dispose_epoch(state: &AppState, key: &str) {
 
 /// 仅清 watcher / indexes / inflight 工件，不 bump dispose 世代。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     finish 路径在 insert 后发现已被 dispose 时需撤回刚写入的工件，但世代已由 dispose 提升，不可再 bump。
 ///
-/// Code Logic（这个函数做什么）:
-///     force_dispose watcher；indexes.remove；try_lock 清 inflight entry。
 fn purge_session_index_artifacts(state: &AppState, key: &str) {
     if let Ok(mut watchers) = state.workbench_claude_session_watchers.lock() {
         if let Some(runtime) = watchers.remove(key) {
@@ -1804,12 +1561,7 @@ fn purge_session_index_artifacts(state: &AppState, key: &str) {
 
 /// 按 worktree 路径列表清理 session 索引与 watcher 运行时。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     用户移除项目时，相关 worktree 的索引与后台监听应立即停止，避免继续占用资源或写回。
 ///
-/// Code Logic（这个函数做什么）:
-///     对每个 path canonicalize 为 key，bump dispose epoch，force_dispose watcher，
-///     并清 indexes/inflight 条目（raw key 亦尝试一次，防止 canonicalize 前后不一致）。
 pub fn dispose_session_indexes_for_worktree_paths(state: &AppState, worktree_paths: &[PathBuf]) {
     for path in worktree_paths {
         let key = path
@@ -1828,11 +1580,7 @@ pub fn dispose_session_indexes_for_worktree_paths(state: &AppState, worktree_pat
 
 /// 关闭全部 Claude session 索引与 watcher（进程 shutdown）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     后端退出时必须 cancel 所有 debounce/scan 任务并 drop watcher，避免幽灵任务与句柄泄漏。
 ///
-/// Code Logic（这个函数做什么）:
-///     drain watchers 并 force_dispose；clear indexes / dispose epochs；best-effort 清 inflight（try_lock）。
 pub fn shutdown_all_claude_session_indexes(state: &AppState) {
     let runtimes: Vec<ClaudeSessionWatcherRuntime> = {
         let mut map = match state.workbench_claude_session_watchers.lock() {
@@ -1865,11 +1613,7 @@ pub fn shutdown_all_claude_session_indexes(state: &AppState) {
 
 /// 按 key 移除单个索引 + runtime，并提升 dispose 世代。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     单 worktree 清理与失败降级共用同一移除语义；必须让并发 ensure 无法写回幽灵索引。
 ///
-/// Code Logic（这个函数做什么）:
-///     bump dispose epoch → purge watcher/indexes/inflight。
 fn dispose_session_index_by_key(state: &AppState, key: &str) {
     bump_dispose_epoch(state, key);
     purge_session_index_artifacts(state, key);
@@ -1877,19 +1621,7 @@ fn dispose_session_index_by_key(state: &AppState, key: &str) {
 
 /// 确保 worktree 的 session 索引已扫描并启动文件监听（lazy + singleflight + spawn_blocking）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     首次搜索某 worktree 时才建索引（lazy），避免启动时全量扫描拖慢。扫描可能阻塞数秒，
-///     必须放在 spawn_blocking 以免卡住 tokio；并发请求必须 singleflight 共享一次扫描。
 ///
-/// Code Logic（这个函数做什么）:
-///     1. 快路径：indexes 读锁命中直接返回；
-///     2. 捕获 dispose start_epoch；
-///     3. 锁 inflight map：已有 Receiver → 等待 Some；否则创建 watch(None) 并成为 leader；
-///     4. leader/回退：`finish_scan_and_insert(start_epoch)`（spawn_blocking + epoch 守卫 insert）；
-///     5. leader send Some(Ok) 并 remove inflight。
-///
-/// **为何写锁不活到函数末尾（防死锁）**：
-///     spawn_session_watcher 失败分支会再取同一 indexes 写锁；标准库 RwLock 不支持重入。
 pub async fn ensure_worktree_session_index_scanned(
     state: &AppState,
     worktree_path: &Path,
@@ -1975,11 +1707,7 @@ pub async fn ensure_worktree_session_index_scanned(
 
 /// 构造未写入缓存的空索引句柄（dispose 竞态 no-op 返回值）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     扫描期间 key 已被 dispose 时，调用方仍需要一个 Shared 句柄，但绝不能写入 indexes 或启 watcher。
 ///
-/// Code Logic（这个函数做什么）:
-///     返回 Arc 包装的空 WorktreeSessionIndex（truncated=false，diagnostics=unavailable）。
 fn empty_uncached_session_index(canonical: &Path) -> SharedWorktreeSessionIndex {
     Arc::new(RwLock::new(WorktreeSessionIndex {
         worktree_path: canonical.to_path_buf(),
@@ -1993,16 +1721,7 @@ fn empty_uncached_session_index(canonical: &Path) -> SharedWorktreeSessionIndex 
 
 /// leader/回退路径：spawn_blocking 扫描 + dispose-epoch 守卫的 insert + watcher。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     singleflight leader 与 follower 失败回退共用同一插入路径；若扫描期间项目已被 dispose，
-///     必须禁止写回索引/启动 watcher，否则会留下幽灵资源。
 ///
-/// Code Logic（这个函数做什么）:
-///     1. （测试）可选 mid-scan barrier；
-///     2. spawn_blocking 默认扫描；
-///     3. 写锁下比对 start_epoch 与当前 dispose epoch：变化则不 insert；
-///     4. double-check 已有 entry 则复用且不重复 spawn watcher；
-///     5. 仅本路径新 insert 时 spawn watcher，并在 spawn 前后再检 epoch，必要时 purge。
 async fn finish_scan_and_insert(
     state: &AppState,
     key: &str,
@@ -2101,17 +1820,7 @@ async fn scan_test_hooks_wait_before_scan() {
 
 /// 为指定 worktree 启动 notify 文件监听。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     Claude session 在用户使用过程中会持续追加 jsonl，索引需要增量更新才能保证搜索结果新鲜。
 ///
-/// Code Logic（这个函数做什么）:
-///     用 notify::RecommendedWatcher 监听 ~/.claude/projects/<encoded_cwd>/ 目录（RecursiveMode::NonRecursive），
-///     poll_interval=500ms 控制 poll backend 轮询频率；回调内 classify_session_watch_event 映射
-///     create/modify/delete/rename/uncertain，再做 **leading + trailing debounce** 后
-///     spawn_blocking 应用 plan。watcher + cancel + debounce/scan handles 一并写入
-///     `ClaudeSessionWatcherRuntime`。
-///     **降级语义（spec 5.1）**：watcher 创建失败或 watch 失败时，必须从 workbench_claude_session_indexes
-///     移除该 key 的索引，保证下次 ensure_worktree_session_index_scanned 命中不到缓存而重走慢路径重扫。
 fn spawn_session_watcher(
     state: &AppState,
     key: &str,
@@ -2339,13 +2048,7 @@ fn spawn_session_watcher(
 
 /// 监听失败降级时从 indexes/watchers 缓存移除指定 worktree 的索引（spec 5.1）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     watcher 创建/启动失败时，索引已写入 workbench_claude_session_indexes，若不移除，
-///     下次 ensure_worktree_session_index_scanned 会命中缓存直接返回旧索引，永不重扫。
-///     spec 5.1 要求监听失败降级为每次搜索重扫，故必须删除该 key。
 ///
-/// Code Logic（这个函数做什么）:
-///     dispose_session_index_by_key：清 runtime（若有）与 indexes entry。
 fn remove_index_on_failure(state: &AppState, key: &str) {
     dispose_session_index_by_key(state, key);
     tracing::info!("监听失败已移除 worktree session 索引缓存（下次搜索重扫）key={key}");
@@ -2353,13 +2056,7 @@ fn remove_index_on_failure(state: &AppState, key: &str) {
 
 /// 重扫指定 jsonl 路径并更新内存索引。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     notify 回调收到文件变化事件后，需要把对应 session 的索引刷新，保证搜索结果新鲜。
 ///
-/// Code Logic（这个函数做什么）:
-///     读锁快照现有 session 指纹；**写锁外**对变更路径仅在 size+mtime 变化时 reparse，
-///     对目录内其它 jsonl 仅索引中尚不存在的 stem 做兜底 parse；再短暂写锁 apply；
-///     成功 upsert、失败按 stem 移除；更新 last_scan_at。
 fn refresh_sessions_from_paths(
     shared: &SharedWorktreeSessionIndex,
     worktree_canonical: &Path,
@@ -2457,15 +2154,7 @@ fn refresh_sessions_from_paths(
 
 /// 全量重扫指定目录下所有 jsonl，重建 sessions HashMap（trailing 兜底专用）。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     debounce 窗口内可能先后有多个不同 jsonl 文件变更，若 trailing 只重扫最后一批事件路径，
-///     较早变更的文件会被漏掉。trailing 兜底必须全量重扫；但对 size+mtime 未变的已索引文件
-///     应复用条目，避免每次事件 O(N) 全量 reparse。
 ///
-/// Code Logic（这个函数做什么）:
-///     读锁取 worktree_path/encoded_cwd + 现有 sessions；**锁外**列目录/排序/预算后，
-///     指纹匹配则 clone 复用，否则 reparse；新 map 仅含磁盘仍存在的文件（delete 收敛）；
-///     再写锁原子 swap sessions/truncated/diagnostics/last_scan_at。
 fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
     let (worktree_path, encoded_cwd, existing) = {
         let guard = match shared.read() {
