@@ -161,6 +161,31 @@ jobs:
             echo "evidence ref does not resolve to expectedEvidenceCommit" >&2
             exit 1
           fi
+          # Docs-only path allowlist for evidence commit vs subject
+          git fetch origin "$SUBJECT" --depth=1 || true
+          if git cat-file -e "${SUBJECT}^{commit}" 2>/dev/null; then
+            CHANGED=$(git diff --name-only "$SUBJECT" "$EVIDENCE" || true)
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                README.md|docs/development/quality-matrix.json|docs/development/real-device-certification.md|docs/development/release-claim.json|docs/development/evidence/*) ;;
+                *)
+                  echo "evidence commit path not allowlisted: $f" >&2
+                  exit 1
+                  ;;
+              esac
+            done <<< "$CHANGED"
+          fi
+          # Require beta claim GO from checker (FAIL/NO-GO blocks publish)
+          node scripts/check-quality-traceability.mjs             --claim-mode platform-beta             --claim-profile macos-aarch64-beta             --subject-commit "$SUBJECT"             --subject-tag "$TAG"             --rc-run-id "$RC_RUN"             --evidence-ref "$EVIDENCE" | tee /tmp/beta-claim-check.log
+          if grep -q 'NO-GO' /tmp/beta-claim-check.log; then
+            echo "beta claim is NO-GO; refusing publish" >&2
+            exit 1
+          fi
+          if grep -qi 'missing required execution\|result must be PASS' /tmp/beta-claim-check.log; then
+            echo "beta claim missing PASS executions; refusing publish" >&2
+            exit 1
+          fi
           echo "beta_tag=$BETA_TAG" >> "$GITHUB_OUTPUT"
           echo "subject_commit=$SUBJECT" >> "$GITHUB_OUTPUT"
 
