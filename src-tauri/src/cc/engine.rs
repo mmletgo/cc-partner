@@ -7,16 +7,18 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     `cc_sync_with_peer(state, device)`：
-//!     1. health_info 取对端 `PeerProtocolInfo`；不可达则跳过；
-//!     2. 若 `supports(cc-history.paged-sync.v1)` → 有界分页路径（manifest-page/items/push-batch）；
-//!     3. 否则 → legacy pull/push 路径（兼容旧对端）；
-//!     4. 分页路径错误/取消结束本轮并上抛；下轮从零开始（不持久化 remote cursor）。
+//!     1. 若调用方未注入协议信息，则 `health_info` 取对端 `PeerProtocolInfo`；不可达则跳过；
+//!     2. 全局同步入口应调用 `cc_sync_with_peer_using_protocol` 复用已探测的协议信息，
+//!        避免同设备二次 health；
+//!     3. 若 `supports(cc-history.paged-sync.v1)` → 有界分页路径（manifest-page/items/push-batch）；
+//!     4. 否则 → legacy pull/push 路径（兼容旧对端）；
+//!     5. 分页路径错误/取消结束本轮并上抛；下轮从零开始（不持久化 remote cursor）。
 //!     全程对 legacy 路径失败仅 tracing::warn 不阻断（保持旧行为）。
 
 use crate::cc::merger::merge_cc_history;
 use crate::cc::models::{CcSyncSummary, ClaudeHistoryRow};
 use crate::net::peer_client::PeerCallError;
-use crate::net::protocol::CAPABILITY_CC_HISTORY_PAGED_SYNC_V1;
+use crate::net::protocol::{PeerProtocolInfo, CAPABILITY_CC_HISTORY_PAGED_SYNC_V1};
 use crate::net::routes::cc_history::{
     estimate_row_bytes, CC_BATCH_MAX_ESTIMATED_BYTES, CC_ITEM_BATCH_LIMIT,
     CC_MANIFEST_PAGE_LIMIT_DEFAULT, CODE_BATCH_TOO_LARGE, CODE_ITEM_TOO_LARGE,
@@ -37,25 +39,21 @@ const METRIC_SYNC_ROUND_MS: &str = "cc_history.sync_round_ms";
 /// 本轮因单条 item_too_large 隔离毒丸的次数（脱敏计数，不含 id/正文）。
 const METRIC_ITEM_TOO_LARGE_ISOLATED: &str = "cc_history.item_too_large_isolated";
 
-/// 与单个对端执行 Claude Code 历史的双向同步。
+/// 与单个对端执行 Claude Code 历史的双向同步（独立探测 health）。
 ///
 /// Business Logic: 确保双方 cc 历史一致。对端声明 `cc-history.paged-sync.v1` 时走有界分页协议，
 ///     否则回退 legacy pull/push。分页路径上的协议/业务错误结束本轮并返回 Err（禁止伪装成
 ///     成功的零条同步）；legacy 路径失败仍仅 warn 不阻断，保持一代兼容行为。
+///     全局多领域同步应优先用 `cc_sync_with_peer_using_protocol` 复用已有 health。
 ///
 /// Code Logic:
 ///     1. health_info；网络失败 → warn 并 Ok 跳过；
-///     2. protocol supports paged → `cc_sync_paged_with_peer`，否则 `cc_sync_legacy_with_peer`；
-///     3. 记录 `cc_history.sync_round_ms`。
+///     2. 委托 `cc_sync_with_peer_using_protocol`。
 pub async fn cc_sync_with_peer(
     state: &AppState,
     device: &crate::models::device::Device,
 ) -> Result<(), String> {
     let base_url = device.base_url();
-    // paged 可观测面不写 device_name；legacy 仍可诊断对端名（一代兼容路径）。
-    tracing::info!("开始 CC 历史同步");
-    let round_start = Instant::now();
-
     let health = match state.peer_client.health_info(&base_url).await {
         Ok(h) => h,
         Err(e) => {
@@ -63,7 +61,28 @@ pub async fn cc_sync_with_peer(
             return Ok(());
         }
     };
-    let protocol = health.protocol_info();
+    cc_sync_with_peer_using_protocol(state, device, &health.protocol_info()).await
+}
+
+/// 使用已探测的对端协议信息执行 CC 历史双向同步（不重复 health）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     全局同步在每设备仅探测一次 health/protocol；CC 领域必须复用该信息，避免二次 probe
+///     拉高尾延迟与对端负载。
+///
+/// Code Logic（这个函数做什么）:
+///     1. 若 protocol supports paged → `cc_sync_paged_with_peer`，否则 `cc_sync_legacy_with_peer`；
+///     2. 记录 `cc_history.sync_round_ms`；不调用 `health_info`。
+pub async fn cc_sync_with_peer_using_protocol(
+    state: &AppState,
+    device: &crate::models::device::Device,
+    protocol: &PeerProtocolInfo,
+) -> Result<(), String> {
+    let base_url = device.base_url();
+    // paged 可观测面不写 device_name；legacy 仍可诊断对端名（一代兼容路径）。
+    tracing::info!("开始 CC 历史同步");
+    let round_start = Instant::now();
+
     let result = if protocol.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1) {
         cc_sync_paged_with_peer(state, &base_url).await
     } else {
@@ -600,5 +619,28 @@ mod tests {
     #[test]
     fn cc_history_mixed_version_legacy_bodies_work_against_new_server() {
         crate::cc::mixed_version_harness::assert_legacy_bodies_work_against_new_server();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     全局同步入口注入的 protocol 必须足以分支 paged/legacy，函数不得再强制 health。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造带/不带 paged capability 的 PeerProtocolInfo，断言 supports 判定与
+    ///     `cc_sync_with_peer_using_protocol` 的分支条件一致（纯协议，无网络）。
+    #[test]
+    fn cc_sync_protocol_reuse_branches_without_extra_health_probe() {
+        use crate::net::protocol::{
+            PeerProtocolInfo, CAPABILITY_CC_HISTORY_PAGED_SYNC_V1, PROTOCOL_VERSION_V1,
+        };
+        let paged = PeerProtocolInfo {
+            protocol_version: PROTOCOL_VERSION_V1,
+            capabilities: vec![CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string()],
+        };
+        let legacy = PeerProtocolInfo {
+            protocol_version: 0,
+            capabilities: vec![],
+        };
+        assert!(paged.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
+        assert!(!legacy.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
     }
 }
