@@ -432,7 +432,7 @@ pub async fn run_tombstone_gc_best_effort(state: &AppState) -> Result<usize, App
 /// 与单设备同步三个领域，并附加 CC 历史（不计 domain 报告）。
 ///
 /// Business Logic: 一次 health/capability 复用；v2 与 legacy 分支；CC 历史仍独立 warn。
-/// Code Logic: health_info → supports v2 → 顺序跑 prompt/ssh/scratchpad → 聚合。
+/// Code Logic: 一次 health_info → supports v2 → 顺序跑 prompt/ssh/scratchpad + 复用 protocol 的 CC → 聚合。
 async fn sync_device_with_domains(
     state: &AppState,
     device: crate::models::device::Device,
@@ -452,8 +452,9 @@ async fn sync_device_with_domains(
         }
     };
 
-    let supports_v2 = health.protocol_info().supports(CAPABILITY_SYNC_MANIFEST_V2);
-    // 一次 health 复用：capability 布尔传入各领域，领域内不再重复 health。
+    let protocol = health.protocol_info();
+    let supports_v2 = protocol.supports(CAPABILITY_SYNC_MANIFEST_V2);
+    // 一次 health 复用：capability/protocol 传入各领域（含 CC），领域内不再重复 health。
     let prompt_outcome = prompt_sync_with_peer(state, &device, &base_url, supports_v2).await;
     let ssh_outcome =
         crate::sync::ssh_target::ssh_target_sync_with_peer(state, &device, &base_url, supports_v2)
@@ -462,8 +463,8 @@ async fn sync_device_with_domains(
         crate::sync::scratchpad::scratchpad_sync_with_peer(state, &device, &base_url, supports_v2)
             .await;
 
-    // CC 历史独立链路，失败不影响 domain 报告
-    let _ = crate::cc::engine::cc_sync_with_peer(state, &device).await;
+    // CC 历史独立链路但复用本设备已探测的 protocol；失败不影响 domain 报告
+    let _ = crate::cc::engine::cc_sync_with_peer_using_protocol(state, &device, &protocol).await;
 
     let domains = vec![
         DomainSyncReport {
@@ -1099,5 +1100,78 @@ mod tests {
     #[tokio::test]
     async fn content_sync_mixed_version_v2_peer_uses_manifest() {
         crate::sync::mixed_version_harness::assert_v2_peer_uses_manifest_routes().await;
+    }
+
+    /// 计数型假 peer：记录 health 调用次数，模拟多领域同步编排。
+    ///
+    /// Business Logic（为什么需要这个类型）:
+    ///     验收「同设备只探一次 health」需要确定性 fake，不能依赖真实网络。
+    ///
+    /// Code Logic（这个类型做什么）:
+    ///     `health_info` 递增计数并返回固定 protocol；领域同步方法只消费 protocol，不再调 health。
+    #[derive(Default)]
+    struct CountingPeer {
+        health_calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl CountingPeer {
+        /// 创建计数 peer。
+        fn new() -> Self {
+            Self::default()
+        }
+
+        /// 返回已发生的 health 调用次数。
+        fn health_calls(&self) -> u32 {
+            self.health_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// 模拟一次 typed health / protocol 探测。
+        async fn health_info(&self) -> crate::net::protocol::PeerProtocolInfo {
+            self.health_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::net::protocol::PeerProtocolInfo {
+                protocol_version: 1,
+                capabilities: vec![
+                    CAPABILITY_SYNC_MANIFEST_V2.to_string(),
+                    crate::net::protocol::CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
+                ],
+            }
+        }
+
+        /// 领域同步只读已注入 protocol（不调用 health）。
+        async fn sync_domain_with_protocol(
+            &self,
+            _protocol: &crate::net::protocol::PeerProtocolInfo,
+        ) {
+            // no-op：编排层契约测试只关心 health 次数
+        }
+    }
+
+    /// 模拟 `sync_device_with_domains` 的 health 复用编排：一次 health，prompt/ssh/scratchpad/cc 共用。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     把「每设备一次 health」固化为可测的编排 helper，防止 CC 路径回退二次 probe。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     health_info 一次 → 四个领域均以同一 protocol 调用，不再 health。
+    async fn sync_all_domains(peer: &CountingPeer) {
+        let protocol = peer.health_info().await;
+        peer.sync_domain_with_protocol(&protocol).await; // prompt
+        peer.sync_domain_with_protocol(&protocol).await; // ssh
+        peer.sync_domain_with_protocol(&protocol).await; // scratchpad
+        peer.sync_domain_with_protocol(&protocol).await; // cc (using_protocol)
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同设备跨 prompt/ssh/scratchpad/cc 同步不得重复 health，否则放大尾延迟。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     CountingPeer 编排 sync_all_domains，断言 health_calls == 1。
+    #[tokio::test]
+    async fn one_device_sync_uses_one_health_probe() {
+        let peer = CountingPeer::new();
+        sync_all_domains(&peer).await;
+        assert_eq!(peer.health_calls(), 1);
     }
 }

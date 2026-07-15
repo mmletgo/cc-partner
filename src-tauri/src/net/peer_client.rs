@@ -6,9 +6,12 @@
 //!     M3 仅实现 health 调用 + 基础结构；sync/transfer 留 M4/M5 填实现。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - 持有一个 reqwest::Client（连接池复用，rustls-tls 避免 OpenSSL 依赖）。
-//!     - `health_info(base_url)`：GET `{base_url}/api/health`，10s 超时，成功且 status==200
-//!       返回解析后的 `HealthResponse`（含 protocol_version / capabilities）；失败返回 PeerCallError。
+//!     - 持有一个 reqwest::Client（连接池复用，rustls-tls 避免 OpenSSL 依赖；无默认 total-timeout）。
+//!     - 出站请求按 `PeerTimeoutClass` 分类设超时：Health 3s / Metadata 10s / Mutation 30s /
+//!       LongRunning 显式预算。事件流走 `open_ndjson_stream`（stream_client，无 total-timeout），
+//!       不进入本 enum。
+//!     - `health_info(base_url)`：GET `{base_url}/api/health`（Health 3s），成功返回
+//!       `HealthResponse`（含 protocol_version / capabilities）；失败返回 PeerCallError。
 //!     - `health(addr, port)`：legacy 布尔包装，复用 health_info，仅返回 ok 字段（旧调用方兼容）。
 //!     - sync/transfer 方法（pull/push/init/chunk 等）。
 
@@ -18,8 +21,65 @@ use crate::net::request_context::{new_request_id, REQUEST_ID_HEADER};
 use crate::net::routes::health::HealthResponse;
 use std::time::Duration;
 
-/// health 请求超时（秒）。对照 Python `DEFAULT_TIMEOUT=5`，Rust 版略放宽到 10s 提升弱网容错。
-const HEALTH_TIMEOUT_SECS: u64 = 10;
+/// Peer 出站请求超时分类。
+///
+/// Business Logic（为什么需要这个类型）:
+///     所有 peer 请求共用 10s 会让 health 过慢、mutation 过早失败；按请求类别配置超时可降低
+///     多设备同步尾延迟，并给 push/transfer 足够预算。事件流不在本 enum 内。
+///
+/// Code Logic（这个类型做什么）:
+///     `timeout()` 映射固定秒数；长操作必须用 `long_running(budget)` 显式预算，禁止隐式默认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeerTimeoutClass {
+    /// 健康检查 / capability probe
+    Health,
+    /// 只读元数据与列表（manifest、pull、items、status、inventory）
+    Metadata,
+    /// 普通写路径（push、push-batch、ack、transfer init/chunk/complete）
+    Mutation,
+    /// 长操作占位；实际时长必须经 `PeerTimeoutClass::long_running(budget)` 显式给出。
+    /// 调用方通过 `long_running(budget)` 取 Duration，不必构造本 variant；保留以完成分类枚举。
+    #[allow(dead_code)]
+    LongRunning,
+}
+
+impl PeerTimeoutClass {
+    /// Health 超时秒数。
+    pub const HEALTH_SECS: u64 = 3;
+    /// Metadata 超时秒数。
+    pub const METADATA_SECS: u64 = 10;
+    /// Mutation 超时秒数。
+    pub const MUTATION_SECS: u64 = 30;
+
+    /// 返回该分类的默认超时。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     调用方按请求语义选类后需要稳定 Duration，避免散落 magic number。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Health→3s，Metadata→10s，Mutation→30s；LongRunning 无固定默认，调用方应使用
+    ///     `long_running`，此处返回 Mutation 作为 fail-safe 上界提示而非生产路径依赖。
+    pub const fn timeout(self) -> Duration {
+        match self {
+            Self::Health => Duration::from_secs(Self::HEALTH_SECS),
+            Self::Metadata => Duration::from_secs(Self::METADATA_SECS),
+            Self::Mutation => Duration::from_secs(Self::MUTATION_SECS),
+            // LongRunning 必须显式预算；保留 Mutation 上界避免误用时无超时。
+            Self::LongRunning => Duration::from_secs(Self::MUTATION_SECS),
+        }
+    }
+
+    /// 构造长操作的显式超时预算。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     大包 bundle / 长 finalize 等不能套 3/10/30 固定类，调用方必须声明预算。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     原样返回传入的 `budget`（Duration），供 request helper 的 `.timeout(...)` 使用。
+    pub const fn long_running(budget: Duration) -> Duration {
+        budget
+    }
+}
 
 // 兼容性再导出：历史上 `PeerCallError` 定义在本模块；Task 7 把它统一到 `net::peer_error`，
 // 这里再导出统一类型，使旧调用点（`use crate::net::peer_client::PeerCallError`）无需改动，
@@ -260,14 +320,16 @@ pub struct PeerClient {
 }
 
 impl PeerClient {
-    /// 创建客户端，配置默认超时。
+    /// 创建客户端（无默认 total-timeout，按 PeerTimeoutClass 逐请求设置）。
     ///
-    /// Code Logic: reqwest::Client::builder 设置 timeout；rustls-tls feature 已在 Cargo.toml 启用，
-    ///     无需系统 OpenSSL。本机自签场景实际走 http，TLS 仅用于 https 资源（如 GitHub Releases）。
-    ///     另建无默认超时的 stream_client 供 remote event bridge 长连接。
+    /// Code Logic: reqwest::Client::builder 仅设 connect_timeout=Health；rustls-tls feature 已在
+    ///     Cargo.toml 启用，无需系统 OpenSSL。本机自签场景实际走 http，TLS 仅用于 https 资源。
+    ///     另建无默认超时的 stream_client 供 remote event bridge 长连接（不进 PeerTimeoutClass）。
     pub fn new() -> Self {
+        // 无默认 total-timeout：由 PeerTimeoutClass 在每个请求上设置，避免 health/mutation 共用 10s。
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS))
+            .connect_timeout(PeerTimeoutClass::Health.timeout())
+            .pool_max_idle_per_host(8)
             .build()
             .expect("构造 reqwest Client 失败（rustls-tls 初始化异常）");
         let stream_client = reqwest::Client::builder()
@@ -323,6 +385,7 @@ impl PeerClient {
         let resp = self
             .client
             .get(&url)
+            .timeout(PeerTimeoutClass::Health.timeout())
             // Finding 3: 出站 request_id 让对端把 health 请求纳入同一调用链日志，
             // 多跳代理（orchestrator/workbench）也能据此关联本机发起的请求。
             .header(
@@ -411,10 +474,27 @@ impl PeerClient {
     async fn request_get<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
+        class: PeerTimeoutClass,
+    ) -> Result<T, PeerCallError> {
+        self.request_get_with_timeout(url, class.timeout()).await
+    }
+
+    /// 共享 GET helper（显式超时预算，供 LongRunning 等场景）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     长读操作不能硬套固定类秒数，需要调用方传入显式 Duration。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     GET + request_id + `.timeout(timeout)` + `parse_peer_response`。
+    async fn request_get_with_timeout<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        timeout: Duration,
     ) -> Result<T, PeerCallError> {
         let resp = self
             .client
             .get(url)
+            .timeout(timeout)
             .header(REQUEST_ID_HEADER, new_request_id())
             .send()
             .await
@@ -425,15 +505,40 @@ impl PeerClient {
         parse_peer_response::<T>(resp, url).await
     }
 
-    /// 共享 POST helper：注入 request_id、发送 JSON body 并用 `parse_peer_response` 解析响应
-    ///（Finding 2）。
+    /// 共享 POST helper：注入 request_id、按超时类发送 JSON body 并用 `parse_peer_response` 解析响应
+    ///（Finding 2 + N7 timeout classes）。
     ///
     /// Business Logic: sync/transfer/cc-history/ssh-target/scratchpad 等 POST 调用都需要
-    ///     统一的 request_id 注入与错误分类。
+    ///     统一的 request_id 注入、错误分类与按类超时。
     ///
-    /// Code Logic: 构造 POST 请求（JSON body + X-CC-Request-Id），发送后委托
+    /// Code Logic: 构造 POST 请求（JSON body + X-CC-Request-Id + class.timeout()），发送后委托
     ///     `parse_peer_response`；错误分类与 `request_get` 一致。
-    async fn request_post<T, B>(&self, url: &str, body: &B) -> Result<T, PeerCallError>
+    async fn request_post<T, B>(
+        &self,
+        url: &str,
+        body: &B,
+        class: PeerTimeoutClass,
+    ) -> Result<T, PeerCallError>
+    where
+        T: serde::de::DeserializeOwned,
+        B: serde::Serialize + ?Sized,
+    {
+        self.request_post_with_timeout(url, body, class.timeout()).await
+    }
+
+    /// 共享 POST helper（显式超时预算）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     LongRunning 写路径需要调用方声明预算，不能隐式 30s。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST JSON + request_id + `.timeout(timeout)` + `parse_peer_response`。
+    async fn request_post_with_timeout<T, B>(
+        &self,
+        url: &str,
+        body: &B,
+        timeout: Duration,
+    ) -> Result<T, PeerCallError>
     where
         T: serde::de::DeserializeOwned,
         B: serde::Serialize + ?Sized,
@@ -441,6 +546,7 @@ impl PeerClient {
         let resp = self
             .client
             .post(url)
+            .timeout(timeout)
             .header(REQUEST_ID_HEADER, new_request_id())
             .json(body)
             .send()
@@ -453,23 +559,25 @@ impl PeerClient {
     }
 
     /// 共享 POST raw-bytes helper：注入 request_id、发送原始字节 body 并用 `parse_peer_response`
-    /// 解析响应（Finding 2）。
+    /// 解析响应（Finding 2 + N7 timeout classes）。
     ///
     /// Business Logic: transfer/chunk 的 body 是原始字节 + 自定义 header（X-Chunk-Offset），
-    ///     无法走 `request_post` 的 JSON 路径，但同样需要 request_id 注入与统一错误分类。
+    ///     无法走 `request_post` 的 JSON 路径，但同样需要 request_id 注入、统一错误分类与分类超时。
     ///
-    /// Code Logic: 构造 POST 请求（自定义 header + raw body + X-CC-Request-Id），发送后委托
-    ///     `parse_peer_response`；错误分类与其它 helper 一致。
+    /// Code Logic: 构造 POST 请求（自定义 header + raw body + X-CC-Request-Id + class.timeout()），
+    ///     发送后委托 `parse_peer_response`。
     async fn request_post_raw<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
         extra_header_name: &str,
         extra_header_value: &str,
         body: Vec<u8>,
+        class: PeerTimeoutClass,
     ) -> Result<T, PeerCallError> {
         let resp = self
             .client
             .post(url)
+            .timeout(class.timeout())
             .header(REQUEST_ID_HEADER, new_request_id())
             .header(extra_header_name, extra_header_value)
             .body(body)
@@ -524,7 +632,7 @@ impl PeerClient {
     ) -> Result<Vec<crate::models::prompt::PromptRow>, PeerCallError> {
         let url = format!("{base_url}/api/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        let data: SyncPullResp = self.request_post(&url, &body).await?;
+        let data: SyncPullResp = self.request_post(&url, &body, PeerTimeoutClass::Metadata).await?;
         crate::backend::logging::OperationLog::new(
             "p2p",
             "sync_pull",
@@ -578,7 +686,7 @@ impl PeerClient {
     ) -> Result<bool, PeerCallError> {
         let url = format!("{base_url}/api/sync/push");
         let body = serde_json::json!({ "prompts": prompts });
-        let data: SyncPushResp = self.request_post(&url, &body).await?;
+        let data: SyncPushResp = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         crate::backend::logging::OperationLog::new(
             "p2p",
             "sync_push",
@@ -605,7 +713,7 @@ impl PeerClient {
     ) -> Result<bool, crate::error::AppError> {
         let url = format!("{base_url}/api/sync/claude_md/push");
         let body = serde_json::json!({ "claude_md": row });
-        let resp: ClaudeMdPushResp = self.request_post(&url, &body).await.map_err(|e| {
+        let resp: ClaudeMdPushResp = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await.map_err(|e| {
             crate::net::peer_error::peer_call_error_to_app_error(e, "远端 CLAUDE.md")
         })?;
         Ok(resp.accepted)
@@ -626,7 +734,7 @@ impl PeerClient {
         let url = format!("{base_url}/api/scratchpad/sync/pull");
         let body = serde_json::json!({ "summaries": summaries });
         match self
-            .request_post::<ScratchpadPullResp, _>(&url, &body)
+            .request_post::<ScratchpadPullResp, _>(&url, &body, PeerTimeoutClass::Metadata)
             .await
         {
             Ok(data) => data.pages,
@@ -651,7 +759,7 @@ impl PeerClient {
         let url = format!("{base_url}/api/scratchpad/sync/push");
         let body = serde_json::json!({ "pages": pages });
         match self
-            .request_post::<ScratchpadPushResp, _>(&url, &body)
+            .request_post::<ScratchpadPushResp, _>(&url, &body, PeerTimeoutClass::Mutation)
             .await
         {
             Ok(data) => {
@@ -684,7 +792,7 @@ impl PeerClient {
     ) -> Result<Vec<crate::claude_code_assets::ClaudeCodeAsset>, crate::error::AppError> {
         let url = format!("{base_url}/api/claude-code/assets/inventory");
         let resp: ClaudeAssetsInventoryResp = self
-            .request_get(&url)
+            .request_get(&url, PeerTimeoutClass::Metadata)
             .await
             .map_err(|e| crate::net::peer_error::peer_call_error_to_app_error(e, "远端 assets"))?;
         Ok(resp)
@@ -704,9 +812,11 @@ impl PeerClient {
     ) -> Result<Vec<u8>, crate::error::AppError> {
         let url = format!("{base_url}/api/claude-code/assets/bundle");
         let body = serde_json::json!({ "items": items });
+        // assets zip 可能较大：LongRunning 显式 120s 预算，不套 30s mutation。
         let resp = self
             .client
             .post(&url)
+            .timeout(PeerTimeoutClass::long_running(Duration::from_secs(120)))
             .header(REQUEST_ID_HEADER, new_request_id())
             .json(&body)
             .send()
@@ -741,7 +851,7 @@ impl PeerClient {
         metadata: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let url = format!("{base_url}/api/transfer/init");
-        self.request_post::<serde_json::Value, _>(&url, &metadata)
+        self.request_post::<serde_json::Value, _>(&url, &metadata, PeerTimeoutClass::Mutation)
             .await
             .map_err(|e| peer_call_error_to_transfer_message("init", &url, e))
     }
@@ -806,6 +916,7 @@ impl PeerClient {
                     "X-Chunk-Offset",
                     &offset.to_string(),
                     data.clone(),
+                    PeerTimeoutClass::Mutation,
                 )
                 .await
             {
@@ -875,6 +986,7 @@ impl PeerClient {
                             "X-Chunk-Offset",
                             &offset.to_string(),
                             data,
+                            PeerTimeoutClass::Mutation,
                         )
                         .await
                     {
@@ -984,7 +1096,7 @@ impl PeerClient {
         transfer_id: &str,
     ) -> Result<serde_json::Value, String> {
         let url = format!("{base_url}/api/transfer/status/{transfer_id}");
-        self.request_get::<serde_json::Value>(&url)
+        self.request_get::<serde_json::Value>(&url, PeerTimeoutClass::Metadata)
             .await
             .map_err(|e| peer_call_error_to_transfer_message("status", &url, e))
     }
@@ -1033,7 +1145,7 @@ impl PeerClient {
         let mut saw_retryable_soft_false = false;
 
         for attempt in 1..=policy.max_attempts {
-            match self.request_post::<ChunkResp, _>(&url, &body).await {
+            match self.request_post::<ChunkResp, _>(&url, &body, PeerTimeoutClass::Mutation).await {
                 Ok(resp) if resp.success => return Ok(true),
                 Ok(_resp) => {
                     // success=false：可能是尚未收齐、durable 晋升失败、或重启后内存 miss。
@@ -1118,7 +1230,7 @@ impl PeerClient {
         transfer_id: &str,
     ) -> Result<serde_json::Value, PeerCallError> {
         let url = format!("{base_url}/api/transfer/status/{transfer_id}");
-        self.request_get::<serde_json::Value>(&url).await
+        self.request_get::<serde_json::Value>(&url, PeerTimeoutClass::Metadata).await
     }
 
     /// Claude Code 历史同步 pull：向对端发送本端 cc 历史摘要，获取对端认为本端需要的 cc 历史。
@@ -1136,7 +1248,7 @@ impl PeerClient {
     ) -> Vec<crate::cc::models::ClaudeHistoryRow> {
         let url = format!("{base_url}/api/cc-history/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        match self.request_post::<CcSyncPullResp, _>(&url, &body).await {
+        match self.request_post::<CcSyncPullResp, _>(&url, &body, PeerTimeoutClass::Metadata).await {
             Ok(data) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -1176,7 +1288,7 @@ impl PeerClient {
     ) -> bool {
         let url = format!("{base_url}/api/cc-history/sync/push");
         let body = serde_json::json!({ "items": items });
-        match self.request_post::<CcSyncPushResp, _>(&url, &body).await {
+        match self.request_post::<CcSyncPushResp, _>(&url, &body, PeerTimeoutClass::Mutation).await {
             Ok(data) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -1223,7 +1335,7 @@ impl PeerClient {
             "limit": limit,
         });
         match self
-            .request_post::<crate::net::routes::cc_history::CcManifestPageResp, _>(&url, &body)
+            .request_post::<crate::net::routes::cc_history::CcManifestPageResp, _>(&url, &body, PeerTimeoutClass::Metadata)
             .await
         {
             Ok(data) => {
@@ -1272,7 +1384,7 @@ impl PeerClient {
         let url = format!("{base_url}/api/cc-history/sync/items");
         let body = serde_json::json!({ "ids": ids });
         match self
-            .request_post::<crate::net::routes::cc_history::CcItemsResp, _>(&url, &body)
+            .request_post::<crate::net::routes::cc_history::CcItemsResp, _>(&url, &body, PeerTimeoutClass::Metadata)
             .await
         {
             Ok(data) => {
@@ -1321,7 +1433,7 @@ impl PeerClient {
         let url = format!("{base_url}/api/cc-history/sync/push-batch");
         let body = serde_json::json!({ "items": items });
         match self
-            .request_post::<crate::net::routes::cc_history::CcPushBatchResp, _>(&url, &body)
+            .request_post::<crate::net::routes::cc_history::CcPushBatchResp, _>(&url, &body, PeerTimeoutClass::Mutation)
             .await
         {
             Ok(data) => {
@@ -1363,7 +1475,7 @@ impl PeerClient {
     ) -> Vec<crate::models::ssh_target::SshTargetRow> {
         let url = format!("{base_url}/api/ssh-target/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        match self.request_post::<SshTargetPullResp, _>(&url, &body).await {
+        match self.request_post::<SshTargetPullResp, _>(&url, &body, PeerTimeoutClass::Metadata).await {
             Ok(data) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -1405,7 +1517,7 @@ impl PeerClient {
     ) -> bool {
         let url = format!("{base_url}/api/ssh-target/sync/push");
         let body = serde_json::json!({ "targets": targets });
-        match self.request_post::<SshTargetPushResp, _>(&url, &body).await {
+        match self.request_post::<SshTargetPushResp, _>(&url, &body, PeerTimeoutClass::Mutation).await {
             Ok(data) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -1467,7 +1579,7 @@ impl PeerClient {
     ) -> Result<Vec<crate::models::ssh_target::SshTargetRow>, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        let data: SshTargetPullResp = self.request_post(&url, &body).await?;
+        let data: SshTargetPullResp = self.request_post(&url, &body, PeerTimeoutClass::Metadata).await?;
         Ok(data.targets)
     }
 
@@ -1482,7 +1594,7 @@ impl PeerClient {
     ) -> Result<bool, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/push");
         let body = serde_json::json!({ "targets": targets });
-        let _data: SshTargetPushResp = self.request_post(&url, &body).await?;
+        let _data: SshTargetPushResp = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         Ok(true)
     }
 
@@ -1497,7 +1609,7 @@ impl PeerClient {
     ) -> Result<Vec<crate::models::scratchpad::ScratchpadRow>, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/pull");
         let body = serde_json::json!({ "summaries": summaries });
-        let data: ScratchpadPullResp = self.request_post(&url, &body).await?;
+        let data: ScratchpadPullResp = self.request_post(&url, &body, PeerTimeoutClass::Metadata).await?;
         Ok(data.pages)
     }
 
@@ -1512,7 +1624,7 @@ impl PeerClient {
     ) -> Result<bool, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/push");
         let body = serde_json::json!({ "pages": pages });
-        let _data: ScratchpadPushResp = self.request_post(&url, &body).await?;
+        let _data: ScratchpadPushResp = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         Ok(true)
     }
 
@@ -1528,7 +1640,7 @@ impl PeerClient {
         let url = format!("{base_url}/api/sync/prompts/manifest-page");
         let body = serde_json::json!({ "cursor": cursor, "limit": null });
         match self
-            .request_post::<crate::sync::protocol::SyncManifestPage<String>, _>(&url, &body)
+            .request_post::<crate::sync::protocol::SyncManifestPage<String>, _>(&url, &body, PeerTimeoutClass::Metadata)
             .await
         {
             Ok(data) => Ok(data),
@@ -1558,7 +1670,7 @@ impl PeerClient {
     ) -> Result<crate::net::routes::sync::PromptItemsResp, PeerCallError> {
         let url = format!("{base_url}/api/sync/prompts/items");
         let body = serde_json::json!({ "ids": ids });
-        self.request_post(&url, &body).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
     }
 
     /// Prompt v2：批量 push 正文。
@@ -1583,7 +1695,7 @@ impl PeerClient {
             "acked_delete_epoch": acked_delete_epoch,
         });
         let data: crate::net::routes::sync::PromptPushBatchResp =
-            self.request_post(&url, &body).await?;
+            self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
     }
@@ -1608,7 +1720,7 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        let _: serde_json::Value = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         Ok(())
     }
 
@@ -1623,7 +1735,7 @@ impl PeerClient {
     ) -> Result<crate::sync::protocol::SyncManifestPage<String>, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/manifest-page");
         let body = serde_json::json!({ "cursor": cursor, "limit": null });
-        self.request_post(&url, &body).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
     }
 
     /// SSH v2：按 host 批取正文。
@@ -1637,7 +1749,7 @@ impl PeerClient {
     ) -> Result<crate::net::routes::ssh_target_sync::SshItemsResp, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/items");
         let body = serde_json::json!({ "ids": ids });
-        self.request_post(&url, &body).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
     }
 
     /// SSH v2：批量 push。
@@ -1661,7 +1773,7 @@ impl PeerClient {
             "acked_delete_epoch": acked_delete_epoch,
         });
         let data: crate::net::routes::ssh_target_sync::SshPushBatchResp =
-            self.request_post(&url, &body).await?;
+            self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
     }
@@ -1685,7 +1797,7 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        let _: serde_json::Value = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         Ok(())
     }
 
@@ -1700,7 +1812,7 @@ impl PeerClient {
     ) -> Result<crate::sync::protocol::SyncManifestPage<String>, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/manifest-page");
         let body = serde_json::json!({ "cursor": cursor, "limit": null });
-        self.request_post(&url, &body).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
     }
 
     /// Scratchpad v2：按 id 批取正文。
@@ -1714,7 +1826,7 @@ impl PeerClient {
     ) -> Result<crate::net::routes::scratchpad_sync::ScratchpadItemsResp, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/items");
         let body = serde_json::json!({ "ids": ids });
-        self.request_post(&url, &body).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
     }
 
     /// Scratchpad v2：批量 push。
@@ -1738,7 +1850,7 @@ impl PeerClient {
             "acked_delete_epoch": acked_delete_epoch,
         });
         let data: crate::net::routes::scratchpad_sync::ScratchpadPushBatchResp =
-            self.request_post(&url, &body).await?;
+            self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
     }
@@ -1762,7 +1874,7 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let _: serde_json::Value = self.request_post(&url, &body).await?;
+        let _: serde_json::Value = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
         Ok(())
     }
 }
@@ -1807,6 +1919,44 @@ fn peer_call_error_to_transfer_message(step: &str, url: &str, error: PeerCallErr
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     peer 请求必须按 Health/Metadata/Mutation 分类映射固定超时，禁止再回落到统一 10s。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 PeerTimeoutClass::timeout() 的秒数契约：3 / 10 / 30。
+    #[test]
+    fn peer_timeout_class_maps_expected_durations() {
+        assert_eq!(
+            PeerTimeoutClass::Health.timeout(),
+            Duration::from_secs(PeerTimeoutClass::HEALTH_SECS)
+        );
+        assert_eq!(PeerTimeoutClass::Health.timeout(), Duration::from_secs(3));
+        assert_eq!(
+            PeerTimeoutClass::Metadata.timeout(),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            PeerTimeoutClass::Mutation.timeout(),
+            Duration::from_secs(30)
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     长操作不能隐式套固定类，必须经 long_running(budget) 显式声明。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     传入 120s 预算，断言返回值原样等于该 Duration。
+    #[test]
+    fn peer_timeout_long_running_uses_explicit_budget() {
+        let budget = Duration::from_secs(120);
+        assert_eq!(PeerTimeoutClass::long_running(budget), budget);
+        // LongRunning variant 无固定默认；timeout() 仅 fail-safe 回落 Mutation 上界。
+        assert_eq!(
+            PeerTimeoutClass::LongRunning.timeout(),
+            PeerTimeoutClass::Mutation.timeout()
+        );
+    }
 
     /// Business Logic（为什么需要这个测试）:
     ///     对端可能是尚未携带 protocol_version / capabilities 字段的旧版；客户端必须能容忍缺失字段
@@ -2123,7 +2273,7 @@ mod tests {
         let client = PeerClient::new();
         let body = serde_json::json!({});
         let resp: AcceptedResp = client
-            .request_post(&url, &body)
+            .request_post(&url, &body, PeerTimeoutClass::Metadata)
             .await
             .expect("2xx 应解析成功");
         // UUID v4 长度 36 → accepted==36 证明 header 已注入并被对端观测到。
@@ -2160,7 +2310,7 @@ mod tests {
         let client = PeerClient::new();
         let body = serde_json::json!({});
         let err = client
-            .request_post::<AcceptedResp, _>(&url, &body)
+            .request_post::<AcceptedResp, _>(&url, &body, PeerTimeoutClass::Metadata)
             .await
             .expect_err("503 应为错误");
         match err {
