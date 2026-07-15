@@ -1305,3 +1305,229 @@ fn normalize_path_inside_root_filters_outsiders() {
     assert!(normalize_path_inside_root(&inside, &root).is_some());
     assert!(normalize_path_inside_root(&outside, &root).is_none());
 }
+
+/// 构造仅用于 Claude session 索引生命周期测试的最小 AppState。
+///
+/// Business Logic（为什么需要这个函数）:
+///     dispose/ensure 竞态回归需要真实 AppState 的 indexes/watchers/inflight/epochs 四表。
+///
+/// Code Logic（这个函数做什么）:
+///     内存 SQLite + Headless UI + 默认 repos；session 索引相关 map 均为空。
+async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppState {
+    use crate::backend::ui::HeadlessBackendUi;
+    use crate::config::{
+        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
+    use crate::net::peer_client::PeerClient;
+    use crate::orchestrator::repo::OrchestratorRepo;
+    use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
+    use crate::state::AppState;
+    use crate::storage::{
+        ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
+        WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+    };
+    use crate::transfer::registry::TransferRegistry;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+    use std::sync::atomic::AtomicU16;
+    use std::sync::{Arc, Mutex, RwLock};
+
+    let options = SqliteConnectOptions::from_str("sqlite::memory:")
+        .unwrap()
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+
+    let config = AppConfig {
+        device_id: "device-session-index-test".to_string(),
+        device_name: "session-index-test".to_string(),
+        http_port: 0,
+        receive_dir: data_dir.to_string_lossy().to_string(),
+        db_path: data_dir.join("data.db").to_string_lossy().to_string(),
+        screenshot_hotkey: "<cmd>+s".to_string(),
+        prompt_optimizer_hotkey: "<ctrl>".to_string(),
+        prompt_optimizer_fill_language: "zh".to_string(),
+        cloud_sync_repo_url: None,
+        cloud_sync_enabled: false,
+        cloud_sync_auto: false,
+        cloud_sync_interval_secs: 600,
+        cloud_sync_branch: None,
+        health: HealthConfig::default(),
+        orchestrator: OrchestratorAutomationConfig::default(),
+        github_trending: GithubTrendingConfig::default(),
+    };
+    let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
+        config.clone(),
+    ));
+    let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(config, store));
+    let config = config_runtime.shared_value();
+
+    AppState {
+        config,
+        config_runtime,
+        db: pool.clone(),
+        maintenance_gate: Arc::new(crate::storage::DatabaseMaintenanceGate::new()),
+        prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
+        transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
+        claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
+        scratchpad_repo: Arc::new(ScratchpadRepo::new(pool.clone())),
+        ssh_target_repo: Arc::new(SshTargetRepo::new(pool.clone())),
+        device_id: Arc::new("device-session-index-test".to_string()),
+        devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        actual_http_port: Arc::new(AtomicU16::new(0)),
+        discovery: Arc::new(Mutex::new(None)),
+        peer_client: Arc::new(PeerClient::new()),
+        transfers: Arc::new(TransferRegistry::new()),
+        ui: Arc::new(HeadlessBackendUi::new(data_dir.join("dist"))),
+        update_runtime: Arc::new(crate::updater::UpdateRuntime::new()),
+        cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
+        workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
+        workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
+        workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
+        workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
+        workbench_browser_previews: Arc::new(
+            crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
+        ),
+        workbench_sessions: Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new()),
+        workbench_remote_events: {
+            let (tx, _) = tokio::sync::broadcast::channel(8);
+            tx
+        },
+        workbench_remote_event_bridges: Arc::new(
+            crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
+        ),
+        workbench_dependency: Arc::new(
+            crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
+        ),
+        cc_collector_cancel: Arc::new(Mutex::new(None)),
+        cloud_sync_runtime: Arc::new(crate::cloud_sync::CloudSyncRuntime::new()),
+        cloud_sync_cancel: Arc::new(Mutex::new(None)),
+        health: Arc::new(crate::health::HealthRuntime::new()),
+        health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),
+        health_cancel: Arc::new(Mutex::new(None)),
+        orchestrator_repo: Arc::new(OrchestratorRepo::new(pool)),
+        orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::new(),
+        orchestrator_cancel: Arc::new(Mutex::new(None)),
+        orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+        workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        workbench_claude_session_index_dispose_epochs: Arc::new(Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        runtime_metrics: Arc::new(crate::backend::runtime_metrics::RuntimeMetrics::new()),
+        runtime_role: crate::backend::authority::RuntimeRole::HeadlessOwner,
+        event_bus: Arc::new(crate::backend::event_bus::RuntimeEventBus::new(
+            "session-index-test-owner",
+        )),
+    }
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     项目移除时若 ensure 扫描仍在进行，dispose 必须清 inflight 并阻止 finish 写回幽灵索引/watcher。
+///
+/// Code Logic（这个测试做什么）:
+///     安装 mid-scan barrier → spawn ensure → 等 entered → dispose 路径 → release → await ensure；
+///     断言 indexes / watchers / inflight 均为空。
+#[tokio::test]
+async fn dispose_during_inflight_ensure_does_not_reinsert_index() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let data_dir = unique_temp_dir("dispose_inflight_ensure");
+    fs::create_dir_all(&data_dir).unwrap();
+    let worktree = data_dir.join("project");
+    fs::create_dir_all(&worktree).unwrap();
+
+    let state = build_session_index_test_state(&data_dir).await;
+    let key = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.clone())
+        .to_string_lossy()
+        .to_string();
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    super::scan_test_hooks::install(Some(super::scan_test_hooks::ScanTestBarrier {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    }));
+
+    let ensure_state = state.clone();
+    let ensure_path = worktree.clone();
+    let ensure_handle = tokio::spawn(async move {
+        ensure_worktree_session_index_scanned(&ensure_state, &ensure_path).await
+    });
+
+    // 等待 leader 进入 finish 扫描前 barrier
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("ensure 应进入 mid-scan barrier");
+
+    // 此时 inflight 应已注册
+    {
+        let inflight = state.workbench_claude_session_index_inflight.lock().await;
+        assert!(
+            inflight.contains_key(&key),
+            "mid-scan 时 inflight 应含 key"
+        );
+    }
+
+    // dispose 项目路径：应 bump epoch + 清 inflight/indexes/watchers
+    dispose_session_indexes_for_worktree_paths(&state, &[worktree.clone()]);
+
+    {
+        let inflight = state.workbench_claude_session_index_inflight.lock().await;
+        assert!(
+            !inflight.contains_key(&key),
+            "dispose 必须清除 inflight entry"
+        );
+    }
+    assert_eq!(
+        dispose_epoch_for_key(&state, &key),
+        1,
+        "dispose 应把 epoch 提升到 1"
+    );
+
+    // 放行扫描完成
+    release.notify_waiters();
+    let shared = ensure_handle.await.expect("ensure join");
+    // 返回的 shared 不得被写入全局 indexes
+    let _ = shared;
+
+    // 清理 hooks，避免污染其它测试
+    super::scan_test_hooks::install(None);
+
+    {
+        let indexes = state
+            .workbench_claude_session_indexes
+            .read()
+            .expect("indexes 读锁");
+        assert!(
+            !indexes.contains_key(&key),
+            "dispose 后 concurrent ensure 不得 reinsert indexes"
+        );
+    }
+    {
+        let watchers = state
+            .workbench_claude_session_watchers
+            .lock()
+            .expect("watchers 锁");
+        assert!(
+            !watchers.contains_key(&key),
+            "dispose 后 concurrent ensure 不得留下 watcher"
+        );
+    }
+    {
+        let inflight = state.workbench_claude_session_index_inflight.lock().await;
+        assert!(
+            !inflight.contains_key(&key),
+            "ensure 结束后 inflight 必须为空"
+        );
+    }
+}

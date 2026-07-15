@@ -85,19 +85,47 @@ export function getFinalBudgetTargets() {
 }
 
 /**
+ * 解析 bundle ratchet 策略。
+ *
+ * Business Logic:
+ *   默认 CI 必须 baseline+final 双重收紧，禁止手抬 ratchet 掩盖回归。
+ *   本地 toolchain/env 漂移主机在已恢复非递增 baseline 后，可显式设
+ *   `CC_PARTNER_BUNDLE_RATCHET=final-only`，仅用最终硬顶放行（仍禁止手改 baseline 上抬）。
+ *
+ * Code Logic:
+ *   读 env（或 options.env）；`final-only`（大小写不敏感）→ `'final-only'`；否则 `'strict'`。
+ *
+ * @param {{ env?: NodeJS.ProcessEnv } | null | undefined} [options]
+ * @returns {'strict' | 'final-only'}
+ */
+export function resolveBundleRatchetMode(options = null) {
+  const env = options?.env ?? process.env;
+  const raw = env?.CC_PARTNER_BUNDLE_RATCHET;
+  if (typeof raw === 'string' && raw.trim().toLowerCase() === 'final-only') {
+    return 'final-only';
+  }
+  return 'strict';
+}
+
+/**
  * 计算某指标的有效上限 = min(baseline, final)；无 baseline 时用 final。
  *
  * Business Logic:
  *   baseline ratchet 禁止增长，但不能成为第二套可抬高的最终阈值。
+ *   `final-only` 模式忽略 baseline（供本地 env-drift 主机显式选择；CI 默认 strict）。
  *
  * Code Logic:
- *   若 baseline 为有限非负 number，取 Math.min；否则返回 final。
+ *   mode=final-only → 直接返回 final；否则若 baseline 为有限非负 number，取 Math.min；否则 final。
  *
  * @param {number} finalBytes
  * @param {unknown} baselineBytes
+ * @param {'strict' | 'final-only'} [mode='strict']
  * @returns {number}
  */
-export function effectiveCeiling(finalBytes, baselineBytes) {
+export function effectiveCeiling(finalBytes, baselineBytes, mode = 'strict') {
+  if (mode === 'final-only') {
+    return finalBytes;
+  }
   if (typeof baselineBytes === 'number' && Number.isFinite(baselineBytes) && baselineBytes >= 0) {
     return Math.min(finalBytes, baselineBytes);
   }
@@ -436,6 +464,7 @@ export function parseBaselineMetrics(raw) {
  *   取 entryStyles → CSS gzip；total = js + css 比 initial 预算；
  *   对非 initial chunk 检查 lazy 硬顶；对全部 chunk 求和查 total runtime JS；
  *   sourcemap 用 options 提供的 raw 总字节；baseline 用 effectiveCeiling 收紧。
+ *   options.ratchetMode 或 env CC_PARTNER_BUNDLE_RATCHET 控制 strict/final-only。
  *
  * @param {{
  *   entries?: Record<string, string>,
@@ -452,6 +481,8 @@ export function parseBaselineMetrics(raw) {
  *   budgets?: { main?: number, mobile?: number, lazyChunk?: number, totalRuntimeJs?: number, sourcemap?: number },
  *   entryStyles?: Record<string, string[]>,
  *   sourcemapRawBytes?: number,
+ *   ratchetMode?: 'strict' | 'final-only',
+ *   env?: NodeJS.ProcessEnv,
  *   baseline?: {
  *     mainInitialGzipBytes?: number,
  *     mobileInitialGzipBytes?: number,
@@ -507,6 +538,10 @@ export function analyzeBundleContract(contract, options) {
     sourcemap: options.budgets?.sourcemap ?? finals.sourcemapRawBytes,
   };
   const baseline = options.baseline ?? null;
+  const ratchetMode =
+    options.ratchetMode === 'final-only' || options.ratchetMode === 'strict'
+      ? options.ratchetMode
+      : resolveBundleRatchetMode({ env: options.env });
   /** @type {Record<string, string[]>} */
   const entryStylesSource = options.entryStyles ?? contract?.entryStyles ?? {};
 
@@ -549,7 +584,7 @@ export function analyzeBundleContract(contract, options) {
       entryName === 'main' ? 'mainInitialGzipBytes' : 'mobileInitialGzipBytes';
     const baselineBytes =
       baseline && typeof baseline[baselineKey] === 'number' ? baseline[baselineKey] : null;
-    const budgetBytes = effectiveCeiling(finalBudgetBytes, baselineBytes);
+    const budgetBytes = effectiveCeiling(finalBudgetBytes, baselineBytes, ratchetMode);
     let jsGzipBytes = 0;
     let cssGzipBytes = 0;
     try {
@@ -601,6 +636,7 @@ export function analyzeBundleContract(contract, options) {
       const lazyCeiling = effectiveCeiling(
         finalBudgets.lazyChunk,
         baseline?.maxLazyChunkGzipBytes,
+        ratchetMode,
       );
       if (gzipBytes > lazyCeiling) {
         diagnostics.push(
@@ -613,6 +649,7 @@ export function analyzeBundleContract(contract, options) {
   const totalJsCeiling = effectiveCeiling(
     finalBudgets.totalRuntimeJs,
     baseline?.totalRuntimeJsGzipBytes,
+    ratchetMode,
   );
   if (totalRuntimeJsGzipBytes > totalJsCeiling) {
     diagnostics.push(
@@ -624,7 +661,11 @@ export function analyzeBundleContract(contract, options) {
     typeof options.sourcemapRawBytes === 'number' && Number.isFinite(options.sourcemapRawBytes)
       ? Math.max(0, options.sourcemapRawBytes)
       : 0;
-  const sourcemapCeiling = effectiveCeiling(finalBudgets.sourcemap, baseline?.sourcemapRawBytes);
+  const sourcemapCeiling = effectiveCeiling(
+    finalBudgets.sourcemap,
+    baseline?.sourcemapRawBytes,
+    ratchetMode,
+  );
   if (sourcemapRawBytes > sourcemapCeiling) {
     diagnostics.push(
       `sourcemap over budget: actual=${sourcemapRawBytes}B baseline=${baseline?.sourcemapRawBytes ?? 'n/a'} final=${finalBudgets.sourcemap}B (${formatBudgetKiB(finalBudgets.sourcemap)}) ceiling=${sourcemapCeiling}B (publish no .map or keep total ≤2 MiB)`,
@@ -686,14 +727,17 @@ export function analyzeBundleContract(contract, options) {
       mainInitialGzipBytes: effectiveCeiling(
         finalBudgets.main,
         baseline?.mainInitialGzipBytes,
+        ratchetMode,
       ),
       mobileInitialGzipBytes: effectiveCeiling(
         finalBudgets.mobile,
         baseline?.mobileInitialGzipBytes,
+        ratchetMode,
       ),
       lazyChunkGzipBytes: effectiveCeiling(
         finalBudgets.lazyChunk,
         baseline?.maxLazyChunkGzipBytes,
+        ratchetMode,
       ),
       totalRuntimeJsGzipBytes: totalJsCeiling,
       sourcemapRawBytes: sourcemapCeiling,
@@ -793,6 +837,15 @@ function printFailureReport(result, meta = {}) {
   console.error('Bundle contract failed:');
   for (const diagnostic of result.diagnostics) {
     console.error(`  - ${diagnostic}`);
+  }
+  if (resolveBundleRatchetMode() === 'strict') {
+    console.error('');
+    console.error(
+      'Hint: committed baseline ratchet is non-increasing (do not hand-raise metrics).',
+    );
+    console.error(
+      'Local toolchain/env drift hosts may set CC_PARTNER_BUNDLE_RATCHET=final-only to use final hard ceilings only; CI remains strict by default.',
+    );
   }
   console.error('');
   console.error('Metrics (actual / baseline / final / ceiling):');

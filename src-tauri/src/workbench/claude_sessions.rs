@@ -1671,13 +1671,71 @@ pub fn apply_session_watch_plan(
     }
 }
 
+/// 读取指定 worktree key 的 dispose 世代。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ensure 扫描前后需要比对世代，识别“扫描期间项目已被移除”。
+///
+/// Code Logic（这个函数做什么）:
+///     读 `workbench_claude_session_index_dispose_epochs`；缺失 key 视为 0；锁中毒时返回 0 并 warn。
+fn dispose_epoch_for_key(state: &AppState, key: &str) -> u64 {
+    match state.workbench_claude_session_index_dispose_epochs.lock() {
+        Ok(map) => map.get(key).copied().unwrap_or(0),
+        Err(err) => {
+            tracing::warn!("session dispose epochs 锁中毒，按 0 处理 key={key}: {err}");
+            0
+        }
+    }
+}
+
+/// 提升 key 的 dispose 世代（单调 +1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     dispose 必须让任何 in-flight scan 在完成后看到世代变化，从而拒绝写回。
+///
+/// Code Logic（这个函数做什么）:
+///     写锁 entry.or_insert(0) 后 saturating_add(1)。
+fn bump_dispose_epoch(state: &AppState, key: &str) {
+    match state.workbench_claude_session_index_dispose_epochs.lock() {
+        Ok(mut map) => {
+            let entry = map.entry(key.to_string()).or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+        Err(err) => {
+            tracing::warn!("session dispose epochs 写锁中毒，无法 bump key={key}: {err}");
+        }
+    }
+}
+
+/// 仅清 watcher / indexes / inflight 工件，不 bump dispose 世代。
+///
+/// Business Logic（为什么需要这个函数）:
+///     finish 路径在 insert 后发现已被 dispose 时需撤回刚写入的工件，但世代已由 dispose 提升，不可再 bump。
+///
+/// Code Logic（这个函数做什么）:
+///     force_dispose watcher；indexes.remove；try_lock 清 inflight entry。
+fn purge_session_index_artifacts(state: &AppState, key: &str) {
+    if let Ok(mut watchers) = state.workbench_claude_session_watchers.lock() {
+        if let Some(runtime) = watchers.remove(key) {
+            runtime.force_dispose();
+        }
+    }
+    if let Ok(mut indexes) = state.workbench_claude_session_indexes.write() {
+        indexes.remove(key);
+    }
+    if let Ok(mut inflight) = state.workbench_claude_session_index_inflight.try_lock() {
+        inflight.remove(key);
+    }
+}
+
 /// 按 worktree 路径列表清理 session 索引与 watcher 运行时。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户移除项目时，相关 worktree 的索引与后台监听应立即停止，避免继续占用资源或写回。
 ///
 /// Code Logic（这个函数做什么）:
-///     对每个 path canonicalize 为 key，remove runtime.force_dispose，并清 indexes/inflight 条目。
+///     对每个 path canonicalize 为 key，bump dispose epoch，force_dispose watcher，
+///     并清 indexes/inflight 条目（raw key 亦尝试一次，防止 canonicalize 前后不一致）。
 pub fn dispose_session_indexes_for_worktree_paths(state: &AppState, worktree_paths: &[PathBuf]) {
     for path in worktree_paths {
         let key = path
@@ -1700,7 +1758,7 @@ pub fn dispose_session_indexes_for_worktree_paths(state: &AppState, worktree_pat
 ///     后端退出时必须 cancel 所有 debounce/scan 任务并 drop watcher，避免幽灵任务与句柄泄漏。
 ///
 /// Code Logic（这个函数做什么）:
-///     drain watchers 并 force_dispose；clear indexes；best-effort 清 inflight（try_lock）。
+///     drain watchers 并 force_dispose；clear indexes / dispose epochs；best-effort 清 inflight（try_lock）。
 pub fn shutdown_all_claude_session_indexes(state: &AppState) {
     let runtimes: Vec<ClaudeSessionWatcherRuntime> = {
         let mut map = match state.workbench_claude_session_watchers.lock() {
@@ -1720,28 +1778,27 @@ pub fn shutdown_all_claude_session_indexes(state: &AppState) {
     } else {
         tracing::warn!("shutdown session indexes 写锁中毒");
     }
+    if let Ok(mut epochs) = state.workbench_claude_session_index_dispose_epochs.lock() {
+        epochs.clear();
+    } else {
+        tracing::warn!("shutdown session dispose epochs 锁中毒");
+    }
     // inflight 是 tokio Mutex；shutdown 路径 best-effort try_lock，避免阻塞退出
     if let Ok(mut inflight) = state.workbench_claude_session_index_inflight.try_lock() {
         inflight.clear();
     }
 }
 
-/// 按 key 移除单个索引 + runtime。
+/// 按 key 移除单个索引 + runtime，并提升 dispose 世代。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     单 worktree 清理与失败降级共用同一移除语义。
+///     单 worktree 清理与失败降级共用同一移除语义；必须让并发 ensure 无法写回幽灵索引。
 ///
 /// Code Logic（这个函数做什么）:
-///     取走 watcher runtime 并 force_dispose；indexes.remove(key)。
+///     bump dispose epoch → purge watcher/indexes/inflight。
 fn dispose_session_index_by_key(state: &AppState, key: &str) {
-    if let Ok(mut watchers) = state.workbench_claude_session_watchers.lock() {
-        if let Some(runtime) = watchers.remove(key) {
-            runtime.force_dispose();
-        }
-    }
-    if let Ok(mut indexes) = state.workbench_claude_session_indexes.write() {
-        indexes.remove(key);
-    }
+    bump_dispose_epoch(state, key);
+    purge_session_index_artifacts(state, key);
 }
 
 /// 确保 worktree 的 session 索引已扫描并启动文件监听（lazy + singleflight + spawn_blocking）。
@@ -1752,10 +1809,10 @@ fn dispose_session_index_by_key(state: &AppState, key: &str) {
 ///
 /// Code Logic（这个函数做什么）:
 ///     1. 快路径：indexes 读锁命中直接返回；
-///     2. 锁 inflight map：已有 Receiver → 等待 Some；否则创建 watch(None) 并成为 leader；
-///     3. leader：`spawn_blocking(scan_worktree_sessions_with_budget default)`；
-///     4. 短暂写锁 double-check insert；释放后 spawn_session_watcher；
-///     5. send Some(Ok/Err) 并 remove inflight。
+///     2. 捕获 dispose start_epoch；
+///     3. 锁 inflight map：已有 Receiver → 等待 Some；否则创建 watch(None) 并成为 leader；
+///     4. leader/回退：`finish_scan_and_insert(start_epoch)`（spawn_blocking + epoch 守卫 insert）；
+///     5. leader send Some(Ok) 并 remove inflight。
 ///
 /// **为何写锁不活到函数末尾（防死锁）**：
 ///     spawn_session_watcher 失败分支会再取同一 indexes 写锁；标准库 RwLock 不支持重入。
@@ -1778,6 +1835,9 @@ pub async fn ensure_worktree_session_index_scanned(
             return Arc::clone(existing);
         }
     }
+
+    // 在进入 inflight 前捕获 dispose 世代；扫描期间 dispose 会 bump，finish 据此 no-op
+    let start_epoch = dispose_epoch_for_key(state, &key);
 
     // singleflight：注册或加入
     let (is_leader, mut rx, tx_opt) = {
@@ -1822,11 +1882,13 @@ pub async fn ensure_worktree_session_index_scanned(
                 return Arc::clone(existing);
             }
         }
-        return finish_scan_and_insert(state, &key, &canonical).await;
+        // 回退路径重新捕获 epoch（dispose 可能已发生）
+        let fallback_epoch = dispose_epoch_for_key(state, &key);
+        return finish_scan_and_insert(state, &key, &canonical, fallback_epoch).await;
     }
 
     // leader
-    let shared = finish_scan_and_insert(state, &key, &canonical).await;
+    let shared = finish_scan_and_insert(state, &key, &canonical, start_epoch).await;
     if let Some(tx) = tx_opt {
         let _ = tx.send(Some(Ok(Arc::clone(&shared))));
     }
@@ -1837,18 +1899,56 @@ pub async fn ensure_worktree_session_index_scanned(
     shared
 }
 
-/// leader/回退路径：spawn_blocking 扫描 + 写锁 insert + watcher。
+/// 构造未写入缓存的空索引句柄（dispose 竞态 no-op 返回值）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     singleflight leader 与 follower 失败回退共用同一插入路径，避免重复逻辑。
+///     扫描期间 key 已被 dispose 时，调用方仍需要一个 Shared 句柄，但绝不能写入 indexes 或启 watcher。
 ///
 /// Code Logic（这个函数做什么）:
-///     spawn_blocking 默认预算扫描；double-check insert；释放锁后 spawn_session_watcher。
+///     返回 Arc 包装的空 WorktreeSessionIndex（truncated=false，diagnostics=unavailable）。
+fn empty_uncached_session_index(canonical: &Path) -> SharedWorktreeSessionIndex {
+    Arc::new(RwLock::new(WorktreeSessionIndex {
+        worktree_path: canonical.to_path_buf(),
+        encoded_cwd: encode_claude_project_path(&canonical.to_string_lossy()),
+        sessions: HashMap::new(),
+        last_scan_at: Utc::now().to_rfc3339(),
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    }))
+}
+
+/// leader/回退路径：spawn_blocking 扫描 + dispose-epoch 守卫的 insert + watcher。
+///
+/// Business Logic（为什么需要这个函数）:
+///     singleflight leader 与 follower 失败回退共用同一插入路径；若扫描期间项目已被 dispose，
+///     必须禁止写回索引/启动 watcher，否则会留下幽灵资源。
+///
+/// Code Logic（这个函数做什么）:
+///     1. （测试）可选 mid-scan barrier；
+///     2. spawn_blocking 默认扫描；
+///     3. 写锁下比对 start_epoch 与当前 dispose epoch：变化则不 insert；
+///     4. double-check 已有 entry 则复用且不重复 spawn watcher；
+///     5. 仅本路径新 insert 时 spawn watcher，并在 spawn 前后再检 epoch，必要时 purge。
 async fn finish_scan_and_insert(
     state: &AppState,
     key: &str,
     canonical: &Path,
+    start_epoch: u64,
 ) -> SharedWorktreeSessionIndex {
+    // 测试钩子：让 dispose 能在 scan 进行中介入
+    #[cfg(test)]
+    {
+        scan_test_hooks_wait_before_scan().await;
+    }
+
+    // 扫描前再检一次：若已 dispose，跳过阻塞扫描直接返回
+    if dispose_epoch_for_key(state, key) != start_epoch {
+        tracing::debug!(
+            "Claude session 扫描前检测到 dispose，跳过 insert key={key} start_epoch={start_epoch}"
+        );
+        return empty_uncached_session_index(canonical);
+    }
+
     let canonical_owned = canonical.to_path_buf();
     let scan_result =
         tokio::task::spawn_blocking(move || scan_worktree_sessions(&canonical_owned)).await;
@@ -1857,7 +1957,7 @@ async fn finish_scan_and_insert(
         Ok(idx) => idx,
         Err(err) => {
             tracing::warn!("Claude session spawn_blocking 扫描 join 失败 key={key}: {err}");
-            // 失败时返回空索引（仍可插入，避免永久卡死）
+            // 失败时返回空索引（若未 dispose 仍可插入，避免永久卡死）
             WorktreeSessionIndex {
                 worktree_path: canonical.to_path_buf(),
                 encoded_cwd: encode_claude_project_path(&canonical.to_string_lossy()),
@@ -1870,22 +1970,61 @@ async fn finish_scan_and_insert(
     };
 
     let shared = Arc::new(RwLock::new(index));
+    let mut inserted = false;
     let to_return = {
+        // 写锁内原子判定 dispose + double-check
+        if dispose_epoch_for_key(state, key) != start_epoch {
+            tracing::debug!(
+                "Claude session 扫描后 dispose 世代变化，跳过 insert key={key} start_epoch={start_epoch}"
+            );
+            return empty_uncached_session_index(canonical);
+        }
         let mut indexes = state
             .workbench_claude_session_indexes
             .write()
             .expect("session indexes 写锁中毒");
+        // 再检 epoch（dispose 可能在等写锁时发生）
+        if dispose_epoch_for_key(state, key) != start_epoch {
+            tracing::debug!(
+                "Claude session 写锁内 dispose 世代变化，跳过 insert key={key} start_epoch={start_epoch}"
+            );
+            return empty_uncached_session_index(canonical);
+        }
         if let Some(existing) = indexes.get(key) {
             Arc::clone(existing)
         } else {
             indexes.insert(key.to_string(), Arc::clone(&shared));
+            inserted = true;
             Arc::clone(&shared)
         }
     };
     // 写锁已释放
-    spawn_session_watcher(state, key, canonical, &to_return);
+
+    // 仅本路径新写入缓存时启动 watcher；复用已有 index 不 thrash watcher
+    if inserted {
+        if dispose_epoch_for_key(state, key) != start_epoch {
+            // insert 与 dispose 竞态：撤回缓存与可能已注册的 watcher
+            purge_session_index_artifacts(state, key);
+            return empty_uncached_session_index(canonical);
+        }
+        spawn_session_watcher(state, key, canonical, &to_return);
+        if dispose_epoch_for_key(state, key) != start_epoch {
+            purge_session_index_artifacts(state, key);
+            return empty_uncached_session_index(canonical);
+        }
+    }
     to_return
 }
+
+#[cfg(test)]
+#[path = "claude_sessions_scan_test_hooks.rs"]
+mod scan_test_hooks;
+
+#[cfg(test)]
+async fn scan_test_hooks_wait_before_scan() {
+    scan_test_hooks::wait_before_scan().await;
+}
+
 
 /// 为指定 worktree 启动 notify 文件监听。
 ///

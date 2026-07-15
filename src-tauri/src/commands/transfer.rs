@@ -471,6 +471,7 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            workbench_claude_session_index_dispose_epochs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             runtime_metrics: Arc::new(crate::backend::runtime_metrics::RuntimeMetrics::new()),
             runtime_role: RuntimeRole::HeadlessOwner,
             event_bus: Arc::new(crate::backend::event_bus::RuntimeEventBus::new(

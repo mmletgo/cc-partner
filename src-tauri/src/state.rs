@@ -159,6 +159,16 @@ pub struct AppState {
             HashMap<String, crate::workbench::claude_sessions::ClaudeSessionIndexInflightRx>,
         >,
     >,
+    /// Claude session 索引 per-key dispose 世代，防止 dispose 后 concurrent ensure 写回幽灵索引。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     用户移除项目时可能正有搜索在 singleflight 扫描中；扫描结束后若仍 insert/spawn watcher，
+    ///     会留下已删除项目的幽灵索引与 notify 运行时。世代计数让 finish 路径识别“扫描期间已被 dispose”。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     `Mutex<HashMap<String, u64>>`；dispose 时 key 的 epoch+1；ensure 在 leader/回退路径
+    ///     捕获 start_epoch，finish_scan_and_insert 在 insert/watcher 前比对，世代变化则 no-op。
+    pub workbench_claude_session_index_dispose_epochs: Arc<Mutex<HashMap<String, u64>>>,
     /// 进程内有界本地运行时指标（耗时/计数/EWMA）；不上传、不记录正文/路径/凭据。
     pub runtime_metrics: Arc<RuntimeMetrics>,
     /// 运行时角色：sidecar=`HeadlessOwner`（唯一 Workbench/runtime owner），GUI=`GuiClient`（仅代理）。
