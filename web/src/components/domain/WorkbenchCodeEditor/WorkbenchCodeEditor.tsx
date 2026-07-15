@@ -51,37 +51,56 @@ const WORKBENCH_CODE_EDITOR_BASIC_SETUP: BasicSetupOptions = {
  *   （纯文本）但仍保持 theme 与 One Dark Pro syntax 扩展；渲染带自定义 theme prop 的 100% 高度
  *   CodeMirror，并启用行号、折叠 gutter、当前行高亮、括号匹配和搜索快捷键。
  */
+/**
+ * 已装载语言扩展快照：仅当 language 与当前请求语言一致时才应用，切换语言时派生为纯文本。
+ */
+interface LoadedLanguageExtension {
+  language: string;
+  extension: Extension | null;
+}
+
 export function WorkbenchCodeEditor({
   value,
   language,
   readOnly = false,
   onChange,
 }: WorkbenchCodeEditorProps): ReactElement {
-  const [languageExtension, setLanguageExtension] = useState<Extension | null>(null);
+  const [loadedLanguage, setLoadedLanguage] = useState<LoadedLanguageExtension | null>(null);
   const languageRequestSeqRef = useRef(0);
 
   useEffect(() => {
+    /**
+     * Business Logic（为什么需要这个 effect）:
+     *   文件切换会改变 language；语言包按需动态 import，完成后才能启用语法高亮。
+     *
+     * Code Logic（这个 effect 做什么）:
+     *   request sequence 丢弃过期 Promise；成功/失败都写入 loadedLanguage。
+     *   不在 effect 同步 setState(null)——language 与 loadedLanguage.language 不一致时
+     *   下方派生 languageExtension=null，避免 set-state-in-effect 级联渲染。
+     */
     const requestSeq = languageRequestSeqRef.current + 1;
     languageRequestSeqRef.current = requestSeq;
-    // 切换语言时先退回纯文本，避免短暂显示错误高亮
-    setLanguageExtension(null);
 
     void loadWorkbenchLanguage(language).then(
       (extension) => {
         if (languageRequestSeqRef.current !== requestSeq) {
           return;
         }
-        setLanguageExtension(extension);
+        setLoadedLanguage({ language, extension });
       },
       () => {
         // import 失败：保持纯文本可编辑，不阻塞文件查看
         if (languageRequestSeqRef.current !== requestSeq) {
           return;
         }
-        setLanguageExtension(null);
+        setLoadedLanguage({ language, extension: null });
       },
     );
   }, [language]);
+
+  // 切换语言瞬间（异步 loader 完成前）强制纯文本，避免错误高亮闪烁
+  const languageExtension =
+    loadedLanguage && loadedLanguage.language === language ? loadedLanguage.extension : null;
 
   const extensions = useMemo(
     () => [

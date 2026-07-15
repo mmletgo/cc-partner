@@ -475,16 +475,14 @@ where
         .filter(|value| !value.is_empty())
         .is_some()
     {
-        if let Err(err) = crate::commands::orchestrator::enforce_deliver_review_digest_for_worktree(
+        // review_diff_changed / Validation 等 digest 门禁错误上抛，由 run_delivery_for_task
+        // 特殊处理回退 Human Review；不得在此 block 或写 delivery evidence。
+        crate::commands::orchestrator::enforce_deliver_review_digest_for_worktree(
             &task.id,
             Path::new(&task_path),
             worktree.base_branch.as_deref(),
             expected_review_digest,
-        ) {
-            // review_diff_changed / Validation 等 digest 门禁错误上抛，由 run_delivery_for_task
-            // 特殊处理回退 Human Review；不得在此 block 或写 delivery evidence。
-            return Err(err);
-        }
+        )?;
     }
 
     let commit_message = format!("orchestrator: {}", task.title.trim());
@@ -1977,7 +1975,8 @@ mod tests {
         let commit_started = harness.controls.commit_started.notified();
         let first_harness = harness.clone();
         let first_task_id = task_id.clone();
-        let first = tokio::spawn(async move { deliver_task(&first_harness, &first_task_id, None).await });
+        let first =
+            tokio::spawn(async move { deliver_task(&first_harness, &first_task_id, None).await });
         commit_started.await;
 
         let second = deliver_task(&harness, &task_id, None)
@@ -2339,10 +2338,7 @@ mod tests {
             err.code(),
             crate::commands::orchestrator::REVIEW_DIFF_CHANGED_CODE
         );
-        assert_eq!(
-            err.classify(),
-            crate::error::AppErrorCategory::Conflict
-        );
+        assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
         assert_eq!(
             harness.controls.commit_calls.load(Ordering::SeqCst),
             0,
@@ -2381,8 +2377,11 @@ mod tests {
     async fn auto_delivery_with_none_digest_skips_commit_boundary_gate() {
         let harness = setup_delivery_harness().await;
         let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
-        fs::write(task_worktree.join("task.txt"), "auto delivery without digest\n")
-            .expect("write task file");
+        fs::write(
+            task_worktree.join("task.txt"),
+            "auto delivery without digest\n",
+        )
+        .expect("write task file");
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
 
         let delivered = deliver_task(&harness, &task_id, None)

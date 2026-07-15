@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-15T01:15:30.055Z",
+  "generatedAt": "2026-07-15T12:47:42.528Z",
   "limits": {
     "ts": {
       "soft": 1000,
@@ -21,9 +21,6 @@
     },
     "src-tauri/src/net/peer_client.rs": {
       "lines": 3014
-    },
-    "src-tauri/src/workbench/claude_sessions.rs": {
-      "lines": 2867
     },
     "src-tauri/src/workbench/dependencies.rs": {
       "lines": 3457

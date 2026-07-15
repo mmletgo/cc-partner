@@ -74,7 +74,6 @@ describe('Workbench render budget (characterization)', () => {
 
     // Task 2 目标：叶子 tick 不得抬升根渲染计数。
     expect(renders.mock.calls.length).toBe(settledRenders);
-    // eslint-disable-next-line no-console
     console.info(
       `[perf-baseline] workbench root renders over 5s after settle: ${renders.mock.calls.length} (settled=${settledRenders})`,
     );
@@ -82,11 +81,9 @@ describe('Workbench render budget (characterization)', () => {
 
   test('records the current CodeEditor lazy-chunk baseline note', () => {
     // Code Logic: 不在单元测试里读 dist（CI 未必先 build）；把与 check:bundle 对齐的
-    // 测量面写进日志。实测（本 worktree dist）：WorkbenchCodeEditor gzip ≈ 263829 B
-    // 即 maxLazyChunk 基线，raw ≈ 755916 B。后续 Task 3 要求 editor-entry 至少下降 20%。
-    // eslint-disable-next-line no-console
+    // 测量面写进日志。editor-entry 经 N7 lazy language loader 后由 check:bundle 实测。
     console.info(
-      '[perf-baseline] CodeEditor lazy chunk: measure via `cd web && npm run check:bundle` → maxLazyChunk / WorkbenchCodeEditor-*.js (baseline maxLazyChunkGzipBytes=263829)',
+      '[perf-baseline] CodeEditor lazy chunk: measure via `cd web && npm run check:bundle` → editorEntryLoadedGzipBytes / maxLazyChunk',
     );
     expect(true).toBe(true);
   });

@@ -430,7 +430,7 @@ vi.mock('react-router-dom', async () => {
         _opts?: unknown,
       ) => {
         setSearchParamsMock(update, _opts);
-        setParams((prev) => {
+        setParams(() => {
           const base = new URLSearchParams(searchParamsState.value.toString());
           const next =
             typeof update === 'function'
