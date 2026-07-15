@@ -1122,8 +1122,7 @@ mod tests {
 
         /// 返回已发生的 health 调用次数。
         fn health_calls(&self) -> u32 {
-            self.health_calls
-                .load(std::sync::atomic::Ordering::SeqCst)
+            self.health_calls.load(std::sync::atomic::Ordering::SeqCst)
         }
 
         /// 模拟一次 typed health / protocol 探测。

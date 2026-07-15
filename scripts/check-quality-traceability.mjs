@@ -6,7 +6,9 @@
  *   S6 要求从产品 surface 追到稳定 evidence ID、测试文件、本地命令、CI job
  *   与明确 exclusions。人工维护会漏改 ID、引用不存在的测试，或把 L3 未执行
  *   项写成已验证。本脚本对 `docs/development/quality-matrix.json` 做零依赖静态校验，
- *   并提供 --self-test 防止门禁自身回归。
+ *   并提供 --self-test 防止门禁自身回归。N8 另固定 `macos-aarch64-beta`
+ *   dependency closure：只消费 Apple Silicon 架构级 execution，不把聚合 PARTIAL/
+ *   canonical NOT VERIFIED 提升为 full PASS，也不让延期平台阻断本机 beta。
  *
  * Code Logic（这个脚本做什么）:
  *   - 读取 quality-matrix.json，校验 id 唯一、level/ciJob 白名单、tests 文件存在、
@@ -14,14 +16,17 @@
  *     optional docs 路径存在、exclusions 为非空字符串数组。
  *   - L3：要求 status；PASS/VERIFIED 且 expiresAt 已过期则失败；
  *     NOT VERIFIED 允许缺少 commit/version/date/expiresAt，也允许 expiresAt 过期。
+ *   - claimMode/claimProfile：固定 `platform-beta` + `macos-aarch64-beta` 闭包，
+ *     校验 execution manifest、RC inventory、releasable 资产与 beta-only 发布元数据。
  *   - 不发明身份鉴权、不把 L1 mock 提升为 L3。
- *   - `--self-test` 用内存 fixture 覆盖 duplicate ID / missing test / unknown level|job /
- *     command 无 package/workflow 背书 / expired L3 / nonexistent doc ref / valid exclusions。
+ *   - `--self-test` 用内存 fixture 覆盖 matrix 门禁 + macos-aarch64-beta profile 契约。
  *
  * Usage:
  *   node scripts/check-quality-traceability.mjs
  *   node scripts/check-quality-traceability.mjs --self-test
  *   node scripts/check-quality-traceability.mjs --matrix path/to/matrix.json
+ *   node scripts/check-quality-traceability.mjs --claim-mode platform-beta --claim-profile macos-aarch64-beta \
+ *     --subject-commit <40hex> --subject-tag <tag> --rc-run-id <id> --evidence-ref <ref>
  */
 
 import {
@@ -31,6 +36,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -532,6 +538,564 @@ export function loadKnownEvidenceIds(
   }
 }
 
+/** 40 位小写/大写十六进制 commit SHA。 */
+const COMMIT_SHA_RE = /^[0-9a-fA-F]{40}$/;
+
+/** SHA-256 十六进制。 */
+const SHA256_RE = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * 当前固定的平台 beta profile 闭包（checker 拥有，调用者不可改 required IDs）。
+ *
+ * Business Logic（为什么需要这个常量）:
+ *   N8 只允许 `macos-aarch64-beta`；required executions / matrix / uncertified surfaces
+ *   必须由 checker 派生，禁止调用者传任意 allowlist 伪装 full 认证。
+ *
+ * Code Logic（这个常量做什么）:
+ *   冻结 claimMode/claimProfile/selectedMatrixIds/requiredExecutions/uncertifiedSurfaces。
+ *
+ * @type {Readonly<{
+ *   claimMode: string,
+ *   claimProfile: string,
+ *   selectedMatrixIds: readonly string[],
+ *   requiredExecutions: readonly string[],
+ *   uncertifiedSurfaces: readonly string[],
+ *   evidenceValidityDays: number,
+ *   allowedReleaseMode: string,
+ * }>}
+ */
+export const MACOS_AARCH64_BETA_PROFILE = Object.freeze({
+  claimMode: 'platform-beta',
+  claimProfile: 'macos-aarch64-beta',
+  selectedMatrixIds: Object.freeze(['macos-aarch64']),
+  requiredExecutions: Object.freeze([
+    'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64',
+    'L3-MACOS-VOICEOVER-001@macos-aarch64',
+  ]),
+  uncertifiedSurfaces: Object.freeze([
+    'windows',
+    'wsl',
+    'ubuntu',
+    'macos-x86_64',
+    'dual-host',
+    'ios',
+    'android',
+    'nvda',
+    'full-release',
+    'stable-release',
+  ]),
+  evidenceValidityDays: 90,
+  allowedReleaseMode: 'beta-prerelease',
+});
+
+/**
+ * 已登记 claim profile 表（当前仅 macos-aarch64-beta）。
+ * @type {ReadonlyMap<string, typeof MACOS_AARCH64_BETA_PROFILE>}
+ */
+export const CLAIM_PROFILES = Object.freeze(
+  new Map([[MACOS_AARCH64_BETA_PROFILE.claimProfile, MACOS_AARCH64_BETA_PROFILE]]),
+);
+
+/**
+ * 解析固定 claim profile。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   release gate 与 self-test 必须拒绝未知 profile 或 claimMode 错配，防止 stable/full 伪装。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅接受 claimMode=platform-beta + 已登记 claimProfile；否则返回 findings。
+ *
+ * @param {string} claimMode
+ * @param {string} claimProfile
+ * @returns {{ ok: boolean, profile: typeof MACOS_AARCH64_BETA_PROFILE | null, findings: string[] }}
+ */
+export function resolveClaimProfile(claimMode, claimProfile) {
+  /** @type {string[]} */
+  const findings = [];
+  if (claimMode !== 'platform-beta') {
+    findings.push(
+      `claimMode: only "platform-beta" is allowed (got ${JSON.stringify(claimMode)})`,
+    );
+  }
+  const profile = CLAIM_PROFILES.get(String(claimProfile || ''));
+  if (!profile) {
+    findings.push(
+      `claimProfile: unknown profile ${JSON.stringify(claimProfile)} (expected macos-aarch64-beta)`,
+    );
+    return { ok: false, profile: null, findings };
+  }
+  if (claimMode !== profile.claimMode) {
+    findings.push(
+      `claimMode/claimProfile mismatch: profile requires ${profile.claimMode}`,
+    );
+  }
+  return { ok: findings.length === 0, profile, findings };
+}
+
+/**
+ * 解析 `STABLE-ID@matrix` execution key。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   required executions 以稳定 ID + 架构矩阵绑定；禁止只写聚合 row 而不带架构。
+ *
+ * Code Logic（这个函数做什么）:
+ *   拆分 `@` 得到 stableId 与 artifactMatrixId；非法返回 null。
+ *
+ * @param {string} key
+ * @returns {{ stableId: string, artifactMatrixId: string } | null}
+ */
+export function parseExecutionKey(key) {
+  const raw = String(key || '').trim();
+  const at = raw.lastIndexOf('@');
+  if (at <= 0 || at === raw.length - 1) return null;
+  const stableId = raw.slice(0, at);
+  const artifactMatrixId = raw.slice(at + 1);
+  if (!stableId || !artifactMatrixId) return null;
+  return { stableId, artifactMatrixId };
+}
+
+/**
+ * 解析 RFC3339 或 YYYY-MM-DD 时间戳为 Date。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   execution expiresAt 可能写日历日或完整 RFC3339，过期判定需统一。
+ *
+ * Code Logic（这个函数做什么）:
+ *   YYYY-MM-DD → UTC 正午；RFC3339 直接 Date 解析；非法返回 null。
+ *
+ * @param {unknown} value
+ * @returns {Date | null}
+ */
+export function parseTimestamp(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const s = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return parseUtcDate(s);
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+/**
+ * 校验单条架构级 execution manifest。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   beta 只能消费匹配架构的 PASS execution；错误架构、过期、缺包 SHA 或伪 PASS 必须拒绝。
+ *
+ * Code Logic（这个函数做什么）:
+ *   校验 stableId/matrix/subject/version/rc/package SHA/result/expires/artifactShas；
+ *   不读取质量矩阵聚合 status 来决定 PASS。
+ *
+ * @param {unknown} manifest
+ * @param {{
+ *   expectedStableId: string,
+ *   expectedMatrixId: string,
+ *   subjectCommit: string,
+ *   appVersion?: string,
+ *   rcWorkflowRunId?: string,
+ *   packageSha256?: string,
+ *   now?: Date,
+ *   evidenceValidityDays?: number,
+ * }} ctx
+ * @returns {string[]}
+ */
+export function validateExecutionManifest(manifest, ctx) {
+  /** @type {string[]} */
+  const findings = [];
+  const label = `${ctx.expectedStableId}@${ctx.expectedMatrixId}`;
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    findings.push(`${label}: execution manifest must be an object`);
+    return findings;
+  }
+  /** @type {Record<string, unknown>} */
+  const m = /** @type {Record<string, unknown>} */ (manifest);
+
+  if (m.stableId !== ctx.expectedStableId) {
+    findings.push(
+      `${label}: stableId mismatch (got ${JSON.stringify(m.stableId)})`,
+    );
+  }
+  if (m.artifactMatrixId !== ctx.expectedMatrixId) {
+    findings.push(
+      `${label}: wrong architecture/matrix (got ${JSON.stringify(m.artifactMatrixId)}; expected ${ctx.expectedMatrixId})`,
+    );
+  }
+  if (typeof m.subjectCommit !== 'string' || !COMMIT_SHA_RE.test(m.subjectCommit)) {
+    findings.push(`${label}: subjectCommit must be 40-hex`);
+  } else if (m.subjectCommit.toLowerCase() !== ctx.subjectCommit.toLowerCase()) {
+    findings.push(`${label}: subjectCommit does not match claim subject`);
+  }
+  if (typeof m.appVersion !== 'string' || !m.appVersion.trim()) {
+    findings.push(`${label}: appVersion required`);
+  } else if (ctx.appVersion && m.appVersion !== ctx.appVersion) {
+    findings.push(`${label}: appVersion mismatch`);
+  }
+  if (
+    m.rcWorkflowRunId == null ||
+    (typeof m.rcWorkflowRunId !== 'string' && typeof m.rcWorkflowRunId !== 'number') ||
+    String(m.rcWorkflowRunId).trim() === ''
+  ) {
+    findings.push(`${label}: rcWorkflowRunId required`);
+  } else if (
+    ctx.rcWorkflowRunId != null &&
+    String(m.rcWorkflowRunId) !== String(ctx.rcWorkflowRunId)
+  ) {
+    findings.push(`${label}: rcWorkflowRunId mismatch`);
+  }
+  if (typeof m.packageFilename !== 'string' || !m.packageFilename.trim()) {
+    findings.push(`${label}: packageFilename required`);
+  }
+  if (typeof m.packageSha256 !== 'string' || !SHA256_RE.test(m.packageSha256)) {
+    findings.push(`${label}: packageSha256 must be 64-hex`);
+  } else if (
+    ctx.packageSha256 &&
+    m.packageSha256.toLowerCase() !== ctx.packageSha256.toLowerCase()
+  ) {
+    findings.push(`${label}: packageSha256 does not match RC inventory`);
+  }
+  if (typeof m.deviceClass !== 'string' || !m.deviceClass.trim()) {
+    findings.push(`${label}: deviceClass required (redacted class, not hostname)`);
+  }
+  if (typeof m.osBuild !== 'string' || !m.osBuild.trim()) {
+    findings.push(`${label}: osBuild required`);
+  }
+  if (typeof m.executorId !== 'string' || !m.executorId.trim()) {
+    findings.push(`${label}: executorId required`);
+  }
+  const executedAt = parseTimestamp(m.executedAt);
+  if (!executedAt) {
+    findings.push(`${label}: executedAt must be RFC3339 or YYYY-MM-DD`);
+  }
+  const expiresAt = parseTimestamp(m.expiresAt);
+  if (!expiresAt) {
+    findings.push(`${label}: expiresAt must be RFC3339 or YYYY-MM-DD`);
+  } else {
+    const now = ctx.now || new Date();
+    if (expiresAt < now) {
+      findings.push(`${label}: execution expired at ${m.expiresAt}`);
+    }
+    if (executedAt) {
+      const maxDays = ctx.evidenceValidityDays ?? 90;
+      const maxMs = maxDays * 24 * 60 * 60 * 1000;
+      if (expiresAt.getTime() - executedAt.getTime() > maxMs + 24 * 60 * 60 * 1000) {
+        findings.push(
+          `${label}: expiresAt window exceeds ${maxDays} days from executedAt`,
+        );
+      }
+    }
+  }
+  const result = typeof m.result === 'string' ? m.result.trim().toUpperCase() : '';
+  if (result !== 'PASS') {
+    findings.push(
+      `${label}: result must be PASS for beta consumption (got ${JSON.stringify(m.result)})`,
+    );
+  }
+  // 禁止仅靠聚合 prose/canonical status 冒充 execution PASS
+  if (m.aggregateStatus != null || m.canonicalStatus != null || m.matrixRowStatus != null) {
+    findings.push(
+      `${label}: aggregate/canonical matrix status fields are not accepted as execution PASS`,
+    );
+  }
+  if (!m.artifactShas || typeof m.artifactShas !== 'object' || Array.isArray(m.artifactShas)) {
+    findings.push(`${label}: artifactShas object required with non-empty checksums`);
+  } else {
+    const shas = /** @type {Record<string, unknown>} */ (m.artifactShas);
+    const keys = Object.keys(shas);
+    if (keys.length === 0) {
+      findings.push(`${label}: artifactShas must be non-empty`);
+    }
+    for (const k of keys) {
+      if (typeof shas[k] !== 'string' || !SHA256_RE.test(/** @type {string} */ (shas[k]))) {
+        findings.push(`${label}: artifactShas[${k}] must be 64-hex`);
+      }
+    }
+  }
+  return findings;
+}
+
+/**
+ * 校验 RC artifact inventory（production releasable + harness non-releasable）。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   beta 只能发布 releasable=true 的 macos-aarch64 生产资产；harness 必须 releasable=false，
+ *   且不得进入发布集合。
+ *
+ * Code Logic（这个函数做什么）:
+ *   校验 matrix、subject、资产 SHA、releasable 标记与禁止的跨平台 matrix。
+ *
+ * @param {unknown} inventory
+ * @param {{
+ *   subjectCommit: string,
+ *   allowedMatrixIds: readonly string[],
+ *   requireProductionReleasable?: boolean,
+ * }} ctx
+ * @returns {string[]}
+ */
+export function validateRcInventory(inventory, ctx) {
+  /** @type {string[]} */
+  const findings = [];
+  if (!inventory || typeof inventory !== 'object' || Array.isArray(inventory)) {
+    findings.push('rcInventory: must be an object');
+    return findings;
+  }
+  /** @type {Record<string, unknown>} */
+  const inv = /** @type {Record<string, unknown>} */ (inventory);
+  if (typeof inv.subjectCommit !== 'string' || !COMMIT_SHA_RE.test(inv.subjectCommit)) {
+    findings.push('rcInventory.subjectCommit must be 40-hex');
+  } else if (inv.subjectCommit.toLowerCase() !== ctx.subjectCommit.toLowerCase()) {
+    findings.push('rcInventory.subjectCommit does not match claim subject');
+  }
+  if (typeof inv.matrixId !== 'string' || !ctx.allowedMatrixIds.includes(inv.matrixId)) {
+    findings.push(
+      `rcInventory.matrixId: only ${ctx.allowedMatrixIds.join(',')} allowed (got ${JSON.stringify(inv.matrixId)})`,
+    );
+  }
+  if (typeof inv.rcWorkflowRunId !== 'string' && typeof inv.rcWorkflowRunId !== 'number') {
+    findings.push('rcInventory.rcWorkflowRunId required');
+  }
+  if (!Array.isArray(inv.assets) || inv.assets.length === 0) {
+    findings.push('rcInventory.assets: non-empty array required');
+    return findings;
+  }
+  let productionCount = 0;
+  let harnessCount = 0;
+  inv.assets.forEach((asset, i) => {
+    const path = `rcInventory.assets[${i}]`;
+    if (!asset || typeof asset !== 'object' || Array.isArray(asset)) {
+      findings.push(`${path}: must be object`);
+      return;
+    }
+    /** @type {Record<string, unknown>} */
+    const a = /** @type {Record<string, unknown>} */ (asset);
+    if (typeof a.name !== 'string' || !a.name.trim()) {
+      findings.push(`${path}.name required`);
+    }
+    if (typeof a.sha256 !== 'string' || !SHA256_RE.test(a.sha256)) {
+      findings.push(`${path}.sha256 must be 64-hex`);
+    }
+    if (typeof a.releasable !== 'boolean') {
+      findings.push(`${path}.releasable must be boolean`);
+    }
+    const name = typeof a.name === 'string' ? a.name : '';
+    const isHarness =
+      a.role === 'updater-harness' ||
+      /harness/i.test(name) ||
+      a.certificationMarker === true;
+    if (a.releasable === true) {
+      productionCount += 1;
+      if (isHarness) {
+        findings.push(
+          `${path}: harness/certification asset must be releasable=false`,
+        );
+      }
+      if (/(windows|linux|x86_64|x64|amd64|intel)/i.test(name) && !/aarch64/i.test(name)) {
+        findings.push(
+          `${path}: Windows/Linux/Intel asset not allowed for macos-aarch64-beta`,
+        );
+      }
+    } else if (a.releasable === false) {
+      harnessCount += 1;
+    }
+  });
+  if (ctx.requireProductionReleasable !== false && productionCount === 0) {
+    findings.push('rcInventory: at least one releasable=true production asset required');
+  }
+  // harness 可选但若存在必须 releasable=false（上面已检查）
+  if (harnessCount > 0 && productionCount === 0) {
+    findings.push(
+      'rcInventory: cannot publish when only releasable=false assets are present',
+    );
+  }
+  return findings;
+}
+
+/**
+ * 校验 release-claim.json 结构（required IDs 只能由 profile 派生）。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   调用者不得传入任意 requiredExecutions allowlist 来绕过 VoiceOver/GUI 依赖。
+ *
+ * Code Logic（这个函数做什么）:
+ *   固定 claimMode/profile/selectedMatrix；若调用方带 requiredExecutions 必须与 profile 完全一致；
+ *   拒绝 stable metadata / non-beta releaseMode。
+ *
+ * @param {unknown} claim
+ * @param {typeof MACOS_AARCH64_BETA_PROFILE} profile
+ * @returns {string[]}
+ */
+export function validateReleaseClaimDocument(claim, profile) {
+  /** @type {string[]} */
+  const findings = [];
+  if (!claim || typeof claim !== 'object' || Array.isArray(claim)) {
+    findings.push('releaseClaim: must be an object');
+    return findings;
+  }
+  /** @type {Record<string, unknown>} */
+  const c = /** @type {Record<string, unknown>} */ (claim);
+  if (c.claimMode !== profile.claimMode) {
+    findings.push(
+      `releaseClaim.claimMode must be ${profile.claimMode} (got ${JSON.stringify(c.claimMode)})`,
+    );
+  }
+  if (c.claimProfile !== profile.claimProfile) {
+    findings.push(
+      `releaseClaim.claimProfile must be ${profile.claimProfile} (got ${JSON.stringify(c.claimProfile)})`,
+    );
+  }
+  if (!Array.isArray(c.selectedMatrixIds)) {
+    findings.push('releaseClaim.selectedMatrixIds must be an array');
+  } else {
+    const got = c.selectedMatrixIds.map(String).sort().join(',');
+    const exp = [...profile.selectedMatrixIds].sort().join(',');
+    if (got !== exp) {
+      findings.push(
+        `releaseClaim.selectedMatrixIds must be exactly [${profile.selectedMatrixIds.join(',')}] (got ${JSON.stringify(c.selectedMatrixIds)})`,
+      );
+    }
+    for (const mid of c.selectedMatrixIds) {
+      if (
+        /windows|linux|ubuntu|x86_64|intel/i.test(String(mid)) &&
+        String(mid) !== 'macos-aarch64'
+      ) {
+        findings.push(
+          `releaseClaim.selectedMatrixIds rejects Windows/Linux/Intel matrix ${JSON.stringify(mid)}`,
+        );
+      }
+    }
+  }
+  if (c.requiredExecutions != null) {
+    if (!Array.isArray(c.requiredExecutions)) {
+      findings.push('releaseClaim.requiredExecutions must be an array when present');
+    } else {
+      const got = [...c.requiredExecutions].map(String).sort();
+      const exp = [...profile.requiredExecutions].map(String).sort();
+      if (got.length !== exp.length || got.some((v, i) => v !== exp[i])) {
+        findings.push(
+          'releaseClaim.requiredExecutions must equal checker-owned profile closure; arbitrary allowlists are rejected',
+        );
+      }
+    }
+  }
+  if (c.releaseMode != null && c.releaseMode !== profile.allowedReleaseMode) {
+    findings.push(
+      `releaseClaim.releaseMode must be ${profile.allowedReleaseMode} or omitted (got ${JSON.stringify(c.releaseMode)})`,
+    );
+  }
+  if (c.stableMetadata === true || c.mutateLatestJson === true || c.publishLatestJson === true) {
+    findings.push(
+      'releaseClaim: stable metadata / latest.json mutation is forbidden for beta profile',
+    );
+  }
+  if (c.prerelease === false) {
+    findings.push('releaseClaim.prerelease must not be false for beta profile');
+  }
+  if (!Array.isArray(c.uncertifiedSurfaces) || c.uncertifiedSurfaces.length === 0) {
+    findings.push(
+      'releaseClaim.uncertifiedSurfaces: must list deferred surfaces (windows/wsl/ubuntu/intel/...)',
+    );
+  }
+  return findings;
+}
+
+/**
+ * 运行 macos-aarch64-beta go/no-go 检查。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   Task 5/6 与 self-test 需要统一入口：两 execution + RC inventory + claim 文档 + 拒绝延期平台。
+ *
+ * Code Logic（这个函数做什么）:
+ *   resolve profile → 校验 claim → 逐 required execution 校验 manifest → inventory → 汇总 findings。
+ *
+ * @param {{
+ *   claimMode: string,
+ *   claimProfile: string,
+ *   subjectCommit: string,
+ *   subjectTag?: string,
+ *   rcWorkflowRunId?: string,
+ *   evidenceRef?: string,
+ *   expectedEvidenceCommit?: string,
+ *   appVersion?: string,
+ *   packageSha256?: string,
+ *   executions?: Record<string, unknown>,
+ *   rcInventory?: unknown,
+ *   releaseClaim?: unknown,
+ *   now?: Date,
+ * }} opts
+ * @returns {{ ok: boolean, decision: 'GO' | 'NO-GO', findings: string[], profile: typeof MACOS_AARCH64_BETA_PROFILE | null }}
+ */
+export function runBetaClaimCheck(opts) {
+  /** @type {string[]} */
+  const findings = [];
+  const resolved = resolveClaimProfile(opts.claimMode, opts.claimProfile);
+  findings.push(...resolved.findings);
+  const profile = resolved.profile;
+  if (!profile) {
+    return { ok: false, decision: 'NO-GO', findings, profile: null };
+  }
+  if (typeof opts.subjectCommit !== 'string' || !COMMIT_SHA_RE.test(opts.subjectCommit)) {
+    findings.push('subjectCommit must be 40-hex');
+  }
+  if (opts.subjectTag != null && (typeof opts.subjectTag !== 'string' || !opts.subjectTag.trim())) {
+    findings.push('subjectTag must be non-empty when provided');
+  }
+  if (opts.expectedEvidenceCommit != null) {
+    if (
+      typeof opts.expectedEvidenceCommit !== 'string' ||
+      !COMMIT_SHA_RE.test(opts.expectedEvidenceCommit)
+    ) {
+      findings.push('expectedEvidenceCommit must be 40-hex when provided');
+    }
+  }
+  if (opts.releaseClaim != null) {
+    findings.push(...validateReleaseClaimDocument(opts.releaseClaim, profile));
+  }
+  if (opts.rcInventory != null) {
+    findings.push(
+      ...validateRcInventory(opts.rcInventory, {
+        subjectCommit: opts.subjectCommit,
+        allowedMatrixIds: profile.selectedMatrixIds,
+      }),
+    );
+  }
+  const executions = opts.executions || {};
+  for (const key of profile.requiredExecutions) {
+    const parsed = parseExecutionKey(key);
+    if (!parsed) {
+      findings.push(`required execution key malformed: ${key}`);
+      continue;
+    }
+    const manifest = executions[key] ?? executions[parsed.stableId];
+    if (manifest == null) {
+      findings.push(`missing required execution: ${key}`);
+      continue;
+    }
+    findings.push(
+      ...validateExecutionManifest(manifest, {
+        expectedStableId: parsed.stableId,
+        expectedMatrixId: parsed.artifactMatrixId,
+        subjectCommit: opts.subjectCommit,
+        appVersion: opts.appVersion,
+        rcWorkflowRunId: opts.rcWorkflowRunId,
+        packageSha256: opts.packageSha256,
+        now: opts.now,
+        evidenceValidityDays: profile.evidenceValidityDays,
+      }),
+    );
+  }
+  // 显式拒绝把聚合 prose 当 PASS
+  if (opts.releaseClaim && /** @type {any} */ (opts.releaseClaim).aggregateProsePass === true) {
+    findings.push(
+      'aggregate prose PASS without architecture execution PASS is rejected',
+    );
+  }
+  const ok = findings.length === 0;
+  return {
+    ok,
+    decision: ok ? 'GO' : 'NO-GO',
+    findings,
+    profile,
+  };
+}
+
 /**
  * 构造最小合法 entry（self-test 用）。
  *
@@ -554,6 +1118,116 @@ function baseEntry(overrides = {}) {
     ciJob: 'frontend-e2e',
     platforms: ['chromium-linux'],
     exclusions: ['real Tauri file dialog', 'multi-host LAN'],
+    ...overrides,
+  };
+}
+
+/**
+ * 构造合法 Apple Silicon execution fixture。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   self-test 需要可复用的 PASS execution 基线，再逐项破坏验证拒绝路径。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回满足 validateExecutionManifest 的对象浅拷贝。
+ *
+ * @param {string} stableId
+ * @param {Partial<Record<string, unknown>>} [overrides]
+ * @returns {Record<string, unknown>}
+ */
+function baseExecution(stableId, overrides = {}) {
+  return {
+    stableId,
+    artifactMatrixId: 'macos-aarch64',
+    subjectCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    appVersion: '0.6.7',
+    rcWorkflowRunId: '1234567890',
+    packageFilename: 'cc-partner_0.6.7_aarch64.dmg',
+    packageSha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    deviceClass: 'apple-silicon-mac',
+    osBuild: 'macOS 15.5 (24F74)',
+    executorId: 'operator-self-test',
+    executedAt: '2026-07-14T12:00:00.000Z',
+    expiresAt: '2026-10-12T12:00:00.000Z',
+    result: 'PASS',
+    checklist: { sample: 'pass' },
+    artifactShas: {
+      'notes.md': 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+    },
+    ...overrides,
+  };
+}
+
+/**
+ * 构造合法 RC inventory fixture。
+ *
+ * @param {Partial<Record<string, unknown>>} [overrides]
+ * @returns {Record<string, unknown>}
+ */
+function baseRcInventory(overrides = {}) {
+  return {
+    subjectCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    subjectTag: 'v0.6.7-rc.1',
+    rcWorkflowRunId: '1234567890',
+    matrixId: 'macos-aarch64',
+    assets: [
+      {
+        name: 'cc-partner_0.6.7_aarch64.dmg',
+        sha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        releasable: true,
+        role: 'production-dmg',
+      },
+      {
+        name: 'cc-partner_aarch64.app.tar.gz',
+        sha256: 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+        releasable: true,
+        role: 'production-updater',
+      },
+      {
+        name: 'cc-partner_aarch64.app.tar.gz.sig',
+        sha256: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+        releasable: true,
+        role: 'production-sig',
+      },
+      {
+        name: 'updater-harness_0.6.6_aarch64.dmg',
+        sha256: 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+        releasable: false,
+        role: 'updater-harness',
+        certificationMarker: true,
+      },
+    ],
+    expiresAt: '2026-10-12T12:00:00.000Z',
+    signingSummary: 'ad-hoc signingIdentity=-',
+    ...overrides,
+  };
+}
+
+/**
+ * 构造合法 release claim fixture。
+ *
+ * @param {Partial<Record<string, unknown>>} [overrides]
+ * @returns {Record<string, unknown>}
+ */
+function baseReleaseClaim(overrides = {}) {
+  return {
+    claimMode: 'platform-beta',
+    claimProfile: 'macos-aarch64-beta',
+    selectedMatrixIds: ['macos-aarch64'],
+    releaseMode: 'beta-prerelease',
+    prerelease: true,
+    uncertifiedSurfaces: [
+      'windows',
+      'wsl',
+      'ubuntu',
+      'macos-x86_64',
+      'dual-host',
+      'ios',
+      'android',
+      'nvda',
+      'full-release',
+      'stable-release',
+    ],
     ...overrides,
   };
 }
@@ -833,6 +1507,360 @@ export function runSelfTest() {
     );
   });
 
+  // ── macos-aarch64-beta profile contract ─────────────────────────────
+  const subject = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const pkgSha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const now = new Date('2026-07-15T12:00:00.000Z');
+
+  caseRun('beta-accepts-apple-silicon-gui-and-voiceover', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      subjectTag: 'v0.6.7-rc.1',
+      rcWorkflowRunId: '1234567890',
+      appVersion: '0.6.7',
+      packageSha256: pkgSha,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      rcInventory: baseRcInventory(),
+      releaseClaim: baseReleaseClaim(),
+    });
+    assert(result.ok, `expected GO, got ${result.findings.join(' | ')}`);
+    assert(result.decision === 'GO', 'decision must be GO');
+    assert(
+      result.profile?.claimProfile === 'macos-aarch64-beta',
+      'profile must be fixed macos-aarch64-beta',
+    );
+  });
+
+  caseRun('beta-rejects-missing-voiceover-dependency', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+        ),
+      },
+      rcInventory: baseRcInventory(),
+      releaseClaim: baseReleaseClaim(),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /missing required execution: L3-MACOS-VOICEOVER-001@macos-aarch64/.test(f)),
+      `expected missing VoiceOver, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-wrong-architecture-execution', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+          { artifactMatrixId: 'macos-x86_64' },
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      releaseClaim: baseReleaseClaim(),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /wrong architecture/.test(f)),
+      `expected wrong architecture, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-aggregate-prose-without-execution-pass', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+          { result: 'NOT VERIFIED', aggregateStatus: 'PARTIAL' },
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      releaseClaim: baseReleaseClaim({ aggregateProsePass: true }),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /result must be PASS|aggregate prose PASS/.test(f)),
+      `expected aggregate prose rejection, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-expired-execution', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+          { expiresAt: '2026-01-01T00:00:00.000Z' },
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      releaseClaim: baseReleaseClaim(),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /expired/i.test(f)),
+      `expected expired execution, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-mismatched-package-sha', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      packageSha256: pkgSha,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+          {
+            packageSha256:
+              '1111111111111111111111111111111111111111111111111111111111111111',
+          },
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      releaseClaim: baseReleaseClaim(),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /packageSha256 does not match/.test(f)),
+      `expected package SHA mismatch, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-arbitrary-required-id-allowlist', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      releaseClaim: baseReleaseClaim({
+        requiredExecutions: ['L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64'],
+      }),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /arbitrary allowlists are rejected|requiredExecutions must equal/.test(f)),
+      `expected allowlist rejection, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-releasable-false-production-path', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      rcInventory: baseRcInventory({
+        assets: [
+          {
+            name: 'updater-harness_only.dmg',
+            sha256: 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+            releasable: false,
+            role: 'updater-harness',
+            certificationMarker: true,
+          },
+        ],
+      }),
+      releaseClaim: baseReleaseClaim(),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /releasable=true production asset|only releasable=false/.test(f)),
+      `expected releasable=false rejection, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-windows-linux-intel-selected-matrix', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      rcInventory: baseRcInventory({ matrixId: 'windows-x86_64' }),
+      releaseClaim: baseReleaseClaim({
+        selectedMatrixIds: ['windows-x86_64', 'linux-x86_64', 'macos-x86_64'],
+      }),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /selectedMatrixIds|matrixId/.test(f)),
+      `expected matrix rejection, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-stable-metadata-or-non-beta-release-mode', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'macos-aarch64-beta',
+      subjectCommit: subject,
+      now,
+      executions: {
+        'L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64': baseExecution(
+          'L3-MACOS-GUI-PERMISSIONS-001',
+        ),
+        'L3-MACOS-VOICEOVER-001@macos-aarch64': baseExecution(
+          'L3-MACOS-VOICEOVER-001',
+        ),
+      },
+      releaseClaim: baseReleaseClaim({
+        releaseMode: 'stable',
+        mutateLatestJson: true,
+        prerelease: false,
+      }),
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /stable metadata|releaseMode|prerelease/.test(f)),
+      `expected stable metadata rejection, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-unknown-claim-profile', () => {
+    const result = runBetaClaimCheck({
+      claimMode: 'platform-beta',
+      claimProfile: 'full-stable',
+      subjectCommit: subject,
+      now,
+      executions: {},
+    });
+    assert(!result.ok, 'expected NO-GO');
+    assert(
+      result.findings.some((f) => /unknown profile/.test(f)),
+      `expected unknown profile, got ${result.findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('beta-rejects-harness-marked-releasable', () => {
+    const findings = validateRcInventory(
+      baseRcInventory({
+        assets: [
+          {
+            name: 'updater-harness_0.6.6_aarch64.dmg',
+            sha256: 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+            releasable: true,
+            role: 'updater-harness',
+            certificationMarker: true,
+          },
+          {
+            name: 'cc-partner_0.6.7_aarch64.dmg',
+            sha256: pkgSha,
+            releasable: true,
+            role: 'production-dmg',
+          },
+        ],
+      }),
+      { subjectCommit: subject, allowedMatrixIds: ['macos-aarch64'] },
+    );
+    assert(findings.length > 0, 'expected findings');
+    assert(
+      findings.some((f) => /releasable=false/.test(f)),
+      `expected harness releasable rejection, got ${findings.join(' | ')}`,
+    );
+  });
+
+  caseRun('load-nested-evidence-executions-from-disk', () => {
+    const nestedRoot = mkdtempSync(join(tmpdir(), 'quality-nested-ev-'));
+    const passPath = join(
+      nestedRoot,
+      'docs/development/evidence/L3-MACOS-GUI-PERMISSIONS-001/macos-aarch64/execution.json',
+    );
+    const failPath = join(
+      nestedRoot,
+      'docs/development/evidence/L3-MACOS-VOICEOVER-001/macos-aarch64/execution.json',
+    );
+    mkdirSync(dirname(passPath), { recursive: true });
+    mkdirSync(dirname(failPath), { recursive: true });
+    writeFileSync(
+      passPath,
+      JSON.stringify({
+        stableId: 'L3-MACOS-GUI-PERMISSIONS-001',
+        artifactMatrixId: 'macos-aarch64',
+        result: 'PASS',
+        subjectCommit: subject,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      failPath,
+      JSON.stringify({
+        stableId: 'L3-MACOS-VOICEOVER-001',
+        artifactMatrixId: 'macos-aarch64',
+        result: 'FAIL',
+        subjectCommit: subject,
+      }),
+      'utf8',
+    );
+    const loaded = loadEvidenceExecutions(nestedRoot);
+    assert(
+      loaded['L3-MACOS-GUI-PERMISSIONS-001@macos-aarch64']?.result === 'PASS',
+      `expected nested PASS load, keys=${Object.keys(loaded).join(',')}`,
+    );
+    assert(
+      loaded['L3-MACOS-VOICEOVER-001@macos-aarch64']?.result === 'FAIL',
+      `expected nested FAIL load, keys=${Object.keys(loaded).join(',')}`,
+    );
+    rmSync(nestedRoot, { recursive: true, force: true });
+  });
+
   rmSync(dir, { recursive: true, force: true });
 
   if (failures.length > 0) {
@@ -855,6 +1883,142 @@ export function runSelfTest() {
  * @param {string[]} [argv]
  * @returns {void}
  */
+/**
+ * 读取 CLI 命名参数值。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   beta claim 检查需要多个可选 flag，统一解析避免重复 indexOf 逻辑。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 `--name value` 的 value；缺失返回 undefined。
+ *
+ * @param {string[]} argv
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+function readArg(argv, name) {
+  const i = argv.indexOf(name);
+  if (i >= 0 && argv[i + 1] && !String(argv[i + 1]).startsWith('--')) {
+    return argv[i + 1];
+  }
+  return undefined;
+}
+
+/**
+ * 从 evidence 目录加载 execution manifests（可选，供 claim 检查）。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   Task 5 需要从 docs/development/evidence/** 读取架构级 execution，而不是聚合矩阵 status。
+ *
+ * Code Logic（这个函数做什么）:
+ *   扫描 evidence 下各稳定 ID 的 execution-*.json / manifest.json。
+ *
+ * @param {string} rootDir
+ * @returns {Record<string, unknown>}
+ */
+export function loadEvidenceExecutions(rootDir = REPO_ROOT) {
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   beta claim 必须从磁盘 evidence 加载 architecture execution，布局为
+   *   `docs/development/evidence/<stableId>/<matrixId>/execution.json`（Plan N8），
+   *   也兼容扁平 `evidence/<stableId>/execution.json`。
+   *
+   * Code Logic（这个函数做什么）:
+   *   扫描 evidence 下 stableId 目录；读取该目录 JSON 与一层 matrix 子目录中的
+   *   execution/manifest JSON；以 stableId@artifactMatrixId 为键。
+   */
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  const base = join(rootDir, 'docs', 'development', 'evidence');
+  if (!existsSync(base)) return out;
+
+  /**
+   * @param {string} filePath
+   * @param {string} fallbackId
+   * @param {string} [fallbackMatrix]
+   */
+  function ingestExecutionFile(filePath, fallbackId, fallbackMatrix) {
+    const baseName = filePath.split(/[/\\]/).pop() || '';
+    if (!/\.json$/i.test(baseName)) return;
+    if (!/execution|manifest/i.test(baseName) && baseName !== 'manifest.json') return;
+    try {
+      const raw = JSON.parse(readFileSync(filePath, 'utf8'));
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+      const stableId =
+        typeof raw.stableId === 'string' && raw.stableId.trim()
+          ? raw.stableId
+          : fallbackId;
+      const matrix =
+        typeof raw.artifactMatrixId === 'string' && raw.artifactMatrixId.trim()
+          ? raw.artifactMatrixId
+          : fallbackMatrix || 'macos-aarch64';
+      out[`${stableId}@${matrix}`] = raw;
+    } catch {
+      // skip unreadable evidence
+    }
+  }
+
+  let ids;
+  try {
+    ids = readdirSync(base);
+  } catch {
+    return out;
+  }
+  for (const id of ids) {
+    const dir = join(base, id);
+    let st;
+    try {
+      st = statSync(dir);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) continue;
+    let entries;
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const abs = join(dir, entry);
+      let est;
+      try {
+        est = statSync(abs);
+      } catch {
+        continue;
+      }
+      if (est.isFile()) {
+        ingestExecutionFile(abs, id);
+        continue;
+      }
+      if (!est.isDirectory()) continue;
+      // Plan layout: evidence/<stableId>/<matrixId>/execution.json
+      let nested;
+      try {
+        nested = readdirSync(abs);
+      } catch {
+        continue;
+      }
+      for (const file of nested) {
+        ingestExecutionFile(join(abs, file), id, entry);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * CLI 入口。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   提供 --self-test / 默认矩阵检查 / --matrix 覆盖 / beta claim 检查，供 CI 与本地复用。
+ *
+ * Code Logic（这个函数做什么）:
+ *   解析 argv，分派到 self-test、runCheck 或 runBetaClaimCheck，打印 findings 并设 exitCode。
+ *
+ * @param {string[]} [argv]
+ * @returns {void}
+ */
 export function main(argv = process.argv.slice(2)) {
   if (argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(
@@ -863,10 +2027,13 @@ export function main(argv = process.argv.slice(2)) {
         '  node scripts/check-quality-traceability.mjs',
         '  node scripts/check-quality-traceability.mjs --self-test',
         '  node scripts/check-quality-traceability.mjs --matrix docs/development/quality-matrix.json',
+        '  node scripts/check-quality-traceability.mjs --claim-mode platform-beta --claim-profile macos-aarch64-beta \\',
+        '    --subject-commit <40hex> [--subject-tag <tag>] [--rc-run-id <id>] [--evidence-ref <ref>]',
         '',
         `Default matrix: ${DEFAULT_MATRIX_REL}`,
         `Known levels: ${[...KNOWN_LEVELS].join(', ')}`,
         `Known ciJobs: ${[...KNOWN_CI_JOBS].join(', ')}`,
+        `Fixed claim profile: ${MACOS_AARCH64_BETA_PROFILE.claimProfile}`,
         '',
       ].join('\n'),
     );
@@ -875,6 +2042,76 @@ export function main(argv = process.argv.slice(2)) {
 
   if (argv.includes('--self-test')) {
     process.exitCode = runSelfTest();
+    return;
+  }
+
+  const claimMode = readArg(argv, '--claim-mode');
+  const claimProfile = readArg(argv, '--claim-profile');
+  if (claimMode || claimProfile) {
+    try {
+      const subjectCommit = readArg(argv, '--subject-commit') || '';
+      const subjectTag = readArg(argv, '--subject-tag');
+      const rcRunId = readArg(argv, '--rc-run-id');
+      const evidenceRef = readArg(argv, '--evidence-ref');
+      const expectedEvidenceCommit = readArg(argv, '--expected-evidence-commit');
+      const appVersion = readArg(argv, '--app-version');
+      const packageSha256 = readArg(argv, '--package-sha256');
+      const claimPath = readArg(argv, '--release-claim');
+      const inventoryPath = readArg(argv, '--rc-inventory');
+      /** @type {unknown} */
+      let releaseClaim;
+      if (claimPath) {
+        releaseClaim = JSON.parse(
+          readFileSync(resolve(REPO_ROOT, claimPath), 'utf8'),
+        );
+      } else {
+        const defaultClaim = join(
+          REPO_ROOT,
+          'docs',
+          'development',
+          'release-claim.json',
+        );
+        if (existsSync(defaultClaim)) {
+          releaseClaim = JSON.parse(readFileSync(defaultClaim, 'utf8'));
+        }
+      }
+      /** @type {unknown} */
+      let rcInventory;
+      if (inventoryPath) {
+        rcInventory = JSON.parse(
+          readFileSync(resolve(REPO_ROOT, inventoryPath), 'utf8'),
+        );
+      }
+      const result = runBetaClaimCheck({
+        claimMode: claimMode || 'platform-beta',
+        claimProfile: claimProfile || 'macos-aarch64-beta',
+        subjectCommit,
+        subjectTag,
+        rcWorkflowRunId: rcRunId,
+        evidenceRef,
+        expectedEvidenceCommit,
+        appVersion,
+        packageSha256,
+        executions: loadEvidenceExecutions(REPO_ROOT),
+        rcInventory,
+        releaseClaim,
+      });
+      if (!result.ok) {
+        for (const f of result.findings) process.stderr.write(`${f}\n`);
+        process.stderr.write(
+          `check-quality-traceability: ${result.decision} (${result.findings.length} issue(s))\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(
+        `check-quality-traceability: ${result.decision} profile=${result.profile?.claimProfile}\n`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`check-quality-traceability: ${msg}\n`);
+      process.exitCode = 1;
+    }
     return;
   }
 

@@ -4,9 +4,9 @@
 //!     最终/临时路径落盘前必须断言仍在 receive_dir 内。
 //! Code Logic: 纯校验与路径规范化，无 IO 副作用（除路径组件解析）。
 
+use super::InitMeta;
 use crate::error::AppError;
 use crate::models::transfer::TransferTask;
-use super::InitMeta;
 use std::path::{Component, Path, PathBuf};
 
 /// Business Logic（为什么需要这个函数）:
@@ -14,7 +14,11 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// Code Logic（这个函数做什么）:
 ///     比较已规范化的 filename/size/sha256/chunk_size 是否与活跃 Receive 任务一致。
-pub(super) fn init_metadata_matches(task: &TransferTask, meta: &InitMeta, safe_filename: &str) -> bool {
+pub(super) fn init_metadata_matches(
+    task: &TransferTask,
+    meta: &InitMeta,
+    safe_filename: &str,
+) -> bool {
     task.filename == safe_filename
         && task.size == meta.size
         && task.sha256 == meta.sha256
@@ -140,4 +144,3 @@ pub(super) fn normalize_path(path: &Path) -> PathBuf {
     }
     out
 }
-

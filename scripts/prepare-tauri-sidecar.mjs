@@ -9,7 +9,7 @@
  *   解析可选 `--target <triple>` 与 `--dry-run`；先构建 `cc-partner-backend` release bin，
  *   再复制到 Tauri externalBin 约定路径。未显式传 target 时用 `rustc -vV` 的 host triple。
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -191,6 +191,21 @@ function main() {
   const destinationPath = sidecarDestinationPath(target);
 
   console.log(`准备 Tauri backend sidecar: target=${target}`);
+
+  // Tauri build.rs 在编译 app 包时会校验 externalBin 路径存在；cargo build --bin
+  // cc-partner-backend 仍会跑 package build.rs，形成 chicken-and-egg。先写占位文件，
+  // 真实二进制构建成功后再覆盖。
+  if (!options.dryRun) {
+    mkdirSync(dirname(destinationPath), { recursive: true });
+    if (!existsSync(destinationPath)) {
+      writeFileSync(destinationPath, 'cc-partner-backend-sidecar-placeholder\n', 'utf8');
+      makeExecutableIfNeeded(destinationPath, target);
+      console.log(`已写入 sidecar 占位: ${destinationPath}`);
+    }
+  } else {
+    console.log(`[dry-run] ensure placeholder ${destinationPath}`);
+  }
+
   runCommand('cargo', cargoArgs, options.dryRun);
 
   if (options.dryRun) {

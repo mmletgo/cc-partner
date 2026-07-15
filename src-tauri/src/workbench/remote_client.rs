@@ -1118,9 +1118,8 @@ impl RemoteWorkbenchClient {
         let bytes = serde_json::to_vec(&value).map_err(|e| {
             AppError::generic(format!("远端 Claude session 搜索响应再序列化失败: {e}"))
         })?;
-        decode_session_search_response_body(&bytes).map_err(|e| {
-            AppError::generic(format!("远端 Claude session 搜索响应解码失败: {e}"))
-        })
+        decode_session_search_response_body(&bytes)
+            .map_err(|e| AppError::generic(format!("远端 Claude session 搜索响应解码失败: {e}")))
     }
 
     /// 读取远端单个 Claude session 的 preview 详情。

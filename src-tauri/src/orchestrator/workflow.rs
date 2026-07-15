@@ -1421,13 +1421,17 @@ mod tests {
             })
             .count();
 
-        assert_eq!(ok_count, 1, "并发 empty-hash 创建必须恰好成功一次: {results:?}");
+        assert_eq!(
+            ok_count, 1,
+            "并发 empty-hash 创建必须恰好成功一次: {results:?}"
+        );
         assert!(
             conflict_count >= 1,
             "至少一次必须返回 workflow_document_changed: {results:?}"
         );
 
-        let on_disk = fs::read_to_string(project.join(WORKFLOW_FILE_NAME)).expect("读取 WORKFLOW.md");
+        let on_disk =
+            fs::read_to_string(project.join(WORKFLOW_FILE_NAME)).expect("读取 WORKFLOW.md");
         assert!(
             on_disk == template_a || on_disk == template_b,
             "落盘内容必须是两份合法模板之一"

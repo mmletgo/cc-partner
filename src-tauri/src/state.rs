@@ -144,9 +144,8 @@ pub struct AppState {
     /// Code Logic（这个字段做什么）:
     ///     `Mutex<HashMap<String, ClaudeSessionWatcherRuntime>>`；监听失败时该 key 不存在
     ///     （降级为每次搜索重扫）。
-    pub workbench_claude_session_watchers: Arc<
-        Mutex<HashMap<String, crate::workbench::claude_sessions::ClaudeSessionWatcherRuntime>>,
-    >,
+    pub workbench_claude_session_watchers:
+        Arc<Mutex<HashMap<String, crate::workbench::claude_sessions::ClaudeSessionWatcherRuntime>>>,
     /// Claude session 索引 singleflight 表：key = worktree canonical，value = watch Receiver。
     ///
     /// Business Logic（为什么需要这个字段）:

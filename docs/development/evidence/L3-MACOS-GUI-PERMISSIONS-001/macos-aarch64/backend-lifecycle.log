@@ -1,0 +1,29 @@
+{"domain":"http","elapsed_ms":0,"error_code":"","level":"info","message":"axum HTTP server 已启动，监听端口: 62116","operation":"serve","request_id":"","result":"ok","timestamp":"2026-07-15T16:26:47.899538+00:00"}
+{"level":"info","message":"mDNS 发现已启动：service=_cc-partner._tcp.local., device=hanss-MacBook-Air.local, port=62116, advertise=true, browse=true","timestamp":"2026-07-15T16:26:47.901045+00:00"}
+{"level":"info","message":"CC 历史采集器 已启动","timestamp":"2026-07-15T16:26:47.901338+00:00"}
+{"level":"info","message":"云端同步 scheduler 已启动","timestamp":"2026-07-15T16:26:47.901360+00:00"}
+{"level":"info","message":"Orchestrator scheduler 已启动","timestamp":"2026-07-15T16:26:47.901431+00:00"}
+{"level":"info","message":"Orchestrator remote outbox dispatcher 已启动","timestamp":"2026-07-15T16:26:47.901473+00:00"}
+{"level":"info","message":"CC 历史采集器启动，立即执行首次扫描","timestamp":"2026-07-15T16:26:47.901492+00:00"}
+{"domain":"control","elapsed_ms":0,"error_code":"","level":"info","message":"cc-partner headless backend 已启动，监听端口 62116","operation":"serve_start","request_id":"","result":"ok","timestamp":"2026-07-15T16:26:47.901493+00:00"}
+{"level":"info","message":"cloud_sync scheduler 已启动","timestamp":"2026-07-15T16:26:47.901583+00:00"}
+{"level":"info","message":"mDNS 发现已停止","timestamp":"2026-07-15T16:26:50.297407+00:00"}
+{"level":"info","message":"CC 历史采集器 已停止","timestamp":"2026-07-15T16:26:50.297423+00:00"}
+{"level":"info","message":"云端同步 scheduler 已停止","timestamp":"2026-07-15T16:26:50.297433+00:00"}
+{"level":"info","message":"Orchestrator scheduler 已停止","timestamp":"2026-07-15T16:26:50.297440+00:00"}
+{"level":"info","message":"Orchestrator remote outbox dispatcher 已停止","timestamp":"2026-07-15T16:26:50.297447+00:00"}
+{"level":"info","message":"mDNS 事件流已关闭，退出发现循环","timestamp":"2026-07-15T16:26:50.297456+00:00"}
+{"level":"info","message":"Orchestrator remote outbox dispatcher 已停止","timestamp":"2026-07-15T16:26:50.297473+00:00"}
+{"level":"info","message":"Orchestrator scheduler 已停止","timestamp":"2026-07-15T16:26:50.297488+00:00"}
+{"level":"info","message":"cloud_sync scheduler 已停止","timestamp":"2026-07-15T16:26:50.297544+00:00"}
+{"domain":"control","elapsed_ms":0,"error_code":"","level":"info","message":"cc-partner headless backend 已停止","operation":"serve_stop","request_id":"","result":"ok","timestamp":"2026-07-15T16:26:50.297667+00:00"}
+{"domain":"http","elapsed_ms":0,"error_code":"","level":"info","message":"axum HTTP server 已启动，监听端口: 62116","operation":"serve","request_id":"","result":"ok","timestamp":"2026-07-15T16:26:50.343951+00:00"}
+{"level":"info","message":"mDNS 发现已启动：service=_cc-partner._tcp.local., device=hanss-MacBook-Air.local, port=62116, advertise=true, browse=true","timestamp":"2026-07-15T16:26:50.344279+00:00"}
+{"level":"info","message":"CC 历史采集器 已启动","timestamp":"2026-07-15T16:26:50.344471+00:00"}
+{"level":"info","message":"云端同步 scheduler 已启动","timestamp":"2026-07-15T16:26:50.344481+00:00"}
+{"level":"info","message":"Orchestrator scheduler 已启动","timestamp":"2026-07-15T16:26:50.344493+00:00"}
+{"level":"info","message":"Orchestrator remote outbox dispatcher 已启动","timestamp":"2026-07-15T16:26:50.344502+00:00"}
+{"domain":"control","elapsed_ms":0,"error_code":"","level":"info","message":"cc-partner headless backend 已启动，监听端口 62116","operation":"serve_start","request_id":"","result":"ok","timestamp":"2026-07-15T16:26:50.344519+00:00"}
+{"level":"info","message":"CC 历史采集器启动，立即执行首次扫描","timestamp":"2026-07-15T16:26:50.344552+00:00"}
+{"level":"info","message":"cloud_sync scheduler 已启动","timestamp":"2026-07-15T16:26:50.344596+00:00"}
+{"level":"info","message":"CC 历史扫描完成：解析出 16300 条候选，新入库 16300 条，扫描 16183 个文件","timestamp":"2026-07-15T16:26:55.277237+00:00"}

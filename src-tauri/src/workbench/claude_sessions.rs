@@ -2025,7 +2025,6 @@ async fn scan_test_hooks_wait_before_scan() {
     scan_test_hooks::wait_before_scan().await;
 }
 
-
 /// 为指定 worktree 启动 notify 文件监听。
 ///
 /// Business Logic（为什么需要这个函数）:

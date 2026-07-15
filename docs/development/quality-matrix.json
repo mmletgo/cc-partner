@@ -463,7 +463,8 @@
       "exclusions": [
         "hosted runner substitute",
         "browser mock substitute",
-        "CI Playwright claim"
+        "CI Playwright claim",
+        "Intel Mac execution (macos-x86_64) not executed — aggregate may stay PARTIAL/NOT VERIFIED while macos-aarch64-beta consumes architecture-level PASS only"
       ],
       "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
       "version": "0.6.7",
@@ -472,6 +473,39 @@
       "status": "NOT VERIFIED",
       "evidence": null,
       "osBuild": null,
+      "aggregateNote": "Architecture-level executions (e.g. macos-aarch64) may PASS independently; canonical row stays NOT VERIFIED until all required architectures for a full macOS claim are executed. Fixed claimProfile macos-aarch64-beta reads only matching execution manifests.",
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
+      ]
+    },
+    {
+      "id": "L3-MACOS-VOICEOVER-001",
+      "surface": "macos-voiceover-accessibility",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: packaged macOS VoiceOver journey on same macos-aarch64 candidate as GUI execution",
+      "ciJob": "manual",
+      "platforms": [
+        "macos"
+      ],
+      "exclusions": [
+        "hosted runner substitute",
+        "browser mock substitute",
+        "NVDA / Windows screen reader",
+        "Intel Mac VoiceOver (macos-x86_64) not executed",
+        "aggregate prose PASS without architecture execution"
+      ],
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
+      "version": "0.6.7",
+      "date": "2026-07-14",
+      "expiresAt": "2026-10-12",
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "aggregateNote": "Depends on matching macos-aarch64 GUI execution for the same subject/RC/package SHA when consumed by macos-aarch64-beta. Canonical row remains NOT VERIFIED while Intel is unexecuted.",
       "docs": [
         "docs/development/testing.md",
         "docs/development/real-device-certification.md"

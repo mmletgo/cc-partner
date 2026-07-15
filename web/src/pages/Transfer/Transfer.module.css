@@ -107,7 +107,7 @@
 
 .select:disabled {
   cursor: not-allowed;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .selectArrow {
@@ -277,7 +277,7 @@
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-widest);
   text-transform: uppercase;
-  color: var(--meta);
+  color: var(--fg-muted-readable);
 }
 
 .taskList {

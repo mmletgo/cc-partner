@@ -1,0 +1,9 @@
+{
+  "subjectCommit": "7db9b8899f1f8a19cf3aec0c8b6cf519bd4c7319",
+  "subjectTag": "subject-0.7.0-macos-aarch64-4",
+  "rcWorkflowRunId": "29429534980",
+  "expectedEvidenceCommit": "489c71c74a540c68b06bfe9e8059fa642f85e9d1",
+  "claimProfile": "macos-aarch64-beta",
+  "decision": "NO-GO",
+  "publishAuthorized": false
+}

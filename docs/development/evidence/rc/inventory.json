@@ -1,0 +1,60 @@
+{
+  "subjectCommit": "7db9b8899f1f8a19cf3aec0c8b6cf519bd4c7319",
+  "subjectTag": "subject-0.7.0-macos-aarch64-4",
+  "rcWorkflowRunId": "29429534980",
+  "matrixId": "macos-aarch64",
+  "assets": [
+    {
+      "name": "cc-partner_0.7.0_aarch64.dmg",
+      "sha256": "f9be87d6ba47a7a564beba8926aef17f56fad4c6ae6e10d89d1e7189358b4790",
+      "releasable": true,
+      "role": "production:cc-partner_0.7.0_aarch64.dmg",
+      "certificationMarker": false,
+      "size": 31611025
+    },
+    {
+      "name": "cc-partner_aarch64.app.tar.gz",
+      "sha256": "16e88ac779b71334b127893e5f36f3e1da7f7d9d5eae36cd74c13347ad79eb95",
+      "releasable": true,
+      "role": "production:cc-partner_aarch64.app.tar.gz",
+      "certificationMarker": false,
+      "size": 31510802
+    },
+    {
+      "name": "cc-partner_aarch64.app.tar.gz.sig",
+      "sha256": "b9f649662cc2f26a9d53aa7eeb1c85e50ee5f61486121e1a45240a813a58fe1a",
+      "releasable": true,
+      "role": "production:cc-partner_aarch64.app.tar.gz.sig",
+      "certificationMarker": false,
+      "size": 408
+    },
+    {
+      "name": "updater-harness_aarch64.app.tar.gz",
+      "sha256": "8f58d255f2f6480a95c587bba7a059d4ae0b291b17a4c7179a403c9cc4c9e915",
+      "releasable": false,
+      "role": "updater-harness:updater-harness_aarch64.app.tar.gz",
+      "certificationMarker": true,
+      "size": 31511282
+    },
+    {
+      "name": "updater-harness_aarch64.app.tar.gz.sig",
+      "sha256": "411b35285b96719a06a7a6b56d44fca70a1f858eb32a8e4e59e24d702845d657",
+      "releasable": false,
+      "role": "updater-harness:updater-harness_aarch64.app.tar.gz.sig",
+      "certificationMarker": true,
+      "size": 448
+    },
+    {
+      "name": "updater-harness_cc-partner-updater-certification-harness_0.6.0_aarch64.dmg",
+      "sha256": "09e4dc103a36e92b248041e5678c7dfc8d55aa07494155b776eae2f06b7062ae",
+      "releasable": false,
+      "role": "updater-harness:updater-harness_cc-partner-updater-certification-harness_0.6.0_aarch64.dmg",
+      "certificationMarker": true,
+      "size": 31605474
+    }
+  ],
+  "expiresAt": "2026-10-13T16:23:56.357Z",
+  "signingSummary": "ad-hoc signingIdentity=- ; production releasable=true ; harness releasable=false",
+  "claimProfile": "macos-aarch64-beta",
+  "claimMode": "platform-beta"
+}

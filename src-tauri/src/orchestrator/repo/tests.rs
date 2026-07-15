@@ -1491,10 +1491,7 @@ async fn revert_delivery_to_human_review_cas_from_delivering() {
         .await
         .unwrap();
     assert_eq!(again.status, OrchestratorTaskStatus::Done);
-    assert_eq!(
-        again.workflow_state,
-        OrchestratorWorkflowState::HumanReview
-    );
+    assert_eq!(again.workflow_state, OrchestratorWorkflowState::HumanReview);
 }
 
 /// Business Logic（为什么需要这个函数）:

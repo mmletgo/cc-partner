@@ -1472,10 +1472,7 @@ async fn dispose_during_inflight_ensure_does_not_reinsert_index() {
     // 此时 inflight 应已注册
     {
         let inflight = state.workbench_claude_session_index_inflight.lock().await;
-        assert!(
-            inflight.contains_key(&key),
-            "mid-scan 时 inflight 应含 key"
-        );
+        assert!(inflight.contains_key(&key), "mid-scan 时 inflight 应含 key");
     }
 
     // dispose 项目路径：应 bump epoch + 清 inflight/indexes/watchers

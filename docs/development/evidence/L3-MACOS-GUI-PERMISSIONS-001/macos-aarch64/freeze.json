@@ -1,0 +1,18 @@
+{
+  "subjectCommit": "7db9b8899f1f8a19cf3aec0c8b6cf519bd4c7319",
+  "subjectTag": "subject-0.7.0-macos-aarch64-4",
+  "rcWorkflowRunId": "29429534980",
+  "appVersion": "0.7.0",
+  "matrixId": "macos-aarch64",
+  "claimMode": "platform-beta",
+  "claimProfile": "macos-aarch64-beta",
+  "rcUrl": "https://github.com/mmletgo/cc-partner/actions/runs/29429534980",
+  "productionDmg": {
+    "name": "cc-partner_0.7.0_aarch64.dmg",
+    "sha256": "f9be87d6ba47a7a564beba8926aef17f56fad4c6ae6e10d89d1e7189358b4790"
+  },
+  "productionAppTar": {
+    "name": "cc-partner_aarch64.app.tar.gz",
+    "sha256": "16e88ac779b71334b127893e5f36f3e1da7f7d9d5eae36cd74c13347ad79eb95"
+  }
+}

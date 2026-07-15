@@ -14,7 +14,10 @@ use tokio::io::AsyncReadExt;
 ///
 /// Code Logic（这个函数做什么）:
 ///     与 `open_regular_file_nofollow` 相同平台语义，返回 `std::fs::File`。
-pub(super) fn open_regular_file_nofollow_std(path: &Path, writable: bool) -> Result<std::fs::File, AppError> {
+pub(super) fn open_regular_file_nofollow_std(
+    path: &Path,
+    writable: bool,
+) -> Result<std::fs::File, AppError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -247,4 +250,3 @@ pub(super) async fn hash_reader(file: &mut tokio::fs::File) -> Result<String, Ap
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
-

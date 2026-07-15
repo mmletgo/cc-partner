@@ -1,0 +1,335 @@
+# RC (Release Candidate) — single-matrix macOS Apple Silicon only
+#
+# Purpose:
+#   Freeze one subjectTag + subjectCommit into immutable macos-aarch64 production
+#   artifacts (releasable=true) plus a non-releasable N-1 updater certification
+#   harness. Does NOT publish GitHub Releases, does NOT write latest.json, and
+#   does NOT build Windows/Linux/Intel matrices.
+#
+# Inputs (workflow_dispatch):
+#   subjectTag     — protected tag that must peel to subjectCommit
+#   subjectCommit  — full 40-hex commit SHA
+#
+# Hard rules:
+#   - matrix is only macos-aarch64
+#   - production config/bundles must not contain loopback endpoint / certification markers
+#   - harness is uploaded as releasable=false inventory entries only
+
+name: RC Tauri (macOS arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      subjectTag:
+        description: Protected subject tag (must peel to subjectCommit)
+        required: true
+        type: string
+      subjectCommit:
+        description: Full 40-hex subject commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: rc-tauri-${{ inputs.subjectTag }}
+  cancel-in-progress: false
+
+jobs:
+  validate-subject:
+    name: Validate subject tag peels to commit
+    runs-on: ubuntu-22.04
+    outputs:
+      subject_commit: ${{ steps.check.outputs.subject_commit }}
+      subject_tag: ${{ steps.check.outputs.subject_tag }}
+    steps:
+      - name: Checkout subject tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.subjectTag }}
+          fetch-depth: 0
+
+      - name: Prove tag peels to subjectCommit
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.subjectTag }}'
+          EXPECTED='${{ inputs.subjectCommit }}'
+          if [[ ! "$EXPECTED" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "subjectCommit must be 40-hex" >&2
+            exit 1
+          fi
+          HEAD_SHA=$(git rev-parse HEAD)
+          TAG_SHA=$(git rev-list -n 1 "refs/tags/${TAG}" 2>/dev/null || git rev-parse "$TAG^{commit}")
+          echo "HEAD=$HEAD_SHA"
+          echo "TAG_PEEL=$TAG_SHA"
+          echo "EXPECTED=$EXPECTED"
+          if [[ "${HEAD_SHA,,}" != "${EXPECTED,,}" ]]; then
+            echo "checkout HEAD does not match subjectCommit" >&2
+            exit 1
+          fi
+          if [[ "${TAG_SHA,,}" != "${EXPECTED,,}" ]]; then
+            echo "tag does not peel to subjectCommit" >&2
+            exit 1
+          fi
+          echo "subject_commit=$EXPECTED" >> "$GITHUB_OUTPUT"
+          echo "subject_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build-macos-aarch64:
+    name: build (macos-aarch64)
+    needs: validate-subject
+    runs-on: macos-latest
+    env:
+      MATRIX_ID: macos-aarch64
+      TARGET: aarch64-apple-darwin
+    steps:
+      - name: Checkout subject commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate-subject.outputs.subject_commit }}
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          shared-key: macos-aarch64-rc
+
+      - name: Install frontend dependencies
+        run: cd web && npm ci
+
+      - name: Prepare Tauri signing key
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY Secret missing" >&2
+            exit 1
+          fi
+          KEY_CONTENT=$(printf '%s' "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" | tr -d '\r\n')
+          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_CONTENT" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Scan production config for certification contamination
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e '
+            import { readFileSync } from "node:fs";
+            const markers = [
+              "http://127.0.0.1:62190",
+              "dangerousInsecureTransportProtocol",
+              "updater-certification-harness",
+              "_ccPartnerCertification",
+            ];
+            const text = readFileSync("src-tauri/tauri.conf.json", "utf8");
+            const hits = markers.filter((m) => text.includes(m));
+            if (hits.length) {
+              console.error("production tauri.conf.json contaminated:", hits.join(", "));
+              process.exit(1);
+            }
+            console.log("production config clean of certification markers");
+          '
+
+      - name: Prepare backend sidecar externalBin
+        run: node scripts/prepare-tauri-sidecar.mjs --target aarch64-apple-darwin
+
+      - name: Build production Tauri app (macos-aarch64)
+        shell: bash
+        run: web/node_modules/.bin/tauri build --target aarch64-apple-darwin
+
+      - name: Collect production assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p rc-assets/production
+          BUNDLE_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
+          ls -la "$BUNDLE_DIR"
+          cp "$BUNDLE_DIR"/*.app.tar.gz "rc-assets/production/cc-partner_aarch64.app.tar.gz"
+          cp "$BUNDLE_DIR"/*.app.tar.gz.sig "rc-assets/production/cc-partner_aarch64.app.tar.gz.sig"
+          for dmg in src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg; do
+            [ -f "$dmg" ] || continue
+            cp "$dmg" "rc-assets/production/$(basename "$dmg")"
+          done
+          ls -la rc-assets/production/
+
+      - name: Rescan production bundles for certification markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Text-level scan of production conf already done; also refuse harness conf leak into production dir names
+          if ls rc-assets/production/*harness* >/dev/null 2>&1; then
+            echo "harness-named asset leaked into production/" >&2
+            exit 1
+          fi
+          node -e '
+            import { readFileSync } from "node:fs";
+            const markers = ["http://127.0.0.1:62190", "updater-certification-harness"];
+            const text = readFileSync("src-tauri/tauri.conf.json", "utf8");
+            for (const m of markers) {
+              if (text.includes(m)) {
+                console.error("post-build production contamination:", m);
+                process.exit(1);
+              }
+            }
+          '
+
+      - name: Build non-releasable updater certification harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p rc-assets/harness /tmp/cc-partner-harness
+          node scripts/prepare-updater-certification-harness.mjs \
+            --write-config /tmp/cc-partner-harness/tauri.conf.json
+          # Temporarily replace production conf for harness build only
+          cp src-tauri/tauri.conf.json /tmp/cc-partner-harness/tauri.conf.production.json
+          # Merge: use prepared harness conf as active tauri.conf.json
+          cp /tmp/cc-partner-harness/tauri.conf.json src-tauri/tauri.conf.json
+          # Rebuild sidecar for same target (subject bytes tree)
+          node scripts/prepare-tauri-sidecar.mjs --target aarch64-apple-darwin
+          web/node_modules/.bin/tauri build --target aarch64-apple-darwin || {
+            # restore production conf before failing
+            cp /tmp/cc-partner-harness/tauri.conf.production.json src-tauri/tauri.conf.json
+            exit 1
+          }
+          BUNDLE_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
+          mkdir -p rc-assets/harness
+          shopt -s nullglob
+          app_tars=("$BUNDLE_DIR"/*.app.tar.gz)
+          if [ ${#app_tars[@]} -gt 0 ]; then
+            # Prefer harness-named tar; fall back to first
+            src="${app_tars[0]}"
+            for f in "${app_tars[@]}"; do
+              if [[ "$(basename "$f")" == *harness* || "$(basename "$f")" == *certification* ]]; then
+                src="$f"
+                break
+              fi
+            done
+            cp "$src" "rc-assets/harness/updater-harness_aarch64.app.tar.gz"
+            if [ -f "${src}.sig" ]; then
+              cp "${src}.sig" "rc-assets/harness/updater-harness_aarch64.app.tar.gz.sig"
+            fi
+          fi
+          for dmg in src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg; do
+            [ -f "$dmg" ] || continue
+            cp "$dmg" "rc-assets/harness/updater-harness_$(basename "$dmg")"
+          done
+          ls -la rc-assets/harness/
+          # Restore production conf on workspace (artifacts already collected)
+          cp /tmp/cc-partner-harness/tauri.conf.production.json src-tauri/tauri.conf.json
+          ls -la rc-assets/harness/ || true
+
+      - name: Write RC inventory (SHA / releasable / expiry)
+        shell: bash
+        env:
+          SUBJECT: ${{ needs.validate-subject.outputs.subject_commit }}
+          TAG: ${{ needs.validate-subject.outputs.subject_tag }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          export EXPIRES
+          EXPIRES=$(node -e 'const d=new Date(); d.setUTCDate(d.getUTCDate()+90); process.stdout.write(d.toISOString())')
+          node <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+          import { join } from "node:path";
+
+          const subject = process.env.SUBJECT;
+          const tag = process.env.TAG;
+          const runId = process.env.RUN_ID;
+          const expiresAt = process.env.EXPIRES;
+
+          function sha256File(path) {
+            return createHash("sha256").update(readFileSync(path)).digest("hex");
+          }
+
+          function collect(dir, releasable, rolePrefix) {
+            const assets = [];
+            let names = [];
+            try {
+              names = readdirSync(dir);
+            } catch {
+              return assets;
+            }
+            for (const name of names) {
+              const abs = join(dir, name);
+              if (!statSync(abs).isFile()) continue;
+              assets.push({
+                name,
+                sha256: sha256File(abs),
+                releasable,
+                role: `${rolePrefix}:${name}`,
+                certificationMarker: !releasable,
+                size: statSync(abs).size,
+              });
+            }
+            return assets;
+          }
+
+          const assets = [
+            ...collect("rc-assets/production", true, "production"),
+            ...collect("rc-assets/harness", false, "updater-harness"),
+          ];
+          if (!assets.some((a) => a.releasable)) {
+            console.error("no releasable production assets");
+            process.exit(1);
+          }
+          if (assets.some((a) => a.releasable && /harness/i.test(a.name))) {
+            console.error("harness asset marked releasable");
+            process.exit(1);
+          }
+          const inventory = {
+            subjectCommit: subject,
+            subjectTag: tag,
+            rcWorkflowRunId: runId,
+            matrixId: "macos-aarch64",
+            assets,
+            expiresAt,
+            signingSummary: "ad-hoc signingIdentity=- ; production releasable=true ; harness releasable=false",
+            claimProfile: "macos-aarch64-beta",
+            claimMode: "platform-beta",
+          };
+          writeFileSync(
+            "rc-assets/inventory.json",
+            JSON.stringify(inventory, null, 2) + "\n",
+            "utf8",
+          );
+          console.log(JSON.stringify(inventory, null, 2));
+          NODE
+
+      - name: Upload production RC artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-macos-aarch64-production
+          path: rc-assets/production/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload non-releasable harness artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-macos-aarch64-harness
+          path: rc-assets/harness/*
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload RC inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-macos-aarch64-inventory
+          path: rc-assets/inventory.json
+          if-no-files-found: error
+          retention-days: 90
