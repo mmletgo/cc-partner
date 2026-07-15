@@ -209,15 +209,25 @@ pub(crate) async fn get_local_owner_orchestrator_review_diff(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Human Review 详情 Changes tab 需要有界只读 diff；local 本机采集，remote 由 owning device 生成。
+///     GuiClient 必须经 control 在 owner 进程读 worktree，保持 review 权威与 digest 同源。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `get_orchestrator_review_diff_for_state`，入参仅 projectId/taskId，拒绝任意 repo path/ref。
+///     GuiClient → `BackendControlClient::get_orchestrator_review_diff`；
+///     HeadlessOwner → `get_orchestrator_review_diff_for_state`；
+///     入参仅 projectId/taskId，拒绝任意 repo path/ref。
 #[tauri::command]
 pub async fn get_orchestrator_review_diff(
     state: State<'_, AppState>,
     project_id: String,
     task_id: String,
 ) -> Result<OrchestratorReviewDiff, AppError> {
+    use crate::backend::authority::RuntimeRole;
+    use crate::backend::control_client::BackendControlClient;
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .get_orchestrator_review_diff(&project_id, &task_id)
+            .await;
+    }
     get_orchestrator_review_diff_for_state(state.inner(), &project_id, &task_id).await
 }
 

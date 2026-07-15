@@ -6,6 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
+//!     orchestrator/{deliver-reviewed,review-diff,workflow-document/{get,validate,save}} /
 //!     workbench-launch-summary（5 段独立 section outcomes，每段 max 5）/
 //!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback} /
 //!     transfer/prepare-open + transfer/{send,retry,resume,get-operation,cancel}
@@ -21,7 +22,10 @@ use crate::backup::{
     RestoreRequest, RestoreResult, FORMAT_VERSION,
 };
 use crate::commands::orchestrator::{
-    get_orchestrator_runtime_snapshot_for_state_with_request_id, OrchestratorRuntimeSnapshotDto,
+    deliver_reviewed_orchestrator_task_view_for_state, get_orchestrator_review_diff_for_state,
+    get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
+    save_workflow_document_for_state, validate_workflow_document_for_state,
+    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::transfer::prepare_transfer_open_for_state;
 use crate::config_runtime::{
@@ -36,8 +40,9 @@ use crate::models::transfer::{
 use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
-use crate::orchestrator::models::OperationalNotificationSnapshot;
+use crate::orchestrator::models::{OperationalNotificationSnapshot, OrchestratorReviewDiff};
 use crate::orchestrator::notifications::capture_operational_notification_snapshot;
+use crate::orchestrator::workflow::WorkflowDocument;
 use crate::state::AppState;
 use crate::storage::RecoveryJobRow;
 use crate::transfer::sender;
@@ -1377,6 +1382,242 @@ pub async fn control_transfer_cancel(
     let body = serde_json::json!({ "ok": true, "id": request.task_id });
     ensure_response_within_limit(&body, &context)?;
     Ok(Json(body))
+}
+
+/// Orchestrator deliver-reviewed control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GuiClient 交付必须把 projectId/taskId/expectedReviewDigest 交给 owner，
+///     由 sidecar 执行 digest 门禁、Settings gate 与 Git delivery。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + projectId + taskId + 可选 expectedReviewDigest。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorDeliverReviewedRequest {
+    pub control_token: String,
+    pub project_id: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub expected_review_digest: Option<String>,
+}
+
+/// owner 路径：交付人工复核任务（完整 delivery pipeline）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Git commit/push/merge、delivery lock、Settings gate 与 digest TOCTOU recheck 只能在
+///     HeadlessOwner 进程执行；GuiClient 不得自跑 pipeline。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `deliver_reviewed_orchestrator_task_view_for_state`
+///     （透传 expectedReviewDigest）→ OrchestratorTaskViewDto。
+pub async fn control_orchestrator_deliver_reviewed(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorDeliverReviewedRequest>,
+) -> P2pResult<Json<OrchestratorTaskViewDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_deliver_reviewed"))?;
+    let view = deliver_reviewed_orchestrator_task_view_for_state(
+        &state,
+        request.project_id.trim(),
+        request.task_id.trim(),
+        request.expected_review_digest.as_deref(),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_deliver_reviewed"))?;
+    ensure_response_within_limit(&view, &context)?;
+    Ok(Json(view))
+}
+
+/// Orchestrator review-diff control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     Human Review Changes tab 必须读 owner worktree 权威 diff，与 deliver digest 同源。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + projectId + taskId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorReviewDiffRequest {
+    pub control_token: String,
+    pub project_id: String,
+    pub task_id: String,
+}
+
+/// owner 路径：采集 remote-aware review diff。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GuiClient 不得在本进程读 Git worktree 猜 digest；review 权威只在 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `get_orchestrator_review_diff_for_state`。
+///     响应可能含有界 patch（展示上限可接近 2 MiB），故不强制 1 MiB 元数据上限。
+pub async fn control_orchestrator_review_diff(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorReviewDiffRequest>,
+) -> P2pResult<Json<OrchestratorReviewDiff>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_review_diff"))?;
+    let diff = get_orchestrator_review_diff_for_state(
+        &state,
+        request.project_id.trim(),
+        request.task_id.trim(),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_review_diff"))?;
+    Ok(Json(diff))
+}
+
+/// workflow-document/get control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     向导必须读 sidecar 上的项目根 WORKFLOW.md，而非 GuiClient 本地空路径。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + projectId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlWorkflowDocumentGetRequest {
+    pub control_token: String,
+    pub project_id: String,
+}
+
+/// owner 路径：读取 WORKFLOW 文档状态。
+///
+/// Business Logic（为什么需要这个函数）:
+///     WORKFLOW.md 权威在项目所在 owner 设备；GuiClient 只代理。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `get_workflow_document_for_state`。
+pub async fn control_orchestrator_workflow_document_get(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlWorkflowDocumentGetRequest>,
+) -> P2pResult<Json<WorkflowDocument>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_get")
+        })?;
+    let doc = get_workflow_document_for_state(&state, request.project_id.trim())
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_get")
+        })?;
+    ensure_response_within_limit(&doc, &context)?;
+    Ok(Json(doc))
+}
+
+/// workflow-document/validate control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     保存前权威 parser 必须与 owner save 路径一致。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + projectId + content。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlWorkflowDocumentValidateRequest {
+    pub control_token: String,
+    pub project_id: String,
+    pub content: String,
+}
+
+/// owner 路径：权威校验 WORKFLOW 内容。
+///
+/// Business Logic（为什么需要这个函数）:
+///     前端 YAML 提示不得当最终结果；validate 与 save 同进程。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `validate_workflow_document_for_state`。
+pub async fn control_orchestrator_workflow_document_validate(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlWorkflowDocumentValidateRequest>,
+) -> P2pResult<Json<WorkflowDocument>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_validate")
+        })?;
+    let doc =
+        validate_workflow_document_for_state(&state, request.project_id.trim(), &request.content)
+            .await
+            .map_err(|e| {
+                P2pError::from_app_error(
+                    e,
+                    &context,
+                    "control.orchestrator_workflow_document_validate",
+                )
+            })?;
+    ensure_response_within_limit(&doc, &context)?;
+    Ok(Json(doc))
+}
+
+/// workflow-document/save control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     CAS save 的 expectedHash + content 必须在 owner 排他写盘。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + projectId + expectedHash + content。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlWorkflowDocumentSaveRequest {
+    pub control_token: String,
+    pub project_id: String,
+    pub expected_hash: String,
+    pub content: String,
+}
+
+/// owner 路径：CAS 保存 WORKFLOW 文档。
+///
+/// Business Logic（为什么需要这个函数）:
+///     排他 create 与 expected-hash CAS 只能在 owner 执行；成功后不 dispatch。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `save_workflow_document_for_state`。
+pub async fn control_orchestrator_workflow_document_save(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlWorkflowDocumentSaveRequest>,
+) -> P2pResult<Json<WorkflowDocument>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_save")
+        })?;
+    let doc = save_workflow_document_for_state(
+        &state,
+        request.project_id.trim(),
+        &request.expected_hash,
+        &request.content,
+    )
+    .await
+    .map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_save")
+    })?;
+    ensure_response_within_limit(&doc, &context)?;
+    Ok(Json(doc))
 }
 
 /// 序列化后检查响应不超过 1 MiB。

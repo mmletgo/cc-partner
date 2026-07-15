@@ -299,7 +299,8 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
         if !delivery_transition.transitioned {
             return Ok(OrchestratorTaskDto::from(delivery_transition.task));
         }
-        return run_delivery_for_task(state, &delivery_transition.task.id).await;
+        // auto-delivery 无人类 digest，传 None 跳过 commit 边界 digest 门禁。
+        return run_delivery_for_task(state, &delivery_transition.task.id, None).await;
     }
 
     start_repair_runner_for_failed_review(state, &task.id, &review).await

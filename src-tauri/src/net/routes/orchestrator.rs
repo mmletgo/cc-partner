@@ -314,7 +314,8 @@ async fn request_rework_task_for_state(
 ///
 /// Code Logic（这个函数做什么）:
 ///     确认任务所属 local 项目，enforce digest（recollect+比较），读取 Settings gate，
-///     通过后切入 Delivering 并调用共享 delivery pipeline。
+///     通过后切入 Delivering 并把 expectedReviewDigest 传入共享 delivery pipeline
+///     （commit 边界再次 recheck）。
 async fn deliver_reviewed_task_for_state(
     state: &AppState,
     req: RemoteDeliverReviewedReq,
@@ -333,7 +334,7 @@ async fn deliver_reviewed_task_for_state(
         .orchestrator_repo
         .start_delivery_from_human_review(&task.id)
         .await?;
-    run_delivery_for_task(state, &delivering.id).await
+    run_delivery_for_task(state, &delivering.id, req.expected_review_digest.as_deref()).await
 }
 
 /// 终止远端任务。

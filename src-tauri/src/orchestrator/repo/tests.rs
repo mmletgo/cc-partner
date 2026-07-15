@@ -1444,6 +1444,59 @@ async fn start_delivery_requires_human_review_task() {
     );
 }
 
+/// Business Logic（为什么需要这个测试）:
+///     commit 边界 digest 漂移后，Delivering 任务必须 CAS 回 Human Review，供前端强制 re-review。
+///
+/// Code Logic（这个测试做什么）:
+///     先 start_delivery_from_human_review 切入 Delivering，再 revert_delivery_to_human_review；
+///     断言 status=Done、workflow=HumanReview、run=Idle；对已非 Delivering 任务调用应保持不变。
+#[tokio::test]
+async fn revert_delivery_to_human_review_cas_from_delivering() {
+    let (pool, repo) = setup_repo().await;
+    let reviewed = task_row("task-revert-hr", "project-1", OrchestratorTaskStatus::Done);
+    repo.create_task(&reviewed).await.unwrap();
+    set_task_split_state(
+        &pool,
+        &reviewed.id,
+        OrchestratorWorkflowState::HumanReview,
+        OrchestratorRunState::Idle,
+        None,
+    )
+    .await;
+    let delivering = repo
+        .start_delivery_from_human_review(&reviewed.id)
+        .await
+        .unwrap();
+    assert_eq!(delivering.status, OrchestratorTaskStatus::Delivering);
+
+    let reverted = repo
+        .revert_delivery_to_human_review(&reviewed.id)
+        .await
+        .unwrap();
+    assert_eq!(reverted.status, OrchestratorTaskStatus::Done);
+    assert_eq!(
+        reverted.workflow_state,
+        OrchestratorWorkflowState::HumanReview
+    );
+    assert_eq!(reverted.run_state, OrchestratorRunState::Idle);
+    assert_eq!(
+        reverted.attempt_phase,
+        Some(OrchestratorAttemptPhase::Succeeded)
+    );
+    assert!(reverted.blocked_reason.is_none());
+
+    // 已不在 Delivering：CAS miss 返回当前 Human Review 行。
+    let again = repo
+        .revert_delivery_to_human_review(&reviewed.id)
+        .await
+        .unwrap();
+    assert_eq!(again.status, OrchestratorTaskStatus::Done);
+    assert_eq!(
+        again.workflow_state,
+        OrchestratorWorkflowState::HumanReview
+    );
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     显式 cancelTask 需要把任务移到 Canceled/Idle，同时保留 worktree、session 和既有 evidence 供用户审计。
 ///

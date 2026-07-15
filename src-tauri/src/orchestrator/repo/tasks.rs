@@ -1429,6 +1429,40 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     人工复核交付切入 Delivering 后，若 commit 边界检测到 review digest 漂移，
+    ///     任务必须回到 Human Review 供用户重新审阅，而不是进入 Blocked 或保持 Delivering。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     CAS：仅当当前仍为 Delivering 时写 status=Done、workflow=HumanReview、run=Idle、
+    ///     attempt_phase=Succeeded，清空 blocked_reason 并 bump state_version；未命中返回当前任务。
+    pub async fn revert_delivery_to_human_review(
+        &self,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_tasks \
+                 SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                     blocked_reason = ?, state_version = state_version + 1, updated_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(OrchestratorTaskStatus::Done.as_str())
+            .bind(OrchestratorWorkflowState::HumanReview.as_str())
+            .bind(OrchestratorRunState::Idle.as_str())
+            .bind(OrchestratorAttemptPhase::Succeeded.as_str())
+            .bind(Option::<&str>::None)
+            .bind(now)
+            .bind(task_id)
+            .bind(OrchestratorTaskStatus::Delivering.as_str())
+            .execute(&self.pool)
+            .await
+        })
+        .await?;
+        self.get_task(task_id).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     显式 cancelTask 表示用户不再希望任务继续被 scheduler 或 delivery 接管，但仍要保留现场和证据供人工审计。
     ///
     /// Code Logic（这个函数做什么）:

@@ -431,6 +431,47 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 ),
             ),
         )
+        // N6 M3：deliver / review-diff / workflow-document 必须在 owner 进程执行
+        // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
+        .route(
+            "/api/backend/control/orchestrator/deliver-reviewed",
+            post(crate::backend::control_api::control_orchestrator_deliver_reviewed).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/review-diff",
+            post(crate::backend::control_api::control_orchestrator_review_diff).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/workflow-document/get",
+            post(crate::backend::control_api::control_orchestrator_workflow_document_get).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/workflow-document/validate",
+            post(crate::backend::control_api::control_orchestrator_workflow_document_validate)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                )),
+        )
+        .route(
+            "/api/backend/control/orchestrator/workflow-document/save",
+            post(crate::backend::control_api::control_orchestrator_workflow_document_save).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
         .route(
             "/api/backend/control/operational-notifications/snapshot",
             post(crate::backend::control_api::control_operational_notification_snapshot).layer(

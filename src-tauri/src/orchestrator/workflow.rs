@@ -503,10 +503,12 @@ pub fn validate_workflow_content(content: &str) -> WorkflowDocument {
 
 /// Business Logic（为什么需要这个函数）:
 ///     向导保存必须 CAS 拒绝并发覆盖，原子落盘，且不得 dispatch 或改动 delivery 配置。
+///     空 hash 创建路径必须排他：并发第二次创建不得静默 last-write-wins。
 ///
 /// Code Logic（这个函数做什么）:
 ///     1) 权威校验 content；2) 解析项目根固定 WORKFLOW.md 路径并拒绝 symlink/越界；
-///     3) missing 仅允许 expected_hash 为空串创建；已有文件比对 SHA-256 后 atomic rename；
+///     3) missing 仅允许 expected_hash 为空串创建（`write_new_workflow_file_atomic` 排他落盘）；
+///        已有文件比对 SHA-256 后 atomic rename（update-path CAS，不变）；
 ///     4) 返回保存后的文档快照。本函数不触发 scheduler。
 pub fn save_workflow_document_at_project_root(
     project_path: &Path,
@@ -596,10 +598,15 @@ fn ensure_workflow_path_is_safe(workflow_path: &Path) -> Result<(), AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     首次创建 WORKFLOW.md 也要原子写入，避免半截文件被 scheduler 读到。
+///     首次创建 WORKFLOW.md 要原子写入，避免半截文件被 scheduler 读到；
+///     并发 empty-hash 创建必须排他，禁止 Unix rename 静默覆盖已有文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     在同目录写唯一临时文件后 rename 到 WORKFLOW.md；失败清理临时文件。
+///     1) 同目录 create_new 写唯一临时文件并 fsync；
+///     2) 落盘前 recheck 目标不存在，已存在 → cleanup temp + `workflow_document_changed`；
+///     3) 优先 `hard_link(temp, target)` 排他放置（AlreadyExists → conflict），成功后删 temp；
+///     4) hard_link 非 AlreadyExists 失败时回退 `create_new` 直写目标（同样 AlreadyExists → conflict）；
+///     5) 任意失败路径清理本次 temp（回退写失败时不删除竞争者文件）。
 fn write_new_workflow_file_atomic(path: &Path, content: &str) -> Result<(), AppError> {
     let parent = path
         .parent()
@@ -623,16 +630,70 @@ fn write_new_workflow_file_atomic(path: &Path, content: &str) -> Result<(), AppE
         let _ = fs::remove_file(&temporary_path);
         return Err(error);
     }
-    if let Err(error) = fs::rename(&temporary_path, path) {
+
+    // TOCTOU recheck：目标已出现则本创建失败（随后 hard_link/create_new 仍作最终排他屏障）。
+    if path.exists() {
         let _ = fs::remove_file(&temporary_path);
-        // 并发创建：目标已存在时转为 CAS 冲突。
-        if path.exists() {
-            return Err(AppError::conflict(WORKFLOW_DOCUMENT_CHANGED_CODE));
-        }
-        return Err(AppError::from(error));
+        return Err(AppError::conflict(WORKFLOW_DOCUMENT_CHANGED_CODE));
     }
-    let _ = sha256_file_hex(path)?;
-    Ok(())
+
+    match fs::hard_link(&temporary_path, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&temporary_path);
+            let _ = sha256_file_hex(path)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(&temporary_path);
+            Err(AppError::conflict(WORKFLOW_DOCUMENT_CHANGED_CODE))
+        }
+        Err(_link_err) => {
+            // 跨卷/受限 FS 等 hard_link 不可用时，用 create_new 直写目标保持排他语义。
+            match write_new_workflow_file_exclusive_create(path, content) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&temporary_path);
+                    let _ = sha256_file_hex(path)?;
+                    Ok(())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&temporary_path);
+                    Err(AppError::conflict(WORKFLOW_DOCUMENT_CHANGED_CODE))
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&temporary_path);
+                    Err(AppError::from(error))
+                }
+            }
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     当 hard_link 在目标 FS 上不可用时，仍需在“目标必须不存在”语义下创建 WORKFLOW.md，
+///     避免回退到可覆盖的 rename。
+///
+/// Code Logic（这个函数做什么）:
+///     `OpenOptions::create_new(true)` 排他打开目标并写入 content；
+///     中途写失败删除本次创建的目标文件（不碰 AlreadyExists 竞争者）。
+fn write_new_workflow_file_exclusive_create(
+    path: &Path,
+    content: &str,
+) -> Result<(), std::io::Error> {
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)?;
+    let write_result = (|| -> Result<(), std::io::Error> {
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+    write_result
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1307,6 +1368,70 @@ mod tests {
             .expect("正确 hash 应保存");
         assert_eq!(saved.status, WorkflowDocumentStatus::Valid);
         assert_ne!(saved.content_hash.as_deref(), Some(hash.as_str()));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     并发 empty-hash 创建不得静默 last-write-wins，第二次创建必须稳定 Conflict。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用 barrier 并发两次合法但不同的模板 empty-hash save；
+    ///     断言恰好 1 次 Ok、至少 1 次 `workflow_document_changed`，磁盘内容是两者之一。
+    #[test]
+    fn save_workflow_document_concurrent_empty_hash_create_is_exclusive() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = tempdir().expect("创建临时目录成功");
+        let project = dir.path().to_path_buf();
+        let template_a = default_workflow_template();
+        let template_b = template_a.replace("300000", "120000");
+        parse_project_workflow(&template_a).expect("模板 A 必须可解析");
+        parse_project_workflow(&template_b).expect("模板 B 必须可解析");
+        assert_ne!(template_a, template_b, "两份模板内容应不同");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let project_a = project.clone();
+        let project_b = project.clone();
+        let content_a = template_a.clone();
+        let content_b = template_b.clone();
+        let barrier_a = Arc::clone(&barrier);
+        let barrier_b = Arc::clone(&barrier);
+
+        let handle_a = thread::spawn(move || {
+            barrier_a.wait();
+            save_workflow_document_at_project_root(&project_a, "", &content_a)
+        });
+        let handle_b = thread::spawn(move || {
+            barrier_b.wait();
+            save_workflow_document_at_project_root(&project_b, "", &content_b)
+        });
+
+        let result_a = handle_a.join().expect("线程 A 不得 panic");
+        let result_b = handle_b.join().expect("线程 B 不得 panic");
+        let results = [result_a, result_b];
+
+        let ok_count = results.iter().filter(|result| result.is_ok()).count();
+        let conflict_count = results
+            .iter()
+            .filter(|result| {
+                result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.to_string() == WORKFLOW_DOCUMENT_CHANGED_CODE)
+            })
+            .count();
+
+        assert_eq!(ok_count, 1, "并发 empty-hash 创建必须恰好成功一次: {results:?}");
+        assert!(
+            conflict_count >= 1,
+            "至少一次必须返回 workflow_document_changed: {results:?}"
+        );
+
+        let on_disk = fs::read_to_string(project.join(WORKFLOW_FILE_NAME)).expect("读取 WORKFLOW.md");
+        assert!(
+            on_disk == template_a || on_disk == template_b,
+            "落盘内容必须是两份合法模板之一"
+        );
     }
 
     /// Business Logic（为什么需要这个函数）:

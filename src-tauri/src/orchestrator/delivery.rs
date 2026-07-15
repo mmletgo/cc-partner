@@ -343,12 +343,20 @@ impl DeliveryContext for AppDeliveryContext<'_> {
 /// Business Logic（为什么需要这个函数）:
 ///     验证成功后的 Delivering 任务应自动完成 commit、push 任务分支、merge main 和 push main，
 ///     让 full-auto 策略无需用户手动收尾。
+///     人工复核交付路径还必须在不可逆 commit 前再次比对 review digest，关闭 enforce→commit 的 TOCTOU。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验任务状态与项目 full-auto flags；按顺序复用 Workbench 本机 helper 执行四个阶段；
+///     校验任务状态与项目 full-auto flags；获取 per-task delivery lock 并解析 worktree 后，
+///     若 `expected_review_digest` 为 Some 则在 worktree 上 recollect 并与 expected 比对，
+///     漂移立即返回 Conflict `review_diff_changed`（无 commit side effect）；
+///     auto-delivery 传 None 跳过该门禁。随后按顺序执行 commit/push/merge/push main 四阶段；
 ///     每个阶段成功写 passed delivery evidence，失败写 failed evidence 并把任务置为 Blocked；
 ///     全局交付开关关闭时写 blocked evidence；全部成功后置 Done。
-pub(crate) async fn deliver_task<C>(context: &C, task_id: &str) -> Result<DeliverySummary, AppError>
+pub(crate) async fn deliver_task<C>(
+    context: &C,
+    task_id: &str,
+    expected_review_digest: Option<&str>,
+) -> Result<DeliverySummary, AppError>
 where
     C: DeliveryContext,
 {
@@ -459,6 +467,25 @@ where
         .unwrap_or_else(|| "unknown".to_string());
     let task_path = worktree.path.clone();
     let main_path = project.path.clone();
+
+    // 人工复核交付：在 delivery lock + worktree 已解析后、不可逆 commit 前 recollect digest，
+    // 关闭 enforce_deliver_review_digest 与 commit 之间的 TOCTOU；漂移立即 Err，无 commit side effect。
+    if expected_review_digest
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        if let Err(err) = crate::commands::orchestrator::enforce_deliver_review_digest_for_worktree(
+            &task.id,
+            Path::new(&task_path),
+            worktree.base_branch.as_deref(),
+            expected_review_digest,
+        ) {
+            // review_diff_changed / Validation 等 digest 门禁错误上抛，由 run_delivery_for_task
+            // 特殊处理回退 Human Review；不得在此 block 或写 delivery evidence。
+            return Err(err);
+        }
+    }
 
     let commit_message = format!("orchestrator: {}", task.title.trim());
     let before_head = match workbench_git::head_hash(Path::new(&task_path)) {
@@ -1899,7 +1926,7 @@ mod tests {
             .expect("write task file");
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("deliver task");
 
@@ -1950,10 +1977,10 @@ mod tests {
         let commit_started = harness.controls.commit_started.notified();
         let first_harness = harness.clone();
         let first_task_id = task_id.clone();
-        let first = tokio::spawn(async move { deliver_task(&first_harness, &first_task_id).await });
+        let first = tokio::spawn(async move { deliver_task(&first_harness, &first_task_id, None).await });
         commit_started.await;
 
-        let second = deliver_task(&harness, &task_id)
+        let second = deliver_task(&harness, &task_id, None)
             .await
             .expect("second delivery should not run side effects");
         harness.controls.release_commit.notify_one();
@@ -1998,7 +2025,7 @@ mod tests {
             .lock()
             .expect("abort after merge lock") = Some(task_id.clone());
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("delivery should return current task");
         let persisted = harness
@@ -2042,7 +2069,7 @@ mod tests {
             .lock()
             .expect("abort before push lock") = Some(task_id.clone());
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("delivery should return current task");
         let persisted = harness
@@ -2079,7 +2106,7 @@ mod tests {
         .await
         .expect("insert invalid config");
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("legacy config should be ignored");
         let evidence = harness
@@ -2129,7 +2156,7 @@ mod tests {
             .await
             .expect("insert task");
 
-        let delivered = deliver_task(&harness, task_id)
+        let delivered = deliver_task(&harness, task_id, None)
             .await
             .expect("missing worktree should block");
         let evidence = harness
@@ -2176,7 +2203,7 @@ mod tests {
         .await
         .expect("disable push main");
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("legacy disabled flag should be ignored");
         let evidence = harness
@@ -2217,7 +2244,7 @@ mod tests {
             }
             harness.set_orchestrator_config(config);
 
-            let delivered = deliver_task(&harness, &task_id)
+            let delivered = deliver_task(&harness, &task_id, None)
                 .await
                 .expect("disabled global flag should block");
             let evidence = harness
@@ -2259,7 +2286,7 @@ mod tests {
         fs::write(repo.join("local-only.txt"), "uncommitted main change\n").expect("dirty main");
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("delivery should return blocked task");
 
@@ -2276,5 +2303,119 @@ mod tests {
             .output()
             .expect("git show origin main task file");
         assert!(!main_show.status.success());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     人工复核交付在 enforce 通过后、不可逆 commit 前 worktree 仍可能被改写；
+    ///     commit 边界必须再次比对 digest，漂移时不得提交未审内容。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     采集 digest A → 修改 worktree → 以 expected=A 调用 deliver_task；
+    ///     断言 Conflict `review_diff_changed`、commit_calls==0、任务仍 Delivering（不在此 block）。
+    #[tokio::test]
+    async fn review_diff_changed_at_commit_boundary_skips_commit() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "reviewed content v1\n")
+            .expect("write reviewed file");
+        let digest_a = crate::orchestrator::review_diff::collect_review_diff_for_worktree(
+            "task-digest-toctou",
+            &task_worktree,
+            Some("main"),
+        )
+        .expect("collect digest A")
+        .review_digest;
+        assert!(!digest_a.is_empty());
+
+        // 模拟 enforce 通过后、commit 前的 worktree 漂移。
+        fs::write(task_worktree.join("task.txt"), "mutated after review v2\n")
+            .expect("mutate after review");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        let err = deliver_task(&harness, &task_id, Some(digest_a.as_str()))
+            .await
+            .expect_err("digest drift must fail before commit");
+        assert_eq!(
+            err.code(),
+            crate::commands::orchestrator::REVIEW_DIFF_CHANGED_CODE
+        );
+        assert_eq!(
+            err.classify(),
+            crate::error::AppErrorCategory::Conflict
+        );
+        assert_eq!(
+            harness.controls.commit_calls.load(Ordering::SeqCst),
+            0,
+            "commit must not run when digest drifts at commit boundary"
+        );
+        assert_eq!(harness.controls.push_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.controls.merge_calls.load(Ordering::SeqCst), 0);
+
+        let task = harness
+            .orchestrator_repo
+            .get_task(&task_id)
+            .await
+            .expect("get task");
+        assert_eq!(
+            task.status,
+            OrchestratorTaskStatus::Delivering,
+            "deliver_task 本身不 block；由 run_delivery_for_task 回退 Human Review"
+        );
+        let evidence = harness
+            .orchestrator_repo
+            .list_evidence(&task_id)
+            .await
+            .expect("list evidence");
+        assert!(
+            evidence.iter().all(|item| item.kind != "delivery"),
+            "digest 漂移后不得写入 delivery evidence"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     auto-delivery 无人类 digest 时必须跳过 commit 边界 digest 门禁，否则 full-auto 路径会永久失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用 deliver_task(..., None) 走完整交付；断言 Done 且 commit 执行过。
+    #[tokio::test]
+    async fn auto_delivery_with_none_digest_skips_commit_boundary_gate() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "auto delivery without digest\n")
+            .expect("write task file");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        let delivered = deliver_task(&harness, &task_id, None)
+            .await
+            .expect("auto delivery with None digest must proceed");
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Done);
+        assert!(harness.controls.commit_calls.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     匹配的 expected digest 应允许 commit 继续，证明门禁只拦截漂移而非阻断合法交付。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     采集当前 digest 后原样传给 deliver_task；断言成功 Done 且 commit 被调用。
+    #[tokio::test]
+    async fn matching_expected_digest_allows_commit() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "matching digest content\n")
+            .expect("write task file");
+        let digest = crate::orchestrator::review_diff::collect_review_diff_for_worktree(
+            "task-matching-digest",
+            &task_worktree,
+            Some("main"),
+        )
+        .expect("collect digest")
+        .review_digest;
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        let delivered = deliver_task(&harness, &task_id, Some(digest.as_str()))
+            .await
+            .expect("matching digest must allow delivery");
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Done);
+        assert!(harness.controls.commit_calls.load(Ordering::SeqCst) >= 1);
     }
 }

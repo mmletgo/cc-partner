@@ -238,38 +238,34 @@ pub async fn request_orchestrator_task_rework_view(
     .await
 }
 
-/// 交付 remote-aware 人工复核任务。
+/// 交付 remote-aware 人工复核任务（owner 本地路径）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户复核通过后可以显式 deliver，但必须只有 Settings 允许 full-auto delivery 时才进入 Git delivery pipeline。
 ///     交付前必须立即 recollect review digest，防止审阅后 worktree 漂移导致交付未审变更；
 ///     remote shortcut 上交付必须由 owning device 检查其 Settings/digest 并执行。
+///     Git delivery / Settings gate / delivery lock / event_bus 必须在 HeadlessOwner 进程执行。
 ///
 /// Code Logic（这个函数做什么）:
 ///     local 项目先校验任务归属，再 enforce expectedReviewDigest（recollect+比较），再 Settings gate，
-///     最后 start_delivery_from_human_review 并跑 delivery pipeline；
-///     remote 项目把 expectedReviewDigest 转发给远端 deliver-reviewed endpoint 并刷新 mirror。
-#[tauri::command]
-pub async fn deliver_reviewed_orchestrator_task_view(
-    state: State<'_, AppState>,
-    project_id: String,
-    task_id: String,
-    expected_review_digest: Option<String>,
+///     最后 start_delivery_from_human_review 并把同一 digest 传入 run_delivery_for_task
+///     （commit 边界再次 recollect 防 TOCTOU）；remote 项目把 expectedReviewDigest 转发给远端
+///     deliver-reviewed endpoint 并刷新 mirror。供 Tauri owner 路径与 control API 共用。
+pub(crate) async fn deliver_reviewed_orchestrator_task_view_for_state(
+    state: &AppState,
+    project_id: &str,
+    task_id: &str,
+    expected_review_digest: Option<&str>,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
-    let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
+    let project = get_orchestrator_workbench_project(state, project_id).await?;
     if project.kind != "remote" {
         let task = get_local_project_task_for_action(
             state.orchestrator_repo.as_ref(),
-            &project_id,
-            &task_id,
+            project_id,
+            task_id,
         )
         .await?;
-        super::enforce_deliver_review_digest(
-            state.inner(),
-            &task,
-            expected_review_digest.as_deref(),
-        )
-        .await?;
+        super::enforce_deliver_review_digest(state, &task, expected_review_digest).await?;
         let config = state
             .config
             .read()
@@ -279,21 +275,57 @@ pub async fn deliver_reviewed_orchestrator_task_view(
         ensure_reviewed_delivery_allowed(&config)?;
         let delivering = state
             .orchestrator_repo
-            .start_delivery_from_human_review(&task_id)
+            .start_delivery_from_human_review(task_id)
             .await?;
-        let delivered = run_delivery_for_task(state.inner(), &delivering.id).await?;
+        let delivered =
+            run_delivery_for_task(state, &delivering.id, expected_review_digest).await?;
         return Ok(OrchestratorTaskViewDto::Local { task: delivered });
     }
-    reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), &task_id).await?;
+    reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), task_id).await?;
+    let digest = expected_review_digest.map(str::to_string);
     update_remote_orchestrator_task_status(
-        state.inner(),
+        state,
         &project,
-        &task_id,
+        task_id,
         |client, base_url, id| async move {
             client
-                .deliver_reviewed_task(&base_url, &id, expected_review_digest.as_deref())
+                .deliver_reviewed_task(&base_url, &id, digest.as_deref())
                 .await
         },
+    )
+    .await
+}
+
+/// 交付 remote-aware 人工复核任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户复核通过后可以显式 deliver，但必须只有 Settings 允许 full-auto delivery 时才进入 Git delivery pipeline。
+///     GuiClient 不得在本进程跑 commit/push/merge 或持有 delivery lock；必须代理到 sidecar owner。
+///
+/// Code Logic（这个函数做什么）:
+///     GuiClient → `BackendControlClient::deliver_reviewed_orchestrator_task`（透传 digest）；
+///     HeadlessOwner → `deliver_reviewed_orchestrator_task_view_for_state`。
+#[tauri::command]
+pub async fn deliver_reviewed_orchestrator_task_view(
+    state: State<'_, AppState>,
+    project_id: String,
+    task_id: String,
+    expected_review_digest: Option<String>,
+) -> Result<OrchestratorTaskViewDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .deliver_reviewed_orchestrator_task(
+                &project_id,
+                &task_id,
+                expected_review_digest.as_deref(),
+            )
+            .await;
+    }
+    deliver_reviewed_orchestrator_task_view_for_state(
+        state.inner(),
+        &project_id,
+        &task_id,
+        expected_review_digest.as_deref(),
     )
     .await
 }
@@ -578,14 +610,21 @@ async fn get_remote_workflow_document(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     向导检测步骤需要 missing/valid/invalid/readError 与 contentHash。
+///     GuiClient 必须经 control 读 owner 权威文件，禁止本进程猜盘路径。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `get_workflow_document_for_state`。
+///     GuiClient → control `orchestrator/workflow-document/get`；
+///     HeadlessOwner → `get_workflow_document_for_state`。
 #[tauri::command]
 pub async fn get_workflow_document(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<WorkflowDocument, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .get_workflow_document(project_id.trim())
+            .await;
+    }
     get_workflow_document_for_state(state.inner(), project_id.trim()).await
 }
 
@@ -593,15 +632,22 @@ pub async fn get_workflow_document(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     保存前必须调用后端 parser；返回 diagnostics 与规范化 preview。
+///     GuiClient 校验也必须代理到 owner，保持与 save 同一权威进程。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `validate_workflow_document_for_state`。
+///     GuiClient → control `orchestrator/workflow-document/validate`；
+///     HeadlessOwner → `validate_workflow_document_for_state`。
 #[tauri::command]
 pub async fn validate_workflow_document(
     state: State<'_, AppState>,
     project_id: String,
     content: String,
 ) -> Result<WorkflowDocument, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .validate_workflow_document(project_id.trim(), &content)
+            .await;
+    }
     validate_workflow_document_for_state(state.inner(), project_id.trim(), &content).await
 }
 
@@ -609,9 +655,11 @@ pub async fn validate_workflow_document(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     向导保存使用 expectedHash；冲突要求重新加载；成功后不自动 dispatch。
+///     GuiClient 不得在本进程 CAS 写盘；排他 create / hash 门禁只在 owner 执行。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `save_workflow_document_for_state`；不调用 scheduler。
+///     GuiClient → control `orchestrator/workflow-document/save`（mutation 不重试）；
+///     HeadlessOwner → `save_workflow_document_for_state`；不调用 scheduler。
 #[tauri::command]
 pub async fn save_workflow_document(
     state: State<'_, AppState>,
@@ -619,6 +667,11 @@ pub async fn save_workflow_document(
     expected_hash: String,
     content: String,
 ) -> Result<WorkflowDocument, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .save_workflow_document(project_id.trim(), &expected_hash, &content)
+            .await;
+    }
     save_workflow_document_for_state(state.inner(), project_id.trim(), &expected_hash, &content)
         .await
 }
