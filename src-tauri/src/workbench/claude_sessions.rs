@@ -8,12 +8,16 @@
 //!     让前端能在「当前 worktree 范围」内按标题或对话内容搜索目标 session，选中后一键 resume。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `build_session_index`：单文件流式解析，提取 ClaudeSessionIndex（标题=lastPrompt 回退首条 user、
-//!       user 文本、assistant 文本、最近 20 条消息、元信息），过滤 slash/bash 命令，2 秒超时跳过。
-//!     - `scan_worktree_sessions`：扫描 worktree path 对应 encoded-cwd 目录，组装 WorktreeSessionIndex。
-//!     - `search_sessions`：按 spec 2.3 语义搜索（空 query 全部倒序 / 关键词命中优先级 + limit + preview snippets）。
-//!     - `ensure_worktree_session_index_scanned`：lazy 初始化内存索引 + 启动 notify 文件监听（debounce 500ms），
-//!       监听失败降级为每次重扫。
+//!     - `ClaudeIndexBudget` + 有界 `read_line_bounded`：限制文件数/单文件/行长/总字节/session 字符，
+//!       候选按 mtime desc + path asc 排序后截断，diagnostics 暴露 stable reason token。
+//!     - `build_session_index(_with_budget)`：单文件有界流式解析，提取 ClaudeSessionIndex（标题=lastPrompt
+//!       回退首条 user、user/assistant 文本、最近 20 条消息、元信息），过滤 slash/bash，2 秒超时跳过。
+//!     - `scan_worktree_sessions(_with_budget|_at)`：扫描 worktree 对应 encoded-cwd 目录，组装
+//!       带 truncated/diagnostics 的 WorktreeSessionIndex。
+//!     - `search_sessions` / `search_sessions_result`：spec 2.3 搜索；后者包装 SessionSearchResult DTO。
+//!     - `ensure_worktree_session_index_scanned`（async）：singleflight + spawn_blocking 扫描 +
+//!       notify 文件监听（debounce 500ms）；监听失败降级为每次重扫。
+//!     - `decode_session_search_response_body`：混部 dual-decode（v2 对象或 legacy 数组）。
 
 use crate::cc::collector::claude_projects_dir;
 use crate::state::AppState;
