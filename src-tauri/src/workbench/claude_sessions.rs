@@ -22,12 +22,404 @@ use chrono::Utc;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// 单文件解析超时（2 秒）。活跃 session 可能几 MB，超时则跳过避免阻塞扫描。
 const SINGLE_FILE_PARSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Diagnostics status：完整成功。
+pub const DIAG_STATUS_OK: &str = "ok";
+/// Diagnostics status：至少一个预算触发截断。
+pub const DIAG_STATUS_TRUNCATED: &str = "truncated";
+/// Diagnostics status：旧端/未知，无法提供预算诊断。
+pub const DIAG_STATUS_UNAVAILABLE: &str = "unavailable";
+
+/// 单次 Claude session 索引扫描的资源预算。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户 worktree 下可能堆积成千上万 jsonl、超大 transcript 或异常长行；无界扫描会拖垮
+///     sidecar 内存与 tokio 响应。预算把扫描约束在可预测的资源上限内，并在 diagnostics 暴露截断原因。
+///
+/// Code Logic（这个结构体做什么）:
+///     持有文件数、单文件字节、jsonl 行字节、总字节与 session 文本 Unicode scalar 上限；Default 给出生产默认。
+#[derive(Debug, Clone, Copy)]
+pub struct ClaudeIndexBudget {
+    /// 最多索引的 jsonl 文件数（按 mtime desc + path asc 排序后截断）。
+    pub max_files: usize,
+    /// 单文件 metadata 长度上限；超过则整文件跳过。
+    pub max_file_bytes: u64,
+    /// 单行 jsonl 最大读取字节；超过则丢弃该行并记 reason。
+    pub max_jsonl_line_bytes: usize,
+    /// 一次扫描累计读取字节上限；下一个文件会超则停止。
+    pub max_total_bytes: u64,
+    /// 单个 session 的 title+user+assistant 文本 Unicode scalar 总预算。
+    pub max_session_chars: usize,
+}
+
+impl Default for ClaudeIndexBudget {
+    /// 生产默认预算。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     搜索/监听热路径与测试需要统一的默认上限，避免调用方到处硬编码。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 max_files=10_000、max_file_bytes=64MiB、max_jsonl_line_bytes=1MiB、
+    ///     max_total_bytes=512MiB、max_session_chars=1_000_000。
+    fn default() -> Self {
+        Self {
+            max_files: 10_000,
+            max_file_bytes: 64 * 1024 * 1024,
+            max_jsonl_line_bytes: 1024 * 1024,
+            max_total_bytes: 512 * 1024 * 1024,
+            max_session_chars: 1_000_000,
+        }
+    }
+}
+
+/// 单文件解析时的预算命中结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     扫描层需要把「行过长 / session 文本截断 / 文件过大」等 reason 汇总到 diagnostics。
+///
+/// Code Logic（这个结构体做什么）:
+///     记录 reasons、实际读取字节，以及是否因 max_file_bytes 整文件跳过。
+#[derive(Debug, Clone, Default)]
+pub struct SessionFileBudgetOutcome {
+    pub reasons: Vec<String>,
+    pub bytes_read: u64,
+    pub skipped_entire_file: bool,
+}
+
+/// 搜索结果诊断信息（稳定 reason token）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端/远端需要知道结果是否因预算截断，以及扫描计数，便于展示「部分结果」而非静默丢数。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 序列化；status ∈ {ok, truncated, unavailable}；reasons 如 max_files 等稳定 token。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchDiagnostics {
+    pub status: String,
+    pub reasons: Vec<String>,
+    pub files_considered: u64,
+    pub files_indexed: u64,
+    pub bytes_read: u64,
+}
+
+impl SessionSearchDiagnostics {
+    /// 构造「完整成功」诊断。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     未触发任何预算时需要统一的 ok 诊断对象。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     status=ok，空 reasons，填入计数。
+    pub fn ok(files_considered: u64, files_indexed: u64, bytes_read: u64) -> Self {
+        Self {
+            status: DIAG_STATUS_OK.to_string(),
+            reasons: Vec::new(),
+            files_considered,
+            files_indexed,
+            bytes_read,
+        }
+    }
+
+    /// 构造「预算截断」诊断。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     任一预算命中时前端需展示 truncated 与 reason 列表。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     status=truncated，reasons 去重保序。
+    pub fn truncated(
+        reasons: Vec<String>,
+        files_considered: u64,
+        files_indexed: u64,
+        bytes_read: u64,
+    ) -> Self {
+        Self {
+            status: DIAG_STATUS_TRUNCATED.to_string(),
+            reasons: dedupe_reasons(reasons),
+            files_considered,
+            files_indexed,
+            bytes_read,
+        }
+    }
+
+    /// 构造「旧端不可用」诊断。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     混部解码旧 `Vec<SessionSearchHit>` 时没有预算信息，需显式 unavailable。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     status=unavailable，空 reasons，计数全 0。
+    pub fn unavailable() -> Self {
+        Self {
+            status: DIAG_STATUS_UNAVAILABLE.to_string(),
+            reasons: Vec::new(),
+            files_considered: 0,
+            files_indexed: 0,
+            bytes_read: 0,
+        }
+    }
+}
+
+/// 搜索 API 返回 DTO：命中列表 + 截断标记 + 诊断。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     仅返回 `Vec<SessionSearchHit>` 无法表达预算截断；新 DTO 让本机/远端/混部客户端统一消费。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase；items 为命中，truncated 与 diagnostics 反映索引扫描侧预算。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchResult {
+    pub items: Vec<SessionSearchHit>,
+    pub truncated: bool,
+    pub diagnostics: SessionSearchDiagnostics,
+}
+
+/// 把旧版 `Vec<SessionSearchHit>` 包装成新 DTO（无预算信息）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     新客户端对旧服务端时，body 仍是数组；需要合成 truncated=false + unavailable 诊断，避免解析失败。
+///
+/// Code Logic（这个函数做什么）:
+///     包装 items，truncated=false，diagnostics=unavailable，计数 0。
+pub fn synthesize_legacy_session_search_result(items: Vec<SessionSearchHit>) -> SessionSearchResult {
+    SessionSearchResult {
+        items,
+        truncated: false,
+        diagnostics: SessionSearchDiagnostics::unavailable(),
+    }
+}
+
+/// 双形态解码搜索响应：新 DTO 对象或旧数组。
+///
+/// Business Logic（为什么需要这个函数）:
+///     混部期间远端可能返回 v2 对象或 legacy 数组，客户端必须都能解析。
+///
+/// Code Logic（这个函数做什么）:
+///     先 `SessionSearchResult`，失败再 `Vec<SessionSearchHit>` 并 synthesize；都失败返回 serde 错误。
+pub fn decode_session_search_response_body(
+    bytes: &[u8],
+) -> Result<SessionSearchResult, serde_json::Error> {
+    match serde_json::from_slice::<SessionSearchResult>(bytes) {
+        Ok(v) => Ok(v),
+        Err(first_err) => match serde_json::from_slice::<Vec<SessionSearchHit>>(bytes) {
+            Ok(items) => Ok(synthesize_legacy_session_search_result(items)),
+            Err(_) => Err(first_err),
+        },
+    }
+}
+
+/// 去重 reason 列表并保持首次出现顺序。
+///
+/// Business Logic（为什么需要这个函数）:
+///     同一 reason 可能在多文件重复出现，diagnostics 只需稳定去重列表。
+///
+/// Code Logic（这个函数做什么）:
+///     O(n) 线性去重。
+fn dedupe_reasons(reasons: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in reasons {
+        if !out.iter().any(|x| x == &r) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// 按 Unicode scalar 预算截断字符串（只在 char 边界切断）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     max_session_chars 以 Unicode scalar 计数；截断必须落在 char 边界，避免 panic/半字符。
+///
+/// Code Logic（这个函数做什么）:
+///     chars().count() ≤ max 时原样 to_string，否则 take(max_chars) collect。
+pub fn truncate_to_char_budget(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        s.chars().take(max_chars).collect()
+    }
+}
+
+/// 在 title → user → assistant 顺序上分配 session 字符预算并截断。
+///
+/// Business Logic（为什么需要这个函数）:
+///     超大对话全文会撑爆内存索引；优先保留 title，再 user，最后 assistant。
+///
+/// Code Logic（这个函数做什么）:
+///     顺序扣减 remaining，返回截断后三元组与是否发生截断。
+fn apply_session_char_budget(
+    title: String,
+    user_text: String,
+    assistant_text: String,
+    max_session_chars: usize,
+) -> (String, String, String, bool) {
+    let mut remaining = max_session_chars;
+    let mut truncated = false;
+
+    let title_chars = title.chars().count();
+    let title_out = if title_chars <= remaining {
+        remaining = remaining.saturating_sub(title_chars);
+        title
+    } else {
+        truncated = true;
+        let out = truncate_to_char_budget(&title, remaining);
+        remaining = 0;
+        out
+    };
+
+    let user_chars = user_text.chars().count();
+    let user_out = if user_chars <= remaining {
+        remaining = remaining.saturating_sub(user_chars);
+        user_text
+    } else {
+        truncated = true;
+        let out = truncate_to_char_budget(&user_text, remaining);
+        remaining = 0;
+        out
+    };
+
+    let assistant_chars = assistant_text.chars().count();
+    let assistant_out = if assistant_chars <= remaining {
+        assistant_text
+    } else {
+        truncated = true;
+        truncate_to_char_budget(&assistant_text, remaining)
+    };
+
+    (title_out, user_out, assistant_out, truncated)
+}
+
+/// 从 BufRead 精确 drain 到并包含下一个 '\\n'（不越过下一行）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     超长行丢弃时必须停在换行符，否则会吞掉后续合法 jsonl 行。
+///
+/// Code Logic（这个函数做什么）:
+///     用 fill_buf/consume 只消耗到首个 '\\n'（含），返回丢弃字节数；永不整行大分配。
+fn drain_until_newline<R: BufRead>(reader: &mut R) -> std::io::Result<u64> {
+    let mut discarded = 0u64;
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(discarded);
+        }
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let n = pos + 1;
+            reader.consume(n);
+            discarded = discarded.saturating_add(n as u64);
+            return Ok(discarded);
+        }
+        let n = buf.len();
+        reader.consume(n);
+        discarded = discarded.saturating_add(n as u64);
+    }
+}
+
+/// 有界读取一行：最多分配 max_bytes+1，超长行丢弃内容并 drain 至换行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     异常/恶意 jsonl 可能含数 MiB 无换行长行；`BufRead::lines()` 会整行分配导致 OOM。
+///
+/// Code Logic（这个函数做什么）:
+///     逐字节/缓冲累积至 max_bytes+1 或 '\\n'；超长则 drain_until_newline 丢弃剩余；
+///     返回 (Option<String UTF-8 lossy 行>, 读取字节数, 是否超长)。
+fn read_line_bounded<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<(Option<String>, u64, bool)> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut bytes_read: u64 = 0;
+    let cap = max_bytes.saturating_add(1);
+
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            break;
+        }
+        if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+            // 本缓冲内含换行：只吃到换行
+            let take_n = pos + 1;
+            if buf.len() + take_n > cap {
+                // 加上本段会超过 cap → 超长行
+                // 先不把超长内容放进 buf；consume 到换行并记 overflow
+                reader.consume(take_n);
+                bytes_read = bytes_read.saturating_add(take_n as u64);
+                return Ok((None, bytes_read, true));
+            }
+            buf.extend_from_slice(&chunk[..take_n]);
+            reader.consume(take_n);
+            bytes_read = bytes_read.saturating_add(take_n as u64);
+            break;
+        }
+        // 本缓冲无换行
+        let available = chunk.len();
+        if buf.len() >= cap {
+            // 已超 cap 且仍无换行：丢弃本缓冲并继续 drain
+            reader.consume(available);
+            bytes_read = bytes_read.saturating_add(available as u64);
+            let extra = drain_until_newline(reader)?;
+            bytes_read = bytes_read.saturating_add(extra);
+            return Ok((None, bytes_read, true));
+        }
+        let room = cap - buf.len();
+        if available <= room {
+            buf.extend_from_slice(chunk);
+            reader.consume(available);
+            bytes_read = bytes_read.saturating_add(available as u64);
+            // 继续读更多
+        } else {
+            // 只填到 cap，然后 drain 剩余至换行
+            buf.extend_from_slice(&chunk[..room]);
+            reader.consume(room);
+            bytes_read = bytes_read.saturating_add(room as u64);
+            let extra = drain_until_newline(reader)?;
+            bytes_read = bytes_read.saturating_add(extra);
+            return Ok((None, bytes_read, true));
+        }
+    }
+
+    if bytes_read == 0 && buf.is_empty() {
+        return Ok((None, 0, false));
+    }
+    // buf 可能以 \n 结尾；cap 溢出已在上面 return
+    if buf.len() > max_bytes {
+        // 整行（含 \n）刚好落在 max+1：仍视为超长
+        return Ok((None, bytes_read, true));
+    }
+    if buf.ends_with(b"\n") {
+        buf.pop();
+        if buf.ends_with(b"\r") {
+            buf.pop();
+        }
+    }
+    let line = String::from_utf8_lossy(&buf).into_owned();
+    Ok((Some(line), bytes_read, false))
+}
+
+/// 把 reason 追加到列表（若尚不存在）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     多处预算命中路径需要稳定地记录 reason token。
+///
+/// Code Logic（这个函数做什么）:
+///     若不存在则 push。
+fn push_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|r| r == reason) {
+        reasons.push(reason.to_string());
+    }
+}
 
 /// 搜索命中上下文片段单侧字符数。
 const PREVIEW_SNIPPET_RADIUS: usize = 30;
@@ -100,10 +492,11 @@ pub struct ClaudeSessionIndex {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     搜索范围限定在当前 active worktree，需要把该 worktree 下所有 session 聚合成一张表，
-///     并记录 encoded_cwd 与扫描时间供文件监听回调复用。
+///     并记录 encoded_cwd 与扫描时间供文件监听回调复用；同时携带预算截断诊断供搜索 DTO 透传。
 ///
 /// Code Logic（这个结构体做什么）:
-///     不 Serialize（仅供内存索引使用）；sessions 以 session_id 为 key 便于单文件增量更新。
+///     不 Serialize（仅供内存索引使用）；sessions 以 session_id 为 key 便于单文件增量更新；
+///     truncated + diagnostics 描述最近一次全量/预算扫描的结果。
 #[derive(Debug, Clone)]
 pub struct WorktreeSessionIndex {
     // 保留 worktree_path 便于调试与未来扩展（当前索引内部未直接读取）。
@@ -112,6 +505,10 @@ pub struct WorktreeSessionIndex {
     pub encoded_cwd: String,
     pub sessions: HashMap<String, ClaudeSessionIndex>,
     pub last_scan_at: String,
+    /// 最近一次扫描是否触发任一预算截断。
+    pub truncated: bool,
+    /// 最近一次扫描诊断（status/reasons/计数）。
+    pub diagnostics: SessionSearchDiagnostics,
 }
 
 /// 搜索命中结果（spec 3.2）。
@@ -122,7 +519,7 @@ pub struct WorktreeSessionIndex {
 /// Code Logic（这个结构体做什么）:
 ///     camelCase 序列化对齐前端 SessionSearchHit；title_hit/user_hit/assistant_hit 标记命中字段。
 ///     同时派生 Deserialize，因为 remote shortcut 命令需要反序列化远端设备的搜索响应。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSearchHit {
     pub session_id: String,
@@ -275,23 +672,51 @@ fn is_command_text(text: &str) -> bool {
     trimmed.starts_with('/') || trimmed.starts_with('!')
 }
 
-/// 从单个 jsonl 文件构建一个 ClaudeSessionIndex（spec 2.2）。
+/// 从单个 jsonl 文件构建一个 ClaudeSessionIndex（默认预算，兼容旧调用/测试）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     既有单测与增量刷新路径只需索引本身，不关心预算 outcome；保留无 budget 签名。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `build_session_index_with_budget(path, &Default::default())` 并丢弃 outcome。
+pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
+    build_session_index_with_budget(path, &ClaudeIndexBudget::default()).map(|(idx, _)| idx)
+}
+
+/// 按预算从单个 jsonl 构建 ClaudeSessionIndex。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     一个 jsonl 文件 = 一次 Claude 会话的完整 transcript。搜索索引需要从每个文件提取标题、
-///     user 文本、assistant 文本、最近 20 条消息和首末活动时间。
+///     user 文本、assistant 文本、最近 20 条消息和首末活动时间；同时遵守文件/行/字符预算避免 OOM。
 ///
 /// Code Logic（这个函数做什么）:
-///     流式 BufReader::lines() 逐行解析，单行失败跳过不阻断；每读一行检查 2 秒超时；
-///     收集 last-prompt（取最后一条作 title）、所有 user 文本（过滤 slash/bash 命令）、
-///     assistant 文本、(role,text,timestamp) 三元组；组装 ClaudeSessionIndex，
-///     recent_messages 按 timestamp 升序取尾部 20 条，title 缺失回退首条 user 文本。
-pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
+///     1. metadata 超过 max_file_bytes → None + skipped_entire_file + reason max_file_bytes；
+///     2. 有界 read_line_bounded 逐行，超长行丢弃并记 max_jsonl_line_bytes；
+///     3. 2 秒超时跳过整文件；
+///     4. 组装后按 title→user→assistant 顺序应用 max_session_chars；
+///     5. recent_messages 仍最多 20。
+pub fn build_session_index_with_budget(
+    path: &Path,
+    budget: &ClaudeIndexBudget,
+) -> Option<(ClaudeSessionIndex, SessionFileBudgetOutcome)> {
     let session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())?;
+
+    let mut outcome = SessionFileBudgetOutcome::default();
+
+    let meta = std::fs::metadata(path)
+        .inspect_err(|err| {
+            tracing::warn!("读取 Claude session transcript metadata 失败 {:?}: {err}", path);
+        })
+        .ok()?;
+    if meta.len() > budget.max_file_bytes {
+        push_reason(&mut outcome.reasons, "max_file_bytes");
+        outcome.skipped_entire_file = true;
+        return None;
+    }
 
     let file = std::fs::File::open(path)
         .inspect_err(|err| {
@@ -299,8 +724,7 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
         })
         .ok()?;
 
-    use std::io::{BufRead, BufReader};
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let start = Instant::now();
 
     let mut last_prompt: Option<String> = None;
@@ -308,13 +732,12 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
     let mut user_parts: Vec<String> = Vec::new();
     let mut assistant_parts: Vec<String> = Vec::new();
     let mut messages: Vec<RecentMessage> = Vec::new();
-    let mut timestamps: Vec<String> = Vec::new();
     let mut cwd: Option<String> = None;
     let mut git_branch: Option<String> = None;
     let mut first_activity_at: String = String::new();
     let mut last_activity_at: String = String::new();
 
-    for line_res in reader.lines() {
+    loop {
         if start.elapsed() > SINGLE_FILE_PARSE_TIMEOUT {
             tracing::warn!(
                 "解析 Claude session transcript 超时（>{:?}），跳过 {:?}",
@@ -323,12 +746,25 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
             );
             return None;
         }
-        let line = match line_res {
-            Ok(l) => l,
-            Err(err) => {
-                tracing::warn!("读取 jsonl 行失败 {:?}: {err}", path);
-                continue;
-            }
+        let (line_opt, line_bytes, overflow) =
+            match read_line_bounded(&mut reader, budget.max_jsonl_line_bytes) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!("读取 jsonl 行失败 {:?}: {err}", path);
+                    break;
+                }
+            };
+        outcome.bytes_read = outcome.bytes_read.saturating_add(line_bytes);
+        if line_opt.is_none() && line_bytes == 0 {
+            break; // EOF
+        }
+        if overflow {
+            push_reason(&mut outcome.reasons, "max_jsonl_line_bytes");
+            continue;
+        }
+        let line = match line_opt {
+            Some(l) => l,
+            None => continue,
         };
         let parsed: JsonlLine = match serde_json::from_str(&line) {
             Ok(p) => p,
@@ -404,12 +840,10 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
                 if last_activity_at.as_str() < ts {
                     last_activity_at = ts.to_string();
                 }
-                timestamps.push(ts.to_string());
             }
         }
     }
 
-    let _ = &timestamps; // 仅用于明确意图，首末时间已直接计算
     let title = last_prompt.or(first_user_text).unwrap_or_default();
     let message_count = messages.len() as u32;
 
@@ -421,37 +855,78 @@ pub fn build_session_index(path: &Path) -> Option<ClaudeSessionIndex> {
         messages
     };
 
-    Some(ClaudeSessionIndex {
-        session_id,
-        title,
-        transcript_path: path.to_path_buf(),
-        first_activity_at,
-        last_activity_at,
-        message_count,
-        user_text: user_parts.join("\n"),
-        assistant_text: assistant_parts.join("\n"),
-        recent_messages,
-        cwd,
-        git_branch,
-    })
+    let user_text = user_parts.join("\n");
+    let assistant_text = assistant_parts.join("\n");
+    let (title, user_text, assistant_text, char_truncated) =
+        apply_session_char_budget(title, user_text, assistant_text, budget.max_session_chars);
+    if char_truncated {
+        push_reason(&mut outcome.reasons, "max_session_chars");
+    }
+
+    Some((
+        ClaudeSessionIndex {
+            session_id,
+            title,
+            transcript_path: path.to_path_buf(),
+            first_activity_at,
+            last_activity_at,
+            message_count,
+            user_text,
+            assistant_text,
+            recent_messages,
+            cwd,
+            git_branch,
+        },
+        outcome,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // worktree 扫描
 // ---------------------------------------------------------------------------
 
-/// 扫描指定 worktree path 对应的 Claude session 索引（spec 3.1）。
+/// 扫描指定 worktree path 对应的 Claude session 索引（默认预算）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     搜索范围限定在当前 active worktree，需要把该 worktree 下所有 session jsonl 解析成内存索引。
 ///
 /// Code Logic（这个函数做什么）:
-///     1. canonicalize worktree_path（失败用原 path）；
-///     2. encoded_cwd = encode_claude_project_path(canonical)；
-///     3. claude_projects_dir = ~/.claude/projects；
-///     4. target_dir = claude_projects_dir.join(encoded_cwd)，不存在返回空索引；
-///     5. 逐文件 build_session_index（单文件超时跳过），组装 WorktreeSessionIndex。
+///     委托 `scan_worktree_sessions_with_budget(path, &Default::default())`。
 pub fn scan_worktree_sessions(worktree_path: &Path) -> WorktreeSessionIndex {
+    scan_worktree_sessions_with_budget(worktree_path, &ClaudeIndexBudget::default())
+}
+
+/// 按预算扫描 worktree 对应 Claude session 目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     生产热路径与单测都需要可注入预算的扫描，以在超大目录下有界返回并暴露 truncated diagnostics。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 ~/.claude/projects/<encoded> 后委托 `scan_worktree_sessions_at`。
+pub fn scan_worktree_sessions_with_budget(
+    worktree_path: &Path,
+    budget: &ClaudeIndexBudget,
+) -> WorktreeSessionIndex {
+    let projects = claude_projects_dir();
+    scan_worktree_sessions_at(worktree_path, projects.as_deref(), budget)
+}
+
+/// 可注入 projects 根目录的扫描入口（测试与默认路径共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单测不能污染真实 `~/.claude/projects`，需要把 projects 根指到临时目录；
+///     生产路径则传入 `claude_projects_dir()`。
+///
+/// Code Logic（这个函数做什么）:
+///     1. canonicalize worktree；2. encode cwd；3. 列 *.jsonl 候选 (mtime, path)；
+///     4. 排序 mtime desc + path asc；5. 应用 max_files；
+///     6. 逐文件检查 max_file_bytes / max_total_bytes，有界 parse；
+///     7. 组装 sessions + truncated + diagnostics。
+pub fn scan_worktree_sessions_at(
+    worktree_path: &Path,
+    projects_dir: Option<&Path>,
+    budget: &ClaudeIndexBudget,
+) -> WorktreeSessionIndex {
     let canonical = worktree_path
         .canonicalize()
         .unwrap_or_else(|_| worktree_path.to_path_buf());
@@ -459,29 +934,95 @@ pub fn scan_worktree_sessions(worktree_path: &Path) -> WorktreeSessionIndex {
     let encoded_cwd = encode_claude_project_path(&canonical_str);
 
     let mut sessions: HashMap<String, ClaudeSessionIndex> = HashMap::new();
+    let mut reasons: Vec<String> = Vec::new();
+    let mut files_considered: u64 = 0;
+    let mut files_indexed: u64 = 0;
+    let mut bytes_read: u64 = 0;
+    let mut truncated = false;
 
-    if let Some(projects_dir) = claude_projects_dir() {
+    if let Some(projects_dir) = projects_dir {
         let target_dir = projects_dir.join(&encoded_cwd);
         if target_dir.is_dir() {
+            // 收集候选：(mtime, path)
+            let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&target_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                         continue;
                     }
-                    if let Some(index) = build_session_index(&path) {
+                    let mtime = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    candidates.push((mtime, path));
+                }
+            }
+            files_considered = candidates.len() as u64;
+
+            // mtime desc, path asc
+            candidates.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| a.1.to_string_lossy().cmp(&b.1.to_string_lossy()))
+            });
+
+            if candidates.len() > budget.max_files {
+                candidates.truncate(budget.max_files);
+                push_reason(&mut reasons, "max_files");
+                truncated = true;
+            }
+
+            for (_mtime, path) in candidates {
+                let meta_len = match std::fs::metadata(&path) {
+                    Ok(m) => m.len(),
+                    Err(_) => continue,
+                };
+                if meta_len > budget.max_file_bytes {
+                    push_reason(&mut reasons, "max_file_bytes");
+                    truncated = true;
+                    continue;
+                }
+                if bytes_read.saturating_add(meta_len) > budget.max_total_bytes {
+                    push_reason(&mut reasons, "max_total_bytes");
+                    truncated = true;
+                    break;
+                }
+
+                match build_session_index_with_budget(&path, budget) {
+                    Some((index, outcome)) => {
+                        bytes_read = bytes_read.saturating_add(outcome.bytes_read.max(meta_len));
+                        for r in outcome.reasons {
+                            push_reason(&mut reasons, &r);
+                            truncated = true;
+                        }
                         sessions.insert(index.session_id.clone(), index);
+                        files_indexed = files_indexed.saturating_add(1);
+                    }
+                    None => {
+                        // 超时/打开失败/整文件跳过：若 skipped 会在 build 内记 reason，但 None 丢 outcome。
+                        // 再检一次 metadata 以记录 max_file_bytes（双重保险已在上面处理）。
+                        if meta_len > budget.max_file_bytes {
+                            push_reason(&mut reasons, "max_file_bytes");
+                            truncated = true;
+                        }
                     }
                 }
             }
         }
     }
 
+    let diagnostics = if truncated {
+        SessionSearchDiagnostics::truncated(reasons, files_considered, files_indexed, bytes_read)
+    } else {
+        SessionSearchDiagnostics::ok(files_considered, files_indexed, bytes_read)
+    };
+
     WorktreeSessionIndex {
         worktree_path: canonical,
         encoded_cwd,
         sessions,
         last_scan_at: Utc::now().to_rfc3339(),
+        truncated,
+        diagnostics,
     }
 }
 
@@ -636,6 +1177,25 @@ pub fn search_sessions(
     hits
 }
 
+/// 在索引上搜索并包装为带 diagnostics 的 SessionSearchResult。
+///
+/// Business Logic（为什么需要这个函数）:
+///     命令层/远端路由需要返回 `{items, truncated, diagnostics}`，截断语义来自索引扫描而非搜索 limit。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 search_sessions，复制 index.truncated 与 index.diagnostics。
+pub fn search_sessions_result(
+    index: &WorktreeSessionIndex,
+    query: &str,
+    limit: usize,
+) -> SessionSearchResult {
+    SessionSearchResult {
+        items: search_sessions(index, query, limit),
+        truncated: index.truncated,
+        diagnostics: index.diagnostics.clone(),
+    }
+}
+
 /// 计算命中的优先级数值（越小越靠前）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -688,24 +1248,32 @@ fn make_hit(
 /// worktree session 索引的内存共享句柄类型别名。
 pub type SharedWorktreeSessionIndex = Arc<RwLock<WorktreeSessionIndex>>;
 
-/// 确保 worktree 的 session 索引已扫描并启动文件监听（lazy 初始化）。
+/// singleflight 进行中扫描的 watch 接收端。
+///
+/// Business Logic（为什么需要这个类型）:
+///     同一 worktree 并发搜索时只应跑一次阻塞扫描；后续调用者等待同一结果。
+///
+/// Code Logic（这个类型做什么）:
+///     `watch::Receiver<Option<Result<SharedWorktreeSessionIndex, String>>>`，None=进行中，Some=完成。
+pub type ClaudeSessionIndexInflightRx =
+    tokio::sync::watch::Receiver<Option<Result<SharedWorktreeSessionIndex, String>>>;
+
+/// 确保 worktree 的 session 索引已扫描并启动文件监听（lazy + singleflight + spawn_blocking）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     首次搜索某 worktree 时才建索引（lazy），避免启动时全量扫描拖慢。建索引后启动 notify 监听，
-///     jsonl 文件新增/修改时 debounce 500ms 后增量更新内存索引；监听失败降级为下次搜索时重扫。
+///     首次搜索某 worktree 时才建索引（lazy），避免启动时全量扫描拖慢。扫描可能阻塞数秒，
+///     必须放在 spawn_blocking 以免卡住 tokio；并发请求必须 singleflight 共享一次扫描。
 ///
 /// Code Logic（这个函数做什么）:
-///     1. 取 worktree_path canonical string 作为 key；
-///     2. 读 indexes HashMap，已有 → 直接返回 clone；
-///     3. 无 → scan_worktree_sessions 建索引（**不持锁**，扫描可能耗时）；
-///     4. 短暂持写锁 insert 并 double-check（防并发重复扫描），写锁立即释放；
-///     5. **不持任何锁**调 spawn_session_watcher 启动文件监听（失败降级）。
+///     1. 快路径：indexes 读锁命中直接返回；
+///     2. 锁 inflight map：已有 Receiver → 等待 Some；否则创建 watch(None) 并成为 leader；
+///     3. leader：`spawn_blocking(scan_worktree_sessions_with_budget default)`；
+///     4. 短暂写锁 double-check insert；释放后 spawn_session_watcher；
+///     5. send Some(Ok/Err) 并 remove inflight。
 ///
 /// **为何写锁不活到函数末尾（防死锁）**：
-///     spawn_session_watcher 的失败分支会调 remove_index_on_failure，后者再次获取同一个
-///     `RwLock` 的写锁。标准库 RwLock 不支持写锁重入，若本函数在调用 spawn_session_watcher 时
-///     仍持有写锁，将必然死锁。故写锁只在 insert 时短暂持有，调用 spawn_session_watcher 前已释放。
-pub fn ensure_worktree_session_index_scanned(
+///     spawn_session_watcher 失败分支会再取同一 indexes 写锁；标准库 RwLock 不支持重入。
+pub async fn ensure_worktree_session_index_scanned(
     state: &AppState,
     worktree_path: &Path,
 ) -> SharedWorktreeSessionIndex {
@@ -714,7 +1282,7 @@ pub fn ensure_worktree_session_index_scanned(
         .unwrap_or_else(|_| worktree_path.to_path_buf());
     let key = canonical.to_string_lossy().to_string();
 
-    // 快速路径：读锁查缓存，已有索引直接返回
+    // 快速路径
     {
         let indexes = state
             .workbench_claude_session_indexes
@@ -725,28 +1293,112 @@ pub fn ensure_worktree_session_index_scanned(
         }
     }
 
-    // 慢路径：先建索引（不持锁，扫描可能耗时）
-    let index = scan_worktree_sessions(&canonical);
-    let shared = Arc::new(RwLock::new(index));
+    // singleflight：注册或加入
+    let (is_leader, mut rx, tx_opt) = {
+        let mut map = state.workbench_claude_session_index_inflight.lock().await;
+        if let Some(existing_rx) = map.get(&key) {
+            (false, existing_rx.clone(), None)
+        } else {
+            let (tx, rx) = tokio::sync::watch::channel(
+                None::<Result<SharedWorktreeSessionIndex, String>>,
+            );
+            map.insert(key.clone(), rx.clone());
+            (true, rx, Some(tx))
+        }
+    };
 
-    // 短暂持写锁 insert 并 double-check（防止并发重复扫描时两个线程都建索引）
+    if !is_leader {
+        // follower：等待 leader 结果；失败则回退自扫
+        loop {
+            let current = rx.borrow().clone();
+            if let Some(result) = current {
+                match result {
+                    Ok(shared) => return shared,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Claude session singleflight 扫描失败，follower 回退自扫 key={key}: {err}"
+                        );
+                        break;
+                    }
+                }
+            }
+            if rx.changed().await.is_err() {
+                // sender dropped
+                break;
+            }
+        }
+        // 回退：再看缓存，否则自己扫（仍 spawn_blocking）
+        {
+            let indexes = state
+                .workbench_claude_session_indexes
+                .read()
+                .expect("session indexes 读锁中毒");
+            if let Some(existing) = indexes.get(&key) {
+                return Arc::clone(existing);
+            }
+        }
+        return finish_scan_and_insert(state, &key, &canonical).await;
+    }
+
+    // leader
+    let shared = finish_scan_and_insert(state, &key, &canonical).await;
+    if let Some(tx) = tx_opt {
+        let _ = tx.send(Some(Ok(Arc::clone(&shared))));
+    }
     {
+        let mut map = state.workbench_claude_session_index_inflight.lock().await;
+        map.remove(&key);
+    }
+    shared
+}
+
+/// leader/回退路径：spawn_blocking 扫描 + 写锁 insert + watcher。
+///
+/// Business Logic（为什么需要这个函数）:
+///     singleflight leader 与 follower 失败回退共用同一插入路径，避免重复逻辑。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn_blocking 默认预算扫描；double-check insert；释放锁后 spawn_session_watcher。
+async fn finish_scan_and_insert(
+    state: &AppState,
+    key: &str,
+    canonical: &Path,
+) -> SharedWorktreeSessionIndex {
+    let canonical_owned = canonical.to_path_buf();
+    let scan_result = tokio::task::spawn_blocking(move || scan_worktree_sessions(&canonical_owned)).await;
+
+    let index = match scan_result {
+        Ok(idx) => idx,
+        Err(err) => {
+            tracing::warn!("Claude session spawn_blocking 扫描 join 失败 key={key}: {err}");
+            // 失败时返回空索引（仍可插入，避免永久卡死）
+            WorktreeSessionIndex {
+                worktree_path: canonical.to_path_buf(),
+                encoded_cwd: encode_claude_project_path(&canonical.to_string_lossy()),
+                sessions: HashMap::new(),
+                last_scan_at: Utc::now().to_rfc3339(),
+                truncated: false,
+                diagnostics: SessionSearchDiagnostics::unavailable(),
+            }
+        }
+    };
+
+    let shared = Arc::new(RwLock::new(index));
+    let to_return = {
         let mut indexes = state
             .workbench_claude_session_indexes
             .write()
             .expect("session indexes 写锁中毒");
-        if let Some(existing) = indexes.get(&key) {
-            // 另一个线程已经建好索引，用它，丢弃我们刚建的（让 Arc 析构）
-            return Arc::clone(existing);
+        if let Some(existing) = indexes.get(key) {
+            Arc::clone(existing)
+        } else {
+            indexes.insert(key.to_string(), Arc::clone(&shared));
+            Arc::clone(&shared)
         }
-        indexes.insert(key.clone(), Arc::clone(&shared));
-    }
+    };
     // 写锁已释放
-
-    // 启动文件监听（不持锁，失败时 remove_index_on_failure 自己获取写锁不会重入死锁）
-    spawn_session_watcher(state, &key, &canonical, &shared);
-
-    shared
+    spawn_session_watcher(state, key, canonical, &to_return);
+    to_return
 }
 
 /// 为指定 worktree 启动 notify 文件监听。
@@ -958,40 +1610,29 @@ fn remove_index_on_failure(state: &AppState, key: &str) {
 ///     notify 回调收到文件变化事件后，需要把对应 session 的索引刷新，保证搜索结果新鲜。
 ///
 /// Code Logic（这个函数做什么）:
-///     对每个路径调 build_session_index（成功则 upsert，失败则从索引移除该 session）；
-///     同时扫描目录里可能新增的其它 jsonl 文件（兜底），更新 last_scan_at。
+///     **先在写锁外**用默认预算 parse 变更路径与兜底新文件，再短暂持写锁原子 apply；
+///     成功 upsert、失败按 stem 移除；更新 last_scan_at。
 fn refresh_sessions_from_paths(
     shared: &SharedWorktreeSessionIndex,
     worktree_canonical: &Path,
     dir: &Path,
     changed_paths: &[PathBuf],
 ) {
-    let mut guard = match shared.write() {
-        Ok(g) => g,
-        Err(err) => {
-            tracing::warn!("session index 写锁中毒，跳过增量更新: {err}");
-            return;
-        }
-    };
-
+    // 锁外解析变更路径（默认预算）
+    let mut parsed: Vec<(String, Option<ClaudeSessionIndex>)> = Vec::new();
     for path in changed_paths {
-        match build_session_index(path) {
-            Some(index) => {
-                guard.sessions.insert(index.session_id.clone(), index);
-            }
-            None => {
-                // 文件可能被删除或解析失败，按 stem 移除
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let stem = stem.trim().to_string();
-                    if !stem.is_empty() {
-                        guard.sessions.remove(&stem);
-                    }
-                }
-            }
-        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        let index = build_session_index(path);
+        parsed.push((stem, index));
     }
 
-    // 兜底：扫描目录里可能新增但未在事件 paths 里的 jsonl
+    // 锁外收集「可能新增」的 jsonl（不查现有 map，写锁内再过滤）
+    let mut extras: Vec<ClaudeSessionIndex> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -1002,31 +1643,132 @@ fn refresh_sessions_from_paths(
                 Some(s) if !s.trim().is_empty() => s.trim().to_string(),
                 _ => continue,
             };
-            if guard.sessions.contains_key(&stem) {
+            // 已在 changed_paths 处理过的跳过
+            if parsed.iter().any(|(s, _)| s == &stem) {
                 continue;
             }
             if let Some(index) = build_session_index(&p) {
-                guard.sessions.insert(index.session_id.clone(), index);
+                extras.push(index);
             }
         }
     }
 
-    // 保持 worktree_path / encoded_cwd 不变（重扫不改根），只刷新 last_scan_at
+    let mut guard = match shared.write() {
+        Ok(g) => g,
+        Err(err) => {
+            tracing::warn!("session index 写锁中毒，跳过增量更新: {err}");
+            return;
+        }
+    };
+
+    for (stem, index_opt) in parsed {
+        match index_opt {
+            Some(index) => {
+                guard.sessions.insert(index.session_id.clone(), index);
+            }
+            None => {
+                if !stem.is_empty() {
+                    guard.sessions.remove(&stem);
+                }
+            }
+        }
+    }
+    for index in extras {
+        if !guard.sessions.contains_key(&index.session_id) {
+            guard.sessions.insert(index.session_id.clone(), index);
+        }
+    }
+
     guard.last_scan_at = Utc::now().to_rfc3339();
-    let _ = worktree_canonical; // 留作未来按 canonical 校验 cwd 用
+    let _ = worktree_canonical;
 }
 
 /// 全量重扫指定目录下所有 jsonl，重建 sessions HashMap（trailing 兜底专用）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     debounce 窗口内可能先后有多个不同 jsonl 文件变更，若 trailing 只重扫最后一批事件路径，
-///     较早变更的文件会被漏掉（它们已在 sessions HashMap 里，增量逻辑会跳过）。
-///     trailing 兜底必须全量重扫，保证 debounce 窗口内所有变更最终都被刷新。
+///     较早变更的文件会被漏掉。trailing 兜底必须全量重扫。
 ///
 /// Code Logic（这个函数做什么）:
-///     持写锁后枚举 dir 下所有 *.jsonl，逐个 build_session_index，**整体替换** sessions HashMap
-///     （而非增量 upsert），确保被删除的 session 也能被清理；最后更新 last_scan_at。
+///     读锁取 worktree_path/encoded_cwd；**锁外**用默认预算扫描目录构建新 HashMap + diagnostics；
+///     再写锁原子 swap sessions/truncated/diagnostics/last_scan_at。
 fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
+    let (worktree_path, encoded_cwd) = {
+        let guard = match shared.read() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!("session index 读锁中毒，跳过全量重扫: {err}");
+                return;
+            }
+        };
+        (guard.worktree_path.clone(), guard.encoded_cwd.clone())
+    };
+
+    let budget = ClaudeIndexBudget::default();
+    // 直接扫 dir（dir 已是 projects/<encoded>）；构造伪 projects 父目录以复用排序/预算逻辑
+    // 更直接：在 dir 上复刻候选排序 + 预算
+    let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mtime = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            candidates.push((mtime, p));
+        }
+    }
+    let files_considered = candidates.len() as u64;
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.to_string_lossy().cmp(&b.1.to_string_lossy()))
+    });
+
+    let mut reasons: Vec<String> = Vec::new();
+    let mut truncated = false;
+    if candidates.len() > budget.max_files {
+        candidates.truncate(budget.max_files);
+        push_reason(&mut reasons, "max_files");
+        truncated = true;
+    }
+
+    let mut new_sessions: HashMap<String, ClaudeSessionIndex> = HashMap::new();
+    let mut files_indexed: u64 = 0;
+    let mut bytes_read: u64 = 0;
+    for (_mtime, path) in candidates {
+        let meta_len = match std::fs::metadata(&path) {
+            Ok(m) => m.len(),
+            Err(_) => continue,
+        };
+        if meta_len > budget.max_file_bytes {
+            push_reason(&mut reasons, "max_file_bytes");
+            truncated = true;
+            continue;
+        }
+        if bytes_read.saturating_add(meta_len) > budget.max_total_bytes {
+            push_reason(&mut reasons, "max_total_bytes");
+            truncated = true;
+            break;
+        }
+        if let Some((index, outcome)) = build_session_index_with_budget(&path, &budget) {
+            bytes_read = bytes_read.saturating_add(outcome.bytes_read.max(meta_len));
+            for r in outcome.reasons {
+                push_reason(&mut reasons, &r);
+                truncated = true;
+            }
+            new_sessions.insert(index.session_id.clone(), index);
+            files_indexed = files_indexed.saturating_add(1);
+        }
+    }
+
+    let diagnostics = if truncated {
+        SessionSearchDiagnostics::truncated(reasons, files_considered, files_indexed, bytes_read)
+    } else {
+        SessionSearchDiagnostics::ok(files_considered, files_indexed, bytes_read)
+    };
+
     let mut guard = match shared.write() {
         Ok(g) => g,
         Err(err) => {
@@ -1034,22 +1776,12 @@ fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
             return;
         }
     };
-
-    let mut new_sessions: HashMap<String, ClaudeSessionIndex> = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Some(index) = build_session_index(&p) {
-                new_sessions.insert(index.session_id.clone(), index);
-            }
-        }
-    }
-
     guard.sessions = new_sessions;
+    guard.truncated = truncated;
+    guard.diagnostics = diagnostics;
     guard.last_scan_at = Utc::now().to_rfc3339();
+    // 保持 path/encoded 不变
+    let _ = (worktree_path, encoded_cwd);
 }
 
 // ---------------------------------------------------------------------------
@@ -1314,6 +2046,8 @@ mod tests {
             encoded_cwd: "test".to_string(),
             sessions,
             last_scan_at: Utc::now().to_rfc3339(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::ok(0, 0, 0),
         };
 
         let hits = search_sessions(&index, "", 50);
@@ -1375,6 +2109,8 @@ mod tests {
             encoded_cwd: "test".to_string(),
             sessions,
             last_scan_at: Utc::now().to_rfc3339(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::ok(0, 0, 0),
         };
 
         let hits = search_sessions(&index, "fix", 50);
@@ -1417,6 +2153,8 @@ mod tests {
             encoded_cwd: "test".to_string(),
             sessions,
             last_scan_at: Utc::now().to_rfc3339(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::ok(0, 0, 0),
         };
 
         let hits = search_sessions(&index, "", 2);
@@ -1452,6 +2190,8 @@ mod tests {
             encoded_cwd: "test".to_string(),
             sessions,
             last_scan_at: Utc::now().to_rfc3339(),
+            truncated: false,
+            diagnostics: SessionSearchDiagnostics::ok(0, 0, 0),
         };
 
         // 用小写关键词搜索，应命中大写的 "Target"
@@ -1705,5 +2445,423 @@ mod tests {
             heartbeat_ticks > 0,
             "heartbeat 线程应在索引期间至少 tick 一次"
         );
+    }
+
+    /// 准备临时 projects 布局：返回 (worktree, projects_dir, session_dir)。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     预算扫描测试需把 jsonl 放到 `projects/<encoded-cwd>/`，不能污染真实 ~/.claude。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     创建 worktree 与 projects/<encoded> 目录。
+    fn prepare_scan_fixture(test_name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = unique_temp_dir(test_name);
+        let worktree = root.join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        let projects = root.join("projects");
+        let canonical = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
+        let encoded = encode_claude_project_path(&canonical.to_string_lossy());
+        let session_dir = projects.join(&encoded);
+        fs::create_dir_all(&session_dir).unwrap();
+        (worktree, projects, session_dir)
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     max_files 预算必须截断候选并标记 truncated + reason=max_files。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     5 个 jsonl，budget.max_files=2，断言 indexed=2、truncated、reasons 含 max_files。
+    #[test]
+    fn budget_max_files_truncates() {
+        let (worktree, projects, session_dir) = prepare_scan_fixture("budget_max_files");
+        for i in 0..5 {
+            let _ = write_jsonl(
+                &session_dir,
+                &format!("f{i}"),
+                &[&format!(
+                    r#"{{"type":"user","message":{{"role":"user","content":"file {i}"}},"timestamp":"2026-01-01T00:0{i}:00Z"}}"#
+                )],
+            );
+        }
+        let budget = ClaudeIndexBudget {
+            max_files: 2,
+            ..ClaudeIndexBudget::default()
+        };
+        let index = scan_worktree_sessions_at(&worktree, Some(&projects), &budget);
+        assert_eq!(index.sessions.len(), 2);
+        assert!(index.truncated);
+        assert_eq!(index.diagnostics.status, DIAG_STATUS_TRUNCATED);
+        assert!(index.diagnostics.reasons.iter().any(|r| r == "max_files"));
+        assert_eq!(index.diagnostics.files_considered, 5);
+        assert_eq!(index.diagnostics.files_indexed, 2);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     超过 max_file_bytes 的文件必须整文件跳过。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写一个较大 jsonl，设 max_file_bytes 很小，断言 0 indexed + reason max_file_bytes。
+    #[test]
+    fn budget_max_file_bytes_skips_oversized() {
+        let (worktree, projects, session_dir) = prepare_scan_fixture("budget_max_file_bytes");
+        let big = "X".repeat(2000);
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-01-01T00:00:00Z"}}"#,
+            serde_json::Value::String(big)
+        );
+        let _ = write_jsonl(&session_dir, "huge", &[line.as_str()]);
+        let budget = ClaudeIndexBudget {
+            max_file_bytes: 100,
+            ..ClaudeIndexBudget::default()
+        };
+        let index = scan_worktree_sessions_at(&worktree, Some(&projects), &budget);
+        assert!(index.sessions.is_empty());
+        assert!(index.truncated);
+        assert!(index
+            .diagnostics
+            .reasons
+            .iter()
+            .any(|r| r == "max_file_bytes"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     超长 jsonl 行不得整行分配进内存；应跳过该行并记 max_jsonl_line_bytes。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写一行 > budget 的 payload + 一行正常 user；断言完成、reason 命中、正常行仍可能入库。
+    #[test]
+    fn budget_max_jsonl_line_bytes_drops_long_line_without_allocating_all() {
+        let (worktree, projects, session_dir) = prepare_scan_fixture("budget_max_jsonl_line");
+        let long_content = "Z".repeat(500);
+        // 故意构造一行远超 max_jsonl_line_bytes=80 的 JSON 行
+        let long_line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-01-01T00:00:00Z"}}"#,
+            serde_json::Value::String(long_content)
+        );
+        let good = r#"{"type":"user","message":{"role":"user","content":"short ok"},"timestamp":"2026-01-01T00:01:00Z"}"#;
+        let path = session_dir.join("mixed.jsonl");
+        {
+            let mut f = fs::File::create(&path).unwrap();
+            writeln!(f, "{long_line}").unwrap();
+            writeln!(f, "{good}").unwrap();
+        }
+        // 短行约 100 字节，长行远超 120；预算取中间值
+        let budget = ClaudeIndexBudget {
+            max_jsonl_line_bytes: 120,
+            ..ClaudeIndexBudget::default()
+        };
+        let index = scan_worktree_sessions_at(&worktree, Some(&projects), &budget);
+        assert!(index.truncated);
+        assert!(index
+            .diagnostics
+            .reasons
+            .iter()
+            .any(|r| r == "max_jsonl_line_bytes"));
+        // 短行应仍被索引
+        let sess = index.sessions.get("mixed").expect("session should exist");
+        assert!(
+            sess.user_text.contains("short ok"),
+            "short line should be indexed, user_text={:?}",
+            sess.user_text
+        );
+        assert!(!sess.user_text.contains("ZZZZ"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     max_total_bytes 必须在累计字节将超时停止后续文件。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     多个中等文件 + 极小 max_total_bytes，断言 partial index + reason。
+    #[test]
+    fn budget_max_total_bytes_stops_early() {
+        let (worktree, projects, session_dir) = prepare_scan_fixture("budget_max_total");
+        for i in 0..4 {
+            let body = "Y".repeat(300);
+            let line = format!(
+                r#"{{"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-01-01T00:0{i}:00Z"}}"#,
+                serde_json::Value::String(body)
+            );
+            let _ = write_jsonl(&session_dir, &format!("t{i}"), &[line.as_str()]);
+        }
+        let budget = ClaudeIndexBudget {
+            max_total_bytes: 400,
+            ..ClaudeIndexBudget::default()
+        };
+        let index = scan_worktree_sessions_at(&worktree, Some(&projects), &budget);
+        assert!(index.sessions.len() < 4);
+        assert!(index.truncated);
+        assert!(index
+            .diagnostics
+            .reasons
+            .iter()
+            .any(|r| r == "max_total_bytes"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     max_session_chars 必须以 Unicode scalar 截断，且只在 char 边界切断（含中文/emoji）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     title/user/assistant 含中文与 emoji，小 budget 截断后 len 合法、无 panic。
+    #[test]
+    fn budget_max_session_chars_truncates_at_char_boundary() {
+        let tmp = unique_temp_dir("budget_max_session_chars");
+        let text = "你好世界🌍🚀测试文本额外内容";
+        // 短 title 占 2 scalar，剩余预算给 user_text
+        let user_line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-01-01T00:00:00Z"}}"#,
+            serde_json::Value::String(text.to_string())
+        );
+        let path = write_jsonl(
+            &tmp,
+            "uni",
+            &[
+                r#"{"type":"last-prompt","lastPrompt":"标题"}"#,
+                user_line.as_str(),
+            ],
+        );
+        let budget = ClaudeIndexBudget {
+            max_session_chars: 7, // 标题 2 + user 5
+            ..ClaudeIndexBudget::default()
+        };
+        let (idx, outcome) = build_session_index_with_budget(&path, &budget).expect("ok");
+        assert!(outcome.reasons.iter().any(|r| r == "max_session_chars"));
+        assert_eq!(idx.title.chars().count(), 2);
+        assert_eq!(idx.user_text.chars().count(), 5);
+        // 截断结果必须是合法 UTF-8 且为原文前缀
+        assert!(
+            text.starts_with(&idx.user_text),
+            "user_text should be a prefix of original, got {:?}",
+            idx.user_text
+        );
+        // 明确 char 边界：重新 collect 应相等
+        let recomposed: String = idx.user_text.chars().collect();
+        assert_eq!(recomposed, idx.user_text);
+        // emoji 截断不 panic：只取前 5 个 scalar（可能含不完整语义但合法 UTF-8）
+        assert!(!idx.user_text.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     候选排序必须 mtime desc 再 path asc，保证 max_files 截断确定性。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写 3 个文件并 sleep 拉开 mtime，max_files=2，断言保留最新两个。
+    #[test]
+    fn scan_orders_by_mtime_desc_then_path_asc() {
+        let (worktree, projects, session_dir) = prepare_scan_fixture("scan_order");
+        let _a = write_jsonl(
+            &session_dir,
+            "a-old",
+            &[r#"{"type":"user","message":{"role":"user","content":"a"},"timestamp":"2026-01-01T00:00:00Z"}"#],
+        );
+        std::thread::sleep(Duration::from_millis(1100));
+        let _b = write_jsonl(
+            &session_dir,
+            "b-mid",
+            &[r#"{"type":"user","message":{"role":"user","content":"b"},"timestamp":"2026-01-01T00:00:00Z"}"#],
+        );
+        std::thread::sleep(Duration::from_millis(1100));
+        let _c = write_jsonl(
+            &session_dir,
+            "c-new",
+            &[r#"{"type":"user","message":{"role":"user","content":"c"},"timestamp":"2026-01-01T00:00:00Z"}"#],
+        );
+        let budget = ClaudeIndexBudget {
+            max_files: 2,
+            ..ClaudeIndexBudget::default()
+        };
+        let index = scan_worktree_sessions_at(&worktree, Some(&projects), &budget);
+        assert_eq!(index.sessions.len(), 2);
+        assert!(index.sessions.contains_key("c-new"));
+        assert!(index.sessions.contains_key("b-mid"));
+        assert!(!index.sessions.contains_key("a-old"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     初始扫描必须在 spawn_blocking 中运行，不阻塞 tokio 心跳。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造多文件 fixture；spawn interval heartbeat + spawn_blocking 紧预算扫描；
+    ///     断言 heartbeat≥3 且 truncated。
+    #[tokio::test]
+    async fn initial_scan_does_not_block_tokio_heartbeat() {
+        let (worktree, projects, session_dir) =
+            prepare_scan_fixture("initial_scan_heartbeat");
+        // 多个中等文件，制造可观测扫描耗时
+        // 多个多行 transcript + 故意在 blocking 侧做足量解析工作
+        for i in 0..12 {
+            let mut lines: Vec<String> = Vec::new();
+            for j in 0..1500 {
+                lines.push(format!(
+                    r#"{{"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-01-01T00:00:00Z"}}"#,
+                    serde_json::Value::String(format!("hb-{i}-{j}-{}", "p".repeat(128)))
+                ));
+            }
+            let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+            let _ = write_jsonl(&session_dir, &format!("hb{i:02}"), &refs);
+        }
+        let budget = ClaudeIndexBudget {
+            max_files: 6,
+            max_jsonl_line_bytes: 64 * 1024,
+            ..ClaudeIndexBudget::default()
+        };
+        let worktree2 = worktree.clone();
+        let projects2 = projects.clone();
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticks = Arc::new(AtomicU32::new(0));
+        let stop_hb = Arc::clone(&stop);
+        let ticks_hb = Arc::clone(&ticks);
+        // 先启动 heartbeat，确保与 blocking 扫描重叠
+        let hb = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(2));
+            interval.tick().await; // 跳过立即完成的首 tick
+            while !stop_hb.load(Ordering::Relaxed) {
+                interval.tick().await;
+                ticks_hb.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        // 让 heartbeat 至少先走一拍，再启动扫描
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let index = tokio::task::spawn_blocking(move || {
+            scan_worktree_sessions_at(&worktree2, Some(&projects2), &budget)
+        })
+        .await
+        .expect("join");
+        stop.store(true, Ordering::Relaxed);
+        let _ = hb.await;
+        let beats = ticks.load(Ordering::Relaxed);
+        assert!(index.truncated, "紧预算应 truncated");
+        assert!(
+            beats >= 3,
+            "扫描期间 tokio heartbeat 应 >=3，实际 {beats}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     singleflight 必须让并发 ensure 共享一次扫描（AtomicUsize 计数=1）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 watch + Mutex map 模拟 inflight；两个任务并发进入，work 只应执行一次。
+    #[tokio::test]
+    async fn singleflight_shares_one_scan() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::{Mutex, Notify};
+
+        let scans = Arc::new(AtomicUsize::new(0));
+        type Slot = Arc<(
+            Notify,
+            std::sync::Mutex<Option<Result<u32, String>>>,
+        )>;
+        let map: Arc<Mutex<HashMap<String, Slot>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        async fn ensure(
+            map: Arc<Mutex<HashMap<String, Slot>>>,
+            scans: Arc<AtomicUsize>,
+            key: &str,
+        ) -> u32 {
+            // fast path 省略
+            let (slot, is_leader) = {
+                let mut g = map.lock().await;
+                if let Some(s) = g.get(key) {
+                    (Arc::clone(s), false)
+                } else {
+                    let s = Arc::new((
+                        Notify::new(),
+                        std::sync::Mutex::new(None::<Result<u32, String>>),
+                    ));
+                    g.insert(key.to_string(), Arc::clone(&s));
+                    (s, true)
+                }
+            };
+            if is_leader {
+                let scans2 = Arc::clone(&scans);
+                let value = tokio::task::spawn_blocking(move || {
+                    scans2.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(50));
+                    42u32
+                })
+                .await
+                .unwrap();
+                *slot.1.lock().unwrap() = Some(Ok(value));
+                slot.0.notify_waiters();
+                let mut g = map.lock().await;
+                g.remove(key);
+                value
+            } else {
+                loop {
+                    if let Some(r) = slot.1.lock().unwrap().clone() {
+                        return r.unwrap();
+                    }
+                    slot.0.notified().await;
+                }
+            }
+        }
+
+        let m1 = Arc::clone(&map);
+        let s1 = Arc::clone(&scans);
+        let m2 = Arc::clone(&map);
+        let s2 = Arc::clone(&scans);
+        let (a, b) = tokio::join!(
+            ensure(m1, s1, "k"),
+            ensure(m2, s2, "k"),
+        );
+        assert_eq!(a, 42);
+        assert_eq!(b, 42);
+        assert_eq!(scans.load(Ordering::SeqCst), 1, "只应扫描一次");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     新客户端必须能解码旧服务端返回的 `Vec<SessionSearchHit>`。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     序列化数组 body，decode 得 truncated=false + unavailable diagnostics。
+    #[test]
+    fn decode_legacy_array_body_synthesizes_unavailable() {
+        let items = vec![SessionSearchHit {
+            session_id: "s1".into(),
+            title: "t".into(),
+            title_hit: true,
+            user_hit: false,
+            assistant_hit: false,
+            first_activity_at: "a".into(),
+            last_activity_at: "b".into(),
+            message_count: 1,
+            preview_snippets: vec![],
+        }];
+        let bytes = serde_json::to_vec(&items).unwrap();
+        let result = decode_session_search_response_body(&bytes).expect("decode");
+        assert_eq!(result.items.len(), 1);
+        assert!(!result.truncated);
+        assert_eq!(result.diagnostics.status, DIAG_STATUS_UNAVAILABLE);
+        assert!(result.diagnostics.reasons.is_empty());
+        assert_eq!(result.diagnostics.files_indexed, 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧/新客户端都必须能解码 v2 对象 DTO。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     序列化 SessionSearchResult 对象，decode 字段完整保留。
+    #[test]
+    fn decode_v2_object_body_preserves_diagnostics() {
+        let dto = SessionSearchResult {
+            items: vec![],
+            truncated: true,
+            diagnostics: SessionSearchDiagnostics::truncated(
+                vec!["max_files".into()],
+                10,
+                2,
+                100,
+            ),
+        };
+        let bytes = serde_json::to_vec(&dto).unwrap();
+        let result = decode_session_search_response_body(&bytes).expect("decode");
+        assert!(result.truncated);
+        assert_eq!(result.diagnostics.status, DIAG_STATUS_TRUNCATED);
+        assert_eq!(result.diagnostics.files_considered, 10);
+        assert_eq!(result.diagnostics.files_indexed, 2);
+        assert_eq!(result.diagnostics.bytes_read, 100);
+        assert!(result.diagnostics.reasons.iter().any(|r| r == "max_files"));
     }
 }

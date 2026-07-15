@@ -500,7 +500,14 @@
     "footerResume": "新窗口 resume",
     "footerClose": "关闭",
     "roleUser": "用户",
-    "roleAssistant": "Claude"
+    "roleAssistant": "Claude",
+    "truncatedNotice": "索引已截断（达到预算），结果可能不完整",
+    "diagnosticsUnavailable": "对端未提供截断诊断",
+    "reasonMaxFiles": "文件数上限",
+    "reasonMaxFileBytes": "单文件大小上限",
+    "reasonMaxLineBytes": "行大小上限",
+    "reasonMaxTotalBytes": "总读取字节上限",
+    "reasonMaxSessionChars": "会话文本上限"
   },
   "markdownEditor": {
     "modeBar": "Markdown 编辑模式",

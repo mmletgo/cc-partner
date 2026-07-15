@@ -151,6 +151,18 @@ pub const CAPABILITY_SYNC_MANIFEST_V2: &str = "sync.manifest.v2";
 ///     `server_protocol_info()` 中宣告。
 pub const CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1: &str = "workbench.mutation-outcome.v1";
 
+/// 能力 token：v2 Workbench Claude session 搜索结果 DTO
+/// （`{items, truncated, diagnostics}` + 混部 dual-decode）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     对端在期望有界预算诊断的搜索结果前必须确认本机返回 SessionSearchResult 对象；
+///     旧版本仅返回 `Vec<SessionSearchHit>` 数组。本 token 与 search 路由 DTO/decoder 原子上线。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；客户端可据此选择解析策略（亦可用 dual-decode）。
+pub const CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2: &str =
+    "workbench.session-search-result.v2";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -213,6 +225,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
             CAPABILITY_TRANSFER_RESUME_V1.to_string(),
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
+            CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
         ],
     }
 }
@@ -350,11 +363,12 @@ mod tests {
     ///     sync.manifest.v2 与三域事务 bulk + ledger 同 build；
     ///     transfer.resume.v1 与 resume 幂等命令同 build；
     ///     workbench.mutation-outcome.v1 与 mutation ledger 同 build；
+    ///     workbench.session-search-result.v2 与 SessionSearchResult DTO/decoder 同 build；
     ///     orchestrator.review-diff.v1 与 review-diff 路由同 build）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
-    ///     去重排序后正好等于九 token 字典序列表；并确认 supports(paged-sync/v2/mutation/resume/review-diff) 为 true。
+    ///     去重排序后正好等于当前 token 字典序列表；并确认 supports(paged-sync/v2/mutation/session-search/resume/review-diff) 为 true。
     #[test]
     fn server_protocol_info_advertises_v1_with_current_capabilities() {
         let info = server_protocol_info();
@@ -372,6 +386,7 @@ mod tests {
                 "transfer.complete.v1".to_string(),
                 "transfer.resume.v1".to_string(),
                 "workbench.mutation-outcome.v1".to_string(),
+                "workbench.session-search-result.v2".to_string(),
             ]
         );
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
@@ -380,6 +395,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
         assert!(info.supports(CAPABILITY_TRANSFER_RESUME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2));
     }
 
     /// Business Logic（为什么需要这个测试）:
