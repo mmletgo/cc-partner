@@ -1,0 +1,27 @@
+{
+  "claimMode": "platform-beta",
+  "claimProfile": "macos-aarch64-beta",
+  "selectedMatrixIds": [
+    "macos-aarch64"
+  ],
+  "subjectCommit": "7db9b8899f1f8a19cf3aec0c8b6cf519bd4c7319",
+  "subjectTag": "subject-0.7.0-macos-aarch64-4",
+  "rcWorkflowRunId": "29429534980",
+  "decision": "NO-GO",
+  "decisionReason": "Required L3 GUI-permissions and VoiceOver executions are FAIL (interactive rows incomplete). RC provenance is valid; beta not releasable until both executions PASS.",
+  "uncertifiedSurfaces": [
+    "Windows",
+    "WSL",
+    "Ubuntu",
+    "Intel Mac",
+    "dual-host",
+    "iOS",
+    "Android",
+    "NVDA",
+    "full/stable release",
+    "L3-MACOS-GUI-PERMISSIONS-001 interactive permission matrix",
+    "L3-MACOS-VOICEOVER-001 VoiceOver journey"
+  ],
+  "releaseMode": "beta",
+  "prereleaseOnly": true
+}
