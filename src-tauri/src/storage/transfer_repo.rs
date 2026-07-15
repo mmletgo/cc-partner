@@ -439,6 +439,38 @@ impl TransferRepo {
         Ok(c.max(0) as u32)
     }
 
+    /// 查找同一 logical_transfer_id 下尚未终态的 Send attempt。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     retry/resume 已为某 logical 派生子 attempt 时，不得再从旧 failed 父行
+    ///     另 mint clientOperationId 并发发送；history 中 pending/transferring 需可查。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `SELECT ... WHERE logical_transfer_id=? AND direction=send AND status IN (pending,transferring)
+    ///      ORDER BY created_at DESC LIMIT 1`；无行 `Ok(None)`。
+    pub async fn find_active_send_for_logical(
+        &self,
+        logical_transfer_id: &str,
+    ) -> Result<Option<TransferTask>, AppError> {
+        let logical = logical_transfer_id.trim();
+        if logical.is_empty() {
+            return Ok(None);
+        }
+        let sql = format!(
+            "SELECT {TRANSFER_SELECT_COLUMNS} FROM transfer_history \
+             WHERE logical_transfer_id = ? \
+               AND direction = 'send' \
+               AND status IN ('pending', 'transferring') \
+             ORDER BY created_at DESC \
+             LIMIT 1"
+        );
+        let row = sqlx::query(&sql)
+            .bind(logical)
+            .fetch_optional(&self.db)
+            .await?;
+        Ok(row.map(|r| Self::row_to_task(&r)))
+    }
+
     /// 列出启动可恢复的 insert-before-spawn 行（Queued + Pending + Send + 有 client_operation_id）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -894,6 +926,66 @@ mod tests {
             conflict,
             super::SenderClaimOutcome::Conflict { .. }
         ));
+    }
+
+    /// 同 logical 的 pending/transferring 可被查找；终态不命中。
+    #[tokio::test]
+    async fn find_active_send_for_logical_only_non_terminal() {
+        let repo = setup_upgraded_repo().await;
+        let failed = TransferTask {
+            filename: "p.bin".into(),
+            file_path: "/tmp/p.bin".into(),
+            size: 3,
+            sha256: "cc".into(),
+            direction: TransferDirection::Send,
+            peer_device_id: "peer".into(),
+            status: TransferStatus::Failed,
+            created_at: "2026-07-14T01:00:00Z".into(),
+            completed_at: Some("2026-07-14T01:01:00Z".into()),
+            phase: Some(TransferPhase::Failed),
+            attempt: 1,
+            logical_transfer_id: "logical-active".into(),
+            attempt_id: "parent".into(),
+            protocol_transfer_id: "proto-p".into(),
+            ..TransferTask::recovery_defaults("parent")
+        };
+        repo.record(&failed).await.unwrap();
+        assert!(repo
+            .find_active_send_for_logical("logical-active")
+            .await
+            .unwrap()
+            .is_none());
+
+        let child = TransferTask {
+            filename: "p.bin".into(),
+            file_path: "/tmp/p.bin".into(),
+            size: 3,
+            sha256: "cc".into(),
+            direction: TransferDirection::Send,
+            peer_device_id: "peer".into(),
+            status: TransferStatus::Pending,
+            created_at: "2026-07-14T01:02:00Z".into(),
+            phase: Some(TransferPhase::Queued),
+            attempt: 2,
+            logical_transfer_id: "logical-active".into(),
+            attempt_id: "child".into(),
+            protocol_transfer_id: "proto-c".into(),
+            client_operation_id: Some("op-child".into()),
+            operation_payload_hash: Some("hash-child".into()),
+            ..TransferTask::recovery_defaults("child")
+        };
+        repo.record(&child).await.unwrap();
+        let found = repo
+            .find_active_send_for_logical("logical-active")
+            .await
+            .unwrap()
+            .expect("active child");
+        assert_eq!(found.id, "child");
+        assert!(repo
+            .find_active_send_for_logical("logical-other")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// 并发同 id claim 仅一条 Fresh winner。

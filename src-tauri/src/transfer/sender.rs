@@ -505,6 +505,17 @@ async fn start_recovery_operation(
     let parent = load_parent_task(&state, &task_id).await?;
     validate_parent_for_recovery(&parent, kind)?;
 
+    let logical_id = resolve_logical_transfer_id(&parent);
+    // 旧 failed 父行仍可点 recovery；同 logical 已有**不同** clientOperationId 的活跃 child 才 conflict。
+    // 同 op 重放留给 claim Replay 路径，不得在此误杀。
+    ensure_no_active_logical_recovery(
+        &state,
+        &logical_id,
+        &parent.id,
+        Some(client_operation_id.as_str()),
+    )
+    .await?;
+
     let path = Path::new(&parent.file_path);
     if !path.exists() {
         return Err(AppError::not_found(format!(
@@ -537,7 +548,7 @@ async fn start_recovery_operation(
     let hash_protocol = resume_protocol_id.as_deref().unwrap_or("");
     let payload_hash = canonical_recovery_payload_hash(
         kind,
-        &parent.logical_transfer_id,
+        &logical_id,
         &parent.file_path,
         &parent.peer_device_id,
         hash_protocol,
@@ -566,11 +577,7 @@ async fn start_recovery_operation(
         phase: Some(TransferPhase::Queued),
         failure: None,
         attempt: next_attempt,
-        logical_transfer_id: if parent.logical_transfer_id.is_empty() {
-            parent.id.clone()
-        } else {
-            parent.logical_transfer_id.clone()
-        },
+        logical_transfer_id: logical_id.clone(),
         attempt_id: attempt_id.clone(),
         protocol_transfer_id: claim_protocol_id,
         client_operation_id: Some(client_operation_id.clone()),
@@ -584,6 +591,29 @@ async fn start_recovery_operation(
 
     match outcome {
         SenderClaimOutcome::Fresh(task) => {
+            // claim 后 TOCTOU 再检：并发不同 op 可能刚插入同 logical 活跃行。
+            // 排除本 claim 行；同 op 自身不视为冲突。
+            if let Err(conflict) = ensure_no_active_logical_recovery(
+                &state,
+                &logical_id,
+                &task.id,
+                Some(client_operation_id.as_str()),
+            )
+            .await
+            {
+                let mut failed = task.clone();
+                failed.status = TransferStatus::Failed;
+                failed.phase = Some(TransferPhase::Failed);
+                failed.failure = Some(TransferFailure {
+                    stage: TransferFailureStage::Transfer,
+                    code: "logical_recovery_conflict".into(),
+                    retryable: true,
+                    message: "同 logical_transfer_id 已有活跃 attempt，本次 claim 作废".into(),
+                });
+                failed.completed_at = Some(now_iso());
+                state.transfer_repo.record(&failed).await?;
+                return Err(conflict);
+            }
             // spawn 前再次重检 size/mtime（TOCTOU）。
             let path = Path::new(&task.file_path);
             let (size2, sha2, _) = recheck_source_fingerprint(path, &task)?;
@@ -608,6 +638,91 @@ async fn start_recovery_operation(
         SenderClaimOutcome::Conflict { .. } => Err(AppError::conflict(
             "operationIdConflict: clientOperationId 已绑定不同 payload",
         )),
+    }
+}
+
+/// 解析跨 attempt 稳定的 logical transfer 身份。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧行缺 logical_transfer_id 时必须回落 task.id，保证 recovery 互斥键稳定。
+///
+/// Code Logic（这个函数做什么）:
+///     非空 logical_transfer_id 优先，否则 `task.id`。
+fn resolve_logical_transfer_id(task: &TransferTask) -> String {
+    if task.logical_transfer_id.trim().is_empty() {
+        task.id.clone()
+    } else {
+        task.logical_transfer_id.clone()
+    }
+}
+
+/// 拒绝同一 logical 上**不同** clientOperationId 的并发 recovery（registry + history）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     父 failed 行终态仍允许点击；若 child 已 Queued/Transferring 且属于另一 op，
+///     必须 conflict，避免第二份 clientOperationId 再 spawn 并发发送。
+///     同 op 重放必须放行到 claim Replay，不能在此误杀。
+///
+/// Code Logic（这个函数做什么）:
+///     扫 registry 非终态同 logical（排除 exclude_task_id / 同 allow_client_operation_id）；
+///     再查 history pending/transferring；命中返回 conflict `logical_transfer_active`。
+async fn ensure_no_active_logical_recovery(
+    state: &AppState,
+    logical_transfer_id: &str,
+    exclude_task_id: &str,
+    allow_client_operation_id: Option<&str>,
+) -> Result<(), AppError> {
+    for active in state.transfers.list() {
+        if active.id == exclude_task_id {
+            continue;
+        }
+        if resolve_logical_transfer_id(&active) != logical_transfer_id {
+            continue;
+        }
+        if is_terminal_status(active.status) {
+            continue;
+        }
+        if is_same_client_operation(active.client_operation_id.as_deref(), allow_client_operation_id)
+        {
+            continue;
+        }
+        return Err(AppError::conflict(format!(
+            "logical_transfer_active: logical_transfer_id={logical_transfer_id} 已有活跃 attempt {}",
+            active.id
+        )));
+    }
+
+    if let Some(history_active) = state
+        .transfer_repo
+        .find_active_send_for_logical(logical_transfer_id)
+        .await?
+    {
+        if history_active.id != exclude_task_id
+            && !is_same_client_operation(
+                history_active.client_operation_id.as_deref(),
+                allow_client_operation_id,
+            )
+        {
+            return Err(AppError::conflict(format!(
+                "logical_transfer_active: logical_transfer_id={logical_transfer_id} 已有活跃 attempt {}",
+                history_active.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 比较两个可选 clientOperationId 是否同指同一用户意图。
+///
+/// Business Logic（为什么需要这个函数）:
+///     recovery 互斥只拦不同 op；同 op Replay 必须识别。
+///
+/// Code Logic（这个函数做什么）:
+///     两侧都是 Some 且字符串相等 → true。
+fn is_same_client_operation(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -1499,6 +1614,61 @@ mod tests {
         let err = validate_parent_for_recovery(&p, TransferRecoveryKind::Resume).unwrap_err();
         let s = err.to_string();
         assert!(s.contains("transfer_active") || s.contains("活跃"));
+    }
+
+    /// logical 身份回落与 clientOperation 同指判定。
+    #[test]
+    fn logical_identity_and_same_op_helpers() {
+        let mut p = failed_parent("parent-id", true);
+        p.logical_transfer_id = String::new();
+        assert_eq!(resolve_logical_transfer_id(&p), "parent-id");
+        p.logical_transfer_id = "logical-z".into();
+        assert_eq!(resolve_logical_transfer_id(&p), "logical-z");
+        assert!(is_same_client_operation(Some("op-1"), Some("op-1")));
+        assert!(!is_same_client_operation(Some("op-1"), Some("op-2")));
+        assert!(!is_same_client_operation(Some("op-1"), None));
+    }
+
+    /// history 中同 logical 活跃 child 可被 repo 查到（recovery 互斥依赖）。
+    #[tokio::test]
+    async fn history_active_logical_blocks_new_recovery_lookup() {
+        let repo = memory_repo().await;
+        let parent = failed_parent("parent-logical", true);
+        repo.record(&parent).await.unwrap();
+        let child = TransferTask {
+            filename: "f.bin".into(),
+            file_path: "/tmp/f.bin".into(),
+            size: 10,
+            sha256: "deadbeef".into(),
+            direction: TransferDirection::Send,
+            peer_device_id: "peer-1".into(),
+            status: TransferStatus::Pending,
+            created_at: "2026-07-14T00:02:00Z".into(),
+            phase: Some(TransferPhase::Queued),
+            attempt: 2,
+            logical_transfer_id: "parent-logical".into(),
+            attempt_id: "child-1".into(),
+            protocol_transfer_id: "proto-child".into(),
+            client_operation_id: Some("op-child".into()),
+            operation_payload_hash: Some("hash-child".into()),
+            ..TransferTask::recovery_defaults("child-1")
+        };
+        repo.record(&child).await.unwrap();
+        let active = repo
+            .find_active_send_for_logical("parent-logical")
+            .await
+            .unwrap()
+            .expect("child active");
+        assert_eq!(active.id, "child-1");
+        // 同 op 视为可 Replay；不同 op 应被视为并发冲突源
+        assert!(is_same_client_operation(
+            active.client_operation_id.as_deref(),
+            Some("op-child")
+        ));
+        assert!(!is_same_client_operation(
+            active.client_operation_id.as_deref(),
+            Some("op-other")
+        ));
     }
 
     /// cancelled 不允许 resume（应走 retry）。

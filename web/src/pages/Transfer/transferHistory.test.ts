@@ -14,8 +14,10 @@ import {
   canOpenRevealTransfer,
   classifyTransferGroup,
   groupTransferTasks,
+  isLogicalTransferRecoveryLocked,
   isTransferResumable,
   isTransferRetryable,
+  resolveLogicalTransferId,
 } from './transferHistory';
 
 /**
@@ -99,5 +101,51 @@ describe('transferHistory helpers', () => {
     expect(groups.active.map((t) => t.id)).toEqual(['1']);
     expect(groups.needsAttention.map((t) => t.id)).toEqual(['2']);
     expect(groups.completed).toEqual([]);
+  });
+
+  test('locks recovery when sibling attempt for same logical is active or reconciling', () => {
+    const failedParent = task({
+      id: 'parent-1',
+      logicalTransferId: 'logical-x',
+      status: 'failed',
+      progress: 0.4,
+      transferredBytes: 40,
+      failure: { stage: 'transfer', code: 'x', retryable: true, message: 'x' },
+    });
+    const activeChild = task({
+      id: 'child-2',
+      logicalTransferId: 'logical-x',
+      status: 'transferring',
+      progress: 0.1,
+    });
+    const unrelated = task({
+      id: 'other',
+      logicalTransferId: 'logical-y',
+      status: 'transferring',
+    });
+
+    expect(resolveLogicalTransferId(failedParent)).toBe('logical-x');
+    expect(isLogicalTransferRecoveryLocked(failedParent, [failedParent], new Set())).toBe(false);
+    expect(
+      isLogicalTransferRecoveryLocked(failedParent, [failedParent, activeChild, unrelated], new Set()),
+    ).toBe(true);
+    expect(
+      isLogicalTransferRecoveryLocked(
+        failedParent,
+        [failedParent, task({ id: 'queued-child', logicalTransferId: 'logical-x', status: 'pending', phase: 'queued' })],
+        new Set(),
+      ),
+    ).toBe(true);
+    expect(
+      isLogicalTransferRecoveryLocked(
+        failedParent,
+        [failedParent, task({ id: 'recon-child', logicalTransferId: 'logical-x', status: 'failed' })],
+        new Set(['recon-child']),
+      ),
+    ).toBe(true);
+    // 自身 reconciling 也锁，避免 uncertain 期间 mint 新 id
+    expect(
+      isLogicalTransferRecoveryLocked(failedParent, [failedParent], new Set(['parent-1'])),
+    ).toBe(true);
   });
 });

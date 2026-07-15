@@ -6,7 +6,7 @@
  *   并为 failed 任务决定 resume 还是 retry，避免组件内散落分支。
  *
  * Code Logic（这个模块做什么）:
- *   提供分组分类、resumable/retryable 判定与 clientOperationId mint。
+ *   提供分组分类、resumable/retryable 判定、同 logical recovery 互斥与 clientOperationId mint。
  */
 
 import type { TransferTask } from '@/lib/types';
@@ -90,6 +90,59 @@ export function isTransferRetryable(
  */
 export function canOpenRevealTransfer(task: TransferTask): boolean {
   return task.direction === 'receive' && task.status === 'completed';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   同一 logical transfer 下若已有 child attempt 在 pending/transferring/对账中，
+ *   旧 failed 行不得再点 resume/retry 另 mint clientOperationId 并发发送。
+ *
+ * Code Logic（这个函数做什么）:
+ *   解析 logicalId（logicalTransferId 缺省回落 task.id）；扫描 tasks：
+ *   同 logical 且 status=pending|transferring、活跃 phase、或 reconciling → true。
+ *   自身 failed/cancelled 行若未 reconciling 不锁自己，但 sibling 活跃会锁。
+ */
+export function isLogicalTransferRecoveryLocked(
+  task: TransferTask,
+  tasks: readonly TransferTask[],
+  reconcilingIds: ReadonlySet<string> = new Set(),
+): boolean {
+  const logicalId = resolveLogicalTransferId(task);
+  for (const candidate of tasks) {
+    if (resolveLogicalTransferId(candidate) !== logicalId) continue;
+    if (reconcilingIds.has(candidate.id)) return true;
+    if (isTransferAttemptActive(candidate)) return true;
+  }
+  return false;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   recovery 互斥与列表扫描共用同一 logical 身份解析。
+ *
+ * Code Logic（这个函数做什么）:
+ *   非空 logicalTransferId 优先，否则回落 task.id。
+ */
+export function resolveLogicalTransferId(task: TransferTask): string {
+  const logical = task.logicalTransferId?.trim();
+  return logical && logical.length > 0 ? logical : task.id;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   判定某 attempt 是否仍占用 logical transfer 的发送槽。
+ *
+ * Code Logic（这个函数做什么）:
+ *   pending/transferring 或 phase 为 queued/connecting/transferring/finalizing。
+ */
+export function isTransferAttemptActive(task: TransferTask): boolean {
+  if (task.status === 'pending' || task.status === 'transferring') return true;
+  return (
+    task.phase === 'queued' ||
+    task.phase === 'connecting' ||
+    task.phase === 'transferring' ||
+    task.phase === 'finalizing'
+  );
 }
 
 /**

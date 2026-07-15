@@ -39,6 +39,7 @@ import { pickTransferFile, subscribeTransferFileDrops } from './transferFileSele
 import {
   canOpenRevealTransfer,
   groupTransferTasks,
+  isLogicalTransferRecoveryLocked,
   isTransferOutcomeUncertain,
   isTransferResumable,
   isTransferRetryable,
@@ -589,6 +590,15 @@ export function Transfer() {
       if (recoveryBusyRef.current.has(taskId)) return;
       if (reconcilingIds.has(taskId)) return;
 
+      const target = tasks.find((item) => item.id === taskId);
+      // 同 logical 已有 child 活跃/对账时禁止再 mint 新 clientOperationId
+      if (
+        target &&
+        isLogicalTransferRecoveryLocked(target, tasks, reconcilingIds)
+      ) {
+        return;
+      }
+
       recoveryBusyRef.current.add(taskId);
       clearTaskActionError(taskId);
 
@@ -639,6 +649,7 @@ export function Transfer() {
       runTasksNow,
       setReconciling,
       t,
+      tasks,
     ],
   );
 
@@ -696,13 +707,21 @@ export function Transfer() {
   const renderTaskRow = useCallback(
     (task: TransferTask) => {
       const reconciling = reconcilingIds.has(task.id);
+      const recoveryLocked = isLogicalTransferRecoveryLocked(task, tasks, reconcilingIds);
       const canCancel = task.status === 'pending' || task.status === 'transferring';
       const peer = task.peerDeviceId
         ? devices.find((d) => d.id === task.peerDeviceId)
         : undefined;
       const peerSupportsResume = deviceSupportsTransferResume(peer);
-      const canResume = !reconciling && isTransferResumable(task, peerSupportsResume);
-      const canRetry = !reconciling && isTransferRetryable(task, peerSupportsResume);
+      // 同 logical 活跃/对账期间禁用旧 failed 行的 resume/retry
+      const canResume =
+        !reconciling &&
+        !recoveryLocked &&
+        isTransferResumable(task, peerSupportsResume);
+      const canRetry =
+        !reconciling &&
+        !recoveryLocked &&
+        isTransferRetryable(task, peerSupportsResume);
       const canOpenReveal = !reconciling && canOpenRevealTransfer(task);
       const actionError = taskActionErrors[task.id];
       return (
@@ -745,6 +764,7 @@ export function Transfer() {
       handleRevealTask,
       reconcilingIds,
       taskActionErrors,
+      tasks,
     ],
   );
 
