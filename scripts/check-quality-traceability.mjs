@@ -36,6 +36,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1872,10 +1873,47 @@ function readArg(argv, name) {
  * @returns {Record<string, unknown>}
  */
 export function loadEvidenceExecutions(rootDir = REPO_ROOT) {
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   beta claim 必须从磁盘 evidence 加载 architecture execution，布局为
+   *   `docs/development/evidence/<stableId>/<matrixId>/execution.json`（Plan N8），
+   *   也兼容扁平 `evidence/<stableId>/execution.json`。
+   *
+   * Code Logic（这个函数做什么）:
+   *   扫描 evidence 下 stableId 目录；读取该目录 JSON 与一层 matrix 子目录中的
+   *   execution/manifest JSON；以 stableId@artifactMatrixId 为键。
+   */
   /** @type {Record<string, unknown>} */
   const out = {};
   const base = join(rootDir, 'docs', 'development', 'evidence');
   if (!existsSync(base)) return out;
+
+  /**
+   * @param {string} filePath
+   * @param {string} fallbackId
+   * @param {string} [fallbackMatrix]
+   */
+  function ingestExecutionFile(filePath, fallbackId, fallbackMatrix) {
+    const baseName = filePath.split(/[/\\]/).pop() || '';
+    if (!/\.json$/i.test(baseName)) return;
+    if (!/execution|manifest/i.test(baseName) && baseName !== 'manifest.json') return;
+    try {
+      const raw = JSON.parse(readFileSync(filePath, 'utf8'));
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+      const stableId =
+        typeof raw.stableId === 'string' && raw.stableId.trim()
+          ? raw.stableId
+          : fallbackId;
+      const matrix =
+        typeof raw.artifactMatrixId === 'string' && raw.artifactMatrixId.trim()
+          ? raw.artifactMatrixId
+          : fallbackMatrix || 'macos-aarch64';
+      out[`${stableId}@${matrix}`] = raw;
+    } catch {
+      // skip unreadable evidence
+    }
+  }
+
   let ids;
   try {
     ids = readdirSync(base);
@@ -1884,27 +1922,41 @@ export function loadEvidenceExecutions(rootDir = REPO_ROOT) {
   }
   for (const id of ids) {
     const dir = join(base, id);
-    let files;
+    let st;
     try {
-      files = readdirSync(dir);
+      st = statSync(dir);
     } catch {
       continue;
     }
-    for (const file of files) {
-      if (!/\.json$/i.test(file)) continue;
-      if (!/execution|manifest/i.test(file) && file !== 'manifest.json') continue;
+    if (!st.isDirectory()) continue;
+    let entries;
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const abs = join(dir, entry);
+      let est;
       try {
-        const raw = JSON.parse(readFileSync(join(dir, file), 'utf8'));
-        if (!raw || typeof raw !== 'object') continue;
-        const stableId =
-          typeof raw.stableId === 'string' ? raw.stableId : id;
-        const matrix =
-          typeof raw.artifactMatrixId === 'string'
-            ? raw.artifactMatrixId
-            : 'macos-aarch64';
-        out[`${stableId}@${matrix}`] = raw;
+        est = statSync(abs);
       } catch {
-        // skip unreadable evidence
+        continue;
+      }
+      if (est.isFile()) {
+        ingestExecutionFile(abs, id);
+        continue;
+      }
+      if (!est.isDirectory()) continue;
+      // Plan layout: evidence/<stableId>/<matrixId>/execution.json
+      let nested;
+      try {
+        nested = readdirSync(abs);
+      } catch {
+        continue;
+      }
+      for (const file of nested) {
+        ingestExecutionFile(join(abs, file), id, entry);
       }
     }
   }
