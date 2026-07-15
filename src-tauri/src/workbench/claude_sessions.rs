@@ -19,6 +19,8 @@
 //!       notify 文件监听（debounce 500ms）；监听失败降级为每次重扫。
 //!     - watcher 将 create/modify/delete/rename/uncertain 映射为 index upsert/remove/rename/bounded rescan；
 //!       owner 侧 `ClaudeSessionWatcherRuntime` 聚合 watcher+cancel+handles；项目移除/shutdown 先 dispose。
+//!       BoundedRescan/Upsert 对已索引且 size+mtime 未变的 jsonl **跳过 reparse**（指纹在 ClaudeSessionIndex）；
+//!       delete/rename/新建仍正确收敛；磁盘已删文件在 BoundedRescan 新 map 中自然剔除。
 //!     - `decode_session_search_response_body`：混部 dual-decode（v2 对象或 legacy 数组）。
 
 use crate::cc::collector::claude_projects_dir;
@@ -496,6 +498,12 @@ pub struct ClaudeSessionIndex {
     pub recent_messages: Vec<RecentMessage>,
     pub cwd: Option<String>,
     pub git_branch: Option<String>,
+    /// 索引时 transcript 文件 size（字节）；watcher rescan/upsert 用 size+mtime 跳过未变文件。
+    #[serde(skip)]
+    pub source_size: u64,
+    /// 索引时 transcript mtime（UNIX_EPOCH 起纳秒）；不可用时为 None，匹配时 fail-closed 强制 reparse。
+    #[serde(skip)]
+    pub source_mtime_ns: Option<u64>,
 }
 
 /// 一个 worktree path 的完整索引。
@@ -725,6 +733,7 @@ pub fn build_session_index_with_budget(
             );
         })
         .ok()?;
+    let (source_size, source_mtime_ns) = session_file_fingerprint_from_meta(&meta);
     if meta.len() > budget.max_file_bytes {
         push_reason(&mut outcome.reasons, "max_file_bytes");
         outcome.skipped_entire_file = true;
@@ -889,9 +898,74 @@ pub fn build_session_index_with_budget(
             recent_messages,
             cwd,
             git_branch,
+            source_size,
+            source_mtime_ns,
         },
         outcome,
     ))
+}
+
+/// 从 metadata 提取 (size, mtime_ns) 指纹。
+///
+/// Business Logic（为什么需要这个函数）:
+///     watcher rescan/upsert 需要廉价判断磁盘文件是否相对内存索引未变，避免每次事件 O(N) 全量 reparse。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 `meta.len()` 与 `modified()` 相对 UNIX_EPOCH 的纳秒；mtime 不可用时为 None。
+fn session_file_fingerprint_from_meta(meta: &std::fs::Metadata) -> (u64, Option<u64>) {
+    let size = meta.len();
+    let mtime_ns = meta.modified().ok().and_then(|t| {
+        t.duration_since(SystemTime::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_nanos() as u64)
+    });
+    (size, mtime_ns)
+}
+
+/// 读取路径的 size+mtime 指纹；metadata 失败返回 None。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Upsert 变更路径在 reparse 前需要对照索引指纹；metadata 失败时应走 reparse/删除收敛。
+///
+/// Code Logic（这个函数做什么）:
+///     `metadata(path)` 成功则委托 `session_file_fingerprint_from_meta`。
+fn read_session_file_fingerprint(path: &Path) -> Option<(u64, Option<u64>)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(session_file_fingerprint_from_meta(&meta))
+}
+
+/// 判断两份 size+mtime 指纹是否一致（可跳过 reparse）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     size+mtime 未变时内容可视为未变；mtime 缺失时 fail-closed，强制 reparse 保证正确性。
+///
+/// Code Logic（这个函数做什么）:
+///     两侧 mtime_ns 均为 Some 且 size/mtime 全等时返回 true，否则 false。
+fn fingerprints_match(
+    indexed_size: u64,
+    indexed_mtime_ns: Option<u64>,
+    size: u64,
+    mtime_ns: Option<u64>,
+) -> bool {
+    match (indexed_mtime_ns, mtime_ns) {
+        (Some(indexed), Some(disk)) => indexed_size == size && indexed == disk,
+        _ => false,
+    }
+}
+
+/// 判断索引条目是否与磁盘指纹一致，可跳过 reparse。
+///
+/// Business Logic（为什么需要这个函数）:
+///     BoundedRescan 需要对照已索引 ClaudeSessionIndex 与磁盘 metadata。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `fingerprints_match` 比较 index.source_* 与磁盘指纹。
+fn session_index_matches_fingerprint(
+    index: &ClaudeSessionIndex,
+    size: u64,
+    mtime_ns: Option<u64>,
+) -> bool {
+    fingerprints_match(index.source_size, index.source_mtime_ns, size, mtime_ns)
 }
 
 // ---------------------------------------------------------------------------
@@ -2283,7 +2357,8 @@ fn remove_index_on_failure(state: &AppState, key: &str) {
 ///     notify 回调收到文件变化事件后，需要把对应 session 的索引刷新，保证搜索结果新鲜。
 ///
 /// Code Logic（这个函数做什么）:
-///     **先在写锁外**用默认预算 parse 变更路径与兜底新文件，再短暂持写锁原子 apply；
+///     读锁快照现有 session 指纹；**写锁外**对变更路径仅在 size+mtime 变化时 reparse，
+///     对目录内其它 jsonl 仅索引中尚不存在的 stem 做兜底 parse；再短暂写锁 apply；
 ///     成功 upsert、失败按 stem 移除；更新 last_scan_at。
 fn refresh_sessions_from_paths(
     shared: &SharedWorktreeSessionIndex,
@@ -2291,7 +2366,23 @@ fn refresh_sessions_from_paths(
     dir: &Path,
     changed_paths: &[PathBuf],
 ) {
-    // 锁外解析变更路径（默认预算）
+    // 读锁快照：已索引 id → 指纹（避免 extras/未变 Upsert 全量 reparse）
+    let existing_fps: HashMap<String, (u64, Option<u64>)> = {
+        let guard = match shared.read() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!("session index 读锁中毒，跳过增量更新: {err}");
+                return;
+            }
+        };
+        guard
+            .sessions
+            .iter()
+            .map(|(id, s)| (id.clone(), (s.source_size, s.source_mtime_ns)))
+            .collect()
+    };
+
+    // 锁外解析变更路径：指纹未变则跳过 reparse（虚假/重复 modify 常见）
     let mut parsed: Vec<(String, Option<ClaudeSessionIndex>)> = Vec::new();
     for path in changed_paths {
         let stem = path
@@ -2300,11 +2391,20 @@ fn refresh_sessions_from_paths(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_default();
+        if !stem.is_empty() {
+            if let Some((size, mtime_ns)) = read_session_file_fingerprint(path) {
+                if let Some((idx_size, idx_mtime)) = existing_fps.get(&stem) {
+                    if fingerprints_match(*idx_size, *idx_mtime, size, mtime_ns) {
+                        continue;
+                    }
+                }
+            }
+        }
         let index = build_session_index(path);
         parsed.push((stem, index));
     }
 
-    // 锁外收集「可能新增」的 jsonl（不查现有 map，写锁内再过滤）
+    // 锁外仅兜底「索引中尚不存在」的新 jsonl；已索引文件绝不在 extras 路径 reparse
     let mut extras: Vec<ClaudeSessionIndex> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -2316,8 +2416,7 @@ fn refresh_sessions_from_paths(
                 Some(s) if !s.trim().is_empty() => s.trim().to_string(),
                 _ => continue,
             };
-            // 已在 changed_paths 处理过的跳过
-            if parsed.iter().any(|(s, _)| s == &stem) {
+            if existing_fps.contains_key(&stem) || parsed.iter().any(|(s, _)| s == &stem) {
                 continue;
             }
             if let Some(index) = build_session_index(&p) {
@@ -2360,13 +2459,15 @@ fn refresh_sessions_from_paths(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     debounce 窗口内可能先后有多个不同 jsonl 文件变更，若 trailing 只重扫最后一批事件路径，
-///     较早变更的文件会被漏掉。trailing 兜底必须全量重扫。
+///     较早变更的文件会被漏掉。trailing 兜底必须全量重扫；但对 size+mtime 未变的已索引文件
+///     应复用条目，避免每次事件 O(N) 全量 reparse。
 ///
 /// Code Logic（这个函数做什么）:
-///     读锁取 worktree_path/encoded_cwd；**锁外**用默认预算扫描目录构建新 HashMap + diagnostics；
+///     读锁取 worktree_path/encoded_cwd + 现有 sessions；**锁外**列目录/排序/预算后，
+///     指纹匹配则 clone 复用，否则 reparse；新 map 仅含磁盘仍存在的文件（delete 收敛）；
 ///     再写锁原子 swap sessions/truncated/diagnostics/last_scan_at。
 fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
-    let (worktree_path, encoded_cwd) = {
+    let (worktree_path, encoded_cwd, existing) = {
         let guard = match shared.read() {
             Ok(g) => g,
             Err(err) => {
@@ -2374,7 +2475,11 @@ fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
                 return;
             }
         };
-        (guard.worktree_path.clone(), guard.encoded_cwd.clone())
+        (
+            guard.worktree_path.clone(),
+            guard.encoded_cwd.clone(),
+            guard.sessions.clone(),
+        )
     };
 
     let budget = ClaudeIndexBudget::default();
@@ -2411,10 +2516,11 @@ fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
     let mut files_indexed: u64 = 0;
     let mut bytes_read: u64 = 0;
     for (_mtime, path) in candidates {
-        let meta_len = match std::fs::metadata(&path) {
-            Ok(m) => m.len(),
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
             Err(_) => continue,
         };
+        let (meta_len, mtime_ns) = session_file_fingerprint_from_meta(&meta);
         if meta_len > budget.max_file_bytes {
             push_reason(&mut reasons, "max_file_bytes");
             truncated = true;
@@ -2425,6 +2531,21 @@ fn refresh_all_sessions(shared: &SharedWorktreeSessionIndex, dir: &Path) {
             truncated = true;
             break;
         }
+
+        let Some(session_id) = session_id_from_jsonl_path(&path) else {
+            continue;
+        };
+
+        // size+mtime 未变：复用内存条目，跳过昂贵 jsonl reparse
+        if let Some(prev) = existing.get(&session_id) {
+            if session_index_matches_fingerprint(prev, meta_len, mtime_ns) {
+                bytes_read = bytes_read.saturating_add(meta_len);
+                new_sessions.insert(session_id, prev.clone());
+                files_indexed = files_indexed.saturating_add(1);
+                continue;
+            }
+        }
+
         if let Some((index, outcome)) = build_session_index_with_budget(&path, &budget) {
             bytes_read = bytes_read.saturating_add(outcome.bytes_read.max(meta_len));
             for r in outcome.reasons {

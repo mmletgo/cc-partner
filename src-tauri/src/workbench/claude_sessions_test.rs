@@ -1254,6 +1254,156 @@ fn watcher_uncertain_event_requests_bounded_rescan() {
 }
 
 /// Business Logic（为什么需要这个测试）:
+///     BoundedRescan 对 size+mtime 未变的已索引文件必须跳过 reparse，否则每次事件 O(N) 全量解析。
+///
+/// Code Logic（这个测试做什么）:
+///     污染内存中 sess-b 标题（磁盘未变）；追加修改 sess-a 磁盘内容；BoundedRescan 后：
+///     sess-a 反映新内容（reparse），sess-b 仍为污染标题（复用，未 reparse）；
+///     再新建 sess-c 后 rescan 必须收录。
+#[test]
+fn watcher_bounded_rescan_skips_unchanged_fingerprint() {
+    let (worktree, watch_dir, shared, path_a, _path_b) =
+        make_shared_index_with_two_sessions("watcher_fp_rescan");
+
+    // 污染未变文件的内存索引：若 rescan 错误 reparse，标题会回到磁盘 "beta"
+    {
+        let mut guard = shared.write().unwrap();
+        let b = guard.sessions.get_mut("sess-b").expect("sess-b");
+        b.title = "POISONED_UNCHANGED".into();
+    }
+
+    // 修改 sess-a 内容（改变 size，通常也改变 mtime），必须被 reparse
+    {
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path_a)
+            .expect("append open");
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"alpha-updated"}},"timestamp":"2026-01-01T00:01:00Z"}}"#
+        )
+        .expect("append line");
+    }
+
+    apply_session_watch_plan(
+        &shared,
+        &worktree,
+        &watch_dir,
+        SessionWatchPlan::BoundedRescan,
+    );
+
+    {
+        let guard = shared.read().unwrap();
+        let a = guard.sessions.get("sess-a").expect("sess-a after rescan");
+        assert!(
+            a.user_text.contains("alpha-updated") || a.title.contains("alpha"),
+            "变更文件必须 reparse：user_text={:?} title={:?}",
+            a.user_text,
+            a.title
+        );
+        assert_eq!(
+            guard.sessions.get("sess-b").map(|s| s.title.as_str()),
+            Some("POISONED_UNCHANGED"),
+            "未变文件必须复用内存条目，跳过 reparse"
+        );
+    }
+
+    // create 收敛：新 jsonl 必须被 BoundedRescan 收录
+    let _path_c = write_jsonl(
+        &watch_dir,
+        "sess-c",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"gamma"},"timestamp":"2026-01-01T00:02:00Z"}"#,
+        ],
+    );
+    apply_session_watch_plan(
+        &shared,
+        &worktree,
+        &watch_dir,
+        SessionWatchPlan::BoundedRescan,
+    );
+    let guard = shared.read().unwrap();
+    assert!(
+        guard.sessions.contains_key("sess-c"),
+        "BoundedRescan 必须收录新建 session"
+    );
+    assert_eq!(
+        guard.sessions.get("sess-b").map(|s| s.title.as_str()),
+        Some("POISONED_UNCHANGED"),
+        "二次 rescan 对仍未变文件继续跳过 reparse"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     Upsert 路径不得对目录内其它已索引 jsonl 做 O(N) reparse；指纹未变的目标路径也应跳过。
+///
+/// Code Logic（这个测试做什么）:
+///     污染 sess-a/sess-b 标题；对未改磁盘的 path_a 发 Upsert：两者标题保持污染；
+///     再改 path_a 后 Upsert：仅 sess-a 更新，sess-b 仍污染。
+#[test]
+fn watcher_upsert_skips_unchanged_and_does_not_reparse_peers() {
+    let (worktree, watch_dir, shared, path_a, _path_b) =
+        make_shared_index_with_two_sessions("watcher_fp_upsert");
+
+    {
+        let mut guard = shared.write().unwrap();
+        guard.sessions.get_mut("sess-a").unwrap().title = "POISON_A".into();
+        guard.sessions.get_mut("sess-b").unwrap().title = "POISON_B".into();
+    }
+
+    // 磁盘未变：Upsert path_a 应跳过 reparse
+    apply_session_watch_plan(
+        &shared,
+        &worktree,
+        &watch_dir,
+        SessionWatchPlan::Upsert(vec![path_a.clone()]),
+    );
+    {
+        let guard = shared.read().unwrap();
+        assert_eq!(
+            guard.sessions.get("sess-a").map(|s| s.title.as_str()),
+            Some("POISON_A")
+        );
+        assert_eq!(
+            guard.sessions.get("sess-b").map(|s| s.title.as_str()),
+            Some("POISON_B"),
+            "Upsert 不得 reparse 未变更的 peer session"
+        );
+    }
+
+    // 变更 path_a 后再 Upsert：仅 a 更新
+    {
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path_a)
+            .expect("append open");
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"alpha-upserted"}},"timestamp":"2026-01-01T00:03:00Z"}}"#
+        )
+        .expect("append");
+    }
+
+    apply_session_watch_plan(
+        &shared,
+        &worktree,
+        &watch_dir,
+        SessionWatchPlan::Upsert(vec![path_a.clone()]),
+    );
+    let guard = shared.read().unwrap();
+    let a = guard.sessions.get("sess-a").expect("sess-a");
+    assert!(
+        a.user_text.contains("alpha-upserted") || a.title != "POISON_A",
+        "变更目标必须 reparse"
+    );
+    assert_eq!(
+        guard.sessions.get("sess-b").map(|s| s.title.as_str()),
+        Some("POISON_B"),
+        "peer 仍不得被 extras 路径 reparse"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
 ///     shutdown/cancel 后不得再有 trailing 后台任务执行写回。
 ///
 /// Code Logic（这个测试做什么）:
