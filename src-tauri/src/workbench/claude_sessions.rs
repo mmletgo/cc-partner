@@ -1528,4 +1528,182 @@ mod tests {
         assert_eq!(index.recent_messages[0].timestamp, "2026-01-01T00:06:00Z");
         assert_eq!(index.recent_messages[19].timestamp, "2026-01-01T00:25:00Z");
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     N7 性能基线：在引入 spawn_blocking / 文件数 / 字节 / 行长 / 缓存文本预算之前，
+    ///     必须可重复记录「当前同步全量索引」的耗时、处理字节、会话数与截断语义，
+    ///     后续任务才能证明预算化与非阻塞改造真正改善了热点，而不是仅改代码结构。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     1. 用 temp JSONL fixture（非用户目录）生成多 session + 长正文 + 超 20 条消息；
+    ///     2. 同步调用 build_session_index 扫描全部文件，累计 wall 时间与读取字节；
+    ///     3. 并行 heartbeat 线程每 2ms 自增，记录索引期间心跳次数（表征调用线程占用）；
+    ///     4. 断言当前行为：全量入库（无 file/byte budget 截断）、user/assistant 全文缓存、
+    ///        recent_messages 仅截到 20；经 eprintln! 输出可复现基线指标。
+    #[test]
+    fn index_budget_baseline() {
+        let tmp = unique_temp_dir("index_budget_baseline");
+
+        // 构造 8 个 session：前 6 个中等大小，第 7 个含超长 user 正文，第 8 个 30 条消息
+        // 触发 recent_messages 截断（当前唯一稳定的截断语义）。
+        let long_body = "L".repeat(8_192);
+        let mut session_ids: Vec<String> = Vec::new();
+
+        for i in 0..6 {
+            let sid = format!("budget-sess-{i:02}");
+            let user = format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"baseline prompt {i}"}},"timestamp":"2026-07-0{}T0{}:00:00Z","cwd":"/tmp/budget"}}"#,
+                (i % 9) + 1,
+                i % 9
+            );
+            let asst = format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"reply {i}"}}]}},"timestamp":"2026-07-0{}T0{}:01:00Z"}}"#,
+                (i % 9) + 1,
+                i % 9
+            );
+            let _ = write_jsonl(&tmp, &sid, &[user.as_str(), asst.as_str()]);
+            session_ids.push(sid);
+        }
+
+        // 超长正文 session：当前实现会把整段写入 user_text（无 1M scalar / 行长预算）
+        {
+            let sid = "budget-sess-long".to_string();
+            let content = format!("prefix-{long_body}-suffix");
+            let line = format!(
+                r#"{{"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-07-14T12:00:00Z"}}"#,
+                serde_json::Value::String(content.clone())
+            );
+            let path = write_jsonl(&tmp, &sid, &[line.as_str()]);
+            let _ = path;
+            session_ids.push(sid);
+        }
+
+        // 30 条消息 session：recent_messages 截到 20，message_count 仍为 30
+        {
+            let sid = "budget-sess-many".to_string();
+            let mut lines: Vec<String> = Vec::new();
+            for i in 1..=30 {
+                let role = if i % 2 == 1 { "user" } else { "assistant" };
+                let text = format!("m{i:02}");
+                let ts = format!("2026-07-14T13:{:02}:00Z", i);
+                let content = if role == "user" {
+                    format!(r#""{text}""#)
+                } else {
+                    format!(r#"[{{"type":"text","text":"{text}"}}]"#)
+                };
+                lines.push(format!(
+                    r#"{{"type":"{role}","message":{{"role":"{role}","content":{content}}},"timestamp":"{ts}"}}"#
+                ));
+            }
+            let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+            let _ = write_jsonl(&tmp, &sid, &refs);
+            session_ids.push(sid);
+        }
+
+        // 汇总 fixture 字节（当前实现会完整读入这些字节；后续预算化后可能截断）
+        let mut total_fixture_bytes: u64 = 0;
+        for entry in fs::read_dir(&tmp).unwrap().flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                total_fixture_bytes += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+
+        // Heartbeat 线程：索引期间每 2ms 自增，用于表征「调用线程被同步解析占用」时
+        // 仍可观测的并发心跳次数（非生产 watcher heartbeat；仅基线证据）。
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::thread;
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticks = Arc::new(AtomicU64::new(0));
+        let stop_hb = Arc::clone(&stop);
+        let ticks_hb = Arc::clone(&ticks);
+        let hb = thread::spawn(move || {
+            while !stop_hb.load(Ordering::Relaxed) {
+                ticks_hb.fetch_add(1, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(2));
+            }
+        });
+
+        let wall_start = Instant::now();
+        let mut sessions: HashMap<String, ClaudeSessionIndex> = HashMap::new();
+        let mut indexed_bytes: u64 = 0;
+        for entry in fs::read_dir(&tmp).unwrap().flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let file_len = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            if let Some(idx) = build_session_index(&p) {
+                indexed_bytes += file_len;
+                sessions.insert(idx.session_id.clone(), idx);
+            }
+        }
+        let elapsed = wall_start.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        let _ = hb.join();
+        let heartbeat_ticks = ticks.load(Ordering::Relaxed);
+
+        // --- 当前行为断言（characterization，Task 4/5 优化后会改语义） ---
+        // 1) 无 file/byte budget：全部 8 个 fixture 都应入库
+        assert_eq!(
+            sessions.len(),
+            session_ids.len(),
+            "当前实现应对全部 fixture session 建索引（无截断预算）"
+        );
+
+        // 2) 超长正文全文缓存进 user_text（无 per-session scalar 截断）
+        let long = sessions
+            .get("budget-sess-long")
+            .expect("long session should be indexed");
+        assert!(
+            long.user_text.contains(&long_body),
+            "当前实现缓存完整 user_text，不含截断标记"
+        );
+        assert!(
+            long.user_text.len() >= long_body.len(),
+            "user_text 应保留完整长正文"
+        );
+
+        // 3) recent_messages 是当前唯一稳定截断：30 条 → 20
+        let many = sessions
+            .get("budget-sess-many")
+            .expect("many-messages session should be indexed");
+        assert_eq!(many.message_count, 30);
+        assert_eq!(many.recent_messages.len(), RECENT_MESSAGES_MAX);
+        assert_eq!(many.recent_messages[0].text, "m11");
+        assert_eq!(many.recent_messages[19].text, "m30");
+
+        // 4) 中等 session 的 assistant 全文也缓存
+        let mid = sessions
+            .get("budget-sess-00")
+            .expect("mid session should be indexed");
+        assert!(mid.assistant_text.contains("reply 0"));
+        assert!(mid.user_text.contains("baseline prompt 0"));
+
+        // 可重复基线输出（cargo test ... -- --nocapture）
+        eprintln!(
+            "[perf-baseline] claude_sessions index_budget_baseline: \
+             sessions={} fixture_bytes={} indexed_bytes={} elapsed_ms={} heartbeat_ticks={} \
+             truncation=recent_messages_only(max={}) full_text_cache=true file_budget=none",
+            sessions.len(),
+            total_fixture_bytes,
+            indexed_bytes,
+            elapsed.as_millis(),
+            heartbeat_ticks,
+            RECENT_MESSAGES_MAX,
+        );
+
+        // 基本健全性：应处理完 fixture 字节且耗时有限（避免无限挂起）
+        assert_eq!(indexed_bytes, total_fixture_bytes);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "fixture 索引应在 5s 内完成，实际 {:?}",
+            elapsed
+        );
+        // heartbeat 线程在同步索引期间应至少跳动过（证明测量面可观测；次数随机器变化）
+        assert!(
+            heartbeat_ticks > 0,
+            "heartbeat 线程应在索引期间至少 tick 一次"
+        );
+    }
 }
