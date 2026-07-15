@@ -10,7 +10,7 @@
  *   mock configApi.update；renderHook 断言 general save 的 resolveSave* 行为。
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook } from '@testing-library/react';
 
 const updateMock = vi.fn();
 const chooseDirMock = vi.fn();

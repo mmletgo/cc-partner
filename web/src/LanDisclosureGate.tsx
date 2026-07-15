@@ -7,14 +7,27 @@
  *
  * Code Logic（这个组件做什么）:
  *   使用 useLanDisclosureStartup；hooks 全在 early return 前；
+ *   `/screenshot-overlay` 与 `/health-overlay` 旁路（系统遮罩不依赖 LAN）；
  *   loading/required/starting/error 渲染 gate UI；pass 渲染 children。
  */
 
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useLocation } from 'react-router-dom';
 import { Button, Card, StatusMessage } from '@/components/primitives';
 import { useLanDisclosureStartup } from '@/hooks/useLanDisclosureStartup';
 import styles from './LanDisclosureGate.module.css';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   截图/健康遮罩是系统级独立窗口，不依赖 LAN 服务，也不应被披露 gate 挡住。
+ *
+ * Code Logic（这个函数做什么）:
+ *   pathname 精确匹配 `/screenshot-overlay` 或 `/health-overlay`（忽略 query）时返回 true。
+ */
+function isOverlayBypassPath(pathname: string): boolean {
+  return pathname === '/screenshot-overlay' || pathname === '/health-overlay';
+}
 
 export type LanDisclosureGateProps = {
   children: ReactNode;
@@ -29,12 +42,13 @@ export type LanDisclosureGateProps = {
  */
 export function LanDisclosureGate({ children }: LanDisclosureGateProps): ReactNode {
   const { t } = useTranslation(['welcome', 'common']);
+  const { pathname } = useLocation();
   const { phase, status, startResult, error, acknowledge, retry, openDiagnostics } =
     useLanDisclosureStartup();
 
   // hooks 全部在 early return 之前
-
-  if (phase === 'pass') {
+  // 系统遮罩窗口：不依赖 LAN 后端，披露未确认时也必须能渲染（截图/健康提醒）。
+  if (isOverlayBypassPath(pathname) || phase === 'pass') {
     return children;
   }
 

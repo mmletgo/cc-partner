@@ -22,7 +22,7 @@ vi.mock('../settingsResources', async () => {
     ...actual,
     loadSettingsResources: (...args: unknown[]) => loadSettingsResourcesMock(...args),
     retrySettingsResource: (...args: unknown[]) => retrySettingsResourceMock(...args),
-    createSettingsResourceApi: (...args: unknown[]) => createSettingsResourceApiMock(...args),
+    createSettingsResourceApi: () => createSettingsResourceApiMock(),
   };
 });
 
