@@ -22,6 +22,6 @@
     "L3-MACOS-GUI-PERMISSIONS-001 interactive permission matrix",
     "L3-MACOS-VOICEOVER-001 VoiceOver journey"
   ],
-  "releaseMode": "beta",
+  "releaseMode": "beta-prerelease",
   "prereleaseOnly": true
 }
