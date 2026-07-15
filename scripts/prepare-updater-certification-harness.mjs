@@ -40,7 +40,7 @@ export const CERTIFICATION_MARKERS = Object.freeze([
   'http://127.0.0.1:62190',
   'dangerousInsecureTransportProtocol',
   'updater-certification-harness',
-  '_ccPartnerCertification',
+  'cc-partner-updater-certification-harness',
 ]);
 
 /**
@@ -116,13 +116,8 @@ export function buildHarnessConfig(productionConf, mergeConf) {
     endpoints: [UPDATER_CERT_ENDPOINT],
     dangerousInsecureTransportProtocol: true,
   };
-  out._ccPartnerCertification = {
-    marker: 'updater-certification-harness',
-    releasable: false,
-    productionVersion: prodVersion,
-    harnessVersion: out.version,
-    endpoint: UPDATER_CERT_ENDPOINT,
-  };
+  out.productName = 'cc-partner-updater-certification-harness';
+  out.identifier = 'com.cc-partner.app.cert-harness';
   return out;
 }
 
@@ -216,8 +211,12 @@ export function runSelfTest() {
       'only loopback endpoint',
     );
     assert(
-      /** @type {any} */ (harness)._ccPartnerCertification.releasable === false,
-      'not releasable',
+      harness.productName === 'cc-partner-updater-certification-harness',
+      'harness productName marker',
+    );
+    assert(
+      harness.identifier === 'com.cc-partner.app.cert-harness',
+      'harness identifier marker',
     );
   });
 
