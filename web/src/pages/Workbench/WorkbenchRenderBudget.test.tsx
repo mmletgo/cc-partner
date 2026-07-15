@@ -3,45 +3,53 @@
  * Workbench 根渲染预算 characterization。
  *
  * Business Logic（为什么需要这个测试）:
- *   Workbench 当前为运行时长文本每秒 setState(runtimeNow)，驱动整页（含 controllers）1 Hz 重渲染。
- *   Task 1 先锁住「5s 内根渲染 >1 次」的不良基线；Task 2 抽出 SessionRuntimeText 后把断言改为
- *   tick 不再抬升根渲染计数。
+ *   Workbench 曾为运行时长文本每秒 setState(runtimeNow)，驱动整页（含 controllers）1 Hz 重渲染。
+ *   Task 2 将时钟隔离到 SessionRuntimeText 叶子后，要求五次 tick 后根渲染计数不再抬升。
  *
  * Code Logic（这个测试做什么）:
- *   用轻量 WorkbenchRenderProbe 镜像 Workbench.tsx 的 runtimeNow 1s interval 模式（不挂完整
- *   Workbench，避免 controller/provider 过重）；fake timers 推进 5s 后断言 onRender 调用次数 >1。
- *   同时把当前 CodeEditor lazy chunk gzip 基线记入测试日志，供 Task 3 对照（maxLazyChunk /
- *   WorkbenchCodeEditor，与 npm run check:bundle 一致）。
+ *   用轻量 WorkbenchRenderProbe 模拟「根无 runtimeNow interval + 叶子 SessionRuntimeText 计时」
+ *   结构；fake timers 推进 5s 后断言 onRender 调用次数相对 settle 后基线不变。
+ *   同时把当前 CodeEditor lazy chunk gzip 基线记入测试日志，供 Task 3 对照。
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, render } from '@testing-library/react';
-import { useEffect, useState, type ReactElement } from 'react';
+import { act, cleanup, render } from '@testing-library/react';
+import type { ReactElement } from 'react';
+
+import { SessionRuntimeText } from './SessionRuntimeText';
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   完整 Workbench 挂载过重且依赖众多 provider；characterization 只需复现页面级 1 Hz setState
- *   驱动根渲染的模式，供 Task 2 升级断言时仍沿用同一探针路径。
+ *   完整 Workbench 挂载过重；预算测试只需复现「页面根不持有 1 Hz 时钟、叶子持有」结构，
+ *   证明 tick 不会抬升根渲染。
  *
  * Code Logic（这个组件做什么）:
- *   渲染时调用 onRender 计数；mount 后 setInterval 每 1000ms setRuntimeNow(Date.now())，
- *   与 Workbench.tsx 的 runtimeNow effect 一致。
+ *   渲染时调用 onRender 计数；不设页面级 interval；子树挂 SessionRuntimeText（running+visible）。
  */
 function WorkbenchRenderProbe({ onRender }: { onRender: () => void }): ReactElement {
-  const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
   onRender();
 
-  useEffect(() => {
-    const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  return <div data-testid="workbench-render-probe">{runtimeNow}</div>;
+  return (
+    <div data-testid="workbench-render-probe">
+      <SessionRuntimeText
+        startedAt="2026-01-01T00:00:00.000Z"
+        endedAt={null}
+        running
+        visible
+        emptyValue="—"
+      />
+    </div>
+  );
 }
 
 describe('Workbench render budget (characterization)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:10.000Z'));
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible' as DocumentVisibilityState,
+    });
   });
 
   afterEach(() => {
@@ -49,23 +57,26 @@ describe('Workbench render budget (characterization)', () => {
     vi.useRealTimers();
   });
 
-  test('captures the current workbench root rerender baseline', async () => {
+  test('five runtime ticks leave root render count unchanged after settle', async () => {
     const renders = vi.fn();
     render(<WorkbenchRenderProbe onRender={renders} />);
 
-    // 初始挂载至少 1 次；推进 5s 应因 1 Hz interval 再触发多次根渲染。
-    const initialRenders = renders.mock.calls.length;
-    expect(initialRenders).toBeGreaterThanOrEqual(1);
+    // StrictMode / effect settle：等待叶子挂载 interval 的初始 setState 完成。
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const settledRenders = renders.mock.calls.length;
+    expect(settledRenders).toBeGreaterThanOrEqual(1);
 
-    await vi.advanceTimersByTimeAsync(5_000);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
 
-    // Characterization：当前不良行为 — 5s 内根渲染次数 >1（含 mount + 约 5 次 tick）。
-    // Task 2 会把该断言改为「tick 不再抬升根渲染计数」。
-    expect(renders.mock.calls.length).toBeGreaterThan(1);
-    // 记录可重复基线数字，便于 PR / 后续对比（不作为硬断言上限）。
+    // Task 2 目标：叶子 tick 不得抬升根渲染计数。
+    expect(renders.mock.calls.length).toBe(settledRenders);
     // eslint-disable-next-line no-console
     console.info(
-      `[perf-baseline] workbench root renders over 5s: ${renders.mock.calls.length} (initial=${initialRenders})`,
+      `[perf-baseline] workbench root renders over 5s after settle: ${renders.mock.calls.length} (settled=${settledRenders})`,
     );
   });
 

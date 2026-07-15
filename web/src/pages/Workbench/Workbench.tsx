@@ -43,7 +43,6 @@ import {
   canListenToTauriEvents,
   deferEffect,
   displayErrorMessage,
-  formatRuntime,
   measureInitialTerminalSize,
 } from './workbenchPageHelpers';
 import { useWorkbenchProjectController } from './controllers/useWorkbenchProjectController';
@@ -119,7 +118,6 @@ export function Workbench() {
   const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
   const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('files');
-  const [runtimeNow, setRuntimeNow] = useState<number>(() => Date.now());
   const activeProjectIdRef = useRef<string | null>(null);
   const activeWorktreeIdRef = useRef<string | null>(null);
   const terminalPanelRef = useRef<HTMLElement | null>(null);
@@ -381,12 +379,9 @@ export function Workbench() {
   );
   const emptyValue = t('workbench:emptyValue');
   const activeRootPath = activeWorktreeRootPath(activeProject?.path ?? '', activeWorktree);
-  const activeSessionRuntime = formatRuntime(
-    activeSession?.startedAt ?? null,
-    activeSession?.exitedAt ?? null,
-    runtimeNow,
-    emptyValue,
-  );
+  // Business Logic: 终端全屏时 inspector 被 fixed overlay 盖住，运行时长无需 1 Hz 刷新；
+  // 由既有 terminalFullscreen 状态派生 visible，不使用 IntersectionObserver。
+  const runtimeVisible = !terminalFullscreen;
   const TerminalFullscreenIcon = terminalFullscreen ? MinimizeIcon : MaximizeIcon;
   const terminalFullscreenLabel = terminalFullscreen
     ? t('workbench:terminalExitFullscreen')
@@ -482,11 +477,6 @@ export function Workbench() {
   useEffect(() => {
     activeWorktreeIdRef.current = activeWorktreeId;
   }, [activeWorktreeId]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     if (!createWorktreeOpen) return undefined;
@@ -1059,7 +1049,7 @@ export function Workbench() {
           setSessionNameDraft={setSessionNameDraft}
           handleRenameSession={handleRenameSession}
           handleCloseSession={handleCloseSession}
-          activeSessionRuntime={activeSessionRuntime}
+          runtimeVisible={runtimeVisible}
         />
 
         <WorkbenchInspector

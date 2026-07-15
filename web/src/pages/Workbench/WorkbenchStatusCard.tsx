@@ -4,17 +4,20 @@
  * Business Logic（为什么需要这个组件）:
  *   Plan 2 Task 8 把 Workbench.tsx 内联的 inspectorPane 顶部状态卡渲染抽到独立叶子组件，便于页面降到 ≤1200 行。
  *   状态卡是 inspectorPane 的一部分，但不是 tab 切换内容，因此单独成件；组件只接收 controller 派生的渲染数据与回调，
- *   不持有自己的状态，也不导入文件/Git 域。
+ *   不持有自己的状态，也不导入文件/Git 域。运行时长由 SessionRuntimeText 叶子自持 1 Hz 时钟，避免根重渲染。
  *
  * Code Logic（这个组件做什么）:
  *   - 渲染会话状态 Pill、项目/worktree/session 元信息 grid、session rename 输入与 close 按钮；
+ *   - statusRuntime 行挂 SessionRuntimeText（startedAt/endedAt/running/visible/emptyValue）；
  *   - 暴露 WorkbenchStatusCardProps 类型，所有数据均来自 useWorkbenchTerminalController + Workbench.tsx 跨域共享。
  */
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { EditIcon, XIcon } from '@/lib/icons';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import styles from './Workbench.module.css';
+import { SessionRuntimeText } from './SessionRuntimeText';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -65,8 +68,11 @@ export interface WorkbenchStatusCardProps {
   setSessionNameDraft: (next: string) => void;
   handleRenameSession: () => Promise<void>;
   handleCloseSession: (sessionId: string) => Promise<void>;
-  /** 当前会话运行时长（已格式化文本），由 Workbench.tsx 用 formatRuntime 计算后透传。 */
-  activeSessionRuntime: string;
+  /**
+   * 状态卡所属 inspector/workspace 表面是否可见。
+   * 由 Workbench 从既有 active 状态派生（如 !terminalFullscreen），不使用 IntersectionObserver。
+   */
+  runtimeVisible: boolean;
 }
 
 /**
@@ -88,7 +94,7 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     setSessionNameDraft,
     handleRenameSession,
     handleCloseSession,
-    activeSessionRuntime,
+    runtimeVisible,
   } = props;
 
   const emptyValue = t('workbench:emptyValue');
@@ -102,8 +108,8 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
           : activeSession.status
     : t('workbench:sessionStatus.none');
 
-  // Business Logic: 11 行元信息以 (label key, value) 数组驱动，输出 DOM 与原 Workbench.tsx 内联版本逐字一致。
-  const rows: Array<{ label: string; value: string }> = [
+  // Business Logic: 11 行元信息以 (label key, value) 数组驱动；runtime 行挂叶子 SessionRuntimeText 自持时钟。
+  const rows: Array<{ label: string; value: ReactNode }> = [
     { label: t('workbench:statusDevice'), value: activeProject?.deviceName ?? emptyValue },
     { label: t('workbench:statusProject'), value: activeProject?.name ?? emptyValue },
     { label: t('workbench:statusWorktree'), value: activeWorktree?.name ?? emptyValue },
@@ -111,7 +117,18 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     { label: t('workbench:statusSession'), value: activeSession?.name ?? emptyValue },
     { label: t('workbench:statusCommand'), value: activeSession?.command ?? emptyValue },
     { label: t('workbench:statusState'), value: sessionStatusLabel },
-    { label: t('workbench:statusRuntime'), value: activeSessionRuntime },
+    {
+      label: t('workbench:statusRuntime'),
+      value: (
+        <SessionRuntimeText
+          startedAt={activeSession?.startedAt ?? null}
+          endedAt={activeSession?.exitedAt ?? null}
+          running={activeSession?.status === 'running'}
+          visible={runtimeVisible}
+          emptyValue={emptyValue}
+        />
+      ),
+    },
     {
       label: t('workbench:statusSize'),
       value: activeSession ? `${activeSession.cols} × ${activeSession.rows}` : emptyValue,
