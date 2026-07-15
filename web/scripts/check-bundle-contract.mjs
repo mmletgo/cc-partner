@@ -695,10 +695,12 @@ export function analyzeBundleContract(contract, options) {
   }
 
   const editorEntry = measureEditorEntryLoadedGzip(chunks, options.readFile);
-  // editor-entry 仅 baseline ratchet（无独立 final 硬顶）；有 baseline 时禁止增长
+  // editor-entry 仅 baseline ratchet（无独立 final 硬顶）；strict 下有 baseline 时禁止增长。
+  // final-only 本地漂移模式跳过 editor-entry baseline（无硬顶可取 min），CI 默认 strict 仍强制。
   /** @type {number | null} */
   let editorEntryCeiling = null;
   if (
+    ratchetMode === 'strict' &&
     typeof editorEntry.gzipBytes === 'number' &&
     typeof baseline?.editorEntryLoadedGzipBytes === 'number'
   ) {

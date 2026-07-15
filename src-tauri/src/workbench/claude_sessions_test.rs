@@ -1479,7 +1479,7 @@ async fn dispose_during_inflight_ensure_does_not_reinsert_index() {
     }
 
     // dispose 项目路径：应 bump epoch + 清 inflight/indexes/watchers
-    dispose_session_indexes_for_worktree_paths(&state, &[worktree.clone()]);
+    dispose_session_indexes_for_worktree_paths(&state, std::slice::from_ref(&worktree));
 
     {
         let inflight = state.workbench_claude_session_index_inflight.lock().await;

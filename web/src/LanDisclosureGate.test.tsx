@@ -12,6 +12,7 @@
 import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import i18n from '@/i18n';
 import { LanDisclosureGate } from './LanDisclosureGate';
 
@@ -50,11 +51,13 @@ describe('LanDisclosureGate', () => {
   test('blocks children when disclosure required', async () => {
     await i18n.changeLanguage('zh');
     render(
-      <I18nextProvider i18n={i18n}>
-        <LanDisclosureGate>
-          <div data-testid="app-child">app</div>
-        </LanDisclosureGate>
-      </I18nextProvider>,
+      <MemoryRouter initialEntries={['/']}>
+        <I18nextProvider i18n={i18n}>
+          <LanDisclosureGate>
+            <div data-testid="app-child">app</div>
+          </LanDisclosureGate>
+        </I18nextProvider>
+      </MemoryRouter>,
     );
     expect(screen.queryByTestId('app-child')).toBeNull();
     expect(screen.getByTestId('lan-disclosure-gate')).toBeTruthy();
@@ -66,11 +69,13 @@ describe('LanDisclosureGate', () => {
   test('renders children when phase is pass', () => {
     hookState.phase = 'pass';
     render(
-      <I18nextProvider i18n={i18n}>
-        <LanDisclosureGate>
-          <div data-testid="app-child">app</div>
-        </LanDisclosureGate>
-      </I18nextProvider>,
+      <MemoryRouter initialEntries={['/']}>
+        <I18nextProvider i18n={i18n}>
+          <LanDisclosureGate>
+            <div data-testid="app-child">app</div>
+          </LanDisclosureGate>
+        </I18nextProvider>
+      </MemoryRouter>,
     );
     expect(screen.getByTestId('app-child')).toBeTruthy();
   });
