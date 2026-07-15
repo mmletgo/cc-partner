@@ -403,7 +403,10 @@ pub fn load_workflow_document(project_path: &Path) -> WorkflowDocument {
                 status: WorkflowDocumentStatus::ReadError,
                 content: None,
                 content_hash: None,
-                diagnostics: vec![diagnostic_from_message("workflow_path_error", &error.to_string())],
+                diagnostics: vec![diagnostic_from_message(
+                    "workflow_path_error",
+                    &error.to_string(),
+                )],
                 preview: None,
             };
         }
@@ -1330,8 +1333,9 @@ mod tests {
             .iter()
             .any(|item| item.code == "workflow_symlink_rejected"));
 
-        let err = save_workflow_document_at_project_root(dir.path(), "", &default_workflow_template())
-            .expect_err("symlink 必须拒绝保存");
+        let err =
+            save_workflow_document_at_project_root(dir.path(), "", &default_workflow_template())
+                .expect_err("symlink 必须拒绝保存");
         assert!(err.to_string().contains("符号链接"));
     }
 }

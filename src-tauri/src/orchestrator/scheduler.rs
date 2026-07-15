@@ -303,7 +303,8 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
                 let reason = err.to_string();
                 // 单任务补偿失败不得中断后续任务：记录错误后继续，避免一个失败让其余 Preparing 永久占槽。
                 if let Err(compensate_err) =
-                    record_runner_failure(&state.orchestrator_repo, &task.id, &reason, Some(state)).await
+                    record_runner_failure(&state.orchestrator_repo, &task.id, &reason, Some(state))
+                        .await
                 {
                     tracing::error!(
                         task_id = %task.id,

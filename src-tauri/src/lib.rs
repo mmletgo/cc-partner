@@ -158,6 +158,7 @@ pub fn run() {
 
             // 装配启动协调器（ensure/start 闭包在 manage 之后捕获 AppHandle）
             let handle_for_ensure = app.handle().clone();
+            #[allow(clippy::type_complexity)]
             let ensure: Arc<
                 dyn Fn() -> std::pin::Pin<
                         Box<
@@ -172,17 +173,13 @@ pub fn run() {
                     + Sync,
             > = Arc::new(move || {
                 let handle = handle_for_ensure.clone();
-                Box::pin(async move {
-                    backend_cmd::ensure_backend_process_for_gui(&handle).await
-                })
+                Box::pin(async move { backend_cmd::ensure_backend_process_for_gui(&handle).await })
             });
             let handle_for_start = app.handle().clone();
+            #[allow(clippy::type_complexity)]
             let start: Arc<
                 dyn Fn() -> std::pin::Pin<
-                        Box<
-                            dyn std::future::Future<Output = Result<u16, error::AppError>>
-                                + Send,
-                        >,
+                        Box<dyn std::future::Future<Output = Result<u16, error::AppError>> + Send>,
                     > + Send
                     + Sync,
             > = Arc::new(move || {
@@ -195,18 +192,16 @@ pub fn run() {
                         .load(std::sync::atomic::Ordering::SeqCst))
                 })
             });
+            #[allow(clippy::type_complexity)]
             let probe: Arc<
                 dyn Fn() -> std::pin::Pin<
                         Box<
-                            dyn std::future::Future<
-                                    Output = crate::backend::control::BackendStatus,
-                                > + Send,
+                            dyn std::future::Future<Output = crate::backend::control::BackendStatus>
+                                + Send,
                         >,
                     > + Send
                     + Sync,
-            > = Arc::new(|| {
-                Box::pin(async { crate::backend::control::current_status().await })
-            });
+            > = Arc::new(|| Box::pin(async { crate::backend::control::current_status().await }));
             let lifecycle = ProductionBackendLifecycle::new(ensure, start, probe);
             let coordinator = GuiStartupCoordinator::new(lifecycle);
 

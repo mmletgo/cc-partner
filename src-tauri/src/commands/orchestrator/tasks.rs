@@ -504,11 +504,11 @@ pub(crate) fn validate_local_owner_workflow_document(
 ///
 /// Code Logic（这个函数做什么）:
 ///     kind!=local → validation；否则返回 PathBuf(project.path)。
-fn require_local_project_path(project: &WorkbenchProjectRow) -> Result<std::path::PathBuf, AppError> {
+fn require_local_project_path(
+    project: &WorkbenchProjectRow,
+) -> Result<std::path::PathBuf, AppError> {
     if project.kind != "local" {
-        return Err(AppError::validation(
-            "远端 Orchestrator 只接受对端本机项目",
-        ));
+        return Err(AppError::validation("远端 Orchestrator 只接受对端本机项目"));
     }
     let path = Path::new(&project.path);
     if project.path.trim().is_empty() {
@@ -550,11 +550,7 @@ async fn get_remote_workflow_document(
         WorkflowDocumentRemoteOp::Validate { content } => {
             let content = content.unwrap_or_default();
             client
-                .validate_workflow_document(
-                    &context.base_url,
-                    &context.remote_project_id,
-                    &content,
-                )
+                .validate_workflow_document(&context.base_url, &context.remote_project_id, &content)
                 .await
         }
         WorkflowDocumentRemoteOp::Save {
@@ -623,13 +619,8 @@ pub async fn save_workflow_document(
     expected_hash: String,
     content: String,
 ) -> Result<WorkflowDocument, AppError> {
-    save_workflow_document_for_state(
-        state.inner(),
-        project_id.trim(),
-        &expected_hash,
-        &content,
-    )
-    .await
+    save_workflow_document_for_state(state.inner(), project_id.trim(), &expected_hash, &content)
+        .await
 }
 
 /// 获取 Orchestrator 项目运行时快照（remote-aware 共享入口）。

@@ -280,6 +280,31 @@ async function installAttentionDesktopMocks(
         if (cmd === 'get_config' || cmd === 'get_default_config') {
           return {};
         }
+        if (
+          cmd === 'get_orchestrator_config' ||
+          cmd === 'get_default_orchestrator_config'
+        ) {
+          return {
+            enabled: false,
+            maxConcurrentTasks: 1,
+            verificationCommands: [],
+            autoCommit: false,
+            autoPushTaskBranch: false,
+            autoMergeToMain: false,
+            autoPushMain: false,
+            notifyHumanReview: true,
+            notifyBlocked: true,
+            notifyRemoteOutboxFailed: true,
+            notifyTaskDone: false,
+          };
+        }
+        if (cmd === 'get_operational_notification_snapshot') {
+          return {
+            asOfCursor: { ownerInstanceId: 'owner-attention', sequence: 0 },
+            items: [],
+            truncated: false,
+          };
+        }
         if (cmd === 'list_github_trending_repos') {
           return { repos: [], cached: true, generatedAt: null };
         }

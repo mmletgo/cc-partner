@@ -1895,7 +1895,9 @@ async fn workbench_launch_summary_list_launch_tasks_bounded_no_n_plus_one() {
 
     let listed = repo.list_launch_tasks(5).await.unwrap();
     assert_eq!(listed.len(), 5);
-    assert!(!listed.iter().any(|t| t.id == "t-draft" || t.id == "t-queued"));
+    assert!(!listed
+        .iter()
+        .any(|t| t.id == "t-draft" || t.id == "t-queued"));
     assert!(listed.iter().any(|t| t.id == "t-extra-4"));
 }
 
@@ -3361,4 +3363,3 @@ async fn operational_notification_snapshot_truncates_at_max_1000() {
     assert!(truncated);
     assert_eq!(items.len(), 1000);
 }
-

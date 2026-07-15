@@ -184,6 +184,8 @@ export function OrchestratorTaskDrawer(props: OrchestratorTaskDrawerProps): JSX.
    */
   useEffect(() => {
     if (!reworkDialogOpen) return;
+    // Dialog 打开时填入默认 reason 草稿；保留用户已编辑内容。
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional open-dialog seed
     setReworkValidationError(null);
     setReworkReason((current) => {
       if (current.trim()) return current;

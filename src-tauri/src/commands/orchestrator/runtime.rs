@@ -47,10 +47,7 @@ pub async fn get_orchestrator_runtime_snapshot(
 #[tauri::command]
 pub async fn get_operational_notification_snapshot(
     state: State<'_, AppState>,
-) -> Result<
-    crate::orchestrator::models::OperationalNotificationSnapshot,
-    AppError,
-> {
+) -> Result<crate::orchestrator::models::OperationalNotificationSnapshot, AppError> {
     use crate::backend::authority::RuntimeRole;
     use crate::backend::control_client::BackendControlClient;
     if state.runtime_role == RuntimeRole::GuiClient {

@@ -9,7 +9,6 @@
 pub mod attention;
 pub mod backend;
 pub mod backup;
-pub mod gui_bootstrap;
 pub mod cc_history;
 pub mod claude_code_assets;
 pub mod claude_md;
@@ -17,6 +16,7 @@ pub mod cloud_sync;
 pub mod config;
 pub mod devices;
 pub mod github_trending;
+pub mod gui_bootstrap;
 pub mod health;
 pub mod lan_firewall_dependency;
 pub mod mobile;

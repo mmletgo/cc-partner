@@ -257,8 +257,6 @@ export function useOperationalNotifications(): void {
   const { t } = useTranslation(['orchestrator']);
   const location = useLocation();
   const pathnameRef = useRef(location.pathname);
-  pathnameRef.current = location.pathname;
-
   const preferencesRef = useRef<OperationalNotificationPreferences>({
     ...DEFAULT_OPERATIONAL_NOTIFICATION_PREFERENCES,
   });
@@ -270,7 +268,12 @@ export function useOperationalNotifications(): void {
   );
   const handshakeGenerationRef = useRef(0);
   const tRef = useRef(t);
-  tRef.current = t;
+
+  // 同步最新 pathname/t 到 ref，供事件回调读取（避免 render 期写 ref 触发 lint）
+  useEffect(() => {
+    pathnameRef.current = location.pathname;
+    tRef.current = t;
+  }, [location.pathname, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -377,6 +380,17 @@ export function useOperationalNotifications(): void {
       }
 
       if (cancelled || generation !== handshakeGenerationRef.current) return;
+
+      // 解码失败/残缺响应 fail-closed：保持 pending，避免 pageerror 崩整页
+      if (
+        !snapshot ||
+        !Array.isArray(snapshot.items) ||
+        !snapshot.asOfCursor ||
+        typeof snapshot.asOfCursor.ownerInstanceId !== 'string' ||
+        typeof snapshot.asOfCursor.sequence !== 'number'
+      ) {
+        return;
+      }
 
       // baseline: snapshot items 全部 no-notify
       for (const item of snapshot.items) {

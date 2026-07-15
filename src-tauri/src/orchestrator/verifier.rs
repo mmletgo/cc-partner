@@ -3,9 +3,7 @@
 use crate::claude_cli;
 use crate::error::AppError;
 use crate::orchestrator::models::OrchestratorTaskRow;
-use crate::orchestrator::review_diff::{
-    collect_review_diff_for_worktree, render_review_diff_text,
-};
+use crate::orchestrator::review_diff::{collect_review_diff_for_worktree, render_review_diff_text};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;

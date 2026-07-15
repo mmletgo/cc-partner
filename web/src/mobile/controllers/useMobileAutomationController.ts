@@ -1083,6 +1083,8 @@ export function useMobileAutomationController({
   useEffect(() => {
     const projectId = project?.id ?? null;
     if (!selectedTask || !projectId) {
+      // 离开任务时清空 inspection-only review 状态。
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset on selection change
       setReviewDiffState('idle');
       setReviewDiff(null);
       setReviewDiffError(null);

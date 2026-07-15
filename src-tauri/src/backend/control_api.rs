@@ -23,8 +23,6 @@ use crate::backup::{
 use crate::commands::orchestrator::{
     get_orchestrator_runtime_snapshot_for_state_with_request_id, OrchestratorRuntimeSnapshotDto,
 };
-use crate::orchestrator::models::OperationalNotificationSnapshot;
-use crate::orchestrator::notifications::capture_operational_notification_snapshot;
 use crate::commands::transfer::prepare_transfer_open_for_state;
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateResponse, OrchestratorRuntimeSummary, RuntimeConfigPatch,
@@ -38,6 +36,8 @@ use crate::models::transfer::{
 use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
+use crate::orchestrator::models::OperationalNotificationSnapshot;
+use crate::orchestrator::notifications::capture_operational_notification_snapshot;
 use crate::state::AppState;
 use crate::storage::RecoveryJobRow;
 use crate::transfer::sender;
@@ -374,10 +374,8 @@ async fn load_launch_sessions(
     }
     // 一次加载项目表建映射；项目数量通常远小于会话 N+1 查询代价。
     let projects = state.workbench_project_repo.list().await?;
-    let name_by_id: HashMap<String, String> = projects
-        .into_iter()
-        .map(|p| (p.id, p.name))
-        .collect();
+    let name_by_id: HashMap<String, String> =
+        projects.into_iter().map(|p| (p.id, p.name)).collect();
     Ok(sessions
         .into_iter()
         .map(|s| {
@@ -423,10 +421,8 @@ async fn load_launch_tasks(state: &AppState) -> Result<Vec<WorkbenchLaunchTaskDt
         return Ok(Vec::new());
     }
     let projects = state.workbench_project_repo.list().await?;
-    let name_by_id: HashMap<String, String> = projects
-        .into_iter()
-        .map(|p| (p.id, p.name))
-        .collect();
+    let name_by_id: HashMap<String, String> =
+        projects.into_iter().map(|p| (p.id, p.name)).collect();
     Ok(tasks
         .into_iter()
         .map(|t| WorkbenchLaunchTaskDto {

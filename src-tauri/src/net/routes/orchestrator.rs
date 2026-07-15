@@ -682,9 +682,7 @@ pub async fn mobile_get_review_diff(
     }
     let diff = get_orchestrator_review_diff_for_state(&state, project_id, task_id)
         .await
-        .map_err(|e| {
-            P2pError::from_app_error(e, &ctx, "orchestrator.mobile.tasks.review_diff")
-        })?;
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.mobile.tasks.review_diff"))?;
     Ok(Json(RemoteOrchestratorReviewDiffResp { diff }))
 }
 
@@ -729,14 +727,11 @@ pub async fn validate_workflow_document_route(
         .workbench_project_repo
         .get(project_id)
         .await
-        .map_err(|e| {
-            P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.validate")
-        })?
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.validate"))?
         .ok_or_else(|| P2pError::not_found("工作台项目不存在", &ctx))?;
-    let document = validate_local_owner_workflow_document(&project, &req.content)
-        .map_err(|e| {
-            P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.validate")
-        })?;
+    let document = validate_local_owner_workflow_document(&project, &req.content).map_err(|e| {
+        P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.validate")
+    })?;
     Ok(Json(RemoteWorkflowDocumentResp { document }))
 }
 
@@ -762,10 +757,10 @@ pub async fn save_workflow_document_route(
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.save"))?
         .ok_or_else(|| P2pError::not_found("工作台项目不存在", &ctx))?;
-    let document =
-        save_local_owner_workflow_document(&project, &req.expected_hash, &req.content).map_err(
-            |e| P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.save"),
-        )?;
+    let document = save_local_owner_workflow_document(&project, &req.expected_hash, &req.content)
+        .map_err(|e| {
+        P2pError::from_app_error(e, &ctx, "orchestrator.workflow_document.save")
+    })?;
     Ok(Json(RemoteWorkflowDocumentResp { document }))
 }
 
@@ -1979,9 +1974,7 @@ mod tests {
     ///     断言 server_protocol_info 宣告 token，并引用 get_review_diff / mobile_get_review_diff handler 指针。
     #[test]
     fn review_diff_capability_and_route_ship_together() {
-        use crate::net::protocol::{
-            server_protocol_info, CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1,
-        };
+        use crate::net::protocol::{server_protocol_info, CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1};
 
         let info = server_protocol_info();
         assert!(
@@ -1990,17 +1983,9 @@ mod tests {
             info.capabilities
         );
         let owner_handler = get_review_diff
-            as fn(
-                State<AppState>,
-                Extension<P2pRequestContext>,
-                Json<RemoteTaskReq>,
-            ) -> _;
+            as fn(State<AppState>, Extension<P2pRequestContext>, Json<RemoteTaskReq>) -> _;
         let mobile_handler = mobile_get_review_diff
-            as fn(
-                State<AppState>,
-                Extension<P2pRequestContext>,
-                Json<MobileReviewDiffReq>,
-            ) -> _;
+            as fn(State<AppState>, Extension<P2pRequestContext>, Json<MobileReviewDiffReq>) -> _;
         assert_ne!(owner_handler as usize, 0);
         assert_ne!(mobile_handler as usize, 0);
     }
@@ -2120,7 +2105,6 @@ mod tests {
             .expect_err("remote shortcut must be rejected");
         assert_eq!(error.to_string(), "远端 Orchestrator 只接受对端本机项目");
     }
-
 
     /// Business Logic（为什么需要这个测试）:
     ///     mobile list/create 必须把入站 request_id 传给 request-id-aware helpers，

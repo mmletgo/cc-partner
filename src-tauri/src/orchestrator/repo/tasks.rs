@@ -99,7 +99,10 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     单 SQL：status ∈ running/preparing/verifying/delivering/blocked 或
     ///     workflow_state=humanReview，按 updated_at DESC LIMIT；limit 裁剪到 0..=5。
-    pub async fn list_launch_tasks(&self, limit: i64) -> Result<Vec<OrchestratorTaskRow>, AppError> {
+    pub async fn list_launch_tasks(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<OrchestratorTaskRow>, AppError> {
         let limit = limit.clamp(0, 5);
         if limit == 0 {
             return Ok(Vec::new());
@@ -880,7 +883,8 @@ impl OrchestratorRepo {
             .bind(OrchestratorTaskStatus::Delivering.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         self.get_task(task_id).await
     }
 
@@ -913,7 +917,8 @@ impl OrchestratorRepo {
             .bind(OrchestratorTaskStatus::Delivering.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         self.get_task(task_id).await
     }
 
@@ -946,7 +951,8 @@ impl OrchestratorRepo {
             .bind(OrchestratorTaskStatus::Verifying.as_str())
             .execute(&self.pool)
             .await
-        }).await?;
+        })
+        .await?;
         self.get_task(task_id).await
     }
 

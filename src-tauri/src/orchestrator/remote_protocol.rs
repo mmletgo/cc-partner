@@ -519,7 +519,8 @@ mod tests {
             task_id: "task-2".to_string(),
             expected_review_digest: None,
         };
-        let value = serde_json::to_value(without_digest).expect("serialize deliver req without digest");
+        let value =
+            serde_json::to_value(without_digest).expect("serialize deliver req without digest");
         assert_eq!(value["taskId"], "task-2");
         assert!(value.get("expectedReviewDigest").is_none());
 

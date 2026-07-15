@@ -63,6 +63,42 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
       invoke: async (cmd: string) => {
         if (cmd === 'plugin:event|listen') return 1;
         if (cmd === 'plugin:event|unlisten') return undefined;
+        if (cmd === 'get_lan_disclosure_status') {
+          return {
+            required: false,
+            version: 1,
+            localAddresses: ['192.168.1.10'],
+            preferredPort: 62116,
+            mdnsPort: 5353,
+            alreadyRunning: false,
+            actualHttpPort: 62116,
+          };
+        }
+        if (cmd === 'get_operational_notification_snapshot') {
+          return {
+            asOfCursor: { ownerInstanceId: 'owner-shot', sequence: 0 },
+            items: [],
+            truncated: false,
+          };
+        }
+        if (
+          cmd === 'get_orchestrator_config' ||
+          cmd === 'get_default_orchestrator_config'
+        ) {
+          return {
+            enabled: false,
+            maxConcurrentTasks: 1,
+            verificationCommands: [],
+            autoCommit: false,
+            autoPushTaskBranch: false,
+            autoMergeToMain: false,
+            autoPushMain: false,
+            notifyHumanReview: true,
+            notifyBlocked: true,
+            notifyRemoteOutboxFailed: true,
+            notifyTaskDone: false,
+          };
+        }
         if (cmd === 'get_region_snapshot') {
           window.__snapshotInvokeState = {
             toolbarVisible: isVisible(document.querySelector('[role="toolbar"]')),

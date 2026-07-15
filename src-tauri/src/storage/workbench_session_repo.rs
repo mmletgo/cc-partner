@@ -88,7 +88,10 @@ impl WorkbenchSessionRepo {
     ///
     /// Code Logic（这个函数做什么）:
     ///     单 SQL：`status = 'running' ORDER BY started_at DESC LIMIT ?`；limit 裁剪到 0..=5。
-    pub async fn list_recent_active(&self, limit: i64) -> Result<Vec<WorkbenchSessionRow>, AppError> {
+    pub async fn list_recent_active(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<WorkbenchSessionRow>, AppError> {
         let limit = limit.clamp(0, 5);
         if limit == 0 {
             return Ok(Vec::new());

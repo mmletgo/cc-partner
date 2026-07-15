@@ -2150,8 +2150,7 @@ fn get_orchestrator_review_diff_is_registered_in_generate_handler() {
         "get_orchestrator_review_diff"
     );
     // 引用命令函数与 lib.rs 源码中的 generate_handler 字面量，防止未注册。
-    let cmd = crate::commands::orchestrator::get_orchestrator_review_diff
-        as *const ();
+    let cmd = crate::commands::orchestrator::get_orchestrator_review_diff as *const ();
     assert!(!cmd.is_null());
     let lib_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
     assert!(
@@ -2249,10 +2248,7 @@ async fn review_diff_changed_blocks_local_deliver_after_worktree_mutation() {
     fs::write(dir.path().join("feature.rs"), "fn a() {}\n").expect("write feature");
     let snapshot_a = collect_review_diff_for_worktree("task-digest", dir.path(), None)
         .expect("collect digest A");
-    assert!(
-        !snapshot_a.review_digest.is_empty(),
-        "digest A 不应为空"
-    );
+    assert!(!snapshot_a.review_digest.is_empty(), "digest A 不应为空");
 
     fs::write(dir.path().join("feature.rs"), "fn a() { /* mutated */ }\n").expect("mutate");
 
@@ -2277,7 +2273,10 @@ async fn review_diff_changed_blocks_local_deliver_after_worktree_mutation() {
     .expect("matching digest must pass");
 
     let missing = require_expected_review_digest(None).expect_err("digest required");
-    assert_eq!(missing.classify(), crate::error::AppErrorCategory::Validation);
+    assert_eq!(
+        missing.classify(),
+        crate::error::AppErrorCategory::Validation
+    );
     let blank = require_expected_review_digest(Some("  ")).expect_err("blank digest");
     assert_eq!(blank.classify(), crate::error::AppErrorCategory::Validation);
 }
@@ -2325,9 +2324,7 @@ async fn review_diff_changed_leaves_task_in_human_review_without_delivery_side_e
     assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
     let evidence = repo.list_evidence(&task.id).await.expect("list evidence");
     assert!(
-        evidence
-            .iter()
-            .all(|item| item.kind != "delivery"),
+        evidence.iter().all(|item| item.kind != "delivery"),
         "digest 冲突后不得写入 delivery evidence"
     );
 }
@@ -2396,13 +2393,12 @@ fn local_owner_workflow_document_helpers_round_trip_without_dispatch() {
     let validated = validate_local_owner_workflow_document(&project, &template).expect("validate");
     assert_eq!(validated.status, WorkflowDocumentStatus::Valid);
 
-    let saved =
-        save_local_owner_workflow_document(&project, "", &template).expect("create save");
+    let saved = save_local_owner_workflow_document(&project, "", &template).expect("create save");
     assert_eq!(saved.status, WorkflowDocumentStatus::Valid);
     let hash = saved.content_hash.clone().expect("hash");
 
-    let conflict = save_local_owner_workflow_document(&project, "bad", &template)
-        .expect_err("hash conflict");
+    let conflict =
+        save_local_owner_workflow_document(&project, "bad", &template).expect_err("hash conflict");
     assert_eq!(conflict.code(), WORKFLOW_DOCUMENT_CHANGED_CODE);
 
     let updated = template.replace("300000", "120000");

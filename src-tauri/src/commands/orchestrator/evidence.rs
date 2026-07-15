@@ -81,6 +81,7 @@ pub(crate) fn ensure_review_digest_matches(
 ///
 /// Code Logic（这个函数做什么）:
 ///     要求非空 expected digest，调用 `collect_review_diff_for_worktree`，再与 expected 比较。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn enforce_deliver_review_digest_for_worktree(
     task_id: &str,
     worktree_path: &Path,
@@ -121,9 +122,14 @@ pub(crate) async fn collect_local_orchestrator_review_diff(
     task: &OrchestratorTaskRow,
 ) -> Result<OrchestratorReviewDiff, AppError> {
     ensure_review_diff_available(task)?;
-    let worktree_id = task.worktree_id.as_deref().filter(|id| !id.trim().is_empty());
+    let worktree_id = task
+        .worktree_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty());
     let Some(worktree_id) = worktree_id else {
-        return Err(AppError::validation("任务缺少 worktree，无法采集 review diff"));
+        return Err(AppError::validation(
+            "任务缺少 worktree，无法采集 review diff",
+        ));
     };
     let worktree = state
         .workbench_worktree_repo
@@ -152,12 +158,9 @@ pub(crate) async fn get_orchestrator_review_diff_for_state(
     if project.kind == "remote" {
         return get_remote_orchestrator_review_diff(state, &project, task_id).await;
     }
-    let task = get_local_project_task_for_action(
-        state.orchestrator_repo.as_ref(),
-        project_id,
-        task_id,
-    )
-    .await?;
+    let task =
+        get_local_project_task_for_action(state.orchestrator_repo.as_ref(), project_id, task_id)
+            .await?;
     collect_local_orchestrator_review_diff(state, &task).await
 }
 
@@ -197,9 +200,7 @@ pub(crate) async fn get_local_owner_orchestrator_review_diff(
     let task = state.orchestrator_repo.get_task(task_id).await?;
     let project = get_orchestrator_workbench_project(state, &task.project_id).await?;
     if project.kind != "local" {
-        return Err(AppError::validation(
-            "远端 Orchestrator 只接受对端本机项目",
-        ));
+        return Err(AppError::validation("远端 Orchestrator 只接受对端本机项目"));
     }
     collect_local_orchestrator_review_diff(state, &task).await
 }

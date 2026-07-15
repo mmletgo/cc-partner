@@ -2,7 +2,6 @@ import type { ReactElement } from 'react';
 import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 import { orchestratorEvidenceKindTone } from '@/lib/orchestrator';
-import type { ReviewDiffFile } from '@/lib/types';
 import {
   formatAutomationTimestamp,
   mobileAutomationEvidenceKindLabelKey,
@@ -44,11 +43,6 @@ export function MobileAutomationTaskDetail({
 }: MobileAutomationTaskDetailProps): ReactElement | null {
   const { t } = useTranslation(['workbench', 'orchestrator']);
   const patchRegionId = useId();
-
-  const selectedFile: ReviewDiffFile | null =
-    reviewDiff && selectedReviewFilePath
-      ? (reviewDiff.files.find((file) => file.path === selectedReviewFilePath) ?? null)
-      : null;
 
   if (!selectedTask) {
     return null;

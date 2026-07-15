@@ -591,11 +591,10 @@ mod tests {
             .get_property_val_str(TXT_KEY_CAPS)
             .expect("caps TXT must be present");
         // value 必须是裸 token 列表，不能自带 `caps=` 前缀（否则对端读到 `caps=caps=...`）。
-        // encode_mdns_capabilities 按字典序排序去重，与 server_protocol_info() 当前全部能力一致。
-        assert_eq!(
-            caps,
-            "attention.v1,cc-history.paged-sync.v1,errors.envelope.v1,orchestrator.runtime-snapshot.v1,sync.manifest.v2,transfer.complete.v1,transfer.resume.v1,workbench.mutation-outcome.v1"
-        );
+        // encode_mdns_capabilities 按字典序排序去重，受 MAX_CAPS_TXT_BYTES 截断；与 advertise 同源。
+        let expected =
+            encode_mdns_capabilities(&server_protocol_info().capabilities, MAX_CAPS_TXT_BYTES);
+        assert_eq!(caps, expected);
         assert!(
             !caps.starts_with("caps="),
             "caps value must NOT carry the `caps=` prefix (it is provided by the TXT key); got: {caps}"

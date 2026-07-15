@@ -92,14 +92,16 @@ pub(crate) use common::{
     ensure_reviewed_delivery_allowed, get_orchestrator_runtime_snapshot_for_project,
     run_delivery_for_task,
 };
+pub use common::{
+    CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+};
+// 部分符号仅 tests / 兄弟路由使用；lib 非 test 编译会报 unused_imports。
+#[allow(unused_imports)]
 pub(crate) use evidence::{
     enforce_deliver_review_digest, enforce_deliver_review_digest_for_worktree,
     ensure_review_diff_available, get_local_owner_orchestrator_review_diff,
     get_orchestrator_review_diff_for_state, require_expected_review_digest,
     REVIEW_DIFF_CHANGED_CODE, REVIEW_DIFF_UNAVAILABLE_CODE,
-};
-pub use common::{
-    CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 pub(crate) use runtime::create_orchestrator_task_view_for_http_with_request_id;
 pub(crate) use tasks::{

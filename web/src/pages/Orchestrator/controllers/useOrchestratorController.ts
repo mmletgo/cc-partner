@@ -714,6 +714,8 @@ export function useOrchestratorController(
    */
   useEffect(() => {
     if (taskLoadDecision.kind !== 'load' || !selectedTask) {
+      // 离开选中任务时同步清空 review 状态；否则旧 diff 会泄漏到下一任务。
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset on selection change
       setReviewDiffState('idle');
       setReviewDiff(null);
       setReviewDiffError(null);

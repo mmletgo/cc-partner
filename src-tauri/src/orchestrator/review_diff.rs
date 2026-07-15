@@ -167,11 +167,7 @@ fn resolve_base_and_head(
     }
 
     if head == UNBORN_HEAD {
-        return Ok((
-            EMPTY_TREE_OID.to_string(),
-            head,
-            EMPTY_TREE_OID.to_string(),
-        ));
+        return Ok((EMPTY_TREE_OID.to_string(), head, EMPTY_TREE_OID.to_string()));
     }
 
     // 无显式 base 时用 HEAD：与历史 verifier 的 dirty worktree 语义对齐（staged+unstaged）。
@@ -217,7 +213,13 @@ fn collect_file_identities(
     // 补充 numstat 增删与 binary 标记（tracked）。
     let numstat = run_git_capture(
         cwd,
-        &["diff", "--numstat", "--no-ext-diff", "--no-renames", base_tree],
+        &[
+            "diff",
+            "--numstat",
+            "--no-ext-diff",
+            "--no-renames",
+            base_tree,
+        ],
     )?;
     apply_numstat(&numstat, &mut by_path);
 
@@ -289,8 +291,7 @@ fn parse_raw_diff_into(
         } else {
             new_mode.to_string()
         };
-        let (binary, new_content_hash) =
-            content_hash_for_path(cwd, &path, status == "deleted")?;
+        let (binary, new_content_hash) = content_hash_for_path(cwd, &path, status == "deleted")?;
         // 对 deleted/modified 优先使用 raw 的 old oid；若全 0 再尝试 base:path
         let old_blob_oid = if old_oid.chars().all(|c| c == '0') {
             lookup_blob_oid(cwd, base_tree, &path).unwrap_or_else(|| old_oid.to_string())
@@ -323,9 +324,8 @@ fn parse_raw_diff_into(
 ///     读取 untracked 文件元数据与 streaming content hash，status 固定为 untracked。
 fn identity_for_untracked(cwd: &Path, path: &str) -> Result<ReviewFileIdentity, AppError> {
     let abs = cwd.join(path);
-    let metadata = fs::symlink_metadata(&abs).map_err(|err| {
-        AppError::generic(format!("读取未跟踪文件元数据失败: {path}: {err}"))
-    })?;
+    let metadata = fs::symlink_metadata(&abs)
+        .map_err(|err| AppError::generic(format!("读取未跟踪文件元数据失败: {path}: {err}")))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Ok(ReviewFileIdentity {
             path: path.to_string(),
@@ -548,9 +548,8 @@ fn content_hash_for_path(
     if !abs.exists() {
         return Ok((false, sha256_hex_of_bytes(b"")));
     }
-    let metadata = fs::symlink_metadata(&abs).map_err(|err| {
-        AppError::generic(format!("读取文件元数据失败: {path}: {err}"))
-    })?;
+    let metadata = fs::symlink_metadata(&abs)
+        .map_err(|err| AppError::generic(format!("读取文件元数据失败: {path}: {err}")))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Ok((true, sha256_hex_of_bytes(b"")));
     }
@@ -633,9 +632,9 @@ fn file_mode_octal(metadata: &std::fs::Metadata) -> String {
         use std::os::unix::fs::PermissionsExt;
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o100 != 0 {
-            return format!("100755");
+            return "100755".to_string();
         }
-        return format!("100644");
+        "100644".to_string()
     }
     #[cfg(not(unix))]
     {

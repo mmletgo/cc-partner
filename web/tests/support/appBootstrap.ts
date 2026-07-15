@@ -174,6 +174,10 @@ export const SETTINGS_FIXTURES = {
     autoPushTaskBranch: false,
     autoMergeToMain: false,
     autoPushMain: false,
+    notifyHumanReview: true,
+    notifyBlocked: true,
+    notifyRemoteOutboxFailed: true,
+    notifyTaskDone: false,
   },
   version: { version: '0.0.0-test', buildDate: '2026-07-14' },
 } as const;
@@ -346,6 +350,23 @@ export function registerAppShellCommands(
       reusedExisting: false,
       version: 1,
     },
+  });
+  // App 级 OperationalNotificationCoordinator 冷启动 baseline + 偏好（无业务副作用）
+  harness.command('get_operational_notification_snapshot', {
+    kind: 'resolve',
+    value: {
+      asOfCursor: { ownerInstanceId: 'owner-shell', sequence: 0 },
+      items: [],
+      truncated: false,
+    },
+  });
+  harness.command('get_orchestrator_config', {
+    kind: 'resolve',
+    value: SETTINGS_FIXTURES.automation,
+  });
+  harness.command('get_default_orchestrator_config', {
+    kind: 'resolve',
+    value: SETTINGS_FIXTURES.automation,
   });
 
   if (notificationGranted) {

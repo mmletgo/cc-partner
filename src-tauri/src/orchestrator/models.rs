@@ -562,9 +562,7 @@ impl OperationalNotificationKind {
             "blocked" => Ok(Self::Blocked),
             "remoteOutboxFailed" => Ok(Self::RemoteOutboxFailed),
             "taskDone" => Ok(Self::TaskDone),
-            other => Err(AppError::generic(format!(
-                "未知运营通知 kind: {other}"
-            ))),
+            other => Err(AppError::generic(format!("未知运营通知 kind: {other}"))),
         }
     }
 }

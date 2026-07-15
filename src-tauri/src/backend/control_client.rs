@@ -15,7 +15,6 @@ use crate::backend::control::{self, BackendControlFile};
 use crate::backend::control_api::WorkbenchLaunchSummaryDto;
 use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
 use crate::commands::orchestrator::OrchestratorRuntimeSnapshotDto;
-use crate::orchestrator::models::OperationalNotificationSnapshot;
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateRequest, ConfigUpdateResponse, RuntimeConfigPatch,
     RuntimeOwnerStatus,
@@ -27,6 +26,7 @@ use crate::hotkey::{
 use crate::models::transfer::{
     LocalTransferOpenTarget, TransferOpenAction, TransferOperationStatus, TransferTaskDto,
 };
+use crate::orchestrator::models::OperationalNotificationSnapshot;
 use crate::workbench::operation_ledger::MutationTransportClass;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

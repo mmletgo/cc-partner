@@ -26,10 +26,10 @@ use crate::orchestrator::models::{
 use crate::orchestrator::remote_protocol::{
     RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq,
     RemoteDeliverReviewedReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
-    RemoteOrchestratorEvidenceResp, RemoteOrchestratorReviewDiffResp,
-    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
-    RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq,
-    RemoteWorkflowDocumentResp, RemoteWorkflowDocumentSaveReq, RemoteWorkflowDocumentValidateReq,
+    RemoteOrchestratorEvidenceResp, RemoteOrchestratorProjectRefreshResp,
+    RemoteOrchestratorReviewDiffResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
+    RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp,
+    RemoteWorkflowDocumentSaveReq, RemoteWorkflowDocumentValidateReq,
 };
 use crate::orchestrator::workflow::WorkflowDocument;
 use serde::{de::DeserializeOwned, Serialize};
@@ -1625,7 +1625,11 @@ mod tests {
             matches!(err, PeerCallError::Unsupported { capability, .. } if capability == CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1),
             "expected Unsupported for review-diff capability, got {err:?}"
         );
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "capability gate 不得调用目标路由");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "capability gate 不得调用目标路由"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1687,7 +1691,11 @@ mod tests {
             matches!(err, PeerCallError::Unsupported { capability, .. } if capability == CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1),
             "expected Unsupported for workflow-document capability, got {err:?}"
         );
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "capability gate 不得调用目标路由");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "capability gate 不得调用目标路由"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
