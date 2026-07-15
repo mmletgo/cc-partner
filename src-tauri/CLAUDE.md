@@ -53,7 +53,7 @@ src/
 ├── storage/health_repo.rs — activity_records/water_records/rest_records 读写 + 聚合；所有 INSERT/UPDATE/DELETE 经 `with_shared_write_lease`；`new`/`with_gate` [已实现 + gate]
 ├── storage/claude_md_repo.rs / transfer_repo.rs / workbench_*_repo.rs — 单语句写均经 `with_shared_write_lease`；生产 `with_gate(pool, AppState.maintenance_gate)` [gate]
 ├── sync/              — 向量时钟 + LWW 合并 + engine + protocol/apply_merge + mixed_version harness [M4/N2]
-├── net/               — mdns-sd 发现 + axum server + reqwest client [已实现 M3]
+├── net/               — mdns-sd 发现 + axum server + reqwest client（`peer_timeout` 超时分类，`peer_client` no-growth） [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
 ├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、claim 有界候选/cursor（`claim.rs`）、scheduler、Workbench 可见 Runner、Prompt 生成、验证与交付 [已实现]
 ├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator + orchestrator/workbench dependency source；Tauri `list_attention_items` 与 Mobile `GET /api/mobile/attention` 共享 helper；能力 token `attention.v1` [已实现]
