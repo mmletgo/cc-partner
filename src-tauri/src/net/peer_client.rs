@@ -523,7 +523,8 @@ impl PeerClient {
         T: serde::de::DeserializeOwned,
         B: serde::Serialize + ?Sized,
     {
-        self.request_post_with_timeout(url, body, class.timeout()).await
+        self.request_post_with_timeout(url, body, class.timeout())
+            .await
     }
 
     /// 共享 POST helper（显式超时预算）。
@@ -632,7 +633,9 @@ impl PeerClient {
     ) -> Result<Vec<crate::models::prompt::PromptRow>, PeerCallError> {
         let url = format!("{base_url}/api/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        let data: SyncPullResp = self.request_post(&url, &body, PeerTimeoutClass::Metadata).await?;
+        let data: SyncPullResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Metadata)
+            .await?;
         crate::backend::logging::OperationLog::new(
             "p2p",
             "sync_pull",
@@ -686,7 +689,9 @@ impl PeerClient {
     ) -> Result<bool, PeerCallError> {
         let url = format!("{base_url}/api/sync/push");
         let body = serde_json::json!({ "prompts": prompts });
-        let data: SyncPushResp = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let data: SyncPushResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         crate::backend::logging::OperationLog::new(
             "p2p",
             "sync_push",
@@ -713,9 +718,12 @@ impl PeerClient {
     ) -> Result<bool, crate::error::AppError> {
         let url = format!("{base_url}/api/sync/claude_md/push");
         let body = serde_json::json!({ "claude_md": row });
-        let resp: ClaudeMdPushResp = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await.map_err(|e| {
-            crate::net::peer_error::peer_call_error_to_app_error(e, "远端 CLAUDE.md")
-        })?;
+        let resp: ClaudeMdPushResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await
+            .map_err(|e| {
+                crate::net::peer_error::peer_call_error_to_app_error(e, "远端 CLAUDE.md")
+            })?;
         Ok(resp.accepted)
     }
 
@@ -1145,7 +1153,10 @@ impl PeerClient {
         let mut saw_retryable_soft_false = false;
 
         for attempt in 1..=policy.max_attempts {
-            match self.request_post::<ChunkResp, _>(&url, &body, PeerTimeoutClass::Mutation).await {
+            match self
+                .request_post::<ChunkResp, _>(&url, &body, PeerTimeoutClass::Mutation)
+                .await
+            {
                 Ok(resp) if resp.success => return Ok(true),
                 Ok(_resp) => {
                     // success=false：可能是尚未收齐、durable 晋升失败、或重启后内存 miss。
@@ -1230,7 +1241,8 @@ impl PeerClient {
         transfer_id: &str,
     ) -> Result<serde_json::Value, PeerCallError> {
         let url = format!("{base_url}/api/transfer/status/{transfer_id}");
-        self.request_get::<serde_json::Value>(&url, PeerTimeoutClass::Metadata).await
+        self.request_get::<serde_json::Value>(&url, PeerTimeoutClass::Metadata)
+            .await
     }
 
     /// Claude Code 历史同步 pull：向对端发送本端 cc 历史摘要，获取对端认为本端需要的 cc 历史。
@@ -1248,7 +1260,10 @@ impl PeerClient {
     ) -> Vec<crate::cc::models::ClaudeHistoryRow> {
         let url = format!("{base_url}/api/cc-history/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        match self.request_post::<CcSyncPullResp, _>(&url, &body, PeerTimeoutClass::Metadata).await {
+        match self
+            .request_post::<CcSyncPullResp, _>(&url, &body, PeerTimeoutClass::Metadata)
+            .await
+        {
             Ok(data) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -1288,7 +1303,10 @@ impl PeerClient {
     ) -> bool {
         let url = format!("{base_url}/api/cc-history/sync/push");
         let body = serde_json::json!({ "items": items });
-        match self.request_post::<CcSyncPushResp, _>(&url, &body, PeerTimeoutClass::Mutation).await {
+        match self
+            .request_post::<CcSyncPushResp, _>(&url, &body, PeerTimeoutClass::Mutation)
+            .await
+        {
             Ok(data) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -1335,7 +1353,11 @@ impl PeerClient {
             "limit": limit,
         });
         match self
-            .request_post::<crate::net::routes::cc_history::CcManifestPageResp, _>(&url, &body, PeerTimeoutClass::Metadata)
+            .request_post::<crate::net::routes::cc_history::CcManifestPageResp, _>(
+                &url,
+                &body,
+                PeerTimeoutClass::Metadata,
+            )
             .await
         {
             Ok(data) => {
@@ -1384,7 +1406,11 @@ impl PeerClient {
         let url = format!("{base_url}/api/cc-history/sync/items");
         let body = serde_json::json!({ "ids": ids });
         match self
-            .request_post::<crate::net::routes::cc_history::CcItemsResp, _>(&url, &body, PeerTimeoutClass::Metadata)
+            .request_post::<crate::net::routes::cc_history::CcItemsResp, _>(
+                &url,
+                &body,
+                PeerTimeoutClass::Metadata,
+            )
             .await
         {
             Ok(data) => {
@@ -1433,7 +1459,11 @@ impl PeerClient {
         let url = format!("{base_url}/api/cc-history/sync/push-batch");
         let body = serde_json::json!({ "items": items });
         match self
-            .request_post::<crate::net::routes::cc_history::CcPushBatchResp, _>(&url, &body, PeerTimeoutClass::Mutation)
+            .request_post::<crate::net::routes::cc_history::CcPushBatchResp, _>(
+                &url,
+                &body,
+                PeerTimeoutClass::Mutation,
+            )
             .await
         {
             Ok(data) => {
@@ -1475,7 +1505,10 @@ impl PeerClient {
     ) -> Vec<crate::models::ssh_target::SshTargetRow> {
         let url = format!("{base_url}/api/ssh-target/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        match self.request_post::<SshTargetPullResp, _>(&url, &body, PeerTimeoutClass::Metadata).await {
+        match self
+            .request_post::<SshTargetPullResp, _>(&url, &body, PeerTimeoutClass::Metadata)
+            .await
+        {
             Ok(data) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -1517,7 +1550,10 @@ impl PeerClient {
     ) -> bool {
         let url = format!("{base_url}/api/ssh-target/sync/push");
         let body = serde_json::json!({ "targets": targets });
-        match self.request_post::<SshTargetPushResp, _>(&url, &body, PeerTimeoutClass::Mutation).await {
+        match self
+            .request_post::<SshTargetPushResp, _>(&url, &body, PeerTimeoutClass::Mutation)
+            .await
+        {
             Ok(data) => {
                 crate::backend::logging::OperationLog::new(
                     "p2p",
@@ -1579,7 +1615,9 @@ impl PeerClient {
     ) -> Result<Vec<crate::models::ssh_target::SshTargetRow>, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/pull");
         let body = serde_json::json!({ "summaries": local_summary });
-        let data: SshTargetPullResp = self.request_post(&url, &body, PeerTimeoutClass::Metadata).await?;
+        let data: SshTargetPullResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Metadata)
+            .await?;
         Ok(data.targets)
     }
 
@@ -1594,7 +1632,9 @@ impl PeerClient {
     ) -> Result<bool, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/push");
         let body = serde_json::json!({ "targets": targets });
-        let _data: SshTargetPushResp = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let _data: SshTargetPushResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         Ok(true)
     }
 
@@ -1609,7 +1649,9 @@ impl PeerClient {
     ) -> Result<Vec<crate::models::scratchpad::ScratchpadRow>, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/pull");
         let body = serde_json::json!({ "summaries": summaries });
-        let data: ScratchpadPullResp = self.request_post(&url, &body, PeerTimeoutClass::Metadata).await?;
+        let data: ScratchpadPullResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Metadata)
+            .await?;
         Ok(data.pages)
     }
 
@@ -1624,7 +1666,9 @@ impl PeerClient {
     ) -> Result<bool, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/push");
         let body = serde_json::json!({ "pages": pages });
-        let _data: ScratchpadPushResp = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let _data: ScratchpadPushResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         Ok(true)
     }
 
@@ -1640,7 +1684,11 @@ impl PeerClient {
         let url = format!("{base_url}/api/sync/prompts/manifest-page");
         let body = serde_json::json!({ "cursor": cursor, "limit": null });
         match self
-            .request_post::<crate::sync::protocol::SyncManifestPage<String>, _>(&url, &body, PeerTimeoutClass::Metadata)
+            .request_post::<crate::sync::protocol::SyncManifestPage<String>, _>(
+                &url,
+                &body,
+                PeerTimeoutClass::Metadata,
+            )
             .await
         {
             Ok(data) => Ok(data),
@@ -1670,7 +1718,8 @@ impl PeerClient {
     ) -> Result<crate::net::routes::sync::PromptItemsResp, PeerCallError> {
         let url = format!("{base_url}/api/sync/prompts/items");
         let body = serde_json::json!({ "ids": ids });
-        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata)
+            .await
     }
 
     /// Prompt v2：批量 push 正文。
@@ -1694,8 +1743,9 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let data: crate::net::routes::sync::PromptPushBatchResp =
-            self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let data: crate::net::routes::sync::PromptPushBatchResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
     }
@@ -1720,7 +1770,9 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let _: serde_json::Value = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let _: serde_json::Value = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         Ok(())
     }
 
@@ -1735,7 +1787,8 @@ impl PeerClient {
     ) -> Result<crate::sync::protocol::SyncManifestPage<String>, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/manifest-page");
         let body = serde_json::json!({ "cursor": cursor, "limit": null });
-        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata)
+            .await
     }
 
     /// SSH v2：按 host 批取正文。
@@ -1749,7 +1802,8 @@ impl PeerClient {
     ) -> Result<crate::net::routes::ssh_target_sync::SshItemsResp, PeerCallError> {
         let url = format!("{base_url}/api/ssh-target/sync/items");
         let body = serde_json::json!({ "ids": ids });
-        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata)
+            .await
     }
 
     /// SSH v2：批量 push。
@@ -1772,8 +1826,9 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let data: crate::net::routes::ssh_target_sync::SshPushBatchResp =
-            self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let data: crate::net::routes::ssh_target_sync::SshPushBatchResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
     }
@@ -1797,7 +1852,9 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let _: serde_json::Value = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let _: serde_json::Value = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         Ok(())
     }
 
@@ -1812,7 +1869,8 @@ impl PeerClient {
     ) -> Result<crate::sync::protocol::SyncManifestPage<String>, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/manifest-page");
         let body = serde_json::json!({ "cursor": cursor, "limit": null });
-        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata)
+            .await
     }
 
     /// Scratchpad v2：按 id 批取正文。
@@ -1826,7 +1884,8 @@ impl PeerClient {
     ) -> Result<crate::net::routes::scratchpad_sync::ScratchpadItemsResp, PeerCallError> {
         let url = format!("{base_url}/api/scratchpad/sync/items");
         let body = serde_json::json!({ "ids": ids });
-        self.request_post(&url, &body, PeerTimeoutClass::Metadata).await
+        self.request_post(&url, &body, PeerTimeoutClass::Metadata)
+            .await
     }
 
     /// Scratchpad v2：批量 push。
@@ -1849,8 +1908,9 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let data: crate::net::routes::scratchpad_sync::ScratchpadPushBatchResp =
-            self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let data: crate::net::routes::scratchpad_sync::ScratchpadPushBatchResp = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         Self::ensure_accepted_not_exceeds(&url, data.accepted, items.len())?;
         Ok(data)
     }
@@ -1874,7 +1934,9 @@ impl PeerClient {
             "claimed_device_id": claimed_device_id,
             "acked_delete_epoch": acked_delete_epoch,
         });
-        let _: serde_json::Value = self.request_post(&url, &body, PeerTimeoutClass::Mutation).await?;
+        let _: serde_json::Value = self
+            .request_post(&url, &body, PeerTimeoutClass::Mutation)
+            .await?;
         Ok(())
     }
 }

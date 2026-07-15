@@ -27,10 +27,10 @@
 //! 临时文件命名 `.{transfer_id}.tmp` 与 Python 一致（断点续传识别）。
 //! 文件名冲突处理（file.txt → file (1).txt → file (2).txt）与 Python `_resolve_filename` 一致。
 
-mod validation;
 mod chunk_io;
-mod resume;
 mod finalize;
+mod resume;
+mod validation;
 
 // 子模块内部 helper 提升到本模块，供 handlers 与 tests（use super::*）使用。
 use chunk_io::*;

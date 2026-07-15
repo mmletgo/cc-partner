@@ -1418,10 +1418,9 @@ pub async fn control_orchestrator_deliver_reviewed(
     Json(request): Json<ControlOrchestratorDeliverReviewedRequest>,
 ) -> P2pResult<Json<OrchestratorTaskViewDto>> {
     authorize_control_request(peer, &context, &request.control_token)?;
-    state
-        .runtime_role
-        .require_owner()
-        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_deliver_reviewed"))?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_deliver_reviewed")
+    })?;
     let view = deliver_reviewed_orchestrator_task_view_for_state(
         &state,
         request.project_id.trim(),
@@ -1506,12 +1505,9 @@ pub async fn control_orchestrator_workflow_document_get(
     Json(request): Json<ControlWorkflowDocumentGetRequest>,
 ) -> P2pResult<Json<WorkflowDocument>> {
     authorize_control_request(peer, &context, &request.control_token)?;
-    state
-        .runtime_role
-        .require_owner()
-        .map_err(|e| {
-            P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_get")
-        })?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_get")
+    })?;
     let doc = get_workflow_document_for_state(&state, request.project_id.trim())
         .await
         .map_err(|e| {
@@ -1550,12 +1546,13 @@ pub async fn control_orchestrator_workflow_document_validate(
     Json(request): Json<ControlWorkflowDocumentValidateRequest>,
 ) -> P2pResult<Json<WorkflowDocument>> {
     authorize_control_request(peer, &context, &request.control_token)?;
-    state
-        .runtime_role
-        .require_owner()
-        .map_err(|e| {
-            P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_validate")
-        })?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(
+            e,
+            &context,
+            "control.orchestrator_workflow_document_validate",
+        )
+    })?;
     let doc =
         validate_workflow_document_for_state(&state, request.project_id.trim(), &request.content)
             .await
@@ -1600,12 +1597,9 @@ pub async fn control_orchestrator_workflow_document_save(
     Json(request): Json<ControlWorkflowDocumentSaveRequest>,
 ) -> P2pResult<Json<WorkflowDocument>> {
     authorize_control_request(peer, &context, &request.control_token)?;
-    state
-        .runtime_role
-        .require_owner()
-        .map_err(|e| {
-            P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_save")
-        })?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_workflow_document_save")
+    })?;
     let doc = save_workflow_document_for_state(
         &state,
         request.project_id.trim(),
@@ -1854,7 +1848,8 @@ mod tests {
     ///     反序列化 deliver / review-diff / workflow save 请求体并断言字段。
     #[test]
     fn orchestrator_control_request_bodies_deserialize_camel_case() {
-        let deliver_raw = r#"{"controlToken":"tok","projectId":"p1","taskId":"t1","expectedReviewDigest":"abc"}"#;
+        let deliver_raw =
+            r#"{"controlToken":"tok","projectId":"p1","taskId":"t1","expectedReviewDigest":"abc"}"#;
         let deliver: ControlOrchestratorDeliverReviewedRequest =
             serde_json::from_str(deliver_raw).expect("deliver body");
         assert_eq!(deliver.control_token, "tok");

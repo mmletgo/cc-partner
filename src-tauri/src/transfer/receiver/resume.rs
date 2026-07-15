@@ -4,13 +4,13 @@
 //!     收敛 complete/status/最后一块重放，禁止同 transfer_id 后缀重复。
 //! Code Logic: 只做 resume/terminal 回放与 recover 编排；place/commit 委托 finalize。
 
-use crate::error::AppError;
-use crate::models::transfer::{TransferDirection, TransferStatus, TransferTask};
-use crate::state::AppState;
 use super::{
     clear_finalize_intent, compute_sha256_nofollow, ensure_path_within_dir, finalize_intent_path,
     now_iso, promote_completed_to_durable, ChunkResp, FinalizeIntent, StatusResp,
 };
+use crate::error::AppError;
+use crate::models::transfer::{TransferDirection, TransferStatus, TransferTask};
+use crate::state::AppState;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -258,4 +258,3 @@ pub(super) fn status_str(s: TransferStatus) -> String {
     }
     .to_string()
 }
-

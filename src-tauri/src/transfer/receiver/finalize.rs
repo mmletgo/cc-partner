@@ -3,14 +3,14 @@
 //! Business Logic: place→history 崩溃窗口靠 intent 恢复；并发同名靠 no-replace place。
 //! Code Logic: durable intent 写清 + hard_link/rename_no_replace + certify + history 晋升。
 
-use crate::error::AppError;
-use chrono::Utc;
-use crate::models::transfer::{TransferDirection, TransferStatus, TransferTask};
-use crate::state::AppState;
 use super::{
     compute_sha256_nofollow, ensure_path_within_dir, normalize_path, open_regular_file_nofollow,
     open_regular_file_nofollow_std, resolve_filename, sanitize_receive_basename,
 };
+use crate::error::AppError;
+use crate::models::transfer::{TransferDirection, TransferStatus, TransferTask};
+use crate::state::AppState;
+use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -377,7 +377,10 @@ pub(super) async fn ensure_regular_intent_dir(receive_dir: &Path) -> Result<Path
 ///     先 remove 残留同名 tmp；create_new 打开后不丢弃句柄，write_all + flush + sync_all。
 ///     生产 intent 写入已改用目录句柄相对路径；本 helper 供单测验证 create_new 语义。
 #[allow(dead_code)]
-pub(super) async fn write_bytes_create_new_nofollow(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+pub(super) async fn write_bytes_create_new_nofollow(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), AppError> {
     let _ = tokio::fs::remove_file(path).await;
     let created = match std::fs::OpenOptions::new()
         .write(true)
@@ -1081,7 +1084,10 @@ pub(super) fn write_finalize_intent_windows_handle(
 /// Code Logic（这个函数做什么）:
 ///     Unix：receive_dir fd + openat intent 目录 + unlinkat；Windows：目录 HANDLE 相对 unlink；
 ///     其它平台：词法路径 remove（无 dirfd 原语时的降级，生产目标平台为 unix/windows）。
-pub(super) async fn clear_finalize_intent(receive_dir: &Path, transfer_id: &str) -> Result<(), AppError> {
+pub(super) async fn clear_finalize_intent(
+    receive_dir: &Path,
+    transfer_id: &str,
+) -> Result<(), AppError> {
     // 边界校验副作用（非法 id / 逃逸）。
     let _ = finalize_intent_path(receive_dir, transfer_id)?;
     let safe_id = sanitize_receive_basename(transfer_id, "transfer_id")?;
@@ -1122,7 +1128,10 @@ pub(super) async fn clear_finalize_intent(receive_dir: &Path, transfer_id: &str)
 
 /// Unix：相对 receive_dir / intent 目录 fd unlinkat 删除 intent。
 #[cfg(unix)]
-pub(super) fn clear_finalize_intent_unix_dirfd(receive_dir: &Path, intent_name: &str) -> Result<(), AppError> {
+pub(super) fn clear_finalize_intent_unix_dirfd(
+    receive_dir: &Path,
+    intent_name: &str,
+) -> Result<(), AppError> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -1456,7 +1465,10 @@ pub(super) fn clear_finalize_intent_windows_handle(
 }
 
 /// Code Logic: 拼 intent 文件路径并校验仍在 receive_dir 内。
-pub(super) fn finalize_intent_path(receive_dir: &Path, transfer_id: &str) -> Result<PathBuf, AppError> {
+pub(super) fn finalize_intent_path(
+    receive_dir: &Path,
+    transfer_id: &str,
+) -> Result<PathBuf, AppError> {
     let safe_id = sanitize_receive_basename(transfer_id, "transfer_id")?;
     let intent_dir = receive_dir.join(FINALIZE_INTENT_DIR);
     // intent 目录若是 symlink，canonicalize 会跟随逃逸；先 no-follow 拒绝。
@@ -2239,7 +2251,10 @@ pub(super) async fn rename_no_replace(tmp_path: &Path, final_path: &Path) -> std
 ///
 /// Code Logic（这个函数做什么）:
 ///     见 `rename_no_replace` 的平台分支；仅同步路径。
-pub(super) fn rename_no_replace_blocking(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+pub(super) fn rename_no_replace_blocking(
+    tmp_path: &Path,
+    final_path: &Path,
+) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         use std::ffi::CString;
@@ -2410,4 +2425,3 @@ pub(super) async fn on_receive_failed(state: &AppState, transfer_id: &str, error
         }),
     );
 }
-

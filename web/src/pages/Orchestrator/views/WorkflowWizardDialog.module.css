@@ -17,14 +17,14 @@
 
 .sectionTitle {
   margin: 0;
-  font-size: var(--font-size-lg);
+  font-size: var(--text-lg);
   color: var(--fg);
 }
 
 .sectionLead {
   margin: var(--space-1) 0 0;
   color: var(--fg-muted-readable);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
 }
 
 .statusRow {
@@ -42,7 +42,7 @@
 
 .field span {
   color: var(--fg-muted-readable);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
 }
 
 .textarea {
@@ -50,7 +50,7 @@
   min-height: 220px;
   resize: vertical;
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   line-height: 1.5;
   color: var(--fg);
   background: var(--surface);
@@ -93,7 +93,7 @@
 
 .diagnosticMeta {
   color: var(--fg-muted-readable);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-xs);
 }
 
 .previewBox {
@@ -106,7 +106,7 @@
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-xs);
   white-space: pre-wrap;
 }
 
@@ -118,7 +118,7 @@
   padding: 0;
   list-style: none;
   color: var(--fg);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
 }
 
 .actions {
@@ -131,11 +131,11 @@
 .alert {
   margin: 0;
   color: var(--danger);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
 }
 
 .notice {
   margin: 0;
   color: var(--fg-muted-readable);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
 }

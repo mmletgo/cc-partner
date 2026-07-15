@@ -850,11 +850,7 @@ impl BackendControlClient {
             task_id: task_id.to_string(),
         };
         match self
-            .send_once(
-                "orchestrator/review-diff",
-                &body,
-                Duration::from_secs(60),
-            )
+            .send_once("orchestrator/review-diff", &body, Duration::from_secs(60))
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),
@@ -904,7 +900,11 @@ impl BackendControlClient {
             content: content.to_string(),
         };
         match self
-            .send_once("orchestrator/workflow-document/validate", &body, MUTATE_TIMEOUT)
+            .send_once(
+                "orchestrator/workflow-document/validate",
+                &body,
+                MUTATE_TIMEOUT,
+            )
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),
