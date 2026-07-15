@@ -55,10 +55,11 @@ jobs:
       - name: Prove protected subject tag peels to subjectCommit
         id: check
         shell: bash
+        env:
+          TAG: ${{ inputs.subjectTag }}
+          EXPECTED: ${{ inputs.subjectCommit }}
         run: |
           set -euo pipefail
-          TAG='${{ inputs.subjectTag }}'
-          EXPECTED='${{ inputs.subjectCommit }}'
           if [[ ! "$EXPECTED" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo "subjectCommit must be 40-hex" >&2
             exit 1

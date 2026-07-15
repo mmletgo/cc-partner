@@ -81,16 +81,17 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # All dispatch inputs via env (never interpolate into bash source)
+          MODE: ${{ inputs.claimMode }}
+          PROFILE: ${{ inputs.claimProfile }}
+          SUBJECT: ${{ inputs.subjectCommit }}
+          EVIDENCE: ${{ inputs.expectedEvidenceCommit }}
+          BETA_TAG: ${{ inputs.betaTag }}
+          RC_RUN: ${{ inputs.rcRunId }}
+          SUBJECT_TAG: ${{ inputs.subjectTag }}
+          EVIDENCE_REF: ${{ inputs.evidenceRef }}
         run: |
           set -euo pipefail
-          MODE='${{ inputs.claimMode }}'
-          PROFILE='${{ inputs.claimProfile }}'
-          SUBJECT='${{ inputs.subjectCommit }}'
-          EVIDENCE='${{ inputs.expectedEvidenceCommit }}'
-          BETA_TAG='${{ inputs.betaTag }}'
-          RC_RUN='${{ inputs.rcRunId }}'
-          SUBJECT_TAG='${{ inputs.subjectTag }}'
-          EVIDENCE_REF='${{ inputs.evidenceRef }}'
 
           if [[ "$MODE" != "platform-beta" ]]; then
             echo "claimMode must be platform-beta" >&2
@@ -108,8 +109,20 @@ jobs:
             echo "expectedEvidenceCommit must be 40-hex" >&2
             exit 1
           fi
-          if [[ ! "$BETA_TAG" =~ ^v ]]; then
-            echo "betaTag should start with v (e.g. v0.6.7-beta.1)" >&2
+          if [[ ! "$BETA_TAG" =~ ^v[A-Za-z0-9._-]+$ ]]; then
+            echo "betaTag must match v[A-Za-z0-9._-]+" >&2
+            exit 1
+          fi
+          if [[ ! "$SUBJECT_TAG" =~ ^subject-[A-Za-z0-9._-]+$ ]]; then
+            echo "subjectTag must match subject-<name>" >&2
+            exit 1
+          fi
+          if [[ ! "$RC_RUN" =~ ^[0-9]+$ ]]; then
+            echo "rcRunId must be numeric" >&2
+            exit 1
+          fi
+          if [[ ! "$EVIDENCE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "evidenceRef has invalid characters" >&2
             exit 1
           fi
           if [[ "$BETA_TAG" == "$SUBJECT_TAG" ]]; then
@@ -340,9 +353,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC_RUN: ${{ inputs.rcRunId }}
         run: |
           set -euo pipefail
-          RC_RUN='${{ inputs.rcRunId }}'
           mkdir -p rc-download
           # Download inventory + production artifacts from the RC run
           gh run download "$RC_RUN" -n rc-macos-aarch64-inventory -D rc-download || {
@@ -467,10 +480,10 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BETA_TAG: ${{ inputs.betaTag }}
+          SUBJECT: ${{ inputs.subjectCommit }}
         run: |
           set -euo pipefail
-          BETA_TAG='${{ inputs.betaTag }}'
-          SUBJECT='${{ inputs.subjectCommit }}'
           # Point tag at subject commit (annotated optional); never force
           git tag "$BETA_TAG" "$SUBJECT"
           git push origin "refs/tags/${BETA_TAG}"
@@ -486,9 +499,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BETA_TAG: ${{ inputs.betaTag }}
         run: |
           set -euo pipefail
-          BETA_TAG='${{ inputs.betaTag }}'
           # Ensure we did not upload latest.json
           if gh release view "$BETA_TAG" --json assets -q '.assets[].name' | grep -qx 'latest.json'; then
             echo "latest.json must not be published on beta release" >&2

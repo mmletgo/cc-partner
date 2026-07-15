@@ -545,12 +545,11 @@ impl BackupRestoreService {
         Ok(())
     }
 
-    /// 列出 recovery jobs（先回收卡住的 Applying）。
+    /// 列出 recovery jobs（不在列表路径回收）。
     ///
-    /// Business Logic: 列表不得把崩溃中断的 Applying 展示为可静默成功的进行中态。
-    /// Code Logic: reclaim_stuck_applying_jobs → list_recent。
+    /// Business Logic: 列表查询与正在 Applying 的恢复并发时不得把活任务误判为崩溃残留。
+    /// Code Logic: 仅 `list_recent`；残留回收只在 `reclaim_on_startup`。
     pub async fn list_jobs(&self, limit: i64) -> Result<Vec<RecoveryJobRow>, AppError> {
-        let _ = self.reclaim_stuck_applying_jobs().await;
         self.job_repo.list_recent(limit).await
     }
 
