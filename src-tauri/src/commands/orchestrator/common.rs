@@ -1345,6 +1345,15 @@ pub(crate) async fn block_task_with_reason(
         .orchestrator_repo
         .block_task_if_verifying(task_id, reason)
         .await?;
+    if task.status == OrchestratorTaskStatus::Blocked
+        && task.blocked_reason.as_deref() == Some(reason)
+    {
+        crate::orchestrator::notifications::emit_task_operational_notification(
+            state,
+            crate::orchestrator::models::OperationalNotificationKind::Blocked,
+            &task,
+        );
+    }
     Ok(OrchestratorTaskDto::from(task))
 }
 
@@ -1480,6 +1489,11 @@ pub(crate) async fn block_task_with_delivery_error(
                 &reason,
             )
             .await?;
+        crate::orchestrator::notifications::emit_task_operational_notification(
+            state,
+            crate::orchestrator::models::OperationalNotificationKind::Blocked,
+            &task,
+        );
     }
     Ok(OrchestratorTaskDto::from(task))
 }
@@ -1502,18 +1516,56 @@ pub(crate) async fn mark_active_running_attempt_completed(
 
 /// Business Logic（为什么需要这个函数）:
 ///     验证完成后命令层需要运行自动交付，并对未预期错误做最终兜底。
+///     人工复核交付若在 commit 边界检测到 review digest 漂移，必须回退 Human Review 并向上抛 Conflict，
+///     不能折叠成 Blocked，否则前端无法强制重新审阅。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造 AppDeliveryContext 调用 delivery::deliver_task；成功返回 summary.task，失败时条件 Block 当前 Delivering 任务。
+///     构造 AppDeliveryContext 调用 delivery::deliver_task(expected_review_digest)；
+///     成功返回 summary.task；`review_diff_changed` 时若仍 Delivering 则 CAS 回 Done+HumanReview+Idle，
+///     不写 delivery evidence，并传播原 Conflict；其它错误条件 Block 当前 Delivering 任务。
 pub(crate) async fn run_delivery_for_task(
     state: &AppState,
     task_id: &str,
+    expected_review_digest: Option<&str>,
 ) -> Result<OrchestratorTaskDto, AppError> {
     let delivery_context = crate::orchestrator::delivery::AppDeliveryContext::new(state);
-    match crate::orchestrator::delivery::deliver_task(&delivery_context, task_id).await {
+    match crate::orchestrator::delivery::deliver_task(
+        &delivery_context,
+        task_id,
+        expected_review_digest,
+    )
+    .await
+    {
         Ok(summary) => {
             tracing::debug!(task_id = %task_id, stages = ?summary.stages, "Orchestrator 自动交付完成");
+            // delivery 成功后可能是 Done 或中途 Blocked；从权威 row 读 state_version 再发运营通知。
+            if let Ok(row) = state.orchestrator_repo.get_task(task_id).await {
+                if row.status == OrchestratorTaskStatus::Done
+                    && row.workflow_state
+                        == crate::orchestrator::models::OrchestratorWorkflowState::Done
+                {
+                    crate::orchestrator::notifications::emit_task_operational_notification(
+                        state,
+                        crate::orchestrator::models::OperationalNotificationKind::TaskDone,
+                        &row,
+                    );
+                } else if row.status == OrchestratorTaskStatus::Blocked {
+                    crate::orchestrator::notifications::emit_task_operational_notification(
+                        state,
+                        crate::orchestrator::models::OperationalNotificationKind::Blocked,
+                        &row,
+                    );
+                }
+            }
             Ok(summary.task)
+        }
+        Err(err) if err.code() == super::REVIEW_DIFF_CHANGED_CODE => {
+            // commit 边界 digest 漂移：回退 Human Review，保留 Conflict 供前端强制 re-review。
+            let _ = state
+                .orchestrator_repo
+                .revert_delivery_to_human_review(task_id)
+                .await?;
+            Err(err)
         }
         Err(err) => block_task_with_delivery_error(state, task_id, err).await,
     }
@@ -1610,6 +1662,11 @@ pub(crate) async fn block_task_with_repair_runner_error(
     };
     let task = if let Some(task) = blocked {
         repo.add_event(task_id, "blocked", &reason, None).await?;
+        crate::orchestrator::notifications::emit_task_operational_notification(
+            state,
+            crate::orchestrator::models::OperationalNotificationKind::Blocked,
+            &task,
+        );
         task
     } else {
         repo.get_task(task_id).await?

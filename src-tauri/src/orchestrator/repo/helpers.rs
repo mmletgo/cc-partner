@@ -38,7 +38,7 @@ pub(crate) const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_c
     external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
     transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
     last_runtime_message, branch_name, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
-    created_at, updated_at, started_at, finished_at";
+    state_version, created_at, updated_at, started_at, finished_at";
 
 /// Business Logic（为什么需要这个函数）:
 ///     claim 候选 SELECT 需要 JOIN `workbench_projects`，未加表前缀时 `id/created_at/updated_at` 会与 project 列歧义。
@@ -100,7 +100,7 @@ pub(crate) const ATTEMPT_COLUMNS: &str =
     "id, task_id, attempt, worktree_id, session_id, prompt, status, \
     created_at, completed_at";
 pub(crate) const REMOTE_OUTBOX_COLUMNS: &str = "id, device_id, device_name, remote_project_path, \
-    remote_project_id, request_json, status, remote_task_id, last_error, created_at, updated_at, \
+    remote_project_id, request_json, status, remote_task_id, last_error, state_version, created_at, updated_at, \
     sent_at";
 pub(crate) const REMOTE_MIRROR_COLUMNS: &str = "id, device_id, device_name, remote_project_id, \
     remote_project_path, remote_task_id, payload_json, last_synced_at";
@@ -142,6 +142,7 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   prepare_claim_token TEXT,
   blocked_reason TEXT,
   attempt INTEGER NOT NULL DEFAULT 0,
+  state_version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   started_at TEXT,
@@ -248,6 +249,7 @@ pub const ORCHESTRATOR_REMOTE_OUTBOX_SCHEMA: &str =
   status TEXT NOT NULL,
   remote_task_id TEXT,
   last_error TEXT,
+  state_version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   sent_at TEXT
@@ -584,6 +586,7 @@ pub(crate) fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppErr
         prepare_claim_token: row.try_get("prepare_claim_token")?,
         blocked_reason: row.try_get("blocked_reason")?,
         attempt: row.try_get("attempt")?,
+        state_version: row.try_get("state_version").unwrap_or(0),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         started_at: row.try_get("started_at")?,
@@ -725,6 +728,7 @@ pub(crate) fn row_to_remote_outbox(
         status: RemoteOutboxStatus::from_str(&status_text)?,
         remote_task_id: row.try_get("remote_task_id")?,
         last_error: row.try_get("last_error")?,
+        state_version: row.try_get("state_version").unwrap_or(0),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         sent_at: row.try_get("sent_at")?,

@@ -737,6 +737,86 @@
         "docs/prd.md",
         "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
       ]
+    },
+    {
+      "id": "E2E-ORCHESTRATOR-REVIEW-001",
+      "surface": "orchestrator-review",
+      "level": "L1",
+      "tests": [
+        "web/tests/orchestrator-review-workflow.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- orchestrator-review-workflow.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Tauri notification OS UI",
+        "multi-host deliver",
+        "packaged desktop"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
+      ]
+    },
+    {
+      "id": "L0-ORCHESTRATOR-REVIEW-001",
+      "surface": "orchestrator-review",
+      "level": "L0",
+      "tests": [
+        "web/src/lib/schemas/orchestrator.test.ts",
+        "web/src/api/orchestrator.test.ts",
+        "web/src/pages/Orchestrator/views/OrchestratorTaskDrawer.test.tsx",
+        "web/src/pages/Orchestrator/views/WorkflowWizardDialog.test.tsx",
+        "web/src/hooks/useOperationalNotifications.test.tsx",
+        "web/src/api/operationalNotifications.test.ts",
+        "src-tauri/src/orchestrator/review_diff.rs",
+        "src-tauri/src/orchestrator/notifications.rs"
+      ],
+      "command": "cd web && npm test -- src/lib/schemas/orchestrator.test.ts src/api/orchestrator.test.ts src/pages/Orchestrator/views/OrchestratorTaskDrawer.test.tsx src/pages/Orchestrator/views/WorkflowWizardDialog.test.tsx src/hooks/useOperationalNotifications.test.tsx src/api/operationalNotifications.test.ts && cd ../src-tauri && cargo test --locked orchestrator::review_diff orchestrator::notifications --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04",
+        "node-linux"
+      ],
+      "exclusions": [
+        "full dual-host deliver",
+        "real OS notification UI",
+        "packaged desktop WebView"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/p2p-protocol.md",
+        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
+      ]
+    },
+    {
+      "id": "L2-ORCHESTRATOR-REVIEW-001",
+      "surface": "orchestrator-review",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/runtime_authority_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test runtime_authority_smoke operational_notification_relay -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "full dual-host Human Review deliver",
+        "real OS notification UI",
+        "packaged multi-process GUI",
+        "review_diff collector end-to-end git worktree (covered at L0 lib tests)"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/p2p-protocol.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
+      ]
     }
   ]
 }

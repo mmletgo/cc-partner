@@ -431,6 +431,55 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 ),
             ),
         )
+        // N6 M3：deliver / review-diff / workflow-document 必须在 owner 进程执行
+        // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
+        .route(
+            "/api/backend/control/orchestrator/deliver-reviewed",
+            post(crate::backend::control_api::control_orchestrator_deliver_reviewed).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/review-diff",
+            post(crate::backend::control_api::control_orchestrator_review_diff).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/workflow-document/get",
+            post(crate::backend::control_api::control_orchestrator_workflow_document_get).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/workflow-document/validate",
+            post(crate::backend::control_api::control_orchestrator_workflow_document_validate)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                )),
+        )
+        .route(
+            "/api/backend/control/orchestrator/workflow-document/save",
+            post(crate::backend::control_api::control_orchestrator_workflow_document_save).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/operational-notifications/snapshot",
+            post(crate::backend::control_api::control_operational_notification_snapshot).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
         .route(
             "/api/backend/control/events/catch-up",
             post(crate::backend::control_api::control_events_catch_up).layer(
@@ -1046,6 +1095,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/orchestrator/tasks/evidence",
             post(orchestrator::get_evidence),
         )
+        // Orchestrator owning-device review diff：capability orchestrator.review-diff.v1；仅本机 local 任务。
+        .route(
+            "/api/orchestrator/tasks/review-diff",
+            post(orchestrator::get_review_diff),
+        )
         .route(
             "/api/orchestrator/tasks/queue",
             post(orchestrator::queue_task),
@@ -1088,6 +1142,37 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/mobile/orchestrator/runtime-snapshot",
             post(orchestrator::mobile_runtime_snapshot),
+        )
+        // Mobile-facing review diff：remote-aware wrapper，capability 由 owning-device 路由门控。
+        .route(
+            "/api/mobile/orchestrator/tasks/review-diff",
+            post(orchestrator::mobile_get_review_diff),
+        )
+        // Orchestrator WORKFLOW document：capability orchestrator.workflow-document.v1；仅本机 local 项目。
+        .route(
+            "/api/orchestrator/workflow-document/get",
+            post(orchestrator::get_workflow_document_route),
+        )
+        .route(
+            "/api/orchestrator/workflow-document/validate",
+            post(orchestrator::validate_workflow_document_route),
+        )
+        .route(
+            "/api/orchestrator/workflow-document/save",
+            post(orchestrator::save_workflow_document_route),
+        )
+        // Mobile remote-aware WORKFLOW document wrappers。
+        .route(
+            "/api/mobile/orchestrator/workflow-document/get",
+            post(orchestrator::mobile_get_workflow_document),
+        )
+        .route(
+            "/api/mobile/orchestrator/workflow-document/validate",
+            post(orchestrator::mobile_validate_workflow_document),
+        )
+        .route(
+            "/api/mobile/orchestrator/workflow-document/save",
+            post(orchestrator::mobile_save_workflow_document),
         )
         .route("/api/orchestrator/config", get(orchestrator::get_config))
         // 移动端 SPA fallback：只服务 /mobile 命名空间；其它未知路径保持 404。

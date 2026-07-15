@@ -511,10 +511,92 @@ pub struct OrchestratorTaskRow {
     pub prepare_claim_token: Option<String>,
     pub blocked_reason: Option<String>,
     pub attempt: i64,
+    /// 可通知状态 revision：进入 HumanReview/Blocked/Done 时 +1，供 operational 去重。
+    pub state_version: i64,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+}
+
+/// 运营通知 kind（隐私安全，不含任务正文）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     桌面 OS 通知与 baseline snapshot 需要稳定四类运营事件，且不得泄露 title/project/goal。
+///
+/// Code Logic（这个枚举做什么）:
+///     serde camelCase：`humanReview|blocked|remoteOutboxFailed|taskDone`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OperationalNotificationKind {
+    HumanReview,
+    Blocked,
+    RemoteOutboxFailed,
+    TaskDone,
+}
+
+impl OperationalNotificationKind {
+    /// Business Logic（为什么需要这个函数）:
+    ///     snapshot SQL UNION 与 wire payload 需要稳定字符串，禁止调用点硬编码漂移。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 camelCase kind 字面量。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HumanReview => "humanReview",
+            Self::Blocked => "blocked",
+            Self::RemoteOutboxFailed => "remoteOutboxFailed",
+            Self::TaskDone => "taskDone",
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     snapshot 查询结果要把 kind 文本还原为枚举，损坏值应 fail-closed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     解析 camelCase kind；未知值返回业务错误。
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Result<Self, AppError> {
+        match value {
+            "humanReview" => Ok(Self::HumanReview),
+            "blocked" => Ok(Self::Blocked),
+            "remoteOutboxFailed" => Ok(Self::RemoteOutboxFailed),
+            "taskDone" => Ok(Self::TaskDone),
+            other => Err(AppError::generic(format!("未知运营通知 kind: {other}"))),
+        }
+    }
+}
+
+/// 运营通知事件（event_bus / Tauri 中继 payload 主体）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     sidecar 在 HR/Blocked/Done/outboxFailed 真实转换后广播隐私安全事件，GUI 用
+///     `{kind,opaqueSourceId,stateVersion}` 去重，不得包含任务标题/项目/goal/diff。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase DTO：kind + opaqueSourceId + stateVersion + occurredAt。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationalNotificationEvent {
+    pub kind: OperationalNotificationKind,
+    pub opaque_source_id: String,
+    pub state_version: i64,
+    pub occurred_at: String,
+}
+
+/// 运营通知 baseline snapshot（owner control）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 冷启动/Gap 需要用 owner 当前 opaque 状态建立 no-notify baseline，并绑定稳定 event cursor。
+///
+/// Code Logic（这个结构做什么）:
+///     `asOfCursor` 为 capture 稳定时的 BackendRuntimeCursor；items ≤1000；truncated 表示截断。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationalNotificationSnapshot {
+    pub as_of_cursor: crate::backend::event_bus::BackendRuntimeCursor,
+    pub items: Vec<OperationalNotificationEvent>,
+    pub truncated: bool,
 }
 
 /// Orchestrator 任务尝试数据库行模型。
@@ -634,6 +716,44 @@ pub struct OrchestratorEvidenceDto {
     pub created_at: String,
 }
 
+/// Human Review 有界 diff 快照。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Human Review / Deliver 前需要展示任务 worktree 的只读改动，并用 digest 检测审阅后漂移。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 task/base/head 身份、有界文件列表、总文件数、截断标记，以及与展示截断无关的 review_digest。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorReviewDiff {
+    pub task_id: String,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub files: Vec<ReviewDiffFile>,
+    pub total_files: u32,
+    pub truncated: bool,
+    pub review_digest: String,
+}
+
+/// Review diff 中的单文件条目。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     前端 Changes tab 需要路径、状态、增删统计和可选 patch；二进制与超限文件只能展示元数据。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 repo-relative path、status、additions/deletions、可选 patch 与 binary/truncated 标记。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewDiffFile {
+    pub path: String,
+    pub status: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub patch: Option<String>,
+    pub binary: bool,
+    pub truncated: bool,
+}
+
 impl OrchestratorTaskRow {
     /// Business Logic（为什么需要这个函数）:
     ///     split state 扩展后，既有命令和测试构造任务时需要统一的内部默认值，避免每个调用点重复填充运行元数据。
@@ -672,6 +792,7 @@ impl OrchestratorTaskRow {
             prepare_claim_token: None,
             blocked_reason: None,
             attempt: 0,
+            state_version: 0,
             created_at: String::new(),
             updated_at: String::new(),
             started_at: None,

@@ -424,6 +424,7 @@ mod tests {
             prepare_claim_token: None,
             blocked_reason: None,
             attempt: 0,
+            state_version: 0,
             created_at: created_at.to_string(),
             updated_at: created_at.to_string(),
             started_at: None,

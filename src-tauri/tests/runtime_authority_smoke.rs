@@ -906,6 +906,86 @@ fn _type_smoke(s: ConfigSnapshot) -> ConfigSnapshot {
     s
 }
 
+/// 运营通知经 event_bus catch-up 中继时携带 owner/sequence，payload 隐私安全。
+///
+/// Business Logic（为什么需要这个测试）:
+///     GUI handshake 依赖 operational:notification 带 ownerInstanceId/sequence 与 opaque 字段，
+///     不得含 title；Gap 路径仍走 backend:runtime-gap。
+///
+/// Code Logic（这个测试做什么）:
+///     publish operational 事件 → client catch-up → 校验 Event owner/seq/payload；
+///     GuiEventRelayState Deliver 带 owner/sequence；无 title 字段。
+#[tokio::test]
+async fn operational_notification_relay() {
+    let harness = RuntimeAuthorityHarness::start().await;
+    let payload = json!({
+        "kind": "humanReview",
+        "opaqueSourceId": "task-opaque-1",
+        "stateVersion": 2,
+        "occurredAt": "2026-07-15T00:00:00Z"
+    });
+    let cursor = harness
+        .event_bus
+        .publish("operational:notification", payload.clone());
+
+    let catch_up = harness
+        .client
+        .events_catch_up(None)
+        .await
+        .expect("catch-up");
+    let msg = catch_up
+        .messages
+        .iter()
+        .find(|m| {
+            matches!(
+                m,
+                RuntimeRelayMessage::Event {
+                    event,
+                    ..
+                } if event == "operational:notification"
+            )
+        })
+        .expect("operational event in catch-up");
+    match msg {
+        RuntimeRelayMessage::Event {
+            owner_instance_id,
+            sequence,
+            event,
+            payload: p,
+        } => {
+            assert_eq!(owner_instance_id, &harness.owner_id);
+            assert_eq!(*sequence, cursor.sequence);
+            assert_eq!(event, "operational:notification");
+            assert_eq!(p["kind"], "humanReview");
+            assert_eq!(p["opaqueSourceId"], "task-opaque-1");
+            assert_eq!(p["stateVersion"], 2);
+            assert!(p.get("title").is_none());
+            assert!(p.get("goal").is_none());
+        }
+        other => panic!("expected Event, got {other:?}"),
+    }
+
+    let mut gui = GuiEventRelayState::default();
+    let action = gui.on_message(msg.clone());
+    match action {
+        RelayClientAction::Deliver {
+            event,
+            payload: p,
+            owner_instance_id,
+            sequence,
+        } => {
+            assert_eq!(event, "operational:notification");
+            assert_eq!(owner_instance_id, harness.owner_id);
+            assert_eq!(sequence, cursor.sequence);
+            assert_eq!(p["opaqueSourceId"], "task-opaque-1");
+            assert!(p.get("title").is_none());
+        }
+        other => panic!("expected Deliver, got {other:?}"),
+    }
+    assert_eq!(catch_up.latest.owner_instance_id, harness.owner_id);
+    assert!(catch_up.latest.sequence >= cursor.sequence);
+}
+
 #[allow(dead_code)]
 fn _err_smoke() -> AppError {
     AppError::generic("x")

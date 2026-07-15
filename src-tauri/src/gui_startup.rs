@@ -11,8 +11,9 @@
 use crate::backend::control::{BackendStatus, BackendStatusKind};
 use crate::error::AppError;
 use crate::gui_bootstrap::{
-    acknowledge_current_lan_disclosure, is_acknowledged_for_version, is_current_lan_disclosure_acknowledged,
-    load_gui_bootstrap, GuiBootstrapState, LAN_DISCLOSURE_VERSION, MDNS_PORT, PREFERRED_HTTP_PORT,
+    acknowledge_current_lan_disclosure, is_acknowledged_for_version,
+    is_current_lan_disclosure_acknowledged, load_gui_bootstrap, GuiBootstrapState,
+    LAN_DISCLOSURE_VERSION, MDNS_PORT, PREFERRED_HTTP_PORT,
 };
 use crate::net::discovery::local_lan_ip;
 use serde::Serialize;
@@ -65,9 +66,7 @@ pub struct LanDisclosureStartResult {
 ///     抽象 probe/ensure/start 三个异步动作。
 pub trait BackendLifecycle: Send + Sync + 'static {
     /// 探测当前 backend 状态（不 start/stop）。
-    fn probe_status(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = BackendStatus> + Send + '_>>;
+    fn probe_status(&self) -> Pin<Box<dyn Future<Output = BackendStatus> + Send + '_>>;
 
     /// 确保 sidecar Running（必要时 start）。
     fn ensure_backend(
@@ -232,6 +231,7 @@ impl<L: BackendLifecycle> GuiStartupCoordinator<L> {
     ///
     /// Code Logic（这个函数做什么）:
     ///     OnceCell 是否有值。
+    #[allow(dead_code)]
     pub fn is_started(&self) -> bool {
         self.started.get().is_some()
     }
@@ -264,15 +264,15 @@ pub fn local_address_candidates() -> Vec<String> {
 ///
 /// Code Logic（这个结构做什么）:
 ///     持有 ensure 闭包与 start 闭包（由外层捕获 AppHandle/AppState）。
+#[allow(clippy::type_complexity)]
 pub struct ProductionBackendLifecycle {
     ensure: Arc<
         dyn Fn() -> Pin<Box<dyn Future<Output = Result<BackendStatus, AppError>> + Send>>
             + Send
             + Sync,
     >,
-    start: Arc<
-        dyn Fn() -> Pin<Box<dyn Future<Output = Result<u16, AppError>> + Send>> + Send + Sync,
-    >,
+    start:
+        Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<u16, AppError>> + Send>> + Send + Sync>,
     probe: Arc<dyn Fn() -> Pin<Box<dyn Future<Output = BackendStatus> + Send>> + Send + Sync>,
 }
 
@@ -282,6 +282,7 @@ impl ProductionBackendLifecycle {
     ///
     /// Code Logic（这个函数做什么）:
     ///     包装三个 Arc 闭包。
+    #[allow(clippy::type_complexity)]
     pub fn new(
         ensure: Arc<
             dyn Fn() -> Pin<Box<dyn Future<Output = Result<BackendStatus, AppError>> + Send>>
@@ -302,9 +303,7 @@ impl ProductionBackendLifecycle {
 }
 
 impl BackendLifecycle for ProductionBackendLifecycle {
-    fn probe_status(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = BackendStatus> + Send + '_>> {
+    fn probe_status(&self) -> Pin<Box<dyn Future<Output = BackendStatus> + Send + '_>> {
         (self.probe)()
     }
 
@@ -369,9 +368,7 @@ mod lan_disclosure_tests {
     }
 
     impl BackendLifecycle for MockLifecycle {
-        fn probe_status(
-            &self,
-        ) -> Pin<Box<dyn Future<Output = BackendStatus> + Send + '_>> {
+        fn probe_status(&self) -> Pin<Box<dyn Future<Output = BackendStatus> + Send + '_>> {
             Box::pin(async move {
                 let kind = *self.probe_kind.lock().unwrap();
                 Self::status_for(kind, self.port)
@@ -412,9 +409,7 @@ mod lan_disclosure_tests {
     struct ArcMock(Arc<MockLifecycle>);
 
     impl BackendLifecycle for ArcMock {
-        fn probe_status(
-            &self,
-        ) -> Pin<Box<dyn Future<Output = BackendStatus> + Send + '_>> {
+        fn probe_status(&self) -> Pin<Box<dyn Future<Output = BackendStatus> + Send + '_>> {
             self.0.probe_status()
         }
         fn ensure_backend(

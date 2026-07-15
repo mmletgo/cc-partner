@@ -91,6 +91,37 @@ describe('MobileAutomationPanel', () => {
       'httpOrchestratorTransport',
       'controller should own orchestrator transport calls',
     );
+    assertContains(
+      controllerSource,
+      'getReviewDiff',
+      'controller should load mobile review diffs via transport',
+    );
+    assertContains(
+      taskDetailSource,
+      'desktopCompletionNotice',
+      'mobile detail must show desktop-completion notice for review',
+    );
+    assertNotContains(
+      taskDetailSource,
+      'deliver',
+      'mobile detail must not expose deliver action this track',
+    );
+    assertNotContains(
+      taskDetailSource,
+      'requestRework',
+      'mobile detail must not expose rework action this track',
+    );
+    assertContains(
+      taskDetailSource,
+      'aria-expanded',
+      'mobile review file buttons must expose aria-expanded',
+    );
+    assertContains(
+      taskDetailSource,
+      'role="alert"',
+      'mobile review/evidence errors must use role=alert',
+    );
+
     assertNotContains(
       controllerSource,
       '<Dialog',

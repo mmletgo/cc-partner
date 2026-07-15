@@ -283,12 +283,9 @@ mod tests {
     async fn workbench_launch_summary_list_recent_is_bounded() {
         let repo = setup_repo().await;
         for i in 0..6 {
-            repo.upsert(&row(
-                &format!("p{i}"),
-                &format!("2026-06-24T0{i}:00:00Z"),
-            ))
-            .await
-            .unwrap();
+            repo.upsert(&row(&format!("p{i}"), &format!("2026-06-24T0{i}:00:00Z")))
+                .await
+                .unwrap();
         }
         let listed = repo.list_recent(5).await.unwrap();
         assert_eq!(listed.len(), 5);

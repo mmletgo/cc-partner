@@ -141,13 +141,45 @@
     "requestRework": "Request rework",
     "requestReworkPrompt": "Enter the rework reason",
     "requestReworkDefaultReason": "Human review did not pass. Continue rework based on the review feedback.",
+    "reworkDialogTitle": "Request rework",
+    "reworkDialogLead": "The rework note is saved as evidence and moves the task to Rework.",
+    "reworkReasonLabel": "Rework reason",
+    "reworkReasonPlaceholder": "Describe what needs to change (1–2000 characters)",
+    "reworkReasonRequired": "Enter a rework reason between 1 and 2000 characters.",
+    "reworkSubmit": "Submit rework",
+    "reworkCancel": "Cancel",
     "deliver": "Deliver",
+    "deliverDisabledPendingDiff": "Review changes before delivering",
+    "deliverDisabledDiffError": "Changes failed to load; delivery is disabled",
     "cancel": "Cancel task",
     "refresh": "Refresh",
     "retry": "Retry",
     "abort": "Abort",
     "localTask": "Local task",
     "remoteTask": "Remote {{deviceName}}"
+  },
+  "tabs": {
+    "summary": "Summary",
+    "changes": "Changes",
+    "evidence": "Evidence",
+    "ariaLabel": "Task detail sections"
+  },
+  "review": {
+    "loading": "Loading changes…",
+    "emptyTitle": "No changes",
+    "emptyBody": "This attempt has no reviewable worktree changes.",
+    "errorTitle": "Failed to load changes",
+    "retry": "Retry",
+    "unsupported": "Peer does not support review diffs; deliver uses the legacy contract.",
+    "truncatedFiles": "Truncated: showing a subset of {{total}} files.",
+    "binaryFile": "Binary file (no patch)",
+    "truncatedPatch": "Patch truncated",
+    "fileSummary": "+{{additions}} / -{{deletions}}",
+    "selectFile": "Select a file to view its patch",
+    "fileCount": "{{count}} files",
+    "baseHead": "{{base}} → {{head}}",
+    "diffChangedConflict": "Changes drifted after review. Re-review before delivering.",
+    "desktopCompletionNotice": "Complete review on desktop"
   },
   "progress": {
     "running": "Attempt {{attempt}} is running in its execution context.",
@@ -212,6 +244,7 @@
     "move": "Failed to move the task.",
     "requestRework": "Failed to request rework.",
     "deliver": "Failed to deliver the task.",
+    "reviewDiff": "Failed to load review changes.",
     "cancel": "Failed to cancel the task.",
     "refresh": "Failed to refresh the project.",
     "retry": "Failed to retry the task.",
@@ -221,6 +254,55 @@
     "promptRequired": "Enter a short prompt first.",
     "required": "Fill in title, goal, and acceptance criteria.",
     "retryOutbox": "Failed to retry the outbox item.",
-    "discardOutbox": "Failed to discard the outbox item."
+    "discardOutbox": "Failed to discard the outbox item.",
+    "workflowDocument": "Failed to load the WORKFLOW document.",
+    "workflowValidate": "Failed to validate the WORKFLOW document.",
+    "workflowSave": "Failed to save the WORKFLOW document."
+  },
+  "workflowWizard": {
+    "open": "WORKFLOW wizard",
+    "title": "WORKFLOW readiness wizard",
+    "subtitle": "Detect, create, and safely save project-root WORKFLOW.md without changing delivery.",
+    "close": "Close WORKFLOW wizard",
+    "loading": "Detecting WORKFLOW document…",
+    "templatePreview": "Default template preview",
+    "createFromTemplate": "Create from template",
+    "openFile": "Open in file workspace",
+    "validate": "Validate",
+    "save": "Save",
+    "reload": "Reload",
+    "draft": "Draft",
+    "draftPlaceholder": "Edit WORKFLOW.md here",
+    "summaryValid": "Document is valid and ready for scheduling.",
+    "summaryNoDelivery": "Saving does not enable or change delivery.",
+    "diagnostics": "Diagnostics",
+    "diagnosticMeta": "{{path}} · line {{line}} · column {{column}} · {{code}}",
+    "conflict": "WORKFLOW.md on disk has changed. Your draft is preserved; reload before saving.",
+    "hash": "Expected hash {{hash}}…",
+    "status": {
+      "missing": "Missing",
+      "valid": "Valid",
+      "invalid": "Invalid",
+      "readError": "Read error",
+      "unknown": "Unknown"
+    }
+  },
+  "notifications": {
+    "humanReview": {
+      "title": "A task is waiting for review",
+      "body": "A task is waiting for human review. Open Attention for details."
+    },
+    "blocked": {
+      "title": "A task is blocked",
+      "body": "A task is blocked. Open Attention for details."
+    },
+    "remoteOutboxFailed": {
+      "title": "Remote task delivery failed",
+      "body": "A remote task delivery failed. Open Attention for details."
+    },
+    "taskDone": {
+      "title": "A task is completed",
+      "body": "A task is completed. Check the automation board for details."
+    }
   }
 }

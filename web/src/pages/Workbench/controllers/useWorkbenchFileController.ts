@@ -42,6 +42,7 @@ import type {
   WorkbenchPathInfo,
 } from '@/lib/types';
 import type { WorkbenchOpenFileTab } from '@/components/domain/WorkbenchFileWorkspace';
+import { isSafeWorkbenchRelativePath } from '../workbenchDeepLink';
 import {
   collectTabsForPath,
   dirtyTabNames,
@@ -151,6 +152,7 @@ export interface WorkbenchFileControllerResult extends WorkbenchFileBridge {
   refreshParentDir: (path: string) => Promise<void>;
   // ---- tab 生命周期 ----
   handleOpenFile: (node: WorkbenchFileNode) => Promise<void>;
+  openFileByPath: (path: string) => Promise<boolean>;
   handleActivateFileTab: (id: string) => void;
   handleCloseFileTab: (id: string) => void;
   handleReturnToTerminal: () => void;
@@ -525,6 +527,34 @@ export function useWorkbenchFileController(
       }
     },
     [handleOpenFile, loadPathInfo],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   WORKFLOW 向导与 files deep link 需要按相对路径打开文件，而不是要求用户先在树中点选节点。
+   *
+   * Code Logic（这个函数做什么）:
+   *   拒绝绝对路径与目录穿越；构造最小 file node 后复用 handleOpenFile。
+   */
+  const openFileByPath = useCallback(
+    async (path: string): Promise<boolean> => {
+      const trimmed = path.trim();
+      if (!isSafeWorkbenchRelativePath(trimmed)) {
+        setFileError(t('openFile'));
+        return false;
+      }
+      const name = basename(trimmed, trimmed);
+      await handleOpenFile({
+        name,
+        path: trimmed,
+        kind: 'file',
+        size: null,
+        modifiedAt: null,
+        children: null,
+      });
+      return true;
+    },
+    [handleOpenFile, t],
   );
 
   const refreshParentDir = useCallback(
@@ -1298,6 +1328,7 @@ export function useWorkbenchFileController(
     refreshParentDir,
     // tab 生命周期
     handleOpenFile,
+    openFileByPath,
     handleActivateFileTab,
     handleCloseFileTab,
     handleReturnToTerminal,

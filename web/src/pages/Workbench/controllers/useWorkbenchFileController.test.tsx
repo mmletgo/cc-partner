@@ -379,6 +379,25 @@ describe('useWorkbenchFileController — open file / tab dedupe', () => {
     expect(requestView).toHaveBeenCalledWith('files');
   });
 
+  test('openFileByPath opens relative path and rejects traversal', async () => {
+    const opened = buildOpenedText('WORKFLOW.md', '---\n', 'hash-wf');
+    fakeFilesApi.open.mockResolvedValueOnce(opened);
+    const { result } = renderController();
+
+    await act(async () => {
+      const ok = await result.current.openFileByPath('WORKFLOW.md');
+      await flushMicrotasks();
+      expect(ok).toBe(true);
+    });
+    expect(fakeFilesApi.open).toHaveBeenCalledWith('project-1', 'WORKFLOW.md', 'worktree-main');
+    expect(result.current.fileTabs[0]?.path).toBe('WORKFLOW.md');
+
+    await act(async () => {
+      const rejected = await result.current.openFileByPath('../secret');
+      expect(rejected).toBe(false);
+    });
+  });
+
   test('handleOpenFile dedupes already-open tab and preserves dirty/content/mode', async () => {
     const openedFirst = buildOpenedText('README.md', 'original', 'hash-1');
     const openedSecond = buildOpenedText('README.md', 'fresh-from-disk', 'hash-2');

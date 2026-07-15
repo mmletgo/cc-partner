@@ -71,6 +71,7 @@ export interface WorkbenchAutomationControllerParams {
   focusSession: (sessionId: string) => Promise<boolean>;
   setAutomationConsoleOpen: (open: boolean) => void;
   requestWorkspaceView: (view: WorkbenchFileWorkspaceView) => void;
+  openFileByPath: (path: string) => Promise<boolean>;
   navigate: (url: string) => void;
 }
 
@@ -123,6 +124,7 @@ export function useWorkbenchAutomationController(
     focusSession,
     setAutomationConsoleOpen,
     requestWorkspaceView,
+    openFileByPath,
     navigate,
   } = params;
 
@@ -131,20 +133,22 @@ export function useWorkbenchAutomationController(
   const deepLinkSessionId = deepLink.sessionId;
 
   // Business Logic: 与原 Workbench.tsx 行为一致——用 ref 记录当前 search 已应用到的
-  // projectId/worktreeId/sessionId，防止同一段被重复应用；search 切换时整体重置三段为 null。
+  // projectId/worktreeId/sessionId/path，防止同一段被重复应用；search 切换时整体重置为 null。
   const deepLinkApplicationRef = useRef<{
     search: string;
     projectId: string | null;
     worktreeId: string | null;
     sessionId: string | null;
+    path: string | null;
   }>({
     search: locationSearch,
     projectId: null,
     worktreeId: null,
     sessionId: null,
+    path: null,
   });
 
-  // Business Logic: locationSearch 变化时把 applied 重置为“当前 search 但三段未应用”，
+  // Business Logic: locationSearch 变化时把 applied 重置为“当前 search 但各段未应用”，
   // 让旧 search 上未完成的 staged effect 自然失效（它们会在 search 不匹配时 early return）。
   useEffect(() => {
     deepLinkApplicationRef.current = {
@@ -152,13 +156,16 @@ export function useWorkbenchAutomationController(
       projectId: null,
       worktreeId: null,
       sessionId: null,
+      path: null,
     };
   }, [locationSearch]);
 
   const deepLinkView = deepLink.view ?? null;
   const deepLinkTaskId = deepLink.taskId ?? null;
   const deepLinkOutboxId = deepLink.outboxId ?? null;
+  const deepLinkPath = deepLink.path ?? null;
   const isAutomationDeepLink = deepLinkView === 'automation';
+  const isFilesDeepLink = deepLinkView === 'files';
 
   // Business Logic: staged deep link —— project 段。命中后 fire-and-forget 触发 selectProjectFromDeepLink，
   // 与原 Workbench.tsx 行为一致（不等待切换完成，让后续 worktree/session 段 effect 自行守卫）。
@@ -226,8 +233,9 @@ export function useWorkbenchAutomationController(
   ]);
 
   // Business Logic: staged deep link —— session 段。等 project+worktree 段对齐后，命中目标 session 则 focus。
+  // files deep link 不消费 session，避免误开终端。
   useEffect(() => {
-    if (isAutomationDeepLink) return;
+    if (isAutomationDeepLink || isFilesDeepLink) return;
     if (!deepLinkSessionId) return;
     if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
     if (deepLinkWorktreeId && activeWorktreeId !== deepLinkWorktreeId) return;
@@ -249,8 +257,40 @@ export function useWorkbenchAutomationController(
     deepLinkWorktreeId,
     focusSession,
     isAutomationDeepLink,
+    isFilesDeepLink,
     locationSearch,
     scopedSessions,
+  ]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   WORKFLOW 向导打开 WORKFLOW.md 时，必须先对齐 project/worktree 上下文，再交给 file controller。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   view=files 且 path 安全时，等 project/worktree 就绪后关闭 automation、切 files 视图并 openFileByPath。
+   */
+  useEffect(() => {
+    if (!isFilesDeepLink || !deepLinkPath) return;
+    if (deepLinkProjectId && activeProjectId !== deepLinkProjectId) return;
+    if (deepLinkWorktreeId && activeWorktreeId !== deepLinkWorktreeId) return;
+    if (!activeWorktreeId) return;
+    const applied = deepLinkApplicationRef.current;
+    if (applied.search !== locationSearch || applied.path === deepLinkPath) return;
+    applied.path = deepLinkPath;
+    setAutomationConsoleOpen(false);
+    requestWorkspaceView('files');
+    void openFileByPath(deepLinkPath);
+  }, [
+    activeProjectId,
+    activeWorktreeId,
+    deepLinkPath,
+    deepLinkProjectId,
+    deepLinkWorktreeId,
+    isFilesDeepLink,
+    locationSearch,
+    openFileByPath,
+    requestWorkspaceView,
+    setAutomationConsoleOpen,
   ]);
 
   /**

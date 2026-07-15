@@ -12,6 +12,14 @@ export interface AutomationSettingsForm {
   autoPushTaskBranch: boolean;
   autoMergeToMain: boolean;
   autoPushMain: boolean;
+  /** 系统通知：Human Review（默认开） */
+  notifyHumanReview: boolean;
+  /** 系统通知：任务阻塞（默认开） */
+  notifyBlocked: boolean;
+  /** 系统通知：远端 outbox 失败（默认开） */
+  notifyRemoteOutboxFailed: boolean;
+  /** 系统通知：任务完成（默认关） */
+  notifyTaskDone: boolean;
 }
 
 /** 自动化表单加载前占位值；真实当前值和默认值由后端命令覆盖。 */
@@ -23,6 +31,10 @@ export const PENDING_AUTOMATION_SETTINGS_FORM: AutomationSettingsForm = {
   autoPushTaskBranch: false,
   autoMergeToMain: false,
   autoPushMain: false,
+  notifyHumanReview: true,
+  notifyBlocked: true,
+  notifyRemoteOutboxFailed: true,
+  notifyTaskDone: false,
 };
 
 const AUTOMATION_MAX_CONCURRENT_TASKS_MIN = 1;
@@ -96,6 +108,10 @@ export function automationConfigToForm(
     autoPushTaskBranch: config.autoPushTaskBranch,
     autoMergeToMain: config.autoMergeToMain,
     autoPushMain: config.autoPushMain,
+    notifyHumanReview: config.notifyHumanReview,
+    notifyBlocked: config.notifyBlocked,
+    notifyRemoteOutboxFailed: config.notifyRemoteOutboxFailed,
+    notifyTaskDone: config.notifyTaskDone,
   };
 }
 
@@ -119,6 +135,10 @@ export function automationFormToPatch(
     autoPushTaskBranch: form.autoPushTaskBranch,
     autoMergeToMain: form.autoMergeToMain,
     autoPushMain: form.autoPushMain,
+    notifyHumanReview: form.notifyHumanReview,
+    notifyBlocked: form.notifyBlocked,
+    notifyRemoteOutboxFailed: form.notifyRemoteOutboxFailed,
+    notifyTaskDone: form.notifyTaskDone,
   };
 }
 

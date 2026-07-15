@@ -500,6 +500,18 @@ pub struct OrchestratorAutomationConfig {
     pub auto_merge_to_main: bool,
     #[serde(default = "default_true")]
     pub auto_push_main: bool,
+    /// 是否通知 HumanReview 进入。
+    #[serde(default = "default_true")]
+    pub notify_human_review: bool,
+    /// 是否通知 Blocked 进入。
+    #[serde(default = "default_true")]
+    pub notify_blocked: bool,
+    /// 是否通知远端 outbox Failed。
+    #[serde(default = "default_true")]
+    pub notify_remote_outbox_failed: bool,
+    /// 是否通知 taskDone（默认关，避免交付成功刷屏）。
+    #[serde(default)]
+    pub notify_task_done: bool,
 }
 
 impl Default for OrchestratorAutomationConfig {
@@ -509,7 +521,8 @@ impl Default for OrchestratorAutomationConfig {
     ///     旧配置升级和设置页恢复默认都需要一致的 full-auto-but-disabled 默认策略。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     enabled=false、max_concurrent_tasks=1、验证命令为空，四个 delivery flag=true。
+    ///     enabled=false、max_concurrent_tasks=1、验证命令为空，四个 delivery flag=true；
+    ///     运营通知 HR/Blocked/outbox 默认开、Done 默认关。
     fn default() -> Self {
         Self {
             enabled: false,
@@ -519,6 +532,10 @@ impl Default for OrchestratorAutomationConfig {
             auto_push_task_branch: true,
             auto_merge_to_main: true,
             auto_push_main: true,
+            notify_human_review: true,
+            notify_blocked: true,
+            notify_remote_outbox_failed: true,
+            notify_task_done: false,
         }
     }
 }

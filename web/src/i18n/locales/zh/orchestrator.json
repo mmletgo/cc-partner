@@ -138,16 +138,48 @@
     "start": "开始",
     "completeAgentRun": "Claude Code 已完成，开始验证",
     "openWorkbench": "打开执行现场",
-    "requestRework": "请求返工",
+    "requestRework": "要求返工",
     "requestReworkPrompt": "请输入返工原因",
     "requestReworkDefaultReason": "人工复核未通过，请根据反馈继续返工。",
+    "reworkDialogTitle": "要求返工",
+    "reworkDialogLead": "返工意见会写入 evidence，并让任务回到 Rework。",
+    "reworkReasonLabel": "返工意见",
+    "reworkReasonPlaceholder": "说明需要修改的内容（1–2000 字）",
+    "reworkReasonRequired": "请填写 1–2000 字的返工意见。",
+    "reworkSubmit": "提交返工",
+    "reworkCancel": "取消",
     "deliver": "交付",
+    "deliverDisabledPendingDiff": "请先审阅变更后再交付",
+    "deliverDisabledDiffError": "变更加载失败，暂不可交付",
     "cancel": "取消任务",
     "refresh": "刷新",
     "retry": "重试",
     "abort": "终止",
     "localTask": "本机任务",
     "remoteTask": "远端 {{deviceName}}"
+  },
+  "tabs": {
+    "summary": "摘要",
+    "changes": "变更",
+    "evidence": "证据",
+    "ariaLabel": "任务详情分区"
+  },
+  "review": {
+    "loading": "正在加载变更…",
+    "emptyTitle": "暂无变更",
+    "emptyBody": "当前 attempt 没有可展示的 worktree 变更。",
+    "errorTitle": "变更加载失败",
+    "retry": "重试加载",
+    "unsupported": "对端不支持审阅 diff，可按旧流程交付。",
+    "truncatedFiles": "已截断：共 {{total}} 个文件，仅展示部分。",
+    "binaryFile": "二进制文件（无 patch）",
+    "truncatedPatch": "patch 已截断",
+    "fileSummary": "+{{additions}} / -{{deletions}}",
+    "selectFile": "选择文件查看 patch",
+    "fileCount": "共 {{count}} 个文件",
+    "baseHead": "{{base}} → {{head}}",
+    "diffChangedConflict": "审阅后的变更已漂移，请重新审阅后再交付。",
+    "desktopCompletionNotice": "请在桌面端完成审核"
   },
   "progress": {
     "running": "第 {{attempt}} 轮正在执行现场运行。",
@@ -212,6 +244,7 @@
     "move": "任务移动失败。",
     "requestRework": "请求返工失败。",
     "deliver": "任务交付失败。",
+    "reviewDiff": "变更加载失败。",
     "cancel": "任务取消失败。",
     "refresh": "项目刷新失败。",
     "retry": "任务重试失败。",
@@ -221,6 +254,55 @@
     "promptRequired": "请先填写简单 Prompt。",
     "required": "请填写标题、目标和验收标准。",
     "retryOutbox": "重新发送失败。",
-    "discardOutbox": "放弃发送失败。"
+    "discardOutbox": "放弃发送失败。",
+    "workflowDocument": "WORKFLOW 文档加载失败。",
+    "workflowValidate": "WORKFLOW 文档校验失败。",
+    "workflowSave": "WORKFLOW 文档保存失败。"
+  },
+  "workflowWizard": {
+    "open": "WORKFLOW 向导",
+    "title": "WORKFLOW 就绪向导",
+    "subtitle": "检测、创建并安全保存项目根 WORKFLOW.md；不会改变 delivery。",
+    "close": "关闭 WORKFLOW 向导",
+    "loading": "正在检测 WORKFLOW 文档…",
+    "templatePreview": "默认模板预览",
+    "createFromTemplate": "从模板创建",
+    "openFile": "在文件工作区打开",
+    "validate": "校验",
+    "save": "保存",
+    "reload": "重新加载",
+    "draft": "草稿",
+    "draftPlaceholder": "在此编辑 WORKFLOW.md",
+    "summaryValid": "文档有效，可继续调度。",
+    "summaryNoDelivery": "保存不会启用或改变 delivery。",
+    "diagnostics": "诊断",
+    "diagnosticMeta": "{{path}} · 行 {{line}} · 列 {{column}} · {{code}}",
+    "conflict": "磁盘上的 WORKFLOW.md 已变化。草稿已保留，请重新加载后再保存。",
+    "hash": "期望哈希 {{hash}}…",
+    "status": {
+      "missing": "缺失",
+      "valid": "有效",
+      "invalid": "无效",
+      "readError": "读取失败",
+      "unknown": "未知"
+    }
+  },
+  "notifications": {
+    "humanReview": {
+      "title": "有任务等待审核",
+      "body": "有任务等待人工审核。请打开待处理事项查看详情。"
+    },
+    "blocked": {
+      "title": "有任务已阻塞",
+      "body": "有任务已进入阻塞状态。请打开待处理事项查看详情。"
+    },
+    "remoteOutboxFailed": {
+      "title": "远端任务投递失败",
+      "body": "有远端任务投递失败。请打开待处理事项查看详情。"
+    },
+    "taskDone": {
+      "title": "有任务已完成",
+      "body": "有任务已完成。可在自动化看板中查看。"
+    }
   }
 }

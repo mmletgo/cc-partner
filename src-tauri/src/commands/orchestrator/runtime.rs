@@ -37,6 +37,28 @@ pub async fn get_orchestrator_runtime_snapshot(
     get_orchestrator_runtime_snapshot_for_state(state.inner(), &project_id).await
 }
 
+/// 获取运营通知 baseline snapshot。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 OS 通知 coordinator 需要 owner 当前 opaque 状态 + asOfCursor 建立 no-notify baseline。
+///
+/// Code Logic（这个函数做什么）:
+///     GuiClient 经 control client 代理；HeadlessOwner 本地 `capture_operational_notification_snapshot`。
+#[tauri::command]
+pub async fn get_operational_notification_snapshot(
+    state: State<'_, AppState>,
+) -> Result<crate::orchestrator::models::OperationalNotificationSnapshot, AppError> {
+    use crate::backend::authority::RuntimeRole;
+    use crate::backend::control_client::BackendControlClient;
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .operational_notification_snapshot()
+            .await;
+    }
+    crate::orchestrator::notifications::capture_operational_notification_snapshot(state.inner())
+        .await
+}
+
 /// 通过 HTTP task-view 协议创建 remote-aware Orchestrator 任务。
 ///
 /// Business Logic（为什么需要这个函数）:

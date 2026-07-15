@@ -57,6 +57,10 @@ function configFixture(
     autoPushTaskBranch: false,
     autoMergeToMain: true,
     autoPushMain: false,
+    notifyHumanReview: true,
+    notifyBlocked: true,
+    notifyRemoteOutboxFailed: true,
+    notifyTaskDone: false,
     ...partial,
   };
 }
@@ -83,6 +87,10 @@ describe('automationSettingsState', () => {
       autoPushTaskBranch: false,
       autoMergeToMain: true,
       autoPushMain: false,
+      notifyHumanReview: true,
+      notifyBlocked: true,
+      notifyRemoteOutboxFailed: true,
+      notifyTaskDone: false,
     });
 
     assertDeepEqual(automationConfigToForm(configFixture({ maxConcurrentTasks: 99 })).maxConcurrentTasks, 8);
@@ -95,6 +103,10 @@ describe('automationSettingsState', () => {
       autoPushTaskBranch: false,
       autoMergeToMain: true,
       autoPushMain: false,
+      notifyHumanReview: true,
+      notifyBlocked: true,
+      notifyRemoteOutboxFailed: true,
+      notifyTaskDone: false,
     });
 
     assertDeepEqual(
@@ -116,5 +128,42 @@ describe('automationSettingsState', () => {
       ),
       true,
     );
+    assertDeepEqual(
+      isAutomationFormDirty(
+        {
+          ...loaded,
+          notifyTaskDone: true,
+        },
+        loaded,
+      ),
+      true,
+    );
+  });
+
+  test('maps notification preference fields through form and patch', () => {
+    const loaded = automationConfigToForm(
+      configFixture({
+        notifyHumanReview: false,
+        notifyBlocked: true,
+        notifyRemoteOutboxFailed: false,
+        notifyTaskDone: true,
+      }),
+    );
+    assertDeepEqual(loaded.notifyHumanReview, false);
+    assertDeepEqual(loaded.notifyBlocked, true);
+    assertDeepEqual(loaded.notifyRemoteOutboxFailed, false);
+    assertDeepEqual(loaded.notifyTaskDone, true);
+
+    const patch = automationFormToPatch(loaded);
+    assertDeepEqual(patch.notifyHumanReview, false);
+    assertDeepEqual(patch.notifyBlocked, true);
+    assertDeepEqual(patch.notifyRemoteOutboxFailed, false);
+    assertDeepEqual(patch.notifyTaskDone, true);
+
+    const pending = automationConfigToForm(null);
+    assertDeepEqual(pending.notifyHumanReview, true);
+    assertDeepEqual(pending.notifyBlocked, true);
+    assertDeepEqual(pending.notifyRemoteOutboxFailed, true);
+    assertDeepEqual(pending.notifyTaskDone, false);
   });
 });

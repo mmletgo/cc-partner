@@ -9,7 +9,8 @@
 
 use crate::error::AppError;
 use crate::gui_startup::{
-    GuiStartupCoordinator, LanDisclosureStartResult, LanDisclosureStatus, ProductionBackendLifecycle,
+    GuiStartupCoordinator, LanDisclosureStartResult, LanDisclosureStatus,
+    ProductionBackendLifecycle,
 };
 use tauri::State;
 

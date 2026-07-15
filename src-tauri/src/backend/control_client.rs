@@ -1,20 +1,23 @@
 //! backend/control_client.rs — GUI 本机 control-file 客户端。
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     GUI 不得自建第二份运行时权威；配置 / Cloud Sync / backup 等 mutation 必须代理到 sidecar owner。
-//!     客户端从本机 control file 读取 port + token，经 loopback control API 读写权威状态。
+//!     GUI 不得自建第二份运行时权威；配置 / Cloud Sync / backup / Orchestrator deliver 等 mutation
+//!     必须代理到 sidecar owner。客户端从本机 control file 读取 port + token，经 loopback
+//!     control API 读写权威状态。
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 `BackendControlClient`：安全查询允许在连接失败时一次性刷新 control file；
 //!     mutation 经 `send_once` 只发送一次，响应不确定时绝不自动重放。
-//!     查询含 status / get-config / workbench-launch-summary / orchestrator snapshot / events / backup list；
+//!     查询含 status / get-config / workbench-launch-summary / orchestrator snapshot /
+//!     orchestrator review-diff / workflow-document get / events / backup list；
+//!     mutation 含 deliver-reviewed / workflow-document validate|save；
 //!     截图快捷键走两阶段补偿（CAS 预检 → OS replace → owner durable commit → 响应丢失对账）。
 
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
 use crate::backend::control_api::WorkbenchLaunchSummaryDto;
 use crate::backend::event_bus::{BackendRuntimeCursor, RuntimeRelayMessage};
-use crate::commands::orchestrator::OrchestratorRuntimeSnapshotDto;
+use crate::commands::orchestrator::{OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto};
 use crate::config_runtime::{
     ConfigSnapshot, ConfigUpdateRequest, ConfigUpdateResponse, RuntimeConfigPatch,
     RuntimeOwnerStatus,
@@ -26,6 +29,8 @@ use crate::hotkey::{
 use crate::models::transfer::{
     LocalTransferOpenTarget, TransferOpenAction, TransferOperationStatus, TransferTaskDto,
 };
+use crate::orchestrator::models::{OperationalNotificationSnapshot, OrchestratorReviewDiff};
+use crate::orchestrator::workflow::WorkflowDocument;
 use crate::workbench::operation_ledger::MutationTransportClass;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -39,6 +44,8 @@ const MUTATE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOUD_SYNC_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 /// 备份创建/恢复/回退超时（ZIP 读写 + exclusive maintenance_gate + 领域 bulk）。
 const BACKUP_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
+/// Orchestrator deliver 超时（git commit/push/merge 可能很长）。
+const ORCHESTRATOR_DELIVER_TIMEOUT: Duration = Duration::from_secs(360);
 
 /// 包装 get-config 响应（与 control_api::ControlConfigResponse 对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +173,53 @@ struct ControlConfigUpdateBody {
 struct ControlRuntimeSnapshotBody {
     control_token: String,
     project_id: String,
+}
+
+/// orchestrator deliver-reviewed control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorDeliverReviewedBody {
+    control_token: String,
+    project_id: String,
+    task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_review_digest: Option<String>,
+}
+
+/// orchestrator review-diff control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorReviewDiffBody {
+    control_token: String,
+    project_id: String,
+    task_id: String,
+}
+
+/// workflow-document/get control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlWorkflowDocumentGetBody {
+    control_token: String,
+    project_id: String,
+}
+
+/// workflow-document/validate control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlWorkflowDocumentValidateBody {
+    control_token: String,
+    project_id: String,
+    content: String,
+}
+
+/// workflow-document/save control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlWorkflowDocumentSaveBody {
+    control_token: String,
+    project_id: String,
+    expected_hash: String,
+    content: String,
 }
 
 /// events catch-up HTTP body。
@@ -721,6 +775,175 @@ impl BackendControlClient {
             },
         )
         .await
+    }
+
+    /// 经 control API 拉取运营通知 baseline snapshot。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI handshake 必须从 sidecar owner 拿 opaque 当前态 + asOfCursor，禁止读本机空 repo。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `operational-notifications/snapshot`；查询允许一次 control-file 刷新。
+    pub async fn operational_notification_snapshot(
+        &self,
+    ) -> Result<OperationalNotificationSnapshot, AppError> {
+        self.query_with_optional_refresh(
+            "operational-notifications/snapshot",
+            &ControlAuthBody {
+                control_token: self.control_token.clone(),
+            },
+        )
+        .await
+    }
+
+    /// 经 control API 在 owner 侧交付人工复核任务。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得在本进程跑 commit/push/merge 或持有 delivery lock；必须代理到 sidecar。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/deliver-reviewed`；超时 360s；mutation 不自动重试；透传 expectedReviewDigest。
+    pub async fn deliver_reviewed_orchestrator_task(
+        &self,
+        project_id: &str,
+        task_id: &str,
+        expected_review_digest: Option<&str>,
+    ) -> Result<OrchestratorTaskViewDto, AppError> {
+        let body = ControlOrchestratorDeliverReviewedBody {
+            control_token: self.control_token.clone(),
+            project_id: project_id.to_string(),
+            task_id: task_id.to_string(),
+            expected_review_digest: expected_review_digest.map(str::to_string),
+        };
+        match self
+            .send_once(
+                "orchestrator/deliver-reviewed",
+                &body,
+                ORCHESTRATOR_DELIVER_TIMEOUT,
+            )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧采集 review diff。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得本进程读 Git worktree；digest 与 Human Review 权威在 sidecar。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/review-diff`；git worktree 读可能超过 QUERY_TIMEOUT，
+    ///     用 60s send_once 且不自动重试（与 prepare-open 同类只读副作用语义）。
+    pub async fn get_orchestrator_review_diff(
+        &self,
+        project_id: &str,
+        task_id: &str,
+    ) -> Result<OrchestratorReviewDiff, AppError> {
+        let body = ControlOrchestratorReviewDiffBody {
+            control_token: self.control_token.clone(),
+            project_id: project_id.to_string(),
+            task_id: task_id.to_string(),
+        };
+        match self
+            .send_once(
+                "orchestrator/review-diff",
+                &body,
+                Duration::from_secs(60),
+            )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧读取 WORKFLOW 文档。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得猜项目根路径读盘；必须向 sidecar 要权威状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/workflow-document/get`；查询允许一次刷新。
+    pub async fn get_workflow_document(
+        &self,
+        project_id: &str,
+    ) -> Result<WorkflowDocument, AppError> {
+        self.query_with_optional_refresh(
+            "orchestrator/workflow-document/get",
+            &ControlWorkflowDocumentGetBody {
+                control_token: self.control_token.clone(),
+                project_id: project_id.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// 经 control API 在 owner 侧权威校验 WORKFLOW 内容。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     validate 与 save 必须同进程，避免前端提示与 owner parser 漂移。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/workflow-document/validate`；mutation 语义 send_once 不自动重试。
+    pub async fn validate_workflow_document(
+        &self,
+        project_id: &str,
+        content: &str,
+    ) -> Result<WorkflowDocument, AppError> {
+        let body = ControlWorkflowDocumentValidateBody {
+            control_token: self.control_token.clone(),
+            project_id: project_id.to_string(),
+            content: content.to_string(),
+        };
+        match self
+            .send_once("orchestrator/workflow-document/validate", &body, MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧 CAS 保存 WORKFLOW 文档。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     排他 create / expected-hash CAS 只能在 owner 执行；GuiClient 不得本进程写盘。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/workflow-document/save`；mutation 不自动重试。
+    pub async fn save_workflow_document(
+        &self,
+        project_id: &str,
+        expected_hash: &str,
+        content: &str,
+    ) -> Result<WorkflowDocument, AppError> {
+        let body = ControlWorkflowDocumentSaveBody {
+            control_token: self.control_token.clone(),
+            project_id: project_id.to_string(),
+            expected_hash: expected_hash.to_string(),
+            content: content.to_string(),
+        };
+        match self
+            .send_once("orchestrator/workflow-document/save", &body, MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
     }
 
     /// 提交字段级 patch：先读 status 再 CAS 一次。

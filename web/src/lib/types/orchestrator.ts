@@ -323,3 +323,113 @@ export interface OrchestratorEvidence {
   content: string;
   createdAt: string;
 }
+
+/**
+ * Human Review 单文件 diff 条目（对齐 Rust ReviewDiffFile，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Changes tab 需要路径、状态、增删统计与可选 patch；二进制/截断文件只能展示元数据。
+ *
+ * Code Logic（字段说明）:
+ *   path/status 必填；additions/deletions 为非负计数；patch 可空；binary/truncated 标记展示策略。
+ */
+export interface ReviewDiffFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch: string | null;
+  binary: boolean;
+  truncated: boolean;
+}
+
+/**
+ * Human Review 有界 diff 快照（对齐 Rust OrchestratorReviewDiff，camelCase）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   人工复核需只读展示 worktree 改动，并用 reviewDigest 在 Deliver 前检测审阅后漂移。
+ *
+ * Code Logic（字段说明）:
+ *   taskId/baseRef/headRef 标识身份；files 有界；totalFiles/truncated 描述截断；reviewDigest 供交付比对。
+ */
+export interface OrchestratorReviewDiff {
+  taskId: string;
+  baseRef: string;
+  headRef: string;
+  files: ReviewDiffFile[];
+  totalFiles: number;
+  truncated: boolean;
+  reviewDigest: string;
+}
+
+/**
+ * Review diff 加载态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   桌面/移动端 controller 需要区分未加载、加载中、就绪、错误与 peer 不支持能力。
+ *
+ * Code Logic（这个类型做什么）:
+ *   闭集五态字面量：idle | loading | ready | error | unsupported。
+ */
+export type OrchestratorReviewDiffLoadState =
+  | 'idle'
+  | 'loading'
+  | 'ready'
+  | 'error'
+  | 'unsupported';
+
+/**
+ * WORKFLOW.md 文档检测状态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   向导需要区分缺失、合法、非法与读失败，以决定创建模板、打开编辑或提示重试。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust WorkflowDocumentStatus 的 camelCase 序列化：missing|valid|invalid|readError。
+ */
+export type WorkflowDocumentStatus = 'missing' | 'valid' | 'invalid' | 'readError';
+
+/**
+ * 单条 WORKFLOW 诊断信息。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   权威 validator 必须返回可定位诊断，供向导高亮 front matter / 模板错误。
+ *
+ * Code Logic（字段说明）:
+ *   path/line/column/code/message；未知位置时 line/column 为 null。
+ */
+export interface WorkflowDiagnostic {
+  path: string;
+  line: number | null;
+  column: number | null;
+  code: string;
+  message: string;
+}
+
+/**
+ * 权威 WORKFLOW 文档快照 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   get/validate/save 共享同一文档视图：状态、正文、CAS hash、诊断与规范化 preview。
+ *
+ * Code Logic（字段说明）:
+ *   missing 时 content/contentHash 为空，preview 可携带默认模板建议；save 成功不改 delivery。
+ */
+export interface WorkflowDocument {
+  status: WorkflowDocumentStatus;
+  content: string | null;
+  contentHash: string | null;
+  diagnostics: WorkflowDiagnostic[];
+  preview?: string | null;
+}
+
+/**
+ * WORKFLOW 向导加载态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   controller 需区分空闲、加载中、就绪与错误，避免旧响应覆盖当前草稿。
+ *
+ * Code Logic（这个类型做什么）:
+ *   闭集四态字面量。
+ */
+export type WorkflowDocumentLoadState = 'idle' | 'loading' | 'ready' | 'error';

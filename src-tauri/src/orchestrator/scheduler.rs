@@ -303,7 +303,8 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
                 let reason = err.to_string();
                 // 单任务补偿失败不得中断后续任务：记录错误后继续，避免一个失败让其余 Preparing 永久占槽。
                 if let Err(compensate_err) =
-                    record_runner_failure(&state.orchestrator_repo, &task.id, &reason).await
+                    record_runner_failure(&state.orchestrator_repo, &task.id, &reason, Some(state))
+                        .await
                 {
                     tracing::error!(
                         task_id = %task.id,
@@ -410,6 +411,7 @@ async fn record_runner_failure(
     repo: &OrchestratorRepo,
     task_id: &str,
     reason: &str,
+    emit_state: Option<&AppState>,
 ) -> Result<OrchestratorTaskRow, AppError> {
     let blocked_task = if let Some(task) = repo
         .try_transition_task_status(
@@ -442,6 +444,13 @@ async fn record_runner_failure(
         None,
     )
     .await?;
+    if let Some(state) = emit_state {
+        crate::orchestrator::notifications::emit_task_operational_notification(
+            state,
+            crate::orchestrator::models::OperationalNotificationKind::Blocked,
+            &blocked_task,
+        );
+    }
     Ok(blocked_task)
 }
 
@@ -1161,7 +1170,7 @@ mod tests {
             .await
             .unwrap();
 
-        let returned = record_runner_failure(&repo, &task.id, "runner failed")
+        let returned = record_runner_failure(&repo, &task.id, "runner failed", None)
             .await
             .unwrap();
         let persisted = repo.get_task(&task.id).await.unwrap();
@@ -1192,7 +1201,7 @@ mod tests {
         task.session_id = Some("session-1".to_string());
         repo.create_task(&task).await.unwrap();
 
-        let returned = record_runner_failure(&repo, &task.id, "prompt write failed")
+        let returned = record_runner_failure(&repo, &task.id, "prompt write failed", None)
             .await
             .unwrap();
         let persisted = repo.get_task(&task.id).await.unwrap();

@@ -182,6 +182,30 @@ impl AppError {
             _ => None,
         }
     }
+
+    /// 返回稳定业务/分类 code，供测试与调用方程序化分支。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     部分业务错误（如 `review_diff_unavailable`、`runtime_owner_required`）以稳定 token
+    ///     作为 Conflict/Validation 消息；调用方需要 `err.code()` 做精确匹配，不能依赖本地化长文案。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `Remote` 返回信封 `meta.code`；其它带消息 variant 原样返回消息字符串；
+    ///     Db/Json/Io/Tauri 返回 `internal_error`。
+    pub fn code(&self) -> &str {
+        match self {
+            AppError::Remote { meta, .. } => meta.code.as_str(),
+            AppError::Conflict(msg)
+            | AppError::Validation(msg)
+            | AppError::NotFound(msg)
+            | AppError::Unavailable(msg)
+            | AppError::Timeout(msg)
+            | AppError::Bad(msg) => msg.as_str(),
+            AppError::Db(_) | AppError::Json(_) | AppError::Io(_) | AppError::Tauri(_) => {
+                "internal_error"
+            }
+        }
+    }
 }
 
 /// 把对端信封的稳定 code token 映射为内部稳定分类（Finding 3）。

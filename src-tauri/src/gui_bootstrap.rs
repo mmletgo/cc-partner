@@ -94,9 +94,8 @@ pub fn load_gui_bootstrap_from_path(path: &Path) -> Result<GuiBootstrapState, Ap
         return Ok(GuiBootstrapState::default());
     }
     let content = fs::read_to_string(path)?;
-    let state: GuiBootstrapState = serde_json::from_str(&content).map_err(|e| {
-        AppError::generic(format!("读取 gui-bootstrap.json 失败: {e}"))
-    })?;
+    let state: GuiBootstrapState = serde_json::from_str(&content)
+        .map_err(|e| AppError::generic(format!("读取 gui-bootstrap.json 失败: {e}")))?;
     Ok(state)
 }
 
@@ -119,17 +118,11 @@ pub fn save_gui_bootstrap(state: &GuiBootstrapState) -> Result<(), AppError> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     create_dir_all(parent) → `.gui-bootstrap.<pid>.tmp` → write/flush → rename。
-pub fn save_gui_bootstrap_to_path(
-    path: &Path,
-    state: &GuiBootstrapState,
-) -> Result<(), AppError> {
+pub fn save_gui_bootstrap_to_path(path: &Path, state: &GuiBootstrapState) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension(format!(
-        "tmp.{}",
-        std::process::id()
-    ));
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| AppError::generic(format!("序列化 gui-bootstrap 失败: {e}")))?;
     {

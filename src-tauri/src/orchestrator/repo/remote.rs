@@ -234,8 +234,8 @@ impl OrchestratorRepo {
             sqlx::query(
                 "INSERT INTO orchestrator_remote_outbox \
                  (id, device_id, device_name, remote_project_path, remote_project_id, request_json, \
-                  status, remote_task_id, last_error, created_at, updated_at, sent_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  status, remote_task_id, last_error, state_version, created_at, updated_at, sent_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(device_id)
@@ -246,6 +246,7 @@ impl OrchestratorRepo {
             .bind(RemoteOutboxStatus::Pending.as_str())
             .bind(Option::<&str>::None)
             .bind(Option::<&str>::None)
+            .bind(0_i64)
             .bind(&now)
             .bind(&now)
             .bind(Option::<&str>::None)
@@ -263,6 +264,7 @@ impl OrchestratorRepo {
             status: RemoteOutboxStatus::Pending,
             remote_task_id: None,
             last_error: None,
+            state_version: 0,
             created_at: now.clone(),
             updated_at: now,
             sent_at: None,
@@ -444,7 +446,8 @@ impl OrchestratorRepo {
         let now = Utc::now().to_rfc3339();
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
-                "UPDATE orchestrator_remote_outbox SET status = ?, last_error = ?, updated_at = ? \
+                "UPDATE orchestrator_remote_outbox \
+                 SET status = ?, last_error = ?, state_version = state_version + 1, updated_at = ? \
                  WHERE id = ? AND status = ?",
             )
             .bind(RemoteOutboxStatus::Failed.as_str())

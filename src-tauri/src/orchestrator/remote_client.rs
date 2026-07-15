@@ -15,15 +15,23 @@ use crate::commands::prompt_optimizer::OrchestratorTaskPromptCompletionDto;
 use crate::error::AppError;
 use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::{parse_peer_response, PeerCallError};
-use crate::net::protocol::CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1;
-use crate::orchestrator::config::OrchestratorAutomationConfigDto;
-use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
-use crate::orchestrator::remote_protocol::{
-    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq, RemoteListTasksReq,
-    RemoteOrchestratorConfigResp, RemoteOrchestratorEvidenceResp,
-    RemoteOrchestratorProjectRefreshResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
-    RemoteTaskReq, RemoteTaskReworkReq,
+use crate::net::protocol::{
+    CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
+    CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
 };
+use crate::orchestrator::config::OrchestratorAutomationConfigDto;
+use crate::orchestrator::models::{
+    OrchestratorEvidenceDto, OrchestratorReviewDiff, OrchestratorTaskDto,
+};
+use crate::orchestrator::remote_protocol::{
+    RemoteCompleteOrchestratorTaskPromptReq, RemoteCreateOrchestratorTaskReq,
+    RemoteDeliverReviewedReq, RemoteListTasksReq, RemoteOrchestratorConfigResp,
+    RemoteOrchestratorEvidenceResp, RemoteOrchestratorProjectRefreshResp,
+    RemoteOrchestratorReviewDiffResp, RemoteOrchestratorTaskListResp, RemoteRuntimeSnapshotReq,
+    RemoteTaskReq, RemoteTaskReworkReq, RemoteWorkflowDocumentGetReq, RemoteWorkflowDocumentResp,
+    RemoteWorkflowDocumentSaveReq, RemoteWorkflowDocumentValidateReq,
+};
+use crate::orchestrator::workflow::WorkflowDocument;
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
@@ -187,6 +195,181 @@ impl RemoteOrchestratorClient {
         Ok(resp.evidence)
     }
 
+    /// 读取 owning-device 有界 Human Review diff（capability-gated）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote shortcut 的 Changes tab 需要 owning device 生成的权威 diff；旧 peer 无
+    ///     `orchestrator.review-diff.v1` 时必须 Unsupported 且不打目标路由。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     1. `require_capability(.., CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1)`；
+    ///     2. POST `{base_url}/api/orchestrator/tasks/review-diff` body `{taskId}`；
+    ///     3. 解析 `{diff}` 为 `OrchestratorReviewDiff`。
+    pub async fn get_review_diff(
+        &self,
+        base_url: &str,
+        task_id: &str,
+    ) -> Result<OrchestratorReviewDiff, PeerCallError> {
+        PeerClient::new()
+            .require_capability(base_url, CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1)
+            .await?;
+
+        let url = endpoint_url(base_url, "/api/orchestrator/tasks/review-diff");
+        let body = RemoteTaskReq {
+            task_id: task_id.to_string(),
+        };
+        let outbound_request_id = self
+            .forwarded_request_id
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(crate::net::request_context::new_request_id);
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                outbound_request_id,
+            )
+            .timeout(remote_request_timeout(RemoteRequestTimeoutKind::Short))
+            .send()
+            .await
+            .map_err(|error| PeerCallError::Network {
+                url: url.clone(),
+                source: error,
+            })?;
+        let resp = parse_peer_response::<RemoteOrchestratorReviewDiffResp>(response, &url).await?;
+        Ok(resp.diff)
+    }
+
+    /// 读取 owning-device WORKFLOW 文档（capability-gated）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote 向导检测状态必须由 owning device 权威返回；旧 peer 缺失能力时 Unsupported。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     require `orchestrator.workflow-document.v1` 后 POST get 路由，解析 `{document}`。
+    pub async fn get_workflow_document(
+        &self,
+        base_url: &str,
+        project_id: &str,
+    ) -> Result<WorkflowDocument, PeerCallError> {
+        self.require_workflow_document_capability(base_url).await?;
+        let url = endpoint_url(base_url, "/api/orchestrator/workflow-document/get");
+        let body = RemoteWorkflowDocumentGetReq {
+            project_id: project_id.to_string(),
+        };
+        let resp: RemoteWorkflowDocumentResp = self
+            .post_json_peer(&url, &body, RemoteRequestTimeoutKind::Short)
+            .await?;
+        Ok(resp.document)
+    }
+
+    /// 在 owning-device 上权威校验 WORKFLOW content。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote 编辑器保存前必须用 owner parser，不能信前端 YAML 提示。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability gate 后 POST validate，解析 `{document}`。
+    pub async fn validate_workflow_document(
+        &self,
+        base_url: &str,
+        project_id: &str,
+        content: &str,
+    ) -> Result<WorkflowDocument, PeerCallError> {
+        self.require_workflow_document_capability(base_url).await?;
+        let url = endpoint_url(base_url, "/api/orchestrator/workflow-document/validate");
+        let body = RemoteWorkflowDocumentValidateReq {
+            project_id: project_id.to_string(),
+            content: content.to_string(),
+        };
+        let resp: RemoteWorkflowDocumentResp = self
+            .post_json_peer(&url, &body, RemoteRequestTimeoutKind::Short)
+            .await?;
+        Ok(resp.document)
+    }
+
+    /// CAS 保存 owning-device WORKFLOW 文档。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote 向导保存必须在文件所在设备做 expectedHash 比对与原子写；不 dispatch。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability gate 后 POST save，解析 `{document}`。
+    pub async fn save_workflow_document(
+        &self,
+        base_url: &str,
+        project_id: &str,
+        expected_hash: &str,
+        content: &str,
+    ) -> Result<WorkflowDocument, PeerCallError> {
+        self.require_workflow_document_capability(base_url).await?;
+        let url = endpoint_url(base_url, "/api/orchestrator/workflow-document/save");
+        let body = RemoteWorkflowDocumentSaveReq {
+            project_id: project_id.to_string(),
+            expected_hash: expected_hash.to_string(),
+            content: content.to_string(),
+        };
+        let resp: RemoteWorkflowDocumentResp = self
+            .post_json_peer(&url, &body, RemoteRequestTimeoutKind::Long)
+            .await?;
+        Ok(resp.document)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     三条 workflow-document 路由共享同一能力 token，client 必须先 gate 再发请求。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 PeerClient::require_capability。
+    async fn require_workflow_document_capability(
+        &self,
+        base_url: &str,
+    ) -> Result<(), PeerCallError> {
+        PeerClient::new()
+            .require_capability(base_url, CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1)
+            .await
+            .map(|_| ())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     workflow-document client 方法复用统一的 request-id/timeout/解析路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST JSON body，解析 PeerCallError。
+    async fn post_json_peer<T, B>(
+        &self,
+        url: &str,
+        body: &B,
+        timeout_kind: RemoteRequestTimeoutKind,
+    ) -> Result<T, PeerCallError>
+    where
+        T: DeserializeOwned,
+        B: Serialize,
+    {
+        let outbound_request_id = self
+            .forwarded_request_id
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(crate::net::request_context::new_request_id);
+        let response = self
+            .client
+            .post(url)
+            .json(body)
+            .header(
+                crate::net::request_context::REQUEST_ID_HEADER,
+                outbound_request_id,
+            )
+            .timeout(remote_request_timeout(timeout_kind))
+            .send()
+            .await
+            .map_err(|error| PeerCallError::Network {
+                url: url.to_string(),
+                source: error,
+            })?;
+        parse_peer_response::<T>(response, url).await
+    }
+
     /// 将远端草稿任务入队。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -275,20 +458,43 @@ impl RemoteOrchestratorClient {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     remote shortcut 上的显式交付必须由 owning device 检查 Settings 并运行 Git delivery pipeline。
+    ///     对声明 `orchestrator.review-diff.v1` 的 peer，请求体必须携带 expectedReviewDigest 供 owner recollect 比对；
+    ///     旧 peer 无该能力时保留 `{taskId}` 旧合同，避免未知字段/强门禁导致交付失败。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     POST `{base_url}/api/orchestrator/tasks/deliver-reviewed`，解析 delivery pipeline 返回的任务 DTO。
+    ///     health 探测 peer 是否支持 review-diff：支持则 POST `{taskId, expectedReviewDigest?}`，
+    ///     否则 POST `{taskId}`；解析 delivery pipeline 返回的任务 DTO。
     pub async fn deliver_reviewed_task(
         &self,
         base_url: &str,
         task_id: &str,
+        expected_review_digest: Option<&str>,
     ) -> Result<OrchestratorTaskDto, AppError> {
-        self.post_task_req(
-            endpoint_url(base_url, "/api/orchestrator/tasks/deliver-reviewed"),
-            task_id,
-            RemoteRequestTimeoutKind::Long,
-        )
-        .await
+        let url = endpoint_url(base_url, "/api/orchestrator/tasks/deliver-reviewed");
+        let supports_review_diff = match PeerClient::new().health_info(base_url).await {
+            Ok(health) => health
+                .protocol_info()
+                .supports(CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1),
+            // health 探测失败时回落旧 body，让后续 deliver 请求自行暴露网络错误。
+            Err(_) => false,
+        };
+        if supports_review_diff {
+            self.post_json(
+                url,
+                &RemoteDeliverReviewedReq {
+                    task_id: task_id.to_string(),
+                    expected_review_digest: expected_review_digest
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|value| value.to_string()),
+                },
+                RemoteRequestTimeoutKind::Long,
+            )
+            .await
+        } else {
+            self.post_task_req(url, task_id, RemoteRequestTimeoutKind::Long)
+                .await
+        }
     }
 
     /// 终止远端任务。
@@ -1356,6 +1562,261 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     review-diff 生产 client 方法必须把 require_capability 与路由调用合成原子方法；
+    ///     缺失 orchestrator.review-diff.v1 时返回 Unsupported 且不调用目标路由。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动无能力 token 的 health + review-diff 路由计数器服务，调用 get_review_diff，
+    ///     断言 Unsupported 且 hit=0。
+    #[tokio::test]
+    async fn review_diff_returns_unsupported_when_capability_absent() {
+        use crate::net::peer_error::PeerCallError;
+        use crate::net::protocol::CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1;
+        use crate::net::routes::health::HealthResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_route = hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "owning-device".to_string(),
+                        device_name: "Owning Device".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 1,
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/review-diff",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({
+                            "diff": {
+                                "taskId": "t1",
+                                "baseRef": "b",
+                                "headRef": "h",
+                                "files": [],
+                                "totalFiles": 0,
+                                "truncated": false,
+                                "reviewDigest": "d"
+                            }
+                        }))
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+
+        let err = RemoteOrchestratorClient::new()
+            .get_review_diff(&base_url, "task-1")
+            .await
+            .expect_err("无能力 token 应被 capability gate 拦截");
+        assert!(
+            matches!(err, PeerCallError::Unsupported { capability, .. } if capability == CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1),
+            "expected Unsupported for review-diff capability, got {err:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "capability gate 不得调用目标路由"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     workflow-document client 必须 capability-gate；缺失 token 时 Unsupported 且不打目标路由。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 无 token + get 路由计数器，调用 get_workflow_document 断言 Unsupported 且 hit=0。
+    #[tokio::test]
+    async fn workflow_document_returns_unsupported_when_capability_absent() {
+        use crate::net::peer_error::PeerCallError;
+        use crate::net::protocol::CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1;
+        use crate::net::routes::health::HealthResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_route = hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "owning-device".to_string(),
+                        device_name: "Owning Device".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 1,
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/workflow-document/get",
+                post(move |Json(_body): Json<serde_json::Value>| {
+                    let hits = hits_route.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({
+                            "document": {
+                                "status": "missing",
+                                "content": null,
+                                "contentHash": null,
+                                "diagnostics": []
+                            }
+                        }))
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+
+        let err = RemoteOrchestratorClient::new()
+            .get_workflow_document(&base_url, "project-1")
+            .await
+            .expect_err("无能力 token 应被 capability gate 拦截");
+        assert!(
+            matches!(err, PeerCallError::Unsupported { capability, .. } if capability == CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1),
+            "expected Unsupported for workflow-document capability, got {err:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "capability gate 不得调用目标路由"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对声明 review-diff 能力的 owning device，deliver-reviewed 必须发送 expectedReviewDigest，
+    ///     供 owner 在交付前 recollect 比对。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动带 `orchestrator.review-diff.v1` 的 health + deliver-reviewed 捕获 body 的服务，
+    ///     调用 deliver_reviewed_task(..., Some(digest))，断言 body 含 expectedReviewDigest。
+    #[tokio::test]
+    async fn deliver_reviewed_sends_digest_when_review_diff_capability_present() {
+        use crate::net::protocol::CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1;
+        use crate::net::routes::health::HealthResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let captured_route = captured.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "owning-device".to_string(),
+                        device_name: "Owning Device".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 1,
+                        capabilities: vec![CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1.to_string()],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/deliver-reviewed",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let captured = captured_route.clone();
+                    async move {
+                        *captured.lock().expect("capture lock") = Some(body);
+                        Json(deliver_reviewed_task_dto_json())
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+
+        let _task = RemoteOrchestratorClient::new()
+            .deliver_reviewed_task(&base_url, "task-1", Some("digest-a"))
+            .await
+            .expect("deliver should succeed");
+
+        let body = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("body captured");
+        assert_eq!(body["taskId"], "task-1");
+        assert_eq!(body["expectedReviewDigest"], "digest-a");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 peer 未宣告 review-diff 时必须保留 `{taskId}` 旧合同，不把 digest 塞进 body，
+    ///     避免混合版本交付失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     启动无 review-diff capability 的 health + deliver-reviewed 捕获 body 服务，
+    ///     即使传入 digest 也断言 body 只有 taskId。
+    #[tokio::test]
+    async fn deliver_reviewed_omits_digest_when_review_diff_capability_absent() {
+        use crate::net::routes::health::HealthResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let captured_route = captured.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "legacy-device".to_string(),
+                        device_name: "Legacy Device".to_string(),
+                        http_port: 8765,
+                        ts: 1_700_000_000,
+                        protocol_version: 1,
+                        capabilities: vec![],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/deliver-reviewed",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let captured = captured_route.clone();
+                    async move {
+                        *captured.lock().expect("capture lock") = Some(body);
+                        Json(deliver_reviewed_task_dto_json())
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+
+        let _task = RemoteOrchestratorClient::new()
+            .deliver_reviewed_task(&base_url, "task-1", Some("digest-a"))
+            .await
+            .expect("legacy deliver should succeed without digest field");
+
+        let body = captured
+            .lock()
+            .expect("capture lock")
+            .clone()
+            .expect("body captured");
+        assert_eq!(body["taskId"], "task-1");
+        assert!(
+            body.get("expectedReviewDigest").is_none(),
+            "legacy peer 不得发送 expectedReviewDigest，实际: {body}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     对端离线（health_info send 失败）时，方法必须返回 `PeerCallError::Network`，
     ///     而不是把网络错误折叠成业务文案或泛型错误，让上层能据此做"离线/在线"决策。
     ///
@@ -1739,6 +2200,29 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     deliver-reviewed client 测试只需稳定的任务 DTO fixture，避免每个用例重复字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回可被 OrchestratorTaskDto 反序列化的最小 camelCase JSON。
+    fn deliver_reviewed_task_dto_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "task-1",
+            "projectId": "project-1",
+            "title": "t",
+            "goal": "g",
+            "acceptanceCriteria": "a",
+            "status": "delivering",
+            "workflowState": "merging",
+            "runState": "delivering",
+            "source": "internal",
+            "priority": 0,
+            "attempt": 1,
+            "createdAt": "2026-07-05T00:00:00Z",
+            "updatedAt": "2026-07-05T00:00:00Z"
+        })
     }
 
     /// Business Logic（为什么需要这个测试）:

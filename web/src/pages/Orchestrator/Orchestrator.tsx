@@ -34,6 +34,7 @@ import { OrchestratorBoard } from './views/OrchestratorBoard';
 import { OrchestratorCreateDialog } from './views/OrchestratorCreateDialog';
 import { OrchestratorOutbox } from './views/OrchestratorOutbox';
 import { OrchestratorTaskDrawer } from './views/OrchestratorTaskDrawer';
+import { WorkflowWizardDialog } from './views/WorkflowWizardDialog';
 import styles from './Orchestrator.module.css';
 
 export type { OrchestratorPanelProps };
@@ -161,6 +162,14 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                           ? t('orchestrator:snapshot.workflowValid')
                           : t('orchestrator:snapshot.workflowInvalid')}
                       </Pill>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={c.handleOpenWorkflowWizard}
+                        data-testid="open-workflow-wizard"
+                      >
+                        {t('orchestrator:workflowWizard.open')}
+                      </Button>
                       <span className={styles.snapshotMetric}>
                         {t('orchestrator:snapshot.slotsUsed', {
                           used: c.runtimeSnapshot.slotsUsed,
@@ -334,6 +343,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           selectedTaskCanStart={c.selectedTaskCanStart}
           selectedTaskCanComplete={c.selectedTaskCanComplete}
           selectedTaskCanRequestRework={c.selectedTaskCanRequestRework}
+          selectedTaskShowDeliver={c.selectedTaskShowDeliver}
           selectedTaskCanDeliver={c.selectedTaskCanDeliver}
           selectedTaskCanCancel={c.selectedTaskCanCancel}
           selectedTaskCanControlBlocked={c.selectedTaskCanControlBlocked}
@@ -352,6 +362,21 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           latestVerifierEvidence={c.latestVerifierEvidence}
           latestRepairPromptEvidence={c.latestRepairPromptEvidence}
           developmentAttemptEvidenceItems={c.developmentAttemptEvidenceItems}
+          detailTab={c.detailTab}
+          onDetailTabChange={c.setDetailTab}
+          reviewDiffState={c.reviewDiffState}
+          reviewDiff={c.reviewDiff}
+          reviewDiffError={c.reviewDiffError}
+          selectedReviewFilePath={c.selectedReviewFilePath}
+          onSelectReviewFilePath={c.setSelectedReviewFilePath}
+          onRetryReviewDiff={c.handleRetryReviewDiff}
+          reworkDialogOpen={c.reworkDialogOpen}
+          reworkError={c.reworkError}
+          onOpenReworkDialog={c.handleOpenReworkDialog}
+          onCloseReworkDialog={c.handleCloseReworkDialog}
+          onSubmitRework={(reason) => {
+            void c.handleSubmitRework(reason);
+          }}
           onClose={c.handleCloseTaskDrawer}
           onStart={() => {
             void c.handleStartSelectedTask();
@@ -362,9 +387,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           onOpenWorkbench={c.handleOpenWorkbench}
           onRetry={() => {
             void c.handleRetryTask();
-          }}
-          onRequestRework={() => {
-            void c.handleRequestReworkTask();
           }}
           onDeliver={() => {
             void c.handleDeliverReviewedTask();
@@ -393,6 +415,35 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         onCreateAction={(createAction) => {
           void c.handleCreateTaskAction(createAction);
         }}
+      />
+      <WorkflowWizardDialog
+        open={c.workflowWizardOpen}
+        loadState={c.workflowLoadState}
+        documentStatus={c.workflowDocumentStatus}
+        draft={c.workflowDraft}
+        expectedHash={c.workflowExpectedHash}
+        diagnostics={c.workflowDiagnostics}
+        preview={c.workflowPreview}
+        loadError={c.workflowLoadError}
+        saveError={c.workflowSaveError}
+        conflict={c.workflowConflict}
+        busy={c.workflowBusy}
+        focusedDiagnosticLine={c.workflowFocusedDiagnosticLine}
+        draftTextareaRef={c.workflowDraftTextareaRef}
+        onClose={c.handleCloseWorkflowWizard}
+        onDraftChange={c.handleWorkflowDraftChange}
+        onCreateFromTemplate={c.handleCreateWorkflowFromTemplate}
+        onValidate={() => {
+          void c.handleValidateWorkflowDocument();
+        }}
+        onSave={() => {
+          void c.handleSaveWorkflowDocument();
+        }}
+        onReload={() => {
+          void c.handleReloadWorkflowDocument();
+        }}
+        onOpenFile={c.handleOpenWorkflowFile}
+        onFocusDiagnostic={c.handleFocusWorkflowDiagnostic}
       />
     </div>
   );

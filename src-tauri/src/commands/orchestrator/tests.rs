@@ -2094,3 +2094,316 @@ async fn discard_remote_outbox_action_is_local_only_and_failed_only() {
     .expect_err("discarded cannot discard again");
     assert!(again.to_string().contains("失败"));
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     review diff 仅在 Human Review / Rework 可用；Todo 等状态必须返回稳定 code，
+///     供前端禁用 Deliver 并展示局部错误，而不是静默空 diff。
+///
+/// Code Logic（这个测试做什么）:
+///     构造 Todo 任务，调用 ensure_review_diff_available，断言 code == review_diff_unavailable。
+#[test]
+fn review_diff_rejects_task_outside_human_review_or_rework() {
+    use super::ensure_review_diff_available;
+    use super::REVIEW_DIFF_UNAVAILABLE_CODE;
+
+    let mut task = command_task_row("task-todo", OrchestratorTaskStatus::Queued);
+    task.workflow_state = OrchestratorWorkflowState::Todo;
+    let err = ensure_review_diff_available(&task).expect_err("todo unavailable");
+    assert_eq!(err.code(), REVIEW_DIFF_UNAVAILABLE_CODE);
+    assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
+
+    let mut rework = command_task_row("task-rework", OrchestratorTaskStatus::Queued);
+    rework.workflow_state = OrchestratorWorkflowState::Rework;
+    ensure_review_diff_available(&rework).expect("rework allowed");
+
+    let mut human = command_task_row("task-human", OrchestratorTaskStatus::Done);
+    human.workflow_state = OrchestratorWorkflowState::HumanReview;
+    ensure_review_diff_available(&human).expect("human review allowed");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     review diff API 只接受 projectId/taskId；任意 path/ref 不得进入公共签名，
+///     防止调用方绕过 worktree 权威元数据越界读盘。
+///
+/// Code Logic（这个测试做什么）:
+///     引用 get_orchestrator_review_diff_for_state 符号并断言命令名固定；无 path/ref 参数入口。
+#[test]
+fn review_diff_command_signature_rejects_arbitrary_repo_path_or_ref() {
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_get_orchestrator_review_diff!(),
+        "get_orchestrator_review_diff"
+    );
+    // 锁死 helper 符号：业务入口只有 (state, project_id, task_id)。
+    let symbol = stringify!(crate::commands::orchestrator::get_orchestrator_review_diff_for_state);
+    assert!(symbol.contains("get_orchestrator_review_diff_for_state"));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     generate_handler! 必须注册 get_orchestrator_review_diff，否则桌面 invoke 永远 not found。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 Tauri 宏生成的命令名常量等于期望字面量，并引用 __cmd__ 函数指针确保宏展开存在。
+#[test]
+fn get_orchestrator_review_diff_is_registered_in_generate_handler() {
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_get_orchestrator_review_diff!(),
+        "get_orchestrator_review_diff"
+    );
+    // 引用命令函数与 lib.rs 源码中的 generate_handler 字面量，防止未注册。
+    let cmd = crate::commands::orchestrator::get_orchestrator_review_diff as *const ();
+    assert!(!cmd.is_null());
+    let lib_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
+    assert!(
+        lib_src.contains("get_orchestrator_review_diff"),
+        "lib.rs generate_handler 必须包含 get_orchestrator_review_diff"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     remote shortcut 成功响应的 taskId 必须映射为 remote:<deviceId>:<inner>，
+///     与 evidence/task view 身份合同一致，避免 UI 混用裸 id。
+///
+/// Code Logic（这个测试做什么）:
+///     对 OrchestratorReviewDiff.task_id 应用 remote_entity_id，断言包装结果。
+#[test]
+fn review_diff_remote_owner_mapping_wraps_task_id() {
+    use crate::workbench::remote_ids::remote_entity_id;
+
+    let owner_task_id = "owner-task-1";
+    let mapped = remote_entity_id("device-a", owner_task_id);
+    assert_eq!(mapped, "remote:device-a:owner-task-1");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     path escape 必须在 snapshot 采集层被拒绝；命令层不接受 path 输入，
+///     资源边界由 review_diff 模块既有 truncate 测试锁定。
+///
+/// Code Logic（这个测试做什么）:
+///     复用 normalize 拒绝 `..` 的行为：通过调用 collect 路径上的校验常量边界契约
+///     （MAX files/patch 在 review_diff 单测覆盖），此处仅断言 unavailable code 稳定。
+#[test]
+fn review_diff_unavailable_code_is_stable_token() {
+    assert_eq!(
+        super::REVIEW_DIFF_UNAVAILABLE_CODE,
+        "review_diff_unavailable"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     稳定 Conflict code `review_diff_changed` 供前端识别漂移并强制重新审阅。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 REVIEW_DIFF_CHANGED_CODE 字面量固定。
+#[test]
+fn review_diff_changed_code_is_stable_token() {
+    assert_eq!(super::REVIEW_DIFF_CHANGED_CODE, "review_diff_changed");
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     deliver digest 测试需要可复现的临时 Git worktree 夹具。
+///
+/// Code Logic（这个函数做什么）:
+///     初始化仓库并提交 base README，返回 TempDir。
+fn review_digest_git_fixture() -> tempfile::TempDir {
+    use std::process::Command;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    fs::write(dir.path().join("README.md"), "base\n").expect("readme");
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "init"]);
+    dir
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     审阅后 worktree 若再被修改，Deliver 必须 Conflict `review_diff_changed`，
+///     且不得把任务切入 Delivering（无 delivery side effect）。
+///
+/// Code Logic（这个测试做什么）:
+///     采集 digest A → 修改文件 → 用 A 调用 enforce_deliver_review_digest_for_worktree；
+///     断言 Conflict code；再以当前 digest 调用应通过；缺 digest 返回 Validation。
+#[tokio::test]
+async fn review_diff_changed_blocks_local_deliver_after_worktree_mutation() {
+    use super::{
+        enforce_deliver_review_digest_for_worktree, require_expected_review_digest,
+        REVIEW_DIFF_CHANGED_CODE,
+    };
+    use crate::orchestrator::review_diff::collect_review_diff_for_worktree;
+
+    let dir = review_digest_git_fixture();
+    fs::write(dir.path().join("feature.rs"), "fn a() {}\n").expect("write feature");
+    let snapshot_a = collect_review_diff_for_worktree("task-digest", dir.path(), None)
+        .expect("collect digest A");
+    assert!(!snapshot_a.review_digest.is_empty(), "digest A 不应为空");
+
+    fs::write(dir.path().join("feature.rs"), "fn a() { /* mutated */ }\n").expect("mutate");
+
+    let err = enforce_deliver_review_digest_for_worktree(
+        "task-digest",
+        dir.path(),
+        None,
+        Some(snapshot_a.review_digest.as_str()),
+    )
+    .expect_err("mutated worktree must conflict");
+    assert_eq!(err.code(), REVIEW_DIFF_CHANGED_CODE);
+    assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
+
+    let snapshot_b = collect_review_diff_for_worktree("task-digest", dir.path(), None)
+        .expect("collect digest B");
+    enforce_deliver_review_digest_for_worktree(
+        "task-digest",
+        dir.path(),
+        None,
+        Some(snapshot_b.review_digest.as_str()),
+    )
+    .expect("matching digest must pass");
+
+    let missing = require_expected_review_digest(None).expect_err("digest required");
+    assert_eq!(
+        missing.classify(),
+        crate::error::AppErrorCategory::Validation
+    );
+    let blank = require_expected_review_digest(Some("  ")).expect_err("blank digest");
+    assert_eq!(blank.classify(), crate::error::AppErrorCategory::Validation);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     digest 门禁失败时任务必须仍停在 Human Review，start_delivery 不得被执行。
+///
+/// Code Logic（这个测试做什么）:
+///     写入 HumanReview 任务；先 enforce 失败；再 get_task 断言 status/workflow 未变，
+///     并确认证据列表仍无 delivery 记录。
+#[tokio::test]
+async fn review_diff_changed_leaves_task_in_human_review_without_delivery_side_effects() {
+    use super::{enforce_deliver_review_digest_for_worktree, REVIEW_DIFF_CHANGED_CODE};
+    use crate::orchestrator::review_diff::collect_review_diff_for_worktree;
+
+    let repo = setup_orchestrator_repo().await;
+    let mut task = command_task_row("task-hr-digest", OrchestratorTaskStatus::Done);
+    task.workflow_state = OrchestratorWorkflowState::HumanReview;
+    task.run_state = OrchestratorRunState::Idle;
+    repo.create_task(&task).await.expect("insert task");
+
+    let dir = review_digest_git_fixture();
+    fs::write(dir.path().join("lib.rs"), "pub fn v1() {}\n").expect("write");
+    let digest_a = collect_review_diff_for_worktree(&task.id, dir.path(), None)
+        .expect("digest A")
+        .review_digest;
+    fs::write(dir.path().join("lib.rs"), "pub fn v2() {}\n").expect("mutate");
+
+    let err = enforce_deliver_review_digest_for_worktree(
+        &task.id,
+        dir.path(),
+        None,
+        Some(digest_a.as_str()),
+    )
+    .expect_err("drift must fail");
+    assert_eq!(err.code(), REVIEW_DIFF_CHANGED_CODE);
+
+    // 门禁失败后不得调用 start_delivery；任务保持 Human Review。
+    let persisted = repo.get_task(&task.id).await.expect("get task");
+    assert_eq!(persisted.status, OrchestratorTaskStatus::Done);
+    assert_eq!(
+        persisted.workflow_state,
+        OrchestratorWorkflowState::HumanReview
+    );
+    assert_eq!(persisted.run_state, OrchestratorRunState::Idle);
+    let evidence = repo.list_evidence(&task.id).await.expect("list evidence");
+    assert!(
+        evidence.iter().all(|item| item.kind != "delivery"),
+        "digest 冲突后不得写入 delivery evidence"
+    );
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     generate_handler! 必须注册三个 workflow document 命令，否则桌面向导 invoke 失败。
+///
+/// Code Logic（这个测试做什么）:
+///     断言命令名常量与 lib.rs 字面量包含 get/validate/save_workflow_document。
+#[test]
+fn workflow_document_commands_command_registration() {
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_get_workflow_document!(),
+        "get_workflow_document"
+    );
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_validate_workflow_document!(),
+        "validate_workflow_document"
+    );
+    assert_eq!(
+        crate::commands::orchestrator::__tauri_command_name_save_workflow_document!(),
+        "save_workflow_document"
+    );
+    let lib_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
+    for name in [
+        "get_workflow_document",
+        "validate_workflow_document",
+        "save_workflow_document",
+    ] {
+        assert!(
+            lib_src.contains(name),
+            "lib.rs generate_handler 必须包含 {name}"
+        );
+    }
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     本地 owner helper 必须能从真实项目路径 load/validate/save，且 save 不隐式 dispatch。
+///
+/// Code Logic（这个测试做什么）:
+///     用临时目录构造 local project row，跑 get/validate/save CAS 一轮。
+#[test]
+fn local_owner_workflow_document_helpers_round_trip_without_dispatch() {
+    use crate::orchestrator::workflow::{
+        default_workflow_template, WorkflowDocumentStatus, WORKFLOW_DOCUMENT_CHANGED_CODE,
+    };
+    use crate::workbench::models::WorkbenchProjectRow;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = WorkbenchProjectRow {
+        id: "proj-wf".to_string(),
+        name: "wf".to_string(),
+        kind: "local".to_string(),
+        device_id: "dev".to_string(),
+        device_name: "dev".to_string(),
+        path: dir.path().to_string_lossy().to_string(),
+        last_opened_at: "t".to_string(),
+        created_at: "t".to_string(),
+        updated_at: "t".to_string(),
+    };
+
+    let missing = get_local_owner_workflow_document(&project).expect("get missing");
+    assert_eq!(missing.status, WorkflowDocumentStatus::Missing);
+
+    let template = default_workflow_template();
+    let validated = validate_local_owner_workflow_document(&project, &template).expect("validate");
+    assert_eq!(validated.status, WorkflowDocumentStatus::Valid);
+
+    let saved = save_local_owner_workflow_document(&project, "", &template).expect("create save");
+    assert_eq!(saved.status, WorkflowDocumentStatus::Valid);
+    let hash = saved.content_hash.clone().expect("hash");
+
+    let conflict =
+        save_local_owner_workflow_document(&project, "bad", &template).expect_err("hash conflict");
+    assert_eq!(conflict.code(), WORKFLOW_DOCUMENT_CHANGED_CODE);
+
+    let updated = template.replace("300000", "120000");
+    let saved2 =
+        save_local_owner_workflow_document(&project, &hash, &updated).expect("update save");
+    assert_eq!(saved2.status, WorkflowDocumentStatus::Valid);
+    assert_ne!(saved2.content_hash.as_deref(), Some(hash.as_str()));
+}

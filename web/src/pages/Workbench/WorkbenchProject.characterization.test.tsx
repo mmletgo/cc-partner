@@ -372,4 +372,23 @@ describe('Workbench project domain (characterization)', () => {
     const createButtonAfter = screen.getByRole('button', { name: '新建 worktree' });
     expect(createButtonAfter.hasAttribute('disabled')).toBe(false);
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   files deep link 必须经 automation controller 调用 file controller 的 openFileByPath，
+   *   Workbench 只接线，不得新增第八个 controller。
+   *
+   * Code Logic（这个测试做什么）:
+   *   静态扫描 Workbench.tsx 确认 openFileByPath 注入 automation 且仍只有七个 useWorkbench*Controller。
+   */
+  test('wires openFileByPath into automation without an eighth controller', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { dirname, join } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Workbench.tsx'), 'utf8');
+    const controllerCalls = source.match(/useWorkbench\w+Controller\(/g) ?? [];
+    expect(controllerCalls).toHaveLength(7);
+    expect(source).toContain('openFileByPath');
+    expect(source).toMatch(/useWorkbenchAutomationController\(\{[\s\S]*openFileByPath/);
+  });
 });
