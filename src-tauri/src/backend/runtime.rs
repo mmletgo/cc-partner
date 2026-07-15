@@ -430,7 +430,11 @@ pub async fn build_app_state_with_role(
         .clone();
     let pool = init_db(&db_path).await?;
     // 全局写屏障：所有生产 SQLite writer 共享；restore 独占。
-    let maintenance_gate = Arc::new(DatabaseMaintenanceGate::new());
+    // 跨进程：GUI 与 sidecar 共用 data_dir/db-maintenance.lock，避免恢复期本地写竞态。
+    let maintenance_lock = crate::config::data_dir()?.join("db-maintenance.lock");
+    let maintenance_gate = Arc::new(DatabaseMaintenanceGate::with_cross_process_lock(
+        maintenance_lock,
+    ));
 
     // 生产 writer 一律 with_gate，共享 restore exclusive 屏障。
     let prompt_repo = Arc::new(PromptRepo::with_gate(
