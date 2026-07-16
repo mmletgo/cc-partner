@@ -7,8 +7,8 @@
   "subjectCommit": "7db9b8899f1f8a19cf3aec0c8b6cf519bd4c7319",
   "subjectTag": "subject-0.7.0-macos-aarch64-4",
   "rcWorkflowRunId": "29429534980",
-  "decision": "NO-GO",
-  "decisionReason": "Required L3 GUI-permissions and VoiceOver executions are FAIL (interactive rows incomplete). RC provenance is valid; beta not releasable until both executions PASS.",
+  "decision": "GO",
+  "decisionReason": "L3 GUI-permissions and VoiceOver executions now PASS via human operator walkthrough on the packaged candidate. macos-aarch64 evidence row is the only one covered by this claim; deferred platforms remain NOT VERIFIED. Beta publish remains UNAUTHORIZED pending explicit user authorization; this GO only flips the evidence-backed decision, not the publish gate.",
   "uncertifiedSurfaces": [
     "Windows",
     "WSL",
@@ -18,10 +18,9 @@
     "iOS",
     "Android",
     "NVDA",
-    "full/stable release",
-    "L3-MACOS-GUI-PERMISSIONS-001 interactive permission matrix",
-    "L3-MACOS-VOICEOVER-001 VoiceOver journey"
+    "full/stable release"
   ],
   "releaseMode": "beta-prerelease",
-  "prereleaseOnly": true
+  "prereleaseOnly": true,
+  "publishAuthorized": false
 }

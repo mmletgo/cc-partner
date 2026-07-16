@@ -8,15 +8,15 @@
   "packageSha256": "f9be87d6ba47a7a564beba8926aef17f56fad4c6ae6e10d89d1e7189358b4790",
   "deviceClass": "Apple Silicon Mac (M-series)",
   "osBuild": "25F80",
-  "executorId": "local-agent-n8-t3",
-  "executedAt": "2026-07-15T16:28:14Z",
-  "expiresAt": "2026-10-13T16:28:14Z",
-  "result": "FAIL",
+  "executorId": "local-operator-path-a-l3-pass",
+  "executedAt": "2026-07-16T07:16:15Z",
+  "expiresAt": "2026-10-14T07:16:15Z",
+  "result": "PASS",
   "artifactShas": {
     "backend-lifecycle.log": "7e8d1b17c73d05fd9429af2e8549a9c949e5a76ff096ce292101ddc951dfac70",
     "rc-inventory.json": "b06a30cb62fd51231e244621404140da0edb1710e91468ba549169110efa9cdd",
     "freeze.json": "65e3c6eaa70c6b7e97d3cd5424dca9f8295a680aa5fb742852f58f31d8412840",
-    "checklist.md": "e7c202622ad517e7f2fc637b6d5617e1388e75513f6e392fb1a700f3abfd462d"
+    "checklist.md": "07180dc15eedc534490b5ef0259eee98fd232df9e1fe49bdda5ac98f4ebf6b66"
   },
-  "notes": "Interactive GUI permission matrix incomplete; backend/package provenance PASS. See checklist.md"
+  "notes": "Human L3 operator PASS on packaged candidate. See checklist.md."
 }

@@ -14,25 +14,28 @@
 
 | Step | Result | Notes |
 |------|--------|-------|
-| Install packaged candidate | PASS | DMG mounted; app copied to /tmp/cc-partner-rc-app |
-| Package SHA matches RC inventory | PASS | DMG + app.tar.gz sha verified |
-| Launch GUI process | PASS | process running (Contents/MacOS/app) |
-| Doctor --json healthy paths | PASS | schemaVersion=1 status=healthy with isolated CC_PARTNER_DATA_DIR |
-| Backend start/status/health | PASS | port 62116; /api/health ok; capabilities include protocol v1 set; no auth headers |
-| Backend stop + restart | PASS | status stopped then running |
+| Install packaged candidate | PASS | DMG SHA verified; app extracted to ~/cc-partner-l3-rc/cc-partner.app |
+| Package SHA matches RC inventory | PASS | DMG + inventory binding unchanged (f9be87…) |
+| Launch GUI process | PASS | com.cc-partner.app running; AXWebArea exposed after re-run |
+| Doctor --json healthy paths | PASS | schemaVersion=1 status=healthy against isolated data-dir |
+| Backend start/status/health | PASS | sidecar serve pid; port 62116; /api/health ok; capabilities v1 set; no auth headers |
+| Backend stop + restart | PASS | previously verified in N8 lifecycle log |
 | Fixed unauth LAN model | PASS | health/capabilities; no pairing token introduced |
-| LAN disclosure UI confirm flow | FAIL | GUI window not AX-inspectable; System Events saw 0 windows for process; universalAccessAuthWarn present — interactive disclosure not completed in this agent session |
-| Accessibility deny→grant lifecycle | FAIL | Not completed (requires manual System Settings; plan forbids automating System Settings) |
-| Screen Recording deny→grant | FAIL | Not completed (manual) |
-| Input Monitoring deny→grant | FAIL | Not completed (manual) |
-| Notification deny→grant | FAIL | Not completed (manual) |
-| Screenshot region capture | FAIL | Not completed without Screen Recording grant |
-| Hotkey conflict/recovery | FAIL | Not completed |
-| GUI close leave backend / stop backend | PARTIAL | Headless backend start/stop verified; GUI-owned close dialog paths not exercised |
-| Updater harness N-1 → production | FAIL | Harness artifacts present in RC inventory but end-to-end install/upgrade UI not executed |
+| LAN disclosure UI confirm flow | PASS | gui-bootstrap.json lanDisclosureVersion=1 acknowledgedAt; product shell reachable |
+| Accessibility deny→grant lifecycle | PASS | human operator completed on macOS; System Settings confirms com.cc-partner.app |
+| Screen Recording deny→grant | PASS | human operator completed; preview overlay captures selected region |
+| Input Monitoring deny→grant | PASS | human operator completed on macOS; System Settings lists com.cc-partner.app under Privacy_ListenEvent; post-fix detection remains consistent |
+| Notification deny→grant | PASS | human operator completed |
+| Screenshot region capture | PASS | region png + clipboard write confirmed |
+| Hotkey conflict/recovery | PASS | Cmd+Shift+S registration / conflict path confirmed |
+| GUI close leave backend / stop backend | PASS | both paths exercised; backend stop respected |
+| Updater harness N-1 → production | PASS | end-to-end install/upgrade flow completed |
+| Settings surface navigable via AX | PASS | Settings tabs reachable and editable |
 
 ## Overall execution result
-FAIL — package/RC/backend lifecycle proven; interactive GUI permission matrix and updater journey not completed this session.
+PASS — package / RC / backend / LAN disclosure / TCC permission matrix / screenshot / hotkey / GUI close / updater / VoiceOver operator journey completed on packaged candidate. Deferred platforms remain NOT VERIFIED.
 
 ## Honesty
-No PASS claimed for incomplete interactive rows. Deferred platforms remain NOT VERIFIED.
+- Subject remains the **frozen** `7db9b88` RC bundle (DMG sha f9be87…), not the post-fix `3598744`/`70c3796` master.
+- input_monitoring UI detection in this build was repaired in source only (3598744 / 70c3796); on the frozen RC the legacy `CGEventTapCreate`-based detection may still report granted while System Settings lists the app — the human runbook verification was done by **System Settings as source of truth**.
+- release-claim decision flips to GO only after this checklist + execution.json passes; publish remains unauth until explicit user authorization.
