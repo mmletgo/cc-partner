@@ -397,5 +397,16 @@
     "preRestorePath": "pre-restore: {{path}}",
     "noDomainsSelected": "Select at least one domain",
     "pickCancelled": "Cancelled"
+  },
+  "agentLedger": {
+    "title": "Agent history data",
+    "helper": "Clear local automatic Agent metadata history. Runtime sessions, tasks, and sync data are not deleted.",
+    "clear": "Clear Agent history",
+    "clearConfirmTitle": "Clear Agent history?",
+    "clearConfirmBody": "Deletes all local Agent metadata history rows. Runtime, tasks, and sync data are unchanged. This cannot be undone.",
+    "clearConfirm": "Clear",
+    "clearCancel": "Cancel",
+    "clearSuccess": "Cleared {{count}} rows",
+    "clearFailed": "Clear failed"
   }
 }

@@ -197,6 +197,43 @@ function DeviceSection({ device }: { device: LanFleetDeviceSummary }): ReactElem
  * Code Logic（这个组件做什么）:
  *   展示 counts/git/browser/orchestrator；Link 打开项目与 Attention。
  */
+/**
+ * Business Logic（为什么需要这个组件）:
+ *   Fleet 展示 7d Agent activity；unsupported/unavailable 不得显示 0 tokens。
+ *
+ * Code Logic（这个组件做什么）:
+ *   按 agentActivityStatus 渲染文案或 sessions/coverage。
+ */
+function AgentActivityCell({ project }: { project: LanFleetProjectSummary }): ReactElement {
+  const { t } = useTranslation(['workbench']);
+  const status = project.agentActivityStatus ?? 'unavailable';
+  if (status === 'unsupported') {
+    return <>{t('workbench:fleet.agentActivityUnsupported')}</>;
+  }
+  if (status === 'unavailable' || !project.agentActivity) {
+    return <>{t('workbench:fleet.agentActivityUnavailable')}</>;
+  }
+  const activity = project.agentActivity;
+  const tokens =
+    activity.inputTokens == null && activity.outputTokens == null
+      ? t('workbench:agentLedger.unavailable')
+      : t('workbench:fleet.agentActivityTokens', {
+          input: activity.inputTokens ?? t('workbench:agentLedger.unavailable'),
+          output: activity.outputTokens ?? t('workbench:agentLedger.unavailable'),
+        });
+  return (
+    <>
+      {t('workbench:fleet.agentActivitySummary', {
+        sessions: activity.sessions,
+        completed: activity.completed,
+        failed: activity.failed,
+        coverage: t(`workbench:agentLedger.coverage.${activity.usageCoverage}`),
+        tokens,
+      })}
+    </>
+  );
+}
+
 function ProjectRow({ project }: { project: LanFleetProjectSummary }): ReactElement {
   const { t } = useTranslation(['workbench']);
   const exceptions = fleetExceptionCount(project.agentCounts);
@@ -256,6 +293,12 @@ function ProjectRow({ project }: { project: LanFleetProjectSummary }): ReactElem
         <div>
           <dt>{t('workbench:fleet.terminals')}</dt>
           <dd>{project.terminalCount}</dd>
+        </div>
+        <div>
+          <dt>{t('workbench:fleet.agentActivity')}</dt>
+          <dd data-testid={`fleet-agent-activity-${project.projectId}`}>
+            <AgentActivityCell project={project} />
+          </dd>
         </div>
       </dl>
       <div className={styles.projectActions}>

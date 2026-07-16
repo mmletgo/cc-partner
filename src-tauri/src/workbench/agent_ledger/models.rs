@@ -250,13 +250,15 @@ pub struct AgentLedgerPage {
 /// Code Logic（这个类型做什么）:
 ///     三态枚举 + wire 字面量。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum LedgerWindow {
     /// 最近 24 小时
+    #[serde(rename = "24h", alias = "hours24", alias = "Hours24")]
     Hours24,
     /// 最近 7 天
+    #[serde(rename = "7d", alias = "days7", alias = "Days7")]
     Days7,
     /// 最近 30 天
+    #[serde(rename = "30d", alias = "days30", alias = "Days30")]
     Days30,
 }
 

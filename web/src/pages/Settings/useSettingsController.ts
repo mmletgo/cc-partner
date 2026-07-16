@@ -10,11 +10,12 @@
  *   并持有 URL tab 真源；返回 shell 与各 panel 所需字段，不渲染 tab JSX 树。
  *   公共 export 面（SETTINGS_TABS、helpers、UseSettingsControllerResult）保持从本文件可导入。
  */
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { useSearchParams } from 'react-router-dom';
+import { workbenchApi } from '@/api/workbench';
 import {
   installButtonMode,
   parseSettingsTabFromSearch,
@@ -110,6 +111,13 @@ export interface UseSettingsControllerResult {
   handleShortcutKeyDown: (e: KeyboardEvent<HTMLInputElement>, id: string) => void;
   handleResetDefaults: () => void;
   handleSave: () => Promise<void>;
+  agentLedgerClearDialogOpen: boolean;
+  agentLedgerClearing: boolean;
+  agentLedgerClearMessage: string | null;
+  agentLedgerClearError: string | null;
+  openAgentLedgerClearDialog: () => void;
+  closeAgentLedgerClearDialog: () => void;
+  confirmClearAgentLedger: () => Promise<void>;
 
   // dependencies / permissions
   permStatus: import('@/lib/types').PermissionsStatus | null;
@@ -327,6 +335,58 @@ export function useSettingsController(): UseSettingsControllerResult {
     [setActiveTab],
   );
 
+  const [agentLedgerClearDialogOpen, setAgentLedgerClearDialogOpen] = useState(false);
+  const [agentLedgerClearing, setAgentLedgerClearing] = useState(false);
+  const [agentLedgerClearMessage, setAgentLedgerClearMessage] = useState<string | null>(null);
+  const [agentLedgerClearError, setAgentLedgerClearError] = useState<string | null>(null);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   打开清除确认 Dialog，避免误删。
+   *
+   * Code Logic（这个函数做什么）:
+   *   open=true 并清空上次结果。
+   */
+  const openAgentLedgerClearDialog = useCallback(() => {
+    setAgentLedgerClearDialogOpen(true);
+    setAgentLedgerClearError(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   取消清除。
+   *
+   * Code Logic（这个函数做什么）:
+   *   open=false。
+   */
+  const closeAgentLedgerClearDialog = useCallback(() => {
+    setAgentLedgerClearDialogOpen(false);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户确认后清除本机 Agent metadata 历史。
+   *
+   * Code Logic（这个函数做什么）:
+   *   workbenchApi.agentLedger.clear → 成功提示 deleted count。
+   */
+  const confirmClearAgentLedger = useCallback(async () => {
+    setAgentLedgerClearing(true);
+    setAgentLedgerClearError(null);
+    try {
+      const deleted = await workbenchApi.agentLedger.clear();
+      setAgentLedgerClearMessage(
+        t('settings:agentLedger.clearSuccess', { count: deleted }),
+      );
+      setAgentLedgerClearDialogOpen(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAgentLedgerClearError(message || t('settings:agentLedger.clearFailed'));
+    } finally {
+      setAgentLedgerClearing(false);
+    }
+  }, [t]);
+
   return {
     t,
     loading: resources.loading,
@@ -355,6 +415,13 @@ export function useSettingsController(): UseSettingsControllerResult {
     handleShortcutKeyDown: form.handleShortcutKeyDown,
     handleResetDefaults: form.handleResetDefaults,
     handleSave: form.handleSave,
+    agentLedgerClearDialogOpen,
+    agentLedgerClearing,
+    agentLedgerClearMessage,
+    agentLedgerClearError,
+    openAgentLedgerClearDialog,
+    closeAgentLedgerClearDialog,
+    confirmClearAgentLedger,
 
     permStatus: updatePermissions.permStatus,
     permLoading: updatePermissions.permLoading,

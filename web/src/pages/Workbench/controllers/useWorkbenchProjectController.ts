@@ -31,6 +31,7 @@ import {
   isRemoteWorkbenchProjectOffline,
 } from '@/lib/workbenchRemoteProjects';
 import type { WorkbenchProject } from '@/lib/types';
+import type { AgentLedgerPage, AgentLedgerSummary } from '@/lib/types/agentLedger';
 import {
   createInitialLaunchSummaryState,
   markLaunchSummaryStaleOnFailure,
@@ -68,6 +69,7 @@ export interface UseWorkbenchProjectControllerParams {
  *   - selectProjectFromDeepLink(id)：从 deep link 选项目，返回是否命中；命中且未激活时触发 selectProject。
  *   - launchSummary：五 section 独立资源态 + generatedAt；仅 launch 模式有意义。
  *   - refreshLaunchSummary：手动刷新启动摘要（失败保留 stale）。
+ *   - agentLedger*：本机 metadata 历史 drawer 状态（remote 项目仅标记 localOnly=false）。
  */
 export interface WorkbenchProjectControllerResult {
   remoteProjectOffline: boolean;
@@ -78,6 +80,17 @@ export interface WorkbenchProjectControllerResult {
   selectProjectFromDeepLink: (projectId: string) => Promise<boolean>;
   launchSummary: WorkbenchLaunchSummaryState;
   refreshLaunchSummary: () => Promise<void>;
+  agentLedgerOpen: boolean;
+  agentLedgerLocalOnly: boolean;
+  agentLedgerPage: AgentLedgerPage | null;
+  agentLedgerSummary: AgentLedgerSummary | null;
+  agentLedgerLoading: boolean;
+  agentLedgerLoadingMore: boolean;
+  agentLedgerError: string | null;
+  openAgentLedger: () => void;
+  closeAgentLedger: () => void;
+  refreshAgentLedger: () => Promise<void>;
+  loadMoreAgentLedger: () => Promise<void>;
 }
 
 /**
@@ -113,6 +126,13 @@ export function useWorkbenchProjectController(
   const [launchSummary, setLaunchSummary] = useState<WorkbenchLaunchSummaryState>(
     createInitialLaunchSummaryState,
   );
+  const [agentLedgerOpen, setAgentLedgerOpen] = useState(false);
+  const [agentLedgerPage, setAgentLedgerPage] = useState<AgentLedgerPage | null>(null);
+  const [agentLedgerSummary, setAgentLedgerSummary] = useState<AgentLedgerSummary | null>(null);
+  const [agentLedgerLoading, setAgentLedgerLoading] = useState(false);
+  const [agentLedgerLoadingMore, setAgentLedgerLoadingMore] = useState(false);
+  const [agentLedgerError, setAgentLedgerError] = useState<string | null>(null);
+  const agentLedgerSeqRef = useRef(0);
 
   // Business Logic: 异步加载回调返回时，active project 可能已经切换；用 ref 读取最新 id 做 stale guard。
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
@@ -275,6 +295,113 @@ export function useWorkbenchProjectController(
     remoteOfflineProjectId,
   );
   const remoteWriteDisabled = remoteProjectOffline;
+  const agentLedgerLocalOnly = activeProject?.kind === 'local';
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   打开本机 Agent metadata 历史 drawer，仅 local project 拉列表/summary。
+   *
+   * Code Logic（这个函数做什么）:
+   *   set open；local 则并行 list+summarize(7d)。
+   */
+  const refreshAgentLedger = useCallback(async (): Promise<void> => {
+    const project = activeProject;
+    if (!project || project.kind !== 'local') {
+      setAgentLedgerPage(null);
+      setAgentLedgerSummary(null);
+      setAgentLedgerError(null);
+      return;
+    }
+    const seq = ++agentLedgerSeqRef.current;
+    setAgentLedgerLoading(true);
+    setAgentLedgerError(null);
+    try {
+      const [page, summary] = await Promise.all([
+        workbenchApi.agentLedger.list({ projectId: project.id, limit: 50 }),
+        workbenchApi.agentLedger.summarize({ window: '7d', projectId: project.id }),
+      ]);
+      if (seq !== agentLedgerSeqRef.current) return;
+      setAgentLedgerPage(page);
+      setAgentLedgerSummary(summary);
+    } catch (error) {
+      if (seq !== agentLedgerSeqRef.current) return;
+      setAgentLedgerError(launchErrorMessage(error, 'agent ledger failed'));
+    } finally {
+      if (seq === agentLedgerSeqRef.current) {
+        setAgentLedgerLoading(false);
+      }
+    }
+  }, [activeProject]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户打开历史 drawer。
+   *
+   * Code Logic（这个函数做什么）:
+   *   open=true 并 refresh。
+   */
+  const openAgentLedger = useCallback(() => {
+    setAgentLedgerOpen(true);
+    void refreshAgentLedger();
+  }, [refreshAgentLedger]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   关闭 drawer 并丢弃 in-flight。
+   *
+   * Code Logic（这个函数做什么）:
+   *   open=false；递增 sequence。
+   */
+  const closeAgentLedger = useCallback(() => {
+    setAgentLedgerOpen(false);
+    agentLedgerSeqRef.current += 1;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   cursor 分页加载更多 metadata 行。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 nextCursor 追加 items。
+   */
+  const loadMoreAgentLedger = useCallback(async (): Promise<void> => {
+    const project = activeProject;
+    const cursor = agentLedgerPage?.nextCursor;
+    if (!project || project.kind !== 'local' || !cursor) return;
+    const seq = ++agentLedgerSeqRef.current;
+    setAgentLedgerLoadingMore(true);
+    try {
+      const next = await workbenchApi.agentLedger.list({
+        projectId: project.id,
+        limit: 50,
+        cursor,
+      });
+      if (seq !== agentLedgerSeqRef.current) return;
+      setAgentLedgerPage((prev) => {
+        if (!prev) return next;
+        return {
+          items: [...prev.items, ...next.items],
+          nextCursor: next.nextCursor,
+        };
+      });
+    } catch (error) {
+      if (seq !== agentLedgerSeqRef.current) return;
+      setAgentLedgerError(launchErrorMessage(error, 'agent ledger load more failed'));
+    } finally {
+      if (seq === agentLedgerSeqRef.current) {
+        setAgentLedgerLoadingMore(false);
+      }
+    }
+  }, [activeProject, agentLedgerPage]);
+
+  // 切换项目时关闭 drawer 并清空，避免跨项目泄漏明细
+  useEffect(() => {
+    setAgentLedgerOpen(false);
+    setAgentLedgerPage(null);
+    setAgentLedgerSummary(null);
+    setAgentLedgerError(null);
+    agentLedgerSeqRef.current += 1;
+  }, [activeProjectId]);
 
   return {
     remoteProjectOffline,
@@ -285,5 +412,16 @@ export function useWorkbenchProjectController(
     selectProjectFromDeepLink,
     launchSummary,
     refreshLaunchSummary,
+    agentLedgerOpen,
+    agentLedgerLocalOnly,
+    agentLedgerPage,
+    agentLedgerSummary,
+    agentLedgerLoading,
+    agentLedgerLoadingMore,
+    agentLedgerError,
+    openAgentLedger,
+    closeAgentLedger,
+    refreshAgentLedger,
+    loadMoreAgentLedger,
   };
 }

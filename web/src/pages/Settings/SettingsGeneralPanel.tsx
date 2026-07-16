@@ -10,7 +10,7 @@
  */
 import type { ChangeEvent, KeyboardEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Card, Button, Input } from '@/components/primitives';
+import { Card, Button, Dialog, Input } from '@/components/primitives';
 import { DevicesIcon, FolderIcon, KeyboardIcon } from '@/lib/icons';
 import { formatShortcutForDisplay } from './shortcutRecorder';
 import type { SettingsState } from './settingsState';
@@ -43,6 +43,13 @@ export interface SettingsGeneralPanelProps {
   onShortcutKeyDown: (e: KeyboardEvent<HTMLInputElement>, id: string) => void;
   onResetDefaults: () => void;
   onSave: () => void;
+  agentLedgerClearDialogOpen: boolean;
+  agentLedgerClearing: boolean;
+  agentLedgerClearMessage: string | null;
+  agentLedgerClearError: string | null;
+  onOpenAgentLedgerClearDialog: () => void;
+  onCloseAgentLedgerClearDialog: () => void;
+  onConfirmClearAgentLedger: () => void;
 }
 
 /**
@@ -92,8 +99,16 @@ export function SettingsGeneralPanel({
   onShortcutKeyDown,
   onResetDefaults,
   onSave,
+  agentLedgerClearDialogOpen,
+  agentLedgerClearing,
+  agentLedgerClearMessage,
+  agentLedgerClearError,
+  onOpenAgentLedgerClearDialog,
+  onCloseAgentLedgerClearDialog,
+  onConfirmClearAgentLedger,
 }: SettingsGeneralPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
+  const clearTitleId = 'settings-agent-ledger-clear-title';
 
   return (
     <>
@@ -185,6 +200,34 @@ export function SettingsGeneralPanel({
   </Card.Body>
 </Card>
 
+{/* Card 3: Agent 历史数据（无保留天数配置，仅一键清除） */}
+<Card variant="flat" padding="md">
+  <Card.Header>
+    <h2 className={styles.sectionTitle}>{t('settings:agentLedger.title')}</h2>
+  </Card.Header>
+  <Card.Body padding="md">
+    <p className={styles.helper}>{t('settings:agentLedger.helper')}</p>
+    {agentLedgerClearMessage ? (
+      <p className={styles.savedHint} role="status">
+        {agentLedgerClearMessage}
+      </p>
+    ) : null}
+    {agentLedgerClearError ? (
+      <p className={styles.updateError} role="alert">
+        {agentLedgerClearError}
+      </p>
+    ) : null}
+    <Button
+      variant="danger"
+      size="sm"
+      onClick={onOpenAgentLedgerClearDialog}
+      disabled={agentLedgerClearing}
+    >
+      {t('settings:agentLedger.clear')}
+    </Button>
+  </Card.Body>
+</Card>
+
 {/* 底部按钮组：只保存常规 tab 的基础配置 */}
 <div className={styles.footer}>
   <div className={styles.footerLeft}>
@@ -217,6 +260,32 @@ export function SettingsGeneralPanel({
     </Button>
   </div>
 </div>
+
+<Dialog
+  open={agentLedgerClearDialogOpen}
+  titleId={clearTitleId}
+  onClose={onCloseAgentLedgerClearDialog}
+>
+  <div className={styles.tabPanel}>
+    <h3 id={clearTitleId} className={styles.sectionTitle}>
+      {t('settings:agentLedger.clearConfirmTitle')}
+    </h3>
+    <p className={styles.helper}>{t('settings:agentLedger.clearConfirmBody')}</p>
+    <div className={styles.footerActions}>
+      <Button variant="ghost" onClick={onCloseAgentLedgerClearDialog} disabled={agentLedgerClearing}>
+        {t('settings:agentLedger.clearCancel')}
+      </Button>
+      <Button
+        variant="danger"
+        onClick={onConfirmClearAgentLedger}
+        loading={agentLedgerClearing}
+        disabled={agentLedgerClearing}
+      >
+        {t('settings:agentLedger.clearConfirm')}
+      </Button>
+    </div>
+  </div>
+</Dialog>
     </>
   );
 }

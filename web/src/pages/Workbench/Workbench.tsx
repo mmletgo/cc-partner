@@ -67,6 +67,7 @@ import { WorkbenchLaunchSurface } from './WorkbenchLaunchSurface';
 import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
 import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
+import { AgentLedgerWorkbenchChrome } from './views/AgentLedgerWorkbenchChrome';
 import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
 import { WorkspaceSnapshotDialog } from './views/WorkspaceSnapshotDialog';
 
@@ -101,6 +102,12 @@ export function Workbench() {
   );
   // Business Logic: 项目域（远端离线状态机 + 跨项目请求守卫 + 项目级 deep link）由独立 controller 持有，
   // 避免在 Workbench.tsx 里散落多处 state/effect；controller 接收窄 API/回调，不复制邻接域 state。
+  const projectCtrl = useWorkbenchProjectController({
+    activeProject,
+    activeProjectId,
+    projects,
+    selectProject,
+  });
   const {
     remoteProjectOffline,
     remoteWriteDisabled,
@@ -110,12 +117,7 @@ export function Workbench() {
     selectProjectFromDeepLink,
     launchSummary,
     refreshLaunchSummary,
-  } = useWorkbenchProjectController({
-    activeProject,
-    activeProjectId,
-    projects,
-    selectProject,
-  });
+  } = projectCtrl;
   const [activeWorktreeId, setActiveWorktreeId] = useState<string | null>(null);
   // Business Logic: workspaceView / automationConsoleOpen 是跨域共享状态（终端全屏、自动化控制台、文件 tab 都会改写），
   // 仍由 Workbench.tsx 持有；文件域 controller 通过 requestWorkspaceView / requestHideAutomationConsole 回调表达意图。
@@ -909,6 +911,13 @@ export function Workbench() {
                       </span>
                     </Button>
                   ) : null}
+                  <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}
+                    open={projectCtrl.agentLedgerOpen} localOnlyAvailable={projectCtrl.agentLedgerLocalOnly}
+                    page={projectCtrl.agentLedgerPage} summary={projectCtrl.agentLedgerSummary}
+                    loading={projectCtrl.agentLedgerLoading} loadingMore={projectCtrl.agentLedgerLoadingMore}
+                    error={projectCtrl.agentLedgerError} onOpen={projectCtrl.openAgentLedger}
+                    onClose={projectCtrl.closeAgentLedger} onLoadMore={() => void projectCtrl.loadMoreAgentLedger()}
+                    onRefresh={() => void projectCtrl.refreshAgentLedger()} />
                   {!terminalFullscreen ? (
                     <Button
                       className={styles.terminalActionButton}

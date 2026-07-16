@@ -31,6 +31,11 @@ import {
   workbenchWorktreesDecoder,
 } from '@/lib/schemas/workbench';
 import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
+import {
+  agentLedgerPageDecoder,
+  agentLedgerSummaryDecoder,
+  clearAgentLedgerResultDecoder,
+} from '@/lib/schemas/agentLedger';
 import { lanFleetSnapshotDecoder } from '@/lib/schemas/lanFleet';
 import type {
   ResumeClaudeSessionResult,
@@ -52,6 +57,12 @@ import type {
   WorkbenchWorktree,
 } from '@/lib/types';
 import type { AgentRuntimeSnapshot } from '@/lib/types/agentRuntime';
+import type {
+  AgentLedgerListParams,
+  AgentLedgerPage,
+  AgentLedgerSummarizeParams,
+  AgentLedgerSummary,
+} from '@/lib/types/agentLedger';
 import type { LanFleetSnapshot } from '@/lib/types/lanFleet';
 import type { WorkbenchLaunchSummaryWire } from '@/lib/types';
 
@@ -714,5 +725,46 @@ export const workbenchApi = {
      */
     getSnapshot: (): Promise<LanFleetSnapshot> =>
       invokeDecoded('get_workbench_lan_fleet', undefined, lanFleetSnapshotDecoder),
+  },
+
+  /**
+   * Agent Metadata Ledger（本机明细 / summary / 清除）。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   drawer 与 Settings 一键清除需要 metadata-only 历史 API。
+   *
+   * Code Logic（这个分组做什么）:
+   *   list / summarize / clear 三个 invoke。
+   */
+  agentLedger: {
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   本机 drawer 分页加载最近 metadata 历史。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded `list_agent_ledger`。
+     */
+    list: (req: AgentLedgerListParams = {}): Promise<AgentLedgerPage> =>
+      invokeDecoded('list_agent_ledger', { req }, agentLedgerPageDecoder),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   本机时间窗聚合。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded `summarize_agent_ledger`。
+     */
+    summarize: (req: AgentLedgerSummarizeParams): Promise<AgentLedgerSummary> =>
+      invokeDecoded('summarize_agent_ledger', { req }, agentLedgerSummaryDecoder),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Settings 一键清除只删 ledger 行。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded `clear_agent_ledger` → 删除行数。
+     */
+    clear: (): Promise<number> =>
+      invokeDecoded('clear_agent_ledger', undefined, clearAgentLedgerResultDecoder),
   },
 };

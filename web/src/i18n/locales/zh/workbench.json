@@ -67,7 +67,12 @@
       "active": "预览中",
       "absent": "无预览",
       "unknown": "未知"
-    }
+    },
+    "agentActivity": "Agent activity",
+    "agentActivityUnsupported": "对端不支持用量摘要",
+    "agentActivityUnavailable": "用量摘要不可用",
+    "agentActivitySummary": "7d · {{sessions}} 次 · 成功 {{completed}} · 失败 {{failed}} · {{coverage}} · {{tokens}}",
+    "agentActivityTokens": "in {{input}} / out {{output}}"
   },
   "addProject": "添加项目",
   "removeProject": "移除项目",
@@ -796,6 +801,30 @@
       "succeeded": "成功",
       "failed": "失败",
       "canceled": "已取消"
+    }
+  },
+  "agentLedger": {
+    "title": "Agent 历史",
+    "open": "Agent 历史",
+    "close": "关闭",
+    "subtitle": "自动产生的 metadata-only 记录；不保存 Prompt 或回复正文。",
+    "localOnly": "仅本机项目可查看明细；远端请在 owning 设备查看。",
+    "summaryTitle": "用量摘要",
+    "listTitle": "最近会话",
+    "sessions": "会话",
+    "completed": "成功",
+    "failed": "失败",
+    "duration": "时长",
+    "inputTokens": "输入 tokens",
+    "outputTokens": "输出 tokens",
+    "unavailable": "未提供",
+    "costUnavailable": "费用未提供",
+    "empty": "暂无历史记录",
+    "loadMore": "加载更多",
+    "coverage": {
+      "complete": "完整",
+      "partial": "部分",
+      "unavailable": "未提供"
     }
   }
 }

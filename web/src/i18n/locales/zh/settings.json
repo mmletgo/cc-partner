@@ -397,5 +397,16 @@
     "preRestorePath": "pre-restore：{{path}}",
     "noDomainsSelected": "请至少选择一个领域",
     "pickCancelled": "已取消"
+  },
+  "agentLedger": {
+    "title": "Agent 历史数据",
+    "helper": "清除本机自动保存的 Agent metadata 历史。不删除运行时会话、任务或同步数据。",
+    "clear": "清除 Agent 历史",
+    "clearConfirmTitle": "清除 Agent 历史？",
+    "clearConfirmBody": "将删除本机全部 Agent metadata 历史行。运行时、任务与同步数据不受影响。此操作不可撤销。",
+    "clearConfirm": "确认清除",
+    "clearCancel": "取消",
+    "clearSuccess": "已清除 {{count}} 条历史",
+    "clearFailed": "清除失败"
   }
 }

@@ -19,6 +19,8 @@ import type {
   LanFleetProjectSummary,
   LanFleetSnapshot,
 } from '../types/lanFleet';
+import type { FleetAgentActivityStatus } from '../types/agentLedger';
+import { agentLedgerSummaryDecoder } from './agentLedger';
 import {
   arrayDecoder,
   booleanDecoder,
@@ -28,6 +30,7 @@ import {
   nullableDecoder,
   numberDecoder,
   objectDecoder,
+  optionalDecoder,
   stringDecoder,
   type Decoder,
 } from '../runtimeSchema';
@@ -86,6 +89,11 @@ export const agentPhaseCountsDecoder: Decoder<AgentPhaseCounts> = objectDecoder(
   },
 );
 
+export const fleetAgentActivityStatusDecoder: Decoder<FleetAgentActivityStatus> = enumDecoder(
+  'FleetAgentActivityStatus',
+  ['live', 'unsupported', 'unavailable'] as const,
+);
+
 export const lanFleetProjectSummaryDecoder: Decoder<LanFleetProjectSummary> = objectDecoder(
   'LanFleetProjectSummary',
   {
@@ -100,6 +108,8 @@ export const lanFleetProjectSummaryDecoder: Decoder<LanFleetProjectSummary> = ob
     orchestratorRunning: nonNegativeIntDecoder,
     orchestratorRetrying: nonNegativeIntDecoder,
     lastActivityAt: nullableDecoder(stringDecoder),
+    agentActivityStatus: optionalDecoder(fleetAgentActivityStatusDecoder),
+    agentActivity: optionalDecoder(nullableDecoder(agentLedgerSummaryDecoder)),
   },
 );
 

@@ -181,6 +181,13 @@ export function Settings(): ReactElement {
               onShortcutKeyDown={ctrl.handleShortcutKeyDown}
               onResetDefaults={ctrl.handleResetDefaults}
               onSave={() => void ctrl.handleSave()}
+              agentLedgerClearDialogOpen={ctrl.agentLedgerClearDialogOpen}
+              agentLedgerClearing={ctrl.agentLedgerClearing}
+              agentLedgerClearMessage={ctrl.agentLedgerClearMessage}
+              agentLedgerClearError={ctrl.agentLedgerClearError}
+              onOpenAgentLedgerClearDialog={ctrl.openAgentLedgerClearDialog}
+              onCloseAgentLedgerClearDialog={ctrl.closeAgentLedgerClearDialog}
+              onConfirmClearAgentLedger={() => void ctrl.confirmClearAgentLedger()}
             />
           </div>
         ) : null}

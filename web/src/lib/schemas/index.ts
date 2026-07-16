@@ -15,3 +15,4 @@ export * from './transfer';
 export * from './workbench';
 export * from './config';
 export * from './agentRuntime';
+export * from './agentLedger';

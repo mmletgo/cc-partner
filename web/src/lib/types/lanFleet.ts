@@ -8,6 +8,8 @@
  *   定义 reachability/freshness/git/browser 与 snapshot 结构。
  */
 
+import type { AgentLedgerSummary, FleetAgentActivityStatus } from './agentLedger';
+
 /** 设备可达性（协议/网络，非认证）。 */
 export type FleetReachability = 'live' | 'offline' | 'unsupported';
 
@@ -51,6 +53,10 @@ export interface LanFleetProjectSummary {
   orchestratorRunning: number;
   orchestratorRetrying: number;
   lastActivityAt: string | null;
+  /** 7d ledger join 状态；unsupported/unavailable 不得显示 usage=0 */
+  agentActivityStatus?: FleetAgentActivityStatus;
+  /** 仅 live 时有值 */
+  agentActivity?: AgentLedgerSummary | null;
 }
 
 /**
