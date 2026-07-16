@@ -177,7 +177,10 @@ async fn dispatch_workbench_op(
         "projects.remote_roots" => {
             let device_id = required_string(&payload, "deviceId")?;
             let base_url = workbench::device_base_url(state, &device_id)?;
-            let items = RemoteWorkbenchClient::new().roots(&base_url).await?;
+            let items = RemoteWorkbenchClient::new()
+                .with_expected_device_id(&device_id)
+                .roots(&base_url)
+                .await?;
             Ok(serde_json::to_value(items)?)
         }
         "projects.remote_list_dir" => {
@@ -185,6 +188,7 @@ async fn dispatch_workbench_op(
             let path = required_string(&payload, "path")?;
             let base_url = workbench::device_base_url(state, &device_id)?;
             let items = RemoteWorkbenchClient::new()
+                .with_expected_device_id(&device_id)
                 .list_dir(&base_url, &path)
                 .await?;
             Ok(serde_json::to_value(items)?)
@@ -194,6 +198,7 @@ async fn dispatch_workbench_op(
             let path = required_string(&payload, "path")?;
             let base_url = workbench::device_base_url(state, &device_id)?;
             let info = RemoteWorkbenchClient::new()
+                .with_expected_device_id(&device_id)
                 .path_info(&base_url, &path)
                 .await?;
             Ok(serde_json::to_value(info)?)
@@ -709,6 +714,7 @@ async fn open_remote_project(
     let base_url = workbench::device_base_url(state, &device_id)?;
     let current_device_name = workbench::device_name_from_state(state, &device_id);
     let remote = RemoteWorkbenchClient::new()
+        .with_expected_device_id(&device_id)
         .open_project(&base_url, &path)
         .await?;
     let remote_id = crate::workbench::remote_ids::remote_project_id(&device_id, &remote.path);
@@ -745,6 +751,7 @@ async fn create_file_for_state(
         let inner_worktree_id =
             workbench::remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .create_file(
                 &context.base_url,
                 RemoteCreatePathReq {
@@ -779,6 +786,7 @@ async fn create_dir_for_state(
         let inner_worktree_id =
             workbench::remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .create_dir(
                 &context.base_url,
                 RemoteCreatePathReq {
@@ -813,6 +821,7 @@ async fn rename_path_for_state(
         let inner_worktree_id =
             workbench::remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .rename_path(
                 &context.base_url,
                 RemoteRenamePathReq {
@@ -846,6 +855,7 @@ async fn delete_path_for_state(
         let inner_worktree_id =
             workbench::remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .delete_path(
                 &context.base_url,
                 RemoteDeletePathReq {
@@ -880,6 +890,7 @@ async fn preview_sqlite_for_state(
         let inner_worktree_id =
             workbench::remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .preview_sqlite_file(
                 &context.base_url,
                 RemotePreviewSqliteReq {
@@ -923,6 +934,7 @@ async fn preview_html_asset_for_state(
         let inner_worktree_id =
             workbench::remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .preview_html_asset(
                 &context.base_url,
                 RemotePreviewHtmlAssetReq {
@@ -960,6 +972,7 @@ async fn rename_session_for_state(
         let base_url = workbench::device_base_url(state, &parsed.device_id)?;
         let inner = workbench::remote_inner_session_id(&parsed.device_id, &session_id)?;
         let item = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .rename_session(&base_url, &inner, &name)
             .await?;
         let local_project_id = workbench::local_project_id_for_remote_inner_project(
