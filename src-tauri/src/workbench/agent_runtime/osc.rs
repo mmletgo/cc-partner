@@ -336,10 +336,12 @@ fn decode_payload_bytes(payload: &[u8]) -> Result<AgentRuntimeMutation, AgentOsc
             detail: None,
         });
     }
-    let json_bytes = URL_SAFE_NO_PAD.decode(payload).map_err(|_| AgentOscDiagnostic {
-        code: "agent_osc_invalid_base64",
-        detail: None,
-    })?;
+    let json_bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| AgentOscDiagnostic {
+            code: "agent_osc_invalid_base64",
+            detail: None,
+        })?;
     let parsed: AgentOscPayload =
         serde_json::from_slice(&json_bytes).map_err(|e| AgentOscDiagnostic {
             code: "agent_osc_invalid_json",
@@ -456,13 +458,12 @@ mod tests {
             "2026-07-15T00:00:01Z",
         );
         let mid = frame.len() / 2;
-        let a = decoder.push(
-            &[b"before".as_slice(), &frame[..mid]]
-                .concat()
-                .as_slice(),
-        );
+        let a = decoder.push(&[b"before".as_slice(), &frame[..mid]].concat().as_slice());
         let b = decoder.push(&[&frame[mid..], b"after"].concat());
-        assert_eq!([a.visible.as_slice(), b.visible.as_slice()].concat(), b"beforeafter");
+        assert_eq!(
+            [a.visible.as_slice(), b.visible.as_slice()].concat(),
+            b"beforeafter"
+        );
         assert_eq!(a.mutations.len() + b.mutations.len(), 1);
     }
 

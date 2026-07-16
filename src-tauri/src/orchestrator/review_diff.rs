@@ -293,13 +293,8 @@ fn parse_raw_diff_into(
             new_mode.to_string()
         };
         // symlink/gitlink 不得用空哈希：否则 retarget/submodule 漂移 digest 不变。
-        let (binary, new_content_hash) = content_hash_for_entry(
-            cwd,
-            &path,
-            status == "deleted",
-            new_mode,
-            new_oid,
-        )?;
+        let (binary, new_content_hash) =
+            content_hash_for_entry(cwd, &path, status == "deleted", new_mode, new_oid)?;
         // 对 deleted/modified 优先使用 raw 的 old oid；若全 0 再尝试 base:path
         let old_blob_oid = if old_oid.chars().all(|c| c == '0') {
             lookup_blob_oid(cwd, base_tree, &path).unwrap_or_else(|| old_oid.to_string())
@@ -611,10 +606,7 @@ fn content_hash_for_path(
         return Ok((true, sha256_hex_of_bytes(&target_bytes)));
     }
     if !metadata.is_file() {
-        return Ok((
-            true,
-            sha256_hex_of_bytes(format!("mode:{path}").as_bytes()),
-        ));
+        return Ok((true, sha256_hex_of_bytes(format!("mode:{path}").as_bytes())));
     }
     let file = File::open(&abs)
         .map_err(|err| AppError::generic(format!("打开文件失败: {path}: {err}")))?;

@@ -161,9 +161,7 @@ pub fn emit_agent_runtime_changed(state: &AppState, row: &AgentSessionRuntime) {
     crate::workbench::remote_events::publish_workbench_remote_event_from_state(
         state,
         crate::workbench::remote_events::WorkbenchRemoteEvent::AgentRuntime(
-            crate::workbench::remote_events::WorkbenchAgentRuntimePayload {
-                agent_session: dto,
-            },
+            crate::workbench::remote_events::WorkbenchAgentRuntimePayload { agent_session: dto },
         ),
     );
 }
@@ -224,7 +222,9 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        WorkbenchAgentSessionRepo::ensure_schema(&pool).await.unwrap();
+        WorkbenchAgentSessionRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
         let repo = WorkbenchAgentSessionRepo::new(pool);
         for i in 0..1_002 {
             // 不同 terminal 才能同时 active

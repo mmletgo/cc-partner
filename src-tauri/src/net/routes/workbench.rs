@@ -974,11 +974,10 @@ pub async fn agent_runtime_snapshot(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
-    let snap = crate::workbench::agent_runtime::get_agent_runtime_snapshot_for_state(
-        &state, project_id,
-    )
-    .await
-    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.agent_runtime.snapshot"))?;
+    let snap =
+        crate::workbench::agent_runtime::get_agent_runtime_snapshot_for_state(&state, project_id)
+            .await
+            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.agent_runtime.snapshot"))?;
     Ok(Json(snap))
 }
 

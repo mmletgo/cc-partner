@@ -130,9 +130,8 @@ pub fn decode_remote_event(line: &str) -> Result<Option<WorkbenchRemoteEvent>, A
         .ok_or_else(|| AppError::validation("remote event missing type".to_string()))?;
     match event_type {
         "terminalOutput" | "terminalStatus" | "mergeProgress" | "agentRuntime" => {
-            let event: WorkbenchRemoteEvent = serde_json::from_value(value).map_err(|e| {
-                AppError::validation(format!("invalid remote event payload: {e}"))
-            })?;
+            let event: WorkbenchRemoteEvent = serde_json::from_value(value)
+                .map_err(|e| AppError::validation(format!("invalid remote event payload: {e}")))?;
             Ok(Some(event))
         }
         // heartbeat 等非业务帧

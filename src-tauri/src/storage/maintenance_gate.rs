@@ -335,10 +335,7 @@ mod tests {
         let gate_a = DatabaseMaintenanceGate::with_cross_process_lock(path.clone());
         let gate_b = DatabaseMaintenanceGate::with_cross_process_lock(path);
         let exclusive = gate_a.acquire_exclusive().await;
-        assert!(
-            exclusive._os_file.is_some(),
-            "exclusive must hold OS lock"
-        );
+        assert!(exclusive._os_file.is_some(), "exclusive must hold OS lock");
         // 另一进程语义：不同 gate 实例
         assert!(gate_b.try_acquire_shared().is_none());
         drop(exclusive);

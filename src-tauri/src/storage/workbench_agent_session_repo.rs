@@ -20,7 +20,8 @@ use sqlx::Row;
 use std::sync::Arc;
 
 /// Agent session 表 DDL（文档 + runtime 共用字面量）。
-pub const WORKBENCH_AGENT_SESSION_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_agent_sessions (
+pub const WORKBENCH_AGENT_SESSION_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS workbench_agent_sessions (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     worktree_id TEXT,
@@ -224,10 +225,7 @@ impl WorkbenchAgentSessionRepo {
     /// Code Logic（这个函数做什么）:
     ///     WHERE id + terminal + version=expected；SET phase/version/activity/native；
     ///     终态时 is_active=0 并写 ended_at；affected==0 → Ok(false)。
-    pub async fn apply_mutation(
-        &self,
-        mutation: &AgentRuntimeMutation,
-    ) -> Result<bool, AppError> {
+    pub async fn apply_mutation(&self, mutation: &AgentRuntimeMutation) -> Result<bool, AppError> {
         if mutation.event_version <= mutation.expected_version {
             return Ok(false);
         }
@@ -475,9 +473,8 @@ impl WorkbenchAgentSessionRepo {
 ///     try_get 各列；非法 phase → Validation。
 fn row_to_runtime(row: &SqliteRow) -> Result<AgentSessionRuntime, AppError> {
     let phase_raw: String = row.try_get("phase")?;
-    let phase = AgentSessionPhase::parse(&phase_raw).ok_or_else(|| {
-        AppError::validation(format!("unknown agent session phase: {phase_raw}"))
-    })?;
+    let phase = AgentSessionPhase::parse(&phase_raw)
+        .ok_or_else(|| AppError::validation(format!("unknown agent session phase: {phase_raw}")))?;
     let version: i64 = row.try_get("version")?;
     let attempt: Option<i64> = row.try_get("orchestrator_attempt")?;
     let is_active: i64 = row.try_get("is_active")?;
@@ -541,7 +538,9 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        WorkbenchAgentSessionRepo::ensure_schema(&pool).await.unwrap();
+        WorkbenchAgentSessionRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
         WorkbenchAgentSessionRepo::new(pool)
     }
 
@@ -586,23 +585,20 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), "agent_session_conflict");
         // expected_version 故意用 first.version+1，CAS 失败
-        assert!(
-            !repo
-                .apply_version_cas(
-                    &first.id,
-                    "terminal-1",
-                    first.version + 1,
-                    first.version + 2,
-                )
-                .await
-                .unwrap()
-        );
+        assert!(!repo
+            .apply_version_cas(
+                &first.id,
+                "terminal-1",
+                first.version + 1,
+                first.version + 2,
+            )
+            .await
+            .unwrap());
         // 正确 CAS：expected=first.version，event=first.version+1
-        assert!(
-            repo.apply_version_cas(&first.id, "terminal-1", first.version, first.version + 1)
-                .await
-                .unwrap()
-        );
+        assert!(repo
+            .apply_version_cas(&first.id, "terminal-1", first.version, first.version + 1)
+            .await
+            .unwrap());
         let updated = repo.get(&first.id).await.unwrap().unwrap();
         assert_eq!(updated.version, first.version + 1);
         assert!(updated.is_active);

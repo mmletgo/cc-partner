@@ -1474,8 +1474,8 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
     use crate::state::AppState;
     use crate::storage::{
         ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
-        WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
-        WorkbenchWorktreeRepo,
+        WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
+        WorkbenchSessionRepo, WorkbenchWorktreeRepo,
     };
     use crate::transfer::registry::TransferRegistry;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

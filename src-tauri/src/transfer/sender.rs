@@ -24,8 +24,8 @@
 use crate::error::AppError;
 use crate::models::transfer::{
     canonical_recovery_payload_hash, canonical_send_payload_hash, SourceFingerprint,
-    TransferDirection, TransferFailure, TransferFailureStage, TransferOperationStatus, TransferPhase,
-    TransferRecoveryKind, TransferStatus, TransferTask,
+    TransferDirection, TransferFailure, TransferFailureStage, TransferOperationStatus,
+    TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
 };
 use crate::net::peer_error::PeerCallError;
 use crate::net::protocol::{CAPABILITY_TRANSFER_COMPLETE_V1, CAPABILITY_TRANSFER_RESUME_V1};
@@ -703,8 +703,10 @@ async fn ensure_no_active_logical_recovery(
         if is_terminal_status(active.status) {
             continue;
         }
-        if is_same_client_operation(active.client_operation_id.as_deref(), allow_client_operation_id)
-        {
+        if is_same_client_operation(
+            active.client_operation_id.as_deref(),
+            allow_client_operation_id,
+        ) {
             continue;
         }
         return Err(AppError::conflict(format!(

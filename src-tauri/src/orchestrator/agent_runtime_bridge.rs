@@ -169,7 +169,9 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        WorkbenchAgentSessionRepo::ensure_schema(&pool).await.unwrap();
+        WorkbenchAgentSessionRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
         WorkbenchAgentSessionRepo::new(pool)
     }
 

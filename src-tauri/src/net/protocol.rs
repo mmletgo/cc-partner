@@ -447,4 +447,22 @@ mod tests {
             .any(|c| c == CAPABILITY_SYNC_MANIFEST_V2));
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 peer 无 agent-runtime 能力时客户端必须 unsupported，不得猜测 Claude session。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     legacy 能力列表不含 token → supports false；本机 server_protocol_info 含 token。
+    #[test]
+    fn mixed_version_old_peer_lacks_agent_runtime_capability() {
+        let legacy = PeerProtocolInfo {
+            protocol_version: 1,
+            capabilities: vec![
+                CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+                CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
+            ],
+        };
+        assert!(!legacy.supports(CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1));
+        assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1));
+    }
 }

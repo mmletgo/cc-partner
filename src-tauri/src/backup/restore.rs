@@ -945,8 +945,7 @@ mod tests {
         use crate::storage::{
             ClaudeHistoryRepo, ClaudeMdRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
             WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
-            WorkbenchSessionRepo,
-            WorkbenchWorktreeRepo,
+            WorkbenchSessionRepo, WorkbenchWorktreeRepo,
         };
         use crate::transfer::registry::TransferRegistry;
         use std::sync::atomic::AtomicU16;
@@ -1456,7 +1455,13 @@ mod tests {
             .unwrap();
 
         // live 中间版本 {A:4}（应被 floor {A:5} 支配为 DeleteWins）
-        let live = sample_prompt("p-mono", "A", "should-stay-deleted", 4, "2024-05-01T00:00:00+00:00");
+        let live = sample_prompt(
+            "p-mono",
+            "A",
+            "should-stay-deleted",
+            4,
+            "2024-05-01T00:00:00+00:00",
+        );
         let live_vc = live.vector_clock.clone();
         state
             .prompt_repo

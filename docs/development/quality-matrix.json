@@ -773,6 +773,35 @@
       ]
     },
     {
+      "id": "L2-AGENT-RUNTIME-001",
+      "surface": "agent-session-runtime",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/storage/workbench_agent_session_repo.rs",
+        "src-tauri/src/workbench/agent_runtime/osc.rs",
+        "src-tauri/src/workbench/agent_runtime/reducer.rs",
+        "src-tauri/src/workbench/agent_runtime/snapshot.rs",
+        "src-tauri/src/workbench/remote_events.rs",
+        "src-tauri/src/orchestrator/agent_runtime_bridge.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked workbench::agent_runtime --lib && cargo test --locked orchestrator::agent_runtime_bridge --lib && cargo test --locked workbench_agent_session --lib && cargo test --locked workbench::remote_events --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "provider adapter launch (A3+)",
+        "Fleet UI / history analytics (A6/A9)",
+        "dual-host multi-device agent projection soak"
+      ],
+      "docs": [
+        "docs/prd.md",
+        "docs/p2p-protocol.md",
+        "docs/development/backend-operations.md",
+        "docs/superpowers/specs/2026-07-15-agent-session-runtime-design.md"
+      ]
+    },
+    {
       "id": "E2E-ORCHESTRATOR-REVIEW-001",
       "surface": "orchestrator-review",
       "level": "L1",

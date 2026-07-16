@@ -123,10 +123,8 @@ fn tcc_listen_event_preflight() -> Option<i32> {
             ) -> *mut std::ffi::c_void;
         }
         const RTLD_LAZY: i32 = 1;
-        let path = std::ffi::CString::new(
-            "/System/Library/PrivateFrameworks/TCC.framework/TCC",
-        )
-        .ok()?;
+        let path =
+            std::ffi::CString::new("/System/Library/PrivateFrameworks/TCC.framework/TCC").ok()?;
         let handle = dlopen(path.as_ptr(), RTLD_LAZY);
         if handle.is_null() {
             return None;
@@ -136,10 +134,8 @@ fn tcc_listen_event_preflight() -> Option<i32> {
         if f.is_null() {
             return None;
         }
-        type PreflightFn = unsafe extern "C" fn(
-            *const std::ffi::c_void,
-            *const std::ffi::c_void,
-        ) -> i32;
+        type PreflightFn =
+            unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> i32;
         let preflight: PreflightFn = std::mem::transmute(f);
         let service_c = std::ffi::CString::new("kTCCServiceListenEvent").ok()?;
         let service = CFStringCreateWithCString(
@@ -426,10 +422,7 @@ mod tests {
             check_input_monitoring_access()
         );
         assert_eq!(status.accessibility.granted, check_accessibility_access());
-        assert_eq!(
-            status.screen_capture.granted,
-            check_screen_capture_access()
-        );
+        assert_eq!(status.screen_capture.granted, check_screen_capture_access());
         let json = serde_json::to_value(&status).expect("serialize");
         assert!(json.get("inputMonitoring").is_some());
         assert!(json.get("accessibility").is_some());

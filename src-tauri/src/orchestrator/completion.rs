@@ -163,13 +163,14 @@ async fn handle_session_completion(state: AppState, session_id: &str) -> Result<
     };
     // A1：先更新统一 Agent runtime 为 Completed，再进入既有 Verifying pipeline
     let at = chrono::Utc::now().to_rfc3339();
-    if let Err(error) = crate::orchestrator::agent_runtime_bridge::mark_agent_completed_before_verifying(
-        &state.workbench_agent_session_repo,
-        None,
-        session_id,
-        &at,
-    )
-    .await
+    if let Err(error) =
+        crate::orchestrator::agent_runtime_bridge::mark_agent_completed_before_verifying(
+            &state.workbench_agent_session_repo,
+            None,
+            session_id,
+            &at,
+        )
+        .await
     {
         tracing::warn!(
             session_id = %session_id,

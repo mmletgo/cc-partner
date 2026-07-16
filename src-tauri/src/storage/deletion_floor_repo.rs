@@ -163,10 +163,7 @@ impl DeletionFloorRepo {
     ///     - Concurrent → 分量 max 合并时钟，`delete_epoch` 取 max，元数据取较新 created_at。
     ///     调用方须保证 domain/item_id 一致；本函数以 local 的 PK 字段为准。
     pub fn merge_floor_monotonic(local: &DeletionFloor, incoming: &DeletionFloor) -> DeletionFloor {
-        match compare(
-            &incoming.delete_vector_clock,
-            &local.delete_vector_clock,
-        ) {
+        match compare(&incoming.delete_vector_clock, &local.delete_vector_clock) {
             ClockOrder::After => DeletionFloor {
                 domain: local.domain.clone(),
                 item_id: local.item_id.clone(),

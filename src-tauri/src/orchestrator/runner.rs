@@ -183,26 +183,27 @@ pub async fn prepare_runner_attempt(
     )
     .await?;
     // A1：创建统一 Agent runtime（Launching），与 Claude legacy dual-write 并行一个版本
-    let agent_runtime = match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner(
-        state,
-        &task.project_id,
-        Some(&worktree.id),
-        &session.id,
-        &task.id,
-        attempt as u32,
-    )
-    .await
-    {
-        Ok(row) => Some(row),
-        Err(error) => {
-            tracing::warn!(
-                task_id = %task.id,
-                session_id = %session.id,
-                "创建 Agent runtime 失败（继续 legacy Claude 路径）: {error}"
-            );
-            None
-        }
-    };
+    let agent_runtime =
+        match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner(
+            state,
+            &task.project_id,
+            Some(&worktree.id),
+            &session.id,
+            &task.id,
+            attempt as u32,
+        )
+        .await
+        {
+            Ok(row) => Some(row),
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    session_id = %session.id,
+                    "创建 Agent runtime 失败（继续 legacy Claude 路径）: {error}"
+                );
+                None
+            }
+        };
     let _agent_session_id = agent_runtime.as_ref().map(|r| r.id.clone());
     // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
     if !state

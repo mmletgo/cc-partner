@@ -16,9 +16,7 @@ pub use models::{
     AgentRuntimeMutation, AgentSessionPhase, AgentSessionRuntime, CreateActiveAgentSession,
 };
 pub use osc::{encode_agent_osc_frame, AgentOscDecoder};
-pub use reducer::{
-    collect_alive_terminal_ids, AgentReduceOutcome, AgentRuntimeReducer,
-};
+pub use reducer::{collect_alive_terminal_ids, AgentReduceOutcome, AgentRuntimeReducer};
 pub use snapshot::{
     emit_agent_runtime_changed, get_agent_runtime_snapshot_for_state, AgentRuntimeSnapshot,
     AgentSessionRuntimeDto,

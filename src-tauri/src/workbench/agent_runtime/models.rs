@@ -45,10 +45,7 @@ impl AgentSessionPhase {
     /// Code Logic（这个函数做什么）:
     ///     Completed / Failed / Disconnected 返回 true。
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Failed | Self::Disconnected
-        )
+        matches!(self, Self::Completed | Self::Failed | Self::Disconnected)
     }
 
     /// 将 phase 编码为稳定存储 token（snake 风格短码，与历史 SQLite 约定一致）。

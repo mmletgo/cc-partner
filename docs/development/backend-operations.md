@@ -14,6 +14,7 @@ cc-partner is local/LAN only. There is a single fixed LAN behavior for all busin
 - Resource limits (absolute caps, not a per-route auth matrix): global body **32 MiB**, transfer chunk **960 KiB**, Workbench text save **5 MiB**, preview proxy body **32 MiB**.
 - `POST /api/backend/control/stop` is a **local lifecycle** control: loopback peer **and** the control-file token. The token must not appear in business APIs, health, mDNS, UI, doctor, or logs.
 - Old and new native peers continue credential-free. There is **no** LAN permission capability negotiation and **no** configurable LAN exposure/read-only product mode.
+- Protocol capability tokens (e.g. `workbench.agent-runtime.v1`, `orchestrator.runtime-snapshot.v1`) are **version negotiation only** — they are not auth tokens and do not gate caller identity.
 
 **Remaining risk (fixed):** Any device on the same reachable network can read, write, and execute; the system does not verify caller identity.
 
@@ -92,8 +93,16 @@ unless noted. Never transport-auto-retry mutations.
 | POST | `/api/backend/control/status` | owner/generation + sanitized diagnostics |
 | POST | `/api/backend/control/get-config` | authoritative config snapshot |
 | POST | `/api/backend/control/update-config` | CAS allowlist patch (`expectedOwnerInstanceId` + `expectedGeneration`) |
-| POST | `/api/backend/control/workbench` | Workbench metadata ops on owner |
+| POST | `/api/backend/control/workbench` | Workbench metadata ops on owner (includes `agent_runtime.snapshot`) |
 | POST | `/api/backend/control/workbench/data` | large file/browser payloads (body ≤32 MiB) |
+
+### Agent session runtime (A1)
+
+- Owner stores minimal metadata in `workbench_agent_sessions` (no prompt/response/terminal bytes/transcript path/credentials).
+- `native_session_id` is owner-local only; never appears in Tauri/control/P2P/Mobile projection DTOs.
+- Snapshot: control op `agent_runtime.snapshot` and P2P `POST /api/workbench/agent-runtime/snapshot` (capability `workbench.agent-runtime.v1`).
+- Events: `workbench:agent-runtime` and NDJSON `type=agentRuntime` on `/api/workbench/events`; unknown event types must be ignored without reconnect.
+- Downgrade: stop or end non-Claude active Agent sessions before rolling back a build that lacks agent-runtime projection; legacy dual-write of Claude fields remains one version.
 | POST | `/api/backend/control/orchestrator/runtime-snapshot` | owner runtime snapshot |
 | POST | `/api/backend/control/events/catch-up` | event bus replay / Gap |
 | POST | `/api/backend/control/events/stream` | NDJSON catch-up + live |

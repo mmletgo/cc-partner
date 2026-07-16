@@ -357,8 +357,8 @@ mod tests {
     use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
     use crate::storage::{
         ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
-        WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
-        WorkbenchWorktreeRepo,
+        WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
+        WorkbenchSessionRepo, WorkbenchWorktreeRepo,
     };
     use crate::transfer::registry::TransferRegistry;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

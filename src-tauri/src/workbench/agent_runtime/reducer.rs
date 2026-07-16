@@ -77,7 +77,10 @@ impl AgentRuntimeReducer {
     ///     4) 非 active 且非同 id 路径 → Ignored；
     ///     5) 用 current.version 作 expected 重写 mutation 再 CAS；
     ///     6) 成功返回 Applied。
-    pub async fn apply(&self, mutation: AgentRuntimeMutation) -> Result<AgentReduceOutcome, AppError> {
+    pub async fn apply(
+        &self,
+        mutation: AgentRuntimeMutation,
+    ) -> Result<AgentReduceOutcome, AppError> {
         let Some(current) = self.repo.get(&mutation.agent_session_id).await? else {
             return Ok(AgentReduceOutcome::Ignored("agent_not_found"));
         };
@@ -165,9 +168,7 @@ impl AgentRuntimeReducer {
         &self,
         terminal_session_id: &str,
     ) -> Result<Option<AgentSessionRuntime>, AppError> {
-        self.repo
-            .get_active_for_terminal(terminal_session_id)
-            .await
+        self.repo.get_active_for_terminal(terminal_session_id).await
     }
 }
 
@@ -215,7 +216,9 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        WorkbenchAgentSessionRepo::ensure_schema(&pool).await.unwrap();
+        WorkbenchAgentSessionRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
         AgentRuntimeReducer::new(WorkbenchAgentSessionRepo::new(pool))
     }
 
@@ -263,7 +266,11 @@ mod tests {
     async fn stale_event_cannot_replace_new_active_agent() {
         let reducer = fixture_reducer().await;
         let old = reducer
-            .start_or_replace_active(create_input("terminal-1", "claudeCodeVisible", "2026-07-15T00:00:00Z"))
+            .start_or_replace_active(create_input(
+                "terminal-1",
+                "claudeCodeVisible",
+                "2026-07-15T00:00:00Z",
+            ))
             .await
             .unwrap();
         // 升到 v1 后替换
@@ -272,7 +279,11 @@ mod tests {
             .await
             .unwrap();
         let new = reducer
-            .start_or_replace_active(create_input("terminal-1", "codexVisible", "2026-07-15T00:01:00Z"))
+            .start_or_replace_active(create_input(
+                "terminal-1",
+                "codexVisible",
+                "2026-07-15T00:01:00Z",
+            ))
             .await
             .unwrap();
         let outcome = reducer

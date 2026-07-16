@@ -571,10 +571,7 @@ fn apply_workbench_terminal_env(
 fn apply_agent_context_env(command: &mut CommandBuilder, ctx: &TerminalAgentContextIds) {
     command.env("CC_PARTNER_PROJECT_ID", &ctx.project_id);
     command.env("CC_PARTNER_WORKTREE_ID", &ctx.worktree_id);
-    command.env(
-        "CC_PARTNER_TERMINAL_SESSION_ID",
-        &ctx.terminal_session_id,
-    );
+    command.env("CC_PARTNER_TERMINAL_SESSION_ID", &ctx.terminal_session_id);
     command.env("CC_PARTNER_OWNER_INSTANCE_ID", &ctx.owner_instance_id);
 }
 
@@ -1006,10 +1003,7 @@ fn agent_context_from_row(
 ///
 /// Code Logic（这个函数做什么）:
 ///     根据 row.backend/backend_id 构造 CommandBuilder；注入 TERM 与 CC_PARTNER_*_ID。
-fn command_builder_for_row(
-    row: &WorkbenchSessionRow,
-    owner_instance_id: &str,
-) -> CommandBuilder {
+fn command_builder_for_row(row: &WorkbenchSessionRow, owner_instance_id: &str) -> CommandBuilder {
     let agent_ctx = agent_context_from_row(row, owner_instance_id);
     if row.backend == TMUX_BACKEND {
         if let (Some(tmux), Some(session_name)) =
@@ -1798,8 +1792,7 @@ impl WorkbenchSessionRegistry {
                 pixel_height: 0,
             })
             .map_err(|error| AppError::generic(format!("创建 PTY 失败: {error}")))?;
-        let mut cmd =
-            command_builder_for_row(&row, state.config_runtime.owner_instance_id());
+        let mut cmd = command_builder_for_row(&row, state.config_runtime.owner_instance_id());
         cmd.cwd(PathBuf::from(&row.cwd));
         let child = pair
             .slave
@@ -2906,7 +2899,9 @@ mod tests {
             assert!(pair[1].starts_with("CC_PARTNER_"));
             assert!(!pair[1].contains("TOKEN"));
         }
-        assert!(tmux_args.iter().any(|a| a == "CC_PARTNER_PROJECT_ID=proj-1"));
+        assert!(tmux_args
+            .iter()
+            .any(|a| a == "CC_PARTNER_PROJECT_ID=proj-1"));
     }
 
     /// Business Logic（为什么需要这个测试）:

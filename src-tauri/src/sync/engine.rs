@@ -592,8 +592,7 @@ async fn prompt_sync_v2(
             }
         }
         // missing_ids 非空：已落库的 items 保留，但禁止 Succeeded / delete-epoch ack
-        if let Some(o) =
-            incomplete_items_outcome(&resp.missing_ids, pulled.saturating_add(pushed))
+        if let Some(o) = incomplete_items_outcome(&resp.missing_ids, pulled.saturating_add(pushed))
         {
             return o;
         }
@@ -829,10 +828,7 @@ pub fn mid_batch_fail_outcome(applied: u32, code: impl Into<String>) -> SyncDoma
 ///     missing_ids 空 → None（调用方继续 push/ack）；
 ///     非空 → Some(mid_batch_fail_outcome(applied, "items_missing_ids:count=N"))，
 ///     调用方必须 return 且不得再 decide_acked_delete_epoch(true, true, ...)。
-pub fn incomplete_items_outcome(
-    missing_ids: &[String],
-    applied: u32,
-) -> Option<SyncDomainOutcome> {
+pub fn incomplete_items_outcome(missing_ids: &[String], applied: u32) -> Option<SyncDomainOutcome> {
     if missing_ids.is_empty() {
         None
     } else {

@@ -261,8 +261,7 @@ async fn scratchpad_sync_v2(
             }
         }
         // missing_ids 非空：已落库的 items 保留，但禁止 Succeeded / delete-epoch ack
-        if let Some(o) =
-            incomplete_items_outcome(&resp.missing_ids, pulled.saturating_add(pushed))
+        if let Some(o) = incomplete_items_outcome(&resp.missing_ids, pulled.saturating_add(pushed))
         {
             return o;
         }
