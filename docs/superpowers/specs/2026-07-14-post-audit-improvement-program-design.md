@@ -1,7 +1,9 @@
 # cc-partner 审计后全面改进计划总纲
 
+> **执行状态（2026-07-15）：已被部分取代。** Review Diff、review digest、Changes UI、mobile diff、Diff→Rework E2E 与 Deliver 人工确认门已取消；通知合同迁移到 Agent State Projection；WORKFLOW.md 向导保留为历史设计但不在当前 LAN Agent Program 实施。N6 不再作为未修改的可执行入口；请改执行 `2026-07-15-lan-agent-program`（A0）与 A2 通知投影。
+
 - 日期：2026-07-14
-- 状态：已确认；用户授权直接生成分域 spec 与对应 implementation plan
+- 状态：已确认；用户授权直接生成分域 spec 与对应 implementation plan；N6 执行单元已 superseded（见上文）
 - 基线提交：`bb980fd`
 - 文档类型：总纲、依赖与覆盖矩阵；不承载单个实现 PR 的函数级步骤
 
@@ -43,7 +45,7 @@
 | N3 | Frontend Async State & Mobile Transport | safe-save、stale guard、错误恢复、operation context、移动端 timeout/cancel/reconcile | `2026-07-14-frontend-async-state-and-mobile-transport-design.md` | `2026-07-14-frontend-async-state-and-mobile-transport.md` |
 | N4 | Core Workbench Experience & LAN Onboarding | Trending 默认首页、Workbench Continue Working 启动页、导航分组、空态、LAN 首次确认、移动布局与对比度 | `2026-07-14-core-workbench-experience-and-lan-onboarding-design.md` | `2026-07-14-core-workbench-experience-and-lan-onboarding.md` |
 | N5 | Transfer Lifecycle & Recovery | retry/resume、失败阶段、结果对账、open/reveal、可操作历史 | `2026-07-14-transfer-lifecycle-and-recovery-design.md` | `2026-07-14-transfer-lifecycle-and-recovery.md` |
-| N6 | Orchestrator Review, Workflow & Notifications | Human Review diff、WORKFLOW 向导、系统通知、deep link 与去重 | `2026-07-14-orchestrator-review-workflow-and-notifications-design.md` | `2026-07-14-orchestrator-review-workflow-and-notifications.md` |
+| N6 | Orchestrator Review, Workflow & Notifications | **superseded（2026-07-15）**：Review Diff / digest / Changes UI / Deliver 人工门取消；通知合同见 A2；WORKFLOW 向导保留历史设计不在本轮实施。入口：`2026-07-15-lan-agent-program` / A2 | `2026-07-14-orchestrator-review-workflow-and-notifications-design.md` | `2026-07-14-orchestrator-review-workflow-and-notifications.md` |
 | N7 | Targeted Performance & Maintainability | 1Hz 隔离、编辑器语言拆包、索引预算、timeout 分类、模块 ratchet | `2026-07-14-targeted-performance-and-maintainability-design.md` | `2026-07-14-targeted-performance-and-maintainability.md` |
 | N8 | Real-Device Release Certification | 当前 Apple Silicon Mac GUI/权限与 VoiceOver 真机证据、90 天有效期、`macos-aarch64-beta` go/no-go；其他平台延期 | `2026-07-14-real-device-release-certification-design.md` | `2026-07-14-real-device-release-certification.md` |
 
@@ -53,7 +55,7 @@
 Wave 0: N1
 Wave 1: N2 | N3
 Wave 2: N4 | N5
-Wave 3: N6
+Wave 3: N6 (superseded → A0/A2; do not execute N6 as written)
 Wave 4: N7
 Wave 5: N8
 ```

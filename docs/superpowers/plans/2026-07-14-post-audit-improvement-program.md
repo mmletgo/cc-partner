@@ -1,5 +1,7 @@
 # Post-Audit Improvement Program Implementation Plan
 
+> **执行状态（2026-07-15）：已被部分取代。** Review Diff、review digest、Changes UI、mobile diff、Diff→Rework E2E 与 Deliver 人工确认门已取消；通知合同迁移到 Agent State Projection；WORKFLOW.md 向导保留为历史设计但不在当前 LAN Agent Program 实施。N6（Task 7）为 **superseded**，改执行 `2026-07-15-lan-agent-program`（A0）与 A2。
+
 > **For agentic workers:** REQUIRED EXECUTION FLOW: use `superpowers:using-git-worktrees`, then `superpowers:test-driven-development` task-by-task, and run `superpowers:verification-before-completion` before every completion claim. Native subagents may execute independent tasks; do not require unavailable `subagent-driven-development` or `executing-plans` skills. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 按八个独立、可验收子计划完成运行时权威、数据正确性、核心体验、新功能闭环、性能治理和真实设备发布认证。
@@ -12,7 +14,7 @@
 
 - 产品审计基线提交固定为 `bb980fd`；执行基线必须是包含本轮九份 spec 与九份 plan 的后继 planning commit。2026-07-13 S1–S6 已落地，不因旧 checkbox 未勾选而重新实现。
 - 必读 `docs/superpowers/specs/2026-07-14-post-audit-improvement-program-design.md` 和当前子计划。
-- 顺序固定为 `N1 → (N2 | N3) → (N4 | N5) → N6 → N7 → N8`；N4 先拥有 AppShell/Settings/deep-link 集成面，N6 只在 N4 合并后增量修改这些文件。
+- 顺序固定为 `N1 → (N2 | N3) → (N4 | N5) → N6[superseded→A0/A2] → N7 → N8`；N4 先拥有 AppShell/Settings/deep-link 集成面；N6 不再作为可执行入口。
 - 每个子计划独立 worktree/branch/验证/commit；共享文件由最早 owning plan 修改，后续计划 rebase 后增量更新。
 - 固定 LAN 无身份模型不变；禁止新增配对、token、可信设备、权限矩阵或可切换 LAN 模式。
 - 数据库 schema 继续使用 runtime 幂等 init/repo helper，`migrations/0001_init.sql` 同步为文档；不启用 `sqlx::migrate!`。
@@ -29,7 +31,7 @@ T1 baseline/branch map
   → T2 N1 runtime authority
     → (T3 N2 sync/recovery | T4 N3 frontend/mobile)
       → (T5 N4 core UX | T6 N5 transfer)
-        → T7 N6 orchestrator
+        → T7 N6 orchestrator [superseded → A0/A2]
           → T8 N7 performance/maintainability
             → T9 N8 real-device certification
               → T10 final calibration
@@ -154,19 +156,17 @@ Owner-scoped commands route through N1; uncertain UI uses N3 mutation/reconcilia
 
 Expected: lost ACK does not duplicate finalize; old peer fallback and action matrix pass; 1 GiB dual-host certification remains deferred `NOT VERIFIED` outside the current Mac-only N8 scope.
 
-### Task 7: Execute N6 Orchestrator Review, Workflow and Notifications
+### Task 7: Execute N6 Orchestrator Review, Workflow and Notifications — **superseded**
 
-**Files:** Follow `docs/superpowers/plans/2026-07-14-orchestrator-review-workflow-and-notifications.md`.
+**Status:** `superseded`（2026-07-15）。不再按本 Task 执行 N6 实现计划。
 
-- [ ] **Step 1: Confirm N1/N3 dependencies**
+**Replacement:** Review Diff / review digest / Changes UI / mobile diff / Diff→Rework E2E / Deliver 人工确认门已取消；通知合同由 `docs/superpowers/plans/2026-07-15-agent-state-projection.md`（A2）承接；总入口见 `docs/superpowers/plans/2026-07-15-lan-agent-program.md`（A0）。WORKFLOW.md 向导保留为历史设计，不在当前 LAN Agent Program 实施。
 
-Runtime/deep links use owner snapshot; WORKFLOW draft/notification async behavior uses N3 contracts.
+**Files (historical only):** `docs/superpowers/plans/2026-07-14-orchestrator-review-workflow-and-notifications.md`.
 
-- [ ] **Step 2: Execute bounded diff, digest, WORKFLOW and notification tasks**
-
-- [ ] **Step 3: Run N6 completion gate**
-
-Expected: delivery drift conflicts, WORKFLOW cannot alter delivery, notifications are privacy-safe navigation-only.
+- [x] **Step 1: Mark N6 superseded** — do not execute bounded diff / digest gate / Changes UI as product surface
+- [x] **Step 2: Notifications re-owned by A2** — see Agent State Projection plan
+- [x] **Step 3: Skip N6 completion gate** — program gates live under A0 Task 7
 
 ### Task 8: Execute N7 Targeted Performance and Maintainability
 

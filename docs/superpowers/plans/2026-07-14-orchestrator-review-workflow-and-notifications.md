@@ -1,5 +1,7 @@
 # Orchestrator Review, Workflow and Notifications Implementation Plan
 
+> **执行状态（2026-07-15）：已被部分取代。** Review Diff、review digest、Changes UI、mobile diff、Diff→Rework E2E 与 Deliver 人工确认门已取消；通知合同迁移到 Agent State Projection；WORKFLOW.md 向导保留为历史设计但不在当前 LAN Agent Program 实施。
+
 > **For agentic workers:** REQUIRED EXECUTION FLOW: use `superpowers:using-git-worktrees`, then `superpowers:test-driven-development` task-by-task, and run `superpowers:verification-before-completion` before every completion claim. Native subagents may execute independent tasks; do not require unavailable `subagent-driven-development` or `executing-plans` skills. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为 Human Review 提供有界只读 diff 与交付前漂移保护，为 WORKFLOW.md 提供安全向导，并用去重系统通知把关键状态导航回权威界面。

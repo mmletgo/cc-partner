@@ -1,7 +1,9 @@
 # Orchestrator Review, Workflow and Notifications 设计
 
+> **执行状态（2026-07-15）：已被部分取代。** Review Diff、review digest、Changes UI、mobile diff、Diff→Rework E2E 与 Deliver 人工确认门已取消；通知合同迁移到 Agent State Projection；WORKFLOW.md 向导保留为历史设计但不在当前 LAN Agent Program 实施。
+
 - 日期：2026-07-14
-- 状态：已确认
+- 状态：已确认（N6 作为串行执行单元已被 `2026-07-15-lan-agent-program` 部分取代；见上文执行状态）
 - 依赖：现有 Orchestrator workflow/action/evidence、Attention 导航投影、系统通知权限与 Workbench file/Git 能力
 
 ## 1. 问题
