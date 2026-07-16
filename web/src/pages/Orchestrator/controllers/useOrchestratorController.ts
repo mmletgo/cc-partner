@@ -335,6 +335,9 @@ export function useOrchestratorController(
   const workflowRequestSeqRef = useRef(0);
   const [experiments, setExperiments] = useState<OrchestratorExperiment[]>([]);
   const [experimentsLoading, setExperimentsLoading] = useState(false);
+  const [boundExperimentsKey, setBoundExperimentsKey] = useState<string | null | undefined>(
+    undefined,
+  );
   const [creatingExperiment, setCreatingExperiment] = useState(false);
   const [experimentActionId, setExperimentActionId] = useState<string | null>(null);
   const activeProjectId = activeProject?.id ?? null;
@@ -343,6 +346,14 @@ export function useOrchestratorController(
     () => resolveOrchestratorTaskLoad(projectsLoading, activeProjectId),
     [activeProjectId, projectsLoading],
   );
+  // project 键变化时在 render 中清空实验组，避免 setState-in-effect 同步清空
+  const experimentsProjectKey =
+    taskLoadDecision.kind === 'load' ? taskLoadDecision.projectId : null;
+  if (boundExperimentsKey !== experimentsProjectKey) {
+    setBoundExperimentsKey(experimentsProjectKey);
+    setExperiments([]);
+    setExperimentsLoading(experimentsProjectKey !== null);
+  }
   const runtimeSnapshotEnabled = taskLoadDecision.kind === 'load';
   const runtimeSnapshotProjectId = runtimeSnapshotEnabled ? taskLoadDecision.projectId : null;
   const {
@@ -693,17 +704,14 @@ export function useOrchestratorController(
    *   实验组列表必须与当前项目同步，支持 NeedsDecision 决策入口。
    *
    * Code Logic（这个 effect 做什么）:
-   *   project 加载后 listExperiments；stale guard 丢弃过期响应。
+   *   project 加载后 listExperiments；清空已在 render 中按 key 完成；stale guard 丢弃过期响应。
    */
   useEffect(() => {
     if (taskLoadDecision.kind !== 'load') {
-      setExperiments([]);
-      setExperimentsLoading(false);
       return undefined;
     }
     let cancelled = false;
     const projectId = taskLoadDecision.projectId;
-    setExperimentsLoading(true);
     void orchestratorApi
       .listExperiments(projectId)
       .then((items) => {

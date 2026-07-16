@@ -78,7 +78,8 @@ describe('agentRuntime schemas', () => {
   });
 
   test('rejects missing terminalSessionId', () => {
-    const { terminalSessionId: _removed, ...rest } = sampleSession;
+    const rest = { ...sampleSession } as Record<string, unknown>;
+    delete rest.terminalSessionId;
     expect(() => agentSessionRuntimeDtoDecoder.decode(rest)).toThrow(ContractDecodeError);
   });
 

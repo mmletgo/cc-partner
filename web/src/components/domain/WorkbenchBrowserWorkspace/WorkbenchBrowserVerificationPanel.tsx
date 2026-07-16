@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Pill } from '@/components/primitives';
@@ -33,6 +33,14 @@ export function WorkbenchBrowserVerificationPanel({
   const [error, setError] = useState<string | null>(null);
   const [run, setRun] = useState<BrowserVerificationRun | null>(null);
   const [shotSrc, setShotSrc] = useState<string | null>(null);
+  // preview 切换时在 render 中复位结果，避免 setState-in-effect
+  const [boundPreviewId, setBoundPreviewId] = useState(previewId);
+  if (boundPreviewId !== previewId) {
+    setBoundPreviewId(previewId);
+    setRun(null);
+    setShotSrc(null);
+    setError(null);
+  }
 
   // hooks 必须在 early return 之前
   const start = useCallback(async () => {
@@ -80,12 +88,6 @@ export function WorkbenchBrowserVerificationPanel({
       setBusy(false);
     }
   }, [previewId, t, transport.browser]);
-
-  useEffect(() => {
-    setRun(null);
-    setShotSrc(null);
-    setError(null);
-  }, [previewId]);
 
   const summary = summarizeVerification(run);
   const canStart = Boolean(previewId && transport.browser.startVerification);

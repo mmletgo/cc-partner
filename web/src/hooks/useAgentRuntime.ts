@@ -128,13 +128,29 @@ export function useAgentRuntime(
   },
 ): UseAgentRuntimeResult {
   const enabled = options?.enabled !== false;
-  const getSnapshot =
-    options?.getSnapshot ??
-    ((pid: string | null) => workbenchApi.agentRuntime.getSnapshot(pid));
+  const injectedGetSnapshot = options?.getSnapshot;
+  const getSnapshot = useCallback(
+    (pid: string | null) =>
+      injectedGetSnapshot
+        ? injectedGetSnapshot(pid)
+        : workbenchApi.agentRuntime.getSnapshot(pid),
+    [injectedGetSnapshot],
+  );
 
   const [state, setState] = useState<AgentRuntimeState>(() => emptyAgentRuntimeState());
   const [phase, setPhase] = useState<HandshakePhase>('pending');
   const [error, setError] = useState<Error | null>(null);
+  // project/enabled 关闭时在 render 中复位投影，避免 setState-in-effect
+  const runtimeActiveKey = enabled && projectId ? projectId : null;
+  const [boundRuntimeKey, setBoundRuntimeKey] = useState<string | null>(runtimeActiveKey);
+  if (boundRuntimeKey !== runtimeActiveKey) {
+    setBoundRuntimeKey(runtimeActiveKey);
+    if (runtimeActiveKey === null) {
+      setPhase('pending');
+      setState(emptyAgentRuntimeState());
+      setError(null);
+    }
+  }
 
   const phaseRef = useRef<HandshakePhase>('pending');
   const bufferRef = useRef<AgentRuntimeEvent[]>([]);
@@ -359,14 +375,12 @@ export function useAgentRuntime(
 
   useEffect(() => {
     if (!enabled || !projectId) {
+      // React state 已在 render 中按 key 复位；此处仅清理异步 handshake 与 refs
       handshakeGenerationRef.current += 1;
       bufferRef.current = [];
       cursorRef.current = null;
       phaseRef.current = 'pending';
-      setPhase('pending');
-      setState(emptyAgentRuntimeState());
       stateRef.current = emptyAgentRuntimeState();
-      setError(null);
       return undefined;
     }
 

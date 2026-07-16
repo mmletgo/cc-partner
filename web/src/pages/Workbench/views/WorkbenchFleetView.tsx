@@ -13,9 +13,6 @@ import type { ReactElement } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type {
-  FleetBrowserState,
-  FleetGitState,
-  FleetReachability,
   LanFleetDeviceSummary,
   LanFleetProjectSummary,
   LanFleetSnapshot,
@@ -28,39 +25,6 @@ export interface WorkbenchFleetViewProps {
   loading?: boolean;
   error?: string | null;
   onRefresh?: () => void;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   可达性文案需文本，不能只靠颜色。
- *
- * Code Logic（这个函数做什么）:
- *   映射 reachability → i18n key 后缀。
- */
-function reachabilityKey(r: FleetReachability): string {
-  return r;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Git 摘要展示 clean/dirty/conflict/unknown。
- *
- * Code Logic（这个函数做什么）:
- *   原样返回 state token 供 i18n。
- */
-function gitKey(g: FleetGitState): string {
-  return g;
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   Browser 摘要展示 active/absent/unknown。
- *
- * Code Logic（这个函数做什么）:
- *   原样返回 state token。
- */
-function browserKey(b: FleetBrowserState): string {
-  return b;
 }
 
 /**
@@ -149,13 +113,13 @@ function DeviceSection({ device }: { device: LanFleetDeviceSummary }): ReactElem
           <li>
             <span className={styles.metaLabel}>{t('workbench:fleet.reachability')}</span>
             <span data-reachability={device.reachability}>
-              {t(`workbench:fleet.reachabilityStates.${reachabilityKey(device.reachability)}`)}
+              {t(`workbench:fleet.reachabilityStates.${device.reachability}` as const)}
             </span>
           </li>
           <li>
             <span className={styles.metaLabel}>{t('workbench:fleet.freshness')}</span>
             <span data-freshness={device.freshness}>
-              {t(`workbench:fleet.freshnessStates.${device.freshness}`)}
+              {t(`workbench:fleet.freshnessStates.${device.freshness}` as const)}
             </span>
           </li>
           <li>
@@ -275,11 +239,11 @@ function ProjectRow({ project }: { project: LanFleetProjectSummary }): ReactElem
         </div>
         <div>
           <dt>{t('workbench:fleet.git')}</dt>
-          <dd>{t(`workbench:fleet.gitStates.${gitKey(project.gitState)}`)}</dd>
+          <dd>{t(`workbench:fleet.gitStates.${project.gitState}` as const)}</dd>
         </div>
         <div>
           <dt>{t('workbench:fleet.browser')}</dt>
-          <dd>{t(`workbench:fleet.browserStates.${browserKey(project.browserState)}`)}</dd>
+          <dd>{t(`workbench:fleet.browserStates.${project.browserState}` as const)}</dd>
         </div>
         <div>
           <dt>{t('workbench:fleet.orchestrator')}</dt>

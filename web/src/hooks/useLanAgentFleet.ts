@@ -100,7 +100,11 @@ export function useLanAgentFleet(
   const requestSeqRef = useRef(0);
   const coalesceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadSnapshotRef = useRef(loadSnapshot);
-  loadSnapshotRef.current = loadSnapshot;
+
+  // 注入 loader 仅异步路径读取，避免 render 中写 ref
+  useEffect(() => {
+    loadSnapshotRef.current = loadSnapshot;
+  }, [loadSnapshot]);
 
   const load = useCallback(async () => {
     const seq = ++requestSeqRef.current;

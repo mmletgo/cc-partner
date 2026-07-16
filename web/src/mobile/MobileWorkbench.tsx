@@ -204,9 +204,12 @@ export function MobileWorkbench(): ReactElement {
     activeProjectIdRef.current = activeProject?.id ?? null;
   }, [activeProject?.id]);
 
-  useEffect(() => {
+  // sessions 列表变化时在 render 阶段播种 runtime（保留已有 agent 投影），避免 setState-in-effect
+  const [seededSessions, setSeededSessions] = useState(sessions);
+  if (seededSessions !== sessions) {
+    setSeededSessions(sessions);
     setSessionRuntime((prev) => seedMobileSessionRuntimeFromSessions(sessions, prev));
-  }, [sessions]);
+  }
 
   /**
    * Business Logic（为什么需要这个函数）:

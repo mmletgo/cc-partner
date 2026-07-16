@@ -313,6 +313,17 @@ export function registerAppShellCommands(
   });
   harness.command('list_workbench_projects', { kind: 'resolve', value: [] });
   harness.command('list_workbench_sessions', { kind: 'resolve', value: [] });
+  harness.command('get_workbench_launch_summary', {
+    kind: 'resolve',
+    value: {
+      projects: { kind: 'ready', value: [] },
+      sessions: { kind: 'ready', value: [] },
+      tasks: { kind: 'ready', value: [] },
+      transfers: { kind: 'ready', value: [] },
+      devices: { kind: 'ready', value: [] },
+      generatedAt: '2026-07-14T00:00:00.000Z',
+    },
+  });
   harness.command('check_workbench_dependency', {
     kind: 'resolve',
     value: makeWorkbenchDependencyReady(),
@@ -368,6 +379,96 @@ export function registerAppShellCommands(
     kind: 'resolve',
     value: SETTINGS_FIXTURES.automation,
   });
+  // Workbench mount：workspace layout restore / Agent runtime / LAN Fleet / ledger / experiments
+  harness.command('get_workspace_layout', { kind: 'resolve', value: null });
+  harness.command('save_workspace_layout', {
+    kind: 'resolve',
+    value: {
+      schemaVersion: 1,
+      id: 'layout-auto',
+      revision: 1,
+      slotKey: 'desktop:auto',
+      kind: 'auto',
+      name: null,
+      projectId: 'proj-placeholder',
+      activeWorktreeId: null,
+      activeSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      createdAt: '2026-07-14T00:00:00.000Z',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    },
+  });
+  harness.command('list_named_workspace_layouts', { kind: 'resolve', value: [] });
+  harness.command('delete_named_workspace_layout', { kind: 'resolve', value: null });
+  harness.command('preflight_workspace_restore_cmd', {
+    kind: 'resolve',
+    value: {
+      restoreId: 'restore-empty',
+      layoutId: '',
+      layoutRevision: 0,
+      status: 'empty',
+      resolvedProjectId: null,
+      resolvedWorktreeId: null,
+      resolvedSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: null,
+      actions: [],
+    },
+  });
+  harness.command('apply_workspace_restore_cmd', {
+    kind: 'resolve',
+    value: {
+      restoreId: 'restore-empty',
+      status: 'empty',
+      restoredCount: 0,
+      skippedCount: 0,
+      actions: [],
+    },
+  });
+  harness.command('get_agent_runtime_snapshot', {
+    kind: 'resolve',
+    value: {
+      ownerInstanceId: 'owner-shell',
+      asOfSequence: 0,
+      projectId: null,
+      sessions: [],
+      truncated: false,
+    },
+  });
+  harness.command('get_workbench_lan_fleet', {
+    kind: 'resolve',
+    value: {
+      generatedAt: '2026-07-14T00:00:00.000Z',
+      devices: [],
+      truncated: false,
+    },
+  });
+  harness.command('list_agent_ledger', {
+    kind: 'resolve',
+    value: { items: [], nextCursor: null },
+  });
+  harness.command('summarize_agent_ledger', {
+    kind: 'resolve',
+    value: {
+      window: '7d',
+      projectId: null,
+      sessions: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      disconnected: 0,
+      durationMs: 0,
+      inputTokens: null,
+      outputTokens: null,
+      costByCurrency: [],
+      usageCoverage: 'unavailable',
+    },
+  });
+  harness.command('clear_agent_ledger', { kind: 'resolve', value: 0 });
+  harness.command('list_orchestrator_experiments', { kind: 'resolve', value: [] });
 
   if (notificationGranted) {
     harness.command('plugin:notification|is_permission_granted', {

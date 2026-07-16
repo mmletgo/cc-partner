@@ -133,6 +133,17 @@ export function useWorkbenchProjectController(
   const [agentLedgerLoadingMore, setAgentLedgerLoadingMore] = useState(false);
   const [agentLedgerError, setAgentLedgerError] = useState<string | null>(null);
   const agentLedgerSeqRef = useRef(0);
+  // 切换项目时在 render 中复位 drawer，避免跨项目泄漏与 setState-in-effect
+  const [ledgerBoundProjectId, setLedgerBoundProjectId] = useState(activeProjectId);
+  if (ledgerBoundProjectId !== activeProjectId) {
+    setLedgerBoundProjectId(activeProjectId);
+    setAgentLedgerOpen(false);
+    setAgentLedgerPage(null);
+    setAgentLedgerSummary(null);
+    setAgentLedgerError(null);
+    setAgentLedgerLoading(false);
+    setAgentLedgerLoadingMore(false);
+  }
 
   // Business Logic: 异步加载回调返回时，active project 可能已经切换；用 ref 读取最新 id 做 stale guard。
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
@@ -321,13 +332,15 @@ export function useWorkbenchProjectController(
         workbenchApi.agentLedger.summarize({ window: '7d', projectId: project.id }),
       ]);
       if (seq !== agentLedgerSeqRef.current) return;
+      if (activeProjectIdRef.current !== project.id) return;
       setAgentLedgerPage(page);
       setAgentLedgerSummary(summary);
     } catch (error) {
       if (seq !== agentLedgerSeqRef.current) return;
+      if (activeProjectIdRef.current !== project.id) return;
       setAgentLedgerError(launchErrorMessage(error, 'agent ledger failed'));
     } finally {
-      if (seq === agentLedgerSeqRef.current) {
+      if (seq === agentLedgerSeqRef.current && activeProjectIdRef.current === project.id) {
         setAgentLedgerLoading(false);
       }
     }
@@ -377,6 +390,7 @@ export function useWorkbenchProjectController(
         cursor,
       });
       if (seq !== agentLedgerSeqRef.current) return;
+      if (activeProjectIdRef.current !== project.id) return;
       setAgentLedgerPage((prev) => {
         if (!prev) return next;
         return {
@@ -386,22 +400,14 @@ export function useWorkbenchProjectController(
       });
     } catch (error) {
       if (seq !== agentLedgerSeqRef.current) return;
+      if (activeProjectIdRef.current !== project.id) return;
       setAgentLedgerError(launchErrorMessage(error, 'agent ledger load more failed'));
     } finally {
-      if (seq === agentLedgerSeqRef.current) {
+      if (seq === agentLedgerSeqRef.current && activeProjectIdRef.current === project.id) {
         setAgentLedgerLoadingMore(false);
       }
     }
   }, [activeProject, agentLedgerPage]);
-
-  // 切换项目时关闭 drawer 并清空，避免跨项目泄漏明细
-  useEffect(() => {
-    setAgentLedgerOpen(false);
-    setAgentLedgerPage(null);
-    setAgentLedgerSummary(null);
-    setAgentLedgerError(null);
-    agentLedgerSeqRef.current += 1;
-  }, [activeProjectId]);
 
   return {
     remoteProjectOffline,

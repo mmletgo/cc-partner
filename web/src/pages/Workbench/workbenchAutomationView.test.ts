@@ -450,8 +450,8 @@ describe('workbenchAutomationView', () => {
   );
   assertContains(
     orchestratorSource,
-    'const busy = Boolean(creatingAction) || completingPrompt;',
-    'Orchestrator create dialog derives busy from creatingAction/completingPrompt',
+    'const busy = Boolean(creatingAction) || completingPrompt || creatingExperiment;',
+    'Orchestrator create dialog derives busy from creatingAction/completingPrompt/creatingExperiment',
   );
   assertContains(
     orchestratorSource,

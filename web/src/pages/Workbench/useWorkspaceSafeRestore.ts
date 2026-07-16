@@ -166,14 +166,25 @@ export function useWorkspaceSafeRestore(
     inspectorTab,
     browserTargetUrl,
   });
-  selectionRef.current = {
+
+  // selection 仅供 autosave/restore 异步回调读取，不得在 render 中写 ref
+  useEffect(() => {
+    selectionRef.current = {
+      activeProjectId,
+      activeWorktreeId,
+      activeSessionId,
+      workspaceView,
+      inspectorTab,
+      browserTargetUrl,
+    };
+  }, [
     activeProjectId,
     activeWorktreeId,
     activeSessionId,
     workspaceView,
     inspectorTab,
     browserTargetUrl,
-  };
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:

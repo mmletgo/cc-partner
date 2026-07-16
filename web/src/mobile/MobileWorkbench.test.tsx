@@ -67,6 +67,21 @@ vi.mock('@/hooks/attentionContext', () => ({
   }),
 }));
 
+vi.mock('@/hooks/workbenchTerminalBuffersContext', () => ({
+  useWorkbenchTerminalBuffers: () => ({
+    store: {
+      getBuffer: () => '',
+      getRevision: () => 0,
+      append: vi.fn(),
+      reset: vi.fn(),
+      remove: vi.fn(),
+      subscribe: () => () => undefined,
+    },
+    resetBuffer: vi.fn(),
+    removeBuffer: vi.fn(),
+  }),
+}));
+
 import { MobileWorkbench } from './MobileWorkbench';
 
 /**
