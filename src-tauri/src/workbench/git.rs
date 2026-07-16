@@ -556,15 +556,20 @@ pub fn rev_parse_ref(path: &Path, git_ref: &str) -> Result<Option<String>, AppEr
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     merge confirm 需要 main 是否包含 source HEAD。
+///     merge 后 parent/ancestry gate 与 merge confirm 需要对任意两 commit 做祖先判定，
+///     不能只绑死当前 HEAD。
 ///
 /// Code Logic（这个函数做什么）:
-///     `git merge-base --is-ancestor <source_head> HEAD` 在 main 路径执行；0=true，1=false。
-#[allow(dead_code)] // N3 MutationAuthoritySnapshot 采集 helper；当前前端对账，后端 pure confirm 单测/后续复用
-pub fn is_ancestor(main_path: &Path, source_head: &str) -> Result<bool, AppError> {
+///     `git merge-base --is-ancestor <ancestor> <descendant>`；0=true，1=false。
+pub fn is_ancestor(path: &Path, ancestor: &str, descendant: &str) -> Result<bool, AppError> {
+    let ancestor = ancestor.trim();
+    let descendant = descendant.trim();
+    if ancestor.is_empty() || descendant.is_empty() {
+        return Err(AppError::generic("is_ancestor 需要非空 commit oid"));
+    }
     let output = Command::new("git")
-        .args(["merge-base", "--is-ancestor", source_head, "HEAD"])
-        .current_dir(main_path)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(path)
         .output()?;
     if output.status.success() {
         return Ok(true);
@@ -576,6 +581,82 @@ pub fn is_ancestor(main_path: &Path, source_head: &str) -> Result<bool, AppError
         "Git 命令失败: {}",
         git_failure_message(&output)
     )))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 验证必须确认 first parent 仍是 merge 前的 pre_oid，并判断 reviewed_oid 是否为 parent。
+///
+/// Code Logic（这个函数做什么）:
+///     `git rev-list --parents -n 1 <commit_oid>`，解析输出中除 commit 自身外的 parent OID 列表。
+pub fn commit_parent_oids(path: &Path, commit_oid: &str) -> Result<Vec<String>, AppError> {
+    let commit_oid = commit_oid.trim();
+    if commit_oid.is_empty() {
+        return Err(AppError::generic("commit oid 不能为空"));
+    }
+    let output = run_git(path, &["rev-list", "--parents", "-n", "1", commit_oid])?;
+    let mut parts = output.split_whitespace();
+    // 首 token 是 commit 自身；其余为 parents。
+    let _commit_self = parts
+        .next()
+        .ok_or_else(|| AppError::generic("git rev-list --parents 返回空"))?;
+    Ok(parts.map(str::to_string).collect())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 成功后的 HEAD 可能被并发 tip 推进；必须校验 branch/ref/parent/ancestry 仍绑定本次 merge。
+///
+/// Code Logic（这个函数做什么）:
+///     1) current_branch == frozen_branch；2) refs/heads/<branch> == merge_oid；
+///     3) merge_oid==pre_oid 时要求 reviewed 是 merge 的祖先；否则 first parent==pre_oid 且
+///     reviewed 是 parent 或 ancestor。失败返回 AppError。
+pub(crate) fn verify_merge_oid_binding(
+    path: &Path,
+    merge_oid: &str,
+    pre_oid: &str,
+    reviewed_oid: &str,
+    frozen_branch: &str,
+) -> Result<(), AppError> {
+    let now_branch = current_branch(path).ok_or_else(|| {
+        AppError::generic("merge main failed: current branch missing after merge")
+    })?;
+    if now_branch != frozen_branch {
+        return Err(AppError::generic(format!(
+            "merge main failed: branch drifted after merge (expected={frozen_branch}, got={now_branch})"
+        )));
+    }
+    let refname = format!("refs/heads/{frozen_branch}");
+    let ref_oid = run_git(path, &["rev-parse", &refname])?.trim().to_string();
+    if ref_oid != merge_oid {
+        return Err(AppError::generic(format!(
+            "merge main failed: branch ref mismatch (ref={ref_oid}, head={merge_oid})"
+        )));
+    }
+    let reviewed = reviewed_oid.trim();
+    if merge_oid == pre_oid {
+        if !is_ancestor(path, reviewed, merge_oid)? {
+            return Err(AppError::generic(format!(
+                "merge main failed: already-up-to-date tip does not contain reviewed oid {reviewed}"
+            )));
+        }
+        return Ok(());
+    }
+    let parents = commit_parent_oids(path, merge_oid)?;
+    let first = parents.first().ok_or_else(|| {
+        AppError::generic("merge main failed: merge commit has no parents".to_string())
+    })?;
+    if first != pre_oid {
+        return Err(AppError::generic(format!(
+            "merge main failed: first parent is not pre-merge tip (expected={pre_oid}, got={first})"
+        )));
+    }
+    let is_parent = parents.iter().any(|p| p == reviewed);
+    let is_anc = is_ancestor(path, reviewed, merge_oid)?;
+    if !is_parent && !is_anc {
+        return Err(AppError::generic(format!(
+            "merge main failed: reviewed oid {reviewed} is neither parent nor ancestor of merge tip"
+        )));
+    }
+    Ok(())
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -607,9 +688,9 @@ pub fn create_worktree(
 /// Code Logic（这个函数做什么）:
 ///     执行 `git add -A` 后检查 staged/working 状态；有变更时执行 `git commit -m`，无变更返回 false。
 ///
-/// 生产 delivery 走 ledger `local_commit_workbench_worktree`；本 helper 供 delivery 单测 harness 与
-/// 简单 stage+commit 场景复用。
+/// 简单 stage+commit 场景复用（delivery 生产/harness 已改 freeze path；保留给其它 git 单测）。
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn commit_all(path: &Path, message: &str) -> Result<bool, AppError> {
     if !stage_all_for_commit(path)? {
         return Ok(false);
@@ -879,14 +960,18 @@ pub fn push_main_commit_oid_to(
 /// Business Logic（为什么需要这个函数）:
 ///     merge reviewed OID 时必须先冻结 main 的 push remote/ref，再 merge，再读 merge OID；
 ///     调用方须持有 project main 进程锁，保证 freeze/merge/head 原子序。
+///     merge 后必须验证 first-parent/ancestry，防止并发 tip 推进返回错误 OID。
 ///
 /// Code Logic（这个函数做什么）:
-///     1) 读 current branch → freeze_push_target；2) merge_commit_oid；
-///     3) Conflicted 原样返回；Merged 后 head_hash 作为 merge_oid。
+///     1) pre_oid = head_hash（要求 Some）；2) 读 branch → freeze_push_target；
+///     3) merge_commit_oid；4) Conflicted 原样返回；Merged 后 head_hash +
+///     verify_merge_oid_binding（branch/ref/first-parent/reviewed ancestry）。
 pub fn merge_reviewed_oid_with_frozen_main(
     main_path: &Path,
     reviewed_oid: &str,
 ) -> Result<MergeReviewedOutcome, AppError> {
+    let pre_oid = head_hash(main_path)?
+        .ok_or_else(|| AppError::generic("主工作区没有可合并的 HEAD 历史（empty/unborn）"))?;
     let branch = current_branch(main_path)
         .ok_or_else(|| AppError::generic("主工作区没有可合并的当前分支"))?;
     let push_target = freeze_push_target(main_path, &branch)?;
@@ -896,6 +981,7 @@ pub fn merge_reviewed_oid_with_frozen_main(
             let merge_oid = head_hash(main_path)?.ok_or_else(|| {
                 AppError::generic("merge main failed: main HEAD empty after merge")
             })?;
+            verify_merge_oid_binding(main_path, &merge_oid, &pre_oid, reviewed_oid, &branch)?;
             Ok(MergeReviewedOutcome::Merged(FrozenMainMergeResult {
                 merge_oid,
                 push_target,
@@ -2065,6 +2151,72 @@ UU web/src/App.tsx
             }
             MergeReviewedOutcome::Conflicted => panic!("expected merged"),
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     merge 后若 HEAD 被并发推进到无关 tip，parent gate 必须拒绝把错误 tip 当作 merge_oid。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     完成合法 merge 后在 main 上再造额外 commit；用 pre_oid + reviewed 校验推进后的 tip，
+    ///     断言 first-parent 门禁失败。
+    #[test]
+    fn merge_reviewed_oid_parent_gate_rejects_concurrent_tip_advance() {
+        let root = temp_git_dir("workbench-merge-parent-gate");
+        let origin = root.join("origin.git");
+        let main = root.join("main");
+        let feature = root.join("feature");
+        fs::create_dir_all(&origin).expect("origin");
+        git_test_command(&origin, &["init", "--bare"]);
+        fs::create_dir_all(&main).expect("main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        fs::write(main.join("README.md"), "base\n").expect("write");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "initial"]);
+        git_test_command(
+            &main,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git_test_command(&main, &["push", "-u", "origin", "main"]);
+        let pre_oid = head_hash(&main).expect("pre").expect("some");
+        git_test_command(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/gate",
+                feature.to_str().unwrap(),
+            ],
+        );
+        fs::write(feature.join("feat.txt"), "v1\n").expect("feat");
+        git_test_command(&feature, &["add", "feat.txt"]);
+        git_test_command(&feature, &["commit", "-m", "feat"]);
+        let reviewed = head_hash(&feature).expect("head").expect("oid");
+        let outcome = merge_reviewed_oid_with_frozen_main(&main, &reviewed).expect("merge");
+        let merge_oid = match outcome {
+            MergeReviewedOutcome::Merged(r) => r.merge_oid,
+            MergeReviewedOutcome::Conflicted => panic!("expected merged"),
+        };
+        // 合法 merge tip 应通过 parent gate。
+        verify_merge_oid_binding(&main, &merge_oid, &pre_oid, &reviewed, "main")
+            .expect("legitimate merge tip must pass");
+        // 模拟并发 tip 推进：额外 commit 后 first parent ≠ pre_oid。
+        fs::write(main.join("sneak.txt"), "race\n").expect("sneak");
+        git_test_command(&main, &["add", "sneak.txt"]);
+        git_test_command(&main, &["commit", "-m", "concurrent tip"]);
+        let advanced = head_hash(&main).expect("advanced").expect("some");
+        assert_ne!(advanced, merge_oid);
+        let err = verify_merge_oid_binding(&main, &advanced, &pre_oid, &reviewed, "main")
+            .expect_err("advanced tip must fail first-parent gate");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("first parent") || msg.contains("pre-merge"),
+            "unexpected err: {msg}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

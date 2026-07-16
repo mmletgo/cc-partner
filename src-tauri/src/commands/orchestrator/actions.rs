@@ -510,18 +510,16 @@ pub async fn retry_orchestrator_task(
 ///     experiment candidate 必须同步 Cancelled，防止后续 approve 复活交付。
 ///
 /// Code Logic（这个函数做什么）:
-///     将任务状态设置为 Aborted，清空 blocked_reason；若有 experiment_id 则
+///     经 `abort_task_preserving_done` 写入 Aborted（拒绝覆写 Done）；若有 experiment_id 则
 ///     mark_candidate_cancelled；不删除 worktree/session。
 #[tauri::command]
 pub async fn abort_orchestrator_task(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
-    let task = state.orchestrator_repo.get_task(&task_id).await?;
-    let target = abort_orchestrator_task_target_status(task.status);
     let updated = state
         .orchestrator_repo
-        .set_task_status(&task.id, target, None)
+        .abort_task_preserving_done(&task_id)
         .await?;
     if updated.experiment_id.is_some() {
         if let Err(err) =

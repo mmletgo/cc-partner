@@ -1527,10 +1527,11 @@ impl OrchestratorRepo {
 
     /// Business Logic（为什么需要这个函数）:
     ///     显式 cancelTask 表示用户不再希望任务继续被 scheduler 或 delivery 接管，但仍要保留现场和证据供人工审计。
+    ///     已 Done 的任务不能被 cancel 覆写，否则会丢失交付终态并触发错误 cleanup 语义。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     将 legacy status 写为 Aborted、split state 写为 Canceled/Idle，清空 blocked_reason 和 attempt_phase；
-    ///     不修改 branch/worktree/session/runtime/evidence 字段。
+    ///     `UPDATE ... WHERE id=? AND status != 'done'` 写 Aborted/Canceled/Idle，清空 blocked_reason 与 attempt_phase；
+    ///     rows=0 且当前为 Done 时返回 conflict；其它情况返回当前行（幂等）。
     pub async fn cancel_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
         let now = Utc::now().to_rfc3339();
         let result = with_shared_write_lease(&self.gate, async {
@@ -1538,7 +1539,7 @@ impl OrchestratorRepo {
                 "UPDATE orchestrator_tasks \
                  SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
                      blocked_reason = ?, updated_at = ? \
-                 WHERE id = ?",
+                 WHERE id = ? AND status != ?",
             )
             .bind(OrchestratorTaskStatus::Aborted.as_str())
             .bind(OrchestratorWorkflowState::Canceled.as_str())
@@ -1547,6 +1548,7 @@ impl OrchestratorRepo {
             .bind(Option::<&str>::None)
             .bind(now)
             .bind(task_id)
+            .bind(OrchestratorTaskStatus::Done.as_str())
             .execute(&self.pool)
             .await
         })
@@ -1556,7 +1558,52 @@ impl OrchestratorRepo {
             return self.get_task(task_id).await;
         }
 
-        self.get_task(task_id).await
+        let current = self.get_task(task_id).await?;
+        if current.status == OrchestratorTaskStatus::Done {
+            return Err(AppError::conflict("任务已完成，不能取消"));
+        }
+        Ok(current)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Abort 路径不得把已 Done 任务覆写为 Aborted，否则交付 cleanup 与终态语义被破坏。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `UPDATE ... WHERE id=? AND status NOT IN ('done')` 写 Aborted 与对应 split state；
+    ///     rows=0 时若当前 Done → conflict；否则返回当前行（已 Aborted 幂等）。
+    pub async fn abort_task_preserving_done(
+        &self,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Aborted);
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_tasks \
+                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
+                 WHERE id = ? AND status != ?",
+            )
+            .bind(OrchestratorTaskStatus::Aborted.as_str())
+            .bind(split_state.workflow_state.as_str())
+            .bind(split_state.run_state.as_str())
+            .bind(Option::<&str>::None)
+            .bind(now)
+            .bind(task_id)
+            .bind(OrchestratorTaskStatus::Done.as_str())
+            .execute(&self.pool)
+            .await
+        })
+        .await?;
+
+        if result.rows_affected() == 1 {
+            return self.get_task(task_id).await;
+        }
+
+        let current = self.get_task(task_id).await?;
+        if current.status == OrchestratorTaskStatus::Done {
+            return Err(AppError::conflict("任务已完成，不能终止"));
+        }
+        Ok(current)
     }
 
     /// Business Logic（为什么需要这个函数）:

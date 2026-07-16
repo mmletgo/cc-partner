@@ -9,7 +9,6 @@
 //!     push/merge（Human Review 与 digest 路径统一），Done CAS Transitioned 后才清理 worktree；
 //!     失败写 failed delivery evidence 并把任务置为 Blocked。
 
-use crate::commands::workbench::local_commit_workbench_worktree;
 use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::models::{
@@ -244,15 +243,18 @@ pub(crate) trait DeliveryContext: Sync {
     fn workbench_worktree_repo(&self) -> &WorkbenchWorktreeRepo;
 
     /// Business Logic（为什么需要这个函数）:
-    ///     full-auto delivery 第一阶段必须把 task worktree 的改动提交到任务分支。
+    ///     full-auto delivery 第一阶段必须把 task worktree 的改动冻结为不可变 commit OID，
+    ///     供后续 push/merge 绑定；禁止 commit 后再读可变 HEAD。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     使用确定性提交信息提交 worktree 全部改动；无改动时应视为成功。
+    ///     纯 freeze 路径：capture parent → stage →（无改动则返回 parent OID；有改动则
+    ///     write-tree + commit_frozen_tree CAS）→ 返回 `Some(oid)`。
+    ///     成功路径始终 `Some`；干净 worktree 无 HEAD 时 Err。
     async fn commit_task_worktree(
         &self,
         worktree_id: String,
         message: Option<String>,
-    ) -> Result<(), AppError>;
+    ) -> Result<Option<String>, AppError>;
 
     /// Business Logic（为什么需要这个函数）:
     ///     full-auto delivery 必须推送已审 commit OID，禁止跟随可变 branch tip。
@@ -345,18 +347,30 @@ impl DeliveryContext for AppDeliveryContext<'_> {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     full-auto delivery 第一阶段必须复用 Workbench commit 语义，保持用户手动提交和自动提交一致。
+    ///     Human Review / 无 digest 交付必须把 task worktree 冻结为不可变 OID，
+    ///     不能走 ledger commit 后再读 HEAD（异步 gap 会 race）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     委托 local_commit_workbench_worktree，并丢弃刷新 DTO，只向 pipeline 暴露成功或错误。
+    ///     读 worktree 路径后执行 pure freeze：parent → stage → write-tree → commit_frozen_tree；
+    ///     无改动时返回 stage 前捕获的 parent OID。
     async fn commit_task_worktree(
         &self,
         worktree_id: String,
         message: Option<String>,
-    ) -> Result<(), AppError> {
-        local_commit_workbench_worktree(self.state, worktree_id, message)
-            .await
-            .map(|_| ())
+    ) -> Result<Option<String>, AppError> {
+        let row = self
+            .state
+            .workbench_worktree_repo
+            .get(&worktree_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("工作台 worktree 不存在"))?;
+        let path = Path::new(&row.path);
+        let message = message
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AppError::generic("交付 commit message 不能为空"))?;
+        freeze_commit_task_worktree(path, message)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -415,6 +429,30 @@ impl DeliveryContext for AppDeliveryContext<'_> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     将 task worktree 冻结为不可变 commit OID，供 Human Review 与测试 harness 共用，
+///     避免 ledger/async commit 后再读 HEAD 的 race。
+///
+/// Code Logic（这个函数做什么）:
+///     1) expected_parent = head_hash；2) stage_all；3) 无改动 → Some(parent)（无 parent 则 Err）；
+///     4) write_tree_hash → commit_frozen_tree(parent CAS) → Some(oid)。
+fn freeze_commit_task_worktree(path: &Path, message: &str) -> Result<Option<String>, AppError> {
+    let expected_parent = workbench_git::head_hash(path)?;
+    let has_changes = workbench_git::stage_all_for_commit(path)?;
+    if !has_changes {
+        return match expected_parent {
+            Some(oid) => Ok(Some(oid)),
+            None => Err(AppError::generic(
+                "commit binding failed: empty HEAD on clean worktree",
+            )),
+        };
+    }
+    let frozen = workbench_git::write_tree_hash(path)?;
+    let oid =
+        workbench_git::commit_frozen_tree(path, &frozen, message, expected_parent.as_deref())?;
+    Ok(Some(oid))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     验证成功后的 Delivering 任务应自动完成 commit、push 任务分支、merge main 和 push main，
 ///     让 full-auto 策略无需用户手动收尾。A0 后不再做人工 review-diff 产品门禁；
 ///     但 verifier auto-delivery / experiment winner 可传入 expected_review_digest，在 commit 前
@@ -423,9 +461,9 @@ impl DeliveryContext for AppDeliveryContext<'_> {
 /// Code Logic（这个函数做什么）:
 ///     校验任务状态与项目 full-auto flags；获取 per-task delivery lock 并解析 worktree 后，
 ///     若提供 expected_review_digest：stage → digest → freeze tree → commit_frozen_tree CAS；
-///     无 digest 时走 `commit_task_worktree` 并立刻 `head_hash` 作为 reviewed OID。
+///     无 digest 时走 `commit_task_worktree` 返回冻结 OID（禁止 post-commit head_hash）。
 ///     **全部**交付走 OID push/merge（无 branch-tip 路径）；main 在进程锁下
-///     freeze+merge；Done CAS 仅 Transitioned 时 cleanup worktree；失败 Blocked。
+///     freeze+merge；Done CAS 仅 Transitioned 且 recheck 仍为 Done 时 cleanup worktree；失败 Blocked。
 pub(crate) async fn deliver_task<C>(
     context: &C,
     task_id: &str,
@@ -568,11 +606,9 @@ where
     };
 
     // digest 绑定路径：stage → digest → freeze tree → commit-tree+update-ref CAS。
-    // Human Review：commit_task_worktree 后立刻 head_hash 作为 reviewed OID。
-    // 两条路径之后统一 OID push/merge；Done CAS Transitioned 后才清理 worktree。
-    let mut reviewed_commit_oid: Option<String> = None;
-
-    if let Some(expected) = expected_review_digest {
+    // Human Review：commit_task_worktree 直接返回冻结 OID（禁止 post-commit head_hash）。
+    // 两条路径之后统一 OID push/merge；Done CAS Transitioned 且 recheck Done 后才清理 worktree。
+    let reviewed_commit_oid: String = if let Some(expected) = expected_review_digest {
         let task_path_ref = Path::new(&task_path);
         // 在 stage/digest 前捕获 parent，供 commit-tree + update-ref CAS 使用。
         let expected_parent = match workbench_git::head_hash(task_path_ref) {
@@ -642,7 +678,7 @@ where
                 &commit_message,
                 expected_parent.as_deref(),
             ) {
-                Ok(oid) => reviewed_commit_oid = Some(oid),
+                Ok(oid) => oid,
                 Err(err) => {
                     let reason = format!("commit failed: frozen tree CAS commit: {err}");
                     return block_delivery_task(
@@ -659,7 +695,7 @@ where
         } else {
             // 已干净：绑定 stage 前捕获的 parent 为 reviewed OID（无新 tree）。
             match expected_parent {
-                Some(oid) => reviewed_commit_oid = Some(oid),
+                Some(oid) => oid,
                 None => {
                     let reason =
                         "commit binding failed: empty HEAD on clean digest match".to_string();
@@ -675,28 +711,15 @@ where
                 }
             }
         }
-    } else if let Err(err) = context
-        .commit_task_worktree(worktree_id.clone(), Some(commit_message))
-        .await
-    {
-        let reason = format!("commit failed: {err}");
-        return block_delivery_task(
-            context.orchestrator_repo(),
-            &task.id,
-            &reason,
-            "commit",
-            &reason,
-            &mut stages,
-        )
-        .await;
-    }
-
-    // Human Review 路径：commit 后立刻固定 after_head 为 reviewed OID（禁止后续再读 tip）。
-    if reviewed_commit_oid.is_none() {
-        match workbench_git::head_hash(Path::new(&task_path)) {
-            Ok(Some(oid)) => reviewed_commit_oid = Some(oid),
+    } else {
+        // Human Review：freeze 路径直接返回不可变 OID。
+        match context
+            .commit_task_worktree(worktree_id.clone(), Some(commit_message))
+            .await
+        {
+            Ok(Some(oid)) => oid,
             Ok(None) => {
-                let reason = "commit binding failed: empty HEAD after commit".to_string();
+                let reason = "commit binding failed: empty commit oid after freeze".to_string();
                 return block_delivery_task(
                     context.orchestrator_repo(),
                     &task.id,
@@ -708,7 +731,7 @@ where
                 .await;
             }
             Err(err) => {
-                let reason = format!("commit failed: read task HEAD after commit failed: {err}");
+                let reason = format!("commit failed: {err}");
                 return block_delivery_task(
                     context.orchestrator_repo(),
                     &task.id,
@@ -720,10 +743,8 @@ where
                 .await;
             }
         }
-    }
-    let reviewed = reviewed_commit_oid
-        .clone()
-        .expect("reviewed_commit_oid must be set after commit");
+    };
+    let reviewed = reviewed_commit_oid;
     let after_head = Some(reviewed.clone());
     let commit_content = format_commit_evidence(before_head.as_deref(), after_head.as_deref());
     add_delivery_evidence(
@@ -855,13 +876,21 @@ where
     .await?;
     stages.push("push main".to_string());
 
-    // 仅 Done CAS Transitioned 时清理 worktree；CasMiss（并发 Abort）禁止 cleanup。
+    // 仅 Done CAS Transitioned 且 recheck 仍为 Done 时清理 worktree；
+    // CasMiss（并发 Abort）或 recheck 非 Done 禁止 cleanup。
     match context
         .orchestrator_repo()
         .finish_task_done(&task.id)
         .await?
     {
-        FinishTaskDoneOutcome::Transitioned(done) => {
+        FinishTaskDoneOutcome::Transitioned(_done) => {
+            let recheck = context.orchestrator_repo().get_task(&task.id).await?;
+            if recheck.status != OrchestratorTaskStatus::Done {
+                return Ok(DeliverySummary {
+                    task: OrchestratorTaskDto::from(recheck),
+                    stages,
+                });
+            }
             if let Err(err) =
                 cleanup_task_worktree_after_oid_delivery(context, &worktree_id, &main_path).await
             {
@@ -872,7 +901,7 @@ where
                 );
             }
             Ok(DeliverySummary {
-                task: OrchestratorTaskDto::from(done),
+                task: OrchestratorTaskDto::from(recheck),
                 stages,
             })
         }
@@ -1879,15 +1908,15 @@ mod tests {
         }
 
         /// Business Logic（为什么需要这个函数）:
-        ///     单测要验证 delivery commit 阶段真实产生 Git 提交，但不能依赖 Claude CLI 生成消息。
+        ///     单测要验证 delivery commit 阶段返回冻结 OID，并可在 commit 中途 pause 注入并发。
         ///
         /// Code Logic（这个函数做什么）:
-        ///     从 worktree row 取路径，使用传入的手写 message 执行 `git add -A && git commit`；无改动视为成功。
+        ///     递增 commit_calls；可选 pause；再走与生产相同的 freeze_commit_task_worktree 返回 OID。
         async fn commit_task_worktree(
             &self,
             worktree_id: String,
             message: Option<String>,
-        ) -> Result<(), AppError> {
+        ) -> Result<Option<String>, AppError> {
             self.controls.commit_calls.fetch_add(1, Ordering::SeqCst);
             if self
                 .controls
@@ -1907,8 +1936,7 @@ mod tests {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| AppError::generic("测试交付缺少 commit message"))?;
-            workbench_git::commit_all(Path::new(&row.path), message)?;
-            Ok(())
+            freeze_commit_task_worktree(Path::new(&row.path), message)
         }
 
         /// Business Logic（为什么需要这个函数）:

@@ -351,7 +351,7 @@ async fn abort_task_for_state(
     get_local_project_task(state, &req.task_id).await?;
     let task = state
         .orchestrator_repo
-        .set_task_status(&req.task_id, OrchestratorTaskStatus::Aborted, None)
+        .abort_task_preserving_done(&req.task_id)
         .await?;
     if task.experiment_id.is_some() {
         if let Err(err) =

@@ -14,10 +14,9 @@ use crate::state::AppState;
 use tauri::State;
 
 use super::common::{
-    abort_orchestrator_task_target_status, create_local_task_for_client_request,
-    create_remote_orchestrator_task_online, get_orchestrator_workbench_project, local_task_view,
-    update_remote_orchestrator_task_status, CreateOrchestratorTaskRequest,
-    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    create_local_task_for_client_request, create_remote_orchestrator_task_online,
+    get_orchestrator_workbench_project, local_task_view, update_remote_orchestrator_task_status,
+    CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use super::tasks::get_orchestrator_runtime_snapshot_for_state;
 
@@ -209,7 +208,7 @@ pub async fn retry_orchestrator_task_view(
 ///     remote shortcut 上的 Abort 必须终止 owning device 上的真实任务，并保留远端现场。
 ///
 /// Code Logic（这个函数做什么）:
-///     local 项目复用 set_task_status；remote 项目调用 RemoteOrchestratorClient::abort_task 并刷新 mirror。
+///     local 项目走 `abort_task_preserving_done`（拒绝覆写 Done）；remote 调 RemoteOrchestratorClient::abort_task 并刷新 mirror。
 #[tauri::command]
 pub async fn abort_orchestrator_task_view(
     state: State<'_, AppState>,
@@ -218,11 +217,9 @@ pub async fn abort_orchestrator_task_view(
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
     if project.kind != "remote" {
-        let task = state.orchestrator_repo.get_task(&task_id).await?;
-        let target = abort_orchestrator_task_target_status(task.status);
         let updated = state
             .orchestrator_repo
-            .set_task_status(&task.id, target, None)
+            .abort_task_preserving_done(&task_id)
             .await?;
         if updated.experiment_id.is_some() {
             if let Err(err) =

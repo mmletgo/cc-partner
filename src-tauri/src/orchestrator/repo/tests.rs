@@ -1548,6 +1548,77 @@ async fn cancel_task_moves_to_canceled_idle_and_preserves_execution_site_and_evi
     assert_eq!(evidence[0].content, "still running");
 }
 
+/// Business Logic（为什么需要这个测试）:
+///     已 Done 任务不能被 cancel 覆写，否则丢失交付终态。
+///
+/// Code Logic（这个测试做什么）:
+///     创建 Done 任务，cancel_task 必须 conflict，状态仍为 Done。
+#[tokio::test]
+async fn cancel_task_refuses_done_status() {
+    let (_pool, repo) = setup_repo().await;
+    let created = task_row(
+        "task-done-cancel",
+        "project-1",
+        OrchestratorTaskStatus::Done,
+    );
+    repo.create_task(&created).await.unwrap();
+
+    let err = repo
+        .cancel_task(&created.id)
+        .await
+        .expect_err("Done 不能取消");
+    assert!(
+        err.to_string().contains("已完成") || err.to_string().contains("不能取消"),
+        "unexpected: {err}"
+    );
+    let persisted = repo.get_task(&created.id).await.unwrap();
+    assert_eq!(persisted.status, OrchestratorTaskStatus::Done);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     Abort 不得把 Done 改成 Aborted。
+///
+/// Code Logic（这个测试做什么）:
+///     创建 Done 任务，abort_task_preserving_done 必须 conflict。
+#[tokio::test]
+async fn abort_task_preserving_done_refuses_done_status() {
+    let (_pool, repo) = setup_repo().await;
+    let created = task_row("task-done-abort", "project-1", OrchestratorTaskStatus::Done);
+    repo.create_task(&created).await.unwrap();
+
+    let err = repo
+        .abort_task_preserving_done(&created.id)
+        .await
+        .expect_err("Done 不能终止");
+    assert!(
+        err.to_string().contains("已完成") || err.to_string().contains("不能终止"),
+        "unexpected: {err}"
+    );
+    let persisted = repo.get_task(&created.id).await.unwrap();
+    assert_eq!(persisted.status, OrchestratorTaskStatus::Done);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     对非 Done 任务 Abort 应成功，且幂等返回 Aborted。
+///
+/// Code Logic（这个测试做什么）:
+///     Running → abort → Aborted；再次 abort 仍 Aborted 且 Ok。
+#[tokio::test]
+async fn abort_task_preserving_done_aborts_running_and_is_idempotent() {
+    let (_pool, repo) = setup_repo().await;
+    let created = task_row(
+        "task-abort-run",
+        "project-1",
+        OrchestratorTaskStatus::Running,
+    );
+    repo.create_task(&created).await.unwrap();
+
+    let aborted = repo.abort_task_preserving_done(&created.id).await.unwrap();
+    assert_eq!(aborted.status, OrchestratorTaskStatus::Aborted);
+    let again = repo.abort_task_preserving_done(&created.id).await.unwrap();
+    assert_eq!(again.status, OrchestratorTaskStatus::Aborted);
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     非草稿任务可能已经在执行、完成或阻塞，重复入队会回退状态并丢失阻塞原因。
 ///

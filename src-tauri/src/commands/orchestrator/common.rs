@@ -1064,17 +1064,41 @@ pub(crate) fn ensure_reviewed_delivery_allowed(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     start/refresh 是显式用户动作，但调度 Runner 仍应尽量沿用后台 scheduler 的统一逻辑，且不能因为一次调度失败破坏任务入队。
+///     start/refresh 是显式用户动作，但调度 Runner 仍应尽量沿用后台 scheduler 的统一逻辑，
+///     且不能因为一次调度失败破坏任务入队。GuiClient 无队列/PTY 权威，必须代理到 sidecar owner。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用 scheduler::dispatch_once；成功返回 dispatched 数量，失败仅记录 warn 并返回 0。
+///     HeadlessOwner → `scheduler::dispatch_once`；GuiClient → control `dispatch_orchestrator_once`
+///     并解析 `{dispatched}`；任一失败仅 warn 并返回 0。
 pub(crate) async fn dispatch_orchestrator_best_effort(state: &AppState) -> usize {
-    match crate::orchestrator::scheduler::dispatch_once(state).await {
-        Ok(dispatched) => dispatched,
-        Err(err) => {
-            tracing::warn!(error = %err, "Orchestrator 显式刷新调度失败");
-            0
+    use crate::backend::authority::RuntimeRole;
+    use crate::backend::control_client::BackendControlClient;
+    match state.runtime_role {
+        RuntimeRole::HeadlessOwner => {
+            match crate::orchestrator::scheduler::dispatch_once(state).await {
+                Ok(dispatched) => dispatched,
+                Err(err) => {
+                    tracing::warn!(error = %err, "Orchestrator 显式刷新调度失败");
+                    0
+                }
+            }
         }
+        RuntimeRole::GuiClient => match BackendControlClient::from_control_file() {
+            Ok(client) => match client.dispatch_orchestrator_once().await {
+                Ok(value) => value
+                    .get("dispatched")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0) as usize,
+                Err(err) => {
+                    tracing::warn!(error = %err, "Orchestrator GuiClient 调度代理失败");
+                    0
+                }
+            },
+            Err(err) => {
+                tracing::warn!(error = %err, "Orchestrator GuiClient 无法连接 control plane");
+                0
+            }
+        },
     }
 }
 
@@ -1149,13 +1173,56 @@ pub(crate) fn retry_orchestrator_task_target_status(
 
 /// Business Logic（为什么需要这个函数）:
 ///     用户终止任务时只需要进入 Aborted 状态，worktree/session 保留给用户人工处理。
+///     生产写入走 `abort_task_preserving_done`（拒绝覆写 Done）；本 helper 仅供单测对照目标状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     返回固定 Aborted 目标状态，命令层负责持久化且不删除任何执行现场。
+///     返回固定 Aborted 目标状态。
+#[cfg(test)]
 pub(crate) fn abort_orchestrator_task_target_status(
     _status: OrchestratorTaskStatus,
 ) -> OrchestratorTaskStatus {
     OrchestratorTaskStatus::Aborted
+}
+
+#[cfg(test)]
+mod dispatch_best_effort_tests {
+    /// Business Logic（为什么需要这个测试）:
+    ///     GuiClient best-effort dispatch 必须代理 control plane，否则在 GUI 空库静默“成功”0 次调度。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源码断言 common.rs 的 dispatch_orchestrator_best_effort 含 RuntimeRole 分支与
+    ///     BackendControlClient::dispatch_orchestrator_once 调用。
+    #[test]
+    fn dispatch_orchestrator_best_effort_proxies_gui_client_to_control() {
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/commands/orchestrator/common.rs"
+        ));
+        assert!(
+            src.contains("dispatch_orchestrator_best_effort"),
+            "common.rs 必须定义 dispatch_orchestrator_best_effort"
+        );
+        assert!(
+            src.contains("RuntimeRole::GuiClient"),
+            "best-effort dispatch 必须区分 GuiClient"
+        );
+        assert!(
+            src.contains("RuntimeRole::HeadlessOwner"),
+            "best-effort dispatch 必须区分 HeadlessOwner"
+        );
+        assert!(
+            src.contains("BackendControlClient::from_control_file"),
+            "GuiClient 必须经 BackendControlClient 代理"
+        );
+        assert!(
+            src.contains(".dispatch_orchestrator_once()"),
+            "GuiClient 必须调用 dispatch_orchestrator_once"
+        );
+        assert!(
+            src.contains("\"dispatched\""),
+            "必须解析 control 响应中的 dispatched 字段"
+        );
+    }
 }
 
 /// 验证 evidence 的写入参数。
