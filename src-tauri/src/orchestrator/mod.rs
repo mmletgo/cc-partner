@@ -8,6 +8,7 @@
 //!     暴露 Orchestrator 的数据模型、状态机和 SQLite 仓储。
 
 pub mod agent_runtime_bridge;
+pub mod browser_verification;
 pub mod claim;
 pub mod claude_runtime;
 pub mod completion;

@@ -22,3 +22,7 @@ release/
 
 # Superpowers visual brainstorming 临时画布（不应 track）
 .superpowers/
+
+# Managed Chrome for Testing cache and extracted runtime (prepared by scripts/prepare-browser-runtime.mjs)
+.browser-runtime-cache/
+src-tauri/resources/browser-runtime/

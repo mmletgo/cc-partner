@@ -179,6 +179,14 @@ async fn build_transfer_test_state(receive_dir: &Path) -> AppState {
         workbench_browser_previews: Arc::new(
             crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
         ),
+        browser_verification: Arc::new(
+            crate::workbench::browser_verification::BrowserVerificationService::new(
+                Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),
+                std::env::temp_dir().join("cc-partner-bv-test"),
+                "test-owner".into(),
+            )
+            .expect("browser verification test service"),
+        ),
         workbench_sessions: Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new()),
         workbench_remote_events: {
             let (tx, _) = tokio::sync::broadcast::channel(8);

@@ -11,6 +11,7 @@ pub mod agent_runtime;
 pub mod browser;
 pub mod browser_models;
 pub mod browser_proxy;
+pub mod browser_verification;
 pub mod claude_path;
 pub mod claude_sessions;
 pub mod dependencies;

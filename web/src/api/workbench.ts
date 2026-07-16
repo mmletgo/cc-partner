@@ -261,6 +261,56 @@ export const workbenchApi = {
         worktreeId: worktreeId ?? null,
         targetUrl,
       }),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   一键验证当前 live preview，只传 previewId。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invoke start_workbench_browser_verification。
+     */
+    startVerification: (
+      previewId: string,
+      requestId: string,
+    ): Promise<import('@/lib/types').BrowserVerificationRun> =>
+      invoke('start_workbench_browser_verification', {
+        previewId,
+        requestId,
+        commands: null,
+      }),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   轮询验证状态。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invoke get_workbench_browser_verification。
+     */
+    getVerification: (runId: string): Promise<import('@/lib/types').BrowserVerificationRun> =>
+      invoke('get_workbench_browser_verification', { runId }),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   取消验证。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invoke cancel_workbench_browser_verification。
+     */
+    cancelVerification: (runId: string): Promise<import('@/lib/types').BrowserVerificationRun> =>
+      invoke('cancel_workbench_browser_verification', { runId }),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   拉取截图 artifact。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invoke get_workbench_browser_verification_artifact。
+     */
+    getVerificationArtifact: (
+      runId: string,
+      artifactId: string,
+    ): Promise<import('@/lib/types').BrowserVerificationArtifact> =>
+      invoke('get_workbench_browser_verification_artifact', { runId, artifactId }),
   },
 
   sessions: {

@@ -47,7 +47,10 @@
       "wix": {
         "language": ["en-US", "zh-CN"]
       }
-    }
+    },
+    "resources": [
+      "resources/browser-runtime/**/*"
+    ]
   },
   "plugins": {
     "updater": {

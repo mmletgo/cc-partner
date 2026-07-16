@@ -192,6 +192,25 @@ function main() {
 
   console.log(`准备 Tauri backend sidecar: target=${target}`);
 
+  // A5：打包前尽量准备当前平台 managed chrome-headless-shell 资源（失败不阻断 sidecar，
+  // verification 能力在运行时按缺失降级为 unavailable；L3 需单独认证）。
+  if (!options.dryRun) {
+    const prepareBrowser = spawnSync(
+      process.execPath,
+      [resolve(REPO_ROOT, 'scripts/prepare-browser-runtime.mjs'), '--platform', 'current'],
+      { cwd: REPO_ROOT, encoding: 'utf8' },
+    );
+    if (prepareBrowser.status === 0) {
+      console.log('managed browser runtime prepared');
+    } else {
+      console.warn(
+        `managed browser runtime prepare skipped/failed (verification may be unavailable): ${
+          prepareBrowser.stderr || prepareBrowser.stdout || prepareBrowser.status
+        }`,
+      );
+    }
+  }
+
   // Tauri build.rs 在编译 app 包时会校验 externalBin 路径存在；cargo build --bin
   // cc-partner-backend 仍会跑 package build.rs，形成 chicken-and-egg。先写占位文件，
   // 真实二进制构建成功后再覆盖。

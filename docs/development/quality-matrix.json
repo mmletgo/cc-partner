@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-07-15",
+  "updatedAt": "2026-07-16",
   "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
   "entries": [
     {
@@ -880,6 +880,62 @@
         "docs/prd.md",
         "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
       ]
+    },
+    {
+      "id": "L2-BROWSER-VERIFICATION-001",
+      "surface": "browser-verification",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/workbench/browser_verification/models.rs",
+        "src-tauri/src/workbench/browser_verification/runtime.rs",
+        "src-tauri/src/workbench/browser_verification/artifact_store.rs",
+        "src-tauri/src/commands/workbench/browser_verification.rs",
+        "src-tauri/src/net/routes/browser_verification.rs",
+        "src-tauri/src/orchestrator/browser_verification.rs",
+        "src-tauri/tests/browser_verification_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked browser_verification --lib && cargo test --locked --test browser_verification_smoke -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04",
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "real multi-host LAN owner relay",
+        "release matrix managed Chromium packaging (see L3-BROWSER-VERIFICATION-001)",
+        "iframe allow-same-origin (must remain absent)"
+      ],
+      "docs": [
+        "docs/superpowers/specs/2026-07-15-browser-verification-surface-design.md",
+        "docs/development/testing.md",
+        "docs/p2p-protocol.md"
+      ]
+    },
+    {
+      "id": "L3-BROWSER-VERIFICATION-001",
+      "surface": "browser-verification-managed-chromium",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: prepare-browser-runtime all platforms + real chrome-headless-shell screenshot on macos/windows/ubuntu release targets",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "hosted runner substitute",
+        "FakeEngine-only unit path"
+      ],
+      "docs": [
+        "scripts/browser-runtime-lock.json",
+        "docs/development/backend-operations.md",
+        "docs/development/testing.md"
+      ],
+      "status": "NOT VERIFIED"
     }
   ]
 }

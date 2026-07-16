@@ -98,6 +98,9 @@ pub struct AppState {
     /// Workbench 浏览器预览会话注册表（previewId 到本机 target 或远端 relay 的短期映射）
     pub workbench_browser_previews:
         Arc<crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry>,
+    /// 浏览器自动验证服务（owner 侧 ephemeral managed Chromium；测试可用 FakeEngine）
+    pub browser_verification:
+        Arc<crate::workbench::browser_verification::BrowserVerificationService>,
     /// 工作台 PTY 会话注册表（运行期 PTY/tmux attach 句柄，元数据由 workbench_session_repo 持久化）
     #[allow(dead_code)]
     pub workbench_sessions: Arc<crate::workbench::sessions::WorkbenchSessionRegistry>,

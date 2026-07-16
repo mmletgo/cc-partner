@@ -371,3 +371,11 @@ manual evidence, not claimed by the smoke.
 - Updater 状态机在进程内，不持久化安装包字节。
 - Health 非法磁盘配置：daemon 跳过提醒/清理本 tick，不 panic。
 - **无** 本主题相关 SQLite 迁移/回滚脚本。
+
+## Managed browser runtime (A5)
+
+- Lock: `scripts/browser-runtime-lock.json` (Chrome for Testing headless-shell `150.0.7871.114`)
+- Prepare: `node scripts/prepare-browser-runtime.mjs --platform current` (downloads into `.browser-runtime-cache/`, extracts to `src-tauri/resources/browser-runtime/`)
+- Optional env override: `CC_PARTNER_BROWSER_RUNTIME` absolute path to chrome-headless-shell
+- Capability: `workbench.browser-verification.v1` routes under `/api/workbench/browser-verification/*`
+- Packaging status for all release platforms: see quality-matrix `L3-BROWSER-VERIFICATION-001` (NOT VERIFIED until real-device certification)

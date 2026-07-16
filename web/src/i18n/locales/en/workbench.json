@@ -719,5 +719,20 @@
   "deepLink": {
     "filesPathRejected": "Only relative paths inside the worktree can be opened.",
     "openWorkflowFile": "Opening WORKFLOW.md"
+  },
+  "browserVerification": {
+    "verifyCurrent": "Verify current preview",
+    "unavailable": "Browser verification unavailable",
+    "urlPath": "Path",
+    "consoleErrors": "Console errors",
+    "assertionFailed": "Failed assertions",
+    "screenshotAlt": "Verification screenshot",
+    "status": {
+      "queued": "Queued",
+      "running": "Running",
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "canceled": "Canceled"
+    }
   }
 }

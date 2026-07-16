@@ -300,6 +300,89 @@ export interface WorkbenchBrowserPreview {
   expiresAtMs: number;
 }
 
+/** 浏览器验证会话状态。 */
+export type BrowserVerificationState =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
+
+/**
+ * 浏览器验证会话 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   一键验证需要展示 run 状态与错误码；不包含 target URL 作为能力。
+ *
+ * Code Logic（字段说明）:
+ *   id/previewId/state 与后端 camelCase 对齐。
+ */
+export interface BrowserVerificationSession {
+  id: string;
+  projectId: string;
+  worktreeId?: string | null;
+  previewId: string;
+  ownerInstanceId: string;
+  state: BrowserVerificationState;
+  createdAt: string;
+  lastActivityAt: string;
+  expiresAt: string;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}
+
+/**
+ * 浏览器验证 evidence 摘要。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   UI 展示 a11y/console/screenshot 摘要，不含 fill value。
+ *
+ * Code Logic（字段说明）:
+ *   screenshotId 用于拉取 artifact；consoleErrors 已脱敏。
+ */
+export interface BrowserVerificationEvidence {
+  sessionId: string;
+  urlPath: string;
+  pageTitle?: string | null;
+  assertions: Array<{ name: string; passed: boolean; detail?: string | null }>;
+  consoleErrors: Array<{ sequence: number; level: string; text: string; timestampMs: number }>;
+  screenshotId?: string | null;
+  truncated: boolean;
+  capturedAt: string;
+}
+
+/**
+ * 浏览器验证 run DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   start/get/cancel 返回完整 run。
+ *
+ * Code Logic（字段说明）:
+ *   session + 可选 evidence；commandResults 为结构化结果。
+ */
+export interface BrowserVerificationRun {
+  session: BrowserVerificationSession;
+  evidence?: BrowserVerificationEvidence | null;
+  commandResults?: unknown[];
+}
+
+/**
+ * 浏览器验证 artifact DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   展示截图 PNG（base64）。
+ *
+ * Code Logic（字段说明）:
+ *   base64 为 PNG 字节；无 cookie/value。
+ */
+export interface BrowserVerificationArtifact {
+  runId: string;
+  artifactId: string;
+  contentType: string;
+  byteLen: number;
+  base64: string;
+}
+
 /** Workbench 一键合并阶段状态。 */
 export type WorkbenchMergeStageStatus =
   | 'pending'

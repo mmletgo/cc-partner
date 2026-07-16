@@ -17,8 +17,8 @@ use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErro
 use crate::net::lan_guard::{browser_request_guard, lan_socket_gate, require_loopback_peer};
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
-    attention, cc_history, claude_code_assets, claude_md_sync, health, mobile, orchestrator,
-    scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
+    attention, browser_verification, cc_history, claude_code_assets, claude_md_sync, health,
+    mobile, orchestrator, scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
@@ -943,6 +943,23 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             .route(
                 "/api/workbench/browser/proxy/:previewId/*path",
                 any(workbench::proxy_browser_preview),
+            )
+            // A5 Browser Verification：owner 侧 create/get/cancel/artifact（能力 workbench.browser-verification.v1）
+            .route(
+                "/api/workbench/browser-verification/create",
+                post(browser_verification::create_browser_verification),
+            )
+            .route(
+                "/api/workbench/browser-verification/get",
+                post(browser_verification::get_browser_verification),
+            )
+            .route(
+                "/api/workbench/browser-verification/cancel",
+                post(browser_verification::cancel_browser_verification),
+            )
+            .route(
+                "/api/workbench/browser-verification/artifact",
+                post(browser_verification::get_browser_verification_artifact),
             )
             // Mobile Workbench 本机入口：手机 → 本机，可继续由本机代理到远端设备 remote shortcut
             .route(

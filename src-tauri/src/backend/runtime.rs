@@ -485,6 +485,22 @@ pub async fn build_app_state_with_role(
     ));
     let workbench_browser_previews =
         Arc::new(crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new());
+    let browser_verification = Arc::new(
+        crate::workbench::browser_verification::BrowserVerificationService::with_discovered_chromium(
+            crate::config::data_dir()?,
+            config_runtime.owner_instance_id().to_string(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!("browser verification service init failed: {e}");
+            // 兜底：仍提供服务对象（engine 会在启动时 unavailable）
+            crate::workbench::browser_verification::BrowserVerificationService::new(
+                Arc::new(crate::workbench::browser_verification::chromium::ChromiumEngine::with_executable(None)),
+                crate::config::data_dir().unwrap_or_else(|_| std::env::temp_dir().join("cc-partner")),
+                config_runtime.owner_instance_id().to_string(),
+            )
+            .expect("browser verification fallback service")
+        }),
+    );
     let orchestrator_repo = Arc::new(OrchestratorRepo::with_gate(
         pool.clone(),
         maintenance_gate.clone(),
@@ -526,6 +542,7 @@ pub async fn build_app_state_with_role(
         workbench_worktree_repo,
         workbench_browser_repo,
         workbench_browser_previews,
+        browser_verification,
         workbench_sessions,
         workbench_remote_events,
         workbench_remote_event_bridges,
@@ -731,6 +748,29 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     // 同步路径：cancel + abort 全部 remote event bridge，避免关机后 ghost reconnect。
     // 测试路径可 await `RemoteEventBridgeRegistry::shutdown_all` 等待任务自然退出。
     state.workbench_remote_event_bridges.force_shutdown();
+
+    // 浏览器验证：cancel 全部活跃 run 并同步 await engine 任务，避免 chrome-headless-shell 孤儿。
+    // 同步 shutdown 钩子上：优先 block_in_place+block_on；无 runtime 时 spawn 线程驱动临时 runtime。
+    let svc = state.browser_verification.clone();
+    let shutdown_fut = async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(8), svc.shutdown_all()).await;
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // 已在 runtime 内：block_in_place 避免嵌套 block_on panic
+        tokio::task::block_in_place(|| {
+            let _ = handle.block_on(shutdown_fut);
+        });
+    } else {
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                rt.block_on(shutdown_fut);
+            }
+        })
+        .join();
+    }
 }
 
 /// 验证 browse-only 模式应复用的 sidecar 端口。

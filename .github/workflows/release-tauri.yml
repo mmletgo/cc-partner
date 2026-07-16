@@ -96,8 +96,14 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: 'src-tauri -> target'
-          # 按 平台+target 隔离缓存，避免 matrix 各 job 缓存碰撞
-          shared-key: ${{ matrix.platform }}-${{ matrix.target }}
+          # 按 平台+target+browser-runtime 版本隔离缓存
+          shared-key: ${{ matrix.platform }}-${{ matrix.target }}-browser-runtime-150.0.7871.114
+
+      - name: Cache managed browser runtime zip
+        uses: actions/cache@v4
+        with:
+          path: .browser-runtime-cache
+          key: browser-runtime-150.0.7871.114-${{ hashFiles('scripts/browser-runtime-lock.json') }}-${{ matrix.platform }}
 
       - name: Install Linux system dependencies (webkit2gtk-4.1 等 Tauri 运行/构建依赖)
         if: startsWith(matrix.platform, 'ubuntu')

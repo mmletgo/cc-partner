@@ -8,6 +8,7 @@
 
 mod agent_runtime;
 mod browser;
+mod browser_verification;
 mod common;
 mod files;
 mod git;
@@ -29,6 +30,18 @@ pub use browser::{
     __tauri_command_name_create_workbench_browser_preview,
     __tauri_command_name_discover_workbench_browser_targets, create_workbench_browser_preview,
     discover_workbench_browser_targets,
+};
+
+pub use browser_verification::{
+    __cmd__cancel_workbench_browser_verification, __cmd__get_workbench_browser_verification,
+    __cmd__get_workbench_browser_verification_artifact, __cmd__start_workbench_browser_verification,
+    __tauri_command_name_cancel_workbench_browser_verification,
+    __tauri_command_name_get_workbench_browser_verification,
+    __tauri_command_name_get_workbench_browser_verification_artifact,
+    __tauri_command_name_start_workbench_browser_verification,
+    cancel_workbench_browser_verification, get_workbench_browser_verification,
+    get_workbench_browser_verification_artifact, start_workbench_browser_verification,
+    BrowserVerificationArtifactDto,
 };
 
 pub use files::{
@@ -106,6 +119,11 @@ pub use projects::add_local_workbench_project_from_path;
 // ---- crate 内 helper / DTO（pub(crate)）----
 
 pub(crate) use browser::create_workbench_browser_preview_for_state;
+pub(crate) use browser_verification::{
+    cancel_browser_verification_for_state, get_browser_verification_artifact_for_state,
+    get_browser_verification_for_state, start_browser_verification_for_state,
+    StartBrowserVerificationReq,
+};
 
 // control_workbench 与其它 crate 内 owner 路径需要 common 中的远程映射/设备 helper。
 pub(crate) use common::{
