@@ -37,7 +37,7 @@
         "src-tauri/src/commands/attention.rs"
       ],
       "command": "cd web && npm test -- agentRuntime Attention AgentRuntime && cd ../src-tauri && cargo test --locked attention:: --lib",
-      "ciJob": "frontend-unit / rust-unit",
+      "ciJob": "quality",
       "platforms": [
         "node",
         "rust"
@@ -1007,6 +1007,95 @@
         "docs/development/testing.md",
         "docs/development/real-device-certification.md"
       ]
+    },
+    {
+      "id": "L0-AGENT-LEDGER-001",
+      "surface": "agent-metadata-ledger",
+      "level": "L0",
+      "tests": [
+        "src-tauri/src/workbench/agent_ledger",
+        "src-tauri/src/storage/agent_ledger_repo.rs",
+        "src-tauri/src/commands/workbench/agent_ledger.rs",
+        "web/src/lib/schemas/agentLedger.test.ts",
+        "web/src/pages/Workbench/views/AgentLedgerDrawer.test.tsx"
+      ],
+      "command": "cd src-tauri && cargo test --locked workbench::agent_ledger --lib && cd ../web && npm test -- agentLedger AgentLedgerDrawer",
+      "ciJob": "quality",
+      "platforms": [
+        "node",
+        "rust"
+      ],
+      "exclusions": [
+        "multi-host P2P ledger join",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/superpowers/specs/2026-07-15-agent-metadata-ledger-design.md",
+        "docs/prd.md"
+      ]
+    },
+    {
+      "id": "E2E-AGENT-LEDGER-001",
+      "surface": "agent-metadata-ledger",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-metadata-ledger.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-metadata-ledger.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real SQLite retention across restarts",
+        "multi-host LAN"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L2-AGENT-LEDGER-PRIVACY-001",
+      "surface": "agent-metadata-ledger",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/workbench/agent_ledger/models.rs",
+        "src-tauri/src/net/routes/workbench.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked entry_dto_serialization_is_metadata_only --lib && cargo test --locked remote_summary_batch_has_no_entry_list --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "production log redaction audit on all hosts"
+      ],
+      "docs": [
+        "docs/p2p-protocol.md",
+        "docs/prd.md"
+      ]
+    },
+    {
+      "id": "L3-AGENT-LEDGER-FLEET-001",
+      "surface": "agent-metadata-ledger",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: dual-host Fleet agent activity join with agent-ledger-summary.v1 capability",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "not executed in CI"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ],
+      "status": "NOT VERIFIED"
     }
   ]
 }

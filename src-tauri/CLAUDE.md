@@ -604,3 +604,13 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 
 
 - **Workspace safe restore**：`workbench/workspace_layout.rs` + `storage/workbench_workspace_layout_repo.rs`（`workbench_workspace_layouts`，slot `desktop:auto` / `named:<uuid>`，schemaVersion=1，revision CAS）；`workbench/workspace_restore.rs` preflight 纯读（select|reuse|safeAttach|skip），`safe_attach` 仅 attach 已存在 tmux（禁止 new-session/window、raw PTY、terminal write、agent resume；claim 自旋失败且无 registry → `safe_attach_claim_busy`，**禁止**无 claim fallthrough / 误 release 他人 claim）；`sessions.list` → `restore_persisted_sessions` → `registry.restore()` 默认 **skip-missing**（缺失 tmux target / raw PTY 标 disconnected，**绝不** `create_tmux_window` / raw PTY 回退；只有用户显式新建终端才 create）；capability `workbench.workspace-safe-restore.v1`；P2P `POST /api/workbench/workspace/restore/{preflight,safe-attach}` owner-local only（`local_project_required`）。
+
+### Agent Metadata Ledger (A9)
+
+- 表 `agent_session_ledger`：metadata-only；`agent_session_id` 唯一；可靠 usage null-fill。
+- 本机命令：`list_agent_ledger` / `summarize_agent_ledger` / `clear_agent_ledger`（control `agent_ledger.*`）。
+- P2P：`POST /api/workbench/agent-ledger/summary` + capability `workbench.agent-ledger-summary.v1`（仅 24h/7d/30d aggregate，无 entry 列表）。
+- Fleet 7d join：`LanFleetProjectSummary.agentActivity` / `agentActivityStatus`；field 失败不阻断其它摘要。
+- 保留：30 天 / 10k 行 / 批删 ≤500；startup + 24h。
+- 隐私：禁止 prompt/response/transcriptPath/cwd/env/nativeSessionId/credential；测试 `agent_ledger_privacy`。
+

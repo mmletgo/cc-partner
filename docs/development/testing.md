@@ -286,3 +286,11 @@ Cross-Platform Smoke workflow 在 macOS/Windows 上额外跑 `transactional_runt
 - Prepare managed runtime: `node scripts/prepare-browser-runtime.mjs --self-test` then `--platform current`
 - L3 managed Chromium packaging/screenshot across release targets: **NOT VERIFIED** (`L3-BROWSER-VERIFICATION-001`)
 - Sandbox audit: iframe must not gain `allow-same-origin`; verification API must not accept `targetUrl`
+
+### Agent Metadata Ledger (A9)
+
+- L0/L2: `cd src-tauri && cargo test --locked workbench::agent_ledger --lib`；privacy `cargo test --locked --test agent_ledger_privacy`
+- Frontend unit: `cd web && npm test -- agentLedger AgentLedgerDrawer WorkbenchFleetView`
+- L1 E2E (browser mock): `cd web && npm run test:e2e -- agent-metadata-ledger.spec.ts`
+- P2P inventory: `node scripts/check-p2p-route-inventory.mjs`（含 `POST /api/workbench/agent-ledger/summary`）
+- Cross-device multi-host Fleet ledger join remains **NOT VERIFIED** until L3 certification.

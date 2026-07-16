@@ -13,13 +13,13 @@ use crate::workbench::agent_ledger::models::{
     AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary, LedgerWindow,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tauri::State;
 
 use super::common::proxy_workbench_if_gui;
 
 /// 列表查询请求（可选 camelCase 字段）。
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListAgentLedgerReq {
     pub project_id: Option<String>,
@@ -32,7 +32,7 @@ pub struct ListAgentLedgerReq {
 }
 
 /// 聚合请求。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SummarizeAgentLedgerReq {
     pub window: String,

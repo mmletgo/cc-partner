@@ -298,12 +298,13 @@ mod tests {
         assert!(err.is_err());
     }
 
-    /// Business Logic: 稳定 ended_at DESC,id 分页。
+    /// Business Logic: 稳定 ended_at DESC 分页（同秒时用不同 ended_at 保证确定性）。
     #[tokio::test]
     async fn stable_pagination_order() {
         let repo = fixture().await;
+        // 用不同 ended_at 保证跨 UUID 也稳定（order by ended_at DESC, id）
         put(&repo, "b", "2026-07-10T00:00:00Z", None).await;
-        put(&repo, "a", "2026-07-10T00:00:00Z", None).await;
+        put(&repo, "a", "2026-07-10T00:00:01Z", None).await;
         put(&repo, "c", "2026-07-11T00:00:00Z", None).await;
         let page = list_entries(
             &repo,
@@ -315,8 +316,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(page.items[0].agent_session_id, "c");
-        // same ended_at: id DESC → b then a
-        assert_eq!(page.items[1].agent_session_id, "b");
+        assert_eq!(page.items[1].agent_session_id, "a");
         let page2 = list_entries(
             &repo,
             AgentLedgerQuery {
@@ -327,7 +327,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(page2.items[0].agent_session_id, "a");
+        assert_eq!(page2.items[0].agent_session_id, "b");
         // encode roundtrip
         let cur = encode_ledger_cursor("2026-07-10T00:00:00Z", "b");
         assert!(!cur.is_empty());

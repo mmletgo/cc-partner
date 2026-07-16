@@ -783,6 +783,38 @@ mod tests {
         assert!(!s.contains("environment"));
     }
 
+    /// Business Logic: P2P batch summary 不得序列化 entries 或 agentSessionId。
+    /// Code Logic: AgentLedgerSummaryBatchResp → JSON 扫描。
+    #[test]
+    fn remote_summary_batch_has_no_entry_list() {
+        let resp = AgentLedgerSummaryBatchResp {
+            window: LedgerWindow::Days7,
+            projects: vec![AgentLedgerSummary {
+                window: LedgerWindow::Days7,
+                project_id: Some("p1".into()),
+                sessions: 2,
+                completed: 1,
+                failed: 1,
+                cancelled: 0,
+                disconnected: 0,
+                duration_ms: 1000,
+                input_tokens: Some(10),
+                output_tokens: None,
+                cost_by_currency: vec![CurrencyAmount {
+                    currency: "USD".into(),
+                    minor_units: 3,
+                }],
+                usage_coverage: LedgerUsageCoverage::Partial,
+            }],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json.get("entries").is_none());
+        let text = json.to_string();
+        assert!(text.contains("sessions"));
+        assert!(!text.contains("agentSessionId"));
+        assert!(scan_forbidden_ledger_field_names(&json).is_empty());
+    }
+
     /// Business Logic: outcome 解析覆盖 cancelled 别名。
     /// Code Logic: canceled/cancelled 均解析。
     #[test]

@@ -143,3 +143,12 @@
 - **DesignSystem 页**: dev-only，不纳入 i18n（保持英文）
 - **AST 合同 / 对等**: `npm run check:i18n` 禁止生产 TSX 硬编码 letterful JSXText 与 title/aria-label/placeholder/alt 字面量；`npm test -- localeParity` 要求 zh/en namespace 与 leaf key（复数后缀归一化后）对等；新增 key 必须中英同提交
 - **新增页面文案**: 在 `src/i18n/locales/{en,zh}/<页ns>.json` 加 key + 组件 `useTranslation(['<页ns>','common'])` + `t('<页ns>:key')`；改完 `npm run check:i18n && npm test -- localeParity && npm run build`（tsc 校验 key）
+
+### Agent Metadata Ledger UI (A9)
+
+- 类型/schema：`web/src/lib/types/agentLedger.ts`、`web/src/lib/schemas/agentLedger.ts`。
+- API：`workbenchApi.agentLedger.{list,summarize,clear}`。
+- 本机历史：`AgentLedgerDrawer` + `useWorkbenchProjectController` 拥有加载；views 不 import `@/api/*`。
+- Fleet：`WorkbenchFleetView` 展示 7d Agent activity（unsupported/unavailable 不显示 0 tokens）。
+- Settings 常规 tab：一键清除 + Dialog 确认。
+
