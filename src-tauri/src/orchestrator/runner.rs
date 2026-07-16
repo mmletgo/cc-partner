@@ -13,8 +13,8 @@ use crate::commands::workbench::{
     local_write_workbench_session_input,
 };
 use crate::error::AppError;
-use crate::orchestrator::agent_adapter::types::{
-    resolve_task_runner_policy, RunnerAttemptPolicy,
+use crate::orchestrator::agent_adapter::{
+    resolve_task_runner_policy, AgentAdapterRegistry, AgentLaunchRequest,
 };
 use crate::orchestrator::claude_runtime::associate_claude_runtime;
 use crate::orchestrator::models::{
@@ -309,7 +309,25 @@ pub async fn prepare_runner_attempt(
     {
         return Ok(current);
     }
-    local_write_workbench_session_input(state, session.id.clone(), format!("claude\n{prompt}\n"))
+    // claim 失配时绝不能向 terminal 注入任何 agent 输入（characterization）。
+    let adapter_registry = AgentAdapterRegistry::with_defaults();
+    let adapter = adapter_registry.get(runner_policy.provider)?;
+    let launch_request = AgentLaunchRequest {
+        agent_session_id: agent_session_id.clone().unwrap_or_default(),
+        terminal_session_id: session.id.clone(),
+        cwd: worktree.path.clone(),
+        prompt: prompt.clone(),
+        native_session_id: None,
+        max_turns: runner_policy.max_turns.clamp(1, 20) as u32,
+        stall_timeout_ms: runner_policy.stall_timeout_ms.max(0) as u64,
+    };
+    let launch_plan = adapter.build_launch_plan(&launch_request)?;
+    if let Some(current) =
+        stop_runner_input_if_task_changed(state, &task.id, attempt, &session.id).await?
+    {
+        return Ok(current);
+    }
+    local_write_workbench_session_input(state, session.id.clone(), launch_plan.to_terminal_input())
         .await?;
 
     running_task = state
@@ -735,6 +753,21 @@ mod tests {
         assert_eq!(super::initial_runner_attempt(&retry).unwrap(), 2);
         let error = super::initial_runner_attempt(&invalid_retry).expect_err("missing worktree");
         assert!(error.to_string().contains("worktree"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     claim token 取消后不得向 terminal 写任何 adapter 输入。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 active_runner_matches 在 Abort 时为 false（输入路径前置守卫）。
+    #[test]
+    fn claim_token_cancellation_blocks_terminal_input_guard() {
+        let mut task = runner_task_row(Some("worktree-1"), 1);
+        task.status = OrchestratorTaskStatus::Running;
+        task.session_id = Some("session-1".to_string());
+        assert!(super::active_runner_matches(&task, 1, "session-1"));
+        task.status = OrchestratorTaskStatus::Aborted;
+        assert!(!super::active_runner_matches(&task, 1, "session-1"));
     }
 
     /// Business Logic（为什么需要这个函数）:
