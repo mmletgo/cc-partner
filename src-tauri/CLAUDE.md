@@ -60,7 +60,7 @@ src/
 ├── transfer/          — 分块传输 + SHA256 + 断点续传 + 幂等 retry/resume claim + sender operation 对账（`transfer.resume.v1`）；`receiver/` 为目录模块（`mod`/`validation`/`chunk_io`/`resume`/`finalize`，公共 API 仍为 `crate::transfer::receiver`）[M5/N5 T2+T3]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
-├── permissions/       — macOS 权限 FFI（CGPreflight/CGRequest/CGEventTap） [M7 已实现]
+├── permissions/       — macOS 权限 FFI（CGPreflight/CGRequest ScreenCapture + ListenEvent；AXIsProcessTrusted；禁止 CGEventTap 假绿探测） [M7 已实现]
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
@@ -273,7 +273,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 - **macOS 权限 FFI（permissions/mod.rs，对照 Python permissions.py 四函数）**：
   - `check_screen_capture_access`：FFI 调 `CGPreflightScreenCaptureAccess`（10.15+ 符号）。
-  - `check_input_monitoring_access`：用 `CGEventTapCreate(kCGHIDEventTap + kCGHeadInsertEventTap + kCGEventTapOptionListenOnly + kCGEventMaskBit(kCGEventKeyDown))` 探测，返回 NULL 即无权限；探测成功立即 `CFMachPortInvalidate` 释放。
+  - `check_input_monitoring_access`：用 `CGPreflightListenEventAccess`（Privacy_ListenEvent / 输入监控，10.15+）预检，**禁止** `CGEventTapCreate`（仅有辅助功能时常假绿）；`request_permission("inputMonitoring")` 先 `CGRequestListenEventAccess` 再可选打开设置面板。
   - `request_permission(type, open_settings?)`：screenCapture 调 `CGRequestScreenCaptureAccess`（仅「未决定」弹框，requested=true），`open_settings`=true（默认）才 `open` Privacy_ScreenCapture 面板；inputMonitoring 无系统 request API，`open_settings`=true 才 open Privacy_ListenEvent 面板。启动主动引导差异化传参：screenCapture 弹框即可（open_settings=false）、inputMonitoring 只能靠开面板（true）。
   - **不显式 `#[link]`**：CoreGraphics 作为 macOS framework 已被 Tauri 依赖链（core-graphics/xcap）通过 `-framework CoreGraphics` 链接，符号在链接期已可见；写 `#[link(name="CoreGraphics",kind="dylib")]` 反而会找 `libCoreGraphics.dylib` 报 `library not found`。
   - **非 macOS 一律 granted=true**（对照 Python 非打包行为；Tauri 不区分打包/开发，故开发态 macOS 也真实检测，与 Python 仅打包检测略有差异——开发期需先授权截图/输入监控才能用）。
@@ -462,7 +462,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 ## 健康提醒已落地行为约定（src/health/ + storage/health_repo.rs + commands/health.rs）
 
 - **功能定位**：久坐监测 + 工作/休息状态机 + 喝水提醒 + 全屏遮罩 + 系统通知提醒 + 屏幕时长统计。每分钟采样前台键鼠活跃度，连续工作达阈值触发久坐提醒；健康监测启用时久坐/喝水/全屏遮罩均固定启用，系统通知由 `notify_enabled` 单独控制；支持免打扰时段 / 手动暂停 / 贪睡 / 跳过。前端入口「健康提醒」页（状态展示 + 暂停/贪睡/跳过按钮）与设置页健康提醒 tab（配置）。
-- **macOS 权限（input monitoring + accessibility）**：键鼠采样（device_query，底层 IOHIDManager）依赖 **Input Monitoring** 权限（`check_input_monitoring_access` 用 CGEventTapCreate 探测，NULL 即无权限）；活动窗口标题采样（active-win-pos-rs，走 AX API）依赖 **Accessibility** 权限（`check_accessibility_access` FFI 调 ApplicationServices `AXIsProcessTrusted` 仅查询不弹框；`request_permission("accessibility")` 无系统 request API，open_settings=true 打开 Privacy_Accessibility 面板引导）。`check_permissions` 返回 `accessibility: {granted}`。前端三权限（screenCapture/accessibility/inputMonitoring）引导复用同一流程（侧栏 PermissionStatusBadge / Welcome / 设置页权限 Card）。
+- **macOS 权限（input monitoring + accessibility）**：键鼠采样（device_query，底层 IOHIDManager）依赖 **Input Monitoring** 权限（`check_input_monitoring_access` 用 `CGPreflightListenEventAccess`，与辅助功能独立，禁止 CGEventTap 假绿）；活动窗口标题采样（active-win-pos-rs，走 AX API）依赖 **Accessibility** 权限（`check_accessibility_access` FFI 调 ApplicationServices `AXIsProcessTrusted` 仅查询不弹框；`request_permission("accessibility")` 无系统 request API，open_settings=true 打开 Privacy_Accessibility 面板引导）。`check_permissions` 返回 `accessibility: {granted}` 与 `inputMonitoring: {granted}` 分字段。前端三权限（screenCapture/accessibility/inputMonitoring）引导复用同一流程（侧栏 PermissionStatusBadge / Welcome / 设置页权限 Card）。
 - **托盘暂停菜单**：`tray.rs` 主菜单加「暂停/恢复监测」项（id `tray_pause`，toggle），点击切 `state.health.paused` 原子标记（与 `commands::health::toggle_health_paused` 复用同一份运行时标记，不落盘、重启失效）。
 - **架构（双线程 daemon，`health/mod.rs::start_health_daemon`）**：一个 `std::thread` 采样（线程局部持有非 Send 的 `DeviceState`/`DeviceQuerySampler`），跨线程只传 `ActivitySample`（Send 纯数据）；一个 `tauri::async_runtime::spawn` 处理 task（`select!{cancel, rx.recv()}` 范式，复用 cc/collector.rs）。daemon **在 lib.rs setup 同步段调用**（`app.manage` 之后），内部用 `tauri::async_runtime::spawn` 而非 `tokio::spawn`（主线程无 reactor），返回 `CancellationToken` 存 `AppState.health_cancel`，`shutdown_backend_runtime` 时 cancel 优雅停止。
 - **状态机（`health/state.rs::HealthStateMachine`，纯算法）**：每分钟喂 `(active: bool, now_ts: i64, &HealthThresholds)` 推进一拍。相位流转：Idle/Resting + 活跃 → 开新工作窗口；Working + 活跃 → 续 `last_active_ts`；Working + 停歇且距上次活动 ≥ `break_seconds` → 关窗口入 Resting（报告被关闭窗口）；其余保持。提醒判定：仅 Working 态，窗口自然时长 ≥ `work_window_seconds` 且本窗口未提醒过 → `should_remind` + 标记 `reminded`（同窗口去重）。配 7 单测。`StateOutcome.state`/`reminder_closed_window` 供未来统计扩展（当前 daemon 仅消费 `should_remind`，故 struct `#[allow(dead_code)]`）。

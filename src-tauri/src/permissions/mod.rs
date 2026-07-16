@@ -9,8 +9,11 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - macOS 下通过 FFI 调 CoreGraphics 的 `CGPreflightScreenCaptureAccess` /
-//!       `CGRequestScreenCaptureAccess`（10.15+ 符号），并用 `CGEventTapCreate` 探测
-//!       输入监控权限（返回 NULL 即无权限）。
+//!       `CGRequestScreenCaptureAccess`（屏幕录制）与 `CGPreflightListenEventAccess` /
+//!       `CGRequestListenEventAccess`（输入监控 / Privacy_ListenEvent，10.15+）。
+//!     - **禁止**用 `CGEventTapCreate` 当输入监控判据：在仅有「辅助功能」时 tap 创建常成功，
+//!       导致 UI 假绿，与系统设置「输入监控」列表不一致。
+//!     - 辅助功能用 `AXIsProcessTrusted`（ApplicationServices）。
 //!     - 非 macOS 一律视为已授权（与 Python 非打包行为一致；Tauri 不区分打包/开发）。
 //!     - `open` 命令打开「系统设置 → 隐私与安全」对应面板（URL scheme 与 Python 一致）。
 
@@ -27,6 +30,11 @@ extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     /// 请求屏幕录制权限：仅在「未决定」状态弹系统对话框；已被拒绝则返回 false 不弹框。
     fn CGRequestScreenCaptureAccess() -> bool;
+    /// 预检输入监控（Listen Event / Privacy_ListenEvent）权限（不弹框）。10.15+。
+    /// 与辅助功能（AXIsProcessTrusted）相互独立；不可用 CGEventTapCreate 代替。
+    fn CGPreflightListenEventAccess() -> bool;
+    /// 请求输入监控权限：仅在「未决定」状态弹系统对话框；已被拒绝则返回 false 不弹框。
+    fn CGRequestListenEventAccess() -> bool;
 }
 
 // ── macOS ApplicationServices FFI（辅助功能权限）──────────────────────────
@@ -39,50 +47,6 @@ extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
-}
-
-/// CGEventTapLocation：在事件流中的插入位置（kCGHIDEventTap = 0）。
-#[cfg(target_os = "macos")]
-const CG_HID_EVENT_TAP: u32 = 0;
-/// CGEventTapPlacement：kCGHeadInsertEventTap = 0。
-#[cfg(target_os = "macos")]
-const CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
-/// CGEventTapOptions：kCGEventTapOptionListenOnly = 1（被动监听，仅用于权限探测）。
-#[cfg(target_os = "macos")]
-const CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
-/// CGEventMask：监听 keyDown 事件位（kCGEventKeyDown = 10，CGEventMaskBit(k)=1<<k）。
-#[cfg(target_os = "macos")]
-const CG_EVENT_MASK_KEY_DOWN: u64 = 1u64 << 10;
-
-/// CGEventTapCreate 的回调占位（探测权限用，不实际处理事件）。
-#[cfg(target_os = "macos")]
-extern "C" fn noop_event_tap(
-    _proxy: *mut std::ffi::c_void,
-    _etype: u32,
-    event: *mut std::ffi::c_void,
-    _refcon: *mut std::ffi::c_void,
-) -> *mut std::ffi::c_void {
-    event
-}
-
-#[cfg(target_os = "macos")]
-extern "C" {
-    /// 创建事件 tap；返回 NULL 表示缺少输入监控权限。用于探测权限。
-    fn CGEventTapCreate(
-        location: u32,
-        placement: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: extern "C" fn(
-            *mut std::ffi::c_void,
-            u32,
-            *mut std::ffi::c_void,
-            *mut std::ffi::c_void,
-        ) -> *mut std::ffi::c_void,
-        user_info: *mut std::ffi::c_void,
-    ) -> *mut std::ffi::c_void;
-    /// 释放（invalidate）一个由 CGEventTapCreate 创建的 tap（CFMachPort）。
-    fn CFMachPortInvalidate(port: *mut std::ffi::c_void);
 }
 
 /// 单项权限的状态。
@@ -144,27 +108,19 @@ pub fn check_screen_capture_access() -> bool {
     true
 }
 
-/// 检测输入监控权限（macOS 尝试创建 CGEventTap，NULL 即无权限；非 macOS 一律 true）。
+/// 检测输入监控权限（macOS 用 CGPreflightListenEventAccess；非 macOS 一律 true）。
 ///
-/// Business Logic: 健康提醒键鼠采样（device_query，底层 IOHIDManager）依赖输入监控权限；用「能否创建事件 tap」作为最准确的判定。对照 Python `check_input_monitoring_access`。
+/// Business Logic（为什么需要这个函数）:
+///     健康提醒键鼠采样依赖「隐私 → 输入监控」。探测结果必须与系统设置列表一致，
+///     不能在仅开启「辅助功能」时假绿，否则用户无法完成 L3 deny→grant 闭环。
+///
+/// Code Logic（这个函数做什么）:
+///     FFI 调 CoreGraphics `CGPreflightListenEventAccess`（10.15+，不弹框，对应
+///     Privacy_ListenEvent / TCC ListenEvent）。**不**调用 `CGEventTapCreate`：该 API
+///     在已授辅助功能时经常返回非 NULL，造成与系统设置不一致的假阳性。
 #[cfg(target_os = "macos")]
 pub fn check_input_monitoring_access() -> bool {
-    unsafe {
-        let tap = CGEventTapCreate(
-            CG_HID_EVENT_TAP,
-            CG_HEAD_INSERT_EVENT_TAP,
-            CG_EVENT_TAP_OPTION_LISTEN_ONLY,
-            CG_EVENT_MASK_KEY_DOWN,
-            noop_event_tap,
-            std::ptr::null_mut(),
-        );
-        if tap.is_null() {
-            return false;
-        }
-        // 探测成功即释放，避免长期占用事件流
-        CFMachPortInvalidate(tap);
-        true
-    }
+    unsafe { CGPreflightListenEventAccess() }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -222,9 +178,10 @@ pub fn open_permission_settings(perm_type: &str) -> bool {
 /// Business Logic:
 ///     - screenCapture：先调 CGRequestScreenCaptureAccess（仅「未决定」弹框）；
 ///       `open_settings=true`（默认）时再打开设置面板兜底。
-///     - inputMonitoring：无系统 request API；仅 `open_settings=true`（默认）时打开设置面板。
-///     - 启动主动引导按权限类型差异化传参：screenCapture 弹框即可（open_settings=false），
-///       inputMonitoring 只能靠开面板引导（open_settings=true）。
+///     - inputMonitoring：先调 CGRequestListenEventAccess（仅「未决定」弹框）；
+///       `open_settings=true`（默认）时再打开 Privacy_ListenEvent 面板兜底。
+///       不得依赖辅助功能侧信道或 CGEventTap 假阳性。
+///     - accessibility：无系统 request API（AXIsProcessTrusted 仅查询），只能 open 设置面板。
 ///     - 非 macOS：返回 `{ok:true, requested:false, opened:false}`。
 pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
     let open_settings = open_settings.unwrap_or(true);
@@ -246,6 +203,8 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "inputMonitoring" => {
+                // 与屏幕录制同形：先 request 弹框（未决定时），再可选打开设置面板。
+                let requested = unsafe { CGRequestListenEventAccess() };
                 let opened = if open_settings {
                     open_permission_settings(perm_type)
                 } else {
@@ -253,7 +212,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 };
                 RequestPermissionResult {
                     ok: check_input_monitoring_access(),
-                    requested: false,
+                    requested,
                     opened,
                 }
             }
@@ -285,5 +244,50 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
             requested: false,
             opened: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     输入监控与辅助功能必须可独立报告；假绿回归会让 L3 清单与系统设置错位。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用 check_permissions，断言三字段均为 bool 且结构可序列化；在 macOS 上额外断言
+    ///     input_monitoring.granted == check_input_monitoring_access() 且
+    ///     accessibility.granted == check_accessibility_access()（两路 API 各自一致，
+    ///     不强制二者相等——那正是假绿 bug 的错误假设）。
+    #[test]
+    fn check_permissions_reports_independent_fields() {
+        let status = check_permissions();
+        assert_eq!(
+            status.input_monitoring.granted,
+            check_input_monitoring_access()
+        );
+        assert_eq!(status.accessibility.granted, check_accessibility_access());
+        assert_eq!(
+            status.screen_capture.granted,
+            check_screen_capture_access()
+        );
+        let json = serde_json::to_value(&status).expect("serialize");
+        assert!(json.get("inputMonitoring").is_some());
+        assert!(json.get("accessibility").is_some());
+        assert!(json.get("screenCapture").is_some());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     输入监控 request 路径不得再写死 requested=false（应能触发 ListenEvent 系统框）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用 request_permission("inputMonitoring", Some(false)) 不强制 open 设置；
+    ///     返回体含 ok/requested/opened 字段且类型稳定（不断言本机 TCC 终态）。
+    #[test]
+    fn request_input_monitoring_shape_is_stable() {
+        let r = request_permission("inputMonitoring", Some(false));
+        // opened 在 open_settings=false 时必须为 false
+        assert!(!r.opened);
+        let _ = (r.ok, r.requested);
     }
 }
