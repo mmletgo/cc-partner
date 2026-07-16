@@ -11,6 +11,9 @@
 
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::workbench::agent_runtime::{
+    try_enqueue_agent_mutation, AgentOscDecoder, AgentRuntimeMutation,
+};
 use crate::workbench::dependencies::{available_tmux_command, TmuxCommand};
 use crate::workbench::models::{WorkbenchProjectRow, WorkbenchSessionDto, WorkbenchSessionRow};
 use crate::workbench::remote_events::{
@@ -2114,10 +2117,11 @@ impl Default for WorkbenchSessionRegistry {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     前端终端需要持续接收 PTY stdout/stderr 合并后的输出。
+///     前端终端需要持续接收 PTY stdout/stderr 合并后的输出；Agent OSC 不得进入 UI。
 ///
 /// Code Logic（这个函数做什么）:
-///     在后台线程循环读取 reader，把每个字节块转换为 UTF-8 lossless chunk 后写入 replay buffer 并 emit。
+///     后台线程读 PTY → `AgentOscDecoder` 剥离 app-private OSC 并 enqueue mutation →
+///     仅 visible 字节进入 `TerminalUtf8Decoder` → replay/emit。
 fn spawn_reader_thread(
     state: AppState,
     session_id: String,
@@ -2127,18 +2131,31 @@ fn spawn_reader_thread(
     thread::spawn(move || {
         let mut buf = [0_u8; 8192];
         let mut seq: u64 = 0;
-        let mut decoder = TerminalUtf8Decoder::default();
+        let mut utf8 = TerminalUtf8Decoder::default();
+        let mut osc = AgentOscDecoder::default();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    emit_terminal_output(
-                        &state,
-                        &session_id,
-                        &mut seq,
-                        decoder.decode(&buf[..n]),
-                        &replay_buffers,
-                    );
+                    let decoded = osc.push(&buf[..n]);
+                    forward_agent_osc_mutations(&state, &session_id, decoded.mutations);
+                    for diag in &decoded.diagnostics {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            code = diag.code,
+                            detail = ?diag.detail,
+                            "agent osc diagnostic"
+                        );
+                    }
+                    if !decoded.visible.is_empty() {
+                        emit_terminal_output(
+                            &state,
+                            &session_id,
+                            &mut seq,
+                            utf8.decode(&decoded.visible),
+                            &replay_buffers,
+                        );
+                    }
                 }
                 Err(error) => {
                     tracing::debug!("读取工作台终端输出结束: {error}");
@@ -2146,10 +2163,34 @@ fn spawn_reader_thread(
                 }
             }
         }
-        if let Some(chunk) = decoder.finish() {
+        if let Some(chunk) = utf8.finish() {
             emit_terminal_output(&state, &session_id, &mut seq, chunk, &replay_buffers);
         }
     });
+}
+
+/// 把 OSC mutation 交给 owner ingress（有界 channel；未启动 reducer 时丢弃）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     剥离后的结构化事件必须离开 reader 热路径，由单一 worker 串行写库。
+///
+/// Code Logic（这个函数做什么）:
+///     校验非空后调用 `try_enqueue_agent_mutation`；不在此执行 SQL。
+fn forward_agent_osc_mutations(
+    state: &AppState,
+    terminal_session_id: &str,
+    mutations: Vec<AgentRuntimeMutation>,
+) {
+    for mutation in mutations {
+        if mutation.terminal_session_id != terminal_session_id {
+            tracing::debug!(
+                terminal = %terminal_session_id,
+                claimed = %mutation.terminal_session_id,
+                "agent osc terminal_session_id mismatch; still enqueue for reducer reject"
+            );
+        }
+        try_enqueue_agent_mutation(state, mutation);
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2421,6 +2462,41 @@ mod tests {
 
         assert_eq!(format!("{first}{second}"), text);
         assert_eq!(decoder.finish(), None);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Agent OSC 不得进入 replay buffer / terminal UI 字节流。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用 AgentOscDecoder 处理夹杂 OSC 的输出，断言 visible 无 base64 载荷且含前后文。
+    #[test]
+    fn agent_osc_payload_never_enters_replay_visible_bytes() {
+        use crate::workbench::agent_runtime::{encode_agent_osc_frame, AgentSessionPhase};
+        let mut osc = crate::workbench::agent_runtime::AgentOscDecoder::default();
+        let frame = encode_agent_osc_frame(
+            "agent-1",
+            "session-1",
+            AgentSessionPhase::Working,
+            2,
+            "2026-07-15T00:00:00Z",
+        );
+        let mut input = b"hello ".to_vec();
+        input.extend_from_slice(&frame);
+        input.extend_from_slice(b"world");
+        let decoded = osc.push(&input);
+        assert_eq!(decoded.visible, b"hello world");
+        assert!(
+            !String::from_utf8_lossy(&decoded.visible).contains("agentSessionId"),
+            "OSC JSON must not leak into visible"
+        );
+        assert_eq!(decoded.mutations.len(), 1);
+        // 写入 replay 的只能是 visible 转 UTF-8 后的文本
+        let mut buffer = SessionReplayBuffer::new(10_000);
+        let text = String::from_utf8_lossy(&decoded.visible).into_owned();
+        buffer.append(&text, 1);
+        let snap = buffer.snapshot("session-1");
+        assert_eq!(snap.buffer, "hello world");
+        assert!(!snap.buffer.contains("cc-partner-agent-v1"));
     }
 
     /// Business Logic（为什么需要这个测试）:
