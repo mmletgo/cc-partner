@@ -1166,6 +1166,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 "/api/orchestrator/runtime-snapshot",
                 post(orchestrator::runtime_snapshot),
             )
+            .route(
+                "/api/orchestrator/agent-adapters",
+                post(orchestrator::agent_adapters_catalog),
+            )
             // Mobile-facing runtime snapshot：手机浏览器同源调用，remote-aware 四态分发，不暴露 owner base URL。
             .route(
                 "/api/mobile/orchestrator/runtime-snapshot",

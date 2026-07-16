@@ -91,7 +91,7 @@ advertised capabilities are:
 - `cc-history.paged-sync.v1` — bounded CC History paged sync (`POST /api/cc-history/sync/{manifest-page,items,push-batch}`); token and the three routes ship atomically
 - `errors.envelope.v1` — standard error envelope wire format
 - `orchestrator.review-diff.v1` — owning-device bounded Human Review / Rework diff (`POST /api/orchestrator/tasks/review-diff`); token and route ship atomically; mobile remote-aware wrapper at `/api/mobile/orchestrator/tasks/review-diff`. Display bounds: ≤200 files, total patch ≤2 MiB, single patch ≤256 KiB; binary metadata only; paths repo-relative (no `..`/absolute). `reviewDigest` = SHA-256 over base/head identity + sorted file metadata + full new-content hashes — **never** hashes truncated display patches. Owner Deliver must recollect and match non-empty `expectedReviewDigest` or conflict `review_diff_changed` (task stays Human Review)
-- `orchestrator.runtime-snapshot.v1` — owning-device runtime snapshot route
+- `orchestrator.runtime-snapshot.v1` · `orchestrator.agent-adapters.v1` — owning-device runtime snapshot route
 - `orchestrator.workflow-document.v1` — owning-device WORKFLOW.md document get/validate/save (`POST /api/orchestrator/workflow-document/{get,validate,save}`); token and routes ship atomically; mobile remote-aware wrappers under `/api/mobile/orchestrator/workflow-document/*`. Save is CAS (`expectedHash` → conflict `workflow_document_changed`); **does not dispatch and cannot enable/change delivery** (Settings-only delivery)
 - `sync.manifest.v2` — bounded Prompt / SSH target / Scratchpad content sync (`POST /api/sync/prompts/{manifest-page,items,push-batch,ack-delete-epoch}`, `/api/ssh-target/sync/{...}`, `/api/scratchpad/sync/{...}`); token ships with transactional bulk upsert + request ledger + apply_merge_batch + dedicated watermark ack
 - `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
@@ -307,6 +307,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/orchestrator/tasks/abort` | `routes/orchestrator.rs` | sets authoritative task to Aborted | no-transport-retry | Orchestrator lifecycle action |
 | POST | `/api/orchestrator/tasks/cancel` | `routes/orchestrator.rs` | transitions to Canceled/Idle, retains scene | no-transport-retry | Orchestrator lifecycle action |
 | POST | `/api/orchestrator/projects/refresh` | `routes/orchestrator.rs` | best-effort `dispatch_once` | no-transport-retry | Orchestrator action; replay can race a concurrent scheduler tick |
+| POST | `/api/orchestrator/agent-adapters` | `routes/orchestrator.rs` | none; redacted owner adapter catalog | read-only | capability `orchestrator.agent-adapters.v1`; body empty/optional; never returns executable/env/path |
 | POST | `/api/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; reads owning-device local runtime snapshot | read-only | capability-gated by `orchestrator.runtime-snapshot.v1`; body snake_case `{project_id}` only; rejects remote shortcuts |
 | POST | `/api/mobile/orchestrator/runtime-snapshot` | `routes/orchestrator.rs` | none; remote-aware runtime snapshot for mobile browser | read-only | body camelCase `{projectId}`; reuses Tauri four-state helper; never exposes owner P2P base URL |
 | GET | `/api/orchestrator/config` | `routes/orchestrator.rs` | none | read-only | — |

@@ -83,7 +83,7 @@ use crate::commands::{
     devices as device_cmd, github_trending as github_trending_cmd,
     gui_bootstrap as gui_bootstrap_cmd, health as health_cmd,
     lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
-    orchestrator as orchestrator_cmd, orchestrator_config as orchestrator_config_cmd,
+    orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd, orchestrator_config as orchestrator_config_cmd,
     permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
     prompts as prompt_cmd, scratchpad as scratchpad_cmd, screenshot as screenshot_cmd,
     ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
@@ -404,6 +404,8 @@ pub fn run() {
             prompt_optimizer_cmd::complete_orchestrator_task_prompt,
             prompt_optimizer_cmd::stream_optimize_prompt_to_workbench_session,
             // Orchestrator 任务 API（任务列表 / 创建草稿任务 / 入队 / evidence / legacy 配置兼容读取）
+            orchestrator_adapters_cmd::list_orchestrator_agent_adapters,
+            orchestrator_adapters_cmd::prepare_orchestrator_agent_downgrade,
             orchestrator_cmd::list_orchestrator_tasks,
             orchestrator_cmd::create_orchestrator_task,
             orchestrator_cmd::queue_orchestrator_task,

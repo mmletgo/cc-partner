@@ -559,4 +559,4 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 侧栏 `WorkbenchProjectRail` 为项目导航权威入口；添加来源/远端选择走共享 Dialog
 - 固定布局回归 viewport：1024×768、1280×720、390×844、844×390；断言无横向溢出、关键入口键盘可达，命名截图供人工评审（本轮不宣称像素 baseline）
 - 验证：`npm run check:css-tokens && npm run check:i18n && npm run lint && npm run build && npm run check:bundle && npm test && npm run test:e2e`；E2E foundation 冒烟 `frontend-foundation.spec.ts`；手动 VoiceOver/NVDA 覆盖 Dialog/Drawer/Attention/终端 tabs
-
+- Orchestrator Agent Adapter：WORKFLOW `runner.provider` 支持 `claudeCodeVisible|codexVisible|genericTerminal`；attempt 创建时冻结 max_turns/stall_timeout；owner probe catalog 不泄露 path/env；旧 peer 降级前必须 quiesce 非 Claude Runner。

@@ -20,7 +20,9 @@ import {
   workflowDocumentDecoder,
 } from '@/lib/schemas/orchestrator';
 import type {
+  OrchestratorAgentAdapterCatalog,
   OrchestratorRemoteOutboxItem,
+  PrepareAgentDowngradeResult,
   OrchestratorReviewDiff,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
@@ -29,7 +31,7 @@ import type {
   WorkflowDocument,
 } from '@/lib/types';
 import { ContractDecodeError } from '@/lib/runtimeSchema';
-import { invokeDecoded } from './client';
+import { invoke, invokeDecoded } from './client';
 import { toOrchestratorRuntimeTransportError } from './orchestratorRuntimeTransportError';
 
 /**
@@ -757,3 +759,30 @@ export const orchestratorApi = {
 export const buildListOrchestratorTasksInvokeArgs = buildListOrchestratorTaskViewsInvokeArgs;
 export const buildCreateOrchestratorTaskInvokeArgs = buildCreateOrchestratorTaskViewInvokeArgs;
 export const buildQueueOrchestratorTaskInvokeArgs = buildOrchestratorTaskViewActionInvokeArgs;
+
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Settings 需要拉取 owner adapter 可用性（redacted）。
+ *
+ * Code Logic（这个函数做什么）:
+ *   invoke list_orchestrator_agent_adapters。
+ */
+export async function listOrchestratorAgentAdapters(
+  projectId?: string | null,
+): Promise<OrchestratorAgentAdapterCatalog> {
+  return invoke<OrchestratorAgentAdapterCatalog>('list_orchestrator_agent_adapters', {
+    projectId: projectId ?? null,
+  });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   旧 peer 降级前必须 quiesce 非 Claude Runner（local-only）。
+ *
+ * Code Logic（这个函数做什么）:
+ *   invoke prepare_orchestrator_agent_downgrade。
+ */
+export async function prepareOrchestratorAgentDowngrade(): Promise<PrepareAgentDowngradeResult> {
+  return invoke<PrepareAgentDowngradeResult>('prepare_orchestrator_agent_downgrade', {});
+}

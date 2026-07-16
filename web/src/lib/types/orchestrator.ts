@@ -433,3 +433,37 @@ export interface WorkflowDocument {
  *   闭集四态字面量。
  */
 export type WorkflowDocumentLoadState = 'idle' | 'loading' | 'ready' | 'error';
+
+
+/**
+ * Agent adapter catalog 条目（无 path/env）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Settings 与 remote 只展示 provider 可用性与完成合同。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust OrchestratorAgentAdapterCatalogItem camelCase。
+ */
+export interface OrchestratorAgentAdapterCatalogItem {
+  provider: string
+  available: boolean
+  completionContract: string
+  supportsResume: boolean
+  supportsUsage: boolean
+  reasonCode?: string | null
+}
+
+/**
+ * Agent adapter catalog 列表。
+ */
+export interface OrchestratorAgentAdapterCatalog {
+  adapters: OrchestratorAgentAdapterCatalogItem[]
+}
+
+/**
+ * prepare agent downgrade 结果。
+ */
+export interface PrepareAgentDowngradeResult {
+  canceledTaskIds: string[]
+  refusedDelivering: string[]
+}
