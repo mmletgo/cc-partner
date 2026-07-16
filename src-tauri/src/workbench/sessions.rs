@@ -2270,16 +2270,24 @@ fn spawn_reader_thread(
                         &replay_buffers,
                         decoded,
                     );
-                    // 突发 rate-limit 后若仍有 pending，在窗口到期时 idle flush，避免静默丢终态
+                    // 突发 rate-limit 后若仍有 pending，等到窗口到期后投递；sleep 被提前唤醒时不得 break 丢终态
                     while osc.has_pending_coalesce() {
                         if let Some(wait) = osc.duration_until_rate_window_end() {
                             if !wait.is_zero() {
                                 thread::sleep(wait);
                             }
                         }
-                        let flushed = osc.poll_flush();
+                        let mut flushed = osc.poll_flush();
                         if flushed.mutations.is_empty() && flushed.diagnostics.is_empty() {
-                            break;
+                            if !osc.has_pending_coalesce() {
+                                break;
+                            }
+                            // 窗口应已到期；强制冲刷，避免 early-wake 后 break 挂起 Completed
+                            flushed = osc.force_flush_pending();
+                            if flushed.mutations.is_empty() && flushed.diagnostics.is_empty() {
+                                thread::sleep(std::time::Duration::from_millis(5));
+                                continue;
+                            }
                         }
                         apply_agent_osc_decode_result(
                             &state,
