@@ -24,6 +24,34 @@
       ]
     },
     {
+      "id": "L0-AGENT-STATE-PROJECTION-001",
+      "surface": "agent-state-projection",
+      "level": "L0",
+      "tests": [
+        "web/src/lib/agentRuntimeState.test.ts",
+        "web/src/lib/schemas/agentRuntime.test.ts",
+        "web/src/hooks/useAgentRuntime.test.tsx",
+        "web/src/pages/Workbench/WorkbenchSessionTabs.test.tsx",
+        "web/src/mobile/mobileWorkbenchState.test.ts",
+        "src-tauri/src/attention/agent_runtime_source.rs",
+        "src-tauri/src/commands/attention.rs"
+      ],
+      "command": "cd web && npm test -- agentRuntime Attention AgentRuntime && cd ../src-tauri && cargo test --locked attention:: --lib",
+      "ciJob": "frontend-unit / rust-unit",
+      "platforms": [
+        "node",
+        "rust"
+      ],
+      "exclusions": [
+        "packaged desktop GUI",
+        "multi-host Agent OSC"
+      ],
+      "docs": [
+        "docs/superpowers/specs/2026-07-15-agent-state-projection-design.md",
+        "docs/prd.md"
+      ]
+    },
+    {
       "id": "E2E-CORE-INTEGRITY-001",
       "surface": "core-integrity",
       "level": "L1",

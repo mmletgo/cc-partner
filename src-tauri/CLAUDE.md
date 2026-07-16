@@ -10,7 +10,7 @@ cc-partner 的桌面宿主与全部后端逻辑，从 PyQt6 + Python 迁移而�
 
 - **本地前端 ↔ Rust**：Tauri `invoke()` IPC（`#[tauri::command]`）。**无本地 HTTP API 端口给桌面前端**、无 CORS、无启动端口竞态。前端 `web/src/api/` 底层走 `@tauri-apps/api/core` 的 `invoke`。
 - **跨设备 P2P / mobile**：axum HTTP server + reqwest peer client + mdns-sd。**首选 TCP 端口 `DEFAULT_HTTP_PORT=62116`**（`net/http_server.rs`）；`config.http_port` 为 0/非法时回落 62116（表示“用首选”，**不是** OS `port=0` 临时端口绑定）；合法 1..=65535 作为首选；`bind_preferred_http_listener` 在 `AddrInUse` 时 **端口 +1 递增** 直至成功，写入 `AppState.actual_http_port`。mDNS UDP **5353**。防火墙必须以 **实际** 端口为准。
-- **Health 权威元数据**：`GET /api/health` 返回 snake_case，`http_port` 为**实际**监听端口，并原样填入 `server_protocol_info()` 的 `protocol_version` + `capabilities`（当前字典序：`attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、`orchestrator.review-diff.v1`、`orchestrator.runtime-snapshot.v1`、`orchestrator.workflow-document.v1`、`sync.manifest.v2`、`transfer.complete.v1`、`transfer.resume.v1`、`workbench.mutation-outcome.v1`、`workbench.session-search-result.v2`）。
+- **Health 权威元数据**：`GET /api/health` 返回 snake_case，`http_port` 为**实际**监听端口，并原样填入 `server_protocol_info()` 的 `protocol_version` + `capabilities`（当前字典序含：`attention.v1`、`attention.v2`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、`orchestrator.review-diff.v1`、`orchestrator.runtime-snapshot.v1`、`orchestrator.workflow-document.v1`、`sync.manifest.v2`、`transfer.complete.v1`、`transfer.resume.v1`、`workbench.agent-runtime.v1`、`workbench.mutation-outcome.v1`、`workbench.session-search-result.v2` 等）。
 - 两条通道共享同一份 `AppState`（`Arc<RwLock<...>>`），由 `app.manage()` 注入命令层、`with_state()` 注入 axum。
 
 ## 目录结构（随 M1–M9 里程碑逐步落地）
@@ -56,7 +56,7 @@ src/
 ├── net/               — mdns-sd 发现 + axum server + reqwest client（`peer_timeout` 超时分类，`peer_client` no-growth） [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
 ├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、claim 有界候选/cursor（`claim.rs`）、scheduler、Workbench 可见 Runner、Prompt 生成、验证与交付 [已实现]
-├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator + orchestrator/workbench dependency source；Tauri `list_attention_items` 与 Mobile `GET /api/mobile/attention` 共享 helper；能力 token `attention.v1` [已实现]
+├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator + orchestrator/workbench dependency + agent_runtime source（v2）；Tauri `list_attention_items`/`list_attention_items_v2` 与 Mobile `GET /api/mobile/attention`/`/v2`；能力 token `attention.v1`+`attention.v2` [已实现]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传 + 幂等 retry/resume claim + sender operation 对账（`transfer.resume.v1`）；`receiver/` 为目录模块（`mod`/`validation`/`chunk_io`/`resume`/`finalize`，公共 API 仍为 `crate::transfer::receiver`）[M5/N5 T2+T3]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
@@ -79,7 +79,8 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 - **Orchestrator source（`orchestrator_source.rs`）**：本机任务 HumanReview→decision、Blocked→blocked（投影前对 `status=blocked` 应用 `SplitTaskState::from_legacy_status`）；排除 resolved/running/queued/retrying 等；稳定 ID `orchestrator:human-review:<taskId>` / `orchestrator:blocked:<taskId>` / `orchestrator:outbox-failed:<outboxId>`，远端 taskId 用 `remote:<deviceId>:<inner>`；failed outbox 仅 active remote shortcut，target.projectId 为本机 shortcut id；remote 在线刷新 mirror 为 live，网络失败回退 path mirror 并以 `last_synced_at` 为 cachedAt；损坏 mirror/仓库错误使整 source 失败；remote 刷新 `buffer_unordered(4)`。本机任务**必须与当前有效 Workbench 本机 project ID 求交**；零本机项目时返回 0 条本机任务，绝不回退全局历史任务或为已删除项目合成 project 引用。不消费 `list_orchestrator_task_views_for_state` 最终 DTO（会丢 freshness）。
 - **Workbench dependency source（`workbench_dependency_source.rs`）**：零 Workbench 项目时任何依赖状态都不投影；有项目时仅 `missing`/`failed`/`unsupported` 产出固定 ID `workbench:dependency:tmux`（category=environment，target=settings/dependencies）；`ready`/`installing` 排除；`updatedAt` 取 dependency 缓存的 `statusChangedAt`，只读 `get_workbench_dependency_status_for_state`，不触发探测/安装。`WorkbenchDependencyInstallRuntime::new()` 在 AppState 初始化时**同步执行一次带硬超时的真实 tmux 探测**写入缓存，禁止用 missing 占位把未探测伪装成真实环境阻塞；探测超时收敛为 `failed`（可 recheck），不得永久阻塞 GUI/headless 启动。
 - **API 出口**：`commands/attention.rs::list_attention_items`（Tauri）与 `net/routes/attention.rs::list_attention`（`GET /api/mobile/attention`）共用 `list_attention_items_for_state`（注册 Orchestrator + Workbench dependency 两 source 后聚合）；HTTP 使用 P2P request-id/error 信封；本路由只聚合当前 backend，不递归要求对端再聚合 attention。
-- **能力宣告**：`attention.v1` 与 Mobile attention 路由同提交写入 `server_protocol_info()`；旧后端缺失该 token 时 Mobile 客户端必须显示 unsupported，不得猜测旧接口。
+- **能力宣告**：`attention.v1` 与 Mobile attention 路由同提交写入 `server_protocol_info()`；`attention.v2` 与 Agent source + `/api/mobile/attention/v2` 同提交；旧后端缺失 v1 时 Mobile 客户端必须显示 unsupported，不得猜测旧接口；客户端优先 v2 回落 v1。
+- **Agent 投影（A2）**：`agent_runtime_source` 仅在 v2 聚合注册；stable id `agent:needs-input:<agentSessionId>` / `agent:failed:<agentSessionId>`；target `agentSession`；working/idle/completed 不进 Inbox；运营通知 kind `agentNeedsInput`/`agentFailed` 在 `emit_agent_runtime_changed` 同步 emit（privacy-safe）。
 - **无 Inbox 表**：Attention 不持久化条目、已读、snooze 或历史；SQLite 只读 Orchestrator/Workbench 权威数据，投影失败不得落库“部分快照”。
 - **错误策略**：任一非网络 source 失败（损坏 mirror、SQLite/项目仓储、非法 DTO）→ 整次 `list_attention_items_for_state` 失败；远端网络失败只允许该 remote 回退最近 mirror 并标 `cached` + 真实 `last_synced_at`，不得伪装 live 或部分成功。
 - **四请求并发上限**：remote mirror 刷新使用 `buffer_unordered(4)`，禁止无界并发扫设备。
