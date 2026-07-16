@@ -583,6 +583,10 @@ pub struct OrchestratorTaskRow {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// A4：所属实验组 id；普通任务为 None。
+    pub experiment_id: Option<String>,
+    /// A4：candidate 任务禁止直接进入普通 delivery；默认 false 保持普通任务语义。
+    pub delivery_suppressed: bool,
 }
 
 /// 运营通知 kind（隐私安全，不含任务正文）。
@@ -754,6 +758,10 @@ pub struct OrchestratorTaskDto {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
+    #[serde(default)]
+    pub delivery_suppressed: bool,
 }
 
 /// Orchestrator legacy 项目配置 DTO。
@@ -888,6 +896,8 @@ impl OrchestratorTaskRow {
             updated_at: String::new(),
             started_at: None,
             finished_at: None,
+            experiment_id: None,
+            delivery_suppressed: false,
         }
     }
 
@@ -955,6 +965,8 @@ impl From<OrchestratorTaskRow> for OrchestratorTaskDto {
             updated_at: row.updated_at,
             started_at: row.started_at,
             finished_at: row.finished_at,
+            experiment_id: row.experiment_id,
+            delivery_suppressed: row.delivery_suppressed,
         }
     }
 }

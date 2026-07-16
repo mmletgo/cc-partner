@@ -126,6 +126,49 @@ pub struct ClaimCasOutcome {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     同一 experiment 不能在一轮中吃满全局槽位；普通 task 也不能被实验组饿死。
+///
+/// Code Logic（这个函数做什么）:
+///     先稳定输出无 experiment_id 的普通任务（保持原序），再按 experiment 组 round-robin
+///     每轮每组最多取一个 candidate，直到候选耗尽。
+pub fn fair_order_claim_candidates(eligible: Vec<ClaimCandidate>) -> Vec<ClaimCandidate> {
+    let mut ordinary: Vec<ClaimCandidate> = Vec::new();
+    let mut by_experiment: std::collections::BTreeMap<String, Vec<ClaimCandidate>> =
+        std::collections::BTreeMap::new();
+    let mut experiment_order: Vec<String> = Vec::new();
+
+    for candidate in eligible {
+        match candidate.task.experiment_id.clone() {
+            Some(exp_id) if !exp_id.is_empty() => {
+                if !by_experiment.contains_key(&exp_id) {
+                    experiment_order.push(exp_id.clone());
+                }
+                by_experiment.entry(exp_id).or_default().push(candidate);
+            }
+            _ => ordinary.push(candidate),
+        }
+    }
+
+    let mut ordered = ordinary;
+    // round-robin experiment groups
+    loop {
+        let mut progressed = false;
+        for exp_id in &experiment_order {
+            if let Some(queue) = by_experiment.get_mut(exp_id) {
+                if !queue.is_empty() {
+                    ordered.push(queue.remove(0));
+                    progressed = true;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    ordered
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     阶段 B 必须在 DB 事务外解析 WORKFLOW.md，并按项目 active_states 过滤可领取候选，
 ///     避免慢盘/YAML 解析占住唯一 SQLite 连接。
 ///
@@ -289,6 +332,37 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     公平序必须先输出普通任务，再 round-robin 各实验组，避免单组吃满。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 2 普通 + 2 组各 2 candidate，断言顺序。
+    #[test]
+    fn fair_order_puts_ordinary_first_then_round_robins_experiments() {
+        let mut items = Vec::new();
+        for id in ["o1", "o2"] {
+            let mut t = sample_task(id, "p", 1, "t");
+            t.experiment_id = None;
+            items.push(ClaimCandidate {
+                task: t,
+                project_path: PathBuf::from("/tmp"),
+            });
+        }
+        for (exp, ids) in [("e1", ["e1a", "e1b"]), ("e2", ["e2a", "e2b"])] {
+            for id in ids {
+                let mut t = sample_task(id, "p", 1, "t");
+                t.experiment_id = Some(exp.to_string());
+                items.push(ClaimCandidate {
+                    task: t,
+                    project_path: PathBuf::from("/tmp"),
+                });
+            }
+        }
+        let ordered = fair_order_claim_candidates(items);
+        let ids: Vec<_> = ordered.iter().map(|c| c.task.id.as_str()).collect();
+        assert_eq!(ids, vec!["o1", "o2", "e1a", "e2a", "e1b", "e2b"]);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     preflight 必须按 active_states 过滤，且无效 workflow 只跳过不改任务语义。
     ///
     /// Code Logic（这个测试做什么）:
@@ -417,6 +491,8 @@ mod tests {
             agent_session_id: None,
             transcript_path: None,
             runtime_started_at: None,
+            experiment_id: None,
+            delivery_suppressed: false,
             last_activity_at: None,
             last_runtime_event: None,
             last_runtime_message: None,

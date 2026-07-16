@@ -51,8 +51,9 @@ impl OrchestratorRepo {
                   runner_stall_timeout_ms, claude_session_id, agent_session_id, transcript_path, \
                   runtime_started_at, last_activity_at, last_runtime_event, last_runtime_message, \
                   worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
-                  state_version, created_at, updated_at, started_at, finished_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  state_version, created_at, updated_at, started_at, finished_at, \
+                  experiment_id, delivery_suppressed) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&row.id)
             .bind(&row.project_id)
@@ -91,6 +92,8 @@ impl OrchestratorRepo {
             .bind(&row.updated_at)
             .bind(&row.started_at)
             .bind(&row.finished_at)
+            .bind(&row.experiment_id)
+            .bind(if row.delivery_suppressed { 1i64 } else { 0i64 })
             .execute(&self.pool)
             .await
         }).await?;
@@ -593,12 +596,51 @@ impl OrchestratorRepo {
             });
         }
 
+        // A4：本事务内按 experiment 计数 group active，避免单组超过 max_parallel
+        let mut group_active: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut group_cap: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let ordered = crate::orchestrator::claim::fair_order_claim_candidates(eligible.to_vec());
+
         let mut claimed = Vec::new();
         let mut cas_miss = 0u64;
-        for candidate in eligible {
+        for candidate in &ordered {
             if claimed.len() >= remaining as usize {
                 break;
             }
+            // group cap check
+            if let Some(exp_id) = candidate.task.experiment_id.as_deref() {
+                if !group_cap.contains_key(exp_id) {
+                    let max_parallel: Option<i64> = sqlx::query_scalar(
+                        "SELECT max_parallel FROM orchestrator_experiments WHERE id = ?",
+                    )
+                    .bind(exp_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    group_cap.insert(exp_id.to_string(), max_parallel.unwrap_or(1).max(1));
+                    let active_in_group: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM orchestrator_experiment_candidates c \
+                         INNER JOIN orchestrator_tasks t ON t.id = c.task_id \
+                         WHERE c.experiment_id = ? AND t.run_state IN (?, ?, ?, ?)",
+                    )
+                    .bind(exp_id)
+                    .bind(OrchestratorRunState::Preparing.as_str())
+                    .bind(OrchestratorRunState::Running.as_str())
+                    .bind(OrchestratorRunState::Verifying.as_str())
+                    .bind(OrchestratorRunState::Delivering.as_str())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap_or(0);
+                    group_active.insert(exp_id.to_string(), active_in_group);
+                }
+                let cap = *group_cap.get(exp_id).unwrap_or(&1);
+                let active_g = *group_active.get(exp_id).unwrap_or(&0);
+                if active_g >= cap {
+                    continue;
+                }
+            }
+
             let task_id = candidate.task.id.as_str();
             let now = Utc::now().to_rfc3339();
             // 每次 claim 签发新 token，使旧 runner 的 touch/mark_running CAS 全部失效。
@@ -634,6 +676,10 @@ impl OrchestratorRepo {
             if result.rows_affected() != 1 {
                 cas_miss = cas_miss.saturating_add(1);
                 continue;
+            }
+
+            if let Some(exp_id) = candidate.task.experiment_id.as_deref() {
+                *group_active.entry(exp_id.to_string()).or_insert(0) += 1;
             }
 
             let updated = sqlx::query(&format!(

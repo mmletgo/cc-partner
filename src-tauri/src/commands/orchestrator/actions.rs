@@ -273,6 +273,37 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
     }
     add_verification_evidence(state, &task.id, &verification_review_evidence(&review)).await?;
     if review.passed {
+        // A4：experiment candidate 永不进入普通 HumanReview/delivery
+        if task.delivery_suppressed || task.experiment_id.is_some() {
+            // 将 Verifying 任务落到非交付终态：Done + InProgress/Idle，outcome=CandidateReady
+            let repo = state.orchestrator_repo.as_ref();
+            let split = crate::orchestrator::models::SplitTaskState {
+                workflow_state: crate::orchestrator::models::OrchestratorWorkflowState::InProgress,
+                run_state: crate::orchestrator::models::OrchestratorRunState::Idle,
+            };
+            let _ = repo
+                .try_transition_task_split_state(
+                    &task.id,
+                    crate::orchestrator::models::OrchestratorTaskStatus::Verifying,
+                    crate::orchestrator::models::OrchestratorTaskStatus::Done,
+                    split.workflow_state,
+                    split.run_state,
+                    Some(crate::orchestrator::models::OrchestratorAttemptPhase::Succeeded),
+                    None,
+                )
+                .await?;
+            crate::orchestrator::experiments::reducer::record_candidate_review(
+                repo, &task.id, true,
+            )
+            .await?;
+            // high+full-auto 时尝试启动 winner delivery
+            if let Some(exp_id) = task.experiment_id.as_deref() {
+                maybe_auto_deliver_experiment_winner(state, exp_id).await?;
+            }
+            let current = repo.get_task(&task.id).await?;
+            return Ok(OrchestratorTaskDto::from(current));
+        }
+
         let should_auto_deliver = {
             let config = state.config.read().expect("config 读锁中毒");
             auto_delivery_enabled(&config.orchestrator)
@@ -303,7 +334,69 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
         return run_delivery_for_task(state, &delivery_transition.task.id, None).await;
     }
 
+    // A4：experiment candidate 终端失败记 Failed outcome，仍允许 repair 路径
+    if task.delivery_suppressed || task.experiment_id.is_some() {
+        // 可恢复 repair 走既有路径；若 repair 失败/耗尽由后续路径处理
+        let result = start_repair_runner_for_failed_review(state, &task.id, &review).await;
+        if result.is_err() {
+            let _ = crate::orchestrator::experiments::reducer::record_candidate_review(
+                state.orchestrator_repo.as_ref(),
+                &task.id,
+                false,
+            )
+            .await;
+        }
+        return result;
+    }
+
     start_repair_runner_for_failed_review(state, &task.id, &review).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     high confidence + full-auto 时实验 winner 应自动进入既有 delivery。
+///
+/// Code Logic（这个函数做什么）:
+///     读实验状态；若 WinnerReady 且 confidence=high 且 full-auto，则 CAS Delivering 并 deliver_task。
+async fn maybe_auto_deliver_experiment_winner(
+    state: &crate::state::AppState,
+    experiment_id: &str,
+) -> Result<(), crate::error::AppError> {
+    use crate::orchestrator::experiments::delivery::{
+        mark_experiment_delivery_completed, start_experiment_winner_delivery,
+    };
+    use crate::orchestrator::experiments::models::{ComparativeConfidence, ExperimentStatus};
+    use crate::orchestrator::models::OrchestratorTaskStatus;
+
+    let repo = state.orchestrator_repo.as_ref();
+    let exp = repo.get_experiment(experiment_id).await?;
+    if exp.status != ExperimentStatus::WinnerReady {
+        return Ok(());
+    }
+    if exp.confidence != Some(ComparativeConfidence::High) {
+        return Ok(());
+    }
+    let should_auto = {
+        let config = state.config.read().expect("config 读锁中毒");
+        auto_delivery_enabled(&config.orchestrator)
+    };
+    if !should_auto {
+        return Ok(());
+    }
+    let winner_id = start_experiment_winner_delivery(repo, experiment_id).await?;
+    // 将 winner 任务转到 Delivering 再交付
+    let _ = repo
+        .try_transition_task_status(
+            &winner_id,
+            OrchestratorTaskStatus::Done,
+            OrchestratorTaskStatus::Delivering,
+            None,
+        )
+        .await?;
+    let delivered = run_delivery_for_task(state, &winner_id, None).await?;
+    if delivered.status == OrchestratorTaskStatus::Done {
+        mark_experiment_delivery_completed(repo, experiment_id).await?;
+    }
+    Ok(())
 }
 
 /// 重试阻塞的 Orchestrator 任务。

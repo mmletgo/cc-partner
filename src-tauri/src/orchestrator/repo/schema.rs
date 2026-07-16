@@ -140,6 +140,8 @@ impl OrchestratorRepo {
         .await?;
         // 旧库仅有 request_id 主键时补齐 project_id / request_fingerprint，并把 project_id 回填为任务归属。
         migrate_remote_task_create_request_scope(pool).await?;
+        // A4：实验组表、唯一 winner 索引、task.experiment_id / delivery_suppressed
+        OrchestratorRepo::init_experiment_schema(pool).await?;
         Ok(())
     }
 }

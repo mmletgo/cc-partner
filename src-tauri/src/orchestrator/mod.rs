@@ -15,6 +15,7 @@ pub mod claude_runtime;
 pub mod completion;
 pub mod config;
 pub mod delivery;
+pub mod experiments;
 pub mod models;
 pub mod notifications;
 pub mod outbox;

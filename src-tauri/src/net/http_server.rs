@@ -1171,6 +1171,27 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 "/api/orchestrator/agent-adapters",
                 post(orchestrator::agent_adapters_catalog),
             )
+            // A4 experiments：capability orchestrator.experiments.v1；组级原子 create/list/get/approve/cancel
+            .route(
+                "/api/orchestrator/experiments/create",
+                post(orchestrator::create_experiment_route),
+            )
+            .route(
+                "/api/orchestrator/experiments/list",
+                post(orchestrator::list_experiments_route),
+            )
+            .route(
+                "/api/orchestrator/experiments/get",
+                post(orchestrator::get_experiment_route),
+            )
+            .route(
+                "/api/orchestrator/experiments/approve-winner",
+                post(orchestrator::approve_experiment_winner_route),
+            )
+            .route(
+                "/api/orchestrator/experiments/cancel",
+                post(orchestrator::cancel_experiment_route),
+            )
             // Mobile-facing runtime snapshot：手机浏览器同源调用，remote-aware 四态分发，不暴露 owner base URL。
             .route(
                 "/api/mobile/orchestrator/runtime-snapshot",

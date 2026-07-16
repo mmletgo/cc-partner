@@ -55,8 +55,8 @@ src/
 ├── sync/              — 向量时钟 + LWW 合并 + engine + protocol/apply_merge + mixed_version harness [M4/N2]
 ├── net/               — mdns-sd 发现 + axum server + reqwest client（`peer_timeout` 超时分类，`peer_client` no-growth） [已实现 M3]
 ├── mobile/            — 移动端局域网 `/mobile` 访问 URL 生成（过滤 localhost/loopback）[已实现]
-├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、claim 有界候选/cursor（`claim.rs`）、scheduler、Workbench 可见 Runner、Prompt 生成、验证与交付 [已实现]
-├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator + orchestrator/workbench dependency + agent_runtime source（v2）；Tauri `list_attention_items`/`list_attention_items_v2` 与 Mobile `GET /api/mobile/attention`/`/v2`；能力 token `attention.v1`+`attention.v2` [已实现]
+├── orchestrator/      — 自动编排器后端：任务模型、状态机、SQLite repo、claim 有界候选/cursor（`claim.rs`）、scheduler、Workbench 可见 Runner、Prompt 生成、验证与交付；**A4 experiments/** 组级 create/reducer/judge/delivery/outbox + `repo/experiments`（partial unique winner、delivery_suppressed candidate、fair claim、capability `orchestrator.experiments.v1`） [已实现]
+├── attention/         — 全局 Inbox 聚合领域：DTO/source trait/确定性 aggregator + orchestrator/workbench dependency + agent_runtime source（v2）+ **experiment_source**（NeedsDecision 组级投影，稳定 ID `experiment:decision:<id>`）；Tauri `list_attention_items`/`list_attention_items_v2` 与 Mobile `GET /api/mobile/attention`/`/v2`；能力 token `attention.v1`+`attention.v2` [已实现]
 ├── transfer/          — 分块传输 + SHA256 + 断点续传 + 幂等 retry/resume claim + sender operation 对账（`transfer.resume.v1`）；`receiver/` 为目录模块（`mod`/`validation`/`chunk_io`/`resume`/`finalize`，公共 API 仍为 `crate::transfer::receiver`）[M5/N5 T2+T3]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
@@ -88,7 +88,8 @@ migrations/0001_init.sql — schema 文档（backend/runtime.rs 内联执行，�
 
 ## Orchestrator 基础约定（src/orchestrator/）
 
-- **模块边界（S6 Task 8）**：`orchestrator/repo/` 为目录模块（`mod/schema/tasks/attempts/evidence/remote` + `tests`），公共类型仍为 `crate::orchestrator::repo::{OrchestratorRepo,IdempotentCreateTaskOutcome,...}`。`commands/orchestrator/` 为目录模块：叶模块只依赖 `common` + 窄 sibling 导入（禁止兄弟 glob 循环），`mod.rs` 显式 re-export Tauri 命令（含 `__cmd__`/`__tauri_command_name_`）、pub DTO 与 `pub(crate)` helper，命令名不变；`commands/workbench/` 同为目录模块；`orchestrator_config.rs` / `workbench_dependencies.rs` 保持独立。
+- **模块边界（S6 Task 8）**：`orchestrator/repo/` 为目录模块（`mod/schema/tasks/attempts/evidence/remote/experiments` + `tests`），公共类型仍为 `crate::orchestrator::repo::{OrchestratorRepo,IdempotentCreateTaskOutcome,...}`。`commands/orchestrator/` 为目录模块：叶模块只依赖 `common` + 窄 sibling 导入（禁止兄弟 glob 循环），`mod.rs` 显式 re-export Tauri 命令（含 `__cmd__`/`__tauri_command_name_`）、pub DTO 与 `pub(crate)` helper，命令名不变；含 A4 `experiments` 命令（create/list/get/approve/cancel/prepare_experiment_downgrade）；`commands/workbench/` 同为目录模块；`orchestrator_config.rs` / `workbench_dependencies.rs` 保持独立。
+- **A4 Automated Candidate Experiments**：显式 opt-in；2–8 candidate 复用普通 task（`source=experiment`、`experiment_id`、`delivery_suppressed=true`）；全部固定同一 owning device；partial unique index `outcome='winner'` + CAS + `deliver_task` 防御 + per-task delivery lock 保证唯一交付；hard gate 通过后 candidate 停在 CandidateReady，禁止 per-task HumanReview/delivery；唯一 ready→high 自动 winner；多 ready 需 judge high 才 auto-deliver；zero/tie/medium/low→NeedsDecision 仅一条组级 Attention；loser 永不 commit/push/merge；remote 组级原子 outbox + capability `orchestrator.experiments.v1`（旧 peer 不 fallback 普通 tasks）；降级前 `prepare_experiment_downgrade` 拒绝 Delivering 并 cancel 非终态组。
 
 
 - **功能定位**：Orchestrator 是内置自动编排器的后端层，当前负责任务模型、状态机、SQLite schema/repo、设备级自动化配置读写、legacy `orchestrator_project_config` 存储/兼容/调试接口、基础任务命令、全局 scheduler、Workbench 可见 Runner、任务 Prompt 生成、开发完成哨兵检测、验证命令、Claude verifier 修复循环、full-auto 交付和 evidence 归档；Workbench query deep link 不属于后端交付语义。

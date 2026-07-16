@@ -10,6 +10,7 @@
 
 mod attempts;
 mod evidence;
+mod experiments;
 mod helpers;
 mod remote;
 mod schema;

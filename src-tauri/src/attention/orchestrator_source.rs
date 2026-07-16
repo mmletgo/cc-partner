@@ -85,6 +85,10 @@ pub async fn collect_orchestrator_attention_items(
             kind: AttentionProjectKind::Local,
         };
         for row in rows {
+            // A4：experiment child 永不投影 per-task HumanReview/Blocked Attention
+            if row.experiment_id.is_some() || row.delivery_suppressed {
+                continue;
+            }
             if let Some(item) = project_local_task_row(&row, Some(project_ref.clone())) {
                 items.push(item);
             }

@@ -38,7 +38,8 @@ pub(crate) const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_c
     external_url, external_state, external_labels_json, runner_provider, runner_max_turns, \
     runner_stall_timeout_ms, claude_session_id, agent_session_id, transcript_path, runtime_started_at, \
     last_activity_at, last_runtime_event, last_runtime_message, branch_name, worktree_id, session_id, \
-    prepare_claim_token, blocked_reason, attempt, state_version, created_at, updated_at, started_at, finished_at";
+    prepare_claim_token, blocked_reason, attempt, state_version, created_at, updated_at, started_at, finished_at, \
+    experiment_id, delivery_suppressed";
 
 /// Business Logic（为什么需要这个函数）:
 ///     claim 候选 SELECT 需要 JOIN `workbench_projects`，未加表前缀时 `id/created_at/updated_at` 会与 project 列歧义。
@@ -607,6 +608,12 @@ pub(crate) fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppErr
         updated_at: row.try_get("updated_at")?,
         started_at: row.try_get("started_at")?,
         finished_at: row.try_get("finished_at")?,
+        // 旧库/旧 SELECT 可能缺列：fail-open 为普通任务默认
+        experiment_id: row.try_get("experiment_id").unwrap_or(None),
+        delivery_suppressed: row
+            .try_get::<i64, _>("delivery_suppressed")
+            .map(|v| v != 0)
+            .unwrap_or(false),
     })
 }
 

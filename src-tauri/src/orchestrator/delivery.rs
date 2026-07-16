@@ -367,6 +367,14 @@ where
             task.status.as_str()
         )));
     }
+    // A4：experiment candidate 仅允许唯一 winner 进入 Git 交付
+    crate::orchestrator::experiments::delivery::assert_task_may_deliver(
+        context.orchestrator_repo(),
+        &task.id,
+        task.experiment_id.as_deref(),
+        task.delivery_suppressed,
+    )
+    .await?;
     let Some(_delivery_guard) = try_acquire_delivery_task_guard(&task.id)? else {
         let current = context.orchestrator_repo().get_task(&task.id).await?;
         return Ok(DeliverySummary {

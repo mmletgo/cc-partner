@@ -145,6 +145,102 @@ export interface OrchestratorTask {
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  experimentId?: string | null;
+  deliverySuppressed?: boolean;
+}
+
+/**
+ * A4 实验组状态。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   组级看板需要稳定状态字面量，与 per-task 状态机区分。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust ExperimentStatus camelCase / winnerReady 等。
+ */
+export type ExperimentStatus =
+  | 'draft'
+  | 'queued'
+  | 'running'
+  | 'comparing'
+  | 'winnerReady'
+  | 'delivering'
+  | 'completed'
+  | 'needsDecision'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * A4 candidate 结果。
+ */
+export type CandidateOutcome =
+  | 'pending'
+  | 'running'
+  | 'candidateReady'
+  | 'rejected'
+  | 'winner'
+  | 'loser'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * A4 比较置信度。
+ */
+export type ComparativeConfidence = 'high' | 'medium' | 'low';
+
+/**
+ * A4 candidate DTO。
+ */
+export interface OrchestratorExperimentCandidate {
+  experimentId: string;
+  taskId: string;
+  ordinal: number;
+  providerId: string;
+  strategyLabel: string;
+  outcome: CandidateOutcome;
+  selectionMetadataJson?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A4 实验组 DTO。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   组详情只展示进度与推荐理由，不展示 diff。
+ *
+ * Code Logic（这个类型做什么）:
+ *   对齐 Rust OrchestratorExperimentDto。
+ */
+export interface OrchestratorExperiment {
+  id: string;
+  projectId: string;
+  title: string;
+  goal: string;
+  acceptance: string;
+  status: ExperimentStatus;
+  selectionPolicy: string;
+  maxParallel: number;
+  winnerTaskId?: string | null;
+  selectionReason?: string | null;
+  confidence?: ComparativeConfidence | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  candidates?: OrchestratorExperimentCandidate[] | null;
+}
+
+/**
+ * 创建实验请求。
+ */
+export interface CreateExperimentRequest {
+  clientRequestId: string;
+  projectId: string;
+  title: string;
+  goal: string;
+  acceptance: string;
+  maxParallel: number;
+  candidates: Array<{ providerId: string; strategyLabel: string }>;
 }
 
 /**

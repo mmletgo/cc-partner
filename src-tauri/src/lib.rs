@@ -437,6 +437,13 @@ pub fn run() {
             orchestrator_cmd::retry_orchestrator_task,
             orchestrator_cmd::abort_orchestrator_task,
             orchestrator_cmd::dispatch_orchestrator_once,
+            // A4 Automated Candidate Experiments
+            orchestrator_cmd::create_orchestrator_experiment,
+            orchestrator_cmd::list_orchestrator_experiments,
+            orchestrator_cmd::get_orchestrator_experiment,
+            orchestrator_cmd::approve_orchestrator_experiment_winner,
+            orchestrator_cmd::cancel_orchestrator_experiment,
+            orchestrator_cmd::prepare_experiment_downgrade,
             // Orchestrator 全局自动化配置（设备级 AppConfig，不写 legacy 项目配置表）
             orchestrator_config_cmd::get_orchestrator_config,
             orchestrator_config_cmd::get_default_orchestrator_config,

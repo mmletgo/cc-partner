@@ -786,3 +786,87 @@ export async function listOrchestratorAgentAdapters(
 export async function prepareOrchestratorAgentDowngrade(): Promise<PrepareAgentDowngradeResult> {
   return invoke<PrepareAgentDowngradeResult>('prepare_orchestrator_agent_downgrade', {});
 }
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   用户一次创建 2–8 candidate 实验组。
+ *
+ * Code Logic（这个函数做什么）:
+ *   invoke create_orchestrator_experiment。
+ */
+export async function createOrchestratorExperiment(
+  request: import('@/lib/types/orchestrator').CreateExperimentRequest,
+): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment> {
+  return invoke('create_orchestrator_experiment', { request });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   列表实验组。
+ *
+ * Code Logic（这个函数做什么）:
+ *   invoke list_orchestrator_experiments。
+ */
+export async function listOrchestratorExperiments(
+  projectId?: string | null,
+): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment[]> {
+  return invoke('list_orchestrator_experiments', {
+    projectId: projectId?.trim() || null,
+  });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   实验详情。
+ *
+ * Code Logic（这个函数做什么）:
+ *   invoke get_orchestrator_experiment。
+ */
+export async function getOrchestratorExperiment(
+  experimentId: string,
+): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment> {
+  return invoke('get_orchestrator_experiment', { experimentId });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   NeedsDecision 时采用推荐或另一 ready candidate。
+ *
+ * Code Logic（这个函数做什么）:
+ *   invoke approve_orchestrator_experiment_winner。
+ */
+export async function approveOrchestratorExperimentWinner(
+  experimentId: string,
+  winnerTaskId: string,
+  reason?: string,
+): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment> {
+  return invoke('approve_orchestrator_experiment_winner', {
+    experimentId,
+    winnerTaskId,
+    reason: reason ?? null,
+  });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   取消整组实验。
+ *
+ * Code Logic（这个函数做什么）:
+ *   invoke cancel_orchestrator_experiment。
+ */
+export async function cancelOrchestratorExperiment(
+  experimentId: string,
+): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment> {
+  return invoke('cancel_orchestrator_experiment', { experimentId });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   降级前 quiesce 实验组。
+ *
+ * Code Logic（这个函数做什么）:
+ *   invoke prepare_experiment_downgrade。
+ */
+export async function prepareExperimentDowngrade(): Promise<number> {
+  return invoke('prepare_experiment_downgrade', {});
+}

@@ -348,6 +348,82 @@ CREATE TABLE IF NOT EXISTS orchestrator_remote_task_create_requests (
     updated_at TEXT NOT NULL
 );
 
+-- A4 Automated Candidate Experiments（实际建表由 OrchestratorRepo::init_experiment_schema 执行）
+CREATE TABLE IF NOT EXISTS orchestrator_experiments (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    acceptance TEXT NOT NULL,
+    status TEXT NOT NULL,
+    selection_policy TEXT NOT NULL DEFAULT 'comparative',
+    max_parallel INTEGER NOT NULL DEFAULT 1,
+    winner_task_id TEXT,
+    selection_reason TEXT,
+    confidence TEXT,
+    version INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS orchestrator_experiment_candidates (
+    experiment_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    provider_id TEXT NOT NULL,
+    strategy_label TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT 'pending',
+    selection_metadata_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, task_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_experiment_candidates_one_winner
+    ON orchestrator_experiment_candidates(experiment_id)
+    WHERE outcome = 'winner';
+CREATE TABLE IF NOT EXISTS orchestrator_experiment_evidence (
+    id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS orchestrator_experiment_create_requests (
+    request_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    experiment_id TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS orchestrator_remote_experiment_outbox (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    remote_project_path TEXT NOT NULL,
+    remote_project_id TEXT,
+    request_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    remote_experiment_id TEXT,
+    last_error TEXT,
+    state_version INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    sent_at TEXT
+);
+CREATE TABLE IF NOT EXISTS orchestrator_remote_experiment_mirrors (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    remote_project_id TEXT NOT NULL,
+    remote_project_path TEXT NOT NULL,
+    remote_experiment_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    last_synced_at TEXT NOT NULL,
+    UNIQUE(device_id, remote_experiment_id)
+);
+
 -- sync_request_ledger 表：Prompt/SSH/Scratchpad v2 push-batch 幂等 outcome ledger
 -- 键 UNIQUE(claimed_device_id, domain, client_request_id)；claimed_device_id 仅为收敛标签，非认证。
 -- 同 key/同 payload_hash 返回原 outcome 且不重复 apply；同 key/不同 hash 返回 conflict。

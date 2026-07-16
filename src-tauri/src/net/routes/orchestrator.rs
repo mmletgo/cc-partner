@@ -1176,6 +1176,154 @@ pub async fn agent_adapters_catalog(
     Ok(Json(catalog))
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     远端创建实验组必须走组级原子路由，旧 peer 无 capability 时客户端不得降级。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 local project 后调用 create_orchestrator_experiment_for_state。
+pub async fn create_experiment_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::orchestrator::experiments::models::CreateExperimentRequest>,
+) -> P2pResult<Json<crate::orchestrator::experiments::remote_protocol::CreateExperimentResponse>>
+{
+    require_local_project_by_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.create"))?;
+    let experiment = crate::commands::orchestrator::create_orchestrator_experiment_for_state(
+        &state, req,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.create"))?;
+    Ok(Json(
+        crate::orchestrator::experiments::remote_protocol::CreateExperimentResponse {
+            experiment,
+            newly_created: true,
+        },
+    ))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端列出项目实验组。
+///
+/// Code Logic（这个函数做什么）:
+///     require local project → list_orchestrator_experiments_for_state。
+pub async fn list_experiments_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::orchestrator::experiments::remote_protocol::ListExperimentsRequest>,
+) -> P2pResult<Json<crate::orchestrator::experiments::remote_protocol::ListExperimentsResponse>>
+{
+    require_local_project_by_id(&state, &req.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.list"))?;
+    let experiments = crate::commands::orchestrator::list_orchestrator_experiments_for_state(
+        &state,
+        Some(&req.project_id),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.list"))?;
+    Ok(Json(
+        crate::orchestrator::experiments::remote_protocol::ListExperimentsResponse { experiments },
+    ))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端实验详情。
+///
+/// Code Logic（这个函数做什么）:
+///     get_orchestrator_experiment_for_state + local project guard。
+pub async fn get_experiment_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::orchestrator::experiments::remote_protocol::GetExperimentRequest>,
+) -> P2pResult<Json<crate::orchestrator::experiments::models::OrchestratorExperimentDto>> {
+    let dto = crate::commands::orchestrator::get_orchestrator_experiment_for_state(
+        &state,
+        &req.experiment_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.get"))?;
+    require_local_project_by_id(&state, &dto.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.get"))?;
+    Ok(Json(dto))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端批准 winner。
+///
+/// Code Logic（这个函数做什么）:
+///     approve_orchestrator_experiment_winner_for_state。
+pub async fn approve_experiment_winner_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<
+        crate::orchestrator::experiments::remote_protocol::ApproveExperimentWinnerRequest,
+    >,
+) -> P2pResult<Json<crate::orchestrator::experiments::models::OrchestratorExperimentDto>> {
+    let before = crate::commands::orchestrator::get_orchestrator_experiment_for_state(
+        &state,
+        &req.experiment_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.approve"))?;
+    require_local_project_by_id(&state, &before.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.approve"))?;
+    let dto = crate::commands::orchestrator::approve_orchestrator_experiment_winner_for_state(
+        &state,
+        &req.experiment_id,
+        &req.winner_task_id,
+        req.reason.as_deref(),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.approve"))?;
+    Ok(Json(dto))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端取消实验组。
+///
+/// Code Logic（这个函数做什么）:
+///     cancel_orchestrator_experiment_for_state。
+pub async fn cancel_experiment_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::orchestrator::experiments::remote_protocol::CancelExperimentRequest>,
+) -> P2pResult<Json<crate::orchestrator::experiments::models::OrchestratorExperimentDto>> {
+    let before = crate::commands::orchestrator::get_orchestrator_experiment_for_state(
+        &state,
+        &req.experiment_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.cancel"))?;
+    require_local_project_by_id(&state, &before.project_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.cancel"))?;
+    let dto = crate::commands::orchestrator::cancel_orchestrator_experiment_for_state(
+        &state,
+        &req.experiment_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.cancel"))?;
+    Ok(Json(dto))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     experiment 路由必须拒绝 remote shortcut 递归代理。
+///
+/// Code Logic（这个函数做什么）:
+///     加载 project 并调用 ensure_remote_orchestrator_local_project。
+async fn require_local_project_by_id(state: &AppState, project_id: &str) -> Result<(), AppError> {
+    let project = state
+        .workbench_project_repo
+        .get(project_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("远端 Orchestrator 项目不存在"))?;
+    ensure_remote_orchestrator_local_project(&project)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

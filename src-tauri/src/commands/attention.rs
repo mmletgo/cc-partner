@@ -10,6 +10,7 @@
 
 use crate::attention::agent_runtime_source::AgentRuntimeAttentionSource;
 use crate::attention::aggregator::aggregate_attention_sources;
+use crate::attention::experiment_source::ExperimentAttentionSource;
 use crate::attention::models::AttentionSnapshotDto;
 use crate::attention::orchestrator_source::OrchestratorAttentionSource;
 use crate::attention::workbench_dependency_source::WorkbenchDependencyAttentionSource;
@@ -32,18 +33,19 @@ pub async fn list_attention_items_for_state(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     attention.v2 在 v1 源基础上追加 Agent needsInput/failed 实时投影。
+///     attention.v2 在 v1 源基础上追加 Agent needsInput/failed 与 experiment NeedsDecision。
 ///
 /// Code Logic（这个函数做什么）:
-///     Orchestrator + Dependency + AgentRuntime；不含 experiment repo 查询。
+///     Orchestrator + Dependency + AgentRuntime + Experiment。
 pub async fn list_attention_items_v2_for_state(
     state: &AppState,
 ) -> Result<AttentionSnapshotDto, AppError> {
     let orchestrator = OrchestratorAttentionSource;
     let dependency = WorkbenchDependencyAttentionSource;
     let agent = AgentRuntimeAttentionSource;
-    let sources: [&dyn crate::attention::source::AttentionSource; 3] =
-        [&orchestrator, &dependency, &agent];
+    let experiment = ExperimentAttentionSource;
+    let sources: [&dyn crate::attention::source::AttentionSource; 4] =
+        [&orchestrator, &dependency, &agent, &experiment];
     aggregate_attention_sources(state, &sources).await
 }
 
