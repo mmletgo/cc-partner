@@ -777,6 +777,7 @@ pub(crate) async fn ensure_remote_project_context(
     }
     let base_url = device_base_url(state, &project.device_id)?;
     let remote = RemoteWorkbenchClient::new()
+        .with_expected_device_id(&project.device_id)
         .open_project(&base_url, &project.path)
         .await?;
     Ok(RemoteWorkbenchProjectContext {
@@ -800,6 +801,7 @@ pub(crate) async fn ensure_remote_worktree_context(
     state.runtime_role.require_owner()?;
     let base_url = device_base_url(state, &device_id)?;
     let worktree = RemoteWorkbenchClient::new()
+        .with_expected_device_id(&device_id)
         .get_worktree(&base_url, &inner_worktree_id)
         .await?;
     let local_project_id = local_project_id_for_remote_inner_project(
@@ -844,6 +846,7 @@ pub(crate) async fn local_project_id_for_remote_inner_project(
         .filter(|project| project.kind == "remote" && project.device_id == device_id)
     {
         match RemoteWorkbenchClient::new()
+            .with_expected_device_id(device_id)
             .open_project(base_url, &project.path)
             .await
         {

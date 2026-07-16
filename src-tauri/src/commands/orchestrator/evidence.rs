@@ -39,6 +39,7 @@ pub async fn list_orchestrator_task_evidence_for_project(
     let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     let remote_task_id = remote_inner_task_id_for_shortcut(&project, &task_id)?;
     let evidence = RemoteOrchestratorClient::new()
+        .with_expected_device_id(&context.device_id)
         .get_evidence(&context.base_url, &remote_task_id)
         .await?;
     Ok(map_remote_evidence_for_shortcut(evidence, &project))
@@ -68,6 +69,7 @@ pub async fn get_orchestrator_config_for_project(
     }
     let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     RemoteOrchestratorClient::new()
+        .with_expected_device_id(&context.device_id)
         .get_config(&context.base_url)
         .await
 }

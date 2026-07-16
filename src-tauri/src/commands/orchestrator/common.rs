@@ -630,7 +630,8 @@ pub(crate) async fn get_remote_orchestrator_runtime_snapshot(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(crate::net::request_context::new_request_id);
-    let mut client = RemoteOrchestratorClient::new();
+    let mut client =
+        RemoteOrchestratorClient::new().with_expected_device_id(&remote_shortcut.device_id);
     // 原样转发入站 request_id（含首尾空格）；middleware 接受可打印 ASCII，trim 会破坏跨跳关联。
     if let Some(request_id) = forwarded_request_id.filter(|value| !value.is_empty()) {
         client = client.with_forwarded_request_id(request_id);
@@ -929,7 +930,8 @@ pub(crate) async fn create_remote_orchestrator_task_online(
     let context =
         open_remote_project_for_shortcut(state, remote_shortcut, forwarded_request_id).await?;
     request.project_id = context.remote_project_id.clone();
-    let mut client = RemoteOrchestratorClient::new();
+    let mut client =
+        RemoteOrchestratorClient::new().with_expected_device_id(&remote_shortcut.device_id);
     // 原样转发入站 request_id（含首尾空格）；middleware 接受可打印 ASCII，trim 会破坏跨跳关联。
     if let Some(request_id) = forwarded_request_id.filter(|value| !value.is_empty()) {
         client = client.with_forwarded_request_id(request_id);
@@ -990,7 +992,7 @@ where
     let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
     let remote_task_id = remote_inner_task_id_for_shortcut(remote_shortcut, task_id)?;
     let task = operation(
-        RemoteOrchestratorClient::new(),
+        RemoteOrchestratorClient::new().with_expected_device_id(&context.device_id),
         context.base_url.clone(),
         remote_task_id,
     )

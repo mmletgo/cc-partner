@@ -417,7 +417,7 @@ pub async fn sync_remote_task_mirror_for_project(
 ) -> Result<Vec<RemoteMirrorTask>, AppError> {
     let context =
         open_remote_project_for_shortcut(state, remote_shortcut, forwarded_request_id).await?;
-    let mut client = RemoteOrchestratorClient::new();
+    let mut client = RemoteOrchestratorClient::new().with_expected_device_id(&context.device_id);
     if let Some(request_id) = select_forwarded_request_id(forwarded_request_id) {
         client = client.with_forwarded_request_id(request_id);
     }
@@ -535,6 +535,7 @@ async fn dispatch_claimed_remote_outbox_item(
 
     request.project_id = context.remote_project_id.clone();
     let task = RemoteOrchestratorClient::new()
+        .with_expected_device_id(&context.device_id)
         .create_task(&context.base_url, request)
         .await
         .map_err(classify_remote_error)?;

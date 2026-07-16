@@ -636,7 +636,22 @@ where
             .await;
         }
     };
-    let commit_content = format_commit_evidence(before_head.as_deref(), after_head.as_deref());
+    // 交付意图：后续 push/merge 必须仍指向此 OID，防止 digest 后并发写入进入 main。
+    let Some(reviewed_commit_oid) = after_head.clone() else {
+        let reason =
+            "commit binding failed: empty HEAD after commit; refuse push/merge".to_string();
+        return block_delivery_task(
+            context.orchestrator_repo(),
+            &task.id,
+            &reason,
+            "commit binding",
+            &reason,
+            &mut stages,
+        )
+        .await;
+    };
+    let commit_content =
+        format_commit_evidence(before_head.as_deref(), Some(reviewed_commit_oid.as_str()));
     add_delivery_evidence(
         context.orchestrator_repo(),
         &task.id,
@@ -651,6 +666,37 @@ where
         stop_delivery_if_task_changed(context.orchestrator_repo(), &task.id, &stages).await?
     {
         return Ok(summary);
+    }
+
+    // push 前 CAS：HEAD 必须仍为 reviewed commit。
+    match workbench_git::head_hash(Path::new(&task_path)) {
+        Ok(Some(ref current)) if current == &reviewed_commit_oid => {}
+        Ok(current) => {
+            let reason = format!(
+                "task HEAD drifted after review commit; refuse push. expected={reviewed_commit_oid}, current={current:?}"
+            );
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "push branch",
+                &format!("branch: {task_branch}\n{reason}"),
+                &mut stages,
+            )
+            .await;
+        }
+        Err(err) => {
+            let reason = format!("push branch failed: re-read task HEAD: {err}");
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "push branch",
+                &format!("branch: {task_branch}\n{reason}"),
+                &mut stages,
+            )
+            .await;
+        }
     }
 
     if let Err(err) = context.push_task_worktree(worktree_id.clone()).await {
@@ -713,6 +759,37 @@ where
         stop_delivery_if_task_changed(context.orchestrator_repo(), &task.id, &stages).await?
     {
         return Ok(summary);
+    }
+
+    // merge 前再 CAS：源 worktree HEAD 必须仍为 reviewed commit。
+    match workbench_git::head_hash(Path::new(&task_path)) {
+        Ok(Some(ref current)) if current == &reviewed_commit_oid => {}
+        Ok(current) => {
+            let reason = format!(
+                "task HEAD drifted before merge; refuse merge. expected={reviewed_commit_oid}, current={current:?}"
+            );
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "merge main",
+                &format!("main path: {main_path}\n{reason}"),
+                &mut stages,
+            )
+            .await;
+        }
+        Err(err) => {
+            let reason = format!("merge main failed: re-read task HEAD: {err}");
+            return block_delivery_task(
+                context.orchestrator_repo(),
+                &task.id,
+                &reason,
+                "merge main",
+                &format!("main path: {main_path}\n{reason}"),
+                &mut stages,
+            )
+            .await;
+        }
     }
 
     match context

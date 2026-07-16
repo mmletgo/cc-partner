@@ -366,6 +366,7 @@ pub async fn refresh_orchestrator_project(
 
     let context = open_remote_project_for_shortcut(state.inner(), &project, None).await?;
     let refreshed = RemoteOrchestratorClient::new()
+        .with_expected_device_id(&context.device_id)
         .refresh_project(&context.base_url, &context.remote_project_id)
         .await?;
     Ok(OrchestratorProjectRefreshDto {
@@ -552,7 +553,7 @@ async fn get_remote_workflow_document(
     op: WorkflowDocumentRemoteOp,
 ) -> Result<WorkflowDocument, AppError> {
     let context = open_remote_project_for_shortcut(state, remote_shortcut, None).await?;
-    let client = RemoteOrchestratorClient::new();
+    let client = RemoteOrchestratorClient::new().with_expected_device_id(&context.device_id);
     let result = match op {
         WorkflowDocumentRemoteOp::Get => {
             client
