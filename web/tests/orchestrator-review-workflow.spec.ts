@@ -435,17 +435,17 @@ function assertNoBusinessActionInvokes(harness: PlaywrightBackendHarness): void 
  *   深链打开 automation 后需要等待看板/任务详情就绪。
  *
  * Code Logic（这个函数做什么）:
- *   等待任务卡 aria（queue.taskAria）或已打开的任务详情 drawer 标题。
+ *   任务卡与 drawer 深链后常同时可见；用 .first() 避免 .or() 命中 2 元素时的 strict mode violation。
  */
 async function expectAutomationReady(
   page: import('@playwright/test').Page,
   taskTitle: string,
 ): Promise<void> {
   const taskCard = page.getByRole('button', {
-    name: new RegExp(`选择任务\\s*${taskTitle}|${taskTitle}`),
+    name: new RegExp(`选择任务\\s*${taskTitle}`),
   });
-  const drawer = page.getByRole('dialog').filter({ hasText: taskTitle });
-  await expect(taskCard.or(drawer)).toBeVisible({ timeout: 20_000 });
+  const drawer = page.getByRole('dialog', { name: taskTitle });
+  await expect(taskCard.or(drawer).first()).toBeVisible({ timeout: 20_000 });
 }
 
 test.describe('E2E-ORCHESTRATOR-REVIEW-001 Orchestrator review workflow', () => {

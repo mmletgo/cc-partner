@@ -48,7 +48,9 @@ export function Settings(): ReactElement {
    *   ≤680px 深链选中的 tab 可能落在横向滚动区外，必须把选中 tab 滚进 tablist 视口，且不移动页面主滚动。
    *
    * Code Logic（这个 effect 做什么）:
-   *   activeTab 变化后在 rAF 中对 tablist 自身 scrollTo，把选中 tab 居中到可见区域。
+   *   activeTab 变化后双 rAF 等布局稳定，用 getBoundingClientRect 相对 tablist 计算 scrollLeft
+   *   （禁止用 offsetLeft：offsetParent 未必是 tablist，会算成过大 scroll 把选中 tab 左侧裁切），
+   *   对 tablist 自身 scrollTo/scrollLeft 居中并二次校正到完全可见。
    */
   useEffect(() => {
     if (ctrl.loading || ctrl.loadError) return;
@@ -59,19 +61,77 @@ export function Settings(): ReactElement {
     );
     if (!selected) return;
 
-    const frame = window.requestAnimationFrame(() => {
-      const targetLeft = Math.max(
-        0,
-        selected.offsetLeft - (tablist.clientWidth - selected.offsetWidth) / 2,
-      );
-      // 浏览器用 scrollTo；jsdom 等无该方法时回退 scrollLeft，且只滚 tablist 不滚页面
-      if (typeof tablist.scrollTo === 'function') {
-        tablist.scrollTo({ left: targetLeft, behavior: 'smooth' });
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   深链/键盘切换后用户必须看到完整选中 tab，否则窄屏 a11y 意图失效。
+     *
+     * Code Logic（这个函数做什么）:
+     *   有布局时用 tab/tablist 的 getBoundingClientRect 差值换算 scrollLeft（居中 + 贴边校正）；
+     *   jsdom/布局未就绪时仍调用 scrollTo（offsetLeft 回退）以保持可观测性，真实浏览器下一帧再校正。
+     */
+    const scrollSelectedIntoTablist = (): void => {
+      const listWidth = tablist.clientWidth;
+      const maxScroll = Math.max(0, tablist.scrollWidth - Math.max(listWidth, 0));
+      const tabRect = selected.getBoundingClientRect();
+      const listRect = tablist.getBoundingClientRect();
+      const hasLayout =
+        listWidth > 0 && listRect.width > 0 && tabRect.width > 0;
+
+      let targetLeft: number;
+      if (hasLayout) {
+        const centerDelta =
+          tabRect.left -
+          listRect.left -
+          (listRect.width - tabRect.width) / 2;
+        targetLeft = Math.max(
+          0,
+          Math.min(tablist.scrollLeft + centerDelta, maxScroll),
+        );
       } else {
+        targetLeft = Math.max(
+          0,
+          selected.offsetLeft -
+            Math.max(listWidth - selected.offsetWidth, 0) / 2,
+        );
+      }
+
+      // 浏览器用 scrollTo；jsdom 等无该方法时回退 scrollLeft；auto 避免 smooth 未完成时 flaky 断言
+      if (typeof tablist.scrollTo === 'function') {
+        tablist.scrollTo({ left: targetLeft, behavior: 'auto' });
+      }
+      tablist.scrollLeft = targetLeft;
+
+      if (!hasLayout) return;
+
+      // 居中后若 tab 仍宽于视口或亚像素裁切，再贴边校正到完全可见
+      const tabRect2 = selected.getBoundingClientRect();
+      const listRect2 = tablist.getBoundingClientRect();
+      let edgeAdjust = 0;
+      if (tabRect2.left < listRect2.left - 0.5) {
+        edgeAdjust = tabRect2.left - listRect2.left;
+      } else if (tabRect2.right > listRect2.right + 0.5) {
+        edgeAdjust = tabRect2.right - listRect2.right;
+      }
+      if (edgeAdjust !== 0) {
+        targetLeft = Math.max(
+          0,
+          Math.min(tablist.scrollLeft + edgeAdjust, maxScroll),
+        );
+        if (typeof tablist.scrollTo === 'function') {
+          tablist.scrollTo({ left: targetLeft, behavior: 'auto' });
+        }
         tablist.scrollLeft = targetLeft;
       }
+    };
+
+    let frame2 = 0;
+    const frame1 = window.requestAnimationFrame(() => {
+      frame2 = window.requestAnimationFrame(scrollSelectedIntoTablist);
     });
-    return () => window.cancelAnimationFrame(frame);
+    return () => {
+      window.cancelAnimationFrame(frame1);
+      window.cancelAnimationFrame(frame2);
+    };
   }, [ctrl.activeTab, ctrl.loading, ctrl.loadError]);
 
   // 加载状态

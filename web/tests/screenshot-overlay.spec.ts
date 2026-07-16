@@ -36,7 +36,10 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
     const png =
       'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lqJ5cgAAAABJRU5ErkJggg==';
     let resolveSnapshot: (() => void) | undefined;
+    let releaseRequested = false;
+    // 允许测试在 invoke 挂起前就调用 __resolveSnapshot：记下请求，挂起时立即放行，避免永久挂死。
     window.__resolveSnapshot = () => {
+      releaseRequested = true;
       resolveSnapshot?.();
     };
     /**
@@ -105,6 +108,10 @@ async function installDelayedSnapshotMock(page: Page): Promise<void> {
             selectionVisible: isVisible(document.querySelector('[data-testid="screenshot-selection"]')),
           };
           await new Promise<void>((resolve) => {
+            if (releaseRequested) {
+              resolve();
+              return;
+            }
             resolveSnapshot = resolve;
           });
           return png;
@@ -148,6 +155,10 @@ test.describe('截图选区 Overlay', () => {
     await page.mouse.up();
 
     await expect(page.getByRole('toolbar')).toBeVisible({ timeout: 10_000 });
+    // 等 get_region_snapshot 真正挂起后再放行（或允许提前 resolve 由 mock 记 releaseRequested）
+    await page.waitForFunction(() => window.__snapshotInvokeState !== undefined, null, {
+      timeout: 15_000,
+    });
     await page.evaluate(() => window.__resolveSnapshot?.());
     await expect(page.locator('canvas')).toBeVisible({ timeout: 10_000 });
   });
