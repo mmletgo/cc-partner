@@ -306,6 +306,23 @@ pub struct BrowserVerificationRun {
     pub command_results: Vec<BrowserCommandResult>,
 }
 
+/// 验证 artifact 传输 DTO（base64，有界）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     desktop/mobile/remote 拉取截图时需要统一 camelCase 信封，避免路径穿越与裸字节。
+///
+/// Code Logic（这个结构体做什么）:
+///     携带 run/artifact id、content_type、长度与 base64 正文。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserVerificationArtifactDto {
+    pub run_id: String,
+    pub artifact_id: String,
+    pub content_type: String,
+    pub byte_len: usize,
+    pub base64: String,
+}
+
 /// 校验 snapshot max_nodes 上限。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -339,6 +356,34 @@ pub fn validate_fill_value(value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 校验 fill 目标控件是否允许写入（password/file/hidden 禁止）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Spec 禁止通过验证引擎向 password/file/hidden 控件注入内容，防止凭证与本地文件路径被自动化写入。
+///
+/// Code Logic（这个函数做什么）:
+///     根据 tagName、input type、hidden 状态判断；命中禁止类型返回 `browser_fill_forbidden_control`。
+///     可在无 DOM 的单元测试中单独覆盖。
+pub fn validate_fill_control_kind(
+    tag_name: Option<&str>,
+    input_type: Option<&str>,
+    is_hidden: bool,
+) -> Result<(), AppError> {
+    if is_hidden {
+        return Err(AppError::validation("browser_fill_forbidden_control"));
+    }
+    let tag = tag_name.unwrap_or("").trim().to_ascii_lowercase();
+    let ty = input_type.unwrap_or("text").trim().to_ascii_lowercase();
+    if tag == "input" && (ty == "password" || ty == "file" || ty == "hidden") {
+        return Err(AppError::validation("browser_fill_forbidden_control"));
+    }
+    // 无 type 的 hidden input 常见于 type="hidden"；role/state 已由 is_hidden 覆盖。
+    if ty == "password" || ty == "file" || ty == "hidden" {
+        return Err(AppError::validation("browser_fill_forbidden_control"));
+    }
+    Ok(())
+}
+
 /// 校验 wait timeout 范围。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -347,7 +392,7 @@ pub fn validate_fill_value(value: &str) -> Result<(), AppError> {
 /// Code Logic（这个函数做什么）:
 ///     要求 [MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS]，否则 `resource_limit`。
 pub fn validate_wait_timeout_ms(timeout_ms: u64) -> Result<u64, AppError> {
-    if timeout_ms < MIN_WAIT_TIMEOUT_MS || timeout_ms > MAX_WAIT_TIMEOUT_MS {
+    if !(MIN_WAIT_TIMEOUT_MS..=MAX_WAIT_TIMEOUT_MS).contains(&timeout_ms) {
         return Err(AppError::validation("resource_limit"));
     }
     Ok(timeout_ms)
@@ -432,7 +477,7 @@ pub fn redact_console_text(raw: &str) -> String {
         if let Some(pos) = out.find(pattern) {
             let rest = &out[pos + pattern.len()..];
             let end_rel = rest
-                .find(|c: char| c == '\n' || c == '\r' || c == '"' || c == '\'')
+                .find(['\n', '\r', '"', '\''])
                 .unwrap_or(rest.len());
             let end = pos + pattern.len() + end_rel;
             out.replace_range(pos..end, &format!("{pattern}[REDACTED]"));
@@ -614,6 +659,37 @@ mod tests {
         let err = validate_fill_value(&big).unwrap_err();
         assert_eq!(err.code(), "resource_limit");
         assert!(validate_fill_value(&"a".repeat(MAX_FILL_VALUE_BYTES)).is_ok());
+    }
+
+    /// fill 禁止 password / file / hidden 控件。
+    #[test]
+    fn fill_rejects_password_file_hidden_controls() {
+        assert_eq!(
+            validate_fill_control_kind(Some("input"), Some("password"), false)
+                .unwrap_err()
+                .code(),
+            "browser_fill_forbidden_control"
+        );
+        assert_eq!(
+            validate_fill_control_kind(Some("input"), Some("file"), false)
+                .unwrap_err()
+                .code(),
+            "browser_fill_forbidden_control"
+        );
+        assert_eq!(
+            validate_fill_control_kind(Some("input"), Some("hidden"), false)
+                .unwrap_err()
+                .code(),
+            "browser_fill_forbidden_control"
+        );
+        assert_eq!(
+            validate_fill_control_kind(Some("input"), Some("text"), true)
+                .unwrap_err()
+                .code(),
+            "browser_fill_forbidden_control"
+        );
+        assert!(validate_fill_control_kind(Some("input"), Some("text"), false).is_ok());
+        assert!(validate_fill_control_kind(Some("textarea"), None, false).is_ok());
     }
 
     /// wait timeout 99 / 30_001 被拒绝；边界 100 / 30_000 通过。

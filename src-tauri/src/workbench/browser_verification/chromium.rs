@@ -1,27 +1,33 @@
-//! browser_verification/chromium.rs — managed chrome-headless-shell 定位与（可选）CDP 驱动
+//! browser_verification/chromium.rs — managed chrome-headless-shell 定位与 CDP 驱动
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     生产路径需要解析打包资源中的固定 headless-shell；测试与无资源环境必须可降级。
+//!     click/fill/console 必须真实执行或明确失败，禁止假成功。
 //!
 //! Code Logic（这个模块做什么）:
-//!     解析 platform 资源路径；提供 `ChromiumEngine` 骨架。完整 CDP 驱动依赖 chromiumoxide，
-//!     在可执行文件缺失时返回 `browser_engine_unavailable`。
+//!     解析 platform 资源路径；`ChromiumEngine` 通过 chromiumoxide 启动 ephemeral browser，
+//!     订阅 console、维护 generation 绑定的 Element map，执行 snapshot/click/fill/wait/screenshot。
 
 use super::engine::{
     BrowserVerificationEngine, BrowserVerificationObserver, EngineRunRequest, EngineRunResult,
 };
 use super::models::{
-    validate_fill_value, validate_snapshot_max_nodes, validate_wait_timeout_ms,
+    redact_console_text, validate_fill_control_kind, validate_fill_value,
+    validate_snapshot_byte_budget, validate_snapshot_max_nodes, validate_wait_timeout_ms,
     BrowserCommandResult, BrowserConsoleEntry, BrowserConsoleLevel, BrowserSnapshotNode,
     BrowserSnapshotResult, BrowserVerificationCommand, BrowserVerificationEvidence,
-    BrowserWaitCondition, MAX_SNAPSHOT_NODES,
+    BrowserWaitCondition, MAX_CONSOLE_ENTRIES, MAX_SNAPSHOT_NODES,
 };
 use crate::error::AppError;
 use crate::workbench::browser::normalize_browser_target_url;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use futures_util::StreamExt;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 /// 解析当前平台的 managed chrome-headless-shell 路径。
@@ -101,13 +107,15 @@ fn expected_executable_rel(platform: &str) -> PathBuf {
     }
 }
 
-/// 校验 target 仍为 loopback http(s)+显式 port（每次导航前调用）。
+/// 校验 target 仍为 loopback http(s)+显式 port（每次导航前/后调用）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     redirect 离开 allowlist 必须立即终止。
+///     redirect 离开 allowlist 必须立即终止（fail-closed）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     复用 `normalize_browser_target_url`；失败映射 `browser_redirect_escape`。
+///     注意：无法在 chromiumoxide 0.7 上可靠挂载 mid-chain navigation listener 时，
+///     至少在每次命令前后与 wait 轮询中 revalidate 最终/当前 URL。
 pub fn revalidate_loopback_target(url: &str) -> Result<String, AppError> {
     normalize_browser_target_url(url).map_err(|_| AppError::validation("browser_redirect_escape"))
 }
@@ -182,7 +190,6 @@ impl BrowserVerificationEngine for ChromiumEngine {
                 serde_json::json!({ "phase": "launching", "targetPath": url_path_only(&target) }),
             );
 
-            // 使用 chromiumoxide 启动 ephemeral browser
             match run_chromiumoxide(&request, exe, &target, observer.as_ref(), &cancel).await {
                 Ok(result) => Ok(result),
                 Err(e) => {
@@ -191,6 +198,9 @@ impl BrowserVerificationEngine for ChromiumEngine {
                         || code == "browser_redirect_escape"
                         || code == "resource_limit"
                         || code == "browser_stale_node"
+                        || code == "browser_fill_forbidden_control"
+                        || code == "browser_wait_timeout"
+                        || code == "browser_command_failed"
                     {
                         return Err(e);
                     }
@@ -220,13 +230,50 @@ fn url_path_only(url: &str) -> String {
         .unwrap_or_else(|_| "/".into())
 }
 
+/// 取消感知的异步包装。
+///
+/// Business Logic（为什么需要这个函数）:
+///     cancel 后不能继续 CDP；应尽快返回 canceled。
+///
+/// Code Logic（这个函数做什么）:
+///     `tokio::select!` cancel 与 future。
+async fn with_cancel<T, F>(cancel: &CancellationToken, fut: F) -> Result<T, AppError>
+where
+    F: std::future::Future<Output = Result<T, AppError>>,
+{
+    tokio::select! {
+        _ = cancel.cancelled() => Err(AppError::conflict("browser_verification_canceled")),
+        r = fut => r,
+    }
+}
+
+/// 读取当前 page URL 并 fail-closed revalidate。
+///
+/// Business Logic（为什么需要这个函数）:
+///     导航/redirect 后必须确认仍在 loopback allowlist。
+///
+/// Code Logic（这个函数做什么）:
+///     page.url() → revalidate_loopback_target。
+async fn ensure_page_still_loopback(page: &chromiumoxide::Page) -> Result<String, AppError> {
+    let current = page
+        .url()
+        .await
+        .map_err(|e| AppError::unavailable(format!("browser_engine_crashed: {e}")))?
+        .unwrap_or_default();
+    if current.is_empty() || current == "about:blank" {
+        return Ok(current);
+    }
+    revalidate_loopback_target(&current)
+}
+
 /// 通过 chromiumoxide 执行命令序列。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     真实验证需要导航到 loopback target 并跑 smoke 命令。
 ///
 /// Code Logic（这个函数做什么）:
-///     配置 user_data_dir + chrome_executable + headless，逐条执行命令，收集结果与截图。
+///     配置 user_data_dir + chrome_executable + headless；订阅 console；维护 node map；
+///     真实 click/fill；wait 轮询；snapshot 后校验 2MiB；全程 cancel/revalidate。
 async fn run_chromiumoxide(
     request: &EngineRunRequest,
     exe: &Path,
@@ -236,7 +283,8 @@ async fn run_chromiumoxide(
 ) -> Result<EngineRunResult, AppError> {
     use chromiumoxide::browser::{Browser, BrowserConfig};
     use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
-    use futures_util::StreamExt;
+    use chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled;
+    use chromiumoxide::Element;
 
     if cancel.is_cancelled() {
         return Err(AppError::conflict("browser_verification_canceled"));
@@ -253,7 +301,6 @@ async fn run_chromiumoxide(
             "--no-default-browser-check".to_string(),
             "--disable-extensions".to_string(),
             "--disable-background-networking".to_string(),
-            // 不监听 LAN：remote debugging 走 chromiumoxide 默认 pipe/local
         ])
         .build()
         .map_err(|e| AppError::unavailable(format!("browser_engine_unavailable: {e}")))?;
@@ -266,140 +313,169 @@ async fn run_chromiumoxide(
         while let Some(_event) = handler.next().await {}
     });
 
+    let console_entries: Arc<Mutex<Vec<BrowserConsoleEntry>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let console_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     let run_result = async {
         let page = browser
             .new_page("about:blank")
             .await
             .map_err(|e| AppError::unavailable(format!("browser_engine_crashed: {e}")))?;
 
-        // 导航前再校验
-        let target = revalidate_loopback_target(target)?;
-        if cancel.is_cancelled() {
-            return Err(AppError::conflict("browser_verification_canceled"));
+        // 订阅 console（Runtime.enable 后 EventConsoleApiCalled）
+        let _ = page.enable_runtime().await;
+        if let Ok(mut stream) = page.event_listener::<EventConsoleApiCalled>().await {
+            let entries = Arc::clone(&console_entries);
+            let seq = Arc::clone(&console_seq);
+            tokio::spawn(async move {
+                while let Some(event) = stream.next().await {
+                    let level = map_console_level(&event.r#type);
+                    let text = event
+                        .args
+                        .iter()
+                        .map(remote_object_to_text)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let redacted = redact_console_text(&text);
+                    let sequence = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let mut guard = entries.lock().await;
+                    if guard.len() >= MAX_CONSOLE_ENTRIES {
+                        continue;
+                    }
+                    guard.push(BrowserConsoleEntry {
+                        sequence,
+                        level,
+                        text: redacted,
+                        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                    });
+                }
+            });
         }
-        page.goto(&target)
-            .await
-            .map_err(|e| AppError::unavailable(format!("browser_engine_crashed: {e}")))?;
 
-        // 导航后校验最终 URL
-        if let Ok(current) = page.url().await {
-            if let Some(cur) = current {
-                revalidate_loopback_target(&cur)?;
-            }
-        }
+        let target = revalidate_loopback_target(target)?;
+        with_cancel(cancel, async {
+            page.goto(&target)
+                .await
+                .map_err(|e| AppError::unavailable(format!("browser_engine_crashed: {e}")))
+        })
+        .await?;
+        ensure_page_still_loopback(&page).await?;
 
         let mut command_results = Vec::new();
         let mut screenshot_pngs = Vec::new();
         let mut generation: u64 = 1;
-        let console_entries: Vec<BrowserConsoleEntry> = Vec::new();
+        let mut node_map: HashMap<String, Element> = HashMap::new();
         let mut last_snapshot: Option<BrowserSnapshotResult> = None;
 
         for cmd in &request.commands {
             if cancel.is_cancelled() {
                 return Err(AppError::conflict("browser_verification_canceled"));
             }
+            // 每条命令前 revalidate（redirect mid-chain 的 fail-closed 加强）
+            ensure_page_still_loopback(&page).await?;
+
             match cmd {
                 BrowserVerificationCommand::WaitFor {
                     condition,
                     timeout_ms,
                 } => {
-                    let _ = validate_wait_timeout_ms(*timeout_ms)?;
-                    // 简化：等待 document ready；结构化条件首版做有限检查
-                    let _ = condition;
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    if matches!(condition, BrowserWaitCondition::DomContentLoaded) {
-                        let _ = page.wait_for_navigation().await;
-                    }
-                    command_results.push(BrowserCommandResult::WaitSatisfied {
-                        timeout_ms: *timeout_ms,
-                    });
+                    let timeout_ms = validate_wait_timeout_ms(*timeout_ms)?;
+                    wait_for_condition(
+                        &page,
+                        condition,
+                        timeout_ms,
+                        cancel,
+                        &console_entries,
+                    )
+                    .await?;
+                    ensure_page_still_loopback(&page).await?;
+                    command_results.push(BrowserCommandResult::WaitSatisfied { timeout_ms });
                 }
                 BrowserVerificationCommand::Snapshot { max_nodes } => {
                     let max = validate_snapshot_max_nodes(*max_nodes)?;
-                    let title = page.get_title().await.ok().flatten();
-                    let url = page
-                        .url()
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| target.clone());
-                    revalidate_loopback_target(&url)?;
-                    let path = url_path_only(&url);
-                    // 有界 a11y：取 document title + 少量 role 占位（完整 AXTree 可后续加强）
-                    let mut nodes = vec![BrowserSnapshotNode {
-                        node_ref: format!("g{generation}-root"),
-                        role: "RootWebArea".into(),
-                        name: title.clone().unwrap_or_default(),
-                        state: None,
-                        bounds: None,
-                        source_hint: None,
-                    }];
-                    if let Ok(buttons) = page.find_elements("button, a, input, textarea, [role]").await
-                    {
-                        for (i, el) in buttons.into_iter().take(max as usize).enumerate() {
-                            let name = el
-                                .property("innerText")
-                                .await
-                                .ok()
-                                .flatten()
-                                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                                .unwrap_or_default();
-                            let role = el
-                                .property("tagName")
-                                .await
-                                .ok()
-                                .flatten()
-                                .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
-                                .unwrap_or_else(|| "generic".into());
-                            nodes.push(BrowserSnapshotNode {
-                                node_ref: format!("g{generation}-n{i}"),
-                                role,
-                                name: name.chars().take(200).collect(),
-                                state: None,
-                                bounds: None,
-                                source_hint: None,
-                            });
-                            if nodes.len() >= max as usize {
-                                break;
-                            }
-                        }
-                    }
-                    let truncated = nodes.len() >= max as usize;
-                    if nodes.len() > MAX_SNAPSHOT_NODES as usize {
-                        nodes.truncate(MAX_SNAPSHOT_NODES as usize);
-                    }
-                    let snap = BrowserSnapshotResult {
-                        generation,
-                        nodes,
-                        truncated,
-                        url_path: path,
-                        page_title: title,
-                    };
+                    let (snap, map) =
+                        capture_snapshot(&page, generation, max, &target, cancel).await?;
+                    validate_snapshot_byte_budget(&snap)?;
+                    node_map = map;
                     last_snapshot = Some(snap.clone());
                     command_results.push(BrowserCommandResult::Snapshot(snap));
-                    generation += 1;
+                    generation = generation.saturating_add(1);
                 }
                 BrowserVerificationCommand::Click { node_ref } => {
-                    // 无完整 node map 时：stale if generation 不匹配前缀
-                    if !node_ref.contains(&format!("g{}", generation.saturating_sub(1)))
-                        && last_snapshot
-                            .as_ref()
-                            .map(|s| s.nodes.iter().all(|n| n.node_ref != *node_ref))
-                            .unwrap_or(true)
-                    {
-                        return Err(AppError::conflict("browser_stale_node"));
-                    }
-                    command_results.push(BrowserCommandResult::clicked(node_ref.clone(), generation.saturating_sub(1), 1));
+                    let el = node_map.get(node_ref).ok_or_else(|| {
+                        AppError::conflict("browser_stale_node")
+                    })?;
+                    with_cancel(cancel, async {
+                        el.click()
+                            .await
+                            .map_err(|e| AppError::validation(format!("browser_command_failed: click: {e}")))
+                    })
+                    .await?;
+                    // click 可能触发导航
+                    let _ = page.wait_for_navigation().await;
+                    ensure_page_still_loopback(&page).await?;
+                    // 导航后 node map 失效
+                    node_map.clear();
+                    command_results.push(BrowserCommandResult::clicked(
+                        node_ref.clone(),
+                        generation.saturating_sub(1),
+                        1,
+                    ));
                 }
                 BrowserVerificationCommand::Fill { node_ref, value } => {
                     validate_fill_value(value)?;
-                    if last_snapshot
-                        .as_ref()
-                        .map(|s| s.nodes.iter().all(|n| n.node_ref != *node_ref))
-                        .unwrap_or(true)
-                    {
-                        return Err(AppError::conflict("browser_stale_node"));
+                    let el = node_map.get(node_ref).ok_or_else(|| {
+                        AppError::conflict("browser_stale_node")
+                    })?;
+                    let tag = el
+                        .property("tagName")
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    let mut input_type = el.attribute("type").await.ok().flatten();
+                    if input_type.is_none() {
+                        input_type = el
+                            .property("type")
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()));
                     }
+                    let hidden_attr = el
+                        .attribute("type")
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|t| t.eq_ignore_ascii_case("hidden"))
+                        .unwrap_or(false);
+                    let is_hidden = hidden_attr
+                        || el
+                            .property("hidden")
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                    validate_fill_control_kind(
+                        tag.as_deref(),
+                        input_type.as_deref(),
+                        is_hidden,
+                    )?;
+                    with_cancel(cancel, async {
+                        // 真实 DOM 写入：先 focus 再 type
+                        el.click()
+                            .await
+                            .map_err(|e| {
+                                AppError::validation(format!("browser_command_failed: fill_focus: {e}"))
+                            })?;
+                        el.type_str(value).await.map_err(|e| {
+                            AppError::validation(format!("browser_command_failed: fill: {e}"))
+                        })?;
+                        Ok::<(), AppError>(())
+                    })
+                    .await?;
                     // 不把 value 写入任何 result
                     command_results.push(BrowserCommandResult::filled(
                         node_ref.clone(),
@@ -407,18 +483,21 @@ async fn run_chromiumoxide(
                     ));
                 }
                 BrowserVerificationCommand::Screenshot { full_page } => {
-                    let params = chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams {
-                        format: Some(CaptureScreenshotFormat::Png),
-                        quality: None,
-                        clip: None,
-                        from_surface: None,
-                        capture_beyond_viewport: Some(*full_page),
-                        optimize_for_speed: None,
-                    };
-                    let data = page
-                        .screenshot(params)
-                        .await
-                        .map_err(|e| AppError::unavailable(format!("browser_engine_crashed: {e}")))?;
+                    let params =
+                        chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams {
+                            format: Some(CaptureScreenshotFormat::Png),
+                            quality: None,
+                            clip: None,
+                            from_surface: None,
+                            capture_beyond_viewport: Some(*full_page),
+                            optimize_for_speed: None,
+                        };
+                    let data = with_cancel(cancel, async {
+                        page.screenshot(params).await.map_err(|e| {
+                            AppError::unavailable(format!("browser_engine_crashed: {e}"))
+                        })
+                    })
+                    .await?;
                     if data.len() > super::models::MAX_SCREENSHOT_BYTES {
                         return Err(AppError::validation("resource_limit"));
                     }
@@ -432,14 +511,17 @@ async fn run_chromiumoxide(
                     });
                 }
                 BrowserVerificationCommand::ReadConsole { after_sequence } => {
-                    let entries: Vec<_> = console_entries
+                    let guard = console_entries.lock().await;
+                    let entries: Vec<_> = guard
                         .iter()
                         .filter(|e| e.sequence > *after_sequence)
                         .cloned()
                         .collect();
+                    let truncated = guard.len() >= MAX_CONSOLE_ENTRIES;
+                    drop(guard);
                     command_results.push(BrowserCommandResult::Console {
                         entries,
-                        truncated: false,
+                        truncated,
                     });
                 }
             }
@@ -449,6 +531,7 @@ async fn run_chromiumoxide(
             );
         }
 
+        let console_snapshot = console_entries.lock().await.clone();
         let url_path = last_snapshot
             .as_ref()
             .map(|s| s.url_path.clone())
@@ -460,7 +543,7 @@ async fn run_chromiumoxide(
             url_path,
             page_title,
             assertions: vec![],
-            console_errors: console_entries
+            console_errors: console_snapshot
                 .into_iter()
                 .filter(|e| e.level == BrowserConsoleLevel::Error)
                 .collect(),
@@ -477,8 +560,283 @@ async fn run_chromiumoxide(
     }
     .await;
 
+    // cancel 或完成：强制 close 子进程，再 abort handler
     let _ = browser.close().await;
+    // chromiumoxide Browser drop 会尝试 reap；额外 kill 依赖 close
     handler_task.abort();
-    // profile 由 runtime 删除
+    // profile 由 runtime 在 join 后删除
     run_result
+}
+
+/// 将 CDP console type 映射为业务 level。
+///
+/// Business Logic（为什么需要这个函数）:
+///     evidence 需要稳定的 level 枚举。
+///
+/// Code Logic（这个函数做什么）:
+///     ConsoleApiCalledType → BrowserConsoleLevel。
+fn map_console_level(
+    t: &chromiumoxide::cdp::js_protocol::runtime::ConsoleApiCalledType,
+) -> BrowserConsoleLevel {
+    use chromiumoxide::cdp::js_protocol::runtime::ConsoleApiCalledType;
+    match t {
+        ConsoleApiCalledType::Error | ConsoleApiCalledType::Assert => BrowserConsoleLevel::Error,
+        ConsoleApiCalledType::Warning => BrowserConsoleLevel::Warn,
+        ConsoleApiCalledType::Info => BrowserConsoleLevel::Info,
+        ConsoleApiCalledType::Debug | ConsoleApiCalledType::Trace => BrowserConsoleLevel::Debug,
+        _ => BrowserConsoleLevel::Log,
+    }
+}
+
+/// RemoteObject → 展示文本（仅 value/description，不含 object graph）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     console 参数需拼成可脱敏字符串。
+///
+/// Code Logic（这个函数做什么）:
+///     优先 value 字符串化，否则 description。
+fn remote_object_to_text(
+    obj: &chromiumoxide::cdp::js_protocol::runtime::RemoteObject,
+) -> String {
+    if let Some(v) = &obj.value {
+        return match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+    }
+    obj.description.clone().unwrap_or_default()
+}
+
+/// 采集有界 snapshot 并返回 generation 绑定的 Element map。
+///
+/// Business Logic（为什么需要这个函数）:
+///     后续 click/fill 必须能真实定位 DOM 节点；node_ref 仅在当前 generation 有效。
+///
+/// Code Logic（这个函数做什么）:
+///     CSS 查询可交互元素，生成 `g{gen}-n{i}` node_ref，写入 map 与节点列表。
+async fn capture_snapshot(
+    page: &chromiumoxide::Page,
+    generation: u64,
+    max: u32,
+    fallback_target: &str,
+    cancel: &CancellationToken,
+) -> Result<(BrowserSnapshotResult, HashMap<String, chromiumoxide::Element>), AppError> {
+    if cancel.is_cancelled() {
+        return Err(AppError::conflict("browser_verification_canceled"));
+    }
+    let title = page.get_title().await.ok().flatten();
+    let url = page
+        .url()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| fallback_target.to_string());
+    revalidate_loopback_target(&url)?;
+    let path = url_path_only(&url);
+
+    let mut nodes = vec![BrowserSnapshotNode {
+        node_ref: format!("g{generation}-root"),
+        role: "RootWebArea".into(),
+        name: title.clone().unwrap_or_default(),
+        state: None,
+        bounds: None,
+        source_hint: None,
+    }];
+    let mut map = HashMap::new();
+
+    let elements = page
+        .find_elements("button, a, input, textarea, select, [role]")
+        .await
+        .map_err(|e| AppError::unavailable(format!("browser_engine_crashed: {e}")))?;
+
+    for (i, el) in elements.into_iter().enumerate() {
+        if nodes.len() >= max as usize {
+            break;
+        }
+        if cancel.is_cancelled() {
+            return Err(AppError::conflict("browser_verification_canceled"));
+        }
+        let mut name = el
+            .property("innerText")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if name.is_empty() {
+            name = el
+                .attribute("aria-label")
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+        }
+        if name.is_empty() {
+            name = el
+                .attribute("placeholder")
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+        }
+        if name.is_empty() {
+            name = el.attribute("name").await.ok().flatten().unwrap_or_default();
+        }
+        let role = el
+            .property("tagName")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
+            .unwrap_or_else(|| "generic".into());
+        let node_ref = format!("g{generation}-n{i}");
+        nodes.push(BrowserSnapshotNode {
+            node_ref: node_ref.clone(),
+            role,
+            name: name.chars().take(200).collect(),
+            state: None,
+            bounds: None,
+            source_hint: None,
+        });
+        map.insert(node_ref, el);
+        if nodes.len() >= max as usize {
+            break;
+        }
+    }
+
+    let truncated = nodes.len() >= max as usize;
+    if nodes.len() > MAX_SNAPSHOT_NODES as usize {
+        nodes.truncate(MAX_SNAPSHOT_NODES as usize);
+    }
+    let snap = BrowserSnapshotResult {
+        generation,
+        nodes,
+        truncated,
+        url_path: path,
+        page_title: title,
+    };
+    Ok((snap, map))
+}
+
+/// 轮询等待结构化条件（带超时与 cancel）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     wait 不得假装满足；超时必须失败。
+///
+/// Code Logic（这个函数做什么）:
+///     按 condition 轮询 page 状态直到满足或 timeout。
+async fn wait_for_condition(
+    page: &chromiumoxide::Page,
+    condition: &BrowserWaitCondition,
+    timeout_ms: u64,
+    cancel: &CancellationToken,
+    console_entries: &Arc<Mutex<Vec<BrowserConsoleEntry>>>,
+) -> Result<(), AppError> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if cancel.is_cancelled() {
+            return Err(AppError::conflict("browser_verification_canceled"));
+        }
+        // 每轮 revalidate URL（redirect fail-closed）
+        ensure_page_still_loopback(page).await?;
+
+        let satisfied = match condition {
+            BrowserWaitCondition::DomContentLoaded => {
+                // readyState interactive/complete
+                match page.evaluate("document.readyState").await {
+                    Ok(eval) => {
+                        let s = eval
+                            .value()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        s == "interactive" || s == "complete"
+                    }
+                    Err(_) => false,
+                }
+            }
+            BrowserWaitCondition::UrlPath { path } => {
+                let url = page.url().await.ok().flatten().unwrap_or_default();
+                url_path_only(&url) == *path
+            }
+            BrowserWaitCondition::TextPresent { text } => {
+                if text.is_empty() {
+                    true
+                } else {
+                    match page.evaluate("document.body ? document.body.innerText : ''").await {
+                        Ok(eval) => {
+                            let body = eval
+                                .value()
+                                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                .unwrap_or_default();
+                            body.contains(text)
+                        }
+                        Err(_) => false,
+                    }
+                }
+            }
+            BrowserWaitCondition::RoleVisible { role, name } => {
+                // 简化：在可交互集合中按 tag/role + name 子串匹配
+                match page
+                    .find_elements("button, a, input, textarea, select, [role]")
+                    .await
+                {
+                    Ok(els) => {
+                        let mut found = false;
+                        for el in els.into_iter().take(200) {
+                            let tag = el
+                                .property("tagName")
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
+                                .unwrap_or_default();
+                            let role_attr = el
+                                .attribute("role")
+                                .await
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default()
+                                .to_lowercase();
+                            let text = el
+                                .property("innerText")
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                .unwrap_or_default();
+                            let role_l = role.to_lowercase();
+                            let name_ok = name.is_empty() || text.contains(name.as_str());
+                            let role_ok = tag == role_l
+                                || role_attr == role_l
+                                || (role_l == "button" && tag == "button")
+                                || (role_l == "link" && tag == "a")
+                                || (role_l == "textbox" && (tag == "input" || tag == "textarea"));
+                            if role_ok && name_ok {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    }
+                    Err(_) => false,
+                }
+            }
+            BrowserWaitCondition::ConsoleErrorCountAtMost { max } => {
+                let guard = console_entries.lock().await;
+                let errors = guard
+                    .iter()
+                    .filter(|e| e.level == BrowserConsoleLevel::Error)
+                    .count();
+                errors as u32 <= *max
+            }
+        };
+
+        if satisfied {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(AppError::timeout("browser_wait_timeout"));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

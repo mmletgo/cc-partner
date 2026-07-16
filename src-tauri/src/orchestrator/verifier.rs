@@ -55,6 +55,26 @@ pub struct VerifierPromptInput<'a> {
     pub worktree_path: &'a str,
     pub verification_output: &'a str,
     pub diff: &'a str,
+    /// 可选：浏览器验证 evidence 摘要（无 preview 时为 not_applicable 文本）。
+    pub browser_verification_note: Option<&'a str>,
+}
+
+/// 构造浏览器验证 evidence 摘要供 verifier/落库使用。
+///
+/// Business Logic（为什么需要这个函数）:
+///     验证路径需要把 A5 browser evidence 或 not_applicable 接到 orchestrator，避免 helper 孤岛。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `prepare_browser_verification_evidence`，返回 content 字符串。
+pub fn browser_verification_evidence_note(
+    preview_available: bool,
+    evidence: Option<&crate::workbench::browser_verification::models::BrowserVerificationEvidence>,
+) -> Result<String, AppError> {
+    let entry = crate::orchestrator::browser_verification::prepare_browser_verification_evidence(
+        preview_available,
+        evidence,
+    )?;
+    Ok(entry.content)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -201,6 +221,15 @@ fn render_quoted_block(value: &str) -> String {
 /// Code Logic（这个函数做什么）:
 ///     拼接结构化中文审查指令；要求只返回符合 schema 的 JSON，passed=false 时 repairPrompt 必须可直接交给开发 Claude。
 pub fn build_verifier_prompt(input: &VerifierPromptInput<'_>) -> String {
+    let browser_section = input
+        .browser_verification_note
+        .map(|note| {
+            format!(
+                "\n\n浏览器验证 evidence：\n```json\n{}\n```",
+                note.trim()
+            )
+        })
+        .unwrap_or_default();
     format!(
         "你是 cc-partner Orchestrator 的交付前 verifier。请只根据当前任务目标、验收标准、验证命令输出和 worktree diff 判断任务是否可以交付。\n\n\
 任务标题：\n{}\n\n\
@@ -209,7 +238,8 @@ pub fn build_verifier_prompt(input: &VerifierPromptInput<'_>) -> String {
 Attempt：{}\n\n\
 Worktree：{}\n\n\
 验证命令输出：\n```text\n{}\n```\n\n\
-Worktree diff/context：\n```diff\n{}\n```\n\n\
+Worktree diff/context：\n```diff\n{}\n```{}
+\n\n\
 裁决要求：\n\
 1. 如果实现已经满足任务目标和验收标准，即使验证命令被跳过，也可以返回 passed=true，但 reason 必须说明判断依据。\n\
 2. 如果验证命令失败、diff 显示实现不完整、缺测试或存在明显风险，返回 passed=false。\n\
@@ -223,6 +253,7 @@ Worktree diff/context：\n```diff\n{}\n```\n\n\
         input.worktree_path.trim(),
         input.verification_output.trim(),
         input.diff.trim(),
+        browser_section,
     )
 }
 
@@ -247,11 +278,14 @@ pub async fn run_verifier_claude(
         )
     };
     let worktree_path = cwd.to_string_lossy().to_string();
+    // 非 Web 任务默认无 preview：记 not_applicable，不阻塞 verifier
+    let browser_note = browser_verification_evidence_note(false, None).unwrap_or_default();
     let input = VerifierPromptInput {
         task,
         worktree_path: &worktree_path,
         verification_output,
         diff,
+        browser_verification_note: Some(browser_note.as_str()),
     };
     let prompt = build_verifier_prompt(&input);
     let review = claude_cli::run_structured_json_with_cwd::<VerifierReview>(
@@ -438,6 +472,7 @@ mod tests {
             task: &task,
             worktree_path: "/repo/worktree",
             verification_output: "$ cargo test\nexit: 101\nfailed",
+            browser_verification_note: None,
             diff: "diff --git a/src/lib.rs b/src/lib.rs",
         };
 

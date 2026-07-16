@@ -733,6 +733,15 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     // 同步路径：cancel + abort 全部 remote event bridge，避免关机后 ghost reconnect。
     // 测试路径可 await `RemoteEventBridgeRegistry::shutdown_all` 等待任务自然退出。
     state.workbench_remote_event_bridges.force_shutdown();
+
+    // 浏览器验证：cancel 全部活跃 run 并尽量 await engine 任务，避免 chrome-headless-shell 孤儿。
+    // shutdown 入口是同步的，这里用 block_in_place / handle 尽力驱动异步收尾。
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let svc = state.browser_verification.clone();
+        handle.spawn(async move {
+            svc.shutdown_all().await;
+        });
+    }
 }
 
 /// 验证 browse-only 模式应复用的 sidecar 端口。

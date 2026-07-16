@@ -137,7 +137,6 @@ pub async fn get_browser_verification_artifact(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::workbench::browser_verification::FakeEngine;
     use crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry;
     use std::sync::Arc;

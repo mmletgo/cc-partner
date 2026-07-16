@@ -13,9 +13,12 @@ use crate::workbench::browser_proxy::BrowserPreviewTarget;
 use crate::workbench::browser_verification::models::{
     default_smoke_commands, BrowserVerificationRun, BrowserVerificationStartRequest,
 };
+use crate::workbench::remote_client::RemoteWorkbenchClient;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use tauri::State;
+
+pub use crate::workbench::browser_verification::models::BrowserVerificationArtifactDto;
 
 /// start 请求体（仅 previewId + requestId + 可选命令）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,70 +30,76 @@ pub struct StartBrowserVerificationReq {
     pub commands: Vec<crate::workbench::browser_verification::BrowserVerificationCommand>,
 }
 
-/// artifact 响应（base64，有界）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserVerificationArtifactDto {
-    pub run_id: String,
-    pub artifact_id: String,
-    pub content_type: String,
-    pub byte_len: usize,
-    pub base64: String,
-}
-
-/// 从 live preview registry 解析本机 target URL。
+/// 从 live preview registry 解析目标。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     verification 只能打到已登记 loopback preview；RemoteRelay 表示目标在 owner，
-///     controller 不得本地启动 engine。
+///     verification 只能打到已登记 loopback preview；RemoteRelay 必须转发到 owner。
 ///
 /// Code Logic（这个函数做什么）:
-///     lookup preview；Local 返回 target_url；RemoteRelay 返回特殊错误码供上层转发；
-///     缺失返回 `browser_preview_not_found`。
-pub fn resolve_local_target_from_preview(
+///     lookup preview；Local → target_url；RemoteRelay → base_url + remote_preview_id。
+pub enum ResolvedVerificationTarget {
+    /// 本机 engine 可启动。
+    Local {
+        project_id: String,
+        worktree_id: Option<String>,
+        target_url: String,
+    },
+    /// 必须代理到 owner（controller 不启 engine）。
+    Remote {
+        #[allow(dead_code)]
+        project_id: String,
+        #[allow(dead_code)]
+        worktree_id: Option<String>,
+        base_url: String,
+        remote_preview_id: String,
+    },
+}
+
+/// 解析 preview 为 Local 或 Remote 目标。
+///
+/// Business Logic（为什么需要这个函数）:
+///     start/get 路径共享同一 registry 契约。
+///
+/// Code Logic（这个函数做什么）:
+///     lookup；缺失 `browser_preview_not_found`。
+pub fn resolve_verification_target(
     state: &AppState,
     preview_id: &str,
-) -> Result<(String, Option<String>, Option<String>, String), AppError> {
+) -> Result<ResolvedVerificationTarget, AppError> {
     let session = state
         .workbench_browser_previews
         .lookup(preview_id)
         .ok_or_else(|| AppError::not_found("browser_preview_not_found"))?;
-    match &session.target {
+    match session.target {
         BrowserPreviewTarget::Local { target_url } => {
-            let normalized = crate::workbench::browser::normalize_browser_target_url(target_url)
+            let normalized = crate::workbench::browser::normalize_browser_target_url(&target_url)
                 .map_err(|_| AppError::validation("browser_redirect_escape"))?;
-            Ok((
-                session.project_id.clone(),
-                session.worktree_id.clone(),
-                Some(normalized), // Some = local engine may start
-                "local".into(),
-            ))
+            Ok(ResolvedVerificationTarget::Local {
+                project_id: session.project_id,
+                worktree_id: session.worktree_id,
+                target_url: normalized,
+            })
         }
         BrowserPreviewTarget::RemoteRelay {
             base_url,
             remote_preview_id,
             ..
-        } => {
-            // 不在 controller 启动 engine；返回标记
-            let _ = (base_url, remote_preview_id);
-            Ok((
-                session.project_id.clone(),
-                session.worktree_id.clone(),
-                None, // None = must relay
-                "remote_relay".into(),
-            ))
-        }
+        } => Ok(ResolvedVerificationTarget::Remote {
+            project_id: session.project_id,
+            worktree_id: session.worktree_id,
+            base_url,
+            remote_preview_id,
+        }),
     }
 }
 
-/// 在本机 state 上启动验证（仅 Local preview）。
+/// 在 state 上启动验证：Local 启 engine；RemoteRelay 代理到 owner。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Tauri/control/P2P owner 路径共享同一 helper。
+///     Tauri/control/P2P 共享；controller 永不本地启动 Chromium。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 preview → 若 RemoteRelay 返回 `browser_verification_remote_only` 且 engine 不启动；
-///     Local 则调用 service.start。
+///     Local → service.start；Remote → RemoteWorkbenchClient.create（capability 门禁）并记录 proxy。
 pub async fn start_browser_verification_for_state(
     state: &AppState,
     req: StartBrowserVerificationReq,
@@ -98,78 +107,129 @@ pub async fn start_browser_verification_for_state(
     if req.preview_id.is_empty() || req.request_id.is_empty() {
         return Err(AppError::validation("validation_error"));
     }
-    // 拒绝过大命令列表
     if req.commands.len() > 32 {
         return Err(AppError::validation("resource_limit"));
     }
-    let (project_id, worktree_id, local_target, kind) =
-        resolve_local_target_from_preview(state, &req.preview_id)?;
-    let Some(target_url) = local_target else {
-        // RemoteRelay：不增加 engine 启动计数
-        return Err(AppError::validation("browser_verification_remote_only"));
+    let commands = if req.commands.is_empty() {
+        default_smoke_commands()
+    } else {
+        req.commands
     };
-    let _ = kind;
-    let start = BrowserVerificationStartRequest {
-        preview_id: req.preview_id.clone(),
-        request_id: req.request_id,
-        commands: if req.commands.is_empty() {
-            default_smoke_commands()
-        } else {
-            req.commands
-        },
-        fingerprint: None,
-    };
-    state
-        .browser_verification
-        .start(req.preview_id, project_id, worktree_id, target_url, start)
-        .await
+    match resolve_verification_target(state, &req.preview_id)? {
+        ResolvedVerificationTarget::Local {
+            project_id,
+            worktree_id,
+            target_url,
+        } => {
+            let start = BrowserVerificationStartRequest {
+                preview_id: req.preview_id.clone(),
+                request_id: req.request_id,
+                commands,
+                fingerprint: None,
+            };
+            state
+                .browser_verification
+                .start(req.preview_id, project_id, worktree_id, target_url, start)
+                .await
+        }
+        ResolvedVerificationTarget::Remote {
+            base_url,
+            remote_preview_id,
+            ..
+        } => {
+            // controller：不增加本地 engine_starts
+            let client = RemoteWorkbenchClient::new();
+            let run = client
+                .create_browser_verification(
+                    &base_url,
+                    &remote_preview_id,
+                    &req.request_id,
+                    &commands,
+                )
+                .await?;
+            state
+                .browser_verification
+                .remember_remote_proxy(run.session.id.clone(), base_url)
+                .await;
+            Ok(run)
+        }
+    }
 }
 
-/// 查询验证 run。
+/// 查询验证 run（本地或 remote proxy）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     UI 轮询状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 service.get。
+///     若 run 登记为 remote proxy 则转发 get；否则 service.get。
 pub async fn get_browser_verification_for_state(
     state: &AppState,
     run_id: String,
 ) -> Result<BrowserVerificationRun, AppError> {
+    if let Some(base) = state
+        .browser_verification
+        .remote_proxy_base_url(&run_id)
+        .await
+    {
+        return RemoteWorkbenchClient::new()
+            .get_browser_verification(&base, &run_id)
+            .await;
+    }
     state.browser_verification.get(&run_id).await
 }
 
-/// 取消验证 run。
+/// 取消验证 run（本地或 remote proxy）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户停止验证。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 service.cancel。
+///     remote proxy 转发 cancel；否则 service.cancel（await join 后删 profile）。
 pub async fn cancel_browser_verification_for_state(
     state: &AppState,
     run_id: String,
 ) -> Result<BrowserVerificationRun, AppError> {
+    if let Some(base) = state
+        .browser_verification
+        .remote_proxy_base_url(&run_id)
+        .await
+    {
+        return RemoteWorkbenchClient::new()
+            .cancel_browser_verification(&base, &run_id)
+            .await;
+    }
     state.browser_verification.cancel(&run_id).await
 }
 
-/// 读取 artifact。
+/// 读取 artifact（本地或 remote proxy）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     UI 展示截图。
 ///
 /// Code Logic（这个函数做什么）:
-///     读字节并 base64；限制 8MiB。
+///     remote 转发；本地读字节并 base64；拒绝路径穿越 id。
 pub async fn get_browser_verification_artifact_for_state(
     state: &AppState,
     run_id: String,
     artifact_id: String,
 ) -> Result<BrowserVerificationArtifactDto, AppError> {
-    // 拒绝路径穿越形态 id
     if artifact_id.contains("..") || artifact_id.contains('/') || artifact_id.contains('\\') {
         return Err(AppError::validation("resource_limit"));
     }
-    let bytes = state.browser_verification.artifact(&run_id, &artifact_id).await?;
+    if let Some(base) = state
+        .browser_verification
+        .remote_proxy_base_url(&run_id)
+        .await
+    {
+        return RemoteWorkbenchClient::new()
+            .get_browser_verification_artifact(&base, &run_id, &artifact_id)
+            .await;
+    }
+    let bytes = state
+        .browser_verification
+        .artifact(&run_id, &artifact_id)
+        .await?;
     Ok(BrowserVerificationArtifactDto {
         run_id,
         artifact_id,
@@ -295,18 +355,6 @@ pub async fn get_workbench_browser_verification_artifact(
         return Ok(v);
     }
     get_browser_verification_artifact_for_state(state.inner(), run_id, artifact_id).await
-}
-
-/// 测试辅助：当前 engine 启动次数。
-///
-/// Business Logic（为什么需要这个函数）:
-///     断言过期 preview 不启动 engine。
-///
-/// Code Logic（这个函数做什么）:
-///     读 service 计数。
-#[cfg(test)]
-pub fn engine_start_count(state: &AppState) -> usize {
-    state.browser_verification.engine_start_count()
 }
 
 #[cfg(test)]

@@ -9,8 +9,13 @@
 //!     解析错误统一转换为简洁中文 AppError。
 
 use crate::error::AppError;
-use crate::net::protocol::PeerProtocolInfo;
+use crate::net::protocol::{
+    PeerProtocolInfo, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
+};
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
+use crate::workbench::browser_verification::{
+    BrowserVerificationArtifactDto, BrowserVerificationCommand, BrowserVerificationRun,
+};
 use crate::workbench::claude_sessions::{
     decode_session_search_response_body, SessionPreview, SessionSearchResult,
 };
@@ -229,6 +234,147 @@ impl RemoteWorkbenchClient {
             endpoint_url(base_url, "/api/workbench/browser/preview"),
             req,
             RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 在对端 capability 缺失时返回 structured unsupported。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 peer 未宣告 `workbench.browser-verification.v1` 时，UI 应看到 unsupported 而非裸 HTTP 失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `peer_supports_capability`；false → `AppError::unavailable("browser_verification_unsupported")`。
+    async fn require_browser_verification_capability(
+        &self,
+        base_url: &str,
+    ) -> Result<(), AppError> {
+        let ok = self
+            .peer_supports_capability(base_url, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1)
+            .await?;
+        if !ok {
+            return Err(AppError::unavailable("browser_verification_unsupported"));
+        }
+        Ok(())
+    }
+
+    /// 在 owning device 上创建/启动浏览器验证（幂等 requestId）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     controller RemoteRelay 不得本地启 engine，必须把 create 代理到 owner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     require capability → POST `/api/workbench/browser-verification/create`。
+    pub async fn create_browser_verification(
+        &self,
+        base_url: &str,
+        preview_id: &str,
+        request_id: &str,
+        commands: &[BrowserVerificationCommand],
+    ) -> Result<BrowserVerificationRun, AppError> {
+        self.require_browser_verification_capability(base_url)
+            .await?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            preview_id: &'a str,
+            request_id: &'a str,
+            commands: &'a [BrowserVerificationCommand],
+        }
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/browser-verification/create"),
+            &Body {
+                preview_id,
+                request_id,
+                commands,
+            },
+            RemoteRequestTimeoutKind::Long,
+        )
+        .await
+    }
+
+    /// 查询 owner 上的验证 run。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     controller 轮询 remote 启动的 run 状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     require capability → POST get。
+    pub async fn get_browser_verification(
+        &self,
+        base_url: &str,
+        run_id: &str,
+    ) -> Result<BrowserVerificationRun, AppError> {
+        self.require_browser_verification_capability(base_url)
+            .await?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            run_id: &'a str,
+        }
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/browser-verification/get"),
+            &Body { run_id },
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 取消 owner 上的验证 run。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     controller 停止 remote 验证并让 owner 收割 child/profile。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     require capability → POST cancel。
+    pub async fn cancel_browser_verification(
+        &self,
+        base_url: &str,
+        run_id: &str,
+    ) -> Result<BrowserVerificationRun, AppError> {
+        self.require_browser_verification_capability(base_url)
+            .await?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            run_id: &'a str,
+        }
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/browser-verification/cancel"),
+            &Body { run_id },
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 拉取 owner 上的验证 artifact（base64 DTO）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     controller UI 展示 remote smoke 截图。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     require capability → POST artifact。
+    pub async fn get_browser_verification_artifact(
+        &self,
+        base_url: &str,
+        run_id: &str,
+        artifact_id: &str,
+    ) -> Result<BrowserVerificationArtifactDto, AppError> {
+        self.require_browser_verification_capability(base_url)
+            .await?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            run_id: &'a str,
+            artifact_id: &'a str,
+        }
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/browser-verification/artifact"),
+            &Body {
+                run_id,
+                artifact_id,
+            },
+            RemoteRequestTimeoutKind::Long,
         )
         .await
     }
