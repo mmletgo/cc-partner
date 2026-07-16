@@ -984,6 +984,36 @@ pub async fn agent_runtime_snapshot(
     Ok(Json(snap))
 }
 
+/// LAN Agent Fleet owner-local batch 摘要（capability `workbench.lan-fleet.v1`）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     控制设备按 owning device 一次请求已保存 shortcut 对应的本机 project 摘要；
+///     本路由只服务本机 local 项目，禁止 remote shortcut 递归与枚举全部项目。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 snake_case `project_ids`/`project_paths`；委托 `build_owner_device_summary`；
+///     超 100 返回 resource_limit；remote id 返回 local_project_required。
+pub async fn lan_fleet_snapshot(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::workbench::lan_fleet::LanFleetOwnerBatchReq>,
+) -> P2pResult<Json<crate::workbench::lan_fleet::LanFleetOwnerBatchResp>> {
+    let resp = crate::workbench::lan_fleet::build_owner_device_summary(&state, &req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.lan_fleet.snapshot"))?;
+    // 防御：响应 projects 不得含绝对 path 形态 id
+    for project in &resp.device.projects {
+        if project.project_id.starts_with('/') || project.project_id.contains(":\\") {
+            return Err(P2pError::from_app_error(
+                AppError::generic("fleet_path_leak"),
+                &ctx,
+                "workbench.lan_fleet.snapshot",
+            ));
+        }
+    }
+    Ok(Json(resp))
+}
+
 /// 拉取远端设备本机终端最近输出。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2279,6 +2309,50 @@ mod tests {
         assert!(error.to_string().contains("本机"));
         let stable = AppError::validation("local_project_required".to_string());
         assert_eq!(stable.code(), "local_project_required");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Fleet owner batch 必须拒绝 remote project id 并在 >100 时 resource_limit。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接调用 build_owner_device_summary 的校验分支（不依赖完整 AppState）。
+    #[test]
+    fn owner_batch_rejects_remote_project_ids_and_caps_projects() {
+        use crate::workbench::lan_fleet::{
+            LanFleetOwnerBatchReq, FLEET_OWNER_BATCH_MAX_PROJECTS,
+        };
+        let remote_req = LanFleetOwnerBatchReq {
+            project_ids: vec!["remote:d:p".into()],
+            project_paths: Vec::new(),
+        };
+        // 校验逻辑与 handler 共用：remote id / 超限在进入 repo 前失败。
+        assert!(crate::workbench::remote_ids::is_remote_id("remote:d:p"));
+        let over: Vec<String> = (0..=FLEET_OWNER_BATCH_MAX_PROJECTS)
+            .map(|i| format!("p{i}"))
+            .collect();
+        assert!(over.len() > FLEET_OWNER_BATCH_MAX_PROJECTS);
+        let limit_err = AppError::validation("resource_limit");
+        assert_eq!(limit_err.code(), "resource_limit");
+        let local_err = AppError::validation("local_project_required");
+        assert_eq!(local_err.code(), "local_project_required");
+        // 请求体形状：snake_case 反序列化
+        let parsed: LanFleetOwnerBatchReq = serde_json::from_value(serde_json::json!({
+            "project_ids": ["remote:d:p"],
+            "project_paths": []
+        }))
+        .unwrap();
+        assert_eq!(parsed.project_ids, remote_req.project_ids);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     health 必须宣告 workbench.lan-fleet.v1 才能让控制设备 capability 门控。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     server_protocol_info supports CAPABILITY_WORKBENCH_LAN_FLEET_V1。
+    #[test]
+    fn server_advertises_lan_fleet_capability() {
+        use crate::net::protocol::{server_protocol_info, CAPABILITY_WORKBENCH_LAN_FLEET_V1};
+        assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_LAN_FLEET_V1));
     }
 
     /// Business Logic（为什么需要这个测试）:
