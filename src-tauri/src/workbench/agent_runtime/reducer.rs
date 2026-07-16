@@ -32,14 +32,20 @@ fn agent_runtime_write_lock() -> &'static Mutex<()> {
 /// mutation 应用结果。
 ///
 /// Business Logic（为什么需要这个类型）:
-///     调用方需要区分已写入 / 幂等丢弃 / 拒绝，以便 metrics 与测试断言。
+///     调用方需要区分已写入 / 幂等丢弃 / 拒绝，以便 metrics 与测试断言；
+///     previous_phase 供运营通知只在 phase 边沿发射。
 ///
 /// Code Logic（这个类型做什么）:
-///     Applied 携带更新后行；Ignored 带稳定 reason token。
+///     Applied 携带写前 phase + 更新后行；Ignored 带稳定 reason token。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentReduceOutcome {
-    /// 已持久化
-    Applied(AgentSessionRuntime),
+    /// 已持久化：previous_phase 为 CAS 前 phase，row 为写后真值。
+    Applied {
+        /// mutation 应用前的 phase（用于 edge-only 通知）
+        previous_phase: AgentSessionPhase,
+        /// 更新后的 runtime 行
+        row: AgentSessionRuntime,
+    },
     /// 幂等或策略拒绝（非错误）
     Ignored(&'static str),
 }
@@ -133,6 +139,7 @@ impl AgentRuntimeReducer {
         if mutation.event_version <= current.version {
             return Ok(AgentReduceOutcome::Ignored("stale_version"));
         }
+        let previous_phase = current.phase;
         let mut normalized = mutation;
         normalized.expected_version = current.version;
         let applied = self.repo.apply_mutation(&normalized).await?;
@@ -144,7 +151,10 @@ impl AgentRuntimeReducer {
             .get(&normalized.agent_session_id)
             .await?
             .ok_or_else(|| AppError::generic("agent session missing after apply"))?;
-        Ok(AgentReduceOutcome::Applied(updated))
+        Ok(AgentReduceOutcome::Applied {
+            previous_phase,
+            row: updated,
+        })
     }
 
     /// 在 terminal 上启动新 active Agent；若已有 active 则先终结为 Disconnected。
@@ -462,7 +472,7 @@ mod tests {
                 .apply(event(&agent, 2, AgentSessionPhase::Working))
                 .await
                 .unwrap(),
-            AgentReduceOutcome::Applied(_)
+            AgentReduceOutcome::Applied { .. }
         ));
         assert!(matches!(
             reducer

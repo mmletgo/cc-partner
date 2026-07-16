@@ -856,4 +856,83 @@ describe('useOperationalNotifications', () => {
       }),
     ).toBe('taskDone:abc:9');
   });
+
+  test('mid-handshake events during await maybeNotify are re-drained once', async () => {
+    // 冷启动 snapshot 先挂起，listener 先就绪
+    const snapshotGate = deferred<OperationalNotificationSnapshot>();
+    getSnapshotMock.mockReturnValueOnce(snapshotGate.promise);
+
+    // 第一次 permission check 挂起，模拟 await maybeNotify 中途
+    const permissionGate = deferred<boolean>();
+    let permissionCalls = 0;
+    checkNotificationGrantedMock.mockImplementation(() => {
+      permissionCalls += 1;
+      if (permissionCalls === 1) {
+        return permissionGate.promise;
+      }
+      return Promise.resolve(true);
+    });
+
+    renderHook(() => useOperationalNotifications(), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(listenerHandlers.has('operational:notification')).toBe(true));
+
+    // 缓冲一个 >asOf 的事件，将在 drain 时触发 await permission
+    await act(async () => {
+      emit(
+        'operational:notification',
+        buildEvent({
+          kind: 'blocked',
+          opaqueSourceId: 'during-drain-1',
+          stateVersion: 1,
+          sequence: 20,
+        }),
+      );
+    });
+
+    // 放行 snapshot → 进入 drain → 卡在 checkNotificationGranted
+    await act(async () => {
+      snapshotGate.resolve(
+        buildSnapshot({
+          asOfCursor: { ownerInstanceId: 'owner-1', sequence: 10 },
+          items: [],
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(permissionCalls).toBeGreaterThanOrEqual(1);
+    });
+
+    // 仍在 pending drain 时再来一条 live 事件，必须入 buffer 并被 re-drain
+    await act(async () => {
+      emit(
+        'operational:notification',
+        buildEvent({
+          kind: 'humanReview',
+          opaqueSourceId: 'during-drain-2',
+          stateVersion: 2,
+          sequence: 21,
+        }),
+      );
+    });
+
+    // 放行 permission，完成 drain + re-drain
+    await act(async () => {
+      permissionGate.resolve(true);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(sendOperationalNotificationMock).toHaveBeenCalledTimes(2);
+    });
+    const titles = sendOperationalNotificationMock.mock.calls.map(
+      (call) => (call[0] as { title: string }).title,
+    );
+    expect(titles).toContain('orchestrator:notifications.blocked.title');
+    expect(titles).toContain('orchestrator:notifications.humanReview.title');
+  });
+
 });

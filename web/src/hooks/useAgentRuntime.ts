@@ -230,33 +230,68 @@ export function useAgentRuntime(
 
     const asOfOwner = snapshot.ownerInstanceId;
     const asOfSeq = snapshot.asOfSequence;
-    const remaining: AgentRuntimeEvent[] = [];
-    for (const buffered of bufferRef.current) {
-      const owner = buffered.ownerInstanceId;
-      const seq = buffered.sequence;
-      if (
-        typeof owner === 'string' &&
-        owner === asOfOwner &&
-        typeof seq === 'number' &&
-        seq <= asOfSeq
-      ) {
-        continue;
-      }
-      if (typeof owner === 'string' && owner !== asOfOwner) {
-        continue;
-      }
-      remaining.push(buffered);
-    }
-    bufferRef.current = [];
+    let highWater = asOfSeq;
 
-    for (const event of sortBufferedEvents(remaining)) {
-      if (generation !== handshakeGenerationRef.current) return;
-      applyEventToState(event);
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   将缓冲事件按 asOf 过滤后同步 apply，并抬高 stream 高水位。
+     *
+     * Code Logic（这个函数做什么）:
+     *   丢弃同 owner seq<=asOf 与异 owner；其余 applyEventToState 并更新 highWater。
+     */
+    const drainBatch = (batch: AgentRuntimeEvent[]): void => {
+      for (const event of sortBufferedEvents(batch)) {
+        if (generation !== handshakeGenerationRef.current) return;
+        const owner = event.ownerInstanceId;
+        const seq = event.sequence;
+        if (
+          typeof owner === 'string' &&
+          owner === asOfOwner &&
+          typeof seq === 'number' &&
+          seq <= asOfSeq
+        ) {
+          continue;
+        }
+        if (typeof owner === 'string' && owner !== asOfOwner) {
+          continue;
+        }
+        if (
+          typeof owner === 'string' &&
+          owner === asOfOwner &&
+          typeof seq === 'number'
+        ) {
+          highWater = Math.max(highWater, seq);
+        }
+        applyEventToState(event);
+      }
+    };
+
+    // Agent drain 同步；仍循环清空 buffer，并在进 live 后冲刷 residual
+    const initial = bufferRef.current;
+    bufferRef.current = [];
+    drainBatch(initial);
+    while (generation === handshakeGenerationRef.current && bufferRef.current.length > 0) {
+      const more = bufferRef.current;
+      bufferRef.current = [];
+      drainBatch(more);
     }
 
     if (generation !== handshakeGenerationRef.current) return;
+    cursorRef.current = {
+      ownerInstanceId: asOfOwner,
+      sequence: highWater,
+    };
     phaseRef.current = 'live';
     setPhase('live');
+    const residual = bufferRef.current;
+    bufferRef.current = [];
+    if (residual.length > 0) {
+      drainBatch(residual);
+      cursorRef.current = {
+        ownerInstanceId: asOfOwner,
+        sequence: highWater,
+      };
+    }
   }, [applyEventToState]);
 
   /**

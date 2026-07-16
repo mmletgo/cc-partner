@@ -10,8 +10,9 @@
  *   1) 先注册 Tauri live/gap listener 并按 (ownerId,sequence) 缓冲
  *   2) 拉 snapshot 作为 no-notify baseline（seed dedupe）
  *   3) 丢弃 sequence<=asOfCursor 的缓冲，顺序 drain 更大 cursor
- *   4) live 模式消费新事件；Gap/owner change 暂停并重 handshake，不卸载 listener
- *   5) 偏好/权限/前台抑制决定是否 sendOperationalNotification；会通知时始终
+ *   4) drain 含 await 时继续扫 buffer 直至空，再切 live（防 mid-handshake 事件搁浅）
+ *   5) live 模式消费新事件；Gap/owner change 暂停并重 handshake，不卸载 listener
+ *   6) 偏好/权限/前台抑制决定是否 sendOperationalNotification；会通知时始终
  *      requestAttentionInvalidation()
  */
 
@@ -85,6 +86,8 @@ function canListenToTauriEvents(): boolean {
 /**
  * Business Logic（为什么需要这个函数）:
  *   同一状态 revision 不得重复弹系统通知（含断线 replay）。
+ *   Agent 同 phase version bump 的低噪音由后端 phase-edge emit 保证；前端仍按
+ *   kind+opaque+stateVersion 去重，以便 phase 再次进入时新 version 可通知。
  *
  * Code Logic（这个函数做什么）:
  *   拼接 `${kind}:${opaqueSourceId}:${stateVersion}`。
@@ -410,7 +413,8 @@ export function useOperationalNotifications(): void {
      *   gap/冷启动后必须用 snapshot 重建 no-notify baseline，再消费更大 cursor。
      *
      * Code Logic（这个函数做什么）:
-     *   generation 防竞态；拉 snapshot → seed dedupe → 过滤缓冲 → drain → live。
+     *   generation 防竞态；拉 snapshot → seed dedupe → 过滤缓冲 → drain（含 await 期间
+     *   新入 buffer 的再扫）→ 抬高 cursor 高水位 → live。
      */
     const runHandshake = async (): Promise<void> => {
       const generation = ++handshakeGenerationRef.current;
@@ -449,37 +453,74 @@ export function useOperationalNotifications(): void {
 
       const asOfOwner = snapshot.asOfCursor.ownerInstanceId;
       const asOfSeq = snapshot.asOfCursor.sequence;
-      const remaining: OperationalNotificationEvent[] = [];
-      for (const buffered of bufferRef.current) {
-        const owner = buffered.ownerInstanceId;
-        const seq = buffered.sequence;
-        // 同 owner 且 sequence<=asOf → baseline 丢弃；无 sequence 保守保留 drain
-        if (
-          typeof owner === 'string' &&
-          owner === asOfOwner &&
-          typeof seq === 'number' &&
-          seq <= asOfSeq
-        ) {
-          // 仍 seed dedupe，避免后续 live 重复
-          seenKeysRef.current.add(operationalNotificationDedupeKey(buffered));
-          continue;
-        }
-        // owner 不匹配的缓冲在 re-handshake 后通常应丢弃（由新 snapshot 覆盖）
-        if (typeof owner === 'string' && owner !== asOfOwner) {
-          continue;
-        }
-        remaining.push(buffered);
-      }
-      bufferRef.current = [];
+      let highWater = asOfSeq;
 
-      const ordered = sortBufferedEvents(remaining);
-      for (const event of ordered) {
-        if (cancelled || generation !== handshakeGenerationRef.current) return;
-        await maybeNotify(event);
+      /**
+       * Business Logic（为什么需要这个函数）:
+       *   将一批缓冲按 asOf 过滤并顺序 maybeNotify；记录 drained 的 sequence 高水位。
+       *
+       * Code Logic（这个函数做什么）:
+       *   同 owner seq<=asOf 只 seed；异 owner 丢弃；其余 await maybeNotify。
+       */
+      const drainBatch = async (
+        batch: OperationalNotificationEvent[],
+      ): Promise<void> => {
+        for (const event of sortBufferedEvents(batch)) {
+          if (cancelled || generation !== handshakeGenerationRef.current) return;
+          const owner = event.ownerInstanceId;
+          const seq = event.sequence;
+          if (
+            typeof owner === 'string' &&
+            owner === asOfOwner &&
+            typeof seq === 'number' &&
+            seq <= asOfSeq
+          ) {
+            seenKeysRef.current.add(operationalNotificationDedupeKey(event));
+            continue;
+          }
+          if (typeof owner === 'string' && owner !== asOfOwner) {
+            continue;
+          }
+          if (
+            typeof owner === 'string' &&
+            owner === asOfOwner &&
+            typeof seq === 'number'
+          ) {
+            highWater = Math.max(highWater, seq);
+          }
+          await maybeNotify(event);
+        }
+      };
+
+      // 首批：清空 buffer 后 drain；await 期间新入队事件再扫直至空
+      const initial = bufferRef.current;
+      bufferRef.current = [];
+      await drainBatch(initial);
+
+      while (!cancelled && generation === handshakeGenerationRef.current) {
+        if (bufferRef.current.length === 0) break;
+        const more = bufferRef.current;
+        bufferRef.current = [];
+        await drainBatch(more);
       }
 
       if (cancelled || generation !== handshakeGenerationRef.current) return;
+      cursorRef.current = {
+        ownerInstanceId: asOfOwner,
+        sequence: highWater,
+      };
+      // 先切 live，再冲刷 pending→live 竞态窗口内入队的 residual（不得搁浅）
       phaseRef.current = 'live';
+      const residual = bufferRef.current;
+      bufferRef.current = [];
+      if (residual.length > 0) {
+        await drainBatch(residual);
+        if (cancelled || generation !== handshakeGenerationRef.current) return;
+        cursorRef.current = {
+          ownerInstanceId: asOfOwner,
+          sequence: highWater,
+        };
+      }
     };
 
     /**

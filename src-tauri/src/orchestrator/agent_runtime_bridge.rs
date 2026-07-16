@@ -52,9 +52,11 @@ pub async fn create_launching_agent_for_runner(
         })
         .await?;
     if let Some(ended) = &outcome.ended {
-        emit_agent_runtime_changed(state, ended);
+        // end → Disconnected：非异常 phase，previous 未知
+        emit_agent_runtime_changed(state, ended, None);
     }
-    emit_agent_runtime_changed(state, &outcome.active);
+    // 新 active 通常 Launching；无 previous phase
+    emit_agent_runtime_changed(state, &outcome.active, None);
     Ok(outcome.active)
 }
 
@@ -89,8 +91,12 @@ pub async fn record_runner_activity(
         occurred_at: occurred_at.to_string(),
     };
     let outcome = reducer.apply(mutation).await?;
-    if let AgentReduceOutcome::Applied(ref row) = outcome {
-        emit_agent_runtime_changed(state, row);
+    if let AgentReduceOutcome::Applied {
+        previous_phase,
+        ref row,
+    } = outcome
+    {
+        emit_agent_runtime_changed(state, row, Some(previous_phase));
     }
     Ok(outcome)
 }
@@ -108,8 +114,12 @@ pub async fn handle_normalized_agent_event(
 ) -> Result<AgentReduceOutcome, AppError> {
     let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
     let outcome = reducer.apply(mutation).await?;
-    if let AgentReduceOutcome::Applied(ref row) = outcome {
-        emit_agent_runtime_changed(state, row);
+    if let AgentReduceOutcome::Applied {
+        previous_phase,
+        ref row,
+    } = outcome
+    {
+        emit_agent_runtime_changed(state, row, Some(previous_phase));
     }
     Ok(outcome)
 }
@@ -157,7 +167,8 @@ pub async fn mark_agent_completed_before_verifying_with_emit(
         .mark_completed(agent_session_id, terminal_session_id, at)
         .await?;
     if let (Some(state), Some(row)) = (state, updated.as_ref()) {
-        emit_agent_runtime_changed(state, row);
+        // Completed 非异常；previous 未知时 None 不会触发 needsInput/failed 通知
+        emit_agent_runtime_changed(state, row, None);
     }
     Ok(updated)
 }

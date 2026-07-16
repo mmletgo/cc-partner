@@ -113,7 +113,8 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                         disconnected.len()
                     );
                     for row in &disconnected {
-                        emit_agent_runtime_changed(&state, row);
+                        // reconcile → Disconnected：无异常通知；previous 未知用 None
+                        emit_agent_runtime_changed(&state, row, None);
                     }
                 }
                 Ok(_) => {}
@@ -124,14 +125,17 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
     }
     while let Some(mutation) = rx.recv().await {
         match reducer.apply(mutation).await {
-            Ok(AgentReduceOutcome::Applied(row)) => {
+            Ok(AgentReduceOutcome::Applied {
+                previous_phase,
+                row,
+            }) => {
                 tracing::debug!(
                     agent_id = %row.id,
                     phase = row.phase.as_str(),
                     version = row.version,
                     "agent runtime mutation applied"
                 );
-                emit_agent_runtime_changed(&state, &row);
+                emit_agent_runtime_changed(&state, &row, Some(previous_phase));
             }
             Ok(AgentReduceOutcome::Ignored(reason)) => {
                 tracing::debug!(reason, "agent runtime mutation ignored");

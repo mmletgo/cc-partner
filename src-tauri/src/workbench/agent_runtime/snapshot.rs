@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     定义 sanitized DTO、snapshot 结构；`get_agent_runtime_snapshot_for_state` 读 repo
-//!     并捕获 event_bus cursor（变化则重试一次）。
+//!     并捕获 event_bus cursor（多轮重试至 sequence 稳定，与运营通知 capture 对齐）。
 
 use super::models::{AgentSessionPhase, AgentSessionRuntime};
 use crate::error::AppError;
@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 
 /// 单 snapshot 最多返回的 active sessions。
 pub const AGENT_RUNTIME_SNAPSHOT_LIMIT: i64 = 1_000;
+
+/// 稳定 cursor 捕获的最大重试次数（对齐 operational notification snapshot）。
+const SNAPSHOT_CURSOR_STABILITY_ATTEMPTS: usize = 8;
 
 /// 投影用 Agent session DTO（禁止 native_session_id）。
 ///
@@ -106,18 +109,24 @@ pub struct AgentRuntimeChangedEvent {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Tauri/control/P2P/mobile 共用同一 owner helper，保证 Gap baseline 一致。
+///     capture 期间若 event_bus sequence 前进，必须重试，否则 asOf 高于 listed sessions
+///     会让客户端丢掉尚未纳入 snapshot 的 durable phase。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 event_bus cursor → list_active(limit+1) → 截断 → 若 cursor 变化重试一次。
+///     最多 8 轮：读 cursor_before → list_active(limit+1) → cursor_after；
+///     before==after 则采用该窗口；仍不稳定则返回最后一轮读到的结果（asOf=cursor_after）。
 pub async fn get_agent_runtime_snapshot_for_state(
     state: &AppState,
     project_id: Option<String>,
 ) -> Result<AgentRuntimeSnapshot, AppError> {
     let owner_instance_id = state.config_runtime.owner_instance_id().to_string();
-    let mut attempt = 0;
-    loop {
+    let limit = AGENT_RUNTIME_SNAPSHOT_LIMIT;
+    let mut last_rows = Vec::new();
+    let mut last_truncated = false;
+    let mut last_seq = state.event_bus.latest_sequence();
+
+    for _ in 0..SNAPSHOT_CURSOR_STABILITY_ATTEMPTS {
         let cursor_before = state.event_bus.latest_sequence();
-        let limit = AGENT_RUNTIME_SNAPSHOT_LIMIT;
         let mut rows = state
             .workbench_agent_session_repo
             .list_active(project_id.as_deref(), limit + 1)
@@ -127,22 +136,25 @@ pub async fn get_agent_runtime_snapshot_for_state(
             rows.truncate(limit as usize);
         }
         let cursor_after = state.event_bus.latest_sequence();
-        if cursor_before != cursor_after && attempt == 0 {
-            attempt += 1;
-            continue;
+        last_rows = rows;
+        last_truncated = truncated;
+        last_seq = cursor_after;
+        if cursor_before == cursor_after {
+            break;
         }
-        let sessions = rows
-            .iter()
-            .map(AgentSessionRuntimeDto::from_runtime)
-            .collect();
-        return Ok(AgentRuntimeSnapshot {
-            owner_instance_id,
-            as_of_sequence: cursor_after,
-            project_id,
-            sessions,
-            truncated,
-        });
     }
+
+    let sessions = last_rows
+        .iter()
+        .map(AgentSessionRuntimeDto::from_runtime)
+        .collect();
+    Ok(AgentRuntimeSnapshot {
+        owner_instance_id,
+        as_of_sequence: last_seq,
+        project_id,
+        sessions,
+        truncated: last_truncated,
+    })
 }
 
 /// 发出 workbench:agent-runtime 事件（mutation 已 durable 后调用）。
@@ -151,8 +163,13 @@ pub async fn get_agent_runtime_snapshot_for_state(
 ///     前端与 control relay 需要在提交后立刻看到 phase 变化。
 ///
 /// Code Logic（这个函数做什么）:
-///     映射 DTO 后 `state.emit_event`；不携带 native_session_id。
-pub fn emit_agent_runtime_changed(state: &AppState, row: &AgentSessionRuntime) {
+///     映射 DTO 后 `state.emit_event`；不携带 native_session_id；
+///     运营通知仅在 phase **首次进入** needsInput/failed 时发射（同 phase 升版不刷屏）。
+pub fn emit_agent_runtime_changed(
+    state: &AppState,
+    row: &AgentSessionRuntime,
+    previous_phase: Option<AgentSessionPhase>,
+) {
     let dto = AgentSessionRuntimeDto::from_runtime(row);
     let event = AgentRuntimeChangedEvent {
         agent_session: dto.clone(),
@@ -164,20 +181,27 @@ pub fn emit_agent_runtime_changed(state: &AppState, row: &AgentSessionRuntime) {
             crate::workbench::remote_events::WorkbenchAgentRuntimePayload { agent_session: dto },
         ),
     );
-    // A2：仅 needsInput/failed 进入运营通知；working/idle/completed 默认无 OS 噪音。
-    emit_agent_operational_notification_if_needed(state, row);
+    emit_agent_operational_notification_if_needed(state, row, previous_phase);
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     用户不必盯住 terminal 也能知道 Agent 等待输入或失败；completed 默认不发。
+///     Spec：needsInput/failed 通知只在 phase **首次进入** 时发一次；同 phase version  bump
+///     （activity/coalesce）不得刷屏。
 ///
 /// Code Logic（这个函数做什么）:
-///     phase=NeedsInput/Failed 时 emit operational:notification，opaque=agentSessionId，
-///     state_version=version；无 title/project/path。
-fn emit_agent_operational_notification_if_needed(state: &AppState, row: &AgentSessionRuntime) {
+///     当前 phase 为 NeedsInput/Failed 且 previous 不同（或无 previous）时 emit；
+///     opaque=agentSessionId，state_version=version；无 title/project/path。
+fn emit_agent_operational_notification_if_needed(
+    state: &AppState,
+    row: &AgentSessionRuntime,
+    previous_phase: Option<AgentSessionPhase>,
+) {
     use crate::orchestrator::models::{OperationalNotificationEvent, OperationalNotificationKind};
     use crate::orchestrator::notifications::emit_operational_notification;
 
+    if !should_emit_agent_exception_notification(previous_phase, row.phase) {
+        return;
+    }
     let kind = match row.phase {
         AgentSessionPhase::NeedsInput => OperationalNotificationKind::AgentNeedsInput,
         AgentSessionPhase::Failed => OperationalNotificationKind::AgentFailed,
@@ -192,6 +216,23 @@ fn emit_agent_operational_notification_if_needed(state: &AppState, row: &AgentSe
             occurred_at: row.last_activity_at.clone(),
         },
     );
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     同 phase 升版不得重复 OS 通知；phase 边沿（含 Working→NeedsInput、NeedsInput→Failed）须通知。
+///
+/// Code Logic（这个函数做什么）:
+///     仅当 current ∈ {NeedsInput,Failed} 且 previous ≠ current（含 previous=None）时返回 true。
+pub fn should_emit_agent_exception_notification(
+    previous_phase: Option<AgentSessionPhase>,
+    current_phase: AgentSessionPhase,
+) -> bool {
+    match current_phase {
+        AgentSessionPhase::NeedsInput | AgentSessionPhase::Failed => {
+            previous_phase.map(|prev| prev != current_phase).unwrap_or(true)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -292,5 +333,32 @@ mod tests {
         let json = serde_json::to_string(&sessions).unwrap();
         assert!(!json.contains("nativeSessionId"));
         assert!(!json.contains("native-"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同 phase version bump 不得再发 OS 通知；首次进入与跨异常 phase 必须发。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖 None→NeedsInput、NeedsInput→NeedsInput、Working→Failed、NeedsInput→Failed。
+    #[test]
+    fn agent_exception_notification_only_on_phase_enter() {
+        use AgentSessionPhase::*;
+        assert!(should_emit_agent_exception_notification(None, NeedsInput));
+        assert!(should_emit_agent_exception_notification(Some(Working), NeedsInput));
+        assert!(!should_emit_agent_exception_notification(
+            Some(NeedsInput),
+            NeedsInput
+        ));
+        assert!(should_emit_agent_exception_notification(Some(Working), Failed));
+        assert!(should_emit_agent_exception_notification(
+            Some(NeedsInput),
+            Failed
+        ));
+        assert!(!should_emit_agent_exception_notification(Some(Failed), Failed));
+        assert!(!should_emit_agent_exception_notification(Some(Working), Idle));
+        assert!(!should_emit_agent_exception_notification(
+            Some(NeedsInput),
+            Working
+        ));
     }
 }

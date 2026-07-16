@@ -6,7 +6,8 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     封装 `workbench_agent_sessions` 表：ensure_schema、create_active、apply_mutation、
-//!     end_active_for_terminal、list_active、mark_disconnected、get；写路径经 shared lease。
+//!     end_active_for_terminal、list_active、list_attention_relevant、mark_disconnected、get；
+//!     写路径经 shared lease。
 
 #![allow(dead_code)]
 
@@ -393,6 +394,54 @@ impl WorkbenchAgentSessionRepo {
         rows.iter().map(row_to_runtime).collect()
     }
 
+    /// 列出 Attention 相关 sessions：active needsInput **与** terminal failed（即使 is_active=0）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Failed 是终态会写 is_active=0；若 Attention 只读 list_active，Inbox 永远看不到失败 Agent。
+    ///     needsInput 非终态仍 active；failed 需单独纳入投影，并按活动时间有界截断。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     WHERE (is_active=1 AND phase needs_input/needsInput) OR phase=failed；
+    ///     可选 project 过滤；ORDER BY last_activity_at DESC, id ASC LIMIT。
+    pub async fn list_attention_relevant(
+        &self,
+        project_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AgentSessionRuntime>, AppError> {
+        let limit = limit.clamp(0, 10_000);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // needs_input 兼容历史 wire 与当前 as_str；failed 不限 is_active。
+        let rows = if let Some(project_id) = project_id {
+            sqlx::query(&format!(
+                "SELECT {SELECT_COLUMNS} FROM workbench_agent_sessions \
+                 WHERE project_id = ? AND ( \
+                   (is_active = 1 AND phase IN ('needs_input', 'needsInput')) \
+                   OR phase = 'failed' \
+                 ) \
+                 ORDER BY last_activity_at DESC, id ASC LIMIT ?"
+            ))
+            .bind(project_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(&format!(
+                "SELECT {SELECT_COLUMNS} FROM workbench_agent_sessions \
+                 WHERE ( \
+                   (is_active = 1 AND phase IN ('needs_input', 'needsInput')) \
+                   OR phase = 'failed' \
+                 ) \
+                 ORDER BY last_activity_at DESC, id ASC LIMIT ?"
+            ))
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.iter().map(row_to_runtime).collect()
+    }
+
     /// 将指定 active session 标为 Disconnected（owner 启动对账）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -685,6 +734,60 @@ mod tests {
         let listed = repo.list_active(Some("p1"), 100).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].project_id, "p1");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Attention 必须看到 is_active=0 的 Failed，以及 active NeedsInput；list_active 不够。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     create Working + NeedsInput → Failed 终态后 list_active 为空/不含 failed，
+    ///     list_attention_relevant 仍含 failed 与 needsInput。
+    #[tokio::test]
+    async fn list_attention_relevant_includes_inactive_failed() {
+        let repo = fixture_repo().await;
+        let needs = repo
+            .create_active({
+                let mut c = fixture_create("term-need", "claudeCodeVisible");
+                c.phase = AgentSessionPhase::NeedsInput;
+                c
+            })
+            .await
+            .unwrap();
+        let will_fail = repo
+            .create_active(fixture_create("term-fail", "claudeCodeVisible"))
+            .await
+            .unwrap();
+        assert!(repo
+            .apply_mutation(&AgentRuntimeMutation {
+                agent_session_id: will_fail.id.clone(),
+                terminal_session_id: "term-fail".to_string(),
+                expected_version: will_fail.version,
+                event_version: will_fail.version + 1,
+                phase: AgentSessionPhase::Failed,
+                native_session_id: None,
+                outcome_code: Some("boom".into()),
+                occurred_at: "2026-07-15T00:10:00Z".into(),
+            })
+            .await
+            .unwrap());
+        let failed = repo.get(&will_fail.id).await.unwrap().unwrap();
+        assert!(!failed.is_active);
+        assert_eq!(failed.phase, AgentSessionPhase::Failed);
+
+        let active_only = repo.list_active(None, 100).await.unwrap();
+        assert!(active_only.iter().all(|r| r.phase != AgentSessionPhase::Failed));
+        assert!(active_only.iter().any(|r| r.id == needs.id));
+
+        let attention = repo.list_attention_relevant(None, 100).await.unwrap();
+        let ids: Vec<_> = attention.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&needs.id.as_str()), "needsInput must surface");
+        assert!(ids.contains(&failed.id.as_str()), "inactive failed must surface");
+        assert!(attention
+            .iter()
+            .all(|r| matches!(
+                r.phase,
+                AgentSessionPhase::NeedsInput | AgentSessionPhase::Failed
+            )));
     }
 
     /// Business Logic（为什么需要这个测试）:

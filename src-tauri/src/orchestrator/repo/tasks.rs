@@ -1592,6 +1592,8 @@ impl OrchestratorRepo {
             return Ok((Vec::new(), false));
         }
         let fetch_limit = limit + 1;
+        // agentFailed 有界子查询：历史终态 failed 不得占满 1000 槽位挤掉 HR/blocked baseline。
+        // 与 Attention list_attention_relevant 一致包含 is_active=0 的 failed，但仅取最近 100 条。
         let rows = sqlx::query(
             "SELECT kind, opaque_source_id, state_version, occurred_at FROM ( \
                SELECT 'humanReview' AS kind, id AS opaque_source_id, state_version, updated_at AS occurred_at \
@@ -1609,8 +1611,13 @@ impl OrchestratorRepo {
                SELECT 'agentNeedsInput', id, CAST(version AS INTEGER), last_activity_at \
                  FROM workbench_agent_sessions WHERE is_active = 1 AND phase IN ('needs_input', 'needsInput') \
                UNION ALL \
-               SELECT 'agentFailed', id, CAST(version AS INTEGER), last_activity_at \
-                 FROM workbench_agent_sessions WHERE phase IN ('failed') \
+               SELECT kind, opaque_source_id, state_version, occurred_at FROM ( \
+                 SELECT 'agentFailed' AS kind, id AS opaque_source_id, CAST(version AS INTEGER) AS state_version, \
+                        last_activity_at AS occurred_at \
+                   FROM workbench_agent_sessions WHERE phase = 'failed' \
+                   ORDER BY last_activity_at DESC, id ASC \
+                   LIMIT 100 \
+               ) \
              ) \
              ORDER BY occurred_at DESC, opaque_source_id ASC \
              LIMIT ?",
