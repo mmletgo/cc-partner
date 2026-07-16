@@ -121,6 +121,7 @@ async fn create_remote_orchestrator_experiment(
                 &http,
                 &context.base_url,
                 &request,
+                Some(remote_shortcut.device_id.as_str()),
             )
             .await
             {
@@ -288,6 +289,7 @@ async fn list_remote_orchestrator_experiments(
                 &http,
                 &context.base_url,
                 &context.remote_project_id,
+                Some(remote_shortcut.device_id.as_str()),
             )
             .await
             {
@@ -596,6 +598,7 @@ async fn try_approve_remote_experiment_by_mirror(
         experiment_id,
         winner_task_id,
         reason.map(str::to_string),
+        Some(meta.device_id.as_str()),
     )
     .await?;
     if let Ok(payload) = serde_json::to_string(&dto) {
@@ -712,8 +715,14 @@ async fn try_cancel_remote_experiment_by_mirror(
     };
     let base_url = remote_device_base_url(state, &meta.device_id)?;
     let http = reqwest::Client::new();
-    let dto = cancel_remote_experiment(state.peer_client.as_ref(), &http, &base_url, experiment_id)
-        .await?;
+    let dto = cancel_remote_experiment(
+        state.peer_client.as_ref(),
+        &http,
+        &base_url,
+        experiment_id,
+        Some(meta.device_id.as_str()),
+    )
+    .await?;
     if let Ok(payload) = serde_json::to_string(&dto) {
         let _ = state
             .orchestrator_repo

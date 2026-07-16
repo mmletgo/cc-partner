@@ -451,11 +451,27 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 ),
             ),
         )
-        // N6 M3：deliver / workflow-document 必须在 owner 进程执行
+        // N6 M3：deliver / complete-agent-run / dispatch-once / workflow-document 必须在 owner 进程执行
         // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
         .route(
             "/api/backend/control/orchestrator/deliver-reviewed",
             post(crate::backend::control_api::control_orchestrator_deliver_reviewed).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/complete-agent-run",
+            post(crate::backend::control_api::control_orchestrator_complete_agent_run).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/dispatch-once",
+            post(crate::backend::control_api::control_orchestrator_dispatch_once).layer(
                 axum::extract::DefaultBodyLimit::max(
                     crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
                 ),

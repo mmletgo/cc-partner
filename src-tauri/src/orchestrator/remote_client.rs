@@ -101,7 +101,8 @@ impl RemoteOrchestratorClient {
         self
     }
 
-    /// 绑定期望远端 device_id，使每个 GET/POST 携带 `X-Cc-Partner-Expected-Device-Id`。
+    /// 绑定期望远端 device_id，使每个 GET/POST（含 post_json_peer / runtime_snapshot 原始构建）
+    /// 携带 `X-Cc-Partner-Expected-Device-Id`。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     共享 Remote*Client 路径必须与 CLI raw helper 一样按请求绑定 device，
@@ -303,7 +304,7 @@ impl RemoteOrchestratorClient {
     ///     workflow-document client 方法复用统一的 request-id/timeout/解析路径。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     POST JSON body，解析 PeerCallError。
+    ///     POST JSON body；注入 request_id 与可选 `EXPECTED_DEVICE_ID_HEADER`；解析 PeerCallError。
     async fn post_json_peer<T, B>(
         &self,
         url: &str,
@@ -319,7 +320,7 @@ impl RemoteOrchestratorClient {
             .clone()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(crate::net::request_context::new_request_id);
-        let response = self
+        let mut req = self
             .client
             .post(url)
             .json(body)
@@ -327,13 +328,17 @@ impl RemoteOrchestratorClient {
                 crate::net::request_context::REQUEST_ID_HEADER,
                 outbound_request_id,
             )
-            .timeout(remote_request_timeout(timeout_kind))
-            .send()
-            .await
-            .map_err(|error| PeerCallError::Network {
-                url: url.to_string(),
-                source: error,
-            })?;
+            .timeout(remote_request_timeout(timeout_kind));
+        if let Some(device_id) = self.expected_device_id.as_deref() {
+            req = req.header(
+                crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
+                device_id,
+            );
+        }
+        let response = req.send().await.map_err(|error| PeerCallError::Network {
+            url: url.to_string(),
+            source: error,
+        })?;
         parse_peer_response::<T>(response, url).await
     }
 
@@ -578,7 +583,7 @@ impl RemoteOrchestratorClient {
         let body = RemoteRuntimeSnapshotReq {
             project_id: project_id.to_string(),
         };
-        let response = self
+        let mut req = self
             .client
             .post(&url)
             .json(&body)
@@ -586,13 +591,17 @@ impl RemoteOrchestratorClient {
                 crate::net::request_context::REQUEST_ID_HEADER,
                 outbound_request_id,
             )
-            .timeout(remote_request_timeout(RemoteRequestTimeoutKind::Short))
-            .send()
-            .await
-            .map_err(|error| PeerCallError::Network {
-                url: url.clone(),
-                source: error,
-            })?;
+            .timeout(remote_request_timeout(RemoteRequestTimeoutKind::Short));
+        if let Some(device_id) = self.expected_device_id.as_deref() {
+            req = req.header(
+                crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
+                device_id,
+            );
+        }
+        let response = req.send().await.map_err(|error| PeerCallError::Network {
+            url: url.clone(),
+            source: error,
+        })?;
         let snapshot =
             parse_peer_response::<OrchestratorRuntimeSnapshotDto>(response, &url).await?;
         // owner 身份语义校验：成功 2xx 也不能把错误项目/远端 shortcut 快照重标为 live。
@@ -2078,5 +2087,90 @@ mod tests {
         // 空串 → forwarded_request_id 应为 None → outbound_request_id 回落到 36 字符 UUID。
         let id = client.outbound_request_id();
         assert_eq!(id.len(), 36, "空转发 ID 应被忽略，回落到 UUID");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     不经 get_json/post_json 的原始 POST 构建路径若漏注入设备头，端口被另一设备接管时
+    ///     会把 mutation/快照打到错误 owner。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源码断言 post_json_peer 与 runtime_snapshot 均在 expected_device_id Some 时写
+    ///     EXPECTED_DEVICE_ID_HEADER。
+    #[test]
+    fn post_json_peer_and_runtime_snapshot_inject_expected_device_id_header() {
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/orchestrator/remote_client.rs"
+        ));
+        // 粗粒度：文件内至少三处（get_json / post_json / 原始路径）注入设备头。
+        let header_hits = src.matches("EXPECTED_DEVICE_ID_HEADER").count();
+        assert!(
+            header_hits >= 3,
+            "get_json/post_json/post_json_peer|runtime_snapshot 均应引用 EXPECTED_DEVICE_ID_HEADER，got {header_hits}"
+        );
+        assert!(
+            src.contains("async fn post_json_peer"),
+            "必须保留 post_json_peer"
+        );
+        // post_json_peer 体与 runtime_snapshot 体内各自出现 expected_device_id 注入。
+        let peer_fn = src
+            .split("async fn post_json_peer")
+            .nth(1)
+            .and_then(|s| s.split("async fn queue_task").next())
+            .expect("定位 post_json_peer 函数体");
+        assert!(
+            peer_fn.contains("EXPECTED_DEVICE_ID_HEADER"),
+            "post_json_peer 必须注入 EXPECTED_DEVICE_ID_HEADER"
+        );
+        let snap_fn = src
+            .split("pub async fn runtime_snapshot")
+            .nth(1)
+            .and_then(|s| s.split("/// 发送 taskId 请求").next())
+            .expect("定位 runtime_snapshot 函数体");
+        assert!(
+            snap_fn.contains("EXPECTED_DEVICE_ID_HEADER"),
+            "runtime_snapshot 必须注入 EXPECTED_DEVICE_ID_HEADER"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     with_expected_device_id 绑定后，post_json 路径必须把设备头送到对端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     echo server 捕获 X-Cc-Partner-Expected-Device-Id；带 device_id 的 list_tasks 断言命中。
+    #[tokio::test]
+    async fn with_expected_device_id_propagates_header_on_post_json() {
+        let observed: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let observed_clone = observed.clone();
+        let app = Router::new().route(
+            "/api/orchestrator/tasks/list",
+            post(
+                move |headers: axum::http::HeaderMap, _req: Json<RemoteListTasksReq>| {
+                    let observed = observed_clone.clone();
+                    async move {
+                        let id = headers
+                            .get(crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str())
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        *observed.lock().unwrap() = id;
+                        Json(RemoteOrchestratorTaskListResp {
+                            tasks: Vec::<OrchestratorTaskDto>::new(),
+                        })
+                    }
+                },
+            ),
+        );
+        let base_url = spawn_orchestrator_server(app).await;
+        RemoteOrchestratorClient::new()
+            .with_expected_device_id("device-owner-42")
+            .list_tasks(&base_url, "project-1")
+            .await
+            .expect("list_tasks 应成功");
+        assert_eq!(
+            observed.lock().unwrap().as_str(),
+            "device-owner-42",
+            "post_json 路径必须携带 expected device id"
+        );
     }
 }

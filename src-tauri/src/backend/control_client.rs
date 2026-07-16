@@ -30,7 +30,7 @@ use crate::models::transfer::{
     LocalTransferOpenTarget, TransferOpenAction, TransferOperationStatus, TransferTaskDto,
 };
 use crate::orchestrator::experiments::{CreateExperimentRequest, OrchestratorExperimentDto};
-use crate::orchestrator::models::OperationalNotificationSnapshot;
+use crate::orchestrator::models::{OperationalNotificationSnapshot, OrchestratorTaskDto};
 use crate::orchestrator::workflow::WorkflowDocument;
 use crate::workbench::operation_ledger::MutationTransportClass;
 use serde::de::DeserializeOwned;
@@ -184,6 +184,21 @@ struct ControlOrchestratorDeliverReviewedBody {
     control_token: String,
     project_id: String,
     task_id: String,
+}
+
+/// orchestrator complete-agent-run control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorCompleteAgentRunBody {
+    control_token: String,
+    task_id: String,
+}
+
+/// orchestrator dispatch-once control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorDispatchOnceBody {
+    control_token: String,
 }
 
 /// orchestrator experiment create control body。
@@ -862,6 +877,60 @@ impl BackendControlClient {
                 &body,
                 ORCHESTRATOR_DELIVER_TIMEOUT,
             )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧完成 Agent 运行（验证 + 可能 delivery）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得在本进程跑验证命令、Claude verifier 或 delivery lock；必须代理到 sidecar。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/complete-agent-run`；超时 360s；mutation 不自动重试。
+    pub async fn complete_orchestrator_agent_run(
+        &self,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskDto, AppError> {
+        let body = ControlOrchestratorCompleteAgentRunBody {
+            control_token: self.control_token.clone(),
+            task_id: task_id.to_string(),
+        };
+        match self
+            .send_once(
+                "orchestrator/complete-agent-run",
+                &body,
+                ORCHESTRATOR_DELIVER_TIMEOUT,
+            )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧触发一次调度。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 无队列/PTY 权威；手动 dispatch 必须在 sidecar 执行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/dispatch-once`；mutation 不自动重试。
+    pub async fn dispatch_orchestrator_once(&self) -> Result<serde_json::Value, AppError> {
+        let body = ControlOrchestratorDispatchOnceBody {
+            control_token: self.control_token.clone(),
+        };
+        match self
+            .send_once("orchestrator/dispatch-once", &body, MUTATE_TIMEOUT)
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),

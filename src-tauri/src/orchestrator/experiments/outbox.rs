@@ -480,6 +480,7 @@ pub async fn dispatch_experiment_outbox_once(
             &http,
             &context.base_url,
             &request,
+            Some(claimed.device_id.as_str()),
         )
         .await
         {

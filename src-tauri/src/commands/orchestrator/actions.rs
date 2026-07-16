@@ -6,6 +6,8 @@
 //! Code Logic（这个模块做什么）:
 //!     命令与 pub(crate) helpers。
 
+use crate::backend::authority::RuntimeRole;
+use crate::backend::control_client::BackendControlClient;
 use crate::error::AppError;
 use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
@@ -40,13 +42,20 @@ pub async fn queue_orchestrator_task(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户或测试需要立即触发一次队列领取，而不是等待后台 scheduler 的 10 秒 tick。
+///     GuiClient 不得在本进程跑 scheduler（无 PTY/队列权威）；必须代理到 sidecar owner。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用 scheduler::dispatch_once 复用后台调度逻辑，并返回本次 dispatched 任务数。
+///     GuiClient → `BackendControlClient::dispatch_orchestrator_once`；
+///     HeadlessOwner → `scheduler::dispatch_once` 并返回 `{dispatched}`。
 #[tauri::command]
 pub async fn dispatch_orchestrator_once(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .dispatch_orchestrator_once()
+            .await;
+    }
     let dispatched = crate::orchestrator::scheduler::dispatch_once(state.inner()).await?;
     Ok(build_dispatch_once_response(dispatched))
 }
@@ -55,14 +64,21 @@ pub async fn dispatch_orchestrator_once(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户在 Workbench 中看到 Claude Code 完成后，需要从 Orchestrator 触发项目验证；Phase 7 的终端哨兵也复用同一流程。
+///     GuiClient 不得在本进程跑验证/delivery pipeline 或持有 delivery lock；必须代理到 sidecar owner。
 ///
 /// Code Logic（这个函数做什么）:
-///     Tauri command 只解包 State 和 String，再委托 complete_orchestrator_agent_run_for_state 执行内部 pipeline。
+///     GuiClient → `BackendControlClient::complete_orchestrator_agent_run`（超时 360s；mutation 不重试）；
+///     HeadlessOwner → `complete_orchestrator_agent_run_for_state`。
 #[tauri::command]
 pub async fn complete_orchestrator_agent_run(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .complete_orchestrator_agent_run(&task_id)
+            .await;
+    }
     complete_orchestrator_agent_run_for_state(state.inner(), &task_id).await
 }
 
@@ -672,4 +688,87 @@ pub(crate) async fn discard_orchestrator_remote_outbox_for_state(
         outbox_id,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    /// Business Logic（为什么需要这个测试）:
+    ///     GuiClient 必须把 complete/dispatch 代理到 sidecar，否则在空库跑验证/delivery 双路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源码断言两个 Tauri wrapper 含 RuntimeRole::GuiClient 分支与 BackendControlClient 调用。
+    #[test]
+    fn complete_and_dispatch_tauri_wrappers_proxy_gui_client_to_control() {
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/commands/orchestrator/actions.rs"
+        ));
+        assert!(
+            src.contains("complete_orchestrator_agent_run"),
+            "actions.rs 必须定义 complete_orchestrator_agent_run"
+        );
+        assert!(
+            src.contains("dispatch_orchestrator_once"),
+            "actions.rs 必须定义 dispatch_orchestrator_once"
+        );
+        assert!(
+            src.matches("RuntimeRole::GuiClient").count() >= 2,
+            "complete/dispatch 两个 Tauri 入口均需 GuiClient 分支"
+        );
+        assert!(
+            src.contains("BackendControlClient::from_control_file"),
+            "GuiClient 必须经 BackendControlClient 代理"
+        );
+        assert!(
+            src.contains(".complete_orchestrator_agent_run(&task_id)"),
+            "complete 必须走 control client"
+        );
+        assert!(
+            src.contains(".dispatch_orchestrator_once()"),
+            "dispatch 必须走 control client"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     control 路由与 client path 漂移会导致 GUI 代理 404。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 http_server / control_client 含 complete-agent-run 与 dispatch-once 路径字面量。
+    #[test]
+    fn complete_and_dispatch_control_routes_registered_in_http_and_client() {
+        let http = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/net/http_server.rs"
+        ));
+        let client = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/backend/control_client.rs"
+        ));
+        let api = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/backend/control_api.rs"
+        ));
+        for path in [
+            "/api/backend/control/orchestrator/complete-agent-run",
+            "/api/backend/control/orchestrator/dispatch-once",
+        ] {
+            assert!(http.contains(path), "http_server 必须注册 {path}");
+        }
+        assert!(
+            client.contains("orchestrator/complete-agent-run"),
+            "control_client 必须 POST complete-agent-run"
+        );
+        assert!(
+            client.contains("orchestrator/dispatch-once"),
+            "control_client 必须 POST dispatch-once"
+        );
+        assert!(
+            api.contains("control_orchestrator_complete_agent_run"),
+            "control_api 必须有 complete handler"
+        );
+        assert!(
+            api.contains("control_orchestrator_dispatch_once"),
+            "control_api 必须有 dispatch handler"
+        );
+    }
 }

@@ -99,8 +99,8 @@ pub use tasks::{
 
 // 外部 crate 内模块（routes / completion / remote_client / tests）需要的 helper
 pub(crate) use actions::{
-    complete_orchestrator_agent_run_for_attempt, discard_orchestrator_remote_outbox_for_repos,
-    retry_orchestrator_remote_outbox_for_repos,
+    complete_orchestrator_agent_run_for_attempt, complete_orchestrator_agent_run_for_state,
+    discard_orchestrator_remote_outbox_for_repos, retry_orchestrator_remote_outbox_for_repos,
 };
 pub(crate) use common::{
     build_orchestrator_task_row, dispatch_orchestrator_best_effort,

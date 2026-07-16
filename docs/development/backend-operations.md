@@ -131,6 +131,8 @@ unless noted. Never transport-auto-retry mutations.
 - Events: `workbench:agent-runtime` and NDJSON `type=agentRuntime` on `/api/workbench/events`; unknown event types must be ignored without reconnect.
 - Downgrade: stop or end non-Claude active Agent sessions before rolling back a build that lacks agent-runtime projection; legacy dual-write of Claude fields remains one version.
 | POST | `/api/backend/control/orchestrator/runtime-snapshot` | owner runtime snapshot |
+| POST | `/api/backend/control/orchestrator/complete-agent-run` | owner complete agent run (verify/deliver) |
+| POST | `/api/backend/control/orchestrator/dispatch-once` | owner one-shot scheduler tick |
 | POST | `/api/backend/control/events/catch-up` | event bus replay / Gap |
 | POST | `/api/backend/control/events/stream` | NDJSON catch-up + live |
 | POST | `/api/backend/control/cloud-sync/trigger` | owner Cloud Sync full cycle |

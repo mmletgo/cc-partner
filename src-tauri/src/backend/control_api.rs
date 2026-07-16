@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
-//!     orchestrator/{deliver-reviewed,workflow-document/{get,validate,save}} /
+//!     orchestrator/{deliver-reviewed,complete-agent-run,dispatch-once,workflow-document/{get,validate,save}} /
 //!     orchestrator/experiments/{create,list,get,approve-winner,cancel,prepare-downgrade} /
 //!     workbench-launch-summary（5 段独立 section outcomes，每段 max 5）/
 //!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback} /
@@ -24,8 +24,8 @@ use crate::backup::{
 };
 use crate::commands::orchestrator::{
     approve_orchestrator_experiment_winner_for_state, cancel_orchestrator_experiment_for_state,
-    create_orchestrator_experiment_for_state, deliver_reviewed_orchestrator_task_view_for_state,
-    get_orchestrator_experiment_for_state,
+    complete_orchestrator_agent_run_for_state, create_orchestrator_experiment_for_state,
+    deliver_reviewed_orchestrator_task_view_for_state, get_orchestrator_experiment_for_state,
     get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
     list_orchestrator_experiments_for_state, prepare_experiment_downgrade_for_state,
     save_workflow_document_for_state, validate_workflow_document_for_state,
@@ -45,7 +45,7 @@ use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
 use crate::orchestrator::experiments::{CreateExperimentRequest, OrchestratorExperimentDto};
-use crate::orchestrator::models::OperationalNotificationSnapshot;
+use crate::orchestrator::models::{OperationalNotificationSnapshot, OrchestratorTaskDto};
 use crate::orchestrator::notifications::capture_operational_notification_snapshot;
 use crate::orchestrator::workflow::WorkflowDocument;
 use crate::state::AppState;
@@ -1439,6 +1439,87 @@ pub async fn control_orchestrator_deliver_reviewed(
     Ok(Json(view))
 }
 
+/// complete-agent-run control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GuiClient 手动完成必须把 taskId 交给 owner，由 sidecar 跑验证/delivery pipeline。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + taskId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorCompleteAgentRunRequest {
+    pub control_token: String,
+    pub task_id: String,
+}
+
+/// owner 路径：完成 Agent 运行并执行验证/交付 pipeline。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Running→Verifying、验证命令、Claude verifier、delivery lock 只能在 HeadlessOwner 执行；
+///     GuiClient 不得自跑 pipeline 或写空库状态。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `complete_orchestrator_agent_run_for_state`
+///     → OrchestratorTaskDto。
+pub async fn control_orchestrator_complete_agent_run(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorCompleteAgentRunRequest>,
+) -> P2pResult<Json<OrchestratorTaskDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_complete_agent_run")
+    })?;
+    let task = complete_orchestrator_agent_run_for_state(&state, request.task_id.trim())
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_complete_agent_run")
+        })?;
+    ensure_response_within_limit(&task, &context)?;
+    Ok(Json(task))
+}
+
+/// dispatch-once control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GuiClient 手动 tick 调度必须在 owner 进程领取队列。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorDispatchOnceRequest {
+    pub control_token: String,
+}
+
+/// owner 路径：触发一次 Orchestrator 调度。
+///
+/// Business Logic（为什么需要这个函数）:
+///     scheduler 队列/PTY spawn 权威在 HeadlessOwner；GuiClient 不得本进程 dispatch。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `scheduler::dispatch_once` → `{dispatched}`。
+pub async fn control_orchestrator_dispatch_once(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorDispatchOnceRequest>,
+) -> P2pResult<Json<serde_json::Value>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_dispatch_once"))?;
+    let dispatched = crate::orchestrator::scheduler::dispatch_once(&state)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_dispatch_once"))?;
+    let body = serde_json::json!({ "dispatched": dispatched });
+    ensure_response_within_limit(&body, &context)?;
+    Ok(Json(body))
+}
+
 /// workflow-document/get control 请求体。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -2085,6 +2166,17 @@ mod tests {
         assert_eq!(deliver.control_token, "tok");
         assert_eq!(deliver.project_id, "p1");
         assert_eq!(deliver.task_id, "t1");
+
+        let complete_raw = r#"{"controlToken":"tok","taskId":"t-run-1"}"#;
+        let complete: ControlOrchestratorCompleteAgentRunRequest =
+            serde_json::from_str(complete_raw).expect("complete-agent-run body");
+        assert_eq!(complete.control_token, "tok");
+        assert_eq!(complete.task_id, "t-run-1");
+
+        let dispatch_raw = r#"{"controlToken":"tok"}"#;
+        let dispatch: ControlOrchestratorDispatchOnceRequest =
+            serde_json::from_str(dispatch_raw).expect("dispatch-once body");
+        assert_eq!(dispatch.control_token, "tok");
 
         let save_raw =
             r#"{"controlToken":"tok","projectId":"p1","expectedHash":"h1","content":"---\n"}"#;
