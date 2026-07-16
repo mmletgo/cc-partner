@@ -226,6 +226,7 @@ pub async fn remote_query_with_base(
             // Remote*Client 自带 reqwest：副作用前再 require，防 health 与写路径间映射漂移。
             require_remote_device(base_url, device_id).await?;
             let items = RemoteWorkbenchClient::new()
+                .with_expected_device_id(device_id)
                 .list_worktrees(base_url, &project_id)
                 .await
                 .map_err(app_error_to_cli)?;
@@ -236,6 +237,7 @@ pub async fn remote_query_with_base(
             let project_id = resolve_remote_project_id(base_url, device_id, &project).await?;
             require_remote_device(base_url, device_id).await?;
             let mut items = RemoteWorkbenchClient::new()
+                .with_expected_device_id(device_id)
                 .list_sessions(base_url, Some(project_id.as_str()))
                 .await
                 .map_err(app_error_to_cli)?;
@@ -254,6 +256,7 @@ pub async fn remote_query_with_base(
             let inner = unwrap_session_id(device_id, &session_id)?;
             require_remote_device(base_url, device_id).await?;
             let mut replay = RemoteWorkbenchClient::new()
+                .with_expected_device_id(device_id)
                 .replay(base_url, &inner)
                 .await
                 .map_err(app_error_to_cli)?;
@@ -313,6 +316,7 @@ pub async fn remote_query_with_base(
             let project_id = resolve_remote_project_id(base_url, device_id, &project).await?;
             require_remote_device(base_url, device_id).await?;
             let items = RemoteOrchestratorClient::new()
+                .with_expected_device_id(device_id)
                 .list_tasks(base_url, &project_id)
                 .await
                 .map_err(app_error_to_cli)?;
@@ -345,6 +349,7 @@ pub async fn remote_query_with_base(
             let project_id = resolve_remote_project_id(base_url, device_id, &project).await?;
             require_remote_device(base_url, device_id).await?;
             let items = RemoteWorkbenchClient::new()
+                .with_expected_device_id(device_id)
                 .discover_browser_targets(
                     base_url,
                     &RemoteWorkbenchBrowserDiscoverReq {
@@ -365,6 +370,7 @@ pub async fn remote_query_with_base(
             .await?;
             require_remote_device(base_url, device_id).await?;
             let run = RemoteWorkbenchClient::new()
+                .with_expected_device_id(device_id)
                 .get_browser_verification(base_url, &run_id)
                 .await
                 .map_err(app_error_to_cli)?;
@@ -415,6 +421,7 @@ pub async fn remote_mutate_with_base(
             // Remote*Client 无 expected-device header：副作用前再 bind device_id。
             require_remote_device(base_url, device_id).await?;
             RemoteWorkbenchClient::new()
+                .with_expected_device_id(device_id)
                 .write_input(base_url, &inner, &data)
                 .await
                 .map_err(|e| map_remote_mutation_error(e, true))?;
@@ -433,6 +440,7 @@ pub async fn remote_mutate_with_base(
                 .map(|s| s.to_string());
             require_remote_device(base_url, device_id).await?;
             let item = RemoteWorkbenchClient::new()
+                .with_expected_device_id(device_id)
                 .create_worktree(
                     base_url,
                     RemoteCreateWorktreeReq {
@@ -460,6 +468,7 @@ pub async fn remote_mutate_with_base(
             let req = build_remote_create_task_req(&project_id, &payload, client_request_id)?;
             require_remote_device(base_url, device_id).await?;
             let task = RemoteOrchestratorClient::new()
+                .with_expected_device_id(device_id)
                 .create_task(base_url, req)
                 .await
                 .map_err(|e| map_remote_mutation_error(e, false))?;
@@ -471,6 +480,7 @@ pub async fn remote_mutate_with_base(
         } => {
             require_remote_device(base_url, device_id).await?;
             let task = RemoteOrchestratorClient::new()
+                .with_expected_device_id(device_id)
                 .cancel_task(base_url, &task_id)
                 .await
                 .map_err(|e| map_remote_mutation_error(e, false))?;
@@ -482,6 +492,7 @@ pub async fn remote_mutate_with_base(
         } => {
             require_remote_device(base_url, device_id).await?;
             let task = RemoteOrchestratorClient::new()
+                .with_expected_device_id(device_id)
                 .retry_task(base_url, &task_id)
                 .await
                 .map_err(|e| map_remote_mutation_error(e, false))?;
@@ -567,6 +578,7 @@ pub async fn remote_mutate_with_base(
                 .unwrap_or_default();
             require_remote_device(base_url, device_id).await?;
             let run = RemoteWorkbenchClient::new()
+                .with_expected_device_id(device_id)
                 .create_browser_verification(base_url, &preview_id, &request_id, &commands)
                 .await
                 .map_err(|e| map_remote_mutation_error(e, true))?;
@@ -641,6 +653,7 @@ async fn resolve_remote_worktree_id(
 ) -> Result<String, CliError> {
     require_remote_device(base_url, device_id).await?;
     let items = RemoteWorkbenchClient::new()
+        .with_expected_device_id(device_id)
         .list_worktrees(base_url, project_id)
         .await
         .map_err(app_error_to_cli)?;

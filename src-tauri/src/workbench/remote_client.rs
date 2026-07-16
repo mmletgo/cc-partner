@@ -83,6 +83,8 @@ enum RemoteRequestTimeoutKind {
 pub struct RemoteWorkbenchClient {
     client: reqwest::Client,
     forwarded_request_id: Option<String>,
+    /// 可选：出站绑定期望 device_id（与 health 预检配合，服务端 header guard 校验）。
+    expected_device_id: Option<String>,
 }
 
 impl RemoteWorkbenchClient {
@@ -101,6 +103,7 @@ impl RemoteWorkbenchClient {
         Self {
             client,
             forwarded_request_id: None,
+            expected_device_id: None,
         }
     }
 
@@ -120,6 +123,20 @@ impl RemoteWorkbenchClient {
     pub fn with_forwarded_request_id(mut self, request_id: impl Into<String>) -> Self {
         let id = request_id.into();
         self.forwarded_request_id = if id.is_empty() { None } else { Some(id) };
+        self
+    }
+
+    /// 绑定期望远端 device_id，使每个 GET/POST 携带 `X-Cc-Partner-Expected-Device-Id`。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     health 预检与真实 mutation 是独立 HTTP 请求；端口复用/设备切换时必须让业务请求
+    ///     自己携带期望 device_id，由 owning 服务端 fail closed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     空串清为 None；非空写入 `expected_device_id`，`get_json`/`post_json` 出站时注入 header。
+    pub fn with_expected_device_id(mut self, device_id: impl Into<String>) -> Self {
+        let id = device_id.into();
+        self.expected_device_id = if id.trim().is_empty() { None } else { Some(id) };
         self
     }
 
@@ -1431,17 +1448,21 @@ impl RemoteWorkbenchClient {
     where
         T: DeserializeOwned,
     {
-        let response = self
+        let mut req = self
             .client
             .get(&url)
             .header(
                 crate::net::request_context::REQUEST_ID_HEADER,
                 self.outbound_request_id(),
             )
-            .timeout(remote_request_timeout(timeout_kind))
-            .send()
-            .await
-            .map_err(map_remote_send_error)?;
+            .timeout(remote_request_timeout(timeout_kind));
+        if let Some(device_id) = self.expected_device_id.as_deref() {
+            req = req.header(
+                crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
+                device_id,
+            );
+        }
+        let response = req.send().await.map_err(map_remote_send_error)?;
         parse_json_response(response).await
     }
 
@@ -1480,7 +1501,7 @@ impl RemoteWorkbenchClient {
         T: DeserializeOwned,
         B: Serialize + ?Sized,
     {
-        let response = self
+        let mut req = self
             .client
             .post(&url)
             .json(body)
@@ -1488,10 +1509,14 @@ impl RemoteWorkbenchClient {
                 crate::net::request_context::REQUEST_ID_HEADER,
                 self.outbound_request_id(),
             )
-            .timeout(remote_request_timeout(timeout_kind))
-            .send()
-            .await
-            .map_err(map_remote_send_error)?;
+            .timeout(remote_request_timeout(timeout_kind));
+        if let Some(device_id) = self.expected_device_id.as_deref() {
+            req = req.header(
+                crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
+                device_id,
+            );
+        }
+        let response = req.send().await.map_err(map_remote_send_error)?;
         parse_json_response(response).await
     }
 }

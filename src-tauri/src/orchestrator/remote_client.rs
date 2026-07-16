@@ -62,6 +62,8 @@ enum RemoteRequestTimeoutKind {
 pub struct RemoteOrchestratorClient {
     client: reqwest::Client,
     forwarded_request_id: Option<String>,
+    /// 可选：出站绑定期望 device_id（服务端 expected_device_id_guard 校验）。
+    expected_device_id: Option<String>,
 }
 
 impl RemoteOrchestratorClient {
@@ -80,6 +82,7 @@ impl RemoteOrchestratorClient {
         Self {
             client,
             forwarded_request_id: None,
+            expected_device_id: None,
         }
     }
 
@@ -95,6 +98,20 @@ impl RemoteOrchestratorClient {
     pub fn with_forwarded_request_id(mut self, request_id: impl Into<String>) -> Self {
         let id = request_id.into();
         self.forwarded_request_id = if id.is_empty() { None } else { Some(id) };
+        self
+    }
+
+    /// 绑定期望远端 device_id，使每个 GET/POST 携带 `X-Cc-Partner-Expected-Device-Id`。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     共享 Remote*Client 路径必须与 CLI raw helper 一样按请求绑定 device，
+    ///     避免 health 预检与 mutation 之间端口被另一设备接管。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     空串 → None；非空存入 expected_device_id，出站 header 注入。
+    pub fn with_expected_device_id(mut self, device_id: impl Into<String>) -> Self {
+        let id = device_id.into();
+        self.expected_device_id = if id.trim().is_empty() { None } else { Some(id) };
         self
     }
 
@@ -626,14 +643,21 @@ impl RemoteOrchestratorClient {
     where
         T: DeserializeOwned,
     {
-        let response = self
+        let mut req = self
             .client
             .get(&url)
             .header(
                 crate::net::request_context::REQUEST_ID_HEADER,
                 self.outbound_request_id(),
             )
-            .timeout(remote_request_timeout(timeout_kind))
+            .timeout(remote_request_timeout(timeout_kind));
+        if let Some(device_id) = self.expected_device_id.as_deref() {
+            req = req.header(
+                crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
+                device_id,
+            );
+        }
+        let response = req
             .send()
             .await
             // send 失败属于传输离线：用 Unavailable 分类，供 outbox/preflight 按类型分支。
@@ -662,7 +686,7 @@ impl RemoteOrchestratorClient {
         T: DeserializeOwned,
         B: Serialize + ?Sized,
     {
-        let response = self
+        let mut req = self
             .client
             .post(&url)
             .json(body)
@@ -670,7 +694,14 @@ impl RemoteOrchestratorClient {
                 crate::net::request_context::REQUEST_ID_HEADER,
                 self.outbound_request_id(),
             )
-            .timeout(remote_request_timeout(timeout_kind))
+            .timeout(remote_request_timeout(timeout_kind));
+        if let Some(device_id) = self.expected_device_id.as_deref() {
+            req = req.header(
+                crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str(),
+                device_id,
+            );
+        }
+        let response = req
             .send()
             .await
             // send 失败属于传输离线：用 Unavailable 分类，供 outbox/preflight 按类型分支。
