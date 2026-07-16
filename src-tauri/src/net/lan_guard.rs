@@ -14,6 +14,7 @@
 //!     - `require_loopback_peer`：backend stop 等本机生命周期接口在 token 比较前强制 loopback；
 //!     - `BrowserGuardParams` + `evaluate_browser_request`：Host/Origin/Content-Type 纯判定；
 //!     - `browser_request_guard`：axum middleware，从 AppState 读取实际端口与受控 mDNS 名后执行判定；
+//!     - `expected_device_id_guard`：可选 `X-Cc-Partner-Expected-Device-Id` 与本机 device_id 绑定（非鉴权）；
 //!     - preview proxy 的 `Origin: null` 仅在全局标记为可延期，最终是否放行由 browser_proxy 会话查找决定。
 
 use crate::net::error_response::{P2pError, P2pErrorCode};
@@ -24,11 +25,20 @@ use crate::workbench::browser_proxy::{
 };
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
-use axum::http::{header, Method, Request};
+use axum::http::{header, HeaderName, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::Ordering;
+
+/// 客户端声明的期望对端 device_id header（可选绑定，非身份鉴权）。
+///
+/// Business Logic（为什么需要这个常量）:
+///     Agent CLI / 显式 `--device` 调用方可在每个 HTTP 请求上声明期望设备；
+///     服务端在 header 与本机 `device_id` 不一致时 fail-closed，防 stale peer 映射写错机。
+///     缺省 header 时行为不变（LAN 仍无调用者身份校验）。
+pub static EXPECTED_DEVICE_ID_HEADER: HeaderName =
+    HeaderName::from_static("x-cc-partner-expected-device-id");
 
 /// 内部 socket peer 范围分类。
 ///
@@ -645,6 +655,67 @@ pub fn evaluate_browser_request_from_http(
     )
 }
 
+/// 可选期望 device_id 绑定中间件（非身份鉴权）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     调用方若声称目标设备（`X-Cc-Partner-Expected-Device-Id`），本机必须在进入业务 handler
+///     前核对是否为本机 `device_id`；错机 fail-closed。缺 header 或空值 → 行为不变（LAN 无鉴权）。
+///
+/// Code Logic（这个函数做什么）:
+///     读 header；非空且与 `state.device_id` 不等 → 409 + code `device_id_mismatch` 信封；
+///     否则 `next.run`。
+pub async fn expected_device_id_guard(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if let Err(err) = evaluate_expected_device_id_header(&request, state.device_id.as_str()) {
+        return err.into_response();
+    }
+    next.run(request).await
+}
+
+/// 纯函数：校验可选期望 device_id header。
+///
+/// Business Logic（为什么需要这个函数）:
+///     中间件与单测共用同一 fail-closed 规则，避免 mock 与生产漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     header 缺/空 → Ok；trim 后与 actual 不等 → Err(stable device_id_mismatch @ 409)。
+pub fn evaluate_expected_device_id_header(
+    request: &Request<Body>,
+    actual_device_id: &str,
+) -> Result<(), P2pError> {
+    let Some(raw) = request.headers().get(&EXPECTED_DEVICE_ID_HEADER) else {
+        return Ok(());
+    };
+    let Ok(expected) = raw.to_str() else {
+        let context = request_context_from_request(request);
+        return Err(P2pError::stable(
+            "X-Cc-Partner-Expected-Device-Id header is not valid UTF-8",
+            "device_id_mismatch",
+            StatusCode::CONFLICT,
+            &context,
+            false,
+        ));
+    };
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    if expected != actual_device_id {
+        let context = request_context_from_request(request);
+        return Err(P2pError::stable(
+            format!("device_id mismatch: expected {expected}, this host is {actual_device_id}"),
+            "device_id_mismatch",
+            StatusCode::CONFLICT,
+            &context,
+            false,
+        ));
+    }
+    Ok(())
+}
+
 /// 浏览器 Host/Origin/Content-Type 门禁中间件（生产路径，读取 AppState）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -707,6 +778,44 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     可选期望 device_id header 错机必须 409 device_id_mismatch；匹配/缺省放行。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 Request 带 wrong/match/absent header，调用 evaluate_expected_device_id_header。
+    #[test]
+    fn expected_device_id_header_rejects_mismatch_accepts_match_or_absent() {
+        let mismatch = Request::builder()
+            .uri("/api/health")
+            .header(&EXPECTED_DEVICE_ID_HEADER, "wrong-device")
+            .body(Body::empty())
+            .expect("request");
+        let err = evaluate_expected_device_id_header(&mismatch, "host-device")
+            .expect_err("wrong header must fail closed");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        let matching = Request::builder()
+            .uri("/api/health")
+            .header(&EXPECTED_DEVICE_ID_HEADER, "host-device")
+            .body(Body::empty())
+            .expect("request");
+        assert!(evaluate_expected_device_id_header(&matching, "host-device").is_ok());
+
+        let absent = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("request");
+        assert!(evaluate_expected_device_id_header(&absent, "host-device").is_ok());
+
+        let empty = Request::builder()
+            .uri("/api/health")
+            .header(&EXPECTED_DEVICE_ID_HEADER, "   ")
+            .body(Body::empty())
+            .expect("request");
+        assert!(evaluate_expected_device_id_header(&empty, "host-device").is_ok());
+    }
 
     /// Business Logic（为什么需要这个测试）:
     ///     支持/拒绝地址表是产品边界契约，边界地址与代表 denied 地址必须覆盖完整。

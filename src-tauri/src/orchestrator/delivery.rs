@@ -349,9 +349,10 @@ impl DeliveryContext for AppDeliveryContext<'_> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验任务状态与项目 full-auto flags；获取 per-task delivery lock 并解析 worktree 后，
-///     若提供 expected_review_digest：先 `stage_all_for_commit` 冻结 index，再
-///     `enforce_expected_review_digest`（worktree 仍含未暂存写入 → fail closed），最后
-///     `commit_staged` 禁止二次 `git add -A`；无 digest 时走 `commit_task_worktree`；
+///     若提供 expected_review_digest：`stage_all_for_commit` → `enforce_expected_review_digest`
+///     → `write_tree_hash` 冻结 index tree → `commit_staged` → `head_tree_hash` 必须等于
+///     frozen tree（否则 fail closed，禁止 push/merge）；`has_changes=false` 时跳过 commit 但
+///     digest 已匹配即可；无 digest 时走 `commit_task_worktree`；
 ///     再按顺序执行 push/merge/push main；每阶段写 delivery evidence；失败 Blocked；全开开关成功后 Done。
 pub(crate) async fn deliver_task<C>(
     context: &C,
@@ -494,11 +495,12 @@ where
         }
     };
 
-    // digest 绑定路径：先 stage 冻结 index，再 rebind digest，最后只 commit_staged
-    //（禁止二次 `git add -A`，关闭 recheck→add 之间的 TOCTOU）。
+    // digest 绑定路径：stage → rebind digest → 冻结 tree → commit_staged → 校验 HEAD tree。
+    //（禁止二次 `git add -A`；commit 后 head tree 必须等于 frozen，绑定到已提交内容。）
     // 无 digest 时保持既有 commit_task_worktree（内部 stage+commit）。
     if let Some(expected) = expected_review_digest {
-        let has_changes = match workbench_git::stage_all_for_commit(Path::new(&task_path)) {
+        let task_path_ref = Path::new(&task_path);
+        let has_changes = match workbench_git::stage_all_for_commit(task_path_ref) {
             Ok(changed) => changed,
             Err(err) => {
                 let reason = format!("commit failed: stage worktree failed: {err}");
@@ -514,7 +516,7 @@ where
             }
         };
         // stage 后 worktree 仍含未暂存新写入；漂移 → fail closed，不 commit。
-        match enforce_expected_review_digest(Path::new(&task_path), expected) {
+        match enforce_expected_review_digest(task_path_ref, expected) {
             Ok(()) => {}
             Err(reason) => {
                 return block_delivery_task(
@@ -529,13 +531,74 @@ where
             }
         }
         if has_changes {
-            if let Err(err) = workbench_git::commit_staged(Path::new(&task_path), &commit_message) {
+            // 在 digest 门通过后冻结 index tree，commit 后必须与 HEAD tree 一致。
+            let frozen_tree = match workbench_git::write_tree_hash(task_path_ref) {
+                Ok(hash) => hash,
+                Err(err) => {
+                    let reason =
+                        format!("commit failed: write-tree after digest gate failed: {err}");
+                    return block_delivery_task(
+                        context.orchestrator_repo(),
+                        &task.id,
+                        &reason,
+                        "commit",
+                        &reason,
+                        &mut stages,
+                    )
+                    .await;
+                }
+            };
+            if let Err(err) = workbench_git::commit_staged(task_path_ref, &commit_message) {
                 let reason = format!("commit failed: {err}");
                 return block_delivery_task(
                     context.orchestrator_repo(),
                     &task.id,
                     &reason,
                     "commit",
+                    &reason,
+                    &mut stages,
+                )
+                .await;
+            }
+            let head_tree = match workbench_git::head_tree_hash(task_path_ref) {
+                Ok(Some(hash)) => hash,
+                Ok(None) => {
+                    let reason =
+                        "commit tree binding failed: HEAD tree missing after commit_staged"
+                            .to_string();
+                    return block_delivery_task(
+                        context.orchestrator_repo(),
+                        &task.id,
+                        &reason,
+                        "commit tree binding",
+                        &reason,
+                        &mut stages,
+                    )
+                    .await;
+                }
+                Err(err) => {
+                    let reason = format!("commit tree binding failed: read HEAD tree: {err}");
+                    return block_delivery_task(
+                        context.orchestrator_repo(),
+                        &task.id,
+                        &reason,
+                        "commit tree binding",
+                        &reason,
+                        &mut stages,
+                    )
+                    .await;
+                }
+            };
+            if head_tree != frozen_tree {
+                let reason = format!(
+                    "committed tree drifted from digest-gated staged tree; refuse push/merge. \
+                     frozen={frozen_tree}, head={head_tree}"
+                );
+                return block_delivery_task(
+                    context.orchestrator_repo(),
+                    &task.id,
+                    &reason,
+                    "commit tree binding",
                     &reason,
                     &mut stages,
                 )
@@ -2579,6 +2642,36 @@ mod tests {
         );
         // digest 路径不经 commit_task_worktree
         assert_eq!(harness.controls.commit_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     digest 门通过后 commit 的 tree 必须与 write-tree 冻结的 staged tree 一致，
+    ///     防止 commit 后 HEAD 内容与审阅边界解绑仍继续 push/merge。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     stage + enforce 后 write_tree_hash → commit_staged → head_tree_hash 必须等于 frozen。
+    #[test]
+    fn digest_path_commit_binds_head_tree_to_frozen_write_tree() {
+        let (_dir, _origin, _repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("bound.txt"), "reviewed-tree\n").expect("write");
+        assert!(
+            workbench_git::stage_all_for_commit(&task_worktree).expect("stage"),
+            "should have staged changes"
+        );
+        let digest =
+            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
+                .expect("digest");
+        enforce_expected_review_digest(&task_worktree, &digest).expect("digest match");
+        let frozen = workbench_git::write_tree_hash(&task_worktree).expect("write-tree");
+        workbench_git::commit_staged(&task_worktree, "orchestrator: tree bind")
+            .expect("commit staged");
+        let head = workbench_git::head_tree_hash(&task_worktree)
+            .expect("head tree")
+            .expect("HEAD tree present");
+        assert_eq!(
+            head, frozen,
+            "HEAD tree must equal digest-gated staged tree"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

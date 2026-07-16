@@ -14,7 +14,9 @@
 
 use crate::backend::control::{self, BackendControlFile};
 use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErrorCode, P2pResult};
-use crate::net::lan_guard::{browser_request_guard, lan_socket_gate, require_loopback_peer};
+use crate::net::lan_guard::{
+    browser_request_guard, expected_device_id_guard, lan_socket_gate, require_loopback_peer,
+};
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     attention, browser_verification, cc_history, claude_code_assets, claude_md_sync, health,
@@ -1303,6 +1305,12 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // 永远拿到稳定的 {error, code, request_id, retryable, details} 结构。放在 request_id_middleware
         // 之内，使其能从 extensions 读到 P2pRequestContext 并写入信封。
         .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+        // 可选期望 device_id 绑定：header 存在且非空时与本机 device_id 比对；错机 409 device_id_mismatch。
+        // 缺 header 行为不变（LAN 仍无调用者身份校验）。
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            expected_device_id_guard,
+        ))
         // 浏览器 Host/Origin/Content-Type 门禁：socket gate 之后、body limit/handler 之前。
         // 读取 AppState.actual_http_port 与 device_id 受控 mDNS 名；不发送 CORS 头。
         .layer(axum::middleware::from_fn_with_state(
@@ -1316,7 +1324,7 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // 注入 P2pRequestContext 供 handler 使用，并打开带 `request_id` 字段的 tracing span。
         // 放在最外层（相对业务 middleware），使其覆盖全部 /api 路由 + /mobile SPA fallback。
         // axum 最后 .layer 最外：请求顺序 ConnectInfo → request_id → lan_socket_gate
-        // → browser_request_guard → envelope → body limit → handler。
+        // → browser_request_guard → expected_device_id → envelope → body limit → handler。
         .layer(axum::middleware::from_fn(request_id_middleware))
         .with_state(state.clone());
 

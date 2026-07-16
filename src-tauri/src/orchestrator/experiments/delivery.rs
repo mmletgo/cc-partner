@@ -261,14 +261,20 @@ pub async fn mark_experiment_delivery_completed(
 /// Business Logic（为什么需要这个函数）:
 ///     组 CAS 到 Delivering 后若任务 CAS 未命中、delivery 返回 Blocked/非 Done，或 pipeline 中途失败，
 ///     实验不能永久停在 Delivering（cancel 会拒绝 Delivering）。需回收到可重试/可取消状态。
+///     若 winner 任务仍卡在 Delivering（例如 digest 缺失路径曾先推进任务），也必须一并回收到 Done，
+///     避免组回到 WinnerReady 而任务仍为 Delivering 的半态。
 ///
 /// Code Logic（这个函数做什么）:
 ///     仅当当前状态为 Delivering 时 CAS：有 winner → WinnerReady（保留 winner/reason/confidence）；
-///     无 winner → NeedsDecision；CAS 未命中则返回最新行。非 Delivering 直接返回当前行。
+///     无 winner → NeedsDecision；若 winner_task_id 存在且该任务仍为 Delivering，则
+///     `try_transition_task_status(Delivering→Done)` 一并回收；CAS 未命中则返回最新行。
+///     非 Delivering 直接返回当前行。
 pub async fn recover_experiment_from_failed_delivery(
     repo: &OrchestratorRepo,
     experiment_id: &str,
 ) -> Result<OrchestratorExperimentRow, AppError> {
+    use crate::orchestrator::models::OrchestratorTaskStatus;
+
     let exp = repo.get_experiment(experiment_id).await?;
     if exp.status != ExperimentStatus::Delivering {
         return Ok(exp);
@@ -278,6 +284,17 @@ pub async fn recover_experiment_from_failed_delivery(
     } else {
         ExperimentStatus::NeedsDecision
     };
+    // 先回收 winner 任务 Delivering→Done，避免组已回 WinnerReady 而任务仍卡 Delivering。
+    if let Some(winner_id) = exp.winner_task_id.as_deref() {
+        let _ = repo
+            .try_transition_task_status(
+                winner_id,
+                OrchestratorTaskStatus::Delivering,
+                OrchestratorTaskStatus::Done,
+                None,
+            )
+            .await?;
+    }
     if let Some(updated) = repo
         .cas_experiment_status(
             experiment_id,
@@ -467,6 +484,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again.status, ExperimentStatus::WinnerReady);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     缺失 reviewDigest 等 fail-closed 路径若已把 winner 任务推进到 Delivering，
+    ///     recover 必须同时把任务 CAS 回 Done，禁止组 WinnerReady + 任务 Delivering 半态。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     组进 Delivering、winner 任务 Done→Delivering 后 recover；断言组 WinnerReady 且任务 Done。
+    #[tokio::test]
+    async fn recover_from_failed_delivery_resets_winner_task_delivering_to_done() {
+        use crate::orchestrator::models::OrchestratorTaskStatus;
+        let repo = setup().await;
+        let exp = repo.insert_experiment_fixture(2).await.unwrap();
+        record_candidate_review(&repo, "task-1", true)
+            .await
+            .unwrap();
+        record_candidate_review(&repo, "task-2", false)
+            .await
+            .unwrap();
+        // CandidateReady 路径：winner 任务为 Done，再 CAS 到 Delivering（模拟 digest 门前误推进）。
+        repo.set_task_status("task-1", OrchestratorTaskStatus::Done, None)
+            .await
+            .unwrap();
+        start_experiment_winner_delivery(&repo, &exp.id)
+            .await
+            .unwrap();
+        let cas = repo
+            .try_transition_task_status(
+                "task-1",
+                OrchestratorTaskStatus::Done,
+                OrchestratorTaskStatus::Delivering,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            cas.is_some(),
+            "fixture must place winner task in Delivering"
+        );
+        assert_eq!(
+            repo.get_task("task-1").await.unwrap().status,
+            OrchestratorTaskStatus::Delivering
+        );
+
+        let recovered = recover_experiment_from_failed_delivery(&repo, &exp.id)
+            .await
+            .unwrap();
+        assert_eq!(recovered.status, ExperimentStatus::WinnerReady);
+        assert_eq!(recovered.winner_task_id.as_deref(), Some("task-1"));
+        assert_eq!(
+            repo.get_task("task-1").await.unwrap().status,
+            OrchestratorTaskStatus::Done,
+            "missing-digest recover must not leave winner task Delivering"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

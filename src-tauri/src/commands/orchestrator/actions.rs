@@ -369,9 +369,10 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
 ///     high confidence + full-auto 时实验 winner 应自动进入既有 delivery。
 ///
 /// Code Logic（这个函数做什么）:
-///     读实验状态；若 WinnerReady 且 confidence=high 且 full-auto，则 CAS Delivering 并 deliver_task；
-///     必须加载 winner 持久化 review_digest，缺失则 fail closed 并 recover；
-///     任务 CAS 未命中且非 Delivering、或交付落到 Blocked/Aborted 等时 recover；
+///     读实验状态；若 WinnerReady 且 confidence=high 且 full-auto，则先加载 winner 持久化
+///     review_digest（缺失则 fail closed，**不**把组/任务推进 Delivering）；digest 就绪后再
+///     CAS 组 Delivering + 任务 Done→Delivering 并 deliver_task；
+///     任务 CAS 未命中且非 Delivering、或交付落到 Blocked/Aborted 等时 recover（组+任务）；
 ///     若仍为 Delivering（丢锁/并发持有）则不 recover，留给持锁方完成（无启动崩溃恢复，NOT VERIFIED）。
 async fn maybe_auto_deliver_experiment_winner(
     state: &crate::state::AppState,
@@ -399,6 +400,24 @@ async fn maybe_auto_deliver_experiment_winner(
     if !should_auto {
         return Ok(());
     }
+    // fail closed：digest 必须在任何组/任务 Delivering 转换之前就绪，禁止先推进再 recover 留下半态。
+    let Some(winner_id) = exp.winner_task_id.clone() else {
+        tracing::warn!(
+            experiment_id = %experiment_id,
+            "experiment WinnerReady but missing winner_task_id; refuse auto-delivery"
+        );
+        return Ok(());
+    };
+    let Some(digest) =
+        crate::orchestrator::delivery::load_persisted_review_digest(repo, &winner_id).await?
+    else {
+        tracing::warn!(
+            experiment_id = %experiment_id,
+            task_id = %winner_id,
+            "experiment winner missing reviewDigest evidence; refuse auto-delivery before Delivering CAS"
+        );
+        return Ok(());
+    };
     let winner_id = start_experiment_winner_delivery(repo, experiment_id).await?;
     // 仅允许 CandidateReady 路径的 Done→Delivering CAS；中止/阻塞不得复活交付。
     let transitioned = repo
@@ -412,23 +431,11 @@ async fn maybe_auto_deliver_experiment_winner(
     if transitioned.is_none() {
         let task = repo.get_task(&winner_id).await?;
         if task.status != OrchestratorTaskStatus::Delivering {
-            // 组已进 Delivering 但任务无法交付 → 回收组状态供重试/取消。
+            // 组已进 Delivering 但任务无法交付 → 回收组+任务状态供重试/取消。
             recover_experiment_from_failed_delivery(repo, experiment_id).await?;
             return Ok(());
         }
     }
-    // fail closed：无持久化 digest 不得以 None 绕过 rebind。
-    let Some(digest) =
-        crate::orchestrator::delivery::load_persisted_review_digest(repo, &winner_id).await?
-    else {
-        tracing::warn!(
-            experiment_id = %experiment_id,
-            task_id = %winner_id,
-            "experiment winner missing reviewDigest evidence; refuse auto-delivery"
-        );
-        recover_experiment_from_failed_delivery(repo, experiment_id).await?;
-        return Ok(());
-    };
     let delivered = match run_delivery_for_task(state, &winner_id, Some(digest)).await {
         Ok(dto) => dto,
         Err(err) => {

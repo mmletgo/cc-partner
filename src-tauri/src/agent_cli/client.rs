@@ -169,6 +169,8 @@ pub fn map_code_to_cli_error(
     }
     let err = if code.contains("not_found") || code == "not_found" {
         CliError::not_found(message)
+    } else if code == "device_id_mismatch" || code.contains("device_id_mismatch") {
+        CliError::conflict(message).with_code("device_id_mismatch")
     } else if code.contains("conflict") || code.contains("ambiguous") {
         CliError::conflict(message).with_code(code)
     } else if code.contains("unsupported") || code.contains("capability") {

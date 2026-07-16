@@ -498,14 +498,14 @@ async fn run_event_follow(
     };
     let mut last_seq_seen: Option<(String, u64)> = None;
 
-    // catch-up
+    // catch-up（契约：afterOwnerInstanceId/afterSequence → messages + latest.{ownerInstanceId,sequence}）
     let catch_url = format!(
         "http://127.0.0.1:{}/api/backend/control/events/catch-up",
         file.port
     );
     let catch_body = json!({
         "controlToken": file.control_token,
-        "afterOwner": if cursor.owner_instance_id.is_empty() { Value::Null } else { json!(cursor.owner_instance_id) },
+        "afterOwnerInstanceId": if cursor.owner_instance_id.is_empty() { Value::Null } else { json!(cursor.owner_instance_id) },
         "afterSequence": cursor.sequence,
     });
     if let Ok(resp) = client
@@ -517,20 +517,15 @@ async fn run_event_follow(
     {
         if resp.status().is_success() {
             if let Ok(body) = resp.json::<Value>().await {
-                if let Some(events) = body.get("events").and_then(|v| v.as_array()) {
-                    for ev in events {
+                if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
+                    for ev in messages {
                         if let Some(line) = filter_and_render_event(ev, &mut last_seq_seen) {
                             println!("{line}");
                             let _ = io::stdout().flush();
                         }
                     }
                 }
-                if let Some(owner) = body.get("ownerInstanceId").and_then(|v| v.as_str()) {
-                    cursor.owner_instance_id = owner.to_string();
-                }
-                if let Some(seq) = body.get("latestSequence").and_then(|v| v.as_u64()) {
-                    cursor.sequence = seq;
-                }
+                apply_catch_up_latest_cursor(&body, &mut cursor);
             }
         }
     }
@@ -546,7 +541,7 @@ async fn run_event_follow(
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                 let body = json!({
                     "controlToken": file.control_token,
-                    "afterOwner": if cursor.owner_instance_id.is_empty() { Value::Null } else { json!(cursor.owner_instance_id) },
+                    "afterOwnerInstanceId": if cursor.owner_instance_id.is_empty() { Value::Null } else { json!(cursor.owner_instance_id) },
                     "afterSequence": cursor.sequence,
                 });
                 if let Ok(resp) = client
@@ -560,8 +555,8 @@ async fn run_event_follow(
                         continue;
                     }
                     if let Ok(body) = resp.json::<Value>().await {
-                        if let Some(events) = body.get("events").and_then(|v| v.as_array()) {
-                            for ev in events {
+                        if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
+                            for ev in messages {
                                 if let Some(line) = filter_and_render_event(ev, &mut last_seq_seen) {
                                     // 有界行：截断超大
                                     let line = if line.len() > 256 * 1024 {
@@ -574,15 +569,27 @@ async fn run_event_follow(
                                 }
                             }
                         }
-                        if let Some(owner) = body.get("ownerInstanceId").and_then(|v| v.as_str()) {
-                            cursor.owner_instance_id = owner.to_string();
-                        }
-                        if let Some(seq) = body.get("latestSequence").and_then(|v| v.as_u64()) {
-                            cursor.sequence = seq;
-                        }
+                        apply_catch_up_latest_cursor(&body, &mut cursor);
                     }
                 }
             }
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     control events catch-up 以 `latest.ownerInstanceId/sequence` 推进游标，
+///     旧字段名不得再被 CLI 误读。
+///
+/// Code Logic（这个函数做什么）:
+///     从 body.latest 读取 ownerInstanceId 与 sequence 写回 cursor。
+fn apply_catch_up_latest_cursor(body: &Value, cursor: &mut BackendRuntimeCursor) {
+    if let Some(latest) = body.get("latest") {
+        if let Some(owner) = latest.get("ownerInstanceId").and_then(|v| v.as_str()) {
+            cursor.owner_instance_id = owner.to_string();
+        }
+        if let Some(seq) = latest.get("sequence").and_then(|v| v.as_u64()) {
+            cursor.sequence = seq;
         }
     }
 }

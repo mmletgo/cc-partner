@@ -447,16 +447,45 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
         let config = state.config.read().expect("config 读锁中毒");
         auto_delivery_enabled(&config.orchestrator)
     };
+    // fail closed：auto-deliver 前必须先持有 reviewDigest；缺失时不得把组/任务推进 Delivering。
+    // select 始终先落到 WinnerReady（advance=false），digest 就绪后再 start_experiment_winner_delivery。
+    let digest_for_delivery = if should_auto {
+        match crate::orchestrator::delivery::load_persisted_review_digest(
+            state.orchestrator_repo.as_ref(),
+            winner_task_id,
+        )
+        .await?
+        {
+            Some(d) => Some(d),
+            None => {
+                tracing::warn!(
+                    experiment_id = %experiment_id,
+                    task_id = %winner_task_id,
+                    "approve winner missing reviewDigest evidence; refuse before Delivering CAS"
+                );
+                return Err(AppError::generic(
+                    "experiment winner 缺少 reviewDigest evidence，拒绝交付（fail closed）",
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let selected = select_experiment_winner(
         state.orchestrator_repo.as_ref(),
         experiment_id,
         winner_task_id,
         reason,
         ComparativeConfidence::High,
-        should_auto,
+        false, // 组 Delivering 仅在 digest 门后由 start_experiment_winner_delivery 推进
     )
     .await?;
     if should_auto && selected.selected {
+        let Some(digest) = digest_for_delivery else {
+            return Err(AppError::generic(
+                "experiment winner 缺少 reviewDigest evidence，拒绝交付（fail closed）",
+            ));
+        };
         let winner =
             match start_experiment_winner_delivery(state.orchestrator_repo.as_ref(), experiment_id)
                 .await
@@ -502,30 +531,6 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
             .await?;
             return get_orchestrator_experiment_for_state(state, experiment_id).await;
         }
-        // fail closed：winner 必须持有 verifier 持久化的 reviewDigest，禁止 None 绕过 rebind。
-        let digest = match crate::orchestrator::delivery::load_persisted_review_digest(
-            state.orchestrator_repo.as_ref(),
-            &winner,
-        )
-        .await?
-        {
-            Some(d) => d,
-            None => {
-                tracing::warn!(
-                    experiment_id = %experiment_id,
-                    task_id = %winner,
-                    "approve winner missing reviewDigest evidence; refuse delivery"
-                );
-                let _ = recover_experiment_from_failed_delivery(
-                    state.orchestrator_repo.as_ref(),
-                    experiment_id,
-                )
-                .await?;
-                return Err(AppError::generic(
-                    "experiment winner 缺少 reviewDigest evidence，拒绝交付（fail closed）",
-                ));
-            }
-        };
         let delivered = match run_delivery_for_task(state, &winner, Some(digest)).await {
             Ok(dto) => dto,
             Err(err) => {
