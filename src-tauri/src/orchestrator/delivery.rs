@@ -11,6 +11,7 @@
 
 use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
+use crate::orchestrator::delivery_lock::try_acquire_delivery_task_guard;
 use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskStatus, EVIDENCE_KIND_DELIVERY,
     EVIDENCE_KIND_REVIEW_DIGEST,
@@ -19,7 +20,7 @@ use crate::orchestrator::repo::{FinishTaskDoneOutcome, OrchestratorRepo};
 use crate::state::AppState;
 use crate::storage::{WorkbenchProjectRepo, WorkbenchWorktreeRepo};
 use crate::workbench::git as workbench_git;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::process::Stdio;
@@ -37,7 +38,6 @@ const PIPE_READER_JOIN_GRACE_TIMEOUT: Duration = Duration::from_millis(200);
 const OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
 #[cfg(unix)]
 const SIGKILL: std::os::raw::c_int = 9;
-static DELIVERY_TASK_LOCKS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 /// 进程内 per-main-path 锁：冻结 push target + merge reviewed OID + 读 merge head 的临界区。
 static MAIN_DELIVERY_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
@@ -67,50 +67,6 @@ where
     };
     let _guard = lock.lock().await;
     f().await
-}
-
-/// 单任务 delivery 执行权守卫。
-///
-/// Business Logic（为什么需要这个结构体）:
-///     同一个 Orchestrator 任务不能同时执行两条自动交付流水线，否则会重复提交、推送、合并并写重复 evidence。
-///
-/// Code Logic（这个结构体做什么）:
-///     记录已领取的 task_id；Drop 时从进程内 HashSet 移除，且不持有 MutexGuard 跨 await。
-struct DeliveryTaskGuard {
-    task_id: String,
-}
-
-impl Drop for DeliveryTaskGuard {
-    /// Business Logic（为什么需要这个函数）:
-    ///     delivery pipeline 结束后必须释放任务执行权，后续用户重试或再次触发才能继续处理。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     在 Drop 中短暂锁定全局 HashSet 并移除 task_id；锁中毒时静默跳过，避免 Drop panic。
-    fn drop(&mut self) {
-        if let Some(locks) = DELIVERY_TASK_LOCKS.get() {
-            if let Ok(mut locked) = locks.lock() {
-                locked.remove(&self.task_id);
-            }
-        }
-    }
-}
-
-/// Business Logic（为什么需要这个函数）:
-///     自动交付需要 per-task 执行权，防止重复点击或并发命令同时执行 Git side effect。
-///
-/// Code Logic（这个函数做什么）:
-///     短暂锁定全局 HashSet；首次插入 task_id 返回守卫，已存在返回 None，不持有锁跨 await。
-fn try_acquire_delivery_task_guard(task_id: &str) -> Result<Option<DeliveryTaskGuard>, AppError> {
-    let locks = DELIVERY_TASK_LOCKS.get_or_init(|| StdMutex::new(HashSet::new()));
-    let mut locked = locks
-        .lock()
-        .map_err(|_| AppError::generic("Orchestrator delivery lock 已损坏"))?;
-    if !locked.insert(task_id.to_string()) {
-        return Ok(None);
-    }
-    Ok(Some(DeliveryTaskGuard {
-        task_id: task_id.to_string(),
-    }))
 }
 
 /// Business Logic（为什么需要这个函数）:

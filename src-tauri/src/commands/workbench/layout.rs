@@ -577,7 +577,7 @@ async fn safe_attach_remote_session(
     session_id: &str,
 ) -> Result<(), AppError> {
     let context = ensure_remote_project_context(state, project).await?;
-    let client = RemoteWorkbenchClient::new();
+    let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
     client
         .safe_attach_session(
             &context.base_url,

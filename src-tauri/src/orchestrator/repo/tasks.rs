@@ -1533,6 +1533,11 @@ impl OrchestratorRepo {
     ///     `UPDATE ... WHERE id=? AND status != 'done'` 写 Aborted/Canceled/Idle，清空 blocked_reason 与 attempt_phase；
     ///     rows=0 且当前为 Done 时返回 conflict；其它情况返回当前行（幂等）。
     pub async fn cancel_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+        if crate::orchestrator::delivery_lock::is_delivery_task_in_progress(task_id) {
+            return Err(AppError::conflict(
+                "任务正在交付中，不能取消；请等待交付结束后再试",
+            ));
+        }
         let now = Utc::now().to_rfc3339();
         let result = with_shared_write_lease(&self.gate, async {
             sqlx::query(
@@ -1575,6 +1580,11 @@ impl OrchestratorRepo {
         &self,
         task_id: &str,
     ) -> Result<OrchestratorTaskRow, AppError> {
+        if crate::orchestrator::delivery_lock::is_delivery_task_in_progress(task_id) {
+            return Err(AppError::conflict(
+                "任务正在交付中，不能终止；请等待交付结束后再试",
+            ));
+        }
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Aborted);
         let result = with_shared_write_lease(&self.gate, async {

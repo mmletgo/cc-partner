@@ -318,13 +318,8 @@ pub(crate) async fn refresh_task_after_create_action(
     }
 
     let task_id = row.id.clone();
-    if let Err(err) = crate::orchestrator::scheduler::dispatch_once(state).await {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %err,
-            "orchestrator createAction=start dispatch failed after task creation"
-        );
-    }
+    // GuiClient 必须经 control 代理；禁止直接 dispatch_once（require_owner 会静默吞错）。
+    let _ = dispatch_orchestrator_best_effort(state).await;
     state.orchestrator_repo.get_task(&task_id).await.or(Ok(row))
 }
 

@@ -596,6 +596,12 @@ fn content_hash_for_entry(
     if !new_oid.chars().all(|c| c == '0') {
         return content_hash_for_blob_oid(cwd, new_oid, new_mode == "120000");
     }
+    // raw 在 index/worktree 分叉时可能给全 0 new_oid；仍优先绑定 index 中的 blob（`:<path>`）。
+    if let Some(index_oid) = lookup_index_blob_oid(cwd, path) {
+        if !index_oid.chars().all(|c| c == '0') {
+            return content_hash_for_blob_oid(cwd, &index_oid, new_mode == "120000");
+        }
+    }
     let abs = cwd.join(path);
     if !abs.exists() {
         return Ok((false, sha256_hex_of_bytes(b"")));
@@ -616,6 +622,26 @@ fn content_hash_for_entry(
         ));
     }
     content_hash_for_path(cwd, path, false)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     index/worktree 分叉时 raw new_oid 可能全 0，必须从 index 取 blob 才能与 write-tree 对齐。
+///
+/// Code Logic（这个函数做什么）:
+///     `git rev-parse :<path>`；失败或空返回 None。
+fn lookup_index_blob_oid(cwd: &Path, path: &str) -> Option<String> {
+    let clean = path.strip_prefix("./").unwrap_or(path);
+    let spec = format!(":{clean}");
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", &spec])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!oid.is_empty()).then_some(oid)
 }
 
 /// Business Logic（为什么需要这个函数）:
