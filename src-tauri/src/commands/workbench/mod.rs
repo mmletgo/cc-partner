@@ -10,6 +10,7 @@ mod browser;
 mod common;
 mod files;
 mod git;
+mod layout;
 mod projects;
 mod sessions;
 
@@ -97,9 +98,29 @@ pub use sessions::{
 
 pub use projects::add_local_workbench_project_from_path;
 
+pub use layout::{
+    __cmd__apply_workspace_restore_cmd, __cmd__delete_named_workspace_layout,
+    __cmd__get_workspace_layout, __cmd__list_named_workspace_layouts,
+    __cmd__preflight_workspace_restore_cmd, __cmd__save_workspace_layout,
+    __tauri_command_name_apply_workspace_restore_cmd,
+    __tauri_command_name_delete_named_workspace_layout, __tauri_command_name_get_workspace_layout,
+    __tauri_command_name_list_named_workspace_layouts,
+    __tauri_command_name_preflight_workspace_restore_cmd,
+    __tauri_command_name_save_workspace_layout, apply_workspace_restore_cmd,
+    delete_named_workspace_layout, get_workspace_layout, list_named_workspace_layouts,
+    preflight_workspace_restore_cmd, save_workspace_layout,
+};
+
 // ---- crate 内 helper / DTO（pub(crate)）----
 
 pub(crate) use browser::create_workbench_browser_preview_for_state;
+
+pub(crate) use layout::{
+    apply_workspace_restore_for_state, delete_named_workspace_layout_for_state,
+    get_workspace_layout_for_state, list_named_workspace_layouts_for_state,
+    owner_local_preflight_for_state, owner_local_safe_attach_for_state,
+    preflight_workspace_restore_for_state, save_workspace_layout_for_state,
+};
 
 // control_workbench 与其它 crate 内 owner 路径需要 common 中的远程映射/设备 helper。
 pub(crate) use common::{

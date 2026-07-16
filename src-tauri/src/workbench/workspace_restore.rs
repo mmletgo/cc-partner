@@ -181,6 +181,7 @@ pub struct SafeAttachResult {
 /// Code Logic（这个结构体做什么）:
 ///     原子计数器；生产路径使用真实 tmux 探测函数，测试路径可 mock。
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct RestoreSideEffectCounters {
     /// tmux new-session 调用次数。
     pub tmux_new_session: AtomicU64,

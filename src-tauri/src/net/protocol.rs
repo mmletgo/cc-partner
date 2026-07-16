@@ -163,6 +163,17 @@ pub const CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1: &str = "workbench.mutation-o
 pub const CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2: &str =
     "workbench.session-search-result.v2";
 
+/// 能力 token：Workbench workspace safe restore（owner-local preflight + safe attach）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制设备在转发 remote project 的 preflight/safe-attach 前必须确认 owner 支持
+///     纯读 preflight 与仅 attach 已有 tmux 的契约；旧 peer 缺失时只恢复 project selection。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；client `supports` 门控。
+pub const CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1: &str =
+    "workbench.workspace-safe-restore.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -226,6 +237,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_TRANSFER_RESUME_V1.to_string(),
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
+            CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1.to_string(),
         ],
     }
 }
@@ -387,6 +399,7 @@ mod tests {
                 "transfer.resume.v1".to_string(),
                 "workbench.mutation-outcome.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
+                "workbench.workspace-safe-restore.v1".to_string(),
             ]
         );
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));

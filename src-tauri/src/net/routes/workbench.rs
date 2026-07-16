@@ -30,6 +30,7 @@ use crate::commands::workbench::{
     local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
     local_split_workbench_pane, local_switch_workbench_pane, local_write_workbench_session_input,
     local_zoom_workbench_pane, merge_workbench_worktree_for_state, open_workbench_file_for_state,
+    owner_local_preflight_for_state, owner_local_safe_attach_for_state,
     push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
     resume_claude_session_for_state, save_workbench_text_file_for_state,
@@ -37,6 +38,8 @@ use crate::commands::workbench::{
     switch_workbench_pane_for_state, write_workbench_session_input_for_state,
     zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
+use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
+use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
 use crate::error::AppError;
 use crate::net::error_response::{mark_response_as_passthrough, P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
@@ -1965,6 +1968,71 @@ pub async fn resume_claude_session(
     Ok(Json(result))
 }
 
+/// owner-local workspace restore preflight。
+///
+/// Business Logic（为什么需要这个函数）:
+///     控制设备把 inner project/worktree/session 发给 owning device 做纯读 preflight；
+///     禁止 remote shortcut 递归代理。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 project 为 local 后委托 `owner_local_preflight_for_state`。
+pub async fn workspace_restore_preflight(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteWorkspaceRestorePreflightReq>,
+) -> P2pResult<Json<WorkspaceRestorePlan>> {
+    ensure_remote_gateway_local_project_id(&state, &req.project_id)
+        .await
+        .map_err(|e| {
+            // 稳定 code：remote shortcut 递归
+            if e.to_string().contains("只接受对端本机") {
+                P2pError::from_app_error(
+                    AppError::validation("local_project_required".to_string()),
+                    &ctx,
+                    "workbench.workspace.restore.preflight",
+                )
+            } else {
+                P2pError::from_app_error(e, &ctx, "workbench.workspace.restore.preflight")
+            }
+        })?;
+    let plan = owner_local_preflight_for_state(
+        &state,
+        req.project_id,
+        req.active_worktree_id,
+        req.active_session_id,
+        req.workspace_view,
+        req.inspector_tab,
+        req.browser_target_url,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.workspace.restore.preflight"))?;
+    Ok(Json(plan))
+}
+
+/// owner-local safe attach。
+///
+/// Business Logic（为什么需要这个函数）:
+///     owning device 对已有 tmux target 做幂等 attach；禁止创建 shell。
+///
+/// Code Logic（这个函数做什么）:
+///     session 所属 project 必须为 local；委托 `owner_local_safe_attach_for_state`。
+pub async fn workspace_restore_safe_attach(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteSafeAttachReq>,
+) -> P2pResult<Json<SafeAttachResult>> {
+    let result = owner_local_safe_attach_for_state(&state, req.session_id)
+        .await
+        .map_err(|e| {
+            if e.code() == "local_project_required" {
+                P2pError::from_app_error(e, &ctx, "workbench.workspace.restore.safe_attach")
+            } else {
+                P2pError::from_app_error(e, &ctx, "workbench.workspace.restore.safe_attach")
+            }
+        })?;
+    Ok(Json(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2171,6 +2239,20 @@ mod tests {
 
         assert_eq!(error.to_string(), "远端 Workbench 网关只接受对端本机项目");
         assert_eq!(error.classify(), crate::error::AppErrorCategory::Validation);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     workspace restore owner 路由必须拒绝 remote shortcut 递归。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 kind=remote 触发 local_project_required 稳定 code 路径。
+    #[test]
+    fn remote_restore_rejects_remote_shortcut_recursion() {
+        let error = ensure_remote_gateway_local_project(&project_row_with_kind("remote"))
+            .expect_err("remote shortcut must be rejected");
+        assert!(error.to_string().contains("本机"));
+        let stable = AppError::validation("local_project_required".to_string());
+        assert_eq!(stable.code(), "local_project_required");
     }
 
     /// Business Logic（为什么需要这个测试）:

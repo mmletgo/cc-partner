@@ -480,6 +480,44 @@ pub struct ResumeClaudeSessionResult {
     pub session_id: String,
 }
 
+/// owner-local workspace restore preflight 请求（inner IDs only）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     控制设备 layout 不上传；owner 只接收本机 project/worktree/session 做纯读探测。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase；不含 layout name/绝对路径。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspaceRestorePreflightReq {
+    /// owner 本机 project id。
+    pub project_id: String,
+    /// owner 本机 worktree id。
+    pub active_worktree_id: Option<String>,
+    /// owner 本机 session id。
+    pub active_session_id: Option<String>,
+    /// workspace view token（与 layout 枚举对齐，由 serde 处理）。
+    pub workspace_view: crate::workbench::workspace_layout::WorkspaceView,
+    /// inspector tab。
+    pub inspector_tab: crate::workbench::workspace_layout::InspectorTab,
+    /// 可选 browser target。
+    pub browser_target_url: Option<String>,
+}
+
+/// owner-local safe attach 请求。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     apply 阶段把 inner sessionId 交给 owning device 幂等 attach。
+///
+/// Code Logic（这个结构体做什么）:
+///     仅 session_id。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSafeAttachReq {
+    /// owner 本机 session id。
+    pub session_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
