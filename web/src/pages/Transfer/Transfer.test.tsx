@@ -211,6 +211,7 @@ beforeEach(() => {
   retryTransferMock.mockReset();
   resumeTransferMock.mockReset();
   getOperationMock.mockReset();
+  getOperationMock.mockResolvedValue({ status: 'notFound', code: 'not_found' });
   openTransferMock.mockReset();
   revealTransferMock.mockReset();
   pickTransferFileMock.mockReset();
@@ -341,7 +342,9 @@ describe('Transfer page journey', () => {
     fireEvent.click(screen.getByRole('button', { name: /发送「report\.txt」/ }));
 
     await waitFor(() => {
-      expect(sendTransferMock).toHaveBeenCalledWith('device-a', windowsPath);
+      expect(sendTransferMock.mock.calls[0][0]).toBe('device-a');
+      expect(sendTransferMock.mock.calls[0][1]).toBe(windowsPath);
+      expect(typeof sendTransferMock.mock.calls[0][2]).toBe('string');
       const sendBtn = screen.getByRole('button', { name: /发送「report\.txt」/ });
       expect(sendBtn.hasAttribute('disabled')).toBe(true);
       expect(sendBtn.getAttribute('aria-busy')).toBe('true');
@@ -367,7 +370,8 @@ describe('Transfer page journey', () => {
 
   test('send failure retains selection and shows alert', async () => {
     pickTransferFileMock.mockResolvedValueOnce('/Users/hans/keep-me.txt');
-    sendTransferMock.mockRejectedValueOnce(new Error('device offline'));
+    // 非 uncertain 错误文案（不含 timeout/network/offline），走 definitive failure 分支
+    sendTransferMock.mockRejectedValueOnce(new Error('permission denied'));
 
     renderTransfer();
 
@@ -384,7 +388,7 @@ describe('Transfer page journey', () => {
     fireEvent.click(screen.getByRole('button', { name: /发送「keep-me\.txt」/ }));
 
     await waitFor(() => {
-      expect(screen.getByRole('alert').textContent).toContain('发送失败：device offline');
+      expect(screen.getByRole('alert').textContent).toContain('发送失败：permission denied');
       const sendBtn = screen.getByRole('button', { name: /发送「keep-me\.txt」/ });
       expect(sendBtn.hasAttribute('disabled')).toBe(false);
       expect(screen.getByText('已选择：keep-me.txt')).toBeTruthy();
@@ -420,7 +424,9 @@ describe('Transfer page journey', () => {
 
     await waitFor(() => {
       expect(sendTransferMock).toHaveBeenCalledTimes(1);
-      expect(sendTransferMock).toHaveBeenCalledWith('device-a', windowsPath);
+      expect(sendTransferMock.mock.calls[0][0]).toBe('device-a');
+      expect(sendTransferMock.mock.calls[0][1]).toBe(windowsPath);
+      expect(typeof sendTransferMock.mock.calls[0][2]).toBe('string');
     });
 
     await act(async () => {
