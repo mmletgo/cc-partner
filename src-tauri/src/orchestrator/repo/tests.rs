@@ -9,8 +9,9 @@ use crate::orchestrator::claim::{
     CLAIM_CANDIDATE_LIMIT,
 };
 use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
+use crate::orchestrator::agent_adapter::types::RunnerAttemptPolicy;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
+    OrchestratorAttemptPhase, OrchestratorAttemptStatus, OrchestratorCreateAction, OrchestratorEvidenceDto,
     OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
     OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState,
     SplitTaskState, EVIDENCE_KIND_REPAIR_PROMPT,
@@ -1202,14 +1203,14 @@ async fn prepare_claim_token_cas_blocks_stale_runner_hijack() {
         .unwrap());
 
     let hijack = repo
-        .mark_task_running_attempt("task-aba", "agent/old", "wt-old", "sess-old", 1, &token_a, None)
+        .mark_task_running_attempt("task-aba", "agent/old", "wt-old", "sess-old", 1, &token_a, None, &RunnerAttemptPolicy::claude_default())
         .await
         .unwrap();
     assert_eq!(hijack.status, OrchestratorTaskStatus::Preparing);
     assert_ne!(hijack.session_id.as_deref(), Some("sess-old"));
 
     let running = repo
-        .mark_task_running_attempt("task-aba", "agent/new", "wt-new", "sess-new", 1, &token_b, None)
+        .mark_task_running_attempt("task-aba", "agent/new", "wt-new", "sess-new", 1, &token_b, None, &RunnerAttemptPolicy::claude_default())
         .await
         .unwrap();
     assert_eq!(running.status, OrchestratorTaskStatus::Running);
@@ -2432,7 +2433,9 @@ async fn add_attempt_and_mark_attempt_completed_persists_attempt_history() {
             "worktree-1",
             "session-1",
             "implement task\nORCHESTRATOR_DEV_DONE",
-            "running",
+            &RunnerAttemptPolicy::claude_default(),
+            None,
+            OrchestratorAttemptStatus::Running,
         )
         .await
         .unwrap();
@@ -2462,7 +2465,9 @@ async fn get_running_attempt_by_session_returns_only_running_attempt() {
             "worktree-1",
             "session-running",
             "prompt",
-            "running",
+            &RunnerAttemptPolicy::claude_default(),
+            None,
+            OrchestratorAttemptStatus::Running,
         )
         .await
         .unwrap();
@@ -2472,7 +2477,9 @@ async fn get_running_attempt_by_session_returns_only_running_attempt() {
         "worktree-2",
         "session-completed",
         "prompt",
-        "running",
+        &RunnerAttemptPolicy::claude_default(),
+        None,
+        OrchestratorAttemptStatus::Running,
     )
     .await
     .unwrap();
@@ -2683,6 +2690,7 @@ async fn mark_task_running_attempt_clears_previous_runtime_and_sets_started_at()
             2,
             "tok",
             None,
+            &RunnerAttemptPolicy::claude_default(),
         )
         .await
         .unwrap();
@@ -2762,7 +2770,8 @@ async fn active_runner_guard_prevents_old_phase_and_runtime_updates() {
         2,
         "tok",
         None,
-    )
+            &RunnerAttemptPolicy::claude_default(),
+        )
     .await
     .unwrap();
 
@@ -2856,7 +2865,8 @@ async fn update_active_runner_runtime_summary_persists_claude_fields() {
         1,
         "tok",
         None,
-    )
+            &RunnerAttemptPolicy::claude_default(),
+        )
     .await
     .unwrap();
     let summary = crate::orchestrator::claude_runtime::ClaudeRuntimeSummary {
@@ -3415,4 +3425,64 @@ async fn operational_notification_snapshot_truncates_at_max_1000() {
         .unwrap();
     assert!(truncated);
     assert_eq!(items.len(), 1000);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     attempt 创建时写入的 provider policy 不得因后续 WORKFLOW/配置变化而漂移。
+///
+/// Code Logic（这个测试做什么）:
+///     用 CodexVisible policy 写 attempt，再读回断言 runner_provider 仍为 codexVisible。
+#[tokio::test]
+async fn attempt_policy_does_not_change_when_workflow_changes() {
+    use crate::orchestrator::agent_adapter::types::{AgentProviderId, RunnerAttemptPolicy};
+
+    let (_pool, repo) = setup_repo().await;
+    let mut task = task_row("task-policy", "proj-1", OrchestratorTaskStatus::Running);
+    repo.create_task(&task).await.unwrap();
+
+    let policy = RunnerAttemptPolicy::new(AgentProviderId::CodexVisible, 4, 300_000, AgentProviderId::CodexVisible.default_completion_contract())
+        .expect("policy");
+    repo.add_attempt(
+        "task-policy",
+        1,
+        "wt-1",
+        "sess-1",
+        "prompt",
+        &policy,
+        None,
+        OrchestratorAttemptStatus::Running,
+    )
+    .await
+    .unwrap();
+
+    let attempt = repo.get_attempt("task-policy", 1).await.unwrap();
+    assert_eq!(attempt.runner_provider, "codexVisible");
+    assert_eq!(attempt.max_turns, 4);
+    assert_eq!(attempt.stall_timeout_ms, 300_000);
+    assert_eq!(attempt.completion_contract, "hookEvent");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     旧 attempt 行 NULL policy 列必须映射 Claude/1/300000/sentinelLine。
+///
+/// Code Logic（这个测试做什么）:
+///     直接 INSERT 无 policy 列值的 attempt，get_attempt 断言默认映射。
+#[tokio::test]
+async fn legacy_null_attempt_policy_maps_to_claude_defaults() {
+    let (pool, repo) = setup_repo().await;
+    let task = task_row("task-legacy", "proj-1", OrchestratorTaskStatus::Running);
+    repo.create_task(&task).await.unwrap();
+    sqlx::query(
+        "INSERT INTO orchestrator_task_attempts \
+         (id, task_id, attempt, worktree_id, session_id, prompt, status, created_at, completed_at) \
+         VALUES ('a1', 'task-legacy', 1, 'wt', 'sess', 'p', 'running', 't', NULL)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let attempt = repo.get_attempt("task-legacy", 1).await.unwrap();
+    assert_eq!(attempt.runner_provider, "claudeCodeVisible");
+    assert_eq!(attempt.max_turns, 1);
+    assert_eq!(attempt.stall_timeout_ms, 300_000);
+    assert_eq!(attempt.completion_contract, "sentinelLine");
 }

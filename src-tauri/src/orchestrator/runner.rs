@@ -13,9 +13,12 @@ use crate::commands::workbench::{
     local_write_workbench_session_input,
 };
 use crate::error::AppError;
+use crate::orchestrator::agent_adapter::types::{
+    resolve_task_runner_policy, RunnerAttemptPolicy,
+};
 use crate::orchestrator::claude_runtime::associate_claude_runtime;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorAttemptPhase, OrchestratorAttemptStatus, OrchestratorTaskRow, OrchestratorTaskStatus,
     EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
 };
 use crate::orchestrator::prompt::{build_repair_task_prompt, RepairPromptContext};
@@ -166,6 +169,17 @@ pub async fn prepare_runner_attempt(
     {
         return state.orchestrator_repo.get_task(&task.id).await;
     }
+    // 创建 worktree/session 前冻结 runner policy：已挂账 task 字段优先，否则读 WORKFLOW。
+    let workflow_for_policy = resolve_project_workflow(Path::new(&project.path))?;
+    let runner_policy = resolve_task_runner_policy(
+        &workflow_for_policy.runner.provider,
+        workflow_for_policy.runner.max_turns,
+        workflow_for_policy.runner.stall_timeout_ms,
+        task.runner_provider.as_deref(),
+        task.runner_max_turns,
+        task.runner_stall_timeout_ms,
+    )?;
+
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
     if !state
         .orchestrator_repo
@@ -224,6 +238,7 @@ pub async fn prepare_runner_attempt(
             attempt,
             &claim_token,
             agent_session_id.as_deref(),
+            &runner_policy,
         )
         .await?;
     if running_task.status != OrchestratorTaskStatus::Running {
@@ -267,7 +282,9 @@ pub async fn prepare_runner_attempt(
             &worktree.id,
             &session.id,
             &prompt,
-            "running",
+            &runner_policy,
+            agent_session_id.as_deref(),
+            OrchestratorAttemptStatus::Running,
         )
         .await?;
     if let Some(current) =

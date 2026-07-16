@@ -6,8 +6,9 @@ use super::common::*;
 use super::*;
 use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
+use crate::orchestrator::agent_adapter::types::RunnerAttemptPolicy;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorCreateAction, OrchestratorEvidenceDto,
+    OrchestratorAttemptPhase, OrchestratorAttemptStatus, OrchestratorCreateAction, OrchestratorEvidenceDto,
     OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
     OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState,
     SplitTaskState, EVIDENCE_KIND_REPAIR_PROMPT, EVIDENCE_KIND_VERIFICATION_REVIEW,
@@ -1693,7 +1694,11 @@ async fn completion_helper_marks_active_running_attempt_completed_after_verifyin
     task.worktree_id = Some("worktree-1".to_string());
     task.session_id = Some("session-1".to_string());
     repo.create_task(&task).await.expect("insert task");
-    repo.add_attempt(&task.id, 1, "worktree-1", "session-1", "prompt", "running")
+    repo.add_attempt(&task.id, 1, "worktree-1", "session-1", "prompt",
+            &RunnerAttemptPolicy::claude_default(),
+            None,
+            OrchestratorAttemptStatus::Running,
+        )
         .await
         .expect("insert attempt");
 

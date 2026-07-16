@@ -1073,6 +1073,11 @@ mod tests {
             session_id: "sess-1".to_string(),
             prompt: "p".to_string(),
             status: "completed".to_string(),
+            runner_provider: "claudeCodeVisible".to_string(),
+            agent_session_id: None,
+            max_turns: 1,
+            stall_timeout_ms: 300_000,
+            completion_contract: "sentinelLine".to_string(),
             created_at: "t".to_string(),
             completed_at: None,
         };
