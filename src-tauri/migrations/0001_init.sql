@@ -107,6 +107,40 @@ CREATE TABLE IF NOT EXISTS workbench_sessions (
     updated_at TEXT NOT NULL
 );
 
+-- workbench_agent_sessions 表：provider-neutral Agent session 运行时最小 metadata
+-- 不存 Prompt/回复/terminal bytes/transcript path/env/credential；native_session_id 仅 owner-local
+CREATE TABLE IF NOT EXISTS workbench_agent_sessions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    worktree_id TEXT,
+    terminal_session_id TEXT NOT NULL,
+    orchestrator_task_id TEXT,
+    orchestrator_attempt INTEGER,
+    provider_id TEXT NOT NULL,
+    native_session_id TEXT,
+    phase TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    ended_at TEXT,
+    outcome_code TEXT,
+    resumed_from_agent_session_id TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1
+);
+
+-- 每个 terminal 至多一个 active Agent session
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workbench_agent_sessions_active_terminal
+    ON workbench_agent_sessions(terminal_session_id) WHERE is_active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_workbench_agent_sessions_project
+    ON workbench_agent_sessions(project_id, last_activity_at DESC, id);
+
+CREATE INDEX IF NOT EXISTS idx_workbench_agent_sessions_worktree
+    ON workbench_agent_sessions(worktree_id, last_activity_at DESC, id);
+
+CREATE INDEX IF NOT EXISTS idx_workbench_agent_sessions_activity
+    ON workbench_agent_sessions(last_activity_at DESC, id);
+
 -- workbench_browser_targets 表：项目/worktree 最近一次浏览器预览目标 URL
 CREATE TABLE IF NOT EXISTS workbench_browser_targets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

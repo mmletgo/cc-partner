@@ -19,7 +19,8 @@ use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
-    SshTargetRepo, TransferRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+    SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
+    WorkbenchProjectRepo, WorkbenchSessionRepo,
     WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
@@ -382,6 +383,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     WorkbenchSessionRepo::new(pool.clone())
         .ensure_schema()
         .await?;
+    // A1 Agent session runtime：表 + active-terminal 部分唯一索引
+    WorkbenchAgentSessionRepo::ensure_schema(&pool).await?;
     OrchestratorRepo::init_schema(&pool).await?;
     Ok(pool)
 }
@@ -469,6 +472,10 @@ pub async fn build_app_state_with_role(
         pool.clone(),
         maintenance_gate.clone(),
     ));
+    let workbench_agent_session_repo = Arc::new(WorkbenchAgentSessionRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::with_gate(
         pool.clone(),
         maintenance_gate.clone(),
@@ -516,6 +523,7 @@ pub async fn build_app_state_with_role(
         cc_history_repo,
         workbench_project_repo,
         workbench_session_repo,
+        workbench_agent_session_repo,
         workbench_worktree_repo,
         workbench_browser_repo,
         workbench_browser_previews,

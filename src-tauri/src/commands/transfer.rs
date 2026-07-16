@@ -357,7 +357,8 @@ mod tests {
     use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
     use crate::storage::{
         ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo, TransferRepo,
-        WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+        WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
+        WorkbenchWorktreeRepo,
     };
     use crate::transfer::registry::TransferRegistry;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -447,6 +448,7 @@ mod tests {
             cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
             workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
             workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
+            workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
             workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
             workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
             workbench_browser_previews: Arc::new(

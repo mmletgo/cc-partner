@@ -20,6 +20,7 @@ pub mod sync_delete_sequence_repo;
 pub mod sync_request_ledger_repo;
 pub mod sync_watermark_repo;
 pub mod transfer_repo;
+pub mod workbench_agent_session_repo;
 pub mod workbench_browser_repo;
 pub mod workbench_project_repo;
 pub mod workbench_session_repo;
@@ -43,6 +44,7 @@ pub use sync_request_ledger_repo::SyncRequestLedgerRepo;
 pub use sync_watermark_repo::SyncWatermarkRepo;
 #[allow(unused_imports)]
 pub use transfer_repo::{SenderClaimOutcome, TransferRepo};
+pub use workbench_agent_session_repo::WorkbenchAgentSessionRepo;
 pub use workbench_browser_repo::WorkbenchBrowserRepo;
 pub use workbench_project_repo::WorkbenchProjectRepo;
 pub use workbench_session_repo::WorkbenchSessionRepo;

@@ -28,8 +28,8 @@ use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
-    TransferRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo, WorkbenchSessionRepo,
-    WorkbenchWorktreeRepo,
+    TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
+    WorkbenchSessionRepo, WorkbenchWorktreeRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use crate::updater::UpdateRuntime;
@@ -87,6 +87,9 @@ pub struct AppState {
     /// 工作台终端会话元数据仓库（workbench_sessions 表访问，重启恢复终端 tab）
     #[allow(dead_code)]
     pub workbench_session_repo: Arc<WorkbenchSessionRepo>,
+    /// Agent session 运行时仓库（workbench_agent_sessions；provider-neutral lifecycle）
+    #[allow(dead_code)]
+    pub workbench_agent_session_repo: Arc<WorkbenchAgentSessionRepo>,
     /// 工作台 Git worktree 元数据仓库（workbench_worktrees 表访问，重启恢复工作区列表）
     #[allow(dead_code)]
     pub workbench_worktree_repo: Arc<WorkbenchWorktreeRepo>,
