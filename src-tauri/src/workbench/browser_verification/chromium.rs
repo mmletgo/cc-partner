@@ -906,7 +906,6 @@ async fn wait_for_condition(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

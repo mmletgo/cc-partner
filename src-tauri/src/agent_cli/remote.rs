@@ -114,9 +114,10 @@ pub async fn require_remote_device(
             "remote peer health returned non-success",
         ));
     }
-    let health: HealthResponse = response.json().await.map_err(|_| {
-        CliError::unsupported("remote peer health response unparseable or pre-v1")
-    })?;
+    let health: HealthResponse = response
+        .json()
+        .await
+        .map_err(|_| CliError::unsupported("remote peer health response unparseable or pre-v1"))?;
     if !health.ok {
         return Err(CliError::unavailable(
             "peer_offline",
@@ -168,12 +169,8 @@ pub async fn require_remote_capability(
 /// Code Logic（这个函数做什么）:
 ///     委托 `require_remote_capability(..., errors.envelope.v1)`。
 async fn health_v1(base_url: &str, expected_device_id: &str) -> Result<(), CliError> {
-    let _ = require_remote_capability(
-        base_url,
-        expected_device_id,
-        CAPABILITY_ERRORS_ENVELOPE_V1,
-    )
-    .await?;
+    let _ = require_remote_capability(base_url, expected_device_id, CAPABILITY_ERRORS_ENVELOPE_V1)
+        .await?;
     Ok(())
 }
 
@@ -263,11 +260,8 @@ pub async fn remote_query_with_base(
             serde_json::to_value(replay).map_err(|_| CliError::internal("serialize failed"))
         }
         AgentControlQuery::AgentList { project } => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1)
+                .await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             remote_post_json(
                 base_url,
@@ -277,11 +271,8 @@ pub async fn remote_query_with_base(
             .await
         }
         AgentControlQuery::AgentInspect { agent_session_id } => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1)
+                .await?;
             // 必须带 agentSessionId，以便 snapshot 强制纳入终态（completed/failed/disconnected）
             let snap = remote_post_json(
                 base_url,
@@ -299,11 +290,8 @@ pub async fn remote_query_with_base(
             phase,
             timeout_ms,
         } => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1)
+                .await?;
             wait_agent_phase_remote(base_url, &agent_session_id, &phase, timeout_ms).await
         }
         AgentControlQuery::TaskList { project } => {
@@ -312,7 +300,7 @@ pub async fn remote_query_with_base(
                 device_id,
                 CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
             )
-                .await?;
+            .await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let items = RemoteOrchestratorClient::new()
                 .list_tasks(base_url, &project_id)
@@ -321,11 +309,8 @@ pub async fn remote_query_with_base(
             Ok(json!({ "items": items }))
         }
         AgentControlQuery::ExperimentInspect { experiment_id } => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1)
+                .await?;
             remote_post_json(
                 base_url,
                 "/api/orchestrator/experiments/get",
@@ -334,19 +319,12 @@ pub async fn remote_query_with_base(
             .await
         }
         AgentControlQuery::AttentionList => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_ATTENTION_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_ATTENTION_V1).await?;
             remote_get_json(base_url, "/api/attention").await
         }
         AgentControlQuery::FleetSnapshot => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_WORKBENCH_LAN_FLEET_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_WORKBENCH_LAN_FLEET_V1)
+                .await?;
             Err(CliError::unsupported(
                 "fleet snapshot over recursive remote is unsupported",
             ))
@@ -372,7 +350,7 @@ pub async fn remote_query_with_base(
                 device_id,
                 CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
             )
-                .await?;
+            .await?;
             let run = RemoteWorkbenchClient::new()
                 .get_browser_verification(base_url, &run_id)
                 .await
@@ -461,7 +439,7 @@ pub async fn remote_mutate_with_base(
                 device_id,
                 CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
             )
-                .await?;
+            .await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let req = build_remote_create_task_req(&project_id, &payload, client_request_id)?;
             let task = RemoteOrchestratorClient::new()
@@ -495,11 +473,8 @@ pub async fn remote_mutate_with_base(
             payload,
             client_request_id,
         } => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1)
+                .await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let mut body = payload;
             if let Some(obj) = body.as_object_mut() {
@@ -515,11 +490,8 @@ pub async fn remote_mutate_with_base(
             winner_task_id,
             reason,
         } => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1)
+                .await?;
             remote_post_json(
                 base_url,
                 "/api/orchestrator/experiments/approve-winner",
@@ -532,11 +504,8 @@ pub async fn remote_mutate_with_base(
             .await
         }
         AgentControlMutation::ExperimentCancel { experiment_id } => {
-            require_remote_capability(
-                base_url,
-                device_id,
-                CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
-            ).await?;
+            require_remote_capability(base_url, device_id, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1)
+                .await?;
             remote_post_json(
                 base_url,
                 "/api/orchestrator/experiments/cancel",
@@ -553,7 +522,7 @@ pub async fn remote_mutate_with_base(
                 device_id,
                 CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
             )
-                .await?;
+            .await?;
             let preview_id = payload
                 .get("previewId")
                 .and_then(|v| v.as_str())
