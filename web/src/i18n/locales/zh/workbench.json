@@ -606,6 +606,21 @@
     "exited": "已退出",
     "disconnected": "已断开"
   },
+  "statusAgent": "Agent",
+  "agentPhase": {
+    "launching": "Agent 启动中",
+    "working": "Agent 工作中",
+    "needsInput": "Agent 等待输入",
+    "idle": "Agent 空闲",
+    "completed": "Agent 已完成",
+    "failed": "Agent 运行失败",
+    "disconnected": "Agent 已断开"
+  },
+  "agentFreshness": {
+    "cached": "缓存",
+    "offline": "离线",
+    "unsupported": "不支持"
+  },
   "inspectorTabs": "工作台右侧栏",
   "filesTitle": "项目文件夹",
   "refreshFiles": "刷新文件",

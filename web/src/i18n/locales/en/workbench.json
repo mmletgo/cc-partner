@@ -613,6 +613,21 @@
     "exited": "Exited",
     "disconnected": "Disconnected"
   },
+  "statusAgent": "Agent",
+  "agentPhase": {
+    "launching": "Agent launching",
+    "working": "Agent working",
+    "needsInput": "Agent needs input",
+    "idle": "Agent idle",
+    "completed": "Agent completed",
+    "failed": "Agent failed",
+    "disconnected": "Agent disconnected"
+  },
+  "agentFreshness": {
+    "cached": "Cached",
+    "offline": "Offline",
+    "unsupported": "Unsupported"
+  },
   "inspectorTabs": "Workbench inspector",
   "filesTitle": "Project folder",
   "refreshFiles": "Refresh files",

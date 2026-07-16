@@ -13,10 +13,18 @@
 import { useCallback } from 'react';
 import type { KeyboardEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button } from '@/components/primitives';
+import { Button, Pill } from '@/components/primitives';
 import { PlusIcon, XIcon } from '@/lib/icons';
 import { getRovingTabIndex, type RovingTabKey } from '@/lib/rovingTablist';
 import type { WorkbenchSession } from '@/lib/types';
+import type { AgentSessionProjection } from '@/lib/types/agentRuntime';
+import {
+  agentFreshnessI18nKey,
+  agentPhaseI18nKey,
+  agentPhaseTone,
+  agentProviderShortLabel,
+  agentStatusAriaLabel,
+} from './agentPhasePresentation';
 import styles from './Workbench.module.css';
 
 const NEW_SESSION_BUTTON_ID = 'workbench-session-tab-new';
@@ -67,14 +75,20 @@ export interface WorkbenchSessionTabsProps {
   onFocusSession: (sessionId: string) => void;
   onCloseSession: (sessionId: string) => Promise<void>;
   onCreateSession: () => void;
+  /**
+   * 按 terminal session 解析最新 Agent 投影（无则不展示 Agent 状态）。
+   * 由页面 useAgentRuntime.latestAgentForTerminal 注入；点击仅 onFocusSession。
+   */
+  resolveAgent?: (sessionId: string) => AgentSessionProjection | null;
 }
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   用户在 Workbench 顶部切换/关闭/新建 terminal window，键盘用户需要 roving tab 语义。
+ *   用户在 Workbench 顶部切换/关闭/新建 terminal window，键盘用户需要 roving tab 语义；
+ *   若存在 Agent 投影则低噪音展示 provider + phase。
  *
  * Code Logic（这个组件做什么）:
- *   渲染 tablist + 新建按钮；处理 Arrow/Home/End 与 close 后焦点。
+ *   渲染 tablist + 新建按钮；处理 Arrow/Home/End 与 close 后焦点；可选 Agent Pill。
  */
 export function WorkbenchSessionTabs({
   sessions,
@@ -84,6 +98,7 @@ export function WorkbenchSessionTabs({
   onFocusSession,
   onCloseSession,
   onCreateSession,
+  resolveAgent,
 }: WorkbenchSessionTabsProps): ReactElement {
   const { t } = useTranslation(['workbench']);
 
@@ -148,6 +163,14 @@ export function WorkbenchSessionTabs({
     <div className={styles.sessionTabs} role="tablist" aria-label={t('workbench:terminalTabs')}>
       {sessions.map((session) => {
         const selected = session.id === activeSessionId;
+        const agent = resolveAgent?.(session.id) ?? null;
+        const phaseLabel = agent
+          ? t(`workbench:${agentPhaseI18nKey(agent.phase)}`)
+          : null;
+        const freshnessKey = agent ? agentFreshnessI18nKey(agent.freshness) : null;
+        const freshnessLabel = freshnessKey ? t(`workbench:${freshnessKey}`) : null;
+        const agentAria =
+          agent && phaseLabel ? agentStatusAriaLabel(agent, phaseLabel) : null;
         return (
           <div
             key={session.id}
@@ -166,6 +189,31 @@ export function WorkbenchSessionTabs({
             >
               <span className={styles.sessionDot} data-status={session.status} />
               <span className={styles.sessionName}>{session.name}</span>
+              {agent && phaseLabel ? (
+                <span
+                  className={styles.sessionAgentStatus}
+                  role="status"
+                  aria-label={agentAria ?? phaseLabel}
+                  title={agentAria ?? phaseLabel}
+                  onClick={(event) => {
+                    // 点击状态只聚焦已有 terminal，不打开新面板、不发送输入。
+                    event.stopPropagation();
+                    onFocusSession(session.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onFocusSession(session.id);
+                    }
+                  }}
+                >
+                  <Pill tone={agentPhaseTone(agent.phase)} dot>
+                    {agentProviderShortLabel(agent.providerId)} · {phaseLabel}
+                    {freshnessLabel ? ` · ${freshnessLabel}` : null}
+                  </Pill>
+                </span>
+              ) : null}
             </button>
             <Button
               variant="icon"

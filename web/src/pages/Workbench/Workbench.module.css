@@ -643,6 +643,31 @@
   background: var(--danger);
 }
 
+/* Agent phase 投影：低噪音，无 working 动画 */
+.sessionAgentStatus {
+  display: inline-flex;
+  align-items: center;
+  max-width: 14rem;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: auto;
+}
+
+.sessionAgentStatus :global(span) {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionAgentStatus {
+    transition: none;
+  }
+}
+
 .terminalArea {
   position: relative;
   min-width: 0;

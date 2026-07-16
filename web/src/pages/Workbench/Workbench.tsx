@@ -56,6 +56,7 @@ import { useWorkbenchAutomationController } from './controllers/useWorkbenchAuto
 import { useWorkbenchPromptOptimizerController } from './controllers/useWorkbenchPromptOptimizerController';
 import type { PromptOptimizerConfigLoadResult } from './controllers/useWorkbenchPromptOptimizerController';
 import { useWorkbenchSessionSearchController } from './controllers/useWorkbenchSessionSearchController';
+import { useAgentRuntime } from '@/hooks/useAgentRuntime';
 import { WorkbenchTerminalArea } from './WorkbenchTerminalArea';
 import { WorkbenchInspector } from './WorkbenchInspector';
 import type { WorkbenchInspectorTab } from './WorkbenchInspector';
@@ -157,6 +158,8 @@ export function Workbench() {
     desktopUnavailableMessage,
     canListenToTauriEvents,
   });
+  // A2 Agent 投影：listener-first handshake；非第 8 个 Workbench controller，仅 selector 供 tab/status。
+  const { latestAgentForTerminal } = useAgentRuntime(activeProjectId);
   const {
     scopedSessions,
     activeSession,
@@ -867,6 +870,7 @@ export function Workbench() {
                   onCreateSession={() => {
                     void handleCreateSession();
                   }}
+                  resolveAgent={latestAgentForTerminal}
                 />
               }
               actions={
@@ -1124,6 +1128,9 @@ export function Workbench() {
           handleRenameSession={handleRenameSession}
           handleCloseSession={handleCloseSession}
           runtimeVisible={runtimeVisible}
+          activeAgent={
+            activeSessionId ? latestAgentForTerminal(activeSessionId) : null
+          }
         />
 
         <WorkbenchInspector

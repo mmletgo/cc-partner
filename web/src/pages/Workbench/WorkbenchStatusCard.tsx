@@ -16,6 +16,13 @@ import { useTranslation } from 'react-i18next';
 import { Button, Card, Input, Pill } from '@/components/primitives';
 import { EditIcon, XIcon } from '@/lib/icons';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import type { AgentSessionProjection } from '@/lib/types/agentRuntime';
+import {
+  agentFreshnessI18nKey,
+  agentPhaseI18nKey,
+  agentPhaseTone,
+  agentProviderShortLabel,
+} from './agentPhasePresentation';
 import styles from './Workbench.module.css';
 import { SessionRuntimeText } from './SessionRuntimeText';
 
@@ -73,6 +80,8 @@ export interface WorkbenchStatusCardProps {
    * 由 Workbench 从既有 active 状态派生（如 !terminalFullscreen），不使用 IntersectionObserver。
    */
   runtimeVisible: boolean;
+  /** 当前 active terminal 的 Agent 投影（无则不展示 Agent 行）。 */
+  activeAgent?: AgentSessionProjection | null;
 }
 
 /**
@@ -95,6 +104,7 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     handleRenameSession,
     handleCloseSession,
     runtimeVisible,
+    activeAgent = null,
   } = props;
 
   const emptyValue = t('workbench:emptyValue');
@@ -108,7 +118,24 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
           : activeSession.status
     : t('workbench:sessionStatus.none');
 
-  // Business Logic: 11 行元信息以 (label key, value) 数组驱动；runtime 行挂叶子 SessionRuntimeText 自持时钟。
+  const agentPhaseLabel = activeAgent
+    ? t(`workbench:${agentPhaseI18nKey(activeAgent.phase)}`)
+    : null;
+  const agentFreshnessKey = activeAgent
+    ? agentFreshnessI18nKey(activeAgent.freshness)
+    : null;
+  const agentStatusValue =
+    activeAgent && agentPhaseLabel
+      ? [
+          agentProviderShortLabel(activeAgent.providerId),
+          agentPhaseLabel,
+          agentFreshnessKey ? t(`workbench:${agentFreshnessKey}`) : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : emptyValue;
+
+  // Business Logic: 元信息以 (label key, value) 数组驱动；runtime 行挂叶子 SessionRuntimeText 自持时钟。
   const rows: Array<{ label: string; value: ReactNode }> = [
     { label: t('workbench:statusDevice'), value: activeProject?.deviceName ?? emptyValue },
     { label: t('workbench:statusProject'), value: activeProject?.name ?? emptyValue },
@@ -117,6 +144,17 @@ export function WorkbenchStatusCard(props: WorkbenchStatusCardProps) {
     { label: t('workbench:statusSession'), value: activeSession?.name ?? emptyValue },
     { label: t('workbench:statusCommand'), value: activeSession?.command ?? emptyValue },
     { label: t('workbench:statusState'), value: sessionStatusLabel },
+    {
+      label: t('workbench:statusAgent'),
+      value:
+        activeAgent && agentPhaseLabel ? (
+          <Pill tone={agentPhaseTone(activeAgent.phase)} dot>
+            {agentStatusValue}
+          </Pill>
+        ) : (
+          emptyValue
+        ),
+    },
     {
       label: t('workbench:statusRuntime'),
       value: (
