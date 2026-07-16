@@ -685,6 +685,19 @@ export interface WorkbenchTerminalStatusEvent {
 }
 
 /**
+ * Workbench HTTP Agent runtime 事件 payload。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   Mobile 需要与桌面同一份 phase 投影（capability workbench.agent-runtime.v1）。
+ *
+ * Code Logic（字段说明）:
+ *   对齐 Rust WorkbenchAgentRuntimePayload：仅 agentSession DTO。
+ */
+export interface WorkbenchAgentRuntimeHttpPayload {
+  agentSession: import('./agentRuntime').AgentSessionRuntimeDto;
+}
+
+/**
  * Workbench HTTP NDJSON 事件。
  *
  * Business Logic（为什么需要这个类型）:
@@ -692,12 +705,14 @@ export interface WorkbenchTerminalStatusEvent {
  *
  * Code Logic（类型说明）:
  *   对齐 Rust `#[serde(tag="type", content="payload", rename_all="camelCase")]`；
- *   terminalOutput/status 复用桌面事件 payload，mergeProgress 复用已有阶段进度 payload。
+ *   terminalOutput/status 复用桌面事件 payload，mergeProgress 复用已有阶段进度 payload，
+ *   agentRuntime 为 A1 投影。
  */
 export type WorkbenchHttpEvent =
   | { type: 'terminalOutput'; payload: WorkbenchTerminalOutputEvent }
   | { type: 'terminalStatus'; payload: WorkbenchTerminalStatusEvent }
-  | { type: 'mergeProgress'; payload: WorkbenchMergeProgressEvent };
+  | { type: 'mergeProgress'; payload: WorkbenchMergeProgressEvent }
+  | { type: 'agentRuntime'; payload: WorkbenchAgentRuntimeHttpPayload };
 
 /**
  * Claude session 搜索命中结果（对齐后端 SessionSearchHitDto，camelCase）。

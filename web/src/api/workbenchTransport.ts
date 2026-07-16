@@ -27,6 +27,7 @@ import type {
   WorkbenchSessionReplay,
   WorkbenchWorktree,
   PromptOptimizerFillLanguage,
+  AgentRuntimeSnapshot,
 } from '@/lib/types';
 
 /**
@@ -168,6 +169,18 @@ export interface WorkbenchTransport {
       },
     ) => Promise<{ ok: boolean; sessionId: string }>;
   };
+  /**
+   * Agent runtime 投影（可选：旧 transport 实现可省略）。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   Desktop/Mobile 共享 snapshot 拉取语义，供 A2 handshake 使用。
+   *
+   * Code Logic（字段说明）:
+   *   getSnapshot 可选 projectId 过滤 active sessions。
+   */
+  agentRuntime?: {
+    getSnapshot: (projectId?: string | null) => Promise<AgentRuntimeSnapshot>;
+  };
 }
 
 /**
@@ -261,6 +274,9 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
   git: {
     listCommits: (projectId, worktreeId, limit) =>
       workbenchApi.git.listCommits(projectId, worktreeId, limit),
+  },
+  agentRuntime: {
+    getSnapshot: (projectId) => workbenchApi.agentRuntime.getSnapshot(projectId),
   },
   browser: {
     discover: (projectId, worktreeId) =>

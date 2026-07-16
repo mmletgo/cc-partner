@@ -9,13 +9,15 @@
  *   lifecycle AbortController + 每连接 child controller；35s watchdog 仅 abort 子连接并重连。
  */
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type {
   WorkbenchHttpEvent,
   WorkbenchMergeProgressEvent,
   WorkbenchTerminalOutputEvent,
   WorkbenchTerminalStatusEvent,
 } from '@/lib/types';
+import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
+import { agentSessionRuntimeDtoDecoder } from '@/lib/schemas/agentRuntime';
 import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 /** 断线后重连延迟（毫秒）。 */
@@ -39,33 +41,39 @@ export interface WorkbenchNdjsonParserState {
 }
 
 /**
- * NDJSON 帧：业务事件或 heartbeat。
+ * NDJSON 帧：业务事件、heartbeat 或未知 type（忽略）。
  *
  * Business Logic（为什么需要这个类型）:
- *   heartbeat 不是业务事件，但必须重置 watchdog；parser 需在业务解码前识别。
+ *   heartbeat 不是业务事件，但必须重置 watchdog；未知 type 不得断开流。
  *
  * Code Logic（联合形态）:
- *   event 携带 WorkbenchHttpEvent；heartbeat 携带 RFC3339 sentAt。
+ *   event 携带 WorkbenchHttpEvent；heartbeat 携带 RFC3339 sentAt；ignored 供前向兼容。
  */
 export type WorkbenchNdjsonFrame =
   | { kind: 'event'; event: WorkbenchHttpEvent }
-  | { kind: 'heartbeat'; sentAt: string };
+  | { kind: 'heartbeat'; sentAt: string }
+  | { kind: 'ignored'; type: string };
 
 /**
  * Workbench HTTP 事件 hook 参数。
  *
  * Business Logic（为什么需要这个接口）:
- *   移动端只应在启用 HTTP transport 时连接 NDJSON，并把输出写入传入的终端 buffer store。
+ *   移动端只应在启用 HTTP transport 时连接 NDJSON，并把输出写入传入的终端 buffer store；
+ *   terminalStatus/agentRuntime 由页面 reducer 消费，不写 terminal buffer。
  *
  * Code Logic（字段说明）:
  *   store 接收 terminalOutput；enabled 控制连接生命周期；
- *   reconnectDelayMs/watchdogMs 供测试注入。
+ *   onTerminalStatus/onAgentRuntime 可选回调；reconnectDelayMs/watchdogMs 供测试注入。
  */
 export interface UseWorkbenchHttpEventsOptions {
   store: WorkbenchTerminalBufferStore;
   enabled: boolean;
   reconnectDelayMs?: number;
   watchdogMs?: number;
+  /** terminalStatus 实时回调（Mobile tab 状态）。 */
+  onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
+  /** agentRuntime 实时回调（Agent phase 投影）。 */
+  onAgentRuntime?: (payload: { agentSession: AgentSessionRuntimeDto }) => void;
 }
 
 /**
@@ -131,6 +139,25 @@ function isMergeProgressPayload(value: unknown): value is WorkbenchMergeProgress
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   agentRuntime 是 A2 投影源；结构错误时必须协议失败，不得 silent 写坏 phase。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用 agentSessionRuntimeDtoDecoder 严格解码 payload.agentSession。
+ */
+function isAgentRuntimePayload(
+  value: unknown,
+): value is { agentSession: AgentSessionRuntimeDto } {
+  if (!isRecord(value) || !('agentSession' in value)) return false;
+  try {
+    agentSessionRuntimeDtoDecoder.decode(value.agentSession);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   server 每 15s 发送 typed heartbeat，parser 必须在业务解码前识别以免当未知事件抛错。
  *
  * Code Logic（这个函数做什么）:
@@ -146,7 +173,8 @@ function isHeartbeatFrame(value: unknown): value is { type: 'heartbeat'; sentAt:
  *   parser 需要把 JSON.parse 的 unknown 值缩窄成业务事件或 heartbeat。
  *
  * Code Logic（这个函数做什么）:
- *   先识别 heartbeat；再按 serde tag `type` 分支校验 payload；不支持或结构错误时抛出 Error。
+ *   先识别 heartbeat；再按 serde tag `type` 分支校验 payload；
+ *   未知 type → ignored（不重连）；已知 type 但 payload 畸形 → 抛 Error。
  */
 export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame {
   if (isHeartbeatFrame(value)) {
@@ -156,17 +184,43 @@ export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame 
     throw new Error('Workbench HTTP event 缺少 type');
   }
 
-  if (value.type === 'terminalOutput' && isTerminalOutputPayload(value.payload)) {
+  if (value.type === 'terminalOutput') {
+    if (!isTerminalOutputPayload(value.payload)) {
+      throw new Error('Workbench HTTP event terminalOutput payload 非法');
+    }
     return { kind: 'event', event: { type: value.type, payload: value.payload } };
   }
-  if (value.type === 'terminalStatus' && isTerminalStatusPayload(value.payload)) {
+  if (value.type === 'terminalStatus') {
+    if (!isTerminalStatusPayload(value.payload)) {
+      throw new Error('Workbench HTTP event terminalStatus payload 非法');
+    }
     return { kind: 'event', event: { type: value.type, payload: value.payload } };
   }
-  if (value.type === 'mergeProgress' && isMergeProgressPayload(value.payload)) {
+  if (value.type === 'mergeProgress') {
+    if (!isMergeProgressPayload(value.payload)) {
+      throw new Error('Workbench HTTP event mergeProgress payload 非法');
+    }
     return { kind: 'event', event: { type: value.type, payload: value.payload } };
+  }
+  if (value.type === 'agentRuntime') {
+    if (!isAgentRuntimePayload(value.payload)) {
+      throw new Error('Workbench HTTP event agentRuntime payload 非法');
+    }
+    return {
+      kind: 'event',
+      event: {
+        type: 'agentRuntime',
+        payload: {
+          agentSession: agentSessionRuntimeDtoDecoder.decode(
+            (value.payload as { agentSession: unknown }).agentSession,
+          ),
+        },
+      },
+    };
   }
 
-  throw new Error(`不支持的 Workbench HTTP event: ${value.type}`);
+  // 未知 type：前向兼容，不抛错、不重连
+  return { kind: 'ignored', type: value.type };
 }
 
 /**
@@ -211,24 +265,37 @@ export function parseWorkbenchNdjsonChunk(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   终端输出事件可能高频到达，移动端必须写入外部 store，而不是进入 React state 触发整页重渲染。
+ *   终端输出事件可能高频到达，移动端必须写入外部 store；status/agent 走回调。
  *
  * Code Logic（这个函数做什么）:
- *   仅消费 terminalOutput 事件并调用 store.append；其它事件暂时保留给后续 UI。
+ *   terminalOutput → store.append；terminalStatus/agentRuntime → 可选回调。
  */
 function consumeWorkbenchHttpEvent(
   store: WorkbenchTerminalBufferStore,
   event: WorkbenchHttpEvent,
+  callbacks: {
+    onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
+    onAgentRuntime?: (payload: { agentSession: AgentSessionRuntimeDto }) => void;
+  },
 ): void {
-  if (event.type !== 'terminalOutput') return;
-  store.append(event.payload.sessionId, event.payload.chunk);
+  if (event.type === 'terminalOutput') {
+    store.append(event.payload.sessionId, event.payload.chunk);
+    return;
+  }
+  if (event.type === 'terminalStatus') {
+    callbacks.onTerminalStatus?.(event.payload);
+    return;
+  }
+  if (event.type === 'agentRuntime') {
+    callbacks.onAgentRuntime?.(event.payload);
+  }
 }
 
 /**
  * useWorkbenchHttpEvents（移动端 Workbench HTTP 事件订阅）
  *
  * Business Logic（为什么需要这个 hook）:
- *   `/mobile` 页面需要持续接收同源 HTTP NDJSON terminal 输出，半开连接需 heartbeat watchdog 后重连。
+ *   `/mobile` 页面需要持续接收同源 HTTP NDJSON terminal 输出与 agent 状态，半开连接需 heartbeat watchdog 后重连。
  *
  * Code Logic（这个 hook 做什么）:
  *   lifecycle AbortController 覆盖 hook 生命周期；每次 connect 新建 child controller；
@@ -239,7 +306,16 @@ export function useWorkbenchHttpEvents({
   enabled,
   reconnectDelayMs = WORKBENCH_HTTP_EVENT_RECONNECT_DELAY_MS,
   watchdogMs = WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
+  onTerminalStatus,
+  onAgentRuntime,
 }: UseWorkbenchHttpEventsOptions): void {
+  const onTerminalStatusRef = useRef(onTerminalStatus);
+  const onAgentRuntimeRef = useRef(onAgentRuntime);
+  useEffect(() => {
+    onTerminalStatusRef.current = onTerminalStatus;
+    onAgentRuntimeRef.current = onAgentRuntime;
+  }, [onTerminalStatus, onAgentRuntime]);
+
   useEffect(() => {
     if (!enabled) return undefined;
 
@@ -326,10 +402,13 @@ export function useWorkbenchHttpEvents({
           if (!value) continue;
           const chunk = decoder.decode(value, { stream: true });
           parseWorkbenchNdjsonFrames(parserState, chunk).forEach((frame) => {
-            // 业务帧与 heartbeat 都重置 watchdog。
+            // 业务帧与 heartbeat 都重置 watchdog；ignored 也重置（仍是合法 NDJSON 行）。
             resetWatchdog();
             if (frame.kind === 'event') {
-              consumeWorkbenchHttpEvent(store, frame.event);
+              consumeWorkbenchHttpEvent(store, frame.event, {
+                onTerminalStatus: onTerminalStatusRef.current,
+                onAgentRuntime: onAgentRuntimeRef.current,
+              });
             }
           });
         }
@@ -339,7 +418,10 @@ export function useWorkbenchHttpEvents({
           parseWorkbenchNdjsonFrames(parserState, trailingChunk).forEach((frame) => {
             resetWatchdog();
             if (frame.kind === 'event') {
-              consumeWorkbenchHttpEvent(store, frame.event);
+              consumeWorkbenchHttpEvent(store, frame.event, {
+                onTerminalStatus: onTerminalStatusRef.current,
+                onAgentRuntime: onAgentRuntimeRef.current,
+              });
             }
           });
         }

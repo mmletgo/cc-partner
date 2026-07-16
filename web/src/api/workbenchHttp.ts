@@ -52,7 +52,8 @@ import {
   workbenchMutationOperationDecoder,
   workbenchRemoveResultDecoder,
 } from '@/lib/schemas/workbench';
-import type { WorkbenchMutationOperation } from '@/lib/types';
+import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
+import type { AgentRuntimeSnapshot, WorkbenchMutationOperation } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from './workbench';
 import type { OrchestratorCreateAction } from './orchestrator';
 import {
@@ -754,6 +755,22 @@ export const httpOrchestratorTransport = {
     postJson<OrchestratorRuntimeSnapshot>('/api/mobile/orchestrator/runtime-snapshot', {
         projectId,
       }, { policy: { kind: 'query' }, decoder: orchestratorRuntimeSnapshotDecoder }),
+
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   Mobile/A2 handshake 需要同源拉取 Agent runtime snapshot baseline（capability workbench.agent-runtime.v1）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   POST `/api/workbench/agent-runtime/snapshot`，body 可选 `{projectId}`，解码 AgentRuntimeSnapshot。
+   */
+  getAgentRuntimeSnapshot: (
+    projectId?: string | null,
+  ): Promise<AgentRuntimeSnapshot> =>
+    postJson<AgentRuntimeSnapshot>(
+      '/api/workbench/agent-runtime/snapshot',
+      projectId ? { projectId } : {},
+      { policy: { kind: 'query' }, decoder: agentRuntimeSnapshotDecoder },
+    ),
 } as const;
 
 /**
@@ -959,6 +976,9 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         },
         { policy: { kind: 'longMutation' } },
       ),
+  },
+  agentRuntime: {
+    getSnapshot: (projectId) => workbenchHttp.getAgentRuntimeSnapshot(projectId),
   },
 };
 

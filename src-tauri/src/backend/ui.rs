@@ -126,9 +126,10 @@ pub async fn run_gui_owner_event_relay(ui: Arc<dyn BackendUi>, cancel: Cancellat
                             owner_instance_id,
                             sequence,
                         } => {
-                            // 运营通知需要附带 owner/sequence，供 GUI handshake 按游标 baseline/dedupe。
+                            // 运营通知与 Agent runtime 需要附带 owner/sequence，供 GUI handshake 按游标 baseline/dedupe。
                             if event
                                 == crate::orchestrator::notifications::OPERATIONAL_NOTIFICATION_EVENT
+                                || event == "workbench:agent-runtime"
                             {
                                 let mut enriched = match payload {
                                     serde_json::Value::Object(map) => map,

@@ -30,6 +30,7 @@ import {
   workbenchWorktreeDecoder,
   workbenchWorktreesDecoder,
 } from '@/lib/schemas/workbench';
+import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
 import type {
   ResumeClaudeSessionResult,
   SessionPreview,
@@ -49,7 +50,14 @@ import type {
   WorkbenchSqlitePreview,
   WorkbenchWorktree,
 } from '@/lib/types';
+import type { AgentRuntimeSnapshot } from '@/lib/types/agentRuntime';
 import type { WorkbenchLaunchSummaryWire } from '@/lib/types';
+
+/** Agent runtime Tauri live event 名（对齐 A1 emit_agent_runtime_changed）。 */
+export const WORKBENCH_AGENT_RUNTIME_EVENT = 'workbench:agent-runtime' as const;
+
+/** N1 runtime gap Tauri event 名（owner 切换/ring gap 时重 handshake）。 */
+export const BACKEND_RUNTIME_GAP_EVENT = 'backend:runtime-gap' as const;
 
 interface WorkbenchTerminalSize {
   cols: number;
@@ -658,5 +666,30 @@ export const workbenchApi = {
         worktreeId: worktreeId ?? null,
         path,
       }),
+  },
+
+  /**
+   * Agent runtime 投影（A1 snapshot + A2 handshake 消费）。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   Desktop Gap 恢复与进入项目需要 owner 权威 active Agent baseline。
+   *
+   * Code Logic（这个分组做什么）:
+   *   invokeDecoded get_agent_runtime_snapshot，可选 projectId 过滤。
+   */
+  agentRuntime: {
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   listener-first handshake 在注册后必须拉 snapshot 建立 asOfSequence baseline。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded `get_agent_runtime_snapshot` → AgentRuntimeSnapshot。
+     */
+    getSnapshot: (projectId?: string | null): Promise<AgentRuntimeSnapshot> =>
+      invokeDecoded(
+        'get_agent_runtime_snapshot',
+        { projectId: projectId ?? null },
+        agentRuntimeSnapshotDecoder,
+      ),
   },
 };

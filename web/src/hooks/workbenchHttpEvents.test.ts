@@ -90,6 +90,39 @@ describe('workbenchHttpEvents', () => {
     expect(eventsOnly).toHaveLength(1);
     expect(eventsOnly[0]?.type).toBe('terminalOutput');
   });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   旧 mobile 遇到新 event type 不得断开 stream；agentRuntime 合法 payload 必须可解析。
+   *
+   * Code Logic（这个测试做什么）:
+   *   未知 type → ignored；合法 agentRuntime → event；畸形 agentRuntime → throw。
+   */
+  test('ignores unknown event types and parses agentRuntime', () => {
+    const state: WorkbenchNdjsonParserState = { pending: '' };
+    const unknownChunk = '{"type":"futureFeature","payload":{"x":1}}\n';
+    const frames = parseWorkbenchNdjsonFrames(state, unknownChunk);
+    expect(frames).toEqual([{ kind: 'ignored', type: 'futureFeature' }]);
+
+    const agentChunk =
+      '{"type":"agentRuntime","payload":{"agentSession":{"id":"a1","projectId":"p1","terminalSessionId":"t1","providerId":"claudeCodeVisible","phase":"needsInput","version":2,"startedAt":"2026-07-15T00:00:00.000Z","lastActivityAt":"2026-07-15T00:01:00.000Z","isActive":true}}}\n';
+    const agentFrames = parseWorkbenchNdjsonFrames({ pending: '' }, agentChunk);
+    expect(agentFrames).toHaveLength(1);
+    expect(agentFrames[0]?.kind).toBe('event');
+    if (agentFrames[0]?.kind === 'event') {
+      expect(agentFrames[0].event.type).toBe('agentRuntime');
+      if (agentFrames[0].event.type === 'agentRuntime') {
+        expect(agentFrames[0].event.payload.agentSession.phase).toBe('needsInput');
+      }
+    }
+
+    expect(() =>
+      parseWorkbenchNdjsonFrames(
+        { pending: '' },
+        '{"type":"agentRuntime","payload":{"agentSession":{"id":"a"}}}\n',
+      ),
+    ).toThrow(/agentRuntime/);
+  });
 });
 
 describe('workbenchHttpEvents watchdog contract', () => {
