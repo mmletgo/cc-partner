@@ -161,11 +161,7 @@ impl AgentLedgerRetentionTask {
 ///
 /// Code Logic（这个函数做什么）:
 ///     最多 64 轮（64×500=32k）调用 cleanup_agent_ledger_batch；错误则 warn 并中止本轮。
-async fn cleanup_until_caught_up(
-    repo: &AgentLedgerRepo,
-    clock: &dyn RetentionClock,
-    label: &str,
-) {
+async fn cleanup_until_caught_up(repo: &AgentLedgerRepo, clock: &dyn RetentionClock, label: &str) {
     const MAX_ROUNDS: u32 = 64;
     let mut total_deleted: u64 = 0;
     for round in 0..MAX_ROUNDS {

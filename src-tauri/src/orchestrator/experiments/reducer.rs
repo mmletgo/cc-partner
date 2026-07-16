@@ -90,10 +90,7 @@ pub async fn mark_candidate_running(
 ///
 /// Code Logic（这个函数做什么）:
 ///     非终态且非 CandidateReady → Failed；再 reduce_experiment。
-pub async fn mark_candidate_failed(
-    repo: &OrchestratorRepo,
-    task_id: &str,
-) -> Result<(), AppError> {
+pub async fn mark_candidate_failed(repo: &OrchestratorRepo, task_id: &str) -> Result<(), AppError> {
     let Some(cand) = repo.get_candidate_by_task(task_id).await? else {
         return Ok(());
     };
@@ -454,20 +451,12 @@ mod tests {
         repo.set_candidate_outcome(&exp_id, "task-2", CandidateOutcome::Running)
             .await
             .unwrap();
-        sync_candidate_with_task_terminal(
-            &repo,
-            "task-1",
-            OrchestratorTaskStatus::Blocked,
-        )
-        .await
-        .unwrap();
-        sync_candidate_with_task_terminal(
-            &repo,
-            "task-2",
-            OrchestratorTaskStatus::Blocked,
-        )
-        .await
-        .unwrap();
+        sync_candidate_with_task_terminal(&repo, "task-1", OrchestratorTaskStatus::Blocked)
+            .await
+            .unwrap();
+        sync_candidate_with_task_terminal(&repo, "task-2", OrchestratorTaskStatus::Blocked)
+            .await
+            .unwrap();
         let c1 = repo.get_candidate_by_task("task-1").await.unwrap().unwrap();
         let c2 = repo.get_candidate_by_task("task-2").await.unwrap().unwrap();
         assert_eq!(c1.outcome, CandidateOutcome::Failed);
@@ -490,13 +479,9 @@ mod tests {
         repo.set_candidate_outcome(&exp_id, "task-2", CandidateOutcome::Running)
             .await
             .unwrap();
-        sync_candidate_with_task_terminal(
-            &repo,
-            "task-2",
-            OrchestratorTaskStatus::Blocked,
-        )
-        .await
-        .unwrap();
+        sync_candidate_with_task_terminal(&repo, "task-2", OrchestratorTaskStatus::Blocked)
+            .await
+            .unwrap();
         let c2 = repo.get_candidate_by_task("task-2").await.unwrap().unwrap();
         assert_eq!(c2.outcome, CandidateOutcome::Failed);
         let exp = repo.get_experiment(&exp_id).await.unwrap();

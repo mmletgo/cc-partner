@@ -199,10 +199,11 @@ impl AgentLedgerRepo {
     /// Code Logic（这个函数做什么）:
     ///     SELECT cleared_before FROM agent_ledger_clear_watermark WHERE id=1。
     pub async fn get_clear_watermark(&self) -> Result<Option<String>, AppError> {
-        let row: Option<String> =
-            sqlx::query_scalar("SELECT cleared_before FROM agent_ledger_clear_watermark WHERE id = 1")
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<String> = sqlx::query_scalar(
+            "SELECT cleared_before FROM agent_ledger_clear_watermark WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.filter(|s| !s.trim().is_empty()))
     }
 
