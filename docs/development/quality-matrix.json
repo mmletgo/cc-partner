@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-07-15",
+  "updatedAt": "2026-07-16",
   "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
   "entries": [
     {
@@ -851,6 +851,49 @@
         "docs/prd.md",
         "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
       ]
+    },
+    {
+      "id": "L1-WORKSPACE-RESTORE-001",
+      "surface": "workbench-workspace-safe-restore",
+      "level": "L1",
+      "tests": [
+        "src-tauri/src/workbench/workspace_layout.rs",
+        "src-tauri/src/workbench/workspace_restore.rs",
+        "src-tauri/src/storage/workbench_workspace_layout_repo.rs",
+        "web/src/pages/Workbench/workspaceLayout.test.ts",
+        "web/src/pages/Workbench/workspaceRestore.test.ts",
+        "web/src/pages/Workbench/views/WorkspaceRestoreNotice.test.tsx",
+        "web/src/pages/Workbench/views/WorkspaceSnapshotDialog.test.tsx"
+      ],
+      "command": "cd src-tauri && cargo test --locked workbench::workspace_layout --lib && cargo test --locked workbench::workspace_restore --lib && cargo test --locked storage::workbench_workspace_layout --lib; cd ../web && npm test -- workspaceLayout.test.ts workspaceRestore.test.ts WorkspaceRestoreNotice WorkspaceSnapshotDialog",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "full multi-device mDNS",
+        "GUI restart fixture"
+      ],
+      "status": "VERIFIED",
+      "notes": "preflight/safe_attach counters for tmux new-session/window, terminal write, agent spawn/resume must remain 0; layout schema v1 CAS"
+    },
+    {
+      "id": "E2E-WORKSPACE-RESTORE-001",
+      "surface": "workbench-workspace-safe-restore",
+      "level": "L2",
+      "tests": [
+        "web/tests/workspace-safe-restore.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- workspace-safe-restore.spec.ts",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "OS-specific tmux attach on Windows/WSL"
+      ],
+      "status": "NOT VERIFIED",
+      "notes": "planned Playwright restart/partial/remote offline paths; keep NOT VERIFIED until fixture wired"
     }
   ]
 }

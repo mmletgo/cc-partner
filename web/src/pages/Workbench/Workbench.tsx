@@ -65,6 +65,9 @@ import { WorkbenchWorktreeBar } from './WorkbenchWorktreeBar';
 import { WorkbenchLaunchSurface } from './WorkbenchLaunchSurface';
 import { activeWorktreeRootPath, DEFAULT_WORKTREE_BRANCH_PREFIX } from './workbenchWorktrees';
 import type { WorkbenchFileWorkspaceView } from './workbenchFiles';
+import { useWorkspaceSafeRestore } from './useWorkspaceSafeRestore';
+import { WorkspaceRestoreNotice } from './views/WorkspaceRestoreNotice';
+import { WorkspaceSnapshotDialog } from './views/WorkspaceSnapshotDialog';
 
 /**
  * Business Logic（为什么需要这个组件）:
@@ -628,6 +631,34 @@ export function Workbench() {
     '--prompt-panel-top': `${promptPanelPosition.top}px`,
   } as CSSProperties;
 
+  const {
+    restoreSummary,
+    dismissRestoreNotice,
+    snapshotOpen,
+    setSnapshotOpen,
+    namedSnapshots,
+    openSnapshotDialog,
+    saveNamedSnapshot,
+    applyNamedSnapshot,
+    deleteNamedSnapshot,
+  } = useWorkspaceSafeRestore({
+    projectsLoading,
+    projectsLength: projects.length,
+    activeProjectId,
+    activeWorktreeId,
+    activeSessionId,
+    workspaceView,
+    inspectorTab,
+    dirtyEditor: fileTabs.some((tab) => tab.dirty),
+    activeProjectIdRef,
+    activeWorktreeIdRef,
+    selectProjectFromDeepLink,
+    setActiveWorktreeId,
+    focusSession,
+    setWorkspaceView,
+    setInspectorTab,
+  });
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   零项目空态主 CTA 复用侧栏/rail 同一套「添加本机项目」流程，避免另起一套。
@@ -695,6 +726,18 @@ export function Workbench() {
   return (
     <div className={styles.page}>
       <main className={styles.centerPane}>
+        <WorkspaceRestoreNotice
+          summary={restoreSummary}
+          onDismiss={dismissRestoreNotice}
+        />
+        <WorkspaceSnapshotDialog
+          open={snapshotOpen}
+          onClose={() => setSnapshotOpen(false)}
+          snapshots={namedSnapshots}
+          onSaveCurrent={saveNamedSnapshot}
+          onApply={applyNamedSnapshot}
+          onDelete={deleteNamedSnapshot}
+        />
         <section className={styles.workspaceHeader}>
           <div className={styles.workspaceTitleGroup}>
             <div>
@@ -706,6 +749,14 @@ export function Workbench() {
             </div>
           </div>
           <div className={styles.workspaceHeaderActions}>
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              onClick={openSnapshotDialog}
+            >
+              现场快照
+            </Button>
             <div className={styles.projectAutomationMeta}>
               <span>{t('workbench:projectAutomation.scope')}</span>
               <strong>
