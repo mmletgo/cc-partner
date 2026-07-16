@@ -865,6 +865,14 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 post(workbench::agent_runtime_snapshot).layer(DefaultBodyLimit::max(64 * 1024)),
             )
             .route(
+                "/api/workbench/workspace/restore/preflight",
+                post(workbench::workspace_restore_preflight),
+            )
+            .route(
+                "/api/workbench/workspace/restore/safe-attach",
+                post(workbench::workspace_restore_safe_attach),
+            )
+            .route(
                 "/api/workbench/sessions/list",
                 post(workbench::list_workbench_sessions),
             )

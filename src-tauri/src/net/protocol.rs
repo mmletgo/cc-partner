@@ -170,22 +170,23 @@ pub const CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2: &str =
 ///     remote/mobile 在拉取 Agent phase snapshot 前必须确认对端已实现
 ///     `POST /api/workbench/agent-runtime/snapshot` 与 events 变体；旧 peer 显示 unsupported，
 ///     不得回退为 Claude session 猜测。本 token 只做版本协商，不是 LAN 鉴权。
-///
 /// Code Logic（这个常量做什么）:
 ///     字符串常量，列入 `server_protocol_info()`；与 snapshot 路由原子上线。
 pub const CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1: &str = "workbench.agent-runtime.v1";
 
 /// 能力 token：v1 Workbench 浏览器自动验证
 /// （`POST /api/workbench/browser-verification/{create,get,cancel,artifact}`）。
-///
-/// Business Logic（为什么需要这个 token）:
 ///     remote/mobile 在调用 owner 验证路由前必须确认对端已实现该契约；
 ///     旧 peer 缺失时显示 unsupported，不得回退为不安全 iframe DOM 访问。
-///
-/// Code Logic（这个常量做什么）:
 ///     与四条路由原子上线；列入 `server_protocol_info()`。
 pub const CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1: &str =
     "workbench.browser-verification.v1";
+/// 能力 token：Workbench workspace safe restore（owner-local preflight + safe attach）。
+///     控制设备在转发 remote project 的 preflight/safe-attach 前必须确认 owner 支持
+///     纯读 preflight 与仅 attach 已有 tmux 的契约；旧 peer 缺失时只恢复 project selection。
+///     字符串常量，列入 `server_protocol_info()`；client `supports` 门控。
+pub const CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1: &str =
+    "workbench.workspace-safe-restore.v1";
 
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
@@ -252,6 +253,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1.to_string(),
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
+            CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1.to_string(),
         ],
     }
 }
@@ -415,6 +417,7 @@ mod tests {
                 "workbench.browser-verification.v1".to_string(),
                 "workbench.mutation-outcome.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
+                "workbench.workspace-safe-restore.v1".to_string(),
             ]
         );
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
@@ -426,6 +429,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2));
+        assert!(info.supports(CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1));
     }
 
     /// Business Logic（为什么需要这个测试）:

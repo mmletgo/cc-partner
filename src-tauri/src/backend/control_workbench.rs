@@ -424,6 +424,70 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(items)?)
         }
+        "browser.create_preview" => {
+            let project_id = required_string(&payload, "projectId")?;
+            let worktree_id = optional_string(&payload, "worktreeId");
+            let target_url = required_string(&payload, "targetUrl")?;
+            let item = workbench::create_workbench_browser_preview_for_state(
+                state,
+                project_id,
+                worktree_id,
+                target_url,
+            )
+            .await?;
+            Ok(serde_json::to_value(item)?)
+        }
+
+        // ---- workspace layout / safe restore ----
+        "layout.get" => {
+            let slot_key = optional_string(&payload, "slotKey")
+                .unwrap_or_else(|| crate::workbench::workspace_layout::desktop_auto_slot_key().to_string());
+            let item = workbench::get_workspace_layout_for_state(state, &slot_key).await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "layout.save" => {
+            let draft: crate::workbench::workspace_layout::WorkspaceLayoutDraft =
+                serde_json::from_value(
+                    payload
+                        .get("draft")
+                        .cloned()
+                        .ok_or_else(|| AppError::validation("draft required".to_string()))?,
+                )?;
+            let expected_revision = payload
+                .get("expectedRevision")
+                .and_then(|v| v.as_u64());
+            let item =
+                workbench::save_workspace_layout_for_state(state, draft, expected_revision).await?;
+            Ok(serde_json::to_value(item)?)
+        }
+        "layout.listNamed" => {
+            let items = workbench::list_named_workspace_layouts_for_state(state).await?;
+            Ok(serde_json::to_value(items)?)
+        }
+        "layout.deleteNamed" => {
+            let id = required_string(&payload, "id")?;
+            workbench::delete_named_workspace_layout_for_state(state, &id).await?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        "layout.preflight" => {
+            let slot_key = optional_string(&payload, "slotKey");
+            let layout_id = optional_string(&payload, "layoutId");
+            let plan =
+                workbench::preflight_workspace_restore_for_state(state, slot_key, layout_id).await?;
+            Ok(serde_json::to_value(plan)?)
+        }
+        "layout.apply" => {
+            let plan: crate::workbench::workspace_restore::WorkspaceRestorePlan =
+                serde_json::from_value(
+                    payload
+                        .get("plan")
+                        .cloned()
+                        .ok_or_else(|| AppError::validation("plan required".to_string()))?,
+                )?;
+            let result = workbench::apply_workspace_restore_for_state(state, plan).await?;
+            Ok(serde_json::to_value(result)?)
+        }
+
         "browser.verification.start" => {
             let req: crate::commands::workbench::StartBrowserVerificationReq =
                 serde_json::from_value(payload.clone()).map_err(|e| {
@@ -460,20 +524,6 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(dto)?)
         }
-        "browser.create_preview" => {
-            let project_id = required_string(&payload, "projectId")?;
-            let worktree_id = optional_string(&payload, "worktreeId");
-            let target_url = required_string(&payload, "targetUrl")?;
-            let item = workbench::create_workbench_browser_preview_for_state(
-                state,
-                project_id,
-                worktree_id,
-                target_url,
-            )
-            .await?;
-            Ok(serde_json::to_value(item)?)
-        }
-
         // ---- agent runtime ----
         "agent_runtime.snapshot" => {
             let project_id = optional_string(&payload, "projectId");

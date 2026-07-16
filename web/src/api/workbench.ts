@@ -313,6 +313,61 @@ export const workbenchApi = {
       invoke('get_workbench_browser_verification_artifact', { runId, artifactId }),
   },
 
+  /**
+   * workspace layout / safe restore。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   自动保存结构现场与启动 preflight/apply；layout 无 terminal 正文/命令字段。
+   *
+   * Code Logic（这个分组做什么）:
+   *   invoke get/save/list/delete/preflight/apply 对应 Rust layout 命令。
+   */
+  layout: {
+    /** 按 slot 读取 layout（默认 desktop:auto）。 */
+    get: (slotKey?: string | null) =>
+      invoke<import('@/pages/Workbench/workspaceLayout').WorkspaceLayout | null>(
+        'get_workspace_layout',
+        { slotKey: slotKey ?? null },
+      ),
+
+    /** CAS 保存 layout。 */
+    save: (
+      draft: import('@/pages/Workbench/workspaceLayout').WorkspaceLayoutDraft,
+      expectedRevision: number | null,
+    ) =>
+      invoke<import('@/pages/Workbench/workspaceLayout').WorkspaceLayout>(
+        'save_workspace_layout',
+        { draft, expectedRevision },
+      ),
+
+    /** 列出命名 snapshot。 */
+    listNamed: () =>
+      invoke<import('@/pages/Workbench/workspaceLayout').WorkspaceLayout[]>(
+        'list_named_workspace_layouts',
+      ),
+
+    /** 删除命名 snapshot。 */
+    deleteNamed: (id: string) =>
+      invoke<void>('delete_named_workspace_layout', { id }),
+
+    /** side-effect-free preflight。 */
+    preflight: (slotKey?: string | null, layoutId?: string | null) =>
+      invoke<import('@/pages/Workbench/workspaceRestore').WorkspaceRestorePlan>(
+        'preflight_workspace_restore_cmd',
+        { slotKey: slotKey ?? null, layoutId: layoutId ?? null },
+      ),
+
+    /** 校验 revision 并执行 safeAttach 列表项；返回改写后的 actions（失败 attach→skip）。 */
+    apply: (plan: import('@/pages/Workbench/workspaceRestore').WorkspaceRestorePlan) =>
+      invoke<{
+        restoreId: string;
+        status: string;
+        restoredCount: number;
+        skippedCount: number;
+        actions: import('@/pages/Workbench/workspaceRestore').WorkspaceRestoreAction[];
+      }>('apply_workspace_restore_cmd', { plan }),
+  },
+
   sessions: {
     /**
      * Business Logic（为什么需要这个函数）:

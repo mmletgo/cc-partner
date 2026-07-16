@@ -25,6 +25,7 @@ pub mod workbench_browser_repo;
 pub mod workbench_project_repo;
 pub mod workbench_session_repo;
 pub mod workbench_worktree_repo;
+pub mod workbench_workspace_layout_repo;
 
 pub use cc_history_repo::ClaudeHistoryRepo;
 pub use claude_md_repo::ClaudeMdRepo;
@@ -49,6 +50,7 @@ pub use workbench_browser_repo::WorkbenchBrowserRepo;
 pub use workbench_project_repo::WorkbenchProjectRepo;
 pub use workbench_session_repo::WorkbenchSessionRepo;
 pub use workbench_worktree_repo::WorkbenchWorktreeRepo;
+pub use workbench_workspace_layout_repo::WorkbenchWorkspaceLayoutRepo;
 
 /// 为 prompts / ssh_targets / scratchpad 确保 `delete_epoch INTEGER NOT NULL DEFAULT 0` 列。
 ///

@@ -35,10 +35,13 @@ use crate::workbench::remote_protocol::{
     RemoteMutationOperationReq, RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq,
     RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq,
     RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
-    RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSessionReq, RemoteSplitPaneReq,
-    RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq, RemoteWorktreeReq,
-    RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
+    RemoteSafeAttachReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSessionReq,
+    RemoteSplitPaneReq, RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq,
+    RemoteWorktreeReq, RemoteWorkspaceRestorePreflightReq, RemoteWriteSessionInputReq,
+    ResumeClaudeSessionResult,
 };
+use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
+use crate::net::protocol::CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1;
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -674,6 +677,62 @@ impl RemoteWorkbenchClient {
             )
             .await?;
         Ok(info.supports(capability))
+    }
+
+    /// owner-local workspace restore preflight。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     控制设备 layout 不上传；把 inner IDs 交给 owning device 纯读探测。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先 capability 门控；再 POST `/api/workbench/workspace/restore/preflight`。
+    pub async fn preflight_workspace_restore(
+        &self,
+        base_url: &str,
+        req: &RemoteWorkspaceRestorePreflightReq,
+    ) -> Result<WorkspaceRestorePlan, AppError> {
+        if !self
+            .peer_supports_capability(base_url, CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1)
+            .await?
+        {
+            return Err(AppError::unavailable(
+                "capability_unsupported:workbench.workspace-safe-restore.v1".to_string(),
+            ));
+        }
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/workspace/restore/preflight"),
+            req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// owner-local safe attach。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     apply 时由 owning device 幂等 attach 已有 tmux target。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability 门控后 POST `/api/workbench/workspace/restore/safe-attach`。
+    pub async fn safe_attach_session(
+        &self,
+        base_url: &str,
+        req: &RemoteSafeAttachReq,
+    ) -> Result<SafeAttachResult, AppError> {
+        if !self
+            .peer_supports_capability(base_url, CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1)
+            .await?
+        {
+            return Err(AppError::unavailable(
+                "capability_unsupported:workbench.workspace-safe-restore.v1".to_string(),
+            ));
+        }
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/workspace/restore/safe-attach"),
+            req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
     }
 
     /// 列出远端 worktree 的 Git 提交。

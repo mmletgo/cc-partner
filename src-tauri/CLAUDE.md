@@ -597,3 +597,6 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 - **serde 对齐前端**：所有返回给前端的 struct 用 `#[serde(rename_all = "camelCase")]`。
 - **迁移参照**：各模块移植自 Python 版（M10 已删除），算法逻辑（向量时钟、选区、分块协议）逐字等价；各 M1–M8 节的"对照 Python xxx"注释是迁移期的行为基线说明，保留作设计意图记录。
 - **事件替代 Qt 信号**：后端 `app_handle.emit("transfer:progress", ...)` 等，前端 `listen(...)`。
+
+
+- **Workspace safe restore**：`workbench/workspace_layout.rs` + `storage/workbench_workspace_layout_repo.rs`（`workbench_workspace_layouts`，slot `desktop:auto` / `named:<uuid>`，schemaVersion=1，revision CAS）；`workbench/workspace_restore.rs` preflight 纯读（select|reuse|safeAttach|skip），`safe_attach` 仅 attach 已存在 tmux（禁止 new-session/window、raw PTY、terminal write、agent resume；claim 自旋失败且无 registry → `safe_attach_claim_busy`，**禁止**无 claim fallthrough / 误 release 他人 claim）；`sessions.list` → `restore_persisted_sessions` → `registry.restore()` 默认 **skip-missing**（缺失 tmux target / raw PTY 标 disconnected，**绝不** `create_tmux_window` / raw PTY 回退；只有用户显式新建终端才 create）；capability `workbench.workspace-safe-restore.v1`；P2P `POST /api/workbench/workspace/restore/{preflight,safe-attach}` owner-local only（`local_project_required`）。

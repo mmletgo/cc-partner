@@ -20,7 +20,7 @@ use crate::state::AppState;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
     SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
-    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use serde::Deserialize;
@@ -295,6 +295,10 @@ const WORKBENCH_BROWSER_TARGET_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_workbench_browser_targets_project
     ON workbench_browser_targets(project_id, updated_at DESC)";
 
+/// Workbench 工作现场 layout 表（auto slot + 命名 snapshot，revision CAS）。
+const WORKBENCH_WORKSPACE_LAYOUT_SCHEMA: &str =
+    crate::storage::workbench_workspace_layout_repo::WORKBENCH_WORKSPACE_LAYOUT_SCHEMA;
+
 /// 初始化数据库连接池：开启 WAL，手动建表，返回 SqlitePool。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -373,6 +377,9 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     sqlx::query(WORKBENCH_BROWSER_TARGET_INDEX)
         .execute(&pool)
         .await?;
+    sqlx::query(WORKBENCH_WORKSPACE_LAYOUT_SCHEMA)
+        .execute(&pool)
+        .await?;
     sqlx::query(crate::workbench::operation_ledger::WORKBENCH_MUTATION_OPERATIONS_SCHEMA)
         .execute(&pool)
         .await?;
@@ -384,6 +391,9 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
         .await?;
     // A1 Agent session runtime：表 + active-terminal 部分唯一索引
     WorkbenchAgentSessionRepo::ensure_schema(&pool).await?;
+    WorkbenchWorkspaceLayoutRepo::new(pool.clone())
+        .ensure_schema()
+        .await?;
     OrchestratorRepo::init_schema(&pool).await?;
     Ok(pool)
 }
@@ -483,6 +493,10 @@ pub async fn build_app_state_with_role(
         pool.clone(),
         maintenance_gate.clone(),
     ));
+    let workbench_workspace_layout_repo = Arc::new(WorkbenchWorkspaceLayoutRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let workbench_browser_previews =
         Arc::new(crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new());
     let browser_verification = Arc::new(
@@ -541,6 +555,7 @@ pub async fn build_app_state_with_role(
         workbench_agent_session_repo,
         workbench_worktree_repo,
         workbench_browser_repo,
+        workbench_workspace_layout_repo,
         workbench_browser_previews,
         browser_verification,
         workbench_sessions,

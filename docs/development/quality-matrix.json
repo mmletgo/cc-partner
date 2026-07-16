@@ -4,203 +4,6 @@
   "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
   "entries": [
     {
-      "id": "L0-RUNTIME-SCHEMA-001",
-      "surface": "runtime-schema",
-      "level": "L0",
-      "tests": [
-        "web/src/lib/runtimeSchema.test.ts",
-        "web/src/lib/schemas/attention.test.ts",
-        "web/src/lib/schemas/config.test.ts",
-        "web/src/lib/schemas/orchestrator.test.ts",
-        "web/src/lib/schemas/protocol.test.ts",
-        "web/src/lib/schemas/transfer.test.ts",
-        "web/src/lib/schemas/workbench.test.ts",
-        "web/src/api/transfer.test.ts",
-        "web/src/pages/Transfer/transferHistory.test.ts"
-      ],
-      "command": "cd web && npm test -- src/lib/runtimeSchema.test.ts src/lib/schemas",
-      "ciJob": "frontend-unit",
-      "platforms": [
-        "node-linux"
-      ],
-      "exclusions": [
-        "Tauri WebView IPC host",
-        "real multi-host LAN payloads"
-      ],
-      "docs": [
-        "docs/development/testing.md"
-      ]
-    },
-    {
-      "id": "E2E-TRANSFER-001",
-      "surface": "transfer",
-      "level": "L1",
-      "tests": [
-        "web/tests/transfer.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- transfer.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux"
-      ],
-      "exclusions": [
-        "real Tauri file dialog",
-        "multi-host LAN transfer",
-        "packaged desktop GUI",
-        "1 GiB dual-host resume (see L3-DUAL-HOST-LAN-001)"
-      ],
-      "docs": [
-        "docs/development/testing.md",
-        "docs/prd.md",
-        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
-      ]
-    },
-    {
-      "id": "E2E-SCRATCH-001",
-      "surface": "scratchpad",
-      "level": "L1",
-      "tests": [
-        "web/tests/scratchpad.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- scratchpad.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux"
-      ],
-      "exclusions": [
-        "real tray/GUI close path",
-        "multi-device scratchpad sync"
-      ],
-      "docs": [
-        "docs/development/testing.md"
-      ]
-    },
-    {
-      "id": "E2E-PROMPTS-001",
-      "surface": "prompts",
-      "level": "L1",
-      "tests": [
-        "web/tests/prompts.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- prompts.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux"
-      ],
-      "exclusions": [
-        "real P2P prompt sync",
-        "packaged desktop GUI"
-      ],
-      "docs": [
-        "docs/development/testing.md"
-      ]
-    },
-    {
-      "id": "E2E-PERM-001",
-      "surface": "permissions",
-      "level": "L1",
-      "tests": [
-        "web/tests/permissions.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- permissions.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux"
-      ],
-      "exclusions": [
-        "real macOS permission dialogs",
-        "system notification center",
-        "accessibility/input monitoring prompts"
-      ],
-      "docs": [
-        "docs/development/testing.md"
-      ]
-    },
-    {
-      "id": "E2E-SETTINGS-001",
-      "surface": "settings",
-      "level": "L1",
-      "tests": [
-        "web/tests/settings.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- settings.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux"
-      ],
-      "exclusions": [
-        "real updater install/restart",
-        "real dependency install side effects"
-      ],
-      "docs": [
-        "docs/development/testing.md"
-      ]
-    },
-    {
-      "id": "E2E-WORKBENCH-001",
-      "surface": "workbench",
-      "level": "L1",
-      "tests": [
-        "web/tests/workbench.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- workbench.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux"
-      ],
-      "exclusions": [
-        "real native PTY/tmux host",
-        "multi-host remote project ownership",
-        "packaged WebView"
-      ],
-      "docs": [
-        "docs/development/testing.md"
-      ]
-    },
-    {
-      "id": "E2E-MOBILE-001",
-      "surface": "mobile-workbench",
-      "level": "L1",
-      "tests": [
-        "web/tests/mobile-workbench.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- mobile-workbench.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux-viewport-390x844"
-      ],
-      "exclusions": [
-        "phone QR second-device browser",
-        "real multi-host mobile relay",
-        "identity auth (product has none)"
-      ],
-      "docs": [
-        "docs/development/testing.md"
-      ]
-    },
-    {
-      "id": "E2E-LAN-001",
-      "surface": "lan-boundary",
-      "level": "L1",
-      "tests": [
-        "web/tests/lan-boundary.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- lan-boundary.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux"
-      ],
-      "exclusions": [
-        "real ConnectInfo peer classification",
-        "multi-host mDNS discovery",
-        "production public NIC path",
-        "identity auth (product has none)"
-      ],
-      "docs": [
-        "docs/development/testing.md"
-      ]
-    },
-    {
       "id": "E2E-ATTENTION-001",
       "surface": "attention",
       "level": "L1",
@@ -261,6 +64,133 @@
       ]
     },
     {
+      "id": "E2E-LAN-001",
+      "surface": "lan-boundary",
+      "level": "L1",
+      "tests": [
+        "web/tests/lan-boundary.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- lan-boundary.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real ConnectInfo peer classification",
+        "multi-host mDNS discovery",
+        "production public NIC path",
+        "identity auth (product has none)"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-MOBILE-001",
+      "surface": "mobile-workbench",
+      "level": "L1",
+      "tests": [
+        "web/tests/mobile-workbench.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- mobile-workbench.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux-viewport-390x844"
+      ],
+      "exclusions": [
+        "phone QR second-device browser",
+        "real multi-host mobile relay",
+        "identity auth (product has none)"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-ORCHESTRATOR-REVIEW-001",
+      "surface": "orchestrator-review",
+      "level": "L1",
+      "tests": [
+        "web/tests/orchestrator-review-workflow.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- orchestrator-review-workflow.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Tauri notification OS UI",
+        "multi-host deliver",
+        "packaged desktop"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
+      ]
+    },
+    {
+      "id": "E2E-PERM-001",
+      "surface": "permissions",
+      "level": "L1",
+      "tests": [
+        "web/tests/permissions.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- permissions.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real macOS permission dialogs",
+        "system notification center",
+        "accessibility/input monitoring prompts"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-PROMPTS-001",
+      "surface": "prompts",
+      "level": "L1",
+      "tests": [
+        "web/tests/prompts.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- prompts.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real P2P prompt sync",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-SCRATCH-001",
+      "surface": "scratchpad",
+      "level": "L1",
+      "tests": [
+        "web/tests/scratchpad.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- scratchpad.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real tray/GUI close path",
+        "multi-device scratchpad sync"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
       "id": "E2E-SCREENSHOT-OVERLAY-001",
       "surface": "screenshot-overlay",
       "level": "L1",
@@ -281,52 +211,255 @@
       ]
     },
     {
-      "id": "L2-QUALITY-FAULTS-001",
-      "surface": "quality-faults",
-      "level": "L2",
+      "id": "E2E-SETTINGS-001",
+      "surface": "settings",
+      "level": "L1",
       "tests": [
-        "src-tauri/tests/quality_faults.rs"
+        "web/tests/settings.spec.ts"
       ],
-      "command": "cd src-tauri && cargo test --locked --test quality_faults -- --nocapture --test-threads=1",
-      "ciJob": "quality",
+      "command": "cd web && npm run test:e2e -- settings.spec.ts",
+      "ciJob": "frontend-e2e",
       "platforms": [
-        "ubuntu-22.04",
-        "macos-latest",
-        "windows-latest"
+        "chromium-linux"
       ],
       "exclusions": [
-        "real disk-full hardware fault",
-        "production env fault switches",
-        "multi-host LAN (see L2-LAN-TRUST-BOUNDARY-001 / L3-DUAL-HOST-LAN-001)",
-        "GUI / Tauri command host"
-      ],
-      "docs": [
-        "docs/development/testing.md",
-        "docs/development/real-device-certification.md"
-      ]
-    },
-    {
-      "id": "L2-LAN-TRUST-BOUNDARY-001",
-      "surface": "lan-trust-boundary",
-      "level": "L2",
-      "tests": [
-        "src-tauri/tests/lan_trust_boundary_smoke.rs"
-      ],
-      "command": "cd src-tauri && cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1",
-      "ciJob": "smoke",
-      "platforms": [
-        "macos-latest",
-        "windows-latest",
-        "ubuntu-local"
-      ],
-      "exclusions": [
-        "multi-host mDNS discovery",
-        "phone QR second device",
-        "real public-peer production NIC",
-        "identity auth (product has none)"
+        "real updater install/restart",
+        "real dependency install side effects"
       ],
       "docs": [
         "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-TRANSFER-001",
+      "surface": "transfer",
+      "level": "L1",
+      "tests": [
+        "web/tests/transfer.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- transfer.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Tauri file dialog",
+        "multi-host LAN transfer",
+        "packaged desktop GUI",
+        "1 GiB dual-host resume (see L3-DUAL-HOST-LAN-001)"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "E2E-WORKBENCH-001",
+      "surface": "workbench",
+      "level": "L1",
+      "tests": [
+        "web/tests/workbench.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- workbench.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real native PTY/tmux host",
+        "multi-host remote project ownership",
+        "packaged WebView"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "E2E-WORKSPACE-RESTORE-001",
+      "surface": "workbench-workspace-safe-restore",
+      "level": "L2",
+      "tests": [
+        "web/tests/workspace-safe-restore.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- workspace-safe-restore.spec.ts",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "OS-specific tmux attach on Windows/WSL"
+      ],
+      "status": "NOT VERIFIED",
+      "notes": "planned Playwright restart/partial/remote offline paths; keep NOT VERIFIED until fixture wired"
+    },
+    {
+      "id": "L0-ORCHESTRATOR-REVIEW-001",
+      "surface": "orchestrator-review",
+      "level": "L0",
+      "tests": [
+        "web/src/lib/schemas/orchestrator.test.ts",
+        "web/src/api/orchestrator.test.ts",
+        "web/src/pages/Orchestrator/views/OrchestratorTaskDrawer.test.tsx",
+        "web/src/pages/Orchestrator/views/WorkflowWizardDialog.test.tsx",
+        "web/src/hooks/useOperationalNotifications.test.tsx",
+        "web/src/api/operationalNotifications.test.ts",
+        "src-tauri/src/orchestrator/review_diff.rs",
+        "src-tauri/src/orchestrator/notifications.rs"
+      ],
+      "command": "cd web && npm test -- src/lib/schemas/orchestrator.test.ts src/api/orchestrator.test.ts src/pages/Orchestrator/views/OrchestratorTaskDrawer.test.tsx src/pages/Orchestrator/views/WorkflowWizardDialog.test.tsx src/hooks/useOperationalNotifications.test.tsx src/api/operationalNotifications.test.ts && cd ../src-tauri && cargo test --locked orchestrator::review_diff orchestrator::notifications --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04",
+        "node-linux"
+      ],
+      "exclusions": [
+        "full dual-host deliver",
+        "real OS notification UI",
+        "packaged desktop WebView"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/p2p-protocol.md",
+        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
+      ]
+    },
+    {
+      "id": "L0-RUNTIME-SCHEMA-001",
+      "surface": "runtime-schema",
+      "level": "L0",
+      "tests": [
+        "web/src/lib/runtimeSchema.test.ts",
+        "web/src/lib/schemas/attention.test.ts",
+        "web/src/lib/schemas/config.test.ts",
+        "web/src/lib/schemas/orchestrator.test.ts",
+        "web/src/lib/schemas/protocol.test.ts",
+        "web/src/lib/schemas/transfer.test.ts",
+        "web/src/lib/schemas/workbench.test.ts",
+        "web/src/api/transfer.test.ts",
+        "web/src/pages/Transfer/transferHistory.test.ts"
+      ],
+      "command": "cd web && npm test -- src/lib/runtimeSchema.test.ts src/lib/schemas",
+      "ciJob": "frontend-unit",
+      "platforms": [
+        "node-linux"
+      ],
+      "exclusions": [
+        "Tauri WebView IPC host",
+        "real multi-host LAN payloads"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L0-SYNC-CONTENT-VERSIONS-001",
+      "surface": "content-versions-tombstone-gc",
+      "level": "L0",
+      "tests": [
+        "src-tauri/src/storage/content_version_repo.rs",
+        "src-tauri/src/storage/deletion_floor_repo.rs",
+        "src-tauri/src/storage/sync_watermark_repo.rs",
+        "src-tauri/src/sync/merger.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --lib content_version deletion_floor sync_watermark concurrent_text_keeps_conflict_copy",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "live multi-peer GC over 90 days wall clock"
+      ],
+      "docs": [
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L0-TRANSFER-RECOVERY-001",
+      "surface": "transfer-recovery",
+      "level": "L0",
+      "tests": [
+        "web/src/lib/schemas/transfer.test.ts",
+        "web/src/api/transfer.test.ts",
+        "web/src/pages/Transfer/transferHistory.test.ts",
+        "web/src/components/domain/TransferItem/TransferItem.test.tsx",
+        "web/src/pages/Transfer/Transfer.test.tsx",
+        "src-tauri/src/models/transfer.rs",
+        "src-tauri/src/storage/transfer_repo.rs",
+        "src-tauri/src/transfer/sender.rs"
+      ],
+      "command": "cd web && npm test -- src/lib/schemas/transfer.test.ts src/api/transfer.test.ts src/pages/Transfer/transferHistory.test.ts src/components/domain/TransferItem/TransferItem.test.tsx src/pages/Transfer/Transfer.test.tsx --run && cd ../src-tauri && cargo test --locked models::transfer storage::transfer_repo transfer::sender --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04",
+        "node-linux"
+      ],
+      "exclusions": [
+        "real multi-host LAN transfer",
+        "1 GiB dual-host disconnect/resume (see L3-DUAL-HOST-LAN-001)",
+        "packaged desktop Open/Reveal OS dialogs"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/p2p-protocol.md",
+        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L1-WORKSPACE-RESTORE-001",
+      "surface": "workbench-workspace-safe-restore",
+      "level": "L1",
+      "tests": [
+        "src-tauri/src/workbench/workspace_layout.rs",
+        "src-tauri/src/workbench/workspace_restore.rs",
+        "src-tauri/src/storage/workbench_workspace_layout_repo.rs",
+        "web/src/pages/Workbench/workspaceLayout.test.ts",
+        "web/src/pages/Workbench/workspaceRestore.test.ts",
+        "web/src/pages/Workbench/views/WorkspaceRestoreNotice.test.tsx",
+        "web/src/pages/Workbench/views/WorkspaceSnapshotDialog.test.tsx"
+      ],
+      "command": "cd src-tauri && cargo test --locked workbench::workspace_layout --lib && cargo test --locked workbench::workspace_restore --lib && cargo test --locked storage::workbench_workspace_layout --lib; cd ../web && npm test -- workspaceLayout.test.ts workspaceRestore.test.ts WorkspaceRestoreNotice WorkspaceSnapshotDialog",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "full multi-device mDNS",
+        "GUI restart fixture"
+      ],
+      "status": "VERIFIED",
+      "notes": "preflight/safe_attach counters for tmux new-session/window, terminal write, agent spawn/resume must remain 0; layout schema v1 CAS"
+    },
+    {
+      "id": "L2-AGENT-RUNTIME-001",
+      "surface": "agent-session-runtime",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/storage/workbench_agent_session_repo.rs",
+        "src-tauri/src/workbench/agent_runtime/osc.rs",
+        "src-tauri/src/workbench/agent_runtime/reducer.rs",
+        "src-tauri/src/workbench/agent_runtime/snapshot.rs",
+        "src-tauri/src/workbench/remote_events.rs",
+        "src-tauri/src/orchestrator/agent_runtime_bridge.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked workbench::agent_runtime --lib && cargo test --locked orchestrator::agent_runtime_bridge --lib && cargo test --locked workbench_agent_session --lib && cargo test --locked workbench::remote_events --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "provider adapter launch (A3+)",
+        "Fleet UI / history analytics (A6/A9)",
+        "dual-host multi-device agent projection soak"
+      ],
+      "docs": [
+        "docs/prd.md",
+        "docs/p2p-protocol.md",
+        "docs/development/backend-operations.md",
+        "docs/superpowers/specs/2026-07-15-agent-session-runtime-design.md"
       ]
     },
     {
@@ -374,6 +507,116 @@
       ]
     },
     {
+      "id": "L2-BACKUP-RESTORE-001",
+      "surface": "backup-export-restore",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/backup/archive.rs",
+        "src-tauri/src/backup/restore.rs",
+        "src-tauri/src/storage/maintenance_gate.rs",
+        "src-tauri/src/storage/recovery_job_repo.rs",
+        "src-tauri/tests/backup_restore_smoke.rs",
+        "web/src/api/sync.test.ts",
+        "web/src/pages/Settings/Settings.test.tsx"
+      ],
+      "command": "cd src-tauri && cargo test --locked --lib backup:: storage::maintenance_gate:: storage::recovery_job && cargo test --locked --test backup_restore_smoke -- --nocapture --test-threads=1 && cd ../web && npm test -- sync.test.ts Settings.test.tsx --run",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "full sidecar process kill/restart export-restore black-box",
+        "secret scanner on production archives",
+        "cross-host restore"
+      ],
+      "docs": [
+        "docs/development/backend-operations.md",
+        "docs/prd.md",
+        "docs/p2p-protocol.md",
+        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L2-BROWSER-VERIFICATION-001",
+      "surface": "browser-verification",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/workbench/browser_verification/models.rs",
+        "src-tauri/src/workbench/browser_verification/runtime.rs",
+        "src-tauri/src/workbench/browser_verification/artifact_store.rs",
+        "src-tauri/src/commands/workbench/browser_verification.rs",
+        "src-tauri/src/net/routes/browser_verification.rs",
+        "src-tauri/src/orchestrator/browser_verification.rs",
+        "src-tauri/tests/browser_verification_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked browser_verification --lib && cargo test --locked --test browser_verification_smoke -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04",
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "real multi-host LAN owner relay",
+        "release matrix managed Chromium packaging (see L3-BROWSER-VERIFICATION-001)",
+        "iframe allow-same-origin (must remain absent)"
+      ],
+      "docs": [
+        "docs/superpowers/specs/2026-07-15-browser-verification-surface-design.md",
+        "docs/development/testing.md",
+        "docs/p2p-protocol.md"
+      ]
+    },
+    {
+      "id": "L2-LAN-TRUST-BOUNDARY-001",
+      "surface": "lan-trust-boundary",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/lan_trust_boundary_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1",
+      "ciJob": "smoke",
+      "platforms": [
+        "macos-latest",
+        "windows-latest",
+        "ubuntu-local"
+      ],
+      "exclusions": [
+        "multi-host mDNS discovery",
+        "phone QR second device",
+        "real public-peer production NIC",
+        "identity auth (product has none)"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L2-ORCHESTRATOR-REVIEW-001",
+      "surface": "orchestrator-review",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/runtime_authority_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test runtime_authority_smoke operational_notification_relay -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "full dual-host Human Review deliver",
+        "real OS notification UI",
+        "packaged multi-process GUI",
+        "review_diff collector end-to-end git worktree (covered at L0 lib tests)"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/p2p-protocol.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
+      ]
+    },
+    {
       "id": "L2-PTY-SMOKE-001",
       "surface": "native-pty",
       "level": "L2",
@@ -395,25 +638,28 @@
       ]
     },
     {
-      "id": "L2-TRANSACTIONAL-RUNTIME-001",
-      "surface": "transactional-runtime",
+      "id": "L2-QUALITY-FAULTS-001",
+      "surface": "quality-faults",
       "level": "L2",
       "tests": [
-        "src-tauri/tests/transactional_runtime_smoke.rs"
+        "src-tauri/tests/quality_faults.rs"
       ],
-      "command": "cd src-tauri && cargo test --locked --test transactional_runtime_smoke -- --nocapture --test-threads=1",
-      "ciJob": "smoke",
+      "command": "cd src-tauri && cargo test --locked --test quality_faults -- --nocapture --test-threads=1",
+      "ciJob": "quality",
       "platforms": [
+        "ubuntu-22.04",
         "macos-latest",
         "windows-latest"
       ],
       "exclusions": [
-        "real disk full",
-        "real updater install/restart",
-        "GUI global shortcut conflicts"
+        "real disk-full hardware fault",
+        "production env fault switches",
+        "multi-host LAN (see L2-LAN-TRUST-BOUNDARY-001 / L3-DUAL-HOST-LAN-001)",
+        "GUI / Tauri command host"
       ],
       "docs": [
-        "docs/development/testing.md"
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
       ]
     },
     {
@@ -446,6 +692,143 @@
         "docs/p2p-protocol.md",
         "docs/prd.md",
         "docs/superpowers/specs/2026-07-14-runtime-authority-and-operational-diagnostics-design.md"
+      ]
+    },
+    {
+      "id": "L2-SYNC-MANIFEST-V2-001",
+      "surface": "content-sync-manifest-v2",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/sync/protocol.rs",
+        "src-tauri/src/sync/engine.rs",
+        "src-tauri/src/sync/apply_merge.rs",
+        "src-tauri/src/net/peer_client.rs",
+        "src-tauri/src/net/routes/sync.rs",
+        "src-tauri/src/net/protocol.rs",
+        "web/src/api/sync.test.ts",
+        "web/src/pages/Settings/Settings.test.tsx"
+      ],
+      "command": "cd src-tauri && cargo test --locked --lib sync::protocol sync::engine sync::apply_merge net::peer_client::tests net::routes::sync net::protocol && cd ../web && npm test -- sync.test.ts Settings.test.tsx --run",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "live multi-host peer exchange",
+        "full process kill/restart export-restore black-box",
+        "CC History paged protocol (cc-history.paged-sync.v1)"
+      ],
+      "docs": [
+        "docs/p2p-protocol.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L2-TRANSACTIONAL-RUNTIME-001",
+      "surface": "transactional-runtime",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/transactional_runtime_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test transactional_runtime_smoke -- --nocapture --test-threads=1",
+      "ciJob": "smoke",
+      "platforms": [
+        "macos-latest",
+        "windows-latest"
+      ],
+      "exclusions": [
+        "real disk full",
+        "real updater install/restart",
+        "GUI global shortcut conflicts"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ]
+    },
+    {
+      "id": "L2-TRANSFER-RECOVERY-001",
+      "surface": "transfer-recovery",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/transfer_recovery_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test transfer_recovery_smoke -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "ubuntu-22.04"
+      ],
+      "exclusions": [
+        "1 GiB dual-host disconnect/restart/resume/SHA (see L3-DUAL-HOST-LAN-001)",
+        "packaged GUI Open/Reveal",
+        "real public multi-NIC peer path",
+        "Mac-only N8 as dual-host substitute"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md",
+        "docs/p2p-protocol.md",
+        "docs/prd.md",
+        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
+      ]
+    },
+    {
+      "id": "L3-BROWSER-VERIFICATION-001",
+      "surface": "browser-verification-managed-chromium",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: prepare-browser-runtime all platforms + real chrome-headless-shell screenshot on macos/windows/ubuntu release targets",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "hosted runner substitute",
+        "FakeEngine-only unit path"
+      ],
+      "docs": [
+        "scripts/browser-runtime-lock.json",
+        "docs/development/backend-operations.md",
+        "docs/development/testing.md"
+      ],
+      "status": "NOT VERIFIED"
+    },
+    {
+      "id": "L3-DUAL-HOST-LAN-001",
+      "surface": "dual-host-lan",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: two physical hosts mDNS + credential-free R/W + boundary reject + 1GiB transfer disconnect mid-stream + process restart + resume from confirmed offset + SHA-256 match",
+      "ciJob": "manual",
+      "platforms": [
+        "dual-host-lan"
+      ],
+      "exclusions": [
+        "single-process injected ConnectInfo substitute",
+        "browser L1 mock substitute",
+        "X-Forwarded-For spoof as public peer evidence",
+        "identity auth (product has none)",
+        "Mac-only single-host N8 smoke as dual-host substitute",
+        "L2 transfer_recovery_smoke as 1GiB proof"
+      ],
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
+      "version": "0.6.7",
+      "date": "2026-07-14",
+      "expiresAt": "2026-10-12",
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md",
+        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md",
+        "docs/p2p-protocol.md"
       ]
     },
     {
@@ -512,6 +895,35 @@
       ]
     },
     {
+      "id": "L3-UBUNTU-GUI-001",
+      "surface": "ubuntu-appimage-deb-gui",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: Ubuntu AppImage/deb GUI + terminal/files",
+      "ciJob": "manual",
+      "platforms": [
+        "ubuntu"
+      ],
+      "exclusions": [
+        "hosted runner substitute",
+        "browser mock substitute",
+        "ubuntu CI headless quality is not packaged GUI cert"
+      ],
+      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
+      "version": "0.6.7",
+      "date": "2026-07-14",
+      "expiresAt": "2026-10-12",
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/real-device-certification.md"
+      ]
+    },
+    {
       "id": "L3-WINDOWS-GUI-001",
       "surface": "windows-gui-transfer-terminal",
       "level": "L3",
@@ -567,375 +979,6 @@
         "docs/development/testing.md",
         "docs/development/real-device-certification.md"
       ]
-    },
-    {
-      "id": "L3-UBUNTU-GUI-001",
-      "surface": "ubuntu-appimage-deb-gui",
-      "level": "L3",
-      "tests": [
-        "docs/development/real-device-certification.md"
-      ],
-      "command": "manual: Ubuntu AppImage/deb GUI + terminal/files",
-      "ciJob": "manual",
-      "platforms": [
-        "ubuntu"
-      ],
-      "exclusions": [
-        "hosted runner substitute",
-        "browser mock substitute",
-        "ubuntu CI headless quality is not packaged GUI cert"
-      ],
-      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
-      "version": "0.6.7",
-      "date": "2026-07-14",
-      "expiresAt": "2026-10-12",
-      "status": "NOT VERIFIED",
-      "evidence": null,
-      "osBuild": null,
-      "docs": [
-        "docs/development/testing.md",
-        "docs/development/real-device-certification.md"
-      ]
-    },
-    {
-      "id": "L3-DUAL-HOST-LAN-001",
-      "surface": "dual-host-lan",
-      "level": "L3",
-      "tests": [
-        "docs/development/real-device-certification.md"
-      ],
-      "command": "manual: two physical hosts mDNS + credential-free R/W + boundary reject + 1GiB transfer disconnect mid-stream + process restart + resume from confirmed offset + SHA-256 match",
-      "ciJob": "manual",
-      "platforms": [
-        "dual-host-lan"
-      ],
-      "exclusions": [
-        "single-process injected ConnectInfo substitute",
-        "browser L1 mock substitute",
-        "X-Forwarded-For spoof as public peer evidence",
-        "identity auth (product has none)",
-        "Mac-only single-host N8 smoke as dual-host substitute",
-        "L2 transfer_recovery_smoke as 1GiB proof"
-      ],
-      "commit": "b0e13467384a1d13d832bfcee40456cff82c90e4",
-      "version": "0.6.7",
-      "date": "2026-07-14",
-      "expiresAt": "2026-10-12",
-      "status": "NOT VERIFIED",
-      "evidence": null,
-      "osBuild": null,
-      "docs": [
-        "docs/development/testing.md",
-        "docs/development/real-device-certification.md",
-        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md",
-        "docs/p2p-protocol.md"
-      ]
-    },
-    {
-      "id": "L2-SYNC-MANIFEST-V2-001",
-      "surface": "content-sync-manifest-v2",
-      "level": "L2",
-      "tests": [
-        "src-tauri/src/sync/protocol.rs",
-        "src-tauri/src/sync/engine.rs",
-        "src-tauri/src/sync/apply_merge.rs",
-        "src-tauri/src/net/peer_client.rs",
-        "src-tauri/src/net/routes/sync.rs",
-        "src-tauri/src/net/protocol.rs",
-        "web/src/api/sync.test.ts",
-        "web/src/pages/Settings/Settings.test.tsx"
-      ],
-      "command": "cd src-tauri && cargo test --locked --lib sync::protocol sync::engine sync::apply_merge net::peer_client::tests net::routes::sync net::protocol && cd ../web && npm test -- sync.test.ts Settings.test.tsx --run",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04"
-      ],
-      "exclusions": [
-        "live multi-host peer exchange",
-        "full process kill/restart export-restore black-box",
-        "CC History paged protocol (cc-history.paged-sync.v1)"
-      ],
-      "docs": [
-        "docs/p2p-protocol.md",
-        "docs/prd.md",
-        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
-      ]
-    },
-    {
-      "id": "L2-BACKUP-RESTORE-001",
-      "surface": "backup-export-restore",
-      "level": "L2",
-      "tests": [
-        "src-tauri/src/backup/archive.rs",
-        "src-tauri/src/backup/restore.rs",
-        "src-tauri/src/storage/maintenance_gate.rs",
-        "src-tauri/src/storage/recovery_job_repo.rs",
-        "src-tauri/tests/backup_restore_smoke.rs",
-        "web/src/api/sync.test.ts",
-        "web/src/pages/Settings/Settings.test.tsx"
-      ],
-      "command": "cd src-tauri && cargo test --locked --lib backup:: storage::maintenance_gate:: storage::recovery_job && cargo test --locked --test backup_restore_smoke -- --nocapture --test-threads=1 && cd ../web && npm test -- sync.test.ts Settings.test.tsx --run",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04"
-      ],
-      "exclusions": [
-        "full sidecar process kill/restart export-restore black-box",
-        "secret scanner on production archives",
-        "cross-host restore"
-      ],
-      "docs": [
-        "docs/development/backend-operations.md",
-        "docs/prd.md",
-        "docs/p2p-protocol.md",
-        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
-      ]
-    },
-    {
-      "id": "L0-SYNC-CONTENT-VERSIONS-001",
-      "surface": "content-versions-tombstone-gc",
-      "level": "L0",
-      "tests": [
-        "src-tauri/src/storage/content_version_repo.rs",
-        "src-tauri/src/storage/deletion_floor_repo.rs",
-        "src-tauri/src/storage/sync_watermark_repo.rs",
-        "src-tauri/src/sync/merger.rs"
-      ],
-      "command": "cd src-tauri && cargo test --locked --lib content_version deletion_floor sync_watermark concurrent_text_keeps_conflict_copy",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04"
-      ],
-      "exclusions": [
-        "live multi-peer GC over 90 days wall clock"
-      ],
-      "docs": [
-        "docs/prd.md",
-        "docs/superpowers/specs/2026-07-14-sync-integrity-conflict-and-recovery-design.md"
-      ]
-    },
-    {
-      "id": "L0-TRANSFER-RECOVERY-001",
-      "surface": "transfer-recovery",
-      "level": "L0",
-      "tests": [
-        "web/src/lib/schemas/transfer.test.ts",
-        "web/src/api/transfer.test.ts",
-        "web/src/pages/Transfer/transferHistory.test.ts",
-        "web/src/components/domain/TransferItem/TransferItem.test.tsx",
-        "web/src/pages/Transfer/Transfer.test.tsx",
-        "src-tauri/src/models/transfer.rs",
-        "src-tauri/src/storage/transfer_repo.rs",
-        "src-tauri/src/transfer/sender.rs"
-      ],
-      "command": "cd web && npm test -- src/lib/schemas/transfer.test.ts src/api/transfer.test.ts src/pages/Transfer/transferHistory.test.ts src/components/domain/TransferItem/TransferItem.test.tsx src/pages/Transfer/Transfer.test.tsx --run && cd ../src-tauri && cargo test --locked models::transfer storage::transfer_repo transfer::sender --lib",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04",
-        "node-linux"
-      ],
-      "exclusions": [
-        "real multi-host LAN transfer",
-        "1 GiB dual-host disconnect/resume (see L3-DUAL-HOST-LAN-001)",
-        "packaged desktop Open/Reveal OS dialogs"
-      ],
-      "docs": [
-        "docs/development/testing.md",
-        "docs/prd.md",
-        "docs/p2p-protocol.md",
-        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
-      ]
-    },
-    {
-      "id": "L2-TRANSFER-RECOVERY-001",
-      "surface": "transfer-recovery",
-      "level": "L2",
-      "tests": [
-        "src-tauri/tests/transfer_recovery_smoke.rs"
-      ],
-      "command": "cd src-tauri && cargo test --locked --test transfer_recovery_smoke -- --nocapture --test-threads=1",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04"
-      ],
-      "exclusions": [
-        "1 GiB dual-host disconnect/restart/resume/SHA (see L3-DUAL-HOST-LAN-001)",
-        "packaged GUI Open/Reveal",
-        "real public multi-NIC peer path",
-        "Mac-only N8 as dual-host substitute"
-      ],
-      "docs": [
-        "docs/development/testing.md",
-        "docs/development/real-device-certification.md",
-        "docs/p2p-protocol.md",
-        "docs/prd.md",
-        "docs/superpowers/specs/2026-07-14-transfer-lifecycle-and-recovery-design.md"
-      ]
-    },
-    {
-      "id": "L2-AGENT-RUNTIME-001",
-      "surface": "agent-session-runtime",
-      "level": "L2",
-      "tests": [
-        "src-tauri/src/storage/workbench_agent_session_repo.rs",
-        "src-tauri/src/workbench/agent_runtime/osc.rs",
-        "src-tauri/src/workbench/agent_runtime/reducer.rs",
-        "src-tauri/src/workbench/agent_runtime/snapshot.rs",
-        "src-tauri/src/workbench/remote_events.rs",
-        "src-tauri/src/orchestrator/agent_runtime_bridge.rs"
-      ],
-      "command": "cd src-tauri && cargo test --locked workbench::agent_runtime --lib && cargo test --locked orchestrator::agent_runtime_bridge --lib && cargo test --locked workbench_agent_session --lib && cargo test --locked workbench::remote_events --lib",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04"
-      ],
-      "exclusions": [
-        "provider adapter launch (A3+)",
-        "Fleet UI / history analytics (A6/A9)",
-        "dual-host multi-device agent projection soak"
-      ],
-      "docs": [
-        "docs/prd.md",
-        "docs/p2p-protocol.md",
-        "docs/development/backend-operations.md",
-        "docs/superpowers/specs/2026-07-15-agent-session-runtime-design.md"
-      ]
-    },
-    {
-      "id": "E2E-ORCHESTRATOR-REVIEW-001",
-      "surface": "orchestrator-review",
-      "level": "L1",
-      "tests": [
-        "web/tests/orchestrator-review-workflow.spec.ts"
-      ],
-      "command": "cd web && npm run test:e2e -- orchestrator-review-workflow.spec.ts",
-      "ciJob": "frontend-e2e",
-      "platforms": [
-        "chromium-linux"
-      ],
-      "exclusions": [
-        "real Tauri notification OS UI",
-        "multi-host deliver",
-        "packaged desktop"
-      ],
-      "docs": [
-        "docs/development/testing.md",
-        "docs/prd.md",
-        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
-      ]
-    },
-    {
-      "id": "L0-ORCHESTRATOR-REVIEW-001",
-      "surface": "orchestrator-review",
-      "level": "L0",
-      "tests": [
-        "web/src/lib/schemas/orchestrator.test.ts",
-        "web/src/api/orchestrator.test.ts",
-        "web/src/pages/Orchestrator/views/OrchestratorTaskDrawer.test.tsx",
-        "web/src/pages/Orchestrator/views/WorkflowWizardDialog.test.tsx",
-        "web/src/hooks/useOperationalNotifications.test.tsx",
-        "web/src/api/operationalNotifications.test.ts",
-        "src-tauri/src/orchestrator/review_diff.rs",
-        "src-tauri/src/orchestrator/notifications.rs"
-      ],
-      "command": "cd web && npm test -- src/lib/schemas/orchestrator.test.ts src/api/orchestrator.test.ts src/pages/Orchestrator/views/OrchestratorTaskDrawer.test.tsx src/pages/Orchestrator/views/WorkflowWizardDialog.test.tsx src/hooks/useOperationalNotifications.test.tsx src/api/operationalNotifications.test.ts && cd ../src-tauri && cargo test --locked orchestrator::review_diff orchestrator::notifications --lib",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04",
-        "node-linux"
-      ],
-      "exclusions": [
-        "full dual-host deliver",
-        "real OS notification UI",
-        "packaged desktop WebView"
-      ],
-      "docs": [
-        "docs/development/testing.md",
-        "docs/prd.md",
-        "docs/p2p-protocol.md",
-        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
-      ]
-    },
-    {
-      "id": "L2-ORCHESTRATOR-REVIEW-001",
-      "surface": "orchestrator-review",
-      "level": "L2",
-      "tests": [
-        "src-tauri/tests/runtime_authority_smoke.rs"
-      ],
-      "command": "cd src-tauri && cargo test --locked --test runtime_authority_smoke operational_notification_relay -- --nocapture --test-threads=1",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04"
-      ],
-      "exclusions": [
-        "full dual-host Human Review deliver",
-        "real OS notification UI",
-        "packaged multi-process GUI",
-        "review_diff collector end-to-end git worktree (covered at L0 lib tests)"
-      ],
-      "docs": [
-        "docs/development/testing.md",
-        "docs/p2p-protocol.md",
-        "docs/prd.md",
-        "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
-      ]
-    },
-    {
-      "id": "L2-BROWSER-VERIFICATION-001",
-      "surface": "browser-verification",
-      "level": "L2",
-      "tests": [
-        "src-tauri/src/workbench/browser_verification/models.rs",
-        "src-tauri/src/workbench/browser_verification/runtime.rs",
-        "src-tauri/src/workbench/browser_verification/artifact_store.rs",
-        "src-tauri/src/commands/workbench/browser_verification.rs",
-        "src-tauri/src/net/routes/browser_verification.rs",
-        "src-tauri/src/orchestrator/browser_verification.rs",
-        "src-tauri/tests/browser_verification_smoke.rs"
-      ],
-      "command": "cd src-tauri && cargo test --locked browser_verification --lib && cargo test --locked --test browser_verification_smoke -- --nocapture --test-threads=1",
-      "ciJob": "quality",
-      "platforms": [
-        "ubuntu-22.04",
-        "macos-latest",
-        "windows-latest"
-      ],
-      "exclusions": [
-        "real multi-host LAN owner relay",
-        "release matrix managed Chromium packaging (see L3-BROWSER-VERIFICATION-001)",
-        "iframe allow-same-origin (must remain absent)"
-      ],
-      "docs": [
-        "docs/superpowers/specs/2026-07-15-browser-verification-surface-design.md",
-        "docs/development/testing.md",
-        "docs/p2p-protocol.md"
-      ]
-    },
-    {
-      "id": "L3-BROWSER-VERIFICATION-001",
-      "surface": "browser-verification-managed-chromium",
-      "level": "L3",
-      "tests": [
-        "docs/development/real-device-certification.md"
-      ],
-      "command": "manual: prepare-browser-runtime all platforms + real chrome-headless-shell screenshot on macos/windows/ubuntu release targets",
-      "ciJob": "manual",
-      "platforms": [
-        "macos",
-        "windows",
-        "ubuntu"
-      ],
-      "exclusions": [
-        "hosted runner substitute",
-        "FakeEngine-only unit path"
-      ],
-      "docs": [
-        "scripts/browser-runtime-lock.json",
-        "docs/development/backend-operations.md",
-        "docs/development/testing.md"
-      ],
-      "status": "NOT VERIFIED"
     }
   ]
 }

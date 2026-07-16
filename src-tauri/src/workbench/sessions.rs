@@ -795,16 +795,77 @@ fn tmux_has_session(tmux: &TmuxCommand, session_name: &str) -> bool {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     恢复 window 时需要判断目标 window 是否仍存在，存在则 attach，不存在则重新创建。
+///     恢复 / safe attach 时需要判断目标 window 是否仍存在；存在才 attach，缺失则 skip（A8 禁止创建）。
 ///
 /// Code Logic（这个函数做什么）:
-///     执行 `tmux display-message -p -t <target> #{window_id}`；target 可为 session 或 session:@window。
+///     执行 `tmux display-message -p -t <target> #{window_id}`；
+///     要求 exit success **且** stdout 为非空 `@N` window id。
+///     （tmux 3.6+ 对缺失 target 可能仍 exit 0 但 stdout 为空，仅看 status 会误判存在。）
 fn tmux_target_exists(tmux: &TmuxCommand, target: &str) -> bool {
-    tmux.std_command()
+    let output = match tmux
+        .std_command()
         .args(["display-message", "-p", "-t", target, "#{window_id}"])
         .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let window_id = String::from_utf8_lossy(&output.stdout);
+    let window_id = window_id.trim();
+    !window_id.is_empty() && window_id.starts_with('@')
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     workspace restore preflight 必须只读探测 tmux target，不得 new-session/new-window。
+///
+/// Code Logic（这个函数做什么）:
+///     若本机无 tmux 则 false；否则对 target 执行 display-message 探测。
+pub fn inspect_tmux_target_exists(target: &str) -> bool {
+    let Some(tmux) = available_tmux_command() else {
+        return false;
+    };
+    tmux_target_exists(&tmux, target)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     preflight/safe attach 需要从持久化 row 得到稳定 target 字符串。
+///
+/// Code Logic（这个函数做什么）:
+///     公开包装 `tmux_target_for_row`。
+pub fn tmux_target_string_for_row(row: &WorkbenchSessionRow) -> Result<String, AppError> {
+    tmux_target_for_row(row)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     safe restore 只能 attach 已存在的 tmux window，禁止走 restore() 的 create/raw-PTY 回退。
+///
+/// Code Logic（这个函数做什么）:
+///     再次确认 backend=tmux 且 target 存在后，仅调用 registry 的 attach-only 入口（spawn attach client）。
+///     不调用 `create_tmux_window` / `new-session` / `new-window` / agent resume。
+pub fn safe_attach_existing_tmux_session(
+    state: &AppState,
+    row: WorkbenchSessionRow,
+    counters: &crate::workbench::workspace_restore::RestoreSideEffectCounters,
+) -> Result<WorkbenchSessionRow, AppError> {
+    if row.backend != TMUX_BACKEND {
+        return Err(AppError::validation(
+            "safe_attach_requires_tmux".to_string(),
+        ));
+    }
+    let target = tmux_target_for_row(&row)?;
+    if !inspect_tmux_target_exists(&target) {
+        return Err(AppError::unavailable("tmux_target_missing".to_string()));
+    }
+    // 计数：仅 attach client，不递增 new-session/new-window。
+    counters
+        .attach_client
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    state
+        .workbench_sessions
+        .attach_existing_tmux_only(state.clone(), row)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -841,8 +902,34 @@ fn migrate_tmux_session_name(
     }
 }
 
+/// 测试用：`create_tmux_window` 调用次数（A8 安全属性：list restore 路径必须为 0）。
+#[cfg(test)]
+static CREATE_TMUX_WINDOW_CALL_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Business Logic（为什么需要这个函数）:
-///     新建或恢复 tab 时，需要在 worktree 级 tmux session 内创建一个 window 承载真实 shell 上下文。
+///     集成/单测断言 list restore 与 safe attach 路径不创建 shell。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 `CREATE_TMUX_WINDOW_CALL_COUNT`。
+#[cfg(test)]
+pub fn create_tmux_window_call_count_for_test() -> u64 {
+    CREATE_TMUX_WINDOW_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     测试间隔离 create 计数。
+///
+/// Code Logic（这个函数做什么）:
+///     归零原子计数器。
+#[cfg(test)]
+pub fn reset_create_tmux_window_call_count_for_test() {
+    CREATE_TMUX_WINDOW_CALL_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     新建 tab 时，需要在 worktree 级 tmux session 内创建一个 window 承载真实 shell 上下文。
+///     **不得**被 list/open restore 路径调用（A8：缺失 target 时 skip，不创建 shell）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     session 不存在时执行 `tmux new-session -d -s <session> -n <window>`；存在时执行 `tmux new-window`；
@@ -855,6 +942,10 @@ fn create_tmux_window(
     shell_command: &str,
     agent_ctx: Option<&TerminalAgentContextIds>,
 ) -> Result<String, AppError> {
+    #[cfg(test)]
+    {
+        CREATE_TMUX_WINDOW_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     let tmux_cwd = tmux.project_cwd(cwd)?;
     let mut command = tmux.std_command();
     if tmux_has_session(tmux, session_name) {
@@ -1667,10 +1758,45 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     应用重启后，持久化的终端 tab 需要重新绑定运行期 PTY；tmux 后端可继续原 shell 上下文。
+    ///     workspace safe restore 只能对**已存在**的 tmux target 建立 attach client，禁止创建 window。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     根据持久化 row.backend 恢复 tmux session，必要时把旧 session 改名为可读名称；失败则回退普通 PTY，然后用 row.cwd 启动 reader/exit watcher。
+    ///     要求 backend=tmux 且 backend_id 存在；直接 `spawn_row` 走 attach 命令路径，
+    ///     绝不调用 `create_tmux_window` 或 raw PTY 回退改写。
+    pub fn attach_existing_tmux_only(
+        &self,
+        state: AppState,
+        mut row: WorkbenchSessionRow,
+    ) -> Result<WorkbenchSessionRow, AppError> {
+        if row.backend != TMUX_BACKEND {
+            return Err(AppError::validation(
+                "safe_attach_requires_tmux".to_string(),
+            ));
+        }
+        if row.backend_id.as_deref().unwrap_or("").is_empty() {
+            return Err(AppError::validation(
+                "safe_attach_missing_backend_id".to_string(),
+            ));
+        }
+        let target = tmux_target_for_row(&row)?;
+        if !inspect_tmux_target_exists(&target) {
+            return Err(AppError::unavailable("tmux_target_missing".to_string()));
+        }
+        row.status = "running".to_string();
+        row.exited_at = None;
+        row.exit_code = None;
+        row.updated_at = chrono::Utc::now().to_rfc3339();
+        self.spawn_row(state, row)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     应用重启 / 项目打开时，持久化终端 tab 需要重新绑定运行期 attach；
+    ///     **仅**对已存在的 tmux target 建立 attach client，缺失或 raw PTY 一律 skip，
+    ///     禁止 `create_tmux_window` / raw PTY 回退（A8：只有用户显式「新建终端」才创建 shell）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     backend=tmux 且 target 存在：迁移可读 session 名后 `spawn_row` attach；
+    ///     target 缺失 / 无 tmux / raw_pty → `Err`（`restore_persisted_sessions` 标 disconnected）。
     pub fn restore(
         &self,
         state: AppState,
@@ -1681,86 +1807,54 @@ impl WorkbenchSessionRegistry {
         if row.cwd.trim().is_empty() {
             row.cwd = project.path.clone();
         }
-        if row.backend == TMUX_BACKEND {
-            if let Some(tmux) = available_tmux_command() {
-                let desired_session_name = tmux_worktree_session_name(
-                    &project.name,
-                    &project.id,
-                    row.worktree_id.as_deref(),
-                    worktree_name.as_deref(),
-                );
-                let session_name = migrate_tmux_session_name(
-                    &tmux,
-                    row.backend_id.as_deref(),
-                    &desired_session_name,
-                );
-                let terminal_command = default_terminal_command();
-                let target_exists = if tmux_row_requires_window_recreation(&row) {
-                    false
-                } else {
-                    row.backend_window_id
-                        .as_deref()
-                        .map(|window_id| {
-                            tmux_target_exists(&tmux, &tmux_window_target(&session_name, window_id))
-                        })
-                        .unwrap_or_else(|| tmux_target_exists(&tmux, &session_name))
-                };
-                if !target_exists {
-                    let agent_ctx = TerminalAgentContextIds {
-                        project_id: row.project_id.clone(),
-                        worktree_id: row.worktree_id.clone().unwrap_or_default(),
-                        terminal_session_id: row.id.clone(),
-                        owner_instance_id: state.config_runtime.owner_instance_id().to_string(),
-                    };
-                    match create_tmux_window(
-                        &tmux,
-                        &session_name,
-                        &row.name,
-                        &row.cwd,
-                        &terminal_command,
-                        Some(&agent_ctx),
-                    ) {
-                        Ok(window_id) => {
-                            let target = tmux_window_target(&session_name, &window_id);
-                            row.backend_id = Some(session_name.clone());
-                            row.backend_window_id = Some(window_id);
-                            row.command = tmux.display_command_for_session(
-                                &session_name,
-                                Some(&target),
-                                &terminal_command,
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!("恢复工作台 tmux 会话失败，回退普通 PTY: {error}");
-                            row.backend = RAW_PTY_BACKEND.to_string();
-                            row.backend_id = None;
-                            row.backend_window_id = None;
-                            row.command = default_terminal_command();
-                        }
-                    }
-                } else if row.backend == TMUX_BACKEND {
-                    if let Err(error) = apply_workbench_tmux_status_theme(&tmux, &session_name) {
-                        tracing::debug!("恢复工作台终端时应用 tmux status 样式失败: {error}");
-                    }
-                    let target = row
-                        .backend_window_id
-                        .as_deref()
-                        .map(|window_id| tmux_window_target(&session_name, window_id));
-                    row.backend_id = Some(session_name);
-                    row.command = tmux.display_command_for_session(
-                        row.backend_id.as_deref().expect("tmux session name"),
-                        target.as_deref(),
-                        &terminal_command,
-                    );
-                }
-            } else {
-                tracing::warn!("恢复工作台终端时未找到 tmux，回退普通 PTY");
-                row.backend = RAW_PTY_BACKEND.to_string();
-                row.backend_id = None;
-                row.backend_window_id = None;
-                row.command = default_terminal_command();
-            }
+        // 非 tmux（含历史 token `raw_pty` 与当前 `pty`）一律 skip，禁止 spawn 新 shell
+        if row.backend != TMUX_BACKEND {
+            return Err(AppError::validation(
+                "restore_skips_raw_pty".to_string(),
+            ));
         }
+        let Some(tmux) = available_tmux_command() else {
+            return Err(AppError::unavailable("tmux_unavailable".to_string()));
+        };
+        let desired_session_name = tmux_worktree_session_name(
+            &project.name,
+            &project.id,
+            row.worktree_id.as_deref(),
+            worktree_name.as_deref(),
+        );
+        let session_name = migrate_tmux_session_name(
+            &tmux,
+            row.backend_id.as_deref(),
+            &desired_session_name,
+        );
+        let terminal_command = default_terminal_command();
+        let target_exists = if tmux_row_requires_window_recreation(&row) {
+            false
+        } else {
+            row.backend_window_id
+                .as_deref()
+                .map(|window_id| {
+                    tmux_target_exists(&tmux, &tmux_window_target(&session_name, window_id))
+                })
+                .unwrap_or_else(|| tmux_target_exists(&tmux, &session_name))
+        };
+        if !target_exists {
+            // A8 skip-missing：不 create_tmux_window、不 raw PTY fallback
+            return Err(AppError::unavailable("tmux_target_missing".to_string()));
+        }
+        if let Err(error) = apply_workbench_tmux_status_theme(&tmux, &session_name) {
+            tracing::debug!("恢复工作台终端时应用 tmux status 样式失败: {error}");
+        }
+        let target = row
+            .backend_window_id
+            .as_deref()
+            .map(|window_id| tmux_window_target(&session_name, window_id));
+        row.backend_id = Some(session_name);
+        row.command = tmux.display_command_for_session(
+            row.backend_id.as_deref().expect("tmux session name"),
+            target.as_deref(),
+            &terminal_command,
+        );
 
         row.status = "running".to_string();
         row.exited_at = None;
@@ -2187,6 +2281,27 @@ impl WorkbenchSessionRegistry {
             .expect("workbench replay buffers 锁中毒")
             .entry(session_id.to_string())
             .or_insert_with(|| SessionReplayBuffer::new(SESSION_REPLAY_MAX_CHARS));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     safe attach 单测需要在无真实 tmux 时把 session 记入 registry，验证幂等与 claim。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 Fake process 的完整 row；仅 `#[cfg(test)]`。
+    #[cfg(test)]
+    pub fn insert_fake_session_row_for_test(&self, row: WorkbenchSessionRow) {
+        let session_id = row.id.clone();
+        self.sessions
+            .lock()
+            .expect("workbench sessions 锁中毒")
+            .insert(
+                session_id.clone(),
+                Arc::new(Mutex::new(WorkbenchSessionHandle {
+                    row,
+                    process: SessionProcess::Fake,
+                })),
+            );
+        self.ensure_replay_buffer(&session_id);
     }
 
     #[cfg(test)]

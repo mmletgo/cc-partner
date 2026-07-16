@@ -29,7 +29,7 @@ use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
 use crate::storage::{
     ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
     TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
-    WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+    WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
 };
 use crate::transfer::registry::TransferRegistry;
 use crate::updater::UpdateRuntime;
@@ -95,6 +95,8 @@ pub struct AppState {
     pub workbench_worktree_repo: Arc<WorkbenchWorktreeRepo>,
     /// Workbench 浏览器预览目标仓库（workbench_browser_targets 表访问，保存项目/worktree 最近目标）
     pub workbench_browser_repo: Arc<WorkbenchBrowserRepo>,
+    /// Workbench 工作现场 layout 仓库（自动 slot + 命名 snapshot，revision CAS）
+    pub workbench_workspace_layout_repo: Arc<WorkbenchWorkspaceLayoutRepo>,
     /// Workbench 浏览器预览会话注册表（previewId 到本机 target 或远端 relay 的短期映射）
     pub workbench_browser_previews:
         Arc<crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry>,

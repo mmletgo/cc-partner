@@ -1493,3 +1493,85 @@
   width: min(920px, 96vw);
   max-height: min(80vh, 720px);
 }
+
+/* Workspace safe restore notice + snapshot dialog */
+.restoreNotice {
+  margin: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-xs);
+}
+
+.restoreNoticeRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.restoreNoticeText {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+
+.restoreNoticeActions {
+  display: flex;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.restoreNoticeReasons {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+  color: var(--fg-muted-readable);
+  font-size: var(--text-xs);
+}
+
+.snapshotDialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: min(420px, 90vw);
+}
+
+.snapshotHint {
+  margin: 0;
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+}
+
+.snapshotSaveRow {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.snapshotList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.snapshotItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.snapshotItemActions {
+  display: flex;
+  gap: var(--space-1);
+}

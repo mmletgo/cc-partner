@@ -32,6 +32,7 @@ export function WorkbenchBrowserWorkspaceView({
   project,
   worktree,
   onReturnToTerminal,
+  onBrowserTargetUrlChange,
 }: WorkbenchBrowserWorkspaceProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const [discovery, setDiscovery] = useState<WorkbenchBrowserDiscovery | null>(null);
@@ -152,6 +153,12 @@ export function WorkbenchBrowserWorkspaceView({
     void loadDiscovery();
   }, [loadDiscovery, projectId, worktreeId]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Business Logic: layout autosave 需要稳定 browserTargetUrl；preview 变化时回写父级。
+  // Code Logic: preview?.targetUrl 或 null 通知 onBrowserTargetUrlChange。
+  useEffect(() => {
+    onBrowserTargetUrlChange?.(preview?.targetUrl ?? null);
+  }, [onBrowserTargetUrlChange, preview?.targetUrl]);
 
   return (
     <section
