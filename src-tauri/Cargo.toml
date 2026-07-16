@@ -7,10 +7,10 @@ license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
-# 存在多个 [[bin]] target（GUI app + cc-partner-backend CLI）时，
+# 存在多个 [[bin]] target（GUI app + cc-partner-backend CLI + Agent CLI）时，
 # 显式声明默认运行 GUI 主进程，避免 `cargo run` / `tauri dev` / `tauri build`
 # 报 "could not determine which binary to run"。CLI 仍可经
-# `cargo run --bin cc-partner-backend` 或打包后的 `cc-partner-backend start` 启动。
+# `cargo run --bin cc-partner-backend` / `cargo run --bin cc-partner` 或打包后的同名入口启动。
 default-run = "app"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -22,6 +22,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [[bin]]
 name = "cc-partner-backend"
 path = "src/bin/cc-partner-backend.rs"
+
+# Agent-first 控制 CLI（独立 artifact；不进入 Tauri externalBin）
+[[bin]]
+name = "cc-partner"
+path = "src/bin/cc-partner.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
@@ -89,6 +94,8 @@ serde_yaml = "0.9.34"
 fs4 = { version = "1", features = ["sync"] }
 # A5 Browser Verification: CDP client for managed chrome-headless-shell
 chromiumoxide = { version = "=0.7.0", default-features = false, features = ["tokio-runtime"] }
+# A7 Agent-first CLI：固定 4.5.32 derive 兼容项目 MSRV 1.77.2
+clap = { version = "=4.5.32", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
