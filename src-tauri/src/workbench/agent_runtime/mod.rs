@@ -10,6 +10,7 @@
 pub mod models;
 pub mod osc;
 pub mod reducer;
+pub mod snapshot;
 
 pub use models::{
     AgentRuntimeMutation, AgentSessionPhase, AgentSessionRuntime, CreateActiveAgentSession,
@@ -17,6 +18,10 @@ pub use models::{
 pub use osc::{encode_agent_osc_frame, AgentOscDecoder};
 pub use reducer::{
     collect_alive_terminal_ids, AgentReduceOutcome, AgentRuntimeReducer,
+};
+pub use snapshot::{
+    emit_agent_runtime_changed, get_agent_runtime_snapshot_for_state, AgentRuntimeSnapshot,
+    AgentSessionRuntimeDto,
 };
 
 use crate::state::AppState;
@@ -122,8 +127,7 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                     version = row.version,
                     "agent runtime mutation applied"
                 );
-                // T4 将在此处 emit workbench:agent-runtime
-                let _ = row;
+                emit_agent_runtime_changed(&state, &row);
             }
             Ok(AgentReduceOutcome::Ignored(reason)) => {
                 tracing::debug!(reason, "agent runtime mutation ignored");

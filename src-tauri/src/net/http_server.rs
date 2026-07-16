@@ -861,6 +861,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             )
             .route("/api/workbench/events", get(workbench::workbench_events))
             .route(
+                "/api/workbench/agent-runtime/snapshot",
+                post(workbench::agent_runtime_snapshot).layer(DefaultBodyLimit::max(64 * 1024)),
+            )
+            .route(
                 "/api/workbench/sessions/list",
                 post(workbench::list_workbench_sessions),
             )

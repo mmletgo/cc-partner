@@ -70,6 +70,8 @@ impl OrchestratorRepo {
         ensure_column(pool, "orchestrator_tasks", "external_labels_json", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "runner_provider", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "claude_session_id", "TEXT").await?;
+        // A1：统一 Agent session 引用（与 claude_session_id dual-write 一个版本）
+        ensure_column(pool, "orchestrator_tasks", "agent_session_id", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "transcript_path", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "runtime_started_at", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "last_activity_at", "TEXT").await?;

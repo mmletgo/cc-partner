@@ -955,6 +955,33 @@ pub async fn workbench_events(State(state): State<AppState>) -> Response<Body> {
     response
 }
 
+/// Agent runtime 有界 snapshot 查询（capability `workbench.agent-runtime.v1`）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote/mobile 在 Gap 后需要 owner active Agent baseline；不得暴露 native session id。
+///
+/// Code Logic（这个函数做什么）:
+///     可选 query/body projectId；委托 `get_agent_runtime_snapshot_for_state`。
+///     **不**提供 LAN Hook ingestion 写路由。
+pub async fn agent_runtime_snapshot(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    body: Option<Json<Value>>,
+) -> P2pResult<Json<crate::workbench::agent_runtime::AgentRuntimeSnapshot>> {
+    let project_id = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("projectId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let snap = crate::workbench::agent_runtime::get_agent_runtime_snapshot_for_state(
+        &state, project_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.agent_runtime.snapshot"))?;
+    Ok(Json(snap))
+}
+
 /// 拉取远端设备本机终端最近输出。
 ///
 /// Business Logic（为什么需要这个函数）:

@@ -475,6 +475,7 @@ pub fn run() {
             workbench_cmd::remove_workbench_worktree,
             workbench_cmd::get_workbench_mutation_operation,
             workbench_cmd::list_workbench_git_commits,
+            workbench_cmd::get_agent_runtime_snapshot,
             workbench_cmd::list_workbench_sessions,
             workbench_cmd::create_workbench_session,
             workbench_cmd::write_workbench_session_input,

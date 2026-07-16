@@ -438,6 +438,17 @@ async fn dispatch_workbench_op(
             Ok(serde_json::to_value(item)?)
         }
 
+        // ---- agent runtime ----
+        "agent_runtime.snapshot" => {
+            let project_id = optional_string(&payload, "projectId");
+            let snap =
+                crate::workbench::agent_runtime::get_agent_runtime_snapshot_for_state(
+                    state, project_id,
+                )
+                .await?;
+            Ok(serde_json::to_value(snap)?)
+        }
+
         // ---- sessions ----
         "sessions.list" => {
             let project_id = optional_string(&payload, "projectId");

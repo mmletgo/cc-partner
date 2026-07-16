@@ -163,6 +163,18 @@ pub const CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1: &str = "workbench.mutation-o
 pub const CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2: &str =
     "workbench.session-search-result.v2";
 
+/// 能力 token：v1 Workbench Agent session runtime
+/// （snapshot + NDJSON `agentRuntime` 事件；协议协商 only，非权限 token）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     remote/mobile 在拉取 Agent phase snapshot 前必须确认对端已实现
+///     `POST /api/workbench/agent-runtime/snapshot` 与 events 变体；旧 peer 显示 unsupported，
+///     不得回退为 Claude session 猜测。本 token 只做版本协商，不是 LAN 鉴权。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 snapshot 路由原子上线。
+pub const CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1: &str = "workbench.agent-runtime.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -224,6 +236,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_SYNC_MANIFEST_V2.to_string(),
             CAPABILITY_TRANSFER_COMPLETE_V1.to_string(),
             CAPABILITY_TRANSFER_RESUME_V1.to_string(),
+            CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1.to_string(),
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
         ],
@@ -385,6 +398,7 @@ mod tests {
                 "sync.manifest.v2".to_string(),
                 "transfer.complete.v1".to_string(),
                 "transfer.resume.v1".to_string(),
+                "workbench.agent-runtime.v1".to_string(),
                 "workbench.mutation-outcome.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
             ]
@@ -394,6 +408,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1));
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
         assert!(info.supports(CAPABILITY_TRANSFER_RESUME_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2));
     }

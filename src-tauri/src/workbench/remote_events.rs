@@ -9,7 +9,9 @@
 //!     并维护 sidecar 拥有的 `RemoteEventBridgeRegistry`（CancellationToken、idle TTL、
 //!     指数退避上限 60s、1 MiB 行/pending、8 KiB 错误前缀、shutdown_all 等待退出）。
 
+use crate::error::AppError;
 use crate::state::AppState;
+use crate::workbench::agent_runtime::snapshot::AgentSessionRuntimeDto;
 use crate::workbench::remote_ids::remote_entity_id;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -80,19 +82,63 @@ pub struct WorkbenchMergeProgressPayload {
     pub stage: Value,
 }
 
+/// Agent runtime 远端事件 payload（与 `workbench:agent-runtime` 对齐，无 native id）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     remote/mobile 需要与本机同一份 phase 投影。
+///
+/// Code Logic（这个结构体做什么）:
+///     包装 sanitized `AgentSessionRuntimeDto`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchAgentRuntimePayload {
+    pub agent_session: AgentSessionRuntimeDto,
+}
+
 /// Workbench 可跨 HTTP NDJSON 传输的事件。
 ///
 /// Business Logic（为什么需要这个枚举）:
-///     远端事件流需要在一条连接中承载 terminal output、terminal status 和 merge progress 多种事件。
+///     远端事件流需要在一条连接中承载 terminal output、terminal status、merge progress 与 agent runtime。
 ///
 /// Code Logic（这个枚举做什么）:
 ///     使用 serde 内部 tag `{type,payload}`，type 按 camelCase 输出为前端和桥接层约定的稳定值。
+///     未知 type 不得经本枚举硬失败——见 `decode_remote_event`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum WorkbenchRemoteEvent {
     TerminalOutput(WorkbenchTerminalOutputPayload),
     TerminalStatus(WorkbenchTerminalStatusPayload),
     MergeProgress(WorkbenchMergeProgressPayload),
+    /// Agent session runtime 投影（capability workbench.agent-runtime.v1）
+    AgentRuntime(WorkbenchAgentRuntimePayload),
+}
+
+/// 解码单行 NDJSON：已知事件 → Some；未知 type → None（不重连）；非法 JSON → Err。
+///
+/// Business Logic（为什么需要这个函数）:
+///     扩展新事件前，旧客户端必须忽略未知 type，禁止因 serde 失败断开 bridge。
+///
+/// Code Logic（这个函数做什么）:
+///     先解析为 Value；读 type 字段；匹配已知集合则反序列化为 WorkbenchRemoteEvent；
+///     未知 type 返回 Ok(None)；缺 type/非法结构返回 AppError::validation。
+pub fn decode_remote_event(line: &str) -> Result<Option<WorkbenchRemoteEvent>, AppError> {
+    let value: Value = serde_json::from_str(line)
+        .map_err(|e| AppError::validation(format!("invalid remote event json: {e}")))?;
+    let event_type = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::validation("remote event missing type".to_string()))?;
+    match event_type {
+        "terminalOutput" | "terminalStatus" | "mergeProgress" | "agentRuntime" => {
+            let event: WorkbenchRemoteEvent = serde_json::from_value(value).map_err(|e| {
+                AppError::validation(format!("invalid remote event payload: {e}"))
+            })?;
+            Ok(Some(event))
+        }
+        // heartbeat 等非业务帧
+        "heartbeat" => Ok(None),
+        _ => Ok(None),
+    }
 }
 
 /// 事件流解析/读取错误（含资源上限）。
@@ -777,9 +823,12 @@ fn process_event_chunk_to_events(
             continue;
         }
         match std::str::from_utf8(line) {
-            Ok(text) => match serde_json::from_str::<WorkbenchRemoteEvent>(text) {
-                Ok(event) => {
+            Ok(text) => match decode_remote_event(text) {
+                Ok(Some(event)) => {
                     events.push(map_remote_event_for_device(device_id, project_ids, event))
+                }
+                Ok(None) => {
+                    // 未知 type / heartbeat：忽略，不中断 stream
                 }
                 Err(error) => tracing::debug!("解析 Workbench 远端事件失败: {error}"),
             },
@@ -846,6 +895,9 @@ fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
         WorkbenchRemoteEvent::MergeProgress(payload) => {
             state.emit_event("workbench:merge-progress", payload);
         }
+        WorkbenchRemoteEvent::AgentRuntime(payload) => {
+            state.emit_event("workbench:agent-runtime", payload);
+        }
     };
 }
 
@@ -875,6 +927,22 @@ fn map_remote_event_for_device(
                 .unwrap_or_else(|| remote_entity_id(device_id, &payload.project_id));
             payload.worktree_id = remote_entity_id(device_id, &payload.worktree_id);
             WorkbenchRemoteEvent::MergeProgress(payload)
+        }
+        WorkbenchRemoteEvent::AgentRuntime(mut payload) => {
+            let s = &mut payload.agent_session;
+            s.id = remote_entity_id(device_id, &s.id);
+            s.project_id = project_ids
+                .get(&s.project_id)
+                .cloned()
+                .unwrap_or_else(|| remote_entity_id(device_id, &s.project_id));
+            if let Some(wt) = s.worktree_id.as_mut() {
+                *wt = remote_entity_id(device_id, wt);
+            }
+            s.terminal_session_id = remote_entity_id(device_id, &s.terminal_session_id);
+            if let Some(task) = s.orchestrator_task_id.as_mut() {
+                *task = remote_entity_id(device_id, task);
+            }
+            WorkbenchRemoteEvent::AgentRuntime(payload)
         }
     }
 }
@@ -990,6 +1058,58 @@ mod tests {
         let registry = RemoteEventBridgeRegistry::new();
         assert_eq!(registry.active_bridge_count(), 0);
         assert!(registry.snapshots().is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧客户端遇到未来事件 type 时必须忽略且不重连。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     decode_remote_event 对未知 type 返回 Ok(None)。
+    #[test]
+    fn unknown_remote_event_is_ignored_without_reconnect() {
+        // 兼容计划示例的 event 键：无 type 视为 validation；带未知 type 则 ignore
+        let line = r#"{"type":"futureEvent","payload":{}}"#;
+        assert_eq!(decode_remote_event(line).unwrap(), None);
+        let heartbeat = r#"{"type":"heartbeat","sentAt":"2026-07-15T00:00:00Z"}"#;
+        assert_eq!(decode_remote_event(heartbeat).unwrap(), None);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Agent runtime 事件 ID 必须映射为 remote:device:inner。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     map_remote_event_for_device 后 id/terminal/project 均带前缀。
+    #[test]
+    fn map_remote_agent_runtime_event_prefixes_ids() {
+        use crate::workbench::agent_runtime::{AgentSessionPhase, AgentSessionRuntimeDto};
+        let event = WorkbenchRemoteEvent::AgentRuntime(WorkbenchAgentRuntimePayload {
+            agent_session: AgentSessionRuntimeDto {
+                id: "agent-1".into(),
+                project_id: "proj".into(),
+                worktree_id: Some("wt".into()),
+                terminal_session_id: "term".into(),
+                orchestrator_task_id: Some("task".into()),
+                orchestrator_attempt: Some(1),
+                provider_id: "claudeCodeVisible".into(),
+                phase: AgentSessionPhase::Working,
+                version: 2,
+                started_at: "t0".into(),
+                last_activity_at: "t1".into(),
+                ended_at: None,
+                outcome_code: None,
+                resumed_from_agent_session_id: None,
+                is_active: true,
+            },
+        });
+        let mapped = map_remote_event_for_device("device-a", &HashMap::new(), event);
+        match mapped {
+            WorkbenchRemoteEvent::AgentRuntime(p) => {
+                assert_eq!(p.agent_session.id, "remote:device-a:agent-1");
+                assert_eq!(p.agent_session.terminal_session_id, "remote:device-a:term");
+                assert_eq!(p.agent_session.project_id, "remote:device-a:proj");
+            }
+            other => panic!("expected AgentRuntime, got {other:?}"),
+        }
     }
 
     /// Business Logic（为什么需要这个测试）:

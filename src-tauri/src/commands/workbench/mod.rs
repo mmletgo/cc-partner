@@ -6,6 +6,7 @@
 //! Code Logic（这个模块做什么）:
 //!     子模块 + 显式 pub / pub(crate) use 再导出 tauri 命令（含 generate_handler 隐藏符号）与 crate 内 helper。
 
+mod agent_runtime;
 mod browser;
 mod common;
 mod files;
@@ -17,6 +18,11 @@ mod sessions;
 mod tests;
 
 // ---- tauri 命令（pub，含 __cmd__/__tauri_command_name_ 供 generate_handler）----
+
+pub use agent_runtime::{
+    __cmd__get_agent_runtime_snapshot, __tauri_command_name_get_agent_runtime_snapshot,
+    get_agent_runtime_snapshot,
+};
 
 pub use browser::{
     __cmd__create_workbench_browser_preview, __cmd__discover_workbench_browser_targets,
