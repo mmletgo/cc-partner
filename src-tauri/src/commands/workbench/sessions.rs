@@ -110,6 +110,7 @@ pub(crate) async fn replay_workbench_session_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         let mut replay = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .replay(&base_url, &inner_session_id)
             .await?;
         replay.session_id = session_id;
@@ -142,6 +143,7 @@ pub(crate) async fn create_workbench_session_for_state(
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         ensure_remote_event_bridge_for_context(state, &context);
         let item = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .create_session(
                 &context.base_url,
                 RemoteCreateSessionReq {
@@ -221,6 +223,7 @@ pub(crate) async fn write_workbench_session_input_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .write_input(&base_url, &inner_session_id, &data)
             .await?;
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
@@ -290,6 +293,7 @@ pub(crate) async fn resize_workbench_session_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .resize(&base_url, &inner_session_id, cols, rows)
             .await?;
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
@@ -349,6 +353,7 @@ pub(crate) async fn focus_workbench_session_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .focus(&base_url, &inner_session_id)
             .await?;
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
@@ -398,6 +403,7 @@ pub(crate) async fn get_focused_workbench_session_for_state(
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         let session_id = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .focused(
                 &context.base_url,
                 &context.inner_project_id,
@@ -480,6 +486,7 @@ pub(crate) async fn split_workbench_pane_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .split_pane(&base_url, &inner_session_id, &direction)
             .await?;
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
@@ -551,6 +558,7 @@ pub(crate) async fn switch_workbench_pane_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .switch_pane(&base_url, &inner_session_id)
             .await?;
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
@@ -635,6 +643,7 @@ pub(crate) async fn zoom_workbench_pane_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .zoom_pane(&base_url, &inner_session_id)
             .await?;
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
@@ -706,6 +715,7 @@ pub(crate) async fn close_workbench_pane_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         let closed_window = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .close_pane(&base_url, &inner_session_id)
             .await?;
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
@@ -785,6 +795,7 @@ pub(crate) async fn close_workbench_session_for_state(
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .close_session(&base_url, &inner_session_id)
             .await?;
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
@@ -876,6 +887,7 @@ pub async fn rename_workbench_session(
         let base_url = device_base_url(&state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
         let item = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
             .rename_session(&base_url, &inner_session_id, &name)
             .await?;
         let local_project_id = local_project_id_for_remote_inner_project(
@@ -943,6 +955,7 @@ pub(crate) async fn list_workbench_dir_for_state(
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .list_workbench_dir(
                 &context.base_url,
                 &context.inner_project_id,
@@ -1012,6 +1025,7 @@ pub(crate) async fn get_workbench_path_info_for_state(
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .workbench_path_info(
                 &context.base_url,
                 &context.inner_project_id,
@@ -1087,6 +1101,7 @@ pub async fn create_workbench_file(
         let context = ensure_remote_project_context(&state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .create_file(
                 &context.base_url,
                 RemoteCreatePathReq {
@@ -1145,6 +1160,7 @@ pub async fn create_workbench_dir(
         let context = ensure_remote_project_context(&state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .create_dir(
                 &context.base_url,
                 RemoteCreatePathReq {
@@ -1203,6 +1219,7 @@ pub async fn rename_workbench_path(
         let context = ensure_remote_project_context(&state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .rename_path(
                 &context.base_url,
                 RemoteRenamePathReq {
@@ -1261,6 +1278,7 @@ pub async fn delete_workbench_path(
         let context = ensure_remote_project_context(&state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .delete_path(
                 &context.base_url,
                 RemoteDeletePathReq {
@@ -1305,6 +1323,7 @@ pub(crate) async fn search_claude_sessions_for_state(
             query: query.to_string(),
         };
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .search_claude_sessions(&context.base_url, req)
             .await;
     }
@@ -1364,6 +1383,7 @@ pub(crate) async fn get_claude_session_preview_for_state(
             session_id: session_id.to_string(),
         };
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .get_claude_session_preview(&context.base_url, req)
             .await;
     }
@@ -1437,6 +1457,7 @@ pub(crate) async fn resume_claude_session_for_state(
             session_id: session_id.to_string(),
         };
         let remote_result = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .resume_claude_session(&context.base_url, req)
             .await?;
         // 把远端新建的 inner terminal sessionId 包装成本机统一 remote sessionId

@@ -83,7 +83,8 @@ pub async fn create_orchestrator_experiment_for_state(
 ///     owning device 上创建必须拒绝非 local 项目，与 P2P `require_local_project_by_id` 对齐。
 ///
 /// Code Logic（这个函数做什么）:
-///     device max concurrency 来自全局 config；create 后仅 newly_created 时 best-effort dispatch。
+///     device max concurrency 来自全局 config；create 后仅 newly_created 时 fire-and-forget
+///     best-effort owner wake（不阻塞响应等待长 dispatch）。
 pub async fn create_local_orchestrator_experiment(
     state: &AppState,
     request: CreateExperimentRequest,
@@ -96,7 +97,11 @@ pub async fn create_local_orchestrator_experiment(
         create_experiment_idempotently(state.orchestrator_repo.as_ref(), &request, device_cap)
             .await?;
     if outcome.newly_created {
-        let _ = super::common::dispatch_orchestrator_best_effort(state).await;
+        // fire-and-forget owner wake: do not hold request on long dispatch
+        let state_bg = state.clone();
+        tokio::spawn(async move {
+            let _ = super::common::dispatch_orchestrator_best_effort(&state_bg).await;
+        });
     }
     Ok(outcome)
 }

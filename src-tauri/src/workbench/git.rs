@@ -603,12 +603,14 @@ pub fn commit_parent_oids(path: &Path, commit_oid: &str) -> Result<Vec<String>, 
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     merge 成功后的 HEAD 可能被并发 tip 推进；必须校验 branch/ref/parent/ancestry 仍绑定本次 merge。
+///     merge 成功后的 HEAD 可能被并发 tip 推进或被 crafty merge 伪造；必须校验 branch/ref/parents
+///     仍精确绑定本次 pre-merge tip 与已审 reviewed OID。
 ///
 /// Code Logic（这个函数做什么）:
 ///     1) current_branch == frozen_branch；2) refs/heads/<branch> == merge_oid；
-///     3) merge_oid==pre_oid 时要求 reviewed 是 merge 的祖先；否则 first parent==pre_oid 且
-///     reviewed 是 parent 或 ancestor。失败返回 AppError。
+///     3) merge_oid==pre_oid 时要求 reviewed 是 merge 的祖先（already-up-to-date）；
+///     4) 否则要求恰好 2 个 parents 且 parents[0]==pre_oid、parents[1]==reviewed_oid（精确匹配，
+///     禁止 ancestor 回退）。失败返回 AppError。
 pub(crate) fn verify_merge_oid_binding(
     path: &Path,
     merge_oid: &str,
@@ -641,19 +643,22 @@ pub(crate) fn verify_merge_oid_binding(
         return Ok(());
     }
     let parents = commit_parent_oids(path, merge_oid)?;
-    let first = parents.first().ok_or_else(|| {
-        AppError::generic("merge main failed: merge commit has no parents".to_string())
-    })?;
-    if first != pre_oid {
+    if parents.len() != 2 {
         return Err(AppError::generic(format!(
-            "merge main failed: first parent is not pre-merge tip (expected={pre_oid}, got={first})"
+            "merge main failed: expected exactly 2 parents for merge tip, got {}",
+            parents.len()
         )));
     }
-    let is_parent = parents.iter().any(|p| p == reviewed);
-    let is_anc = is_ancestor(path, reviewed, merge_oid)?;
-    if !is_parent && !is_anc {
+    if parents[0] != pre_oid {
         return Err(AppError::generic(format!(
-            "merge main failed: reviewed oid {reviewed} is neither parent nor ancestor of merge tip"
+            "merge main failed: first parent is not pre-merge tip (expected={pre_oid}, got={})",
+            parents[0]
+        )));
+    }
+    if parents[1] != reviewed {
+        return Err(AppError::generic(format!(
+            "merge main failed: second parent is not reviewed oid (expected={reviewed}, got={})",
+            parents[1]
         )));
     }
     Ok(())
@@ -965,7 +970,7 @@ pub fn push_main_commit_oid_to(
 /// Code Logic（这个函数做什么）:
 ///     1) pre_oid = head_hash（要求 Some）；2) 读 branch → freeze_push_target；
 ///     3) merge_commit_oid；4) Conflicted 原样返回；Merged 后 head_hash +
-///     verify_merge_oid_binding（branch/ref/first-parent/reviewed ancestry）。
+///     verify_merge_oid_binding（branch/ref/exact parents [pre, reviewed]）。
 pub fn merge_reviewed_oid_with_frozen_main(
     main_path: &Path,
     reviewed_oid: &str,
@@ -2211,12 +2216,112 @@ UU web/src/App.tsx
         let advanced = head_hash(&main).expect("advanced").expect("some");
         assert_ne!(advanced, merge_oid);
         let err = verify_merge_oid_binding(&main, &advanced, &pre_oid, &reviewed, "main")
-            .expect_err("advanced tip must fail first-parent gate");
+            .expect_err("advanced tip must fail exact parent gate");
         let msg = err.to_string();
         assert!(
-            msg.contains("first parent") || msg.contains("pre-merge"),
+            msg.contains("first parent")
+                || msg.contains("pre-merge")
+                || msg.contains("exactly 2 parents"),
             "unexpected err: {msg}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     crafty merge tip 若 second-parent 是 reviewed 的后代而非 reviewed 本身，
+    ///     会把未审改动带进 main；exact parent gate 必须拒绝 ancestor 回退。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 parents=[pre, descendant-of-reviewed] 的 commit-tree tip，
+    ///     断言 verify_merge_oid_binding 因 second parent ≠ reviewed 失败。
+    #[test]
+    fn verify_merge_oid_binding_rejects_second_parent_descendant_of_reviewed() {
+        let root = temp_git_dir("workbench-merge-exact-parents");
+        let main = root.join("main");
+        let feature = root.join("feature");
+        fs::create_dir_all(&main).expect("main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        fs::write(main.join("README.md"), "base\n").expect("write");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "initial"]);
+        let pre_oid = head_hash(&main).expect("pre").expect("some");
+        git_test_command(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/crafty",
+                feature.to_str().unwrap(),
+            ],
+        );
+        fs::write(feature.join("feat.txt"), "v1\n").expect("feat");
+        git_test_command(&feature, &["add", "feat.txt"]);
+        git_test_command(&feature, &["commit", "-m", "feat reviewed"]);
+        let reviewed = head_hash(&feature).expect("reviewed").expect("oid");
+        // 在 reviewed 之上再造一笔未审改动，作为 crafty second-parent 候选。
+        fs::write(feature.join("sneak.txt"), "unreviewed\n").expect("sneak");
+        git_test_command(&feature, &["add", "sneak.txt"]);
+        git_test_command(&feature, &["commit", "-m", "sneak after review"]);
+        let descendant = head_hash(&feature).expect("descendant").expect("oid");
+        assert_ne!(descendant, reviewed);
+        assert!(is_ancestor(&main, &reviewed, &descendant).expect("anc"));
+        // 手工构造 first-parent=pre、second-parent=descendant 的 crafty merge tip。
+        let crafty_tree =
+            git_test_command(&feature, &["rev-parse", &format!("{descendant}^{{tree}}")])
+                .trim()
+                .to_string();
+        let crafty_oid = git_test_command(
+            &main,
+            &[
+                "commit-tree",
+                &crafty_tree,
+                "-p",
+                &pre_oid,
+                "-p",
+                &descendant,
+                "-m",
+                "crafty merge tip",
+            ],
+        )
+        .trim()
+        .to_string();
+        git_test_command(&main, &["update-ref", "refs/heads/main", &crafty_oid]);
+        git_test_command(&main, &["reset", "--hard", "HEAD"]);
+        let err = verify_merge_oid_binding(&main, &crafty_oid, &pre_oid, &reviewed, "main")
+            .expect_err("descendant second-parent must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("second parent") || msg.contains("reviewed oid"),
+            "unexpected err: {msg}"
+        );
+        // 对照：合法 parents=[pre, reviewed] 必须通过。
+        let reviewed_tree =
+            git_test_command(&feature, &["rev-parse", &format!("{reviewed}^{{tree}}")])
+                .trim()
+                .to_string();
+        let legit_oid = git_test_command(
+            &main,
+            &[
+                "commit-tree",
+                &reviewed_tree,
+                "-p",
+                &pre_oid,
+                "-p",
+                &reviewed,
+                "-m",
+                "legitimate merge tip",
+            ],
+        )
+        .trim()
+        .to_string();
+        git_test_command(&main, &["update-ref", "refs/heads/main", &legit_oid]);
+        git_test_command(&main, &["reset", "--hard", "HEAD"]);
+        verify_merge_oid_binding(&main, &legit_oid, &pre_oid, &reviewed, "main")
+            .expect("exact [pre, reviewed] parents must pass");
         let _ = fs::remove_dir_all(root);
     }
 

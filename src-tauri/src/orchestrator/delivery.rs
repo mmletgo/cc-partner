@@ -460,10 +460,12 @@ fn freeze_commit_task_worktree(path: &Path, message: &str) -> Result<Option<Stri
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验任务状态与项目 full-auto flags；获取 per-task delivery lock 并解析 worktree 后，
-///     若提供 expected_review_digest：stage → digest → freeze tree → commit_frozen_tree CAS；
+///     若提供 expected_review_digest：stage → write-tree → digest → write-tree sandwich →
+///     稳定时 `commit_frozen_tree(frozen2)` CAS（commit 仅用 post-digest tree）；
 ///     无 digest 时走 `commit_task_worktree` 返回冻结 OID（禁止 post-commit head_hash）。
-///     **全部**交付走 OID push/merge（无 branch-tip 路径）；main 在进程锁下
-///     freeze+merge；Done CAS 仅 Transitioned 且 recheck 仍为 Done 时 cleanup worktree；失败 Blocked。
+///     **全部**交付走 OID push/merge（无 branch-tip 路径）；main 在进程锁内先 recheck
+///     仍为 Delivering 再 dirty check + freeze+merge；abort 中止不得污染 merge evidence；
+///     Done CAS 仅 Transitioned 且 recheck 仍为 Done 时 cleanup worktree；失败 Blocked。
 pub(crate) async fn deliver_task<C>(
     context: &C,
     task_id: &str,
@@ -605,7 +607,8 @@ where
         }
     };
 
-    // digest 绑定路径：stage → digest → freeze tree → commit-tree+update-ref CAS。
+    // digest 绑定路径：stage → write-tree → digest → write-tree 二次冻结 sandwich →
+    // 仅当两次 tree OID 一致时 commit-tree+update-ref CAS（commit 只用 post-digest frozen2）。
     // Human Review：commit_task_worktree 直接返回冻结 OID（禁止 post-commit head_hash）。
     // 两条路径之后统一 OID push/merge；Done CAS Transitioned 且 recheck Done 后才清理 worktree。
     let reviewed_commit_oid: String = if let Some(expected) = expected_review_digest {
@@ -641,22 +644,39 @@ where
                 .await;
             }
         };
-        match enforce_expected_review_digest(task_path_ref, expected) {
-            Ok(()) => {}
-            Err(reason) => {
-                return block_delivery_task(
-                    context.orchestrator_repo(),
-                    &task.id,
-                    &reason,
-                    "review digest gate",
-                    &reason,
-                    &mut stages,
-                )
-                .await;
-            }
-        }
         if has_changes {
-            let frozen_tree = match workbench_git::write_tree_hash(task_path_ref) {
+            // write-tree sandwich：digest 前后各冻结一次 index tree，防止 digest 与 commit 之间 index 漂移。
+            let frozen1 = match workbench_git::write_tree_hash(task_path_ref) {
+                Ok(hash) => hash,
+                Err(err) => {
+                    let reason =
+                        format!("commit failed: write-tree before digest gate failed: {err}");
+                    return block_delivery_task(
+                        context.orchestrator_repo(),
+                        &task.id,
+                        &reason,
+                        "commit",
+                        &reason,
+                        &mut stages,
+                    )
+                    .await;
+                }
+            };
+            match enforce_expected_review_digest(task_path_ref, expected) {
+                Ok(()) => {}
+                Err(reason) => {
+                    return block_delivery_task(
+                        context.orchestrator_repo(),
+                        &task.id,
+                        &reason,
+                        "review digest gate",
+                        &reason,
+                        &mut stages,
+                    )
+                    .await;
+                }
+            }
+            let frozen2 = match workbench_git::write_tree_hash(task_path_ref) {
                 Ok(hash) => hash,
                 Err(err) => {
                     let reason =
@@ -672,9 +692,23 @@ where
                     .await;
                 }
             };
+            if frozen1 != frozen2 {
+                let reason = format!(
+                    "commit failed: index drifted between digest gate and freeze (before={frozen1}, after={frozen2})"
+                );
+                return block_delivery_task(
+                    context.orchestrator_repo(),
+                    &task.id,
+                    &reason,
+                    "commit",
+                    &reason,
+                    &mut stages,
+                )
+                .await;
+            }
             match workbench_git::commit_frozen_tree(
                 task_path_ref,
-                &frozen_tree,
+                &frozen2,
                 &commit_message,
                 expected_parent.as_deref(),
             ) {
@@ -693,7 +727,21 @@ where
                 }
             }
         } else {
-            // 已干净：绑定 stage 前捕获的 parent 为 reviewed OID（无新 tree）。
+            // 已干净：仍 enforce digest，再绑定 stage 前捕获的 parent 为 reviewed OID（无新 tree）。
+            match enforce_expected_review_digest(task_path_ref, expected) {
+                Ok(()) => {}
+                Err(reason) => {
+                    return block_delivery_task(
+                        context.orchestrator_repo(),
+                        &task.id,
+                        &reason,
+                        "review digest gate",
+                        &reason,
+                        &mut stages,
+                    )
+                    .await;
+                }
+            }
             match expected_parent {
                 Some(oid) => oid,
                 None => {
@@ -795,8 +843,15 @@ where
         return Ok(summary);
     }
 
-    // dirty check + freeze + merge 在同一 main 锁下执行。
+    // dirty check + freeze + merge 在同一 main 锁下执行；进锁后先 recheck 仍为 Delivering。
     let frozen_merge = match with_main_delivery_lock(&main_path, || async {
+        let current = context.orchestrator_repo().get_task(&task.id).await?;
+        if current.status != OrchestratorTaskStatus::Delivering {
+            return Err(AppError::conflict(format!(
+                "delivery_stopped:{}",
+                current.status.as_str()
+            )));
+        }
         let main_path_ref = Path::new(&main_path);
         let main_status = workbench_git::status(main_path_ref)?;
         if !main_status.clean {
@@ -812,6 +867,15 @@ where
     {
         Ok(result) => result,
         Err(err) => {
+            let message = err.to_string();
+            // Abort/状态变化：不得 block_delivery，也不得写 merge failed evidence。
+            if message.starts_with("delivery_stopped:") || message.contains("delivery_stopped:") {
+                let current = context.orchestrator_repo().get_task(&task.id).await?;
+                return Ok(DeliverySummary {
+                    task: OrchestratorTaskDto::from(current),
+                    stages,
+                });
+            }
             let reason = normalize_merge_failure_reason(&err);
             return block_delivery_task(
                 context.orchestrator_repo(),
@@ -2781,11 +2845,12 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     digest 门通过后 commit 的 tree 必须与 write-tree 冻结的 staged tree 一致，
-    ///     防止 commit 后 HEAD 内容与审阅边界解绑仍继续 push/merge。
+    ///     digest 路径必须在 gate 前后各 write-tree 一次（sandwich）；仅当两次 tree OID 稳定
+    ///     时才允许 commit，且 commit 的 tree 必须等于 post-digest frozen2。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     stage + enforce 后 write_tree_hash → commit_staged → head_tree_hash 必须等于 frozen。
+    ///     stage → write_tree(frozen1) → enforce → write_tree(frozen2)；断言 frozen1==frozen2，
+    ///     再 commit_frozen_tree(frozen2) 后 head_tree_hash == frozen2。
     #[test]
     fn digest_path_commit_binds_head_tree_to_frozen_write_tree() {
         let (_dir, _origin, _repo, task_worktree) = setup_git_delivery_repo();
@@ -2797,16 +2862,28 @@ mod tests {
         let digest =
             crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
                 .expect("digest");
+        // sandwich 文档化：digest 前/后各冻结一次，稳定才可 commit。
+        let frozen1 = workbench_git::write_tree_hash(&task_worktree).expect("write-tree before");
         enforce_expected_review_digest(&task_worktree, &digest).expect("digest match");
-        let frozen = workbench_git::write_tree_hash(&task_worktree).expect("write-tree");
-        workbench_git::commit_staged(&task_worktree, "orchestrator: tree bind")
-            .expect("commit staged");
-        let head = workbench_git::head_tree_hash(&task_worktree)
-            .expect("head tree")
-            .expect("HEAD tree present");
+        let frozen2 = workbench_git::write_tree_hash(&task_worktree).expect("write-tree after");
         assert_eq!(
-            head, frozen,
-            "HEAD tree must equal digest-gated staged tree"
+            frozen1, frozen2,
+            "index must be stable across digest gate sandwich"
+        );
+        let parent = workbench_git::head_hash(&task_worktree)
+            .expect("parent")
+            .expect("some parent");
+        let oid = workbench_git::commit_frozen_tree(
+            &task_worktree,
+            &frozen2,
+            "orchestrator: tree bind",
+            Some(&parent),
+        )
+        .expect("commit frozen2 only");
+        let head = workbench_git::commit_tree_hash(&task_worktree, &oid).expect("commit tree");
+        assert_eq!(
+            head, frozen2,
+            "committed tree must equal post-digest frozen2"
         );
     }
 
