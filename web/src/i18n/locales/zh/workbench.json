@@ -46,6 +46,7 @@
     "terminals": "终端",
     "openProject": "打开项目",
     "openAttention": "打开 Attention",
+    "projectUnavailable": "不可用",
     "reachabilityStates": {
       "live": "在线",
       "offline": "离线",

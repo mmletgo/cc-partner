@@ -213,9 +213,12 @@ pub async fn build_local_fleet_project(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     P2P route 与本机 collector 共用：按请求 id/path 解析本机 local 项目，带 100 上限。
+///     失效 shortcut / 缺失 id 必须返回 unavailable 占位（请求顺序一一对应），禁止静默省略，
+///     以便控制侧按 path/id 稳定 join，而不是按稀疏结果 index zip。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验请求规模 → 解析 id/path → 逐项 build_local_fleet_project → 填 global slots。
+///     校验规模与 remote id → 每个非空请求槽输出一条 summary（命中则 build，失败/缺失则
+///     unavailable）→ 填 device-global slots。path 解析只 list 一次 local 项目。
 pub async fn build_owner_device_summary(
     state: &AppState,
     req: &LanFleetOwnerBatchReq,
@@ -225,8 +228,16 @@ pub async fn build_owner_device_summary(
         return Err(AppError::validation("resource_limit"));
     }
 
-    let mut resolved: Vec<WorkbenchProjectRow> = Vec::new();
-    let mut seen_ids: HashMap<String, ()> = HashMap::new();
+    // path 匹配只拉一次 local 列表，避免 O(paths × list)
+    let local_by_path: Vec<WorkbenchProjectRow> = state
+        .workbench_project_repo
+        .list()
+        .await?
+        .into_iter()
+        .filter(|p| p.kind == "local")
+        .collect();
+
+    let mut projects: Vec<LanFleetProjectSummary> = Vec::with_capacity(total_requested);
 
     for raw_id in &req.project_ids {
         let id = raw_id.trim();
@@ -236,20 +247,17 @@ pub async fn build_owner_device_summary(
         if is_remote_id(id) {
             return Err(AppError::validation("local_project_required"));
         }
-        if seen_ids.contains_key(id) {
-            continue;
-        }
         match state.workbench_project_repo.get(id).await? {
             Some(row) if row.kind == "local" => {
-                seen_ids.insert(row.id.clone(), ());
-                resolved.push(row);
+                projects.push(build_or_unavailable(state, &row).await?);
             }
             Some(_) => {
+                // DB 中存在但非 local（如 remote shortcut）→ 整批拒绝，禁止递归
                 return Err(AppError::validation("local_project_required"));
             }
             None => {
-                // 缺失项目：跳过，调用方显示 unavailable；不因单 id 失败整批
-                continue;
+                // 缺失 id：unavailable 占位，保留请求 id 供导航锚点
+                projects.push(unavailable_for_request(id, id));
             }
         }
     }
@@ -263,36 +271,29 @@ pub async fn build_owner_device_summary(
         if is_remote_id(path) {
             return Err(AppError::validation("local_project_required"));
         }
-        // 先按已保存 local project 精确 path 匹配（不自动创建新项目，避免 batch 副作用）
-        let all = state.workbench_project_repo.list().await?;
-        if let Some(row) = all
-            .into_iter()
-            .find(|p| p.kind == "local" && (p.path == path || paths_equal(&p.path, path)))
+        // 已保存 local project 精确/尾斜杠 path 匹配；不自动创建
+        if let Some(row) = local_by_path
+            .iter()
+            .find(|p| p.path == path || paths_equal(&p.path, path))
         {
-            if seen_ids.contains_key(&row.id) {
-                continue;
-            }
-            seen_ids.insert(row.id.clone(), ());
-            resolved.push(row);
+            projects.push(build_or_unavailable(state, row).await?);
+        } else {
+            // shortcut 失效：unavailable；project_id 不得写绝对 path（控制侧按请求 path 槽位 join）
+            projects.push(unavailable_for_request(
+                FLEET_UNRESOLVED_PROJECT_ID,
+                &path_display_name(path),
+            ));
         }
-        // 未找到：跳过（shortcut 失效）
     }
 
-    if resolved.len() > FLEET_OWNER_BATCH_MAX_PROJECTS {
+    if projects.len() > FLEET_OWNER_BATCH_MAX_PROJECTS {
         return Err(AppError::validation("resource_limit"));
     }
 
-    let mut projects = Vec::with_capacity(resolved.len());
-    for row in &resolved {
-        match build_local_fleet_project(state, row).await {
-            Ok(summary) => projects.push(summary),
-            Err(e) if e.code() == "local_project_required" => {
-                return Err(e);
-            }
-            Err(_) => {
-                // 单项目整体失败：以 unavailable 占位（保留 id/name）
-                projects.push(unavailable_project_summary(row));
-            }
+    // 防御：响应不得含绝对 path 形态 id
+    for project in &projects {
+        if project.project_id.starts_with('/') || project.project_id.contains(":\\") {
+            return Err(AppError::generic("fleet_path_leak"));
         }
     }
 
@@ -321,6 +322,22 @@ pub async fn build_owner_device_summary(
         generated_at,
         device,
     })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单项目 build 失败时仍要占位，不能让整批缺槽导致控制侧 join 错位。
+///
+/// Code Logic（这个函数做什么）:
+///     build_local_fleet_project；local_project_required 上抛；其它错误 → unavailable。
+async fn build_or_unavailable(
+    state: &AppState,
+    row: &WorkbenchProjectRow,
+) -> Result<LanFleetProjectSummary, AppError> {
+    match build_local_fleet_project(state, row).await {
+        Ok(summary) => Ok(summary),
+        Err(e) if e.code() == "local_project_required" => Err(e),
+        Err(_) => Ok(unavailable_project_summary(row)),
+    }
 }
 
 /// 控制设备：仅聚合已保存 shortcut，按 device 去重 fan-out（使用全局 display cache）。
@@ -490,7 +507,7 @@ pub async fn collect_lan_fleet_for_state_with_cache(
                     };
                 }
 
-                // 按 path 批请求；上限 100
+                // 按 path 批请求；稳定排序 + 去重；上限 100
                 let mut paths: Vec<String> = shortcuts.iter().map(|s| s.path.clone()).collect();
                 paths.sort();
                 paths.dedup();
@@ -498,7 +515,7 @@ pub async fn collect_lan_fleet_for_state_with_cache(
                     paths.truncate(FLEET_OWNER_BATCH_MAX_PROJECTS);
                 }
 
-                // path → control-side shortcut id 映射（响应改写 project_id，禁止泄漏 path）
+                // path → control-side shortcut 映射（响应按 path 键 join，禁止泄漏 path）
                 let path_to_shortcut: HashMap<String, WorkbenchProjectRow> = shortcuts
                     .iter()
                     .map(|s| (s.path.clone(), s.clone()))
@@ -506,7 +523,7 @@ pub async fn collect_lan_fleet_for_state_with_cache(
 
                 let req = LanFleetOwnerBatchReq {
                     project_ids: Vec::new(),
-                    project_paths: paths,
+                    project_paths: paths.clone(),
                 };
 
                 let fetch = client.lan_fleet_snapshot(&base_url, &req);
@@ -519,10 +536,11 @@ pub async fn collect_lan_fleet_for_state_with_cache(
                 match timed {
                     Ok(Ok(resp)) => {
                         let mut device = resp.device;
-                        // 改写 project_id 为控制侧 remote shortcut id；kind=remote
+                        // 按请求 path 键 join → 控制侧 remote shortcut id；失效 path 保留 unavailable
                         device.projects = remap_remote_projects(
                             &device_id,
                             device.projects,
+                            &paths,
                             &path_to_shortcut,
                         );
                         device.device_id = device_id.clone();
@@ -602,16 +620,31 @@ fn paths_equal(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
+/// owner 响应中“未解析 path”占位的稳定 project_id（禁止写绝对 path）。
+const FLEET_UNRESOLVED_PROJECT_ID: &str = "__fleet_unresolved__";
+
+/// Fleet 项目 kind：shortcut/path 失效或构建失败时的显式 unavailable。
+const FLEET_PROJECT_KIND_UNAVAILABLE: &str = "unavailable";
+
 /// Business Logic（为什么需要这个函数）:
 ///     单项目构建失败时仍保留导航锚点，避免整 device 空白。
 ///
 /// Code Logic（这个函数做什么）:
-///     用 unknown 字段填充 LanFleetProjectSummary。
+///     用 unknown 字段 + kind=unavailable 填充 LanFleetProjectSummary。
 fn unavailable_project_summary(row: &WorkbenchProjectRow) -> LanFleetProjectSummary {
+    unavailable_for_request(&row.id, &row.name)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     请求 id/path 无法解析为 local 项目时必须输出 unavailable 行，禁止静默省略。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 kind=unavailable 的占位 summary；project_id 不得是绝对 path。
+fn unavailable_for_request(project_id: &str, display_name: &str) -> LanFleetProjectSummary {
     LanFleetProjectSummary {
-        project_id: row.id.clone(),
-        display_name: row.name.clone(),
-        project_kind: row.kind.clone(),
+        project_id: project_id.to_string(),
+        display_name: display_name.to_string(),
+        project_kind: FLEET_PROJECT_KIND_UNAVAILABLE.to_string(),
         agent_counts: AgentPhaseCounts::default(),
         attention_count: 0,
         terminal_count: 0,
@@ -621,6 +654,35 @@ fn unavailable_project_summary(row: &WorkbenchProjectRow) -> LanFleetProjectSumm
         orchestrator_retrying: 0,
         last_activity_at: None,
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     unavailable 占位需要可读 display_name，但不能把绝对 path 写进 DTO。
+///
+/// Code Logic（这个函数做什么）:
+///     取 path 最后一段；空则回落 "unavailable"。
+fn path_display_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    let name = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        FLEET_PROJECT_KIND_UNAVAILABLE.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     判断 owner 摘要是否为失效/失败占位，控制侧 remap 后仍要展示 unavailable。
+///
+/// Code Logic（这个函数做什么）:
+///     project_kind == unavailable 或 unresolved 哨兵 id。
+fn is_unavailable_summary(summary: &LanFleetProjectSummary) -> bool {
+    summary.project_kind == FLEET_PROJECT_KIND_UNAVAILABLE
+        || summary.project_id == FLEET_UNRESOLVED_PROJECT_ID
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -694,44 +756,88 @@ fn device_base_url_from_map(
 
 /// Business Logic（为什么需要这个函数）:
 ///     owner 返回的 local project_id 不能直接用于控制设备导航；必须改写为 remote shortcut id。
-///     且不得把远端绝对 path 写入最终 snapshot。
+///     且不得把远端绝对 path 写入最终 snapshot。中间 path 缺失时禁止 index zip 错绑邻接项目。
 ///
 /// Code Logic（这个函数做什么）:
-///     优先用 path→shortcut 映射；否则 remote_project_id(device, owner_id) 不稳定时用
-///     remote_entity_id 包装 owner local id；display_name 优先 shortcut.name。
+///     以请求 `project_paths` 为稳定 join 键：槽位 i 对应 paths[i] → path_to_shortcut 查
+///     shortcut id/name；owner 同步按请求顺序返回（含 unavailable 占位）。缺失槽合成
+///     unavailable。绝不按 owner 稀疏结果与 shortcut 列表 index zip。
 fn remap_remote_projects(
     device_id: &str,
     owner_projects: Vec<LanFleetProjectSummary>,
+    requested_paths: &[String],
     path_to_shortcut: &HashMap<String, WorkbenchProjectRow>,
 ) -> Vec<LanFleetProjectSummary> {
-    // owner 响应不含 path；用 display_name/path 无法可靠匹配。
-    // 控制侧 shortcut.path 对应 owner 上 local path；open 后 owner id 存在于 shortcut 流程。
-    // 策略：若只有一条 shortcut 且一条 project，直接绑定；否则按 remote_project_id(device, path)
-    // 预计算的 shortcut id 列表顺序对齐（batch 按 path 排序后 owner 按解析顺序返回）。
-    // 更稳妥：用 shortcut 列表建立 owner_local_id 未知时的 fallback——按 path 排序的 shortcuts
-    // 与 owner 返回顺序 zip（owner build 按请求 path 顺序）。
-    let mut shortcuts_by_path: Vec<&WorkbenchProjectRow> = path_to_shortcut.values().collect();
-    shortcuts_by_path.sort_by(|a, b| a.path.cmp(&b.path));
+    // path 键 → 规范化 lookup（精确 + 尾斜杠）
+    let lookup_shortcut = |path: &str| -> Option<&WorkbenchProjectRow> {
+        if let Some(row) = path_to_shortcut.get(path) {
+            return Some(row);
+        }
+        path_to_shortcut
+            .iter()
+            .find(|(k, _)| paths_equal(k, path))
+            .map(|(_, v)| v)
+    };
 
-    owner_projects
-        .into_iter()
-        .enumerate()
-        .map(|(idx, mut summary)| {
-            if let Some(shortcut) = shortcuts_by_path.get(idx) {
-                summary.project_id = shortcut.id.clone();
-                if !shortcut.name.trim().is_empty() {
-                    summary.display_name = shortcut.name.clone();
+    if !requested_paths.is_empty() {
+        let mut out = Vec::with_capacity(requested_paths.len());
+        for (idx, path) in requested_paths.iter().enumerate() {
+            let shortcut = lookup_shortcut(path);
+            let owner_summary = owner_projects.get(idx);
+            let unavailable = match owner_summary {
+                Some(s) => is_unavailable_summary(s),
+                None => true,
+            };
+
+            let mut summary = match owner_summary {
+                Some(s) => s.clone(),
+                None => unavailable_for_request(
+                    FLEET_UNRESOLVED_PROJECT_ID,
+                    &path_display_name(path),
+                ),
+            };
+
+            if let Some(sc) = shortcut {
+                summary.project_id = sc.id.clone();
+                if !sc.name.trim().is_empty() {
+                    summary.display_name = sc.name.clone();
                 }
             } else {
-                // fallback：包装 owner local id（不泄漏 path）
-                summary.project_id = format!("remote:{device_id}:{}", summary.project_id);
+                // 无 shortcut 记录时用 path 哈希 remote id（稳定、不写绝对 path）
+                summary.project_id = remote_project_id(device_id, path);
             }
-            summary.project_kind = "remote".to_string();
-            // 防御：确保 project_id 不含绝对 path 形态
+
+            summary.project_kind = if unavailable {
+                FLEET_PROJECT_KIND_UNAVAILABLE.to_string()
+            } else {
+                "remote".to_string()
+            };
+
             if summary.project_id.starts_with('/') || summary.project_id.contains(":\\") {
                 summary.project_id = remote_project_id(device_id, &summary.project_id);
             }
             let _ = parse_remote_entity_id(&summary.project_id);
+            out.push(summary);
+        }
+        return out;
+    }
+
+    // 无 path 列表时（异常/测试）：仅包装 owner local id，不猜 shortcut
+    owner_projects
+        .into_iter()
+        .map(|mut summary| {
+            let unavailable = is_unavailable_summary(&summary);
+            if !summary.project_id.starts_with("remote:") {
+                summary.project_id = format!("remote:{device_id}:{}", summary.project_id);
+            }
+            summary.project_kind = if unavailable {
+                FLEET_PROJECT_KIND_UNAVAILABLE.to_string()
+            } else {
+                "remote".to_string()
+            };
+            if summary.project_id.starts_with('/') || summary.project_id.contains(":\\") {
+                summary.project_id = remote_project_id(device_id, &summary.project_id);
+            }
             summary
         })
         .collect()
@@ -740,17 +846,26 @@ fn remap_remote_projects(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::ui::HeadlessBackendUi;
+    use crate::config::{AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::net::peer_client::PeerClient;
+    use crate::workbench::lan_fleet::cache::FleetDisplayCache;
     use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
     use crate::orchestrator::repo::OrchestratorRepo;
+    use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
+    use crate::state::AppState;
     use crate::storage::{
-        DatabaseMaintenanceGate, WorkbenchAgentSessionRepo, WorkbenchProjectRepo,
-        WorkbenchSessionRepo,
+        ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
+        TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
+        WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
     };
+    use crate::transfer::registry::TransferRegistry;
     use crate::workbench::agent_runtime::models::CreateActiveAgentSession;
     use crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
-    use std::sync::Arc;
+    use std::sync::atomic::AtomicU16;
+    use std::sync::{Arc, Mutex, RwLock};
 
     /// Business Logic（为什么需要这个函数）:
     ///     collector 单测需要共享内存库与 schema。
@@ -798,6 +913,15 @@ mod tests {
     /// Code Logic（这个函数做什么）:
     ///     INSERT workbench_projects。
     async fn insert_project(pool: &sqlx::SqlitePool, id: &str, kind: &str) {
+        insert_project_at(pool, id, kind, &format!("/tmp/{id}")).await;
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     path 批测试需要可控绝对 path。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     INSERT workbench_projects 带自定义 path。
+    async fn insert_project_at(pool: &sqlx::SqlitePool, id: &str, kind: &str, path: &str) {
         sqlx::query(
             "INSERT INTO workbench_projects \
              (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
@@ -806,7 +930,7 @@ mod tests {
         .bind(id)
         .bind(format!("P-{id}"))
         .bind(kind)
-        .bind(format!("/tmp/{id}"))
+        .bind(path)
         .execute(pool)
         .await
         .unwrap();
@@ -836,6 +960,203 @@ mod tests {
             started_at: None,
             finished_at: None,
             ..OrchestratorTaskRow::default_for_status(status)
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     owner batch / remap 集成测需要可调用 `build_owner_device_summary` 的真实 AppState。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     内存库 + 最小 schema + Headless UI 拼装 AppState。
+    async fn fleet_test_state(device_id: &str) -> AppState {
+        let pool = setup_pool().await;
+        // 其它 repo 需要的空表（get 路径不碰时也需构造）
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS prompts (\
+             id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, \
+             tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
+             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
+             delete_epoch INTEGER NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ssh_targets (\
+             host TEXT PRIMARY KEY, port INTEGER NOT NULL, username TEXT NOT NULL, \
+             label TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
+             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
+             delete_epoch INTEGER NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS scratchpad (\
+             id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '速记本', content TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL, \
+             vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
+             delete_epoch INTEGER NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let config = AppConfig {
+            device_id: device_id.to_string(),
+            device_name: "fleet-owner".into(),
+            http_port: 0,
+            receive_dir: "/tmp/cc-partner-fleet-test-recv".into(),
+            db_path: ":memory:".into(),
+            screenshot_hotkey: "<cmd>+s".into(),
+            prompt_optimizer_hotkey: "<ctrl>".into(),
+            prompt_optimizer_fill_language: "zh".into(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+        };
+        let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
+            config.clone(),
+        ));
+        let config_runtime = Arc::new(crate::config_runtime::ConfigRuntime::new(config, store));
+        let config = config_runtime.shared_value();
+        let maintenance_gate = Arc::new(DatabaseMaintenanceGate::new());
+
+        AppState {
+            config,
+            config_runtime,
+            db: pool.clone(),
+            maintenance_gate: maintenance_gate.clone(),
+            prompt_repo: Arc::new(PromptRepo::with_gate(
+                pool.clone(),
+                maintenance_gate.clone(),
+            )),
+            transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
+            claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
+            scratchpad_repo: Arc::new(ScratchpadRepo::with_gate(
+                pool.clone(),
+                maintenance_gate.clone(),
+            )),
+            device_id: Arc::new(device_id.to_string()),
+            devices: Arc::new(RwLock::new(HashMap::new())),
+            actual_http_port: Arc::new(AtomicU16::new(0)),
+            discovery: Arc::new(Mutex::new(None)),
+            peer_client: Arc::new(PeerClient::new()),
+            transfers: Arc::new(TransferRegistry::new()),
+            ui: Arc::new(HeadlessBackendUi::new(std::path::PathBuf::from("/tmp"))),
+            update_runtime: Arc::new(crate::updater::UpdateRuntime::new()),
+            cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
+            ssh_target_repo: Arc::new(crate::storage::SshTargetRepo::with_gate(
+                pool.clone(),
+                maintenance_gate.clone(),
+            )),
+            workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
+            workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
+            workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
+            workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
+            workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
+            workbench_workspace_layout_repo: Arc::new(WorkbenchWorkspaceLayoutRepo::new(
+                pool.clone(),
+            )),
+            workbench_browser_previews: Arc::new(WorkbenchBrowserPreviewRegistry::new()),
+            browser_verification: Arc::new(
+                crate::workbench::browser_verification::BrowserVerificationService::new(
+                    Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),
+                    std::env::temp_dir().join("cc-partner-bv-fleet-test"),
+                    "test-owner".into(),
+                )
+                .expect("browser verification test service"),
+            ),
+            workbench_sessions: Arc::new(
+                crate::workbench::sessions::WorkbenchSessionRegistry::new(),
+            ),
+            workbench_remote_events: {
+                let (tx, _) = tokio::sync::broadcast::channel(8);
+                tx
+            },
+            workbench_remote_event_bridges: Arc::new(
+                crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
+            ),
+            workbench_dependency: Arc::new(
+                crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
+            ),
+            cc_collector_cancel: Arc::new(Mutex::new(None)),
+            cloud_sync_runtime: Arc::new(crate::cloud_sync::CloudSyncRuntime::new()),
+            cloud_sync_cancel: Arc::new(Mutex::new(None)),
+            health: Arc::new(crate::health::HealthRuntime::new()),
+            health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),
+            health_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_repo: Arc::new(OrchestratorRepo::new(pool)),
+            orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::new(),
+            orchestrator_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            workbench_claude_session_indexes: Arc::new(RwLock::new(HashMap::new())),
+            workbench_claude_session_watchers: Arc::new(Mutex::new(HashMap::new())),
+            workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
+                HashMap::new(),
+            )),
+            workbench_claude_session_index_dispose_epochs: Arc::new(Mutex::new(HashMap::new())),
+            runtime_metrics: Arc::new(crate::backend::runtime_metrics::RuntimeMetrics::new()),
+            runtime_role: crate::backend::authority::RuntimeRole::HeadlessOwner,
+            event_bus: Arc::new(crate::backend::event_bus::RuntimeEventBus::new(format!(
+                "fleet-test-{device_id}"
+            ))),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     remap 单测需要构造 control 侧 shortcut 行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     最小 WorkbenchProjectRow（kind=remote）。
+    fn shortcut_row(id: &str, name: &str, path: &str) -> WorkbenchProjectRow {
+        WorkbenchProjectRow {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: "remote".into(),
+            device_id: "owner-1".into(),
+            device_name: "Owner".into(),
+            path: path.to_string(),
+            last_opened_at: "2026-07-15T00:00:00Z".into(),
+            created_at: "2026-07-15T00:00:00Z".into(),
+            updated_at: "2026-07-15T00:00:00Z".into(),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     remap 单测需要模拟 owner 返回的 project 摘要。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     最小 LanFleetProjectSummary。
+    fn owner_summary(project_id: &str, display_name: &str, kind: &str) -> LanFleetProjectSummary {
+        LanFleetProjectSummary {
+            project_id: project_id.to_string(),
+            display_name: display_name.to_string(),
+            project_kind: kind.to_string(),
+            agent_counts: AgentPhaseCounts {
+                working: if kind == "unavailable" { 0 } else { 1 },
+                ..AgentPhaseCounts::default()
+            },
+            attention_count: 0,
+            terminal_count: 0,
+            git_state: if kind == "unavailable" {
+                FleetGitState::Unknown
+            } else {
+                FleetGitState::Clean
+            },
+            browser_state: if kind == "unavailable" {
+                FleetBrowserState::Unknown
+            } else {
+                FleetBrowserState::Absent
+            },
+            orchestrator_running: 0,
+            orchestrator_retrying: 0,
+            last_activity_at: None,
         }
     }
 
@@ -999,5 +1320,279 @@ mod tests {
         let _ = WorkbenchProjectRepo::new(pool.clone());
         let _ = WorkbenchSessionRepo::new(pool.clone());
         let _ = WorkbenchBrowserPreviewRegistry::new();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     中间 path 失效时，剩余摘要必须仍绑定正确 shortcut，不能 index zip 错绑。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     请求 paths A/B/C，owner 返回 A、unavailable、C；remap 后 shortcut 顺序与 metrics 对齐。
+    #[test]
+    fn remap_joins_by_requested_path_not_sparse_index() {
+        let path_a = "/tmp/proj-a";
+        let path_b = "/tmp/proj-b-missing";
+        let path_c = "/tmp/proj-c";
+        let sc_a = shortcut_row("remote:owner-1:hash-a", "Shortcut A", path_a);
+        let sc_b = shortcut_row("remote:owner-1:hash-b", "Shortcut B", path_b);
+        let sc_c = shortcut_row("remote:owner-1:hash-c", "Shortcut C", path_c);
+        let mut path_to_shortcut = HashMap::new();
+        path_to_shortcut.insert(path_a.to_string(), sc_a);
+        path_to_shortcut.insert(path_b.to_string(), sc_b);
+        path_to_shortcut.insert(path_c.to_string(), sc_c);
+
+        // owner 按请求顺序返回：A live / B unavailable / C live（不再跳过 B）
+        let owner_projects = vec![
+            owner_summary("local-a", "P-a", "local"),
+            unavailable_for_request(FLEET_UNRESOLVED_PROJECT_ID, "proj-b-missing"),
+            owner_summary("local-c", "P-c", "local"),
+        ];
+        let requested = vec![
+            path_a.to_string(),
+            path_b.to_string(),
+            path_c.to_string(),
+        ];
+
+        let remapped = remap_remote_projects(
+            "owner-1",
+            owner_projects,
+            &requested,
+            &path_to_shortcut,
+        );
+
+        assert_eq!(remapped.len(), 3);
+        assert_eq!(remapped[0].project_id, "remote:owner-1:hash-a");
+        assert_eq!(remapped[0].display_name, "Shortcut A");
+        assert_eq!(remapped[0].project_kind, "remote");
+        assert_eq!(remapped[0].agent_counts.working, 1);
+
+        assert_eq!(remapped[1].project_id, "remote:owner-1:hash-b");
+        assert_eq!(remapped[1].display_name, "Shortcut B");
+        assert_eq!(remapped[1].project_kind, FLEET_PROJECT_KIND_UNAVAILABLE);
+        assert_eq!(remapped[1].agent_counts.working, 0);
+
+        assert_eq!(remapped[2].project_id, "remote:owner-1:hash-c");
+        assert_eq!(remapped[2].display_name, "Shortcut C");
+        assert_eq!(remapped[2].project_kind, "remote");
+        assert_eq!(remapped[2].agent_counts.working, 1);
+
+        // 旧 index-zip 会把 C 的 metrics 错绑到 B；此处明确否定
+        assert_ne!(remapped[1].project_id, "remote:owner-1:hash-c");
+        for p in &remapped {
+            assert!(!p.project_id.starts_with('/'));
+            assert!(!p.project_id.contains(":\\"));
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner 响应比请求 path 短时，尾部槽必须合成 unavailable，不得越界 panic。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     owner 仅 1 条、paths 2 条 → 槽 1 unavailable 且绑定正确 shortcut id。
+    #[test]
+    fn remap_synthesizes_unavailable_for_missing_owner_slots() {
+        let path_a = "/tmp/a";
+        let path_b = "/tmp/b";
+        let mut map = HashMap::new();
+        map.insert(
+            path_a.to_string(),
+            shortcut_row("remote:d:a", "A", path_a),
+        );
+        map.insert(
+            path_b.to_string(),
+            shortcut_row("remote:d:b", "B", path_b),
+        );
+        let owner_projects = vec![owner_summary("la", "A", "local")];
+        let requested = vec![path_a.to_string(), path_b.to_string()];
+        let remapped = remap_remote_projects("d", owner_projects, &requested, &map);
+        assert_eq!(remapped.len(), 2);
+        assert_eq!(remapped[0].project_id, "remote:d:a");
+        assert_eq!(remapped[0].project_kind, "remote");
+        assert_eq!(remapped[1].project_id, "remote:d:b");
+        assert_eq!(remapped[1].project_kind, FLEET_PROJECT_KIND_UNAVAILABLE);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner batch 必须真正拒绝 remote project id，而不是只构造 AppError 常量。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用 build_owner_device_summary → local_project_required。
+    #[tokio::test]
+    async fn build_owner_rejects_remote_project_ids() {
+        let state = fleet_test_state("owner-dev").await;
+        let err = build_owner_device_summary(
+            &state,
+            &LanFleetOwnerBatchReq {
+                project_ids: vec!["remote:d:p".into()],
+                project_paths: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("remote id must fail");
+        assert_eq!(err.code(), "local_project_required");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner batch >100 必须 resource_limit（真实校验分支）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     101 个 project_ids 调用 build_owner_device_summary。
+    #[tokio::test]
+    async fn build_owner_caps_projects_at_resource_limit() {
+        let state = fleet_test_state("owner-dev").await;
+        let ids: Vec<String> = (0..=FLEET_OWNER_BATCH_MAX_PROJECTS)
+            .map(|i| format!("p{i}"))
+            .collect();
+        assert!(ids.len() > FLEET_OWNER_BATCH_MAX_PROJECTS);
+        let err = build_owner_device_summary(
+            &state,
+            &LanFleetOwnerBatchReq {
+                project_ids: ids,
+                project_paths: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("oversize must fail");
+        assert_eq!(err.code(), "resource_limit");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     失效 path 必须返回 unavailable 占位且不泄漏绝对 path；命中 path 保留 local id。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入 A/C，请求 A/B/C paths → 三条；B unavailable；无绝对 path project_id。
+    #[tokio::test]
+    async fn build_owner_emits_unavailable_for_missing_paths_in_request_order() {
+        let state = fleet_test_state("owner-dev").await;
+        insert_project_at(&state.db, "local-a", "local", "/tmp/proj-a").await;
+        insert_project_at(&state.db, "local-c", "local", "/tmp/proj-c").await;
+
+        let resp = build_owner_device_summary(
+            &state,
+            &LanFleetOwnerBatchReq {
+                project_ids: Vec::new(),
+                project_paths: vec![
+                    "/tmp/proj-a".into(),
+                    "/tmp/proj-b-missing".into(),
+                    "/tmp/proj-c".into(),
+                ],
+            },
+        )
+        .await
+        .expect("batch ok");
+
+        assert_eq!(resp.device.projects.len(), 3);
+        assert_eq!(resp.device.projects[0].project_id, "local-a");
+        assert_ne!(
+            resp.device.projects[0].project_kind,
+            FLEET_PROJECT_KIND_UNAVAILABLE
+        );
+        assert_eq!(
+            resp.device.projects[1].project_kind,
+            FLEET_PROJECT_KIND_UNAVAILABLE
+        );
+        assert_eq!(
+            resp.device.projects[1].project_id,
+            FLEET_UNRESOLVED_PROJECT_ID
+        );
+        assert_eq!(resp.device.projects[2].project_id, "local-c");
+
+        for p in &resp.device.projects {
+            assert!(
+                !p.project_id.starts_with('/'),
+                "project_id must not be absolute path: {}",
+                p.project_id
+            );
+            assert!(!p.project_id.contains(":\\"));
+        }
+
+        // 端到端：owner 响应 + path 键 remap 后 B 绑定正确 shortcut，C 不被错绑
+        let mut map = HashMap::new();
+        map.insert(
+            "/tmp/proj-a".into(),
+            shortcut_row("remote:owner-dev:sa", "SA", "/tmp/proj-a"),
+        );
+        map.insert(
+            "/tmp/proj-b-missing".into(),
+            shortcut_row("remote:owner-dev:sb", "SB", "/tmp/proj-b-missing"),
+        );
+        map.insert(
+            "/tmp/proj-c".into(),
+            shortcut_row("remote:owner-dev:sc", "SC", "/tmp/proj-c"),
+        );
+        let paths = vec![
+            "/tmp/proj-a".to_string(),
+            "/tmp/proj-b-missing".to_string(),
+            "/tmp/proj-c".to_string(),
+        ];
+        let remapped = remap_remote_projects(
+            "owner-dev",
+            resp.device.projects,
+            &paths,
+            &map,
+        );
+        assert_eq!(remapped[0].project_id, "remote:owner-dev:sa");
+        assert_eq!(remapped[1].project_id, "remote:owner-dev:sb");
+        assert_eq!(remapped[1].project_kind, FLEET_PROJECT_KIND_UNAVAILABLE);
+        assert_eq!(remapped[2].project_id, "remote:owner-dev:sc");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     缺失 local project id 也必须 unavailable 占位，不能静默省略。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     请求存在 id + 不存在 id → 两条，第二条 unavailable。
+    #[tokio::test]
+    async fn build_owner_emits_unavailable_for_missing_project_ids() {
+        let state = fleet_test_state("owner-dev").await;
+        insert_project_at(&state.db, "exists", "local", "/tmp/exists").await;
+        let resp = build_owner_device_summary(
+            &state,
+            &LanFleetOwnerBatchReq {
+                project_ids: vec!["exists".into(), "gone".into()],
+                project_paths: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.device.projects.len(), 2);
+        assert_eq!(resp.device.projects[0].project_id, "exists");
+        assert_eq!(resp.device.projects[1].project_id, "gone");
+        assert_eq!(
+            resp.device.projects[1].project_kind,
+            FLEET_PROJECT_KIND_UNAVAILABLE
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     offline 时 cache 命中必须标 cached，且不清除其它 device 的 live 数据语义。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     put cache → offline_or_cached → Offline+Cached+error_code。
+    #[test]
+    fn offline_or_cached_preserves_last_live_projects() {
+        let cache = FleetDisplayCache::new();
+        let shared = Arc::new(cache);
+        shared.put(LanFleetDeviceSummary {
+            device_id: "d1".into(),
+            device_name: "One".into(),
+            reachability: FleetReachability::Live,
+            freshness: FleetFreshness::Live,
+            scheduler_slots_used: Some(2),
+            scheduler_slots_max: Some(4),
+            projects: vec![owner_summary("p1", "P1", "remote")],
+            error_code: None,
+            captured_at: Some("2026-07-15T00:00:00Z".into()),
+        });
+        let out = offline_or_cached(&shared, "d1", "One", "timeout");
+        assert_eq!(out.reachability, FleetReachability::Offline);
+        assert_eq!(out.freshness, FleetFreshness::Cached);
+        assert_eq!(out.error_code.as_deref(), Some("timeout"));
+        assert_eq!(out.projects.len(), 1);
+        assert_eq!(out.projects[0].project_id, "p1");
+
+        let miss = offline_or_cached(&shared, "d2", "Two", "peer_error");
+        assert_eq!(miss.reachability, FleetReachability::Offline);
+        assert_eq!(miss.freshness, FleetFreshness::Unknown);
+        assert!(miss.projects.is_empty());
     }
 }

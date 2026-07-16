@@ -46,6 +46,7 @@
     "terminals": "Terminals",
     "openProject": "Open project",
     "openAttention": "Open Attention",
+    "projectUnavailable": "Unavailable",
     "reachabilityStates": {
       "live": "Online",
       "offline": "Offline",

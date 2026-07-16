@@ -208,9 +208,11 @@ function ProjectRow({ project }: { project: LanFleetProjectSummary }): ReactElem
       <div className={styles.projectMain}>
         <span className={styles.projectName}>{project.displayName}</span>
         <span className={styles.projectKind}>
-          {project.projectKind === 'remote'
-            ? t('workbench:remoteBadge')
-            : t('workbench:projectSources.local')}
+          {project.projectKind === 'unavailable'
+            ? t('workbench:fleet.projectUnavailable')
+            : project.projectKind === 'remote'
+              ? t('workbench:remoteBadge')
+              : t('workbench:projectSources.local')}
         </span>
       </div>
       <dl className={styles.projectStats}>

@@ -2329,36 +2329,29 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     Fleet owner batch 必须拒绝 remote project id 并在 >100 时 resource_limit。
+    ///     Fleet owner batch 请求体 snake_case 反序列化与稳定错误 code 常量对齐。
+    ///     真实 build_owner_device_summary 校验见 `lan_fleet::collector::tests`。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     直接调用 build_owner_device_summary 的校验分支（不依赖完整 AppState）。
+    ///     反序列化 snake_case body；断言 resource_limit / local_project_required code token。
     #[test]
-    fn owner_batch_rejects_remote_project_ids_and_caps_projects() {
-        use crate::workbench::lan_fleet::{
-            LanFleetOwnerBatchReq, FLEET_OWNER_BATCH_MAX_PROJECTS,
-        };
-        let remote_req = LanFleetOwnerBatchReq {
-            project_ids: vec!["remote:d:p".into()],
-            project_paths: Vec::new(),
-        };
-        // 校验逻辑与 handler 共用：remote id / 超限在进入 repo 前失败。
-        assert!(crate::workbench::remote_ids::is_remote_id("remote:d:p"));
-        let over: Vec<String> = (0..=FLEET_OWNER_BATCH_MAX_PROJECTS)
-            .map(|i| format!("p{i}"))
-            .collect();
-        assert!(over.len() > FLEET_OWNER_BATCH_MAX_PROJECTS);
-        let limit_err = AppError::validation("resource_limit");
-        assert_eq!(limit_err.code(), "resource_limit");
-        let local_err = AppError::validation("local_project_required");
-        assert_eq!(local_err.code(), "local_project_required");
-        // 请求体形状：snake_case 反序列化
+    fn owner_batch_request_shape_and_error_codes() {
+        use crate::workbench::lan_fleet::LanFleetOwnerBatchReq;
         let parsed: LanFleetOwnerBatchReq = serde_json::from_value(serde_json::json!({
             "project_ids": ["remote:d:p"],
             "project_paths": []
         }))
         .unwrap();
-        assert_eq!(parsed.project_ids, remote_req.project_ids);
+        assert_eq!(parsed.project_ids, vec!["remote:d:p".to_string()]);
+        assert!(crate::workbench::remote_ids::is_remote_id("remote:d:p"));
+        assert_eq!(
+            AppError::validation("resource_limit").code(),
+            "resource_limit"
+        );
+        assert_eq!(
+            AppError::validation("local_project_required").code(),
+            "local_project_required"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
