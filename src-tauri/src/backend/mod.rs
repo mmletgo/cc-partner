@@ -9,6 +9,7 @@
 pub mod authority;
 pub mod cli;
 pub mod control;
+pub mod control_agent;
 pub mod control_api;
 pub mod control_client;
 pub mod control_workbench;

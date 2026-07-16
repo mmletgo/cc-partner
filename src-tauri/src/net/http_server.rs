@@ -422,6 +422,24 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 post(crate::backend::control_workbench::control_workbench_data)
                     .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
             )
+            // A7：Agent-first CLI typed control（query/mutate；loopback+token）
+            // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
+            .route(
+                "/api/backend/control/agent/query",
+                post(crate::backend::control_agent::control_agent_query).layer(
+                    axum::extract::DefaultBodyLimit::max(
+                        crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                    ),
+                ),
+            )
+            .route(
+                "/api/backend/control/agent/mutate",
+                post(crate::backend::control_agent::control_agent_mutate).layer(
+                    axum::extract::DefaultBodyLimit::max(
+                        crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                    ),
+                ),
+            )
             // N1 Task5：owner 事件 relay + Orchestrator runtime snapshot 代理
             // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
             .route(
