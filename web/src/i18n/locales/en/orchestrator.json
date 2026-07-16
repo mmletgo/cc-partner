@@ -149,6 +149,7 @@
     "reworkSubmit": "Submit rework",
     "reworkCancel": "Cancel",
     "deliver": "Deliver",
+    "deliverDisabled": "Deliver unavailable",
     "deliverDisabledPendingDiff": "Review changes before delivering",
     "deliverDisabledDiffError": "Changes failed to load; delivery is disabled",
     "cancel": "Cancel task",

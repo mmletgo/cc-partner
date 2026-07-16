@@ -149,6 +149,7 @@
     "reworkSubmit": "提交返工",
     "reworkCancel": "取消",
     "deliver": "交付",
+    "deliverDisabled": "当前不可交付",
     "deliverDisabledPendingDiff": "请先审阅变更后再交付",
     "deliverDisabledDiffError": "变更加载失败，暂不可交付",
     "cancel": "取消任务",

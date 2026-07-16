@@ -5,7 +5,10 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { OrchestratorTask } from '@/lib/types';
-import { OrchestratorTaskDrawer } from './OrchestratorTaskDrawer';
+import {
+  OrchestratorTaskDrawer,
+  type OrchestratorTaskDrawerProps,
+} from './OrchestratorTaskDrawer';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -50,7 +53,7 @@ afterEach(() => {
  *   Drawer 测试需要最小合法 task。
  *
  * Code Logic（这个函数做什么）:
- *   返回 Human Review 态 OrchestratorTask 桩。
+ *   返回 Human Review 态完整 OrchestratorTask 桩。
  */
 function makeTask(): OrchestratorTask {
   return {
@@ -60,7 +63,7 @@ function makeTask(): OrchestratorTask {
     goal: 'Goal text',
     acceptanceCriteria: 'Accept',
     priority: 0,
-    status: 'waiting_human',
+    status: 'blocked',
     workflowState: 'humanReview',
     runState: 'idle',
     attemptPhase: null,
@@ -68,19 +71,25 @@ function makeTask(): OrchestratorTask {
     worktreeId: null,
     sessionId: null,
     branchName: null,
-    baseBranch: null,
     blockedReason: null,
     lastRuntimeMessage: null,
     claudeSessionId: null,
     transcriptPath: null,
-    source: null,
+    source: 'local',
     externalId: null,
+    externalIdentifier: null,
+    externalUrl: null,
+    externalState: null,
+    externalLabels: null,
+    runnerProvider: null,
+    runtimeStartedAt: null,
+    lastActivityAt: null,
+    lastRuntimeEvent: null,
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',
     startedAt: null,
-    completedAt: null,
-    stateVersion: 1,
-  } as OrchestratorTask;
+    finishedAt: null,
+  };
 }
 
 /**
@@ -88,15 +97,20 @@ function makeTask(): OrchestratorTask {
  *   为 Drawer 提供默认 props。
  *
  * Code Logic（这个函数做什么）:
- *   返回最小可渲染 props，可 override。
+ *   返回最小可渲染 OrchestratorTaskDrawerProps，可 override。
  */
-function baseProps(overrides: Record<string, unknown> = {}) {
+function baseProps(
+  overrides: Partial<OrchestratorTaskDrawerProps> = {},
+): OrchestratorTaskDrawerProps {
+  const task = makeTask();
   return {
-    selectedTask: makeTask(),
+    selectedTask: task,
     selectedRenderableTask: {
-      origin: 'local' as const,
-      task: makeTask(),
-      view: { origin: 'local' as const, task: makeTask() },
+      origin: 'local',
+      task,
+      deviceId: null,
+      deviceName: null,
+      view: { origin: 'local', task },
     },
     selectedTaskCanStart: false,
     selectedTaskCanComplete: false,
@@ -120,7 +134,7 @@ function baseProps(overrides: Record<string, unknown> = {}) {
     latestVerifierEvidence: null,
     latestRepairPromptEvidence: null,
     developmentAttemptEvidenceItems: [],
-    detailTab: 'summary' as const,
+    detailTab: 'summary',
     onDetailTabChange: vi.fn(),
     reworkDialogOpen: false,
     reworkError: null,
@@ -147,7 +161,7 @@ describe('OrchestratorTaskDrawer', () => {
    *   渲染 summary，断言 Changes 文案不存在，Summary 存在。
    */
   it('renders summary without Changes tab', () => {
-    render(<OrchestratorTaskDrawer {...(baseProps() as never)} />);
+    render(<OrchestratorTaskDrawer {...baseProps()} />);
     expect(screen.getByRole('tab', { name: 'Summary' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Evidence' })).toBeTruthy();
     expect(screen.queryByRole('tab', { name: 'Changes' })).toBeNull();
@@ -162,7 +176,7 @@ describe('OrchestratorTaskDrawer', () => {
    *   断言 Deliver 按钮存在且未 disabled。
    */
   it('enables Deliver without review digest gate', () => {
-    render(<OrchestratorTaskDrawer {...(baseProps() as never)} />);
+    render(<OrchestratorTaskDrawer {...baseProps()} />);
     const deliver = screen.getByRole('button', { name: /Deliver|deliver|交付/i });
     expect(deliver).toBeTruthy();
     expect((deliver as HTMLButtonElement).disabled).toBe(false);
