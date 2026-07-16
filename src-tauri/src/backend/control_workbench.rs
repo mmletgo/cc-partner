@@ -424,6 +424,42 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(items)?)
         }
+        "browser.verification.start" => {
+            let req: crate::commands::workbench::StartBrowserVerificationReq =
+                serde_json::from_value(payload.clone()).map_err(|e| {
+                    crate::error::AppError::validation(format!(
+                        "invalid browser.verification.start: {e}"
+                    ))
+                })?;
+            let run =
+                crate::commands::workbench::start_browser_verification_for_state(state, req).await?;
+            Ok(serde_json::to_value(run)?)
+        }
+        "browser.verification.get" => {
+            let run_id = required_string(&payload, "runId")?;
+            let run =
+                crate::commands::workbench::get_browser_verification_for_state(state, run_id)
+                    .await?;
+            Ok(serde_json::to_value(run)?)
+        }
+        "browser.verification.cancel" => {
+            let run_id = required_string(&payload, "runId")?;
+            let run =
+                crate::commands::workbench::cancel_browser_verification_for_state(state, run_id)
+                    .await?;
+            Ok(serde_json::to_value(run)?)
+        }
+        "browser.verification.artifact" => {
+            let run_id = required_string(&payload, "runId")?;
+            let artifact_id = required_string(&payload, "artifactId")?;
+            let dto = crate::commands::workbench::get_browser_verification_artifact_for_state(
+                state,
+                run_id,
+                artifact_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(dto)?)
+        }
         "browser.create_preview" => {
             let project_id = required_string(&payload, "projectId")?;
             let worktree_id = optional_string(&payload, "worktreeId");

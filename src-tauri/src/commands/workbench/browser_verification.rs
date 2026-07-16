@@ -193,6 +193,20 @@ pub async fn start_workbench_browser_verification(
     request_id: String,
     commands: Option<Vec<crate::workbench::browser_verification::BrowserVerificationCommand>>,
 ) -> Result<BrowserVerificationRun, AppError> {
+    use super::common::proxy_workbench_if_gui;
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "browser.verification.start",
+        serde_json::json!({
+            "previewId": preview_id.clone(),
+            "requestId": request_id.clone(),
+            "commands": commands.clone(),
+        }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
     start_browser_verification_for_state(
         state.inner(),
         StartBrowserVerificationReq {
@@ -216,6 +230,16 @@ pub async fn get_workbench_browser_verification(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<BrowserVerificationRun, AppError> {
+    use super::common::proxy_workbench_if_gui;
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "browser.verification.get",
+        serde_json::json!({ "runId": run_id.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
     get_browser_verification_for_state(state.inner(), run_id).await
 }
 
@@ -231,6 +255,16 @@ pub async fn cancel_workbench_browser_verification(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<BrowserVerificationRun, AppError> {
+    use super::common::proxy_workbench_if_gui;
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "browser.verification.cancel",
+        serde_json::json!({ "runId": run_id.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
     cancel_browser_verification_for_state(state.inner(), run_id).await
 }
 
@@ -247,6 +281,19 @@ pub async fn get_workbench_browser_verification_artifact(
     run_id: String,
     artifact_id: String,
 ) -> Result<BrowserVerificationArtifactDto, AppError> {
+    use super::common::proxy_workbench_if_gui;
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "browser.verification.artifact",
+        serde_json::json!({
+            "runId": run_id.clone(),
+            "artifactId": artifact_id.clone(),
+        }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
     get_browser_verification_artifact_for_state(state.inner(), run_id, artifact_id).await
 }
 
