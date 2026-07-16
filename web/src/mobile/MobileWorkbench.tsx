@@ -12,13 +12,17 @@ import {
   WorkbenchMutationUnknownError,
 } from '@/lib/asyncState/mutationOutcome';
 import { useAttention } from '@/hooks/attentionContext';
+import { useWorkbenchHttpEvents } from '@/hooks/useWorkbenchHttpEvents';
+import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
 import type {
   AttentionItem,
   MutationIntent,
   WorkbenchProject,
   WorkbenchSession,
+  WorkbenchSessionStatus,
   WorkbenchWorktree,
 } from '@/lib/types';
+import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
 import {
   buildMergeRemoveAuthority,
   reconcileWorkbenchMutation,
@@ -34,12 +38,17 @@ import {
   type MobileAttentionNavigation,
 } from './mobileAttentionTarget';
 import {
+  applyMobileAgentRuntimeEvent,
+  applyMobileTerminalStatusEvent,
   canOpenMobileWorktreeSwitcher,
   canSelectMobileProject,
+  emptyMobileSessionRuntimeState,
   getInitialMobileWorkbenchPanel,
   getMobileConnectionCachedAt,
   markMobileConnectionOffline,
   markMobileConnectionOnline,
+  mergeMobileSessionsWithRuntime,
+  seedMobileSessionRuntimeFromSessions,
   selectMobilePanelForProject,
   selectMobileWorktreeWorkspacePanel,
   selectPreferredMobileSession,
@@ -48,6 +57,7 @@ import {
   shouldSkipMobileProjectReload,
   type MobileConnectionState,
   type MobileProjectDetailStatus,
+  type MobileSessionRuntimeState,
   type MobileWorkbenchPanel,
 } from './mobileWorkbenchState';
 import {
@@ -153,12 +163,16 @@ function createMobileFilePanelContext(
  *   管理 active panel/project/worktree/session 状态；local/remote 项目都通过 HTTP transport 拉取 worktree/session，后端按项目类型决定是否代理。
  */
 export function MobileWorkbench(): ReactElement {
+  const { store: terminalBufferStore } = useWorkbenchTerminalBuffers();
   const [panel, setPanel] = useState<MobileWorkbenchPanel>(() => getInitialMobileWorkbenchPanel());
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [activeProject, setActiveProject] = useState<WorkbenchProject | null>(null);
   const [worktrees, setWorktrees] = useState<WorkbenchWorktree[]>([]);
   const [activeWorktree, setActiveWorktree] = useState<WorkbenchWorktree | null>(null);
   const [sessions, setSessions] = useState<WorkbenchSession[]>([]);
+  const [sessionRuntime, setSessionRuntime] = useState<MobileSessionRuntimeState>(() =>
+    emptyMobileSessionRuntimeState(),
+  );
   const [activeSession, setActiveSession] = useState<WorkbenchSession | null>(null);
   const [projectsLoading, setProjectsLoading] = useState<boolean>(false);
   const [projectDetailStatus, setProjectDetailStatus] =
@@ -184,6 +198,64 @@ export function MobileWorkbench(): ReactElement {
   const projectDetailsAbortRef = useRef<AbortController | null>(null);
   const worktreesRequestIdRef = useRef<number>(0);
   const sessionsRequestIdRef = useRef<number>(0);
+  const activeProjectIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    activeProjectIdRef.current = activeProject?.id ?? null;
+  }, [activeProject?.id]);
+
+  useEffect(() => {
+    setSessionRuntime((prev) => seedMobileSessionRuntimeFromSessions(sessions, prev));
+  }, [sessions]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   HTTP terminalStatus 需更新当前已知 session 的 status，并同步 activeSession。
+   *
+   * Code Logic（这个函数做什么）:
+   *   applyMobileTerminalStatusEvent；合并 sessions 列表 status。
+   */
+  const handleTerminalStatusEvent = useCallback(
+    (payload: { sessionId: string; status: string }): void => {
+      const status = payload.status as WorkbenchSessionStatus;
+      setSessionRuntime((prev) =>
+        applyMobileTerminalStatusEvent(prev, payload.sessionId, status),
+      );
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === payload.sessionId ? { ...session, status } : session,
+        ),
+      );
+      setActiveSession((prev) =>
+        prev && prev.id === payload.sessionId ? { ...prev, status } : prev,
+      );
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   agentRuntime 事件只投影当前项目已知 session 的 Agent phase。
+   *
+   * Code Logic（这个函数做什么）:
+   *   过滤 projectId；applyMobileAgentRuntimeEvent。
+   */
+  const handleAgentRuntimeEvent = useCallback(
+    (payload: { agentSession: AgentSessionRuntimeDto }): void => {
+      const dto = payload.agentSession;
+      const projectId = activeProjectIdRef.current;
+      if (projectId && dto.projectId !== projectId) return;
+      setSessionRuntime((prev) => applyMobileAgentRuntimeEvent(prev, dto, 'live'));
+    },
+    [],
+  );
+
+  useWorkbenchHttpEvents({
+    store: terminalBufferStore,
+    enabled: true,
+    onTerminalStatus: handleTerminalStatusEvent,
+    onAgentRuntime: handleAgentRuntimeEvent,
+  });
   const activeProjectRef = useRef<WorkbenchProject | null>(null);
   const activeWorktreeRef = useRef<WorkbenchWorktree | null>(null);
   const worktreeOperationBusyRef = useRef<boolean>(false);
@@ -1190,9 +1262,10 @@ export function MobileWorkbench(): ReactElement {
         <MobileTerminalPanel
           project={activeProject}
           worktree={activeWorktree}
-          sessions={sessions}
+          sessions={mergeMobileSessionsWithRuntime(sessions, sessionRuntime)}
           activeSession={activeSession}
           busy={projectDetailsLoading}
+          sessionRuntime={sessionRuntime}
           onSessionsChange={handleSessionsChange}
           onActiveSessionChange={setActiveSession}
           onRefreshSessions={refreshSessions}

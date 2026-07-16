@@ -1034,6 +1034,17 @@
   font-weight: var(--weight-semibold);
 }
 
+.mobileSessionAgent {
+  min-width: 0;
+  max-width: 10rem;
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .mobileSessionPaneCount {
   color: var(--muted);
 }

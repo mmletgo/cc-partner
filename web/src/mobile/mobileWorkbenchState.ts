@@ -1,5 +1,8 @@
-import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import type { WorkbenchProject, WorkbenchSession, WorkbenchSessionStatus, WorkbenchWorktree } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from '@/api/workbench';
+import type { AgentPhase, AgentSessionProjection } from '@/lib/types/agentRuntime';
+import { toAgentSessionProjection } from '@/lib/agentRuntimeState';
+import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
 
 export type MobileWorkbenchPanel =
   | 'projects'
@@ -546,3 +549,176 @@ export function canRunMobilePaneMutation(
 export function canSwitchMobilePane(session: WorkbenchSession | null, busy: boolean): boolean {
   return canRunMobilePaneMutation(session, busy) && (session?.paneCount ?? 0) > 1;
 }
+
+/**
+ * 移动端单 session 的运行时投影（terminal status + Agent）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   HTTP terminalStatus/agentRuntime 需合并进当前项目会话，且 Agent 不得写回 WorkbenchSession DTO。
+ *
+ * Code Logic（字段说明）:
+ *   status 为 terminal 生命周期；agent 为可选 projection。
+ */
+export interface MobileSessionRuntimeEntry {
+  status: WorkbenchSessionStatus;
+  agent: AgentSessionProjection | null;
+}
+
+/**
+ * 移动端 session 运行时聚合（按 sessionId）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   pure reducer 测试与 MobileWorkbench 共用同一形状。
+ *
+ * Code Logic（字段说明）:
+ *   sessions 为 Record；knownSessionIds 限制只更新已知会话。
+ */
+export interface MobileSessionRuntimeState {
+  sessions: Record<string, MobileSessionRuntimeEntry>;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   测试与初始化需要确定性空态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 sessions={}。
+ */
+export function emptyMobileSessionRuntimeState(): MobileSessionRuntimeState {
+  return { sessions: {} };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   从当前 list sessions 播种运行时条目，保留已有 agent 投影。
+ *
+ * Code Logic（这个函数做什么）:
+ *   以 session list 为权威重建 keys；保留旧 agent。
+ */
+export function seedMobileSessionRuntimeFromSessions(
+  sessions: WorkbenchSession[],
+  prev: MobileSessionRuntimeState,
+): MobileSessionRuntimeState {
+  const next: Record<string, MobileSessionRuntimeEntry> = {};
+  for (const session of sessions) {
+    const previous = prev.sessions[session.id];
+    next[session.id] = {
+      status: session.status,
+      agent: previous?.agent ?? null,
+    };
+  }
+  return { sessions: next };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   terminalStatus 事件应更新已知 session 的 status，未知 id 忽略。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若 sessions[id] 存在则更新 status；否则返回原 state。
+ */
+export function applyMobileTerminalStatusEvent(
+  state: MobileSessionRuntimeState,
+  sessionId: string,
+  status: WorkbenchSessionStatus,
+): MobileSessionRuntimeState {
+  const existing = state.sessions[sessionId];
+  if (!existing) return state;
+  if (existing.status === status) return state;
+  return {
+    sessions: {
+      ...state.sessions,
+      [sessionId]: { ...existing, status },
+    },
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   agentRuntime 事件更新已知 session 的 Agent phase；version 乱序拒绝。
+ *
+ * Code Logic（这个函数做什么）:
+ *   映射 DTO→projection；仅当 version 更大或无 agent 时写入。
+ */
+export function applyMobileAgentRuntimeEvent(
+  state: MobileSessionRuntimeState,
+  dto: AgentSessionRuntimeDto,
+  freshness: AgentSessionProjection['freshness'] = 'live',
+): MobileSessionRuntimeState {
+  const sessionId = dto.terminalSessionId;
+  const existing = state.sessions[sessionId];
+  if (!existing) return state;
+  const incoming = toAgentSessionProjection(dto, freshness);
+  if (existing.agent && existing.agent.version >= incoming.version) {
+    return state;
+  }
+  return {
+    sessions: {
+      ...state.sessions,
+      [sessionId]: { ...existing, agent: incoming },
+    },
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   测试与页面可用统一 reduce 入口消费 terminalStatus/agentRuntime。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 kind 分发到 apply* 函数。
+ */
+export type MobileSessionRuntimeEvent =
+  | { kind: 'terminalStatus'; sessionId: string; status: WorkbenchSessionStatus }
+  | { kind: 'agentRuntime'; agentSession: AgentSessionRuntimeDto };
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   pure reducer 便于单测 terminalStatus + agent 合并。
+ *
+ * Code Logic（这个函数做什么）:
+ *   switch event.kind 调用对应 apply。
+ */
+export function reduceMobileSessionRuntime(
+  state: MobileSessionRuntimeState,
+  event: MobileSessionRuntimeEvent,
+): MobileSessionRuntimeState {
+  if (event.kind === 'terminalStatus') {
+    return applyMobileTerminalStatusEvent(state, event.sessionId, event.status);
+  }
+  return applyMobileAgentRuntimeEvent(state, event.agentSession);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   将运行时 status 合并回 WorkbenchSession 列表供 tab 展示。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若 runtime 有该 id 则覆盖 status。
+ */
+export function mergeMobileSessionsWithRuntime(
+  sessions: WorkbenchSession[],
+  runtime: MobileSessionRuntimeState,
+): WorkbenchSession[] {
+  return sessions.map((session) => {
+    const entry = runtime.sessions[session.id];
+    if (!entry || entry.status === session.status) return session;
+    return { ...session, status: entry.status };
+  });
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   取某 session 的 Agent phase 供 MobileTerminalPanel 展示。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 agent 或 null。
+ */
+export function mobileAgentForSession(
+  runtime: MobileSessionRuntimeState,
+  sessionId: string,
+): AgentSessionProjection | null {
+  return runtime.sessions[sessionId]?.agent ?? null;
+}
+
+/** 导出 AgentPhase 供测试字面量（避免循环 import 噪音）。 */
+export type { AgentPhase };

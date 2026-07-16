@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { attentionHttpApi } from '@/api/attentionHttp';
-import { useWorkbenchHttpEvents } from '@/hooks/useWorkbenchHttpEvents';
 import { AttentionProvider } from '@/hooks/useAttention';
 import { WorkbenchDependencyProvider } from '@/hooks/useWorkbenchDependency';
 import {
@@ -31,7 +30,7 @@ export function MobileApp(): ReactElement {
     createWorkbenchTerminalBufferStore(),
   );
 
-  useWorkbenchHttpEvents({ store, enabled: true });
+  // terminalStatus/agentRuntime 在 MobileWorkbench 内消费（拥有 sessions 状态）。
 
   /**
    * Business Logic（为什么需要这个函数）:

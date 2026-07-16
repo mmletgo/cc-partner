@@ -17,6 +17,12 @@ import {
 } from '@/pages/Workbench/terminalReplay';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
 import {
+  agentFreshnessI18nKey,
+  agentPhaseI18nKey,
+  agentProviderShortLabel,
+  agentStatusAriaLabel,
+} from '@/pages/Workbench/agentPhasePresentation';
+import {
   planMobileReplayReadyBufferWrite,
   prepareInitialReplayBuffer,
   shouldForwardMobileTerminalInput,
@@ -30,9 +36,12 @@ import {
 import {
   canRunMobilePaneMutation,
   canSwitchMobilePane,
+  emptyMobileSessionRuntimeState,
   getMobileCreatePaneDirection,
   getMobileTerminalChromeVisibility,
+  mobileAgentForSession,
   selectPreferredMobileSession,
+  type MobileSessionRuntimeState,
 } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
 
@@ -46,6 +55,8 @@ export interface MobileTerminalPanelProps {
   sessions: WorkbenchSession[];
   activeSession: WorkbenchSession | null;
   busy: boolean;
+  /** session 运行时投影（terminal status + Agent）；点击 Agent 只选中 terminal。 */
+  sessionRuntime?: MobileSessionRuntimeState;
   onSessionsChange: (next: WorkbenchSession[]) => void;
   onActiveSessionChange: (session: WorkbenchSession | null) => void;
   onRefreshSessions?: () => Promise<void> | void;
@@ -137,6 +148,7 @@ export function MobileTerminalPanel({
   sessions,
   activeSession,
   busy,
+  sessionRuntime = emptyMobileSessionRuntimeState(),
   onSessionsChange,
   onActiveSessionChange,
   onRefreshSessions,
@@ -794,6 +806,16 @@ export function MobileTerminalPanel({
           >
             {scopedSessions.map((session) => {
               const isActive = session.id === visibleSession?.id;
+              const agent = mobileAgentForSession(sessionRuntime, session.id);
+              const phaseLabel = agent
+                ? t(`workbench:${agentPhaseI18nKey(agent.phase)}`)
+                : null;
+              const freshnessKey = agent ? agentFreshnessI18nKey(agent.freshness) : null;
+              const freshnessLabel = freshnessKey
+                ? t(`workbench:${freshnessKey}`)
+                : null;
+              const agentAria =
+                agent && phaseLabel ? agentStatusAriaLabel(agent, phaseLabel) : null;
               return (
                 <div
                   key={session.id}
@@ -809,6 +831,22 @@ export function MobileTerminalPanel({
                   >
                     <span className={styles.mobileSessionDot} data-status={session.status} />
                     <span className={styles.mobileSessionName}>{session.name}</span>
+                    {agent && phaseLabel ? (
+                      <span
+                        className={styles.mobileSessionAgent}
+                        role="status"
+                        aria-label={agentAria ?? phaseLabel}
+                        title={agentAria ?? phaseLabel}
+                        onClick={(event) => {
+                          // 点击 Agent 状态只导航到该 terminal，永不发送输入。
+                          event.stopPropagation();
+                          handleSelectSession(session);
+                        }}
+                      >
+                        {agentProviderShortLabel(agent.providerId)} · {phaseLabel}
+                        {freshnessLabel ? ` · ${freshnessLabel}` : null}
+                      </span>
+                    ) : null}
                     <span className={styles.mobileSessionPaneCount}>
                       {t('workbench:mobile.terminalPanel.paneCount', {
                         count: session.paneCount,

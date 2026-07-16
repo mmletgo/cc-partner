@@ -9,6 +9,7 @@ import {
   computeMobileKeyboardInset,
   computeMobileTerminalMinHeight,
   computeMobileViewportLayoutHints,
+  emptyMobileSessionRuntimeState,
   getMobileConnectionCachedAt,
   getMobileNavGroupIdForPanel,
   getMobileWorkbenchNavGroups,
@@ -22,6 +23,8 @@ import {
   markMobileConnectionOnline,
   markMobileConnectionReconnecting,
   openMobileNav,
+  reduceMobileSessionRuntime,
+  seedMobileSessionRuntimeFromSessions,
   selectMobileWorktreeWorkspacePanel,
   selectMobilePanelForProject,
   selectPreferredMobileSession,
@@ -699,5 +702,54 @@ describe('mobileWorkbenchState', () => {
 
     assertEqual(shouldRefreshMobilePanelOnReconnect(offline, markMobileConnectionOnline(4_000)), true);
     assertEqual(shouldRefreshMobilePanelOnReconnect(online, markMobileConnectionOnline(4_000)), false);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   terminalStatus 与 agentRuntime 必须实时反映到已知 session，未知 id 忽略。
+   *
+   * Code Logic（这个测试做什么）:
+   *   seed s1 → status disconnected → agent needsInput。
+   */
+  test('applies terminalStatus and agentRuntime to the selected mobile session', () => {
+    const seeded = seedMobileSessionRuntimeFromSessions(
+      [createSession({ id: 's1', name: 'one', status: 'running' })],
+      emptyMobileSessionRuntimeState(),
+    );
+    const afterStatus = reduceMobileSessionRuntime(seeded, {
+      kind: 'terminalStatus',
+      sessionId: 's1',
+      status: 'disconnected',
+    });
+    const afterAgent = reduceMobileSessionRuntime(afterStatus, {
+      kind: 'agentRuntime',
+      agentSession: {
+        id: 'a1',
+        projectId: 'project-1',
+        worktreeId: null,
+        terminalSessionId: 's1',
+        orchestratorTaskId: null,
+        orchestratorAttempt: null,
+        providerId: 'claudeCodeVisible',
+        phase: 'needsInput',
+        version: 2,
+        startedAt: '2026-07-15T00:00:00.000Z',
+        lastActivityAt: '2026-07-15T00:01:00.000Z',
+        endedAt: null,
+        outcomeCode: null,
+        resumedFromAgentSessionId: null,
+        isActive: true,
+      },
+    });
+    assertEqual(afterAgent.sessions.s1?.status, 'disconnected');
+    assertEqual(afterAgent.sessions.s1?.agent?.phase, 'needsInput');
+
+    // 未知 session 忽略
+    const ignored = reduceMobileSessionRuntime(afterAgent, {
+      kind: 'terminalStatus',
+      sessionId: 'missing',
+      status: 'running',
+    });
+    assertEqual(Object.keys(ignored.sessions).length, 1);
   });
 });
