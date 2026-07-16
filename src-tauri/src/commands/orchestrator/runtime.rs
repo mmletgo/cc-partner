@@ -224,6 +224,21 @@ pub async fn abort_orchestrator_task_view(
             .orchestrator_repo
             .set_task_status(&task.id, target, None)
             .await?;
+        if updated.experiment_id.is_some() {
+            if let Err(err) =
+                crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal(
+                    state.orchestrator_repo.as_ref(),
+                    &updated.id,
+                    updated.status,
+                )
+                .await
+            {
+                tracing::debug!(
+                    task_id = %updated.id,
+                    "sync_candidate after abort_view: {err}"
+                );
+            }
+        }
         return Ok(local_task_view(updated));
     }
     update_remote_orchestrator_task_status(

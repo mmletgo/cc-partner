@@ -427,10 +427,21 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
     .await?;
     if should_auto && selected.selected {
         let winner =
-            start_experiment_winner_delivery(state.orchestrator_repo.as_ref(), experiment_id)
+            match start_experiment_winner_delivery(state.orchestrator_repo.as_ref(), experiment_id)
                 .await
-                .unwrap_or_else(|_| winner_task_id.to_string());
-        let _ = state
+            {
+                Ok(id) => id,
+                Err(err) => {
+                    tracing::debug!(
+                        experiment_id = %experiment_id,
+                        "start_experiment_winner_delivery failed after select: {err}"
+                    );
+                    return get_orchestrator_experiment_for_state(state, experiment_id).await;
+                }
+            };
+        // 仅允许 CandidateReady 路径的 Done→Delivering 条件 CAS。
+        // 禁止无条件 set_task_status：否则 Abort 后的 Aborted 会被复活并进入 Git 交付。
+        let transitioned = state
             .orchestrator_repo
             .try_transition_task_status(
                 &winner,
@@ -439,13 +450,20 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
                 None,
             )
             .await?;
-        // 也可能已是其他状态，再尝试从 Verifying/Done
-        let task = state.orchestrator_repo.get_task(&winner).await?;
-        if task.status != OrchestratorTaskStatus::Delivering {
-            let _ = state
-                .orchestrator_repo
-                .set_task_status(&winner, OrchestratorTaskStatus::Delivering, None)
-                .await;
+        let may_deliver = match transitioned {
+            Some(_) => true,
+            None => {
+                let current = state.orchestrator_repo.get_task(&winner).await?;
+                current.status == OrchestratorTaskStatus::Delivering
+            }
+        };
+        if !may_deliver {
+            tracing::debug!(
+                task_id = %winner,
+                experiment_id = %experiment_id,
+                "approve winner: task not Done/Delivering after select; skip delivery"
+            );
+            return get_orchestrator_experiment_for_state(state, experiment_id).await;
         }
         let delivered = run_delivery_for_task(state, &winner, None).await?;
         if delivered.status == OrchestratorTaskStatus::Done {

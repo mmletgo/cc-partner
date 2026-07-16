@@ -364,4 +364,82 @@ mod tests {
             .await
             .unwrap();
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     中止 CandidateReady 后 approve 不得再选该 winner。
+    #[tokio::test]
+    async fn abort_then_approve_rejects_cancelled_candidate() {
+        use crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal;
+        use crate::orchestrator::models::OrchestratorTaskStatus;
+        let repo = setup().await;
+        let exp = repo.insert_experiment_fixture(2).await.unwrap();
+        record_candidate_review(&repo, "task-1", true)
+            .await
+            .unwrap();
+        record_candidate_review(&repo, "task-2", true)
+            .await
+            .unwrap();
+        // NeedsDecision + 中止 task-1
+        sync_candidate_with_task_terminal(&repo, "task-1", OrchestratorTaskStatus::Aborted)
+            .await
+            .unwrap();
+        let err = select_experiment_winner(
+            &repo,
+            &exp.id,
+            "task-1",
+            "user pick aborted",
+            ComparativeConfidence::High,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("硬门禁") || err.to_string().contains("candidate"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     并发 abort 与 Done→Delivering CAS：中止赢得 CAS 后不得交付。
+    #[tokio::test]
+    async fn concurrent_abort_blocks_done_to_delivering_cas() {
+        use crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal;
+        use crate::orchestrator::models::OrchestratorTaskStatus;
+        let repo = setup().await;
+        let exp = repo.insert_experiment_fixture(2).await.unwrap();
+        record_candidate_review(&repo, "task-1", true)
+            .await
+            .unwrap();
+        record_candidate_review(&repo, "task-2", false)
+            .await
+            .unwrap();
+        // WinnerReady：把 winner task 标为 Done（CandidateReady 路径）
+        repo.set_task_status("task-1", OrchestratorTaskStatus::Done, None)
+            .await
+            .unwrap();
+        // 模拟 approve 已 select（组 Delivering）与 abort 竞争
+        start_experiment_winner_delivery(&repo, &exp.id)
+            .await
+            .unwrap();
+        // abort 先完成
+        repo.set_task_status("task-1", OrchestratorTaskStatus::Aborted, None)
+            .await
+            .unwrap();
+        sync_candidate_with_task_terminal(&repo, "task-1", OrchestratorTaskStatus::Aborted)
+            .await
+            .unwrap();
+        // approve 侧仅允许 Done→Delivering CAS
+        let cas = repo
+            .try_transition_task_status(
+                "task-1",
+                OrchestratorTaskStatus::Done,
+                OrchestratorTaskStatus::Delivering,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(cas.is_none(), "Aborted 不得被 CAS 到 Delivering");
+        let task = repo.get_task("task-1").await.unwrap();
+        assert_eq!(task.status, OrchestratorTaskStatus::Aborted);
+    }
 }

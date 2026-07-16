@@ -344,10 +344,11 @@ async fn deliver_reviewed_task_for_state(
 /// 终止远端任务。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户在 remote shortcut 终止任务时，owning device 应把权威任务置为 Aborted 并保留现场。
+///     用户在 remote shortcut 终止任务时，owning device 应把权威任务置为 Aborted 并保留现场；
+///     experiment candidate 同步 Cancelled，防止后续 approve 复活交付。
 ///
 /// Code Logic（这个函数做什么）:
-///     确认任务所属 local 项目后调用 repo.set_task_status 写 Aborted，保持 worktree/session 字段不变。
+///     确认任务所属 local 项目后 set Aborted；若 experiment_id 存在则 sync_candidate_with_task_terminal。
 async fn abort_task_for_state(
     state: &OrchestratorRouteContext,
     req: RemoteTaskReq,
@@ -357,6 +358,21 @@ async fn abort_task_for_state(
         .orchestrator_repo
         .set_task_status(&req.task_id, OrchestratorTaskStatus::Aborted, None)
         .await?;
+    if task.experiment_id.is_some() {
+        if let Err(err) =
+            crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal(
+                state.orchestrator_repo.as_ref(),
+                &task.id,
+                task.status,
+            )
+            .await
+        {
+            tracing::debug!(
+                task_id = %task.id,
+                "sync_candidate after p2p abort: {err}"
+            );
+        }
+    }
     Ok(OrchestratorTaskDto::from(task))
 }
 

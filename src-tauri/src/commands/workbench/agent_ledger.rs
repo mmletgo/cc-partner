@@ -8,7 +8,7 @@
 
 use crate::error::AppError;
 use crate::state::AppState;
-use crate::workbench::agent_ledger::aggregation::{clear_history, list_entries, summarize_window};
+use crate::workbench::agent_ledger::aggregation::{list_entries, summarize_window};
 use crate::workbench::agent_ledger::models::{
     AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary, LedgerWindow,
 };
@@ -165,12 +165,12 @@ pub async fn clear_agent_ledger(state: State<'_, AppState>) -> Result<u64, AppEr
 /// owner 本机 clear。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     control 与 tauri 共用。
+///     control 与 tauri 共用；须与 reconcile 串行并写隐私水位。
 ///
 /// Code Logic（这个函数做什么）:
-///     clear_history。
+///     service.clear_history（水位 + DELETE，持 clear_reconcile_lock）。
 pub async fn clear_agent_ledger_for_state(state: &AppState) -> Result<u64, AppError> {
-    clear_history(&state.agent_ledger_repo).await
+    state.agent_ledger_service.clear_history().await
 }
 
 // 为 proxy_workbench_if_gui 提供 Serialize

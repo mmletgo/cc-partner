@@ -107,6 +107,48 @@ pub async fn mark_candidate_failed(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     用户中止 experiment candidate 时必须同步 Cancelled，否则 approve 仍可按
+///     CandidateReady 复活任务并进入 Git 交付。
+///
+/// Code Logic（这个函数做什么）:
+///     Pending/Running/CandidateReady → Cancelled；已终态跳过；再 reduce_experiment。
+pub async fn mark_candidate_cancelled(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+) -> Result<(), AppError> {
+    let Some(cand) = repo.get_candidate_by_task(task_id).await? else {
+        return Ok(());
+    };
+    if cand.outcome.is_terminal() {
+        return Ok(());
+    }
+    // CandidateReady 虽非 is_terminal，中止后也必须 Cancelled，阻断后续 select/approve。
+    repo.set_candidate_outcome(&cand.experiment_id, task_id, CandidateOutcome::Cancelled)
+        .await?;
+    let _ = reduce_experiment(repo, &cand.experiment_id).await?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     task 进入 Blocked/Aborted 时必须与 candidate outcome + reduce 统一，
+///     避免验证基础设施失败 / repair bootstrap Ok(Blocked) 让组永久 Running。
+///
+/// Code Logic（这个函数做什么）:
+///     Blocked → mark_candidate_failed；Aborted → mark_candidate_cancelled；其它状态 noop。
+pub async fn sync_candidate_with_task_terminal(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+    task_status: crate::orchestrator::models::OrchestratorTaskStatus,
+) -> Result<(), AppError> {
+    use crate::orchestrator::models::OrchestratorTaskStatus;
+    match task_status {
+        OrchestratorTaskStatus::Blocked => mark_candidate_failed(repo, task_id).await,
+        OrchestratorTaskStatus::Aborted => mark_candidate_cancelled(repo, task_id).await,
+        _ => Ok(()),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     所有 candidate 到达终态或 ready 后，组需要比较或进入 NeedsDecision；
 ///     卡在 Comparing 时必须可恢复，禁止永久 early-return。
 ///
@@ -396,5 +438,88 @@ mod tests {
         let final_exp = repo.get_experiment(&exp_id).await.unwrap();
         assert_eq!(final_exp.status, ExperimentStatus::WinnerReady);
         assert_eq!(final_exp.winner_task_id.as_deref(), Some("task-1"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     验证基础设施失败把 task 置 Blocked 时，candidate 必须 Failed 并让组收敛。
+    #[tokio::test]
+    async fn validation_infra_blocked_converges_group() {
+        use crate::orchestrator::models::OrchestratorTaskStatus;
+        let repo = setup().await;
+        let exp_id = fixture_two(&repo).await;
+        // 模拟两 candidate 都在 Running，然后验证 infra 失败 → Blocked
+        repo.set_candidate_outcome(&exp_id, "task-1", CandidateOutcome::Running)
+            .await
+            .unwrap();
+        repo.set_candidate_outcome(&exp_id, "task-2", CandidateOutcome::Running)
+            .await
+            .unwrap();
+        sync_candidate_with_task_terminal(
+            &repo,
+            "task-1",
+            OrchestratorTaskStatus::Blocked,
+        )
+        .await
+        .unwrap();
+        sync_candidate_with_task_terminal(
+            &repo,
+            "task-2",
+            OrchestratorTaskStatus::Blocked,
+        )
+        .await
+        .unwrap();
+        let c1 = repo.get_candidate_by_task("task-1").await.unwrap().unwrap();
+        let c2 = repo.get_candidate_by_task("task-2").await.unwrap().unwrap();
+        assert_eq!(c1.outcome, CandidateOutcome::Failed);
+        assert_eq!(c2.outcome, CandidateOutcome::Failed);
+        let exp = repo.get_experiment(&exp_id).await.unwrap();
+        assert_eq!(exp.status, ExperimentStatus::NeedsDecision);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     repair bootstrap 失败（Ok(Blocked)）时，一个 Failed + 一个 Ready 必须收敛出 winner。
+    #[tokio::test]
+    async fn repair_bootstrap_blocked_allows_winner_convergence() {
+        use crate::orchestrator::models::OrchestratorTaskStatus;
+        let repo = setup().await;
+        let exp_id = fixture_two(&repo).await;
+        record_candidate_review(&repo, "task-1", true)
+            .await
+            .unwrap();
+        // task-2 仍 Running（模拟 repair 进行中），然后 bootstrap 失败 → Blocked
+        repo.set_candidate_outcome(&exp_id, "task-2", CandidateOutcome::Running)
+            .await
+            .unwrap();
+        sync_candidate_with_task_terminal(
+            &repo,
+            "task-2",
+            OrchestratorTaskStatus::Blocked,
+        )
+        .await
+        .unwrap();
+        let c2 = repo.get_candidate_by_task("task-2").await.unwrap().unwrap();
+        assert_eq!(c2.outcome, CandidateOutcome::Failed);
+        let exp = repo.get_experiment(&exp_id).await.unwrap();
+        assert_eq!(exp.status, ExperimentStatus::WinnerReady);
+        assert_eq!(exp.winner_task_id.as_deref(), Some("task-1"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     中止 CandidateReady 任务必须把 outcome 置 Cancelled，阻断后续 approve。
+    #[tokio::test]
+    async fn abort_cancels_candidate_ready_outcome() {
+        use crate::orchestrator::models::OrchestratorTaskStatus;
+        let repo = setup().await;
+        let _exp_id = fixture_two(&repo).await;
+        record_candidate_review(&repo, "task-1", true)
+            .await
+            .unwrap();
+        let before = repo.get_candidate_by_task("task-1").await.unwrap().unwrap();
+        assert_eq!(before.outcome, CandidateOutcome::CandidateReady);
+        sync_candidate_with_task_terminal(&repo, "task-1", OrchestratorTaskStatus::Aborted)
+            .await
+            .unwrap();
+        let after = repo.get_candidate_by_task("task-1").await.unwrap().unwrap();
+        assert_eq!(after.outcome, CandidateOutcome::Cancelled);
     }
 }

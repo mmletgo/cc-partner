@@ -67,13 +67,14 @@ pub async fn summarize_window(
     repo.summarize(window, project_id, now).await
 }
 
-/// 清除全部历史；返回删除数。
+/// 清除全部历史并写隐私水位；返回删除数。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     设置页一键清除；幂等。
+///     设置页一键清除；幂等；生产路径优先走 AgentLedgerService::clear_history
+///     以与 reconcile 串行。
 ///
 /// Code Logic（这个函数做什么）:
-///     repo.clear_all。
+///     repo.clear_all（UPSERT 水位 + DELETE）。
 pub async fn clear_history(repo: &AgentLedgerRepo) -> Result<u64, AppError> {
     repo.clear_all().await
 }

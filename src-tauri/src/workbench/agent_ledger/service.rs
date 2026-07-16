@@ -17,6 +17,7 @@ use crate::workbench::agent_runtime::{AgentSessionPhase, AgentSessionRuntime};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 
 /// Ledger 写入服务（metadata-only；失败不阻断 runtime）。
 ///
@@ -24,11 +25,13 @@ use std::sync::{Arc, Mutex};
 ///     集中 usage 缓存、幂等 finalize 与有界重试 metric。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 repo、usage_cache、metrics；可选 fail 钩子供测试。
+///     持有 repo、usage_cache、metrics；clear/reconcile 互斥锁；可选 fail 钩子供测试。
 #[derive(Clone)]
 pub struct AgentLedgerService {
     repo: AgentLedgerRepo,
     usage_cache: Arc<Mutex<HashMap<String, ReliableUsageSnapshot>>>,
+    /// 串行化 clear 与 reconcile，避免 clear 后并发对账把旧历史写回
+    clear_reconcile_lock: Arc<AsyncMutex<()>>,
     /// 后台重试次数累计
     retry_count: Arc<AtomicU64>,
     /// 最终失败次数累计
@@ -44,15 +47,28 @@ impl AgentLedgerService {
     ///     AppState / 测试 fixture 共享同一 service。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     包装 repo 与空 cache/metrics。
+    ///     包装 repo 与空 cache/metrics/互斥锁。
     pub fn new(repo: AgentLedgerRepo) -> Self {
         Self {
             repo,
             usage_cache: Arc::new(Mutex::new(HashMap::new())),
+            clear_reconcile_lock: Arc::new(AsyncMutex::new(())),
             retry_count: Arc::new(AtomicU64::new(0)),
             failure_metric: Arc::new(AtomicU64::new(0)),
             fail_writes: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// 清除全部历史并写入隐私水位；与 reconcile 互斥。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     设置页一键清除必须与启动对账串行，且水位持久化，防止旧终态复活。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持 clear_reconcile_lock → aggregation::clear_history（水位 + DELETE）。
+    pub async fn clear_history(&self) -> Result<u64, AppError> {
+        let _guard = self.clear_reconcile_lock.lock().await;
+        crate::workbench::agent_ledger::aggregation::clear_history(&self.repo).await
     }
 
     /// 返回底层 repo。
@@ -181,10 +197,11 @@ impl AgentLedgerService {
     /// 首次观察到终态时记录 ledger（同步路径；调用方应 spawn 以免阻塞）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     runtime 真值已落库后旁路写 ledger；失败只记 metric。
+    ///     runtime 真值已落库后旁路写 ledger；失败只记 metric；
+    ///     clear 之前结束的 session 不得再写入（隐私水位）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     组 FinalizeInput → try_finalize + 一次后台重试语义（调用方 async 重试）。
+    ///     组 FinalizeInput → 水位检查 → try_finalize + 一次后台重试语义。
     pub async fn record_terminal(
         &self,
         session: &AgentSessionRuntime,
@@ -204,6 +221,19 @@ impl AgentLedgerService {
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| session.last_activity_at.clone());
+        // clear 水位：旧终态 session 禁止复活写入
+        match self.repo.is_ended_after_clear_watermark(&ended_at).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                tracing::debug!(
+                    agent_session_id = %session.id,
+                    error = %e,
+                    "agent ledger clear watermark check failed; skip write"
+                );
+                return;
+            }
+        }
         let usage = self
             .usage_cache
             .lock()
@@ -280,27 +310,46 @@ impl AgentLedgerService {
     /// 启动对账：扫描终态 runtime 缺失 ledger 行并补写。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     owner 重启后需补齐未写 ledger 的终态 session；不得重开 transcript。
+    ///     owner 重启后需补齐未写 ledger 的终态 session；不得重开 transcript；
+    ///     必须排除 clear 水位之前结束的 session，并与 clear 串行。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     SQL 左连接缺失行 → record_terminal 等价 finalize。
+    ///     持 clear_reconcile_lock → SQL 左连接缺失行且 ended 晚于水位 → finalize。
     pub async fn reconcile_terminal_sessions(
         &self,
         agent_repo: &WorkbenchAgentSessionRepo,
     ) -> Result<u64, AppError> {
+        let _guard = self.clear_reconcile_lock.lock().await;
         // 直接通过 agent repo 的 pool 查询 terminal 且无 ledger 的行
         let pool = agent_repo.pool();
-        let rows = sqlx::query(
-            "SELECT s.id, s.project_id, s.worktree_id, s.provider_id, s.phase, \
-                    s.started_at, s.last_activity_at, s.ended_at, s.outcome_code \
-             FROM workbench_agent_sessions s \
-             LEFT JOIN agent_session_ledger l ON l.agent_session_id = s.id \
-             WHERE s.phase IN ('completed', 'failed', 'disconnected') \
-               AND l.id IS NULL \
-             LIMIT 500",
-        )
-        .fetch_all(&pool)
-        .await?;
+        let watermark = self.repo.get_clear_watermark().await?;
+        let rows = if let Some(ref wm) = watermark {
+            sqlx::query(
+                "SELECT s.id, s.project_id, s.worktree_id, s.provider_id, s.phase, \
+                        s.started_at, s.last_activity_at, s.ended_at, s.outcome_code \
+                 FROM workbench_agent_sessions s \
+                 LEFT JOIN agent_session_ledger l ON l.agent_session_id = s.id \
+                 WHERE s.phase IN ('completed', 'failed', 'disconnected') \
+                   AND l.id IS NULL \
+                   AND COALESCE(NULLIF(TRIM(s.ended_at), ''), s.last_activity_at) > ? \
+                 LIMIT 500",
+            )
+            .bind(wm)
+            .fetch_all(&pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT s.id, s.project_id, s.worktree_id, s.provider_id, s.phase, \
+                        s.started_at, s.last_activity_at, s.ended_at, s.outcome_code \
+                 FROM workbench_agent_sessions s \
+                 LEFT JOIN agent_session_ledger l ON l.agent_session_id = s.id \
+                 WHERE s.phase IN ('completed', 'failed', 'disconnected') \
+                   AND l.id IS NULL \
+                 LIMIT 500",
+            )
+            .fetch_all(&pool)
+            .await?
+        };
 
         let mut written = 0u64;
         for row in rows {
@@ -321,6 +370,11 @@ impl AgentLedgerService {
             let ended = ended_at
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or(last_activity_at);
+            // 双重检查：持锁期间 clear 已完成时，水位可能更新（本函数持锁故不会，
+            // 但 record_terminal 旁路路径也依赖 is_ended_after_clear_watermark）。
+            if !self.repo.is_ended_after_clear_watermark(&ended).await? {
+                continue;
+            }
             let usage = self
                 .usage_cache
                 .lock()
@@ -645,5 +699,48 @@ mod tests {
         let n = svc.reconcile_terminal_sessions(&agents).await.unwrap();
         assert_eq!(n, 1);
         assert!(svc.repo().exists_agent_session("a9").await.unwrap());
+    }
+
+    /// Business Logic: clear 后对账不得复活清除前终态历史。
+    #[tokio::test]
+    async fn clear_then_reconcile_stays_empty() {
+        let (svc, agents) = setup().await;
+        agents
+            .create_active(CreateActiveAgentSession {
+                id: Some("old-session".into()),
+                project_id: "p1".into(),
+                worktree_id: None,
+                terminal_session_id: "t-old".into(),
+                orchestrator_task_id: None,
+                orchestrator_attempt: None,
+                provider_id: "claudeCodeVisible".into(),
+                native_session_id: None,
+                phase: AgentSessionPhase::Working,
+                started_at: "2026-07-01T10:00:00Z".into(),
+                resumed_from_agent_session_id: None,
+            })
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE workbench_agent_sessions SET phase='completed', is_active=0, \
+             ended_at='2026-07-01T10:05:00Z' WHERE id='old-session'",
+        )
+        .execute(&agents.pool())
+        .await
+        .unwrap();
+        // 先写 ledger，再 clear（模拟用户清除历史）
+        let n = svc.reconcile_terminal_sessions(&agents).await.unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(svc.clear_history().await.unwrap(), 1);
+        assert_eq!(svc.repo().count_all().await.unwrap(), 0);
+        // 重启对账：旧终态 session 仍在 runtime，但水位排除后不得写回
+        let n2 = svc.reconcile_terminal_sessions(&agents).await.unwrap();
+        assert_eq!(n2, 0);
+        assert_eq!(svc.repo().count_all().await.unwrap(), 0);
+        assert!(!svc
+            .repo()
+            .exists_agent_session("old-session")
+            .await
+            .unwrap());
     }
 }

@@ -1332,10 +1332,12 @@ pub(crate) async fn add_verification_evidence(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     验证失败、缺少 worktree 或找不到 worktree 时，任务应进入 Blocked 并保留明确原因。
+///     验证失败、缺少 worktree 或找不到 worktree 时，任务应进入 Blocked 并保留明确原因；
+///     experiment candidate 必须同步 Failed，否则组永久 Running。
 ///
 /// Code Logic（这个函数做什么）:
-///     仅当任务仍处于 Verifying 时写入 Blocked 和 blocked_reason，再转换为 DTO；已 Abort 时返回当前任务。
+///     仅当任务仍处于 Verifying 时写入 Blocked 和 blocked_reason；
+///     若为 experiment 且最终 Blocked/Aborted，调用 sync_candidate_with_task_terminal。
 pub(crate) async fn block_task_with_reason(
     state: &AppState,
     task_id: &str,
@@ -1353,6 +1355,26 @@ pub(crate) async fn block_task_with_reason(
             crate::orchestrator::models::OperationalNotificationKind::Blocked,
             &task,
         );
+    }
+    if task.experiment_id.is_some()
+        && matches!(
+            task.status,
+            OrchestratorTaskStatus::Blocked | OrchestratorTaskStatus::Aborted
+        )
+    {
+        if let Err(err) =
+            crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal(
+                state.orchestrator_repo.as_ref(),
+                task_id,
+                task.status,
+            )
+            .await
+        {
+            tracing::debug!(
+                task_id = %task_id,
+                "sync_candidate_with_task_terminal after block: {err}"
+            );
+        }
     }
     Ok(OrchestratorTaskDto::from(task))
 }
@@ -1630,10 +1652,12 @@ pub(crate) async fn block_task_with_verification_review_error(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     修复 runner 准备失败时任务不能永久停在 Preparing 或 runner bootstrap 的 Running 状态。
+///     修复 runner 准备失败时任务不能永久停在 Preparing 或 runner bootstrap 的 Running 状态；
+///     experiment candidate 同步 Failed + reduce，避免 Ok(Blocked) 永久卡住组。
 ///
 /// Code Logic（这个函数做什么）:
-///     按 scheduler 语义尝试 Preparing->Blocked，再尝试 Running->Blocked；未命中时返回当前任务，不覆盖 Abort/Block。
+///     按 scheduler 语义尝试 Preparing->Blocked，再尝试 Running->Blocked；
+///     命中后写 event/通知；experiment 任务调用 sync_candidate_with_task_terminal。
 pub(crate) async fn block_task_with_repair_runner_error(
     state: &AppState,
     task_id: &str,
@@ -1671,6 +1695,26 @@ pub(crate) async fn block_task_with_repair_runner_error(
     } else {
         repo.get_task(task_id).await?
     };
+    if task.experiment_id.is_some()
+        && matches!(
+            task.status,
+            OrchestratorTaskStatus::Blocked | OrchestratorTaskStatus::Aborted
+        )
+    {
+        if let Err(sync_err) =
+            crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal(
+                repo,
+                task_id,
+                task.status,
+            )
+            .await
+        {
+            tracing::debug!(
+                task_id = %task_id,
+                "sync_candidate after repair block: {sync_err}"
+            );
+        }
+    }
     Ok(OrchestratorTaskDto::from(task))
 }
 
@@ -1702,7 +1746,30 @@ pub(crate) async fn start_repair_runner_for_failed_review(
         repair_prompt,
     };
     match prepare_repair_runner(state, &repair_transition.task, repair_context).await {
-        Ok(task) => Ok(OrchestratorTaskDto::from(task)),
+        Ok(task) => {
+            // prepare 可能返回 Ok(Blocked)（max turns / provider 等），experiment 必须 Failed。
+            if task.experiment_id.is_some()
+                && matches!(
+                    task.status,
+                    OrchestratorTaskStatus::Blocked | OrchestratorTaskStatus::Aborted
+                )
+            {
+                if let Err(err) =
+                    crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal(
+                        state.orchestrator_repo.as_ref(),
+                        task_id,
+                        task.status,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        task_id = %task_id,
+                        "sync_candidate after repair Ok(Blocked): {err}"
+                    );
+                }
+            }
+            Ok(OrchestratorTaskDto::from(task))
+        }
         Err(err) => block_task_with_repair_runner_error(state, task_id, err).await,
     }
 }

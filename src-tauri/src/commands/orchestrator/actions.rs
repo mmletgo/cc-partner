@@ -334,19 +334,10 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
         return run_delivery_for_task(state, &delivery_transition.task.id, None).await;
     }
 
-    // A4：experiment candidate 终端失败记 Failed outcome，仍允许 repair 路径
+    // A4：experiment candidate 可走 repair；若最终 Blocked/Aborted 由 start_repair_* /
+    // block_task_* 统一 sync candidate Failed，禁止仅靠 is_err 分支（Ok(Blocked) 会漏）。
     if task.delivery_suppressed || task.experiment_id.is_some() {
-        // 可恢复 repair 走既有路径；若 repair 失败/耗尽由后续路径处理
-        let result = start_repair_runner_for_failed_review(state, &task.id, &review).await;
-        if result.is_err() {
-            let _ = crate::orchestrator::experiments::reducer::record_candidate_review(
-                state.orchestrator_repo.as_ref(),
-                &task.id,
-                false,
-            )
-            .await;
-        }
-        return result;
+        return start_repair_runner_for_failed_review(state, &task.id, &review).await;
     }
 
     start_repair_runner_for_failed_review(state, &task.id, &review).await
@@ -383,8 +374,8 @@ async fn maybe_auto_deliver_experiment_winner(
         return Ok(());
     }
     let winner_id = start_experiment_winner_delivery(repo, experiment_id).await?;
-    // 将 winner 任务转到 Delivering 再交付
-    let _ = repo
+    // 仅允许 CandidateReady 路径的 Done→Delivering CAS；中止/阻塞不得复活交付。
+    let transitioned = repo
         .try_transition_task_status(
             &winner_id,
             OrchestratorTaskStatus::Done,
@@ -392,6 +383,12 @@ async fn maybe_auto_deliver_experiment_winner(
             None,
         )
         .await?;
+    if transitioned.is_none() {
+        let task = repo.get_task(&winner_id).await?;
+        if task.status != OrchestratorTaskStatus::Delivering {
+            return Ok(());
+        }
+    }
     let delivered = run_delivery_for_task(state, &winner_id, None).await?;
     if delivered.status == OrchestratorTaskStatus::Done {
         mark_experiment_delivery_completed(repo, experiment_id).await?;
@@ -426,10 +423,12 @@ pub async fn retry_orchestrator_task(
 /// 终止 Orchestrator 任务。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户需要从 blocked UI 或队列中终止不再继续的任务，同时保留现场用于人工检查。
+///     用户需要从 blocked UI 或队列中终止不再继续的任务，同时保留现场用于人工检查；
+///     experiment candidate 必须同步 Cancelled，防止后续 approve 复活交付。
 ///
 /// Code Logic（这个函数做什么）:
-///     将任务状态设置为 Aborted，清空 blocked_reason，不删除 worktree/session。
+///     将任务状态设置为 Aborted，清空 blocked_reason；若有 experiment_id 则
+///     mark_candidate_cancelled；不删除 worktree/session。
 #[tauri::command]
 pub async fn abort_orchestrator_task(
     state: State<'_, AppState>,
@@ -441,6 +440,21 @@ pub async fn abort_orchestrator_task(
         .orchestrator_repo
         .set_task_status(&task.id, target, None)
         .await?;
+    if updated.experiment_id.is_some() {
+        if let Err(err) =
+            crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal(
+                state.orchestrator_repo.as_ref(),
+                &updated.id,
+                updated.status,
+            )
+            .await
+        {
+            tracing::debug!(
+                task_id = %updated.id,
+                "sync_candidate after abort: {err}"
+            );
+        }
+    }
     Ok(OrchestratorTaskDto::from(updated))
 }
 

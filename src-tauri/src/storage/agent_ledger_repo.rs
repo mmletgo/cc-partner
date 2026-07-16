@@ -49,6 +49,20 @@ pub const AGENT_SESSION_LEDGER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agent_
     updated_at TEXT NOT NULL
 )";
 
+/// clear 隐私水位：单行 tombstone，记录最近一次 clear 的 RFC3339 时刻。
+///
+/// Business Logic（为什么需要这个表）:
+///     用户 clear 只删 ledger 行，终态 runtime session 仍保留；若不持久化水位，
+///     启动 reconcile 会把清除前的旧 session 重新写回 ledger，破坏隐私删除语义。
+///
+/// Code Logic（这个表做什么）:
+///     id 固定为 1；cleared_before 为 clear 时刻；reconcile/finalize 排除 ended_at ≤ 该值的 session。
+pub const AGENT_LEDGER_CLEAR_WATERMARK_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS agent_ledger_clear_watermark (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    cleared_before TEXT NOT NULL
+)";
+
 /// project + ended_at 索引。
 pub const AGENT_SESSION_LEDGER_PROJECT_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_agent_session_ledger_project_ended \
@@ -157,9 +171,12 @@ impl AgentLedgerRepo {
     ///     旧库无迁移框架；CREATE IF NOT EXISTS 即可升级。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     表 + 三个索引；bootstrap 不经 write lease。
+    ///     ledger 表 + clear watermark 表 + 三个索引；bootstrap 不经 write lease。
     pub async fn ensure_schema(pool: &SqlitePool) -> Result<(), AppError> {
         sqlx::query(AGENT_SESSION_LEDGER_SCHEMA)
+            .execute(pool)
+            .await?;
+        sqlx::query(AGENT_LEDGER_CLEAR_WATERMARK_SCHEMA)
             .execute(pool)
             .await?;
         sqlx::query(AGENT_SESSION_LEDGER_PROJECT_INDEX)
@@ -172,6 +189,40 @@ impl AgentLedgerRepo {
             .execute(pool)
             .await?;
         Ok(())
+    }
+
+    /// 读取最近一次 clear 隐私水位（RFC3339）；从未 clear 则 None。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     reconcile 与 finalize 需排除 clear 之前结束的 session，防止历史复活。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT cleared_before FROM agent_ledger_clear_watermark WHERE id=1。
+    pub async fn get_clear_watermark(&self) -> Result<Option<String>, AppError> {
+        let row: Option<String> =
+            sqlx::query_scalar("SELECT cleared_before FROM agent_ledger_clear_watermark WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.filter(|s| !s.trim().is_empty()))
+    }
+
+    /// 判断 ended_at 是否允许写入 ledger（未 clear 或 ended 严格晚于水位）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     clear 后旧终态 session 不得被 record_terminal / reconcile 重新写入。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     无水位 → true；ended_at 空白 → false；否则 ended_at > cleared_before（RFC3339 字典序）。
+    pub async fn is_ended_after_clear_watermark(&self, ended_at: &str) -> Result<bool, AppError> {
+        let Some(watermark) = self.get_clear_watermark().await? else {
+            return Ok(true);
+        };
+        let ended = ended_at.trim();
+        if ended.is_empty() {
+            return Ok(false);
+        }
+        // RFC3339 在固定 Z/偏移格式下字典序与时间序一致（本库写入均为 to_rfc3339）。
+        Ok(ended > watermark.as_str())
     }
 
     /// 幂等 finalize：首次 INSERT；冲突时 null-fill / 更晚 endedAt / 单调 counters。
@@ -609,15 +660,24 @@ impl AgentLedgerRepo {
         Ok(AgentLedgerPage { items, next_cursor })
     }
 
-    /// 清除全部 ledger 行；返回删除数。幂等。
+    /// 清除全部 ledger 行并写入隐私水位；返回删除数。幂等。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     设置页一键清除；不影响 runtime/task/terminal。
+    ///     设置页一键清除；不影响 runtime/task/terminal；必须持久化水位，
+    ///     否则启动 reconcile 会把清除前终态 session 重新写回。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     DELETE FROM agent_session_ledger；返回 rows_affected。
+    ///     shared lease 内 UPSERT cleared_before=now，再 DELETE ledger 全表；返回 rows_affected。
     pub async fn clear_all(&self) -> Result<u64, AppError> {
         with_shared_write_lease(&self.gate, async {
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO agent_ledger_clear_watermark (id, cleared_before) VALUES (1, ?) \
+                 ON CONFLICT(id) DO UPDATE SET cleared_before = excluded.cleared_before",
+            )
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
             let res = sqlx::query("DELETE FROM agent_session_ledger")
                 .execute(&self.pool)
                 .await?;
@@ -1128,5 +1188,26 @@ mod tests {
         assert_eq!(repo.clear_all().await.unwrap(), 1);
         assert_eq!(repo.clear_all().await.unwrap(), 0);
         assert_eq!(repo.count_all().await.unwrap(), 0);
+    }
+
+    /// Business Logic: clear 必须持久化水位，供 reconcile 排除旧 session。
+    #[tokio::test]
+    async fn clear_all_persists_watermark() {
+        let repo = ledger_repo().await;
+        assert!(repo.get_clear_watermark().await.unwrap().is_none());
+        repo.finalize(finalize("a1", None)).await.unwrap();
+        repo.clear_all().await.unwrap();
+        let wm = repo.get_clear_watermark().await.unwrap().unwrap();
+        assert!(!wm.is_empty());
+        // clear 之前的 ended_at 不得再写入
+        assert!(!repo
+            .is_ended_after_clear_watermark("2020-01-01T00:00:00Z")
+            .await
+            .unwrap());
+        // 水位之后的 ended_at 仍允许
+        assert!(repo
+            .is_ended_after_clear_watermark("2099-01-01T00:00:00Z")
+            .await
+            .unwrap());
     }
 }
