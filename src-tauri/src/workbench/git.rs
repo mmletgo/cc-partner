@@ -995,10 +995,12 @@ pub fn push_branch(path: &Path, branch: &str) -> Result<(), AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Orchestrator 自动 merge 成功后，源任务 worktree 会被清理，主分支推送必须从主工作区 cwd 读取当前分支并执行。
+///     非 OID 绑定场景（手动/旧路径）在主工作区 cwd 推送当前分支；Orchestrator 交付已改走
+///     `push_main_commit_oid_to`，本 helper 仍保留给测试与未来非交付推送复用。
 ///
 /// Code Logic（这个函数做什么）:
-///     在传入的主工作区路径读取当前分支名，再复用 push_branch 的 upstream/origin 安全规则推送，成功返回分支名供 evidence 记录。
+///     在传入的主工作区路径读取当前分支名，再复用 push_branch 的 upstream/origin 安全规则推送，成功返回分支名。
+#[allow(dead_code)]
 pub fn push_main_worktree_current_branch(path: &Path) -> Result<String, AppError> {
     let branch =
         current_branch(path).ok_or_else(|| AppError::generic("主工作区没有可推送的当前分支"))?;
