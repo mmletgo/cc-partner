@@ -90,10 +90,12 @@ pub struct FrozenPushTarget {
 ///     merge 成功后调用方只应 push 固定 merge OID 到固定 remote/ref，不能再读 current branch。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存 merge 后的 commit OID 与 merge 前冻结的 push target。
+///     保存 merge 后的 commit OID、merge 前 tip（pre_oid，供 abort 回滚 CAS）与冻结 push target。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrozenMainMergeResult {
     pub merge_oid: String,
+    /// merge 前主分支 tip；若交付在 merge 后被终止，可用 CAS 回滚到此 OID。
+    pub pre_oid: String,
     pub push_target: FrozenPushTarget,
 }
 
@@ -989,10 +991,38 @@ pub fn merge_reviewed_oid_with_frozen_main(
             verify_merge_oid_binding(main_path, &merge_oid, &pre_oid, reviewed_oid, &branch)?;
             Ok(MergeReviewedOutcome::Merged(FrozenMainMergeResult {
                 merge_oid,
+                pre_oid,
                 push_target,
             }))
         }
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     交付在 merge 成功后若任务已被 Abort/Cancel，必须把本地 main 从污染 tip CAS 回 pre_oid，
+///     否则后续交付会把已终止任务的 merge 当作祖先间接推送。
+///
+/// Code Logic（这个函数做什么）:
+///     `git update-ref refs/heads/<branch> <pre_oid> <merge_oid>`；期望 old=merge_oid，
+///     成功则 tip 回滚；CAS 失败（tip 已漂移）返回错误由调用方记录。
+pub fn rollback_main_merge_cas(
+    main_path: &Path,
+    branch: &str,
+    pre_oid: &str,
+    merge_oid: &str,
+) -> Result<(), AppError> {
+    if branch.trim().is_empty() {
+        return Err(AppError::generic("rollback main: branch 不能为空"));
+    }
+    if pre_oid.trim().is_empty() || merge_oid.trim().is_empty() {
+        return Err(AppError::generic("rollback main: pre/merge oid 不能为空"));
+    }
+    let refname = format!("refs/heads/{}", branch.trim());
+    run_git(
+        main_path,
+        &["update-ref", &refname, pre_oid.trim(), merge_oid.trim()],
+    )?;
+    Ok(())
 }
 
 /// 解析当前分支 upstream 的 remote 名（如 origin）。

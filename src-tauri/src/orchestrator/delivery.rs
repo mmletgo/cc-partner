@@ -843,7 +843,8 @@ where
         return Ok(summary);
     }
 
-    // dirty check + freeze + merge 在同一 main 锁下执行；进锁后先 recheck 仍为 Delivering。
+    // dirty check + merge + push 均在同一 main 锁下；进锁/merge 后 recheck Delivering；
+    // 若已终止则 CAS 回滚 main 到 pre_oid，禁止污染 tip 被后续交付间接推送。
     let frozen_merge = match with_main_delivery_lock(&main_path, || async {
         let current = context.orchestrator_repo().get_task(&task.id).await?;
         if current.status != OrchestratorTaskStatus::Delivering {
@@ -859,9 +860,49 @@ where
                 "merge main failed: main worktree is dirty; 主工作区有未提交改动，请先提交或清理后再合并",
             ));
         }
-        context
+        let merged = context
             .merge_task_commit_oid_to_main(worktree_id.clone(), &reviewed)
-            .await
+            .await?;
+        // merge 后再次 recheck：终止则 CAS 回滚 local main，再返回 stopped。
+        let after_merge = context.orchestrator_repo().get_task(&task.id).await?;
+        if after_merge.status != OrchestratorTaskStatus::Delivering {
+            if let Err(rb_err) = workbench_git::rollback_main_merge_cas(
+                main_path_ref,
+                &merged.push_target.branch,
+                &merged.pre_oid,
+                &merged.merge_oid,
+            ) {
+                tracing::warn!(
+                    task_id = %task.id,
+                    "delivery stopped after merge; main rollback CAS failed: {rb_err}"
+                );
+            }
+            return Err(AppError::conflict(format!(
+                "delivery_stopped:{}",
+                after_merge.status.as_str()
+            )));
+        }
+        // push 仍在锁内，缩短 abort 窗口。
+        workbench_git::push_main_commit_oid_to(
+            main_path_ref,
+            &merged.push_target,
+            &merged.merge_oid,
+        )
+        .map_err(|err| {
+            AppError::generic(format!(
+                "main merged locally (oid={}) but push main failed: {err}",
+                merged.merge_oid
+            ))
+        })?;
+        // push 后再 recheck：已推送不可逆，但禁止随后 Done/cleanup 误伤 Aborted。
+        let after_push = context.orchestrator_repo().get_task(&task.id).await?;
+        if after_push.status != OrchestratorTaskStatus::Delivering {
+            return Err(AppError::conflict(format!(
+                "delivery_stopped_after_push:{}",
+                after_push.status.as_str()
+            )));
+        }
+        Ok(merged)
     })
     .await
     {
@@ -869,7 +910,7 @@ where
         Err(err) => {
             let message = err.to_string();
             // Abort/状态变化：不得 block_delivery，也不得写 merge failed evidence。
-            if message.starts_with("delivery_stopped:") || message.contains("delivery_stopped:") {
+            if message.contains("delivery_stopped") {
                 let current = context.orchestrator_repo().get_task(&task.id).await?;
                 return Ok(DeliverySummary {
                     task: OrchestratorTaskDto::from(current),
@@ -877,11 +918,16 @@ where
                 });
             }
             let reason = normalize_merge_failure_reason(&err);
+            let stage = if reason.contains("push main failed") {
+                "push main"
+            } else {
+                "merge main"
+            };
             return block_delivery_task(
                 context.orchestrator_repo(),
                 &task.id,
                 &reason,
-                "merge main",
+                stage,
                 &format!("main path: {main_path}\n{reason}"),
                 &mut stages,
             )
@@ -900,33 +946,6 @@ where
     )
     .await?;
     stages.push("merge main".to_string());
-
-    if let Some(summary) =
-        stop_delivery_if_task_changed(context.orchestrator_repo(), &task.id, &stages).await?
-    {
-        return Ok(summary);
-    }
-
-    // 锁外用冻结 target + merge OID push main。
-    if let Err(err) = workbench_git::push_main_commit_oid_to(
-        Path::new(&main_path),
-        &frozen_merge.push_target,
-        &frozen_merge.merge_oid,
-    ) {
-        let reason = format!(
-            "main merged locally (oid={}) but push main failed: {err}",
-            frozen_merge.merge_oid
-        );
-        return block_delivery_task(
-            context.orchestrator_repo(),
-            &task.id,
-            &reason,
-            "push main",
-            &reason,
-            &mut stages,
-        )
-        .await;
-    }
     add_delivery_evidence(
         context.orchestrator_repo(),
         &task.id,
@@ -2424,10 +2443,8 @@ mod tests {
         assert_eq!(delivered.task.status, OrchestratorTaskStatus::Aborted);
         assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
         assert!(persisted.finished_at.is_none());
-        assert_eq!(
-            delivered.stages,
-            vec!["commit", "push branch", "merge main"]
-        );
+        // merge 在锁内完成后 recheck 发现 Aborted → CAS 回滚 main 并停止，不 push、不记 merge stage。
+        assert_eq!(delivered.stages, vec!["commit", "push branch"]);
         let main_show = StdCommand::new("git")
             .args(["show", "refs/heads/main:task.txt"])
             .current_dir(&origin)

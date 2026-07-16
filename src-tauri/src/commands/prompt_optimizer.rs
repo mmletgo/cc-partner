@@ -351,7 +351,7 @@ async fn remote_stream_optimize_prompt_to_workbench_session(
     let (_, target_language) = parse_required_target_language(target_language)?;
     let working_directory = remote_working_directory(working_directory)?;
     let base_url = device_base_url(state, &device_id)?;
-    let client = RemoteWorkbenchClient::new();
+    let client = RemoteWorkbenchClient::new().with_expected_device_id(&device_id);
     let _ = client
         .stream_prompt_optimizer_to_session(
             &base_url,

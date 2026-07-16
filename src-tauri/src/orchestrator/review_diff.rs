@@ -574,8 +574,10 @@ fn compute_review_digest(
 ///     raw diff 条目可能是普通 blob / symlink / gitlink；digest 必须反映真实内容身份。
 ///
 /// Code Logic（这个函数做什么）:
-///     deleted → 空哈希；gitlink(160000) → hash(new_oid)；symlink(120000) → hash(链接目标)；
-///     普通文件 → streaming content hash。
+///     deleted → 空哈希；gitlink(160000) → hash(new_oid)；
+///     **优先**用 staged blob OID（`git cat-file -p`）流式哈希，使 digest 与 write-tree 绑定同一
+///     不可变对象，避免 index=B / 工作树=A 时 digest 按 A 通过却 commit B；
+///     无 blob OID 时回退工作树路径（未 stage 的脏路径）。
 fn content_hash_for_entry(
     cwd: &Path,
     path: &str,
@@ -590,12 +592,12 @@ fn content_hash_for_entry(
     if new_mode == "160000" {
         return Ok((true, sha256_hex_of_bytes(new_oid.as_bytes())));
     }
+    // staged blob 存在时必须从对象库读内容，禁止再读可变 worktree。
+    if !new_oid.chars().all(|c| c == '0') {
+        return content_hash_for_blob_oid(cwd, new_oid, new_mode == "120000");
+    }
     let abs = cwd.join(path);
     if !abs.exists() {
-        // 无工作树文件时仍用 new_oid 占位（staged-only 变更）
-        if !new_oid.chars().all(|c| c == '0') {
-            return Ok((true, sha256_hex_of_bytes(new_oid.as_bytes())));
-        }
         return Ok((false, sha256_hex_of_bytes(b"")));
     }
     let metadata = fs::symlink_metadata(&abs)
@@ -614,6 +616,42 @@ fn content_hash_for_entry(
         ));
     }
     content_hash_for_path(cwd, path, false)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     write-tree 冻结的是 index blob；digest 若读工作树可与 tree 脱钩并放行未审内容。
+///
+/// Code Logic（这个函数做什么）:
+///     `git cat-file -p <oid>` 流式 SHA-256；symlink 模式整段当目标文本并标 binary；
+///     普通 blob 用 NUL 探测 binary。
+fn content_hash_for_blob_oid(
+    cwd: &Path,
+    blob_oid: &str,
+    is_symlink: bool,
+) -> Result<(bool, String), AppError> {
+    let output = std::process::Command::new("git")
+        .args(["cat-file", "-p", blob_oid.trim()])
+        .current_dir(cwd)
+        .output()
+        .map_err(|err| AppError::generic(format!("读取 blob 失败: {blob_oid}: {err}")))?;
+    if !output.status.success() {
+        return Err(AppError::generic(format!(
+            "git cat-file -p {blob_oid} 失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    if is_symlink {
+        return Ok((true, sha256_hex_of_bytes(&output.stdout)));
+    }
+    let mut hasher = Sha256::new();
+    let mut binary = false;
+    for chunk in output.stdout.chunks(8192) {
+        if chunk.contains(&0) {
+            binary = true;
+        }
+        hasher.update(chunk);
+    }
+    Ok((binary, format!("{:x}", hasher.finalize())))
 }
 
 /// Business Logic（为什么需要这个函数）:
