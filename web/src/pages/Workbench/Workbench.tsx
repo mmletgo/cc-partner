@@ -1142,7 +1142,6 @@ export function Workbench() {
             activeSessionId ? agentRuntime.latestAgentForTerminal(activeSessionId) : null
           }
         />
-
         <WorkbenchInspector
           inspectorTab={inspectorTab}
           setInspectorTab={setInspectorTab}
