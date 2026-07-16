@@ -27,10 +27,11 @@ use crate::net::peer_client::PeerClient;
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
 use crate::storage::{
-    ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
-    TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
-    WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
+    AgentLedgerRepo, ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo,
+    ScratchpadRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
+    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
 };
+use crate::workbench::agent_ledger::AgentLedgerService;
 use crate::transfer::registry::TransferRegistry;
 use crate::updater::UpdateRuntime;
 use mdns_sd::ServiceDaemon;
@@ -90,6 +91,10 @@ pub struct AppState {
     /// Agent session 运行时仓库（workbench_agent_sessions；provider-neutral lifecycle）
     #[allow(dead_code)]
     pub workbench_agent_session_repo: Arc<WorkbenchAgentSessionRepo>,
+    /// Agent Metadata Ledger 仓库（metadata-only 历史；agent_session_id 唯一）
+    pub agent_ledger_repo: Arc<AgentLedgerRepo>,
+    /// Agent Metadata Ledger 写入服务（失败隔离 + usage 缓存 + 有界重试 metric）
+    pub agent_ledger_service: Arc<AgentLedgerService>,
     /// 工作台 Git worktree 元数据仓库（workbench_worktrees 表访问，重启恢复工作区列表）
     #[allow(dead_code)]
     pub workbench_worktree_repo: Arc<WorkbenchWorktreeRepo>,
@@ -136,6 +141,8 @@ pub struct AppState {
     pub orchestrator_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Orchestrator 远端 outbox dispatcher 的取消令牌（应用退出时 cancel，停止 pending 远端任务投递）
     pub orchestrator_outbox_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Agent Metadata Ledger 保留清理后台任务取消令牌
+    pub agent_ledger_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Workbench Claude session 搜索的内存索引，key = worktree_path canonical string。
     /// 首次搜索某 worktree 时 lazy 初始化并启动文件监听。
     pub workbench_claude_session_indexes: Arc<

@@ -18,10 +18,11 @@ use crate::net::{discovery, http_server, peer_client::PeerClient};
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
 use crate::storage::{
-    ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
-    SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
+    AgentLedgerRepo, ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo,
+    ScratchpadRepo, SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
     WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
 };
+use crate::workbench::agent_ledger::AgentLedgerService;
 use crate::transfer::registry::TransferRegistry;
 use serde::Deserialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -391,6 +392,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
         .await?;
     // A1 Agent session runtime：表 + active-terminal 部分唯一索引
     WorkbenchAgentSessionRepo::ensure_schema(&pool).await?;
+    // A9 Agent Metadata Ledger：metadata-only 历史表
+    AgentLedgerRepo::ensure_schema(&pool).await?;
     WorkbenchWorkspaceLayoutRepo::new(pool.clone())
         .ensure_schema()
         .await?;
@@ -485,6 +488,11 @@ pub async fn build_app_state_with_role(
         pool.clone(),
         maintenance_gate.clone(),
     ));
+    let agent_ledger_repo = Arc::new(AgentLedgerRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
+    let agent_ledger_service = Arc::new(AgentLedgerService::new((*agent_ledger_repo).clone()));
     let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::with_gate(
         pool.clone(),
         maintenance_gate.clone(),
@@ -553,6 +561,8 @@ pub async fn build_app_state_with_role(
         workbench_project_repo,
         workbench_session_repo,
         workbench_agent_session_repo,
+        agent_ledger_repo,
+        agent_ledger_service,
         workbench_worktree_repo,
         workbench_browser_repo,
         workbench_workspace_layout_repo,
@@ -573,6 +583,7 @@ pub async fn build_app_state_with_role(
             crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry::new(),
         orchestrator_cancel: Arc::new(Mutex::new(None)),
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+        agent_ledger_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
@@ -689,6 +700,37 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                         .await;
                 });
             }
+            // A9：启动时 reconcile 缺失 ledger 行（失败不阻断）
+            {
+                let ledger_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    match ledger_state
+                        .agent_ledger_service
+                        .reconcile_terminal_sessions(&ledger_state.workbench_agent_session_repo)
+                        .await
+                    {
+                        Ok(n) if n > 0 => {
+                            tracing::info!("agent ledger reconcile wrote {n} missing rows");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("agent ledger reconcile failed (non-blocking): {e}");
+                        }
+                    }
+                });
+            }
+            // A9：Agent Metadata Ledger 保留清理（启动批 + 24h）
+            start_cancelled_task_once(&state.agent_ledger_cancel, "Agent ledger retention", || {
+                let cancel = CancellationToken::new();
+                let child = cancel.child_token();
+                let repo = (*state.agent_ledger_repo).clone();
+                let _handle = crate::workbench::agent_ledger::AgentLedgerRetentionTask::spawn(
+                    repo,
+                    child,
+                    std::time::Duration::from_secs(24 * 3600),
+                );
+                cancel
+            });
             // 周期性 tombstone → deletion floor GC（与同步结束后的 best-effort 互补）
             {
                 let gc_state = state.clone();
@@ -750,6 +792,7 @@ pub fn shutdown_backend_runtime(state: &AppState) {
         &state.orchestrator_outbox_cancel,
         "Orchestrator remote outbox dispatcher",
     );
+    cancel_runtime_token(&state.agent_ledger_cancel, "Agent ledger retention");
     cancel_runtime_token(&state.health_cancel, "健康监测 daemon");
 
     let cleaned = state.workbench_sessions.shutdown_all();

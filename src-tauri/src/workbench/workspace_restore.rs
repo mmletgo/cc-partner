@@ -1065,6 +1065,10 @@ mod tests {
             workbench_worktree_repo: Arc::new(worktree_repo),
             workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
             workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
+            agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
+            agent_ledger_service: Arc::new(crate::workbench::agent_ledger::AgentLedgerService::new(
+                crate::storage::AgentLedgerRepo::new(pool.clone()),
+            )),
             workbench_workspace_layout_repo: Arc::new(layout_repo),
             browser_verification: Arc::new(
                 crate::workbench::browser_verification::BrowserVerificationService::new(
@@ -1100,6 +1104,7 @@ mod tests {
             orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::default(),
             orchestrator_cancel: Arc::new(Mutex::new(None)),
             orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            agent_ledger_cancel: Arc::new(Mutex::new(None)),
             workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
             workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
             workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(

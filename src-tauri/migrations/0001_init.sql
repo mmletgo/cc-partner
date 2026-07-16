@@ -496,3 +496,33 @@ CREATE TABLE IF NOT EXISTS recovery_jobs (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_recovery_jobs_updated ON recovery_jobs(updated_at DESC);
+
+-- agent_session_ledger：Agent Metadata Ledger（A9）
+-- metadata-only；agent_session_id UNIQUE 幂等 finalize；usage 列全 nullable。
+-- 实际建表：AgentLedgerRepo::ensure_schema（runtime 幂等；非 sqlx::migrate!）
+CREATE TABLE IF NOT EXISTS agent_session_ledger (
+    id TEXT PRIMARY KEY,
+    agent_session_id TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    worktree_id TEXT,
+    provider_id TEXT NOT NULL,
+    model_id TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    cost_minor_units INTEGER,
+    cost_currency TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_session_ledger_project_ended
+    ON agent_session_ledger(project_id, ended_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_agent_session_ledger_provider_ended
+    ON agent_session_ledger(provider_id, ended_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_agent_session_ledger_ended
+    ON agent_session_ledger(ended_at ASC, id);

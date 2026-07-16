@@ -1538,6 +1538,10 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
         workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
         workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
+            agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
+            agent_ledger_service: Arc::new(crate::workbench::agent_ledger::AgentLedgerService::new(
+                crate::storage::AgentLedgerRepo::new(pool.clone()),
+            )),
         workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
         workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
         workbench_workspace_layout_repo: Arc::new(crate::storage::WorkbenchWorkspaceLayoutRepo::new(pool.clone())),
@@ -1573,6 +1577,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::new(),
         orchestrator_cancel: Arc::new(Mutex::new(None)),
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            agent_ledger_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
