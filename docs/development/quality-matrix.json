@@ -535,6 +535,33 @@
       ]
     },
     {
+      "id": "L2-AGENT-CLI-SMOKE-001",
+      "surface": "agent-cli",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/agent_cli",
+        "src-tauri/src/backend/control_agent.rs",
+        "src-tauri/tests/agent_cli_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked agent_cli --lib && cargo test --locked --test agent_cli_smoke -- --nocapture --test-threads=1",
+      "ciJob": "smoke",
+      "platforms": [
+        "macos-latest",
+        "windows-latest",
+        "ubuntu-latest"
+      ],
+      "exclusions": [
+        "GUI / WebView",
+        "multi-host remote device table",
+        "packaged release artifact install path"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/backend-operations.md",
+        "docs/superpowers/specs/2026-07-15-agent-first-cli-design.md"
+      ]
+    },
+    {
       "id": "L2-BACKUP-RESTORE-001",
       "surface": "backup-export-restore",
       "level": "L2",

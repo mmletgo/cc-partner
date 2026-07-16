@@ -46,6 +46,7 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | `L2-LAN-TRUST-BOUNDARY-001` | L2 | `src-tauri/tests/lan_trust_boundary_smoke.rs` |
 | `L2-BACKEND-CLI-SMOKE-001` | L2 | `src-tauri/tests/backend_cli_smoke.rs` |
 | `L2-BACKEND-DOCTOR-SMOKE-001` | L2 | `src-tauri/tests/backend_doctor_smoke.rs` |
+| `L2-AGENT-CLI-SMOKE-001` | L2 | `src-tauri/tests/agent_cli_smoke.rs` + `cargo test --locked agent_cli --lib` |
 | `L2-PTY-SMOKE-001` | L2 | `src-tauri/tests/pty_smoke.rs` |
 | `L2-TRANSACTIONAL-RUNTIME-001` | L2 | `src-tauri/tests/transactional_runtime_smoke.rs` |
 | `L3-MACOS-GUI-PERMISSIONS-001` | L3 | Packaged macOS GUI + permission grant/deny/retry + screenshot clipboard — **NOT VERIFIED** (canonical aggregate; architecture executions under `macos-aarch64-beta` only) ([real-device-certification.md](real-device-certification.md)) |
@@ -161,6 +162,8 @@ cargo test --locked backend::doctor::tests -- --nocapture
 cargo test --locked workbench::sessions::tests -- --nocapture
 cargo test --locked --test backend_cli_smoke -- --nocapture --test-threads=1
 cargo test --locked --test backend_doctor_smoke -- --nocapture --test-threads=1
+cargo test --locked agent_cli --lib
+cargo test --locked --test agent_cli_smoke -- --nocapture --test-threads=1
 cargo test --locked --test pty_smoke -- --nocapture --test-threads=1
 cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-threads=1
 cargo test --locked --test quality_faults -- --nocapture --test-threads=1

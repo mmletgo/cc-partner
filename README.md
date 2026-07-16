@@ -59,7 +59,31 @@ cargo run --locked --bin cc-partner-backend -- stop
 - 可选依赖缺失（如未装 tmux）通常是 degraded/1
 - 诊断日志本地落盘：`~/.cc-partner/logs/backend.log`（及最多 3 个历史文件），**不上传**、无 telemetry
 
-### 5. 配套工具：文件传输 · 截图 · Prompt · 草稿
+### 5. Agent-first 控制 CLI（`cc-partner`）
+
+独立二进制 **`cc-partner`**（**不是** Tauri `externalBin`，不替代 `cc-partner-backend`）面向 Agent/脚本：
+
+```text
+cc-partner [--device local|id:<deviceId>] [--json] <resource> <action>
+```
+
+- 资源：`project` / `worktree` / `session` / `agent` / `task` / `experiment` / `attention` / `fleet` / `browser` / `event`
+- 选择器仅 `id:` / `path:` / `branch:` 精确匹配；禁止 `active/current/recent/name` 与自动 remote 选择
+- Prompt、terminal 正文、browser fill 只能 `--input-json -`（stdin）；不得进 argv/日志/错误 envelope
+- `--json`：stdout 单一 envelope `{schemaVersion:1,ok,data|error}`；`event follow` 为 JSONL
+- exit code：`0` 成功 · `1` 内部 · `2` 用法 · `3` 未找到 · `4` 冲突 · `5` 不可用/超时 · `6` 能力不支持 · `7` 部分结果
+- 本机经 loopback control token；远端必须 `--device id:<deviceId>`，**不**发送 control token
+- non-replayable mutation（如 `session send`）连接丢失 → `outcomeUnknown=true`，不盲重放
+
+```bash
+cargo run --locked --bin cc-partner -- --json project list
+cargo run --locked --bin cc-partner -- --json attention list
+printf '%s' '{"data":"pwd\\n"}' | cargo run --locked --bin cc-partner -- session send --session id:<sid> --input-json -
+```
+
+细节见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md) 与设计 `docs/superpowers/specs/2026-07-15-agent-first-cli-design.md`。
+
+### 6. 配套工具：文件传输 · 截图 · Prompt · 草稿
 
 - **局域网文件传输**：分块传输、断点续传、SHA256 校验、拖拽发送
 - **区域截图**：全局快捷键框选，复制到剪贴板，可粘贴到 Claude Code

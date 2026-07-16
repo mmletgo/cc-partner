@@ -156,6 +156,27 @@ jobs:
             node scripts/prepare-tauri-sidecar.mjs
           fi
 
+      # A7：独立 Agent CLI 产物（不进入 Tauri externalBin / binaries/）
+      - name: Build standalone agent CLI (cc-partner)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --locked --release --bin cc-partner --manifest-path src-tauri/Cargo.toml --target "${{ matrix.target }}"
+            BIN="src-tauri/target/${{ matrix.target }}/release/cc-partner"
+          else
+            cargo build --locked --release --bin cc-partner --manifest-path src-tauri/Cargo.toml
+            BIN="src-tauri/target/release/cc-partner"
+          fi
+          if [ -f "${BIN}.exe" ]; then BIN="${BIN}.exe"; fi
+          ARCH_TAG="${{ matrix.matrix_id }}"
+          OUT="release-assets/cc-partner-cli-${ARCH_TAG}"
+          if [[ "$BIN" == *.exe ]]; then OUT="${OUT}.exe"; fi
+          cp "$BIN" "$OUT"
+          echo "=== agent CLI artifact ==="
+          ls -la "$OUT"
+
       - name: Build Tauri App (macOS)
         if: startsWith(matrix.platform, 'macos')
         shell: bash

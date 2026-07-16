@@ -62,6 +62,33 @@ cargo run --locked --bin cc-partner-backend -- stop
 
 `serve` is not a normal operator entry; prefer `start` / `stop`.
 
+## Agent-first control CLI (`cc-partner`)
+
+Standalone binary **`cc-partner`** (separate from lifecycle; **not** Tauri `externalBin`):
+
+```text
+cc-partner [--device local|id:<deviceId>] [--json] <resource> <action>
+```
+
+| Topic | Contract |
+| --- | --- |
+| Transport | Local: loopback control token + `POST /api/backend/control/agent/{query,mutate}`. Remote: explicit `id:<deviceId>` only; P2P business APIs; **never** send control token |
+| Selectors | `id:`, `path:` (canonical), `branch:` exact; multi-hit → exit 4; no fuzzy / active / auto device |
+| Bodies | `--input-json -` / stdin only (max 1 MiB; terminal send max 256 KiB); never argv / logs / error envelope |
+| JSON | Success `{schemaVersion:1,ok:true,data}`; failure `{schemaVersion:1,ok:false,error:{code,message,retryable,requestId,outcomeUnknown}}` |
+| Exit codes | 0 success · 1 internal · 2 usage · 3 not found · 4 conflict · 5 unavailable/timeout · 6 unsupported · 7 partial |
+| Mutation | Query may refresh control file once; `NeverReplay` (session send / worktree create / browser verify) single hit; loss after dispatch → `outcomeUnknown=true` |
+| Fixed LAN | Same credential-free business API boundary as P2P; peers are not “authenticated devices” |
+
+```bash
+cargo run --locked --bin cc-partner -- --json project list
+cargo run --locked --bin cc-partner -- --device id:<deviceId> --json project list
+printf '%s' '{"title":"t","goal":"g","acceptanceCriteria":"a"}' | \
+  cargo run --locked --bin cc-partner -- --json task create --project id:<pid> --input-json -
+```
+
+Smoke: `cd src-tauri && cargo test --locked --test agent_cli_smoke -- --nocapture --test-threads=1` (`L2-AGENT-CLI-SMOKE-001`).
+
 ## Runtime authority (sidecar owner)
 
 The headless `serve` process is the sole **runtime owner** (`HeadlessOwner`) for
