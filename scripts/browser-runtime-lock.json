@@ -1,0 +1,32 @@
+{
+  "version": "150.0.7871.114",
+  "product": "chrome-headless-shell",
+  "source": "https://googlechromelabs.github.io/chrome-for-testing/",
+  "assets": {
+    "linux64": {
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/150.0.7871.114/linux64/chrome-headless-shell-linux64.zip",
+      "sha256": "34882ae1e7e64bbb639084d2607577717d263f20575d3a653249fc87a766d2d4",
+      "executable": "chrome-headless-shell-linux64/chrome-headless-shell",
+      "zipBytes": 120342598
+    },
+    "mac-arm64": {
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/150.0.7871.114/mac-arm64/chrome-headless-shell-mac-arm64.zip",
+      "sha256": "82c6ddef1d723fbb6a4ecf08e5dbfe86bae632f5721020cbc3ad484e211933b1",
+      "executable": "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+      "zipBytes": 98536142
+    },
+    "mac-x64": {
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/150.0.7871.114/mac-x64/chrome-headless-shell-mac-x64.zip",
+      "sha256": "aa8194eacab3cd705ca44ea594a3fc52dd8e3c9cdb87b3bb87ebb6008b21f7b4",
+      "executable": "chrome-headless-shell-mac-x64/chrome-headless-shell",
+      "zipBytes": 104265664
+    },
+    "win64": {
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/150.0.7871.114/win64/chrome-headless-shell-win64.zip",
+      "sha256": "0ed14c324ee7c1892c1f5ac116fd893d0762ddf6898c3f4d39a7664b7f4889a2",
+      "executable": "chrome-headless-shell-win64/chrome-headless-shell.exe",
+      "zipBytes": 120348368
+    }
+  },
+  "generatedAt": "2026-07-16T08:07:39.040Z"
+}

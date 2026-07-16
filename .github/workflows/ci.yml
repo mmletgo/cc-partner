@@ -56,6 +56,11 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: 'src-tauri -> target'
+          # 含 browser-runtime lock 版本，避免 managed Chromium/CDP 依赖与旧缓存混用
+          shared-key: browser-runtime-150.0.7871.114
+
+      - name: Browser runtime prepare self-test
+        run: node scripts/prepare-browser-runtime.mjs --self-test
 
       - name: Install Linux build deps (Tauri 编译/clippy 依赖：webkit2gtk-4.1 等)
         run: |

@@ -74,8 +74,8 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: 'src-tauri -> target'
-          # 按平台隔离缓存，避免 macOS/Windows 缓存碰撞
-          shared-key: smoke-${{ matrix.os }}
+          # 按平台 + managed browser runtime 版本隔离缓存
+          shared-key: smoke-${{ matrix.os }}-browser-runtime-150.0.7871.114
 
       - name: Prepare smoke root and log dirs
         shell: bash
