@@ -47,11 +47,12 @@ impl OrchestratorRepo {
                 "INSERT INTO orchestrator_tasks \
                  (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
                   workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
-                  external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
-                  agent_session_id, transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-                  last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
+                  external_url, external_state, external_labels_json, runner_provider, runner_max_turns, \
+                  runner_stall_timeout_ms, claude_session_id, agent_session_id, transcript_path, \
+                  runtime_started_at, last_activity_at, last_runtime_event, last_runtime_message, \
+                  worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
                   state_version, created_at, updated_at, started_at, finished_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&row.id)
             .bind(&row.project_id)
@@ -71,6 +72,8 @@ impl OrchestratorRepo {
             .bind(&row.external_state)
             .bind(&external_labels_json)
             .bind(&row.runner_provider)
+            .bind(row.runner_max_turns)
+            .bind(row.runner_stall_timeout_ms)
             .bind(&row.claude_session_id)
             .bind(&row.agent_session_id)
             .bind(&row.transcript_path)

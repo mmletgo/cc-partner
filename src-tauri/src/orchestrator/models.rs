@@ -299,6 +299,66 @@ impl OrchestratorRunState {
     }
 }
 
+/// Orchestrator attempt 生命周期状态（policy 快照行）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     attempt 行需要强类型 status，覆盖运行中、完成、turn 上限与 stall 等终止态。
+///
+/// Code Logic（这个枚举做什么）:
+///     SQLite 存 camelCase 稳定字符串；`as_str`/`from_str` 双向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrchestratorAttemptStatus {
+    Running,
+    Completed,
+    Failed,
+    TurnLimitReached,
+    Stalled,
+    Canceled,
+}
+
+impl OrchestratorAttemptStatus {
+    /// 返回 wire/存储稳定字符串。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     attempt status 需可跨版本 diff，禁止随意字面量。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     映射枚举到 camelCase token（running 历史兼容小写）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::TurnLimitReached => "turnLimitReached",
+            Self::Stalled => "stalled",
+            Self::Canceled => "canceled",
+        }
+    }
+
+    /// 解析 attempt status；未知 fail-closed。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     损坏值不能静默当 running。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     匹配 as_str 字面量。
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Result<Self, AppError> {
+        match value {
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "turnLimitReached" => Ok(Self::TurnLimitReached),
+            "stalled" => Ok(Self::Stalled),
+            "canceled" | "cancelled" => Ok(Self::Canceled),
+            other => Err(AppError::generic(format!(
+                "未知 Orchestrator attempt 状态: {other}"
+            ))),
+        }
+    }
+}
+
 /// Orchestrator runner 当前尝试阶段。
 ///
 /// Business Logic（为什么需要这个枚举）:
@@ -497,6 +557,10 @@ pub struct OrchestratorTaskRow {
     pub external_state: Option<String>,
     pub external_labels: Option<Vec<String>>,
     pub runner_provider: Option<String>,
+    /// 任务级冻结的 max_turns（claim/running 时写入；旧 NULL 读侧映射 1）。
+    pub runner_max_turns: Option<i64>,
+    /// 任务级冻结的 stall_timeout_ms（旧 NULL 读侧映射 300000）。
+    pub runner_stall_timeout_ms: Option<i64>,
     pub claude_session_id: Option<String>,
     /// 统一 Agent session 引用（A1 dual-write，与 claude_session_id 并行一个版本）。
     pub agent_session_id: Option<String>,
@@ -621,7 +685,7 @@ pub struct OperationalNotificationSnapshot {
 ///     prompt 和完成时间，供后续 sentinel、evidence 和任务详情追溯。
 ///
 /// Code Logic（这个结构体做什么）:
-///     字段与 orchestrator_task_attempts 表一一对应；status 目前保存为稳定字符串，后续 runner 接入时再收敛为枚举。
+///     字段与 orchestrator_task_attempts 表一一对应；含 attempt 级不可变 runner policy 快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct OrchestratorTaskAttemptRow {
@@ -632,6 +696,13 @@ pub struct OrchestratorTaskAttemptRow {
     pub session_id: String,
     pub prompt: String,
     pub status: String,
+    /// attempt 创建时冻结的 provider wire 值。
+    pub runner_provider: String,
+    /// 统一 Agent session id（可空）。
+    pub agent_session_id: Option<String>,
+    pub max_turns: i64,
+    pub stall_timeout_ms: i64,
+    pub completion_contract: String,
     pub created_at: String,
     pub completed_at: Option<String>,
 }
@@ -796,6 +867,8 @@ impl OrchestratorTaskRow {
             external_state: None,
             external_labels: None,
             runner_provider: Some("claudeCodeVisible".to_string()),
+            runner_max_turns: Some(1),
+            runner_stall_timeout_ms: Some(300_000),
             claude_session_id: None,
             agent_session_id: None,
             transcript_path: None,

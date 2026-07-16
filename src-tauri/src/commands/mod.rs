@@ -21,6 +21,7 @@ pub mod health;
 pub mod lan_firewall_dependency;
 pub mod mobile;
 pub mod orchestrator;
+pub mod orchestrator_adapters;
 pub mod orchestrator_config;
 pub mod permissions;
 pub mod prompt_optimizer;

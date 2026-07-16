@@ -75,6 +75,16 @@ pub const CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1: &str = "orchestrator.review-di
 ///     字符串常量，列入 `server_protocol_info()`；client `supports` 门控。
 pub const CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1: &str = "orchestrator.workflow-document.v1";
 
+/// 能力 token：v1 Orchestrator Agent adapter catalog
+/// （`POST /api/orchestrator/agent-adapters`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     远端只协商是否支持 adapter 可用性查询；不含 path/env，也非授权机制。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`。
+pub const CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1: &str = "orchestrator.agent-adapters.v1";
+
 /// 能力 token：v1 全局 Attention/Inbox 快照路由（`GET /api/mobile/attention`）。
 ///
 /// Business Logic（为什么需要这个 token）:
@@ -246,6 +256,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_ATTENTION_V2.to_string(),
             CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+            CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1.to_string(),
@@ -411,6 +422,7 @@ mod tests {
                 "attention.v2".to_string(),
                 "cc-history.paged-sync.v1".to_string(),
                 "errors.envelope.v1".to_string(),
+                "orchestrator.agent-adapters.v1".to_string(),
                 "orchestrator.review-diff.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
                 "orchestrator.workflow-document.v1".to_string(),
@@ -426,6 +438,7 @@ mod tests {
         );
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
+        assert!(info.supports(CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1));
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));

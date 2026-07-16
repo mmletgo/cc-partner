@@ -35,10 +35,10 @@ use uuid::Uuid;
 
 pub(crate) const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, status, priority, \
     workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
-    external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
-    agent_session_id, transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
-    last_runtime_message, branch_name, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
-    state_version, created_at, updated_at, started_at, finished_at";
+    external_url, external_state, external_labels_json, runner_provider, runner_max_turns, \
+    runner_stall_timeout_ms, claude_session_id, agent_session_id, transcript_path, runtime_started_at, \
+    last_activity_at, last_runtime_event, last_runtime_message, branch_name, worktree_id, session_id, \
+    prepare_claim_token, blocked_reason, attempt, state_version, created_at, updated_at, started_at, finished_at";
 
 /// Business Logic（为什么需要这个函数）:
 ///     claim 候选 SELECT 需要 JOIN `workbench_projects`，未加表前缀时 `id/created_at/updated_at` 会与 project 列歧义。
@@ -98,6 +98,7 @@ pub(crate) fn is_active_run_state(state: OrchestratorRunState) -> bool {
 pub(crate) const EVIDENCE_COLUMNS: &str = "id, task_id, kind, title, summary, content, created_at";
 pub(crate) const ATTEMPT_COLUMNS: &str =
     "id, task_id, attempt, worktree_id, session_id, prompt, status, \
+    runner_provider, agent_session_id, max_turns, stall_timeout_ms, completion_contract, \
     created_at, completed_at";
 pub(crate) const REMOTE_OUTBOX_COLUMNS: &str = "id, device_id, device_name, remote_project_path, \
     remote_project_id, request_json, status, remote_task_id, last_error, state_version, created_at, updated_at, \
@@ -129,6 +130,8 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   external_state TEXT,
   external_labels_json TEXT,
   runner_provider TEXT,
+  runner_max_turns INTEGER,
+  runner_stall_timeout_ms INTEGER,
   claude_session_id TEXT,
   agent_session_id TEXT,
   transcript_path TEXT,
@@ -230,6 +233,11 @@ pub const ORCHESTRATOR_TASK_ATTEMPT_SCHEMA: &str =
   session_id TEXT NOT NULL,
   prompt TEXT NOT NULL,
   status TEXT NOT NULL,
+  runner_provider TEXT,
+  agent_session_id TEXT,
+  max_turns INTEGER,
+  stall_timeout_ms INTEGER,
+  completion_contract TEXT,
   created_at TEXT NOT NULL,
   completed_at TEXT,
   UNIQUE(task_id, attempt)
@@ -574,6 +582,12 @@ pub(crate) fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppErr
         external_state: row.try_get("external_state")?,
         external_labels: deserialize_external_labels(external_labels_json)?,
         runner_provider: row.try_get("runner_provider")?,
+        runner_max_turns: row
+            .try_get::<Option<i64>, _>("runner_max_turns")
+            .unwrap_or(None),
+        runner_stall_timeout_ms: row
+            .try_get::<Option<i64>, _>("runner_stall_timeout_ms")
+            .unwrap_or(None),
         claude_session_id: row.try_get("claude_session_id")?,
         agent_session_id: row.try_get("agent_session_id").unwrap_or(None),
         transcript_path: row.try_get("transcript_path")?,
@@ -665,6 +679,19 @@ pub(crate) fn row_to_evidence(row: &SqliteRow) -> Result<OrchestratorEvidenceDto
 /// Code Logic（这个函数做什么）:
 ///     从 SqliteRow 读取 orchestrator_task_attempts 全字段并组装 OrchestratorTaskAttemptRow。
 pub(crate) fn row_to_attempt(row: &SqliteRow) -> Result<OrchestratorTaskAttemptRow, AppError> {
+    use crate::orchestrator::agent_adapter::types::{
+        AgentCompletionContract, AgentProviderId, DEFAULT_MAX_TURNS, DEFAULT_STALL_TIMEOUT_MS,
+    };
+    let provider_raw: Option<String> = row.try_get("runner_provider").unwrap_or(None);
+    let runner_provider = AgentProviderId::parse_legacy(provider_raw.as_deref())?
+        .as_str()
+        .to_string();
+    let max_turns: Option<i64> = row.try_get("max_turns").unwrap_or(None);
+    let stall_timeout_ms: Option<i64> = row.try_get("stall_timeout_ms").unwrap_or(None);
+    let completion_raw: Option<String> = row.try_get("completion_contract").unwrap_or(None);
+    let completion_contract = AgentCompletionContract::parse_legacy(completion_raw.as_deref())?
+        .as_str()
+        .to_string();
     Ok(OrchestratorTaskAttemptRow {
         id: row.try_get("id")?,
         task_id: row.try_get("task_id")?,
@@ -673,6 +700,11 @@ pub(crate) fn row_to_attempt(row: &SqliteRow) -> Result<OrchestratorTaskAttemptR
         session_id: row.try_get("session_id")?,
         prompt: row.try_get("prompt")?,
         status: row.try_get("status")?,
+        runner_provider,
+        agent_session_id: row.try_get("agent_session_id").unwrap_or(None),
+        max_turns: max_turns.unwrap_or(DEFAULT_MAX_TURNS),
+        stall_timeout_ms: stall_timeout_ms.unwrap_or(DEFAULT_STALL_TIMEOUT_MS),
+        completion_contract,
         created_at: row.try_get("created_at")?,
         completed_at: row.try_get("completed_at")?,
     })

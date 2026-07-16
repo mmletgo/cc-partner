@@ -9,6 +9,9 @@
 //!     限额和验证命令，并提供任务 Prompt 模板渲染 helper。
 
 use crate::error::AppError;
+use crate::orchestrator::agent_adapter::types::{
+    validate_max_turns, validate_stall_timeout_ms, AgentProviderId,
+};
 use crate::orchestrator::config::normalize_verification_command_items;
 use crate::orchestrator::models::OrchestratorWorkflowState;
 use crate::orchestrator::prompt::{
@@ -20,8 +23,6 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-const MAX_STALL_TIMEOUT_MS: i64 = 30 * 60 * 1000;
 
 /// 文件相对审阅快照发生漂移时的稳定 Conflict code。
 ///
@@ -77,10 +78,11 @@ pub enum WorkflowSource {
 /// Runner 限额配置。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     项目可以收紧或调整可见 Runner 的安全上限，但当前只允许 claudeCodeVisible provider。
+///     项目可以收紧或调整可见 Runner 的安全上限；provider 为内置
+///     `claudeCodeVisible|codexVisible|genericTerminal` 之一。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存 Runner provider、最大轮次和 stall timeout，resolver 会在应用覆盖项时做边界校验。
+///     保存 Runner provider wire 字符串、最大轮次和 stall timeout，resolver 做边界与 fail-closed 校验。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowRunnerConfig {
     pub provider: String,
@@ -827,37 +829,30 @@ fn apply_workflow_section(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Runner 覆盖项会影响自动化资源消耗，只能允许当前已实现的可见 Claude Code provider 和受控上限。
+///     Runner 覆盖项会影响自动化资源消耗，只能允许内置 adapter provider 与受控上限。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 provider 必须为 claudeCodeVisible，max_turns 必须在 1..=20，stall_timeout_ms 必须在安全范围内。
+///     校验 provider ∈ 内置三枚举，max_turns ∈ 1..=20，stall_timeout_ms ∈ 30s..=30min。
 fn apply_runner_section(
     runner: &mut WorkflowRunnerConfig,
     section: RunnerSection,
 ) -> Result<(), AppError> {
     if let Some(provider) = section.provider {
-        let provider = provider.trim();
-        if provider != "claudeCodeVisible" {
-            return Err(AppError::generic(format!(
-                "{WORKFLOW_FILE_NAME} runner.provider 只支持 claudeCodeVisible"
-            )));
-        }
-        runner.provider = provider.to_string();
+        let parsed = AgentProviderId::parse(provider.trim()).map_err(|err| {
+            AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err))
+        })?;
+        runner.provider = parsed.as_str().to_string();
     }
     if let Some(max_turns) = section.max_turns {
-        if !(1..=20).contains(&max_turns) {
-            return Err(AppError::generic(format!(
-                "{WORKFLOW_FILE_NAME} runner.max_turns 必须在 1..=20"
-            )));
-        }
+        validate_max_turns(max_turns).map_err(|err| {
+            AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err))
+        })?;
         runner.max_turns = max_turns;
     }
     if let Some(stall_timeout_ms) = section.stall_timeout_ms {
-        if !(30_000..=MAX_STALL_TIMEOUT_MS).contains(&stall_timeout_ms) {
-            return Err(AppError::generic(format!(
-                "{WORKFLOW_FILE_NAME} runner.stall_timeout_ms 必须在 30000..={MAX_STALL_TIMEOUT_MS}，收到 {stall_timeout_ms}"
-            )));
-        }
+        validate_stall_timeout_ms(stall_timeout_ms).map_err(|err| {
+            AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err))
+        })?;
         runner.stall_timeout_ms = stall_timeout_ms;
     }
     Ok(())
@@ -1299,6 +1294,53 @@ mod tests {
         let error = resolve_project_workflow(dir.path()).expect_err("超大 timeout 必须报错");
 
         assert!(error.to_string().contains("1800001"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Agent Adapter Platform 要求三个内置 provider 都能被 WORKFLOW parser 接受。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对 claudeCodeVisible/codexVisible/genericTerminal 解析并断言 provider.as_str 一致。
+    #[test]
+    fn workflow_accepts_all_built_in_agent_providers() {
+        for value in ["claudeCodeVisible", "codexVisible", "genericTerminal"] {
+            let resolved = parse_project_workflow(&format!(
+                "---\nrunner:\n  provider: {value}\n---\nPrompt"
+            ))
+            .unwrap_or_else(|e| panic!("provider {value} 应被接受: {e}"));
+            assert_eq!(resolved.runner.provider, value);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     未知 provider 必须 fail-closed，禁止静默落到 Claude。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     provider: unknownAgent 断言错误包含 runner.provider。
+    #[test]
+    fn workflow_rejects_unknown_agent_provider() {
+        let error = parse_project_workflow("---\nrunner:\n  provider: unknownAgent\n---\nBody")
+            .expect_err("未知 provider 必须失败");
+        assert!(error.to_string().contains("runner.provider"));
+        assert!(error.to_string().contains("unknownAgent"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     max_turns 0/21 与 stall 29999 必须拒绝。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     分别写入非法值并断言错误。
+    #[test]
+    fn workflow_rejects_out_of_range_runner_limits() {
+        let err0 = parse_project_workflow("---\nrunner:\n  max_turns: 0\n---\nBody")
+            .expect_err("max_turns 0");
+        assert!(err0.to_string().contains("max_turns"));
+        let err21 = parse_project_workflow("---\nrunner:\n  max_turns: 21\n---\nBody")
+            .expect_err("max_turns 21");
+        assert!(err21.to_string().contains("max_turns"));
+        let err_stall = parse_project_workflow("---\nrunner:\n  stall_timeout_ms: 29999\n---\nBody")
+            .expect_err("stall 29999");
+        assert!(err_stall.to_string().contains("29999"));
     }
 
     /// Business Logic（为什么需要这个函数）:

@@ -411,6 +411,8 @@ mod tests {
             external_state: None,
             external_labels: None,
             runner_provider: None,
+            runner_max_turns: None,
+            runner_stall_timeout_ms: None,
             claude_session_id: None,
             agent_session_id: None,
             transcript_path: None,

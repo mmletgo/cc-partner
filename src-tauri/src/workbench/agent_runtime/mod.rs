@@ -124,6 +124,7 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
         Err(e) => tracing::warn!("agent runtime collect alive terminals failed: {e}"),
     }
     while let Some(mutation) = rx.recv().await {
+        let occurred_at = mutation.occurred_at.clone();
         match reducer.apply(mutation).await {
             Ok(AgentReduceOutcome::Applied {
                 previous_phase,
@@ -136,6 +137,47 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                     "agent runtime mutation applied"
                 );
                 emit_agent_runtime_changed(&state, &row, Some(previous_phase));
+                // H1：OSC 生产路径 dual-write task.last_activity_at，供 stall watchdog 使用。
+                if let (Some(task_id), Some(attempt)) =
+                    (row.orchestrator_task_id.as_deref(), row.orchestrator_attempt)
+                {
+                    let activity_at = if row.last_activity_at.trim().is_empty() {
+                        occurred_at.as_str()
+                    } else {
+                        row.last_activity_at.as_str()
+                    };
+                    if let Err(err) = state
+                        .orchestrator_repo
+                        .touch_task_last_activity(
+                            task_id,
+                            attempt as i64,
+                            &row.terminal_session_id,
+                            activity_at,
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            task_id = %task_id,
+                            "touch_task_last_activity after OSC apply failed: {err}"
+                        );
+                    }
+                }
+                // HookEvent completion：runtime Completed 时按 attempt 冻结合同推进 Verifying。
+                if row.phase == AgentSessionPhase::Completed
+                    && row.orchestrator_task_id.is_some()
+                {
+                    if let Err(err) = crate::orchestrator::completion::maybe_complete_from_agent_runtime_completed(
+                        &state,
+                        &row,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            agent_id = %row.id,
+                            "HookEvent completion from agent runtime failed: {err}"
+                        );
+                    }
+                }
             }
             Ok(AgentReduceOutcome::Ignored(reason)) => {
                 tracing::debug!(reason, "agent runtime mutation ignored");

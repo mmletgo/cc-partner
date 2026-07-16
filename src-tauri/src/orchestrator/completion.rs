@@ -9,8 +9,10 @@
 
 use crate::commands::orchestrator::complete_orchestrator_agent_run_for_attempt;
 use crate::error::AppError;
+use crate::orchestrator::agent_adapter::types::AgentCompletionContract;
 use crate::orchestrator::prompt::DEV_DONE_SENTINEL;
 use crate::state::AppState;
+use crate::workbench::agent_runtime::{AgentSessionPhase, AgentSessionRuntime};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -143,31 +145,37 @@ pub fn spawn_maybe_handle_session_output_for_state(
     });
 }
 
+/// 解析 attempt 冻结的 completion 合同；legacy NULL → SentinelLine。
+///
 /// Business Logic（为什么需要这个函数）:
-///     完成哨兵只能通过 session_id 定位到当前 running attempt，然后复用手动完成命令的验证/交付 pipeline。
+///     不同 provider 不得共用哨兵自动完成语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     按 session_id 查询 running attempt；找到后把 task_id、attempt 和 session_id
-///     交给内部 completion helper 做 active runner 原子校验，attempt 完成标记由 helper 统一执行。
-async fn handle_session_completion(state: AppState, session_id: &str) -> Result<(), AppError> {
-    let Some(attempt) = state
-        .orchestrator_repo
-        .get_running_attempt_by_session(session_id)
-        .await?
-    else {
-        tracing::warn!(
-            session_id = %session_id,
-            "Orchestrator completion sentinel 未找到 running attempt"
-        );
-        return Ok(());
-    };
-    // A1：先更新统一 Agent runtime 为 Completed，再进入既有 Verifying pipeline（fail-closed）
+///     `AgentCompletionContract::parse_legacy`。
+fn completion_contract_for_attempt(
+    contract: &str,
+) -> Result<AgentCompletionContract, AppError> {
+    AgentCompletionContract::parse_legacy(Some(contract))
+}
+
+/// 进入 Verifying 的共享路径（哨兵 / Hook 完成共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     无论完成信号来自 sentinel 还是 HookEvent，都必须先 mark Agent Completed 再推进 task。
+///
+/// Code Logic（这个函数做什么）:
+///     mark_agent_completed_before_verifying → complete_orchestrator_agent_run_for_attempt。
+async fn complete_running_attempt_to_verifying(
+    state: &AppState,
+    task_id: &str,
+    attempt: i64,
+    session_id: &str,
+    agent_session_id: Option<&str>,
+) -> Result<(), AppError> {
     let at = chrono::Utc::now().to_rfc3339();
-    let task = state.orchestrator_repo.get_task(&attempt.task_id).await?;
-    let agent_session_id = task.agent_session_id.as_deref();
     let marked = crate::orchestrator::agent_runtime_bridge::mark_agent_completed_before_verifying_with_emit(
         &state.workbench_agent_session_repo,
-        Some(&state),
+        Some(state),
         agent_session_id,
         session_id,
         &at,
@@ -176,7 +184,7 @@ async fn handle_session_completion(state: AppState, session_id: &str) -> Result<
     .map_err(|error| {
         tracing::error!(
             session_id = %session_id,
-            task_id = %attempt.task_id,
+            task_id = %task_id,
             "Agent runtime completion mark 失败（拒绝进入 Verifying）: {error}"
         );
         error
@@ -189,22 +197,162 @@ async fn handle_session_completion(state: AppState, session_id: &str) -> Result<
             )));
         }
     }
-    complete_orchestrator_agent_run_for_attempt(
+    complete_orchestrator_agent_run_for_attempt(state, task_id, attempt, session_id).await?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     完成哨兵只能通过 session_id 定位到当前 running attempt，然后复用手动完成命令的验证/交付 pipeline。
+///
+/// Code Logic（这个函数做什么）:
+///     按 session_id 查询 running attempt；按冻结 `completion_contract` 分支：
+///     Manual/HookEvent 忽略哨兵自动完成；仅 SentinelLine 进入 Verifying。
+async fn handle_session_completion(state: AppState, session_id: &str) -> Result<(), AppError> {
+    let Some(attempt) = state
+        .orchestrator_repo
+        .get_running_attempt_by_session(session_id)
+        .await?
+    else {
+        tracing::warn!(
+            session_id = %session_id,
+            "Orchestrator completion sentinel 未找到 running attempt"
+        );
+        return Ok(());
+    };
+
+    let contract = completion_contract_for_attempt(&attempt.completion_contract)?;
+    match contract {
+        AgentCompletionContract::Manual => {
+            tracing::info!(
+                session_id = %session_id,
+                task_id = %attempt.task_id,
+                "completion_contract=manual：忽略哨兵自动完成"
+            );
+            return Ok(());
+        }
+        AgentCompletionContract::HookEvent => {
+            tracing::info!(
+                session_id = %session_id,
+                task_id = %attempt.task_id,
+                "completion_contract=hookEvent：忽略哨兵，等待 runtime Completed"
+            );
+            return Ok(());
+        }
+        AgentCompletionContract::SentinelLine => {}
+    }
+
+    let task = state.orchestrator_repo.get_task(&attempt.task_id).await?;
+    complete_running_attempt_to_verifying(
         &state,
         &attempt.task_id,
         attempt.attempt,
         &attempt.session_id,
+        task.agent_session_id.as_deref(),
     )
-    .await?;
-    Ok(())
+    .await
+}
+
+/// A1 runtime phase=Completed 时按 attempt 冻结合同触发自动完成（HookEvent）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Codex 等 provider 以 Hook/OSC Completed 为完成信号，不能依赖 DEV_DONE 哨兵。
+///
+/// Code Logic（这个函数做什么）:
+///     仅当 row 绑定 orchestrator task/attempt 且 attempt.completion_contract=hookEvent 时
+///     推进 Verifying；Manual 忽略；SentinelLine 由哨兵路径负责。
+pub async fn maybe_complete_from_agent_runtime_completed(
+    state: &AppState,
+    row: &AgentSessionRuntime,
+) -> Result<(), AppError> {
+    if row.phase != AgentSessionPhase::Completed {
+        return Ok(());
+    }
+    let Some(task_id) = row
+        .orchestrator_task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(attempt_num) = row.orchestrator_attempt else {
+        return Ok(());
+    };
+    let session_id = row.terminal_session_id.trim();
+    if session_id.is_empty() {
+        return Ok(());
+    }
+
+    let Ok(attempt_row) = state
+        .orchestrator_repo
+        .get_attempt(task_id, attempt_num as i64)
+        .await
+    else {
+        return Ok(());
+    };
+    let contract = completion_contract_for_attempt(&attempt_row.completion_contract)?;
+    match contract {
+        AgentCompletionContract::HookEvent => {}
+        AgentCompletionContract::Manual => {
+            tracing::debug!(
+                task_id = %task_id,
+                "completion_contract=manual：runtime Completed 不自动推进 Verifying"
+            );
+            return Ok(());
+        }
+        AgentCompletionContract::SentinelLine => {
+            // Claude 仍以哨兵为准，避免 Hook 与哨兵双触发
+            return Ok(());
+        }
+    }
+
+    // 若 attempt 已非 running（竞态），直接返回
+    if attempt_row.status != "running" {
+        return Ok(());
+    }
+
+    complete_running_attempt_to_verifying(
+        state,
+        task_id,
+        attempt_num as i64,
+        session_id,
+        Some(row.id.as_str()),
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DevDoneDetector;
+    use super::{completion_contract_for_attempt, DevDoneDetector};
+    use crate::orchestrator::agent_adapter::types::AgentCompletionContract;
     use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
     use crate::orchestrator::prompt::build_initial_task_prompt;
     use crate::orchestrator::prompt::DEV_DONE_SENTINEL;
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     冻结 completion_contract 必须可解析为三态，legacy 空值映射 SentinelLine。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 parse 分支与 legacy 默认。
+    #[test]
+    fn completion_contract_parse_branches() {
+        assert_eq!(
+            completion_contract_for_attempt("sentinelLine").unwrap(),
+            AgentCompletionContract::SentinelLine
+        );
+        assert_eq!(
+            completion_contract_for_attempt("hookEvent").unwrap(),
+            AgentCompletionContract::HookEvent
+        );
+        assert_eq!(
+            completion_contract_for_attempt("manual").unwrap(),
+            AgentCompletionContract::Manual
+        );
+        assert_eq!(
+            completion_contract_for_attempt("").unwrap(),
+            AgentCompletionContract::SentinelLine
+        );
+    }
 
     /// Business Logic（为什么需要这个函数）:
     ///     Prompt 回显安全测试需要构造真实 Orchestrator 任务行，确保 detector 面对完整 Runner Prompt。

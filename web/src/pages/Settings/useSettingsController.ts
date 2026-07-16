@@ -218,6 +218,8 @@ export interface UseSettingsControllerResult {
   handleAutomationFormChange: (nextForm: AutomationSettingsForm) => void;
   handleResetAutomationDefaults: () => void;
   handleSaveAutomation: () => Promise<void>;
+  /** owner adapter catalog（Settings 自动化 tab 只读展示） */
+  agentAdapters: import('@/lib/types').OrchestratorAgentAdapterCatalogItem[];
 
   // about / update
   versionInfo: VersionInfo | null;
@@ -451,6 +453,7 @@ export function useSettingsController(): UseSettingsControllerResult {
     automationError: form.automationError,
     automationSaved: form.automationSaved,
     automationLoadError: resources.automationLoadError,
+    agentAdapters: resources.agentAdapters,
     canResetAutomationDefaults: resources.canResetAutomationDefaults,
     handleAutomationFormChange: form.handleAutomationFormChange,
     handleResetAutomationDefaults: form.handleResetAutomationDefaults,

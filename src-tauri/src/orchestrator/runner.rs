@@ -13,12 +13,18 @@ use crate::commands::workbench::{
     local_write_workbench_session_input,
 };
 use crate::error::AppError;
+use crate::orchestrator::agent_adapter::{
+    resolve_task_runner_policy, AgentAdapterRegistry, AgentAvailability, AgentLaunchRequest,
+};
 use crate::orchestrator::claude_runtime::associate_claude_runtime;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorAttemptPhase, OrchestratorAttemptStatus, OrchestratorTaskRow, OrchestratorTaskStatus,
     EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
 };
 use crate::orchestrator::prompt::{build_repair_task_prompt, RepairPromptContext};
+use crate::orchestrator::runner_limits::{
+    check_next_attempt, is_max_turns_exceeded, EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED,
+};
 use crate::orchestrator::workflow::{resolve_project_workflow, PromptTaskContext};
 use crate::state::AppState;
 use std::path::Path;
@@ -166,6 +172,100 @@ pub async fn prepare_runner_attempt(
     {
         return state.orchestrator_repo.get_task(&task.id).await;
     }
+    // 创建 worktree/session 前冻结 runner policy：已挂账 task 字段优先，否则读 WORKFLOW。
+    let workflow_for_policy = resolve_project_workflow(Path::new(&project.path))?;
+    let runner_policy = resolve_task_runner_policy(
+        &workflow_for_policy.runner.provider,
+        workflow_for_policy.runner.max_turns,
+        workflow_for_policy.runner.stall_timeout_ms,
+        task.runner_provider.as_deref(),
+        task.runner_max_turns,
+        task.runner_stall_timeout_ms,
+    )?;
+    // max_turns 在创建 worktree/session/attempt 之前强制检查。
+    if let Err(error) = check_next_attempt(&runner_policy, attempt) {
+        if is_max_turns_exceeded(&error) {
+            // 仅 CAS 赢家写 evidence + 可选 attempt 终态，避免 lease 回收后重复 evidence。
+            if let Ok(Some(blocked)) = state
+                .orchestrator_repo
+                .try_transition_task_status(
+                    &task.id,
+                    OrchestratorTaskStatus::Preparing,
+                    OrchestratorTaskStatus::Blocked,
+                    Some(EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED),
+                )
+                .await
+            {
+                // 若上一 attempt 仍 running，CAS 到 TurnLimitReached（不存在则忽略）。
+                if attempt > 1 {
+                    let _ = state
+                        .orchestrator_repo
+                        .mark_attempt_turn_limit_reached(&task.id, attempt - 1)
+                        .await;
+                }
+                let _ = state
+                    .orchestrator_repo
+                    .add_evidence(
+                        &task.id,
+                        "runnerLimit",
+                        "Runner max turns exceeded",
+                        EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED,
+                        &format!(
+                            "next_attempt={attempt}\nmax_turns={}\nprovider={}",
+                            runner_policy.max_turns,
+                            runner_policy.provider.as_str()
+                        ),
+                    )
+                    .await;
+                return Ok(blocked);
+            }
+            return state.orchestrator_repo.get_task(&task.id).await;
+        }
+        return Err(error);
+    }
+
+    // owner probe：adapter 不可用时 fail-closed，禁止创建 worktree/session。
+    let adapter_registry = {
+        let config = state
+            .config
+            .read()
+            .map_err(|_| AppError::generic("读取 AppConfig 失败（锁损坏）"))?;
+        AgentAdapterRegistry::from_app_config(&config)
+    };
+    let probe = adapter_registry.probe_cached(runner_policy.provider)?;
+    if probe.availability != AgentAvailability::Available {
+        let reason = probe
+            .reason_code
+            .as_deref()
+            .unwrap_or("provider_unavailable");
+        if let Ok(Some(blocked)) = state
+            .orchestrator_repo
+            .try_transition_task_status(
+                &task.id,
+                OrchestratorTaskStatus::Preparing,
+                OrchestratorTaskStatus::Blocked,
+                Some(reason),
+            )
+            .await
+        {
+            let _ = state
+                .orchestrator_repo
+                .add_evidence(
+                    &task.id,
+                    "runnerAdapter",
+                    "Agent adapter unavailable",
+                    reason,
+                    &format!(
+                        "provider={}\navailability=unavailable\nreason={reason}",
+                        runner_policy.provider.as_str()
+                    ),
+                )
+                .await;
+            return Ok(blocked);
+        }
+        return state.orchestrator_repo.get_task(&task.id).await;
+    }
+
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
     if !state
         .orchestrator_repo
@@ -182,28 +282,30 @@ pub async fn prepare_runner_attempt(
         Some(DEFAULT_TERMINAL_ROWS),
     )
     .await?;
-    // A1：创建统一 Agent runtime（Launching），与 Claude legacy dual-write 并行一个版本
-    let agent_runtime =
-        match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner(
-            state,
-            &task.project_id,
-            Some(&worktree.id),
-            &session.id,
-            &task.id,
-            attempt as u32,
-        )
-        .await
-        {
-            Ok(row) => Some(row),
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    session_id = %session.id,
-                    "创建 Agent runtime 失败（继续 legacy Claude 路径）: {error}"
-                );
-                None
-            }
-        };
+    // A1/A3：按冻结 policy 的 provider 创建 Agent runtime（Launching）
+    let agent_runtime = match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner_with_provider(
+        state,
+        &task.project_id,
+        Some(&worktree.id),
+        &session.id,
+        &task.id,
+        attempt as u32,
+        runner_policy.provider,
+        None,
+    )
+    .await
+    {
+        Ok(row) => Some(row),
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.id,
+                session_id = %session.id,
+                provider = %runner_policy.provider.as_str(),
+                "创建 Agent runtime 失败（继续 adapter launch）: {error}"
+            );
+            None
+        }
+    };
     let agent_session_id = agent_runtime.as_ref().map(|r| r.id.clone());
     // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
     if !state
@@ -224,6 +326,7 @@ pub async fn prepare_runner_attempt(
             attempt,
             &claim_token,
             agent_session_id.as_deref(),
+            &runner_policy,
         )
         .await?;
     if running_task.status != OrchestratorTaskStatus::Running {
@@ -267,7 +370,9 @@ pub async fn prepare_runner_attempt(
             &worktree.id,
             &session.id,
             &prompt,
-            "running",
+            &runner_policy,
+            agent_session_id.as_deref(),
+            OrchestratorAttemptStatus::Running,
         )
         .await?;
     if let Some(current) =
@@ -292,7 +397,32 @@ pub async fn prepare_runner_attempt(
     {
         return Ok(current);
     }
-    local_write_workbench_session_input(state, session.id.clone(), format!("claude\n{prompt}\n"))
+    // claim 失配时绝不能向 terminal 注入任何 agent 输入（characterization）。
+    // registry 必须带 owner generic allowlist，与 catalog/probe 一致。
+    let adapter_registry = {
+        let config = state
+            .config
+            .read()
+            .map_err(|_| AppError::generic("读取 AppConfig 失败（锁损坏）"))?;
+        AgentAdapterRegistry::from_app_config(&config)
+    };
+    let adapter = adapter_registry.get(runner_policy.provider)?;
+    let launch_request = AgentLaunchRequest {
+        agent_session_id: agent_session_id.clone().unwrap_or_default(),
+        terminal_session_id: session.id.clone(),
+        cwd: worktree.path.clone(),
+        prompt: prompt.clone(),
+        native_session_id: None,
+        max_turns: runner_policy.max_turns.clamp(1, 20) as u32,
+        stall_timeout_ms: runner_policy.stall_timeout_ms.max(0) as u64,
+    };
+    let launch_plan = adapter.build_launch_plan(&launch_request)?;
+    if let Some(current) =
+        stop_runner_input_if_task_changed(state, &task.id, attempt, &session.id).await?
+    {
+        return Ok(current);
+    }
+    local_write_workbench_session_input(state, session.id.clone(), launch_plan.to_terminal_input())
         .await?;
 
     running_task = state
@@ -718,6 +848,21 @@ mod tests {
         assert_eq!(super::initial_runner_attempt(&retry).unwrap(), 2);
         let error = super::initial_runner_attempt(&invalid_retry).expect_err("missing worktree");
         assert!(error.to_string().contains("worktree"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     claim token 取消后不得向 terminal 写任何 adapter 输入。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 active_runner_matches 在 Abort 时为 false（输入路径前置守卫）。
+    #[test]
+    fn claim_token_cancellation_blocks_terminal_input_guard() {
+        let mut task = runner_task_row(Some("worktree-1"), 1);
+        task.status = OrchestratorTaskStatus::Running;
+        task.session_id = Some("session-1".to_string());
+        assert!(super::active_runner_matches(&task, 1, "session-1"));
+        task.status = OrchestratorTaskStatus::Aborted;
+        assert!(!super::active_runner_matches(&task, 1, "session-1"));
     }
 
     /// Business Logic（为什么需要这个函数）:

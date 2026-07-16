@@ -512,6 +512,9 @@ pub struct OrchestratorAutomationConfig {
     /// 是否通知 taskDone（默认关，避免交付成功刷屏）。
     #[serde(default)]
     pub notify_task_done: bool,
+    /// owner-local generic terminal allowlist（永不经 P2P 传输）。
+    #[serde(default)]
+    pub generic_terminal: Option<crate::orchestrator::agent_adapter::GenericTerminalConfig>,
 }
 
 impl Default for OrchestratorAutomationConfig {
@@ -536,6 +539,7 @@ impl Default for OrchestratorAutomationConfig {
             notify_blocked: true,
             notify_remote_outbox_failed: true,
             notify_task_done: false,
+            generic_terminal: None,
         }
     }
 }
@@ -940,6 +944,9 @@ fn validate_orchestrator_config_fields(
         }
     }
     orch.verification_commands = commands;
+    if let Some(generic) = &orch.generic_terminal {
+        generic.validate()?;
+    }
     Ok(())
 }
 

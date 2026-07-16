@@ -7,6 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     暴露 Orchestrator 的数据模型、状态机和 SQLite 仓储。
 
+pub mod agent_adapter;
 pub mod agent_runtime_bridge;
 pub mod browser_verification;
 pub mod claim;
@@ -23,6 +24,8 @@ pub mod remote_protocol;
 pub mod repo;
 pub mod review_diff;
 pub mod runner;
+pub mod runner_limits;
+pub mod runner_watchdog;
 pub mod scheduler;
 pub mod state;
 pub mod verifier;

@@ -9,23 +9,114 @@
 //!     写路径经 `AgentRuntimeReducer` 串行锁；测试覆盖 CAS 重试与 real mark Completed。
 
 use crate::error::AppError;
+use crate::orchestrator::agent_adapter::{
+    AgentAdapterRegistry, AgentLaunchRequest, AgentProviderId, NativeAgentEvent,
+};
 use crate::state::AppState;
 use crate::storage::WorkbenchAgentSessionRepo;
 use crate::workbench::agent_runtime::{
     emit_agent_runtime_changed, AgentReduceOutcome, AgentRuntimeMutation, AgentRuntimeReducer,
     AgentSessionPhase, AgentSessionRuntime, CreateActiveAgentSession,
 };
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Orchestrator 可见 Claude provider id（legacy dual-write 对齐）。
 pub const ORCHESTRATOR_CLAUDE_PROVIDER_ID: &str = "claudeCodeVisible";
 
-/// 为 Runner 新建的 terminal 创建 Launching Agent session。
+/// terminal activity 写库节流（避免 OSC 风暴）。
+const ACTIVITY_THROTTLE: Duration = Duration::from_millis(500);
+
+/// 每 agent_session_id 的最近 Working activity 写库时间（禁止跨 session 全局节流）。
+static LAST_ACTIVITY_WRITE_BY_SESSION: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+/// 从 AppState 构造带 owner generic allowlist 的 adapter registry。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     普通 Workbench 与 Orchestrator 共用 Agent runtime 真值；Runner 必须在 terminal 就绪后立刻建 row。
+///     bridge/resume 必须与 Runner/catalog 使用同一 generic 配置。
 ///
 /// Code Logic（这个函数做什么）:
-///     start_or_replace_active(Launching)；emit 旧 ended + 新 active；返回 runtime（含 id 供 task 持久化）。
+///     读 config.orchestrator.generic_terminal → AgentAdapterRegistry::from_app_config。
+fn registry_from_state(state: &AppState) -> Result<AgentAdapterRegistry, AppError> {
+    let config = state
+        .config
+        .read()
+        .map_err(|_| AppError::generic("读取 AppConfig 失败（锁损坏）"))?;
+    Ok(AgentAdapterRegistry::from_app_config(&config))
+}
+
+/// 判断 Working activity 是否应被 per-session 节流跳过。
+///
+/// Business Logic（为什么需要这个函数）:
+///     多任务并行时全局节流会拉长无关 session 的 liveness 间隙。
+///
+/// Code Logic（这个函数做什么）:
+///     仅当同一 agent_session_id 在 ACTIVITY_THROTTLE 内已写过 Working 时返回 true。
+fn should_throttle_working_activity(agent_session_id: &str) -> bool {
+    let Ok(guard) = LAST_ACTIVITY_WRITE_BY_SESSION.lock() else {
+        return false;
+    };
+    let Some(map) = guard.as_ref() else {
+        return false;
+    };
+    map.get(agent_session_id)
+        .is_some_and(|last| last.elapsed() < ACTIVITY_THROTTLE)
+}
+
+/// 记录某 agent_session 的 Working 写库时刻。
+///
+/// Business Logic（为什么需要这个函数）:
+///     与 should_throttle 配对维护 per-session 节流状态。
+///
+/// Code Logic（这个函数做什么）:
+///     插入/更新 HashMap 条目。
+fn mark_working_activity_written(agent_session_id: &str) {
+    if let Ok(mut guard) = LAST_ACTIVITY_WRITE_BY_SESSION.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(agent_session_id.to_string(), Instant::now());
+        // 防止测试/长跑无限增长：超过 256 时清空（节流仅 best-effort）。
+        if map.len() > 256 {
+            map.clear();
+            map.insert(agent_session_id.to_string(), Instant::now());
+        }
+    }
+}
+
+/// dual-write orchestrator task last_activity（stall watchdog 权威锚点之一）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     A1 agent session 活动必须推动 task.last_activity_at，否则 stall 误杀。
+///
+/// Code Logic（这个函数做什么）:
+///     若 row 绑定 orchestrator task/attempt，调用 touch_task_last_activity。
+async fn dual_write_task_activity_from_row(
+    state: &AppState,
+    row: &AgentSessionRuntime,
+    occurred_at: &str,
+) {
+    if let (Some(task_id), Some(attempt)) =
+        (row.orchestrator_task_id.as_deref(), row.orchestrator_attempt)
+    {
+        let at = if row.last_activity_at.trim().is_empty() {
+            occurred_at
+        } else {
+            row.last_activity_at.as_str()
+        };
+        let _ = state
+            .orchestrator_repo
+            .touch_task_last_activity(task_id, attempt as i64, &row.terminal_session_id, at)
+            .await;
+    }
+}
+
+/// 为 Runner 新建的 terminal 创建 Launching Agent session（默认 Claude provider）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     兼容旧调用点；新路径应传真实 provider。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `create_launching_agent_for_runner_with_provider(Claude)`。
 pub async fn create_launching_agent_for_runner(
     state: &AppState,
     project_id: &str,
@@ -33,6 +124,36 @@ pub async fn create_launching_agent_for_runner(
     terminal_session_id: &str,
     task_id: &str,
     attempt: u32,
+) -> Result<AgentSessionRuntime, AppError> {
+    create_launching_agent_for_runner_with_provider(
+        state,
+        project_id,
+        worktree_id,
+        terminal_session_id,
+        task_id,
+        attempt,
+        AgentProviderId::ClaudeCodeVisible,
+        None,
+    )
+    .await
+}
+
+/// 为 Runner 按 provider 创建 Launching Agent session。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Codex/generic attempt 必须把真实 provider_id 写入 A1 runtime，resume 才能选对 adapter。
+///
+/// Code Logic（这个函数做什么）:
+///     start_or_replace_active(Launching)；emit；返回 active runtime。
+pub async fn create_launching_agent_for_runner_with_provider(
+    state: &AppState,
+    project_id: &str,
+    worktree_id: Option<&str>,
+    terminal_session_id: &str,
+    task_id: &str,
+    attempt: u32,
+    provider: AgentProviderId,
+    resumed_from: Option<&str>,
 ) -> Result<AgentSessionRuntime, AppError> {
     let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
     let now = chrono::Utc::now().to_rfc3339();
@@ -44,11 +165,11 @@ pub async fn create_launching_agent_for_runner(
             terminal_session_id: terminal_session_id.to_string(),
             orchestrator_task_id: Some(task_id.to_string()),
             orchestrator_attempt: Some(attempt),
-            provider_id: ORCHESTRATOR_CLAUDE_PROVIDER_ID.to_string(),
+            provider_id: provider.as_str().to_string(),
             native_session_id: None,
             phase: AgentSessionPhase::Launching,
             started_at: now,
-            resumed_from_agent_session_id: None,
+            resumed_from_agent_session_id: resumed_from.map(str::to_string),
         })
         .await?;
     if let Some(ended) = &outcome.ended {
@@ -66,8 +187,8 @@ pub async fn create_launching_agent_for_runner(
 ///     transcript scanner / OSC 需要把 Working 等 phase 写入统一 runtime，同时保留 legacy 字段一个版本。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 active for terminal 或 by agent_session_id；apply CAS Working；
-///     若提供 native_session_id 则写入 runtime 行（不进 DTO）。
+///     per-session 500ms 节流；读 agent_session；apply CAS；可选 native_session_id（不进 DTO）；
+///     Applied 时 dual-write task.last_activity_at。
 pub async fn record_runner_activity(
     state: &AppState,
     agent_session_id: &str,
@@ -76,10 +197,23 @@ pub async fn record_runner_activity(
     native_session_id: Option<&str>,
     occurred_at: &str,
 ) -> Result<AgentReduceOutcome, AppError> {
+    if phase == AgentSessionPhase::Working && should_throttle_working_activity(agent_session_id) {
+        return Ok(AgentReduceOutcome::Ignored("activity_throttled"));
+    }
     let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
     let Some(current) = reducer.repo().get(agent_session_id).await? else {
         return Ok(AgentReduceOutcome::Ignored("agent_not_found"));
     };
+    // 旧 session 事件：terminal 上 active 已换人则忽略。
+    if let Ok(Some(active)) = reducer
+        .repo()
+        .get_active_for_terminal(terminal_session_id)
+        .await
+    {
+        if active.id != agent_session_id {
+            return Ok(AgentReduceOutcome::Ignored("stale_agent_session"));
+        }
+    }
     let mutation = AgentRuntimeMutation {
         agent_session_id: agent_session_id.to_string(),
         terminal_session_id: terminal_session_id.to_string(),
@@ -96,22 +230,94 @@ pub async fn record_runner_activity(
         ref row,
     } = outcome
     {
+        if phase == AgentSessionPhase::Working {
+            mark_working_activity_written(agent_session_id);
+        }
         emit_agent_runtime_changed(state, row, Some(previous_phase));
+        dual_write_task_activity_from_row(state, row, occurred_at).await;
     }
     Ok(outcome)
+}
+
+/// 经选定 adapter 归一化 native 事件后写入 A1 runtime。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Hook/OSC 入站必须走 provider adapter，不能假设 Claude 形状。
+///
+/// Code Logic（这个函数做什么）:
+///     registry.get(provider).normalize → handle_normalized_agent_event。
+pub async fn handle_native_agent_event(
+    state: &AppState,
+    provider: AgentProviderId,
+    event: NativeAgentEvent,
+) -> Result<AgentReduceOutcome, AppError> {
+    let registry = registry_from_state(state)?;
+    let adapter = registry.get(provider)?;
+    let mutation = adapter.normalize_runtime_event(event)?;
+    handle_normalized_agent_event(state, mutation).await
+}
+
+/// resume 当前 attempt：仅当 adapter 支持且 native id 可用时启动。
+///
+/// Business Logic（为什么需要这个函数）:
+///     repair/resume 必须使用原 provider，禁止静默换成 Claude。
+///
+/// Code Logic（这个函数做什么）:
+///     读 task policy provider；adapter.build_resume_plan；创建新 agent session 行（resumed_from）。
+pub async fn resume_runner_attempt(
+    state: &AppState,
+    task_id: &str,
+    terminal_session_id: &str,
+    prompt: &str,
+    native_session_id: Option<&str>,
+    previous_agent_session_id: Option<&str>,
+) -> Result<AgentSessionRuntime, AppError> {
+    let task = state.orchestrator_repo.get_task(task_id).await?;
+    let provider = AgentProviderId::parse_legacy(task.runner_provider.as_deref())?;
+    let registry = registry_from_state(state)?;
+    let adapter = registry.get(provider)?;
+    if !adapter.supports_resume() {
+        return Err(AppError::generic(format!(
+            "provider {} 不支持 resume",
+            provider.as_str()
+        )));
+    }
+    let request = AgentLaunchRequest {
+        agent_session_id: previous_agent_session_id.unwrap_or("").to_string(),
+        terminal_session_id: terminal_session_id.to_string(),
+        cwd: String::new(),
+        prompt: prompt.to_string(),
+        native_session_id: native_session_id.map(str::to_string),
+        max_turns: task.runner_max_turns.unwrap_or(1).clamp(1, 20) as u32,
+        stall_timeout_ms: task.runner_stall_timeout_ms.unwrap_or(300_000).max(0) as u64,
+    };
+    let _plan = adapter.build_resume_plan(&request)?;
+    create_launching_agent_for_runner_with_provider(
+        state,
+        &task.project_id,
+        task.worktree_id.as_deref(),
+        terminal_session_id,
+        task_id,
+        task.attempt.max(1) as u32,
+        provider,
+        previous_agent_session_id,
+    )
+    .await
 }
 
 /// 处理归一化 Agent event（OSC / Hook 入站后）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Orchestrator 与普通 terminal 共享 reducer 入口语义。
+///     Orchestrator 与普通 terminal 共享 reducer 入口语义；Applied 必须 dual-write task 活动。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `AgentRuntimeReducer::apply` 并在 Applied 时 emit。
+///     委托 `AgentRuntimeReducer::apply`；Applied 时 emit + touch_task_last_activity；
+///     phase=Completed 时尝试 HookEvent 自动完成。
 pub async fn handle_normalized_agent_event(
     state: &AppState,
     mutation: AgentRuntimeMutation,
 ) -> Result<AgentReduceOutcome, AppError> {
+    let occurred_at = mutation.occurred_at.clone();
     let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
     let outcome = reducer.apply(mutation).await?;
     if let AgentReduceOutcome::Applied {
@@ -120,6 +326,20 @@ pub async fn handle_normalized_agent_event(
     } = outcome
     {
         emit_agent_runtime_changed(state, row, Some(previous_phase));
+        dual_write_task_activity_from_row(state, row, &occurred_at).await;
+        if row.phase == AgentSessionPhase::Completed && row.orchestrator_task_id.is_some() {
+            if let Err(err) =
+                crate::orchestrator::completion::maybe_complete_from_agent_runtime_completed(
+                    state, row,
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_id = %row.id,
+                    "HookEvent completion from normalized event failed: {err}"
+                );
+            }
+        }
     }
     Ok(outcome)
 }
@@ -378,5 +598,64 @@ mod tests {
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("nativeSessionId"));
         assert!(!json.contains("claude-native-xyz"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     resume 必须保留原 provider，旧 session 事件不得覆盖新 active。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建 Codex Launching → 再 create resume from old id → 旧 id 事件应被 stale 忽略语义覆盖在 record 路径。
+    #[tokio::test]
+    async fn resume_uses_original_provider_and_old_session_event_is_ignored() {
+        let repo = fixture_repo().await;
+        let reducer = AgentRuntimeReducer::new(repo.clone());
+        let now = chrono::Utc::now().to_rfc3339();
+        let first = reducer
+            .start_or_replace_active(CreateActiveAgentSession {
+                id: Some("agent-old".into()),
+                project_id: "p".into(),
+                worktree_id: Some("wt".into()),
+                terminal_session_id: "term-resume".into(),
+                orchestrator_task_id: Some("task".into()),
+                orchestrator_attempt: Some(1),
+                provider_id: AgentProviderId::CodexVisible.as_str().to_string(),
+                native_session_id: Some("native-1".into()),
+                phase: AgentSessionPhase::Working,
+                started_at: now.clone(),
+                resumed_from_agent_session_id: None,
+            })
+            .await
+            .unwrap()
+            .active;
+        assert_eq!(first.provider_id, "codexVisible");
+
+        let resumed = reducer
+            .start_or_replace_active(CreateActiveAgentSession {
+                id: Some("agent-new".into()),
+                project_id: "p".into(),
+                worktree_id: Some("wt".into()),
+                terminal_session_id: "term-resume".into(),
+                orchestrator_task_id: Some("task".into()),
+                orchestrator_attempt: Some(1),
+                provider_id: AgentProviderId::CodexVisible.as_str().to_string(),
+                native_session_id: Some("native-1".into()),
+                phase: AgentSessionPhase::Launching,
+                started_at: now.clone(),
+                resumed_from_agent_session_id: Some("agent-old".into()),
+            })
+            .await
+            .unwrap()
+            .active;
+        assert_eq!(resumed.provider_id, "codexVisible");
+        assert_eq!(resumed.id, "agent-new");
+        let active = repo
+            .get_active_for_terminal("term-resume")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.id, "agent-new");
+        // 旧 session 已 inactive
+        let old = repo.get("agent-old").await.unwrap().unwrap();
+        assert!(!old.is_active);
     }
 }

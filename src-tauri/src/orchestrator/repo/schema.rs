@@ -69,6 +69,9 @@ impl OrchestratorRepo {
         ensure_column(pool, "orchestrator_tasks", "external_state", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "external_labels_json", "TEXT").await?;
         ensure_column(pool, "orchestrator_tasks", "runner_provider", "TEXT").await?;
+        // A3：任务级冻结的 runner policy 限额
+        ensure_column(pool, "orchestrator_tasks", "runner_max_turns", "INTEGER").await?;
+        ensure_column(pool, "orchestrator_tasks", "runner_stall_timeout_ms", "INTEGER").await?;
         ensure_column(pool, "orchestrator_tasks", "claude_session_id", "TEXT").await?;
         // A1：统一 Agent session 引用（与 claude_session_id dual-write 一个版本）
         ensure_column(pool, "orchestrator_tasks", "agent_session_id", "TEXT").await?;
@@ -109,6 +112,24 @@ impl OrchestratorRepo {
         ] {
             sqlx::query(statement).execute(pool).await?;
         }
+        // A3：attempt 级不可变 policy 快照列（旧库 CREATE IF NOT EXISTS 不会补列）
+        ensure_column(pool, "orchestrator_task_attempts", "runner_provider", "TEXT").await?;
+        ensure_column(pool, "orchestrator_task_attempts", "agent_session_id", "TEXT").await?;
+        ensure_column(pool, "orchestrator_task_attempts", "max_turns", "INTEGER").await?;
+        ensure_column(
+            pool,
+            "orchestrator_task_attempts",
+            "stall_timeout_ms",
+            "INTEGER",
+        )
+        .await?;
+        ensure_column(
+            pool,
+            "orchestrator_task_attempts",
+            "completion_contract",
+            "TEXT",
+        )
+        .await?;
         // 旧 outbox 表缺 state_version 时补列，默认 0。
         ensure_column(
             pool,

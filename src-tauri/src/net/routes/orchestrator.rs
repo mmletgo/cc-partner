@@ -24,7 +24,9 @@ use crate::commands::orchestrator::{
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
 };
+use crate::commands::orchestrator_adapters::{build_agent_adapter_catalog, OrchestratorAgentAdapterCatalog};
 use crate::config::AppConfig;
+use crate::orchestrator::agent_adapter::AgentAdapterRegistry;
 use crate::error::AppError;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
@@ -1141,6 +1143,37 @@ async fn discard_remote_outbox_for_context(
         &req.outbox_id,
     )
     .await
+}
+
+
+
+/// Business Logic（为什么需要这个函数）:
+///     远端/桌面需要 owner adapter 可用性，且不得泄露 executable/env。
+///
+/// Code Logic（这个函数做什么）:
+///     读 optional generic_terminal，build redacted catalog。
+pub async fn agent_adapters_catalog(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<OrchestratorAgentAdapterCatalog>> {
+    let generic = state
+        .config
+        .read()
+        .map_err(|_| {
+            P2pError::from_app_error(
+                AppError::generic("config 读锁中毒"),
+                &ctx,
+                "orchestrator.agent_adapters",
+            )
+        })?
+        .orchestrator
+        .generic_terminal
+        .clone();
+    let registry = AgentAdapterRegistry::new(generic);
+    let catalog = build_agent_adapter_catalog(&registry).map_err(|e| {
+        P2pError::from_app_error(e, &ctx, "orchestrator.agent_adapters")
+    })?;
+    Ok(Json(catalog))
 }
 
 #[cfg(test)]
