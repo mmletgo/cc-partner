@@ -1062,7 +1062,7 @@
         "src-tauri/src/workbench/agent_ledger/models.rs",
         "src-tauri/src/net/routes/workbench.rs"
       ],
-      "command": "cd src-tauri && cargo test --locked entry_dto_serialization_is_metadata_only --lib && cargo test --locked remote_summary_batch_has_no_entry_list --lib",
+      "command": "cd src-tauri && cargo test --locked --test agent_ledger_privacy && cargo test --locked remote_summary_batch_has_no_entry_list --lib",
       "ciJob": "quality",
       "platforms": [
         "rust"
