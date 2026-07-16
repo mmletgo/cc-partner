@@ -524,15 +524,86 @@ fn tmux_window_target(session_name: &str, window_id: &str) -> String {
     format!("{session_name}:{window_id}")
 }
 
+/// terminal / Agent adapter 共享的非敏感稳定上下文 ID。
+///
+/// Business Logic（为什么需要这个类型）:
+///     Hook/OSC 需要 project/worktree/terminal/owner 关联，但不得注入 control token 或凭据。
+///
+/// Code Logic（这个类型做什么）:
+///     四字段纯 ID；由 spawn 路径从 row + AppState 组装。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalAgentContextIds {
+    /// 项目 id
+    pub project_id: String,
+    /// worktree id（可空串）
+    pub worktree_id: String,
+    /// terminal session id
+    pub terminal_session_id: String,
+    /// owner 实例 id
+    pub owner_instance_id: String,
+}
+
 /// Business Logic（为什么需要这个函数）:
-///     cc-partner 是 GUI 应用，父进程可能没有真实终端环境或继承 `TERM=dumb`，会破坏 tmux 客户端协商。
+///     cc-partner 是 GUI 应用，父进程可能没有真实终端环境或继承 `TERM=dumb`，会破坏 tmux 客户端协商；
+///     Agent adapter 还需要稳定非敏感 ID 环境变量。
 ///
 /// Code Logic（这个函数做什么）:
-///     给工作台 PTY 命令显式设置 xterm 兼容 TERM 与真彩色环境。
-fn apply_workbench_terminal_env(command: &mut CommandBuilder) {
+///     设置 xterm TERM/COLORTERM/TERM_PROGRAM，以及可选的四条 `CC_PARTNER_*_ID`（无 token）。
+fn apply_workbench_terminal_env(
+    command: &mut CommandBuilder,
+    agent_ctx: Option<&TerminalAgentContextIds>,
+) {
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.env("TERM_PROGRAM", "cc-partner");
+    if let Some(ctx) = agent_ctx {
+        apply_agent_context_env(command, ctx);
+    }
+}
+
+/// 注入四条非敏感 Agent 上下文环境变量。
+///
+/// Business Logic（为什么需要这个函数）:
+///     tmux 与 raw PTY 的 pane/shell 必须能读到同一套 CC_PARTNER_*_ID，供 Hook 关联 session。
+///
+/// Code Logic（这个函数做什么）:
+///     仅设置 PROJECT/WORKTREE/TERMINAL_SESSION/OWNER_INSTANCE_ID；不设置任何 token/credential。
+fn apply_agent_context_env(command: &mut CommandBuilder, ctx: &TerminalAgentContextIds) {
+    command.env("CC_PARTNER_PROJECT_ID", &ctx.project_id);
+    command.env("CC_PARTNER_WORKTREE_ID", &ctx.worktree_id);
+    command.env(
+        "CC_PARTNER_TERMINAL_SESSION_ID",
+        &ctx.terminal_session_id,
+    );
+    command.env("CC_PARTNER_OWNER_INSTANCE_ID", &ctx.owner_instance_id);
+}
+
+/// 生成 tmux `new-session` / `new-window` 的 `-e KEY=VAL` 参数（Agent 上下文）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     tmux pane 内 shell 继承创建时的 -e 环境；attach 客户端 env 不会进入已有 pane。
+///
+/// Code Logic（这个函数做什么）:
+///     返回交错的 `-e` / `KEY=VAL` 列表，仅含四条 CC_PARTNER_*_ID。
+fn tmux_agent_context_env_args(ctx: &TerminalAgentContextIds) -> Vec<String> {
+    let pairs = [
+        ("CC_PARTNER_PROJECT_ID", ctx.project_id.as_str()),
+        ("CC_PARTNER_WORKTREE_ID", ctx.worktree_id.as_str()),
+        (
+            "CC_PARTNER_TERMINAL_SESSION_ID",
+            ctx.terminal_session_id.as_str(),
+        ),
+        (
+            "CC_PARTNER_OWNER_INSTANCE_ID",
+            ctx.owner_instance_id.as_str(),
+        ),
+    ];
+    let mut args = Vec::with_capacity(pairs.len() * 2);
+    for (k, v) in pairs {
+        args.push("-e".to_string());
+        args.push(format!("{k}={v}"));
+    }
+    args
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -785,6 +856,7 @@ fn create_tmux_window(
     window_name: &str,
     cwd: &str,
     shell_command: &str,
+    agent_ctx: Option<&TerminalAgentContextIds>,
 ) -> Result<String, AppError> {
     let tmux_cwd = tmux.project_cwd(cwd)?;
     let mut command = tmux.std_command();
@@ -816,6 +888,11 @@ fn create_tmux_window(
             "-F",
             "#{window_id}",
         ]);
+    }
+    if let Some(ctx) = agent_ctx {
+        for arg in tmux_agent_context_env_args(ctx) {
+            command.arg(arg);
+        }
     }
     if let Some(shell_command) = tmux.shell_command_for_new_session(shell_command) {
         command.arg(shell_command);
@@ -905,12 +982,35 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     }
 }
 
+/// 从 session row 与 owner 实例 id 组装 Agent 上下文。
+///
+/// Business Logic（为什么需要这个函数）:
+///     spawn/attach 需要把稳定 ID 注入 shell，Hook 才能关联 OSC。
+///
+/// Code Logic（这个函数做什么）:
+///     worktree 缺省为空串；owner_instance_id 原样拷贝。
+fn agent_context_from_row(
+    row: &WorkbenchSessionRow,
+    owner_instance_id: &str,
+) -> TerminalAgentContextIds {
+    TerminalAgentContextIds {
+        project_id: row.project_id.clone(),
+        worktree_id: row.worktree_id.clone().unwrap_or_default(),
+        terminal_session_id: row.id.clone(),
+        owner_instance_id: owner_instance_id.to_string(),
+    }
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     portable-pty 启动命令需要统一构造，普通 PTY 和 tmux attach 仅命令及参数不同。
 ///
 /// Code Logic（这个函数做什么）:
-///     根据 row.backend/backend_id 构造 CommandBuilder；tmux 行为是 attach，普通 PTY 直接启动 shell。
-fn command_builder_for_row(row: &WorkbenchSessionRow) -> CommandBuilder {
+///     根据 row.backend/backend_id 构造 CommandBuilder；注入 TERM 与 CC_PARTNER_*_ID。
+fn command_builder_for_row(
+    row: &WorkbenchSessionRow,
+    owner_instance_id: &str,
+) -> CommandBuilder {
+    let agent_ctx = agent_context_from_row(row, owner_instance_id);
     if row.backend == TMUX_BACKEND {
         if let (Some(tmux), Some(session_name)) =
             (available_tmux_command(), row.backend_id.as_deref())
@@ -927,12 +1027,12 @@ fn command_builder_for_row(row: &WorkbenchSessionRow) -> CommandBuilder {
             } else {
                 cmd.args(["attach-session", "-t", session_name]);
             }
-            apply_workbench_terminal_env(&mut cmd);
+            apply_workbench_terminal_env(&mut cmd, Some(&agent_ctx));
             return cmd;
         }
     }
     let mut cmd = CommandBuilder::new(row.command.clone());
-    apply_workbench_terminal_env(&mut cmd);
+    apply_workbench_terminal_env(&mut cmd, Some(&agent_ctx));
     cmd
 }
 
@@ -1409,6 +1509,22 @@ impl WorkbenchSessionRegistry {
             .len()
     }
 
+    /// 列出运行期 registry 中的全部 session id。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Agent runtime reconcile 需要知道内存中仍存活的 terminal。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     克隆 sessions map 的 key 集合。
+    pub fn registry_session_ids(&self) -> Vec<String> {
+        self.sessions
+            .lock()
+            .expect("workbench sessions 锁中毒")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     RAII 故障注入测试需要确认 Drop 后没有存活 child/fake 句柄。
     ///
@@ -1479,6 +1595,12 @@ impl WorkbenchSessionRegistry {
         let now = chrono::Utc::now().to_rfc3339();
         let (cols, rows) = initial_terminal_size(initial_cols, initial_rows);
         let terminal_command = default_terminal_command();
+        let agent_ctx = TerminalAgentContextIds {
+            project_id: project.id.clone(),
+            worktree_id: worktree_id.clone().unwrap_or_default(),
+            terminal_session_id: session_id.clone(),
+            owner_instance_id: state.config_runtime.owner_instance_id().to_string(),
+        };
         let (backend, backend_id, backend_window_id, command) = match available_tmux_command() {
             Some(tmux) => {
                 let worktree_tmux_id = tmux_worktree_session_name(
@@ -1493,6 +1615,7 @@ impl WorkbenchSessionRegistry {
                     &project.name,
                     &cwd,
                     &terminal_command,
+                    Some(&agent_ctx),
                 ) {
                     Ok(window_id) => {
                         let target = tmux_window_target(&worktree_tmux_id, &window_id);
@@ -1589,12 +1712,19 @@ impl WorkbenchSessionRegistry {
                         .unwrap_or_else(|| tmux_target_exists(&tmux, &session_name))
                 };
                 if !target_exists {
+                    let agent_ctx = TerminalAgentContextIds {
+                        project_id: row.project_id.clone(),
+                        worktree_id: row.worktree_id.clone().unwrap_or_default(),
+                        terminal_session_id: row.id.clone(),
+                        owner_instance_id: state.config_runtime.owner_instance_id().to_string(),
+                    };
                     match create_tmux_window(
                         &tmux,
                         &session_name,
                         &row.name,
                         &row.cwd,
                         &terminal_command,
+                        Some(&agent_ctx),
                     ) {
                         Ok(window_id) => {
                             let target = tmux_window_target(&session_name, &window_id);
@@ -1668,7 +1798,8 @@ impl WorkbenchSessionRegistry {
                 pixel_height: 0,
             })
             .map_err(|error| AppError::generic(format!("创建 PTY 失败: {error}")))?;
-        let mut cmd = command_builder_for_row(&row);
+        let mut cmd =
+            command_builder_for_row(&row, state.config_runtime.owner_instance_id());
         cmd.cwd(PathBuf::from(&row.cwd));
         let child = pair
             .slave
@@ -2710,7 +2841,7 @@ mod tests {
     #[test]
     fn workbench_terminal_env_overrides_dumb_parent_term() {
         let mut command = CommandBuilder::new("/bin/sh");
-        apply_workbench_terminal_env(&mut command);
+        apply_workbench_terminal_env(&mut command, None);
 
         assert_eq!(
             command.get_env("TERM").and_then(|value| value.to_str()),
@@ -2722,6 +2853,60 @@ mod tests {
                 .and_then(|value| value.to_str()),
             Some("truecolor")
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Agent Hook 依赖四条非敏感 CC_PARTNER_*_ID；不得注入 control/device token。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     apply 带 agent ctx 后断言四 ID 存在，且无 *TOKEN* / credential 键。
+    #[test]
+    fn workbench_terminal_env_includes_stable_partner_ids_without_tokens() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        let ctx = TerminalAgentContextIds {
+            project_id: "proj-1".to_string(),
+            worktree_id: "wt-1".to_string(),
+            terminal_session_id: "term-1".to_string(),
+            owner_instance_id: "owner-1".to_string(),
+        };
+        apply_workbench_terminal_env(&mut command, Some(&ctx));
+
+        assert_eq!(
+            command
+                .get_env("CC_PARTNER_PROJECT_ID")
+                .and_then(|v| v.to_str()),
+            Some("proj-1")
+        );
+        assert_eq!(
+            command
+                .get_env("CC_PARTNER_WORKTREE_ID")
+                .and_then(|v| v.to_str()),
+            Some("wt-1")
+        );
+        assert_eq!(
+            command
+                .get_env("CC_PARTNER_TERMINAL_SESSION_ID")
+                .and_then(|v| v.to_str()),
+            Some("term-1")
+        );
+        assert_eq!(
+            command
+                .get_env("CC_PARTNER_OWNER_INSTANCE_ID")
+                .and_then(|v| v.to_str()),
+            Some("owner-1")
+        );
+        assert!(command.get_env("CC_PARTNER_CONTROL_TOKEN").is_none());
+        assert!(command.get_env("CC_PARTNER_DEVICE_TOKEN").is_none());
+        assert!(command.get_env("CC_PARTNER_AUTH_TOKEN").is_none());
+
+        let tmux_args = tmux_agent_context_env_args(&ctx);
+        assert_eq!(tmux_args.len() % 2, 0);
+        for pair in tmux_args.chunks(2) {
+            assert_eq!(pair[0], "-e");
+            assert!(pair[1].starts_with("CC_PARTNER_"));
+            assert!(!pair[1].contains("TOKEN"));
+        }
+        assert!(tmux_args.iter().any(|a| a == "CC_PARTNER_PROJECT_ID=proj-1"));
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -650,6 +650,14 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                     }
                 });
             }
+            // A1：Agent runtime mutation worker + 启动对账
+            {
+                let agent_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::workbench::agent_runtime::spawn_owner_agent_runtime_worker(agent_state)
+                        .await;
+                });
+            }
             // 周期性 tombstone → deletion floor GC（与同步结束后的 best-effort 互补）
             {
                 let gc_state = state.clone();

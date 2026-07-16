@@ -9,11 +9,15 @@
 
 pub mod models;
 pub mod osc;
+pub mod reducer;
 
 pub use models::{
     AgentRuntimeMutation, AgentSessionPhase, AgentSessionRuntime, CreateActiveAgentSession,
 };
-pub use osc::{encode_agent_osc_frame, AgentOscDecodeResult, AgentOscDecoder, AgentOscDiagnostic};
+pub use osc::{encode_agent_osc_frame, AgentOscDecoder};
+pub use reducer::{
+    collect_alive_terminal_ids, AgentReduceOutcome, AgentRuntimeReducer,
+};
 
 use crate::state::AppState;
 use std::sync::{Mutex, OnceLock};
@@ -79,4 +83,52 @@ pub fn try_enqueue_agent_mutation(state: &AppState, mutation: AgentRuntimeMutati
 #[allow(dead_code)]
 pub fn set_agent_mutation_test_hook(hook: Option<Box<dyn Fn(AgentRuntimeMutation) + Send>>) {
     *AGENT_MUTATION_TEST_HOOK.lock().expect("hook lock") = hook;
+}
+
+/// 启动 owner Agent runtime worker：安装 ingress、对账 active、串行消费 mutation。
+///
+/// Business Logic（为什么需要这个函数）:
+///     HeadlessOwner 进程启动后必须恢复 Agent 真值：幽灵 active → Disconnected，
+///     并把 OSC 入站 mutation 串行写入 SQLite。
+///
+/// Code Logic（这个函数做什么）:
+///     install channel → reconcile（registry + running DB sessions）→ loop recv apply。
+pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
+    let Some(mut rx) = install_agent_mutation_ingress() else {
+        tracing::debug!("agent mutation ingress already installed; skip worker");
+        return;
+    };
+    let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
+    let registry_ids = state.workbench_sessions.registry_session_ids();
+    match collect_alive_terminal_ids(registry_ids, &state.workbench_session_repo).await {
+        Ok(alive) => {
+            let at = chrono::Utc::now().to_rfc3339();
+            match reducer.reconcile_active_sessions(&alive, &at).await {
+                Ok(n) if n > 0 => {
+                    tracing::info!("agent runtime reconcile disconnected {n} stale sessions");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("agent runtime reconcile failed: {e}"),
+            }
+        }
+        Err(e) => tracing::warn!("agent runtime collect alive terminals failed: {e}"),
+    }
+    while let Some(mutation) = rx.recv().await {
+        match reducer.apply(mutation).await {
+            Ok(AgentReduceOutcome::Applied(row)) => {
+                tracing::debug!(
+                    agent_id = %row.id,
+                    phase = row.phase.as_str(),
+                    version = row.version,
+                    "agent runtime mutation applied"
+                );
+                // T4 将在此处 emit workbench:agent-runtime
+                let _ = row;
+            }
+            Ok(AgentReduceOutcome::Ignored(reason)) => {
+                tracing::debug!(reason, "agent runtime mutation ignored");
+            }
+            Err(e) => tracing::warn!("agent runtime mutation apply error: {e}"),
+        }
+    }
 }
