@@ -376,6 +376,8 @@ mod tests {
         }
     }
 
+    /// Mini 仅测「本地 engine 边界」：RemoteRelay 不得在本机 start engine。
+    /// 生产路径 `start_browser_verification_for_state` 对 RemoteRelay 会 require_capability 后代理 owner。
     async fn start_on_mini(
         mini: &MiniState,
         req: StartBrowserVerificationReq,
@@ -387,6 +389,7 @@ mod tests {
         let target_url = match session.target {
             BrowserPreviewTarget::Local { target_url } => target_url,
             BrowserPreviewTarget::RemoteRelay { .. } => {
+                // 与生产「不启本地 engine」一致；完整 owner 代理见 remote_client + 集成路径
                 return Err(AppError::validation("browser_verification_remote_only"));
             }
         };
@@ -452,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_relay_does_not_start_local_engine() {
+    async fn remote_relay_preview_never_starts_local_engine_in_mini_boundary() {
         let dir = tempdir().unwrap();
         let mini = MiniState {
             previews: crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),

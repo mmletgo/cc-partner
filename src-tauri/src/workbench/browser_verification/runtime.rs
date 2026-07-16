@@ -375,16 +375,21 @@ impl BrowserVerificationService {
             let rid = run_id.clone();
             let turl = target_url;
             let cmds = commands;
-            let pdir = profile_dir;
+            let pdir = profile_dir.clone();
             let tok = cancel;
+            // 先在锁外 spawn，再立刻回填 handle；cancel 侧对 None 做短轮询，避免 TOCTOU 未注册就删 profile
             let join = tokio::spawn(async move {
                 handle.run_engine(rid, turl, cmds, pdir, tok).await;
             });
-            // 回填 JoinHandle，供 cancel await
             {
                 let mut tables = self.inner.tables.lock().await;
                 if let Some(rec) = tables.runs.get_mut(&run_id) {
+                    // 若 cancel 已置 Canceled 且已 take 过 None，仍挂上 handle 供后续 cleanup 等待
                     rec.task = Some(join);
+                } else {
+                    // run 已被清理：尽量 join 后删 profile
+                    let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
+                    delete_profile_dir(&profile_dir);
                 }
             }
         }
@@ -569,7 +574,7 @@ impl BrowserVerificationService {
     /// Code Logic（这个函数做什么）:
     ///     cancel token → await task join → 再删 profile，避免在活进程下删 user_data_dir。
     pub async fn cancel(&self, run_id: &str) -> Result<BrowserVerificationRun, AppError> {
-        let (handle, profile_dir) = {
+        let profile_dir = {
             let mut tables = self.inner.tables.lock().await;
             let rec = tables
                 .runs
@@ -584,8 +589,35 @@ impl BrowserVerificationService {
                 rec.session.last_activity_at = chrono::Utc::now().to_rfc3339();
                 rec.last_activity_instant = Instant::now();
             }
-            (rec.task.take(), rec.profile_dir.clone())
+            rec.profile_dir.clone()
         };
+        // 轮询 JoinHandle：start 可能尚未回填 task；最多等 ~1s 再 await
+        let mut handle: Option<JoinHandle<()>> = None;
+        for _ in 0..50 {
+            {
+                let mut tables = self.inner.tables.lock().await;
+                if let Some(rec) = tables.runs.get_mut(run_id) {
+                    if rec.task.is_some() {
+                        handle = rec.task.take();
+                        break;
+                    }
+                    // 已终态且无 task：engine 已结束
+                    if !matches!(
+                        rec.session.state,
+                        BrowserVerificationState::Queued | BrowserVerificationState::Running
+                            | BrowserVerificationState::Canceled
+                    ) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if handle.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         if let Some(h) = handle {
             let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
         }
