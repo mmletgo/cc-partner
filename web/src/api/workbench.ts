@@ -307,13 +307,14 @@ export const workbenchApi = {
         { slotKey: slotKey ?? null, layoutId: layoutId ?? null },
       ),
 
-    /** 校验 revision 并执行 safeAttach 列表项。 */
+    /** 校验 revision 并执行 safeAttach 列表项；返回改写后的 actions（失败 attach→skip）。 */
     apply: (plan: import('@/pages/Workbench/workspaceRestore').WorkspaceRestorePlan) =>
       invoke<{
         restoreId: string;
         status: string;
         restoredCount: number;
         skippedCount: number;
+        actions: import('@/pages/Workbench/workspaceRestore').WorkspaceRestoreAction[];
       }>('apply_workspace_restore_cmd', { plan }),
   },
 

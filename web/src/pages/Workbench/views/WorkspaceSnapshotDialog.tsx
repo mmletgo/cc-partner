@@ -9,6 +9,7 @@
  */
 
 import { useId, useState } from 'react';
+import type { ReactElement } from 'react';
 import { Dialog } from '@/components/primitives/Dialog';
 import { Button } from '@/components/primitives/Button';
 import { Input } from '@/components/primitives/Input';
@@ -33,7 +34,7 @@ export interface WorkspaceSnapshotDialogProps {
  */
 export function WorkspaceSnapshotDialog(
   props: WorkspaceSnapshotDialogProps,
-): JSX.Element {
+): ReactElement {
   const { open, onClose, snapshots, onSaveCurrent, onApply, onDelete } = props;
   const titleId = useId();
   const [name, setName] = useState('');

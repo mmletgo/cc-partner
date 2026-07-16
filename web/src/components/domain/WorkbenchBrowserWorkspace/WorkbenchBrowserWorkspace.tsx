@@ -10,6 +10,11 @@ export interface WorkbenchBrowserWorkspaceProps {
   project: WorkbenchProject | null;
   worktree: WorkbenchWorktree | null;
   onReturnToTerminal?: () => void;
+  /**
+   * preview target 变化时回写 layout autosave 用的 browserTargetUrl。
+   * null 表示当前无活跃 preview。
+   */
+  onBrowserTargetUrlChange?: (url: string | null) => void;
 }
 
 /**

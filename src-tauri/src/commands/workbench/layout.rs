@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use super::common::{
-    ensure_remote_project_context, get_project, proxy_workbench_if_gui, remote_inner_worktree_id,
+    ensure_remote_project_context, proxy_workbench_if_gui, remote_inner_worktree_id,
 };
 
 /// apply 请求体。

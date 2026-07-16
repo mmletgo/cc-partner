@@ -121,6 +121,8 @@ export function Workbench() {
   const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
   const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
   const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('files');
+  // Business Logic: workspace layout autosave 需要真实 browser target；由 BrowserWorkspace 回写。
+  const [browserTargetUrl, setBrowserTargetUrl] = useState<string | null>(null);
   const activeProjectIdRef = useRef<string | null>(null);
   const activeWorktreeIdRef = useRef<string | null>(null);
   const terminalPanelRef = useRef<HTMLElement | null>(null);
@@ -473,6 +475,38 @@ export function Workbench() {
     focusSession,
   });
 
+  // A8: 必须在 project/worktree effect 之前挂载，以便 suppressContextResetRef 可供那些 effect 读取。
+  const {
+    restoreSummary,
+    dismissRestoreNotice,
+    snapshotOpen,
+    setSnapshotOpen,
+    namedSnapshots,
+    openSnapshotDialog,
+    saveNamedSnapshot,
+    applyNamedSnapshot,
+    deleteNamedSnapshot,
+    suppressContextResetRef,
+  } = useWorkspaceSafeRestore({
+    projectsLoading,
+    projectsLength: projects.length,
+    activeProjectId,
+    activeWorktreeId,
+    activeSessionId,
+    workspaceView,
+    inspectorTab,
+    browserTargetUrl,
+    dirtyEditor: fileTabs.some((tab) => tab.dirty),
+    activeProjectIdRef,
+    activeWorktreeIdRef,
+    selectProjectFromDeepLink,
+    setActiveWorktreeId,
+    focusSession,
+    setWorkspaceView,
+    setInspectorTab,
+    setBrowserTargetUrl,
+  });
+
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
   }, [activeProjectId]);
@@ -495,10 +529,28 @@ export function Workbench() {
       // Business Logic: 文件域（含 open/save/format/sqlite/dir stale 守卫）由 fileController.resetForContext 统一重置。
       // Code Logic: resetForContext 忽略入参（仅作语义占位），不依赖当前 activeWorktreeId，因此本 effect 不订阅
       // activeWorktreeId 变化——避免 worktree 切换时重跑 loadSessions 把 terminal-status 事件更新覆盖回 running。
-      resetFileForContext(activeProjectId, null);
+      // A8: restore apply 窗口内 suppressContextResetRef 为 true 时，只加载 worktrees/sessions，
+      // 不清 worktree / 不强制 terminal，避免与 restore 顺序竞态。
+      const suppressReset = suppressContextResetRef.current;
+      if (!suppressReset) {
+        resetFileForContext(activeProjectId, null);
+      }
       if (!activeProjectId) {
-        setSessions([]);
-        setActiveSessionId(null);
+        if (!suppressReset) {
+          setSessions([]);
+          setActiveSessionId(null);
+          setWorktrees([]);
+          setActiveWorktreeId(null);
+          setCreateWorktreeOpen(false);
+          setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
+          setCreateWorktreeBranchSuffixDraft('');
+          setWorkspaceView('terminal');
+          setGitCommits([]);
+          setGitHistoryError(null);
+        }
+        return;
+      }
+      if (!suppressReset) {
         setWorktrees([]);
         setActiveWorktreeId(null);
         setCreateWorktreeOpen(false);
@@ -507,16 +559,7 @@ export function Workbench() {
         setWorkspaceView('terminal');
         setGitCommits([]);
         setGitHistoryError(null);
-        return;
       }
-      setWorktrees([]);
-      setActiveWorktreeId(null);
-      setCreateWorktreeOpen(false);
-      setCreateWorktreeBranchPrefix(DEFAULT_WORKTREE_BRANCH_PREFIX);
-      setCreateWorktreeBranchSuffixDraft('');
-      setWorkspaceView('terminal');
-      setGitCommits([]);
-      setGitHistoryError(null);
       void loadWorktrees(activeProjectId);
       void loadSessions(activeProjectId);
     });
@@ -525,6 +568,13 @@ export function Workbench() {
   useEffect(() => {
     return deferEffect(() => {
       // Business Logic: worktree 切换时文件域需要彻底重置（含 stale 守卫），随后按新 worktree 重新加载根目录。
+      // A8: restore apply 期间不强制 terminal，保留 plan 中的 workspaceView。
+      if (suppressContextResetRef.current) {
+        if (activeProjectId && activeWorktreeId) {
+          void loadDir('');
+        }
+        return;
+      }
       resetFileForContext(activeProjectId, activeWorktreeId);
       setWorkspaceView('terminal');
       setGitCommits([]);
@@ -630,34 +680,6 @@ export function Workbench() {
     '--prompt-panel-left': `${promptPanelPosition.left}px`,
     '--prompt-panel-top': `${promptPanelPosition.top}px`,
   } as CSSProperties;
-
-  const {
-    restoreSummary,
-    dismissRestoreNotice,
-    snapshotOpen,
-    setSnapshotOpen,
-    namedSnapshots,
-    openSnapshotDialog,
-    saveNamedSnapshot,
-    applyNamedSnapshot,
-    deleteNamedSnapshot,
-  } = useWorkspaceSafeRestore({
-    projectsLoading,
-    projectsLength: projects.length,
-    activeProjectId,
-    activeWorktreeId,
-    activeSessionId,
-    workspaceView,
-    inspectorTab,
-    dirtyEditor: fileTabs.some((tab) => tab.dirty),
-    activeProjectIdRef,
-    activeWorktreeIdRef,
-    selectProjectFromDeepLink,
-    setActiveWorktreeId,
-    focusSession,
-    setWorkspaceView,
-    setInspectorTab,
-  });
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1035,6 +1057,7 @@ export function Workbench() {
               project={activeProject}
               worktree={activeWorktree}
               onReturnToTerminal={handleReturnToTerminal}
+              onBrowserTargetUrlChange={setBrowserTargetUrl}
             />
           </div>
 

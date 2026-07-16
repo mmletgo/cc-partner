@@ -590,17 +590,18 @@ pub async fn safe_attach_workbench_session(
         ));
     }
 
-    // claim 防止并发重复 attach
-    let claimed = ctx.state.workbench_sessions.try_claim_restore(session_id);
+    // claim 防止并发重复 attach；未拿到 claim 时禁止 fallthrough（否则会无占位 attach，
+    // 并可能用 armed RestoreClaimGuard 误释放他人 claim）。
+    let mut claimed = ctx.state.workbench_sessions.try_claim_restore(session_id);
     if !claimed {
-        // 另一路正在 attach 或已完成
+        // 另一路正在 attach 或已完成：优先 reuse
         if ctx.registry_contains(session_id) {
             return Ok(SafeAttachResult {
                 session_id: session_id.to_string(),
                 reused: true,
             });
         }
-        // 等待短暂后再次检查（简单自旋避免死锁）
+        // 短暂自旋等待 holder 完成并进入 registry，或 claim 释放后由本路接手
         for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             if ctx.registry_contains(session_id) {
@@ -610,26 +611,25 @@ pub async fn safe_attach_workbench_session(
                 });
             }
             if ctx.state.workbench_sessions.try_claim_restore(session_id) {
+                claimed = true;
                 break;
             }
         }
-        if ctx.registry_contains(session_id) {
-            return Ok(SafeAttachResult {
-                session_id: session_id.to_string(),
-                reused: true,
-            });
-        }
-        if !ctx.state.workbench_sessions.try_claim_restore(session_id) {
-            // 最后一次机会：若仍无 claim 且无 registry，返回 unavailable
+        if !claimed {
             if ctx.registry_contains(session_id) {
                 return Ok(SafeAttachResult {
                     session_id: session_id.to_string(),
                     reused: true,
                 });
             }
+            // fail-closed：超时仍无 claim 且无 registry → busy，绝不无 claim 继续 attach
+            return Err(AppError::unavailable(
+                "safe_attach_claim_busy".to_string(),
+            ));
         }
     }
 
+    // 仅在确认 claimed 后构造 guard（Drop 才安全释放本路 claim）
     let mut guard = crate::workbench::sessions::RestoreClaimGuard::new(
         (*ctx.state.workbench_sessions).clone(),
         session_id.to_string(),
@@ -1248,6 +1248,175 @@ mod tests {
         assert_eq!(fixture.tmux_new_session_count(), 0);
         assert_eq!(fixture.terminal_write_count(), 0);
         assert_eq!(fixture.ctx.counters.agent_resume_count(), 0);
+    }
+
+    /// holder 持 claim 但不插入 registry，且 attach 慢于自旋窗口 → waiter 必须 busy，不得二次 attach。
+    #[tokio::test]
+    async fn concurrent_safe_attach_waiter_busy_when_claim_held_without_registry() {
+        let fixture = RestoreFixture::base()
+            .await
+            .persisted_tmux("s1")
+            .await
+            .tmux_target_present();
+        // 模拟慢 holder：占 claim 但不写 registry、不 attach
+        assert!(
+            fixture
+                .ctx
+                .state
+                .workbench_sessions
+                .try_claim_restore("s1"),
+            "holder must own claim"
+        );
+        let err = fixture.safe_attach("s1").await.expect_err("waiter must fail closed");
+        assert_eq!(err.code(), "safe_attach_claim_busy");
+        assert_eq!(
+            fixture.attach_client_count(),
+            0,
+            "waiter must not fallthrough to attach without claim"
+        );
+        assert_eq!(fixture.tmux_new_session_count(), 0);
+        assert_eq!(fixture.tmux_new_window_count(), 0);
+        // holder 仍持 claim（waiter 不得误 release）
+        assert!(
+            !fixture
+                .ctx
+                .state
+                .workbench_sessions
+                .try_claim_restore("s1"),
+            "holder claim must still be held"
+        );
+        fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .release_restore_claim("s1");
+    }
+
+    /// preflight skip missing tmux 后，list/restore 路径也不得 create window。
+    #[tokio::test]
+    async fn preflight_skip_then_list_restore_never_creates_tmux_window() {
+        crate::workbench::sessions::reset_create_tmux_window_call_count_for_test();
+        // 使用全局唯一 backend_id，避免本机遗留 tmux session 让 restore 误命中
+        let unique_backend = format!("cp-a8-missing-{}", uuid::Uuid::new_v4());
+        let fixture = RestoreFixture::base().await;
+        let row = WorkbenchSessionRow {
+            id: "s1".to_string(),
+            project_id: "p1".to_string(),
+            worktree_id: Some("w1".to_string()),
+            name: "demo".to_string(),
+            command: "tmux attach".to_string(),
+            cwd: "/tmp/demo".to_string(),
+            status: "running".to_string(),
+            cols: 80,
+            rows: 24,
+            started_at: "t".to_string(),
+            exited_at: None,
+            exit_code: None,
+            backend: "tmux".to_string(),
+            backend_id: Some(unique_backend.clone()),
+            backend_window_id: Some("@99991".to_string()),
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        };
+        fixture
+            .ctx
+            .state
+            .workbench_session_repo
+            .upsert(&row)
+            .await
+            .unwrap();
+        // preflight mock：target 不存在 → skip
+        let fixture = fixture.tmux_target_absent();
+        // layout 指向 s1
+        let mut layout = fixture.layout.clone();
+        layout.active_session_id = Some("s1".to_string());
+        let plan = preflight_workspace_restore(&fixture.ctx, &layout)
+            .await
+            .unwrap();
+        assert!(
+            plan.actions.iter().any(|a| {
+                a.target == "session"
+                    && a.outcome == WorkspaceRestoreOutcome::Skip
+                    && a.reason() == Some(RestoreSkipReason::TmuxTargetMissing)
+            }),
+            "preflight must skip missing tmux session"
+        );
+        assert_eq!(fixture.tmux_new_session_count(), 0);
+        assert_eq!(fixture.tmux_new_window_count(), 0);
+
+        // 模拟 project open → sessions.list → restore_persisted_sessions → restore()
+        // restore() 走真实 tmux 探测；唯一 backend_id 必不存在 → skip，禁止 create
+        let project = fixture
+            .ctx
+            .state
+            .workbench_project_repo
+            .get("p1")
+            .await
+            .unwrap()
+            .expect("project");
+        let restore_err = fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .restore(
+                fixture.ctx.state.clone(),
+                project,
+                row,
+                Some("main".to_string()),
+            )
+            .expect_err("missing target must skip, not create");
+        let code = restore_err.code();
+        assert!(
+            code == "tmux_target_missing" || code == "tmux_unavailable",
+            "unexpected restore error code: {code}"
+        );
+        assert_eq!(
+            crate::workbench::sessions::create_tmux_window_call_count_for_test(),
+            0,
+            "list restore path must not call create_tmux_window"
+        );
+        assert_eq!(fixture.attach_client_count(), 0);
+        assert!(!fixture.ctx.state.workbench_sessions.contains("s1"));
+    }
+
+    /// raw PTY 持久化 session 在 list restore 路径必须 skip，不得 spawn 新 shell。
+    #[tokio::test]
+    async fn list_restore_skips_raw_pty_without_create() {
+        crate::workbench::sessions::reset_create_tmux_window_call_count_for_test();
+        let fixture = RestoreFixture::base().await.persisted_raw_pty("s-raw").await;
+        let row = fixture
+            .ctx
+            .state
+            .workbench_session_repo
+            .get("s-raw")
+            .await
+            .unwrap()
+            .expect("row");
+        let project = fixture
+            .ctx
+            .state
+            .workbench_project_repo
+            .get("p1")
+            .await
+            .unwrap()
+            .expect("project");
+        let err = fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .restore(
+                fixture.ctx.state.clone(),
+                project,
+                row,
+                Some("main".to_string()),
+            )
+            .expect_err("raw pty must skip");
+        assert_eq!(err.code(), "restore_skips_raw_pty");
+        assert_eq!(
+            crate::workbench::sessions::create_tmux_window_call_count_for_test(),
+            0
+        );
+        assert!(!fixture.ctx.state.workbench_sessions.contains("s-raw"));
     }
 
     #[tokio::test]

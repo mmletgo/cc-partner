@@ -9,6 +9,7 @@
  */
 
 import { useId, useState } from 'react';
+import type { ReactElement } from 'react';
 import { Button } from '@/components/primitives/Button';
 import type { WorkspaceRestoreSummary } from '../workspaceRestore';
 import { formatRestoreNotice } from '../workspaceRestore';
@@ -28,7 +29,7 @@ export interface WorkspaceRestoreNoticeProps {
  */
 export function WorkspaceRestoreNotice(
   props: WorkspaceRestoreNoticeProps,
-): JSX.Element | null {
+): ReactElement | null {
   const { summary, onDismiss } = props;
   const [expanded, setExpanded] = useState(false);
   const titleId = useId();

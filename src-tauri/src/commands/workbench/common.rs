@@ -483,11 +483,13 @@ pub(crate) async fn merged_session_dtos(
 
 /// Business Logic（为什么需要这个函数）:
 ///     应用重启后，进入工作台项目时应自动恢复之前打开的终端 tab 和可重连上下文。
+///     A8：list/open 路径默认 **skip-missing**——仅 attach 已存在 tmux target；
+///     缺失 target / raw PTY 不创建 shell（只有用户显式新建终端才 `create_tmux_window`）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     读取持久化会话；用 `try_claim_restore` 原子占位避免并发重复恢复（Finding 5）；
-///     项目存在时补齐可读 worktree 名再调用 registry.restore，成功后写回最新 row；
-///     无论成功/失败都释放占位；项目缺失则删除孤儿会话。
+///     项目存在时补齐可读 worktree 名再调用 registry.restore（内部 skip-missing），
+///     成功后写回最新 row；失败标 disconnected；无论成功/失败都释放占位；项目缺失则删除孤儿会话。
 pub(crate) async fn restore_persisted_sessions(
     state: &AppState,
     project_id: Option<&str>,
