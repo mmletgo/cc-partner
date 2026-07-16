@@ -29,7 +29,7 @@ use crate::hotkey::{
 use crate::models::transfer::{
     LocalTransferOpenTarget, TransferOpenAction, TransferOperationStatus, TransferTaskDto,
 };
-use crate::orchestrator::models::{OperationalNotificationSnapshot, OrchestratorReviewDiff};
+use crate::orchestrator::models::OperationalNotificationSnapshot;
 use crate::orchestrator::workflow::WorkflowDocument;
 use crate::workbench::operation_ledger::MutationTransportClass;
 use serde::de::DeserializeOwned;
@@ -180,17 +180,6 @@ struct ControlRuntimeSnapshotBody {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ControlOrchestratorDeliverReviewedBody {
-    control_token: String,
-    project_id: String,
-    task_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expected_review_digest: Option<String>,
-}
-
-/// orchestrator review-diff control body。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ControlOrchestratorReviewDiffBody {
     control_token: String,
     project_id: String,
     task_id: String,
@@ -803,18 +792,16 @@ impl BackendControlClient {
     ///     GuiClient 不得在本进程跑 commit/push/merge 或持有 delivery lock；必须代理到 sidecar。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     POST `orchestrator/deliver-reviewed`；超时 360s；mutation 不自动重试；透传 expectedReviewDigest。
+    ///     POST `orchestrator/deliver-reviewed`；超时 360s；mutation 不自动重试。
     pub async fn deliver_reviewed_orchestrator_task(
         &self,
         project_id: &str,
         task_id: &str,
-        expected_review_digest: Option<&str>,
     ) -> Result<OrchestratorTaskViewDto, AppError> {
         let body = ControlOrchestratorDeliverReviewedBody {
             control_token: self.control_token.clone(),
             project_id: project_id.to_string(),
             task_id: task_id.to_string(),
-            expected_review_digest: expected_review_digest.map(str::to_string),
         };
         match self
             .send_once(
@@ -822,36 +809,6 @@ impl BackendControlClient {
                 &body,
                 ORCHESTRATOR_DELIVER_TIMEOUT,
             )
-            .await
-        {
-            ControlCallOutcome::Ok(v) => Ok(v),
-            ControlCallOutcome::Failed(e) => Err(e),
-            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
-                "control_response_uncertain: {e}"
-            ))),
-        }
-    }
-
-    /// 经 control API 在 owner 侧采集 review diff。
-    ///
-    /// Business Logic（为什么需要这个函数）:
-    ///     GuiClient 不得本进程读 Git worktree；digest 与 Human Review 权威在 sidecar。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     POST `orchestrator/review-diff`；git worktree 读可能超过 QUERY_TIMEOUT，
-    ///     用 60s send_once 且不自动重试（与 prepare-open 同类只读副作用语义）。
-    pub async fn get_orchestrator_review_diff(
-        &self,
-        project_id: &str,
-        task_id: &str,
-    ) -> Result<OrchestratorReviewDiff, AppError> {
-        let body = ControlOrchestratorReviewDiffBody {
-            control_token: self.control_token.clone(),
-            project_id: project_id.to_string(),
-            task_id: task_id.to_string(),
-        };
-        match self
-            .send_once("orchestrator/review-diff", &body, Duration::from_secs(60))
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),

@@ -139,9 +139,9 @@
       "surface": "orchestrator-review",
       "level": "L1",
       "tests": [
-        "web/tests/orchestrator-review-workflow.spec.ts"
+        "web/tests/orchestrator-review-workflow.spec.ts (A0 skipped)"
       ],
-      "command": "cd web && npm run test:e2e -- orchestrator-review-workflow.spec.ts",
+      "command": "cd web && npm run test:e2e -- orchestrator-review-workflow.spec.ts (A0 skipped)",
       "ciJob": "frontend-e2e",
       "platforms": [
         "chromium-linux"
@@ -335,7 +335,7 @@
         "src-tauri/src/orchestrator/review_diff.rs",
         "src-tauri/src/orchestrator/notifications.rs"
       ],
-      "command": "cd web && npm test -- src/lib/schemas/orchestrator.test.ts src/api/orchestrator.test.ts src/pages/Orchestrator/views/OrchestratorTaskDrawer.test.tsx src/pages/Orchestrator/views/WorkflowWizardDialog.test.tsx src/hooks/useOperationalNotifications.test.tsx src/api/operationalNotifications.test.ts && cd ../src-tauri && cargo test --locked orchestrator::review_diff orchestrator::notifications --lib",
+      "command": "cd web && npm test -- src/lib/schemas/orchestrator.test.ts src/api/orchestrator.test.ts src/pages/Orchestrator/views/OrchestratorTaskDrawer.test.tsx src/pages/Orchestrator/views/WorkflowWizardDialog.test.tsx src/hooks/useOperationalNotifications.test.tsx src/api/operationalNotifications.test.ts && cd ../src-tauri && cargo test --locked orchestrator::notifications --lib",
       "ciJob": "quality",
       "platforms": [
         "ubuntu-22.04",

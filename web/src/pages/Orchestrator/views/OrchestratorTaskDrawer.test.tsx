@@ -1,73 +1,43 @@
 // @vitest-environment jsdom
 /**
- * OrchestratorTaskDrawer review Changes / Deliver 合同测试
- *
- * Business Logic（为什么需要这个测试）:
- *   Human Review 抽屉在 diff error 时必须保留 Evidence 与 Rework，Deliver 可见但禁用；
- *   防止错误态吞掉审阅动作。
- *
- * Code Logic（这个测试做什么）:
- *   jsdom 渲染纯 props 抽屉；断言 error/alert、Deliver disabled、Rework enabled、Evidence tab。
+ * OrchestratorTaskDrawer 合同测试（A0：无 Changes / review diff 产品面）
  */
-import { afterEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { OrchestratorTask } from '@/lib/types';
-import {
-  OrchestratorTaskDrawer,
-  type OrchestratorTaskDrawerProps,
-} from './OrchestratorTaskDrawer';
+import { OrchestratorTaskDrawer } from './OrchestratorTaskDrawer';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, opts?: Record<string, unknown>) => {
+    t: (key: string) => {
       const map: Record<string, string> = {
-        'orchestrator:detail.deliver': '交付',
-        'orchestrator:detail.requestRework': '要求返工',
-        'orchestrator:tabs.evidence': 'Evidence',
         'orchestrator:tabs.summary': 'Summary',
-        'orchestrator:tabs.changes': 'Changes',
-        'orchestrator:tabs.ariaLabel': 'Task detail sections',
+        'orchestrator:tabs.evidence': 'Evidence',
+        'orchestrator:tabs.ariaLabel': 'Task tabs',
+        'orchestrator:detail.drawerLabel': 'Task',
+        'orchestrator:detail.close': 'Close',
+        'orchestrator:detail.title': 'Detail',
+        'orchestrator:detail.subtitle': 'Subtitle',
+        'orchestrator:detail.goal': 'Goal',
+        'orchestrator:detail.acceptanceCriteria': 'Acceptance',
+        'orchestrator:detail.localTask': 'Local',
+        'orchestrator:detail.unknown': 'Unknown',
+        'orchestrator:detail.unassigned': 'Unassigned',
+        'orchestrator:detail.workflowState': 'Workflow',
+        'orchestrator:detail.legacyStatus': 'Status',
+        'orchestrator:detail.runState': 'Run',
+        'orchestrator:detail.attemptPhase': 'Phase',
+        'orchestrator:detail.branch': 'Branch',
+        'orchestrator:detail.attempt': 'Attempt',
+        'orchestrator:detail.activeSession': 'Session',
         'orchestrator:evidence.title': 'Evidence',
-        'orchestrator:review.retry': '重试加载',
-        'orchestrator:detail.drawerLabel': '当前任务',
-        'orchestrator:detail.close': '关闭任务详情',
-        'orchestrator:detail.title': '任务详情',
-        'orchestrator:detail.subtitle': 'subtitle',
-        'orchestrator:detail.goal': '目标',
-        'orchestrator:detail.acceptanceCriteria': '验收标准',
-        'orchestrator:detail.localTask': '本机任务',
-        'orchestrator:workflow.humanReview': '人工复核',
-        'orchestrator:run.idle': '空闲',
-        'orchestrator:status.done': '已完成',
-        'orchestrator:detail.workflowState': '工作流状态',
-        'orchestrator:detail.legacyStatus': '兼容状态',
-        'orchestrator:detail.runState': '运行状态',
-        'orchestrator:detail.attemptPhase': '尝试阶段',
-        'orchestrator:detail.unknown': '未知',
-        'orchestrator:detail.branch': '分支',
-        'orchestrator:detail.attempt': '尝试次数',
-        'orchestrator:detail.noAttempt': '尚未开始',
-        'orchestrator:detail.activeSession': '执行现场',
-        'orchestrator:detail.unassigned': '未绑定',
-        'orchestrator:detail.runnerProvider': 'Runner',
-        'orchestrator:detail.claudeSession': 'Claude 会话',
-        'orchestrator:detail.transcript': '转录文件',
-        'orchestrator:detail.createdAt': '创建时间',
-        'orchestrator:detail.updatedAt': '更新时间',
-        'orchestrator:detail.lastActivity': '最后活动',
-        'orchestrator:detail.lastEvent': '最后事件',
-        'orchestrator:detail.lastMessage': '最后消息',
-        'orchestrator:evidence.subtitle': 'subtitle',
-        'orchestrator:evidence.loading': 'loading',
-        'orchestrator:evidence.emptyTitle': 'empty',
-        'orchestrator:evidence.emptyBody': 'empty body',
+        'orchestrator:evidence.subtitle': 'Evidence list',
+        'orchestrator:evidence.loading': 'Loading evidence',
+        'orchestrator:detail.deliver': 'Deliver',
+        'orchestrator:detail.deliverDisabled': 'Deliver unavailable',
       };
-      if (key === 'orchestrator:review.fileSummary' && opts) {
-        return `+${opts.additions} / -${opts.deletions}`;
-      }
       return map[key] ?? key;
     },
-    i18n: { language: 'zh' },
   }),
 }));
 
@@ -76,109 +46,82 @@ afterEach(() => {
 });
 
 /**
- * Business Logic（为什么需要这个函数）:
- *   抽屉测试需要稳定的 Human Review 任务 DTO。
+ * Business Logic（为什么需要这个夹具）:
+ *   Drawer 测试需要最小合法 task。
  *
  * Code Logic（这个函数做什么）:
- *   返回 done + humanReview + idle 的 OrchestratorTask。
+ *   返回 Human Review 态 OrchestratorTask 桩。
  */
-function makeHumanReviewTask(): OrchestratorTask {
+function makeTask(): OrchestratorTask {
   return {
     id: 'task-1',
     projectId: 'project-1',
-    title: 'Review me',
-    goal: 'Ship feature',
-    acceptanceCriteria: 'Tests pass',
-    status: 'done',
+    title: 'Review task',
+    goal: 'Goal text',
+    acceptanceCriteria: 'Accept',
+    priority: 0,
+    status: 'waiting_human',
     workflowState: 'humanReview',
     runState: 'idle',
     attemptPhase: null,
-    source: 'internal',
-    externalId: null,
-    externalIdentifier: null,
-    externalUrl: null,
-    externalState: null,
-    externalLabels: null,
-    runnerProvider: null,
+    attempt: 1,
+    worktreeId: null,
+    sessionId: null,
+    branchName: null,
+    baseBranch: null,
+    blockedReason: null,
+    lastRuntimeMessage: null,
     claudeSessionId: null,
     transcriptPath: null,
-    runtimeStartedAt: null,
-    lastActivityAt: null,
-    lastRuntimeEvent: null,
-    lastRuntimeMessage: null,
-    priority: 0,
-    branchName: 'agent/task-1',
-    worktreeId: 'wt-1',
-    sessionId: 'sess-1',
-    blockedReason: null,
-    attempt: 1,
-    createdAt: '2026-07-14T00:00:00.000Z',
-    updatedAt: '2026-07-14T00:00:00.000Z',
+    source: null,
+    externalId: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
     startedAt: null,
-    finishedAt: null,
-  };
+    completedAt: null,
+    stateVersion: 1,
+  } as OrchestratorTask;
 }
 
 /**
- * Business Logic（为什么需要这个函数）:
- *   纯视图测试只需覆盖目标 props，其余用稳定默认值。
+ * Business Logic（为什么需要这个夹具）:
+ *   为 Drawer 提供默认 props。
  *
  * Code Logic（这个函数做什么）:
- *   合并 partial override 到完整 OrchestratorTaskDrawerProps。
+ *   返回最小可渲染 props，可 override。
  */
-function makeTaskDrawerProps(
-  overrides: Partial<OrchestratorTaskDrawerProps> = {},
-): OrchestratorTaskDrawerProps {
-  const task = overrides.selectedTask ?? makeHumanReviewTask();
+function baseProps(overrides: Record<string, unknown> = {}) {
   return {
-    selectedTask: task,
+    selectedTask: makeTask(),
     selectedRenderableTask: {
-      origin: 'local',
-      task,
-      view: { origin: 'local', task },
-      deviceId: null,
-      deviceName: null,
+      origin: 'local' as const,
+      task: makeTask(),
+      view: { origin: 'local' as const, task: makeTask() },
     },
     selectedTaskCanStart: false,
     selectedTaskCanComplete: false,
     selectedTaskCanRequestRework: true,
     selectedTaskShowDeliver: true,
-    selectedTaskCanDeliver: false,
+    selectedTaskCanDeliver: true,
     selectedTaskCanCancel: false,
     selectedTaskCanControlBlocked: false,
-    selectedTaskCanOpenWorkbench: true,
+    selectedTaskCanOpenWorkbench: false,
     selectedTaskProgressMessage: null,
-    selectedTaskTerminalLabel: 'sess-1',
+    selectedTaskTerminalLabel: null,
     startingTaskId: null,
     completingTaskId: null,
     reworkingTaskId: null,
     deliveringTaskId: null,
     retryingTaskId: null,
     cancelingTaskId: null,
-    evidenceItems: [
-      {
-        id: 'e1',
-        taskId: task.id,
-        kind: 'verificationReview',
-        title: 'Verifier',
-        summary: 'passed',
-        content: 'ok',
-        createdAt: '2026-07-14T00:00:00.000Z',
-      },
-    ],
+    evidenceItems: [],
     evidenceLoading: false,
     evidenceError: null,
     latestVerifierEvidence: null,
     latestRepairPromptEvidence: null,
     developmentAttemptEvidenceItems: [],
-    detailTab: 'changes',
+    detailTab: 'summary' as const,
     onDetailTabChange: vi.fn(),
-    reviewDiffState: 'error',
-    reviewDiff: null,
-    reviewDiffError: 'unavailable',
-    selectedReviewFilePath: null,
-    onSelectReviewFilePath: vi.fn(),
-    onRetryReviewDiff: vi.fn(),
     reworkDialogOpen: false,
     reworkError: null,
     onOpenReworkDialog: vi.fn(),
@@ -195,77 +138,33 @@ function makeTaskDrawerProps(
   };
 }
 
-describe('OrchestratorTaskDrawer review actions', () => {
-  test('diff error leaves evidence and review actions available', async () => {
-    render(
-      <OrchestratorTaskDrawer
-        {...makeTaskDrawerProps({
-          selectedTask: makeHumanReviewTask(),
-          reviewDiffState: 'error',
-          reviewDiffError: 'unavailable',
-          detailTab: 'changes',
-          selectedTaskShowDeliver: true,
-          selectedTaskCanDeliver: false,
-          selectedTaskCanRequestRework: true,
-        })}
-      />,
-    );
-
-    expect(await screen.findByText('unavailable')).toBeTruthy();
-    const deliver = screen.getByRole('button', { name: '交付' }) as HTMLButtonElement;
-    expect(deliver.disabled).toBe(true);
-    const rework = screen.getByRole('button', { name: '要求返工' }) as HTMLButtonElement;
-    expect(rework.disabled).toBe(false);
+describe('OrchestratorTaskDrawer', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   A0 后抽屉只有 Summary/Evidence，不得再暴露 Changes tab。
+   *
+   * Code Logic（这个测试做什么）:
+   *   渲染 summary，断言 Changes 文案不存在，Summary 存在。
+   */
+  it('renders summary without Changes tab', () => {
+    render(<OrchestratorTaskDrawer {...(baseProps() as never)} />);
+    expect(screen.getByRole('tab', { name: 'Summary' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Evidence' })).toBeTruthy();
+    expect(screen.queryByRole('tab', { name: 'Changes' })).toBeNull();
+    expect(screen.getAllByText('Review task').length).toBeGreaterThan(0);
   });
 
-  test('ready digest enables deliver and mounts only selected file patch', () => {
-    const onSelect = vi.fn();
-    render(
-      <OrchestratorTaskDrawer
-        {...makeTaskDrawerProps({
-          reviewDiffState: 'ready',
-          reviewDiffError: null,
-          selectedTaskCanDeliver: true,
-          selectedReviewFilePath: 'src/a.ts',
-          onSelectReviewFilePath: onSelect,
-          reviewDiff: {
-            taskId: 'task-1',
-            baseRef: 'main',
-            headRef: 'worktree',
-            totalFiles: 2,
-            truncated: false,
-            reviewDigest: 'digest-a',
-            files: [
-              {
-                path: 'src/a.ts',
-                status: 'modified',
-                additions: 1,
-                deletions: 0,
-                patch: 'PATCH_A_ONLY',
-                binary: false,
-                truncated: false,
-              },
-              {
-                path: 'src/b.ts',
-                status: 'modified',
-                additions: 2,
-                deletions: 1,
-                patch: 'PATCH_B_MUST_NOT_MOUNT',
-                binary: false,
-                truncated: false,
-              },
-            ],
-          },
-        })}
-      />,
-    );
-
-    const deliver = screen.getByRole('button', { name: '交付' }) as HTMLButtonElement;
-    expect(deliver.disabled).toBe(false);
-    expect(screen.getByText('PATCH_A_ONLY')).toBeTruthy();
-    expect(screen.queryByText('PATCH_B_MUST_NOT_MOUNT')).toBeNull();
-    fireEvent.click(screen.getByText('src/b.ts', { exact: false }));
-    expect(onSelect).toHaveBeenCalled();
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Deliver 在可交付时必须可用，不依赖 digest。
+   *
+   * Code Logic（这个测试做什么）:
+   *   断言 Deliver 按钮存在且未 disabled。
+   */
+  it('enables Deliver without review digest gate', () => {
+    render(<OrchestratorTaskDrawer {...(baseProps() as never)} />);
+    const deliver = screen.getByRole('button', { name: /Deliver|deliver|交付/i });
+    expect(deliver).toBeTruthy();
+    expect((deliver as HTMLButtonElement).disabled).toBe(false);
   });
 });

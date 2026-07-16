@@ -427,7 +427,6 @@ pub fn run() {
             orchestrator_cmd::discard_orchestrator_remote_outbox,
             orchestrator_cmd::abort_orchestrator_task_view,
             orchestrator_cmd::list_orchestrator_task_evidence_for_project,
-            orchestrator_cmd::get_orchestrator_review_diff,
             orchestrator_cmd::get_workflow_document,
             orchestrator_cmd::validate_workflow_document,
             orchestrator_cmd::save_workflow_document,

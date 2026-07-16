@@ -465,7 +465,7 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
             );
             return get_orchestrator_experiment_for_state(state, experiment_id).await;
         }
-        let delivered = run_delivery_for_task(state, &winner, None).await?;
+        let delivered = run_delivery_for_task(state, &winner).await?;
         if delivered.status == OrchestratorTaskStatus::Done {
             mark_experiment_delivery_completed(state.orchestrator_repo.as_ref(), experiment_id)
                 .await?;

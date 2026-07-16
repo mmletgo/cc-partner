@@ -16,8 +16,6 @@ import type { OrchestratorRenderableTask } from '@/lib/orchestratorRemote';
 import type {
   OrchestratorAttemptPhase,
   OrchestratorEvidence,
-  OrchestratorReviewDiff,
-  OrchestratorReviewDiffLoadState,
   OrchestratorRemoteOutboxItem,
   OrchestratorRemoteOutboxStatus,
   OrchestratorRemoteRuntimeStatus,
@@ -426,12 +424,6 @@ export interface MobileAutomationTaskDetailProps {
   evidenceItems: OrchestratorEvidence[];
   evidenceLoading: boolean;
   evidenceError: string | null;
-  reviewDiffState: OrchestratorReviewDiffLoadState;
-  reviewDiff: OrchestratorReviewDiff | null;
-  reviewDiffError: string | null;
-  selectedReviewFilePath: string | null;
-  onSelectReviewFilePath: (path: string | null) => void;
-  onRetryReviewDiff: () => void;
   canOpenExecutionContext: boolean;
   onCloseDetails: () => void;
   onOpenExecutionContext: () => void;
@@ -534,12 +526,6 @@ export function useMobileAutomationController({
   const [evidenceItems, setEvidenceItems] = useState<OrchestratorEvidence[]>([]);
   const [evidenceLoading, setEvidenceLoading] = useState<boolean>(false);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
-  const [reviewDiffState, setReviewDiffState] =
-    useState<OrchestratorReviewDiffLoadState>('idle');
-  const [reviewDiff, setReviewDiff] = useState<OrchestratorReviewDiff | null>(null);
-  const [reviewDiffError, setReviewDiffError] = useState<string | null>(null);
-  const [selectedReviewFilePath, setSelectedReviewFilePath] = useState<string | null>(null);
-  const reviewRequestSeqRef = useRef(0);
   const [title, setTitle] = useState<string>('');
   const [goal, setGoal] = useState<string>('');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState<string>('');
@@ -1089,126 +1075,6 @@ export function useMobileAutomationController({
 
 
   /**
-   * Business Logic（为什么需要这个 effect）:
-   *   移动端 Human Review/Rework 详情需要 inspection-only 展示有界 diff。
-   *
-   * Code Logic（这个 effect 做什么）:
-   *   非复核态清空；复核态递增 seq 调 getReviewDiff；stale seq 丢弃；unsupported 可识别。
-   */
-  useEffect(() => {
-    const projectId = project?.id ?? null;
-    if (!selectedTask || !projectId) {
-      // 离开任务时清空 inspection-only review 状态。
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset on selection change
-      setReviewDiffState('idle');
-      setReviewDiff(null);
-      setReviewDiffError(null);
-      setSelectedReviewFilePath(null);
-      return undefined;
-    }
-    const needsReview =
-      selectedTask.workflowState === 'humanReview' || selectedTask.workflowState === 'rework';
-    if (!needsReview) {
-      setReviewDiffState('idle');
-      setReviewDiff(null);
-      setReviewDiffError(null);
-      setSelectedReviewFilePath(null);
-      return undefined;
-    }
-    const taskId = selectedTask.id;
-    const nextSeq = reviewRequestSeqRef.current + 1;
-    reviewRequestSeqRef.current = nextSeq;
-    setReviewDiffState('loading');
-    setReviewDiff(null);
-    setReviewDiffError(null);
-    setSelectedReviewFilePath(null);
-    let cancelled = false;
-    void httpOrchestratorTransport.tasks
-      .getReviewDiff(projectId, taskId)
-      .then((diff) => {
-        if (cancelled || reviewRequestSeqRef.current !== nextSeq || activeProjectIdRef.current !== projectId) {
-          return;
-        }
-        setReviewDiff(diff);
-        setReviewDiffState('ready');
-        setReviewDiffError(null);
-        setSelectedReviewFilePath(diff.files[0]?.path ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (cancelled || reviewRequestSeqRef.current !== nextSeq || activeProjectIdRef.current !== projectId) {
-          return;
-        }
-        const message = getErrorMessage(reason);
-        if (
-          message.includes('orchestrator.review-diff.v1') ||
-          message.includes('不支持能力')
-        ) {
-          setReviewDiffState('unsupported');
-          setReviewDiff(null);
-          setReviewDiffError(null);
-          return;
-        }
-        setReviewDiffState('error');
-        setReviewDiff(null);
-        setReviewDiffError(
-          `${t('orchestrator:errors.reviewDiff')}: ${message || t('orchestrator:errors.reviewDiff')}`,
-        );
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [project?.id, selectedTask, t]);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   移动端 inspection 错误后可重试加载 review diff。
-   *
-   * Code Logic（这个函数做什么）:
-   *   递增 seq 并重拉 getReviewDiff。
-   */
-  const handleRetryReviewDiff = useCallback(() => {
-    const projectId = project?.id ?? null;
-    if (!selectedTask || !projectId) return;
-    const taskId = selectedTask.id;
-    const nextSeq = reviewRequestSeqRef.current + 1;
-    reviewRequestSeqRef.current = nextSeq;
-    setReviewDiffState('loading');
-    setReviewDiff(null);
-    setReviewDiffError(null);
-    void httpOrchestratorTransport.tasks
-      .getReviewDiff(projectId, taskId)
-      .then((diff) => {
-        if (reviewRequestSeqRef.current !== nextSeq || activeProjectIdRef.current !== projectId) {
-          return;
-        }
-        setReviewDiff(diff);
-        setReviewDiffState('ready');
-        setReviewDiffError(null);
-        setSelectedReviewFilePath(diff.files[0]?.path ?? null);
-      })
-      .catch((reason: unknown) => {
-        if (reviewRequestSeqRef.current !== nextSeq || activeProjectIdRef.current !== projectId) {
-          return;
-        }
-        const message = getErrorMessage(reason);
-        if (
-          message.includes('orchestrator.review-diff.v1') ||
-          message.includes('不支持能力')
-        ) {
-          setReviewDiffState('unsupported');
-          setReviewDiff(null);
-          setReviewDiffError(null);
-          return;
-        }
-        setReviewDiffState('error');
-        setReviewDiff(null);
-        setReviewDiffError(
-          `${t('orchestrator:errors.reviewDiff')}: ${message || t('orchestrator:errors.reviewDiff')}`,
-        );
-      });
-  }, [project?.id, selectedTask, t]);
-
-  /**
    * Business Logic（为什么需要这个函数）:
    *   用户关闭详情后应回到纯列表，避免残留过期 evidence 区域。
    *
@@ -1404,12 +1270,6 @@ export function useMobileAutomationController({
       evidenceItems,
       evidenceLoading,
       evidenceError,
-      reviewDiffState,
-      reviewDiff,
-      reviewDiffError,
-      selectedReviewFilePath,
-      onSelectReviewFilePath: setSelectedReviewFilePath,
-      onRetryReviewDiff: handleRetryReviewDiff,
       canOpenExecutionContext,
       onCloseDetails: handleCloseDetails,
       onOpenExecutionContext: handleOpenExecutionContext,

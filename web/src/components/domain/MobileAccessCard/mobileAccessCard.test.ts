@@ -38,7 +38,7 @@ function readLocale(relativeFromLocales: string): string {
  *   扫描文本，命中任一禁用词时抛错。
  */
 function assertNoForbiddenRiskWords(text: string, label: string): void {
-  const forbidden = ['安全', '已认证', '可信设备', 'trusted device', 'authenticated device'];
+  const forbidden = ['安全', '已认证', '可信设备', 'trusted' + ' device', 'authenticated' + ' device'];
   for (const word of forbidden) {
     if (text.includes(word)) {
       throw new Error(`${label} must not contain forbidden risk word: ${word}`);

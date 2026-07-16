@@ -2,7 +2,7 @@
  * Orchestrator 任务详情抽屉视图
  *
  * Business Logic（为什么需要这个模块）:
- *   选中任务后需要右侧抽屉展示 Summary / Changes / Evidence 与 Deliver/Rework 等动作；
+ *   选中任务后需要右侧抽屉展示 Summary / Evidence 与 Deliver/Rework 等动作；
  *   视图必须 API-free，只消费 controller props。
  *
  * Code Logic（这个模块做什么）:
@@ -31,10 +31,7 @@ import {
 import { getRovingTabIndex, type RovingTabKey } from '@/lib/rovingTablist';
 import type {
   OrchestratorEvidence,
-  OrchestratorReviewDiff,
-  OrchestratorReviewDiffLoadState,
   OrchestratorTask,
-  ReviewDiffFile,
 } from '@/lib/types';
 import {
   orchestratorAttemptLabel,
@@ -58,7 +55,7 @@ import {
 } from '../orchestratorViewHelpers';
 import styles from '../Orchestrator.module.css';
 
-const DETAIL_TABS = ['summary', 'changes', 'evidence'] as const;
+const DETAIL_TABS = ['summary', 'evidence'] as const;
 export type OrchestratorDetailTab = (typeof DETAIL_TABS)[number];
 
 /**
@@ -66,7 +63,7 @@ export type OrchestratorDetailTab = (typeof DETAIL_TABS)[number];
  *   抽屉只消费 controller 派生数据与回调，禁止直接 import API。
  *
  * Code Logic（这个类型做什么）:
- *   描述 selected task、capability flags、busy ids、evidence、review diff 与全部动作回调。
+ *   描述 selected task、capability flags、busy ids、evidence 与全部动作回调。
  */
 export interface OrchestratorTaskDrawerProps {
   selectedTask: OrchestratorTask | null;
@@ -95,12 +92,6 @@ export interface OrchestratorTaskDrawerProps {
   developmentAttemptEvidenceItems: OrchestratorEvidence[];
   detailTab: OrchestratorDetailTab;
   onDetailTabChange: (tab: OrchestratorDetailTab) => void;
-  reviewDiffState: OrchestratorReviewDiffLoadState;
-  reviewDiff: OrchestratorReviewDiff | null;
-  reviewDiffError: string | null;
-  selectedReviewFilePath: string | null;
-  onSelectReviewFilePath: (path: string | null) => void;
-  onRetryReviewDiff: () => void;
   reworkDialogOpen: boolean;
   reworkError: string | null;
   onOpenReworkDialog: () => void;
@@ -117,10 +108,10 @@ export interface OrchestratorTaskDrawerProps {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   选中任务后需要右侧抽屉展示完整详情、变更与 Evidence，关闭后回到纯看板。
+ *   选中任务后需要右侧抽屉展示完整详情与 Evidence，关闭后回到纯看板。
  *
  * Code Logic（这个函数做什么）:
- *   selectedTask 为空返回 null；否则渲染 Drawer + Summary/Changes/Evidence tabs 与 footer 动作。
+ *   selectedTask 为空返回 null；否则渲染 Drawer + Summary/Evidence tabs 与 footer 动作。
  */
 export function OrchestratorTaskDrawer(props: OrchestratorTaskDrawerProps): JSX.Element | null {
   const {
@@ -150,12 +141,6 @@ export function OrchestratorTaskDrawer(props: OrchestratorTaskDrawerProps): JSX.
     developmentAttemptEvidenceItems,
     detailTab,
     onDetailTabChange,
-    reviewDiffState,
-    reviewDiff,
-    reviewDiffError,
-    selectedReviewFilePath,
-    onSelectReviewFilePath,
-    onRetryReviewDiff,
     reworkDialogOpen,
     reworkError,
     onOpenReworkDialog,
@@ -253,11 +238,6 @@ export function OrchestratorTaskDrawer(props: OrchestratorTaskDrawerProps): JSX.
     onCloseReworkDialog();
   }, [onCloseReworkDialog]);
 
-  const selectedFile: ReviewDiffFile | null = useMemo(() => {
-    if (!reviewDiff || !selectedReviewFilePath) return null;
-    return reviewDiff.files.find((file) => file.path === selectedReviewFilePath) ?? null;
-  }, [reviewDiff, selectedReviewFilePath]);
-
   if (!selectedTask) return null;
 
   const showFooterActions =
@@ -270,9 +250,7 @@ export function OrchestratorTaskDrawer(props: OrchestratorTaskDrawerProps): JSX.
     selectedTaskCanComplete;
 
   const deliverDisabledTitle = !selectedTaskCanDeliver
-    ? reviewDiffState === 'error'
-      ? t('orchestrator:detail.deliverDisabledDiffError')
-      : t('orchestrator:detail.deliverDisabledPendingDiff')
+    ? t('orchestrator:detail.deliverDisabled')
     : undefined;
 
   return (
@@ -371,22 +349,6 @@ export function OrchestratorTaskDrawer(props: OrchestratorTaskDrawerProps): JSX.
                     <span className={styles.label}>{t('orchestrator:detail.acceptanceCriteria')}</span>
                     <p className={styles.detailText}>{selectedTask.acceptanceCriteria}</p>
                   </div>
-                  {reviewDiff && reviewDiff.files.length > 0 ? (
-                    <p className={styles.muted}>
-                      {t('orchestrator:review.baseHead', {
-                        base: reviewDiff.baseRef,
-                        head: reviewDiff.headRef,
-                      })}{' '}
-                      · {t('orchestrator:review.fileCount', {
-                        count: reviewDiff.totalFiles,
-                      })}
-                      {reviewDiff.truncated
-                        ? ` · ${t('orchestrator:review.truncatedFiles', {
-                            total: reviewDiff.totalFiles,
-                          })}`
-                        : ''}
-                    </p>
-                  ) : null}
                   <dl className={styles.metaGrid}>
                     <div>
                       <dt>{t('orchestrator:detail.workflowState')}</dt>
@@ -553,112 +515,6 @@ export function OrchestratorTaskDrawer(props: OrchestratorTaskDrawerProps): JSX.
                         ))}
                       </ul>
                     </div>
-                  ) : null}
-                </Card.Body>
-              </Card>
-            ) : null}
-
-            {detailTab === 'changes' ? (
-              <Card variant="outlined" padding="md">
-                <Card.Header className={styles.cardHeader}>
-                  <div>
-                    <h2 className={styles.sectionTitle}>{t('orchestrator:tabs.changes')}</h2>
-                    {reviewDiff ? (
-                      <p className={styles.sectionLead}>
-                        {t('orchestrator:review.baseHead', {
-                          base: reviewDiff.baseRef,
-                          head: reviewDiff.headRef,
-                        })}
-                      </p>
-                    ) : (
-                      <p className={styles.sectionLead}>{t('orchestrator:review.selectFile')}</p>
-                    )}
-                  </div>
-                  {reviewDiff ? <Pill tone="neutral">{reviewDiff.totalFiles}</Pill> : null}
-                </Card.Header>
-                <Card.Body className={styles.evidenceBody}>
-                  {reviewDiffState === 'loading' || reviewDiffState === 'idle' ? (
-                    <p className={styles.muted}>{t('orchestrator:review.loading')}</p>
-                  ) : null}
-                  {reviewDiffState === 'error' ? (
-                    <div className={styles.errorBox} role="alert">
-                      <p>{reviewDiffError || t('orchestrator:review.errorTitle')}</p>
-                      <Button variant="secondary" size="sm" onClick={onRetryReviewDiff}>
-                        {t('orchestrator:review.retry')}
-                      </Button>
-                    </div>
-                  ) : null}
-                  {reviewDiffState === 'unsupported' ? (
-                    <p className={styles.muted}>{t('orchestrator:review.unsupported')}</p>
-                  ) : null}
-                  {reviewDiffState === 'ready' && reviewDiff ? (
-                    <>
-                      {reviewDiff.truncated ? (
-                        <p className={styles.muted}>
-                          {t('orchestrator:review.truncatedFiles', {
-                            total: reviewDiff.totalFiles,
-                          })}
-                        </p>
-                      ) : null}
-                      {reviewDiff.files.length === 0 ? (
-                        <div className={styles.empty}>
-                          <h3 className={styles.emptyTitle}>{t('orchestrator:review.emptyTitle')}</h3>
-                          <p className={styles.emptyBody}>{t('orchestrator:review.emptyBody')}</p>
-                        </div>
-                      ) : (
-                        <div className={styles.reviewDiffLayout}>
-                          <ul className={styles.reviewFileList}>
-                            {reviewDiff.files.map((file) => {
-                              const selected = selectedReviewFilePath === file.path;
-                              return (
-                                <li key={file.path}>
-                                  <button
-                                    type="button"
-                                    className={styles.reviewFileButton}
-                                    data-active={selected || undefined}
-                                    onClick={() => onSelectReviewFilePath(file.path)}
-                                  >
-                                    <span className={styles.reviewFilePath}>{file.path}</span>
-                                    <span className={styles.reviewFileMeta}>
-                                      {file.status}
-                                      {' · '}
-                                      {t('orchestrator:review.fileSummary', {
-                                        additions: file.additions,
-                                        deletions: file.deletions,
-                                      })}
-                                      {file.binary ? ` · ${t('orchestrator:review.binaryFile')}` : ''}
-                                      {file.truncated
-                                        ? ` · ${t('orchestrator:review.truncatedPatch')}`
-                                        : ''}
-                                    </span>
-                                  </button>
-                                </li>
-                              );
-                            })}
-                          </ul>
-                          <div className={styles.reviewPatchPane}>
-                            {selectedFile ? (
-                              selectedFile.binary ? (
-                                <p className={styles.muted}>{t('orchestrator:review.binaryFile')}</p>
-                              ) : selectedFile.patch ? (
-                                <>
-                                  {selectedFile.truncated ? (
-                                    <p className={styles.muted}>
-                                      {t('orchestrator:review.truncatedPatch')}
-                                    </p>
-                                  ) : null}
-                                  <pre className={styles.reviewPatch}>{selectedFile.patch}</pre>
-                                </>
-                              ) : (
-                                <p className={styles.muted}>{t('orchestrator:review.emptyBody')}</p>
-                              )
-                            ) : (
-                              <p className={styles.muted}>{t('orchestrator:review.selectFile')}</p>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </>
                   ) : null}
                 </Card.Body>
               </Card>

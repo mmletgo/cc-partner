@@ -450,19 +450,11 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                     ),
                 ),
             )
-            // N6 M3：deliver / review-diff / workflow-document 必须在 owner 进程执行
+            // N6 M3：deliver / workflow-document 必须在 owner 进程执行
             // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
             .route(
                 "/api/backend/control/orchestrator/deliver-reviewed",
                 post(crate::backend::control_api::control_orchestrator_deliver_reviewed).layer(
-                    axum::extract::DefaultBodyLimit::max(
-                        crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
-                    ),
-                ),
-            )
-            .route(
-                "/api/backend/control/orchestrator/review-diff",
-                post(crate::backend::control_api::control_orchestrator_review_diff).layer(
                     axum::extract::DefaultBodyLimit::max(
                         crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
                     ),
@@ -1157,11 +1149,6 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 "/api/orchestrator/tasks/evidence",
                 post(orchestrator::get_evidence),
             )
-            // Orchestrator owning-device review diff：capability orchestrator.review-diff.v1；仅本机 local 任务。
-            .route(
-                "/api/orchestrator/tasks/review-diff",
-                post(orchestrator::get_review_diff),
-            )
             .route(
                 "/api/orchestrator/tasks/queue",
                 post(orchestrator::queue_task),
@@ -1229,11 +1216,6 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             .route(
                 "/api/mobile/orchestrator/runtime-snapshot",
                 post(orchestrator::mobile_runtime_snapshot),
-            )
-            // Mobile-facing review diff：remote-aware wrapper，capability 由 owning-device 路由门控。
-            .route(
-                "/api/mobile/orchestrator/tasks/review-diff",
-                post(orchestrator::mobile_get_review_diff),
             )
             // Orchestrator WORKFLOW document：capability orchestrator.workflow-document.v1；仅本机 local 项目。
             .route(

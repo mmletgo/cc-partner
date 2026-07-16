@@ -52,18 +52,6 @@ pub const CAPABILITY_ERRORS_ENVELOPE_V1: &str = "errors.envelope.v1";
 /// `server_protocol_info()` 中宣告。
 pub const CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1: &str = "orchestrator.runtime-snapshot.v1";
 
-/// 能力 token：v1 Orchestrator Human Review 有界 diff 快照
-/// （`POST /api/orchestrator/tasks/review-diff`）。
-///
-/// Business Logic（为什么需要这个 token）:
-///     对端在拉取 owning-device review diff 前必须确认本设备已实现该路由；
-///     旧版本缺失能力时客户端应显示 unsupported，不得猜测旧接口或接受任意 repo path/ref。
-///     本 token 与 review-diff 路由原子上线，与 `errors.envelope.v1` 解耦。
-///
-/// Code Logic（这个常量做什么）:
-///     字符串常量，与 `PeerProtocolInfo::supports()` 精确匹配；列入 `server_protocol_info()`。
-pub const CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1: &str = "orchestrator.review-diff.v1";
-
 /// 能力 token：v1 Orchestrator WORKFLOW 文档 API
 /// （`POST /api/orchestrator/workflow-document/{get,validate,save}`）。
 ///
@@ -275,10 +263,10 @@ impl PeerProtocolInfo {
 /// Business Logic（为什么需要这个函数）:
 ///     本机对外（health/对端探测）需要宣告自身支持的能力集合，且必须是当前 build 实际存在路由的子集。
 ///     本轮宣告 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
-///     `orchestrator.review-diff.v1`、`orchestrator.runtime-snapshot.v1`、
-///     `orchestrator.workflow-document.v1`、`sync.manifest.v2`、
-///     `transfer.complete.v1`、`transfer.resume.v1` 与 `workbench.mutation-outcome.v1`；
-///     各自与对应路由/ledger/契约原子上线。
+///     `orchestrator.runtime-snapshot.v1`、`orchestrator.workflow-document.v1`、
+///     `sync.manifest.v2`、`transfer.complete.v1`、`transfer.resume.v1` 与
+///     `workbench.mutation-outcome.v1` 等；各自与对应路由/ledger/契约原子上线。
+///     （A0 已撤销人工 Human Review diff 产品面，不再宣告相关能力 token。）
 ///
 /// Code Logic（这个函数做什么）:
 ///     构造 `protocol_version = 1`，capabilities 为已排序、去重的当前支持能力列表。
@@ -292,7 +280,6 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1.to_string(),
-            CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1.to_string(),
             CAPABILITY_SYNC_MANIFEST_V2.to_string(),
@@ -436,18 +423,13 @@ mod tests {
     /// Business Logic（为什么需要这个测试）:
     ///     `server_protocol_info()` 是本机对外的能力宣告入口，本轮必须宣告 v1
     ///     且包含 `attention.v1`、`cc-history.paged-sync.v1`、`errors.envelope.v1`、
-    ///     `orchestrator.review-diff.v1`、`orchestrator.runtime-snapshot.v1`、`sync.manifest.v2`、
+    ///     `orchestrator.runtime-snapshot.v1`、`sync.manifest.v2`、
     ///     `transfer.complete.v1`、`transfer.resume.v1` 与 `workbench.mutation-outcome.v1`
-    ///     （分别与对应路由/ledger/契约原子上线；paged-sync 与三条 CC History 分页路由同 build；
-    ///     sync.manifest.v2 与三域事务 bulk + ledger 同 build；
-    ///     transfer.resume.v1 与 resume 幂等命令同 build；
-    ///     workbench.mutation-outcome.v1 与 mutation ledger 同 build；
-    ///     workbench.session-search-result.v2 与 SessionSearchResult DTO/decoder 同 build；
-    ///     orchestrator.review-diff.v1 与 review-diff 路由同 build）。
+    ///     （分别与对应路由/ledger/契约原子上线；A0 后不再宣告已撤销的人工 review diff 能力）。
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 `server_protocol_info()`，断言 protocol_version == 1 且 capabilities
-    ///     去重排序后正好等于当前 token 字典序列表；并确认 supports(paged-sync/v2/mutation/session-search/resume/review-diff) 为 true。
+    ///     去重排序后正好等于当前 token 字典序列表；并确认 supports(paged-sync/v2/mutation/session-search/resume) 为 true。
     #[test]
     fn server_protocol_info_advertises_v1_with_current_capabilities() {
         let info = server_protocol_info();
@@ -461,7 +443,6 @@ mod tests {
                 "errors.envelope.v1".to_string(),
                 "orchestrator.agent-adapters.v1".to_string(),
                 "orchestrator.experiments.v1".to_string(),
-                "orchestrator.review-diff.v1".to_string(),
                 "orchestrator.runtime-snapshot.v1".to_string(),
                 "orchestrator.workflow-document.v1".to_string(),
                 "sync.manifest.v2".to_string(),
@@ -479,7 +460,6 @@ mod tests {
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1));
-        assert!(info.supports(CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1));
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));
         assert!(info.supports(CAPABILITY_TRANSFER_RESUME_V1));

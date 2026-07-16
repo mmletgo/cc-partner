@@ -11,7 +11,6 @@
 import type {
   OrchestratorEvidence,
   OrchestratorRemoteOutboxItem,
-  OrchestratorReviewDiff,
   OrchestratorRuntimeSnapshot,
   OrchestratorTask,
   OrchestratorTaskPromptCompletion,
@@ -33,7 +32,6 @@ import type { Decoder } from '@/lib/runtimeSchema';
 import { ContractDecodeError, nullableDecoder } from '@/lib/runtimeSchema';
 import {
   orchestratorRemoteOutboxItemDecoder,
-  orchestratorReviewDiffResponseDecoder,
   orchestratorRuntimeSnapshotDecoder,
   orchestratorTaskViewDecoder,
   orchestratorTaskViewListResponseDecoder,
@@ -709,21 +707,6 @@ export const httpOrchestratorTransport = {
         { policy: { kind: 'query' } },
       );
       return response.evidence;
-    },
-    /**
-     * Business Logic（为什么需要这个方法）:
-     *   手机端 Human Review 详情需要 inspection-only 展示有界 review diff，不得直连 owning device。
-     *
-     * Code Logic（这个函数做什么）:
-     *   POST `/api/mobile/orchestrator/tasks/review-diff` body `{projectId,taskId}`，解码 `{diff}` 后返回 diff。
-     */
-    getReviewDiff: async (projectId: string, taskId: string): Promise<OrchestratorReviewDiff> => {
-      const response = await postJson<{ diff: OrchestratorReviewDiff }>(
-        '/api/mobile/orchestrator/tasks/review-diff',
-        { projectId, taskId },
-        { policy: { kind: 'query' }, decoder: orchestratorReviewDiffResponseDecoder },
-      );
-      return response.diff;
     },
   },
   /**

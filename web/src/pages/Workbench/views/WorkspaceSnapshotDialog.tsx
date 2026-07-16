@@ -2,7 +2,7 @@
  * WorkspaceSnapshotDialog — 命名 snapshot 二级入口。
  *
  * Business Logic（为什么需要）:
- *   用户可保存/应用/删除当前结构 metadata；不是 Command Recipe，无命令编辑器。
+ *   用户可保存/应用/删除当前结构 metadata；不是可执行命令配方，无命令编辑器。
  *
  * Code Logic（做什么）:
  *   复用 Dialog/Button；props-only，不 import @/api/*。

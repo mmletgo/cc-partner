@@ -114,19 +114,6 @@ function mockSuccessBodyForUrl(url: string): unknown {
   if (url.includes('/runtime-snapshot')) {
     return validRuntimeFixture;
   }
-  if (url.includes('/tasks/review-diff')) {
-    return {
-      diff: {
-        taskId: 't1',
-        baseRef: 'main',
-        headRef: 'worktree',
-        files: [],
-        totalFiles: 0,
-        truncated: false,
-        reviewDigest: 'digest-fixture',
-      },
-    };
-  }
   if (url.includes('/tasks/list')) {
     return { tasks: [] };
   }
@@ -397,22 +384,6 @@ describe('workbenchHttp', () => {
           JSON.stringify({ projectId: 'remote-project-1', taskId: 'remote:device-a:task-1' }),
         'orchestrator evidence should include projectId and taskId',
       );
-
-      const reviewDiff = await httpOrchestratorTransport.tasks.getReviewDiff(
-        'remote-project-1',
-        'remote:device-a:task-1',
-      );
-      const reviewDiffIdx = capturedUrls.length - 1;
-      assert(
-        capturedUrls[reviewDiffIdx] === '/api/mobile/orchestrator/tasks/review-diff',
-        'review diff should call the mobile remote-aware review-diff route',
-      );
-      assert(
-        JSON.stringify(capturedBodies[reviewDiffIdx]) ===
-          JSON.stringify({ projectId: 'remote-project-1', taskId: 'remote:device-a:task-1' }),
-        'review diff should include projectId and taskId',
-      );
-      assert(reviewDiff.reviewDigest === 'digest-fixture', 'review diff should return decoded digests');
 
       await httpOrchestratorTransport.getRuntimeSnapshot('remote-project-1');
       const runtimeIdx = capturedUrls.length - 1;

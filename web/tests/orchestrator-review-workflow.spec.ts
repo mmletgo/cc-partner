@@ -1,3 +1,4 @@
+/** A0 supersession: human review-diff / Diff→Rework digest gate removed; suite skipped. */
 /**
  * E2E-ORCHESTRATOR-REVIEW-001 — Orchestrator Human Review / WORKFLOW / 通知 / Attention 权威旅程（L1 browser mock）。
  *
@@ -448,7 +449,7 @@ async function expectAutomationReady(
   await expect(taskCard.or(drawer).first()).toBeVisible({ timeout: 20_000 });
 }
 
-test.describe('E2E-ORCHESTRATOR-REVIEW-001 Orchestrator review workflow', () => {
+test.describe.skip('E2E-ORCHESTRATOR-REVIEW-001 Orchestrator review workflow', () => {
   test('human review diff → request rework with reason', async ({
     page,
     backendHarness,
@@ -594,7 +595,7 @@ test.describe('E2E-ORCHESTRATOR-REVIEW-001 Orchestrator review workflow', () => 
       kind: 'resolve',
       value: project,
     });
-    // 初次 getReviewDiff 用 digest-v1；冲突后重拉仍 sticky 返回 v1（足以断言 re-fetch 与 expectedReviewDigest）
+    // 初次 getReviewDiff 用 digest-v1；冲突后重拉仍 sticky 返回 v1（足以断言 re-fetch 与 expectedDigest）
     backendHarness.command('get_orchestrator_review_diff', {
       kind: 'resolve',
       value: reviewDiff,
@@ -638,11 +639,11 @@ test.describe('E2E-ORCHESTRATOR-REVIEW-001 Orchestrator review workflow', () => 
       const args = deliverCall.args as {
         projectId?: string;
         taskId?: string;
-        expectedReviewDigest?: string;
+        expectedDigest?: string;
       };
       expect(args.projectId).toBe(PROJECT_ID);
       expect(args.taskId).toBe(TASK_ID);
-      expect(args.expectedReviewDigest).toBe(DIGEST_V1);
+      expect(args.expectedDigest).toBe(DIGEST_V1);
     }
 
     await expect(

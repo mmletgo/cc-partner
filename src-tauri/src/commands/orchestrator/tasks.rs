@@ -242,30 +242,26 @@ pub async fn request_orchestrator_task_rework_view(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户复核通过后可以显式 deliver，但必须只有 Settings 允许 full-auto delivery 时才进入 Git delivery pipeline。
-///     交付前必须立即 recollect review digest，防止审阅后 worktree 漂移导致交付未审变更；
-///     remote shortcut 上交付必须由 owning device 检查其 Settings/digest 并执行。
+///     A0 后不再要求人工 digest；remote shortcut 上交付由 owning device 检查 Settings 并执行。
 ///     Git delivery / Settings gate / delivery lock / event_bus 必须在 HeadlessOwner 进程执行。
 ///
 /// Code Logic（这个函数做什么）:
-///     local 项目先校验任务归属，再 enforce expectedReviewDigest（recollect+比较），再 Settings gate，
-///     最后 start_delivery_from_human_review 并把同一 digest 传入 run_delivery_for_task
-///     （commit 边界再次 recollect 防 TOCTOU）；remote 项目把 expectedReviewDigest 转发给远端
-///     deliver-reviewed endpoint 并刷新 mirror。供 Tauri owner 路径与 control API 共用。
+///     local 项目校验任务归属 → Settings gate → start_delivery_from_human_review →
+///     run_delivery_for_task；remote 转发 deliver-reviewed endpoint 并刷新 mirror。
+///     供 Tauri owner 路径与 control API 共用。
 pub(crate) async fn deliver_reviewed_orchestrator_task_view_for_state(
     state: &AppState,
     project_id: &str,
     task_id: &str,
-    expected_review_digest: Option<&str>,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     let project = get_orchestrator_workbench_project(state, project_id).await?;
     if project.kind != "remote" {
-        let task = get_local_project_task_for_action(
+        let _task = get_local_project_task_for_action(
             state.orchestrator_repo.as_ref(),
             project_id,
             task_id,
         )
         .await?;
-        super::enforce_deliver_review_digest(state, &task, expected_review_digest).await?;
         let config = state
             .config
             .read()
@@ -277,21 +273,15 @@ pub(crate) async fn deliver_reviewed_orchestrator_task_view_for_state(
             .orchestrator_repo
             .start_delivery_from_human_review(task_id)
             .await?;
-        let delivered =
-            run_delivery_for_task(state, &delivering.id, expected_review_digest).await?;
+        let delivered = run_delivery_for_task(state, &delivering.id).await?;
         return Ok(OrchestratorTaskViewDto::Local { task: delivered });
     }
     reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), task_id).await?;
-    let digest = expected_review_digest.map(str::to_string);
     update_remote_orchestrator_task_status(
         state,
         &project,
         task_id,
-        |client, base_url, id| async move {
-            client
-                .deliver_reviewed_task(&base_url, &id, digest.as_deref())
-                .await
-        },
+        |client, base_url, id| async move { client.deliver_reviewed_task(&base_url, &id).await },
     )
     .await
 }
@@ -303,31 +293,20 @@ pub(crate) async fn deliver_reviewed_orchestrator_task_view_for_state(
 ///     GuiClient 不得在本进程跑 commit/push/merge 或持有 delivery lock；必须代理到 sidecar owner。
 ///
 /// Code Logic（这个函数做什么）:
-///     GuiClient → `BackendControlClient::deliver_reviewed_orchestrator_task`（透传 digest）；
+///     GuiClient → `BackendControlClient::deliver_reviewed_orchestrator_task`；
 ///     HeadlessOwner → `deliver_reviewed_orchestrator_task_view_for_state`。
 #[tauri::command]
 pub async fn deliver_reviewed_orchestrator_task_view(
     state: State<'_, AppState>,
     project_id: String,
     task_id: String,
-    expected_review_digest: Option<String>,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
     if state.runtime_role == RuntimeRole::GuiClient {
         return BackendControlClient::from_control_file()?
-            .deliver_reviewed_orchestrator_task(
-                &project_id,
-                &task_id,
-                expected_review_digest.as_deref(),
-            )
+            .deliver_reviewed_orchestrator_task(&project_id, &task_id)
             .await;
     }
-    deliver_reviewed_orchestrator_task_view_for_state(
-        state.inner(),
-        &project_id,
-        &task_id,
-        expected_review_digest.as_deref(),
-    )
-    .await
+    deliver_reviewed_orchestrator_task_view_for_state(state.inner(), &project_id, &task_id).await
 }
 
 /// 取消 remote-aware Orchestrator 任务。

@@ -9,7 +9,7 @@
 
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
-    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorReviewDiff, OrchestratorTaskDto,
+    OrchestratorCreateAction, OrchestratorEvidenceDto, OrchestratorTaskDto,
 };
 use crate::orchestrator::workflow::WorkflowDocument;
 use serde::{Deserialize, Serialize};
@@ -64,17 +64,14 @@ pub struct RemoteTaskReq {
 /// 远端交付人工复核任务请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     deliver-reviewed 需要在 owning device 上比对用户已确认的 review digest；
-///     旧 peer 无 review-diff 能力时 client 仍只发 `{taskId}`，不使用本 DTO。
+///     deliver-reviewed 在 owning device 上跑 Settings gate + Git delivery；A0 后无人工 digest。
 ///
 /// Code Logic（这个结构体做什么）:
-///     使用 camelCase 序列化 `{taskId, expectedReviewDigest?}`；digest 可选以便 wire 兼容反序列化。
+///     使用 camelCase 序列化 `{taskId}`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteDeliverReviewedReq {
     pub task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_review_digest: Option<String>,
 }
 
 /// 远端任务返工请求体。
@@ -171,34 +168,6 @@ pub struct RemoteOrchestratorTaskListResp {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteOrchestratorEvidenceResp {
     pub evidence: Vec<OrchestratorEvidenceDto>,
-}
-
-/// 远端 Orchestrator review diff 响应。
-///
-/// Business Logic（为什么需要这个结构体）:
-///     remote shortcut / mobile 需要展示 owning device 生成的有界 Human Review diff。
-///
-/// Code Logic（这个结构体做什么）:
-///     包装 camelCase `{diff}`，内部 diff 沿用 OrchestratorReviewDiff。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteOrchestratorReviewDiffResp {
-    pub diff: OrchestratorReviewDiff,
-}
-
-/// Mobile/remote-aware review diff 请求体。
-///
-/// Business Logic（为什么需要这个结构体）:
-///     手机浏览器与本机 remote-aware helper 需要同时携带 projectId 与 taskId，
-///     才能在 local/remote shortcut 上定位正确任务。
-///
-/// Code Logic（这个结构体做什么）:
-///     使用 camelCase 序列化 `{projectId, taskId}`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileReviewDiffReq {
-    pub project_id: String,
-    pub task_id: String,
 }
 
 /// 远端 WORKFLOW 文档 get 请求体。
@@ -496,40 +465,6 @@ mod tests {
         assert_eq!(value["taskId"], "task-1");
         assert_eq!(value["reason"], "需要补充验证证据");
         assert!(value.get("task_id").is_none());
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     deliver-reviewed 请求体必须稳定 camelCase 携带 expectedReviewDigest，
-    ///     缺 digest 时序列化只保留 taskId，兼容旧 wire 形态。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     序列化带/不带 digest 的 RemoteDeliverReviewedReq，断言字段名与 skip_serializing 行为。
-    #[test]
-    fn deliver_reviewed_request_serializes_expected_review_digest_as_camel_case() {
-        let with_digest = RemoteDeliverReviewedReq {
-            task_id: "task-1".to_string(),
-            expected_review_digest: Some("digest-a".to_string()),
-        };
-        let value = serde_json::to_value(with_digest).expect("serialize deliver req");
-        assert_eq!(value["taskId"], "task-1");
-        assert_eq!(value["expectedReviewDigest"], "digest-a");
-        assert!(value.get("expected_review_digest").is_none());
-
-        let without_digest = RemoteDeliverReviewedReq {
-            task_id: "task-2".to_string(),
-            expected_review_digest: None,
-        };
-        let value =
-            serde_json::to_value(without_digest).expect("serialize deliver req without digest");
-        assert_eq!(value["taskId"], "task-2");
-        assert!(value.get("expectedReviewDigest").is_none());
-
-        let parsed: RemoteDeliverReviewedReq = serde_json::from_value(serde_json::json!({
-            "taskId": "task-legacy"
-        }))
-        .expect("legacy body without digest must deserialize");
-        assert_eq!(parsed.task_id, "task-legacy");
-        assert!(parsed.expected_review_digest.is_none());
     }
 
     /// Business Logic（为什么需要这个测试）:

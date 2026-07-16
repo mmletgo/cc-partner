@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
-//!     orchestrator/{deliver-reviewed,review-diff,workflow-document/{get,validate,save}} /
+//!     orchestrator/{deliver-reviewed,workflow-document/{get,validate,save}} /
 //!     workbench-launch-summary（5 段独立 section outcomes，每段 max 5）/
 //!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback} /
 //!     transfer/prepare-open + transfer/{send,retry,resume,get-operation,cancel}
@@ -22,7 +22,7 @@ use crate::backup::{
     RestoreRequest, RestoreResult, FORMAT_VERSION,
 };
 use crate::commands::orchestrator::{
-    deliver_reviewed_orchestrator_task_view_for_state, get_orchestrator_review_diff_for_state,
+    deliver_reviewed_orchestrator_task_view_for_state,
     get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
     save_workflow_document_for_state, validate_workflow_document_for_state,
     OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
@@ -40,7 +40,7 @@ use crate::models::transfer::{
 use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
-use crate::orchestrator::models::{OperationalNotificationSnapshot, OrchestratorReviewDiff};
+use crate::orchestrator::models::OperationalNotificationSnapshot;
 use crate::orchestrator::notifications::capture_operational_notification_snapshot;
 use crate::orchestrator::workflow::WorkflowDocument;
 use crate::state::AppState;
@@ -1392,30 +1392,27 @@ pub async fn control_transfer_cancel(
 /// Orchestrator deliver-reviewed control 请求体。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     GuiClient 交付必须把 projectId/taskId/expectedReviewDigest 交给 owner，
-///     由 sidecar 执行 digest 门禁、Settings gate 与 Git delivery。
+///     GuiClient 交付必须把 projectId/taskId 交给 owner，由 sidecar 执行 Settings gate 与 Git delivery。
 ///
 /// Code Logic（这个结构做什么）:
-///     camelCase：controlToken + projectId + taskId + 可选 expectedReviewDigest。
+///     camelCase：controlToken + projectId + taskId。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlOrchestratorDeliverReviewedRequest {
     pub control_token: String,
     pub project_id: String,
     pub task_id: String,
-    #[serde(default)]
-    pub expected_review_digest: Option<String>,
 }
 
 /// owner 路径：交付人工复核任务（完整 delivery pipeline）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Git commit/push/merge、delivery lock、Settings gate 与 digest TOCTOU recheck 只能在
-///     HeadlessOwner 进程执行；GuiClient 不得自跑 pipeline。
+///     Git commit/push/merge、delivery lock 与 Settings gate 只能在 HeadlessOwner 进程执行；
+///     GuiClient 不得自跑 pipeline。A0 后无人工 digest 门禁。
 ///
 /// Code Logic（这个函数做什么）:
 ///     loopback → token → require_owner → `deliver_reviewed_orchestrator_task_view_for_state`
-///     （透传 expectedReviewDigest）→ OrchestratorTaskViewDto。
+///     → OrchestratorTaskViewDto。
 pub async fn control_orchestrator_deliver_reviewed(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Extension(context): Extension<P2pRequestContext>,
@@ -1430,56 +1427,11 @@ pub async fn control_orchestrator_deliver_reviewed(
         &state,
         request.project_id.trim(),
         request.task_id.trim(),
-        request.expected_review_digest.as_deref(),
     )
     .await
     .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_deliver_reviewed"))?;
     ensure_response_within_limit(&view, &context)?;
     Ok(Json(view))
-}
-
-/// Orchestrator review-diff control 请求体。
-///
-/// Business Logic（为什么需要这个结构）:
-///     Human Review Changes tab 必须读 owner worktree 权威 diff，与 deliver digest 同源。
-///
-/// Code Logic（这个结构做什么）:
-///     camelCase：controlToken + projectId + taskId。
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ControlOrchestratorReviewDiffRequest {
-    pub control_token: String,
-    pub project_id: String,
-    pub task_id: String,
-}
-
-/// owner 路径：采集 remote-aware review diff。
-///
-/// Business Logic（为什么需要这个函数）:
-///     GuiClient 不得在本进程读 Git worktree 猜 digest；review 权威只在 owner。
-///
-/// Code Logic（这个函数做什么）:
-///     loopback → token → require_owner → `get_orchestrator_review_diff_for_state`。
-///     响应可能含有界 patch（展示上限可接近 2 MiB），故不强制 1 MiB 元数据上限。
-pub async fn control_orchestrator_review_diff(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Extension(context): Extension<P2pRequestContext>,
-    State(state): State<AppState>,
-    Json(request): Json<ControlOrchestratorReviewDiffRequest>,
-) -> P2pResult<Json<OrchestratorReviewDiff>> {
-    authorize_control_request(peer, &context, &request.control_token)?;
-    state
-        .runtime_role
-        .require_owner()
-        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_review_diff"))?;
-    let diff = get_orchestrator_review_diff_for_state(
-        &state,
-        request.project_id.trim(),
-        request.task_id.trim(),
-    )
-    .await
-    .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_review_diff"))?;
-    Ok(Json(diff))
 }
 
 /// workflow-document/get control 请求体。
@@ -1844,29 +1796,21 @@ mod tests {
         assert_eq!(req.action, TransferOpenAction::Reveal);
     }
 
-    /// Orchestrator deliver/review-diff/workflow control body 必须 camelCase 对齐。
+    /// Orchestrator deliver/workflow control body 必须 camelCase 对齐。
     ///
     /// Business Logic（为什么需要这个测试）:
-    ///     GuiClient control client 与 owner handler 共用 contract；字段名漂移会导致静默丢 digest/hash。
+    ///     GuiClient control client 与 owner handler 共用 contract；字段名漂移会导致静默丢 hash。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     反序列化 deliver / review-diff / workflow save 请求体并断言字段。
+    ///     反序列化 deliver / workflow save 请求体并断言字段。
     #[test]
     fn orchestrator_control_request_bodies_deserialize_camel_case() {
-        let deliver_raw =
-            r#"{"controlToken":"tok","projectId":"p1","taskId":"t1","expectedReviewDigest":"abc"}"#;
+        let deliver_raw = r#"{"controlToken":"tok","projectId":"p1","taskId":"t1"}"#;
         let deliver: ControlOrchestratorDeliverReviewedRequest =
             serde_json::from_str(deliver_raw).expect("deliver body");
         assert_eq!(deliver.control_token, "tok");
         assert_eq!(deliver.project_id, "p1");
         assert_eq!(deliver.task_id, "t1");
-        assert_eq!(deliver.expected_review_digest.as_deref(), Some("abc"));
-
-        let diff_raw = r#"{"controlToken":"tok","projectId":"p1","taskId":"t1"}"#;
-        let diff: ControlOrchestratorReviewDiffRequest =
-            serde_json::from_str(diff_raw).expect("review-diff body");
-        assert_eq!(diff.project_id, "p1");
-        assert_eq!(diff.task_id, "t1");
 
         let save_raw =
             r#"{"controlToken":"tok","projectId":"p1","expectedHash":"h1","content":"---\n"}"#;

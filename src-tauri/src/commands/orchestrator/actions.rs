@@ -331,7 +331,7 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
             return Ok(OrchestratorTaskDto::from(delivery_transition.task));
         }
         // auto-delivery 无人类 digest，传 None 跳过 commit 边界 digest 门禁。
-        return run_delivery_for_task(state, &delivery_transition.task.id, None).await;
+        return run_delivery_for_task(state, &delivery_transition.task.id).await;
     }
 
     // A4：experiment candidate 可走 repair；若最终 Blocked/Aborted 由 start_repair_* /
@@ -389,7 +389,7 @@ async fn maybe_auto_deliver_experiment_winner(
             return Ok(());
         }
     }
-    let delivered = run_delivery_for_task(state, &winner_id, None).await?;
+    let delivered = run_delivery_for_task(state, &winner_id).await?;
     if delivered.status == OrchestratorTaskStatus::Done {
         mark_experiment_delivery_completed(repo, experiment_id).await?;
     }

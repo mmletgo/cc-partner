@@ -4,7 +4,6 @@ import {
   ORCHESTRATOR_REMOTE_COMMANDS,
   buildCreateOrchestratorTaskViewInvokeArgs,
   buildDeliverReviewedOrchestratorTaskViewInvokeArgs,
-  buildGetOrchestratorReviewDiffInvokeArgs,
   buildListOrchestratorTaskViewsInvokeArgs,
   buildListOrchestratorTaskEvidenceForProjectInvokeArgs,
   buildMoveOrchestratorTaskWorkflowStateInvokeArgs,
@@ -74,14 +73,6 @@ describe('orchestrator', () => {
       ORCHESTRATOR_REMOTE_COMMANDS.listEvidenceForProject ===
         'list_orchestrator_task_evidence_for_project',
       'listEvidence should use the project-scoped evidence backend command',
-    );
-    assert(
-      ORCHESTRATOR_REMOTE_COMMANDS.getReviewDiff === 'get_orchestrator_review_diff',
-      'getReviewDiff should use the remote-aware review diff backend command',
-    );
-    assert(
-      typeof orchestratorApi.getReviewDiff === 'function',
-      'orchestratorApi should expose getReviewDiff',
     );
     assert(
       ORCHESTRATOR_REMOTE_COMMANDS.moveTaskWorkflowState ===
@@ -285,47 +276,16 @@ describe('orchestrator', () => {
       'getRuntimeSnapshot should trim projectId before invoking backend',
     );
 
-    const reviewDiffArgs = buildGetOrchestratorReviewDiffInvokeArgs(' project-1 ', ' task-1 ');
-    assert(
-      JSON.stringify(reviewDiffArgs) ===
-        JSON.stringify({ projectId: 'project-1', taskId: 'task-1' }),
-      'getReviewDiff should trim projectId and taskId before invoking backend',
-    );
 
-    const deliverWithoutDigest = buildDeliverReviewedOrchestratorTaskViewInvokeArgs(
+    const deliverArgs = buildDeliverReviewedOrchestratorTaskViewInvokeArgs(
       ' project-1 ',
       ' task-1 ',
     );
     assert(
-      JSON.stringify(deliverWithoutDigest) ===
+      JSON.stringify(deliverArgs) ===
         JSON.stringify({ projectId: 'project-1', taskId: 'task-1' }),
-      'deliver without digest should keep legacy projectId/taskId shape',
+      'deliver should trim projectId/taskId without digest field',
     );
 
-    const deliverWithDigest = buildDeliverReviewedOrchestratorTaskViewInvokeArgs(
-      ' project-1 ',
-      ' task-1 ',
-      '  digest-a  ',
-    );
-    assert(
-      JSON.stringify(deliverWithDigest) ===
-        JSON.stringify({
-          projectId: 'project-1',
-          taskId: 'task-1',
-          expectedReviewDigest: 'digest-a',
-        }),
-      'deliver with digest should include camelCase expectedReviewDigest',
-    );
-
-    const deliverNullDigest = buildDeliverReviewedOrchestratorTaskViewInvokeArgs(
-      'project-1',
-      'task-1',
-      null,
-    );
-    assert(
-      JSON.stringify(deliverNullDigest) ===
-        JSON.stringify({ projectId: 'project-1', taskId: 'task-1' }),
-      'deliver with null digest should omit expectedReviewDigest',
-    );
   });
 });

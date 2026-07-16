@@ -394,12 +394,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
           developmentAttemptEvidenceItems={c.developmentAttemptEvidenceItems}
           detailTab={c.detailTab}
           onDetailTabChange={c.setDetailTab}
-          reviewDiffState={c.reviewDiffState}
-          reviewDiff={c.reviewDiff}
-          reviewDiffError={c.reviewDiffError}
-          selectedReviewFilePath={c.selectedReviewFilePath}
           onSelectReviewFilePath={c.setSelectedReviewFilePath}
-          onRetryReviewDiff={c.handleRetryReviewDiff}
           reworkDialogOpen={c.reworkDialogOpen}
           reworkError={c.reworkError}
           onOpenReworkDialog={c.handleOpenReworkDialog}

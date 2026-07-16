@@ -30,16 +30,13 @@ pub use actions::{
 };
 pub use evidence::{
     __cmd__get_orchestrator_config_for_project, __cmd__get_orchestrator_project_config,
-    __cmd__get_orchestrator_review_diff, __cmd__list_orchestrator_task_evidence,
-    __cmd__list_orchestrator_task_evidence_for_project,
+    __cmd__list_orchestrator_task_evidence, __cmd__list_orchestrator_task_evidence_for_project,
     __tauri_command_name_get_orchestrator_config_for_project,
     __tauri_command_name_get_orchestrator_project_config,
-    __tauri_command_name_get_orchestrator_review_diff,
     __tauri_command_name_list_orchestrator_task_evidence,
     __tauri_command_name_list_orchestrator_task_evidence_for_project,
     get_orchestrator_config_for_project, get_orchestrator_project_config,
-    get_orchestrator_review_diff, list_orchestrator_task_evidence,
-    list_orchestrator_task_evidence_for_project,
+    list_orchestrator_task_evidence, list_orchestrator_task_evidence_for_project,
 };
 pub use experiments::{
     __cmd__approve_orchestrator_experiment_winner, __cmd__cancel_orchestrator_experiment,
@@ -112,14 +109,6 @@ pub(crate) use common::{
 };
 pub use common::{
     CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
-};
-// 部分符号仅 tests / 兄弟路由使用；lib 非 test 编译会报 unused_imports。
-#[allow(unused_imports)]
-pub(crate) use evidence::{
-    enforce_deliver_review_digest, enforce_deliver_review_digest_for_worktree,
-    ensure_review_diff_available, get_local_owner_orchestrator_review_diff,
-    get_orchestrator_review_diff_for_state, require_expected_review_digest,
-    REVIEW_DIFF_CHANGED_CODE, REVIEW_DIFF_UNAVAILABLE_CODE,
 };
 pub(crate) use runtime::create_orchestrator_task_view_for_http_with_request_id;
 pub(crate) use tasks::{
