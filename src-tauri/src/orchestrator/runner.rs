@@ -22,6 +22,9 @@ use crate::orchestrator::models::{
     EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
 };
 use crate::orchestrator::prompt::{build_repair_task_prompt, RepairPromptContext};
+use crate::orchestrator::runner_limits::{
+    check_next_attempt, is_max_turns_exceeded, EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED,
+};
 use crate::orchestrator::workflow::{resolve_project_workflow, PromptTaskContext};
 use crate::state::AppState;
 use std::path::Path;
@@ -179,6 +182,40 @@ pub async fn prepare_runner_attempt(
         task.runner_max_turns,
         task.runner_stall_timeout_ms,
     )?;
+    // max_turns 在创建 worktree/session/attempt 之前强制检查。
+    if let Err(error) = check_next_attempt(&runner_policy, attempt) {
+        if is_max_turns_exceeded(&error) {
+            let _ = state
+                .orchestrator_repo
+                .add_evidence(
+                    &task.id,
+                    "runnerLimit",
+                    "Runner max turns exceeded",
+                    EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED,
+                    &format!(
+                        "next_attempt={attempt}\nmax_turns={}\nprovider={}",
+                        runner_policy.max_turns,
+                        runner_policy.provider.as_str()
+                    ),
+                )
+                .await;
+            // 尝试 Preparing→Blocked（CAS）；未命中则返回当前任务。
+            if let Ok(Some(blocked)) = state
+                .orchestrator_repo
+                .try_transition_task_status(
+                    &task.id,
+                    OrchestratorTaskStatus::Preparing,
+                    OrchestratorTaskStatus::Blocked,
+                    Some(EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED),
+                )
+                .await
+            {
+                return Ok(blocked);
+            }
+            return state.orchestrator_repo.get_task(&task.id).await;
+        }
+        return Err(error);
+    }
 
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
     if !state
@@ -196,28 +233,30 @@ pub async fn prepare_runner_attempt(
         Some(DEFAULT_TERMINAL_ROWS),
     )
     .await?;
-    // A1：创建统一 Agent runtime（Launching），与 Claude legacy dual-write 并行一个版本
-    let agent_runtime =
-        match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner(
-            state,
-            &task.project_id,
-            Some(&worktree.id),
-            &session.id,
-            &task.id,
-            attempt as u32,
-        )
-        .await
-        {
-            Ok(row) => Some(row),
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    session_id = %session.id,
-                    "创建 Agent runtime 失败（继续 legacy Claude 路径）: {error}"
-                );
-                None
-            }
-        };
+    // A1/A3：按冻结 policy 的 provider 创建 Agent runtime（Launching）
+    let agent_runtime = match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner_with_provider(
+        state,
+        &task.project_id,
+        Some(&worktree.id),
+        &session.id,
+        &task.id,
+        attempt as u32,
+        runner_policy.provider,
+        None,
+    )
+    .await
+    {
+        Ok(row) => Some(row),
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.id,
+                session_id = %session.id,
+                provider = %runner_policy.provider.as_str(),
+                "创建 Agent runtime 失败（继续 adapter launch）: {error}"
+            );
+            None
+        }
+    };
     let agent_session_id = agent_runtime.as_ref().map(|r| r.id.clone());
     // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
     if !state

@@ -274,6 +274,46 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
             .warn_metric(METRIC_SCHEDULER_TICK_DELAY_MS);
     }
 
+    // stall watchdog：claim 前扫描并 CAS 终止超时 runner（赢家 best-effort interrupt）。
+    match crate::orchestrator::runner_watchdog::list_and_reconcile_stalled_active_runners(
+        state,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(winners) => {
+            for winner in winners {
+                let registry =
+                    crate::orchestrator::agent_adapter::AgentAdapterRegistry::with_defaults();
+                if let Ok(task) = state.orchestrator_repo.get_task(&winner.task_id).await {
+                    let provider = crate::orchestrator::agent_adapter::AgentProviderId::parse_legacy(
+                        task.runner_provider.as_deref(),
+                    )
+                    .unwrap_or(crate::orchestrator::agent_adapter::AgentProviderId::ClaudeCodeVisible);
+                    if let Ok(adapter) = registry.get(provider) {
+                        let interrupt = adapter.interrupt_input().to_string();
+                        if let Err(err) = crate::commands::workbench::local_write_workbench_session_input(
+                            state,
+                            winner.session_id.clone(),
+                            interrupt,
+                        )
+                        .await
+                        {
+                            tracing::debug!(
+                                task_id = %winner.task_id,
+                                session_id = %winner.session_id,
+                                "stall interrupt 写入 terminal 失败（best-effort）: {err}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            tracing::warn!("Orchestrator stall watchdog 扫描失败: {err}");
+        }
+    }
+
     let config = state
         .config
         .read()

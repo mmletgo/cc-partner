@@ -490,4 +490,35 @@ impl OrchestratorRepo {
         )
         .await
     }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     OSC/Hook 活动需要刷新 task.last_activity_at 供 stall watchdog 使用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅 Running + attempt + session 匹配时更新 last_activity_at/updated_at。
+    pub async fn touch_task_last_activity(
+        &self,
+        task_id: &str,
+        attempt: i64,
+        session_id: &str,
+        occurred_at: &str,
+    ) -> Result<bool, AppError> {
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_tasks \
+                 SET last_activity_at = ?, updated_at = ? \
+                 WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
+            )
+            .bind(occurred_at)
+            .bind(occurred_at)
+            .bind(task_id)
+            .bind(OrchestratorTaskStatus::Running.as_str())
+            .bind(attempt)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+        })
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
 }

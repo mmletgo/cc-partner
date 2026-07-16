@@ -24,6 +24,8 @@ pub mod remote_protocol;
 pub mod repo;
 pub mod review_diff;
 pub mod runner;
+pub mod runner_limits;
+pub mod runner_watchdog;
 pub mod scheduler;
 pub mod state;
 pub mod verifier;
