@@ -17,7 +17,10 @@ export type OperationalNotificationKind =
   | 'humanReview'
   | 'blocked'
   | 'remoteOutboxFailed'
-  | 'taskDone';
+  | 'taskDone'
+  | 'agentNeedsInput'
+  | 'agentFailed'
+  | 'experimentDecision';
 
 /**
  * 单条运营通知事件（隐私安全：无任务标题/项目/goal）。

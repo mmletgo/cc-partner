@@ -303,6 +303,18 @@
     "taskDone": {
       "title": "有任务已完成",
       "body": "有任务已完成。可在自动化看板中查看。"
+    },
+    "agentNeedsInput": {
+      "title": "Agent 等待输入",
+      "body": "有 Agent 会话正在等待输入。请打开应用查看。"
+    },
+    "agentFailed": {
+      "title": "Agent 运行失败",
+      "body": "有 Agent 会话运行失败。请打开应用查看。"
+    },
+    "experimentDecision": {
+      "title": "实验需要决策",
+      "body": "有实验需要你做出选择。请打开应用查看。"
     }
   }
 }

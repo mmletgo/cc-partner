@@ -41,21 +41,30 @@ interface TauriInternalsWindow extends Window {
   };
 }
 
-/** 运营通知偏好（与 OrchestratorAutomationConfig 四字段对齐）。 */
+/** 运营通知偏好（Orchestrator 四字段 + A2 Agent/experiment 默认策略）。 */
 export interface OperationalNotificationPreferences {
   notifyHumanReview: boolean;
   notifyBlocked: boolean;
   notifyRemoteOutboxFailed: boolean;
   notifyTaskDone: boolean;
+  /** Agent needsInput；默认开。 */
+  notifyAgentNeedsInput: boolean;
+  /** Agent failed；默认开。 */
+  notifyAgentFailed: boolean;
+  /** Experiment decision（A4 合同）；默认开，A2 无发射源。 */
+  notifyExperimentDecision: boolean;
 }
 
-/** 默认偏好：Human Review/Blocked/outbox failed 开，Done 关。 */
+/** 默认偏好：needsInput/failed/experiment/blocked/outbox 开，completed/Done 关。 */
 export const DEFAULT_OPERATIONAL_NOTIFICATION_PREFERENCES: OperationalNotificationPreferences =
   {
     notifyHumanReview: true,
     notifyBlocked: true,
     notifyRemoteOutboxFailed: true,
     notifyTaskDone: false,
+    notifyAgentNeedsInput: true,
+    notifyAgentFailed: true,
+    notifyExperimentDecision: true,
   };
 
 type HandshakePhase = 'pending' | 'live';
@@ -109,6 +118,12 @@ export function isOperationalNotificationKindEnabled(
       return preferences.notifyRemoteOutboxFailed;
     case 'taskDone':
       return preferences.notifyTaskDone;
+    case 'agentNeedsInput':
+      return preferences.notifyAgentNeedsInput;
+    case 'agentFailed':
+      return preferences.notifyAgentFailed;
+    case 'experimentDecision':
+      return preferences.notifyExperimentDecision;
     default:
       return false;
   }
@@ -136,17 +151,23 @@ type OperationalNotificationI18nKeys = {
     | 'orchestrator:notifications.humanReview.title'
     | 'orchestrator:notifications.blocked.title'
     | 'orchestrator:notifications.remoteOutboxFailed.title'
-    | 'orchestrator:notifications.taskDone.title';
+    | 'orchestrator:notifications.taskDone.title'
+    | 'orchestrator:notifications.agentNeedsInput.title'
+    | 'orchestrator:notifications.agentFailed.title'
+    | 'orchestrator:notifications.experimentDecision.title';
   bodyKey:
     | 'orchestrator:notifications.humanReview.body'
     | 'orchestrator:notifications.blocked.body'
     | 'orchestrator:notifications.remoteOutboxFailed.body'
-    | 'orchestrator:notifications.taskDone.body';
+    | 'orchestrator:notifications.taskDone.body'
+    | 'orchestrator:notifications.agentNeedsInput.body'
+    | 'orchestrator:notifications.agentFailed.body'
+    | 'orchestrator:notifications.experimentDecision.body';
 };
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   系统通知 title/body 只能是固定隐私安全文案，禁止塞任务标题/goal。
+ *   系统通知 title/body 只能是固定隐私安全文案，禁止塞任务标题/goal/路径。
  *
  * Code Logic（这个函数做什么）:
  *   按 kind 返回 i18n key 字面量对，供 t() 编译期校验。
@@ -173,6 +194,21 @@ function i18nKeysForKind(kind: OperationalNotificationKind): OperationalNotifica
         titleKey: 'orchestrator:notifications.taskDone.title',
         bodyKey: 'orchestrator:notifications.taskDone.body',
       };
+    case 'agentNeedsInput':
+      return {
+        titleKey: 'orchestrator:notifications.agentNeedsInput.title',
+        bodyKey: 'orchestrator:notifications.agentNeedsInput.body',
+      };
+    case 'agentFailed':
+      return {
+        titleKey: 'orchestrator:notifications.agentFailed.title',
+        bodyKey: 'orchestrator:notifications.agentFailed.body',
+      };
+    case 'experimentDecision':
+      return {
+        titleKey: 'orchestrator:notifications.experimentDecision.title',
+        bodyKey: 'orchestrator:notifications.experimentDecision.body',
+      };
     default:
       return {
         titleKey: 'orchestrator:notifications.blocked.title',
@@ -198,7 +234,10 @@ function normalizeOperationalEvent(
     kind !== 'humanReview' &&
     kind !== 'blocked' &&
     kind !== 'remoteOutboxFailed' &&
-    kind !== 'taskDone'
+    kind !== 'taskDone' &&
+    kind !== 'agentNeedsInput' &&
+    kind !== 'agentFailed' &&
+    kind !== 'experimentDecision'
   ) {
     return null;
   }
@@ -309,6 +348,13 @@ export function useOperationalNotifications(): void {
             typeof config.notifyTaskDone === 'boolean'
               ? config.notifyTaskDone
               : DEFAULT_OPERATIONAL_NOTIFICATION_PREFERENCES.notifyTaskDone,
+          // A2 Agent/experiment 偏好：配置未落地字段时使用默认（开/开/开）
+          notifyAgentNeedsInput:
+            DEFAULT_OPERATIONAL_NOTIFICATION_PREFERENCES.notifyAgentNeedsInput,
+          notifyAgentFailed:
+            DEFAULT_OPERATIONAL_NOTIFICATION_PREFERENCES.notifyAgentFailed,
+          notifyExperimentDecision:
+            DEFAULT_OPERATIONAL_NOTIFICATION_PREFERENCES.notifyExperimentDecision,
         };
       } catch {
         // 配置不可用时使用默认偏好，不阻断协调器

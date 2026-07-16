@@ -1605,6 +1605,12 @@ impl OrchestratorRepo {
                UNION ALL \
                SELECT 'remoteOutboxFailed', id, state_version, updated_at \
                  FROM orchestrator_remote_outbox WHERE status = ? \
+               UNION ALL \
+               SELECT 'agentNeedsInput', id, CAST(version AS INTEGER), last_activity_at \
+                 FROM workbench_agent_sessions WHERE is_active = 1 AND phase IN ('needs_input', 'needsInput') \
+               UNION ALL \
+               SELECT 'agentFailed', id, CAST(version AS INTEGER), last_activity_at \
+                 FROM workbench_agent_sessions WHERE phase IN ('failed') \
              ) \
              ORDER BY occurred_at DESC, opaque_source_id ASC \
              LIMIT ?",

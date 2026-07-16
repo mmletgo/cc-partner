@@ -303,6 +303,18 @@
     "taskDone": {
       "title": "A task is completed",
       "body": "A task is completed. Check the automation board for details."
+    },
+    "agentNeedsInput": {
+      "title": "Agent needs input",
+      "body": "An agent session is waiting for input. Open the app to continue."
+    },
+    "agentFailed": {
+      "title": "Agent failed",
+      "body": "An agent session failed. Open the app for details."
+    },
+    "experimentDecision": {
+      "title": "Experiment needs a decision",
+      "body": "An experiment needs your choice. Open the app to continue."
     }
   }
 }

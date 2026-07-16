@@ -527,7 +527,8 @@ pub struct OrchestratorTaskRow {
 ///     桌面 OS 通知与 baseline snapshot 需要稳定四类运营事件，且不得泄露 title/project/goal。
 ///
 /// Code Logic（这个枚举做什么）:
-///     serde camelCase：`humanReview|blocked|remoteOutboxFailed|taskDone`。
+///     serde camelCase：`humanReview|blocked|remoteOutboxFailed|taskDone|
+///     agentNeedsInput|agentFailed|experimentDecision`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OperationalNotificationKind {
@@ -535,6 +536,12 @@ pub enum OperationalNotificationKind {
     Blocked,
     RemoteOutboxFailed,
     TaskDone,
+    /// A2：Agent phase 进入 needsInput
+    AgentNeedsInput,
+    /// A2：Agent phase 进入 failed
+    AgentFailed,
+    /// A4 合同：experiment 需要决策（A2 仅 kind/settings，不发射直到 A4）
+    ExperimentDecision,
 }
 
 impl OperationalNotificationKind {
@@ -549,6 +556,9 @@ impl OperationalNotificationKind {
             Self::Blocked => "blocked",
             Self::RemoteOutboxFailed => "remoteOutboxFailed",
             Self::TaskDone => "taskDone",
+            Self::AgentNeedsInput => "agentNeedsInput",
+            Self::AgentFailed => "agentFailed",
+            Self::ExperimentDecision => "experimentDecision",
         }
     }
 
@@ -564,6 +574,9 @@ impl OperationalNotificationKind {
             "blocked" => Ok(Self::Blocked),
             "remoteOutboxFailed" => Ok(Self::RemoteOutboxFailed),
             "taskDone" => Ok(Self::TaskDone),
+            "agentNeedsInput" => Ok(Self::AgentNeedsInput),
+            "agentFailed" => Ok(Self::AgentFailed),
+            "experimentDecision" => Ok(Self::ExperimentDecision),
             other => Err(AppError::generic(format!("未知运营通知 kind: {other}"))),
         }
     }

@@ -164,6 +164,34 @@ pub fn emit_agent_runtime_changed(state: &AppState, row: &AgentSessionRuntime) {
             crate::workbench::remote_events::WorkbenchAgentRuntimePayload { agent_session: dto },
         ),
     );
+    // A2：仅 needsInput/failed 进入运营通知；working/idle/completed 默认无 OS 噪音。
+    emit_agent_operational_notification_if_needed(state, row);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户不必盯住 terminal 也能知道 Agent 等待输入或失败；completed 默认不发。
+///
+/// Code Logic（这个函数做什么）:
+///     phase=NeedsInput/Failed 时 emit operational:notification，opaque=agentSessionId，
+///     state_version=version；无 title/project/path。
+fn emit_agent_operational_notification_if_needed(state: &AppState, row: &AgentSessionRuntime) {
+    use crate::orchestrator::models::{OperationalNotificationEvent, OperationalNotificationKind};
+    use crate::orchestrator::notifications::emit_operational_notification;
+
+    let kind = match row.phase {
+        AgentSessionPhase::NeedsInput => OperationalNotificationKind::AgentNeedsInput,
+        AgentSessionPhase::Failed => OperationalNotificationKind::AgentFailed,
+        _ => return,
+    };
+    emit_operational_notification(
+        state,
+        &OperationalNotificationEvent {
+            kind,
+            opaque_source_id: row.id.clone(),
+            state_version: row.version as i64,
+            occurred_at: row.last_activity_at.clone(),
+        },
+    );
 }
 
 #[cfg(test)]
