@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 ///     2) `CC_PARTNER_BROWSER_RUNTIME_DIR` / `CC_PARTNER_RESOURCE_DIR` 下
 ///        `<platform>/<rel>` 或 `browser-runtime|resources/browser-runtime` 布局；
 ///     3) `current_exe` 旁常见 Tauri 包布局（macOS Resources、exe 旁 resources、
+///        Linux `../lib/cc-partner|exe_stem/resources`、`$APPDIR`、`/usr/lib/cc-partner`、
 ///        向上最多 4 级的 `resources/browser-runtime`）；
 ///     4) 开发态 `CARGO_MANIFEST_DIR` 与相对 cwd 路径。
 ///     找不到返回 None。
@@ -80,12 +81,39 @@ pub fn resolve_managed_chrome_executable() -> Option<PathBuf> {
     // 打包布局：不依赖源码 cwd，从 current_exe 推导 resource 位置。
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            let packaged_roots = [
+            let mut packaged_roots = vec![
                 exe_dir.join("../Resources/resources/browser-runtime"),
                 exe_dir.join("../Resources/browser-runtime"),
                 exe_dir.join("resources/browser-runtime"),
                 exe_dir.join("../resources/browser-runtime"),
+                // Linux AppImage / deb 常见布局：bin 旁 ../lib/<app>/resources
+                exe_dir.join("../lib/cc-partner/resources/browser-runtime"),
             ];
+            if let Some(stem) = exe
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
+            {
+                packaged_roots.push(
+                    exe_dir
+                        .join("../lib")
+                        .join(stem)
+                        .join("resources/browser-runtime"),
+                );
+            }
+            // AppImage 挂载根：APPDIR/usr/lib/cc-partner/resources/...
+            if let Ok(appdir) = std::env::var("APPDIR") {
+                if !appdir.trim().is_empty() {
+                    packaged_roots.push(
+                        PathBuf::from(appdir).join("usr/lib/cc-partner/resources/browser-runtime"),
+                    );
+                }
+            }
+            // 系统安装前缀
+            packaged_roots.push(PathBuf::from(
+                "/usr/lib/cc-partner/resources/browser-runtime",
+            ));
+
             for root in packaged_roots {
                 let candidate = root.join(platform).join(&rel);
                 if candidate.is_file() {

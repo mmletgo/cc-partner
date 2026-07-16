@@ -15,6 +15,7 @@ use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
 use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskStatus, EVIDENCE_KIND_DELIVERY,
+    EVIDENCE_KIND_REVIEW_DIGEST,
 };
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
@@ -343,16 +344,15 @@ impl DeliveryContext for AppDeliveryContext<'_> {
 /// Business Logic（为什么需要这个函数）:
 ///     验证成功后的 Delivering 任务应自动完成 commit、push 任务分支、merge main 和 push main，
 ///     让 full-auto 策略无需用户手动收尾。A0 后不再做人工 review-diff 产品门禁；
-///     但 verifier auto-delivery 可传入 expected_review_digest，在 commit 前 rebind 审阅内容，
-///     防止 agent 在审查通过后继续改 worktree。Human Review 显式 Deliver 传 None。
+///     但 verifier auto-delivery / experiment winner 可传入 expected_review_digest，在 commit 前
+///     rebind 审阅内容，防止 agent 在审查通过后继续改 worktree。Human Review 显式 Deliver 传 None。
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验任务状态与项目 full-auto flags；获取 per-task delivery lock 并解析 worktree 后，
-///     若提供 expected_review_digest 则用 collect_review_diff_for_worktree 重算并比对，
-///     不匹配则 failed delivery evidence + Blocked（不 commit）；
-///     再按顺序执行 commit/push/merge/push main 四阶段；
-///     每个阶段成功写 passed delivery evidence，失败写 failed evidence 并把任务置为 Blocked；
-///     全局交付开关关闭时写 blocked evidence；全部成功后置 Done。
+///     若提供 expected_review_digest：先 `stage_all_for_commit` 冻结 index，再
+///     `enforce_expected_review_digest`（worktree 仍含未暂存写入 → fail closed），最后
+///     `commit_staged` 禁止二次 `git add -A`；无 digest 时走 `commit_task_worktree`；
+///     再按顺序执行 push/merge/push main；每阶段写 delivery evidence；失败 Blocked；全开开关成功后 Done。
 pub(crate) async fn deliver_task<C>(
     context: &C,
     task_id: &str,
@@ -477,24 +477,6 @@ where
     let task_path = worktree.path.clone();
     let main_path = project.path.clone();
 
-    // auto-delivery 安全门：在拿到 delivery lock 且解析 worktree 后、commit 前 rebind digest。
-    if let Some(expected) = expected_review_digest {
-        match enforce_expected_review_digest(Path::new(&task_path), expected) {
-            Ok(()) => {}
-            Err(reason) => {
-                return block_delivery_task(
-                    context.orchestrator_repo(),
-                    &task.id,
-                    &reason,
-                    "review digest gate",
-                    &reason,
-                    &mut stages,
-                )
-                .await;
-            }
-        }
-    }
-
     let commit_message = format!("orchestrator: {}", task.title.trim());
     let before_head = match workbench_git::head_hash(Path::new(&task_path)) {
         Ok(head) => head,
@@ -511,7 +493,57 @@ where
             .await;
         }
     };
-    if let Err(err) = context
+
+    // digest 绑定路径：先 stage 冻结 index，再 rebind digest，最后只 commit_staged
+    //（禁止二次 `git add -A`，关闭 recheck→add 之间的 TOCTOU）。
+    // 无 digest 时保持既有 commit_task_worktree（内部 stage+commit）。
+    if let Some(expected) = expected_review_digest {
+        let has_changes = match workbench_git::stage_all_for_commit(Path::new(&task_path)) {
+            Ok(changed) => changed,
+            Err(err) => {
+                let reason = format!("commit failed: stage worktree failed: {err}");
+                return block_delivery_task(
+                    context.orchestrator_repo(),
+                    &task.id,
+                    &reason,
+                    "commit",
+                    &reason,
+                    &mut stages,
+                )
+                .await;
+            }
+        };
+        // stage 后 worktree 仍含未暂存新写入；漂移 → fail closed，不 commit。
+        match enforce_expected_review_digest(Path::new(&task_path), expected) {
+            Ok(()) => {}
+            Err(reason) => {
+                return block_delivery_task(
+                    context.orchestrator_repo(),
+                    &task.id,
+                    &reason,
+                    "review digest gate",
+                    &reason,
+                    &mut stages,
+                )
+                .await;
+            }
+        }
+        if has_changes {
+            if let Err(err) = workbench_git::commit_staged(Path::new(&task_path), &commit_message) {
+                let reason = format!("commit failed: {err}");
+                return block_delivery_task(
+                    context.orchestrator_repo(),
+                    &task.id,
+                    &reason,
+                    "commit",
+                    &reason,
+                    &mut stages,
+                )
+                .await;
+            }
+        }
+        // 已干净且 digest 匹配：视为 empty/clean commit 成功（不创建空 commit）。
+    } else if let Err(err) = context
         .commit_task_worktree(worktree_id.clone(), Some(commit_message))
         .await
     {
@@ -1160,6 +1192,62 @@ pub(crate) fn enforce_expected_review_digest(
     Err(format!(
         "worktree content drifted after verification (review_digest mismatch); refuse commit. expected={expected_review_digest}, current={actual}"
     ))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     experiment winner 可能在 CandidateReady 后数小时才交付；必须从 evidence 读取
+///     verifier 通过时绑定的 review_digest，禁止传 None 绕过 rebind 门。
+///
+/// Code Logic（这个函数做什么）:
+///     列出任务 evidence，取 kind=`reviewDigest` 的最新一条；优先 content，空则 summary；
+///     无有效值返回 None（调用方 fail closed）。
+pub(crate) async fn load_persisted_review_digest(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+) -> Result<Option<String>, AppError> {
+    let items = repo.list_evidence(task_id).await?;
+    Ok(items
+        .into_iter()
+        .rev()
+        .find(|item| item.kind == EVIDENCE_KIND_REVIEW_DIGEST)
+        .and_then(|item| {
+            let content = item.content.trim();
+            if !content.is_empty() {
+                return Some(content.to_string());
+            }
+            let summary = item.summary.trim();
+            if !summary.is_empty() {
+                Some(summary.to_string())
+            } else {
+                None
+            }
+        }))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     hard gate 通过时必须把 worktree review_digest 写入 evidence，供延后的 winner 交付 rebind。
+///
+/// Code Logic（这个函数做什么）:
+///     拒绝空 digest；以 kind=reviewDigest、title="review digest"、summary/content=digest 追加 evidence。
+pub(crate) async fn persist_review_digest_evidence(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+    digest: &str,
+) -> Result<(), AppError> {
+    let digest = digest.trim();
+    if digest.is_empty() {
+        return Err(AppError::generic(
+            "review_digest 不能为空，无法持久化交付 rebind 证据",
+        ));
+    }
+    repo.add_evidence(
+        task_id,
+        EVIDENCE_KIND_REVIEW_DIGEST,
+        "review digest",
+        digest,
+        digest,
+    )
+    .await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2416,5 +2504,131 @@ mod tests {
         fs::write(task_worktree.join("a.txt"), "v2\n").expect("write v2");
         let err = enforce_expected_review_digest(&task_worktree, &expected).expect_err("mismatch");
         assert!(err.contains("review_digest mismatch"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     experiment winner 延后交付依赖 evidence 中的 reviewDigest；缺失必须可探测以便 fail closed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 Delivering 任务，断言无 evidence 时 load 为 None；persist 后再 load 得同一 digest。
+    #[tokio::test]
+    async fn load_persisted_review_digest_missing_and_present() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        assert!(
+            load_persisted_review_digest(harness.orchestrator_repo.as_ref(), &task_id)
+                .await
+                .expect("load missing")
+                .is_none()
+        );
+
+        let digest = "sha256:review-digest-fixture";
+        persist_review_digest_evidence(harness.orchestrator_repo.as_ref(), &task_id, digest)
+            .await
+            .expect("persist digest");
+        let loaded = load_persisted_review_digest(harness.orchestrator_repo.as_ref(), &task_id)
+            .await
+            .expect("load present");
+        assert_eq!(loaded.as_deref(), Some(digest));
+
+        let evidence = harness
+            .orchestrator_repo
+            .list_evidence(&task_id)
+            .await
+            .expect("list evidence");
+        assert!(evidence.iter().any(|e| {
+            e.kind == EVIDENCE_KIND_REVIEW_DIGEST
+                && e.title == "review digest"
+                && e.summary == digest
+                && e.content == digest
+        }));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     stage 冻结 index 后若再写入，digest rebind 必须失败，且不得经二次 `git add -A` 提交漂移。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写 A 采 digest → stage → 写 B（漂移）→ deliver_task(Some(digest)) 断言 Blocked 且 commit 未发生。
+    #[tokio::test]
+    async fn delivery_blocks_when_worktree_drifts_after_stage() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "staged reviewed\n").expect("write reviewed");
+        let expected =
+            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
+                .expect("capture digest");
+        // 模拟 stage 后 agent 再写：deliver 内部会先 stage 再 enforce，此处先写漂移内容。
+        fs::write(task_worktree.join("task.txt"), "post-stage drift\n").expect("drift");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        let delivered = deliver_task(&harness, &task_id, Some(expected.as_str()))
+            .await
+            .expect("blocked summary");
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
+        assert!(
+            delivered
+                .task
+                .blocked_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("review_digest"),
+            "expected digest gate: {:?}",
+            delivered.task.blocked_reason
+        );
+        // digest 路径不经 commit_task_worktree
+        assert_eq!(harness.controls.commit_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     commit_staged 不得把 stage 之后的未暂存写入带进 commit，否则 recheck→add TOCTOU 复活。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     stage A → enforce 通过 → 写入 B → commit_staged；断言 HEAD 含 A 不含 B，B 仍为工作区改动。
+    #[test]
+    fn commit_staged_only_excludes_post_stage_unstaged_writes() {
+        let (_dir, _origin, _repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("bound.txt"), "reviewed-A\n").expect("write A");
+        assert!(
+            workbench_git::stage_all_for_commit(&task_worktree).expect("stage"),
+            "should have staged changes"
+        );
+        let digest =
+            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
+                .expect("digest at stage boundary");
+        enforce_expected_review_digest(&task_worktree, &digest)
+            .expect("digest matches staged tree");
+
+        // enforce 之后模拟 agent 写入；digest 路径不会再 add -A。
+        fs::write(task_worktree.join("bound.txt"), "sneak-B\n").expect("write B after enforce");
+        fs::write(task_worktree.join("extra-untracked.txt"), "untracked\n").expect("untracked");
+
+        workbench_git::commit_staged(&task_worktree, "orchestrator: staged only")
+            .expect("commit staged");
+
+        let show = git(&task_worktree, &["show", "HEAD:bound.txt"]);
+        assert!(
+            show.contains("reviewed-A"),
+            "commit must contain staged A, got: {show}"
+        );
+        assert!(
+            !show.contains("sneak-B"),
+            "post-enforce write must not enter commit"
+        );
+        let untracked_in_head = StdCommand::new("git")
+            .args(["cat-file", "-e", "HEAD:extra-untracked.txt"])
+            .current_dir(&task_worktree)
+            .status()
+            .expect("cat-file");
+        assert!(
+            !untracked_in_head.success(),
+            "post-stage untracked file must not be in commit"
+        );
+        let status = git(&task_worktree, &["status", "--porcelain"]);
+        assert!(
+            status.contains("bound.txt") || status.contains("extra-untracked.txt"),
+            "post-stage writes remain dirty: {status}"
+        );
     }
 }

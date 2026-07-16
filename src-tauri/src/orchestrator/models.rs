@@ -59,6 +59,16 @@ pub const EVIDENCE_KIND_REMOTE_OUTBOX: &str = "remoteOutbox";
 ///     集中定义 `orchestrator_task_evidence.kind` 中 delivery 的存储值。
 pub const EVIDENCE_KIND_DELIVERY: &str = "delivery";
 
+/// verifier 审阅时绑定的 worktree review_digest evidence kind。
+///
+/// Business Logic（为什么需要这个常量）:
+///     experiment candidate 在 hard gate 通过后停在 CandidateReady，交付可能延后数小时；
+///     必须把 verifier 审阅时的 review_digest 持久化，winner 交付时 rebind，禁止无 digest 绕过。
+///
+/// Code Logic（这个常量做什么）:
+///     集中定义 `orchestrator_task_evidence.kind` 中 reviewDigest 的存储值。
+pub const EVIDENCE_KIND_REVIEW_DIGEST: &str = "reviewDigest";
+
 /// Orchestrator 任务生命周期状态。
 ///
 /// Business Logic（为什么需要这个枚举）:

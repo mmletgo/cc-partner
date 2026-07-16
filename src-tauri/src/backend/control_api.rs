@@ -7,7 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
 //!     orchestrator/{deliver-reviewed,workflow-document/{get,validate,save}} /
-//!     orchestrator/experiments/{create,list,get,approve-winner,cancel} /
+//!     orchestrator/experiments/{create,list,get,approve-winner,cancel,prepare-downgrade} /
 //!     workbench-launch-summary（5 段独立 section outcomes，每段 max 5）/
 //!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback} /
 //!     transfer/prepare-open + transfer/{send,retry,resume,get-operation,cancel}
@@ -27,8 +27,9 @@ use crate::commands::orchestrator::{
     create_orchestrator_experiment_for_state, deliver_reviewed_orchestrator_task_view_for_state,
     get_orchestrator_experiment_for_state,
     get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
-    list_orchestrator_experiments_for_state, save_workflow_document_for_state,
-    validate_workflow_document_for_state, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    list_orchestrator_experiments_for_state, prepare_experiment_downgrade_for_state,
+    save_workflow_document_for_state, validate_workflow_document_for_state,
+    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::transfer::prepare_transfer_open_for_state;
 use crate::config_runtime::{
@@ -1796,6 +1797,52 @@ pub async fn control_orchestrator_experiment_cancel(
         })?;
     ensure_response_within_limit(&dto, &context)?;
     Ok(Json(dto))
+}
+
+/// experiment prepare-downgrade control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     降级 quiesce 会 cancel 全部非终态组；必须只在 owner 仓储执行。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：仅 controlToken。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorExperimentPrepareDowngradeRequest {
+    pub control_token: String,
+}
+
+/// owner 路径：关闭 experiments 能力前 quiesce 非终态组。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GuiClient 本地扫库 cancel 会与 sidecar 双路径漂移；降级准备只能 owner 执行。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `prepare_experiment_downgrade_for_state` → cancelled 计数。
+pub async fn control_orchestrator_experiment_prepare_downgrade(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorExperimentPrepareDowngradeRequest>,
+) -> P2pResult<Json<u32>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(
+            e,
+            &context,
+            "control.orchestrator_experiment_prepare_downgrade",
+        )
+    })?;
+    let cancelled = prepare_experiment_downgrade_for_state(&state)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(
+                e,
+                &context,
+                "control.orchestrator_experiment_prepare_downgrade",
+            )
+        })?;
+    Ok(Json(cancelled))
 }
 
 /// 序列化后检查响应不超过 1 MiB。

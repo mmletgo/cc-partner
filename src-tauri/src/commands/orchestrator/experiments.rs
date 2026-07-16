@@ -502,8 +502,31 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
             .await?;
             return get_orchestrator_experiment_for_state(state, experiment_id).await;
         }
-        // experiment 交付跨越 verifier 时窗，无连续 rebind；传 None。
-        let delivered = match run_delivery_for_task(state, &winner, None).await {
+        // fail closed：winner 必须持有 verifier 持久化的 reviewDigest，禁止 None 绕过 rebind。
+        let digest = match crate::orchestrator::delivery::load_persisted_review_digest(
+            state.orchestrator_repo.as_ref(),
+            &winner,
+        )
+        .await?
+        {
+            Some(d) => d,
+            None => {
+                tracing::warn!(
+                    experiment_id = %experiment_id,
+                    task_id = %winner,
+                    "approve winner missing reviewDigest evidence; refuse delivery"
+                );
+                let _ = recover_experiment_from_failed_delivery(
+                    state.orchestrator_repo.as_ref(),
+                    experiment_id,
+                )
+                .await?;
+                return Err(AppError::generic(
+                    "experiment winner 缺少 reviewDigest evidence，拒绝交付（fail closed）",
+                ));
+            }
+        };
+        let delivered = match run_delivery_for_task(state, &winner, Some(digest)).await {
             Ok(dto) => dto,
             Err(err) => {
                 tracing::debug!(
@@ -522,6 +545,14 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
         if delivered.status == OrchestratorTaskStatus::Done {
             mark_experiment_delivery_completed(state.orchestrator_repo.as_ref(), experiment_id)
                 .await?;
+        } else if delivered.status == OrchestratorTaskStatus::Delivering {
+            // 丢锁/并发持有：保持组 Delivering，禁止误 recover 到 WinnerReady。
+            // 残差：进程崩溃后启动无自动回收 Delivering 组 — NOT VERIFIED。
+            tracing::debug!(
+                experiment_id = %experiment_id,
+                task_id = %winner,
+                "approve winner delivery still Delivering; leave for lock holder"
+            );
         } else {
             recover_experiment_from_failed_delivery(
                 state.orchestrator_repo.as_ref(),
@@ -698,16 +729,23 @@ async fn try_cancel_remote_experiment_by_mirror(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     关闭 experiments 能力前必须停止 active groups，否则旧版本可能把 candidate 当普通 task 交付。
+///     GuiClient 不得在本进程扫/改 owner 仓储，否则与 sidecar 双路径 cancel 漂移。
 ///
 /// Code Logic（这个函数做什么）:
-///     拒绝若存在 Delivering；否则取消全部非终态组。
+///     GuiClient → `BackendControlClient::prepare_experiment_downgrade`；
+///     HeadlessOwner → `prepare_experiment_downgrade_for_state`。
 #[tauri::command]
 pub async fn prepare_experiment_downgrade(state: State<'_, AppState>) -> Result<u32, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .prepare_experiment_downgrade()
+            .await;
+    }
     prepare_experiment_downgrade_for_state(&state).await
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     local-only 降级 helper。
+///     local-only 降级 helper；仅 owner 可执行组级 cancel。
 ///
 /// Code Logic（这个函数做什么）:
 ///     扫描全部实验；Delivering 拒绝；其余非终态 cancel。
@@ -769,10 +807,10 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     GuiClient 必须代理 experiment mutation/list/get 到 sidecar，否则双 delivery。
+    ///     GuiClient 必须代理 experiment mutation/list/get/downgrade 到 sidecar，否则双路径。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     源码断言五个 Tauri wrapper 均含 RuntimeRole::GuiClient 分支与 BackendControlClient。
+    ///     源码断言六个 Tauri wrapper 均含 RuntimeRole::GuiClient 分支与 BackendControlClient。
     #[test]
     fn experiment_tauri_wrappers_proxy_gui_client_to_control() {
         let src = include_str!(concat!(
@@ -785,12 +823,13 @@ mod tests {
             "get_orchestrator_experiment",
             "approve_orchestrator_experiment_winner",
             "cancel_orchestrator_experiment",
+            "prepare_experiment_downgrade",
         ] {
             assert!(src.contains(marker), "experiments.rs 必须定义 {marker}");
         }
         assert!(
-            src.matches("RuntimeRole::GuiClient").count() >= 5,
-            "五个 Tauri experiment 入口均需 GuiClient 分支"
+            src.matches("RuntimeRole::GuiClient").count() >= 6,
+            "六个 Tauri experiment 入口均需 GuiClient 分支"
         );
         assert!(
             src.contains("BackendControlClient::from_control_file"),
@@ -816,13 +855,17 @@ mod tests {
             src.contains(".get_orchestrator_experiment(&experiment_id)"),
             "get 必须走 control client"
         );
+        assert!(
+            src.contains(".prepare_experiment_downgrade()"),
+            "prepare_experiment_downgrade 必须走 control client"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
     ///     control 路由与 client path 漂移会导致 GUI 代理 404。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言 http_server / control_client 含 experiments 五条 control 路径字面量。
+    ///     断言 http_server / control_client 含 experiments 六条 control 路径字面量。
     #[test]
     fn experiment_control_routes_registered_in_http_and_client() {
         let http = include_str!(concat!(
@@ -839,6 +882,7 @@ mod tests {
             "/api/backend/control/orchestrator/experiments/get",
             "/api/backend/control/orchestrator/experiments/approve-winner",
             "/api/backend/control/orchestrator/experiments/cancel",
+            "/api/backend/control/orchestrator/experiments/prepare-downgrade",
         ] {
             assert!(http.contains(path), "http_server 必须挂载 {path}");
         }
@@ -848,6 +892,7 @@ mod tests {
             "orchestrator/experiments/get",
             "orchestrator/experiments/approve-winner",
             "orchestrator/experiments/cancel",
+            "orchestrator/experiments/prepare-downgrade",
         ] {
             assert!(client.contains(path), "control_client 必须调用 {path}");
         }

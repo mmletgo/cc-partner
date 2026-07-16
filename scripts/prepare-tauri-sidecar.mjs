@@ -56,6 +56,28 @@ function parseArgs(argv) {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   release matrix 按 cargo target 交叉准备 sidecar 时，managed Chromium 资源必须对齐
+ *   目标平台（如 linux 构建机为 mac 产物时不能下载 host chrome）。
+ *
+ * Code Logic（这个函数做什么）:
+ *   将常见 cargo target triple 映射为 prepare-browser-runtime 的 platform id；
+ *   未识别 triple 回落 `current`（本机 host 探测）。
+ *
+ * @param {string} triple cargo target triple
+ * @returns {string} browser-runtime platform id
+ */
+function cargoTargetToBrowserPlatform(triple) {
+  const map = {
+    'aarch64-apple-darwin': 'mac-arm64',
+    'x86_64-apple-darwin': 'mac-x64',
+    'x86_64-unknown-linux-gnu': 'linux64',
+    'x86_64-pc-windows-msvc': 'win64',
+  };
+  return map[triple] ?? 'current';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   未显式传 target 的 Windows/Linux CI job 和本地打包都必须使用当前 host triple 命名 sidecar。
  *
  * Code Logic（这个函数做什么）:
@@ -192,12 +214,17 @@ function main() {
 
   console.log(`准备 Tauri backend sidecar: target=${target}`);
 
-  // A5：打包前尽量准备当前平台 managed chrome-headless-shell 资源（失败不阻断 sidecar，
-  // verification 能力在运行时按缺失降级为 unavailable；L3 需单独认证）。
+  // A5：按 cargo target triple 映射 browser 平台（交叉编译时不能用 host `current`）。
+  // 失败不阻断 sidecar；verification 在运行时按缺失降级为 unavailable；L3 需单独认证。
   if (!options.dryRun) {
+    const browserPlatform = cargoTargetToBrowserPlatform(target);
     const prepareBrowser = spawnSync(
       process.execPath,
-      [resolve(REPO_ROOT, 'scripts/prepare-browser-runtime.mjs'), '--platform', 'current'],
+      [
+        resolve(REPO_ROOT, 'scripts/prepare-browser-runtime.mjs'),
+        '--platform',
+        browserPlatform,
+      ],
       { cwd: REPO_ROOT, encoding: 'utf8' },
     );
     if (prepareBrowser.status === 0) {

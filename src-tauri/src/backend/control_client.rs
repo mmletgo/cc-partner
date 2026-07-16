@@ -231,6 +231,13 @@ struct ControlOrchestratorExperimentCancelBody {
     experiment_id: String,
 }
 
+/// orchestrator experiment prepare-downgrade control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorExperimentPrepareDowngradeBody {
+    control_token: String,
+}
+
 /// workflow-document/get control body。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -986,6 +993,33 @@ impl BackendControlClient {
         };
         match self
             .send_once("orchestrator/experiments/cancel", &body, MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧执行 experiment 降级 quiesce。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     关闭能力前 cancel 非终态组必须在 owner 仓储完成；GuiClient 本地扫库无效且危险。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/experiments/prepare-downgrade`；mutation 不自动重试；返回 cancelled 计数。
+    pub async fn prepare_experiment_downgrade(&self) -> Result<u32, AppError> {
+        let body = ControlOrchestratorExperimentPrepareDowngradeBody {
+            control_token: self.control_token.clone(),
+        };
+        match self
+            .send_once(
+                "orchestrator/experiments/prepare-downgrade",
+                &body,
+                MUTATE_TIMEOUT,
+            )
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),

@@ -525,9 +525,12 @@ fn build_display_files(identities: Vec<ReviewFileIdentity>) -> (Vec<ReviewDiffFi
 
 /// Business Logic（为什么需要这个函数）:
 ///     Deliver 前用 digest 检测审阅后漂移；digest 绝不能只哈希截断后的展示 patch。
+///     同一磁盘内容在 untracked 与已 stage（status=added）之间切换时 digest 必须稳定，
+///     否则 delivery 的 stage→enforce 顺序会把合法 worktree 误判为漂移。
 ///
 /// Code Logic（这个函数做什么）:
-///     SHA-256(base_tree + head + 按 path 排序的 status/mode/old_oid/new_content_hash)。
+///     SHA-256(base_tree + head + 按 path 排序的 status/mode/old_oid/new_content_hash)；
+///     digest 内：status `untracked`→`added`；全 0 的 old_oid（含 git 缩写 0000000）归为空串。
 fn compute_review_digest(
     base_tree: &str,
     head_ref: &str,
@@ -539,13 +542,27 @@ fn compute_review_digest(
     hasher.update(head_ref.as_bytes());
     hasher.update([0]);
     for identity in identities {
+        // untracked 与 stage 后的 added 表示同一「相对 base 的新增内容」身份。
+        let status_for_digest = if identity.status == "untracked" {
+            "added"
+        } else {
+            identity.status.as_str()
+        };
+        // untracked 用 40×'0'，raw diff 可能给缩写 0000000；均视为「无旧 blob」。
+        let old_oid_for_digest = if identity.old_blob_oid.is_empty()
+            || identity.old_blob_oid.chars().all(|c| c == '0')
+        {
+            ""
+        } else {
+            identity.old_blob_oid.as_str()
+        };
         hasher.update(identity.path.as_bytes());
         hasher.update([0]);
-        hasher.update(identity.status.as_bytes());
+        hasher.update(status_for_digest.as_bytes());
         hasher.update([0]);
         hasher.update(identity.mode.as_bytes());
         hasher.update([0]);
-        hasher.update(identity.old_blob_oid.as_bytes());
+        hasher.update(old_oid_for_digest.as_bytes());
         hasher.update([0]);
         hasher.update(identity.new_content_hash.as_bytes());
         hasher.update([0]);
@@ -950,6 +967,23 @@ mod tests {
         assert!(!review_digests_match("abc", "abd"));
         assert!(!review_digests_match("", "abc"));
         assert!(review_digests_match("", ""));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     delivery 先 stage 再 enforce；同一磁盘新增文件在 untracked→added 后 digest 必须不变。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写 untracked 文件采 digest，`git add -A` 后再采，断言两次 digest 相等。
+    #[tokio::test]
+    async fn review_digest_stable_across_stage_for_new_file() {
+        let repo = DiffFixture::with_text_file("new-file.txt", 64).await;
+        let before = current_worktree_review_digest(repo.path()).expect("digest untracked");
+        git(repo.path(), &["add", "-A"]);
+        let after = current_worktree_review_digest(repo.path()).expect("digest staged");
+        assert_eq!(
+            before, after,
+            "stage must not change content identity digest"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

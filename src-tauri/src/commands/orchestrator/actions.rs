@@ -275,6 +275,14 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
     }
     add_verification_evidence(state, &task.id, &verification_review_evidence(&review)).await?;
     if review.passed {
+        // 所有 hard-gate 通过路径都持久化 review_digest，供 experiment 延后交付 rebind。
+        crate::orchestrator::delivery::persist_review_digest_evidence(
+            state.orchestrator_repo.as_ref(),
+            &task.id,
+            &review_digest,
+        )
+        .await?;
+
         // A4：experiment candidate 永不进入普通 HumanReview/delivery
         if task.delivery_suppressed || task.experiment_id.is_some() {
             // 将 Verifying 任务落到非交付终态：Done + InProgress/Idle，outcome=CandidateReady
@@ -362,7 +370,9 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
 ///
 /// Code Logic（这个函数做什么）:
 ///     读实验状态；若 WinnerReady 且 confidence=high 且 full-auto，则 CAS Delivering 并 deliver_task；
-///     任务 CAS 未命中且非 Delivering、或交付未 Done 时 recover 组状态，避免永久卡在 Delivering。
+///     必须加载 winner 持久化 review_digest，缺失则 fail closed 并 recover；
+///     任务 CAS 未命中且非 Delivering、或交付落到 Blocked/Aborted 等时 recover；
+///     若仍为 Delivering（丢锁/并发持有）则不 recover，留给持锁方完成（无启动崩溃恢复，NOT VERIFIED）。
 async fn maybe_auto_deliver_experiment_winner(
     state: &crate::state::AppState,
     experiment_id: &str,
@@ -407,8 +417,19 @@ async fn maybe_auto_deliver_experiment_winner(
             return Ok(());
         }
     }
-    // experiment 交付跨越 verifier 时窗，无连续 rebind；传 None。
-    let delivered = match run_delivery_for_task(state, &winner_id, None).await {
+    // fail closed：无持久化 digest 不得以 None 绕过 rebind。
+    let Some(digest) =
+        crate::orchestrator::delivery::load_persisted_review_digest(repo, &winner_id).await?
+    else {
+        tracing::warn!(
+            experiment_id = %experiment_id,
+            task_id = %winner_id,
+            "experiment winner missing reviewDigest evidence; refuse auto-delivery"
+        );
+        recover_experiment_from_failed_delivery(repo, experiment_id).await?;
+        return Ok(());
+    };
+    let delivered = match run_delivery_for_task(state, &winner_id, Some(digest)).await {
         Ok(dto) => dto,
         Err(err) => {
             tracing::debug!(
@@ -422,6 +443,13 @@ async fn maybe_auto_deliver_experiment_winner(
     };
     if delivered.status == OrchestratorTaskStatus::Done {
         mark_experiment_delivery_completed(repo, experiment_id).await?;
+    } else if delivered.status == OrchestratorTaskStatus::Delivering {
+        // 丢锁/并发交付仍在进行：保持组 Delivering，禁止误 recover 到 WinnerReady。
+        tracing::debug!(
+            experiment_id = %experiment_id,
+            task_id = %winner_id,
+            "experiment auto-delivery returned while still Delivering; leave for lock holder"
+        );
     } else {
         recover_experiment_from_failed_delivery(repo, experiment_id).await?;
     }

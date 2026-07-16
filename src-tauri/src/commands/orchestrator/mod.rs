@@ -53,7 +53,7 @@ pub use experiments::{
     create_orchestrator_experiment, create_orchestrator_experiment_for_state,
     get_orchestrator_experiment, get_orchestrator_experiment_for_state,
     list_orchestrator_experiments, list_orchestrator_experiments_for_state,
-    prepare_experiment_downgrade,
+    prepare_experiment_downgrade, prepare_experiment_downgrade_for_state,
 };
 pub use remote::{
     __cmd__discard_orchestrator_remote_outbox, __cmd__retry_orchestrator_remote_outbox,
