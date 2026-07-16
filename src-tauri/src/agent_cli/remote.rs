@@ -18,10 +18,11 @@ use crate::agent_cli::selectors::{
 use crate::commands::workbench::device_base_url;
 use crate::error::AppError;
 use crate::net::protocol::{
-    PeerProtocolInfo, CAPABILITY_ATTENTION_V1, CAPABILITY_ERRORS_ENVELOPE_V1,
-    CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
-    CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
-    CAPABILITY_WORKBENCH_LAN_FLEET_V1, PROTOCOL_VERSION_V1,
+    PeerProtocolInfo, CAPABILITY_ATTENTION_V1, CAPABILITY_DEVICE_REQUEST_BINDING_V1,
+    CAPABILITY_ERRORS_ENVELOPE_V1, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
+    CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1,
+    CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1, CAPABILITY_WORKBENCH_LAN_FLEET_V1,
+    PROTOCOL_VERSION_V1,
 };
 use crate::net::routes::health::HealthResponse;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
@@ -138,9 +139,11 @@ pub async fn require_remote_device(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     旧 peer / 缺能力必须 exit 6；offline exit 5；stale peer 映射 exit 4（device_id_mismatch）。
+///     凡会发送 `X-Cc-Partner-Expected-Device-Id` 的路径还必须要求
+///     `device.request-binding.v1`，否则旧 peer 忽略设备头会 fail-open。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 `require_remote_device`；再检查 protocol_version 与 capability token。
+///     先 `require_remote_device`；再要求 binding + 目标 capability token。
 pub async fn require_remote_capability(
     base_url: &str,
     expected_device_id: &str,
@@ -152,6 +155,11 @@ pub async fn require_remote_capability(
         return Err(CliError::unsupported(
             "remote peer protocol version is below v1",
         ));
+    }
+    if !info.supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1) {
+        return Err(CliError::unsupported(format!(
+            "remote peer missing capability {CAPABILITY_DEVICE_REQUEST_BINDING_V1}"
+        )));
     }
     if !info.supports(capability) {
         return Err(CliError::unsupported(format!(
@@ -1090,7 +1098,10 @@ mod tests {
         let base = spawn_health_server(
             "actual-device",
             true,
-            vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+            vec![
+                CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
+                CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+            ],
         )
         .await;
         let err = require_remote_device(&base, "expected-device")
@@ -1111,7 +1122,10 @@ mod tests {
         let base = spawn_health_server(
             "device-ok",
             true,
-            vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+            vec![
+                CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
+                CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+            ],
         )
         .await;
         let health = require_remote_device(&base, "device-ok")
@@ -1146,7 +1160,10 @@ mod tests {
                         http_port: 1,
                         ts: 1,
                         protocol_version: PROTOCOL_VERSION_V1,
-                        capabilities: vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+                        capabilities: vec![
+                            CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
+                            CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+                        ],
                     })
                 }),
             )
@@ -1207,6 +1224,7 @@ mod tests {
                         ts: 1,
                         protocol_version: PROTOCOL_VERSION_V1,
                         capabilities: vec![
+                            CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
                             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
                             CAPABILITY_ATTENTION_V1.to_string(),
                         ],
@@ -1277,7 +1295,10 @@ mod tests {
                         http_port: 1,
                         ts: 1,
                         protocol_version: PROTOCOL_VERSION_V1,
-                        capabilities: vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+                        capabilities: vec![
+                            CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
+                            CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
+                        ],
                     })
                 }),
             )

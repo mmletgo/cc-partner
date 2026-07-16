@@ -46,6 +46,19 @@ pub struct IdempotentCreateTaskOutcome {
     pub newly_created: bool,
 }
 
+/// Delivering→Done CAS 结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     交付收尾写 Done 可能与用户 Abort 并发；仅 Transitioned 时可安全清理 worktree。
+///
+/// Code Logic（这个枚举做什么）:
+///     `Transitioned` 表示 rows_affected==1 已写入 Done；`CasMiss` 表示未改写，携带当前行。
+#[derive(Debug, Clone)]
+pub enum FinishTaskDoneOutcome {
+    Transitioned(crate::orchestrator::models::OrchestratorTaskRow),
+    CasMiss(crate::orchestrator::models::OrchestratorTaskRow),
+}
+
 /// Orchestrator 仓储。
 ///
 /// Business Logic（为什么需要这个结构体）:

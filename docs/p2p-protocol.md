@@ -90,6 +90,7 @@ advertised capabilities are:
 - `attention.v1` — Mobile Attention snapshot (`GET /api/mobile/attention`); v1 sources only (no Agent/Experiment variants)
 - `attention.v2` — Attention snapshot with Agent needsInput/failed projections (`GET /api/mobile/attention/v2`, Tauri `list_attention_items_v2`); clients prefer v2 and fall back to v1
 - `cc-history.paged-sync.v1` — bounded CC History paged sync (`POST /api/cc-history/sync/{manifest-page,items,push-batch}`); token and the three routes ship atomically
+- `device.request-binding.v1` — peer **honors** `X-Cc-Partner-Expected-Device-Id` fail-closed on mismatch (via `expected_device_id_guard`); protocol negotiation only — **not** auth/trust/pairing or LAN identity encryption; bound clients must require this capability before sending the header so old peers cannot fail-open
 - `errors.envelope.v1` — standard error envelope wire format
 - `orchestrator.runtime-snapshot.v1` · `orchestrator.agent-adapters.v1` · `orchestrator.experiments.v1` — owning-device runtime snapshot / adapters / automated candidate experiments
 - `orchestrator.workflow-document.v1` — owning-device WORKFLOW.md document get/validate/save (`POST /api/orchestrator/workflow-document/{get,validate,save}`); token and routes ship atomically; mobile remote-aware wrappers under `/api/mobile/orchestrator/workflow-document/*`. Save is CAS (`expectedHash` → conflict `workflow_document_changed`); **does not dispatch and cannot enable/change delivery** (Settings-only delivery)

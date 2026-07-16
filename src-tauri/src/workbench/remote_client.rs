@@ -9,10 +9,12 @@
 //!     解析错误统一转换为简洁中文 AppError。
 
 use crate::error::AppError;
+use crate::net::peer_client::PeerClient;
+use crate::net::peer_error::peer_call_error_to_app_error;
 use crate::net::protocol::CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1;
 use crate::net::protocol::{
-    PeerProtocolInfo, CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1,
-    CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
+    PeerProtocolInfo, CAPABILITY_DEVICE_REQUEST_BINDING_V1,
+    CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
 };
 use crate::workbench::agent_ledger::models::{
     AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
@@ -146,6 +148,34 @@ impl RemoteWorkbenchClient {
             .clone()
             .filter(|id| !id.is_empty())
             .unwrap_or_else(crate::net::request_context::new_request_id)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     绑定 expected_device_id 时，旧 peer 会忽略设备头并 fail-open；必须先确认对端
+    ///     宣告 `device.request-binding.v1` 且 health.device_id 精确匹配。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     expected_device_id 为 None 时直接 Ok；否则 require_capability(binding) + device_id 精确匹配，
+    ///     不匹配 → conflict；缺能力 → validation（Unsupported）。
+    async fn ensure_expected_device_binding(&self, base_url: &str) -> Result<(), AppError> {
+        let Some(expected) = self.expected_device_id.as_deref() else {
+            return Ok(());
+        };
+        let expected = expected.trim();
+        if expected.is_empty() {
+            return Ok(());
+        }
+        let health = PeerClient::new()
+            .require_capability(base_url, CAPABILITY_DEVICE_REQUEST_BINDING_V1)
+            .await
+            .map_err(|err| peer_call_error_to_app_error(err, "远端 Workbench"))?;
+        if health.device_id.trim() != expected {
+            return Err(AppError::conflict(format!(
+                "远端 Workbench device_id 不匹配: expected={expected}, got={}",
+                health.device_id
+            )));
+        }
+        Ok(())
     }
 
     /// 获取远端设备可浏览的根目录。
@@ -1448,6 +1478,10 @@ impl RemoteWorkbenchClient {
     where
         T: DeserializeOwned,
     {
+        if self.expected_device_id.is_some() {
+            let base = origin_base_url(&url)?;
+            self.ensure_expected_device_binding(&base).await?;
+        }
         let mut req = self
             .client
             .get(&url)
@@ -1501,6 +1535,10 @@ impl RemoteWorkbenchClient {
         T: DeserializeOwned,
         B: Serialize + ?Sized,
     {
+        if self.expected_device_id.is_some() {
+            let base = origin_base_url(&url)?;
+            self.ensure_expected_device_binding(&base).await?;
+        }
         let mut req = self
             .client
             .post(&url)
@@ -1519,6 +1557,24 @@ impl RemoteWorkbenchClient {
         let response = req.send().await.map_err(map_remote_send_error)?;
         parse_json_response(response).await
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     get_json/post_json 收到完整 endpoint URL，能力探测只需 origin base。
+///
+/// Code Logic（这个函数做什么）:
+///     用 `url::Url`/`reqwest::Url` 解析 scheme/host/port，拼 `scheme://host:port`。
+fn origin_base_url(full_url: &str) -> Result<String, AppError> {
+    let parsed = reqwest::Url::parse(full_url)
+        .map_err(|err| AppError::generic(format!("远端 Workbench URL 无效: {err}")))?;
+    let scheme = parsed.scheme();
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::generic("远端 Workbench URL 缺少 host"))?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| AppError::generic("远端 Workbench URL 缺少 port"))?;
+    Ok(format!("{scheme}://{host}:{port}"))
 }
 
 /// Business Logic: legacy mutation 路径需要区分 timeout vs network，才能映射 unknown envelope。

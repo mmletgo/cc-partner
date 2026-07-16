@@ -1815,7 +1815,14 @@ async fn finish_task_done_does_not_override_aborted_task() {
     let finished = repo.finish_task_done(&created.id).await.unwrap();
     let persisted = repo.get_task(&created.id).await.unwrap();
 
-    assert_eq!(finished.status, OrchestratorTaskStatus::Aborted);
+    match finished {
+        crate::orchestrator::repo::FinishTaskDoneOutcome::CasMiss(row) => {
+            assert_eq!(row.status, OrchestratorTaskStatus::Aborted);
+        }
+        crate::orchestrator::repo::FinishTaskDoneOutcome::Transitioned(_) => {
+            panic!("aborted task must not transition to Done");
+        }
+    }
     assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
     assert!(persisted.finished_at.is_none());
 }
@@ -3338,7 +3345,12 @@ async fn operational_notification_event_bumps_state_version_on_blocked_and_done(
     repo.set_task_status("task-bd", OrchestratorTaskStatus::Delivering, None)
         .await
         .unwrap();
-    let done = repo.finish_task_done("task-bd").await.unwrap();
+    let done = match repo.finish_task_done("task-bd").await.unwrap() {
+        crate::orchestrator::repo::FinishTaskDoneOutcome::Transitioned(row) => row,
+        crate::orchestrator::repo::FinishTaskDoneOutcome::CasMiss(row) => {
+            panic!("expected Transitioned, got CasMiss status={:?}", row.status);
+        }
+    };
     assert_eq!(done.status, OrchestratorTaskStatus::Done);
     assert!(done.state_version >= 2);
 }

@@ -137,6 +137,17 @@ pub const CAPABILITY_TRANSFER_RESUME_V1: &str = "transfer.resume.v1";
 ///     `server_protocol_info()` 中宣告。
 pub const CAPABILITY_CC_HISTORY_PAGED_SYNC_V1: &str = "cc-history.paged-sync.v1";
 
+/// 能力 token：对端 **honors** `X-Cc-Partner-Expected-Device-Id` 请求绑定 fail-closed。
+///
+/// Business Logic（为什么需要这个 token）:
+///     绑定了 expected_device_id 的客户端若对旧 peer 仍只靠 header 注入，旧 peer 会忽略 header
+///     并 fail-open 执行 mutation。本 token 表示对端已挂载 expected_device_id_guard，
+///     不匹配时冲突拒绝。**不是**鉴权/信任/配对，也不提供 LAN 身份加密。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 `lan_guard::expected_device_id_guard` 原子上线。
+pub const CAPABILITY_DEVICE_REQUEST_BINDING_V1: &str = "device.request-binding.v1";
+
 /// 能力 token：Prompt/SSH/Scratchpad 有界 manifest/items/push-batch v2
 /// （`POST /api/sync/prompts/*`、`/api/ssh-target/sync/*`、`/api/scratchpad/sync/*` 新路由）。
 ///
@@ -277,6 +288,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_ATTENTION_V1.to_string(),
             CAPABILITY_ATTENTION_V2.to_string(),
             CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
+            CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1.to_string(),
@@ -440,6 +452,7 @@ mod tests {
                 "attention.v1".to_string(),
                 "attention.v2".to_string(),
                 "cc-history.paged-sync.v1".to_string(),
+                "device.request-binding.v1".to_string(),
                 "errors.envelope.v1".to_string(),
                 "orchestrator.agent-adapters.v1".to_string(),
                 "orchestrator.experiments.v1".to_string(),
@@ -459,6 +472,7 @@ mod tests {
         );
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
+        assert!(info.supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_AGENT_ADAPTERS_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1));
         assert!(info.supports(CAPABILITY_SYNC_MANIFEST_V2));

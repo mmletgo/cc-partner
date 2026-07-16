@@ -69,6 +69,47 @@ pub enum MergeBranchOutcome {
     Conflicted,
 }
 
+/// 冻结的 push 目标（remote + remote ref），禁止在 merge 后再读可变分支解析。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     自动交付在 merge main 前后主分支 tip 与 checkout 可能变化；push 必须绑定 merge 前解析的
+///     remote/ref，否则会把 merge OID 推到错误分支或跟随漂移 tip。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 local branch 名、remote 名与完整 remote ref（如 refs/heads/main）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenPushTarget {
+    pub branch: String,
+    pub remote: String,
+    pub remote_ref: String,
+}
+
+/// 已按 reviewed OID 合并 main 后的冻结结果。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     merge 成功后调用方只应 push 固定 merge OID 到固定 remote/ref，不能再读 current branch。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 merge 后的 commit OID 与 merge 前冻结的 push target。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenMainMergeResult {
+    pub merge_oid: String,
+    pub push_target: FrozenPushTarget,
+}
+
+/// reviewed OID merge 的分类结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     交付流水线需要区分 merge 成功（可 push 固定 OID）与冲突（应 abort 并 Blocked）。
+///
+/// Code Logic（这个枚举做什么）:
+///     Merged 携带冻结 push 目标与 merge OID；Conflicted 表示已检测到冲突。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeReviewedOutcome {
+    Merged(FrozenMainMergeResult),
+    Conflicted,
+}
+
 const MAX_COMMIT_DIFF_CHARS: usize = 24_000;
 
 /// Business Logic（为什么需要这个函数）:
@@ -693,6 +734,7 @@ pub fn commit_frozen_tree(
             run_git(path, &["update-ref", &refname, &new_oid, old])?;
         }
         None => {
+            // unborn：仅允许 zero-OID CAS；失败不得无条件 update-ref 覆盖已有 tip。
             run_git(
                 path,
                 &[
@@ -701,8 +743,7 @@ pub fn commit_frozen_tree(
                     &new_oid,
                     "0000000000000000000000000000000000000000",
                 ],
-            )
-            .or_else(|_| run_git(path, &["update-ref", &refname, &new_oid]))?;
+            )?;
         }
     }
     Ok(new_oid)
@@ -733,18 +774,51 @@ pub fn commit_tree_hash(path: &Path, commit_oid: &str) -> Result<String, AppErro
 ///     自动交付必须推送“已审 commit OID”，禁止按分支 tip 再解析导致未审提交被推送。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 push target；执行 `git push <remote> <commit_oid>:refs/heads/<branch>`
-///     （有 upstream 时同样用显式 refspec，避免跟随可变 HEAD）。
+///     先 `freeze_push_target` 再 `push_commit_oid_to`；有 upstream 时同样用显式 refspec。
 pub fn push_commit_oid(path: &Path, branch: &str, commit_oid: &str) -> Result<(), AppError> {
+    let target = freeze_push_target(path, branch)?;
+    push_commit_oid_to(path, &target.remote, &target.remote_ref, commit_oid)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge main 前必须冻结 remote/ref，merge 后再读 current branch 会跟到错误 tip。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 branch 的 push remote 与 remote_ref，返回 FrozenPushTarget。
+pub fn freeze_push_target(path: &Path, branch: &str) -> Result<FrozenPushTarget, AppError> {
     if branch.trim().is_empty() {
         return Err(AppError::generic("当前 worktree 没有可推送的分支"));
+    }
+    let (remote, remote_ref) = resolve_push_remote_and_ref(path, branch)?;
+    Ok(FrozenPushTarget {
+        branch: branch.trim().to_string(),
+        remote,
+        remote_ref,
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     已冻结 remote/ref 后，push 不得再解析可变分支配置。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git push <remote> <commit_oid>:<remote_ref>`，remote/ref 仅使用入参。
+pub fn push_commit_oid_to(
+    path: &Path,
+    remote: &str,
+    remote_ref: &str,
+    commit_oid: &str,
+) -> Result<(), AppError> {
+    if remote.trim().is_empty() {
+        return Err(AppError::generic("push remote 不能为空"));
+    }
+    if remote_ref.trim().is_empty() {
+        return Err(AppError::generic("push remote ref 不能为空"));
     }
     if commit_oid.trim().is_empty() {
         return Err(AppError::generic("commit oid 不能为空"));
     }
-    let (remote, remote_ref) = resolve_push_remote_and_ref(path, branch)?;
-    let refspec = format!("{}:{}", commit_oid.trim(), remote_ref);
-    run_git(path, &["push", &remote, &refspec])?;
+    let refspec = format!("{}:{}", commit_oid.trim(), remote_ref.trim());
+    run_git(path, &["push", remote.trim(), &refspec])?;
     Ok(())
 }
 
@@ -777,12 +851,57 @@ fn resolve_push_remote_and_ref(path: &Path, branch: &str) -> Result<(String, Str
 ///     merge 成功后主分支 tip 也必须按固定 OID 推送，禁止再读可变 current branch tip。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取当前分支名，调用 `push_commit_oid` 推送给定 main commit OID。
+///     读取当前分支名并 freeze push target，再 push 给定 main commit OID。
+///     交付流水线优先用 `push_main_commit_oid_to`（merge 前已冻结 target）；本函数保留给
+///     单步「当前 HEAD + 当前 branch」推送场景。
+#[allow(dead_code)]
 pub fn push_main_commit_oid(path: &Path, commit_oid: &str) -> Result<String, AppError> {
     let branch =
         current_branch(path).ok_or_else(|| AppError::generic("主工作区没有可推送的当前分支"))?;
-    push_commit_oid(path, &branch, commit_oid)?;
+    let target = freeze_push_target(path, &branch)?;
+    push_main_commit_oid_to(path, &target, commit_oid)?;
     Ok(branch)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     交付 merge 前已冻结的 main push target 必须原样用于 push，禁止再解析 current branch。
+///
+/// Code Logic（这个函数做什么）:
+///     仅使用 `target.remote` / `target.remote_ref` 调用 `push_commit_oid_to`。
+pub fn push_main_commit_oid_to(
+    path: &Path,
+    target: &FrozenPushTarget,
+    commit_oid: &str,
+) -> Result<(), AppError> {
+    push_commit_oid_to(path, &target.remote, &target.remote_ref, commit_oid)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge reviewed OID 时必须先冻结 main 的 push remote/ref，再 merge，再读 merge OID；
+///     调用方须持有 project main 进程锁，保证 freeze/merge/head 原子序。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 读 current branch → freeze_push_target；2) merge_commit_oid；
+///     3) Conflicted 原样返回；Merged 后 head_hash 作为 merge_oid。
+pub fn merge_reviewed_oid_with_frozen_main(
+    main_path: &Path,
+    reviewed_oid: &str,
+) -> Result<MergeReviewedOutcome, AppError> {
+    let branch = current_branch(main_path)
+        .ok_or_else(|| AppError::generic("主工作区没有可合并的当前分支"))?;
+    let push_target = freeze_push_target(main_path, &branch)?;
+    match merge_commit_oid(main_path, reviewed_oid)? {
+        MergeBranchOutcome::Conflicted => Ok(MergeReviewedOutcome::Conflicted),
+        MergeBranchOutcome::Merged => {
+            let merge_oid = head_hash(main_path)?.ok_or_else(|| {
+                AppError::generic("merge main failed: main HEAD empty after merge")
+            })?;
+            Ok(MergeReviewedOutcome::Merged(FrozenMainMergeResult {
+                merge_oid,
+                push_target,
+            }))
+        }
+    }
 }
 
 /// 解析当前分支 upstream 的 remote 名（如 origin）。
@@ -1275,6 +1394,14 @@ pub fn branch_slug(branch: &str) -> String {
 /// Code Logic（这个函数做什么）:
 ///     从 `branch...upstream [ahead N, behind M]` 中提取 branch/ahead/behind。
 fn parse_branch_header(header: &str, status: &mut WorkbenchGitStatusDto) {
+    // unborn: `No commits yet on <branch>`（不能按空格取首 token，否则会得到 "No"）。
+    if let Some(rest) = header.strip_prefix("No commits yet on ") {
+        let branch = rest.split([' ', '[']).next().unwrap_or_default().trim();
+        if !branch.is_empty() {
+            status.branch = Some(branch.to_string());
+        }
+        return;
+    }
     let branch_part = header
         .split([' ', '['])
         .next()
@@ -1798,6 +1925,144 @@ UU web/src/App.tsx
         assert_eq!(outcome, MergeBranchOutcome::Merged);
         assert!(main.join("feat.txt").exists());
         assert!(!main.join("extra.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     unborn zero-OID CAS 失败时不得无条件 update-ref 覆盖并发初始 commit。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     orphan 分支上先 commit-tree 成功落首 tip，再以 expected_parent=None 并发第二次
+    ///     commit_frozen_tree，断言失败且 tip 仍为第一次 OID。
+    #[test]
+    fn commit_frozen_tree_unborn_cas_does_not_overwrite_existing_tip() {
+        let root = temp_git_dir("workbench-unborn-cas");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["checkout", "--orphan", "unborn-feature"]);
+        git_test_command(&repo, &["config", "user.email", "test@example.com"]);
+        git_test_command(&repo, &["config", "user.name", "Workbench Test"]);
+        // orphan 分支尚无 commit：write-tree 空 index 后 CAS；第二次必须失败。
+        let empty_tree = git_test_command(&repo, &["write-tree"]).trim().to_string();
+        let first =
+            commit_frozen_tree(&repo, &empty_tree, "first unborn", None).expect("first unborn CAS");
+        let tip_after_first = head_hash(&repo).expect("head").expect("some tip");
+        assert_eq!(tip_after_first, first);
+        // 再造不同 tree 内容后第二次 unborn CAS 应失败。
+        fs::write(repo.join("a.txt"), "race\n").expect("write");
+        git_test_command(&repo, &["add", "a.txt"]);
+        let second_tree = write_tree_hash(&repo).expect("second tree");
+        let err = commit_frozen_tree(&repo, &second_tree, "second unborn", None)
+            .expect_err("second unborn CAS must fail");
+        assert!(
+            err.to_string().contains("update-ref")
+                || err.to_string().contains("Git 命令失败")
+                || err.to_string().to_ascii_lowercase().contains("cannot lock")
+                || err.to_string().contains("but expected"),
+            "unexpected err: {err}"
+        );
+        let tip_now = head_hash(&repo).expect("head").expect("some tip");
+        assert_eq!(tip_now, first, "first tip must remain after failed CAS");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     freeze_push_target 后 push 不得因 checkout 切换而改写 remote/ref。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     bare origin + clone；freeze main 目标后 checkout 另一分支，仍用冻结 target push OID。
+    #[test]
+    fn push_commit_oid_to_uses_frozen_remote_ref_after_checkout_change() {
+        let root = temp_git_dir("workbench-frozen-push");
+        let origin = root.join("origin.git");
+        let main = root.join("main");
+        fs::create_dir_all(&origin).expect("origin");
+        git_test_command(&origin, &["init", "--bare"]);
+        fs::create_dir_all(&main).expect("main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        fs::write(main.join("README.md"), "base\n").expect("write");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "initial"]);
+        git_test_command(
+            &main,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git_test_command(&main, &["push", "-u", "origin", "main"]);
+        let target = freeze_push_target(&main, "main").expect("freeze main");
+        assert_eq!(target.branch, "main");
+        assert_eq!(target.remote, "origin");
+        assert_eq!(target.remote_ref, "refs/heads/main");
+        fs::write(main.join("feat.txt"), "v1\n").expect("feat");
+        git_test_command(&main, &["add", "feat.txt"]);
+        git_test_command(&main, &["commit", "-m", "feat"]);
+        let oid = head_hash(&main).expect("head").expect("oid");
+        // 切换到其它本地分支，证明 push 不读 current branch。
+        git_test_command(&main, &["checkout", "-b", "other"]);
+        push_commit_oid_to(&main, &target.remote, &target.remote_ref, &oid).expect("push frozen");
+        let origin_main = git_test_command(&origin, &["rev-parse", "refs/heads/main"])
+            .trim()
+            .to_string();
+        assert_eq!(origin_main, oid);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     merge_reviewed_oid_with_frozen_main 必须在 merge 前冻结 branch/remote/ref。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     feature OID merge 进 main；断言 FrozenMainMergeResult.push_target.branch=main，
+    ///     merge_oid 等于 merge 后 HEAD。
+    #[test]
+    fn merge_reviewed_oid_with_frozen_main_freezes_branch_before_merge() {
+        let root = temp_git_dir("workbench-frozen-merge");
+        let origin = root.join("origin.git");
+        let main = root.join("main");
+        let feature = root.join("feature");
+        fs::create_dir_all(&origin).expect("origin");
+        git_test_command(&origin, &["init", "--bare"]);
+        fs::create_dir_all(&main).expect("main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        fs::write(main.join("README.md"), "base\n").expect("write");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "initial"]);
+        git_test_command(
+            &main,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git_test_command(&main, &["push", "-u", "origin", "main"]);
+        git_test_command(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/freeze",
+                feature.to_str().unwrap(),
+            ],
+        );
+        fs::write(feature.join("feat.txt"), "v1\n").expect("feat");
+        git_test_command(&feature, &["add", "feat.txt"]);
+        git_test_command(&feature, &["commit", "-m", "feat"]);
+        let reviewed = head_hash(&feature).expect("head").expect("oid");
+        let outcome = merge_reviewed_oid_with_frozen_main(&main, &reviewed).expect("merge frozen");
+        match outcome {
+            MergeReviewedOutcome::Merged(result) => {
+                assert_eq!(result.push_target.branch, "main");
+                assert_eq!(result.push_target.remote, "origin");
+                assert_eq!(result.push_target.remote_ref, "refs/heads/main");
+                let head = head_hash(&main).expect("head").expect("oid");
+                assert_eq!(result.merge_oid, head);
+                assert!(main.join("feat.txt").exists());
+            }
+            MergeReviewedOutcome::Conflicted => panic!("expected merged"),
+        }
         let _ = fs::remove_dir_all(root);
     }
 

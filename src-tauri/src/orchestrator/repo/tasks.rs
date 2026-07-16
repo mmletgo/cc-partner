@@ -10,7 +10,7 @@
 #![allow(unused_imports)]
 
 use super::helpers::*;
-use super::OrchestratorRepo;
+use super::{FinishTaskDoneOutcome, OrchestratorRepo};
 use crate::error::AppError;
 use crate::orchestrator::claim::{
     preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
@@ -916,14 +916,15 @@ impl OrchestratorRepo {
 
     /// Business Logic（为什么需要这个函数）:
     ///     自动交付完整成功后，任务需要进入 Done；但用户可能在交付期间终止任务，Done 写入不能覆盖 Aborted。
+    ///     调用方必须能区分 Transitioned 与 CasMiss，以免 CasMiss 时仍清理 worktree。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅当当前状态仍为 Delivering 时将 status 置为 done、清空 blocked_reason 并写 finished_at；
-    ///     条件未命中时读取并返回当前任务，不改写终止或其它状态。
-    pub async fn finish_task_done(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+    ///     仅当 status 仍为 Delivering 时 CAS 写 done/finished_at；`rows_affected==1` → Transitioned，
+    ///     否则 CasMiss 并返回当前任务行（不改写终止或其它状态）。
+    pub async fn finish_task_done(&self, task_id: &str) -> Result<FinishTaskDoneOutcome, AppError> {
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Done);
-        with_shared_write_lease(&self.gate, async {
+        let result = with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "UPDATE orchestrator_tasks \
                  SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, \
@@ -942,7 +943,12 @@ impl OrchestratorRepo {
             .await
         })
         .await?;
-        self.get_task(task_id).await
+        let row = self.get_task(task_id).await?;
+        if result.rows_affected() == 1 {
+            Ok(FinishTaskDoneOutcome::Transitioned(row))
+        } else {
+            Ok(FinishTaskDoneOutcome::CasMiss(row))
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:

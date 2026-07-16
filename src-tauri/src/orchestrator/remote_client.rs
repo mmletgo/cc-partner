@@ -14,9 +14,10 @@ use crate::commands::orchestrator::OrchestratorRuntimeSnapshotDto;
 use crate::commands::prompt_optimizer::OrchestratorTaskPromptCompletionDto;
 use crate::error::AppError;
 use crate::net::peer_client::PeerClient;
-use crate::net::peer_error::{parse_peer_response, PeerCallError};
+use crate::net::peer_error::{parse_peer_response, peer_call_error_to_app_error, PeerCallError};
 use crate::net::protocol::{
-    CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1, CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
+    CAPABILITY_DEVICE_REQUEST_BINDING_V1, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
+    CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1,
 };
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{OrchestratorEvidenceDto, OrchestratorTaskDto};
@@ -122,6 +123,33 @@ impl RemoteOrchestratorClient {
             .clone()
             .filter(|id| !id.is_empty())
             .unwrap_or_else(crate::net::request_context::new_request_id)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     绑定 expected_device_id 时，旧 peer 会忽略设备头并 fail-open；必须先确认对端
+    ///     宣告 `device.request-binding.v1` 且 health.device_id 精确匹配。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     expected_device_id 为 None 时直接 Ok；否则 require_capability(binding) + device_id 精确匹配。
+    async fn ensure_expected_device_binding(&self, base_url: &str) -> Result<(), AppError> {
+        let Some(expected) = self.expected_device_id.as_deref() else {
+            return Ok(());
+        };
+        let expected = expected.trim();
+        if expected.is_empty() {
+            return Ok(());
+        }
+        let health = PeerClient::new()
+            .require_capability(base_url, CAPABILITY_DEVICE_REQUEST_BINDING_V1)
+            .await
+            .map_err(|err| peer_call_error_to_app_error(err, "远端 Orchestrator"))?;
+        if health.device_id.trim() != expected {
+            return Err(AppError::conflict(format!(
+                "远端 Orchestrator device_id 不匹配: expected={expected}, got={}",
+                health.device_id
+            )));
+        }
+        Ok(())
     }
 
     /// 在远端项目中创建 Orchestrator 任务。
@@ -315,6 +343,7 @@ impl RemoteOrchestratorClient {
         T: DeserializeOwned,
         B: Serialize,
     {
+        self.ensure_expected_device_binding_peer(url).await?;
         let outbound_request_id = self
             .forwarded_request_id
             .clone()
@@ -340,6 +369,38 @@ impl RemoteOrchestratorClient {
             source: error,
         })?;
         parse_peer_response::<T>(response, url).await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     post_json_peer / runtime_snapshot 返回 PeerCallError，绑定检查须保留 Unsupported 变体。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     expected_device_id 缺省时 Ok；否则 require_capability(binding) 并精确比对 device_id。
+    async fn ensure_expected_device_binding_peer(&self, url: &str) -> Result<(), PeerCallError> {
+        let Some(expected) = self.expected_device_id.as_deref() else {
+            return Ok(());
+        };
+        let expected = expected.trim();
+        if expected.is_empty() {
+            return Ok(());
+        }
+        let base = origin_base_url(url).map_err(|err| PeerCallError::InvalidResponse {
+            url: url.to_string(),
+            reason: err.to_string(),
+        })?;
+        let health = PeerClient::new()
+            .require_capability(&base, CAPABILITY_DEVICE_REQUEST_BINDING_V1)
+            .await?;
+        if health.device_id.trim() != expected {
+            return Err(PeerCallError::InvalidResponse {
+                url: base,
+                reason: format!(
+                    "device_id mismatch: expected={expected}, got={}",
+                    health.device_id
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// 将远端草稿任务入队。
@@ -570,6 +631,12 @@ impl RemoteOrchestratorClient {
         PeerClient::new()
             .require_capability(base_url, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1)
             .await?;
+        // 绑定 expected_device_id 时 fail-closed：缺 binding 能力或 device 不匹配不得发路由。
+        self.ensure_expected_device_binding_peer(&endpoint_url(
+            base_url,
+            "/api/orchestrator/runtime-snapshot",
+        ))
+        .await?;
 
         // 出站 request_id：非空入参原样转发（含首尾空格，与 middleware 可打印 ASCII 契约一致），
         // 仅真正空串生成新 UUID（禁止 trim，避免 ` req-1 ` 被改写）。
@@ -652,6 +719,10 @@ impl RemoteOrchestratorClient {
     where
         T: DeserializeOwned,
     {
+        if self.expected_device_id.is_some() {
+            let base = origin_base_url(&url)?;
+            self.ensure_expected_device_binding(&base).await?;
+        }
         let mut req = self
             .client
             .get(&url)
@@ -695,6 +766,10 @@ impl RemoteOrchestratorClient {
         T: DeserializeOwned,
         B: Serialize + ?Sized,
     {
+        if self.expected_device_id.is_some() {
+            let base = origin_base_url(&url)?;
+            self.ensure_expected_device_binding(&base).await?;
+        }
         let mut req = self
             .client
             .post(&url)
@@ -719,6 +794,24 @@ impl RemoteOrchestratorClient {
             })?;
         parse_json_response(response, &url).await
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     get_json/post_json 收到完整 endpoint URL，能力探测只需 origin base。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 scheme/host/port，拼 `scheme://host:port`。
+fn origin_base_url(full_url: &str) -> Result<String, AppError> {
+    let parsed = reqwest::Url::parse(full_url)
+        .map_err(|err| AppError::generic(format!("远端 Orchestrator URL 无效: {err}")))?;
+    let scheme = parsed.scheme();
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::generic("远端 Orchestrator URL 缺少 host"))?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| AppError::generic("远端 Orchestrator URL 缺少 port"))?;
+    Ok(format!("{scheme}://{host}:{port}"))
 }
 
 impl Default for RemoteOrchestratorClient {
@@ -864,7 +957,10 @@ mod tests {
     use super::*;
     use crate::error::AppErrorCategory;
     use crate::net::peer_error::PeerCallError;
-    use crate::net::protocol::CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1;
+    use crate::net::protocol::{
+        CAPABILITY_DEVICE_REQUEST_BINDING_V1, CAPABILITY_ERRORS_ENVELOPE_V1,
+        CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1, PROTOCOL_VERSION_V1,
+    };
     use crate::net::routes::health::HealthResponse;
     use crate::orchestrator::models::OrchestratorAttemptPhase;
     use axum::http::StatusCode;
@@ -2137,40 +2233,159 @@ mod tests {
     ///     with_expected_device_id 绑定后，post_json 路径必须把设备头送到对端。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     echo server 捕获 X-Cc-Partner-Expected-Device-Id；带 device_id 的 list_tasks 断言命中。
+    ///     health 宣告 binding + matching device_id；list 捕获设备头并断言命中。
     #[tokio::test]
     async fn with_expected_device_id_propagates_header_on_post_json() {
         let observed: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
         let observed_clone = observed.clone();
-        let app = Router::new().route(
-            "/api/orchestrator/tasks/list",
-            post(
-                move |headers: axum::http::HeaderMap, _req: Json<RemoteListTasksReq>| {
-                    let observed = observed_clone.clone();
-                    async move {
-                        let id = headers
-                            .get(crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str())
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or("")
-                            .to_string();
-                        *observed.lock().unwrap() = id;
-                        Json(RemoteOrchestratorTaskListResp {
-                            tasks: Vec::<OrchestratorTaskDto>::new(),
-                        })
-                    }
-                },
-            ),
-        );
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_clone = hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "device-owner-42".into(),
+                        device_name: "owner".into(),
+                        http_port: 1,
+                        ts: 1,
+                        protocol_version: PROTOCOL_VERSION_V1,
+                        capabilities: vec![CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string()],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/list",
+                post(
+                    move |headers: axum::http::HeaderMap, _req: Json<RemoteListTasksReq>| {
+                        let observed = observed_clone.clone();
+                        let hits = hits_clone.clone();
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            let id = headers
+                                .get(crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER.as_str())
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            *observed.lock().unwrap() = id;
+                            Json(RemoteOrchestratorTaskListResp {
+                                tasks: Vec::<OrchestratorTaskDto>::new(),
+                            })
+                        }
+                    },
+                ),
+            );
         let base_url = spawn_orchestrator_server(app).await;
         RemoteOrchestratorClient::new()
             .with_expected_device_id("device-owner-42")
             .list_tasks(&base_url, "project-1")
             .await
             .expect("list_tasks 应成功");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(
             observed.lock().unwrap().as_str(),
             "device-owner-42",
             "post_json 路径必须携带 expected device id"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     绑定 device 时旧 peer 无 `device.request-binding.v1` 必须 fail-closed，禁止 mutation。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 无 binding 能力；list_tasks 失败且 list 路由 hit=0。
+    #[tokio::test]
+    async fn expected_device_binding_fails_closed_without_capability() {
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_clone = hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "device-owner-42".into(),
+                        device_name: "owner".into(),
+                        http_port: 1,
+                        ts: 1,
+                        protocol_version: PROTOCOL_VERSION_V1,
+                        capabilities: vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/list",
+                post(move |_req: Json<RemoteListTasksReq>| {
+                    let hits = hits_clone.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(RemoteOrchestratorTaskListResp {
+                            tasks: Vec::<OrchestratorTaskDto>::new(),
+                        })
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+        let err = RemoteOrchestratorClient::new()
+            .with_expected_device_id("device-owner-42")
+            .list_tasks(&base_url, "project-1")
+            .await
+            .expect_err("missing binding capability must fail closed");
+        assert!(
+            err.to_string().contains("device.request-binding.v1")
+                || err.to_string().contains("不支持能力"),
+            "unexpected err: {err}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "mutation must not hit");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     binding 能力存在但 health.device_id 不匹配时必须 conflict fail-closed。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 宣告 binding + wrong device；list_tasks 失败且 hit=0。
+    #[tokio::test]
+    async fn expected_device_binding_fails_closed_on_device_mismatch() {
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_clone = hits.clone();
+        let app = Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "other-device".into(),
+                        device_name: "other".into(),
+                        http_port: 1,
+                        ts: 1,
+                        protocol_version: PROTOCOL_VERSION_V1,
+                        capabilities: vec![CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string()],
+                    })
+                }),
+            )
+            .route(
+                "/api/orchestrator/tasks/list",
+                post(move |_req: Json<RemoteListTasksReq>| {
+                    let hits = hits_clone.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Json(RemoteOrchestratorTaskListResp {
+                            tasks: Vec::<OrchestratorTaskDto>::new(),
+                        })
+                    }
+                }),
+            );
+        let base_url = spawn_orchestrator_server(app).await;
+        let err = RemoteOrchestratorClient::new()
+            .with_expected_device_id("device-owner-42")
+            .list_tasks(&base_url, "project-1")
+            .await
+            .expect_err("device mismatch must fail closed");
+        assert!(
+            err.to_string().contains("device_id") || err.to_string().contains("不匹配"),
+            "unexpected err: {err}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 }
