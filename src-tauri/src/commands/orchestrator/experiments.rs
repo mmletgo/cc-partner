@@ -12,7 +12,8 @@ use crate::backend::control_client::BackendControlClient;
 use crate::error::AppError;
 use crate::orchestrator::experiments::create::create_experiment_idempotently;
 use crate::orchestrator::experiments::delivery::{
-    mark_experiment_delivery_completed, select_experiment_winner, start_experiment_winner_delivery,
+    mark_experiment_delivery_completed, recover_experiment_from_failed_delivery,
+    select_experiment_winner, start_experiment_winner_delivery,
 };
 use crate::orchestrator::experiments::models::{
     CandidateOutcome, ComparativeConfidence, CreateExperimentRequest, ExperimentStatus,
@@ -491,14 +492,42 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
             tracing::debug!(
                 task_id = %winner,
                 experiment_id = %experiment_id,
-                "approve winner: task not Done/Delivering after select; skip delivery"
+                "approve winner: task not Done/Delivering after select; recover experiment"
             );
+            // 组可能已 CAS 到 Delivering；任务无法交付时回收，避免永久卡死且无法 cancel。
+            let _ = recover_experiment_from_failed_delivery(
+                state.orchestrator_repo.as_ref(),
+                experiment_id,
+            )
+            .await?;
             return get_orchestrator_experiment_for_state(state, experiment_id).await;
         }
-        let delivered = run_delivery_for_task(state, &winner).await?;
+        // experiment 交付跨越 verifier 时窗，无连续 rebind；传 None。
+        let delivered = match run_delivery_for_task(state, &winner, None).await {
+            Ok(dto) => dto,
+            Err(err) => {
+                tracing::debug!(
+                    experiment_id = %experiment_id,
+                    task_id = %winner,
+                    "approve winner delivery error: {err}"
+                );
+                let _ = recover_experiment_from_failed_delivery(
+                    state.orchestrator_repo.as_ref(),
+                    experiment_id,
+                )
+                .await?;
+                return get_orchestrator_experiment_for_state(state, experiment_id).await;
+            }
+        };
         if delivered.status == OrchestratorTaskStatus::Done {
             mark_experiment_delivery_completed(state.orchestrator_repo.as_ref(), experiment_id)
                 .await?;
+        } else {
+            recover_experiment_from_failed_delivery(
+                state.orchestrator_repo.as_ref(),
+                experiment_id,
+            )
+            .await?;
         }
     }
     get_orchestrator_experiment_for_state(state, experiment_id).await

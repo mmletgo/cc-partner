@@ -296,16 +296,34 @@ pub async fn run_verifier_claude(
     validate_verifier_review(review)
 }
 
+/// Verifier 用的 worktree 改动快照（文本 + 稳定 digest）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     verifier 审查的文本与后续 auto-delivery 提交边界需要绑定同一 review_digest，
+///     防止 agent 在审查通过后、commit 前继续改 worktree。
+///
+/// Code Logic（这个结构体做什么）:
+///     `text` 为有界截断后的 prompt 上下文；`review_digest` 来自完整身份哈希（与展示截断无关）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeDiffForVerifier {
+    pub text: String,
+    pub review_digest: String,
+}
+
 /// Business Logic（为什么需要这个函数）:
-///     verifier 需要看到 worktree 的真实改动范围，尤其是验证命令失败时用于判断是否应继续修复。
+///     verifier 需要看到 worktree 的真实改动范围，尤其是验证命令失败时用于判断是否应继续修复；
+///     同时捕获稳定 digest 供 auto-delivery 在 commit 前 rebind。
 ///
 /// Code Logic（这个函数做什么）:
 ///     复用 review_diff 有界 snapshot（staged/unstaged/untracked/unborn 同一语义），渲染为文本后再按
-///     verifier prompt 全局字节上限截断并标记。
-pub fn collect_worktree_diff(cwd: &Path) -> Result<String, AppError> {
+///     verifier prompt 全局字节上限截断并标记；一并返回 snapshot.review_digest。
+pub fn collect_worktree_diff(cwd: &Path) -> Result<WorktreeDiffForVerifier, AppError> {
     let snapshot = collect_review_diff_for_worktree("verifier", cwd, None)?;
     let context = render_review_diff_text(&snapshot);
-    Ok(truncate_diff_context(&context, MAX_DIFF_CONTEXT_BYTES))
+    Ok(WorktreeDiffForVerifier {
+        text: truncate_diff_context(&context, MAX_DIFF_CONTEXT_BYTES),
+        review_digest: snapshot.review_digest,
+    })
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -544,9 +562,13 @@ mod tests {
 
         let context = collect_worktree_diff(dir.path()).expect("diff context");
 
-        assert!(context.contains("review-diff snapshot"));
-        assert!(context.contains("+staged line"));
-        assert!(context.contains("generated.rs"));
-        assert!(context.contains("pub fn generated() -> bool"));
+        assert!(context.text.contains("review-diff snapshot"));
+        assert!(context.text.contains("+staged line"));
+        assert!(context.text.contains("generated.rs"));
+        assert!(context.text.contains("pub fn generated() -> bool"));
+        assert!(
+            !context.review_digest.is_empty(),
+            "review_digest must be captured for delivery rebind"
+        );
     }
 }

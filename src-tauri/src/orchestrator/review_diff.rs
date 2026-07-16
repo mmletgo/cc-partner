@@ -110,6 +110,25 @@ pub fn collect_review_diff_for_worktree(
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     auto-delivery 在 verifier 通过后、commit 前需要比对稳定 digest，检测审阅后漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     对 expected 与 actual 做精确字符串相等；不解析/截断，调用方负责采集 digest。
+pub fn review_digests_match(expected: &str, actual: &str) -> bool {
+    expected == actual
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     delivery gate 只需 digest 本体，不必再拿完整 DTO。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 collect_review_diff_for_worktree 并只返回 review_digest 字段。
+pub fn current_worktree_review_digest(worktree_path: &Path) -> Result<String, AppError> {
+    let snapshot = collect_review_diff_for_worktree("digest-check", worktree_path, None)?;
+    Ok(snapshot.review_digest)
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     verifier Claude 仍需要文本上下文；消费同一 snapshot 可避免两套 diff 语义分叉。
 ///
 /// Code Logic（这个函数做什么）:
@@ -918,6 +937,19 @@ mod tests {
         assert!(diff.files[0].patch.as_ref().unwrap().len() <= 256 * 1024);
         assert_eq!(diff.files[0].path, "large.txt");
         assert!(!diff.review_digest.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     digest 门禁 helper 必须是精确相等，不能接受空串伪匹配。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言相同/不同字符串与空 expected 的 match 语义。
+    #[test]
+    fn review_digests_match_is_exact_equality() {
+        assert!(review_digests_match("abc", "abc"));
+        assert!(!review_digests_match("abc", "abd"));
+        assert!(!review_digests_match("", "abc"));
+        assert!(review_digests_match("", ""));
     }
 
     /// Business Logic（为什么需要这个测试）:

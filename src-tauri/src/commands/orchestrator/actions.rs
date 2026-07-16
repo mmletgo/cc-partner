@@ -234,7 +234,7 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
         return Ok(current);
     }
 
-    let diff = match verifier::collect_worktree_diff(&cwd) {
+    let diff_snapshot = match verifier::collect_worktree_diff(&cwd) {
         Ok(diff) => diff,
         Err(err) => {
             return block_task_with_verification_review_error(
@@ -246,6 +246,8 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
             .await;
         }
     };
+    let review_digest = diff_snapshot.review_digest.clone();
+    let diff = diff_snapshot.text;
     if let Some(current) =
         stop_verification_if_task_changed(state.orchestrator_repo.as_ref(), &task.id).await?
     {
@@ -330,8 +332,20 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
         if !delivery_transition.transitioned {
             return Ok(OrchestratorTaskDto::from(delivery_transition.task));
         }
-        // auto-delivery 无人类 digest，传 None 跳过 commit 边界 digest 门禁。
-        return run_delivery_for_task(state, &delivery_transition.task.id).await;
+        // verifier→commit 内容 rebind：进入 Delivering 后、跑 pipeline 前再采一次 digest。
+        if let Err(reason) =
+            crate::orchestrator::delivery::enforce_expected_review_digest(&cwd, &review_digest)
+        {
+            return block_task_with_delivery_error(
+                state,
+                &delivery_transition.task.id,
+                AppError::generic(reason),
+            )
+            .await;
+        }
+        // 将 verifier 审阅时的 digest 传入 delivery；pipeline 在 lock 后再次 recheck。
+        return run_delivery_for_task(state, &delivery_transition.task.id, Some(review_digest))
+            .await;
     }
 
     // A4：experiment candidate 可走 repair；若最终 Blocked/Aborted 由 start_repair_* /
@@ -347,13 +361,15 @@ pub(crate) async fn complete_orchestrator_agent_run_after_verifying_transition(
 ///     high confidence + full-auto 时实验 winner 应自动进入既有 delivery。
 ///
 /// Code Logic（这个函数做什么）:
-///     读实验状态；若 WinnerReady 且 confidence=high 且 full-auto，则 CAS Delivering 并 deliver_task。
+///     读实验状态；若 WinnerReady 且 confidence=high 且 full-auto，则 CAS Delivering 并 deliver_task；
+///     任务 CAS 未命中且非 Delivering、或交付未 Done 时 recover 组状态，避免永久卡在 Delivering。
 async fn maybe_auto_deliver_experiment_winner(
     state: &crate::state::AppState,
     experiment_id: &str,
 ) -> Result<(), crate::error::AppError> {
     use crate::orchestrator::experiments::delivery::{
-        mark_experiment_delivery_completed, start_experiment_winner_delivery,
+        mark_experiment_delivery_completed, recover_experiment_from_failed_delivery,
+        start_experiment_winner_delivery,
     };
     use crate::orchestrator::experiments::models::{ComparativeConfidence, ExperimentStatus};
     use crate::orchestrator::models::OrchestratorTaskStatus;
@@ -386,12 +402,28 @@ async fn maybe_auto_deliver_experiment_winner(
     if transitioned.is_none() {
         let task = repo.get_task(&winner_id).await?;
         if task.status != OrchestratorTaskStatus::Delivering {
+            // 组已进 Delivering 但任务无法交付 → 回收组状态供重试/取消。
+            recover_experiment_from_failed_delivery(repo, experiment_id).await?;
             return Ok(());
         }
     }
-    let delivered = run_delivery_for_task(state, &winner_id).await?;
+    // experiment 交付跨越 verifier 时窗，无连续 rebind；传 None。
+    let delivered = match run_delivery_for_task(state, &winner_id, None).await {
+        Ok(dto) => dto,
+        Err(err) => {
+            tracing::debug!(
+                experiment_id = %experiment_id,
+                task_id = %winner_id,
+                "experiment auto-delivery error: {err}"
+            );
+            recover_experiment_from_failed_delivery(repo, experiment_id).await?;
+            return Ok(());
+        }
+    };
     if delivered.status == OrchestratorTaskStatus::Done {
         mark_experiment_delivery_completed(repo, experiment_id).await?;
+    } else {
+        recover_experiment_from_failed_delivery(repo, experiment_id).await?;
     }
     Ok(())
 }

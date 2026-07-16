@@ -1538,17 +1538,25 @@ pub(crate) async fn mark_active_running_attempt_completed(
 
 /// Business Logic（为什么需要这个函数）:
 ///     验证完成后命令层需要运行自动交付，并对未预期错误做最终兜底。
-///     A0 后无人工 digest 门禁；失败一律条件 Block 当前 Delivering 任务。
+///     A0 后无人工 review-diff 产品门禁；verifier auto-delivery 可传 expected_review_digest
+///     在 commit 前 rebind；失败一律条件 Block 当前 Delivering 任务。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造 AppDeliveryContext 调用 delivery::deliver_task；
+///     构造 AppDeliveryContext 调用 delivery::deliver_task(expected_review_digest)；
 ///     成功返回 summary.task；错误条件 Block 当前 Delivering 任务。
 pub(crate) async fn run_delivery_for_task(
     state: &AppState,
     task_id: &str,
+    expected_review_digest: Option<String>,
 ) -> Result<OrchestratorTaskDto, AppError> {
     let delivery_context = crate::orchestrator::delivery::AppDeliveryContext::new(state);
-    match crate::orchestrator::delivery::deliver_task(&delivery_context, task_id).await {
+    match crate::orchestrator::delivery::deliver_task(
+        &delivery_context,
+        task_id,
+        expected_review_digest.as_deref(),
+    )
+    .await
+    {
         Ok(summary) => {
             tracing::debug!(task_id = %task_id, stages = ?summary.stages, "Orchestrator 自动交付完成");
             // delivery 成功后可能是 Done 或中途 Blocked；从权威 row 读 state_version 再发运营通知。

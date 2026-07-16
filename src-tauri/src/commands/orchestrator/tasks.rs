@@ -273,7 +273,8 @@ pub(crate) async fn deliver_reviewed_orchestrator_task_view_for_state(
             .orchestrator_repo
             .start_delivery_from_human_review(task_id)
             .await?;
-        let delivered = run_delivery_for_task(state, &delivering.id).await?;
+        // Human Review 显式 Deliver：A0 后无 verifier digest rebind，传 None。
+        let delivered = run_delivery_for_task(state, &delivering.id, None).await?;
         return Ok(OrchestratorTaskViewDto::Local { task: delivered });
     }
     reject_pending_remote_task_action(state.orchestrator_repo.as_ref(), task_id).await?;

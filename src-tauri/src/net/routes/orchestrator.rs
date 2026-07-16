@@ -332,7 +332,8 @@ async fn deliver_reviewed_task_for_state(
         .orchestrator_repo
         .start_delivery_from_human_review(&task.id)
         .await?;
-    run_delivery_for_task(state, &delivering.id).await
+    // Human Review / P2P deliver-reviewed：无 verifier digest rebind，传 None。
+    run_delivery_for_task(state, &delivering.id, None).await
 }
 
 /// 终止远端任务。

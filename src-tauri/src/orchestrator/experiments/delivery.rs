@@ -258,6 +258,43 @@ pub async fn mark_experiment_delivery_completed(
     Ok(())
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     组 CAS 到 Delivering 后若任务 CAS 未命中、delivery 返回 Blocked/非 Done，或 pipeline 中途失败，
+///     实验不能永久停在 Delivering（cancel 会拒绝 Delivering）。需回收到可重试/可取消状态。
+///
+/// Code Logic（这个函数做什么）:
+///     仅当当前状态为 Delivering 时 CAS：有 winner → WinnerReady（保留 winner/reason/confidence）；
+///     无 winner → NeedsDecision；CAS 未命中则返回最新行。非 Delivering 直接返回当前行。
+pub async fn recover_experiment_from_failed_delivery(
+    repo: &OrchestratorRepo,
+    experiment_id: &str,
+) -> Result<OrchestratorExperimentRow, AppError> {
+    let exp = repo.get_experiment(experiment_id).await?;
+    if exp.status != ExperimentStatus::Delivering {
+        return Ok(exp);
+    }
+    let next_status = if exp.winner_task_id.is_some() {
+        ExperimentStatus::WinnerReady
+    } else {
+        ExperimentStatus::NeedsDecision
+    };
+    if let Some(updated) = repo
+        .cas_experiment_status(
+            experiment_id,
+            exp.version,
+            ExperimentStatus::Delivering,
+            next_status,
+            exp.winner_task_id.as_deref(),
+            exp.selection_reason.as_deref(),
+            exp.confidence,
+        )
+        .await?
+    {
+        return Ok(updated);
+    }
+    repo.get_experiment(experiment_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +434,39 @@ mod tests {
             err.to_string().contains("硬门禁") || err.to_string().contains("candidate"),
             "unexpected error: {err}"
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     交付失败后组必须从 Delivering 回到 WinnerReady，保留 winner 以便重试或 cancel。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     WinnerReady→Delivering 后调用 recover，断言状态 WinnerReady 且 winner 不变。
+    #[tokio::test]
+    async fn recover_from_failed_delivery_returns_to_winner_ready() {
+        let repo = setup().await;
+        let exp = repo.insert_experiment_fixture(2).await.unwrap();
+        record_candidate_review(&repo, "task-1", true)
+            .await
+            .unwrap();
+        record_candidate_review(&repo, "task-2", false)
+            .await
+            .unwrap();
+        start_experiment_winner_delivery(&repo, &exp.id)
+            .await
+            .unwrap();
+        let delivering = repo.get_experiment(&exp.id).await.unwrap();
+        assert_eq!(delivering.status, ExperimentStatus::Delivering);
+        let winner = delivering.winner_task_id.clone();
+        let recovered = recover_experiment_from_failed_delivery(&repo, &exp.id)
+            .await
+            .unwrap();
+        assert_eq!(recovered.status, ExperimentStatus::WinnerReady);
+        assert_eq!(recovered.winner_task_id, winner);
+        // 非 Delivering 时 recover 为 no-op
+        let again = recover_experiment_from_failed_delivery(&repo, &exp.id)
+            .await
+            .unwrap();
+        assert_eq!(again.status, ExperimentStatus::WinnerReady);
     }
 
     /// Business Logic（为什么需要这个测试）:

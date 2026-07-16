@@ -342,15 +342,22 @@ impl DeliveryContext for AppDeliveryContext<'_> {
 
 /// Business Logic（为什么需要这个函数）:
 ///     验证成功后的 Delivering 任务应自动完成 commit、push 任务分支、merge main 和 push main，
-///     让 full-auto 策略无需用户手动收尾。A0 后不再做人工 review digest 门禁；
-///     Human Review 显式 Deliver 与 verifier auto-delivery 共用同一 Git pipeline。
+///     让 full-auto 策略无需用户手动收尾。A0 后不再做人工 review-diff 产品门禁；
+///     但 verifier auto-delivery 可传入 expected_review_digest，在 commit 前 rebind 审阅内容，
+///     防止 agent 在审查通过后继续改 worktree。Human Review 显式 Deliver 传 None。
 ///
 /// Code Logic（这个函数做什么）:
 ///     校验任务状态与项目 full-auto flags；获取 per-task delivery lock 并解析 worktree 后，
-///     按顺序执行 commit/push/merge/push main 四阶段；
+///     若提供 expected_review_digest 则用 collect_review_diff_for_worktree 重算并比对，
+///     不匹配则 failed delivery evidence + Blocked（不 commit）；
+///     再按顺序执行 commit/push/merge/push main 四阶段；
 ///     每个阶段成功写 passed delivery evidence，失败写 failed evidence 并把任务置为 Blocked；
 ///     全局交付开关关闭时写 blocked evidence；全部成功后置 Done。
-pub(crate) async fn deliver_task<C>(context: &C, task_id: &str) -> Result<DeliverySummary, AppError>
+pub(crate) async fn deliver_task<C>(
+    context: &C,
+    task_id: &str,
+    expected_review_digest: Option<&str>,
+) -> Result<DeliverySummary, AppError>
 where
     C: DeliveryContext,
 {
@@ -469,6 +476,24 @@ where
         .unwrap_or_else(|| "unknown".to_string());
     let task_path = worktree.path.clone();
     let main_path = project.path.clone();
+
+    // auto-delivery 安全门：在拿到 delivery lock 且解析 worktree 后、commit 前 rebind digest。
+    if let Some(expected) = expected_review_digest {
+        match enforce_expected_review_digest(Path::new(&task_path), expected) {
+            Ok(()) => {}
+            Err(reason) => {
+                return block_delivery_task(
+                    context.orchestrator_repo(),
+                    &task.id,
+                    &reason,
+                    "review digest gate",
+                    &reason,
+                    &mut stages,
+                )
+                .await;
+            }
+        }
+    }
 
     let commit_message = format!("orchestrator: {}", task.title.trim());
     let before_head = match workbench_git::head_hash(Path::new(&task_path)) {
@@ -1108,6 +1133,33 @@ async fn add_delivery_evidence(
     orchestrator_repo
         .add_evidence(task_id, EVIDENCE_KIND_DELIVERY, title, summary, content)
         .await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     verifier 已通过的内容必须与即将 commit 的 worktree 一致，否则不得进入 Git 副作用。
+///
+/// Code Logic（这个函数做什么）:
+///     用 collect_review_diff_for_worktree 重算 digest（非截断文本哈希），与 expected 精确比对；
+///     匹配返回 Ok；不匹配或采集失败返回供 block_delivery_task 使用的 reason 字符串。
+pub(crate) fn enforce_expected_review_digest(
+    worktree_path: &Path,
+    expected_review_digest: &str,
+) -> Result<(), String> {
+    let actual =
+        match crate::orchestrator::review_diff::current_worktree_review_digest(worktree_path) {
+            Ok(digest) => digest,
+            Err(err) => {
+                return Err(format!(
+                    "worktree review_digest recheck failed before commit: {err}"
+                ));
+            }
+        };
+    if crate::orchestrator::review_diff::review_digests_match(expected_review_digest, &actual) {
+        return Ok(());
+    }
+    Err(format!(
+        "worktree content drifted after verification (review_digest mismatch); refuse commit. expected={expected_review_digest}, current={actual}"
+    ))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1909,7 +1961,7 @@ mod tests {
             .expect("write task file");
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("deliver task");
 
@@ -1960,10 +2012,11 @@ mod tests {
         let commit_started = harness.controls.commit_started.notified();
         let first_harness = harness.clone();
         let first_task_id = task_id.clone();
-        let first = tokio::spawn(async move { deliver_task(&first_harness, &first_task_id).await });
+        let first =
+            tokio::spawn(async move { deliver_task(&first_harness, &first_task_id, None).await });
         commit_started.await;
 
-        let second = deliver_task(&harness, &task_id)
+        let second = deliver_task(&harness, &task_id, None)
             .await
             .expect("second delivery should not run side effects");
         harness.controls.release_commit.notify_one();
@@ -2008,7 +2061,7 @@ mod tests {
             .lock()
             .expect("abort after merge lock") = Some(task_id.clone());
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("delivery should return current task");
         let persisted = harness
@@ -2052,7 +2105,7 @@ mod tests {
             .lock()
             .expect("abort before push lock") = Some(task_id.clone());
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("delivery should return current task");
         let persisted = harness
@@ -2089,7 +2142,7 @@ mod tests {
         .await
         .expect("insert invalid config");
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("legacy config should be ignored");
         let evidence = harness
@@ -2139,7 +2192,7 @@ mod tests {
             .await
             .expect("insert task");
 
-        let delivered = deliver_task(&harness, task_id)
+        let delivered = deliver_task(&harness, task_id, None)
             .await
             .expect("missing worktree should block");
         let evidence = harness
@@ -2186,7 +2239,7 @@ mod tests {
         .await
         .expect("disable push main");
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("legacy disabled flag should be ignored");
         let evidence = harness
@@ -2227,7 +2280,7 @@ mod tests {
             }
             harness.set_orchestrator_config(config);
 
-            let delivered = deliver_task(&harness, &task_id)
+            let delivered = deliver_task(&harness, &task_id, None)
                 .await
                 .expect("disabled global flag should block");
             let evidence = harness
@@ -2269,7 +2322,7 @@ mod tests {
         fs::write(repo.join("local-only.txt"), "uncommitted main change\n").expect("dirty main");
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
 
-        let delivered = deliver_task(&harness, &task_id)
+        let delivered = deliver_task(&harness, &task_id, None)
             .await
             .expect("delivery should return blocked task");
 
@@ -2286,5 +2339,82 @@ mod tests {
             .output()
             .expect("git show origin main task file");
         assert!(!main_show.status.success());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     auto-delivery 在 commit 前必须拒绝与 verifier 审阅 digest 不一致的 worktree，避免提交未审内容。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入文件 A 采集 digest，再改成文件 B，带着 A 的 digest 调用 deliver_task，断言 Blocked 且未 Done。
+    #[tokio::test]
+    async fn delivery_blocks_when_expected_review_digest_mismatches() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, _origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "reviewed content\n").expect("write reviewed");
+        let expected =
+            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
+                .expect("capture digest");
+        fs::write(task_worktree.join("task.txt"), "drifted after review\n").expect("drift content");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        let delivered = deliver_task(&harness, &task_id, Some(expected.as_str()))
+            .await
+            .expect("delivery returns blocked summary");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Blocked);
+        assert_ne!(delivered.task.status, OrchestratorTaskStatus::Done);
+        let reason = delivered.task.blocked_reason.unwrap_or_default();
+        assert!(
+            reason.contains("review_digest mismatch") || reason.contains("drifted"),
+            "unexpected reason: {reason}"
+        );
+        assert_eq!(delivered.stages, vec!["review digest gate"]);
+        assert_eq!(harness.controls.commit_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     digest 一致时既有 delivery 路径不得被错误阻断。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     采集当前 digest 后直接 deliver_task(Some(digest))，断言 Done 且四阶段完成。
+    #[tokio::test]
+    async fn delivery_succeeds_when_expected_review_digest_matches() {
+        let harness = setup_delivery_harness().await;
+        let (_dir, origin, repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("task.txt"), "bound content\n").expect("write bound");
+        let expected =
+            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
+                .expect("capture digest");
+        let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
+
+        let delivered = deliver_task(&harness, &task_id, Some(expected.as_str()))
+            .await
+            .expect("deliver with matching digest");
+
+        assert_eq!(delivered.task.status, OrchestratorTaskStatus::Done);
+        assert_eq!(
+            delivered.stages,
+            vec!["commit", "push branch", "merge main", "push main"]
+        );
+        let main_file = git(&origin, &["show", "refs/heads/main:task.txt"]);
+        assert!(main_file.contains("bound content"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     enforce helper 必须在纯函数层正确区分匹配/不匹配，便于 command 层 precheck 复用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     临时 repo 上写文件、采集 digest，断言 match Ok、改文件后 mismatch Err。
+    #[test]
+    fn enforce_expected_review_digest_pure_match_and_mismatch() {
+        let (_dir, _origin, _repo, task_worktree) = setup_git_delivery_repo();
+        fs::write(task_worktree.join("a.txt"), "v1\n").expect("write v1");
+        let expected =
+            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
+                .expect("digest v1");
+        assert!(enforce_expected_review_digest(&task_worktree, &expected).is_ok());
+        fs::write(task_worktree.join("a.txt"), "v2\n").expect("write v2");
+        let err = enforce_expected_review_digest(&task_worktree, &expected).expect_err("mismatch");
+        assert!(err.contains("review_digest mismatch"));
     }
 }
