@@ -253,6 +253,27 @@ pub async fn handle_native_agent_event(
 ) -> Result<AgentReduceOutcome, AppError> {
     let registry = registry_from_state(state)?;
     let adapter = registry.get(provider)?;
+    // A9：structured usage → Ledger cache（失败不阻断 mutation）
+    if let Some(delta) = adapter.extract_usage(&event) {
+        if delta.has_any() {
+            let snap = crate::workbench::agent_ledger::ReliableUsageSnapshot {
+                model_id: delta.model_id.clone(),
+                input_tokens: delta.input_tokens,
+                output_tokens: delta.output_tokens,
+                cache_read_tokens: delta.cache_read_tokens,
+                cache_write_tokens: delta.cache_write_tokens,
+                cost_major: delta.cost_major.clone(),
+                cost_currency: delta.cost_currency.clone(),
+            };
+            let agent_id = event.agent_session_id.clone();
+            if let Err(e) = state.agent_ledger_service.note_usage(&agent_id, snap).await {
+                tracing::debug!(
+                    agent_session_id = %agent_id,
+                    "agent ledger note_usage failed: {e}"
+                );
+            }
+        }
+    }
     let mutation = adapter.normalize_runtime_event(event)?;
     handle_normalized_agent_event(state, mutation).await
 }

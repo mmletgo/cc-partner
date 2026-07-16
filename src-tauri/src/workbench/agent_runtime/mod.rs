@@ -115,6 +115,17 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                     for row in &disconnected {
                         // reconcile → Disconnected：无异常通知；previous 未知用 None
                         emit_agent_runtime_changed(&state, row, None);
+                        // A9：对账断开也写 Ledger（失败隔离）
+                        let ledger_svc = state.agent_ledger_service.clone();
+                        let row_for_ledger = row.clone();
+                        tokio::spawn(async move {
+                            crate::workbench::agent_ledger::service::on_agent_runtime_terminal(
+                                &ledger_svc,
+                                &row_for_ledger,
+                                None,
+                            )
+                            .await;
+                        });
                     }
                 }
                 Ok(_) => {}
@@ -137,6 +148,20 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                     "agent runtime mutation applied"
                 );
                 emit_agent_runtime_changed(&state, &row, Some(previous_phase));
+                // A9：首次终态旁路写 Ledger；失败隔离，不阻断 runtime 完成路径。
+                if row.phase.is_terminal() {
+                    let ledger_svc = state.agent_ledger_service.clone();
+                    let row_for_ledger = row.clone();
+                    let prev = previous_phase;
+                    tokio::spawn(async move {
+                        crate::workbench::agent_ledger::service::on_agent_runtime_terminal(
+                            &ledger_svc,
+                            &row_for_ledger,
+                            Some(prev),
+                        )
+                        .await;
+                    });
+                }
                 // H1：OSC 生产路径 dual-write task.last_activity_at，供 stall watchdog 使用。
                 if let (Some(task_id), Some(attempt)) =
                     (row.orchestrator_task_id.as_deref(), row.orchestrator_attempt)

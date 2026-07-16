@@ -126,17 +126,43 @@ pub struct NativeAgentEvent {
     pub raw_kind: Option<String>,
 }
 
-/// usage 增量（可选，不进 P2P）。
+/// 可靠 cumulative usage 快照（可选，不进 P2P；仅 structured adapter 字段）。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     provider 可上报 token 用量供 owner 本地审计。
+///     provider 可上报 token/cost 用量供 owner-local Ledger；unknown 保持 None，禁止估算。
 ///
 /// Code Logic（这个结构体做什么）:
-///     可选 input/output token 计数。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///     可选 model/token/cost 字段；cost_major 为主单位十进制字符串。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentUsageDelta {
+    pub model_id: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    /// provider 主单位金额字符串（如 "0.0123"）
+    pub cost_major: Option<String>,
+    /// ISO 4217 三字符大写
+    pub cost_currency: Option<String>,
+}
+
+impl AgentUsageDelta {
+    /// 是否含任何可靠字段。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     全空快照无需写入 Ledger cache。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     任一字段 Some 即 true。
+    pub fn has_any(&self) -> bool {
+        self.model_id.is_some()
+            || self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.cache_read_tokens.is_some()
+            || self.cache_write_tokens.is_some()
+            || self.cost_major.is_some()
+            || self.cost_currency.is_some()
+    }
 }
 
 /// Agent adapter 合同。

@@ -159,8 +159,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
             return None;
         }
         Some(AgentUsageDelta {
+            model_id: None,
             input_tokens: event.usage_input_tokens,
             output_tokens: event.usage_output_tokens,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost_major: None,
+            cost_currency: None,
         })
     }
 
