@@ -492,12 +492,19 @@ export interface MobileAutomationOutboxProps {
  * Code Logic（这个类型做什么）:
  *   汇总 controller 返回的五组 props bundle。
  */
+export interface MobileAutomationExperimentsProps {
+  experiments: import('@/lib/types').OrchestratorExperiment[];
+  onApproveRecommended: (experimentId: string, winnerTaskId: string) => void;
+  onCancel: (experimentId: string) => void;
+}
+
 export interface UseMobileAutomationControllerResult {
   shell: MobileAutomationShellProps;
   taskList: MobileAutomationTaskListProps;
   taskDetail: MobileAutomationTaskDetailProps;
   createDialog: MobileAutomationCreateDialogProps;
   outbox: MobileAutomationOutboxProps;
+  experiments: MobileAutomationExperimentsProps;
 }
 
 /**
@@ -548,6 +555,9 @@ export function useMobileAutomationController({
   const [runtimeDisplayState, setRuntimeDisplay] = useState<OwnedMobileRuntimeDisplayState>(
     () => emptyMobileRuntimeDisplayState(false),
   );
+  const [experiments, setExperiments] = useState<
+    import('@/lib/types').OrchestratorExperiment[]
+  >([]);
   const requestIdRef = useRef<number>(0);
   const evidenceRequestIdRef = useRef<number>(0);
   const activeProjectIdRef = useRef<string | null>(null);
@@ -639,10 +649,14 @@ export function useMobileAutomationController({
     setError(null);
 
     try {
-      const nextTaskViews = await httpOrchestratorTransport.tasks.listViews(projectId);
+      const [nextTaskViews, nextExperiments] = await Promise.all([
+        httpOrchestratorTransport.tasks.listViews(projectId),
+        httpOrchestratorTransport.experiments.list(projectId).catch(() => []),
+      ]);
       if (requestIdRef.current !== requestId) return;
       if (activeProjectIdRef.current !== projectId) return;
       setTaskViews(nextTaskViews);
+      setExperiments(nextExperiments);
       setSelectedTaskView((current) => resolveSelectedTaskViewAfterRefresh(current, nextTaskViews));
     } catch (reason) {
       if (requestIdRef.current !== requestId) return;
@@ -694,6 +708,7 @@ export function useMobileAutomationController({
     appliedFocusTaskIdRef.current = null;
     appliedFocusOutboxIdRef.current = null;
     setTaskViews([]);
+    setExperiments([]);
     setSelectedTaskView(null);
     setFocusedOutboxId(null);
     setEvidenceItems([]);
@@ -1299,6 +1314,67 @@ export function useMobileAutomationController({
     void handleCreateTask(createAction, statusKey);
   }, [handleCreateTask]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机端 NeedsDecision 时采用推荐 winner。
+   *
+   * Code Logic（这个函数做什么）:
+   *   approveWinner 后刷新 experiments 与 task list。
+   */
+  const handleApproveExperiment = useCallback(
+    (experimentId: string, winnerTaskId: string): void => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) return;
+      void (async () => {
+        try {
+          const updated = await httpOrchestratorTransport.experiments.approveWinner(
+            experimentId,
+            winnerTaskId,
+          );
+          if (activeProjectIdRef.current !== projectId) return;
+          setExperiments((current) =>
+            current.map((item) => (item.id === updated.id ? updated : item)),
+          );
+          void loadTasks(projectId);
+          requestAttentionInvalidation();
+        } catch (reason) {
+          if (activeProjectIdRef.current !== projectId) return;
+          setError(getErrorMessage(reason));
+        }
+      })();
+    },
+    [loadTasks],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   手机端取消整组实验。
+   *
+   * Code Logic（这个函数做什么）:
+   *   cancel 后更新 experiments。
+   */
+  const handleCancelExperiment = useCallback(
+    (experimentId: string): void => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) return;
+      void (async () => {
+        try {
+          const updated = await httpOrchestratorTransport.experiments.cancel(experimentId);
+          if (activeProjectIdRef.current !== projectId) return;
+          setExperiments((current) =>
+            current.map((item) => (item.id === updated.id ? updated : item)),
+          );
+          void loadTasks(projectId);
+          requestAttentionInvalidation();
+        } catch (reason) {
+          if (activeProjectIdRef.current !== projectId) return;
+          setError(getErrorMessage(reason));
+        }
+      })();
+    },
+    [loadTasks],
+  );
+
   return {
     shell: {
       titleId,
@@ -1366,6 +1442,11 @@ export function useMobileAutomationController({
       outboxActionId,
       onRetry: handleRetryOutbox,
       onDiscard: handleDiscardOutbox,
+    },
+    experiments: {
+      experiments,
+      onApproveRecommended: handleApproveExperiment,
+      onCancel: handleCancelExperiment,
     },
   };
 }

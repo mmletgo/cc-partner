@@ -4,7 +4,8 @@
 //!     桌面/本机需要创建、列表、详情、批准 winner、取消与降级 quiesce 实验组。
 //!
 //! Code Logic（这个模块做什么）:
-//!     封装 create_experiment_idempotently 与 delivery/select helpers。
+//!     封装 create_experiment_idempotently 与 delivery/select helpers；
+//!     local 仅 owning device；remote shortcut 走 remote_client 或组级 outbox。
 
 use crate::error::AppError;
 use crate::orchestrator::experiments::create::create_experiment_idempotently;
@@ -13,36 +14,70 @@ use crate::orchestrator::experiments::delivery::{
 };
 use crate::orchestrator::experiments::models::{
     CandidateOutcome, ComparativeConfidence, CreateExperimentRequest, ExperimentStatus,
-    OrchestratorExperimentDto,
+    IdempotentCreateExperimentOutcome, OrchestratorExperimentDto,
+};
+use crate::orchestrator::experiments::outbox::ExperimentOutboxStatus;
+use crate::orchestrator::experiments::remote_client::{
+    approve_remote_experiment_winner, cancel_remote_experiment, create_remote_experiment,
+    list_remote_experiments,
 };
 use crate::orchestrator::models::OrchestratorTaskStatus;
+use crate::orchestrator::outbox::{
+    is_remote_network_error, open_remote_project_for_shortcut, remote_device_base_url,
+};
 use crate::state::AppState;
+use crate::workbench::models::WorkbenchProjectRow;
 use tauri::State;
 
-use super::common::{auto_delivery_enabled, run_delivery_for_task};
+use super::common::{
+    auto_delivery_enabled, get_orchestrator_workbench_project, run_delivery_for_task,
+};
 
 /// Business Logic（为什么需要这个函数）:
 ///     用户创建 2–8 candidate 实验组。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验本机项目后原子创建；可选 best-effort dispatch。
+///     分流 local/remote；local 原子创建并 best-effort dispatch；返回 DTO。
 #[tauri::command]
 pub async fn create_orchestrator_experiment(
     state: State<'_, AppState>,
     request: CreateExperimentRequest,
 ) -> Result<OrchestratorExperimentDto, AppError> {
-    create_orchestrator_experiment_for_state(&state, request).await
+    let outcome = create_orchestrator_experiment_for_state(&state, request).await?;
+    Ok(outcome.experiment)
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     HTTP/route 与 Tauri 共用创建入口。
+///     HTTP/route 与 Tauri 共用创建入口；调用方需要 `newly_created` 做幂等分支。
 ///
 /// Code Logic（这个函数做什么）:
-///     device max concurrency 来自全局 config；create 后 best-effort dispatch。
+///     local project → 本机原子创建；remote shortcut → 在线 remote_client / 离线组级 outbox；
+///     禁止在 remote shortcut 上写本机 candidate tasks。
 pub async fn create_orchestrator_experiment_for_state(
     state: &AppState,
     request: CreateExperimentRequest,
-) -> Result<OrchestratorExperimentDto, AppError> {
+) -> Result<IdempotentCreateExperimentOutcome, AppError> {
+    let project = get_orchestrator_workbench_project(state, &request.project_id).await?;
+    if project.kind == "remote" {
+        return create_remote_orchestrator_experiment(state, &project, request).await;
+    }
+    if project.kind != "local" {
+        return Err(AppError::generic(
+            "仅本机 owning 项目或远端 shortcut 可创建实验组",
+        ));
+    }
+    create_local_orchestrator_experiment(state, request).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     owning device 上创建必须拒绝非 local 项目，与 P2P `require_local_project_by_id` 对齐。
+///
+/// Code Logic（这个函数做什么）:
+///     device max concurrency 来自全局 config；create 后仅 newly_created 时 best-effort dispatch。
+pub async fn create_local_orchestrator_experiment(
+    state: &AppState,
+    request: CreateExperimentRequest,
+) -> Result<IdempotentCreateExperimentOutcome, AppError> {
     let device_cap = {
         let config = state.config.read().expect("config 读锁中毒");
         config.orchestrator.max_concurrent_tasks.max(1) as u32
@@ -53,7 +88,129 @@ pub async fn create_orchestrator_experiment_for_state(
     if outcome.newly_created {
         let _ = super::common::dispatch_orchestrator_best_effort(state).await;
     }
-    Ok(outcome.experiment)
+    Ok(outcome)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 必须整组转发 owner，离线写一条 experiment outbox，禁止 N 条 task outbox。
+///
+/// Code Logic（这个函数做什么）:
+///     open remote project → create_remote_experiment；网络错误 enqueue_experiment_outbox 并返回
+///     合成 DTO（selectionReason 标记 pending outbox）；capability 失败 fail-closed。
+async fn create_remote_orchestrator_experiment(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+    mut request: CreateExperimentRequest,
+) -> Result<IdempotentCreateExperimentOutcome, AppError> {
+    match open_remote_project_for_shortcut(state, remote_shortcut, None).await {
+        Ok(context) => {
+            request.project_id = context.remote_project_id.clone();
+            let http = reqwest::Client::new();
+            match create_remote_experiment(
+                state.peer_client.as_ref(),
+                &http,
+                &context.base_url,
+                &request,
+            )
+            .await
+            {
+                Ok(resp) => {
+                    if let Ok(payload) = serde_json::to_string(&resp.experiment) {
+                        let _ = state
+                            .orchestrator_repo
+                            .upsert_experiment_mirror(
+                                &remote_shortcut.device_id,
+                                &remote_shortcut.device_name,
+                                &context.remote_project_id,
+                                &context.remote_project_path,
+                                &resp.experiment.id,
+                                &payload,
+                            )
+                            .await;
+                    }
+                    Ok(IdempotentCreateExperimentOutcome {
+                        experiment: resp.experiment,
+                        newly_created: resp.newly_created,
+                    })
+                }
+                Err(err) if is_remote_network_error(&err) => {
+                    enqueue_pending_remote_experiment(state, remote_shortcut, &request).await
+                }
+                Err(err) => Err(err),
+            }
+        }
+        Err(err) if is_remote_network_error(&err) => {
+            enqueue_pending_remote_experiment(state, remote_shortcut, &request).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     owner 离线时必须保留整组 create 请求，等待 dispatcher 原子投递。
+///
+/// Code Logic（这个函数做什么）:
+///     enqueue_experiment_outbox；返回合成 experiment DTO（id=outbox 行 id，status=queued）。
+async fn enqueue_pending_remote_experiment(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+    request: &CreateExperimentRequest,
+) -> Result<IdempotentCreateExperimentOutcome, AppError> {
+    let item = state
+        .orchestrator_repo
+        .enqueue_experiment_outbox(
+            &remote_shortcut.device_id,
+            &remote_shortcut.device_name,
+            &remote_shortcut.path,
+            None,
+            request,
+        )
+        .await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let dto = OrchestratorExperimentDto {
+        id: item.id.clone(),
+        project_id: remote_shortcut.id.clone(),
+        title: request.title.clone(),
+        goal: request.goal.clone(),
+        acceptance: request.acceptance.clone(),
+        status: ExperimentStatus::Queued,
+        selection_policy: crate::orchestrator::experiments::models::EXPERIMENT_SELECTION_POLICY_COMPARATIVE
+            .to_string(),
+        max_parallel: request.max_parallel as i64,
+        winner_task_id: None,
+        selection_reason: Some(format!(
+            "pending remote experiment outbox ({})",
+            ExperimentOutboxStatus::Pending.as_str()
+        )),
+        confidence: None,
+        version: 0,
+        created_at: now.clone(),
+        updated_at: now,
+        candidates: Some(
+            request
+                .candidates
+                .iter()
+                .enumerate()
+                .map(|(idx, c)| {
+                    crate::orchestrator::experiments::models::OrchestratorExperimentCandidateDto {
+                        experiment_id: item.id.clone(),
+                        task_id: format!("pending-{}-{}", item.id, idx + 1),
+                        ordinal: (idx as i64) + 1,
+                        provider_id: c.provider_id.clone(),
+                        strategy_label: c.strategy_label.clone(),
+                        outcome: CandidateOutcome::Pending,
+                        selection_metadata_json: None,
+                        created_at: item.created_at.clone(),
+                        updated_at: item.updated_at.clone(),
+                    }
+                })
+                .collect(),
+        ),
+    };
+    Ok(IdempotentCreateExperimentOutcome {
+        experiment: dto,
+        newly_created: true,
+    })
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -70,14 +227,20 @@ pub async fn list_orchestrator_experiments(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     共享列表入口。
+///     共享列表入口；remote shortcut 读 owning device 或 mirror。
 ///
 /// Code Logic（这个函数做什么）:
-///     投影 DTO 并填充 candidates。
+///     local → 本机 list + candidates；remote → list_remote_experiments，离线读 mirror。
 pub async fn list_orchestrator_experiments_for_state(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<Vec<OrchestratorExperimentDto>, AppError> {
+    if let Some(pid) = project_id {
+        let project = get_orchestrator_workbench_project(state, pid).await?;
+        if project.kind == "remote" {
+            return list_remote_orchestrator_experiments(state, &project).await;
+        }
+    }
     let rows = state
         .orchestrator_repo
         .list_experiments(project_id)
@@ -93,6 +256,69 @@ pub async fn list_orchestrator_experiments_for_state(
         out.push(dto);
     }
     Ok(out)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端项目看板需要展示 owning device 上的实验组。
+///
+/// Code Logic（这个函数做什么）:
+///     open remote → list_remote_experiments；网络错误时 list experiment mirrors。
+async fn list_remote_orchestrator_experiments(
+    state: &AppState,
+    remote_shortcut: &WorkbenchProjectRow,
+) -> Result<Vec<OrchestratorExperimentDto>, AppError> {
+    match open_remote_project_for_shortcut(state, remote_shortcut, None).await {
+        Ok(context) => {
+            let http = reqwest::Client::new();
+            match list_remote_experiments(
+                state.peer_client.as_ref(),
+                &http,
+                &context.base_url,
+                &context.remote_project_id,
+            )
+            .await
+            {
+                Ok(experiments) => {
+                    for exp in &experiments {
+                        if let Ok(payload) = serde_json::to_string(exp) {
+                            let _ = state
+                                .orchestrator_repo
+                                .upsert_experiment_mirror(
+                                    &remote_shortcut.device_id,
+                                    &remote_shortcut.device_name,
+                                    &context.remote_project_id,
+                                    &context.remote_project_path,
+                                    &exp.id,
+                                    &payload,
+                                )
+                                .await;
+                        }
+                    }
+                    Ok(experiments)
+                }
+                Err(err) if is_remote_network_error(&err) => {
+                    state
+                        .orchestrator_repo
+                        .list_experiment_mirrors_for_project_path(
+                            &remote_shortcut.device_id,
+                            &remote_shortcut.path,
+                        )
+                        .await
+                }
+                Err(err) => Err(err),
+            }
+        }
+        Err(err) if is_remote_network_error(&err) => {
+            state
+                .orchestrator_repo
+                .list_experiment_mirrors_for_project_path(
+                    &remote_shortcut.device_id,
+                    &remote_shortcut.path,
+                )
+                .await
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -112,19 +338,32 @@ pub async fn get_orchestrator_experiment(
 ///     共享详情入口。
 ///
 /// Code Logic（这个函数做什么）:
-///     get + candidates。
+///     本机 get + candidates；若 id 在本机缺失则尝试按 mirror 返回（remote 场景）。
 pub async fn get_orchestrator_experiment_for_state(
     state: &AppState,
     experiment_id: &str,
 ) -> Result<OrchestratorExperimentDto, AppError> {
-    let row = state.orchestrator_repo.get_experiment(experiment_id).await?;
-    let mut dto = OrchestratorExperimentDto::from(row);
-    let cands = state
-        .orchestrator_repo
-        .list_experiment_candidates(experiment_id)
-        .await?;
-    dto.candidates = Some(cands.into_iter().map(Into::into).collect());
-    Ok(dto)
+    match state.orchestrator_repo.get_experiment(experiment_id).await {
+        Ok(row) => {
+            let mut dto = OrchestratorExperimentDto::from(row);
+            let cands = state
+                .orchestrator_repo
+                .list_experiment_candidates(experiment_id)
+                .await?;
+            dto.candidates = Some(cands.into_iter().map(Into::into).collect());
+            Ok(dto)
+        }
+        Err(err) => {
+            if let Ok(Some(mirrored)) = state
+                .orchestrator_repo
+                .get_experiment_mirror_by_remote_id(experiment_id)
+                .await
+            {
+                return Ok(mirrored);
+            }
+            Err(err)
+        }
+    }
 }
 
 /// 批准/采用推荐 winner。
@@ -151,16 +390,33 @@ pub async fn approve_orchestrator_experiment_winner(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     共享批准入口。
+///     共享批准入口；remote 实验转发 owner。
 ///
 /// Code Logic（这个函数做什么）:
-///     CAS 选 winner；auto deliver 时启动交付。
+///     本机 CAS 选 winner 并可选 auto deliver；mirror-only id 走 remote approve。
 pub async fn approve_orchestrator_experiment_winner_for_state(
     state: &AppState,
     experiment_id: &str,
     winner_task_id: &str,
     reason: Option<&str>,
 ) -> Result<OrchestratorExperimentDto, AppError> {
+    if state
+        .orchestrator_repo
+        .get_experiment(experiment_id)
+        .await
+        .is_err()
+    {
+        if let Some(dto) = try_approve_remote_experiment_by_mirror(
+            state,
+            experiment_id,
+            winner_task_id,
+            reason,
+        )
+        .await?
+        {
+            return Ok(dto);
+        }
+    }
     let reason = reason.unwrap_or("用户采用推荐 winner");
     let should_auto = {
         let config = state.config.read().expect("config 读锁中毒");
@@ -208,6 +464,51 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
     get_orchestrator_experiment_for_state(state, experiment_id).await
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     桌面在 remote shortcut 上批准时权威状态在 owner 设备。
+///
+/// Code Logic（这个函数做什么）:
+///     查 mirror 得 device_id/path → base_url → approve_remote_experiment_winner。
+async fn try_approve_remote_experiment_by_mirror(
+    state: &AppState,
+    experiment_id: &str,
+    winner_task_id: &str,
+    reason: Option<&str>,
+) -> Result<Option<OrchestratorExperimentDto>, AppError> {
+    let Some(meta) = state
+        .orchestrator_repo
+        .get_experiment_mirror_meta(experiment_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let base_url = remote_device_base_url(state, &meta.device_id)?;
+    let http = reqwest::Client::new();
+    let dto = approve_remote_experiment_winner(
+        state.peer_client.as_ref(),
+        &http,
+        &base_url,
+        experiment_id,
+        winner_task_id,
+        reason.map(str::to_string),
+    )
+    .await?;
+    if let Ok(payload) = serde_json::to_string(&dto) {
+        let _ = state
+            .orchestrator_repo
+            .upsert_experiment_mirror(
+                &meta.device_id,
+                &meta.device_name,
+                &meta.remote_project_id,
+                &meta.remote_project_path,
+                &dto.id,
+                &payload,
+            )
+            .await;
+    }
+    Ok(Some(dto))
+}
+
 /// 取消整组实验。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -224,15 +525,25 @@ pub async fn cancel_orchestrator_experiment(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     共享取消入口。
+///     共享取消入口；remote mirror 转发 owner cancel。
 ///
 /// Code Logic（这个函数做什么）:
-///     cancel group + candidates + abort child tasks。
+///     cancel group + candidates + abort child tasks；本机缺失时 remote cancel。
 pub async fn cancel_orchestrator_experiment_for_state(
     state: &AppState,
     experiment_id: &str,
 ) -> Result<OrchestratorExperimentDto, AppError> {
-    let exp = state.orchestrator_repo.get_experiment(experiment_id).await?;
+    let exp = match state.orchestrator_repo.get_experiment(experiment_id).await {
+        Ok(exp) => exp,
+        Err(_) => {
+            if let Some(dto) = try_cancel_remote_experiment_by_mirror(state, experiment_id).await? {
+                return Ok(dto);
+            }
+            return Err(AppError::not_found(format!(
+                "Orchestrator 实验不存在: {experiment_id}"
+            )));
+        }
+    };
     if exp.status == ExperimentStatus::Delivering {
         return Err(AppError::generic(
             "实验正在交付中，不能取消；请等待交付完成",
@@ -269,6 +580,47 @@ pub async fn cancel_orchestrator_experiment_for_state(
         }
     }
     get_orchestrator_experiment_for_state(state, experiment_id).await
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     remote shortcut 上的取消必须落到 owning device。
+///
+/// Code Logic（这个函数做什么）:
+///     mirror meta → cancel_remote_experiment。
+async fn try_cancel_remote_experiment_by_mirror(
+    state: &AppState,
+    experiment_id: &str,
+) -> Result<Option<OrchestratorExperimentDto>, AppError> {
+    let Some(meta) = state
+        .orchestrator_repo
+        .get_experiment_mirror_meta(experiment_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let base_url = remote_device_base_url(state, &meta.device_id)?;
+    let http = reqwest::Client::new();
+    let dto = cancel_remote_experiment(
+        state.peer_client.as_ref(),
+        &http,
+        &base_url,
+        experiment_id,
+    )
+    .await?;
+    if let Ok(payload) = serde_json::to_string(&dto) {
+        let _ = state
+            .orchestrator_repo
+            .upsert_experiment_mirror(
+                &meta.device_id,
+                &meta.device_name,
+                &meta.remote_project_id,
+                &meta.remote_project_path,
+                &dto.id,
+                &payload,
+            )
+            .await;
+    }
+    Ok(Some(dto))
 }
 
 /// 降级前 quiesce：取消非终态实验组。

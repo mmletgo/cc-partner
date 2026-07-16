@@ -257,7 +257,17 @@
     "discardOutbox": "Failed to discard the outbox item.",
     "workflowDocument": "Failed to load the WORKFLOW document.",
     "workflowValidate": "Failed to validate the WORKFLOW document.",
-    "workflowSave": "Failed to save the WORKFLOW document."
+    "workflowSave": "Failed to save the WORKFLOW document.",
+    "experimentsLoad": "Failed to load experiment groups.",
+    "experimentsCreate": "Failed to create the experiment group.",
+    "experimentsApprove": "Failed to approve the recommended winner.",
+    "experimentsCancel": "Failed to cancel the experiment group."
+  },
+  "experiments": {
+    "title": "Candidate experiments",
+    "empty": "No experiment groups yet. Create a comparative experiment from the create dialog.",
+    "create": "Create comparative experiment",
+    "approveReason": "User approved recommended winner"
   },
   "workflowWizard": {
     "open": "WORKFLOW wizard",

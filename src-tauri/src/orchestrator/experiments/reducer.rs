@@ -5,7 +5,8 @@
 //!     当组内全部 candidate 终态后触发比较。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `record_candidate_review` 更新 outcome；`reduce_experiment` 在全部就绪后调用 judge。
+//!     `record_candidate_review` 更新 outcome；`reduce_experiment` 在全部就绪后调用 judge；
+//!     Comparing 卡住可恢复；winner/status 同事务写入。
 
 use crate::error::AppError;
 use crate::orchestrator::experiments::judge::{evaluate_experiment, CandidateSummary};
@@ -49,7 +50,7 @@ pub async fn record_candidate_review(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     标记 candidate 开始运行（claim 后）。
+///     标记 candidate 开始运行（claim/attempt 后）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     Pending → Running；并 CAS 组状态到 Running。
@@ -82,10 +83,12 @@ pub async fn mark_candidate_running(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     所有 candidate 到达终态或 ready 后，组需要比较或进入 NeedsDecision。
+///     所有 candidate 到达终态或 ready 后，组需要比较或进入 NeedsDecision；
+///     卡在 Comparing 时必须可恢复，禁止永久 early-return。
 ///
 /// Code Logic（这个函数做什么）:
-///     若仍有 Pending/Running 则 noop；否则 CAS 到 Comparing → judge → 写 evidence 与状态。
+///     若仍有 Pending/Running 则 noop；CAS 到 Comparing（已 Comparing 则跳过 CAS）→ judge →
+///     同事务写 outcomes + 状态。
 pub async fn reduce_experiment(
     repo: &OrchestratorRepo,
     experiment_id: &str,
@@ -97,7 +100,6 @@ pub async fn reduce_experiment(
             ExperimentStatus::WinnerReady
                 | ExperimentStatus::Delivering
                 | ExperimentStatus::NeedsDecision
-                | ExperimentStatus::Comparing
         )
     {
         return Ok(None);
@@ -114,20 +116,32 @@ pub async fn reduce_experiment(
         return Ok(None);
     }
 
-    // CAS into Comparing
-    let Some(comparing) = repo
-        .cas_experiment_status(
-            experiment_id,
-            exp.version,
-            exp.status,
-            ExperimentStatus::Comparing,
-            None,
-            None,
-            None,
-        )
-        .await?
-    else {
-        return Ok(None);
+    // CAS into Comparing；若已 Comparing 则复用当前行做恢复 reduce（C-M1）。
+    let comparing = if exp.status == ExperimentStatus::Comparing {
+        exp
+    } else {
+        match repo
+            .cas_experiment_status(
+                experiment_id,
+                exp.version,
+                exp.status,
+                ExperimentStatus::Comparing,
+                None,
+                None,
+                None,
+            )
+            .await?
+        {
+            Some(row) => row,
+            None => {
+                // 并发 CAS 未命中：若已进入 Comparing 则继续恢复，否则退出
+                let current = repo.get_experiment(experiment_id).await?;
+                if current.status != ExperimentStatus::Comparing {
+                    return Ok(None);
+                }
+                current
+            }
+        }
     };
 
     let summaries: Vec<CandidateSummary> = candidates
@@ -137,7 +151,12 @@ pub async fn reduce_experiment(
             outcome: c.outcome,
             provider_id: c.provider_id.clone(),
             strategy_label: c.strategy_label.clone(),
-            validation_summary: String::new(),
+            validation_summary: match c.outcome {
+                CandidateOutcome::CandidateReady => "passed hard gate".to_string(),
+                CandidateOutcome::Failed => "failed hard gate".to_string(),
+                CandidateOutcome::Cancelled => "cancelled".to_string(),
+                other => other.as_str().to_string(),
+            },
             risk_notes: Vec::new(),
             diff_digest: None,
             browser_summary: None,
@@ -147,7 +166,7 @@ pub async fn reduce_experiment(
     let verdict = evaluate_experiment(&comparing, &summaries, None)?;
 
     let content = serde_json::to_string(&verdict).unwrap_or_default();
-    let _ = repo
+    if let Err(err) = repo
         .add_experiment_evidence(
             experiment_id,
             EXPERIMENT_EVIDENCE_KIND_SELECTION_REVIEW,
@@ -155,87 +174,88 @@ pub async fn reduce_experiment(
             &verdict.reason,
             &content,
         )
-        .await;
+        .await
+    {
+        tracing::warn!(
+            experiment_id = %experiment_id,
+            "experiment selection evidence 写入失败: {err}"
+        );
+    }
 
     let ready_count = summaries
         .iter()
         .filter(|s| s.outcome == CandidateOutcome::CandidateReady)
         .count();
 
-    if ready_count == 0 {
-        let _ = repo
-            .cas_experiment_status(
-                experiment_id,
-                comparing.version,
-                ExperimentStatus::Comparing,
-                ExperimentStatus::NeedsDecision,
-                None,
-                Some(&verdict.reason),
-                Some(verdict.confidence),
-            )
-            .await?;
-        return Ok(Some(verdict));
-    }
-
-    if verdict.winner_task_id.is_some()
+    let (next_status, winner_for_status, outcome_updates) = if ready_count == 0 {
+        (
+            ExperimentStatus::NeedsDecision,
+            None,
+            Vec::new(),
+        )
+    } else if verdict.winner_task_id.is_some()
         && verdict.confidence == ComparativeConfidence::High
         && verdict.tied_task_ids.is_empty()
     {
-        // 标记 winner/losers
-        if let Some(ref winner) = verdict.winner_task_id {
+        let winner = verdict.winner_task_id.clone();
+        let mut updates = Vec::new();
+        if let Some(ref w) = winner {
             for c in &candidates {
-                if c.outcome != CandidateOutcome::CandidateReady
-                    && c.outcome != CandidateOutcome::Winner
+                if c.task_id == *w {
+                    updates.push((c.task_id.clone(), CandidateOutcome::Winner));
+                } else if c.outcome == CandidateOutcome::CandidateReady
+                    || (!c.outcome.is_terminal() && c.outcome != CandidateOutcome::Winner)
                 {
-                    if !c.outcome.is_terminal() {
-                        let _ = repo
-                            .set_candidate_outcome(
-                                experiment_id,
-                                &c.task_id,
-                                CandidateOutcome::Loser,
-                            )
-                            .await;
-                    }
-                    continue;
-                }
-                if c.task_id == *winner {
-                    let _ = repo
-                        .set_candidate_outcome(experiment_id, &c.task_id, CandidateOutcome::Winner)
-                        .await;
-                } else if c.outcome == CandidateOutcome::CandidateReady {
-                    let _ = repo
-                        .set_candidate_outcome(experiment_id, &c.task_id, CandidateOutcome::Loser)
-                        .await;
+                    updates.push((c.task_id.clone(), CandidateOutcome::Loser));
                 }
             }
         }
-        let _ = repo
-            .cas_experiment_status(
-                experiment_id,
-                comparing.version,
-                ExperimentStatus::Comparing,
-                ExperimentStatus::WinnerReady,
-                verdict.winner_task_id.as_deref(),
-                Some(&verdict.reason),
-                Some(verdict.confidence),
-            )
-            .await?;
-        return Ok(Some(verdict));
-    }
+        (ExperimentStatus::WinnerReady, winner, updates)
+    } else {
+        // tie / medium / low / judge ambiguity
+        (
+            ExperimentStatus::NeedsDecision,
+            verdict.winner_task_id.clone(),
+            Vec::new(),
+        )
+    };
 
-    // tie / medium / low / judge ambiguity
-    let _ = repo
-        .cas_experiment_status(
+    match repo
+        .apply_experiment_verdict(
             experiment_id,
             comparing.version,
             ExperimentStatus::Comparing,
-            ExperimentStatus::NeedsDecision,
-            verdict.winner_task_id.as_deref(),
+            next_status,
+            winner_for_status.as_deref(),
             Some(&verdict.reason),
             Some(verdict.confidence),
+            &outcome_updates,
         )
-        .await?;
-    Ok(Some(verdict))
+        .await
+    {
+        Ok(Some(_)) => Ok(Some(verdict)),
+        Ok(None) => {
+            // 并发 CAS 未命中：读回状态；若已推进到目标态则仍返回 verdict
+            let current = repo.get_experiment(experiment_id).await?;
+            if current.status == next_status
+                || matches!(
+                    current.status,
+                    ExperimentStatus::WinnerReady
+                        | ExperimentStatus::NeedsDecision
+                        | ExperimentStatus::Delivering
+                        | ExperimentStatus::Completed
+                )
+            {
+                Ok(Some(verdict))
+            } else {
+                Err(AppError::conflict(format!(
+                    "experiment `{experiment_id}` Comparing 推进 CAS 未命中，状态仍为 {}",
+                    current.status.as_str()
+                )))
+            }
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(test)]
@@ -322,5 +342,39 @@ mod tests {
             .unwrap();
         let exp = repo.get_experiment(&exp_id).await.unwrap();
         assert_eq!(exp.status, ExperimentStatus::NeedsDecision);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     卡在 Comparing 后再次 reduce 必须能推进到终态。
+    #[tokio::test]
+    async fn reduce_recovers_from_stuck_comparing() {
+        let repo = setup().await;
+        let exp_id = fixture_two(&repo).await;
+        repo.set_candidate_outcome(&exp_id, "task-1", CandidateOutcome::CandidateReady)
+            .await
+            .unwrap();
+        repo.set_candidate_outcome(&exp_id, "task-2", CandidateOutcome::Failed)
+            .await
+            .unwrap();
+        let exp = repo.get_experiment(&exp_id).await.unwrap();
+        // 强制写入 Comparing 模拟中断
+        let comparing = repo
+            .cas_experiment_status(
+                &exp_id,
+                exp.version,
+                exp.status,
+                ExperimentStatus::Comparing,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(comparing.status, ExperimentStatus::Comparing);
+        reduce_experiment(&repo, &exp_id).await.unwrap();
+        let final_exp = repo.get_experiment(&exp_id).await.unwrap();
+        assert_eq!(final_exp.status, ExperimentStatus::WinnerReady);
+        assert_eq!(final_exp.winner_task_id.as_deref(), Some("task-1"));
     }
 }

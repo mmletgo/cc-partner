@@ -1180,7 +1180,8 @@ pub async fn agent_adapters_catalog(
 ///     远端创建实验组必须走组级原子路由，旧 peer 无 capability 时客户端不得降级。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 local project 后调用 create_orchestrator_experiment_for_state。
+///     校验 local project 后调用 create_local_orchestrator_experiment；
+///     返回真实 `newly_created`（幂等重放为 false）。
 pub async fn create_experiment_route(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -1190,15 +1191,15 @@ pub async fn create_experiment_route(
     require_local_project_by_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.create"))?;
-    let experiment = crate::commands::orchestrator::create_orchestrator_experiment_for_state(
+    let outcome = crate::commands::orchestrator::create_local_orchestrator_experiment(
         &state, req,
     )
     .await
     .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.create"))?;
     Ok(Json(
         crate::orchestrator::experiments::remote_protocol::CreateExperimentResponse {
-            experiment,
-            newly_created: true,
+            experiment: outcome.experiment,
+            newly_created: outcome.newly_created,
         },
     ))
 }

@@ -379,6 +379,24 @@ pub fn start_orchestrator_remote_outbox_dispatcher(state: AppState) -> Cancellat
                             tracing::error!("Orchestrator remote outbox dispatch 失败: {err}");
                         }
                     }
+                    // A4：同 tick 排水组级 experiment outbox（一条 outbox = 整组 create）。
+                    match crate::orchestrator::experiments::outbox::dispatch_experiment_outbox_once(
+                        &state,
+                    )
+                    .await
+                    {
+                        Ok(dispatched) if dispatched > 0 => {
+                            tracing::info!(
+                                "Orchestrator experiment outbox 已投递 {dispatched} 条实验组"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::error!(
+                                "Orchestrator experiment outbox dispatch 失败: {err}"
+                            );
+                        }
+                    }
                 }
             }
         }

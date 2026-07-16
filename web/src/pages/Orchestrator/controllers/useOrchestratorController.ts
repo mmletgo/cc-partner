@@ -43,6 +43,7 @@ import {
 } from '@/lib/orchestratorRemote';
 import type {
   OrchestratorEvidence,
+  OrchestratorExperiment,
   OrchestratorReviewDiff,
   OrchestratorReviewDiffLoadState,
   OrchestratorTask,
@@ -254,6 +255,13 @@ export interface UseOrchestratorControllerResult {
   handleReloadWorkflowDocument: () => Promise<void>;
   handleOpenWorkflowFile: () => void;
   handleFocusWorkflowDiagnostic: (diagnostic: WorkflowDiagnostic) => void;
+  experiments: OrchestratorExperiment[];
+  experimentsLoading: boolean;
+  creatingExperiment: boolean;
+  experimentActionId: string | null;
+  handleCreateExperiment: () => Promise<void>;
+  handleApproveExperimentWinner: (experimentId: string, winnerTaskId: string) => Promise<void>;
+  handleCancelExperiment: (experimentId: string) => Promise<void>;
 }
 
 /**
@@ -325,6 +333,10 @@ export function useOrchestratorController(
   );
   const workflowDraftTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const workflowRequestSeqRef = useRef(0);
+  const [experiments, setExperiments] = useState<OrchestratorExperiment[]>([]);
+  const [experimentsLoading, setExperimentsLoading] = useState(false);
+  const [creatingExperiment, setCreatingExperiment] = useState(false);
+  const [experimentActionId, setExperimentActionId] = useState<string | null>(null);
   const activeProjectId = activeProject?.id ?? null;
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const taskLoadDecision = useMemo(
@@ -512,9 +524,9 @@ export function useOrchestratorController(
    *   creatingAction 或 completingPrompt 为真时 early-return；否则关闭 createDialogOpen。
    */
   const handleCloseCreateDialog = useCallback(() => {
-    if (creatingAction || completingPrompt) return;
+    if (creatingAction || completingPrompt || creatingExperiment) return;
     setCreateDialogOpen(false);
-  }, [completingPrompt, creatingAction]);
+  }, [completingPrompt, creatingAction, creatingExperiment]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -670,6 +682,43 @@ export function useOrchestratorController(
           views: current?.projectId === projectId ? current.views : [],
           error: displayOrchestratorErrorMessage(err, t('orchestrator:errors.load')),
         }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskLoadDecision, t]);
+
+  /**
+   * Business Logic（为什么需要这个 effect）:
+   *   实验组列表必须与当前项目同步，支持 NeedsDecision 决策入口。
+   *
+   * Code Logic（这个 effect 做什么）:
+   *   project 加载后 listExperiments；stale guard 丢弃过期响应。
+   */
+  useEffect(() => {
+    if (taskLoadDecision.kind !== 'load') {
+      setExperiments([]);
+      setExperimentsLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    const projectId = taskLoadDecision.projectId;
+    setExperimentsLoading(true);
+    void orchestratorApi
+      .listExperiments(projectId)
+      .then((items) => {
+        if (cancelled || activeProjectIdRef.current !== projectId) return;
+        setExperiments(items);
+        setExperimentsLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (cancelled || activeProjectIdRef.current !== projectId) return;
+        setExperiments([]);
+        setExperimentsLoading(false);
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.experimentsLoad')),
+        });
       });
     return () => {
       cancelled = true;
@@ -975,6 +1024,161 @@ export function useOrchestratorController(
       await submitCreateTask(createAction);
     },
     [submitCreateTask],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户可从同一创建表单字段发起 2-candidate 比较实验（默认两条策略）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用 title/goal/acceptance 调用 createExperiment（2 candidates, maxParallel=1）。
+   */
+  const handleCreateExperiment = useCallback(async () => {
+    if (!activeProject) {
+      setActionError({ projectId: activeProjectId, message: t('orchestrator:errors.noProject') });
+      return;
+    }
+    const projectId = activeProject.id;
+    const title = form.title.trim();
+    const goal = form.goal.trim();
+    const acceptance = form.acceptanceCriteria.trim();
+    if (!title || !goal || !acceptance) {
+      setActionError({ projectId, message: t('orchestrator:errors.required') });
+      return;
+    }
+    setCreatingExperiment(true);
+    setActionError(null);
+    try {
+      const created = await orchestratorApi.createExperiment({
+        clientRequestId: crypto.randomUUID(),
+        projectId,
+        title,
+        goal,
+        acceptance,
+        maxParallel: 1,
+        candidates: [
+          { providerId: 'claudeCodeVisible', strategyLabel: 'baseline' },
+          { providerId: 'claudeCodeVisible', strategyLabel: 'alternative' },
+        ],
+      });
+      if (activeProjectIdRef.current !== projectId) return;
+      setExperiments((current) => {
+        const without = current.filter((item) => item.id !== created.id);
+        return [created, ...without];
+      });
+      setForm(EMPTY_ORCHESTRATOR_CREATE_FORM);
+      setCompletionPrompt('');
+      setCreateDialogOpen(false);
+      void refreshRuntimeSnapshot();
+      requestAttentionInvalidation();
+      // 实验创建会插入 candidate tasks，刷新 task board
+      void reloadTaskViewsForActiveProject();
+    } catch (err) {
+      if (activeProjectIdRef.current === projectId) {
+        setActionError({
+          projectId,
+          message: displayOrchestratorErrorMessage(err, t('orchestrator:errors.experimentsCreate')),
+        });
+      }
+    } finally {
+      if (activeProjectIdRef.current === projectId) {
+        setCreatingExperiment(false);
+      }
+    }
+  }, [
+    activeProject,
+    activeProjectId,
+    form.acceptanceCriteria,
+    form.goal,
+    form.title,
+    refreshRuntimeSnapshot,
+    reloadTaskViewsForActiveProject,
+    t,
+  ]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   NeedsDecision / WinnerReady 时用户可采用推荐 winner。
+   *
+   * Code Logic（这个函数做什么）:
+   *   approveExperimentWinner 后更新 experiments 列表并 invalidation Attention。
+   */
+  const handleApproveExperimentWinner = useCallback(
+    async (experimentId: string, winnerTaskId: string) => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || experimentActionId) return;
+      setExperimentActionId(experimentId);
+      setActionError(null);
+      try {
+        const updated = await orchestratorApi.approveExperimentWinner(
+          experimentId,
+          winnerTaskId,
+          t('orchestrator:experiments.approveReason'),
+        );
+        if (activeProjectIdRef.current !== projectId) return;
+        setExperiments((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        requestAttentionInvalidation();
+        void reloadTaskViewsForActiveProject();
+        void refreshRuntimeSnapshot();
+      } catch (err) {
+        if (activeProjectIdRef.current === projectId) {
+          setActionError({
+            projectId,
+            message: displayOrchestratorErrorMessage(
+              err,
+              t('orchestrator:errors.experimentsApprove'),
+            ),
+          });
+        }
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setExperimentActionId(null);
+        }
+      }
+    },
+    [experimentActionId, refreshRuntimeSnapshot, reloadTaskViewsForActiveProject, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户可取消整组实验。
+   *
+   * Code Logic（这个函数做什么）:
+   *   cancelExperiment 后更新列表。
+   */
+  const handleCancelExperiment = useCallback(
+    async (experimentId: string) => {
+      const projectId = activeProjectIdRef.current;
+      if (!projectId || experimentActionId) return;
+      setExperimentActionId(experimentId);
+      setActionError(null);
+      try {
+        const updated = await orchestratorApi.cancelExperiment(experimentId);
+        if (activeProjectIdRef.current !== projectId) return;
+        setExperiments((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        requestAttentionInvalidation();
+        void reloadTaskViewsForActiveProject();
+      } catch (err) {
+        if (activeProjectIdRef.current === projectId) {
+          setActionError({
+            projectId,
+            message: displayOrchestratorErrorMessage(
+              err,
+              t('orchestrator:errors.experimentsCancel'),
+            ),
+          });
+        }
+      } finally {
+        if (activeProjectIdRef.current === projectId) {
+          setExperimentActionId(null);
+        }
+      }
+    },
+    [experimentActionId, reloadTaskViewsForActiveProject, t],
   );
 
   /**
@@ -1558,10 +1762,14 @@ export function useOrchestratorController(
     setActionError(null);
     try {
       await orchestratorApi.refreshProject(projectId);
-      const nextViews = await orchestratorApi.listTaskViews(projectId);
+      const [nextViews, nextExperiments] = await Promise.all([
+        orchestratorApi.listTaskViews(projectId),
+        orchestratorApi.listExperiments(projectId),
+      ]);
       if (activeProjectIdRef.current !== projectId) return;
       const nextSplit = splitOrchestratorTaskViews(nextViews);
       setTaskListResult({ projectId, views: nextViews, error: null });
+      setExperiments(nextExperiments);
       setSelectedTaskId((current) => {
         if (current && nextSplit.tasks.some((item) => item.task.id === current)) return current;
         return null;
@@ -1923,5 +2131,12 @@ export function useOrchestratorController(
     handleReloadWorkflowDocument,
     handleOpenWorkflowFile,
     handleFocusWorkflowDiagnostic,
+    experiments,
+    experimentsLoading,
+    creatingExperiment,
+    experimentActionId,
+    handleCreateExperiment,
+    handleApproveExperimentWinner,
+    handleCancelExperiment,
   };
 }

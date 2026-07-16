@@ -7,6 +7,7 @@ import {
   type MobileAutomationPanelProps,
 } from '../controllers/useMobileAutomationController';
 import styles from '../MobileWorkbench.module.css';
+import { MobileAutomationExperiments } from './MobileAutomationExperiments';
 import { MobileAutomationCreateDialog } from './MobileAutomationCreateDialog';
 import { MobileAutomationOutbox } from './MobileAutomationOutbox';
 import { MobileAutomationTaskDetail } from './MobileAutomationTaskDetail';
@@ -25,7 +26,8 @@ export type { MobileAutomationExecutionContext, MobileAutomationPanelProps };
  *   不直接调用 transport/API；公开类型仍从本文件 re-export 以稳定 MobileWorkbench 导入路径。
  */
 export function MobileAutomationPanel(props: MobileAutomationPanelProps): ReactElement {
-  const { shell, taskList, taskDetail, createDialog, outbox } = useMobileAutomationController(props);
+  const { shell, taskList, taskDetail, createDialog, outbox, experiments } =
+    useMobileAutomationController(props);
   const { t } = useTranslation(['workbench', 'orchestrator']);
   const {
     titleId,
@@ -177,6 +179,7 @@ export function MobileAutomationPanel(props: MobileAutomationPanelProps): ReactE
           >
             <MobileAutomationTaskList {...taskList} />
             <MobileAutomationOutbox {...outbox} />
+            <MobileAutomationExperiments {...experiments} />
           </div>
           <MobileAutomationTaskDetail {...taskDetail} />
           <MobileAutomationCreateDialog {...createDialog} />

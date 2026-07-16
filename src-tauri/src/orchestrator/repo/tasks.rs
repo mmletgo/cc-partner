@@ -596,11 +596,14 @@ impl OrchestratorRepo {
             });
         }
 
-        // A4：本事务内按 experiment 计数 group active，避免单组超过 max_parallel
+        // A4：本事务内按 experiment 计数 group active，避免单组超过 max_parallel；
+        // 且同一 tick 对同一 experiment 最多 claim 一个 candidate（公平轮转）。
         let mut group_active: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
         let mut group_cap: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
+        let mut claimed_experiments_this_tick: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let ordered = crate::orchestrator::claim::fair_order_claim_candidates(eligible.to_vec());
 
         let mut claimed = Vec::new();
@@ -609,8 +612,11 @@ impl OrchestratorRepo {
             if claimed.len() >= remaining as usize {
                 break;
             }
-            // group cap check
+            // group cap check + per-tick fairness
             if let Some(exp_id) = candidate.task.experiment_id.as_deref() {
+                if claimed_experiments_this_tick.contains(exp_id) {
+                    continue;
+                }
                 if !group_cap.contains_key(exp_id) {
                     let max_parallel: Option<i64> = sqlx::query_scalar(
                         "SELECT max_parallel FROM orchestrator_experiments WHERE id = ?",
@@ -680,6 +686,7 @@ impl OrchestratorRepo {
 
             if let Some(exp_id) = candidate.task.experiment_id.as_deref() {
                 *group_active.entry(exp_id.to_string()).or_insert(0) += 1;
+                claimed_experiments_this_tick.insert(exp_id.to_string());
             }
 
             let updated = sqlx::query(&format!(

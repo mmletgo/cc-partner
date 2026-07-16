@@ -650,6 +650,55 @@ export const orchestratorApi = {
       orchestratorRemoteOutboxItemDecoder,
     ),
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   自动化看板需要创建 2–8 candidate 实验组。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委托 createOrchestratorExperiment invoke。
+   */
+  createExperiment: (
+    request: import('@/lib/types/orchestrator').CreateExperimentRequest,
+  ): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment> =>
+    createOrchestratorExperiment(request),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   看板需要列出当前项目实验组。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委托 listOrchestratorExperiments。
+   */
+  listExperiments: (
+    projectId?: string | null,
+  ): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment[]> =>
+    listOrchestratorExperiments(projectId),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   NeedsDecision 时采用推荐或另一 ready candidate。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委托 approveOrchestratorExperimentWinner。
+   */
+  approveExperimentWinner: (
+    experimentId: string,
+    winnerTaskId: string,
+    reason?: string,
+  ): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment> =>
+    approveOrchestratorExperimentWinner(experimentId, winnerTaskId, reason),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户取消整组实验。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委托 cancelOrchestratorExperiment。
+   */
+  cancelExperiment: (
+    experimentId: string,
+  ): Promise<import('@/lib/types/orchestrator').OrchestratorExperiment> =>
+    cancelOrchestratorExperiment(experimentId),
 
   /**
    * Business Logic（为什么需要这个函数）:

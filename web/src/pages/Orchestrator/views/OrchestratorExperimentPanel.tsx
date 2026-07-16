@@ -6,6 +6,7 @@
  * Code Logic（做什么）:
  *   纯展示组件：接收 experiment DTO 与动作回调。
  */
+import type { JSX } from 'react';
 import { Button } from '@/components/primitives/Button';
 import type { OrchestratorExperiment } from '@/lib/types/orchestrator';
 import styles from './OrchestratorExperimentPanel.module.css';

@@ -5,6 +5,7 @@
  * Code Logic（做什么）:
  *   复用 OrchestratorExperimentPanel 渲染实验列表。
  */
+import type { JSX } from 'react';
 import { OrchestratorExperimentPanel } from '@/pages/Orchestrator/views/OrchestratorExperimentPanel';
 import type { OrchestratorExperiment } from '@/lib/types/orchestrator';
 

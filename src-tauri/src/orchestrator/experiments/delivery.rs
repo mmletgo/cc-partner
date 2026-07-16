@@ -110,8 +110,20 @@ pub async fn select_experiment_winner(
 
     // 允许从 Comparing / NeedsDecision / WinnerReady / Running 选择
     let expected = exp.status;
+    let mut outcome_updates: Vec<(String, CandidateOutcome)> = Vec::new();
+    for c in &candidates {
+        if c.task_id == winner_task_id {
+            outcome_updates.push((c.task_id.clone(), CandidateOutcome::Winner));
+        } else if matches!(
+            c.outcome,
+            CandidateOutcome::CandidateReady | CandidateOutcome::Pending | CandidateOutcome::Running
+        ) {
+            outcome_updates.push((c.task_id.clone(), CandidateOutcome::Loser));
+        }
+    }
+
     let Some(updated) = repo
-        .cas_experiment_status(
+        .apply_experiment_verdict(
             experiment_id,
             exp.version,
             expected,
@@ -119,6 +131,7 @@ pub async fn select_experiment_winner(
             Some(winner_task_id),
             Some(reason),
             Some(confidence),
+            &outcome_updates,
         )
         .await?
     else {
@@ -128,22 +141,6 @@ pub async fn select_experiment_winner(
             experiment: current,
         });
     };
-
-    // outcomes: winner + losers
-    for c in &candidates {
-        if c.task_id == winner_task_id {
-            let _ = repo
-                .set_candidate_outcome(experiment_id, &c.task_id, CandidateOutcome::Winner)
-                .await;
-        } else if matches!(
-            c.outcome,
-            CandidateOutcome::CandidateReady | CandidateOutcome::Pending | CandidateOutcome::Running
-        ) {
-            let _ = repo
-                .set_candidate_outcome(experiment_id, &c.task_id, CandidateOutcome::Loser)
-                .await;
-        }
-    }
 
     Ok(SelectWinnerOutcome {
         selected: true,
@@ -177,12 +174,10 @@ pub async fn assert_task_may_deliver(
             "candidate `{task_id}` 不是 experiment `{exp_id}` 的 winner，禁止交付"
         )));
     }
-    if exp.status != ExperimentStatus::Delivering
-        && exp.status != ExperimentStatus::WinnerReady
-        && exp.status != ExperimentStatus::Completed
-    {
+    // 四层防御：组必须已 CAS 到 Delivering（WinnerReady/Completed 不得直接交付）。
+    if exp.status != ExperimentStatus::Delivering {
         return Err(AppError::generic(format!(
-            "experiment `{exp_id}` 状态为 {}，禁止交付",
+            "experiment `{exp_id}` 状态为 {}，禁止交付（仅 Delivering 允许）",
             exp.status.as_str()
         )));
     }

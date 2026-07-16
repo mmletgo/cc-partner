@@ -52,11 +52,11 @@ pub use experiments::{
     __tauri_command_name_list_orchestrator_experiments,
     __tauri_command_name_prepare_experiment_downgrade, approve_orchestrator_experiment_winner,
     approve_orchestrator_experiment_winner_for_state, cancel_orchestrator_experiment,
-    cancel_orchestrator_experiment_for_state, create_orchestrator_experiment,
-    create_orchestrator_experiment_for_state, get_orchestrator_experiment,
-    get_orchestrator_experiment_for_state, list_orchestrator_experiments,
-    list_orchestrator_experiments_for_state, prepare_experiment_downgrade,
-    prepare_experiment_downgrade_for_state,
+    cancel_orchestrator_experiment_for_state, create_local_orchestrator_experiment,
+    create_orchestrator_experiment, create_orchestrator_experiment_for_state,
+    get_orchestrator_experiment, get_orchestrator_experiment_for_state,
+    list_orchestrator_experiments, list_orchestrator_experiments_for_state,
+    prepare_experiment_downgrade, prepare_experiment_downgrade_for_state,
 };
 pub use remote::{
     __cmd__discard_orchestrator_remote_outbox, __cmd__retry_orchestrator_remote_outbox,

@@ -505,31 +505,89 @@ impl OrchestratorRepo {
         selection_reason: Option<&str>,
         confidence: Option<ComparativeConfidence>,
     ) -> Result<Option<OrchestratorExperimentRow>, AppError> {
+        self.apply_experiment_verdict(
+            experiment_id,
+            expected_version,
+            expected_status,
+            next_status,
+            winner_task_id,
+            selection_reason,
+            confidence,
+            &[],
+        )
+        .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     reduce/select 必须把 experiment CAS 与 winner/loser outcomes 写在同一事务，
+    ///     避免中断后 winner outcome 与组状态分叉。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     begin_shared_write：CAS experiment 行；成功后再批量 UPDATE candidate outcomes；commit。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_experiment_verdict(
+        &self,
+        experiment_id: &str,
+        expected_version: i64,
+        expected_status: ExperimentStatus,
+        next_status: ExperimentStatus,
+        winner_task_id: Option<&str>,
+        selection_reason: Option<&str>,
+        confidence: Option<ComparativeConfidence>,
+        outcome_updates: &[(String, CandidateOutcome)],
+    ) -> Result<Option<OrchestratorExperimentRow>, AppError> {
         let now = Utc::now().to_rfc3339();
         let next_version = expected_version.saturating_add(1);
-        let result = with_shared_write_lease(&self.gate, async {
-            sqlx::query(
-                "UPDATE orchestrator_experiments \
-                 SET status = ?, winner_task_id = ?, selection_reason = ?, confidence = ?, \
-                     version = ?, updated_at = ? \
-                 WHERE id = ? AND version = ? AND status = ?",
-            )
-            .bind(next_status.as_str())
-            .bind(winner_task_id)
-            .bind(selection_reason)
-            .bind(confidence.map(ComparativeConfidence::as_str))
-            .bind(next_version)
-            .bind(&now)
-            .bind(experiment_id)
-            .bind(expected_version)
-            .bind(expected_status.as_str())
-            .execute(&self.pool)
-            .await
-        })
+        let (_permit, mut tx) = begin_shared_write(&self.pool, &self.gate).await?;
+        let result = sqlx::query(
+            "UPDATE orchestrator_experiments \
+             SET status = ?, winner_task_id = ?, selection_reason = ?, confidence = ?, \
+                 version = ?, updated_at = ? \
+             WHERE id = ? AND version = ? AND status = ?",
+        )
+        .bind(next_status.as_str())
+        .bind(winner_task_id)
+        .bind(selection_reason)
+        .bind(confidence.map(ComparativeConfidence::as_str))
+        .bind(next_version)
+        .bind(&now)
+        .bind(experiment_id)
+        .bind(expected_version)
+        .bind(expected_status.as_str())
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() != 1 {
+            tx.rollback().await?;
             return Ok(None);
         }
+        for (task_id, outcome) in outcome_updates {
+            let r = sqlx::query(
+                "UPDATE orchestrator_experiment_candidates \
+                 SET outcome = ?, updated_at = ? \
+                 WHERE experiment_id = ? AND task_id = ?",
+            )
+            .bind(outcome.as_str())
+            .bind(&now)
+            .bind(experiment_id)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await;
+            match r {
+                Ok(_) => {}
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("UNIQUE") || msg.contains("unique") {
+                        tx.rollback().await?;
+                        return Err(AppError::conflict(format!(
+                            "experiment `{experiment_id}` 已存在 winner，拒绝第二个 winner"
+                        )));
+                    }
+                    tx.rollback().await?;
+                    return Err(AppError::from(err));
+                }
+            }
+        }
+        tx.commit().await?;
         Ok(Some(self.get_experiment(experiment_id).await?))
     }
 

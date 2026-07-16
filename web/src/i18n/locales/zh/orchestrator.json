@@ -257,7 +257,17 @@
     "discardOutbox": "放弃发送失败。",
     "workflowDocument": "WORKFLOW 文档加载失败。",
     "workflowValidate": "WORKFLOW 文档校验失败。",
-    "workflowSave": "WORKFLOW 文档保存失败。"
+    "workflowSave": "WORKFLOW 文档保存失败。",
+    "experimentsLoad": "实验组列表加载失败。",
+    "experimentsCreate": "实验组创建失败。",
+    "experimentsApprove": "采用推荐失败。",
+    "experimentsCancel": "取消实验组失败。"
+  },
+  "experiments": {
+    "title": "候选实验组",
+    "empty": "暂无实验组。可在创建弹窗中发起比较实验。",
+    "create": "创建比较实验",
+    "approveReason": "用户采用推荐 winner"
   },
   "workflowWizard": {
     "open": "WORKFLOW 向导",

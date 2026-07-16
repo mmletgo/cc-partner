@@ -31,12 +31,14 @@ export interface OrchestratorCreateDialogProps {
   canCreate: boolean;
   canCompletePrompt: boolean;
   completionPromptRef: RefObject<HTMLTextAreaElement | null>;
+  creatingExperiment?: boolean;
   onClose: () => void;
   onCompletionPromptChange: (value: string) => void;
   onUpdateFormField: (field: keyof OrchestratorCreateForm, value: string) => void;
   onCompleteWithAi: () => void;
   onCreateFormSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onCreateAction: (createAction: OrchestratorCreateAction) => void;
+  onCreateExperiment?: () => void;
 }
 
 /**
@@ -56,15 +58,17 @@ export function OrchestratorCreateDialog(props: OrchestratorCreateDialogProps): 
     canCreate,
     canCompletePrompt,
     completionPromptRef,
+    creatingExperiment = false,
     onClose,
     onCompletionPromptChange,
     onUpdateFormField,
     onCompleteWithAi,
     onCreateFormSubmit,
     onCreateAction,
+    onCreateExperiment,
   } = props;
   const { t } = useTranslation(['orchestrator', 'common']);
-  const busy = Boolean(creatingAction) || completingPrompt;
+  const busy = Boolean(creatingAction) || completingPrompt || creatingExperiment;
 
   return (
     <Dialog
@@ -167,7 +171,7 @@ export function OrchestratorCreateDialog(props: OrchestratorCreateDialogProps): 
                   icon={<PlusIcon />}
                   key={action.createAction}
                   loading={creatingAction === action.createAction}
-                  disabled={!canCreate || completingPrompt}
+                  disabled={!canCreate || completingPrompt || creatingExperiment}
                   onClick={() => {
                     void onCreateAction(action.createAction);
                   }}
@@ -175,6 +179,21 @@ export function OrchestratorCreateDialog(props: OrchestratorCreateDialogProps): 
                   {t(action.labelKey)}
                 </Button>
               ))}
+              {onCreateExperiment ? (
+                <Button
+                  variant="secondary"
+                  size="md"
+                  type="button"
+                  loading={creatingExperiment}
+                  disabled={!canCreate || completingPrompt || creatingExperiment}
+                  onClick={() => {
+                    void onCreateExperiment();
+                  }}
+                  data-testid="create-experiment"
+                >
+                  {t('orchestrator:experiments.create')}
+                </Button>
+              ) : null}
             </div>
           </form>
         </Card.Body>

@@ -32,6 +32,7 @@ import {
 } from './orchestratorViewHelpers';
 import { OrchestratorBoard } from './views/OrchestratorBoard';
 import { OrchestratorCreateDialog } from './views/OrchestratorCreateDialog';
+import { OrchestratorExperimentPanel } from './views/OrchestratorExperimentPanel';
 import { OrchestratorOutbox } from './views/OrchestratorOutbox';
 import { OrchestratorTaskDrawer } from './views/OrchestratorTaskDrawer';
 import { WorkflowWizardDialog } from './views/WorkflowWizardDialog';
@@ -334,6 +335,35 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 }}
               />
             ) : null}
+            {!c.loading ? (
+              <section className={styles.group} aria-label={t('orchestrator:experiments.title')}>
+                <div className={styles.groupHeader}>
+                  <span>{t('orchestrator:experiments.title')}</span>
+                  <Pill tone="neutral">{c.experiments.length}</Pill>
+                </div>
+                {c.experimentsLoading ? (
+                  <p className={styles.muted}>{t('common:loading')}</p>
+                ) : null}
+                {!c.experimentsLoading && c.experiments.length === 0 ? (
+                  <p className={styles.muted}>{t('orchestrator:experiments.empty')}</p>
+                ) : null}
+                {c.experiments.map((experiment) => (
+                  <OrchestratorExperimentPanel
+                    key={experiment.id}
+                    experiment={experiment}
+                    onApproveRecommended={(experimentId, winnerTaskId) => {
+                      void c.handleApproveExperimentWinner(experimentId, winnerTaskId);
+                    }}
+                    onSelectCandidate={(experimentId, taskId) => {
+                      void c.handleApproveExperimentWinner(experimentId, taskId);
+                    }}
+                    onCancel={(experimentId) => {
+                      void c.handleCancelExperiment(experimentId);
+                    }}
+                  />
+                ))}
+              </section>
+            ) : null}
           </Card.Body>
         </Card>
 
@@ -405,6 +435,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         canCreate={c.canCreate}
         canCompletePrompt={c.canCompletePrompt}
         completionPromptRef={c.completionPromptRef}
+        creatingExperiment={c.creatingExperiment}
         onClose={c.handleCloseCreateDialog}
         onCompletionPromptChange={c.setCompletionPrompt}
         onUpdateFormField={c.updateFormField}
@@ -414,6 +445,9 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
         onCreateFormSubmit={c.handleCreateFormSubmit}
         onCreateAction={(createAction) => {
           void c.handleCreateTaskAction(createAction);
+        }}
+        onCreateExperiment={() => {
+          void c.handleCreateExperiment();
         }}
       />
       <WorkflowWizardDialog

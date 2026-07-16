@@ -755,6 +755,36 @@ export const httpOrchestratorTransport = {
     postJson<OrchestratorRuntimeSnapshot>('/api/mobile/orchestrator/runtime-snapshot', {
         projectId,
       }, { policy: { kind: 'query' }, decoder: orchestratorRuntimeSnapshotDecoder }),
+
+  /**
+   * A4 experiment HTTP helpers（mobile / LAN browser）。
+   *
+   * Business Logic（为什么需要）:
+   *   手机端需要列表与决策实验组，复用 P2P owner 路由。
+   *
+   * Code Logic（做什么）:
+   *   POST experiments/list|approve-winner|cancel。
+   */
+  experiments: {
+    list: (projectId: string) =>
+      postJson<{ experiments: import('@/lib/types').OrchestratorExperiment[] }>(
+        '/api/orchestrator/experiments/list',
+        { projectId },
+        { policy: { kind: 'query' } },
+      ).then((body) => body.experiments),
+    approveWinner: (experimentId: string, winnerTaskId: string, reason?: string | null) =>
+      postJson<import('@/lib/types').OrchestratorExperiment>(
+        '/api/orchestrator/experiments/approve-winner',
+        { experimentId, winnerTaskId, reason: reason ?? null },
+        { policy: { kind: 'mutation' } },
+      ),
+    cancel: (experimentId: string) =>
+      postJson<import('@/lib/types').OrchestratorExperiment>(
+        '/api/orchestrator/experiments/cancel',
+        { experimentId },
+        { policy: { kind: 'mutation' } },
+      ),
+  },
 } as const;
 
 /**
