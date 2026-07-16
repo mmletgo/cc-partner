@@ -12,7 +12,6 @@ use crate::agent_cli::output::CliError;
 use crate::agent_cli::protocol::{
     AgentControlMutation, AgentControlQuery, AgentControlRequest, MutationReplayPolicy,
 };
-use crate::agent_cli::selectors::ProjectSelector;
 use crate::backend::control::{self, BackendControlFile};
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -302,12 +301,15 @@ impl AgentCliClient {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     mutation 遵循 replay policy：NeverReplay 只一击。
+    ///     mutation 遵循 replay policy：NeverReplay 只一击；ReconcileByRequestId 不盲重放。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     POST agent/mutate 一次；不自动重试。
+    ///     POST agent/mutate 一次；NeverReplay 的 transport 丢失 → outcomeUnknown；
+    ///     ReconcileByRequestId 在 post-dispatch uncertainty 后可单次 `reconcile_query`，
+    ///     命中返回既有状态，未命中 → outcomeUnknown（绝不二次 POST mutate）。
     pub async fn mutate(&self, op: AgentControlMutation) -> Result<Value, CliError> {
         let policy = op.replay_policy();
+        let reconcile = op.reconcile_query();
         let body = serde_json::to_value(AgentControlRequest {
             control_token: self.control_token.clone(),
             op,
@@ -322,10 +324,23 @@ impl AgentCliClient {
                     && e.code() != "backend_offline"
                     && e.exit == crate::agent_cli::output::CliExitCode::Unavailable
                 {
-                    Err(CliError::outcome_unknown(e.message.clone()))
-                } else {
-                    Err(e)
+                    return Err(CliError::outcome_unknown(e.message.clone())
+                        .with_request_id(e.request_id.clone()));
                 }
+                if policy == MutationReplayPolicy::ReconcileByRequestId
+                    && is_post_dispatch_uncertainty(&e)
+                {
+                    if let Some(q) = reconcile {
+                        if let Ok(v) = self.query(q).await {
+                            return Ok(v);
+                        }
+                    }
+                    if !e.outcome_unknown_flag() {
+                        return Err(CliError::outcome_unknown(e.message.clone())
+                            .with_request_id(e.request_id.clone()));
+                    }
+                }
+                Err(e)
             }
         }
     }
@@ -367,6 +382,20 @@ fn extract_data(v: Value) -> Result<Value, CliError> {
         return Ok(data.clone());
     }
     Ok(v)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     仅当 mutation 可能已到达 owner 后 transport 丢失时才对账/标 outcomeUnknown。
+///
+/// Code Logic（这个函数做什么）:
+///     outcome_unknown 或 Unavailable（排除 backend_offline 连接前失败）。
+fn is_post_dispatch_uncertainty(err: &CliError) -> bool {
+    if err.outcome_unknown_flag() {
+        return true;
+    }
+    err.exit == crate::agent_cli::output::CliExitCode::Unavailable
+        && err.code() != "backend_offline"
+        && err.code() != "peer_offline"
 }
 
 /// 测试用 Fake transport 状态。
@@ -484,6 +513,7 @@ pub fn terminal_send(session_id: &str, data: &[u8]) -> AgentControlMutation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_cli::selectors::ProjectSelector;
 
     #[tokio::test]
     async fn terminal_send_connection_loss_is_never_replayed() {
@@ -531,5 +561,30 @@ mod tests {
         let err = client(transport.clone()).mutate(op).await.unwrap_err();
         assert_eq!(transport.hit_count(), 1);
         assert!(err.outcome_unknown_flag());
+    }
+
+    #[tokio::test]
+    async fn task_create_reconcile_does_not_replay_mutate_on_uncertainty() {
+        // drop-after-apply：mutate 失败后走 reconcile query（第二次 hit），不再 POST mutate。
+        let transport = FakeTransport::drop_after_apply();
+        let op = AgentControlMutation::TaskCreate {
+            project: ProjectSelector::Id("p1".into()),
+            payload: serde_json::json!({"title": "t", "goal": "g", "acceptanceCriteria": "a"}),
+            client_request_id: "req-stable-1".into(),
+        };
+        let err = client(transport.clone()).mutate(op).await.unwrap_err();
+        // 1 mutate + 1 reconcile query
+        assert_eq!(transport.hit_count(), 2);
+        assert!(err.outcome_unknown_flag());
+        assert_eq!(op_policy_reconcile(), MutationReplayPolicy::ReconcileByRequestId);
+    }
+
+    fn op_policy_reconcile() -> MutationReplayPolicy {
+        AgentControlMutation::TaskCreate {
+            project: ProjectSelector::Id("p".into()),
+            payload: serde_json::json!({}),
+            client_request_id: "r".into(),
+        }
+        .replay_policy()
     }
 }

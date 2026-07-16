@@ -19,9 +19,11 @@ use crate::backend::control_api::CONTROL_RESPONSE_BODY_LIMIT_BYTES;
 use crate::commands::attention::list_attention_items_v2_for_state;
 use crate::commands::orchestrator::{
     cancel_orchestrator_experiment_for_state, create_orchestrator_experiment_for_state,
-    create_orchestrator_task_view_for_state, get_orchestrator_experiment_for_state,
-    list_orchestrator_task_views_for_state, CreateOrchestratorTaskRequest,
+    create_orchestrator_task_view_for_http_with_request_id, get_orchestrator_experiment_for_state,
+    list_orchestrator_task_views_for_state,
 };
+use crate::orchestrator::models::OrchestratorCreateAction;
+use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
 use crate::commands::workbench::{
     create_workbench_worktree_for_state, discover_workbench_browser_targets_for_state,
     get_browser_verification_for_state, get_workbench_lan_fleet_for_state,
@@ -211,6 +213,22 @@ pub async fn dispatch_query(state: &AppState, op: AgentControlQuery) -> Result<V
             let run = get_browser_verification_for_state(state, run_id).await?;
             Ok(serde_json::to_value(run)?)
         }
+        AgentControlQuery::DeviceResolve { device_id } => resolve_device_for_control(state, &device_id),
+        AgentControlQuery::TaskByClientRequestId { client_request_id } => {
+            let task = state
+                .orchestrator_repo
+                .get_task_by_client_request_id(&client_request_id)
+                .await?;
+            match task {
+                Some(row) => {
+                    let dto = crate::orchestrator::models::OrchestratorTaskDto::from(row);
+                    Ok(serde_json::to_value(dto)?)
+                }
+                None => Err(AppError::not_found(format!(
+                    "no task for clientRequestId `{client_request_id}`"
+                ))),
+            }
+        }
     }
 }
 
@@ -253,10 +271,17 @@ pub async fn dispatch_mutate(
         AgentControlMutation::TaskCreate {
             project,
             payload,
-            client_request_id: _,
+            client_request_id,
         } => {
+            let client_request_id = client_request_id.trim().to_string();
+            if client_request_id.is_empty() {
+                return Err(AppError::validation(
+                    "clientRequestId required for task create",
+                ));
+            }
             let project_id = resolve_project_id(state, &project).await?;
-            let request = CreateOrchestratorTaskRequest {
+            let create_action = parse_create_action(payload.get("createAction"));
+            let req = RemoteCreateOrchestratorTaskReq {
                 project_id,
                 title: payload
                     .get("title")
@@ -273,8 +298,9 @@ pub async fn dispatch_mutate(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                priority: payload.get("priority").and_then(|v| v.as_i64()),
-                create_action: Default::default(),
+                priority: payload.get("priority").and_then(|v| v.as_i64()).unwrap_or(0),
+                create_action,
+                client_request_id: Some(client_request_id),
                 source: payload
                     .get("source")
                     .and_then(|v| v.as_str())
@@ -285,7 +311,9 @@ pub async fn dispatch_mutate(
                 external_state: None,
                 external_labels: None,
             };
-            let view = create_orchestrator_task_view_for_state(state, request).await?;
+            // 走 clientRequestId 幂等路径（local ledger + remote 透传），禁止静默丢弃 request id。
+            let view =
+                create_orchestrator_task_view_for_http_with_request_id(state, req, None).await?;
             Ok(serde_json::to_value(view)?)
         }
         AgentControlMutation::TaskCancel {
@@ -460,6 +488,44 @@ fn phase_matches(current: &str, want: &str) -> bool {
         .replace('-', "");
     let b = want.to_ascii_lowercase().replace('_', "").replace('-', "");
     a == b
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Agent CLI 远端 `--device id:` 必须经 control plane 读 owner mDNS 表，禁止 GET /api/devices。
+///
+/// Code Logic（这个函数做什么）:
+///     读完整 devices map（非 launch-summary 的 max5 截断），返回 baseUrl/online。
+fn resolve_device_for_control(state: &AppState, device_id: &str) -> Result<Value, AppError> {
+    let device_id = device_id.trim();
+    if device_id.is_empty() {
+        return Err(AppError::validation("device id must be non-empty"));
+    }
+    let devices = state
+        .devices
+        .read()
+        .map_err(|_| AppError::generic("devices 读锁中毒"))?;
+    let device = devices
+        .get(device_id)
+        .ok_or_else(|| AppError::not_found("remote device not found in discovery table"))?;
+    Ok(json!({
+        "id": device.id,
+        "name": device.name,
+        "baseUrl": device.base_url(),
+        "host": device.host,
+        "port": device.port,
+        "online": device.online,
+    }))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     task create payload 可带 createAction；缺省 backlog 与领域契约一致。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 JSON 字符串/枚举值为 OrchestratorCreateAction。
+fn parse_create_action(value: Option<&Value>) -> OrchestratorCreateAction {
+    value
+        .and_then(|v| serde_json::from_value::<OrchestratorCreateAction>(v.clone()).ok())
+        .unwrap_or_default()
 }
 
 fn authorize_control_request(

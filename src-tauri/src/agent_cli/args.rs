@@ -11,7 +11,7 @@ use crate::agent_cli::selectors::{
     parse_entity_selector, parse_project_selector, parse_worktree_selector, EntitySelector,
     ProjectSelector, WorktreeSelector,
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 /// 设备选择器：仅 local 或显式 id。
 ///

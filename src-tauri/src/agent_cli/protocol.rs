@@ -16,7 +16,10 @@ use serde_json::Value;
 ///     non-replayable 操作连接丢失不得盲重放；可对账的则先查再定。
 ///
 /// Code Logic（这个枚举做什么）:
-///     ReconcileByRequestId / NaturallyIdempotent / NeverReplay。
+///     - `NeverReplay`：CLI 只发一次 mutation；dispatch 后 transport/timeout → `outcomeUnknown`。
+///     - `ReconcileByRequestId`：服务端 ledger/领域幂等使 agent 同 requestId 重入安全；
+///       CLI 在 transport uncertainty 后可单次 query 对账，**绝不**自动重放 mutation。
+///     - `NaturallyIdempotent`：同 mutation 重入安全（如已取消再 cancel）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationReplayPolicy {
     ReconcileByRequestId,
@@ -81,6 +84,14 @@ pub enum AgentControlQuery {
     BrowserInspect {
         run_id: String,
     },
+    /// 从 owner mDNS 设备表解析远端 base URL（control-only，禁止 LAN business API 绕过）。
+    DeviceResolve {
+        device_id: String,
+    },
+    /// 按 clientRequestId 查询 create ledger 命中的任务（ReconcileByRequestId 对账）。
+    TaskByClientRequestId {
+        client_request_id: String,
+    },
 }
 
 /// 本机 control agent 变更变体（闭集）。
@@ -102,7 +113,8 @@ pub enum AgentControlMutation {
         #[serde(with = "project_selector_serde")]
         project: ProjectSelector,
         payload: Value,
-        client_request_id: Option<String>,
+        /// 非空幂等键；owner/ledger 按此 dedupe，禁止静默丢弃。
+        client_request_id: String,
     },
     TaskCancel {
         task_id: String,
@@ -144,6 +156,23 @@ impl AgentControlMutation {
             | Self::TaskRetry { .. }
             | Self::ExperimentCreate { .. } => MutationReplayPolicy::ReconcileByRequestId,
             Self::ExperimentCancel { .. } => MutationReplayPolicy::NaturallyIdempotent,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     ReconcileByRequestId 在 mutation 响应丢失后需用领域 ledger 对账，而不是盲重放。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     TaskCreate → `TaskByClientRequestId`；其它 reconcile 变体暂无独立 ledger query 则 None
+    ///     （agent 可安全重入，依赖服务端幂等）。
+    pub fn reconcile_query(&self) -> Option<AgentControlQuery> {
+        match self {
+            Self::TaskCreate {
+                client_request_id, ..
+            } => Some(AgentControlQuery::TaskByClientRequestId {
+                client_request_id: client_request_id.clone(),
+            }),
+            _ => None,
         }
     }
 }

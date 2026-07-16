@@ -177,6 +177,134 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
     };
     let _ = assert_json_ok(&mut case, "fleet snapshot", &fleet);
 
+    // 经 control workbench 添加本机项目，供 task create 幂等 smoke
+    let project_dir = case.case_dir.join("sample-project");
+    if let Err(e) = std::fs::create_dir_all(&project_dir) {
+        fail_case(&mut case, format!("create sample project dir: {e}"));
+    }
+    // 最小 git repo（部分 workbench add 路径会检查目录存在即可）
+    let _ = Command::new("git")
+        .args(["init"])
+        .current_dir(&project_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let project = match add_local_project_via_control(
+        &control.control_token,
+        control.port,
+        &project_dir,
+    ) {
+        Ok(p) => p,
+        Err(e) => fail_case(&mut case, e),
+    };
+    let project_id = project
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if project_id.is_empty() {
+        fail_case(&mut case, format!("projects.add missing id: {project}"));
+    }
+
+    // session list（无 session 也须 envelope ok）
+    let sessions = match run_agent_cli(
+        &case,
+        &["--json", "session", "list", "--project", &format!("id:{project_id}")],
+        None,
+    ) {
+        Ok(c) => c,
+        Err(e) => fail_case(&mut case, e),
+    };
+    let _ = assert_json_ok(&mut case, "session list", &sessions);
+
+    // agent list
+    let agents = match run_agent_cli(
+        &case,
+        &["--json", "agent", "list", "--project", &format!("id:{project_id}")],
+        None,
+    ) {
+        Ok(c) => c,
+        Err(e) => fail_case(&mut case, e),
+    };
+    let _ = assert_json_ok(&mut case, "agent list", &agents);
+
+    // task create stdin + 同 clientRequestId 重放 → 同一 task
+    let create_body = format!(
+        r#"{{"title":"smoke task","goal":"g","acceptanceCriteria":"a","clientRequestId":"smoke-req-1"}}"#
+    );
+    let create1 = match run_agent_cli(
+        &case,
+        &[
+            "--json",
+            "task",
+            "create",
+            "--project",
+            &format!("id:{project_id}"),
+            "--input-json",
+            "-",
+        ],
+        Some(&create_body),
+    ) {
+        Ok(c) => c,
+        Err(e) => fail_case(&mut case, e),
+    };
+    let body1 = assert_json_ok(&mut case, "task create #1", &create1);
+    let task_id_1 = extract_task_id(&body1["data"]).unwrap_or_default();
+    if task_id_1.is_empty() {
+        fail_case(&mut case, format!("task create #1 missing task id: {body1}"));
+    }
+    let create2 = match run_agent_cli(
+        &case,
+        &[
+            "--json",
+            "task",
+            "create",
+            "--project",
+            &format!("id:{project_id}"),
+            "--input-json",
+            "-",
+        ],
+        Some(&create_body),
+    ) {
+        Ok(c) => c,
+        Err(e) => fail_case(&mut case, e),
+    };
+    let body2 = assert_json_ok(&mut case, "task create #2 (idempotent)", &create2);
+    let task_id_2 = extract_task_id(&body2["data"]).unwrap_or_default();
+    if task_id_1 != task_id_2 {
+        fail_case(
+            &mut case,
+            format!("idempotent create mismatch: {task_id_1} vs {task_id_2}\n{body1}\n{body2}"),
+        );
+    }
+
+    // 缺 clientRequestId → usage exit 2
+    let missing_rid = match run_agent_cli(
+        &case,
+        &[
+            "--json",
+            "task",
+            "create",
+            "--project",
+            &format!("id:{project_id}"),
+            "--input-json",
+            "-",
+        ],
+        Some(r#"{"title":"x","goal":"y","acceptanceCriteria":"z"}"#),
+    ) {
+        Ok(c) => c,
+        Err(e) => fail_case(&mut case, e),
+    };
+    if missing_rid.code != Some(2) {
+        fail_case(
+            &mut case,
+            format!(
+                "missing clientRequestId should exit 2\n{}",
+                missing_rid.diagnostic()
+            ),
+        );
+    }
+
     // usage error exit 2（缺 action）
     let usage = match run_agent_cli(&case, &["--json", "project"], None) {
         Ok(c) => c,
@@ -211,6 +339,66 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
     if !stop.success {
         fail_case(&mut case, format!("backend stop 失败\n{}", stop.diagnostic()));
     }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     smoke 需要经 control plane 注册本机项目，不能绕开 workbench control。
+///
+/// Code Logic（这个函数做什么）:
+///     curl POST `/api/backend/control/workbench` op=projects.add。
+fn add_local_project_via_control(
+    token: &str,
+    port: u16,
+    path: &std::path::Path,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({
+        "controlToken": token,
+        "op": "projects.add",
+        "payload": { "path": path.to_string_lossy() }
+    });
+    let url = format!("http://127.0.0.1:{port}/api/backend/control/workbench");
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "-X",
+            "POST",
+            &url,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body.to_string(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("curl projects.add spawn: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "curl projects.add failed: status={:?} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("projects.add JSON: {e}; body={text}"))?;
+    if let Some(result) = v.get("result") {
+        return Ok(result.clone());
+    }
+    Ok(v)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     task view DTO 可能是 local 包装或扁平 task 字段。
+///
+/// Code Logic（这个函数做什么）:
+///     从 data.task.id / data.id / data.taskId 提取任务 id。
+fn extract_task_id(data: &serde_json::Value) -> Option<String> {
+    data.pointer("/task/id")
+        .or_else(|| data.get("id"))
+        .or_else(|| data.get("taskId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Business Logic（为什么需要这个测试）:

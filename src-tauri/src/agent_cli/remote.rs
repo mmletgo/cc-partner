@@ -292,6 +292,12 @@ pub async fn remote_query_with_base(
                 .map_err(app_error_to_cli)?;
             serde_json::to_value(run).map_err(|_| CliError::internal("serialize failed"))
         }
+        // 仅本机 control plane 使用：解析 owner mDNS / 本机 create ledger。
+        AgentControlQuery::DeviceResolve { .. }
+        | AgentControlQuery::TaskByClientRequestId { .. } => Err(CliError::usage(
+            "invalid_device",
+            "DeviceResolve/TaskByClientRequestId are local control-only queries",
+        )),
     }
 }
 
@@ -447,8 +453,15 @@ pub async fn remote_mutate_with_base(
 fn build_remote_create_task_req(
     project_id: &str,
     payload: &Value,
-    client_request_id: Option<String>,
+    client_request_id: String,
 ) -> Result<RemoteCreateOrchestratorTaskReq, CliError> {
+    let client_request_id = client_request_id.trim().to_string();
+    if client_request_id.is_empty() {
+        return Err(CliError::usage(
+            "invalid_input",
+            "clientRequestId required for task create",
+        ));
+    }
     Ok(RemoteCreateOrchestratorTaskReq {
         project_id: project_id.to_string(),
         title: payload
@@ -468,7 +481,7 @@ fn build_remote_create_task_req(
             .to_string(),
         priority: payload.get("priority").and_then(|v| v.as_i64()).unwrap_or(0),
         create_action: Default::default(),
-        client_request_id,
+        client_request_id: Some(client_request_id),
         source: payload
             .get("source")
             .and_then(|v| v.as_str())
@@ -696,36 +709,84 @@ fn map_remote_http_error(bytes: &[u8], status: u16) -> CliError {
 
 fn map_remote_mutation_error(err: AppError, never_replay: bool) -> CliError {
     let cli = app_error_to_cli(err);
-    if never_replay
-        && cli.exit == crate::agent_cli::output::CliExitCode::Unavailable
-        && cli.code() != "peer_offline"
-        && !cli.outcome_unknown_flag()
-    {
-        return CliError::outcome_unknown(cli.message);
+    if never_replay && !cli.outcome_unknown_flag() {
+        // health 已通过后的 mutation 路径：Unavailable/Timeout 视为 dispatch 后 transport 丢失。
+        // 不得仅因中文 Display 文案缺关键字而落入 Internal 并跳过 outcomeUnknown。
+        if cli.exit == crate::agent_cli::output::CliExitCode::Unavailable
+            && cli.code() != "peer_offline"
+            && cli.code() != "backend_offline"
+        {
+            return CliError::outcome_unknown(cli.message).with_request_id(cli.request_id);
+        }
     }
     cli
 }
 
-/// AppError → CliError（稳定 code，通用 message）。
+/// AppError → CliError（按 `classify()` / `remote_meta()`，不解析本地化 message）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Spec：remote error 从结构化 envelope/分类映射；中文 Display 不得驱动 exit/code。
+///
+/// Code Logic（这个函数做什么）:
+///     优先 Remote 信封 code/request_id/retryable；否则 `classify()` → 稳定 CliError；
+///     message 使用通用英文短句，不回显业务中文。
 pub fn app_error_to_cli(err: AppError) -> CliError {
-    let msg = err.to_string();
-    let lower = msg.to_ascii_lowercase();
-    if lower.contains("not found") || lower.contains("不存在") {
-        CliError::not_found("resource not found")
-    } else if lower.contains("conflict") || lower.contains("冲突") {
-        CliError::conflict("conflict")
-    } else if lower.contains("unavail") || lower.contains("offline") || lower.contains("不可用")
-    {
-        CliError::unavailable("unavailable", "backend or peer unavailable")
-    } else if lower.contains("timeout") || lower.contains("超时") {
-        CliError::unavailable("timeout", "operation timed out")
-    } else if lower.contains("valid") || lower.contains("校验") {
-        CliError::usage("validation", "validation failed")
-    } else if lower.contains("unsupported") || lower.contains("capability") {
-        CliError::unsupported("unsupported capability or protocol")
-    } else {
-        CliError::internal("operation failed")
+    use crate::error::AppErrorCategory;
+
+    let request_id = err
+        .remote_meta()
+        .map(|m| m.request_id.clone())
+        .filter(|s| !s.is_empty());
+    let retryable_from_meta = err.remote_meta().map(|m| m.retryable);
+    let code_from_meta = err.remote_meta().map(|m| m.code.clone());
+
+    let category = err.classify();
+    let (code, message, mut cli) = match category {
+        AppErrorCategory::NotFound => (
+            "not_found".to_string(),
+            "resource not found",
+            CliError::not_found("resource not found"),
+        ),
+        AppErrorCategory::Conflict => (
+            "conflict".to_string(),
+            "conflict",
+            CliError::conflict("conflict"),
+        ),
+        AppErrorCategory::Validation => (
+            "validation".to_string(),
+            "validation failed",
+            CliError::usage("validation", "validation failed"),
+        ),
+        AppErrorCategory::Unavailable => (
+            "unavailable".to_string(),
+            "backend or peer unavailable",
+            CliError::unavailable("unavailable", "backend or peer unavailable"),
+        ),
+        AppErrorCategory::Timeout => (
+            "timeout".to_string(),
+            "operation timed out",
+            CliError::unavailable("timeout", "operation timed out"),
+        ),
+        AppErrorCategory::Internal => (
+            "internal".to_string(),
+            "operation failed",
+            CliError::internal("operation failed"),
+        ),
+    };
+    let _ = message;
+    if let Some(code) = code_from_meta {
+        // Remote 信封 code 覆盖默认 token（如 not_found/conflict/unavailable）。
+        cli = cli.with_code(code);
+    } else if category == AppErrorCategory::Internal {
+        cli = cli.with_code(code);
     }
+    let retryable = retryable_from_meta.unwrap_or_else(|| {
+        matches!(
+            category,
+            AppErrorCategory::Unavailable | AppErrorCategory::Timeout
+        )
+    });
+    cli.with_retryable(retryable).with_request_id(request_id)
 }
 
 /// 模拟 peer：用于 remote 单测 hit count / no control token。
@@ -848,5 +909,42 @@ mod tests {
         let err = app_error_to_cli(AppError::not_found("工作台会话不存在"));
         assert_eq!(err.exit, crate::agent_cli::output::CliExitCode::NotFound);
         assert!(!err.message.contains("工作台"));
+    }
+
+    #[test]
+    fn app_error_unavailable_chinese_without_keywords_maps_unavailable() {
+        // 真实 RemoteWorkbenchClient 失败文案不含 unavail/offline/不可用
+        let err = app_error_to_cli(AppError::unavailable("远端 Workbench 请求失败: connection reset"));
+        assert_eq!(err.exit, crate::agent_cli::output::CliExitCode::Unavailable);
+        assert_eq!(err.code(), "unavailable");
+        assert!(!err.message.contains("Workbench"));
+    }
+
+    #[test]
+    fn never_replay_promotes_unavailable_transport_to_outcome_unknown() {
+        let err = map_remote_mutation_error(
+            AppError::unavailable("远端 Workbench 请求失败: broken pipe"),
+            true,
+        );
+        assert!(err.outcome_unknown_flag());
+        assert_eq!(err.exit, crate::agent_cli::output::CliExitCode::Unavailable);
+        assert_eq!(err.code(), "outcome_unknown");
+    }
+
+    #[test]
+    fn app_error_remote_meta_preserves_request_id() {
+        let err = app_error_to_cli(AppError::remote(
+            "peer says no",
+            crate::error::RemoteErrorMeta {
+                code: "not_found".into(),
+                status: 404,
+                retryable: false,
+                request_id: "req-remote-1".into(),
+                details: serde_json::json!({}),
+            },
+        ));
+        assert_eq!(err.exit, crate::agent_cli::output::CliExitCode::NotFound);
+        assert_eq!(err.code(), "not_found");
+        assert_eq!(err.request_id.as_deref(), Some("req-remote-1"));
     }
 }

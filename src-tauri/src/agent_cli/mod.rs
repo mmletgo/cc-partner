@@ -166,29 +166,9 @@ async fn dispatch_local(command: Commands) -> Result<Value, CliError> {
 }
 
 async fn dispatch_remote(device_id: &str, command: Commands) -> Result<Value, CliError> {
-    // remote 需要本机 owner 的 device 表：通过 control agent 间接拿 state 不现实。
-    // 对 remote 业务 API，CLI 仍需本机 backend 运行以读取 mDNS 表。
-    // 实现：先走 control 侧的“remote proxy”不存在时，在本进程无法持有 AppState。
-    // 合同要求 remote 从当前 owner 的 mDNS 表解析——因此 remote 路径应经 local control
-    // 扩展，或 CLI 嵌入只读 device 查询。
-    // 务实路径：增加 control agent 不承载 remote；改由 `cc-partner` 在运行时
-    // 通过 HTTP 调本机 `workbench` control 取 devices，再直连 peer。
-    // 这里：要求 backend 在线，经 control query Fleet/devices 不够。
-    // 采用：通过 loopback 读取 `/api/devices` 若存在；否则 control file port + 本机 P2P health 上的设备列表。
-    // 最简合规：remote 命令先 query local control 的合成端点不可用时，
-    // 使用 `state` via 启动短期 client——但 CLI 不该 build_app_state。
-    //
-    // 设计折中：remote 的 device 解析放在 **本机 control agent 新 query** 不在 v1 列表。
-    // 计划写：resolve from owner's mDNS table — CLI 作为本机进程读 control 后
-    // 调用既有 peer，device 表在 sidecar。故 remote 应经 sidecar 转发。
-    //
-    // 实现选择：在 control_agent 增加隐式 remote 不合适。
-    // 改：CLI 通过 `GET http://127.0.0.1:{port}/api/devices`（若有）或
-    // workbench launch summary devices。
-
-    let control = client::read_control_file_cli()?;
-    let base = format!("http://127.0.0.1:{}", control.port);
-    let peer_base = resolve_device_base_via_local_api(&base, &control.control_token, device_id).await?;
+    // 远端业务走 peer P2P；device→baseUrl 仅经本机 control agent `DeviceResolve`（mDNS 表），
+    // 禁止 GET /api/devices 等 LAN business API 绕过 control plane。
+    let peer_base = resolve_device_base_via_control(device_id).await?;
 
     match command_to_op(command)? {
         Op::Query(q) => remote_query_direct(&peer_base, device_id, q).await,
@@ -196,77 +176,33 @@ async fn dispatch_remote(device_id: &str, command: Commands) -> Result<Value, Cl
     }
 }
 
-/// 经本机 control/workbench-launch-summary 或 devices 路由解析 peer base URL。
-async fn resolve_device_base_via_local_api(
-    local_base: &str,
-    token: &str,
-    device_id: &str,
-) -> Result<String, CliError> {
-    let client = reqwest::Client::new();
-    // 尝试 workbench-launch-summary devices 段
-    let url = format!("{local_base}/api/backend/control/workbench-launch-summary");
-    let resp = client
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .json(&json!({ "controlToken": token }))
-        .send()
-        .await
-        .map_err(|_| {
-            CliError::unavailable("backend_offline", "cannot reach local control for device table")
-        })?;
-    if resp.status().is_success() {
-        if let Ok(body) = resp.json::<Value>().await {
-            if let Some(devices) = body
-                .pointer("/devices/value")
-                .or_else(|| body.pointer("/devices"))
-                .and_then(|v| v.as_array())
-            {
-                for d in devices {
-                    if d.get("id").and_then(|v| v.as_str()) == Some(device_id) {
-                        if let Some(addr) = d.get("address").and_then(|v| v.as_str()) {
-                            // address 可能已是 host:port 或 URL
-                            if addr.starts_with("http://") || addr.starts_with("https://") {
-                                return Ok(addr.trim_end_matches('/').to_string());
-                            }
-                            return Ok(format!("http://{addr}"));
-                        }
-                    }
-                }
-            }
-        }
+/// 经本机 control agent `DeviceResolve` 从 owner mDNS 表解析 peer base URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Spec：CLI 不通过 localhost LAN 业务 API 绕过 control plane。
+///
+/// Code Logic（这个函数做什么）:
+///     AgentCliClient.query(DeviceResolve) → 读 `baseUrl`；缺失/离线映射 CliError。
+async fn resolve_device_base_via_control(device_id: &str) -> Result<String, CliError> {
+    let client = AgentCliClient::from_control_file()?;
+    let data = client
+        .query(AgentControlQuery::DeviceResolve {
+            device_id: device_id.to_string(),
+        })
+        .await?;
+    if data.get("online").and_then(|v| v.as_bool()) == Some(false) {
+        return Err(CliError::unavailable(
+            "peer_offline",
+            "remote device is offline",
+        ));
     }
-
-    // 回退：本机 P2P devices 列表（LAN 业务 API，loopback 可访问）
-    let url = format!("{local_base}/api/devices");
-    if let Ok(resp) = client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
-        if resp.status().is_success() {
-            if let Ok(devices) = resp.json::<Vec<Value>>().await {
-                let hits: Vec<_> = devices
-                    .iter()
-                    .filter(|d| d.get("id").and_then(|v| v.as_str()) == Some(device_id))
-                    .collect();
-                match hits.as_slice() {
-                    [] => {}
-                    [one] => {
-                        if let Some(addr) = one.get("address").and_then(|v| v.as_str()) {
-                            if let Some(port) = one.get("port").and_then(|v| v.as_u64()) {
-                                return Ok(format!("http://{addr}:{port}"));
-                            }
-                            if addr.starts_with("http://") {
-                                return Ok(addr.trim_end_matches('/').to_string());
-                            }
-                            return Ok(format!("http://{addr}"));
-                        }
-                    }
-                    _ => return Err(CliError::conflict("duplicate device id in discovery table")),
-                }
-            }
-        }
-    }
-
-    Err(CliError::not_found(
-        "remote device not found in discovery table",
-    ))
+    let base = data
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| CliError::not_found("remote device baseUrl missing in discovery table"))?;
+    Ok(base.trim_end_matches('/').to_string())
 }
 
 /// 不持有 AppState 的远端 query（已解析 base_url）。
@@ -384,7 +320,15 @@ fn command_to_op(command: Commands) -> Result<Op, CliError> {
             let client_request_id = payload
                 .get("clientRequestId")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    CliError::usage(
+                        "invalid_input",
+                        "clientRequestId required for task create",
+                    )
+                })?;
             Ok(Op::Mutate(AgentControlMutation::TaskCreate {
                 project,
                 payload,

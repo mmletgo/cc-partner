@@ -200,6 +200,36 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     Agent CLI ReconcileByRequestId 在 create 响应丢失后需按 clientRequestId 对账，
+    ///     避免盲重放；ledger 命中则返回既有任务。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查 `orchestrator_remote_task_create_requests` → 再 `get_task`；无映射返回 None。
+    pub async fn get_task_by_client_request_id(
+        &self,
+        client_request_id: &str,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        let request_id = match non_empty_trimmed(client_request_id) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let mapped = sqlx::query_scalar::<_, String>(
+            "SELECT task_id FROM orchestrator_remote_task_create_requests WHERE request_id = ?",
+        )
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match mapped {
+            Some(task_id) => match self.get_task(&task_id).await {
+                Ok(task) => Ok(Some(task)),
+                Err(AppError::NotFound(_)) => Ok(None),
+                Err(err) => Err(err),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     远端设备离线时，本机仍允许用户创建远端任务；创建请求必须先持久化为 pending outbox。
     ///
     /// Code Logic（这个函数做什么）:
