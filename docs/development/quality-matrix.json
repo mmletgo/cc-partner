@@ -139,9 +139,9 @@
       "surface": "orchestrator-review",
       "level": "L1",
       "tests": [
-        "web/tests/orchestrator-review-workflow.spec.ts (A0 skipped)"
+        "web/tests/orchestrator-review-workflow.spec.ts"
       ],
-      "command": "cd web && npm run test:e2e -- orchestrator-review-workflow.spec.ts (A0 skipped)",
+      "command": "cd web && npm run test:e2e -- orchestrator-review-workflow.spec.ts",
       "ciJob": "frontend-e2e",
       "platforms": [
         "chromium-linux"
@@ -155,7 +155,9 @@
         "docs/development/testing.md",
         "docs/prd.md",
         "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
-      ]
+      ],
+      "status": "NOT VERIFIED",
+      "notes": "A0 supersession: Review Diff product surface removed; suite skipped"
     },
     {
       "id": "E2E-PERM-001",
@@ -351,7 +353,9 @@
         "docs/prd.md",
         "docs/p2p-protocol.md",
         "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
-      ]
+      ],
+      "status": "PASS",
+      "notes": "A0: human digest gate removed; notifications/workflow residual still covered by listed unit tests"
     },
     {
       "id": "L0-RUNTIME-SCHEMA-001",
@@ -669,7 +673,9 @@
         "docs/p2p-protocol.md",
         "docs/prd.md",
         "docs/superpowers/specs/2026-07-14-orchestrator-review-workflow-and-notifications-design.md"
-      ]
+      ],
+      "status": "PASS",
+      "notes": "operational notification relay smoke; not Diff→Rework"
     },
     {
       "id": "L2-PTY-SMOKE-001",
