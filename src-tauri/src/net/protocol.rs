@@ -211,6 +211,18 @@ pub const CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1: &str =
 pub const CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1: &str =
     "workbench.workspace-safe-restore.v1";
 
+/// 能力 token：v1 Workbench LAN Agent Fleet owner batch
+/// （`POST /api/workbench/lan-fleet/snapshot`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制设备在 fan-out 拉取 owning device 的 Fleet 摘要前必须确认对端已实现
+///     有界 local-only batch 路由；旧 peer 缺失时显示 unsupported，不得递归猜测。
+///     本 token 只做协议协商，不是 LAN 鉴权或设备信任。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量，列入 `server_protocol_info()`；与 snapshot 路由原子上线。
+pub const CAPABILITY_WORKBENCH_LAN_FLEET_V1: &str = "workbench.lan-fleet.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -277,6 +289,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_TRANSFER_RESUME_V1.to_string(),
             CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1.to_string(),
             CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1.to_string(),
+            CAPABILITY_WORKBENCH_LAN_FLEET_V1.to_string(),
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
             CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1.to_string(),
@@ -444,6 +457,7 @@ mod tests {
                 "transfer.resume.v1".to_string(),
                 "workbench.agent-runtime.v1".to_string(),
                 "workbench.browser-verification.v1".to_string(),
+                "workbench.lan-fleet.v1".to_string(),
                 "workbench.mutation-outcome.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
                 "workbench.workspace-safe-restore.v1".to_string(),
@@ -458,6 +472,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_TRANSFER_RESUME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1));
+        assert!(info.supports(CAPABILITY_WORKBENCH_LAN_FLEET_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2));
         assert!(info.supports(CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1));

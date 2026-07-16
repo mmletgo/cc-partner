@@ -29,6 +29,7 @@ import type {
   PromptOptimizerFillLanguage,
   AgentRuntimeSnapshot,
 } from '@/lib/types';
+import type { LanFleetSnapshot } from '@/lib/types/lanFleet';
 
 /**
  * Workbench 终端初始尺寸。
@@ -181,6 +182,18 @@ export interface WorkbenchTransport {
   agentRuntime?: {
     getSnapshot: (projectId?: string | null) => Promise<AgentRuntimeSnapshot>;
   };
+  /**
+   * LAN Agent Fleet（可选：旧 transport 可省略）。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   Desktop/Mobile 共享控制设备聚合 snapshot。
+   *
+   * Code Logic（字段说明）:
+   *   getSnapshot 无参数，返回全局 LanFleetSnapshot。
+   */
+  lanFleet?: {
+    getSnapshot: () => Promise<LanFleetSnapshot>;
+  };
 }
 
 /**
@@ -277,6 +290,9 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
   },
   agentRuntime: {
     getSnapshot: (projectId) => workbenchApi.agentRuntime.getSnapshot(projectId),
+  },
+  lanFleet: {
+    getSnapshot: () => workbenchApi.lanFleet.getSnapshot(),
   },
   browser: {
     discover: (projectId, worktreeId) =>

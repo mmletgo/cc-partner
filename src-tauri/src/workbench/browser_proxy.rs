@@ -247,6 +247,23 @@ impl WorkbenchBrowserPreviewRegistry {
             session.expires_at_ms = Utc::now().timestamp_millis() - 1_000;
         }
     }
+
+    /// 判断某 project 是否存在未过期的 browser preview。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     LAN Fleet 项目摘要只需 Active/Absent，不暴露 target URL。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写锁内清理过期 session 后，扫描是否存在匹配 project_id 的条目。
+    pub fn has_active_for_project(&self, project_id: &str) -> bool {
+        let now = Instant::now();
+        let mut guard = self
+            .inner
+            .write()
+            .expect("browser preview registry 写锁中毒");
+        guard.retain(|_, session| session.expires_at > now);
+        guard.values().any(|session| session.project_id == project_id)
+    }
 }
 
 impl Default for WorkbenchBrowserPreviewRegistry {

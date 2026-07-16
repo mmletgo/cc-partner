@@ -20,6 +20,7 @@ pub mod file_preview;
 pub mod fs;
 pub mod git;
 pub mod html_assets;
+pub mod lan_fleet;
 pub mod models;
 pub mod operation_ledger;
 pub mod projects;

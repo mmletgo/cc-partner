@@ -12,13 +12,16 @@
  *   来源选择与远端项目选择统一走共享 Dialog（portal / focus trap / Escape / backdrop）。
  */
 
-import { useCallback, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog } from '@/components/primitives';
 import { DevicesIcon, FolderIcon, PlusIcon, SyncIcon, XIcon } from '@/lib/icons';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
+import { useLanAgentFleet } from '@/hooks/useLanAgentFleet';
 import { EMPTY_PROJECT_SESSION_STATS } from '@/lib/workbenchProjectStats';
+import { fleetExceptionCount } from '@/lib/types/lanFleet';
+import type { LanFleetDeviceSummary, LanFleetProjectSummary } from '@/lib/types/lanFleet';
 import { WorkbenchRemoteProjectPicker } from '@/components/domain/WorkbenchRemoteProjectPicker';
 import styles from './WorkbenchProjectRail.module.css';
 
@@ -49,6 +52,26 @@ export function WorkbenchProjectRail() {
     selectProject,
     removeProject,
   } = useWorkbenchProjects();
+
+  const { projectSummaries, snapshot: fleetSnapshot } = useLanAgentFleet({ enabled: true });
+
+  /**
+   * Business Logic（为什么需要这个映射）:
+   *   Rail 需要按 project 查找 device reachability（offline 文本）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   projectId → 所属 device summary。
+   */
+  const deviceByProjectId = useMemo(() => {
+    const map: Record<string, LanFleetDeviceSummary> = {};
+    if (!fleetSnapshot) return map;
+    for (const device of fleetSnapshot.devices) {
+      for (const project of device.projects) {
+        map[project.projectId] = device;
+      }
+    }
+    return map;
+  }, [fleetSnapshot]);
 
   const sectionTitle = t('workbench:projectRail.sectionTitle');
 
@@ -114,6 +137,13 @@ export function WorkbenchProjectRail() {
       <div className={styles.header}>
         <h2 className={styles.title}>{sectionTitle}</h2>
         <div className={styles.actions}>
+          <Link
+            to="/workbench/fleet"
+            className={styles.fleetLink}
+            aria-label={t('workbench:projectRail.fleetLinkAria')}
+          >
+            {t('workbench:projectRail.fleetLink')}
+          </Link>
           <Button
             variant="icon"
             icon={<SyncIcon />}
@@ -178,6 +208,28 @@ export function WorkbenchProjectRail() {
           const statusLabel = isActive
             ? t('workbench:projectRail.statusActive')
             : t('workbench:projectRail.statusInactive');
+          const fleetProject: LanFleetProjectSummary | undefined =
+            projectSummaries[project.id];
+          const fleetDevice = deviceByProjectId[project.id];
+          const exceptionCount = fleetProject
+            ? fleetExceptionCount(fleetProject.agentCounts)
+            : 0;
+          const workingCount = fleetProject?.agentCounts.working ?? 0;
+          const offline = fleetDevice?.reachability === 'offline';
+          const unsupported = fleetDevice?.reachability === 'unsupported';
+          const cached = fleetDevice?.freshness === 'cached';
+          const agentHintParts: string[] = [];
+          if (workingCount > 0) {
+            agentHintParts.push(
+              t('workbench:projectRail.agentWorkingHint', { count: workingCount }),
+            );
+          }
+          if (offline) agentHintParts.push(t('workbench:projectRail.deviceOffline'));
+          if (cached) agentHintParts.push(t('workbench:projectRail.deviceCached'));
+          if (unsupported) {
+            agentHintParts.push(t('workbench:projectRail.deviceUnsupported'));
+          }
+          const agentHint = agentHintParts.join(' · ');
           return (
             <div
               key={project.id}
@@ -187,12 +239,28 @@ export function WorkbenchProjectRail() {
               <button
                 type="button"
                 className={styles.projectSelectButton}
+                title={agentHint || undefined}
                 onClick={() => {
                   void selectProject(project).then(() => navigate('/workbench'));
                 }}
               >
                 <span className={styles.projectText}>
-                  <span className={styles.projectName}>{project.name}</span>
+                  <span className={styles.projectNameRow}>
+                    <span className={styles.projectName}>{project.name}</span>
+                    {fleetProject ? (
+                      <span
+                        className={styles.agentStatusDot}
+                        data-tone={
+                          exceptionCount > 0
+                            ? 'exception'
+                            : workingCount > 0
+                              ? 'working'
+                              : 'idle'
+                        }
+                        aria-hidden="true"
+                      />
+                    ) : null}
+                  </span>
                   <span className={styles.projectPath}>{project.path}</span>
                   <span className={styles.projectMeta}>
                     <span className={styles.projectDevice}>
@@ -200,10 +268,22 @@ export function WorkbenchProjectRail() {
                         <span className={styles.remoteBadge}>{t('workbench:remoteBadge')}</span>
                       ) : null}
                       <span>{project.deviceName}</span>
+                      {offline ? (
+                        <span className={styles.offlineText}>
+                          {t('workbench:projectRail.deviceOffline')}
+                        </span>
+                      ) : null}
+                      {cached && !offline ? (
+                        <span className={styles.offlineText}>
+                          {t('workbench:projectRail.deviceCached')}
+                        </span>
+                      ) : null}
                     </span>
                     <span
                       className={styles.projectStats}
-                      aria-label={`${windowCountLabel}, ${paneCountLabel}`}
+                      aria-label={`${windowCountLabel}, ${paneCountLabel}${
+                        agentHint ? `, ${agentHint}` : ''
+                      }`}
                     >
                       <span>{windowCountLabel}</span>
                       <span aria-hidden="true">·</span>
@@ -218,6 +298,17 @@ export function WorkbenchProjectRail() {
                 data-active={isActive || undefined}
                 aria-hidden="true"
               />
+              {exceptionCount > 0 ? (
+                <Link
+                  to={`/attention?projectId=${encodeURIComponent(project.id)}`}
+                  className={styles.exceptionBadge}
+                  aria-label={t('workbench:projectRail.agentExceptionBadge', {
+                    count: exceptionCount,
+                  })}
+                >
+                  {exceptionCount}
+                </Link>
+              ) : null}
               <Button
                 className={styles.projectRemoveButton}
                 variant="icon"

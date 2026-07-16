@@ -533,6 +533,12 @@ async fn dispatch_workbench_op(
             .await?;
             Ok(serde_json::to_value(snap)?)
         }
+        // ---- lan fleet ----
+        "lan_fleet.snapshot" => {
+            let snap =
+                crate::commands::workbench::get_workbench_lan_fleet_for_state(state).await?;
+            Ok(serde_json::to_value(snap)?)
+        }
 
         // ---- sessions ----
         "sessions.list" => {

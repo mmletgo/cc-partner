@@ -12,6 +12,7 @@ use crate::error::AppError;
 use crate::net::protocol::{
     PeerProtocolInfo, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
 };
+use crate::workbench::lan_fleet::models::{LanFleetOwnerBatchReq, LanFleetOwnerBatchResp};
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
 use crate::workbench::browser_verification::{
     BrowserVerificationArtifactDto, BrowserVerificationCommand, BrowserVerificationRun,
@@ -677,6 +678,28 @@ impl RemoteWorkbenchClient {
             )
             .await?;
         Ok(info.supports(capability))
+    }
+
+    /// 拉取 owning device 的 LAN Fleet owner batch 摘要。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     控制设备按 device 一次请求已保存 shortcut 对应的 local project 摘要，
+    ///     禁止递归调用对端再 fan-out。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability 预检由调用方完成（便于结构化 unsupported）；
+    ///     POST `/api/workbench/lan-fleet/snapshot`，body 为 LanFleetOwnerBatchReq。
+    pub async fn lan_fleet_snapshot(
+        &self,
+        base_url: &str,
+        req: &LanFleetOwnerBatchReq,
+    ) -> Result<LanFleetOwnerBatchResp, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/lan-fleet/snapshot"),
+            req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
     }
 
     /// owner-local workspace restore preflight。

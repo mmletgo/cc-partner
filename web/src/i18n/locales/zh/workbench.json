@@ -12,7 +12,62 @@
     "addLocalCta": "添加本机项目",
     "addRemoteCta": "选择局域网项目",
     "statusActive": "当前",
-    "statusInactive": "未选中"
+    "statusInactive": "未选中",
+    "fleetLink": "Fleet",
+    "fleetLinkAria": "打开局域网 Agent Fleet 视图",
+    "agentExceptionBadge": "{{count}} 个 Agent 需要处理",
+    "agentWorkingHint": "{{count}} 个 Agent 运行中",
+    "deviceOffline": "设备离线",
+    "deviceCached": "使用缓存摘要",
+    "deviceUnsupported": "对端不支持 Fleet"
+  },
+  "fleet": {
+    "title": "局域网 Agent Fleet",
+    "subtitle": "只读聚合已保存项目的 Agent、Attention、Git 与自动化摘要；不自动调度或迁移。",
+    "backToWorkbench": "返回工作台",
+    "empty": "还没有可聚合的项目快捷方式",
+    "truncated": "结果已截断（超过上限）",
+    "noProjects": "此设备暂无已保存项目摘要",
+    "reachability": "可达性",
+    "freshness": "新鲜度",
+    "slotsLabel": "调度槽位",
+    "slots": "{{used}} / {{max}}",
+    "slotsUnknown": "未知",
+    "capturedAt": "捕获时间",
+    "errorCode": "错误码",
+    "agents": "Agent",
+    "agentCounts": "工作 {{working}} · 待输入 {{needsInput}} · 失败 {{failed}} · 空闲 {{idle}}",
+    "exceptionBadge": "{{count}} 需处理",
+    "attention": "Attention",
+    "git": "Git",
+    "browser": "浏览器",
+    "orchestrator": "自动化",
+    "orchestratorCounts": "运行 {{running}} · 重试 {{retrying}}",
+    "terminals": "终端",
+    "openProject": "打开项目",
+    "openAttention": "打开 Attention",
+    "projectUnavailable": "不可用",
+    "reachabilityStates": {
+      "live": "在线",
+      "offline": "离线",
+      "unsupported": "不支持"
+    },
+    "freshnessStates": {
+      "live": "实时",
+      "cached": "缓存",
+      "unknown": "未知"
+    },
+    "gitStates": {
+      "clean": "干净",
+      "dirty": "有改动",
+      "conflict": "冲突",
+      "unknown": "未知"
+    },
+    "browserStates": {
+      "active": "预览中",
+      "absent": "无预览",
+      "unknown": "未知"
+    }
   },
   "addProject": "添加项目",
   "removeProject": "移除项目",

@@ -31,6 +31,7 @@ import {
   workbenchWorktreesDecoder,
 } from '@/lib/schemas/workbench';
 import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
+import { lanFleetSnapshotDecoder } from '@/lib/schemas/lanFleet';
 import type {
   ResumeClaudeSessionResult,
   SessionPreview,
@@ -51,6 +52,7 @@ import type {
   WorkbenchWorktree,
 } from '@/lib/types';
 import type { AgentRuntimeSnapshot } from '@/lib/types/agentRuntime';
+import type { LanFleetSnapshot } from '@/lib/types/lanFleet';
 import type { WorkbenchLaunchSummaryWire } from '@/lib/types';
 
 /** Agent runtime Tauri live event 名（对齐 A1 emit_agent_runtime_changed）。 */
@@ -691,5 +693,26 @@ export const workbenchApi = {
         { projectId: projectId ?? null },
         agentRuntimeSnapshotDecoder,
       ),
+  },
+
+  /**
+   * LAN Agent Fleet 只读聚合。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   Rail/Fleet 需要一次拉取已保存 shortcut 的跨设备摘要。
+   *
+   * Code Logic（这个分组做什么）:
+   *   invokeDecoded get_workbench_lan_fleet。
+   */
+  lanFleet: {
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   可见 reconcile / event invalidation 后刷新 Fleet display。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded `get_workbench_lan_fleet` → LanFleetSnapshot。
+     */
+    getSnapshot: (): Promise<LanFleetSnapshot> =>
+      invokeDecoded('get_workbench_lan_fleet', undefined, lanFleetSnapshotDecoder),
   },
 };

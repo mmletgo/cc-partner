@@ -1,6 +1,8 @@
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WorkbenchProject } from '@/lib/types';
+import { useLanAgentFleet } from '@/hooks/useLanAgentFleet';
+import { fleetExceptionCount } from '@/lib/types/lanFleet';
 import { canSelectMobileProject } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
 
@@ -32,6 +34,15 @@ export function MobileProjectPanel({
 }: MobileProjectPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const shouldShowEmpty = !loading && !error && projects.length === 0;
+  const { snapshot: fleetSnapshot, projectSummaries } = useLanAgentFleet({ enabled: true });
+
+  // 汇总异常 Agent（低噪音：仅 needsInput/failed）
+  let exceptionTotal = 0;
+  for (const summary of Object.values(projectSummaries)) {
+    exceptionTotal += fleetExceptionCount(summary.agentCounts);
+  }
+  const offlineDevices =
+    fleetSnapshot?.devices.filter((d) => d.reachability === 'offline').length ?? 0;
 
   return (
     <section className={styles.panel} aria-labelledby="mobile-project-panel-title">
@@ -49,6 +60,20 @@ export function MobileProjectPanel({
           {t('workbench:refresh')}
         </button>
       </div>
+
+      {fleetSnapshot ? (
+        <div className={styles.fleetSummary} aria-label={t('workbench:fleet.title')}>
+          <p className={styles.panelState}>
+            {t('workbench:fleet.title')}
+            {exceptionTotal > 0
+              ? ` · ${t('workbench:fleet.exceptionBadge', { count: exceptionTotal })}`
+              : ''}
+            {offlineDevices > 0
+              ? ` · ${t('workbench:projectRail.deviceOffline')} (${offlineDevices})`
+              : ''}
+          </p>
+        </div>
+      ) : null}
 
       {loading ? <p className={styles.panelState}>{t('workbench:loading')}</p> : null}
       {error ? (

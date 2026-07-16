@@ -11,6 +11,7 @@ mod browser;
 mod browser_verification;
 mod common;
 mod files;
+mod fleet;
 mod git;
 mod layout;
 mod projects;
@@ -24,6 +25,11 @@ mod tests;
 pub use agent_runtime::{
     __cmd__get_agent_runtime_snapshot, __tauri_command_name_get_agent_runtime_snapshot,
     get_agent_runtime_snapshot,
+};
+
+pub use fleet::{
+    __cmd__get_workbench_lan_fleet, __tauri_command_name_get_workbench_lan_fleet,
+    get_workbench_lan_fleet, get_workbench_lan_fleet_for_state,
 };
 
 pub use browser::{

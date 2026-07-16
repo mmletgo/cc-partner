@@ -1,0 +1,190 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  min-height: 0;
+  overflow: auto;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+}
+
+.subtitle {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+.headerActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.navLink {
+  color: var(--accent);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.navLink:hover {
+  color: var(--accent-hover, var(--accent));
+  text-decoration: underline;
+}
+
+.refreshButton {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.refreshButton:hover {
+  background: var(--surface-hover, var(--surface));
+}
+
+.state {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+.error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+
+.deviceList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.deviceCard {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.deviceHeader {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.deviceName {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+}
+
+.deviceMeta {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.metaLabel {
+  margin-right: var(--space-1);
+  color: var(--fg-subtle, var(--fg-muted));
+}
+
+.projectList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.projectRow {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.projectMain {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.projectName {
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+
+.projectKind {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+.projectStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.projectStats dt {
+  color: var(--fg-subtle, var(--fg-muted));
+  font-weight: var(--weight-regular);
+}
+
+.projectStats dd {
+  margin: 0;
+  color: var(--fg);
+}
+
+.exceptionBadge {
+  display: inline-block;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-full);
+  background: var(--danger-soft, var(--danger));
+  color: var(--danger-on, var(--accent-on));
+  font-size: var(--text-xs);
+}
+
+.projectActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
