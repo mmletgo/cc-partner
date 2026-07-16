@@ -647,6 +647,167 @@ pub fn commit_staged(path: &Path, message: &str) -> Result<(), AppError> {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     Orchestrator 交付必须把“已审 tree”冻结成不可变 commit OID，不能再从可变 HEAD 二次推导意图。
+///
+/// Code Logic（这个函数做什么）:
+///     `git commit-tree <tree> [-p parent] -m msg` 生成 OID，再以
+///     `git update-ref refs/heads/<branch> <new> <old>` CAS 更新分支；并发提交会 CAS 失败。
+///     返回新 commit OID（完整 hash）。
+pub fn commit_frozen_tree(path: &Path, tree_oid: &str, message: &str) -> Result<String, AppError> {
+    if tree_oid.trim().is_empty() {
+        return Err(AppError::generic("tree oid 不能为空"));
+    }
+    let cleaned = sanitize_commit_message(message)?;
+    let parent = head_hash(path)?;
+    let mut args: Vec<String> = vec![
+        "commit-tree".into(),
+        tree_oid.trim().into(),
+        "-m".into(),
+        cleaned,
+    ];
+    if let Some(ref p) = parent {
+        args.push("-p".into());
+        args.push(p.clone());
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let new_oid = run_git(path, &arg_refs)?.trim().to_string();
+    if new_oid.is_empty() {
+        return Err(AppError::generic("git commit-tree 返回空 commit oid"));
+    }
+    // 校验新 commit 的 tree 仍是冻结 tree（防御 commit-tree 参数错误）。
+    let committed_tree = commit_tree_hash(path, &new_oid)?;
+    if committed_tree != tree_oid.trim() {
+        return Err(AppError::generic(format!(
+            "commit-tree tree 绑定失败: expected={tree_oid}, got={committed_tree}"
+        )));
+    }
+    let branch =
+        current_branch(path).ok_or_else(|| AppError::generic("当前 worktree 没有可更新的分支"))?;
+    let refname = format!("refs/heads/{branch}");
+    match parent {
+        Some(old) => {
+            run_git(path, &["update-ref", &refname, &new_oid, &old])?;
+        }
+        None => {
+            run_git(path, &["update-ref", &refname, &new_oid])?;
+        }
+    }
+    Ok(new_oid)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     交付意图必须绑定具体 commit 对象的 tree，而不是再次读取可变 HEAD。
+///
+/// Code Logic（这个函数做什么）:
+///     `git rev-parse <commit>^{tree}`，返回完整 tree hash。
+pub fn commit_tree_hash(path: &Path, commit_oid: &str) -> Result<String, AppError> {
+    if commit_oid.trim().is_empty() {
+        return Err(AppError::generic("commit oid 不能为空"));
+    }
+    let rev = format!("{}^{{tree}}", commit_oid.trim());
+    let hash = run_git(path, &["rev-parse", "--verify", &rev])?
+        .trim()
+        .to_string();
+    if hash.is_empty() {
+        return Err(AppError::generic(format!(
+            "无法解析 commit tree: {commit_oid}"
+        )));
+    }
+    Ok(hash)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     自动交付必须推送“已审 commit OID”，禁止按分支 tip 再解析导致未审提交被推送。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 push target；执行 `git push <remote> <commit_oid>:refs/heads/<branch>`
+///     （有 upstream 时同样用显式 refspec，避免跟随可变 HEAD）。
+pub fn push_commit_oid(path: &Path, branch: &str, commit_oid: &str) -> Result<(), AppError> {
+    if branch.trim().is_empty() {
+        return Err(AppError::generic("当前 worktree 没有可推送的分支"));
+    }
+    if commit_oid.trim().is_empty() {
+        return Err(AppError::generic("commit oid 不能为空"));
+    }
+    let refspec = format!("{}:refs/heads/{}", commit_oid.trim(), branch.trim());
+    match resolve_push_target(path)? {
+        PushTarget::Upstream => {
+            let remote = upstream_remote_name(path).unwrap_or_else(|| "origin".to_string());
+            // 显式 OID refspec：推送内容与 reviewed commit 绑定，不跟随可变 HEAD tip。
+            run_git(path, &["push", &remote, &refspec])?;
+        }
+        PushTarget::Remote(remote) => {
+            run_git(path, &["push", "-u", &remote, &refspec])?;
+        }
+    }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 成功后主分支 tip 也必须按固定 OID 推送，禁止再读可变 current branch tip。
+///
+/// Code Logic（这个函数做什么）:
+///     读取当前分支名，调用 `push_commit_oid` 推送给定 main commit OID。
+pub fn push_main_commit_oid(path: &Path, commit_oid: &str) -> Result<String, AppError> {
+    let branch =
+        current_branch(path).ok_or_else(|| AppError::generic("主工作区没有可推送的当前分支"))?;
+    push_commit_oid(path, &branch, commit_oid)?;
+    Ok(branch)
+}
+
+/// 解析当前分支 upstream 的 remote 名（如 origin）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     显式 OID push 需要 remote 名，而不能依赖 `git push` 无参数时的隐式 HEAD 跟随。
+///
+/// Code Logic（这个函数做什么）:
+///     `git rev-parse --abbrev-ref @{u}` → 取 `remote/branch` 前缀；失败返回 None。
+fn upstream_remote_name(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "@{u}"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let remote = upstream.split('/').next()?.to_string();
+    (!remote.is_empty()).then_some(remote)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     自动交付 merge 必须合并已审 commit OID，禁止 `git merge <branch>` 解析到漂移 tip。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 `git merge --no-ff <commit_oid>`；成功 Merged，冲突 Conflicted，其它错误 AppError。
+pub fn merge_commit_oid(
+    main_path: &Path,
+    commit_oid: &str,
+) -> Result<MergeBranchOutcome, AppError> {
+    if commit_oid.trim().is_empty() {
+        return Err(AppError::generic("commit oid 不能为空"));
+    }
+    let output = Command::new("git")
+        .args(["merge", "--no-ff", commit_oid.trim()])
+        .current_dir(main_path)
+        .output()?;
+    if output.status.success() {
+        return Ok(MergeBranchOutcome::Merged);
+    }
+    if unresolved_conflict_files(main_path)
+        .map(|files| !files.is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(MergeBranchOutcome::Conflicted);
+    }
+    Err(AppError::generic(format!(
+        "Git 命令失败: {}",
+        git_failure_message(&output)
+    )))
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     大型 diff 不能完整塞给 Claude CLI，否则容易超时或超出上下文。
 ///
 /// Code Logic（这个函数做什么）:
@@ -1550,6 +1711,62 @@ UU web/src/App.tsx
         assert!(message.contains("origin"));
         assert!(message.contains("upstream"));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     交付必须把 digest 门后的 frozen tree 冻结成固定 commit OID，且并发 tip 推进不能改变该 OID。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     stage + write-tree + commit_frozen_tree；再在工作区制造额外 commit 后断言
+    ///     commit_tree_hash(reviewed) 仍等于 frozen tree，且 merge_commit_oid 合并的是 reviewed OID。
+    #[test]
+    fn commit_frozen_tree_and_merge_commit_oid_bind_immutable_review() {
+        let root = temp_git_dir("workbench-frozen-oid");
+        let main = root.join("main");
+        let feature = root.join("feature");
+        fs::create_dir_all(&main).expect("main dir");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        fs::write(main.join("README.md"), "base\n").expect("write");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "initial"]);
+        git_test_command(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/oid",
+                feature.to_str().unwrap(),
+            ],
+        );
+        fs::write(feature.join("feat.txt"), "v1\n").expect("feat");
+        assert!(stage_all_for_commit(&feature).expect("stage"));
+        let frozen = write_tree_hash(&feature).expect("write-tree");
+        let reviewed =
+            commit_frozen_tree(&feature, &frozen, "reviewed change").expect("commit-tree CAS");
+        assert_eq!(
+            commit_tree_hash(&feature, &reviewed).expect("tree of reviewed"),
+            frozen
+        );
+        // 模拟并发 tip 推进：额外 commit 后 HEAD ≠ reviewed，但 reviewed tree 不变。
+        fs::write(feature.join("extra.txt"), "sneak\n").expect("extra");
+        git_test_command(&feature, &["add", "extra.txt"]);
+        git_test_command(&feature, &["commit", "-m", "sneak"]);
+        let head_now = head_hash(&feature).expect("head").expect("some");
+        assert_ne!(head_now, reviewed);
+        assert_eq!(
+            commit_tree_hash(&feature, &reviewed).expect("reviewed still frozen"),
+            frozen
+        );
+        // merge 按 OID：main 只应拿到 feat.txt，不应含 sneak。
+        let outcome = merge_commit_oid(&main, &reviewed).expect("merge oid");
+        assert_eq!(outcome, MergeBranchOutcome::Merged);
+        assert!(main.join("feat.txt").exists());
+        assert!(!main.join("extra.txt").exists());
         let _ = fs::remove_dir_all(root);
     }
 
