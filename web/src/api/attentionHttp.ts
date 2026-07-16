@@ -18,8 +18,14 @@ import { getJson } from './workbenchHttp';
 /** P2P capability token：与后端 CAPABILITY_ATTENTION_V1 一致。 */
 export const ATTENTION_CAPABILITY_V1 = 'attention.v1' as const;
 
-/** Mobile Attention HTTP 路径。 */
+/** P2P capability token：与后端 CAPABILITY_ATTENTION_V2 一致（含 Agent 投影）。 */
+export const ATTENTION_CAPABILITY_V2 = 'attention.v2' as const;
+
+/** Mobile Attention HTTP 路径（v1）。 */
 export const ATTENTION_MOBILE_HTTP_PATH = '/api/mobile/attention' as const;
+
+/** Mobile Attention HTTP 路径（v2）。 */
+export const ATTENTION_MOBILE_HTTP_PATH_V2 = '/api/mobile/attention/v2' as const;
 
 /** 同源 health 路径，用于能力探测。 */
 export const ATTENTION_HEALTH_PATH = '/api/health' as const;
@@ -103,6 +109,21 @@ export function supportsAttentionV1(info: AttentionHealthProtocolInfo | null | u
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   Mobile 优先走 v2 以获取 Agent 投影；无 v2 时回落 v1。
+ *
+ * Code Logic（这个函数做什么）:
+ *   protocol_version>=1 且 capabilities 含 attention.v2。
+ */
+export function supportsAttentionV2(info: AttentionHealthProtocolInfo | null | undefined): boolean {
+  if (!info) return false;
+  const version = typeof info.protocol_version === 'number' ? info.protocol_version : 0;
+  if (version < 1) return false;
+  const caps = Array.isArray(info.capabilities) ? info.capabilities : [];
+  return caps.includes(ATTENTION_CAPABILITY_V2);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Mobile Provider 需要在请求 Attention 前探测本机 backend 是否宣告 attention.v1。
  *
  * Code Logic（这个函数做什么）:
@@ -144,14 +165,47 @@ export async function listAttentionSnapshotHttp(
     fetchSnapshot?: () => Promise<AttentionSnapshot>;
   } = {},
 ): Promise<AttentionSnapshot> {
-  await assertAttentionCapability(options.fetchHealth);
+  let health: AttentionHealthProtocolInfo | null = null;
+  if (options.fetchHealth) {
+    await assertAttentionCapability(options.fetchHealth);
+  } else {
+    try {
+      health = await getJson<AttentionHealthProtocolInfo>(ATTENTION_HEALTH_PATH, {
+        timeoutMs: ATTENTION_HTTP_TIMEOUT_MS,
+        decoder: protocolHealthInfoDecoder,
+      });
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      throw new AttentionHttpError(message, 'network');
+    }
+    if (!supportsAttentionV1(health) && !supportsAttentionV2(health)) {
+      throw new AttentionHttpError(
+        '当前后端不支持 attention.v1',
+        'unsupported',
+        ATTENTION_CAPABILITY_V1,
+      );
+    }
+  }
+
+  const preferV2 = health ? supportsAttentionV2(health) : true;
   const fetchSnapshot =
     options.fetchSnapshot ??
-    (() =>
-      getJson<AttentionSnapshot>(ATTENTION_MOBILE_HTTP_PATH, {
+    (async () => {
+      if (preferV2) {
+        try {
+          return await getJson<AttentionSnapshot>(ATTENTION_MOBILE_HTTP_PATH_V2, {
+            timeoutMs: ATTENTION_HTTP_TIMEOUT_MS,
+            decoder: attentionSnapshotDecoder,
+          });
+        } catch {
+          // 回落 v1
+        }
+      }
+      return getJson<AttentionSnapshot>(ATTENTION_MOBILE_HTTP_PATH, {
         timeoutMs: ATTENTION_HTTP_TIMEOUT_MS,
         decoder: attentionSnapshotDecoder,
-      }));
+      });
+    });
   try {
     return await fetchSnapshot();
   } catch (reason) {

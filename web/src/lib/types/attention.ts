@@ -43,7 +43,10 @@ export type AttentionSourceKind =
   | 'orchestratorHumanReview'
   | 'orchestratorBlocked'
   | 'remoteOutboxFailed'
-  | 'workbenchDependency';
+  | 'workbenchDependency'
+  | 'agentNeedsInput'
+  | 'agentFailed'
+  | 'experimentNeedsDecision';
 
 /**
  * Attention 语义化跳转目标。
@@ -52,12 +55,21 @@ export type AttentionSourceKind =
  *   后端只返回语义 target，由桌面/移动端各自映射导航，禁止携带后端 URL。
  *
  * Code Logic（这个类型做什么）:
- *   discriminated union：orchestratorTask / remoteOutbox / settings(dependencies)。
+ *   discriminated union：orchestratorTask / remoteOutbox / settings /
+ *   agentSession（v2）/ experiment（v2 合同）。
  */
 export type AttentionTarget =
   | { kind: 'orchestratorTask'; projectId: string; taskId: string }
   | { kind: 'remoteOutbox'; projectId: string; outboxId: string }
-  | { kind: 'settings'; tab: 'dependencies' };
+  | { kind: 'settings'; tab: 'dependencies' }
+  | {
+      kind: 'agentSession';
+      projectId: string;
+      worktreeId?: string | null;
+      terminalSessionId: string;
+      agentSessionId: string;
+    }
+  | { kind: 'experiment'; projectId: string; experimentId: string };
 
 /**
  * 单条 Attention 条目 DTO。

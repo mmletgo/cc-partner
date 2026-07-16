@@ -9,7 +9,9 @@
 //!     使用 P2pRequestContext/P2pError 信封；不递归请求其它设备的 attention 聚合。
 
 use crate::attention::models::AttentionSnapshotDto;
-use crate::commands::attention::list_attention_items_for_state;
+use crate::commands::attention::{
+    list_attention_items_for_state, list_attention_items_v2_for_state,
+};
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
@@ -21,7 +23,7 @@ use axum::Json;
 ///     Orchestrator source 可对各 remote owning device 刷新 mirror 一次，但绝不让对端再聚合 attention。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `list_attention_items_for_state`；错误经 P2pError 信封返回。
+///     委托 `list_attention_items_for_state`（v1，无 Agent 枚举）；错误经 P2pError 信封返回。
 pub async fn list_attention(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -29,6 +31,21 @@ pub async fn list_attention(
     let snapshot = list_attention_items_for_state(&state)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "attention.list"))?;
+    Ok(Json(snapshot))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     支持 attention.v2 的 Mobile 需要 Agent needsInput/failed 投影；旧客户端继续走 v1。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `list_attention_items_v2_for_state`。
+pub async fn list_attention_v2(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<AttentionSnapshotDto>> {
+    let snapshot = list_attention_items_v2_for_state(&state)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "attention.list_v2"))?;
     Ok(Json(snapshot))
 }
 

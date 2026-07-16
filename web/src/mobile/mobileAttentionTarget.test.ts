@@ -69,6 +69,25 @@ describe('mapMobileAttentionTarget', () => {
    * Code Logic（这个测试做什么）:
    *   断言 settings/dependencies 映射为 settingsDependencies。
    */
+  test('maps agentSession to terminal panel only', () => {
+    const navigation = mapMobileAttentionTarget({
+      kind: 'agentSession',
+      projectId: 'proj-a',
+      worktreeId: 'wt-1',
+      terminalSessionId: 'term-9',
+      agentSessionId: 'agent-1',
+    });
+    expect(navigation).toEqual({
+      kind: 'terminalSession',
+      projectId: 'proj-a',
+      worktreeId: 'wt-1',
+      sessionId: 'term-9',
+      agentSessionId: 'agent-1',
+      panel: 'terminal',
+    });
+    expect(getMobileAttentionNavigationPanel(navigation)).toBe('terminal');
+  });
+
   test('maps settings dependencies to settings panel', () => {
     const navigation = mapMobileAttentionTarget({
       kind: 'settings',

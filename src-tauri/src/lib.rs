@@ -328,6 +328,7 @@ pub fn run() {
             config_cmd::choose_dir,
             mobile_cmd::get_mobile_access_info,
             attention_cmd::list_attention_items,
+            attention_cmd::list_attention_items_v2,
             device_cmd::list_devices,
             device_cmd::get_local_device,
             sync_cmd::trigger_sync,

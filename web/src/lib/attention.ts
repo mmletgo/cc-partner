@@ -116,7 +116,9 @@ export type AttentionActionI18nKey =
   | 'attention:action.review'
   | 'attention:action.viewBlocked'
   | 'attention:action.viewFailed'
-  | 'attention:action.openSettings';
+  | 'attention:action.openSettings'
+  | 'attention:action.openTerminal'
+  | 'attention:action.openExperiment';
 
 export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): AttentionActionI18nKey {
   switch (sourceKind) {
@@ -128,6 +130,11 @@ export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): Atte
       return 'attention:action.viewFailed';
     case 'workbenchDependency':
       return 'attention:action.openSettings';
+    case 'agentNeedsInput':
+    case 'agentFailed':
+      return 'attention:action.openTerminal';
+    case 'experimentNeedsDecision':
+      return 'attention:action.openExperiment';
     default: {
       const _exhaustive: never = sourceKind;
       return _exhaustive;
@@ -137,7 +144,7 @@ export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): Atte
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   桌面端只允许导航到三个权威 URL：任务 automation、outbox automation、设置 dependencies。
+ *   桌面端只允许导航到权威 URL：任务/outbox automation、设置、terminal session、experiment。
  *
  * Code Logic（这个函数做什么）:
  *   将语义 target 映射为 `/workbench?...` 或 `/settings?tab=dependencies`。
@@ -160,6 +167,20 @@ export function buildDesktopAttentionTargetUrl(target: AttentionTarget): string 
     }
     case 'settings':
       return '/settings?tab=dependencies';
+    case 'agentSession': {
+      const params = new URLSearchParams();
+      params.set('projectId', target.projectId);
+      if (target.worktreeId) params.set('worktreeId', target.worktreeId);
+      params.set('sessionId', target.terminalSessionId);
+      return `/workbench?${params.toString()}`;
+    }
+    case 'experiment': {
+      // A4 落地前先定位到项目 automation 表面，不打开不存在的 experiment 面板。
+      const params = new URLSearchParams();
+      params.set('projectId', target.projectId);
+      params.set('view', 'automation');
+      return `/workbench?${params.toString()}`;
+    }
     default: {
       const _exhaustive: never = target;
       return _exhaustive;

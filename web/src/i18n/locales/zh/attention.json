@@ -39,7 +39,9 @@
     "review": "前往复核",
     "viewBlocked": "查看阻塞原因",
     "viewFailed": "查看失败项",
-    "openSettings": "打开设置"
+    "openSettings": "打开设置",
+    "openTerminal": "打开终端",
+    "openExperiment": "查看实验"
   },
   "nav": {
     "label": "待处理"

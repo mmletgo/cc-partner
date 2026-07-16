@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 pub mod aggregator;
+pub(crate) mod agent_runtime_source;
 pub mod models;
 pub(crate) mod orchestrator_source;
 pub(crate) mod source;

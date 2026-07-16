@@ -89,6 +89,8 @@ pub const CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1: &str = "orchestrator.wor
 /// Code Logic: 字符串常量，与 `PeerProtocolInfo::supports()` 做精确匹配；随路由一起在
 /// `server_protocol_info()` 中宣告。
 pub const CAPABILITY_ATTENTION_V1: &str = "attention.v1";
+/// Attention Inbox v2（含 Agent needsInput/failed 投影；capability 仅协议协商）。
+pub const CAPABILITY_ATTENTION_V2: &str = "attention.v2";
 
 /// 能力 token：v1 文件传输显式 complete/finalize 握手
 /// （`POST /api/transfer/complete/:id`）。
@@ -241,6 +243,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
         capabilities: vec![
             CAPABILITY_ATTENTION_V1.to_string(),
+            CAPABILITY_ATTENTION_V2.to_string(),
             CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
             CAPABILITY_ERRORS_ENVELOPE_V1.to_string(),
             CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1.to_string(),
@@ -405,6 +408,7 @@ mod tests {
             info.capabilities,
             vec![
                 "attention.v1".to_string(),
+                "attention.v2".to_string(),
                 "cc-history.paged-sync.v1".to_string(),
                 "errors.envelope.v1".to_string(),
                 "orchestrator.review-diff.v1".to_string(),
@@ -420,6 +424,7 @@ mod tests {
                 "workbench.workspace-safe-restore.v1".to_string(),
             ]
         );
+        assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_REVIEW_DIFF_V1));
         assert!(info.supports(CAPABILITY_ORCHESTRATOR_WORKFLOW_DOCUMENT_V1));

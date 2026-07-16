@@ -25,6 +25,7 @@ import {
   nullableDecoder,
   numberDecoder,
   objectDecoder,
+  optionalDecoder,
   stringDecoder,
   unionDecoder,
   type Decoder,
@@ -46,6 +47,9 @@ const attentionSourceKindDecoder: Decoder<AttentionSourceKind> = enumDecoder('At
   'orchestratorBlocked',
   'remoteOutboxFailed',
   'workbenchDependency',
+  'agentNeedsInput',
+  'agentFailed',
+  'experimentNeedsDecision',
 ] as const);
 
 const projectKindDecoder = enumDecoder('AttentionProjectKind', ['local', 'remote'] as const);
@@ -88,6 +92,18 @@ export const attentionTargetDecoder: Decoder<AttentionTarget> = unionDecoder<Att
     objectDecoder('AttentionTargetSettings', {
       kind: literalDecoder('settings'),
       tab: literalDecoder('dependencies'),
+    }),
+    objectDecoder('AttentionTargetAgentSession', {
+      kind: literalDecoder('agentSession'),
+      projectId: stringDecoder,
+      worktreeId: optionalDecoder(nullableDecoder(stringDecoder)),
+      terminalSessionId: stringDecoder,
+      agentSessionId: stringDecoder,
+    }),
+    objectDecoder('AttentionTargetExperiment', {
+      kind: literalDecoder('experiment'),
+      projectId: stringDecoder,
+      experimentId: stringDecoder,
     }),
   ],
 );

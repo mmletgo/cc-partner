@@ -38,14 +38,28 @@ export type MobileAttentionNavigation =
       kind: 'settingsDependencies';
       panel: 'settings';
       tab: 'dependencies';
+    }
+  | {
+      kind: 'terminalSession';
+      projectId: string;
+      worktreeId: string | null;
+      sessionId: string;
+      agentSessionId: string;
+      panel: 'terminal';
+    }
+  | {
+      kind: 'experiment';
+      projectId: string;
+      experimentId: string;
+      panel: 'automation';
     };
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   点击 Inbox 条目后，移动端必须把语义 target 变成现有 Automation/Settings 导航，而不是 URL。
+ *   点击 Inbox 条目后，移动端必须把语义 target 变成现有 panel 导航，而不是 URL。
  *
  * Code Logic（这个函数做什么）:
- *   orchestratorTask → automation + taskId；remoteOutbox → automation + outboxId；settings → settings/dependencies。
+ *   orchestratorTask/outbox/settings 保持；agentSession → terminal；experiment → automation。
  */
 export function mapMobileAttentionTarget(target: AttentionTarget): MobileAttentionNavigation {
   switch (target.kind) {
@@ -68,6 +82,22 @@ export function mapMobileAttentionTarget(target: AttentionTarget): MobileAttenti
         kind: 'settingsDependencies',
         panel: 'settings',
         tab: 'dependencies',
+      };
+    case 'agentSession':
+      return {
+        kind: 'terminalSession',
+        projectId: target.projectId,
+        worktreeId: target.worktreeId ?? null,
+        sessionId: target.terminalSessionId,
+        agentSessionId: target.agentSessionId,
+        panel: 'terminal',
+      };
+    case 'experiment':
+      return {
+        kind: 'experiment',
+        projectId: target.projectId,
+        experimentId: target.experimentId,
+        panel: 'automation',
       };
     default: {
       const _exhaustive: never = target;

@@ -39,7 +39,9 @@
     "review": "Review",
     "viewBlocked": "View blocked reason",
     "viewFailed": "View failed item",
-    "openSettings": "Open settings"
+    "openSettings": "Open settings",
+    "openTerminal": "Open terminal",
+    "openExperiment": "Open experiment"
   },
   "nav": {
     "label": "Inbox"

@@ -623,8 +623,9 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             )
             // 移动端访问入口：返回手机可访问的局域网 /mobile URL（过滤 localhost/loopback）
             .route("/api/mobile/access-info", get(mobile::access_info))
-            // Mobile Attention 快照：与 Tauri list_attention_items 共享聚合 helper；能力 token attention.v1
+            // Mobile Attention 快照：v1 与 Tauri list_attention_items 共享；v2 含 Agent 投影
             .route("/api/mobile/attention", get(attention::list_attention))
+            .route("/api/mobile/attention/v2", get(attention::list_attention_v2))
             // P2P 同步协议（M4）：对端调 pull/push，字段对照 Python protocol.py
             .route("/api/sync/pull", post(sync::sync_pull))
             .route("/api/sync/push", post(sync::sync_push))

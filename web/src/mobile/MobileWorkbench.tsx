@@ -1040,10 +1040,10 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   Attention 条目只导航到现有 Automation/Settings，不在列表内执行副作用动作。
+   *   Attention 条目只导航到现有 Automation/Settings/Terminal，不在列表内执行副作用动作。
    *
    * Code Logic（这个函数做什么）:
-   *   mapMobileAttentionTarget 后：settings 直接切 settings；task/outbox 先选项目再进入 automation 并写入 focus id。
+   *   mapMobileAttentionTarget 后：settings 切 settings；agent → terminal；task/outbox/experiment → automation。
    */
   const handleOpenAttentionItem = useCallback(
     async (item: AttentionItem): Promise<void> => {
@@ -1063,6 +1063,25 @@ export function MobileWorkbench(): ReactElement {
         setAttentionNotice(t('attention:resolvedOrChanged'));
         void refreshAttention();
         setPanel('attention');
+        return;
+      }
+
+      if (navigation.kind === 'terminalSession') {
+        setAttentionFocusTaskId(null);
+        setAttentionFocusOutboxId(null);
+        const selected = await selectProject(project, { nextPanel: 'terminal' });
+        if (!selected) {
+          setAttentionNotice(t('attention:resolvedOrChanged'));
+          void refreshAttention();
+          setPanel('attention');
+          return;
+        }
+        // 选择项目后若 session 列表已有目标，聚焦对应 terminal window。
+        const targetSession =
+          sessionsRef.current.find((session) => session.id === navigation.sessionId) ?? null;
+        if (targetSession) {
+          setActiveSession(targetSession);
+        }
         return;
       }
 

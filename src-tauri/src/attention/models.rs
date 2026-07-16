@@ -58,9 +58,11 @@ pub enum AttentionFreshness {
 ///
 /// Business Logic（为什么需要这个枚举）:
 ///     前端按 sourceKind 映射操作文案与图标，source 投影必须输出稳定字面量。
+///     `attention.v1` 响应不得包含 Agent/Experiment 变体；仅 `attention.v2` 投影输出新枚举。
 ///
 /// Code Logic（这个枚举做什么）:
-///     序列化为 orchestratorHumanReview / orchestratorBlocked / remoteOutboxFailed / workbenchDependency。
+///     序列化为 orchestratorHumanReview / orchestratorBlocked / remoteOutboxFailed /
+///     workbenchDependency / agentNeedsInput / agentFailed / experimentNeedsDecision。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AttentionSourceKind {
@@ -68,6 +70,26 @@ pub enum AttentionSourceKind {
     OrchestratorBlocked,
     RemoteOutboxFailed,
     WorkbenchDependency,
+    /// A2：Agent phase=needsInput（仅 v2）
+    AgentNeedsInput,
+    /// A2：Agent phase=failed（仅 v2）
+    AgentFailed,
+    /// A4 合同预留：experiment 需要决策（A2 不查询 repo）
+    ExperimentNeedsDecision,
+}
+
+impl AttentionSourceKind {
+    /// Business Logic（为什么需要这个函数）:
+    ///     v1 响应必须严格排除 Agent/Experiment 变体，避免旧客户端解码失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Agent*/Experiment* 返回 true。
+    pub fn is_v2_only(self) -> bool {
+        matches!(
+            self,
+            Self::AgentNeedsInput | Self::AgentFailed | Self::ExperimentNeedsDecision
+        )
+    }
 }
 
 /// Attention 条目所属项目摘要。
@@ -119,7 +141,8 @@ pub struct AttentionDeviceRef {
 ///     后端只返回语义 target，由桌面/移动端各自映射导航；禁止返回后端 URL。
 ///
 /// Code Logic（这个枚举做什么）:
-///     用内部 tag `kind` 序列化为三种目标：orchestratorTask / remoteOutbox / settings。
+///     用内部 tag `kind` 序列化：orchestratorTask / remoteOutbox / settings /
+///     agentSession（v2）/ experiment（v2 合同）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AttentionTargetDto {
@@ -137,6 +160,24 @@ pub enum AttentionTargetDto {
     },
     Settings {
         tab: AttentionSettingsTab,
+    },
+    /// A2：导航到既有 terminal/Agent session（不打开新命令面板）。
+    AgentSession {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "worktreeId")]
+        worktree_id: Option<String>,
+        #[serde(rename = "terminalSessionId")]
+        terminal_session_id: String,
+        #[serde(rename = "agentSessionId")]
+        agent_session_id: String,
+    },
+    /// A4 合同：导航到 experiment 权威界面（A2 不发射）。
+    Experiment {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "experimentId")]
+        experiment_id: String,
     },
 }
 
@@ -310,6 +351,20 @@ mod tests {
             serde_json::to_value(AttentionSourceKind::WorkbenchDependency).unwrap(),
             json!("workbenchDependency")
         );
+        assert_eq!(
+            serde_json::to_value(AttentionSourceKind::AgentNeedsInput).unwrap(),
+            json!("agentNeedsInput")
+        );
+        assert_eq!(
+            serde_json::to_value(AttentionSourceKind::AgentFailed).unwrap(),
+            json!("agentFailed")
+        );
+        assert_eq!(
+            serde_json::to_value(AttentionSourceKind::ExperimentNeedsDecision).unwrap(),
+            json!("experimentNeedsDecision")
+        );
+        assert!(AttentionSourceKind::AgentNeedsInput.is_v2_only());
+        assert!(!AttentionSourceKind::OrchestratorHumanReview.is_v2_only());
 
         assert_eq!(
             serde_json::to_value(AttentionProjectKind::Local).unwrap(),
@@ -365,6 +420,38 @@ mod tests {
             json!({
                 "kind": "settings",
                 "tab": "dependencies",
+            })
+        );
+
+        let agent_target = serde_json::to_value(AttentionTargetDto::AgentSession {
+            project_id: "p3".to_string(),
+            worktree_id: Some("wt1".to_string()),
+            terminal_session_id: "term-1".to_string(),
+            agent_session_id: "agent-1".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            agent_target,
+            json!({
+                "kind": "agentSession",
+                "projectId": "p3",
+                "worktreeId": "wt1",
+                "terminalSessionId": "term-1",
+                "agentSessionId": "agent-1",
+            })
+        );
+
+        let experiment_target = serde_json::to_value(AttentionTargetDto::Experiment {
+            project_id: "p4".to_string(),
+            experiment_id: "exp-1".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            experiment_target,
+            json!({
+                "kind": "experiment",
+                "projectId": "p4",
+                "experimentId": "exp-1",
             })
         );
 
