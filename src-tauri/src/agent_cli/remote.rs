@@ -23,6 +23,7 @@ use crate::net::protocol::{
     CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
     CAPABILITY_WORKBENCH_LAN_FLEET_V1, PROTOCOL_VERSION_V1,
 };
+use crate::net::routes::health::HealthResponse;
 use crate::orchestrator::remote_client::RemoteOrchestratorClient;
 use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
 use crate::state::AppState;
@@ -77,17 +78,28 @@ pub fn resolve_remote_device_base_url(
     }
 }
 
-/// 远端 health + capability 门禁。
+/// 远端 health 且绑定期望 `device_id`（防 stale mDNS 映射误写他机）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     旧 peer / 缺能力必须 exit 6；offline exit 5。
+///     mDNS 表中的 address/port 可能过期指向另一台设备；mutation/query 若只做 capability
+///     探测而不核对 health.device_id，会把 CLI 操作打到错误 peer。业务 API 无调用者身份
+///     鉴权，更必须以对端自报 device_id 与 `--device` 期望值精确一致作为 fail-closed 门禁。
 ///
 /// Code Logic（这个函数做什么）:
-///     GET /api/health；检查 protocol_version 与 capability token。
-pub async fn require_remote_capability(
+///     GET `{base}/api/health` → 要求 HTTP 成功、`ok == true`、
+///     `device_id == expected_device_id`（精确字符串相等）；解析完整 `HealthResponse`。
+///     device_id 不匹配 → conflict + code `device_id_mismatch`；不可达 → unavailable。
+pub async fn require_remote_device(
     base_url: &str,
-    capability: &str,
-) -> Result<PeerProtocolInfo, CliError> {
+    expected_device_id: &str,
+) -> Result<HealthResponse, CliError> {
+    let expected = expected_device_id.trim();
+    if expected.is_empty() {
+        return Err(CliError::usage(
+            "invalid_device",
+            "device id must be non-empty",
+        ));
+    }
     let client = reqwest::Client::new();
     let url = format!("{base_url}/api/health");
     let response = client
@@ -102,10 +114,39 @@ pub async fn require_remote_capability(
             "remote peer health returned non-success",
         ));
     }
-    let info: PeerProtocolInfo = response
-        .json()
-        .await
-        .map_err(|_| CliError::unsupported("remote peer protocol info unparseable or pre-v1"))?;
+    let health: HealthResponse = response.json().await.map_err(|_| {
+        CliError::unsupported("remote peer health response unparseable or pre-v1")
+    })?;
+    if !health.ok {
+        return Err(CliError::unavailable(
+            "peer_offline",
+            "remote peer health reported ok=false",
+        ));
+    }
+    if health.device_id != expected {
+        return Err(CliError::conflict(format!(
+            "remote peer device_id mismatch: expected {expected}, got {}",
+            health.device_id
+        ))
+        .with_code("device_id_mismatch"));
+    }
+    Ok(health)
+}
+
+/// 远端 health + device_id 绑定 + capability 门禁。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧 peer / 缺能力必须 exit 6；offline exit 5；stale peer 映射 exit 4（device_id_mismatch）。
+///
+/// Code Logic（这个函数做什么）:
+///     先 `require_remote_device`；再检查 protocol_version 与 capability token。
+pub async fn require_remote_capability(
+    base_url: &str,
+    expected_device_id: &str,
+    capability: &str,
+) -> Result<PeerProtocolInfo, CliError> {
+    let health = require_remote_device(base_url, expected_device_id).await?;
+    let info = health.protocol_info();
     if info.protocol_version < PROTOCOL_VERSION_V1 {
         return Err(CliError::unsupported(
             "remote peer protocol version is below v1",
@@ -119,9 +160,20 @@ pub async fn require_remote_capability(
     Ok(info)
 }
 
-/// 仅校验 v1 + errors envelope。
-async fn health_v1(base_url: &str) -> Result<(), CliError> {
-    let _ = require_remote_capability(base_url, CAPABILITY_ERRORS_ENVELOPE_V1).await?;
+/// 校验 v1 + errors envelope，并绑定期望 device_id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     基础 query/mutation 在无额外 capability 时也必须确认对端身份与协议。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `require_remote_capability(..., errors.envelope.v1)`。
+async fn health_v1(base_url: &str, expected_device_id: &str) -> Result<(), CliError> {
+    let _ = require_remote_capability(
+        base_url,
+        expected_device_id,
+        CAPABILITY_ERRORS_ENVELOPE_V1,
+    )
+    .await?;
     Ok(())
 }
 
@@ -155,12 +207,12 @@ pub async fn remote_query_with_base(
 ) -> Result<Value, CliError> {
     match op {
         AgentControlQuery::ProjectList => {
-            health_v1(base_url).await?;
+            health_v1(base_url, device_id).await?;
             let projects: Value = remote_get_json(base_url, "/api/workbench/projects/list").await?;
             Ok(json!({ "items": projects }))
         }
         AgentControlQuery::ProjectInspect { selector } => {
-            health_v1(base_url).await?;
+            health_v1(base_url, device_id).await?;
             let projects: Vec<Value> =
                 remote_get_json(base_url, "/api/workbench/projects/list").await?;
             let candidates = projects_to_candidates(&projects);
@@ -171,7 +223,7 @@ pub async fn remote_query_with_base(
                 .ok_or_else(|| CliError::not_found("project not found"))
         }
         AgentControlQuery::WorktreeList { project } => {
-            health_v1(base_url).await?;
+            health_v1(base_url, device_id).await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let items = RemoteWorkbenchClient::new()
                 .list_worktrees(base_url, &project_id)
@@ -180,7 +232,7 @@ pub async fn remote_query_with_base(
             Ok(json!({ "items": items }))
         }
         AgentControlQuery::SessionList { project, worktree } => {
-            health_v1(base_url).await?;
+            health_v1(base_url, device_id).await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let mut items = RemoteWorkbenchClient::new()
                 .list_sessions(base_url, Some(project_id.as_str()))
@@ -196,7 +248,7 @@ pub async fn remote_query_with_base(
             session_id,
             after_sequence,
         } => {
-            health_v1(base_url).await?;
+            health_v1(base_url, device_id).await?;
             let inner = unwrap_session_id(device_id, &session_id)?;
             let mut replay = RemoteWorkbenchClient::new()
                 .replay(base_url, &inner)
@@ -211,7 +263,11 @@ pub async fn remote_query_with_base(
             serde_json::to_value(replay).map_err(|_| CliError::internal("serialize failed"))
         }
         AgentControlQuery::AgentList { project } => {
-            require_remote_capability(base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1,
+            ).await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             remote_post_json(
                 base_url,
@@ -221,7 +277,11 @@ pub async fn remote_query_with_base(
             .await
         }
         AgentControlQuery::AgentInspect { agent_session_id } => {
-            require_remote_capability(base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1,
+            ).await?;
             // 必须带 agentSessionId，以便 snapshot 强制纳入终态（completed/failed/disconnected）
             let snap = remote_post_json(
                 base_url,
@@ -239,11 +299,19 @@ pub async fn remote_query_with_base(
             phase,
             timeout_ms,
         } => {
-            require_remote_capability(base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1,
+            ).await?;
             wait_agent_phase_remote(base_url, &agent_session_id, &phase, timeout_ms).await
         }
         AgentControlQuery::TaskList { project } => {
-            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1)
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
+            )
                 .await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let items = RemoteOrchestratorClient::new()
@@ -253,7 +321,11 @@ pub async fn remote_query_with_base(
             Ok(json!({ "items": items }))
         }
         AgentControlQuery::ExperimentInspect { experiment_id } => {
-            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
+            ).await?;
             remote_post_json(
                 base_url,
                 "/api/orchestrator/experiments/get",
@@ -262,17 +334,25 @@ pub async fn remote_query_with_base(
             .await
         }
         AgentControlQuery::AttentionList => {
-            require_remote_capability(base_url, CAPABILITY_ATTENTION_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_ATTENTION_V1,
+            ).await?;
             remote_get_json(base_url, "/api/attention").await
         }
         AgentControlQuery::FleetSnapshot => {
-            require_remote_capability(base_url, CAPABILITY_WORKBENCH_LAN_FLEET_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_WORKBENCH_LAN_FLEET_V1,
+            ).await?;
             Err(CliError::unsupported(
                 "fleet snapshot over recursive remote is unsupported",
             ))
         }
         AgentControlQuery::BrowserDiscover { project } => {
-            health_v1(base_url).await?;
+            health_v1(base_url, device_id).await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let items = RemoteWorkbenchClient::new()
                 .discover_browser_targets(
@@ -287,7 +367,11 @@ pub async fn remote_query_with_base(
             Ok(json!({ "items": items }))
         }
         AgentControlQuery::BrowserInspect { run_id } => {
-            require_remote_capability(base_url, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1)
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
+            )
                 .await?;
             let run = RemoteWorkbenchClient::new()
                 .get_browser_verification(base_url, &run_id)
@@ -323,19 +407,20 @@ pub async fn remote_mutate(
 /// 在已知 peer base URL 上执行 mutation。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     CLI 直连 peer 时复用同一套 never-replay 语义。
+///     CLI 直连 peer 时复用同一套 never-replay 语义；必须把 `--device` 与 health.device_id
+///     绑定，避免 stale 映射误 mutate。
 ///
 /// Code Logic（这个函数做什么）:
-///     health → 按 variant 调用 Remote*Client 一次。
+///     `require_remote_device`（经 health_v1：ok + device_id + envelope）→ 按 variant 调用一次。
 pub async fn remote_mutate_with_base(
     base_url: &str,
-    _device_id: &str,
+    device_id: &str,
     op: AgentControlMutation,
 ) -> Result<Value, CliError> {
-    health_v1(base_url).await?;
+    health_v1(base_url, device_id).await?;
     match op {
         AgentControlMutation::SessionSend { session_id, data } => {
-            let inner = unwrap_session_id(_device_id, &session_id)?;
+            let inner = unwrap_session_id(device_id, &session_id)?;
             RemoteWorkbenchClient::new()
                 .write_input(base_url, &inner, &data)
                 .await
@@ -371,7 +456,11 @@ pub async fn remote_mutate_with_base(
             payload,
             client_request_id,
         } => {
-            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1)
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1,
+            )
                 .await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let req = build_remote_create_task_req(&project_id, &payload, client_request_id)?;
@@ -406,7 +495,11 @@ pub async fn remote_mutate_with_base(
             payload,
             client_request_id,
         } => {
-            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
+            ).await?;
             let project_id = resolve_remote_project_id(base_url, &project).await?;
             let mut body = payload;
             if let Some(obj) = body.as_object_mut() {
@@ -422,7 +515,11 @@ pub async fn remote_mutate_with_base(
             winner_task_id,
             reason,
         } => {
-            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
+            ).await?;
             remote_post_json(
                 base_url,
                 "/api/orchestrator/experiments/approve-winner",
@@ -435,7 +532,11 @@ pub async fn remote_mutate_with_base(
             .await
         }
         AgentControlMutation::ExperimentCancel { experiment_id } => {
-            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1).await?;
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
+            ).await?;
             remote_post_json(
                 base_url,
                 "/api/orchestrator/experiments/cancel",
@@ -447,7 +548,11 @@ pub async fn remote_mutate_with_base(
             project: _,
             payload,
         } => {
-            require_remote_capability(base_url, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1)
+            require_remote_capability(
+                base_url,
+                device_id,
+                CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
+            )
                 .await?;
             let preview_id = payload
                 .get("previewId")
@@ -900,6 +1005,192 @@ impl MockPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::get, Json, Router};
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use tokio::net::TcpListener;
+
+    /// 启动临时 health 服务，返回 base URL。
+    async fn spawn_health_server(device_id: &str, ok: bool, capabilities: Vec<String>) -> String {
+        let device_id = device_id.to_string();
+        let app = Router::new().route(
+            "/api/health",
+            get(move || {
+                let device_id = device_id.clone();
+                let capabilities = capabilities.clone();
+                async move {
+                    Json(HealthResponse {
+                        ok,
+                        device_id,
+                        device_name: "test-peer".into(),
+                        http_port: 62116,
+                        ts: 1_700_000_000,
+                        protocol_version: PROTOCOL_VERSION_V1,
+                        capabilities,
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     stale mDNS 映射可能把 base URL 指到另一台设备；mutation 必须 fail-closed。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     mock health 返回 wrong device_id；require_remote_device 拒绝。
+    #[tokio::test]
+    async fn require_remote_device_rejects_device_id_mismatch() {
+        let base = spawn_health_server(
+            "actual-device",
+            true,
+            vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+        )
+        .await;
+        let err = require_remote_device(&base, "expected-device")
+            .await
+            .expect_err("mismatch must fail closed");
+        assert_eq!(err.code(), "device_id_mismatch");
+        assert_eq!(err.exit, crate::agent_cli::output::CliExitCode::Conflict);
+        assert!(err.message.contains("device_id mismatch"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     device_id 匹配时 health 门禁必须放行，后续 mutation 才能继续。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     mock health 返回 matching id；require_remote_device Ok；capability 也通过。
+    #[tokio::test]
+    async fn require_remote_device_accepts_matching_device_id() {
+        let base = spawn_health_server(
+            "device-ok",
+            true,
+            vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+        )
+        .await;
+        let health = require_remote_device(&base, "device-ok")
+            .await
+            .expect("matching device must pass");
+        assert_eq!(health.device_id, "device-ok");
+        assert!(health.ok);
+
+        let info = require_remote_capability(&base, "device-ok", CAPABILITY_ERRORS_ENVELOPE_V1)
+            .await
+            .expect("capability after device bind");
+        assert!(info.supports(CAPABILITY_ERRORS_ENVELOPE_V1));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     mutation 路径不得在 device_id 不匹配时发出写请求。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 返回 wrong id + write 路由计数；mutate SessionSend 失败且 hit=0。
+    #[tokio::test]
+    async fn remote_mutate_rejects_mismatch_before_write() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = Arc::clone(&hits);
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "other-device".into(),
+                        device_name: "other".into(),
+                        http_port: 1,
+                        ts: 1,
+                        protocol_version: PROTOCOL_VERSION_V1,
+                        capabilities: vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+                    })
+                }),
+            )
+            .route(
+                "/api/workbench/sessions/write",
+                axum::routing::post(move || {
+                    let hits = Arc::clone(&hits_clone);
+                    async move {
+                        hits.fetch_add(1, AtomicOrdering::SeqCst);
+                        Json(json!({ "ok": true }))
+                    }
+                }),
+            );
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base = format!("http://{addr}");
+
+        let err = remote_mutate_with_base(
+            &base,
+            "expected-device",
+            AgentControlMutation::SessionSend {
+                session_id: "sess-1".into(),
+                data: "ls\n".into(),
+            },
+        )
+        .await
+        .expect_err("stale peer mapping must not mutate");
+        assert_eq!(err.code(), "device_id_mismatch");
+        assert_eq!(hits.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     matching device_id 时 mutation 门禁应通过 health，再进入业务路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     health 匹配 + sessions/write 返回 200；SessionSend 成功。
+    #[tokio::test]
+    async fn remote_mutate_proceeds_when_device_id_matches() {
+        let app = Router::new()
+            .route(
+                "/api/health",
+                get(|| async {
+                    Json(HealthResponse {
+                        ok: true,
+                        device_id: "peer-1".into(),
+                        device_name: "peer".into(),
+                        http_port: 1,
+                        ts: 1,
+                        protocol_version: PROTOCOL_VERSION_V1,
+                        capabilities: vec![CAPABILITY_ERRORS_ENVELOPE_V1.to_string()],
+                    })
+                }),
+            )
+            .route(
+                "/api/workbench/sessions/write",
+                axum::routing::post(|| async { Json(json!({ "ok": true })) }),
+            );
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base = format!("http://{addr}");
+
+        let result = remote_mutate_with_base(
+            &base,
+            "peer-1",
+            AgentControlMutation::SessionSend {
+                session_id: "sess-1".into(),
+                data: "ls\n".into(),
+            },
+        )
+        .await
+        .expect("matching device_id must allow mutation");
+        assert_eq!(result.get("ok"), Some(&json!(true)));
+    }
 
     #[test]
     fn remote_terminal_send_does_not_receive_control_token_or_retry() {

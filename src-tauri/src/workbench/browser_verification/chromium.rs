@@ -34,10 +34,18 @@ use tokio_util::sync::CancellationToken;
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Engine 只能启动仓库/安装包内固定版本二进制，禁止任意用户 Chrome。
+///     打包后 sidecar/GUI 的 cwd 不是源码树，必须能从 env、resource_dir 与
+///     `current_exe` 相对布局定位 runtime，否则验证永远 unavailable。
 ///
 /// Code Logic（这个函数做什么）:
-///     依次探测 `resources/browser-runtime/<platform>/...`、`CC_PARTNER_BROWSER_RUNTIME` env、
-///     与可执行文件旁相对路径；找不到返回 None。
+///     按固定优先级探测：
+///     1) `CC_PARTNER_BROWSER_RUNTIME` 指向可执行文件本身；
+///     2) `CC_PARTNER_BROWSER_RUNTIME_DIR` / `CC_PARTNER_RESOURCE_DIR` 下
+///        `<platform>/<rel>` 或 `browser-runtime|resources/browser-runtime` 布局；
+///     3) `current_exe` 旁常见 Tauri 包布局（macOS Resources、exe 旁 resources、
+///        向上最多 4 级的 `resources/browser-runtime`）；
+///     4) 开发态 `CARGO_MANIFEST_DIR` 与相对 cwd 路径。
+///     找不到返回 None。
 pub fn resolve_managed_chrome_executable() -> Option<PathBuf> {
     if let Ok(explicit) = std::env::var("CC_PARTNER_BROWSER_RUNTIME") {
         let p = PathBuf::from(explicit);
@@ -45,9 +53,64 @@ pub fn resolve_managed_chrome_executable() -> Option<PathBuf> {
             return Some(p);
         }
     }
+
     let platform = current_browser_platform()?;
     let rel = expected_executable_rel(platform);
-    let candidates = [
+
+    // 资源根 env：BROWSER_RUNTIME_DIR 视为 browser-runtime 根；RESOURCE_DIR 再尝试常见子路径。
+    for env_key in ["CC_PARTNER_BROWSER_RUNTIME_DIR", "CC_PARTNER_RESOURCE_DIR"] {
+        if let Ok(dir) = std::env::var(env_key) {
+            if dir.trim().is_empty() {
+                continue;
+            }
+            let root = PathBuf::from(dir);
+            let env_candidates = [
+                root.join(platform).join(&rel),
+                root.join("browser-runtime").join(platform).join(&rel),
+                root.join("resources/browser-runtime")
+                    .join(platform)
+                    .join(&rel),
+            ];
+            if let Some(hit) = env_candidates.into_iter().find(|p| p.is_file()) {
+                return Some(hit);
+            }
+        }
+    }
+
+    // 打包布局：不依赖源码 cwd，从 current_exe 推导 resource 位置。
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let packaged_roots = [
+                exe_dir.join("../Resources/resources/browser-runtime"),
+                exe_dir.join("../Resources/browser-runtime"),
+                exe_dir.join("resources/browser-runtime"),
+                exe_dir.join("../resources/browser-runtime"),
+            ];
+            for root in packaged_roots {
+                let candidate = root.join(platform).join(&rel);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            // 向上最多 4 级寻找 resources/browser-runtime/<platform>/<rel>
+            let mut cur = exe_dir.to_path_buf();
+            for _ in 0..4 {
+                let candidate = cur
+                    .join("resources/browser-runtime")
+                    .join(platform)
+                    .join(&rel);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+                if !cur.pop() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // 开发 smoke：源码树与相对 cwd。
+    let dev_candidates = [
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("resources/browser-runtime")
             .join(platform)
@@ -59,7 +122,7 @@ pub fn resolve_managed_chrome_executable() -> Option<PathBuf> {
             .join(platform)
             .join(&rel),
     ];
-    candidates.into_iter().find(|p| p.is_file())
+    dev_candidates.into_iter().find(|p| p.is_file())
 }
 
 /// 当前平台 lock id。
@@ -69,6 +132,8 @@ pub fn resolve_managed_chrome_executable() -> Option<PathBuf> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     映射 cfg target_os/arch。
+///     **linux aarch64 / 其它未列架构**：`browser-runtime-lock.json` 无对应 asset，
+///     返回 None（managed runtime **NOT VERIFIED / unsupported**，不得伪造路径）。
 fn current_browser_platform() -> Option<&'static str> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -85,6 +150,11 @@ fn current_browser_platform() -> Option<&'static str> {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
         return Some("win64");
+    }
+    // linux aarch64 等：lock 无 asset，managed chrome-headless-shell NOT VERIFIED / unsupported。
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        return None;
     }
     #[allow(unreachable_code)]
     None
@@ -833,5 +903,161 @@ async fn wait_for_condition(
             return Err(AppError::timeout("browser_wait_timeout"));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// 串行化会改写 browser-runtime 相关 env 的测试，避免并行污染。
+    fn browser_runtime_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 写一个占位“可执行文件”（仅 is_file 探测，不真正执行）。
+    fn touch_file(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(path, b"fake-chrome-headless-shell").expect("write fake exe");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     打包/sidecar 环境无 CARGO_MANIFEST_DIR 有效路径；运维必须能用 env 指到绝对路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     临时目录写假文件，设 `CC_PARTNER_BROWSER_RUNTIME`，断言 resolve 命中且不依赖源码树。
+    #[test]
+    fn resolve_managed_chrome_respects_explicit_runtime_env() {
+        let _guard = browser_runtime_env_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake = tmp.path().join("chrome-headless-shell");
+        touch_file(&fake);
+
+        let prev_runtime = std::env::var_os("CC_PARTNER_BROWSER_RUNTIME");
+        let prev_dir = std::env::var_os("CC_PARTNER_BROWSER_RUNTIME_DIR");
+        let prev_res = std::env::var_os("CC_PARTNER_RESOURCE_DIR");
+        std::env::set_var("CC_PARTNER_BROWSER_RUNTIME", &fake);
+        std::env::remove_var("CC_PARTNER_BROWSER_RUNTIME_DIR");
+        std::env::remove_var("CC_PARTNER_RESOURCE_DIR");
+
+        let resolved = resolve_managed_chrome_executable();
+        assert_eq!(resolved.as_deref(), Some(fake.as_path()));
+
+        match prev_runtime {
+            Some(v) => std::env::set_var("CC_PARTNER_BROWSER_RUNTIME", v),
+            None => std::env::remove_var("CC_PARTNER_BROWSER_RUNTIME"),
+        }
+        match prev_dir {
+            Some(v) => std::env::set_var("CC_PARTNER_BROWSER_RUNTIME_DIR", v),
+            None => std::env::remove_var("CC_PARTNER_BROWSER_RUNTIME_DIR"),
+        }
+        match prev_res {
+            Some(v) => std::env::set_var("CC_PARTNER_RESOURCE_DIR", v),
+            None => std::env::remove_var("CC_PARTNER_RESOURCE_DIR"),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     resource dir env 是安装包/sidecar 注入绝对资源根的主路径；不得依赖 CARGO_MANIFEST_DIR。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 temp 下按 `<platform>/<rel>` 布局假文件，设 `CC_PARTNER_BROWSER_RUNTIME_DIR`，
+    ///     清除显式 RUNTIME 文件 env 后断言 resolve 命中。
+    #[test]
+    fn resolve_managed_chrome_respects_runtime_dir_env_without_manifest() {
+        let _guard = browser_runtime_env_lock();
+        let Some(platform) = current_browser_platform() else {
+            // linux aarch64 等：lock 无 asset，平台级 None 属预期，跳过 dir 布局断言。
+            return;
+        };
+        let rel = expected_executable_rel(platform);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake = tmp.path().join(platform).join(&rel);
+        touch_file(&fake);
+
+        let prev_runtime = std::env::var_os("CC_PARTNER_BROWSER_RUNTIME");
+        let prev_dir = std::env::var_os("CC_PARTNER_BROWSER_RUNTIME_DIR");
+        let prev_res = std::env::var_os("CC_PARTNER_RESOURCE_DIR");
+        // 显式文件 env 优先；测试 dir 路径时必须清掉，避免误命中其它值。
+        std::env::remove_var("CC_PARTNER_BROWSER_RUNTIME");
+        std::env::set_var("CC_PARTNER_BROWSER_RUNTIME_DIR", tmp.path());
+        std::env::remove_var("CC_PARTNER_RESOURCE_DIR");
+
+        let resolved = resolve_managed_chrome_executable();
+        assert_eq!(
+            resolved.as_deref(),
+            Some(fake.as_path()),
+            "should resolve from CC_PARTNER_BROWSER_RUNTIME_DIR layout"
+        );
+
+        match prev_runtime {
+            Some(v) => std::env::set_var("CC_PARTNER_BROWSER_RUNTIME", v),
+            None => std::env::remove_var("CC_PARTNER_BROWSER_RUNTIME"),
+        }
+        match prev_dir {
+            Some(v) => std::env::set_var("CC_PARTNER_BROWSER_RUNTIME_DIR", v),
+            None => std::env::remove_var("CC_PARTNER_BROWSER_RUNTIME_DIR"),
+        }
+        match prev_res {
+            Some(v) => std::env::set_var("CC_PARTNER_RESOURCE_DIR", v),
+            None => std::env::remove_var("CC_PARTNER_RESOURCE_DIR"),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     非文件的 explicit env 不得短路后续候选。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     设 BROWSER_RUNTIME 为不存在路径，再设 RUNTIME_DIR 有效布局，断言仍可命中 dir。
+    #[test]
+    fn resolve_managed_chrome_skips_missing_explicit_file_env() {
+        let _guard = browser_runtime_env_lock();
+        let Some(platform) = current_browser_platform() else {
+            return;
+        };
+        let rel = expected_executable_rel(platform);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake = tmp.path().join(platform).join(&rel);
+        touch_file(&fake);
+
+        let prev_runtime = std::env::var_os("CC_PARTNER_BROWSER_RUNTIME");
+        let prev_dir = std::env::var_os("CC_PARTNER_BROWSER_RUNTIME_DIR");
+        let prev_res = std::env::var_os("CC_PARTNER_RESOURCE_DIR");
+        std::env::set_var(
+            "CC_PARTNER_BROWSER_RUNTIME",
+            tmp.path().join("does-not-exist"),
+        );
+        std::env::set_var("CC_PARTNER_BROWSER_RUNTIME_DIR", tmp.path());
+        std::env::remove_var("CC_PARTNER_RESOURCE_DIR");
+
+        let resolved = resolve_managed_chrome_executable();
+        assert_eq!(resolved.as_deref(), Some(fake.as_path()));
+
+        match prev_runtime {
+            Some(v) => std::env::set_var("CC_PARTNER_BROWSER_RUNTIME", v),
+            None => std::env::remove_var("CC_PARTNER_BROWSER_RUNTIME"),
+        }
+        match prev_dir {
+            Some(v) => std::env::set_var("CC_PARTNER_BROWSER_RUNTIME_DIR", v),
+            None => std::env::remove_var("CC_PARTNER_BROWSER_RUNTIME_DIR"),
+        }
+        match prev_res {
+            Some(v) => std::env::set_var("CC_PARTNER_RESOURCE_DIR", v),
+            None => std::env::remove_var("CC_PARTNER_RESOURCE_DIR"),
+        }
     }
 }
