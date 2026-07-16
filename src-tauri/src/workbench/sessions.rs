@@ -737,6 +737,56 @@ fn tmux_target_exists(tmux: &TmuxCommand, target: &str) -> bool {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     workspace restore preflight 必须只读探测 tmux target，不得 new-session/new-window。
+///
+/// Code Logic（这个函数做什么）:
+///     若本机无 tmux 则 false；否则对 target 执行 display-message 探测。
+pub fn inspect_tmux_target_exists(target: &str) -> bool {
+    let Some(tmux) = available_tmux_command() else {
+        return false;
+    };
+    tmux_target_exists(&tmux, target)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     preflight/safe attach 需要从持久化 row 得到稳定 target 字符串。
+///
+/// Code Logic（这个函数做什么）:
+///     公开包装 `tmux_target_for_row`。
+pub fn tmux_target_string_for_row(row: &WorkbenchSessionRow) -> Result<String, AppError> {
+    tmux_target_for_row(row)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     safe restore 只能 attach 已存在的 tmux window，禁止走 restore() 的 create/raw-PTY 回退。
+///
+/// Code Logic（这个函数做什么）:
+///     再次确认 backend=tmux 且 target 存在后，仅调用 registry 的 attach-only 入口（spawn attach client）。
+///     不调用 `create_tmux_window` / `new-session` / `new-window` / agent resume。
+pub fn safe_attach_existing_tmux_session(
+    state: &AppState,
+    row: WorkbenchSessionRow,
+    counters: &crate::workbench::workspace_restore::RestoreSideEffectCounters,
+) -> Result<WorkbenchSessionRow, AppError> {
+    if row.backend != TMUX_BACKEND {
+        return Err(AppError::validation(
+            "safe_attach_requires_tmux".to_string(),
+        ));
+    }
+    let target = tmux_target_for_row(&row)?;
+    if !inspect_tmux_target_exists(&target) {
+        return Err(AppError::unavailable("tmux_target_missing".to_string()));
+    }
+    // 计数：仅 attach client，不递增 new-session/new-window。
+    counters
+        .attach_client
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    state
+        .workbench_sessions
+        .attach_existing_tmux_only(state.clone(), row)
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     恢复旧版本持久化会话时，应把仍存在的旧 tmux session 尽量迁移成新的可读名称，而不是丢弃上下文重建。
 ///
 /// Code Logic（这个函数做什么）:
@@ -1547,6 +1597,38 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     workspace safe restore 只能对**已存在**的 tmux target 建立 attach client，禁止创建 window。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     要求 backend=tmux 且 backend_id 存在；直接 `spawn_row` 走 attach 命令路径，
+    ///     绝不调用 `create_tmux_window` 或 raw PTY 回退改写。
+    pub fn attach_existing_tmux_only(
+        &self,
+        state: AppState,
+        mut row: WorkbenchSessionRow,
+    ) -> Result<WorkbenchSessionRow, AppError> {
+        if row.backend != TMUX_BACKEND {
+            return Err(AppError::validation(
+                "safe_attach_requires_tmux".to_string(),
+            ));
+        }
+        if row.backend_id.as_deref().unwrap_or("").is_empty() {
+            return Err(AppError::validation(
+                "safe_attach_missing_backend_id".to_string(),
+            ));
+        }
+        let target = tmux_target_for_row(&row)?;
+        if !inspect_tmux_target_exists(&target) {
+            return Err(AppError::unavailable("tmux_target_missing".to_string()));
+        }
+        row.status = "running".to_string();
+        row.exited_at = None;
+        row.exit_code = None;
+        row.updated_at = chrono::Utc::now().to_rfc3339();
+        self.spawn_row(state, row)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     应用重启后，持久化的终端 tab 需要重新绑定运行期 PTY；tmux 后端可继续原 shell 上下文。
     ///
     /// Code Logic（这个函数做什么）:
@@ -2060,6 +2142,27 @@ impl WorkbenchSessionRegistry {
             .expect("workbench replay buffers 锁中毒")
             .entry(session_id.to_string())
             .or_insert_with(|| SessionReplayBuffer::new(SESSION_REPLAY_MAX_CHARS));
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     safe attach 单测需要在无真实 tmux 时把 session 记入 registry，验证幂等与 claim。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     插入 Fake process 的完整 row；仅 `#[cfg(test)]`。
+    #[cfg(test)]
+    pub fn insert_fake_session_row_for_test(&self, row: WorkbenchSessionRow) {
+        let session_id = row.id.clone();
+        self.sessions
+            .lock()
+            .expect("workbench sessions 锁中毒")
+            .insert(
+                session_id.clone(),
+                Arc::new(Mutex::new(WorkbenchSessionHandle {
+                    row,
+                    process: SessionProcess::Fake,
+                })),
+            );
+        self.ensure_replay_buffer(&session_id);
     }
 
     #[cfg(test)]

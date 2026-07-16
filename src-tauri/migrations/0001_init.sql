@@ -121,6 +121,24 @@ CREATE TABLE IF NOT EXISTS workbench_browser_targets (
 CREATE INDEX IF NOT EXISTS idx_workbench_browser_targets_project
     ON workbench_browser_targets(project_id, updated_at DESC);
 
+-- workbench_workspace_layouts 表：Workbench 工作现场结构 metadata（auto + named snapshot；revision CAS）
+CREATE TABLE IF NOT EXISTS workbench_workspace_layouts (
+    id TEXT PRIMARY KEY NOT NULL,
+    slot_key TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    name TEXT,
+    schema_version INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+    active_worktree_id TEXT,
+    active_session_id TEXT,
+    workspace_view TEXT NOT NULL,
+    inspector_tab TEXT NOT NULL,
+    browser_target_url TEXT,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- workbench_mutation_operations 表：Workbench Git mutation 持久化 ledger（UNIQUE client_operation_id）
 CREATE TABLE IF NOT EXISTS workbench_mutation_operations (
     client_operation_id TEXT PRIMARY KEY NOT NULL,

@@ -174,6 +174,7 @@ async fn build_transfer_test_state(receive_dir: &Path) -> AppState {
         workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
         workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
         workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
+        workbench_workspace_layout_repo: Arc::new(crate::storage::WorkbenchWorkspaceLayoutRepo::new(pool.clone())),
         workbench_browser_previews: Arc::new(
             crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
         ),
