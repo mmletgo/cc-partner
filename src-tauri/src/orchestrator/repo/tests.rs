@@ -1202,14 +1202,14 @@ async fn prepare_claim_token_cas_blocks_stale_runner_hijack() {
         .unwrap());
 
     let hijack = repo
-        .mark_task_running_attempt("task-aba", "agent/old", "wt-old", "sess-old", 1, &token_a)
+        .mark_task_running_attempt("task-aba", "agent/old", "wt-old", "sess-old", 1, &token_a, None)
         .await
         .unwrap();
     assert_eq!(hijack.status, OrchestratorTaskStatus::Preparing);
     assert_ne!(hijack.session_id.as_deref(), Some("sess-old"));
 
     let running = repo
-        .mark_task_running_attempt("task-aba", "agent/new", "wt-new", "sess-new", 1, &token_b)
+        .mark_task_running_attempt("task-aba", "agent/new", "wt-new", "sess-new", 1, &token_b, None)
         .await
         .unwrap();
     assert_eq!(running.status, OrchestratorTaskStatus::Running);
@@ -2682,6 +2682,7 @@ async fn mark_task_running_attempt_clears_previous_runtime_and_sets_started_at()
             "session-2",
             2,
             "tok",
+            None,
         )
         .await
         .unwrap();
@@ -2760,6 +2761,7 @@ async fn active_runner_guard_prevents_old_phase_and_runtime_updates() {
         "session-new",
         2,
         "tok",
+        None,
     )
     .await
     .unwrap();
@@ -2853,6 +2855,7 @@ async fn update_active_runner_runtime_summary_persists_claude_fields() {
         "session-1",
         1,
         "tok",
+        None,
     )
     .await
     .unwrap();

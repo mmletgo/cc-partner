@@ -107,8 +107,14 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
         Ok(alive) => {
             let at = chrono::Utc::now().to_rfc3339();
             match reducer.reconcile_active_sessions(&alive, &at).await {
-                Ok(n) if n > 0 => {
-                    tracing::info!("agent runtime reconcile disconnected {n} stale sessions");
+                Ok(disconnected) if !disconnected.is_empty() => {
+                    tracing::info!(
+                        "agent runtime reconcile disconnected {} stale sessions",
+                        disconnected.len()
+                    );
+                    for row in &disconnected {
+                        emit_agent_runtime_changed(&state, row);
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!("agent runtime reconcile failed: {e}"),

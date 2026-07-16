@@ -12,7 +12,7 @@ use super::models::{AgentRuntimeMutation, AgentSessionPhase};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::Deserialize;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// OSC 单帧最大字节数（含前缀后的 payload，至 ST 前）。
 pub const AGENT_OSC_MAX_FRAME_BYTES: usize = 16 * 1024;
@@ -46,6 +46,7 @@ pub struct AgentOscDiagnostic {
 /// Code Logic（这个类型做什么）:
 ///     三元组：visible 字节、解析成功的 mutation 列表、诊断列表。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)] // visible/diagnostics 由 reader 与测试共同消费
 pub struct AgentOscDecodeResult {
     /// 可安全写入 terminal/replay 的字节
     pub visible: Vec<u8>,
@@ -134,7 +135,8 @@ impl AgentOscDecoder {
     ///     terminal backend 在写入 replay/UI 前必须剥离 app-private OSC 并提取结构化事件。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     逐字节状态机；完整帧 → decode_payload；溢出/非法 → diagnostic 且不回灌可见输出。
+    ///     逐字节状态机；完整帧 → decode_payload；溢出/非法 → diagnostic 且不回灌可见输出；
+    ///     结束时若 1s 窗口已过期则冲刷 pending_coalesce。
     pub fn push(&mut self, input: &[u8]) -> AgentOscDecodeResult {
         let mut result = AgentOscDecodeResult::default();
         let mut i = 0;
@@ -242,18 +244,73 @@ impl AgentOscDecoder {
                 }
             }
         }
-        // 冲刷窗口内 coalesce 的最后状态（若本 push 有新 accepted，已在 accept 时处理）
-        if let Some(m) = self.pending_coalesce.take() {
-            // 仍在超限窗口内则继续挂起；否则作为一次 mutation 发出
-            if self.rate_window_count >= AGENT_OSC_MAX_EVENTS_PER_SEC
-                && self.rate_window_start.elapsed().as_secs() < 1
-            {
-                self.pending_coalesce = Some(m);
-            } else {
-                result.mutations.push(m);
-            }
-        }
+        // push 结束时若 rate 窗口已过期，立即冲刷 coalesce，避免依赖“下一次 PTY 字节”
+        self.flush_pending_if_window_elapsed(&mut result);
         result
+    }
+
+    /// 无新字节时轮询冲刷：1s 窗口到期后投递 pending_coalesce 最后状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     突发 OSC 后 PTY 可能长时间静默；若不在 idle tick 冲刷，终态 phase 会永久丢失。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     若窗口已过期则 flush pending 并重置 rate 桶；否则返回空结果。
+    pub fn poll_flush(&mut self) -> AgentOscDecodeResult {
+        let mut result = AgentOscDecodeResult::default();
+        self.flush_pending_if_window_elapsed(&mut result);
+        result
+    }
+
+    /// 强制冲刷 pending（reader 退出 / terminal 关闭时调用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     会话结束时不能因仍在 1s 窗口内而丢弃最后 coalesced phase。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     无论窗口是否到期，取出 pending_coalesce 并重置 rate 计数。
+    pub fn force_flush_pending(&mut self) -> AgentOscDecodeResult {
+        let mut result = AgentOscDecodeResult::default();
+        if self.rate_coalesced > 0 {
+            result.diagnostics.push(AgentOscDiagnostic {
+                code: "agent_osc_rate_limited",
+                detail: Some(format!("coalesced={}", self.rate_coalesced)),
+            });
+        }
+        if let Some(prev) = self.pending_coalesce.take() {
+            result.mutations.push(prev);
+        }
+        self.rate_window_start = Instant::now();
+        self.rate_window_count = 0;
+        self.rate_coalesced = 0;
+        result
+    }
+
+    /// 是否仍有待冲刷的 coalesced mutation。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     reader 循环在静默期需要决定是否 sleep+poll_flush，而不是无限阻塞 read。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `pending_coalesce.is_some()`。
+    pub fn has_pending_coalesce(&self) -> bool {
+        self.pending_coalesce.is_some()
+    }
+
+    /// 距当前 rate 窗口结束的剩余时间（用于 idle tick sleep）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     reader 应在窗口到期时立刻 flush，而不是固定盲等 1s。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     若无 pending 返回 None；否则 `1s - elapsed`（下限 0）。
+    pub fn duration_until_rate_window_end(&self) -> Option<Duration> {
+        if self.pending_coalesce.is_none() {
+            return None;
+        }
+        let elapsed = self.rate_window_start.elapsed();
+        let window = Duration::from_secs(1);
+        Some(window.saturating_sub(elapsed))
     }
 
     /// 完成一帧 payload 的解码并应用 rate limit。
@@ -285,19 +342,7 @@ impl AgentOscDecoder {
         result: &mut AgentOscDecodeResult,
     ) {
         if self.rate_window_start.elapsed().as_secs() >= 1 {
-            if self.rate_coalesced > 0 {
-                result.diagnostics.push(AgentOscDiagnostic {
-                    code: "agent_osc_rate_limited",
-                    detail: Some(format!("coalesced={}", self.rate_coalesced)),
-                });
-            }
-            // 新窗口开始前冲刷上一窗口 coalesce
-            if let Some(prev) = self.pending_coalesce.take() {
-                result.mutations.push(prev);
-            }
-            self.rate_window_start = Instant::now();
-            self.rate_window_count = 0;
-            self.rate_coalesced = 0;
+            self.flush_pending_if_window_elapsed(result);
         }
         if self.rate_window_count < AGENT_OSC_MAX_EVENTS_PER_SEC {
             self.rate_window_count += 1;
@@ -306,6 +351,31 @@ impl AgentOscDecoder {
             self.rate_coalesced += 1;
             self.pending_coalesce = Some(mutation);
         }
+    }
+
+    /// 若 rate 窗口 ≥1s，冲刷 pending 并重置计数桶。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     push / poll_flush / accept 共用同一冲刷语义，保证最后状态在窗口结束后一定投递。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     elapsed≥1s 时：诊断 rate_limited → push pending → 重置 window/count/coalesced。
+    fn flush_pending_if_window_elapsed(&mut self, result: &mut AgentOscDecodeResult) {
+        if self.rate_window_start.elapsed().as_secs() < 1 {
+            return;
+        }
+        if self.rate_coalesced > 0 {
+            result.diagnostics.push(AgentOscDiagnostic {
+                code: "agent_osc_rate_limited",
+                detail: Some(format!("coalesced={}", self.rate_coalesced)),
+            });
+        }
+        if let Some(prev) = self.pending_coalesce.take() {
+            result.mutations.push(prev);
+        }
+        self.rate_window_start = Instant::now();
+        self.rate_window_count = 0;
+        self.rate_coalesced = 0;
     }
 
     /// 重置 payload 扫描（回到 Idle）。
@@ -612,6 +682,42 @@ mod tests {
             last_version = pending.event_version;
         }
         assert_eq!(last_version, 25);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     突发后 PTY 静默时，coalesced 终态必须在 1s 窗口后经 poll_flush 投递，不能永远挂起。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     push 25 帧（最后为 Completed）→ pending 持有 v25 → sleep 1.05s → poll_flush 交付 Completed。
+    #[test]
+    fn rate_limit_idle_poll_flush_delivers_final_phase() {
+        let mut decoder = AgentOscDecoder::default();
+        for v in 1..=25u64 {
+            let phase = if v == 25 {
+                AgentSessionPhase::Completed
+            } else {
+                AgentSessionPhase::Working
+            };
+            let frame = encode_agent_osc_frame("s", "t", phase, v, "2026-07-15T00:00:00Z");
+            let _ = decoder.push(&frame);
+        }
+        assert!(decoder.has_pending_coalesce());
+        assert_eq!(
+            decoder
+                .pending_coalesce
+                .as_ref()
+                .map(|m| m.event_version),
+            Some(25)
+        );
+        // 无更多 push：仅靠 idle tick
+        std::thread::sleep(Duration::from_millis(1_050));
+        let flushed = decoder.poll_flush();
+        assert_eq!(flushed.mutations.len(), 1);
+        assert_eq!(flushed.mutations[0].event_version, 25);
+        assert_eq!(flushed.mutations[0].phase, AgentSessionPhase::Completed);
+        assert!(!decoder.has_pending_coalesce());
+        // 再次 poll 不应重复交付
+        assert!(decoder.poll_flush().mutations.is_empty());
     }
 
     /// Business Logic（为什么需要这个测试）:

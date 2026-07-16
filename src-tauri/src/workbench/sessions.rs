@@ -2262,22 +2262,32 @@ fn spawn_reader_thread(
                 Ok(0) => break,
                 Ok(n) => {
                     let decoded = osc.push(&buf[..n]);
-                    forward_agent_osc_mutations(&state, &session_id, decoded.mutations);
-                    for diag in &decoded.diagnostics {
-                        tracing::debug!(
-                            session_id = %session_id,
-                            code = diag.code,
-                            detail = ?diag.detail,
-                            "agent osc diagnostic"
-                        );
-                    }
-                    if !decoded.visible.is_empty() {
-                        emit_terminal_output(
+                    apply_agent_osc_decode_result(
+                        &state,
+                        &session_id,
+                        &mut seq,
+                        &mut utf8,
+                        &replay_buffers,
+                        decoded,
+                    );
+                    // 突发 rate-limit 后若仍有 pending，在窗口到期时 idle flush，避免静默丢终态
+                    while osc.has_pending_coalesce() {
+                        if let Some(wait) = osc.duration_until_rate_window_end() {
+                            if !wait.is_zero() {
+                                thread::sleep(wait);
+                            }
+                        }
+                        let flushed = osc.poll_flush();
+                        if flushed.mutations.is_empty() && flushed.diagnostics.is_empty() {
+                            break;
+                        }
+                        apply_agent_osc_decode_result(
                             &state,
                             &session_id,
                             &mut seq,
-                            utf8.decode(&decoded.visible),
+                            &mut utf8,
                             &replay_buffers,
+                            flushed,
                         );
                     }
                 }
@@ -2287,10 +2297,55 @@ fn spawn_reader_thread(
                 }
             }
         }
+        // 会话结束：强制冲刷仍挂起的 coalesced mutation
+        let flushed = osc.force_flush_pending();
+        apply_agent_osc_decode_result(
+            &state,
+            &session_id,
+            &mut seq,
+            &mut utf8,
+            &replay_buffers,
+            flushed,
+        );
         if let Some(chunk) = utf8.finish() {
             emit_terminal_output(&state, &session_id, &mut seq, chunk, &replay_buffers);
         }
     });
+}
+
+/// 处理一次 OSC 解码结果：enqueue mutation、记诊断、转发可见字节。
+///
+/// Business Logic（为什么需要这个函数）:
+///     push 与 idle poll_flush / force_flush 共用同一出口，避免终态只在一种路径上入站。
+///
+/// Code Logic（这个函数做什么）:
+///     forward mutations → debug diagnostics → 非空 visible 走 UTF-8/emit。
+fn apply_agent_osc_decode_result(
+    state: &AppState,
+    session_id: &str,
+    seq: &mut u64,
+    utf8: &mut TerminalUtf8Decoder,
+    replay_buffers: &Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
+    decoded: crate::workbench::agent_runtime::osc::AgentOscDecodeResult,
+) {
+    forward_agent_osc_mutations(state, session_id, decoded.mutations);
+    for diag in &decoded.diagnostics {
+        tracing::debug!(
+            session_id = %session_id,
+            code = diag.code,
+            detail = ?diag.detail,
+            "agent osc diagnostic"
+        );
+    }
+    if !decoded.visible.is_empty() {
+        emit_terminal_output(
+            state,
+            session_id,
+            seq,
+            utf8.decode(&decoded.visible),
+            replay_buffers,
+        );
+    }
 }
 
 /// 把 OSC mutation 交给 owner ingress（有界 channel；未启动 reducer 时丢弃）。

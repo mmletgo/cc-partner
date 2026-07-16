@@ -161,21 +161,33 @@ async fn handle_session_completion(state: AppState, session_id: &str) -> Result<
         );
         return Ok(());
     };
-    // A1：先更新统一 Agent runtime 为 Completed，再进入既有 Verifying pipeline
+    // A1：先更新统一 Agent runtime 为 Completed，再进入既有 Verifying pipeline（fail-closed）
     let at = chrono::Utc::now().to_rfc3339();
-    if let Err(error) =
-        crate::orchestrator::agent_runtime_bridge::mark_agent_completed_before_verifying(
-            &state.workbench_agent_session_repo,
-            None,
-            session_id,
-            &at,
-        )
-        .await
-    {
-        tracing::warn!(
+    let task = state.orchestrator_repo.get_task(&attempt.task_id).await?;
+    let agent_session_id = task.agent_session_id.as_deref();
+    let marked = crate::orchestrator::agent_runtime_bridge::mark_agent_completed_before_verifying_with_emit(
+        &state.workbench_agent_session_repo,
+        Some(&state),
+        agent_session_id,
+        session_id,
+        &at,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
             session_id = %session_id,
-            "Agent runtime completion mark 失败（继续 task pipeline）: {error}"
+            task_id = %attempt.task_id,
+            "Agent runtime completion mark 失败（拒绝进入 Verifying）: {error}"
         );
+        error
+    })?;
+    if let Some(row) = marked.as_ref() {
+        if row.is_active && !row.phase.is_terminal() {
+            return Err(AppError::generic(format!(
+                "Agent runtime 仍为 active {:?}，拒绝进入 Verifying",
+                row.phase
+            )));
+        }
     }
     complete_orchestrator_agent_run_for_attempt(
         &state,

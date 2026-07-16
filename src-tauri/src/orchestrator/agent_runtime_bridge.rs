@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     `record_runner_activity` / `handle_normalized_agent_event` / `mark_agent_completed_before_verifying`；
-//!     测试覆盖 completion 排序与 legacy 字段仍可写。
+//!     写路径经 `AgentRuntimeReducer` 串行锁；测试覆盖 CAS 重试与 real mark Completed。
 
 use crate::error::AppError;
 use crate::state::AppState;
@@ -25,7 +25,7 @@ pub const ORCHESTRATOR_CLAUDE_PROVIDER_ID: &str = "claudeCodeVisible";
 ///     普通 Workbench 与 Orchestrator 共用 Agent runtime 真值；Runner 必须在 terminal 就绪后立刻建 row。
 ///
 /// Code Logic（这个函数做什么）:
-///     start_or_replace_active(Launching)；返回 runtime（含 id 供 attempt 持久化）。
+///     start_or_replace_active(Launching)；emit 旧 ended + 新 active；返回 runtime（含 id 供 task 持久化）。
 pub async fn create_launching_agent_for_runner(
     state: &AppState,
     project_id: &str,
@@ -36,7 +36,7 @@ pub async fn create_launching_agent_for_runner(
 ) -> Result<AgentSessionRuntime, AppError> {
     let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
     let now = chrono::Utc::now().to_rfc3339();
-    let row = reducer
+    let outcome = reducer
         .start_or_replace_active(CreateActiveAgentSession {
             id: None,
             project_id: project_id.to_string(),
@@ -51,8 +51,11 @@ pub async fn create_launching_agent_for_runner(
             resumed_from_agent_session_id: None,
         })
         .await?;
-    emit_agent_runtime_changed(state, &row);
-    Ok(row)
+    if let Some(ended) = &outcome.ended {
+        emit_agent_runtime_changed(state, ended);
+    }
+    emit_agent_runtime_changed(state, &outcome.active);
+    Ok(outcome.active)
 }
 
 /// 记录 Runner 活动（phase 推进），可选 dual-write native/claude session id（仅 owner 内部）。
@@ -117,38 +120,46 @@ pub async fn handle_normalized_agent_event(
 ///     Spec 要求 completion reducer 先更新 Agent runtime，再由既有 task SM 进 Verifying。
 ///
 /// Code Logic（这个函数做什么）:
-///     end_active_for_terminal(Completed) 或 mark by agent id；返回更新后的 Agent 行。
+///     经 reducer 串行锁：CAS Completed（带重试）或 end_active_for_terminal；
+///     若有 state 则 emit 投影；失败返回错误（不得返回仍 Working 的 active 行）。
 pub async fn mark_agent_completed_before_verifying(
     repo: &WorkbenchAgentSessionRepo,
     agent_session_id: Option<&str>,
     terminal_session_id: &str,
     at: &str,
 ) -> Result<Option<AgentSessionRuntime>, AppError> {
-    if let Some(id) = agent_session_id {
-        if let Some(current) = repo.get(id).await? {
-            if current.is_active {
-                let mutation = AgentRuntimeMutation {
-                    agent_session_id: id.to_string(),
-                    terminal_session_id: terminal_session_id.to_string(),
-                    expected_version: current.version,
-                    event_version: current.version.saturating_add(1),
-                    phase: AgentSessionPhase::Completed,
-                    native_session_id: None,
-                    outcome_code: Some("dev_done".to_string()),
-                    occurred_at: at.to_string(),
-                };
-                let _ = repo.apply_mutation(&mutation).await?;
-                return repo.get(id).await;
-            }
-        }
-    }
-    repo.end_active_for_terminal(
+    mark_agent_completed_before_verifying_with_emit(
+        repo,
+        None,
+        agent_session_id,
         terminal_session_id,
-        AgentSessionPhase::Completed,
-        Some("dev_done"),
         at,
     )
     .await
+}
+
+/// 带可选 emit 的 completion mark（生产 completion 路径传入 AppState）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     durable Completed 后 live 客户端必须立刻看到投影，不能等 Gap/snapshot。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 reducer.mark_completed；成功后若有 state 则 emit_agent_runtime_changed。
+pub async fn mark_agent_completed_before_verifying_with_emit(
+    repo: &WorkbenchAgentSessionRepo,
+    state: Option<&AppState>,
+    agent_session_id: Option<&str>,
+    terminal_session_id: &str,
+    at: &str,
+) -> Result<Option<AgentSessionRuntime>, AppError> {
+    let reducer = AgentRuntimeReducer::new(repo.clone());
+    let updated = reducer
+        .mark_completed(agent_session_id, terminal_session_id, at)
+        .await?;
+    if let (Some(state), Some(row)) = (state, updated.as_ref()) {
+        emit_agent_runtime_changed(state, row);
+    }
+    Ok(updated)
 }
 
 #[cfg(test)]
@@ -156,8 +167,6 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
-    use std::sync::atomic::{AtomicU8, Ordering};
-    use std::sync::Arc;
 
     /// 内存 bridge fixture。
     async fn fixture_repo() -> WorkbenchAgentSessionRepo {
@@ -176,14 +185,13 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     completion 必须先 Completed Agent，再允许 task 进入 Verifying。
+    ///     completion 必须真实把 Agent 标 Completed（inactive），才能进入 Verifying。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     用原子计数模拟顺序：先 mark agent Completed，再 set attempt phase Verifying。
+    ///     create Working → mark_agent_completed_before_verifying(Some id) → 断言 phase Completed。
     #[tokio::test]
     async fn completion_updates_agent_before_task_enters_verifying() {
         let repo = fixture_repo().await;
-        let order = Arc::new(AtomicU8::new(0));
         let agent = repo
             .create_active(CreateActiveAgentSession {
                 id: Some("agent-orch-1".into()),
@@ -201,7 +209,6 @@ mod tests {
             .await
             .unwrap();
 
-        // step 1: agent complete
         let completed = mark_agent_completed_before_verifying(
             &repo,
             Some(&agent.id),
@@ -211,19 +218,109 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        order.store(1, Ordering::SeqCst);
         assert_eq!(completed.phase, AgentSessionPhase::Completed);
         assert!(!completed.is_active);
 
-        // step 2: only after agent complete may task pipeline enter verifying
-        assert_eq!(order.load(Ordering::SeqCst), 1);
-        let task_pipeline_phase = "verifying";
-        order.store(2, Ordering::SeqCst);
-        assert_eq!(task_pipeline_phase, "verifying");
-        assert_eq!(order.load(Ordering::SeqCst), 2);
-        // agent must still be completed (not overwritten by task phase)
         let again = repo.get(&agent.id).await.unwrap().unwrap();
         assert_eq!(again.phase, AgentSessionPhase::Completed);
+        assert!(!again.is_active);
+        // terminal 上不再有 active（可进入 Verifying 的前置条件）
+        assert!(repo
+            .get_active_for_terminal("term-orch")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     提供 agent id 时若 CAS 因 version 竞态失败，必须重试/fallthrough，不得返回 Working。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     创建后用 apply_mutation 升 version，再用过期 expected 路径的 mark（内部读新鲜 version）完成。
+    #[tokio::test]
+    async fn mark_with_id_retries_cas_and_never_returns_working_active() {
+        let repo = fixture_repo().await;
+        let agent = repo
+            .create_active(CreateActiveAgentSession {
+                id: Some("agent-cas-1".into()),
+                project_id: "p".into(),
+                worktree_id: None,
+                terminal_session_id: "term-cas".into(),
+                orchestrator_task_id: Some("task-cas".into()),
+                orchestrator_attempt: Some(1),
+                provider_id: ORCHESTRATOR_CLAUDE_PROVIDER_ID.into(),
+                native_session_id: None,
+                phase: AgentSessionPhase::Working,
+                started_at: "2026-07-15T00:00:00Z".into(),
+                resumed_from_agent_session_id: None,
+            })
+            .await
+            .unwrap();
+        // 抢先 CAS 升版，模拟 OSC 与 completion 竞态
+        assert!(repo
+            .apply_mutation(&AgentRuntimeMutation {
+                agent_session_id: agent.id.clone(),
+                terminal_session_id: "term-cas".into(),
+                expected_version: 1,
+                event_version: 2,
+                phase: AgentSessionPhase::Working,
+                native_session_id: None,
+                outcome_code: None,
+                occurred_at: "2026-07-15T00:00:30Z".into(),
+            })
+            .await
+            .unwrap());
+
+        let completed = mark_agent_completed_before_verifying(
+            &repo,
+            Some(&agent.id),
+            "term-cas",
+            "2026-07-15T00:01:00Z",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(completed.phase, AgentSessionPhase::Completed);
+        assert!(!completed.is_active);
+        assert_ne!(completed.phase, AgentSessionPhase::Working);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     无 agent id 时 end_active_for_terminal 仍必须 durable Completed。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     mark(..., None, terminal) → terminal 无 active 且 phase Completed。
+    #[tokio::test]
+    async fn mark_without_id_ends_active_for_terminal() {
+        let repo = fixture_repo().await;
+        let agent = repo
+            .create_active(CreateActiveAgentSession {
+                id: None,
+                project_id: "p".into(),
+                worktree_id: None,
+                terminal_session_id: "term-end".into(),
+                orchestrator_task_id: None,
+                orchestrator_attempt: None,
+                provider_id: ORCHESTRATOR_CLAUDE_PROVIDER_ID.into(),
+                native_session_id: None,
+                phase: AgentSessionPhase::Idle,
+                started_at: "2026-07-15T00:00:00Z".into(),
+                resumed_from_agent_session_id: None,
+            })
+            .await
+            .unwrap();
+        let completed = mark_agent_completed_before_verifying(
+            &repo,
+            None,
+            "term-end",
+            "2026-07-15T00:01:00Z",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(completed.id, agent.id);
+        assert_eq!(completed.phase, AgentSessionPhase::Completed);
+        assert!(!completed.is_active);
     }
 
     /// Business Logic（为什么需要这个测试）:

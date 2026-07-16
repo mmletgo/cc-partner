@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     `AgentRuntimeReducer` 持有 repo，提供 apply / start_or_replace_active /
-//!     reconcile_active_sessions；不解析 terminal bytes 或 transcript。
+//!     reconcile_active_sessions；所有写路径经进程内 async mutex 与 OSC worker 串行。
 
 use super::models::{
     AgentRuntimeMutation, AgentSessionPhase, AgentSessionRuntime, CreateActiveAgentSession,
@@ -14,6 +14,20 @@ use super::models::{
 use crate::error::AppError;
 use crate::storage::WorkbenchAgentSessionRepo;
 use std::collections::HashSet;
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
+
+/// 进程内 Agent runtime 写串行锁（OSC worker 与 Orchestrator bridge 共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     设计要求单一写入口；bridge 若直写 repo 会与 OSC CAS 竞态导致 completion 丢标记。
+///
+/// Code Logic（这个函数做什么）:
+///     返回 OnceLock 初始化的 tokio Mutex；所有 reducer 公开 mutation 方法在 await 前 acquire。
+fn agent_runtime_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// mutation 应用结果。
 ///
@@ -28,6 +42,21 @@ pub enum AgentReduceOutcome {
     Applied(AgentSessionRuntime),
     /// 幂等或策略拒绝（非错误）
     Ignored(&'static str),
+}
+
+/// `start_or_replace_active` 结果：可选被替换的旧行 + 新 active。
+///
+/// Business Logic（为什么需要这个类型）:
+///     替换时旧 Agent 进入 Disconnected 也是 durable phase 变化，调用方必须 emit 投影。
+///
+/// Code Logic（这个类型做什么）:
+///     ended = 被 end 的旧 active（若有）；active = 新创建行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartOrReplaceOutcome {
+    /// 被替换并终结的旧 session（若 terminal 上曾有 active）
+    pub ended: Option<AgentSessionRuntime>,
+    /// 新 active session
+    pub active: AgentSessionRuntime,
 }
 
 /// Agent session 运行时 reducer（owner-local）。
@@ -71,13 +100,23 @@ impl AgentRuntimeReducer {
     ///     迟到 event、错误 terminal、已替换 session 不得写坏当前 active。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     1) get by agent id；缺失 → Ignored；
-    ///     2) terminal 不一致 → Ignored；
-    ///     3) event_version <= current.version → Ignored（stale）；
-    ///     4) 非 active 且非同 id 路径 → Ignored；
-    ///     5) 用 current.version 作 expected 重写 mutation 再 CAS；
-    ///     6) 成功返回 Applied。
+    ///     获取写锁后：get → terminal/active/version 校验 → CAS apply → Applied/Ignored。
     pub async fn apply(
+        &self,
+        mutation: AgentRuntimeMutation,
+    ) -> Result<AgentReduceOutcome, AppError> {
+        let _guard = agent_runtime_write_lock().lock().await;
+        self.apply_unlocked(mutation).await
+    }
+
+    /// 无锁 apply（调用方已持有写锁时使用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     mark_completed 等复合路径需要在同一临界区内读-改-写，避免中途释放锁被 OSC 抢占。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     与 `apply` 相同归约语义，不 acquire 锁。
+    async fn apply_unlocked(
         &self,
         mutation: AgentRuntimeMutation,
     ) -> Result<AgentReduceOutcome, AppError> {
@@ -114,13 +153,14 @@ impl AgentRuntimeReducer {
     ///     同一 terminal 任一时刻最多一个 active；替换必须先 end 旧 row。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     end_active_for_terminal(Disconnected) → create_active。
+    ///     写锁内 end_active_for_terminal(Disconnected) → create_active；返回 ended+active。
     pub async fn start_or_replace_active(
         &self,
         input: CreateActiveAgentSession,
-    ) -> Result<AgentSessionRuntime, AppError> {
+    ) -> Result<StartOrReplaceOutcome, AppError> {
+        let _guard = agent_runtime_write_lock().lock().await;
         let at = input.started_at.clone();
-        let _ = self
+        let ended = self
             .repo
             .end_active_for_terminal(
                 &input.terminal_session_id,
@@ -129,7 +169,104 @@ impl AgentRuntimeReducer {
                 &at,
             )
             .await?;
-        self.repo.create_active(input).await
+        let active = self.repo.create_active(input).await?;
+        Ok(StartOrReplaceOutcome { ended, active })
+    }
+
+    /// 将 Agent 标为 Completed（completion 路径，优先 by id，CAS 失败则 end_active）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Spec 要求进入 Verifying 前 Agent 必须 durable Completed；不得在 CAS 失败后返回仍 Working 的行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写锁内：对 id 最多 3 次读 version+CAS Completed；仍失败则 end_active_for_terminal；
+    ///     若目标仍 active Working → 错误。
+    pub async fn mark_completed(
+        &self,
+        agent_session_id: Option<&str>,
+        terminal_session_id: &str,
+        at: &str,
+    ) -> Result<Option<AgentSessionRuntime>, AppError> {
+        let _guard = agent_runtime_write_lock().lock().await;
+        const MAX_CAS_RETRIES: u32 = 3;
+
+        if let Some(id) = agent_session_id {
+            for _ in 0..MAX_CAS_RETRIES {
+                let Some(current) = self.repo.get(id).await? else {
+                    break;
+                };
+                if !current.is_active {
+                    if current.phase == AgentSessionPhase::Completed {
+                        return Ok(Some(current));
+                    }
+                    // 已非 active 但非 Completed（例如 Disconnected）——仍尝试 terminal end 对齐
+                    break;
+                }
+                if current.terminal_session_id != terminal_session_id {
+                    break;
+                }
+                let mutation = AgentRuntimeMutation {
+                    agent_session_id: id.to_string(),
+                    terminal_session_id: terminal_session_id.to_string(),
+                    expected_version: current.version,
+                    event_version: current.version.saturating_add(1),
+                    phase: AgentSessionPhase::Completed,
+                    native_session_id: None,
+                    outcome_code: Some("dev_done".to_string()),
+                    occurred_at: at.to_string(),
+                };
+                if self.repo.apply_mutation(&mutation).await? {
+                    let updated = self
+                        .repo
+                        .get(id)
+                        .await?
+                        .ok_or_else(|| AppError::generic("agent session missing after complete"))?;
+                    if updated.phase == AgentSessionPhase::Completed && !updated.is_active {
+                        return Ok(Some(updated));
+                    }
+                }
+                // CAS 失败：循环用新鲜 version 重试
+            }
+        }
+
+        let ended = self
+            .repo
+            .end_active_for_terminal(
+                terminal_session_id,
+                AgentSessionPhase::Completed,
+                Some("dev_done"),
+                at,
+            )
+            .await?;
+
+        if let Some(id) = agent_session_id {
+            if let Some(row) = self.repo.get(id).await? {
+                if row.is_active && !row.phase.is_terminal() {
+                    // end_active 未命中该 id（terminal 错配等）：强制 mark 终态
+                    let force = AgentRuntimeMutation {
+                        agent_session_id: id.to_string(),
+                        terminal_session_id: row.terminal_session_id.clone(),
+                        expected_version: row.version,
+                        event_version: row.version.saturating_add(1),
+                        phase: AgentSessionPhase::Completed,
+                        native_session_id: None,
+                        outcome_code: Some("dev_done".to_string()),
+                        occurred_at: at.to_string(),
+                    };
+                    if !self.repo.apply_mutation(&force).await? {
+                        return Err(AppError::generic(format!(
+                            "agent completion mark failed after retries: {id}"
+                        )));
+                    }
+                    return self.repo.get(id).await;
+                }
+                if row.phase == AgentSessionPhase::Completed {
+                    return Ok(Some(row));
+                }
+            }
+        }
+
+        Ok(ended)
     }
 
     /// owner 启动时对账：active row 的 terminal 不在存活集合则 mark_disconnected。
@@ -138,19 +275,21 @@ impl AgentRuntimeReducer {
     ///     进程重启后内存 terminal 丢失，SQLite 中幽灵 active 必须变为 Disconnected。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     list_active 全量（上限 10_000）；terminal 不在 alive 集合则 mark_disconnected；
-    ///     返回断开数量。
+    ///     写锁内 list_active；terminal 不在 alive 则 mark_disconnected；返回已断开行供 emit。
     pub async fn reconcile_active_sessions(
         &self,
         alive_terminal_ids: &HashSet<String>,
         at: &str,
-    ) -> Result<u32, AppError> {
+    ) -> Result<Vec<AgentSessionRuntime>, AppError> {
+        let _guard = agent_runtime_write_lock().lock().await;
         let active = self.repo.list_active(None, 10_000).await?;
-        let mut disconnected = 0u32;
+        let mut disconnected = Vec::new();
         for row in active {
             if !alive_terminal_ids.contains(&row.terminal_session_id) {
                 if self.repo.mark_disconnected(&row.id, at).await? {
-                    disconnected = disconnected.saturating_add(1);
+                    if let Some(updated) = self.repo.get(&row.id).await? {
+                        disconnected.push(updated);
+                    }
                 }
             }
         }
@@ -272,7 +411,8 @@ mod tests {
                 "2026-07-15T00:00:00Z",
             ))
             .await
-            .unwrap();
+            .unwrap()
+            .active;
         // 升到 v1 后替换
         let _ = reducer
             .apply(event(&old, 2, AgentSessionPhase::Working))
@@ -285,7 +425,8 @@ mod tests {
                 "2026-07-15T00:01:00Z",
             ))
             .await
-            .unwrap();
+            .unwrap()
+            .active;
         let outcome = reducer
             .apply(event(&old, 3, AgentSessionPhase::Working))
             .await
@@ -314,7 +455,8 @@ mod tests {
         let agent = reducer
             .start_or_replace_active(create_input("t2", "p", "2026-07-15T00:00:00Z"))
             .await
-            .unwrap();
+            .unwrap()
+            .active;
         assert!(matches!(
             reducer
                 .apply(event(&agent, 2, AgentSessionPhase::Working))
@@ -342,7 +484,8 @@ mod tests {
         let agent = reducer
             .start_or_replace_active(create_input("t3", "p", "2026-07-15T00:00:00Z"))
             .await
-            .unwrap();
+            .unwrap()
+            .active;
         let mut bad = event(&agent, 2, AgentSessionPhase::Working);
         bad.terminal_session_id = "other-terminal".to_string();
         assert!(matches!(
@@ -362,22 +505,54 @@ mod tests {
         let a = reducer
             .start_or_replace_active(create_input("alive", "p", "2026-07-15T00:00:00Z"))
             .await
-            .unwrap();
+            .unwrap()
+            .active;
         let b = reducer
             .start_or_replace_active(create_input("gone", "p", "2026-07-15T00:00:01Z"))
             .await
-            .unwrap();
+            .unwrap()
+            .active;
         let mut alive = HashSet::new();
         alive.insert("alive".to_string());
-        let n = reducer
+        let disconnected = reducer
             .reconcile_active_sessions(&alive, "2026-07-15T00:02:00Z")
             .await
             .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(disconnected.len(), 1);
+        assert_eq!(disconnected[0].id, b.id);
+        assert_eq!(disconnected[0].phase, AgentSessionPhase::Disconnected);
         let a2 = reducer.repo().get(&a.id).await.unwrap().unwrap();
         let b2 = reducer.repo().get(&b.id).await.unwrap().unwrap();
         assert!(a2.is_active);
         assert!(!b2.is_active);
         assert_eq!(b2.phase, AgentSessionPhase::Disconnected);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     mark_completed 在 version 竞态后必须仍落到 Completed，不得返回 Working。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先 Working；并发式 advance version 一次后 mark_completed；断言 Completed + inactive。
+    #[tokio::test]
+    async fn mark_completed_retries_after_version_race() {
+        let reducer = fixture_reducer().await;
+        let agent = reducer
+            .start_or_replace_active(create_input("t-race", "p", "2026-07-15T00:00:00Z"))
+            .await
+            .unwrap()
+            .active;
+        // 模拟 OSC 抢先升版（与 mark 竞态）
+        let _ = reducer
+            .apply(event(&agent, 2, AgentSessionPhase::Working))
+            .await
+            .unwrap();
+        let completed = reducer
+            .mark_completed(Some(&agent.id), "t-race", "2026-07-15T00:02:00Z")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.phase, AgentSessionPhase::Completed);
+        assert!(!completed.is_active);
+        assert!(completed.version >= 3);
     }
 }

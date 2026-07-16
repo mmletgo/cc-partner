@@ -129,10 +129,10 @@ impl OrchestratorRepo {
              (id, project_id, title, goal, acceptance_criteria, status, priority, branch_name, \
               workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
               external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
-              transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
+              agent_session_id, transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
               last_runtime_message, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, created_at, \
               updated_at, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row_to_insert.id)
         .bind(&row_to_insert.project_id)
@@ -153,6 +153,7 @@ impl OrchestratorRepo {
         .bind(&external_labels_json)
         .bind(&row_to_insert.runner_provider)
         .bind(&row_to_insert.claude_session_id)
+        .bind(&row_to_insert.agent_session_id)
         .bind(&row_to_insert.transcript_path)
         .bind(&row_to_insert.runtime_started_at)
         .bind(&row_to_insert.last_activity_at)

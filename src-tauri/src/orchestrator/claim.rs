@@ -412,6 +412,7 @@ mod tests {
             external_labels: None,
             runner_provider: None,
             claude_session_id: None,
+            agent_session_id: None,
             transcript_path: None,
             runtime_started_at: None,
             last_activity_at: None,

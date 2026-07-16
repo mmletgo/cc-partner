@@ -498,6 +498,8 @@ pub struct OrchestratorTaskRow {
     pub external_labels: Option<Vec<String>>,
     pub runner_provider: Option<String>,
     pub claude_session_id: Option<String>,
+    /// 统一 Agent session 引用（A1 dual-write，与 claude_session_id 并行一个版本）。
+    pub agent_session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub runtime_started_at: Option<String>,
     pub last_activity_at: Option<String>,
@@ -649,6 +651,8 @@ pub struct OrchestratorTaskDto {
     pub external_labels: Option<Vec<String>>,
     pub runner_provider: Option<String>,
     pub claude_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub runtime_started_at: Option<String>,
     pub last_activity_at: Option<String>,
@@ -780,6 +784,7 @@ impl OrchestratorTaskRow {
             external_labels: None,
             runner_provider: Some("claudeCodeVisible".to_string()),
             claude_session_id: None,
+            agent_session_id: None,
             transcript_path: None,
             runtime_started_at: None,
             last_activity_at: None,
@@ -847,6 +852,7 @@ impl From<OrchestratorTaskRow> for OrchestratorTaskDto {
             external_labels: row.external_labels,
             runner_provider: row.runner_provider,
             claude_session_id: row.claude_session_id,
+            agent_session_id: row.agent_session_id,
             transcript_path: row.transcript_path,
             runtime_started_at: row.runtime_started_at,
             last_activity_at: row.last_activity_at,

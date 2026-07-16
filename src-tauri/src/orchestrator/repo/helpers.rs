@@ -36,7 +36,7 @@ use uuid::Uuid;
 pub(crate) const TASK_COLUMNS: &str = "id, project_id, title, goal, acceptance_criteria, status, priority, \
     workflow_state, run_state, attempt_phase, source, external_id, external_identifier, \
     external_url, external_state, external_labels_json, runner_provider, claude_session_id, \
-    transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
+    agent_session_id, transcript_path, runtime_started_at, last_activity_at, last_runtime_event, \
     last_runtime_message, branch_name, worktree_id, session_id, prepare_claim_token, blocked_reason, attempt, \
     state_version, created_at, updated_at, started_at, finished_at";
 
@@ -130,6 +130,7 @@ pub const ORCHESTRATOR_TASK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestra
   external_labels_json TEXT,
   runner_provider TEXT,
   claude_session_id TEXT,
+  agent_session_id TEXT,
   transcript_path TEXT,
   runtime_started_at TEXT,
   last_activity_at TEXT,
@@ -574,6 +575,7 @@ pub(crate) fn row_to_task(row: &SqliteRow) -> Result<OrchestratorTaskRow, AppErr
         external_labels: deserialize_external_labels(external_labels_json)?,
         runner_provider: row.try_get("runner_provider")?,
         claude_session_id: row.try_get("claude_session_id")?,
+        agent_session_id: row.try_get("agent_session_id").unwrap_or(None),
         transcript_path: row.try_get("transcript_path")?,
         runtime_started_at: row.try_get("runtime_started_at")?,
         last_activity_at: row.try_get("last_activity_at")?,

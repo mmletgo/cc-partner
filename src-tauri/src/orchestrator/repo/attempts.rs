@@ -168,7 +168,7 @@ impl OrchestratorRepo {
     ///
     /// Code Logic（这个函数做什么）:
     ///     仅当任务仍为 Preparing 时写入 branch/worktree/session/attempt/runner_provider，把状态切到 Running；
-    ///     同时清空上一轮 Claude runtime 字段并设置 runtime_started_at；未命中时返回当前任务。
+    ///     同时清空上一轮 Claude runtime 字段、写入本轮 agent_session_id 并设置 runtime_started_at；未命中时返回当前任务。
     pub async fn mark_task_running_attempt(
         &self,
         task_id: &str,
@@ -177,6 +177,7 @@ impl OrchestratorRepo {
         session_id: &str,
         attempt: i64,
         prepare_claim_token: &str,
+        agent_session_id: Option<&str>,
     ) -> Result<OrchestratorTaskRow, AppError> {
         if attempt <= 0 {
             return Err(AppError::generic("任务尝试轮次必须大于 0"));
@@ -191,7 +192,7 @@ impl OrchestratorRepo {
             sqlx::query(
                 "UPDATE orchestrator_tasks \
                  SET status = ?, workflow_state = ?, run_state = ?, runner_provider = ?, branch_name = ?, worktree_id = ?, session_id = ?, attempt = ?, \
-                     claude_session_id = ?, transcript_path = ?, runtime_started_at = ?, last_activity_at = ?, last_runtime_event = ?, last_runtime_message = ?, \
+                     claude_session_id = ?, agent_session_id = ?, transcript_path = ?, runtime_started_at = ?, last_activity_at = ?, last_runtime_event = ?, last_runtime_message = ?, \
                      blocked_reason = ?, prepare_claim_token = NULL, started_at = COALESCE(started_at, ?), updated_at = ? \
                  WHERE id = ? AND status = ? AND prepare_claim_token = ?",
             )
@@ -204,6 +205,7 @@ impl OrchestratorRepo {
             .bind(session_id)
             .bind(attempt)
             .bind(Option::<&str>::None)
+            .bind(agent_session_id)
             .bind(Option::<&str>::None)
             .bind(&now)
             .bind(Option::<&str>::None)
@@ -373,6 +375,7 @@ impl OrchestratorRepo {
             session_id,
             1,
             prepare_claim_token,
+            None,
         )
         .await
     }

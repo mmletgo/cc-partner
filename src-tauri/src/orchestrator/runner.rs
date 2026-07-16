@@ -204,7 +204,7 @@ pub async fn prepare_runner_attempt(
                 None
             }
         };
-    let _agent_session_id = agent_runtime.as_ref().map(|r| r.id.clone());
+    let agent_session_id = agent_runtime.as_ref().map(|r| r.id.clone());
     // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
     if !state
         .orchestrator_repo
@@ -223,6 +223,7 @@ pub async fn prepare_runner_attempt(
             &session.id,
             attempt,
             &claim_token,
+            agent_session_id.as_deref(),
         )
         .await?;
     if running_task.status != OrchestratorTaskStatus::Running {
