@@ -130,6 +130,11 @@ pub enum AgentControlMutation {
         payload: Value,
         client_request_id: Option<String>,
     },
+    ExperimentApprove {
+        experiment_id: String,
+        winner_task_id: String,
+        reason: Option<String>,
+    },
     ExperimentCancel {
         experiment_id: String,
     },
@@ -155,7 +160,9 @@ impl AgentControlMutation {
             | Self::TaskCancel { .. }
             | Self::TaskRetry { .. }
             | Self::ExperimentCreate { .. } => MutationReplayPolicy::ReconcileByRequestId,
-            Self::ExperimentCancel { .. } => MutationReplayPolicy::NaturallyIdempotent,
+            Self::ExperimentApprove { .. } | Self::ExperimentCancel { .. } => {
+                MutationReplayPolicy::NaturallyIdempotent
+            }
         }
     }
 
@@ -278,6 +285,16 @@ mod tests {
     fn experiment_cancel_is_naturally_idempotent() {
         let m = AgentControlMutation::ExperimentCancel {
             experiment_id: "e1".into(),
+        };
+        assert_eq!(m.replay_policy(), MutationReplayPolicy::NaturallyIdempotent);
+    }
+
+    #[test]
+    fn experiment_approve_is_naturally_idempotent() {
+        let m = AgentControlMutation::ExperimentApprove {
+            experiment_id: "e1".into(),
+            winner_task_id: "t1".into(),
+            reason: None,
         };
         assert_eq!(m.replay_policy(), MutationReplayPolicy::NaturallyIdempotent);
     }

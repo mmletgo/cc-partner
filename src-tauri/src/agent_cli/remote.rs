@@ -417,6 +417,23 @@ pub async fn remote_mutate_with_base(
             }
             remote_post_json(base_url, "/api/orchestrator/experiments/create", body).await
         }
+        AgentControlMutation::ExperimentApprove {
+            experiment_id,
+            winner_task_id,
+            reason,
+        } => {
+            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1).await?;
+            remote_post_json(
+                base_url,
+                "/api/orchestrator/experiments/approve-winner",
+                json!({
+                    "experimentId": experiment_id,
+                    "winnerTaskId": winner_task_id,
+                    "reason": reason,
+                }),
+            )
+            .await
+        }
         AgentControlMutation::ExperimentCancel { experiment_id } => {
             require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1).await?;
             remote_post_json(

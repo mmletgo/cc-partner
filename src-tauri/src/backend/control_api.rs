@@ -7,6 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     提供 status / get-config / update-config / events / orchestrator snapshot /
 //!     orchestrator/{deliver-reviewed,workflow-document/{get,validate,save}} /
+//!     orchestrator/experiments/{create,list,get,approve-winner,cancel} /
 //!     workbench-launch-summary（5 段独立 section outcomes，每段 max 5）/
 //!     cloud-sync/{trigger,test,claude-md-push} / backup/{create,inspect,restore,list-jobs,list-backups,rollback} /
 //!     transfer/prepare-open + transfer/{send,retry,resume,get-operation,cancel}
@@ -22,10 +23,12 @@ use crate::backup::{
     RestoreRequest, RestoreResult, FORMAT_VERSION,
 };
 use crate::commands::orchestrator::{
-    deliver_reviewed_orchestrator_task_view_for_state,
+    approve_orchestrator_experiment_winner_for_state, cancel_orchestrator_experiment_for_state,
+    create_orchestrator_experiment_for_state, deliver_reviewed_orchestrator_task_view_for_state,
+    get_orchestrator_experiment_for_state,
     get_orchestrator_runtime_snapshot_for_state_with_request_id, get_workflow_document_for_state,
-    save_workflow_document_for_state, validate_workflow_document_for_state,
-    OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
+    list_orchestrator_experiments_for_state, save_workflow_document_for_state,
+    validate_workflow_document_for_state, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
 use crate::commands::transfer::prepare_transfer_open_for_state;
 use crate::config_runtime::{
@@ -40,6 +43,7 @@ use crate::models::transfer::{
 use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
+use crate::orchestrator::experiments::{CreateExperimentRequest, OrchestratorExperimentDto};
 use crate::orchestrator::models::OperationalNotificationSnapshot;
 use crate::orchestrator::notifications::capture_operational_notification_snapshot;
 use crate::orchestrator::workflow::WorkflowDocument;
@@ -1569,6 +1573,229 @@ pub async fn control_orchestrator_workflow_document_save(
     })?;
     ensure_response_within_limit(&doc, &context)?;
     Ok(Json(doc))
+}
+
+/// experiment create control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GuiClient 不得在本进程写 experiment 仓储或 dispatch candidate；必须交给 sidecar owner。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + 扁平化 `CreateExperimentRequest` 字段。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorExperimentCreateRequest {
+    pub control_token: String,
+    #[serde(flatten)]
+    pub request: CreateExperimentRequest,
+}
+
+/// owner 路径：创建实验组。
+///
+/// Business Logic（为什么需要这个函数）:
+///     实验组创建与 candidate dispatch 只能在 HeadlessOwner 执行；GuiClient 空库创建会漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `create_orchestrator_experiment_for_state` → DTO。
+pub async fn control_orchestrator_experiment_create(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorExperimentCreateRequest>,
+) -> P2pResult<Json<OrchestratorExperimentDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_experiment_create")
+    })?;
+    let outcome = create_orchestrator_experiment_for_state(&state, request.request)
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_experiment_create")
+        })?;
+    ensure_response_within_limit(&outcome.experiment, &context)?;
+    Ok(Json(outcome.experiment))
+}
+
+/// experiment list control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GuiClient 本地 DB 无 owner 实验行；列表必须读 sidecar 权威仓储。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + 可选 projectId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorExperimentListRequest {
+    pub control_token: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// owner 路径：列出实验组。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面看板不得用 GuiClient 空库冒充 owner 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `list_orchestrator_experiments_for_state`。
+pub async fn control_orchestrator_experiment_list(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorExperimentListRequest>,
+) -> P2pResult<Json<Vec<OrchestratorExperimentDto>>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_experiment_list")
+    })?;
+    let experiments = list_orchestrator_experiments_for_state(
+        &state,
+        request
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_experiment_list"))?;
+    ensure_response_within_limit(&experiments, &context)?;
+    Ok(Json(experiments))
+}
+
+/// experiment get control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     详情必须读 owner 仓储（含 candidates），禁止 GuiClient 空库 NotFound 误导 UI。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + experimentId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorExperimentGetRequest {
+    pub control_token: String,
+    pub experiment_id: String,
+}
+
+/// owner 路径：读取实验组详情。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GuiClient 不得对本机空库 get 后假装实验不存在。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `get_orchestrator_experiment_for_state`。
+pub async fn control_orchestrator_experiment_get(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorExperimentGetRequest>,
+) -> P2pResult<Json<OrchestratorExperimentDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_experiment_get")
+    })?;
+    let dto = get_orchestrator_experiment_for_state(&state, request.experiment_id.trim())
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_experiment_get")
+        })?;
+    ensure_response_within_limit(&dto, &context)?;
+    Ok(Json(dto))
+}
+
+/// experiment approve-winner control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     批准 winner 可能触发 full-auto Git delivery；必须只在 owner 持有 delivery lock。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + experimentId + winnerTaskId + 可选 reason。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorExperimentApproveRequest {
+    pub control_token: String,
+    pub experiment_id: String,
+    pub winner_task_id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// owner 路径：批准/采用实验 winner（可进入 delivery）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     GuiClient 与 sidecar 双路径 approve 会造成双重 commit/push/merge；仅 owner 可交付。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `approve_orchestrator_experiment_winner_for_state`。
+pub async fn control_orchestrator_experiment_approve_winner(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorExperimentApproveRequest>,
+) -> P2pResult<Json<OrchestratorExperimentDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(
+            e,
+            &context,
+            "control.orchestrator_experiment_approve_winner",
+        )
+    })?;
+    let dto = approve_orchestrator_experiment_winner_for_state(
+        &state,
+        request.experiment_id.trim(),
+        request.winner_task_id.trim(),
+        request.reason.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        P2pError::from_app_error(
+            e,
+            &context,
+            "control.orchestrator_experiment_approve_winner",
+        )
+    })?;
+    ensure_response_within_limit(&dto, &context)?;
+    Ok(Json(dto))
+}
+
+/// experiment cancel control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     取消整组必须落到 owner 仓储与 child task abort，GuiClient 本地取消无效且危险。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + experimentId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorExperimentCancelRequest {
+    pub control_token: String,
+    pub experiment_id: String,
+}
+
+/// owner 路径：取消实验组。
+///
+/// Business Logic（为什么需要这个函数）:
+///     组 CAS + candidate abort 只能在 owner 执行。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `cancel_orchestrator_experiment_for_state`。
+pub async fn control_orchestrator_experiment_cancel(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorExperimentCancelRequest>,
+) -> P2pResult<Json<OrchestratorExperimentDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state.runtime_role.require_owner().map_err(|e| {
+        P2pError::from_app_error(e, &context, "control.orchestrator_experiment_cancel")
+    })?;
+    let dto = cancel_orchestrator_experiment_for_state(&state, request.experiment_id.trim())
+        .await
+        .map_err(|e| {
+            P2pError::from_app_error(e, &context, "control.orchestrator_experiment_cancel")
+        })?;
+    ensure_response_within_limit(&dto, &context)?;
+    Ok(Json(dto))
 }
 
 /// 序列化后检查响应不超过 1 MiB。

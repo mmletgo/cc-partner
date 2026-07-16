@@ -7,6 +7,8 @@
 //!     封装 create_experiment_idempotently 与 delivery/select helpers；
 //!     local 仅 owning device；remote shortcut 走 remote_client 或组级 outbox。
 
+use crate::backend::authority::RuntimeRole;
+use crate::backend::control_client::BackendControlClient;
 use crate::error::AppError;
 use crate::orchestrator::experiments::create::create_experiment_idempotently;
 use crate::orchestrator::experiments::delivery::{
@@ -35,14 +37,21 @@ use super::common::{
 
 /// Business Logic（为什么需要这个函数）:
 ///     用户创建 2–8 candidate 实验组。
+///     GuiClient 不得写本机空库或与 sidecar 双路径 dispatch。
 ///
 /// Code Logic（这个函数做什么）:
-///     分流 local/remote；local 原子创建并 best-effort dispatch；返回 DTO。
+///     GuiClient → `BackendControlClient::create_orchestrator_experiment`；
+///     HeadlessOwner → `create_orchestrator_experiment_for_state`。
 #[tauri::command]
 pub async fn create_orchestrator_experiment(
     state: State<'_, AppState>,
     request: CreateExperimentRequest,
 ) -> Result<OrchestratorExperimentDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .create_orchestrator_experiment(request)
+            .await;
+    }
     let outcome = create_orchestrator_experiment_for_state(&state, request).await?;
     Ok(outcome.experiment)
 }
@@ -218,12 +227,17 @@ async fn enqueue_pending_remote_experiment(
 ///     看板需要列出项目实验组。
 ///
 /// Code Logic（这个函数做什么）:
-///     list_experiments + 附带 candidates。
+///     GuiClient → control list；HeadlessOwner → `list_orchestrator_experiments_for_state`。
 #[tauri::command]
 pub async fn list_orchestrator_experiments(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<Vec<OrchestratorExperimentDto>, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .list_orchestrator_experiments(project_id.as_deref())
+            .await;
+    }
     list_orchestrator_experiments_for_state(&state, project_id.as_deref()).await
 }
 
@@ -323,12 +337,17 @@ async fn list_remote_orchestrator_experiments(
 ///     详情页需要完整实验 + candidates。
 ///
 /// Code Logic（这个函数做什么）:
-///     get_experiment + list candidates。
+///     GuiClient → control get；HeadlessOwner → `get_orchestrator_experiment_for_state`。
 #[tauri::command]
 pub async fn get_orchestrator_experiment(
     state: State<'_, AppState>,
     experiment_id: String,
 ) -> Result<OrchestratorExperimentDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .get_orchestrator_experiment(&experiment_id)
+            .await;
+    }
     get_orchestrator_experiment_for_state(&state, &experiment_id).await
 }
 
@@ -368,9 +387,11 @@ pub async fn get_orchestrator_experiment_for_state(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     NeedsDecision 或 WinnerReady（非 full-auto）时用户可采用推荐或选择另一 ready candidate。
+///     GuiClient 不得在本进程跑 full-auto delivery（commit/push/merge）或持有 process-local delivery lock。
 ///
 /// Code Logic（这个函数做什么）:
-///     select_experiment_winner → 若 full-auto 或 force_deliver 则 start delivery。
+///     GuiClient → `BackendControlClient::approve_orchestrator_experiment_winner`（超时 360s）；
+///     HeadlessOwner → `approve_orchestrator_experiment_winner_for_state`。
 #[tauri::command]
 pub async fn approve_orchestrator_experiment_winner(
     state: State<'_, AppState>,
@@ -378,6 +399,15 @@ pub async fn approve_orchestrator_experiment_winner(
     winner_task_id: String,
     reason: Option<String>,
 ) -> Result<OrchestratorExperimentDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .approve_orchestrator_experiment_winner(
+                &experiment_id,
+                &winner_task_id,
+                reason.as_deref(),
+            )
+            .await;
+    }
     approve_orchestrator_experiment_winner_for_state(
         &state,
         &experiment_id,
@@ -523,14 +553,21 @@ async fn try_approve_remote_experiment_by_mirror(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     用户可取消整组；running agents 由既有 abort 路径处理。
+///     GuiClient 必须代理到 owner，禁止本机空库 cancel 误成功/无效。
 ///
 /// Code Logic（这个函数做什么）:
-///     组 CAS Cancelled；非终态 candidates → Cancelled；child tasks abort。
+///     GuiClient → `BackendControlClient::cancel_orchestrator_experiment`；
+///     HeadlessOwner → `cancel_orchestrator_experiment_for_state`。
 #[tauri::command]
 pub async fn cancel_orchestrator_experiment(
     state: State<'_, AppState>,
     experiment_id: String,
 ) -> Result<OrchestratorExperimentDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .cancel_orchestrator_experiment(&experiment_id)
+            .await;
+    }
     cancel_orchestrator_experiment_for_state(&state, &experiment_id).await
 }
 
@@ -700,5 +737,90 @@ mod tests {
                 .unwrap_or(0),
             2
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     GuiClient 必须代理 experiment mutation/list/get 到 sidecar，否则双 delivery。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     源码断言五个 Tauri wrapper 均含 RuntimeRole::GuiClient 分支与 BackendControlClient。
+    #[test]
+    fn experiment_tauri_wrappers_proxy_gui_client_to_control() {
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/commands/orchestrator/experiments.rs"
+        ));
+        for marker in [
+            "create_orchestrator_experiment",
+            "list_orchestrator_experiments",
+            "get_orchestrator_experiment",
+            "approve_orchestrator_experiment_winner",
+            "cancel_orchestrator_experiment",
+        ] {
+            assert!(src.contains(marker), "experiments.rs 必须定义 {marker}");
+        }
+        assert!(
+            src.matches("RuntimeRole::GuiClient").count() >= 5,
+            "五个 Tauri experiment 入口均需 GuiClient 分支"
+        );
+        assert!(
+            src.contains("BackendControlClient::from_control_file"),
+            "GuiClient 必须经 BackendControlClient 代理"
+        );
+        assert!(
+            src.contains(".create_orchestrator_experiment(request)"),
+            "create 必须走 control client"
+        );
+        assert!(
+            src.contains(".approve_orchestrator_experiment_winner("),
+            "approve 必须走 control client"
+        );
+        assert!(
+            src.contains(".cancel_orchestrator_experiment(&experiment_id)"),
+            "cancel 必须走 control client"
+        );
+        assert!(
+            src.contains(".list_orchestrator_experiments(project_id.as_deref())"),
+            "list 必须走 control client"
+        );
+        assert!(
+            src.contains(".get_orchestrator_experiment(&experiment_id)"),
+            "get 必须走 control client"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     control 路由与 client path 漂移会导致 GUI 代理 404。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 http_server / control_client 含 experiments 五条 control 路径字面量。
+    #[test]
+    fn experiment_control_routes_registered_in_http_and_client() {
+        let http = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/net/http_server.rs"
+        ));
+        let client = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/backend/control_client.rs"
+        ));
+        for path in [
+            "/api/backend/control/orchestrator/experiments/create",
+            "/api/backend/control/orchestrator/experiments/list",
+            "/api/backend/control/orchestrator/experiments/get",
+            "/api/backend/control/orchestrator/experiments/approve-winner",
+            "/api/backend/control/orchestrator/experiments/cancel",
+        ] {
+            assert!(http.contains(path), "http_server 必须挂载 {path}");
+        }
+        for path in [
+            "orchestrator/experiments/create",
+            "orchestrator/experiments/list",
+            "orchestrator/experiments/get",
+            "orchestrator/experiments/approve-winner",
+            "orchestrator/experiments/cancel",
+        ] {
+            assert!(client.contains(path), "control_client 必须调用 {path}");
+        }
     }
 }

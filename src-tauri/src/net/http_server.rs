@@ -460,6 +460,47 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                     ),
                 ),
             )
+            // GuiClient experiment 代理：create/list/get/approve/cancel 仅 owner 执行
+            // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
+            .route(
+                "/api/backend/control/orchestrator/experiments/create",
+                post(crate::backend::control_api::control_orchestrator_experiment_create).layer(
+                    axum::extract::DefaultBodyLimit::max(
+                        crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                    ),
+                ),
+            )
+            .route(
+                "/api/backend/control/orchestrator/experiments/list",
+                post(crate::backend::control_api::control_orchestrator_experiment_list).layer(
+                    axum::extract::DefaultBodyLimit::max(
+                        crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                    ),
+                ),
+            )
+            .route(
+                "/api/backend/control/orchestrator/experiments/get",
+                post(crate::backend::control_api::control_orchestrator_experiment_get).layer(
+                    axum::extract::DefaultBodyLimit::max(
+                        crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                    ),
+                ),
+            )
+            .route(
+                "/api/backend/control/orchestrator/experiments/approve-winner",
+                post(crate::backend::control_api::control_orchestrator_experiment_approve_winner)
+                    .layer(axum::extract::DefaultBodyLimit::max(
+                        crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                    )),
+            )
+            .route(
+                "/api/backend/control/orchestrator/experiments/cancel",
+                post(crate::backend::control_api::control_orchestrator_experiment_cancel).layer(
+                    axum::extract::DefaultBodyLimit::max(
+                        crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                    ),
+                ),
+            )
             .route(
                 "/api/backend/control/orchestrator/workflow-document/get",
                 post(crate::backend::control_api::control_orchestrator_workflow_document_get)

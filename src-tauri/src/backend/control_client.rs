@@ -29,6 +29,7 @@ use crate::hotkey::{
 use crate::models::transfer::{
     LocalTransferOpenTarget, TransferOpenAction, TransferOperationStatus, TransferTaskDto,
 };
+use crate::orchestrator::experiments::{CreateExperimentRequest, OrchestratorExperimentDto};
 use crate::orchestrator::models::OperationalNotificationSnapshot;
 use crate::orchestrator::workflow::WorkflowDocument;
 use crate::workbench::operation_ledger::MutationTransportClass;
@@ -183,6 +184,51 @@ struct ControlOrchestratorDeliverReviewedBody {
     control_token: String,
     project_id: String,
     task_id: String,
+}
+
+/// orchestrator experiment create control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorExperimentCreateBody {
+    control_token: String,
+    #[serde(flatten)]
+    request: CreateExperimentRequest,
+}
+
+/// orchestrator experiment list control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorExperimentListBody {
+    control_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
+}
+
+/// orchestrator experiment get control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorExperimentGetBody {
+    control_token: String,
+    experiment_id: String,
+}
+
+/// orchestrator experiment approve-winner control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorExperimentApproveBody {
+    control_token: String,
+    experiment_id: String,
+    winner_task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// orchestrator experiment cancel control body。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlOrchestratorExperimentCancelBody {
+    control_token: String,
+    experiment_id: String,
 }
 
 /// workflow-document/get control body。
@@ -809,6 +855,137 @@ impl BackendControlClient {
                 &body,
                 ORCHESTRATOR_DELIVER_TIMEOUT,
             )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧创建实验组。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得写本机空库或双路径 dispatch；创建权威只在 sidecar。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/experiments/create`；mutation 不自动重试。
+    pub async fn create_orchestrator_experiment(
+        &self,
+        request: CreateExperimentRequest,
+    ) -> Result<OrchestratorExperimentDto, AppError> {
+        let body = ControlOrchestratorExperimentCreateBody {
+            control_token: self.control_token.clone(),
+            request,
+        };
+        match self
+            .send_once("orchestrator/experiments/create", &body, MUTATE_TIMEOUT)
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 列出 owner 侧实验组。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 本地 DB 无权威 experiment 行，看板必须读 sidecar。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/experiments/list`；查询允许一次刷新。
+    pub async fn list_orchestrator_experiments(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<OrchestratorExperimentDto>, AppError> {
+        self.query_with_optional_refresh(
+            "orchestrator/experiments/list",
+            &ControlOrchestratorExperimentListBody {
+                control_token: self.control_token.clone(),
+                project_id: project_id.map(str::to_string),
+            },
+        )
+        .await
+    }
+
+    /// 经 control API 读取 owner 侧实验组详情。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     详情与 candidates 权威在 owner；禁止 GuiClient 空库 NotFound。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/experiments/get`；查询允许一次刷新。
+    pub async fn get_orchestrator_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<OrchestratorExperimentDto, AppError> {
+        self.query_with_optional_refresh(
+            "orchestrator/experiments/get",
+            &ControlOrchestratorExperimentGetBody {
+                control_token: self.control_token.clone(),
+                experiment_id: experiment_id.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// 经 control API 在 owner 侧批准实验 winner（可触发 delivery）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     批准可能跑 full-auto commit/push/merge；delivery lock 仅 owner 进程持有。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/experiments/approve-winner`；超时 360s；mutation 不自动重试。
+    pub async fn approve_orchestrator_experiment_winner(
+        &self,
+        experiment_id: &str,
+        winner_task_id: &str,
+        reason: Option<&str>,
+    ) -> Result<OrchestratorExperimentDto, AppError> {
+        let body = ControlOrchestratorExperimentApproveBody {
+            control_token: self.control_token.clone(),
+            experiment_id: experiment_id.to_string(),
+            winner_task_id: winner_task_id.to_string(),
+            reason: reason.map(str::to_string),
+        };
+        match self
+            .send_once(
+                "orchestrator/experiments/approve-winner",
+                &body,
+                ORCHESTRATOR_DELIVER_TIMEOUT,
+            )
+            .await
+        {
+            ControlCallOutcome::Ok(v) => Ok(v),
+            ControlCallOutcome::Failed(e) => Err(e),
+            ControlCallOutcome::Uncertain(e) => Err(AppError::unavailable(format!(
+                "control_response_uncertain: {e}"
+            ))),
+        }
+    }
+
+    /// 经 control API 在 owner 侧取消实验组。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     组 CAS 与 child abort 只能在 owner 仓储执行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `orchestrator/experiments/cancel`；mutation 不自动重试。
+    pub async fn cancel_orchestrator_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<OrchestratorExperimentDto, AppError> {
+        let body = ControlOrchestratorExperimentCancelBody {
+            control_token: self.control_token.clone(),
+            experiment_id: experiment_id.to_string(),
+        };
+        match self
+            .send_once("orchestrator/experiments/cancel", &body, MUTATE_TIMEOUT)
             .await
         {
             ControlCallOutcome::Ok(v) => Ok(v),

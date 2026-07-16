@@ -18,7 +18,8 @@ use crate::backend::control::{self, BackendControlFile};
 use crate::backend::control_api::CONTROL_RESPONSE_BODY_LIMIT_BYTES;
 use crate::commands::attention::list_attention_items_v2_for_state;
 use crate::commands::orchestrator::{
-    cancel_orchestrator_experiment_for_state, create_orchestrator_experiment_for_state,
+    approve_orchestrator_experiment_winner_for_state, cancel_orchestrator_experiment_for_state,
+    create_orchestrator_experiment_for_state,
     create_orchestrator_task_view_for_http_with_request_id, get_orchestrator_experiment_for_state,
     list_orchestrator_task_views_for_state,
 };
@@ -385,6 +386,20 @@ pub async fn dispatch_mutate(
             };
             let outcome = create_orchestrator_experiment_for_state(state, req).await?;
             Ok(serde_json::to_value(outcome.experiment)?)
+        }
+        AgentControlMutation::ExperimentApprove {
+            experiment_id,
+            winner_task_id,
+            reason,
+        } => {
+            let exp = approve_orchestrator_experiment_winner_for_state(
+                state,
+                &experiment_id,
+                &winner_task_id,
+                reason.as_deref(),
+            )
+            .await?;
+            Ok(serde_json::to_value(exp)?)
         }
         AgentControlMutation::ExperimentCancel { experiment_id } => {
             let exp = cancel_orchestrator_experiment_for_state(state, &experiment_id).await?;
