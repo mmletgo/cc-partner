@@ -652,29 +652,33 @@ pub fn commit_staged(path: &Path, message: &str) -> Result<(), AppError> {
 /// Code Logic（这个函数做什么）:
 ///     `git commit-tree <tree> [-p parent] -m msg` 生成 OID，再以
 ///     `git update-ref refs/heads/<branch> <new> <old>` CAS 更新分支；并发提交会 CAS 失败。
+///     `expected_parent` 由调用方在 stage/digest 前捕获，禁止函数内再读可变 HEAD 作 parent。
 ///     返回新 commit OID（完整 hash）。
-pub fn commit_frozen_tree(path: &Path, tree_oid: &str, message: &str) -> Result<String, AppError> {
+pub fn commit_frozen_tree(
+    path: &Path,
+    tree_oid: &str,
+    message: &str,
+    expected_parent: Option<&str>,
+) -> Result<String, AppError> {
     if tree_oid.trim().is_empty() {
         return Err(AppError::generic("tree oid 不能为空"));
     }
     let cleaned = sanitize_commit_message(message)?;
-    let parent = head_hash(path)?;
     let mut args: Vec<String> = vec![
         "commit-tree".into(),
         tree_oid.trim().into(),
         "-m".into(),
         cleaned,
     ];
-    if let Some(ref p) = parent {
+    if let Some(p) = expected_parent.map(str::trim).filter(|p| !p.is_empty()) {
         args.push("-p".into());
-        args.push(p.clone());
+        args.push(p.to_string());
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let new_oid = run_git(path, &arg_refs)?.trim().to_string();
     if new_oid.is_empty() {
         return Err(AppError::generic("git commit-tree 返回空 commit oid"));
     }
-    // 校验新 commit 的 tree 仍是冻结 tree（防御 commit-tree 参数错误）。
     let committed_tree = commit_tree_hash(path, &new_oid)?;
     if committed_tree != tree_oid.trim() {
         return Err(AppError::generic(format!(
@@ -684,12 +688,21 @@ pub fn commit_frozen_tree(path: &Path, tree_oid: &str, message: &str) -> Result<
     let branch =
         current_branch(path).ok_or_else(|| AppError::generic("当前 worktree 没有可更新的分支"))?;
     let refname = format!("refs/heads/{branch}");
-    match parent {
+    match expected_parent.map(str::trim).filter(|p| !p.is_empty()) {
         Some(old) => {
-            run_git(path, &["update-ref", &refname, &new_oid, &old])?;
+            run_git(path, &["update-ref", &refname, &new_oid, old])?;
         }
         None => {
-            run_git(path, &["update-ref", &refname, &new_oid])?;
+            run_git(
+                path,
+                &[
+                    "update-ref",
+                    &refname,
+                    &new_oid,
+                    "0000000000000000000000000000000000000000",
+                ],
+            )
+            .or_else(|_| run_git(path, &["update-ref", &refname, &new_oid]))?;
         }
     }
     Ok(new_oid)
@@ -729,18 +742,35 @@ pub fn push_commit_oid(path: &Path, branch: &str, commit_oid: &str) -> Result<()
     if commit_oid.trim().is_empty() {
         return Err(AppError::generic("commit oid 不能为空"));
     }
-    let refspec = format!("{}:refs/heads/{}", commit_oid.trim(), branch.trim());
+    let (remote, remote_ref) = resolve_push_remote_and_ref(path, branch)?;
+    let refspec = format!("{}:{}", commit_oid.trim(), remote_ref);
+    run_git(path, &["push", &remote, &refspec])?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     OID push 必须推到真实 upstream 目标 ref，而不是假设远程也叫同名 local branch。
+///
+/// Code Logic（这个函数做什么）:
+///     有 upstream 时解析 `remote` + `branch.<name>.merge`；否则 origin + refs/heads/<branch>。
+fn resolve_push_remote_and_ref(path: &Path, branch: &str) -> Result<(String, String), AppError> {
     match resolve_push_target(path)? {
         PushTarget::Upstream => {
-            let remote = upstream_remote_name(path).unwrap_or_else(|| "origin".to_string());
-            // 显式 OID refspec：推送内容与 reviewed commit 绑定，不跟随可变 HEAD tip。
-            run_git(path, &["push", &remote, &refspec])?;
+            let remote = upstream_remote_name(path)
+                .ok_or_else(|| AppError::generic("无法解析 upstream remote"))?;
+            let merge_key = format!("branch.{}.merge", branch.trim());
+            let merge_ref = run_git(path, &["config", "--get", &merge_key])
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| format!("refs/heads/{}", branch.trim()));
+            let remote_ref = if merge_ref.starts_with("refs/") {
+                merge_ref
+            } else {
+                format!("refs/heads/{merge_ref}")
+            };
+            Ok((remote, remote_ref))
         }
-        PushTarget::Remote(remote) => {
-            run_git(path, &["push", "-u", &remote, &refspec])?;
-        }
+        PushTarget::Remote(remote) => Ok((remote, format!("refs/heads/{}", branch.trim()))),
     }
-    Ok(())
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1746,8 +1776,9 @@ UU web/src/App.tsx
         fs::write(feature.join("feat.txt"), "v1\n").expect("feat");
         assert!(stage_all_for_commit(&feature).expect("stage"));
         let frozen = write_tree_hash(&feature).expect("write-tree");
-        let reviewed =
-            commit_frozen_tree(&feature, &frozen, "reviewed change").expect("commit-tree CAS");
+        let parent = head_hash(&feature).expect("parent").expect("some parent");
+        let reviewed = commit_frozen_tree(&feature, &frozen, "reviewed change", Some(&parent))
+            .expect("commit-tree CAS");
         assert_eq!(
             commit_tree_hash(&feature, &reviewed).expect("tree of reviewed"),
             frozen

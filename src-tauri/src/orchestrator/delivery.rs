@@ -498,11 +498,28 @@ where
     // digest 绑定路径：stage → digest → freeze tree → commit-tree+update-ref CAS →
     // 全程携带 reviewed_commit_oid；push/merge 按 OID 执行；main 推送成功后再清理 worktree。
     // 无 digest（Human Review 显式 Deliver）保持既有 branch-tip 路径。
-    let oid_bound = expected_review_digest.is_some();
+    // 有 digest 走 commit-tree CAS；无 digest 在 commit 后也捕获 fixed HEAD 走 OID push/merge。
     let mut reviewed_commit_oid: Option<String> = None;
+    let digest_bound = expected_review_digest.is_some();
 
     if let Some(expected) = expected_review_digest {
         let task_path_ref = Path::new(&task_path);
+        // 在 stage/digest 前捕获 parent，供 commit-tree + update-ref CAS 使用。
+        let expected_parent = match workbench_git::head_hash(task_path_ref) {
+            Ok(p) => p,
+            Err(err) => {
+                let reason = format!("commit failed: capture parent before stage: {err}");
+                return block_delivery_task(
+                    context.orchestrator_repo(),
+                    &task.id,
+                    &reason,
+                    "commit",
+                    &reason,
+                    &mut stages,
+                )
+                .await;
+            }
+        };
         let has_changes = match workbench_git::stage_all_for_commit(task_path_ref) {
             Ok(changed) => changed,
             Err(err) => {
@@ -549,8 +566,12 @@ where
                     .await;
                 }
             };
-            // 不可变 commit：commit-tree(frozen) + update-ref CAS，返回固定 OID。
-            match workbench_git::commit_frozen_tree(task_path_ref, &frozen_tree, &commit_message) {
+            match workbench_git::commit_frozen_tree(
+                task_path_ref,
+                &frozen_tree,
+                &commit_message,
+                expected_parent.as_deref(),
+            ) {
                 Ok(oid) => reviewed_commit_oid = Some(oid),
                 Err(err) => {
                     let reason = format!("commit failed: frozen tree CAS commit: {err}");
@@ -566,24 +587,12 @@ where
                 }
             }
         } else {
-            // 已干净：绑定当前 HEAD 为 reviewed OID（digest 已匹配，无新 tree）。
-            match workbench_git::head_hash(task_path_ref) {
-                Ok(Some(oid)) => reviewed_commit_oid = Some(oid),
-                Ok(None) => {
+            // 已干净：绑定 stage 前捕获的 parent 为 reviewed OID（无新 tree）。
+            match expected_parent {
+                Some(oid) => reviewed_commit_oid = Some(oid),
+                None => {
                     let reason =
                         "commit binding failed: empty HEAD on clean digest match".to_string();
-                    return block_delivery_task(
-                        context.orchestrator_repo(),
-                        &task.id,
-                        &reason,
-                        "commit binding",
-                        &reason,
-                        &mut stages,
-                    )
-                    .await;
-                }
-                Err(err) => {
-                    let reason = format!("commit binding failed: read HEAD: {err}");
                     return block_delivery_task(
                         context.orchestrator_repo(),
                         &task.id,
@@ -631,6 +640,8 @@ where
             }
         }
     };
+    // 仅 verifier digest 路径走不可变 OID push/merge；Human Review 仍走 DeliveryContext（含 abort 钩子）。
+    let oid_bound = digest_bound && reviewed_commit_oid.is_some();
     let commit_content = format_commit_evidence(before_head.as_deref(), after_head.as_deref());
     add_delivery_evidence(
         context.orchestrator_repo(),
@@ -718,18 +729,36 @@ where
             return Ok(summary);
         }
 
-        // 按 reviewed OID merge，禁止 git merge <branch> 解析漂移 tip。
-        match workbench_git::merge_commit_oid(main_path_ref, &reviewed) {
+        // 按 reviewed OID merge；成功后立刻同步读 main tip，再 push 该固定 OID。
+        let main_oid = match workbench_git::merge_commit_oid(main_path_ref, &reviewed) {
             Ok(workbench_git::MergeBranchOutcome::Merged) => {
-                add_delivery_evidence(
-                    context.orchestrator_repo(),
-                    &task.id,
-                    "merge main",
-                    "passed",
-                    &format!("merged reviewed oid {reviewed} into main"),
-                )
-                .await?;
-                stages.push("merge main".to_string());
+                match workbench_git::head_hash(main_path_ref) {
+                    Ok(Some(oid)) => oid,
+                    Ok(None) => {
+                        let reason = "merge main failed: main HEAD empty after merge".to_string();
+                        return block_delivery_task(
+                            context.orchestrator_repo(),
+                            &task.id,
+                            &reason,
+                            "merge main",
+                            &reason,
+                            &mut stages,
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        let reason = format!("merge main failed: read main HEAD: {err}");
+                        return block_delivery_task(
+                            context.orchestrator_repo(),
+                            &task.id,
+                            &reason,
+                            "merge main",
+                            &reason,
+                            &mut stages,
+                        )
+                        .await;
+                    }
+                }
             }
             Ok(workbench_git::MergeBranchOutcome::Conflicted) => {
                 let _ = workbench_git::abort_merge(main_path_ref);
@@ -758,7 +787,16 @@ where
                 )
                 .await;
             }
-        }
+        };
+        add_delivery_evidence(
+            context.orchestrator_repo(),
+            &task.id,
+            "merge main",
+            "passed",
+            &format!("merged reviewed oid {reviewed} into main; result_oid={main_oid}"),
+        )
+        .await?;
+        stages.push("merge main".to_string());
 
         if let Some(summary) =
             stop_delivery_if_task_changed(context.orchestrator_repo(), &task.id, &stages).await?
@@ -766,34 +804,6 @@ where
             return Ok(summary);
         }
 
-        // 捕获 merge 后 main tip OID，按 OID 推送（推送成功后再破坏性清理源 worktree）。
-        let main_oid = match workbench_git::head_hash(main_path_ref) {
-            Ok(Some(oid)) => oid,
-            Ok(None) => {
-                let reason = "push main failed: main HEAD empty after merge".to_string();
-                return block_delivery_task(
-                    context.orchestrator_repo(),
-                    &task.id,
-                    &reason,
-                    "push main",
-                    &reason,
-                    &mut stages,
-                )
-                .await;
-            }
-            Err(err) => {
-                let reason = format!("push main failed: read main HEAD: {err}");
-                return block_delivery_task(
-                    context.orchestrator_repo(),
-                    &task.id,
-                    &reason,
-                    "push main",
-                    &reason,
-                    &mut stages,
-                )
-                .await;
-            }
-        };
         match workbench_git::push_main_commit_oid(main_path_ref, &main_oid) {
             Ok(branch) => {
                 add_delivery_evidence(
@@ -821,16 +831,24 @@ where
             }
         }
 
-        // 破坏性清理延后到 main 推送成功之后。
+        // 先 Done 再 cleanup。
+        let done = context
+            .orchestrator_repo()
+            .finish_task_done(&task.id)
+            .await?;
         if let Err(err) =
             cleanup_task_worktree_after_oid_delivery(context, &worktree_id, &main_path).await
         {
             tracing::warn!(
                 task_id = %task.id,
                 worktree_id = %worktree_id,
-                "post-delivery worktree cleanup failed (main already pushed): {err}"
+                "post-delivery worktree cleanup failed (task already Done): {err}"
             );
         }
+        return Ok(DeliverySummary {
+            task: OrchestratorTaskDto::from(done),
+            stages,
+        });
     } else {
         // Human Review / 无 digest：既有 branch-tip 路径。
         if let Err(err) = context.push_task_worktree(worktree_id.clone()).await {

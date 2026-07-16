@@ -102,6 +102,7 @@ pub(crate) async fn save_workbench_text_file_for_state(
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .save_text_file(
                 &context.base_url,
                 RemoteSaveTextReq {
@@ -221,6 +222,7 @@ pub async fn preview_workbench_sqlite(
         let context = ensure_remote_project_context(&state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .preview_sqlite_file(
                 &context.base_url,
                 RemotePreviewSqliteReq {
@@ -281,6 +283,7 @@ pub async fn preview_workbench_html_asset(
         let context = ensure_remote_project_context(&state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .preview_html_asset(
                 &context.base_url,
                 RemotePreviewHtmlAssetReq {
@@ -329,6 +332,7 @@ pub(crate) async fn list_workbench_sessions_for_state(
             let context = ensure_remote_project_context(state, &project).await?;
             ensure_remote_event_bridge_for_context(state, &context);
             let items = RemoteWorkbenchClient::new()
+                .with_expected_device_id(&context.device_id)
                 .list_sessions(&context.base_url, Some(&context.inner_project_id))
                 .await?;
             return Ok(map_remote_session_dtos(
