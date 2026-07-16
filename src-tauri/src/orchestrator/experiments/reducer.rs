@@ -20,7 +20,8 @@ use crate::orchestrator::repo::OrchestratorRepo;
 ///     验证通过的 experiment child 必须记为 CandidateReady 而非交付。
 ///
 /// Code Logic（这个函数做什么）:
-///     更新 candidate outcome；若组内全部终态则 reduce。
+///     CAS：仅 Pending/Running → CandidateReady/Failed；Cancelled 等终态不可覆盖；
+///     若组内全部终态则 reduce。
 pub async fn record_candidate_review(
     repo: &OrchestratorRepo,
     task_id: &str,
@@ -34,17 +35,26 @@ pub async fn record_candidate_review(
     } else {
         CandidateOutcome::Failed
     };
-    // 已是终态则跳过
-    if cand.outcome.is_terminal() || cand.outcome == CandidateOutcome::CandidateReady {
-        if cand.outcome == CandidateOutcome::CandidateReady && passed {
-            // already ready
-        } else if cand.outcome.is_terminal() {
-            return Ok(());
-        }
+    // 已是 CandidateReady 且 passed：幂等；其它非 Pending/Running 不可覆盖
+    if cand.outcome == CandidateOutcome::CandidateReady && passed {
+        let _ = reduce_experiment(repo, &cand.experiment_id).await?;
+        return Ok(());
     }
-    repo.set_candidate_outcome(&cand.experiment_id, task_id, outcome)
+    if cand.outcome.is_terminal() || cand.outcome == CandidateOutcome::CandidateReady {
+        return Ok(());
+    }
+    // CAS：并发 cancel 已写入 Cancelled 时 rows_affected=0，禁止覆盖
+    let applied = repo
+        .cas_set_candidate_outcome(
+            &cand.experiment_id,
+            task_id,
+            &[CandidateOutcome::Pending, CandidateOutcome::Running],
+            outcome,
+        )
         .await?;
-    // 若 candidate 进入 Running 时也更新过；这里只关心 ready/failed
+    if !applied {
+        return Ok(());
+    }
     let _ = reduce_experiment(repo, &cand.experiment_id).await?;
     Ok(())
 }
@@ -55,7 +65,7 @@ pub async fn record_candidate_review(
 ///     会永远把该 candidate 视为活跃而无法比较结束。
 ///
 /// Code Logic（这个函数做什么）:
-///     Pending → Running；并 CAS 组状态到 Running。
+///     CAS Pending → Running；并 CAS 组状态到 Running。
 pub async fn mark_candidate_running(
     repo: &OrchestratorRepo,
     task_id: &str,
@@ -63,10 +73,14 @@ pub async fn mark_candidate_running(
     let Some(cand) = repo.get_candidate_by_task(task_id).await? else {
         return Ok(());
     };
-    if cand.outcome == CandidateOutcome::Pending {
-        repo.set_candidate_outcome(&cand.experiment_id, task_id, CandidateOutcome::Running)
-            .await?;
-    }
+    let _ = repo
+        .cas_set_candidate_outcome(
+            &cand.experiment_id,
+            task_id,
+            &[CandidateOutcome::Pending],
+            CandidateOutcome::Running,
+        )
+        .await?;
     let exp = repo.get_experiment(&cand.experiment_id).await?;
     if exp.status == ExperimentStatus::Queued {
         let _ = repo
@@ -89,7 +103,7 @@ pub async fn mark_candidate_running(
 ///     标为 Failed，否则组级 reduce 永远等不到全部终态。
 ///
 /// Code Logic（这个函数做什么）:
-///     非终态且非 CandidateReady → Failed；再 reduce_experiment。
+///     CAS：仅 Pending/Running → Failed；再 reduce_experiment。
 pub async fn mark_candidate_failed(repo: &OrchestratorRepo, task_id: &str) -> Result<(), AppError> {
     let Some(cand) = repo.get_candidate_by_task(task_id).await? else {
         return Ok(());
@@ -97,8 +111,17 @@ pub async fn mark_candidate_failed(repo: &OrchestratorRepo, task_id: &str) -> Re
     if cand.outcome.is_terminal() || cand.outcome == CandidateOutcome::CandidateReady {
         return Ok(());
     }
-    repo.set_candidate_outcome(&cand.experiment_id, task_id, CandidateOutcome::Failed)
+    let applied = repo
+        .cas_set_candidate_outcome(
+            &cand.experiment_id,
+            task_id,
+            &[CandidateOutcome::Pending, CandidateOutcome::Running],
+            CandidateOutcome::Failed,
+        )
         .await?;
+    if !applied {
+        return Ok(());
+    }
     let _ = reduce_experiment(repo, &cand.experiment_id).await?;
     Ok(())
 }
@@ -108,7 +131,7 @@ pub async fn mark_candidate_failed(repo: &OrchestratorRepo, task_id: &str) -> Re
 ///     CandidateReady 复活任务并进入 Git 交付。
 ///
 /// Code Logic（这个函数做什么）:
-///     Pending/Running/CandidateReady → Cancelled；已终态跳过；再 reduce_experiment。
+///     CAS：Pending/Running/CandidateReady → Cancelled；已终态跳过；再 reduce_experiment。
 pub async fn mark_candidate_cancelled(
     repo: &OrchestratorRepo,
     task_id: &str,
@@ -120,8 +143,21 @@ pub async fn mark_candidate_cancelled(
         return Ok(());
     }
     // CandidateReady 虽非 is_terminal，中止后也必须 Cancelled，阻断后续 select/approve。
-    repo.set_candidate_outcome(&cand.experiment_id, task_id, CandidateOutcome::Cancelled)
+    let applied = repo
+        .cas_set_candidate_outcome(
+            &cand.experiment_id,
+            task_id,
+            &[
+                CandidateOutcome::Pending,
+                CandidateOutcome::Running,
+                CandidateOutcome::CandidateReady,
+            ],
+            CandidateOutcome::Cancelled,
+        )
         .await?;
+    if !applied {
+        return Ok(());
+    }
     let _ = reduce_experiment(repo, &cand.experiment_id).await?;
     Ok(())
 }
@@ -506,5 +542,69 @@ mod tests {
             .unwrap();
         let after = repo.get_candidate_by_task("task-1").await.unwrap().unwrap();
         assert_eq!(after.outcome, CandidateOutcome::Cancelled);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     cancel 已落库后，迟到的 review 不得把 Cancelled 覆盖成 CandidateReady。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Running → cancel → review(passed)；断言仍为 Cancelled。
+    #[tokio::test]
+    async fn review_after_cancel_cannot_overwrite_cancelled() {
+        let repo = setup().await;
+        let _exp_id = fixture_two(&repo).await;
+        repo.set_candidate_outcome(&_exp_id, "task-1", CandidateOutcome::Running)
+            .await
+            .unwrap();
+        mark_candidate_cancelled(&repo, "task-1").await.unwrap();
+        record_candidate_review(&repo, "task-1", true)
+            .await
+            .unwrap();
+        let after = repo.get_candidate_by_task("task-1").await.unwrap().unwrap();
+        assert_eq!(after.outcome, CandidateOutcome::Cancelled);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     cancel 与 review 并发时，Cancelled 不得被 CandidateReady 覆盖。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     多轮并发 join cancel/review；若最终非 Cancelled 则必须是合法的 ready/failed，
+    ///     且再强制 cancel 后 review 不能复活。
+    #[tokio::test]
+    async fn concurrent_cancel_and_review_preserves_cancelled_invariant() {
+        let repo = setup().await;
+        let exp_id = fixture_two(&repo).await;
+        for i in 0..12 {
+            repo.set_candidate_outcome(&exp_id, "task-1", CandidateOutcome::Running)
+                .await
+                .unwrap();
+            let r1 = repo.clone();
+            let r2 = repo.clone();
+            let cancel = tokio::spawn(async move { mark_candidate_cancelled(&r1, "task-1").await });
+            let review =
+                tokio::spawn(async move { record_candidate_review(&r2, "task-1", true).await });
+            cancel.await.unwrap().unwrap();
+            review.await.unwrap().unwrap();
+            let after = repo.get_candidate_by_task("task-1").await.unwrap().unwrap();
+            assert!(
+                matches!(
+                    after.outcome,
+                    CandidateOutcome::Cancelled | CandidateOutcome::CandidateReady
+                ),
+                "round {i}: unexpected outcome {:?}",
+                after.outcome
+            );
+            // 无论谁先，cancel 后必须保持 Cancelled，review 不可覆盖
+            mark_candidate_cancelled(&repo, "task-1").await.unwrap();
+            record_candidate_review(&repo, "task-1", true)
+                .await
+                .unwrap();
+            let final_row = repo.get_candidate_by_task("task-1").await.unwrap().unwrap();
+            assert_eq!(
+                final_row.outcome,
+                CandidateOutcome::Cancelled,
+                "round {i}: cancelled must not be overwritten by review"
+            );
+        }
     }
 }

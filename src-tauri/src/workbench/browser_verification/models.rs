@@ -497,7 +497,12 @@ pub fn redact_console_text(raw: &str) -> String {
     // 绝对路径粗略脱敏（Unix/macOS home 与 Windows 盘符）
     out = redact_absolute_paths(&out);
     if out.len() > 4_096 {
-        out.truncate(4_096);
+        // 必须落在 UTF-8 char boundary，否则 truncate 会 panic
+        let mut end = 4_096;
+        while end > 0 && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
         out.push('…');
     }
     out
@@ -745,6 +750,33 @@ mod tests {
         let cleaned = redact_console_text(raw);
         assert!(!cleaned.contains("/Users/hans"));
         assert!(cleaned.contains("[PATH]"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     多字节 UTF-8 字符若横跨 4096 字节边界，`truncate(4096)` 会 panic。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造长度越过 4096 且边界落在多字节字符内的字符串，断言脱敏不 panic 且 ≤4097。
+    #[test]
+    fn console_redact_truncates_on_utf8_char_boundary() {
+        // '你' 为 3 字节；构造使 4096 落在字符中间
+        let unit = "你";
+        assert_eq!(unit.len(), 3);
+        // 4095 字节的前缀 + 多字节，使原始 len > 4096 且 4096 非 boundary
+        let mut raw = String::new();
+        while raw.len() < 4095 {
+            raw.push_str(unit);
+        }
+        // 此时 len 为 3 的倍数；再补足到 >4096 且 4096 可能非 boundary
+        while raw.len() <= 4096 + 3 {
+            raw.push_str(unit);
+        }
+        assert!(raw.len() > 4_096);
+        // 4096 对 3 字节字符序列：若起始对齐则 4095/4098 为 boundary，4096 不是
+        let cleaned = redact_console_text(&raw);
+        assert!(cleaned.is_char_boundary(cleaned.len()));
+        assert!(cleaned.len() <= 4_096 + '…'.len_utf8());
+        assert!(cleaned.ends_with('…'));
     }
 
     /// start 请求 DTO 不含 targetUrl 字段。

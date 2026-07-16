@@ -487,6 +487,58 @@ impl OrchestratorRepo {
         }
     }
 
+    /// CAS 更新 candidate outcome：仅当当前 outcome 落在 expected 集合时才写入。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     review 与 cancel 并发时，禁止用 CandidateReady/Failed 覆盖已 Cancelled 的终态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `UPDATE ... WHERE outcome IN (expected...)`；返回是否命中一行。
+    pub async fn cas_set_candidate_outcome(
+        &self,
+        experiment_id: &str,
+        task_id: &str,
+        expected: &[CandidateOutcome],
+        outcome: CandidateOutcome,
+    ) -> Result<bool, AppError> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let now = Utc::now().to_rfc3339();
+        // 构造 `outcome IN (?,?,...)` 占位；expected 为闭集枚举，数量有界。
+        let placeholders = expected.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "UPDATE orchestrator_experiment_candidates \
+             SET outcome = ?, updated_at = ? \
+             WHERE experiment_id = ? AND task_id = ? AND outcome IN ({placeholders})"
+        );
+        let result = with_shared_write_lease(&self.gate, async {
+            let mut q = sqlx::query(&sql)
+                .bind(outcome.as_str())
+                .bind(&now)
+                .bind(experiment_id)
+                .bind(task_id);
+            for e in expected {
+                q = q.bind(e.as_str());
+            }
+            q.execute(&self.pool).await
+        })
+        .await;
+        match result {
+            Ok(r) => Ok(r.rows_affected() == 1),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("UNIQUE") || msg.contains("unique") {
+                    Err(AppError::conflict(format!(
+                        "experiment `{experiment_id}` 已存在 winner，拒绝第二个 winner"
+                    )))
+                } else {
+                    Err(AppError::from(err))
+                }
+            }
+        }
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     比较完成后需要 CAS 推进实验状态与 winner 身份。
     ///

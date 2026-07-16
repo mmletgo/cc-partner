@@ -134,24 +134,47 @@ impl BrowserVerificationService {
         Ok(service)
     }
 
-    /// 启动 idle/max 会话扫除（仅一次）。
+    /// sweeper 每 N 次 tick 执行一次 artifact/run cleanup（2s * 30 ≈ 60s）。
+    const SWEEPER_CLEANUP_EVERY_N_TICKS: u64 = 30;
+
+    /// 启动 idle/max 会话扫除与周期 artifact cleanup（仅一次）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     Spec 要求空闲 60s 与 30min 上限强制退出，防止 ephemeral Chromium 悬挂。
+    ///     Spec 要求空闲 60s 与 30min 上限强制退出，并定期清理 24h 过期 artifact，
+    ///     防止 ephemeral Chromium 与磁盘截图悬挂。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     原子标记后 spawn 周期任务调用 `enforce_session_limits`。
+    ///     原子标记后 spawn 周期任务：每次 `sweeper_tick`（limits + 每 N tick cleanup）。
     fn ensure_sweeper(&self) {
         if self.inner.sweeper_started.swap(true, Ordering::SeqCst) {
             return;
         }
         let handle = self.clone();
         tokio::spawn(async move {
+            let mut tick: u64 = 0;
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                handle.enforce_session_limits().await;
+                tick = tick.wrapping_add(1);
+                handle.sweeper_tick(tick).await;
             }
         });
+    }
+
+    /// 单次 sweeper 逻辑：会话时限 + 周期性 cleanup。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     单测可直接驱动 tick 而不等待真实 2s 循环；生产路径与测试共享同一清理语义。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     始终 `enforce_session_limits`；当 `tick % SWEEPER_CLEANUP_EVERY_N_TICKS == 0`
+    ///     时调用 `cleanup`（含 `cleanup_expired`）。
+    pub async fn sweeper_tick(&self, tick: u64) {
+        self.enforce_session_limits().await;
+        if tick > 0 && tick % Self::SWEEPER_CLEANUP_EVERY_N_TICKS == 0 {
+            if let Err(e) = self.cleanup().await {
+                tracing::debug!("browser verification sweeper cleanup failed: {e}");
+            }
+        }
     }
 
     /// 强制取消超时/空闲 run。
@@ -712,6 +735,20 @@ impl BrowserVerificationService {
     pub fn data_dir_for_test(&self) -> PathBuf {
         self.inner.data_dir.clone()
     }
+
+    /// 测试：artifact 是否仍在索引中（不受 get 的 retention 过滤影响）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     sweeper cleanup 单测需证明索引被删除，而非仅 get 因过期拒绝。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 ArtifactStore::is_indexed_for_test。
+    #[cfg(test)]
+    pub fn artifact_indexed_for_test(&self, run_id: &str, artifact_id: &str) -> bool {
+        self.inner
+            .artifacts
+            .is_indexed_for_test(run_id, artifact_id)
+    }
 }
 
 /// 记录转 DTO。
@@ -1031,6 +1068,46 @@ mod tests {
             .await;
         service.cleanup().await.unwrap();
         assert!(service.artifact(&a.session.id, &shot_id).await.is_err());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     sweeper 若只 enforce_session_limits 而不 cleanup，24h artifact 永不删除。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入 artifact → 推进时钟超过 retention → 调用 `sweeper_tick(30)` 断言被清理。
+    #[tokio::test(flavor = "current_thread")]
+    async fn sweeper_tick_invokes_cleanup_on_interval() {
+        let service = fixture_service(FakeEngine::succeeds()).await;
+        let run = service
+            .start(
+                "preview-sweep".into(),
+                "proj".into(),
+                None,
+                "http://127.0.0.1:5173/".into(),
+                start_req("preview-sweep", "request-sweep"),
+            )
+            .await
+            .unwrap();
+        let shot_id = service
+            .put_artifact_for_test(&run.session.id, "bin", b"sweep-me")
+            .unwrap();
+        service
+            .advance_clock_for_test(Duration::from_secs(86_401))
+            .await;
+        // tick 未到清理间隔：索引仍在（get 会因 retention 失败，故查索引）
+        service.sweeper_tick(1).await;
+        assert!(
+            service.artifact_indexed_for_test(&run.session.id, &shot_id),
+            "tick=1 must not cleanup_expired"
+        );
+        // 到达清理间隔：cleanup 删除索引
+        service
+            .sweeper_tick(BrowserVerificationService::SWEEPER_CLEANUP_EVERY_N_TICKS)
+            .await;
+        assert!(
+            !service.artifact_indexed_for_test(&run.session.id, &shot_id),
+            "tick=N must invoke cleanup and drop expired artifact index"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

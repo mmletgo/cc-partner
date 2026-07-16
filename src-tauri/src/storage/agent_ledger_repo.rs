@@ -11,7 +11,9 @@
 #![allow(dead_code)]
 
 use crate::error::AppError;
-use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
+use crate::storage::maintenance_gate::{
+    begin_shared_write, with_shared_write_lease, DatabaseMaintenanceGate,
+};
 use crate::workbench::agent_ledger::models::{
     compute_duration_ms, convert_major_to_minor_units, merge_usage_monotonic,
     validate_currency_code, AgentLedgerEntry, AgentLedgerFinalizeInput, AgentLedgerOutcome,
@@ -296,6 +298,11 @@ impl AgentLedgerRepo {
                         cost_currency,
                     )
                     .await;
+            }
+
+            // 与 clear 同一 critical section 语义：INSERT 前再查水位，禁止复活已清除历史
+            if !self.is_ended_after_clear_watermark(&ended_at).await? {
+                return Err(AppError::conflict("agent_ledger_cleared_before_ended_at"));
             }
 
             let id = uuid::Uuid::new_v4().to_string();
@@ -666,25 +673,26 @@ impl AgentLedgerRepo {
     /// Business Logic（为什么需要这个函数）:
     ///     设置页一键清除；不影响 runtime/task/terminal；必须持久化水位，
     ///     否则启动 reconcile 会把清除前终态 session 重新写回。
+    ///     watermark + DELETE 必须同一事务，禁止半清除窗口被 finalize 插入复活。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     shared lease 内 UPSERT cleared_before=now，再 DELETE ledger 全表；返回 rows_affected。
+    ///     begin_shared_write 事务：UPSERT cleared_before=now + DELETE ledger 全表；commit。
     pub async fn clear_all(&self) -> Result<u64, AppError> {
-        with_shared_write_lease(&self.gate, async {
-            let now = Utc::now().to_rfc3339();
-            sqlx::query(
-                "INSERT INTO agent_ledger_clear_watermark (id, cleared_before) VALUES (1, ?) \
-                 ON CONFLICT(id) DO UPDATE SET cleared_before = excluded.cleared_before",
-            )
-            .bind(&now)
-            .execute(&self.pool)
+        let (permit, mut tx) = begin_shared_write(&self.pool, &self.gate).await?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO agent_ledger_clear_watermark (id, cleared_before) VALUES (1, ?) \
+             ON CONFLICT(id) DO UPDATE SET cleared_before = excluded.cleared_before",
+        )
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        let res = sqlx::query("DELETE FROM agent_session_ledger")
+            .execute(&mut *tx)
             .await?;
-            let res = sqlx::query("DELETE FROM agent_session_ledger")
-                .execute(&self.pool)
-                .await?;
-            Ok(res.rows_affected())
-        })
-        .await
+        tx.commit().await?;
+        drop(permit);
+        Ok(res.rows_affected())
     }
 
     /// 统计总行数。

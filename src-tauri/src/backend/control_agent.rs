@@ -423,19 +423,58 @@ pub async fn dispatch_mutate(
     }
 }
 
+/// 本机 control 仅解析 `kind=local` 项目；remote shortcut 必须显式 `--device`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     无 `--device` 时若把 remote shortcut 当成本地 projectId，会在错误设备上执行
+///     worktree/session/task 操作。
+///
+/// Code Logic（这个函数做什么）:
+///     先检测 selector 是否命中 remote 行 → `remote_project_requires_device`；
+///     否则只在 local 候选中 `resolve_exact_project`。
 async fn resolve_project_id(
     state: &AppState,
     selector: &crate::agent_cli::selectors::ProjectSelector,
 ) -> Result<String, AppError> {
     let rows = state.workbench_project_repo.list().await?;
-    let candidates: Vec<ProjectCandidate> = rows
+    let items: Vec<(String, String, String)> = rows
         .iter()
-        .map(|r| ProjectCandidate {
-            id: r.id.clone(),
-            path: r.path.clone(),
+        .map(|r| (r.id.clone(), r.path.clone(), r.kind.clone()))
+        .collect();
+    resolve_project_id_from_rows(selector, &items)
+}
+
+/// 纯函数：从 (id, path, kind) 行解析本地 project id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单测无需完整 AppState；与 `resolve_project_id` 共享同一过滤语义。
+///
+/// Code Logic（这个函数做什么）:
+///     remote 命中 → validation `remote_project_requires_device`；否则 local-only resolve。
+fn resolve_project_id_from_rows(
+    selector: &crate::agent_cli::selectors::ProjectSelector,
+    rows: &[(String, String, String)],
+) -> Result<String, AppError> {
+    let remote_candidates: Vec<ProjectCandidate> = rows
+        .iter()
+        .filter(|(_, _, kind)| kind != "local")
+        .map(|(id, path, _)| ProjectCandidate {
+            id: id.clone(),
+            path: path.clone(),
         })
         .collect();
-    Ok(resolve_exact_project(selector, &candidates)
+    if resolve_exact_project(selector, &remote_candidates).is_ok() {
+        return Err(AppError::validation("remote_project_requires_device"));
+    }
+    let local_candidates: Vec<ProjectCandidate> = rows
+        .iter()
+        .filter(|(_, _, kind)| kind == "local")
+        .map(|(id, path, _)| ProjectCandidate {
+            id: id.clone(),
+            path: path.clone(),
+        })
+        .collect();
+    Ok(resolve_exact_project(selector, &local_candidates)
         .map_err(cli_to_app_error)?
         .id
         .clone())
@@ -624,5 +663,32 @@ mod tests {
     fn phase_match_helper() {
         assert!(phase_matches("needs_input", "needsInput"));
         assert!(phase_matches("idle", "Idle"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     本地 control 不得把 remote shortcut 解析成本机 projectId。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     remote id 命中 → `remote_project_requires_device`；local id 仍可解析。
+    #[test]
+    fn resolve_project_id_rejects_remote_without_device() {
+        let rows = vec![
+            ("local-1".into(), "/tmp/local-proj".into(), "local".into()),
+            ("remote-1".into(), "/remote/path".into(), "remote".into()),
+        ];
+        let remote_sel = crate::agent_cli::selectors::ProjectSelector::Id("remote-1".into());
+        let err = resolve_project_id_from_rows(&remote_sel, &rows).unwrap_err();
+        assert_eq!(err.code(), "remote_project_requires_device");
+
+        let local_sel = crate::agent_cli::selectors::ProjectSelector::Id("local-1".into());
+        assert_eq!(
+            resolve_project_id_from_rows(&local_sel, &rows).unwrap(),
+            "local-1"
+        );
+
+        // 未知 id 仍 not_found，不是 remote 误报
+        let missing = crate::agent_cli::selectors::ProjectSelector::Id("nope".into());
+        let err = resolve_project_id_from_rows(&missing, &rows).unwrap_err();
+        assert_eq!(err.code(), "project not found");
     }
 }

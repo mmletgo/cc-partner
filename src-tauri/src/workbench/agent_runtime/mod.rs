@@ -26,6 +26,7 @@ pub use snapshot::{
 use crate::state::AppState;
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 /// 有界 mutation ingress 容量（OSC 热路径 try_send，满则丢弃并记诊断）。
 const AGENT_MUTATION_CHANNEL_CAP: usize = 256;
@@ -33,9 +34,71 @@ const AGENT_MUTATION_CHANNEL_CAP: usize = 256;
 /// 进程内 mutation 发送端（由 `install_agent_mutation_ingress` 安装）。
 static AGENT_MUTATION_TX: OnceLock<mpsc::Sender<AgentRuntimeMutation>> = OnceLock::new();
 
+/// channel 满时保留最近一次高优先级（Completed/Failed/NeedsInput）mutation。
+static TERMINAL_MUTATION_OVERFLOW: Mutex<Option<AgentRuntimeMutation>> = Mutex::new(None);
+
 /// 测试可替换的 send 钩子（默认走 channel）。
 type AgentMutationTestHook = Option<Box<dyn Fn(AgentRuntimeMutation) + Send>>;
 static AGENT_MUTATION_TEST_HOOK: Mutex<AgentMutationTestHook> = Mutex::new(None);
+
+/// 判断 mutation 是否为不得丢弃的高优先级 phase。
+///
+/// Business Logic（为什么需要这个函数）:
+///     channel 满时普通 Working 可丢并由对账恢复；Completed/Failed/NeedsInput 必须送达。
+///
+/// Code Logic（这个函数做什么）:
+///     phase ∈ {Completed, Failed, NeedsInput}。
+fn is_priority_agent_mutation(mutation: &AgentRuntimeMutation) -> bool {
+    matches!(
+        mutation.phase,
+        AgentSessionPhase::Completed | AgentSessionPhase::Failed | AgentSessionPhase::NeedsInput
+    )
+}
+
+/// 取出并清空 overflow 槽中的高优先级 mutation。
+///
+/// Business Logic（为什么需要这个函数）:
+///     worker 在消费 channel 间隙必须冲刷 overflow，避免终态永久滞留。
+///
+/// Code Logic（这个函数做什么）:
+///     `TERMINAL_MUTATION_OVERFLOW.take()`。
+fn take_terminal_mutation_overflow() -> Option<AgentRuntimeMutation> {
+    TERMINAL_MUTATION_OVERFLOW
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+}
+
+/// 向指定 sender 投递 mutation；满时对高优先级写入 overflow。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单测可注入 capacity=1 的 channel 验证 Completed 不被丢弃。
+///
+/// Code Logic（这个函数做什么）:
+///     try_send；Full 且 priority → overflow slot（last-wins）；其它记 debug。
+fn enqueue_agent_mutation_to(
+    tx: &mpsc::Sender<AgentRuntimeMutation>,
+    mutation: AgentRuntimeMutation,
+) {
+    match tx.try_send(mutation) {
+        Ok(()) => {}
+        Err(TrySendError::Full(m)) => {
+            if is_priority_agent_mutation(&m) {
+                if let Ok(mut slot) = TERMINAL_MUTATION_OVERFLOW.lock() {
+                    *slot = Some(m);
+                    tracing::debug!(
+                        "agent mutation ingress full; retained priority mutation in overflow"
+                    );
+                }
+            } else {
+                tracing::debug!("agent mutation ingress full or closed; drop non-priority event");
+            }
+        }
+        Err(TrySendError::Closed(_)) => {
+            tracing::debug!("agent mutation ingress closed; drop event");
+        }
+    }
+}
 
 /// 安装 owner mutation ingress，返回 receiver 供 reducer worker 消费。
 ///
@@ -53,13 +116,14 @@ pub fn install_agent_mutation_ingress() -> Option<mpsc::Receiver<AgentRuntimeMut
     }
 }
 
-/// 非阻塞投递 mutation；未安装 ingress 或 channel 满时丢弃。
+/// 非阻塞投递 mutation；未安装 ingress 时丢弃；channel 满时普通事件丢弃，
+/// Completed/Failed/NeedsInput 写入 overflow 槽由 worker 冲刷。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     PTY reader 在 OS 线程上运行，不能 block 等 DB；满载时丢弃由 snapshot/对账恢复。
+///     PTY reader 在 OS 线程上运行，不能 block 等 DB；终态不得因 channel 满而永久丢失。
 ///
 /// Code Logic（这个函数做什么）:
-///     优先 test hook；否则 `try_send`；`state` 预留给后续 metrics（当前未读）。
+///     优先 test hook；否则 `enqueue_agent_mutation_to`；`state` 预留给后续 metrics。
 pub fn try_enqueue_agent_mutation(state: &AppState, mutation: AgentRuntimeMutation) {
     let _ = state;
     if let Ok(guard) = AGENT_MUTATION_TEST_HOOK.lock() {
@@ -69,9 +133,7 @@ pub fn try_enqueue_agent_mutation(state: &AppState, mutation: AgentRuntimeMutati
         }
     }
     if let Some(tx) = AGENT_MUTATION_TX.get() {
-        if tx.try_send(mutation).is_err() {
-            tracing::debug!("agent mutation ingress full or closed; drop event");
-        }
+        enqueue_agent_mutation_to(tx, mutation);
     }
 }
 
@@ -135,7 +197,23 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
         }
         Err(e) => tracing::warn!("agent runtime collect alive terminals failed: {e}"),
     }
-    while let Some(mutation) = rx.recv().await {
+    loop {
+        // 先冲刷 overflow（channel 曾满时保留的终态），再阻塞读 channel
+        let mutation = if let Some(m) = take_terminal_mutation_overflow() {
+            m
+        } else {
+            match rx.recv().await {
+                Some(m) => m,
+                None => {
+                    // channel 关闭后仍冲刷一次 overflow
+                    if let Some(m) = take_terminal_mutation_overflow() {
+                        m
+                    } else {
+                        break;
+                    }
+                }
+            }
+        };
         let occurred_at = mutation.occurred_at.clone();
         match reducer.apply(mutation).await {
             Ok(AgentReduceOutcome::Applied {
@@ -209,5 +287,71 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
             }
             Err(e) => tracing::warn!("agent runtime mutation apply error: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workbench::agent_runtime::models::AgentSessionPhase;
+
+    /// 构造最小 mutation 夹具。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     channel 满/overflow 单测只需 phase 与身份字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回固定 id 的 AgentRuntimeMutation。
+    fn sample_mutation(phase: AgentSessionPhase, version: u64) -> AgentRuntimeMutation {
+        AgentRuntimeMutation {
+            agent_session_id: "agent-1".into(),
+            terminal_session_id: "term-1".into(),
+            expected_version: version.saturating_sub(1),
+            event_version: version,
+            phase,
+            native_session_id: None,
+            outcome_code: None,
+            occurred_at: "2026-07-01T10:00:00Z".into(),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     channel 满时 Completed 不得静默丢弃，否则 runtime 真值卡住 Working。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     capacity=1 填满 Working 后入队 Completed；断言 overflow 持有 Completed。
+    #[test]
+    fn completed_retained_in_overflow_when_channel_full() {
+        // 清理可能残留的 overflow
+        let _ = take_terminal_mutation_overflow();
+        let (tx, mut rx) = mpsc::channel(1);
+        enqueue_agent_mutation_to(&tx, sample_mutation(AgentSessionPhase::Working, 1));
+        // 再塞一条 Working：Full 且非 priority → drop
+        enqueue_agent_mutation_to(&tx, sample_mutation(AgentSessionPhase::Working, 2));
+        assert!(take_terminal_mutation_overflow().is_none());
+        // Completed：Full → overflow
+        enqueue_agent_mutation_to(&tx, sample_mutation(AgentSessionPhase::Completed, 3));
+        let retained = take_terminal_mutation_overflow().expect("Completed must be retained");
+        assert_eq!(retained.phase, AgentSessionPhase::Completed);
+        assert_eq!(retained.event_version, 3);
+        // channel 内仍是第一条 Working
+        let first = rx.try_recv().expect("first Working still in channel");
+        assert_eq!(first.phase, AgentSessionPhase::Working);
+        assert_eq!(first.event_version, 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     NeedsInput 与 Failed 同属高优先级，满载时同样进入 overflow。
+    #[test]
+    fn needs_input_and_failed_are_priority_overflow() {
+        let _ = take_terminal_mutation_overflow();
+        let (tx, _rx) = mpsc::channel(1);
+        enqueue_agent_mutation_to(&tx, sample_mutation(AgentSessionPhase::Working, 1));
+        enqueue_agent_mutation_to(&tx, sample_mutation(AgentSessionPhase::NeedsInput, 2));
+        let n = take_terminal_mutation_overflow().unwrap();
+        assert_eq!(n.phase, AgentSessionPhase::NeedsInput);
+        enqueue_agent_mutation_to(&tx, sample_mutation(AgentSessionPhase::Failed, 3));
+        let f = take_terminal_mutation_overflow().unwrap();
+        assert_eq!(f.phase, AgentSessionPhase::Failed);
     }
 }

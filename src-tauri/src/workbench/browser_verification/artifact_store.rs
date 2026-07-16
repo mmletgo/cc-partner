@@ -204,6 +204,19 @@ impl ArtifactStore {
         Ok(())
     }
 
+    /// 测试：索引中是否仍登记该 artifact（忽略 retention 读取语义）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     `get` 对过期项也返回 not_found；单测需区分「仅过期」与「已被 cleanup 删除」。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查内存索引是否含 (run_id, artifact_id)。
+    #[cfg(test)]
+    pub fn is_indexed_for_test(&self, run_id: &str, artifact_id: &str) -> bool {
+        let guard = self.inner.lock().expect("artifact store");
+        guard.get(artifact_id).is_some_and(|m| m.run_id == run_id)
+    }
+
     /// 清理超过 retention 的 artifact。
     ///
     /// Business Logic（为什么需要这个函数）:

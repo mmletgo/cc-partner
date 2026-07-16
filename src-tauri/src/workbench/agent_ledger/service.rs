@@ -198,10 +198,11 @@ impl AgentLedgerService {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     runtime 真值已落库后旁路写 ledger；失败只记 metric；
-    ///     clear 之前结束的 session 不得再写入（隐私水位）。
+    ///     clear 之前结束的 session 不得再写入（隐私水位）；
+    ///     必须与 clear_history 共享 clear_reconcile_lock，避免 clear 与 finalize 交错复活。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     组 FinalizeInput → 水位检查 → try_finalize + 一次后台重试语义。
+    ///     持 clear_reconcile_lock → 组 FinalizeInput → 水位检查 → try_finalize + 一次后台重试。
     pub async fn record_terminal(
         &self,
         session: &AgentSessionRuntime,
@@ -221,6 +222,8 @@ impl AgentLedgerService {
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| session.last_activity_at.clone());
+        // 与 clear_history 串行：水位检查 + finalize 在同一临界区
+        let _guard = self.clear_reconcile_lock.lock().await;
         // clear 水位：旧终态 session 禁止复活写入
         match self.repo.is_ended_after_clear_watermark(&ended_at).await {
             Ok(true) => {}
@@ -294,17 +297,20 @@ impl AgentLedgerService {
     /// 单次 finalize（可被 fail 钩子拦截）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     统一写入口，便于测试注入失败。
+    ///     统一写入口，便于测试注入失败；水位拒绝视为成功跳过（不累计 failure）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     fail_writes 时 Err；否则 repo.finalize。
+    ///     fail_writes 时 Err；`agent_ledger_cleared_before_ended_at` → Ok(())；否则 repo.finalize。
     async fn try_finalize_once(&self, input: AgentLedgerFinalizeInput) -> Result<(), AppError> {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(AppError::generic("injected ledger write failure"));
         }
         // 日志/错误不得带 prompt/path：input 本身无这些字段
-        self.repo.finalize(input).await?;
-        Ok(())
+        match self.repo.finalize(input).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.code() == "agent_ledger_cleared_before_ended_at" => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// 启动对账：扫描终态 runtime 缺失 ledger 行并补写。
@@ -742,5 +748,47 @@ mod tests {
             .exists_agent_session("old-session")
             .await
             .unwrap());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     clear 与 record_terminal 并发时，清除前终态不得在 clear 后复活。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     多轮并发 join clear_history 与 record_terminal(旧 ended_at)；
+    ///     最终 count 必须为 0。
+    #[tokio::test]
+    async fn concurrent_clear_during_finalize_cannot_resurrect() {
+        let (svc, _) = setup().await;
+        for i in 0..16 {
+            let id = format!("race-{i}");
+            let mut row = runtime(&id, AgentSessionPhase::Completed);
+            // 固定旧 ended_at，clear 后水位会更晚
+            row.ended_at = Some("2020-01-01T00:00:00Z".into());
+            row.last_activity_at = "2020-01-01T00:00:00Z".into();
+            row.started_at = "2020-01-01T00:00:00Z".into();
+
+            let s1 = svc.clone();
+            let s2 = svc.clone();
+            let row_c = row.clone();
+            let finalize = tokio::spawn(async move {
+                s1.record_terminal(&row_c, Some(AgentSessionPhase::Working))
+                    .await;
+            });
+            let clear = tokio::spawn(async move {
+                let _ = s2.clear_history().await;
+            });
+            finalize.await.unwrap();
+            clear.await.unwrap();
+            // 再 clear 一次确保水位已写（若 finalize 先于 clear 写入了行）
+            let _ = svc.clear_history().await;
+            // 迟到 finalize 不得复活
+            svc.record_terminal(&row, Some(AgentSessionPhase::Working))
+                .await;
+            assert_eq!(
+                svc.repo().count_all().await.unwrap(),
+                0,
+                "round {i}: ledger must stay empty after clear vs old terminal"
+            );
+        }
     }
 }
