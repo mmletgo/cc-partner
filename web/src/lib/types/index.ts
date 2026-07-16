@@ -13,3 +13,4 @@ export * from './settings';
 export * from './workbench';
 export * from './orchestrator';
 export * from './attention';
+export * from './agentRuntime';
