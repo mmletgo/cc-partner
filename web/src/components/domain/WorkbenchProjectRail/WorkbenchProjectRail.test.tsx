@@ -26,6 +26,58 @@ import {
 } from '@/hooks/workbenchProjectsContext';
 import { WorkbenchProjectRail } from './WorkbenchProjectRail';
 
+const fleetMockState = {
+  projectSummaries: {} as Record<
+    string,
+    {
+      projectId: string;
+      displayName: string;
+      projectKind: string;
+      agentCounts: {
+        launching: number;
+        working: number;
+        needsInput: number;
+        idle: number;
+        completed: number;
+        failed: number;
+        disconnected: number;
+      };
+      attentionCount: number;
+      terminalCount: number;
+      gitState: 'clean' | 'dirty' | 'conflict' | 'unknown';
+      browserState: 'active' | 'absent' | 'unknown';
+      orchestratorRunning: number;
+      orchestratorRetrying: number;
+      lastActivityAt: string | null;
+    }
+  >,
+  snapshot: null as null | {
+    generatedAt: string;
+    truncated: boolean;
+    devices: Array<{
+      deviceId: string;
+      deviceName: string;
+      reachability: 'live' | 'offline' | 'unsupported';
+      freshness: 'live' | 'cached' | 'unknown';
+      schedulerSlotsUsed: number | null;
+      schedulerSlotsMax: number | null;
+      projects: Array<{ projectId: string }>;
+      errorCode: string | null;
+      capturedAt: string | null;
+    }>;
+  },
+};
+
+vi.mock('@/hooks/useLanAgentFleet', () => ({
+  useLanAgentFleet: () => ({
+    snapshot: fleetMockState.snapshot,
+    loading: false,
+    error: null,
+    refresh: async () => undefined,
+    projectSummaries: fleetMockState.projectSummaries,
+  }),
+}));
+
 beforeAll(async () => {
   await i18n.changeLanguage('zh');
 });
@@ -128,5 +180,105 @@ describe('WorkbenchProjectRail discovery IA', () => {
     expect(screen.getByRole('button', { name: /idle-repo/ })).toBeTruthy();
     expect(screen.getByText('当前')).toBeTruthy();
     expect(screen.getByText('未选中')).toBeTruthy();
+  });
+
+  test('does not badge normal working agents but badges needs-input', () => {
+    const project = buildProject({ id: 'p1', name: 'agent-repo' });
+    fleetMockState.projectSummaries = {
+      p1: {
+        projectId: 'p1',
+        displayName: 'agent-repo',
+        projectKind: 'local',
+        agentCounts: {
+          launching: 0,
+          working: 4,
+          needsInput: 0,
+          idle: 0,
+          completed: 0,
+          failed: 0,
+          disconnected: 0,
+        },
+        attentionCount: 0,
+        terminalCount: 1,
+        gitState: 'clean',
+        browserState: 'absent',
+        orchestratorRunning: 0,
+        orchestratorRetrying: 0,
+        lastActivityAt: null,
+      },
+    };
+    const { rerender } = render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <WorkbenchProjectsContext.Provider
+            value={{
+              projects: [project],
+              activeProjectId: project.id,
+              activeProject: project,
+              projectsLoading: false,
+              projectBusy: false,
+              projectError: null,
+              projectSessionStats: {},
+              loadProjects: vi.fn(async () => undefined),
+              chooseAndAddProject: vi.fn(async () => null),
+              openRemoteProject: vi.fn(async () => null),
+              selectProject: vi.fn(async () => undefined),
+              removeProject: vi.fn(async () => undefined),
+              setActiveProjectId: vi.fn(),
+              addProjectFromPath: vi.fn(async () => null),
+              refreshProjectSessionStats: vi.fn(async () => undefined),
+            } as unknown as WorkbenchProjectsContextValue}
+          >
+            <WorkbenchProjectRail />
+          </WorkbenchProjectsContext.Provider>
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    expect(screen.queryByLabelText(/需要处理/)).toBeNull();
+    expect(screen.getByRole('link', { name: /Fleet|局域网 Agent Fleet/ })).toBeTruthy();
+
+    fleetMockState.projectSummaries = {
+      p1: {
+        ...fleetMockState.projectSummaries.p1!,
+        agentCounts: {
+          launching: 0,
+          working: 4,
+          needsInput: 1,
+          idle: 0,
+          completed: 0,
+          failed: 0,
+          disconnected: 0,
+        },
+      },
+    };
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <WorkbenchProjectsContext.Provider
+            value={{
+              projects: [project],
+              activeProjectId: project.id,
+              activeProject: project,
+              projectsLoading: false,
+              projectBusy: false,
+              projectError: null,
+              projectSessionStats: {},
+              loadProjects: vi.fn(async () => undefined),
+              chooseAndAddProject: vi.fn(async () => null),
+              openRemoteProject: vi.fn(async () => null),
+              selectProject: vi.fn(async () => undefined),
+              removeProject: vi.fn(async () => undefined),
+              setActiveProjectId: vi.fn(),
+              addProjectFromPath: vi.fn(async () => null),
+              refreshProjectSessionStats: vi.fn(async () => undefined),
+            } as unknown as WorkbenchProjectsContextValue}
+          >
+            <WorkbenchProjectRail />
+          </WorkbenchProjectsContext.Provider>
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+    expect(screen.getByLabelText('1 个 Agent 需要处理')).toBeTruthy();
   });
 });

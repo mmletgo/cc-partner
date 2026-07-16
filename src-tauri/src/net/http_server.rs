@@ -976,6 +976,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             )
             // Mobile Workbench 本机入口：手机 → 本机，可继续由本机代理到远端设备 remote shortcut
             .route(
+                "/api/mobile/workbench/lan-fleet",
+                post(workbench::mobile_lan_fleet).layer(DefaultBodyLimit::max(64 * 1024)),
+            )
+            .route(
                 "/api/mobile/workbench/projects/list",
                 get(workbench::mobile_list_projects),
             )

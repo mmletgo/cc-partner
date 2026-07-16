@@ -1014,6 +1014,23 @@ pub async fn lan_fleet_snapshot(
     Ok(Json(resp))
 }
 
+/// 移动端 / 本机浏览器：控制设备全局 Fleet 聚合。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `/mobile` 不能 Tauri invoke，需要同源 HTTP 拉取已保存 shortcut 的 Fleet 摘要。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `collect_lan_fleet_for_state`（含 remote fan-out）；非 P2P owner batch。
+pub async fn mobile_lan_fleet(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+) -> P2pResult<Json<crate::workbench::lan_fleet::LanFleetSnapshot>> {
+    let snap = crate::workbench::lan_fleet::collect_lan_fleet_for_state(&state)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.mobile.lan_fleet"))?;
+    Ok(Json(snap))
+}
+
 /// 拉取远端设备本机终端最近输出。
 ///
 /// Business Logic（为什么需要这个函数）:

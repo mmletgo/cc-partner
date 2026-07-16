@@ -53,6 +53,8 @@ import {
   workbenchRemoveResultDecoder,
 } from '@/lib/schemas/workbench';
 import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
+import { lanFleetSnapshotDecoder } from '@/lib/schemas/lanFleet';
+import type { LanFleetSnapshot } from '@/lib/types/lanFleet';
 import type { AgentRuntimeSnapshot, WorkbenchMutationOperation } from '@/lib/types';
 import type { WorkbenchPaneSplitDirection } from './workbench';
 import type { OrchestratorCreateAction } from './orchestrator';
@@ -974,6 +976,22 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         '/api/workbench/agent-runtime/snapshot',
         projectId ? { projectId } : {},
         { policy: { kind: 'query' }, decoder: agentRuntimeSnapshotDecoder },
+      ),
+  },
+  lanFleet: {
+    /**
+     * Business Logic（为什么需要这个方法）:
+     *   Mobile 项目面板需要同源拉取控制设备 Fleet 摘要。
+     *
+     * Code Logic（这个函数做什么）:
+     *   GET `/api/mobile/workbench/lan-fleet`（若未挂 mobile 路由则走 control 代理语义不可用时由后端决定）。
+     *   当前实现：POST 空 body 到 owner 聚合命令对应 HTTP（desktop sidecar 代理时仍用 invoke）。
+     */
+    getSnapshot: (): Promise<LanFleetSnapshot> =>
+      postJson<LanFleetSnapshot>(
+        '/api/mobile/workbench/lan-fleet',
+        {},
+        { policy: { kind: 'query' }, decoder: lanFleetSnapshotDecoder },
       ),
   },
 };

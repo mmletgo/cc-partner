@@ -50,6 +50,10 @@ const Transfer = lazyNamed(() => import('./pages/Transfer'), 'Transfer');
 const Prompts = lazyNamed(() => import('./pages/Prompts'), 'Prompts');
 const CcHistory = lazyNamed(() => import('./pages/CcHistory'), 'CcHistory');
 const Workbench = lazyNamed(() => import('./pages/Workbench'), 'Workbench');
+const WorkbenchFleetPage = lazyNamed(
+  () => import('./pages/Workbench/WorkbenchFleetPage'),
+  'WorkbenchFleetPage',
+);
 const Scratchpad = lazyNamed(() => import('./pages/Scratchpad'), 'Scratchpad');
 const PromptOptimizer = lazyNamed(() => import('./pages/PromptOptimizer'), 'PromptOptimizer');
 const ClaudeMd = lazyNamed(() => import('./pages/ClaudeMd'), 'ClaudeMd');
@@ -517,6 +521,14 @@ export default function App() {
             <Route path="/prompts" element={<ShellRoute><Prompts /></ShellRoute>} />
             <Route path="/cc-history" element={<ShellRoute><CcHistory /></ShellRoute>} />
             <Route path="/workbench" element={<ShellRoute><Workbench /></ShellRoute>} />
+            <Route
+              path="/workbench/fleet"
+              element={
+                <ShellRoute>
+                  <WorkbenchFleetPage />
+                </ShellRoute>
+              }
+            />
             <Route path="/scratchpad" element={<ShellRoute><Scratchpad /></ShellRoute>} />
             <Route path="/prompt-optimizer" element={<ShellRoute><PromptOptimizer /></ShellRoute>} />
             <Route path="/claude-md" element={<ShellRoute><ClaudeMd /></ShellRoute>} />

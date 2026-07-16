@@ -12,7 +12,61 @@
     "addLocalCta": "Add local project",
     "addRemoteCta": "Choose LAN project",
     "statusActive": "Active",
-    "statusInactive": "Not selected"
+    "statusInactive": "Not selected",
+    "fleetLink": "Fleet",
+    "fleetLinkAria": "Open LAN Agent Fleet view",
+    "agentExceptionBadge": "{{count}} agents need attention",
+    "agentWorkingHint": "{{count}} agents working",
+    "deviceOffline": "Device offline",
+    "deviceCached": "Showing cached summary",
+    "deviceUnsupported": "Peer lacks Fleet support"
+  },
+  "fleet": {
+    "title": "LAN Agent Fleet",
+    "subtitle": "Read-only aggregate of Agent, Attention, Git and automation for saved projects. No auto placement or migration.",
+    "backToWorkbench": "Back to Workbench",
+    "empty": "No saved project shortcuts to aggregate",
+    "truncated": "Results truncated (limit exceeded)",
+    "noProjects": "No project summaries on this device",
+    "reachability": "Reachability",
+    "freshness": "Freshness",
+    "slotsLabel": "Scheduler slots",
+    "slots": "{{used}} / {{max}}",
+    "slotsUnknown": "Unknown",
+    "capturedAt": "Captured at",
+    "errorCode": "Error code",
+    "agents": "Agents",
+    "agentCounts": "working {{working}} · needs input {{needsInput}} · failed {{failed}} · idle {{idle}}",
+    "exceptionBadge": "{{count}} need action",
+    "attention": "Attention",
+    "git": "Git",
+    "browser": "Browser",
+    "orchestrator": "Automation",
+    "orchestratorCounts": "running {{running}} · retrying {{retrying}}",
+    "terminals": "Terminals",
+    "openProject": "Open project",
+    "openAttention": "Open Attention",
+    "reachabilityStates": {
+      "live": "Online",
+      "offline": "Offline",
+      "unsupported": "Unsupported"
+    },
+    "freshnessStates": {
+      "live": "Live",
+      "cached": "Cached",
+      "unknown": "Unknown"
+    },
+    "gitStates": {
+      "clean": "Clean",
+      "dirty": "Dirty",
+      "conflict": "Conflict",
+      "unknown": "Unknown"
+    },
+    "browserStates": {
+      "active": "Preview active",
+      "absent": "No preview",
+      "unknown": "Unknown"
+    }
   },
   "addProject": "Add project",
   "removeProject": "Remove project",
