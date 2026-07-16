@@ -38,8 +38,6 @@ use crate::commands::workbench::{
     switch_workbench_pane_for_state, write_workbench_session_input_for_state,
     zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
-use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
-use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
 use crate::error::AppError;
 use crate::net::error_response::{mark_response_as_passthrough, P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
@@ -71,7 +69,9 @@ use crate::workbench::remote_protocol::{
     RemoteSearchClaudeSessionsReq, RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq,
     RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
+use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
+use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
 use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, State};
 use axum::http::header;
@@ -997,10 +997,10 @@ pub async fn agent_ledger_summary(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<crate::workbench::agent_ledger::AgentLedgerSummaryBatchReq>,
 ) -> P2pResult<Json<crate::workbench::agent_ledger::AgentLedgerSummaryBatchResp>> {
+    use crate::workbench::agent_ledger::aggregation::summarize_projects;
     use crate::workbench::agent_ledger::models::{
         AgentLedgerSummaryBatchResp, LedgerWindow, AGENT_LEDGER_SUMMARY_MAX_PROJECTS,
     };
-    use crate::workbench::agent_ledger::aggregation::summarize_projects;
     use crate::workbench::remote_ids::is_remote_id;
 
     let window = LedgerWindow::parse(&req.window).ok_or_else(|| {
@@ -2154,11 +2154,7 @@ pub async fn workspace_restore_safe_attach(
     let result = owner_local_safe_attach_for_state(&state, req.session_id)
         .await
         .map_err(|e| {
-            if e.code() == "local_project_required" {
-                P2pError::from_app_error(e, &ctx, "workbench.workspace.restore.safe_attach")
-            } else {
-                P2pError::from_app_error(e, &ctx, "workbench.workspace.restore.safe_attach")
-            }
+            P2pError::from_app_error(e, &ctx, "workbench.workspace.restore.safe_attach")
         })?;
     Ok(Json(result))
 }

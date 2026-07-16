@@ -59,10 +59,8 @@ pub async fn collect_agent_runtime_attention_items(
         .list_attention_relevant(None, 1_000)
         .await?;
     let projects = state.workbench_project_repo.list().await?;
-    let project_by_id: HashMap<String, WorkbenchProjectRow> = projects
-        .into_iter()
-        .map(|p| (p.id.clone(), p))
-        .collect();
+    let project_by_id: HashMap<String, WorkbenchProjectRow> =
+        projects.into_iter().map(|p| (p.id.clone(), p)).collect();
     let device_id = state.device_id.clone();
     let device_name = {
         let cfg = state.config.read().expect("config lock");
@@ -130,15 +128,17 @@ fn project_single_agent_row(
         | AgentSessionPhase::Disconnected => return None,
     };
 
-    let project = project_by_id.get(&row.project_id).map(|p| AttentionProjectRef {
-        id: p.id.clone(),
-        name: p.name.clone(),
-        kind: if p.kind == "remote" {
-            AttentionProjectKind::Remote
-        } else {
-            AttentionProjectKind::Local
-        },
-    });
+    let project = project_by_id
+        .get(&row.project_id)
+        .map(|p| AttentionProjectRef {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            kind: if p.kind == "remote" {
+                AttentionProjectKind::Remote
+            } else {
+                AttentionProjectKind::Local
+            },
+        });
 
     Some(AttentionItemDto {
         id: format!("{id_prefix}{}", row.id),

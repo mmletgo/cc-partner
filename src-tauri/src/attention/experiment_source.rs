@@ -55,22 +55,15 @@ pub async fn collect_experiment_attention_items(
         return Ok(Vec::new());
     }
     let projects = state.workbench_project_repo.list().await?;
-    let names: HashMap<String, String> = projects
-        .into_iter()
-        .map(|p| (p.id, p.name))
-        .collect();
+    let names: HashMap<String, String> = projects.into_iter().map(|p| (p.id, p.name)).collect();
     let mut items = Vec::with_capacity(experiments.len());
     for exp in experiments {
         let name = names
             .get(&exp.project_id)
             .cloned()
             .unwrap_or_else(|| exp.project_id.clone());
-        let mut item = experiment_decision_item_contract(
-            &exp.project_id,
-            &exp.id,
-            &name,
-            &exp.updated_at,
-        );
+        let mut item =
+            experiment_decision_item_contract(&exp.project_id, &exp.id, &name, &exp.updated_at);
         // 使用实验标题丰富展示，但不改变稳定 ID
         if !exp.title.is_empty() {
             item.title = format!("实验需要决策：{}", exp.title);

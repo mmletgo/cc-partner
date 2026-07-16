@@ -775,19 +775,22 @@ mod tests {
         assert_eq!(failed.phase, AgentSessionPhase::Failed);
 
         let active_only = repo.list_active(None, 100).await.unwrap();
-        assert!(active_only.iter().all(|r| r.phase != AgentSessionPhase::Failed));
+        assert!(active_only
+            .iter()
+            .all(|r| r.phase != AgentSessionPhase::Failed));
         assert!(active_only.iter().any(|r| r.id == needs.id));
 
         let attention = repo.list_attention_relevant(None, 100).await.unwrap();
         let ids: Vec<_> = attention.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&needs.id.as_str()), "needsInput must surface");
-        assert!(ids.contains(&failed.id.as_str()), "inactive failed must surface");
-        assert!(attention
-            .iter()
-            .all(|r| matches!(
-                r.phase,
-                AgentSessionPhase::NeedsInput | AgentSessionPhase::Failed
-            )));
+        assert!(
+            ids.contains(&failed.id.as_str()),
+            "inactive failed must surface"
+        );
+        assert!(attention.iter().all(|r| matches!(
+            r.phase,
+            AgentSessionPhase::NeedsInput | AgentSessionPhase::Failed
+        )));
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -38,6 +38,7 @@ fn agent_runtime_write_lock() -> &'static Mutex<()> {
 /// Code Logic（这个类型做什么）:
 ///     Applied 携带写前 phase + 更新后行；Ignored 带稳定 reason token。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Applied 携带完整 runtime 行供 emit；与 Ignored 体量差可接受
 pub enum AgentReduceOutcome {
     /// 已持久化：previous_phase 为 CAS 前 phase，row 为写后真值。
     Applied {
@@ -226,11 +227,10 @@ impl AgentRuntimeReducer {
                     occurred_at: at.to_string(),
                 };
                 if self.repo.apply_mutation(&mutation).await? {
-                    let updated = self
-                        .repo
-                        .get(id)
-                        .await?
-                        .ok_or_else(|| AppError::generic("agent session missing after complete"))?;
+                    let updated =
+                        self.repo.get(id).await?.ok_or_else(|| {
+                            AppError::generic("agent session missing after complete")
+                        })?;
                     if updated.phase == AgentSessionPhase::Completed && !updated.is_active {
                         return Ok(Some(updated));
                     }
@@ -295,11 +295,11 @@ impl AgentRuntimeReducer {
         let active = self.repo.list_active(None, 10_000).await?;
         let mut disconnected = Vec::new();
         for row in active {
-            if !alive_terminal_ids.contains(&row.terminal_session_id) {
-                if self.repo.mark_disconnected(&row.id, at).await? {
-                    if let Some(updated) = self.repo.get(&row.id).await? {
-                        disconnected.push(updated);
-                    }
+            if !alive_terminal_ids.contains(&row.terminal_session_id)
+                && self.repo.mark_disconnected(&row.id, at).await?
+            {
+                if let Some(updated) = self.repo.get(&row.id).await? {
+                    disconnected.push(updated);
                 }
             }
         }
@@ -313,6 +313,7 @@ impl AgentRuntimeReducer {
     ///
     /// Code Logic（这个函数做什么）:
     ///     委托 repo.get_active_for_terminal。
+    #[allow(dead_code)] // bridge / 测试查询 terminal 权威 active API surface
     pub async fn active_for_terminal(
         &self,
         terminal_session_id: &str,

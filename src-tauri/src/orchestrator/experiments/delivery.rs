@@ -116,7 +116,9 @@ pub async fn select_experiment_winner(
             outcome_updates.push((c.task_id.clone(), CandidateOutcome::Winner));
         } else if matches!(
             c.outcome,
-            CandidateOutcome::CandidateReady | CandidateOutcome::Pending | CandidateOutcome::Running
+            CandidateOutcome::CandidateReady
+                | CandidateOutcome::Pending
+                | CandidateOutcome::Running
         ) {
             outcome_updates.push((c.task_id.clone(), CandidateOutcome::Loser));
         }

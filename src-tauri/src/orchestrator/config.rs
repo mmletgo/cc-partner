@@ -226,7 +226,7 @@ mod tests {
             notify_blocked: true,
             notify_remote_outbox_failed: true,
             notify_task_done: false,
-                    generic_terminal: None,
+            generic_terminal: None,
         }
     }
 
@@ -411,7 +411,7 @@ mod tests {
             notify_blocked: false,
             notify_remote_outbox_failed: true,
             notify_task_done: true,
-                    generic_terminal: None,
+            generic_terminal: None,
         });
 
         let value = serde_json::to_value(dto).expect("dto should serialize");

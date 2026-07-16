@@ -151,10 +151,7 @@ pub async fn build_local_fleet_project(
     // Terminals: non-exited preferred; fall back to all listed
     let terminal_count = match state.workbench_session_repo.list(Some(project_id)).await {
         Ok(rows) => {
-            let active = rows
-                .iter()
-                .filter(|r| r.status != "exited")
-                .count();
+            let active = rows.iter().filter(|r| r.status != "exited").count();
             if active > 0 {
                 active as u32
             } else {
@@ -178,11 +175,7 @@ pub async fn build_local_fleet_project(
         .has_active_for_project(project_id)));
 
     // Orchestrator project-local running / retrying
-    let orchestrator_running = match state
-        .orchestrator_repo
-        .count_active_tasks(project_id)
-        .await
-    {
+    let orchestrator_running = match state.orchestrator_repo.count_active_tasks(project_id).await {
         Ok(n) => n.max(0) as u32,
         Err(_) => 0,
     };
@@ -201,21 +194,20 @@ pub async fn build_local_fleet_project(
     }
 
     // 7d ledger 聚合：失败只降级 status，不阻断其它 Fleet 字段
-    let (agent_activity_status, agent_activity) =
-        match summarize_window(
-            &state.agent_ledger_repo,
-            LedgerWindow::Days7,
-            Some(project_id),
-            Utc::now(),
-        )
-        .await
-        {
-            Ok(mut summary) => {
-                summary.project_id = Some(project.id.clone());
-                (FleetAgentActivityStatus::Live, Some(summary))
-            }
-            Err(_) => (FleetAgentActivityStatus::Unavailable, None),
-        };
+    let (agent_activity_status, agent_activity) = match summarize_window(
+        &state.agent_ledger_repo,
+        LedgerWindow::Days7,
+        Some(project_id),
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(mut summary) => {
+            summary.project_id = Some(project.id.clone());
+            (FleetAgentActivityStatus::Live, Some(summary))
+        }
+        Err(_) => (FleetAgentActivityStatus::Unavailable, None),
+    };
 
     Ok(LanFleetProjectSummary {
         project_id: project.id.clone(),
@@ -248,7 +240,10 @@ pub async fn build_owner_device_summary(
     state: &AppState,
     req: &LanFleetOwnerBatchReq,
 ) -> Result<LanFleetOwnerBatchResp, AppError> {
-    let total_requested = req.project_ids.len().saturating_add(req.project_paths.len());
+    let total_requested = req
+        .project_ids
+        .len()
+        .saturating_add(req.project_paths.len());
     if total_requested > FLEET_OWNER_BATCH_MAX_PROJECTS {
         return Err(AppError::validation("resource_limit"));
     }
@@ -552,11 +547,9 @@ pub async fn collect_lan_fleet_for_state_with_cache(
                 };
 
                 let fetch = client.lan_fleet_snapshot(&base_url, &req);
-                let timed = tokio::time::timeout(
-                    Duration::from_secs(FLEET_DEVICE_TIMEOUT_SECS),
-                    fetch,
-                )
-                .await;
+                let timed =
+                    tokio::time::timeout(Duration::from_secs(FLEET_DEVICE_TIMEOUT_SECS), fetch)
+                        .await;
 
                 match timed {
                     Ok(Ok(resp)) => {
@@ -760,10 +753,8 @@ async fn join_remote_agent_activity(
                 if let Some(summary) = by_id.get(&p.project_id) {
                     p.agent_activity_status = FleetAgentActivityStatus::Live;
                     p.agent_activity = Some(summary.clone());
-                } else if p.project_kind == FLEET_PROJECT_KIND_UNAVAILABLE {
-                    p.agent_activity_status = FleetAgentActivityStatus::Unavailable;
-                    p.agent_activity = None;
                 } else {
+                    // project_kind==unavailable 与 batch 缺 summary 结果相同
                     p.agent_activity_status = FleetAgentActivityStatus::Unavailable;
                     p.agent_activity = None;
                 }
@@ -785,11 +776,7 @@ async fn join_remote_agent_activity(
 ///     取 path 最后一段；空则回落 "unavailable"。
 fn path_display_name(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
-    let name = trimmed
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let name = trimmed.rsplit(['/', '\\']).next().unwrap_or("").trim();
     if name.is_empty() {
         FLEET_PROJECT_KIND_UNAVAILABLE.to_string()
     } else {
@@ -913,10 +900,9 @@ fn remap_remote_projects(
 
             let mut summary = match owner_summary {
                 Some(s) => s.clone(),
-                None => unavailable_for_request(
-                    FLEET_UNRESOLVED_PROJECT_ID,
-                    &path_display_name(path),
-                ),
+                None => {
+                    unavailable_for_request(FLEET_UNRESOLVED_PROJECT_ID, &path_display_name(path))
+                }
             };
 
             if let Some(sc) = shortcut {
@@ -969,9 +955,10 @@ fn remap_remote_projects(
 mod tests {
     use super::*;
     use crate::backend::ui::HeadlessBackendUi;
-    use crate::config::{AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig};
+    use crate::config::{
+        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
     use crate::net::peer_client::PeerClient;
-    use crate::workbench::lan_fleet::cache::FleetDisplayCache;
     use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
     use crate::orchestrator::repo::OrchestratorRepo;
     use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
@@ -979,11 +966,12 @@ mod tests {
     use crate::storage::{
         ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
         TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
-        WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
+        WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo, WorkbenchWorktreeRepo,
     };
     use crate::transfer::registry::TransferRegistry;
     use crate::workbench::agent_runtime::models::CreateActiveAgentSession;
     use crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry;
+    use crate::workbench::lan_fleet::cache::FleetDisplayCache;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
     use std::sync::atomic::AtomicU16;
@@ -1181,9 +1169,11 @@ mod tests {
             workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
             workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
             agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
-            agent_ledger_service: Arc::new(crate::workbench::agent_ledger::AgentLedgerService::new(
-                crate::storage::AgentLedgerRepo::new(pool.clone()),
-            )),
+            agent_ledger_service: Arc::new(
+                crate::workbench::agent_ledger::AgentLedgerService::new(
+                    crate::storage::AgentLedgerRepo::new(pool.clone()),
+                ),
+            ),
             workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
             workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
             workbench_workspace_layout_repo: Arc::new(WorkbenchWorkspaceLayoutRepo::new(
@@ -1301,20 +1291,12 @@ mod tests {
         insert_project(&pool, "p1", "local").await;
         insert_project(&pool, "p2", "local").await;
         let repo = OrchestratorRepo::new(pool.clone());
-        repo.create_task(&task_row(
-            "t1",
-            "p1",
-            OrchestratorTaskStatus::Running,
-        ))
-        .await
-        .unwrap();
-        repo.create_task(&task_row(
-            "t2",
-            "p2",
-            OrchestratorTaskStatus::Preparing,
-        ))
-        .await
-        .unwrap();
+        repo.create_task(&task_row("t1", "p1", OrchestratorTaskStatus::Running))
+            .await
+            .unwrap();
+        repo.create_task(&task_row("t2", "p2", OrchestratorTaskStatus::Preparing))
+            .await
+            .unwrap();
 
         let device_slots = count_active_slots_for_device(&repo).await.unwrap();
         let project_running = repo.count_active_tasks("p1").await.unwrap();
@@ -1475,18 +1457,10 @@ mod tests {
             unavailable_for_request(FLEET_UNRESOLVED_PROJECT_ID, "proj-b-missing"),
             owner_summary("local-c", "P-c", "local"),
         ];
-        let requested = vec![
-            path_a.to_string(),
-            path_b.to_string(),
-            path_c.to_string(),
-        ];
+        let requested = vec![path_a.to_string(), path_b.to_string(), path_c.to_string()];
 
-        let remapped = remap_remote_projects(
-            "owner-1",
-            owner_projects,
-            &requested,
-            &path_to_shortcut,
-        );
+        let remapped =
+            remap_remote_projects("owner-1", owner_projects, &requested, &path_to_shortcut);
 
         assert_eq!(remapped.len(), 3);
         assert_eq!(remapped[0].project_id, "remote:owner-1:hash-a");
@@ -1522,14 +1496,8 @@ mod tests {
         let path_a = "/tmp/a";
         let path_b = "/tmp/b";
         let mut map = HashMap::new();
-        map.insert(
-            path_a.to_string(),
-            shortcut_row("remote:d:a", "A", path_a),
-        );
-        map.insert(
-            path_b.to_string(),
-            shortcut_row("remote:d:b", "B", path_b),
-        );
+        map.insert(path_a.to_string(), shortcut_row("remote:d:a", "A", path_a));
+        map.insert(path_b.to_string(), shortcut_row("remote:d:b", "B", path_b));
         let owner_projects = vec![owner_summary("la", "A", "local")];
         let requested = vec![path_a.to_string(), path_b.to_string()];
         let remapped = remap_remote_projects("d", owner_projects, &requested, &map);
@@ -1653,12 +1621,7 @@ mod tests {
             "/tmp/proj-b-missing".to_string(),
             "/tmp/proj-c".to_string(),
         ];
-        let remapped = remap_remote_projects(
-            "owner-dev",
-            resp.device.projects,
-            &paths,
-            &map,
-        );
+        let remapped = remap_remote_projects("owner-dev", resp.device.projects, &paths, &map);
         assert_eq!(remapped[0].project_id, "remote:owner-dev:sa");
         assert_eq!(remapped[1].project_id, "remote:owner-dev:sb");
         assert_eq!(remapped[1].project_kind, FLEET_PROJECT_KIND_UNAVAILABLE);

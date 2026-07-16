@@ -137,8 +137,8 @@ pub async fn get_browser_verification_artifact(
 
 #[cfg(test)]
 mod tests {
-    use crate::workbench::browser_verification::FakeEngine;
     use crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry;
+    use crate::workbench::browser_verification::FakeEngine;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -176,7 +176,9 @@ mod tests {
         );
 
         // controller 解析 RemoteRelay → 不 start
-        let session = controller_previews.lookup(&ctrl_preview.preview_id).unwrap();
+        let session = controller_previews
+            .lookup(&ctrl_preview.preview_id)
+            .unwrap();
         assert!(matches!(
             session.target,
             crate::workbench::browser_proxy::BrowserPreviewTarget::RemoteRelay { .. }

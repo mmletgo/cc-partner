@@ -4,17 +4,17 @@
 
 use super::*;
 use crate::error::AppError;
+use crate::orchestrator::agent_adapter::types::RunnerAttemptPolicy;
 use crate::orchestrator::claim::{
     preflight_claim_candidates, ClaimCandidate, ClaimCasOutcome, ClaimScanCursor,
     CLAIM_CANDIDATE_LIMIT,
 };
 use crate::orchestrator::claude_runtime::ClaudeRuntimeSummary;
-use crate::orchestrator::agent_adapter::types::RunnerAttemptPolicy;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorAttemptStatus, OrchestratorCreateAction, OrchestratorEvidenceDto,
-    OrchestratorProjectConfigDto, OrchestratorRunState, OrchestratorTaskAttemptRow,
-    OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus, OrchestratorWorkflowState,
-    SplitTaskState, EVIDENCE_KIND_REPAIR_PROMPT,
+    OrchestratorAttemptPhase, OrchestratorAttemptStatus, OrchestratorCreateAction,
+    OrchestratorEvidenceDto, OrchestratorProjectConfigDto, OrchestratorRunState,
+    OrchestratorTaskAttemptRow, OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
+    OrchestratorWorkflowState, SplitTaskState, EVIDENCE_KIND_REPAIR_PROMPT,
 };
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
@@ -1203,14 +1203,32 @@ async fn prepare_claim_token_cas_blocks_stale_runner_hijack() {
         .unwrap());
 
     let hijack = repo
-        .mark_task_running_attempt("task-aba", "agent/old", "wt-old", "sess-old", 1, &token_a, None, &RunnerAttemptPolicy::claude_default())
+        .mark_task_running_attempt(
+            "task-aba",
+            "agent/old",
+            "wt-old",
+            "sess-old",
+            1,
+            &token_a,
+            None,
+            &RunnerAttemptPolicy::claude_default(),
+        )
         .await
         .unwrap();
     assert_eq!(hijack.status, OrchestratorTaskStatus::Preparing);
     assert_ne!(hijack.session_id.as_deref(), Some("sess-old"));
 
     let running = repo
-        .mark_task_running_attempt("task-aba", "agent/new", "wt-new", "sess-new", 1, &token_b, None, &RunnerAttemptPolicy::claude_default())
+        .mark_task_running_attempt(
+            "task-aba",
+            "agent/new",
+            "wt-new",
+            "sess-new",
+            1,
+            &token_b,
+            None,
+            &RunnerAttemptPolicy::claude_default(),
+        )
         .await
         .unwrap();
     assert_eq!(running.status, OrchestratorTaskStatus::Running);
@@ -2770,8 +2788,8 @@ async fn active_runner_guard_prevents_old_phase_and_runtime_updates() {
         2,
         "tok",
         None,
-            &RunnerAttemptPolicy::claude_default(),
-        )
+        &RunnerAttemptPolicy::claude_default(),
+    )
     .await
     .unwrap();
 
@@ -2865,8 +2883,8 @@ async fn update_active_runner_runtime_summary_persists_claude_fields() {
         1,
         "tok",
         None,
-            &RunnerAttemptPolicy::claude_default(),
-        )
+        &RunnerAttemptPolicy::claude_default(),
+    )
     .await
     .unwrap();
     let summary = crate::orchestrator::claude_runtime::ClaudeRuntimeSummary {
@@ -3437,11 +3455,16 @@ async fn attempt_policy_does_not_change_when_workflow_changes() {
     use crate::orchestrator::agent_adapter::types::{AgentProviderId, RunnerAttemptPolicy};
 
     let (_pool, repo) = setup_repo().await;
-    let mut task = task_row("task-policy", "proj-1", OrchestratorTaskStatus::Running);
+    let task = task_row("task-policy", "proj-1", OrchestratorTaskStatus::Running);
     repo.create_task(&task).await.unwrap();
 
-    let policy = RunnerAttemptPolicy::new(AgentProviderId::CodexVisible, 4, 300_000, AgentProviderId::CodexVisible.default_completion_contract())
-        .expect("policy");
+    let policy = RunnerAttemptPolicy::new(
+        AgentProviderId::CodexVisible,
+        4,
+        300_000,
+        AgentProviderId::CodexVisible.default_completion_contract(),
+    )
+    .expect("policy");
     repo.add_attempt(
         "task-policy",
         1,
@@ -3501,7 +3524,11 @@ async fn stall_cas_is_atomic_and_does_not_pollute_verifying_attempt() {
     use crate::orchestrator::runner_watchdog::EVIDENCE_CODE_RUNNER_STALLED;
 
     let (_pool, repo) = setup_repo().await;
-    let mut task = task_row("task-stall-cas", "proj-1", OrchestratorTaskStatus::Preparing);
+    let task = task_row(
+        "task-stall-cas",
+        "proj-1",
+        OrchestratorTaskStatus::Preparing,
+    );
     repo.create_task(&task).await.unwrap();
     sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
         .bind("task-stall-cas")
@@ -3546,10 +3573,7 @@ async fn stall_cas_is_atomic_and_does_not_pollute_verifying_attempt() {
         .await
         .unwrap();
     assert!(blocked.is_some());
-    assert_eq!(
-        blocked.unwrap().status,
-        OrchestratorTaskStatus::Blocked
-    );
+    assert_eq!(blocked.unwrap().status, OrchestratorTaskStatus::Blocked);
     let attempt = repo.get_attempt("task-stall-cas", 1).await.unwrap();
     assert_eq!(attempt.status, "stalled");
 
@@ -3566,7 +3590,11 @@ async fn stall_cas_is_atomic_and_does_not_pollute_verifying_attempt() {
     assert!(again.is_none());
 
     // Verifying + still-running attempt 不得被 stall 污染
-    let mut task2 = task_row("task-verifying", "proj-1", OrchestratorTaskStatus::Verifying);
+    let mut task2 = task_row(
+        "task-verifying",
+        "proj-1",
+        OrchestratorTaskStatus::Verifying,
+    );
     task2.attempt = 1;
     task2.session_id = Some("sess-v".into());
     repo.create_task(&task2).await.unwrap();
@@ -3632,7 +3660,10 @@ async fn touch_task_last_activity_updates_running_task_anchor() {
         .unwrap();
     assert!(ok);
     let row = repo.get_task("task-act").await.unwrap();
-    assert_eq!(row.last_activity_at.as_deref(), Some("2026-07-15T12:00:00Z"));
+    assert_eq!(
+        row.last_activity_at.as_deref(),
+        Some("2026-07-15T12:00:00Z")
+    );
 
     // session 不匹配不得更新
     let miss = repo
@@ -3641,5 +3672,8 @@ async fn touch_task_last_activity_updates_running_task_anchor() {
         .unwrap();
     assert!(!miss);
     let row = repo.get_task("task-act").await.unwrap();
-    assert_eq!(row.last_activity_at.as_deref(), Some("2026-07-15T12:00:00Z"));
+    assert_eq!(
+        row.last_activity_at.as_deref(),
+        Some("2026-07-15T12:00:00Z")
+    );
 }

@@ -7,7 +7,7 @@
 //!     定义 camelCase wire DTO 与 capability token。
 
 use crate::orchestrator::experiments::models::{
-    ComparativeConfidence, CreateExperimentRequest, OrchestratorExperimentDto,
+    CreateExperimentRequest, OrchestratorExperimentDto,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +75,7 @@ pub fn experiments_capability() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::experiments::models::ComparativeConfidence;
 
     #[test]
     fn capability_token_stable() {

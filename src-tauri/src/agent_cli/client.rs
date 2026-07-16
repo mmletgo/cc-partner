@@ -30,10 +30,7 @@ const MUTATE_TIMEOUT: Duration = Duration::from_secs(120);
 ///     Http 走 loopback；Fake 记录 hit 并按 mode 返回。
 #[derive(Clone)]
 pub enum AgentTransport {
-    Http {
-        port: u16,
-        http: reqwest::Client,
-    },
+    Http { port: u16, http: reqwest::Client },
     Fake(FakeTransport),
 }
 
@@ -142,13 +139,7 @@ pub fn map_control_error_bytes(bytes: &[u8], status: u16) -> CliError {
         }
         if let Some(code) = v.code {
             let message = v.message.unwrap_or_else(|| "control request failed".into());
-            return map_code_to_cli_error(
-                &code,
-                &message,
-                false,
-                v.outcome_unknown,
-                v.request_id,
-            );
+            return map_code_to_cli_error(&code, &message, false, v.outcome_unknown, v.request_id);
         }
     }
     match status {
@@ -182,15 +173,9 @@ pub fn map_code_to_cli_error(
         CliError::conflict(message).with_code(code)
     } else if code.contains("unsupported") || code.contains("capability") {
         CliError::unsupported(message)
-    } else if code.contains("unavailable")
-        || code.contains("timeout")
-        || code.contains("offline")
-    {
+    } else if code.contains("unavailable") || code.contains("timeout") || code.contains("offline") {
         CliError::unavailable(code, message)
-    } else if code.contains("validation")
-        || code.contains("invalid")
-        || code.contains("usage")
-    {
+    } else if code.contains("validation") || code.contains("invalid") || code.contains("usage") {
         CliError::usage(code, message)
     } else if code.contains("partial") {
         CliError::partial(message)
@@ -421,6 +406,8 @@ impl Default for FakeTransport {
 enum FakeMode {
     Ok(Value),
     DropAfterApply,
+    /// 测试失败路径 fixture（API surface）
+    #[allow(dead_code)]
     Fail(CliError),
 }
 
@@ -466,10 +453,7 @@ impl FakeTransport {
     /// Code Logic（这个函数做什么）:
     ///     克隆 last_headers。
     pub fn last_headers(&self) -> Vec<(String, String)> {
-        self.last_headers
-            .lock()
-            .expect("headers lock")
-            .clone()
+        self.last_headers.lock().expect("headers lock").clone()
     }
 
     async fn post_json(&self, _path: &str, _body: Value) -> Result<Value, CliError> {
@@ -576,7 +560,10 @@ mod tests {
         // 1 mutate + 1 reconcile query
         assert_eq!(transport.hit_count(), 2);
         assert!(err.outcome_unknown_flag());
-        assert_eq!(op_policy_reconcile(), MutationReplayPolicy::ReconcileByRequestId);
+        assert_eq!(
+            op_policy_reconcile(),
+            MutationReplayPolicy::ReconcileByRequestId
+        );
     }
 
     fn op_policy_reconcile() -> MutationReplayPolicy {

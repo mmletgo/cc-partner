@@ -48,16 +48,16 @@ impl GenericTerminalConfig {
     pub fn validate(&self) -> Result<AgentCompletionContract, AppError> {
         validate_no_shell_meta("executable", &self.executable)?;
         if self.executable.trim().is_empty() {
-            return Err(AppError::validation(
-                "generic terminal executable 不能为空",
-            ));
+            return Err(AppError::validation("generic terminal executable 不能为空"));
         }
         for (i, arg) in self.args.iter().enumerate() {
             validate_no_shell_meta(&format!("args[{i}]"), arg)?;
         }
         let completion = AgentCompletionContract::parse(&self.completion_contract)?;
         match completion {
-            AgentCompletionContract::Manual | AgentCompletionContract::SentinelLine => Ok(completion),
+            AgentCompletionContract::Manual | AgentCompletionContract::SentinelLine => {
+                Ok(completion)
+            }
             AgentCompletionContract::HookEvent => Err(AppError::validation(
                 "generic terminal 不支持 hookEvent completion",
             )),
@@ -173,7 +173,10 @@ impl AgentAdapter for GenericTerminalAdapter {
         })
     }
 
-    fn build_resume_plan(&self, _request: &AgentLaunchRequest) -> Result<AgentLaunchPlan, AppError> {
+    fn build_resume_plan(
+        &self,
+        _request: &AgentLaunchRequest,
+    ) -> Result<AgentLaunchPlan, AppError> {
         Err(AppError::generic("generic terminal 不支持 resume"))
     }
 
@@ -261,7 +264,10 @@ mod tests {
             args: vec!["--flag".into(), "value".into()],
             completion_contract: "sentinelLine".into(),
         };
-        assert_eq!(ok.validate().unwrap(), AgentCompletionContract::SentinelLine);
+        assert_eq!(
+            ok.validate().unwrap(),
+            AgentCompletionContract::SentinelLine
+        );
         let _ = cfg;
     }
 

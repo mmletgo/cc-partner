@@ -73,7 +73,9 @@ mod tests {
         assert!(check_next_attempt(&p, 1).is_ok());
         let err = check_next_attempt(&p, 2).unwrap_err();
         assert!(is_max_turns_exceeded(&err));
-        assert!(err.to_string().contains(EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED));
+        assert!(err
+            .to_string()
+            .contains(EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED));
     }
 
     /// Business Logic（为什么需要这个测试）:

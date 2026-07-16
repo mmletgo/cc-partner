@@ -39,11 +39,7 @@ pub struct StalledRunnerCandidate {
 ///
 /// Code Logic（这个函数做什么）:
 ///     activity_anchor + stall_timeout_ms <= now。
-pub fn is_stalled_at(
-    activity_anchor_at: &str,
-    stall_timeout_ms: i64,
-    now: DateTime<Utc>,
-) -> bool {
+pub fn is_stalled_at(activity_anchor_at: &str, stall_timeout_ms: i64, now: DateTime<Utc>) -> bool {
     let Ok(anchor) = DateTime::parse_from_rfc3339(activity_anchor_at) else {
         return false;
     };
@@ -102,7 +98,11 @@ pub fn select_stalled_runners(
         if task.status != OrchestratorTaskStatus::Running {
             continue;
         }
-        let Some(session_id) = task.session_id.as_deref().map(str::trim).filter(|v| !v.is_empty())
+        let Some(session_id) = task
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
         else {
             continue;
         };
@@ -276,7 +276,7 @@ mod tests {
             .with_timezone(&Utc);
 
         let before = base + chrono::Duration::milliseconds(299_999);
-        assert!(select_stalled_runners(&[task.clone()], before).is_empty());
+        assert!(select_stalled_runners(std::slice::from_ref(&task), before).is_empty());
 
         let at = base + chrono::Duration::milliseconds(300_000);
         assert_eq!(select_stalled_runners(&[task], at).len(), 1);

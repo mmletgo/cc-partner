@@ -15,11 +15,12 @@ pub mod snapshot;
 pub use models::{
     AgentRuntimeMutation, AgentSessionPhase, AgentSessionRuntime, CreateActiveAgentSession,
 };
-pub use osc::{encode_agent_osc_frame, AgentOscDecoder};
+#[cfg(test)]
+pub use osc::encode_agent_osc_frame;
+pub use osc::AgentOscDecoder;
 pub use reducer::{collect_alive_terminal_ids, AgentReduceOutcome, AgentRuntimeReducer};
 pub use snapshot::{
     emit_agent_runtime_changed, get_agent_runtime_snapshot_for_state, AgentRuntimeSnapshot,
-    AgentSessionRuntimeDto,
 };
 
 use crate::state::AppState;
@@ -33,8 +34,8 @@ const AGENT_MUTATION_CHANNEL_CAP: usize = 256;
 static AGENT_MUTATION_TX: OnceLock<mpsc::Sender<AgentRuntimeMutation>> = OnceLock::new();
 
 /// 测试可替换的 send 钩子（默认走 channel）。
-static AGENT_MUTATION_TEST_HOOK: Mutex<Option<Box<dyn Fn(AgentRuntimeMutation) + Send>>> =
-    Mutex::new(None);
+type AgentMutationTestHook = Option<Box<dyn Fn(AgentRuntimeMutation) + Send>>;
+static AGENT_MUTATION_TEST_HOOK: Mutex<AgentMutationTestHook> = Mutex::new(None);
 
 /// 安装 owner mutation ingress，返回 receiver 供 reducer worker 消费。
 ///
@@ -163,9 +164,10 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                     });
                 }
                 // H1：OSC 生产路径 dual-write task.last_activity_at，供 stall watchdog 使用。
-                if let (Some(task_id), Some(attempt)) =
-                    (row.orchestrator_task_id.as_deref(), row.orchestrator_attempt)
-                {
+                if let (Some(task_id), Some(attempt)) = (
+                    row.orchestrator_task_id.as_deref(),
+                    row.orchestrator_attempt,
+                ) {
                     let activity_at = if row.last_activity_at.trim().is_empty() {
                         occurred_at.as_str()
                     } else {
@@ -188,9 +190,7 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                     }
                 }
                 // HookEvent completion：runtime Completed 时按 attempt 冻结合同推进 Verifying。
-                if row.phase == AgentSessionPhase::Completed
-                    && row.orchestrator_task_id.is_some()
-                {
+                if row.phase == AgentSessionPhase::Completed && row.orchestrator_task_id.is_some() {
                     if let Err(err) = crate::orchestrator::completion::maybe_complete_from_agent_runtime_completed(
                         &state,
                         &row,

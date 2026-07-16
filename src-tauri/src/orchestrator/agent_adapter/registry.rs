@@ -275,10 +275,9 @@ impl AgentAdapterRegistry {
     /// Code Logic（这个函数做什么）:
     ///     HashMap get；缺失返回业务错误。
     pub fn get(&self, provider: AgentProviderId) -> Result<Arc<dyn AgentAdapter>, AppError> {
-        self.adapters
-            .get(&provider)
-            .cloned()
-            .ok_or_else(|| AppError::generic(format!("未注册 Agent adapter: {}", provider.as_str())))
+        self.adapters.get(&provider).cloned().ok_or_else(|| {
+            AppError::generic(format!("未注册 Agent adapter: {}", provider.as_str()))
+        })
     }
 
     /// 带 60s 缓存的 probe。

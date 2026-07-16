@@ -253,6 +253,7 @@ pub fn desktop_auto_slot_key() -> &'static str {
 ///
 /// Code Logic（这个函数做什么）:
 ///     生成 `named:<uuid>`。
+#[allow(dead_code)] // named snapshot 创建 API surface
 pub fn new_named_slot_key() -> String {
     format!("named:{}", uuid::Uuid::new_v4())
 }
@@ -328,9 +329,7 @@ pub fn validate_layout_name(
 ///
 /// Code Logic（这个函数做什么）:
 ///     None 透传；Some 走 `normalize_browser_target_url`。
-pub fn normalize_layout_browser_target(
-    raw: Option<&str>,
-) -> Result<Option<String>, AppError> {
+pub fn normalize_layout_browser_target(raw: Option<&str>) -> Result<Option<String>, AppError> {
     match raw {
         None => Ok(None),
         Some(value) => {
@@ -447,11 +446,7 @@ mod tests {
     #[test]
     fn named_requires_name_auto_forbids_name() {
         assert!(validate_layout_name(WorkspaceLayoutKind::Named, &None).is_err());
-        assert!(validate_layout_name(
-            WorkspaceLayoutKind::Auto,
-            &Some("x".to_string())
-        )
-        .is_err());
+        assert!(validate_layout_name(WorkspaceLayoutKind::Auto, &Some("x".to_string())).is_err());
         assert_eq!(
             validate_layout_name(WorkspaceLayoutKind::Named, &Some("  snap  ".to_string()))
                 .unwrap()
@@ -500,11 +495,23 @@ mod tests {
         }
         // 整段 JSON 也不应出现这些敏感键名（防止嵌套泄漏）。
         let text = value.to_string();
-        for needle in ["\"command\"", "\"prompt\"", "\"token\"", "\"env\"", "\"provider\""] {
-            assert!(!text.contains(needle), "serialized layout must not contain {needle}");
+        for needle in [
+            "\"command\"",
+            "\"prompt\"",
+            "\"token\"",
+            "\"env\"",
+            "\"provider\"",
+        ] {
+            assert!(
+                !text.contains(needle),
+                "serialized layout must not contain {needle}"
+            );
         }
         assert_eq!(obj.get("schemaVersion"), Some(&Value::from(1)));
-        assert_eq!(obj.get("slotKey").and_then(|v| v.as_str()), Some("desktop:auto"));
+        assert_eq!(
+            obj.get("slotKey").and_then(|v| v.as_str()),
+            Some("desktop:auto")
+        );
     }
 
     #[test]

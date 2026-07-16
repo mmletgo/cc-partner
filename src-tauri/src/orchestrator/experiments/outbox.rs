@@ -123,10 +123,7 @@ impl OrchestratorRepo {
     ///
     /// Code Logic（这个函数做什么）:
     ///     SELECT by id。
-    pub async fn get_experiment_outbox(
-        &self,
-        id: &str,
-    ) -> Result<ExperimentOutboxRow, AppError> {
+    pub async fn get_experiment_outbox(&self, id: &str) -> Result<ExperimentOutboxRow, AppError> {
         let row = sqlx::query(
             "SELECT id, device_id, device_name, remote_project_path, remote_project_id, request_json, \
              status, remote_experiment_id, last_error, state_version, created_at, updated_at, sent_at \
@@ -333,10 +330,8 @@ impl OrchestratorRepo {
     pub async fn get_experiment_mirror_by_remote_id(
         &self,
         remote_experiment_id: &str,
-    ) -> Result<
-        Option<crate::orchestrator::experiments::models::OrchestratorExperimentDto>,
-        AppError,
-    > {
+    ) -> Result<Option<crate::orchestrator::experiments::models::OrchestratorExperimentDto>, AppError>
+    {
         let row = sqlx::query(
             "SELECT payload_json FROM orchestrator_remote_experiment_mirrors \
              WHERE remote_experiment_id = ? ORDER BY last_synced_at DESC LIMIT 1",
@@ -405,9 +400,7 @@ pub async fn dispatch_experiment_outbox_once(
     state: &crate::state::AppState,
 ) -> Result<usize, AppError> {
     use crate::orchestrator::experiments::remote_client::create_remote_experiment;
-    use crate::orchestrator::outbox::{
-        is_remote_network_error, open_remote_project_for_shortcut,
-    };
+    use crate::orchestrator::outbox::{is_remote_network_error, open_remote_project_for_shortcut};
     use crate::workbench::models::WorkbenchProjectRow;
 
     let pending = state

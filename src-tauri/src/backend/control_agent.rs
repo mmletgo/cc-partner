@@ -22,8 +22,6 @@ use crate::commands::orchestrator::{
     create_orchestrator_task_view_for_http_with_request_id, get_orchestrator_experiment_for_state,
     list_orchestrator_task_views_for_state,
 };
-use crate::orchestrator::models::OrchestratorCreateAction;
-use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
 use crate::commands::workbench::{
     create_workbench_worktree_for_state, discover_workbench_browser_targets_for_state,
     get_browser_verification_for_state, get_workbench_lan_fleet_for_state,
@@ -36,6 +34,8 @@ use crate::net::error_response::{P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::require_loopback_peer;
 use crate::net::request_context::P2pRequestContext;
 use crate::orchestrator::experiments::CreateExperimentRequest;
+use crate::orchestrator::models::OrchestratorCreateAction;
+use crate::orchestrator::remote_protocol::RemoteCreateOrchestratorTaskReq;
 use crate::state::AppState;
 use crate::workbench::agent_runtime::snapshot::{
     get_agent_runtime_snapshot_for_state, AgentSessionRuntimeDto,
@@ -121,8 +121,7 @@ pub async fn dispatch_query(state: &AppState, op: AgentControlQuery) -> Result<V
                     path: r.path.clone(),
                 })
                 .collect();
-            let hit = resolve_exact_project(&selector, &candidates)
-                .map_err(cli_to_app_error)?;
+            let hit = resolve_exact_project(&selector, &candidates).map_err(cli_to_app_error)?;
             let row = rows
                 .iter()
                 .find(|r| r.id == hit.id)
@@ -160,8 +159,7 @@ pub async fn dispatch_query(state: &AppState, op: AgentControlQuery) -> Result<V
         }
         AgentControlQuery::AgentList { project } => {
             let project_id = resolve_project_id(state, &project).await?;
-            let snap =
-                get_agent_runtime_snapshot_for_state(state, Some(project_id)).await?;
+            let snap = get_agent_runtime_snapshot_for_state(state, Some(project_id)).await?;
             Ok(serde_json::to_value(snap)?)
         }
         AgentControlQuery::AgentInspect { agent_session_id } => {
@@ -187,8 +185,7 @@ pub async fn dispatch_query(state: &AppState, op: AgentControlQuery) -> Result<V
         } => wait_agent_phase_local(state, &agent_session_id, &phase, timeout_ms).await,
         AgentControlQuery::TaskList { project } => {
             let project_id = resolve_project_id(state, &project).await?;
-            let items =
-                list_orchestrator_task_views_for_state(state, Some(project_id)).await?;
+            let items = list_orchestrator_task_views_for_state(state, Some(project_id)).await?;
             Ok(json!({ "items": items }))
         }
         AgentControlQuery::ExperimentInspect { experiment_id } => {
@@ -213,7 +210,9 @@ pub async fn dispatch_query(state: &AppState, op: AgentControlQuery) -> Result<V
             let run = get_browser_verification_for_state(state, run_id).await?;
             Ok(serde_json::to_value(run)?)
         }
-        AgentControlQuery::DeviceResolve { device_id } => resolve_device_for_control(state, &device_id),
+        AgentControlQuery::DeviceResolve { device_id } => {
+            resolve_device_for_control(state, &device_id)
+        }
         AgentControlQuery::TaskByClientRequestId { client_request_id } => {
             let task = state
                 .orchestrator_repo
@@ -256,13 +255,9 @@ pub async fn dispatch_mutate(
                 .get("baseBranch")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let item = create_workbench_worktree_for_state(
-                state,
-                project_id,
-                branch_name,
-                base_branch,
-            )
-            .await?;
+            let item =
+                create_workbench_worktree_for_state(state, project_id, branch_name, base_branch)
+                    .await?;
             Ok(serde_json::to_value(item)?)
         }
         AgentControlMutation::SessionSend { session_id, data } => {
@@ -298,7 +293,10 @@ pub async fn dispatch_mutate(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                priority: payload.get("priority").and_then(|v| v.as_i64()).unwrap_or(0),
+                priority: payload
+                    .get("priority")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
                 create_action,
                 client_request_id: Some(client_request_id),
                 source: payload
@@ -322,7 +320,9 @@ pub async fn dispatch_mutate(
         } => {
             // 自然幂等：已取消则返回当前视图
             let task = state.orchestrator_repo.cancel_task(&task_id).await?;
-            Ok(serde_json::to_value(crate::orchestrator::models::OrchestratorTaskDto::from(task))?)
+            Ok(serde_json::to_value(
+                crate::orchestrator::models::OrchestratorTaskDto::from(task),
+            )?)
         }
         AgentControlMutation::TaskRetry {
             task_id,
@@ -387,11 +387,13 @@ pub async fn dispatch_mutate(
             Ok(serde_json::to_value(outcome.experiment)?)
         }
         AgentControlMutation::ExperimentCancel { experiment_id } => {
-            let exp =
-                cancel_orchestrator_experiment_for_state(state, &experiment_id).await?;
+            let exp = cancel_orchestrator_experiment_for_state(state, &experiment_id).await?;
             Ok(serde_json::to_value(exp)?)
         }
-        AgentControlMutation::BrowserVerify { project: _, payload } => {
+        AgentControlMutation::BrowserVerify {
+            project: _,
+            payload,
+        } => {
             let preview_id = payload
                 .get("previewId")
                 .and_then(|v| v.as_str())
@@ -482,11 +484,8 @@ async fn wait_agent_phase_local(
 }
 
 fn phase_matches(current: &str, want: &str) -> bool {
-    let a = current
-        .to_ascii_lowercase()
-        .replace('_', "")
-        .replace('-', "");
-    let b = want.to_ascii_lowercase().replace('_', "").replace('-', "");
+    let a = current.to_ascii_lowercase().replace(['_', '-'], "");
+    let b = want.to_ascii_lowercase().replace(['_', '-'], "");
     a == b
 }
 
@@ -557,9 +556,8 @@ fn ensure_response_within_limit<T: serde::Serialize>(
     body: &T,
     context: &P2pRequestContext,
 ) -> Result<(), P2pError> {
-    let bytes = serde_json::to_vec(body).map_err(|_| {
-        P2pError::from_code("响应序列化失败", P2pErrorCode::Internal, context)
-    })?;
+    let bytes = serde_json::to_vec(body)
+        .map_err(|_| P2pError::from_code("响应序列化失败", P2pErrorCode::Internal, context))?;
     if bytes.len() > CONTROL_RESPONSE_BODY_LIMIT_BYTES {
         return Err(P2pError::from_code(
             "control response exceeds 1MiB",
@@ -575,12 +573,8 @@ fn cli_to_app_error(err: crate::agent_cli::output::CliError) -> AppError {
         crate::agent_cli::output::CliExitCode::NotFound => AppError::not_found(err.message),
         crate::agent_cli::output::CliExitCode::Conflict => AppError::conflict(err.message),
         crate::agent_cli::output::CliExitCode::Usage => AppError::validation(err.message),
-        crate::agent_cli::output::CliExitCode::Unavailable => {
-            AppError::unavailable(err.message)
-        }
-        crate::agent_cli::output::CliExitCode::Unsupported => {
-            AppError::validation(err.message)
-        }
+        crate::agent_cli::output::CliExitCode::Unavailable => AppError::unavailable(err.message),
+        crate::agent_cli::output::CliExitCode::Unsupported => AppError::validation(err.message),
         _ => AppError::generic(err.message),
     }
 }

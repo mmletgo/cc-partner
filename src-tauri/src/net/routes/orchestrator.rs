@@ -21,15 +21,17 @@ use crate::commands::orchestrator::{
     validate_local_owner_workflow_document, validate_workflow_document_for_state,
     CreateOrchestratorTaskRequest, OrchestratorRuntimeSnapshotDto, OrchestratorTaskViewDto,
 };
+use crate::commands::orchestrator_adapters::{
+    build_agent_adapter_catalog, OrchestratorAgentAdapterCatalog,
+};
 use crate::commands::prompt_optimizer::{
     local_complete_orchestrator_task_prompt, OrchestratorTaskPromptCompletionDto,
 };
-use crate::commands::orchestrator_adapters::{build_agent_adapter_catalog, OrchestratorAgentAdapterCatalog};
 use crate::config::AppConfig;
-use crate::orchestrator::agent_adapter::AgentAdapterRegistry;
 use crate::error::AppError;
 use crate::net::error_response::{P2pError, P2pResult};
 use crate::net::request_context::P2pRequestContext;
+use crate::orchestrator::agent_adapter::AgentAdapterRegistry;
 use crate::orchestrator::config::OrchestratorAutomationConfigDto;
 use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskRow, OrchestratorTaskStatus,
@@ -1145,8 +1147,6 @@ async fn discard_remote_outbox_for_context(
     .await
 }
 
-
-
 /// Business Logic（为什么需要这个函数）:
 ///     远端/桌面需要 owner adapter 可用性，且不得泄露 executable/env。
 ///
@@ -1170,9 +1170,8 @@ pub async fn agent_adapters_catalog(
         .generic_terminal
         .clone();
     let registry = AgentAdapterRegistry::new(generic);
-    let catalog = build_agent_adapter_catalog(&registry).map_err(|e| {
-        P2pError::from_app_error(e, &ctx, "orchestrator.agent_adapters")
-    })?;
+    let catalog = build_agent_adapter_catalog(&registry)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.agent_adapters"))?;
     Ok(Json(catalog))
 }
 
@@ -1186,16 +1185,13 @@ pub async fn create_experiment_route(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<crate::orchestrator::experiments::models::CreateExperimentRequest>,
-) -> P2pResult<Json<crate::orchestrator::experiments::remote_protocol::CreateExperimentResponse>>
-{
+) -> P2pResult<Json<crate::orchestrator::experiments::remote_protocol::CreateExperimentResponse>> {
     require_local_project_by_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.create"))?;
-    let outcome = crate::commands::orchestrator::create_local_orchestrator_experiment(
-        &state, req,
-    )
-    .await
-    .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.create"))?;
+    let outcome = crate::commands::orchestrator::create_local_orchestrator_experiment(&state, req)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.create"))?;
     Ok(Json(
         crate::orchestrator::experiments::remote_protocol::CreateExperimentResponse {
             experiment: outcome.experiment,
@@ -1213,8 +1209,7 @@ pub async fn list_experiments_route(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<crate::orchestrator::experiments::remote_protocol::ListExperimentsRequest>,
-) -> P2pResult<Json<crate::orchestrator::experiments::remote_protocol::ListExperimentsResponse>>
-{
+) -> P2pResult<Json<crate::orchestrator::experiments::remote_protocol::ListExperimentsResponse>> {
     require_local_project_by_id(&state, &req.project_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "orchestrator.experiments.list"))?;

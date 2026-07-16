@@ -28,7 +28,8 @@ use sqlx::Row;
 use uuid::Uuid;
 
 /// 实验组表 schema。
-pub const ORCHESTRATOR_EXPERIMENT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS orchestrator_experiments (
+pub const ORCHESTRATOR_EXPERIMENT_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS orchestrator_experiments (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -133,7 +134,8 @@ pub const ORCHESTRATOR_REMOTE_EXPERIMENT_MIRROR_SCHEMA: &str =
   UNIQUE(device_id, remote_experiment_id)
 )";
 
-const EXPERIMENT_COLUMNS: &str = "id, project_id, title, goal, acceptance, status, selection_policy, \
+const EXPERIMENT_COLUMNS: &str =
+    "id, project_id, title, goal, acceptance, status, selection_policy, \
     max_parallel, winner_task_id, selection_reason, confidence, version, created_at, updated_at";
 
 const CANDIDATE_COLUMNS: &str = "experiment_id, task_id, ordinal, provider_id, strategy_label, \
@@ -216,9 +218,7 @@ impl OrchestratorRepo {
     ///
     /// Code Logic（这个函数做什么）:
     ///     执行 CREATE TABLE/INDEX IF NOT EXISTS，并 ensure task 上 experiment_id/delivery_suppressed 列。
-    pub async fn init_experiment_schema(
-        pool: &sqlx::sqlite::SqlitePool,
-    ) -> Result<(), AppError> {
+    pub async fn init_experiment_schema(pool: &sqlx::sqlite::SqlitePool) -> Result<(), AppError> {
         for statement in [
             ORCHESTRATOR_EXPERIMENT_SCHEMA,
             ORCHESTRATOR_EXPERIMENT_CANDIDATE_SCHEMA,
@@ -382,10 +382,7 @@ impl OrchestratorRepo {
     ///
     /// Code Logic（这个函数做什么）:
     ///     INSERT orchestrator_experiments 全字段。
-    pub async fn insert_experiment(
-        &self,
-        row: &OrchestratorExperimentRow,
-    ) -> Result<(), AppError> {
+    pub async fn insert_experiment(&self, row: &OrchestratorExperimentRow) -> Result<(), AppError> {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "INSERT INTO orchestrator_experiments \
@@ -495,6 +492,7 @@ impl OrchestratorRepo {
     ///
     /// Code Logic（这个函数做什么）:
     ///     UPDATE WHERE id AND version AND expected_status；成功后 version+1。
+    #[allow(clippy::too_many_arguments)] // CAS 需 version/status/winner/confidence
     pub async fn cas_experiment_status(
         &self,
         experiment_id: &str,
@@ -988,13 +986,12 @@ mod tests {
         assert!(cols.iter().any(|c| c == "experiment_id"));
         assert!(cols.iter().any(|c| c == "delivery_suppressed"));
         // winner index 存在
-        let idx: Option<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
-        )
-        .bind("idx_orchestrator_experiment_candidates_one_winner")
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
+        let idx: Option<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+                .bind("idx_orchestrator_experiment_candidates_one_winner")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
         assert!(idx.is_some());
     }
 

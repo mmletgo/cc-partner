@@ -73,9 +73,7 @@ impl ExperimentStatus {
             "needs_decision" => Ok(Self::NeedsDecision),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
-            other => Err(AppError::generic(format!(
-                "未知 Experiment 状态: {other}"
-            ))),
+            other => Err(AppError::generic(format!("未知 Experiment 状态: {other}"))),
         }
     }
 
@@ -145,9 +143,7 @@ impl CandidateOutcome {
             "loser" => Ok(Self::Loser),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
-            other => Err(AppError::generic(format!(
-                "未知 CandidateOutcome: {other}"
-            ))),
+            other => Err(AppError::generic(format!("未知 CandidateOutcome: {other}"))),
         }
     }
 
@@ -493,10 +489,7 @@ mod tests {
             ExperimentStatus::Failed,
             ExperimentStatus::Cancelled,
         ] {
-            assert_eq!(
-                ExperimentStatus::from_str(status.as_str()).unwrap(),
-                status
-            );
+            assert_eq!(ExperimentStatus::from_str(status.as_str()).unwrap(), status);
         }
         assert!(ExperimentStatus::from_str("unknown").is_err());
     }

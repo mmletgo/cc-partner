@@ -29,11 +29,12 @@ use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
 use crate::storage::{
     AgentLedgerRepo, ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo,
     ScratchpadRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
-    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
+    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo,
+    WorkbenchWorktreeRepo,
 };
-use crate::workbench::agent_ledger::AgentLedgerService;
 use crate::transfer::registry::TransferRegistry;
 use crate::updater::UpdateRuntime;
+use crate::workbench::agent_ledger::AgentLedgerService;
 use mdns_sd::ServiceDaemon;
 use serde::Serialize;
 use sqlx::SqlitePool;

@@ -309,12 +309,10 @@ async fn run_chromiumoxide(
         .await
         .map_err(|e| AppError::unavailable(format!("browser_engine_unavailable: {e}")))?;
 
-    let handler_task = tokio::spawn(async move {
-        while let Some(_event) = handler.next().await {}
-    });
+    let handler_task =
+        tokio::spawn(async move { while let Some(_event) = handler.next().await {} });
 
-    let console_entries: Arc<Mutex<Vec<BrowserConsoleEntry>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let console_entries: Arc<Mutex<Vec<BrowserConsoleEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let console_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let run_result = async {
@@ -381,14 +379,8 @@ async fn run_chromiumoxide(
                     timeout_ms,
                 } => {
                     let timeout_ms = validate_wait_timeout_ms(*timeout_ms)?;
-                    wait_for_condition(
-                        &page,
-                        condition,
-                        timeout_ms,
-                        cancel,
-                        &console_entries,
-                    )
-                    .await?;
+                    wait_for_condition(&page, condition, timeout_ms, cancel, &console_entries)
+                        .await?;
                     ensure_page_still_loopback(&page).await?;
                     command_results.push(BrowserCommandResult::WaitSatisfied { timeout_ms });
                 }
@@ -403,13 +395,13 @@ async fn run_chromiumoxide(
                     generation = generation.saturating_add(1);
                 }
                 BrowserVerificationCommand::Click { node_ref } => {
-                    let el = node_map.get(node_ref).ok_or_else(|| {
-                        AppError::conflict("browser_stale_node")
-                    })?;
+                    let el = node_map
+                        .get(node_ref)
+                        .ok_or_else(|| AppError::conflict("browser_stale_node"))?;
                     with_cancel(cancel, async {
-                        el.click()
-                            .await
-                            .map_err(|e| AppError::validation(format!("browser_command_failed: click: {e}")))
+                        el.click().await.map_err(|e| {
+                            AppError::validation(format!("browser_command_failed: click: {e}"))
+                        })
                     })
                     .await?;
                     // click 可能触发导航
@@ -425,9 +417,9 @@ async fn run_chromiumoxide(
                 }
                 BrowserVerificationCommand::Fill { node_ref, value } => {
                     validate_fill_value(value)?;
-                    let el = node_map.get(node_ref).ok_or_else(|| {
-                        AppError::conflict("browser_stale_node")
-                    })?;
+                    let el = node_map
+                        .get(node_ref)
+                        .ok_or_else(|| AppError::conflict("browser_stale_node"))?;
                     let tag = el
                         .property("tagName")
                         .await
@@ -458,18 +450,12 @@ async fn run_chromiumoxide(
                             .flatten()
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
-                    validate_fill_control_kind(
-                        tag.as_deref(),
-                        input_type.as_deref(),
-                        is_hidden,
-                    )?;
+                    validate_fill_control_kind(tag.as_deref(), input_type.as_deref(), is_hidden)?;
                     with_cancel(cancel, async {
                         // 真实 DOM 写入：先 focus 再 type
-                        el.click()
-                            .await
-                            .map_err(|e| {
-                                AppError::validation(format!("browser_command_failed: fill_focus: {e}"))
-                            })?;
+                        el.click().await.map_err(|e| {
+                            AppError::validation(format!("browser_command_failed: fill_focus: {e}"))
+                        })?;
                         el.type_str(value).await.map_err(|e| {
                             AppError::validation(format!("browser_command_failed: fill: {e}"))
                         })?;
@@ -519,10 +505,7 @@ async fn run_chromiumoxide(
                         .collect();
                     let truncated = guard.len() >= MAX_CONSOLE_ENTRIES;
                     drop(guard);
-                    command_results.push(BrowserCommandResult::Console {
-                        entries,
-                        truncated,
-                    });
+                    command_results.push(BrowserCommandResult::Console { entries, truncated });
                 }
             }
             observer.on_progress(
@@ -595,9 +578,7 @@ fn map_console_level(
 ///
 /// Code Logic（这个函数做什么）:
 ///     优先 value 字符串化，否则 description。
-fn remote_object_to_text(
-    obj: &chromiumoxide::cdp::js_protocol::runtime::RemoteObject,
-) -> String {
+fn remote_object_to_text(obj: &chromiumoxide::cdp::js_protocol::runtime::RemoteObject) -> String {
     if let Some(v) = &obj.value {
         return match v {
             serde_json::Value::String(s) => s.clone(),
@@ -620,7 +601,13 @@ async fn capture_snapshot(
     max: u32,
     fallback_target: &str,
     cancel: &CancellationToken,
-) -> Result<(BrowserSnapshotResult, HashMap<String, chromiumoxide::Element>), AppError> {
+) -> Result<
+    (
+        BrowserSnapshotResult,
+        HashMap<String, chromiumoxide::Element>,
+    ),
+    AppError,
+> {
     if cancel.is_cancelled() {
         return Err(AppError::conflict("browser_verification_canceled"));
     }
@@ -680,7 +667,12 @@ async fn capture_snapshot(
                 .unwrap_or_default();
         }
         if name.is_empty() {
-            name = el.attribute("name").await.ok().flatten().unwrap_or_default();
+            name = el
+                .attribute("name")
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
         }
         let role = el
             .property("tagName")
@@ -762,7 +754,10 @@ async fn wait_for_condition(
                 if text.is_empty() {
                     true
                 } else {
-                    match page.evaluate("document.body ? document.body.innerText : ''").await {
+                    match page
+                        .evaluate("document.body ? document.body.innerText : ''")
+                        .await
+                    {
                         Ok(eval) => {
                             let body = eval
                                 .value()

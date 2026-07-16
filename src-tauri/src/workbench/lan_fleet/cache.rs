@@ -96,6 +96,7 @@ impl FleetDisplayCache {
     ///
     /// Code Logic（这个函数做什么）:
     ///     clear。
+    #[allow(dead_code)] // 单测隔离清空 cache API surface
     pub fn clear(&self) {
         let mut guard = self.inner.lock().expect("fleet cache 锁中毒");
         guard.clear();

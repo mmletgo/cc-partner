@@ -1809,9 +1809,7 @@ impl WorkbenchSessionRegistry {
         }
         // 非 tmux（含历史 token `raw_pty` 与当前 `pty`）一律 skip，禁止 spawn 新 shell
         if row.backend != TMUX_BACKEND {
-            return Err(AppError::validation(
-                "restore_skips_raw_pty".to_string(),
-            ));
+            return Err(AppError::validation("restore_skips_raw_pty".to_string()));
         }
         let Some(tmux) = available_tmux_command() else {
             return Err(AppError::unavailable("tmux_unavailable".to_string()));
@@ -1822,11 +1820,8 @@ impl WorkbenchSessionRegistry {
             row.worktree_id.as_deref(),
             worktree_name.as_deref(),
         );
-        let session_name = migrate_tmux_session_name(
-            &tmux,
-            row.backend_id.as_deref(),
-            &desired_session_name,
-        );
+        let session_name =
+            migrate_tmux_session_name(&tmux, row.backend_id.as_deref(), &desired_session_name);
         let terminal_command = default_terminal_command();
         let target_exists = if tmux_row_requires_window_recreation(&row) {
             false

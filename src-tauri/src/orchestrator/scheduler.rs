@@ -290,18 +290,22 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
             };
             for winner in winners {
                 if let Ok(task) = state.orchestrator_repo.get_task(&winner.task_id).await {
-                    let provider = crate::orchestrator::agent_adapter::AgentProviderId::parse_legacy(
-                        task.runner_provider.as_deref(),
-                    )
-                    .unwrap_or(crate::orchestrator::agent_adapter::AgentProviderId::ClaudeCodeVisible);
+                    let provider =
+                        crate::orchestrator::agent_adapter::AgentProviderId::parse_legacy(
+                            task.runner_provider.as_deref(),
+                        )
+                        .unwrap_or(
+                            crate::orchestrator::agent_adapter::AgentProviderId::ClaudeCodeVisible,
+                        );
                     if let Ok(adapter) = registry.get(provider) {
                         let interrupt = adapter.interrupt_input().to_string();
-                        if let Err(err) = crate::commands::workbench::local_write_workbench_session_input(
-                            state,
-                            winner.session_id.clone(),
-                            interrupt,
-                        )
-                        .await
+                        if let Err(err) =
+                            crate::commands::workbench::local_write_workbench_session_input(
+                                state,
+                                winner.session_id.clone(),
+                                interrupt,
+                            )
+                            .await
                         {
                             tracing::debug!(
                                 task_id = %winner.task_id,

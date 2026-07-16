@@ -74,6 +74,7 @@ impl RestoreSkipReason {
     ///
     /// Code Logic（这个函数做什么）:
     ///     返回 camelCase token 字符串。
+    #[allow(dead_code)] // 前端 notice 稳定 reason code API surface
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ProjectMissing => "projectMissing",
@@ -130,6 +131,7 @@ impl WorkspaceRestoreAction {
     ///
     /// Code Logic（这个函数做什么）:
     ///     返回 reason 字段。
+    #[allow(dead_code)] // 测试断言 skip reason API surface
     pub fn reason(&self) -> Option<RestoreSkipReason> {
         self.reason
     }
@@ -199,6 +201,7 @@ pub struct RestoreSideEffectCounters {
     pub agent_resume: AtomicU64,
 }
 
+#[allow(dead_code)] // 安全恢复副作用计数测试 API surface
 impl RestoreSideEffectCounters {
     /// Business Logic（为什么需要这个函数）:
     ///     测试断言零副作用。
@@ -323,7 +326,12 @@ pub async fn preflight_workspace_restore(
     let mut browser_target_url = None;
 
     // 1) project
-    match ctx.state.workbench_project_repo.get(&layout.project_id).await? {
+    match ctx
+        .state
+        .workbench_project_repo
+        .get(&layout.project_id)
+        .await?
+    {
         Some(project) => {
             resolved_project_id = Some(project.id.clone());
             actions.push(WorkspaceRestoreAction {
@@ -363,36 +371,34 @@ pub async fn preflight_workspace_restore(
                 reason: Some(RestoreSkipReason::WorktreeNotRequested),
             });
         }
-        Some(worktree_id) => {
-            match ctx.state.workbench_worktree_repo.get(worktree_id).await? {
-                None => {
+        Some(worktree_id) => match ctx.state.workbench_worktree_repo.get(worktree_id).await? {
+            None => {
+                actions.push(WorkspaceRestoreAction {
+                    target: "worktree".to_string(),
+                    resource_id: Some(worktree_id.clone()),
+                    outcome: WorkspaceRestoreOutcome::Skip,
+                    reason: Some(RestoreSkipReason::WorktreeMissing),
+                });
+            }
+            Some(wt) => {
+                if wt.project_id != layout.project_id {
                     actions.push(WorkspaceRestoreAction {
                         target: "worktree".to_string(),
                         resource_id: Some(worktree_id.clone()),
                         outcome: WorkspaceRestoreOutcome::Skip,
-                        reason: Some(RestoreSkipReason::WorktreeMissing),
+                        reason: Some(RestoreSkipReason::WorktreeOwnershipMismatch),
+                    });
+                } else {
+                    resolved_worktree_id = Some(wt.id.clone());
+                    actions.push(WorkspaceRestoreAction {
+                        target: "worktree".to_string(),
+                        resource_id: Some(wt.id),
+                        outcome: WorkspaceRestoreOutcome::Select,
+                        reason: None,
                     });
                 }
-                Some(wt) => {
-                    if wt.project_id != layout.project_id {
-                        actions.push(WorkspaceRestoreAction {
-                            target: "worktree".to_string(),
-                            resource_id: Some(worktree_id.clone()),
-                            outcome: WorkspaceRestoreOutcome::Skip,
-                            reason: Some(RestoreSkipReason::WorktreeOwnershipMismatch),
-                        });
-                    } else {
-                        resolved_worktree_id = Some(wt.id.clone());
-                        actions.push(WorkspaceRestoreAction {
-                            target: "worktree".to_string(),
-                            resource_id: Some(wt.id),
-                            outcome: WorkspaceRestoreOutcome::Select,
-                            reason: None,
-                        });
-                    }
-                }
             }
-        }
+        },
     }
 
     // 3) session
@@ -416,16 +422,10 @@ pub async fn preflight_workspace_restore(
                     });
                 }
                 Some(row) => {
-                    if row.project_id != layout.project_id {
-                        actions.push(WorkspaceRestoreAction {
-                            target: "session".to_string(),
-                            resource_id: Some(session_id.clone()),
-                            outcome: WorkspaceRestoreOutcome::Skip,
-                            reason: Some(RestoreSkipReason::SessionOwnershipMismatch),
-                        });
-                    } else if resolved_worktree_id.is_some()
-                        && row.worktree_id.as_deref() != resolved_worktree_id.as_deref()
-                    {
+                    let ownership_mismatch = row.project_id != layout.project_id
+                        || (resolved_worktree_id.is_some()
+                            && row.worktree_id.as_deref() != resolved_worktree_id.as_deref());
+                    if ownership_mismatch {
                         actions.push(WorkspaceRestoreAction {
                             target: "session".to_string(),
                             resource_id: Some(session_id.clone()),
@@ -530,9 +530,12 @@ pub async fn preflight_workspace_restore(
         },
     }
 
-    let has_skip = actions
-        .iter()
-        .any(|a| a.outcome == WorkspaceRestoreOutcome::Skip && a.reason != Some(RestoreSkipReason::WorktreeNotRequested) && a.reason != Some(RestoreSkipReason::SessionNotRequested) && a.reason != Some(RestoreSkipReason::BrowserNotRequested));
+    let has_skip = actions.iter().any(|a| {
+        a.outcome == WorkspaceRestoreOutcome::Skip
+            && a.reason != Some(RestoreSkipReason::WorktreeNotRequested)
+            && a.reason != Some(RestoreSkipReason::SessionNotRequested)
+            && a.reason != Some(RestoreSkipReason::BrowserNotRequested)
+    });
     // 仅“未请求”类 skip 仍可算 complete；真正资源缺失为 partial
     let status = if has_skip {
         RestorePlanStatus::Partial
@@ -585,9 +588,7 @@ pub async fn safe_attach_workbench_session(
 
     let target = crate::workbench::sessions::tmux_target_string_for_row(&row)?;
     if !ctx.tmux_target_exists(&target) {
-        return Err(AppError::unavailable(
-            "tmux_target_missing".to_string(),
-        ));
+        return Err(AppError::unavailable("tmux_target_missing".to_string()));
     }
 
     // claim 防止并发重复 attach；未拿到 claim 时禁止 fallthrough（否则会无占位 attach，
@@ -623,9 +624,7 @@ pub async fn safe_attach_workbench_session(
                 });
             }
             // fail-closed：超时仍无 claim 且无 registry → busy，绝不无 claim 继续 attach
-            return Err(AppError::unavailable(
-                "safe_attach_claim_busy".to_string(),
-            ));
+            return Err(AppError::unavailable("safe_attach_claim_busy".to_string()));
         }
     }
 
@@ -637,9 +636,7 @@ pub async fn safe_attach_workbench_session(
 
     // 再次确认 target（preflight 与 apply 之间可能消失）
     if !ctx.tmux_target_exists(&target) {
-        return Err(AppError::unavailable(
-            "tmux_target_missing".to_string(),
-        ));
+        return Err(AppError::unavailable("tmux_target_missing".to_string()));
     }
 
     // 测试 mock：只登记 Fake registry，不创建真实 PTY/tmux window。
@@ -667,7 +664,9 @@ pub async fn safe_attach_workbench_session(
     }
 
     guard.disarm();
-    ctx.state.workbench_sessions.release_restore_claim(session_id);
+    ctx.state
+        .workbench_sessions
+        .release_restore_claim(session_id);
 
     Ok(SafeAttachResult {
         session_id: session_id.to_string(),
@@ -748,12 +747,15 @@ fn finalize_plan(
 mod tests {
     use super::*;
     use crate::storage::{
-        WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
-        WorkbenchWorkspaceLayoutRepo,
+        WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo,
+        WorkbenchWorktreeRepo,
     };
-    use crate::workbench::models::{WorkbenchProjectRow, WorkbenchSessionRow, WorkbenchWorktreeRow};
+    use crate::workbench::models::{
+        WorkbenchProjectRow, WorkbenchSessionRow, WorkbenchWorktreeRow,
+    };
     use crate::workbench::workspace_layout::{
-        desktop_auto_slot_key, WorkspaceLayoutDraft, WorkspaceLayoutKind, WORKSPACE_LAYOUT_SCHEMA_VERSION,
+        desktop_auto_slot_key, WorkspaceLayoutDraft, WorkspaceLayoutKind,
+        WORKSPACE_LAYOUT_SCHEMA_VERSION,
     };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::collections::HashSet;
@@ -862,14 +864,9 @@ mod tests {
 
             // 构造最小 AppState 需要很多字段——用 runtime 完整路径过重。
             // 这里用专用测试 state helper。
-            let state = build_minimal_state(
-                pool,
-                project_repo,
-                worktree_repo,
-                session_repo,
-                layout_repo,
-            )
-            .await;
+            let state =
+                build_minimal_state(pool, project_repo, worktree_repo, session_repo, layout_repo)
+                    .await;
 
             Self {
                 ctx: RestoreInspectionContext {
@@ -979,10 +976,7 @@ mod tests {
             self.ctx.counters.attach_client_count()
         }
 
-        async fn safe_attach(
-            &self,
-            session_id: &str,
-        ) -> Result<SafeAttachResult, AppError> {
+        async fn safe_attach(&self, session_id: &str) -> Result<SafeAttachResult, AppError> {
             safe_attach_workbench_session(&self.ctx, session_id).await
         }
     }
@@ -1066,9 +1060,11 @@ mod tests {
             workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
             workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
             agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
-            agent_ledger_service: Arc::new(crate::workbench::agent_ledger::AgentLedgerService::new(
-                crate::storage::AgentLedgerRepo::new(pool.clone()),
-            )),
+            agent_ledger_service: Arc::new(
+                crate::workbench::agent_ledger::AgentLedgerService::new(
+                    crate::storage::AgentLedgerRepo::new(pool.clone()),
+                ),
+            ),
             workbench_workspace_layout_repo: Arc::new(layout_repo),
             browser_verification: Arc::new(
                 crate::workbench::browser_verification::BrowserVerificationService::new(
@@ -1105,8 +1101,12 @@ mod tests {
             orchestrator_cancel: Arc::new(Mutex::new(None)),
             orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
             agent_ledger_cancel: Arc::new(Mutex::new(None)),
-            workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            workbench_claude_session_indexes: Arc::new(RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_watchers: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -1274,14 +1274,13 @@ mod tests {
             .tmux_target_present();
         // 模拟慢 holder：占 claim 但不写 registry、不 attach
         assert!(
-            fixture
-                .ctx
-                .state
-                .workbench_sessions
-                .try_claim_restore("s1"),
+            fixture.ctx.state.workbench_sessions.try_claim_restore("s1"),
             "holder must own claim"
         );
-        let err = fixture.safe_attach("s1").await.expect_err("waiter must fail closed");
+        let err = fixture
+            .safe_attach("s1")
+            .await
+            .expect_err("waiter must fail closed");
         assert_eq!(err.code(), "safe_attach_claim_busy");
         assert_eq!(
             fixture.attach_client_count(),
@@ -1292,11 +1291,7 @@ mod tests {
         assert_eq!(fixture.tmux_new_window_count(), 0);
         // holder 仍持 claim（waiter 不得误 release）
         assert!(
-            !fixture
-                .ctx
-                .state
-                .workbench_sessions
-                .try_claim_restore("s1"),
+            !fixture.ctx.state.workbench_sessions.try_claim_restore("s1"),
             "holder claim must still be held"
         );
         fixture
@@ -1397,7 +1392,10 @@ mod tests {
     #[tokio::test]
     async fn list_restore_skips_raw_pty_without_create() {
         crate::workbench::sessions::reset_create_tmux_window_call_count_for_test();
-        let fixture = RestoreFixture::base().await.persisted_raw_pty("s-raw").await;
+        let fixture = RestoreFixture::base()
+            .await
+            .persisted_raw_pty("s-raw")
+            .await;
         let row = fixture
             .ctx
             .state

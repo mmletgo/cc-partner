@@ -11,7 +11,7 @@ use crate::error::AppError;
 use crate::orchestrator::agent_adapter::{
     AgentAdapterRegistry, AgentAvailability, AgentProviderId,
 };
-use crate::orchestrator::models::{OrchestratorTaskStatus};
+use crate::orchestrator::models::OrchestratorTaskStatus;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;

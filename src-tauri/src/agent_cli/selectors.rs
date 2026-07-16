@@ -313,9 +313,8 @@ pub fn read_bounded(reader: &mut impl Read, max_bytes: usize) -> Result<Vec<u8>,
 ///     read_bounded → serde_json；错误 message 不含 body。
 pub fn read_input_json<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, CliError> {
     let bytes = read_bounded(reader, MAX_STDIN_BYTES)?;
-    serde_json::from_slice(&bytes).map_err(|_| {
-        CliError::usage("invalid_json", "stdin is not valid JSON for the command")
-    })
+    serde_json::from_slice(&bytes)
+        .map_err(|_| CliError::usage("invalid_json", "stdin is not valid JSON for the command"))
 }
 
 /// 读取 terminal send 正文（最大 256KiB）。
@@ -445,7 +444,7 @@ mod tests {
 
     #[test]
     fn terminal_body_over_256kib_rejected() {
-        let mut big = vec![b'x'; MAX_TERMINAL_BODY_BYTES + 1];
+        let big = vec![b'x'; MAX_TERMINAL_BODY_BYTES + 1];
         let mut c = Cursor::new(big);
         let err = read_bounded(&mut c, MAX_TERMINAL_BODY_BYTES).unwrap_err();
         assert_eq!(err.code(), "input_too_large");
@@ -469,8 +468,8 @@ mod tests {
     #[test]
     fn missing_worktree_is_not_found() {
         let rows = vec![worktree("w1", "main")];
-        let err = resolve_exact_worktree(&WorktreeSelector::Id("missing".into()), &rows)
-            .unwrap_err();
+        let err =
+            resolve_exact_worktree(&WorktreeSelector::Id("missing".into()), &rows).unwrap_err();
         assert_eq!(err.exit, crate::agent_cli::output::CliExitCode::NotFound);
     }
 }

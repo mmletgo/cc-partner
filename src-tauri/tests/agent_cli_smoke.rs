@@ -141,7 +141,10 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
         Err(e) => fail_case(&mut case, e),
     };
     if !start.success {
-        fail_case(&mut case, format!("backend start 失败\n{}", start.diagnostic()));
+        fail_case(
+            &mut case,
+            format!("backend start 失败\n{}", start.diagnostic()),
+        );
     }
     let control = match case.wait_for_control_file() {
         Ok(c) => c,
@@ -189,14 +192,11 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    let project = match add_local_project_via_control(
-        &control.control_token,
-        control.port,
-        &project_dir,
-    ) {
-        Ok(p) => p,
-        Err(e) => fail_case(&mut case, e),
-    };
+    let project =
+        match add_local_project_via_control(&control.control_token, control.port, &project_dir) {
+            Ok(p) => p,
+            Err(e) => fail_case(&mut case, e),
+        };
     let project_id = project
         .get("id")
         .and_then(|v| v.as_str())
@@ -209,7 +209,13 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
     // session list（无 session 也须 envelope ok）
     let sessions = match run_agent_cli(
         &case,
-        &["--json", "session", "list", "--project", &format!("id:{project_id}")],
+        &[
+            "--json",
+            "session",
+            "list",
+            "--project",
+            &format!("id:{project_id}"),
+        ],
         None,
     ) {
         Ok(c) => c,
@@ -220,7 +226,13 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
     // agent list
     let agents = match run_agent_cli(
         &case,
-        &["--json", "agent", "list", "--project", &format!("id:{project_id}")],
+        &[
+            "--json",
+            "agent",
+            "list",
+            "--project",
+            &format!("id:{project_id}"),
+        ],
         None,
     ) {
         Ok(c) => c,
@@ -229,9 +241,7 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
     let _ = assert_json_ok(&mut case, "agent list", &agents);
 
     // task create stdin + 同 clientRequestId 重放 → 同一 task
-    let create_body = format!(
-        r#"{{"title":"smoke task","goal":"g","acceptanceCriteria":"a","clientRequestId":"smoke-req-1"}}"#
-    );
+    let create_body = r#"{"title":"smoke task","goal":"g","acceptanceCriteria":"a","clientRequestId":"smoke-req-1"}"#.to_string();
     let create1 = match run_agent_cli(
         &case,
         &[
@@ -251,7 +261,10 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
     let body1 = assert_json_ok(&mut case, "task create #1", &create1);
     let task_id_1 = extract_task_id(&body1["data"]).unwrap_or_default();
     if task_id_1.is_empty() {
-        fail_case(&mut case, format!("task create #1 missing task id: {body1}"));
+        fail_case(
+            &mut case,
+            format!("task create #1 missing task id: {body1}"),
+        );
     }
     let create2 = match run_agent_cli(
         &case,
@@ -337,7 +350,10 @@ fn agent_cli_queries_and_idempotent_create_against_isolated_backend() {
         Err(e) => fail_case(&mut case, e),
     };
     if !stop.success {
-        fail_case(&mut case, format!("backend stop 失败\n{}", stop.diagnostic()));
+        fail_case(
+            &mut case,
+            format!("backend stop 失败\n{}", stop.diagnostic()),
+        );
     }
 }
 
@@ -413,17 +429,22 @@ fn agent_cli_offline_backend_is_exit_five() {
         return;
     }
     let case = SmokeCase::new("agent-cli-offline").expect("case");
-    let captured = run_agent_cli(&case, &["--json", "project", "list"], None)
-        .expect("run agent cli");
+    let captured =
+        run_agent_cli(&case, &["--json", "project", "list"], None).expect("run agent cli");
     assert_eq!(
         captured.code,
         Some(5),
         "offline should be exit 5\n{}",
         captured.diagnostic()
     );
-    let body: serde_json::Value =
-        serde_json::from_str(captured.stdout.lines().find(|l| !l.trim().is_empty()).unwrap_or("{}"))
-            .expect("json");
+    let body: serde_json::Value = serde_json::from_str(
+        captured
+            .stdout
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("{}"),
+    )
+    .expect("json");
     assert_eq!(body["ok"], false);
     assert_eq!(body["schemaVersion"], 1);
     assert_eq!(body["error"]["outcomeUnknown"], false);

@@ -11,8 +11,8 @@
 // source 纯投影 helper 可能仅被测试/后续扩展引用；保留 dead_code 以免阻断编译。
 #![allow(dead_code)]
 
-pub mod aggregator;
 pub(crate) mod agent_runtime_source;
+pub mod aggregator;
 pub(crate) mod experiment_source;
 pub mod models;
 pub(crate) mod orchestrator_source;

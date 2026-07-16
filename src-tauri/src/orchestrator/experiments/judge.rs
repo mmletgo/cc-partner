@@ -66,10 +66,7 @@ pub fn evaluate_experiment(
         return Ok(ComparativeVerdict {
             winner_task_id: Some(ready[0].task_id.clone()),
             confidence: ComparativeConfidence::High,
-            reason: format!(
-                "唯一通过硬门禁的 candidate（{}）",
-                ready[0].strategy_label
-            ),
+            reason: format!("唯一通过硬门禁的 candidate（{}）", ready[0].strategy_label),
             risk_notes: ready[0].risk_notes.clone(),
             tied_task_ids: Vec::new(),
         });
@@ -84,10 +81,7 @@ pub fn evaluate_experiment(
     Ok(ComparativeVerdict {
         winner_task_id: None,
         confidence: ComparativeConfidence::Medium,
-        reason: format!(
-            "{} 个 candidate 通过硬门禁，需要比较决策",
-            ready.len()
-        ),
+        reason: format!("{} 个 candidate 通过硬门禁，需要比较决策", ready.len()),
         risk_notes: vec!["multiple_ready_no_judge".to_string()],
         tied_task_ids: ready.iter().map(|c| c.task_id.clone()).collect(),
     })
@@ -135,9 +129,8 @@ fn validate_verdict(
 /// Code Logic（这个函数做什么）:
 ///     serde 反序列化 ComparativeVerdict；失败返回 Err 由调用方转 NeedsDecision。
 pub fn parse_judge_json(raw: &str) -> Result<ComparativeVerdict, AppError> {
-    serde_json::from_str(raw).map_err(|err| {
-        AppError::generic(format!("comparative judge JSON 无效: {err}"))
-    })
+    serde_json::from_str(raw)
+        .map_err(|err| AppError::generic(format!("comparative judge JSON 无效: {err}")))
 }
 
 #[cfg(test)]
@@ -196,12 +189,8 @@ mod tests {
     async fn one_ready_candidate_is_high_confidence_without_judge_call() {
         let judge_calls = 0u32;
         // 不传 external judge：唯一 ready 不得调用外部 judge
-        let verdict = evaluate_experiment(
-            &exp(),
-            &[ready("task-1"), failed("task-2")],
-            None,
-        )
-        .unwrap();
+        let verdict =
+            evaluate_experiment(&exp(), &[ready("task-1"), failed("task-2")], None).unwrap();
         assert_eq!(verdict.winner_task_id.as_deref(), Some("task-1"));
         assert_eq!(verdict.confidence, ComparativeConfidence::High);
         assert_eq!(judge_calls, 0);

@@ -13,9 +13,9 @@ use crate::orchestrator::experiments::models::{
     CreateExperimentRequest, OrchestratorExperimentDto,
 };
 use crate::orchestrator::experiments::remote_protocol::{
-    ApproveExperimentWinnerRequest, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
-    CancelExperimentRequest, CreateExperimentResponse, GetExperimentRequest,
-    ListExperimentsRequest, ListExperimentsResponse,
+    ApproveExperimentWinnerRequest, CancelExperimentRequest, CreateExperimentResponse,
+    GetExperimentRequest, ListExperimentsRequest, ListExperimentsResponse,
+    CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -37,7 +37,13 @@ pub async fn create_remote_experiment(
     peer.require_capability(base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1)
         .await
         .map_err(map_peer_err)?;
-    post_json(http, base_url, "/api/orchestrator/experiments/create", request).await
+    post_json(
+        http,
+        base_url,
+        "/api/orchestrator/experiments/create",
+        request,
+    )
+    .await
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -176,9 +182,9 @@ async fn post_json<B: Serialize, R: DeserializeOwned>(
 ///     match PeerCallError 变体。
 fn map_peer_err(err: PeerCallError) -> AppError {
     match err {
-        PeerCallError::Unsupported { capability, .. } => AppError::generic(format!(
-            "对端不支持 {capability}，不能降级为普通 tasks"
-        )),
+        PeerCallError::Unsupported { capability, .. } => {
+            AppError::generic(format!("对端不支持 {capability}，不能降级为普通 tasks"))
+        }
         other => AppError::generic(format!("远端 experiment 调用失败: {other}")),
     }
 }

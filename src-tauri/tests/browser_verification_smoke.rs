@@ -52,10 +52,7 @@ async fn fake_engine_smoke_snapshot_to_screenshot() {
     let mut final_run = run;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(10)).await;
-        final_run = service
-            .get(&final_run.session.id)
-            .await
-            .expect("get");
+        final_run = service.get(&final_run.session.id).await.expect("get");
         if matches!(
             final_run.session.state,
             BrowserVerificationState::Succeeded

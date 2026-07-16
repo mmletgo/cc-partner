@@ -1047,12 +1047,16 @@ mod tests {
             workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
             workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
             agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
-            agent_ledger_service: Arc::new(crate::workbench::agent_ledger::AgentLedgerService::new(
-                crate::storage::AgentLedgerRepo::new(pool.clone()),
-            )),
+            agent_ledger_service: Arc::new(
+                crate::workbench::agent_ledger::AgentLedgerService::new(
+                    crate::storage::AgentLedgerRepo::new(pool.clone()),
+                ),
+            ),
             workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
             workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
-        workbench_workspace_layout_repo: Arc::new(crate::storage::WorkbenchWorkspaceLayoutRepo::new(pool.clone())),
+            workbench_workspace_layout_repo: Arc::new(
+                crate::storage::WorkbenchWorkspaceLayoutRepo::new(pool.clone()),
+            ),
             workbench_browser_previews: Arc::new(
                 crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
             ),
@@ -1145,7 +1149,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // 与 fail-point 测试串行，避免全局注入污染
     async fn merge_restore_concurrent_keeps_conflict_copy() {
+        // 全局 apply_merge fail point 与 mid_tx 测试共享；持锁确保无注入残留。
+        let _lock = apply_fail_test_lock();
+        clear_apply_merge_fail_point();
         let (state, tmp) = setup_restore_state().await;
         // local 较新（updated_at 更大）但与 archive 并发
         let local = sample_prompt("p1", "left", "local-body", 1, "2024-01-03T00:00:00+00:00");

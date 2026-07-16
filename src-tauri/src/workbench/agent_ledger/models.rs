@@ -502,10 +502,14 @@ pub fn convert_major_to_minor_units(major: &str, currency: &str) -> Result<u64, 
         None => (s, ""),
     };
     if int_part.is_empty() || !int_part.chars().all(|c| c.is_ascii_digit()) {
-        return Err(AppError::validation(format!("cost_major 整数部分非法: {major}")));
+        return Err(AppError::validation(format!(
+            "cost_major 整数部分非法: {major}"
+        )));
     }
     if !frac_part.chars().all(|c| c.is_ascii_digit()) {
-        return Err(AppError::validation(format!("cost_major 小数部分非法: {major}")));
+        return Err(AppError::validation(format!(
+            "cost_major 小数部分非法: {major}"
+        )));
     }
     if frac_part.len() as u32 > exp {
         return Err(AppError::validation(format!(
@@ -534,12 +538,10 @@ pub fn convert_major_to_minor_units(major: &str, currency: &str) -> Result<u64, 
 /// Code Logic（这个函数做什么）:
 ///     解析 RFC3339；end<start → 0；否则毫秒差。
 pub fn compute_duration_ms(started_at: &str, ended_at: &str) -> Result<u64, AppError> {
-    let start = chrono::DateTime::parse_from_rfc3339(started_at.trim()).map_err(|e| {
-        AppError::validation(format!("started_at 非法 RFC3339: {e}"))
-    })?;
-    let end = chrono::DateTime::parse_from_rfc3339(ended_at.trim()).map_err(|e| {
-        AppError::validation(format!("ended_at 非法 RFC3339: {e}"))
-    })?;
+    let start = chrono::DateTime::parse_from_rfc3339(started_at.trim())
+        .map_err(|e| AppError::validation(format!("started_at 非法 RFC3339: {e}")))?;
+    let end = chrono::DateTime::parse_from_rfc3339(ended_at.trim())
+        .map_err(|e| AppError::validation(format!("ended_at 非法 RFC3339: {e}")))?;
     let ms = end.signed_duration_since(start).num_milliseconds();
     if ms < 0 {
         Ok(0)
@@ -560,7 +562,11 @@ pub fn merge_usage_monotonic(
     base: &ReliableUsageSnapshot,
     incoming: &ReliableUsageSnapshot,
 ) -> Result<ReliableUsageSnapshot, AppError> {
-    fn merge_counter(name: &str, cur: Option<u64>, next: Option<u64>) -> Result<Option<u64>, AppError> {
+    fn merge_counter(
+        name: &str,
+        cur: Option<u64>,
+        next: Option<u64>,
+    ) -> Result<Option<u64>, AppError> {
         match (cur, next) {
             (Some(a), Some(b)) if b < a => Err(AppError::validation(format!(
                 "usage counter 回退: {name} {b} < {a}"
@@ -573,7 +579,10 @@ pub fn merge_usage_monotonic(
     }
 
     let model_id = match (
-        base.model_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        base.model_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
         incoming
             .model_id
             .as_deref()
@@ -581,9 +590,7 @@ pub fn merge_usage_monotonic(
             .filter(|s| !s.is_empty()),
     ) {
         (Some(a), Some(b)) if a != b => {
-            return Err(AppError::conflict(format!(
-                "model_id 冲突: {a} vs {b}"
-            )));
+            return Err(AppError::conflict(format!("model_id 冲突: {a} vs {b}")));
         }
         (Some(a), _) => Some(a.to_string()),
         (None, Some(b)) => Some(b.to_string()),
@@ -617,9 +624,7 @@ pub fn merge_usage_monotonic(
             let mb = convert_major_to_minor_units(b, cur).ok();
             match (ma, mb) {
                 (Some(x), Some(y)) if y < x => {
-                    return Err(AppError::validation(format!(
-                        "usage cost 回退: {y} < {x}"
-                    )));
+                    return Err(AppError::validation(format!("usage cost 回退: {y} < {x}")));
                 }
                 (Some(x), Some(y)) if y >= x => Some(b.to_string()),
                 (Some(_), None) => Some(a.to_string()),
@@ -657,6 +662,7 @@ pub fn merge_usage_monotonic(
 ///
 /// Code Logic（这个函数做什么）:
 ///     对 JSON 键路径做小写子串匹配；返回命中的 forbidden 片段。
+#[allow(dead_code)] // privacy 回归 / 外部校验 API surface
 pub fn scan_forbidden_ledger_field_names(value: &serde_json::Value) -> Vec<String> {
     const FORBIDDEN: &[&str] = &[
         "prompt",
@@ -679,10 +685,8 @@ pub fn scan_forbidden_ledger_field_names(value: &serde_json::Value) -> Vec<Strin
                 for (k, child) in map {
                     let lower = k.to_ascii_lowercase();
                     for f in forbidden {
-                        if lower == *f || lower.contains(f) {
-                            if !hits.iter().any(|h| h == f) {
-                                hits.push((*f).to_string());
-                            }
+                        if (lower == *f || lower.contains(f)) && !hits.iter().any(|h| h == f) {
+                            hits.push((*f).to_string());
                         }
                     }
                     walk(child, hits, forbidden);

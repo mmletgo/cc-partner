@@ -20,10 +20,11 @@ use crate::state::AppState;
 use crate::storage::{
     AgentLedgerRepo, ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo,
     ScratchpadRepo, SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
-    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo, WorkbenchWorkspaceLayoutRepo,
+    WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo,
+    WorkbenchWorktreeRepo,
 };
-use crate::workbench::agent_ledger::AgentLedgerService;
 use crate::transfer::registry::TransferRegistry;
+use crate::workbench::agent_ledger::AgentLedgerService;
 use serde::Deserialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
@@ -816,7 +817,7 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         // 已在 runtime 内：block_in_place 避免嵌套 block_on panic
         tokio::task::block_in_place(|| {
-            let _ = handle.block_on(shutdown_fut);
+            handle.block_on(shutdown_fut);
         });
     } else {
         let _ = std::thread::spawn(move || {

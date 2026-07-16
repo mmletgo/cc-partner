@@ -174,8 +174,9 @@ async fn enqueue_pending_remote_experiment(
         goal: request.goal.clone(),
         acceptance: request.acceptance.clone(),
         status: ExperimentStatus::Queued,
-        selection_policy: crate::orchestrator::experiments::models::EXPERIMENT_SELECTION_POLICY_COMPARATIVE
-            .to_string(),
+        selection_policy:
+            crate::orchestrator::experiments::models::EXPERIMENT_SELECTION_POLICY_COMPARATIVE
+                .to_string(),
         max_parallel: request.max_parallel as i64,
         winner_task_id: None,
         selection_reason: Some(format!(
@@ -241,10 +242,7 @@ pub async fn list_orchestrator_experiments_for_state(
             return list_remote_orchestrator_experiments(state, &project).await;
         }
     }
-    let rows = state
-        .orchestrator_repo
-        .list_experiments(project_id)
-        .await?;
+    let rows = state.orchestrator_repo.list_experiments(project_id).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut dto = OrchestratorExperimentDto::from(row);
@@ -406,13 +404,9 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
         .await
         .is_err()
     {
-        if let Some(dto) = try_approve_remote_experiment_by_mirror(
-            state,
-            experiment_id,
-            winner_task_id,
-            reason,
-        )
-        .await?
+        if let Some(dto) =
+            try_approve_remote_experiment_by_mirror(state, experiment_id, winner_task_id, reason)
+                .await?
         {
             return Ok(dto);
         }
@@ -432,12 +426,10 @@ pub async fn approve_orchestrator_experiment_winner_for_state(
     )
     .await?;
     if should_auto && selected.selected {
-        let winner = start_experiment_winner_delivery(
-            state.orchestrator_repo.as_ref(),
-            experiment_id,
-        )
-        .await
-        .unwrap_or_else(|_| winner_task_id.to_string());
+        let winner =
+            start_experiment_winner_delivery(state.orchestrator_repo.as_ref(), experiment_id)
+                .await
+                .unwrap_or_else(|_| winner_task_id.to_string());
         let _ = state
             .orchestrator_repo
             .try_transition_task_status(
@@ -600,13 +592,8 @@ async fn try_cancel_remote_experiment_by_mirror(
     };
     let base_url = remote_device_base_url(state, &meta.device_id)?;
     let http = reqwest::Client::new();
-    let dto = cancel_remote_experiment(
-        state.peer_client.as_ref(),
-        &http,
-        &base_url,
-        experiment_id,
-    )
-    .await?;
+    let dto = cancel_remote_experiment(state.peer_client.as_ref(), &http, &base_url, experiment_id)
+        .await?;
     if let Ok(payload) = serde_json::to_string(&dto) {
         let _ = state
             .orchestrator_repo
@@ -631,9 +618,7 @@ async fn try_cancel_remote_experiment_by_mirror(
 /// Code Logic（这个函数做什么）:
 ///     拒绝若存在 Delivering；否则取消全部非终态组。
 #[tauri::command]
-pub async fn prepare_experiment_downgrade(
-    state: State<'_, AppState>,
-) -> Result<u32, AppError> {
+pub async fn prepare_experiment_downgrade(state: State<'_, AppState>) -> Result<u32, AppError> {
     prepare_experiment_downgrade_for_state(&state).await
 }
 
@@ -644,10 +629,7 @@ pub async fn prepare_experiment_downgrade(
 ///     扫描全部实验；Delivering 拒绝；其余非终态 cancel。
 pub async fn prepare_experiment_downgrade_for_state(state: &AppState) -> Result<u32, AppError> {
     let all = state.orchestrator_repo.list_experiments(None).await?;
-    if all
-        .iter()
-        .any(|e| e.status == ExperimentStatus::Delivering)
-    {
+    if all.iter().any(|e| e.status == ExperimentStatus::Delivering) {
         return Err(AppError::generic(
             "存在正在交付的实验组，无法降级；请等待完成",
         ));
@@ -687,10 +669,9 @@ mod tests {
     #[tokio::test]
     async fn create_via_service_produces_candidates() {
         let repo = setup_repo().await;
-        let outcome =
-            create_experiment_idempotently(&repo, &request_with_candidates(2), 4)
-                .await
-                .unwrap();
+        let outcome = create_experiment_idempotently(&repo, &request_with_candidates(2), 4)
+            .await
+            .unwrap();
         assert!(outcome.newly_created);
         assert_eq!(
             outcome

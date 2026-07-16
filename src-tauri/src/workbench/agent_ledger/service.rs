@@ -379,7 +379,9 @@ mod tests {
             .await
             .unwrap();
         AgentLedgerRepo::ensure_schema(&pool).await.unwrap();
-        WorkbenchAgentSessionRepo::ensure_schema(&pool).await.unwrap();
+        WorkbenchAgentSessionRepo::ensure_schema(&pool)
+            .await
+            .unwrap();
         let ledger = AgentLedgerRepo::new(pool.clone());
         let agents = WorkbenchAgentSessionRepo::new(pool);
         (AgentLedgerService::new(ledger), agents)
@@ -507,7 +509,12 @@ mod tests {
         let row = runtime("a1", AgentSessionPhase::Completed);
         svc.record_terminal(&row, Some(AgentSessionPhase::Working))
             .await;
-        let entry = svc.repo().get_by_agent_session_id("a1").await.unwrap().unwrap();
+        let entry = svc
+            .repo()
+            .get_by_agent_session_id("a1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.input_tokens, Some(10));
         assert_eq!(entry.output_tokens, Some(4));
     }
@@ -528,7 +535,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let entry = svc.repo().get_by_agent_session_id("a1").await.unwrap().unwrap();
+        let entry = svc
+            .repo()
+            .get_by_agent_session_id("a1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.input_tokens, Some(99));
     }
 
@@ -539,7 +551,12 @@ mod tests {
         let row = runtime("a1", AgentSessionPhase::Completed);
         svc.record_terminal(&row, Some(AgentSessionPhase::Working))
             .await;
-        let entry = svc.repo().get_by_agent_session_id("a1").await.unwrap().unwrap();
+        let entry = svc
+            .repo()
+            .get_by_agent_session_id("a1")
+            .await
+            .unwrap()
+            .unwrap();
         assert!(entry.input_tokens.is_none());
         assert!(entry.cost_minor_units.is_none());
     }
@@ -587,7 +604,12 @@ mod tests {
         // FinalizeInput 不 Serialize；用 entry 形状等价检查
         let (svc, _) = setup().await;
         svc.try_finalize_with_retry(input).await.unwrap();
-        let entry = svc.repo().get_by_agent_session_id("a").await.unwrap().unwrap();
+        let entry = svc
+            .repo()
+            .get_by_agent_session_id("a")
+            .await
+            .unwrap()
+            .unwrap();
         let json = serde_json::to_value(&entry).unwrap();
         assert!(scan_forbidden_ledger_field_names(&json).is_empty());
     }

@@ -223,12 +223,7 @@ fn render_quoted_block(value: &str) -> String {
 pub fn build_verifier_prompt(input: &VerifierPromptInput<'_>) -> String {
     let browser_section = input
         .browser_verification_note
-        .map(|note| {
-            format!(
-                "\n\n浏览器验证 evidence：\n```json\n{}\n```",
-                note.trim()
-            )
-        })
+        .map(|note| format!("\n\n浏览器验证 evidence：\n```json\n{}\n```", note.trim()))
         .unwrap_or_default();
     format!(
         "你是 cc-partner Orchestrator 的交付前 verifier。请只根据当前任务目标、验收标准、验证命令输出和 worktree diff 判断任务是否可以交付。\n\n\

@@ -10,9 +10,7 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::remote_client::RemoteWorkbenchClient;
-use crate::workbench::remote_protocol::{
-    RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq,
-};
+use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
 use crate::workbench::workspace_layout::{
     desktop_auto_slot_key, WorkspaceLayout, WorkspaceLayoutDraft,
 };
@@ -31,6 +29,7 @@ use super::common::{
 /// apply 请求体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // invoke/control wire DTO API surface
 pub struct ApplyWorkspaceRestoreReq {
     /// preflight 产出的计划。
     pub plan: WorkspaceRestorePlan,
@@ -55,6 +54,7 @@ pub struct ApplyWorkspaceRestoreResult {
 /// save layout 请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // invoke/control wire DTO API surface
 pub struct SaveWorkspaceLayoutReq {
     /// draft。
     pub draft: WorkspaceLayoutDraft,
@@ -65,6 +65,7 @@ pub struct SaveWorkspaceLayoutReq {
 /// preflight 请求（可按 slot 或显式 layout）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // invoke/control wire DTO API surface
 pub struct PreflightWorkspaceRestoreReq {
     /// slot key，默认 desktop:auto。
     pub slot_key: Option<String>,
@@ -167,8 +168,8 @@ pub async fn save_workspace_layout_for_state(
 pub async fn list_named_workspace_layouts(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkspaceLayout>, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(state.inner(), "layout.listNamed", serde_json::json!({}))
-        .await?
+    if let Some(v) =
+        proxy_workbench_if_gui(state.inner(), "layout.listNamed", serde_json::json!({})).await?
     {
         return Ok(v);
     }
@@ -317,10 +318,7 @@ pub async fn apply_workspace_restore_for_state(
         .get_by_id(&plan.layout_id)
         .await?
         .ok_or_else(|| AppError::not_found("workspace_layout_not_found".to_string()))?;
-    let project = state
-        .workbench_project_repo
-        .get(&layout.project_id)
-        .await?;
+    let project = state.workbench_project_repo.get(&layout.project_id).await?;
 
     let mut actions = plan.actions.clone();
     let mut restored = 0u32;
@@ -481,13 +479,12 @@ async fn preflight_remote_layout(
         Ok(ctx) => ctx,
         Err(err) => {
             // offline / unsupported → partial：仅允许 controller 侧 select project
-            let reason = if err.code().contains("unsupported")
-                || err.to_string().contains("unsupported")
-            {
-                RestoreSkipReason::CapabilityUnsupported
-            } else {
-                RestoreSkipReason::RemoteOffline
-            };
+            let reason =
+                if err.code().contains("unsupported") || err.to_string().contains("unsupported") {
+                    RestoreSkipReason::CapabilityUnsupported
+                } else {
+                    RestoreSkipReason::RemoteOffline
+                };
             return Ok(partial_remote_controller_only(layout, reason));
         }
     };

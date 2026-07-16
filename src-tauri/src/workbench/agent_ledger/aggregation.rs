@@ -7,9 +7,7 @@
 //!     薄封装 repo.get_page / summarize / clear；规范化 limit；window 边界 helper。
 
 use crate::error::AppError;
-use crate::storage::agent_ledger_repo::{
-    AgentLedgerRepo, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
-};
+use crate::storage::agent_ledger_repo::{AgentLedgerRepo, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use crate::workbench::agent_ledger::models::{
     AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary, LedgerWindow,
 };
@@ -156,14 +154,9 @@ mod batch_tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T13:00:00+00:00")
             .unwrap()
             .with_timezone(&Utc);
-        let rows = summarize_projects(
-            &repo,
-            &["p1".into(), "p2".into()],
-            LedgerWindow::Days7,
-            now,
-        )
-        .await
-        .unwrap();
+        let rows = summarize_projects(&repo, &["p1".into(), "p2".into()], LedgerWindow::Days7, now)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].project_id.as_deref(), Some("p1"));
         assert_eq!(rows[0].sessions, 1);
@@ -404,14 +397,9 @@ mod tests {
             .unwrap();
         assert_eq!(s.usage_coverage, LedgerUsageCoverage::Complete);
         // empty window
-        let empty = summarize_window(
-            &repo,
-            LedgerWindow::Hours24,
-            Some("no-such-project"),
-            now,
-        )
-        .await
-        .unwrap();
+        let empty = summarize_window(&repo, LedgerWindow::Hours24, Some("no-such-project"), now)
+            .await
+            .unwrap();
         assert_eq!(empty.sessions, 0);
         assert_eq!(empty.usage_coverage, LedgerUsageCoverage::Unavailable);
         assert!(empty.input_tokens.is_none());
@@ -450,8 +438,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.cost_by_currency.len(), 2);
-        assert!(s.cost_by_currency.iter().any(|c| c.currency == "USD" && c.minor_units == 100));
-        assert!(s.cost_by_currency.iter().any(|c| c.currency == "EUR" && c.minor_units == 200));
+        assert!(s
+            .cost_by_currency
+            .iter()
+            .any(|c| c.currency == "USD" && c.minor_units == 100));
+        assert!(s
+            .cost_by_currency
+            .iter()
+            .any(|c| c.currency == "EUR" && c.minor_units == 200));
     }
 
     /// Business Logic: clear 只删 ledger。

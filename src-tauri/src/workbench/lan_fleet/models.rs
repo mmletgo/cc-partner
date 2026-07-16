@@ -143,6 +143,7 @@ impl AgentPhaseCounts {
     ///
     /// Code Logic（这个函数做什么）:
     ///     needs_input + failed 饱和加。
+    #[allow(dead_code)] // Project Rail / 前端 badge API surface（测试与 DTO 辅助）
     pub fn exception_count(self) -> u32 {
         self.needs_input.saturating_add(self.failed)
     }
@@ -154,6 +155,7 @@ impl AgentPhaseCounts {
     ///
     /// Code Logic（这个函数做什么）:
     ///     七字段饱和求和。
+    #[allow(dead_code)] // 空态/辅助文本总 Agent 数 API surface
     pub fn total(self) -> u32 {
         self.launching
             .saturating_add(self.working)

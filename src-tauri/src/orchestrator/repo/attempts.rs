@@ -42,6 +42,7 @@ impl OrchestratorRepo {
     ///
     /// Code Logic（这个函数做什么）:
     ///     插入 orchestrator_task_attempts，写入 policy 列与 agent_session_id；task_id+attempt 唯一。
+    #[allow(clippy::too_many_arguments)] // attempt 行与 policy 字段需一次写入
     pub async fn add_attempt(
         &self,
         task_id: &str,
@@ -346,6 +347,7 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     仅当任务仍为 Preparing 且 claim token 匹配时写入 branch/worktree/session/attempt/policy，
     ///     切到 Running；同时清空上一轮 Claude runtime 字段并写 agent_session_id。
+    #[allow(clippy::too_many_arguments)] // running attempt CAS 需完整 claim 上下文
     pub async fn mark_task_running_attempt(
         &self,
         task_id: &str,

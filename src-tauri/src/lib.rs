@@ -84,11 +84,11 @@ use crate::commands::{
     devices as device_cmd, github_trending as github_trending_cmd,
     gui_bootstrap as gui_bootstrap_cmd, health as health_cmd,
     lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
-    orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd, orchestrator_config as orchestrator_config_cmd,
-    permissions as permissions_cmd, prompt_optimizer as prompt_optimizer_cmd,
-    prompts as prompt_cmd, scratchpad as scratchpad_cmd, screenshot as screenshot_cmd,
-    ssh_target as ssh_target_cmd, sync as sync_cmd, transfer as transfer_cmd,
-    updater as updater_cmd, workbench as workbench_cmd,
+    orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd,
+    orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,
+    prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd, scratchpad as scratchpad_cmd,
+    screenshot as screenshot_cmd, ssh_target as ssh_target_cmd, sync as sync_cmd,
+    transfer as transfer_cmd, updater as updater_cmd, workbench as workbench_cmd,
     workbench_dependencies as workbench_dependency_cmd,
 };
 use crate::gui_startup::{GuiStartupCoordinator, ProductionBackendLifecycle, SetupOutcome};

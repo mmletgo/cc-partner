@@ -226,6 +226,8 @@ mod tests {
     #[test]
     fn claude_adapter_rejects_empty_prompt() {
         assert!(ClaudeCodeAdapter.build_launch_plan(&request("")).is_err());
-        assert!(ClaudeCodeAdapter.build_launch_plan(&request("   ")).is_err());
+        assert!(ClaudeCodeAdapter
+            .build_launch_plan(&request("   "))
+            .is_err());
     }
 }

@@ -16,7 +16,6 @@ pub mod selectors;
 use crate::agent_cli::args::{
     AgentAction, AttentionAction, BrowserAction, Cli, Commands, DeviceSelector, EventAction,
     ExperimentAction, FleetAction, ProjectAction, SessionAction, TaskAction, WorktreeAction,
-    APPROVED_COMMAND_FIXTURES,
 };
 use crate::agent_cli::client::AgentCliClient;
 use crate::agent_cli::output::{
@@ -24,9 +23,7 @@ use crate::agent_cli::output::{
     RenderedOutput,
 };
 use crate::agent_cli::protocol::{AgentControlMutation, AgentControlQuery};
-use crate::agent_cli::selectors::{
-    read_input_json, read_terminal_send_body, require_stdin_dash, EntitySelector,
-};
+use crate::agent_cli::selectors::{read_input_json, read_terminal_send_body, require_stdin_dash};
 use crate::backend::event_bus::BackendRuntimeCursor;
 use clap::{CommandFactory, Parser};
 use serde_json::{json, Value};
@@ -63,7 +60,7 @@ where
         }
         Err(err) => {
             // help / version 直接打印到 stdout，exit 0
-            if err.use_stderr() == false
+            if !err.use_stderr()
                 || matches!(
                     err.kind(),
                     clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
@@ -140,9 +137,7 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult, CliError> {
     } = &cli.command
     {
         if !matches!(cli.device, DeviceSelector::Local) {
-            return Err(CliError::unsupported(
-                "event follow is local-only in v1",
-            ));
+            return Err(CliError::unsupported("event follow is local-only in v1"));
         }
         run_event_follow(after_owner.clone(), *after_sequence).await?;
         return Ok(DispatchResult::EventFollowDone);
@@ -150,9 +145,7 @@ async fn dispatch_inner(cli: Cli) -> Result<DispatchResult, CliError> {
 
     let data = match cli.device {
         DeviceSelector::Local => dispatch_local(cli.command).await?,
-        DeviceSelector::Remote { device_id } => {
-            dispatch_remote(&device_id, cli.command).await?
-        }
+        DeviceSelector::Remote { device_id } => dispatch_remote(&device_id, cli.command).await?,
     };
     Ok(DispatchResult::Json(data))
 }
@@ -250,10 +243,11 @@ fn command_to_op(command: Commands) -> Result<Op, CliError> {
             action: WorktreeAction::List { project },
         } => Ok(Op::Query(AgentControlQuery::WorktreeList { project })),
         Commands::Worktree {
-            action: WorktreeAction::Create {
-                project,
-                input_json,
-            },
+            action:
+                WorktreeAction::Create {
+                    project,
+                    input_json,
+                },
         } => {
             require_stdin_dash(&input_json)?;
             let payload = read_input_json(&mut io::stdin())?;
@@ -264,21 +258,26 @@ fn command_to_op(command: Commands) -> Result<Op, CliError> {
         }
         Commands::Session {
             action: SessionAction::List { project, worktree },
-        } => Ok(Op::Query(AgentControlQuery::SessionList { project, worktree })),
+        } => Ok(Op::Query(AgentControlQuery::SessionList {
+            project,
+            worktree,
+        })),
         Commands::Session {
-            action: SessionAction::Read {
-                session,
-                after_sequence,
-            },
+            action:
+                SessionAction::Read {
+                    session,
+                    after_sequence,
+                },
         } => Ok(Op::Query(AgentControlQuery::SessionRead {
             session_id: session.id,
             after_sequence,
         })),
         Commands::Session {
-            action: SessionAction::Send {
-                session,
-                input_json,
-            },
+            action:
+                SessionAction::Send {
+                    session,
+                    input_json,
+                },
         } => {
             require_stdin_dash(&input_json)?;
             let data = read_terminal_send_body(&mut io::stdin())?;
@@ -296,11 +295,12 @@ fn command_to_op(command: Commands) -> Result<Op, CliError> {
             agent_session_id: agent.id,
         })),
         Commands::Agent {
-            action: AgentAction::Wait {
-                agent,
-                phase,
-                timeout_ms,
-            },
+            action:
+                AgentAction::Wait {
+                    agent,
+                    phase,
+                    timeout_ms,
+                },
         } => Ok(Op::Query(AgentControlQuery::AgentWait {
             agent_session_id: agent.id,
             phase,
@@ -310,10 +310,11 @@ fn command_to_op(command: Commands) -> Result<Op, CliError> {
             action: TaskAction::List { project },
         } => Ok(Op::Query(AgentControlQuery::TaskList { project })),
         Commands::Task {
-            action: TaskAction::Create {
-                project,
-                input_json,
-            },
+            action:
+                TaskAction::Create {
+                    project,
+                    input_json,
+                },
         } => {
             require_stdin_dash(&input_json)?;
             let payload: Value = read_input_json(&mut io::stdin())?;
@@ -324,10 +325,7 @@ fn command_to_op(command: Commands) -> Result<Op, CliError> {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .ok_or_else(|| {
-                    CliError::usage(
-                        "invalid_input",
-                        "clientRequestId required for task create",
-                    )
+                    CliError::usage("invalid_input", "clientRequestId required for task create")
                 })?;
             Ok(Op::Mutate(AgentControlMutation::TaskCreate {
                 project,
@@ -336,28 +334,31 @@ fn command_to_op(command: Commands) -> Result<Op, CliError> {
             }))
         }
         Commands::Task {
-            action: TaskAction::Cancel {
-                task,
-                client_request_id,
-            },
+            action:
+                TaskAction::Cancel {
+                    task,
+                    client_request_id,
+                },
         } => Ok(Op::Mutate(AgentControlMutation::TaskCancel {
             task_id: task.id,
             client_request_id,
         })),
         Commands::Task {
-            action: TaskAction::Retry {
-                task,
-                client_request_id,
-            },
+            action:
+                TaskAction::Retry {
+                    task,
+                    client_request_id,
+                },
         } => Ok(Op::Mutate(AgentControlMutation::TaskRetry {
             task_id: task.id,
             client_request_id,
         })),
         Commands::Experiment {
-            action: ExperimentAction::Create {
-                project,
-                input_json,
-            },
+            action:
+                ExperimentAction::Create {
+                    project,
+                    input_json,
+                },
         } => {
             require_stdin_dash(&input_json)?;
             let payload: Value = read_input_json(&mut io::stdin())?;
@@ -391,10 +392,11 @@ fn command_to_op(command: Commands) -> Result<Op, CliError> {
             action: BrowserAction::Discover { project },
         } => Ok(Op::Query(AgentControlQuery::BrowserDiscover { project })),
         Commands::Browser {
-            action: BrowserAction::Verify {
-                project,
-                input_json,
-            },
+            action:
+                BrowserAction::Verify {
+                    project,
+                    input_json,
+                },
         } => {
             require_stdin_dash(&input_json)?;
             let payload = read_input_json(&mut io::stdin())?;
@@ -585,10 +587,7 @@ async fn run_event_follow(
     }
 }
 
-fn filter_and_render_event(
-    ev: &Value,
-    last: &mut Option<(String, u64)>,
-) -> Option<String> {
+fn filter_and_render_event(ev: &Value, last: &mut Option<(String, u64)>) -> Option<String> {
     let owner = ev
         .get("ownerInstanceId")
         .and_then(|v| v.as_str())
@@ -609,6 +608,8 @@ fn filter_and_render_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_cli::args::APPROVED_COMMAND_FIXTURES;
+    use crate::agent_cli::selectors::EntitySelector;
     use clap::Parser;
 
     #[test]
@@ -651,10 +652,11 @@ mod tests {
         .unwrap();
         match cli.command {
             Commands::Session {
-                action: SessionAction::Read {
-                    session,
-                    after_sequence,
-                },
+                action:
+                    SessionAction::Read {
+                        session,
+                        after_sequence,
+                    },
             } => {
                 assert_eq!(session, EntitySelector { id: "abc".into() });
                 assert_eq!(after_sequence, Some(3));

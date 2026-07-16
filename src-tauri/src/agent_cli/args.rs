@@ -500,14 +500,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_device() {
-        let err = Cli::try_parse_from([
-            "cc-partner",
-            "--device",
-            "auto",
-            "project",
-            "list",
-        ])
-        .unwrap_err();
+        let err =
+            Cli::try_parse_from(["cc-partner", "--device", "auto", "project", "list"]).unwrap_err();
         assert!(err.to_string().contains("local") || err.to_string().contains("device"));
     }
 
@@ -563,6 +557,9 @@ mod tests {
     fn device_selector_parse_rejects_empty_id() {
         assert!(DeviceSelector::parse("id:").is_err());
         assert!(DeviceSelector::parse("name:foo").is_err());
-        assert_eq!(DeviceSelector::parse("local").unwrap(), DeviceSelector::Local);
+        assert_eq!(
+            DeviceSelector::parse("local").unwrap(),
+            DeviceSelector::Local
+        );
     }
 }

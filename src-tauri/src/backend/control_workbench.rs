@@ -440,8 +440,9 @@ async fn dispatch_workbench_op(
 
         // ---- workspace layout / safe restore ----
         "layout.get" => {
-            let slot_key = optional_string(&payload, "slotKey")
-                .unwrap_or_else(|| crate::workbench::workspace_layout::desktop_auto_slot_key().to_string());
+            let slot_key = optional_string(&payload, "slotKey").unwrap_or_else(|| {
+                crate::workbench::workspace_layout::desktop_auto_slot_key().to_string()
+            });
             let item = workbench::get_workspace_layout_for_state(state, &slot_key).await?;
             Ok(serde_json::to_value(item)?)
         }
@@ -453,9 +454,7 @@ async fn dispatch_workbench_op(
                         .cloned()
                         .ok_or_else(|| AppError::validation("draft required".to_string()))?,
                 )?;
-            let expected_revision = payload
-                .get("expectedRevision")
-                .and_then(|v| v.as_u64());
+            let expected_revision = payload.get("expectedRevision").and_then(|v| v.as_u64());
             let item =
                 workbench::save_workspace_layout_for_state(state, draft, expected_revision).await?;
             Ok(serde_json::to_value(item)?)
@@ -472,8 +471,8 @@ async fn dispatch_workbench_op(
         "layout.preflight" => {
             let slot_key = optional_string(&payload, "slotKey");
             let layout_id = optional_string(&payload, "layoutId");
-            let plan =
-                workbench::preflight_workspace_restore_for_state(state, slot_key, layout_id).await?;
+            let plan = workbench::preflight_workspace_restore_for_state(state, slot_key, layout_id)
+                .await?;
             Ok(serde_json::to_value(plan)?)
         }
         "layout.apply" => {
@@ -495,15 +494,14 @@ async fn dispatch_workbench_op(
                         "invalid browser.verification.start: {e}"
                     ))
                 })?;
-            let run =
-                crate::commands::workbench::start_browser_verification_for_state(state, req).await?;
+            let run = crate::commands::workbench::start_browser_verification_for_state(state, req)
+                .await?;
             Ok(serde_json::to_value(run)?)
         }
         "browser.verification.get" => {
             let run_id = required_string(&payload, "runId")?;
-            let run =
-                crate::commands::workbench::get_browser_verification_for_state(state, run_id)
-                    .await?;
+            let run = crate::commands::workbench::get_browser_verification_for_state(state, run_id)
+                .await?;
             Ok(serde_json::to_value(run)?)
         }
         "browser.verification.cancel" => {
@@ -535,8 +533,7 @@ async fn dispatch_workbench_op(
         }
         // ---- lan fleet ----
         "lan_fleet.snapshot" => {
-            let snap =
-                crate::commands::workbench::get_workbench_lan_fleet_for_state(state).await?;
+            let snap = crate::commands::workbench::get_workbench_lan_fleet_for_state(state).await?;
             Ok(serde_json::to_value(snap)?)
         }
         // ---- agent metadata ledger ----
@@ -549,10 +546,7 @@ async fn dispatch_workbench_op(
         "agent_ledger.summarize" => {
             let window = required_string(&payload, "window")?;
             let project_id = optional_string(&payload, "projectId");
-            let req = crate::commands::workbench::SummarizeAgentLedgerReq {
-                window,
-                project_id,
-            };
+            let req = crate::commands::workbench::SummarizeAgentLedgerReq { window, project_id };
             let summary =
                 crate::commands::workbench::summarize_agent_ledger_for_state(state, req).await?;
             Ok(serde_json::to_value(summary)?)

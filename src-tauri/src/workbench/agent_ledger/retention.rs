@@ -64,6 +64,7 @@ impl MockClock {
     ///
     /// Code Logic（这个函数做什么）:
     ///     包装 initial。
+    #[allow(dead_code)] // 测试 fixture / retention 时钟 API surface
     pub fn new(initial: DateTime<Utc>) -> Self {
         Self {
             inner: Arc::new(std::sync::Mutex::new(initial)),
@@ -202,11 +203,7 @@ mod tests {
         AgentLedgerRepo::new(pool)
     }
 
-    async fn insert_row(
-        repo: &AgentLedgerRepo,
-        id: &str,
-        ended_at: &str,
-    ) {
+    async fn insert_row(repo: &AgentLedgerRepo, id: &str, ended_at: &str) {
         let input = AgentLedgerFinalizeInput {
             agent_session_id: id.into(),
             project_id: "p1".into(),
@@ -305,11 +302,8 @@ mod tests {
     async fn shutdown_cancellation_stops_task() {
         let repo = repo().await;
         let cancel = CancellationToken::new();
-        let handle = AgentLedgerRetentionTask::spawn(
-            repo,
-            cancel.clone(),
-            Duration::from_secs(3600 * 24),
-        );
+        let handle =
+            AgentLedgerRetentionTask::spawn(repo, cancel.clone(), Duration::from_secs(3600 * 24));
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle)
             .await

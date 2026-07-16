@@ -18,8 +18,8 @@ use crate::orchestrator::agent_adapter::{
 };
 use crate::orchestrator::claude_runtime::associate_claude_runtime;
 use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorAttemptStatus, OrchestratorTaskRow, OrchestratorTaskStatus,
-    EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
+    OrchestratorAttemptPhase, OrchestratorAttemptStatus, OrchestratorTaskRow,
+    OrchestratorTaskStatus, EVIDENCE_KIND_DEVELOPMENT_ATTEMPT,
 };
 use crate::orchestrator::prompt::{build_repair_task_prompt, RepairPromptContext};
 use crate::orchestrator::runner_limits::{

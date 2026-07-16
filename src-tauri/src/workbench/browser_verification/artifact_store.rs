@@ -104,12 +104,7 @@ impl ArtifactStore {
     ///
     /// Code Logic（这个函数做什么）:
     ///     校验大小与 run 聚合限额，写入 `root/<run_id>/<id>.bin`，返回 artifact id。
-    pub fn put(
-        &self,
-        run_id: &str,
-        kind: &str,
-        bytes: &[u8],
-    ) -> Result<ArtifactMeta, AppError> {
+    pub fn put(&self, run_id: &str, kind: &str, bytes: &[u8]) -> Result<ArtifactMeta, AppError> {
         if kind == "screenshot" || kind == "png" {
             if bytes.len() > MAX_SCREENSHOT_BYTES {
                 return Err(AppError::validation("resource_limit"));
@@ -280,8 +275,7 @@ mod tests {
     #[test]
     fn enforces_per_run_count_and_expires() {
         let dir = tempdir().unwrap();
-        let store =
-            ArtifactStore::new_with_retention(dir.path(), Duration::from_secs(1)).unwrap();
+        let store = ArtifactStore::new_with_retention(dir.path(), Duration::from_secs(1)).unwrap();
         for _ in 0..MAX_ARTIFACTS_PER_RUN {
             store.put("run1", "bin", b"hi").unwrap();
         }

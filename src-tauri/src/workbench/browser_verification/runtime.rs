@@ -142,11 +142,7 @@ impl BrowserVerificationService {
     /// Code Logic（这个函数做什么）:
     ///     原子标记后 spawn 周期任务调用 `enforce_session_limits`。
     fn ensure_sweeper(&self) {
-        if self
-            .inner
-            .sweeper_started
-            .swap(true, Ordering::SeqCst)
-        {
+        if self.inner.sweeper_started.swap(true, Ordering::SeqCst) {
             return;
         }
         let handle = self.clone();
@@ -363,9 +359,7 @@ impl BrowserVerificationService {
             };
             let dto = record_to_run(&rec);
             tables.runs.insert(run_id.clone(), rec);
-            tables
-                .by_request
-                .insert(request.request_id, run_id.clone());
+            tables.by_request.insert(request.request_id, run_id.clone());
             (true, dto)
         };
 
@@ -604,7 +598,8 @@ impl BrowserVerificationService {
                     // 已终态且无 task：engine 已结束
                     if !matches!(
                         rec.session.state,
-                        BrowserVerificationState::Queued | BrowserVerificationState::Running
+                        BrowserVerificationState::Queued
+                            | BrowserVerificationState::Running
                             | BrowserVerificationState::Canceled
                     ) {
                         break;

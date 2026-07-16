@@ -21,7 +21,8 @@ use sqlx::Row;
 use std::sync::Arc;
 
 /// layout 表建表 SQL（幂等 CREATE TABLE IF NOT EXISTS）。
-pub const WORKBENCH_WORKSPACE_LAYOUT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_workspace_layouts (
+pub const WORKBENCH_WORKSPACE_LAYOUT_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS workbench_workspace_layouts (
     id TEXT PRIMARY KEY NOT NULL,
     slot_key TEXT NOT NULL UNIQUE,
     kind TEXT NOT NULL,
@@ -266,14 +267,14 @@ impl WorkbenchWorkspaceLayoutRepo {
     ///     仅 `kind=named` 行可删；按 id 删除。
     pub async fn delete_named(&self, id: &str) -> Result<(), AppError> {
         with_shared_write_lease(&self.gate, async {
-            let row = sqlx::query(
-                "SELECT kind FROM workbench_workspace_layouts WHERE id = ?",
-            )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+            let row = sqlx::query("SELECT kind FROM workbench_workspace_layouts WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
             let Some(row) = row else {
-                return Err(AppError::not_found("workspace_layout_not_found".to_string()));
+                return Err(AppError::not_found(
+                    "workspace_layout_not_found".to_string(),
+                ));
             };
             let kind: String = row.try_get("kind")?;
             if kind != WorkspaceLayoutKind::Named.as_str() {

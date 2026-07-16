@@ -332,8 +332,7 @@ pub fn render_success<T: Serialize>(data: T, json: bool) -> RenderedOutput {
             exit_code: CliExitCode::Success.as_i32(),
         }
     } else {
-        let stdout = serde_json::to_string_pretty(&data)
-            .unwrap_or_else(|_| "{}".to_string());
+        let stdout = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string());
         RenderedOutput {
             stdout,
             stderr: String::new(),
@@ -480,7 +479,10 @@ mod tests {
     fn failure_message_never_echoes_secret_fixture() {
         let secret = "SUPER_SECRET_PROMPT_BODY_xyz";
         // 调用方必须传通用 message；此处验证 render 不会自动附加额外字段
-        let rendered = render_failure(CliError::usage("invalid_input", "stdin body rejected"), true);
+        let rendered = render_failure(
+            CliError::usage("invalid_input", "stdin body rejected"),
+            true,
+        );
         assert!(!rendered.stdout.contains(secret));
         assert!(!rendered.stderr.contains(secret));
     }

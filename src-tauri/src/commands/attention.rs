@@ -75,7 +75,6 @@ pub async fn list_attention_items_v2(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::attention::agent_runtime_source::project_agent_runtime_rows;
     use crate::attention::aggregator::aggregate_attention_item_batches;
     use crate::attention::models::{

@@ -262,7 +262,9 @@ impl WorkbenchBrowserPreviewRegistry {
             .write()
             .expect("browser preview registry 写锁中毒");
         guard.retain(|_, session| session.expires_at > now);
-        guard.values().any(|session| session.project_id == project_id)
+        guard
+            .values()
+            .any(|session| session.project_id == project_id)
     }
 }
 

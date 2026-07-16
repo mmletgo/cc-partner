@@ -27,6 +27,7 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 ///     反序列化 camelCase `{kind, control?, error?}`；control 仅含 pid/port。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // smoke/CLI fixture API surface
 pub struct CliStatusJson {
     pub kind: String,
     pub control: Option<CliControlJson>,
@@ -42,6 +43,7 @@ pub struct CliStatusJson {
 ///     反序列化 `{pid, port}`。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // smoke/CLI fixture API surface
 pub struct CliControlJson {
     pub pid: u32,
     pub port: u16,
@@ -98,6 +100,7 @@ impl CapturedCli {
     ///
     /// Code Logic（这个函数做什么）:
     ///     从 stdout 取最后一行非空文本并反序列化为 `CliStatusJson`。
+    #[allow(dead_code)] // smoke status JSON 解析 API surface
     pub fn parse_status_json(&self) -> Result<CliStatusJson, String> {
         let line = self
             .stdout

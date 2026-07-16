@@ -228,9 +228,9 @@ pub fn should_emit_agent_exception_notification(
     current_phase: AgentSessionPhase,
 ) -> bool {
     match current_phase {
-        AgentSessionPhase::NeedsInput | AgentSessionPhase::Failed => {
-            previous_phase.map(|prev| prev != current_phase).unwrap_or(true)
-        }
+        AgentSessionPhase::NeedsInput | AgentSessionPhase::Failed => previous_phase
+            .map(|prev| prev != current_phase)
+            .unwrap_or(true),
         _ => false,
     }
 }
@@ -344,18 +344,30 @@ mod tests {
     fn agent_exception_notification_only_on_phase_enter() {
         use AgentSessionPhase::*;
         assert!(should_emit_agent_exception_notification(None, NeedsInput));
-        assert!(should_emit_agent_exception_notification(Some(Working), NeedsInput));
+        assert!(should_emit_agent_exception_notification(
+            Some(Working),
+            NeedsInput
+        ));
         assert!(!should_emit_agent_exception_notification(
             Some(NeedsInput),
             NeedsInput
         ));
-        assert!(should_emit_agent_exception_notification(Some(Working), Failed));
+        assert!(should_emit_agent_exception_notification(
+            Some(Working),
+            Failed
+        ));
         assert!(should_emit_agent_exception_notification(
             Some(NeedsInput),
             Failed
         ));
-        assert!(!should_emit_agent_exception_notification(Some(Failed), Failed));
-        assert!(!should_emit_agent_exception_notification(Some(Working), Idle));
+        assert!(!should_emit_agent_exception_notification(
+            Some(Failed),
+            Failed
+        ));
+        assert!(!should_emit_agent_exception_notification(
+            Some(Working),
+            Idle
+        ));
         assert!(!should_emit_agent_exception_notification(
             Some(NeedsInput),
             Working

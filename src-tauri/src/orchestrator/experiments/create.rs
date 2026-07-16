@@ -8,10 +8,11 @@
 //!     校验候选数量与 maxParallel，计算 fingerprint，调用 repo 单事务写入。
 
 use crate::error::AppError;
+#[cfg(test)]
+use crate::orchestrator::experiments::models::ExperimentCandidateSpec;
 use crate::orchestrator::experiments::models::{
-    CreateExperimentRequest, ExperimentStatus, ExperimentCandidateSpec,
-    IdempotentCreateExperimentOutcome, OrchestratorExperimentCandidateRow,
-    OrchestratorExperimentDto, OrchestratorExperimentRow, CandidateOutcome,
+    CandidateOutcome, CreateExperimentRequest, ExperimentStatus, IdempotentCreateExperimentOutcome,
+    OrchestratorExperimentCandidateRow, OrchestratorExperimentDto, OrchestratorExperimentRow,
     EXPERIMENT_SELECTION_POLICY_COMPARATIVE, EXPERIMENT_TASK_SOURCE,
 };
 use crate::orchestrator::models::{
@@ -37,7 +38,7 @@ pub fn validate_create_request(
     device_max_concurrency: u32,
 ) -> Result<(), AppError> {
     let n = request.candidates.len();
-    if n < MIN_CANDIDATES || n > MAX_CANDIDATES {
+    if !(MIN_CANDIDATES..=MAX_CANDIDATES).contains(&n) {
         return Err(AppError::generic(format!(
             "experiment candidates 数量必须在 {MIN_CANDIDATES}–{MAX_CANDIDATES}，当前为 {n}"
         )));
@@ -83,7 +84,9 @@ pub fn validate_create_request(
 ///
 /// Code Logic（这个函数做什么）:
 ///     固定 key 顺序 JSON + SHA256 hex。
-pub fn experiment_request_fingerprint(request: &CreateExperimentRequest) -> Result<String, AppError> {
+pub fn experiment_request_fingerprint(
+    request: &CreateExperimentRequest,
+) -> Result<String, AppError> {
     let payload = serde_json::json!({
         "project_id": request.project_id,
         "title": request.title,
@@ -254,7 +257,11 @@ mod tests {
         let err = create_experiment_idempotently(&repo, &request_with_candidates(1), 4)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("2–8") || err.to_string().contains("2-8") || err.to_string().contains("数量"));
+        assert!(
+            err.to_string().contains("2–8")
+                || err.to_string().contains("2-8")
+                || err.to_string().contains("数量")
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -262,9 +269,11 @@ mod tests {
     #[tokio::test]
     async fn rejects_nine_candidates() {
         let repo = setup().await;
-        assert!(create_experiment_idempotently(&repo, &request_with_candidates(9), 8)
-            .await
-            .is_err());
+        assert!(
+            create_experiment_idempotently(&repo, &request_with_candidates(9), 8)
+                .await
+                .is_err()
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -285,7 +294,9 @@ mod tests {
         let tasks = repo.list_tasks(Some("proj-1")).await.unwrap();
         assert_eq!(tasks.len(), 3);
         assert!(tasks.iter().all(|t| t.delivery_suppressed));
-        assert!(tasks.iter().all(|t| t.experiment_id.as_deref() == Some(&first.experiment.id)));
+        assert!(tasks
+            .iter()
+            .all(|t| t.experiment_id.as_deref() == Some(&first.experiment.id)));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -294,9 +305,13 @@ mod tests {
     async fn same_request_key_different_payload_conflicts() {
         let repo = setup().await;
         let mut req = request_with_candidates(2);
-        create_experiment_idempotently(&repo, &req, 4).await.unwrap();
+        create_experiment_idempotently(&repo, &req, 4)
+            .await
+            .unwrap();
         req.title = "other title".to_string();
-        assert!(create_experiment_idempotently(&repo, &req, 4).await.is_err());
+        assert!(create_experiment_idempotently(&repo, &req, 4)
+            .await
+            .is_err());
     }
 
     /// Business Logic（为什么需要这个测试）:

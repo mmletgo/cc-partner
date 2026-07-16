@@ -152,9 +152,7 @@ pub fn spawn_maybe_handle_session_output_for_state(
 ///
 /// Code Logic（这个函数做什么）:
 ///     `AgentCompletionContract::parse_legacy`。
-fn completion_contract_for_attempt(
-    contract: &str,
-) -> Result<AgentCompletionContract, AppError> {
+fn completion_contract_for_attempt(contract: &str) -> Result<AgentCompletionContract, AppError> {
     AgentCompletionContract::parse_legacy(Some(contract))
 }
 
@@ -173,22 +171,23 @@ async fn complete_running_attempt_to_verifying(
     agent_session_id: Option<&str>,
 ) -> Result<(), AppError> {
     let at = chrono::Utc::now().to_rfc3339();
-    let marked = crate::orchestrator::agent_runtime_bridge::mark_agent_completed_before_verifying_with_emit(
-        &state.workbench_agent_session_repo,
-        Some(state),
-        agent_session_id,
-        session_id,
-        &at,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!(
-            session_id = %session_id,
-            task_id = %task_id,
-            "Agent runtime completion mark 失败（拒绝进入 Verifying）: {error}"
-        );
-        error
-    })?;
+    let marked =
+        crate::orchestrator::agent_runtime_bridge::mark_agent_completed_before_verifying_with_emit(
+            &state.workbench_agent_session_repo,
+            Some(state),
+            agent_session_id,
+            session_id,
+            &at,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                session_id = %session_id,
+                task_id = %task_id,
+                "Agent runtime completion mark 失败（拒绝进入 Verifying）: {error}"
+            );
+            error
+        })?;
     if let Some(row) = marked.as_ref() {
         if row.is_active && !row.phase.is_terminal() {
             return Err(AppError::generic(format!(

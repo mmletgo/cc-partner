@@ -231,9 +231,7 @@ mod option_worktree_selector_serde {
         match value {
             None => serializer.serialize_none(),
             Some(WorktreeSelector::Id(id)) => serializer.serialize_some(&format!("id:{id}")),
-            Some(WorktreeSelector::Branch(b)) => {
-                serializer.serialize_some(&format!("branch:{b}"))
-            }
+            Some(WorktreeSelector::Branch(b)) => serializer.serialize_some(&format!("branch:{b}")),
         }
     }
 
@@ -270,7 +268,10 @@ mod tests {
             task_id: "t1".into(),
             client_request_id: "r1".into(),
         };
-        assert_eq!(m.replay_policy(), MutationReplayPolicy::ReconcileByRequestId);
+        assert_eq!(
+            m.replay_policy(),
+            MutationReplayPolicy::ReconcileByRequestId
+        );
     }
 
     #[test]

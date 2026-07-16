@@ -838,21 +838,18 @@ fn apply_runner_section(
     section: RunnerSection,
 ) -> Result<(), AppError> {
     if let Some(provider) = section.provider {
-        let parsed = AgentProviderId::parse(provider.trim()).map_err(|err| {
-            AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err))
-        })?;
+        let parsed = AgentProviderId::parse(provider.trim())
+            .map_err(|err| AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err)))?;
         runner.provider = parsed.as_str().to_string();
     }
     if let Some(max_turns) = section.max_turns {
-        validate_max_turns(max_turns).map_err(|err| {
-            AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err))
-        })?;
+        validate_max_turns(max_turns)
+            .map_err(|err| AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err)))?;
         runner.max_turns = max_turns;
     }
     if let Some(stall_timeout_ms) = section.stall_timeout_ms {
-        validate_stall_timeout_ms(stall_timeout_ms).map_err(|err| {
-            AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err))
-        })?;
+        validate_stall_timeout_ms(stall_timeout_ms)
+            .map_err(|err| AppError::generic(format!("{WORKFLOW_FILE_NAME} {}", err)))?;
         runner.stall_timeout_ms = stall_timeout_ms;
     }
     Ok(())
@@ -1304,10 +1301,9 @@ mod tests {
     #[test]
     fn workflow_accepts_all_built_in_agent_providers() {
         for value in ["claudeCodeVisible", "codexVisible", "genericTerminal"] {
-            let resolved = parse_project_workflow(&format!(
-                "---\nrunner:\n  provider: {value}\n---\nPrompt"
-            ))
-            .unwrap_or_else(|e| panic!("provider {value} 应被接受: {e}"));
+            let resolved =
+                parse_project_workflow(&format!("---\nrunner:\n  provider: {value}\n---\nPrompt"))
+                    .unwrap_or_else(|e| panic!("provider {value} 应被接受: {e}"));
             assert_eq!(resolved.runner.provider, value);
         }
     }
@@ -1338,8 +1334,9 @@ mod tests {
         let err21 = parse_project_workflow("---\nrunner:\n  max_turns: 21\n---\nBody")
             .expect_err("max_turns 21");
         assert!(err21.to_string().contains("max_turns"));
-        let err_stall = parse_project_workflow("---\nrunner:\n  stall_timeout_ms: 29999\n---\nBody")
-            .expect_err("stall 29999");
+        let err_stall =
+            parse_project_workflow("---\nrunner:\n  stall_timeout_ms: 29999\n---\nBody")
+                .expect_err("stall 29999");
         assert!(err_stall.to_string().contains("29999"));
     }
 

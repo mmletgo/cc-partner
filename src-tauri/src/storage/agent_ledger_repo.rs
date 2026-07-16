@@ -13,10 +13,10 @@
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use crate::workbench::agent_ledger::models::{
-    compute_duration_ms, convert_major_to_minor_units, merge_usage_monotonic, validate_currency_code,
-    AgentLedgerEntry, AgentLedgerFinalizeInput, AgentLedgerOutcome, AgentLedgerPage,
-    AgentLedgerQuery, AgentLedgerSummary, CurrencyAmount, LedgerUsageCoverage, LedgerWindow,
-    ReliableUsageSnapshot,
+    compute_duration_ms, convert_major_to_minor_units, merge_usage_monotonic,
+    validate_currency_code, AgentLedgerEntry, AgentLedgerFinalizeInput, AgentLedgerOutcome,
+    AgentLedgerPage, AgentLedgerQuery, AgentLedgerSummary, CurrencyAmount, LedgerUsageCoverage,
+    LedgerWindow, ReliableUsageSnapshot,
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -75,7 +75,8 @@ pub const RETENTION_DAYS: i64 = 30;
 /// 每 device 硬上限条数。
 pub const MAX_LEDGER_ROWS: u64 = 10_000;
 
-const SELECT_COLUMNS: &str = "id, agent_session_id, project_id, worktree_id, provider_id, model_id, \
+const SELECT_COLUMNS: &str =
+    "id, agent_session_id, project_id, worktree_id, provider_id, model_id, \
     started_at, ended_at, duration_ms, outcome, input_tokens, output_tokens, \
     cache_read_tokens, cache_write_tokens, cost_minor_units, cost_currency, \
     created_at, updated_at";
@@ -214,16 +215,14 @@ impl AgentLedgerRepo {
             .map(|s| s.to_string())
             .or(model_from_usage);
 
-        let (cost_minor, cost_currency) = match (
-            usage.cost_major.as_deref(),
-            usage.cost_currency.as_deref(),
-        ) {
-            (Some(major), Some(cur)) => match convert_major_to_minor_units(major, cur) {
-                Ok(m) => (Some(m), Some(validate_currency_code(cur)?)),
-                Err(_) => (None, None),
-            },
-            _ => (None, None),
-        };
+        let (cost_minor, cost_currency) =
+            match (usage.cost_major.as_deref(), usage.cost_currency.as_deref()) {
+                (Some(major), Some(cur)) => match convert_major_to_minor_units(major, cur) {
+                    Ok(m) => (Some(m), Some(validate_currency_code(cur)?)),
+                    Err(_) => (None, None),
+                },
+                _ => (None, None),
+            };
 
         with_shared_write_lease(&self.gate, async {
             if let Some(existing) = self.get_by_agent_session_id(&agent_session_id).await? {
@@ -281,7 +280,9 @@ impl AgentLedgerRepo {
             .map_err(|e| {
                 // 并发 INSERT 唯一冲突 → 回读并 null-fill
                 if is_unique_violation(&e) {
-                    AppError::conflict(format!("agent_session_id 并发 finalize: {agent_session_id}"))
+                    AppError::conflict(format!(
+                        "agent_session_id 并发 finalize: {agent_session_id}"
+                    ))
                 } else {
                     AppError::from(e)
                 }
@@ -354,12 +355,14 @@ impl AgentLedgerRepo {
         // worktree：已有非空且新值不同 → 冲突；空则可填
         let worktree_id = match (
             existing.worktree_id.as_deref(),
-            input.worktree_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+            input
+                .worktree_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
         ) {
             (Some(a), Some(b)) if a != b => {
-                return Err(AppError::conflict(format!(
-                    "worktree_id 冲突: {a} vs {b}"
-                )));
+                return Err(AppError::conflict(format!("worktree_id 冲突: {a} vs {b}")));
             }
             (Some(a), _) => Some(a.to_string()),
             (None, Some(b)) => Some(b.to_string()),
@@ -381,7 +384,7 @@ impl AgentLedgerRepo {
 
         let incoming = input.usage.clone().unwrap_or_default();
         // merge tokens via merge_usage_monotonic，但对 cost 使用 minor units 直接比较
-        let mut merged = merge_usage_monotonic(
+        let merged = merge_usage_monotonic(
             &ReliableUsageSnapshot {
                 model_id: base_usage.model_id.clone(),
                 input_tokens: base_usage.input_tokens,
@@ -409,24 +412,20 @@ impl AgentLedgerRepo {
             cost_minor,
             cost_currency.as_deref(),
         ) {
-            (Some(a), Some(ca), Some(b), Some(cb)) if ca != cb => {
+            (Some(_a), Some(ca), Some(_b), Some(cb)) if ca != cb => {
                 return Err(AppError::conflict(format!(
                     "cost_currency 冲突: {ca} vs {cb}"
                 )));
             }
-            (Some(a), cur, Some(b), _) if b < a => {
-                return Err(AppError::validation(format!(
-                    "usage cost 回退: {b} < {a}"
-                )));
+            (Some(a), _cur, Some(b), _) if b < a => {
+                return Err(AppError::validation(format!("usage cost 回退: {b} < {a}")));
             }
-            (Some(_a), cur, Some(b), new_cur) if b >= existing.cost_minor_units.unwrap_or(0) => {
-                (
-                    Some(b),
-                    new_cur
-                        .map(|s| s.to_string())
-                        .or_else(|| cur.map(|s| s.to_string())),
-                )
-            }
+            (Some(_a), cur, Some(b), new_cur) if b >= existing.cost_minor_units.unwrap_or(0) => (
+                Some(b),
+                new_cur
+                    .map(|s| s.to_string())
+                    .or_else(|| cur.map(|s| s.to_string())),
+            ),
             (Some(a), cur, None, _) => (Some(a), cur.map(|s| s.to_string())),
             (None, _, Some(b), cur) => (Some(b), cur.map(|s| s.to_string())),
             (None, cur, None, _) => (None, cur.map(|s| s.to_string())),
@@ -444,7 +443,7 @@ impl AgentLedgerRepo {
         };
 
         // started_at 不得改变 identity 时间语义：首次写入为准
-        let started_at = existing.started_at.clone();
+        let _started_at = existing.started_at.clone();
 
         let now = Utc::now().to_rfc3339();
         sqlx::query(
@@ -531,7 +530,12 @@ impl AgentLedgerRepo {
         let mut sql = format!("SELECT {SELECT_COLUMNS} FROM agent_session_ledger WHERE 1=1");
         let mut binds: Vec<BindValue> = Vec::new();
 
-        if let Some(pid) = query.project_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(pid) = query
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             sql.push_str(" AND project_id = ?");
             binds.push(BindValue::Text(pid.to_string()));
         }
@@ -548,15 +552,30 @@ impl AgentLedgerRepo {
             sql.push_str(" AND outcome = ?");
             binds.push(BindValue::Text(outcome.as_str().to_string()));
         }
-        if let Some(after) = query.ended_after.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(after) = query
+            .ended_after
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             sql.push_str(" AND ended_at >= ?");
             binds.push(BindValue::Text(after.to_string()));
         }
-        if let Some(before) = query.ended_before.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(before) = query
+            .ended_before
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             sql.push_str(" AND ended_at <= ?");
             binds.push(BindValue::Text(before.to_string()));
         }
-        if let Some(cursor_raw) = query.cursor.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(cursor_raw) = query
+            .cursor
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let cur = decode_ledger_cursor(cursor_raw)
                 .map_err(|_| AppError::validation("invalid ledger cursor"))?;
             sql.push_str(" AND (ended_at < ? OR (ended_at = ? AND id < ?))");
@@ -587,10 +606,7 @@ impl AgentLedgerRepo {
         } else {
             None
         };
-        Ok(AgentLedgerPage {
-            items,
-            next_cursor,
-        })
+        Ok(AgentLedgerPage { items, next_cursor })
     }
 
     /// 清除全部 ledger 行；返回删除数。幂等。
@@ -638,7 +654,7 @@ impl AgentLedgerRepo {
         max_rows: u64,
         batch_limit: u64,
     ) -> Result<AgentLedgerCleanupResult, AppError> {
-        let batch_limit = batch_limit.min(CLEANUP_BATCH_LIMIT).max(1);
+        let batch_limit = batch_limit.clamp(1, CLEANUP_BATCH_LIMIT);
         let cutoff = (now - ChronoDuration::days(max_age_days)).to_rfc3339();
 
         with_shared_write_lease(&self.gate, async {
@@ -681,12 +697,11 @@ impl AgentLedgerRepo {
             let _ = budget;
 
             // more_remaining：仍有超龄或超 cap
-            let still_old: i64 = sqlx::query_scalar(
-                "SELECT COUNT(1) FROM agent_session_ledger WHERE ended_at < ?",
-            )
-            .bind(&cutoff)
-            .fetch_one(&self.pool)
-            .await?;
+            let still_old: i64 =
+                sqlx::query_scalar("SELECT COUNT(1) FROM agent_session_ledger WHERE ended_at < ?")
+                    .bind(&cutoff)
+                    .fetch_one(&self.pool)
+                    .await?;
             let total_after = self.count_all().await?;
             let more_remaining = still_old > 0 || total_after > max_rows;
 
@@ -711,8 +726,7 @@ impl AgentLedgerRepo {
         project_id: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<AgentLedgerSummary, AppError> {
-        let start = now
-            - ChronoDuration::seconds(window.duration_secs() as i64);
+        let start = now - ChronoDuration::seconds(window.duration_secs() as i64);
         let start_s = start.to_rfc3339();
         let now_s = now.to_rfc3339();
 
@@ -720,7 +734,11 @@ impl AgentLedgerRepo {
             "SELECT {SELECT_COLUMNS} FROM agent_session_ledger \
              WHERE ended_at >= ? AND ended_at <= ?"
         );
-        if project_id.map(str::trim).filter(|s| !s.is_empty()).is_some() {
+        if project_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
             sql.push_str(" AND project_id = ?");
         }
         let mut q = sqlx::query(&sql).bind(&start_s).bind(&now_s);
@@ -853,9 +871,8 @@ fn decode_ledger_cursor(cursor: &str) -> Result<LedgerCursorV1, ()> {
 ///     try_get 各列；outcome parse fail → Err。
 fn map_row(row: SqliteRow) -> Result<AgentLedgerEntry, AppError> {
     let outcome_raw: String = row.try_get("outcome")?;
-    let outcome = AgentLedgerOutcome::parse(&outcome_raw).ok_or_else(|| {
-        AppError::generic(format!("ledger outcome 损坏: {outcome_raw}"))
-    })?;
+    let outcome = AgentLedgerOutcome::parse(&outcome_raw)
+        .ok_or_else(|| AppError::generic(format!("ledger outcome 损坏: {outcome_raw}")))?;
     Ok(AgentLedgerEntry {
         id: row.try_get("id")?,
         agent_session_id: row.try_get("agent_session_id")?,
@@ -1031,7 +1048,10 @@ mod tests {
         // 但 validate 路径：usage 带小写 → cost 不写
         let mut u = usage(1, 1, "usd", "1.00");
         // convert fails → cost null
-        let entry = repo.finalize(finalize("c1", Some(u.clone()))).await.unwrap();
+        let entry = repo
+            .finalize(finalize("c1", Some(u.clone())))
+            .await
+            .unwrap();
         assert!(entry.cost_minor_units.is_none());
         // 直接 validate
         assert!(validate_currency_code("usd").is_err());

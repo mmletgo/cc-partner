@@ -24,12 +24,8 @@ use super::common::proxy_workbench_if_gui;
 pub async fn get_workbench_lan_fleet(
     state: State<'_, AppState>,
 ) -> Result<LanFleetSnapshot, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(
-        state.inner(),
-        "lan_fleet.snapshot",
-        serde_json::json!({}),
-    )
-    .await?
+    if let Some(v) =
+        proxy_workbench_if_gui(state.inner(), "lan_fleet.snapshot", serde_json::json!({})).await?
     {
         return Ok(v);
     }

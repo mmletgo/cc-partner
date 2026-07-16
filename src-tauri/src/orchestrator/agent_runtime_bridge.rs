@@ -95,9 +95,10 @@ async fn dual_write_task_activity_from_row(
     row: &AgentSessionRuntime,
     occurred_at: &str,
 ) {
-    if let (Some(task_id), Some(attempt)) =
-        (row.orchestrator_task_id.as_deref(), row.orchestrator_attempt)
-    {
+    if let (Some(task_id), Some(attempt)) = (
+        row.orchestrator_task_id.as_deref(),
+        row.orchestrator_attempt,
+    ) {
         let at = if row.last_activity_at.trim().is_empty() {
             occurred_at
         } else {
@@ -145,6 +146,7 @@ pub async fn create_launching_agent_for_runner(
 ///
 /// Code Logic（这个函数做什么）:
 ///     start_or_replace_active(Launching)；emit；返回 active runtime。
+#[allow(clippy::too_many_arguments)] // runner create 需要完整 identity 上下文
 pub async fn create_launching_agent_for_runner_with_provider(
     state: &AppState,
     project_id: &str,
@@ -561,15 +563,11 @@ mod tests {
             })
             .await
             .unwrap();
-        let completed = mark_agent_completed_before_verifying(
-            &repo,
-            None,
-            "term-end",
-            "2026-07-15T00:01:00Z",
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let completed =
+            mark_agent_completed_before_verifying(&repo, None, "term-end", "2026-07-15T00:01:00Z")
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(completed.id, agent.id);
         assert_eq!(completed.phase, AgentSessionPhase::Completed);
         assert!(!completed.is_active);
@@ -615,7 +613,8 @@ mod tests {
         assert!(ok);
         let row = repo.get(&agent.id).await.unwrap().unwrap();
         assert_eq!(row.native_session_id.as_deref(), Some("claude-native-xyz"));
-        let dto = crate::workbench::agent_runtime::AgentSessionRuntimeDto::from_runtime(&row);
+        let dto =
+            crate::workbench::agent_runtime::snapshot::AgentSessionRuntimeDto::from_runtime(&row);
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("nativeSessionId"));
         assert!(!json.contains("claude-native-xyz"));

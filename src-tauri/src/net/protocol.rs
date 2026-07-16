@@ -202,8 +202,7 @@ pub const CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1: &str = "workbench.agent-runtime
 ///     remote/mobile 在调用 owner 验证路由前必须确认对端已实现该契约；
 ///     旧 peer 缺失时显示 unsupported，不得回退为不安全 iframe DOM 访问。
 ///     与四条路由原子上线；列入 `server_protocol_info()`。
-pub const CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1: &str =
-    "workbench.browser-verification.v1";
+pub const CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1: &str = "workbench.browser-verification.v1";
 /// 能力 token：Workbench workspace safe restore（owner-local preflight + safe attach）。
 ///     控制设备在转发 remote project 的 preflight/safe-attach 前必须确认 owner 支持
 ///     纯读 preflight 与仅 attach 已有 tmux 的契约；旧 peer 缺失时只恢复 project selection。
@@ -233,8 +232,7 @@ pub const CAPABILITY_WORKBENCH_LAN_FLEET_V1: &str = "workbench.lan-fleet.v1";
 ///
 /// Code Logic（这个常量做什么）:
 ///     字符串常量，列入 `server_protocol_info()`；与 summary 路由原子上线。
-pub const CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1: &str =
-    "workbench.agent-ledger-summary.v1";
+pub const CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1: &str = "workbench.agent-ledger-summary.v1";
 
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///

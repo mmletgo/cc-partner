@@ -218,7 +218,7 @@ mod tests {
             notify_blocked: true,
             notify_remote_outbox_failed: true,
             notify_task_done: false,
-                    generic_terminal: None,
+            generic_terminal: None,
         });
         let patch = OrchestratorAutomationConfigPatch {
             enabled: Some(true),
@@ -271,7 +271,7 @@ mod tests {
             notify_blocked: true,
             notify_remote_outbox_failed: true,
             notify_task_done: false,
-                    generic_terminal: None,
+            generic_terminal: None,
         };
         let mut cfg = test_app_config(original.clone());
         let patch = OrchestratorAutomationConfigPatch {

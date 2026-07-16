@@ -95,15 +95,26 @@ pub enum BrowserWaitCondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BrowserVerificationCommand {
-    Snapshot { max_nodes: u32 },
-    Click { node_ref: String },
-    Fill { node_ref: String, value: String },
+    Snapshot {
+        max_nodes: u32,
+    },
+    Click {
+        node_ref: String,
+    },
+    Fill {
+        node_ref: String,
+        value: String,
+    },
     WaitFor {
         condition: BrowserWaitCondition,
         timeout_ms: u64,
     },
-    Screenshot { full_page: bool },
-    ReadConsole { after_sequence: u64 },
+    Screenshot {
+        full_page: bool,
+    },
+    ReadConsole {
+        after_sequence: u64,
+    },
 }
 
 /// accessibility snapshot 节点。
@@ -442,7 +453,8 @@ pub fn redact_console_text(raw: &str) -> String {
         // 仅在疑似 URL 片段时裁剪 query
         let before = &out[..idx];
         if before.contains("://") || before.contains("http") || before.contains('/') {
-            if let Some(frag) = out[idx..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            if let Some(frag) =
+                out[idx..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
             {
                 let end = idx + frag;
                 out.replace_range(idx..end, "");
@@ -454,7 +466,8 @@ pub fn redact_console_text(raw: &str) -> String {
     if let Some(idx) = out.find('#') {
         let before = &out[..idx];
         if before.contains("://") || before.contains('/') {
-            if let Some(frag) = out[idx..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            if let Some(frag) =
+                out[idx..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
             {
                 let end = idx + frag;
                 out.replace_range(idx..end, "");
@@ -476,9 +489,7 @@ pub fn redact_console_text(raw: &str) -> String {
     ] {
         if let Some(pos) = out.find(pattern) {
             let rest = &out[pos + pattern.len()..];
-            let end_rel = rest
-                .find(['\n', '\r', '"', '\''])
-                .unwrap_or(rest.len());
+            let end_rel = rest.find(['\n', '\r', '"', '\'']).unwrap_or(rest.len());
             let end = pos + pattern.len() + end_rel;
             out.replace_range(pos..end, &format!("{pattern}[REDACTED]"));
         }

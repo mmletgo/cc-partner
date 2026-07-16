@@ -305,9 +305,7 @@ impl AgentOscDecoder {
     /// Code Logic（这个函数做什么）:
     ///     若无 pending 返回 None；否则 `1s - elapsed`（下限 0）。
     pub fn duration_until_rate_window_end(&self) -> Option<Duration> {
-        if self.pending_coalesce.is_none() {
-            return None;
-        }
+        self.pending_coalesce.as_ref()?;
         let elapsed = self.rate_window_start.elapsed();
         let window = Duration::from_secs(1);
         Some(window.saturating_sub(elapsed))
@@ -449,6 +447,7 @@ fn decode_payload_bytes(payload: &[u8]) -> Result<AgentRuntimeMutation, AgentOsc
 ///
 /// Code Logic（这个函数做什么）:
 ///     JSON camelCase → URL_SAFE_NO_PAD → 前缀 + payload + ST。
+#[allow(dead_code)] // 单测 / adapter 参考帧构造 API surface
 pub fn encode_agent_osc_frame(
     agent_session_id: &str,
     terminal_session_id: &str,
@@ -528,7 +527,7 @@ mod tests {
             "2026-07-15T00:00:01Z",
         );
         let mid = frame.len() / 2;
-        let a = decoder.push(&[b"before".as_slice(), &frame[..mid]].concat().as_slice());
+        let a = decoder.push([b"before".as_slice(), &frame[..mid]].concat().as_slice());
         let b = decoder.push(&[&frame[mid..], b"after"].concat());
         assert_eq!(
             [a.visible.as_slice(), b.visible.as_slice()].concat(),
@@ -703,10 +702,7 @@ mod tests {
         }
         assert!(decoder.has_pending_coalesce());
         assert_eq!(
-            decoder
-                .pending_coalesce
-                .as_ref()
-                .map(|m| m.event_version),
+            decoder.pending_coalesce.as_ref().map(|m| m.event_version),
             Some(25)
         );
         // 无更多 push：仅靠 idle tick

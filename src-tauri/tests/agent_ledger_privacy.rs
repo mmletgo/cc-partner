@@ -104,16 +104,15 @@ fn migration_sql_has_no_content_columns_for_ledger() {
         // Allow mentions only in comments that say they are forbidden.
         for line in sql.lines() {
             let l = line.to_lowercase();
-            if l.contains("agent_session_ledger") || l.contains("ledger") {
-                if l.contains(bad)
-                    && !l.contains("forbid")
-                    && !l.contains("不得")
-                    && !l.contains("no ")
-                    && !l.trim_start().starts_with("--")
-                    && !l.trim_start().starts_with("/*")
-                {
-                    panic!("ledger-related line must not declare content column {bad}: {line}");
-                }
+            if (l.contains("agent_session_ledger") || l.contains("ledger"))
+                && l.contains(bad)
+                && !l.contains("forbid")
+                && !l.contains("不得")
+                && !l.contains("no ")
+                && !l.trim_start().starts_with("--")
+                && !l.trim_start().starts_with("/*")
+            {
+                panic!("ledger-related line must not declare content column {bad}: {line}");
             }
         }
     }

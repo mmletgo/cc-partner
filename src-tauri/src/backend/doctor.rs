@@ -1549,7 +1549,7 @@ fn sanitize_request_id_field(raw: &str, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::control::classify_status;
+    use crate::backend::control::{classify_status, BackendStatus};
     use crate::workbench::dependencies::{
         probe_claude_cli_non_mutating_with_budget, probe_git_non_mutating_with_budget,
         probe_tmux_non_mutating_with_budget, probe_wsl_non_mutating_with_budget,
@@ -2089,12 +2089,13 @@ mod tests {
     #[test]
     fn fixture_active_unreachable_unhealthy() {
         let (_tmp, data, db, log_dir) = temp_paths();
-        // 进程存活但 health 失败 → Stale 分类，probe 映射为 unreachable error
-        // 使用当前进程 pid 保证 alive=true；port 用高位空闲端口但 health 已失败
+        // classify_status：pid 存活时即使 health 失败仍为 Running（瞬时 health 不得拆控制面）。
+        // doctor 的 unreachable 映射仅在 Stale 分支且 process 仍存活时触发（分类与 probe 竞态）。
+        // 此处手写 Stale + 当前 pid，覆盖 classify_stale_backend 的 alive→unreachable 路径。
         let pid = std::process::id();
         let control = BackendControlFile {
             pid,
-            port: 1, // 通常被占用或不可达；alive=true 走 unreachable 分支
+            port: 1,
             device_id: "dev-1".into(),
             device_name: "test".into(),
             started_at: "2026-07-11T00:00:00Z".into(),
@@ -2102,8 +2103,14 @@ mod tests {
             control_schema_version: 0,
             owner_instance_id: None,
         };
-        let status = classify_status(Some(control), true, false, None);
-        assert_eq!(status.kind, BackendStatusKind::Stale);
+        let classified = classify_status(Some(control.clone()), true, false, None);
+        assert_eq!(classified.kind, BackendStatusKind::Running);
+
+        let status = BackendStatus {
+            kind: BackendStatusKind::Stale,
+            control: Some(control),
+            error: None,
+        };
         let snap = assemble_snapshot_from_inputs(base_inputs(status, data, db, log_dir), None);
         assert_eq!(snap.status, DoctorStatus::Unhealthy);
         assert_eq!(snap.backend.health.status, DoctorCheckStatus::Error);

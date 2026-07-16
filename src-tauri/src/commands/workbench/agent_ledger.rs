@@ -74,11 +74,15 @@ pub async fn list_agent_ledger_for_state(
     state: &AppState,
     req: ListAgentLedgerReq,
 ) -> Result<AgentLedgerPage, AppError> {
-    let outcome = match req.outcome.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let outcome = match req
+        .outcome
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(raw) => Some(
-            crate::workbench::agent_ledger::models::AgentLedgerOutcome::parse(raw).ok_or_else(
-                || AppError::validation(format!("非法 outcome: {raw}")),
-            )?,
+            crate::workbench::agent_ledger::models::AgentLedgerOutcome::parse(raw)
+                .ok_or_else(|| AppError::validation(format!("非法 outcome: {raw}")))?,
         ),
         None => None,
     };
@@ -130,10 +134,7 @@ pub async fn summarize_agent_ledger_for_state(
     req: SummarizeAgentLedgerReq,
 ) -> Result<AgentLedgerSummary, AppError> {
     let window = LedgerWindow::parse(&req.window).ok_or_else(|| {
-        AppError::validation(format!(
-            "非法 window: {}（仅 24h|7d|30d）",
-            req.window
-        ))
+        AppError::validation(format!("非法 window: {}（仅 24h|7d|30d）", req.window))
     })?;
     summarize_window(
         &state.agent_ledger_repo,
@@ -153,12 +154,8 @@ pub async fn summarize_agent_ledger_for_state(
 ///     clear_history → 返回 deleted 计数。
 #[tauri::command]
 pub async fn clear_agent_ledger(state: State<'_, AppState>) -> Result<u64, AppError> {
-    if let Some(v) = proxy_workbench_if_gui(
-        state.inner(),
-        "agent_ledger.clear",
-        serde_json::json!({}),
-    )
-    .await?
+    if let Some(v) =
+        proxy_workbench_if_gui(state.inner(), "agent_ledger.clear", serde_json::json!({})).await?
     {
         return Ok(v);
     }

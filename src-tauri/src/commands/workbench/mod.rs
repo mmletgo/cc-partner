@@ -54,7 +54,8 @@ pub use browser::{
 
 pub use browser_verification::{
     __cmd__cancel_workbench_browser_verification, __cmd__get_workbench_browser_verification,
-    __cmd__get_workbench_browser_verification_artifact, __cmd__start_workbench_browser_verification,
+    __cmd__get_workbench_browser_verification_artifact,
+    __cmd__start_workbench_browser_verification,
     __tauri_command_name_cancel_workbench_browser_verification,
     __tauri_command_name_get_workbench_browser_verification,
     __tauri_command_name_get_workbench_browser_verification_artifact,

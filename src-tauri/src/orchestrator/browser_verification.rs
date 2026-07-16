@@ -36,7 +36,9 @@ pub struct BrowserVerificationEvidenceEntry {
 ///
 /// Code Logic（这个函数做什么）:
 ///     序列化 assertions/console error count/screenshot_id/url_path/truncated。
-pub fn sanitize_evidence_content(evidence: &BrowserVerificationEvidence) -> Result<String, AppError> {
+pub fn sanitize_evidence_content(
+    evidence: &BrowserVerificationEvidence,
+) -> Result<String, AppError> {
     let value = json!({
         "sessionId": evidence.session_id,
         "urlPath": evidence.url_path,

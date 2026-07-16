@@ -188,11 +188,7 @@ pub async fn reduce_experiment(
         .count();
 
     let (next_status, winner_for_status, outcome_updates) = if ready_count == 0 {
-        (
-            ExperimentStatus::NeedsDecision,
-            None,
-            Vec::new(),
-        )
+        (ExperimentStatus::NeedsDecision, None, Vec::new())
     } else if verdict.winner_task_id.is_some()
         && verdict.confidence == ComparativeConfidence::High
         && verdict.tied_task_ids.is_empty()

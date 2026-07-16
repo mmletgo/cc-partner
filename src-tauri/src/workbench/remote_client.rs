@@ -9,6 +9,7 @@
 //!     解析错误统一转换为简洁中文 AppError。
 
 use crate::error::AppError;
+use crate::net::protocol::CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1;
 use crate::net::protocol::{
     PeerProtocolInfo, CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1,
     CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
@@ -16,7 +17,6 @@ use crate::net::protocol::{
 use crate::workbench::agent_ledger::models::{
     AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
 };
-use crate::workbench::lan_fleet::models::{LanFleetOwnerBatchReq, LanFleetOwnerBatchResp};
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
 use crate::workbench::browser_verification::{
     BrowserVerificationArtifactDto, BrowserVerificationCommand, BrowserVerificationRun,
@@ -24,6 +24,7 @@ use crate::workbench::browser_verification::{
 use crate::workbench::claude_sessions::{
     decode_session_search_response_body, SessionPreview, SessionSearchResult,
 };
+use crate::workbench::lan_fleet::models::{LanFleetOwnerBatchReq, LanFleetOwnerBatchResp};
 use crate::workbench::models::{
     WorkbenchFileNode, WorkbenchGitCommitDto, WorkbenchHtmlAssetDto, WorkbenchOpenFileDto,
     WorkbenchPathInfo, WorkbenchProjectDto, WorkbenchRemoteDirectoryEntryDto,
@@ -42,12 +43,11 @@ use crate::workbench::remote_protocol::{
     RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
     RemoteSafeAttachReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSessionReq,
     RemoteSplitPaneReq, RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq,
-    RemoteWorktreeReq, RemoteWorkspaceRestorePreflightReq, RemoteWriteSessionInputReq,
+    RemoteWorkspaceRestorePreflightReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
     ResumeClaudeSessionResult,
 };
-use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
-use crate::net::protocol::CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1;
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
+use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::time::Duration;

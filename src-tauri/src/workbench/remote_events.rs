@@ -105,6 +105,7 @@ pub struct WorkbenchAgentRuntimePayload {
 ///     未知 type 不得经本枚举硬失败——见 `decode_remote_event`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)] // AgentRuntime 载荷更大；保持扁平 payload 以对齐 wire 形状
 pub enum WorkbenchRemoteEvent {
     TerminalOutput(WorkbenchTerminalOutputPayload),
     TerminalStatus(WorkbenchTerminalStatusPayload),
@@ -1080,7 +1081,8 @@ mod tests {
     ///     map_remote_event_for_device 后 id/terminal/project 均带前缀。
     #[test]
     fn map_remote_agent_runtime_event_prefixes_ids() {
-        use crate::workbench::agent_runtime::{AgentSessionPhase, AgentSessionRuntimeDto};
+        use crate::workbench::agent_runtime::models::AgentSessionPhase;
+        use crate::workbench::agent_runtime::snapshot::AgentSessionRuntimeDto;
         let event = WorkbenchRemoteEvent::AgentRuntime(WorkbenchAgentRuntimePayload {
             agent_session: AgentSessionRuntimeDto {
                 id: "agent-1".into(),

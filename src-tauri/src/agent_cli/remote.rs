@@ -59,9 +59,10 @@ pub fn resolve_remote_device_base_url(
     match device_base_url(state, device_id) {
         Ok(url) => Ok(url),
         Err(_) => {
-            let devices = state.devices.read().map_err(|_| {
-                CliError::internal("device table lock poisoned")
-            })?;
+            let devices = state
+                .devices
+                .read()
+                .map_err(|_| CliError::internal("device table lock poisoned"))?;
             if devices.contains_key(device_id) {
                 Err(CliError::unavailable(
                     "peer_offline",
@@ -94,18 +95,17 @@ pub async fn require_remote_capability(
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
-        .map_err(|_| {
-            CliError::unavailable("peer_offline", "remote peer health check failed")
-        })?;
+        .map_err(|_| CliError::unavailable("peer_offline", "remote peer health check failed"))?;
     if !response.status().is_success() {
         return Err(CliError::unavailable(
             "peer_offline",
             "remote peer health returned non-success",
         ));
     }
-    let info: PeerProtocolInfo = response.json().await.map_err(|_| {
-        CliError::unsupported("remote peer protocol info unparseable or pre-v1")
-    })?;
+    let info: PeerProtocolInfo = response
+        .json()
+        .await
+        .map_err(|_| CliError::unsupported("remote peer protocol info unparseable or pre-v1"))?;
     if info.protocol_version < PROTOCOL_VERSION_V1 {
         return Err(CliError::unsupported(
             "remote peer protocol version is below v1",
@@ -155,15 +155,14 @@ pub async fn remote_query_with_base(
 ) -> Result<Value, CliError> {
     match op {
         AgentControlQuery::ProjectList => {
-            health_v1(&base_url).await?;
-            let projects: Value =
-                remote_get_json(&base_url, "/api/workbench/projects/list").await?;
+            health_v1(base_url).await?;
+            let projects: Value = remote_get_json(base_url, "/api/workbench/projects/list").await?;
             Ok(json!({ "items": projects }))
         }
         AgentControlQuery::ProjectInspect { selector } => {
-            health_v1(&base_url).await?;
+            health_v1(base_url).await?;
             let projects: Vec<Value> =
-                remote_get_json(&base_url, "/api/workbench/projects/list").await?;
+                remote_get_json(base_url, "/api/workbench/projects/list").await?;
             let candidates = projects_to_candidates(&projects);
             let hit = resolve_exact_project(&selector, &candidates)?;
             projects
@@ -172,23 +171,23 @@ pub async fn remote_query_with_base(
                 .ok_or_else(|| CliError::not_found("project not found"))
         }
         AgentControlQuery::WorktreeList { project } => {
-            health_v1(&base_url).await?;
-            let project_id = resolve_remote_project_id(&base_url, &project).await?;
+            health_v1(base_url).await?;
+            let project_id = resolve_remote_project_id(base_url, &project).await?;
             let items = RemoteWorkbenchClient::new()
-                .list_worktrees(&base_url, &project_id)
+                .list_worktrees(base_url, &project_id)
                 .await
                 .map_err(app_error_to_cli)?;
             Ok(json!({ "items": items }))
         }
         AgentControlQuery::SessionList { project, worktree } => {
-            health_v1(&base_url).await?;
-            let project_id = resolve_remote_project_id(&base_url, &project).await?;
+            health_v1(base_url).await?;
+            let project_id = resolve_remote_project_id(base_url, &project).await?;
             let mut items = RemoteWorkbenchClient::new()
-                .list_sessions(&base_url, Some(project_id.as_str()))
+                .list_sessions(base_url, Some(project_id.as_str()))
                 .await
                 .map_err(app_error_to_cli)?;
             if let Some(wsel) = worktree {
-                let wt_id = resolve_remote_worktree_id(&base_url, &project_id, &wsel).await?;
+                let wt_id = resolve_remote_worktree_id(base_url, &project_id, &wsel).await?;
                 items.retain(|s| s.worktree_id.as_deref() == Some(wt_id.as_str()));
             }
             Ok(json!({ "items": items }))
@@ -197,10 +196,10 @@ pub async fn remote_query_with_base(
             session_id,
             after_sequence,
         } => {
-            health_v1(&base_url).await?;
+            health_v1(base_url).await?;
             let inner = unwrap_session_id(device_id, &session_id)?;
             let mut replay = RemoteWorkbenchClient::new()
-                .replay(&base_url, &inner)
+                .replay(base_url, &inner)
                 .await
                 .map_err(app_error_to_cli)?;
             if let Some(after) = after_sequence {
@@ -212,19 +211,19 @@ pub async fn remote_query_with_base(
             serde_json::to_value(replay).map_err(|_| CliError::internal("serialize failed"))
         }
         AgentControlQuery::AgentList { project } => {
-            require_remote_capability(&base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
-            let project_id = resolve_remote_project_id(&base_url, &project).await?;
+            require_remote_capability(base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
+            let project_id = resolve_remote_project_id(base_url, &project).await?;
             remote_post_json(
-                &base_url,
+                base_url,
                 "/api/workbench/agent-runtime/snapshot",
                 json!({ "projectId": project_id }),
             )
             .await
         }
         AgentControlQuery::AgentInspect { agent_session_id } => {
-            require_remote_capability(&base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
+            require_remote_capability(base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
             let snap = remote_post_json(
-                &base_url,
+                base_url,
                 "/api/workbench/agent-runtime/snapshot",
                 json!({ "projectId": Value::Null }),
             )
@@ -236,44 +235,44 @@ pub async fn remote_query_with_base(
             phase,
             timeout_ms,
         } => {
-            require_remote_capability(&base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
-            wait_agent_phase_remote(&base_url, &agent_session_id, &phase, timeout_ms).await
+            require_remote_capability(base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
+            wait_agent_phase_remote(base_url, &agent_session_id, &phase, timeout_ms).await
         }
         AgentControlQuery::TaskList { project } => {
-            require_remote_capability(&base_url, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1)
+            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_RUNTIME_SNAPSHOT_V1)
                 .await?;
-            let project_id = resolve_remote_project_id(&base_url, &project).await?;
+            let project_id = resolve_remote_project_id(base_url, &project).await?;
             let items = RemoteOrchestratorClient::new()
-                .list_tasks(&base_url, &project_id)
+                .list_tasks(base_url, &project_id)
                 .await
                 .map_err(app_error_to_cli)?;
             Ok(json!({ "items": items }))
         }
         AgentControlQuery::ExperimentInspect { experiment_id } => {
-            require_remote_capability(&base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1).await?;
+            require_remote_capability(base_url, CAPABILITY_ORCHESTRATOR_EXPERIMENTS_V1).await?;
             remote_post_json(
-                &base_url,
+                base_url,
                 "/api/orchestrator/experiments/get",
                 json!({ "experimentId": experiment_id }),
             )
             .await
         }
         AgentControlQuery::AttentionList => {
-            require_remote_capability(&base_url, CAPABILITY_ATTENTION_V1).await?;
-            remote_get_json(&base_url, "/api/attention").await
+            require_remote_capability(base_url, CAPABILITY_ATTENTION_V1).await?;
+            remote_get_json(base_url, "/api/attention").await
         }
         AgentControlQuery::FleetSnapshot => {
-            require_remote_capability(&base_url, CAPABILITY_WORKBENCH_LAN_FLEET_V1).await?;
+            require_remote_capability(base_url, CAPABILITY_WORKBENCH_LAN_FLEET_V1).await?;
             Err(CliError::unsupported(
                 "fleet snapshot over recursive remote is unsupported",
             ))
         }
         AgentControlQuery::BrowserDiscover { project } => {
-            health_v1(&base_url).await?;
-            let project_id = resolve_remote_project_id(&base_url, &project).await?;
+            health_v1(base_url).await?;
+            let project_id = resolve_remote_project_id(base_url, &project).await?;
             let items = RemoteWorkbenchClient::new()
                 .discover_browser_targets(
-                    &base_url,
+                    base_url,
                     &RemoteWorkbenchBrowserDiscoverReq {
                         project_id,
                         worktree_id: None,
@@ -284,10 +283,10 @@ pub async fn remote_query_with_base(
             Ok(json!({ "items": items }))
         }
         AgentControlQuery::BrowserInspect { run_id } => {
-            require_remote_capability(&base_url, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1)
+            require_remote_capability(base_url, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1)
                 .await?;
             let run = RemoteWorkbenchClient::new()
-                .get_browser_verification(&base_url, &run_id)
+                .get_browser_verification(base_url, &run_id)
                 .await
                 .map_err(app_error_to_cli)?;
             serde_json::to_value(run).map_err(|_| CliError::internal("serialize failed"))
@@ -423,7 +422,10 @@ pub async fn remote_mutate_with_base(
             )
             .await
         }
-        AgentControlMutation::BrowserVerify { project: _, payload } => {
+        AgentControlMutation::BrowserVerify {
+            project: _,
+            payload,
+        } => {
             require_remote_capability(base_url, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1)
                 .await?;
             let preview_id = payload
@@ -479,7 +481,10 @@ fn build_remote_create_task_req(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        priority: payload.get("priority").and_then(|v| v.as_i64()).unwrap_or(0),
+        priority: payload
+            .get("priority")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
         create_action: Default::default(),
         client_request_id: Some(client_request_id),
         source: payload
@@ -603,11 +608,8 @@ async fn wait_agent_phase_remote(
 }
 
 fn phase_matches(current: &str, want: &str) -> bool {
-    let a = current
-        .to_ascii_lowercase()
-        .replace('_', "")
-        .replace('-', "");
-    let b = want.to_ascii_lowercase().replace('_', "").replace('-', "");
+    let a = current.to_ascii_lowercase().replace(['_', '-'], "");
+    let b = want.to_ascii_lowercase().replace(['_', '-'], "");
     a == b
 }
 
@@ -780,12 +782,10 @@ pub fn app_error_to_cli(err: AppError) -> CliError {
     } else if category == AppErrorCategory::Internal {
         cli = cli.with_code(code);
     }
-    let retryable = retryable_from_meta.unwrap_or_else(|| {
-        matches!(
-            category,
-            AppErrorCategory::Unavailable | AppErrorCategory::Timeout
-        )
-    });
+    let retryable = retryable_from_meta.unwrap_or(matches!(
+        category,
+        AppErrorCategory::Unavailable | AppErrorCategory::Timeout
+    ));
     cli.with_retryable(retryable).with_request_id(request_id)
 }
 
@@ -811,6 +811,8 @@ impl Default for MockPeer {
 #[derive(Clone)]
 enum MockPeerMode {
     DropAfterApply,
+    /// 测试成功路径 fixture（API surface）
+    #[allow(dead_code)]
     Ok,
 }
 
@@ -914,7 +916,9 @@ mod tests {
     #[test]
     fn app_error_unavailable_chinese_without_keywords_maps_unavailable() {
         // 真实 RemoteWorkbenchClient 失败文案不含 unavail/offline/不可用
-        let err = app_error_to_cli(AppError::unavailable("远端 Workbench 请求失败: connection reset"));
+        let err = app_error_to_cli(AppError::unavailable(
+            "远端 Workbench 请求失败: connection reset",
+        ));
         assert_eq!(err.exit, crate::agent_cli::output::CliExitCode::Unavailable);
         assert_eq!(err.code(), "unavailable");
         assert!(!err.message.contains("Workbench"));
