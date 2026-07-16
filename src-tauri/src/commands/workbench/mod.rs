@@ -35,6 +35,7 @@ pub use browser_verification::{
     __tauri_command_name_start_workbench_browser_verification,
     cancel_workbench_browser_verification, get_workbench_browser_verification,
     get_workbench_browser_verification_artifact, start_workbench_browser_verification,
+    BrowserVerificationArtifactDto,
 };
 
 pub use files::{

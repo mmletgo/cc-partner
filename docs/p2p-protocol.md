@@ -96,6 +96,7 @@ advertised capabilities are:
 - `sync.manifest.v2` — bounded Prompt / SSH target / Scratchpad content sync (`POST /api/sync/prompts/{manifest-page,items,push-batch,ack-delete-epoch}`, `/api/ssh-target/sync/{...}`, `/api/scratchpad/sync/{...}`); token ships with transactional bulk upsert + request ledger + apply_merge_batch + dedicated watermark ack
 - `transfer.complete.v1` — explicit transfer finalize handshake (`POST /api/transfer/complete/:id`)
 - `transfer.resume.v1` — sender-side resume recovery (stable `protocolTransferId` + source fingerprint + peer checkpoint). Token ships with `resume_transfer` / operation ledger claim; **no new LAN route** — wire still uses init/chunk/complete/status keyed by the stable protocol id
+- `workbench.browser-verification.v1` — owner-side browser verification (`POST /api/workbench/browser-verification/{create,get,cancel,artifact}`); token and routes ship atomically; start accepts only live `previewId` (no target URL/CDP); fixed LAN remains unauthenticated
 - `workbench.mutation-outcome.v1` — Workbench Git mutation envelope (`succeeded|unknown`) + durable operation ledger query (`POST /api/workbench/worktrees/mutation-operation`); token ships with commit/push/merge/remove envelope responses
 
 ### Semantics of `errors.envelope.v1` (important)
@@ -242,6 +243,10 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/browser/discover` | `routes/workbench.rs` | none; scans loopback dev servers | read-only | — |
 | POST | `/api/workbench/browser/preview` | `routes/workbench.rs` | registers a previewId (local relay or remote relay) | requires-idempotency-key | each call mints a new UUID previewId; replay registers a second stale entry |
 | ANY | `/api/workbench/browser/proxy/:previewId/*path` | `routes/workbench.rs` | proxied HTTP/WS pass-through; forwards arbitrary methods (GET/POST/PUT/DELETE) to the upstream dev server | no-transport-retry | the proxy is method-agnostic (`any(...)`); a retry can replay a non-idempotent upstream POST/PUT/DELETE, so the transport layer must not auto-replay proxied requests |
+| POST | `/api/workbench/browser-verification/create` | `routes/browser_verification.rs` | starts owner-side verification bound to live previewId | requires-idempotency-key | body camelCase `{previewId,requestId,commands?}`; `requestId` is the idempotency key; capability `workbench.browser-verification.v1`; never accepts target URL/CDP; engine only on owner |
+| POST | `/api/workbench/browser-verification/get` | `routes/browser_verification.rs` | none; returns run state/evidence | read-only | body `{runId}`; safe to poll |
+| POST | `/api/workbench/browser-verification/cancel` | `routes/browser_verification.rs` | cancels run and reaps child/profile | naturally-idempotent | body `{runId}`; cancel is naturally idempotent |
+| POST | `/api/workbench/browser-verification/artifact` | `routes/browser_verification.rs` | none; returns base64 screenshot bytes | read-only | body `{runId,artifactId}`; rejects path traversal; max 8 MiB PNG |
 | GET | `/api/mobile/workbench/projects/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/projects/open` | `routes/workbench.rs` | upserts a `local` project row keyed by canonical path | naturally-idempotent | reuses same project id for same path |
 | POST | `/api/mobile/workbench/worktrees/list` | `routes/workbench.rs` | none | read-only | — |

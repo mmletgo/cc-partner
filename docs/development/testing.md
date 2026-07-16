@@ -278,3 +278,11 @@ cargo test --locked --test transactional_runtime_smoke -- --nocapture --test-thr
 Cross-Platform Smoke workflow 在 macOS/Windows 上额外跑 `transactional_runtime_smoke`。
 
 **NOT VERIFIED**：真实磁盘满、GUI 全局快捷键冲突、真实 updater 安装/重启。
+
+## Browser verification (A5)
+
+- Unit/FakeEngine: `cd src-tauri && cargo test --locked browser_verification --lib`
+- Smoke: `cd src-tauri && cargo test --locked --test browser_verification_smoke -- --nocapture --test-threads=1`
+- Prepare managed runtime: `node scripts/prepare-browser-runtime.mjs --self-test` then `--platform current`
+- L3 managed Chromium packaging/screenshot across release targets: **NOT VERIFIED** (`L3-BROWSER-VERIFICATION-001`)
+- Sandbox audit: iframe must not gain `allow-same-origin`; verification API must not accept `targetUrl`

@@ -16,6 +16,7 @@ import {
   WORKBENCH_BROWSER_IFRAME_SANDBOX,
   type WorkbenchBrowserRequestSnapshot,
 } from './workbenchBrowserHelpers';
+import { WorkbenchBrowserVerificationPanel } from './WorkbenchBrowserVerificationPanel';
 import styles from './WorkbenchBrowserWorkspace.module.css';
 
 /**
@@ -234,6 +235,10 @@ export function WorkbenchBrowserWorkspaceView({
           <div className={styles.empty}>{t('workbench:browserPreview.empty')}</div>
         )}
       </div>
+      <WorkbenchBrowserVerificationPanel
+        previewId={preview?.previewId ?? null}
+        transport={transport}
+      />
     </section>
   );
 }

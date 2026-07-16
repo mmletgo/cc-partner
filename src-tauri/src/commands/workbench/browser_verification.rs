@@ -13,7 +13,6 @@ use crate::workbench::browser_proxy::BrowserPreviewTarget;
 use crate::workbench::browser_verification::models::{
     default_smoke_commands, BrowserVerificationRun, BrowserVerificationStartRequest,
 };
-use crate::workbench::browser_verification::BrowserVerificationService;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -266,7 +265,7 @@ pub fn engine_start_count(state: &AppState) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workbench::browser_verification::FakeEngine;
+    use crate::workbench::browser_verification::{BrowserVerificationService, FakeEngine};
     use std::sync::Arc;
     use tempfile::tempdir;
 

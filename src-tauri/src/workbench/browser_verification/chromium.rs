@@ -291,7 +291,7 @@ async fn run_chromiumoxide(
         let mut command_results = Vec::new();
         let mut screenshot_pngs = Vec::new();
         let mut generation: u64 = 1;
-        let mut console_entries: Vec<BrowserConsoleEntry> = Vec::new();
+        let console_entries: Vec<BrowserConsoleEntry> = Vec::new();
         let mut last_snapshot: Option<BrowserSnapshotResult> = None;
 
         for cmd in &request.commands {

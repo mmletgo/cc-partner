@@ -143,6 +143,20 @@ export interface WorkbenchTransport {
       worktreeId: string | null | undefined,
       targetUrl: string,
     ) => Promise<WorkbenchBrowserPreview>;
+    startVerification?: (
+      previewId: string,
+      requestId: string,
+    ) => Promise<import('@/lib/types').BrowserVerificationRun>;
+    getVerification?: (
+      runId: string,
+    ) => Promise<import('@/lib/types').BrowserVerificationRun>;
+    cancelVerification?: (
+      runId: string,
+    ) => Promise<import('@/lib/types').BrowserVerificationRun>;
+    getVerificationArtifact?: (
+      runId: string,
+      artifactId: string,
+    ) => Promise<import('@/lib/types').BrowserVerificationArtifact>;
   };
   prompt: {
     streamToTerminal: (
@@ -253,6 +267,12 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
       workbenchApi.browser.discover(projectId, worktreeId ?? null),
     createPreview: (projectId, worktreeId, targetUrl) =>
       workbenchApi.browser.createPreview(projectId, worktreeId ?? null, targetUrl),
+    startVerification: (previewId, requestId) =>
+      workbenchApi.browser.startVerification(previewId, requestId),
+    getVerification: (runId) => workbenchApi.browser.getVerification(runId),
+    cancelVerification: (runId) => workbenchApi.browser.cancelVerification(runId),
+    getVerificationArtifact: (runId, artifactId) =>
+      workbenchApi.browser.getVerificationArtifact(runId, artifactId),
   },
   prompt: {
     streamToTerminal: (prompt, options) =>

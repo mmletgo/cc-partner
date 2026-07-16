@@ -712,5 +712,20 @@
   "deepLink": {
     "filesPathRejected": "只能打开工作区内的相对路径文件。",
     "openWorkflowFile": "正在打开 WORKFLOW.md"
+  },
+  "browserVerification": {
+    "verifyCurrent": "验证当前预览",
+    "unavailable": "浏览器验证暂不可用",
+    "urlPath": "路径",
+    "consoleErrors": "控制台错误",
+    "assertionFailed": "断言失败",
+    "screenshotAlt": "验证截图",
+    "status": {
+      "queued": "排队中",
+      "running": "运行中",
+      "succeeded": "成功",
+      "failed": "失败",
+      "canceled": "已取消"
+    }
   }
 }

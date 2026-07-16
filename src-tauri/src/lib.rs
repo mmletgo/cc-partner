@@ -66,6 +66,8 @@ mod transfer;
 mod tray;
 pub mod updater;
 mod workbench;
+/// A5：集成 smoke / 外部 crate 测试需要直连浏览器验证服务与 FakeEngine。
+pub use workbench::browser_verification;
 
 use std::sync::Arc;
 

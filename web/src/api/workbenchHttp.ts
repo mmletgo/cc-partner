@@ -930,6 +930,22 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         worktreeId: worktreeId ?? null,
         targetUrl,
       }, { policy: { kind: 'mutation' } }),
+    // mobile 首版：经 P2P owner 路由（同源 /api/workbench/... 由 mobile 代理或直接不可用时 optional）
+    startVerification: (previewId, requestId) =>
+      postJson('/api/workbench/browser-verification/create', {
+        previewId,
+        requestId,
+      }, { policy: { kind: 'mutation' } }),
+    getVerification: (runId) =>
+      postJson('/api/workbench/browser-verification/get', { runId }, { policy: { kind: 'query' } }),
+    cancelVerification: (runId) =>
+      postJson('/api/workbench/browser-verification/cancel', { runId }, {
+        policy: { kind: 'mutation' },
+      }),
+    getVerificationArtifact: (runId, artifactId) =>
+      postJson('/api/workbench/browser-verification/artifact', { runId, artifactId }, {
+        policy: { kind: 'query' },
+      }),
   },
   prompt: {
     streamToTerminal: (prompt, options) =>

@@ -35,6 +35,7 @@ use uuid::Uuid;
 /// 内存中的一次验证运行。
 struct RunRecord {
     session: BrowserVerificationSession,
+    #[allow(dead_code)]
     request_id: String,
     fingerprint: String,
     command_results: Vec<BrowserCommandResult>,
