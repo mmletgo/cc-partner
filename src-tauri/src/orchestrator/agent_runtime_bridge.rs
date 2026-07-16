@@ -18,6 +18,7 @@ use crate::workbench::agent_runtime::{
     emit_agent_runtime_changed, AgentReduceOutcome, AgentRuntimeMutation, AgentRuntimeReducer,
     AgentSessionPhase, AgentSessionRuntime, CreateActiveAgentSession,
 };
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -27,8 +28,87 @@ pub const ORCHESTRATOR_CLAUDE_PROVIDER_ID: &str = "claudeCodeVisible";
 /// terminal activity 写库节流（避免 OSC 风暴）。
 const ACTIVITY_THROTTLE: Duration = Duration::from_millis(500);
 
-/// 最近 activity 写库时间（测试/进程内节流）。
-static LAST_ACTIVITY_WRITE: Mutex<Option<Instant>> = Mutex::new(None);
+/// 每 agent_session_id 的最近 Working activity 写库时间（禁止跨 session 全局节流）。
+static LAST_ACTIVITY_WRITE_BY_SESSION: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+/// 从 AppState 构造带 owner generic allowlist 的 adapter registry。
+///
+/// Business Logic（为什么需要这个函数）:
+///     bridge/resume 必须与 Runner/catalog 使用同一 generic 配置。
+///
+/// Code Logic（这个函数做什么）:
+///     读 config.orchestrator.generic_terminal → AgentAdapterRegistry::from_app_config。
+fn registry_from_state(state: &AppState) -> Result<AgentAdapterRegistry, AppError> {
+    let config = state
+        .config
+        .read()
+        .map_err(|_| AppError::generic("读取 AppConfig 失败（锁损坏）"))?;
+    Ok(AgentAdapterRegistry::from_app_config(&config))
+}
+
+/// 判断 Working activity 是否应被 per-session 节流跳过。
+///
+/// Business Logic（为什么需要这个函数）:
+///     多任务并行时全局节流会拉长无关 session 的 liveness 间隙。
+///
+/// Code Logic（这个函数做什么）:
+///     仅当同一 agent_session_id 在 ACTIVITY_THROTTLE 内已写过 Working 时返回 true。
+fn should_throttle_working_activity(agent_session_id: &str) -> bool {
+    let Ok(guard) = LAST_ACTIVITY_WRITE_BY_SESSION.lock() else {
+        return false;
+    };
+    let Some(map) = guard.as_ref() else {
+        return false;
+    };
+    map.get(agent_session_id)
+        .is_some_and(|last| last.elapsed() < ACTIVITY_THROTTLE)
+}
+
+/// 记录某 agent_session 的 Working 写库时刻。
+///
+/// Business Logic（为什么需要这个函数）:
+///     与 should_throttle 配对维护 per-session 节流状态。
+///
+/// Code Logic（这个函数做什么）:
+///     插入/更新 HashMap 条目。
+fn mark_working_activity_written(agent_session_id: &str) {
+    if let Ok(mut guard) = LAST_ACTIVITY_WRITE_BY_SESSION.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(agent_session_id.to_string(), Instant::now());
+        // 防止测试/长跑无限增长：超过 256 时清空（节流仅 best-effort）。
+        if map.len() > 256 {
+            map.clear();
+            map.insert(agent_session_id.to_string(), Instant::now());
+        }
+    }
+}
+
+/// dual-write orchestrator task last_activity（stall watchdog 权威锚点之一）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     A1 agent session 活动必须推动 task.last_activity_at，否则 stall 误杀。
+///
+/// Code Logic（这个函数做什么）:
+///     若 row 绑定 orchestrator task/attempt，调用 touch_task_last_activity。
+async fn dual_write_task_activity_from_row(
+    state: &AppState,
+    row: &AgentSessionRuntime,
+    occurred_at: &str,
+) {
+    if let (Some(task_id), Some(attempt)) =
+        (row.orchestrator_task_id.as_deref(), row.orchestrator_attempt)
+    {
+        let at = if row.last_activity_at.trim().is_empty() {
+            occurred_at
+        } else {
+            row.last_activity_at.as_str()
+        };
+        let _ = state
+            .orchestrator_repo
+            .touch_task_last_activity(task_id, attempt as i64, &row.terminal_session_id, at)
+            .await;
+    }
+}
 
 /// 为 Runner 新建的 terminal 创建 Launching Agent session（默认 Claude provider）。
 ///
@@ -105,7 +185,8 @@ pub async fn create_launching_agent_for_runner_with_provider(
 ///     transcript scanner / OSC 需要把 Working 等 phase 写入统一 runtime，同时保留 legacy 字段一个版本。
 ///
 /// Code Logic（这个函数做什么）:
-///     500ms 节流；读 agent_session；apply CAS；可选 native_session_id（不进 DTO）。
+///     per-session 500ms 节流；读 agent_session；apply CAS；可选 native_session_id（不进 DTO）；
+///     Applied 时 dual-write task.last_activity_at。
 pub async fn record_runner_activity(
     state: &AppState,
     agent_session_id: &str,
@@ -114,12 +195,8 @@ pub async fn record_runner_activity(
     native_session_id: Option<&str>,
     occurred_at: &str,
 ) -> Result<AgentReduceOutcome, AppError> {
-    if let Ok(guard) = LAST_ACTIVITY_WRITE.lock() {
-        if let Some(last) = *guard {
-            if last.elapsed() < ACTIVITY_THROTTLE && phase == AgentSessionPhase::Working {
-                return Ok(AgentReduceOutcome::Ignored("activity_throttled"));
-            }
-        }
+    if phase == AgentSessionPhase::Working && should_throttle_working_activity(agent_session_id) {
+        return Ok(AgentReduceOutcome::Ignored("activity_throttled"));
     }
     let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
     let Some(current) = reducer.repo().get(agent_session_id).await? else {
@@ -147,19 +224,11 @@ pub async fn record_runner_activity(
     };
     let outcome = reducer.apply(mutation).await?;
     if let AgentReduceOutcome::Applied(ref row) = outcome {
-        if let Ok(mut guard) = LAST_ACTIVITY_WRITE.lock() {
-            *guard = Some(Instant::now());
+        if phase == AgentSessionPhase::Working {
+            mark_working_activity_written(agent_session_id);
         }
         emit_agent_runtime_changed(state, row);
-        // Claude legacy dual-write：同步 task last_activity（不写 transcript path 到 A1 DTO）。
-        if let (Some(task_id), Some(attempt)) =
-            (row.orchestrator_task_id.as_deref(), row.orchestrator_attempt)
-        {
-            let _ = state
-                .orchestrator_repo
-                .touch_task_last_activity(task_id, attempt as i64, terminal_session_id, occurred_at)
-                .await;
-        }
+        dual_write_task_activity_from_row(state, row, occurred_at).await;
     }
     Ok(outcome)
 }
@@ -176,7 +245,7 @@ pub async fn handle_native_agent_event(
     provider: AgentProviderId,
     event: NativeAgentEvent,
 ) -> Result<AgentReduceOutcome, AppError> {
-    let registry = AgentAdapterRegistry::with_defaults();
+    let registry = registry_from_state(state)?;
     let adapter = registry.get(provider)?;
     let mutation = adapter.normalize_runtime_event(event)?;
     handle_normalized_agent_event(state, mutation).await
@@ -199,7 +268,7 @@ pub async fn resume_runner_attempt(
 ) -> Result<AgentSessionRuntime, AppError> {
     let task = state.orchestrator_repo.get_task(task_id).await?;
     let provider = AgentProviderId::parse_legacy(task.runner_provider.as_deref())?;
-    let registry = AgentAdapterRegistry::with_defaults();
+    let registry = registry_from_state(state)?;
     let adapter = registry.get(provider)?;
     if !adapter.supports_resume() {
         return Err(AppError::generic(format!(
@@ -233,18 +302,34 @@ pub async fn resume_runner_attempt(
 /// 处理归一化 Agent event（OSC / Hook 入站后）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     Orchestrator 与普通 terminal 共享 reducer 入口语义。
+///     Orchestrator 与普通 terminal 共享 reducer 入口语义；Applied 必须 dual-write task 活动。
 ///
 /// Code Logic（这个函数做什么）:
-///     委托 `AgentRuntimeReducer::apply` 并在 Applied 时 emit。
+///     委托 `AgentRuntimeReducer::apply`；Applied 时 emit + touch_task_last_activity；
+///     phase=Completed 时尝试 HookEvent 自动完成。
 pub async fn handle_normalized_agent_event(
     state: &AppState,
     mutation: AgentRuntimeMutation,
 ) -> Result<AgentReduceOutcome, AppError> {
+    let occurred_at = mutation.occurred_at.clone();
     let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
     let outcome = reducer.apply(mutation).await?;
     if let AgentReduceOutcome::Applied(ref row) = outcome {
         emit_agent_runtime_changed(state, row);
+        dual_write_task_activity_from_row(state, row, &occurred_at).await;
+        if row.phase == AgentSessionPhase::Completed && row.orchestrator_task_id.is_some() {
+            if let Err(err) =
+                crate::orchestrator::completion::maybe_complete_from_agent_runtime_completed(
+                    state, row,
+                )
+                .await
+            {
+                tracing::warn!(
+                    agent_id = %row.id,
+                    "HookEvent completion from normalized event failed: {err}"
+                );
+            }
+        }
     }
     Ok(outcome)
 }

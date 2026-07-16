@@ -306,6 +306,17 @@ impl AgentAdapterRegistry {
         order.into_iter().map(|id| self.probe_cached(id)).collect()
     }
 
+    /// 从 owner AppConfig 构造带 generic allowlist 的 registry。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner / watchdog / bridge 必须与 catalog 使用同一 generic 配置，禁止 with_defaults 空 allowlist。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读 `config.orchestrator.generic_terminal`（锁失败则 None）后 `new`。
+    pub fn from_app_config(config: &crate::config::AppConfig) -> Self {
+        Self::new(config.orchestrator.generic_terminal.clone())
+    }
+
     /// 使 probe 缓存失效。
     ///
     /// Business Logic（为什么需要这个函数）:

@@ -27,7 +27,7 @@ use crate::orchestrator::models::{
 use crate::orchestrator::outbox::{
     OrchestratorRemoteOutboxRow, RemoteMirrorTask, RemoteOutboxStatus,
 };
-use crate::storage::maintenance_gate::with_shared_write_lease;
+use crate::storage::maintenance_gate::{begin_shared_write, with_shared_write_lease};
 use chrono::Utc;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
@@ -245,6 +245,80 @@ impl OrchestratorRepo {
         self.get_attempt(task_id, attempt).await
     }
 
+    /// 原子 stall：仅当 task 仍为 Running 且 attempt/session 匹配时 Blocked，并仅赢家标记 attempt stalled。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     禁止先 mark attempt=stalled 再 task CAS 失败，留下 Verifying+stalled 污染合法完成。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     单事务：先 `UPDATE tasks … WHERE status=Running AND attempt AND session_id`，
+    ///     仅 rows_affected=1 时再 `UPDATE attempts … status=running → stalled` 并 commit；返回 Some(task) 或 None。
+    pub async fn try_cas_running_attempt_to_stalled_blocked(
+        &self,
+        task_id: &str,
+        attempt: i64,
+        session_id: &str,
+        blocked_reason: &str,
+    ) -> Result<Option<OrchestratorTaskRow>, AppError> {
+        if attempt <= 0 {
+            return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Err(AppError::generic("任务尝试缺少 session"));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Blocked);
+        let (_permit, mut tx) = begin_shared_write(&self.pool, &self.gate).await?;
+        let task_result = sqlx::query(
+            "UPDATE orchestrator_tasks \
+             SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
+                 blocked_reason = ?, state_version = state_version + 1, updated_at = ? \
+             WHERE id = ? AND status = ? AND attempt = ? AND session_id = ?",
+        )
+        .bind(OrchestratorTaskStatus::Blocked.as_str())
+        .bind(split_state.workflow_state.as_str())
+        .bind(split_state.run_state.as_str())
+        .bind(OrchestratorAttemptPhase::Stalled.as_str())
+        .bind(blocked_reason)
+        .bind(&now)
+        .bind(task_id)
+        .bind(OrchestratorTaskStatus::Running.as_str())
+        .bind(attempt)
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if task_result.rows_affected() != 1 {
+            tx.rollback().await?;
+            self.get_task(task_id).await?;
+            return Ok(None);
+        }
+
+        // 仅 task CAS 赢家才写 attempt 终态；attempt 行缺失/已完成时不回滚 task。
+        let _ = sqlx::query(
+            "UPDATE orchestrator_task_attempts SET status = ?, completed_at = ? \
+             WHERE task_id = ? AND attempt = ? AND status = ?",
+        )
+        .bind(OrchestratorAttemptStatus::Stalled.as_str())
+        .bind(&now)
+        .bind(task_id)
+        .bind(attempt)
+        .bind(OrchestratorAttemptStatus::Running.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM orchestrator_tasks WHERE id = ?"
+        ))
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(row_to_task(&row)?))
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     terminal completion hook 只能拿到 Workbench session_id，必须反查当前 running attempt 才能定位 task_id。
     ///
@@ -292,7 +366,7 @@ impl OrchestratorRepo {
         }
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Running);
-        with_shared_write_lease(&self.gate, async {
+        let result = with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "UPDATE orchestrator_tasks \
                  SET status = ?, workflow_state = ?, run_state = ?, runner_provider = ?, \
@@ -330,6 +404,14 @@ impl OrchestratorRepo {
             .await
         })
         .await?;
+        // CAS miss：返回当前行（通常非 Running），调用方不得继续注入 stdin。
+        if result.rows_affected() != 1 {
+            tracing::debug!(
+                task_id = %task_id,
+                attempt,
+                "mark_task_running_attempt CAS miss（claim/status 不匹配）"
+            );
+        }
         self.get_task(task_id).await
     }
 

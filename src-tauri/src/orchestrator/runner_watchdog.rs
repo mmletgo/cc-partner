@@ -4,13 +4,11 @@
 //!     stall_timeout_ms 必须以 active Agent runtime 活动时间为准；超时后 CAS 终止并写 evidence。
 //!
 //! Code Logic（这个模块做什么）:
-//!     扫描 stalled candidates、解析 deadline、CAS 协调 interrupt 赢家。
+//!     扫描 stalled candidates、provider-specific liveness 对账、原子 task+attempt CAS 协调 interrupt 赢家。
 
 use crate::error::AppError;
 use crate::orchestrator::agent_adapter::types::{DEFAULT_STALL_TIMEOUT_MS, MIN_STALL_TIMEOUT_MS};
-use crate::orchestrator::models::{
-    OrchestratorAttemptPhase, OrchestratorTaskRow, OrchestratorTaskStatus,
-};
+use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 
@@ -127,14 +125,16 @@ pub fn select_stalled_runners(
     out
 }
 
-/// 对单个 stalled runner 做 CAS 终止：写 evidence + attempt stalled + task Blocked。
+/// 对单个 stalled runner 做原子 CAS 终止：仅赢家写 attempt stalled + task Blocked + evidence。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     仅 CAS 赢家可 interrupt，避免对已替换 session 发 Ctrl-C。
+///     仅 CAS 赢家可 interrupt，避免对已替换 session 发 Ctrl-C；绝不能在 completion 已进 Verifying 后污染 attempt。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验仍 Running/attempt/session 匹配；标 attempt stalled；task Blocked；写 runner_stalled evidence。
-///     返回是否成为 CAS 赢家（true 时调用方才应 interrupt）。
+///     1) 重读 task 校验 Running/attempt/session；
+///     2) provider-specific liveness：读 A1 agent session last_activity_at，若更新则 dual-write task 并放弃；
+///     3) 原子 try_cas_running_attempt_to_stalled_blocked（task 先于 attempt）；
+///     4) 仅赢家写 evidence。返回是否成为 CAS 赢家。
 pub async fn reconcile_stalled_runner(
     state: &AppState,
     candidate: &StalledRunnerCandidate,
@@ -147,39 +147,56 @@ pub async fn reconcile_stalled_runner(
         return Ok(false);
     }
 
-    // 再做 liveness：若 last_activity 已更新则放弃
+    // 再做 task 级 liveness：若 last_activity 已更新则放弃
     if let Some(anchor) = activity_anchor_for_task(&task) {
         if anchor != candidate.activity_anchor_at {
             return Ok(false);
         }
     }
 
-    let _ = state
+    // provider-specific liveness：以 A1 agent runtime last_activity 为权威活动源。
+    if let Some(agent_id) = candidate
+        .agent_session_id
+        .as_deref()
+        .or(task.agent_session_id.as_deref())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if let Ok(Some(agent)) = state.workbench_agent_session_repo.get(agent_id).await {
+            let agent_activity = agent.last_activity_at.trim();
+            if !agent_activity.is_empty() && agent_activity != candidate.activity_anchor_at {
+                // dual-write 刷新 task 锚点，避免下一 tick 再误选
+                let _ = state
+                    .orchestrator_repo
+                    .touch_task_last_activity(
+                        &candidate.task_id,
+                        candidate.attempt,
+                        &candidate.session_id,
+                        agent_activity,
+                    )
+                    .await;
+                // 若 agent 活动仍未过 deadline，则明确不是 stall
+                if !is_stalled_at(agent_activity, candidate.stall_timeout_ms, Utc::now()) {
+                    return Ok(false);
+                }
+                // agent 活动本身也已超时：继续 CAS（用更新后的锚点写 evidence）
+            }
+        }
+    }
+
+    let Some(_blocked) = state
         .orchestrator_repo
-        .update_active_runner_attempt_phase(
+        .try_cas_running_attempt_to_stalled_blocked(
             &candidate.task_id,
             candidate.attempt,
             &candidate.session_id,
-            OrchestratorAttemptPhase::Stalled,
+            EVIDENCE_CODE_RUNNER_STALLED,
         )
-        .await;
-    let _ = state
-        .orchestrator_repo
-        .mark_attempt_stalled(&candidate.task_id, candidate.attempt)
-        .await;
-
-    let blocked = state
-        .orchestrator_repo
-        .try_transition_task_status(
-            &candidate.task_id,
-            OrchestratorTaskStatus::Running,
-            OrchestratorTaskStatus::Blocked,
-            Some(EVIDENCE_CODE_RUNNER_STALLED),
-        )
-        .await?;
-    if blocked.is_none() {
+        .await?
+    else {
+        // task CAS 失败（可能已 Verifying）：不得再写 attempt stalled
         return Ok(false);
-    }
+    };
 
     state
         .orchestrator_repo

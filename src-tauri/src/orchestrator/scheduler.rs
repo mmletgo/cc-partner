@@ -282,9 +282,13 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
     .await
     {
         Ok(winners) => {
+            let registry = match state.config.read() {
+                Ok(cfg) => {
+                    crate::orchestrator::agent_adapter::AgentAdapterRegistry::from_app_config(&cfg)
+                }
+                Err(_) => crate::orchestrator::agent_adapter::AgentAdapterRegistry::with_defaults(),
+            };
             for winner in winners {
-                let registry =
-                    crate::orchestrator::agent_adapter::AgentAdapterRegistry::with_defaults();
                 if let Ok(task) = state.orchestrator_repo.get_task(&winner.task_id).await {
                     let provider = crate::orchestrator::agent_adapter::AgentProviderId::parse_legacy(
                         task.runner_provider.as_deref(),

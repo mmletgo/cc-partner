@@ -13,6 +13,7 @@ import type { ChangeEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button, Input, Pill } from '@/components/primitives';
 import { CheckIcon, XIcon } from '@/lib/icons';
+import type { OrchestratorAgentAdapterCatalogItem } from '@/lib/types';
 import type { AutomationSettingsForm } from './automationSettingsState';
 import {
   clampAutomationMaxConcurrentTasks,
@@ -41,6 +42,8 @@ interface AutomationSettingsPanelProps {
   onSave: () => void;
   /** 默认配置是否可用（不可用时禁用「恢复默认」） */
   canResetDefaults?: boolean;
+  /** owner adapter catalog（只读可用性，无 path/env） */
+  agentAdapters?: OrchestratorAgentAdapterCatalogItem[];
 }
 
 interface ToggleRowProps {
@@ -110,6 +113,7 @@ export function AutomationSettingsPanel({
   onResetDefaults,
   onSave,
   canResetDefaults = true,
+  agentAdapters = [],
 }: AutomationSettingsPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
   const resetDisabled =
@@ -117,6 +121,50 @@ export function AutomationSettingsPanel({
 
   return (
     <>
+      {agentAdapters.length > 0 ? (
+        <Card variant="flat" padding="md">
+          <Card.Header>
+            <h2 className={styles.sectionTitle}>
+              {t('settings:automation.agentAdaptersTitle', {
+                defaultValue: 'Agent adapters',
+              })}
+            </h2>
+          </Card.Header>
+          <Card.Body padding="md">
+            <p className={styles.helper}>
+              {t('settings:automation.agentAdaptersHint', {
+                defaultValue:
+                  'Owner-local adapter availability (no executable path or credentials).',
+              })}
+            </p>
+            <ul className={styles.toggleList} aria-label="Agent adapter catalog">
+              {agentAdapters.map((item) => (
+                <li key={item.provider} className={styles.toggleRow}>
+                  <div className={styles.toggleText}>
+                    <span className={styles.toggleLabel}>{item.provider}</span>
+                    <span className={styles.toggleHelper}>
+                      {item.completionContract}
+                      {item.reasonCode ? ` · ${item.reasonCode}` : ''}
+                    </span>
+                  </div>
+                  <span className={styles.toggleState}>
+                    {item.available ? (
+                      <Pill tone="success" dot>
+                        available
+                      </Pill>
+                    ) : (
+                      <Pill tone="neutral" dot>
+                        unavailable
+                      </Pill>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </Card.Body>
+        </Card>
+      ) : null}
+
       <Card variant="flat" padding="md">
         <Card.Header>
           <h2 className={styles.sectionTitle}>{t('settings:automation.title')}</h2>

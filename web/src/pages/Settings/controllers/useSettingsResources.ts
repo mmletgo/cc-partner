@@ -14,9 +14,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { configApi } from '@/api/config';
 import { healthApi } from '@/api/health';
+import { listOrchestratorAgentAdapters } from '@/api/orchestrator';
 import { orchestratorConfigApi } from '@/api/orchestratorConfig';
 import { githubTrendingApi } from '@/api/githubTrending';
-import type { VersionInfo } from '@/lib/types';
+import type { OrchestratorAgentAdapterCatalogItem, VersionInfo } from '@/lib/types';
 import {
   createSettingsResourceApi,
   isResourceReady,
@@ -95,6 +96,8 @@ export interface UseSettingsResourcesResult {
   automationLoadError: Error | null;
   versionLoadError: Error | null;
   versionInfo: VersionInfo | null;
+  /** owner adapter catalog（redacted；加载失败为空数组） */
+  agentAdapters: OrchestratorAgentAdapterCatalogItem[];
 }
 
 /**
@@ -120,6 +123,7 @@ export function useSettingsResources(
   const [resourceResults, setResourceResults] = useState<SettingsResourceResults | null>(null);
   const [retryingGroup, setRetryingGroup] = useState<SettingsResourceGroup | null>(null);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
+  const [agentAdapters, setAgentAdapters] = useState<OrchestratorAgentAdapterCatalogItem[]>([]);
 
   /**
    * Business Logic（为什么需要这个常量）:
@@ -269,6 +273,25 @@ export function useSettingsResources(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A3：并行拉取 redacted adapter catalog（失败不阻断 automation tab）。
+  useEffect(() => {
+    let cancelled = false;
+    void listOrchestratorAgentAdapters()
+      .then((catalog) => {
+        if (!cancelled) {
+          setAgentAdapters(catalog.adapters ?? []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAgentAdapters([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return {
     loading,
     loadError,
@@ -287,5 +310,6 @@ export function useSettingsResources(
     automationLoadError,
     versionLoadError,
     versionInfo,
+    agentAdapters,
   };
 }

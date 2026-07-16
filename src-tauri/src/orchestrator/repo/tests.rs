@@ -3486,3 +3486,160 @@ async fn legacy_null_attempt_policy_maps_to_claude_defaults() {
     assert_eq!(attempt.stall_timeout_ms, 300_000);
     assert_eq!(attempt.completion_contract, "sentinelLine");
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     stall CAS 必须先 task Running→Blocked（含 attempt/session），再标 attempt stalled；
+///     已 Verifying 的任务不得被写 attempt=stalled。
+///
+/// Code Logic（这个测试做什么）:
+///     1) Running task+running attempt → CAS 成功 → task Blocked + attempt stalled；
+///     2) 再对已 Blocked 二次 CAS 失败；
+///     3) 模拟 Verifying task 上 running attempt → CAS miss 且 attempt 仍 running。
+#[tokio::test]
+async fn stall_cas_is_atomic_and_does_not_pollute_verifying_attempt() {
+    use crate::orchestrator::agent_adapter::types::RunnerAttemptPolicy;
+    use crate::orchestrator::runner_watchdog::EVIDENCE_CODE_RUNNER_STALLED;
+
+    let (_pool, repo) = setup_repo().await;
+    let mut task = task_row("task-stall-cas", "proj-1", OrchestratorTaskStatus::Preparing);
+    repo.create_task(&task).await.unwrap();
+    sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+        .bind("task-stall-cas")
+        .execute(&_pool)
+        .await
+        .unwrap();
+    let policy = RunnerAttemptPolicy::claude_default();
+    let running = repo
+        .mark_task_running_attempt(
+            "task-stall-cas",
+            "agent/stall",
+            "wt-1",
+            "sess-stall",
+            1,
+            "tok",
+            None,
+            &policy,
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.status, OrchestratorTaskStatus::Running);
+    repo.add_attempt(
+        "task-stall-cas",
+        1,
+        "wt-1",
+        "sess-stall",
+        "prompt",
+        &policy,
+        None,
+        OrchestratorAttemptStatus::Running,
+    )
+    .await
+    .unwrap();
+
+    let blocked = repo
+        .try_cas_running_attempt_to_stalled_blocked(
+            "task-stall-cas",
+            1,
+            "sess-stall",
+            EVIDENCE_CODE_RUNNER_STALLED,
+        )
+        .await
+        .unwrap();
+    assert!(blocked.is_some());
+    assert_eq!(
+        blocked.unwrap().status,
+        OrchestratorTaskStatus::Blocked
+    );
+    let attempt = repo.get_attempt("task-stall-cas", 1).await.unwrap();
+    assert_eq!(attempt.status, "stalled");
+
+    // 二次 CAS 必须失败
+    let again = repo
+        .try_cas_running_attempt_to_stalled_blocked(
+            "task-stall-cas",
+            1,
+            "sess-stall",
+            EVIDENCE_CODE_RUNNER_STALLED,
+        )
+        .await
+        .unwrap();
+    assert!(again.is_none());
+
+    // Verifying + still-running attempt 不得被 stall 污染
+    let mut task2 = task_row("task-verifying", "proj-1", OrchestratorTaskStatus::Verifying);
+    task2.attempt = 1;
+    task2.session_id = Some("sess-v".into());
+    repo.create_task(&task2).await.unwrap();
+    repo.add_attempt(
+        "task-verifying",
+        1,
+        "wt-v",
+        "sess-v",
+        "prompt",
+        &policy,
+        None,
+        OrchestratorAttemptStatus::Running,
+    )
+    .await
+    .unwrap();
+    let miss = repo
+        .try_cas_running_attempt_to_stalled_blocked(
+            "task-verifying",
+            1,
+            "sess-v",
+            EVIDENCE_CODE_RUNNER_STALLED,
+        )
+        .await
+        .unwrap();
+    assert!(miss.is_none());
+    let attempt_v = repo.get_attempt("task-verifying", 1).await.unwrap();
+    assert_eq!(attempt_v.status, "running");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     OSC/agent 活动必须刷新 task.last_activity_at，stall 才不会误杀活跃 runner。
+///
+/// Code Logic（这个测试做什么）:
+///     mark Running 后 touch_task_last_activity，读回 last_activity_at。
+#[tokio::test]
+async fn touch_task_last_activity_updates_running_task_anchor() {
+    use crate::orchestrator::agent_adapter::types::RunnerAttemptPolicy;
+
+    let (_pool, repo) = setup_repo().await;
+    let task = task_row("task-act", "proj-1", OrchestratorTaskStatus::Preparing);
+    repo.create_task(&task).await.unwrap();
+    sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+        .bind("task-act")
+        .execute(&_pool)
+        .await
+        .unwrap();
+    repo.mark_task_running_attempt(
+        "task-act",
+        "agent/a",
+        "wt",
+        "sess-a",
+        1,
+        "tok",
+        None,
+        &RunnerAttemptPolicy::claude_default(),
+    )
+    .await
+    .unwrap();
+
+    let ok = repo
+        .touch_task_last_activity("task-act", 1, "sess-a", "2026-07-15T12:00:00Z")
+        .await
+        .unwrap();
+    assert!(ok);
+    let row = repo.get_task("task-act").await.unwrap();
+    assert_eq!(row.last_activity_at.as_deref(), Some("2026-07-15T12:00:00Z"));
+
+    // session 不匹配不得更新
+    let miss = repo
+        .touch_task_last_activity("task-act", 1, "other-sess", "2026-07-15T13:00:00Z")
+        .await
+        .unwrap();
+    assert!(!miss);
+    let row = repo.get_task("task-act").await.unwrap();
+    assert_eq!(row.last_activity_at.as_deref(), Some("2026-07-15T12:00:00Z"));
+}

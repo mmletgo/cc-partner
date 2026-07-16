@@ -380,6 +380,7 @@ export function Settings(): ReactElement {
                 onResetDefaults={ctrl.handleResetAutomationDefaults}
                 onSave={() => void ctrl.handleSaveAutomation()}
                 canResetDefaults={ctrl.canResetAutomationDefaults}
+                agentAdapters={ctrl.agentAdapters}
               />
             )}
           </div>

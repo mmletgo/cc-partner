@@ -14,7 +14,7 @@ use crate::commands::workbench::{
 };
 use crate::error::AppError;
 use crate::orchestrator::agent_adapter::{
-    resolve_task_runner_policy, AgentAdapterRegistry, AgentLaunchRequest,
+    resolve_task_runner_policy, AgentAdapterRegistry, AgentAvailability, AgentLaunchRequest,
 };
 use crate::orchestrator::claude_runtime::associate_claude_runtime;
 use crate::orchestrator::models::{
@@ -185,21 +185,7 @@ pub async fn prepare_runner_attempt(
     // max_turns 在创建 worktree/session/attempt 之前强制检查。
     if let Err(error) = check_next_attempt(&runner_policy, attempt) {
         if is_max_turns_exceeded(&error) {
-            let _ = state
-                .orchestrator_repo
-                .add_evidence(
-                    &task.id,
-                    "runnerLimit",
-                    "Runner max turns exceeded",
-                    EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED,
-                    &format!(
-                        "next_attempt={attempt}\nmax_turns={}\nprovider={}",
-                        runner_policy.max_turns,
-                        runner_policy.provider.as_str()
-                    ),
-                )
-                .await;
-            // 尝试 Preparing→Blocked（CAS）；未命中则返回当前任务。
+            // 仅 CAS 赢家写 evidence + 可选 attempt 终态，避免 lease 回收后重复 evidence。
             if let Ok(Some(blocked)) = state
                 .orchestrator_repo
                 .try_transition_task_status(
@@ -210,11 +196,74 @@ pub async fn prepare_runner_attempt(
                 )
                 .await
             {
+                // 若上一 attempt 仍 running，CAS 到 TurnLimitReached（不存在则忽略）。
+                if attempt > 1 {
+                    let _ = state
+                        .orchestrator_repo
+                        .mark_attempt_turn_limit_reached(&task.id, attempt - 1)
+                        .await;
+                }
+                let _ = state
+                    .orchestrator_repo
+                    .add_evidence(
+                        &task.id,
+                        "runnerLimit",
+                        "Runner max turns exceeded",
+                        EVIDENCE_CODE_RUNNER_MAX_TURNS_EXCEEDED,
+                        &format!(
+                            "next_attempt={attempt}\nmax_turns={}\nprovider={}",
+                            runner_policy.max_turns,
+                            runner_policy.provider.as_str()
+                        ),
+                    )
+                    .await;
                 return Ok(blocked);
             }
             return state.orchestrator_repo.get_task(&task.id).await;
         }
         return Err(error);
+    }
+
+    // owner probe：adapter 不可用时 fail-closed，禁止创建 worktree/session。
+    let adapter_registry = {
+        let config = state
+            .config
+            .read()
+            .map_err(|_| AppError::generic("读取 AppConfig 失败（锁损坏）"))?;
+        AgentAdapterRegistry::from_app_config(&config)
+    };
+    let probe = adapter_registry.probe_cached(runner_policy.provider)?;
+    if probe.availability != AgentAvailability::Available {
+        let reason = probe
+            .reason_code
+            .as_deref()
+            .unwrap_or("provider_unavailable");
+        if let Ok(Some(blocked)) = state
+            .orchestrator_repo
+            .try_transition_task_status(
+                &task.id,
+                OrchestratorTaskStatus::Preparing,
+                OrchestratorTaskStatus::Blocked,
+                Some(reason),
+            )
+            .await
+        {
+            let _ = state
+                .orchestrator_repo
+                .add_evidence(
+                    &task.id,
+                    "runnerAdapter",
+                    "Agent adapter unavailable",
+                    reason,
+                    &format!(
+                        "provider={}\navailability=unavailable\nreason={reason}",
+                        runner_policy.provider.as_str()
+                    ),
+                )
+                .await;
+            return Ok(blocked);
+        }
+        return state.orchestrator_repo.get_task(&task.id).await;
     }
 
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
@@ -349,7 +398,14 @@ pub async fn prepare_runner_attempt(
         return Ok(current);
     }
     // claim 失配时绝不能向 terminal 注入任何 agent 输入（characterization）。
-    let adapter_registry = AgentAdapterRegistry::with_defaults();
+    // registry 必须带 owner generic allowlist，与 catalog/probe 一致。
+    let adapter_registry = {
+        let config = state
+            .config
+            .read()
+            .map_err(|_| AppError::generic("读取 AppConfig 失败（锁损坏）"))?;
+        AgentAdapterRegistry::from_app_config(&config)
+    };
     let adapter = adapter_registry.get(runner_policy.provider)?;
     let launch_request = AgentLaunchRequest {
         agent_session_id: agent_session_id.clone().unwrap_or_default(),
