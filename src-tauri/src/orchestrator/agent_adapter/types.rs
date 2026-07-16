@@ -96,11 +96,13 @@ impl AgentProviderId {
     ///     创建 attempt 快照时若无显式覆盖，需按 provider 选择安全默认完成语义。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     Claude → SentinelLine；Codex → HookEvent；Generic → Manual。
+    ///     Claude → SentinelLine；Codex → SentinelLine（无 Hook 桥接时 fail-closed，
+    ///     禁止默认 HookEvent 导致永远等不到 Completed）；Generic → Manual。
     pub fn default_completion_contract(self) -> AgentCompletionContract {
         match self {
             Self::ClaudeCodeVisible => AgentCompletionContract::SentinelLine,
-            Self::CodexVisible => AgentCompletionContract::HookEvent,
+            // 未安装 cc-partner OSC Hook 桥接前 Codex 不得默认 HookEvent。
+            Self::CodexVisible => AgentCompletionContract::SentinelLine,
             Self::GenericTerminal => AgentCompletionContract::Manual,
         }
     }
@@ -393,7 +395,7 @@ mod tests {
     ///     task 覆盖 provider 必须优先于 workflow，且 completion 跟随新 provider。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     workflow=Claude，override=codex → Codex + HookEvent。
+    ///     workflow=Claude，override=codex → Codex + SentinelLine（无 Hook 桥接）。
     #[test]
     fn resolve_task_runner_policy_prefers_override() {
         let policy = resolve_task_runner_policy(
@@ -410,7 +412,7 @@ mod tests {
         assert_eq!(policy.stall_timeout_ms, 120_000);
         assert_eq!(
             policy.completion_contract,
-            AgentCompletionContract::HookEvent
+            AgentCompletionContract::SentinelLine
         );
     }
 }

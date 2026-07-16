@@ -126,7 +126,7 @@ impl AgentLedgerRetentionTask {
     ///     启动批 + 24h 间隔；失败只 warn；cancel 时退出。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先跑一批（错误吞掉）；再 interval 24h 直到 cancel。
+    ///     先 `cleanup_until_caught_up`（错误吞掉）；再 interval 24h 直到 cancel。
     pub fn spawn(
         repo: AgentLedgerRepo,
         cancel: CancellationToken,
@@ -134,19 +134,7 @@ impl AgentLedgerRetentionTask {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let clock = SystemClock;
-            match cleanup_agent_ledger_batch(&repo, &clock).await {
-                Ok(r) if r.deleted > 0 => {
-                    tracing::info!(
-                        deleted = r.deleted,
-                        more = r.more_remaining,
-                        "agent ledger startup cleanup"
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("agent ledger startup cleanup failed (non-blocking): {e}");
-                }
-            }
+            cleanup_until_caught_up(&repo, &clock, "startup").await;
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // 消耗首次立即 tick，使下一拍在 interval 后
@@ -158,23 +146,61 @@ impl AgentLedgerRetentionTask {
                         break;
                     }
                     _ = ticker.tick() => {
-                        match cleanup_agent_ledger_batch(&repo, &clock).await {
-                            Ok(r) if r.deleted > 0 => {
-                                tracing::info!(
-                                    deleted = r.deleted,
-                                    more = r.more_remaining,
-                                    "agent ledger periodic cleanup"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!("agent ledger periodic cleanup failed: {e}");
-                            }
-                        }
+                        cleanup_until_caught_up(&repo, &clock, "periodic").await;
                     }
                 }
             }
         })
+    }
+}
+
+/// 单次 tick 内循环批清理直到 `more_remaining=false` 或达轮次上限。
+///
+/// Business Logic（为什么需要这个函数）:
+///     每批最多 500 行；若只跑一批就等 24h，已有数万过期行时会长期违反 10k/30d 上限。
+///
+/// Code Logic（这个函数做什么）:
+///     最多 64 轮（64×500=32k）调用 cleanup_agent_ledger_batch；错误则 warn 并中止本轮。
+async fn cleanup_until_caught_up(
+    repo: &AgentLedgerRepo,
+    clock: &dyn RetentionClock,
+    label: &str,
+) {
+    const MAX_ROUNDS: u32 = 64;
+    let mut total_deleted: u64 = 0;
+    for round in 0..MAX_ROUNDS {
+        match cleanup_agent_ledger_batch(repo, clock).await {
+            Ok(r) => {
+                total_deleted = total_deleted.saturating_add(r.deleted);
+                if !r.more_remaining {
+                    if total_deleted > 0 {
+                        tracing::info!(
+                            deleted = total_deleted,
+                            rounds = round + 1,
+                            phase = label,
+                            "agent ledger cleanup"
+                        );
+                    }
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    phase = label,
+                    error = %e,
+                    "agent ledger cleanup failed (non-blocking)"
+                );
+                return;
+            }
+        }
+    }
+    if total_deleted > 0 {
+        tracing::info!(
+            deleted = total_deleted,
+            rounds = MAX_ROUNDS,
+            phase = label,
+            "agent ledger cleanup hit round cap; more may remain"
+        );
     }
 }
 

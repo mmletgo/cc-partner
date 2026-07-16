@@ -148,21 +148,8 @@ pub async fn prepare_runner_attempt(
         return Ok(preparing_task);
     }
     // 命中后继续使用本轮 claim_token（与 CAS 入参一致），禁止采用返回行中可能不同的 token。
-
-    // A4：attempt 开始时把 experiment candidate 标为 Running（缺失则 board 状态不准）。
-    if preparing_task.experiment_id.is_some() {
-        if let Err(err) = crate::orchestrator::experiments::reducer::mark_candidate_running(
-            state.orchestrator_repo.as_ref(),
-            &preparing_task.id,
-        )
-        .await
-        {
-            tracing::debug!(
-                task_id = %preparing_task.id,
-                "mark_candidate_running 失败（best-effort）: {err}"
-            );
-        }
-    }
+    // A4：candidate Running 仅在 prepare/launch 全部成功后标记（见函数末尾），
+    // 禁止在 probe/worktree 前标 Running，否则失败后 experiment 永久卡住。
 
     let project = state
         .workbench_project_repo
@@ -466,6 +453,23 @@ pub async fn prepare_runner_attempt(
     .await?
     {
         running_task = runtime_task;
+    }
+
+    // A4：prepare + adapter launch 全部成功后才把 experiment candidate 标 Running。
+    if running_task.experiment_id.is_some()
+        && running_task.status == OrchestratorTaskStatus::Running
+    {
+        if let Err(err) = crate::orchestrator::experiments::reducer::mark_candidate_running(
+            state.orchestrator_repo.as_ref(),
+            &running_task.id,
+        )
+        .await
+        {
+            tracing::debug!(
+                task_id = %running_task.id,
+                "mark_candidate_running 失败（best-effort）: {err}"
+            );
+        }
     }
 
     Ok(running_task)

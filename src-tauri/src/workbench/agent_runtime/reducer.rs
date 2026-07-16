@@ -325,19 +325,33 @@ impl AgentRuntimeReducer {
 /// 从 AppState 终端 registry + session repo 收集“仍存活”的 terminal id。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     reconcile 需要知道哪些 terminal 仍 running（内存或持久 status）。
+///     reconcile 需要知道哪些 terminal 仍真正存活。进程崩溃后 raw PTY 或已丢失
+///     tmux target 的行可能仍 `status=running`，若一律视为存活会跳过 Agent
+///     Disconnected 对账，留下幽灵 active Agent。
 ///
 /// Code Logic（这个函数做什么）:
-///     合并 in-memory registry session ids 与 DB 中 status=running 的 id。
+///     1) 并入 in-memory registry 已附着的 session id；
+///     2) 对 DB 中其余 `status=running` 行，仅当 backend=tmux 且
+///        `inspect_tmux_target_exists` 验证 target 仍在时才计入；
+///     3) raw_pty/pty 与 target 缺失一律不计入。
 pub async fn collect_alive_terminal_ids(
     registry_ids: impl IntoIterator<Item = String>,
     session_repo: &crate::storage::WorkbenchSessionRepo,
 ) -> Result<HashSet<String>, AppError> {
     let mut set: HashSet<String> = registry_ids.into_iter().collect();
-    // 持久化 running 会话在 restore 前也可能算“应存活”；exited 不算。
     let rows = session_repo.list(None).await?;
     for row in rows {
-        if row.status == "running" {
+        if set.contains(&row.id) {
+            continue;
+        }
+        if row.status != "running" {
+            continue;
+        }
+        // 仅验证可复现的 tmux target；持久化 running 本身不是存活证明。
+        let Ok(target) = crate::workbench::sessions::tmux_target_string_for_row(&row) else {
+            continue;
+        };
+        if crate::workbench::sessions::inspect_tmux_target_exists(&target) {
             set.insert(row.id);
         }
     }

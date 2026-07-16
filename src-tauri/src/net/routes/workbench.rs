@@ -962,9 +962,11 @@ pub async fn workbench_events(State(state): State<AppState>) -> Response<Body> {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     remote/mobile 在 Gap 后需要 owner active Agent baseline；不得暴露 native session id。
+///     远端 wait/inspect 可通过 body.agentSessionId 强制纳入终态 session。
 ///
 /// Code Logic（这个函数做什么）:
-///     可选 query/body projectId；委托 `get_agent_runtime_snapshot_for_state`。
+///     可选 body projectId / agentSessionId；委托
+///     `get_agent_runtime_snapshot_for_state_with_include`。
 ///     **不**提供 LAN Hook ingestion 写路由。
 pub async fn agent_runtime_snapshot(
     State(state): State<AppState>,
@@ -977,10 +979,19 @@ pub async fn agent_runtime_snapshot(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
-    let snap =
-        crate::workbench::agent_runtime::get_agent_runtime_snapshot_for_state(&state, project_id)
-            .await
-            .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.agent_runtime.snapshot"))?;
+    let include_agent_session_id = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("agentSessionId"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let snap = crate::workbench::agent_runtime::snapshot::get_agent_runtime_snapshot_for_state_with_include(
+        &state,
+        project_id,
+        include_agent_session_id,
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.agent_runtime.snapshot"))?;
     Ok(Json(snap))
 }
 

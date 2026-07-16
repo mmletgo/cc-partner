@@ -2470,9 +2470,12 @@ fn apply_agent_osc_decode_result(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     剥离后的结构化事件必须离开 reader 热路径，由单一 worker 串行写库。
+///     PTY 来源 terminal 与 OSC 声明 terminal 不一致时必须丢弃，否则 reducer 无法
+///     知道真实 PTY 来源，可能错误更新甚至完成另一 terminal 上的 Agent/Orchestrator task。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验非空后调用 `try_enqueue_agent_mutation`；不在此执行 SQL。
+///     逐条比对 `mutation.terminal_session_id` 与实际 PTY `terminal_session_id`；
+///     一致才 `try_enqueue_agent_mutation`；不一致记 debug 并 discard（不入队）。
 fn forward_agent_osc_mutations(
     state: &AppState,
     terminal_session_id: &str,
@@ -2483,8 +2486,9 @@ fn forward_agent_osc_mutations(
             tracing::debug!(
                 terminal = %terminal_session_id,
                 claimed = %mutation.terminal_session_id,
-                "agent osc terminal_session_id mismatch; still enqueue for reducer reject"
+                "agent osc terminal_session_id mismatch; discard mutation"
             );
+            continue;
         }
         try_enqueue_agent_mutation(state, mutation);
     }

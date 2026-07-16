@@ -113,11 +113,27 @@ pub struct AgentRuntimeChangedEvent {
 ///     会让客户端丢掉尚未纳入 snapshot 的 durable phase。
 ///
 /// Code Logic（这个函数做什么）:
-///     最多 8 轮：读 cursor_before → list_active(limit+1) → cursor_after；
-///     before==after 则采用该窗口；仍不稳定则返回最后一轮读到的结果（asOf=cursor_after）。
+///     委托 `get_agent_runtime_snapshot_for_state_with_include(..., None)`。
 pub async fn get_agent_runtime_snapshot_for_state(
     state: &AppState,
     project_id: Option<String>,
+) -> Result<AgentRuntimeSnapshot, AppError> {
+    get_agent_runtime_snapshot_for_state_with_include(state, project_id, None).await
+}
+
+/// 为 AppState 构造 Agent runtime snapshot，并可强制纳入指定 session（含终态）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     默认 snapshot 只含 `is_active=1`；远端 `agent wait --phase completed` /
+///     `agent inspect` 必须能读到 completed/failed/disconnected 终态，否则永远超时。
+///
+/// Code Logic（这个函数做什么）:
+///     与 active snapshot 相同的 cursor 稳定循环；若 `include_agent_session_id`
+///     不在 active 列表内则 `repo.get` 追加脱敏 DTO（仍无 nativeSessionId）。
+pub async fn get_agent_runtime_snapshot_for_state_with_include(
+    state: &AppState,
+    project_id: Option<String>,
+    include_agent_session_id: Option<&str>,
 ) -> Result<AgentRuntimeSnapshot, AppError> {
     let owner_instance_id = state.config_runtime.owner_instance_id().to_string();
     let limit = AGENT_RUNTIME_SNAPSHOT_LIMIT;
@@ -141,6 +157,26 @@ pub async fn get_agent_runtime_snapshot_for_state(
         last_seq = cursor_after;
         if cursor_before == cursor_after {
             break;
+        }
+    }
+
+    let include_id = include_agent_session_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(ref id) = include_id {
+        let already = last_rows.iter().any(|r| r.id == *id);
+        if !already {
+            if let Some(row) = state.workbench_agent_session_repo.get(id).await? {
+                // project 过滤：指定 project 时拒绝异项目 id，避免泄漏
+                let project_ok = project_id
+                    .as_deref()
+                    .map(|pid| row.project_id == pid)
+                    .unwrap_or(true);
+                if project_ok {
+                    last_rows.push(row);
+                }
+            }
         }
     }
 

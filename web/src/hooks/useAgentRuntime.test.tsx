@@ -268,4 +268,35 @@ describe('useAgentRuntime', () => {
     expect(result.current.latestAgentForTerminal('t')?.version).toBe(3);
     expect(result.current.latestAgentForTerminal('t')?.phase).toBe('working');
   });
+
+  test('snapshot failure sets error phase and refresh retries handshake', async () => {
+    getSnapshotMock
+      .mockRejectedValueOnce(new Error('snapshot unavailable'))
+      .mockResolvedValueOnce(
+        snapshot({
+          asOfSequence: 10,
+          sessions: [session({ version: 1, phase: 'working' })],
+        }),
+      );
+
+    const { result } = renderHook(() =>
+      useAgentRuntime('p1', { getSnapshot: (pid) => getSnapshotMock(pid) }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('error');
+      expect(result.current.error?.message).toContain('snapshot unavailable');
+    });
+
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('live');
+      expect(result.current.error).toBeNull();
+      expect(result.current.latestAgentForTerminal('t')?.phase).toBe('working');
+    });
+    expect(getSnapshotMock).toHaveBeenCalledTimes(2);
+  });
 });

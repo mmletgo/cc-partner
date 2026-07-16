@@ -344,7 +344,25 @@ async fn dispatch_once_inner(state: &AppState) -> Result<usize, AppError> {
     let mut dispatched = 0usize;
     for task in tasks {
         match prepare_visible_runner(state, &task).await {
-            Ok(_) => {
+            Ok(result) => {
+                // prepare 内部可返回 Ok(Blocked)（provider 不可用 / max turns 等）；
+                // experiment candidate 必须 Failed，否则组永远等 Pending。
+                if result.experiment_id.is_some()
+                    && result.status == OrchestratorTaskStatus::Blocked
+                {
+                    if let Err(err) =
+                        crate::orchestrator::experiments::reducer::mark_candidate_failed(
+                            state.orchestrator_repo.as_ref(),
+                            &result.id,
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            task_id = %result.id,
+                            "mark_candidate_failed after Ok(Blocked): {err}"
+                        );
+                    }
+                }
                 dispatched += 1;
             }
             Err(err) => {
@@ -492,6 +510,17 @@ async fn record_runner_failure(
         None,
     )
     .await?;
+    // A4：prepare 失败时 candidate 必须 Failed，禁止永久 Running/Pending 卡住实验组。
+    if blocked_task.experiment_id.is_some() {
+        if let Err(err) =
+            crate::orchestrator::experiments::reducer::mark_candidate_failed(repo, task_id).await
+        {
+            tracing::debug!(
+                task_id = %task_id,
+                "mark_candidate_failed 失败（best-effort）: {err}"
+            );
+        }
+    }
     if let Some(state) = emit_state {
         crate::orchestrator::notifications::emit_task_operational_notification(
             state,

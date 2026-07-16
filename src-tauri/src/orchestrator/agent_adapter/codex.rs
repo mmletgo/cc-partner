@@ -27,6 +27,21 @@ use std::time::Duration;
 pub struct CodexAdapter;
 
 impl CodexAdapter {
+    /// 解析 Codex 当前可用的完成合同。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     HookEvent 依赖 `cc-partner-agent-v1` OSC/Hook 桥接；普通 Codex CLI 未安装该桥时，
+    ///     若仍声明 HookEvent 会忽略 DEV_DONE 且永远等不到 runtime Completed，任务只能被
+    ///     watchdog 阻断。未安装桥接时必须 fail-closed 回落 SentinelLine。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     当前 owner 尚未安装 Codex Hook 桥接 → 固定返回 SentinelLine；
+    ///     未来桥接就位后可在此探测后升级为 HookEvent。
+    fn effective_completion_contract() -> AgentCompletionContract {
+        // 无安装/探测到 OSC hook 桥接时不得启用 HookEvent。
+        AgentCompletionContract::SentinelLine
+    }
+
     /// 有界 `codex --version`。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -104,12 +119,14 @@ impl AgentAdapter for CodexAdapter {
             return Err(AppError::generic("Codex launch prompt 不能为空"));
         }
         // 受控 visible 启动：`codex` + 将 prompt 经 stdin 注入，不拼接 shell。
+        // 完成合同：未安装 cc-partner OSC Hook 桥接时不得宣称 HookEvent（否则
+        // 忽略 DEV_DONE 且永远等不到 runtime Completed，只能 watchdog 阻断）。
         Ok(AgentLaunchPlan {
             executable: "codex".into(),
             args: vec![],
             stdin: Some(format!("{}\n", request.prompt.trim_end_matches('\n'))),
             env: vec![],
-            completion: AgentCompletionContract::HookEvent,
+            completion: Self::effective_completion_contract(),
         })
     }
 
@@ -129,7 +146,7 @@ impl AgentAdapter for CodexAdapter {
             args: vec!["resume".into(), native.to_string()],
             stdin: Some(format!("{}\n", request.prompt.trim_end_matches('\n'))),
             env: vec![],
-            completion: AgentCompletionContract::HookEvent,
+            completion: Self::effective_completion_contract(),
         })
     }
 
@@ -177,7 +194,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn completion_contract(&self) -> AgentCompletionContract {
-        AgentCompletionContract::HookEvent
+        Self::effective_completion_contract()
     }
 }
 
@@ -186,10 +203,10 @@ mod tests {
     use super::*;
 
     /// Business Logic（为什么需要这个测试）:
-    ///     Codex launch 不得拼 shell，且 completion 为 HookEvent。
+    ///     Codex launch 不得拼 shell；无 Hook 桥接时 completion 必须为 SentinelLine。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     build_launch_plan 断言 executable=codex、stdin 含 prompt。
+    ///     build_launch_plan 断言 executable=codex、stdin 含 prompt、SentinelLine。
     #[test]
     fn codex_launch_plan_is_controlled() {
         let plan = CodexAdapter
@@ -206,7 +223,11 @@ mod tests {
         assert_eq!(plan.executable, "codex");
         assert!(plan.args.is_empty());
         assert_eq!(plan.stdin.as_deref(), Some("do work\n"));
-        assert_eq!(plan.completion, AgentCompletionContract::HookEvent);
+        assert_eq!(plan.completion, AgentCompletionContract::SentinelLine);
+        assert_eq!(
+            CodexAdapter.completion_contract(),
+            AgentCompletionContract::SentinelLine
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

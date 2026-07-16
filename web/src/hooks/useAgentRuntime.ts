@@ -39,7 +39,7 @@ interface TauriInternalsWindow extends Window {
   };
 }
 
-type HandshakePhase = 'pending' | 'live';
+type HandshakePhase = 'pending' | 'live' | 'error';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -100,13 +100,15 @@ function sortBufferedEvents(events: AgentRuntimeEvent[]): AgentRuntimeEvent[] {
  *   页面/terminal 只读 selector，不直接持有 Map 可变引用。
  *
  * Code Logic（字段说明）:
- *   state 为聚合；latestAgentForTerminal 为便捷 selector；phase/error 供调试/降级。
+ *   state 为聚合；latestAgentForTerminal 为便捷 selector；
+ *   phase=error 表示 snapshot 失败（非永久 pending）；refresh 可重试握手。
  */
 export interface UseAgentRuntimeResult {
   state: AgentRuntimeState;
   phase: HandshakePhase;
   error: Error | null;
   latestAgentForTerminal: (terminalSessionId: string) => AgentSessionProjection | null;
+  /** 重新拉取 snapshot baseline（snapshot 失败或 Gap 后可调用）。 */
   refresh: () => Promise<void>;
 }
 
@@ -217,7 +219,8 @@ export function useAgentRuntime(
       snapshot = agentRuntimeSnapshotDecoder.decode(raw);
     } catch (err) {
       if (generation !== handshakeGenerationRef.current) return;
-      // snapshot 失败：保留 display-only cache 并标 offline，不制造 failure Attention
+      // snapshot 失败：不得永久停在 pending（否则 live 事件无限缓冲、无法 re-handshake）。
+      // 进入 error：保留 display-only cache 并标 offline；调用 refresh 可重试。
       setState((prev) => {
         if (prev.byAgentId.size === 0) {
           const empty = emptyAgentRuntimeState();
@@ -229,6 +232,8 @@ export function useAgentRuntime(
         return marked;
       });
       setError(err instanceof Error ? err : new Error(String(err)));
+      phaseRef.current = 'error';
+      setPhase('error');
       return;
     }
 
@@ -324,6 +329,13 @@ export function useAgentRuntime(
 
       if (phaseRef.current === 'pending') {
         bufferRef.current.push(event);
+        return;
+      }
+
+      // snapshot 失败后的 error 态：缓冲并触发 re-handshake，避免永久离线
+      if (phaseRef.current === 'error') {
+        bufferRef.current.push(event);
+        void runHandshake();
         return;
       }
 

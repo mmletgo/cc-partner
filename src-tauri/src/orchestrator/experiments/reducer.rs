@@ -50,7 +50,9 @@ pub async fn record_candidate_review(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     标记 candidate 开始运行（claim/attempt 后）。
+///     标记 candidate 开始运行（**仅**在 prepare/launch 成功后调用）。
+///     若在 provider probe/worktree 之前就标 Running，prepare 失败后 experiment
+///     会永远把该 candidate 视为活跃而无法比较结束。
 ///
 /// Code Logic（这个函数做什么）:
 ///     Pending → Running；并 CAS 组状态到 Running。
@@ -79,6 +81,28 @@ pub async fn mark_candidate_running(
             )
             .await?;
     }
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     prepare/launch 失败或 task 补偿为 Blocked 时，必须把 candidate 从 Pending/Running
+///     标为 Failed，否则组级 reduce 永远等不到全部终态。
+///
+/// Code Logic（这个函数做什么）:
+///     非终态且非 CandidateReady → Failed；再 reduce_experiment。
+pub async fn mark_candidate_failed(
+    repo: &OrchestratorRepo,
+    task_id: &str,
+) -> Result<(), AppError> {
+    let Some(cand) = repo.get_candidate_by_task(task_id).await? else {
+        return Ok(());
+    };
+    if cand.outcome.is_terminal() || cand.outcome == CandidateOutcome::CandidateReady {
+        return Ok(());
+    }
+    repo.set_candidate_outcome(&cand.experiment_id, task_id, CandidateOutcome::Failed)
+        .await?;
+    let _ = reduce_experiment(repo, &cand.experiment_id).await?;
     Ok(())
 }
 

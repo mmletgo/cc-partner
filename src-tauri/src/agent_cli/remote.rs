@@ -222,10 +222,14 @@ pub async fn remote_query_with_base(
         }
         AgentControlQuery::AgentInspect { agent_session_id } => {
             require_remote_capability(base_url, CAPABILITY_WORKBENCH_AGENT_RUNTIME_V1).await?;
+            // 必须带 agentSessionId，以便 snapshot 强制纳入终态（completed/failed/disconnected）
             let snap = remote_post_json(
                 base_url,
                 "/api/workbench/agent-runtime/snapshot",
-                json!({ "projectId": Value::Null }),
+                json!({
+                    "projectId": Value::Null,
+                    "agentSessionId": agent_session_id,
+                }),
             )
             .await?;
             filter_agent_from_snapshot(&snap, &agent_session_id)
@@ -585,10 +589,14 @@ async fn wait_agent_phase_remote(
 ) -> Result<Value, CliError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1));
     loop {
+        // 携带 agentSessionId：snapshot 仅含 active 时仍会并入目标终态，避免 wait completed 永远超时
         let snap = remote_post_json(
             base_url,
             "/api/workbench/agent-runtime/snapshot",
-            json!({ "projectId": Value::Null }),
+            json!({
+                "projectId": Value::Null,
+                "agentSessionId": agent_id,
+            }),
         )
         .await?;
         if let Ok(agent) = filter_agent_from_snapshot(&snap, agent_id) {

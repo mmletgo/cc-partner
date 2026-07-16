@@ -3482,7 +3482,7 @@ async fn attempt_policy_does_not_change_when_workflow_changes() {
     assert_eq!(attempt.runner_provider, "codexVisible");
     assert_eq!(attempt.max_turns, 4);
     assert_eq!(attempt.stall_timeout_ms, 300_000);
-    assert_eq!(attempt.completion_contract, "hookEvent");
+    assert_eq!(attempt.completion_contract, "sentinelLine");
 }
 
 /// Business Logic（为什么需要这个测试）:

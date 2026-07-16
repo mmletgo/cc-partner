@@ -160,8 +160,8 @@ export function Workbench() {
     desktopUnavailableMessage,
     canListenToTauriEvents,
   });
-  // A2 Agent 投影：listener-first handshake；非第 8 个 Workbench controller，仅 selector 供 tab/status。
-  const { latestAgentForTerminal } = useAgentRuntime(activeProjectId);
+  // A2 Agent 投影；snapshot 失败 phase=error 须暴露 refresh（禁永久 pending）。
+  const agentRuntime = useAgentRuntime(activeProjectId);
   const {
     scopedSessions,
     activeSession,
@@ -847,6 +847,7 @@ export function Workbench() {
           ) : null}
           {sessionError ? <StatusMessage tone="danger" className={styles.errorBox}>{sessionError}</StatusMessage> : null}
           {worktreeError ? <StatusMessage tone="danger" className={styles.errorBox}>{worktreeError}</StatusMessage> : null}
+          {agentRuntime.phase === 'error' && agentRuntime.error ? <StatusMessage tone="warn" className={styles.errorBox} action={<Button variant="secondary" size="sm" onClick={() => { void agentRuntime.refresh(); }}>{t('workbench:refresh')}</Button>}>{agentRuntime.error.message}</StatusMessage> : null}
           {dependencyStatus.status !== 'ready' ? <WorkbenchDependencyCard compact className={styles.dependencyNotice} /> : null}
         </div>
 
@@ -872,7 +873,7 @@ export function Workbench() {
                   onCreateSession={() => {
                     void handleCreateSession();
                   }}
-                  resolveAgent={latestAgentForTerminal}
+                  resolveAgent={agentRuntime.latestAgentForTerminal}
                 />
               }
               actions={
@@ -1138,7 +1139,7 @@ export function Workbench() {
           handleCloseSession={handleCloseSession}
           runtimeVisible={runtimeVisible}
           activeAgent={
-            activeSessionId ? latestAgentForTerminal(activeSessionId) : null
+            activeSessionId ? agentRuntime.latestAgentForTerminal(activeSessionId) : null
           }
         />
 
