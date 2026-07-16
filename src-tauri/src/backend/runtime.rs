@@ -479,6 +479,22 @@ pub async fn build_app_state_with_role(
     ));
     let workbench_browser_previews =
         Arc::new(crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new());
+    let browser_verification = Arc::new(
+        crate::workbench::browser_verification::BrowserVerificationService::with_discovered_chromium(
+            crate::config::data_dir()?,
+            config_runtime.owner_instance_id().to_string(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!("browser verification service init failed: {e}");
+            // 兜底：仍提供服务对象（engine 会在启动时 unavailable）
+            crate::workbench::browser_verification::BrowserVerificationService::new(
+                Arc::new(crate::workbench::browser_verification::chromium::ChromiumEngine::with_executable(None)),
+                crate::config::data_dir().unwrap_or_else(|_| std::env::temp_dir().join("cc-partner")),
+                config_runtime.owner_instance_id().to_string(),
+            )
+            .expect("browser verification fallback service")
+        }),
+    );
     let orchestrator_repo = Arc::new(OrchestratorRepo::with_gate(
         pool.clone(),
         maintenance_gate.clone(),
@@ -519,6 +535,7 @@ pub async fn build_app_state_with_role(
         workbench_worktree_repo,
         workbench_browser_repo,
         workbench_browser_previews,
+        browser_verification,
         workbench_sessions,
         workbench_remote_events,
         workbench_remote_event_bridges,

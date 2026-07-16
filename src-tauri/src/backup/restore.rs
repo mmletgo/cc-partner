@@ -1050,6 +1050,14 @@ mod tests {
             workbench_browser_previews: Arc::new(
                 crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
             ),
+            browser_verification: Arc::new(
+                crate::workbench::browser_verification::BrowserVerificationService::new(
+                    Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),
+                    std::env::temp_dir().join("cc-partner-bv-test"),
+                    "test-owner".into(),
+                )
+                .expect("browser verification test service"),
+            ),
             workbench_sessions: Arc::new(
                 crate::workbench::sessions::WorkbenchSessionRegistry::new(),
             ),

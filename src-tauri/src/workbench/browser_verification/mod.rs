@@ -6,13 +6,17 @@
 //!     且不得扩大成任意 URL 代理或破坏既有 sandbox。
 //!
 //! Code Logic（这个模块做什么）:
-//!     导出有界 DTO 与 `BrowserVerificationEngine` 缝合点；runtime/chromium/artifact 在后续任务接入。
+//!     导出有界 DTO、engine 缝合点、artifact 存储、runtime 服务与 chromium 定位。
 
+pub mod artifact_store;
+pub mod chromium;
 pub mod engine;
 pub mod models;
+pub mod runtime;
 
 pub use engine::{
     BrowserVerificationEngine, BrowserVerificationObserver, EngineRunRequest, EngineRunResult,
     NoopObserver,
 };
 pub use models::*;
+pub use runtime::{BrowserVerificationService, FakeEngine};
