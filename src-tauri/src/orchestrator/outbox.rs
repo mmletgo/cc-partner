@@ -475,7 +475,8 @@ pub async fn open_remote_project_for_shortcut(
 ) -> Result<RemoteOrchestratorProjectContext, AppError> {
     ensure_remote_shortcut(remote_shortcut)?;
     let base_url = remote_device_base_url(state, &remote_shortcut.device_id)?;
-    let mut client = RemoteWorkbenchClient::new();
+    let mut client =
+        RemoteWorkbenchClient::new().with_expected_device_id(&remote_shortcut.device_id);
     if let Some(request_id) = select_forwarded_request_id(forwarded_request_id) {
         client = client.with_forwarded_request_id(request_id);
     }

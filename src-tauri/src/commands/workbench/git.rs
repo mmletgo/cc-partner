@@ -265,6 +265,7 @@ pub(crate) async fn create_workbench_worktree_for_state(
     if project.kind == "remote" {
         let context = ensure_remote_project_context(state, &project).await?;
         let item = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .create_worktree(
                 &context.base_url,
                 RemoteCreateWorktreeReq {
@@ -436,7 +437,7 @@ pub(crate) async fn commit_workbench_worktree_for_state(
         } => {
             let context =
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
-            let client = RemoteWorkbenchClient::new();
+            let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
             let supports = client
                 .peer_supports_capability(
                     &context.base_url,
@@ -686,7 +687,7 @@ pub(crate) async fn push_workbench_worktree_for_state(
         } => {
             let context =
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
-            let client = RemoteWorkbenchClient::new();
+            let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
             let supports = client
                 .peer_supports_capability(
                     &context.base_url,
@@ -1035,7 +1036,7 @@ pub(crate) async fn merge_workbench_worktree_for_state(
         } => {
             let context =
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
-            let client = RemoteWorkbenchClient::new();
+            let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
             let supports = client
                 .peer_supports_capability(
                     &context.base_url,
@@ -1752,7 +1753,7 @@ pub(crate) async fn remove_workbench_worktree_for_state(
         } => {
             let context =
                 ensure_remote_worktree_context(state, device_id, inner_worktree_id).await?;
-            let client = RemoteWorkbenchClient::new();
+            let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
             let supports = client
                 .peer_supports_capability(
                     &context.base_url,
@@ -1913,6 +1914,7 @@ pub(crate) async fn list_workbench_git_commits_for_state(
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         let limit = limit.unwrap_or(30).clamp(1, 100) as i64;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .list_git_commits(
                 &context.base_url,
                 &context.inner_project_id,
@@ -2061,6 +2063,7 @@ pub(crate) async fn open_workbench_file_for_state(
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         return RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .open_file(
                 &context.base_url,
                 &context.inner_project_id,

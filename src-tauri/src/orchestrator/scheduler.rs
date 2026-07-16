@@ -238,6 +238,8 @@ pub fn start_orchestrator_scheduler(state: AppState) -> CancellationToken {
 ///     每次从 AppState 读取全局 Orchestrator 配置，在 repo 事务内按全局本机容量批量 claim 可执行泳道任务并交给 runner；
 ///     runner 失败时仅在任务仍为 Preparing 或 bootstrap Running 时把任务置为 Blocked 并追加事件，成功时计入 dispatched。
 pub async fn dispatch_once(state: &AppState) -> Result<usize, AppError> {
+    // GuiClient 不得本进程 claim/runner；须经 control dispatch-once 或 owner tick。
+    state.runtime_role.require_owner()?;
     let tick_at = Utc::now().to_rfc3339();
     let result = dispatch_once_inner(state).await;
     match &result {
