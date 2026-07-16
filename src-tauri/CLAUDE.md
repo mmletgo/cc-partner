@@ -273,7 +273,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 - **macOS 权限 FFI（permissions/mod.rs，对照 Python permissions.py 四函数）**：
   - `check_screen_capture_access`：FFI 调 `CGPreflightScreenCaptureAccess`（10.15+ 符号）。
-  - `check_input_monitoring_access`：用 `CGPreflightListenEventAccess`（Privacy_ListenEvent / 输入监控，10.15+）预检，**禁止** `CGEventTapCreate`（仅有辅助功能时常假绿）；`request_permission("inputMonitoring")` 先 `CGRequestListenEventAccess` 再可选打开设置面板。
+  - `check_input_monitoring_access`：fail-closed 多信号——无稳定 `CFBundleIdentifier`（如 `tauri dev` 裸 `app`）直接 false；`IOHIDCheckAccess(ListenEvent)==Granted`；可选私有 `TCCAccessPreflight(kTCCServiceListenEvent)==0`；再 `CGPreflightListenEventAccess`。**禁止**单独 CGEventTap/单独 CGPreflight。`request_permission("inputMonitoring")` 调 `IOHIDRequestAccess` + `CGRequestListenEventAccess` 再可选开 Privacy_ListenEvent。
   - `request_permission(type, open_settings?)`：screenCapture 调 `CGRequestScreenCaptureAccess`（仅「未决定」弹框，requested=true），`open_settings`=true（默认）才 `open` Privacy_ScreenCapture 面板；inputMonitoring 无系统 request API，`open_settings`=true 才 open Privacy_ListenEvent 面板。启动主动引导差异化传参：screenCapture 弹框即可（open_settings=false）、inputMonitoring 只能靠开面板（true）。
   - **不显式 `#[link]`**：CoreGraphics 作为 macOS framework 已被 Tauri 依赖链（core-graphics/xcap）通过 `-framework CoreGraphics` 链接，符号在链接期已可见；写 `#[link(name="CoreGraphics",kind="dylib")]` 反而会找 `libCoreGraphics.dylib` 报 `library not found`。
   - **非 macOS 一律 granted=true**（对照 Python 非打包行为；Tauri 不区分打包/开发，故开发态 macOS 也真实检测，与 Python 仅打包检测略有差异——开发期需先授权截图/输入监控才能用）。
