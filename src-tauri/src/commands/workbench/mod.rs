@@ -6,6 +6,7 @@
 //! Code Logic（这个模块做什么）:
 //!     子模块 + 显式 pub / pub(crate) use 再导出 tauri 命令（含 generate_handler 隐藏符号）与 crate 内 helper。
 
+mod agent_ledger;
 mod agent_runtime;
 mod browser;
 mod browser_verification;
@@ -22,6 +23,13 @@ mod tests;
 
 // ---- tauri 命令（pub，含 __cmd__/__tauri_command_name_ 供 generate_handler）----
 
+pub use agent_ledger::{
+    __cmd__clear_agent_ledger, __cmd__list_agent_ledger, __cmd__summarize_agent_ledger,
+    __tauri_command_name_clear_agent_ledger, __tauri_command_name_list_agent_ledger,
+    __tauri_command_name_summarize_agent_ledger, clear_agent_ledger, list_agent_ledger,
+    summarize_agent_ledger,
+};
+
 pub use agent_runtime::{
     __cmd__get_agent_runtime_snapshot, __tauri_command_name_get_agent_runtime_snapshot,
     get_agent_runtime_snapshot,
@@ -30,6 +38,11 @@ pub use agent_runtime::{
 pub use fleet::{
     __cmd__get_workbench_lan_fleet, __tauri_command_name_get_workbench_lan_fleet,
     get_workbench_lan_fleet, get_workbench_lan_fleet_for_state,
+};
+
+pub(crate) use agent_ledger::{
+    clear_agent_ledger_for_state, list_agent_ledger_for_state, summarize_agent_ledger_for_state,
+    ListAgentLedgerReq, SummarizeAgentLedgerReq,
 };
 
 pub use browser::{

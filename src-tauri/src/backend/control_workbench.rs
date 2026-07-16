@@ -539,6 +539,28 @@ async fn dispatch_workbench_op(
                 crate::commands::workbench::get_workbench_lan_fleet_for_state(state).await?;
             Ok(serde_json::to_value(snap)?)
         }
+        // ---- agent metadata ledger ----
+        "agent_ledger.list" => {
+            let req: crate::commands::workbench::ListAgentLedgerReq =
+                serde_json::from_value(payload.clone()).unwrap_or_default();
+            let page = crate::commands::workbench::list_agent_ledger_for_state(state, req).await?;
+            Ok(serde_json::to_value(page)?)
+        }
+        "agent_ledger.summarize" => {
+            let window = required_string(&payload, "window")?;
+            let project_id = optional_string(&payload, "projectId");
+            let req = crate::commands::workbench::SummarizeAgentLedgerReq {
+                window,
+                project_id,
+            };
+            let summary =
+                crate::commands::workbench::summarize_agent_ledger_for_state(state, req).await?;
+            Ok(serde_json::to_value(summary)?)
+        }
+        "agent_ledger.clear" => {
+            let deleted = crate::commands::workbench::clear_agent_ledger_for_state(state).await?;
+            Ok(serde_json::to_value(deleted)?)
+        }
 
         // ---- sessions ----
         "sessions.list" => {
