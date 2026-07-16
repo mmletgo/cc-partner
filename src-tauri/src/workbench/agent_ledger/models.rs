@@ -396,6 +396,43 @@ pub struct AgentLedgerSummary {
     pub usage_coverage: LedgerUsageCoverage,
 }
 
+/// P2P owner-local 批量 summary 请求（snake_case，与 lan-fleet owner batch 一致）。
+///
+/// Business Logic（为什么需要这个类型）:
+///     控制设备按 owning device 一次请求多个本机 project 的时间窗聚合；
+///     不得请求 entry 列表或 remote: 包装 id。
+///
+/// Code Logic（这个类型做什么）:
+///     snake_case project_ids + window 字面量；上限由路由校验。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentLedgerSummaryBatchReq {
+    /// 本机 inner project id 列表（非 remote:）
+    #[serde(default)]
+    pub project_ids: Vec<String>,
+    /// 时间窗：24h|7d|30d
+    #[serde(default)]
+    pub window: String,
+}
+
+/// P2P 批量 summary 响应（camelCase，无 entry/session id）。
+///
+/// Business Logic（为什么需要这个类型）:
+///     Fleet join 与 remote client 需要 per-project 聚合；序列化结果不得含 entries。
+///
+/// Code Logic（这个类型做什么）:
+///     window + projects[]（每个是 AgentLedgerSummary，带 project_id）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLedgerSummaryBatchResp {
+    /// 请求的时间窗
+    pub window: LedgerWindow,
+    /// 按请求顺序的 per-project 聚合
+    pub projects: Vec<AgentLedgerSummary>,
+}
+
+/// P2P 批量 summary 最多 project id 数。
+pub const AGENT_LEDGER_SUMMARY_MAX_PROJECTS: usize = 100;
+
 /// 校验 ISO 4217 三字符大写货币码。
 ///
 /// Business Logic（为什么需要这个函数）:

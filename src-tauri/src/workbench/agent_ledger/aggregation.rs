@@ -80,6 +80,98 @@ pub async fn clear_history(repo: &AgentLedgerRepo) -> Result<u64, AppError> {
     repo.clear_all().await
 }
 
+/// 对本机多个 project 做同一时间窗聚合（P2P / Fleet join）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     owning device 只返回 aggregate，控制设备再映射 remote id；单 project 失败不得拖垮批次。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 window；逐 project 调 summarize_window；保证 project_id 写回 summary。
+pub async fn summarize_projects(
+    repo: &AgentLedgerRepo,
+    project_ids: &[String],
+    window: LedgerWindow,
+    now: DateTime<Utc>,
+) -> Result<Vec<AgentLedgerSummary>, AppError> {
+    let mut out = Vec::with_capacity(project_ids.len());
+    for raw in project_ids {
+        let pid = raw.trim();
+        if pid.is_empty() {
+            continue;
+        }
+        let mut summary = summarize_window(repo, window, Some(pid), now).await?;
+        summary.project_id = Some(pid.to_string());
+        out.push(summary);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use crate::storage::agent_ledger_repo::AgentLedgerRepo;
+    use crate::workbench::agent_ledger::models::{
+        AgentLedgerFinalizeInput, AgentLedgerOutcome, LedgerUsageCoverage,
+    };
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+
+    async fn fixture() -> AgentLedgerRepo {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        AgentLedgerRepo::ensure_schema(&pool).await.unwrap();
+        AgentLedgerRepo::new(pool)
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     P2P batch 必须按 project 拆分聚合且不混入其它 project 的 session。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     两 project 各 1 条 → summarize_projects 返回两条且 sessions=1。
+    #[tokio::test]
+    async fn summarize_projects_scopes_per_project() {
+        let repo = fixture().await;
+        let ended = "2026-07-15T12:00:00+00:00";
+        for (id, pid) in [("a1", "p1"), ("a2", "p2")] {
+            repo.finalize(AgentLedgerFinalizeInput {
+                agent_session_id: id.into(),
+                project_id: pid.into(),
+                worktree_id: None,
+                provider_id: "claudeCodeVisible".into(),
+                model_id: None,
+                started_at: ended.into(),
+                ended_at: ended.into(),
+                outcome: AgentLedgerOutcome::Completed,
+                usage: None,
+            })
+            .await
+            .unwrap();
+        }
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T13:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let rows = summarize_projects(
+            &repo,
+            &["p1".into(), "p2".into()],
+            LedgerWindow::Days7,
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].project_id.as_deref(), Some("p1"));
+        assert_eq!(rows[0].sessions, 1);
+        assert_eq!(rows[1].project_id.as_deref(), Some("p2"));
+        assert_eq!(rows[1].usage_coverage, LedgerUsageCoverage::Unavailable);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,8 +17,9 @@ pub use collector::{
     count_active_slots_for_device, count_agent_phases, map_browser_state, map_git_status,
 };
 pub use models::{
-    AgentPhaseCounts, FleetBrowserState, FleetFreshness, FleetGitState, FleetReachability,
-    LanFleetDeviceSummary, LanFleetOwnerBatchReq, LanFleetOwnerBatchResp, LanFleetProjectSummary,
-    LanFleetSnapshot, FLEET_DEVICE_TIMEOUT_SECS, FLEET_FANOUT_MAX_CONCURRENCY,
-    FLEET_OWNER_BATCH_MAX_PROJECTS, FLEET_SNAPSHOT_MAX_AGENT_REFS, FLEET_SNAPSHOT_MAX_PROJECTS,
+    AgentPhaseCounts, FleetAgentActivityStatus, FleetBrowserState, FleetFreshness, FleetGitState,
+    FleetReachability, LanFleetDeviceSummary, LanFleetOwnerBatchReq, LanFleetOwnerBatchResp,
+    LanFleetProjectSummary, LanFleetSnapshot, FLEET_DEVICE_TIMEOUT_SECS,
+    FLEET_FANOUT_MAX_CONCURRENCY, FLEET_OWNER_BATCH_MAX_PROJECTS, FLEET_SNAPSHOT_MAX_AGENT_REFS,
+    FLEET_SNAPSHOT_MAX_PROJECTS,
 };

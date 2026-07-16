@@ -10,16 +10,22 @@
 
 use super::cache::SharedFleetDisplayCache;
 use super::models::{
-    AgentPhaseCounts, FleetBrowserState, FleetFreshness, FleetGitState, FleetReachability,
-    LanFleetDeviceSummary, LanFleetOwnerBatchReq, LanFleetOwnerBatchResp, LanFleetProjectSummary,
-    LanFleetSnapshot, FLEET_DEVICE_TIMEOUT_SECS, FLEET_FANOUT_MAX_CONCURRENCY,
-    FLEET_OWNER_BATCH_MAX_PROJECTS, FLEET_SNAPSHOT_MAX_PROJECTS,
+    AgentPhaseCounts, FleetAgentActivityStatus, FleetBrowserState, FleetFreshness, FleetGitState,
+    FleetReachability, LanFleetDeviceSummary, LanFleetOwnerBatchReq, LanFleetOwnerBatchResp,
+    LanFleetProjectSummary, LanFleetSnapshot, FLEET_DEVICE_TIMEOUT_SECS,
+    FLEET_FANOUT_MAX_CONCURRENCY, FLEET_OWNER_BATCH_MAX_PROJECTS, FLEET_SNAPSHOT_MAX_PROJECTS,
 };
 use crate::error::AppError;
 use crate::models::device::Device;
-use crate::net::protocol::CAPABILITY_WORKBENCH_LAN_FLEET_V1;
+use crate::net::protocol::{
+    CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1, CAPABILITY_WORKBENCH_LAN_FLEET_V1,
+};
 use crate::orchestrator::repo::OrchestratorRepo;
 use crate::state::AppState;
+use crate::workbench::agent_ledger::aggregation::summarize_window;
+use crate::workbench::agent_ledger::models::{
+    AgentLedgerSummaryBatchReq, LedgerWindow, AGENT_LEDGER_SUMMARY_MAX_PROJECTS,
+};
 use crate::workbench::agent_runtime::models::{AgentSessionPhase, AgentSessionRuntime};
 use crate::workbench::models::{WorkbenchGitStatusDto, WorkbenchProjectRow};
 use crate::workbench::remote_client::RemoteWorkbenchClient;
@@ -194,6 +200,23 @@ pub async fn build_local_fleet_project(
         last_activity_at = Some(project.updated_at.clone());
     }
 
+    // 7d ledger 聚合：失败只降级 status，不阻断其它 Fleet 字段
+    let (agent_activity_status, agent_activity) =
+        match summarize_window(
+            &state.agent_ledger_repo,
+            LedgerWindow::Days7,
+            Some(project_id),
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(mut summary) => {
+                summary.project_id = Some(project.id.clone());
+                (FleetAgentActivityStatus::Live, Some(summary))
+            }
+            Err(_) => (FleetAgentActivityStatus::Unavailable, None),
+        };
+
     Ok(LanFleetProjectSummary {
         project_id: project.id.clone(),
         display_name: project.name.clone(),
@@ -206,6 +229,8 @@ pub async fn build_local_fleet_project(
         orchestrator_running,
         orchestrator_retrying,
         last_activity_at,
+        agent_activity_status,
+        agent_activity,
     })
 }
 
@@ -536,6 +561,8 @@ pub async fn collect_lan_fleet_for_state_with_cache(
                 match timed {
                     Ok(Ok(resp)) => {
                         let mut device = resp.device;
+                        // ledger join 必须在 remap 前：owner 返回 local project_id
+                        join_remote_agent_activity(&client, &base_url, &mut device.projects).await;
                         // 按请求 path 键 join → 控制侧 remote shortcut id；失效 path 保留 unavailable
                         device.projects = remap_remote_projects(
                             &device_id,
@@ -543,6 +570,12 @@ pub async fn collect_lan_fleet_for_state_with_cache(
                             &paths,
                             &path_to_shortcut,
                         );
+                        // activity.project_id 与 project_id 同步为 remote 包装 id
+                        for p in device.projects.iter_mut() {
+                            if let Some(ref mut activity) = p.agent_activity {
+                                activity.project_id = Some(p.project_id.clone());
+                            }
+                        }
                         device.device_id = device_id.clone();
                         if device.device_name.trim().is_empty() {
                             device.device_name = device_name.clone();
@@ -653,6 +686,95 @@ fn unavailable_for_request(project_id: &str, display_name: &str) -> LanFleetProj
         orchestrator_running: 0,
         orchestrator_retrying: 0,
         last_activity_at: None,
+        agent_activity_status: FleetAgentActivityStatus::Unavailable,
+        agent_activity: None,
+    }
+}
+
+/// 为 remote owner 响应 join 7d ledger 聚合；失败/unsupported 不改写其它 Fleet 字段。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Fleet 第一版不得被 ledger 阻断；旧 peer 显示 unsupported，用量永不伪造为 0。
+///
+/// Code Logic（这个函数做什么）:
+///     capability 门控 → 收集 owner local project_ids → agent_ledger_summary → 按 id 合并。
+async fn join_remote_agent_activity(
+    client: &RemoteWorkbenchClient,
+    base_url: &str,
+    projects: &mut [LanFleetProjectSummary],
+) {
+    let supports = match client
+        .peer_supports_capability(base_url, CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1)
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => {
+            for p in projects.iter_mut() {
+                p.agent_activity_status = FleetAgentActivityStatus::Unavailable;
+                p.agent_activity = None;
+            }
+            return;
+        }
+    };
+    if !supports {
+        for p in projects.iter_mut() {
+            p.agent_activity_status = FleetAgentActivityStatus::Unsupported;
+            p.agent_activity = None;
+        }
+        return;
+    }
+
+    let mut project_ids: Vec<String> = projects
+        .iter()
+        .filter(|p| p.project_kind != FLEET_PROJECT_KIND_UNAVAILABLE)
+        .map(|p| p.project_id.clone())
+        .filter(|id| !id.is_empty() && id != FLEET_UNRESOLVED_PROJECT_ID)
+        .collect();
+    project_ids.sort();
+    project_ids.dedup();
+    if project_ids.len() > AGENT_LEDGER_SUMMARY_MAX_PROJECTS {
+        project_ids.truncate(AGENT_LEDGER_SUMMARY_MAX_PROJECTS);
+    }
+    if project_ids.is_empty() {
+        for p in projects.iter_mut() {
+            p.agent_activity_status = FleetAgentActivityStatus::Unavailable;
+            p.agent_activity = None;
+        }
+        return;
+    }
+
+    let req = AgentLedgerSummaryBatchReq {
+        project_ids: project_ids.clone(),
+        window: LedgerWindow::Days7.as_str().to_string(),
+    };
+    let fetch = client.agent_ledger_summary(base_url, &req);
+    let timed = tokio::time::timeout(Duration::from_secs(FLEET_DEVICE_TIMEOUT_SECS), fetch).await;
+    match timed {
+        Ok(Ok(resp)) => {
+            let by_id: HashMap<String, _> = resp
+                .projects
+                .into_iter()
+                .filter_map(|s| s.project_id.clone().map(|id| (id, s)))
+                .collect();
+            for p in projects.iter_mut() {
+                if let Some(summary) = by_id.get(&p.project_id) {
+                    p.agent_activity_status = FleetAgentActivityStatus::Live;
+                    p.agent_activity = Some(summary.clone());
+                } else if p.project_kind == FLEET_PROJECT_KIND_UNAVAILABLE {
+                    p.agent_activity_status = FleetAgentActivityStatus::Unavailable;
+                    p.agent_activity = None;
+                } else {
+                    p.agent_activity_status = FleetAgentActivityStatus::Unavailable;
+                    p.agent_activity = None;
+                }
+            }
+        }
+        _ => {
+            for p in projects.iter_mut() {
+                p.agent_activity_status = FleetAgentActivityStatus::Unavailable;
+                p.agent_activity = None;
+            }
+        }
     }
 }
 
@@ -1058,6 +1180,10 @@ mod tests {
             workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
             workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
             workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
+            agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
+            agent_ledger_service: Arc::new(crate::workbench::agent_ledger::AgentLedgerService::new(
+                crate::storage::AgentLedgerRepo::new(pool.clone()),
+            )),
             workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
             workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
             workbench_workspace_layout_repo: Arc::new(WorkbenchWorkspaceLayoutRepo::new(
@@ -1095,6 +1221,7 @@ mod tests {
             orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::new(),
             orchestrator_cancel: Arc::new(Mutex::new(None)),
             orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            agent_ledger_cancel: Arc::new(Mutex::new(None)),
             workbench_claude_session_indexes: Arc::new(RwLock::new(HashMap::new())),
             workbench_claude_session_watchers: Arc::new(Mutex::new(HashMap::new())),
             workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
@@ -1157,6 +1284,8 @@ mod tests {
             orchestrator_running: 0,
             orchestrator_retrying: 0,
             last_activity_at: None,
+            agent_activity_status: FleetAgentActivityStatus::Unavailable,
+            agent_activity: None,
         }
     }
 

@@ -15,8 +15,9 @@ pub mod service;
 #[allow(unused_imports)]
 pub use models::{
     AgentLedgerEntry, AgentLedgerFinalizeInput, AgentLedgerOutcome, AgentLedgerPage,
-    AgentLedgerQuery, AgentLedgerSummary, CurrencyAmount, LedgerUsageCoverage, LedgerWindow,
-    ReliableUsageSnapshot,
+    AgentLedgerQuery, AgentLedgerSummary, AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
+    CurrencyAmount, LedgerUsageCoverage, LedgerWindow, ReliableUsageSnapshot,
+    AGENT_LEDGER_SUMMARY_MAX_PROJECTS,
 };
 #[allow(unused_imports)]
 pub use retention::{AgentLedgerRetentionTask, RetentionClock};

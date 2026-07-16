@@ -10,7 +10,11 @@
 
 use crate::error::AppError;
 use crate::net::protocol::{
-    PeerProtocolInfo, CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
+    PeerProtocolInfo, CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1,
+    CAPABILITY_WORKBENCH_BROWSER_VERIFICATION_V1,
+};
+use crate::workbench::agent_ledger::models::{
+    AgentLedgerSummaryBatchReq, AgentLedgerSummaryBatchResp,
 };
 use crate::workbench::lan_fleet::models::{LanFleetOwnerBatchReq, LanFleetOwnerBatchResp};
 use crate::workbench::browser_models::{WorkbenchBrowserDiscovery, WorkbenchBrowserPreview};
@@ -696,6 +700,27 @@ impl RemoteWorkbenchClient {
     ) -> Result<LanFleetOwnerBatchResp, AppError> {
         self.post_json(
             endpoint_url(base_url, "/api/workbench/lan-fleet/snapshot"),
+            req,
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
+    }
+
+    /// 拉取 owning device 的 Agent ledger 时间窗聚合（无 entry 列表）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Fleet join 需要 remote 7d/24h/30d aggregate；旧 peer 由调用方 capability 门控。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     capability 预检由调用方完成；POST `/api/workbench/agent-ledger/summary`。
+    pub async fn agent_ledger_summary(
+        &self,
+        base_url: &str,
+        req: &AgentLedgerSummaryBatchReq,
+    ) -> Result<AgentLedgerSummaryBatchResp, AppError> {
+        let _ = CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1; // 文档锚点：capability 与路由同名
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/agent-ledger/summary"),
             req,
             RemoteRequestTimeoutKind::Short,
         )

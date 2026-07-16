@@ -870,6 +870,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 post(workbench::lan_fleet_snapshot).layer(DefaultBodyLimit::max(256 * 1024)),
             )
             .route(
+                "/api/workbench/agent-ledger/summary",
+                post(workbench::agent_ledger_summary).layer(DefaultBodyLimit::max(256 * 1024)),
+            )
+            .route(
                 "/api/workbench/workspace/restore/preflight",
                 post(workbench::workspace_restore_preflight),
             )

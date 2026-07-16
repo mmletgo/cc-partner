@@ -8,7 +8,27 @@
 //!     定义 reachability/freshness/git/browser 枚举与 device/project/snapshot 结构；
 //!     全部 camelCase serde，供 IPC/P2P/前端严格 schema 对齐。
 
+use crate::workbench::agent_ledger::models::AgentLedgerSummary;
 use serde::{Deserialize, Serialize};
+
+/// Fleet 项目上 Agent activity（ledger 7d 聚合）的获取状态。
+///
+/// Business Logic（为什么需要这个类型）:
+///     旧 peer / 单 field 失败时必须显示 unsupported/unavailable，不得把 unknown 当 0。
+///
+/// Code Logic（这个类型做什么）:
+///     camelCase 字符串枚举；默认 Unavailable。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum FleetAgentActivityStatus {
+    /// 本轮成功拿到 aggregate
+    Live,
+    /// 对端无 workbench.agent-ledger-summary.v1
+    Unsupported,
+    /// 超时/错误/未 join（默认，不阻断其它 Fleet 字段）
+    #[default]
+    Unavailable,
+}
 
 /// 单设备 owner batch 最多聚合的 project 数。
 pub const FLEET_OWNER_BATCH_MAX_PROJECTS: usize = 100;
@@ -166,6 +186,12 @@ pub struct LanFleetProjectSummary {
     pub orchestrator_running: u32,
     pub orchestrator_retrying: u32,
     pub last_activity_at: Option<String>,
+    /// 7d Agent ledger 聚合状态；field 失败不得阻断其它字段。
+    #[serde(default)]
+    pub agent_activity_status: FleetAgentActivityStatus,
+    /// 7d metadata-only 聚合；仅 status=live 时存在；不含 entry/session id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_activity: Option<AgentLedgerSummary>,
 }
 
 /// 单设备 Fleet 摘要。

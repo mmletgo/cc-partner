@@ -984,6 +984,63 @@ pub async fn agent_runtime_snapshot(
     Ok(Json(snap))
 }
 
+/// Agent Metadata Ledger owner-local 时间窗聚合（capability `workbench.agent-ledger-summary.v1`）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     控制设备 Fleet join 只读 owning device 的 24h/7d/30d aggregate；
+///     不得暴露 entry 列表、agentSessionId、prompt 或 path。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 window 与 project_ids 上限/ remote id；委托 aggregation::summarize_projects。
+pub async fn agent_ledger_summary(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<crate::workbench::agent_ledger::AgentLedgerSummaryBatchReq>,
+) -> P2pResult<Json<crate::workbench::agent_ledger::AgentLedgerSummaryBatchResp>> {
+    use crate::workbench::agent_ledger::models::{
+        AgentLedgerSummaryBatchResp, LedgerWindow, AGENT_LEDGER_SUMMARY_MAX_PROJECTS,
+    };
+    use crate::workbench::agent_ledger::aggregation::summarize_projects;
+    use crate::workbench::remote_ids::is_remote_id;
+
+    let window = LedgerWindow::parse(&req.window).ok_or_else(|| {
+        P2pError::from_app_error(
+            AppError::validation(format!("invalid ledger window: {}", req.window)),
+            &ctx,
+            "workbench.agent_ledger.summary",
+        )
+    })?;
+
+    if req.project_ids.len() > AGENT_LEDGER_SUMMARY_MAX_PROJECTS {
+        return Err(P2pError::from_app_error(
+            AppError::validation("resource_limit".to_string()),
+            &ctx,
+            "workbench.agent_ledger.summary",
+        ));
+    }
+
+    for id in &req.project_ids {
+        if is_remote_id(id) {
+            return Err(P2pError::from_app_error(
+                AppError::validation("local_project_required".to_string()),
+                &ctx,
+                "workbench.agent_ledger.summary",
+            ));
+        }
+    }
+
+    let projects = summarize_projects(
+        &state.agent_ledger_repo,
+        &req.project_ids,
+        window,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.agent_ledger.summary"))?;
+
+    Ok(Json(AgentLedgerSummaryBatchResp { window, projects }))
+}
+
 /// LAN Agent Fleet owner-local batch 摘要（capability `workbench.lan-fleet.v1`）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2363,6 +2420,83 @@ mod tests {
     fn server_advertises_lan_fleet_capability() {
         use crate::net::protocol::{server_protocol_info, CAPABILITY_WORKBENCH_LAN_FLEET_V1};
         assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_LAN_FLEET_V1));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     health 必须宣告 agent-ledger-summary.v1 才能 Fleet join 并拒绝旧 peer 伪 0。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     server_protocol_info supports CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1。
+    #[test]
+    fn server_advertises_agent_ledger_summary_capability() {
+        use crate::net::protocol::{
+            server_protocol_info, CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1,
+        };
+        assert!(server_protocol_info().supports(CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     remote summary 序列化不得含 entries/agentSessionId，且必须含 sessions 聚合字段。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 AgentLedgerSummaryBatchResp → JSON；断言无 entries/agentSessionId，有 sessions。
+    #[test]
+    fn remote_summary_never_serializes_ledger_entries() {
+        use crate::workbench::agent_ledger::models::{
+            AgentLedgerSummary, AgentLedgerSummaryBatchResp, LedgerUsageCoverage, LedgerWindow,
+        };
+        let response = AgentLedgerSummaryBatchResp {
+            window: LedgerWindow::Days7,
+            projects: vec![AgentLedgerSummary {
+                window: LedgerWindow::Days7,
+                project_id: Some("p-local".into()),
+                sessions: 2,
+                completed: 1,
+                failed: 1,
+                cancelled: 0,
+                disconnected: 0,
+                duration_ms: 1000,
+                input_tokens: Some(10),
+                output_tokens: None,
+                cost_by_currency: vec![],
+                usage_coverage: LedgerUsageCoverage::Partial,
+            }],
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json.get("entries").is_none());
+        let text = json.to_string();
+        assert!(text.contains("sessions"));
+        assert!(!text.contains("agentSessionId"));
+        assert!(!text.contains("entries"));
+        assert!(!text.contains("prompt"));
+        assert!(!text.contains("transcriptPath"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     remote-wrapped project id 与超限/非法 window 必须稳定拒绝，不得静默汇总。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     校验 remote id / resource_limit / window parse 的本地前置条件。
+    #[test]
+    fn agent_ledger_summary_request_guards() {
+        use crate::workbench::agent_ledger::models::{
+            AgentLedgerSummaryBatchReq, LedgerWindow, AGENT_LEDGER_SUMMARY_MAX_PROJECTS,
+        };
+        use crate::workbench::remote_ids::is_remote_id;
+
+        assert!(is_remote_id("remote:d:p"));
+        assert!(!is_remote_id("local-uuid"));
+        assert!(LedgerWindow::parse("7d").is_some());
+        assert!(LedgerWindow::parse("bogus").is_none());
+        assert_eq!(AGENT_LEDGER_SUMMARY_MAX_PROJECTS, 100);
+
+        let parsed: AgentLedgerSummaryBatchReq = serde_json::from_value(serde_json::json!({
+            "project_ids": ["a", "b"],
+            "window": "24h"
+        }))
+        .unwrap();
+        assert_eq!(parsed.project_ids.len(), 2);
+        assert_eq!(parsed.window, "24h");
     }
 
     /// Business Logic（为什么需要这个测试）:
