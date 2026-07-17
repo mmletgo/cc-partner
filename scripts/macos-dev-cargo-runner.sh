@@ -46,7 +46,12 @@ for arg in "$@"; do
 done
 
 # 与 cargo run 相同的编译参数，但不自动启动裸二进制
-cargo build "${build_args[@]}"
+# set -u 下空数组展开会 unbound
+if [[ ${#build_args[@]} -gt 0 ]]; then
+  cargo build "${build_args[@]}"
+else
+  cargo build
+fi
 
 if [[ ! -f "$PREPARE_JS" ]]; then
   echo "[macos-dev-cargo-runner] missing $PREPARE_JS" >&2
@@ -62,4 +67,9 @@ fi
 
 echo "[macos-dev-cargo-runner] launching cc-partner (Dev)  com.cc-partner.app.dev" >&2
 echo "[macos-dev-cargo-runner] $DEV_BIN" >&2
-exec "$DEV_BIN" "${app_args[@]}"
+# set -u 下空数组 "${app_args[@]}" 会 unbound；无 app 参数时直接 exec 二进制
+if [[ ${#app_args[@]} -gt 0 ]]; then
+  exec "$DEV_BIN" "${app_args[@]}"
+else
+  exec "$DEV_BIN"
+fi
