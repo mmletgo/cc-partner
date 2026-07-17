@@ -27,8 +27,10 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -168,6 +170,20 @@ export function prepareMacosDevApp(opts = {}) {
   mkdirSync(macos, { recursive: true });
   mkdirSync(resources, { recursive: true });
 
+  // 清掉历史探测残留（id_probe / tcc_* 等），避免 codesign 体积膨胀与无关可执行文件
+  try {
+    for (const name of readdirSync(macos)) {
+      if (name === DEV_EXECUTABLE || name === 'cc-partner-backend') continue;
+      try {
+        unlinkSync(join(macos, name));
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   const guiDest = join(macos, DEV_EXECUTABLE);
   copyFileSync(guiSource, guiDest);
   // 保持可执行位
@@ -199,10 +215,11 @@ export function prepareMacosDevApp(opts = {}) {
     'utf8',
   );
 
-  // ad-hoc 签名；不使用 runtime，方便 lldb / 开发调试
+  // ad-hoc + hardened runtime：与发行版一致，确保 TCC 把进程当作隐私主体
+  // （仅 adhoc 无 runtime 时，直接 exec 更易假绿；open 启动 + runtime 更稳）
   const sign = spawnSync(
     'codesign',
-    ['--force', '--deep', '--sign', '-', appPath],
+    ['--force', '--deep', '--options', 'runtime', '--sign', '-', appPath],
     { encoding: 'utf8' },
   );
   if (sign.status !== 0) {
