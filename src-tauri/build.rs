@@ -57,6 +57,7 @@ fn compile_macos_notification_auth() {
 
     println!("cargo:rustc-link-lib=framework=UserNotifications");
     println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=ApplicationServices");
 }
 
 /// 生成 debug profile 使用的 sidecar launcher。

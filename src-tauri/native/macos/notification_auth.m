@@ -13,6 +13,7 @@
 
 #import "notification_auth.h"
 
+#import <ApplicationServices/ApplicationServices.h>
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
 #import <dispatch/dispatch.h>
@@ -77,5 +78,16 @@ int cp_notification_request_authorization(void) {
   } @catch (NSException *ex) {
     (void)ex;
     return 0;
+  }
+}
+
+bool cp_request_accessibility_prompt(void) {
+  @try {
+    // 仅用户手势路径：prompt=YES 会登记列表并可弹出系统辅助功能引导
+    NSDictionary *options = @{(__bridge id)kAXTrustedCheckOptionPrompt : @YES};
+    return AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+  } @catch (NSException *ex) {
+    (void)ex;
+    return AXIsProcessTrusted();
   }
 }

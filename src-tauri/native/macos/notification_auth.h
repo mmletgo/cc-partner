@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +28,18 @@ int cp_notification_auth_status(void);
  * @return 1=用户授权(含 provisional/ephemeral), 0=拒绝或失败
  */
 int cp_notification_request_authorization(void);
+
+/**
+ * Business Logic:
+ *   用户点击 Welcome「去设置」时把 app 登记进「隐私 → 辅助功能」列表；
+ *   禁止在权限 check / app 启动路径调用（会弹系统框）。
+ *
+ * Code Logic:
+ *   AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: YES})。
+ *
+ * @return 当前是否已信任
+ */
+bool cp_request_accessibility_prompt(void);
 
 #ifdef __cplusplus
 }

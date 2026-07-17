@@ -4,17 +4,18 @@
   "checkingPermission": "Checking permission status…",
   "permissionReady": "Permissions ready",
   "waitingPermission": "Waiting for system authorization… If the toggle is already on in System Settings, fully quit and reopen the app, then tap Recheck.",
+  "restartAfterGrantHint": "After turning the toggle on in System Settings, fully quit and reopen this app, then tap Recheck for it to take effect.",
   "skip": "Skip for now",
   "continue": "Continue",
   "permissionListAriaLabel": "Permission list",
   "permission": {
     "screenRecording": {
       "title": "Screen Recording",
-      "description": "Allow capturing screen content"
+      "description": "Allow capturing screen content; after enabling in System Settings, fully quit and reopen this app"
     },
     "accessibility": {
       "title": "Accessibility",
-      "description": "Health reminder reads the foreground app"
+      "description": "Health reminder reads the foreground app; after enabling in System Settings, fully quit and reopen this app"
     },
     "inputMonitoring": {
       "title": "Input Monitoring",

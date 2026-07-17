@@ -288,10 +288,22 @@ fn tcc_listen_event_preflight() -> Option<i32> {
 // 与上面 CG*「不写 #[link]」刻意区分。若编译器报 framework 已链接的 warning，可移除该 link。
 
 // AXIsProcessTrusted：当前进程被加入「隐私 → 辅助功能」白名单返回 true（10.2+）。
+// WithOptions(prompt) 仅经 native `cp_request_accessibility_prompt` 在用户点击时调用。
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
+}
+
+/// Business Logic: 用户点「去设置」时把本 app 登记到「隐私 → 辅助功能」列表并可选弹系统引导。
+/// Code Logic: 调用 native `cp_request_accessibility_prompt`（WithOptions prompt=true）；
+///     仅 request 路径调用，check 路径仍用无 prompt 的 `AXIsProcessTrusted`。
+#[cfg(target_os = "macos")]
+fn request_accessibility_prompt() -> bool {
+    extern "C" {
+        fn cp_request_accessibility_prompt() -> bool;
+    }
+    unsafe { cp_request_accessibility_prompt() }
 }
 
 /// 单项权限的状态。
@@ -324,24 +336,111 @@ pub struct RequestPermissionResult {
     pub opened: bool,
 }
 
-/// macOS「系统设置 → 隐私与安全」面板 URL scheme（对照 Python `_PERMISSION_SETTINGS_URLS`）。
+/// macOS「系统设置 → 隐私与安全」面板 URL scheme（多候选，兼容旧/新系统设置）。
 #[cfg(target_os = "macos")]
-fn settings_url(perm_type: &str) -> Option<&'static str> {
+fn settings_urls(perm_type: &str) -> &'static [&'static str] {
     match perm_type {
-        "screenCapture" => {
-            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        "screenCapture" => &[
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
+        ],
+        "inputMonitoring" => &[
+            // 输入监控：旧 Security pane + Sequoia PrivacySecurity extension
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ListenEvent",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_InputMonitoring",
+        ],
+        "accessibility" => &[
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+        ],
+        "notification" => &[
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.notifications",
+        ],
+        _ => &[],
+    }
+}
+
+/// Business Logic: 用户点击「去设置」后应落到正确隐私子页，旧 URL 在新系统可能无效。
+/// Code Logic: 依次 `open` 候选 URL，任一 spawn 成功即 true。
+#[cfg(target_os = "macos")]
+pub fn open_permission_settings(perm_type: &str) -> bool {
+    let mut any = false;
+    for url in settings_urls(perm_type) {
+        if std::process::Command::new("open").arg(url).spawn().is_ok() {
+            any = true;
+            // 多 URL 都尝试一次：部分系统会忽略无效 scheme，有效者会前置正确面板
         }
-        "inputMonitoring" => {
-            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+    }
+    any
+}
+
+/// Business Logic: 输入监控列表只有在进程「尝试监听输入」后才出现本 app；仅 open 设置不够。
+/// Code Logic: IOHIDRequestAccess + CGRequestListenEventAccess，再尝试 listen-only
+///     CGEventTapCreate（失败也登记 TCC 主体）；**仅 request 路径调用**，check 禁止 EventTap。
+#[cfg(target_os = "macos")]
+fn register_input_monitoring_subject() -> bool {
+    unsafe {
+        let requested_iohid = IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT);
+        let requested_cg = CGRequestListenEventAccess();
+        // listen-only event tap：未授权时返回 null，但会把签名身份写入「输入监控」列表
+        attempt_listen_only_event_tap_registration();
+        requested_iohid || requested_cg
+    }
+}
+
+/// 尝试创建 listen-only event tap 以登记 TCC 主体（立即释放；不用于授权判定）。
+#[cfg(target_os = "macos")]
+fn attempt_listen_only_event_tap_registration() {
+    // CGEventTapLocation / Placement / Options
+    const K_CG_SESSION_EVENT_TAP: u32 = 1;
+    const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+    const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
+    // CGEventMask bit for key down/up (kCGEventKeyDown=10, KeyUp=11)
+    const KEY_MASK: u64 = (1u64 << 10) | (1u64 << 11);
+
+    type TapCallback = Option<
+        unsafe extern "C" fn(
+            proxy: *mut std::ffi::c_void,
+            event_type: u32,
+            event: *mut std::ffi::c_void,
+            user_info: *mut std::ffi::c_void,
+        ) -> *mut std::ffi::c_void,
+    >;
+
+    extern "C" {
+        fn CGEventTapCreate(
+            tap: u32,
+            place: u32,
+            options: u32,
+            events_of_interest: u64,
+            callback: TapCallback,
+            user_info: *mut std::ffi::c_void,
+        ) -> *mut std::ffi::c_void;
+    }
+
+    unsafe extern "C" fn passthrough_tap(
+        _proxy: *mut std::ffi::c_void,
+        _event_type: u32,
+        event: *mut std::ffi::c_void,
+        _user_info: *mut std::ffi::c_void,
+    ) -> *mut std::ffi::c_void {
+        event
+    }
+
+    unsafe {
+        let tap = CGEventTapCreate(
+            K_CG_SESSION_EVENT_TAP,
+            K_CG_HEAD_INSERT_EVENT_TAP,
+            K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+            KEY_MASK,
+            Some(passthrough_tap),
+            std::ptr::null_mut(),
+        );
+        if !tap.is_null() {
+            CFRelease(tap);
         }
-        "accessibility" => {
-            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        }
-        // Ventura+ 通知面板；旧系统 open 失败时 request 仍会弹框/无操作
-        "notification" => {
-            Some("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
-        }
-        _ => None,
     }
 }
 
@@ -529,27 +628,14 @@ pub fn check_permissions() -> PermissionsStatus {
     }
 }
 
-/// 打开 macOS 系统设置对应面板（对照 Python `open_permission_settings`）。
-///
-/// Business Logic: 用户被拒绝或忽略授权弹框后，需直接跳转到对应面板手动开启。
-/// Code Logic: 非阻塞 `open <url-scheme>`。macOS-only——唯一调用方 `request_permission` 的
-///     调用点全在 `#[cfg(target_os = "macos")]` 块内，非 macOS 调不到，故整函数 mac-only。
-#[cfg(target_os = "macos")]
-pub fn open_permission_settings(perm_type: &str) -> bool {
-    let Some(url) = settings_url(perm_type) else {
-        return false;
-    };
-    std::process::Command::new("open").arg(url).spawn().is_ok()
-}
-
 /// 请求权限（对照 Python `request_screen_capture_access` + `open_permission_settings`）。
 ///
 /// Business Logic:
-///     - screenCapture：先调 CGRequestScreenCaptureAccess（仅「未决定」弹框）；
-///       `open_settings=true`（默认）时再打开设置面板兜底。
-///     - inputMonitoring：IOHID + CG request；`open_settings` 时打开 Privacy_ListenEvent。
-///     - accessibility：**不**调用带 prompt 的 AX API（避免进入 Welcome 即弹框）；
-///       仅在用户点击时 `open_settings` 打开 Privacy_Accessibility。
+///     - screenCapture：CGRequestScreenCaptureAccess + 可选打开设置；授权后常需完全退出重开。
+///     - inputMonitoring：登记 TCC 主体（IOHID + CGRequest + listen-only EventTap 尝试）后
+///       短暂等待再打开输入监控面板，确保列表出现本 app（Dev 显示名 cc-partner (Dev)）。
+///     - accessibility：仅用户点击时 WithOptions(prompt=true) 登记列表 + 打开设置；
+///       **禁止**在 check/挂载路径 prompt。
 ///     - notification：UNUserNotificationCenter requestAuthorization；可选打开通知设置。
 ///     - 非 macOS：返回 `{ok:true, requested:false, opened:false}`。
 pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
@@ -572,11 +658,11 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "inputMonitoring" => {
-                // IOHID + CG 双 request（未决定时弹框），再可选打开 Privacy_ListenEvent。
-                let requested_iohid =
-                    unsafe { IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
-                let requested_cg = unsafe { CGRequestListenEventAccess() };
-                let requested = requested_iohid || requested_cg;
+                // 先登记主体，再给 TCC 一点时间写入列表，最后打开设置页
+                let requested = register_input_monitoring_subject();
+                if open_settings {
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                }
                 let opened = if open_settings {
                     open_permission_settings(perm_type)
                 } else {
@@ -589,15 +675,16 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "accessibility" => {
-                // 无非弹框 request API；只在用户显式点击时打开设置面板（禁止 WithOptions 自动弹）
+                // 仅用户点击：prompt 登记列表；检测路径永不调用
+                let trusted = request_accessibility_prompt();
                 let opened = if open_settings {
                     open_permission_settings(perm_type)
                 } else {
                     false
                 };
                 RequestPermissionResult {
-                    ok: check_accessibility_access(),
-                    requested: false,
+                    ok: trusted || check_accessibility_access(),
+                    requested: true,
                     opened,
                 }
             }

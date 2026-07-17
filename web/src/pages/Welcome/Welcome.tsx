@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Button } from '@/components/primitives';
+import { Button, StatusMessage } from '@/components/primitives';
 import { PermissionCard } from '@/components/domain';
 import { configApi } from '@/api/config';
 import {
@@ -34,6 +34,13 @@ import type { PermissionType } from '@/lib/types';
 import appIconUrl from '@/assets/app-icon.png';
 import styles from './Welcome.module.css';
 
+/** 授权后需完全退出再重开的权限（macOS TCC 常见）。 */
+const RESTART_AFTER_GRANT: ReadonlySet<PermissionType> = new Set([
+  'screenCapture',
+  'accessibility',
+  'inputMonitoring',
+]);
+
 /**
  * Welcome 页面根组件
  */
@@ -41,6 +48,8 @@ export function Welcome() {
   const { t } = useTranslation(['welcome', 'common']);
   const navigate = useNavigate();
   const [flavor, setFlavor] = useState<AppFlavor>('release');
+  /** 用户点过「去设置」且该项需重启后生效时展示醒目提示 */
+  const [showRestartHint, setShowRestartHint] = useState(false);
   const {
     status,
     loading,
@@ -73,13 +82,16 @@ export function Welcome() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点单项「去设置」只应请求该权限。
+   *   用户点单项「去设置」只应请求该权限；屏幕录制/辅助功能/输入监控授权后须完全退出重开。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 request(type)，吞掉 rejection（error 已由 hook 投影）。
+   *   调用 request(type)；对需重启类权限置 showRestartHint；吞掉 rejection。
    */
   const handleRequest = useCallback(
     (type: PermissionType) => {
+      if (RESTART_AFTER_GRANT.has(type)) {
+        setShowRestartHint(true);
+      }
       void request(type).catch(() => undefined);
     },
     [request],
@@ -182,6 +194,10 @@ export function Welcome() {
           <p className={styles.subtitle} role="alert">
             {t('welcome:checkFailed', { error })}
           </p>
+        ) : null}
+
+        {showRestartHint && !allRequiredGranted ? (
+          <StatusMessage tone="warn">{t('welcome:restartAfterGrantHint')}</StatusMessage>
         ) : null}
 
         <div className={styles.permissionList} aria-label={t('welcome:permissionListAriaLabel')}>
