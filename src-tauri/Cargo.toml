@@ -36,6 +36,7 @@ path = "src/bin/cc-partner.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
+cc = "1"
 
 [dependencies]
 serde_json = "1.0"

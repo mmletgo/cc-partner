@@ -1,25 +1,20 @@
 //! permissions — macOS 权限检测/请求（对照 Python `ui/permissions.py`）
 //!
 //! Business Logic（为什么需要这个模块）:
-//!     三条 macOS 权限的真实消费者：截图依赖「屏幕录制」；健康提醒键鼠采样（device_query，
+//!     四条 macOS 权限的真实消费者：截图依赖「屏幕录制」；健康提醒键鼠采样（device_query，
 //!     走 IOHIDManager）依赖「输入监控」；健康提醒活动窗口标题采样（active-win-pos-rs，走 AX
-//!     API）依赖「辅助功能」。全局快捷键基于 RegisterEventHotKey，无需任何 TCC 权限。前端设置
-//!     页需展示授权状态并引导前往系统设置开启。本模块提供检测（屏幕录制/输入监控/辅助功能）
-//!     + 请求（弹系统框/打开设置面板）的 Rust 实现。
+//!     API）依赖「辅助功能」；久坐/运营系统通知依赖「通知」。全局快捷键基于 RegisterEventHotKey，
+//!     无需 TCC。Dev（`com.cc-partner.app.dev`）与 Release（`com.cc-partner.app`）按 Bundle 身份
+//!     独立记账。本模块提供检测 + 请求（弹系统框/打开设置面板）的 Rust 实现。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - 屏幕录制：`CGPreflightScreenCaptureAccess` / `CGRequestScreenCaptureAccess`。
-//!     - 输入监控（Privacy_ListenEvent）：**fail-closed 多信号**：
-//!         1) 无稳定 `CFBundleIdentifier`（如 `tauri dev` 裸 `target/debug/app`）→ 一律未授权
-//!            （该进程不受 TCC 约束，系统 API 会假绿，且系统设置不会以 cc-partner 列出）；
-//!         2) `IOHIDCheckAccess(ListenEvent)` 仅 `Granted` 通过；
-//!         3) 若可加载私有 TCC 框架：仅 **Denied(1)** 硬失败；`Granted(0)` 通过；
-//!            `Unknown(2)` 软忽略（ListenEvent 上 Unknown 常见，不得当假红）；
-//!         4) 最后 `CGPreflightListenEventAccess`。
-//!       **禁止**单独用 `CGEventTapCreate` / 单独用 CGPreflight（在已授辅助功能时易假绿）。
-//!     - 辅助功能：`AXIsProcessTrusted`。
+//!     - 输入监控（Privacy_ListenEvent）：**fail-closed 多信号**（bundle id + IOHID + TCC + CG）。
+//!     - 辅助功能：仅 `AXIsProcessTrusted`（**不**带 prompt；禁止 `WithOptions` 自动弹框）。
+//!     - 通知：`UNUserNotificationCenter`（native/macos/notification_auth.m）；**禁止**依赖
+//!       tauri-plugin-notification 桌面 stub（恒 Granted，无法区分 Dev/Release）。
 //!     - 非 macOS 一律视为已授权。
-//!     - `open` 打开「系统设置 → 隐私与安全」对应面板。
+//!     - `open` 打开「系统设置 → 隐私与安全 / 通知」对应面板。
 
 use serde::{Deserialize, Serialize};
 
@@ -314,6 +309,8 @@ pub struct PermissionsStatus {
     pub input_monitoring: PermissionState,
     /// 辅助功能权限（健康提醒活动窗口标题采样依赖；macOS 需手动授权）。
     pub accessibility: PermissionState,
+    /// 通知权限（按 Bundle 身份独立；权威源为 UNUserNotificationCenter，非 plugin stub）。
+    pub notification: PermissionState,
 }
 
 /// 请求权限的结果（前端约定字段：ok / requested / opened）。
@@ -340,8 +337,58 @@ fn settings_url(perm_type: &str) -> Option<&'static str> {
         "accessibility" => {
             Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         }
+        // Ventura+ 通知面板；旧系统 open 失败时 request 仍会弹框/无操作
+        "notification" => {
+            Some("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+        }
         _ => None,
     }
+}
+
+// ── macOS 通知权限（UNUserNotificationCenter，按 Bundle 身份独立）────────────
+#[cfg(target_os = "macos")]
+mod notification_ffi {
+    extern "C" {
+        /// 见 native/macos/notification_auth.h
+        pub fn cp_notification_auth_status() -> i32;
+        pub fn cp_notification_request_authorization() -> i32;
+    }
+}
+
+/// 检测通知权限（macOS 用 UNUserNotificationCenter；非 macOS 一律 true）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Welcome/Onboarding 第四项；Dev 与 Release 必须各自授权，互不继承。
+///     tauri-plugin-notification 桌面端 `permission_state` 恒 Granted，不得使用。
+///
+/// Code Logic（这个函数做什么）:
+///     查询 authorizationStatus；Authorized/Provisional/Ephemeral → true；
+///     NotDetermined/Denied/error → false（fail-closed，通知为引导必选项）。
+#[cfg(target_os = "macos")]
+pub fn check_notification_access() -> bool {
+    // UNAuthorizationStatus: 0 notDetermined, 1 denied, 2 authorized, 3 provisional, 4 ephemeral
+    let status = unsafe { notification_ffi::cp_notification_auth_status() };
+    matches!(status, 2 | 3 | 4)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn check_notification_access() -> bool {
+    true
+}
+
+/// 请求通知权限（仅 notDetermined 弹框；返回是否已授权）。
+///
+/// Business Logic: 用户点 Welcome「去设置」时触发。
+/// Code Logic: `requestAuthorizationWithOptions`；再读一次 status。
+#[cfg(target_os = "macos")]
+pub fn request_notification_access() -> bool {
+    let _ = unsafe { notification_ffi::cp_notification_request_authorization() };
+    check_notification_access()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_notification_access() -> bool {
+    true
 }
 
 /// 检测屏幕录制权限（macOS 用 CGPreflightScreenCaptureAccess，非 macOS 一律 true）。
@@ -462,6 +509,9 @@ pub fn check_accessibility_access() -> bool {
 /// 查询全量权限状态（供 `check_permissions` 命令调用）。
 ///
 /// Business Logic: 前端 usePermissions hook 初始化与轮询时调用。
+///
+/// Code Logic: 同步查询四项；通知走 UNUserNotificationCenter（调用方宜 spawn_blocking，
+///     避免主线程与 completion 死锁）。
 pub fn check_permissions() -> PermissionsStatus {
     PermissionsStatus {
         screen_capture: PermissionState {
@@ -472,6 +522,9 @@ pub fn check_permissions() -> PermissionsStatus {
         },
         accessibility: PermissionState {
             granted: check_accessibility_access(),
+        },
+        notification: PermissionState {
+            granted: check_notification_access(),
         },
     }
 }
@@ -494,10 +547,10 @@ pub fn open_permission_settings(perm_type: &str) -> bool {
 /// Business Logic:
 ///     - screenCapture：先调 CGRequestScreenCaptureAccess（仅「未决定」弹框）；
 ///       `open_settings=true`（默认）时再打开设置面板兜底。
-///     - inputMonitoring：先调 CGRequestListenEventAccess（仅「未决定」弹框）；
-///       `open_settings=true`（默认）时再打开 Privacy_ListenEvent 面板兜底。
-///       不得依赖辅助功能侧信道或 CGEventTap 假阳性。
-///     - accessibility：无系统 request API（AXIsProcessTrusted 仅查询），只能 open 设置面板。
+///     - inputMonitoring：IOHID + CG request；`open_settings` 时打开 Privacy_ListenEvent。
+///     - accessibility：**不**调用带 prompt 的 AX API（避免进入 Welcome 即弹框）；
+///       仅在用户点击时 `open_settings` 打开 Privacy_Accessibility。
+///     - notification：UNUserNotificationCenter requestAuthorization；可选打开通知设置。
 ///     - 非 macOS：返回 `{ok:true, requested:false, opened:false}`。
 pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
     let open_settings = open_settings.unwrap_or(true);
@@ -536,7 +589,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "accessibility" => {
-                // 无系统 request API（AXIsProcessTrusted 仅查询），只能 open 设置面板引导
+                // 无非弹框 request API；只在用户显式点击时打开设置面板（禁止 WithOptions 自动弹）
                 let opened = if open_settings {
                     open_permission_settings(perm_type)
                 } else {
@@ -545,6 +598,24 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 RequestPermissionResult {
                     ok: check_accessibility_access(),
                     requested: false,
+                    opened,
+                }
+            }
+            "notification" => {
+                let before = check_notification_access();
+                let ok = if before {
+                    true
+                } else {
+                    request_notification_access()
+                };
+                let opened = if open_settings {
+                    open_permission_settings(perm_type)
+                } else {
+                    false
+                };
+                RequestPermissionResult {
+                    ok,
+                    requested: !before,
                     opened,
                 }
             }
@@ -574,10 +645,7 @@ mod tests {
     ///     输入监控与辅助功能必须可独立报告；假绿回归会让 L3 清单与系统设置错位。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     调用 check_permissions，断言三字段均为 bool 且结构可序列化；在 macOS 上额外断言
-    ///     input_monitoring.granted == check_input_monitoring_access() 且
-    ///     accessibility.granted == check_accessibility_access()（两路 API 各自一致，
-    ///     不强制二者相等——那正是假绿 bug 的错误假设）。
+    ///     调用 check_permissions，断言四字段各自与检测函数一致且可序列化（含 notification）。
     #[test]
     fn check_permissions_reports_independent_fields() {
         let status = check_permissions();
@@ -587,10 +655,12 @@ mod tests {
         );
         assert_eq!(status.accessibility.granted, check_accessibility_access());
         assert_eq!(status.screen_capture.granted, check_screen_capture_access());
+        assert_eq!(status.notification.granted, check_notification_access());
         let json = serde_json::to_value(&status).expect("serialize");
         assert!(json.get("inputMonitoring").is_some());
         assert!(json.get("accessibility").is_some());
         assert!(json.get("screenCapture").is_some());
+        assert!(json.get("notification").is_some());
     }
 
     /// Business Logic（为什么需要这个测试）:

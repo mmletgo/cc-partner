@@ -144,6 +144,7 @@ dependencies = [
  "arboard",
  "axum",
  "base64 0.22.1",
+ "cc",
  "chromiumoxide",
  "chrono",
  "clap",

@@ -50,7 +50,7 @@ const grantedDecoder = objectDecoder('PermissionGranted', {
  *
  * Code Logic（这个 decoder 做什么）:
  *   解码 screenCapture/inputMonitoring/accessibility；
- *   notification 缺省时显式 default `{ granted: false }`（后端 check_permissions 不含该字段）。
+ *   notification 由后端权威返回；缺省时 default `{ granted: false }`（fail-closed，避免假绿）。
  */
 export const permissionsStatusDecoder: Decoder<PermissionsStatus> = objectDecoder<PermissionsStatus>(
   'PermissionsStatus',

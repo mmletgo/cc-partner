@@ -363,7 +363,7 @@ export interface PermissionsStatus {
   screenCapture: { granted: boolean };
   inputMonitoring: { granted: boolean };
   accessibility: { granted: boolean };
-  /** 通知权限（前端 JS API 检测合并；后端 check_permissions 不含此字段） */
+  /** 通知权限（后端 UNUserNotificationCenter，按 Bundle 身份独立；非 plugin stub） */
   notification: { granted: boolean };
 }
 

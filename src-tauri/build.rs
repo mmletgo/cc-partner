@@ -20,10 +20,43 @@ fn main() {
     println!("cargo:rerun-if-changed=icons/icon.icns");
     println!("cargo:rerun-if-changed=icons/icon.ico");
     println!("cargo:rerun-if-changed=icons/tray-icon.png");
+    println!("cargo:rerun-if-changed=native/macos/notification_auth.m");
+    println!("cargo:rerun-if-changed=native/macos/notification_auth.h");
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=TARGET");
     ensure_debug_sidecar_launcher();
+    compile_macos_notification_auth();
     tauri_build::build()
+}
+
+/// 编译 macOS 通知权限 ObjC 桥接。
+///
+/// Business Logic（为什么需要这个函数）:
+///   Dev/Release 需独立通知授权状态；plugin 桌面 stub 恒 Granted，需原生 UNUserNotificationCenter。
+///
+/// Code Logic（这个函数做什么）:
+///   仅 darwin target 用 `cc` 编译 `notification_auth.m` 并链接 UserNotifications/Foundation。
+fn compile_macos_notification_auth() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
+        panic!("编译 notification_auth 时缺少 CARGO_MANIFEST_DIR")
+    }));
+    let src = manifest_dir.join("native/macos/notification_auth.m");
+    if !src.exists() {
+        panic!("missing {}", src.display());
+    }
+
+    cc::Build::new()
+        .file(&src)
+        .include(manifest_dir.join("native/macos"))
+        .flag("-fobjc-arc")
+        .compile("cp_notification_auth");
+
+    println!("cargo:rustc-link-lib=framework=UserNotifications");
+    println!("cargo:rustc-link-lib=framework=Foundation");
 }
 
 /// 生成 debug profile 使用的 sidecar launcher。

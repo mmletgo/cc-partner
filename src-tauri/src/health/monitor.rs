@@ -139,17 +139,21 @@ impl ActivitySampler for DeviceQuerySampler {
 /// 安全构建 DeviceState,权限/环境不可用时返回 None 而非 panic。
 ///
 /// Business Logic(为什么需要这个函数):
-///     `device_query::DeviceState::new()` 在 macOS 缺辅助功能权限时会 `assert!` panic,
-///     在 Linux 缺 X display 时也会 panic;health daemon 的采样线程若直接调用会导致子线程崩溃。
-///     需要一个跨平台的安全构建入口,失败时优雅降级。
+///     `device_query` 在 macOS 上通过 `application_is_trusted_with_prompt()` 检测辅助功能，
+///     **会自动弹出系统授权对话框**。进入 Welcome 仅检查权限时也不应弹框——弹框只能由用户
+///     点击「去设置」触发。缺权限/环境时采样线程须降级而非崩溃或弹窗。
 ///
 /// Code Logic(这个函数做什么):
-///     macOS 优先用库提供的 `checked_new()`(返回 Option,不 panic);其它平台无 checked_new,
-///     用 `catch_unwind` 包裹 `new()`,panic 时返回 None。
+///     macOS：先用本进程 `AXIsProcessTrusted`（无 prompt）预检；未授权直接 None，
+///     **永不**调用 `DeviceState::checked_new/new`（二者内部 with_prompt）。已授权再
+///     `checked_new`（此时 with_prompt 不会弹框）。其它平台 catch_unwind 包裹 `new()`。
 fn try_build_device_state() -> Option<DeviceState> {
     #[cfg(target_os = "macos")]
     {
-        // macOS 库直接提供不 panic 的 checked_new,内部检测辅助功能权限。
+        // 禁止走 device_query 的 with_prompt 路径，否则 app 启动/进入 Welcome 即弹辅助功能授权框。
+        if !crate::permissions::check_accessibility_access() {
+            return None;
+        }
         DeviceState::checked_new()
     }
 

@@ -4,10 +4,10 @@
  *
  * Business Logic（为什么需要这个测试）:
  *   权限引导不得永久「检查中」；首轮失败、重试、stale 保留、逐项请求与可见性轮询
- *   是 Welcome/Settings 的核心正确性合同。
+ *   是 Welcome/Settings 的核心正确性合同。通知由后端 check_permissions 权威返回。
  *
  * Code Logic（这个测试做什么）:
- *   mock configApi 与 notification helper；默认 real timers 覆盖状态机，
+ *   mock configApi；默认 real timers 覆盖状态机，
  *   仅 interval/visibility 用例启用 fake timers + act 冲刷。
  */
 
@@ -18,20 +18,12 @@ import type { PermissionType, PermissionsStatus } from '@/lib/types';
 
 const permissionsMock = vi.fn();
 const requestPermissionMock = vi.fn();
-const checkNotificationGrantedMock = vi.fn();
-const requestNotificationPermissionMock = vi.fn();
 
 vi.mock('@/api/config', () => ({
   configApi: {
     permissions: (...args: unknown[]) => permissionsMock(...args),
     requestPermission: (...args: unknown[]) => requestPermissionMock(...args),
   },
-}));
-
-vi.mock('@/lib/notification', () => ({
-  checkNotificationGranted: (...args: unknown[]) => checkNotificationGrantedMock(...args),
-  requestNotificationPermission: (...args: unknown[]) =>
-    requestNotificationPermissionMock(...args),
 }));
 
 import { usePermissions } from './usePermissions';
@@ -70,22 +62,24 @@ function setVisibilityState(state: DocumentVisibilityState): void {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   多个用例共享最小合法权限 DTO。
+ *   多个用例共享最小合法权限 DTO（含 notification，与后端四字段一致）。
  *
  * Code Logic（这个函数做什么）:
- *   返回可覆盖字段的 PermissionsStatus（TCC 部分；notification 由 check mock 合并）。
+ *   返回可覆盖字段的 PermissionsStatus。
  */
-function buildTccStatus(
+function buildStatus(
   overrides: Partial<{
     screenCapture: boolean;
     accessibility: boolean;
     inputMonitoring: boolean;
+    notification: boolean;
   }> = {},
-): Omit<PermissionsStatus, 'notification'> {
+): PermissionsStatus {
   return {
     screenCapture: { granted: overrides.screenCapture ?? false },
     accessibility: { granted: overrides.accessibility ?? false },
     inputMonitoring: { granted: overrides.inputMonitoring ?? false },
+    notification: { granted: overrides.notification ?? false },
   };
 }
 
@@ -108,11 +102,7 @@ beforeEach(() => {
   setVisibilityState('visible');
   permissionsMock.mockReset();
   requestPermissionMock.mockReset();
-  checkNotificationGrantedMock.mockReset();
-  requestNotificationPermissionMock.mockReset();
-  checkNotificationGrantedMock.mockResolvedValue(false);
   requestPermissionMock.mockResolvedValue({ ok: true, requested: true, opened: true });
-  requestNotificationPermissionMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -137,8 +127,7 @@ describe('usePermissions', () => {
   test('retry after first failure succeeds and clears error', async () => {
     permissionsMock
       .mockRejectedValueOnce(new Error('perm down'))
-      .mockResolvedValue(buildTccStatus({ screenCapture: true }));
-    checkNotificationGrantedMock.mockResolvedValue(true);
+      .mockResolvedValue(buildStatus({ screenCapture: true, notification: true }));
 
     const { result } = renderHook(() => usePermissions());
     await flushMicrotasks();
@@ -158,9 +147,8 @@ describe('usePermissions', () => {
 
   test('later refresh failure preserves stale status and sets error', async () => {
     permissionsMock
-      .mockResolvedValueOnce(buildTccStatus({ accessibility: true }))
+      .mockResolvedValueOnce(buildStatus({ accessibility: true }))
       .mockRejectedValueOnce(new Error('stale refresh'));
-    checkNotificationGrantedMock.mockResolvedValue(false);
 
     const { result } = renderHook(() => usePermissions());
     await flushMicrotasks();
@@ -177,9 +165,8 @@ describe('usePermissions', () => {
 
   test('request asks only the given type and refreshes status', async () => {
     permissionsMock
-      .mockResolvedValueOnce(buildTccStatus())
-      .mockResolvedValueOnce(buildTccStatus({ screenCapture: true }));
-    checkNotificationGrantedMock.mockResolvedValue(false);
+      .mockResolvedValueOnce(buildStatus())
+      .mockResolvedValueOnce(buildStatus({ screenCapture: true }));
 
     const { result } = renderHook(() => usePermissions());
     await flushMicrotasks();
@@ -192,14 +179,28 @@ describe('usePermissions', () => {
 
     expect(requestPermissionMock).toHaveBeenCalledTimes(1);
     expect(requestPermissionMock).toHaveBeenCalledWith('screenCapture', false);
-    expect(requestNotificationPermissionMock).not.toHaveBeenCalled();
     expect(result.current.status?.screenCapture.granted).toBe(true);
     expect(result.current.requesting.has('screenCapture')).toBe(false);
   });
 
+  test('notification request goes through configApi.requestPermission', async () => {
+    permissionsMock
+      .mockResolvedValueOnce(buildStatus())
+      .mockResolvedValueOnce(buildStatus({ notification: true }));
+
+    const { result } = renderHook(() => usePermissions());
+    await flushMicrotasks();
+
+    await act(async () => {
+      await result.current.request('notification');
+    });
+
+    expect(requestPermissionMock).toHaveBeenCalledWith('notification', undefined);
+    expect(result.current.status?.notification.granted).toBe(true);
+  });
+
   test('request error surfaces error and clears requesting flag', async () => {
-    permissionsMock.mockResolvedValue(buildTccStatus());
-    checkNotificationGrantedMock.mockResolvedValue(false);
+    permissionsMock.mockResolvedValue(buildStatus());
     requestPermissionMock.mockRejectedValueOnce(new Error('request boom'));
 
     const { result } = renderHook(() => usePermissions());
@@ -214,8 +215,7 @@ describe('usePermissions', () => {
   });
 
   test('duplicate same-type request reuses in-flight promise', async () => {
-    permissionsMock.mockResolvedValue(buildTccStatus());
-    checkNotificationGrantedMock.mockResolvedValue(false);
+    permissionsMock.mockResolvedValue(buildStatus());
     const pending = deferred<{ ok: boolean; requested: boolean; opened: boolean }>();
     requestPermissionMock.mockReturnValueOnce(pending.promise);
 
@@ -243,13 +243,13 @@ describe('usePermissions', () => {
 
   test('allRequiredGranted includes notification', async () => {
     permissionsMock.mockResolvedValue(
-      buildTccStatus({
+      buildStatus({
         screenCapture: true,
         accessibility: true,
         inputMonitoring: true,
+        notification: false,
       }),
     );
-    checkNotificationGrantedMock.mockResolvedValue(false);
 
     const { result } = renderHook(() => usePermissions());
     await flushMicrotasks();
@@ -258,7 +258,14 @@ describe('usePermissions', () => {
     expect(result.current.allGranted).toBe(false);
     expect(result.current.status?.notification.granted).toBe(false);
 
-    checkNotificationGrantedMock.mockResolvedValue(true);
+    permissionsMock.mockResolvedValue(
+      buildStatus({
+        screenCapture: true,
+        accessibility: true,
+        inputMonitoring: true,
+        notification: true,
+      }),
+    );
     await act(async () => {
       await result.current.refresh();
     });
@@ -269,8 +276,7 @@ describe('usePermissions', () => {
 
   test('pauses polling while hidden and refreshes once when visible', async () => {
     vi.useFakeTimers();
-    permissionsMock.mockResolvedValue(buildTccStatus());
-    checkNotificationGrantedMock.mockResolvedValue(false);
+    permissionsMock.mockResolvedValue(buildStatus());
 
     renderHook(() => usePermissions());
     await flushMicrotasks();
@@ -296,16 +302,12 @@ describe('usePermissions', () => {
   });
 
   test('requestMissing requests missing types sequentially', async () => {
-    permissionsMock.mockResolvedValue(buildTccStatus());
-    checkNotificationGrantedMock.mockResolvedValue(false);
+    permissionsMock.mockResolvedValue(buildStatus());
 
     const order: PermissionType[] = [];
     requestPermissionMock.mockImplementation(async (type: PermissionType) => {
       order.push(type);
       return { ok: true, requested: true, opened: true };
-    });
-    requestNotificationPermissionMock.mockImplementation(async () => {
-      order.push('notification');
     });
 
     const { result } = renderHook(() => usePermissions());
@@ -326,13 +328,13 @@ describe('usePermissions', () => {
   test('stopWhenGranted disables further polling after required granted', async () => {
     vi.useFakeTimers();
     permissionsMock.mockResolvedValue(
-      buildTccStatus({
+      buildStatus({
         screenCapture: true,
         accessibility: true,
         inputMonitoring: true,
+        notification: true,
       }),
     );
-    checkNotificationGrantedMock.mockResolvedValue(true);
 
     renderHook(() => usePermissions({ stopWhenGranted: true }));
     await flushMicrotasks();
