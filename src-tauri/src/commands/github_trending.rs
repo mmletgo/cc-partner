@@ -392,10 +392,13 @@ async fn refresh_cached_ai_cache(
 /// 判断未过期失败缓存是否应该重试 Claude 解说。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户遇到的旧泛化错误没有可操作信息，且可能已经由新版命令形态修复；继续返回旧缓存会让问题看似未解决。
+///     用户可能已升级到修复了 CLI 路径/参数的版本，或刚装好 Claude CLI；若仍直接返回当天
+///     failed 缓存，首页会一直显示旧错误（例如打包 GUI 的 os error 2），看起来像没修好。
 ///
 /// Code Logic（这个函数做什么）:
-///     仅在 AI 仍启用、缓存状态为 failed、错误文本匹配旧的“命令返回非零状态”兜底文案时允许重试。
+///     AI 启用 + `ai_status=failed` + 尚未 `ai_retry_attempted` 时，若错误属于可被升级/环境修复
+///     的类别（旧“命令返回非零状态”、CLI 启动失败、未找到 CLI、os error 2/NotFound）则允许
+///     用缓存榜单轻量重试一次；其它业务失败不自动重试。
 fn should_retry_failed_ai_cache(
     payload: &GithubTrendingPayload,
     config: &GithubTrendingConfig,
@@ -406,8 +409,25 @@ fn should_retry_failed_ai_cache(
         && payload
             .ai_error
             .as_deref()
-            .map(|error| error.contains("命令返回非零状态"))
+            .map(is_retriable_ai_cache_error)
             .unwrap_or(false)
+}
+
+/// 判断失败缓存错误是否值得自动重试一次。
+///
+/// Code Logic（这个函数做什么）:
+///     匹配旧泛化非零退出、CLI 启动/查找失败、以及常见 NotFound（含 os error 2）文案。
+fn is_retriable_ai_cache_error(error: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "命令返回非零状态",
+        "启动 Claude CLI 失败",
+        "未找到 Claude CLI",
+        "No such file or directory",
+        "os error 2",
+        "program not found",
+        "The system cannot find the file specified",
+    ];
+    MARKERS.iter().any(|marker| error.contains(marker))
 }
 
 /// 从 SQLite 读取指定 key 的缓存。
@@ -842,6 +862,29 @@ mod tests {
         let config = GithubTrendingConfig::default();
 
         assert!(should_retry_failed_ai_cache(&payload, &config));
+    }
+
+    #[test]
+    fn retries_packaged_gui_cli_not_found_failed_ai_cache() {
+        let payload = GithubTrendingPayload {
+            repos: Vec::new(),
+            fetched_at: Utc::now().to_rfc3339(),
+            expires_at: (Utc::now() + ChronoDuration::hours(24)).to_rfc3339(),
+            ai_status: "failed".to_string(),
+            ai_error: Some(
+                "启动 Claude CLI 失败: No such file or directory (os error 2)".to_string(),
+            ),
+            ai_retry_attempted: false,
+        };
+        let config = GithubTrendingConfig::default();
+
+        assert!(should_retry_failed_ai_cache(&payload, &config));
+        assert!(is_retriable_ai_cache_error(
+            "未找到 Claude CLI，请确认已安装并配置 PATH"
+        ));
+        assert!(!is_retriable_ai_cache_error(
+            "Claude CLI 生成解说失败: model refused"
+        ));
     }
 
     #[test]
