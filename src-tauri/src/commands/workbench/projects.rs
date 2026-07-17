@@ -85,6 +85,7 @@ pub(crate) async fn discover_workbench_browser_targets_for_state(
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         let mut discovery = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .discover_browser_targets(
                 &context.base_url,
                 &RemoteWorkbenchBrowserDiscoverReq {
@@ -193,7 +194,10 @@ pub async fn list_workbench_remote_roots(
         return Ok(v);
     }
     let base_url = device_base_url(&state, &device_id)?;
-    RemoteWorkbenchClient::new().roots(&base_url).await
+    RemoteWorkbenchClient::new()
+        .with_expected_device_id(&device_id)
+        .roots(&base_url)
+        .await
 }
 
 /// 列出远端设备某个目录下的一级条目。
@@ -220,6 +224,7 @@ pub async fn list_workbench_remote_dir(
     }
     let base_url = device_base_url(&state, &device_id)?;
     RemoteWorkbenchClient::new()
+        .with_expected_device_id(&device_id)
         .list_dir(&base_url, &path)
         .await
 }
@@ -248,6 +253,7 @@ pub async fn get_workbench_remote_path_info(
     }
     let base_url = device_base_url(&state, &device_id)?;
     RemoteWorkbenchClient::new()
+        .with_expected_device_id(&device_id)
         .path_info(&base_url, &path)
         .await
 }
@@ -277,6 +283,7 @@ pub async fn open_workbench_remote_project(
     let base_url = device_base_url(&state, &device_id)?;
     let current_device_name = device_name_from_state(&state, &device_id);
     let remote = RemoteWorkbenchClient::new()
+        .with_expected_device_id(&device_id)
         .open_project(&base_url, &path)
         .await?;
     let remote_id = remote_project_id(&device_id, &remote.path);
@@ -434,6 +441,7 @@ pub(crate) async fn list_workbench_worktrees_for_state(
     if project.kind == "remote" {
         let context = ensure_remote_project_context(state, &project).await?;
         let items = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .list_worktrees(&context.base_url, &context.inner_project_id)
             .await?;
         return Ok(map_remote_worktree_dtos(

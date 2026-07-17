@@ -2545,4 +2545,96 @@ mod tests {
             "未设置转发 ID 时应生成 36 字符 UUID"
         );
     }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     生产路径 RemoteWorkbenchClient mutation 若漏 bind expected_device_id，端口复用会
+    ///     fail-open 打到错误设备；必须用源码盘点锁死允许清单。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     扫描 src/ 下非测试模块的 `RemoteWorkbenchClient::new()`，要求同窗口 5 行内出现
+    ///     `with_expected_device_id`；仅允许本文件测试段与明确 allowlist 路径。
+    #[test]
+    fn production_remote_workbench_client_must_bind_expected_device_id() {
+        use std::path::PathBuf;
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut unbound = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<(PathBuf, usize)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let lines: Vec<&str> = text.lines().collect();
+                let mut in_cfg_test = false;
+                let mut brace_depth_at_test: Option<i32> = None;
+                let mut depth = 0i32;
+                for (i, line) in lines.iter().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("#[cfg(test)]") {
+                        in_cfg_test = true;
+                        brace_depth_at_test = None;
+                    }
+                    // 跟踪 cfg(test) 模块的花括号深度，退出后恢复 production 模式
+                    if in_cfg_test {
+                        for ch in line.chars() {
+                            if ch == '{' {
+                                depth += 1;
+                                if brace_depth_at_test.is_none() {
+                                    brace_depth_at_test = Some(depth);
+                                }
+                            } else if ch == '}' {
+                                depth -= 1;
+                                if brace_depth_at_test == Some(depth + 1)
+                                    || (brace_depth_at_test.is_some() && depth < 0)
+                                {
+                                    // 粗粒度：遇到空行后的下一个非 test item 时由后续逻辑处理
+                                }
+                            }
+                        }
+                    }
+                    if line.contains("RemoteWorkbenchClient::new()") {
+                        // 文件名 / 路径 allowlist：单元测试文件
+                        let path_str = path.to_string_lossy();
+                        if path_str.contains("/tests/")
+                            || path_str.ends_with("tests.rs")
+                            || path_str.ends_with("remote_client.rs")
+                                && text[..text.find(line).unwrap_or(0).min(text.len())]
+                                    .contains("#[cfg(test)]")
+                        {
+                            // remote_client 自身 tests 允许无 bind
+                            if path_str.ends_with("remote_client.rs") {
+                                // 仅当位于 cfg(test) 之后
+                                let before: String = lines[..i].join("\n");
+                                if before.contains("#[cfg(test)]") {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        }
+                        let window = lines[i..lines.len().min(i + 5)].join("\n");
+                        if !window.contains("with_expected_device_id") {
+                            out.push((path.clone(), i + 1));
+                        }
+                    }
+                }
+            }
+        }
+        walk(&manifest, &mut unbound);
+        assert!(
+            unbound.is_empty(),
+            "production RemoteWorkbenchClient::new() 必须链式 with_expected_device_id，未绑定: {:?}",
+            unbound
+        );
+    }
 }

@@ -494,7 +494,7 @@ async fn preflight_remote_layout(
     // session id on remote shortcut is owner-local id already when stored as inner; if mapped use as-is
     let inner_session = layout.active_session_id.clone();
 
-    let client = RemoteWorkbenchClient::new();
+    let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
     match client
         .preflight_workspace_restore(
             &context.base_url,

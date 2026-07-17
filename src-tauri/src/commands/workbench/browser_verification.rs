@@ -51,6 +51,8 @@ pub enum ResolvedVerificationTarget {
         #[allow(dead_code)]
         worktree_id: Option<String>,
         base_url: String,
+        /// owning device id，用于 RemoteWorkbenchClient device bind。
+        device_id: String,
         remote_preview_id: String,
     },
 }
@@ -58,11 +60,11 @@ pub enum ResolvedVerificationTarget {
 /// 解析 preview 为 Local 或 Remote 目标。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     start/get 路径共享同一 registry 契约。
+///     start/get 路径共享同一 registry 契约；Remote 必须带 owning device_id 做 bind。
 ///
 /// Code Logic（这个函数做什么）:
-///     lookup；缺失 `browser_preview_not_found`。
-pub fn resolve_verification_target(
+///     lookup；缺失 `browser_preview_not_found`；RemoteRelay 从项目 row 解析 device_id。
+pub async fn resolve_verification_target(
     state: &AppState,
     preview_id: &str,
 ) -> Result<ResolvedVerificationTarget, AppError> {
@@ -84,12 +86,26 @@ pub fn resolve_verification_target(
             base_url,
             remote_preview_id,
             ..
-        } => Ok(ResolvedVerificationTarget::Remote {
-            project_id: session.project_id,
-            worktree_id: session.worktree_id,
-            base_url,
-            remote_preview_id,
-        }),
+        } => {
+            let project = state
+                .workbench_project_repo
+                .get(&session.project_id)
+                .await?
+                .ok_or_else(|| AppError::not_found("browser_preview_project_not_found"))?;
+            let device_id = project.device_id.trim().to_string();
+            if device_id.is_empty() {
+                return Err(AppError::validation(
+                    "browser_verification_remote_missing_device_id",
+                ));
+            }
+            Ok(ResolvedVerificationTarget::Remote {
+                project_id: session.project_id,
+                worktree_id: session.worktree_id,
+                base_url,
+                device_id,
+                remote_preview_id,
+            })
+        }
     }
 }
 
@@ -115,7 +131,7 @@ pub async fn start_browser_verification_for_state(
     } else {
         req.commands
     };
-    match resolve_verification_target(state, &req.preview_id)? {
+    match resolve_verification_target(state, &req.preview_id).await? {
         ResolvedVerificationTarget::Local {
             project_id,
             worktree_id,
@@ -134,11 +150,12 @@ pub async fn start_browser_verification_for_state(
         }
         ResolvedVerificationTarget::Remote {
             base_url,
+            device_id,
             remote_preview_id,
             ..
         } => {
-            // controller：不增加本地 engine_starts
-            let client = RemoteWorkbenchClient::new();
+            // controller：不增加本地 engine_starts；mutation 必须 bind device_id
+            let client = RemoteWorkbenchClient::new().with_expected_device_id(&device_id);
             let run = client
                 .create_browser_verification(
                     &base_url,
@@ -149,7 +166,7 @@ pub async fn start_browser_verification_for_state(
                 .await?;
             state
                 .browser_verification
-                .remember_remote_proxy(run.session.id.clone(), base_url)
+                .remember_remote_proxy(run.session.id.clone(), base_url, device_id)
                 .await;
             Ok(run)
         }
@@ -167,13 +184,14 @@ pub async fn get_browser_verification_for_state(
     state: &AppState,
     run_id: String,
 ) -> Result<BrowserVerificationRun, AppError> {
-    if let Some(base) = state
+    if let Some(proxy) = state
         .browser_verification
-        .remote_proxy_base_url(&run_id)
+        .remote_proxy_endpoint(&run_id)
         .await
     {
         return RemoteWorkbenchClient::new()
-            .get_browser_verification(&base, &run_id)
+            .with_expected_device_id(&proxy.device_id)
+            .get_browser_verification(&proxy.base_url, &run_id)
             .await;
     }
     state.browser_verification.get(&run_id).await
@@ -190,13 +208,14 @@ pub async fn cancel_browser_verification_for_state(
     state: &AppState,
     run_id: String,
 ) -> Result<BrowserVerificationRun, AppError> {
-    if let Some(base) = state
+    if let Some(proxy) = state
         .browser_verification
-        .remote_proxy_base_url(&run_id)
+        .remote_proxy_endpoint(&run_id)
         .await
     {
         return RemoteWorkbenchClient::new()
-            .cancel_browser_verification(&base, &run_id)
+            .with_expected_device_id(&proxy.device_id)
+            .cancel_browser_verification(&proxy.base_url, &run_id)
             .await;
     }
     state.browser_verification.cancel(&run_id).await
@@ -217,13 +236,14 @@ pub async fn get_browser_verification_artifact_for_state(
     if artifact_id.contains("..") || artifact_id.contains('/') || artifact_id.contains('\\') {
         return Err(AppError::validation("resource_limit"));
     }
-    if let Some(base) = state
+    if let Some(proxy) = state
         .browser_verification
-        .remote_proxy_base_url(&run_id)
+        .remote_proxy_endpoint(&run_id)
         .await
     {
         return RemoteWorkbenchClient::new()
-            .get_browser_verification_artifact(&base, &run_id, &artifact_id)
+            .with_expected_device_id(&proxy.device_id)
+            .get_browser_verification_artifact(&proxy.base_url, &run_id, &artifact_id)
             .await;
     }
     let bytes = state

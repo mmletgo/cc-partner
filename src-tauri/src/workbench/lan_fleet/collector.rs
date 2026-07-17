@@ -461,14 +461,14 @@ pub async fn collect_lan_fleet_for_state_with_cache(
         .collect();
 
     let semaphore = Arc::new(Semaphore::new(FLEET_FANOUT_MAX_CONCURRENCY));
-    let client = RemoteWorkbenchClient::new();
     let cache_arc = cache.clone();
     let devices_map = state.devices.clone();
 
     let remote_results: Vec<LanFleetDeviceSummary> = stream::iter(remote_entries)
         .map(|(device_id, device_name, shortcuts)| {
             let semaphore = semaphore.clone();
-            let client = client.clone();
+            // 每个远端设备独立 bind expected_device_id，避免 fan-out 打到端口复用后的错误节点。
+            let client = RemoteWorkbenchClient::new().with_expected_device_id(&device_id);
             let cache_arc = cache_arc.clone();
             let devices_map = devices_map.clone();
             let state_ref_port = state.actual_http_port.clone();

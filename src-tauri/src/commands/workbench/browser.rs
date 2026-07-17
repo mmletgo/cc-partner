@@ -66,6 +66,7 @@ pub(crate) async fn create_workbench_browser_preview_for_state(
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         let remote_preview = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&context.device_id)
             .create_browser_preview(
                 &context.base_url,
                 &RemoteWorkbenchBrowserPreviewReq {

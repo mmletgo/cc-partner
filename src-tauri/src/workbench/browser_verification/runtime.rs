@@ -50,12 +50,25 @@ struct RunRecord {
     task: Option<JoinHandle<()>>,
 }
 
+/// controller→owner remote proxy 记录（base_url + 期望 device_id）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     get/cancel/artifact 必须与 create 使用同一 owner 绑定，避免端口复用后打到错误设备。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 owner HTTP base_url 与 expected_device_id，供后续 RemoteWorkbenchClient 重绑。
+#[derive(Debug, Clone)]
+pub struct RemoteProxyEndpoint {
+    pub base_url: String,
+    pub device_id: String,
+}
+
 /// start/get/cancel 共享的可变表（单一 mutex，消除 TOCTOU）。
 struct ServiceTables {
     runs: HashMap<String, RunRecord>,
     by_request: HashMap<String, String>,
-    /// 本机作为 controller 时，转发到 owner 的 run_id → base_url。
-    remote_proxies: HashMap<String, String>,
+    /// 本机作为 controller 时，转发到 owner 的 run_id → (base_url, device_id)。
+    remote_proxies: HashMap<String, RemoteProxyEndpoint>,
 }
 
 struct ServiceInner {
@@ -213,25 +226,42 @@ impl BrowserVerificationService {
     /// 记录 controller→owner 的 remote proxy 映射。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     RemoteRelay 启动后 get/cancel/artifact 需转发到同一 owner base_url。
+    ///     RemoteRelay 启动后 get/cancel/artifact 需转发到同一 owner，并绑定 device_id。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     写入 remote_proxies 表。
-    pub async fn remember_remote_proxy(&self, run_id: String, base_url: String) {
+    ///     写入 remote_proxies（base_url + device_id）。
+    pub async fn remember_remote_proxy(&self, run_id: String, base_url: String, device_id: String) {
         let mut tables = self.inner.tables.lock().await;
-        tables.remote_proxies.insert(run_id, base_url);
+        tables.remote_proxies.insert(
+            run_id,
+            RemoteProxyEndpoint {
+                base_url,
+                device_id,
+            },
+        );
     }
 
-    /// 查询 remote proxy base_url。
+    /// 查询 remote proxy endpoint（base_url + device_id）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     get/cancel/artifact 分流本地 vs 远端。
+    ///     get/cancel/artifact 分流本地 vs 远端，并在远端路径强制 device bind。
     ///
     /// Code Logic（这个函数做什么）:
     ///     读 remote_proxies。
-    pub async fn remote_proxy_base_url(&self, run_id: &str) -> Option<String> {
+    pub async fn remote_proxy_endpoint(&self, run_id: &str) -> Option<RemoteProxyEndpoint> {
         let tables = self.inner.tables.lock().await;
         tables.remote_proxies.get(run_id).cloned()
+    }
+
+    /// 兼容查询：仅返回 remote proxy base_url。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧调用方只关心 base_url 分流。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 endpoint 取 base_url。
+    pub async fn remote_proxy_base_url(&self, run_id: &str) -> Option<String> {
+        self.remote_proxy_endpoint(run_id).await.map(|e| e.base_url)
     }
 
     /// 关闭时取消全部活跃验证并尽量等待任务结束。
