@@ -4,22 +4,21 @@
   "checkingPermission": "正在检查权限状态…",
   "permissionReady": "权限已就绪",
   "waitingPermission": "正在等待系统授权…若系统设置里已打开开关，请完全退出应用后重新打开，再点「重新检查」。",
-  "restartAfterGrantHint": "在系统设置中打开开关后，请完全退出本应用并重新打开，再点「重新检查」才会生效。",
   "skip": "暂时跳过",
   "continue": "继续使用",
   "permissionListAriaLabel": "权限列表",
   "permission": {
     "screenRecording": {
       "title": "屏幕录制",
-      "description": "允许截取屏幕内容；在系统设置打开后请完全退出并重新打开本应用"
+      "description": "允许截取屏幕内容"
     },
     "accessibility": {
       "title": "辅助功能",
-      "description": "健康提醒读取前台应用需要；在系统设置打开后请完全退出并重新打开本应用"
+      "description": "健康提醒读取前台应用需要"
     },
     "inputMonitoring": {
       "title": "输入监控",
-      "description": "健康提醒检测键盘活动需要；在系统设置打开后请完全退出并重新打开本应用"
+      "description": "健康提醒检测键盘活动需要"
     },
     "notification": {
       "title": "通知",
