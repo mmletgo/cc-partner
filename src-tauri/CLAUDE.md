@@ -352,9 +352,10 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 ## M9 已落地行为约定（打包发版：bundle 配置 + 版本号单一来源 + bump 脚本 + 三平台 CI workflow）
 
 - **bundle 配置（tauri.conf.json）**：
-  - `targets: "all"` —— Tauri 按当前构建平台自动选择本平台产物（macOS→dmg/app、Windows→nsis/msi、Linux→appimage/deb）。CI 三平台矩阵各跑本平台，故 `"all"` 等效于列全三平台且不会跨平台报错。
+  - `targets: "all"` —— 默认本平台全产物；**CI Windows 显式 `--bundles nsis`**（见下），不打包 MSI。
+  - `resources: ["resources/browser-runtime/**/*"]` —— 打包 managed Chromium；`prepare-tauri-sidecar` 在目标无 lock 资产（如 `aarch64-unknown-linux-gnu`）时必须写入 `.platform-unavailable` 占位，否则 Tauri build.rs 因 glob 未匹配失败。
   - `macOS.signingIdentity: "-"` —— **ad-hoc 签名**（开发/测试用，免 Apple Developer ID）。**正式分发需后续配 Apple Developer ID 签名 + notarization**（M9 不做，用户后续配置）。
-  - `windows.wix.language: ["en-US","zh-CN"]` —— MSI 安装包中英文双语。
+  - `windows.wix.language` 仍可配置，但 **stable release CI 不跑 WiX/MSI**（managed Chromium 下 light.exe 失败且无细节日志；历史 v0.6.x 也只发布 nsis）。
   - `publisher: "cc-partner"`、`category: "Productivity"` —— 安装包元数据。
   - `icon` 数组覆盖三平台（32x32.png/128x128.png/128x128@2x.png/icon.icns/icon.ico），无需额外生成。
 - **版本号单一来源 + 同步**：`tauri.conf.json.version` 是唯一来源。`Cargo.toml.version` **必须与之完全一致**（Tauri build 强制校验，不一致会告警/失败）；`web/package.json.version` 跟随同步（前端构建元数据一致）。锁文件中的根包版本也必须同步，避免 CI 的 `cargo --locked` / `npm ci` 路径与源码清单不一致。
@@ -363,11 +364,11 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
   - 触发：`push tags: ['v*']`。
   - 旧的 Python/PyInstaller `release.yml` 已于 M10 删除，现在仓库为纯 Tauri 结构，推 `v*` tag 只跑这一套 Tauri 构建。
   - **三段式 workflow（v0.6.6 起弃用 tauri-apps/tauri-action）**：曾用 `tauri-apps/tauri-action@v0`，但其 latest.json 自动生成有 bug —— 任一平台缺 `.sig` 就打印 "Signature not found, skipping upload" 并整体跳过 latest.json，导致应用内检查更新报 `error sending request for url`（latest.json 返回 404）。改用三段式：
-    1. `build`（matrix 5 平台：macOS aarch64/x86_64、Windows x64、Linux x64/arm64）—— 先运行 `node scripts/prepare-tauri-sidecar.mjs [--target <triple>]` 构建并复制真实 backend externalBin，再原生 `web/node_modules/.bin/tauri build` 构建（项目锁定 tauri CLI 版本），「Prepare Tauri signing key」步骤把 secret 归一化为 base64 注入环境变量，build 时自动签名产出 `.sig`。每个平台收集 updater 产物（`.app.tar.gz`/`_x64-setup.exe`/`.AppImage` + `.sig`）到 `release-assets/`，缺失 `.sig` 直接 fail。
+    1. `build`（matrix 5 平台：macOS aarch64/x86_64、Windows x64、Linux x64/arm64）—— 先 `node scripts/prepare-tauri-sidecar.mjs [--target <triple>]`（含 browser-runtime 准备/占位 + backend externalBin），再原生 `tauri build`（macOS 带 `--target`；**Windows 固定 `--bundles nsis`**；Linux `--bundles appimage,deb,rpm`），签名后收集 updater 产物到 `release-assets/`，缺 `.sig` fail。
     2. `publish-release`（needs: build）—— `actions/download-artifact` 合并所有平台产物，`softprops/action-gh-release@v2` 上传到 GitHub Release。
     3. `assemble-latest-json`（needs: publish-release）—— `gh release download` 拉所有 `.sig`，bash + jq 按文件名匹配平台生成 `latest.json`（`*_aarch64.app.tar.gz`→darwin-aarch64 等），单平台缺签名只跳过该平台不连坐，`gh release upload --clobber` 上传。
   - `bundle.createUpdaterArtifacts: true` —— tauri.conf.json 必须开启，否则 tauri build 不产出 `.sig`。
-  - Windows updater 用 nsis 安装包（`_x64-setup.exe`，非 msi）作下载源，对齐 `tauri.conf.json` 的 `windows.installMode: "passive"`。
+  - Windows updater / 正式分发均用 nsis（`_x64-setup.exe`，**非 msi**），对齐 `windows.installMode: "passive"`。
 - **签名 secret（用户必配）**：CI 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`（+ 可选 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}`）。用户需把 `~/.tauri/claude-partner.updater.key` 的**内容**配到 repo 的 `TAURI_SIGNING_PRIVATE_KEY` secret（Settings → Secrets and variables → Actions），支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64（minisign 私钥文件原样），CI 会自动归一化。当前公钥用 `1ED3DE93` 这对（`~/.tauri/claude-partner.updater.key.pub`，**无密码**——CI 始终注入 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env，无密码时为空字符串，tauri signer 需要这个 env 存在才不报 "incorrect password"）。**未配 secret 时 CI 的「Prepare Tauri signing key」步骤直接 exit 1，CI 红。**
 - **发版流程**：1) `node scripts/bump-version.mjs <新版本号>`（同步源码清单与锁文件版本）；2) 提交；3) `git tag v<版本号> && git push origin v<版本号>` 触发 CI。
 
