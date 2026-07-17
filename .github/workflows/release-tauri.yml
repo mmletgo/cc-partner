@@ -185,9 +185,10 @@ jobs:
       - name: Build Tauri App (Windows)
         if: startsWith(matrix.platform, 'windows')
         shell: bash
-        # 不指定 --bundles：Tauri 2 bundle.targets=all 会同时产出 nsis(.exe) 和 wix(.msi)，
-        # updater 只用 nsis 的 .exe（下方 Prepare Windows Assets 只收集 nsis 产物）。
-        run: web/node_modules/.bin/tauri build
+        # 只打 nsis：updater 与正式分发均使用 *_x64-setup.exe。
+        # targets=all 会额外跑 WiX MSI；在打包 managed Chromium（browser-runtime，~100MB+）
+        # 时 light.exe 会失败且日志几乎无细节，阻断整平台。v0.6.x 发版也只发布 nsis。
+        run: web/node_modules/.bin/tauri build --bundles nsis
 
       - name: Build Tauri App (Linux)
         if: startsWith(matrix.platform, 'ubuntu')
