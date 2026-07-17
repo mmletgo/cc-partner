@@ -359,6 +359,7 @@ pub fn run() {
             screenshot_cmd::cancel_region_capture,
             permissions_cmd::check_permissions,
             permissions_cmd::request_permission,
+            permissions_cmd::get_app_identity,
             // M8 自动更新（5 命令，返回类型对齐前端 types.ts）
             updater_cmd::check_update,
             updater_cmd::download_update,

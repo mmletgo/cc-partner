@@ -8,7 +8,11 @@ import { Button, Card, Dialog } from '@/components/primitives';
 import { AppShell } from './components/layout/AppShell';
 import { RouteErrorBoundary } from './components/layout/RouteErrorBoundary';
 import { configApi } from './api/config';
-import { PERMISSION_ONBOARDED_KEY } from './hooks/usePermissions';
+import {
+  permissionOnboardedKey,
+  permissionSkippedKey,
+  type AppFlavor,
+} from './hooks/usePermissions';
 import { WorkbenchProjectsProvider } from './hooks/useWorkbenchProjects';
 import { WorkbenchDependencyProvider } from './hooks/useWorkbenchDependency';
 import { WorkbenchTerminalBuffersProvider } from './hooks/useWorkbenchTerminalBuffers';
@@ -186,15 +190,16 @@ function canListenToTauriEvents(): boolean {
  * OnboardingGuard - 首次启动权限引导守卫
  *
  * Business Logic（为什么需要这个组件）:
- *   仅在「首次启动且权限未全部就绪」时把用户导向 /welcome 一次。
- *   已完成引导（localStorage 标记）或四项权限已就绪则直接放行，避免每次启动重复打扰。
+ *   四项系统权限未齐时导向 /welcome；开发壳与发布版引导标记隔离。
+ *   「暂时跳过」与「已全部授权」分 key，缺权限时不得因旧 onboarded 标记绕过 Welcome。
  *
  * Code Logic（这个组件做什么）:
- *   - 读 PERMISSION_ONBOARDED_KEY，已标记 → pass
- *   - 否则并行查 TCC（check_permissions）+ 通知（checkNotificationGranted）：
- *     屏幕录制/辅助功能/输入监控/通知全部授权 → 写标记 + pass；否则 → redirect 到 /welcome
- *   - 查询失败 → pass（不阻塞用户）
- *   - hooks 在 early return 之前（React 规则：hooks 调用顺序不能条件化）
+ *   - resolve flavor（get_app_identity；失败当 release）→ flavor 专属 onboarded/skipped key
+ *   - 查 TCC + 通知：全部授权 → 写 onboarded、清 skipped → pass
+ *   - 未齐但 skipped=1 → pass（用户明确跳过）
+ *   - 否则 → redirect /welcome（含仅有旧 onboarded、未真正授权的情况）
+ *   - 权限查询失败 → pass（不永久卡死）
+ *   - hooks 在 early return 之前
  */
 function OnboardingGuard() {
   const [state, setState] = useState<GuardState>('loading');
@@ -202,31 +207,45 @@ function OnboardingGuard() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      if (localStorage.getItem(PERMISSION_ONBOARDED_KEY) === '1') {
-        if (!cancelled) setState('pass');
-        return;
+      let flavor: AppFlavor = 'release';
+      try {
+        const identity = await configApi.appIdentity();
+        if (identity.flavor === 'dev' || identity.flavor === 'release') {
+          flavor = identity.flavor;
+        }
+      } catch {
+        // 浏览器调试 / 旧后端：按 release key
       }
+      if (cancelled) return;
+
+      const onboardedKey = permissionOnboardedKey(flavor);
+      const skippedKey = permissionSkippedKey(flavor);
+
       try {
         const [s, notifyGranted] = await Promise.all([
           configApi.permissions(),
           checkNotificationGranted(),
         ]);
         if (cancelled) return;
-        // 与 usePermissions.isRequiredGranted 对齐：TCC 三项 + 通知均需授权
         const all =
           s.screenCapture.granted &&
           s.accessibility.granted &&
           s.inputMonitoring.granted &&
           notifyGranted;
         if (all) {
-          localStorage.setItem(PERMISSION_ONBOARDED_KEY, '1');
+          localStorage.setItem(onboardedKey, '1');
+          localStorage.removeItem(skippedKey);
           setState('pass');
-        } else {
-          // 首启不主动 request/openSettings（避免自动弹出系统设置面板打扰用户），
-          // 仅跳转 Welcome 页，由用户主动点「去设置」逐项引导授权。
-          if (!cancelled) setState('redirect');
+          return;
         }
+        if (localStorage.getItem(skippedKey) === '1') {
+          setState('pass');
+          return;
+        }
+        // 首启 / 未授权：不自动 openSettings，只进 Welcome
+        setState('redirect');
       } catch {
+        // 查询失败：若用户曾明确跳过则放行，否则也放行以免卡死（与历史行为一致）
         if (!cancelled) setState('pass');
       }
     })();

@@ -3,18 +3,28 @@
  * Welcome 权限页单元测试（权限与 LAN gate 分离）。
  *
  * Business Logic（为什么需要这个测试）:
- *   Welcome skip/continue 只写权限 onboarding 标记，不得绕过 LAN disclosure。
+ *   Welcome skip 写 skipped 标记（不写 onboarded）；continue 仅在全授权时可点。
+ *   开发壳/发布版 key 隔离，不得混用。
  *
  * Code Logic（这个测试做什么）:
- *   mock usePermissions；断言 skip 写入 PERMISSION_ONBOARDED_KEY。
+ *   mock usePermissions + configApi.appIdentity；断言 skip → permissionSkippedKey。
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
-import { PERMISSION_ONBOARDED_KEY } from '@/hooks/usePermissions';
+import {
+  PERMISSION_ONBOARDED_KEY,
+  permissionSkippedKey,
+} from '@/hooks/usePermissions';
+
+vi.mock('@/api/config', () => ({
+  configApi: {
+    appIdentity: vi.fn(async () => ({ bundleId: 'com.cc-partner.app', flavor: 'release' as const })),
+  },
+}));
 
 vi.mock('@/hooks/usePermissions', async () => {
   const actual = await vi.importActual<typeof import('@/hooks/usePermissions')>(
@@ -34,7 +44,9 @@ vi.mock('@/hooks/usePermissions', async () => {
       error: null,
       requesting: new Set(),
       allRequiredGranted: false,
+      allGranted: false,
       request: vi.fn(),
+      requestMissing: vi.fn(),
       refresh: vi.fn(),
     }),
   };
@@ -51,7 +63,7 @@ describe('Welcome', () => {
     cleanup();
   });
 
-  test('skip writes permission onboarded marker only', async () => {
+  test('skip writes permission skipped marker only', async () => {
     await i18n.changeLanguage('zh');
     render(
       <I18nextProvider i18n={i18n}>
@@ -60,7 +72,11 @@ describe('Welcome', () => {
         </MemoryRouter>
       </I18nextProvider>,
     );
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '暂时跳过' })).toBeTruthy();
+    });
     fireEvent.click(screen.getByRole('button', { name: '暂时跳过' }));
-    expect(localStorage.getItem(PERMISSION_ONBOARDED_KEY)).toBe('1');
+    expect(localStorage.getItem(permissionSkippedKey('release'))).toBe('1');
+    expect(localStorage.getItem(PERMISSION_ONBOARDED_KEY)).toBeNull();
   });
 });

@@ -3,21 +3,32 @@
 //! Business Logic（为什么需要这个模块）:
 //!     前端 `usePermissions` hook + `OnboardingGuard` 通过 invoke 调用本模块命令，
 //!     查询 macOS 屏幕录制/输入监控权限状态，并触发授权流程。对照 Python
-//!     `permissions.py` 四函数，封装为两个 IPC 命令。
+//!     `permissions.py` 四函数，封装为权限 IPC 命令。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `check_permissions`：无状态，直接调 `permissions::check_permissions`。
 //!     - `request_permission`：按 type 调 `permissions::request_permission`，返回 JSON。
+//!     - `get_app_identity`：返回 Bundle ID + flavor（dev/release），供引导存储隔离。
 
 use crate::error::AppError;
 use crate::permissions;
 
-/// 查询当前权限状态（screenCapture / inputMonitoring）。
+/// 查询当前权限状态（screenCapture / inputMonitoring / accessibility）。
 ///
 /// Business Logic: 前端权限状态徽标与 OnboardingGuard 初始化时调用。
 #[tauri::command]
 pub fn check_permissions() -> Result<permissions::PermissionsStatus, AppError> {
     Ok(permissions::check_permissions())
+}
+
+/// 查询当前应用身份（开发壳 vs 发布包）。
+///
+/// Business Logic: Welcome / OnboardingGuard 需按 flavor 隔离 onboarding 标记，
+///     避免开发版与发布版共用「已引导」状态。
+/// Code Logic: 委托 `permissions::app_identity`。
+#[tauri::command]
+pub fn get_app_identity() -> Result<permissions::AppIdentity, AppError> {
+    Ok(permissions::app_identity())
 }
 
 /// 请求指定类型权限（触发系统弹框 / 打开设置面板）。

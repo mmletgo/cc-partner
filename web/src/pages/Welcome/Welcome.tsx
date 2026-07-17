@@ -3,25 +3,31 @@
  *
  * Business Logic（为什么需要这个页面）:
  *   macOS 等系统要求桌面工具在首次使用前明确申请「屏幕录制 / 输入监控」等
- *   敏感权限，否则后续功能（截图、全局快捷键）会静默失败。Welcome 页在路由层
- *   独立于 AppShell（不进入主窗口），给首次使用的用户一个「先授权再用」的引导。
+ *   敏感权限，否则后续功能（截图、健康提醒）会静默失败。Welcome 页在路由层
+ *   独立于 AppShell，给首次使用的用户「先授权再用」的引导。开发壳与发布版
+ *   使用不同的 onboarding/skip localStorage key。
  *   首轮检查失败必须显示错误与重试，不得永久「检查中」。
  *
  * Code Logic（这个页面做什么）:
- *   - 全屏深色背景 + 居中主内容壳（`<main>`，非 modal/dialog）展示 logo/标题/权限卡/CTA
- *   - 权限卡由 mapPermissions 渲染；每张卡 onRequest={() => request(entry.type)}
- *   - usePermissions({ stopWhenGranted: true }) 基于可见性轮询；required 全授权后停轮询
- *   - 首轮 loading 仅短暂显示 checking；失败展示 error + 重新检查；有状态时刷新失败保留卡片
- *   - 「继续使用」/「暂时跳过」写入 PERMISSION_ONBOARDED_KEY 后导航首页
- *   - 所有 hooks 集中在组件顶部，early return 之前
+ *   - 解析 app flavor（get_app_identity）→ 专属 onboarded/skipped key
+ *   - 权限卡 mapPermissions；usePermissions({ stopWhenGranted: true })
+ *   - 「继续使用」：写 onboarded、清 skipped → /
+ *   - 「暂时跳过」：写 skipped（不写 onboarded）→ /
+ *   - 所有 hooks 在 early return 之前
  */
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives';
 import { PermissionCard } from '@/components/domain';
-import { usePermissions, PERMISSION_ONBOARDED_KEY } from '@/hooks/usePermissions';
+import { configApi } from '@/api/config';
+import {
+  usePermissions,
+  permissionOnboardedKey,
+  permissionSkippedKey,
+  type AppFlavor,
+} from '@/hooks/usePermissions';
 import { ArrowRightIcon } from '@/lib/icons';
 import { mapPermissions } from '@/lib/permissionEntries';
 import type { PermissionType } from '@/lib/types';
@@ -34,6 +40,7 @@ import styles from './Welcome.module.css';
 export function Welcome() {
   const { t } = useTranslation(['welcome', 'common']);
   const navigate = useNavigate();
+  const [flavor, setFlavor] = useState<AppFlavor>('release');
   const {
     status,
     loading,
@@ -46,6 +53,23 @@ export function Welcome() {
   } = usePermissions({
     stopWhenGranted: true,
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const identity = await configApi.appIdentity();
+        if (!cancelled && (identity.flavor === 'dev' || identity.flavor === 'release')) {
+          setFlavor(identity.flavor);
+        }
+      } catch {
+        // 浏览器/旧后端：保持 release
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -72,11 +96,33 @@ export function Welcome() {
     void refresh();
   }, [refresh]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   四项已齐时进入主界面，并记「已完成授权」而非「跳过」。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写 flavor 专属 onboarded，清 skipped，navigate /。
+   */
   const finishOnboarding = useCallback(() => {
-    localStorage.setItem(PERMISSION_ONBOARDED_KEY, '1');
+    const onboardedKey = permissionOnboardedKey(flavor);
+    const skippedKey = permissionSkippedKey(flavor);
+    localStorage.setItem(onboardedKey, '1');
+    localStorage.removeItem(skippedKey);
     navigate('/');
-  }, [navigate]);
+  }, [flavor, navigate]);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户可暂时跳过系统授权；与「已全部授权」分 key，便于之后仍可再引导。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写 flavor 专属 skipped，不写 onboarded，navigate /。
+   */
+  const skipOnboarding = useCallback(() => {
+    const skippedKey = permissionSkippedKey(flavor);
+    localStorage.setItem(skippedKey, '1');
+    navigate('/');
+  }, [flavor, navigate]);
   // hooks 全部在 early return 之前
   if (loading) {
     return (
@@ -103,7 +149,7 @@ export function Welcome() {
           </p>
           <footer className={styles.footer}>
             <div className={styles.actions}>
-              <Button variant="ghost" size="md" onClick={finishOnboarding}>
+              <Button variant="ghost" size="md" onClick={skipOnboarding}>
                 {t('welcome:skip')}
               </Button>
               <Button
@@ -166,7 +212,7 @@ export function Welcome() {
             >
               {t('welcome:recheck')}
             </Button>
-            <Button variant="ghost" size="md" onClick={finishOnboarding}>
+            <Button variant="ghost" size="md" onClick={skipOnboarding}>
               {t('welcome:skip')}
             </Button>
             <Button

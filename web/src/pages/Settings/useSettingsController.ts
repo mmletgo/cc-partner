@@ -17,7 +17,12 @@ import type { TFunction } from 'i18next';
 import { useSearchParams } from 'react-router-dom';
 import { backendApi } from '@/api/backend';
 import { workbenchApi } from '@/api/workbench';
-import { PERMISSION_ONBOARDED_KEY } from '@/hooks/usePermissions';
+import {
+  permissionOnboardedKey,
+  permissionSkippedKey,
+  type AppFlavor,
+} from '@/hooks/usePermissions';
+import { configApi } from '@/api/config';
 import { pendingWrites } from '@/lib/pendingWrites';
 import {
   installButtonMode,
@@ -438,7 +443,22 @@ export function useSettingsController(): UseSettingsControllerResult {
     try {
       await backendApi.resetOnboardingGates();
       try {
-        localStorage.removeItem(PERMISSION_ONBOARDED_KEY);
+        let flavor: AppFlavor = 'release';
+        try {
+          const identity = await configApi.appIdentity();
+          if (identity.flavor === 'dev' || identity.flavor === 'release') {
+            flavor = identity.flavor;
+          }
+        } catch {
+          // 旧后端：清 release key
+        }
+        localStorage.removeItem(permissionOnboardedKey(flavor));
+        localStorage.removeItem(permissionSkippedKey(flavor));
+        // 兼容清旧无后缀 key / 另一 flavor 残留
+        localStorage.removeItem(permissionOnboardedKey('release'));
+        localStorage.removeItem(permissionSkippedKey('release'));
+        localStorage.removeItem(permissionOnboardedKey('dev'));
+        localStorage.removeItem(permissionSkippedKey('dev'));
       } catch {
         // WebView storage 异常不阻断退出：后端 bootstrap 已重置
       }

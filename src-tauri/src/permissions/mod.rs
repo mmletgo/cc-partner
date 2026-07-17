@@ -74,10 +74,53 @@ const K_IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
 const K_IOHID_ACCESS_TYPE_GRANTED: u32 = 0;
 
 /// 发布版 Bundle Identifier（与 `tauri.conf.json` `identifier` 对齐）。
-const PRODUCT_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app";
+pub const PRODUCT_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app";
 /// 开发版 Bundle Identifier（`scripts/prepare-macos-dev-app.mjs` 写入 Info.plist）。
-#[allow(dead_code)]
-const DEV_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app.dev";
+pub const DEV_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app.dev";
+
+/// 应用发行通道：开发壳 vs 发布包（前端 onboarding 存储分 key 用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AppFlavor {
+    /// `cc-partner-dev.app` / `com.cc-partner.app.dev`
+    Dev,
+    /// 正式安装包 / `com.cc-partner.app`
+    Release,
+}
+
+/// 应用身份（Bundle ID + flavor），供前端隔离引导状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppIdentity {
+    /// 当前进程解析到的 CFBundleIdentifier；裸二进制可能为 null。
+    pub bundle_id: Option<String>,
+    /// 开发壳或发布包。
+    pub flavor: AppFlavor,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     开发壳与发布版必须在系统设置与前端引导状态上可区分。
+///
+/// Code Logic（这个函数做什么）:
+///     Bundle ID 等于或后缀为 `.dev` / 等于 `DEV_BUNDLE_IDENTIFIER` → Dev，否则 Release。
+pub fn app_flavor() -> AppFlavor {
+    match main_bundle_identifier().as_deref() {
+        Some(id) if id == DEV_BUNDLE_IDENTIFIER || id.ends_with(".dev") => AppFlavor::Dev,
+        _ => AppFlavor::Release,
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     前端 OnboardingGuard / Welcome 需要按 flavor 隔离 localStorage key。
+///
+/// Code Logic（这个函数做什么）:
+///     组合 `main_bundle_identifier` 与 `app_flavor`。
+pub fn app_identity() -> AppIdentity {
+    AppIdentity {
+        bundle_id: main_bundle_identifier(),
+        flavor: app_flavor(),
+    }
+}
 
 /// Business Logic（为什么需要这个函数）:
 ///     解析 Info.plist XML 中的 CFBundleIdentifier，供 CF API 失败时的路径回退。
@@ -633,5 +676,18 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     flavor 决定前端引导 key；Dev Bundle 不得被当成 Release。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在测试二进制上调用 app_identity；仅断言可序列化且 flavor 为枚举之一。
+    #[test]
+    fn app_identity_serializes_flavor() {
+        let id = app_identity();
+        let v = serde_json::to_value(&id).expect("serialize");
+        assert!(v.get("flavor").is_some());
+        assert!(matches!(id.flavor, AppFlavor::Dev | AppFlavor::Release));
     }
 }

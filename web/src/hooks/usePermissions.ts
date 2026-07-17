@@ -21,8 +21,35 @@ import { checkNotificationGranted, requestNotificationPermission } from '@/lib/n
 import type { PermissionType, PermissionsStatus } from '@/lib/types';
 import { useVisibilityPolling } from './useVisibilityPolling';
 
-/** localStorage key：标记已完成首次权限引导，避免每次启动都跳 Welcome */
+/** 发布版 localStorage key：标记权限引导已完成（全部 required 已授权）。 */
 export const PERMISSION_ONBOARDED_KEY = 'cp-permission-onboarded';
+/** 发布版：用户点了「暂时跳过」。 */
+export const PERMISSION_SKIPPED_KEY = 'cp-permission-skipped';
+
+/** 应用发行通道（与 Rust `AppFlavor` 对齐）。 */
+export type AppFlavor = 'dev' | 'release';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   开发壳与发布版必须使用不同的 onboarding 标记，避免互相跳过 Welcome。
+ *
+ * Code Logic（这个函数做什么）:
+ *   release → `cp-permission-onboarded`；dev → `cp-permission-onboarded.dev`。
+ */
+export function permissionOnboardedKey(flavor: AppFlavor = 'release'): string {
+  return flavor === 'dev' ? `${PERMISSION_ONBOARDED_KEY}.dev` : PERMISSION_ONBOARDED_KEY;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   「暂时跳过」与「已全部授权」分开记账，缺权限时仍应进 Welcome，除非用户明确跳过。
+ *
+ * Code Logic（这个函数做什么）:
+ *   release → `cp-permission-skipped`；dev → `cp-permission-skipped.dev`。
+ */
+export function permissionSkippedKey(flavor: AppFlavor = 'release'): string {
+  return flavor === 'dev' ? `${PERMISSION_SKIPPED_KEY}.dev` : PERMISSION_SKIPPED_KEY;
+}
 
 const POLL_INTERVAL_MS = 2000;
 

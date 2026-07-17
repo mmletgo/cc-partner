@@ -115,6 +115,16 @@ export const configApi = {
     invokeDecoded('check_permissions', undefined, permissionsStatusDecoder),
 
   /**
+   * Business Logic（为什么需要这个函数）:
+   *   Welcome / OnboardingGuard 按 dev|release 隔离引导 localStorage。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invoke get_app_identity → { bundleId, flavor }。
+   */
+  appIdentity: () =>
+    invoke<{ bundleId: string | null; flavor: 'dev' | 'release' }>('get_app_identity'),
+
+  /**
    * 触发权限请求（M7 实现）。
    * @param openSettings 是否打开系统设置面板兜底；缺省 true。启动主动引导时按类型差异化传：
    *   screenCapture 传 false（仅弹系统框）、inputMonitoring 传 true（它只能靠开面板引导）。
