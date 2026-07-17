@@ -408,5 +408,15 @@
     "clearCancel": "取消",
     "clearSuccess": "已清除 {{count}} 条历史",
     "clearFailed": "清除失败"
+  },
+  "onboardingReset": {
+    "title": "首次启动引导",
+    "helper": "清除 LAN 风险披露确认与权限引导完成标记，下次启动将重新走首次流程。不删除 Prompt、速记本、Claude Code 相关内容。",
+    "button": "重置首次启动引导",
+    "confirmTitle": "重置首次启动引导？",
+    "confirmBody": "将清除 LAN 风险披露确认与权限引导完成标记，停止本机后台服务，并退出应用。不会删除 Prompt、速记本、Claude Code 相关内容或设备配置。系统隐私权限（屏幕录制等）无法由应用自动撤销，如需关闭请到「系统设置 → 隐私与安全」。确认后应用将退出，再次打开即可看到首次引导。",
+    "confirm": "重置并退出",
+    "cancel": "取消",
+    "failed": "重置失败"
   }
 }

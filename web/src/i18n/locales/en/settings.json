@@ -408,5 +408,15 @@
     "clearCancel": "Cancel",
     "clearSuccess": "Cleared {{count}} rows",
     "clearFailed": "Clear failed"
+  },
+  "onboardingReset": {
+    "title": "First-launch onboarding",
+    "helper": "Clear LAN risk disclosure acknowledgement and permission onboarding marker so the next launch repeats the first-run flow. Prompt, scratchpad, and Claude Code content are kept.",
+    "button": "Reset first-launch onboarding",
+    "confirmTitle": "Reset first-launch onboarding?",
+    "confirmBody": "This clears LAN risk disclosure acknowledgement and the permission onboarding marker, stops the local backend service, and quits the app. Prompt, scratchpad, Claude Code content, and device settings are not deleted. macOS privacy permissions (Screen Recording, etc.) cannot be revoked by the app — turn them off in System Settings → Privacy & Security if needed. After confirmation the app exits; reopen it to see the first-run guides.",
+    "confirm": "Reset and quit",
+    "cancel": "Cancel",
+    "failed": "Reset failed"
   }
 }

@@ -50,6 +50,12 @@ export interface SettingsGeneralPanelProps {
   onOpenAgentLedgerClearDialog: () => void;
   onCloseAgentLedgerClearDialog: () => void;
   onConfirmClearAgentLedger: () => void;
+  onboardingResetDialogOpen: boolean;
+  onboardingResetting: boolean;
+  onboardingResetError: string | null;
+  onOpenOnboardingResetDialog: () => void;
+  onCloseOnboardingResetDialog: () => void;
+  onConfirmOnboardingReset: () => void;
 }
 
 /**
@@ -106,9 +112,16 @@ export function SettingsGeneralPanel({
   onOpenAgentLedgerClearDialog,
   onCloseAgentLedgerClearDialog,
   onConfirmClearAgentLedger,
+  onboardingResetDialogOpen,
+  onboardingResetting,
+  onboardingResetError,
+  onOpenOnboardingResetDialog,
+  onCloseOnboardingResetDialog,
+  onConfirmOnboardingReset,
 }: SettingsGeneralPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
   const clearTitleId = 'settings-agent-ledger-clear-title';
+  const onboardingResetTitleId = 'settings-onboarding-reset-title';
 
   return (
     <>
@@ -221,9 +234,33 @@ export function SettingsGeneralPanel({
       variant="danger"
       size="sm"
       onClick={onOpenAgentLedgerClearDialog}
-      disabled={agentLedgerClearing}
+      disabled={agentLedgerClearing || onboardingResetting}
     >
       {t('settings:agentLedger.clear')}
+    </Button>
+  </Card.Body>
+</Card>
+
+{/* Card 4: 重置首次启动引导（LAN 披露 + 权限 onboarding 标记） */}
+<Card variant="flat" padding="md">
+  <Card.Header>
+    <h2 className={styles.sectionTitle}>{t('settings:onboardingReset.title')}</h2>
+  </Card.Header>
+  <Card.Body padding="md">
+    <p className={styles.helper}>{t('settings:onboardingReset.helper')}</p>
+    {onboardingResetError ? (
+      <p className={styles.updateError} role="alert">
+        {onboardingResetError}
+      </p>
+    ) : null}
+    <Button
+      variant="danger"
+      size="sm"
+      onClick={onOpenOnboardingResetDialog}
+      disabled={onboardingResetting || agentLedgerClearing}
+      data-testid="settings-onboarding-reset"
+    >
+      {t('settings:onboardingReset.button')}
     </Button>
   </Card.Body>
 </Card>
@@ -265,6 +302,8 @@ export function SettingsGeneralPanel({
   open={agentLedgerClearDialogOpen}
   titleId={clearTitleId}
   onClose={onCloseAgentLedgerClearDialog}
+  closeOnEscape={!agentLedgerClearing}
+  closeOnBackdrop={!agentLedgerClearing}
 >
   <div className={styles.tabPanel}>
     <h3 id={clearTitleId} className={styles.sectionTitle}>
@@ -282,6 +321,44 @@ export function SettingsGeneralPanel({
         disabled={agentLedgerClearing}
       >
         {t('settings:agentLedger.clearConfirm')}
+      </Button>
+    </div>
+  </div>
+</Dialog>
+
+<Dialog
+  open={onboardingResetDialogOpen}
+  titleId={onboardingResetTitleId}
+  onClose={onCloseOnboardingResetDialog}
+  closeOnEscape={!onboardingResetting}
+  closeOnBackdrop={!onboardingResetting}
+>
+  <div className={styles.tabPanel}>
+    <h3 id={onboardingResetTitleId} className={styles.sectionTitle}>
+      {t('settings:onboardingReset.confirmTitle')}
+    </h3>
+    <p className={styles.helper}>{t('settings:onboardingReset.confirmBody')}</p>
+    {onboardingResetError ? (
+      <p className={styles.updateError} role="alert">
+        {onboardingResetError}
+      </p>
+    ) : null}
+    <div className={styles.footerActions}>
+      <Button
+        variant="ghost"
+        onClick={onCloseOnboardingResetDialog}
+        disabled={onboardingResetting}
+      >
+        {t('settings:onboardingReset.cancel')}
+      </Button>
+      <Button
+        variant="danger"
+        onClick={onConfirmOnboardingReset}
+        loading={onboardingResetting}
+        disabled={onboardingResetting}
+        data-testid="settings-onboarding-reset-confirm"
+      >
+        {t('settings:onboardingReset.confirm')}
       </Button>
     </div>
   </div>

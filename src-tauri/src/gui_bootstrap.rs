@@ -165,6 +165,19 @@ pub fn is_current_lan_disclosure_acknowledged() -> Result<bool, AppError> {
     Ok(is_acknowledged_for_version(&state, LAN_DISCLOSURE_VERSION))
 }
 
+/// 重置 LAN 披露确认为未确认态。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在设置中「重置首次启动引导」时，需清除 LAN 风险确认，使下次启动重新进入披露 gate。
+///
+/// Code Logic（这个函数做什么）:
+///     原子写入 `GuiBootstrapState::default()`（version=0、无 acknowledged_at），不触碰 data.db。
+pub fn reset_lan_disclosure() -> Result<GuiBootstrapState, AppError> {
+    let state = GuiBootstrapState::default();
+    save_gui_bootstrap(&state)?;
+    Ok(state)
+}
+
 /// 纯函数：给定状态与目标版本是否已确认。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -235,5 +248,46 @@ mod tests {
         assert_eq!(obj.len(), 2);
         assert!(obj.contains_key("lanDisclosureVersion"));
         assert!(obj.contains_key("acknowledgedAt"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     重置后必须回到未确认态，否则「重置首次启动引导」无效。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入已确认 state → default 覆盖 → is_acknowledged 为 false。
+    #[test]
+    fn reset_state_is_unacknowledged_default() {
+        let acked = GuiBootstrapState {
+            lan_disclosure_version: LAN_DISCLOSURE_VERSION,
+            acknowledged_at: Some("2026-07-15T00:00:00Z".to_string()),
+        };
+        assert!(is_acknowledged_for_version(&acked, LAN_DISCLOSURE_VERSION));
+        let reset = GuiBootstrapState::default();
+        assert_eq!(reset.lan_disclosure_version, 0);
+        assert!(reset.acknowledged_at.is_none());
+        assert!(!is_acknowledged_for_version(&reset, LAN_DISCLOSURE_VERSION));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     路径级重置必须持久化 default，供下次启动读取。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写已确认 → save default → load 断言未确认。
+    #[test]
+    fn save_default_clears_acknowledgement_on_disk() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gui-bootstrap.json");
+        save_gui_bootstrap_to_path(
+            &path,
+            &GuiBootstrapState {
+                lan_disclosure_version: LAN_DISCLOSURE_VERSION,
+                acknowledged_at: Some("2026-07-15T00:00:00Z".to_string()),
+            },
+        )
+        .unwrap();
+        save_gui_bootstrap_to_path(&path, &GuiBootstrapState::default()).unwrap();
+        let loaded = load_gui_bootstrap_from_path(&path).unwrap();
+        assert_eq!(loaded, GuiBootstrapState::default());
+        assert!(!is_acknowledged_for_version(&loaded, LAN_DISCLOSURE_VERSION));
     }
 }

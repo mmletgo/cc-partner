@@ -64,4 +64,21 @@ export const backendApi = {
    */
   acknowledgeLanDisclosureAndStartBackend: () =>
     invoke<LanDisclosureStartResult>('acknowledge_lan_disclosure_and_start_backend'),
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   设置页「重置首次启动引导」需清 LAN 披露确认并停止 backend。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invoke reset_onboarding_gates → ResetOnboardingGatesResult。
+   */
+  resetOnboardingGates: () =>
+    invoke<ResetOnboardingGatesResult>('reset_onboarding_gates'),
+};
+
+/** 重置 onboarding 门闩结果（camelCase，对齐 Rust）。 */
+export type ResetOnboardingGatesResult = {
+  ok: boolean;
+  lanDisclosureReset: boolean;
+  backendStopped: boolean;
 };

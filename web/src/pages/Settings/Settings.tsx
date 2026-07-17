@@ -248,6 +248,12 @@ export function Settings(): ReactElement {
               onOpenAgentLedgerClearDialog={ctrl.openAgentLedgerClearDialog}
               onCloseAgentLedgerClearDialog={ctrl.closeAgentLedgerClearDialog}
               onConfirmClearAgentLedger={() => void ctrl.confirmClearAgentLedger()}
+              onboardingResetDialogOpen={ctrl.onboardingResetDialogOpen}
+              onboardingResetting={ctrl.onboardingResetting}
+              onboardingResetError={ctrl.onboardingResetError}
+              onOpenOnboardingResetDialog={ctrl.openOnboardingResetDialog}
+              onCloseOnboardingResetDialog={ctrl.closeOnboardingResetDialog}
+              onConfirmOnboardingReset={() => void ctrl.confirmOnboardingReset()}
             />
           </div>
         ) : null}

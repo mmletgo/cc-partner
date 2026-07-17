@@ -314,6 +314,7 @@ pub fn run() {
             backend_cmd::open_backend_log_dir,
             gui_bootstrap_cmd::get_lan_disclosure_status,
             gui_bootstrap_cmd::acknowledge_lan_disclosure_and_start_backend,
+            gui_bootstrap_cmd::reset_onboarding_gates,
             prompt_cmd::list_prompts,
             prompt_cmd::get_prompt,
             prompt_cmd::create_prompt,

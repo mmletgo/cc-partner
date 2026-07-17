@@ -35,6 +35,11 @@ describe('backendApi', () => {
     expect(invokeMock).toHaveBeenCalledWith('acknowledge_lan_disclosure_and_start_backend');
   });
 
+  test('resetOnboardingGates invokes reset_onboarding_gates', async () => {
+    await backendApi.resetOnboardingGates();
+    expect(invokeMock).toHaveBeenCalledWith('reset_onboarding_gates');
+  });
+
   test('legacy lifecycle commands remain', async () => {
     await backendApi.status();
     await backendApi.start();

@@ -15,7 +15,10 @@ import type { KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { useSearchParams } from 'react-router-dom';
+import { backendApi } from '@/api/backend';
 import { workbenchApi } from '@/api/workbench';
+import { PERMISSION_ONBOARDED_KEY } from '@/hooks/usePermissions';
+import { pendingWrites } from '@/lib/pendingWrites';
 import {
   installButtonMode,
   parseSettingsTabFromSearch,
@@ -118,6 +121,12 @@ export interface UseSettingsControllerResult {
   openAgentLedgerClearDialog: () => void;
   closeAgentLedgerClearDialog: () => void;
   confirmClearAgentLedger: () => Promise<void>;
+  onboardingResetDialogOpen: boolean;
+  onboardingResetting: boolean;
+  onboardingResetError: string | null;
+  openOnboardingResetDialog: () => void;
+  closeOnboardingResetDialog: () => void;
+  confirmOnboardingReset: () => Promise<void>;
 
   // dependencies / permissions
   permStatus: import('@/lib/types').PermissionsStatus | null;
@@ -387,6 +396,65 @@ export function useSettingsController(): UseSettingsControllerResult {
     }
   }, [t]);
 
+  const [onboardingResetDialogOpen, setOnboardingResetDialogOpen] = useState(false);
+  const [onboardingResetting, setOnboardingResetting] = useState(false);
+  const [onboardingResetError, setOnboardingResetError] = useState<string | null>(null);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   打开「重置首次启动引导」确认 Dialog，避免误操作退出。
+   *
+   * Code Logic（这个函数做什么）:
+   *   open=true 并清空上次错误。
+   */
+  const openOnboardingResetDialog = useCallback(() => {
+    setOnboardingResetDialogOpen(true);
+    setOnboardingResetError(null);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   取消重置。
+   *
+   * Code Logic（这个函数做什么）:
+   *   open=false（busy 时由 Dialog 禁用关闭）。
+   */
+  const closeOnboardingResetDialog = useCallback(() => {
+    if (onboardingResetting) return;
+    setOnboardingResetDialogOpen(false);
+  }, [onboardingResetting]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户确认后清 LAN 披露 + 权限 onboarding 标记，停止 backend 并退出 GUI。
+   *
+   * Code Logic（这个函数做什么）:
+   *   resetOnboardingGates → removeItem(PERMISSION_ONBOARDED_KEY) →
+   *   best-effort pendingWrites.flushAll → exitGui；失败不 exit。
+   */
+  const confirmOnboardingReset = useCallback(async () => {
+    setOnboardingResetting(true);
+    setOnboardingResetError(null);
+    try {
+      await backendApi.resetOnboardingGates();
+      try {
+        localStorage.removeItem(PERMISSION_ONBOARDED_KEY);
+      } catch {
+        // WebView storage 异常不阻断退出：后端 bootstrap 已重置
+      }
+      try {
+        await pendingWrites.flushAll();
+      } catch {
+        // flush 失败不阻断退出（与规格 best-effort 一致）
+      }
+      await backendApi.exitGui();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOnboardingResetError(message || t('settings:onboardingReset.failed'));
+      setOnboardingResetting(false);
+    }
+  }, [t]);
+
   return {
     t,
     loading: resources.loading,
@@ -422,6 +490,12 @@ export function useSettingsController(): UseSettingsControllerResult {
     openAgentLedgerClearDialog,
     closeAgentLedgerClearDialog,
     confirmClearAgentLedger,
+    onboardingResetDialogOpen,
+    onboardingResetting,
+    onboardingResetError,
+    openOnboardingResetDialog,
+    closeOnboardingResetDialog,
+    confirmOnboardingReset,
 
     permStatus: updatePermissions.permStatus,
     permLoading: updatePermissions.permLoading,
