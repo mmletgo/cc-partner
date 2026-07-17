@@ -804,11 +804,11 @@
     }
   },
   "agentLedger": {
-    "title": "Agent 历史",
-    "open": "Agent 历史",
+    "title": "Agent 使用统计",
+    "open": "Agent 使用统计",
     "close": "关闭",
-    "subtitle": "自动产生的 metadata-only 记录；不保存 Prompt 或回复正文。",
-    "localOnly": "仅本机项目可查看明细；远端请在 owning 设备查看。",
+    "subtitle": "自动汇总本项目 Agent 的运行次数、耗时与 token/费用。只记录统计信息，不保存 Prompt 或回复正文。",
+    "localOnly": "明细仅本机项目可查看；远端项目请到该项目所在设备查看。",
     "summaryTitle": "用量摘要",
     "listTitle": "最近会话",
     "sessions": "会话",
@@ -819,7 +819,7 @@
     "outputTokens": "输出 tokens",
     "unavailable": "未提供",
     "costUnavailable": "费用未提供",
-    "empty": "暂无历史记录",
+    "empty": "暂无使用统计",
     "loadMore": "加载更多",
     "coverage": {
       "complete": "完整",

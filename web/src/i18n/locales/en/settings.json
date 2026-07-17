@@ -399,14 +399,14 @@
     "pickCancelled": "Cancelled"
   },
   "agentLedger": {
-    "title": "Agent history data",
-    "helper": "Clear local automatic Agent metadata history. Runtime sessions, tasks, and sync data are not deleted.",
-    "clear": "Clear Agent history",
-    "clearConfirmTitle": "Clear Agent history?",
-    "clearConfirmBody": "Deletes all local Agent metadata history rows. Runtime, tasks, and sync data are unchanged. This cannot be undone.",
+    "title": "Agent usage stats",
+    "helper": "Clear locally recorded Agent usage stats (session counts, duration, tokens/cost, etc.). View them from the Workbench header button “Agent usage stats”. Does not delete terminal sessions, automation tasks, prompts, conversation content, or sync data.",
+    "clear": "Clear usage stats",
+    "clearConfirmTitle": "Clear Agent usage stats?",
+    "clearConfirmBody": "Deletes all local Agent usage stats permanently. Terminal sessions, automation tasks, prompts, and conversation content are unchanged.",
     "clearConfirm": "Clear",
     "clearCancel": "Cancel",
-    "clearSuccess": "Cleared {{count}} rows",
+    "clearSuccess": "Cleared {{count}} usage records",
     "clearFailed": "Clear failed"
   },
   "onboardingReset": {

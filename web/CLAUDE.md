@@ -145,11 +145,12 @@
 - **AST 合同 / 对等**: `npm run check:i18n` 禁止生产 TSX 硬编码 letterful JSXText 与 title/aria-label/placeholder/alt 字面量；`npm test -- localeParity` 要求 zh/en namespace 与 leaf key（复数后缀归一化后）对等；新增 key 必须中英同提交
 - **新增页面文案**: 在 `src/i18n/locales/{en,zh}/<页ns>.json` 加 key + 组件 `useTranslation(['<页ns>','common'])` + `t('<页ns>:key')`；改完 `npm run check:i18n && npm test -- localeParity && npm run build`（tsc 校验 key）
 
-### Agent Metadata Ledger UI (A9)
+### Agent 使用统计 UI（Agent Metadata Ledger / A9）
 
+- 用户文案统一为「Agent 使用统计 / Agent usage stats」（不再写 metadata history）。
 - 类型/schema：`web/src/lib/types/agentLedger.ts`、`web/src/lib/schemas/agentLedger.ts`。
 - API：`workbenchApi.agentLedger.{list,summarize,clear}`。
-- 本机历史：`AgentLedgerDrawer` + `useWorkbenchProjectController` 拥有加载；views 不 import `@/api/*`。
+- **查看入口**：Workbench 标题区 `AgentLedgerWorkbenchChrome` 按钮 → `AgentLedgerDrawer` 二级抽屉（用量摘要 + 最近会话列表）；加载态由 `useWorkbenchProjectController` 拥有，views 不 import `@/api/*`。
 - Fleet：`WorkbenchFleetView` 展示 7d Agent activity（unsupported/unavailable 不显示 0 tokens）。
-- Settings 常规 tab：一键清除 + Dialog 确认。
+- Settings 常规 tab：一键清除使用统计 + Dialog 确认；helper 文案需说明入口在工作台、以及不会删终端/任务/Prompt/对话。
 

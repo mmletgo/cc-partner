@@ -811,11 +811,11 @@
     }
   },
   "agentLedger": {
-    "title": "Agent history",
-    "open": "Agent history",
+    "title": "Agent usage stats",
+    "open": "Agent usage stats",
     "close": "Close",
-    "subtitle": "Automatic metadata-only records. Prompts and replies are not stored.",
-    "localOnly": "Detailed history is local-only. Use the owning device for remote projects.",
+    "subtitle": "Automatic summary of Agent runs for this project: counts, duration, and tokens/cost. Stats only — prompts and replies are not stored.",
+    "localOnly": "Detailed stats are available for local projects only. For remote projects, open them on the owning device.",
     "summaryTitle": "Usage summary",
     "listTitle": "Recent sessions",
     "sessions": "Sessions",
@@ -826,7 +826,7 @@
     "outputTokens": "Output tokens",
     "unavailable": "Not provided",
     "costUnavailable": "Cost not provided",
-    "empty": "No history yet",
+    "empty": "No usage stats yet",
     "loadMore": "Load more",
     "coverage": {
       "complete": "Complete",
