@@ -492,12 +492,39 @@ where
     {
         let current = context.orchestrator_repo().get_task(&task.id).await?;
         if current.status != OrchestratorTaskStatus::Delivering {
+            if let Err(err) = delivery_guard.release_db_lease_now().await {
+                tracing::warn!(task_id = %task.id, "release delivery lease early: {err}");
+            }
             return Ok(DeliverySummary {
                 task: OrchestratorTaskDto::from(current),
                 stages: Vec::new(),
             });
         }
     }
+    // 包住整条 pipeline：无论 Ok/Err/early return，结束时 await 释放 DB 租约（不依赖 Drop spawn）。
+    let pipeline_result =
+        deliver_task_pipeline(context, &task, expected_review_digest, &mut delivery_guard).await;
+    if let Err(err) = delivery_guard.release_db_lease_now().await {
+        tracing::warn!(task_id = %task.id, "release delivery lease after pipeline: {err}");
+    }
+    pipeline_result
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     将交付副作用与租约生命周期分离：pipeline 内可多处 early return，外层统一 await 释租约。
+///
+/// Code Logic（这个函数做什么）:
+///     执行原 deliver_task 的 Git/evidence/Done 主体；`delivery_guard` 仅用于持锁期间，
+///     不在此函数内释放 DB 租约。
+async fn deliver_task_pipeline<C>(
+    context: &C,
+    task: &crate::orchestrator::models::OrchestratorTaskRow,
+    expected_review_digest: Option<&str>,
+    _delivery_guard: &mut crate::orchestrator::delivery_lock::DeliveryTaskGuard,
+) -> Result<DeliverySummary, AppError>
+where
+    C: DeliveryContext,
+{
     let mut stages = Vec::new();
     let config = context.orchestrator_config();
 
@@ -2797,9 +2824,10 @@ mod tests {
         let harness = setup_delivery_harness().await;
         let (_dir, origin, repo, task_worktree) = setup_git_delivery_repo();
         fs::write(task_worktree.join("task.txt"), "bound content\n").expect("write bound");
-        let expected =
-            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
-                .expect("capture digest");
+        // 与 verifier 同源：freeze_review_snapshot 产出 v2 tree-bound digest。
+        let expected = crate::orchestrator::review_diff::freeze_review_snapshot(&task_worktree)
+            .expect("freeze capture digest")
+            .review_digest;
         let task_id = insert_delivery_task(&harness, &repo, &task_worktree).await;
 
         let delivered = deliver_task(&harness, &task_id, Some(expected.as_str()))

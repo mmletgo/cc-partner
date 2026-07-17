@@ -1600,8 +1600,7 @@ impl OrchestratorRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Abort/Cancel 在状态 CAS 前必须确认 owner 无未过期 delivery 租约，
-    ///     否则可与跨进程交付 merge/push 竞态。
+    ///     只读探测是否存在未过期 delivery 租约（测试/诊断）；生产 abort/cancel 应走原子 CAS。
     ///
     /// Code Logic（这个函数做什么）:
     ///     查询 lease 且 expires_at > now → conflict；无行或已过期 → Ok。
@@ -1623,76 +1622,54 @@ impl OrchestratorRepo {
         Ok(())
     }
 
-    pub async fn cancel_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+    /// Business Logic（为什么需要这个函数）:
+    ///     abort/cancel 在「先查 lease 再 UPDATE 状态」之间会与 delivery 抢租约竞态；
+    ///     必须在同一 write lease 事务内用 NOT EXISTS 条件更新，消除 TOCTOU。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在 `with_shared_write_lease` 内：`UPDATE tasks … WHERE id=? AND status!=done
+    ///     AND NOT EXISTS (active delivery lease)`；rows=1 成功；否则区分 Done / 活跃租约 / 幂等。
+    async fn terminal_abort_if_not_delivering_leased(
+        &self,
+        task_id: &str,
+        canceled_lane: bool,
+    ) -> Result<OrchestratorTaskRow, AppError> {
         if crate::orchestrator::delivery_lock::is_delivery_task_in_progress(task_id) {
             return Err(AppError::conflict(
-                "任务正在交付中，不能取消；请等待交付结束后再试",
+                "任务正在交付中，不能终止或取消；请等待交付结束后再试",
             ));
         }
-        self.assert_no_delivery_lease(task_id).await?;
         let now = Utc::now().to_rfc3339();
+        let split_state = if canceled_lane {
+            SplitTaskState {
+                workflow_state: OrchestratorWorkflowState::Canceled,
+                run_state: OrchestratorRunState::Idle,
+            }
+        } else {
+            SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Aborted)
+        };
         let result = with_shared_write_lease(&self.gate, async {
+            // 同事务：状态 CAS 与「无活跃 delivery 租约」原子绑定。
             sqlx::query(
                 "UPDATE orchestrator_tasks \
                  SET status = ?, workflow_state = ?, run_state = ?, attempt_phase = ?, \
                      blocked_reason = ?, updated_at = ? \
-                 WHERE id = ? AND status != ?",
-            )
-            .bind(OrchestratorTaskStatus::Aborted.as_str())
-            .bind(OrchestratorWorkflowState::Canceled.as_str())
-            .bind(OrchestratorRunState::Idle.as_str())
-            .bind(Option::<&str>::None)
-            .bind(Option::<&str>::None)
-            .bind(now)
-            .bind(task_id)
-            .bind(OrchestratorTaskStatus::Done.as_str())
-            .execute(&self.pool)
-            .await
-        })
-        .await?;
-
-        if result.rows_affected() == 1 {
-            return self.get_task(task_id).await;
-        }
-
-        let current = self.get_task(task_id).await?;
-        if current.status == OrchestratorTaskStatus::Done {
-            return Err(AppError::conflict("任务已完成，不能取消"));
-        }
-        Ok(current)
-    }
-
-    /// Business Logic（为什么需要这个函数）:
-    ///     Abort 路径不得把已 Done 任务覆写为 Aborted，否则交付 cleanup 与终态语义被破坏。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     `UPDATE ... WHERE id=? AND status NOT IN ('done')` 写 Aborted 与对应 split state；
-    ///     rows=0 时若当前 Done → conflict；否则返回当前行（已 Aborted 幂等）。
-    pub async fn abort_task_preserving_done(
-        &self,
-        task_id: &str,
-    ) -> Result<OrchestratorTaskRow, AppError> {
-        if crate::orchestrator::delivery_lock::is_delivery_task_in_progress(task_id) {
-            return Err(AppError::conflict(
-                "任务正在交付中，不能终止；请等待交付结束后再试",
-            ));
-        }
-        self.assert_no_delivery_lease(task_id).await?;
-        let now = Utc::now().to_rfc3339();
-        let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Aborted);
-        let result = with_shared_write_lease(&self.gate, async {
-            sqlx::query(
-                "UPDATE orchestrator_tasks \
-                 SET status = ?, workflow_state = ?, run_state = ?, blocked_reason = ?, updated_at = ? \
-                 WHERE id = ? AND status != ?",
+                 WHERE id = ? AND status != ? \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM orchestrator_task_leases \
+                     WHERE task_id = ? AND expires_at > ? \
+                   )",
             )
             .bind(OrchestratorTaskStatus::Aborted.as_str())
             .bind(split_state.workflow_state.as_str())
             .bind(split_state.run_state.as_str())
             .bind(Option::<&str>::None)
-            .bind(now)
+            .bind(Option::<&str>::None)
+            .bind(&now)
             .bind(task_id)
             .bind(OrchestratorTaskStatus::Done.as_str())
+            .bind(task_id)
+            .bind(&now)
             .execute(&self.pool)
             .await
         })
@@ -1704,9 +1681,52 @@ impl OrchestratorRepo {
 
         let current = self.get_task(task_id).await?;
         if current.status == OrchestratorTaskStatus::Done {
-            return Err(AppError::conflict("任务已完成，不能终止"));
+            return Err(AppError::conflict(if canceled_lane {
+                "任务已完成，不能取消"
+            } else {
+                "任务已完成，不能终止"
+            }));
         }
+        // 仍有活跃租约 → 明确 conflict（与 UPDATE NOT EXISTS 失败对齐）。
+        let lease: Option<(String,)> = sqlx::query_as(
+            "SELECT holder FROM orchestrator_task_leases \
+             WHERE task_id = ? AND expires_at > ? LIMIT 1",
+        )
+        .bind(task_id)
+        .bind(&now)
+        .fetch_optional(&self.pool)
+        .await?;
+        if lease.is_some() {
+            return Err(AppError::conflict(
+                "任务正在交付中，不能终止或取消；请等待交付结束后再试",
+            ));
+        }
+        // 已 Aborted / 其它非 Done：幂等返回当前行。
         Ok(current)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式 cancelTask 表示用户不再希望任务继续被 scheduler 或 delivery 接管，但仍要保留现场。
+    ///     已 Done 与交付中（进程锁或 DB 租约）均不得取消。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `terminal_abort_if_not_delivering_leased`（Canceled 泳道）；lease 与 status 同事务。
+    pub async fn cancel_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
+        self.terminal_abort_if_not_delivering_leased(task_id, true)
+            .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Abort 路径不得把已 Done 任务覆写为 Aborted，也不得在 delivery 租约持有期间改状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `terminal_abort_if_not_delivering_leased`（Aborted split state）；lease 与 status 同事务。
+    pub async fn abort_task_preserving_done(
+        &self,
+        task_id: &str,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        self.terminal_abort_if_not_delivering_leased(task_id, false)
+            .await
     }
 
     /// Business Logic（为什么需要这个函数）:

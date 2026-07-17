@@ -95,7 +95,7 @@ pub fn collect_review_diff_for_worktree(
 ) -> Result<OrchestratorReviewDiff, AppError> {
     let (base_ref, head_ref, base_tree) = resolve_base_and_head(worktree_path, preferred_base)?;
     let identities = collect_file_identities(worktree_path, &base_tree)?;
-    let review_digest = compute_review_digest(&base_tree, &head_ref, &identities);
+    let review_digest = compute_review_digest(&base_tree, &head_ref, &identities, None);
     let total_files = identities.len() as u32;
     let (files, truncated) = build_display_files(identities);
     Ok(OrchestratorReviewDiff {
@@ -186,11 +186,11 @@ pub(crate) fn collect_review_diff_for_frozen_index(
     frozen_tree_oid: &str,
 ) -> Result<OrchestratorReviewDiff, AppError> {
     let (base_ref, head_ref, base_tree) = resolve_base_and_head(worktree_path, preferred_base)?;
-    // 内容身份来自 cached index；head/base 仍用 resolve 语义，保证与历史 digest 可比。
-    // frozen_tree_oid 由调用方持久化/commit，不塞进 digest 字段以免破坏 rebind 兼容。
-    let _ = frozen_tree_oid;
+    // 内容身份来自 cached index；digest 额外绑定 frozen_tree_oid，使 commit_frozen_tree
+    // 的 tree 与审阅摘要不可分叉（v2：含 tree 字段；与无 tree 的 worktree digest 路径分离）。
     let identities = collect_file_identities_cached(worktree_path, &base_tree)?;
-    let review_digest = compute_review_digest(&base_tree, &head_ref, &identities);
+    let review_digest =
+        compute_review_digest(&base_tree, &head_ref, &identities, Some(frozen_tree_oid));
     let total_files = identities.len() as u32;
     let (files, truncated) = build_display_files(identities);
     Ok(OrchestratorReviewDiff {
@@ -626,16 +626,26 @@ fn build_display_files(identities: Vec<ReviewFileIdentity>) -> (Vec<ReviewDiffFi
 ///     Deliver 前用 digest 检测审阅后漂移；digest 绝不能只哈希截断后的展示 patch。
 ///     同一磁盘内容在 untracked 与已 stage（status=added）之间切换时 digest 必须稳定，
 ///     否则 delivery 的 stage→enforce 顺序会把合法 worktree 误判为漂移。
+///     frozen 路径额外绑定 write-tree OID，使摘要与 commit_frozen_tree 的 tree 同源。
 ///
 /// Code Logic（这个函数做什么）:
-///     SHA-256(base_tree + head + 按 path 排序的 status/mode/old_oid/new_content_hash)；
+///     SHA-256(optional tree_oid + base_tree + head + 按 path 排序的 status/mode/old_oid/new_content_hash)；
 ///     digest 内：status `untracked`→`added`；全 0 的 old_oid（含 git 缩写 0000000）归为空串。
+///     `frozen_tree_oid=Some` 时前缀 `v2\0tree:<oid>\0`，与 worktree 路径（None）输出不同族。
 fn compute_review_digest(
     base_tree: &str,
     head_ref: &str,
     identities: &[ReviewFileIdentity],
+    frozen_tree_oid: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
+    if let Some(tree) = frozen_tree_oid.map(str::trim).filter(|t| !t.is_empty()) {
+        hasher.update(b"v2");
+        hasher.update([0]);
+        hasher.update(b"tree:");
+        hasher.update(tree.as_bytes());
+        hasher.update([0]);
+    }
     hasher.update(base_tree.as_bytes());
     hasher.update([0]);
     hasher.update(head_ref.as_bytes());

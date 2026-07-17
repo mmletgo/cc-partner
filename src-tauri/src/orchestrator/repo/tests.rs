@@ -1676,6 +1676,45 @@ async fn delivery_lease_acquire_is_exclusive() {
         .unwrap());
 }
 
+/// Business Logic（为什么需要这个测试）:
+///     cancel 与 abort 必须在同事务内以「无活跃 lease」为条件写状态，不能先查后写被 TOCTOU。
+///
+/// Code Logic（这个测试做什么）:
+///     持有 lease 时 cancel 失败且状态仍为 Delivering；释放后 cancel 成功到 Aborted/Canceled。
+#[tokio::test]
+async fn delivery_lease_blocks_cancel_atomically_until_released() {
+    let (_pool, repo) = setup_repo().await;
+    let created = task_row(
+        "task-lease-cancel",
+        "project-1",
+        OrchestratorTaskStatus::Delivering,
+    );
+    repo.create_task(&created).await.unwrap();
+    assert!(repo
+        .try_acquire_delivery_lease(&created.id, "holder-c", 600)
+        .await
+        .unwrap());
+    let err = repo
+        .cancel_task(&created.id)
+        .await
+        .expect_err("cancel must conflict while leased");
+    assert!(
+        err.to_string().contains("交付") || err.to_string().contains("conflict"),
+        "unexpected: {err}"
+    );
+    let still = repo.get_task(&created.id).await.unwrap();
+    assert_eq!(still.status, OrchestratorTaskStatus::Delivering);
+    repo.release_delivery_lease(&created.id, "holder-c")
+        .await
+        .unwrap();
+    let canceled = repo.cancel_task(&created.id).await.unwrap();
+    assert_eq!(canceled.status, OrchestratorTaskStatus::Aborted);
+    assert_eq!(
+        canceled.workflow_state,
+        OrchestratorWorkflowState::Canceled
+    );
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     非草稿任务可能已经在执行、完成或阻塞，重复入队会回退状态并丢失阻塞原因。
 ///

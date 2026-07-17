@@ -78,6 +78,19 @@ impl DeliveryTaskGuard {
         }
         Ok(acquired)
     }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     pipeline 正常结束路径必须 **await** 释放 DB 租约，不能只依赖 Drop+spawn
+    ///     （runtime 关闭或 spawn 延迟时 abort 会被挡住直至 TTL）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     若持有 db_lease 则 `take` 后 `await release_delivery_lease`；之后 Drop 不再二次释放。
+    pub(crate) async fn release_db_lease_now(&mut self) -> Result<(), AppError> {
+        if let Some((repo, holder)) = self.db_lease.take() {
+            repo.release_delivery_lease(&self.task_id, &holder).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
