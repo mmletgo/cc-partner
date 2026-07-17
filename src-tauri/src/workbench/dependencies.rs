@@ -2252,12 +2252,10 @@ pub fn probe_claude_cli_non_mutating_with_budget(
     overall_deadline: Option<Instant>,
     guard: Option<&ProbeRuntimeGuard>,
 ) -> OptionalDependencyProbe {
-    let program = if cli_path.trim().is_empty() {
-        "claude"
-    } else {
-        cli_path.trim()
-    };
-    let mut command = StdCommand::new(program);
+    // 与 github_trending / Prompt 优化一致：打包 GUI PATH 不含 ~/.local/bin 时仍能命中 Claude CLI。
+    let program = crate::claude_cli::resolve_cli_path(cli_path);
+    let mut command = StdCommand::new(&program);
+    command.env("PATH", crate::claude_cli::cli_command_path_env());
     command.arg("--version");
     match run_std_command_with_timeout_guarded(
         command,

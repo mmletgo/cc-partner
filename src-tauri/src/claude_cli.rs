@@ -11,7 +11,8 @@
 
 use crate::error::AppError;
 use serde::de::DeserializeOwned;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -36,6 +37,132 @@ pub(crate) fn normalize_cli_path(path: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// 解析本机 Claude CLI 可执行路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     打包后的 GUI/Tauri 进程只继承 launchd/系统 PATH，通常不含用户 shell 里的
+///     `~/.local/bin` 等目录；默认配置 `claude` 会在 macOS 打包态直接 NotFound，
+///     导致 GitHub 解说/Prompt 优化显示「启动 Claude CLI 失败: os error 2」。
+///
+/// Code Logic（这个函数做什么）:
+///     归一化配置路径后：绝对/显式路径原样返回；裸命令名则在常见安装目录与当前
+///     PATH 中查找可执行文件，命中返回绝对路径，未命中仍返回命令名让 OS 再解析。
+pub(crate) fn resolve_cli_path(path: &str) -> String {
+    resolve_cli_path_with_search(
+        path,
+        dirs::home_dir().as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+/// 可测试入口：在给定 home / PATH 下解析 Claude CLI。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `resolve_cli_path` 相同语义，但搜索根与 PATH 由调用方注入。
+pub(crate) fn resolve_cli_path_with_search(
+    path: &str,
+    home: Option<&Path>,
+    path_env: Option<&std::ffi::OsStr>,
+) -> String {
+    let normalized = normalize_cli_path(path);
+    let candidate = Path::new(&normalized);
+    if candidate.is_absolute()
+        || normalized.contains('/')
+        || normalized.contains('\\')
+    {
+        return normalized;
+    }
+
+    for dir in cli_search_dirs(home, path_env) {
+        if let Some(found) = executable_in_dir(&dir, &normalized) {
+            return found.to_string_lossy().into_owned();
+        }
+    }
+    normalized
+}
+
+/// 构造启动 Claude CLI 时应使用的 PATH（用户常见安装目录优先）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     即使已解析到绝对路径，Claude CLI 内部仍可能依赖同目录或用户 PATH 中的其它工具；
+///     GUI 进程的稀疏 PATH 会导致二次失败。doctor 探测与正式调用必须共用同一 PATH。
+///
+/// Code Logic（这个函数做什么）:
+///     将常见安装目录前置拼到现有 PATH 前，去重后 `join_paths`。
+pub(crate) fn cli_command_path_env() -> OsString {
+    cli_command_path_env_with(
+        dirs::home_dir().as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+fn cli_command_path_env_with(
+    home: Option<&Path>,
+    path_env: Option<&std::ffi::OsStr>,
+) -> OsString {
+    let mut dirs = cli_search_dirs(home, path_env);
+    // 保证系统基础路径始终存在，避免完全覆盖 PATH 后丢 /usr/bin。
+    for system in [
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ] {
+        if !dirs.iter().any(|d| d == &system) {
+            dirs.push(system);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_else(|_| OsString::from("/usr/bin:/bin"))
+}
+
+/// 常见 Claude CLI 安装目录 + 当前 PATH 条目。
+fn cli_search_dirs(home: Option<&Path>, path_env: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home {
+        dirs.push(home.join(".local").join("bin"));
+        dirs.push(home.join(".claude").join("local"));
+        dirs.push(home.join(".claude").join("bin"));
+        #[cfg(windows)]
+        {
+            dirs.push(home.join("AppData").join("Local").join("Claude"));
+            dirs.push(home.join("AppData").join("Roaming").join("npm"));
+        }
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    if let Some(path_env) = path_env {
+        for entry in std::env::split_paths(path_env) {
+            if !entry.as_os_str().is_empty() && !dirs.iter().any(|d| d == &entry) {
+                dirs.push(entry);
+            }
+        }
+    }
+    dirs
+}
+
+/// 在目录中查找可执行的 CLI 文件（Windows 额外尝试 .exe/.cmd/.bat）。
+fn executable_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+    let direct = dir.join(name);
+    if is_runnable_file(&direct) {
+        return Some(direct);
+    }
+    #[cfg(windows)]
+    {
+        for ext in ["exe", "cmd", "bat"] {
+            let with_ext = dir.join(name).with_extension(ext);
+            if is_runnable_file(&with_ext) {
+                return Some(with_ext);
+            }
+        }
+    }
+    None
+}
+
+fn is_runnable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// 归一化 Claude 模型名。
@@ -64,9 +191,10 @@ pub(crate) fn normalize_model(model: &str) -> String {
 ///     失败（命令不存在/非零退出）返回 `Err(中文错误描述)`；
 ///     命令成功但 stdout 为空也视为异常返回 Err。不读写任何配置，纯检测函数。
 pub(crate) async fn check_claude_cli_available(cli_path: &str) -> Result<String, String> {
-    let cli = normalize_cli_path(cli_path);
+    let cli = resolve_cli_path(cli_path);
     let mut cmd = Command::new(&cli);
-    cmd.arg("--version")
+    cmd.env("PATH", cli_command_path_env())
+        .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -320,14 +448,15 @@ pub(crate) async fn run_structured_json_with_cwd<T>(
 where
     T: DeserializeOwned,
 {
-    let cli = normalize_cli_path(cli_path);
-    let mut cmd = Command::new(cli);
+    let cli = resolve_cli_path(cli_path);
+    let mut cmd = Command::new(&cli);
     let args = if working_directory.is_some() {
         build_project_headless_args(model, schema)
     } else {
         build_pure_headless_args(model, schema)
     };
-    cmd.args(args)
+    cmd.env("PATH", cli_command_path_env())
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -389,16 +518,17 @@ pub(crate) async fn run_streaming_text_with_cwd<F>(
 where
     F: FnMut(&str) -> Result<(), AppError> + Send,
 {
-    let cli = normalize_cli_path(cli_path);
-    let mut cmd = Command::new(cli);
-    cmd.args(build_streaming_text_args(
-        model,
-        working_directory.is_some(),
-    ))
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true);
+    let cli = resolve_cli_path(cli_path);
+    let mut cmd = Command::new(&cli);
+    cmd.env("PATH", cli_command_path_env())
+        .args(build_streaming_text_args(
+            model,
+            working_directory.is_some(),
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     if let Some(directory) = working_directory {
         cmd.current_dir(directory);
     }
@@ -626,6 +756,68 @@ mod tests {
         assert_eq!(normalize_cli_path("  /opt/claude  "), "/opt/claude");
         assert_eq!(normalize_model("  "), "sonnet");
         assert_eq!(normalize_model("  haiku  "), "haiku");
+    }
+
+    #[test]
+    fn resolves_bare_claude_from_user_local_bin_when_gui_path_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        let local_bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&local_bin).expect("mkdir");
+        let fake_cli = local_bin.join("claude");
+        std::fs::write(&fake_cli, b"#!/bin/sh\necho 1.0.0\n").expect("write fake cli");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_cli, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        // 模拟打包 GUI 的稀疏 PATH：不含 ~/.local/bin。
+        let sparse_path = std::ffi::OsString::from("/usr/bin:/bin");
+        let resolved =
+            resolve_cli_path_with_search("claude", Some(home), Some(sparse_path.as_os_str()));
+        assert_eq!(
+            Path::new(&resolved),
+            fake_cli.as_path(),
+            "应解析到 home/.local/bin/claude，而不是留下裸命令名"
+        );
+
+        // 显式绝对路径不改写。
+        assert_eq!(
+            resolve_cli_path_with_search(
+                fake_cli.to_str().expect("utf8"),
+                Some(home),
+                Some(sparse_path.as_os_str())
+            ),
+            fake_cli.to_string_lossy()
+        );
+
+        // 不存在时仍返回默认命令名，便于错误文案保留 `claude`。
+        let missing_home = home.join("empty-home");
+        std::fs::create_dir_all(&missing_home).expect("mkdir empty home");
+        assert_eq!(
+            resolve_cli_path_with_search(
+                "claude",
+                Some(missing_home.as_path()),
+                Some(sparse_path.as_os_str())
+            ),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn path_env_prefers_user_local_bin() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        let path = cli_command_path_env_with(Some(home), Some(std::ffi::OsStr::new("/usr/bin")));
+        let joined = path.to_string_lossy();
+        let local = home.join(".local").join("bin").to_string_lossy().into_owned();
+        assert!(
+            joined.contains(&local),
+            "增强 PATH 应包含 ~/.local/bin: {joined}"
+        );
+        assert!(joined.contains("/usr/bin"), "增强 PATH 应保留系统路径");
     }
 
     #[test]

@@ -76,9 +76,9 @@ cc-partner [--device local|id:<deviceId>] [--json] <resource> <action>
 - non-replayable mutation（如 `session send`）连接丢失 → `outcomeUnknown=true`，不盲重放
 
 ```bash
-cargo run --locked --bin cc-partner -- --json project list
-cargo run --locked --bin cc-partner -- --json attention list
-printf '%s' '{"data":"pwd\\n"}' | cargo run --locked --bin cc-partner -- session send --session id:<sid> --input-json -
+cargo run --locked --bin cc-partner-cli -- --json project list
+cargo run --locked --bin cc-partner-cli -- --json attention list
+printf '%s' '{"data":"pwd\\n"}' | cargo run --locked --bin cc-partner-cli -- session send --session id:<sid> --input-json -
 ```
 
 细节见 [`docs/development/backend-operations.md`](docs/development/backend-operations.md) 与设计 `docs/superpowers/specs/2026-07-15-agent-first-cli-design.md`。

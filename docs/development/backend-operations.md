@@ -81,10 +81,10 @@ cc-partner [--device local|id:<deviceId>] [--json] <resource> <action>
 | Fixed LAN | Same credential-free business API boundary as P2P; peers are not “authenticated devices” |
 
 ```bash
-cargo run --locked --bin cc-partner -- --json project list
-cargo run --locked --bin cc-partner -- --device id:<deviceId> --json project list
+cargo run --locked --bin cc-partner-cli -- --json project list
+cargo run --locked --bin cc-partner-cli -- --device id:<deviceId> --json project list
 printf '%s' '{"title":"t","goal":"g","acceptanceCriteria":"a"}' | \
-  cargo run --locked --bin cc-partner -- --json task create --project id:<pid> --input-json -
+  cargo run --locked --bin cc-partner-cli -- --json task create --project id:<pid> --input-json -
 ```
 
 Smoke: `cd src-tauri && cargo test --locked --test agent_cli_smoke -- --nocapture --test-threads=1` (`L2-AGENT-CLI-SMOKE-001`).

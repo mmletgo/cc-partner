@@ -9,8 +9,13 @@ edition = "2021"
 rust-version = "1.77.2"
 # 存在多个 [[bin]] target（GUI app + cc-partner-backend CLI + Agent CLI）时，
 # 显式声明默认运行 GUI 主进程，避免 `cargo run` / `tauri dev` / `tauri build`
-# 报 "could not determine which binary to run"。CLI 仍可经
-# `cargo run --bin cc-partner-backend` / `cargo run --bin cc-partner` 或打包后的同名入口启动。
+# 报 "could not determine which binary to run"。
+# - package name 保持 `app`（Cargo 主二进制名），Tauri 通过 tauri.conf.json
+#   `mainBinaryName: "cc-partner"` 在打包时把 GUI 可执行文件命名为 cc-partner，
+#   与 productName / 防火墙指引 / macOS 授权显示名一致。
+# - Agent CLI cargo bin 固定为 `cc-partner-cli`，避免与 GUI mainBinaryName 在
+#   target/release 下同名覆盖；release 产物仍上传为 `cc-partner-cli-<matrix>`。
+# CLI：`cargo run --bin cc-partner-backend` / `cargo run --bin cc-partner-cli`。
 default-run = "app"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -24,8 +29,9 @@ name = "cc-partner-backend"
 path = "src/bin/cc-partner-backend.rs"
 
 # Agent-first 控制 CLI（独立 artifact；不进入 Tauri externalBin）
+# 二进制名必须与 GUI mainBinaryName（cc-partner）区分，防止 tauri build 重命名覆盖。
 [[bin]]
-name = "cc-partner"
+name = "cc-partner-cli"
 path = "src/bin/cc-partner.rs"
 
 [build-dependencies]

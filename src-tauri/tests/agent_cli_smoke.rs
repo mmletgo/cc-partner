@@ -30,9 +30,9 @@ fn fail_case(case: &mut SmokeCase, message: impl AsRef<str>) -> ! {
 ///     agent CLI 与 backend 二进制分离，必须用独立 CARGO_BIN_EXE。
 ///
 /// Code Logic（这个函数做什么）:
-///     返回 `CARGO_BIN_EXE_cc-partner` 路径。
+///     返回 `CARGO_BIN_EXE_cc-partner-cli` 路径（cargo bin 名与 GUI mainBinaryName 区分）。
 fn agent_cli_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_cc-partner"))
+    PathBuf::from(env!("CARGO_BIN_EXE_cc-partner-cli"))
 }
 
 /// Business Logic（为什么需要这个函数）:

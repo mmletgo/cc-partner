@@ -157,17 +157,18 @@ jobs:
           fi
 
       # A7：独立 Agent CLI 产物（不进入 Tauri externalBin / binaries/）
-      - name: Build standalone agent CLI (cc-partner)
+      # cargo bin 名是 cc-partner-cli（与 GUI mainBinaryName=cc-partner 区分，防覆盖）
+      - name: Build standalone agent CLI (cc-partner-cli)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-assets
           if [ -n "${{ matrix.target }}" ]; then
-            cargo build --locked --release --bin cc-partner --manifest-path src-tauri/Cargo.toml --target "${{ matrix.target }}"
-            BIN="src-tauri/target/${{ matrix.target }}/release/cc-partner"
+            cargo build --locked --release --bin cc-partner-cli --manifest-path src-tauri/Cargo.toml --target "${{ matrix.target }}"
+            BIN="src-tauri/target/${{ matrix.target }}/release/cc-partner-cli"
           else
-            cargo build --locked --release --bin cc-partner --manifest-path src-tauri/Cargo.toml
-            BIN="src-tauri/target/release/cc-partner"
+            cargo build --locked --release --bin cc-partner-cli --manifest-path src-tauri/Cargo.toml
+            BIN="src-tauri/target/release/cc-partner-cli"
           fi
           if [ -f "${BIN}.exe" ]; then BIN="${BIN}.exe"; fi
           ARCH_TAG="${{ matrix.matrix_id }}"
