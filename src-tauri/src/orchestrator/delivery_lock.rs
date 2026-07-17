@@ -6,36 +6,77 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     进程内 HashSet 记录 in-flight task_id；提供 try_acquire 守卫与 is_in_progress 查询。
+//!     owner 侧 SQLite 租约见 `OrchestratorRepo::try_acquire_delivery_lease`（跨 GuiClient 可见）。
 
 use crate::error::AppError;
+use crate::orchestrator::repo::OrchestratorRepo;
 use std::collections::HashSet;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
 static DELIVERY_TASK_LOCKS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
-/// 单任务 delivery 执行权守卫。
+/// delivery 默认租约 TTL（秒）：覆盖 commit/push/merge 慢路径，过期后 abort 可恢复。
+pub(crate) const DELIVERY_LEASE_TTL_SECS: i64 = 900;
+
+/// 单任务 delivery 执行权守卫（进程内 + 可选 owner DB 租约）。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     同一个 Orchestrator 任务不能同时执行两条自动交付流水线。
+///     同一个 Orchestrator 任务不能同时执行两条自动交付流水线；DB 租约让跨进程 abort 可见。
 ///
 /// Code Logic（这个结构体做什么）:
-///     记录已领取的 task_id；Drop 时从进程内 HashSet 移除。
+///     记录已领取的 task_id 与可选 (repo, holder)；Drop 时释放 HashSet，并 best-effort 异步释放 DB 租约。
 pub(crate) struct DeliveryTaskGuard {
     task_id: String,
+    db_lease: Option<(OrchestratorRepo, String)>,
 }
 
 impl Drop for DeliveryTaskGuard {
     /// Business Logic（为什么需要这个函数）:
-    ///     delivery pipeline 结束后必须释放任务执行权。
+    ///     delivery pipeline 结束后必须释放任务执行权与 owner 租约。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     在 Drop 中短暂锁定全局 HashSet 并移除 task_id；锁中毒时静默跳过。
+    ///     在 Drop 中短暂锁定全局 HashSet 并移除 task_id；若持有 DB 租约则 spawn 异步 release。
     fn drop(&mut self) {
         if let Some(locks) = DELIVERY_TASK_LOCKS.get() {
             if let Ok(mut locked) = locks.lock() {
                 locked.remove(&self.task_id);
             }
         }
+        if let Some((repo, holder)) = self.db_lease.take() {
+            let task_id = self.task_id.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    if let Err(err) = repo.release_delivery_lease(&task_id, &holder).await {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            "release delivery lease on drop failed: {err}"
+                        );
+                    }
+                });
+            }
+        }
+    }
+}
+
+impl DeliveryTaskGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     进程内锁成功后还要在 owner SQLite 占位，防止 GuiClient abort 与交付交叉。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     生成 holder UUID，调用 `try_acquire_delivery_lease`；失败返回 false（调用方应 drop 守卫）。
+    pub(crate) async fn attach_db_lease(
+        &mut self,
+        repo: &OrchestratorRepo,
+        ttl_secs: i64,
+    ) -> Result<bool, AppError> {
+        let holder = uuid::Uuid::new_v4().to_string();
+        let acquired = repo
+            .try_acquire_delivery_lease(&self.task_id, &holder, ttl_secs)
+            .await?;
+        if acquired {
+            self.db_lease = Some((repo.clone(), holder));
+        }
+        Ok(acquired)
     }
 }
 
@@ -71,5 +112,6 @@ pub(crate) fn try_acquire_delivery_task_guard(
     }
     Ok(Some(DeliveryTaskGuard {
         task_id: task_id.to_string(),
+        db_lease: None,
     }))
 }

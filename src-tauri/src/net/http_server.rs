@@ -470,6 +470,22 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             ),
         )
         .route(
+            "/api/backend/control/orchestrator/abort-task",
+            post(crate::backend::control_api::control_orchestrator_abort_task).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/backend/control/orchestrator/cancel-task",
+            post(crate::backend::control_api::control_orchestrator_cancel_task).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
+        .route(
             "/api/backend/control/orchestrator/dispatch-once",
             post(crate::backend::control_api::control_orchestrator_dispatch_once).layer(
                 axum::extract::DefaultBodyLimit::max(

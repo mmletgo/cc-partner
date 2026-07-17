@@ -115,6 +115,7 @@ impl OrchestratorRepo {
             ORCHESTRATOR_REMOTE_TASK_MIRROR_SCHEMA,
             ORCHESTRATOR_REMOTE_TASK_MIRROR_PROJECT_INDEX,
             ORCHESTRATOR_REMOTE_TASK_CREATE_REQUEST_SCHEMA,
+            ORCHESTRATOR_TASK_LEASE_SCHEMA,
         ] {
             sqlx::query(statement).execute(pool).await?;
         }

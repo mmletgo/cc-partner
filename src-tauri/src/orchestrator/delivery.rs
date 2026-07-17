@@ -11,7 +11,9 @@
 
 use crate::config::OrchestratorAutomationConfig;
 use crate::error::AppError;
-use crate::orchestrator::delivery_lock::try_acquire_delivery_task_guard;
+use crate::orchestrator::delivery_lock::{
+    try_acquire_delivery_task_guard, DELIVERY_LEASE_TTL_SECS,
+};
 use crate::orchestrator::models::{
     OrchestratorTaskDto, OrchestratorTaskStatus, EVIDENCE_KIND_DELIVERY,
     EVIDENCE_KIND_REVIEW_DIGEST,
@@ -445,13 +447,34 @@ where
         task.delivery_suppressed,
     )
     .await?;
-    let Some(_delivery_guard) = try_acquire_delivery_task_guard(&task.id)? else {
+    let Some(mut delivery_guard) = try_acquire_delivery_task_guard(&task.id)? else {
         let current = context.orchestrator_repo().get_task(&task.id).await?;
         return Ok(DeliverySummary {
             task: OrchestratorTaskDto::from(current),
             stages: Vec::new(),
         });
     };
+    // owner SQLite 租约：GuiClient abort/cancel 可见；抢占失败则释放进程锁并返回当前任务。
+    if !delivery_guard
+        .attach_db_lease(context.orchestrator_repo(), DELIVERY_LEASE_TTL_SECS)
+        .await?
+    {
+        let current = context.orchestrator_repo().get_task(&task.id).await?;
+        return Ok(DeliverySummary {
+            task: OrchestratorTaskDto::from(current),
+            stages: Vec::new(),
+        });
+    }
+    // 持有租约后 recheck 仍为 Delivering，避免 CAS 竞态窗口。
+    {
+        let current = context.orchestrator_repo().get_task(&task.id).await?;
+        if current.status != OrchestratorTaskStatus::Delivering {
+            return Ok(DeliverySummary {
+                task: OrchestratorTaskDto::from(current),
+                stages: Vec::new(),
+            });
+        }
+    }
     let mut stages = Vec::new();
     let config = context.orchestrator_config();
 
@@ -819,20 +842,22 @@ where
         let merged = context
             .merge_task_commit_oid_to_main(worktree_id.clone(), &reviewed)
             .await?;
-        // merge 后再次 recheck：终止则 CAS 回滚 local main，再返回 stopped。
+        // merge 后再次 recheck：终止则完整回滚 ref+index+worktree，再返回 stopped。
+        // 回滚失败必须 hard error，禁止吞掉后留下污染 main 静默 stopped。
         let after_merge = context.orchestrator_repo().get_task(&task.id).await?;
         if after_merge.status != OrchestratorTaskStatus::Delivering {
-            if let Err(rb_err) = workbench_git::rollback_main_merge_cas(
+            workbench_git::rollback_main_merge_full(
                 main_path_ref,
                 &merged.push_target.branch,
                 &merged.pre_oid,
                 &merged.merge_oid,
-            ) {
-                tracing::warn!(
-                    task_id = %task.id,
-                    "delivery stopped after merge; main rollback CAS failed: {rb_err}"
-                );
-            }
+            )
+            .map_err(|rb_err| {
+                AppError::generic(format!(
+                    "delivery_stopped:{} but full main rollback failed: {rb_err}",
+                    after_merge.status.as_str()
+                ))
+            })?;
             return Err(AppError::conflict(format!(
                 "delivery_stopped:{}",
                 after_merge.status.as_str()
@@ -1426,17 +1451,17 @@ async fn add_delivery_evidence(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     verifier 已通过的内容必须与即将 commit 的 worktree 一致，否则不得进入 Git 副作用。
+///     verifier 已通过的内容必须与即将 commit 的 index tree 一致，否则不得进入 Git 副作用。
 ///
 /// Code Logic（这个函数做什么）:
-///     用 collect_review_diff_for_worktree 重算 digest（非截断文本哈希），与 expected 精确比对；
-///     匹配返回 Ok；不匹配或采集失败返回供 block_delivery_task 使用的 reason 字符串。
+///     调用方须已 stage；用 `current_frozen_index_review_digest`（write-tree + index-only）
+///     重算 digest，与 expected 精确比对；匹配 Ok，否则返回 block reason。
 pub(crate) fn enforce_expected_review_digest(
     worktree_path: &Path,
     expected_review_digest: &str,
 ) -> Result<(), String> {
     let actual =
-        match crate::orchestrator::review_diff::current_worktree_review_digest(worktree_path) {
+        match crate::orchestrator::review_diff::current_frozen_index_review_digest(worktree_path) {
             Ok(digest) => digest,
             Err(err) => {
                 return Err(format!(
@@ -2728,16 +2753,18 @@ mod tests {
     ///     enforce helper 必须在纯函数层正确区分匹配/不匹配，便于 command 层 precheck 复用。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     临时 repo 上写文件、采集 digest，断言 match Ok、改文件后 mismatch Err。
+    ///     stage 后用 frozen-index digest 采 expected，断言 match Ok；再 stage 新内容后 mismatch。
     #[test]
     fn enforce_expected_review_digest_pure_match_and_mismatch() {
         let (_dir, _origin, _repo, task_worktree) = setup_git_delivery_repo();
         fs::write(task_worktree.join("a.txt"), "v1\n").expect("write v1");
+        workbench_git::stage_all_for_commit(&task_worktree).expect("stage v1");
         let expected =
-            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
+            crate::orchestrator::review_diff::current_frozen_index_review_digest(&task_worktree)
                 .expect("digest v1");
         assert!(enforce_expected_review_digest(&task_worktree, &expected).is_ok());
         fs::write(task_worktree.join("a.txt"), "v2\n").expect("write v2");
+        workbench_git::stage_all_for_commit(&task_worktree).expect("stage v2");
         let err = enforce_expected_review_digest(&task_worktree, &expected).expect_err("mismatch");
         assert!(err.contains("review_digest mismatch"));
     }

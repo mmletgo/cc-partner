@@ -324,6 +324,14 @@ pub async fn cancel_orchestrator_task_view(
     project_id: String,
     task_id: String,
 ) -> Result<OrchestratorTaskViewDto, AppError> {
+    use crate::backend::authority::RuntimeRole;
+    use crate::backend::control_client::BackendControlClient;
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let task = BackendControlClient::from_control_file()?
+            .cancel_orchestrator_task(&task_id)
+            .await?;
+        return Ok(OrchestratorTaskViewDto::Local { task });
+    }
     let project = get_orchestrator_workbench_project(state.inner(), &project_id).await?;
     if project.kind != "remote" {
         get_local_project_task_for_action(state.orchestrator_repo.as_ref(), &project_id, &task_id)

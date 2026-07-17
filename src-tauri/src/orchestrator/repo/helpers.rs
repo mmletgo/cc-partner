@@ -300,6 +300,22 @@ pub const ORCHESTRATOR_REMOTE_TASK_CREATE_REQUEST_SCHEMA: &str =
   updated_at TEXT NOT NULL
 )";
 
+/// owner 侧 delivery 租约表：跨 GuiClient/sidecar 进程可见，阻塞并发 abort/cancel。
+///
+/// Business Logic（为什么需要这个常量）:
+///     进程内 HashSet 对 GuiClient 不可见；abort 可能在交付 merge/push 窗口误成功。
+///
+/// Code Logic（这个常量做什么）:
+///     定义 `orchestrator_task_leases` DDL（task_id PK + kind/holder/expires_at）。
+pub const ORCHESTRATOR_TASK_LEASE_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS orchestrator_task_leases (
+  task_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  holder TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)";
+
 /// Business Logic（为什么需要这个函数）:
 ///     幂等键必须绑定项目与请求内容指纹，避免跨项目泄露任务 goal/acceptance，或同键不同 payload 静默复用旧任务。
 ///     指纹编码必须无歧义：字段内 NUL/分隔符不得制造跨字段边界碰撞，否则 fail-closed 会被绕过。

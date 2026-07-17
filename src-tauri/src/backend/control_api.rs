@@ -1481,6 +1481,104 @@ pub async fn control_orchestrator_complete_agent_run(
     Ok(Json(task))
 }
 
+/// abort-task control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GuiClient Abort 必须在 owner 上检查 delivery 租约并 CAS 状态，禁止本机空库误成功。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + taskId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorAbortTaskRequest {
+    pub control_token: String,
+    pub task_id: String,
+}
+
+/// owner 路径：终止任务（保留 Done）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     abort 与 delivery 共享 owner DB 租约；GuiClient 必须代理到 sidecar。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `abort_task_preserving_done`（含 lease 检查）
+///     → 可选 experiment candidate sync → OrchestratorTaskDto。
+pub async fn control_orchestrator_abort_task(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorAbortTaskRequest>,
+) -> P2pResult<Json<OrchestratorTaskDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_abort_task"))?;
+    let task_id = request.task_id.trim();
+    let updated = state
+        .orchestrator_repo
+        .abort_task_preserving_done(task_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_abort_task"))?;
+    if updated.experiment_id.is_some() {
+        if let Err(err) =
+            crate::orchestrator::experiments::reducer::sync_candidate_with_task_terminal(
+                state.orchestrator_repo.as_ref(),
+                &updated.id,
+                updated.status,
+            )
+            .await
+        {
+            tracing::debug!(task_id = %updated.id, "sync_candidate after control abort: {err}");
+        }
+    }
+    let dto = OrchestratorTaskDto::from(updated);
+    ensure_response_within_limit(&dto, &context)?;
+    Ok(Json(dto))
+}
+
+/// cancel-task control 请求体。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GuiClient cancel 必须在 owner 上检查 delivery 租约。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase：controlToken + taskId。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlOrchestratorCancelTaskRequest {
+    pub control_token: String,
+    pub task_id: String,
+}
+
+/// owner 路径：取消任务。
+///
+/// Business Logic（为什么需要这个函数）:
+///     cancel 与 delivery 共享 owner DB 租约；GuiClient 必须代理到 sidecar。
+///
+/// Code Logic（这个函数做什么）:
+///     loopback → token → require_owner → `cancel_task` → OrchestratorTaskDto。
+pub async fn control_orchestrator_cancel_task(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    Json(request): Json<ControlOrchestratorCancelTaskRequest>,
+) -> P2pResult<Json<OrchestratorTaskDto>> {
+    authorize_control_request(peer, &context, &request.control_token)?;
+    state
+        .runtime_role
+        .require_owner()
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_cancel_task"))?;
+    let updated = state
+        .orchestrator_repo
+        .cancel_task(request.task_id.trim())
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &context, "control.orchestrator_cancel_task"))?;
+    let dto = OrchestratorTaskDto::from(updated);
+    ensure_response_within_limit(&dto, &context)?;
+    Ok(Json(dto))
+}
+
 /// dispatch-once control 请求体。
 ///
 /// Business Logic（为什么需要这个结构）:

@@ -1619,6 +1619,63 @@ async fn abort_task_preserving_done_aborts_running_and_is_idempotent() {
     assert_eq!(again.status, OrchestratorTaskStatus::Aborted);
 }
 
+/// Business Logic（为什么需要这个测试）:
+///     owner delivery 租约必须挡住并发 abort，释放后才允许终止。
+///
+/// Code Logic（这个测试做什么）:
+///     acquire lease → abort conflict → release → abort 成功。
+#[tokio::test]
+async fn delivery_lease_blocks_abort_until_released() {
+    let (_pool, repo) = setup_repo().await;
+    let created = task_row(
+        "task-lease-abort",
+        "project-1",
+        OrchestratorTaskStatus::Delivering,
+    );
+    repo.create_task(&created).await.unwrap();
+
+    let acquired = repo
+        .try_acquire_delivery_lease(&created.id, "holder-a", 600)
+        .await
+        .unwrap();
+    assert!(acquired, "first acquire must succeed");
+    let err = repo
+        .abort_task_preserving_done(&created.id)
+        .await
+        .expect_err("abort must conflict while leased");
+    assert!(
+        err.to_string().contains("交付") || err.to_string().contains("conflict"),
+        "unexpected: {err}"
+    );
+    repo.release_delivery_lease(&created.id, "holder-a")
+        .await
+        .unwrap();
+    let aborted = repo.abort_task_preserving_done(&created.id).await.unwrap();
+    assert_eq!(aborted.status, OrchestratorTaskStatus::Aborted);
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     delivery 获取租约后第二 holder 不得抢占。
+///
+/// Code Logic（这个测试做什么）:
+///     holder-a 占租约；holder-b 再 acquire 返回 false。
+#[tokio::test]
+async fn delivery_lease_acquire_is_exclusive() {
+    let (_pool, repo) = setup_repo().await;
+    assert!(repo
+        .try_acquire_delivery_lease("task-lease-x", "holder-a", 600)
+        .await
+        .unwrap());
+    assert!(!repo
+        .try_acquire_delivery_lease("task-lease-x", "holder-b", 600)
+        .await
+        .unwrap());
+    assert!(repo
+        .try_acquire_delivery_lease("task-lease-x", "holder-a", 600)
+        .await
+        .unwrap());
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     非草稿任务可能已经在执行、完成或阻塞，重复入队会回退状态并丢失阻塞原因。
 ///

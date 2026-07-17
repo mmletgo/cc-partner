@@ -1532,12 +1532,104 @@ impl OrchestratorRepo {
     /// Code Logic（这个函数做什么）:
     ///     `UPDATE ... WHERE id=? AND status != 'done'` 写 Aborted/Canceled/Idle，清空 blocked_reason 与 attempt_phase；
     ///     rows=0 且当前为 Done 时返回 conflict；其它情况返回当前行（幂等）。
+    /// Business Logic（为什么需要这个函数）:
+    ///     delivery 在 owner 进程拿到进程内锁后，还必须在 SQLite 上占位，让 GuiClient 侧的
+    ///     abort/cancel 能看到「正在交付」并 fail closed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     清理本 task 过期租约后 INSERT/UPDATE lease；仅当无活跃他人 holder 或同 holder 续租时
+    ///     rows_affected>0 返回 true，否则 false。
+    pub async fn try_acquire_delivery_lease(
+        &self,
+        task_id: &str,
+        holder: &str,
+        ttl_secs: i64,
+    ) -> Result<bool, AppError> {
+        let now = Utc::now();
+        let now_s = now.to_rfc3339();
+        let expires_s = (now + chrono::Duration::seconds(ttl_secs.max(1))).to_rfc3339();
+        let result = with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM orchestrator_task_leases WHERE task_id = ? AND expires_at < ?")
+                .bind(task_id)
+                .bind(&now_s)
+                .execute(&self.pool)
+                .await?;
+            let r = sqlx::query(
+                "INSERT INTO orchestrator_task_leases (task_id, kind, holder, expires_at, updated_at) \
+                 VALUES (?, 'delivery', ?, ?, ?) \
+                 ON CONFLICT(task_id) DO UPDATE SET \
+                   kind = 'delivery', \
+                   holder = excluded.holder, \
+                   expires_at = excluded.expires_at, \
+                   updated_at = excluded.updated_at \
+                 WHERE orchestrator_task_leases.expires_at < ? \
+                    OR orchestrator_task_leases.holder = excluded.holder",
+            )
+            .bind(task_id)
+            .bind(holder)
+            .bind(&expires_s)
+            .bind(&now_s)
+            .bind(&now_s)
+            .execute(&self.pool)
+            .await?;
+            Ok::<_, sqlx::Error>(r)
+        })
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     delivery pipeline 结束（成功/失败/中止）必须释放 owner 租约，允许后续 abort/cancel。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `DELETE ... WHERE task_id=? AND holder=?`；holder 不匹配则 no-op。
+    pub async fn release_delivery_lease(
+        &self,
+        task_id: &str,
+        holder: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query("DELETE FROM orchestrator_task_leases WHERE task_id = ? AND holder = ?")
+                .bind(task_id)
+                .bind(holder)
+                .execute(&self.pool)
+                .await
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Abort/Cancel 在状态 CAS 前必须确认 owner 无未过期 delivery 租约，
+    ///     否则可与跨进程交付 merge/push 竞态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询 lease 且 expires_at > now → conflict；无行或已过期 → Ok。
+    pub async fn assert_no_delivery_lease(&self, task_id: &str) -> Result<(), AppError> {
+        let now_s = Utc::now().to_rfc3339();
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT holder FROM orchestrator_task_leases \
+             WHERE task_id = ? AND expires_at > ? LIMIT 1",
+        )
+        .bind(task_id)
+        .bind(&now_s)
+        .fetch_optional(&self.pool)
+        .await?;
+        if row.is_some() {
+            return Err(AppError::conflict(
+                "任务正在交付中，不能终止或取消；请等待交付结束后再试",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn cancel_task(&self, task_id: &str) -> Result<OrchestratorTaskRow, AppError> {
         if crate::orchestrator::delivery_lock::is_delivery_task_in_progress(task_id) {
             return Err(AppError::conflict(
                 "任务正在交付中，不能取消；请等待交付结束后再试",
             ));
         }
+        self.assert_no_delivery_lease(task_id).await?;
         let now = Utc::now().to_rfc3339();
         let result = with_shared_write_lease(&self.gate, async {
             sqlx::query(
@@ -1585,6 +1677,7 @@ impl OrchestratorRepo {
                 "任务正在交付中，不能终止；请等待交付结束后再试",
             ));
         }
+        self.assert_no_delivery_lease(task_id).await?;
         let now = Utc::now().to_rfc3339();
         let split_state = SplitTaskState::from_legacy_status(OrchestratorTaskStatus::Aborted);
         let result = with_shared_write_lease(&self.gate, async {

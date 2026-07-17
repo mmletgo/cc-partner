@@ -517,6 +517,13 @@ pub async fn abort_orchestrator_task(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<OrchestratorTaskDto, AppError> {
+    use crate::backend::authority::RuntimeRole;
+    use crate::backend::control_client::BackendControlClient;
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .abort_orchestrator_task(&task_id)
+            .await;
+    }
     let updated = state
         .orchestrator_repo
         .abort_task_preserving_done(&task_id)
