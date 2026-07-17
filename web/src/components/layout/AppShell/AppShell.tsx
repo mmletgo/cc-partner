@@ -5,21 +5,23 @@
  *   cc-partner 是一个三端（macOS / Windows / Linux）桌面工具，
  *   Web 端需要提供侧边导航 + 主内容区的基本布局骨架，
  *   窗口标题栏由 PyQt6 原生提供，无需 Web 端自绘。
- *   侧边栏 footer 区域集中展示版本号、语言/主题切换和移动端访问入口。
+ *   侧边栏 footer 区域集中展示版本号、语言/主题/设置与移动端访问入口；
+ *   设置固定在 footer，避免小屏滚动才能看到。
  *   主导航按 Explore/Work/Knowledge/Connect/System 分组，短窗口下可滚动。
  *
  * Code Logic（这个组件做什么）:
  *   - 全屏 flex 布局：左侧 Sidebar（240px）+ 右侧 main 区域
  *   - Sidebar 内包含 Logo、分组导航（section + 非聚焦 group label）、
- *     Work 组内 ProjectRail、footer（版本号 + 语言/主题切换 + 手机访问按钮）
+ *     Work 组内 ProjectRail、footer（版本号 + 语言/主题/设置齿轮 + 手机访问按钮）
+ *   - 设置入口为 footer NavLink(`/settings`)，System 组仅保留健康提醒
  *   - 手机访问入口经共享 Dialog 呈现 MobileAccessCard（Escape/backdrop/焦点恢复由 Dialog 合同处理）
- *   - 右侧 main 区域是 <Outlet /> 出口，由 React Router 注入子页面，
+ *   - 右侧 main 区域是 <outlet /> 出口，由 React Router 注入子页面，
  *     main 自带 overflow: auto 实现独立滚动
  *
  *   注意：本组件是 <Outlet /> 容器，children 不直接使用。
  */
 import { useCallback, useRef, useState, type ReactNode } from 'react';
-import { Outlet } from 'react-router-dom';
+import { NavLink, Outlet } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   HomeIcon,
@@ -144,10 +146,22 @@ export function AppShell({ children }: AppShellProps) {
               <LanguageSwitcher />
               <div className={styles.footerIconGroup}>
                 <ThemeToggle />
+                <NavLink
+                  to="/settings"
+                  className={({ isActive }) =>
+                    isActive
+                      ? `${styles.footerIconButton} ${styles.footerIconButtonActive}`
+                      : styles.footerIconButton
+                  }
+                  aria-label={t('nav:settings')}
+                  title={t('nav:settings')}
+                >
+                  <SettingsIcon size={14} />
+                </NavLink>
                 <button
                   ref={mobileAccessButtonRef}
                   type="button"
-                  className={styles.mobileAccessButton}
+                  className={styles.footerIconButton}
                   onClick={toggleMobileAccess}
                   aria-label={t('settings:mobileAccess.buttonLabel')}
                   aria-haspopup="dialog"
@@ -194,7 +208,6 @@ export function AppShell({ children }: AppShellProps) {
           </NavGroup>
           <NavGroup id={NAV_GROUP_IDS.system} label={t('nav:groups.system')}>
             <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
-            <NavItem to="/settings" label={t('nav:settings')} icon={<SettingsIcon />} />
           </NavGroup>
         </nav>
         <PermissionStatusBadge />

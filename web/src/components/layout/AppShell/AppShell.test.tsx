@@ -2,14 +2,15 @@
  * AppShell 导航分组与侧栏滚动合同测试。
  *
  * Business Logic（为什么需要这个测试）:
- *   侧栏 12+ 入口需要按 Explore/Work/Knowledge/Connect/System 分组，
+ *   侧栏主导航按 Explore/Work/Knowledge/Connect/System 分组，
  *   短窗口下 content 独立滚动且 footer 不被覆盖；分组标签不可聚焦，
- *   Trending 仍是 Home `/`，不得出现 Discover 重复入口。
+ *   Trending 仍是 Home `/`，不得出现 Discover 重复入口；
+ *   设置入口固定在 footer，不在主导航 System 组。
  *
  * Code Logic（这个测试做什么）:
  *   mock 版本/Attention/ProjectRail/权限徽章与 MobileAccessCard；
- *   断言分组标签与 section aria-labelledby、路由顺序、每条链路单 tab stop、
- *   ProjectRail 位于 Work 组、CSS 滚动合同源文件。
+ *   断言分组标签与 section aria-labelledby、路由顺序、footer 设置链接、
+ *   每条链路单 tab stop、ProjectRail 位于 Work 组、CSS 滚动合同源文件。
  */
 
 // @vitest-environment jsdom
@@ -136,10 +137,18 @@ describe('AppShell grouped navigation', () => {
       '/claude-code',
       '/devices',
       '/health',
-      '/settings',
     ]);
     expect(hrefs.filter((href) => href === '/discover')).toHaveLength(0);
     expect(hrefs.filter((href) => href === '/')).toHaveLength(1);
+    expect(hrefs.filter((href) => href === '/settings')).toHaveLength(0);
+  });
+
+  test('places settings entry in footer icon group with gear link', () => {
+    renderShell();
+
+    const settingsLink = screen.getByRole('link', { name: '设置' });
+    expect(settingsLink.getAttribute('href')).toBe('/settings');
+    expect(settingsLink.closest('[class*="footerIconGroup"]') || settingsLink.parentElement).toBeTruthy();
   });
 
   test('exposes one focusable tab stop per nav link and puts ProjectRail in Work group', () => {
@@ -147,7 +156,7 @@ describe('AppShell grouped navigation', () => {
 
     const nav = screen.getByRole('navigation', { name: '主导航' });
     const links = within(nav).getAllByRole('link');
-    expect(links).toHaveLength(13);
+    expect(links).toHaveLength(12);
 
     for (const link of links) {
       const tabIndex = link.getAttribute('tabindex');
