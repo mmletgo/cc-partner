@@ -2954,8 +2954,8 @@ mod tests {
             "should have staged changes"
         );
         let digest =
-            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
-                .expect("digest");
+            crate::orchestrator::review_diff::current_frozen_index_review_digest(&task_worktree)
+                .expect("frozen digest");
         // sandwich 文档化：digest 前/后各冻结一次，稳定才可 commit。
         let frozen1 = workbench_git::write_tree_hash(&task_worktree).expect("write-tree before");
         enforce_expected_review_digest(&task_worktree, &digest).expect("digest match");
@@ -2995,8 +2995,8 @@ mod tests {
             "should have staged changes"
         );
         let digest =
-            crate::orchestrator::review_diff::current_worktree_review_digest(&task_worktree)
-                .expect("digest at stage boundary");
+            crate::orchestrator::review_diff::current_frozen_index_review_digest(&task_worktree)
+                .expect("frozen digest at stage boundary");
         enforce_expected_review_digest(&task_worktree, &digest)
             .expect("digest matches staged tree");
 
