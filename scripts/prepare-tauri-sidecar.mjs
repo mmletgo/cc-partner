@@ -9,13 +9,27 @@
  *   解析可选 `--target <triple>` 与 `--dry-run`；先构建 `cc-partner-backend` release bin，
  *   再复制到 Tauri externalBin 约定路径。未显式传 target 时用 `rustc -vV` 的 host triple。
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC_TAURI_DIR = resolve(REPO_ROOT, 'src-tauri');
+// Tauri bundle.resources 的 `resources/browser-runtime/**/*` 要求目录至少有一个文件；
+// linux aarch64 等无 Chrome for Testing 资产的目标必须落占位，否则 cargo/tauri build 直接失败。
+const BROWSER_RUNTIME_ROOT = resolve(SRC_TAURI_DIR, 'resources/browser-runtime');
+const BROWSER_RUNTIME_PLACEHOLDER = join(
+  BROWSER_RUNTIME_ROOT,
+  '.platform-unavailable',
+);
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -72,8 +86,45 @@ function cargoTargetToBrowserPlatform(triple) {
     'x86_64-apple-darwin': 'mac-x64',
     'x86_64-unknown-linux-gnu': 'linux64',
     'x86_64-pc-windows-msvc': 'win64',
+    // Chrome for Testing 当前无 linux-arm64 headless-shell 锁定资产；
+    // 返回 null 表示明确不可用（禁止回落 host `current` 再炸一次）。
+    'aarch64-unknown-linux-gnu': null,
   };
-  return map[triple] ?? 'current';
+  if (Object.prototype.hasOwnProperty.call(map, triple)) {
+    return map[triple];
+  }
+  return 'current';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   tauri.conf.json 把 browser-runtime 目录声明为 bundle resources 通配；
+ *   空目录或不存在时 Tauri build.rs 会以 glob 未匹配失败，阻断整平台发版。
+ *   无 managed Chromium 的目标（如 linux aarch64）仍应产出可安装包，仅 verification 不可用。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若 browser-runtime 根目录下没有任何文件，写入 `.platform-unavailable` 占位；
+ *   已有真实 runtime 内容则不动。
+ *
+ * @param {string} reason 写入占位时的说明文本
+ */
+function ensureBrowserRuntimeResourcePresent(reason) {
+  mkdirSync(BROWSER_RUNTIME_ROOT, { recursive: true });
+  let hasContent = false;
+  try {
+    hasContent = readdirSync(BROWSER_RUNTIME_ROOT).length > 0;
+  } catch {
+    hasContent = false;
+  }
+  if (hasContent) {
+    return;
+  }
+  writeFileSync(
+    BROWSER_RUNTIME_PLACEHOLDER,
+    `${reason.trim() || 'managed browser runtime unavailable for this target'}\n`,
+    'utf8',
+  );
+  console.log(`已写入 browser-runtime 占位: ${BROWSER_RUNTIME_PLACEHOLDER}`);
 }
 
 /**
@@ -216,25 +267,43 @@ function main() {
 
   // A5：按 cargo target triple 映射 browser 平台（交叉编译时不能用 host `current`）。
   // 失败不阻断 sidecar；verification 在运行时按缺失降级为 unavailable；L3 需单独认证。
+  // 但 Tauri resource glob 仍要求 resources/browser-runtime 下至少有一个文件。
   if (!options.dryRun) {
     const browserPlatform = cargoTargetToBrowserPlatform(target);
-    const prepareBrowser = spawnSync(
-      process.execPath,
-      [
-        resolve(REPO_ROOT, 'scripts/prepare-browser-runtime.mjs'),
-        '--platform',
-        browserPlatform,
-      ],
-      { cwd: REPO_ROOT, encoding: 'utf8' },
-    );
-    if (prepareBrowser.status === 0) {
-      console.log('managed browser runtime prepared');
-    } else {
+    if (browserPlatform == null) {
       console.warn(
-        `managed browser runtime prepare skipped/failed (verification may be unavailable): ${
-          prepareBrowser.stderr || prepareBrowser.stdout || prepareBrowser.status
-        }`,
+        `managed browser runtime unsupported for cargo target ${target}; packaging continues without Chromium`,
       );
+      ensureBrowserRuntimeResourcePresent(
+        `unsupported cargo target for managed Chromium: ${target}`,
+      );
+    } else {
+      const prepareBrowser = spawnSync(
+        process.execPath,
+        [
+          resolve(REPO_ROOT, 'scripts/prepare-browser-runtime.mjs'),
+          '--platform',
+          browserPlatform,
+        ],
+        { cwd: REPO_ROOT, encoding: 'utf8' },
+      );
+      if (prepareBrowser.status === 0) {
+        console.log('managed browser runtime prepared');
+        ensureBrowserRuntimeResourcePresent(
+          `prepare succeeded but resource dir empty for ${browserPlatform}`,
+        );
+      } else {
+        console.warn(
+          `managed browser runtime prepare skipped/failed (verification may be unavailable): ${
+            prepareBrowser.stderr || prepareBrowser.stdout || prepareBrowser.status
+          }`,
+        );
+        ensureBrowserRuntimeResourcePresent(
+          `prepare failed for platform ${browserPlatform}: ${
+            prepareBrowser.stderr || prepareBrowser.stdout || prepareBrowser.status
+          }`,
+        );
+      }
     }
   }
 
