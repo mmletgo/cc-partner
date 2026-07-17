@@ -821,6 +821,8 @@
     "costUnavailable": "费用未提供",
     "empty": "暂无使用统计",
     "loadMore": "加载更多",
+    "clearInSettingsHint": "若要删除本机全部使用统计，请到设置 → 常规。",
+    "openClearInSettings": "去设置清除",
     "coverage": {
       "complete": "完整",
       "partial": "部分",

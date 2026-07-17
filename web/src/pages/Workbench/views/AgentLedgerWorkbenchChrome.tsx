@@ -52,6 +52,7 @@ export function AgentLedgerWorkbenchChrome(props: AgentLedgerWorkbenchChromeProp
           title={t('workbench:agentLedger.open')}
           aria-label={t('workbench:agentLedger.open')}
           data-workbench-responsive-action="true"
+          data-testid="agent-usage-stats-open"
           disabled={props.disabled}
           onClick={props.onOpen}
         >

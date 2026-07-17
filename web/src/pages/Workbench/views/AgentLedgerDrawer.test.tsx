@@ -4,11 +4,22 @@
  */
 import type { ReactElement } from 'react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import i18n from '@/i18n';
 import { AgentLedgerDrawer } from './AgentLedgerDrawer';
 import type { AgentLedgerPage, AgentLedgerSummary } from '@/lib/types/agentLedger';
+
+const navigateMock = vi.fn();
+
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return {
+    ...actual,
+    useNavigate: () => navigateMock,
+  };
+});
 
 beforeAll(async () => {
   await i18n.changeLanguage('zh');
@@ -16,6 +27,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   cleanup();
+  navigateMock.mockReset();
 });
 
 const emptyPage: AgentLedgerPage = { items: [], nextCursor: null };
@@ -37,26 +49,28 @@ const summaryPartial: AgentLedgerSummary = {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   测试需要 i18n 上下文。
+ *   测试需要 i18n + router 上下文。
  *
  * Code Logic（这个函数做什么）:
- *   I18nextProvider 包裹 render。
+ *   MemoryRouter + I18nextProvider 包裹 render。
  */
 function renderDrawer(
   props: Partial<React.ComponentProps<typeof AgentLedgerDrawer>> = {},
 ): ReturnType<typeof render> {
   return render(
     (
-      <I18nextProvider i18n={i18n}>
-        <AgentLedgerDrawer
-          open
-          onClose={vi.fn()}
-          localOnlyAvailable
-          page={emptyPage}
-          summary={summaryPartial}
-          {...props}
-        />
-      </I18nextProvider>
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <AgentLedgerDrawer
+            open
+            onClose={vi.fn()}
+            localOnlyAvailable
+            page={emptyPage}
+            summary={summaryPartial}
+            {...props}
+          />
+        </I18nextProvider>
+      </MemoryRouter>
     ) as ReactElement,
   );
 }
@@ -116,5 +130,15 @@ describe('AgentLedgerDrawer', () => {
     expect(screen.queryByText(/transcriptPath/i)).toBeNull();
     expect(screen.queryByText(/nativeSessionId/i)).toBeNull();
     expect(screen.queryByText(/credential/i)).toBeNull();
+  });
+
+  it('links to Settings general for clearing usage stats', () => {
+    const onClose = vi.fn();
+    renderDrawer({ onClose });
+    expect(screen.getByTestId('agent-usage-stats-settings-link')).toBeTruthy();
+    expect(screen.getByText(/设置 → 常规/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId('agent-usage-stats-open-settings'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(navigateMock).toHaveBeenCalledWith('/settings?tab=general');
   });
 });

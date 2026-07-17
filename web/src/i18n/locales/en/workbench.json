@@ -828,6 +828,8 @@
     "costUnavailable": "Cost not provided",
     "empty": "No usage stats yet",
     "loadMore": "Load more",
+    "clearInSettingsHint": "To delete all local usage stats, go to Settings → General.",
+    "openClearInSettings": "Clear in Settings",
     "coverage": {
       "complete": "Complete",
       "partial": "Partial",

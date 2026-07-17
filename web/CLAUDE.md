@@ -150,7 +150,8 @@
 - 用户文案统一为「Agent 使用统计 / Agent usage stats」（不再写 metadata history）。
 - 类型/schema：`web/src/lib/types/agentLedger.ts`、`web/src/lib/schemas/agentLedger.ts`。
 - API：`workbenchApi.agentLedger.{list,summarize,clear}`。
-- **查看入口**：Workbench 标题区 `AgentLedgerWorkbenchChrome` 按钮 → `AgentLedgerDrawer` 二级抽屉（用量摘要 + 最近会话列表）；加载态由 `useWorkbenchProjectController` 拥有，views 不 import `@/api/*`。
+- **查看入口**：Workbench 终端工具栏 `AgentLedgerWorkbenchChrome` 按钮（`data-testid=agent-usage-stats-open`）→ `AgentLedgerDrawer` 二级抽屉（用量摘要 + 最近会话列表）；加载态由 `useWorkbenchProjectController` 拥有，views 不 import `@/api/*`。
+- **发现性互链**：Drawer 底部「去设置清除」→ 关闭后 `navigate('/settings?tab=general')`（`data-testid=agent-usage-stats-open-settings`）；Settings 常规 helper 说明数据在工作台按钮查看、清除不影响终端/任务/Prompt/对话。
 - Fleet：`WorkbenchFleetView` 展示 7d Agent activity（unsupported/unavailable 不显示 0 tokens）。
-- Settings 常规 tab：一键清除使用统计 + Dialog 确认；helper 文案需说明入口在工作台、以及不会删终端/任务/Prompt/对话。
+- Settings 常规 tab：一键清除使用统计 + Dialog 确认。
 

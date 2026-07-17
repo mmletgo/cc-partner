@@ -1,15 +1,18 @@
 /**
- * AgentLedgerDrawer — 本机 Agent metadata 历史二级抽屉
+ * AgentLedgerDrawer — 本机 Agent 使用统计二级抽屉
  *
  * Business Logic（为什么需要这个组件）:
- *   用户需要查看自动产生的 metadata-only 历史与时间窗用量，unknown 显示「未提供」而非 0。
+ *   用户需要查看自动汇总的 Agent 使用统计（次数/耗时/token），unknown 显示「未提供」而非 0；
+ *   并需能发现「清除」入口（设置 → 常规），避免只在设置页看到清除、不知数据在哪看。
  *
  * Code Logic（这个组件做什么）:
- *   纯视图：接收 page/summary/loading 与回调；复用 Drawer/Button/Pill；不 import @/api。
+ *   纯视图：接收 page/summary/loading 与回调；复用 Drawer/Button/Pill；
+ *   底部提供跳转 `/settings?tab=general` 的清除入口；不 import @/api。
  */
 
-import type { ReactElement } from 'react';
+import { useCallback, type ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Button, Drawer, Pill } from '@/components/primitives';
 import type {
   AgentLedgerEntry,
@@ -63,10 +66,10 @@ function coverageTone(coverage: LedgerUsageCoverage): 'success' | 'warn' | 'neut
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   二级 drawer 呈现本机 Agent metadata 历史。
+ *   二级 drawer 呈现本机 Agent 使用统计，并互链设置清除入口。
  *
  * Code Logic（这个组件做什么）:
- *   Drawer + summary 块 + entry 列表 + load more。
+ *   Drawer + summary 块 + entry 列表 + load more + 底部跳转设置。
  */
 export function AgentLedgerDrawer({
   open,
@@ -81,8 +84,21 @@ export function AgentLedgerDrawer({
   onRefresh,
 }: AgentLedgerDrawerProps): ReactElement {
   const { t } = useTranslation(['workbench']);
+  const navigate = useNavigate();
   const titleId = 'agent-ledger-drawer-title';
   const unavailable = t('workbench:agentLedger.unavailable');
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户从查看页发现清除能力时，应一键落到设置常规页，而不是自己找。
+   *
+   * Code Logic（这个函数做什么）:
+   *   关闭 drawer 后 navigate `/settings?tab=general`。
+   */
+  const openClearInSettings = useCallback(() => {
+    onClose();
+    navigate('/settings?tab=general');
+  }, [navigate, onClose]);
 
   return (
     <Drawer open={open} onClose={onClose} titleId={titleId} side="right">
@@ -198,6 +214,18 @@ export function AgentLedgerDrawer({
             ) : null}
           </section>
         ) : null}
+
+        <footer className={styles.footer} data-testid="agent-usage-stats-settings-link">
+          <p className={styles.muted}>{t('workbench:agentLedger.clearInSettingsHint')}</p>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={openClearInSettings}
+            data-testid="agent-usage-stats-open-settings"
+          >
+            {t('workbench:agentLedger.openClearInSettings')}
+          </Button>
+        </footer>
       </div>
     </Drawer>
   );
