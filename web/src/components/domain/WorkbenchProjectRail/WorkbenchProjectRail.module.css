@@ -372,10 +372,11 @@
   line-height: var(--leading-normal);
 }
 
-/* 挂在共享 Dialog surface 上：远端项目选择器内容区 */
+/* 挂在共享 Dialog surface 上：远端项目选择器（Card 自管 padding） */
 .modalDialog {
   width: min(720px, 100%);
   max-width: 100%;
   max-height: min(760px, calc(100vh - var(--space-10)));
+  padding: 0;
   overflow: auto;
 }

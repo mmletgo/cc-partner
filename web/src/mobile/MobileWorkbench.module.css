@@ -713,6 +713,8 @@
   width: min(100%, 720px);
   max-width: 100%;
   max-height: calc(100dvh - var(--space-8));
+  /* header/body 自管分区 padding，覆盖 Dialog surface 默认内边距 */
+  padding: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;

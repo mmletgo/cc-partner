@@ -7,6 +7,8 @@
  *
  * Code Logic（这个组件做什么）:
  *   portal 到 document.body；surface 使用 role=dialog + aria-modal + aria-labelledby；
+ *   surface 默认提供内容内边距（padding: var(--space-5)），直接塞内容不再贴边；
+ *   header/body 自管分区 padding 或全宽分隔线时，调用方 className 须 padding:0 覆盖；
  *   side 控制左/右侧滑；useModalLayer 管理焦点与层栈；默认 closeOnEscape/closeOnBackdrop=true。
  */
 

@@ -581,6 +581,11 @@
   }
 }
 
+/* 嵌套 Card 的确认弹窗：Card 自管 padding，覆盖 Dialog surface 默认内边距 */
+.dialogWithCard {
+  padding: 0;
+}
+
 /* 分组资源加载失败：局部错误 + 重试 */
 .resourceError {
   display: flex;

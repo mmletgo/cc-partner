@@ -254,8 +254,8 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | StatusDot | status, size | 设备在线状态点 |
 | StatusMessage | tone, live?, action? | 异步反馈 live region；`success/info/warn`→`role=status`，`danger`→`role=alert`；阻断失败恰好一次 alert |
 | ProgressBar | value, tone, size | 进度条 |
-| Dialog | open, titleId, onClose, closeOnEscape?, closeOnBackdrop?, initialFocusRef? | portal 模态；surface `role=dialog aria-modal`；共享 `useModalLayer`（focus trap / Escape / 背景 inert 引用计数 / body scroll lock / 关闭恢复触发焦点）；禁止业务页自建 focus trap |
-| Drawer | Dialog props + side?: left\|right | 侧滑模态抽屉；窄屏导航/详情侧栏；复用同一层栈合同 |
+| Dialog | open, titleId, onClose, closeOnEscape?, closeOnBackdrop?, initialFocusRef?, className? | portal 模态；surface `role=dialog aria-modal` + **默认 `padding: var(--space-5)`**；共享 `useModalLayer`（focus trap / Escape / 背景 inert 引用计数 / body scroll lock / 关闭恢复触发焦点）；禁止业务页自建 focus trap。嵌套 Card 或自管分区 padding 时，`className` 必须显式 `padding: 0` 覆盖，避免双边距 |
+| Drawer | Dialog props + side?: left\|right | 侧滑模态抽屉；surface **默认 `padding: var(--space-5)`**；header/body 自管分区或全宽分隔线时 `className` 须 `padding: 0`；复用同一层栈合同 |
 
 > Frontend foundation 合同：`npm run check:css-tokens` / `check:i18n` / `check:bundle`；巨型页 controller/view 所有权见 `web/CLAUDE.md`；E2E 冒烟 `npm run test:e2e -- frontend-foundation.spec.ts`（Dialog 焦点、mobile Drawer Escape、Attention 单 tab stop、终端 arrow、路由崩溃恢复、reduced-motion）。手动 VoiceOver/NVDA 覆盖同类路径。禁止 Redux/Zustand/CSS framework/第三方 modal 库。
 

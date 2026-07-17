@@ -5,11 +5,12 @@
  *   用户可保存/应用/删除当前结构 metadata；不是可执行命令配方，无命令编辑器。
  *
  * Code Logic（做什么）:
- *   复用 Dialog/Button；props-only，不 import @/api/*。
+ *   复用 Dialog/Button；props-only，不 import @/api/*；用户文案走 workbench:workspaceSnapshot。
  */
 
 import { useId, useState } from 'react';
 import type { ReactElement } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Dialog } from '@/components/primitives/Dialog';
 import { Button } from '@/components/primitives/Button';
 import { Input } from '@/components/primitives/Input';
@@ -36,6 +37,7 @@ export function WorkspaceSnapshotDialog(
   props: WorkspaceSnapshotDialogProps,
 ): ReactElement {
   const { open, onClose, snapshots, onSaveCurrent, onApply, onDelete } = props;
+  const { t } = useTranslation(['workbench', 'common']);
   const titleId = useId();
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -63,16 +65,15 @@ export function WorkspaceSnapshotDialog(
   return (
     <Dialog open={open} titleId={titleId} onClose={onClose}>
       <div className={styles.snapshotDialog} data-testid="workspace-snapshot-dialog">
-        <h2 id={titleId}>工作现场快照</h2>
-        <p className={styles.snapshotHint}>
-          仅保存项目/工作区/终端选择与视图结构，不包含终端输出、命令或文件内容。
-        </p>
+        <h2 id={titleId}>{t('workbench:workspaceSnapshot.title')}</h2>
+        <p className={styles.snapshotHint}>{t('workbench:workspaceSnapshot.hint')}</p>
         <div className={styles.snapshotSaveRow}>
           <Input
+            className={styles.snapshotSaveInput}
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder="快照名称"
-            aria-label="快照名称"
+            placeholder={t('workbench:workspaceSnapshot.namePlaceholder')}
+            aria-label={t('workbench:workspaceSnapshot.nameAriaLabel')}
           />
           <Button
             variant="primary"
@@ -81,48 +82,52 @@ export function WorkspaceSnapshotDialog(
             loading={busy}
             onClick={() => void handleSave()}
           >
-            保存当前结构
+            {t('workbench:workspaceSnapshot.saveCurrent')}
           </Button>
         </div>
-        <ul className={styles.snapshotList}>
-          {snapshots.map((item) => (
-            <li key={item.id} className={styles.snapshotItem}>
-              <span>{item.name ?? item.slotKey}</span>
-              <div className={styles.snapshotItemActions}>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  type="button"
-                  onClick={() => void onApply(item.id)}
-                >
-                  应用
-                </Button>
-                {pendingDeleteId === item.id ? (
+        {snapshots.length === 0 ? (
+          <p className={styles.snapshotHint}>{t('workbench:workspaceSnapshot.empty')}</p>
+        ) : (
+          <ul className={styles.snapshotList}>
+            {snapshots.map((item) => (
+              <li key={item.id} className={styles.snapshotItem}>
+                <span>{item.name ?? item.slotKey}</span>
+                <div className={styles.snapshotItemActions}>
                   <Button
-                    variant="danger"
+                    variant="secondary"
                     size="sm"
                     type="button"
-                    onClick={() => {
-                      void onDelete(item.id);
-                      setPendingDeleteId(null);
-                    }}
+                    onClick={() => void onApply(item.id)}
                   >
-                    确认删除
+                    {t('workbench:workspaceSnapshot.apply')}
                   </Button>
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    type="button"
-                    onClick={() => setPendingDeleteId(item.id)}
-                  >
-                    删除
-                  </Button>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
+                  {pendingDeleteId === item.id ? (
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      type="button"
+                      onClick={() => {
+                        void onDelete(item.id);
+                        setPendingDeleteId(null);
+                      }}
+                    >
+                      {t('workbench:workspaceSnapshot.confirmDelete')}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      type="button"
+                      onClick={() => setPendingDeleteId(item.id)}
+                    >
+                      {t('workbench:workspaceSnapshot.delete')}
+                    </Button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
         {/* 明确不提供命令编辑器 */}
       </div>
     </Dialog>

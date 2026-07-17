@@ -101,7 +101,13 @@ export function AgentLedgerDrawer({
   }, [navigate, onClose]);
 
   return (
-    <Drawer open={open} onClose={onClose} titleId={titleId} side="right">
+    <Drawer
+      open={open}
+      onClose={onClose}
+      titleId={titleId}
+      side="right"
+      className={styles.drawer}
+    >
       <div className={styles.root}>
         <header className={styles.header}>
           <h2 id={titleId} className={styles.title}>

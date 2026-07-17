@@ -3,6 +3,8 @@
 .drawer {
   width: min(420px, 100vw);
   max-width: 100vw;
+  /* header/body 自管分区 padding，覆盖 Drawer surface 默认内边距 */
+  padding: 0;
   display: flex;
   flex-direction: column;
   background: var(--surface);
@@ -112,6 +114,8 @@
 
 .modal {
   width: min(420px, calc(100vw - var(--space-8)));
+  /* Card 自管 padding，覆盖 Dialog surface 默认内边距 */
+  padding: 0;
 }
 
 .modalCard {

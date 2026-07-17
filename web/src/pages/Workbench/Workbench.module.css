@@ -1517,6 +1517,8 @@
 .launchRemoteDialog {
   width: min(920px, 96vw);
   max-height: min(80vh, 720px);
+  /* 内部 WorkbenchRemoteProjectPicker Card 自管 padding */
+  padding: 0;
 }
 
 /* Workspace safe restore notice + snapshot dialog */
@@ -1562,6 +1564,14 @@
   min-width: min(420px, 90vw);
 }
 
+.snapshotDialog h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+  line-height: var(--leading-tight);
+}
+
 .snapshotHint {
   margin: 0;
   color: var(--fg-muted-readable);
@@ -1572,6 +1582,12 @@
   display: flex;
   gap: var(--space-2);
   align-items: center;
+}
+
+/* Input width:100% 在 flex 行内需收缩，避免挤出按钮 */
+.snapshotSaveInput {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .snapshotList {
@@ -1592,7 +1608,7 @@
   gap: var(--space-2);
   padding: var(--space-2);
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background: var(--bg);
   border: 1px solid var(--border);
 }
 

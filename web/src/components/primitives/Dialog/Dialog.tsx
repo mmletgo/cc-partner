@@ -7,6 +7,8 @@
  *
  * Code Logic（这个组件做什么）:
  *   打开时 portal 到 document.body，渲染 backdrop + role=dialog surface；
+ *   surface 默认提供内容内边距（padding: var(--space-5)），直接塞标题/表单不再贴边；
+ *   嵌套 Card 或 header/body 自管 padding 时，调用方 className 须 padding:0 覆盖；
  *   通过 useModalLayer 管理层栈、焦点陷阱、inert、滚动锁与触发焦点恢复；
  *   无业务导入；closeOnEscape/closeOnBackdrop 默认 true。
  */

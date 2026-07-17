@@ -1,5 +1,7 @@
 .dialog {
   width: min(720px, 100%);
+  /* Card 自带 Header/Body padding，覆盖 Dialog surface 默认内边距避免双边距 */
+  padding: 0;
 }
 
 .header {

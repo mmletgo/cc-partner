@@ -13,6 +13,8 @@
   max-height: 76vh;
   align-self: flex-start;
   margin-top: 12vh;
+  /* header/list/footer 自管分区 padding，覆盖 Dialog surface 默认内边距 */
+  padding: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;

@@ -835,5 +835,16 @@
       "partial": "Partial",
       "unavailable": "Not provided"
     }
+  },
+  "workspaceSnapshot": {
+    "title": "Workspace snapshots",
+    "hint": "Saves project/worktree/terminal selection and view structure only — not terminal output, commands, or file contents.",
+    "namePlaceholder": "Snapshot name",
+    "nameAriaLabel": "Snapshot name",
+    "saveCurrent": "Save current layout",
+    "apply": "Apply",
+    "delete": "Delete",
+    "confirmDelete": "Confirm delete",
+    "empty": "No named snapshots yet"
   }
 }

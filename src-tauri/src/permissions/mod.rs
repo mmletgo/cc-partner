@@ -13,7 +13,8 @@
 //!         1) 无稳定 `CFBundleIdentifier`（如 `tauri dev` 裸 `target/debug/app`）→ 一律未授权
 //!            （该进程不受 TCC 约束，系统 API 会假绿，且系统设置不会以 cc-partner 列出）；
 //!         2) `IOHIDCheckAccess(ListenEvent)` 仅 `Granted` 通过；
-//!         3) 若可加载私有 TCC 框架，则 `TCCAccessPreflight(kTCCServiceListenEvent)==0`；
+//!         3) 若可加载私有 TCC 框架：仅 **Denied(1)** 硬失败；`Granted(0)` 通过；
+//!            `Unknown(2)` 软忽略（ListenEvent 上 Unknown 常见，不得当假红）；
 //!         4) 最后 `CGPreflightListenEventAccess`。
 //!       **禁止**单独用 `CGEventTapCreate` / 单独用 CGPreflight（在已授辅助功能时易假绿）。
 //!     - 辅助功能：`AXIsProcessTrusted`。
@@ -106,12 +107,29 @@ fn main_bundle_identifier() -> Option<String> {
     }
 }
 
+/// TCCAccessPreflight 结果（私有 API 经验值；与 ScreenCapture 对照验证）。
+#[cfg(target_os = "macos")]
+const TCC_PREFLIGHT_GRANTED: i32 = 0;
+#[cfg(target_os = "macos")]
+const TCC_PREFLIGHT_DENIED: i32 = 1;
+// Unknown=2：ListenEvent 上常见，不得单独当作「未授权」。
+
+/// Business Logic（为什么需要这个函数）:
+///     私有 TCC preflight 在 ListenEvent 上常返回 Unknown，不得把非 0 一律当未授权（假红）。
+///
+/// Code Logic（这个函数做什么）:
+///     仅当 preflight 明确返回 Denied(1) 时返回 true（应 hard-fail）；None/Granted/Unknown 返回 false。
+#[cfg(target_os = "macos")]
+fn tcc_listen_event_hard_denied(tcc: Option<i32>) -> bool {
+    matches!(tcc, Some(TCC_PREFLIGHT_DENIED))
+}
+
 /// 通过私有 TCC 框架预检 ListenEvent（与系统设置列表同源信号）。
 ///
-/// Business Logic: 公开 CG/IOHID 在无 bundle / 仅辅助功能时会假绿；TCC preflight 更贴近
-///     「隐私 → 输入监控」列表。框架为私有，加载失败时返回 None 由调用方降级。
+/// Business Logic: 公开 CG/IOHID 在无 bundle / 仅辅助功能时会假绿；TCC preflight 可补充
+///     「隐私 → 输入监控」侧信号。框架为私有，加载失败时返回 None 由调用方降级。
 /// Code Logic: dlopen TCC.framework → TCCAccessPreflight("kTCCServiceListenEvent")；
-///     经验值 0=granted、非 0=not granted（与 ScreenCapture 对照验证）。
+///     返回 0=Granted / 1=Denied / 2=Unknown（或其它非 0/1 值按 Unknown 软处理）。
 #[cfg(target_os = "macos")]
 fn tcc_listen_event_preflight() -> Option<i32> {
     unsafe {
@@ -228,25 +246,32 @@ pub fn check_screen_capture_access() -> bool {
 /// Business Logic（为什么需要这个函数）:
 ///     UI「已授权」必须与系统设置「隐私 → 输入监控」一致。`tauri dev` 裸二进制无
 ///     CFBundleIdentifier 时不受 TCC 约束，公开 API 会假绿；仅开辅助功能时
-///     CGPreflight/CGEventTap 也会假绿。必须 fail-closed。
+///     CGPreflight/CGEventTap 也会假绿。必须 fail-closed。同时不得因私有
+///     `TCCAccessPreflight==Unknown` 在用户已打开开关后假红。
 ///
 /// Code Logic（这个函数做什么）:
 ///     1) 无/空/占位 bundle id → false；
-///     2) IOHIDCheckAccess(ListenEvent) 必须 Granted；
-///     3) 若 TCCAccessPreflight 可用，必须返回 0（granted）；
+///     2) IOHIDCheckAccess(ListenEvent) 必须 Granted(0)；
+///     3) 若 TCCAccessPreflight 可用：仅 Denied(1) → false；Granted(0) 通过；
+///        Unknown(2)/其它值软忽略（继续看 CG）；
 ///     4) CGPreflightListenEventAccess 必须 true。
+///     任一步失败时 `info!` 打出 bundle/iohid/tcc/cg 便于对照系统设置。
 #[cfg(target_os = "macos")]
 pub fn check_input_monitoring_access() -> bool {
     let bundle_id = main_bundle_identifier();
+    let bundle_label = bundle_id.as_deref().unwrap_or("<none>");
     match bundle_id.as_deref() {
         None => {
-            tracing::debug!("input_monitoring check: no CFBundleIdentifier → fail-closed");
+            tracing::info!(
+                bundle_id = bundle_label,
+                "input_monitoring check: no CFBundleIdentifier → fail-closed"
+            );
             return false;
         }
         // tauri dev 偶发 placeholder / 空标识
         Some("") | Some("app") => {
-            tracing::debug!(
-                bundle_id = bundle_id.as_deref(),
+            tracing::info!(
+                bundle_id = bundle_label,
                 "input_monitoring check: unstable bundle id → fail-closed"
             );
             return false;
@@ -256,20 +281,44 @@ pub fn check_input_monitoring_access() -> bool {
 
     let iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
     if iohid != K_IOHID_ACCESS_TYPE_GRANTED {
-        tracing::debug!(iohid, "input_monitoring check: IOHID not Granted");
+        tracing::info!(
+            bundle_id = bundle_label,
+            iohid,
+            "input_monitoring check: IOHID not Granted (0=Granted,1=Denied,2=Unknown)"
+        );
         return false;
     }
 
-    if let Some(tcc) = tcc_listen_event_preflight() {
-        if tcc != 0 {
-            tracing::debug!(tcc, "input_monitoring check: TCC preflight not granted");
-            return false;
+    let tcc = tcc_listen_event_preflight();
+    if tcc_listen_event_hard_denied(tcc) {
+        tracing::info!(
+            bundle_id = bundle_label,
+            iohid,
+            tcc = ?tcc,
+            "input_monitoring check: TCC preflight Denied"
+        );
+        return false;
+    }
+    if let Some(code) = tcc {
+        if code != TCC_PREFLIGHT_GRANTED {
+            // Unknown 或未文档化返回值：不单独否决，交给 CG 终判
+            tracing::debug!(
+                bundle_id = bundle_label,
+                iohid,
+                tcc = code,
+                "input_monitoring check: TCC preflight soft (not Denied); continue"
+            );
         }
     }
 
     let cg = unsafe { CGPreflightListenEventAccess() };
     if !cg {
-        tracing::debug!("input_monitoring check: CGPreflightListenEventAccess=false");
+        tracing::info!(
+            bundle_id = bundle_label,
+            iohid,
+            tcc = ?tcc,
+            "input_monitoring check: CGPreflightListenEventAccess=false"
+        );
         return false;
     }
     true
@@ -467,5 +516,20 @@ mod tests {
                 assert_eq!(granted, check_input_monitoring_access());
             }
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     TCC Unknown 不得把系统设置已开的输入监控判成未授权（假红）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言仅 Denied(1) 触发 hard deny；None/Granted(0)/Unknown(2)/其它值均不 hard deny。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn tcc_listen_event_only_hard_denies_on_denied() {
+        assert!(!tcc_listen_event_hard_denied(None));
+        assert!(!tcc_listen_event_hard_denied(Some(TCC_PREFLIGHT_GRANTED)));
+        assert!(tcc_listen_event_hard_denied(Some(TCC_PREFLIGHT_DENIED)));
+        assert!(!tcc_listen_event_hard_denied(Some(2))); // Unknown
+        assert!(!tcc_listen_event_hard_denied(Some(99)));
     }
 }

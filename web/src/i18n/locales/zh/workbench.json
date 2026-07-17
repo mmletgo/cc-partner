@@ -828,5 +828,16 @@
       "partial": "部分",
       "unavailable": "未提供"
     }
+  },
+  "workspaceSnapshot": {
+    "title": "工作现场快照",
+    "hint": "仅保存项目/工作区/终端选择与视图结构，不包含终端输出、命令或文件内容。",
+    "namePlaceholder": "快照名称",
+    "nameAriaLabel": "快照名称",
+    "saveCurrent": "保存当前结构",
+    "apply": "应用",
+    "delete": "删除",
+    "confirmDelete": "确认删除",
+    "empty": "暂无命名快照"
   }
 }

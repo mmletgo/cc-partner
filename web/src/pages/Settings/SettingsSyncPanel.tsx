@@ -792,6 +792,7 @@ export function SettingsSyncPanel({
   onClose={onCloseRestoreDialog}
   closeOnEscape={!restoreBusy}
   closeOnBackdrop={!restoreBusy}
+  className={styles.dialogWithCard}
 >
   <Card variant="elevated" padding="md">
     <Card.Header>
@@ -831,6 +832,7 @@ export function SettingsSyncPanel({
   onClose={onCloseRollbackDialog}
   closeOnEscape={!rollbackBusy}
   closeOnBackdrop={!rollbackBusy}
+  className={styles.dialogWithCard}
 >
   <Card variant="elevated" padding="md">
     <Card.Header>

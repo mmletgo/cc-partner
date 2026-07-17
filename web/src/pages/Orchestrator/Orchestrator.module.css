@@ -104,6 +104,8 @@
 
 /* Drawer surface 已提供宽度/高度/边框/背景/阴影；此处只补内部布局 */
 .taskDrawer {
+  /* header/content/footer 自管分区 padding，覆盖 Drawer surface 默认内边距 */
+  padding: 0;
   overflow: hidden;
 }
 
@@ -801,8 +803,9 @@
   opacity: 0.65;
 }
 
-/* Dialog surface 已提供宽度/最大高度/阴影；此处只保留内部滚动边界 */
+/* Dialog surface 已提供宽度/最大高度/阴影；Card 自带 Header/Body padding，覆盖默认内边距 */
 .createDialog {
+  padding: 0;
   overflow: hidden;
 }
 
@@ -1071,6 +1074,7 @@
   font: inherit;
   padding: var(--space-2);
   margin-bottom: var(--space-3);
+  box-sizing: border-box;
 }
 
 .reworkDialogActions {

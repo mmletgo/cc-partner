@@ -3,7 +3,7 @@
   "subtitle": "Grant the following permissions to enable full functionality",
   "checkingPermission": "Checking permission status…",
   "permissionReady": "Permissions ready",
-  "waitingPermission": "Waiting for system authorization…",
+  "waitingPermission": "Waiting for system authorization… If the toggle is already on in System Settings, fully quit and reopen the app, then tap Recheck.",
   "skip": "Skip for now",
   "continue": "Continue",
   "permissionListAriaLabel": "Permission list",
@@ -18,7 +18,7 @@
     },
     "inputMonitoring": {
       "title": "Input Monitoring",
-      "description": "Health reminder detects keyboard activity"
+      "description": "Health reminder detects keyboard activity; after enabling in System Settings, fully quit and reopen this app"
     },
     "notification": {
       "title": "Notifications",

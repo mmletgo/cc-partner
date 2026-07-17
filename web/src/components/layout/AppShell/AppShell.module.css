@@ -126,17 +126,18 @@
   outline-offset: 2px;
 }
 
-/* 共享 Dialog surface：窄卡片模态，承载 MobileAccessCard */
+/* 共享 Dialog surface：窄卡片模态，承载 MobileAccessCard；内边距由 body 统一管理 */
 .mobileAccessDialog {
   width: min(360px, 100%);
   max-height: calc(100vh - var(--space-10));
+  padding: 0;
   overflow: auto;
 }
 
 .mobileAccessDialogBody {
   position: relative;
   box-sizing: border-box;
-  padding: var(--space-3);
+  padding: var(--space-5);
 }
 
 .mobileAccessClose {

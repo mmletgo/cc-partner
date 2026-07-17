@@ -32,11 +32,15 @@
   flex-direction: column;
   width: min(620px, calc(100vw - var(--space-8)));
   height: 100%;
+  /* 默认内容内边距：直接塞内容的侧栏不再贴边；
+     header/body/footer 分区自管 padding 或全宽分隔线时，className 须 padding: 0 覆盖 */
+  padding: var(--space-5);
   overflow: auto;
   background: var(--bg);
   color: var(--fg);
   box-shadow: var(--shadow-window);
   outline: none;
+  box-sizing: border-box;
 }
 
 .sideRight {
