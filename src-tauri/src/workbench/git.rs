@@ -988,7 +988,19 @@ pub fn merge_reviewed_oid_with_frozen_main(
             let merge_oid = head_hash(main_path)?.ok_or_else(|| {
                 AppError::generic("merge main failed: main HEAD empty after merge")
             })?;
-            verify_merge_oid_binding(main_path, &merge_oid, &pre_oid, reviewed_oid, &branch)?;
+            if let Err(bind_err) =
+                verify_merge_oid_binding(main_path, &merge_oid, &pre_oid, reviewed_oid, &branch)
+            {
+                // binding 失败说明 merge 已改写 tip/index；必须完整回滚再向外抛错。
+                if let Err(rb_err) =
+                    rollback_main_merge_full(main_path, &branch, &pre_oid, &merge_oid)
+                {
+                    return Err(AppError::generic(format!(
+                        "merge main binding failed ({bind_err}); full rollback also failed: {rb_err}"
+                    )));
+                }
+                return Err(bind_err);
+            }
             Ok(MergeReviewedOutcome::Merged(FrozenMainMergeResult {
                 merge_oid,
                 pre_oid,
@@ -1005,6 +1017,8 @@ pub fn merge_reviewed_oid_with_frozen_main(
 /// Code Logic（这个函数做什么）:
 ///     `git update-ref refs/heads/<branch> <pre_oid> <merge_oid>`；期望 old=merge_oid，
 ///     成功则 tip 回滚；CAS 失败（tip 已漂移）返回错误由调用方记录。
+///     注意：本函数只回滚 ref，不恢复 index/worktree；生产 abort 路径应优先
+///     `rollback_main_merge_full`。
 pub fn rollback_main_merge_cas(
     main_path: &Path,
     branch: &str,
@@ -1022,6 +1036,60 @@ pub fn rollback_main_merge_cas(
         main_path,
         &["update-ref", &refname, pre_oid.trim(), merge_oid.trim()],
     )?;
+    Ok(())
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     merge 验证失败或交付 abort-after-merge 时，仅 update-ref 会留下脏 index/worktree
+///     （仍停在 merge tree），污染后续 dirty check 与 push；必须完整恢复 ref+index+worktree。
+///
+/// Code Logic（这个函数做什么）:
+///     1) `update-ref` CAS：branch tip `merge_oid` → `pre_oid`（tip 已漂移则 Err）；
+///     2) 确保当前分支为 `branch` 后 `git reset --hard <pre_oid>`；
+///     3) 校验 `head_hash == pre_oid` 且 `status.clean`，否则 Err。
+pub fn rollback_main_merge_full(
+    main_path: &Path,
+    branch: &str,
+    pre_oid: &str,
+    merge_oid: &str,
+) -> Result<(), AppError> {
+    let branch = branch.trim();
+    let pre_oid = pre_oid.trim();
+    let merge_oid = merge_oid.trim();
+    if branch.is_empty() {
+        return Err(AppError::generic("rollback main full: branch 不能为空"));
+    }
+    if pre_oid.is_empty() || merge_oid.is_empty() {
+        return Err(AppError::generic(
+            "rollback main full: pre/merge oid 不能为空",
+        ));
+    }
+    // tip 已不是 merge_oid 时 CAS 失败，避免把别人的推进误回滚。
+    rollback_main_merge_cas(main_path, branch, pre_oid, merge_oid)?;
+
+    if let Some(now_branch) = current_branch(main_path) {
+        if now_branch != branch {
+            // 尝试切回冻结分支再 hard reset
+            run_git(main_path, &["checkout", branch])?;
+        }
+    } else {
+        run_git(main_path, &["checkout", branch])?;
+    }
+    run_git(main_path, &["reset", "--hard", pre_oid])?;
+
+    let head = head_hash(main_path)?
+        .ok_or_else(|| AppError::generic("rollback main full: HEAD empty after reset --hard"))?;
+    if head != pre_oid {
+        return Err(AppError::generic(format!(
+            "rollback main full: HEAD 未回到 pre_oid (expected={pre_oid}, got={head})"
+        )));
+    }
+    let st = status(main_path)?;
+    if !st.clean {
+        return Err(AppError::generic(
+            "rollback main full: index/worktree 在 reset 后仍不干净",
+        ));
+    }
     Ok(())
 }
 
@@ -2186,6 +2254,68 @@ UU web/src/App.tsx
             }
             MergeReviewedOutcome::Conflicted => panic!("expected merged"),
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     abort-after-merge 必须完整恢复 ref+index+worktree，否则 main 脏态会挡住后续交付。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     merge feature 进 main 后 `rollback_main_merge_full`；断言 HEAD=pre_oid、clean、
+    ///     merge 内容（feat.txt）消失。
+    #[test]
+    fn rollback_main_merge_full_restores_ref_index_and_worktree() {
+        let root = temp_git_dir("workbench-full-rollback");
+        let origin = root.join("origin.git");
+        let main = root.join("main");
+        let feature = root.join("feature");
+        fs::create_dir_all(&origin).expect("origin");
+        git_test_command(&origin, &["init", "--bare"]);
+        fs::create_dir_all(&main).expect("main");
+        git_test_command(&main, &["init"]);
+        git_test_command(&main, &["checkout", "-b", "main"]);
+        git_test_command(&main, &["config", "user.email", "test@example.com"]);
+        git_test_command(&main, &["config", "user.name", "Workbench Test"]);
+        fs::write(main.join("README.md"), "base\n").expect("write");
+        git_test_command(&main, &["add", "README.md"]);
+        git_test_command(&main, &["commit", "-m", "initial"]);
+        git_test_command(
+            &main,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git_test_command(&main, &["push", "-u", "origin", "main"]);
+        let pre_oid = head_hash(&main).expect("pre").expect("some");
+        git_test_command(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/rb",
+                feature.to_str().unwrap(),
+            ],
+        );
+        fs::write(feature.join("feat.txt"), "merged-content\n").expect("feat");
+        git_test_command(&feature, &["add", "feat.txt"]);
+        git_test_command(&feature, &["commit", "-m", "feat"]);
+        let reviewed = head_hash(&feature).expect("head").expect("oid");
+        let outcome = merge_reviewed_oid_with_frozen_main(&main, &reviewed).expect("merge");
+        let merge_oid = match outcome {
+            MergeReviewedOutcome::Merged(r) => {
+                assert!(main.join("feat.txt").exists());
+                r.merge_oid
+            }
+            MergeReviewedOutcome::Conflicted => panic!("expected merged"),
+        };
+        rollback_main_merge_full(&main, "main", &pre_oid, &merge_oid).expect("full rollback");
+        let head = head_hash(&main).expect("head").expect("oid");
+        assert_eq!(head, pre_oid, "HEAD must return to pre_oid");
+        let st = status(&main).expect("status");
+        assert!(st.clean, "worktree must be clean after full rollback");
+        assert!(
+            !main.join("feat.txt").exists(),
+            "merge content must be gone from worktree"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
