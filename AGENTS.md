@@ -435,7 +435,9 @@ cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture -
 
 ```bash
 ./start.sh                         # 推荐：自检工具链 + tauri dev
-# 或：cd web && npm install && ./node_modules/.bin/tauri dev
+# macOS 下会经 scripts/macos-dev-cargo-runner 组装 cc-partner-dev.app
+# （「cc-partner (Dev)」/ com.cc-partner.app.dev），与发布版分开 TCC 授权
+# 或：cd web && npm install && ./node_modules/.bin/tauri dev  # 裸 binary，无开发壳
 ```
 
 本地前端 ↔ Rust 走 `invoke()` IPC（无前端本地 API 端口、无 `/api` proxy）。开发模式设计系统：`http://localhost:1420/design-system`（Tauri dev 默认 1420；生产不可访问）。

@@ -187,11 +187,12 @@ function canListenToTauriEvents(): boolean {
  *
  * Business Logic（为什么需要这个组件）:
  *   仅在「首次启动且权限未全部就绪」时把用户导向 /welcome 一次。
- *   已完成引导（localStorage 标记）或权限已就绪则直接放行，避免每次启动重复打扰。
+ *   已完成引导（localStorage 标记）或四项权限已就绪则直接放行，避免每次启动重复打扰。
  *
  * Code Logic（这个组件做什么）:
  *   - 读 PERMISSION_ONBOARDED_KEY，已标记 → pass
- *   - 否则查权限：全部授权 → 写标记 + pass；否则 → redirect 到 /welcome
+ *   - 否则并行查 TCC（check_permissions）+ 通知（checkNotificationGranted）：
+ *     屏幕录制/辅助功能/输入监控/通知全部授权 → 写标记 + pass；否则 → redirect 到 /welcome
  *   - 查询失败 → pass（不阻塞用户）
  *   - hooks 在 early return 之前（React 规则：hooks 调用顺序不能条件化）
  */
@@ -206,12 +207,17 @@ function OnboardingGuard() {
         return;
       }
       try {
-        const s = await configApi.permissions();
+        const [s, notifyGranted] = await Promise.all([
+          configApi.permissions(),
+          checkNotificationGranted(),
+        ]);
         if (cancelled) return;
+        // 与 usePermissions.isRequiredGranted 对齐：TCC 三项 + 通知均需授权
         const all =
           s.screenCapture.granted &&
           s.accessibility.granted &&
-          s.inputMonitoring.granted;
+          s.inputMonitoring.granted &&
+          notifyGranted;
         if (all) {
           localStorage.setItem(PERMISSION_ONBOARDED_KEY, '1');
           setState('pass');

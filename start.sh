@@ -69,6 +69,22 @@ run_dev() {
   # 但 GUI setup 启动时必须拉起 cc-partner-backend sidecar,缺真 binary 会 panic。
   # 故在此预先构建 cc-partner-backend debug binary(cargo 增量编译,之后很快)。
   ensure_backend_debug_binary
+
+  # macOS：用独立开发 .app（显示名 cc-partner (Dev)、Bundle ID com.cc-partner.app.dev）
+  # 替换裸 target/debug/app，使系统设置 TCC 列表与发布版分开展示、分开授权。
+  # 非 Darwin 仍走默认 cargo runner。
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local runner="$PWD/scripts/macos-dev-cargo-runner.sh"
+    if [[ ! -x "$runner" ]]; then
+      chmod +x "$runner" 2>/dev/null || true
+    fi
+    if [[ -x "$runner" ]]; then
+      info "macOS 开发壳: cc-partner (Dev) / com.cc-partner.app.dev"
+      info "系统「隐私与安全性」中将与发布版 cc-partner 分开展示，需单独授权。"
+      exec "$TAURI_BIN" dev --runner "$runner"
+    fi
+    error "缺少可执行 scripts/macos-dev-cargo-runner.sh，回退裸 binary（输入监控可能 fail-closed）"
+  fi
   exec "$TAURI_BIN" dev
 }
 
@@ -99,6 +115,9 @@ cc-partner 启动脚本
 
 命令:
   dev       开发模式(默认):Tauri + Vite + 热重载
+            macOS 下经 scripts/macos-dev-cargo-runner 打成
+            cc-partner-dev.app（显示名「cc-partner (Dev)」、
+            Bundle ID com.cc-partner.app.dev），与发布版分开 TCC 授权
   build     生产构建(产出 dmg/安装包)
   web       仅前端 Vite(浏览器预览,无 Tauri 外壳)
   clean     清理构建产物

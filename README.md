@@ -136,8 +136,10 @@ cd cc-partner
 
 # 推荐：一键开发（检查 Node/Rust、按需 npm install、预构建 backend sidecar、tauri dev）
 ./start.sh
+# macOS：自动用开发壳 cc-partner-dev.app（显示名「cc-partner (Dev)」、
+# Bundle ID com.cc-partner.app.dev），与发布版在系统设置中分开展示/授权
 
-# 或手动
+# 或手动（裸 tauri dev 无开发壳；macOS 输入监控可能 fail-closed）
 cd web && npm install
 ./node_modules/.bin/tauri dev
 ```

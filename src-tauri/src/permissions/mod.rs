@@ -73,37 +73,111 @@ const K_IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
 #[cfg(target_os = "macos")]
 const K_IOHID_ACCESS_TYPE_GRANTED: u32 = 0;
 
+/// 发布版 Bundle Identifier（与 `tauri.conf.json` `identifier` 对齐）。
+const PRODUCT_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app";
+/// 开发版 Bundle Identifier（`scripts/prepare-macos-dev-app.mjs` 写入 Info.plist）。
+#[allow(dead_code)]
+const DEV_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app.dev";
+
+/// Business Logic（为什么需要这个函数）:
+///     解析 Info.plist XML 中的 CFBundleIdentifier，供 CF API 失败时的路径回退。
+///
+/// Code Logic（这个函数做什么）:
+///     在文本中定位 `<key>CFBundleIdentifier</key>` 后的第一个 `<string>...</string>`，
+///     去空白后非空则返回；找不到返回 None。不依赖完整 plist 解析库。
+fn parse_cfbundle_identifier_plist_xml(xml: &str) -> Option<String> {
+    const KEY: &str = "CFBundleIdentifier";
+    let key_pos = xml.find(KEY)?;
+    let after_key = &xml[key_pos + KEY.len()..];
+    let string_open = after_key.find("<string>")?;
+    let after_open = &after_key[string_open + "<string>".len()..];
+    let string_close = after_open.find("</string>")?;
+    let value = after_open[..string_close].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     `CFBundleGetIdentifier` 在部分启动路径（直接 exec MacOS 二进制、异常 main bundle）
+///     会返回空，但进程实际仍在 `*.app/Contents/MacOS/` 内，是合法 TCC 主体。
+///
+/// Code Logic（这个函数做什么）:
+///     从 `current_exe` 向上识别 `…/Name.app/Contents/MacOS/exe`，读取同级
+///     `Contents/Info.plist` 的 CFBundleIdentifier。
+#[cfg(target_os = "macos")]
+fn bundle_id_from_enclosing_app_plist() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()?.to_str()? != "Contents" {
+        return None;
+    }
+    let app_dir = contents_dir.parent()?;
+    let app_name = app_dir.file_name()?.to_str()?;
+    if !app_name.ends_with(".app") {
+        return None;
+    }
+    let plist_path = contents_dir.join("Info.plist");
+    let xml = std::fs::read_to_string(&plist_path).ok()?;
+    parse_cfbundle_identifier_plist_xml(&xml)
+}
+
 /// 读取主 bundle 的 CFBundleIdentifier；裸二进制常为 None。
 ///
 /// Business Logic: 无稳定 bundle id 时进程往往不是 TCC 主体，系统设置不会以产品名列出，
 ///     此时任何「已授权」展示都会与用户在系统设置中的观察冲突。
-/// Code Logic: CFBundleGetMainBundle + CFBundleGetIdentifier + CFStringGetCString。
+/// Code Logic: 先 `CFBundleGetMainBundle` + `CFBundleGetIdentifier`；失败则从
+///     enclosing `.app/Contents/Info.plist` 解析；过滤空串与 tauri 占位 `app`。
 #[cfg(target_os = "macos")]
 fn main_bundle_identifier() -> Option<String> {
-    unsafe {
+    let from_cf = unsafe {
         let bundle = CFBundleGetMainBundle();
         if bundle.is_null() {
-            return None;
+            None
+        } else {
+            let id_ref = CFBundleGetIdentifier(bundle);
+            if id_ref.is_null() {
+                None
+            } else {
+                let mut buf = vec![0i8; 512];
+                if CFStringGetCString(
+                    id_ref,
+                    buf.as_mut_ptr(),
+                    buf.len() as isize,
+                    K_CFSTRING_ENCODING_UTF8,
+                ) == 0
+                {
+                    None
+                } else {
+                    std::ffi::CStr::from_ptr(buf.as_ptr())
+                        .to_str()
+                        .ok()
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                }
+            }
         }
-        let id_ref = CFBundleGetIdentifier(bundle);
-        if id_ref.is_null() {
-            return None;
+    };
+
+    let raw = from_cf.or_else(bundle_id_from_enclosing_app_plist);
+    match raw.as_deref() {
+        None | Some("") | Some("app") => {
+            if let Ok(exe) = std::env::current_exe() {
+                tracing::debug!(
+                    exe = %exe.display(),
+                    product = PRODUCT_BUNDLE_IDENTIFIER,
+                    "bundle id unresolved (CF + Info.plist); bare/dev binary is not a TCC product subject"
+                );
+            }
+            None
         }
-        let mut buf = vec![0i8; 512];
-        if CFStringGetCString(
-            id_ref,
-            buf.as_mut_ptr(),
-            buf.len() as isize,
-            K_CFSTRING_ENCODING_UTF8,
-        ) == 0
-        {
-            return None;
-        }
-        std::ffi::CStr::from_ptr(buf.as_ptr())
-            .to_str()
-            .ok()
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty())
+        Some(_) => raw,
     }
 }
 
@@ -261,18 +335,16 @@ pub fn check_input_monitoring_access() -> bool {
     let bundle_id = main_bundle_identifier();
     let bundle_label = bundle_id.as_deref().unwrap_or("<none>");
     match bundle_id.as_deref() {
-        None => {
+        None | Some("") | Some("app") => {
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".into());
             tracing::info!(
                 bundle_id = bundle_label,
-                "input_monitoring check: no CFBundleIdentifier → fail-closed"
-            );
-            return false;
-        }
-        // tauri dev 偶发 placeholder / 空标识
-        Some("") | Some("app") => {
-            tracing::info!(
-                bundle_id = bundle_label,
-                "input_monitoring check: unstable bundle id → fail-closed"
+                exe = %exe,
+                product = PRODUCT_BUNDLE_IDENTIFIER,
+                dev_product = DEV_BUNDLE_IDENTIFIER,
+                "input_monitoring check: no stable product bundle id → fail-closed (use release .app or ./start.sh dev → cc-partner-dev.app, not bare target/debug/app)"
             );
             return false;
         }
@@ -531,5 +603,35 @@ mod tests {
         assert!(tcc_listen_event_hard_denied(Some(TCC_PREFLIGHT_DENIED)));
         assert!(!tcc_listen_event_hard_denied(Some(2))); // Unknown
         assert!(!tcc_listen_event_hard_denied(Some(99)));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     CF API 失败时依赖 Info.plist 文本解析，解析器不得误读其它 key。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     用最小 plist XML 断言读到 com.cc-partner.app；缺 key / 空 string 返回 None。
+    #[test]
+    fn parse_cfbundle_identifier_from_minimal_plist_xml() {
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>cc-partner</string>
+  <key>CFBundleIdentifier</key><string>com.cc-partner.app</string>
+  <key>CFBundleExecutable</key><string>cc-partner</string>
+</dict></plist>"#;
+        assert_eq!(
+            parse_cfbundle_identifier_plist_xml(xml).as_deref(),
+            Some("com.cc-partner.app")
+        );
+        assert_eq!(
+            parse_cfbundle_identifier_plist_xml("<dict></dict>"),
+            None
+        );
+        assert_eq!(
+            parse_cfbundle_identifier_plist_xml(
+                "<key>CFBundleIdentifier</key><string>  </string>"
+            ),
+            None
+        );
     }
 }

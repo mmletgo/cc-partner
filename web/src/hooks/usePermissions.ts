@@ -9,10 +9,10 @@
  * Code Logic（这个 hook 做什么）:
  *   - 基于 useVisibilityPolling 每 2s 拉取 configApi.permissions + 通知权限；
  *     页面隐藏暂停，恢复可见立即刷新，single-flight 防重叠
- *   - stopWhenGranted=true 时，required 三项全部授权后停止轮询（Welcome 用）
+ *   - stopWhenGranted=true 时，required 四项全部授权后停止轮询（Welcome 用）
  *   - loading 仅表示从未拿到过首轮结果；refreshing 表示已有状态的后台刷新
  *   - request(type) 只请求一个权限，同 type 并发合并为同一 Promise；requestMissing 顺序请求
- *   - allRequiredGranted / allGranted 只看 screenCapture/accessibility/inputMonitoring
+ *   - allRequiredGranted / allGranted 看 screenCapture/accessibility/inputMonitoring/notification
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -39,17 +39,18 @@ function toErrorMessage(err: unknown): string {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   引导完成条件只看三项 TCC 权限，通知不阻塞 onboarding。
+ *   引导完成条件要求四项权限均已授权：三项 TCC + 通知（健康提醒等依赖通知）。
  *
  * Code Logic（这个函数做什么）:
- *   当 status 存在且三项 granted 均为 true 时返回 true。
+ *   当 status 存在且四项 granted 均为 true 时返回 true。
  */
 function isRequiredGranted(status: PermissionsStatus | null): boolean {
   return (
     !!status &&
     status.screenCapture.granted &&
     status.accessibility.granted &&
-    status.inputMonitoring.granted
+    status.inputMonitoring.granted &&
+    status.notification.granted
   );
 }
 
@@ -64,11 +65,11 @@ export interface UsePermissionsResult {
   /** 正在请求中的权限类型集合 */
   requesting: ReadonlySet<PermissionType>;
   /**
-   * 三项 TCC 权限是否已全部授权（与 allRequiredGranted 同义，保留兼容徽标/旧调用方）。
-   * 不含 notification。
+   * 四项引导权限是否已全部授权（与 allRequiredGranted 同义，保留兼容徽标/旧调用方）。
+   * 含 notification。
    */
   allGranted: boolean;
-  /** 三项 TCC 权限是否已全部授权；notification 不计入 */
+  /** 四项引导权限是否已全部授权（TCC 三项 + notification） */
   allRequiredGranted: boolean;
   /**
    * 请求单项权限；同 type 并发调用复用同一 Promise。

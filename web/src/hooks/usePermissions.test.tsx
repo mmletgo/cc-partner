@@ -241,7 +241,7 @@ describe('usePermissions', () => {
     expect(result.current.requesting.has('inputMonitoring')).toBe(false);
   });
 
-  test('allRequiredGranted excludes notification', async () => {
+  test('allRequiredGranted includes notification', async () => {
     permissionsMock.mockResolvedValue(
       buildTccStatus({
         screenCapture: true,
@@ -254,9 +254,17 @@ describe('usePermissions', () => {
     const { result } = renderHook(() => usePermissions());
     await flushMicrotasks();
 
+    expect(result.current.allRequiredGranted).toBe(false);
+    expect(result.current.allGranted).toBe(false);
+    expect(result.current.status?.notification.granted).toBe(false);
+
+    checkNotificationGrantedMock.mockResolvedValue(true);
+    await act(async () => {
+      await result.current.refresh();
+    });
     expect(result.current.allRequiredGranted).toBe(true);
     expect(result.current.allGranted).toBe(true);
-    expect(result.current.status?.notification.granted).toBe(false);
+    expect(result.current.status?.notification.granted).toBe(true);
   });
 
   test('pauses polling while hidden and refreshes once when visible', async () => {
