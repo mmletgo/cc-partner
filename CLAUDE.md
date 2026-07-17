@@ -43,7 +43,7 @@ AGENTS.md    → 根层开发指南（组件清单与跨目录陷阱）
 
 ### 入口与配置
 
-- GUI：`src-tauri/src/lib.rs` setup → 构建 AppState/窗口 → **LAN 风险披露已确认**后才 ensure sidecar + browse-only mDNS（`gui-bootstrap.json` 仅 version/timestamp；未确认跳过 ensure/start）
+- GUI：`src-tauri/src/lib.rs` setup → 构建 AppState/窗口 → **LAN 风险披露已确认**后才 ensure sidecar + browse-only mDNS（bootstrap 按 flavor：`gui-bootstrap.json`（release）/ `gui-bootstrap.dev.json`（dev），仅 version/timestamp；未确认跳过 ensure/start）
 - Headless：`cc-partner-backend serve`（由 `start` detach）advertise+browse；**不读** gui-bootstrap
 - 配置：`~/.cc-partner/config.json`（设备 ID、首选端口、路径、快捷键等）
 

@@ -434,7 +434,8 @@ export function useSettingsController(): UseSettingsControllerResult {
    *   用户确认后清 LAN 披露 + 权限 onboarding 标记，停止 backend 并退出 GUI。
    *
    * Code Logic（这个函数做什么）:
-   *   resetOnboardingGates → removeItem(PERMISSION_ONBOARDED_KEY) →
+   *   resetOnboardingGates（只清当前 flavor 的 LAN bootstrap 文件）→
+   *   清当前/兼容的 permission onboarded+skipped keys →
    *   best-effort pendingWrites.flushAll → exitGui；失败不 exit。
    */
   const confirmOnboardingReset = useCallback(async () => {

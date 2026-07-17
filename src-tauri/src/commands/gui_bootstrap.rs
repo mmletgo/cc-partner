@@ -61,15 +61,16 @@ pub async fn acknowledge_lan_disclosure_and_start_backend(
     coordinator.acknowledge_and_start().await
 }
 
-/// 重置 onboarding 门闩：清 LAN 披露确认并停止 backend。
+/// 重置 onboarding 门闩：清**当前 flavor** 的 LAN 披露确认并停止 backend。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户希望下次启动复现首次 LAN 披露与权限 Welcome，但不删除 Prompt/速记本等业务数据。
+///     用户希望下次启动复现首次 LAN 披露与权限 Welcome，但不删除 Prompt/速记本等业务数据；
+///     Dev 重置不得清掉 Release 的 `gui-bootstrap.json`，反之亦然。
 ///
 /// Code Logic（这个函数做什么）:
-///     1) `reset_lan_disclosure` 原子写 default bootstrap（失败则不 stop）；
+///     1) `reset_lan_disclosure` 原子写当前 flavor bootstrap 为 default（失败则不 stop）；
 ///     2) 调用 `stop_backend_process`（幂等）；
-///     3) 返回 `{ok, lanDisclosureReset, backendStopped}`。不碰 data.db / localStorage。
+///     3) 返回 `{ok, lanDisclosureReset, backendStopped}`。不碰 data.db / 前端 localStorage。
 #[tauri::command]
 pub async fn reset_onboarding_gates(app: AppHandle) -> Result<ResetOnboardingGatesResult, AppError> {
     gui_bootstrap::reset_lan_disclosure()?;

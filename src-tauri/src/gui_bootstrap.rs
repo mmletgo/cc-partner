@@ -2,15 +2,18 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     GUI 在首次启动局域网 listener / 进入产品前必须获得用户对 LAN 风险的知情确认。
-//!     该确认不得写入 sidecar-owned `AppConfig`，而应保存在 launcher 专属的
-//!     `gui-bootstrap.json`（仅版本号 + 时间戳），以便在 sidecar 出生前原子读写。
+//!     该确认不得写入 sidecar-owned `AppConfig`，而应保存在 launcher 专属的 bootstrap
+//!     文件（仅版本号 + 时间戳），以便在 sidecar 出生前原子读写。
+//!     **开发壳与发布版分文件**：release → `gui-bootstrap.json`，dev → `gui-bootstrap.dev.json`，
+//!     重置引导只清当前 flavor，互不影响。
 //!
 //! Code Logic（这个模块做什么）:
-//!     定义 `LAN_DISCLOSURE_VERSION` 与 `GuiBootstrapState`；提供路径解析、加载、
-//!     原子写入与“当前版本是否已确认”查询。Headless CLI 永不读取本文件。
+//!     定义 `LAN_DISCLOSURE_VERSION` 与 `GuiBootstrapState`；按 `permissions::app_flavor`
+//!     解析路径；提供加载、原子写入与“当前版本是否已确认”查询。Headless CLI 永不读取本文件。
 
 use crate::config::data_dir;
 use crate::error::AppError;
+use crate::permissions::{app_flavor, AppFlavor};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -22,8 +25,25 @@ use std::path::{Path, PathBuf};
 ///     披露语义实质变化时需要用户重新确认；普通措辞微调不 bump 版本，避免打扰。
 ///
 /// Code Logic（这个常量做什么）:
-///     作为 `gui-bootstrap.json` 中 `lanDisclosureVersion` 的权威当前值。
+///     作为 bootstrap 文件中 `lanDisclosureVersion` 的权威当前值。
 pub const LAN_DISCLOSURE_VERSION: u32 = 1;
+
+/// 发布版 bootstrap 文件名（保持历史路径，兼容已确认用户）。
+pub const GUI_BOOTSTRAP_FILE_RELEASE: &str = "gui-bootstrap.json";
+/// 开发壳 bootstrap 文件名（与发布版隔离）。
+pub const GUI_BOOTSTRAP_FILE_DEV: &str = "gui-bootstrap.dev.json";
+
+/// Business Logic（为什么需要这个函数）:
+///     Dev / Release 必须使用不同的 LAN 披露确认文件，重置一端不得清掉另一端。
+///
+/// Code Logic（这个函数做什么）:
+///     Dev → `gui-bootstrap.dev.json`；Release → `gui-bootstrap.json`。
+pub fn gui_bootstrap_file_name(flavor: AppFlavor) -> &'static str {
+    match flavor {
+        AppFlavor::Dev => GUI_BOOTSTRAP_FILE_DEV,
+        AppFlavor::Release => GUI_BOOTSTRAP_FILE_RELEASE,
+    }
+}
 
 /// 首选 HTTP/P2P TCP 端口（占用则递增，见 HTTP server 绑定策略）。
 pub const PREFERRED_HTTP_PORT: u16 = 62116;
@@ -59,15 +79,16 @@ impl Default for GuiBootstrapState {
     }
 }
 
-/// 返回 `gui-bootstrap.json` 绝对路径。
+/// 返回当前进程 flavor 对应的 bootstrap 绝对路径。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     launcher 与测试需要在同一 data_dir 根下定位 bootstrap，支持 `CC_PARTNER_DATA_DIR` 隔离。
+///     launcher 与测试需要在同一 data_dir 根下定位 bootstrap，支持 `CC_PARTNER_DATA_DIR` 隔离；
+///     开发壳与发布版分文件，避免共用确认状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     基于 `data_dir()` 拼接 `gui-bootstrap.json`。
+///     `data_dir()` + `gui_bootstrap_file_name(app_flavor())`。
 pub fn gui_bootstrap_path() -> Result<PathBuf, AppError> {
-    Ok(data_dir()?.join("gui-bootstrap.json"))
+    Ok(data_dir()?.join(gui_bootstrap_file_name(app_flavor())))
 }
 
 /// 从磁盘加载 bootstrap 状态。
@@ -94,8 +115,14 @@ pub fn load_gui_bootstrap_from_path(path: &Path) -> Result<GuiBootstrapState, Ap
         return Ok(GuiBootstrapState::default());
     }
     let content = fs::read_to_string(path)?;
-    let state: GuiBootstrapState = serde_json::from_str(&content)
-        .map_err(|e| AppError::generic(format!("读取 gui-bootstrap.json 失败: {e}")))?;
+    let state: GuiBootstrapState = serde_json::from_str(&content).map_err(|e| {
+        AppError::generic(format!(
+            "读取 {} 失败: {e}",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("gui-bootstrap")
+        ))
+    })?;
     Ok(state)
 }
 
@@ -132,7 +159,12 @@ pub fn save_gui_bootstrap_to_path(path: &Path, state: &GuiBootstrapState) -> Res
     }
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        AppError::generic(format!("写入 gui-bootstrap.json 失败: {e}"))
+        AppError::generic(format!(
+            "写入 {} 失败: {e}",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("gui-bootstrap")
+        ))
     })?;
     Ok(())
 }
@@ -168,10 +200,11 @@ pub fn is_current_lan_disclosure_acknowledged() -> Result<bool, AppError> {
 /// 重置 LAN 披露确认为未确认态。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户在设置中「重置首次启动引导」时，需清除 LAN 风险确认，使下次启动重新进入披露 gate。
+///     用户在设置中「重置首次启动引导」时，需清除**当前 flavor** 的 LAN 风险确认，
+///     使下次启动重新进入披露 gate；不得清掉另一端（Dev↔Release）的确认。
 ///
 /// Code Logic（这个函数做什么）:
-///     原子写入 `GuiBootstrapState::default()`（version=0、无 acknowledged_at），不触碰 data.db。
+///     原子写入当前 `gui_bootstrap_path()` 的 `GuiBootstrapState::default()`，不触碰 data.db。
 pub fn reset_lan_disclosure() -> Result<GuiBootstrapState, AppError> {
     let state = GuiBootstrapState::default();
     save_gui_bootstrap(&state)?;
@@ -193,6 +226,17 @@ pub fn is_acknowledged_for_version(state: &GuiBootstrapState, version: u32) -> b
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Business Logic: Dev/Release 文件名必须固定且互不相同。
+    #[test]
+    fn bootstrap_file_name_differs_by_flavor() {
+        assert_eq!(
+            gui_bootstrap_file_name(AppFlavor::Release),
+            GUI_BOOTSTRAP_FILE_RELEASE
+        );
+        assert_eq!(gui_bootstrap_file_name(AppFlavor::Dev), GUI_BOOTSTRAP_FILE_DEV);
+        assert_ne!(GUI_BOOTSTRAP_FILE_RELEASE, GUI_BOOTSTRAP_FILE_DEV);
+    }
 
     #[test]
     fn missing_file_is_unacknowledged_default() {
