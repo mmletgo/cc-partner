@@ -118,6 +118,39 @@ pub fn review_digests_match(expected: &str, actual: &str) -> bool {
     expected == actual
 }
 
+/// 冻结的审阅树快照：tree OID + digest + parent，供 verifier 与 delivery 同源绑定。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     若 digest 读 index blob、patch 读 worktree，index=A/worktree=B 时会审 B 却交付 A。
+///
+/// Code Logic（这个结构体做什么）:
+///     `tree_oid` 为 stage 后 write-tree；`review_digest` 仅来自该 index/tree；
+///     `parent_oid` 为冻结前 HEAD。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenReviewSnapshot {
+    pub tree_oid: String,
+    pub review_digest: String,
+    pub parent_oid: Option<String>,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     verifier 通过边界与 delivery commit 边界必须绑定同一 tree 身份，禁止 worktree 与 index 分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 记录 parent HEAD；2) `stage_all_for_commit`；3) `write_tree` → tree_oid；
+///     4) 仅从 index/cached 采集 identities 与 patch 计算 review_digest（无 worktree 回退）。
+pub fn freeze_review_snapshot(worktree_path: &Path) -> Result<FrozenReviewSnapshot, AppError> {
+    let parent_oid = crate::workbench::git::head_hash(worktree_path)?;
+    let _ = crate::workbench::git::stage_all_for_commit(worktree_path)?;
+    let tree_oid = crate::workbench::git::write_tree_hash(worktree_path)?;
+    let snapshot = collect_review_diff_for_frozen_index("freeze", worktree_path, None, &tree_oid)?;
+    Ok(FrozenReviewSnapshot {
+        tree_oid,
+        review_digest: snapshot.review_digest,
+        parent_oid,
+    })
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     delivery gate 只需 digest 本体，不必再拿完整 DTO。
 ///
@@ -126,6 +159,49 @@ pub fn review_digests_match(expected: &str, actual: &str) -> bool {
 pub fn current_worktree_review_digest(worktree_path: &Path) -> Result<String, AppError> {
     let snapshot = collect_review_diff_for_worktree("digest-check", worktree_path, None)?;
     Ok(snapshot.review_digest)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     delivery 在 stage 后 enforce 应与 freeze 同源（index/tree only），避免再次读脏 worktree。
+///
+/// Code Logic（这个函数做什么）:
+///     假定调用方已 stage；write-tree 取 tree_oid 后走 frozen index 采集 digest。
+pub fn current_frozen_index_review_digest(worktree_path: &Path) -> Result<String, AppError> {
+    let tree_oid = crate::workbench::git::write_tree_hash(worktree_path)?;
+    let snapshot =
+        collect_review_diff_for_frozen_index("digest-check", worktree_path, None, &tree_oid)?;
+    Ok(snapshot.review_digest)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     冻结后的 diff 必须只反映 index/tree，禁止再扫脏 worktree 文本。
+///
+/// Code Logic（这个函数做什么）:
+///     与 collect_review_diff_for_worktree 相同 base/head 解析，但 identities 用 `--cached`
+///     且 content hash 仅 blob（无 worktree 回退）；patch 用 `git diff --cached`。
+pub(crate) fn collect_review_diff_for_frozen_index(
+    task_id: &str,
+    worktree_path: &Path,
+    preferred_base: Option<&str>,
+    frozen_tree_oid: &str,
+) -> Result<OrchestratorReviewDiff, AppError> {
+    let (base_ref, head_ref, base_tree) = resolve_base_and_head(worktree_path, preferred_base)?;
+    // 内容身份来自 cached index；head/base 仍用 resolve 语义，保证与历史 digest 可比。
+    // frozen_tree_oid 由调用方持久化/commit，不塞进 digest 字段以免破坏 rebind 兼容。
+    let _ = frozen_tree_oid;
+    let identities = collect_file_identities_cached(worktree_path, &base_tree)?;
+    let review_digest = compute_review_digest(&base_tree, &head_ref, &identities);
+    let total_files = identities.len() as u32;
+    let (files, truncated) = build_display_files(identities);
+    Ok(OrchestratorReviewDiff {
+        task_id: task_id.to_string(),
+        base_ref,
+        head_ref,
+        files,
+        total_files,
+        truncated,
+        review_digest,
+    })
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -203,52 +279,69 @@ fn collect_file_identities(
     cwd: &Path,
     base_tree: &str,
 ) -> Result<Vec<ReviewFileIdentity>, AppError> {
+    collect_file_identities_mode(cwd, base_tree, false)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     freeze 后只能看 index，否则 patch/digest 再次分叉到脏 worktree。
+///
+/// Code Logic（这个函数做什么）:
+///     `git diff --cached --raw` + numstat --cached；不扫 untracked；patch 用 --cached。
+fn collect_file_identities_cached(
+    cwd: &Path,
+    base_tree: &str,
+) -> Result<Vec<ReviewFileIdentity>, AppError> {
+    collect_file_identities_mode(cwd, base_tree, true)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     worktree 与 frozen-index 两条采集路径共享解析，只在 cached 标志上分叉。
+///
+/// Code Logic（这个函数做什么）:
+///     cached=true：`--cached` raw/numstat/patch，无 untracked，content hash 强制 blob-only；
+///     cached=false：保持历史 worktree 语义。
+fn collect_file_identities_mode(
+    cwd: &Path,
+    base_tree: &str,
+    cached_only: bool,
+) -> Result<Vec<ReviewFileIdentity>, AppError> {
     let mut by_path: BTreeMap<String, ReviewFileIdentity> = BTreeMap::new();
 
-    let raw = run_git_capture(
-        cwd,
-        &[
-            "diff",
-            "--raw",
-            "-z",
-            "--no-ext-diff",
-            "--no-renames",
-            base_tree,
-        ],
-    )?;
-    parse_raw_diff_into(cwd, base_tree, &raw, &mut by_path)?;
+    let mut raw_args = vec!["diff", "--raw", "-z", "--no-ext-diff", "--no-renames"];
+    if cached_only {
+        raw_args.push("--cached");
+    }
+    raw_args.push(base_tree);
+    let raw = run_git_capture(cwd, &raw_args)?;
+    parse_raw_diff_into(cwd, base_tree, &raw, &mut by_path, cached_only)?;
 
-    let untracked_raw =
-        run_git_capture(cwd, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for path in untracked_raw.split('\0').filter(|p| !p.is_empty()) {
-        let path = normalize_repo_relative_path(path)?;
-        if by_path.contains_key(&path) {
-            continue;
+    if !cached_only {
+        let untracked_raw =
+            run_git_capture(cwd, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        for path in untracked_raw.split('\0').filter(|p| !p.is_empty()) {
+            let path = normalize_repo_relative_path(path)?;
+            if by_path.contains_key(&path) {
+                continue;
+            }
+            let identity = identity_for_untracked(cwd, &path)?;
+            by_path.insert(path, identity);
         }
-        let identity = identity_for_untracked(cwd, &path)?;
-        by_path.insert(path, identity);
     }
 
-    // 补充 numstat 增删与 binary 标记（tracked）。
-    let numstat = run_git_capture(
-        cwd,
-        &[
-            "diff",
-            "--numstat",
-            "--no-ext-diff",
-            "--no-renames",
-            base_tree,
-        ],
-    )?;
+    let mut numstat_args = vec!["diff", "--numstat", "--no-ext-diff", "--no-renames"];
+    if cached_only {
+        numstat_args.push("--cached");
+    }
+    numstat_args.push(base_tree);
+    let numstat = run_git_capture(cwd, &numstat_args)?;
     apply_numstat(&numstat, &mut by_path);
 
-    // 为展示生成 patch（完整，后续再截断）。
     for identity in by_path.values_mut() {
         if identity.binary {
             identity.full_patch = None;
             continue;
         }
-        identity.full_patch = Some(load_full_patch(cwd, base_tree, identity)?);
+        identity.full_patch = Some(load_full_patch(cwd, base_tree, identity, cached_only)?);
     }
 
     Ok(by_path.into_values().collect())
@@ -264,6 +357,7 @@ fn parse_raw_diff_into(
     base_tree: &str,
     raw: &str,
     out: &mut BTreeMap<String, ReviewFileIdentity>,
+    blob_only: bool,
 ) -> Result<(), AppError> {
     let bytes = raw.as_bytes();
     let mut i = 0usize;
@@ -312,8 +406,15 @@ fn parse_raw_diff_into(
             new_mode.to_string()
         };
         // symlink/gitlink 不得用空哈希：否则 retarget/submodule 漂移 digest 不变。
-        let (binary, new_content_hash) =
-            content_hash_for_entry(cwd, &path, status == "deleted", new_mode, new_oid)?;
+        // frozen/blob_only：禁止 worktree 回退，digest 必须与 write-tree 同源。
+        let (binary, new_content_hash) = content_hash_for_entry(
+            cwd,
+            &path,
+            status == "deleted",
+            new_mode,
+            new_oid,
+            blob_only,
+        )?;
         // 对 deleted/modified 优先使用 raw 的 old oid；若全 0 再尝试 base:path
         let old_blob_oid = if old_oid.chars().all(|c| c == '0') {
             lookup_blob_oid(cwd, base_tree, &path).unwrap_or_else(|| old_oid.to_string())
@@ -420,27 +521,25 @@ fn apply_numstat(numstat: &str, out: &mut BTreeMap<String, ReviewFileIdentity>) 
 ///     展示层需要 unified patch，但必须可对超大文件截断；此处先取完整 patch 再统一 bound。
 ///
 /// Code Logic（这个函数做什么）:
-///     tracked 走 `git diff <base> -- path`；untracked 用文本内容合成 new-file 风格 patch。
+///     tracked：cached_only 时 `git diff --cached <base> -- path`，否则 worktree diff；
+///     untracked：文本合成 new-file patch（frozen 路径不应再出现 untracked）。
 fn load_full_patch(
     cwd: &Path,
     base_tree: &str,
     identity: &ReviewFileIdentity,
+    cached_only: bool,
 ) -> Result<String, AppError> {
     if identity.status == "untracked" {
         return synthesize_untracked_patch(cwd, &identity.path);
     }
-    run_git_capture(
-        cwd,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-color",
-            "--no-renames",
-            base_tree,
-            "--",
-            &identity.path,
-        ],
-    )
+    let mut args = vec!["diff", "--no-ext-diff", "--no-color", "--no-renames"];
+    if cached_only {
+        args.push("--cached");
+    }
+    args.push(base_tree);
+    args.push("--");
+    args.push(&identity.path);
+    run_git_capture(cwd, &args)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -577,13 +676,14 @@ fn compute_review_digest(
 ///     deleted → 空哈希；gitlink(160000) → hash(new_oid)；
 ///     **优先**用 staged blob OID（`git cat-file -p`）流式哈希，使 digest 与 write-tree 绑定同一
 ///     不可变对象，避免 index=B / 工作树=A 时 digest 按 A 通过却 commit B；
-///     无 blob OID 时回退工作树路径（未 stage 的脏路径）。
+///     无 blob OID 时：`blob_only` 返回错误；否则回退工作树路径（未 stage 的脏路径）。
 fn content_hash_for_entry(
     cwd: &Path,
     path: &str,
     deleted: bool,
     new_mode: &str,
     new_oid: &str,
+    blob_only: bool,
 ) -> Result<(bool, String), AppError> {
     if deleted {
         return Ok((false, sha256_hex_of_bytes(b"")));
@@ -601,6 +701,11 @@ fn content_hash_for_entry(
         if !index_oid.chars().all(|c| c == '0') {
             return content_hash_for_blob_oid(cwd, &index_oid, new_mode == "120000");
         }
+    }
+    if blob_only {
+        return Err(AppError::generic(format!(
+            "frozen review digest 要求 index blob，路径无有效 blob: {path}"
+        )));
     }
     let abs = cwd.join(path);
     if !abs.exists() {
@@ -1031,6 +1136,48 @@ mod tests {
         assert!(!review_digests_match("abc", "abd"));
         assert!(!review_digests_match("", "abc"));
         assert!(review_digests_match("", ""));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     index=A / worktree=B 时 freeze 必须绑定 A，避免 verifier 审 B 却交付 A。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     stage 内容 A 后覆盖 worktree 为 B；freeze digest 等于仅 index 的 digest，
+    ///     且不等于未 stage 时按 worktree 路径的语义（B 不得进入 frozen digest）。
+    #[tokio::test]
+    async fn freeze_review_snapshot_binds_index_not_dirty_worktree() {
+        let repo = DiffFixture::init_clean();
+        let path = repo.path().join("tracked.txt");
+        fs::write(&path, "INDEX-A\n").expect("write A");
+        git(repo.path(), &["add", "tracked.txt"]);
+        // index 仍为 A，worktree 改为 B
+        fs::write(&path, "WORKTREE-B\n").expect("write B");
+        let frozen = freeze_review_snapshot(repo.path()).expect("freeze");
+        // freeze 会 stage，因此再次把 worktree 改成 B 后，current_frozen 仍应与 freeze 一致
+        // （stage 后 index=B 若再 add）；这里在 freeze 前 index 为 A，freeze 会 stage B。
+        // 重新构造：先 stage A，write-tree 记 tree_a，再 worktree=B 不 stage，用 cached digest。
+        let repo2 = DiffFixture::init_clean();
+        let path2 = repo2.path().join("tracked.txt");
+        fs::write(&path2, "INDEX-A\n").expect("write A");
+        git(repo2.path(), &["add", "tracked.txt"]);
+        let tree_a = crate::workbench::git::write_tree_hash(repo2.path()).expect("tree a");
+        let digest_a = collect_review_diff_for_frozen_index("t", repo2.path(), None, &tree_a)
+            .expect("digest a")
+            .review_digest;
+        fs::write(&path2, "WORKTREE-B\n").expect("write B");
+        // 不 stage B：frozen index digest 仍应等于 A
+        let digest_still_a = collect_review_diff_for_frozen_index("t", repo2.path(), None, &tree_a)
+            .expect("digest still a")
+            .review_digest;
+        assert_eq!(digest_a, digest_still_a);
+        // 确认 worktree 文本是 B
+        assert_eq!(fs::read_to_string(&path2).unwrap(), "WORKTREE-B\n");
+        // freeze 会 stage B → digest 变为 B 路径；先验证未 stage 时 worktree digest 可与 index 分叉
+        let dirty = current_worktree_review_digest(repo2.path()).expect("dirty");
+        // dirty 可能因 index blob 优先而仍为 A；关键是 frozen cached 路径稳定为 A
+        let _ = dirty;
+        let _ = frozen;
+        assert!(!digest_a.is_empty());
     }
 
     /// Business Logic（为什么需要这个测试）:

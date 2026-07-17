@@ -3,7 +3,6 @@
 use crate::claude_cli;
 use crate::error::AppError;
 use crate::orchestrator::models::OrchestratorTaskRow;
-use crate::orchestrator::review_diff::{collect_review_diff_for_worktree, render_review_diff_text};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -311,18 +310,27 @@ pub struct WorktreeDiffForVerifier {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     verifier 需要看到 worktree 的真实改动范围，尤其是验证命令失败时用于判断是否应继续修复；
+///     verifier 需要看到将要交付的改动范围，尤其是验证命令失败时用于判断是否应继续修复；
 ///     同时捕获稳定 digest 供 auto-delivery 在 commit 前 rebind。
 ///
 /// Code Logic（这个函数做什么）:
-///     复用 review_diff 有界 snapshot（staged/unstaged/untracked/unborn 同一语义），渲染为文本后再按
-///     verifier prompt 全局字节上限截断并标记；一并返回 snapshot.review_digest。
+///     `freeze_review_snapshot`（stage → write-tree → index-only digest/patch），再渲染有界文本；
+///     返回的 review_digest 与后续 `commit_frozen_tree` 绑定同一 tree 身份。
 pub fn collect_worktree_diff(cwd: &Path) -> Result<WorktreeDiffForVerifier, AppError> {
-    let snapshot = collect_review_diff_for_worktree("verifier", cwd, None)?;
+    use crate::orchestrator::review_diff::{
+        collect_review_diff_for_frozen_index, freeze_review_snapshot, render_review_diff_text,
+    };
+    // 与 delivery 同源：先冻结 index tree，再采 digest/patch（禁止脏 worktree 文本）。
+    let frozen = freeze_review_snapshot(cwd)?;
+    let snapshot = collect_review_diff_for_frozen_index("verifier", cwd, None, &frozen.tree_oid)?;
+    debug_assert_eq!(
+        snapshot.review_digest, frozen.review_digest,
+        "frozen text snapshot digest must match freeze_review_snapshot"
+    );
     let context = render_review_diff_text(&snapshot);
     Ok(WorktreeDiffForVerifier {
         text: truncate_diff_context(&context, MAX_DIFF_CONTEXT_BYTES),
-        review_digest: snapshot.review_digest,
+        review_digest: frozen.review_digest,
     })
 }
 
