@@ -915,18 +915,26 @@ where
         Ok(result) => result,
         Err(err) => {
             let message = err.to_string();
-            // 回滚失败：必须 Blocked + evidence，禁止 soft-stop 吞掉污染 main。
+            // 回滚失败：任务通常已是 Aborted，block_task_if_delivering 会 no-op。
+            // 必须无条件写 failed evidence 并 Err 上抛，禁止 soft-stop / 静默 Ok。
             if message.contains("delivery_rollback_failed") {
                 let reason = normalize_merge_failure_reason(&err);
-                return block_delivery_task(
+                let content = format!("main path: {main_path}\n{reason}");
+                add_delivery_evidence(
                     context.orchestrator_repo(),
                     &task.id,
-                    &reason,
                     "merge main",
-                    &format!("main path: {main_path}\n{reason}"),
-                    &mut stages,
+                    "failed",
+                    &content,
                 )
-                .await;
+                .await?;
+                stages.push("merge main".to_string());
+                // 尽力附加 blocked_reason（仅 Delivering 时生效）；状态已 Aborted 时不覆盖。
+                let _ = context
+                    .orchestrator_repo()
+                    .block_task_if_delivering(&task.id, &reason)
+                    .await;
+                return Err(AppError::generic(reason));
             }
             // Abort/状态变化且 main 已干净回滚：不得 block_delivery，也不得写 merge failed evidence。
             // 仅匹配 soft-stop 标记；不得用宽泛 contains("delivery_stopped")（会误吞 rollback 文案）。
