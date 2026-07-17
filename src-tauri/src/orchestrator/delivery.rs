@@ -72,6 +72,29 @@ where
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     merge/push 临界区用错误串区分 soft-stop 与 hard failure；宽泛 contains 会把
+///     `delivery_stopped:… but rollback failed` 误判为 soft-stop。
+///
+/// Code Logic（这个函数做什么）:
+///     在消息中定位 `delivery_stopped_after_push:` 或 `delivery_stopped:` 后，要求剩余部分
+///     **仅为**状态 token（字母数字/`_`/`-`）；任何额外文案（含 rollback 失败）返回 false。
+fn is_delivery_soft_stop_message(message: &str) -> bool {
+    for marker in ["delivery_stopped_after_push:", "delivery_stopped:"] {
+        if let Some(pos) = message.rfind(marker) {
+            let rest = message[pos + marker.len()..].trim();
+            if !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     用户可以在 delivery pipeline 的任意阶段终止任务；一旦任务不再是 Delivering，
 ///     后续 Git push/merge 这类不可逆副作用必须立即停止。
 ///
@@ -843,7 +866,7 @@ where
             .merge_task_commit_oid_to_main(worktree_id.clone(), &reviewed)
             .await?;
         // merge 后再次 recheck：终止则完整回滚 ref+index+worktree，再返回 stopped。
-        // 回滚失败必须 hard error，禁止吞掉后留下污染 main 静默 stopped。
+        // 回滚失败必须用独立错误码 hard fail（禁止含 delivery_stopped 前缀被 soft-stop 吞掉）。
         let after_merge = context.orchestrator_repo().get_task(&task.id).await?;
         if after_merge.status != OrchestratorTaskStatus::Delivering {
             workbench_git::rollback_main_merge_full(
@@ -854,8 +877,10 @@ where
             )
             .map_err(|rb_err| {
                 AppError::generic(format!(
-                    "delivery_stopped:{} but full main rollback failed: {rb_err}",
-                    after_merge.status.as_str()
+                    "delivery_rollback_failed: status={} pre={} merge={} err={rb_err}",
+                    after_merge.status.as_str(),
+                    merged.pre_oid,
+                    merged.merge_oid
                 ))
             })?;
             return Err(AppError::conflict(format!(
@@ -890,8 +915,22 @@ where
         Ok(result) => result,
         Err(err) => {
             let message = err.to_string();
-            // Abort/状态变化：不得 block_delivery，也不得写 merge failed evidence。
-            if message.contains("delivery_stopped") {
+            // 回滚失败：必须 Blocked + evidence，禁止 soft-stop 吞掉污染 main。
+            if message.contains("delivery_rollback_failed") {
+                let reason = normalize_merge_failure_reason(&err);
+                return block_delivery_task(
+                    context.orchestrator_repo(),
+                    &task.id,
+                    &reason,
+                    "merge main",
+                    &format!("main path: {main_path}\n{reason}"),
+                    &mut stages,
+                )
+                .await;
+            }
+            // Abort/状态变化且 main 已干净回滚：不得 block_delivery，也不得写 merge failed evidence。
+            // 仅匹配 soft-stop 标记；不得用宽泛 contains("delivery_stopped")（会误吞 rollback 文案）。
+            if is_delivery_soft_stop_message(&message) {
                 let current = context.orchestrator_repo().get_task(&task.id).await?;
                 return Ok(DeliverySummary {
                     task: OrchestratorTaskDto::from(current),
@@ -2465,6 +2504,25 @@ mod tests {
 
         assert_eq!(delivered.task.status, OrchestratorTaskStatus::Aborted);
         assert_eq!(persisted.status, OrchestratorTaskStatus::Aborted);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     soft-stop 分类必须把 rollback 失败排除在外，否则污染 main 会被当成成功 stopped。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 delivery_stopped:/after_push 为 soft-stop；delivery_rollback_failed 与含 rollback 的文案不是。
+    #[test]
+    fn soft_stop_message_excludes_rollback_failure() {
+        assert!(is_delivery_soft_stop_message("delivery_stopped:aborted"));
+        assert!(is_delivery_soft_stop_message(
+            "conflict: delivery_stopped_after_push:aborted"
+        ));
+        assert!(!is_delivery_soft_stop_message(
+            "delivery_rollback_failed: status=aborted pre=aaa merge=bbb err=cas"
+        ));
+        assert!(!is_delivery_soft_stop_message(
+            "delivery_stopped:aborted but full main rollback failed: cas miss"
+        ));
     }
 
     /// Business Logic（为什么需要这个函数）:
