@@ -5,17 +5,17 @@
  * Business Logic（为什么需要这个脚本）:
  *   macOS TCC（输入监控/屏幕录制等）按代码签名身份记账。`tauri dev` 默认跑裸
  *   `target/debug/app`，无稳定 CFBundleIdentifier，系统设置列表名称混乱，且应用内
- *   fail-closed 会恒显示「未授权」。开发版需要独立的 .app 包，使用与发布版不同的
- *   显示名与 Bundle ID，便于单独授权、互不抢开关。
+ *   fail-closed 会恒显示「不可用」。开发版需要独立的 .app 包，使用与稳定版不同的
+ *   显示名与 Bundle ID，便于单独授权、互不抢开关；输入监控只允许固定内部签名通道。
  *
  * Code Logic（这个脚本做什么）:
  *   在 `src-tauri/target/debug/cc-partner-dev.app` 组装开发包：
- *   - CFBundleIdentifier = com.cc-partner.app.dev
- *   - CFBundleDisplayName / CFBundleName = cc-partner (Dev)
+ *   - 默认社区壳：com.cc-partner.app.dev + ad-hoc，仅开发非输入监控功能
+ *   - 显式内部壳：com.cc-partner.app.internal.dev + 固定自签名证书
  *   - 将 debug GUI 二进制复制为 Contents/MacOS/cc-partner
  *   - 尽量把 debug backend 也放进 MacOS（便于 sidecar 旁路发现）
  *   - 复制 icon.icns（若有）
- *   - ad-hoc codesign（无 hardened runtime，便于调试 attach）
+ *   - 内部通道签名后强制验证证书指纹与 designated requirement，不允许 ad-hoc 回退
  *
  * 用法:
  *   node scripts/prepare-macos-dev-app.mjs
@@ -35,6 +35,10 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  inspectSignedApp,
+  validateSigningMetadata,
+} from './check-macos-signing-contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -45,6 +49,36 @@ export const DEV_APP_NAME = 'cc-partner-dev.app';
 export const DEV_BUNDLE_ID = 'com.cc-partner.app.dev';
 export const DEV_DISPLAY_NAME = 'cc-partner (Dev)';
 export const DEV_EXECUTABLE = 'cc-partner';
+export const INTERNAL_DEV_APP_NAME = 'cc-partner-internal-dev.app';
+export const INTERNAL_DEV_BUNDLE_ID = 'com.cc-partner.app.internal.dev';
+export const INTERNAL_DEV_DISPLAY_NAME = 'cc-partner Internal (Dev)';
+export const INTERNAL_SIGNING_IDENTITY = 'cc-partner Internal Code Signing';
+
+/** 根据显式环境变量选择社区或内部开发签名通道。 */
+export function resolveDevSigningChannel(env = process.env) {
+  const identity = env.CC_PARTNER_INTERNAL_SIGNING_IDENTITY?.trim();
+  if (!identity) {
+    return {
+      appName: DEV_APP_NAME,
+      bundleId: DEV_BUNDLE_ID,
+      displayName: DEV_DISPLAY_NAME,
+      signingIdentity: '-',
+      internal: false,
+    };
+  }
+  if (identity !== INTERNAL_SIGNING_IDENTITY) {
+    throw new Error(
+      `内部开发签名 identity 必须固定为 ${INTERNAL_SIGNING_IDENTITY}，实际为 ${identity}`,
+    );
+  }
+  return {
+    appName: INTERNAL_DEV_APP_NAME,
+    bundleId: INTERNAL_DEV_BUNDLE_ID,
+    displayName: INTERNAL_DEV_DISPLAY_NAME,
+    signingIdentity: identity,
+    internal: true,
+  };
+}
 
 /**
  * Business Logic: 定位当前 debug GUI 产物（Cargo 包名 app，打包后才是 cc-partner）。
@@ -155,6 +189,7 @@ export function prepareMacosDevApp(opts = {}) {
   }
 
   const debugDir = opts.debugDir ?? DEBUG_DIR;
+  const channel = resolveDevSigningChannel();
   const guiSource = resolveDebugGuiBinary(debugDir);
   if (!guiSource) {
     throw new Error(
@@ -162,7 +197,7 @@ export function prepareMacosDevApp(opts = {}) {
     );
   }
 
-  const appPath = join(debugDir, DEV_APP_NAME);
+  const appPath = join(debugDir, channel.appName);
   const contents = join(appPath, 'Contents');
   const macos = join(contents, 'MacOS');
   const resources = join(contents, 'Resources');
@@ -211,15 +246,25 @@ export function prepareMacosDevApp(opts = {}) {
 
   writeFileSync(
     join(contents, 'Info.plist'),
-    buildInfoPlistXml({ version: readAppVersion() }),
+    buildInfoPlistXml({
+      bundleId: channel.bundleId,
+      displayName: channel.displayName,
+      version: readAppVersion(),
+    }),
     'utf8',
   );
 
-  // ad-hoc + hardened runtime：与发行版一致，确保 TCC 把进程当作隐私主体
-  // （仅 adhoc 无 runtime 时，直接 exec 更易假绿；open 启动 + runtime 更稳）
   const sign = spawnSync(
     'codesign',
-    ['--force', '--deep', '--options', 'runtime', '--sign', '-', appPath],
+    [
+      '--force',
+      '--deep',
+      '--options',
+      'runtime',
+      '--sign',
+      channel.signingIdentity,
+      appPath,
+    ],
     { encoding: 'utf8' },
   );
   if (sign.status !== 0) {
@@ -228,11 +273,22 @@ export function prepareMacosDevApp(opts = {}) {
     );
   }
 
+  if (channel.internal) {
+    const expectedCertSha256 = process.env.CC_PARTNER_INTERNAL_CERT_SHA256?.trim();
+    if (!expectedCertSha256) {
+      throw new Error('内部开发签名要求 CC_PARTNER_INTERNAL_CERT_SHA256');
+    }
+    validateSigningMetadata(inspectSignedApp(appPath), {
+      expectedIdentifier: channel.bundleId,
+      expectedCertSha256,
+    });
+  }
+
   return {
     appPath,
     guiSource,
-    bundleId: DEV_BUNDLE_ID,
-    displayName: DEV_DISPLAY_NAME,
+    bundleId: channel.bundleId,
+    displayName: channel.displayName,
   };
 }
 

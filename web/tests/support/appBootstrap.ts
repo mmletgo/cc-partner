@@ -48,17 +48,19 @@ export function makeAppConfig(partial: Partial<TestAppConfig> = {}): TestAppConf
  *   Welcome/Settings 权限卡需要稳定的 TCC 状态。
  *
  * Code Logic（这个函数做什么）:
- *   返回三项 granted 可配置的 PermissionsStatus（notification 由 decoder default）。
+ *   返回四项 granted 可配置的 PermissionsStatus；输入监控同时携带权威四态。
  */
 export function makePermissionsStatus(granted = true): {
   screenCapture: { granted: boolean };
   accessibility: { granted: boolean };
-  inputMonitoring: { granted: boolean };
+  inputMonitoring: { granted: boolean; state: 'granted' | 'notDetermined' };
+  notification: { granted: boolean };
 } {
   return {
     screenCapture: { granted },
     accessibility: { granted },
-    inputMonitoring: { granted },
+    inputMonitoring: { granted, state: granted ? 'granted' : 'notDetermined' },
+    notification: { granted },
   };
 }
 

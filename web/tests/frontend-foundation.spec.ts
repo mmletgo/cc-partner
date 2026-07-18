@@ -89,7 +89,8 @@ async function installFoundationMocks(
           return {
             screenCapture: { granted: true },
             accessibility: { granted: true },
-            inputMonitoring: { granted: true },
+            inputMonitoring: { granted: true, state: 'granted' },
+            notification: { granted: true },
           };
         }
         if (cmd === 'get_lan_disclosure_status') {
@@ -612,7 +613,8 @@ test.describe('frontend foundation smoke', () => {
             return {
               screenCapture: { granted: true },
               accessibility: { granted: true },
-              inputMonitoring: { granted: true },
+              inputMonitoring: { granted: true, state: 'granted' },
+              notification: { granted: true },
             };
           }
           if (cmd === 'get_version') return { version: '0.0.0-test', buildDate: '2026-07-14' };

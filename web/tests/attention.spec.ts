@@ -229,7 +229,8 @@ async function installAttentionDesktopMocks(
           return {
             screenCapture: { granted: true },
             accessibility: { granted: true },
-            inputMonitoring: { granted: true },
+            inputMonitoring: { granted: true, state: 'granted' },
+            notification: { granted: true },
           };
         }
         if (cmd === 'get_lan_disclosure_status') {

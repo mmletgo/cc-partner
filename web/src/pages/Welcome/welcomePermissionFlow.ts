@@ -37,11 +37,6 @@ export type WelcomePermEvent =
   | { type: 'FOREGROUND' }
   /** 用户点「重新检查」：即使当前 idle，只要组件确认 sticky 仍 denied 也可进入 syncing */
   | { type: 'USER_RECHECK' }
-  /**
-   * 后端声明 needsRelaunch（输入监控 Denied 同进程无法弹中转窗）：
-   * 立即展示「重新打开应用」，新进程再 Request 弹系统中转窗。
-   */
-  | { type: 'BACKEND_NEEDS_RELAUNCH' }
   | { type: 'SYNC_TICK'; status: StickyStatusSlice }
   | { type: 'SYNC_EXHAUSTED'; status: StickyStatusSlice }
   | { type: 'ALL_REQUIRED_GRANTED' }
@@ -63,7 +58,6 @@ export function hasStickyDenied(status: StickyStatusSlice): boolean {
  * Business Logic: 权限同步相位转移，无 IO。
  * Code Logic:
  *   - GO_SETTINGS(sticky) → awaiting
- *   - BACKEND_NEEDS_RELAUNCH → needs_reopen（立即露出「重新打开应用」）
  *   - FOREGROUND: awaiting → syncing；needs_reopen 保持（避免 recheck 时按钮消失）
  *   - USER_RECHECK: idle|awaiting → syncing；needs_reopen 保持
  *   - SYNC_TICK / SYNC_EXHAUSTED: sticky 全齐 → idle；否则 syncing 耗尽 → needs_reopen，
@@ -83,9 +77,6 @@ export function reduceWelcomePermPhase(
         return phase === 'needs_reopen' ? 'needs_reopen' : 'awaiting';
       }
       return phase;
-    case 'BACKEND_NEEDS_RELAUNCH':
-      // 输入监控同进程无法弹中转窗：立刻进入 needs_reopen，不依赖多轮 recheck
-      return 'needs_reopen';
     case 'FOREGROUND':
       if (phase === 'awaiting') return 'syncing';
       // needs_reopen / syncing 保持：多轮 recheck 不卸掉「重新打开应用」

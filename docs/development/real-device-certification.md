@@ -41,8 +41,9 @@ Infrastructure (must be in `subjectCommit` before freeze):
 - `.github/workflows/release-tauri-beta.yml` — beta-only evidence-aware publish gate
 - `scripts/prepare-updater-certification-harness.mjs` + `serve-updater-certification.mjs` + `src-tauri/tauri.updater-certification.conf.json`
 
-Stable multi-platform publish remains `.github/workflows/release-tauri.yml` and is
-**not** invoked for this beta profile.
+Stable public Windows/Linux publish remains `.github/workflows/release-tauri.yml`;
+fixed-certificate macOS artifacts use the manual `.github/workflows/internal-macos.yml`.
+Neither is invoked for this beta profile or substitutes for L3 permission evidence.
 
 ## Certification row schema
 
@@ -129,6 +130,7 @@ platforms (Windows, WSL, Ubuntu, Intel Mac, dual-host, iOS, Android, NVDA) stay
 | ID | Surface | appVersion | commit | OS build | status | evidence | date | expiresAt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | L3-MACOS-GUI-PERMISSIONS-001 | macOS packaged GUI launch; screen/accessibility/input/notification grant-deny-retry; screenshot clipboard; updater via loopback harness | 0.7.0 | 15f2337… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
+| L3-MACOS-INPUT-MONITORING-INTERNAL-001 | Fixed-certificate internal app: input monitoring deny → grant → explicit reopen → upgrade without reauthorization | n/a | n/a | n/a (no fixed-certificate host run) | **NOT VERIFIED** | none | n/a | n/a |
 | L3-MACOS-VOICEOVER-001 | macOS VoiceOver: LAN disclosure, Home/Trending, Workbench, Dialog/Drawer, live region, terminal, Attention, Human Review, WORKFLOW | 0.7.0 | 15f2337… | n/a (no host run) | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
 | L3-WINDOWS-GUI-001 | Windows packaged GUI; file transfer path/dialog; native terminal | 0.7.0 | 15f2337… | n/a | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
 | L3-WINDOWS-WSL-001 | Windows WSL + tmux Workbench terminal recovery | 0.7.0 | 15f2337… | n/a | **NOT VERIFIED** | none | 2026-07-15 | 2026-10-13 |
@@ -163,6 +165,14 @@ Only mark `PASS` when **all** of the following are true for that row:
    **not** a substitute and must not flip this row to PASS.
 5. `expiresAt` is set to execution date + 90 days.
 
+For `L3-MACOS-INPUT-MONITORING-INTERNAL-001`, additionally require the exact
+Bundle ID `com.cc-partner.app.internal`, the fixed `cc-partner Internal Code
+Signing` leaf certificate fingerprint, a screenshot showing the app in the
+Input Monitoring list, and a second build installed over the first without a
+new authorization prompt. Community/ad-hoc builds and the signing-contract
+unit tests are not substitutes. Follow
+`docs/development/macos-internal-signing.md` and record sanitized evidence.
+
 ### Deferred 1 GiB dual-host transfer resume (N5 → L3 handoff)
 
 Keep **`L3-DUAL-HOST-LAN-001` = NOT VERIFIED** until an operator executes all of:
@@ -189,7 +199,7 @@ current tree not re-certified.”
 The following remain **NOT VERIFIED** until a real-device pass is recorded:
 
 1. macOS packaged GUI launch and WebView (Apple Silicon execution planned for N8; Intel unexecuted)
-2. macOS screen recording / accessibility / input monitoring / notification dialogs (grant, deny, retry)
+2. macOS screen recording / accessibility / input monitoring / notification dialogs (grant, deny, retry), including fixed-certificate input monitoring upgrade retention (`L3-MACOS-INPUT-MONITORING-INTERNAL-001`)
 3. macOS region screenshot → clipboard round-trip on real display
 4. macOS VoiceOver semantic journey on packaged candidate (`L3-MACOS-VOICEOVER-001`)
 5. macOS Intel (`macos-x86_64`) GUI/permissions + VoiceOver (deferred; not in current beta)
@@ -228,4 +238,3 @@ cargo test --locked --test lan_trust_boundary_smoke -- --nocapture --test-thread
 - production DMG: `cc-partner_0.7.0_aarch64.dmg` sha256 `f9be87d6ba47a7a564beba8926aef17f56fad4c6ae6e10d89d1e7189358b4790`
 - inventory: `docs/development/evidence/rc/inventory.json`
 - L3 GUI/VoiceOver executions: not yet written (still NOT VERIFIED until T3/T4)
-

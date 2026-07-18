@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-07-16",
+  "updatedAt": "2026-07-19",
   "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
   "entries": [
     {
@@ -921,6 +921,38 @@
       "docs": [
         "docs/development/testing.md",
         "docs/development/real-device-certification.md"
+      ]
+    },
+    {
+      "id": "L3-MACOS-INPUT-MONITORING-INTERNAL-001",
+      "surface": "macos-internal-input-monitoring-stable-identity",
+      "level": "L3",
+      "tests": [
+        "docs/development/macos-internal-signing.md",
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: fixed-certificate internal app deny -> grant -> explicit reopen -> upgrade without reauthorization",
+      "ciJob": "manual",
+      "platforms": [
+        "macos"
+      ],
+      "exclusions": [
+        "hosted runner substitute",
+        "ad-hoc or community build substitute",
+        "unit test or browser mock substitute",
+        "certificate contract check without a real TCC interaction"
+      ],
+      "commit": null,
+      "version": null,
+      "date": null,
+      "expiresAt": null,
+      "status": "NOT VERIFIED",
+      "evidence": null,
+      "osBuild": null,
+      "docs": [
+        "docs/development/macos-internal-signing.md",
+        "docs/development/real-device-certification.md",
+        "docs/superpowers/specs/2026-07-19-macos-input-monitoring-root-fix-design.md"
       ]
     },
     {

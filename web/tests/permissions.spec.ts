@@ -63,7 +63,7 @@ test.describe('E2E-PERM-001 Permissions journey', () => {
   }) => {
     await installAppLocalStorage(page, { permissionOnboarded: true });
     registerAppShellCommands(backendHarness, {
-      permissions: makePermissionsStatus(false),
+      permissions: makePermissionsStatus(true),
       notificationGranted: true,
     });
 

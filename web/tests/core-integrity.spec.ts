@@ -125,7 +125,8 @@ async function installTransferMocks(page: Page): Promise<void> {
           return {
             screenCapture: { granted: true },
             accessibility: { granted: true },
-            inputMonitoring: { granted: true },
+            inputMonitoring: { granted: true, state: 'granted' },
+            notification: { granted: true },
           };
         }
         if (cmd === 'get_lan_disclosure_status') {
@@ -312,7 +313,8 @@ async function installPromptMocks(page: Page): Promise<void> {
           return {
             screenCapture: { granted: true },
             accessibility: { granted: true },
-            inputMonitoring: { granted: true },
+            inputMonitoring: { granted: true, state: 'granted' },
+            notification: { granted: true },
           };
         }
         if (cmd === 'get_lan_disclosure_status') {
@@ -506,7 +508,8 @@ async function installPermissionMocks(page: Page): Promise<void> {
           return {
             screenCapture: { granted: false },
             accessibility: { granted: false },
-            inputMonitoring: { granted: false },
+            inputMonitoring: { granted: false, state: 'notDetermined' },
+            notification: { granted: false },
           };
         }
         if (cmd === 'request_permission') {

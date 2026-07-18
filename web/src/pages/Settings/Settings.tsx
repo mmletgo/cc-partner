@@ -309,6 +309,7 @@ export function Settings(): ReactElement {
               permRefreshing={ctrl.permRefreshing}
               permError={ctrl.permError}
               permRequesting={ctrl.permRequesting}
+              permissionBuildHelpVisible={ctrl.permissionBuildHelpVisible}
               onRequestAccess={ctrl.handleRequestAccess}
               onRefreshPermissions={() => void ctrl.refreshPermissions()}
             />

@@ -11,7 +11,6 @@
  */
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import { Card, Button } from '@/components/primitives';
 import {
   LanFirewallDependencyCard,
@@ -38,6 +37,7 @@ export interface SettingsDependenciesPanelProps {
   permRefreshing: boolean;
   permError: string | null;
   permRequesting: ReadonlySet<PermissionType> | Set<PermissionType>;
+  permissionBuildHelpVisible: boolean;
   onRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
   onRefreshPermissions: () => void;
 }
@@ -60,12 +60,12 @@ export function SettingsDependenciesPanel({
   permRefreshing,
   permError,
   permRequesting,
+  permissionBuildHelpVisible,
   onRequestAccess,
   onRefreshPermissions,
 }: SettingsDependenciesPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
   const [tWelcome] = useTranslation('welcome');
-  const navigate = useNavigate();
 
   return (
     <>
@@ -103,6 +103,11 @@ export function SettingsDependenciesPanel({
             {t('settings:permission.loadFailed', { error: permError })}
           </p>
         ) : null}
+        {permissionBuildHelpVisible ? (
+          <p className={styles.helper} role="status">
+            {tWelcome('internalBuildHelp')}
+          </p>
+        ) : null}
         {mapPermissions(permStatus, tWelcome).map((p) => (
           <PermissionCard
             key={p.id}
@@ -112,13 +117,7 @@ export function SettingsDependenciesPanel({
             granted={p.granted}
             requesting={permRequesting.has(p.id)}
             actionLabel={p.actionLabel}
-            onRequestAccess={() => {
-              if (p.action === 'buildHelp') {
-                navigate('/welcome');
-              } else {
-                onRequestAccess(p.id, p.action);
-              }
-            }}
+            onRequestAccess={() => onRequestAccess(p.id, p.action)}
           />
         ))}
         <div>

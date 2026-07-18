@@ -197,7 +197,7 @@ pub fn app_identity() -> AppIdentity {
 pub fn check_notification_access() -> bool {
     matches!(
         unsafe { notification_ffi::cp_notification_auth_status() },
-        2 | 3 | 4
+        2..=4
     )
 }
 
@@ -474,9 +474,70 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+const LEGACY_INPUT_MONITORING_MARKERS: [&str; 2] = [
+    "input-monitoring-pending-request",
+    "input-monitoring-cs-rotated",
+];
+
+/// 删除旧版输入监控补偿流程遗留的应用自有标记。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧版本可能留下 pending/rotation 文件；新版本不再读取或执行这些补偿动作，
+///     启动时应一次性清掉，避免运维人员误以为它们仍会触发 TCC mutation。
+///
+/// Code Logic（这个函数做什么）:
+///     只在应用 data_dir 下删除两个固定文件名；不存在或删除失败不阻断启动，且绝不调用
+///     `tccutil`、`codesign` 或其它系统权限修改命令。
+pub fn clear_legacy_input_monitoring_markers() {
+    let Ok(data_dir) = crate::config::data_dir() else {
+        return;
+    };
+    clear_legacy_input_monitoring_markers_in(&data_dir);
+}
+
+/// 在指定目录中删除旧版输入监控标记，供隔离测试复用。
+fn clear_legacy_input_monitoring_markers_in(data_dir: &std::path::Path) {
+    for marker in LEGACY_INPUT_MONITORING_MARKERS {
+        match std::fs::remove_file(data_dir.join(marker)) {
+            Ok(()) => tracing::info!(marker, "cleared legacy input monitoring marker"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(marker, error = %error, "failed to clear legacy input monitoring marker")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 旧版本的 pending/rotation 标记不得继续影响新权限状态机。
+    #[test]
+    fn clears_only_legacy_input_monitoring_markers() {
+        let root = std::env::temp_dir().join(format!(
+            "cc-partner-permission-marker-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create isolated temp dir");
+        let pending = root.join("input-monitoring-pending-request");
+        let rotated = root.join("input-monitoring-cs-rotated");
+        let unrelated = root.join("keep-me");
+        std::fs::write(&pending, b"legacy").expect("write pending marker");
+        std::fs::write(&rotated, b"legacy").expect("write rotation marker");
+        std::fs::write(&unrelated, b"keep").expect("write unrelated file");
+
+        clear_legacy_input_monitoring_markers_in(&root);
+
+        assert!(!pending.exists());
+        assert!(!rotated.exists());
+        assert!(unrelated.exists());
+        std::fs::remove_dir_all(root).expect("remove isolated temp dir");
+    }
 
     /// 查询结果必须携带输入监控四态并可序列化为 camelCase。
     #[test]

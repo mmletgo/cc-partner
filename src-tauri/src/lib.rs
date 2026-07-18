@@ -158,6 +158,7 @@ pub fn run() {
 
             // 注入共享状态供命令层使用
             app.manage(state);
+            permissions::clear_legacy_input_monitoring_markers();
 
             // 装配启动协调器（ensure/start 闭包在 manage 之后捕获 AppHandle）
             let handle_for_ensure = app.handle().clone();

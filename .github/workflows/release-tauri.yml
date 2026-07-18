@@ -8,7 +8,7 @@
 #
 # 新方案（参考 cc-switch 项目）：
 #   1. 用项目锁定的 tauri CLI 直接跑 `tauri build`（配合 tauri.conf.json 的
-#      bundle.createUpdaterArtifacts: true，让 Tauri 自动产出 .app.tar.gz / .exe 及其
+#      bundle.createUpdaterArtifacts: true，让 Tauri 自动产出 .exe / AppImage 及其
 #      .sig 签名文件），不再依赖 tauri-action 的产物收集逻辑。
 #   2. 每个 matrix 平台把 updater 产物（+.sig）和安装包收集到 release-assets/，通过
 #      workflow artifact 汇总。
@@ -16,15 +16,14 @@
 #      Release —— 只要某个平台产出了 .sig 就会进 latest.json，互不影响，彻底绕开 bug。
 #
 # 三个 job 的职责：
-#   - build                  : 按 matrix（macOS aarch64 / macOS x86_64 / Windows / Linux x64 /
-#                              Linux arm64）各自 tauri build，收集产物到 release-assets/。
+#   - build                  : 按 matrix（Windows / Linux x64 / Linux arm64）各自 tauri build，
+#                              收集产物到 release-assets/。macOS 内部包由 internal-macos.yml 负责。
 #   - publish-release        : 合并所有平台的 release-assets/，上传到 GitHub Release。
 #   - assemble-latest-json   : 从 Release 拉取全部 .sig，生成并上传 latest.json 供 updater 用。
 #
 # 注：前端在 web/ 子目录（用 npm 不是 pnpm），tauri 项目在 src-tauri/ 子目录。tauri CLI
 # 经 `cd web && npm ci` 安装到 web/node_modules，从仓库根目录调用 web/node_modules/.bin/tauri
-# （与本地 ./start.sh 一致）。macOS 保持 ad-hoc 签名（signingIdentity: "-"），不做 Apple
-# 公证/notarization；Windows updater 用 nsis（.exe）。
+# （与本地 ./start.sh 一致）。公开 Release 不发布 macOS ad-hoc 包；Windows updater 用 nsis。
 
 name: Build & Release (Tauri)
 
@@ -52,14 +51,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS Apple Silicon（M 系列）
-          - matrix_id: macos-aarch64
-            platform: 'macos-latest'
-            target: 'aarch64-apple-darwin'
-          # macOS Intel
-          - matrix_id: macos-x86_64
-            platform: 'macos-latest'
-            target: 'x86_64-apple-darwin'
           # Windows x86_64（nsis + msi；updater 用 nsis 的 .exe）
           - matrix_id: windows-x86_64
             platform: 'windows-latest'
@@ -89,7 +80,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          # macOS 按目标 target 装（aarch64/x86_64）；其他平台 target 为空，用默认 host target
+          # 当前公开矩阵均使用 runner 默认 host target；保留字段便于 Linux cross target 扩展。
           targets: ${{ matrix.target }}
 
       - name: Cache cargo build artifacts
@@ -178,11 +169,6 @@ jobs:
           echo "=== agent CLI artifact ==="
           ls -la "$OUT"
 
-      - name: Build Tauri App (macOS)
-        if: startsWith(matrix.platform, 'macos')
-        shell: bash
-        run: web/node_modules/.bin/tauri build --target ${{ matrix.target }}
-
       - name: Build Tauri App (Windows)
         if: startsWith(matrix.platform, 'windows')
         shell: bash
@@ -200,39 +186,6 @@ jobs:
         run: web/node_modules/.bin/tauri build --bundles appimage,deb,rpm
 
       # ── 收集产物到 release-assets/ ────────────────────────────────────────
-      - name: Prepare macOS Assets
-        if: startsWith(matrix.platform, 'macos')
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p release-assets
-          # updater 产物（.app.tar.gz + .sig）在 target 专属目录下；
-          # 用 matrix.target 动态拼路径（带 --target 时为 target/<target>/release/...）。
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
-          echo "macOS bundle 目录: $BUNDLE_DIR"
-          ls -la "$BUNDLE_DIR"
-          # Tauri 2 原生 build 产出的 macOS tarball 文件名是 cc-partner.app.tar.gz（无架构后缀），
-          # 双架构 matrix（aarch64 + x86_64）会产出同名文件互相覆盖。
-          # 故按 matrix.target 重命名加架构后缀，让 latest.json 脚本能区分平台、避免覆盖。
-          # 约定：aarch64-apple-darwin → aarch64；x86_64-apple-darwin → x64（对齐 latest.json key）
-          ARCH="${{ matrix.target }}"
-          case "$ARCH" in
-            aarch64-*) ARCH_SHORT="aarch64";;
-            x86_64-*)  ARCH_SHORT="x64";;
-            *)         ARCH_SHORT="${ARCH%%-*}";;
-          esac
-          cp "$BUNDLE_DIR"/*.app.tar.gz "release-assets/cc-partner_${ARCH_SHORT}.app.tar.gz"
-          cp "$BUNDLE_DIR"/*.app.tar.gz.sig "release-assets/cc-partner_${ARCH_SHORT}.app.tar.gz.sig"
-          # 顺带收集 dmg 安装包（不参与 updater，仅供手动下载；同样加架构后缀避免覆盖）
-          for dmg in src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
-            [ -f "$dmg" ] || continue
-            base=$(basename "$dmg")
-            # 原文件名形如 cc-partner_0.6.6_aarch64.dmg 已含架构，保留原名
-            cp "$dmg" "release-assets/$base"
-          done
-          echo "=== release-assets ==="
-          ls -la release-assets/
-
       - name: Prepare Windows Assets
         if: startsWith(matrix.platform, 'windows')
         shell: bash
@@ -320,8 +273,6 @@ jobs:
 
             | 平台 | 安装包 |
             | --- | --- |
-            | macOS (Apple Silicon) | `*_aarch64.dmg` |
-            | macOS (Intel) | `*_x64.dmg` |
             | Windows (x86_64) | `*_x64-setup.exe` |
             | Linux (x86_64) | `*_amd64.AppImage` / `.deb` |
             | Linux (ARM64) | `*_aarch64.AppImage` / `.deb` |
@@ -329,7 +280,7 @@ jobs:
             ### 自动更新
 
             已安装旧版本的用户，应用内会自动检查更新（读取本 Release 的 `latest.json`）。
-            macOS / Windows 支持应用内自动更新；Linux 需手动下载新版本安装包覆盖。
+            Windows 支持应用内自动更新；Linux 需手动下载新版本安装包覆盖。
           files: release-assets/*
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -378,8 +329,6 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
           base_url="https://github.com/$REPO/releases/download/$TAG"
 
-          mac_aarch64_url=""; mac_aarch64_sig=""
-          mac_x64_url="";     mac_x64_sig=""
           win_x64_url="";     win_x64_sig=""
           linux_x64_url="";   linux_x64_sig=""
           linux_arm64_url=""; linux_arm64_sig=""
@@ -391,10 +340,6 @@ jobs:
             url="$base_url/$fname"
             sig_content=$(cat "$sig")
             case "$fname" in
-              *_aarch64.app.tar.gz)
-                mac_aarch64_url="$url"; mac_aarch64_sig="$sig_content";;
-              *_x64.app.tar.gz)
-                mac_x64_url="$url"; mac_x64_sig="$sig_content";;
               *_x64-setup.exe)
                 win_x64_url="$url"; win_x64_sig="$sig_content";;
               *_amd64.AppImage)
@@ -404,17 +349,13 @@ jobs:
             esac
           done
 
-          # 用 jq 构造 platforms 对象：先建全 5 个键，再用 with_entries 过滤掉 url 为空的
+          # 用 jq 构造公开 platforms 对象；macOS 内部产物不得进入公开 updater 清单。
           # （jq 的 empty 在对象字面量里会吞掉整个对象，不能用 if-then-empty 写法）
           platforms_json=$(jq -n \
-            --arg mac_a_url "$mac_aarch64_url"     --arg mac_a_sig "$mac_aarch64_sig" \
-            --arg mac_x_url "$mac_x64_url"         --arg mac_x_sig "$mac_x64_sig" \
             --arg win_url  "$win_x64_url"          --arg win_sig  "$win_x64_sig" \
             --arg lx_url   "$linux_x64_url"        --arg lx_sig   "$linux_x64_sig" \
             --arg la_url   "$linux_arm64_url"      --arg la_sig   "$linux_arm64_sig" \
             '{
-              "darwin-aarch64": {signature: $mac_a_sig, url: $mac_a_url},
-              "darwin-x86_64":  {signature: $mac_x_sig, url: $mac_x_url},
               "windows-x86_64": {signature: $win_sig,  url: $win_url},
               "linux-x86_64":   {signature: $lx_sig,   url: $lx_url},
               "linux-aarch64":  {signature: $la_sig,   url: $la_url}

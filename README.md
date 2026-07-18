@@ -98,19 +98,17 @@ printf '%s' '{"data":"pwd\\n"}' | cargo run --locked --bin cc-partner-cli -- ses
 
 | 系统 | 文件 | 说明 |
 |------|------|------|
-| macOS (Apple Silicon / Intel) | `.dmg` | 按 CPU 架构分两个包 |
-| Windows | `.exe`（NSIS）/ `.msi` | 安装程序 |
-| Ubuntu / Linux | `.AppImage` / `.deb` | 直接运行或安装包 |
+| macOS | 内部固定签名构建 | 公开 Release 暂不发布 ad-hoc 包；见下方说明 |
+| Windows | `.exe`（NSIS） | 安装程序 |
+| Ubuntu / Linux | `.AppImage` / `.deb` / `.rpm` | 直接运行或安装包 |
 
 ### macOS
 
-1. 下载 `.dmg`，将 **cc-partner** 拖入 Applications
-2. 若提示无法验证开发者：系统设置 → 隐私与安全性 → 「仍要打开」
-3. 首次截图/全局快捷键：授予「屏幕录制」「输入监控」
+当前没有 Apple Developer ID，因此公开 Release 不发布会丢失稳定 TCC 身份的 ad-hoc macOS 包。内部使用请按 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md) 创建并信任固定自签名证书，再构建 `cc-partner Internal.app`。社区源码构建仍可开发其它功能，但输入监控会明确显示 unavailable，不会打开没有应用条目的设置列表。
 
 ### Windows
 
-下载 `.exe` 或 `.msi`，按向导安装。Workbench 完整 tmux 上下文依赖 **默认 WSL 发行版内的 tmux**（见下方平台说明）。
+下载 `.exe`，按向导安装。Workbench 完整 tmux 上下文依赖 **默认 WSL 发行版内的 tmux**（见下方平台说明）。
 
 ### Linux
 
@@ -136,10 +134,10 @@ cd cc-partner
 
 # 推荐：一键开发（检查 Node/Rust、按需 npm install、预构建 backend sidecar、tauri dev）
 ./start.sh
-# macOS：自动用开发壳 cc-partner-dev.app（显示名「cc-partner (Dev)」、
-# Bundle ID com.cc-partner.app.dev），与发布版在系统设置中分开展示/授权
+# macOS：默认社区开发壳仅支持非输入监控功能；输入监控需固定内部签名，
+# 见 docs/development/macos-internal-signing.md
 
-# 或手动（裸 tauri dev 无开发壳；macOS 输入监控可能 fail-closed）
+# 或手动（裸 tauri dev 无稳定 TCC 主体；macOS 输入监控明确 unavailable）
 cd web && npm install
 ./node_modules/.bin/tauri dev
 ```

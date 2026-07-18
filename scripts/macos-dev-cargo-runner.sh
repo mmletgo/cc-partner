@@ -19,7 +19,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEBUG_DIR="$REPO_ROOT/src-tauri/target/debug"
-DEV_APP="$DEBUG_DIR/cc-partner-dev.app"
+if [[ -n "${CC_PARTNER_INTERNAL_SIGNING_IDENTITY:-}" ]]; then
+  DEV_APP="$DEBUG_DIR/cc-partner-internal-dev.app"
+  DEV_DISPLAY_NAME="cc-partner Internal (Dev)"
+else
+  DEV_APP="$DEBUG_DIR/cc-partner-dev.app"
+  DEV_DISPLAY_NAME="cc-partner (Dev)"
+fi
 DEV_BIN="$DEV_APP/Contents/MacOS/cc-partner"
 PREPARE_JS="$SCRIPT_DIR/prepare-macos-dev-app.mjs"
 LOG_DIR="$DEBUG_DIR"
@@ -86,7 +92,7 @@ trap cleanup EXIT TERM INT HUP
 : >"$STDOUT_LOG"
 : >"$STDERR_LOG"
 
-echo "[macos-dev-cargo-runner] launching via LaunchServices (open): cc-partner (Dev)" >&2
+echo "[macos-dev-cargo-runner] launching via LaunchServices (open): $DEV_DISPLAY_NAME" >&2
 echo "[macos-dev-cargo-runner] $DEV_APP" >&2
 echo "[macos-dev-cargo-runner] logs: $STDOUT_LOG | $STDERR_LOG" >&2
 echo "[macos-dev-cargo-runner] NOTE: open --stdout=/dev/stdout fails under tauri pipes (-10810); using log files" >&2

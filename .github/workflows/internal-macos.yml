@@ -1,0 +1,65 @@
+name: Internal macOS Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    environment: internal-macos
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        run: cd web && npm ci
+      - name: Import fixed internal code-signing identity
+        shell: bash
+        env:
+          P12_BASE64: ${{ secrets.MACOS_INTERNAL_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_INTERNAL_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_INTERNAL_KEYCHAIN_PASSWORD }}
+          CERT_SHA256: ${{ secrets.MACOS_INTERNAL_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          : "${P12_BASE64:?missing MACOS_INTERNAL_CERTIFICATE_P12_BASE64}"
+          : "${P12_PASSWORD:?missing MACOS_INTERNAL_CERTIFICATE_PASSWORD}"
+          : "${KEYCHAIN_PASSWORD:?missing MACOS_INTERNAL_KEYCHAIN_PASSWORD}"
+          : "${CERT_SHA256:?missing MACOS_INTERNAL_CERT_SHA256}"
+          KEYCHAIN="$RUNNER_TEMP/cc-partner-internal.keychain-db"
+          P12="$RUNNER_TEMP/cc-partner-internal.p12"
+          printf '%s' "$P12_BASE64" | /usr/bin/base64 -D > "$P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          rm -f "$P12"
+          echo "CC_PARTNER_INTERNAL_SIGNING_IDENTITY=cc-partner Internal Code Signing" >> "$GITHUB_ENV"
+          echo "CC_PARTNER_INTERNAL_CERT_SHA256=$CERT_SHA256" >> "$GITHUB_ENV"
+      - name: Build and verify internal app
+        run: scripts/build-macos-internal.sh
+      - name: Upload internal app artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-partner-internal-macos-${{ github.sha }}
+          path: |
+            src-tauri/target/release/bundle/macos/*.app
+            src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary keychain
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/cc-partner-internal.p12"
+          security delete-keychain "$RUNNER_TEMP/cc-partner-internal.keychain-db" || true

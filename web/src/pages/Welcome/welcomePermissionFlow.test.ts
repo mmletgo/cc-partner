@@ -57,18 +57,6 @@ describe('welcomePermissionFlow', () => {
     expect(reduceWelcomePermPhase('needs_reopen', { type: 'USER_RECHECK' })).toBe('needs_reopen');
   });
 
-  test('BACKEND_NEEDS_RELAUNCH immediately enters needs_reopen from any phase', () => {
-    expect(reduceWelcomePermPhase('idle', { type: 'BACKEND_NEEDS_RELAUNCH' })).toBe(
-      'needs_reopen',
-    );
-    expect(reduceWelcomePermPhase('awaiting', { type: 'BACKEND_NEEDS_RELAUNCH' })).toBe(
-      'needs_reopen',
-    );
-    expect(reduceWelcomePermPhase('syncing', { type: 'BACKEND_NEEDS_RELAUNCH' })).toBe(
-      'needs_reopen',
-    );
-  });
-
   test('SYNC_TICK with sticky granted ends at idle', () => {
     expect(reduceWelcomePermPhase('syncing', { type: 'SYNC_TICK', status: stickyOk })).toBe(
       'idle',

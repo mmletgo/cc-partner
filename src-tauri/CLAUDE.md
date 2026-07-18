@@ -60,7 +60,7 @@ src/
 ├── transfer/          — 分块传输 + SHA256 + 断点续传 + 幂等 retry/resume claim + sender operation 对账（`transfer.resume.v1`）；`receiver/` 为目录模块（`mod`/`validation`/`chunk_io`/`resume`/`finalize`，公共 API 仍为 `crate::transfer::receiver`）[M5/N5 T2+T3]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
-├── permissions/       — macOS 权限 FFI（CGPreflight/CGRequest ScreenCapture + ListenEvent；AXIsProcessTrusted；禁止 CGEventTap 假绿探测） [M7 已实现]
+├── permissions/       — macOS 权限 FFI（屏幕录制/AX/通知 + IOHID 输入监控四态；内部固定签名主体才允许 Request） [M7 已实现]
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
@@ -278,20 +278,15 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 ## M7 已落地行为约定（移植自 Python `hotkey/listener.py` + `ui/tray.py` + `ui/permissions.py`）
 
-- **macOS 权限 FFI（permissions/mod.rs，对照 Python permissions.py 四函数）**：
-  - `check_screen_capture_access`：FFI 调 `CGPreflightScreenCaptureAccess`（10.15+ 符号）。
-  - `check_input_monitoring_access`：fail-closed 多信号——**稳定产品 bundle id** 来自 `CFBundleGetIdentifier`，失败则读 enclosing `*.app/Contents/Info.plist` 的 `CFBundleIdentifier`；仍无/空/占位 `app`（如 `tauri dev` 裸 `target/debug/app`）直接 false（非 TCC 产品主体，公开 API 会假绿）；`IOHIDCheckAccess(ListenEvent)==Granted`；可选私有 `TCCAccessPreflight(kTCCServiceListenEvent)` **仅 Denied(1) 硬失败**（Granted(0) 通过，Unknown(2) 软忽略）；再 `CGPreflightListenEventAccess`。失败时 debug 同时打出 iohid/tcc/cg；系统设置已开但进程仍 Denied 时须新进程才能生效——**禁止** request/visibility 自动 relaunch；**仅** Welcome 用户点「重新打开应用」才调 `relaunch_for_permissions`（enclosing `.app` + delayed LaunchServices `open` + exit；无 `.app` 时 fallback `request_restart`；禁止直接 exec MacOS 二进制）。`check_permissions` debug 摘要含四字段 + bundle id。失败路径 `info!` 打出 bundle/exe/iohid/tcc/cg。**禁止**单独 CGEventTap/单独 CGPreflight。`request_permission("inputMonitoring")` 见下矩阵（Denied → reset + 同进程 Request + 可选 open 设置；**不**自动重启）。验证输入监控请运行打包后的 `.app` 或 `./start.sh dev` 组装的 `target/debug/cc-partner-dev.app`（显示名 **cc-partner (Dev)**、`com.cc-partner.app.dev`，与发布版 `com.cc-partner.app` 分开 TCC 授权）；不要用裸 `target/debug/app`。开发壳：`scripts/prepare-macos-dev-app.mjs` + `scripts/macos-dev-cargo-runner.sh`（`start.sh dev` 在 Darwin 自动 `--runner`）。 **必须用 LaunchServices `open` 启动**，禁止 `exec` Contents/MacOS 二进制——直接 exec 会绕过 TCC（系统设置无条目、权限 API 假绿）。`open --stdout=/dev/stdout` 在 tauri DevCommand 管道父进程下会失败（LS -10810）；runner 将 stdout/stderr 写到 `target/debug/cc-partner-dev.{stdout,stderr}.log` 再 `tail -f` 回终端。
-  - `request_permission(type, open_settings?)` 按类型分流，返回 `{ok, requested, opened, action}`，`action ∈ settings|prompt|noop`：
-    - **screenCapture**（严格对齐辅助功能）：已 granted → `noop`；TCC Denied（已在列表）→ **仅 open**；Unknown/首次 → **仅** `CGRequest` 登记（可能系统框，**禁止**同次 open）。check 仅 `CGPreflight`（**禁止**私有 TCC=0 假绿）。`open_permission_settings` **首个 URL 成功即返回**。
-    - **accessibility**：已信任 → `noop`；TCC Denied → **仅** open 设置；Unknown → **仅** AX prompt 登记（不叠 open）。
-    - **inputMonitoring**：已 granted → `noop`；**禁止 EventTap 静默登记**、**第二实例 oneshot**、**自动 cold relaunch**。主路径是系统中转弹窗：Unknown → 同进程主线程 `cp_request_listen_event_access`（只 Request，禁止同次 open）。Denied/TCC Denied：`tccutil reset`；同进程仍 Denied → 写 pending + `needs_relaunch=true`（**不 open 空列表**）；Welcome「重新打开应用」后新进程 **先** `consume_pending`：bundle/服务级 reset → 若 ad-hoc Dev 仍 sticky Denied 则 **codesign 旋转 CDHash 一次**并 open+exit → 下一进程再 Request 中转窗；**再**启动 health（禁止 DeviceState 抢先钉 Denied）。Request 后列表已有未开开关才 open。check 只信 IOHID Granted。
-    - **notification**：**不得**始终 request+open。authorized/provisional/ephemeral → `noop`（不 open）；notDetermined → `requestAuthorization` only → `prompt`（不 open）；denied/未知 → 仅 open 通知设置 → `settings`。
-    - `open_settings`：`None`/`Some(true)` 允许 open；`Some(false)` 只登记/请求不 open。非 macOS / 未知 type → action=`noop`。
-  - **不显式 `#[link]`**：CoreGraphics 作为 macOS framework 已被 Tauri 依赖链（core-graphics/xcap）通过 `-framework CoreGraphics` 链接，符号在链接期已可见；写 `#[link(name="CoreGraphics",kind="dylib")]` 反而会找 `libCoreGraphics.dylib` 报 `library not found`。
-  - **非 macOS 一律 granted=true**（对照 Python 非打包行为；Tauri 不区分打包/开发，故开发态 macOS 也真实检测，与 Python 仅打包检测略有差异——开发期需先授权截图/输入监控才能用）。
-  - `check_notification_access`：`UNUserNotificationCenter`（native/macos/notification_auth.m）；**禁止** tauri-plugin-notification 桌面 stub（恒 Granted）。Dev/Release 按 Bundle ID 独立。
-  - `check_permissions() -> {screenCapture,inputMonitoring,accessibility,notification}`；`request_permission` 返回 `{ok, requested, opened, action, needsRelaunch:false}`，`action ∈ settings|prompt|noop`，与前端 `PermissionsStatus`/`PermissionType`/`PermissionRequestResult.action?` 约定一致。
-- **权限命令（commands/permissions.rs）**：`check_permissions`（spawn_blocking）；`request_permission(type, openSettings?)` **主线程** `run_on_main_thread`（CG/IOHID/AX 弹窗后台线程常失效）；json 含 `action`；**禁止**自动 cold relaunch；`get_app_identity`；`relaunch_for_permissions`（**仅** Welcome「重新打开应用」：`open` enclosing `.app` + delayed exit；禁止直接 exec MacOS 二进制）。
+- **macOS 权限 FFI（`permissions/mod.rs` + `permissions/input_monitoring.rs`）**：
+  - `check_permissions` 是无副作用查询；输入监控返回 `{granted,state}`，其中 `state ∈ granted|denied|notDetermined|unavailable`。`granted` 仅在公开 `IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)` 返回 Granted 时为 true，禁止 CGEventTap、私有 TCC SPI 或其它信号拼接假绿。
+  - 输入监控只接受固定内部主体 `com.cc-partner.app.internal` / `com.cc-partner.app.internal.dev`；公开 `com.cc-partner.app`、社区 Dev 壳、裸二进制和未知 IOHID 值均 fail closed 为 `unavailable`。内部包由固定自签名证书 `cc-partner Internal Code Signing` 签名，构建后必须校验 leaf SHA-256 与 designated requirement；详见 `docs/development/macos-internal-signing.md`。
+  - 输入监控 Request 状态机：仅 `notDetermined` 在主线程调用一次公开 `IOHIDRequestAccess`；`denied`、`granted`、`unavailable` 均 noop。`denied` 只能由用户显式点“打开系统设置”；**禁止** `tccutil reset`、私有 `TCCAccess*`、pending marker、第二实例、运行时 `codesign`、CDHash 旋转和自动重启。
+  - `request_permission(type)` 与 `open_permission_settings(type)` 是两条独立 IPC：前者只 Request，后者只打开对应设置。返回统一 `{permission,operation,before,after}`，`operation ∈ request|openSettings|noop`；任何 check/visibility 轮询不得夹带副作用。
+  - screenCapture 使用 `CGPreflightScreenCaptureAccess` / 显式 `CGRequestScreenCaptureAccess`；accessibility 使用 `AXIsProcessTrusted` / 显式 AX prompt；notification 使用 `UNUserNotificationCenter` 原生桥（禁止 desktop plugin stub）。非 macOS 保持 granted=true。
+  - `relaunch_for_permissions` 仅供 Welcome 的显式“重新打开应用”；必须经 LaunchServices `open` 启动 enclosing `.app`，禁止 Request/Open Settings 自动调用，也禁止直接 exec `Contents/MacOS`。
+  - macOS Dev 壳必须由 `scripts/prepare-macos-dev-app.mjs` + `scripts/macos-dev-cargo-runner.sh` 组装并经 LaunchServices 启动。无内部环境变量时生成社区 `cc-partner-dev.app`（输入监控 unavailable）；设置固定 identity + 指纹时生成 `cc-partner-internal-dev.app`。裸 `target/debug/app` 不属于可授权产品主体。
+- **权限命令（`commands/permissions.rs`）**：`check_permissions`（spawn_blocking）；`request_permission(type)` 在主线程执行公开 Request；`open_permission_settings(type)` 独立打开设置；`get_app_identity`；`relaunch_for_permissions` 仅显式 Reopen。命令注册或前端契约变化时必须同步四态测试。
 - **全局快捷键（hotkey.rs + tauri-plugin-global-shortcut 2）**：
   - **格式转换** `hotkey_pynput_to_plugin`：config 存 pynput 格式（`<cmd>+<shift>+s`，macOS；`<ctrl>...` 其他），转插件格式 `CommandOrControl+Shift+S`。`<cmd>/<ctrl>/<win>` → `CommandOrControl`（插件按平台解析 macOS=Command / Win/Linux=Ctrl），`<shift>` → `Shift`，`<alt>/<option>` → `Option`，普通键大写。配 3 个单测。
   - **注册**：v2 的 `on_shortcut(shortcut, handler)` 需随快捷键传入 handler（不是 Builder 全局 handler）；启动路径 `register_screenshot_hotkey` 只注销同 shortcut 后 `on_shortcut`。**热更新禁止 `unregister_all`**：`replace_screenshot_hotkey_os` 先注册新值、再注销旧值，配置事务失败则 `compensate_screenshot_hotkey_os` 恢复旧值；补偿失败返回 `hotkey.rollback_failed`（磁盘/内存保持旧配置，需重启）。handler = `screenshot_handler`。
@@ -355,27 +350,29 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 - **AppState 扩展**：加 `transfer_repo: Arc<TransferRepo>`、`transfers: Arc<TransferRegistry>`；事件统一通过 `AppState.ui: Arc<dyn BackendUi>` 发布，不再在 AppState 保存 mandatory `AppHandle`。
 - **Send 边界注意**：标准 `RwLockReadGuard` 非 Send，跨 await 持有会破坏 `tokio::spawn` 的 Send 约束；`run_send_loop` 取 devices、`handle_init`/`finalize_transfer` 取 config 时，均在 await 前 clone 出字段释放 guard（已踩坑修复）。
 
-## M9 已落地行为约定（打包发版：bundle 配置 + 版本号单一来源 + bump 脚本 + 三平台 CI workflow）
+## M9 已落地行为约定（公开 Windows/Linux 发版 + 内部 macOS 固定签名通道）
 
 - **bundle 配置（tauri.conf.json）**：
   - `targets: "all"` —— 默认本平台全产物；**CI Windows 显式 `--bundles nsis`**（见下），不打包 MSI。
   - `resources: ["resources/browser-runtime/**/*"]` —— 打包 managed Chromium；`prepare-tauri-sidecar` 在目标无 lock 资产（如 `aarch64-unknown-linux-gnu`）时必须写入 `.platform-unavailable` 占位，否则 Tauri build.rs 因 glob 未匹配失败。
-  - `macOS.signingIdentity: "-"` —— **ad-hoc 签名**（开发/测试用，免 Apple Developer ID）。**正式分发需后续配 Apple Developer ID 签名 + notarization**（M9 不做，用户后续配置）。
+  - 基础配置的 `macOS.signingIdentity: "-"` 只供社区源码/本地非输入监控开发；该主体在产品内明确为 input monitoring `unavailable`，不得作为官方 macOS Release 发布。
+  - `tauri.internal.conf.json` 覆盖 `productName=cc-partner Internal`、`identifier=com.cc-partner.app.internal` 与固定 `signingIdentity=cc-partner Internal Code Signing`；同时关闭 updater artifact 并隔离到尚未发布的 `internal-macos` 专用 feed，当前只允许手动覆盖安装，禁止消费公开 latest.json。`scripts/build-macos-internal.sh` 构建后校验 nested code、Bundle ID、证书 SHA-256 和 designated requirement，任一漂移 fail closed，禁止 ad-hoc fallback。
   - `windows.wix.language` 仍可配置，但 **stable release CI 不跑 WiX/MSI**（managed Chromium 下 light.exe 失败且无细节日志；历史 v0.6.x 也只发布 nsis）。
   - `publisher: "cc-partner"`、`category: "Productivity"` —— 安装包元数据。
   - `icon` 数组覆盖三平台（32x32.png/128x128.png/128x128@2x.png/icon.icns/icon.ico），无需额外生成。
 - **版本号单一来源 + 同步**：`tauri.conf.json.version` 是唯一来源。`Cargo.toml.version` **必须与之完全一致**（Tauri build 强制校验，不一致会告警/失败）；`web/package.json.version` 跟随同步（前端构建元数据一致）。锁文件中的根包版本也必须同步，避免 CI 的 `cargo --locked` / `npm ci` 路径与源码清单不一致。
 - **bump 脚本（`scripts/bump-version.mjs`）**：发版时统一升级版本号，避免漏改。用法 `node scripts/bump-version.mjs <新版本号>`（如 `0.6.0`），内部正则替换 `tauri.conf.json` / `Cargo.toml` / `Cargo.lock` / `web/package.json` / `web/package-lock.json` 的版本字段并回读校验，支持语义化版本含预发布号（如 `1.0.0-beta.1`）。**禁止手动改单个文件版本号**，必须走 bump 脚本。
-- **CI workflow（`.github/workflows/release-tauri.yml`）**：
+- **公开 CI workflow（`.github/workflows/release-tauri.yml`）**：
   - 触发：`push tags: ['v*']`。
   - 旧的 Python/PyInstaller `release.yml` 已于 M10 删除，现在仓库为纯 Tauri 结构，推 `v*` tag 只跑这一套 Tauri 构建。
   - **三段式 workflow（v0.6.6 起弃用 tauri-apps/tauri-action）**：曾用 `tauri-apps/tauri-action@v0`，但其 latest.json 自动生成有 bug —— 任一平台缺 `.sig` 就打印 "Signature not found, skipping upload" 并整体跳过 latest.json，导致应用内检查更新报 `error sending request for url`（latest.json 返回 404）。改用三段式：
-    1. `build`（matrix 5 平台：macOS aarch64/x86_64、Windows x64、Linux x64/arm64）—— 先 `node scripts/prepare-tauri-sidecar.mjs [--target <triple>]`（含 browser-runtime 准备/占位 + backend externalBin），再原生 `tauri build`（macOS 带 `--target`；**Windows 固定 `--bundles nsis`**；Linux `--bundles appimage,deb,rpm`），签名后收集 updater 产物到 `release-assets/`，缺 `.sig` fail。
+    1. `build`（matrix 3 平台：Windows x64、Linux x64/arm64）—— 先 `node scripts/prepare-tauri-sidecar.mjs [--target <triple>]`（含 browser-runtime 准备/占位 + backend externalBin），再原生 `tauri build`（**Windows 固定 `--bundles nsis`**；Linux `--bundles appimage,deb,rpm`），签名后收集 updater 产物到 `release-assets/`，缺 `.sig` fail。公开 workflow 不构建、不上传 macOS ad-hoc 包，`latest.json` 也不生成 darwin 平台条目。
     2. `publish-release`（needs: build）—— `actions/download-artifact` 合并所有平台产物，`softprops/action-gh-release@v2` 上传到 GitHub Release。
     3. `assemble-latest-json`（needs: publish-release）—— `gh release download` 拉所有 `.sig`，bash + jq 按文件名匹配平台生成 `latest.json`（`*_aarch64.app.tar.gz`→darwin-aarch64 等），单平台缺签名只跳过该平台不连坐，`gh release upload --clobber` 上传。
   - `bundle.createUpdaterArtifacts: true` —— tauri.conf.json 必须开启，否则 tauri build 不产出 `.sig`。
   - Windows updater / 正式分发均用 nsis（`_x64-setup.exe`，**非 msi**），对齐 `windows.installMode: "passive"`。
 - **签名 secret（用户必配）**：CI 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`（+ 可选 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}`）。用户需把 `~/.tauri/claude-partner.updater.key` 的**内容**配到 repo 的 `TAURI_SIGNING_PRIVATE_KEY` secret（Settings → Secrets and variables → Actions），支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64（minisign 私钥文件原样），CI 会自动归一化。当前公钥用 `1ED3DE93` 这对（`~/.tauri/claude-partner.updater.key.pub`，**无密码**——CI 始终注入 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env，无密码时为空字符串，tauri signer 需要这个 env 存在才不报 "incorrect password"）。**未配 secret 时 CI 的「Prepare Tauri signing key」步骤直接 exit 1，CI 红。**
+- **内部 macOS workflow（`.github/workflows/internal-macos.yml`）**：仅 `workflow_dispatch`，绑定受保护 Environment `internal-macos`；从四个 Environment secrets 临时导入固定 P12 到一次性 Keychain，运行 `scripts/build-macos-internal.sh`，上传短期 workflow artifact，always 删除临时 Keychain。证书创建、信任、轮换和 L3 验证见 `docs/development/macos-internal-signing.md`。
 - **发版流程**：1) `node scripts/bump-version.mjs <新版本号>`（同步源码清单与锁文件版本）；2) 提交；3) `git tag v<版本号> && git push origin v<版本号>` 触发 CI。
 
 ## Claude Code 历史采集与同步已落地行为约定（src/cc/ + storage/cc_history_repo.rs + commands/cc_history.rs + net/routes/cc_history.rs）
@@ -477,7 +474,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 ## 健康提醒已落地行为约定（src/health/ + storage/health_repo.rs + commands/health.rs）
 
 - **功能定位**：久坐监测 + 工作/休息状态机 + 喝水提醒 + 全屏遮罩 + 系统通知提醒 + 屏幕时长统计。每分钟采样前台键鼠活跃度，连续工作达阈值触发久坐提醒；健康监测启用时久坐/喝水/全屏遮罩均固定启用，系统通知由 `notify_enabled` 单独控制；支持免打扰时段 / 手动暂停 / 贪睡 / 跳过。前端入口「健康提醒」页（状态展示 + 暂停/贪睡/跳过按钮）与设置页健康提醒 tab（配置）。
-- **macOS 权限（input monitoring + accessibility）**：键鼠采样（device_query，底层 IOHIDManager）依赖 **Input Monitoring** 权限（`check_input_monitoring_access` 用 `CGPreflightListenEventAccess`，与辅助功能独立，禁止 CGEventTap 假绿）；活动窗口标题采样（active-win-pos-rs，走 AX API）依赖 **Accessibility** 权限（`check_accessibility_access` 仅 `AXIsProcessTrusted` 查询不弹框；**禁止** device_query `application_is_trusted_with_prompt` 在启动时弹框——health daemon 构建 DeviceState 前必须先无 prompt 预检，未授权降级；`request_permission("accessibility")` 仅用户点击时 `AXIsProcessTrustedWithOptions(prompt)` 登记列表并 open Privacy_Accessibility；系统设置内由 macOS 展示「退出并重新打开」（应用内不自绘））。`check_permissions` 返回 `accessibility: {granted}` 与 `inputMonitoring: {granted}` 分字段。前端三权限（screenCapture/accessibility/inputMonitoring）引导复用同一流程（侧栏 PermissionStatusBadge / Welcome / 设置页权限 Card）。
+- **macOS 权限（input monitoring + accessibility）**：键鼠采样（device_query，底层 IOHIDManager）依赖 **Input Monitoring**，其权威查询是 `IOHIDCheckAccess`，返回四态 DTO；只有固定内部 Bundle ID 可 Request，社区/ad-hoc 构建为 unavailable。活动窗口标题采样（active-win-pos-rs，走 AX API）依赖 **Accessibility**（`check_accessibility_access` 仅 `AXIsProcessTrusted` 查询不弹框；禁止 device_query 在启动时主动 prompt，未授权时 health daemon 降级）。前端 Welcome/Settings 按状态分别显示 Request / Open Settings / Reopen / Build Help，侧栏只导航 Welcome，不批量触发权限副作用。
 - **托盘暂停菜单**：`tray.rs` 主菜单加「暂停/恢复监测」项（id `tray_pause`，toggle），点击切 `state.health.paused` 原子标记（与 `commands::health::toggle_health_paused` 复用同一份运行时标记，不落盘、重启失效）。
 - **架构（双线程 daemon，`health/mod.rs::start_health_daemon`）**：一个 `std::thread` 采样（线程局部持有非 Send 的 `DeviceState`/`DeviceQuerySampler`），跨线程只传 `ActivitySample`（Send 纯数据）；一个 `tauri::async_runtime::spawn` 处理 task（`select!{cancel, rx.recv()}` 范式，复用 cc/collector.rs）。daemon **在 lib.rs setup 同步段调用**（`app.manage` 之后），内部用 `tauri::async_runtime::spawn` 而非 `tokio::spawn`（主线程无 reactor），返回 `CancellationToken` 存 `AppState.health_cancel`，`shutdown_backend_runtime` 时 cancel 优雅停止。
 - **状态机（`health/state.rs::HealthStateMachine`，纯算法）**：每分钟喂 `(active: bool, now_ts: i64, &HealthThresholds)` 推进一拍。相位流转：Idle/Resting + 活跃 → 开新工作窗口；Working + 活跃 → 续 `last_active_ts`；Working + 停歇且距上次活动 ≥ `break_seconds` → 关窗口入 Resting（报告被关闭窗口）；其余保持。提醒判定：仅 Working 态，窗口自然时长 ≥ `work_window_seconds` 且本窗口未提醒过 → `should_remind` + 标记 `reminded`（同窗口去重）。配 7 单测。`StateOutcome.state`/`reminder_closed_window` 供未来统计扩展（当前 daemon 仅消费 `should_remind`，故 struct `#[allow(dead_code)]`）。
@@ -510,7 +507,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 ## 跨平台 Smoke（macOS / Windows）覆盖范围
 
-Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、doctor --json、日志轮转/脱敏、固定 LAN trust boundary 集成 smoke、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。三平台 release 安装包仍由 `release-tauri.yml` 负责，**不能替代本 smoke**。
+Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、doctor --json、日志轮转/脱敏、固定 LAN trust boundary 集成 smoke、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。公开 Windows/Linux Release 由 `release-tauri.yml` 负责，内部 macOS 包由 `internal-macos.yml` 负责，二者都**不能替代本 smoke 或真机 TCC 验证**。
 
 ### 已验证（Verified）
 
@@ -539,7 +536,7 @@ Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runne
 | 多机 mDNS / 跨主机 P2P / 手机 QR | NOT VERIFIED — hosted runner scope |
 | 真实公网 peer 生产网卡路径 | NOT VERIFIED — injected ConnectInfo/XFF 不是生产证据 |
 | Browser L1 Playwright LAN journey | NOT VERIFIED in S1 — owned by S6 |
-| 完整 release 安装包矩阵 | 由 `release-tauri.yml` 独立负责，**不是**本 smoke 的替代 |
+| 发布安装包 | 公开 Windows/Linux 由 `release-tauri.yml`、内部 macOS 由 `internal-macos.yml` 独立负责，**不是**本 smoke 的替代 |
 
 ### 本地运行
 
@@ -623,4 +620,3 @@ mkdir -p "$CC_PARTNER_SMOKE_ROOT"
 - Fleet 7d join：`LanFleetProjectSummary.agentActivity` / `agentActivityStatus`；field 失败不阻断其它摘要。
 - 保留：30 天 / 10k 行 / 批删 ≤500；startup + 24h。
 - 隐私：禁止 prompt/response/transcriptPath/cwd/env/nativeSessionId/credential；测试 `agent_ledger_privacy`。
-

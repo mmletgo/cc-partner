@@ -3,7 +3,7 @@
  *
  * Business Logic（为什么需要这个 hook）:
  *   Welcome 引导页、设置页权限管理与侧栏授权徽标都需要：持续获取屏幕录制/辅助功能/
- *   输入监控/通知权限状态，并在用户点击「去设置」时触发单项授权。首轮失败必须结束
+ *   输入监控/通知权限状态，并在用户点击对应动作时分别 Request 或打开设置。首轮失败必须结束
  *   loading 并给出可重试错误，避免永久「检查中」；刷新失败保留旧状态。
  *
  * Code Logic（这个 hook 做什么）:
@@ -104,8 +104,8 @@ export interface UsePermissionsResult {
   /**
    * 请求单项权限；同 type 并发调用复用同一 Promise。
    * @param type 权限类型
-   * @param openSettings 是否打开系统设置面板（仅 TCC 路径透传）
-   * @returns 后端结果（含 needsRelaunch：输入监控 Denied 同进程无法弹中转窗时 true）
+   * Request 与 Open Settings 是两条独立入口；本函数只触发公开 Request API。
+   * @returns 后端权限操作结果
    */
   request: (type: PermissionType) => Promise<PermissionActionResult>;
   /** 显式打开单项系统设置；与 Request 使用不同 IPC。 */
@@ -205,14 +205,13 @@ export function usePermissions(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户对单项权限点「去设置」时，只应触发该项授权，且重复点击不得并行弹多次。
+   *   用户对单项权限点“请求授权”时，只应触发公开 Request，且重复点击不得并行弹多次。
    *   进入 Welcome **不得**自动调用（辅助功能等禁止自动弹系统框）。
-   *   输入监控 Denied 时后端 needsRelaunch=true，Welcome 立刻展示「重新打开应用」
-   *   以在新进程弹系统中转窗登记列表。
+   *   输入监控 Denied 必须走独立 openSettings；这里不得重置 TCC、打开设置或重启。
    *
    * Code Logic（这个函数做什么）:
    *   同 type 返回 in-flight Promise；四项均走 requestPermission（含 notification）；
-   *   结束后 runNow 刷新；请求失败写 error 并 rethrow；成功返回 PermissionRequestResult。
+   *   结束后 runNow 刷新；请求失败写 error 并 rethrow；成功返回 PermissionActionResult。
    */
   const request = useCallback(
     (type: PermissionType): Promise<PermissionActionResult> => {
@@ -269,7 +268,7 @@ export function usePermissions(
 
       const promise = (async () => {
         setRequesting((prev) => new Set(prev).add(type));
-      try {
+        try {
           const result = await configApi.openPermissionSettings(type);
           await runNow({ force: true });
           return result;

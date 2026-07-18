@@ -140,6 +140,7 @@ export interface UseSettingsControllerResult {
   permRefreshing: boolean;
   permError: string | null;
   permRequesting: ReadonlySet<PermissionType>;
+  permissionBuildHelpVisible: boolean;
   refreshPermissions: () => void | Promise<void>;
   handleRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
 
@@ -524,6 +525,7 @@ export function useSettingsController(): UseSettingsControllerResult {
     permRefreshing: updatePermissions.permRefreshing,
     permError: updatePermissions.permError,
     permRequesting: updatePermissions.permRequesting,
+    permissionBuildHelpVisible: updatePermissions.permissionBuildHelpVisible,
     refreshPermissions: updatePermissions.refreshPermissions,
     handleRequestAccess: updatePermissions.handleRequestAccess,
 

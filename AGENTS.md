@@ -98,7 +98,7 @@ cc-partner/
 │   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
 │   └── Cargo.toml
 ├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory / check-quality-traceability / check-docs + 图标源
-├── .github/workflows/            # ci.yml · cross-platform-smoke.yml · release-tauri.yml · docs.yml
+├── .github/workflows/            # ci/smoke/docs + 公开 Windows/Linux release + 内部 macOS 手动构建
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
 │   ├── prd.md
@@ -115,6 +115,7 @@ cc-partner/
 | 设计 token / 组件分层 / 复用 / Hooks 顺序 | 本文 §3–§5；前端细则 `web/CLAUDE.md` |
 | 前端命令、Vitest/Playwright、Workbench controllers、Attention、runtime cache | `web/CLAUDE.md` |
 | P2P 协议 v1 / 错误信封 / 幂等 / 端口 / CLI doctor / smoke / 发版 | `src-tauri/CLAUDE.md` |
+| macOS 固定内部签名 / 输入监控真机验收 | `docs/development/macos-internal-signing.md` |
 | 用户向启动、防火墙、产品定位 | `README.md` |
 | 持久产品行为 | `docs/prd.md` |
 
@@ -279,7 +280,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | PromptCard | prompt, onEdit, onDelete, onCopy | Prompt 卡片 |
 | DeviceCard | device, onClick | 设备卡片 |
 | TransferItem | task, onCancel?, onPause?, onResume?, onRetry?, onOpen?, cancelling? | 传输项；每个动作仅在对应回调存在时渲染（当前页面只传 pending/transferring 的 onCancel） |
-| PermissionCard | icon, title, description, granted, requesting?, onRequestAccess | 权限卡片；逐项 request，requesting 时按钮 busy |
+| PermissionCard | icon, title, description, granted, actionLabel?, requesting?, onRequestAccess | 权限卡片；父层按四态决定动作与文案，requesting 时按钮 busy |
 | GithubRepoCard | repo, language, onOpen | GitHub 周热门项目卡片 |
 | MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
@@ -435,8 +436,8 @@ cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture -
 
 ```bash
 ./start.sh                         # 推荐：自检工具链 + tauri dev
-# macOS 下会经 scripts/macos-dev-cargo-runner 组装 cc-partner-dev.app
-# （「cc-partner (Dev)」/ com.cc-partner.app.dev），与发布版分开 TCC 授权
+# macOS 默认组装社区 cc-partner-dev.app（输入监控 unavailable）；配置固定内部
+# identity + 指纹后组装 cc-partner-internal-dev.app，详见 macOS 内部签名文档
 # 或：cd web && npm install && ./node_modules/.bin/tauri dev  # 裸 binary，无开发壳
 ```
 
@@ -453,11 +454,12 @@ cd web && npm run build            # tsc -b && vite build（类型检查入口�
 
 ```bash
 node scripts/bump-version.mjs <新版本号>   # 同步 tauri.conf.json + Cargo.toml/lock + web package.json/lock
-git tag v<版本号> && git push origin v<版本号>  # 触发 release-tauri.yml
+git tag v<版本号> && git push origin v<版本号>  # 公开发布仅 Windows/Linux
 ```
 
 - **版本号单一来源**：`src-tauri/tauri.conf.json` 的 `version`
-- **Release 机制**：三段式原生 `tauri build`（`prepare-tauri-sidecar` → matrix build → softprops 上传 → 独立 `latest.json` 组装），**不是** `tauri-apps/tauri-action`
+- **公开 Release 机制**：`release-tauri.yml` 三段式原生 `tauri build`，仅发布 Windows/Linux；**不是** `tauri-apps/tauri-action`，禁止发布 macOS ad-hoc “官方”包
+- **内部 macOS**：固定自签名证书 + `com.cc-partner.app.internal`，本地运行 `scripts/build-macos-internal.sh`，CI 手动触发 `internal-macos.yml`；详见 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md)
 - **跨目录关键陷阱**：repo secret `TAURI_SIGNING_PRIVATE_KEY` 缺失则无 `.sig` / `latest.json` 不完整，应用内更新失败；`plugins.updater.pubkey` 必须与私钥配对；`bundle.createUpdaterArtifacts: true` 必须开启
 - **实现细节、矩阵平台、sidecar、历史弃用原因**：`src-tauri/CLAUDE.md`「M9」节
 
@@ -533,6 +535,7 @@ Rust `app_handle.emit("<event>", payload)`，前端 `listen("<event>", cb)`（�
 | `src-tauri/src/net/*` | P2P HTTP / mDNS / protocol | 高 |
 | `src-tauri/tauri.conf.json` | Tauri 配置 + bundle + updater（版本号单一来源） | 低（发版改） |
 | `docs/p2p-protocol.md` | P2P 路由权威清单 | 中 |
+| `docs/development/macos-internal-signing.md` | 内部 macOS 固定签名与输入监控 L3 手册 | 低 |
 
 ---
 
