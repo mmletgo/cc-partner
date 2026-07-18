@@ -682,11 +682,10 @@ pub fn check_permissions() -> PermissionsStatus {
 ///
 /// Business Logic（对齐 design §3）:
 ///     1) **登记**（列表需要本 app 时必须做）；2) **主动作** 能开设置则开设置，否则系统框；
-///     3) **禁止** 同一点击「系统授权弹窗 + 系统设置页」双开。
-///     - screenCapture（Welcome 默认 allow_open）：**只 open 设置，绝不 CGRequest**。
-///       macOS 15+/26 上 CGRequestScreenCaptureAccess 会弹录屏框，且常同步打开系统设置，
-///       与我们 open 叠加成「弹窗+设置」双开；TCC 对已在列表 app 也可能返回 Unknown，
-///       旧逻辑会误走 CGRequest。仅 `open_settings=false` 才 CGRequest 登记。
+///     3) **禁止** 同一点击「系统授权弹窗 + 系统设置页」双开（同一次调用不得 CGRequest+open）。
+///     - screenCapture（对齐辅助功能）：TCC Denied（已在列表）→ **只 open**；
+///       Unknown/首次 → **只 CGRequest 登记**（写入列表；弹窗自带「打开系统设置」，我们不叠 open）；
+///       已 granted → noop。禁止「只 open 不登记」导致系统设置列表无 Dev app。
 ///     - accessibility：TCC Denied → 只 open；Unknown → 只 AX prompt；已 granted → noop。
 ///     - inputMonitoring：静默 EventTap 登记 + 默认只 open 设置。
 ///     - notification：authorized → noop；notDetermined → prompt only；denied → settings only。
@@ -701,8 +700,9 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
     {
         match perm_type {
             "screenCapture" => {
-                // Welcome「去设置」：只开系统设置页，禁止 CGRequest（防录屏弹窗 + 设置双开）。
-                // open_settings=false：仅 CGRequest 登记（不 open）。
+                // 对齐辅助功能 + design §3.2：列表需要登记；禁止同次 CGRequest+open。
+                // Denied（已在列表）→ 只 open；Unknown/首次 → 只 CGRequest（写列表，不 open）。
+                // open_settings=false：只 CGRequest。
                 if check_screen_capture_access() {
                     return RequestPermissionResult {
                         ok: true,
@@ -712,12 +712,14 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     };
                 }
                 let tcc = tcc_screen_capture_preflight();
+                let already_in_list = matches!(tcc, Some(TCC_PREFLIGHT_DENIED));
                 tracing::info!(
                     allow_open,
                     tcc = ?tcc,
+                    already_in_list,
                     "request_permission(screenCapture) branch"
                 );
-                if allow_open {
+                if allow_open && already_in_list {
                     let opened = open_permission_settings(perm_type);
                     RequestPermissionResult {
                         ok: check_screen_capture_access(),
@@ -726,7 +728,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         action: if opened { "settings" } else { "noop" },
                     }
                 } else {
-                    // 仅登记：CGRequest 可能弹系统框，但本路径禁止 open
+                    // 未在列表 / 仅登记：CGRequest 写入列表（可能弹窗）；绝不 open
                     let requested = unsafe { CGRequestScreenCaptureAccess() };
                     RequestPermissionResult {
                         ok: check_screen_capture_access(),
@@ -1023,18 +1025,21 @@ mod tests {
         );
     }
 
-    /// Business Logic: Welcome 去设置（allow_open）对录屏只开设置，绝不 CGRequest 弹框。
-    /// Code Logic: open_settings=true → action ∈ {settings|noop}，不得 prompt。
+    /// Business Logic: 录屏 allow_open 禁止同次 prompt+open；未在列表可 prompt，已在列表可 settings。
+    /// Code Logic: action=prompt ⇒ opened=false；action=settings|noop 合法。
     #[test]
     #[cfg(target_os = "macos")]
-    fn request_screen_capture_allow_open_is_settings_never_prompt() {
+    fn request_screen_capture_allow_open_never_dual_opens() {
         let r = request_permission("screenCapture", Some(true));
-        assert!(
-            r.action == "settings" || r.action == "noop",
-            "allow_open 录屏不得 prompt: {:?}",
-            r
-        );
-        assert!(!r.requested, "allow_open 录屏不得调用 CGRequest: {:?}", r);
+        if r.action == "prompt" {
+            assert!(!r.opened, "prompt 不得同时 open settings: {:?}", r);
+        } else {
+            assert!(
+                r.action == "settings" || r.action == "noop",
+                "unexpected action {:?}",
+                r
+            );
+        }
     }
 
     /// Business Logic: open_settings=false 时录屏可登记 prompt，但不得 open。
