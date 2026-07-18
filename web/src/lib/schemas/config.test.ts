@@ -4,7 +4,11 @@
 
 import { describe, expect, test } from 'vitest';
 import { ContractDecodeError } from '../runtimeSchema';
-import { appConfigDecoder, permissionsStatusDecoder } from './config';
+import {
+  appConfigDecoder,
+  permissionActionResultDecoder,
+  permissionsStatusDecoder,
+} from './config';
 
 const validConfig = {
   deviceId: 'd1',
@@ -25,14 +29,44 @@ describe('config schemas', () => {
     expect(
       permissionsStatusDecoder.decode({
         screenCapture: { granted: true },
-        inputMonitoring: { granted: false },
+        inputMonitoring: { granted: false, state: 'notDetermined' },
         accessibility: { granted: true },
       }),
     ).toEqual({
       screenCapture: { granted: true },
-      inputMonitoring: { granted: false },
+      inputMonitoring: { granted: false, state: 'notDetermined' },
       accessibility: { granted: true },
       notification: { granted: false },
+    });
+  });
+
+  test('permissions preserve the input monitoring four-state contract', () => {
+    const decoded = permissionsStatusDecoder.decode({
+      screenCapture: { granted: true },
+      inputMonitoring: { granted: false, state: 'unavailable' },
+      accessibility: { granted: true },
+      notification: { granted: true },
+    });
+
+    expect(decoded.inputMonitoring).toEqual({
+      granted: false,
+      state: 'unavailable',
+    });
+  });
+
+  test('decodes explicit permission operations', () => {
+    expect(
+      permissionActionResultDecoder.decode({
+        permission: 'inputMonitoring',
+        operation: 'request',
+        before: 'notDetermined',
+        after: 'denied',
+      }),
+    ).toEqual({
+      permission: 'inputMonitoring',
+      operation: 'request',
+      before: 'notDetermined',
+      after: 'denied',
     });
   });
 

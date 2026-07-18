@@ -24,6 +24,7 @@ import {
 } from '@/hooks/usePermissions';
 import { configApi } from '@/api/config';
 import { pendingWrites } from '@/lib/pendingWrites';
+import type { PermissionEntryAction } from '@/lib/permissionEntries';
 import {
   installButtonMode,
   parseSettingsTabFromSearch,
@@ -140,7 +141,7 @@ export interface UseSettingsControllerResult {
   permError: string | null;
   permRequesting: ReadonlySet<PermissionType>;
   refreshPermissions: () => void | Promise<void>;
-  handleRequestAccess: (type: PermissionType) => void;
+  handleRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
 
   // health
   healthForm: HealthForm;

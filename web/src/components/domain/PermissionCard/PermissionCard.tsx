@@ -32,6 +32,8 @@ export interface PermissionCardProps {
   granted: boolean;
   /** 该项是否正在请求授权（禁用按钮并 aria-busy） */
   requesting?: boolean;
+  /** 未授权时由父级按权限状态提供的动作文案 */
+  actionLabel?: string;
   /** 点击"去设置"按钮时触发，由父级决定是打开系统设置还是重新检查授权 */
   onRequestAccess?: () => void;
   className?: string;
@@ -50,6 +52,7 @@ function PermissionCardInner({
   description,
   granted,
   requesting = false,
+  actionLabel,
   onRequestAccess,
   className,
   style,
@@ -96,7 +99,7 @@ function PermissionCardInner({
           >
             {requesting
               ? t('welcome:permissionCard.requesting')
-              : t('welcome:permissionCard.goSettings')}
+              : (actionLabel ?? t('welcome:permissionCard.goSettings'))}
           </Button>
         )}
       </div>

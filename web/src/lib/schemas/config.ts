@@ -8,7 +8,12 @@
  *   解码 AppConfig 与 PermissionsStatus（通知字段对后端响应显式 default）。
  */
 
-import type { AppConfig, PermissionsStatus, PromptOptimizerFillLanguage } from '../types';
+import type {
+  AppConfig,
+  PermissionActionResult,
+  PermissionsStatus,
+  PromptOptimizerFillLanguage,
+} from '../types';
 import {
   booleanDecoder,
   enumDecoder,
@@ -44,6 +49,29 @@ const grantedDecoder = objectDecoder('PermissionGranted', {
   granted: booleanDecoder,
 });
 
+const inputMonitoringStateDecoder = enumDecoder('InputMonitoringState', [
+  'granted',
+  'denied',
+  'notDetermined',
+  'unavailable',
+] as const);
+
+const inputMonitoringDecoder = objectDecoder('InputMonitoringPermissionState', {
+  granted: booleanDecoder,
+  state: inputMonitoringStateDecoder,
+});
+
+/** 解码显式权限操作结果，拒绝旧的 prompt/settings 混合返回形态。 */
+export const permissionActionResultDecoder: Decoder<PermissionActionResult> = objectDecoder(
+  'PermissionActionResult',
+  {
+    permission: stringDecoder,
+    operation: enumDecoder('PermissionOperation', ['request', 'openSettings', 'noop'] as const),
+    before: stringDecoder,
+    after: stringDecoder,
+  },
+);
+
 /**
  * Business Logic（为什么需要这个 decoder）:
  *   权限引导依赖三项 TCC + notification 合并结构。
@@ -56,7 +84,7 @@ export const permissionsStatusDecoder: Decoder<PermissionsStatus> = objectDecode
   'PermissionsStatus',
   {
     screenCapture: grantedDecoder,
-    inputMonitoring: grantedDecoder,
+    inputMonitoring: inputMonitoringDecoder,
     accessibility: grantedDecoder,
     notification: grantedDecoder,
   },

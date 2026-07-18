@@ -18,7 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { configApi } from '@/api/config';
 import type {
-  PermissionRequestResult,
+  PermissionActionResult,
   PermissionType,
   PermissionsStatus,
 } from '@/lib/types';
@@ -107,15 +107,9 @@ export interface UsePermissionsResult {
    * @param openSettings 是否打开系统设置面板（仅 TCC 路径透传）
    * @returns 后端结果（含 needsRelaunch：输入监控 Denied 同进程无法弹中转窗时 true）
    */
-  request: (
-    type: PermissionType,
-    openSettings?: boolean,
-  ) => Promise<PermissionRequestResult>;
-  /**
-   * 顺序请求所有未授权权限（侧栏徽标批量入口仍需要）。
-   * 单项失败不中断后续项。
-   */
-  requestMissing: () => Promise<void>;
+  request: (type: PermissionType) => Promise<PermissionActionResult>;
+  /** 显式打开单项系统设置；与 Request 使用不同 IPC。 */
+  openSettings: (type: PermissionType) => Promise<PermissionActionResult>;
   /** 手动触发一次权限状态刷新（single-flight） */
   refresh: () => Promise<void>;
 }
@@ -138,8 +132,11 @@ export function usePermissions(
 
   const statusRef = useRef<PermissionsStatus | null>(null);
   const requestingPromisesRef = useRef<
-    Map<PermissionType, Promise<PermissionRequestResult>>
+    Map<PermissionType, Promise<PermissionActionResult>>
   >(new Map());
+  const settingsPromisesRef = useRef<Map<PermissionType, Promise<PermissionActionResult>>>(
+    new Map(),
+  );
   const mountedRef = useRef(true);
 
   // 在 effect 中同步 ref，避免 render 期间写 ref（react-hooks/refs 规则）
@@ -218,10 +215,7 @@ export function usePermissions(
    *   结束后 runNow 刷新；请求失败写 error 并 rethrow；成功返回 PermissionRequestResult。
    */
   const request = useCallback(
-    (
-      type: PermissionType,
-      openSettings?: boolean,
-    ): Promise<PermissionRequestResult> => {
+    (type: PermissionType): Promise<PermissionActionResult> => {
       // 注意：外层不可标 async，否则 return existing 会被再包一层 Promise，破坏去重。
       const existing = requestingPromisesRef.current.get(type);
       if (existing) {
@@ -235,7 +229,7 @@ export function usePermissions(
           return next;
         });
         try {
-          const result = await configApi.requestPermission(type, openSettings);
+          const result = await configApi.requestPermission(type);
           await runNow({ force: true });
           return result;
         } catch (err) {
@@ -263,29 +257,42 @@ export function usePermissions(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   侧栏徽标仍提供「一次点开请求所有未授权项」的批量入口。
+   *   Denied 权限必须由用户显式打开设置，不得复用 Request 或批量触发副作用。
    *
    * Code Logic（这个函数做什么）:
-   *   按固定顺序对未授权项 await request；单项失败继续后续项。
+   *   同 type 的设置跳转合并为一个 Promise；结束后强制刷新状态。
    */
-  const requestMissing = useCallback(async () => {
-    const current = statusRef.current;
-    if (!current) return;
+  const openSettings = useCallback(
+    (type: PermissionType): Promise<PermissionActionResult> => {
+      const existing = settingsPromisesRef.current.get(type);
+      if (existing) return existing;
 
-    const types: PermissionType[] = [];
-    if (!current.screenCapture.granted) types.push('screenCapture');
-    if (!current.accessibility.granted) types.push('accessibility');
-    if (!current.inputMonitoring.granted) types.push('inputMonitoring');
-    if (!current.notification.granted) types.push('notification');
-
-    for (const type of types) {
+      const promise = (async () => {
+        setRequesting((prev) => new Set(prev).add(type));
       try {
-        await request(type);
-      } catch {
-        // 顺序继续，不因单项失败中断
-      }
-    }
-  }, [request]);
+          const result = await configApi.openPermissionSettings(type);
+          await runNow({ force: true });
+          return result;
+        } catch (err) {
+          if (mountedRef.current) setError(toErrorMessage(err));
+          throw err;
+        } finally {
+          settingsPromisesRef.current.delete(type);
+          if (mountedRef.current) {
+            setRequesting((prev) => {
+              const next = new Set(prev);
+              next.delete(type);
+              return next;
+            });
+          }
+        }
+      })();
+
+      settingsPromisesRef.current.set(type, promise);
+      return promise;
+    },
+    [runNow],
+  );
 
   return {
     status,
@@ -296,7 +303,7 @@ export function usePermissions(
     allGranted: allRequiredGranted,
     allRequiredGranted,
     request,
-    requestMissing,
+    openSettings,
     refresh,
   };
 }

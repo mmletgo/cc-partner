@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
@@ -25,13 +25,24 @@ import {
 } from '@/hooks/usePermissions';
 import { POST_SETTINGS_SYNC_SCHEDULE_MS, SYNC_DELAYS_MS } from './welcomePermissionFlow';
 
-const requestMock = vi.fn(async () => undefined);
+const requestMock = vi.fn(async () => ({
+  permission: 'inputMonitoring',
+  operation: 'request' as const,
+  before: 'notDetermined',
+  after: 'denied',
+}));
+const openSettingsMock = vi.fn(async () => ({
+  permission: 'inputMonitoring',
+  operation: 'openSettings' as const,
+  before: 'denied',
+  after: 'denied',
+}));
 const refreshMock = vi.fn(async () => undefined);
 const relaunchMock = vi.fn(async () => undefined);
 const permissionsMock = vi.fn(async () => ({
   screenCapture: { granted: false },
   accessibility: { granted: false },
-  inputMonitoring: { granted: false },
+  inputMonitoring: { granted: false, state: 'denied' as const },
   notification: { granted: false },
 }));
 
@@ -46,6 +57,8 @@ vi.mock('@/api/config', () => ({
   },
 }));
 
+let inputMonitoringState: 'granted' | 'denied' | 'notDetermined' | 'unavailable' = 'denied';
+
 vi.mock('@/hooks/usePermissions', async () => {
   const actual = await vi.importActual<typeof import('@/hooks/usePermissions')>(
     '@/hooks/usePermissions',
@@ -56,7 +69,10 @@ vi.mock('@/hooks/usePermissions', async () => {
       status: {
         screenCapture: { granted: false },
         accessibility: { granted: false },
-        inputMonitoring: { granted: false },
+        inputMonitoring: {
+          granted: inputMonitoringState === 'granted',
+          state: inputMonitoringState,
+        },
         notification: { granted: false },
       },
       loading: false,
@@ -66,7 +82,7 @@ vi.mock('@/hooks/usePermissions', async () => {
       allRequiredGranted: false,
       allGranted: false,
       request: requestMock,
-      requestMissing: vi.fn(),
+      openSettings: openSettingsMock,
       refresh: refreshMock,
     }),
   };
@@ -77,7 +93,7 @@ import { Welcome } from './Welcome';
 const DENIED_PERMISSIONS = {
   screenCapture: { granted: false },
   accessibility: { granted: false },
-  inputMonitoring: { granted: false },
+  inputMonitoring: { granted: false, state: 'denied' },
   notification: { granted: false },
 } as const;
 
@@ -142,10 +158,12 @@ describe('Welcome', () => {
   beforeEach(() => {
     localStorage.clear();
     requestMock.mockClear();
+    openSettingsMock.mockClear();
     refreshMock.mockClear();
     relaunchMock.mockClear();
     permissionsMock.mockClear();
     permissionsMock.mockResolvedValue({ ...DENIED_PERMISSIONS });
+    inputMonitoringState = 'denied';
   });
 
   afterEach(() => {
@@ -170,6 +188,68 @@ describe('Welcome', () => {
     expect(localStorage.getItem(PERMISSION_ONBOARDED_KEY)).toBeNull();
   });
 
+  test('input monitoring notDetermined requests without opening settings', async () => {
+    inputMonitoringState = 'notDetermined';
+    await i18n.changeLanguage('zh');
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <Welcome />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    const card = screen.getByText('输入监控').closest('[data-granted]');
+    expect(card).not.toBeNull();
+    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '请求授权' }));
+
+    await act(async () => Promise.resolve());
+    expect(requestMock).toHaveBeenCalledWith('inputMonitoring');
+    expect(openSettingsMock).not.toHaveBeenCalled();
+  });
+
+  test('input monitoring denied opens settings without requesting', async () => {
+    inputMonitoringState = 'denied';
+    await i18n.changeLanguage('zh');
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <Welcome />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    const card = screen.getByText('输入监控').closest('[data-granted]');
+    expect(card).not.toBeNull();
+    fireEvent.click(
+      within(card as HTMLElement).getByRole('button', { name: '打开系统设置' }),
+    );
+
+    await act(async () => Promise.resolve());
+    expect(openSettingsMock).toHaveBeenCalledWith('inputMonitoring');
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  test('input monitoring unavailable shows build help without permission IPC', async () => {
+    inputMonitoringState = 'unavailable';
+    await i18n.changeLanguage('zh');
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <Welcome />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    const card = screen.getByText('输入监控').closest('[data-granted]');
+    expect(card).not.toBeNull();
+    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '查看构建说明' }));
+
+    expect(screen.getByRole('status').textContent).toContain('稳定的内部代码签名');
+    expect(requestMock).not.toHaveBeenCalled();
+    expect(openSettingsMock).not.toHaveBeenCalled();
+  });
+
   test('go settings + scheduled sync never auto-relaunches; reopen button relaunches once', async () => {
     vi.useFakeTimers();
     await i18n.changeLanguage('zh');
@@ -186,14 +266,16 @@ describe('Welcome', () => {
       await Promise.resolve();
     });
 
-    const go = screen.getAllByRole('button', { name: '去设置' });
-    fireEvent.click(go[0]!);
+    const inputCard = screen.getByText('输入监控').closest('[data-granted]');
+    fireEvent.click(
+      within(inputCard as HTMLElement).getByRole('button', { name: '打开系统设置' }),
+    );
 
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(requestMock).toHaveBeenCalled();
+    expect(openSettingsMock).toHaveBeenCalled();
     expect(relaunchMock).not.toHaveBeenCalled();
 
     // 不依赖 visibility：POST_SETTINGS 调度即可耗尽到 needs_reopen
@@ -252,8 +334,10 @@ describe('Welcome', () => {
       await Promise.resolve();
     });
 
-    const go = screen.getAllByRole('button', { name: '去设置' });
-    fireEvent.click(go[0]!);
+    const inputCard = screen.getByText('输入监控').closest('[data-granted]');
+    fireEvent.click(
+      within(inputCard as HTMLElement).getByRole('button', { name: '打开系统设置' }),
+    );
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();

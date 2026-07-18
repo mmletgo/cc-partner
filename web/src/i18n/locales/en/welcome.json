@@ -21,7 +21,7 @@
     },
     "inputMonitoring": {
       "title": "Input Monitoring",
-      "description": "Needed for health reminder keyboard activity. Complete the system permission prompt first; if the app still does not appear, click “Reopen app” and authorize again"
+      "description": "Needed for health reminder keyboard activity. Request access once, then enable the app in the Input Monitoring list if access was denied"
     },
     "notification": {
       "title": "Notifications",
@@ -31,8 +31,12 @@
   "permissionCard": {
     "granted": "Granted",
     "goSettings": "Open Settings",
-    "requesting": "Requesting…"
+    "requestAccess": "Request access",
+    "openSettings": "Open System Settings",
+    "buildHelp": "View build requirements",
+    "requesting": "Working…"
   },
+  "internalBuildHelp": "This build does not have a stable internal code-signing identity, so macOS cannot register Input Monitoring reliably. Install and run the internally signed cc-partner Internal app.",
   "recheck": "Recheck",
   "checkFailed": "Failed to check permissions: {{error}}",
   "unknownError": "Unknown error",

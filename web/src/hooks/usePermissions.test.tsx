@@ -14,15 +14,17 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook } from '@testing-library/react';
 
-import type { PermissionType, PermissionsStatus } from '@/lib/types';
+import type { PermissionActionResult, PermissionsStatus } from '@/lib/types';
 
 const permissionsMock = vi.fn();
 const requestPermissionMock = vi.fn();
+const openPermissionSettingsMock = vi.fn();
 
 vi.mock('@/api/config', () => ({
   configApi: {
     permissions: (...args: unknown[]) => permissionsMock(...args),
     requestPermission: (...args: unknown[]) => requestPermissionMock(...args),
+    openPermissionSettings: (...args: unknown[]) => openPermissionSettingsMock(...args),
   },
 }));
 
@@ -78,7 +80,10 @@ function buildStatus(
   return {
     screenCapture: { granted: overrides.screenCapture ?? false },
     accessibility: { granted: overrides.accessibility ?? false },
-    inputMonitoring: { granted: overrides.inputMonitoring ?? false },
+    inputMonitoring: {
+      granted: overrides.inputMonitoring ?? false,
+      state: overrides.inputMonitoring ? 'granted' : 'notDetermined',
+    },
     notification: { granted: overrides.notification ?? false },
   };
 }
@@ -102,7 +107,19 @@ beforeEach(() => {
   setVisibilityState('visible');
   permissionsMock.mockReset();
   requestPermissionMock.mockReset();
-  requestPermissionMock.mockResolvedValue({ ok: true, requested: true, opened: true });
+  openPermissionSettingsMock.mockReset();
+  requestPermissionMock.mockResolvedValue({
+    permission: 'screenCapture',
+    operation: 'request',
+    before: 'denied',
+    after: 'granted',
+  });
+  openPermissionSettingsMock.mockResolvedValue({
+    permission: 'inputMonitoring',
+    operation: 'openSettings',
+    before: 'denied',
+    after: 'denied',
+  });
 });
 
 afterEach(() => {
@@ -174,11 +191,11 @@ describe('usePermissions', () => {
     expect(result.current.status).not.toBeNull();
 
     await act(async () => {
-      await result.current.request('screenCapture', false);
+      await result.current.request('screenCapture');
     });
 
     expect(requestPermissionMock).toHaveBeenCalledTimes(1);
-    expect(requestPermissionMock).toHaveBeenCalledWith('screenCapture', false);
+    expect(requestPermissionMock).toHaveBeenCalledWith('screenCapture');
     expect(result.current.status?.screenCapture.granted).toBe(true);
     expect(result.current.requesting.has('screenCapture')).toBe(false);
   });
@@ -195,8 +212,23 @@ describe('usePermissions', () => {
       await result.current.request('notification');
     });
 
-    expect(requestPermissionMock).toHaveBeenCalledWith('notification', undefined);
+    expect(requestPermissionMock).toHaveBeenCalledWith('notification');
     expect(result.current.status?.notification.granted).toBe(true);
+  });
+
+  test('openSettings uses only the dedicated settings IPC', async () => {
+    permissionsMock.mockResolvedValue(buildStatus({ inputMonitoring: false }));
+
+    const { result } = renderHook(() => usePermissions());
+    await flushMicrotasks();
+
+    await act(async () => {
+      await result.current.openSettings('inputMonitoring');
+    });
+
+    expect(openPermissionSettingsMock).toHaveBeenCalledTimes(1);
+    expect(openPermissionSettingsMock).toHaveBeenCalledWith('inputMonitoring');
+    expect(requestPermissionMock).not.toHaveBeenCalled();
   });
 
   test('request error surfaces error and clears requesting flag', async () => {
@@ -216,14 +248,19 @@ describe('usePermissions', () => {
 
   test('duplicate same-type request reuses in-flight promise', async () => {
     permissionsMock.mockResolvedValue(buildStatus());
-    const pending = deferred<{ ok: boolean; requested: boolean; opened: boolean }>();
+    const pending = deferred<{
+      permission: string;
+      operation: 'request';
+      before: string;
+      after: string;
+    }>();
     requestPermissionMock.mockReturnValueOnce(pending.promise);
 
     const { result } = renderHook(() => usePermissions());
     await flushMicrotasks();
 
-    let first!: Promise<void>;
-    let second!: Promise<void>;
+    let first!: Promise<PermissionActionResult>;
+    let second!: Promise<PermissionActionResult>;
     await act(async () => {
       first = result.current.request('inputMonitoring');
       second = result.current.request('inputMonitoring');
@@ -234,7 +271,12 @@ describe('usePermissions', () => {
     expect(result.current.requesting.has('inputMonitoring')).toBe(true);
 
     await act(async () => {
-      pending.resolve({ ok: true, requested: true, opened: true });
+      pending.resolve({
+        permission: 'inputMonitoring',
+        operation: 'request',
+        before: 'notDetermined',
+        after: 'denied',
+      });
       await first;
     });
 
@@ -299,30 +341,6 @@ describe('usePermissions', () => {
     await flushMicrotasks();
 
     expect(permissionsMock.mock.calls.length).toBe(afterMount + 1);
-  });
-
-  test('requestMissing requests missing types sequentially', async () => {
-    permissionsMock.mockResolvedValue(buildStatus());
-
-    const order: PermissionType[] = [];
-    requestPermissionMock.mockImplementation(async (type: PermissionType) => {
-      order.push(type);
-      return { ok: true, requested: true, opened: true };
-    });
-
-    const { result } = renderHook(() => usePermissions());
-    await flushMicrotasks();
-
-    await act(async () => {
-      await result.current.requestMissing();
-    });
-
-    expect(order).toEqual([
-      'screenCapture',
-      'accessibility',
-      'inputMonitoring',
-      'notification',
-    ]);
   });
 
   test('stopWhenGranted disables further polling after required granted', async () => {

@@ -40,7 +40,7 @@ import {
   type AppFlavor,
 } from '@/hooks/usePermissions';
 import { ArrowRightIcon } from '@/lib/icons';
-import { mapPermissions } from '@/lib/permissionEntries';
+import { mapPermissions, type PermissionEntryAction } from '@/lib/permissionEntries';
 import type { PermissionType } from '@/lib/types';
 import appIconUrl from '@/assets/app-icon.png';
 import styles from './Welcome.module.css';
@@ -69,6 +69,7 @@ export function Welcome() {
   const navigate = useNavigate();
   const [flavor, setFlavor] = useState<AppFlavor>('release');
   const [phase, setPhase] = useState<WelcomePermPhase>('idle');
+  const [buildHelpVisible, setBuildHelpVisible] = useState(false);
   const phaseRef = useRef<WelcomePermPhase>(phase);
   /** 防止 visibility/focus 并发进入多轮 sync */
   const syncInFlightRef = useRef(false);
@@ -87,6 +88,7 @@ export function Welcome() {
     requesting,
     allRequiredGranted,
     request,
+    openSettings,
     refresh,
   } = usePermissions({
     stopWhenGranted: true,
@@ -252,36 +254,38 @@ export function Welcome() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点单项「去设置」只应请求该权限；sticky 类型进入 awaiting / 保持 needs_reopen。
-   *   输入监控 Denied 时后端 needsRelaunch：立刻 needs_reopen，用户点「重新打开应用」
-   *   后新进程弹系统中转窗把本 app 写入列表（禁止只开空设置页）。
+   *   四态必须映射为独立动作：notDetermined=Request、Denied=Open Settings、
+   *   Unavailable=构建说明；任何一步都不得自动 relaunch。
    *
    * Code Logic（这个函数做什么）:
-   *   dispatch GO_SETTINGS；await request(type)；若 needsRelaunch → BACKEND_NEEDS_RELAUNCH；
-   *   否则 sticky 则 schedulePostSettingsSync。
+   *   buildHelp 只展示说明；request/openSettings 调各自 hook 后刷新，sticky 再进入同步相位。
    */
-  const handleRequest = useCallback(
-    (type: PermissionType) => {
+  const handlePermissionAction = useCallback(
+    (type: PermissionType, action: PermissionEntryAction) => {
+      if (action === 'buildHelp') {
+        setBuildHelpVisible(true);
+        return;
+      }
+      if (action === 'none') return;
+
       dispatch({ type: 'GO_SETTINGS', permission: type });
       void (async () => {
-        let needsRelaunch = false;
         try {
-          const result = await request(type);
-          needsRelaunch = result?.needsRelaunch === true;
+          if (action === 'request') {
+            await request(type);
+          } else {
+            await openSettings(type);
+          }
         } catch {
           // error 已由 hook 投影
         }
         await refresh();
-        if (needsRelaunch) {
-          dispatch({ type: 'BACKEND_NEEDS_RELAUNCH' });
-          return;
-        }
         if (isStickyPermission(type)) {
           schedulePostSettingsSync();
         }
       })();
     },
-    [dispatch, request, refresh, schedulePostSettingsSync],
+    [dispatch, openSettings, request, refresh, schedulePostSettingsSync],
   );
 
   /**
@@ -414,6 +418,12 @@ export function Welcome() {
           </p>
         ) : null}
 
+        {buildHelpVisible ? (
+          <p className={styles.subtitle} role="status">
+            {t('welcome:internalBuildHelp')}
+          </p>
+        ) : null}
+
         <div className={styles.permissionList} aria-label={t('welcome:permissionListAriaLabel')}>
           {entries.map((p) => (
             <PermissionCard
@@ -422,8 +432,9 @@ export function Welcome() {
               title={p.title}
               description={p.description}
               granted={p.granted}
-              requesting={requesting.has(p.id as PermissionType)}
-              onRequestAccess={() => handleRequest(p.id as PermissionType)}
+              requesting={requesting.has(p.id)}
+              actionLabel={p.actionLabel}
+              onRequestAccess={() => handlePermissionAction(p.id, p.action)}
             />
           ))}
         </div>

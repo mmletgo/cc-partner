@@ -12,14 +12,18 @@
  */
 
 import { invoke, invokeDecoded } from './client';
-import { appConfigDecoder, permissionsStatusDecoder } from '@/lib/schemas/config';
+import {
+  appConfigDecoder,
+  permissionActionResultDecoder,
+  permissionsStatusDecoder,
+} from '@/lib/schemas/config';
 import type {
   AppConfig,
   VersionInfo,
   UpdateCheckResult,
   UpdateDownloadStatus,
   PermissionType,
-  PermissionRequestResult,
+  PermissionActionResult,
   CloudSyncConfig,
   CloudSyncResult,
   TestCloudSyncResult,
@@ -124,13 +128,13 @@ export const configApi = {
   appIdentity: () =>
     invoke<{ bundleId: string | null; flavor: 'dev' | 'release' }>('get_app_identity'),
 
-  /**
-   * 触发权限请求（M7 实现）。
-   * @param openSettings 是否允许打开系统设置面板；缺省 true（Welcome「去设置」默认）。
-   *   对齐辅助功能：已在列表(TCC Denied) → 只开设置；未在列表 → 只登记 API（可能系统框，禁止同次 open）。
-   */
-  requestPermission: (type: PermissionType, openSettings?: boolean) =>
-    invoke<PermissionRequestResult>('request_permission', { type, openSettings }),
+  /** 显式请求单项权限；该命令不会打开系统设置或重启应用。 */
+  requestPermission: (type: PermissionType): Promise<PermissionActionResult> =>
+    invokeDecoded('request_permission', { type }, permissionActionResultDecoder),
+
+  /** 显式打开单项权限的系统设置；该命令不会 Request 或重启应用。 */
+  openPermissionSettings: (type: PermissionType): Promise<PermissionActionResult> =>
+    invokeDecoded('open_permission_settings', { type }, permissionActionResultDecoder),
 
   /**
    * Business Logic（为什么需要这个函数）:

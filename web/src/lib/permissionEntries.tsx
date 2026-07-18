@@ -16,15 +16,19 @@
 import type { ReactElement } from 'react';
 import type { TFunction } from 'i18next';
 import { BellIcon, HealthIcon, InfoIcon, KeyboardIcon } from '@/lib/icons';
-import type { PermissionsStatus } from '@/lib/types';
+import type { PermissionsStatus, PermissionType } from '@/lib/types';
+
+export type PermissionEntryAction = 'request' | 'openSettings' | 'none' | 'buildHelp';
 
 /** 单条权限条目的展示格式（供 PermissionCard 渲染） */
 export interface PermissionEntry {
-  id: string;
+  id: PermissionType;
   icon: ReactElement;
   title: string;
   description: string;
   granted: boolean;
+  action: PermissionEntryAction;
+  actionLabel?: string;
 }
 
 /**
@@ -52,6 +56,8 @@ export function mapPermissions(
       title: t('permission.screenRecording.title'),
       description: t('permission.screenRecording.description'),
       granted: status.screenCapture.granted,
+      action: status.screenCapture.granted ? 'none' : 'request',
+      actionLabel: t('permissionCard.requestAccess'),
     },
     {
       id: 'accessibility',
@@ -59,6 +65,8 @@ export function mapPermissions(
       title: t('permission.accessibility.title'),
       description: t('permission.accessibility.description'),
       granted: status.accessibility.granted,
+      action: status.accessibility.granted ? 'none' : 'request',
+      actionLabel: t('permissionCard.requestAccess'),
     },
     {
       id: 'inputMonitoring',
@@ -66,6 +74,22 @@ export function mapPermissions(
       title: t('permission.inputMonitoring.title'),
       description: t('permission.inputMonitoring.description'),
       granted: status.inputMonitoring.granted,
+      action:
+        status.inputMonitoring.state === 'granted'
+          ? 'none'
+          : status.inputMonitoring.state === 'notDetermined'
+            ? 'request'
+            : status.inputMonitoring.state === 'denied'
+              ? 'openSettings'
+              : 'buildHelp',
+      actionLabel:
+        status.inputMonitoring.state === 'notDetermined'
+          ? t('permissionCard.requestAccess')
+          : status.inputMonitoring.state === 'denied'
+            ? t('permissionCard.openSettings')
+            : status.inputMonitoring.state === 'unavailable'
+              ? t('permissionCard.buildHelp')
+              : undefined,
     },
     {
       id: 'notification',
@@ -73,6 +97,8 @@ export function mapPermissions(
       title: t('permission.notification.title'),
       description: t('permission.notification.description'),
       granted: status.notification.granted,
+      action: status.notification.granted ? 'none' : 'request',
+      actionLabel: t('permissionCard.requestAccess'),
     },
   ];
 }

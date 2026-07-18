@@ -15,6 +15,7 @@ import { configApi } from '@/api/config';
 import { usePermissions } from '@/hooks/usePermissions';
 import { useVisibilityPolling } from '@/hooks/useVisibilityPolling';
 import type { PermissionType, UpdateCheckResult, UpdateDownloadStatus } from '@/lib/types';
+import type { PermissionEntryAction } from '@/lib/permissionEntries';
 import {
   installButtonMode,
   isUpdateCheckDisabled,
@@ -40,7 +41,7 @@ export interface UseSettingsUpdatePermissionsResult {
   permError: string | null;
   permRequesting: ReadonlySet<PermissionType>;
   refreshPermissions: () => void | Promise<void>;
-  handleRequestAccess: (type: PermissionType) => void;
+  handleRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
   updateResult: UpdateCheckResult | null;
   updateHint: string;
   updateCheckDisabled: boolean;
@@ -81,6 +82,7 @@ export function useSettingsUpdatePermissions(): UseSettingsUpdatePermissionsResu
     error: permError,
     requesting: permRequesting,
     request: requestPermissionItem,
+    openSettings: openPermissionSettings,
     refresh: refreshPermissions,
   } = usePermissions();
 
@@ -117,10 +119,14 @@ export function useSettingsUpdatePermissions(): UseSettingsUpdatePermissionsResu
    * @param type 权限类型 screenCapture / accessibility / inputMonitoring / notification
    */
   const handleRequestAccess = useCallback(
-    (type: PermissionType) => {
-      void requestPermissionItem(type).catch(() => undefined);
+    (type: PermissionType, action: PermissionEntryAction = 'request') => {
+      if (action === 'request') {
+        void requestPermissionItem(type).catch(() => undefined);
+      } else if (action === 'openSettings') {
+        void openPermissionSettings(type).catch(() => undefined);
+      }
     },
-    [requestPermissionItem],
+    [openPermissionSettings, requestPermissionItem],
   );
 
   const updateHint = useMemo(

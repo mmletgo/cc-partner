@@ -44,13 +44,13 @@ export async function checkNotificationGranted(): Promise<boolean> {
 /**
  * 请求通知权限
  *
- * Business Logic: 用户在 Welcome/设置页点「去设置」时触发系统通知授权框（及可选设置面板）。
+ * Business Logic: 用户显式点“请求授权”时触发系统通知授权框，不夹带设置跳转。
  * Code Logic: 非 macOS no-op；macOS 调 request_permission('notification')。
  */
 export async function requestNotificationPermission(): Promise<void> {
   if (!isMacos()) return;
   try {
-    await configApi.requestPermission('notification', true);
+    await configApi.requestPermission('notification');
   } catch {
     // 请求失败静默，轮询反映真实状态
   }

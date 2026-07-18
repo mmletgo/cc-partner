@@ -361,7 +361,7 @@ export interface UpdateDownloadStatus {
 
 export interface PermissionsStatus {
   screenCapture: { granted: boolean };
-  inputMonitoring: { granted: boolean };
+  inputMonitoring: InputMonitoringPermissionState;
   accessibility: { granted: boolean };
   /** 通知权限（后端 UNUserNotificationCenter，按 Bundle 身份独立；非 plugin stub） */
   notification: { granted: boolean };
@@ -369,20 +369,28 @@ export interface PermissionsStatus {
 
 export type PermissionType = 'screenCapture' | 'inputMonitoring' | 'accessibility' | 'notification';
 
-export interface PermissionRequestResult {
-  ok: boolean;
-  /** 是否触发了系统授权弹窗 / 登记 API（按权限类型语义不同） */
-  requested: boolean;
-  /** 是否成功打开了系统设置面板 */
-  opened: boolean;
-  /** settings=打开系统设置；prompt=系统授权框；noop=已授权无操作 */
-  action?: 'settings' | 'prompt' | 'noop';
-  /**
-   * 输入监控 Denied 同进程无法弹系统中转窗时为 true。
-   * **禁止**自动 relaunch；Welcome 立刻展示「重新打开应用」，新进程再 Request。
-   */
-  needsRelaunch?: boolean;
-  error?: string;
+/** 输入监控公开 IOHID 四态。 */
+export type InputMonitoringState =
+  | 'granted'
+  | 'denied'
+  | 'notDetermined'
+  | 'unavailable';
+
+/** 输入监控状态 DTO；granted 仅为 state 的兼容派生字段。 */
+export interface InputMonitoringPermissionState {
+  granted: boolean;
+  state: InputMonitoringState;
+}
+
+/** 显式权限操作；Request、Open Settings、Reopen 不得混合。 */
+export type PermissionOperation = 'request' | 'openSettings' | 'noop';
+
+/** 权限操作前后状态 DTO。 */
+export interface PermissionActionResult {
+  permission: string;
+  operation: PermissionOperation;
+  before: string;
+  after: string;
 }
 
 /**

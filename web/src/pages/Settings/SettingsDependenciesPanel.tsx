@@ -11,6 +11,7 @@
  */
 import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Card, Button } from '@/components/primitives';
 import {
   LanFirewallDependencyCard,
@@ -18,7 +19,7 @@ import {
   RuntimeDiagnosticsCard,
   WorkbenchDependencyCard,
 } from '@/components/domain';
-import { mapPermissions } from '@/lib/permissionEntries';
+import { mapPermissions, type PermissionEntryAction } from '@/lib/permissionEntries';
 import type { PermissionType, PermissionsStatus } from '@/lib/types';
 import styles from './Settings.module.css';
 
@@ -37,7 +38,7 @@ export interface SettingsDependenciesPanelProps {
   permRefreshing: boolean;
   permError: string | null;
   permRequesting: ReadonlySet<PermissionType> | Set<PermissionType>;
-  onRequestAccess: (type: PermissionType) => void;
+  onRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
   onRefreshPermissions: () => void;
 }
 
@@ -64,6 +65,7 @@ export function SettingsDependenciesPanel({
 }: SettingsDependenciesPanelProps): ReactElement {
   const { t } = useTranslation(['settings', 'common']);
   const [tWelcome] = useTranslation('welcome');
+  const navigate = useNavigate();
 
   return (
     <>
@@ -108,8 +110,15 @@ export function SettingsDependenciesPanel({
             title={p.title}
             description={p.description}
             granted={p.granted}
-            requesting={permRequesting.has(p.id as PermissionType)}
-            onRequestAccess={() => onRequestAccess(p.id as PermissionType)}
+            requesting={permRequesting.has(p.id)}
+            actionLabel={p.actionLabel}
+            onRequestAccess={() => {
+              if (p.action === 'buildHelp') {
+                navigate('/welcome');
+              } else {
+                onRequestAccess(p.id, p.action);
+              }
+            }}
           />
         ))}
         <div>
