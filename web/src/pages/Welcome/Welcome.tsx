@@ -45,6 +45,7 @@ import styles from './Welcome.module.css';
 import {
   SYNC_DELAYS_MS,
   hasStickyDenied,
+  isStickyPermission,
   reduceWelcomePermPhase,
   welcomeHintKey,
   type WelcomePermEvent,
@@ -198,20 +199,34 @@ export function Welcome() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点单项「去设置」只应请求该权限；sticky 类型进入 awaiting，
-   *   从设置返回后由 runSyncAfterForeground 同步——**禁止**自动 relaunch。
+   *   用户点单项「去设置」只应请求该权限；sticky 类型进入 awaiting。
+   *   macOS 打开系统设置时 WebView 常仍 visible，visibilitychange 不触发，
+   *   若只靠 focus/visibility 则永远进不了 needs_reopen（卡片一直「去设置」）。
+   *   因此 sticky 请求结束后必须主动启动同步轮次——**禁止**自动 relaunch。
    *
    * Code Logic（这个函数做什么）:
-   *   dispatch GO_SETTINGS；request(type)；refresh（即时权限如通知）。
+   *   dispatch GO_SETTINGS；await request(type)；refresh；
+   *   sticky 则 schedule runSyncAfterForeground（短延迟，给系统设置时间弹出）。
    */
   const handleRequest = useCallback(
     (type: PermissionType) => {
       dispatch({ type: 'GO_SETTINGS', permission: type });
-      void request(type).catch(() => undefined);
-      // 通知等即时权限：request 后 refresh；禁止 relaunch
-      void refresh();
+      void (async () => {
+        try {
+          await request(type);
+        } catch {
+          // error 已由 hook 投影
+        }
+        await refresh();
+        if (isStickyPermission(type)) {
+          // 不依赖 visibility：开系统设置后窗口可能一直 visible
+          window.setTimeout(() => {
+            void runSyncAfterForeground();
+          }, 800);
+        }
+      })();
     },
-    [dispatch, request, refresh],
+    [dispatch, request, refresh, runSyncAfterForeground],
   );
 
   /**

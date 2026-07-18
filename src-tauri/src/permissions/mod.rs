@@ -701,11 +701,12 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
     {
         match perm_type {
             "screenCapture" => {
-                // Spec：登记 + 主动作开设置；禁止「弹窗与设置」同时出现。
-                // - 已授权 → noop
-                // - TCC Denied（已在列表）→ 只 open 设置（对齐辅助功能）
-                // - Unknown/首次 → CGRequest 登记（同步，弹窗结束后才返回），
-                //   若仍未授权且 allow_open → **再** open 设置（顺序，非并行双开）
+                // Spec 对齐辅助功能 + 禁止双开：
+                // CGRequestScreenCaptureAccess **立即返回**（不wait用户关弹窗），
+                // 若随后 open 设置 → 用户同时看到录屏弹窗与设置页。
+                // 因此：Denied（已在列表）→ 只 open；Unknown/首次 → **只** CGRequest
+                // （弹窗自带「打开系统设置」）；已授权 → noop。绝不在同一次调用里
+                // CGRequest + open。
                 if check_screen_capture_access() {
                     return RequestPermissionResult {
                         ok: true,
@@ -722,52 +723,41 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     } else {
                         false
                     };
-                    return RequestPermissionResult {
+                    RequestPermissionResult {
                         ok: check_screen_capture_access(),
                         requested: false,
                         opened,
                         action: if opened { "settings" } else { "noop" },
-                    };
-                }
-                // 未在列表：先 CGRequest 写入 TCC（可能弹窗；返回时弹窗已关）
-                let requested = unsafe { CGRequestScreenCaptureAccess() };
-                if check_screen_capture_access() {
-                    return RequestPermissionResult {
-                        ok: true,
+                    }
+                } else {
+                    // 未在列表：只 CGRequest 登记（可能弹窗）；不 open
+                    let requested = unsafe { CGRequestScreenCaptureAccess() };
+                    RequestPermissionResult {
+                        ok: check_screen_capture_access(),
                         requested,
                         opened: false,
-                        action: "prompt",
-                    };
-                }
-                // 登记后仍未授权：顺序打开设置页，列表应已有本 app
-                let opened = if allow_open {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    open_permission_settings(perm_type)
-                } else {
-                    false
-                };
-                RequestPermissionResult {
-                    ok: check_screen_capture_access(),
-                    requested,
-                    opened,
-                    action: if opened {
-                        "settings"
-                    } else if requested {
-                        "prompt"
-                    } else {
-                        "noop"
-                    },
+                        action: if requested { "prompt" } else { "noop" },
+                    }
                 }
             }
             "inputMonitoring" => {
-                // Spec：静默登记 + 只 open 设置。
-                // allow_open 时 silent=true：禁止 IOHID/CG Request（会弹系统框 → 与 open 双开）。
-                // 已 TCC Denied 时跳过登记，只 open（与辅助功能对称）。
+                // Spec：静默登记 + 只 open 设置；禁止任何会弹系统框的 Request API。
+                // allow_open 路径 silent=true：仅 EventTap（无 IOHID/CG Request）。
+                // TCC Denied：跳过登记，只 open（与辅助功能对称）。
+                if check_input_monitoring_access() {
+                    return RequestPermissionResult {
+                        ok: true,
+                        requested: false,
+                        opened: false,
+                        action: "noop",
+                    };
+                }
                 let tcc = tcc_listen_event_preflight();
                 let already_in_list = matches!(tcc, Some(TCC_PREFLIGHT_DENIED));
                 let requested = if already_in_list {
                     false
                 } else {
+                    // Welcome 默认 allow_open=true → silent；仅 open_settings=false 才走可弹框登记
                     register_input_monitoring_subject(/* silent */ allow_open)
                 };
                 if allow_open && !already_in_list {
@@ -782,7 +772,14 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     ok: check_input_monitoring_access(),
                     requested,
                     opened,
-                    action: "settings",
+                    action: if opened {
+                        "settings"
+                    } else if requested {
+                        // open_settings=false 时的登记路径
+                        "prompt"
+                    } else {
+                        "noop"
+                    },
                 }
             }
             "accessibility" => {
@@ -985,17 +982,19 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     输入监控 request 路径不得再写死 requested=false（应能触发 ListenEvent 系统框）。
+    ///     open_settings=false 时输入监控只做登记、不 open；action 可为 prompt（登记）或 settings/noop。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     调用 request_permission("inputMonitoring", Some(false)) 不强制 open 设置；
-    ///     返回体含 ok/requested/opened/action 字段且类型稳定（不断言本机 TCC 终态）。
+    ///     调用 request_permission("inputMonitoring", Some(false))；断言 !opened。
     #[test]
     fn request_input_monitoring_shape_is_stable() {
         let r = request_permission("inputMonitoring", Some(false));
-        // opened 在 open_settings=false 时必须为 false
         assert!(!r.opened);
-        assert_eq!(r.action, "settings");
+        assert!(
+            r.action == "settings" || r.action == "prompt" || r.action == "noop",
+            "unexpected action {:?}",
+            r
+        );
         let _ = (r.ok, r.requested);
     }
 
@@ -1014,15 +1013,18 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     输入监控默认产品路径是 settings（登记 + 开设置），不得标成 prompt。
+    ///     Welcome 默认 allow_open 时输入监控产品路径是 settings（静默登记 + 开设置）。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     open_settings=false 时验证 !opened 且 action 字段存在为 settings（不强制本机 TCC）。
+    ///     open_settings=true 时 action 为 settings（或已授权 noop）。
     #[test]
     fn request_input_monitoring_defaults_to_settings_action_when_open() {
-        let r = request_permission("inputMonitoring", Some(false));
-        assert!(!r.opened);
-        assert_eq!(r.action, "settings");
+        let r = request_permission("inputMonitoring", Some(true));
+        assert!(
+            r.action == "settings" || r.action == "noop",
+            "allow_open 不得走 prompt 弹框路径: {:?}",
+            r
+        );
     }
 
     /// Business Logic: prompt 与 open 不得并行；顺序「登记后仍未授权再 open」允许 requested&&opened。
