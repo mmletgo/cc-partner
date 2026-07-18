@@ -534,19 +534,23 @@ pub fn check_screen_capture_access() -> bool {
     true
 }
 
-/// 检测输入监控权限（macOS fail-closed 公开 API；非 macOS 一律 true）。
+/// 检测输入监控权限（macOS fail-closed；非 macOS 一律 true）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     UI「已授权」必须与真实可用性一致。裸二进制无 Bundle ID → fail-closed 防假绿。
-///     **禁止**把私有 TCC preflight==0 单独当已授权（macOS 上会假绿，用户未开开关
-///     Welcome 却显示已授权）。系统开关已开但进程态仍 Denied → Welcome needs_reopen，
-///     不伪造绿勾。
+///     UI「已授权」必须与系统「隐私 → 输入监控」真实开关一致。
+///     调用 `IOHIDRequestAccess` / `CGRequestListenEventAccess` 后，
+///     `CGPreflightListenEventAccess`（甚至部分系统上的 IOHID）会在用户未开开关时
+///     暂时返回 true → Welcome 一点「去设置」就假绿。因此：
+///     - **禁止**用 CGPreflight 作为授权依据（登记 API 污染源）；
+///     - **禁止**私有 TCC=0 单独放行；
+///     - 仅当 IOHIDCheckAccess==Granted 且 TCC 不是 Denied 时为 true；
+///     - 系统开关已开但 IOHID 仍非 Granted → false（Welcome needs_reopen）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     1) 无/空/占位 bundle id → false；
-///     2) IOHIDCheckAccess(ListenEvent) 必须 Granted(0)；
-///     3) TCC preflight 仅 Denied(1) → false；Granted/Unknown 不单独放行；
-///     4) CGPreflightListenEventAccess 必须 true。
+///     2) TCC preflight Denied(1) → false（列表上明确关闭）；
+///     3) IOHIDCheckAccess(ListenEvent)==Granted(0) → true；否则 false。
+///     不读 CGPreflight（避免 Request 后假绿）。
 #[cfg(target_os = "macos")]
 pub fn check_input_monitoring_access() -> bool {
     let bundle_id = main_bundle_identifier();
@@ -570,34 +574,26 @@ pub fn check_input_monitoring_access() -> bool {
 
     let iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
     let tcc = tcc_listen_event_preflight();
+    // 诊断用，不参与授权判定（CGRequest 后会假绿）
     let cg = unsafe { CGPreflightListenEventAccess() };
 
-    if iohid != K_IOHID_ACCESS_TYPE_GRANTED {
-        tracing::debug!(
-            bundle_id = bundle_label,
-            iohid,
-            tcc = ?tcc,
-            cg,
-            "input_monitoring check: IOHID not Granted"
-        );
-        return false;
-    }
     if tcc_listen_event_hard_denied(tcc) {
         tracing::debug!(
             bundle_id = bundle_label,
             iohid,
             tcc = ?tcc,
             cg,
-            "input_monitoring check: TCC preflight Denied"
+            "input_monitoring check: TCC preflight Denied → not granted"
         );
         return false;
     }
-    if !cg {
+    if iohid != K_IOHID_ACCESS_TYPE_GRANTED {
         tracing::debug!(
             bundle_id = bundle_label,
             iohid,
             tcc = ?tcc,
-            "input_monitoring check: CGPreflightListenEventAccess=false"
+            cg,
+            "input_monitoring check: IOHID not Granted (0=Granted,1=Denied,2=Unknown)"
         );
         return false;
     }
@@ -669,8 +665,8 @@ pub fn check_permissions() -> PermissionsStatus {
 ///     静默 API 在 macOS 新版本上无法写入列表；「只 open」导致列表无 app；
 ///     「静默登记+open」仍无列表；把 TCC=0 当已授权会假绿。
 ///     - screenCapture：已授权 → noop；TCC Denied → 只 open；否则只 CGRequest（不 open）。
-///     - inputMonitoring：已授权 → noop；TCC Denied → 只 open；否则 IOHID/CG/EventTap
-///       登记（可弹框，不 open）。allow_open 时禁止「登记 API + open」同次双开。
+///     - inputMonitoring：已授权 → noop；allow_open → silent EventTap + 只 open
+///       （**禁止** IOHID/CG Request，否则 check 假绿）；open_settings=false 才完整 Request。
 ///     - accessibility：同上（Denied → open；Unknown → AX prompt）。
 ///     - notification：authorized → noop；notDetermined → prompt；denied → settings。
 ///
@@ -723,8 +719,11 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "inputMonitoring" => {
-                // 对齐辅助功能：Denied → 只 open；否则必须真正登记（非 silent-only EventTap，
-                // 否则系统设置列表无 app）。禁止登记 API 与 open 同次。
+                // Welcome allow_open：**禁止** IOHIDRequestAccess / CGRequestListenEventAccess。
+                // 二者调用后 check 会假绿（用户未开开关 Welcome 变已授权）。
+                // 路径：已授权 → noop；否则 silent EventTap 尝试写入列表 + 只 open 设置
+                // （与「去设置直接进系统设置」一致；列表靠 EventTap + 打开面板触发刷新）。
+                // open_settings=false 才走完整 Request 登记（仍不 open）。
                 if check_input_monitoring_access() {
                     return RequestPermissionResult {
                         ok: true,
@@ -741,16 +740,26 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     already_in_list,
                     "request_permission(inputMonitoring) branch"
                 );
-                if allow_open && already_in_list {
+                if allow_open {
+                    // 未在列表：仅 silent EventTap（无 Request 弹框、不污染 check）
+                    let requested = if already_in_list {
+                        false
+                    } else {
+                        register_input_monitoring_subject(/* silent */ true)
+                    };
+                    if !already_in_list {
+                        std::thread::sleep(std::time::Duration::from_millis(350));
+                    }
                     let opened = open_permission_settings(perm_type);
+                    // 关键：ok 必须再 check，且 Request 未调用时不应假绿
                     RequestPermissionResult {
                         ok: check_input_monitoring_access(),
-                        requested: false,
+                        requested,
                         opened,
                         action: if opened { "settings" } else { "noop" },
                     }
                 } else {
-                    // 首次/Unknown：完整登记（IOHID/CG 可能弹框 + EventTap）；绝不 open
+                    // 非 Welcome：可弹框登记；ok 仍走 check（若系统假绿至少 Welcome 路径干净）
                     let requested =
                         register_input_monitoring_subject(/* silent */ false);
                     RequestPermissionResult {
@@ -999,15 +1008,17 @@ mod tests {
     #[test]
     fn request_input_monitoring_defaults_to_settings_action_when_open() {
         let r = request_permission("inputMonitoring", Some(true));
-        // 未在列表时可为 prompt（登记）；已在列表为 settings；已授权 noop。禁止 prompt+open。
-        if r.action == "prompt" {
-            assert!(!r.opened, "prompt 不得 open: {:?}", r);
-        } else {
-            assert!(
-                r.action == "settings" || r.action == "noop",
-                "unexpected action {:?}",
-                r
-            );
+        // Welcome allow_open：只 settings|noop，不得 prompt（避免 Request 假绿）
+        assert!(
+            r.action == "settings" || r.action == "noop",
+            "allow_open 必须 settings|noop，不得 prompt: {:?}",
+            r
+        );
+        // 未授权时 ok 必须 false（假绿回归）
+        if r.action != "noop" {
+            // settings 路径：若系统未真正授权，ok 应为 false
+            // （已授权机器上可能 ok=true，放宽为：action=settings 时允许 ok 真假）
+            let _ = r.ok;
         }
     }
 
@@ -1060,20 +1071,36 @@ mod tests {
         }
     }
 
-    /// Business Logic: 输入监控 allow_open 禁止同次 prompt+open。
-    /// Code Logic: prompt ⇒ !opened；settings|noop 合法。
+    /// Business Logic: Welcome 输入监控去设置不得走 Request prompt（会假绿）。
+    /// Code Logic: action ∈ {settings|noop}。
     #[test]
     #[cfg(target_os = "macos")]
     fn request_input_monitoring_allow_open_never_dual_opens() {
         let r = request_permission("inputMonitoring", Some(true));
-        if r.action == "prompt" {
-            assert!(!r.opened, "prompt 不得同时 open: {:?}", r);
-        } else {
+        assert!(
+            r.action == "settings" || r.action == "noop",
+            "allow_open 不得 prompt: {:?}",
+            r
+        );
+    }
+
+    /// Business Logic: 一点「去设置」不得把未授权输入监控变成已授权（假绿回归）。
+    /// Code Logic: 若本机 IOHID 未真正 Granted，request allow_open 后 check 仍为 false。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn request_input_monitoring_allow_open_does_not_false_green() {
+        // 先读当前真实状态
+        let before = check_input_monitoring_access();
+        let r = request_permission("inputMonitoring", Some(true));
+        let after = check_input_monitoring_access();
+        if !before {
             assert!(
-                r.action == "settings" || r.action == "noop",
-                "unexpected action {:?}",
-                r
+                !after,
+                "未授权时 allow_open 不得使 check 变 true（假绿）: result={:?} after={}",
+                r,
+                after
             );
+            assert!(!r.ok, "未授权时 result.ok 不得为 true: {:?}", r);
         }
     }
 
