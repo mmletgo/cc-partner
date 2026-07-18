@@ -126,8 +126,10 @@ export const configApi = {
 
   /**
    * 触发权限请求（M7 实现）。
-   * @param openSettings 是否打开系统设置面板兜底；缺省 true。启动主动引导时按类型差异化传：
-   *   screenCapture 传 false（仅弹系统框）、inputMonitoring 传 true（它只能靠开面板引导）。
+   * @param openSettings 是否允许打开系统设置面板；缺省 true（Welcome「去设置」默认）。
+   *   screenCapture + true → 只开设置，不 CGRequest（防录屏弹窗与设置双开）；
+   *   screenCapture + false → 仅 CGRequest 登记；
+   *   inputMonitoring + true → 静默 EventTap 登记 + 开设置。
    */
   requestPermission: (type: PermissionType, openSettings?: boolean) =>
     invoke<PermissionRequestResult>('request_permission', { type, openSettings }),

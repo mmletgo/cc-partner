@@ -202,11 +202,14 @@ export function Welcome() {
    *   用户点单项「去设置」只应请求该权限；sticky 类型进入 awaiting。
    *   macOS 打开系统设置时 WebView 常仍 visible，visibilitychange 不触发，
    *   若只靠 focus/visibility 则永远进不了 needs_reopen（卡片一直「去设置」）。
-   *   因此 sticky 请求结束后必须主动启动同步轮次——**禁止**自动 relaunch。
+   *   系统设置内打开开关后当前进程 sticky TCC 常仍 denied——必须多轮 recheck 后
+   *   进入 needs_reopen 露出「重新打开应用」，否则用户只看到卡片仍「去设置」。
+   *   **禁止**自动 relaunch。
    *
    * Code Logic（这个函数做什么）:
    *   dispatch GO_SETTINGS；await request(type)；refresh；
-   *   sticky 则 schedule runSyncAfterForeground（短延迟，给系统设置时间弹出）。
+   *   sticky 则多次 schedule runSyncAfterForeground（800ms / 2.5s / 5s），
+   *   覆盖「设置窗弹出后立刻同步」与「用户在设置里授权后仍在前台」两种时序。
    */
   const handleRequest = useCallback(
     (type: PermissionType) => {
@@ -220,9 +223,11 @@ export function Welcome() {
         await refresh();
         if (isStickyPermission(type)) {
           // 不依赖 visibility：开系统设置后窗口可能一直 visible
-          window.setTimeout(() => {
-            void runSyncAfterForeground();
-          }, 800);
+          for (const delay of [800, 2500, 5000]) {
+            window.setTimeout(() => {
+              void runSyncAfterForeground();
+            }, delay);
+          }
         }
       })();
     },
