@@ -137,8 +137,15 @@ export function Welcome() {
       return;
     }
     syncInFlightRef.current = true;
+    /** permissions() 全轮失败时仍用全 denied 片推到 needs_reopen，避免卡在 syncing */
+    const deniedSlice = {
+      screenCapture: { granted: false },
+      accessibility: { granted: false },
+      inputMonitoring: { granted: false },
+    };
     try {
       dispatch({ type: 'FOREGROUND' });
+      let lastDenied = deniedSlice;
       for (let i = 0; i < SYNC_DELAYS_MS.length; i++) {
         const delay = SYNC_DELAYS_MS[i]!;
         if (delay > 0) {
@@ -151,18 +158,24 @@ export function Welcome() {
         try {
           slice = await configApi.permissions();
         } catch {
+          // 本轮读失败：继续后续轮次；耗尽后用 lastDenied / deniedSlice 收口
           continue;
         }
         if (!hasStickyDenied(slice)) {
           dispatch({ type: 'SYNC_TICK', status: slice });
           return;
         }
-        if (i === SYNC_DELAYS_MS.length - 1) {
-          dispatch({ type: 'SYNC_EXHAUSTED', status: slice });
-        } else {
-          dispatch({ type: 'SYNC_TICK', status: slice });
+        lastDenied = {
+          screenCapture: slice.screenCapture,
+          accessibility: slice.accessibility,
+          inputMonitoring: slice.inputMonitoring,
+        };
+        if (i < SYNC_DELAYS_MS.length - 1) {
+          dispatch({ type: 'SYNC_TICK', status: lastDenied });
         }
       }
+      // 多轮 recheck 后 sticky 仍 denied，或全部 catch：进入 needs_reopen
+      dispatch({ type: 'SYNC_EXHAUSTED', status: lastDenied });
     } finally {
       syncInFlightRef.current = false;
     }
