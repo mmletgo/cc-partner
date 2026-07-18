@@ -236,14 +236,14 @@ fn tcc_listen_event_hard_denied(tcc: Option<i32>) -> bool {
     matches!(tcc, Some(TCC_PREFLIGHT_DENIED))
 }
 
-/// 通过私有 TCC 框架预检 ListenEvent（与系统设置列表同源信号）。
+/// 通过私有 TCC 框架预检指定服务（与系统设置列表同源信号）。
 ///
-/// Business Logic: 公开 CG/IOHID 在无 bundle / 仅辅助功能时会假绿；TCC preflight 可补充
-///     「隐私 → 输入监控」侧信号。框架为私有，加载失败时返回 None 由调用方降级。
-/// Code Logic: dlopen TCC.framework → TCCAccessPreflight("kTCCServiceListenEvent")；
-///     返回 0=Granted / 1=Denied / 2=Unknown（或其它非 0/1 值按 Unknown 软处理）。
+/// Business Logic: 分流「首次登记(prompt)」与「已在列表(只开设置)」需要 TCC 侧状态，
+///     避免 CGRequest/AX prompt 与 open 设置双开，同时保证列表能出现本 app。
+/// Code Logic: dlopen TCC.framework → TCCAccessPreflight(service)；
+///     返回 0=Granted / 1=Denied / 2=Unknown；加载失败返回 None。
 #[cfg(target_os = "macos")]
-fn tcc_listen_event_preflight() -> Option<i32> {
+fn tcc_access_preflight(service_name: &str) -> Option<i32> {
     unsafe {
         extern "C" {
             fn dlopen(filename: *const std::os::raw::c_char, flags: i32) -> *mut std::ffi::c_void;
@@ -267,7 +267,7 @@ fn tcc_listen_event_preflight() -> Option<i32> {
         type PreflightFn =
             unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> i32;
         let preflight: PreflightFn = std::mem::transmute(f);
-        let service_c = std::ffi::CString::new("kTCCServiceListenEvent").ok()?;
+        let service_c = std::ffi::CString::new(service_name).ok()?;
         let service = CFStringCreateWithCString(
             std::ptr::null(),
             service_c.as_ptr(),
@@ -280,6 +280,24 @@ fn tcc_listen_event_preflight() -> Option<i32> {
         CFRelease(service);
         Some(result)
     }
+}
+
+/// ListenEvent TCC 预检（输入监控 check 路径）。
+#[cfg(target_os = "macos")]
+fn tcc_listen_event_preflight() -> Option<i32> {
+    tcc_access_preflight("kTCCServiceListenEvent")
+}
+
+/// ScreenCapture TCC 预检（录屏「去设置」分流）。
+#[cfg(target_os = "macos")]
+fn tcc_screen_capture_preflight() -> Option<i32> {
+    tcc_access_preflight("kTCCServiceScreenCapture")
+}
+
+/// Accessibility TCC 预检（辅助功能「去设置」分流）。
+#[cfg(target_os = "macos")]
+fn tcc_accessibility_preflight() -> Option<i32> {
+    tcc_access_preflight("kTCCServiceAccessibility")
 }
 
 // ── macOS ApplicationServices FFI（辅助功能权限）──────────────────────────
@@ -655,19 +673,17 @@ pub fn check_permissions() -> PermissionsStatus {
 
 /// 请求权限（按类型分流：登记 / 系统弹框 / 打开设置）。
 ///
-/// Business Logic:
-///     **同一点击禁止「系统授权弹窗 + 系统设置页」双开**（能 open 设置则只 open）。
-///     - screenCapture：`allow_open` → **仅** open 录屏设置；`open_settings=false` 且未授权
-///       才 `CGRequest…`（系统弹窗，其自身可带「打开系统设置」）。
-///     - accessibility：`allow_open` → **仅** open 辅助功能设置（不 AX prompt 弹框）；
-///       `open_settings=false` 才 `AXIsProcessTrustedWithOptions(prompt)` 登记/引导。
-///     - inputMonitoring：静默登记（无用户弹窗）+ 默认 **只** open 输入监控设置 → `settings`。
-///     - notification：authorized → `noop`；notDetermined → `requestAuthorization`（`prompt`，
-///       不 open）；denied → 仅 open 通知设置。禁止始终 request+open。
-///     - 非 macOS / 未知类型：`{ok:true, requested:false, opened:false, action:"noop"}`。
+/// Business Logic（对齐 design §3）:
+///     1) **登记**（列表需要本 app 时必须做）；2) **主动作** 能开设置则开设置，否则系统框；
+///     3) **禁止** 同一点击「系统授权弹窗 + 系统设置页」双开。
+///     - screenCapture / accessibility：TCC Denied（已在列表）→ 只 open 设置；
+///       Unknown/无 TCC 预检 → 只走系统登记/prompt（写入列表，弹窗自带「打开系统设置」）；
+///       已 granted → noop。
+///     - inputMonitoring：静默登记（IOHID/CG/tap）+ 默认只 open 设置。
+///     - notification：authorized → noop；notDetermined → prompt only；denied → settings only。
 ///
 /// Code Logic:
-///     `open_settings`：`None`/`Some(true)` → allow_open；`Some(false)` → 仅 prompt/登记路径。
+///     `open_settings`：`None`/`Some(true)` → allow_open；`Some(false)` → 仅 prompt/登记。
 ///     返回 `action ∈ {settings|prompt|noop}`。
 pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
     // Some(false) 只登记/请求；None / Some(true) 允许打开设置
@@ -676,8 +692,19 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
     {
         match perm_type {
             "screenCapture" => {
-                // 能 open 设置则只 open，避免与 CGRequest 系统弹窗双开
-                if allow_open {
+                // Spec：登记 + 开设置，但禁止双开。
+                // TCC Denied → 已在列表，只 open；Unknown/None → 只 CGRequest 登记（可弹窗一次）。
+                if check_screen_capture_access() {
+                    return RequestPermissionResult {
+                        ok: true,
+                        requested: false,
+                        opened: false,
+                        action: "noop",
+                    };
+                }
+                let tcc = tcc_screen_capture_preflight();
+                let already_in_list = matches!(tcc, Some(TCC_PREFLIGHT_DENIED));
+                if allow_open && already_in_list {
                     let opened = open_permission_settings(perm_type);
                     RequestPermissionResult {
                         ok: check_screen_capture_access(),
@@ -685,25 +712,19 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         opened,
                         action: if opened { "settings" } else { "noop" },
                     }
-                } else if !check_screen_capture_access() {
+                } else {
+                    // 首次/Unknown：必须 CGRequest 才能写入录屏列表；不再叠 open（防双开）
                     let requested = unsafe { CGRequestScreenCaptureAccess() };
                     RequestPermissionResult {
                         ok: check_screen_capture_access(),
                         requested,
                         opened: false,
-                        action: if requested { "prompt" } else { "noop" },
-                    }
-                } else {
-                    RequestPermissionResult {
-                        ok: true,
-                        requested: false,
-                        opened: false,
-                        action: "noop",
+                        action: "prompt",
                     }
                 }
             }
             "inputMonitoring" => {
-                // 静默登记主体（无用户弹窗）；默认只 open 设置
+                // Spec：静默登记 + 只 open 设置（登记保证列表出现本 app）
                 let requested = register_input_monitoring_subject();
                 if allow_open {
                     std::thread::sleep(std::time::Duration::from_millis(350));
@@ -717,13 +738,23 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     ok: check_input_monitoring_access(),
                     requested,
                     opened,
-                    // 输入监控产品路径始终是设置页（登记只为列表出现本 app）
                     action: "settings",
                 }
             }
             "accessibility" => {
-                // 能 open 设置则只 open，避免 AX prompt 系统框与设置页双开
-                if allow_open {
+                // Spec：登记 + 开设置，禁止双开。
+                // TCC Denied 或已不信任但曾登记 → 只 open；Unknown → 只 AX prompt 登记。
+                if check_accessibility_access() {
+                    return RequestPermissionResult {
+                        ok: true,
+                        requested: false,
+                        opened: false,
+                        action: "noop",
+                    };
+                }
+                let tcc = tcc_accessibility_preflight();
+                let already_in_list = matches!(tcc, Some(TCC_PREFLIGHT_DENIED));
+                if allow_open && already_in_list {
                     let opened = open_permission_settings(perm_type);
                     RequestPermissionResult {
                         ok: check_accessibility_access(),
@@ -732,6 +763,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         action: if opened { "settings" } else { "noop" },
                     }
                 } else {
+                    // Unknown/None 或 open_settings=false：只 AX prompt 登记（弹窗可引导设置，不叠 open）
                     let trusted = request_accessibility_prompt();
                     RequestPermissionResult {
                         ok: trusted || check_accessibility_access(),
@@ -949,32 +981,42 @@ mod tests {
         assert_eq!(r.action, "settings");
     }
 
-    /// Business Logic: Welcome「去设置」默认 allow_open，不得再走 CGRequest 弹窗路径。
-    /// Code Logic: open_settings=true 时 screenCapture 的 requested 必须为 false（只 open 设置）。
+    /// Business Logic: allow_open 时不得「系统弹窗 + 设置」双开（action 互斥）。
+    /// Code Logic: screenCapture 返回体要么 settings/noop（opened 可 true），要么 prompt（opened 必须 false）。
     #[test]
     #[cfg(target_os = "macos")]
-    fn request_screen_capture_allow_open_does_not_mark_requested() {
+    fn request_screen_capture_allow_open_never_dual_opens() {
         let r = request_permission("screenCapture", Some(true));
-        assert!(
-            !r.requested,
-            "allow_open 路径不得 CGRequest 双开，requested 应为 false, got {:?}",
-            r
-        );
-        assert!(r.action == "settings" || r.action == "noop");
+        if r.action == "prompt" {
+            assert!(!r.opened, "prompt 不得叠 open settings: {:?}", r);
+            assert!(r.requested);
+        } else {
+            assert!(
+                r.action == "settings" || r.action == "noop",
+                "unexpected action {:?}",
+                r
+            );
+            assert!(!r.requested, "settings/noop 路径不得再 CGRequest: {:?}", r);
+        }
     }
 
-    /// Business Logic: 辅助功能 allow_open 只开设置，不 AX prompt。
-    /// Code Logic: open_settings=true 时 requested=false。
+    /// Business Logic: 辅助功能同样禁止 prompt 与 open 双开。
+    /// Code Logic: action=prompt 时 opened=false。
     #[test]
     #[cfg(target_os = "macos")]
-    fn request_accessibility_allow_open_does_not_mark_requested() {
+    fn request_accessibility_allow_open_never_dual_opens() {
         let r = request_permission("accessibility", Some(true));
-        assert!(
-            !r.requested,
-            "allow_open 路径不得 AX prompt 双开, got {:?}",
-            r
-        );
-        assert!(r.action == "settings" || r.action == "noop");
+        if r.action == "prompt" {
+            assert!(!r.opened, "prompt 不得叠 open settings: {:?}", r);
+            assert!(r.requested);
+        } else {
+            assert!(
+                r.action == "settings" || r.action == "noop",
+                "unexpected action {:?}",
+                r
+            );
+            assert!(!r.requested, "settings/noop 路径不得再 AX prompt: {:?}", r);
+        }
     }
 
     /// Business Logic（为什么需要这个测试）:
