@@ -473,27 +473,6 @@ fn attempt_listen_only_event_tap_registration() {
     }
 }
 
-/// Business Logic: 屏幕录制列表需要本 app 出现，但 Welcome 去设置不能弹 CGRequest 系统框
-///     （否则与「直接打开系统设置」的辅助功能体验不一致）。
-/// Code Logic: 调用 `CGWindowListCopyWindowInfo` 触发 TCC 主体登记（通常不弹授权框），
-///     立即 CFRelease；失败则 no-op。check 路径禁止调用。
-#[cfg(target_os = "macos")]
-fn register_screen_capture_subject_silent() {
-    extern "C" {
-        fn CGWindowListCopyWindowInfo(
-            option: u32,
-            relative_to_window: u32,
-        ) -> *mut std::ffi::c_void;
-    }
-    // kCGWindowListOptionAll = 0
-    unsafe {
-        let info = CGWindowListCopyWindowInfo(0, 0);
-        if !info.is_null() {
-            CFRelease(info);
-        }
-    }
-}
-
 // ── macOS 通知权限（UNUserNotificationCenter，按 Bundle 身份独立）────────────
 #[cfg(target_os = "macos")]
 mod notification_ffi {
@@ -540,18 +519,14 @@ pub fn request_notification_access() -> bool {
     true
 }
 
-/// 检测屏幕录制权限（macOS：CGPreflight 或 TCC Granted；非 macOS 一律 true）。
+/// 检测屏幕录制权限（macOS 用公开 CGPreflight；非 macOS 一律 true）。
 ///
-/// Business Logic: 截图前需确认已授权；系统设置打开开关后 CG 进程态可能滞后，
-///     但 TCC 与系统列表同源——TCC Granted 时 Welcome 应显示已授权（对齐辅助功能体验）。
-/// Code Logic: `CGPreflightScreenCaptureAccess` 为 true → true；
-///     否则 `TCCAccessPreflight(ScreenCapture)==Granted(0)` → true；其余 false。
+/// Business Logic: 截图前需确认已授权。私有 TCC preflight 的 0 不可当作已授权
+///     （会假绿）；进程态滞后时由 Welcome needs_reopen / 重新打开应用处理，禁止假绿。
+/// Code Logic: 仅 `CGPreflightScreenCaptureAccess()`。
 #[cfg(target_os = "macos")]
 pub fn check_screen_capture_access() -> bool {
-    if unsafe { CGPreflightScreenCaptureAccess() } {
-        return true;
-    }
-    matches!(tcc_screen_capture_preflight(), Some(TCC_PREFLIGHT_GRANTED))
+    unsafe { CGPreflightScreenCaptureAccess() }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -559,19 +534,19 @@ pub fn check_screen_capture_access() -> bool {
     true
 }
 
-/// 检测输入监控权限（macOS fail-closed 多信号；非 macOS 一律 true）。
+/// 检测输入监控权限（macOS fail-closed 公开 API；非 macOS 一律 true）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     UI「已授权」必须与系统设置「隐私 → 输入监控」一致。裸 `target/debug/app` 无
-///     稳定 Bundle ID 时 fail-closed 防假绿。系统设置打开开关后 IOHID/CG 进程态
-///     可能仍 Denied，但 TCC Granted 与列表开关同源——此时 Welcome 应显示已授权
-///     （对齐辅助功能：开开关后卡片变绿，不强制先 relaunch）。
+///     UI「已授权」必须与真实可用性一致。裸二进制无 Bundle ID → fail-closed 防假绿。
+///     **禁止**把私有 TCC preflight==0 单独当已授权（macOS 上会假绿，用户未开开关
+///     Welcome 却显示已授权）。系统开关已开但进程态仍 Denied → Welcome needs_reopen，
+///     不伪造绿勾。
 ///
 /// Code Logic（这个函数做什么）:
 ///     1) 无/空/占位 bundle id → false；
-///     2) TCC Granted(0) → true（优先反映系统设置开关）；
-///     3) TCC Denied(1) → false；
-///     4) 否则要求 IOHID Granted 且 CGPreflight true（Unknown 软路径）。
+///     2) IOHIDCheckAccess(ListenEvent) 必须 Granted(0)；
+///     3) TCC preflight 仅 Denied(1) → false；Granted/Unknown 不单独放行；
+///     4) CGPreflightListenEventAccess 必须 true。
 #[cfg(target_os = "macos")]
 pub fn check_input_monitoring_access() -> bool {
     let bundle_id = main_bundle_identifier();
@@ -597,9 +572,15 @@ pub fn check_input_monitoring_access() -> bool {
     let tcc = tcc_listen_event_preflight();
     let cg = unsafe { CGPreflightListenEventAccess() };
 
-    // TCC Granted：与系统设置开关同源，优先信任（IOHID 进程态滞后时不再假红）
-    if matches!(tcc, Some(TCC_PREFLIGHT_GRANTED)) {
-        return true;
+    if iohid != K_IOHID_ACCESS_TYPE_GRANTED {
+        tracing::debug!(
+            bundle_id = bundle_label,
+            iohid,
+            tcc = ?tcc,
+            cg,
+            "input_monitoring check: IOHID not Granted"
+        );
+        return false;
     }
     if tcc_listen_event_hard_denied(tcc) {
         tracing::debug!(
@@ -608,18 +589,6 @@ pub fn check_input_monitoring_access() -> bool {
             tcc = ?tcc,
             cg,
             "input_monitoring check: TCC preflight Denied"
-        );
-        return false;
-    }
-
-    // TCC Unknown/None：回落 IOHID + CG（两者皆真才 true）
-    if iohid != K_IOHID_ACCESS_TYPE_GRANTED {
-        tracing::debug!(
-            bundle_id = bundle_label,
-            iohid,
-            tcc = ?tcc,
-            cg,
-            "input_monitoring check: IOHID not Granted and TCC not Granted"
         );
         return false;
     }
@@ -694,21 +663,20 @@ pub fn check_permissions() -> PermissionsStatus {
 
 /// 请求权限（按类型分流：登记 / 系统弹框 / 打开设置）。
 ///
-/// Business Logic（对齐 design §3 + 辅助功能成功体验）:
-///     Welcome「去设置」目标体验：直接打开系统设置对应页、列表有本 app、用户打开开关后
-///     Welcome 显示已授权；**禁止**系统授权弹窗中转。
-///     1) **静默登记**（列表需要本 app 时）；2) allow_open → **只 open 设置**；
-///     3) **禁止** 同一次调用「系统弹窗 + 系统设置」双开。
-///     - screenCapture allow_open：静默 `CGWindowListCopyWindowInfo` 登记 + 只 open；
-///       open_settings=false 才 `CGRequest`（可能弹窗）。
-///     - inputMonitoring allow_open：静默 EventTap 登记 + 只 open；
-///       open_settings=false 才 IOHID/CG Request。
-///     - accessibility：TCC Denied → 只 open；Unknown → 只 AX prompt；已 granted → noop。
-///     - notification：authorized → noop；notDetermined → prompt only；denied → settings only。
+/// Business Logic（严格对齐辅助功能成功路径）:
+///     辅助功能：TCC Denied（已在列表）→ **只 open 设置**；Unknown/首次 → **只** AX
+///     登记 API（可能系统框，**不**叠 open）。录屏/输入监控必须同一模型——
+///     静默 API 在 macOS 新版本上无法写入列表；「只 open」导致列表无 app；
+///     「静默登记+open」仍无列表；把 TCC=0 当已授权会假绿。
+///     - screenCapture：已授权 → noop；TCC Denied → 只 open；否则只 CGRequest（不 open）。
+///     - inputMonitoring：已授权 → noop；TCC Denied → 只 open；否则 IOHID/CG/EventTap
+///       登记（可弹框，不 open）。allow_open 时禁止「登记 API + open」同次双开。
+///     - accessibility：同上（Denied → open；Unknown → AX prompt）。
+///     - notification：authorized → noop；notDetermined → prompt；denied → settings。
 ///
 /// Code Logic:
-///     `open_settings`：`None`/`Some(true)` → allow_open；`Some(false)` → 仅 prompt/登记。
-///     返回 `action ∈ {settings|prompt|noop}`。
+///     `open_settings`：`None`/`Some(true)` → allow_open；`Some(false)` → 仅登记。
+///     返回 `action ∈ {settings|prompt|noop}`。check **禁止** 私有 TCC Granted 假绿。
 pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
     // Some(false) 只登记/请求；None / Some(true) 允许打开设置
     let allow_open = open_settings.unwrap_or(true);
@@ -716,7 +684,8 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
     {
         match perm_type {
             "screenCapture" => {
-                // 对齐辅助功能成功路径：去设置 = 静默登记（如需）+ 只 open，绝不 CGRequest 弹窗。
+                // 对齐辅助功能：Denied（已在列表）→ 只 open；否则只 CGRequest 写入列表。
+                // 禁止 silent WindowList（新系统不进列表）+ 禁止 CGRequest 与 open 同次。
                 if check_screen_capture_access() {
                     return RequestPermissionResult {
                         ok: true,
@@ -726,30 +695,24 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     };
                 }
                 let tcc = tcc_screen_capture_preflight();
-                let already_in_list = matches!(
-                    tcc,
-                    Some(TCC_PREFLIGHT_DENIED) | Some(TCC_PREFLIGHT_GRANTED)
-                );
+                // 仅 Denied 表示已在列表未开开关；Unknown/None 必须登记，不可只 open
+                let already_in_list = matches!(tcc, Some(TCC_PREFLIGHT_DENIED));
                 tracing::info!(
                     allow_open,
                     tcc = ?tcc,
                     already_in_list,
                     "request_permission(screenCapture) branch"
                 );
-                if allow_open {
-                    if !already_in_list {
-                        register_screen_capture_subject_silent();
-                        std::thread::sleep(std::time::Duration::from_millis(350));
-                    }
+                if allow_open && already_in_list {
                     let opened = open_permission_settings(perm_type);
                     RequestPermissionResult {
                         ok: check_screen_capture_access(),
-                        requested: !already_in_list,
+                        requested: false,
                         opened,
                         action: if opened { "settings" } else { "noop" },
                     }
                 } else {
-                    // 仅登记：CGRequest 可能弹窗；不 open
+                    // 首次/Unknown 或 open_settings=false：只 CGRequest（写列表，可能弹窗）
                     let requested = unsafe { CGRequestScreenCaptureAccess() };
                     RequestPermissionResult {
                         ok: check_screen_capture_access(),
@@ -760,7 +723,8 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "inputMonitoring" => {
-                // 对齐辅助功能：静默登记 + 只 open；禁止 IOHID/CG Request 弹框。
+                // 对齐辅助功能：Denied → 只 open；否则必须真正登记（非 silent-only EventTap，
+                // 否则系统设置列表无 app）。禁止登记 API 与 open 同次。
                 if check_input_monitoring_access() {
                     return RequestPermissionResult {
                         ok: true,
@@ -770,35 +734,25 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     };
                 }
                 let tcc = tcc_listen_event_preflight();
-                let already_in_list = matches!(
-                    tcc,
-                    Some(TCC_PREFLIGHT_DENIED) | Some(TCC_PREFLIGHT_GRANTED)
-                );
+                let already_in_list = matches!(tcc, Some(TCC_PREFLIGHT_DENIED));
                 tracing::info!(
                     allow_open,
                     tcc = ?tcc,
                     already_in_list,
                     "request_permission(inputMonitoring) branch"
                 );
-                if allow_open {
-                    let requested = if already_in_list {
-                        false
-                    } else {
-                        register_input_monitoring_subject(/* silent */ true)
-                    };
-                    if !already_in_list {
-                        std::thread::sleep(std::time::Duration::from_millis(350));
-                    }
+                if allow_open && already_in_list {
                     let opened = open_permission_settings(perm_type);
                     RequestPermissionResult {
                         ok: check_input_monitoring_access(),
-                        requested,
+                        requested: false,
                         opened,
                         action: if opened { "settings" } else { "noop" },
                     }
                 } else {
-                    // open_settings=false：可弹框登记
-                    let requested = register_input_monitoring_subject(/* silent */ false);
+                    // 首次/Unknown：完整登记（IOHID/CG 可能弹框 + EventTap）；绝不 open
+                    let requested =
+                        register_input_monitoring_subject(/* silent */ false);
                     RequestPermissionResult {
                         ok: check_input_monitoring_access(),
                         requested,
@@ -1045,27 +999,33 @@ mod tests {
     #[test]
     fn request_input_monitoring_defaults_to_settings_action_when_open() {
         let r = request_permission("inputMonitoring", Some(true));
-        assert!(
-            r.action == "settings" || r.action == "noop",
-            "allow_open 不得走 prompt 弹框路径: {:?}",
-            r
-        );
+        // 未在列表时可为 prompt（登记）；已在列表为 settings；已授权 noop。禁止 prompt+open。
+        if r.action == "prompt" {
+            assert!(!r.opened, "prompt 不得 open: {:?}", r);
+        } else {
+            assert!(
+                r.action == "settings" || r.action == "noop",
+                "unexpected action {:?}",
+                r
+            );
+        }
     }
 
-    /// Business Logic: Welcome 录屏去设置对齐辅助功能——只 open 设置，绝不 CGRequest prompt。
-    /// Code Logic: allow_open → action ∈ {settings|noop}，不得 prompt。
+    /// Business Logic: 录屏禁止同次 prompt+open（对齐辅助功能）。
+    /// Code Logic: action=prompt ⇒ opened=false；action=settings|noop 合法。
     #[test]
     #[cfg(target_os = "macos")]
-    fn request_screen_capture_allow_open_is_settings_never_prompt() {
+    fn request_screen_capture_allow_open_never_dual_opens() {
         let r = request_permission("screenCapture", Some(true));
-        assert!(
-            r.action == "settings" || r.action == "noop",
-            "allow_open 录屏不得 prompt: {:?}",
-            r
-        );
-        // 即使 silent 登记 requested=true，也不得 opened 同时为 true 与 prompt 语义混用；
-        // 此处约束 action 不得为 prompt（opened 由环境决定）。
-        assert_ne!(r.action, "prompt");
+        if r.action == "prompt" {
+            assert!(!r.opened, "prompt 不得同时 open settings: {:?}", r);
+        } else {
+            assert!(
+                r.action == "settings" || r.action == "noop",
+                "unexpected action {:?}",
+                r
+            );
+        }
     }
 
     /// Business Logic: open_settings=false 时录屏可登记 prompt，但不得 open。
@@ -1100,13 +1060,21 @@ mod tests {
         }
     }
 
-    /// Business Logic: Welcome 去设置对输入监控必须静默登记（无 IOHID/CG 弹框 API）。
-    /// Code Logic: allow_open 路径 action=settings；不强制 opened（open URL 依赖环境）。
+    /// Business Logic: 输入监控 allow_open 禁止同次 prompt+open。
+    /// Code Logic: prompt ⇒ !opened；settings|noop 合法。
     #[test]
     #[cfg(target_os = "macos")]
-    fn request_input_monitoring_allow_open_is_settings_action() {
+    fn request_input_monitoring_allow_open_never_dual_opens() {
         let r = request_permission("inputMonitoring", Some(true));
-        assert_eq!(r.action, "settings");
+        if r.action == "prompt" {
+            assert!(!r.opened, "prompt 不得同时 open: {:?}", r);
+        } else {
+            assert!(
+                r.action == "settings" || r.action == "noop",
+                "unexpected action {:?}",
+                r
+            );
+        }
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -127,8 +127,7 @@ export const configApi = {
   /**
    * 触发权限请求（M7 实现）。
    * @param openSettings 是否允许打开系统设置面板；缺省 true（Welcome「去设置」默认）。
-   *   screenCapture：已在列表 → 只开设置；未在列表 → 只 CGRequest 登记（禁止同次双开）；
-   *   inputMonitoring + true → 静默 EventTap 登记 + 开设置。
+   *   对齐辅助功能：已在列表(TCC Denied) → 只开设置；未在列表 → 只登记 API（可能系统框，禁止同次 open）。
    */
   requestPermission: (type: PermissionType, openSettings?: boolean) =>
     invoke<PermissionRequestResult>('request_permission', { type, openSettings }),
