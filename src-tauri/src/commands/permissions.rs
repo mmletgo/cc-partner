@@ -6,8 +6,8 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     - `check_permissions`：spawn_blocking（通知查询带 semaphore）。
-//!     - `request_permission`：**主线程**执行（macOS 系统授权弹窗/TCC 登记 API
-//!       在后台线程常无弹窗、不写列表）。**禁止**因输入监控自动 cold relaunch。
+//!     - `request_permission`：**主线程**执行公开 Request API。
+//!     - `open_permission_settings`：独立打开系统设置，不夹带 Request。
 //!     - `get_app_identity`：返回 Bundle ID + flavor（dev/release）。
 //!     - `relaunch_for_permissions`：仅 Welcome 用户点「重新打开应用」后生效。
 
@@ -36,21 +36,19 @@ pub fn get_app_identity() -> Result<permissions::AppIdentity, AppError> {
     Ok(permissions::app_identity())
 }
 
-/// 请求指定类型权限（触发系统弹框 / 打开设置面板）。
+/// 请求指定类型权限（仅触发公开 Request API）。
 ///
-/// Business Logic: 用户在 Welcome/设置页点「去设置」时调用；**不得**在进入 Welcome 时自动调用。
+/// Business Logic: 用户在 Welcome/设置页点“请求授权”时调用；进入页面或回前台只查询。
 /// Code Logic: type ∈ screenCapture|inputMonitoring|accessibility|notification；
-///     open_settings 缺省 true；**必须主线程**执行 request_permission（CG/IOHID/AX 弹窗）。
-///     **禁止**根据 `needs_relaunch` 自动重启应用。
+///     必须主线程执行 CG/IOHID/AX Request，且绝不打开设置或自动重启。
 #[tauri::command]
 pub async fn request_permission(
     app: AppHandle,
     r#type: String,
-    open_settings: Option<bool>,
-) -> Result<serde_json::Value, AppError> {
+) -> Result<permissions::PermissionActionResult, AppError> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
-        let r = permissions::request_permission(&r#type, open_settings);
+        let r = permissions::request_permission(&r#type);
         let _ = tx.send(r);
     })
     .map_err(|e| AppError::generic(format!("request_permission schedule main: {e}")))?;
@@ -59,14 +57,18 @@ pub async fn request_permission(
         .await
         .map_err(|_| AppError::generic("request_permission main-thread result dropped"))?;
 
-    Ok(serde_json::json!({
-        "ok": r.ok,
-        "requested": r.requested,
-        "opened": r.opened,
-        "action": r.action,
-        // 输入监控 Denied 同进程无法弹中转窗时为 true；禁止自动 relaunch，仅 Welcome 手动「重新打开应用」
-        "needsRelaunch": r.needs_relaunch,
-    }))
+    Ok(r)
+}
+
+/// 打开指定权限的系统设置（不请求权限、不重启应用）。
+///
+/// Business Logic: Denied 状态只允许用户显式选择“打开系统设置”。
+/// Code Logic: 委托纯设置跳转入口，返回操作前后状态供前端刷新。
+#[tauri::command]
+pub fn open_permission_settings(
+    r#type: String,
+) -> Result<permissions::PermissionActionResult, AppError> {
+    Ok(permissions::open_permission_settings(&r#type))
 }
 
 /// 为应用 TCC 授权态而 relaunch（**仅** Welcome「重新打开应用」按钮）。

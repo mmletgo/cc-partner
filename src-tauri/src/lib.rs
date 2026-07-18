@@ -124,33 +124,6 @@ pub fn run() {
         )
         .try_init();
 
-    // Dev 诊断：打印输入监控 TCC/IOHID 后退出（不启动 GUI）。
-    if std::env::var_os("CC_PARTNER_IM_DIAG").is_some() {
-        #[cfg(target_os = "macos")]
-        {
-            permissions::debug_dump_input_monitoring_state("CC_PARTNER_IM_DIAG");
-        }
-        std::process::exit(0);
-    }
-    // Dev 诊断：主线程 Request 输入监控（测中转窗）后退出。
-    if std::env::var_os("CC_PARTNER_IM_REQUEST").is_some() {
-        #[cfg(target_os = "macos")]
-        {
-            permissions::debug_dump_input_monitoring_state("IM_REQUEST before");
-            let ok = permissions::debug_request_input_monitoring_once();
-            permissions::debug_dump_input_monitoring_state("IM_REQUEST after");
-            eprintln!("[IM_REQUEST] ok={ok}");
-        }
-        std::process::exit(0);
-    }
-
-    // 兼容旧 oneshot flag：不再作为主路径（第二实例不弹窗且会卡主线程）。
-    // 若带此 flag，exit 0 并忽略，避免误开第二 GUI。
-    if std::env::args().any(|a| a == permissions::INPUT_MONITORING_REGISTER_ARG) {
-        tracing::info!("ignore legacy --cp-register-input-monitoring; use GUI pending path");
-        std::process::exit(0);
-    }
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -273,12 +246,6 @@ pub fn run() {
                 });
             }
 
-            // 输入监控 pending Request 必须在 health daemon **之前**同步执行。
-            // 证据：run_on_main_thread 不阻塞时 health 的 DeviceState/采样会先碰 IOHID，
-            // 把状态钉成 Denied，随后 Request 立即 raw=0、永不弹中转窗。
-            // setup 在主线程：直接调用，禁止 fire-and-forget。
-            permissions::consume_pending_input_monitoring_request();
-
             // 启动健康监测 daemon（采样线程 + 处理 task），取消令牌存入 AppState 供应用退出时优雅停止。
             // start_health_daemon 内部用 tauri::async_runtime::spawn，同步段调用安全（无需当前线程 reactor）。
             {
@@ -393,6 +360,7 @@ pub fn run() {
             screenshot_cmd::cancel_region_capture,
             permissions_cmd::check_permissions,
             permissions_cmd::request_permission,
+            permissions_cmd::open_permission_settings,
             permissions_cmd::get_app_identity,
             permissions_cmd::relaunch_for_permissions,
             // M8 自动更新（5 命令，返回类型对齐前端 types.ts）

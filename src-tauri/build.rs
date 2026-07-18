@@ -22,13 +22,10 @@ fn main() {
     println!("cargo:rerun-if-changed=icons/tray-icon.png");
     println!("cargo:rerun-if-changed=native/macos/notification_auth.m");
     println!("cargo:rerun-if-changed=native/macos/notification_auth.h");
-    println!("cargo:rerun-if-changed=native/macos/input_monitoring_auth.m");
-    println!("cargo:rerun-if-changed=native/macos/input_monitoring_auth.h");
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=TARGET");
     ensure_debug_sidecar_launcher();
     compile_macos_notification_auth();
-    compile_macos_input_monitoring_auth();
     tauri_build::build()
 }
 
@@ -44,9 +41,10 @@ fn compile_macos_notification_auth() {
         return;
     }
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
-        panic!("编译 notification_auth 时缺少 CARGO_MANIFEST_DIR")
-    }));
+    let manifest_dir = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR")
+            .unwrap_or_else(|_| panic!("编译 notification_auth 时缺少 CARGO_MANIFEST_DIR")),
+    );
     let src = manifest_dir.join("native/macos/notification_auth.m");
     if !src.exists() {
         panic!("missing {}", src.display());
@@ -61,38 +59,6 @@ fn compile_macos_notification_auth() {
     println!("cargo:rustc-link-lib=framework=UserNotifications");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=ApplicationServices");
-}
-
-/// 编译 macOS 输入监控 Request ObjC 桥接。
-///
-/// Business Logic（为什么需要这个函数）:
-///   输入监控系统弹窗需 NSApplication + RunLoop；纯 Rust FFI 在 oneshot 子进程无 NSApp 时常不弹窗。
-///
-/// Code Logic（这个函数做什么）:
-///   仅 darwin 编译 `input_monitoring_auth.m`，链接 AppKit/CoreGraphics/IOKit。
-fn compile_macos_input_monitoring_auth() {
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        return;
-    }
-
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
-        panic!("编译 input_monitoring_auth 时缺少 CARGO_MANIFEST_DIR")
-    }));
-    let src = manifest_dir.join("native/macos/input_monitoring_auth.m");
-    if !src.exists() {
-        panic!("missing {}", src.display());
-    }
-
-    cc::Build::new()
-        .file(&src)
-        .include(manifest_dir.join("native/macos"))
-        .flag("-fobjc-arc")
-        .compile("cp_input_monitoring_auth");
-
-    println!("cargo:rustc-link-lib=framework=AppKit");
-    println!("cargo:rustc-link-lib=framework=CoreGraphics");
-    println!("cargo:rustc-link-lib=framework=IOKit");
-    println!("cargo:rustc-link-lib=framework=Foundation");
 }
 
 /// 生成 debug profile 使用的 sidecar launcher。
