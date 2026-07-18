@@ -54,6 +54,7 @@ pub async fn request_permission(
         "ok": r.ok,
         "requested": r.requested,
         "opened": r.opened,
+        "action": r.action,
     }))
 }
 

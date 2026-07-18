@@ -325,15 +325,19 @@ pub struct PermissionsStatus {
     pub notification: PermissionState,
 }
 
-/// 请求权限的结果（前端约定字段：ok / requested / opened）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 请求权限的结果（前端约定字段：ok / requested / opened / action）。
+///
+/// `action` 仅由后端产出并序列化给前端，不从 JSON 反序列化（`&'static str`）。
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestPermissionResult {
     pub ok: bool,
-    /// 是否真正触发了系统授权弹框（仅 macOS 屏幕录制「未决定」时为 true）。
+    /// 是否真正触发了系统授权弹框 / 登记 API（按权限类型语义不同）。
     pub requested: bool,
     /// 是否成功打开了系统设置面板。
     pub opened: bool,
+    /// settings = 打开系统设置页；prompt = 系统授权框；noop = 已授权无操作。
+    pub action: &'static str,
 }
 
 /// macOS「系统设置 → 隐私与安全」面板 URL scheme（多候选，兼容旧/新系统设置）。
@@ -649,42 +653,60 @@ pub fn check_permissions() -> PermissionsStatus {
     status
 }
 
-/// 请求权限（对照 Python `request_screen_capture_access` + `open_permission_settings`）。
+/// 请求权限（按类型分流：登记 / 系统弹框 / 打开设置）。
 ///
 /// Business Logic:
-///     - screenCapture：CGRequestScreenCaptureAccess + 可选打开设置；授权后常需完全退出重开。
-///     - inputMonitoring：登记 TCC 主体（IOHID + CGRequest + listen-only EventTap 尝试）后
-///       短暂等待再打开输入监控面板，确保列表出现本 app（Dev 显示名 cc-partner (Dev)）。
-///     - accessibility：仅用户点击时 WithOptions(prompt=true) 登记列表 + 打开设置；
-///       **禁止**在 check/挂载路径 prompt。
-///     - notification：UNUserNotificationCenter requestAuthorization；可选打开通知设置。
-///     - 非 macOS：返回 `{ok:true, requested:false, opened:false}`。
+///     - screenCapture：未授权时 `CGRequest…`；默认再 open Screen Recording 设置；
+///       action=`settings`（若 opened）否则若 requested 则 `prompt`。
+///     - accessibility：用户点击时 AX prompt 登记 + 默认 open Accessibility 设置 → `settings`。
+///     - inputMonitoring：静默登记（IOHID/CG/tap）+ 默认 **只** open Input Monitoring 设置
+///       （不依赖第二套弹框，不在本函数内 relaunch）→ `settings`。
+///     - notification：authorized → `noop`；notDetermined → `requestAuthorization`（`prompt`，
+///       不无脑 open）；denied → 仅 open 通知设置（`settings`）。禁止始终 request+open。
+///     - 非 macOS / 未知类型：`{ok:true, requested:false, opened:false, action:"noop"}`。
+///
+/// Code Logic:
+///     `open_settings` 保留兼容：`None`/`Some(true)` 允许 open；`Some(false)` 只登记/请求不 open。
+///     返回 `action ∈ {settings|prompt|noop}` 供前端 Welcome sticky 文案分支。
 pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
-    let open_settings = open_settings.unwrap_or(true);
+    // Some(false) 只登记/请求；None / Some(true) 允许打开设置
+    let allow_open = open_settings.unwrap_or(true);
     #[cfg(target_os = "macos")]
     {
         match perm_type {
             "screenCapture" => {
-                // requested=true 仅当系统弹了授权对话框（CGRequest 返回值不代表最终授权）
-                let requested = unsafe { CGRequestScreenCaptureAccess() };
-                let opened = if open_settings {
+                // 仅未授权时 request；CGRequest 返回值表示是否可能弹出系统框，不代表最终授权
+                let requested = if !check_screen_capture_access() {
+                    unsafe { CGRequestScreenCaptureAccess() }
+                } else {
+                    false
+                };
+                let opened = if allow_open {
                     open_permission_settings(perm_type)
                 } else {
                     false
+                };
+                let action = if opened {
+                    "settings"
+                } else if requested {
+                    "prompt"
+                } else {
+                    "noop"
                 };
                 RequestPermissionResult {
                     ok: check_screen_capture_access(),
                     requested,
                     opened,
+                    action,
                 }
             }
             "inputMonitoring" => {
-                // 先登记主体，再给 TCC 一点时间写入列表，最后打开设置页
+                // 静默登记主体；默认只 open 设置（不依赖第二套弹框，不在此 relaunch）
                 let requested = register_input_monitoring_subject();
-                if open_settings {
+                if allow_open {
                     std::thread::sleep(std::time::Duration::from_millis(350));
                 }
-                let opened = if open_settings {
+                let opened = if allow_open {
                     open_permission_settings(perm_type)
                 } else {
                     false
@@ -693,54 +715,83 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     ok: check_input_monitoring_access(),
                     requested,
                     opened,
+                    // 输入监控产品路径始终是设置页（登记只为列表出现本 app）
+                    action: "settings",
                 }
             }
             "accessibility" => {
                 // 仅用户点击：prompt 登记列表；检测路径永不调用
                 let trusted = request_accessibility_prompt();
-                let opened = if open_settings {
+                let opened = if allow_open {
                     open_permission_settings(perm_type)
                 } else {
                     false
+                };
+                let action = if opened {
+                    "settings"
+                } else {
+                    // 未 open（或 open 失败）时，本次主动作是 AX prompt 登记
+                    "prompt"
                 };
                 RequestPermissionResult {
                     ok: trusted || check_accessibility_access(),
                     requested: true,
                     opened,
+                    action,
                 }
             }
             "notification" => {
-                let before = check_notification_access();
-                let ok = if before {
-                    true
-                } else {
-                    request_notification_access()
-                };
-                let opened = if open_settings {
-                    open_permission_settings(perm_type)
-                } else {
-                    false
-                };
-                RequestPermissionResult {
-                    ok,
-                    requested: !before,
-                    opened,
+                // UNAuthorizationStatus: 0 notDetermined, 1 denied, 2 authorized, 3 provisional, 4 ephemeral
+                let status = unsafe { notification_ffi::cp_notification_auth_status() };
+                match status {
+                    2 | 3 | 4 => RequestPermissionResult {
+                        ok: true,
+                        requested: false,
+                        opened: false,
+                        action: "noop",
+                    },
+                    0 => {
+                        // notDetermined：只弹系统授权框，不要无脑 open 设置
+                        let ok = request_notification_access();
+                        RequestPermissionResult {
+                            ok,
+                            requested: true,
+                            opened: false,
+                            action: "prompt",
+                        }
+                    }
+                    // denied 或未知：只走设置页（不 requestAuthorization）
+                    _ => {
+                        let opened = if allow_open {
+                            open_permission_settings(perm_type)
+                        } else {
+                            false
+                        };
+                        RequestPermissionResult {
+                            ok: check_notification_access(),
+                            requested: false,
+                            opened,
+                            action: "settings",
+                        }
+                    }
                 }
             }
             _ => RequestPermissionResult {
                 ok: true,
                 requested: false,
                 opened: false,
+                action: "noop",
             },
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (perm_type, open_settings);
+        let _ = (perm_type, allow_open);
         RequestPermissionResult {
             ok: true,
             requested: false,
             opened: false,
+            action: "noop",
         }
     }
 }
@@ -861,13 +912,54 @@ mod tests {
     ///
     /// Code Logic（这个测试做什么）:
     ///     调用 request_permission("inputMonitoring", Some(false)) 不强制 open 设置；
-    ///     返回体含 ok/requested/opened 字段且类型稳定（不断言本机 TCC 终态）。
+    ///     返回体含 ok/requested/opened/action 字段且类型稳定（不断言本机 TCC 终态）。
     #[test]
     fn request_input_monitoring_shape_is_stable() {
         let r = request_permission("inputMonitoring", Some(false));
         // opened 在 open_settings=false 时必须为 false
         assert!(!r.opened);
+        assert_eq!(r.action, "settings");
         let _ = (r.ok, r.requested);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     通知 notDetermined 必须走 prompt，不得无脑 open 设置；open_settings=false 时 opened 恒 false。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用 request_permission("notification", Some(false))；断言 !opened，
+    ///     action ∈ {prompt|noop|settings}（本机 TCC 终态放宽）。
+    #[test]
+    fn request_notification_when_undetermined_prefers_prompt_shape() {
+        let r = request_permission("notification", Some(false));
+        // open_settings=false：不得 opened
+        assert!(!r.opened);
+        assert!(r.action == "prompt" || r.action == "noop" || r.action == "settings");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     输入监控默认产品路径是 settings（登记 + 开设置），不得标成 prompt。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     open_settings=false 时验证 !opened 且 action 字段存在为 settings（不强制本机 TCC）。
+    #[test]
+    fn request_input_monitoring_defaults_to_settings_action_when_open() {
+        let r = request_permission("inputMonitoring", Some(false));
+        assert!(!r.opened);
+        assert_eq!(r.action, "settings");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     未知类型 / 非 macOS 路径必须稳定返回 noop，避免前端 sticky 误判。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用未知 perm type，断言 action=noop 且 opened/requested 为 false。
+    #[test]
+    fn request_unknown_permission_is_noop() {
+        let r = request_permission("notARealPermission", Some(true));
+        assert!(!r.opened);
+        assert!(!r.requested);
+        assert_eq!(r.action, "noop");
+        assert!(r.ok);
     }
 
     /// Business Logic（为什么需要这个测试）:

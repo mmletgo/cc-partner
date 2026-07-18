@@ -371,10 +371,12 @@ export type PermissionType = 'screenCapture' | 'inputMonitoring' | 'accessibilit
 
 export interface PermissionRequestResult {
   ok: boolean;
-  /** 是否触发了系统授权弹窗（仅 screenCapture 且首次可能为 true） */
+  /** 是否触发了系统授权弹窗 / 登记 API（按权限类型语义不同） */
   requested: boolean;
   /** 是否成功打开了系统设置面板 */
   opened: boolean;
+  /** settings=打开系统设置；prompt=系统授权框；noop=已授权无操作（后端可选字段） */
+  action?: 'settings' | 'prompt' | 'noop';
   error?: string;
 }
 
