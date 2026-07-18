@@ -540,22 +540,29 @@ pub fn check_input_monitoring_access() -> bool {
         Some(_) => {}
     }
 
+    // 失败路径统一采样 iohid/tcc/cg，便于对照系统设置（Denied 时常需完全退出重开）。
     let iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+    let tcc = tcc_listen_event_preflight();
+    let cg = unsafe { CGPreflightListenEventAccess() };
+
     if iohid != K_IOHID_ACCESS_TYPE_GRANTED {
-        tracing::info!(
+        // debug：Welcome 2s 轮询会刷屏；诊断时 RUST_LOG=app_lib::permissions=debug
+        tracing::debug!(
             bundle_id = bundle_label,
             iohid,
-            "input_monitoring check: IOHID not Granted (0=Granted,1=Denied,2=Unknown)"
+            tcc = ?tcc,
+            cg,
+            "input_monitoring check: IOHID not Granted (0=Granted,1=Denied,2=Unknown); if System Settings toggle is on for this bundle, fully quit and reopen the app"
         );
         return false;
     }
 
-    let tcc = tcc_listen_event_preflight();
     if tcc_listen_event_hard_denied(tcc) {
-        tracing::info!(
+        tracing::debug!(
             bundle_id = bundle_label,
             iohid,
             tcc = ?tcc,
+            cg,
             "input_monitoring check: TCC preflight Denied"
         );
         return false;
@@ -567,14 +574,14 @@ pub fn check_input_monitoring_access() -> bool {
                 bundle_id = bundle_label,
                 iohid,
                 tcc = code,
+                cg,
                 "input_monitoring check: TCC preflight soft (not Denied); continue"
             );
         }
     }
 
-    let cg = unsafe { CGPreflightListenEventAccess() };
     if !cg {
-        tracing::info!(
+        tracing::debug!(
             bundle_id = bundle_label,
             iohid,
             tcc = ?tcc,
@@ -610,9 +617,10 @@ pub fn check_accessibility_access() -> bool {
 /// Business Logic: 前端 usePermissions hook 初始化与轮询时调用。
 ///
 /// Code Logic: 同步查询四项；通知走 UNUserNotificationCenter（调用方宜 spawn_blocking，
-///     避免主线程与 completion 死锁）。
+///     避免主线程与 completion 死锁）。debug 打一条四字段摘要（含 bundle id），
+///     便于对照 Welcome「系统已开仍未授权」是否为需重启的 TCC 进程态。
 pub fn check_permissions() -> PermissionsStatus {
-    PermissionsStatus {
+    let status = PermissionsStatus {
         screen_capture: PermissionState {
             granted: check_screen_capture_access(),
         },
@@ -625,7 +633,20 @@ pub fn check_permissions() -> PermissionsStatus {
         notification: PermissionState {
             granted: check_notification_access(),
         },
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = main_bundle_identifier();
+        tracing::debug!(
+            bundle_id = bundle.as_deref().unwrap_or("<none>"),
+            screen = status.screen_capture.granted,
+            accessibility = status.accessibility.granted,
+            input_monitoring = status.input_monitoring.granted,
+            notification = status.notification.granted,
+            "check_permissions summary"
+        );
     }
+    status
 }
 
 /// 请求权限（对照 Python `request_screen_capture_access` + `open_permission_settings`）。

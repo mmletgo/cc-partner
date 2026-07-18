@@ -8,8 +8,9 @@
  *
  * Code Logic（这个模块做什么）:
  *   `mapPermissions(status, t)` 接收 welcome ns 的翻译函数，返回 PermissionEntry[]，
- *   顺序固定为屏幕录制 → 辅助功能 → 输入监控 → 通知。通知权限由前端 JS API 检测
- *   （lib/notification.ts），非 TCC；仅 macOS 引导，非 macOS 视为已授权。
+ *   顺序固定为屏幕录制 → 辅助功能 → 输入监控 → 通知。四项均来自后端
+ *   `check_permissions`（通知为 UNUserNotificationCenter，按 Bundle 身份独立）；
+ *   非 macOS 后端一律 granted=true。
  */
 
 import type { ReactElement } from 'react';

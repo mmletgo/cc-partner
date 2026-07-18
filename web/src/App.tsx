@@ -195,7 +195,7 @@ function canListenToTauriEvents(): boolean {
  *
  * Code Logic（这个组件做什么）:
  *   - resolve flavor（get_app_identity；失败当 release）→ flavor 专属 onboarded/skipped key
- *   - 查 TCC + 通知：全部授权 → 写 onboarded、清 skipped → pass
+ *   - 一次 check_permissions：四项（含 notification）全部 granted → 写 onboarded、清 skipped → pass
  *   - 未齐但 skipped=1 → pass（用户明确跳过）
  *   - 否则 → redirect /welcome（含仅有旧 onboarded、未真正授权的情况）
  *   - 权限查询失败 → pass（不永久卡死）
@@ -222,16 +222,15 @@ function OnboardingGuard() {
       const skippedKey = permissionSkippedKey(flavor);
 
       try {
-        const [s, notifyGranted] = await Promise.all([
-          configApi.permissions(),
-          checkNotificationGranted(),
-        ]);
+        // 四项一律以 Rust check_permissions 为权威（含 notification）；
+        // 禁止再并行 checkNotificationGranted 二次拉取，避免双路径判定漂移。
+        const s = await configApi.permissions();
         if (cancelled) return;
         const all =
           s.screenCapture.granted &&
           s.accessibility.granted &&
           s.inputMonitoring.granted &&
-          notifyGranted;
+          s.notification.granted;
         if (all) {
           localStorage.setItem(onboardedKey, '1');
           localStorage.removeItem(skippedKey);

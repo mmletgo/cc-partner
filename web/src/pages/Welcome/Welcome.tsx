@@ -7,10 +7,14 @@
  *   独立于 AppShell，给首次使用的用户「先授权再用」的引导。开发壳与发布版
  *   使用不同的 onboarding/skip localStorage key。
  *   首轮检查失败必须显示错误与重试，不得永久「检查中」。
+ *   屏幕录制/辅助功能/输入监控在系统设置打开开关后，**当前进程**常仍报告未授权，
+ *   必须完全退出并重新打开后才生效；应用内需醒目提示并标明正确的系统设置条目名
+ *   （Dev=`cc-partner (Dev)` / Release=`cc-partner`），避免用户开错开关或只点「重新检查」。
  *
  * Code Logic（这个页面做什么）:
- *   - 解析 app flavor（get_app_identity）→ 专属 onboarded/skipped key
+ *   - 解析 app flavor（get_app_identity）→ 专属 onboarded/skipped key + 展示用 appLabel
  *   - 权限卡 mapPermissions；usePermissions({ stopWhenGranted: true })
+ *   - 点 TCC「去设置」后置 showRestartHint；四项齐后自动清 hint
  *   - 「继续使用」：写 onboarded、清 skipped → /
  *   - 「暂时跳过」：写 skipped（不写 onboarded）→ /
  *   - 所有 hooks 在 early return 之前
@@ -19,7 +23,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Button } from '@/components/primitives';
+import { Button, StatusMessage } from '@/components/primitives';
 import { PermissionCard } from '@/components/domain';
 import { configApi } from '@/api/config';
 import {
@@ -35,12 +39,41 @@ import appIconUrl from '@/assets/app-icon.png';
 import styles from './Welcome.module.css';
 
 /**
+ * Business Logic（为什么需要这个常量）:
+ *   屏幕录制 / 辅助功能 / 输入监控在 macOS TCC 下授权后，当前进程的
+ *   CGPreflight / AXIsProcessTrusted / IOHIDCheckAccess 常仍返回未授权，
+ *   必须完全退出再启动；通知权限通常即时生效，不列入。
+ *
+ * Code Logic（这个常量做什么）:
+ *   点「去设置」时若 type 在此集合内，展示 restartAfterGrantHint。
+ */
+const RESTART_AFTER_GRANT: ReadonlySet<PermissionType> = new Set([
+  'screenCapture',
+  'accessibility',
+  'inputMonitoring',
+]);
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   系统设置列表按应用显示名分条；开发壳与发布版必须对应不同条目，
+ *   用户开错（如给 Release 开了却跑 Dev）会表现为「已开仍未授权」。
+ *
+ * Code Logic（这个函数做什么）:
+ *   flavor=dev → `cc-partner (Dev)`；否则 `cc-partner`。
+ */
+function appLabelForFlavor(flavor: AppFlavor): string {
+  return flavor === 'dev' ? 'cc-partner (Dev)' : 'cc-partner';
+}
+
+/**
  * Welcome 页面根组件
  */
 export function Welcome() {
   const { t } = useTranslation(['welcome', 'common']);
   const navigate = useNavigate();
   const [flavor, setFlavor] = useState<AppFlavor>('release');
+  /** 用户点过需重启才生效的「去设置」后展示醒目提示（四项齐后清） */
+  const [showRestartHint, setShowRestartHint] = useState(false);
   const {
     status,
     loading,
@@ -71,15 +104,26 @@ export function Welcome() {
     };
   }, []);
 
+  // 四项均已授权后清除重启提示，避免成功态残留警告
+  useEffect(() => {
+    if (allRequiredGranted) {
+      setShowRestartHint(false);
+    }
+  }, [allRequiredGranted]);
+
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点单项「去设置」只应请求该权限（系统级「退出并重新打开」由 macOS 系统设置负责）。
+   *   用户点单项「去设置」只应请求该权限；TCC 三项授权后当前进程常仍报未授权，
+   *   须完全退出重开——应用内必须提示，不能仅依赖系统设置文案。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 request(type)，吞掉 rejection（error 已由 hook 投影）。
+   *   对 RESTART_AFTER_GRANT 类型置 showRestartHint；调用 request(type)，吞掉 rejection。
    */
   const handleRequest = useCallback(
     (type: PermissionType) => {
+      if (RESTART_AFTER_GRANT.has(type)) {
+        setShowRestartHint(true);
+      }
       void request(type).catch(() => undefined);
     },
     [request],
@@ -169,6 +213,7 @@ export function Welcome() {
   }
 
   const entries = mapPermissions(status, t);
+  const appLabel = appLabelForFlavor(flavor);
 
   return (
     <div className={styles.backdrop}>
@@ -182,6 +227,12 @@ export function Welcome() {
           <p className={styles.subtitle} role="alert">
             {t('welcome:checkFailed', { error })}
           </p>
+        ) : null}
+
+        {showRestartHint && !allRequiredGranted ? (
+          <StatusMessage tone="warn">
+            {t('welcome:restartAfterGrantHint', { appLabel })}
+          </StatusMessage>
         ) : null}
 
         <div className={styles.permissionList} aria-label={t('welcome:permissionListAriaLabel')}>
@@ -200,7 +251,9 @@ export function Welcome() {
 
         <footer className={styles.footer}>
           <span className={styles.hint}>
-            {allRequiredGranted ? t('welcome:permissionReady') : t('welcome:waitingPermission')}
+            {allRequiredGranted
+              ? t('welcome:permissionReady')
+              : t('welcome:waitingPermission', { appLabel })}
           </span>
           <div className={styles.actions}>
             <Button
