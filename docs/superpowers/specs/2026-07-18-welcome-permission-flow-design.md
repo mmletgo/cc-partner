@@ -60,7 +60,7 @@
 | --- | --- | --- | --- |
 | 屏幕录制 | 未决定时可 `CGRequestScreenCaptureAccess`（系统可能出框） | 打开「隐私 → 屏幕录制」 | 不 relaunch |
 | 辅助功能 | `AXIsProcessTrustedWithOptions(prompt)` 登记列表 | 打开「隐私 → 辅助功能」 | check 路径不 prompt |
-| 输入监控 | **静默登记**（IOHID / CG / listen-only tap），保证列表有本 app | 打开「隐私 → 输入监控」 | 登记后不 relaunch |
+| 输入监控 | **系统中转弹窗**登记：Unknown 同进程 Request；Denied 时 reset + pending + needsRelaunch，用户「重新打开应用」后新进程再 Request 弹中转窗 | 仅列表已有未开开关时 open 拨开关；禁止未登记 open 空列表 | 禁止自动 relaunch；禁止只删 pending 不 Request |
 | 通知 | — | **未决定** → `requestAuthorization`；**已拒绝** → 打开通知设置；**已授权** → no-op + recheck | 默认不「请求 + 开设置」双开 |
 
 用户确认：四项在「列表需要本 app」时都要做登记；主路径以打开设置为准（通知未决定除外）。
@@ -202,7 +202,7 @@ needs_reopen
 | --- | --- |
 | 交互策略 | C + 方案 1 |
 | 去设置双开 | 否；按权限分流 |
-| 登记 | 四项在需要时都登记；输入监控静默登记 + 开设置 |
+| 登记 | 四项在需要时都登记；输入监控靠系统中转弹窗（Denied 时 pending + 手动重新打开） |
 | 自动 relaunch | 禁止 |
 | 可选 relaunch | 仅 needs_reopen + 用户点击 |
 | 说教文案 | 禁止 |

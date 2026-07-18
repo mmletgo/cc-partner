@@ -377,7 +377,10 @@ export interface PermissionRequestResult {
   opened: boolean;
   /** settings=打开系统设置；prompt=系统授权框；noop=已授权无操作 */
   action?: 'settings' | 'prompt' | 'noop';
-  /** 后端恒 false；自动 cold relaunch 已禁止 */
+  /**
+   * 输入监控 Denied 同进程无法弹系统中转窗时为 true。
+   * **禁止**自动 relaunch；Welcome 立刻展示「重新打开应用」，新进程再 Request。
+   */
   needsRelaunch?: boolean;
   error?: string;
 }

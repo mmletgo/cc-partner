@@ -17,7 +17,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { configApi } from '@/api/config';
-import type { PermissionType, PermissionsStatus } from '@/lib/types';
+import type {
+  PermissionRequestResult,
+  PermissionType,
+  PermissionsStatus,
+} from '@/lib/types';
 import { useVisibilityPolling } from './useVisibilityPolling';
 
 /** 发布版 localStorage key：标记权限引导已完成（全部 required 已授权）。 */
@@ -101,8 +105,12 @@ export interface UsePermissionsResult {
    * 请求单项权限；同 type 并发调用复用同一 Promise。
    * @param type 权限类型
    * @param openSettings 是否打开系统设置面板（仅 TCC 路径透传）
+   * @returns 后端结果（含 needsRelaunch：输入监控 Denied 同进程无法弹中转窗时 true）
    */
-  request: (type: PermissionType, openSettings?: boolean) => Promise<void>;
+  request: (
+    type: PermissionType,
+    openSettings?: boolean,
+  ) => Promise<PermissionRequestResult>;
   /**
    * 顺序请求所有未授权权限（侧栏徽标批量入口仍需要）。
    * 单项失败不中断后续项。
@@ -129,7 +137,9 @@ export function usePermissions(
   const [requesting, setRequesting] = useState<ReadonlySet<PermissionType>>(() => new Set());
 
   const statusRef = useRef<PermissionsStatus | null>(null);
-  const requestingPromisesRef = useRef<Map<PermissionType, Promise<void>>>(new Map());
+  const requestingPromisesRef = useRef<
+    Map<PermissionType, Promise<PermissionRequestResult>>
+  >(new Map());
   const mountedRef = useRef(true);
 
   // 在 effect 中同步 ref，避免 render 期间写 ref（react-hooks/refs 规则）
@@ -200,13 +210,18 @@ export function usePermissions(
    * Business Logic（为什么需要这个函数）:
    *   用户对单项权限点「去设置」时，只应触发该项授权，且重复点击不得并行弹多次。
    *   进入 Welcome **不得**自动调用（辅助功能等禁止自动弹系统框）。
+   *   输入监控 Denied 时后端 needsRelaunch=true，Welcome 立刻展示「重新打开应用」
+   *   以在新进程弹系统中转窗登记列表。
    *
    * Code Logic（这个函数做什么）:
    *   同 type 返回 in-flight Promise；四项均走 requestPermission（含 notification）；
-   *   结束后 runNow 刷新；请求失败写 error 并 rethrow。
+   *   结束后 runNow 刷新；请求失败写 error 并 rethrow；成功返回 PermissionRequestResult。
    */
   const request = useCallback(
-    (type: PermissionType, openSettings?: boolean): Promise<void> => {
+    (
+      type: PermissionType,
+      openSettings?: boolean,
+    ): Promise<PermissionRequestResult> => {
       // 注意：外层不可标 async，否则 return existing 会被再包一层 Promise，破坏去重。
       const existing = requestingPromisesRef.current.get(type);
       if (existing) {
@@ -220,8 +235,9 @@ export function usePermissions(
           return next;
         });
         try {
-          await configApi.requestPermission(type, openSettings);
+          const result = await configApi.requestPermission(type, openSettings);
           await runNow({ force: true });
+          return result;
         } catch (err) {
           if (mountedRef.current) {
             setError(toErrorMessage(err));

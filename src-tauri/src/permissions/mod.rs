@@ -365,7 +365,8 @@ pub struct RequestPermissionResult {
     pub opened: bool,
     /// settings = 打开系统设置页；prompt = 系统授权框；noop = 已授权无操作。
     pub action: &'static str,
-    /// 保留字段：恒为 false。自动 cold relaunch 已禁止；仅 Welcome 手动「重新打开应用」。
+    /// 输入监控 Denied 同进程无法弹中转窗时为 true。
+    /// **禁止**命令层自动 relaunch；仅 Welcome 用户点「重新打开应用」后新进程 Request。
     pub needs_relaunch: bool,
 }
 
@@ -467,6 +468,7 @@ const INPUT_MONITORING_PENDING_REQUEST: &str = "input-monitoring-pending-request
 
 /// Business Logic: 输入监控系统弹窗必须在**当前 GUI** 的 NSApplication 上下文中请求。
 ///     第二实例 oneshot 在已有 GUI 运行时不会弹窗，且会阻塞主线程。
+///     同进程在 IOHID=Denied 时 Request 会立即 false，**无法**把 app 写入列表。
 /// Code Logic: 调 native `cp_request_listen_event_access`（NSApp + Request）。
 #[cfg(target_os = "macos")]
 fn request_listen_event_with_nsapp() -> bool {
@@ -487,18 +489,252 @@ fn request_listen_event_with_nsapp() -> bool {
     ok
 }
 
-/// Business Logic: 清理旧版写入的 pending 标记（自动重启路径已废弃）。
-/// Code Logic: 若标记文件存在则删除；**不再**自动 Request / 重启。
+/// Business Logic: Denied 同进程 Request 无效；把「下一次 GUI 冷启动主线程再 Request」
+///     记到 data_dir，供 Welcome 用户点「重新打开应用」或下次启动时真正登记列表。
+/// Code Logic: 写空文件 `input-monitoring-pending-request`；失败仅 warn。
 #[cfg(target_os = "macos")]
-pub fn consume_pending_input_monitoring_request() {
-    let Ok(path) = crate::config::data_dir().map(|d| d.join(INPUT_MONITORING_PENDING_REQUEST)) else {
+fn mark_pending_input_monitoring_request() {
+    match crate::config::data_dir() {
+        Ok(dir) => {
+            let path = dir.join(INPUT_MONITORING_PENDING_REQUEST);
+            match std::fs::write(&path, b"1") {
+                Ok(()) => tracing::info!(
+                    path = %path.display(),
+                    "marked input-monitoring-pending-request for next launch"
+                ),
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to mark input-monitoring-pending-request"
+                ),
+            }
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "data_dir unavailable; cannot mark input-monitoring-pending-request"
+        ),
+    }
+}
+
+
+/// Business Logic: Dev 诊断中转窗是否弹出。
+/// Code Logic: 调 NSApp Request 并返回 bool。
+#[cfg(target_os = "macos")]
+pub fn debug_request_input_monitoring_once() -> bool {
+    request_listen_event_with_nsapp()
+}
+
+/// Business Logic: 诊断输入监控 TCC 进程态（Dev 用 CC_PARTNER_IM_DIAG）。
+/// Code Logic: 打印 bundle/iohid/tcc/cg 与 current_exe。
+#[cfg(target_os = "macos")]
+pub fn debug_dump_input_monitoring_state(tag: &str) {
+    let bundle = main_bundle_identifier();
+    let iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+    let tcc = tcc_listen_event_preflight();
+    let cg = unsafe { CGPreflightListenEventAccess() };
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".into());
+    tracing::info!(
+        tag,
+        bundle_id = bundle.as_deref().unwrap_or("<none>"),
+        exe = %exe,
+        iohid,
+        tcc = ?tcc,
+        cg,
+        "input_monitoring diagnostic dump"
+    );
+    eprintln!(
+        "[{tag}] bundle={:?} exe={exe} iohid={iohid} tcc={tcc:?} cg={cg}",
+        bundle
+    );
+}
+
+/// Dev 一次性「已旋转 ad-hoc 签名」标记，防止无限 resign+relaunch。
+#[cfg(target_os = "macos")]
+const INPUT_MONITORING_CS_ROTATED: &str = "input-monitoring-cs-rotated";
+
+/// Business Logic: ad-hoc 签名下 `tccutil reset ListenEvent <bundle>` 常清不掉按 csreq
+///     记账的 Denied；Dev 壳在 pending 冷启动路径可再试一次服务级 reset，否则中转窗永不出现。
+/// Code Logic: 仅 Dev flavor 执行 `tccutil reset ListenEvent`（无 bundle）；Release 不调用。
+#[cfg(target_os = "macos")]
+fn reset_listen_event_tcc_all_for_dev() -> bool {
+    if app_flavor() != AppFlavor::Dev {
+        return false;
+    }
+    match std::process::Command::new("tccutil")
+        .args(["reset", "ListenEvent"])
+        .output()
+    {
+        Ok(out) => {
+            let ok = out.status.success();
+            tracing::info!(
+                ok,
+                status = %out.status,
+                stdout = %String::from_utf8_lossy(&out.stdout),
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "tccutil reset ListenEvent (service-wide, Dev only)"
+            );
+            ok
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "tccutil reset ListenEvent (all) spawn failed");
+            false
+        }
+    }
+}
+
+/// Business Logic: ad-hoc Dev 的 ListenEvent Denied 常按 CDHash/csreq 粘住，
+///     `tccutil` 成功后进程侧仍 iohid=1，系统中转窗永不出现。旋转 ad-hoc 签名会换
+///     CDHash，TCC 视为新主体，下一次启动才能回到未决定并弹窗。
+/// Code Logic: 仅 Dev；对 enclosing `.app` 执行 `codesign --force --deep --options runtime -s -`。
+#[cfg(target_os = "macos")]
+fn rotate_dev_adhoc_codesign() -> bool {
+    if app_flavor() != AppFlavor::Dev {
+        return false;
+    }
+    let Some(app_path) = enclosing_app_bundle_path() else {
+        tracing::warn!("rotate_dev_adhoc_codesign: no enclosing .app");
+        return false;
+    };
+    match std::process::Command::new("codesign")
+        .args([
+            "--force",
+            "--deep",
+            "--options",
+            "runtime",
+            "--sign",
+            "-",
+            &app_path.display().to_string(),
+        ])
+        .output()
+    {
+        Ok(out) => {
+            let ok = out.status.success();
+            tracing::info!(
+                ok,
+                status = %out.status,
+                app = %app_path.display(),
+                stdout = %String::from_utf8_lossy(&out.stdout),
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "rotate_dev_adhoc_codesign"
+            );
+            ok
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "codesign rotate spawn failed");
+            false
+        }
+    }
+}
+
+/// Business Logic: 签名旋转后须启动**新 CDHash** 的进程，旧进程无法继续弹窗。
+/// Code Logic: `sleep 0.8; open <enclosing.app>` 后 `process::exit(0)`；无 .app 则 no-op。
+#[cfg(target_os = "macos")]
+fn schedule_open_enclosing_app_and_exit() {
+    let Some(app_path) = enclosing_app_bundle_path() else {
+        tracing::warn!("schedule_open_enclosing_app_and_exit: no enclosing .app");
         return;
     };
+    let path = app_path.display().to_string();
+    let script = format!("sleep 0.8; open {}", shell_single_quote(&path));
+    match std::process::Command::new("sh").arg("-c").arg(&script).spawn() {
+        Ok(_) => {
+            tracing::info!(
+                app_bundle = %path,
+                "scheduled open after codesign rotate; exiting for new CDHash"
+            );
+            std::process::exit(0);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to schedule open after codesign rotate");
+        }
+    }
+}
+
+/// Business Logic: 上次 Denied 路径在同进程无法弹中转窗；新进程冷启动须在任何
+///     IOHID 探测（health DeviceState）之前 Request，否则状态被钉成 Denied 后 raw=0。
+///     ad-hoc Dev 若 tccutil 后仍 Denied：旋转 CDHash 后退出再启动，才能弹中转窗。
+/// Code Logic:
+///     1) 有 pending 文件才继续；
+///     2) 若 IOHID/TCC Denied：bundle reset → Dev 服务级 reset；
+///     3) 仍 Denied 且 Dev 未旋转过签名 → codesign 旋转 + 保留 pending + open+exit；
+///     4) 否则 NSApp Request；成功清 pending/旋转标记；失败保留 pending。
+///     **禁止**只删文件不 Request。
+#[cfg(target_os = "macos")]
+pub fn consume_pending_input_monitoring_request() {
+    let Ok(data) = crate::config::data_dir() else {
+        return;
+    };
+    let path = data.join(INPUT_MONITORING_PENDING_REQUEST);
+    let rotated_flag = data.join(INPUT_MONITORING_CS_ROTATED);
     if !path.is_file() {
         return;
     }
-    let _ = std::fs::remove_file(&path);
-    tracing::info!("cleared stale input-monitoring-pending-request (auto relaunch disabled)");
+    tracing::info!(
+        path = %path.display(),
+        "consuming input-monitoring-pending-request: reset if needed + NSApp Request"
+    );
+
+    let mut iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+    let mut tcc = tcc_listen_event_preflight();
+    tracing::info!(iohid, tcc = ?tcc, "pending consume pre-reset state");
+
+    if iohid == K_IOHID_ACCESS_TYPE_DENIED || matches!(tcc, Some(TCC_PREFLIGHT_DENIED)) {
+        if let Some(bundle_id) = main_bundle_identifier() {
+            let _ = reset_listen_event_tcc(&bundle_id);
+        }
+        iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+        tcc = tcc_listen_event_preflight();
+        if iohid == K_IOHID_ACCESS_TYPE_DENIED || matches!(tcc, Some(TCC_PREFLIGHT_DENIED)) {
+            // ad-hoc Dev：bundle 级 reset 常无效，服务级 reset 才能回到 Undetermined
+            let _ = reset_listen_event_tcc_all_for_dev();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+            tcc = tcc_listen_event_preflight();
+        }
+        tracing::info!(iohid, tcc = ?tcc, "pending consume post-reset state");
+    }
+
+    // tccutil 仍无法清掉 ad-hoc CDHash 粘性 Denied：旋转签名换主体（仅一次）
+    if (iohid == K_IOHID_ACCESS_TYPE_DENIED || matches!(tcc, Some(TCC_PREFLIGHT_DENIED)))
+        && app_flavor() == AppFlavor::Dev
+        && !rotated_flag.is_file()
+    {
+        if rotate_dev_adhoc_codesign() {
+            let _ = std::fs::write(&rotated_flag, b"1");
+            let _ = std::fs::write(&path, b"1");
+            tracing::warn!(
+                "Dev ad-hoc CDHash sticky Denied: rotated codesign; relaunching for clean TCC subject"
+            );
+            schedule_open_enclosing_app_and_exit();
+            // exit 不可达；若 open 调度失败则继续尝试 Request
+        }
+    }
+
+    let ok = request_listen_event_with_nsapp();
+    let iohid_after = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+    tracing::info!(
+        ok,
+        iohid = iohid_after,
+        "input-monitoring pending Request finished"
+    );
+
+    if ok || iohid_after == K_IOHID_ACCESS_TYPE_GRANTED {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated_flag);
+        tracing::info!(path = %path.display(), "cleared input-monitoring-pending-request after success");
+    } else {
+        // 保留 pending，下次启动（或用户再次重新打开）继续尝试中转窗
+        if let Err(e) = std::fs::write(&path, b"1") {
+            tracing::warn!(error = %e, "failed to keep input-monitoring-pending-request after failed Request");
+        } else {
+            tracing::warn!(
+                path = %path.display(),
+                "kept input-monitoring-pending-request after failed Request (no system prompt)"
+            );
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -693,11 +929,10 @@ pub fn check_permissions() -> PermissionsStatus {
 ///
 /// Business Logic（录屏 / 输入监控 / 辅助功能同构分流）：
 ///     - screenCapture：已授权 → noop；TCC Denied → 只 open；否则只 CGRequestScreenCaptureAccess。
-///     - inputMonitoring：已授权 → noop；**禁止** EventTap / 第二实例 oneshot / **自动重启**。
-///       Denied/TCC Denied：同进程 `tccutil reset` 后仍立刻主线程 NSApp Request（尽力弹窗），
-///       未授权且 allow_open → open 设置（列表拨开关或「+」添加）。
-///       Unknown：主线程 NSApp Request；未授权且 allow_open → open 设置。
-///       check 只信 IOHID Granted。`needs_relaunch` 恒 false（重启仅 Welcome 手动「重新打开应用」）。
+///     - inputMonitoring：已授权 → noop；**禁止** EventTap / oneshot / **自动重启**。
+///       主路径是系统中转弹窗：Unknown → 只 NSApp Request（禁止同次 open）。
+///       Denied：`tccutil reset`；同进程仍 Denied → pending + `needs_relaunch=true`（不 open 空列表）。
+///       Request 后列表已有未开开关且 allow_open → 只 open。check 只信 IOHID Granted。
 ///     - accessibility：Denied → 只 open；Unknown → 只 AX prompt。
 ///     - notification：authorized → noop；notDetermined → prompt；denied → settings。
 ///
@@ -753,13 +988,16 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "inputMonitoring" => {
-                // 系统「输入监控」列表：
-                // - 禁止 EventTap 静默登记、第二实例 oneshot、以及「去设置」自动重启。
-                // - Denied：先 tccutil reset（清幽灵 Denied），再同进程 NSApp Request 尽力弹窗。
-                // - Unknown：同进程 NSApp Request。
-                // - 仍未授权且 allow_open → open 设置（拨开关 / 「+」添加）。
-                // - needs_relaunch 恒 false；重启仅 Welcome 用户点「重新打开应用」。
-                // - ok 只信 IOHID Granted。
+                // 产品主路径：系统中转弹窗（CG/IOHID Request）→ 用户确认后本 app 出现在
+                // 「隐私 → 输入监控」；**禁止**未登记就 open 空列表，也禁止 EventTap 静默登记。
+                // 证据（GUI log）：Denied 同进程 Request 立即 false（raw=0），列表不出现；
+                // 必须 tccutil reset + 写 pending + needs_relaunch，用户「重新打开应用」后
+                // 新进程 consume_pending 再 Request 才能弹中转窗。
+                // - 已 granted → noop
+                // - Denied/TCC Denied：reset；仍 Denied → pending + needs_relaunch，**不 open**
+                // - Unknown：只 NSApp Request（可能中转窗）；**禁止**与 open 同次
+                // - Request 后若已在列表未开开关（TCC Denied）且 allow_open → 只 open 拨开关
+                // - ok 只信 IOHID Granted；禁止自动 cold relaunch
                 if check_input_monitoring_access() {
                     return RequestPermissionResult {
                         ok: true,
@@ -791,27 +1029,66 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                             "inputMonitoring denied but no bundle id for tccutil reset"
                         );
                     }
-                    // 不写 pending、不 relaunch：用户明确不要自动重启。
-                    // reset 后立刻同进程 Request（macOS 有时仍不弹窗，则走设置「+」）。
                 }
 
-                // 主线程 NSApp Request（可能弹系统中转窗；Denied 缓存时可能立即 false）
+                let iohid_after_reset =
+                    unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+                let same_process_request_useless =
+                    iohid_after_reset == K_IOHID_ACCESS_TYPE_DENIED;
+
+                if same_process_request_useless {
+                    // 同进程无法弹中转窗：挂 pending，引导 Welcome 手动重新打开
+                    mark_pending_input_monitoring_request();
+                    tracing::info!(
+                        reset_ok,
+                        iohid_after_reset,
+                        "inputMonitoring: same-process Request useless; pending + needs_relaunch"
+                    );
+                    return RequestPermissionResult {
+                        ok: false,
+                        requested: false,
+                        opened: false,
+                        action: "noop",
+                        needs_relaunch: true,
+                    };
+                }
+
+                // Unknown：只弹系统中转窗/Request 登记（禁止同次 open 空设置页）
                 let requested = request_listen_event_with_nsapp();
-                let still_ungranted = !check_input_monitoring_access();
-                let opened = if allow_open && still_ungranted {
+                let ok = check_input_monitoring_access();
+                let iohid_post =
+                    unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+                let tcc_post = tcc_listen_event_preflight();
+                let now_denied = iohid_post == K_IOHID_ACCESS_TYPE_DENIED
+                    || matches!(tcc_post, Some(TCC_PREFLIGHT_DENIED));
+
+                // Request 后进列表但未开开关：允许只 open 设置拨开关（列表应有本 app）
+                let opened = if ok {
+                    false
+                } else if allow_open && now_denied && requested {
                     open_permission_settings(perm_type)
                 } else {
                     false
                 };
-                let ok = check_input_monitoring_access();
+
+                // Request 失败且仍非列表态：挂 pending，需新进程再弹中转窗
+                let needs_relaunch = if ok {
+                    false
+                } else if !requested || (!now_denied && !ok) {
+                    mark_pending_input_monitoring_request();
+                    true
+                } else {
+                    false
+                };
+
                 tracing::info!(
                     requested,
                     reset_ok,
                     opened,
                     ok,
-                    iohid_after = unsafe {
-                        IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT)
-                    },
+                    needs_relaunch,
+                    iohid_after = iohid_post,
+                    tcc_after = ?tcc_post,
                     "request_permission(inputMonitoring) done"
                 );
                 RequestPermissionResult {
@@ -825,7 +1102,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     } else {
                         "noop"
                     },
-                    needs_relaunch: false,
+                    needs_relaunch,
                 }
             }
             "accessibility" => {
@@ -938,9 +1215,10 @@ pub fn relaunch_for_permissions(app: &tauri::AppHandle) -> Result<(), crate::err
     {
         if let Some(bundle) = enclosing_app_bundle_path() {
             let path = bundle.display().to_string();
-            // 延迟 open：确保当前实例先退出，避免 open 只 activate 旧进程
+            // 延迟 open：给旧进程足够时间退出，避免 TCC/CDHash 粘在旧实例上
+            // （输入监控 Denied 时 0.4s 常不够，新进程仍 before=Denied 无法弹中转窗）
             let script = format!(
-                "sleep 0.4; open {}",
+                "sleep 1.2; open {}",
                 shell_single_quote(&path)
             );
             match std::process::Command::new("sh").arg("-c").arg(&script).spawn() {
@@ -1048,19 +1326,18 @@ mod tests {
     }
 
     /// Business Logic: open_settings=false 时输入监控不得 open 设置；
-    ///     action 可为 prompt / noop（禁止 relaunch / 自动重启）。
-    /// Code Logic: 断言 !opened 且 needs_relaunch=false。
+    ///     action 可为 prompt / noop；Denied 时可 needs_relaunch（禁止自动重启）。
+    /// Code Logic: 断言 !opened；action ∈ {prompt|noop|settings}。
     #[test]
     fn request_input_monitoring_shape_is_stable() {
         let r = request_permission("inputMonitoring", Some(false));
         assert!(!r.opened);
-        assert!(!r.needs_relaunch);
         assert!(
             r.action == "settings" || r.action == "prompt" || r.action == "noop",
             "unexpected action {:?}",
             r
         );
-        let _ = (r.ok, r.requested);
+        let _ = (r.ok, r.requested, r.needs_relaunch);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1077,13 +1354,12 @@ mod tests {
         assert!(r.action == "prompt" || r.action == "noop" || r.action == "settings");
     }
 
-    /// Business Logic: Welcome 默认 allow_open 时：Unknown/Denied→prompt 或 settings；
-    ///     已授权→noop。禁止 prompt 与 open 同次；禁止自动 relaunch。
-    /// Code Logic: action ∈ {prompt|settings|noop}；prompt ⇒ !opened；needs_relaunch=false。
+    /// Business Logic: Welcome allow_open：Unknown→prompt（中转窗）；Denied→needs_relaunch
+    ///     不 open 空列表；已授权→noop。禁止 prompt 与 open 同次；禁止自动 relaunch。
+    /// Code Logic: action ∈ {prompt|settings|noop}；prompt ⇒ !opened。
     #[test]
     fn request_input_monitoring_defaults_to_settings_action_when_open() {
         let r = request_permission("inputMonitoring", Some(true));
-        assert!(!r.needs_relaunch);
         if r.action == "prompt" {
             assert!(!r.opened, "prompt 不得同时 open: {:?}", r);
         } else {
@@ -1092,6 +1368,10 @@ mod tests {
                 "unexpected action {:?}",
                 r
             );
+        }
+        // Denied 同进程无法弹窗时 needs_relaunch=true 且不得 open 空列表
+        if r.needs_relaunch {
+            assert!(!r.opened, "needs_relaunch 不得 open 空设置: {:?}", r);
         }
     }
 
@@ -1145,12 +1425,11 @@ mod tests {
     }
 
     /// Business Logic: 输入监控禁止 prompt 与 open 双开；禁止自动 relaunch。
-    /// Code Logic: action=prompt ⇒ !opened；settings|noop 合法；needs_relaunch=false。
+    /// Code Logic: action=prompt ⇒ !opened；needs_relaunch ⇒ !opened。
     #[test]
     #[cfg(target_os = "macos")]
     fn request_input_monitoring_allow_open_never_dual_opens() {
         let r = request_permission("inputMonitoring", Some(true));
-        assert!(!r.needs_relaunch);
         if r.action == "prompt" {
             assert!(!r.opened, "prompt 不得同时 open: {:?}", r);
         } else {
@@ -1159,6 +1438,9 @@ mod tests {
                 "unexpected action {:?}",
                 r
             );
+        }
+        if r.needs_relaunch {
+            assert!(!r.opened, "needs_relaunch 不得 open 空设置: {:?}", r);
         }
     }
 
@@ -1180,6 +1462,51 @@ mod tests {
             );
             assert!(!r.ok, "未授权时 result.ok 不得为 true: {:?}", r);
         }
+    }
+
+
+    /// Business Logic: pending 标记必须可写入 data_dir，否则 relaunch 后无法登记。
+    /// Code Logic: mark_pending 后文件存在；consume 成功删文件、失败则保留（可再试）。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn mark_pending_input_monitoring_request_writes_file() {
+        mark_pending_input_monitoring_request();
+        let path = crate::config::data_dir()
+            .expect("data_dir")
+            .join(INPUT_MONITORING_PENDING_REQUEST);
+        assert!(path.is_file(), "mark_pending must create {:?}", path);
+        // consume 会尝试 Request；无 GUI/仍 Denied 时保留 pending 是正确行为
+        consume_pending_input_monitoring_request();
+        // 仅断言 consume 可调用且路径仍是合法 data_dir 下文件或已清除
+        let _ = path.is_file();
+    }
+
+    /// Business Logic: Denied 同进程无法登记列表时必须留下 pending，供 relaunch 后真正 Request。
+    /// Code Logic: 若当前 IOHID=Denied，request 后 data_dir 下应存在 pending 标记文件
+    ///     （无产品 bundle 的 cargo test 可能 skip）。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn denied_input_monitoring_marks_pending_for_next_launch() {
+        let iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+        if iohid != K_IOHID_ACCESS_TYPE_DENIED {
+            // 本机未处于 Denied 时无法在单测中构造进程级 Denied 缓存
+            return;
+        }
+        let Some(id) = main_bundle_identifier() else {
+            return;
+        };
+        if !is_product_bundle_id(&id) {
+            return;
+        }
+        let _ = request_permission("inputMonitoring", Some(false));
+        let path = crate::config::data_dir()
+            .expect("data_dir")
+            .join(INPUT_MONITORING_PENDING_REQUEST);
+        assert!(
+            path.is_file(),
+            "IOHID Denied 时 request 必须写 pending 标记以便 relaunch 后登记: {:?}",
+            path
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

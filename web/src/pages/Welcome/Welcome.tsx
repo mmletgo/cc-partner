@@ -253,21 +253,29 @@ export function Welcome() {
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户点单项「去设置」只应请求该权限；sticky 类型进入 awaiting / 保持 needs_reopen。
-   *   请求结束后主动 schedule 同步，确保「重新打开应用」会出现。
+   *   输入监控 Denied 时后端 needsRelaunch：立刻 needs_reopen，用户点「重新打开应用」
+   *   后新进程弹系统中转窗把本 app 写入列表（禁止只开空设置页）。
    *
    * Code Logic（这个函数做什么）:
-   *   dispatch GO_SETTINGS；await request(type)；refresh；sticky 则 schedulePostSettingsSync。
+   *   dispatch GO_SETTINGS；await request(type)；若 needsRelaunch → BACKEND_NEEDS_RELAUNCH；
+   *   否则 sticky 则 schedulePostSettingsSync。
    */
   const handleRequest = useCallback(
     (type: PermissionType) => {
       dispatch({ type: 'GO_SETTINGS', permission: type });
       void (async () => {
+        let needsRelaunch = false;
         try {
-          await request(type);
+          const result = await request(type);
+          needsRelaunch = result?.needsRelaunch === true;
         } catch {
           // error 已由 hook 投影
         }
         await refresh();
+        if (needsRelaunch) {
+          dispatch({ type: 'BACKEND_NEEDS_RELAUNCH' });
+          return;
+        }
         if (isStickyPermission(type)) {
           schedulePostSettingsSync();
         }

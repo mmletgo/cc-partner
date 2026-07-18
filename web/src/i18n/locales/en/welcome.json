@@ -21,7 +21,7 @@
     },
     "inputMonitoring": {
       "title": "Input Monitoring",
-      "description": "Needed for health reminder keyboard activity. If the app is missing from the list, click “+” and add “cc-partner (Dev)” or “cc-partner”"
+      "description": "Needed for health reminder keyboard activity. Complete the system permission prompt first; if the app still does not appear, click “Reopen app” and authorize again"
     },
     "notification": {
       "title": "Notifications",

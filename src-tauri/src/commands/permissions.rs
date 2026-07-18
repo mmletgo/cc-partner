@@ -64,7 +64,8 @@ pub async fn request_permission(
         "requested": r.requested,
         "opened": r.opened,
         "action": r.action,
-        "needsRelaunch": false,
+        // 输入监控 Denied 同进程无法弹中转窗时为 true；禁止自动 relaunch，仅 Welcome 手动「重新打开应用」
+        "needsRelaunch": r.needs_relaunch,
     }))
 }
 

@@ -154,6 +154,11 @@ fn try_build_device_state() -> Option<DeviceState> {
         if !crate::permissions::check_accessibility_access() {
             return None;
         }
+        // 输入监控未授权时不构建 DeviceState：IOHID 探测会把 TCC 钉成 Denied，
+        // 阻塞后续系统中转窗登记（pending Request raw=0）。
+        if !crate::permissions::check_input_monitoring_access() {
+            return None;
+        }
         DeviceState::checked_new()
     }
 
