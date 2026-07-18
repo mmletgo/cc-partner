@@ -9,16 +9,17 @@
  *   首轮检查失败必须显示错误与重试，不得永久「检查中」。
  *
  *   macOS 对屏幕录制/辅助功能/输入监控：系统设置里打开开关后，**当前进程**的
- *   检测 API 常仍返回未授权。产品目标是「用户在系统里授权后 Welcome 显示已授权」
- *   ——不在 UI 文案里教育用户手动退出；改为：从系统设置回到应用后多轮 recheck，
- *   若 TCC 三项仍未齐，静默经 LaunchServices `open` 重启一次以应用授权态
- *   （禁止直接 exec Contents/MacOS，否则会丢 TCC 主体）。
+ *   检测 API 常仍返回未授权。产品目标是「用户在系统里授权后 Welcome 尽量同步
+ *   显示已授权」——不自动 relaunch（避免闪白屏/反复重启）。从设置回前台后多轮
+ *   recheck；若 sticky 三项仍未齐，进入 needs_reopen，由用户可选点击
+ *   「重新打开应用」才调用 relaunchForPermissions。
  *
  * Code Logic（这个页面做什么）:
  *   - 解析 app flavor（get_app_identity）→ 专属 onboarded/skipped key
  *   - 权限卡 mapPermissions；usePermissions({ stopWhenGranted: true })
- *   - 点 TCC「去设置」后记 pendingApply；visibility 恢复 → 多轮 refresh →
- *     仍缺则 configApi.relaunchForPermissions() 一次
+ *   - 相位机 welcomePermissionFlow：GO_SETTINGS → awaiting；visibility/focus
+ *     → FOREGROUND + SYNC_DELAYS recheck；耗尽仍 denied → needs_reopen
+ *   - handleRequest / visibility / recheck **禁止** relaunch；仅 handleReopen 可
  *   - 「继续使用」：写 onboarded、清 skipped → /
  *   - 「暂时跳过」：写 skipped（不写 onboarded）→ /
  *   - 所有 hooks 在 early return 之前
@@ -38,65 +39,35 @@ import {
 } from '@/hooks/usePermissions';
 import { ArrowRightIcon } from '@/lib/icons';
 import { mapPermissions } from '@/lib/permissionEntries';
-import type { PermissionType, PermissionsStatus } from '@/lib/types';
+import type { PermissionType } from '@/lib/types';
 import appIconUrl from '@/assets/app-icon.png';
 import styles from './Welcome.module.css';
-
-/**
- * Business Logic（为什么需要这个常量）:
- *   屏幕录制 / 辅助功能 / 输入监控在 macOS 上授权后，当前进程检测常滞后于
- *   系统设置开关；从设置返回后若仍未齐需 relaunch 应用进程态。通知通常即时。
- *
- * Code Logic（这个常量做什么）:
- *   点「去设置」时若 type 在此集合内，标记 pendingApply 以便 visibility 恢复后处理。
- */
-const PROCESS_STICKY_PERMISSIONS: ReadonlySet<PermissionType> = new Set([
-  'screenCapture',
-  'accessibility',
-  'inputMonitoring',
-]);
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   判断「是否仍有需进程重启才生效的权限未授权」。
- *
- * Code Logic（这个函数做什么）:
- *   任一项 sticky 权限 granted=false 则 true。
- */
-function hasStickyDenied(status: PermissionsStatus): boolean {
-  return (
-    !status.screenCapture.granted ||
-    !status.accessibility.granted ||
-    !status.inputMonitoring.granted
-  );
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   给 OS/检测 API 一点时间在切回前台后刷新。
- *
- * Code Logic（这个函数做什么）:
- *   Promise 封装 setTimeout。
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-}
+import {
+  SYNC_DELAYS_MS,
+  hasStickyDenied,
+  reduceWelcomePermPhase,
+  welcomeHintKey,
+  type WelcomePermEvent,
+  type WelcomePermPhase,
+} from './welcomePermissionFlow';
 
 /**
  * Welcome 页面根组件
+ *
+ * Business Logic（为什么需要这个组件）:
+ *   首次启动权限引导主 UI；协调权限卡、状态提示与可选重新打开。
+ *
+ * Code Logic（这个组件做什么）:
+ *   持有 WelcomePermPhase 状态机；接线 request/refresh/relaunch；渲染引导布局。
  */
 export function Welcome() {
   const { t } = useTranslation(['welcome', 'common']);
   const navigate = useNavigate();
   const [flavor, setFlavor] = useState<AppFlavor>('release');
-  /** 用户点过 sticky「去设置」，从系统设置返回后需 recheck / 可能 relaunch */
-  const pendingApplyRef = useRef(false);
-  /** 本页生命周期内最多静默 relaunch 一次，避免未授权时循环重启 */
-  const relaunchUsedRef = useRef(false);
-  /** 避免 visibility 回调重入 */
-  const applyInFlightRef = useRef(false);
+  const [phase, setPhase] = useState<WelcomePermPhase>('idle');
+  const phaseRef = useRef<WelcomePermPhase>(phase);
+  /** 防止 visibility/focus 并发进入多轮 sync */
+  const syncInFlightRef = useRef(false);
 
   const {
     status,
@@ -110,6 +81,19 @@ export function Welcome() {
   } = usePermissions({
     stopWhenGranted: true,
   });
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   相位转移必须同步更新 ref，否则 await 间隙里 SYNC_TICK 会读到旧 phase。
+   *
+   * Code Logic（这个函数做什么）:
+   *   以 phaseRef 为源 reduce → 写回 ref + setPhase。
+   */
+  const dispatch = useCallback((event: WelcomePermEvent) => {
+    const next = reduceWelcomePermPhase(phaseRef.current, event);
+    phaseRef.current = next;
+    setPhase(next);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,128 +112,120 @@ export function Welcome() {
     };
   }, []);
 
-  // 四项齐：清 pending，无需 relaunch
+  // 四项齐：相位回 idle
   useEffect(() => {
     if (allRequiredGranted) {
-      pendingApplyRef.current = false;
+      dispatch({ type: 'ALL_REQUIRED_GRANTED' });
     }
-  }, [allRequiredGranted]);
+  }, [allRequiredGranted, dispatch]);
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户从系统设置回到 Welcome 后，应尽快反映已授权；当前进程若仍读到未授权，
-   *   则静默 relaunch 一次让 TCC 在新进程生效——不向用户展示「请退出重开」文案。
+   *   用户从系统设置回到应用后，应尽快反映已授权；仍未齐则进入 needs_reopen
+   *   提示可选重新打开——**禁止**自动 relaunch。
    *
    * Code Logic（这个函数做什么）:
-   *   多轮 refresh + 直接 check_permissions；仍 sticky-denied 且未 relaunch 过则
-   *   invoke relaunch_for_permissions（macOS 用 open .app）。
+   *   仅在 awaiting/needs_reopen/syncing 时：FOREGROUND → 按 SYNC_DELAYS_MS
+   *   多轮 refresh + permissions()；SYNC_TICK / SYNC_EXHAUSTED 更新相位。
    */
-  const applyPermissionsAfterSettings = useCallback(async () => {
-    if (!pendingApplyRef.current || relaunchUsedRef.current || applyInFlightRef.current) {
+  const runSyncAfterForeground = useCallback(async () => {
+    const start = phaseRef.current;
+    if (start !== 'awaiting' && start !== 'needs_reopen' && start !== 'syncing') {
       return;
     }
-    applyInFlightRef.current = true;
+    if (syncInFlightRef.current) {
+      return;
+    }
+    syncInFlightRef.current = true;
     try {
-      // 多轮 recheck：屏幕录制/辅助功能常在无需重启时于数百 ms 内翻转
-      for (const delay of [0, 400, 900]) {
+      dispatch({ type: 'FOREGROUND' });
+      for (let i = 0; i < SYNC_DELAYS_MS.length; i++) {
+        const delay = SYNC_DELAYS_MS[i]!;
         if (delay > 0) {
-          await sleep(delay);
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, delay);
+          });
         }
         await refresh();
+        let slice;
         try {
-          const latest = await configApi.permissions();
-          if (!hasStickyDenied(latest)) {
-            pendingApplyRef.current = false;
-            return;
-          }
+          slice = await configApi.permissions();
         } catch {
-          // 保留 pending，继续后续轮次 / relaunch
+          continue;
+        }
+        if (!hasStickyDenied(slice)) {
+          dispatch({ type: 'SYNC_TICK', status: slice });
+          return;
+        }
+        if (i === SYNC_DELAYS_MS.length - 1) {
+          dispatch({ type: 'SYNC_EXHAUSTED', status: slice });
+        } else {
+          dispatch({ type: 'SYNC_TICK', status: slice });
         }
       }
-
-      if (!pendingApplyRef.current || relaunchUsedRef.current) {
-        return;
-      }
-
-      let stillDenied = true;
-      try {
-        stillDenied = hasStickyDenied(await configApi.permissions());
-      } catch {
-        stillDenied = true;
-      }
-      if (!stillDenied) {
-        pendingApplyRef.current = false;
-        return;
-      }
-
-      // 静默 relaunch 一次以应用系统侧已打开的开关
-      relaunchUsedRef.current = true;
-      pendingApplyRef.current = false;
-      await configApi.relaunchForPermissions();
     } finally {
-      applyInFlightRef.current = false;
+      syncInFlightRef.current = false;
     }
-  }, [refresh]);
+  }, [dispatch, refresh]);
 
   useEffect(() => {
-    const onVisibility = () => {
-      if (document.visibilityState !== 'visible') {
-        return;
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        void runSyncAfterForeground();
       }
-      void applyPermissionsAfterSettings();
     };
-    document.addEventListener('visibilitychange', onVisibility);
-    // 部分路径下从设置返回时窗口已 visible 且不派发 visibilitychange：
-    // 用 focus 再兜一次
-    window.addEventListener('focus', onVisibility);
+    document.addEventListener('visibilitychange', onVis);
+    // 部分路径下从设置返回时窗口已 visible 且不派发 visibilitychange：用 focus 兜底
+    window.addEventListener('focus', onVis);
     return () => {
-      document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('focus', onVisibility);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onVis);
     };
-  }, [applyPermissionsAfterSettings]);
+  }, [runSyncAfterForeground]);
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点单项「去设置」只应请求该权限；对 sticky 类型标记 pendingApply，
-   *   从设置返回后由 applyPermissionsAfterSettings 对齐或 relaunch。
+   *   用户点单项「去设置」只应请求该权限；sticky 类型进入 awaiting，
+   *   从设置返回后由 runSyncAfterForeground 同步——**禁止**自动 relaunch。
    *
    * Code Logic（这个函数做什么）:
-   *   标记 pending；request(type)；结束后再 force refresh。
+   *   dispatch GO_SETTINGS；request(type)；refresh（即时权限如通知）。
    */
   const handleRequest = useCallback(
     (type: PermissionType) => {
-      if (PROCESS_STICKY_PERMISSIONS.has(type)) {
-        pendingApplyRef.current = true;
-      }
-      void (async () => {
-        try {
-          await request(type);
-        } catch {
-          // error 已由 hook 投影
-        }
-        // 若系统框（通知）即时授权，立即对齐；sticky 类型可能仍 false，等 visibility
-        await refresh();
-        void applyPermissionsAfterSettings();
-      })();
+      dispatch({ type: 'GO_SETTINGS', permission: type });
+      void request(type).catch(() => undefined);
+      // 通知等即时权限：request 后 refresh；禁止 relaunch
+      void refresh();
     },
-    [request, refresh, applyPermissionsAfterSettings],
+    [dispatch, request, refresh],
   );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   仅用户主动点击「重新打开应用」才可 relaunch，以应用 sticky TCC 进程态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   dispatch REOPEN_CLICKED；invoke relaunchForPermissions（可能永不 resolve）。
+   */
+  const handleReopen = useCallback(() => {
+    dispatch({ type: 'REOPEN_CLICKED' });
+    void configApi.relaunchForPermissions().catch(() => undefined);
+  }, [dispatch]);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   首轮失败或刷新失败后需要显式「重新检查」。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 refresh()；若仍有 pendingApply 则走 apply 路径。
+   *   调用 refresh()；若处于 awaiting/needs_reopen/syncing 则走前台同步路径。
    */
   const handleRecheck = useCallback(() => {
     void (async () => {
       await refresh();
-      if (pendingApplyRef.current) {
-        void applyPermissionsAfterSettings();
-      }
+      void runSyncAfterForeground();
     })();
-  }, [refresh, applyPermissionsAfterSettings]);
+  }, [refresh, runSyncAfterForeground]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -278,6 +254,7 @@ export function Welcome() {
     localStorage.setItem(skippedKey, '1');
     navigate('/');
   }, [flavor, navigate]);
+
   // hooks 全部在 early return 之前
   if (loading) {
     return (
@@ -324,6 +301,7 @@ export function Welcome() {
   }
 
   const entries = mapPermissions(status, t);
+  const hintKey = welcomeHintKey(phase, allRequiredGranted);
 
   return (
     <div className={styles.backdrop}>
@@ -354,10 +332,13 @@ export function Welcome() {
         </div>
 
         <footer className={styles.footer}>
-          <span className={styles.hint}>
-            {allRequiredGranted ? t('welcome:permissionReady') : t('welcome:waitingPermission')}
-          </span>
+          <span className={styles.hint}>{t(`welcome:${hintKey}`)}</span>
           <div className={styles.actions}>
+            {phase === 'needs_reopen' ? (
+              <Button variant="secondary" size="md" onClick={handleReopen}>
+                {t('welcome:reopenApp')}
+              </Button>
+            ) : null}
             <Button
               variant="secondary"
               size="md"

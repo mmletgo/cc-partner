@@ -134,8 +134,9 @@ export const configApi = {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   系统设置打开 TCC 开关后当前进程检测常仍为未授权；Welcome 静默 relaunch
-   *   以在新进程反映已授权，不向用户展示「请退出重开」文案。
+   *   系统设置打开 sticky TCC 开关后当前进程检测常仍为未授权；仅 Welcome
+   *   「重新打开应用」按钮可调用本方法，在新进程反映已授权。
+   *   **禁止** request / visibility / focus / recheck 自动调用（避免闪白屏）。
    *
    * Code Logic（这个函数做什么）:
    *   invoke relaunch_for_permissions；macOS 经 LaunchServices open .app 后退出。
