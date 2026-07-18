@@ -656,18 +656,19 @@ pub fn check_permissions() -> PermissionsStatus {
 /// 请求权限（按类型分流：登记 / 系统弹框 / 打开设置）。
 ///
 /// Business Logic:
-///     - screenCapture：未授权时 `CGRequest…`；默认再 open Screen Recording 设置；
-///       action=`settings`（若 opened）否则若 requested 则 `prompt`。
-///     - accessibility：用户点击时 AX prompt 登记 + 默认 open Accessibility 设置 → `settings`。
-///     - inputMonitoring：静默登记（IOHID/CG/tap）+ 默认 **只** open Input Monitoring 设置
-///       （不依赖第二套弹框，不在本函数内 relaunch）→ `settings`。
+///     **同一点击禁止「系统授权弹窗 + 系统设置页」双开**（能 open 设置则只 open）。
+///     - screenCapture：`allow_open` → **仅** open 录屏设置；`open_settings=false` 且未授权
+///       才 `CGRequest…`（系统弹窗，其自身可带「打开系统设置」）。
+///     - accessibility：`allow_open` → **仅** open 辅助功能设置（不 AX prompt 弹框）；
+///       `open_settings=false` 才 `AXIsProcessTrustedWithOptions(prompt)` 登记/引导。
+///     - inputMonitoring：静默登记（无用户弹窗）+ 默认 **只** open 输入监控设置 → `settings`。
 ///     - notification：authorized → `noop`；notDetermined → `requestAuthorization`（`prompt`，
-///       不无脑 open）；denied → 仅 open 通知设置（`settings`）。禁止始终 request+open。
+///       不 open）；denied → 仅 open 通知设置。禁止始终 request+open。
 ///     - 非 macOS / 未知类型：`{ok:true, requested:false, opened:false, action:"noop"}`。
 ///
 /// Code Logic:
-///     `open_settings` 保留兼容：`None`/`Some(true)` 允许 open；`Some(false)` 只登记/请求不 open。
-///     返回 `action ∈ {settings|prompt|noop}` 供前端 Welcome sticky 文案分支。
+///     `open_settings`：`None`/`Some(true)` → allow_open；`Some(false)` → 仅 prompt/登记路径。
+///     返回 `action ∈ {settings|prompt|noop}`。
 pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
     // Some(false) 只登记/请求；None / Some(true) 允许打开设置
     let allow_open = open_settings.unwrap_or(true);
@@ -675,33 +676,34 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
     {
         match perm_type {
             "screenCapture" => {
-                // 仅未授权时 request；CGRequest 返回值表示是否可能弹出系统框，不代表最终授权
-                let requested = if !check_screen_capture_access() {
-                    unsafe { CGRequestScreenCaptureAccess() }
+                // 能 open 设置则只 open，避免与 CGRequest 系统弹窗双开
+                if allow_open {
+                    let opened = open_permission_settings(perm_type);
+                    RequestPermissionResult {
+                        ok: check_screen_capture_access(),
+                        requested: false,
+                        opened,
+                        action: if opened { "settings" } else { "noop" },
+                    }
+                } else if !check_screen_capture_access() {
+                    let requested = unsafe { CGRequestScreenCaptureAccess() };
+                    RequestPermissionResult {
+                        ok: check_screen_capture_access(),
+                        requested,
+                        opened: false,
+                        action: if requested { "prompt" } else { "noop" },
+                    }
                 } else {
-                    false
-                };
-                let opened = if allow_open {
-                    open_permission_settings(perm_type)
-                } else {
-                    false
-                };
-                let action = if opened {
-                    "settings"
-                } else if requested {
-                    "prompt"
-                } else {
-                    "noop"
-                };
-                RequestPermissionResult {
-                    ok: check_screen_capture_access(),
-                    requested,
-                    opened,
-                    action,
+                    RequestPermissionResult {
+                        ok: true,
+                        requested: false,
+                        opened: false,
+                        action: "noop",
+                    }
                 }
             }
             "inputMonitoring" => {
-                // 静默登记主体；默认只 open 设置（不依赖第二套弹框，不在此 relaunch）
+                // 静默登记主体（无用户弹窗）；默认只 open 设置
                 let requested = register_input_monitoring_subject();
                 if allow_open {
                     std::thread::sleep(std::time::Duration::from_millis(350));
@@ -720,24 +722,23 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "accessibility" => {
-                // 仅用户点击：prompt 登记列表；检测路径永不调用
-                let trusted = request_accessibility_prompt();
-                let opened = if allow_open {
-                    open_permission_settings(perm_type)
+                // 能 open 设置则只 open，避免 AX prompt 系统框与设置页双开
+                if allow_open {
+                    let opened = open_permission_settings(perm_type);
+                    RequestPermissionResult {
+                        ok: check_accessibility_access(),
+                        requested: false,
+                        opened,
+                        action: if opened { "settings" } else { "noop" },
+                    }
                 } else {
-                    false
-                };
-                let action = if opened {
-                    "settings"
-                } else {
-                    // 未 open（或 open 失败）时，本次主动作是 AX prompt 登记
-                    "prompt"
-                };
-                RequestPermissionResult {
-                    ok: trusted || check_accessibility_access(),
-                    requested: true,
-                    opened,
-                    action,
+                    let trusted = request_accessibility_prompt();
+                    RequestPermissionResult {
+                        ok: trusted || check_accessibility_access(),
+                        requested: true,
+                        opened: false,
+                        action: "prompt",
+                    }
                 }
             }
             "notification" => {
@@ -946,6 +947,34 @@ mod tests {
         let r = request_permission("inputMonitoring", Some(false));
         assert!(!r.opened);
         assert_eq!(r.action, "settings");
+    }
+
+    /// Business Logic: Welcome「去设置」默认 allow_open，不得再走 CGRequest 弹窗路径。
+    /// Code Logic: open_settings=true 时 screenCapture 的 requested 必须为 false（只 open 设置）。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn request_screen_capture_allow_open_does_not_mark_requested() {
+        let r = request_permission("screenCapture", Some(true));
+        assert!(
+            !r.requested,
+            "allow_open 路径不得 CGRequest 双开，requested 应为 false, got {:?}",
+            r
+        );
+        assert!(r.action == "settings" || r.action == "noop");
+    }
+
+    /// Business Logic: 辅助功能 allow_open 只开设置，不 AX prompt。
+    /// Code Logic: open_settings=true 时 requested=false。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn request_accessibility_allow_open_does_not_mark_requested() {
+        let r = request_permission("accessibility", Some(true));
+        assert!(
+            !r.requested,
+            "allow_open 路径不得 AX prompt 双开, got {:?}",
+            r
+        );
+        assert!(r.action == "settings" || r.action == "noop");
     }
 
     /// Business Logic（为什么需要这个测试）:
