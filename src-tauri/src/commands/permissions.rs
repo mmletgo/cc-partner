@@ -5,10 +5,11 @@
 //!     查询 macOS 屏幕录制/输入监控/辅助功能/通知权限状态，并触发授权流程。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `check_permissions` / `request_permission`：在 blocking 线程执行，避免
-//!       UNUserNotificationCenter 主线程 semaphore 死锁。
+//!     - `check_permissions`：spawn_blocking（通知查询带 semaphore）。
+//!     - `request_permission`：**主线程**执行（macOS 系统授权弹窗/TCC 登记 API
+//!       在后台线程常无弹窗、不写列表，表现为「代码改了行为不变」）。
 //!     - `get_app_identity`：返回 Bundle ID + flavor（dev/release）。
-//!     - `relaunch_for_permissions`：系统设置授权后让 TCC 在新进程生效（macOS 用 `open` .app）。
+//!     - `relaunch_for_permissions`：系统设置授权后让 TCC 在新进程生效。
 
 use crate::error::AppError;
 use crate::permissions;
@@ -39,17 +40,24 @@ pub fn get_app_identity() -> Result<permissions::AppIdentity, AppError> {
 ///
 /// Business Logic: 用户在 Welcome/设置页点「去设置」时调用；**不得**在进入 Welcome 时自动调用。
 /// Code Logic: type ∈ screenCapture|inputMonitoring|accessibility|notification；
-///     open_settings 缺省 true；spawn_blocking 执行（通知 request 同步等待 completion）。
+///     open_settings 缺省 true；**必须主线程**执行 request_permission（CG/IOHID/AX 弹窗）。
 #[tauri::command]
 pub async fn request_permission(
+    app: AppHandle,
     r#type: String,
     open_settings: Option<bool>,
 ) -> Result<serde_json::Value, AppError> {
-    let r = tokio::task::spawn_blocking(move || {
-        permissions::request_permission(&r#type, open_settings)
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let r = permissions::request_permission(&r#type, open_settings);
+        let _ = tx.send(r);
     })
-    .await
-    .map_err(|e| AppError::generic(format!("request_permission join: {e}")))?;
+    .map_err(|e| AppError::generic(format!("request_permission schedule main: {e}")))?;
+
+    let r = rx
+        .await
+        .map_err(|_| AppError::generic("request_permission main-thread result dropped"))?;
+
     Ok(serde_json::json!({
         "ok": r.ok,
         "requested": r.requested,
