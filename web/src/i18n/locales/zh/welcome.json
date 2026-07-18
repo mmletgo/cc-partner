@@ -21,7 +21,7 @@
     },
     "inputMonitoring": {
       "title": "输入监控",
-      "description": "健康提醒检测键盘活动需要"
+      "description": "健康提醒检测键盘活动需要。若系统列表中没有本应用，请点列表下方「+」添加「cc-partner (Dev)」或「cc-partner」"
     },
     "notification": {
       "title": "通知",

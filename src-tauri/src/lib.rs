@@ -124,6 +124,13 @@ pub fn run() {
         )
         .try_init();
 
+    // 兼容旧 oneshot flag：不再作为主路径（第二实例不弹窗且会卡主线程）。
+    // 若带此 flag，exit 0 并忽略，避免误开第二 GUI。
+    if std::env::args().any(|a| a == permissions::INPUT_MONITORING_REGISTER_ARG) {
+        tracing::info!("ignore legacy --cp-register-input-monitoring; use GUI pending path");
+        std::process::exit(0);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -302,6 +309,16 @@ pub fn run() {
                     hotkey::screenshot_handler,
                 );
             }
+
+            // 输入监控：Denied 路径写的 pending，在 NSApp/托盘就绪后尝试系统弹窗 Request
+            // （不在「去设置」主线程同步等第二实例，避免 UI 卡住）。
+            {
+                let handle = app.handle().clone();
+                let _ = handle.run_on_main_thread(|| {
+                    permissions::consume_pending_input_monitoring_request();
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

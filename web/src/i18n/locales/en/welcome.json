@@ -21,7 +21,7 @@
     },
     "inputMonitoring": {
       "title": "Input Monitoring",
-      "description": "Health reminder detects keyboard activity"
+      "description": "Needed for health reminder keyboard activity. If the app is missing from the list, click “+” and add “cc-partner (Dev)” or “cc-partner”"
     },
     "notification": {
       "title": "Notifications",

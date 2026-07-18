@@ -375,8 +375,10 @@ export interface PermissionRequestResult {
   requested: boolean;
   /** 是否成功打开了系统设置面板 */
   opened: boolean;
-  /** settings=打开系统设置；prompt=系统授权框；noop=已授权无操作（后端可选字段） */
+  /** settings=打开系统设置；prompt=系统授权框；noop=已授权无操作 */
   action?: 'settings' | 'prompt' | 'noop';
+  /** 后端恒 false；自动 cold relaunch 已禁止 */
+  needsRelaunch?: boolean;
   error?: string;
 }
 

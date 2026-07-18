@@ -29,7 +29,8 @@ extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
     /// 预检输入监控（Listen Event）。不得单独作为 UI 判据，须配合 bundle id + IOHID + TCC。
     fn CGPreflightListenEventAccess() -> bool;
-    /// 请求输入监控权限（未决定时弹框）。
+    /// 请求输入监控权限（未决定时弹框）。生产路径走 ObjC `cp_request_listen_event_access`。
+    #[allow(dead_code)]
     fn CGRequestListenEventAccess() -> bool;
 }
 
@@ -58,6 +59,8 @@ extern "C" {
 extern "C" {
     /// kIOHIDRequestTypeListenEvent = 1；返回 kIOHIDAccessTypeGranted=0 / Denied=1 / Unknown=2。
     fn IOHIDCheckAccess(request_type: u32) -> u32;
+    /// 生产 Request 走 ObjC `cp_request_listen_event_access`（需 NSApp）。
+    #[allow(dead_code)]
     fn IOHIDRequestAccess(request_type: u32) -> bool;
 }
 
@@ -362,6 +365,8 @@ pub struct RequestPermissionResult {
     pub opened: bool,
     /// settings = 打开系统设置页；prompt = 系统授权框；noop = 已授权无操作。
     pub action: &'static str,
+    /// 保留字段：恒为 false。自动 cold relaunch 已禁止；仅 Welcome 手动「重新打开应用」。
+    pub needs_relaunch: bool,
 }
 
 /// macOS「系统设置 → 隐私与安全」面板 URL scheme（多候选，兼容旧/新系统设置）。
@@ -402,141 +407,103 @@ pub fn open_permission_settings(perm_type: &str) -> bool {
     false
 }
 
-/// Business Logic: 输入监控列表只有进程「尝试监听」后才出现本 app；仅 open 不够。
-///     Welcome 未在列表时走 `silent=false`（对齐录屏系统弹窗登记）。
+/// Business Logic: 仅产品 Bundle（Dev/Release）才允许重置 ListenEvent 决策；
+///     裸 `app` 或未知身份不得误清其它应用的 TCC。
 ///
-/// Code Logic:
-///     - `silent=true`：EventTap(runloop) + IOHIDRequestAccess（无 CGRequest）。
-///     - `silent=false`：同上 + CGRequestListenEventAccess（完整系统弹窗登记）。
-///     check 路径禁止调用；授权判定只信 IOHIDCheckAccess，不信 CGPreflight。
+/// Code Logic: 与 `PRODUCT_BUNDLE_IDENTIFIER` / `DEV_BUNDLE_IDENTIFIER` 精确匹配。
 #[cfg(target_os = "macos")]
-fn register_input_monitoring_subject(silent: bool) -> bool {
-    // 先调系统 Request（可能弹窗 / 写 TCC），再 EventTap 挂 runloop 加固列表条目。
-    // 顺序很重要：先 EventTap 在无权限时 create 失败，且可能干扰后续 Request。
-    let iohid_ok = unsafe { IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
-    let cg_ok = if silent {
-        false
-    } else {
-        unsafe { CGRequestListenEventAccess() }
-    };
-    let tap_ok = attempt_listen_only_event_tap_registration();
-    tracing::info!(
-        silent,
-        iohid_ok,
-        cg_ok,
-        tap_ok,
-        "register_input_monitoring_subject done"
-    );
-    iohid_ok || cg_ok || tap_ok
+fn is_product_bundle_id(id: &str) -> bool {
+    id == PRODUCT_BUNDLE_IDENTIFIER || id == DEV_BUNDLE_IDENTIFIER
 }
 
-/// 创建 listen-only event tap 并短暂接入 runloop，以登记 TCC 主体。
+/// Business Logic: macOS 在列表为空时仍可能把 ListenEvent 记为 Denied，
+///     导致 IOHID/CG/EventTap 全失败、系统设置永远不出现本 app（幽灵 Denied）。
+///     `tccutil reset ListenEvent <bundle>` 可清掉该决策，让下一次 Request 重新弹窗登记。
 ///
-/// Business Logic: 仅 `CGEventTapCreate` 立刻 `CFRelease` 在新 macOS 上常**不进**
-///     输入监控列表；需 enable + runloop source。
-/// Code Logic: Create → CFMachPortCreateRunLoopSource → AddSource → Enable →
-///     CFRunLoopRunInMode(~0.15s) → 拆除；返回是否成功创建 tap。不用于授权判定。
+/// Code Logic: 仅产品 Bundle 时 spawn `tccutil reset ListenEvent <bundle_id>`；
+///     成功看 exit status；失败记 warn 返回 false。不用于授权判定。
 #[cfg(target_os = "macos")]
-fn attempt_listen_only_event_tap_registration() -> bool {
-    const K_CG_SESSION_EVENT_TAP: u32 = 1;
-    const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
-    const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
-    const KEY_MASK: u64 = (1u64 << 10) | (1u64 << 11);
-    // kCFRunLoopDefaultMode
-    const DEFAULT_MODE: &[u8] = b"kCFRunLoopDefaultMode ";
+fn reset_listen_event_tcc(bundle_id: &str) -> bool {
+    if !is_product_bundle_id(bundle_id) {
+        tracing::warn!(
+            bundle_id,
+            "skip tccutil reset ListenEvent: not a product bundle"
+        );
+        return false;
+    }
+    match std::process::Command::new("tccutil")
+        .args(["reset", "ListenEvent", bundle_id])
+        .output()
+    {
+        Ok(out) => {
+            let ok = out.status.success();
+            tracing::info!(
+                bundle_id,
+                ok,
+                status = %out.status,
+                stdout = %String::from_utf8_lossy(&out.stdout),
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "tccutil reset ListenEvent"
+            );
+            ok
+        }
+        Err(e) => {
+            tracing::warn!(
+                bundle_id,
+                error = %e,
+                "tccutil reset ListenEvent spawn failed"
+            );
+            false
+        }
+    }
+}
 
-    type TapCallback = Option<
-        unsafe extern "C" fn(
-            proxy: *mut std::ffi::c_void,
-            event_type: u32,
-            event: *mut std::ffi::c_void,
-            user_info: *mut std::ffi::c_void,
-        ) -> *mut std::ffi::c_void,
-    >;
+/// 一次性登记子进程入口 flag（冷启动 pending request 用）。
+pub const INPUT_MONITORING_REGISTER_ARG: &str = "--cp-register-input-monitoring";
 
+/// 冷启动时「待弹出输入监控 Request」标记文件（data_dir 下）。
+#[cfg(target_os = "macos")]
+const INPUT_MONITORING_PENDING_REQUEST: &str = "input-monitoring-pending-request";
+
+/// Business Logic: 输入监控系统弹窗必须在**当前 GUI** 的 NSApplication 上下文中请求。
+///     第二实例 oneshot 在已有 GUI 运行时不会弹窗，且会阻塞主线程。
+/// Code Logic: 调 native `cp_request_listen_event_access`（NSApp + Request）。
+#[cfg(target_os = "macos")]
+fn request_listen_event_with_nsapp() -> bool {
     extern "C" {
-        fn CGEventTapCreate(
-            tap: u32,
-            place: u32,
-            options: u32,
-            events_of_interest: u64,
-            callback: TapCallback,
-            user_info: *mut std::ffi::c_void,
-        ) -> *mut std::ffi::c_void;
-        fn CGEventTapEnable(tap: *mut std::ffi::c_void, enable: bool);
-        fn CFMachPortCreateRunLoopSource(
-            allocator: *const std::ffi::c_void,
-            port: *mut std::ffi::c_void,
-            order: isize,
-        ) -> *mut std::ffi::c_void;
-        fn CFRunLoopGetCurrent() -> *mut std::ffi::c_void;
-        fn CFRunLoopAddSource(
-            rl: *mut std::ffi::c_void,
-            source: *mut std::ffi::c_void,
-            mode: *const std::ffi::c_void,
-        );
-        fn CFRunLoopRemoveSource(
-            rl: *mut std::ffi::c_void,
-            source: *mut std::ffi::c_void,
-            mode: *const std::ffi::c_void,
-        );
-        fn CFRunLoopRunInMode(
-            mode: *const std::ffi::c_void,
-            seconds: f64,
-            return_after_source_handled: u8,
-        ) -> i32;
-        fn CFStringCreateWithCString(
-            alloc: *const std::ffi::c_void,
-            c_str: *const std::os::raw::c_char,
-            encoding: u32,
-        ) -> *const std::ffi::c_void;
+        fn cp_request_listen_event_access() -> i32;
     }
-
-    unsafe extern "C" fn passthrough_tap(
-        _proxy: *mut std::ffi::c_void,
-        _event_type: u32,
-        event: *mut std::ffi::c_void,
-        _user_info: *mut std::ffi::c_void,
-    ) -> *mut std::ffi::c_void {
-        event
-    }
-
-    unsafe {
-        let tap = CGEventTapCreate(
-            K_CG_SESSION_EVENT_TAP,
-            K_CG_HEAD_INSERT_EVENT_TAP,
-            K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
-            KEY_MASK,
-            Some(passthrough_tap),
-            std::ptr::null_mut(),
-        );
-        if tap.is_null() {
-            tracing::debug!("input_monitoring EventTap create failed (expected without grant)");
-            return false;
-        }
-        let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-        let rl = CFRunLoopGetCurrent();
-        let mode = CFStringCreateWithCString(
-            std::ptr::null(),
-            DEFAULT_MODE.as_ptr() as *const std::os::raw::c_char,
-            K_CFSTRING_ENCODING_UTF8,
-        );
-        if !source.is_null() && !mode.is_null() {
-            CFRunLoopAddSource(rl, source, mode);
-            CGEventTapEnable(tap, true);
-            // 短暂泵 runloop，让 TCC 有机会登记主体
-            let _ = CFRunLoopRunInMode(mode, 0.15, 0);
-            CGEventTapEnable(tap, false);
-            CFRunLoopRemoveSource(rl, source, mode);
-            CFRelease(source);
-        }
-        if !mode.is_null() {
-            CFRelease(mode);
-        }
-        CFRelease(tap);
-        true
-    }
+    let before = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+    let raw = unsafe { cp_request_listen_event_access() };
+    let after = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+    let ok = raw != 0 || after == K_IOHID_ACCESS_TYPE_GRANTED;
+    tracing::info!(
+        before,
+        raw,
+        after,
+        ok,
+        "cp_request_listen_event_access done"
+    );
+    ok
 }
+
+/// Business Logic: 清理旧版写入的 pending 标记（自动重启路径已废弃）。
+/// Code Logic: 若标记文件存在则删除；**不再**自动 Request / 重启。
+#[cfg(target_os = "macos")]
+pub fn consume_pending_input_monitoring_request() {
+    let Ok(path) = crate::config::data_dir().map(|d| d.join(INPUT_MONITORING_PENDING_REQUEST)) else {
+        return;
+    };
+    if !path.is_file() {
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    tracing::info!("cleared stale input-monitoring-pending-request (auto relaunch disabled)");
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn consume_pending_input_monitoring_request() {}
+
 
 // ── macOS 通知权限（UNUserNotificationCenter，按 Bundle 身份独立）────────────
 #[cfg(target_os = "macos")]
@@ -724,19 +691,19 @@ pub fn check_permissions() -> PermissionsStatus {
 
 /// 请求权限（按类型分流：登记 / 系统弹框 / 打开设置）。
 ///
-/// Business Logic（录屏 / 输入监控同一模型；辅助功能同构）：
-///     TCC Denied（已在列表）→ **只 open 设置**；Unknown/首次 → **只** 系统登记弹窗
-///     （**禁止** 同次再 open，避免弹窗+设置双开）。
-///     - screenCapture：已授权 → noop；Denied → 只 open；否则只 CGRequestScreenCaptureAccess。
-///     - inputMonitoring：已授权 → noop；Denied → 只 open；否则只完整登记
-///       （IOHIDRequest + CGRequestListenEvent + EventTap runloop，可能系统框，**不 open**）。
-///       check 只信 IOHID Granted（不信 CGPreflight），防 Request 后假绿。
+/// Business Logic（录屏 / 输入监控 / 辅助功能同构分流）：
+///     - screenCapture：已授权 → noop；TCC Denied → 只 open；否则只 CGRequestScreenCaptureAccess。
+///     - inputMonitoring：已授权 → noop；**禁止** EventTap / 第二实例 oneshot / **自动重启**。
+///       Denied/TCC Denied：同进程 `tccutil reset` 后仍立刻主线程 NSApp Request（尽力弹窗），
+///       未授权且 allow_open → open 设置（列表拨开关或「+」添加）。
+///       Unknown：主线程 NSApp Request；未授权且 allow_open → open 设置。
+///       check 只信 IOHID Granted。`needs_relaunch` 恒 false（重启仅 Welcome 手动「重新打开应用」）。
 ///     - accessibility：Denied → 只 open；Unknown → 只 AX prompt。
 ///     - notification：authorized → noop；notDetermined → prompt；denied → settings。
 ///
 /// Code Logic:
 ///     `open_settings`：`None`/`Some(true)` → allow_open；`Some(false)` → 仅登记。
-///     返回 `action ∈ {settings|prompt|noop}`。
+///     返回 `action ∈ {settings|prompt|noop}`；`needs_relaunch` 恒 false。
 pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> RequestPermissionResult {
     // Some(false) 只登记/请求；None / Some(true) 允许打开设置
     let allow_open = open_settings.unwrap_or(true);
@@ -752,6 +719,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         requested: false,
                         opened: false,
                         action: "noop",
+                        needs_relaunch: false,
                     };
                 }
                 let tcc = tcc_screen_capture_preflight();
@@ -770,6 +738,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         requested: false,
                         opened,
                         action: if opened { "settings" } else { "noop" },
+                        needs_relaunch: false,
                     }
                 } else {
                     // 首次/Unknown 或 open_settings=false：只 CGRequest（写列表，可能弹窗）
@@ -779,93 +748,84 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         requested,
                         opened: false,
                         action: if requested { "prompt" } else { "noop" },
+                        needs_relaunch: false,
                     }
                 }
             }
             "inputMonitoring" => {
-                // 对齐录屏「系统弹窗中转」+ 修复 macOS 26 假 Denied：
-                // 实测日志：列表为空时 iohid/tcc 仍可能 =Denied(1)。若把 Denied 当
-                // already_in_list 只 open，则永远不弹窗、列表永远空（用户报告的「完全没变」）。
-                //
-                // 分流（互斥，禁止弹窗与 open 同 tick）：
-                // 1) 已授权 → noop
-                // 2) IOHID Unknown(2) 或非 Denied → **只**完整系统登记弹窗
-                //    （IOHIDRequest+CGRequest+EventTap），不 open（对齐录屏首次）
-                // 3) IOHID Denied(1) → 先强制登记刷新列表条目（Denied 时常无弹窗），
-                //    再 open 设置（用户可拨开关）；不依赖「列表一定已有条目」的假前提
-                //
-                // ok 只走 check（IOHID Granted，不信 CGPreflight 防假绿）。
+                // 系统「输入监控」列表：
+                // - 禁止 EventTap 静默登记、第二实例 oneshot、以及「去设置」自动重启。
+                // - Denied：先 tccutil reset（清幽灵 Denied），再同进程 NSApp Request 尽力弹窗。
+                // - Unknown：同进程 NSApp Request。
+                // - 仍未授权且 allow_open → open 设置（拨开关 / 「+」添加）。
+                // - needs_relaunch 恒 false；重启仅 Welcome 用户点「重新打开应用」。
+                // - ok 只信 IOHID Granted。
                 if check_input_monitoring_access() {
                     return RequestPermissionResult {
                         ok: true,
                         requested: false,
                         opened: false,
                         action: "noop",
+                        needs_relaunch: false,
                     };
                 }
                 let tcc = tcc_listen_event_preflight();
                 let iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
-                // 仅 Unknown 走纯弹窗；Denied 走「登记+设置」；其它值当 Unknown 处理
                 let is_denied = iohid == K_IOHID_ACCESS_TYPE_DENIED;
+                let tcc_denied = matches!(tcc, Some(TCC_PREFLIGHT_DENIED));
                 tracing::info!(
                     allow_open,
                     tcc = ?tcc,
                     iohid,
                     is_denied,
+                    tcc_denied,
                     "request_permission(inputMonitoring) branch"
                 );
-                if is_denied {
-                    // 可能列表空但仍 Denied：强制登记刷新主体，再开设置
-                    let requested =
-                        register_input_monitoring_subject(/* silent */ false);
-                    let opened = if allow_open {
-                        // 登记 API 返回后再 open（串行，非同 tick 叠在弹窗上；
-                        // Denied 时 Request 通常立即返回不弹窗）
-                        open_permission_settings(perm_type)
+
+                let mut reset_ok = false;
+                if is_denied || tcc_denied {
+                    if let Some(bundle_id) = main_bundle_identifier() {
+                        reset_ok = reset_listen_event_tcc(&bundle_id);
                     } else {
-                        false
-                    };
-                    let ok = check_input_monitoring_access();
-                    tracing::info!(
-                        requested,
-                        opened,
-                        ok,
-                        iohid_after = unsafe {
-                            IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT)
-                        },
-                        "request_permission(inputMonitoring) denied path done"
-                    );
-                    RequestPermissionResult {
-                        ok,
-                        requested,
-                        opened,
-                        action: if opened {
-                            "settings"
-                        } else if requested {
-                            "prompt"
-                        } else {
-                            "noop"
-                        },
+                        tracing::warn!(
+                            "inputMonitoring denied but no bundle id for tccutil reset"
+                        );
                     }
+                    // 不写 pending、不 relaunch：用户明确不要自动重启。
+                    // reset 后立刻同进程 Request（macOS 有时仍不弹窗，则走设置「+」）。
+                }
+
+                // 主线程 NSApp Request（可能弹系统中转窗；Denied 缓存时可能立即 false）
+                let requested = request_listen_event_with_nsapp();
+                let still_ungranted = !check_input_monitoring_access();
+                let opened = if allow_open && still_ungranted {
+                    open_permission_settings(perm_type)
                 } else {
-                    // Unknown/其它：只系统弹窗登记，对齐录屏首次（不 open）
-                    let requested =
-                        register_input_monitoring_subject(/* silent */ false);
-                    let ok = check_input_monitoring_access();
-                    tracing::info!(
-                        requested,
-                        ok,
-                        iohid_after = unsafe {
-                            IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT)
-                        },
-                        "request_permission(inputMonitoring) prompt path done"
-                    );
-                    RequestPermissionResult {
-                        ok,
-                        requested,
-                        opened: false,
-                        action: if requested { "prompt" } else { "noop" },
-                    }
+                    false
+                };
+                let ok = check_input_monitoring_access();
+                tracing::info!(
+                    requested,
+                    reset_ok,
+                    opened,
+                    ok,
+                    iohid_after = unsafe {
+                        IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT)
+                    },
+                    "request_permission(inputMonitoring) done"
+                );
+                RequestPermissionResult {
+                    ok,
+                    requested,
+                    opened,
+                    action: if opened {
+                        "settings"
+                    } else if requested {
+                        "prompt"
+                    } else {
+                        "noop"
+                    },
+                    needs_relaunch: false,
                 }
             }
             "accessibility" => {
@@ -877,6 +837,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         requested: false,
                         opened: false,
                         action: "noop",
+                        needs_relaunch: false,
                     };
                 }
                 let tcc = tcc_accessibility_preflight();
@@ -888,6 +849,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         requested: false,
                         opened,
                         action: if opened { "settings" } else { "noop" },
+                        needs_relaunch: false,
                     }
                 } else {
                     // Unknown/None 或 open_settings=false：只 AX prompt 登记（弹窗可引导设置，不叠 open）
@@ -897,6 +859,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         requested: true,
                         opened: false,
                         action: "prompt",
+                        needs_relaunch: false,
                     }
                 }
             }
@@ -909,6 +872,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                         requested: false,
                         opened: false,
                         action: "noop",
+                        needs_relaunch: false,
                     },
                     0 => {
                         // notDetermined：只弹系统授权框，不要无脑 open 设置
@@ -918,6 +882,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                             requested: true,
                             opened: false,
                             action: "prompt",
+                            needs_relaunch: false,
                         }
                     }
                     // denied 或未知：只走设置页（不 requestAuthorization）
@@ -932,6 +897,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                             requested: false,
                             opened,
                             action: "settings",
+                            needs_relaunch: false,
                         }
                     }
                 }
@@ -941,6 +907,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 requested: false,
                 opened: false,
                 action: "noop",
+                needs_relaunch: false,
             },
         }
     }
@@ -952,6 +919,7 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
             requested: false,
             opened: false,
             action: "noop",
+            needs_relaunch: false,
         }
     }
 }
@@ -1067,15 +1035,26 @@ mod tests {
         assert!(json.get("notification").is_some());
     }
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     open_settings=false 时输入监控只做登记、不 open；action 可为 prompt（登记）或 settings/noop。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     调用 request_permission("inputMonitoring", Some(false))；断言 !opened。
+    /// Business Logic: 仅产品 Bundle 可触发 tccutil reset，防误清其它 app。
+    /// Code Logic: product / .dev 为 true；占位 app / 空 / 无关 id 为 false。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn product_bundle_id_only_accepts_dev_and_release() {
+        assert!(is_product_bundle_id(PRODUCT_BUNDLE_IDENTIFIER));
+        assert!(is_product_bundle_id(DEV_BUNDLE_IDENTIFIER));
+        assert!(!is_product_bundle_id("app"));
+        assert!(!is_product_bundle_id(""));
+        assert!(!is_product_bundle_id("com.example.other"));
+    }
+
+    /// Business Logic: open_settings=false 时输入监控不得 open 设置；
+    ///     action 可为 prompt / noop（禁止 relaunch / 自动重启）。
+    /// Code Logic: 断言 !opened 且 needs_relaunch=false。
     #[test]
     fn request_input_monitoring_shape_is_stable() {
         let r = request_permission("inputMonitoring", Some(false));
         assert!(!r.opened);
+        assert!(!r.needs_relaunch);
         assert!(
             r.action == "settings" || r.action == "prompt" || r.action == "noop",
             "unexpected action {:?}",
@@ -1098,16 +1077,13 @@ mod tests {
         assert!(r.action == "prompt" || r.action == "noop" || r.action == "settings");
     }
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     Welcome 默认 allow_open 时输入监控产品路径是 settings（静默登记 + 开设置）。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     open_settings=true 时 action 为 settings（或已授权 noop）。
+    /// Business Logic: Welcome 默认 allow_open 时：Unknown/Denied→prompt 或 settings；
+    ///     已授权→noop。禁止 prompt 与 open 同次；禁止自动 relaunch。
+    /// Code Logic: action ∈ {prompt|settings|noop}；prompt ⇒ !opened；needs_relaunch=false。
     #[test]
     fn request_input_monitoring_defaults_to_settings_action_when_open() {
-        // 与录屏同构：未在列表 prompt（系统框）；已在列表 settings；已授权 noop。
-        // 禁止 prompt 与 open 同次。
         let r = request_permission("inputMonitoring", Some(true));
+        assert!(!r.needs_relaunch);
         if r.action == "prompt" {
             assert!(!r.opened, "prompt 不得同时 open: {:?}", r);
         } else {
@@ -1168,12 +1144,13 @@ mod tests {
         }
     }
 
-    /// Business Logic: 输入监控与录屏同构，禁止 prompt+open 双开。
-    /// Code Logic: action=prompt ⇒ !opened；settings|noop 合法。
+    /// Business Logic: 输入监控禁止 prompt 与 open 双开；禁止自动 relaunch。
+    /// Code Logic: action=prompt ⇒ !opened；settings|noop 合法；needs_relaunch=false。
     #[test]
     #[cfg(target_os = "macos")]
     fn request_input_monitoring_allow_open_never_dual_opens() {
         let r = request_permission("inputMonitoring", Some(true));
+        assert!(!r.needs_relaunch);
         if r.action == "prompt" {
             assert!(!r.opened, "prompt 不得同时 open: {:?}", r);
         } else {

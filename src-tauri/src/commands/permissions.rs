@@ -7,9 +7,9 @@
 //! Code Logic（这个模块做什么）:
 //!     - `check_permissions`：spawn_blocking（通知查询带 semaphore）。
 //!     - `request_permission`：**主线程**执行（macOS 系统授权弹窗/TCC 登记 API
-//!       在后台线程常无弹窗、不写列表，表现为「代码改了行为不变」）。
+//!       在后台线程常无弹窗、不写列表）。**禁止**因输入监控自动 cold relaunch。
 //!     - `get_app_identity`：返回 Bundle ID + flavor（dev/release）。
-//!     - `relaunch_for_permissions`：系统设置授权后让 TCC 在新进程生效。
+//!     - `relaunch_for_permissions`：仅 Welcome 用户点「重新打开应用」后生效。
 
 use crate::error::AppError;
 use crate::permissions;
@@ -41,6 +41,7 @@ pub fn get_app_identity() -> Result<permissions::AppIdentity, AppError> {
 /// Business Logic: 用户在 Welcome/设置页点「去设置」时调用；**不得**在进入 Welcome 时自动调用。
 /// Code Logic: type ∈ screenCapture|inputMonitoring|accessibility|notification；
 ///     open_settings 缺省 true；**必须主线程**执行 request_permission（CG/IOHID/AX 弹窗）。
+///     **禁止**根据 `needs_relaunch` 自动重启应用。
 #[tauri::command]
 pub async fn request_permission(
     app: AppHandle,
@@ -63,16 +64,17 @@ pub async fn request_permission(
         "requested": r.requested,
         "opened": r.opened,
         "action": r.action,
+        "needsRelaunch": false,
     }))
 }
 
-/// 为应用 TCC 授权态而 relaunch（Welcome 从系统设置返回后调用）。
+/// 为应用 TCC 授权态而 relaunch（**仅** Welcome「重新打开应用」按钮）。
 ///
 /// Business Logic:
 ///     用户在系统设置打开开关后，当前进程的 CG/AX/IOHID 检测常仍为未授权；
-///     产品要让 Welcome **显示已授权**而不展示「请手动退出」文案，须重启进程。
+///     产品要让 Welcome **显示已授权**而不展示「请手动退出」文案，须用户主动重启进程。
 ///     macOS 必须经 LaunchServices `open` 拉起 `.app`，禁止直接 exec MacOS 二进制
-///     （否则会丢 TCC 主体 / 假绿）。
+///     （否则会丢 TCC 主体 / 假绿）。**禁止** request_permission 自动调用本命令。
 ///
 /// Code Logic:
 ///     委托 `permissions::relaunch_for_permissions`；函数在成功路径不返回（进程退出）。
