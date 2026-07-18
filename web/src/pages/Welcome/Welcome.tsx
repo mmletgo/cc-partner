@@ -17,8 +17,10 @@
  * Code Logic（这个页面做什么）:
  *   - 解析 app flavor（get_app_identity）→ 专属 onboarded/skipped key
  *   - 权限卡 mapPermissions；usePermissions({ stopWhenGranted: true })
- *   - 相位机 welcomePermissionFlow：GO_SETTINGS → awaiting；visibility/focus
- *     → FOREGROUND + SYNC_DELAYS recheck；耗尽仍 denied → needs_reopen
+ *   - 相位机 welcomePermissionFlow：GO_SETTINGS → awaiting；visibility/focus /
+ *     POST_SETTINGS 调度 → FOREGROUND + SYNC_DELAYS recheck；耗尽仍 denied →
+ *     needs_reopen（「重新打开应用」保持到 sticky 全齐，recheck 不卸按钮）
+ *   - 「重新检查」在 sticky 仍 denied 时经 USER_RECHECK 强制进入同步路径
  *   - handleRequest / visibility / recheck **禁止** relaunch；仅 handleReopen 可
  *   - 「继续使用」：写 onboarded、清 skipped → /
  *   - 「暂时跳过」：写 skipped（不写 onboarded）→ /
@@ -43,6 +45,7 @@ import type { PermissionType } from '@/lib/types';
 import appIconUrl from '@/assets/app-icon.png';
 import styles from './Welcome.module.css';
 import {
+  POST_SETTINGS_SYNC_SCHEDULE_MS,
   SYNC_DELAYS_MS,
   hasStickyDenied,
   isStickyPermission,
@@ -69,6 +72,12 @@ export function Welcome() {
   const phaseRef = useRef<WelcomePermPhase>(phase);
   /** 防止 visibility/focus 并发进入多轮 sync */
   const syncInFlightRef = useRef(false);
+  /** in-flight 期间又有 sync 请求时，结束后补跑一轮，避免丢掉 needs_reopen 收口 */
+  const syncQueuedRef = useRef(false);
+  /** sticky 去设置后 schedule 的 timer，卸载时清理 */
+  const postSettingsTimersRef = useRef<number[]>([]);
+  /** 最新 runSync，供 finally 排队补跑（避免 useCallback 自引用） */
+  const runSyncRef = useRef<() => Promise<void>>(async () => undefined);
 
   const {
     status,
@@ -124,10 +133,12 @@ export function Welcome() {
    * Business Logic（为什么需要这个函数）:
    *   用户从系统设置回到应用后，应尽快反映已授权；仍未齐则进入 needs_reopen
    *   提示可选重新打开——**禁止**自动 relaunch。
+   *   in-flight 期间的再次请求必须排队，否则会丢掉耗尽收口，按钮永不出现。
    *
    * Code Logic（这个函数做什么）:
    *   仅在 awaiting/needs_reopen/syncing 时：FOREGROUND → 按 SYNC_DELAYS_MS
-   *   多轮 refresh + permissions()；SYNC_TICK / SYNC_EXHAUSTED 更新相位。
+   *   多轮 refresh + permissions()；SYNC_TICK / SYNC_EXHAUSTED 更新相位；
+   *   in-flight 时 set syncQueued，结束后补跑。
    */
   const runSyncAfterForeground = useCallback(async () => {
     const start = phaseRef.current;
@@ -135,6 +146,7 @@ export function Welcome() {
       return;
     }
     if (syncInFlightRef.current) {
+      syncQueuedRef.current = true;
       return;
     }
     syncInFlightRef.current = true;
@@ -145,42 +157,59 @@ export function Welcome() {
       inputMonitoring: { granted: false },
     };
     try {
-      dispatch({ type: 'FOREGROUND' });
-      let lastDenied = deniedSlice;
-      for (let i = 0; i < SYNC_DELAYS_MS.length; i++) {
-        const delay = SYNC_DELAYS_MS[i]!;
-        if (delay > 0) {
-          await new Promise<void>((resolve) => {
-            window.setTimeout(resolve, delay);
-          });
+      do {
+        syncQueuedRef.current = false;
+        dispatch({ type: 'FOREGROUND' });
+        let lastDenied = deniedSlice;
+        let exhausted = true;
+        for (let i = 0; i < SYNC_DELAYS_MS.length; i++) {
+          const delay = SYNC_DELAYS_MS[i]!;
+          if (delay > 0) {
+            await new Promise<void>((resolve) => {
+              window.setTimeout(resolve, delay);
+            });
+          }
+          await refresh();
+          let slice;
+          try {
+            slice = await configApi.permissions();
+          } catch {
+            // 本轮读失败：继续后续轮次；耗尽后用 lastDenied / deniedSlice 收口
+            continue;
+          }
+          if (!hasStickyDenied(slice)) {
+            dispatch({ type: 'SYNC_TICK', status: slice });
+            exhausted = false;
+            break;
+          }
+          lastDenied = {
+            screenCapture: slice.screenCapture,
+            accessibility: slice.accessibility,
+            inputMonitoring: slice.inputMonitoring,
+          };
+          if (i < SYNC_DELAYS_MS.length - 1) {
+            dispatch({ type: 'SYNC_TICK', status: lastDenied });
+          }
         }
-        await refresh();
-        let slice;
-        try {
-          slice = await configApi.permissions();
-        } catch {
-          // 本轮读失败：继续后续轮次；耗尽后用 lastDenied / deniedSlice 收口
-          continue;
+        // 多轮 recheck 后 sticky 仍 denied，或全部 catch：进入 / 保持 needs_reopen
+        if (exhausted) {
+          dispatch({ type: 'SYNC_EXHAUSTED', status: lastDenied });
         }
-        if (!hasStickyDenied(slice)) {
-          dispatch({ type: 'SYNC_TICK', status: slice });
-          return;
-        }
-        lastDenied = {
-          screenCapture: slice.screenCapture,
-          accessibility: slice.accessibility,
-          inputMonitoring: slice.inputMonitoring,
-        };
-        if (i < SYNC_DELAYS_MS.length - 1) {
-          dispatch({ type: 'SYNC_TICK', status: lastDenied });
-        }
-      }
-      // 多轮 recheck 后 sticky 仍 denied，或全部 catch：进入 needs_reopen
-      dispatch({ type: 'SYNC_EXHAUSTED', status: lastDenied });
+      } while (syncQueuedRef.current);
     } finally {
       syncInFlightRef.current = false;
+      // do-while 退出后若又排队：经 ref 补跑（phase 已是 syncing/needs_reopen）
+      if (syncQueuedRef.current) {
+        window.setTimeout(() => {
+          void runSyncRef.current();
+        }, 0);
+      }
     }
   }, [dispatch, refresh]);
+
+  useEffect(() => {
+    runSyncRef.current = runSyncAfterForeground;
+  }, [runSyncAfterForeground]);
 
   useEffect(() => {
     const onVis = () => {
@@ -194,22 +223,40 @@ export function Welcome() {
     return () => {
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('focus', onVis);
+      for (const id of postSettingsTimersRef.current) {
+        window.clearTimeout(id);
+      }
+      postSettingsTimersRef.current = [];
     };
   }, [runSyncAfterForeground]);
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户点单项「去设置」只应请求该权限；sticky 类型进入 awaiting。
-   *   macOS 打开系统设置时 WebView 常仍 visible，visibilitychange 不触发，
-   *   若只靠 focus/visibility 则永远进不了 needs_reopen（卡片一直「去设置」）。
-   *   系统设置内打开开关后当前进程 sticky TCC 常仍 denied——必须多轮 recheck 后
-   *   进入 needs_reopen 露出「重新打开应用」，否则用户只看到卡片仍「去设置」。
-   *   **禁止**自动 relaunch。
+   *   sticky 去设置后必须主动进入同步并最终 needs_reopen（系统设置时 WebView
+   *   常仍 visible，不能只靠 visibility）。**禁止**自动 relaunch。
    *
    * Code Logic（这个函数做什么）:
-   *   dispatch GO_SETTINGS；await request(type)；refresh；
-   *   sticky 则多次 schedule runSyncAfterForeground（800ms / 2.5s / 5s），
-   *   覆盖「设置窗弹出后立刻同步」与「用户在设置里授权后仍在前台」两种时序。
+   *   清旧 timer；按 POST_SETTINGS_SYNC_SCHEDULE_MS 调度 runSyncAfterForeground；
+   *   in-flight 由 queue 合并，保证能耗尽收口。
+   */
+  const schedulePostSettingsSync = useCallback(() => {
+    for (const id of postSettingsTimersRef.current) {
+      window.clearTimeout(id);
+    }
+    postSettingsTimersRef.current = POST_SETTINGS_SYNC_SCHEDULE_MS.map((delay) =>
+      window.setTimeout(() => {
+        void runSyncAfterForeground();
+      }, delay),
+    );
+  }, [runSyncAfterForeground]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户点单项「去设置」只应请求该权限；sticky 类型进入 awaiting / 保持 needs_reopen。
+   *   请求结束后主动 schedule 同步，确保「重新打开应用」会出现。
+   *
+   * Code Logic（这个函数做什么）:
+   *   dispatch GO_SETTINGS；await request(type)；refresh；sticky 则 schedulePostSettingsSync。
    */
   const handleRequest = useCallback(
     (type: PermissionType) => {
@@ -222,16 +269,11 @@ export function Welcome() {
         }
         await refresh();
         if (isStickyPermission(type)) {
-          // 不依赖 visibility：开系统设置后窗口可能一直 visible
-          for (const delay of [800, 2500, 5000]) {
-            window.setTimeout(() => {
-              void runSyncAfterForeground();
-            }, delay);
-          }
+          schedulePostSettingsSync();
         }
       })();
     },
-    [dispatch, request, refresh, runSyncAfterForeground],
+    [dispatch, request, refresh, schedulePostSettingsSync],
   );
 
   /**
@@ -248,17 +290,31 @@ export function Welcome() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   首轮失败或刷新失败后需要显式「重新检查」。
+   *   「重新检查」必须能把 sticky 仍 denied 的路径推进到 needs_reopen；
+   *   过去在 idle 时 runSync 直接 return，用户点重新检查永远看不到重新打开。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 refresh()；若处于 awaiting/needs_reopen/syncing 则走前台同步路径。
+   *   refresh；若 sticky denied → USER_RECHECK 进入 syncing/保持 needs_reopen 再跑同步；
+   *   否则仅 refresh。
    */
   const handleRecheck = useCallback(() => {
     void (async () => {
       await refresh();
-      void runSyncAfterForeground();
+      let slice;
+      try {
+        slice = await configApi.permissions();
+      } catch {
+        // 读失败仍尝试同步路径（runSync 内用 denied 片收口）
+        dispatch({ type: 'USER_RECHECK' });
+        void runSyncAfterForeground();
+        return;
+      }
+      if (hasStickyDenied(slice)) {
+        dispatch({ type: 'USER_RECHECK' });
+        void runSyncAfterForeground();
+      }
     })();
-  }, [refresh, runSyncAfterForeground]);
+  }, [dispatch, refresh, runSyncAfterForeground]);
 
   /**
    * Business Logic（为什么需要这个函数）:

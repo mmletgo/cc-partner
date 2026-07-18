@@ -5,12 +5,13 @@
  * Business Logic（为什么需要这个测试）:
  *   Welcome skip 只写 skipped 标记；点「去设置」只 request，禁止自动 relaunch
  *   （避免从系统设置返回时闪白屏/反复重启）。前台同步耗尽仍 denied 时才出现
- *   「重新打开应用」，且仅该按钮可 relaunch。
+ *   「重新打开应用」，且仅该按钮可 relaunch。方案 A：重新检查也能推进到 needs_reopen。
  *
  * Code Logic（这个测试做什么）:
  *   mock usePermissions + configApi；断言 skip → permissionSkippedKey；
- *   断言 go settings + visibility/focus + SYNC_DELAYS 全程不 relaunch；
- *   断言 needs_reopen 后点击「重新打开应用」才 relaunch 一次。
+ *   断言 go settings + 调度/visibility + SYNC_DELAYS 全程不 relaunch；
+ *   断言 needs_reopen 后点击「重新打开应用」才 relaunch 一次；
+ *   断言「重新检查」在 sticky denied 时也能露出「重新打开应用」。
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -22,7 +23,7 @@ import {
   PERMISSION_ONBOARDED_KEY,
   permissionSkippedKey,
 } from '@/hooks/usePermissions';
-import { SYNC_DELAYS_MS } from './welcomePermissionFlow';
+import { POST_SETTINGS_SYNC_SCHEDULE_MS, SYNC_DELAYS_MS } from './welcomePermissionFlow';
 
 const requestMock = vi.fn(async () => undefined);
 const refreshMock = vi.fn(async () => undefined);
@@ -121,6 +122,22 @@ async function advanceSyncDelays() {
   });
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   sticky 去设置后按 POST_SETTINGS_SYNC_SCHEDULE_MS 主动同步，须推进到 needs_reopen。
+ *
+ * Code Logic（这个函数做什么）:
+ *   推进 schedule 首个 delay + 整轮 SYNC_DELAYS。
+ */
+async function advancePostSettingsSyncToNeedsReopen() {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(POST_SETTINGS_SYNC_SCHEDULE_MS[0]!);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  await advanceSyncDelays();
+}
+
 describe('Welcome', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -153,7 +170,7 @@ describe('Welcome', () => {
     expect(localStorage.getItem(PERMISSION_ONBOARDED_KEY)).toBeNull();
   });
 
-  test('go settings + foreground sync never auto-relaunches; reopen button relaunches once', async () => {
+  test('go settings + scheduled sync never auto-relaunches; reopen button relaunches once', async () => {
     vi.useFakeTimers();
     await i18n.changeLanguage('zh');
     render(
@@ -179,7 +196,69 @@ describe('Welcome', () => {
     expect(requestMock).toHaveBeenCalled();
     expect(relaunchMock).not.toHaveBeenCalled();
 
-    // 从系统设置返回：visibility + focus 触发多轮 SYNC，全程不得 relaunch
+    // 不依赖 visibility：POST_SETTINGS 调度即可耗尽到 needs_reopen
+    await advancePostSettingsSyncToNeedsReopen();
+
+    expect(relaunchMock).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '重新打开应用' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: '重新打开应用' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(relaunchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('recheck with sticky denied reaches needs_reopen without auto-relaunch', async () => {
+    vi.useFakeTimers();
+    await i18n.changeLanguage('zh');
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <Welcome />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '重新检查' }));
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // USER_RECHECK 后进入 syncing，推进 SYNC_DELAYS
+    await advanceSyncDelays();
+
+    expect(relaunchMock).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '重新打开应用' })).toBeTruthy();
+  });
+
+  test('visibility return from settings still never auto-relaunches', async () => {
+    vi.useFakeTimers();
+    await i18n.changeLanguage('zh');
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <Welcome />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const go = screen.getAllByRole('button', { name: '去设置' });
+    fireEvent.click(go[0]!);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
     await act(async () => {
       fireReturnFromSettings();
       await Promise.resolve();
@@ -188,13 +267,6 @@ describe('Welcome', () => {
     await advanceSyncDelays();
 
     expect(relaunchMock).not.toHaveBeenCalled();
-    // permissions 保持全 false → needs_reopen
     expect(screen.getByRole('button', { name: '重新打开应用' })).toBeTruthy();
-
-    fireEvent.click(screen.getByRole('button', { name: '重新打开应用' }));
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(relaunchMock).toHaveBeenCalledTimes(1);
   });
 });

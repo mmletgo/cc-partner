@@ -30,21 +30,43 @@ describe('welcomePermissionFlow', () => {
     ).toBe('awaiting');
   });
 
+  test('GO_SETTINGS on sticky keeps needs_reopen (button must not vanish)', () => {
+    expect(
+      reduceWelcomePermPhase('needs_reopen', {
+        type: 'GO_SETTINGS',
+        permission: 'screenCapture',
+      }),
+    ).toBe('needs_reopen');
+  });
+
   test('GO_SETTINGS on notification stays idle', () => {
     expect(
       reduceWelcomePermPhase('idle', { type: 'GO_SETTINGS', permission: 'notification' }),
     ).toBe('idle');
   });
 
-  test('FOREGROUND only from awaiting -> syncing', () => {
+  test('FOREGROUND only from awaiting -> syncing; keeps needs_reopen', () => {
     expect(reduceWelcomePermPhase('awaiting', { type: 'FOREGROUND' })).toBe('syncing');
     expect(reduceWelcomePermPhase('idle', { type: 'FOREGROUND' })).toBe('idle');
+    expect(reduceWelcomePermPhase('needs_reopen', { type: 'FOREGROUND' })).toBe('needs_reopen');
+  });
+
+  test('USER_RECHECK from idle enters syncing; keeps needs_reopen', () => {
+    expect(reduceWelcomePermPhase('idle', { type: 'USER_RECHECK' })).toBe('syncing');
+    expect(reduceWelcomePermPhase('awaiting', { type: 'USER_RECHECK' })).toBe('syncing');
+    expect(reduceWelcomePermPhase('needs_reopen', { type: 'USER_RECHECK' })).toBe('needs_reopen');
   });
 
   test('SYNC_TICK with sticky granted ends at idle', () => {
+    expect(reduceWelcomePermPhase('syncing', { type: 'SYNC_TICK', status: stickyOk })).toBe(
+      'idle',
+    );
+  });
+
+  test('SYNC_TICK on needs_reopen with sticky denied keeps needs_reopen', () => {
     expect(
-      reduceWelcomePermPhase('syncing', { type: 'SYNC_TICK', status: stickyOk }),
-    ).toBe('idle');
+      reduceWelcomePermPhase('needs_reopen', { type: 'SYNC_TICK', status: denied }),
+    ).toBe('needs_reopen');
   });
 
   test('SYNC_EXHAUSTED with sticky denied -> needs_reopen', () => {
