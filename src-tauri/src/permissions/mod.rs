@@ -69,7 +69,9 @@ const K_IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
 const K_IOHID_ACCESS_TYPE_GRANTED: u32 = 0;
 #[cfg(target_os = "macos")]
 const K_IOHID_ACCESS_TYPE_DENIED: u32 = 1;
-// Unknown = 2：从未登记时常见，不得当「已在列表」
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+const K_IOHID_ACCESS_TYPE_UNKNOWN: u32 = 2;
 
 /// 发布版 Bundle Identifier（与 `tauri.conf.json` `identifier` 对齐）。
 pub const PRODUCT_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app";
@@ -409,15 +411,23 @@ pub fn open_permission_settings(perm_type: &str) -> bool {
 ///     check 路径禁止调用；授权判定只信 IOHIDCheckAccess，不信 CGPreflight。
 #[cfg(target_os = "macos")]
 fn register_input_monitoring_subject(silent: bool) -> bool {
-    // EventTap 必须 enable + 挂 runloop 才更可能写入 TCC 列表；只 Create 立刻 Release 常无效。
-    let tap_ok = attempt_listen_only_event_tap_registration();
+    // 先调系统 Request（可能弹窗 / 写 TCC），再 EventTap 挂 runloop 加固列表条目。
+    // 顺序很重要：先 EventTap 在无权限时 create 失败，且可能干扰后续 Request。
     let iohid_ok = unsafe { IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
-    if silent {
-        // Welcome 路径：IOHID + EventTap 足以登记进列表；禁止 CGRequest
-        return tap_ok || iohid_ok;
-    }
-    let cg_ok = unsafe { CGRequestListenEventAccess() };
-    tap_ok || iohid_ok || cg_ok
+    let cg_ok = if silent {
+        false
+    } else {
+        unsafe { CGRequestListenEventAccess() }
+    };
+    let tap_ok = attempt_listen_only_event_tap_registration();
+    tracing::info!(
+        silent,
+        iohid_ok,
+        cg_ok,
+        tap_ok,
+        "register_input_monitoring_subject done"
+    );
+    iohid_ok || cg_ok || tap_ok
 }
 
 /// 创建 listen-only event tap 并短暂接入 runloop，以登记 TCC 主体。
@@ -773,13 +783,18 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "inputMonitoring" => {
-                // **与 screenCapture 同一模型**（用户要求：中转系统弹窗登记）：
-                // 已授权 → noop；
-                // 已在列表且明确关闭 → 只 open；
-                // 否则 → 只完整系统登记弹窗（IOHID+CGRequest+EventTap），**绝不**同次 open。
-                // 「已在列表」以 IOHID==Denied 为准（TCC 对 ListenEvent 常误报 Denied/Unknown，
-                // 仅靠 TCC Denied 会永远走 open、永远不弹窗 → 列表永远空）。
-                // ok 只走 check（IOHID Granted，不信 CGPreflight）。
+                // 对齐录屏「系统弹窗中转」+ 修复 macOS 26 假 Denied：
+                // 实测日志：列表为空时 iohid/tcc 仍可能 =Denied(1)。若把 Denied 当
+                // already_in_list 只 open，则永远不弹窗、列表永远空（用户报告的「完全没变」）。
+                //
+                // 分流（互斥，禁止弹窗与 open 同 tick）：
+                // 1) 已授权 → noop
+                // 2) IOHID Unknown(2) 或非 Denied → **只**完整系统登记弹窗
+                //    （IOHIDRequest+CGRequest+EventTap），不 open（对齐录屏首次）
+                // 3) IOHID Denied(1) → 先强制登记刷新列表条目（Denied 时常无弹窗），
+                //    再 open 设置（用户可拨开关）；不依赖「列表一定已有条目」的假前提
+                //
+                // ok 只走 check（IOHID Granted，不信 CGPreflight 防假绿）。
                 if check_input_monitoring_access() {
                     return RequestPermissionResult {
                         ok: true,
@@ -790,25 +805,50 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
                 let tcc = tcc_listen_event_preflight();
                 let iohid = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
-                // 仅当 IOHID 明确 Denied 才视为「已在列表未开」；Unknown/其它 → 必须弹窗登记
-                let already_in_list = iohid == K_IOHID_ACCESS_TYPE_DENIED;
+                // 仅 Unknown 走纯弹窗；Denied 走「登记+设置」；其它值当 Unknown 处理
+                let is_denied = iohid == K_IOHID_ACCESS_TYPE_DENIED;
                 tracing::info!(
                     allow_open,
                     tcc = ?tcc,
                     iohid,
-                    already_in_list,
+                    is_denied,
                     "request_permission(inputMonitoring) branch"
                 );
-                if allow_open && already_in_list {
-                    let opened = open_permission_settings(perm_type);
-                    RequestPermissionResult {
-                        ok: check_input_monitoring_access(),
-                        requested: false,
+                if is_denied {
+                    // 可能列表空但仍 Denied：强制登记刷新主体，再开设置
+                    let requested =
+                        register_input_monitoring_subject(/* silent */ false);
+                    let opened = if allow_open {
+                        // 登记 API 返回后再 open（串行，非同 tick 叠在弹窗上；
+                        // Denied 时 Request 通常立即返回不弹窗）
+                        open_permission_settings(perm_type)
+                    } else {
+                        false
+                    };
+                    let ok = check_input_monitoring_access();
+                    tracing::info!(
+                        requested,
                         opened,
-                        action: if opened { "settings" } else { "noop" },
+                        ok,
+                        iohid_after = unsafe {
+                            IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT)
+                        },
+                        "request_permission(inputMonitoring) denied path done"
+                    );
+                    RequestPermissionResult {
+                        ok,
+                        requested,
+                        opened,
+                        action: if opened {
+                            "settings"
+                        } else if requested {
+                            "prompt"
+                        } else {
+                            "noop"
+                        },
                     }
                 } else {
-                    // 首次/Unknown：主线程系统弹窗登记（对齐录屏 CGRequest，不 open）
+                    // Unknown/其它：只系统弹窗登记，对齐录屏首次（不 open）
                     let requested =
                         register_input_monitoring_subject(/* silent */ false);
                     let ok = check_input_monitoring_access();
