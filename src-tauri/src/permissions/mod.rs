@@ -745,6 +745,91 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
     }
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     用户在系统设置打开 TCC 开关后，当前进程的检测 API 常仍返回未授权；
+///     Welcome 要在不展示「请手动退出」文案的前提下让 UI 显示已授权，
+///     必须重启进程以应用系统侧授权态。
+///
+/// Code Logic（这个函数做什么）:
+///     macOS：解析 enclosing `*.app`，用 LaunchServices `open` 延迟拉起后 `app.exit(0)`；
+///     **禁止**直接 exec `Contents/MacOS/*`（会丢 TCC 主体）。非 macOS / 解析失败时
+///     回退 `app.request_restart()`。成功路径进程退出，调用方不应依赖 Ok 返回。
+pub fn relaunch_for_permissions(app: &tauri::AppHandle) -> Result<(), crate::error::AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle) = enclosing_app_bundle_path() {
+            let path = bundle.display().to_string();
+            // 延迟 open：确保当前实例先退出，避免 open 只 activate 旧进程
+            let script = format!(
+                "sleep 0.4; open {}",
+                shell_single_quote(&path)
+            );
+            match std::process::Command::new("sh").arg("-c").arg(&script).spawn() {
+                Ok(_) => {
+                    tracing::info!(
+                        app_bundle = %path,
+                        "relaunch_for_permissions: scheduled open via LaunchServices; exiting"
+                    );
+                    app.exit(0);
+                    // exit 后理论不可达；给类型系统一条路径
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        app_bundle = %path,
+                        "relaunch_for_permissions: open schedule failed; fallback request_restart"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "relaunch_for_permissions: no enclosing .app; fallback request_restart"
+            );
+        }
+    }
+    app.request_restart();
+    Ok(())
+}
+
+/// Business Logic: relaunch 必须打开 `.app` 包而非裸二进制，以保留 TCC 主体。
+/// Code Logic: current_exe → …/Name.app/Contents/MacOS/exe 向上三级得到 .app。
+#[cfg(target_os = "macos")]
+fn enclosing_app_bundle_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()?.to_str()? != "Contents" {
+        return None;
+    }
+    let app_dir = contents_dir.parent()?;
+    let name = app_dir.file_name()?.to_str()?;
+    if !name.ends_with(".app") {
+        return None;
+    }
+    Some(app_dir.to_path_buf())
+}
+
+/// Business Logic: 把路径安全嵌入 `sh -c` 单引号字符串。
+/// Code Logic: `' -> '\''` 经典 shell 转义。
+#[cfg(target_os = "macos")]
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,6 +868,19 @@ mod tests {
         // opened 在 open_settings=false 时必须为 false
         assert!(!r.opened);
         let _ = (r.ok, r.requested);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     relaunch 路径把 .app 路径塞进 `sh -c`，单引号必须可安全嵌套。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     对含空格/单引号路径断言 shell_single_quote 往返可被 shell 解析为原串。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn shell_single_quote_escapes_apostrophe() {
+        assert_eq!(shell_single_quote("a"), "'a'");
+        assert_eq!(shell_single_quote("a b"), "'a b'");
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
     }
 
     /// Business Logic（为什么需要这个测试）:

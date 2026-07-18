@@ -360,6 +360,7 @@ pub fn run() {
             permissions_cmd::check_permissions,
             permissions_cmd::request_permission,
             permissions_cmd::get_app_identity,
+            permissions_cmd::relaunch_for_permissions,
             // M8 自动更新（5 命令，返回类型对齐前端 types.ts）
             updater_cmd::check_update,
             updater_cmd::download_update,

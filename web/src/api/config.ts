@@ -132,6 +132,17 @@ export const configApi = {
   requestPermission: (type: PermissionType, openSettings?: boolean) =>
     invoke<PermissionRequestResult>('request_permission', { type, openSettings }),
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   系统设置打开 TCC 开关后当前进程检测常仍为未授权；Welcome 静默 relaunch
+   *   以在新进程反映已授权，不向用户展示「请退出重开」文案。
+   *
+   * Code Logic（这个函数做什么）:
+   *   invoke relaunch_for_permissions；macOS 经 LaunchServices open .app 后退出。
+   *   成功路径进程退出，Promise 可能永不 resolve。
+   */
+  relaunchForPermissions: () => invoke<void>('relaunch_for_permissions'),
+
   /** 获取 GitHub 私有仓库云端同步配置 */
   getCloudSyncConfig: () => invoke<CloudSyncConfig>('get_cloud_sync_config'),
 

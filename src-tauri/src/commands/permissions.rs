@@ -8,9 +8,11 @@
 //!     - `check_permissions` / `request_permission`：在 blocking 线程执行，避免
 //!       UNUserNotificationCenter 主线程 semaphore 死锁。
 //!     - `get_app_identity`：返回 Bundle ID + flavor（dev/release）。
+//!     - `relaunch_for_permissions`：系统设置授权后让 TCC 在新进程生效（macOS 用 `open` .app）。
 
 use crate::error::AppError;
 use crate::permissions;
+use tauri::AppHandle;
 
 /// 查询当前权限状态（screenCapture / inputMonitoring / accessibility / notification）。
 ///
@@ -53,4 +55,19 @@ pub async fn request_permission(
         "requested": r.requested,
         "opened": r.opened,
     }))
+}
+
+/// 为应用 TCC 授权态而 relaunch（Welcome 从系统设置返回后调用）。
+///
+/// Business Logic:
+///     用户在系统设置打开开关后，当前进程的 CG/AX/IOHID 检测常仍为未授权；
+///     产品要让 Welcome **显示已授权**而不展示「请手动退出」文案，须重启进程。
+///     macOS 必须经 LaunchServices `open` 拉起 `.app`，禁止直接 exec MacOS 二进制
+///     （否则会丢 TCC 主体 / 假绿）。
+///
+/// Code Logic:
+///     委托 `permissions::relaunch_for_permissions`；函数在成功路径不返回（进程退出）。
+#[tauri::command]
+pub fn relaunch_for_permissions(app: AppHandle) -> Result<(), AppError> {
+    permissions::relaunch_for_permissions(&app)
 }
