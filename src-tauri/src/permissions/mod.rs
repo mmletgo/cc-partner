@@ -399,35 +399,37 @@ pub fn open_permission_settings(perm_type: &str) -> bool {
 /// Business Logic: 输入监控列表只有在进程「尝试监听输入」后才出现本 app；仅 open 设置不够。
 ///
 /// Code Logic:
-///     - `silent=true`（Welcome 去设置默认）：**只** listen-only EventTap 登记，
-///       **禁止** IOHIDRequestAccess / CGRequestListenEventAccess（二者会弹系统框，
-///       与随后 open 设置形成双开，违反 spec）。
-///     - `silent=false`：完整登记（含可能弹框的 Request API），仅 open_settings=false 路径用。
-///     check 路径禁止 EventTap。
+///     - `silent=true`：listen-only EventTap（挂 runloop + enable）+ `IOHIDRequestAccess`
+///       （写入列表所需；**不**调 CGRequestListenEventAccess，避免污染/多余弹框）。
+///     - `silent=false`：同上 + `CGRequestListenEventAccess`（完整登记，可能弹框）。
+///     check 路径禁止调用本函数。授权判定只信 IOHIDCheckAccess，不信 CGPreflight。
 #[cfg(target_os = "macos")]
 fn register_input_monitoring_subject(silent: bool) -> bool {
+    // EventTap 必须 enable + 挂 runloop 才更可能写入 TCC 列表；只 Create 立刻 Release 常无效。
+    let tap_ok = attempt_listen_only_event_tap_registration();
+    let iohid_ok = unsafe { IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) };
     if silent {
-        attempt_listen_only_event_tap_registration();
-        // EventTap 无布尔成功语义；调用本身即登记尝试
-        return true;
+        // Welcome 路径：IOHID + EventTap 足以登记进列表；禁止 CGRequest
+        return tap_ok || iohid_ok;
     }
-    unsafe {
-        let requested_iohid = IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT);
-        let requested_cg = CGRequestListenEventAccess();
-        attempt_listen_only_event_tap_registration();
-        requested_iohid || requested_cg
-    }
+    let cg_ok = unsafe { CGRequestListenEventAccess() };
+    tap_ok || iohid_ok || cg_ok
 }
 
-/// 尝试创建 listen-only event tap 以登记 TCC 主体（立即释放；不用于授权判定）。
+/// 创建 listen-only event tap 并短暂接入 runloop，以登记 TCC 主体。
+///
+/// Business Logic: 仅 `CGEventTapCreate` 立刻 `CFRelease` 在新 macOS 上常**不进**
+///     输入监控列表；需 enable + runloop source。
+/// Code Logic: Create → CFMachPortCreateRunLoopSource → AddSource → Enable →
+///     CFRunLoopRunInMode(~0.15s) → 拆除；返回是否成功创建 tap。不用于授权判定。
 #[cfg(target_os = "macos")]
-fn attempt_listen_only_event_tap_registration() {
-    // CGEventTapLocation / Placement / Options
+fn attempt_listen_only_event_tap_registration() -> bool {
     const K_CG_SESSION_EVENT_TAP: u32 = 1;
     const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
     const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
-    // CGEventMask bit for key down/up (kCGEventKeyDown=10, KeyUp=11)
     const KEY_MASK: u64 = (1u64 << 10) | (1u64 << 11);
+    // kCFRunLoopDefaultMode
+    const DEFAULT_MODE: &[u8] = b"kCFRunLoopDefaultMode ";
 
     type TapCallback = Option<
         unsafe extern "C" fn(
@@ -447,6 +449,33 @@ fn attempt_listen_only_event_tap_registration() {
             callback: TapCallback,
             user_info: *mut std::ffi::c_void,
         ) -> *mut std::ffi::c_void;
+        fn CGEventTapEnable(tap: *mut std::ffi::c_void, enable: bool);
+        fn CFMachPortCreateRunLoopSource(
+            allocator: *const std::ffi::c_void,
+            port: *mut std::ffi::c_void,
+            order: isize,
+        ) -> *mut std::ffi::c_void;
+        fn CFRunLoopGetCurrent() -> *mut std::ffi::c_void;
+        fn CFRunLoopAddSource(
+            rl: *mut std::ffi::c_void,
+            source: *mut std::ffi::c_void,
+            mode: *const std::ffi::c_void,
+        );
+        fn CFRunLoopRemoveSource(
+            rl: *mut std::ffi::c_void,
+            source: *mut std::ffi::c_void,
+            mode: *const std::ffi::c_void,
+        );
+        fn CFRunLoopRunInMode(
+            mode: *const std::ffi::c_void,
+            seconds: f64,
+            return_after_source_handled: u8,
+        ) -> i32;
+        fn CFStringCreateWithCString(
+            alloc: *const std::ffi::c_void,
+            c_str: *const std::os::raw::c_char,
+            encoding: u32,
+        ) -> *const std::ffi::c_void;
     }
 
     unsafe extern "C" fn passthrough_tap(
@@ -467,9 +496,31 @@ fn attempt_listen_only_event_tap_registration() {
             Some(passthrough_tap),
             std::ptr::null_mut(),
         );
-        if !tap.is_null() {
-            CFRelease(tap);
+        if tap.is_null() {
+            tracing::debug!("input_monitoring EventTap create failed (expected without grant)");
+            return false;
         }
+        let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+        let rl = CFRunLoopGetCurrent();
+        let mode = CFStringCreateWithCString(
+            std::ptr::null(),
+            DEFAULT_MODE.as_ptr() as *const std::os::raw::c_char,
+            K_CFSTRING_ENCODING_UTF8,
+        );
+        if !source.is_null() && !mode.is_null() {
+            CFRunLoopAddSource(rl, source, mode);
+            CGEventTapEnable(tap, true);
+            // 短暂泵 runloop，让 TCC 有机会登记主体
+            let _ = CFRunLoopRunInMode(mode, 0.15, 0);
+            CGEventTapEnable(tap, false);
+            CFRunLoopRemoveSource(rl, source, mode);
+            CFRelease(source);
+        }
+        if !mode.is_null() {
+            CFRelease(mode);
+        }
+        CFRelease(tap);
+        true
     }
 }
 
@@ -665,8 +716,8 @@ pub fn check_permissions() -> PermissionsStatus {
 ///     静默 API 在 macOS 新版本上无法写入列表；「只 open」导致列表无 app；
 ///     「静默登记+open」仍无列表；把 TCC=0 当已授权会假绿。
 ///     - screenCapture：已授权 → noop；TCC Denied → 只 open；否则只 CGRequest（不 open）。
-///     - inputMonitoring：已授权 → noop；allow_open → silent EventTap + 只 open
-///       （**禁止** IOHID/CG Request，否则 check 假绿）；open_settings=false 才完整 Request。
+///     - inputMonitoring：已授权 → noop；allow_open → IOHID+EventTap(runloop) 登记后 open
+///       （**禁止** CGRequest；check 只信 IOHID 防假绿）；open_settings=false 可含 CGRequest。
 ///     - accessibility：同上（Denied → open；Unknown → AX prompt）。
 ///     - notification：authorized → noop；notDetermined → prompt；denied → settings。
 ///
@@ -719,11 +770,13 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                 }
             }
             "inputMonitoring" => {
-                // Welcome allow_open：**禁止** IOHIDRequestAccess / CGRequestListenEventAccess。
-                // 二者调用后 check 会假绿（用户未开开关 Welcome 变已授权）。
-                // 路径：已授权 → noop；否则 silent EventTap 尝试写入列表 + 只 open 设置
-                // （与「去设置直接进系统设置」一致；列表靠 EventTap + 打开面板触发刷新）。
-                // open_settings=false 才走完整 Request 登记（仍不 open）。
+                // 列表登记需要 IOHIDRequestAccess + 有效 EventTap（挂 runloop）；
+                // 仅 open 或「Create 立刻 Release」进不了列表。
+                // Welcome allow_open：
+                //   - 已授权 → noop
+                //   - TCC Denied（已在列表）→ 只 open
+                //   - 未在列表 → silent 登记（IOHID+EventTap，**无** CGRequest）再 open
+                // check 只信 IOHID Granted（不信 CG），避免 Request 后假绿。
                 if check_input_monitoring_access() {
                     return RequestPermissionResult {
                         ok: true,
@@ -741,25 +794,30 @@ pub fn request_permission(perm_type: &str, open_settings: Option<bool>) -> Reque
                     "request_permission(inputMonitoring) branch"
                 );
                 if allow_open {
-                    // 未在列表：仅 silent EventTap（无 Request 弹框、不污染 check）
                     let requested = if already_in_list {
                         false
                     } else {
+                        // 写入列表：IOHID + runloop EventTap（silent=true 不含 CGRequest）
                         register_input_monitoring_subject(/* silent */ true)
                     };
                     if !already_in_list {
-                        std::thread::sleep(std::time::Duration::from_millis(350));
+                        std::thread::sleep(std::time::Duration::from_millis(400));
                     }
                     let opened = open_permission_settings(perm_type);
-                    // 关键：ok 必须再 check，且 Request 未调用时不应假绿
+                    let ok = check_input_monitoring_access();
+                    tracing::info!(
+                        requested,
+                        opened,
+                        ok,
+                        "request_permission(inputMonitoring) allow_open done"
+                    );
                     RequestPermissionResult {
-                        ok: check_input_monitoring_access(),
+                        ok,
                         requested,
                         opened,
                         action: if opened { "settings" } else { "noop" },
                     }
                 } else {
-                    // 非 Welcome：可弹框登记；ok 仍走 check（若系统假绿至少 Welcome 路径干净）
                     let requested =
                         register_input_monitoring_subject(/* silent */ false);
                     RequestPermissionResult {
