@@ -9,11 +9,11 @@ pub const INTERNAL_DEV_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app.internal.de
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InputMonitoringState {
-    /// IOHID 明确报告已授权。
+    /// IOHID 或公开 CoreGraphics ListenEvent 预检明确报告已授权。
     Granted,
-    /// IOHID 明确报告已拒绝，用户必须显式打开系统设置。
+    /// 当前进程已显式请求但公开 ListenEvent 预检仍未授权。
     Denied,
-    /// IOHID 尚未记录决定，允许用户显式请求一次系统授权。
+    /// IOHID 尚未记录决定，或 macOS 26 在本进程请求前返回假 Denied。
     NotDetermined,
     /// 当前构建不是稳定内部签名主体，或系统返回未知状态。
     Unavailable,
@@ -67,7 +67,7 @@ pub(crate) fn state_from_raw(supported: bool, raw: u32) -> InputMonitoringState 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InputMonitoringOperation {
-    /// 调用了一次公开 `IOHIDRequestAccess`。
+    /// 调用了公开 ListenEvent Request 登记路径。
     Request,
     /// 当前状态不允许请求，未产生系统副作用。
     Noop,
@@ -82,9 +82,20 @@ pub struct InputMonitoringRequestResult {
     pub after: InputMonitoringState,
 }
 
-/// 隔离公开 IOHID 系统调用，便于用纯内存 provider 验证状态机而不触碰宿主 TCC。
+/// 隔离公开 IOHID / CoreGraphics ListenEvent 系统调用，便于用纯内存 provider 验证
+/// 状态机而不触碰宿主 TCC。
 pub(crate) trait InputMonitoringAccessProvider {
     fn check(&self) -> u32;
+    fn preflight_listen_event(&self) -> bool {
+        false
+    }
+    fn requested_in_process(&self) -> bool {
+        false
+    }
+    fn mark_requested_in_process(&self) {}
+    fn request_listen_event(&self) -> bool {
+        false
+    }
     fn request(&self) -> bool;
 }
 
@@ -96,12 +107,20 @@ pub(crate) fn check_with_provider<P: InputMonitoringAccessProvider>(
     if !supported {
         return InputMonitoringState::Unavailable.into();
     }
-    state_from_raw(true, provider.check()).into()
+    let raw = provider.check();
+    if raw == 0 || provider.preflight_listen_event() {
+        return InputMonitoringState::Granted.into();
+    }
+    match raw {
+        1 if !provider.requested_in_process() => InputMonitoringState::NotDetermined.into(),
+        _ => state_from_raw(true, raw).into(),
+    }
 }
 
-/// 在指定 IOHID provider 上执行一次显式 Request 状态机。
+/// 在指定公开系统 API provider 上执行一次显式 Request 状态机。
 ///
-/// 仅 `NotDetermined` 调 Request；Denied/Granted/Unavailable 都是无副作用 noop。
+/// 仅 `NotDetermined` 调 Request；依次调用 CoreGraphics 与 IOHID 两条公开 ListenEvent
+/// 请求路径。Denied/Granted/Unavailable 都是无副作用 noop。
 pub(crate) fn request_with_provider<P: InputMonitoringAccessProvider>(
     provider: &P,
     supported: bool,
@@ -114,7 +133,7 @@ pub(crate) fn request_with_provider<P: InputMonitoringAccessProvider>(
         };
     }
 
-    let before = state_from_raw(true, provider.check());
+    let before = check_with_provider(provider, true).state;
     if before != InputMonitoringState::NotDetermined {
         return InputMonitoringRequestResult {
             operation: InputMonitoringOperation::Noop,
@@ -123,11 +142,13 @@ pub(crate) fn request_with_provider<P: InputMonitoringAccessProvider>(
         };
     }
 
+    provider.mark_requested_in_process();
+    let _ = provider.request_listen_event();
     let _ = provider.request();
     InputMonitoringRequestResult {
         operation: InputMonitoringOperation::Request,
         before,
-        after: state_from_raw(true, provider.check()),
+        after: check_with_provider(provider, true).state,
     }
 }
 
@@ -139,10 +160,21 @@ extern "C" {
 }
 
 #[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGRequestListenEventAccess() -> bool;
+}
+
+#[cfg(target_os = "macos")]
 const K_IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
 
 #[cfg(target_os = "macos")]
 struct SystemInputMonitoringProvider;
+
+#[cfg(target_os = "macos")]
+static REQUESTED_INPUT_MONITORING_IN_PROCESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 impl InputMonitoringAccessProvider for SystemInputMonitoringProvider {
@@ -152,6 +184,22 @@ impl InputMonitoringAccessProvider for SystemInputMonitoringProvider {
 
     fn request(&self) -> bool {
         unsafe { IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) }
+    }
+
+    fn request_listen_event(&self) -> bool {
+        unsafe { CGRequestListenEventAccess() }
+    }
+
+    fn preflight_listen_event(&self) -> bool {
+        unsafe { CGPreflightListenEventAccess() }
+    }
+
+    fn requested_in_process(&self) -> bool {
+        REQUESTED_INPUT_MONITORING_IN_PROCESS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn mark_requested_in_process(&self) {
+        REQUESTED_INPUT_MONITORING_IN_PROCESS.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -173,7 +221,7 @@ pub fn check_input_monitoring_state(_bundle_id: Option<&str>) -> InputMonitoring
 
 /// 显式请求输入监控授权。
 ///
-/// 仅 macOS + 稳定内部主体 + NotDetermined 会调用一次公开 IOHID Request。
+/// 仅 macOS + 稳定内部主体 + NotDetermined 会调用公开 ListenEvent Request。
 #[cfg(target_os = "macos")]
 pub fn request_input_monitoring_access(bundle_id: Option<&str>) -> InputMonitoringRequestResult {
     request_with_provider(
@@ -193,7 +241,7 @@ pub fn request_input_monitoring_access(_bundle_id: Option<&str>) -> InputMonitor
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use super::{
         check_with_provider, is_supported_subject, request_with_provider, state_from_raw,
@@ -205,6 +253,9 @@ mod tests {
         state: Cell<u32>,
         state_after_request: u32,
         request_calls: Cell<usize>,
+        request_order: RefCell<Vec<&'static str>>,
+        listen_event_granted: Cell<bool>,
+        requested_in_process: Cell<bool>,
     }
 
     impl FakeProvider {
@@ -213,6 +264,9 @@ mod tests {
                 state: Cell::new(state),
                 state_after_request,
                 request_calls: Cell::new(0),
+                request_order: RefCell::new(Vec::new()),
+                listen_event_granted: Cell::new(false),
+                requested_in_process: Cell::new(false),
             }
         }
     }
@@ -223,9 +277,27 @@ mod tests {
         }
 
         fn request(&self) -> bool {
+            self.request_order.borrow_mut().push("iohid");
             self.request_calls.set(self.request_calls.get() + 1);
             self.state.set(self.state_after_request);
             true
+        }
+
+        fn request_listen_event(&self) -> bool {
+            self.request_order.borrow_mut().push("coreGraphics");
+            false
+        }
+
+        fn preflight_listen_event(&self) -> bool {
+            self.listen_event_granted.get()
+        }
+
+        fn requested_in_process(&self) -> bool {
+            self.requested_in_process.get()
+        }
+
+        fn mark_requested_in_process(&self) {
+            self.requested_in_process.set(true);
         }
     }
 
@@ -268,6 +340,7 @@ mod tests {
     #[test]
     fn denied_request_is_noop() {
         let provider = FakeProvider::new(1, 0);
+        provider.requested_in_process.set(true);
         let result = request_with_provider(&provider, true);
 
         assert_eq!(result.operation, InputMonitoringOperation::Noop);
@@ -290,6 +363,50 @@ mod tests {
         assert_eq!(result.before, InputMonitoringState::NotDetermined);
         assert_eq!(result.after, InputMonitoringState::Denied);
         assert_eq!(provider.request_calls.get(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     macOS 26 上 IOHID Request 可能直接把状态改成 Denied，却既不弹系统中转框也不把
+    ///     应用登记进输入监控列表；一旦先走 IOHID，后续公开 Request 已失去首次登记机会。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     模拟 CoreGraphics 首次登记未直接授权、IOHID 作为后备请求的路径，锁定两个公开
+    ///     ListenEvent API 的调用顺序必须是 CoreGraphics 在前、IOHID 在后。
+    #[test]
+    fn not_determined_registers_with_core_graphics_before_iohid_fallback() {
+        let provider = FakeProvider::new(2, 1);
+
+        let result = request_with_provider(&provider, true);
+
+        assert_eq!(result.operation, InputMonitoringOperation::Request);
+        assert_eq!(result.before, InputMonitoringState::NotDetermined);
+        assert_eq!(result.after, InputMonitoringState::Denied);
+        assert_eq!(
+            provider.request_order.borrow().as_slice(),
+            ["coreGraphics", "iohid"]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     macOS 26 首次检查可能直接错报 Denied；进入显式请求后不能因为该假状态而跳过
+    ///     Apple DTS 推荐的 IOHID Request 后备路径。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     模拟进程首次检查 raw=Denied，断言用户显式请求时仍按 CoreGraphics → IOHID
+    ///     顺序各调用一次，最终才稳定为 Denied 并交给手动「+」登记兜底。
+    #[test]
+    fn false_denied_first_request_still_calls_both_public_apis() {
+        let provider = FakeProvider::new(1, 1);
+
+        let result = request_with_provider(&provider, true);
+
+        assert_eq!(result.operation, InputMonitoringOperation::Request);
+        assert_eq!(result.before, InputMonitoringState::NotDetermined);
+        assert_eq!(result.after, InputMonitoringState::Denied);
+        assert_eq!(
+            provider.request_order.borrow().as_slice(),
+            ["coreGraphics", "iohid"]
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -322,5 +439,39 @@ mod tests {
         assert_eq!(result.state, InputMonitoringState::NotDetermined);
         assert!(!result.granted);
         assert_eq!(provider.request_calls.get(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     macOS 26 会在刚重置、尚未请求时把 IOHID ListenEvent 错报为 Denied；若直接相信该值，
+    ///     Welcome 只会显示“打开系统设置”，用户永远没有触发登记弹窗的机会。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     注入 IOHID=Denied、CG 未授权且当前进程尚未请求，断言查询仍给出可请求的
+    ///     NotDetermined，而不是提前锁死为 Denied。
+    #[test]
+    fn iohid_denied_before_process_request_remains_requestable() {
+        let provider = FakeProvider::new(1, 1);
+
+        let result = check_with_provider(&provider, true);
+
+        assert_eq!(result.state, InputMonitoringState::NotDetermined);
+        assert!(!result.granted);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     macOS 26 的 IOHID 查询即使在 ListenEvent 已授权后仍可能返回 Denied；权限页不能因此
+    ///     永久假红并阻止健康采样。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     注入 IOHID=Denied 但公开 CoreGraphics ListenEvent preflight=true，断言最终状态为 Granted。
+    #[test]
+    fn core_graphics_preflight_repairs_iohid_false_denial() {
+        let provider = FakeProvider::new(1, 1);
+        provider.listen_event_granted.set(true);
+
+        let result = check_with_provider(&provider, true);
+
+        assert_eq!(result.state, InputMonitoringState::Granted);
+        assert!(result.granted);
     }
 }

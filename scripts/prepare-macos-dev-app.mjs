@@ -9,9 +9,10 @@
  *   显示名与 Bundle ID，便于单独授权、互不抢开关；输入监控只允许固定内部签名通道。
  *
  * Code Logic（这个脚本做什么）:
- *   在 `src-tauri/target/debug/cc-partner-dev.app` 组装开发包：
+ *   组装开发包：
  *   - 默认社区壳：com.cc-partner.app.dev + ad-hoc，仅开发非输入监控功能
- *   - 显式内部壳：com.cc-partner.app.internal.dev + 固定自签名证书
+ *   - 显式内部壳：com.cc-partner.app.internal.dev + 固定自签名证书，固定安装到
+ *     `~/Applications/cc-partner Internal (Dev).app`，供系统设置「+」手动选择
  *   - 将 debug GUI 二进制复制为 Contents/MacOS/cc-partner
  *   - 尽量把 debug backend 也放进 MacOS（便于 sidecar 旁路发现）
  *   - 复制 icon.icns（若有）
@@ -33,6 +34,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -49,7 +51,7 @@ export const DEV_APP_NAME = 'cc-partner-dev.app';
 export const DEV_BUNDLE_ID = 'com.cc-partner.app.dev';
 export const DEV_DISPLAY_NAME = 'cc-partner (Dev)';
 export const DEV_EXECUTABLE = 'cc-partner';
-export const INTERNAL_DEV_APP_NAME = 'cc-partner-internal-dev.app';
+export const INTERNAL_DEV_APP_NAME = 'cc-partner Internal (Dev).app';
 export const INTERNAL_DEV_BUNDLE_ID = 'com.cc-partner.app.internal.dev';
 export const INTERNAL_DEV_DISPLAY_NAME = 'cc-partner Internal (Dev)';
 export const INTERNAL_SIGNING_IDENTITY = 'cc-partner Internal Code Signing';
@@ -78,6 +80,28 @@ export function resolveDevSigningChannel(env = process.env) {
     signingIdentity: identity,
     internal: true,
   };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   macOS 26 可能不把公开 Input Monitoring Request 自动登记到系统设置列表，用户需要
+ *   通过列表下方「+」手动选择应用。内部开发壳必须位于稳定、易找到的 Applications 路径，
+ *   不能随 Cargo target 目录漂移。
+ *
+ * Code Logic（这个函数做什么）:
+ *   内部签名通道固定返回用户 Applications 下的开发壳；社区 ad-hoc 壳仍留在 debug 目录，
+ *   避免把不可授权构建伪装成可安装应用。
+ *
+ * @param {ReturnType<typeof resolveDevSigningChannel>} channel
+ * @param {string} debugDir
+ * @param {string} userHome
+ * @returns {string}
+ */
+export function resolveDevAppPath(channel, debugDir = DEBUG_DIR, userHome = homedir()) {
+  if (channel.internal) {
+    return join(userHome, 'Applications', INTERNAL_DEV_APP_NAME);
+  }
+  return join(debugDir, channel.appName);
 }
 
 /**
@@ -197,11 +221,12 @@ export function prepareMacosDevApp(opts = {}) {
     );
   }
 
-  const appPath = join(debugDir, channel.appName);
+  const appPath = resolveDevAppPath(channel, debugDir);
   const contents = join(appPath, 'Contents');
   const macos = join(contents, 'MacOS');
   const resources = join(contents, 'Resources');
 
+  mkdirSync(dirname(appPath), { recursive: true });
   mkdirSync(macos, { recursive: true });
   mkdirSync(resources, { recursive: true });
 

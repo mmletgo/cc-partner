@@ -72,7 +72,10 @@ export function mapPermissions(
       id: 'inputMonitoring',
       icon: <KeyboardIcon />,
       title: t('permission.inputMonitoring.title'),
-      description: t('permission.inputMonitoring.description'),
+      description:
+        status.inputMonitoring.state === 'denied'
+          ? t('permission.inputMonitoring.deniedDescription')
+          : t('permission.inputMonitoring.description'),
       granted: status.inputMonitoring.granted,
       action:
         status.inputMonitoring.state === 'granted'
@@ -86,7 +89,7 @@ export function mapPermissions(
         status.inputMonitoring.state === 'notDetermined'
           ? t('permissionCard.requestAccess')
           : status.inputMonitoring.state === 'denied'
-            ? t('permissionCard.openSettings')
+            ? t('permissionCard.addInSettings')
             : status.inputMonitoring.state === 'unavailable'
               ? t('permissionCard.buildHelp')
               : undefined,

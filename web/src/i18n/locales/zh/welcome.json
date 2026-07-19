@@ -21,7 +21,8 @@
     },
     "inputMonitoring": {
       "title": "输入监控",
-      "description": "健康提醒检测键盘活动需要。首次请请求授权；已拒绝时请在系统设置的输入监控列表中打开开关"
+      "description": "健康提醒检测键盘活动需要。点击请求授权后，macOS 会尝试登记当前应用",
+      "deniedDescription": "macOS 未自动登记时：打开系统设置，点输入监控列表下方的「+」，选择当前 cc-partner 应用（开发版为「cc-partner Internal (Dev)」），再打开开关"
     },
     "notification": {
       "title": "通知",
@@ -33,6 +34,7 @@
     "goSettings": "去设置",
     "requestAccess": "请求授权",
     "openSettings": "打开系统设置",
+    "addInSettings": "在系统设置中添加",
     "buildHelp": "查看构建说明",
     "requesting": "处理中…"
   },

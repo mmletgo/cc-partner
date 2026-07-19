@@ -2,7 +2,7 @@
 
 > **For agentic workers:** 按任务顺序实施，并对行为改动执行 test-first 的 Red/Green/Refactor；当前环境未提供 executing-plans/subagent-driven-development 时，由主 agent 在当前分支内联执行。步骤使用 checkbox（`- [ ]`）追踪。
 
-**Goal:** 为内部 macOS 构建建立稳定自签名代码身份，并把输入监控改为只使用公开 IOHID API、显式分离 Request/Settings/Reopen 的可验证权限流。
+**Goal:** 为内部 macOS 构建建立稳定自签名代码身份，并把输入监控改为只使用公开 ListenEvent API、显式分离 Request/Settings/Reopen 的可验证权限流。
 
 **Architecture:** 内部稳定版与开发版使用独立 Bundle ID 和同一固定 Code Signing identity；社区构建保持可构建但权限主体 fail closed。Rust 将输入监控状态映射与系统 FFI 分层，前端消费 `granted|denied|notDetermined|unavailable`，发布脚本与 CI 对 ad-hoc、错误证书和错误 Bundle ID fail closed。
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - 生产权限路径不得调用私有 `TCCAccessPreflight`、`tccutil` 或运行时 `codesign`。
-- 输入监控只以 `IOHIDCheckAccess/IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)` 为权威。
+- 输入监控以公开 IOHID 查询为基础；macOS 26 假 Denied 只允许用公开 `CGPreflightListenEventAccess/CGRequestListenEventAccess` 修正，禁止私有 TCC。
 - 内部稳定 Bundle ID 固定 `com.cc-partner.app.internal`；内部开发 Bundle ID 固定 `com.cc-partner.app.internal.dev`。
 - 内部签名失败不得回退 ad-hoc；社区构建必须返回 `unavailable`，不得假装可授权。
 - Request、Open Settings、Reopen 必须是三条独立用户动作；启动和回前台只查询。
@@ -49,7 +49,7 @@
 
 **Interfaces:**
 - Produces: `InputMonitoringState`, `InputMonitoringPermissionState`, `check_input_monitoring_state()`, `request_input_monitoring_access()`。
-- Consumes: macOS `IOHIDCheckAccess` / `IOHIDRequestAccess`；非 macOS返回 `Granted`。
+- Consumes: macOS `IOHIDCheckAccess` / `IOHIDRequestAccess` + 公开 CoreGraphics ListenEvent preflight/request；非 macOS返回 `Granted`。
 
 - [ ] **Step 1: 写状态映射失败测试**
 
@@ -113,11 +113,11 @@ fn state_from_raw(supported: bool, raw: u32) -> InputMonitoringState {
 }
 ```
 
-`request_input_monitoring_access()` 必须先读 before；仅 `NotDetermined` 调一次 IOHID Request；再读 after。Denied/Granted/Unavailable 返回 noop，不调用 Request。
+`request_input_monitoring_access()` 必须先读 before；仅 `NotDetermined` 依次调一次 CG ListenEvent Request 与一次 IOHID Request，再读 after。Denied/Granted/Unavailable 返回 noop，不调用 Request。两条公开 API 都是最佳努力，不能替代系统设置列表的人工确认。
 
 - [ ] **Step 4: 删除旧输入监控私有/补偿路径**
 
-从 `permissions/mod.rs` 删除：`TCCAccessPreflight`、ListenEvent TCC preflight、`reset_listen_event_tcc*`、pending/rotated marker、`rotate_dev_adhoc_codesign`、输入监控 CG Request 聚合和诊断入口。保留 `check_input_monitoring_access()` 兼容调用，但实现为 `check_input_monitoring_state().granted`。
+从 `permissions/mod.rs` 删除：私有 `TCCAccessPreflight`、`reset_listen_event_tcc*`、持久 pending/rotated marker、`rotate_dev_adhoc_codesign` 和旧诊断入口。保留公开 CG ListenEvent preflight/request 与 `check_input_monitoring_access()` 兼容调用。
 
 - [ ] **Step 5: 运行 Rust 权限测试**
 
@@ -358,7 +358,7 @@ node scripts/check-macos-signing-contract.mjs <app-path> com.cc-partner.app.inte
 
 - [ ] **Step 5: 修改开发壳签名分流**
 
-存在 `CC_PARTNER_INTERNAL_SIGNING_IDENTITY` 时：Bundle ID=`com.cc-partner.app.internal.dev`、display name=`cc-partner Internal (Dev)`、codesign 使用该 identity；缺失时保留社区 Dev 名称但权限后端返回 unavailable。禁止内部 identity 失败后回退 `-`。
+存在 `CC_PARTNER_INTERNAL_SIGNING_IDENTITY` 时：Bundle ID=`com.cc-partner.app.internal.dev`、display name=`cc-partner Internal (Dev)`、codesign 使用该 identity，并固定组装到 `~/Applications/cc-partner Internal (Dev).app`；缺失时保留 debug 目录中的社区 Dev 名称但权限后端返回 unavailable。禁止内部 identity 失败后回退 `-`。
 
 - [ ] **Step 6: 验证脚本**
 
@@ -448,7 +448,7 @@ git commit -m "ci: split internal macOS and public release channels"
 Run:
 
 ```bash
-rg -n "TCCAccessPreflight|tccutil|rotate_dev_adhoc_codesign|input-monitoring-pending-request|CGRequestListenEventAccess" src-tauri/src src-tauri/native
+rg -n "TCCAccessPreflight|tccutil|rotate_dev_adhoc_codesign|input-monitoring-pending-request" src-tauri/src src-tauri/native
 ```
 
 Expected: 无生产权限路径命中；仅设计/历史测试 fixture 若有必须有明确 allowlist。

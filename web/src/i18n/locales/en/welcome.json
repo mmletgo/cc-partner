@@ -21,7 +21,8 @@
     },
     "inputMonitoring": {
       "title": "Input Monitoring",
-      "description": "Needed for health reminder keyboard activity. Request access once, then enable the app in the Input Monitoring list if access was denied"
+      "description": "Needed for health reminder keyboard activity. Request access to let macOS register the current app",
+      "deniedDescription": "If macOS did not register it: open System Settings, click + below the Input Monitoring list, select the current cc-partner app (cc-partner Internal (Dev) for development), then enable the switch"
     },
     "notification": {
       "title": "Notifications",
@@ -33,6 +34,7 @@
     "goSettings": "Open Settings",
     "requestAccess": "Request access",
     "openSettings": "Open System Settings",
+    "addInSettings": "Add in System Settings",
     "buildHelp": "View build requirements",
     "requesting": "Working…"
   },

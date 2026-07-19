@@ -221,8 +221,9 @@ describe('Welcome', () => {
 
     const card = screen.getByText('输入监控').closest('[data-granted]');
     expect(card).not.toBeNull();
+    expect(card?.textContent).toContain('点输入监控列表下方的「+」');
     fireEvent.click(
-      within(card as HTMLElement).getByRole('button', { name: '打开系统设置' }),
+      within(card as HTMLElement).getByRole('button', { name: '在系统设置中添加' }),
     );
 
     await act(async () => Promise.resolve());
@@ -268,7 +269,7 @@ describe('Welcome', () => {
 
     const inputCard = screen.getByText('输入监控').closest('[data-granted]');
     fireEvent.click(
-      within(inputCard as HTMLElement).getByRole('button', { name: '打开系统设置' }),
+      within(inputCard as HTMLElement).getByRole('button', { name: '在系统设置中添加' }),
     );
 
     await act(async () => {
@@ -336,7 +337,7 @@ describe('Welcome', () => {
 
     const inputCard = screen.getByText('输入监控').closest('[data-granted]');
     fireEvent.click(
-      within(inputCard as HTMLElement).getByRole('button', { name: '打开系统设置' }),
+      within(inputCard as HTMLElement).getByRole('button', { name: '在系统设置中添加' }),
     );
     await act(async () => {
       await Promise.resolve();

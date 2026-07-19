@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEBUG_DIR="$REPO_ROOT/src-tauri/target/debug"
 if [[ -n "${CC_PARTNER_INTERNAL_SIGNING_IDENTITY:-}" ]]; then
-  DEV_APP="$DEBUG_DIR/cc-partner-internal-dev.app"
+  DEV_APP="${HOME}/Applications/cc-partner Internal (Dev).app"
   DEV_DISPLAY_NAME="cc-partner Internal (Dev)"
 else
   DEV_APP="$DEBUG_DIR/cc-partner-dev.app"
@@ -72,6 +72,22 @@ fi
 
 APP_PIDS=()
 TAIL_PIDS=()
+
+# App 路径包含空格和括号，不能交给 pgrep/pkill 当正则解释。这里从 ps 输出中做
+# 字面量全路径匹配；允许路径后跟启动参数，但不会误伤 cc-partner-backend。
+find_dev_app_pids() {
+  ps -axo pid=,command= | awk -v expected="$DEV_BIN" '
+    {
+      pid = $1
+      command = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", command)
+      if (command == expected || index(command, expected " ") == 1) {
+        print pid
+      }
+    }
+  '
+}
+
 cleanup() {
   local pid
   for pid in "${TAIL_PIDS[@]+"${TAIL_PIDS[@]}"}"; do
@@ -84,7 +100,11 @@ cleanup() {
       kill "$pid" 2>/dev/null || true
     fi
   done
-  pkill -f "$DEV_BIN" 2>/dev/null || true
+  while IFS= read -r pid; do
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done < <(find_dev_app_pids)
 }
 trap cleanup EXIT TERM INT HUP
 
@@ -118,7 +138,7 @@ TAIL_PIDS+=("$!")
 # 等待主进程出现
 app_pid=""
 for _ in $(seq 1 100); do
-  app_pid="$(pgrep -f "$DEV_BIN" 2>/dev/null | head -1 || true)"
+  app_pid="$(find_dev_app_pids | head -1 || true)"
   if [[ -n "$app_pid" ]]; then
     break
   fi

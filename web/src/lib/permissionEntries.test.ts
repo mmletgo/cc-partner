@@ -52,7 +52,11 @@ describe('permissionEntries', () => {
     assertEqual(entryFor('notDetermined').action, 'request');
     assertEqual(entryFor('notDetermined').actionLabel, 'permissionCard.requestAccess');
     assertEqual(entryFor('denied').action, 'openSettings');
-    assertEqual(entryFor('denied').actionLabel, 'permissionCard.openSettings');
+    assertEqual(entryFor('denied').actionLabel, 'permissionCard.addInSettings');
+    assertEqual(
+      entryFor('denied').description,
+      'permission.inputMonitoring.deniedDescription',
+    );
     assertEqual(entryFor('granted').action, 'none');
     assertEqual(entryFor('unavailable').action, 'buildHelp');
     assertEqual(entryFor('unavailable').actionLabel, 'permissionCard.buildHelp');

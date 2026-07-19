@@ -116,6 +116,7 @@ run_dev() {
     if [[ -x "$runner" ]]; then
       if [[ -n "${CC_PARTNER_INTERNAL_SIGNING_IDENTITY:-}" ]]; then
         info "macOS 开发壳: cc-partner Internal (Dev) / com.cc-partner.app.internal.dev"
+        info "固定位置: ~/Applications/cc-partner Internal (Dev).app"
         info "输入监控将登记到固定内部 Dev 主体，与内部稳定版分开授权。"
       else
         info "macOS 开发壳: cc-partner (Dev) / com.cc-partner.app.dev"
@@ -155,7 +156,7 @@ cc-partner 启动脚本
 命令:
   dev       开发模式(默认):Tauri + Vite + 热重载
             macOS 已安装固定内部签名 identity 时自动生成
-            cc-partner-internal-dev.app；未安装时生成社区
+            ~/Applications/cc-partner Internal (Dev).app；未安装时生成社区
             cc-partner-dev.app（输入监控不可用）
   build     生产构建(产出 dmg/安装包)
   web       仅前端 Vite(浏览器预览,无 Tauri 外壳)

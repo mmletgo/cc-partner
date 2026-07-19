@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { resolveDevSigningChannel } from './prepare-macos-dev-app.mjs';
+import {
+  resolveDevAppPath,
+  resolveDevSigningChannel,
+} from './prepare-macos-dev-app.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -23,13 +26,39 @@ test('uses fixed internal dev identity without ad-hoc fallback', () => {
       CC_PARTNER_INTERNAL_SIGNING_IDENTITY: 'cc-partner Internal Code Signing',
     }),
     {
-      appName: 'cc-partner-internal-dev.app',
+      appName: 'cc-partner Internal (Dev).app',
       bundleId: 'com.cc-partner.app.internal.dev',
       displayName: 'cc-partner Internal (Dev)',
       signingIdentity: 'cc-partner Internal Code Signing',
       internal: true,
     },
   );
+});
+
+test('stages internal dev app at a stable user Applications path', () => {
+  const internalChannel = resolveDevSigningChannel({
+    CC_PARTNER_INTERNAL_SIGNING_IDENTITY: 'cc-partner Internal Code Signing',
+  });
+  const communityChannel = resolveDevSigningChannel({});
+
+  assert.equal(
+    resolveDevAppPath(internalChannel, '/tmp/debug', '/Users/tester'),
+    '/Users/tester/Applications/cc-partner Internal (Dev).app',
+  );
+  assert.equal(
+    resolveDevAppPath(communityChannel, '/tmp/debug', '/Users/tester'),
+    '/tmp/debug/cc-partner-dev.app',
+  );
+});
+
+test('runner matches the friendly app path literally instead of as a regular expression', () => {
+  const runner = readFileSync(
+    join(repoRoot, 'scripts', 'macos-dev-cargo-runner.sh'),
+    'utf8',
+  );
+
+  assert.doesNotMatch(runner, /p(?:g|k)rep\s+-f/u);
+  assert.match(runner, /index\(command, expected " "\) == 1/u);
 });
 
 test('keeps internal stable identity and updater feed isolated from public releases', () => {

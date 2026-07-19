@@ -135,7 +135,8 @@ cd cc-partner
 # 推荐：一键开发（检查 Node/Rust、按需 npm install、预构建 backend sidecar、tauri dev）
 ./start.sh
 # macOS：已安装固定内部签名 identity 时自动启用 Internal Dev；否则使用
-# 社区开发壳（输入监控不可用）。详见 docs/development/macos-internal-signing.md
+# 固定的 ~/Applications/cc-partner Internal (Dev).app；否则使用社区开发壳
+# （输入监控不可用）。详见 docs/development/macos-internal-signing.md
 
 # 或手动（裸 tauri dev 无稳定 TCC 主体；macOS 输入监控明确 unavailable）
 cd web && npm install

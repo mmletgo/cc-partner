@@ -4,7 +4,7 @@
 
 cc-partner 当前的 macOS 发布包与开发壳均使用 ad-hoc 签名。其 Designated Requirement（DR）退化为具体二进制的 `cdhash`，每次重新构建都会成为新的 TCC 权限主体。现有实现又在运行时混合执行 ListenEvent Request、打开系统设置、`tccutil reset`、重签名和重启，导致“系统设置已打开但列表没有 cc-partner”、权限假绿、授权跨版本丢失和不可重复验证。
 
-输入监控的真实消费者是 `device_query` 底层的 IOHIDManager。因此，输入监控的状态与请求必须以公开 IOHID API 为唯一权威，不得再使用私有 TCC API或把 CoreGraphics/IOHID 的聚合返回值解释为“已经登记进系统设置列表”。
+输入监控的真实消费者是 `device_query` 底层的 IOHIDManager。初版设计据此把公开 IOHID API 作为唯一权威；但 macOS 26.5.1 真机证明 `IOHIDCheckAccess` 在刚 reset、尚未请求时也会返回 Denied，`IOHIDRequestAccess` 还可能不弹中转框且不登记列表。修正版仍禁止私有 TCC API，以公开 IOHID 查询为基础，并仅用同属 ListenEvent 服务的公开 CoreGraphics preflight/request 修正该系统回归；任何返回值都不声称“列表必然已登记”，列表仍由 L3 真机确认。
 
 ## 2. 目标
 
@@ -66,7 +66,7 @@ Tauri updater 的 minisign 签名继续用于更新包真实性；它不能替�
 ### 5.2 内部开发通道
 
 - `./start.sh dev` 在 macOS 上生成 `.app` 壳并通过 LaunchServices 启动。
-- 配置内部签名 identity 时使用 `com.cc-partner.app.internal.dev` 与固定证书。
+- 配置内部签名 identity 时使用 `com.cc-partner.app.internal.dev` 与固定证书，并把开发壳固定组装到 `~/Applications/cc-partner Internal (Dev).app`，供系统设置「+」选择。
 - 未配置内部证书时允许普通社区开发构建，但权限页明确显示 `unavailable`，不得尝试登记输入监控。
 - 开发脚本不得 ad-hoc 重签一个已由固定证书签名的 `.app`。
 
@@ -84,12 +84,13 @@ Tauri updater 的 minisign 签名继续用于更新包真实性；它不能替�
 InputMonitoringState = granted | denied | notDetermined | unavailable
 ```
 
-- `IOHIDCheckAccess(ListenEvent) == Granted` → `granted`
-- `Denied` → `denied`
+- `IOHIDCheckAccess(ListenEvent) == Granted` 或 `CGPreflightListenEventAccess() == true` → `granted`
+- `IOHID Denied` 且当前进程尚未显式 Request → `notDetermined`（macOS 26 假 Denied 兼容）
+- `IOHID Denied` 且当前进程已经显式 Request、CG 仍未授权 → `denied`
 - `Unknown` → `notDetermined`
 - 不在受支持的内部 `.app` Bundle 身份中 → `unavailable`
 
-`CGPreflightListenEventAccess` 不参与输入监控授权判定。私有 `TCCAccessPreflight` 从生产代码删除。
+进程内仅记录“本次已 Request”布尔态，不写磁盘、不跨重启。私有 `TCCAccessPreflight` 继续从生产代码删除。
 
 ### 6.2 显式操作
 
@@ -99,7 +100,7 @@ InputMonitoringState = granted | denied | notDetermined | unavailable
 - `open_permission_settings(type)`：只打开系统设置，不调用 Request。
 - `relaunch_for_permissions()`：只在用户显式点击时重新打开 enclosing `.app`。
 
-输入监控 Request 必须在 Tauri 主线程调用 `IOHIDRequestAccess(ListenEvent)`，并返回：
+输入监控 Request 必须在 Tauri 主线程依次调用 `CGRequestListenEventAccess()` 与 `IOHIDRequestAccess(ListenEvent)`。两条 API 都是最佳努力，返回值不得解释为系统设置列表已经登记，并返回：
 
 ```text
 PermissionActionResult {
@@ -123,13 +124,13 @@ PermissionActionResult {
 | 状态 | 主按钮 | 行为 |
 | --- | --- | --- |
 | `notDetermined` | 请求授权 | 只调用 Request |
-| `denied` | 打开系统设置 | 只打开 Privacy_ListenEvent |
+| `denied` | 在系统设置中添加 | 只打开 Privacy_ListenEvent；文案指引点列表下方「+」选择当前 `.app` |
 | `granted` | 已授权 | 无副作用 |
 | `unavailable` | 查看构建说明 | 解释必须从内部签名 `.app` 启动 |
 
 补充规则：
 
-- Request 返回 `denied` 后，按钮切为“打开系统设置”。
+- Request 返回 `denied` 后，按钮切为“在系统设置中添加”；系统未自动登记时，用户点列表下方「+」选择当前应用后再开开关。
 - 从系统设置返回只刷新状态；不自动 Request、不自动重启。
 - 用户确认已打开开关但状态仍为 `denied` 时，才显示“重新打开应用”。
 - 移除侧栏“一次请求所有权限”的批量副作用；入口只导航到权限页。
@@ -156,7 +157,7 @@ PermissionActionResult {
 
 - 将 IOHID 查询/请求封装为可替换 provider。
 - 纯状态映射覆盖 Granted/Denied/Unknown/unavailable。
-- Request 测试证明只调用一次公开 IOHID Request，且不调用设置、reset、codesign 或 relaunch。
+- Request 测试证明公开调用顺序固定为 CoreGraphics ListenEvent 在前、IOHID 在后，且不调用设置、reset、codesign 或 relaunch。
 - Open Settings 测试证明不调用 Request。
 - 启动清理测试只删除应用自有 legacy marker。
 - 所有测试使用隔离 `CC_PARTNER_DATA_DIR`，不得写真实 `~/.cc-partner` 或修改宿主 TCC。
@@ -182,8 +183,8 @@ PermissionActionResult {
 1. 记录包 SHA、commit、Bundle ID、证书指纹摘要和 DR。
 2. 清理仅测试 Bundle ID 的旧 TCC 状态（由人工测试准备步骤执行，不在应用内）。
 3. 首次启动显示 `notDetermined`。
-4. 点击“请求授权”后，系统提示出现且输入监控列表包含 `cc-partner Internal`。
-5. 拒绝后状态为 `denied`；“打开系统设置”不触发第二个请求。
+4. 点击“请求授权”；若系统提示出现则完成选择，若没有提示或列表仍为空，则点“在系统设置中添加”，再点列表下方「+」选择当前内部 `.app`。两条路径最终都必须让列表包含对应应用。
+5. 未授权时状态为 `denied`；“在系统设置中添加”只打开设置，不触发第二个请求。
 6. 打开开关并按系统要求重启后状态为 `granted`，真实 IOHID 采样可用。
 7. 安装下一内部版本后 DR 兼容，权限仍为 `granted`，不重复提示。
 8. Dev Bundle 的授权与内部稳定版互不影响。
@@ -195,7 +196,7 @@ PermissionActionResult {
 ### 10.1 首次迁移
 
 - 内部版使用新 Bundle ID，因此不会继承旧 ad-hoc TCC 记录。
-- 首次启动按正常 `notDetermined → request` 流程授权一次。
+- 首次启动按 `notDetermined → request` 流程请求一次；macOS 未自动登记时按正式手动「+」兜底，不重复 Request。
 - 旧版本创建的 pending/rotation marker 在应用数据目录中安全删除。
 - 不自动删除旧应用、不自动重置旧 Bundle ID 的 TCC；清理由用户按文档完成。
 
@@ -208,9 +209,8 @@ PermissionActionResult {
 ## 11. 完成标准
 
 1. 生产权限路径不存在 `TCCAccessPreflight`、`tccutil`、运行时 `codesign` 或 pending 自动 Request。
-2. 输入监控状态只由 IOHID 与受支持 Bundle 身份决定。
+2. 输入监控状态只由公开 IOHID/CG ListenEvent 预检与受支持 Bundle 身份决定；不使用私有 TCC。
 3. Request/Open Settings/Reopen 三条命令和前端动作完全分离。
 4. 内部构建对错误签名 fail closed，公共 workflow 不把 ad-hoc macOS 包标为正式支持。
 5. Rust、前端和签名合同测试通过且不污染宿主 TCC/真实数据目录。
 6. 当前内部签名构建完成 L3 deny→grant→upgrade 验收后，才能宣称根治完成。
-

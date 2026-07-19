@@ -37,7 +37,7 @@ scripts/build-macos-internal.sh
 node --test scripts/detect-macos-internal-signing.test.mjs scripts/check-macos-signing-contract.test.mjs scripts/prepare-macos-dev-app.test.mjs
 ```
 
-内部开发机安装固定 identity 后，直接运行 `./start.sh dev` 即会自动生成 `cc-partner-internal-dev.app`。启动脚本只在 Keychain 中恰好存在一个固定名称的有效代码签名 identity 时启用内部通道；首次发现会把非敏感 SHA-256 指纹写入 `~/Library/Application Support/cc-partner/signing/internal-cert.sha256`，后续同名证书与 pin 不一致时 fail closed，避免无感切换 TCC 主体。显式设置两个环境变量仍具有最高优先级，且必须成对提供。
+内部开发机安装固定 identity 后，直接运行 `./start.sh dev` 即会自动组装并从 `~/Applications/cc-partner Internal (Dev).app` 启动固定开发壳。固定 Applications 路径既保持 TCC 主体可定位，也让 macOS 未自动登记时能从输入监控列表下方的「+」直接选择。启动脚本只在 Keychain 中恰好存在一个固定名称的有效代码签名 identity 时启用内部通道；首次发现会把非敏感 SHA-256 指纹写入 `~/Library/Application Support/cc-partner/signing/internal-cert.sha256`，后续同名证书与 pin 不一致时 fail closed，避免无感切换 TCC 主体。显式设置两个环境变量仍具有最高优先级，且必须成对提供。
 
 没有安装内部 identity 的开源贡献者仍生成社区 Dev 壳；它可以开发其它功能，但输入监控会显示 `unavailable`，不会误导用户打开空设置列表。社区模式与自动检测结果都会由 `start.sh` 明确打印，禁止检测失败后静默回退 ad-hoc。
 
@@ -59,8 +59,8 @@ node --test scripts/detect-macos-internal-signing.test.mjs scripts/check-macos-s
 旧 `com.cc-partner.app` / `com.cc-partner.app.dev` 条目不会继承到 internal Bundle ID。首次迁移：
 
 1. 安装并信任内部公钥证书，启动签名校验通过的 `.app`。
-2. Welcome 输入监控为 `notDetermined` 时点“请求授权”，只调用一次 IOHID Request。
-3. 状态变为 `denied` 后点“打开系统设置”，确认列表出现 `cc-partner Internal` 并打开开关。
+2. Welcome 输入监控为 `notDetermined` 时点“请求授权”；应用在 Tauri 主线程依次调用公开 CoreGraphics ListenEvent Request 与 IOHID Request。macOS 26 若把尚未请求的 IOHID 状态错报为 Denied，应用会在当前进程第一次检查时仍展示“请求授权”；真正请求后仍未授权才切换为“在系统设置中添加”。公开 API 返回值不等于系统设置已经登记成功。
+3. 若系统中转框未出现或列表仍为空，点“在系统设置中添加”，在输入监控列表下方点「+」：开发版选择 `~/Applications/cc-partner Internal (Dev).app`，内部稳定版选择实际安装的 `cc-partner Internal.app`，然后打开开关。这是 macOS 26 上的正式兜底流程，不需要重复点击 Request。
 4. 回到应用重新检查；若当前进程状态滞后，显式点“重新打开应用”。
 5. 升级到下一内部构建，确认条目和开关保持，不重新授权。
 
