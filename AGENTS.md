@@ -436,8 +436,8 @@ cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture -
 
 ```bash
 ./start.sh                         # 推荐：自检工具链 + tauri dev
-# macOS 默认组装社区 cc-partner-dev.app（输入监控 unavailable）；配置固定内部
-# identity + 指纹后组装 cc-partner-internal-dev.app，详见 macOS 内部签名文档
+# macOS 检测到唯一固定内部 identity 时自动组装 cc-partner-internal-dev.app；
+# 未检测到时组装社区 cc-partner-dev.app（输入监控 unavailable），详见内部签名文档
 # 或：cd web && npm install && ./node_modules/.bin/tauri dev  # 裸 binary，无开发壳
 ```
 

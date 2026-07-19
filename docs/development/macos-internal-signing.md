@@ -34,10 +34,12 @@ scripts/build-macos-internal.sh
 首次使用时可先只运行签名合同单测，不接触 Keychain/TCC：
 
 ```bash
-node --test scripts/check-macos-signing-contract.test.mjs scripts/prepare-macos-dev-app.test.mjs
+node --test scripts/detect-macos-internal-signing.test.mjs scripts/check-macos-signing-contract.test.mjs scripts/prepare-macos-dev-app.test.mjs
 ```
 
-内部开发壳使用同样两个环境变量运行 `./start.sh dev`，生成 `cc-partner-internal-dev.app`。不设置变量时生成社区 Dev 壳；它可以开发其它功能，但输入监控会显示 `unavailable`，不会误导用户打开空设置列表。
+内部开发机安装固定 identity 后，直接运行 `./start.sh dev` 即会自动生成 `cc-partner-internal-dev.app`。启动脚本只在 Keychain 中恰好存在一个固定名称的有效代码签名 identity 时启用内部通道；首次发现会把非敏感 SHA-256 指纹写入 `~/Library/Application Support/cc-partner/signing/internal-cert.sha256`，后续同名证书与 pin 不一致时 fail closed，避免无感切换 TCC 主体。显式设置两个环境变量仍具有最高优先级，且必须成对提供。
+
+没有安装内部 identity 的开源贡献者仍生成社区 Dev 壳；它可以开发其它功能，但输入监控会显示 `unavailable`，不会误导用户打开空设置列表。社区模式与自动检测结果都会由 `start.sh` 明确打印，禁止检测失败后静默回退 ad-hoc。
 
 ## GitHub 内部构建
 
