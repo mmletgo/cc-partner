@@ -1,9 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  certificateExtractionArgs,
   parseCodesignMetadata,
   validateSigningMetadata,
 } from './check-macos-signing-contract.mjs';
+
+test('binds certificate prefix to the codesign long option', () => {
+  assert.deepEqual(certificateExtractionArgs('/tmp/signing/cert', '/Applications/Internal.app'), [
+    '-d',
+    '--extract-certificates=/tmp/signing/cert',
+    '/Applications/Internal.app',
+  ]);
+});
 
 test('rejects ad-hoc cdhash-only signing', () => {
   assert.throws(

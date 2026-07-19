@@ -22,6 +22,11 @@ export function parseCodesignMetadata(output) {
   return { identifier, authorities };
 }
 
+/** 生成证书链导出参数；prefix 必须与长选项写在同一参数中，避免被解析为代码路径。 */
+export function certificateExtractionArgs(prefix, appPath) {
+  return ['-d', `--extract-certificates=${prefix}`, appPath];
+}
+
 /** 验证内部签名的稳定身份合同；不读取或输出私钥。 */
 export function validateSigningMetadata(metadata, expected) {
   if (metadata.identifier !== expected.expectedIdentifier) {
@@ -73,7 +78,7 @@ export function inspectSignedApp(appPath) {
   const certDir = mkdtempSync(join(tmpdir(), 'cc-partner-signing-'));
   try {
     const certPrefix = join(certDir, 'cert');
-    run('codesign', ['-d', '--extract-certificates', certPrefix, appPath]);
+    run('codesign', certificateExtractionArgs(certPrefix, appPath));
     const certPath = `${certPrefix}0`;
     if (!existsSync(certPath)) throw new Error('codesign did not extract a leaf certificate');
     const fingerprintOutput = run('openssl', [
