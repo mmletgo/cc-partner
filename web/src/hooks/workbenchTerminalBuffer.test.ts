@@ -1,4 +1,4 @@
-import { describe, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { planTerminalBufferWrite } from '@/pages/Workbench/terminalReplay';
 import {
   appendWorkbenchTerminalOutput,
@@ -6,6 +6,7 @@ import {
   MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
   removeWorkbenchTerminalBuffer,
   resetWorkbenchTerminalBuffer,
+  type TerminalBufferDelta,
   type TerminalFrameScheduler,
 } from './workbenchTerminalBuffer';
 
@@ -382,5 +383,72 @@ describe('workbenchTerminalBuffer', () => {
     assert(store.getBuffer('session-sync') === 'firstsecond', 'second append must concatenate after sync flush');
     assert(store.getRevision('session-sync') === 2, 'second sync append must bump revision again');
     assert(notifications === 2, 'second sync append must notify again (scheduledCancel must not stick)');
+  });
+
+  test('subscribe-before-snapshot dedupes queued deltas by generation and appendId', () => {
+    const scheduler = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({ frameScheduler: scheduler.scheduler });
+    const deltas: TerminalBufferDelta[] = [];
+    const unsubscribe = store.subscribeLive('s1', (delta) => deltas.push(delta));
+    store.append('s1', 'a');
+    const snapshot = store.getSnapshot('s1');
+    store.append('s1', 'b');
+
+    expect(snapshot.buffer).toBe('a');
+    expect(snapshot.cursor).toEqual({ generation: 0, appendId: 1 });
+    expect(deltas.map((delta) => delta.chunk)).toEqual(['a', 'b']);
+    expect(
+      deltas.filter(
+        (delta) =>
+          delta.generation > snapshot.cursor.generation ||
+          delta.appendId > snapshot.cursor.appendId,
+      ),
+    ).toHaveLength(1);
+    unsubscribe();
+  });
+
+  test('live append never materializes the replay snapshot', () => {
+    let materializeCalls = 0;
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+      onMaterializeForTest: () => {
+        materializeCalls += 1;
+      },
+    });
+    store.subscribeLive('s1', () => undefined);
+    for (let index = 0; index < 1_000; index += 1) store.append('s1', 'x');
+    expect(materializeCalls).toBe(0);
+    expect(store.getSnapshot('s1').buffer.length).toBe(1_000);
+    expect(materializeCalls).toBe(1);
+  });
+
+  test('full replay ring advances a head index instead of shifting every append', () => {
+    let compactions = 0;
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      maxChars: 8,
+      frameScheduler: frames.scheduler,
+      onCompactForTest: () => {
+        compactions += 1;
+      },
+    });
+    for (let index = 0; index < 10_000; index += 1) store.append('s1', 'x');
+    expect(store.getSnapshot('s1').buffer).toBe('xxxxxxxx');
+    expect(compactions).toBeLessThan(12);
+  });
+
+  test('reset starts a new generation and remove invalidates old deltas', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+    store.append('s1', 'old');
+    store.reset('s1', 'new');
+    store.append('s1', '!');
+    expect(store.getSnapshot('s1').buffer).toBe('new!');
+    expect(deltas.at(-1)?.generation).toBe(1);
   });
 });

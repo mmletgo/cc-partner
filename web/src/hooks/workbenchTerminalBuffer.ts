@@ -2,7 +2,12 @@ export type WorkbenchTerminalBuffers = Record<string, string>;
 
 export const MAX_WORKBENCH_TERMINAL_BUFFER_CHARS = 200_000;
 
+/** 废弃 chunk 前缀达到该数量且至少占数组一半时才物理 compact。 */
+const COMPACT_HEAD_THRESHOLD = 1_024;
+
 type WorkbenchTerminalBufferListener = () => void;
+type WorkbenchTerminalLiveListener = (delta: TerminalBufferDelta) => void;
+type WorkbenchTerminalResetListener = () => void;
 
 /**
  * Business Logic（为什么需要这个接口）:
@@ -17,23 +22,77 @@ export interface TerminalFrameScheduler {
 
 /**
  * Business Logic（为什么需要这个接口）:
+ *   xterm live writer 与 snapshot 握手需要可比较的进程内游标，避免重复写入与漏写。
+ *
+ * Code Logic（这个接口做什么）:
+ *   generation 在 reset/remove 时递增；appendId 在同代每次 append 后单调递增。
+ */
+export interface TerminalBufferCursor {
+  generation: number;
+  appendId: number;
+}
+
+/**
+ * Business Logic（为什么需要这个接口）:
+ *   首次挂载、resync 与 React 非 live 消费者需要完整 buffer 与游标快照。
+ *
+ * Code Logic（这个接口做什么）:
+ *   携带物化 buffer、当前 cursor 与 React revision。
+ */
+export interface TerminalBufferSnapshot {
+  buffer: string;
+  cursor: TerminalBufferCursor;
+  revision: number;
+}
+
+/**
+ * Business Logic（为什么需要这个接口）:
+ *   已挂载 xterm 只消费增量 chunk，不能每次把完整历史送进 React diff。
+ *
+ * Code Logic（这个接口做什么）:
+ *   描述一次 append 的 session、chunk 与握手游标。
+ */
+export interface TerminalBufferDelta extends TerminalBufferCursor {
+  sessionId: string;
+  chunk: string;
+}
+
+/**
+ * Business Logic（为什么需要这个接口）:
  *   store 创建参数从位置参数迁移为 options，便于注入 initialBuffers / maxChars / frameScheduler。
  *
  * Code Logic（这个接口做什么）:
- *   描述 createWorkbenchTerminalBufferStore 的可选配置项。
+ *   描述 createWorkbenchTerminalBufferStore 的可选配置项；测试 seam 仅用于观测物化与 compact。
  */
 export interface TerminalBufferStoreOptions {
   initialBuffers?: WorkbenchTerminalBuffers;
   maxChars?: number;
   frameScheduler?: TerminalFrameScheduler;
+  /** 仅测试：真正 join/slice 物化时回调 */
+  onMaterializeForTest?: () => void;
+  /** 仅测试：物理 compact 废弃前缀时回调 */
+  onCompactForTest?: () => void;
 }
 
+/**
+ * Business Logic（为什么需要这个接口）:
+ *   终端输出缓存既要服务 React revision 订阅，也要服务 mounted xterm 的同步 live delta。
+ *
+ * Code Logic（这个接口做什么）:
+ *   暴露 snapshot/revision/live/reset 订阅与 append/reset/remove 变更 API。
+ */
 export interface WorkbenchTerminalBufferStore {
+  getSnapshot: (sessionId: string | null) => TerminalBufferSnapshot;
   getBuffer: (sessionId: string | null) => string;
   getRevision: (sessionId: string | null) => number;
   subscribe: (sessionId: string | null, listener: WorkbenchTerminalBufferListener) => () => void;
+  subscribeLive: (
+    sessionId: string | null,
+    listener: WorkbenchTerminalLiveListener,
+  ) => () => void;
+  subscribeReset: (sessionId: string, listener: WorkbenchTerminalResetListener) => () => void;
   append: (sessionId: string, chunk: string) => void;
-  reset: (sessionId: string) => void;
+  reset: (sessionId: string, buffer?: string) => void;
   remove: (sessionId: string) => void;
 }
 
@@ -42,21 +101,31 @@ export interface WorkbenchTerminalBufferStore {
  *   每个终端 session 需要独立维护 chunk 队列、裁剪偏移、物化缓存与帧调度代数。
  *
  * Code Logic（这个类型做什么）:
- *   描述单 session 的 ring buffer 内部状态，避免每次 append 都拼接完整字符串。
+ *   描述单 session 的 ring buffer 内部状态；headIndex 推进废弃前缀，避免每次 shift。
  */
 interface SessionRingBuffer {
   chunks: string[];
-  /** 第一个 chunk 内已裁剪掉的前缀字符数 */
+  /** 逻辑读头：小于 headIndex 的 chunk 已废弃，不得再 shift */
+  headIndex: number;
+  /** 活动首 chunk 内已裁剪掉的前缀字符数 */
   startOffset: number;
   /** 有效 UTF-16 code unit 总数（扣除 startOffset） */
   length: number;
-  /** getBuffer 物化后的缓存；null 表示需要重新 join */
+  /** getSnapshot 物化后的缓存；null 表示需要重新 join */
   materialized: string | null;
   revision: number;
   scheduledCancel: (() => void) | null;
-  /** 每次 reset/remove/cancel 递增，防止 stale frame 误通知 */
+  /** reset/remove 递增；append 帧通知也用它作废 stale frame */
   generation: number;
+  /** 同 generation 内每次成功 append 后递增 */
+  appendId: number;
 }
+
+const EMPTY_SNAPSHOT: TerminalBufferSnapshot = {
+  buffer: '',
+  cursor: { generation: 0, appendId: 0 },
+  revision: 0,
+};
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -141,17 +210,19 @@ function createDefaultFrameScheduler(): TerminalFrameScheduler {
  *   新建或首次写入 session 时需要统一的空 ring buffer 结构。
  *
  * Code Logic（这个函数做什么）:
- *   返回 chunks 为空、revision/generation 为 0 的 SessionRingBuffer。
+ *   返回 chunks 为空、revision/generation/appendId 为 0 的 SessionRingBuffer。
  */
 function createEmptySessionBuffer(): SessionRingBuffer {
   return {
     chunks: [],
+    headIndex: 0,
     startOffset: 0,
     length: 0,
     materialized: null,
     revision: 0,
     scheduledCancel: null,
     generation: 0,
+    appendId: 0,
   };
 }
 
@@ -168,13 +239,35 @@ function createSessionBufferFromString(content: string): SessionRingBuffer {
   }
   return {
     chunks: [content],
+    headIndex: 0,
     startOffset: 0,
     length: content.length,
     materialized: content,
     revision: 0,
     scheduledCancel: null,
     generation: 0,
+    appendId: 0,
   };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   满容量后若每轮 Array.shift，小 chunk 热路径会变成 O(n)；需要摊销 compact。
+ *
+ * Code Logic（这个函数做什么）:
+ *   headIndex 足够大且废弃前缀至少占一半时，slice 掉前缀并归零 headIndex。
+ */
+function maybeCompactSessionBuffer(
+  session: SessionRingBuffer,
+  onCompact?: () => void,
+): void {
+  const discarded = session.headIndex;
+  const total = session.chunks.length;
+  if (discarded < COMPACT_HEAD_THRESHOLD) return;
+  if (discarded * 2 < total) return;
+  session.chunks = session.chunks.slice(session.headIndex);
+  session.headIndex = 0;
+  onCompact?.();
 }
 
 /**
@@ -182,17 +275,21 @@ function createSessionBufferFromString(content: string): SessionRingBuffer {
  *   超过 maxChars 时必须丢掉最旧输出，否则内存无限增长且 xterm replay 也会过大。
  *
  * Code Logic（这个函数做什么）:
- *   从头推进 startOffset / 丢弃完整 chunk；只在边界 chunk 上 slice 一次；清空 materialized。
+ *   只推进 headIndex / startOffset 丢弃前缀；禁止 Array.shift；必要时摊销 compact。
  */
-function trimSessionBuffer(session: SessionRingBuffer, maxChars: number): void {
+function trimSessionBuffer(
+  session: SessionRingBuffer,
+  maxChars: number,
+  onCompact?: () => void,
+): void {
   if (session.length <= maxChars) return;
 
   let overflow = session.length - maxChars;
-  while (overflow > 0 && session.chunks.length > 0) {
-    const head = session.chunks[0] ?? '';
+  while (overflow > 0 && session.headIndex < session.chunks.length) {
+    const head = session.chunks[session.headIndex] ?? '';
     const available = head.length - session.startOffset;
     if (overflow >= available) {
-      session.chunks.shift();
+      session.headIndex += 1;
       session.startOffset = 0;
       session.length -= available;
       overflow -= available;
@@ -203,9 +300,13 @@ function trimSessionBuffer(session: SessionRingBuffer, maxChars: number): void {
     }
   }
 
-  if (session.chunks.length === 0) {
+  if (session.headIndex >= session.chunks.length) {
+    session.chunks = [];
+    session.headIndex = 0;
     session.startOffset = 0;
     session.length = 0;
+  } else {
+    maybeCompactSessionBuffer(session, onCompact);
   }
 
   session.materialized = null;
@@ -216,28 +317,34 @@ function trimSessionBuffer(session: SessionRingBuffer, maxChars: number): void {
  *   xterm / React 订阅层需要完整字符串 snapshot，但 append 路径不能每次 join。
  *
  * Code Logic（这个函数做什么）:
- *   若 materialized 为空则 join（首 chunk 应用 startOffset），缓存后返回；否则直接返回缓存。
+ *   若 materialized 为空则从 headIndex 起 join（活动首 chunk 应用 startOffset），缓存后返回。
  */
-function materializeSessionBuffer(session: SessionRingBuffer): string {
+function materializeSessionBuffer(
+  session: SessionRingBuffer,
+  onMaterialize?: () => void,
+): string {
   if (session.materialized !== null) {
     return session.materialized;
   }
 
-  if (session.chunks.length === 0 || session.length === 0) {
+  onMaterialize?.();
+
+  if (session.headIndex >= session.chunks.length || session.length === 0) {
     session.materialized = '';
     return '';
   }
 
+  const activeCount = session.chunks.length - session.headIndex;
   let joined: string;
-  if (session.chunks.length === 1) {
-    const only = session.chunks[0] ?? '';
+  if (activeCount === 1) {
+    const only = session.chunks[session.headIndex] ?? '';
     joined = session.startOffset > 0 ? only.slice(session.startOffset) : only;
   } else {
-    const parts: string[] = new Array(session.chunks.length);
-    const first = session.chunks[0] ?? '';
+    const parts: string[] = new Array(activeCount);
+    const first = session.chunks[session.headIndex] ?? '';
     parts[0] = session.startOffset > 0 ? first.slice(session.startOffset) : first;
-    for (let index = 1; index < session.chunks.length; index += 1) {
-      parts[index] = session.chunks[index] ?? '';
+    for (let index = 1; index < activeCount; index += 1) {
+      parts[index] = session.chunks[session.headIndex + index] ?? '';
     }
     joined = parts.join('');
   }
@@ -265,16 +372,20 @@ function cancelScheduledFrame(session: SessionRingBuffer): void {
  *   终端输出可能非常高频，不能让 React Context 每个 chunk 都唤醒整个应用和 Workbench 页面。
  *
  * Code Logic（这个函数做什么）:
- *   创建外部可变 ring-buffer store：按 session 维护 chunk deque + revision；append 仅 push 并
- *   在 animation frame 合并 notify；getBuffer 惰性物化并缓存；reset/remove 立即生效并取消 stale frame。
+ *   创建外部可变 ring-buffer store：按 session 维护 chunk deque + cursor；append 只 push/trim 并
+ *   同步发布 live delta，React revision 仍经 animation frame 合并；snapshot 惰性物化。
  */
 export function createWorkbenchTerminalBufferStore(
   options: TerminalBufferStoreOptions = {},
 ): WorkbenchTerminalBufferStore {
   const maxChars = options.maxChars ?? MAX_WORKBENCH_TERMINAL_BUFFER_CHARS;
   const frameScheduler = options.frameScheduler ?? createDefaultFrameScheduler();
+  const onMaterializeForTest = options.onMaterializeForTest;
+  const onCompactForTest = options.onCompactForTest;
   const sessions = new Map<string, SessionRingBuffer>();
   const listenersBySession = new Map<string, Set<WorkbenchTerminalBufferListener>>();
+  const liveListenersBySession = new Map<string, Set<WorkbenchTerminalLiveListener>>();
+  const resetListenersBySession = new Map<string, Set<WorkbenchTerminalResetListener>>();
 
   for (const [sessionId, content] of Object.entries(options.initialBuffers ?? {})) {
     sessions.set(sessionId, createSessionBufferFromString(content));
@@ -282,13 +393,39 @@ export function createWorkbenchTerminalBufferStore(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   某个终端 session 输出变化后，只需要唤醒该 session 的 xterm pane。
+   *   某个终端 session 输出变化后，只需要唤醒该 session 的 React 订阅方。
    *
    * Code Logic（这个函数做什么）:
    *   查找 sessionId 对应 listener 集合并逐个执行；没有订阅者时直接返回。
    */
   const notify = (sessionId: string): void => {
     const listeners = listenersBySession.get(sessionId);
+    if (!listeners) return;
+    listeners.forEach((listener) => listener());
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   mounted xterm 需要同步收到每个 chunk，不能等 rAF/React。
+   *
+   * Code Logic（这个函数做什么）:
+   *   同步调用该 session 的 live listeners。
+   */
+  const notifyLive = (sessionId: string, delta: TerminalBufferDelta): void => {
+    const listeners = liveListenersBySession.get(sessionId);
+    if (!listeners) return;
+    listeners.forEach((listener) => listener(delta));
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   resync/remove 后旧 generation 的 writer 队列必须立刻失效并重放。
+   *
+   * Code Logic（这个函数做什么）:
+   *   同步调用该 session 的 reset listeners。
+   */
+  const notifyReset = (sessionId: string): void => {
+    const listeners = resetListenersBySession.get(sessionId);
     if (!listeners) return;
     listeners.forEach((listener) => listener());
   };
@@ -311,12 +448,35 @@ export function createWorkbenchTerminalBufferStore(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   seed/reset 字符串可能超过 maxChars，需要与 append 相同的裁剪语义。
+   *
+   * Code Logic（这个函数做什么）:
+   *   用单 chunk 写入 session，必要时 trim；empty 清空。
+   */
+  const seedSessionBuffer = (session: SessionRingBuffer, buffer: string): void => {
+    if (buffer.length === 0) {
+      session.chunks = [];
+      session.headIndex = 0;
+      session.startOffset = 0;
+      session.length = 0;
+      session.materialized = '';
+      return;
+    }
+    session.chunks = [buffer];
+    session.headIndex = 0;
+    session.startOffset = 0;
+    session.length = buffer.length;
+    session.materialized = buffer;
+    trimSessionBuffer(session, maxChars, onCompactForTest);
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   同帧多次 append 只需一次 React 重渲染；生产用 rAF，测试注入 scheduler。
    *
    * Code Logic（这个函数做什么）:
    *   若尚无 pending frame 则 schedule。先登记 wrappedCancel，再调用 schedule，避免同步
    *   scheduler（callback 在返回前已执行）把已清空的 cancel 句柄再次写回并卡住后续通知。
-   *   回调入口清掉本轮 pending token；generation 校验后 bump revision 并 notify 一次。
    */
   const scheduleNotify = (sessionId: string, session: SessionRingBuffer): void => {
     if (session.scheduledCancel) return;
@@ -334,12 +494,10 @@ export function createWorkbenchTerminalBufferStore(
       }
     };
 
-    // 先绑定 pending token，同步 callback 才能正确识别并清空
     session.scheduledCancel = wrappedCancel;
 
     cancelFromScheduler = frameScheduler.schedule(() => {
       const current = sessions.get(sessionId);
-      // 回调入口先清 pending，防止同步/异步路径留下 stale cancel
       if (current && current.scheduledCancel === wrappedCancel) {
         current.scheduledCancel = null;
       }
@@ -350,7 +508,6 @@ export function createWorkbenchTerminalBufferStore(
       notify(sessionId);
     });
 
-    // 同步 scheduler 时 callback 已跑完并清空；若仍挂着本轮 token 则强制清除
     if (!active && session.scheduledCancel === wrappedCancel) {
       session.scheduledCancel = null;
     }
@@ -358,24 +515,26 @@ export function createWorkbenchTerminalBufferStore(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   reset/remove 是显式生命周期事件，订阅方需要立刻看到空/删除态，不能等下一帧。
+   *   首次挂载、resync 与测试读取需要完整 buffer 与握手 cursor。
    *
    * Code Logic（这个函数做什么）:
-   *   取消 pending frame、递增 generation、bump revision 并立即 notify。
+   *   惰性物化 session buffer，并返回 generation/appendId/revision 快照。
    */
-  const notifyImmediately = (sessionId: string, session: SessionRingBuffer): void => {
-    cancelScheduledFrame(session);
-    session.generation += 1;
-    session.revision += 1;
-    notify(sessionId);
+  const getSnapshot = (sessionId: string | null): TerminalBufferSnapshot => {
+    if (!sessionId) return EMPTY_SNAPSHOT;
+    const session = sessions.get(sessionId);
+    if (!session) return EMPTY_SNAPSHOT;
+    return {
+      buffer: materializeSessionBuffer(session, onMaterializeForTest),
+      cursor: { generation: session.generation, appendId: session.appendId },
+      revision: session.revision,
+    };
   };
 
   return {
+    getSnapshot,
     getBuffer(sessionId) {
-      if (!sessionId) return '';
-      const session = sessions.get(sessionId);
-      if (!session) return '';
-      return materializeSessionBuffer(session);
+      return getSnapshot(sessionId).buffer;
     },
     getRevision(sessionId) {
       if (!sessionId) return 0;
@@ -393,38 +552,74 @@ export function createWorkbenchTerminalBufferStore(
         }
       };
     },
+    subscribeLive(sessionId, listener) {
+      if (!sessionId) return () => {};
+      const listeners = liveListenersBySession.get(sessionId) ?? new Set();
+      listeners.add(listener);
+      liveListenersBySession.set(sessionId, listeners);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          liveListenersBySession.delete(sessionId);
+        }
+      };
+    },
+    subscribeReset(sessionId, listener) {
+      const listeners = resetListenersBySession.get(sessionId) ?? new Set();
+      listeners.add(listener);
+      resetListenersBySession.set(sessionId, listeners);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          resetListenersBySession.delete(sessionId);
+        }
+      };
+    },
     append(sessionId, chunk) {
-      // 空 chunk 不改内容，也不调度 notify，避免无意义 revision+1 / re-render
+      // 空 chunk 不改内容，也不发布 delta / schedule notify
       if (chunk.length === 0) return;
       const session = ensureSession(sessionId);
       session.chunks.push(chunk);
       session.length += chunk.length;
       session.materialized = null;
-      trimSessionBuffer(session, maxChars);
+      trimSessionBuffer(session, maxChars, onCompactForTest);
+      session.appendId += 1;
+      notifyLive(sessionId, {
+        sessionId,
+        chunk,
+        generation: session.generation,
+        appendId: session.appendId,
+      });
       scheduleNotify(sessionId, session);
     },
-    reset(sessionId) {
+    reset(sessionId, buffer = '') {
       const session = ensureSession(sessionId);
-      session.chunks = [];
-      session.startOffset = 0;
-      session.length = 0;
-      session.materialized = '';
-      notifyImmediately(sessionId, session);
+      cancelScheduledFrame(session);
+      session.generation += 1;
+      session.appendId = 0;
+      seedSessionBuffer(session, buffer);
+      // reset 本身不伪造 live delta；只同步通知 reset listeners 再立即 bump revision
+      notifyReset(sessionId);
+      session.revision += 1;
+      notify(sessionId);
     },
     remove(sessionId) {
-      // remove 后仍保留 tombstone revision：与旧实现 revisions map 一致，避免 getRevision 回落到 0
-      // 导致 useSyncExternalStore 认为 snapshot 未变。
+      // remove 后仍保留 tombstone revision，避免 getRevision 回落到 0 导致 useSyncExternalStore 失真。
       const existing = sessions.get(sessionId) ?? createEmptySessionBuffer();
       cancelScheduledFrame(existing);
       existing.generation += 1;
+      existing.appendId = 0;
+      notifyReset(sessionId);
       sessions.set(sessionId, {
         chunks: [],
+        headIndex: 0,
         startOffset: 0,
         length: 0,
         materialized: '',
         revision: existing.revision + 1,
         scheduledCancel: null,
         generation: existing.generation,
+        appendId: 0,
       });
       notify(sessionId);
     },

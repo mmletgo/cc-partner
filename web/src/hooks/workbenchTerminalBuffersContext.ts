@@ -5,11 +5,14 @@
  *   Workbench 页面切换到其他路由后会卸载，但 PTY/tmux 仍在运行；终端输出缓存必须跨路由保留。
  *
  * Code Logic（这个模块做什么）:
- *   定义 Context value、创建 React Context，并提供 useWorkbenchTerminalBuffers 读取上下文。
+ *   定义 Context value、创建 React Context，并提供 store / snapshot 读取 hook。
  */
 
 import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from 'react';
-import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
+import type {
+  TerminalBufferSnapshot,
+  WorkbenchTerminalBufferStore,
+} from './workbenchTerminalBuffer';
 
 export interface WorkbenchTerminalBuffersContextValue {
   store: WorkbenchTerminalBufferStore;
@@ -17,6 +20,13 @@ export interface WorkbenchTerminalBuffersContextValue {
   removeBuffer: (sessionId: string) => void;
 }
 
+/**
+ * Business Logic（为什么需要这个接口）:
+ *   React 非 xterm 消费者仍按 revision 读取 buffer snapshot。
+ *
+ * Code Logic（这个接口做什么）:
+ *   暴露 buffer 字符串与 revision 号（cursor 可选供诊断）。
+ */
 export interface WorkbenchTerminalBufferSnapshot {
   buffer: string;
   revision: number;
@@ -44,10 +54,21 @@ export function useWorkbenchTerminalBuffers(): WorkbenchTerminalBuffersContextVa
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   每个 xterm pane 只需要响应自身 session 的输出，不能让某个终端输出导致整个 Workbench 重渲染。
+ *   TerminalPane 的 live writer 需要稳定 store 引用做 imperative 订阅，不能经 React revision 热路径。
  *
  * Code Logic（这个函数做什么）:
- *   使用 useSyncExternalStore 订阅指定 session 的 revision，并按 revision 读取当前 buffer。
+ *   返回 Context 中的 store；缺少 Provider 时抛错。
+ */
+export function useWorkbenchTerminalBufferStore(): WorkbenchTerminalBufferStore {
+  return useWorkbenchTerminalBuffers().store;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   每个非 xterm 消费者只需要响应自身 session 的输出 revision，不能让某个终端输出导致整个 Workbench 重渲染。
+ *
+ * Code Logic（这个函数做什么）:
+ *   使用 useSyncExternalStore 订阅指定 session 的 revision，并按 revision 读取当前 snapshot.buffer。
  */
 export function useWorkbenchTerminalBuffer(
   sessionId: string | null,
@@ -57,14 +78,14 @@ export function useWorkbenchTerminalBuffer(
     (listener: () => void) => store.subscribe(sessionId, listener),
     [sessionId, store],
   );
-  const getSnapshot = useCallback(() => store.getRevision(sessionId), [sessionId, store]);
-  const revision = useSyncExternalStore(subscribe, getSnapshot, () => 0);
+  const getRevision = useCallback(() => store.getRevision(sessionId), [sessionId, store]);
+  const revision = useSyncExternalStore(subscribe, getRevision, () => 0);
 
-  return useMemo(
-    () => ({
-      buffer: store.getBuffer(sessionId),
+  return useMemo(() => {
+    const snapshot: TerminalBufferSnapshot = store.getSnapshot(sessionId);
+    return {
+      buffer: snapshot.buffer,
       revision,
-    }),
-    [revision, sessionId, store],
-  );
+    };
+  }, [revision, sessionId, store]);
 }

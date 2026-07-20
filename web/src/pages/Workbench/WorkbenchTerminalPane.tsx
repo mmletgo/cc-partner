@@ -3,26 +3,25 @@
  *
  * Business Logic（为什么需要这个文件）:
  *   xterm 生命周期较重，必须隔离在独立组件内，避免 Workbench 页面其他状态刷新时重复初始化终端实例。
- *   本文件由 Workbench.tsx 原 TerminalPane 组件逐字（VERBATIM）迁移而来，保留原有 effect 依赖数组、
- *   xterm options、replay sequencing、DOM refs 与 cleanup；本任务不修改终端行为或 CSS。
+ *   live 输出经 terminalLiveWriter 直接写 xterm，不再经 React buffer effect / full-buffer KMP。
  *
  * Code Logic（这个文件做什么）:
  *   - 暴露 WorkbenchTerminalPane（memo 组件）和 TerminalCursorAnchor / WorkbenchTerminalPaneProps 类型；
- *   - session id 变化时创建/销毁 Terminal；buffer revision 变化时只写入新增输出；
+ *   - session id 变化时创建/销毁 Terminal；open 后创建 live writer 订阅 store delta；
  *   - 仅 inputEnabled=true 的 active 终端转发 onData；ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端。
  */
 import { memo, useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { useWorkbenchTerminalBuffer } from '@/hooks/workbenchTerminalBuffersContext';
+import { useWorkbenchTerminalBufferStore } from '@/hooks/workbenchTerminalBuffersContext';
 import type { WorkbenchSession } from '@/lib/types';
 import styles from './Workbench.module.css';
+import { createTerminalLiveWriter, type TerminalLiveWriter } from './terminalLiveWriter';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from './terminalOptions';
 import {
-  planTerminalBufferWrite,
   shouldForwardTerminalInput,
-  writeTerminalReplay,
+  type TerminalReplayGate,
 } from './terminalReplay';
 
 export interface WorkbenchTerminalPaneProps {
@@ -61,7 +60,7 @@ function clampU16(value: number, min: number): number {
  *   xterm 生命周期较重，应隔离在独立组件内，避免页面其他状态刷新时重复初始化终端实例。
  *
  * Code Logic（这个组件做什么）:
- *   session 变化时创建/销毁 Terminal；buffer revision 变化时只写入新增输出；
+ *   session 变化时创建/销毁 Terminal；open 后挂 live writer 直接写增量；
  *   仅 inputEnabled=true 的 active 终端转发 onData；ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端。
  */
 export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: WorkbenchTerminalPaneProps) {
@@ -76,9 +75,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   } = props;
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const bufferRef = useRef<string>('');
-  const writtenBufferRef = useRef<string>('');
-  const replayGateRef = useRef<boolean>(false);
+  const liveWriterRef = useRef<TerminalLiveWriter | null>(null);
+  const replayGateRef = useRef<TerminalReplayGate>({ current: false });
   const inputEnabledRef = useRef<boolean>(inputEnabled);
   const resizeTimerRef = useRef<number | null>(null);
   const forceResizeRef = useRef<(() => void) | null>(null);
@@ -86,11 +84,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     onCursorAnchorChange,
   );
   const sessionId = session?.id ?? null;
-  const { buffer, revision } = useWorkbenchTerminalBuffer(sessionId);
-
-  useEffect(() => {
-    bufferRef.current = buffer;
-  }, [buffer]);
+  const store = useWorkbenchTerminalBufferStore();
 
   useEffect(() => {
     inputEnabledRef.current = inputEnabled;
@@ -124,12 +118,17 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       }
     };
     const dataDisposable = terminal.onData((data: string) => {
-      if (!shouldForwardTerminalInput(replayGateRef, inputEnabledRef.current)) return;
+      if (!shouldForwardTerminalInput(replayGateRef.current, inputEnabledRef.current)) return;
       onInput(sessionId, data);
     });
     const cursorDisposable = terminal.onCursorMove(emitCursorAnchor);
-    writeTerminalReplay(terminal, bufferRef.current, replayGateRef);
-    writtenBufferRef.current = bufferRef.current;
+    const writer = createTerminalLiveWriter({
+      terminal,
+      source: store,
+      sessionId,
+      gate: replayGateRef.current,
+    });
+    liveWriterRef.current = writer;
     emitCursorAnchor();
     const resize = () => {
       try {
@@ -170,6 +169,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
 
     return () => {
       window.cancelAnimationFrame(layoutRaf);
+      liveWriterRef.current?.dispose();
+      liveWriterRef.current = null;
       observer.disconnect();
       dataDisposable.dispose();
       cursorDisposable.dispose();
@@ -181,10 +182,9 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       terminal.dispose();
       terminalRef.current = null;
       forceResizeRef.current = null;
-      writtenBufferRef.current = '';
-      replayGateRef.current = false;
+      replayGateRef.current = { current: false };
     };
-  }, [onInput, onResize, sessionId]);
+  }, [onInput, onResize, sessionId, store]);
 
   useEffect(() => {
     if (resizeRequestKey <= 0) return;
@@ -205,22 +205,6 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       window.removeEventListener('storage', applyTheme);
     };
   }, []);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal || !sessionId) return;
-    const plan = planTerminalBufferWrite(writtenBufferRef.current, buffer);
-    if (plan.mode === 'replay') {
-      terminal.clear();
-      writeTerminalReplay(terminal, plan.data, replayGateRef);
-      writtenBufferRef.current = buffer;
-      return;
-    }
-    if (plan.mode === 'append') {
-      terminal.write(plan.data);
-      writtenBufferRef.current = buffer;
-    }
-  }, [buffer, revision, sessionId]);
 
   return (
     <div className={styles.terminalHost} data-testid="terminal-pane">
