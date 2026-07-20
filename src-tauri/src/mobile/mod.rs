@@ -10,6 +10,9 @@
 //!     去重后生成 entries（含 isDefault/role）与同序 urls 的 camelCase DTO。
 
 use crate::config::AppConfig;
+use crate::net::discovery::{
+    list_mobile_access_candidates, local_lan_ip, MobileAccessCandidate as DiscoveryCandidate,
+};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -75,6 +78,44 @@ pub struct MobileAccessInfoDto {
     pub port: u16,
     pub urls: Vec<String>,
     pub entries: Vec<MobileAccessEntryDto>,
+}
+
+/// 从配置与实际端口组装多网段移动端访问入口信息。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `get_mobile_access_info` 与 `GET /api/mobile/access-info` 必须产出同一份多网段
+///     access-info，避免 command/route 两处各自枚举网卡或 fallback 漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 `list_mobile_access_candidates` 枚举候选，将 discovery 的 `"wifi"|"wired"`
+///     角色标签映射为 `MobileAccessRole`；候选为空时回退 `local_lan_ip()` 单 host；
+///     `default_host` 始终取自 `local_lan_ip()`，再交给 `build_mobile_access_info`。
+pub fn mobile_access_info_from_state(config: &AppConfig, port: u16) -> MobileAccessInfoDto {
+    let default_host = local_lan_ip().map(|ip| ip.to_string());
+    let mut candidates: Vec<MobileAccessCandidate> = list_mobile_access_candidates()
+        .into_iter()
+        .map(|c: DiscoveryCandidate| MobileAccessCandidate {
+            host: c.host,
+            role: match c.role {
+                Some("wifi") => Some(MobileAccessRole::Wifi),
+                Some("wired") => Some(MobileAccessRole::Wired),
+                _ => None,
+            },
+            ifa_name: c.ifa_name,
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        if let Some(ref ip) = default_host {
+            candidates.push(MobileAccessCandidate {
+                host: ip.clone(),
+                role: None,
+                ifa_name: String::new(),
+            });
+        }
+    }
+
+    build_mobile_access_info(config, port, candidates, default_host.as_deref())
 }
 
 /// 构建移动端访问入口信息。
