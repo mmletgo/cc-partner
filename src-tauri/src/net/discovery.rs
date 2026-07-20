@@ -14,6 +14,7 @@
 //!     - 本机过滤：ServiceResolved 时比对 TXT 的 device_id 与本机 device_id，一致则忽略
 //!       （与 Python `_on_service_state_change` 过滤逻辑一致）。
 //!     - 本机 IP 探测：`local_lan_ip` 优先选真实局域网接口 IP，对照 Python `_get_local_ip`。
+//!     - 移动端扫码候选：`list_mobile_access_candidates` 枚举多网卡可达地址（黑名单 + wifi/wired 角色启发式）。
 
 use crate::models::device::Device;
 use crate::net::protocol::server_protocol_info;
@@ -351,6 +352,139 @@ pub fn local_lan_ip() -> Option<IpAddr> {
     }
 }
 
+/// 移动端扫码可用的单条局域网候选地址。
+///
+/// Business Logic（为什么需要这个结构）:
+///     多网卡场景下手机可能连在非默认网段；需要 host + 可选 wifi/wired 角色 + 网卡名，
+///     供后续 access-info 组装 URL 与芯片标签。
+///
+/// Code Logic（这个结构做什么）:
+///     纯数据载体；`role` 仅 `"wifi"` | `"wired"`，未知为 None；Task 2 可映射到 enum。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobileAccessCandidate {
+    pub host: String,
+    /// "wifi" | "wired"；未知为 None
+    pub role: Option<&'static str>,
+    pub ifa_name: String,
+}
+
+/// 判断网卡名是否应从移动端扫码候选中排除。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Docker/VM/桥接/loopback 地址对手机浏览器通常不可达或噪音过大，进入二维码列表会误导用户。
+///
+/// Code Logic（这个函数做什么）:
+///     将接口名小写并去掉多余空白后，按前缀/全名黑名单匹配；命中返回 true。
+pub fn is_blocked_mobile_interface_name(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase().replace(' ', "");
+    if n.is_empty() {
+        return true;
+    }
+    const EXACT: &[&str] = &["lo", "lo0"];
+    if EXACT.contains(&n.as_str()) {
+        return true;
+    }
+    const PREFIXES: &[&str] = &[
+        "docker", "br-", "veth", "cni", "flannel", "cbridge", "vmnet", "vbox", "virbr", "hyper-v",
+        "vethernet", "awdl", "llw", "ap", "bridge", "gif", "stf", "p2p",
+    ];
+    PREFIXES.iter().any(|p| n.starts_with(p))
+}
+
+/// 从接口名启发式推断 wifi/wired 角色。
+///
+/// Business Logic（为什么需要这个函数）:
+///     芯片标签在可识别时显示「Wi‑Fi / 有线 · IP」，帮助用户选择手机所在网段。
+///
+/// Code Logic（这个函数做什么）:
+///     小写匹配常见 wifi/wired 命名；macOS 仅 `en0` 视为 wifi；无法判断返回 None。
+pub fn infer_mobile_access_role(interface_name: &str) -> Option<&'static str> {
+    let n = interface_name.trim().to_ascii_lowercase();
+    if n.is_empty() {
+        return None;
+    }
+    // wifi
+    if n.contains("wi-fi")
+        || n.contains("wifi")
+        || n.contains("wlan")
+        || n.contains("airport")
+        || n.starts_with("wl")
+    {
+        return Some("wifi");
+    }
+    #[cfg(target_os = "macos")]
+    if n == "en0" {
+        return Some("wifi");
+    }
+    // wired（中文「以太网」在 to_ascii_lowercase 后仍保留，故同时看原始 trim 名）
+    let raw = interface_name.trim();
+    if raw.contains("以太网")
+        || n.contains("ethernet")
+        || n.starts_with("eth")
+        || n.starts_with("enp")
+        || n.starts_with("ens")
+        || n.starts_with("eno")
+        || n.starts_with("em")
+    {
+        return Some("wired");
+    }
+    None
+}
+
+/// 枚举可供手机扫码的局域网候选地址。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单默认出站 IP 无法覆盖多网卡场景；手机可能连在非默认网段。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 if-addrs 枚举接口，过滤 loopback/link-local/未指定/黑名单接口，
+///     生成 host + 可选 role；失败返回空 Vec（调用方可回退 local_lan_ip）。
+pub fn list_mobile_access_candidates() -> Vec<MobileAccessCandidate> {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for iface in ifaces {
+        if is_blocked_mobile_interface_name(&iface.name) {
+            continue;
+        }
+        if iface.is_loopback() {
+            continue;
+        }
+        let ip = iface.ip();
+        match ip {
+            IpAddr::V4(v4) if v4.is_link_local() || v4.is_unspecified() || v4.is_loopback() => {
+                continue;
+            }
+            IpAddr::V6(v6)
+                if v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80 =>
+            {
+                continue;
+            }
+            _ => {}
+        }
+        // 额外：部分平台 link_local 方法
+        if matches!(&iface.addr, if_addrs::IfAddr::V4(a) if a.is_link_local())
+            || matches!(&iface.addr, if_addrs::IfAddr::V6(a) if a.is_link_local())
+        {
+            continue;
+        }
+        let host = ip.to_string();
+        if !seen.insert(host.clone()) {
+            continue;
+        }
+        out.push(MobileAccessCandidate {
+            host,
+            role: infer_mobile_access_role(&iface.name),
+            ifa_name: iface.name,
+        });
+    }
+    out
+}
+
 /// 把能力 token 列表编码为 mDNS TXT `caps` 值（逗号分隔，不含 `caps=` 前缀）。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -667,6 +801,98 @@ mod tests {
 
         assert_eq!(proto_version, PROTOCOL_VERSION_V1);
         assert!(capabilities.contains(&"errors.envelope.v1".to_string()));
+    }
+
+    /// 验证移动端候选接口黑名单覆盖虚拟网卡与 loopback。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     Docker/VM/桥接/AirDrop 等地址对手机浏览器通常不可达，进入二维码列表会误导用户。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言虚拟/回环名命中黑名单；常见物理网卡名不被误杀。
+    #[test]
+    fn blocked_mobile_interface_names_cover_virtual_and_loopback() {
+        for name in [
+            "lo",
+            "lo0",
+            "docker0",
+            "br-abc",
+            "veth123",
+            "cni0",
+            "flannel.1",
+            "vmnet1",
+            "vboxnet0",
+            "virbr0",
+            "vEthernet (WSL)",
+            "awdl0",
+            "llw0",
+            "bridge0",
+            "gif0",
+            "stf0",
+            "ap1",
+        ] {
+            assert!(
+                is_blocked_mobile_interface_name(name),
+                "expected blocked: {name}"
+            );
+        }
+        for name in [
+            "en0", "en1", "eth0", "wlan0", "wlp2s0", "utun4", "Ethernet", "Wi-Fi",
+        ] {
+            assert!(
+                !is_blocked_mobile_interface_name(name),
+                "expected allowed: {name}"
+            );
+        }
+    }
+
+    /// 验证 wifi/wired 角色启发式与平台分支。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     芯片标签依赖可识别的角色；错误推断会让用户选错手机所在网段。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖常见 wifi/wired 命名、未知接口 None，以及 macOS 仅 en0 视为 wifi。
+    #[test]
+    fn infer_mobile_access_role_wifi_wired_or_none() {
+        assert_eq!(infer_mobile_access_role("wlan0"), Some("wifi"));
+        assert_eq!(infer_mobile_access_role("wlp2s0"), Some("wifi"));
+        assert_eq!(infer_mobile_access_role("Wi-Fi"), Some("wifi"));
+        assert_eq!(infer_mobile_access_role("eth0"), Some("wired"));
+        assert_eq!(infer_mobile_access_role("enp0s3"), Some("wired"));
+        assert_eq!(infer_mobile_access_role("Ethernet"), Some("wired"));
+        assert_eq!(infer_mobile_access_role("以太网"), Some("wired"));
+        assert_eq!(infer_mobile_access_role("utun4"), None);
+        // macOS en0 → wifi；其它平台 en0 在本函数内用 cfg(target_os = "macos") 分支
+        #[cfg(target_os = "macos")]
+        assert_eq!(infer_mobile_access_role("en0"), Some("wifi"));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(infer_mobile_access_role("en0"), None);
+    }
+
+    /// 验证候选枚举不 panic，且不包含 loopback 主机。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     枚举失败或把 127.0.0.1 塞进列表都会破坏扫码可用性。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     调用 list_mobile_access_candidates，断言无 127.0.0.1 / ::1，且每条 host 非空。
+    #[test]
+    fn list_mobile_access_candidates_excludes_loopback_hosts() {
+        let candidates = list_mobile_access_candidates();
+        for c in &candidates {
+            assert!(!c.host.is_empty(), "host must not be empty");
+            assert_ne!(c.host, "127.0.0.1");
+            assert_ne!(c.host, "::1");
+            assert!(!c.ifa_name.is_empty(), "ifa_name must not be empty");
+            if let Some(role) = c.role {
+                assert!(
+                    role == "wifi" || role == "wired",
+                    "unexpected role {role} for {}",
+                    c.ifa_name
+                );
+            }
+        }
     }
 }
 

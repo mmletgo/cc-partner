@@ -57,6 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 libc = "0.2"
 hostname = "0.4"
+if-addrs = "0.13"
 toml_edit = "0.25"
 # M3 P2P 网络层：axum HTTP server（供对端调用）+ reqwest peer client + mdns-sd 发现 + tower（axum 服务依赖）
 axum = { version = "0.7", features = ["macros", "ws"] }
