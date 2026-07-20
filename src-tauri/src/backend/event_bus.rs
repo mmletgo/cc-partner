@@ -182,31 +182,33 @@ impl RuntimeEventBus {
     /// 发布一条事件并返回新游标。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     terminal/merge/transfer/runtime 事件必须在 sidecar 单调编号后才能被 GUI 去重。
+    ///     terminal/merge/transfer/runtime 事件必须在 sidecar 单调编号后才能被 GUI 去重；
+    ///     并发 publisher 不得让 seq=N+1 先于 seq=N 交付，否则 live consumer 会推进游标
+    ///     并把较晚到达的较早 sequence 当重复丢弃，且不产生 Gap。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     分配 next_sequence；写入 ring（满则弹出最旧）；broadcast Event；返回 cursor。
+    ///     在同一把 inner 锁内完成：分配 next_sequence、写入 ring（满则弹出最旧）、
+    ///     `broadcast::Sender::send`；锁外仅构造返回的 cursor。发送与编号同临界区保证
+    ///     交付顺序与 sequence 单调一致。
     pub fn publish(&self, event: &str, payload: Value) -> BackendRuntimeCursor {
-        let sequence = {
-            let mut inner = self.inner.lock().expect("event bus 锁中毒");
-            let sequence = inner.next_sequence;
-            inner.next_sequence = inner.next_sequence.saturating_add(1);
-            if inner.ring.len() >= inner.ring_capacity {
-                inner.ring.pop_front();
-            }
-            inner.ring.push_back(RingEntry {
-                sequence,
-                event: event.to_string(),
-                payload: payload.clone(),
-            });
-            sequence
-        };
+        let mut inner = self.inner.lock().expect("event bus 锁中毒");
+        let sequence = inner.next_sequence;
+        inner.next_sequence = inner.next_sequence.saturating_add(1);
+        if inner.ring.len() >= inner.ring_capacity {
+            inner.ring.pop_front();
+        }
+        inner.ring.push_back(RingEntry {
+            sequence,
+            event: event.to_string(),
+            payload: payload.clone(),
+        });
         let message = RuntimeRelayMessage::Event {
             owner_instance_id: self.owner_instance_id.clone(),
             sequence,
             event: event.to_string(),
             payload,
         };
+        // 必须持锁发送：并发 publish 若解锁后再 send，seq=2 可先于 seq=1 交付。
         let _ = self.tx.send(message);
         BackendRuntimeCursor {
             owner_instance_id: self.owner_instance_id.clone(),
@@ -631,6 +633,72 @@ mod tests {
         assert_eq!(c1.sequence, 1);
         assert_eq!(c2.sequence, 2);
         assert_eq!(c1.owner_instance_id, "owner-a");
+    }
+
+    /// 并发 publisher 交付顺序必须与 sequence 单调一致。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     若 seq 分配在锁内、broadcast send 在锁外，seq=2 可先于 seq=1 交付；
+    ///     live consumer 推进 skip 后会把 1 当重复丢弃且不产生 Gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先 open_relay 订阅 live，再 spawn 多个线程并发 publish；收集到的 Event
+    ///     sequence 必须严格递增、无空洞（或仅在 lag 时见 Gap，本容量下应无 Gap）。
+    #[test]
+    fn concurrent_publish_delivers_monotonic_sequences() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let bus = Arc::new(RuntimeEventBus::with_capacity("owner-a", 256, 256));
+        let mut relay = bus.open_relay(None);
+        // 吃掉订阅时可能已有的 ring 快照（当前为空）。
+        while relay.try_recv().is_some() {}
+
+        let threads = 8usize;
+        let per_thread = 32usize;
+        let mut handles = Vec::with_capacity(threads);
+        for t in 0..threads {
+            let bus = Arc::clone(&bus);
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    let _ = bus.publish("e", json!({ "t": t, "i": i }));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("publisher join");
+        }
+
+        let expected = (threads * per_thread) as u64;
+        let mut sequences = Vec::with_capacity(expected as usize);
+        // 全部 publish 完成后，live + catch-up 路径应能收齐全部 Event。
+        // open_relay(None) 会先 ring catch-up 再 live；此处在 publish 后另开 relay 读 ring。
+        let mut catch_up = bus.open_relay(None);
+        while let Some(msg) = catch_up.try_recv() {
+            match msg {
+                RuntimeRelayMessage::Event { sequence, .. } => sequences.push(sequence),
+                RuntimeRelayMessage::Gap { .. } => {
+                    panic!("concurrent publish under capacity must not Gap")
+                }
+            }
+        }
+        assert_eq!(sequences.len() as u64, expected);
+        for (idx, seq) in sequences.iter().enumerate() {
+            assert_eq!(*seq, (idx as u64) + 1, "delivery order must match sequence");
+        }
+        // 实时订阅侧：任意已收到的前缀也必须单调（可能仍在 live 缓冲）。
+        let mut last = 0u64;
+        while let Some(msg) = relay.try_recv() {
+            match msg {
+                RuntimeRelayMessage::Event { sequence, .. } => {
+                    assert!(sequence > last, "live delivery reordered: {sequence} after {last}");
+                    last = sequence;
+                }
+                RuntimeRelayMessage::Gap { .. } => {
+                    panic!("live concurrent path under capacity must not Gap")
+                }
+            }
+        }
     }
 
     #[test]

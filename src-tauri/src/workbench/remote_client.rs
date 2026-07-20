@@ -2327,6 +2327,7 @@ mod tests {
                             buffer: "hello\n".to_string(),
                             truncated: false,
                             last_seq: 42,
+                            owner_instance_id: Some("owner-remote".to_string()),
                         })
                     },
                 ),

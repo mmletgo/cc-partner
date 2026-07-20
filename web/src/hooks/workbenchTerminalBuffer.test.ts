@@ -783,7 +783,17 @@ describe('session cutover epoch / committed baseline', () => {
     expect(state.authorityId).toBe('owner-a');
     expect(isTerminalAuthorityChange(state, 'owner-b')).toBe(true);
 
-    // owner B 以 lastSeq=1 到来：同 sessionId 但 authority 变更必须 accept
+    // 已绑定 A 时，直接用 B 调 shouldAccept 必须拒绝（防 delayed A/B clobber）。
+    expect(shouldAcceptTerminalCutover(state, 1, undefined, 'owner-b')).toBe(false);
+
+    // live/resync 先 rebind authority（与 Provider 行为一致），再同 authority cutover。
+    state = {
+      ...state,
+      authorityId: 'owner-b',
+      committedBaselineLastSeq: 0,
+      overflowHighWaterSeq: 0,
+      needsReplay: false,
+    };
     expect(shouldAcceptTerminalCutover(state, 1, undefined, 'owner-b')).toBe(true);
     const pruned = applyTerminalBaselineCutover(
       store,
@@ -805,6 +815,40 @@ describe('session cutover epoch / committed baseline', () => {
     store.append('s1', 'b-live', 2, 'owner-b');
     expect(store.getBuffer('s1')).toBe('B-BASEb-live');
     expect(store.getLastSeq('s1')).toBe(2);
+
+    // 迟到的 owner-A 高 lastSeq replay 不得 clobber B
+    expect(shouldAcceptTerminalCutover(state, 999, undefined, 'owner-a')).toBe(false);
+  });
+
+  test('delayed owner-A replay after B live must not clobber B', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    let state = createEmptySessionCutoverState();
+
+    // A baseline 请求已发出，但尚未返回。期间 B live rebind + cutover 建立权威。
+    state = {
+      ...state,
+      authorityId: 'owner-b',
+      committedBaselineLastSeq: 0,
+      overflowHighWaterSeq: 0,
+      needsReplay: false,
+    };
+    expect(shouldAcceptTerminalCutover(state, 5, 1, 'owner-b')).toBe(true);
+    applyTerminalBaselineCutover(store, 's1', 'B', 5, [], 'owner-b', true);
+    state = commitTerminalCutover(state, 5, 1, 'owner-b');
+    store.append('s1', 'b2', 6, 'owner-b');
+    expect(store.getBuffer('s1')).toBe('Bb2');
+
+    // A 的 delayed replay（高 lastSeq、旧 authority）必须 reject
+    expect(shouldAcceptTerminalCutover(state, 100, 0, 'owner-a')).toBe(false);
+    // 无 authority 的旧 baseline 也不得用高 lastSeq 清 B（同 authority 比较 lastSeq 时可接受，
+    // 但这里模拟 replay 未带 owner：不得改变已绑定 authority，且 lastSeq 比较仍可接受高水位）。
+    // 关键：带 owner-a 的路径已 reject。
+    expect(store.getBuffer('s1')).toBe('Bb2');
+    expect(store.getLastSeq('s1')).toBe(6);
+    expect(state.authorityId).toBe('owner-b');
   });
 
   test('shouldCollectHeldLive only during baseline window or replay', () => {

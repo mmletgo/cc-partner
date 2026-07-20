@@ -208,11 +208,17 @@ export function WorkbenchTerminalBuffersProvider({
         try {
           const replay = await workbenchApi.sessions.replay(sessionId);
           if (cancelled) return;
+          const authorityId =
+            typeof replay.ownerInstanceId === 'string' &&
+            replay.ownerInstanceId.length > 0
+              ? replay.ownerInstanceId
+              : null;
           applySucceeded = applyCutover(
             replay.sessionId,
             replay.buffer,
             replay.lastSeq,
             requestEpoch,
+            authorityId,
           );
         } catch {
           applySucceeded = false;
@@ -355,6 +361,20 @@ export function WorkbenchTerminalBuffersProvider({
             payload.ownerInstanceId.length > 0
               ? payload.ownerInstanceId
               : null;
+          const cutover = ensureCutoverState(sessionId);
+          if (isTerminalAuthorityChange(cutover, authorityId)) {
+            // resync 新 owner：先 rebind 并作废 in-flight baseline（抬 epoch），再 cutover。
+            heldLiveBySessionRef.current.delete(sessionId);
+            cutoverBySessionRef.current.set(sessionId, {
+              ...cutover,
+              authorityId: authorityId ?? cutover.authorityId,
+              committedBaselineLastSeq: 0,
+              overflowHighWaterSeq: 0,
+              needsReplay: false,
+              cutoverEpoch: cutover.cutoverEpoch + 1,
+              replayInFlight: false,
+            });
+          }
           applyCutover(sessionId, payload.buffer ?? '', lastSeq, undefined, authorityId);
         });
       } catch {
@@ -377,7 +397,18 @@ export function WorkbenchTerminalBuffersProvider({
             try {
               const replay = await workbenchApi.sessions.replay(session.id);
               if (cancelled) return;
-              applyCutover(replay.sessionId, replay.buffer, replay.lastSeq);
+              const authorityId =
+                typeof replay.ownerInstanceId === 'string' &&
+                replay.ownerInstanceId.length > 0
+                  ? replay.ownerInstanceId
+                  : null;
+              applyCutover(
+                replay.sessionId,
+                replay.buffer,
+                replay.lastSeq,
+                undefined,
+                authorityId,
+              );
             } catch {
               // 单 session replay 失败不阻断其它 session；后续 resync / live 仍可恢复。
             }

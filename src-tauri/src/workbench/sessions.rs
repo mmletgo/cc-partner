@@ -186,7 +186,7 @@ impl TerminalUtf8Decoder {
 ///     移动端首次打开终端时无法收到历史 live event，需要通过 HTTP 拉取最近输出后再接增量事件。
 ///
 /// Code Logic（这个结构体做什么）:
-///     以 camelCase 序列化 sessionId、最近输出 buffer、是否截断和最后 seq，供 Rust route 与前端类型对齐。
+///     以 camelCase 序列化 sessionId、最近输出 buffer、是否截断、最后 seq，以及可选 ownerInstanceId（cutover 权威），供 Rust route 与前端类型对齐。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchSessionReplayDto {
@@ -194,6 +194,9 @@ pub struct WorkbenchSessionReplayDto {
     pub buffer: String,
     pub truncated: bool,
     pub last_seq: u64,
+    /// 发布该 terminal ring 的 owner 实例；缺失时前端不得用其重置已绑定 authority。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_instance_id: Option<String>,
 }
 
 /// 工作台终端 replay 中的增量输出块。
@@ -318,6 +321,8 @@ impl SessionReplayBuffer {
             buffer,
             truncated: self.truncated,
             last_seq: self.last_seq,
+            // snapshot 层不知 owner；由命令/route 注入权威 ownerInstanceId。
+            owner_instance_id: None,
         }
     }
 }
@@ -1759,6 +1764,7 @@ impl WorkbenchSessionRegistry {
                 buffer: String::new(),
                 truncated: false,
                 last_seq: 0,
+                owner_instance_id: None,
             },
             |buffer| buffer.snapshot(session_id),
         )

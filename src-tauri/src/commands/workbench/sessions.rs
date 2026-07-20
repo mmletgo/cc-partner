@@ -114,13 +114,29 @@ pub(crate) async fn replay_workbench_session_for_state(
             .replay(&base_url, &inner_session_id)
             .await?;
         replay.session_id = session_id;
+        // 远端 DTO 可能已带对端 owner；若缺失则不得伪造本机 sidecar owner 冒充远端 authority。
+        // 本机 event bus 对 remote terminal-output 使用的是本机 sidecar owner（bridge 再发布），
+        // 因此 cutover 权威以本机 event_bus owner 为准，保证与 live enrichment 一致。
+        if replay
+            .owner_instance_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
+            replay.owner_instance_id =
+                Some(state.config_runtime.owner_instance_id().to_string());
+        }
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
         return Ok(replay);
     }
     if !state.workbench_sessions.session_exists(&session_id) {
         return Err(AppError::not_found("工作台会话不存在"));
     }
-    Ok(state.workbench_sessions.replay(&session_id))
+    let mut replay = state.workbench_sessions.replay(&session_id);
+    // 本机 PTY ring 的 authority 即 sidecar ownerInstanceId。
+    replay.owner_instance_id = Some(state.config_runtime.owner_instance_id().to_string());
+    Ok(replay)
 }
 
 /// 拉取工作台终端最近输出（Tauri 命令入口）。

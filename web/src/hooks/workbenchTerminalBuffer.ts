@@ -258,10 +258,15 @@ export function isTerminalAuthorityChange(
 /**
  * Business Logic（为什么需要这个函数）:
  *   晚到的旧 baseline A 或 held 溢出后作废的 in-flight replay 不得 clobber 已提交较新 B；
- *   但 owner 切换时新 authority 的较低 lastSeq 必须接受，否则终端永久冻结。
+ *   已绑定 authority 后，迟到的**另一** owner 快照（含 delayed replay）必须拒绝；
+ *   新 owner 的较低 lastSeq 只能在 live/resync **先 rebind authority** 后经同 authority 路径接受，
+ *   否则终端要么被 A 污染要么永久冻结。
  *
  * Code Logic（这个函数做什么）:
- *   lastSeq 非有限 → reject；authority 变更 → accept；
+ *   lastSeq 非有限 → reject；
+ *   若 authorityId 有效且与 state.authorityId 不同：
+ *     - state 尚未绑定（null/空）→ accept（首次绑定）；
+ *     - state 已绑定其它 authority → reject（stale owner，不得 clobber）；
  *   lastSeq < committedBaselineLastSeq → reject；
  *   若提供 requestEpoch 且 requestEpoch < cutoverEpoch → reject；否则 accept。
  */
@@ -274,7 +279,20 @@ export function shouldAcceptTerminalCutover(
   if (typeof lastSeq !== 'number' || !Number.isFinite(lastSeq)) {
     return false;
   }
+  const hasBoundAuthority =
+    typeof state.authorityId === 'string' && state.authorityId.length > 0;
+  const hasAuthorityArg =
+    typeof authorityId === 'string' && authorityId.length > 0;
+  // 已绑定 authority 时，缺 owner 的 plain replay 也不得 clobber（R6 H2）。
+  if (hasBoundAuthority && !hasAuthorityArg) {
+    return false;
+  }
   if (isTerminalAuthorityChange(state, authorityId)) {
+    // 已绑定其它 owner：迟到的旧/异 owner 快照一律拒绝（A delayed after B）。
+    // 新 owner 必须由 live/resync 先 rebind 再走同 authority cutover。
+    if (hasBoundAuthority) {
+      return false;
+    }
     return true;
   }
   if (lastSeq < state.committedBaselineLastSeq) {

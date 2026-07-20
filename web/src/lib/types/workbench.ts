@@ -528,13 +528,22 @@ export interface WorkbenchSession {
  *   移动端首次打开远端终端时，需要先拉取最近输出，再订阅增量事件。
  *
  * Code Logic（字段说明）:
- *   buffer 是后端按 Unicode char 边界保留的最近输出；lastSeq 用于前端衔接后续 terminal-output 事件。
+ *   buffer 是后端按 Unicode char 边界保留的最近输出；lastSeq 用于前端衔接后续 terminal-output 事件；
+ *   ownerInstanceId 为 cutover 权威（可选，缺失时不得重置已绑定 authority）。
  */
 export interface WorkbenchSessionReplay {
   sessionId: string;
   buffer: string;
   truncated: boolean;
   lastSeq: number;
+  /**
+   * Business Logic（为什么需要这个字段）:
+   *   baseline/overflow replay 必须绑定 stream owner，迟到的旧 owner 快照不得 clobber 新 authority。
+   *
+   * Code Logic（这个字段做什么）:
+   *   可选 ownerInstanceId；缺失时 applyCutover 不得覆盖已绑定 authority。
+   */
+  ownerInstanceId?: string;
 }
 
 /** 工作台文件节点类型：文件或文件夹。 */

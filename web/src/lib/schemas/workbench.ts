@@ -302,7 +302,7 @@ export const workbenchSessionsDecoder: Decoder<WorkbenchSession[]> =
  *   桌面 baseline / Gap resync 需要完整 replay buffer 与 lastSeq cutover；残缺 DTO 不得推进游标。
  *
  * Code Logic（这个 decoder 做什么）:
- *   解码 sessionId/buffer/truncated/lastSeq；buffer 允许空串。
+ *   解码 sessionId/buffer/truncated/lastSeq/可选 ownerInstanceId；buffer 允许空串。
  */
 export const workbenchSessionReplayDecoder: Decoder<WorkbenchSessionReplay> = objectDecoder(
   'WorkbenchSessionReplay',
@@ -311,6 +311,8 @@ export const workbenchSessionReplayDecoder: Decoder<WorkbenchSessionReplay> = ob
     buffer: stringDecoder,
     truncated: booleanDecoder,
     lastSeq: numberDecoder,
+    // 可选 owner：旧对端可能无此字段；缺失时前端不得重置已绑定 authority。
+    ownerInstanceId: optionalDecoder(stringDecoder),
   },
 );
 

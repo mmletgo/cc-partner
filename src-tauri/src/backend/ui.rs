@@ -602,16 +602,107 @@ fn session_row_is_replayable_for_gap(session: &serde_json::Value) -> bool {
     status.eq_ignore_ascii_case("running")
 }
 
+/// 收集 Gap resync 需要 inventory 的全部 session 行（本机 + remote shortcut）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     无 projectId 的 `sessions.list` 只返回本机会话，但远端 bridge 的 terminal-output
+///     也发布进同一 event bus；若 Gap 只 replay 本机，会把远端缺口标 complete 并 attach latest。
+///
+/// Code Logic（这个函数做什么）:
+///     1) `sessions.list({})` 本机行；2) `projects.list` 找 kind=remote 的 shortcut；
+///     3) 对每个 remote project 调 `sessions.list({projectId})`（失败上抛，fail-closed）；
+///     4) 按 session id 去重合并返回。
+async fn list_sessions_for_gap_resync(
+    client: &BackendControlClient,
+    cancel: Option<&CancellationToken>,
+) -> Result<Vec<Value>, AppError> {
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(AppError::generic("cancelled"));
+    }
+    let mut by_id: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+
+    let local_sessions: Vec<Value> = client
+        .workbench_op("sessions.list", json!({}))
+        .await
+        .map_err(|e| AppError::generic(format!("gap_resync_list_failed:{}", e.code())))?;
+    for session in local_sessions {
+        if let Some(id) = session
+            .get("id")
+            .or_else(|| session.get("sessionId"))
+            .and_then(|v| v.as_str())
+        {
+            by_id.insert(id.to_string(), session);
+        }
+    }
+
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(AppError::generic("cancelled"));
+    }
+    let projects: Vec<Value> = client
+        .workbench_op("projects.list", json!({}))
+        .await
+        .map_err(|e| {
+            // projects.list 失败时无法证明无活跃远端源，必须 incomplete（fail-closed）。
+            AppError::generic(format!("gap_resync_projects_list_failed:{}", e.code()))
+        })?;
+
+    for project in projects {
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            return Err(AppError::generic("cancelled"));
+        }
+        let kind = project
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("local");
+        if !kind.eq_ignore_ascii_case("remote") {
+            continue;
+        }
+        let Some(project_id) = project
+            .get("id")
+            .or_else(|| project.get("projectId"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
+            continue;
+        };
+        let remote_sessions: Vec<Value> = client
+            .workbench_op(
+                "sessions.list",
+                json!({ "projectId": project_id }),
+            )
+            .await
+            .map_err(|e| {
+                // 任一 remote inventory 失败：不得 attach latest 越过远端缺口。
+                AppError::generic(format!(
+                    "gap_resync_remote_list_failed:{}",
+                    e.code()
+                ))
+            })?;
+        for session in remote_sessions {
+            if let Some(id) = session
+                .get("id")
+                .or_else(|| session.get("sessionId"))
+                .and_then(|v| v.as_str())
+            {
+                by_id.insert(id.to_string(), session);
+            }
+        }
+    }
+
+    Ok(by_id.into_values().collect())
+}
+
 /// 经 control workbench 列出 session 并 replay，向前端发出 terminal-resync。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Gap 后 GUI 本地 terminal buffer 可能缺中间输出；必须从 owner registry 拉 replay buffer。
+///     inventory 必须覆盖本机 + remote shortcut 会话（同一 event bus 的全部 terminal-output 源）。
 ///     list 失败或任一**可 replay（running）** session 的 replay 失败都必须视为 incomplete。
 ///     disconnected/exited 仅存在于 SQLite 的会话不得阻断 cutover（同步 status 由后续 list 路径负责）。
 ///
 /// Code Logic（这个函数做什么）:
-///     `sessions.list`（失败上抛）→ 仅对 `session_row_is_replayable_for_gap` 为真的 id
-///     调 `sessions.replay`（失败上抛）→ 注入 `ownerInstanceId` 后 emit resync；
+///     `list_sessions_for_gap_resync`（失败上抛）→ 仅对 `session_row_is_replayable_for_gap`
+///     为真的 id 调 `sessions.replay`（失败上抛）→ 注入 `ownerInstanceId` 后 emit resync；
 ///     每步前检查 cancel；返回成功次数。
 async fn resync_terminals_via_control(
     client: &BackendControlClient,
@@ -622,12 +713,7 @@ async fn resync_terminals_via_control(
     if cancel.is_some_and(|c| c.is_cancelled()) {
         return Err(AppError::generic("cancelled"));
     }
-    let sessions: Vec<serde_json::Value> = client
-        .workbench_op("sessions.list", json!({}))
-        .await
-        .map_err(|e| {
-            AppError::generic(format!("gap_resync_list_failed:{}", e.code()))
-        })?;
+    let sessions = list_sessions_for_gap_resync(client, cancel).await?;
     let mut count = 0u64;
     for session in sessions {
         if cancel.is_some_and(|c| c.is_cancelled()) {
@@ -655,11 +741,19 @@ async fn resync_terminals_via_control(
                 AppError::generic(format!("gap_resync_replay_failed:{}", e.code()))
             })?;
         // 前端 cutover 按 owner authority 重置 lastSeq；resync payload 必须带新 owner。
+        // 若 replay DTO 已自带 ownerInstanceId 则保留；否则注入 bus owner。
         if let Some(obj) = replay.as_object_mut() {
-            obj.insert(
-                "ownerInstanceId".to_string(),
-                Value::String(owner_instance_id.to_string()),
-            );
+            let has_owner = obj
+                .get("ownerInstanceId")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_owner {
+                obj.insert(
+                    "ownerInstanceId".to_string(),
+                    Value::String(owner_instance_id.to_string()),
+                );
+            }
         }
         ui.emit(WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
         count = count.saturating_add(1);
@@ -1005,6 +1099,8 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
+                // Gap resync 会先 projects.list 再 inventory remote；默认空列表（仅本机）。
+                "projects.list" => Value::Array(vec![]),
                 "sessions.list" => Value::Array(s.list_rows.clone()),
                 "sessions.replay" => {
                     let sid = body
@@ -1027,6 +1123,7 @@ mod tests {
                         "buffer": s.buffer,
                         "truncated": false,
                         "lastSeq": 1,
+                        "ownerInstanceId": "owner-1",
                     })
                 }
                 _ => json!({ "ok": true }),
@@ -1329,6 +1426,213 @@ mod tests {
         assert_eq!(state.cursor().unwrap().owner_instance_id, "owner-1");
         assert!(state.recovery_pending());
         assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 0);
+    }
+
+    /// remote inventory 失败时 Gap 必须 incomplete，不得 attach latest。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     R6 H3：sessions.list 无 projectId 仅本机，但 remote bridge 同样写 event bus；
+    ///     若 projects.list/remote sessions.list 失败仍 complete，会永久越过远端缺口。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     mock control：local list 成功；projects.list 返回 remote 项目；
+    ///     sessions.list(projectId) 返回 503 → resync incomplete → 不 attach latest。
+    #[tokio::test]
+    async fn gap_resync_remote_inventory_failure_is_incomplete() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WbReq {
+            #[allow(dead_code)]
+            control_token: String,
+            op: String,
+            #[serde(default)]
+            payload: Value,
+        }
+
+        async fn handle_wb(
+            Json(body): Json<WbReq>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let result = match body.op.as_str() {
+                "projects.list" => json!([{
+                    "id": "remote-proj",
+                    "kind": "remote",
+                    "name": "remote",
+                }]),
+                "sessions.list" => {
+                    let project_id = body
+                        .payload
+                        .get("projectId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if project_id.is_empty() {
+                        // 本机 running session
+                        json!([{
+                            "id": "local-s1",
+                            "sessionId": "local-s1",
+                            "status": "running",
+                        }])
+                    } else {
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({
+                                "error": "remote offline",
+                                "code": "unavailable",
+                            })),
+                        ));
+                    }
+                }
+                "sessions.replay" => json!({
+                    "sessionId": "local-s1",
+                    "buffer": "x",
+                    "truncated": false,
+                    "lastSeq": 1,
+                    "ownerInstanceId": "owner-1",
+                }),
+                _ => json!({ "ok": true }),
+            };
+            Ok(Json(json!({
+                "ownerInstanceId": "owner-1",
+                "result": result,
+            })))
+        }
+
+        let app = Router::new()
+            .route("/api/backend/control/workbench", post(handle_wb))
+            .route("/api/backend/control/workbench/data", post(handle_wb));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind remote-fail fixture");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        std::mem::forget(server);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let client = BackendControlClient::for_test(port, "token", "owner-1").expect("client");
+        let ui = RecordingBackendUi::default();
+        let outcome = resync_after_gap(
+            &client,
+            &ui,
+            "owner-1",
+            1,
+            9,
+            None,
+        )
+        .await;
+        assert!(
+            outcome.is_none(),
+            "remote inventory failure must make Gap incomplete"
+        );
+    }
+
+    /// remote + local running 会话均可 inventory 并 replay 时 Gap complete。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端会话成功恢复时必须一并 resync，不能只完成本机。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     projects.list 含 remote；sessions.list 按 projectId 返回 remote session；
+    ///     两次 replay 成功 → Some outcome 且 terminal_replay_count>=2。
+    #[tokio::test]
+    async fn gap_resync_includes_remote_running_sessions() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WbReq {
+            #[allow(dead_code)]
+            control_token: String,
+            op: String,
+            #[serde(default)]
+            payload: Value,
+        }
+
+        async fn handle_wb(
+            Json(body): Json<WbReq>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let result = match body.op.as_str() {
+                "projects.list" => json!([{
+                    "id": "remote-proj",
+                    "kind": "remote",
+                    "name": "remote",
+                }]),
+                "sessions.list" => {
+                    let project_id = body
+                        .payload
+                        .get("projectId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if project_id.is_empty() {
+                        json!([{
+                            "id": "local-s1",
+                            "sessionId": "local-s1",
+                            "status": "running",
+                        }])
+                    } else {
+                        json!([{
+                            "id": "remote:dev:inner-s1",
+                            "sessionId": "remote:dev:inner-s1",
+                            "status": "running",
+                        }])
+                    }
+                }
+                "sessions.replay" => {
+                    let sid = body
+                        .payload
+                        .get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    json!({
+                        "sessionId": sid,
+                        "buffer": "buf",
+                        "truncated": false,
+                        "lastSeq": 3,
+                        "ownerInstanceId": "owner-1",
+                    })
+                }
+                _ => json!({ "ok": true }),
+            };
+            Ok(Json(json!({
+                "ownerInstanceId": "owner-1",
+                "result": result,
+            })))
+        }
+
+        let app = Router::new()
+            .route("/api/backend/control/workbench", post(handle_wb))
+            .route("/api/backend/control/workbench/data", post(handle_wb));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind remote-ok fixture");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        std::mem::forget(server);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let client = BackendControlClient::for_test(port, "token", "owner-1").expect("client");
+        let ui = RecordingBackendUi::default();
+        let outcome = resync_after_gap(
+            &client,
+            &ui,
+            "owner-1",
+            1,
+            9,
+            None,
+        )
+        .await
+        .expect("remote+local inventory must complete");
+        assert!(
+            outcome.terminal_replay_count >= 2,
+            "must replay local and remote running sessions, got {}",
+            outcome.terminal_replay_count
+        );
+        let events = ui.snapshot();
+        let resyncs: Vec<_> = events
+            .iter()
+            .filter(|(name, _)| name == WORKBENCH_TERMINAL_RESYNC_EVENT)
+            .collect();
+        assert_eq!(resyncs.len(), 2);
     }
 
     /// 验证同 sequence 重复消息被 DropDuplicate。

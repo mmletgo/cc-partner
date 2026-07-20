@@ -209,6 +209,7 @@ function createEmptyDesktopReplay(sessionId: string): WorkbenchSessionReplay {
     buffer: '',
     truncated: false,
     lastSeq: 0,
+    // 空 desktop transport 无 owner 权威，不得冒充 live stream。
   };
 }
 

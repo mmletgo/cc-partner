@@ -1117,7 +1117,10 @@ pub async fn replay_workbench_session(
     if !state.workbench_sessions.session_exists(&req.session_id) {
         return Err(P2pError::not_found("工作台会话不存在", &ctx));
     }
-    Ok(Json(state.workbench_sessions.replay(&req.session_id)))
+    let mut replay = state.workbench_sessions.replay(&req.session_id);
+    // P2P 对端 replay 必须携带本机 owner，便于调用方 cutover 按 authority 绑定。
+    replay.owner_instance_id = Some(state.config_runtime.owner_instance_id().to_string());
+    Ok(Json(replay))
 }
 
 /// 列出远端设备本机项目终端会话。
