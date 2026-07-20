@@ -3,6 +3,7 @@ import { planTerminalBufferWrite } from '@/pages/Workbench/terminalReplay';
 import {
   appendWorkbenchTerminalOutput,
   applyTerminalBaselineCutover,
+  beginAuthorityChangeReplay,
   beginHeldOverflowReplay,
   commitTerminalCutover,
   createEmptySessionCutoverState,
@@ -767,6 +768,29 @@ describe('session cutover epoch / committed baseline', () => {
     expect(state.overflowHighWaterSeq).toBe(0);
   });
 
+  test('beginAuthorityChangeReplay forces re-baseline only for already-bound switch', () => {
+    const unbound = createEmptySessionCutoverState();
+    expect(beginAuthorityChangeReplay(unbound, 'owner-a')).toBeNull();
+    expect(beginAuthorityChangeReplay(unbound, null)).toBeNull();
+    expect(beginAuthorityChangeReplay(unbound, '')).toBeNull();
+
+    let state = commitTerminalCutover(unbound, 100, undefined, 'owner-a');
+    expect(state.authorityId).toBe('owner-a');
+    expect(beginAuthorityChangeReplay(state, 'owner-a')).toBeNull();
+
+    const switched = beginAuthorityChangeReplay(state, 'owner-b');
+    expect(switched).not.toBeNull();
+    expect(switched!.requestEpoch).toBe(state.cutoverEpoch + 1);
+    expect(switched!.state.authorityId).toBe('owner-b');
+    expect(switched!.state.committedBaselineLastSeq).toBe(0);
+    expect(switched!.state.overflowHighWaterSeq).toBe(0);
+    expect(switched!.state.needsReplay).toBe(true);
+    expect(switched!.state.replayInFlight).toBe(false);
+    expect(switched!.state.cutoverEpoch).toBe(state.cutoverEpoch + 1);
+    // 切换后必须 held 新 authority live，直到匹配 epoch 的 replay 成功。
+    expect(shouldCollectHeldLiveTerminalEvent(switched!.state, true)).toBe(true);
+  });
+
   test('owner authority change accepts lower lastSeq and resets store baseline', () => {
     const frames = createCollectingFrameScheduler();
     const store = createWorkbenchTerminalBufferStore({
@@ -786,15 +810,16 @@ describe('session cutover epoch / committed baseline', () => {
     // 已绑定 A 时，直接用 B 调 shouldAccept 必须拒绝（防 delayed A/B clobber）。
     expect(shouldAcceptTerminalCutover(state, 1, undefined, 'owner-b')).toBe(false);
 
-    // live/resync 先 rebind authority（与 Provider 行为一致），再同 authority cutover。
-    state = {
-      ...state,
-      authorityId: 'owner-b',
-      committedBaselineLastSeq: 0,
-      overflowHighWaterSeq: 0,
-      needsReplay: false,
-    };
-    expect(shouldAcceptTerminalCutover(state, 1, undefined, 'owner-b')).toBe(true);
+    // R9 M1：已绑定 authority 切换强制 re-baseline（beginAuthorityChangeReplay）。
+    const switched = beginAuthorityChangeReplay(state, 'owner-b');
+    expect(switched).not.toBeNull();
+    state = switched!.state;
+    expect(state.needsReplay).toBe(true);
+    expect(shouldAcceptTerminalCutover(state, 1, switched!.requestEpoch, 'owner-b')).toBe(
+      true,
+    );
+    // authority 已 rebind：authorityChanged=false；旧 held 在 Provider 侧先清空，
+    // 这里传入的旧 seq held 也不得写回（调用方应丢弃或 authorityChanged=true）。
     const pruned = applyTerminalBaselineCutover(
       store,
       's1',
@@ -805,11 +830,12 @@ describe('session cutover epoch / committed baseline', () => {
       true,
     );
     expect(pruned).toEqual([]);
-    state = commitTerminalCutover(state, 1, undefined, 'owner-b');
+    state = commitTerminalCutover(state, 1, switched!.requestEpoch, 'owner-b');
     expect(store.getBuffer('s1')).toBe('B-BASE');
     expect(store.getLastSeq('s1')).toBe(1);
     expect(state.authorityId).toBe('owner-b');
     expect(state.committedBaselineLastSeq).toBe(1);
+    expect(state.needsReplay).toBe(false);
 
     // 后续 live 从新 authority 的 seq=2 起可写
     store.append('s1', 'b-live', 2, 'owner-b');
@@ -941,30 +967,42 @@ describe('session cutover epoch / committed baseline', () => {
     // 已绑定 A 时，直接用 B 的 cutover 会被 reject（防 delayed clobber）
     expect(shouldAcceptTerminalCutover(state, 1, undefined, authorityB)).toBe(false);
 
-    // live/resync 先 rebind authority（与 Provider 行为一致）
-    state = {
-      ...state,
-      authorityId: authorityB,
-      committedBaselineLastSeq: 0,
-      overflowHighWaterSeq: 0,
-      needsReplay: false,
-    };
-    expect(shouldAcceptTerminalCutover(state, 1, undefined, authorityB)).toBe(true);
-    applyTerminalBaselineCutover(store, sessionId, 'b', 1, [], authorityB, true);
-    state = commitTerminalCutover(state, 1, undefined, authorityB);
-    expect(store.getBuffer(sessionId)).toBe('b');
-    expect(store.getLastSeq(sessionId)).toBe(1);
+    // R9 M1：已绑定 A→B 必须 beginAuthorityChangeReplay（needsReplay + 抬 epoch）
+    const switched = beginAuthorityChangeReplay(state, authorityB);
+    expect(switched).not.toBeNull();
+    state = switched!.state;
+    expect(state.needsReplay).toBe(true);
     expect(state.authorityId).toBe(authorityB);
-
-    // cutover 后新 live seq=2 追加
-    store.append(sessionId, 'b', 2, authorityB);
-    expect(store.getBuffer(sessionId)).toBe('bb');
+    expect(shouldAcceptTerminalCutover(state, 1, switched!.requestEpoch, authorityB)).toBe(
+      true,
+    );
+    // 模拟成功 sessions.replay：baseline 含断线窗口内容 'b0'+'b1'，lastSeq=1
+    // held 在 replay 期间收集了首条 B live（seq=2）
+    const heldAfterLive: HeldLiveTerminalEvent[] = [{ chunk: 'b2', seq: 2 }];
+    applyTerminalBaselineCutover(
+      store,
+      sessionId,
+      'b0b1',
+      1,
+      heldAfterLive,
+      authorityB,
+      false,
+    );
+    state = commitTerminalCutover(state, 1, switched!.requestEpoch, authorityB);
+    expect(store.getBuffer(sessionId)).toBe('b0b1b2');
     expect(store.getLastSeq(sessionId)).toBe(2);
+    expect(state.authorityId).toBe(authorityB);
+    expect(state.needsReplay).toBe(false);
 
     // 同 authority 下重复 seq 不双写
     store.append(sessionId, 'x', 2, authorityB);
-    expect(store.getBuffer(sessionId)).toBe('bb');
+    expect(store.getBuffer(sessionId)).toBe('b0b1b2');
     expect(store.getLastSeq(sessionId)).toBe(2);
+
+    // 新 live seq=3 追加
+    store.append(sessionId, 'b3', 3, authorityB);
+    expect(store.getBuffer(sessionId)).toBe('b0b1b2b3');
+    expect(store.getLastSeq(sessionId)).toBe(3);
   });
 
   test('shouldCollectHeldLive only during baseline window or replay', () => {

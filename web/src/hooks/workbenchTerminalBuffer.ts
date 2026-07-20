@@ -423,6 +423,45 @@ export function beginHeldOverflowReplay(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   已绑定 stream authority 后若 owner 切换（如远端 backend 重启合成新 composite authority），
+ *   远端 `/api/workbench/events` 是纯 broadcast，断线窗口输出不会回放，也不会进入本机 Gap。
+ *   若只 rebind 并 needsReplay=false，仅首条 live 被 append，窗口内输出永久缺失。
+ *
+ * Code Logic（这个函数做什么）:
+ *   仅当 state 已绑定非空 authority 且入参是不同的非空 authority 时生效：
+ *   绑定新 authorityId、committedBaselineLastSeq/overflowHighWaterSeq=0、
+ *   cutoverEpoch+=1、needsReplay=true、replayInFlight=false；
+ *   返回新 state 与 requestEpoch。首次绑定或无效 authority 返回 null（调用方走轻量 rebind）。
+ */
+export function beginAuthorityChangeReplay(
+  state: SessionCutoverState,
+  authorityId?: string | null,
+): { state: SessionCutoverState; requestEpoch: number } | null {
+  if (typeof authorityId !== 'string' || authorityId.length === 0) {
+    return null;
+  }
+  const hasBoundAuthority =
+    typeof state.authorityId === 'string' && state.authorityId.length > 0;
+  if (!hasBoundAuthority || state.authorityId === authorityId) {
+    return null;
+  }
+  const cutoverEpoch = state.cutoverEpoch + 1;
+  return {
+    state: {
+      ...state,
+      authorityId,
+      committedBaselineLastSeq: 0,
+      overflowHighWaterSeq: 0,
+      cutoverEpoch,
+      needsReplay: true,
+      replayInFlight: false,
+    },
+    requestEpoch: cutoverEpoch,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Provider 在启动/结束 sessions.replay 时需要更新 in-flight 门闩，避免同 session 狂刷。
  *
  * Code Logic（这个函数做什么）:

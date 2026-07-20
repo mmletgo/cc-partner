@@ -9,10 +9,13 @@
  *   乱序 baseline 与 held 溢出不得静默丢 chunk：per-session cutover epoch + committed lastSeq
  *   拒绝更旧 cutover；held 仅在异步 baseline/replay 窗口收集，steady-state 不入 held；
  *   超限触发 re-baseline 而非 drop-oldest；ownerInstanceId 分代避免 owner 重启后 seq 冻结。
+ *   **已绑定 authority 切换**（R9 M1）：抬 epoch + needsReplay=true + 暂存新 authority live，
+ *   并立即 sessions.replay；仅接受匹配新 authority 的 replay，成功后 settle held。
  *
  * Code Logic（这个模块做什么）:
  *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline replay；
  *   live 带 seq 的事件在 baseline 未 settle / needsReplay / replayInFlight 时写入有界 held；
+ *   已绑定 authority 变化走 beginAuthorityChangeReplay → requestSessionReplay；
  *   resync/baseline 先 shouldAcceptTerminalCutover(authority)，再 applyTerminalBaselineCutover
  *   并 commitTerminalCutover(requestEpoch?, authorityId)；held 溢出先算 highWater 再清空
  *   held、beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch。
@@ -25,6 +28,7 @@ import { workbenchApi } from '@/api/workbench';
 import type { WorkbenchTerminalOutputEvent } from '@/lib/types';
 import {
   applyTerminalBaselineCutover,
+  beginAuthorityChangeReplay,
   beginHeldOverflowReplay,
   commitTerminalCutover,
   createEmptySessionCutoverState,
@@ -317,8 +321,14 @@ export function WorkbenchTerminalBuffersProvider({
               : null;
           if (typeof seq === 'number' && Number.isFinite(seq)) {
             const cutover = ensureCutoverState(sessionId);
-            if (isTerminalAuthorityChange(cutover, authorityId)) {
-              // live 先于 resync 到达新 owner 时：清空旧 held 与 lastSeq 基线，绑定新 authority。
+            // 已绑定 authority 切换：强制 re-baseline（远端 broadcast 不会补断线窗口）。
+            const authoritySwitch = beginAuthorityChangeReplay(cutover, authorityId);
+            if (authoritySwitch) {
+              heldLiveBySessionRef.current.delete(sessionId);
+              cutoverBySessionRef.current.set(sessionId, authoritySwitch.state);
+              requestSessionReplay(sessionId, authoritySwitch.requestEpoch);
+            } else if (isTerminalAuthorityChange(cutover, authorityId)) {
+              // 首次绑定：轻量 rebind；launch baseline / resync 负责历史。
               heldLiveBySessionRef.current.delete(sessionId);
               cutoverBySessionRef.current.set(sessionId, {
                 ...cutover,
@@ -362,8 +372,27 @@ export function WorkbenchTerminalBuffersProvider({
               ? payload.ownerInstanceId
               : null;
           const cutover = ensureCutoverState(sessionId);
+          // resync 自身携带 baseline：已绑定 authority 切换时抬 epoch 作废 in-flight，
+          // 但 needsReplay 由本次 applyCutover 的 requestEpoch 清掉（不是 live 强制 replay）。
+          const authoritySwitch = beginAuthorityChangeReplay(cutover, authorityId);
+          if (authoritySwitch) {
+            heldLiveBySessionRef.current.delete(sessionId);
+            cutoverBySessionRef.current.set(sessionId, {
+              ...authoritySwitch.state,
+              // resync 即 baseline：不需要再拉 sessions.replay
+              needsReplay: false,
+            });
+            applyCutover(
+              sessionId,
+              payload.buffer ?? '',
+              lastSeq,
+              authoritySwitch.requestEpoch,
+              authorityId,
+            );
+            return;
+          }
           if (isTerminalAuthorityChange(cutover, authorityId)) {
-            // resync 新 owner：先 rebind 并作废 in-flight baseline（抬 epoch），再 cutover。
+            // 首次绑定：轻量 rebind 再 cutover。
             heldLiveBySessionRef.current.delete(sessionId);
             cutoverBySessionRef.current.set(sessionId, {
               ...cutover,
@@ -371,8 +400,6 @@ export function WorkbenchTerminalBuffersProvider({
               committedBaselineLastSeq: 0,
               overflowHighWaterSeq: 0,
               needsReplay: false,
-              cutoverEpoch: cutover.cutoverEpoch + 1,
-              replayInFlight: false,
             });
           }
           applyCutover(sessionId, payload.buffer ?? '', lastSeq, undefined, authorityId);
