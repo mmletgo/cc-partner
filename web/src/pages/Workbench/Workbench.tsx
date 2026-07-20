@@ -846,7 +846,7 @@ export function Workbench() {
               })}
             </div>
           ) : null}
-          {sessionError ? <StatusMessage tone="danger" className={styles.errorBox}>{sessionError}</StatusMessage> : null}
+          {sessionError ? <StatusMessage tone="danger" className={styles.errorBox} action={terminalController.hasWriteBlockedSessions ? <Button variant="secondary" size="sm" onClick={() => { void terminalController.retryWriteBlockRecovery(); }}>{t('workbench:recheckWriteBlock')}</Button> : undefined}>{sessionError}</StatusMessage> : null}
           {worktreeError ? <StatusMessage tone="danger" className={styles.errorBox}>{worktreeError}</StatusMessage> : null}
           {agentRuntime.phase === 'error' && agentRuntime.error ? <StatusMessage tone="warn" className={styles.errorBox} action={<Button variant="secondary" size="sm" onClick={() => { void agentRuntime.refresh(); }}>{t('workbench:refresh')}</Button>}>{agentRuntime.error.message}</StatusMessage> : null}
           {dependencyStatus.status !== 'ready' ? <WorkbenchDependencyCard compact className={styles.dependencyNotice} /> : null}

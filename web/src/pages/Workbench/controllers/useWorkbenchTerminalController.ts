@@ -183,12 +183,29 @@ export interface WorkbenchTerminalControllerResult extends WorkbenchTerminalBrid
   /**
    * Business Logic（为什么需要这个函数）:
    *   write 失败后 pump lane 永久 blocked，若 xterm 仍启用输入会变成静默键盘黑洞；
-   *   视图需按 session 禁用 input，直到 loadSessions 成功 recover。
+   *   视图需按 session 禁用 input，直到 read-only status check 或 loadSessions 成功 recover。
    *
    * Code Logic（这个函数做什么）:
    *   查询 writeBlockedSessionIds 是否包含该 sessionId。
    */
   isWriteBlocked: (sessionId: string) => boolean;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   sessionError 的 StatusMessage 仅在仍有 write-blocked session 时展示「重新检查」动作，
+   *   避免把 load/create/focus 等非 write 错误也伪装成可自动解锁。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回 writeBlockedSessionIds 是否非空。
+   */
+  hasWriteBlockedSessions: boolean;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   自动只读 status check 失败时，用户需显式重试解锁，而不必切项目或等下一次 loadSessions。
+   *
+   * Code Logic（这个函数做什么）:
+   *   对当前所有 write-blocked session 再跑一次 read-only list 恢复；不写输入、不重放失败批次。
+   */
+  retryWriteBlockRecovery: () => Promise<void>;
   handleResize: (sessionId: string, cols: number, rows: number) => Promise<void>;
   handleRefreshTerminalSize: () => void;
   handleEnterTerminalFullscreen: () => void;
@@ -235,7 +252,7 @@ export function useWorkbenchTerminalController(
   const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
   const [terminalResizeRequestKey, setTerminalResizeRequestKey] = useState<number>(0);
   // Business Logic: write 失败后 lane.blocked 对 React 不可见；用 Set 跟踪 blocked session，
-  // 供 UI 禁用 xterm 输入，直到 loadSessions 成功 recoverSession。
+  // 供 UI 禁用 xterm 输入，直到 read-only status check 或 loadSessions 成功 recoverSession。
   const [writeBlockedSessionIds, setWriteBlockedSessionIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -259,6 +276,10 @@ export function useWorkbenchTerminalController(
   const reportWriteErrorRef = useRef<(sessionId: string, error: unknown) => void>(() => {});
   // Business Logic: onWriteError / loadSessions / dispose 路径都要读写 blocked 集合；ref 保证异步回调读到最新 Set。
   const writeBlockedSessionIdsRef = useRef<ReadonlySet<string>>(writeBlockedSessionIds);
+  // Business Logic: 同一 session 的 write-block status check 合并为单次 in-flight，避免快速失败刷爆 list。
+  const writeBlockRecoveryInflightRef = useRef<Map<string, Promise<void>>>(new Map());
+  // Business Logic: isCurrentProject 经 ref 读取，避免 status-check 回调闭包绑定过期函数。
+  const isCurrentProjectRef = useRef(isCurrentProject);
   useEffect(() => {
     canListenToTauriEventsRef.current = canListenToTauriEventsParam;
   });
@@ -275,6 +296,10 @@ export function useWorkbenchTerminalController(
     writeBlockedSessionIdsRef.current = writeBlockedSessionIds;
   }, [writeBlockedSessionIds]);
 
+  useEffect(() => {
+    isCurrentProjectRef.current = isCurrentProject;
+  }, [isCurrentProject]);
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   session 消失（close / list 替换 / worktree clear）时，对应 write-blocked 跟踪必须同步移除，
@@ -284,13 +309,11 @@ export function useWorkbenchTerminalController(
    *   若 Set 含 sessionId 则删掉并 setState；无变化时保持同一 Set 引用。
    */
   const untrackWriteBlocked = useCallback((sessionId: string): void => {
-    setWriteBlockedSessionIds((prev) => {
-      if (!prev.has(sessionId)) return prev;
-      const next = new Set(prev);
-      next.delete(sessionId);
-      writeBlockedSessionIdsRef.current = next;
-      return next;
-    });
+    if (!writeBlockedSessionIdsRef.current.has(sessionId)) return;
+    const next = new Set(writeBlockedSessionIdsRef.current);
+    next.delete(sessionId);
+    writeBlockedSessionIdsRef.current = next;
+    setWriteBlockedSessionIds(next);
   }, []);
 
   /**
@@ -311,6 +334,70 @@ export function useWorkbenchTerminalController(
     writeBlockedSessionIdsRef.current = empty;
     setWriteBlockedSessionIds(empty);
   }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   瞬时 control/write 故障会把 lane 永久 blocked 且 `inputEnabled=false`；生产路径不会主动
+   *   loadSessions，用户又不会为此切项目，因此 write fail 后必须 kick 一次只读 status check，
+   *   确认 session 仍存在后立即解锁，且绝不能自动重放失败输入批次。
+   *
+   * Code Logic（这个函数做什么）:
+   *   1. 同一 session 并发 check 合并为 in-flight Promise；
+   *   2. 读取 activeProjectId，调用只读 sessions.list（不得 writeInput / 重放）；
+   *   3. stale guard：project 仍 active、session 仍 blocked、list 仍含该 session；
+   *   4. 成功：recoverSession + untrackWriteBlocked；若 blocked 集合空则清 sessionError；
+   *   5. 失败或 session 已消失：保持 blocked + sessionError，等待后续 loadSessions / 手动重试。
+   */
+  const checkAndRecoverWriteBlock = useCallback(async (sessionId: string): Promise<void> => {
+    const inflight = writeBlockRecoveryInflightRef.current.get(sessionId);
+    if (inflight) {
+      await inflight;
+      return;
+    }
+
+    const run = (async (): Promise<void> => {
+      if (!writeBlockedSessionIdsRef.current.has(sessionId)) return;
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) return;
+      try {
+        const list = await workbenchApi.sessions.list(projectId);
+        if (!isCurrentProjectRef.current(projectId)) return;
+        if (!writeBlockedSessionIdsRef.current.has(sessionId)) return;
+        if (!list.some((session) => session.id === sessionId)) return;
+        terminalInputPumpRef.current?.recoverSession(sessionId);
+        untrackWriteBlocked(sessionId);
+        if (writeBlockedSessionIdsRef.current.size === 0) {
+          setSessionError(null);
+        }
+      } catch {
+        // 只读 status check 失败时保持 blocked + sessionError；用户可手动 retry 或后续 loadSessions。
+      }
+    })();
+
+    writeBlockRecoveryInflightRef.current.set(sessionId, run);
+    try {
+      await run;
+    } finally {
+      if (writeBlockRecoveryInflightRef.current.get(sessionId) === run) {
+        writeBlockRecoveryInflightRef.current.delete(sessionId);
+      }
+    }
+  }, [untrackWriteBlocked]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   StatusMessage 需要显式「重新检查」动作；自动 status check 失败后用户可重试，
+   *   而不必切换项目或依赖其它路径的 loadSessions。
+   *
+   * Code Logic（这个函数做什么）:
+   *   对当前 writeBlockedSessionIds 中的每个 session 再跑 checkAndRecoverWriteBlock；
+   *   空集合时 no-op；不写输入、不重放失败批次。
+   */
+  const retryWriteBlockRecovery = useCallback(async (): Promise<void> => {
+    const blocked = [...writeBlockedSessionIdsRef.current];
+    if (blocked.length === 0) return;
+    await Promise.all(blocked.map((sessionId) => checkAndRecoverWriteBlock(sessionId)));
+  }, [checkAndRecoverWriteBlock]);
 
   // Business Logic: sessions 变化时同步 knownSessionIdsRef；对已消失的 session 丢弃输入 pending，
   // 覆盖 close / loadSessions 项目切换 / 列表替换，但不触碰仍存活的 session。
@@ -420,19 +507,22 @@ export function useWorkbenchTerminalController(
   );
 
   // Business Logic: 输入泵 write 失败后封锁 lane，投影 sessionError，并记录 blocked session
-  // 供 UI 禁用 xterm 输入（避免 enqueue 静默 no-op 变成键盘黑洞）。
+  // 供 UI 禁用 xterm 输入（避免 enqueue 静默 no-op 变成键盘黑洞）；随后 kick 只读 status check，
+  // 不重放失败批次，也不要求用户切换项目。
   useEffect(() => {
     reportWriteErrorRef.current = (sessionId, error) => {
       setSessionError(displayErrorMessage(error, t('writeSession')));
-      setWriteBlockedSessionIds((prev) => {
-        if (prev.has(sessionId)) return prev;
-        const next = new Set(prev);
+      // Business Logic: ref 必须在 kick status check 前同步标记 blocked；
+      // setState updater 可能延后执行，异步 list 不能依赖尚未提交的 React state。
+      if (!writeBlockedSessionIdsRef.current.has(sessionId)) {
+        const next = new Set(writeBlockedSessionIdsRef.current);
         next.add(sessionId);
         writeBlockedSessionIdsRef.current = next;
-        return next;
-      });
+        setWriteBlockedSessionIds(next);
+      }
+      void checkAndRecoverWriteBlock(sessionId);
     };
-  }, [displayErrorMessage, t]);
+  }, [checkAndRecoverWriteBlock, displayErrorMessage, t]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -895,6 +985,10 @@ export function useWorkbenchTerminalController(
     [writeBlockedSessionIds],
   );
 
+  // Business Logic: StatusMessage 只在仍有 write-blocked session 时挂「重新检查」；
+  // load/create/focus 等其它 sessionError 不伪装成 write-block 恢复入口。
+  const hasWriteBlockedSessions = writeBlockedSessionIds.size > 0;
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   xterm ResizeObserver 把 cols/rows 同步到后端 PTY；高频触发，失败不阻断终端显示。
@@ -1077,6 +1171,8 @@ export function useWorkbenchTerminalController(
     handleRenameSession,
     handleInput,
     isWriteBlocked,
+    hasWriteBlockedSessions,
+    retryWriteBlockRecovery,
     handleResize,
     handleRefreshTerminalSize,
     handleEnterTerminalFullscreen,

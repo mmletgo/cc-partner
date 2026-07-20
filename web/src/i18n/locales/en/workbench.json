@@ -2,6 +2,7 @@
   "title": "Workbench",
   "sessionBadge": "Terminal sessions",
   "refresh": "Refresh",
+  "recheckWriteBlock": "Recheck input",
   "loading": "Loading",
   "emptyValue": "—",
   "rootPath": "/",

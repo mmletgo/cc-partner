@@ -1254,7 +1254,65 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     expect(calls).toEqual(['a']);
   });
 
-  test('write failure blocks input until successful loadSessions recovers without replaying failed batch', async () => {
+  test('transient write failure auto status-check recovers without replaying failed batch or project switch', async () => {
+    // M1: write fail 后自动只读 sessions.list 成功 → 未手动 loadSessions / 未切项目即 unblocked。
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const session = buildSession({ id: 's1' });
+    fakeSessionsApi.list.mockResolvedValue([session]);
+    const calls: string[] = [];
+    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+      calls.push(data);
+      if (data === 'bad') {
+        throw new Error('write failed');
+      }
+      return { ok: true, sessionId: 's1' };
+    });
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+    const listCallsAfterInitialLoad = fakeSessionsApi.list.mock.calls.length;
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'bad');
+      // 失败前缀后的后缀不得发送；blocked 后 enqueue 必须 no-op。
+      void result.current.handleInput('s1', 'suffix');
+      await flushMicrotasks(20);
+    });
+
+    expect(calls).toEqual(['bad']);
+    // 自动 status check 已再调 list；不得重放 failed batch。
+    expect(fakeSessionsApi.list.mock.calls.length).toBeGreaterThan(listCallsAfterInitialLoad);
+    expect(result.current.isWriteBlocked('s1')).toBe(false);
+    expect(result.current.sessionError).toBeNull();
+    expect(result.current.hasWriteBlockedSessions).toBe(false);
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'ok');
+      await flushMicrotasks(12);
+    });
+    expect(calls).toEqual(['bad', 'ok']);
+    expect(result.current.isWriteBlocked('s1')).toBe(false);
+  });
+
+  test('write failure stays blocked when status check fails; manual loadSessions still recovers without replay', async () => {
+    // status check list 失败时保持 blocked；既有 loadSessions 成功路径仍可 unlock 且不重放。
     const project = buildLocalProject();
     const worktree = buildWorktree();
     const session = buildSession({ id: 's1' });
@@ -1287,16 +1345,19 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
       await flushMicrotasks();
     });
 
+    // write fail 后自动 status check 的 list 拒绝，保持 blocked。
+    fakeSessionsApi.list.mockRejectedValueOnce(new Error('status check offline'));
+
     await act(async () => {
       void result.current.handleInput('s1', 'bad');
-      // 失败前缀后的后缀不得发送；blocked 后 enqueue 必须 no-op。
       void result.current.handleInput('s1', 'suffix');
-      await flushMicrotasks(12);
+      await flushMicrotasks(20);
     });
 
     expect(calls).toEqual(['bad']);
     expect(result.current.sessionError).toContain('write failed');
     expect(result.current.isWriteBlocked('s1')).toBe(true);
+    expect(result.current.hasWriteBlockedSessions).toBe(true);
 
     await act(async () => {
       void result.current.handleInput('s1', 'more');
@@ -1304,12 +1365,13 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     });
     expect(calls).toEqual(['bad']);
 
+    // 手动 loadSessions 仍是兼容恢复路径。
+    fakeSessionsApi.list.mockResolvedValueOnce([session]);
     await act(async () => {
       await result.current.loadSessions(project.id);
       await flushMicrotasks(12);
     });
 
-    // 成功 list 解除封锁；不得自动重放 failed batch / blocked 期间 pending。
     expect(result.current.isWriteBlocked('s1')).toBe(false);
     expect(result.current.sessionError).toBeNull();
     expect(calls).toEqual(['bad']);
@@ -1320,6 +1382,64 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     });
     expect(calls).toEqual(['bad', 'ok']);
     expect(result.current.isWriteBlocked('s1')).toBe(false);
+  });
+
+  test('retryWriteBlockRecovery re-runs read-only status check and unlocks without replaying failed batch', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const session = buildSession({ id: 's1' });
+    fakeSessionsApi.list.mockResolvedValue([session]);
+    const calls: string[] = [];
+    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+      calls.push(data);
+      if (data === 'bad') {
+        throw new Error('write failed');
+      }
+      return { ok: true, sessionId: 's1' };
+    });
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    fakeSessionsApi.list.mockRejectedValueOnce(new Error('status check offline'));
+    await act(async () => {
+      void result.current.handleInput('s1', 'bad');
+      await flushMicrotasks(20);
+    });
+    expect(result.current.isWriteBlocked('s1')).toBe(true);
+    expect(calls).toEqual(['bad']);
+
+    fakeSessionsApi.list.mockResolvedValueOnce([session]);
+    await act(async () => {
+      await result.current.retryWriteBlockRecovery();
+      await flushMicrotasks(12);
+    });
+
+    expect(result.current.isWriteBlocked('s1')).toBe(false);
+    expect(result.current.sessionError).toBeNull();
+    expect(calls).toEqual(['bad']);
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'ok');
+      await flushMicrotasks(12);
+    });
+    expect(calls).toEqual(['bad', 'ok']);
   });
 
   test('handleResize clamps cols/rows to min bounds and forwards to API', async () => {
