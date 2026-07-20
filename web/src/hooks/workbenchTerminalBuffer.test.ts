@@ -3,10 +3,16 @@ import { planTerminalBufferWrite } from '@/pages/Workbench/terminalReplay';
 import {
   appendWorkbenchTerminalOutput,
   applyTerminalBaselineCutover,
+  beginHeldOverflowReplay,
+  commitTerminalCutover,
+  createEmptySessionCutoverState,
   createWorkbenchTerminalBufferStore,
+  MAX_HELD_LIVE_TERMINAL_EVENTS,
   MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
   removeWorkbenchTerminalBuffer,
   resetWorkbenchTerminalBuffer,
+  setTerminalCutoverReplayInFlight,
+  shouldAcceptTerminalCutover,
   type HeldLiveTerminalEvent,
   type TerminalBufferDelta,
   type TerminalFrameScheduler,
@@ -556,5 +562,119 @@ describe('applyTerminalBaselineCutover', () => {
     expect(store.getBuffer('s1')).toBe('BASE');
     expect(store.getLastSeq('s1')).toBe(5);
     expect(pruned).toEqual([]);
+  });
+});
+
+describe('session cutover epoch / committed baseline', () => {
+  test('shouldAccept rejects lastSeq older than committed baseline', () => {
+    let state = createEmptySessionCutoverState();
+    state = commitTerminalCutover(state, 20);
+
+    expect(shouldAcceptTerminalCutover(state, 20)).toBe(true);
+    expect(shouldAcceptTerminalCutover(state, 21)).toBe(true);
+    expect(shouldAcceptTerminalCutover(state, 19)).toBe(false);
+    expect(shouldAcceptTerminalCutover(state, Number.NaN)).toBe(false);
+  });
+
+  test('shouldAccept rejects requestEpoch older than cutoverEpoch', () => {
+    let state = createEmptySessionCutoverState();
+    const overflow = beginHeldOverflowReplay(state);
+    state = overflow.state;
+    // overflow 把 epoch 抬到 1
+    expect(state.cutoverEpoch).toBe(1);
+    expect(state.needsReplay).toBe(true);
+
+    expect(shouldAcceptTerminalCutover(state, 50, 1)).toBe(true);
+    expect(shouldAcceptTerminalCutover(state, 50, 0)).toBe(false);
+    // 未提供 requestEpoch 时只按 lastSeq 判定
+    expect(shouldAcceptTerminalCutover(state, 50)).toBe(true);
+  });
+
+  test('out-of-order baseline B then A: A rejected; store keeps B + later live', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    let state = createEmptySessionCutoverState();
+    const heldAfterB: HeldLiveTerminalEvent[] = [{ chunk: 'liveB', seq: 21 }];
+
+    // 先 apply 较新 B（lastSeq=20）
+    expect(shouldAcceptTerminalCutover(state, 20)).toBe(true);
+    applyTerminalBaselineCutover(store, 's1', 'BASE-B', 20, heldAfterB);
+    state = commitTerminalCutover(state, 20);
+    store.append('s1', 'afterB', 22);
+
+    expect(store.getBuffer('s1')).toBe('BASE-BliveBafterB');
+    expect(store.getLastSeq('s1')).toBe(22);
+    expect(state.committedBaselineLastSeq).toBe(20);
+
+    // 晚到的旧 baseline A（lastSeq=10）必须 reject，且不得 clobber store
+    expect(shouldAcceptTerminalCutover(state, 10)).toBe(false);
+    // 模拟 Provider 拒绝后不调用 apply
+    expect(store.getBuffer('s1')).toBe('BASE-BliveBafterB');
+    expect(store.getLastSeq('s1')).toBe(22);
+  });
+
+  test('held overflow: beginHeldOverflowReplay bumps epoch and marks needsReplay', () => {
+    let state = createEmptySessionCutoverState();
+    state = commitTerminalCutover(state, 5);
+    expect(state.needsReplay).toBe(false);
+
+    const first = beginHeldOverflowReplay(state);
+    expect(first.requestEpoch).toBe(1);
+    expect(first.state.cutoverEpoch).toBe(1);
+    expect(first.state.needsReplay).toBe(true);
+    expect(first.state.committedBaselineLastSeq).toBe(5);
+
+    // 并发再次 overflow：抬 epoch，旧 in-flight 的 requestEpoch=1 应失效
+    const second = beginHeldOverflowReplay(first.state);
+    expect(second.requestEpoch).toBe(2);
+    expect(second.state.cutoverEpoch).toBe(2);
+    expect(shouldAcceptTerminalCutover(second.state, 100, 1)).toBe(false);
+    expect(shouldAcceptTerminalCutover(second.state, 100, 2)).toBe(true);
+  });
+
+  test('held overflow decision: >MAX_HELD requires clear+replay, not drop-oldest', () => {
+    // 纯决策：超过上限时 Provider 必须清空 held 并 beginHeldOverflowReplay，
+    // 而不是 splice(0, held.length - MAX) 后继续。
+    const held: HeldLiveTerminalEvent[] = [];
+    for (let i = 1; i <= MAX_HELD_LIVE_TERMINAL_EVENTS; i += 1) {
+      held.push({ chunk: `c${i}`, seq: i });
+    }
+    expect(held.length).toBe(MAX_HELD_LIVE_TERMINAL_EVENTS);
+
+    // 再 push 1 条 → 溢出
+    held.push({ chunk: 'overflow', seq: MAX_HELD_LIVE_TERMINAL_EVENTS + 1 });
+    const overflowed = held.length > MAX_HELD_LIVE_TERMINAL_EVENTS;
+    expect(overflowed).toBe(true);
+
+    // 正确语义：清空 held + 抬 epoch
+    const cleared: HeldLiveTerminalEvent[] = [];
+    let state = createEmptySessionCutoverState();
+    const { state: next, requestEpoch } = beginHeldOverflowReplay(state);
+    state = setTerminalCutoverReplayInFlight(next, true);
+
+    expect(cleared).toEqual([]);
+    expect(requestEpoch).toBe(1);
+    expect(state.needsReplay).toBe(true);
+    expect(state.replayInFlight).toBe(true);
+    expect(state.cutoverEpoch).toBe(1);
+
+    // 禁止 drop-oldest：若错误 splice 会保留尾部 256 条并丢前缀，语义不可接受。
+    const wrongDropOldest = held.slice(-(MAX_HELD_LIVE_TERMINAL_EVENTS));
+    expect(wrongDropOldest[0]?.seq).toBe(2); // 静默丢了 seq=1
+    expect(cleared.length).toBe(0); // 正确路径不保留任何 held 缺口
+  });
+
+  test('commitTerminalCutover clears needsReplay after successful apply', () => {
+    let state = createEmptySessionCutoverState();
+    const overflow = beginHeldOverflowReplay(state);
+    state = overflow.state;
+    expect(state.needsReplay).toBe(true);
+
+    state = commitTerminalCutover(state, 42);
+    expect(state.committedBaselineLastSeq).toBe(42);
+    expect(state.needsReplay).toBe(false);
+    expect(state.cutoverEpoch).toBe(1); // epoch 不回退
   });
 });

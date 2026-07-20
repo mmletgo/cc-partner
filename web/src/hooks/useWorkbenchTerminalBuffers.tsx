@@ -6,11 +6,14 @@
  *   会丢失 TUI 屏幕态并出现错位。缓存 Provider 必须跟随 AppShell 常驻。
  *   桌面 GUI 在 React 挂载前已从 owner stream 转发 terminal-output，因此 Provider 必须
  *   listener-first + baseline replay，并用 lastSeq 丢弃 resync 后的重复 live 事件。
+ *   乱序 baseline 与 held 溢出不得静默丢 chunk：per-session cutover epoch + committed lastSeq
+ *   拒绝更旧 cutover；held 超限触发 re-baseline 而非 drop-oldest。
  *
  * Code Logic（这个模块做什么）:
  *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline replay；
- *   live 带 seq 的事件写入有界 held map；resync/baseline 走 applyTerminalBaselineCutover
- *   （reset 后再 re-append seq > lastSeq 的 held live）。
+ *   live 带 seq 的事件写入有界 held map；resync/baseline 先 shouldAcceptTerminalCutover，
+ *   再 applyTerminalBaselineCutover 并 commitTerminalCutover；held 溢出清空 held、
+ *   beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -20,9 +23,15 @@ import { workbenchApi } from '@/api/workbench';
 import type { WorkbenchTerminalOutputEvent } from '@/lib/types';
 import {
   applyTerminalBaselineCutover,
+  beginHeldOverflowReplay,
+  commitTerminalCutover,
+  createEmptySessionCutoverState,
   createWorkbenchTerminalBufferStore,
   MAX_HELD_LIVE_TERMINAL_EVENTS,
+  setTerminalCutoverReplayInFlight,
+  shouldAcceptTerminalCutover,
   type HeldLiveTerminalEvent,
+  type SessionCutoverState,
   type WorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffer';
 import {
@@ -79,6 +88,30 @@ export function WorkbenchTerminalBuffersProvider({
   const heldLiveBySessionRef = useRef<Map<string, HeldLiveTerminalEvent[]>>(
     new Map(),
   );
+  /**
+   * Business Logic（为什么需要这个 ref）:
+   *   乱序 baseline 与 held 溢出 re-baseline 需要 per-session 单调 epoch 与 committed lastSeq。
+   *
+   * Code Logic（这个 ref 做什么）:
+   *   sessionId → SessionCutoverState；removeBuffer 时删除条目。
+   */
+  const cutoverBySessionRef = useRef<Map<string, SessionCutoverState>>(new Map());
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   cutover helper 需要可写的 session 状态，避免调用方重复判空。
+   *
+   * Code Logic（这个函数做什么）:
+   *   若 map 无该 session 则 createEmptySessionCutoverState 并登记后返回。
+   */
+  const ensureCutoverState = useCallback((sessionId: string): SessionCutoverState => {
+    let state = cutoverBySessionRef.current.get(sessionId);
+    if (!state) {
+      state = createEmptySessionCutoverState();
+      cutoverBySessionRef.current.set(sessionId, state);
+    }
+    return state;
+  }, []);
 
   const resetBuffer = useCallback((sessionId: string) => {
     store.reset(sessionId);
@@ -86,6 +119,7 @@ export function WorkbenchTerminalBuffersProvider({
 
   const removeBuffer = useCallback((sessionId: string) => {
     heldLiveBySessionRef.current.delete(sessionId);
+    cutoverBySessionRef.current.delete(sessionId);
     store.remove(sessionId);
   }, [store]);
 
@@ -97,16 +131,21 @@ export function WorkbenchTerminalBuffersProvider({
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   cutover 路径（resync / baseline replay）不能只 reset，否则会抹掉 held 中更新的 live。
+     *   cutover 路径（resync / baseline replay）不能只 reset，且不能接受更旧 lastSeq/epoch。
      *
      * Code Logic（这个函数做什么）:
-     *   读取 session held → applyTerminalBaselineCutover → 用 pruned 列表回写 map。
+     *   shouldAccept → held + applyTerminalBaselineCutover → commitTerminalCutover 回写 map。
      */
     const applyCutover = (
       sessionId: string,
       buffer: string,
       lastSeq: number,
-    ): void => {
+      requestEpoch?: number,
+    ): boolean => {
+      const state = ensureCutoverState(sessionId);
+      if (!shouldAcceptTerminalCutover(state, lastSeq, requestEpoch)) {
+        return false;
+      }
       const held = heldLiveBySessionRef.current.get(sessionId) ?? [];
       const pruned = applyTerminalBaselineCutover(
         store,
@@ -120,6 +159,75 @@ export function WorkbenchTerminalBuffersProvider({
       } else {
         heldLiveBySessionRef.current.set(sessionId, pruned);
       }
+      cutoverBySessionRef.current.set(
+        sessionId,
+        commitTerminalCutover(state, lastSeq),
+      );
+      return true;
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   held 溢出或显式 re-baseline 时需拉 sessions.replay；同 session 不得并发狂刷，
+     *   但 overflow 抬 epoch 后旧 in-flight 结果必须失效并在 settle 后补拉。
+     *
+     * Code Logic（这个函数做什么）:
+     *   已有 replayInFlight 则仅依赖调用方已抬高的 epoch；否则标记 inFlight 并
+     *   await replay → applyCutover(requestEpoch)；finally 清 inFlight，若 needsReplay
+     *   且 epoch 已抬高则用当前 epoch 再请求一次。
+     */
+    const requestSessionReplay = (sessionId: string, requestEpoch: number): void => {
+      const state = ensureCutoverState(sessionId);
+      if (state.replayInFlight) {
+        return;
+      }
+      cutoverBySessionRef.current.set(
+        sessionId,
+        setTerminalCutoverReplayInFlight(state, true),
+      );
+
+      void (async () => {
+        try {
+          const replay = await workbenchApi.sessions.replay(sessionId);
+          if (cancelled) return;
+          applyCutover(
+            replay.sessionId,
+            replay.buffer,
+            replay.lastSeq,
+            requestEpoch,
+          );
+        } catch {
+          // 单次 replay 失败不狂刷；needsReplay 可保留至后续 overflow / terminal-resync。
+        } finally {
+          if (cancelled) return;
+          const current = ensureCutoverState(sessionId);
+          const cleared = setTerminalCutoverReplayInFlight(current, false);
+          cutoverBySessionRef.current.set(sessionId, cleared);
+          // in-flight 期间 overflow 抬高了 epoch：旧结果已失效，需用新 epoch 再拉一次。
+          if (
+            cleared.needsReplay &&
+            cleared.cutoverEpoch > requestEpoch &&
+            !cleared.replayInFlight
+          ) {
+            requestSessionReplay(sessionId, cleared.cutoverEpoch);
+          }
+        }
+      })();
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   held 超过 256 条时静默 drop-oldest 会留下 relay 永不补发的缺口。
+     *
+     * Code Logic（这个函数做什么）:
+     *   清空 held → beginHeldOverflowReplay → 必要时 requestSessionReplay。
+     */
+    const handleHeldOverflow = (sessionId: string): void => {
+      heldLiveBySessionRef.current.set(sessionId, []);
+      const state = ensureCutoverState(sessionId);
+      const { state: next, requestEpoch } = beginHeldOverflowReplay(state);
+      cutoverBySessionRef.current.set(sessionId, next);
+      requestSessionReplay(sessionId, requestEpoch);
     };
 
     /**
@@ -127,8 +235,8 @@ export function WorkbenchTerminalBuffersProvider({
      *   必须先挂 listener 再 baseline，避免 subscribe 与 replay 之间的 live 输出永久丢失。
      *
      * Code Logic（这个函数做什么）:
-     *   await 两个 listen；output 暂存带 seq live 后 append；resync/baseline 走 cutover；
-     *   随后 list 全部 session 并逐个 replay baseline（单 session 失败跳过）。
+     *   await 两个 listen；output 暂存带 seq live 后 append，超限走 overflow re-baseline；
+     *   resync/baseline 走 cutover；随后 list 全部 session 并逐个 replay baseline。
      */
     const setup = async (): Promise<void> => {
       try {
@@ -145,9 +253,11 @@ export function WorkbenchTerminalBuffersProvider({
                 heldLiveBySessionRef.current.get(sessionId) ?? [];
               held.push({ chunk, seq });
               if (held.length > MAX_HELD_LIVE_TERMINAL_EVENTS) {
-                held.splice(0, held.length - MAX_HELD_LIVE_TERMINAL_EVENTS);
+                // 禁止 splice drop-oldest；清空 held 并 re-baseline。
+                handleHeldOverflow(sessionId);
+              } else {
+                heldLiveBySessionRef.current.set(sessionId, held);
               }
-              heldLiveBySessionRef.current.set(sessionId, held);
             }
             store.append(sessionId, chunk, seq);
           },
@@ -203,7 +313,7 @@ export function WorkbenchTerminalBuffersProvider({
       unlistenOutput?.();
       unlistenResync?.();
     };
-  }, [store]);
+  }, [ensureCutoverState, store]);
 
   const value = useMemo<WorkbenchTerminalBuffersContextValue>(
     () => ({

@@ -171,6 +171,124 @@ export interface HeldLiveTerminalEvent {
 export const MAX_HELD_LIVE_TERMINAL_EVENTS = 256;
 
 /**
+ * Business Logic（为什么需要这个接口）:
+ *   乱序 baseline/resync 与 held 溢出 re-baseline 并发时，必须按 session 单调拒绝
+ *   更旧的 cutover，否则已提交的较新 baseline 会被晚到的旧 A 再次 reset 抹掉。
+ *
+ * Code Logic（这个接口做什么）:
+ *   记录已提交 baseline lastSeq、cutover 代数 epoch、needsReplay 与 replayInFlight。
+ */
+export interface SessionCutoverState {
+  committedBaselineLastSeq: number;
+  cutoverEpoch: number;
+  needsReplay: boolean;
+  replayInFlight: boolean;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   每个终端 session 首次遇到 live/baseline 时需要统一的 cutover 初始态。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 committedBaselineLastSeq/cutoverEpoch=0、needsReplay/replayInFlight=false 的新状态。
+ */
+export function createEmptySessionCutoverState(): SessionCutoverState {
+  return {
+    committedBaselineLastSeq: 0,
+    cutoverEpoch: 0,
+    needsReplay: false,
+    replayInFlight: false,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   晚到的旧 baseline A 或 held 溢出后作废的 in-flight replay 不得 clobber 已提交较新 B。
+ *
+ * Code Logic（这个函数做什么）:
+ *   lastSeq 非有限 → reject；lastSeq < committedBaselineLastSeq → reject；
+ *   若提供 requestEpoch 且 requestEpoch < cutoverEpoch → reject；否则 accept。
+ */
+export function shouldAcceptTerminalCutover(
+  state: SessionCutoverState,
+  lastSeq: number,
+  requestEpoch?: number,
+): boolean {
+  if (typeof lastSeq !== 'number' || !Number.isFinite(lastSeq)) {
+    return false;
+  }
+  if (lastSeq < state.committedBaselineLastSeq) {
+    return false;
+  }
+  if (
+    typeof requestEpoch === 'number' &&
+    Number.isFinite(requestEpoch) &&
+    requestEpoch < state.cutoverEpoch
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   成功 apply baseline/resync 后必须抬高已提交 lastSeq，并清掉 needsReplay，
+ *   后续更旧 cutover 才能被拒绝。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回浅拷贝：committedBaselineLastSeq=lastSeq、needsReplay=false；保留 epoch/inFlight。
+ */
+export function commitTerminalCutover(
+  state: SessionCutoverState,
+  lastSeq: number,
+): SessionCutoverState {
+  return {
+    ...state,
+    committedBaselineLastSeq: lastSeq,
+    needsReplay: false,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   held live 超过有界上限时，静默 drop-oldest 会在 cutover 后留下永久缺口（relay 不重发）；
+ *   必须抬高 cutover epoch、标记 needsReplay，让 in-flight 旧结果失效并触发 re-baseline。
+ *
+ * Code Logic（这个函数做什么）:
+ *   cutoverEpoch+=1、needsReplay=true；返回新 state 与供 in-flight 请求绑定的 requestEpoch。
+ */
+export function beginHeldOverflowReplay(
+  state: SessionCutoverState,
+): { state: SessionCutoverState; requestEpoch: number } {
+  const cutoverEpoch = state.cutoverEpoch + 1;
+  return {
+    state: {
+      ...state,
+      cutoverEpoch,
+      needsReplay: true,
+    },
+    requestEpoch: cutoverEpoch,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Provider 在启动/结束 sessions.replay 时需要更新 in-flight 门闩，避免同 session 狂刷。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回浅拷贝，仅覆写 replayInFlight。
+ */
+export function setTerminalCutoverReplayInFlight(
+  state: SessionCutoverState,
+  replayInFlight: boolean,
+): SessionCutoverState {
+  return {
+    ...state,
+    replayInFlight,
+  };
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   过期 baseline/resync 的 reset 会抹掉 reset 前已 append 的更新 live chunk，
  *   而 owner relay 不会重发这些 seq；cutover 必须在 reset 后把 held 中更新的事件写回。
@@ -178,6 +296,7 @@ export const MAX_HELD_LIVE_TERMINAL_EVENTS = 256;
  * Code Logic（这个函数做什么）:
  *   先 store.reset(sessionId, buffer, lastSeq)；再按序对 held 中 seq > lastSeq 的事件
  *   store.append(sessionId, chunk, seq)；返回仍应保留跟踪的 pruned held 列表。
+ *   调用方必须先 shouldAcceptTerminalCutover 再调用本函数。
  */
 export function applyTerminalBaselineCutover(
   store: WorkbenchTerminalBufferStore,
