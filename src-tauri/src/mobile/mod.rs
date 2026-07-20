@@ -2,57 +2,145 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     桌面端需要展示手机可扫码访问的局域网 `/mobile` 地址。localhost/loopback 地址只能被本机访问，
-//!     返回给手机会造成二维码不可用，因此必须只输出真实局域网候选地址。
+//!     返回给手机会造成二维码不可用，因此必须只输出真实局域网候选地址；多网段机器还需结构化
+//!     entries 供前端芯片切换，并保持 urls 与 entries 同序兼容旧消费者。
 //!
 //! Code Logic（这个模块做什么）:
-//!     从 AppConfig 取设备名，结合 HTTP server 实际端口和候选 IP 列表，过滤 loopback/空值后
-//!     生成 camelCase DTO，供 axum HTTP API 返回给桌面前端。
+//!     从 AppConfig 取设备名，结合 HTTP server 实际端口与候选 host/role 列表，过滤 loopback/空值、
+//!     去重后生成 entries（含 isDefault/role）与同序 urls 的 camelCase DTO。
 
 use crate::config::AppConfig;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::net::IpAddr;
 
+/// 移动端访问入口候选（构建 DTO 前的中间结构）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     多网卡场景下每个候选 IP 可能带 wifi/wired 角色与接口名，构建 entries 时需要这些字段。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 host、可选角色与接口名；role 使用本模块 `MobileAccessRole`，由调用方从 discovery
+///     的字符串标签映射而来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobileAccessCandidate {
+    pub host: String,
+    pub role: Option<MobileAccessRole>,
+    pub ifa_name: String,
+}
+
+/// 移动端访问入口角色（Wi‑Fi / 有线）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     前端芯片在可识别时显示「Wi‑Fi / 有线 · IP」，帮助用户选择手机所在网段。
+///
+/// Code Logic（这个枚举做什么）:
+///     camelCase 序列化为 `wifi` / `wired`；无法推断时为 None，不额外输出「其他」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MobileAccessRole {
+    Wifi,
+    Wired,
+}
+
+/// 单条移动端访问入口 DTO。
+///
+/// Business Logic（为什么需要这个结构）:
+///     前端需要按条目渲染 URL、复制、二维码与网段芯片，并标记默认出站项。
+///
+/// Code Logic（这个结构做什么）:
+///     camelCase 字段：id/url/host/role/isDefault；role 为空时跳过序列化。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileAccessEntryDto {
+    pub id: String,
+    pub url: String,
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<MobileAccessRole>,
+    pub is_default: bool,
+}
+
 /// 移动端访问入口信息 DTO。
 ///
 /// Business Logic（为什么需要这个结构）:
-///     桌面端需要设备名、实际 HTTP 端口和可供手机访问的 URL 列表来渲染链接与二维码。
+///     桌面端需要设备名、实际 HTTP 端口、结构化 entries 以及兼容字段 urls 来渲染链接与二维码。
 ///
 /// Code Logic（这个结构做什么）:
-///     使用 camelCase 序列化给前端；测试中通过 PartialEq/Eq 直接比较期望输出。
+///     使用 camelCase 序列化给前端；`urls` 必须与 `entries[].url` 同序派生。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileAccessInfoDto {
     pub device_name: String,
     pub port: u16,
     pub urls: Vec<String>,
+    pub entries: Vec<MobileAccessEntryDto>,
 }
 
 /// 构建移动端访问入口信息。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     手机访问必须使用桌面所在局域网 IP 和实际监听端口，不能展示本机 loopback 地址。
+///     手机访问必须使用桌面所在局域网 IP 和实际监听端口，不能展示本机 loopback 地址；
+///     多网段时需结构化 entries 并标记默认出站 host，且 urls 与 entries 同序兼容旧前端。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收配置、实际端口和候选 IP 字符串列表；过滤空白、localhost 与 loopback IP 后，
-///     按 `http://<host>:<port>/mobile` 生成 URL，并保留设备名与端口。
+///     过滤/归一化 candidate.host，按 host 去重；生成 url/id/role/is_default；
+///     排序：is_default desc，再 host asc；urls 由 entries 映射；default_host 归一化后仅匹配一次。
 pub fn build_mobile_access_info(
     config: &AppConfig,
     port: u16,
-    candidate_ips: Vec<String>,
+    candidates: Vec<MobileAccessCandidate>,
+    default_host: Option<&str>,
 ) -> MobileAccessInfoDto {
+    let default_normalized = default_host.and_then(normalize_mobile_host);
     let mut seen = HashSet::new();
-    let urls = candidate_ips
-        .into_iter()
-        .filter_map(|candidate| normalize_mobile_host(&candidate))
-        .filter(|host| seen.insert(host.clone()))
-        .map(|host| format!("http://{}:{port}/mobile", format_url_host(&host)))
-        .collect();
+    let mut entries: Vec<MobileAccessEntryDto> = Vec::new();
+
+    for candidate in candidates {
+        let Some(host) = normalize_mobile_host(&candidate.host) else {
+            continue;
+        };
+        if !seen.insert(host.clone()) {
+            continue;
+        }
+        let url = format!("http://{}:{port}/mobile", format_url_host(&host));
+        let is_default = default_normalized
+            .as_ref()
+            .is_some_and(|d| d == &host);
+        entries.push(MobileAccessEntryDto {
+            id: host.clone(),
+            url,
+            host,
+            role: candidate.role,
+            is_default,
+        });
+    }
+
+    // 保证最多一个 is_default=true：若多个 host 误标，只保留排序后的第一个
+    let mut default_claimed = false;
+    for entry in &mut entries {
+        if entry.is_default {
+            if default_claimed {
+                entry.is_default = false;
+            } else {
+                default_claimed = true;
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        b.is_default
+            .cmp(&a.is_default)
+            .then_with(|| a.host.cmp(&b.host))
+    });
+
+    let urls = entries.iter().map(|e| e.url.clone()).collect();
 
     MobileAccessInfoDto {
         device_name: config.device_name.clone(),
         port,
         urls,
+        entries,
     }
 }
 
@@ -95,11 +183,14 @@ fn format_url_host(host: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_mobile_access_info, MobileAccessInfoDto};
+    use super::{
+        build_mobile_access_info, MobileAccessCandidate, MobileAccessEntryDto, MobileAccessInfoDto,
+        MobileAccessRole,
+    };
     use crate::config::AppConfig;
 
     /// Business Logic（为什么需要这个函数）:
-    ///     mobile access info 测试只关心设备名、端口与 URL 过滤结果，需要稳定的最小配置样本。
+    ///     mobile access info 测试只关心设备名、端口与 URL/entries 过滤结果，需要稳定的最小配置样本。
     ///
     /// Code Logic（这个函数做什么）:
     ///     构造带默认字段的 AppConfig，避免每个测试重复初始化与当前断言无关的配置项。
@@ -124,11 +215,24 @@ mod tests {
         }
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧测试与适配器场景只需 host 字符串，需快速构造无角色候选。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     用给定 host 填入 MobileAccessCandidate，role/ifa_name 为空默认。
+    fn candidate(host: &str) -> MobileAccessCandidate {
+        MobileAccessCandidate {
+            host: host.to_string(),
+            role: None,
+            ifa_name: String::new(),
+        }
+    }
+
     /// Business Logic（为什么需要这个测试）:
     ///     桌面端需要把移动端访问地址展示为链接和二维码，返回 localhost/loopback 会导致手机无法访问。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造包含 localhost、127.0.0.1 和局域网 IP 的候选列表，断言只保留局域网 `/mobile` URL，
+    ///     构造包含 localhost、127.0.0.1 和局域网 IP 的候选列表，断言只保留局域网 entries/urls，
     ///     同时保留设备名和实际 HTTP 端口。
     #[test]
     fn access_info_filters_loopback_urls() {
@@ -138,10 +242,11 @@ mod tests {
             &config,
             14203,
             vec![
-                "127.0.0.1".to_string(),
-                "localhost".to_string(),
-                "192.168.1.23".to_string(),
+                candidate("127.0.0.1"),
+                candidate("localhost"),
+                candidate("192.168.1.23"),
             ],
+            Some("192.168.1.23"),
         );
 
         assert_eq!(
@@ -150,6 +255,13 @@ mod tests {
                 device_name: "Hans Mac".to_string(),
                 port: 14203,
                 urls: vec!["http://192.168.1.23:14203/mobile".to_string()],
+                entries: vec![MobileAccessEntryDto {
+                    id: "192.168.1.23".to_string(),
+                    url: "http://192.168.1.23:14203/mobile".to_string(),
+                    host: "192.168.1.23".to_string(),
+                    role: None,
+                    is_default: true,
+                }],
             }
         );
     }
@@ -167,16 +279,20 @@ mod tests {
             &config,
             14203,
             vec![
-                String::new(),
-                "   ".to_string(),
-                "  192.168.1.23  ".to_string(),
+                candidate(""),
+                candidate("   "),
+                candidate("  192.168.1.23  "),
             ],
+            None,
         );
 
         assert_eq!(
             info.urls,
             vec!["http://192.168.1.23:14203/mobile".to_string()]
         );
+        assert_eq!(info.entries.len(), 1);
+        assert_eq!(info.entries[0].host, "192.168.1.23");
+        assert!(!info.entries[0].is_default);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -192,16 +308,19 @@ mod tests {
             &config,
             14203,
             vec![
-                "127.12.3.4".to_string(),
-                "::1".to_string(),
-                "192.168.1.23".to_string(),
+                candidate("127.12.3.4"),
+                candidate("::1"),
+                candidate("192.168.1.23"),
             ],
+            None,
         );
 
         assert_eq!(
             info.urls,
             vec!["http://192.168.1.23:14203/mobile".to_string()]
         );
+        assert_eq!(info.entries.len(), 1);
+        assert_eq!(info.entries[0].host, "192.168.1.23");
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -217,16 +336,19 @@ mod tests {
             &config,
             14203,
             vec![
-                "192.168.1.23".to_string(),
-                "192.168.1.23".to_string(),
-                " 192.168.1.23 ".to_string(),
+                candidate("192.168.1.23"),
+                candidate("192.168.1.23"),
+                candidate(" 192.168.1.23 "),
             ],
+            Some("192.168.1.23"),
         );
 
         assert_eq!(
             info.urls,
             vec!["http://192.168.1.23:14203/mobile".to_string()]
         );
+        assert_eq!(info.entries.len(), 1);
+        assert!(info.entries[0].is_default);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -238,11 +360,61 @@ mod tests {
     fn access_info_formats_non_loopback_ipv6_hosts() {
         let config = test_config();
 
-        let info = build_mobile_access_info(&config, 14203, vec!["2001:db8::5".to_string()]);
+        let info = build_mobile_access_info(
+            &config,
+            14203,
+            vec![candidate("2001:db8::5")],
+            None,
+        );
 
         assert_eq!(
             info.urls,
             vec!["http://[2001:db8::5]:14203/mobile".to_string()]
         );
+        assert_eq!(info.entries.len(), 1);
+        assert_eq!(info.entries[0].host, "2001:db8::5");
+        assert_eq!(info.entries[0].url, "http://[2001:db8::5]:14203/mobile");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     多网段机器应产出结构化 entries：默认出站优先排序，role/host/url 一致，urls 与 entries 同序。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 wired/wifi/loopback 三类候选，指定 wifi 为 default，断言 loopback 过滤、
+    ///     default 排前、urls[0] 对齐 entries[0].url。
+    #[test]
+    fn access_info_builds_entries_marks_default_and_sorts() {
+        let config = test_config();
+        let candidates = vec![
+            MobileAccessCandidate {
+                host: "10.0.0.5".into(),
+                role: Some(MobileAccessRole::Wired),
+                ifa_name: "eth0".into(),
+            },
+            MobileAccessCandidate {
+                host: "192.168.1.23".into(),
+                role: Some(MobileAccessRole::Wifi),
+                ifa_name: "wlan0".into(),
+            },
+            MobileAccessCandidate {
+                host: "127.0.0.1".into(),
+                role: None,
+                ifa_name: "lo".into(),
+            },
+        ];
+        let info = build_mobile_access_info(&config, 14203, candidates, Some("192.168.1.23"));
+        assert_eq!(info.port, 14203);
+        assert_eq!(info.urls.len(), 2);
+        assert_eq!(info.entries.len(), 2);
+        // default first
+        assert_eq!(info.entries[0].host, "192.168.1.23");
+        assert!(info.entries[0].is_default);
+        assert_eq!(info.entries[0].role, Some(MobileAccessRole::Wifi));
+        assert_eq!(info.entries[0].url, "http://192.168.1.23:14203/mobile");
+        assert_eq!(info.urls[0], info.entries[0].url);
+        assert_eq!(info.entries[1].host, "10.0.0.5");
+        assert!(!info.entries[1].is_default);
+        assert_eq!(info.entries[1].role, Some(MobileAccessRole::Wired));
+        assert_eq!(info.urls[1], info.entries[1].url);
     }
 }
