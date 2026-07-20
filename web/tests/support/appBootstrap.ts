@@ -44,6 +44,65 @@ export function makeAppConfig(partial: Partial<TestAppConfig> = {}): TestAppConf
 }
 
 /**
+ * Business Logic（为什么需要这个类型）:
+ *   E2E harness 的 get_mobile_access_info mock 必须对齐生产 DTO（entries + urls），
+ *   避免卡片解析 entries 时落到空列表或旧字段。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述 deviceName/port/urls/entries 结构；role 仅 wifi|wired。
+ */
+export type TestMobileAccessEntry = {
+  id: string;
+  url: string;
+  host: string;
+  role?: 'wifi' | 'wired' | null;
+  isDefault: boolean;
+};
+
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   桌面 AppShell / MobileAccessCard 消费的 access-info 响应形状。
+ *
+ * Code Logic（这个类型做什么）:
+ *   urls 与 entries[].url 同序；entries 为权威列表。
+ */
+export type TestMobileAccessInfo = {
+  deviceName: string;
+  port: number;
+  urls: string[];
+  entries: TestMobileAccessEntry[];
+};
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   多处 E2E 需要合法 get_mobile_access_info 响应，避免每个 spec 手写漂移字段。
+ *
+ * Code Logic（这个函数做什么）:
+ *   默认单局域网入口（isDefault=true）；可用 partial 覆盖。
+ */
+export function makeMobileAccessInfo(
+  partial: Partial<TestMobileAccessInfo> = {},
+): TestMobileAccessInfo {
+  const host = '192.168.1.10';
+  const port = partial.port ?? 62116;
+  const url = `http://${host}:${port}/mobile`;
+  const defaultEntry: TestMobileAccessEntry = {
+    id: host,
+    url,
+    host,
+    role: 'wifi',
+    isDefault: true,
+  };
+  const entries = partial.entries ?? [defaultEntry];
+  return {
+    deviceName: partial.deviceName ?? 'Test Device',
+    port,
+    urls: partial.urls ?? entries.map((entry) => entry.url),
+    entries,
+  };
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   Welcome/Settings 权限卡需要稳定的 TCC 状态。
  *
@@ -344,11 +403,7 @@ export function registerAppShellCommands(
   });
   harness.command('get_mobile_access_info', {
     kind: 'resolve',
-    value: {
-      url: 'http://192.168.1.10:62116/mobile',
-      lanAddresses: ['192.168.1.10'],
-      httpPort: 62116,
-    },
+    value: makeMobileAccessInfo(),
   });
   // 默认已确认 LAN disclosure，避免无关 E2E 被 gate 拦截
   harness.command('get_lan_disclosure_status', {

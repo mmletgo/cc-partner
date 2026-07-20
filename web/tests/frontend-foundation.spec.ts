@@ -234,10 +234,18 @@ async function installFoundationMocks(
         if (cmd === 'list_transfers') return [];
         if (cmd === 'get_mobile_access_info') {
           return {
-            urls: ['http://127.0.0.1:62116/mobile'],
-            primaryUrl: 'http://127.0.0.1:62116/mobile',
-            httpPort: 62116,
-            lanIps: ['127.0.0.1'],
+            deviceName: 'Hans-Mac',
+            port: 62116,
+            urls: ['http://192.168.1.10:62116/mobile'],
+            entries: [
+              {
+                id: '192.168.1.10',
+                url: 'http://192.168.1.10:62116/mobile',
+                host: '192.168.1.10',
+                role: 'wifi',
+                isDefault: true,
+              },
+            ],
           };
         }
         if (cmd === 'check_lan_firewall_dependency') {
