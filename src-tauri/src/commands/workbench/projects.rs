@@ -340,8 +340,13 @@ pub async fn remove_workbench_project(
 
     let session_rows = state.workbench_session_repo.list(Some(&project_id)).await?;
     for row in session_rows {
-        let _ = state.workbench_sessions.close(&row.id);
-        kill_persisted_backend(&row);
+        // R24 H1：每 session 在 kill + 项目级 delete 前 finish 各自 barrier。
+        if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
+            kill_persisted_backend(cleanup.row());
+            cleanup.finish_cleanup();
+        } else {
+            kill_persisted_backend(&row);
+        }
     }
     state
         .workbench_session_repo

@@ -738,9 +738,11 @@ pub(crate) async fn local_close_workbench_pane(
         PaneCloseOutcome::PaneClosed => {
             Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": false }))
         }
-        PaneCloseOutcome::WindowClosed(row) => {
-            kill_persisted_backend(&row);
+        PaneCloseOutcome::WindowClosed(cleanup) => {
+            // R24 H1：Closing barrier 覆盖 kill/delete；完成后 finish_cleanup。
+            kill_persisted_backend(cleanup.row());
             state.workbench_session_repo.delete(&session_id).await?;
+            cleanup.finish_cleanup();
             Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": true }))
         }
     }
@@ -808,9 +810,12 @@ pub(crate) async fn local_close_workbench_session(
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
     state.runtime_role.require_owner()?;
+    // R24 H1：registry close 返回 closer-owned cleanup；kill/SQLite 完成后再 finish_cleanup。
     match state.workbench_sessions.close(&session_id) {
-        Ok(row) => {
-            kill_persisted_backend(&row);
+        Ok(cleanup) => {
+            kill_persisted_backend(cleanup.row());
+            state.workbench_session_repo.delete(&session_id).await?;
+            cleanup.finish_cleanup();
         }
         Err(AppError::NotFound(_)) => {
             let row = state
@@ -819,10 +824,10 @@ pub(crate) async fn local_close_workbench_session(
                 .await?
                 .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
             kill_persisted_backend(&row);
+            state.workbench_session_repo.delete(&session_id).await?;
         }
         Err(error) => return Err(error),
     }
-    state.workbench_session_repo.delete(&session_id).await?;
     Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
 

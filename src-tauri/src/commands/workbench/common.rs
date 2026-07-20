@@ -543,6 +543,8 @@ pub(crate) async fn restore_persisted_sessions(
         // Finding 5 + R14/R16: 原子占位，区分 AlreadyLive / RestoreInProgress / Claimed。
         match state.workbench_sessions.try_claim_restore(&row.id) {
             RestoreClaimOutcome::AlreadyLive => continue,
+            // R24 H2：Closing barrier 下不 claim；下一次 list re-read durable（已删除则不再 restore）。
+            RestoreClaimOutcome::BarrierActive => continue,
             RestoreClaimOutcome::RestoreInProgress(rx) => {
                 // 并发 list：共享 in-flight restore 结果；Failed/超时 fail closed。
                 match wait_for_shared_restore(rx).await {
@@ -631,6 +633,15 @@ pub(crate) async fn restore_persisted_sessions(
             }
             Err(error) => {
                 tracing::warn!("恢复工作台终端会话失败: {error}");
+                // R24 H2：Closing barrier abort 不得把 pre-close 行 upsert 为 disconnected 复活；
+                // finish Failed 后上层 re-list 再读 durable（已删除则终止 restore）。
+                let is_close_barrier = matches!(&error, AppError::Unavailable(msg) if msg == "session_close_barrier_active");
+                if is_close_barrier {
+                    claim_guard.finish(SharedRestoreNotification::Failed(
+                        AppErrorCategory::Unavailable,
+                    ));
+                    return Err(error);
+                }
                 let mut disconnected = row.clone();
                 disconnected.status = "disconnected".to_string();
                 disconnected.exited_at = Some(now_iso());

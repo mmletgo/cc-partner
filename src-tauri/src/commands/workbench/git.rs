@@ -1309,16 +1309,19 @@ pub(crate) async fn close_sessions_for_worktree(
         .await?;
     let mut closed = 0_usize;
     for row in sessions {
+        // R24 H1：persist cleanup 完成前保持 Closing barrier。
         match state.workbench_sessions.close(&row.id) {
-            Ok(closed_row) => {
-                kill_persisted_backend(&closed_row);
+            Ok(cleanup) => {
+                kill_persisted_backend(cleanup.row());
+                state.workbench_session_repo.delete(&row.id).await?;
+                cleanup.finish_cleanup();
             }
             Err(AppError::NotFound(_)) => {
                 kill_persisted_backend(&row);
+                state.workbench_session_repo.delete(&row.id).await?;
             }
             Err(error) => return Err(error),
         }
-        state.workbench_session_repo.delete(&row.id).await?;
         closed += 1;
     }
     Ok(closed)
