@@ -621,12 +621,52 @@ pub(crate) fn tmux_attach_window_args(session_name: &str, window_target: &str) -
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     冷启动 attach 或「适应尺寸」时，仅依赖 PTY SIGWINCH 可能不刷新 detached tmux window 尺寸，
+///     导致 status bar 悬在旧 client size 中间；需要显式 `resize-window` 强制同步。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `resize-window -t <target> -x <cols> -y <rows>` 参数列表。
+fn tmux_resize_window_args(target: &str, cols: u16, rows: u16) -> Vec<String> {
+    vec![
+        "resize-window".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "-x".to_string(),
+        cols.to_string(),
+        "-y".to_string(),
+        rows.to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     同尺寸 `resize-window` / PTY resize 常被 tmux/内核忽略，status 停在历史帧中间；
+///     需要先 bump 一行再回到目标尺寸，强制 SIGWINCH 与 full redraw。
+///
+/// Code Logic（这个函数做什么）:
+///     返回与 target 不同的临时 rows（优先 rows-1，否则 rows+1），供两步 resize。
+fn tmux_force_redraw_bump_rows(rows: u16) -> u16 {
+    if rows > MIN_TERMINAL_ROWS {
+        rows - 1
+    } else {
+        rows.saturating_add(1).max(MIN_TERMINAL_ROWS + 1)
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     Workbench 的终端主题由前端 xterm 控制，tmux status bar 不能继承用户全局 `.tmux.conf` 中的固定深色背景。
 ///
 /// Code Logic（这个函数做什么）:
 ///     生成一组浅色/深色都安全的 tmux status option 命令；保留 session/window 标签结构，但不保留全局 tmux 主题里的硬编码颜色。
+///     强制 `status-position bottom`，避免用户全局 `status-position top` 或错位状态在重启后残留。
 fn tmux_status_theme_commands(session_name: &str) -> Vec<Vec<String>> {
     vec![
+        vec![
+            "set-option".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+            "status-position".to_string(),
+            "bottom".to_string(),
+        ],
         vec![
             "set-option".to_string(),
             "-t".to_string(),
@@ -932,8 +972,9 @@ pub fn reset_create_tmux_window_call_count_for_test() {
 ///     **不得**被 list/open restore 路径调用（A8：缺失 target 时 skip，不创建 shell）。
 ///
 /// Code Logic（这个函数做什么）:
-///     session 不存在时执行 `tmux new-session -d -s <session> -n <window>`；存在时执行 `tmux new-window`；
-///     两者都用 `-P -F #{window_id}` 读取真实 window id。
+///     session 不存在时执行 `tmux new-session -d -s <session> -n <window> -x/-y`；存在时执行 `tmux new-window`；
+///     两者都用 `-P -F #{window_id}` 读取真实 window id。new-window 不支持 -x/-y，创建后统一
+///     `resize-window -x/-y`，避免 detached window 以默认小尺寸绘制导致 status bar 错位。
 fn create_tmux_window(
     tmux: &TmuxCommand,
     session_name: &str,
@@ -941,14 +982,19 @@ fn create_tmux_window(
     cwd: &str,
     shell_command: &str,
     agent_ctx: Option<&TerminalAgentContextIds>,
+    cols: u16,
+    rows: u16,
 ) -> Result<String, AppError> {
     #[cfg(test)]
     {
         CREATE_TMUX_WINDOW_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
     let tmux_cwd = tmux.project_cwd(cwd)?;
+    let cols_text = cols.to_string();
+    let rows_text = rows.to_string();
     let mut command = tmux.std_command();
     if tmux_has_session(tmux, session_name) {
+        // new-window 无 -x/-y；尺寸在拿到 window_id 后由 resize-window 强制同步。
         command.args([
             "new-window",
             "-d",
@@ -972,6 +1018,10 @@ fn create_tmux_window(
             window_name,
             "-c",
             &tmux_cwd,
+            "-x",
+            &cols_text,
+            "-y",
+            &rows_text,
             "-P",
             "-F",
             "#{window_id}",
@@ -994,6 +1044,12 @@ fn create_tmux_window(
         } else {
             if let Err(error) = apply_workbench_tmux_status_theme(tmux, session_name) {
                 tracing::debug!("应用工作台 tmux status 样式失败: {error}");
+            }
+            let target = tmux_window_target(session_name, &window_id);
+            let resize_args = tmux_resize_window_args(&target, cols, rows);
+            let resize_refs: Vec<&str> = resize_args.iter().map(String::as_str).collect();
+            if let Err(error) = run_tmux_command(tmux, &resize_refs) {
+                tracing::debug!("创建后调整 tmux window 尺寸失败 target={target}: {error}");
             }
             Ok(window_id)
         }
@@ -1701,6 +1757,8 @@ impl WorkbenchSessionRegistry {
                     &cwd,
                     &terminal_command,
                     Some(&agent_ctx),
+                    cols,
+                    rows,
                 ) {
                     Ok(window_id) => {
                         let target = tmux_window_target(&worktree_tmux_id, &window_id);
@@ -1786,7 +1844,10 @@ impl WorkbenchSessionRegistry {
         row.exited_at = None;
         row.exit_code = None;
         row.updated_at = chrono::Utc::now().to_rfc3339();
-        self.spawn_row(state, row)
+        let restored = self.spawn_row(state, row)?;
+        // attach 后立刻强制 window 尺寸，避免冷启动 status bar 停留在旧 client size。
+        let _ = self.force_tmux_window_size(&restored);
+        Ok(restored)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1855,7 +1916,37 @@ impl WorkbenchSessionRegistry {
         row.exited_at = None;
         row.exit_code = None;
         row.updated_at = chrono::Utc::now().to_rfc3339();
-        self.spawn_row(state, row)
+        let restored = self.spawn_row(state, row)?;
+        // restore attach 后立刻强制 window 尺寸，避免冷启动 status bar 停留在旧 client size。
+        let _ = self.force_tmux_window_size(&restored);
+        Ok(restored)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     冷启动 restore、手动适应尺寸或 PTY resize 后，需要把 detached tmux window 强制同步到目标 cols/rows，
+    ///     并触发 full redraw（同尺寸 resize 往往被 tmux 忽略，status 会停在历史帧中间）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅对 tmux-backed row：先 `resize-window` 到 rows±1，再设回目标 cols/rows；
+    ///     raw PTY / 缺 tmux 直接 Ok；命令失败返回 Err 供调用方 debug，不阻断主流程。
+    fn force_tmux_window_size(&self, row: &WorkbenchSessionRow) -> Result<(), AppError> {
+        if row.backend != TMUX_BACKEND {
+            return Ok(());
+        }
+        let Some(tmux) = available_tmux_command() else {
+            return Ok(());
+        };
+        let target = tmux_target_for_row(row)?;
+        let bump_rows = tmux_force_redraw_bump_rows(row.rows);
+        for (cols, rows) in [
+            (row.cols, bump_rows),
+            (row.cols, row.rows),
+        ] {
+            let args = tmux_resize_window_args(&target, cols, rows);
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            run_tmux_command(&tmux, &arg_refs)?;
+        }
+        Ok(())
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2127,10 +2218,13 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     前端终端容器尺寸变化时，子进程需要收到新的 PTY 行列数。
+    ///     前端终端容器尺寸变化时，子进程需要收到新的 PTY 行列数；
+    ///     冷启动 restore 或「适应尺寸」时，仅 MasterPty::resize 可能不推动 detached tmux window 尺寸，
+    ///     导致 status bar 停在旧 client size 中间。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     更新 row 尺寸，并调用 MasterPty::resize 通知底层 PTY。
+    ///     更新 row 尺寸，调用 MasterPty::resize 通知底层 PTY；对 tmux-backed session
+    ///     额外执行 `resize-window -x/-y` 强制同步 window/client 尺寸（失败仅 debug，不阻断 PTY resize）。
     pub fn resize(
         &self,
         session_id: &str,
@@ -2144,16 +2238,27 @@ impl WorkbenchSessionRegistry {
         handle.row.updated_at = chrono::Utc::now().to_rfc3339();
         match &mut handle.process {
             SessionProcess::Pty { master, .. } => {
-                master
-                    .resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    })
-                    .map_err(|error| AppError::generic(format!("调整 PTY 尺寸失败: {error}")))?;
+                // 同尺寸 resize 可能不发 SIGWINCH；先 bump 一行再设目标尺寸强制刷新。
+                let bump_rows = tmux_force_redraw_bump_rows(rows);
+                for next_rows in [bump_rows, rows] {
+                    master
+                        .resize(PtySize {
+                            rows: next_rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        })
+                        .map_err(|error| {
+                            AppError::generic(format!("调整 PTY 尺寸失败: {error}"))
+                        })?;
+                }
             }
             SessionProcess::Fake => {}
+        }
+        if let Err(error) = self.force_tmux_window_size(&handle.row) {
+            tracing::debug!(
+                "调整工作台 tmux window 尺寸失败 session_id={session_id}: {error}"
+            );
         }
         Ok(handle.row.clone())
     }
@@ -3111,7 +3216,7 @@ mod tests {
     ///     工作台浅色/深色主题切换时，tmux 底部 status bar 不应继承用户 tmux 配置里的深色背景、彩色右侧时间或 underline。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言 Workbench 使用无内嵌颜色的 status/window format，并保留 session/window 标签的结构。
+    ///     断言 Workbench 使用无内嵌颜色的 status/window format，强制 status-position=bottom，并保留 session/window 标签结构。
     #[test]
     fn tmux_status_theme_commands_use_light_safe_label_style() {
         let commands = tmux_status_theme_commands("cc-partner-project-project1234abcd");
@@ -3119,6 +3224,13 @@ mod tests {
         assert_eq!(
             commands,
             vec![
+                vec![
+                    "set-option",
+                    "-t",
+                    "cc-partner-project-project1234abcd",
+                    "status-position",
+                    "bottom",
+                ],
                 vec![
                     "set-option",
                     "-t",
@@ -3200,6 +3312,31 @@ mod tests {
         assert!(!joined.contains("underscore"));
         assert!(!joined.contains("fg=#"));
         assert!(!joined.contains("bg=#"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     冷启动 / 适应尺寸必须能构造出强制同步 window 尺寸的 tmux 命令，避免 status bar 悬在中间。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 `tmux_resize_window_args` 生成 `resize-window -t <target> -x <cols> -y <rows>`，
+    ///     且 bump rows 与目标不同以便两步强制重绘。
+    #[test]
+    fn tmux_resize_window_args_force_window_size() {
+        let args = tmux_resize_window_args("cc-partner-project-project1234abcd:@3", 160, 42);
+        assert_eq!(
+            args,
+            vec![
+                "resize-window",
+                "-t",
+                "cc-partner-project-project1234abcd:@3",
+                "-x",
+                "160",
+                "-y",
+                "42",
+            ]
+        );
+        assert_eq!(tmux_force_redraw_bump_rows(42), 41);
+        assert_eq!(tmux_force_redraw_bump_rows(MIN_TERMINAL_ROWS), MIN_TERMINAL_ROWS + 1);
     }
 
     /// Business Logic（为什么需要这个测试）:

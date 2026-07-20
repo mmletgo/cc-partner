@@ -42,7 +42,9 @@ export function workbenchTerminalOptions(readToken: TokenReader = readCssToken):
     cursorBlink: true,
     fontFamily: readToken('--font-mono', 'monospace'),
     fontSize: 13,
-    lineHeight: 1.35,
+    // lineHeight 保持 1：>1 时 FitAddon 行高与 canvas 像素可能不一致，
+    // tmux status 画在最后一行时会在容器底部上方留白，看起来像“悬空”。
+    lineHeight: 1,
     scrollback: 3000,
     theme: workbenchTerminalTheme(readToken),
   };

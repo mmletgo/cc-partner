@@ -29,11 +29,15 @@
 }
 
 .centerPane {
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  /* flex 而非固定 4 行 grid：RestoreNotice/SnapshotDialog/noticeStack 显隐时
+     子项数量会变；grid 的 1fr 会落到错误子项，mainWorkspace 只剩 min-height 塌缩，
+     FitAddon ~90x24 → tmux status 悬空。flex 保证 mainWorkspace 始终吃剩余高度。 */
+  display: flex;
+  flex-direction: column;
   gap: 0;
   padding: 0;
   overflow: hidden;
+  min-height: 0;
 }
 
 .workspaceHeader,
@@ -439,6 +443,8 @@
 
 .mainWorkspace {
   position: relative;
+  /* 在 centerPane flex 列中占据全部剩余高度；absolute terminalLayer 依赖此盒高度。 */
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -457,6 +463,8 @@
 .terminalLayer {
   grid-template-rows: auto minmax(0, 1fr);
   z-index: var(--z-base);
+  /* absolute + inset 已给出高度；显式 height 避免子 grid 在部分 WebView 里按内容收缩 */
+  height: 100%;
 }
 
 .terminalLayer[data-fullscreen='true'] {
@@ -672,11 +680,15 @@
   position: relative;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   display: grid;
+  /* 单行 1fr：让 terminalPanel 吃满 terminalLayer 剩余高度，而不是按内容 min-height 塌缩 */
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .terminalLayer[data-fullscreen='true'] .terminalArea {
   min-height: 0;
+  height: 100%;
 }
 
 .promptOptimizerPanel {
@@ -724,6 +736,7 @@
 
 .terminalPanel {
   min-height: 0;
+  height: 100%;
   display: grid;
   gap: 0;
   margin: var(--space-4) var(--space-6) var(--space-6);
@@ -767,6 +780,7 @@
   grid-area: 1 / 1;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   border: 1px solid transparent;
@@ -823,9 +837,11 @@
   overflow: hidden;
 }
 
+/* 不要把 .xterm 强行 height:100%：FitAddon 按 cell 高度算 rows，
+   若容器更高会在画布下方留出空白，tmux status 画在 buffer 最后一行时
+   视觉上就悬在中间。宽度 100% 保持列对齐即可。 */
 .terminalViewport :global(.xterm) {
   width: 100%;
-  height: 100%;
 }
 
 .terminalPlaceholder {

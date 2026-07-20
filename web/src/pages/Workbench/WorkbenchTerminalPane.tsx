@@ -134,11 +134,15 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     const resize = () => {
       try {
         fit.fit();
+        // 始终把当前 cols/rows 回传：即使与上次相同，后端也会 bump 尺寸强制
+        // tmux/PTY 重绘，避免冷启动 replay 后 status bar 停在历史帧中间。
         onResize(
           sessionId,
           clampU16(terminal.cols, MIN_TERMINAL_COLS),
           clampU16(terminal.rows, MIN_TERMINAL_ROWS),
         );
+        // 同步刷新 xterm 视口度量，避免 canvas 与容器错位。
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
         emitCursorAnchor();
       } catch {
         // xterm 在容器不可见时 fit 可能失败，下一次 ResizeObserver 会重试。
@@ -150,12 +154,22 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       }
       resizeTimerRef.current = window.setTimeout(resize, 80);
     });
+    // 同时观察 host 与 viewport：冷启动后 host 高度从 min-height 撑满时，
+    // 仅 observe viewport 偶发不触发，导致长期停在 ~90x24、tmux status 悬空。
+    const host = viewport.parentElement;
     observer.observe(viewport);
+    if (host) observer.observe(host);
     forceResizeRef.current = resize;
     resize();
+    // 布局可能在首帧后才完成（absolute 层 + grid 1fr）；补两次延迟 fit。
+    const layoutRaf = window.requestAnimationFrame(() => {
+      resize();
+      resizeTimerRef.current = window.setTimeout(resize, 120);
+    });
     terminalRef.current = terminal;
 
     return () => {
+      window.cancelAnimationFrame(layoutRaf);
       observer.disconnect();
       dataDisposable.dispose();
       cursorDisposable.dispose();
