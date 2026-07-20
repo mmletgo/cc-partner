@@ -173,7 +173,8 @@ pub(crate) use common::{
     build_remote_project_shortcut_row, device_base_url, device_name_from_state,
     ensure_remote_event_bridge_for_project_mapping, ensure_remote_project_context, get_project,
     local_project_id_for_remote_inner_project, map_remote_session_dtos_with_project, now_iso,
-    remote_inner_session_id, remote_inner_worktree_id, WorkbenchMergeResultDto,
+    remote_inner_session_id, remote_inner_worktree_id, remove_local_workbench_project_with_barrier,
+    WorkbenchMergeResultDto,
 };
 
 pub(crate) use files::{

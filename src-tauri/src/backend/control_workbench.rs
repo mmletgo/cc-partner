@@ -22,7 +22,6 @@ use crate::workbench::remote_protocol::{
     RemoteCreatePathReq, RemoteDeletePathReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq,
     RemoteRenamePathReq,
 };
-use crate::workbench::sessions::kill_persisted_backend;
 use axum::extract::{ConnectInfo, Extension, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -147,53 +146,9 @@ async fn dispatch_workbench_op(
             Ok(serde_json::to_value(item)?)
         }
         "projects.remove" => {
+            // R26 M1：desktop / control 共用 project barrier helper。
             let project_id = required_string(&payload, "projectId")?;
-            let _ = workbench::get_project(state, &project_id).await?;
-            let session_rows = state.workbench_session_repo.list(Some(&project_id)).await?;
-            // R25 H2：收集 close cleanup 令牌；bulk delete 成功后才 finish_cleanup。
-            let mut cleanups = Vec::new();
-            for row in session_rows {
-                match state.workbench_sessions.close(&row.id) {
-                    Ok(cleanup) => {
-                        kill_persisted_backend(cleanup.row());
-                        cleanups.push(cleanup);
-                    }
-                    Err(AppError::NotFound(_)) => {
-                        match state
-                            .workbench_sessions
-                            .begin_close_intent_for_missing_handle(&row.id, row.clone())
-                        {
-                            Ok(cleanup) => {
-                                kill_persisted_backend(cleanup.row());
-                                cleanups.push(cleanup);
-                            }
-                            Err(AppError::Conflict(_)) => {
-                                if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
-                                    kill_persisted_backend(cleanup.row());
-                                    cleanups.push(cleanup);
-                                } else {
-                                    kill_persisted_backend(&row);
-                                }
-                            }
-                            Err(_) => kill_persisted_backend(&row),
-                        }
-                    }
-                    Err(_) => kill_persisted_backend(&row),
-                }
-            }
-            state
-                .workbench_session_repo
-                .delete_by_project(&project_id)
-                .await?;
-            state
-                .workbench_worktree_repo
-                .delete_by_project(&project_id)
-                .await?;
-            state.workbench_project_repo.delete(&project_id).await?;
-            for cleanup in cleanups {
-                cleanup.finish_cleanup();
-            }
-            Ok(serde_json::json!({ "ok": true, "projectId": project_id }))
+            Ok(workbench::remove_local_workbench_project_with_barrier(state, &project_id).await?)
         }
         "projects.touch" => {
             let project_id = required_string(&payload, "projectId")?;

@@ -541,7 +541,7 @@ pub(crate) async fn restore_persisted_sessions(
     let rows = state.workbench_session_repo.list(project_id).await?;
     for row in rows {
         // Finding 5 + R14/R16: 原子占位，区分 AlreadyLive / RestoreInProgress / Claimed。
-        match state.workbench_sessions.try_claim_restore(&row.id) {
+        let claim_generation = match state.workbench_sessions.try_claim_restore(&row.id) {
             RestoreClaimOutcome::AlreadyLive => continue,
             // R24 H2：Closing barrier 下不 claim；下一次 list re-read durable（已删除则不再 restore）。
             RestoreClaimOutcome::BarrierActive => continue,
@@ -560,13 +560,24 @@ pub(crate) async fn restore_persisted_sessions(
                     }
                 }
             }
-            RestoreClaimOutcome::Claimed => {}
-        }
-        // RAII：任意 early return / Err 路径 Drop 都会 finish Failed 并通知 waiters。
+            RestoreClaimOutcome::Claimed { generation } => generation,
+        };
+        // RAII：任意 early return / Err 路径 Drop 都会 generation-scoped finish Failed。
         let mut claim_guard = crate::workbench::sessions::RestoreClaimGuard::new(
             (*state.workbench_sessions).clone(),
             row.id.clone(),
+            claim_generation,
         );
+        // R26 M1：project remove 窗口内不得继续 restore。
+        if let Err(error) = state
+            .workbench_sessions
+            .require_project_not_closing(&row.project_id)
+        {
+            claim_guard.finish(SharedRestoreNotification::Failed(
+                AppErrorCategory::Unavailable,
+            ));
+            return Err(error);
+        }
         let Some(project) = state.workbench_project_repo.get(&row.project_id).await? else {
             state.workbench_session_repo.delete(&row.id).await?;
             // 孤儿删除成功：无会话可合并；广播 PersistedDisconnected 让 waiter 安全 continue。
@@ -583,10 +594,13 @@ pub(crate) async fn restore_persisted_sessions(
                     None
                 }
             };
-        match state
-            .workbench_sessions
-            .restore(state.clone(), project, row.clone(), worktree_name)
-        {
+        match state.workbench_sessions.restore(
+            state.clone(),
+            project,
+            row.clone(),
+            worktree_name,
+            Some(claim_generation),
+        ) {
             Ok(restored) => {
                 // spawn 成功后 upsert 失败也必须回收 attach，并广播 Failed + 返回 Err。
                 let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new_with_state(
@@ -594,8 +608,61 @@ pub(crate) async fn restore_persisted_sessions(
                     restored.id.clone(),
                     state.clone(),
                 );
+                // R26 H1：running upsert 前 acquire persist lease + revalidate claim/project。
+                let mut persist_lease = match state
+                    .workbench_sessions
+                    .try_acquire_restore_persist_lease(&restored.id, claim_generation)
+                {
+                    Some(lease) => lease,
+                    None => {
+                        drop(spawn_guard);
+                        claim_guard.finish(SharedRestoreNotification::Failed(
+                            AppErrorCategory::Unavailable,
+                        ));
+                        return Err(AppError::unavailable(
+                            "session_restore_claim_revoked".to_string(),
+                        ));
+                    }
+                };
+                if let Err(error) = state
+                    .workbench_sessions
+                    .require_project_not_closing(&restored.project_id)
+                {
+                    drop(spawn_guard);
+                    persist_lease.release();
+                    claim_guard.finish(SharedRestoreNotification::Failed(
+                        AppErrorCategory::Unavailable,
+                    ));
+                    return Err(error);
+                }
+                if !persist_lease.is_active() {
+                    drop(spawn_guard);
+                    persist_lease.release();
+                    claim_guard.finish(SharedRestoreNotification::Failed(
+                        AppErrorCategory::Unavailable,
+                    ));
+                    return Err(AppError::unavailable(
+                        "session_restore_claim_revoked".to_string(),
+                    ));
+                }
                 match state.workbench_session_repo.upsert(&restored).await {
                     Ok(()) => {
+                        persist_lease.release();
+                        // R26 H1：upsert 后再 revalidate；revoked 则 reclaim 并 Failed。
+                        if !claim_guard.is_active()
+                            || state
+                                .workbench_sessions
+                                .require_project_not_closing(&restored.project_id)
+                                .is_err()
+                        {
+                            drop(spawn_guard);
+                            claim_guard.finish(SharedRestoreNotification::Failed(
+                                AppErrorCategory::Unavailable,
+                            ));
+                            return Err(AppError::unavailable(
+                                "session_restore_claim_revoked".to_string(),
+                            ));
+                        }
                         // R20 M1：仅 generation CAS 真正 Ready 才 finish(Ready)；否则补偿并 Failed。
                         if spawn_guard.commit() {
                             claim_guard.finish(SharedRestoreNotification::Ready);
@@ -611,7 +678,16 @@ pub(crate) async fn restore_persisted_sessions(
                             disconnected.status = "disconnected".to_string();
                             disconnected.exited_at = Some(now_iso());
                             disconnected.updated_at = now_iso();
-                            let _ = state.workbench_session_repo.upsert(&disconnected).await;
+                            if let Some(mut lease) = state
+                                .workbench_sessions
+                                .try_acquire_restore_persist_lease(
+                                    &disconnected.id,
+                                    claim_generation,
+                                )
+                            {
+                                let _ = state.workbench_session_repo.upsert(&disconnected).await;
+                                lease.release();
+                            }
                             claim_guard.finish(SharedRestoreNotification::Failed(
                                 AppErrorCategory::Unavailable,
                             ));
@@ -621,6 +697,7 @@ pub(crate) async fn restore_persisted_sessions(
                         }
                     }
                     Err(error) => {
+                        persist_lease.release();
                         tracing::warn!("恢复工作台终端后持久化失败，已回收 attach: {error}");
                         let category = error.classify();
                         // R17 M1：必须先回收 spawn，再放 claim；否则第三方 list 会短暂 AlreadyLive。
@@ -633,9 +710,14 @@ pub(crate) async fn restore_persisted_sessions(
             }
             Err(error) => {
                 tracing::warn!("恢复工作台终端会话失败: {error}");
-                // R24 H2：Closing barrier abort 不得把 pre-close 行 upsert 为 disconnected 复活；
-                // finish Failed 后上层 re-list 再读 durable（已删除则终止 restore）。
-                let is_close_barrier = matches!(&error, AppError::Unavailable(msg) if msg == "session_close_barrier_active");
+                // R24 H2 / R26：Closing/project barrier / revoked claim 不得 upsert disconnected 复活。
+                let is_close_barrier = matches!(
+                    &error,
+                    AppError::Unavailable(msg)
+                        if msg == "session_close_barrier_active"
+                            || msg == "project_closing_barrier_active"
+                            || msg == "session_restore_claim_revoked"
+                );
                 if is_close_barrier {
                     claim_guard.finish(SharedRestoreNotification::Failed(
                         AppErrorCategory::Unavailable,
@@ -646,12 +728,47 @@ pub(crate) async fn restore_persisted_sessions(
                 disconnected.status = "disconnected".to_string();
                 disconnected.exited_at = Some(now_iso());
                 disconnected.updated_at = now_iso();
+                // R26 H1：disconnected upsert 同样需要 lease + revalidate。
+                let mut persist_lease = match state
+                    .workbench_sessions
+                    .try_acquire_restore_persist_lease(&disconnected.id, claim_generation)
+                {
+                    Some(lease) => lease,
+                    None => {
+                        claim_guard.finish(SharedRestoreNotification::Failed(
+                            AppErrorCategory::Unavailable,
+                        ));
+                        return Err(AppError::unavailable(
+                            "session_restore_claim_revoked".to_string(),
+                        ));
+                    }
+                };
+                if let Err(error) = state
+                    .workbench_sessions
+                    .require_project_not_closing(&disconnected.project_id)
+                {
+                    persist_lease.release();
+                    claim_guard.finish(SharedRestoreNotification::Failed(
+                        AppErrorCategory::Unavailable,
+                    ));
+                    return Err(error);
+                }
                 match state.workbench_session_repo.upsert(&disconnected).await {
                     Ok(()) => {
+                        persist_lease.release();
+                        if !claim_guard.is_active() {
+                            claim_guard.finish(SharedRestoreNotification::Failed(
+                                AppErrorCategory::Unavailable,
+                            ));
+                            return Err(AppError::unavailable(
+                                "session_restore_claim_revoked".to_string(),
+                            ));
+                        }
                         // skip-missing 已落盘 disconnected：list 可合并该行，不可 live replay。
                         claim_guard.finish(SharedRestoreNotification::PersistedDisconnected);
                     }
                     Err(persist_error) => {
+                        persist_lease.release();
                         tracing::warn!(
                             "恢复失败后写入 disconnected 状态失败，会话可能不可 replay: {persist_error}"
                         );
@@ -1172,6 +1289,97 @@ pub(crate) fn ensure_remote_event_bridge_for_worktree_context(
         &context.inner_project_id,
         &context.local_project_id,
     );
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     R26 M1：desktop `remove_workbench_project` 与 control `projects.remove` 必须共享
+///     project-scoped closing barrier，覆盖 snapshot→bulk delete 全窗口；否则 concurrent
+///     create 可在 delete 期间 spawn orphan live session 并 INSERT OR REPLACE。
+///
+/// Code Logic（这个函数做什么）:
+///     1) begin project closing barrier generation；
+///     2) list sessions 快照；
+///     3) 逐 session close / close intent + kill_persisted_backend，收集 cleanup 令牌；
+///     4) delete sessions/worktrees/project；
+///     5) finish session cleanups + finish project barrier。
+pub(crate) async fn remove_local_workbench_project_with_barrier(
+    state: &AppState,
+    project_id: &str,
+) -> Result<serde_json::Value, AppError> {
+    use crate::workbench::sessions::kill_persisted_backend;
+
+    state.runtime_role.require_owner()?;
+    let _project = get_project(state, project_id).await?;
+    let project_barrier = state
+        .workbench_sessions
+        .begin_project_closing_barrier(project_id);
+
+    let session_rows = state.workbench_session_repo.list(Some(project_id)).await?;
+    // R25 H2 / R26 M1：先收集全部 SessionCloseCleanup；bulk SQLite 成功后才 finish。
+    let mut cleanups = Vec::new();
+    for row in session_rows {
+        match state.workbench_sessions.close(&row.id) {
+            Ok(cleanup) => {
+                kill_persisted_backend(cleanup.row());
+                cleanups.push(cleanup);
+            }
+            Err(AppError::NotFound(_)) => {
+                // R25 H1：无 live handle 也 install close intent，阻断 restore re-upsert。
+                match state
+                    .workbench_sessions
+                    .begin_close_intent_for_missing_handle(&row.id, row.clone())
+                {
+                    Ok(cleanup) => {
+                        kill_persisted_backend(cleanup.row());
+                        cleanups.push(cleanup);
+                    }
+                    Err(AppError::Conflict(_)) => {
+                        if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
+                            kill_persisted_backend(cleanup.row());
+                            cleanups.push(cleanup);
+                        } else {
+                            kill_persisted_backend(&row);
+                        }
+                    }
+                    Err(_) => kill_persisted_backend(&row),
+                }
+            }
+            Err(_) => kill_persisted_backend(&row),
+        }
+    }
+
+    // bulk delete 期间 project barrier 仍 active；create/restore revalidate 失败。
+    let delete_result = async {
+        state
+            .workbench_session_repo
+            .delete_by_project(project_id)
+            .await?;
+        state
+            .workbench_worktree_repo
+            .delete_by_project(project_id)
+            .await?;
+        state.workbench_project_repo.delete(project_id).await?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+
+    match delete_result {
+        Ok(()) => {
+            for cleanup in cleanups {
+                cleanup.finish_cleanup();
+            }
+            state
+                .workbench_sessions
+                .finish_project_closing_barrier(project_id, project_barrier);
+            Ok(serde_json::json!({ "ok": true, "projectId": project_id }))
+        }
+        Err(error) => {
+            // delete 失败：保留 session + project barrier，禁止 orphan create/restore。
+            // cleanup Drop 本身也不清 session barrier（R25 M2）。
+            drop(cleanups);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]

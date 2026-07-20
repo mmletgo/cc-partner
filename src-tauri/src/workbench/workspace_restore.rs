@@ -660,11 +660,16 @@ pub async fn safe_attach_workbench_session(
 
     // claim 防止并发重复 attach；未拿到 claim 时禁止 fallthrough（否则会无占位 attach，
     // 并可能用 armed RestoreClaimGuard 误释放他人 claim）。
-    let mut claimed = matches!(
-        ctx.state.workbench_sessions.try_claim_restore(session_id),
-        RestoreClaimOutcome::Claimed
-    );
-    if !claimed {
+    // R26 H1：Claimed 携带可撤销 generation。
+    let mut claim_generation: Option<u64> = match ctx
+        .state
+        .workbench_sessions
+        .try_claim_restore(session_id)
+    {
+        RestoreClaimOutcome::Claimed { generation } => Some(generation),
+        _ => None,
+    };
+    if claim_generation.is_none() {
         // 另一路正在 attach 或已完成：优先 reuse
         if ctx.registry_is_live(session_id) {
             return Ok(SafeAttachResult {
@@ -681,15 +686,14 @@ pub async fn safe_attach_workbench_session(
                     reused: true,
                 });
             }
-            if matches!(
-                ctx.state.workbench_sessions.try_claim_restore(session_id),
-                RestoreClaimOutcome::Claimed
-            ) {
-                claimed = true;
+            if let RestoreClaimOutcome::Claimed { generation } =
+                ctx.state.workbench_sessions.try_claim_restore(session_id)
+            {
+                claim_generation = Some(generation);
                 break;
             }
         }
-        if !claimed {
+        if claim_generation.is_none() {
             if ctx.registry_is_live(session_id) {
                 return Ok(SafeAttachResult {
                     session_id: session_id.to_string(),
@@ -701,10 +705,12 @@ pub async fn safe_attach_workbench_session(
         }
     }
 
-    // 仅在确认 claimed 后构造 guard（Drop 才安全释放本路 claim）
+    let claim_generation = claim_generation.expect("claim generation present after spin");
+    // 仅在确认 claimed 后构造 guard（Drop 才安全 generation-scoped 释放本路 claim）
     let mut guard = crate::workbench::sessions::RestoreClaimGuard::new(
         (*ctx.state.workbench_sessions).clone(),
         session_id.to_string(),
+        claim_generation,
     );
 
     // 再次确认 target（preflight 与 apply 之间可能消失）
@@ -1541,6 +1547,7 @@ mod tests {
                 project,
                 row,
                 Some("main".to_string()),
+                None,
             )
             .expect_err("missing target must skip, not create");
         let code = restore_err.code();
@@ -1590,6 +1597,7 @@ mod tests {
                 project,
                 row,
                 Some("main".to_string()),
+                None,
             )
             .expect_err("raw pty must skip");
         assert_eq!(err.code(), "restore_skips_raw_pty");

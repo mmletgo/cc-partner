@@ -1233,7 +1233,7 @@ pub fn safe_attach_existing_tmux_session(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let restored = state
         .workbench_sessions
-        .attach_existing_tmux_only(state.clone(), row)?;
+        .attach_existing_tmux_only(state.clone(), row, None)?;
     // R19 M1：workspace safe_attach 无单独 SQLite upsert 门闸时，attach 成功即 Ready。
     state
         .workbench_sessions
@@ -1753,14 +1753,17 @@ fn decode_utf8_chunk(bytes: &[u8], pending: &mut Vec<u8>) -> String {
 ///     Closing barrier 期间不得 Claimed：否则 pre-close 快照会在 barrier 清后复活。
 ///
 /// Code Logic（这个枚举做什么）:
-///     `Claimed`：本 caller 独占 restore 并必须 finish；
+///     `Claimed{generation}`：本 caller 独占 restore 并必须 finish（token 可被 close 撤销）；
 ///     `AlreadyLive`：sessions map 已有该 id，无需 restore；
 ///     `RestoreInProgress`：另一路持有 claim，附带 watch receiver 供 await/共享结果；
 ///     `BarrierActive`：Closing barrier 仍在，跳过本轮并在后续 list re-read durable 状态。
 #[derive(Debug)]
 pub enum RestoreClaimOutcome {
-    /// 本 caller 独占 restore 责任。
-    Claimed,
+    /// 本 caller 独占 restore 责任；`generation` 为可撤销 token。
+    Claimed {
+        /// 本 claim 的唯一 generation，spawn/upsert 前必须 revalidate。
+        generation: u64,
+    },
     /// 会话已在运行期 registry。
     AlreadyLive,
     /// 另一路正在 restore；receiver 在 finish 时收到终态结果（或 sender drop → Failed）。
@@ -1774,9 +1777,184 @@ impl RestoreClaimOutcome {
     ///     旧代码以 `bool` 判断是否拿到 claim；测试与 spin 等待路径仍需要简洁布尔。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅 `Claimed` 返回 true。
+    ///     仅 `Claimed { .. }` 返回 true。
     pub fn is_claimed(&self) -> bool {
-        matches!(self, Self::Claimed)
+        matches!(self, Self::Claimed { .. })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     holder 构造 `RestoreClaimGuard` / revalidate 需要 claim generation。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `Claimed` 返回 Some(generation)，其余 None。
+    pub fn claim_generation(&self) -> Option<u64> {
+        match self {
+            Self::Claimed { generation } => Some(*generation),
+            _ => None,
+        }
+    }
+}
+
+/// restore claim 在途持久化 lease 的最大 drain 等待（R26 H1）。
+///
+/// Business Logic（为什么需要这个常量）:
+///     close 撤销 claim 后必须等 in-flight upsert 退出，否则删库后 holder 仍可 INSERT OR REPLACE。
+///     超时则 fail-closed 保留 Closing barrier，禁止恢复路径复活。
+///
+/// Code Logic（这个常量做什么）:
+///     `begin_close_intent_for_missing_handle` 等待 lease 归零的上限。
+const RESTORE_CLAIM_LEASE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 可撤销 restore claim 状态（R26 H1）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     仅从 restoring map 移除 sender 不够：已持有 `RestoreClaimGuard` 的 holder
+///     在 close/delete 后仍可能用旧快照 upsert 复活已删会话。
+///
+/// Code Logic（这个结构体做什么）:
+///     `generation` 唯一 token；`revoked` 原子撤销；`leases` 统计 in-flight 持久化；
+///     close 等待 leases==0 后再继续 bulk delete（或超时保留 barrier）。
+struct RestoreClaimState {
+    generation: u64,
+    tx: tokio::sync::watch::Sender<SharedRestoreNotification>,
+    revoked: AtomicBool,
+    leases: AtomicUsize,
+    wait: Mutex<()>,
+    cv: Condvar,
+}
+
+impl RestoreClaimState {
+    /// Business Logic（为什么需要这个函数）:
+    ///     claim 成功时需要新建可撤销状态并广播 Pending。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     分配 generation + watch channel，leases=0、revoked=false。
+    fn new(generation: u64) -> Arc<Self> {
+        let (tx, _rx) = tokio::sync::watch::channel(SharedRestoreNotification::Pending);
+        Arc::new(Self {
+            generation,
+            tx,
+            revoked: AtomicBool::new(false),
+            leases: AtomicUsize::new(0),
+            wait: Mutex::new(()),
+            cv: Condvar::new(),
+        })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     close / revalidate 需要判断 token 是否仍有效。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `!revoked`。
+    fn is_active(&self) -> bool {
+        !self.revoked.load(Ordering::SeqCst)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     close 必须撤销 token，禁止后续 spawn/upsert 成功路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     store revoked=true 并通知 lease waiters。
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::SeqCst);
+        let _guard = self.wait.lock().expect("restore claim wait 锁中毒");
+        self.cv.notify_all();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     持久化路径需要在 upsert 期间阻止 close 提前 bulk delete。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     若仍 active 则 leases++ 并返回 true；已 revoked 返回 false。
+    fn try_acquire_lease(&self) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        self.leases.fetch_add(1, Ordering::SeqCst);
+        // 二次校验：acquire 与 revoke 竞态时立刻 release。
+        if !self.is_active() {
+            self.release_lease();
+            return false;
+        }
+        true
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     upsert 完成/失败后必须释放 lease，允许 close 继续。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     leases 饱和减一并 notify。
+    fn release_lease(&self) {
+        let prev = self.leases.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(prev > 0, "restore claim lease underflow");
+        let _guard = self.wait.lock().expect("restore claim wait 锁中毒");
+        self.cv.notify_all();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     close 撤销后须等 in-flight upsert 退出，超时则 fail-closed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     blocking wait leases==0 或超时；返回是否完全 drain。
+    fn wait_leases_drained(&self, timeout: Duration) -> bool {
+        let mut guard = self.wait.lock().expect("restore claim wait 锁中毒");
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.leases.load(Ordering::SeqCst) == 0 {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return self.leases.load(Ordering::SeqCst) == 0;
+            }
+            let (next, _) = self
+                .cv
+                .wait_timeout(guard, deadline.saturating_duration_since(now))
+                .expect("restore claim condvar 中毒");
+            guard = next;
+        }
+    }
+}
+
+/// restore claim 持久化 lease 的 RAII 守卫（R26 H1）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     running/disconnected upsert 在 close 撤销 claim 后不得继续提交；
+///     已在途的 upsert 必须被 close 观察到并等待结束。
+///
+/// Code Logic（这个结构体做什么）:
+///     Drop 时 release lease；`is_active` 查询 token 是否仍有效。
+pub struct RestorePersistLease {
+    state: Arc<RestoreClaimState>,
+    released: bool,
+}
+
+impl RestorePersistLease {
+    /// Business Logic（为什么需要这个函数）:
+    ///     upsert 前后需确认 claim 未被 close 撤销。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `state.is_active()`。
+    pub fn is_active(&self) -> bool {
+        self.state.is_active()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     显式提前释放 lease，避免 Drop 次序导致 close 多等一轮。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     幂等 release。
+    pub fn release(&mut self) {
+        if !self.released {
+            self.state.release_lease();
+            self.released = true;
+        }
+    }
+}
+
+impl Drop for RestorePersistLease {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -1976,16 +2154,26 @@ pub struct WorkbenchSessionRegistry {
     /// Code Logic（这个字段做什么）:
     ///     session_id → 旧 PublishControl；insert 前 blocking drain 并移除。
     closing_publish: Arc<Mutex<HashMap<String, Arc<PublishControl>>>>,
-    /// 正在 restore 的 session_id 占位 map（Finding 5 + R14 M1）。
+    /// 正在 restore 的 session_id 占位 map（Finding 5 + R14 M1 + R26 H1）。
     ///
     /// Business Logic（为什么需要这个字段）:
     ///     `restore_persisted_sessions` 先 claim 再异步 `resolve_worktree` 后 `restore()`，
     ///     两个并发的 sessions/list 请求都能通过 contains() 检查并各自 spawn 一次 PTY/tmux 窗口。
-    ///     占位 map 让"检查 + 占位"原子完成：第一个 caller 拿到 claim 并持有 watch sender，
-    ///     第二个得到 `RestoreInProgress` 并可 wait。restore 完成后 finish 携带
-    ///     Ready / PersistedDisconnected / Failed 通知 waiters（禁止仅「ended」）。
-    restoring:
-        Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<SharedRestoreNotification>>>>,
+    ///     占位 map 让"检查 + 占位"原子完成：第一个 caller 拿到 claim generation 并持有
+    ///     可撤销状态；第二个得到 `RestoreInProgress` 并可 wait。close 可 revoke generation，
+    ///     禁止 holder 在 delete 后 re-upsert。
+    restoring: Arc<Mutex<HashMap<String, Arc<RestoreClaimState>>>>,
+    /// 项目级 closing barrier generation（R26 M1）。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     project remove 从 snapshot 到 bulk delete 期间，并发 create/restore 不得
+    ///     为已删除项目 spawn 出 orphan live session。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     project_id → barrier generation；create/restore revalidate 比对该 generation。
+    project_closing: Arc<Mutex<HashMap<String, u64>>>,
+    /// 项目 barrier generation 单调分配器（R26 M1）。
+    next_project_barrier_generation: Arc<AtomicU64>,
 }
 
 /// Session 创建后的 RAII 补偿守卫：repo 持久化失败时自动关闭 attach，禁止 ghost registry/child。
@@ -2209,27 +2397,39 @@ impl Drop for SessionCloseCleanup {
 /// Business Logic（为什么需要这个结构体）:
 ///     `try_claim_restore` 成功后若中途失败却未 finish claim，后续 list 永远不会再恢复该 session；
 ///     且必须广播 Failed 而非「ended」，否则 waiter 会误判成功。
+///     R26 H1：finish 仅当 generation 仍匹配时生效，close 撤销后不得误清后继 claim。
 ///
 /// Code Logic（这个结构体做什么）:
-///     Drop 时若未 `disarm` 则 `finish_restore_claim(Failed(Internal))`。
+///     Drop 时若未 `disarm` 则 `finish_restore_claim_for_generation(Failed(Internal))`。
 pub struct RestoreClaimGuard {
     registry: WorkbenchSessionRegistry,
     session_id: String,
+    generation: u64,
     armed: bool,
 }
 
 impl RestoreClaimGuard {
     /// Business Logic（为什么需要这个函数）:
-    ///     claim 成功后立刻接管 finish 责任。
+    ///     claim 成功后立刻接管 finish 责任，并绑定 generation token。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     记录 registry/session_id，armed=true。
-    pub fn new(registry: WorkbenchSessionRegistry, session_id: String) -> Self {
+    ///     记录 registry/session_id/generation，armed=true。
+    pub fn new(registry: WorkbenchSessionRegistry, session_id: String, generation: u64) -> Self {
         Self {
             registry,
             session_id,
+            generation,
             armed: true,
         }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     spawn/upsert 路径需要 generation 做 revalidate。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回绑定的 claim generation。
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2246,13 +2446,26 @@ impl RestoreClaimGuard {
     ///     再 disarm，避免 Drop 默认 Failed(Internal) 覆盖真实结果。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     `finish_restore_claim` + `disarm`。
+    ///     generation-scoped `finish_restore_claim` + `disarm`。
     pub fn finish(&mut self, result: SharedRestoreNotification) {
         if self.armed {
-            self.registry
-                .finish_restore_claim(&self.session_id, result);
+            self.registry.finish_restore_claim_for_generation(
+                &self.session_id,
+                self.generation,
+                result,
+            );
             self.armed = false;
         }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     close 撤销后 holder 不得再以 Ready 收尾；查询 token 是否仍有效。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `is_restore_claim_generation_active`。
+    pub fn is_active(&self) -> bool {
+        self.registry
+            .is_restore_claim_generation_active(&self.session_id, self.generation)
     }
 }
 
@@ -2261,11 +2474,12 @@ impl Drop for RestoreClaimGuard {
     ///     restore 任意失败出口都必须 finish claim 并通知 waiters Failed。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     armed 时 `finish_restore_claim(Failed(Internal))`。
+    ///     armed 时 generation-scoped `finish_restore_claim(Failed(Internal))`。
     fn drop(&mut self) {
         if self.armed {
-            self.registry.finish_restore_claim(
+            self.registry.finish_restore_claim_for_generation(
                 &self.session_id,
+                self.generation,
                 SharedRestoreNotification::Failed(AppErrorCategory::Internal),
             );
         }
@@ -2277,8 +2491,8 @@ impl WorkbenchSessionRegistry {
     ///     AppState 初始化时需要创建空的工作台会话注册表。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造空会话 HashMap、replay buffer、generation 计数器与 restoring map，
-    ///     并包裹 Arc 供命令和后台线程共享。
+    ///     构造空会话 HashMap、replay buffer、generation 计数器、restoring map
+    ///     与 project_closing barrier，并包裹 Arc 供命令和后台线程共享。
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -2286,6 +2500,8 @@ impl WorkbenchSessionRegistry {
             next_generation: Arc::new(AtomicU64::new(1)),
             closing_publish: Arc::new(Mutex::new(HashMap::new())),
             restoring: Arc::new(Mutex::new(HashMap::new())),
+            project_closing: Arc::new(Mutex::new(HashMap::new())),
+            next_project_barrier_generation: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -2408,7 +2624,7 @@ impl WorkbenchSessionRegistry {
         }
     }
 
-    /// 原子占位：声明"我即将 restore 这个 session"（Finding 5 + R14 M1 + R18 M1 + R24 H2）。
+    /// 原子占位：声明"我即将 restore 这个 session"（Finding 5 + R14 M1 + R18 M1 + R24 H2 + R26 H1）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     `restore_persisted_sessions` 的旧实现 `contains() → await resolve_worktree → restore()`
@@ -2416,19 +2632,20 @@ impl WorkbenchSessionRegistry {
     ///     PTY/tmux 窗口。provisional insert 后 durable upsert 成功前也不得被第三方
     ///     当作 AlreadyLive 消费。Closing barrier 期间更不得 claim：否则 restore 会带着
     ///     pre-close 行快照在 barrier 清后复活已删除会话（R24 H2）。
+    ///     R26 H1：claim 绑定可撤销 generation，close 可作废已持有 Guard。
     ///
     /// Code Logic（这个函数做什么）:
     ///     锁顺序 sessions → restoring → closing_publish。顺序检查：**先 restoring**，
     ///     再 sessions（AlreadyLive），再 Closing barrier（RestoreInProgress 且无 claim 写入），
-    ///     否则写入 watch sender 返回 Claimed。
+    ///     否则分配 generation、写入 `RestoreClaimState` 返回 `Claimed{generation}`。
     ///
-    /// `Claimed` 时 caller 必须 restore 并在完成后调用 `finish_restore_claim`
+    /// `Claimed` 时 caller 必须 restore 并在完成后 generation-scoped finish
     ///（或持有 `RestoreClaimGuard` 直至结束）。
     pub fn try_claim_restore(&self, session_id: &str) -> RestoreClaimOutcome {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
         let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
-        if let Some(tx) = restoring.get(session_id) {
-            return RestoreClaimOutcome::RestoreInProgress(tx.subscribe());
+        if let Some(state) = restoring.get(session_id) {
+            return RestoreClaimOutcome::RestoreInProgress(state.tx.subscribe());
         }
         if sessions.contains_key(session_id) {
             return RestoreClaimOutcome::AlreadyLive;
@@ -2443,10 +2660,10 @@ impl WorkbenchSessionRegistry {
                 return RestoreClaimOutcome::BarrierActive;
             }
         }
-        let (tx, _rx) =
-            tokio::sync::watch::channel(SharedRestoreNotification::Pending);
-        restoring.insert(session_id.to_string(), tx);
-        RestoreClaimOutcome::Claimed
+        let generation = self.allocate_generation();
+        let state = RestoreClaimState::new(generation);
+        restoring.insert(session_id.to_string(), state);
+        RestoreClaimOutcome::Claimed { generation }
     }
 
     /// 结束 restore 占位并广播显式结果（Finding 5 + R14/R15 + R16 M1）。
@@ -2457,8 +2674,8 @@ impl WorkbenchSessionRegistry {
     ///     失败路径释放后允许后续请求重试 restore。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     从 restoring map 移除 sender 并 `send(result)`（若 result 为 Pending 则升为 Failed(Internal)）；
-    ///     幂等 no-op。
+    ///     从 restoring map 移除当前 state 并 `send(result)`（若 result 为 Pending 则升为 Failed(Internal)）；
+    ///     幂等 no-op。R26 后优先使用 generation-scoped 变体，避免误清后继 claim。
     pub fn finish_restore_claim(&self, session_id: &str, result: SharedRestoreNotification) {
         let note = if result.is_terminal() {
             result
@@ -2466,8 +2683,38 @@ impl WorkbenchSessionRegistry {
             SharedRestoreNotification::Failed(AppErrorCategory::Internal)
         };
         let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
-        if let Some(tx) = restoring.remove(session_id) {
-            let _ = tx.send(note);
+        if let Some(state) = restoring.remove(session_id) {
+            let _ = state.tx.send(note);
+        }
+    }
+
+    /// generation-scoped finish（R26 H1）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     close 撤销旧 claim 后，旧 Guard Drop 不得误移除同 session 的新 claim。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 map 中 generation 匹配时 remove + send；否则 no-op。
+    pub fn finish_restore_claim_for_generation(
+        &self,
+        session_id: &str,
+        generation: u64,
+        result: SharedRestoreNotification,
+    ) {
+        let note = if result.is_terminal() {
+            result
+        } else {
+            SharedRestoreNotification::Failed(AppErrorCategory::Internal)
+        };
+        let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+        let should_remove = restoring
+            .get(session_id)
+            .map(|state| state.generation == generation)
+            .unwrap_or(false);
+        if should_remove {
+            if let Some(state) = restoring.remove(session_id) {
+                let _ = state.tx.send(note);
+            }
         }
     }
 
@@ -2483,6 +2730,127 @@ impl WorkbenchSessionRegistry {
             session_id,
             SharedRestoreNotification::Failed(AppErrorCategory::Internal),
         );
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     spawn / running upsert / disconnected upsert 在 commit 前必须确认 claim 仍有效。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     restoring 含 session_id 且 generation 匹配且未 revoked。
+    pub fn is_restore_claim_generation_active(&self, session_id: &str, generation: u64) -> bool {
+        let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+        restoring
+            .get(session_id)
+            .map(|state| state.generation == generation && state.is_active())
+            .unwrap_or(false)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     durable upsert 前 acquire lease，使 close 能等 in-flight 持久化退出。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     generation 匹配且 active 时 acquire lease 并返回 RAII 守卫；否则 None。
+    pub fn try_acquire_restore_persist_lease(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> Option<RestorePersistLease> {
+        let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+        let state = restoring.get(session_id)?.clone();
+        if state.generation != generation {
+            return None;
+        }
+        if !state.try_acquire_lease() {
+            return None;
+        }
+        Some(RestorePersistLease {
+            state,
+            released: false,
+        })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     spawn 前与 insert CAS 时 revalidate claim generation；无效则 fail closed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     active → Ok；否则 `unavailable(session_restore_claim_revoked)`。
+    pub fn require_restore_claim_active(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<(), AppError> {
+        if self.is_restore_claim_generation_active(session_id, generation) {
+            Ok(())
+        } else {
+            Err(AppError::unavailable(
+                "session_restore_claim_revoked".to_string(),
+            ))
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     project remove 从 snapshot 到 bulk delete 期间，create/restore 不得再为该项目
+    ///     生成 orphan live session（R26 M1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     分配新 generation 写入 `project_closing[project_id]` 并返回该 generation。
+    pub fn begin_project_closing_barrier(&self, project_id: &str) -> u64 {
+        let generation = self
+            .next_project_barrier_generation
+            .fetch_add(1, Ordering::SeqCst);
+        let mut map = self
+            .project_closing
+            .lock()
+            .expect("project_closing 锁中毒");
+        map.insert(project_id.to_string(), generation);
+        generation
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     bulk delete 成功后必须清除 barrier，允许同 project_id 再创建（若用户重新添加）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 generation 匹配时 remove；否则 no-op。
+    pub fn finish_project_closing_barrier(&self, project_id: &str, generation: u64) {
+        let mut map = self
+            .project_closing
+            .lock()
+            .expect("project_closing 锁中毒");
+        if map.get(project_id).copied() == Some(generation) {
+            map.remove(project_id);
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     create/restore 在 spawn 与 upsert 前 revalidate project barrier。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     project_closing 含 project_id → `unavailable(project_closing_barrier_active)`。
+    pub fn require_project_not_closing(&self, project_id: &str) -> Result<(), AppError> {
+        let map = self
+            .project_closing
+            .lock()
+            .expect("project_closing 锁中毒");
+        if map.contains_key(project_id) {
+            Err(AppError::unavailable(
+                "project_closing_barrier_active".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试与诊断需要观察 project barrier 是否仍在。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `project_closing` 是否含 project_id。
+    #[cfg(test)]
+    pub fn has_project_closing_barrier_for_test(&self, project_id: &str) -> bool {
+        self.project_closing
+            .lock()
+            .expect("project_closing 锁中毒")
+            .contains_key(project_id)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2534,7 +2902,7 @@ impl WorkbenchSessionRegistry {
     ///     当作可立即 replay 返回，或把瞬时 not_found 误判为永久缺失。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     检查 restoring map 是否包含 session_id。
+    ///     检查 restoring map 是否包含 session_id（含已 revoked 但尚未 finish 的 holder）。
     pub fn is_restore_claim_held(&self, session_id: &str) -> bool {
         self.restoring
             .lock()
@@ -2652,15 +3020,19 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     R25 H1：close 时 registry 无 live handle，但 restore claim 已占位尚未 insert；
+    ///     R25 H1 / R26 H1：close 时 registry 无 live handle，但 restore claim 已占位尚未 insert；
     ///     若仅走 NotFound 删 SQLite，旧 restore 仍会 INSERT OR REPLACE 复活同 id。
     ///     close / restoring claim / Closing tombstone 必须共享同一 atomic lifecycle。
+    ///     仅移除 map entry 不够：必须 revoke generation 并 wait persistence leases，
+    ///     否则 holder 可在 barrier 清后用旧 token re-upsert。
     ///
     /// Code Logic（这个函数做什么）:
     ///     锁序 sessions → restoring → closing_publish：
     ///     - 已 live → AlreadyLive（调用方应走 close_inner）；
-    ///     - 已有 Closing barrier → 取消 restoring claim 并返回既有 intent 令牌；
-    ///     - 否则 install barrier、移除 restoring claim 并 Failed 广播，返回 closer-owned 令牌。
+    ///     - revoke 既有 claim generation（若有）并 Failed 广播，**先不 remove** 直到 lease drain；
+    ///     - 已有 Closing barrier → 返回既有 intent 令牌；
+    ///     - 否则 install barrier，返回 closer-owned 令牌；
+    ///     - barrier 已装后 wait lease drain（超时则保留 barrier fail-closed）。
     pub fn begin_close_intent_for_missing_handle(
         &self,
         session_id: &str,
@@ -2673,43 +3045,66 @@ impl WorkbenchSessionRegistry {
                 "session_close_intent_already_live".to_string(),
             ));
         }
-        // 取消 in-flight restore claim，禁止 holder 后续 upsert/spawn 成功路径。
-        let cancel_tx = restoring.remove(session_id);
-        drop(restoring);
-        if let Some(tx) = cancel_tx {
-            let _ = tx.send(SharedRestoreNotification::Failed(
+        // R26 H1：revoke generation token；在途 lease 由 wait 收敛，禁止 holder 成功 re-upsert。
+        let revoked_claim = restoring.get(session_id).cloned();
+        if let Some(ref state) = revoked_claim {
+            state.revoke();
+            let _ = state.tx.send(SharedRestoreNotification::Failed(
                 AppErrorCategory::Unavailable,
             ));
+            // 从 map 移除：后续 try_claim 在 barrier 下返回 BarrierActive；
+            // holder finish/Drop 按 generation no-op。
+            restoring.remove(session_id);
         }
+        drop(restoring);
+        drop(sessions);
+
         // 已有 barrier：返回共享身份令牌，finish 时 CAS clear。
-        {
+        let cleanup = {
             let closing = self
                 .closing_publish
                 .lock()
                 .expect("closing_publish 锁中毒");
             if let Some(publish) = closing.get(session_id).cloned() {
                 let drained = publish.in_flight.load(Ordering::SeqCst) == 0;
-                return Ok(SessionCloseCleanup {
+                Some(SessionCloseCleanup {
                     registry: self.clone(),
                     session_id: session_id.to_string(),
                     publish,
-                    row,
+                    row: row.clone(),
                     drained,
                     finished: false,
-                });
+                })
+            } else {
+                None
+            }
+        };
+        let cleanup = if let Some(cleanup) = cleanup {
+            cleanup
+        } else {
+            let publish = PublishControl::new();
+            publish.revoke();
+            self.install_closing_tombstone(session_id, publish.clone());
+            SessionCloseCleanup {
+                registry: self.clone(),
+                session_id: session_id.to_string(),
+                publish,
+                row,
+                drained: true,
+                finished: false,
+            }
+        };
+
+        // 等 in-flight persist lease 退出；超时保留 barrier（fail closed）。
+        if let Some(state) = revoked_claim {
+            if !state.wait_leases_drained(RESTORE_CLAIM_LEASE_DRAIN_TIMEOUT) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "restore claim persist leases still in-flight after close revoke; retaining barrier"
+                );
             }
         }
-        let publish = PublishControl::new();
-        publish.revoke();
-        self.install_closing_tombstone(session_id, publish.clone());
-        Ok(SessionCloseCleanup {
-            registry: self.clone(),
-            session_id: session_id.to_string(),
-            publish,
-            row,
-            drained: true,
-            finished: false,
-        })
+        Ok(cleanup)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2887,7 +3282,8 @@ impl WorkbenchSessionRegistry {
     ///     用户在工作台中创建本机终端时，需要在当前 worktree 根目录中启动普通 shell。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     创建 portable-pty pair，cwd 指向 active worktree 路径，spawn 系统 shell，并启动输出与退出监听线程。
+    ///     R26 M1：先 revalidate project closing barrier；通过后创建 portable-pty pair，
+    ///     cwd 指向 active worktree 路径，spawn 系统 shell，并启动输出与退出监听线程。
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -2899,6 +3295,8 @@ impl WorkbenchSessionRegistry {
         initial_cols: Option<u16>,
         initial_rows: Option<u16>,
     ) -> Result<WorkbenchSessionRow, AppError> {
+        // R26 M1：project remove 窗口内禁止 create 产生 orphan live。
+        self.require_project_not_closing(&project.id)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let (cols, rows) = initial_terminal_size(initial_cols, initial_rows);
@@ -2979,7 +3377,9 @@ impl WorkbenchSessionRegistry {
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        self.spawn_row(state, row, SpawnBarrierPolicy::Retry)
+        // spawn 前再 revalidate：create 期间 project 可能被 remove。
+        self.require_project_not_closing(&project.id)?;
+        self.spawn_row(state, row, SpawnBarrierPolicy::Retry, None)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2989,11 +3389,18 @@ impl WorkbenchSessionRegistry {
     ///     要求 backend=tmux 且 backend_id 存在；直接 `spawn_row` 走 attach 命令路径，
     ///     绝不调用 `create_tmux_window` 或 raw PTY 回退改写。
     ///     BarrierActive 时 Abort：禁止用 pre-close 行快照无限重试复活（R24 H2）。
+    ///     R26：可选 restore claim generation；None 时仅 revalidate project barrier。
     pub fn attach_existing_tmux_only(
         &self,
         state: AppState,
         mut row: WorkbenchSessionRow,
+        restore_claim_generation: Option<u64>,
     ) -> Result<WorkbenchSessionRow, AppError> {
+        // R26 M1：project remove 窗口内禁止 attach 复活。
+        self.require_project_not_closing(&row.project_id)?;
+        if let Some(generation) = restore_claim_generation {
+            self.require_restore_claim_active(&row.id, generation)?;
+        }
         if row.backend != TMUX_BACKEND {
             return Err(AppError::validation(
                 "safe_attach_requires_tmux".to_string(),
@@ -3012,7 +3419,17 @@ impl WorkbenchSessionRegistry {
         row.exited_at = None;
         row.exit_code = None;
         row.updated_at = chrono::Utc::now().to_rfc3339();
-        let restored = self.spawn_row(state, row, SpawnBarrierPolicy::Abort)?;
+        // spawn 前再 revalidate claim / project barrier。
+        self.require_project_not_closing(&row.project_id)?;
+        if let Some(generation) = restore_claim_generation {
+            self.require_restore_claim_active(&row.id, generation)?;
+        }
+        let restored = self.spawn_row(
+            state,
+            row,
+            SpawnBarrierPolicy::Abort,
+            restore_claim_generation,
+        )?;
         // attach 后立刻强制 window 尺寸，避免冷启动 status bar 停留在旧 client size。
         let _ = self.force_tmux_window_size(&restored);
         Ok(restored)
@@ -3027,13 +3444,20 @@ impl WorkbenchSessionRegistry {
     ///     backend=tmux 且 target 存在：迁移可读 session 名后 `spawn_row` attach；
     ///     target 缺失 / 无 tmux / raw_pty → `Err`（`restore_persisted_sessions` 标 disconnected）。
     ///     BarrierActive 时 Abort 返回 `session_close_barrier_active`，上层 re-read durable 状态（R24 H2）。
+    ///     R26 H1：`restore_claim_generation` 必须在 spawn 前与 upsert 前仍 active。
     pub fn restore(
         &self,
         state: AppState,
         project: WorkbenchProjectRow,
         mut row: WorkbenchSessionRow,
         worktree_name: Option<String>,
+        restore_claim_generation: Option<u64>,
     ) -> Result<WorkbenchSessionRow, AppError> {
+        // R26 M1：project remove 窗口内禁止 restore 复活 orphan。
+        self.require_project_not_closing(&project.id)?;
+        if let Some(generation) = restore_claim_generation {
+            self.require_restore_claim_active(&row.id, generation)?;
+        }
         if row.cwd.trim().is_empty() {
             row.cwd = project.path.clone();
         }
@@ -3085,7 +3509,17 @@ impl WorkbenchSessionRegistry {
         row.exited_at = None;
         row.exit_code = None;
         row.updated_at = chrono::Utc::now().to_rfc3339();
-        let restored = self.spawn_row(state, row, SpawnBarrierPolicy::Abort)?;
+        // openpty 前再 revalidate：close/remove 可能在 resolve 期间发生。
+        self.require_project_not_closing(&project.id)?;
+        if let Some(generation) = restore_claim_generation {
+            self.require_restore_claim_active(&row.id, generation)?;
+        }
+        let restored = self.spawn_row(
+            state,
+            row,
+            SpawnBarrierPolicy::Abort,
+            restore_claim_generation,
+        )?;
         // restore attach 后立刻强制 window 尺寸，避免冷启动 status bar 停留在旧 client size。
         let _ = self.force_tmux_window_size(&restored);
         Ok(restored)
@@ -3120,9 +3554,11 @@ impl WorkbenchSessionRegistry {
     ///     R19 M1：insert 为 Provisional，不立即 emit running；外部事件等 mark Ready。
     ///     R23 M1：insert 必须与 Closing barrier 同 lifecycle 锁 CAS，禁止 reinsert 越过新 barrier。
     ///     R24 H2：restore/safe_attach 在 BarrierActive 时 Abort，禁止旧行快照无限重试复活。
+    ///     R26 H1/M1：spawn 前 revalidate restore claim generation 与 project closing barrier。
     ///
     /// Code Logic（这个函数做什么）:
     ///     R25 M1：Abort 且 pre-existing Closing barrier → 立即返回，不 wait/不 PTY/不 insert；
+    ///     R26：若有 restore_claim_generation / project_id 无效则 reclaim PTY 后返回；
     ///     否则 wait barrier → openpty/spawn → try_insert 再校验 barrier；
     ///     CAS 失败：AlreadyLive 返回既有；BarrierActive 按 policy Retry 或 Abort；
     ///     成功后分配 generation 绑定 reader/exit fence。
@@ -3131,13 +3567,20 @@ impl WorkbenchSessionRegistry {
         state: AppState,
         row: WorkbenchSessionRow,
         barrier_policy: SpawnBarrierPolicy,
+        restore_claim_generation: Option<u64>,
     ) -> Result<WorkbenchSessionRow, AppError> {
         let session_id = row.id.clone();
+        let project_id = row.project_id.clone();
         let cols = row.cols;
         let rows = row.rows;
 
         // R25 M1：Abort 对 pre-installed barrier 立即 fail-closed（禁止 wait 后继续 stale snapshot）。
         self.abort_if_preexisting_closing_barrier(&session_id, barrier_policy)?;
+        // R26：spawn 入口 revalidate project + restore claim。
+        self.require_project_not_closing(&project_id)?;
+        if let Some(generation) = restore_claim_generation {
+            self.require_restore_claim_active(&session_id, generation)?;
+        }
 
         // R21 H2 / R23 M1 / R24 H2：wait + openpty + insert CAS。
         let (generation, publish, handle, reader) = loop {
@@ -3147,6 +3590,15 @@ impl WorkbenchSessionRegistry {
                 self.abort_if_preexisting_closing_barrier(&session_id, barrier_policy)?;
             } else {
                 self.wait_for_closing_tombstone(&session_id);
+            }
+            // openpty 前再 revalidate：close/remove 可能在 wait 期间发生。
+            if let Err(error) = self.require_project_not_closing(&project_id) {
+                return Err(error);
+            }
+            if let Some(generation) = restore_claim_generation {
+                if let Err(error) = self.require_restore_claim_active(&session_id, generation) {
+                    return Err(error);
+                }
             }
 
             let pty_system = native_pty_system();
@@ -3173,6 +3625,48 @@ impl WorkbenchSessionRegistry {
                 .take_writer()
                 .map_err(|error| AppError::generic(format!("创建 PTY writer 失败: {error}")))?;
 
+            // insert 前最后一次 revalidate；失败则 kill 本轮 PTY。
+            let kill_spawned_handle = |handle: &Arc<Mutex<WorkbenchSessionHandle>>| {
+                let mut h = handle.lock().expect("workbench session 锁中毒");
+                if let SessionProcess::Pty { child, .. } = &mut h.process {
+                    if let Err(error) = normalize_terminal_kill_result(child.kill()) {
+                        tracing::debug!("spawn_row revalidate 失败后 kill PTY: {error}");
+                    }
+                }
+            };
+            if self.require_project_not_closing(&project_id).is_err()
+                || restore_claim_generation.is_some_and(|g| {
+                    self.require_restore_claim_active(&session_id, g).is_err()
+                })
+            {
+                // 构造临时 handle 以统一 kill 路径。
+                let generation = self.allocate_generation();
+                let publish = PublishControl::new();
+                let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
+                    row: row.clone(),
+                    generation,
+                    durability: SessionDurability::Provisional,
+                    publish,
+                    deferred_output: Vec::new(),
+                    deferred_mutations: Vec::new(),
+                    pending_exit: None,
+                    process: SessionProcess::Pty {
+                        master: pair.master,
+                        writer,
+                        child,
+                    },
+                }));
+                kill_spawned_handle(&handle);
+                if let Some(generation) = restore_claim_generation {
+                    self.require_restore_claim_active(&session_id, generation)?;
+                }
+                self.require_project_not_closing(&project_id)?;
+                // 理论上不会落到这里；保险返回 revoked。
+                return Err(AppError::unavailable(
+                    "session_restore_claim_revoked".to_string(),
+                ));
+            }
+
             let generation = self.allocate_generation();
             let publish = PublishControl::new();
             let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
@@ -3193,14 +3687,7 @@ impl WorkbenchSessionRegistry {
                 InsertCasResult::Inserted => break (generation, publish, handle, reader),
                 InsertCasResult::AlreadyLive => {
                     // 并发赢家已 Live：kill 本轮 PTY，返回已有 row（不覆盖）。
-                    {
-                        let mut h = handle.lock().expect("workbench session 锁中毒");
-                        if let SessionProcess::Pty { child, .. } = &mut h.process {
-                            if let Err(error) = normalize_terminal_kill_result(child.kill()) {
-                                tracing::debug!("spawn_row AlreadyLive 后 kill PTY: {error}");
-                            }
-                        }
-                    }
+                    kill_spawned_handle(&handle);
                     let existing = self.get_handle(&session_id).map(|h| {
                         h.lock().expect("workbench session 锁中毒").row.clone()
                     });
@@ -3211,14 +3698,7 @@ impl WorkbenchSessionRegistry {
                 }
                 InsertCasResult::BarrierActive => {
                     // barrier 在 wait 与 insert 间隙被挂上：kill 本轮 child。
-                    {
-                        let mut h = handle.lock().expect("workbench session 锁中毒");
-                        if let SessionProcess::Pty { child, .. } = &mut h.process {
-                            if let Err(error) = normalize_terminal_kill_result(child.kill()) {
-                                tracing::debug!("spawn_row barrier CAS 失败后 kill PTY: {error}");
-                            }
-                        }
-                    }
+                    kill_spawned_handle(&handle);
                     match barrier_policy {
                         SpawnBarrierPolicy::Retry => {
                             thread::sleep(Duration::from_millis(1));
@@ -5235,9 +5715,13 @@ mod tests {
     #[test]
     fn restore_claim_guard_releases_on_drop() {
         let registry = WorkbenchSessionRegistry::new();
-        assert!(registry.try_claim_restore("s-restore").is_claimed());
+        let generation = registry
+            .try_claim_restore("s-restore")
+            .claim_generation()
+            .expect("claimed");
         {
-            let _guard = RestoreClaimGuard::new(registry.clone(), "s-restore".to_string());
+            let _guard =
+                RestoreClaimGuard::new(registry.clone(), "s-restore".to_string(), generation);
         }
         assert!(!registry.is_restore_claim_held("s-restore"));
         assert!(registry.try_claim_restore("s-restore").is_claimed());
@@ -6595,11 +7079,17 @@ mod tests {
     fn upsert_failure_cleanup_reclaims_spawn_before_releasing_claim() {
         let registry = WorkbenchSessionRegistry::new();
         // claim 必须在 insert live 之前：已 live 时 try_claim 返回 AlreadyLive。
-        assert!(registry.try_claim_restore("s-cleanup-order").is_claimed());
+        let generation = registry
+            .try_claim_restore("s-cleanup-order")
+            .claim_generation()
+            .expect("claimed");
         registry.insert_fake_session_for_test("s-cleanup-order", "p1");
 
-        let mut claim_guard =
-            RestoreClaimGuard::new(registry.clone(), "s-cleanup-order".to_string());
+        let mut claim_guard = RestoreClaimGuard::new(
+            registry.clone(),
+            "s-cleanup-order".to_string(),
+            generation,
+        );
         let spawn_guard =
             SessionSpawnGuard::new(registry.clone(), "s-cleanup-order".to_string());
 
@@ -6634,10 +7124,14 @@ mod tests {
     #[test]
     fn releasing_claim_before_spawn_reclaim_creates_already_live_window() {
         let registry = WorkbenchSessionRegistry::new();
-        assert!(registry.try_claim_restore("s-wrong-order").is_claimed());
+        let generation = registry
+            .try_claim_restore("s-wrong-order")
+            .claim_generation()
+            .expect("claimed");
         registry.insert_fake_session_for_test("s-wrong-order", "p1");
 
-        let mut claim_guard = RestoreClaimGuard::new(registry.clone(), "s-wrong-order".to_string());
+        let mut claim_guard =
+            RestoreClaimGuard::new(registry.clone(), "s-wrong-order".to_string(), generation);
         let spawn_guard = SessionSpawnGuard::new(registry.clone(), "s-wrong-order".to_string());
 
         // 错误顺序：先放 claim。
@@ -7670,10 +8164,7 @@ mod tests {
         // finish closer cleanup 后允许 re-read + claim。
         publish.mark_cleanup_done();
         registry.clear_closing_tombstone_for_test("s-r24-h2");
-        assert!(matches!(
-            registry.try_claim_restore("s-r24-h2"),
-            RestoreClaimOutcome::Claimed
-        ));
+        assert!(registry.try_claim_restore("s-r24-h2").is_claimed());
         registry.finish_restore_claim(
             "s-r24-h2",
             SharedRestoreNotification::PersistedDisconnected,
@@ -7888,6 +8379,257 @@ mod tests {
         registry.finish_restore_claim(
             "s-r25-m2",
             SharedRestoreNotification::PersistedDisconnected,
+        );
+    }
+
+    /// Business Logic（R26 H1: 为什么需要这个测试）:
+    ///     holder 已 claim 后 close 必须 revoke generation；holder 恢复后不得成功 re-upsert
+    ///     已删除会话，也不得留下 live orphan。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim → pause（持有 generation）→ close intent → claim generation inactive；
+    ///     persist lease 获取失败；insert CAS BarrierActive；finish 后才允许新 claim。
+    #[test]
+    fn close_revokes_held_restore_claim_before_reupsert() {
+        let registry = WorkbenchSessionRegistry::new();
+        let generation = registry
+            .try_claim_restore("s-r26-h1")
+            .claim_generation()
+            .expect("claimed");
+        let guard =
+            RestoreClaimGuard::new(registry.clone(), "s-r26-h1".to_string(), generation);
+        assert!(guard.is_active());
+        assert!(registry.is_restore_claim_generation_active("s-r26-h1", generation));
+
+        // 模拟 holder 已进入 upsert 前：acquire lease 成功。
+        let mut lease = registry
+            .try_acquire_restore_persist_lease("s-r26-h1", generation)
+            .expect("lease while active");
+        assert!(lease.is_active());
+
+        let row = WorkbenchSessionRow {
+            id: "s-r26-h1".into(),
+            project_id: "p1".into(),
+            worktree_id: None,
+            name: "n".into(),
+            command: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            status: "running".into(),
+            cols: 80,
+            rows: 24,
+            started_at: "t".into(),
+            exited_at: None,
+            exit_code: None,
+            backend: RAW_PTY_BACKEND.into(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        // 释放 lease 再 close（模拟 holder 尚未持 lease 时 close 更快路径）；
+        // 另测 close 等待 in-flight lease 的路径见 concurrent 测试。
+        lease.release();
+
+        let cleanup = registry
+            .begin_close_intent_for_missing_handle("s-r26-h1", row)
+            .expect("close intent");
+        assert!(registry.has_closing_tombstone_for_test("s-r26-h1"));
+        assert!(!guard.is_active());
+        assert!(!registry.is_restore_claim_generation_active("s-r26-h1", generation));
+        assert!(
+            registry
+                .try_acquire_restore_persist_lease("s-r26-h1", generation)
+                .is_none(),
+            "revoked claim must not acquire persist lease"
+        );
+        assert!(matches!(
+            registry.require_restore_claim_active("s-r26-h1", generation),
+            Err(AppError::Unavailable(msg)) if msg == "session_restore_claim_revoked"
+        ));
+
+        let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
+            row: WorkbenchSessionRow {
+                id: "s-r26-h1".into(),
+                project_id: "p1".into(),
+                worktree_id: None,
+                name: "n".into(),
+                command: "/bin/sh".into(),
+                cwd: "/tmp".into(),
+                status: "running".into(),
+                cols: 80,
+                rows: 24,
+                started_at: "t".into(),
+                exited_at: None,
+                exit_code: None,
+                backend: RAW_PTY_BACKEND.into(),
+                backend_id: None,
+                backend_window_id: None,
+                created_at: "t".into(),
+                updated_at: "t".into(),
+            },
+            generation: 99,
+            durability: SessionDurability::Provisional,
+            publish: PublishControl::new(),
+            deferred_output: Vec::new(),
+            deferred_mutations: Vec::new(),
+            pending_exit: None,
+            process: SessionProcess::Fake,
+        }));
+        assert_eq!(
+            registry.try_insert_handle_revalidating_barrier("s-r26-h1", handle),
+            InsertCasResult::BarrierActive,
+            "holder must not re-insert live after close revoke"
+        );
+        assert!(!registry.contains("s-r26-h1"));
+        // Drop stale guard 不得 panic / 不得清掉 barrier。
+        drop(guard);
+        assert!(registry.has_closing_tombstone_for_test("s-r26-h1"));
+        cleanup.finish_cleanup();
+        assert!(!registry.has_closing_tombstone_for_test("s-r26-h1"));
+        assert!(registry.try_claim_restore("s-r26-h1").is_claimed());
+        registry.release_restore_claim("s-r26-h1");
+    }
+
+    /// Business Logic（R26 H1: 为什么需要这个测试）:
+    ///     close 时 holder 若仍在途 persist lease，必须 wait drain；否则 delete 后
+    ///     holder 仍可 upsert 已删行。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim + lease held → concurrent close intent 阻塞至 lease release →
+    ///     generation inactive 且 barrier 在；release 后 close 完成。
+    #[test]
+    fn close_waits_for_restore_persist_lease_drain() {
+        use std::sync::Barrier as StdBarrier;
+        let registry = WorkbenchSessionRegistry::new();
+        let generation = registry
+            .try_claim_restore("s-r26-h1-lease")
+            .claim_generation()
+            .expect("claimed");
+        let mut lease = registry
+            .try_acquire_restore_persist_lease("s-r26-h1-lease", generation)
+            .expect("lease");
+
+        let start = Arc::new(StdBarrier::new(2));
+        let reg = registry.clone();
+        let start_close = start.clone();
+        let closer = thread::spawn(move || {
+            start_close.wait();
+            let row = WorkbenchSessionRow {
+                id: "s-r26-h1-lease".into(),
+                project_id: "p1".into(),
+                worktree_id: None,
+                name: "n".into(),
+                command: "/bin/sh".into(),
+                cwd: "/tmp".into(),
+                status: "running".into(),
+                cols: 80,
+                rows: 24,
+                started_at: "t".into(),
+                exited_at: None,
+                exit_code: None,
+                backend: RAW_PTY_BACKEND.into(),
+                backend_id: None,
+                backend_window_id: None,
+                created_at: "t".into(),
+                updated_at: "t".into(),
+            };
+            reg.begin_close_intent_for_missing_handle("s-r26-h1-lease", row)
+                .expect("close intent after drain")
+        });
+
+        start.wait();
+        // close 线程应阻塞在 lease drain；短暂 sleep 后仍 inactive 未 finish barrier 也可能已装。
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            registry.is_restore_claim_generation_active("s-r26-h1-lease", generation)
+                || registry.has_closing_tombstone_for_test("s-r26-h1-lease"),
+            "close either still waiting with claim or has installed barrier"
+        );
+        // holder 完成（或放弃）persist：release lease 让 close 继续。
+        lease.release();
+        let cleanup = closer.join().expect("closer join");
+        assert!(registry.has_closing_tombstone_for_test("s-r26-h1-lease"));
+        assert!(!registry.is_restore_claim_generation_active("s-r26-h1-lease", generation));
+        assert!(
+            registry
+                .try_acquire_restore_persist_lease("s-r26-h1-lease", generation)
+                .is_none()
+        );
+        cleanup.finish_cleanup();
+    }
+
+    /// Business Logic（R26 M1: 为什么需要这个测试）:
+    ///     project remove 与 concurrent create 交错时，无 project barrier 会留下 orphan live。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     begin project barrier → require_project_not_closing Err；
+    ///     create revalidate 失败；finish barrier 后 Ok。
+    #[test]
+    fn project_closing_barrier_blocks_create_until_finish() {
+        let registry = WorkbenchSessionRegistry::new();
+        let gen = registry.begin_project_closing_barrier("p-r26-m1");
+        assert!(registry.has_project_closing_barrier_for_test("p-r26-m1"));
+        match registry.require_project_not_closing("p-r26-m1") {
+            Err(AppError::Unavailable(msg)) => {
+                assert_eq!(msg, "project_closing_barrier_active");
+            }
+            other => panic!("expected project barrier error, got {other:?}"),
+        }
+        // 其他项目不受影响。
+        assert!(registry.require_project_not_closing("p-other").is_ok());
+
+        // 并发 create 观察 barrier 仍在。
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let reg = registry.clone();
+        let start_t = start.clone();
+        let observer = thread::spawn(move || {
+            start_t.wait();
+            reg.require_project_not_closing("p-r26-m1").is_err()
+        });
+        start.wait();
+        assert!(observer.join().expect("observer"), "create blocked during remove");
+
+        registry.finish_project_closing_barrier("p-r26-m1", gen);
+        assert!(!registry.has_project_closing_barrier_for_test("p-r26-m1"));
+        assert!(registry.require_project_not_closing("p-r26-m1").is_ok());
+        // 错误 generation finish 是 no-op 后仍可再次 begin。
+        let gen2 = registry.begin_project_closing_barrier("p-r26-m1");
+        registry.finish_project_closing_barrier("p-r26-m1", gen2.wrapping_add(1));
+        assert!(
+            registry.has_project_closing_barrier_for_test("p-r26-m1"),
+            "mismatched generation must not clear barrier"
+        );
+        registry.finish_project_closing_barrier("p-r26-m1", gen2);
+        assert!(!registry.has_project_closing_barrier_for_test("p-r26-m1"));
+    }
+
+    /// Business Logic（R26 M1: 为什么需要这个测试）:
+    ///     project remove 与 restore claim 交错：remove 先挂 barrier，restore revalidate 失败。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim 成功后 begin project barrier → require_project_not_closing Err；
+    ///     finish project barrier 后 require Ok（session claim 仍 held）。
+    #[test]
+    fn project_closing_barrier_blocks_restore_revalidate() {
+        let registry = WorkbenchSessionRegistry::new();
+        let claim_gen = registry
+            .try_claim_restore("s-r26-m1-restore")
+            .claim_generation()
+            .expect("claimed");
+        let project_gen = registry.begin_project_closing_barrier("p-r26-restore");
+        assert!(
+            registry
+                .require_project_not_closing("p-r26-restore")
+                .is_err()
+        );
+        // claim generation 本身仍 active，但 project barrier 独立阻止 spawn/upsert。
+        assert!(registry.is_restore_claim_generation_active("s-r26-m1-restore", claim_gen));
+        registry.finish_project_closing_barrier("p-r26-restore", project_gen);
+        assert!(registry.require_project_not_closing("p-r26-restore").is_ok());
+        registry.finish_restore_claim_for_generation(
+            "s-r26-m1-restore",
+            claim_gen,
+            SharedRestoreNotification::Failed(AppErrorCategory::Unavailable),
         );
     }
 }

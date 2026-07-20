@@ -19,7 +19,6 @@ use crate::workbench::models::{
     WorkbenchProjectDto, WorkbenchProjectRow, WorkbenchRemoteDirectoryEntryDto,
     WorkbenchRemotePathInfoDto, WorkbenchRemoteRootDto, WorkbenchWorktreeDto,
 };
-use crate::workbench::sessions::kill_persisted_backend;
 use crate::workbench::{
     projects, remote_client::RemoteWorkbenchClient, remote_ids::remote_project_id,
     remote_protocol::RemoteWorkbenchBrowserDiscoverReq,
@@ -306,8 +305,9 @@ pub async fn open_workbench_remote_project(
 ///     用户可从工作台列表移除项目，但这不应删除磁盘上的真实项目文件夹。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 dispose 项目/worktree 对应的 Claude session 索引 watcher runtime，再关闭会话并销毁
-///     可重连后端，最后删除 SQLite 项目与会话记录，返回轻量 ok 对象。
+///     先 dispose 项目/worktree 对应的 Claude session 索引 watcher runtime，再委托
+///     `remove_local_workbench_project_with_barrier`（R26 M1：project barrier 覆盖
+///     snapshot→bulk delete，desktop/control 共用）。
 #[tauri::command]
 pub async fn remove_workbench_project(
     state: State<'_, AppState>,
@@ -338,52 +338,7 @@ pub async fn remove_workbench_project(
         &session_index_paths,
     );
 
-    let session_rows = state.workbench_session_repo.list(Some(&project_id)).await?;
-    // R25 H2：先收集全部 SessionCloseCleanup 令牌并 kill 后端；bulk SQLite 成功后才 finish。
-    let mut cleanups = Vec::new();
-    for row in session_rows {
-        match state.workbench_sessions.close(&row.id) {
-            Ok(cleanup) => {
-                kill_persisted_backend(cleanup.row());
-                cleanups.push(cleanup);
-            }
-            Err(AppError::NotFound(_)) => {
-                // R25 H1：无 live handle 也 install close intent，阻断 restore 窗口 re-upsert。
-                match state
-                    .workbench_sessions
-                    .begin_close_intent_for_missing_handle(&row.id, row.clone())
-                {
-                    Ok(cleanup) => {
-                        kill_persisted_backend(cleanup.row());
-                        cleanups.push(cleanup);
-                    }
-                    Err(AppError::Conflict(_)) => {
-                        if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
-                            kill_persisted_backend(cleanup.row());
-                            cleanups.push(cleanup);
-                        } else {
-                            kill_persisted_backend(&row);
-                        }
-                    }
-                    Err(_) => kill_persisted_backend(&row),
-                }
-            }
-            Err(_) => kill_persisted_backend(&row),
-        }
-    }
-    state
-        .workbench_session_repo
-        .delete_by_project(&project_id)
-        .await?;
-    state
-        .workbench_worktree_repo
-        .delete_by_project(&project_id)
-        .await?;
-    state.workbench_project_repo.delete(&project_id).await?;
-    for cleanup in cleanups {
-        cleanup.finish_cleanup();
-    }
-    Ok(serde_json::json!({ "ok": true, "projectId": project_id }))
+    remove_local_workbench_project_with_barrier(state.inner(), &project_id).await
 }
 
 /// 更新项目最近打开时间。

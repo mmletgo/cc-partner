@@ -91,7 +91,26 @@ pub(crate) async fn local_create_workbench_session(
         row.id.clone(),
         state.clone(),
     );
+    // R26 M1：upsert 前再 revalidate project barrier；失败 reclaim PTY。
+    if let Err(error) = state
+        .workbench_sessions
+        .require_project_not_closing(&row.project_id)
+    {
+        drop(spawn_guard);
+        return Err(error);
+    }
     state.workbench_session_repo.upsert(&row).await?;
+    // upsert 后再 revalidate：project remove 可能在写库期间完成。
+    if state
+        .workbench_sessions
+        .require_project_not_closing(&row.project_id)
+        .is_err()
+    {
+        drop(spawn_guard);
+        return Err(AppError::unavailable(
+            "project_closing_barrier_active".to_string(),
+        ));
+    }
     // R20 M1：generation CAS 失败不得对外宣称 running/Ready。
     if !spawn_guard.commit() {
         return Err(AppError::unavailable(
