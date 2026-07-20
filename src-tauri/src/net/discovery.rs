@@ -360,6 +360,9 @@ pub fn local_lan_ip() -> Option<IpAddr> {
 ///
 /// Code Logic（这个结构做什么）:
 ///     纯数据载体；`role` 仅 `"wifi"` | `"wired"`，未知为 None；Task 2 可映射到 enum。
+///
+/// Task 1 仅落地枚举 API，Task 2 才接线 DTO/routes；临时 allow 避免 clippy -D warnings。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MobileAccessCandidate {
     pub host: String,
@@ -375,6 +378,9 @@ pub struct MobileAccessCandidate {
 ///
 /// Code Logic（这个函数做什么）:
 ///     将接口名小写并去掉多余空白后，按前缀/全名黑名单匹配；命中返回 true。
+///
+/// Task 1 仅落地枚举 API，Task 2 才接线消费者；临时 allow 避免 clippy -D warnings。
+#[allow(dead_code)]
 pub fn is_blocked_mobile_interface_name(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase().replace(' ', "");
     if n.is_empty() {
@@ -398,6 +404,9 @@ pub fn is_blocked_mobile_interface_name(name: &str) -> bool {
 ///
 /// Code Logic（这个函数做什么）:
 ///     小写匹配常见 wifi/wired 命名；macOS 仅 `en0` 视为 wifi；无法判断返回 None。
+///
+/// Task 1 仅落地枚举 API，Task 2 才接线消费者；临时 allow 避免 clippy -D warnings。
+#[allow(dead_code)]
 pub fn infer_mobile_access_role(interface_name: &str) -> Option<&'static str> {
     let n = interface_name.trim().to_ascii_lowercase();
     if n.is_empty() {
@@ -439,6 +448,9 @@ pub fn infer_mobile_access_role(interface_name: &str) -> Option<&'static str> {
 /// Code Logic（这个函数做什么）:
 ///     调用 if-addrs 枚举接口，过滤 loopback/link-local/未指定/黑名单接口，
 ///     生成 host + 可选 role；失败返回空 Vec（调用方可回退 local_lan_ip）。
+///
+/// Task 1 仅落地枚举 API，Task 2 才接线 DTO/routes；临时 allow 避免 clippy -D warnings。
+#[allow(dead_code)]
 pub fn list_mobile_access_candidates() -> Vec<MobileAccessCandidate> {
     let Ok(ifaces) = if_addrs::get_if_addrs() else {
         return Vec::new();
