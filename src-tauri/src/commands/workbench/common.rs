@@ -465,10 +465,13 @@ pub(crate) async fn resolve_worktree(
 
 /// Business Logic（为什么需要这个函数）:
 ///     Workbench 会话列表既要包含 SQLite 中待恢复的历史 tab，也要优先展示当前运行期 registry 的实时状态。
-///     R14 M1：仍在 restore 中的持久行不得当作可立即 replay 的会话返回，否则并发 list 会触发永久 not_found。
+///     R14/R18 M1：仍在 restore claim 中的持久行与 provisional live 都不得当作可立即 replay
+///     的会话返回（Ready 前不可对外暴露 live）。
 ///
 /// Code Logic（这个函数做什么）:
-///     先把持久化 row 投影为 DTO（跳过 `is_restore_claim_held` 的 id），再用 registry 中的实时 DTO 按 id 覆盖同名项。
+///     先把持久化 row 投影为 DTO（跳过 `is_restore_claim_held` 的 id），
+///     再用 registry `list` 的实时 DTO 覆盖（registry.list 已过滤 claim-held），
+///     live overlay 再双重跳过 claim-held 以防竞态。
 pub(crate) async fn merged_session_dtos(
     state: &AppState,
     project_id: Option<&str>,
@@ -482,6 +485,10 @@ pub(crate) async fn merged_session_dtos(
         .map(|row| row.to_dto_with_pane_count(pane_count_for_row(row)))
         .collect();
     for live in state.workbench_sessions.list(project_id) {
+        // R18 M1：live overlay 也不得把 claim-held provisional 暴露出去。
+        if state.workbench_sessions.is_restore_claim_held(&live.id) {
+            continue;
+        }
         if let Some(existing) = sessions.iter_mut().find(|session| session.id == live.id) {
             *existing = live;
         } else {

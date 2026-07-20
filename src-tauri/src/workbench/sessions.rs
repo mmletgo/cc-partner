@@ -26,6 +26,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -347,12 +348,16 @@ enum SessionProcess {
 /// 工作台终端会话运行态句柄。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     每个会话需要同时保存前端展示 DTO 和可操作的 PTY 进程资源。
+///     每次 spawn/restore 都需要独立运行期身份；失败 reclaim 后同 session_id 的新实例
+///     不得被旧 reader/exit watcher 写入 status 或 replay。
 ///
 /// Code Logic（这个结构体做什么）:
-///     将持久化 row 快照与 writer/master/child 聚合到单个 Mutex 保护的对象中，保证输入、resize、close 串行访问。
+///     将持久化 row 快照、generation 与 writer/master/child 聚合到单个 Mutex 保护对象中；
+///     generation 在 insert 时分配，worker 写 status/replay 前必须 fence 匹配。
 struct WorkbenchSessionHandle {
     row: WorkbenchSessionRow,
+    /// 本次 live 实例世代（R18 M2）。
+    generation: u64,
     process: SessionProcess,
 }
 
@@ -1676,11 +1681,14 @@ pub async fn wait_for_shared_restore(
 ///
 /// Code Logic（这个结构体做什么）:
 ///     用 HashMap 保存 session_id 到会话句柄和 replay buffer 的映射；外层 Arc 允许后台读写线程更新状态。
+///     `next_generation` 为每次 insert 分配单调 generation，供 worker fence（R18 M2）。
 ///     Clone 廉价（内部全是 Arc），供 `SessionSpawnGuard` / `RestoreClaimGuard` 持有。
 #[derive(Clone)]
 pub struct WorkbenchSessionRegistry {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
+    /// 下一个可分配的 session generation（从 1 起单调递增）。
+    next_generation: Arc<AtomicU64>,
     /// 正在 restore 的 session_id 占位 map（Finding 5 + R14 M1）。
     ///
     /// Business Logic（为什么需要这个字段）:
@@ -1817,25 +1825,33 @@ impl WorkbenchSessionRegistry {
     ///     AppState 初始化时需要创建空的工作台会话注册表。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造空会话 HashMap 与 replay buffer HashMap，并包裹 Arc<Mutex<_>> 供命令和后台线程共享。
+    ///     构造空会话 HashMap、replay buffer、generation 计数器与 restoring map，
+    ///     并包裹 Arc 供命令和后台线程共享。
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             replay_buffers: Arc::new(Mutex::new(HashMap::new())),
+            next_generation: Arc::new(AtomicU64::new(1)),
             restoring: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     前端工作台需要列出全部会话，或只列出某个项目下的会话。
+    ///     R18 M1：仍持 restore claim 的 provisional live 不得对外暴露为可 replay 会话。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     读取内存 registry，按可选 project_id 过滤并克隆 DTO 返回。
+    ///     先持 sessions 锁再持 restoring 锁（与 claim 路径同序，避免死锁），
+    ///     过滤 claim-held id，再按可选 project_id 过滤并克隆 DTO 返回。
     pub fn list(&self, project_id: Option<&str>) -> Vec<WorkbenchSessionDto> {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
         sessions
-            .values()
-            .filter_map(|handle| {
+            .iter()
+            .filter_map(|(session_id, handle)| {
+                if restoring.contains_key(session_id) {
+                    return None;
+                }
                 let handle = handle.lock().expect("workbench session 锁中毒");
                 if project_id
                     .map(|id| handle.row.project_id == id)
@@ -1874,24 +1890,23 @@ impl WorkbenchSessionRegistry {
         self.contains(session_id)
     }
 
-    /// 原子判定 session 运行期可见性（R15 M1）。
+    /// 原子判定 session 运行期可见性（R15 M1 + R18 M1）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     P2P / local / control / mobile 的 replay 入口必须在同一次快照下区分
-    ///     Live / RestoreInProgress / Missing。若先查 row 再单独 `session_exists`，
-    ///     claim 已建立但尚未 insert 时会误报永久 not_found。
+    ///     Live / RestoreInProgress / Missing。provisional live 在 durable Ready 前
+    ///     不得对外暴露为 Live；claim 窗口也不得误报永久 not_found。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先持 sessions 锁检查 live；未命中时在仍持有 sessions 锁下检查 restoring map，
-    ///     与 `try_claim_restore` 相同的锁顺序，返回 `SessionRuntimePresence`。
+    ///     锁顺序 sessions → restoring。**restoring 优先**：claim held → RestoreInProgress；
+    ///     否则 sessions 有 key → Live；否则 Missing。
     pub fn runtime_presence(&self, session_id: &str) -> SessionRuntimePresence {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
-        if sessions.contains_key(session_id) {
-            return SessionRuntimePresence::Live;
-        }
         let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
         if restoring.contains_key(session_id) {
             SessionRuntimePresence::RestoreInProgress
+        } else if sessions.contains_key(session_id) {
+            SessionRuntimePresence::Live
         } else {
             SessionRuntimePresence::Missing
         }
@@ -1915,31 +1930,30 @@ impl WorkbenchSessionRegistry {
         }
     }
 
-    /// 原子占位：声明"我即将 restore 这个 session"（Finding 5 + R14 M1）。
+    /// 原子占位：声明"我即将 restore 这个 session"（Finding 5 + R14 M1 + R18 M1）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     `restore_persisted_sessions` 的旧实现 `contains() → await resolve_worktree → restore()`
     ///     存在 TOCTOU：两个并发的 sessions/list 请求都能通过 contains() 检查，各自 spawn 一个
-    ///     PTY/tmux 窗口，导致同一持久化 session 被恢复两次。本方法把"检查 sessions map + 写入
-    ///     restoring 占位"原子完成：第一个 caller 拿到 `Claimed`，第二个得到
-    ///     `RestoreInProgress`（可 wait），已 live 则 `AlreadyLive`。
+    ///     PTY/tmux 窗口。provisional insert 后 durable upsert 成功前也不得被第三方
+    ///     当作 AlreadyLive 消费。本方法把检查 + 占位原子完成：claim held →
+    ///     RestoreInProgress；仅 sessions 有且无 claim → AlreadyLive；否则 Claimed。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     1. 持 sessions 锁；
-    ///     2. 若 sessions map 已有该 session_id → `AlreadyLive`；
-    ///     3. 若 restoring map 已有该 session_id → `RestoreInProgress(subscribe)`；
-    ///     4. 否则写入 watch sender 并返回 `Claimed`（caller 独占 restore 责任）。
+    ///     锁顺序 sessions → restoring。顺序检查：**先 restoring**（含 provisional live
+    ///     时仍 RestoreInProgress），再 sessions（AlreadyLive），否则写入 watch sender
+    ///     返回 Claimed。
     ///
     /// `Claimed` 时 caller 必须 restore 并在完成后调用 `finish_restore_claim`
     ///（或持有 `RestoreClaimGuard` 直至结束）。
     pub fn try_claim_restore(&self, session_id: &str) -> RestoreClaimOutcome {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
-        if sessions.contains_key(session_id) {
-            return RestoreClaimOutcome::AlreadyLive;
-        }
         let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
         if let Some(tx) = restoring.get(session_id) {
             return RestoreClaimOutcome::RestoreInProgress(tx.subscribe());
+        }
+        if sessions.contains_key(session_id) {
+            return RestoreClaimOutcome::AlreadyLive;
         }
         let (tx, _rx) =
             tokio::sync::watch::channel(SharedRestoreNotification::Pending);
@@ -2038,6 +2052,48 @@ impl WorkbenchSessionRegistry {
             .lock()
             .expect("restoring 集合锁中毒")
             .contains_key(session_id)
+    }
+
+    /// 分配新的 session generation（R18 M2）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     每次 insert live handle 都需要独立世代，以便失败 reclaim 后旧 worker
+    ///     无法污染同 session_id 的新实例。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对 `next_generation` 做 `fetch_add(1, SeqCst)` 并返回旧值。
+    fn allocate_generation(&self) -> u64 {
+        self.next_generation.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// 判断 worker 捕获的 generation 是否仍对应当前 registry 句柄（R18 M2）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     close/reclaim 后 reader/exit watcher 可能仍在跑；同 id 新实例不得被旧 worker
+    ///     写入 status 或 append replay。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读 sessions map 中该 id 的 handle.generation；匹配则 true，缺失/不匹配 false。
+    pub fn is_current_session_generation(&self, session_id: &str, generation: u64) -> bool {
+        is_current_session_generation(&self.sessions, session_id, generation)
+    }
+
+    /// 测试：读取当前 live handle 的 generation。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     generation fencing 单测需要断言 insert 后的世代与 fence 检查。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     若 session 存在则返回其 generation，否则 None。
+    #[cfg(test)]
+    pub fn session_generation_for_test(&self, session_id: &str) -> Option<u64> {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        sessions.get(session_id).map(|handle| {
+            handle
+                .lock()
+                .expect("workbench session 锁中毒")
+                .generation
+        })
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2296,7 +2352,8 @@ impl WorkbenchSessionRegistry {
     ///     新建和恢复终端最终都要启动一个 PTY 客户端并注册输出/退出监听。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用 row 中的命令/后端信息构造 CommandBuilder，spawn 子进程并写入内存 registry。
+    ///     用 row 中的命令/后端信息构造 CommandBuilder，分配 generation 后 spawn 子进程
+    ///     并写入内存 registry；reader/exit watcher 捕获 generation 做 fence。
     fn spawn_row(
         &self,
         state: AppState,
@@ -2330,8 +2387,10 @@ impl WorkbenchSessionRegistry {
             .take_writer()
             .map_err(|error| AppError::generic(format!("创建 PTY writer 失败: {error}")))?;
 
+        let generation = self.allocate_generation();
         let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
             row: row.clone(),
+            generation,
             process: SessionProcess::Pty {
                 master: pair.master,
                 writer,
@@ -2348,10 +2407,18 @@ impl WorkbenchSessionRegistry {
         spawn_reader_thread(
             state.clone(),
             session_id.clone(),
+            generation,
             reader,
+            self.sessions.clone(),
             self.replay_buffers.clone(),
         );
-        spawn_exit_watcher(state, self.sessions.clone(), session_id.clone(), handle);
+        spawn_exit_watcher(
+            state,
+            self.sessions.clone(),
+            session_id.clone(),
+            generation,
+            handle,
+        );
 
         Ok(row)
     }
@@ -2728,10 +2795,11 @@ impl WorkbenchSessionRegistry {
     ///     safe attach 单测需要在无真实 tmux 时把 session 记入 registry，验证幂等与 claim。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     插入 Fake process 的完整 row；仅 `#[cfg(test)]`。
+    ///     分配 generation 后插入 Fake process 的完整 row；仅 `#[cfg(test)]`。
     #[cfg(test)]
     pub fn insert_fake_session_row_for_test(&self, row: WorkbenchSessionRow) {
         let session_id = row.id.clone();
+        let generation = self.allocate_generation();
         self.sessions
             .lock()
             .expect("workbench sessions 锁中毒")
@@ -2739,6 +2807,7 @@ impl WorkbenchSessionRegistry {
                 session_id.clone(),
                 Arc::new(Mutex::new(WorkbenchSessionHandle {
                     row,
+                    generation,
                     process: SessionProcess::Fake,
                 })),
             );
@@ -2750,7 +2819,7 @@ impl WorkbenchSessionRegistry {
     ///     list 过滤测试需要构造不同项目的会话，但不应启动真实 PTY 或依赖本机 Claude CLI。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅在测试编译时插入 fake 会话句柄，覆盖 list/filter 纯内存逻辑。
+    ///     仅在测试编译时分配 generation 并插入 fake 会话句柄，覆盖 list/filter 与 fencing 逻辑。
     fn insert_fake_session_for_test(&self, session_id: &str, project_id: &str) {
         let row = WorkbenchSessionRow {
             id: session_id.to_string(),
@@ -2771,6 +2840,7 @@ impl WorkbenchSessionRegistry {
             created_at: "2026-06-24T00:00:00Z".to_string(),
             updated_at: "2026-06-24T00:00:00Z".to_string(),
         };
+        let generation = self.allocate_generation();
         self.sessions
             .lock()
             .expect("workbench sessions 锁中毒")
@@ -2778,11 +2848,37 @@ impl WorkbenchSessionRegistry {
                 session_id.to_string(),
                 Arc::new(Mutex::new(WorkbenchSessionHandle {
                     row,
+                    generation,
                     process: SessionProcess::Fake,
                 })),
             );
         self.ensure_replay_buffer(session_id);
     }
+}
+
+/// 判断 sessions map 中 id 的 handle generation 是否匹配（R18 M2）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     reader/exit watcher 与 registry 方法共用同一 fence，避免旧 worker 污染新实例。
+///
+/// Code Logic（这个函数做什么）:
+///     读 map 中 session 的 generation；相等返回 true，缺失或不匹配返回 false。
+fn is_current_session_generation(
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    let sessions = sessions.lock().expect("workbench sessions 锁中毒");
+    sessions
+        .get(session_id)
+        .map(|handle| {
+            handle
+                .lock()
+                .expect("workbench session 锁中毒")
+                .generation
+                == generation
+        })
+        .unwrap_or(false)
 }
 
 impl Default for WorkbenchSessionRegistry {
@@ -2798,14 +2894,17 @@ impl Default for WorkbenchSessionRegistry {
 
 /// Business Logic（为什么需要这个函数）:
 ///     前端终端需要持续接收 PTY stdout/stderr 合并后的输出；Agent OSC 不得进入 UI。
+///     R18 M2：reclaim 后旧 reader 不得 append 到同 id 新实例的 replay。
 ///
 /// Code Logic（这个函数做什么）:
 ///     后台线程读 PTY → `AgentOscDecoder` 剥离 app-private OSC 并 enqueue mutation →
-///     仅 visible 字节进入 `TerminalUtf8Decoder` → replay/emit。
+///     仅 visible 字节进入 `TerminalUtf8Decoder` → generation fence 后 replay/emit。
 fn spawn_reader_thread(
     state: AppState,
     session_id: String,
+    generation: u64,
     mut reader: Box<dyn Read + Send>,
+    sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
 ) {
     thread::spawn(move || {
@@ -2814,18 +2913,25 @@ fn spawn_reader_thread(
         let mut utf8 = TerminalUtf8Decoder::default();
         let mut osc = AgentOscDecoder::default();
         loop {
+            if !is_current_session_generation(&sessions, &session_id, generation) {
+                break;
+            }
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let decoded = osc.push(&buf[..n]);
-                    apply_agent_osc_decode_result(
+                    if !apply_agent_osc_decode_result(
                         &state,
                         &session_id,
+                        generation,
                         &mut seq,
                         &mut utf8,
+                        &sessions,
                         &replay_buffers,
                         decoded,
-                    );
+                    ) {
+                        break;
+                    }
                     // 突发 rate-limit 后若仍有 pending，等到窗口到期后投递；sleep 被提前唤醒时不得 break 丢终态
                     while osc.has_pending_coalesce() {
                         if let Some(wait) = osc.duration_until_rate_window_end() {
@@ -2845,14 +2951,18 @@ fn spawn_reader_thread(
                                 continue;
                             }
                         }
-                        apply_agent_osc_decode_result(
+                        if !apply_agent_osc_decode_result(
                             &state,
                             &session_id,
+                            generation,
                             &mut seq,
                             &mut utf8,
+                            &sessions,
                             &replay_buffers,
                             flushed,
-                        );
+                        ) {
+                            return;
+                        }
                     }
                 }
                 Err(error) => {
@@ -2861,18 +2971,31 @@ fn spawn_reader_thread(
                 }
             }
         }
-        // 会话结束：强制冲刷仍挂起的 coalesced mutation
+        // 会话结束：仅当 generation 仍当前时强制冲刷仍挂起的 coalesced mutation
+        if !is_current_session_generation(&sessions, &session_id, generation) {
+            return;
+        }
         let flushed = osc.force_flush_pending();
-        apply_agent_osc_decode_result(
+        let _ = apply_agent_osc_decode_result(
             &state,
             &session_id,
+            generation,
             &mut seq,
             &mut utf8,
+            &sessions,
             &replay_buffers,
             flushed,
         );
         if let Some(chunk) = utf8.finish() {
-            emit_terminal_output(&state, &session_id, &mut seq, chunk, &replay_buffers);
+            let _ = emit_terminal_output(
+                &state,
+                &session_id,
+                Some(generation),
+                &sessions,
+                &mut seq,
+                chunk,
+                &replay_buffers,
+            );
         }
     });
 }
@@ -2883,15 +3006,18 @@ fn spawn_reader_thread(
 ///     push 与 idle poll_flush / force_flush 共用同一出口，避免终态只在一种路径上入站。
 ///
 /// Code Logic（这个函数做什么）:
-///     forward mutations → debug diagnostics → 非空 visible 走 UTF-8/emit。
+///     forward mutations → debug diagnostics → 非空 visible 走 UTF-8/emit；
+///     generation fence 失败时返回 false，让 reader break。
 fn apply_agent_osc_decode_result(
     state: &AppState,
     session_id: &str,
+    generation: u64,
     seq: &mut u64,
     utf8: &mut TerminalUtf8Decoder,
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
     replay_buffers: &Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
     decoded: crate::workbench::agent_runtime::osc::AgentOscDecodeResult,
-) {
+) -> bool {
     forward_agent_osc_mutations(state, session_id, decoded.mutations);
     for diag in &decoded.diagnostics {
         tracing::debug!(
@@ -2902,14 +3028,17 @@ fn apply_agent_osc_decode_result(
         );
     }
     if !decoded.visible.is_empty() {
-        emit_terminal_output(
+        return emit_terminal_output(
             state,
             session_id,
+            Some(generation),
+            sessions,
             seq,
             utf8.decode(&decoded.visible),
             replay_buffers,
         );
     }
+    true
 }
 
 /// 把 OSC mutation 交给 owner ingress（有界 channel；未启动 reducer 时丢弃）。
@@ -2942,18 +3071,27 @@ fn forward_agent_osc_mutations(
 
 /// Business Logic（为什么需要这个函数）:
 ///     终端输出事件需要统一递增 seq，且纯 pending chunk 未完成时不应发送空事件。
+///     R18 M2：generation 不匹配时不得 append/emit，防止旧 reader 污染新实例。
 ///
 /// Code Logic（这个函数做什么）:
-///     非空 chunk 才递增 seq、写入 replay buffer，并构造 `TerminalOutputEvent` 通过后端 UI adapter emit。
+///     非空 chunk 才检查可选 generation fence；匹配后递增 seq、写入 replay buffer，
+///     并构造 `TerminalOutputEvent` 通过后端 UI adapter emit。返回 false 表示 fence 拒绝。
 fn emit_terminal_output(
     state: &AppState,
     session_id: &str,
+    generation: Option<u64>,
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
     seq: &mut u64,
     chunk: String,
     replay_buffers: &Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
-) {
+) -> bool {
     if chunk.is_empty() {
-        return;
+        return true;
+    }
+    if let Some(generation) = generation {
+        if !is_current_session_generation(sessions, session_id, generation) {
+            return false;
+        }
     }
     *seq += 1;
     {
@@ -2982,17 +3120,20 @@ fn emit_terminal_output(
         session_id.to_string(),
         event.chunk.clone(),
     );
+    true
 }
 
 /// Business Logic（为什么需要这个函数）:
 ///     终端进程退出后，前端需要收到状态变化并保留退出码。
+///     R18 M2：旧 watcher 不得把同 id 新实例标为 exited。
 ///
 /// Code Logic（这个函数做什么）:
-///     后台线程短轮询 child.try_wait，退出时更新 DTO 并 emit exited 状态事件。
+///     后台线程短轮询 child.try_wait；写 status/emit 前确认 generation 仍匹配，否则 no-op。
 fn spawn_exit_watcher(
     state: AppState,
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     session_id: String,
+    generation: u64,
     handle: Arc<Mutex<WorkbenchSessionHandle>>,
 ) {
     thread::spawn(move || loop {
@@ -3010,23 +3151,25 @@ fn spawn_exit_watcher(
 
         match status {
             Some(Ok(exit_code)) => {
-                let still_registered = sessions
-                    .lock()
-                    .expect("workbench sessions 锁中毒")
-                    .contains_key(&session_id);
-                if still_registered {
+                if is_current_session_generation(&sessions, &session_id, generation) {
                     let mut handle = handle.lock().expect("workbench session 锁中毒");
-                    handle.row.status = "exited".to_string();
-                    handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
-                    handle.row.exit_code = Some(exit_code);
-                    handle.row.updated_at = chrono::Utc::now().to_rfc3339();
-                    emit_status(&state, &session_id, "exited", Some(exit_code));
+                    // 双重检查：持 handle 锁后再确认 generation（防止 TOCTOU）。
+                    if handle.generation == generation {
+                        handle.row.status = "exited".to_string();
+                        handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
+                        handle.row.exit_code = Some(exit_code);
+                        handle.row.updated_at = chrono::Utc::now().to_rfc3339();
+                        drop(handle);
+                        emit_status(&state, &session_id, "exited", Some(exit_code));
+                    }
                 }
                 break;
             }
             Some(Err(error)) => {
                 tracing::warn!("查询工作台终端退出状态失败: {error}");
-                emit_status(&state, &session_id, "disconnected", None);
+                if is_current_session_generation(&sessions, &session_id, generation) {
+                    emit_status(&state, &session_id, "disconnected", None);
+                }
                 break;
             }
             None => thread::sleep(Duration::from_millis(200)),
@@ -4325,13 +4468,14 @@ mod tests {
         );
     }
 
-    /// Business Logic（R15 M1: 为什么需要这个测试）:
-    ///     P2P/local/control/mobile replay 必须共享原子 presence：claim 已建立但尚未 live 时
-    ///     只能是 RestoreInProgress，禁止单独 session_exists 漏判成 Missing/not_found。
+    /// Business Logic（R15/R18 M1: 为什么需要这个测试）:
+    ///     P2P/local/control/mobile replay 必须共享原子 presence：claim held（含 provisional live）
+    ///     只能是 RestoreInProgress，禁止单独 session_exists 漏判成 Missing/not_found，
+    ///     也禁止 provisional live 被当作可 replay Live。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     空 registry → Missing；claim 后 → RestoreInProgress + require_live unavailable；
-    ///     insert live 后仍 claim → Live（sessions 优先）；release 后 Missing 或 Live。
+    ///     空 registry → Missing；claim 后 → RestoreInProgress；claim + provisional live
+    ///     → 仍 RestoreInProgress + require_live unavailable；release claim 后 → Live。
     #[test]
     fn runtime_presence_atomic_live_restore_missing() {
         let registry = WorkbenchSessionRegistry::new();
@@ -4360,18 +4504,26 @@ mod tests {
             "session_restore_in_progress"
         );
 
+        // R18 M1：claim 优先于 provisional live。
         registry.insert_fake_session_for_test("s-presence", "p1");
-        // live 优先于 claim（与 try_claim_restore 顺序一致）。
         assert_eq!(
             registry.runtime_presence("s-presence"),
-            SessionRuntimePresence::Live
+            SessionRuntimePresence::RestoreInProgress
         );
-        assert!(registry.require_live_for_replay("s-presence").is_ok());
+        let provisional_err = registry
+            .require_live_for_replay("s-presence")
+            .expect_err("claim-held provisional live must block replay");
+        assert_eq!(provisional_err.ipc_category_code(), "unavailable");
+        assert_eq!(
+            provisional_err.to_string(),
+            "session_restore_in_progress"
+        );
         registry.release_restore_claim("s-presence");
         assert_eq!(
             registry.runtime_presence("s-presence"),
             SessionRuntimePresence::Live
         );
+        assert!(registry.require_live_for_replay("s-presence").is_ok());
     }
 
     /// Business Logic（R15 M2: 为什么需要这个测试）:
@@ -4595,5 +4747,131 @@ mod tests {
 
         drop(spawn_guard);
         assert!(!registry.contains("s-wrong-order"));
+    }
+
+    /// Business Logic（R18 M1: 为什么需要这个测试）:
+    ///     durable Ready 前 provisional live 不得对外暴露；并发 claim / replay / list
+    ///     都必须把 claim-held 视为 RestoreInProgress。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim + insert provisional → try_claim RestoreInProgress；runtime_presence
+    ///     RestoreInProgress；require_live unavailable；list 不含该 id；finish Failed
+    ///     后 Missing，并可重新 Claimed。
+    #[test]
+    fn provisional_live_while_claim_held_is_not_externally_live() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-provisional").is_claimed());
+        registry.insert_fake_session_for_test("s-provisional", "p1");
+        assert!(registry.contains("s-provisional"));
+        assert!(registry.is_restore_claim_held("s-provisional"));
+
+        assert!(
+            matches!(
+                registry.try_claim_restore("s-provisional"),
+                RestoreClaimOutcome::RestoreInProgress(_)
+            ),
+            "claim-held provisional must be RestoreInProgress, not AlreadyLive"
+        );
+        assert_eq!(
+            registry.runtime_presence("s-provisional"),
+            SessionRuntimePresence::RestoreInProgress
+        );
+        let err = registry
+            .require_live_for_replay("s-provisional")
+            .expect_err("provisional live must block replay");
+        assert_eq!(err.ipc_category_code(), "unavailable");
+        assert_eq!(err.to_string(), "session_restore_in_progress");
+
+        let listed = registry.list(Some("p1"));
+        assert!(
+            listed.iter().all(|dto| dto.id != "s-provisional"),
+            "registry list must hide claim-held provisional live"
+        );
+        let listed_all = registry.list(None);
+        assert!(listed_all.iter().all(|dto| dto.id != "s-provisional"));
+
+        registry.finish_restore_claim(
+            "s-provisional",
+            SharedRestoreNotification::Failed(AppErrorCategory::Internal),
+        );
+        // finish Failed 只放 claim，不自动 close provisional；模拟 holder 先 reclaim spawn。
+        let _ = registry.close("s-provisional");
+        assert_eq!(
+            registry.runtime_presence("s-provisional"),
+            SessionRuntimePresence::Missing
+        );
+        assert!(registry.try_claim_restore("s-provisional").is_claimed());
+        registry.release_restore_claim("s-provisional");
+    }
+
+    /// Business Logic（R18 M2: 为什么需要这个测试）:
+    ///     close/reclaim 后同 id 新实例不得被旧 generation 的 worker fence 通过。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     insert gen1 → close → insert gen2；check(gen1)=false，check(gen2)=true。
+    #[test]
+    fn session_generation_fence_rejects_stale_after_reinsert() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-gen", "p1");
+        let gen1 = registry
+            .session_generation_for_test("s-gen")
+            .expect("gen1 must exist");
+        assert!(registry.is_current_session_generation("s-gen", gen1));
+
+        registry.close("s-gen").expect("close gen1");
+        assert!(!registry.is_current_session_generation("s-gen", gen1));
+
+        registry.insert_fake_session_for_test("s-gen", "p1");
+        let gen2 = registry
+            .session_generation_for_test("s-gen")
+            .expect("gen2 must exist");
+        assert_ne!(gen1, gen2, "reinsert must allocate a new generation");
+        assert!(!registry.is_current_session_generation("s-gen", gen1));
+        assert!(registry.is_current_session_generation("s-gen", gen2));
+    }
+
+    /// Business Logic（R18 M2: 为什么需要这个测试）:
+    ///     失败 reclaim 后立即 re-claim + insert 新 gen，旧 fence 不得污染新实例。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim + insert gen1 → reclaim close + finish Failed → re-claim + insert gen2；
+    ///     旧 gen fence false，新 gen true；presence 在 claim held 时仍 RestoreInProgress。
+    #[test]
+    fn reclaim_then_reclaim_insert_fences_old_generation() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-reclaim-fence").is_claimed());
+        registry.insert_fake_session_for_test("s-reclaim-fence", "p1");
+        let gen1 = registry
+            .session_generation_for_test("s-reclaim-fence")
+            .expect("gen1");
+        assert!(registry.is_current_session_generation("s-reclaim-fence", gen1));
+        assert_eq!(
+            registry.runtime_presence("s-reclaim-fence"),
+            SessionRuntimePresence::RestoreInProgress
+        );
+
+        // 失败 reclaim：先 close spawn 再放 claim。
+        let _ = registry.close("s-reclaim-fence");
+        registry.finish_restore_claim(
+            "s-reclaim-fence",
+            SharedRestoreNotification::Failed(AppErrorCategory::Internal),
+        );
+        assert!(!registry.is_current_session_generation("s-reclaim-fence", gen1));
+
+        assert!(registry.try_claim_restore("s-reclaim-fence").is_claimed());
+        registry.insert_fake_session_for_test("s-reclaim-fence", "p1");
+        let gen2 = registry
+            .session_generation_for_test("s-reclaim-fence")
+            .expect("gen2");
+        assert_ne!(gen1, gen2);
+        assert!(!registry.is_current_session_generation("s-reclaim-fence", gen1));
+        assert!(registry.is_current_session_generation("s-reclaim-fence", gen2));
+        registry.finish_restore_claim("s-reclaim-fence", SharedRestoreNotification::Ready);
+        assert_eq!(
+            registry.runtime_presence("s-reclaim-fence"),
+            SessionRuntimePresence::Live
+        );
+        assert!(registry.is_current_session_generation("s-reclaim-fence", gen2));
+        assert!(!registry.is_current_session_generation("s-reclaim-fence", gen1));
     }
 }
