@@ -423,15 +423,19 @@ export function beginHeldOverflowReplay(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   已绑定 stream authority 后若 owner 切换（如远端 backend 重启合成新 composite authority），
- *   远端 `/api/workbench/events` 是纯 broadcast，断线窗口输出不会回放，也不会进入本机 Gap。
- *   若只 rebind 并 needsReplay=false，仅首条 live 被 append，窗口内输出永久缺失。
+ *   两种路径都会让终端历史缺口静默永久化，必须强制 listener-first replay：
+ *   1) **首次绑定 authority**（R10 M1）：启动 baseline 的 sessions.list 无 projectId，只枚举本机；
+ *      用户之后打开远端项目时首条 remote live 到达时 cutover 仍未绑定。若只做轻量 rebind
+ *      并 needsReplay=false，则不会 sessions.replay；远端事件是纯 broadcast，bridge 前 ring/TUI
+ *      历史永不补回。
+ *   2) **已绑定 authority 切换**（R9 M1）：远端 backend 重启合成新 composite authority 时，
+ *      断线窗口输出不会进本机 Gap；若 needsReplay=false 只 append 首条 live，窗口内容永久缺失。
  *
  * Code Logic（这个函数做什么）:
- *   仅当 state 已绑定非空 authority 且入参是不同的非空 authority 时生效：
+ *   入参 authorityId 非空且与 state.authorityId 不同（含 state 尚为 null 的首次绑定）时生效：
  *   绑定新 authorityId、committedBaselineLastSeq/overflowHighWaterSeq=0、
  *   cutoverEpoch+=1、needsReplay=true、replayInFlight=false；
- *   返回新 state 与 requestEpoch。首次绑定或无效 authority 返回 null（调用方走轻量 rebind）。
+ *   返回新 state 与 requestEpoch。同 authority 或无效 authority 返回 null。
  */
 export function beginAuthorityChangeReplay(
   state: SessionCutoverState,
@@ -440,11 +444,11 @@ export function beginAuthorityChangeReplay(
   if (typeof authorityId !== 'string' || authorityId.length === 0) {
     return null;
   }
-  const hasBoundAuthority =
-    typeof state.authorityId === 'string' && state.authorityId.length > 0;
-  if (!hasBoundAuthority || state.authorityId === authorityId) {
+  // 同 authority：无切换，不抬 epoch。
+  if (state.authorityId === authorityId) {
     return null;
   }
+  // 首次绑定（authority 为空）或已绑定切换：一律强制 needsReplay。
   const cutoverEpoch = state.cutoverEpoch + 1;
   return {
     state: {
@@ -458,6 +462,58 @@ export function beginAuthorityChangeReplay(
     },
     requestEpoch: cutoverEpoch,
   };
+}
+
+/** 同 epoch 瞬时失败的有界立即重试次数（含首次）。 */
+export const TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS = 3;
+
+/** 立即重试耗尽后，可恢复退避的上限（ms）。 */
+export const TERMINAL_REPLAY_RECOVERY_BACKOFF_CAP_MS = 5_000;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   authority replay 在瞬时失败后需要有界立即重试；三次仍失败时不得永久静默停滞，
+ *   必须按 capped backoff 继续可恢复重试，直到成功或 session 被移除（R10 M2）。
+ *
+ * Code Logic（这个函数做什么）:
+ *   consecutiveFailures 从 1 起：
+ *   - 1 → 50ms、2 → 100ms（同 epoch 立即重试间隔；第 3 次失败后进入恢复波）；
+ *   - ≥3 → 1000 * 2^(n-3) ms，封顶 TERMINAL_REPLAY_RECOVERY_BACKOFF_CAP_MS。
+ *   调用方用返回值作为 setTimeout delay；非法/非正 failures 按 1 处理。
+ */
+export function terminalReplayRecoveryDelayMs(consecutiveFailures: number): number {
+  const failures =
+    typeof consecutiveFailures === 'number' &&
+    Number.isFinite(consecutiveFailures) &&
+    consecutiveFailures >= 1
+      ? Math.floor(consecutiveFailures)
+      : 1;
+  if (failures < TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS) {
+    return failures === 1 ? 50 : 100;
+  }
+  const recoveryIndex = failures - TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS;
+  const delay = 1_000 * 2 ** recoveryIndex;
+  return Math.min(delay, TERMINAL_REPLAY_RECOVERY_BACKOFF_CAP_MS);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   live/online/focus 触发恢复时必须尊重 cooldown，避免在 needsReplay 窗口对每个 chunk 狂刷 replay。
+ *
+ * Code Logic（这个函数做什么）:
+ *   nextRetryAt 未设置（0/非有限）→ true；nowMs >= nextRetryAt → true；否则 false。
+ */
+export function shouldTriggerTerminalReplayRecovery(
+  nextRetryAt: number,
+  nowMs: number,
+): boolean {
+  if (typeof nextRetryAt !== 'number' || !Number.isFinite(nextRetryAt) || nextRetryAt <= 0) {
+    return true;
+  }
+  if (typeof nowMs !== 'number' || !Number.isFinite(nowMs)) {
+    return false;
+  }
+  return nowMs >= nextRetryAt;
 }
 
 /**

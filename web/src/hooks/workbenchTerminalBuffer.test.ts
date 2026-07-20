@@ -17,6 +17,10 @@ import {
   shouldAcceptTerminalCutover,
   shouldClearTerminalNeedsReplay,
   shouldCollectHeldLiveTerminalEvent,
+  shouldTriggerTerminalReplayRecovery,
+  terminalReplayRecoveryDelayMs,
+  TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS,
+  TERMINAL_REPLAY_RECOVERY_BACKOFF_CAP_MS,
   type HeldLiveTerminalEvent,
   type TerminalBufferDelta,
   type TerminalFrameScheduler,
@@ -768,9 +772,18 @@ describe('session cutover epoch / committed baseline', () => {
     expect(state.overflowHighWaterSeq).toBe(0);
   });
 
-  test('beginAuthorityChangeReplay forces re-baseline only for already-bound switch', () => {
+  test('beginAuthorityChangeReplay forces re-baseline for first bind and already-bound switch', () => {
     const unbound = createEmptySessionCutoverState();
-    expect(beginAuthorityChangeReplay(unbound, 'owner-a')).toBeNull();
+    // R10 M1：首次绑定也必须强制 needsReplay（禁止 light rebind）。
+    const firstBind = beginAuthorityChangeReplay(unbound, 'owner-a');
+    expect(firstBind).not.toBeNull();
+    expect(firstBind!.state.authorityId).toBe('owner-a');
+    expect(firstBind!.state.needsReplay).toBe(true);
+    expect(firstBind!.state.committedBaselineLastSeq).toBe(0);
+    expect(firstBind!.state.cutoverEpoch).toBe(1);
+    expect(firstBind!.requestEpoch).toBe(1);
+    expect(shouldCollectHeldLiveTerminalEvent(firstBind!.state, true)).toBe(true);
+
     expect(beginAuthorityChangeReplay(unbound, null)).toBeNull();
     expect(beginAuthorityChangeReplay(unbound, '')).toBeNull();
 
@@ -789,6 +802,22 @@ describe('session cutover epoch / committed baseline', () => {
     expect(switched!.state.cutoverEpoch).toBe(state.cutoverEpoch + 1);
     // 切换后必须 held 新 authority live，直到匹配 epoch 的 replay 成功。
     expect(shouldCollectHeldLiveTerminalEvent(switched!.state, true)).toBe(true);
+  });
+
+  test('terminalReplayRecoveryDelayMs caps backoff and shouldTrigger respects cooldown', () => {
+    expect(TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS).toBe(3);
+    expect(terminalReplayRecoveryDelayMs(1)).toBe(50);
+    expect(terminalReplayRecoveryDelayMs(2)).toBe(100);
+    // 第 3 次失败后进入恢复波：1s、2s、4s… 封顶
+    expect(terminalReplayRecoveryDelayMs(3)).toBe(1_000);
+    expect(terminalReplayRecoveryDelayMs(4)).toBe(2_000);
+    expect(terminalReplayRecoveryDelayMs(5)).toBe(4_000);
+    expect(terminalReplayRecoveryDelayMs(6)).toBe(TERMINAL_REPLAY_RECOVERY_BACKOFF_CAP_MS);
+    expect(terminalReplayRecoveryDelayMs(20)).toBe(TERMINAL_REPLAY_RECOVERY_BACKOFF_CAP_MS);
+
+    expect(shouldTriggerTerminalReplayRecovery(0, 1000)).toBe(true);
+    expect(shouldTriggerTerminalReplayRecovery(500, 1000)).toBe(true);
+    expect(shouldTriggerTerminalReplayRecovery(1500, 1000)).toBe(false);
   });
 
   test('owner authority change accepts lower lastSeq and resets store baseline', () => {

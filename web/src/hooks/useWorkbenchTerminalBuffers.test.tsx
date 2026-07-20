@@ -5,10 +5,15 @@
  * Business Logic（为什么需要这个测试）:
  *   远端 owner 重启后 `/api/workbench/events` 是纯 broadcast，断线窗口输出不会进入本机 Gap。
  *   已绑定 authority 切换若 needsReplay=false 且只 append 首条 live，窗口输出永久缺失。
+ *   启动 baseline 的 sessions.list 无 projectId 仅本机；首次远端 live 若 light rebind
+ *   needsReplay=false，bridge 前 ring/TUI 历史永不补回（R10 M1）。
+ *   authority replay 三次失败后若不再安排恢复，安静终端永久缺口（R10 M2）。
  *
  * Code Logic（这个测试做什么）:
- *   mock Tauri listen + workbenchApi.sessions.list/replay：先建立 A 高 seq baseline，
- *   再注入 B 首条 live（无 Gap resync），断言触发 sessions.replay 且最终 buffer 含 B baseline。
+ *   mock Tauri listen + workbenchApi.sessions.list/replay：
+ *   - R9：先建立 A 高 seq baseline，再注入 B 首条 live，断言强制 replay 并 settle held。
+ *   - R10 M1：启动 list 仅本地，随后远端首条 live → 强制 replay 并回填历史。
+ *   - R10 M2：三次 replay 失败后服务恢复，live/cooldown 路径 settle held。
  *   测试不包含终端 body 明文日志；chunk 仅为可识别标记。
  */
 
@@ -68,6 +73,14 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+type ReplayDto = {
+  sessionId: string;
+  buffer: string;
+  truncated: boolean;
+  lastSeq: number;
+  ownerInstanceId: string;
+};
+
 /**
  * Business Logic（为什么需要这个组件）:
  *   测试需在 Provider 内读取 store 引用。
@@ -113,6 +126,7 @@ describe('WorkbenchTerminalBuffersProvider authority change (R9 M1)', () => {
     listMock.mockReset();
     replayMock.mockReset();
     listenMock.mockReset();
+    vi.useRealTimers();
 
     listenMock.mockImplementation(
       async (eventName: string, handler: EventHandler) => {
@@ -126,6 +140,7 @@ describe('WorkbenchTerminalBuffersProvider authority change (R9 M1)', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
@@ -137,20 +152,8 @@ describe('WorkbenchTerminalBuffersProvider authority change (R9 M1)', () => {
 
     // 首次 launch baseline：A 高 seq
     listMock.mockResolvedValue([{ id: sessionId }]);
-    const firstReplay = deferred<{
-      sessionId: string;
-      buffer: string;
-      truncated: boolean;
-      lastSeq: number;
-      ownerInstanceId: string;
-    }>();
-    const secondReplay = deferred<{
-      sessionId: string;
-      buffer: string;
-      truncated: boolean;
-      lastSeq: number;
-      ownerInstanceId: string;
-    }>();
+    const firstReplay = deferred<ReplayDto>();
+    const secondReplay = deferred<ReplayDto>();
     let replayCalls = 0;
     replayMock.mockImplementation(() => {
       replayCalls += 1;
@@ -264,5 +267,260 @@ describe('WorkbenchTerminalBuffersProvider authority change (R9 M1)', () => {
     });
     expect(storeRef.current?.getBuffer(sessionId)).toBe('B0B1B-LIVE-2B3');
     expect(storeRef.current?.getLastSeq(sessionId)).toBe(3);
+  });
+});
+
+describe('WorkbenchTerminalBuffersProvider first remote bind (R10 M1)', () => {
+  beforeEach(() => {
+    listenerHandlers.clear();
+    listMock.mockReset();
+    replayMock.mockReset();
+    listenMock.mockReset();
+    vi.useRealTimers();
+
+    listenMock.mockImplementation(
+      async (eventName: string, handler: EventHandler) => {
+        listenerHandlers.set(eventName, handler);
+        return () => {
+          listenerHandlers.delete(eventName);
+        };
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+
+  test('startup list local-only then first remote live forces replay and settles history', async () => {
+    const localSessionId = 'local-s1';
+    const remoteSessionId = 'remote:peer:s-remote';
+    const localAuthority = 'local-owner';
+    // 与后端 unit separator 合成格式一致
+    const remoteAuthority = 'localremote-R1';
+
+    // 真实生产合同：启动 list 无 projectId → 仅本机会话
+    listMock.mockResolvedValue([{ id: localSessionId }]);
+
+    const localBaseline = deferred<ReplayDto>();
+    const remoteReplay = deferred<ReplayDto>();
+    let replayCalls = 0;
+    const replayArgs: string[] = [];
+    replayMock.mockImplementation((sessionId: string) => {
+      replayCalls += 1;
+      replayArgs.push(sessionId);
+      if (sessionId === localSessionId) return localBaseline.promise;
+      return remoteReplay.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+
+    renderProvider(storeRef);
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+
+    // 本机 baseline 完成
+    await act(async () => {
+      localBaseline.resolve({
+        sessionId: localSessionId,
+        buffer: 'L-BASE',
+        truncated: false,
+        lastSeq: 3,
+        ownerInstanceId: localAuthority,
+      });
+      await localBaseline.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(localSessionId)).toBe('L-BASE');
+    });
+    // 启动阶段不得对远端 session 发起 baseline（list 没有它）
+    expect(replayArgs).toEqual([localSessionId]);
+    expect(replayCalls).toBe(1);
+
+    // 用户打开远端项目后首条 remote live 到达（无 prior baseline）
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId: remoteSessionId,
+          chunk: 'R-LIVE-5',
+          seq: 5,
+          ownerInstanceId: remoteAuthority,
+        },
+      });
+    });
+
+    // 必须强制 sessions.replay（禁止 light rebind needsReplay=false）
+    await waitFor(() => {
+      expect(replayCalls).toBeGreaterThanOrEqual(2);
+      expect(replayArgs).toContain(remoteSessionId);
+    });
+
+    // remote baseline 含 bridge 前历史；held live seq=5 在 cutover 后 settle
+    await act(async () => {
+      remoteReplay.resolve({
+        sessionId: remoteSessionId,
+        buffer: 'R0R1R2R3R4',
+        truncated: false,
+        lastSeq: 4,
+        ownerInstanceId: remoteAuthority,
+      });
+      await remoteReplay.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(remoteSessionId)).toBe('R0R1R2R3R4R-LIVE-5');
+      expect(storeRef.current?.getLastSeq(remoteSessionId)).toBe(5);
+    });
+
+    // 本机 buffer 不受影响
+    expect(storeRef.current?.getBuffer(localSessionId)).toBe('L-BASE');
+  });
+});
+
+describe('WorkbenchTerminalBuffersProvider recoverable replay (R10 M2)', () => {
+  beforeEach(() => {
+    listenerHandlers.clear();
+    listMock.mockReset();
+    replayMock.mockReset();
+    listenMock.mockReset();
+    // 先用 real timers 完成 listener/baseline 注册，再切 fake timers 控制退避。
+    vi.useRealTimers();
+
+    listenMock.mockImplementation(
+      async (eventName: string, handler: EventHandler) => {
+        listenerHandlers.set(eventName, handler);
+        return () => {
+          listenerHandlers.delete(eventName);
+        };
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+
+  test('three replay failures then recovery settles held via live cooldown path', async () => {
+    const sessionId = 'remote:peer:s-recover';
+    const authorityA = 'localremote-A';
+    const authorityB = 'localremote-B';
+
+    listMock.mockResolvedValue([{ id: sessionId }]);
+
+    let replayCalls = 0;
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      replayCalls += 1;
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+
+    renderProvider(storeRef);
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+
+    // launch baseline A 成功
+    await act(async () => {
+      expect(pendingReplays.length).toBeGreaterThanOrEqual(1);
+      pendingReplays[0]!.resolve({
+        sessionId,
+        buffer: 'A-BASE',
+        truncated: false,
+        lastSeq: 10,
+        ownerInstanceId: authorityA,
+      });
+      await pendingReplays[0]!.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('A-BASE');
+    });
+    const baselineCalls = replayCalls;
+
+    // 之后的失败/退避路径用 fake timers 精确控制
+    vi.useFakeTimers();
+
+    // A→B 切换触发 replay
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'B-HELD-3',
+          seq: 3,
+          ownerInstanceId: authorityB,
+        },
+      });
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+
+    // 三次立即失败（attempt 1/2/3）
+    for (let i = 0; i < 3; i += 1) {
+      const idx = pendingReplays.length - 1;
+      await act(async () => {
+        pendingReplays[idx]!.reject(new Error('replay_unavailable'));
+        await pendingReplays[idx]!.promise.catch(() => undefined);
+      });
+      if (i < 2) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(i === 0 ? 50 : 100);
+        });
+        expect(replayCalls).toBe(baselineCalls + 2 + i);
+      }
+    }
+
+    // 立即耗尽后进入 recoverable backoff（failures=3 → 1000ms）
+    const callsAfterImmediate = replayCalls;
+    expect(callsAfterImmediate).toBe(baselineCalls + 3);
+
+    // 在 cooldown 内的 live 不得再触发额外请求
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'B-HELD-4',
+          seq: 4,
+          ownerInstanceId: authorityB,
+        },
+      });
+    });
+    expect(replayCalls).toBe(callsAfterImmediate);
+
+    // 推进到 recovery backoff，timer 触发第 4 次请求
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(replayCalls).toBe(callsAfterImmediate + 1);
+
+    // 服务恢复：第 4 次 replay 成功，settle held
+    const successIdx = pendingReplays.length - 1;
+    await act(async () => {
+      pendingReplays[successIdx]!.resolve({
+        sessionId,
+        buffer: 'B0B1B2',
+        truncated: false,
+        lastSeq: 2,
+        ownerInstanceId: authorityB,
+      });
+      await pendingReplays[successIdx]!.promise;
+    });
+
+    expect(storeRef.current?.getBuffer(sessionId)).toBe('B0B1B2B-HELD-3B-HELD-4');
+    expect(storeRef.current?.getLastSeq(sessionId)).toBe(4);
   });
 });

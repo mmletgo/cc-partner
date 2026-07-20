@@ -9,13 +9,16 @@
  *   乱序 baseline 与 held 溢出不得静默丢 chunk：per-session cutover epoch + committed lastSeq
  *   拒绝更旧 cutover；held 仅在异步 baseline/replay 窗口收集，steady-state 不入 held；
  *   超限触发 re-baseline 而非 drop-oldest；ownerInstanceId 分代避免 owner 重启后 seq 冻结。
- *   **已绑定 authority 切换**（R9 M1）：抬 epoch + needsReplay=true + 暂存新 authority live，
- *   并立即 sessions.replay；仅接受匹配新 authority 的 replay，成功后 settle held。
+ *   **authority 绑定 / 切换**（R9 M1 + R10 M1）：首次绑定与已绑定切换一律抬 epoch +
+ *   needsReplay=true + 暂存新 authority live，并立即 sessions.replay；禁止 light rebind 且
+ *   needsReplay=false（启动 list 无 projectId 仅本地，远端历史不会出现在 launch baseline）。
+ *   **replay 失败恢复**（R10 M2）：同 epoch 立即最多 3 次；耗尽后 capped backoff 持续重试，
+ *   并允许后续 live 在 cooldown 后重新触发，直到成功或 session 被移除。
  *
  * Code Logic（这个模块做什么）:
  *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline replay；
  *   live 带 seq 的事件在 baseline 未 settle / needsReplay / replayInFlight 时写入有界 held；
- *   已绑定 authority 变化走 beginAuthorityChangeReplay → requestSessionReplay；
+ *   authority 变化走 beginAuthorityChangeReplay → requestSessionReplay（首次绑定亦强制）；
  *   resync/baseline 先 shouldAcceptTerminalCutover(authority)，再 applyTerminalBaselineCutover
  *   并 commitTerminalCutover(requestEpoch?, authorityId)；held 溢出先算 highWater 再清空
  *   held、beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch。
@@ -38,6 +41,9 @@ import {
   setTerminalCutoverReplayInFlight,
   shouldAcceptTerminalCutover,
   shouldCollectHeldLiveTerminalEvent,
+  shouldTriggerTerminalReplayRecovery,
+  terminalReplayRecoveryDelayMs,
+  TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS,
   type HeldLiveTerminalEvent,
   type SessionCutoverState,
   type WorkbenchTerminalBufferStore,
@@ -51,6 +57,21 @@ interface TauriInternalsWindow extends Window {
   __TAURI_INTERNALS__?: {
     transformCallback?: unknown;
   };
+}
+
+/**
+ * Business Logic（为什么需要这个接口）:
+ *   同 epoch 立即重试耗尽后，仍需跨 live 事件与 timer 共享失败计数与 cooldown，
+ *   避免永久静默缺口或每个 live chunk 狂刷 replay。
+ *
+ * Code Logic（这个接口做什么）:
+ *   consecutiveFailures 累计失败次数；nextRetryAt 为可 live 触发的最早时刻；
+ *   timerId 为可取消的恢复 setTimeout 句柄。
+ */
+interface SessionReplayRecoveryState {
+  consecutiveFailures: number;
+  nextRetryAt: number;
+  timerId: ReturnType<typeof setTimeout> | null;
 }
 
 export interface WorkbenchTerminalBuffersProviderProps {
@@ -104,6 +125,16 @@ export function WorkbenchTerminalBuffersProvider({
    *   sessionId → SessionCutoverState；removeBuffer 时删除条目。
    */
   const cutoverBySessionRef = useRef<Map<string, SessionCutoverState>>(new Map());
+  /**
+   * Business Logic（为什么需要这个 ref）:
+   *   R10 M2：三次立即失败后仍要可恢复重试，需跨 timer/live 共享失败计数与 cooldown。
+   *
+   * Code Logic（这个 ref 做什么）:
+   *   sessionId → SessionReplayRecoveryState；成功 cutover / removeBuffer / unmount 时清理。
+   */
+  const replayRecoveryBySessionRef = useRef<Map<string, SessionReplayRecoveryState>>(
+    new Map(),
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -121,6 +152,21 @@ export function WorkbenchTerminalBuffersProvider({
     return state;
   }, []);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   session 被移除或 Provider 卸载时，必须取消挂起的恢复 timer，避免泄漏与对已删 session 狂刷。
+   *
+   * Code Logic（这个函数做什么）:
+   *   clearTimeout 后从 map 删除该 session 的 recovery 条目。
+   */
+  const clearReplayRecovery = useCallback((sessionId: string): void => {
+    const entry = replayRecoveryBySessionRef.current.get(sessionId);
+    if (entry?.timerId != null) {
+      globalThis.clearTimeout(entry.timerId);
+    }
+    replayRecoveryBySessionRef.current.delete(sessionId);
+  }, []);
+
   const resetBuffer = useCallback((sessionId: string) => {
     store.reset(sessionId);
   }, [store]);
@@ -128,6 +174,11 @@ export function WorkbenchTerminalBuffersProvider({
   const removeBuffer = useCallback((sessionId: string) => {
     heldLiveBySessionRef.current.delete(sessionId);
     cutoverBySessionRef.current.delete(sessionId);
+    const entry = replayRecoveryBySessionRef.current.get(sessionId);
+    if (entry?.timerId != null) {
+      globalThis.clearTimeout(entry.timerId);
+    }
+    replayRecoveryBySessionRef.current.delete(sessionId);
     store.remove(sessionId);
   }, [store]);
 
@@ -145,7 +196,8 @@ export function WorkbenchTerminalBuffersProvider({
      *
      * Code Logic（这个函数做什么）:
      *   shouldAccept(authority) → held + applyTerminalBaselineCutover(authorityChanged) →
-     *   commitTerminalCutover(state, lastSeq, requestEpoch, authorityId) 回写 map。
+     *   commitTerminalCutover(state, lastSeq, requestEpoch, authorityId) 回写 map；
+     *   成功后清除该 session 的 replay recovery 状态。
      */
     const applyCutover = (
       sessionId: string,
@@ -178,20 +230,101 @@ export function WorkbenchTerminalBuffersProvider({
         sessionId,
         commitTerminalCutover(state, lastSeq, requestEpoch, authorityId),
       );
+      // 成功 baseline 后关闭可恢复重试闸门。
+      clearReplayRecovery(sessionId);
       return true;
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   三次立即失败后需按 capped backoff 继续请求，直到成功或 session 移除（R10 M2）。
+     *
+     * Code Logic（这个函数做什么）:
+     *   取消旧 timer → 按 consecutiveFailures 计算 delay → setTimeout 到期后若仍
+     *   needsReplay/同 epoch/非 inFlight 则 requestSessionReplay(attempt=1)。
+     */
+    const scheduleRecoverableReplay = (
+      sessionId: string,
+      requestEpoch: number,
+      consecutiveFailures: number,
+    ): void => {
+      const prev = replayRecoveryBySessionRef.current.get(sessionId);
+      if (prev?.timerId != null) {
+        globalThis.clearTimeout(prev.timerId);
+      }
+      const delayMs = terminalReplayRecoveryDelayMs(consecutiveFailures);
+      const nextRetryAt = Date.now() + delayMs;
+      const timerId = globalThis.setTimeout(() => {
+        if (cancelled) return;
+        const entry = replayRecoveryBySessionRef.current.get(sessionId);
+        if (entry) {
+          replayRecoveryBySessionRef.current.set(sessionId, {
+            ...entry,
+            timerId: null,
+          });
+        }
+        const latest = ensureCutoverState(sessionId);
+        if (
+          latest.needsReplay &&
+          latest.cutoverEpoch === requestEpoch &&
+          !latest.replayInFlight
+        ) {
+          requestSessionReplay(sessionId, requestEpoch, 1);
+        }
+      }, delayMs);
+      replayRecoveryBySessionRef.current.set(sessionId, {
+        consecutiveFailures,
+        nextRetryAt,
+        timerId,
+      });
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   立即重试耗尽后的恢复窗口内，后续 live 应能在 cooldown 后重新触发 replay，
+     *   而不是干等 timer 或永久 stalled（R10 M2）。
+     *
+     * Code Logic（这个函数做什么）:
+     *   仅当 recovery 条目存在、needsReplay、非 inFlight 且 cooldown 到期时：
+     *   取消 pending timer 并 requestSessionReplay(attempt=1)。
+     */
+    const maybeLiveTriggerReplayRecovery = (sessionId: string): void => {
+      const latest = ensureCutoverState(sessionId);
+      if (!latest.needsReplay || latest.replayInFlight) {
+        return;
+      }
+      const recovery = replayRecoveryBySessionRef.current.get(sessionId);
+      if (!recovery) {
+        return;
+      }
+      if (!shouldTriggerTerminalReplayRecovery(recovery.nextRetryAt, Date.now())) {
+        return;
+      }
+      if (recovery.timerId != null) {
+        globalThis.clearTimeout(recovery.timerId);
+      }
+      // 提前触发后刷新 cooldown，防止同波 live 连刷。
+      const delayMs = terminalReplayRecoveryDelayMs(recovery.consecutiveFailures);
+      replayRecoveryBySessionRef.current.set(sessionId, {
+        consecutiveFailures: recovery.consecutiveFailures,
+        nextRetryAt: Date.now() + delayMs,
+        timerId: null,
+      });
+      requestSessionReplay(sessionId, latest.cutoverEpoch, 1);
     };
 
     /**
      * Business Logic（为什么需要这个函数）:
      *   held 溢出或显式 re-baseline 时需拉 sessions.replay；同 session 不得并发狂刷，
      *   但 overflow 抬 epoch 后旧 in-flight 结果必须失效并在 settle 后补拉；
-     *   同 epoch 瞬时失败也不能立刻放弃，需有界重试以免永久缺口。
+     *   同 epoch 瞬时失败也不能立刻放弃，需有界立即重试 + 可恢复 backoff。
      *
      * Code Logic（这个函数做什么）:
      *   已有 replayInFlight 则仅依赖调用方已抬高的 epoch；否则标记 inFlight，
-     *   最多 3 次（含首次）await replay → applyCutover(requestEpoch)，失败间隔
-     *   50/100/200ms；finally 清 inFlight，若 needsReplay 且 epoch 已抬高则用新 epoch
-     *   再请求；同 epoch 最终失败则保留 needsReplay。
+     *   最多 TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS 次 await replay → applyCutover(requestEpoch)；
+     *   失败间隔由 terminalReplayRecoveryDelayMs 决定；finally 清 inFlight；
+     *   若 needsReplay 且 epoch 已抬高则用新 epoch 再请求；同 epoch 立即耗尽后
+     *   scheduleRecoverableReplay。
      */
     const requestSessionReplay = (
       sessionId: string,
@@ -238,19 +371,39 @@ export function WorkbenchTerminalBuffersProvider({
             cleared.cutoverEpoch > requestEpoch &&
             !cleared.replayInFlight
           ) {
+            // 新 epoch 重置失败计数。
+            clearReplayRecovery(sessionId);
             requestSessionReplay(sessionId, cleared.cutoverEpoch);
             return;
           }
 
-          // 同 epoch 失败：有界重试（最多 3 次，含首次），避免瞬时失败变永久缺口。
+          if (applySucceeded || !cleared.needsReplay) {
+            clearReplayRecovery(sessionId);
+            return;
+          }
+
           if (
-            !applySucceeded &&
-            cleared.needsReplay &&
-            cleared.cutoverEpoch === requestEpoch &&
-            !cleared.replayInFlight &&
-            attempt < 3
+            cleared.cutoverEpoch !== requestEpoch ||
+            cleared.replayInFlight
           ) {
-            const delayMs = attempt === 1 ? 50 : attempt === 2 ? 100 : 200;
+            return;
+          }
+
+          const prev = replayRecoveryBySessionRef.current.get(sessionId);
+          const consecutiveFailures = (prev?.consecutiveFailures ?? 0) + 1;
+
+          // 同 epoch 有界立即重试（最多 3 次，含首次）。
+          // 立即窗口内也写入 cooldown，防止 held live 在 attempt 间隙狂刷。
+          if (attempt < TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS) {
+            const delayMs = terminalReplayRecoveryDelayMs(attempt);
+            if (prev?.timerId != null) {
+              globalThis.clearTimeout(prev.timerId);
+            }
+            replayRecoveryBySessionRef.current.set(sessionId, {
+              consecutiveFailures,
+              nextRetryAt: Date.now() + delayMs,
+              timerId: null,
+            });
             globalThis.setTimeout(() => {
               if (cancelled) return;
               const latest = ensureCutoverState(sessionId);
@@ -262,7 +415,11 @@ export function WorkbenchTerminalBuffersProvider({
                 requestSessionReplay(sessionId, requestEpoch, attempt + 1);
               }
             }, delayMs);
+            return;
           }
+
+          // 立即耗尽：进入 capped backoff 可恢复重试，直到成功或 session 移除。
+          scheduleRecoverableReplay(sessionId, requestEpoch, consecutiveFailures);
         }
       })();
     };
@@ -290,6 +447,7 @@ export function WorkbenchTerminalBuffersProvider({
         highWater,
       );
       cutoverBySessionRef.current.set(sessionId, next);
+      clearReplayRecovery(sessionId);
       requestSessionReplay(sessionId, requestEpoch);
     };
 
@@ -321,22 +479,16 @@ export function WorkbenchTerminalBuffersProvider({
               : null;
           if (typeof seq === 'number' && Number.isFinite(seq)) {
             const cutover = ensureCutoverState(sessionId);
-            // 已绑定 authority 切换：强制 re-baseline（远端 broadcast 不会补断线窗口）。
+            // 首次绑定 / 已绑定切换：一律强制 re-baseline（禁止 light rebind needsReplay=false）。
             const authoritySwitch = beginAuthorityChangeReplay(cutover, authorityId);
             if (authoritySwitch) {
               heldLiveBySessionRef.current.delete(sessionId);
               cutoverBySessionRef.current.set(sessionId, authoritySwitch.state);
+              clearReplayRecovery(sessionId);
               requestSessionReplay(sessionId, authoritySwitch.requestEpoch);
-            } else if (isTerminalAuthorityChange(cutover, authorityId)) {
-              // 首次绑定：轻量 rebind；launch baseline / resync 负责历史。
-              heldLiveBySessionRef.current.delete(sessionId);
-              cutoverBySessionRef.current.set(sessionId, {
-                ...cutover,
-                authorityId: authorityId ?? cutover.authorityId,
-                committedBaselineLastSeq: 0,
-                overflowHighWaterSeq: 0,
-                needsReplay: false,
-              });
+            } else {
+              // 同 authority 下：若处于恢复窗口，live 可 cooldown 触发再请求。
+              maybeLiveTriggerReplayRecovery(sessionId);
             }
             const collectState = ensureCutoverState(sessionId);
             if (shouldCollectHeldLiveTerminalEvent(collectState, baselineSettled)) {
@@ -372,11 +524,12 @@ export function WorkbenchTerminalBuffersProvider({
               ? payload.ownerInstanceId
               : null;
           const cutover = ensureCutoverState(sessionId);
-          // resync 自身携带 baseline：已绑定 authority 切换时抬 epoch 作废 in-flight，
+          // resync 自身携带 baseline：首次绑定/已绑定切换时抬 epoch 作废 in-flight，
           // 但 needsReplay 由本次 applyCutover 的 requestEpoch 清掉（不是 live 强制 replay）。
           const authoritySwitch = beginAuthorityChangeReplay(cutover, authorityId);
           if (authoritySwitch) {
             heldLiveBySessionRef.current.delete(sessionId);
+            clearReplayRecovery(sessionId);
             cutoverBySessionRef.current.set(sessionId, {
               ...authoritySwitch.state,
               // resync 即 baseline：不需要再拉 sessions.replay
@@ -390,17 +543,6 @@ export function WorkbenchTerminalBuffersProvider({
               authorityId,
             );
             return;
-          }
-          if (isTerminalAuthorityChange(cutover, authorityId)) {
-            // 首次绑定：轻量 rebind 再 cutover。
-            heldLiveBySessionRef.current.delete(sessionId);
-            cutoverBySessionRef.current.set(sessionId, {
-              ...cutover,
-              authorityId: authorityId ?? cutover.authorityId,
-              committedBaselineLastSeq: 0,
-              overflowHighWaterSeq: 0,
-              needsReplay: false,
-            });
           }
           applyCutover(sessionId, payload.buffer ?? '', lastSeq, undefined, authorityId);
         });
@@ -416,6 +558,7 @@ export function WorkbenchTerminalBuffersProvider({
       }
 
       // baseline：补上 React 挂载前已从 owner ring 发出的输出，并建立 lastSeq cutover。
+      // 注意：sessions.list() 无 projectId 时仅枚举本机；远端 session 由后续 live/resync 强制 replay。
       try {
         const sessions = await workbenchApi.sessions.list();
         if (cancelled) return;
@@ -455,8 +598,14 @@ export function WorkbenchTerminalBuffersProvider({
       cancelled = true;
       unlistenOutput?.();
       unlistenResync?.();
+      for (const [sessionId, entry] of replayRecoveryBySessionRef.current) {
+        if (entry.timerId != null) {
+          globalThis.clearTimeout(entry.timerId);
+        }
+        replayRecoveryBySessionRef.current.delete(sessionId);
+      }
     };
-  }, [ensureCutoverState, store]);
+  }, [clearReplayRecovery, ensureCutoverState, store]);
 
   const value = useMemo<WorkbenchTerminalBuffersContextValue>(
     () => ({
