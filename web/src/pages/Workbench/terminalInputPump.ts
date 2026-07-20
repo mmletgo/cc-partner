@@ -104,8 +104,9 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
    *   发到可能已执行/可能丢失的命令前缀后面。
    *
    * Code Logic（这个函数做什么）:
-   *   循环取出完整 pending 作为 batch 调用 options.write；catch 后清空 pending、封锁
-   *   lane 并回调 onWriteError；generation 变化时保留 barrier 至本 drain 结束。
+   *   循环取出完整 pending 作为 batch 调用 options.write；catch 时若 disposed 或
+   *   generation 已变则 break 不碰 pending/blocked/onWriteError，否则清空 pending、
+   *   封锁 lane 并回调 onWriteError；generation 变化时保留 barrier 至本 drain 结束。
    */
   const drain = async (sessionId: string, lane: InputLane, generation: number): Promise<void> => {
     lane.running = true;
@@ -120,7 +121,12 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
       try {
         await options.write(sessionId, batch);
       } catch (error) {
-        // 失败批次永不自动重放；立刻清空尚未发送的后缀并封锁 lane。
+        // 旧 generation / 已 dispose 的 in-flight reject 不得清掉新 generation 的 pending，
+        // 也不得 block 或上报错误；由下方 generation-mismatch 分支启动新 drain。
+        if (disposed || lane.generation !== generation) {
+          break;
+        }
+        // 当前 generation 失败批次永不自动重放；立刻清空尚未发送的后缀并封锁 lane。
         lane.pending = '';
         lane.blocked = true;
         options.onWriteError?.(sessionId, error);

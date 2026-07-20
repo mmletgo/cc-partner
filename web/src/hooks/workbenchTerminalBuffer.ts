@@ -105,19 +105,31 @@ export interface WorkbenchTerminalBufferStore {
   /**
    * Business Logic（为什么需要这个函数）:
    *   live terminal-output 可能带 seq；<= lastSeq 的事件在 baseline/resync 后必须丢弃。
+   *   owner 切换时必须按 authority 重置 lastSeq 基线，否则新 owner 低 seq 会被当重复丢弃。
    *
    * Code Logic（这个函数做什么）:
-   *   可选 seq；若提供且 seq<=session.lastSeq 则 no-op；成功 append 后推进 lastSeq。
+   *   可选 seq / authorityId；authority 变更时先把 lastSeq 置 0 再比较；
+   *   若提供 seq 且 seq<=session.lastSeq 则 no-op；成功 append 后推进 lastSeq。
    */
-  append: (sessionId: string, chunk: string, seq?: number) => void;
+  append: (
+    sessionId: string,
+    chunk: string,
+    seq?: number,
+    authorityId?: string | null,
+  ) => void;
   /**
    * Business Logic（为什么需要这个函数）:
-   *   resync/baseline 写入完整 buffer 后必须记录 lastSeq 作为 cutover。
+   *   resync/baseline 写入完整 buffer 后必须记录 lastSeq 作为 cutover，并绑定 stream authority。
    *
    * Code Logic（这个函数做什么）:
-   *   提升 generation、seed buffer，并设置 lastSeq（缺省 0）。
+   *   提升 generation、seed buffer，设置 lastSeq（缺省 0）与可选 authorityId。
    */
-  reset: (sessionId: string, buffer?: string, lastSeq?: number) => void;
+  reset: (
+    sessionId: string,
+    buffer?: string,
+    lastSeq?: number,
+    authorityId?: string | null,
+  ) => void;
   remove: (sessionId: string) => void;
 }
 
@@ -146,6 +158,8 @@ interface SessionRingBuffer {
   appendId: number;
   /** owner replay/output 的 lastSeq 上沿（用于 stream cutover） */
   lastSeq: number;
+  /** 当前 ring 绑定的 ownerInstanceId（null 表示尚未绑定） */
+  authorityId: string | null;
 }
 
 const EMPTY_SNAPSHOT: TerminalBufferSnapshot = {
@@ -175,10 +189,11 @@ export const MAX_HELD_LIVE_TERMINAL_EVENTS = 256;
  *   乱序 baseline/resync 与 held 溢出 re-baseline 并发时，必须按 session 单调拒绝
  *   更旧的 cutover，否则已提交的较新 baseline 会被晚到的旧 A 再次 reset 抹掉；
  *   溢出后还要记住 high-water seq，避免无 epoch 的旧 launch baseline 误清 needsReplay。
+ *   owner 重启后 reader seq 从 0 起算，必须按 ownerInstanceId 分代，否则新低 seq 被当重复丢弃。
  *
  * Code Logic（这个接口做什么）:
- *   记录已提交 baseline lastSeq、cutover 代数 epoch、needsReplay、replayInFlight，
- *   以及 overflowHighWaterSeq（0 表示无溢出水位）。
+ *   记录已提交 baseline lastSeq、cutover 代数 epoch、needsReplay、replayInFlight、
+ *   overflowHighWaterSeq（0 表示无溢出水位），以及 stream authority（ownerInstanceId）。
  */
 export interface SessionCutoverState {
   committedBaselineLastSeq: number;
@@ -194,6 +209,14 @@ export interface SessionCutoverState {
    *   溢出时取 max(已有水位, 被清空 held 的最大有限 seq, 0)；0 表示无溢出保护水位。
    */
   overflowHighWaterSeq: number;
+  /**
+   * Business Logic（为什么需要这个字段）:
+   *   持久 tmux session 在新 owner 恢复时 output seq 从 0 重启；只比 lastSeq 会永久冻结终端。
+   *
+   * Code Logic（这个字段做什么）:
+   *   最近一次已提交 cutover/live 的 ownerInstanceId；null 表示尚未绑定 authority。
+   */
+  authorityId: string | null;
 }
 
 /**
@@ -211,24 +234,48 @@ export function createEmptySessionCutoverState(): SessionCutoverState {
     needsReplay: false,
     replayInFlight: false,
     overflowHighWaterSeq: 0,
+    authorityId: null,
   };
 }
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   晚到的旧 baseline A 或 held 溢出后作废的 in-flight replay 不得 clobber 已提交较新 B。
+ *   判断 cutover/live 是否切换到新的 owner stream authority。
  *
  * Code Logic（这个函数做什么）:
- *   lastSeq 非有限 → reject；lastSeq < committedBaselineLastSeq → reject；
+ *   非空 authorityId 且与 state.authorityId 不同（含 state 尚为 null）→ true。
+ */
+export function isTerminalAuthorityChange(
+  state: SessionCutoverState,
+  authorityId?: string | null,
+): boolean {
+  if (typeof authorityId !== 'string' || authorityId.length === 0) {
+    return false;
+  }
+  return state.authorityId !== authorityId;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   晚到的旧 baseline A 或 held 溢出后作废的 in-flight replay 不得 clobber 已提交较新 B；
+ *   但 owner 切换时新 authority 的较低 lastSeq 必须接受，否则终端永久冻结。
+ *
+ * Code Logic（这个函数做什么）:
+ *   lastSeq 非有限 → reject；authority 变更 → accept；
+ *   lastSeq < committedBaselineLastSeq → reject；
  *   若提供 requestEpoch 且 requestEpoch < cutoverEpoch → reject；否则 accept。
  */
 export function shouldAcceptTerminalCutover(
   state: SessionCutoverState,
   lastSeq: number,
   requestEpoch?: number,
+  authorityId?: string | null,
 ): boolean {
   if (typeof lastSeq !== 'number' || !Number.isFinite(lastSeq)) {
     return false;
+  }
+  if (isTerminalAuthorityChange(state, authorityId)) {
+    return true;
   }
   if (lastSeq < state.committedBaselineLastSeq) {
     return false;
@@ -241,6 +288,23 @@ export function shouldAcceptTerminalCutover(
     return false;
   }
   return true;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   steady-state live 不得无限写入 held；仅异步 baseline/replay 窗口需要暂存。
+ *
+ * Code Logic（这个函数做什么）:
+ *   baseline 未 settle → true；needsReplay 或 replayInFlight → true；否则 false。
+ */
+export function shouldCollectHeldLiveTerminalEvent(
+  state: SessionCutoverState,
+  baselineSettled: boolean,
+): boolean {
+  if (!baselineSettled) {
+    return true;
+  }
+  return state.needsReplay || state.replayInFlight;
 }
 
 /**
@@ -277,26 +341,34 @@ export function shouldClearTerminalNeedsReplay(
  * Business Logic（为什么需要这个函数）:
  *   成功 apply baseline/resync 后必须抬高已提交 lastSeq；但只有在当前 epoch 匹配
  *   或 lastSeq 盖住 overflow high-water 时才清 needsReplay，避免 stale baseline 误关闸。
+ *   owner 切换时同时绑定新 authorityId，作为后续 seq 比较基线。
  *
  * Code Logic（这个函数做什么）:
- *   总是更新 committedBaselineLastSeq=lastSeq；仅当 shouldClearTerminalNeedsReplay
- *   为真时置 needsReplay=false 且 overflowHighWaterSeq=0；保留 cutoverEpoch/replayInFlight。
+ *   总是更新 committedBaselineLastSeq=lastSeq；非空 authorityId 写入 state；
+ *   仅当 shouldClearTerminalNeedsReplay 为真时置 needsReplay=false 且 overflowHighWaterSeq=0；
+ *   保留 cutoverEpoch/replayInFlight。
  */
 export function commitTerminalCutover(
   state: SessionCutoverState,
   lastSeq: number,
   requestEpoch?: number,
+  authorityId?: string | null,
 ): SessionCutoverState {
   const clearNeedsReplay = shouldClearTerminalNeedsReplay(
     state,
     lastSeq,
     requestEpoch,
   );
+  const nextAuthority =
+    typeof authorityId === 'string' && authorityId.length > 0
+      ? authorityId
+      : state.authorityId;
   return {
     ...state,
     committedBaselineLastSeq: lastSeq,
     needsReplay: clearNeedsReplay ? false : state.needsReplay,
     overflowHighWaterSeq: clearNeedsReplay ? 0 : state.overflowHighWaterSeq,
+    authorityId: nextAuthority,
   };
 }
 
@@ -352,10 +424,13 @@ export function setTerminalCutoverReplayInFlight(
  * Business Logic（为什么需要这个函数）:
  *   过期 baseline/resync 的 reset 会抹掉 reset 前已 append 的更新 live chunk，
  *   而 owner relay 不会重发这些 seq；cutover 必须在 reset 后把 held 中更新的事件写回。
+ *   owner 切换时用新 authority 重置 seq 基线，旧 authority 的 held 不得写回。
  *
  * Code Logic（这个函数做什么）:
- *   先 store.reset(sessionId, buffer, lastSeq)；再按序对 held 中 seq > lastSeq 的事件
- *   store.append(sessionId, chunk, seq)；返回仍应保留跟踪的 pruned held 列表。
+ *   先 store.reset(sessionId, buffer, lastSeq, authorityId)；
+ *   authority 变更时丢弃全部 held 返回 []；
+ *   否则按序对 held 中 seq > lastSeq 的事件 store.append(..., authorityId)；
+ *   返回仍应保留跟踪的 pruned held 列表。
  *   调用方必须先 shouldAcceptTerminalCutover 再调用本函数。
  */
 export function applyTerminalBaselineCutover(
@@ -364,8 +439,14 @@ export function applyTerminalBaselineCutover(
   buffer: string,
   lastSeq: number,
   heldLiveEvents: readonly HeldLiveTerminalEvent[],
+  authorityId?: string | null,
+  authorityChanged = false,
 ): HeldLiveTerminalEvent[] {
-  store.reset(sessionId, buffer, lastSeq);
+  store.reset(sessionId, buffer, lastSeq, authorityId);
+  if (authorityChanged) {
+    // 旧 owner 的 held seq 与新 stream 不可比，全部丢弃。
+    return [];
+  }
   const pruned: HeldLiveTerminalEvent[] = [];
   for (const event of heldLiveEvents) {
     if (typeof event.seq !== 'number' || !Number.isFinite(event.seq)) {
@@ -374,7 +455,7 @@ export function applyTerminalBaselineCutover(
     if (event.seq <= lastSeq) {
       continue;
     }
-    store.append(sessionId, event.chunk, event.seq);
+    store.append(sessionId, event.chunk, event.seq, authorityId);
     pruned.push(event);
   }
   return pruned;
@@ -477,6 +558,7 @@ function createEmptySessionBuffer(): SessionRingBuffer {
     generation: 0,
     appendId: 0,
     lastSeq: 0,
+    authorityId: null,
   };
 }
 
@@ -502,6 +584,7 @@ function createSessionBufferFromString(content: string): SessionRingBuffer {
     generation: 0,
     appendId: 0,
     lastSeq: 0,
+    authorityId: null,
   };
 }
 
@@ -838,10 +921,17 @@ export function createWorkbenchTerminalBufferStore(
         }
       };
     },
-    append(sessionId, chunk, seq) {
+    append(sessionId, chunk, seq, authorityId) {
       // 空 chunk 不改内容，也不发布 delta / schedule notify
       if (chunk.length === 0) return;
       const session = ensureSession(sessionId);
+      if (typeof authorityId === 'string' && authorityId.length > 0) {
+        if (session.authorityId !== authorityId) {
+          // 新 owner stream：seq 从 0 起算，必须重置比较基线。
+          session.authorityId = authorityId;
+          session.lastSeq = 0;
+        }
+      }
       if (typeof seq === 'number' && Number.isFinite(seq) && seq <= session.lastSeq) {
         // baseline/resync 已包含该 seq；丢弃重复 live 事件
         return;
@@ -863,13 +953,16 @@ export function createWorkbenchTerminalBufferStore(
       });
       scheduleNotify(sessionId, session);
     },
-    reset(sessionId, buffer = '', lastSeq = 0) {
+    reset(sessionId, buffer = '', lastSeq = 0, authorityId) {
       const session = ensureSession(sessionId);
       cancelScheduledFrame(session);
       session.generation += 1;
       session.appendId = 0;
       session.lastSeq =
         typeof lastSeq === 'number' && Number.isFinite(lastSeq) && lastSeq > 0 ? lastSeq : 0;
+      if (typeof authorityId === 'string' && authorityId.length > 0) {
+        session.authorityId = authorityId;
+      }
       seedSessionBuffer(session, buffer);
       // reset 本身不伪造 live delta；只同步通知 reset listeners 再立即 bump revision
       notifyReset(sessionId);
@@ -883,6 +976,7 @@ export function createWorkbenchTerminalBufferStore(
       existing.generation += 1;
       existing.appendId = 0;
       existing.lastSeq = 0;
+      existing.authorityId = null;
       notifyReset(sessionId);
       sessions.set(sessionId, {
         chunks: [],
@@ -895,6 +989,7 @@ export function createWorkbenchTerminalBufferStore(
         generation: existing.generation,
         appendId: 0,
         lastSeq: 0,
+        authorityId: null,
       });
       notify(sessionId);
     },

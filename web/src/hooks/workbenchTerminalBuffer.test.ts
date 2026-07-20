@@ -7,6 +7,7 @@ import {
   commitTerminalCutover,
   createEmptySessionCutoverState,
   createWorkbenchTerminalBufferStore,
+  isTerminalAuthorityChange,
   MAX_HELD_LIVE_TERMINAL_EVENTS,
   MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
   removeWorkbenchTerminalBuffer,
@@ -14,6 +15,7 @@ import {
   setTerminalCutoverReplayInFlight,
   shouldAcceptTerminalCutover,
   shouldClearTerminalNeedsReplay,
+  shouldCollectHeldLiveTerminalEvent,
   type HeldLiveTerminalEvent,
   type TerminalBufferDelta,
   type TerminalFrameScheduler,
@@ -763,5 +765,80 @@ describe('session cutover epoch / committed baseline', () => {
     state = commitTerminalCutover(state, 70, overflow.requestEpoch);
     expect(state.needsReplay).toBe(false);
     expect(state.overflowHighWaterSeq).toBe(0);
+  });
+
+  test('owner authority change accepts lower lastSeq and resets store baseline', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    let state = createEmptySessionCutoverState();
+
+    // owner A: lastSeq 推进到 100
+    expect(shouldAcceptTerminalCutover(state, 100, undefined, 'owner-a')).toBe(true);
+    applyTerminalBaselineCutover(store, 's1', 'A-BASE', 100, [], 'owner-a', true);
+    state = commitTerminalCutover(state, 100, undefined, 'owner-a');
+    store.append('s1', 'a-live', 101, 'owner-a');
+    expect(store.getLastSeq('s1')).toBe(101);
+    expect(state.authorityId).toBe('owner-a');
+    expect(isTerminalAuthorityChange(state, 'owner-b')).toBe(true);
+
+    // owner B 以 lastSeq=1 到来：同 sessionId 但 authority 变更必须 accept
+    expect(shouldAcceptTerminalCutover(state, 1, undefined, 'owner-b')).toBe(true);
+    const pruned = applyTerminalBaselineCutover(
+      store,
+      's1',
+      'B-BASE',
+      1,
+      [{ chunk: 'stale-a', seq: 102 }],
+      'owner-b',
+      true,
+    );
+    expect(pruned).toEqual([]);
+    state = commitTerminalCutover(state, 1, undefined, 'owner-b');
+    expect(store.getBuffer('s1')).toBe('B-BASE');
+    expect(store.getLastSeq('s1')).toBe(1);
+    expect(state.authorityId).toBe('owner-b');
+    expect(state.committedBaselineLastSeq).toBe(1);
+
+    // 后续 live 从新 authority 的 seq=2 起可写
+    store.append('s1', 'b-live', 2, 'owner-b');
+    expect(store.getBuffer('s1')).toBe('B-BASEb-live');
+    expect(store.getLastSeq('s1')).toBe(2);
+  });
+
+  test('shouldCollectHeldLive only during baseline window or replay', () => {
+    const idle = createEmptySessionCutoverState();
+    expect(shouldCollectHeldLiveTerminalEvent(idle, false)).toBe(true);
+    expect(shouldCollectHeldLiveTerminalEvent(idle, true)).toBe(false);
+
+    let replaying = createEmptySessionCutoverState();
+    replaying = beginHeldOverflowReplay(replaying, 10).state;
+    expect(shouldCollectHeldLiveTerminalEvent(replaying, true)).toBe(true);
+
+    let inFlight = createEmptySessionCutoverState();
+    inFlight = setTerminalCutoverReplayInFlight(inFlight, true);
+    expect(shouldCollectHeldLiveTerminalEvent(inFlight, true)).toBe(true);
+  });
+
+  test('steady-state append does not require held growth beyond 256 without replay', () => {
+    // Provider 决策合同：baselineSettled 且 !needsReplay && !replayInFlight 时
+    // 不得把 live 写入 held；因此 >256 稳态 chunk 不会触发 overflow re-baseline。
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    let state = createEmptySessionCutoverState();
+    state = commitTerminalCutover(state, 0, undefined, 'owner-a');
+    expect(shouldCollectHeldLiveTerminalEvent(state, true)).toBe(false);
+
+    const total = MAX_HELD_LIVE_TERMINAL_EVENTS + 20;
+    for (let i = 1; i <= total; i += 1) {
+      store.append('s1', `c${i}`, i, 'owner-a');
+    }
+    expect(store.getLastSeq('s1')).toBe(total);
+    // 无 needsReplay：不需要 re-baseline
+    expect(state.needsReplay).toBe(false);
+    expect(state.cutoverEpoch).toBe(0);
   });
 });

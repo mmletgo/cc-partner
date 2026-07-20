@@ -7,15 +7,15 @@
  *   桌面 GUI 在 React 挂载前已从 owner stream 转发 terminal-output，因此 Provider 必须
  *   listener-first + baseline replay，并用 lastSeq 丢弃 resync 后的重复 live 事件。
  *   乱序 baseline 与 held 溢出不得静默丢 chunk：per-session cutover epoch + committed lastSeq
- *   拒绝更旧 cutover；held 超限触发 re-baseline 而非 drop-oldest；溢出 high-water 防止
- *   无 epoch 的旧 launch baseline 误清 needsReplay 后留下永久缺口。
+ *   拒绝更旧 cutover；held 仅在异步 baseline/replay 窗口收集，steady-state 不入 held；
+ *   超限触发 re-baseline 而非 drop-oldest；ownerInstanceId 分代避免 owner 重启后 seq 冻结。
  *
  * Code Logic（这个模块做什么）:
  *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline replay；
- *   live 带 seq 的事件写入有界 held map；resync/baseline 先 shouldAcceptTerminalCutover，
- *   再 applyTerminalBaselineCutover 并 commitTerminalCutover(requestEpoch?)；held 溢出
- *   先算 highWater 再清空 held、beginHeldOverflowReplay 后 sessions.replay，in-flight
- *   绑定 requestEpoch，失败时同 epoch 有界重试。
+ *   live 带 seq 的事件在 baseline 未 settle / needsReplay / replayInFlight 时写入有界 held；
+ *   resync/baseline 先 shouldAcceptTerminalCutover(authority)，再 applyTerminalBaselineCutover
+ *   并 commitTerminalCutover(requestEpoch?, authorityId)；held 溢出先算 highWater 再清空
+ *   held、beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -29,9 +29,11 @@ import {
   commitTerminalCutover,
   createEmptySessionCutoverState,
   createWorkbenchTerminalBufferStore,
+  isTerminalAuthorityChange,
   MAX_HELD_LIVE_TERMINAL_EVENTS,
   setTerminalCutoverReplayInFlight,
   shouldAcceptTerminalCutover,
+  shouldCollectHeldLiveTerminalEvent,
   type HeldLiveTerminalEvent,
   type SessionCutoverState,
   type WorkbenchTerminalBufferStore,
@@ -134,22 +136,25 @@ export function WorkbenchTerminalBuffersProvider({
     /**
      * Business Logic（为什么需要这个函数）:
      *   cutover 路径（resync / baseline replay）不能只 reset，且不能接受更旧 lastSeq/epoch；
-     *   commit 时必须把 requestEpoch 传给 helper，否则 stale 无 epoch baseline 会误清 needsReplay。
+     *   owner 切换时必须接受新 authority 的较低 lastSeq；commit 时必须把 requestEpoch 与
+     *   authorityId 传给 helper，否则 stale 无 epoch baseline 会误清 needsReplay 或冻结终端。
      *
      * Code Logic（这个函数做什么）:
-     *   shouldAccept → held + applyTerminalBaselineCutover →
-     *   commitTerminalCutover(state, lastSeq, requestEpoch) 回写 map。
+     *   shouldAccept(authority) → held + applyTerminalBaselineCutover(authorityChanged) →
+     *   commitTerminalCutover(state, lastSeq, requestEpoch, authorityId) 回写 map。
      */
     const applyCutover = (
       sessionId: string,
       buffer: string,
       lastSeq: number,
       requestEpoch?: number,
+      authorityId?: string | null,
     ): boolean => {
       const state = ensureCutoverState(sessionId);
-      if (!shouldAcceptTerminalCutover(state, lastSeq, requestEpoch)) {
+      if (!shouldAcceptTerminalCutover(state, lastSeq, requestEpoch, authorityId)) {
         return false;
       }
+      const authorityChanged = isTerminalAuthorityChange(state, authorityId);
       const held = heldLiveBySessionRef.current.get(sessionId) ?? [];
       const pruned = applyTerminalBaselineCutover(
         store,
@@ -157,6 +162,8 @@ export function WorkbenchTerminalBuffersProvider({
         buffer,
         lastSeq,
         held,
+        authorityId,
+        authorityChanged,
       );
       if (pruned.length === 0) {
         heldLiveBySessionRef.current.delete(sessionId);
@@ -165,7 +172,7 @@ export function WorkbenchTerminalBuffersProvider({
       }
       cutoverBySessionRef.current.set(
         sessionId,
-        commitTerminalCutover(state, lastSeq, requestEpoch),
+        commitTerminalCutover(state, lastSeq, requestEpoch, authorityId),
       );
       return true;
     };
@@ -281,20 +288,42 @@ export function WorkbenchTerminalBuffersProvider({
      *   必须先挂 listener 再 baseline，避免 subscribe 与 replay 之间的 live 输出永久丢失。
      *
      * Code Logic（这个函数做什么）:
-     *   await 两个 listen；output 暂存带 seq live 后 append，超限走 overflow re-baseline；
-     *   resync/baseline 走 cutover；随后 list 全部 session 并逐个 replay baseline。
+     *   await 两个 listen；output 仅在 baseline 窗口/needsReplay/replayInFlight 时 held，
+     *   再 append（带 authority）；超限走 overflow re-baseline；resync/baseline 走 cutover；
+     *   随后 list 全部 session 并逐个 replay baseline，完成后标记 baselineSettled。
      */
     const setup = async (): Promise<void> => {
+      // baseline 未 settle 前 live 可能先于 replay 到达，必须 held；settle 后清空 held 路径。
+      let baselineSettled = false;
       try {
-        unlistenOutput = await listen<WorkbenchTerminalOutputEvent>(
-          'workbench:terminal-output',
-          (event) => {
-            const payload = event.payload;
-            if (!payload?.sessionId) return;
-            const sessionId = payload.sessionId;
-            const chunk = payload.chunk ?? '';
-            const seq = payload.seq;
-            if (typeof seq === 'number' && Number.isFinite(seq)) {
+        unlistenOutput = await listen<
+          WorkbenchTerminalOutputEvent & { ownerInstanceId?: string }
+        >('workbench:terminal-output', (event) => {
+          const payload = event.payload;
+          if (!payload?.sessionId) return;
+          const sessionId = payload.sessionId;
+          const chunk = payload.chunk ?? '';
+          const seq = payload.seq;
+          const authorityId =
+            typeof payload.ownerInstanceId === 'string' &&
+            payload.ownerInstanceId.length > 0
+              ? payload.ownerInstanceId
+              : null;
+          if (typeof seq === 'number' && Number.isFinite(seq)) {
+            const cutover = ensureCutoverState(sessionId);
+            if (isTerminalAuthorityChange(cutover, authorityId)) {
+              // live 先于 resync 到达新 owner 时：清空旧 held 与 lastSeq 基线，绑定新 authority。
+              heldLiveBySessionRef.current.delete(sessionId);
+              cutoverBySessionRef.current.set(sessionId, {
+                ...cutover,
+                authorityId: authorityId ?? cutover.authorityId,
+                committedBaselineLastSeq: 0,
+                overflowHighWaterSeq: 0,
+                needsReplay: false,
+              });
+            }
+            const collectState = ensureCutoverState(sessionId);
+            if (shouldCollectHeldLiveTerminalEvent(collectState, baselineSettled)) {
               const held =
                 heldLiveBySessionRef.current.get(sessionId) ?? [];
               held.push({ chunk, seq });
@@ -305,13 +334,14 @@ export function WorkbenchTerminalBuffersProvider({
                 heldLiveBySessionRef.current.set(sessionId, held);
               }
             }
-            store.append(sessionId, chunk, seq);
-          },
-        );
+          }
+          store.append(sessionId, chunk, seq, authorityId);
+        });
         unlistenResync = await listen<{
           sessionId?: string;
           buffer?: string;
           lastSeq?: number;
+          ownerInstanceId?: string;
         }>('workbench:terminal-resync', (event) => {
           const payload = event.payload;
           const sessionId = payload.sessionId;
@@ -320,7 +350,12 @@ export function WorkbenchTerminalBuffersProvider({
             typeof payload.lastSeq === 'number' && Number.isFinite(payload.lastSeq)
               ? payload.lastSeq
               : 0;
-          applyCutover(sessionId, payload.buffer ?? '', lastSeq);
+          const authorityId =
+            typeof payload.ownerInstanceId === 'string' &&
+            payload.ownerInstanceId.length > 0
+              ? payload.ownerInstanceId
+              : null;
+          applyCutover(sessionId, payload.buffer ?? '', lastSeq, undefined, authorityId);
         });
       } catch {
         // 非 Tauri 或 listen 失败：不 baseline
@@ -350,6 +385,10 @@ export function WorkbenchTerminalBuffersProvider({
         );
       } catch {
         // list 失败：依赖后续 terminal-resync 与项目 loadSessions 路径闭合 race。
+      } finally {
+        if (!cancelled) {
+          baselineSettled = true;
+        }
       }
     };
 

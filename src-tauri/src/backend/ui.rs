@@ -315,8 +315,8 @@ pub async fn apply_gui_relay_message_with_cancel(
 ///     部分事件需要把 owner/sequence 并入 payload 供前端 handshake 去重；其余事件原样转发。
 ///
 /// Code Logic（这个函数做什么）:
-///     operational:notification 与 workbench:agent-runtime 合并 ownerInstanceId/sequence；
-///     其它事件直接 `ui.emit`。
+///     operational:notification / workbench:agent-runtime / workbench:terminal-output
+///     合并 ownerInstanceId（后两者还带 event-bus sequence）；其余事件原样转发。
 fn emit_gui_relay_event(
     ui: &dyn BackendUi,
     event: String,
@@ -326,6 +326,7 @@ fn emit_gui_relay_event(
 ) {
     if event == crate::orchestrator::notifications::OPERATIONAL_NOTIFICATION_EVENT
         || event == "workbench:agent-runtime"
+        || event == "workbench:terminal-output"
     {
         let mut enriched = match payload {
             Value::Object(map) => map,
@@ -336,6 +337,7 @@ fn emit_gui_relay_event(
             }
         };
         enriched.insert("ownerInstanceId".into(), Value::String(owner_instance_id));
+        // agent/operational 握手依赖 event-bus sequence；terminal-output 也附带以便前端诊断。
         enriched.insert("sequence".into(), Value::Number(sequence.into()));
         ui.emit(&event, Value::Object(enriched));
     } else {
@@ -555,14 +557,15 @@ pub async fn resync_after_gap(
         return None;
     }
     // 顺序恢复：terminal 先于 runtime 通知；失败/不完全时不 commit cursor。
-    let terminal_replay_count = match resync_terminals_via_control(client, ui, cancel).await {
-        Ok(n) => n,
-        Err(e) if e.code() == "cancelled" => return None,
-        Err(e) => {
-            tracing::warn!("gap resync incomplete: terminal replay 失败: {e}");
-            return None;
-        }
-    };
+    let terminal_replay_count =
+        match resync_terminals_via_control(client, ui, owner_instance_id, cancel).await {
+            Ok(n) => n,
+            Err(e) if e.code() == "cancelled" => return None,
+            Err(e) => {
+                tracing::warn!("gap resync incomplete: terminal replay 失败: {e}");
+                return None;
+            }
+        };
     if cancel.is_some_and(|c| c.is_cancelled()) {
         return None;
     }
@@ -582,18 +585,38 @@ pub async fn resync_after_gap(
     })
 }
 
+/// 判断 gap resync 是否应对该 list 行执行 terminal replay。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `sessions.list` 含 SQLite 持久化的 disconnected/exited 会话；对这些会话
+///     调 replay 会 NotFound，若把整次 Gap 判 incomplete，会永久无法 attach 新 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 camelCase/snake_case `status`；仅 `running`（或缺失 status 的兼容路径）
+///     视为可 replay；`disconnected`/`exited` 及其它非 running 状态返回 false。
+fn session_row_is_replayable_for_gap(session: &serde_json::Value) -> bool {
+    let status = session
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("running");
+    status.eq_ignore_ascii_case("running")
+}
+
 /// 经 control workbench 列出 session 并 replay，向前端发出 terminal-resync。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Gap 后 GUI 本地 terminal buffer 可能缺中间输出；必须从 owner registry 拉 replay buffer。
-///     list 或任一活跃 session replay 失败都必须视为 incomplete，禁止静默跳过。
+///     list 失败或任一**可 replay（running）** session 的 replay 失败都必须视为 incomplete。
+///     disconnected/exited 仅存在于 SQLite 的会话不得阻断 cutover（同步 status 由后续 list 路径负责）。
 ///
 /// Code Logic（这个函数做什么）:
-///     `sessions.list`（失败上抛）→ 每个 id `sessions.replay`（失败上抛）→ emit resync；
+///     `sessions.list`（失败上抛）→ 仅对 `session_row_is_replayable_for_gap` 为真的 id
+///     调 `sessions.replay`（失败上抛）→ 注入 `ownerInstanceId` 后 emit resync；
 ///     每步前检查 cancel；返回成功次数。
 async fn resync_terminals_via_control(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
+    owner_instance_id: &str,
     cancel: Option<&CancellationToken>,
 ) -> Result<u64, AppError> {
     if cancel.is_some_and(|c| c.is_cancelled()) {
@@ -610,6 +633,10 @@ async fn resync_terminals_via_control(
         if cancel.is_some_and(|c| c.is_cancelled()) {
             return Err(AppError::generic("cancelled"));
         }
+        if !session_row_is_replayable_for_gap(&session) {
+            // disconnected/exited：不同步 replay buffer，也不让整次 Gap incomplete。
+            continue;
+        }
         let Some(session_id) = session
             .get("id")
             .or_else(|| session.get("sessionId"))
@@ -618,7 +645,7 @@ async fn resync_terminals_via_control(
         else {
             continue;
         };
-        let replay = client
+        let mut replay = client
             .workbench_op::<serde_json::Value>(
                 "sessions.replay",
                 json!({ "sessionId": session_id }),
@@ -627,6 +654,13 @@ async fn resync_terminals_via_control(
             .map_err(|e| {
                 AppError::generic(format!("gap_resync_replay_failed:{}", e.code()))
             })?;
+        // 前端 cutover 按 owner authority 重置 lastSeq；resync payload 必须带新 owner。
+        if let Some(obj) = replay.as_object_mut() {
+            obj.insert(
+                "ownerInstanceId".to_string(),
+                Value::String(owner_instance_id.to_string()),
+            );
+        }
         ui.emit(WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
         count = count.saturating_add(1);
     }
@@ -937,14 +971,16 @@ mod tests {
     ///     Gap resync 测试需要真实 HTTP workbench 响应，但不能依赖完整 sidecar。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     bind 127.0.0.1:0；list 返回给定 session；replay 返回 buffer 文本。
-    async fn spawn_terminal_replay_workbench(
-        session_id: &str,
+    ///     bind 127.0.0.1:0；list 返回给定 session 行（含 status）；仅 running id 可 replay。
+    async fn spawn_terminal_replay_workbench_with_sessions(
+        list_rows: Vec<Value>,
+        running_session_id: &str,
         buffer: &str,
     ) -> (u16, tokio::task::JoinHandle<()>) {
         #[derive(Clone)]
         struct ReplayState {
-            session_id: String,
+            list_rows: Vec<Value>,
+            running_session_id: String,
             buffer: String,
         }
 
@@ -959,7 +995,8 @@ mod tests {
         }
 
         let state = ReplayState {
-            session_id: session_id.to_string(),
+            list_rows,
+            running_session_id: running_session_id.to_string(),
             buffer: buffer.to_string(),
         };
         // sessions.replay 走 workbench/data；sessions.list 走 workbench 元数据路径。
@@ -968,15 +1005,23 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
-                "sessions.list" => {
-                    json!([{ "id": s.session_id, "sessionId": s.session_id }])
-                }
+                "sessions.list" => Value::Array(s.list_rows.clone()),
                 "sessions.replay" => {
                     let sid = body
                         .payload
                         .get("sessionId")
                         .and_then(|v| v.as_str())
-                        .unwrap_or(&s.session_id);
+                        .unwrap_or("");
+                    if sid != s.running_session_id {
+                        // 模拟 registry 对 disconnected 持久会话返回 NotFound。
+                        return Err((
+                            StatusCode::NOT_FOUND,
+                            Json(json!({
+                                "error": "session not found",
+                                "code": "not_found",
+                            })),
+                        ));
+                    }
                     json!({
                         "sessionId": sid,
                         "buffer": s.buffer,
@@ -1007,6 +1052,29 @@ mod tests {
         (port, server)
     }
 
+    /// 启动单 running session 的 mock workbench control（兼容既有 Gap 测试）。
+    ///
+    /// Business Logic（为什么需要这个 helper）:
+    ///     多数 Gap 测试只需一条可 replay 的 running 会话。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `spawn_terminal_replay_workbench_with_sessions`，list 仅含该 running 行。
+    async fn spawn_terminal_replay_workbench(
+        session_id: &str,
+        buffer: &str,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        spawn_terminal_replay_workbench_with_sessions(
+            vec![json!({
+                "id": session_id,
+                "sessionId": session_id,
+                "status": "running",
+            })],
+            session_id,
+            buffer,
+        )
+        .await
+    }
+
     /// 构造带 terminal replay 的测试 control client。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -1022,6 +1090,39 @@ mod tests {
         // 泄漏 server join handle：测试进程结束即回收；端口保持到测试完成。
         std::mem::forget(_server);
         BackendControlClient::for_test(port, "token", "owner-1").expect("test client")
+    }
+
+    /// 构造含 running + disconnected 持久会话的 resync client。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     H2 回归：list 混有 SQLite-only disconnected 行时 Gap 仍须 complete 并 attach。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     list 返回 running + disconnected；仅 running 可 replay，disconnected 会 404。
+    async fn fake_resync_client_with_running_and_disconnected(
+        running_id: &str,
+        disconnected_id: &str,
+        buffer: &str,
+    ) -> BackendControlClient {
+        let (port, _server) = spawn_terminal_replay_workbench_with_sessions(
+            vec![
+                json!({
+                    "id": running_id,
+                    "sessionId": running_id,
+                    "status": "running",
+                }),
+                json!({
+                    "id": disconnected_id,
+                    "sessionId": disconnected_id,
+                    "status": "disconnected",
+                }),
+            ],
+            running_id,
+            buffer,
+        )
+        .await;
+        std::mem::forget(_server);
+        BackendControlClient::for_test(port, "token", "owner-b").expect("test client")
     }
 
     /// 验证 live Deliver 一次投递，Gap 触发 resync 并 attach latest。
@@ -1082,6 +1183,63 @@ mod tests {
         .await;
         assert_eq!(reconnect, GuiRelayApplyResult::GapComplete);
         assert!(reconnect.should_reconnect_stream());
+    }
+
+    /// 验证 list 含 disconnected 持久会话时 Gap 仍 complete 并 attach 新 owner。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner 切换后 list 常混有 SQLite-only disconnected 行；若对其 replay 导致
+    ///     整次 incomplete，GUI 永远无法 attach 新 owner、relay 停止交付。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     pre-gap Event under owner-a；Gap under owner-b 且 list=running+disconnected；
+    ///     disconnected 若被 replay 会 404。期望 GapComplete、cursor=owner-b latest、
+    ///     terminal-resync 恰好 1 次（仅 running）。
+    #[tokio::test]
+    async fn gap_resync_skips_disconnected_persisted_sessions_and_attaches() {
+        let ui = RecordingBackendUi::default();
+        let client =
+            fake_resync_client_with_running_and_disconnected("running-1", "dead-sqlite-1", "p")
+                .await;
+        let mut state = GuiEventRelayState::default();
+        let deliver = apply_gui_relay_message(
+            &client,
+            &ui,
+            &mut state,
+            RuntimeRelayMessage::Event {
+                owner_instance_id: "owner-a".into(),
+                sequence: 3,
+                event: "workbench:terminal-output".into(),
+                payload: json!({"sessionId":"running-1","chunk":"x","seq":3,"ts":1}),
+            },
+        )
+        .await;
+        assert_eq!(deliver, GuiRelayApplyResult::NoGap);
+        assert_eq!(state.cursor().unwrap().owner_instance_id, "owner-a");
+
+        let complete = apply_gui_relay_message(
+            &client,
+            &ui,
+            &mut state,
+            RuntimeRelayMessage::Gap {
+                owner_instance_id: "owner-b".into(),
+                oldest_available: 1,
+                latest: 11,
+            },
+        )
+        .await;
+        assert_eq!(complete, GuiRelayApplyResult::GapComplete);
+        assert!(complete.should_reconnect_stream());
+        let cursor = state.cursor().expect("attached");
+        assert_eq!(cursor.owner_instance_id, "owner-b");
+        assert_eq!(cursor.sequence, 11);
+        assert!(!state.recovery_pending());
+        assert_eq!(
+            ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT),
+            1,
+            "only running session should be replayed"
+        );
+        assert_eq!(ui.event_count(BACKEND_RUNTIME_GAP_EVENT), 1);
     }
 
     /// 验证 list 失败的 incomplete Gap 不得 attach latest。

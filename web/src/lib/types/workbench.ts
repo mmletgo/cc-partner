@@ -674,6 +674,14 @@ export interface WorkbenchTerminalOutputEvent {
   chunk: string;
   seq: number;
   ts: number;
+  /**
+   * Business Logic（为什么需要这个字段）:
+   *   owner 重启后 terminal reader seq 从 0 起算；前端 cutover 必须按 authority 分代。
+   *
+   * Code Logic（字段说明）:
+   *   GUI relay 注入的 ownerInstanceId；缺省时保持既有 lastSeq 比较基线。
+   */
+  ownerInstanceId?: string;
 }
 
 /** 工作台终端状态事件 payload（listen('workbench:terminal-status')）。 */

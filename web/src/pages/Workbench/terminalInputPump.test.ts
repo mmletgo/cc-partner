@@ -148,4 +148,45 @@ describe("terminalInputPump", () => {
     expect(write).toHaveBeenCalledTimes(2);
     expect(write.mock.calls[1]?.[1]).toBe("ok");
   });
+
+  test("stale in-flight write reject after recover preserves and drains new generation pending once", async () => {
+    const first = deferred();
+    const writes: Array<[string, string]> = [];
+    const errors: string[] = [];
+    const write = vi.fn((sessionId: string, data: string) => {
+      writes.push([sessionId, data]);
+      if (writes.length === 1) {
+        return first.promise;
+      }
+      return Promise.resolve();
+    });
+    const pump = createTerminalInputPump({
+      write,
+      onWriteError: (sessionId) => {
+        errors.push(sessionId);
+      },
+    });
+
+    pump.enqueue("s1", "old-in-flight");
+    expect(writes).toEqual([["s1", "old-in-flight"]]);
+
+    // recover 抬 generation 并清 pending；随后新 generation 入队。
+    pump.recoverSession("s1");
+    pump.enqueue("s1", "new-gen");
+    // 旧 write 仍 in-flight：新 generation 必须排队，不得并发第二 write。
+    expect(write).toHaveBeenCalledTimes(1);
+
+    // 旧 generation write reject：不得清 new-gen pending、不得 block、不得 onWriteError。
+    first.reject(new Error("stale-fail"));
+    await pump.whenIdle("s1");
+
+    expect(errors).toEqual([]);
+    expect(pump.isBlocked("s1")).toBe(false);
+    expect(writes).toEqual([
+      ["s1", "old-in-flight"],
+      ["s1", "new-gen"],
+    ]);
+    // 新 generation 只 drain 一次，且绝不重放旧失败批次。
+    expect(write).toHaveBeenCalledTimes(2);
+  });
 });
