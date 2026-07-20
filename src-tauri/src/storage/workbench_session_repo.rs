@@ -15,6 +15,7 @@ use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintena
 use crate::workbench::models::WorkbenchSessionRow;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// 工作台终端会话仓库，封装所有 workbench_sessions 表操作。
@@ -24,11 +25,21 @@ use std::sync::Arc;
 ///
 /// Code Logic（这个结构体做什么）:
 ///     持有 SQLite pool + maintenance gate，并提供 list/get/upsert/delete 等 CRUD。
+///     `fail_next_upserts` 为 test/debug 故障注入计数（生产恒为 0）。
 #[derive(Clone)]
 pub struct WorkbenchSessionRepo {
     pool: SqlitePool,
     /// 维护屏障：写路径持 shared lease，restore exclusive 时阻塞。
     gate: Arc<DatabaseMaintenanceGate>,
+    /// 测试/debug 故障注入：接下来 N 次 `upsert` 直接失败（R17 list 路径回归）。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     生产 list/restore 路径要在真实 `upsert` 失败时 fail closed；集成测试必须能注入该失败，
+    ///     且不记录会话正文。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     `Arc<AtomicUsize>` 跨 Clone 共享；`inject_fail_next_upserts` 设置，`upsert` 递减消费。
+    fail_next_upserts: Arc<AtomicUsize>,
 }
 
 impl WorkbenchSessionRepo {
@@ -46,9 +57,45 @@ impl WorkbenchSessionRepo {
     /// 生产构造：共享 AppState.maintenance_gate。
     ///
     /// Business Logic: 全部 ordinary writer 与 restore 共用同一 gate。
-    /// Code Logic: 保存 pool + Arc gate。
+    /// Code Logic: 保存 pool + Arc gate + 零值 inject 计数。
     pub fn with_gate(pool: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
-        Self { pool, gate }
+        Self {
+            pool,
+            gate,
+            fail_next_upserts: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     R17 集成测试需要在生产 list/restore 路径上注入 upsert 失败，验证 holder/waiter fail closed。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 `fail_next_upserts` 设为 `count`；后续 `upsert` 每次递减直到 0。
+    ///     仅 test/debug 调用；生产路径不得使用。
+    #[cfg(any(test, debug_assertions))]
+    pub fn inject_fail_next_upserts(&self, count: usize) {
+        self.fail_next_upserts.store(count, Ordering::SeqCst);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     `upsert` 在写库前消费一次故障注入计数。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     CAS 递减 `fail_next_upserts`；成功消费返回 true。
+    fn consume_fail_next_upsert(&self) -> bool {
+        let mut current = self.fail_next_upserts.load(Ordering::SeqCst);
+        while current > 0 {
+            match self.fail_next_upserts.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+        false
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -180,8 +227,14 @@ impl WorkbenchSessionRepo {
     ///     新建、恢复、重命名和 resize 后都需要保存会话元数据，供下次启动恢复。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     持 shared write lease 后用 INSERT OR REPLACE 写入完整 row。
+    ///     若故障注入计数 >0 则先消费并返回稳定 Internal 错误（无 body）；
+    ///     否则持 shared write lease 后用 INSERT OR REPLACE 写入完整 row。
     pub async fn upsert(&self, row: &WorkbenchSessionRow) -> Result<(), AppError> {
+        if self.consume_fail_next_upsert() {
+            return Err(AppError::generic(
+                "workbench_session_upsert_injected_failure".to_string(),
+            ));
+        }
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "INSERT OR REPLACE INTO workbench_sessions \
@@ -370,6 +423,27 @@ mod tests {
         let mut row = row(id, project_id, started_at);
         row.worktree_id = worktree_id.map(str::to_string);
         row
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     R17 list/restore 故障注入 seam 必须真实让下一次 upsert 失败，且不落盘、不泄漏正文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     inject_fail_next_upserts(1) → upsert Err；再次 upsert Ok 且 list 只有成功写入的一行。
+    #[tokio::test]
+    async fn inject_fail_next_upserts_fails_once_then_succeeds() {
+        let repo = setup_repo().await;
+        let first = row("s-inject-1", "p1", "2026-07-21T00:00:00Z");
+        repo.inject_fail_next_upserts(1);
+        let err = repo.upsert(&first).await.expect_err("injected upsert must fail");
+        assert_eq!(err.code(), "workbench_session_upsert_injected_failure");
+        assert!(repo.list(Some("p1")).await.unwrap().is_empty());
+
+        repo.upsert(&first).await.expect("second upsert succeeds");
+        let listed = repo.list(Some("p1")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "s-inject-1");
+        // 不断言 command/cwd 正文，避免敏感 body 依赖。
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -495,18 +495,22 @@ pub(crate) async fn merged_session_dtos(
 ///     应用重启后，进入工作台项目时应自动恢复之前打开的终端 tab 和可重连上下文。
 ///     A8：list/open 路径默认 **skip-missing**——仅 attach 已存在 tmux target；
 ///     缺失 target / raw PTY 不创建 shell（只有用户显式新建终端才 `create_tmux_window`）。
-///     R14–R16：并发 list 等待 in-flight restore 的**结果**，不得把恢复中行当 ready，
-///     也不得把 holder Failed 当成功合并不可 replay 会话。
+///     R14–R17：并发 list 等待 in-flight restore 的**结果**，不得把恢复中行当 ready，
+///     也不得把 holder 持久化失败当成功合并不可 replay 会话（holder 必须 `return Err`）。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取持久化会话；用 `try_claim_restore` 原子占位（Finding 5 + R14 + R15 + R16）：
+///     读取持久化会话；用 `try_claim_restore` 原子占位（Finding 5 + R14–R17）：
 ///     `Claimed` 独占 restore；`AlreadyLive` 跳过；`RestoreInProgress` await watch 结果。
 ///     Ready/PersistedDisconnected → continue；Failed → 映射稳定错误返回；
 ///     TimedOut → `timeout(session_restore_wait_timeout)`；禁止部分成功清单。
-///     项目存在时补齐可读 worktree 名再调用 registry.restore（内部 skip-missing），
-///     成功写回最新 row 并 finish Ready；upsert 失败 finish Failed；
-///     restore Err 时尝试持久化 disconnected，成功 finish PersistedDisconnected，
-///     失败 finish Failed；project 查询/删除 `?` 失败由 guard Drop 广播 Failed。
+///     项目存在时补齐可读 worktree 名再调用 registry.restore（内部 skip-missing）。
+///     成功写回最新 row 并 finish Ready。
+///     restore 成功但 upsert 失败：先显式 `drop(SessionSpawnGuard)` 回收 attach，
+///     再 finish Failed 并 **return 原始 Err**（禁止先放 claim 再 Drop spawn，
+///     否则第三方并发 list 可能短暂 AlreadyLive）。
+///     restore Err 时尝试持久化 disconnected，成功 finish PersistedDisconnected；
+///     失败 finish Failed 并 **return 原始 Err**。
+///     project 查询/删除 `?` 失败由 guard Drop 广播 Failed 并向上传播。
 pub(crate) async fn restore_persisted_sessions(
     state: &AppState,
     project_id: Option<&str>,
@@ -565,7 +569,7 @@ pub(crate) async fn restore_persisted_sessions(
             .restore(state.clone(), project, row.clone(), worktree_name)
         {
             Ok(restored) => {
-                // spawn 成功后 upsert 失败也必须回收 attach，并广播 Failed。
+                // spawn 成功后 upsert 失败也必须回收 attach，并广播 Failed + 返回 Err。
                 let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new(
                     (*state.workbench_sessions).clone(),
                     restored.id.clone(),
@@ -577,8 +581,12 @@ pub(crate) async fn restore_persisted_sessions(
                     }
                     Err(error) => {
                         tracing::warn!("恢复工作台终端后持久化失败，已回收 attach: {error}");
-                        // spawn_guard Drop → close；会话不可 replay → Failed。
-                        claim_guard.finish(SharedRestoreNotification::Failed(error.classify()));
+                        let category = error.classify();
+                        // R17 M1：必须先回收 spawn，再放 claim；否则第三方 list 会短暂 AlreadyLive。
+                        drop(spawn_guard);
+                        claim_guard.finish(SharedRestoreNotification::Failed(category));
+                        // 持有 claim 的 list 不得落到 Ok(merged_session_dtos) 返回不可 replay 成功清单。
+                        return Err(error);
                     }
                 }
             }
@@ -597,10 +605,10 @@ pub(crate) async fn restore_persisted_sessions(
                         tracing::warn!(
                             "恢复失败后写入 disconnected 状态失败，会话可能不可 replay: {persist_error}"
                         );
-                        // 不得吞掉：waiter 若 continue 会合并出 running 持久行但无 registry。
-                        claim_guard.finish(SharedRestoreNotification::Failed(
-                            persist_error.classify(),
-                        ));
+                        // R17 M1：disconnected upsert 失败必须返回 Err，禁止 holder 吞掉后 Ok 合并 running 行。
+                        let category = persist_error.classify();
+                        claim_guard.finish(SharedRestoreNotification::Failed(category));
+                        return Err(persist_error);
                     }
                 }
             }
@@ -1114,4 +1122,379 @@ pub(crate) fn ensure_remote_event_bridge_for_worktree_context(
         &context.inner_project_id,
         &context.local_project_id,
     );
+}
+
+#[cfg(test)]
+mod restore_holder_fail_closed_tests {
+    //! R17 M1：生产 list/restore 路径故障注入回归。
+
+    use super::*;
+    use crate::backend::authority::RuntimeRole;
+    use crate::backend::event_bus::RuntimeEventBus;
+    use crate::backend::runtime_metrics::RuntimeMetrics;
+    use crate::backend::ui::HeadlessBackendUi;
+    use crate::cloud_sync::CloudSyncRuntime;
+    use crate::config::{
+        AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+    };
+    use crate::config_runtime::ConfigRuntime;
+    use crate::config_store::MemoryConfigStore;
+    use crate::net::peer_client::PeerClient;
+    use crate::orchestrator::repo::OrchestratorRepo;
+    use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
+    use crate::storage::{
+        ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
+        SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
+        WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
+        WorkbenchWorkspaceLayoutRepo,
+    };
+    use crate::transfer::registry::TransferRegistry;
+    use crate::updater::UpdateRuntime;
+    use crate::workbench::models::{WorkbenchProjectRow, WorkbenchSessionRow};
+    use crate::workbench::sessions::{
+        shared_restore_failed_error, RestoreClaimOutcome, SharedRestoreWaitResult,
+    };
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+    use std::sync::atomic::AtomicU16;
+    use std::sync::{Arc, Mutex, RwLock};
+    use std::time::Duration;
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     R17 集成测试需要最小 owner AppState，覆盖生产 list/restore 与 inject upsert 失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     内存 SQLite 建 projects/sessions/worktrees 表，构造 HeadlessOwner AppState。
+    async fn build_restore_fail_state() -> AppState {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE workbench_worktrees (\
+             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, branch TEXT, \
+             base_branch TEXT, path TEXT NOT NULL, is_main INTEGER NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE workbench_sessions (\
+             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL, \
+             command TEXT NOT NULL, cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL, \
+             rows INTEGER NOT NULL, started_at TEXT NOT NULL, exited_at TEXT, exit_code INTEGER, \
+             backend TEXT NOT NULL, backend_id TEXT, backend_window_id TEXT, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let project_repo = WorkbenchProjectRepo::new(pool.clone());
+        let worktree_repo = WorkbenchWorktreeRepo::new(pool.clone());
+        let session_repo = WorkbenchSessionRepo::new(pool.clone());
+        let layout_repo = WorkbenchWorkspaceLayoutRepo::new(pool.clone());
+        layout_repo.ensure_schema().await.unwrap();
+
+        project_repo
+            .upsert(&WorkbenchProjectRow {
+                id: "p1".to_string(),
+                name: "demo".to_string(),
+                kind: "local".to_string(),
+                device_id: "d1".to_string(),
+                device_name: "local".to_string(),
+                path: "/tmp/demo".to_string(),
+                last_opened_at: "t".to_string(),
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let config = AppConfig {
+            device_id: "d1".to_string(),
+            device_name: "test".to_string(),
+            http_port: 0,
+            receive_dir: "/tmp".to_string(),
+            db_path: ":memory:".to_string(),
+            screenshot_hotkey: "<cmd>+s".to_string(),
+            prompt_optimizer_hotkey: "<ctrl>".to_string(),
+            prompt_optimizer_fill_language: "zh".to_string(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+        };
+        let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
+        let config_runtime = Arc::new(ConfigRuntime::new(config, store));
+        let config = config_runtime.shared_value();
+        let maintenance_gate = Arc::new(DatabaseMaintenanceGate::new());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let event_bus = Arc::new(RuntimeEventBus::new(owner));
+
+        AppState {
+            config,
+            config_runtime,
+            db: pool.clone(),
+            maintenance_gate: maintenance_gate.clone(),
+            prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
+            transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
+            claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
+            scratchpad_repo: Arc::new(ScratchpadRepo::new(pool.clone())),
+            ssh_target_repo: Arc::new(SshTargetRepo::new(pool.clone())),
+            device_id: Arc::new("d1".to_string()),
+            devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            actual_http_port: Arc::new(AtomicU16::new(0)),
+            discovery: Arc::new(Mutex::new(None)),
+            peer_client: Arc::new(PeerClient::new()),
+            transfers: Arc::new(TransferRegistry::new()),
+            ui: Arc::new(HeadlessBackendUi::new(std::path::PathBuf::from("/tmp"))),
+            update_runtime: Arc::new(UpdateRuntime::new()),
+            cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
+            workbench_project_repo: Arc::new(project_repo),
+            workbench_session_repo: Arc::new(session_repo),
+            workbench_worktree_repo: Arc::new(worktree_repo),
+            workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
+            workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
+            agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
+            agent_ledger_service: Arc::new(
+                crate::workbench::agent_ledger::AgentLedgerService::new(
+                    crate::storage::AgentLedgerRepo::new(pool.clone()),
+                ),
+            ),
+            workbench_workspace_layout_repo: Arc::new(layout_repo),
+            browser_verification: Arc::new(
+                crate::workbench::browser_verification::BrowserVerificationService::new(
+                    Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),
+                    std::path::PathBuf::from("/tmp/browser-verification-r17"),
+                    "test-owner".into(),
+                )
+                .expect("browser verification fixture"),
+            ),
+            workbench_browser_previews: Arc::new(
+                crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
+            ),
+            workbench_sessions: Arc::new(
+                crate::workbench::sessions::WorkbenchSessionRegistry::new(),
+            ),
+            workbench_remote_events: {
+                let (tx, _) = tokio::sync::broadcast::channel(8);
+                tx
+            },
+            workbench_remote_event_bridges: Arc::new(
+                crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
+            ),
+            workbench_dependency: Arc::new(
+                crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
+            ),
+            cc_collector_cancel: Arc::new(Mutex::new(None)),
+            cloud_sync_runtime: Arc::new(CloudSyncRuntime::new()),
+            cloud_sync_cancel: Arc::new(Mutex::new(None)),
+            health: Arc::new(crate::health::HealthRuntime::new()),
+            health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),
+            health_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_repo: Arc::new(OrchestratorRepo::new(pool.clone())),
+            orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::default(),
+            orchestrator_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            agent_ledger_cancel: Arc::new(Mutex::new(None)),
+            workbench_claude_session_indexes: Arc::new(RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_watchers: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_index_dispose_epochs: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            runtime_metrics: Arc::new(RuntimeMetrics::new()),
+            runtime_role: RuntimeRole::HeadlessOwner,
+            event_bus,
+            backend_control_client_runtime: Arc::new(
+                crate::backend::control_client::BackendControlClientRuntime::new(),
+            ),
+            gui_event_relay_cancel: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     注入 raw PTY running 行以触发 restore skip-missing → disconnected upsert 路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入 backend=pty 的 running 会话元数据（无正文断言）。
+    async fn seed_raw_pty_running(state: &AppState, session_id: &str) {
+        let row = WorkbenchSessionRow {
+            id: session_id.to_string(),
+            project_id: "p1".to_string(),
+            worktree_id: None,
+            name: "term".to_string(),
+            command: "/bin/sh".to_string(),
+            cwd: "/tmp/demo".to_string(),
+            status: "running".to_string(),
+            cols: 80,
+            rows: 24,
+            started_at: "t".to_string(),
+            exited_at: None,
+            exit_code: None,
+            backend: "pty".to_string(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        };
+        state.workbench_session_repo.upsert(&row).await.unwrap();
+    }
+
+    /// Business Logic（R17 M1: 为什么需要这个测试）:
+    ///     claim holder 在 disconnected upsert 失败时若仍 Ok，会合并出 running 但无 registry 的清单，
+    ///     后续 replay 永久 not_found。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     生产 `restore_persisted_sessions` + inject upsert 失败：holder Err，无 live/claim，
+    ///     若错误地 merge 会得到 running；断言 merge 不该被当作成功 list。
+    #[tokio::test]
+    async fn production_list_holder_returns_err_on_disconnected_upsert_failure() {
+        let state = build_restore_fail_state().await;
+        seed_raw_pty_running(&state, "s-holder-fail").await;
+        // 下一次 upsert（disconnected 落盘）失败。
+        state.workbench_session_repo.inject_fail_next_upserts(1);
+
+        let err = restore_persisted_sessions(&state, Some("p1"))
+            .await
+            .expect_err("holder must return Err on disconnected upsert failure");
+        assert_eq!(err.code(), "workbench_session_upsert_injected_failure");
+        assert_eq!(err.ipc_category_code(), "internal");
+        assert!(!state.workbench_sessions.contains("s-holder-fail"));
+        assert!(!state.workbench_sessions.is_restore_claim_held("s-holder-fail"));
+        // SQLite 仍可能是 running（upsert 未成功）；不得被当作成功 list DTO。
+        let rows = state
+            .workbench_session_repo
+            .list(Some("p1"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "running");
+        // 模拟若 holder 吞掉错误继续 merge：会返回 running DTO；生产路径禁止。
+        let merged = merged_session_dtos(&state, Some("p1")).await.unwrap();
+        // claim 已释放，merge 会看到 stale running 行——这正是 holder 必须 return Err 的原因。
+        assert!(
+            merged.iter().any(|s| s.id == "s-holder-fail" && s.status == "running"),
+            "stale running row still in sqlite; success path would leak non-replayable DTO"
+        );
+        assert!(
+            state
+                .workbench_sessions
+                .require_live_for_replay("s-holder-fail")
+                .is_err(),
+            "session must not be live-replayable after failed restore"
+        );
+    }
+
+    /// Business Logic（R17 M1: 为什么需要这个测试）:
+    ///     并发 list：holder 持久化失败时 waiter 必须 Failed；清理后第三方不得 AlreadyLive。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     双任务并发 `restore_persisted_sessions` + inject 1 次 upsert 失败：
+    ///     holder Err；waiter 为 shared Failed 或晚到后落盘 disconnected；
+    ///     无 registry live；第三方 try_claim 为 Claimed。
+    #[tokio::test]
+    async fn production_list_holder_and_waiter_fail_without_already_live_window() {
+        let state = build_restore_fail_state().await;
+        seed_raw_pty_running(&state, "s-concurrent-fail").await;
+        // 仅失败一次：holder 的 disconnected upsert 命中 inject。
+        state.workbench_session_repo.inject_fail_next_upserts(1);
+
+        let holder_state = state.clone();
+        let waiter_state = state.clone();
+        let holder = tokio::spawn(async move {
+            restore_persisted_sessions(&holder_state, Some("p1")).await
+        });
+        // 给 holder 一点时间 claim，确保 waiter 更可能走 RestoreInProgress。
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let waiter = tokio::spawn(async move {
+            restore_persisted_sessions(&waiter_state, Some("p1")).await
+        });
+
+        let holder_res = holder.await.expect("holder join");
+        let waiter_res = waiter.await.expect("waiter join");
+
+        // 至少有一方必须失败（inject 只影响第一次 upsert）。
+        assert!(
+            holder_res.is_err() || waiter_res.is_err(),
+            "at least one concurrent restore must fail closed"
+        );
+
+        // 若 holder 失败，错误应是 inject failure，而非 Ok 成功清单。
+        if let Err(h) = &holder_res {
+            assert_eq!(h.code(), "workbench_session_upsert_injected_failure");
+        }
+        if let Err(w) = &waiter_res {
+            assert!(
+                w.code() == "session_restore_shared_failed"
+                    || w.code() == "workbench_session_upsert_injected_failure",
+                "waiter err code unexpected: {}",
+                w.code()
+            );
+            let _ = shared_restore_failed_error(crate::error::AppErrorCategory::Internal);
+        }
+        if holder_res.is_ok() && waiter_res.is_ok() {
+            panic!("both succeeded; inject should have forced fail-closed");
+        }
+
+        // 无 live registry；不得留下 claim。
+        assert!(!state.workbench_sessions.contains("s-concurrent-fail"));
+        assert!(!state
+            .workbench_sessions
+            .is_restore_claim_held("s-concurrent-fail"));
+
+        // 第三方清理后不得 AlreadyLive（spawn 已回收）。
+        assert!(
+            state
+                .workbench_sessions
+                .try_claim_restore("s-concurrent-fail")
+                .is_claimed(),
+            "third request after cleanup must Claimed, not AlreadyLive"
+        );
+        state
+            .workbench_sessions
+            .release_restore_claim("s-concurrent-fail");
+
+        // 若最终 SQLite 仍 running，说明 upsert 失败且无人写 disconnected；
+        // 生产路径禁止把该状态当成功 list（holder/waiter 已 Err）。
+        let rows = state
+            .workbench_session_repo
+            .list(Some("p1"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].status == "running" || rows[0].status == "disconnected",
+            "unexpected status without body: {}",
+            rows[0].status
+        );
+        let _ = SharedRestoreWaitResult::Failed(crate::error::AppErrorCategory::Internal);
+        let _ = RestoreClaimOutcome::AlreadyLive;
+    }
 }

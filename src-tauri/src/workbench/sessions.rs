@@ -4523,4 +4523,77 @@ mod tests {
         assert_eq!(list_err.ipc_category_code(), "internal");
         assert_eq!(list_err.to_string(), "session_restore_shared_failed");
     }
+
+    /// Business Logic（R17 M1: 为什么需要这个测试）:
+    ///     restore 成功后 upsert 失败必须先回收 SessionSpawnGuard，再 finish claim；
+    ///     若先放 claim 后 Drop spawn，第三方并发 list 会短暂 AlreadyLive。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     insert fake + claim → SessionSpawnGuard 未 commit；
+    ///     先 drop spawn（registry 清空）→ 第三方 claim 为 RestoreInProgress（非 AlreadyLive）→
+    ///     再 finish Failed → claim 释放且仍无 live session。
+    #[test]
+    fn upsert_failure_cleanup_reclaims_spawn_before_releasing_claim() {
+        let registry = WorkbenchSessionRegistry::new();
+        // claim 必须在 insert live 之前：已 live 时 try_claim 返回 AlreadyLive。
+        assert!(registry.try_claim_restore("s-cleanup-order").is_claimed());
+        registry.insert_fake_session_for_test("s-cleanup-order", "p1");
+
+        let mut claim_guard =
+            RestoreClaimGuard::new(registry.clone(), "s-cleanup-order".to_string());
+        let spawn_guard =
+            SessionSpawnGuard::new(registry.clone(), "s-cleanup-order".to_string());
+
+        // 正确顺序：先 reclaim spawn。
+        drop(spawn_guard);
+        assert_eq!(registry.registry_len(), 0);
+        assert!(!registry.contains("s-cleanup-order"));
+        assert!(registry.is_restore_claim_held("s-cleanup-order"));
+
+        // claim 仍持有且无 live → 第三方不得 AlreadyLive。
+        match registry.try_claim_restore("s-cleanup-order") {
+            RestoreClaimOutcome::RestoreInProgress(_) => {}
+            other => panic!("expected RestoreInProgress during cleanup, got {other:?}"),
+        }
+
+        claim_guard.finish(SharedRestoreNotification::Failed(AppErrorCategory::Internal));
+        assert!(!registry.is_restore_claim_held("s-cleanup-order"));
+        assert_eq!(
+            registry.runtime_presence("s-cleanup-order"),
+            SessionRuntimePresence::Missing
+        );
+        assert!(registry.try_claim_restore("s-cleanup-order").is_claimed());
+        registry.release_restore_claim("s-cleanup-order");
+    }
+
+    /// Business Logic（R17 M1: 为什么需要这个测试）:
+    ///     反例：若先 finish claim 再 Drop spawn，第三方可在窗口内 AlreadyLive。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim + live fake → finish claim 后 spawn 仍在 → 第三方 AlreadyLive；
+    ///     再 drop spawn 才清空。证明必须先 reclaim spawn。
+    #[test]
+    fn releasing_claim_before_spawn_reclaim_creates_already_live_window() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-wrong-order").is_claimed());
+        registry.insert_fake_session_for_test("s-wrong-order", "p1");
+
+        let mut claim_guard = RestoreClaimGuard::new(registry.clone(), "s-wrong-order".to_string());
+        let spawn_guard = SessionSpawnGuard::new(registry.clone(), "s-wrong-order".to_string());
+
+        // 错误顺序：先放 claim。
+        claim_guard.finish(SharedRestoreNotification::Failed(AppErrorCategory::Internal));
+        assert!(!registry.is_restore_claim_held("s-wrong-order"));
+        assert!(registry.contains("s-wrong-order"));
+        assert!(
+            matches!(
+                registry.try_claim_restore("s-wrong-order"),
+                RestoreClaimOutcome::AlreadyLive
+            ),
+            "wrong cleanup order creates AlreadyLive window"
+        );
+
+        drop(spawn_guard);
+        assert!(!registry.contains("s-wrong-order"));
+    }
 }
