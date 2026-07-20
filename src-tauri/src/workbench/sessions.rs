@@ -393,27 +393,54 @@ enum SideEffectGate {
     Rejected,
 }
 
-/// wait_for_closing_tombstone 单轮动作（R22 M1）。
+/// wait_for_closing_tombstone 单轮动作（R22 M1 / R23 H2）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     waiter 只能观察 barrier 是否仍在 / 是否被替换，**禁止**自行清除。
+///
+/// Code Logic（这个枚举做什么）:
+///     Gone=无 barrier；Replaced=身份变化；Retry=仍在（含 cleanup 未完成）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaitClosingAction {
     Gone,
-    Cleared,
     Replaced,
     Retry,
 }
 
-/// generation-scoped 发布控制：token + 在途 lease 计数 + close barrier（R20 H2）。
+/// 一次锁内完成 classify + buffer/lease 的结果（R23 H1）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     reader/exit 在 Flushing→Ready 窗口不得因 classify 与 buffer 分锁而永久退出。
+///
+/// Code Logic（这个枚举做什么）:
+///     `Buffered`：已在 Provisional/Flushing 缓冲；
+///     `Live`：Ready 下已持 lease 并带回 payload（供锁外 publish）；
+///     `Rejected`：stale。
+enum PreparedSideEffect<T> {
+    Buffered,
+    Live {
+        lease: PublicationLease,
+        payload: T,
+    },
+    Rejected,
+}
+
+/// generation-scoped 发布控制：token + 在途 lease 计数 + close barrier（R20 H2 / R23 H2）。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     close 必须在同一同步域内 revoke 并等待在途 publisher 完成，禁止 check→publish TOCTOU。
+///     Closing barrier 还须覆盖 replay/PTY/tmux/persist cleanup，waiters 不得提前清 tombstone。
 ///
 /// Code Logic（这个结构体做什么）:
-///     `allowed` 失效 token；`in_flight` 统计持 lease 的副作用；`cv` 供 close 等待。
+///     `allowed` 失效 token；`in_flight` 统计持 lease 的副作用；
+///     `cleanup_done` 标记 closer 已完成 cleanup；`cv` 供 close/waiter 等待。
 struct PublishControl {
     allowed: AtomicBool,
     in_flight: AtomicUsize,
     /// generation-scoped 输出序号分配器（从 0 起，allocate 后从 1 递增；R21 H1）。
     next_seq: AtomicU64,
+    /// Closing barrier：closer 完成 kill/replay/cleanup 后置 true（R23 H2）。
+    cleanup_done: AtomicBool,
     wait: Mutex<()>,
     cv: Condvar,
 }
@@ -423,15 +450,36 @@ impl PublishControl {
     ///     每个 live 实例需要独立可失效的发布控制器。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造 allowed=true、in_flight=0 的 Arc 控制块。
+    ///     构造 allowed=true、in_flight=0、cleanup_done=false 的 Arc 控制块。
     fn new() -> Arc<Self> {
         Arc::new(Self {
             allowed: AtomicBool::new(true),
             in_flight: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
+            cleanup_done: AtomicBool::new(false),
             wait: Mutex::new(()),
             cv: Condvar::new(),
         })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     closer 完成 replay/PTY/tmux/persist cleanup 后必须标记 barrier，waiters 才能与 drain 一起收敛。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `cleanup_done=true` 并 notify 所有 waiter。
+    fn mark_cleanup_done(&self) {
+        self.cleanup_done.store(true, Ordering::SeqCst);
+        let _guard = self.wait.lock().expect("publish control wait 锁中毒");
+        self.cv.notify_all();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     waiter / closer 需要查询 cleanup 是否完成，禁止仅凭 in_flight==0 清 barrier。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读 `cleanup_done` 原子标志。
+    fn is_cleanup_done(&self) -> bool {
+        self.cleanup_done.load(Ordering::SeqCst)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2371,11 +2419,12 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     同 session_id 重建前必须等 Closing barrier 清除且旧 lease drain，避免旧 generation 污染。
+    ///     同 session_id 重建前必须等 Closing barrier 清除且旧 lease drain + cleanup 完成，
+    ///     避免旧 generation 污染后继。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     不抢先 remove；blocking 等 in_flight==0 与 close 身份 CAS 清除；
-    ///     soft-timeout 遗留且已 drain 时，reinsert 侧可身份 CAS 清除 residual barrier。
+    ///     **waiter 永不 clear barrier**（R23 H2）；blocking 等 closer 身份 CAS 清除或身份替换；
+    ///     期间可观察 in_flight/cleanup_done，仅作为 wait 条件。
     fn wait_for_closing_tombstone(&self, session_id: &str) {
         loop {
             let control = {
@@ -2388,30 +2437,23 @@ impl WorkbenchSessionRegistry {
             let Some(control) = control else {
                 return;
             };
-            // 先等 lease drain。
-            control.wait_in_flight_drained_blocking();
-            // 再查 barrier：禁止在持有 wait 锁时抢 closing_publish（与 clear 锁序死锁）。
+            // 尽量等 drain，但即便 in_flight==0 也不得自行 remove——须等 cleanup_done + closer clear。
+            if control.in_flight.load(Ordering::SeqCst) > 0 {
+                control.wait_in_flight_drained_blocking();
+            }
             let action = {
-                let mut closing = self
+                let closing = self
                     .closing_publish
                     .lock()
                     .expect("closing_publish 锁中毒");
                 match closing.get(session_id) {
                     None => WaitClosingAction::Gone,
                     Some(current) if !Arc::ptr_eq(current, &control) => WaitClosingAction::Replaced,
-                    Some(_) => {
-                        if control.in_flight.load(Ordering::SeqCst) == 0 {
-                            // soft-timeout residual 或 close 未及时 clear：身份 CAS 清除。
-                            closing.remove(session_id);
-                            WaitClosingAction::Cleared
-                        } else {
-                            WaitClosingAction::Retry
-                        }
-                    }
+                    Some(_) => WaitClosingAction::Retry,
                 }
             };
             match action {
-                WaitClosingAction::Gone | WaitClosingAction::Cleared => {
+                WaitClosingAction::Gone => {
                     let _guard = control.wait.lock().expect("publish control wait 锁中毒");
                     control.cv.notify_all();
                     return;
@@ -2419,6 +2461,7 @@ impl WorkbenchSessionRegistry {
                 WaitClosingAction::Replaced => continue,
                 WaitClosingAction::Retry => {
                     let guard = control.wait.lock().expect("publish control wait 锁中毒");
+                    // cleanup 未完成或 closer 尚未 CAS 清除：condvar 等待。
                     let (_next, _) = control
                         .cv
                         .wait_timeout(guard, Duration::from_millis(50))
@@ -2432,7 +2475,7 @@ impl WorkbenchSessionRegistry {
     ///     close 移除 handle 的同一临界区必须立刻挂上 Closing barrier，消除 Missing 窗口。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     无条件写入/覆盖 closing_publish[session_id]（含 in_flight==0，直至 cleanup 完成才清）。
+    ///     无条件写入/覆盖 closing_publish[session_id]（含 in_flight==0，直至 closer cleanup+drain 才清）。
     fn install_closing_tombstone(&self, session_id: &str, publish: Arc<PublishControl>) {
         let mut closing = self
             .closing_publish
@@ -2443,6 +2486,7 @@ impl WorkbenchSessionRegistry {
 
     /// Business Logic（为什么需要这个函数）:
     ///     close 完成 lease drain + 后端 cleanup 后必须按身份清除 barrier，允许同 id 合法 reinsert。
+    ///     仅 closer（或 closer 启动的 drain reaper）可 clear，waiter 禁止（R23 H2）。
     ///
     /// Code Logic（这个函数做什么）:
     ///     仅当 closing_publish[session_id] 仍是同一 PublishControl Arc 时 remove 并 notify。
@@ -2461,6 +2505,74 @@ impl WorkbenchSessionRegistry {
         drop(closing);
         let _guard = publish.wait.lock().expect("publish control wait 锁中毒");
         publish.cv.notify_all();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     soft-timeout 未 drain 时 closer 不能阻塞永久，但 barrier 必须由 closer 身份在
+    ///     drain+cleanup 后清除，禁止 waiter 代清导致旧 cleanup 打到新 generation。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     后台线程 blocking drain 后，仅当 cleanup_done 且身份匹配时 clear。
+    fn spawn_closing_barrier_reaper(&self, session_id: String, publish: Arc<PublishControl>) {
+        let registry = self.clone();
+        thread::spawn(move || {
+            publish.wait_in_flight_drained_blocking();
+            // cleanup 必须由 close 路径 mark；若未 mark 则继续等（避免过早 clear）。
+            loop {
+                if publish.is_cleanup_done() {
+                    break;
+                }
+                let guard = publish.wait.lock().expect("publish control wait 锁中毒");
+                let (_next, _) = publish
+                    .cv
+                    .wait_timeout(guard, Duration::from_millis(50))
+                    .expect("publish control condvar 中毒");
+            }
+            registry.clear_closing_tombstone_if_same(&session_id, &publish);
+        });
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     reinsert 与 close install barrier 必须在同一 lifecycle 锁序下 CAS，禁止 wait 返回后
+    ///     再被 close 抢先挂 barrier 却仍 insert（R23 M1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先取 sessions 锁，再取 closing_publish 锁；barrier 仍在则 false；否则 insert 返回 true。
+    fn try_insert_handle_revalidating_barrier(
+        &self,
+        session_id: &str,
+        handle: Arc<Mutex<WorkbenchSessionHandle>>,
+    ) -> bool {
+        let mut sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        let closing = self
+            .closing_publish
+            .lock()
+            .expect("closing_publish 锁中毒");
+        if closing.contains_key(session_id) {
+            return false;
+        }
+        sessions.insert(session_id.to_string(), handle);
+        true
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试/生产 insert 在 wait barrier 后仍可能与 close 竞态，必须循环 CAS。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     wait → 调用方构造 handle → try_insert；失败则重 wait 直至成功。
+    fn insert_handle_with_barrier_cas(
+        &self,
+        session_id: &str,
+        mut build: impl FnMut() -> Arc<Mutex<WorkbenchSessionHandle>>,
+    ) {
+        loop {
+            self.wait_for_closing_tombstone(session_id);
+            let handle = build();
+            if self.try_insert_handle_revalidating_barrier(session_id, handle) {
+                return;
+            }
+            // close 在 wait 与 insert 间隙挂了 barrier：丢弃本次 handle 后重试。
+        }
     }
 
     /// 判断 worker 捕获的 generation 是否仍对应当前 registry 句柄（R18 M2）。
@@ -2759,10 +2871,11 @@ impl WorkbenchSessionRegistry {
     /// Business Logic（为什么需要这个函数）:
     ///     新建和恢复终端最终都要启动一个 PTY 客户端并注册输出/退出监听。
     ///     R19 M1：insert 为 Provisional，不立即 emit running；外部事件等 mark Ready。
+    ///     R23 M1：insert 必须与 Closing barrier 同 lifecycle 锁 CAS，禁止 reinsert 越过新 barrier。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造 CommandBuilder，分配 generation + publish token，spawn 子进程写入 registry
-    ///     （durability=Provisional）；reader/exit 捕获 generation+token 做 fence。
+    ///     wait barrier → openpty/spawn → try_insert 再校验 barrier；CAS 失败 kill 本轮后重试；
+    ///     成功后分配 generation 绑定 reader/exit fence。
     fn spawn_row(
         &self,
         state: AppState,
@@ -2772,52 +2885,65 @@ impl WorkbenchSessionRegistry {
         let cols = row.cols;
         let rows = row.rows;
 
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|error| AppError::generic(format!("创建 PTY 失败: {error}")))?;
-        let mut cmd = command_builder_for_row(&row, state.config_runtime.owner_instance_id());
-        cmd.cwd(PathBuf::from(&row.cwd));
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|error| AppError::generic(format!("启动工作台终端失败: {error}")))?;
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|error| AppError::generic(format!("创建 PTY reader 失败: {error}")))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| AppError::generic(format!("创建 PTY writer 失败: {error}")))?;
+        // R21 H2 / R23 M1：wait + openpty + insert CAS。barrier 在 wait/insert 间隙被挂上时
+        // kill 本轮 PTY 并重试（portable-pty 无法先占 barrier 再 spawn）。
+        let (generation, publish, handle, reader) = loop {
+            self.wait_for_closing_tombstone(&session_id);
 
-        // R21 H2：同 id 旧 generation tombstone 未 drain 前禁止 reinsert。
-        self.wait_for_closing_tombstone(&session_id);
-        let generation = self.allocate_generation();
-        let publish = PublishControl::new();
-        let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
-            row: row.clone(),
-            generation,
-            durability: SessionDurability::Provisional,
-            publish: publish.clone(),
-            deferred_output: Vec::new(),
-            deferred_mutations: Vec::new(),
-            pending_exit: None,
-            process: SessionProcess::Pty {
-                master: pair.master,
-                writer,
-                child,
-            },
-        }));
-        self.sessions
-            .lock()
-            .expect("workbench sessions 锁中毒")
-            .insert(session_id.clone(), handle.clone());
+            let pty_system = native_pty_system();
+            let pair = pty_system
+                .openpty(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|error| AppError::generic(format!("创建 PTY 失败: {error}")))?;
+            let mut cmd = command_builder_for_row(&row, state.config_runtime.owner_instance_id());
+            cmd.cwd(PathBuf::from(&row.cwd));
+            let child = pair
+                .slave
+                .spawn_command(cmd)
+                .map_err(|error| AppError::generic(format!("启动工作台终端失败: {error}")))?;
+            let reader = pair
+                .master
+                .try_clone_reader()
+                .map_err(|error| AppError::generic(format!("创建 PTY reader 失败: {error}")))?;
+            let writer = pair
+                .master
+                .take_writer()
+                .map_err(|error| AppError::generic(format!("创建 PTY writer 失败: {error}")))?;
+
+            let generation = self.allocate_generation();
+            let publish = PublishControl::new();
+            let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
+                row: row.clone(),
+                generation,
+                durability: SessionDurability::Provisional,
+                publish: publish.clone(),
+                deferred_output: Vec::new(),
+                deferred_mutations: Vec::new(),
+                pending_exit: None,
+                process: SessionProcess::Pty {
+                    master: pair.master,
+                    writer,
+                    child,
+                },
+            }));
+            if self.try_insert_handle_revalidating_barrier(&session_id, handle.clone()) {
+                break (generation, publish, handle, reader);
+            }
+            // barrier 在 wait 与 insert 间隙被 close 挂上：kill 本轮 child 后重试。
+            {
+                let mut h = handle.lock().expect("workbench session 锁中毒");
+                if let SessionProcess::Pty { child, .. } = &mut h.process {
+                    if let Err(error) = normalize_terminal_kill_result(child.kill()) {
+                        tracing::debug!("spawn_row barrier CAS 失败后 kill PTY: {error}");
+                    }
+                }
+            }
+        };
+
         self.ensure_replay_buffer_for_generation(&session_id, generation);
 
         // R19 M1：不在 Provisional 发 running；commit/mark_ready 后再发。
@@ -3406,11 +3532,13 @@ impl WorkbenchSessionRegistry {
 
     /// Business Logic（为什么需要这个函数）:
     ///     close / close_if_generation 共享 revoke、lease barrier 与 tombstone 语义。
-    ///     R22 M1：remove 与 Closing barrier 必须同临界区，消除 Missing 窗口。
+    ///     R22 M1 / R23 H2：remove 与 Closing barrier 必须同临界区；barrier 覆盖 drain **与**
+    ///     cleanup，且仅 closer 身份 CAS 清除。
     ///
     /// Code Logic（这个函数做什么）:
     ///     sessions 锁内：generation CAS remove + revoke + 立即 install Closing barrier；
-    ///     锁外 soft-wait drain + kill/cleanup；仅 drain 完成时按 PublishControl 身份 CAS 清 barrier。
+    ///     锁外 soft-wait drain + kill/replay cleanup → mark_cleanup_done；
+    ///     drained 则 closer 身份 CAS 清 barrier，否则 spawn reaper 等 drain 后 closer 清。
     fn close_inner(
         &self,
         session_id: &str,
@@ -3466,7 +3594,7 @@ impl WorkbenchSessionRegistry {
                 .expect("workbench replay buffers 锁中毒")
                 .remove(session_id);
         }
-        // soft-wait 在途 lease；无论是否 timeout，barrier 已在 map 中直至 cleanup 后 CAS 清除。
+        // soft-wait 在途 lease；无论是否 timeout，barrier 已在 map 中直至 cleanup+drain 后 closer CAS 清除。
         let drained = publish.wait_in_flight_drained();
         let mut handle = handle.lock().expect("workbench session 锁中毒");
         let was_running = handle.row.status == "running";
@@ -3485,9 +3613,13 @@ impl WorkbenchSessionRegistry {
         handle.row.updated_at = chrono::Utc::now().to_rfc3339();
         let row = handle.row.clone();
         drop(handle);
-        // R22 M1：仅 drain 完成且 cleanup 结束后按身份清除 barrier；未 drain 保留供 reinsert wait。
+        // R23 H2：cleanup 完成（含 kill/replay 清理）后 mark；waiters 永不 clear。
+        publish.mark_cleanup_done();
         if drained {
             self.clear_closing_tombstone_if_same(session_id, &publish);
+        } else {
+            // soft-timeout：reaper 以 closer 身份在 drain 后 clear，禁止 waiter 代清。
+            self.spawn_closing_barrier_reaper(session_id.to_string(), publish);
         }
         Ok(row)
     }
@@ -3593,29 +3725,26 @@ impl WorkbenchSessionRegistry {
     ///     safe attach 单测需要在无真实 tmux 时把 session 记入 registry，验证幂等与 claim。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     分配 generation 后插入 Fake process 的完整 row；仅 `#[cfg(test)]`。
+    ///     分配 generation 后经 barrier CAS 插入 Fake process 的完整 row；仅 `#[cfg(test)]`。
     #[cfg(test)]
     pub fn insert_fake_session_row_for_test(&self, row: WorkbenchSessionRow) {
         let session_id = row.id.clone();
-        self.wait_for_closing_tombstone(&session_id);
-        let generation = self.allocate_generation();
-        self.sessions
-            .lock()
-            .expect("workbench sessions 锁中毒")
-            .insert(
-                session_id.clone(),
-                Arc::new(Mutex::new(WorkbenchSessionHandle {
-                    row,
-                    generation,
-                    durability: SessionDurability::Ready,
-                    publish: PublishControl::new(),
-                    deferred_output: Vec::new(),
-                    deferred_mutations: Vec::new(),
-                    pending_exit: None,
-                    process: SessionProcess::Fake,
-                })),
-            );
-        self.ensure_replay_buffer_for_generation(&session_id, generation);
+        let mut inserted_generation = 0u64;
+        self.insert_handle_with_barrier_cas(&session_id, || {
+            let generation = self.allocate_generation();
+            inserted_generation = generation;
+            Arc::new(Mutex::new(WorkbenchSessionHandle {
+                row: row.clone(),
+                generation,
+                durability: SessionDurability::Ready,
+                publish: PublishControl::new(),
+                deferred_output: Vec::new(),
+                deferred_mutations: Vec::new(),
+                pending_exit: None,
+                process: SessionProcess::Fake,
+            }))
+        });
+        self.ensure_replay_buffer_for_generation(&session_id, inserted_generation);
     }
 
     #[cfg(test)]
@@ -3623,7 +3752,7 @@ impl WorkbenchSessionRegistry {
     ///     list 过滤测试需要构造不同项目的会话，但不应启动真实 PTY 或依赖本机 Claude CLI。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅在测试编译时分配 generation 并插入 fake 会话句柄，覆盖 list/filter 与 fencing 逻辑。
+    ///     仅在测试编译时分配 generation 并经 barrier CAS 插入 fake 会话句柄。
     fn insert_fake_session_for_test(&self, session_id: &str, project_id: &str) {
         let row = WorkbenchSessionRow {
             id: session_id.to_string(),
@@ -3644,25 +3773,59 @@ impl WorkbenchSessionRegistry {
             created_at: "2026-06-24T00:00:00Z".to_string(),
             updated_at: "2026-06-24T00:00:00Z".to_string(),
         };
-        self.wait_for_closing_tombstone(session_id);
-        let generation = self.allocate_generation();
-        self.sessions
+        let mut inserted_generation = 0u64;
+        self.insert_handle_with_barrier_cas(session_id, || {
+            let generation = self.allocate_generation();
+            inserted_generation = generation;
+            Arc::new(Mutex::new(WorkbenchSessionHandle {
+                row: row.clone(),
+                generation,
+                durability: SessionDurability::Ready,
+                publish: PublishControl::new(),
+                deferred_output: Vec::new(),
+                deferred_mutations: Vec::new(),
+                pending_exit: None,
+                process: SessionProcess::Fake,
+            }))
+        });
+        self.ensure_replay_buffer_for_generation(session_id, inserted_generation);
+    }
+
+    /// 测试：标记 closer cleanup 完成（R23 H2）。
+    #[cfg(test)]
+    fn mark_closing_cleanup_done_for_test(&self, session_id: &str) {
+        let closing = self
+            .closing_publish
             .lock()
-            .expect("workbench sessions 锁中毒")
-            .insert(
-                session_id.to_string(),
-                Arc::new(Mutex::new(WorkbenchSessionHandle {
-                    row,
-                    generation,
-                    durability: SessionDurability::Ready,
-                    publish: PublishControl::new(),
-                    deferred_output: Vec::new(),
-                    deferred_mutations: Vec::new(),
-                    pending_exit: None,
-                    process: SessionProcess::Fake,
-                })),
-            );
-        self.ensure_replay_buffer_for_generation(session_id, generation);
+            .expect("closing_publish 锁中毒");
+        if let Some(control) = closing.get(session_id) {
+            control.mark_cleanup_done();
+        }
+    }
+
+    /// 测试：仅 closer 身份清除 barrier（R23 H2）。
+    #[cfg(test)]
+    fn clear_closing_tombstone_for_test(&self, session_id: &str) {
+        let control = {
+            let closing = self
+                .closing_publish
+                .lock()
+                .expect("closing_publish 锁中毒");
+            closing.get(session_id).cloned()
+        };
+        if let Some(control) = control {
+            self.clear_closing_tombstone_if_same(session_id, &control);
+        }
+    }
+
+    /// 测试：在不 mark cleanup 的情况下安装 barrier（模拟 closer 仍在 cleanup）。
+    #[cfg(test)]
+    fn install_closing_barrier_for_test(&self, session_id: &str) -> Arc<PublishControl> {
+        let publish = PublishControl::new();
+        // 先 revoke 模拟 close 语义，但 cleanup_done 仍为 false。
+        publish.revoke();
+        self.install_closing_tombstone(session_id, publish.clone());
+        publish
     }
 
     /// 测试：插入 Provisional fake handle（不 Ready）。
@@ -3834,7 +3997,7 @@ fn publish_token_alive(
 ///     reader 必须区分 Provisional 等待与 stale/revoked，不能把未 Ready 当永久拒绝。
 ///
 /// Code Logic（这个函数做什么）:
-///     同 gen+allowed+Ready → Ready；同 gen+allowed+Provisional → Provisional；否则 Rejected。
+///     同 gen+allowed+Ready → Ready；同 gen+allowed+Provisional/Flushing → Provisional；否则 Rejected。
 fn classify_side_effect_gate(
     sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
     session_id: &str,
@@ -3845,21 +4008,35 @@ fn classify_side_effect_gate(
         .get(session_id)
         .map(|handle| {
             let handle = handle.lock().expect("workbench session 锁中毒");
-            if handle.generation != generation || !handle.publish.allowed.load(Ordering::SeqCst) {
-                SideEffectGate::Rejected
-            } else if handle.durability == SessionDurability::Ready {
-                SideEffectGate::Ready
-            } else if matches!(
-                handle.durability,
-                SessionDurability::Provisional | SessionDurability::Flushing
-            ) {
-                // Flushing 期间 live reader 继续缓冲，禁止与 deferred flush 双写同一 seq 空间外路径。
-                SideEffectGate::Provisional
-            } else {
-                SideEffectGate::Rejected
-            }
+            classify_side_effect_gate_locked(&handle, generation)
         })
         .unwrap_or(SideEffectGate::Rejected)
+}
+
+/// 在已持 handle 锁时分类副作用门。
+///
+/// Business Logic（为什么需要这个函数）:
+///     原子 prepare 路径需在同一临界区内复用 classify 规则。
+///
+/// Code Logic（这个函数做什么）:
+///     gen+allowed+Ready/Provisional|Flushing/其他 → Ready/Provisional/Rejected。
+fn classify_side_effect_gate_locked(
+    handle: &WorkbenchSessionHandle,
+    generation: u64,
+) -> SideEffectGate {
+    if handle.generation != generation || !handle.publish.allowed.load(Ordering::SeqCst) {
+        SideEffectGate::Rejected
+    } else if handle.durability == SessionDurability::Ready {
+        SideEffectGate::Ready
+    } else if matches!(
+        handle.durability,
+        SessionDurability::Provisional | SessionDurability::Flushing
+    ) {
+        // Flushing 期间 live reader 继续缓冲，禁止与 deferred flush 双写同一 seq 空间外路径。
+        SideEffectGate::Provisional
+    } else {
+        SideEffectGate::Rejected
+    }
 }
 
 /// generation + Ready + publish token 的完整副作用 fence（R19 H1/M1）。
@@ -3877,21 +4054,17 @@ fn can_publish_side_effect(
     classify_side_effect_gate(sessions, session_id, generation) == SideEffectGate::Ready
 }
 
-/// 尝试获取 generation-scoped 发布 lease（R20 H2）。
+/// 在已持 handle 锁时尝试获取 lease。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     emit/enqueue 必须把 fence 与副作用包在同一 lease 内，close 才能等待在途发布。
+///     原子 prepare 在 classify Ready 后必须同锁持 lease，禁止 TOCTOU。
 ///
 /// Code Logic（这个函数做什么）:
-///     锁内确认 Ready+token 后 `in_flight+1` 并返回 PublicationLease；失败 None。
-fn try_acquire_publication_lease(
-    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
-    session_id: &str,
+///     Ready|Flushing + gen + allowed 时 `in_flight+1` 并返回 lease；失败 None。
+fn try_acquire_publication_lease_locked(
+    handle: &WorkbenchSessionHandle,
     generation: u64,
 ) -> Option<PublicationLease> {
-    let sessions = sessions.lock().expect("workbench sessions 锁中毒");
-    let handle = sessions.get(session_id)?;
-    let handle = handle.lock().expect("workbench session 锁中毒");
     if handle.generation != generation
         || !handle.publish.allowed.load(Ordering::SeqCst)
         || !matches!(
@@ -3914,13 +4087,50 @@ fn try_acquire_publication_lease(
     })
 }
 
+/// 尝试获取 generation-scoped 发布 lease（R20 H2）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     emit/enqueue 必须把 fence 与副作用包在同一 lease 内，close 才能等待在途发布。
+///
+/// Code Logic（这个函数做什么）:
+///     锁内确认 Ready|Flushing+token 后 `in_flight+1` 并返回 PublicationLease；失败 None。
+fn try_acquire_publication_lease(
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    session_id: &str,
+    generation: u64,
+) -> Option<PublicationLease> {
+    let sessions = sessions.lock().expect("workbench sessions 锁中毒");
+    let handle = sessions.get(session_id)?;
+    let handle = handle.lock().expect("workbench session 锁中毒");
+    try_acquire_publication_lease_locked(&handle, generation)
+}
+
+/// 在已持 handle 锁时缓冲输出。
+///
+/// Business Logic（为什么需要这个函数）:
+///     原子 prepare 路径在 Provisional/Flushing 时同锁缓冲。
+///
+/// Code Logic（这个函数做什么）:
+///     有界 push deferred_output。
+fn buffer_output_locked(handle: &mut WorkbenchSessionHandle, chunk: String) {
+    if chunk.is_empty() {
+        return;
+    }
+    // 有界缓冲，避免长时间 upsert 阻塞撑爆内存（仅 metadata 路径，无敏感 body 日志）。
+    const MAX_DEFERRED_CHUNKS: usize = 256;
+    if handle.deferred_output.len() >= MAX_DEFERRED_CHUNKS {
+        handle.deferred_output.remove(0);
+    }
+    handle.deferred_output.push(chunk);
+}
+
 /// 缓冲 Provisional 期输出（R20 H1）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Ready 前首屏可见字节不得杀死 reader，也不得对外发布。
 ///
 /// Code Logic（这个函数做什么）:
-///     同 gen + Provisional + allowed 时 push deferred_output 并返回 true；否则 false。
+///     同 gen + Provisional/Flushing + allowed 时 push deferred_output 并返回 true；否则 false。
 fn buffer_provisional_output(
     sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
     session_id: &str,
@@ -3935,21 +4145,10 @@ fn buffer_provisional_output(
         return false;
     };
     let mut handle = handle.lock().expect("workbench session 锁中毒");
-    if handle.generation != generation
-        || !handle.publish.allowed.load(Ordering::SeqCst)
-        || !matches!(
-            handle.durability,
-            SessionDurability::Provisional | SessionDurability::Flushing
-        )
-    {
+    if classify_side_effect_gate_locked(&handle, generation) != SideEffectGate::Provisional {
         return false;
     }
-    // 有界缓冲，避免长时间 upsert 阻塞撑爆内存（仅 metadata 路径，无敏感 body 日志）。
-    const MAX_DEFERRED_CHUNKS: usize = 256;
-    if handle.deferred_output.len() >= MAX_DEFERRED_CHUNKS {
-        handle.deferred_output.remove(0);
-    }
-    handle.deferred_output.push(chunk);
+    buffer_output_locked(&mut handle, chunk);
     true
 }
 
@@ -3959,7 +4158,7 @@ fn buffer_provisional_output(
 ///     Ready 前 mutation 不得 enqueue，也不得因此 break reader。
 ///
 /// Code Logic（这个函数做什么）:
-///     同 gen + Provisional 时 extend deferred_mutations。
+///     同 gen + Provisional/Flushing 时 extend deferred_mutations。
 fn buffer_provisional_mutations(
     sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
     session_id: &str,
@@ -3974,13 +4173,7 @@ fn buffer_provisional_mutations(
         return false;
     };
     let mut handle = handle.lock().expect("workbench session 锁中毒");
-    if handle.generation != generation
-        || !handle.publish.allowed.load(Ordering::SeqCst)
-        || !matches!(
-            handle.durability,
-            SessionDurability::Provisional | SessionDurability::Flushing
-        )
-    {
+    if classify_side_effect_gate_locked(&handle, generation) != SideEffectGate::Provisional {
         return false;
     }
     handle.deferred_mutations.extend(mutations);
@@ -3993,7 +4186,7 @@ fn buffer_provisional_mutations(
 ///     upsert 完成前进程退出不得丢失，也不得提前发布 exited 后仍宣称 running。
 ///
 /// Code Logic（这个函数做什么）:
-///     同 gen + Provisional 时写 pending_exit；返回是否接受。
+///     同 gen + Provisional/Flushing 时写 pending_exit；返回是否接受。
 fn record_pending_exit(
     sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
     session_id: &str,
@@ -4005,17 +4198,122 @@ fn record_pending_exit(
         return false;
     };
     let mut handle = handle.lock().expect("workbench session 锁中毒");
-    if handle.generation != generation
-        || !handle.publish.allowed.load(Ordering::SeqCst)
-        || !matches!(
-            handle.durability,
-            SessionDurability::Provisional | SessionDurability::Flushing
-        )
-    {
+    if classify_side_effect_gate_locked(&handle, generation) != SideEffectGate::Provisional {
         return false;
     }
     handle.pending_exit = Some(exit_code);
     true
+}
+
+/// 一次锁内 classify + buffer 输出或取得 Ready lease（R23 H1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Flushing→Ready 间隙若 classify 与 buffer/lease 分锁，Ready mid-flight 会让 buffer 失败
+///     并被 reader 当作 stale 永久退出，丢失后续 chunk。
+///
+/// Code Logic（这个函数做什么）:
+///     持 sessions+handle 锁：Provisional/Flushing → 缓冲；Ready → 同锁持 lease 并带回 chunk；
+///     Rejected → 拒绝。
+fn prepare_output_side_effect(
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    session_id: &str,
+    generation: u64,
+    chunk: String,
+) -> PreparedSideEffect<String> {
+    if chunk.is_empty() {
+        return PreparedSideEffect::Buffered;
+    }
+    let sessions = sessions.lock().expect("workbench sessions 锁中毒");
+    let Some(handle) = sessions.get(session_id) else {
+        return PreparedSideEffect::Rejected;
+    };
+    let mut handle = handle.lock().expect("workbench session 锁中毒");
+    match classify_side_effect_gate_locked(&handle, generation) {
+        SideEffectGate::Provisional => {
+            buffer_output_locked(&mut handle, chunk);
+            PreparedSideEffect::Buffered
+        }
+        SideEffectGate::Ready => match try_acquire_publication_lease_locked(&handle, generation) {
+            Some(lease) => PreparedSideEffect::Live {
+                lease,
+                payload: chunk,
+            },
+            // Ready 但 lease 失败（revoke 交错）→ Rejected。
+            None => PreparedSideEffect::Rejected,
+        },
+        SideEffectGate::Rejected => PreparedSideEffect::Rejected,
+    }
+}
+
+/// 一次锁内 classify + buffer mutation 或取得 Ready lease（R23 H1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OSC mutation 与 output 共享同一 mid-flight 竞态；分锁会永久杀死 reader。
+///
+/// Code Logic（这个函数做什么）:
+///     Provisional/Flushing 同锁 extend deferred_mutations；Ready 同锁持 lease 并带回 mutations。
+fn prepare_mutation_side_effect(
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    session_id: &str,
+    generation: u64,
+    mutations: Vec<AgentRuntimeMutation>,
+) -> PreparedSideEffect<Vec<AgentRuntimeMutation>> {
+    if mutations.is_empty() {
+        return PreparedSideEffect::Buffered;
+    }
+    let sessions = sessions.lock().expect("workbench sessions 锁中毒");
+    let Some(handle) = sessions.get(session_id) else {
+        return PreparedSideEffect::Rejected;
+    };
+    let mut handle = handle.lock().expect("workbench session 锁中毒");
+    match classify_side_effect_gate_locked(&handle, generation) {
+        SideEffectGate::Provisional => {
+            handle.deferred_mutations.extend(mutations);
+            PreparedSideEffect::Buffered
+        }
+        SideEffectGate::Ready => match try_acquire_publication_lease_locked(&handle, generation) {
+            Some(lease) => PreparedSideEffect::Live {
+                lease,
+                payload: mutations,
+            },
+            None => PreparedSideEffect::Rejected,
+        },
+        SideEffectGate::Rejected => PreparedSideEffect::Rejected,
+    }
+}
+
+/// 一次锁内 classify + 记录 pending_exit 或取得 Ready lease（R23 H1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     exit watcher 同样不得在 Ready 过渡窗口永久丢失 exit 或误判 stale。
+///
+/// Code Logic（这个函数做什么）:
+///     Provisional/Flushing 写 pending_exit；Ready 持 lease 并带回 exit_code 供外层 emit。
+fn prepare_exit_side_effect(
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    session_id: &str,
+    generation: u64,
+    exit_code: Option<i32>,
+) -> PreparedSideEffect<Option<i32>> {
+    let sessions = sessions.lock().expect("workbench sessions 锁中毒");
+    let Some(handle) = sessions.get(session_id) else {
+        return PreparedSideEffect::Rejected;
+    };
+    let mut handle = handle.lock().expect("workbench session 锁中毒");
+    match classify_side_effect_gate_locked(&handle, generation) {
+        SideEffectGate::Provisional => {
+            handle.pending_exit = Some(exit_code);
+            PreparedSideEffect::Buffered
+        }
+        SideEffectGate::Ready => match try_acquire_publication_lease_locked(&handle, generation) {
+            Some(lease) => PreparedSideEffect::Live {
+                lease,
+                payload: exit_code,
+            },
+            None => PreparedSideEffect::Rejected,
+        },
+        SideEffectGate::Rejected => PreparedSideEffect::Rejected,
+    }
 }
 
 impl Default for WorkbenchSessionRegistry {
@@ -4219,14 +4517,14 @@ fn forward_agent_osc_mutations(
     }
 }
 
-/// generation fence 后转发 OSC mutation（R19 H1 / R20 H1/H2）。
+/// generation fence 后转发 OSC mutation（R19 H1 / R20 H1/H2 / R23 H1）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     旧 generation 在 decode 后、enqueue 前被 close/reinsert 时不得推进新实例 Agent。
-///     Provisional 期间缓冲，Ready 后持 lease enqueue。
+///     Provisional 期间缓冲，Ready 后持 lease enqueue；mid-flight Ready 不得永久杀死 reader。
 ///
 /// Code Logic（这个函数做什么）:
-///     empty → true；Provisional → buffer；Ready → lease + forward；Rejected → false。
+///     empty → true；一次锁 prepare：Buffered → true；Live → forward payload；Rejected → false。
 fn forward_agent_osc_mutations_fenced(
     state: &AppState,
     terminal_session_id: &str,
@@ -4238,20 +4536,14 @@ fn forward_agent_osc_mutations_fenced(
         // 无 mutation 时不因 fence 失败 break reader；仅在有 mutation 时强制 fence。
         return true;
     }
-    match classify_side_effect_gate(sessions, terminal_session_id, generation) {
-        SideEffectGate::Ready => {
-            let Some(_lease) =
-                try_acquire_publication_lease(sessions, terminal_session_id, generation)
-            else {
-                return false;
-            };
-            forward_agent_osc_mutations(state, terminal_session_id, mutations);
+    // R23 H1：classify+buffer/lease 一次锁，避免 Ready 过渡把 reader 永久打死。
+    match prepare_mutation_side_effect(sessions, terminal_session_id, generation, mutations) {
+        PreparedSideEffect::Buffered => true,
+        PreparedSideEffect::Live { lease: _lease, payload } => {
+            forward_agent_osc_mutations(state, terminal_session_id, payload);
             true
         }
-        SideEffectGate::Provisional => {
-            buffer_provisional_mutations(sessions, terminal_session_id, generation, mutations)
-        }
-        SideEffectGate::Rejected => false,
+        PreparedSideEffect::Rejected => false,
     }
 }
 
@@ -4259,10 +4551,11 @@ fn forward_agent_osc_mutations_fenced(
 ///     终端输出事件需要统一递增 seq，且纯 pending chunk 未完成时不应发送空事件。
 ///     R18 M2：generation 不匹配时不得 append/emit，防止旧 reader 污染新实例。
 ///     R20 H1：Provisional 缓冲；R20 H2：lease 覆盖 append+publish。
+///     R23 H1：classify 与 buffer/lease 同锁，Ready mid-flight 走 live 而非永久退出。
 ///
 /// Code Logic（这个函数做什么）:
-///     非空 chunk：generation 路径分类 gate；Provisional 缓冲返回 true；
-///     Ready 持 lease 写 buffer + 远端/本地/orchestrator；Rejected 返回 false。
+///     非空 chunk：generation 路径一次锁 prepare；Buffered → true；
+///     Live 持 lease 写 buffer + 远端/本地/orchestrator；Rejected → false。
 fn emit_terminal_output(
     state: &AppState,
     session_id: &str,
@@ -4276,31 +4569,25 @@ fn emit_terminal_output(
         return true;
     }
     if let Some(generation) = generation {
-        match classify_side_effect_gate(sessions, session_id, generation) {
-            SideEffectGate::Provisional => {
-                return buffer_provisional_output(sessions, session_id, generation, chunk);
+        // R23 H1：一次锁 classify + buffer 或 lease；Ready 过渡不再二次加锁失败。
+        match prepare_output_side_effect(sessions, session_id, generation, chunk) {
+            PreparedSideEffect::Buffered => return true,
+            PreparedSideEffect::Rejected => return false,
+            PreparedSideEffect::Live {
+                lease: _lease,
+                payload,
+            } => {
+                return emit_terminal_output_with_lease(
+                    state,
+                    session_id,
+                    Some(generation),
+                    sessions,
+                    seq,
+                    payload,
+                    replay_buffers,
+                );
             }
-            SideEffectGate::Rejected => return false,
-            SideEffectGate::Ready => {}
         }
-        let Some(_lease) = try_acquire_publication_lease(sessions, session_id, generation) else {
-            // lease 失败：若已回退 Provisional 则缓冲，否则拒绝。
-            return match classify_side_effect_gate(sessions, session_id, generation) {
-                SideEffectGate::Provisional => {
-                    buffer_provisional_output(sessions, session_id, generation, chunk)
-                }
-                _ => false,
-            };
-        };
-        return emit_terminal_output_with_lease(
-            state,
-            session_id,
-            Some(generation),
-            sessions,
-            seq,
-            chunk,
-            replay_buffers,
-        );
     }
     // 无 generation 的路径仅测试兼容。
     emit_terminal_output_with_lease(
@@ -4421,70 +4708,55 @@ fn spawn_exit_watcher(
 
         match status {
             Some(Ok(exit_code)) => {
-                // R20 H1：Provisional 记录 pending_exit；Ready 持 lease 写 status/emit。
-                match classify_side_effect_gate(&sessions, &session_id, generation) {
-                    SideEffectGate::Provisional => {
-                        let _ = record_pending_exit(
-                            &sessions,
-                            &session_id,
-                            generation,
-                            Some(exit_code),
-                        );
-                    }
-                    SideEffectGate::Ready => {
+                // R20 H1 / R23 H1：一次锁记录 pending_exit 或持 lease 写 status/emit。
+                match prepare_exit_side_effect(
+                    &sessions,
+                    &session_id,
+                    generation,
+                    Some(exit_code),
+                ) {
+                    PreparedSideEffect::Buffered => {}
+                    PreparedSideEffect::Live {
+                        lease: _lease,
+                        payload,
+                    } => {
+                        // 仅当仍是同一 handle Arc 时写 status（防止同 id 后继被污染）。
                         let still_owner = {
                             let map = sessions.lock().expect("workbench sessions 锁中毒");
                             match map.get(&session_id) {
-                                Some(current) if Arc::ptr_eq(current, &handle) => {
-                                    let h = current.lock().expect("workbench session 锁中毒");
-                                    h.generation == generation
-                                        && h.publish.allowed.load(Ordering::SeqCst)
-                                        && h.durability == SessionDurability::Ready
-                                }
+                                Some(current) if Arc::ptr_eq(current, &handle) => true,
                                 _ => false,
                             }
                         };
                         if still_owner {
-                            if let Some(_lease) = try_acquire_publication_lease(
-                                &sessions,
-                                &session_id,
-                                generation,
-                            ) {
-                                let mut handle =
-                                    handle.lock().expect("workbench session 锁中毒");
-                                if handle.generation == generation
-                                    && handle.publish.allowed.load(Ordering::SeqCst)
-                                {
-                                    handle.row.status = "exited".to_string();
-                                    handle.row.exited_at =
-                                        Some(chrono::Utc::now().to_rfc3339());
-                                    handle.row.exit_code = Some(exit_code);
-                                    handle.row.updated_at =
-                                        chrono::Utc::now().to_rfc3339();
-                                    drop(handle);
-                                    emit_status(&state, &session_id, "exited", Some(exit_code));
-                                }
+                            let mut handle = handle.lock().expect("workbench session 锁中毒");
+                            if handle.generation == generation
+                                && handle.publish.allowed.load(Ordering::SeqCst)
+                            {
+                                handle.row.status = "exited".to_string();
+                                handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
+                                handle.row.exit_code = payload;
+                                handle.row.updated_at = chrono::Utc::now().to_rfc3339();
+                                drop(handle);
+                                emit_status(&state, &session_id, "exited", payload);
                             }
                         }
                     }
-                    SideEffectGate::Rejected => {}
+                    PreparedSideEffect::Rejected => {}
                 }
                 break;
             }
             Some(Err(error)) => {
                 tracing::warn!("查询工作台终端退出状态失败: {error}");
-                match classify_side_effect_gate(&sessions, &session_id, generation) {
-                    SideEffectGate::Provisional => {
-                        let _ = record_pending_exit(&sessions, &session_id, generation, None);
+                match prepare_exit_side_effect(&sessions, &session_id, generation, None) {
+                    PreparedSideEffect::Buffered => {}
+                    PreparedSideEffect::Live {
+                        lease: _lease,
+                        payload: _,
+                    } => {
+                        emit_status(&state, &session_id, "disconnected", None);
                     }
-                    SideEffectGate::Ready => {
-                        if let Some(_lease) =
-                            try_acquire_publication_lease(&sessions, &session_id, generation)
-                        {
-                            emit_status(&state, &session_id, "disconnected", None);
-                        }
-                    }
-                    SideEffectGate::Rejected => {}
+                    PreparedSideEffect::Rejected => {}
                 }
                 break;
             }
@@ -6760,6 +7032,224 @@ mod tests {
         );
         assert!(
             try_acquire_publication_lease(&registry.sessions, "s-close-barrier", live).is_some()
+        );
+    }
+
+    /// Business Logic（R23 H1: 为什么需要这个测试）:
+    ///     Flushing→Ready 过渡时 output prepare 必须原子成功，禁止分锁 buffer 失败后永久 Rejected。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Provisional 置 Flushing；并发 finish_ready 与 prepare_output；
+    ///     结果只能 Buffered 或 Live，不得 Rejected；最终 Ready 且 deferred 空。
+    #[test]
+    fn prepare_output_survives_ready_transition() {
+        use std::sync::Barrier;
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_provisional_fake_session_for_test("s-r23-out", "p1");
+        let gen = registry.session_generation_for_test("s-r23-out").expect("gen");
+        {
+            let sessions = registry.sessions.lock().expect("lock");
+            let mut handle = sessions.get("s-r23-out").expect("h").lock().expect("h");
+            handle.durability = SessionDurability::Flushing;
+            handle.deferred_output.push("pre".into());
+        }
+        let barrier = Arc::new(Barrier::new(2));
+        let reg_ready = registry.clone();
+        let barrier_ready = barrier.clone();
+        let ready_thread = thread::spawn(move || {
+            barrier_ready.wait();
+            reg_ready.finish_ready_after_flush_for_test("s-r23-out", gen)
+        });
+        barrier.wait();
+        let mut saw_buffered = false;
+        let mut saw_live = false;
+        let mut saw_rejected = false;
+        for i in 0..64 {
+            match prepare_output_side_effect(
+                &registry.sessions,
+                "s-r23-out",
+                gen,
+                format!("chunk-{i}"),
+            ) {
+                PreparedSideEffect::Buffered => saw_buffered = true,
+                PreparedSideEffect::Live { lease: _lease, payload: _ } => {
+                    saw_live = true;
+                }
+                PreparedSideEffect::Rejected => saw_rejected = true,
+            }
+            thread::yield_now();
+        }
+        assert!(ready_thread.join().expect("ready"), "must reach Ready");
+        assert!(
+            !saw_rejected,
+            "mid-flight Ready must not permanently reject same generation output"
+        );
+        assert!(
+            saw_buffered || saw_live,
+            "prepare must accept output as buffer or live across Ready transition"
+        );
+        assert_eq!(
+            registry.session_durability_for_test("s-r23-out"),
+            Some(SessionDurability::Ready)
+        );
+    }
+
+    /// Business Logic（R23 H1: 为什么需要这个测试）:
+    ///     mutation prepare 与 exit prepare 必须在 Ready 过渡窗口保持原子，禁止分锁 stale。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Flushing 下并发 Ready；mutation/exit prepare 不得 Rejected。
+    #[test]
+    fn prepare_mutation_and_exit_survive_ready_transition() {
+        use crate::workbench::agent_runtime::AgentSessionPhase;
+        use std::sync::Barrier;
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_provisional_fake_session_for_test("s-r23-mut", "p1");
+        let gen = registry.session_generation_for_test("s-r23-mut").expect("gen");
+        {
+            let sessions = registry.sessions.lock().expect("lock");
+            let mut handle = sessions.get("s-r23-mut").expect("h").lock().expect("h");
+            handle.durability = SessionDurability::Flushing;
+        }
+        let barrier = Arc::new(Barrier::new(2));
+        let reg_ready = registry.clone();
+        let barrier_ready = barrier.clone();
+        let ready_thread = thread::spawn(move || {
+            barrier_ready.wait();
+            reg_ready.finish_ready_after_flush_for_test("s-r23-mut", gen)
+        });
+        barrier.wait();
+        let mutation = AgentRuntimeMutation {
+            agent_session_id: "a1".into(),
+            terminal_session_id: "s-r23-mut".into(),
+            expected_version: 0,
+            event_version: 1,
+            phase: AgentSessionPhase::Working,
+            native_session_id: None,
+            outcome_code: None,
+            occurred_at: "2026-07-21T00:00:00Z".into(),
+        };
+        let mut rejected = false;
+        for i in 0..32 {
+            match prepare_mutation_side_effect(
+                &registry.sessions,
+                "s-r23-mut",
+                gen,
+                vec![mutation.clone()],
+            ) {
+                PreparedSideEffect::Rejected => rejected = true,
+                PreparedSideEffect::Buffered | PreparedSideEffect::Live { .. } => {}
+            }
+            match prepare_exit_side_effect(&registry.sessions, "s-r23-mut", gen, Some(i as i32)) {
+                PreparedSideEffect::Rejected => rejected = true,
+                PreparedSideEffect::Buffered | PreparedSideEffect::Live { .. } => {}
+            }
+            thread::yield_now();
+        }
+        assert!(ready_thread.join().expect("ready"));
+        assert!(
+            !rejected,
+            "mutation/exit prepare must not reject across Ready transition"
+        );
+    }
+
+    /// Business Logic（R23 H2: 为什么需要这个测试）:
+    ///     waiters 不得因 in_flight==0 清除 barrier；closer 未 cleanup 时 reinsert 必须等待。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     安装 barrier（leases=0, cleanup_done=false）；并发 reinsert 阻塞；
+    ///     mark cleanup + closer clear 后 reinsert 成功。
+    #[test]
+    fn waiter_never_clears_barrier_before_cleanup_done() {
+        use std::sync::Barrier;
+        let registry = WorkbenchSessionRegistry::new();
+        let publish = registry.install_closing_barrier_for_test("s-r23-h2");
+        assert!(
+            registry.has_closing_tombstone_for_test("s-r23-h2"),
+            "barrier installed"
+        );
+        assert!(
+            !publish.is_cleanup_done(),
+            "cleanup_done must start false"
+        );
+        assert_eq!(publish.in_flight.load(Ordering::SeqCst), 0);
+        let start = Arc::new(Barrier::new(2));
+        let reg_ins = registry.clone();
+        let start_ins = start.clone();
+        let inserter = thread::spawn(move || {
+            start_ins.wait();
+            reg_ins.insert_fake_session_for_test("s-r23-h2", "p1");
+            reg_ins.session_generation_for_test("s-r23-h2")
+        });
+        start.wait();
+        thread::sleep(Duration::from_millis(80));
+        assert!(
+            !registry.contains("s-r23-h2"),
+            "waiter must not clear barrier / reinsert while cleanup pending"
+        );
+        assert!(registry.has_closing_tombstone_for_test("s-r23-h2"));
+        // closer 完成 cleanup 后才可 clear。
+        publish.mark_cleanup_done();
+        registry.clear_closing_tombstone_for_test("s-r23-h2");
+        let gen = inserter.join().expect("inserter").expect("gen");
+        assert!(
+            !registry.has_closing_tombstone_for_test("s-r23-h2"),
+            "only closer clear removes barrier"
+        );
+        assert!(registry.contains("s-r23-h2"));
+        assert_eq!(registry.session_generation_for_test("s-r23-h2"), Some(gen));
+    }
+
+    /// Business Logic（R23 M1: 为什么需要这个测试）:
+    ///     close install barrier 与 insert CAS 必须同 lifecycle 锁；并发 reinsert 不得越过新 barrier。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     live gen1；并发 close + insert；insert 最终成功的 gen 必须 != gen1 且 barrier 清后存在；
+    ///     中途若 close 先装 barrier，insert CAS 失败后重试直至成功。
+    #[test]
+    fn insert_revalidates_barrier_under_lifecycle_lock() {
+        use std::sync::Barrier;
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-r23-m1", "p1");
+        let gen1 = registry.session_generation_for_test("s-r23-m1").expect("gen1");
+        let start = Arc::new(Barrier::new(3));
+        let reg_close = registry.clone();
+        let start_close = start.clone();
+        let closer = thread::spawn(move || {
+            start_close.wait();
+            reg_close.close("s-r23-m1")
+        });
+        let mut inserters = Vec::new();
+        for _ in 0..1 {
+            let reg = registry.clone();
+            let start = start.clone();
+            inserters.push(thread::spawn(move || {
+                start.wait();
+                // 紧跟 close：可能撞上 barrier；CAS 循环直至成功。
+                reg.insert_fake_session_for_test("s-r23-m1", "p1");
+                reg.session_generation_for_test("s-r23-m1")
+            }));
+        }
+        start.wait();
+        closer.join().expect("closer").expect("close ok");
+        let gen2 = inserters
+            .pop()
+            .expect("one")
+            .join()
+            .expect("inserter")
+            .expect("gen2");
+        assert_ne!(gen1, gen2, "successor generation must differ");
+        assert!(
+            !registry.has_closing_tombstone_for_test("s-r23-m1"),
+            "barrier must be gone after close cleanup + successful reinsert"
+        );
+        assert_eq!(
+            registry.session_generation_for_test("s-r23-m1"),
+            Some(gen2)
+        );
+        assert_eq!(
+            registry.runtime_presence("s-r23-m1"),
+            SessionRuntimePresence::Live
         );
     }
 }
