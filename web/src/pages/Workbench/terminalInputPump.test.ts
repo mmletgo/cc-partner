@@ -24,11 +24,11 @@ describe("terminalInputPump", () => {
     pump.enqueue("s1", "a");
     expect(writes).toEqual([["s1", "a"]]);
     pump.enqueue("s1", "b");
-    pump.enqueue("s1", "\u007f");
+    pump.enqueue("s1", "c");
     expect(writes).toHaveLength(1);
     first.resolve();
     await pump.whenIdle("s1");
-    expect(writes).toEqual([["s1", "a"], ["s1", "b\u007f"]]);
+    expect(writes).toEqual([["s1", "a"], ["s1", "bc"]]);
   });
 
   test("isolates sessions and never replays a failed batch", async () => {
@@ -55,6 +55,41 @@ describe("terminalInputPump", () => {
     pump.disposeSession("s1");
     first.resolve();
     await Promise.resolve();
+    await Promise.resolve();
     expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  test("dispose during in-flight then re-enqueue keeps max concurrency 1 and ordered batches", async () => {
+    const first = deferred();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const writes: Array<[string, string]> = [];
+    const write = vi.fn(async (sessionId: string, data: string) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      writes.push([sessionId, data]);
+      try {
+        if (writes.length === 1) {
+          await first.promise;
+        }
+      } finally {
+        inFlight -= 1;
+      }
+    });
+    const pump = createTerminalInputPump({ write });
+
+    pump.enqueue("s1", "a");
+    expect(writes).toEqual([["s1", "a"]]);
+    pump.disposeSession("s1");
+    // dispose 后、旧 write 仍 pending 时 re-enqueue 必须排队，不得并发第二 write。
+    pump.enqueue("s1", "b");
+    pump.enqueue("s1", "c");
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(maxInFlight).toBe(1);
+
+    first.resolve();
+    await pump.whenIdle("s1");
+    expect(maxInFlight).toBe(1);
+    expect(writes).toEqual([["s1", "a"], ["s1", "bc"]]);
   });
 });

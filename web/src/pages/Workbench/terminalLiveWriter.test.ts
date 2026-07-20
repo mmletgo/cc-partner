@@ -175,4 +175,32 @@ describe('terminalLiveWriter', () => {
     expect(terminal.clearCalls).toBe(1);
     expect(terminal.writes).toEqual(['old', 'new', '!']);
   });
+
+  test('coalesces unbounded high-rate deltas into a single next batch while writing', () => {
+    const terminal = new FakeTerminalWriter();
+    const source = new FakeTerminalLiveSource('seed', { generation: 0, appendId: 0 });
+    createTerminalLiveWriter({ terminal, source, sessionId: 's1' });
+    // 完成 snapshot write，进入 idle。
+    terminal.completeWrite(0);
+    expect(terminal.writes).toEqual(['seed']);
+
+    source.emit({ sessionId: 's1', generation: 0, appendId: 1, chunk: 'a' });
+    expect(terminal.writes).toEqual(['seed', 'a']);
+    // 保持 in-flight，连续大量 delta 必须合并为有界 next-buffer，不得每个 delta 一次 write。
+    for (let i = 2; i <= 50; i += 1) {
+      source.emit({
+        sessionId: 's1',
+        generation: 0,
+        appendId: i,
+        chunk: String(i % 10),
+      });
+    }
+    expect(terminal.writes).toHaveLength(2);
+    terminal.completeWrite(1);
+    expect(terminal.writes).toHaveLength(3);
+    const expectedTail = Array.from({ length: 49 }, (_, idx) => String((idx + 2) % 10)).join('');
+    expect(terminal.writes[2]).toBe(expectedTail);
+    terminal.completeWrite(2);
+    expect(terminal.writes).toHaveLength(3);
+  });
 });

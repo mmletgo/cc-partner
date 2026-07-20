@@ -9,8 +9,9 @@
  *
  * Code Logic（这个模块做什么）:
  *   维护 session → InputLane（generation/pending/running/idleWaiters）；enqueue 拼接并
- *   触发 drain；每个 lane 最多一个 in-flight write；disposeSession/dispose 丢弃 pending
- *   并抬高 generation，不伪取消 in-flight。
+ *   触发 drain；每个 lane 最多一个 in-flight write；disposeSession 丢弃 pending 并抬高
+ *   generation，但保留 in-flight tombstone 直到 write settle，避免 dispose 后立刻 re-enqueue
+ *   启动第二个并发 drain。
  */
 
 export interface TerminalInputPumpOptions {
@@ -58,11 +59,23 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   dispose 后调用方不应再被 whenIdle 挂起，即使 in-flight write 仍在 settle。
+   *
+   * Code Logic（这个函数做什么）:
+   *   无条件 resolve 并清空 idleWaiters。
+   */
+  const forceSettleIdle = (lane: InputLane): void => {
+    lane.idleWaiters.forEach((resolve) => resolve());
+    lane.idleWaiters.clear();
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   每个 session 必须串行写出，且 in-flight 期间到达的字节要在 settle 后作为下一批发送。
    *
    * Code Logic（这个函数做什么）:
    *   循环取出完整 pending 作为 batch 调用 options.write；catch 后不重放本批；
-   *   generation 变化或 dispose 后停止。
+   *   generation 变化时保留 barrier 至本 drain 结束，再按需启动新 generation 的 drain。
    */
   const drain = async (sessionId: string, lane: InputLane, generation: number): Promise<void> => {
     lane.running = true;
@@ -75,10 +88,25 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
         // Mutation 不重放；后续已排队批次仍按原顺序继续。
       }
     }
-    if (lane.generation === generation) {
+
+    if (lane.generation !== generation) {
+      // dispose 期间本 drain 作为 in-flight barrier；settle 后若有新 pending 则启动恰好一次新 drain。
+      if (!disposed && lane.pending.length > 0) {
+        void drain(sessionId, lane, lane.generation);
+        return;
+      }
       lane.running = false;
       settleIdle(lane);
-      if (lane.pending.length === 0 && lane.idleWaiters.size === 0) lanes.delete(sessionId);
+      if (lane.pending.length === 0 && lane.idleWaiters.size === 0) {
+        lanes.delete(sessionId);
+      }
+      return;
+    }
+
+    lane.running = false;
+    settleIdle(lane);
+    if (lane.pending.length === 0 && lane.idleWaiters.size === 0) {
+      lanes.delete(sessionId);
     }
   };
 
@@ -87,16 +115,18 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
    *   session close / offline / unmount 时必须丢弃尚未提交的输入，且不得重发 in-flight。
    *
    * Code Logic（这个函数做什么）:
-   *   generation++、清空 pending、标记非 running、settle idle waiters 并从 map 删除。
+   *   generation++、清空 pending、强制 settle idle waiters；若无 in-flight 则删除 lane，
+   *   若仍有 in-flight 则保留 tombstone（running 保持 true）直到旧 drain settle。
    */
   const disposeSession = (sessionId: string): void => {
     const lane = lanes.get(sessionId);
     if (!lane) return;
     lane.generation += 1;
     lane.pending = '';
-    lane.running = false;
-    settleIdle(lane);
-    lanes.delete(sessionId);
+    forceSettleIdle(lane);
+    if (!lane.running) {
+      lanes.delete(sessionId);
+    }
   };
 
   return {
@@ -105,7 +135,8 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
      *   xterm onData 到达时需要尽快把字节交给 owner，同时遵守 per-session max in-flight=1。
      *
      * Code Logic（这个函数做什么）:
-     *   空串与全局 dispose 后 no-op；否则拼接 pending，若无 in-flight 则启动 drain。
+     *   空串与全局 dispose 后 no-op；否则拼接 pending，若无 in-flight 则启动 drain；
+     *   dispose 后仍 in-flight 时复用 tombstone，不启动第二个并发 write。
      */
     enqueue(sessionId, data) {
       if (disposed || data.length === 0) return;

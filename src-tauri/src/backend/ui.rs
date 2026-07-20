@@ -151,11 +151,12 @@ pub async fn run_gui_owner_event_relay(
                         message = stream.next_message() => match message {
                             Ok(Some(message)) => {
                                 received_message = true;
-                                apply_gui_relay_message(
+                                apply_gui_relay_message_with_cancel(
                                     &client,
                                     ui.as_ref(),
                                     &mut relay_state,
                                     message,
+                                    Some(&cancel),
                                 )
                                 .await;
                             }
@@ -199,6 +200,24 @@ pub async fn apply_gui_relay_message(
     relay_state: &mut GuiEventRelayState,
     message: RuntimeRelayMessage,
 ) {
+    apply_gui_relay_message_with_cancel(client, ui, relay_state, message, None).await;
+}
+
+/// 带可选 cancel 的 relay 消息处理（stream 热路径使用，避免 gap resync 阻塞 shutdown）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Gap resync 会 list sessions 并 N 次 replay；shutdown 时不能长时间占住 stream select arm。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `apply_gui_relay_message` 相同，但 RequestResync 经 cancel-aware `resync_after_gap`；
+///     cancel 返回后不 attach latest。
+pub async fn apply_gui_relay_message_with_cancel(
+    client: &BackendControlClient,
+    ui: &dyn BackendUi,
+    relay_state: &mut GuiEventRelayState,
+    message: RuntimeRelayMessage,
+    cancel: Option<&CancellationToken>,
+) {
     match relay_state.on_message(message) {
         RelayClientAction::Deliver {
             event,
@@ -212,8 +231,18 @@ pub async fn apply_gui_relay_message(
             oldest_available,
             latest,
         } => {
-            let outcome =
-                resync_after_gap(client, ui, &owner_instance_id, oldest_available, latest).await;
+            let Some(outcome) = resync_after_gap(
+                client,
+                ui,
+                &owner_instance_id,
+                oldest_available,
+                latest,
+                cancel,
+            )
+            .await
+            else {
+                return;
+            };
             tracing::info!(
                 terminal_replay_count = outcome.terminal_replay_count,
                 runtime_snapshot_refresh_count = outcome.runtime_snapshot_refresh_count,
@@ -361,13 +390,15 @@ impl RecordingBackendUi {
         }
     }
 
-    /// 等待 terminal-output 事件累计包含给定 chunk 序列。
+    /// 等待 terminal-output 事件按序包含给定 chunk 序列。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     重连测试需要确认 stream 断线前后两段输出都到达 GUI。
+    ///     重连测试需要确认 stream 断线前后两段输出都按顺序到达 GUI；
+    ///     失败诊断不得打印 terminal body（隐私合同）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     收集 `workbench:terminal-output` 的 payload.chunk，判断是否按序包含 expected。
+    ///     收集 `workbench:terminal-output` 的 chunk，按 expected 顺序顺序匹配；
+    ///     超时 panic 只报 step/counts/byte_len，不 dump 正文。
     pub async fn wait_for_terminal_chunks(&self, expected: &[&str], timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -382,14 +413,29 @@ impl RecordingBackendUi {
                         .map(|s| s.to_string())
                 })
                 .collect();
-            if expected
-                .iter()
-                .all(|want| chunks.iter().any(|got| got == *want))
-            {
+            // 顺序敏感：expected[i] 必须在 expected[i-1] 之后出现。
+            let mut from = 0usize;
+            let mut matched = 0usize;
+            for want in expected {
+                if let Some(offset) = chunks[from..].iter().position(|got| got == *want) {
+                    from += offset + 1;
+                    matched += 1;
+                } else {
+                    break;
+                }
+            }
+            if matched == expected.len() {
                 return;
             }
             if tokio::time::Instant::now() >= deadline {
-                panic!("等待 terminal chunks {expected:?} 超时；已收到 {chunks:?}");
+                let lens: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
+                panic!(
+                    "等待 terminal chunks 超时：expected_steps={} matched_steps={} received_count={} received_byte_lens={:?}",
+                    expected.len(),
+                    matched,
+                    chunks.len(),
+                    lens
+                );
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -423,29 +469,38 @@ impl BackendUi for RecordingBackendUi {
     }
 }
 
-/// Gap 后执行 terminal replay + runtime snapshot 恢复（可观测）。
+/// Gap 后执行 terminal replay + runtime snapshot 恢复（可观测、cancel-aware）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     RequestResync 不能只发空事件；必须调用既有 sessions.list/replay 与 runtime 刷新路径。
+///     RequestResync 不能只发空事件；必须调用既有 sessions.list/replay 与 runtime 刷新路径；
+///     多 session 回放期间必须响应 shutdown cancel，避免幽灵 task 长时间占住 relay。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 `resync_terminals_via_control`，再 emit `backend:runtime-gap`；
-///     计数汇总为 `GapResyncOutcome`（与 `perform_gap_resync` 语义一致，避免引用生命周期问题）。
+///     先 `resync_terminals_via_control`（步骤间轮询 cancel），再 emit `backend:runtime-gap`；
+///     cancel 时返回 None；成功返回 `GapResyncOutcome`。
 pub async fn resync_after_gap(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
     owner_instance_id: &str,
     oldest_available: u64,
     latest: u64,
-) -> GapResyncOutcome {
+    cancel: Option<&CancellationToken>,
+) -> Option<GapResyncOutcome> {
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return None;
+    }
     // 顺序恢复：terminal 先于 runtime 通知，保证前端 snapshot 刷新时 buffer 已开始重置。
-    let terminal_replay_count = match resync_terminals_via_control(client, ui).await {
+    let terminal_replay_count = match resync_terminals_via_control(client, ui, cancel).await {
         Ok(n) => n,
+        Err(e) if e.code() == "cancelled" => return None,
         Err(e) => {
             tracing::warn!("gap resync: terminal replay 失败: {e}");
             0
         }
     };
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return None;
+    }
     ui.emit(
         BACKEND_RUNTIME_GAP_EVENT,
         json!({
@@ -456,10 +511,10 @@ pub async fn resync_after_gap(
             "resyncRuntime": true,
         }),
     );
-    GapResyncOutcome {
+    Some(GapResyncOutcome {
         terminal_replay_count,
         runtime_snapshot_refresh_count: 1,
-    }
+    })
 }
 
 /// 经 control workbench 列出 session 并 replay，向前端发出 terminal-resync。
@@ -469,17 +524,24 @@ pub async fn resync_after_gap(
 ///
 /// Code Logic（这个函数做什么）:
 ///     `sessions.list` → 每个 id `sessions.replay` → emit `workbench:terminal-resync`；
-///     单 session 失败跳过，返回成功次数。
+///     单 session 失败跳过；每步前检查 cancel；返回成功次数。
 async fn resync_terminals_via_control(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
+    cancel: Option<&CancellationToken>,
 ) -> Result<u64, AppError> {
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(AppError::generic("cancelled"));
+    }
     let sessions: Vec<serde_json::Value> = client
         .workbench_op("sessions.list", json!({}))
         .await
         .unwrap_or_default();
     let mut count = 0u64;
     for session in sessions {
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            return Err(AppError::generic("cancelled"));
+        }
         let Some(session_id) = session
             .get("id")
             .or_else(|| session.get("sessionId"))

@@ -104,8 +104,9 @@ function writeSnapshotWithOptionalGate(
  *   已挂载 xterm 需要先订阅再读 snapshot，把真实 PTY 增量直接写入终端，绕过 rAF/React/KMP。
  *
  * Code Logic（这个函数做什么）:
- *   先 subscribe live/reset，再 snapshot；replay 期间队列 delta；write 回调后按 cursor 去重并合并
- *   下一批；generation 变化时 invalidate 队列、clear 并 replay 最新 snapshot。
+ *   先 subscribe live/reset，再 snapshot；write in-flight 期间把后续 delta 合并为有界 next-buffer
+ *   （单字符串 + 最后 cursor），完成回调后再按 generation/appendId 去重 drain；generation 变化时
+ *   invalidate 队列、clear 并 replay 最新 snapshot。
  */
 export function createTerminalLiveWriter(
   options: CreateTerminalLiveWriterOptions,
@@ -115,7 +116,9 @@ export function createTerminalLiveWriter(
   let writeEpoch = 0;
   let writing = false;
   let appliedCursor: TerminalBufferCursor = { generation: -1, appendId: -1 };
-  let pendingDeltas: TerminalBufferDelta[] = [];
+  /** 有界 pending：合并为单一 next chunk，仅保留最后 cursor（generation/appendId）。 */
+  let pendingChunk = '';
+  let pendingCursor: TerminalBufferCursor | null = null;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -128,20 +131,34 @@ export function createTerminalLiveWriter(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   snapshot 完成后或 drain 前需要丢弃已包含在 appliedCursor 内的 pending。
+   *
+   * Code Logic（这个函数做什么）:
+   *   若 pendingCursor 不新于 appliedCursor 则清空有界缓冲。
+   */
+  const dropStalePending = (): void => {
+    if (!pendingCursor || !isNewerDelta(pendingCursor, appliedCursor)) {
+      pendingChunk = '';
+      pendingCursor = null;
+    }
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   live delta 到达时可能正有 write in-flight，需要按到达顺序合并下一批。
    *
    * Code Logic（这个函数做什么）:
-   *   过滤 <= appliedCursor 的 delta，合并 chunk 后单次 write；完成后再 drain。
+   *   过滤 <= appliedCursor 的 pending，把有界 next-buffer 单次 write；完成后再 drain。
    */
   const drainPending = (): void => {
     if (disposed || writing) return;
-    pendingDeltas = pendingDeltas.filter((delta) => isNewerDelta(delta, appliedCursor));
-    if (pendingDeltas.length === 0) return;
+    dropStalePending();
+    if (!pendingCursor) return;
 
-    const batch = pendingDeltas;
-    pendingDeltas = [];
-    const data = batch.map((delta) => delta.chunk).join('');
-    const last = batch[batch.length - 1]!;
+    const data = pendingChunk;
+    const last = pendingCursor;
+    pendingChunk = '';
+    pendingCursor = null;
     if (data.length === 0) {
       appliedCursor = { generation: last.generation, appendId: last.appendId };
       drainPending();
@@ -168,8 +185,11 @@ export function createTerminalLiveWriter(
   const replaySnapshot = (clearFirst: boolean): void => {
     const epoch = ++writeEpoch;
     writing = true;
-    pendingDeltas = [];
+    pendingChunk = '';
+    pendingCursor = null;
     const snapshot = source.getSnapshot(sessionId);
+    // 先抬 appliedCursor，使 snapshot 期间到达的 <=cursor delta 不会进入有界 pending（否则 coalesce 无法裁掉前缀）。
+    appliedCursor = snapshot.cursor;
     if (clearFirst) {
       terminal.clear();
     }
@@ -177,8 +197,7 @@ export function createTerminalLiveWriter(
     writeSnapshotWithOptionalGate(terminal, snapshot.buffer, gate, () => {
       if (!isCurrent(epoch)) return;
       writing = false;
-      appliedCursor = snapshot.cursor;
-      pendingDeltas = pendingDeltas.filter((delta) => isNewerDelta(delta, appliedCursor));
+      dropStalePending();
       drainPending();
     });
   };
@@ -188,12 +207,19 @@ export function createTerminalLiveWriter(
    *   append 热路径把每个 chunk 同步交给已挂载 writer。
    *
    * Code Logic（这个函数做什么）:
-   *   忽略已 dispose 的事件；其余一律入队，由 drain 按 appliedCursor 去重。
+   *   忽略已 dispose / 非本 session / 不新于 applied 的 delta；其余合并进有界 next-buffer。
    */
   const onLiveDelta = (delta: TerminalBufferDelta): void => {
     if (disposed) return;
     if (delta.sessionId !== sessionId) return;
-    pendingDeltas.push(delta);
+    if (!isNewerDelta(delta, appliedCursor)) return;
+    if (pendingCursor && delta.generation < pendingCursor.generation) return;
+    if (pendingCursor && delta.generation > pendingCursor.generation) {
+      pendingChunk = delta.chunk;
+    } else {
+      pendingChunk += delta.chunk;
+    }
+    pendingCursor = { generation: delta.generation, appendId: delta.appendId };
     drainPending();
   };
 
@@ -206,7 +232,8 @@ export function createTerminalLiveWriter(
    */
   const onReset = (): void => {
     if (disposed) return;
-    pendingDeltas = [];
+    pendingChunk = '';
+    pendingCursor = null;
     replaySnapshot(true);
   };
 
@@ -228,7 +255,8 @@ export function createTerminalLiveWriter(
       disposed = true;
       writeEpoch += 1;
       writing = false;
-      pendingDeltas = [];
+      pendingChunk = '';
+      pendingCursor = null;
       unsubscribeLive();
       unsubscribeReset();
     },
