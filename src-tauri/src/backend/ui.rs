@@ -26,6 +26,42 @@ pub const BACKEND_RUNTIME_GAP_EVENT: &str = "backend:runtime-gap";
 /// Gap resync 后终端 buffer 全量重置事件（sessionId + buffer）。
 pub const WORKBENCH_TERMINAL_RESYNC_EVENT: &str = "workbench:terminal-resync";
 
+/// GUI owner event relay 对单条消息的应用结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     stream 与 poll fallback 必须区分“无 Gap / Gap 完整 / Gap 不完整”，
+///     incomplete 时保留 recovery cursor 重试，禁止以 None 当 brand-new consumer 重连。
+///
+/// Code Logic（这个枚举做什么）:
+///     `NoGap`：Deliver/DropDuplicate，无需为 Gap 重连；
+///     `GapComplete`：resync 成功并 attach latest，应关闭当前 stream 按新 cursor 重连；
+///     `GapIncomplete`：resync 失败/取消，已 restore recovery cursor，应重连/退避重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiRelayApplyResult {
+    /// 非 Gap 消息：无需为 Gap 关闭 stream。
+    NoGap,
+    /// Gap resync 完整成功：已 attach latest。
+    GapComplete,
+    /// Gap resync 未完成：已恢复 pre-gap recovery cursor（若有）。
+    GapIncomplete,
+}
+
+impl GuiRelayApplyResult {
+    /// 是否应关闭当前 stream 后按 cursor 重连。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Gap 成功与 incomplete 都不得继续消费 laggy stream 尾部。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `GapComplete` / `GapIncomplete` → true；`NoGap` → false。
+    pub fn should_reconnect_stream(self) -> bool {
+        matches!(
+            self,
+            GuiRelayApplyResult::GapComplete | GuiRelayApplyResult::GapIncomplete
+        )
+    }
+}
+
 /// 后端 UI 静态资源载荷。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -152,8 +188,8 @@ pub async fn run_gui_owner_event_relay(
                             Ok(Some(message)) => {
                                 received_message = true;
                                 // Gap 成功/不完全后都 break：重连 open_events_stream(cursor)
-                                // 避免继续消费 laggy stream 尾部导致与 resync snapshot 双写。
-                                let reconnect_after_gap = apply_gui_relay_message_with_cancel(
+                                // incomplete 时 cursor 为 pre-gap recovery，禁止 None brand-new 重连。
+                                let apply_result = apply_gui_relay_message_with_cancel(
                                     &client,
                                     ui.as_ref(),
                                     &mut relay_state,
@@ -161,7 +197,7 @@ pub async fn run_gui_owner_event_relay(
                                     Some(&cancel),
                                 )
                                 .await;
-                                if reconnect_after_gap {
+                                if apply_result.should_reconnect_stream() {
                                     break;
                                 }
                             }
@@ -198,14 +234,14 @@ pub async fn run_gui_owner_event_relay(
 ///
 /// Code Logic（这个函数做什么）:
 ///     `GuiEventRelayState::on_message` → Deliver 走 `emit_gui_relay_event`；DropDuplicate
-///     静默；RequestResync 先 `resync_after_gap` 再 `attach_at(owner, latest)`。
-///     返回 true 表示本消息触发了 Gap 恢复且应关闭当前 stream 后按 cursor 重连。
+///     静默；RequestResync 先 `resync_after_gap`：完整则 `attach_at(latest)` 返回 `GapComplete`；
+///     incomplete/cancel 则 `restore_recovery_cursor` 返回 `GapIncomplete`。
 pub async fn apply_gui_relay_message(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
     relay_state: &mut GuiEventRelayState,
     message: RuntimeRelayMessage,
-) -> bool {
+) -> GuiRelayApplyResult {
     apply_gui_relay_message_with_cancel(client, ui, relay_state, message, None).await
 }
 
@@ -214,18 +250,19 @@ pub async fn apply_gui_relay_message(
 /// Business Logic（为什么需要这个函数）:
 ///     Gap resync 会 list sessions 并 N 次 replay；shutdown 时不能长时间占住 stream select arm。
 ///     成功 resync 后若继续消费**同一** laggy stream 的 pre-gap 尾部，会把已包含在
-///     snapshot 中的 terminal 输出再次转发。
+///     snapshot 中的 terminal 输出再次转发。incomplete 时必须恢复 pre-gap cursor，
+///     禁止以 None 重连成 brand-new consumer。
 ///
 /// Code Logic（这个函数做什么）:
 ///     与 `apply_gui_relay_message` 相同，但 RequestResync 经 cancel-aware `resync_after_gap`；
-///     cancel/incomplete 不 attach latest；完整成功返回 true，调用方应 break stream 重连。
+///     cancel/incomplete → restore recovery + `GapIncomplete`；完整成功 → attach latest + `GapComplete`。
 pub async fn apply_gui_relay_message_with_cancel(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
     relay_state: &mut GuiEventRelayState,
     message: RuntimeRelayMessage,
     cancel: Option<&CancellationToken>,
-) -> bool {
+) -> GuiRelayApplyResult {
     match relay_state.on_message(message) {
         RelayClientAction::Deliver {
             event,
@@ -234,9 +271,9 @@ pub async fn apply_gui_relay_message_with_cancel(
             sequence,
         } => {
             emit_gui_relay_event(ui, event, payload, owner_instance_id, sequence);
-            false
+            GuiRelayApplyResult::NoGap
         }
-        RelayClientAction::DropDuplicate => false,
+        RelayClientAction::DropDuplicate => GuiRelayApplyResult::NoGap,
         RelayClientAction::RequestResync {
             owner_instance_id,
             oldest_available,
@@ -252,8 +289,9 @@ pub async fn apply_gui_relay_message_with_cancel(
             )
             .await
             else {
-                // incomplete/cancel：不 attach latest，也不继续吞旧流。
-                return true;
+                // incomplete/cancel：不 attach latest；恢复 pre-gap recovery cursor 供重连/重试。
+                relay_state.restore_recovery_cursor();
+                return GuiRelayApplyResult::GapIncomplete;
             };
             tracing::info!(
                 terminal_replay_count = outcome.terminal_replay_count,
@@ -266,7 +304,7 @@ pub async fn apply_gui_relay_message_with_cancel(
                 sequence: latest,
             });
             // 调用方应关闭当前 stream 并按新 cursor 重连，避免 pre-gap 尾部二次转发。
-            true
+            GuiRelayApplyResult::GapComplete
         }
     }
 }
@@ -310,10 +348,12 @@ fn emit_gui_relay_event(
 /// Business Logic（为什么需要这个函数）:
 ///     mixed-version 下仍需交付 owner 事件；fallback 必须可观测为 poll 模式，
 ///     且不得把 250ms 等待塞进本函数，以便外层统一 cancel-aware 调度。
+///     incomplete Gap 后不得 attach batch.latest，否则永久越过缺口。
 ///
 /// Code Logic（这个函数做什么）:
-///     `events_catch_up(after)` → 逐条 `apply_gui_relay_message`；空 cursor 时若 latest.sequence>0
-///     则 `attach_at(latest)`；transport 错误原样返回供调用方失效 client 缓存。
+///     `events_catch_up(after)` → 逐条 `apply_gui_relay_message`；遇 `GapIncomplete` 停止本批
+///     后续消息且不 attach latest；仅当仍无 cursor、无 pending recovery、且 latest.sequence>0
+///     （真正的 brand-new 空批消费者）才 `attach_at(latest)`。
 async fn run_poll_fallback_once(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
@@ -322,10 +362,19 @@ async fn run_poll_fallback_once(
     let after = relay_state.cursor();
     let batch = client.events_catch_up(after.as_ref()).await?;
     for message in batch.messages {
-        let _reconnect = apply_gui_relay_message(client, ui, relay_state, message).await;
-        // poll 无长连接：Gap 后 cursor 已 attach/清空，下轮 catch-up 自然从新 after 取。
+        let apply_result = apply_gui_relay_message(client, ui, relay_state, message).await;
+        if apply_result == GuiRelayApplyResult::GapIncomplete {
+            // incomplete：recovery cursor 已 restore；停止本批，禁止 attach latest。
+            return Ok(());
+        }
+        // GapComplete：cursor 已 attach latest，可继续消费本批后续（若有）；
+        // NoGap：正常推进。
     }
-    if relay_state.cursor().is_none() && batch.latest.sequence > 0 {
+    // 仅 brand-new 消费者（从未 attach、无 pending recovery）才用 batch.latest 初始化游标。
+    if relay_state.cursor().is_none()
+        && !relay_state.recovery_pending()
+        && batch.latest.sequence > 0
+    {
         relay_state.attach_at(batch.latest);
     }
     Ok(())
@@ -981,13 +1030,13 @@ mod tests {
     ///     stream-first relay 的核心合同：同消息不重复；Gap 后 terminal-resync + cursor=latest。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     apply Event seq=1 → count=1；apply Gap latest=9 → cursor.sequence=9 且 resync=1。
+    ///     apply Event seq=1 → count=1；apply Gap latest=9 → cursor.sequence=9 且 GapComplete。
     #[tokio::test]
     async fn live_relay_delivers_once_and_gap_resync_attaches_latest() {
         let ui = RecordingBackendUi::default();
         let client = fake_resync_client_with_terminal_replay("s1", "prompt$ ").await;
         let mut state = GuiEventRelayState::default();
-        apply_gui_relay_message(
+        let deliver = apply_gui_relay_message(
             &client,
             &ui,
             &mut state,
@@ -999,9 +1048,10 @@ mod tests {
             },
         )
         .await;
+        assert_eq!(deliver, GuiRelayApplyResult::NoGap);
         assert_eq!(ui.event_count("workbench:terminal-output"), 1);
 
-        apply_gui_relay_message(
+        let complete = apply_gui_relay_message(
             &client,
             &ui,
             &mut state,
@@ -1012,7 +1062,10 @@ mod tests {
             },
         )
         .await;
+        assert_eq!(complete, GuiRelayApplyResult::GapComplete);
+        assert!(complete.should_reconnect_stream());
         assert_eq!(state.cursor().unwrap().sequence, 9);
+        assert!(!state.recovery_pending());
         assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 1);
         assert_eq!(ui.event_count(BACKEND_RUNTIME_GAP_EVENT), 1);
         // Gap 完整成功后应请求 stream 重连，避免 pre-gap 尾部双写。
@@ -1027,7 +1080,8 @@ mod tests {
             },
         )
         .await;
-        assert!(reconnect, "complete gap resync must signal stream reconnect");
+        assert_eq!(reconnect, GuiRelayApplyResult::GapComplete);
+        assert!(reconnect.should_reconnect_stream());
     }
 
     /// 验证 list 失败的 incomplete Gap 不得 attach latest。
@@ -1036,14 +1090,14 @@ mod tests {
     ///     瞬时 control 错误若仍 attach latest，会永久越过缺口且无法自愈。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     无 workbench mock 的 client 上 apply Gap → cursor 保持 None 且无 resync 事件。
+    ///     无 pre-gap cursor 时 incomplete Gap → cursor 仍 None + GapIncomplete + recovery_pending。
     #[tokio::test]
     async fn incomplete_gap_resync_does_not_attach_latest() {
         let ui = RecordingBackendUi::default();
         // 不提供 workbench mock：sessions.list 失败 → incomplete
         let client = BackendControlClient::for_test(1, "token", "owner-1").expect("test client");
         let mut state = GuiEventRelayState::default();
-        let reconnect = apply_gui_relay_message(
+        let result = apply_gui_relay_message(
             &client,
             &ui,
             &mut state,
@@ -1054,13 +1108,69 @@ mod tests {
             },
         )
         .await;
-        assert!(reconnect, "incomplete gap still breaks current stream");
+        assert_eq!(result, GuiRelayApplyResult::GapIncomplete);
+        assert!(result.should_reconnect_stream());
         assert!(
             state.cursor().is_none(),
-            "incomplete gap must not attach latest cursor"
+            "incomplete gap without pre-gap cursor must not invent latest"
+        );
+        assert!(
+            state.recovery_pending(),
+            "incomplete gap keeps recovery pending"
         );
         assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 0);
         assert_eq!(ui.event_count(BACKEND_RUNTIME_GAP_EVENT), 0);
+    }
+
+    /// 验证 incomplete Gap 恢复 pre-gap recovery cursor（H1 回归）。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     有已提交游标时 incomplete resync 若 cursor=None 重连，owner 当 brand-new 只回放 ring，
+    ///     不再报告原 Gap，造成永久 silent loss。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Event seq=7 → incomplete Gap → cursor.sequence 仍为 7 + GapIncomplete + recovery_pending。
+    #[tokio::test]
+    async fn incomplete_gap_restores_pre_gap_recovery_cursor() {
+        let ui = RecordingBackendUi::default();
+        let client = BackendControlClient::for_test(1, "token", "owner-1").expect("test client");
+        let mut state = GuiEventRelayState::default();
+        let deliver = apply_gui_relay_message(
+            &client,
+            &ui,
+            &mut state,
+            RuntimeRelayMessage::Event {
+                owner_instance_id: "owner-1".into(),
+                sequence: 7,
+                event: "workbench:terminal-output".into(),
+                payload: json!({"sessionId":"s1","chunk":"x","seq":7,"ts":1}),
+            },
+        )
+        .await;
+        assert_eq!(deliver, GuiRelayApplyResult::NoGap);
+        assert_eq!(state.cursor().unwrap().sequence, 7);
+
+        let incomplete = apply_gui_relay_message(
+            &client,
+            &ui,
+            &mut state,
+            RuntimeRelayMessage::Gap {
+                owner_instance_id: "owner-1".into(),
+                oldest_available: 10,
+                latest: 20,
+            },
+        )
+        .await;
+        assert_eq!(incomplete, GuiRelayApplyResult::GapIncomplete);
+        assert!(incomplete.should_reconnect_stream());
+        assert_eq!(
+            state.cursor().unwrap().sequence,
+            7,
+            "reconnect must use pre-gap recovery cursor, not None"
+        );
+        assert_eq!(state.cursor().unwrap().owner_instance_id, "owner-1");
+        assert!(state.recovery_pending());
+        assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 0);
     }
 
     /// 验证同 sequence 重复消息被 DropDuplicate。
@@ -1081,8 +1191,14 @@ mod tests {
             event: "workbench:terminal-output".into(),
             payload: json!({"sessionId":"s1","chunk":"a","seq":3,"ts":1}),
         };
-        apply_gui_relay_message(&client, &ui, &mut state, msg.clone()).await;
-        apply_gui_relay_message(&client, &ui, &mut state, msg).await;
+        assert_eq!(
+            apply_gui_relay_message(&client, &ui, &mut state, msg.clone()).await,
+            GuiRelayApplyResult::NoGap
+        );
+        assert_eq!(
+            apply_gui_relay_message(&client, &ui, &mut state, msg).await,
+            GuiRelayApplyResult::NoGap
+        );
         assert_eq!(ui.event_count("workbench:terminal-output"), 1);
         assert_eq!(state.cursor().unwrap().sequence, 3);
     }
@@ -1159,5 +1275,113 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(ui.event_count("workbench:terminal-output"), 1);
         assert_eq!(relay_state.cursor().unwrap().sequence, 1);
+    }
+
+    /// 验证 poll fallback 在 incomplete Gap 后不 attach batch.latest（H2 回归）。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 sidecar fallback 若 incomplete 仍 attach latest，会永久越过缺口；
+    ///     且后续消息不得继续推进 recovery 状态。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     pre-gap cursor=4；catch-up 返回 Gap + 后续 Event；list/replay 失败 →
+    ///     cursor 仍为 4、recovery_pending、不 emit 后续 event、不 attach latest=99。
+    #[tokio::test]
+    async fn poll_fallback_incomplete_gap_keeps_recovery_cursor_not_batch_latest() {
+        #[derive(Clone)]
+        struct CatchState {
+            owner: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct EventsBody {
+            #[allow(dead_code)]
+            control_token: String,
+            #[allow(dead_code)]
+            after_owner_instance_id: Option<String>,
+            #[allow(dead_code)]
+            after_sequence: Option<u64>,
+        }
+
+        let state = CatchState {
+            owner: "owner-1".into(),
+        };
+        let app = Router::new()
+            .route(
+                "/api/backend/control/events/catch-up",
+                post(
+                    |AxumState(s): AxumState<CatchState>, Json(_body): Json<EventsBody>| async move {
+                        let gap = RuntimeRelayMessage::Gap {
+                            owner_instance_id: s.owner.clone(),
+                            oldest_available: 10,
+                            latest: 99,
+                        };
+                        // incomplete 后应停止本批：后续 Event 不得被 apply。
+                        let trailing = RuntimeRelayMessage::Event {
+                            owner_instance_id: s.owner.clone(),
+                            sequence: 50,
+                            event: "workbench:terminal-output".into(),
+                            payload: json!({"sessionId":"s1","chunk":"should-not-apply","seq":50,"ts":1}),
+                        };
+                        let latest = BackendRuntimeCursor {
+                            owner_instance_id: s.owner.clone(),
+                            sequence: 99,
+                        };
+                        Ok::<_, (StatusCode, Json<Value>)>(Json(json!({
+                            "messages": [gap, trailing],
+                            "latest": latest,
+                        })))
+                    },
+                ),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // port 可达 catch-up，但 workbench list/replay 指向同 client port 且无 mock → incomplete。
+        let client = BackendControlClient::for_test(port, "token", "owner-1").unwrap();
+        let ui = RecordingBackendUi::default();
+        let mut relay_state = GuiEventRelayState::default();
+        // 先建立 pre-gap 已提交游标。
+        assert_eq!(
+            apply_gui_relay_message(
+                &client,
+                &ui,
+                &mut relay_state,
+                RuntimeRelayMessage::Event {
+                    owner_instance_id: "owner-1".into(),
+                    sequence: 4,
+                    event: "workbench:terminal-output".into(),
+                    payload: json!({"sessionId":"s1","chunk":"pre","seq":4,"ts":1}),
+                },
+            )
+            .await,
+            GuiRelayApplyResult::NoGap
+        );
+        assert_eq!(relay_state.cursor().unwrap().sequence, 4);
+
+        run_poll_fallback_once(&client, &ui, &mut relay_state)
+            .await
+            .expect("poll once with incomplete gap");
+        assert_eq!(
+            relay_state.cursor().unwrap().sequence,
+            4,
+            "incomplete gap must keep pre-gap recovery cursor"
+        );
+        assert!(
+            relay_state.recovery_pending(),
+            "recovery remains pending until complete attach"
+        );
+        assert_eq!(
+            ui.event_count("workbench:terminal-output"),
+            1,
+            "trailing catch-up events after incomplete gap must not apply"
+        );
+        assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 0);
     }
 }

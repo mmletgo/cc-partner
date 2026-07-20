@@ -7,7 +7,8 @@
 //! Code Logic（这个模块做什么）:
 //!     提供 `RuntimeEventBus`：有界 broadcast + 有界 replay ring；`BackendRuntimeCursor` 与
 //!     `RuntimeRelayMessage::{Event,Gap}`；`GuiEventRelayState` 在 owner 变化时重置、同 owner 去重，
-//!     并在 Gap/Lag 时要求 terminal replay + runtime snapshot resync。
+//!     并在 Gap/Lag 时要求 terminal replay + runtime snapshot resync；incomplete Gap 保留 pre-gap
+//!     recovery cursor，禁止以 `cursor=None` 重连成 brand-new consumer。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -419,26 +420,46 @@ pub enum RelayClientAction {
 ///
 /// Business Logic（为什么需要这个结构）:
 ///     GUI 保存 `(ownerInstanceId, sequence)`，owner 变化时重置，仅在同 owner 下去重。
+///     incomplete Gap 不得以 `cursor=None` 重连，否则 owner 只回放 ring 且不再报告原 Gap，
+///     造成永久 silent loss。
 ///
 /// Code Logic（这个结构做什么）:
-///     持有可选 cursor；处理 Event/Gap 并产出动作列表。
+///     持有 live cursor、pre-gap recovery cursor 与 recovery_pending；
+///     Gap 时保留 last committed 为 recovery 并清空 live；incomplete 时 restore recovery；
+///     complete attach 清 recovery；处理 Event/Gap 并产出动作列表。
 #[derive(Debug, Clone, Default)]
 pub struct GuiEventRelayState {
     cursor: Option<BackendRuntimeCursor>,
+    /// Gap 前最后一次已提交游标；complete resync 前保留，供 incomplete 恢复重连。
+    recovery_cursor: Option<BackendRuntimeCursor>,
+    /// 已见 Gap 且尚未 complete attach；阻止 poll fallback 以 brand-new 方式 attach latest。
+    recovery_pending: bool,
     /// 累计 resync 次数（测试/诊断）。
     pub resync_count: u64,
 }
 
 impl GuiEventRelayState {
-    /// 当前游标。
+    /// 当前 live 游标（重连 / catch-up afterSequence）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     重连 afterSequence 需要读出已提交游标。
+    ///     重连 afterSequence 需要读出已提交游标；incomplete 后应是 pre-gap recovery，而非 None。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     返回 cursor 克隆。
+    ///     返回 live cursor 克隆。
     pub fn cursor(&self) -> Option<BackendRuntimeCursor> {
         self.cursor.clone()
+    }
+
+    /// 是否仍处于未完成的 Gap recovery。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     poll fallback 在无 live cursor 时若仍 pending recovery，不得 attach batch.latest
+    ///     假装 brand-new consumer 已追平。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 `recovery_pending` 标志。
+    pub fn recovery_pending(&self) -> bool {
+        self.recovery_pending
     }
 
     /// 处理一条 relay 消息。
@@ -447,7 +468,7 @@ impl GuiEventRelayState {
     ///     owner 重启不得当重复；Gap 必须触发 resync 而非 silent drop。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     Gap → RequestResync 并清空 cursor；
+    ///     Gap → 若有 live cursor 则写入 recovery_cursor，清空 live，置 recovery_pending，RequestResync；
     ///     Event：owner 不同则重置后投递；同 owner sequence<=cursor 则 DropDuplicate；否则推进游标并 Deliver。
     pub fn on_message(&mut self, message: RuntimeRelayMessage) -> RelayClientAction {
         match message {
@@ -456,7 +477,11 @@ impl GuiEventRelayState {
                 oldest_available,
                 latest,
             } => {
-                self.cursor = None;
+                // 仅在 live 有已提交游标时覆盖 recovery；重复 Gap/incomplete 重试保留原 pre-gap。
+                if let Some(committed) = self.cursor.take() {
+                    self.recovery_cursor = Some(committed);
+                }
+                self.recovery_pending = true;
                 self.resync_count = self.resync_count.saturating_add(1);
                 RelayClientAction::RequestResync {
                     owner_instance_id,
@@ -477,6 +502,8 @@ impl GuiEventRelayState {
                     if cur.owner_instance_id != owner_instance_id {
                         // owner 变化：重置旧游标后接受新事件（sequence 可从 1 再起）。
                         self.cursor = None;
+                        self.recovery_cursor = None;
+                        self.recovery_pending = false;
                     }
                 }
                 self.cursor = Some(BackendRuntimeCursor {
@@ -493,15 +520,31 @@ impl GuiEventRelayState {
         }
     }
 
+    /// incomplete Gap resync 后恢复 pre-gap 游标，供重连/catch-up 使用。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     resync 失败/取消时若把 cursor 留在 None，外层重连会被 owner 当 brand-new consumer，
+    ///     只回放 ring 且不再报原 Gap，导致永久 silent loss。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 `recovery_cursor` 写回 live `cursor`（若存在）；`recovery_pending` 保持 true。
+    pub fn restore_recovery_cursor(&mut self) {
+        if let Some(recovery) = self.recovery_cursor.clone() {
+            self.cursor = Some(recovery);
+        }
+    }
+
     /// resync 完成后 attach 到最新 live 游标（不投递历史）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     Gap 后 GUI 先 snapshot/replay，再从 latest live 接上，避免重复历史。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     直接设置 cursor 为给定值。
+    ///     设置 cursor 为给定值，并清空 recovery_cursor / recovery_pending。
     pub fn attach_at(&mut self, cursor: BackendRuntimeCursor) {
         self.cursor = Some(cursor);
+        self.recovery_cursor = None;
+        self.recovery_pending = false;
     }
 }
 
@@ -667,5 +710,48 @@ mod tests {
         assert!(matches!(action, RelayClientAction::RequestResync { .. }));
         assert_eq!(state.resync_count, 1);
         assert!(state.cursor().is_none());
+        assert!(state.recovery_pending());
+    }
+
+    /// 验证 Gap 会保存 pre-gap 游标，incomplete 后可恢复，complete attach 清 recovery。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     incomplete Gap 不得以 None 重连成 brand-new consumer。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Event seq=3 → Gap → cursor None + recovery_pending → restore → cursor.sequence=3；
+    ///     再 attach_at(20) → recovery_pending false。
+    #[test]
+    fn gui_state_gap_preserves_recovery_cursor_until_complete_attach() {
+        let mut state = GuiEventRelayState::default();
+        let _ = state.on_message(RuntimeRelayMessage::Event {
+            owner_instance_id: "owner-a".into(),
+            sequence: 3,
+            event: "e".into(),
+            payload: json!(null),
+        });
+        let action = state.on_message(RuntimeRelayMessage::Gap {
+            owner_instance_id: "owner-a".into(),
+            oldest_available: 10,
+            latest: 20,
+        });
+        assert!(matches!(action, RelayClientAction::RequestResync { .. }));
+        assert!(state.cursor().is_none());
+        assert!(state.recovery_pending());
+        state.restore_recovery_cursor();
+        assert_eq!(
+            state.cursor().unwrap(),
+            BackendRuntimeCursor {
+                owner_instance_id: "owner-a".into(),
+                sequence: 3,
+            }
+        );
+        assert!(state.recovery_pending());
+        state.attach_at(BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 20,
+        });
+        assert!(!state.recovery_pending());
+        assert_eq!(state.cursor().unwrap().sequence, 20);
     }
 }
