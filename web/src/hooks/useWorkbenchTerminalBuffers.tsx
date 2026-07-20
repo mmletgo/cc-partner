@@ -4,14 +4,18 @@
  * Business Logic（为什么需要这个模块）:
  *   用户离开 Workbench 路由后，后端 PTY/tmux 会继续输出；如果页面内监听被卸载，切回时 xterm
  *   会丢失 TUI 屏幕态并出现错位。缓存 Provider 必须跟随 AppShell 常驻。
+ *   桌面 GUI 在 React 挂载前已从 owner stream 转发 terminal-output，因此 Provider 必须
+ *   listener-first + baseline replay，并用 lastSeq 丢弃 resync 后的重复 live 事件。
  *
  * Code Logic（这个模块做什么）:
- *   监听 `workbench:terminal-output` 事件，写入 session 级外部 store，并提供重置/删除方法。
+ *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline replay；
+ *   append 携带 seq 做 cutover；reset 写入 buffer + lastSeq。
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { workbenchApi } from '@/api/workbench';
 import type { WorkbenchTerminalOutputEvent } from '@/lib/types';
 import {
   createWorkbenchTerminalBufferStore,
@@ -52,7 +56,7 @@ function canListenToTauriEvents(): boolean {
  *
  * Code Logic（这个组件做什么）:
  *   以 options 形式创建稳定的 session 级 ring-buffer store（默认 rAF 帧批处理），
- *   常驻监听后端 terminal-output 事件，并暴露 reset/remove 操作给 Workbench 页面。
+ *   listener-first 注册后 baseline replay，常驻监听 terminal-output/resync，暴露 reset/remove。
  */
 export function WorkbenchTerminalBuffersProvider({
   children,
@@ -71,26 +75,78 @@ export function WorkbenchTerminalBuffersProvider({
 
   useEffect(() => {
     if (!canListenToTauriEvents()) return undefined;
-    const outputUnlisten = listen<WorkbenchTerminalOutputEvent>(
-      'workbench:terminal-output',
-      (event) => {
-        const payload = event.payload;
-        store.append(payload.sessionId, payload.chunk);
-      },
-    );
-    // Gap resync：owner ring 丢失中间事件后，Rust 侧 replay 完整 buffer 并重置前端 store generation。
-    const resyncUnlisten = listen<{
-      sessionId?: string;
-      buffer?: string;
-    }>('workbench:terminal-resync', (event) => {
-      const payload = event.payload;
-      const sessionId = payload.sessionId;
-      if (!sessionId) return;
-      store.reset(sessionId, payload.buffer ?? '');
-    });
+    let cancelled = false;
+    let unlistenOutput: (() => void) | undefined;
+    let unlistenResync: (() => void) | undefined;
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   必须先挂 listener 再 baseline，避免 subscribe 与 replay 之间的 live 输出永久丢失。
+     *
+     * Code Logic（这个函数做什么）:
+     *   await 两个 listen；output 带 seq append；resync 用 buffer+lastSeq reset；
+     *   随后 list 全部 session 并逐个 replay baseline（单 session 失败跳过）。
+     */
+    const setup = async (): Promise<void> => {
+      try {
+        unlistenOutput = await listen<WorkbenchTerminalOutputEvent>(
+          'workbench:terminal-output',
+          (event) => {
+            const payload = event.payload;
+            if (!payload?.sessionId) return;
+            store.append(payload.sessionId, payload.chunk ?? '', payload.seq);
+          },
+        );
+        unlistenResync = await listen<{
+          sessionId?: string;
+          buffer?: string;
+          lastSeq?: number;
+        }>('workbench:terminal-resync', (event) => {
+          const payload = event.payload;
+          const sessionId = payload.sessionId;
+          if (!sessionId) return;
+          const lastSeq =
+            typeof payload.lastSeq === 'number' && Number.isFinite(payload.lastSeq)
+              ? payload.lastSeq
+              : 0;
+          store.reset(sessionId, payload.buffer ?? '', lastSeq);
+        });
+      } catch {
+        // 非 Tauri 或 listen 失败：不 baseline
+        return;
+      }
+
+      if (cancelled) {
+        unlistenOutput?.();
+        unlistenResync?.();
+        return;
+      }
+
+      // baseline：补上 React 挂载前已从 owner ring 发出的输出，并建立 lastSeq cutover。
+      try {
+        const sessions = await workbenchApi.sessions.list();
+        if (cancelled) return;
+        await Promise.all(
+          sessions.map(async (session) => {
+            try {
+              const replay = await workbenchApi.sessions.replay(session.id);
+              if (cancelled) return;
+              store.reset(replay.sessionId, replay.buffer, replay.lastSeq);
+            } catch {
+              // 单 session replay 失败不阻断其它 session；后续 resync / live 仍可恢复。
+            }
+          }),
+        );
+      } catch {
+        // list 失败：依赖后续 terminal-resync 与项目 loadSessions 路径闭合 race。
+      }
+    };
+
+    void setup();
     return () => {
-      void outputUnlisten.then((fn) => fn());
-      void resyncUnlisten.then((fn) => fn());
+      cancelled = true;
+      unlistenOutput?.();
+      unlistenResync?.();
     };
   }, [store]);
 

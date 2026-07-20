@@ -151,7 +151,9 @@ pub async fn run_gui_owner_event_relay(
                         message = stream.next_message() => match message {
                             Ok(Some(message)) => {
                                 received_message = true;
-                                apply_gui_relay_message_with_cancel(
+                                // Gap 成功/不完全后都 break：重连 open_events_stream(cursor)
+                                // 避免继续消费 laggy stream 尾部导致与 resync snapshot 双写。
+                                let reconnect_after_gap = apply_gui_relay_message_with_cancel(
                                     &client,
                                     ui.as_ref(),
                                     &mut relay_state,
@@ -159,6 +161,9 @@ pub async fn run_gui_owner_event_relay(
                                     Some(&cancel),
                                 )
                                 .await;
+                                if reconnect_after_gap {
+                                    break;
+                                }
                             }
                             Ok(None) | Err(_) => break,
                         }
@@ -194,38 +199,44 @@ pub async fn run_gui_owner_event_relay(
 /// Code Logic（这个函数做什么）:
 ///     `GuiEventRelayState::on_message` → Deliver 走 `emit_gui_relay_event`；DropDuplicate
 ///     静默；RequestResync 先 `resync_after_gap` 再 `attach_at(owner, latest)`。
+///     返回 true 表示本消息触发了 Gap 恢复且应关闭当前 stream 后按 cursor 重连。
 pub async fn apply_gui_relay_message(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
     relay_state: &mut GuiEventRelayState,
     message: RuntimeRelayMessage,
-) {
-    apply_gui_relay_message_with_cancel(client, ui, relay_state, message, None).await;
+) -> bool {
+    apply_gui_relay_message_with_cancel(client, ui, relay_state, message, None).await
 }
 
 /// 带可选 cancel 的 relay 消息处理（stream 热路径使用，避免 gap resync 阻塞 shutdown）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Gap resync 会 list sessions 并 N 次 replay；shutdown 时不能长时间占住 stream select arm。
+///     成功 resync 后若继续消费**同一** laggy stream 的 pre-gap 尾部，会把已包含在
+///     snapshot 中的 terminal 输出再次转发。
 ///
 /// Code Logic（这个函数做什么）:
 ///     与 `apply_gui_relay_message` 相同，但 RequestResync 经 cancel-aware `resync_after_gap`；
-///     cancel 返回后不 attach latest。
+///     cancel/incomplete 不 attach latest；完整成功返回 true，调用方应 break stream 重连。
 pub async fn apply_gui_relay_message_with_cancel(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
     relay_state: &mut GuiEventRelayState,
     message: RuntimeRelayMessage,
     cancel: Option<&CancellationToken>,
-) {
+) -> bool {
     match relay_state.on_message(message) {
         RelayClientAction::Deliver {
             event,
             payload,
             owner_instance_id,
             sequence,
-        } => emit_gui_relay_event(ui, event, payload, owner_instance_id, sequence),
-        RelayClientAction::DropDuplicate => {}
+        } => {
+            emit_gui_relay_event(ui, event, payload, owner_instance_id, sequence);
+            false
+        }
+        RelayClientAction::DropDuplicate => false,
         RelayClientAction::RequestResync {
             owner_instance_id,
             oldest_available,
@@ -241,7 +252,8 @@ pub async fn apply_gui_relay_message_with_cancel(
             )
             .await
             else {
-                return;
+                // incomplete/cancel：不 attach latest，也不继续吞旧流。
+                return true;
             };
             tracing::info!(
                 terminal_replay_count = outcome.terminal_replay_count,
@@ -253,6 +265,8 @@ pub async fn apply_gui_relay_message_with_cancel(
                 owner_instance_id,
                 sequence: latest,
             });
+            // 调用方应关闭当前 stream 并按新 cursor 重连，避免 pre-gap 尾部二次转发。
+            true
         }
     }
 }
@@ -308,7 +322,8 @@ async fn run_poll_fallback_once(
     let after = relay_state.cursor();
     let batch = client.events_catch_up(after.as_ref()).await?;
     for message in batch.messages {
-        apply_gui_relay_message(client, ui, relay_state, message).await;
+        let _reconnect = apply_gui_relay_message(client, ui, relay_state, message).await;
+        // poll 无长连接：Gap 后 cursor 已 attach/清空，下轮 catch-up 自然从新 after 取。
     }
     if relay_state.cursor().is_none() && batch.latest.sequence > 0 {
         relay_state.attach_at(batch.latest);
@@ -474,10 +489,11 @@ impl BackendUi for RecordingBackendUi {
 /// Business Logic（为什么需要这个函数）:
 ///     RequestResync 不能只发空事件；必须调用既有 sessions.list/replay 与 runtime 刷新路径；
 ///     多 session 回放期间必须响应 shutdown cancel，避免幽灵 task 长时间占住 relay。
+///     **不完整 resync 不得 attach latest**，否则会永久越过缺口。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 `resync_terminals_via_control`（步骤间轮询 cancel），再 emit `backend:runtime-gap`；
-///     cancel 时返回 None；成功返回 `GapResyncOutcome`。
+///     先 `resync_terminals_via_control`（list 失败或任一 replay 失败 → Err）；
+///     仅 complete 时 emit `backend:runtime-gap` 并返回 Some；cancel/incomplete 返回 None。
 pub async fn resync_after_gap(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
@@ -489,13 +505,13 @@ pub async fn resync_after_gap(
     if cancel.is_some_and(|c| c.is_cancelled()) {
         return None;
     }
-    // 顺序恢复：terminal 先于 runtime 通知，保证前端 snapshot 刷新时 buffer 已开始重置。
+    // 顺序恢复：terminal 先于 runtime 通知；失败/不完全时不 commit cursor。
     let terminal_replay_count = match resync_terminals_via_control(client, ui, cancel).await {
         Ok(n) => n,
         Err(e) if e.code() == "cancelled" => return None,
         Err(e) => {
-            tracing::warn!("gap resync: terminal replay 失败: {e}");
-            0
+            tracing::warn!("gap resync incomplete: terminal replay 失败: {e}");
+            return None;
         }
     };
     if cancel.is_some_and(|c| c.is_cancelled()) {
@@ -521,10 +537,11 @@ pub async fn resync_after_gap(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     Gap 后 GUI 本地 terminal buffer 可能缺中间输出；必须从 owner registry 拉 replay buffer。
+///     list 或任一活跃 session replay 失败都必须视为 incomplete，禁止静默跳过。
 ///
 /// Code Logic（这个函数做什么）:
-///     `sessions.list` → 每个 id `sessions.replay` → emit `workbench:terminal-resync`；
-///     单 session 失败跳过；每步前检查 cancel；返回成功次数。
+///     `sessions.list`（失败上抛）→ 每个 id `sessions.replay`（失败上抛）→ emit resync；
+///     每步前检查 cancel；返回成功次数。
 async fn resync_terminals_via_control(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
@@ -536,7 +553,9 @@ async fn resync_terminals_via_control(
     let sessions: Vec<serde_json::Value> = client
         .workbench_op("sessions.list", json!({}))
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            AppError::generic(format!("gap_resync_list_failed:{}", e.code()))
+        })?;
     let mut count = 0u64;
     for session in sessions {
         if cancel.is_some_and(|c| c.is_cancelled()) {
@@ -550,21 +569,17 @@ async fn resync_terminals_via_control(
         else {
             continue;
         };
-        match client
+        let replay = client
             .workbench_op::<serde_json::Value>(
                 "sessions.replay",
                 json!({ "sessionId": session_id }),
             )
             .await
-        {
-            Ok(replay) => {
-                ui.emit(WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
-                count = count.saturating_add(1);
-            }
-            Err(e) => {
-                tracing::debug!("gap resync: session replay 失败: {e}");
-            }
-        }
+            .map_err(|e| {
+                AppError::generic(format!("gap_resync_replay_failed:{}", e.code()))
+            })?;
+        ui.emit(WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
+        count = count.saturating_add(1);
     }
     Ok(count)
 }
@@ -1000,6 +1015,52 @@ mod tests {
         assert_eq!(state.cursor().unwrap().sequence, 9);
         assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 1);
         assert_eq!(ui.event_count(BACKEND_RUNTIME_GAP_EVENT), 1);
+        // Gap 完整成功后应请求 stream 重连，避免 pre-gap 尾部双写。
+        let reconnect = apply_gui_relay_message(
+            &client,
+            &ui,
+            &mut state,
+            RuntimeRelayMessage::Gap {
+                owner_instance_id: "owner-1".into(),
+                oldest_available: 10,
+                latest: 12,
+            },
+        )
+        .await;
+        assert!(reconnect, "complete gap resync must signal stream reconnect");
+    }
+
+    /// 验证 list 失败的 incomplete Gap 不得 attach latest。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     瞬时 control 错误若仍 attach latest，会永久越过缺口且无法自愈。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     无 workbench mock 的 client 上 apply Gap → cursor 保持 None 且无 resync 事件。
+    #[tokio::test]
+    async fn incomplete_gap_resync_does_not_attach_latest() {
+        let ui = RecordingBackendUi::default();
+        // 不提供 workbench mock：sessions.list 失败 → incomplete
+        let client = BackendControlClient::for_test(1, "token", "owner-1").expect("test client");
+        let mut state = GuiEventRelayState::default();
+        let reconnect = apply_gui_relay_message(
+            &client,
+            &ui,
+            &mut state,
+            RuntimeRelayMessage::Gap {
+                owner_instance_id: "owner-1".into(),
+                oldest_available: 2,
+                latest: 9,
+            },
+        )
+        .await;
+        assert!(reconnect, "incomplete gap still breaks current stream");
+        assert!(
+            state.cursor().is_none(),
+            "incomplete gap must not attach latest cursor"
+        );
+        assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 0);
+        assert_eq!(ui.event_count(BACKEND_RUNTIME_GAP_EVENT), 0);
     }
 
     /// 验证同 sequence 重复消息被 DropDuplicate。

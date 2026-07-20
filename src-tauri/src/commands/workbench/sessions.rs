@@ -123,6 +123,31 @@ pub(crate) async fn replay_workbench_session_for_state(
     Ok(state.workbench_sessions.replay(&session_id))
 }
 
+/// 拉取工作台终端最近输出（Tauri 命令入口）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 Provider 在 listener 就绪后需要对活跃 session 做 baseline replay，
+///     以补上 React 挂载前已发出的 ring 输出，并用 lastSeq 做 stream cutover。
+///
+/// Code Logic（这个函数做什么）:
+///     GuiClient 经 control proxy；Owner 本地走 `replay_workbench_session_for_state`。
+#[tauri::command]
+pub async fn replay_workbench_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<WorkbenchSessionReplayDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.replay",
+        serde_json::json!({ "sessionId": session_id.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    replay_workbench_session_for_state(state.inner(), session_id).await
+}
+
 /// 在项目目录中创建一个普通 PTY 终端会话。
 ///
 /// Business Logic（为什么需要这个函数）:

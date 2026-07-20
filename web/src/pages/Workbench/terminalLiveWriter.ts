@@ -3,6 +3,7 @@ import type {
   TerminalBufferDelta,
   TerminalBufferSnapshot,
 } from '@/hooks/workbenchTerminalBuffer';
+import { MAX_WORKBENCH_TERMINAL_BUFFER_CHARS } from '@/hooks/workbenchTerminalBuffer';
 import {
   writeTerminalReplay,
   type TerminalReplayGate,
@@ -53,6 +54,8 @@ export interface CreateTerminalLiveWriterOptions {
   sessionId: string;
   /** 历史 snapshot/resync 写入期间屏蔽 xterm 设备响应写回 PTY */
   gate?: TerminalReplayGate;
+  /** pendingChunk 硬上限（UTF-16 code units），默认对齐 200k ring */
+  maxPendingChars?: number;
 }
 
 /**
@@ -105,13 +108,19 @@ function writeSnapshotWithOptionalGate(
  *
  * Code Logic（这个函数做什么）:
  *   先 subscribe live/reset，再 snapshot；write in-flight 期间把后续 delta 合并为有界 next-buffer
- *   （单字符串 + 最后 cursor），完成回调后再按 generation/appendId 去重 drain；generation 变化时
- *   invalidate 队列、clear 并 replay 最新 snapshot。
+ *   （单字符串 + 最后 cursor，硬上限 maxPendingChars）；完成回调后再按 generation/appendId 去重 drain；
+ *   generation 变化时串行等待当前 write 完成后 clear + replay；pending 超限则 needsSnapshot。
  */
 export function createTerminalLiveWriter(
   options: CreateTerminalLiveWriterOptions,
 ): TerminalLiveWriter {
-  const { terminal, source, sessionId, gate } = options;
+  const {
+    terminal,
+    source,
+    sessionId,
+    gate,
+    maxPendingChars = MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
+  } = options;
   let disposed = false;
   let writeEpoch = 0;
   let writing = false;
@@ -119,6 +128,9 @@ export function createTerminalLiveWriter(
   /** 有界 pending：合并为单一 next chunk，仅保留最后 cursor（generation/appendId）。 */
   let pendingChunk = '';
   let pendingCursor: TerminalBufferCursor | null = null;
+  /** 超限或 generation 变化时，在当前 write 完成后 clear+replay 最新 snapshot。 */
+  let needsSnapshot = false;
+  let clearBeforeSnapshot = false;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -145,6 +157,52 @@ export function createTerminalLiveWriter(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   首次挂载与 generation 变化后都要用完整 snapshot 重建屏幕，再接着 drain 更新。
+   *   Gap/reset 若在 xterm write 回调完成前到达，必须等当前 write 结束后再 clear，
+   *   否则旧字节可能在 clear 后继续 paint，与新 snapshot 混合。
+   *
+   * Code Logic（这个函数做什么）:
+   *   若 writing，只标记 needsSnapshot 并串行；否则提升 epoch、可选 clear、写 snapshot。
+   */
+  const replaySnapshot = (clearFirst: boolean): void => {
+    if (disposed) return;
+    if (writing) {
+      needsSnapshot = true;
+      clearBeforeSnapshot = clearBeforeSnapshot || clearFirst;
+      return;
+    }
+
+    const epoch = ++writeEpoch;
+    writing = true;
+    pendingChunk = '';
+    pendingCursor = null;
+    needsSnapshot = false;
+    const shouldClear = clearFirst || clearBeforeSnapshot;
+    clearBeforeSnapshot = false;
+    const snapshot = source.getSnapshot(sessionId);
+    // 先抬 appliedCursor，使 snapshot 期间到达的 <=cursor delta 不会进入有界 pending。
+    appliedCursor = snapshot.cursor;
+    if (shouldClear) {
+      terminal.clear();
+    }
+
+    writeSnapshotWithOptionalGate(terminal, snapshot.buffer, gate, () => {
+      if (!isCurrent(epoch)) return;
+      writing = false;
+      if (needsSnapshot) {
+        const clear = clearBeforeSnapshot;
+        needsSnapshot = false;
+        clearBeforeSnapshot = false;
+        replaySnapshot(clear);
+        return;
+      }
+      dropStalePending();
+      drainPending();
+    });
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   live delta 到达时可能正有 write in-flight，需要按到达顺序合并下一批。
    *
    * Code Logic（这个函数做什么）:
@@ -152,6 +210,13 @@ export function createTerminalLiveWriter(
    */
   const drainPending = (): void => {
     if (disposed || writing) return;
+    if (needsSnapshot) {
+      const clear = clearBeforeSnapshot;
+      needsSnapshot = false;
+      clearBeforeSnapshot = false;
+      replaySnapshot(clear);
+      return;
+    }
     dropStalePending();
     if (!pendingCursor) return;
 
@@ -171,48 +236,35 @@ export function createTerminalLiveWriter(
       if (!isCurrent(epoch)) return;
       writing = false;
       appliedCursor = { generation: last.generation, appendId: last.appendId };
+      if (needsSnapshot) {
+        const clear = clearBeforeSnapshot;
+        needsSnapshot = false;
+        clearBeforeSnapshot = false;
+        replaySnapshot(clear);
+        return;
+      }
       drainPending();
     });
   };
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   首次挂载与 generation 变化后都要用完整 snapshot 重建屏幕，再接着 drain 更新。
+   *   append 热路径把每个 chunk 同步交给已挂载 writer，但 pending 必须有界，
+   *   否则 stalled xterm callback 会让 pendingChunk 无限增长。
    *
    * Code Logic（这个函数做什么）:
-   *   读取 snapshot，写 buffer，完成后以 snapshot.cursor 过滤队列并 drain。
-   */
-  const replaySnapshot = (clearFirst: boolean): void => {
-    const epoch = ++writeEpoch;
-    writing = true;
-    pendingChunk = '';
-    pendingCursor = null;
-    const snapshot = source.getSnapshot(sessionId);
-    // 先抬 appliedCursor，使 snapshot 期间到达的 <=cursor delta 不会进入有界 pending（否则 coalesce 无法裁掉前缀）。
-    appliedCursor = snapshot.cursor;
-    if (clearFirst) {
-      terminal.clear();
-    }
-
-    writeSnapshotWithOptionalGate(terminal, snapshot.buffer, gate, () => {
-      if (!isCurrent(epoch)) return;
-      writing = false;
-      dropStalePending();
-      drainPending();
-    });
-  };
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   append 热路径把每个 chunk 同步交给已挂载 writer。
-   *
-   * Code Logic（这个函数做什么）:
-   *   忽略已 dispose / 非本 session / 不新于 applied 的 delta；其余合并进有界 next-buffer。
+   *   忽略已 dispose / 非本 session / 不新于 applied 的 delta；其余合并进有界 next-buffer；
+   *   超限标记 needsSnapshot，在当前 write 完成后 clear+replay 最新 snapshot。
    */
   const onLiveDelta = (delta: TerminalBufferDelta): void => {
     if (disposed) return;
     if (delta.sessionId !== sessionId) return;
     if (!isNewerDelta(delta, appliedCursor)) return;
+    if (needsSnapshot) {
+      // 已决定 snapshot 回填，只推进 cursor 语义到最新，不继续拼接无界字符串。
+      pendingCursor = { generation: delta.generation, appendId: delta.appendId };
+      return;
+    }
     if (pendingCursor && delta.generation < pendingCursor.generation) return;
     if (pendingCursor && delta.generation > pendingCursor.generation) {
       pendingChunk = delta.chunk;
@@ -220,15 +272,28 @@ export function createTerminalLiveWriter(
       pendingChunk += delta.chunk;
     }
     pendingCursor = { generation: delta.generation, appendId: delta.appendId };
+    if (pendingChunk.length > maxPendingChars) {
+      pendingChunk = '';
+      needsSnapshot = true;
+      clearBeforeSnapshot = true;
+      if (!writing) {
+        const clear = clearBeforeSnapshot;
+        needsSnapshot = false;
+        clearBeforeSnapshot = false;
+        replaySnapshot(clear);
+      }
+      return;
+    }
     drainPending();
   };
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   resync/remove 会提升 generation，旧队列不得继续 append 到新屏幕。
+   *   resync/remove 会提升 generation，旧队列不得继续 append 到新屏幕；
+   *   且必须等当前 xterm write 回调结束后再 clear，避免新旧字节混合。
    *
    * Code Logic（这个函数做什么）:
-   *   使旧 write epoch 失效，清空队列并 clear + replay 最新 snapshot。
+   *   清空 pending 并请求 clear+replay 最新 snapshot（串行到 writing=false）。
    */
   const onReset = (): void => {
     if (disposed) return;
@@ -257,6 +322,8 @@ export function createTerminalLiveWriter(
       writing = false;
       pendingChunk = '';
       pendingCursor = null;
+      needsSnapshot = false;
+      clearBeforeSnapshot = false;
       unsubscribeLive();
       unsubscribeReset();
     },

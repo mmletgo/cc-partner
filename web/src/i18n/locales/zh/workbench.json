@@ -732,6 +732,7 @@
     "closePane": "关闭 pane 失败",
     "closeSession": "关闭终端失败",
     "renameSession": "重命名会话失败",
+    "writeSession": "写入终端失败",
     "files": "读取文件夹失败",
     "openFile": "打开文件失败",
     "saveFile": "保存文件失败",

@@ -123,7 +123,8 @@ export type WorkbenchTerminalErrorKey =
   | 'zoomPane'
   | 'closePane'
   | 'closeSession'
-  | 'renameSession';
+  | 'renameSession'
+  | 'writeSession';
 
 /**
  * controller 暴露给页面 deep link / 项目切换等流程的窄接口。
@@ -237,13 +238,11 @@ export function useWorkbenchTerminalController(
   // Business Logic: terminal-status listen 只想在 mount 时注册一次；用 ref 读取最新的 canListenToTauriEvents，
   // 避免把它放进 effect 依赖导致 listener 反复重注册（与原 Workbench.tsx 的 [] 依赖行为一致）。
   const canListenToTauriEventsRef = useRef(canListenToTauriEventsParam);
-  // Business Logic: 每 session 有序输入泵稳定挂在 controller 生命周期上，避免每键并发 writeInput。
+  // Business Logic: 每 session 有序输入泵挂在 controller 生命周期上，避免每键并发 writeInput。
+  // StrictMode 会 setup→cleanup→setup；cleanup dispose 后必须重建，否则 ref 仍指向 disposed 泵。
   const terminalInputPumpRef = useRef<TerminalInputPump | null>(null);
-  if (terminalInputPumpRef.current === null) {
-    terminalInputPumpRef.current = createTerminalInputPump({
-      write: (sessionId, data) => workbenchApi.sessions.writeInput(sessionId, data),
-    });
-  }
+  // Business Logic: write 失败上报回调经 ref 注入，泵 effect 保持 [] 依赖，避免 StrictMode/依赖抖动。
+  const reportWriteErrorRef = useRef<(sessionId: string, error: unknown) => void>(() => {});
   useEffect(() => {
     canListenToTauriEventsRef.current = canListenToTauriEventsParam;
   });
@@ -268,10 +267,20 @@ export function useWorkbenchTerminalController(
     knownSessionIdsRef.current = nextIds;
   }, [sessions]);
 
-  // Business Logic: controller unmount 时清理全部输入 lane，丢弃 pending，不伪取消 in-flight。
+  // Business Logic: mount 时创建输入泵；unmount/StrictMode cleanup 时 dispose 并清空 ref，
+  // 下次 setup 重建，避免 disposed 泵永久吞掉全部 enqueue。
   useEffect(() => {
-    const pump = terminalInputPumpRef.current;
-    return () => pump?.dispose();
+    const pump = createTerminalInputPump({
+      write: (sessionId, data) => workbenchApi.sessions.writeInput(sessionId, data),
+      onWriteError: (sessionId, error) => reportWriteErrorRef.current(sessionId, error),
+    });
+    terminalInputPumpRef.current = pump;
+    return () => {
+      pump.dispose();
+      if (terminalInputPumpRef.current === pump) {
+        terminalInputPumpRef.current = null;
+      }
+    };
   }, []);
 
   // Business Logic: 远端进入 offline 后写路径已禁用；丢弃当前 session 的 pending 输入，
@@ -346,6 +355,13 @@ export function useWorkbenchTerminalController(
     },
     [translateError],
   );
+
+  // Business Logic: 输入泵 write 失败后封锁 lane，并把错误投影到 sessionError 供 UI 提示。
+  useEffect(() => {
+    reportWriteErrorRef.current = (_sessionId, error) => {
+      setSessionError(displayErrorMessage(error, t('writeSession')));
+    };
+  }, [displayErrorMessage, t]);
 
   /**
    * Business Logic（为什么需要这个函数）:

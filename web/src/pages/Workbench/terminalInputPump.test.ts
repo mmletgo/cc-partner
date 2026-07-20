@@ -31,19 +31,33 @@ describe("terminalInputPump", () => {
     expect(writes).toEqual([["s1", "a"], ["s1", "bc"]]);
   });
 
-  test("isolates sessions and never replays a failed batch", async () => {
+  test("stops lane after failure and never sends pending suffix or replays the failed batch", async () => {
     const calls: Array<[string, string]> = [];
+    const errors: string[] = [];
     const write = vi.fn(async (sessionId: string, data: string) => {
       calls.push([sessionId, data]);
       if (data === "a") throw new Error("uncertain");
     });
-    const pump = createTerminalInputPump({ write });
+    const pump = createTerminalInputPump({
+      write,
+      onWriteError: (sessionId) => {
+        errors.push(sessionId);
+      },
+    });
     pump.enqueue("s1", "a");
-    pump.enqueue("s1", "b");
+    // 失败前缀后的 Enter/后缀不得发送
+    pump.enqueue("s1", "b\n");
     pump.enqueue("s2", "x");
     await Promise.all([pump.whenIdle("s1"), pump.whenIdle("s2")]);
-    expect(calls.filter(([id]) => id === "s1")).toEqual([["s1", "a"], ["s1", "b"]]);
+    expect(calls.filter(([id]) => id === "s1")).toEqual([["s1", "a"]]);
     expect(calls.filter(([, data]) => data === "a")).toHaveLength(1);
+    expect(calls.some(([, data]) => data.includes("b"))).toBe(false);
+    expect(calls.filter(([id]) => id === "s2")).toEqual([["s2", "x"]]);
+    expect(errors).toEqual(["s1"]);
+    // blocked lane 继续 enqueue 必须 no-op
+    pump.enqueue("s1", "more");
+    await pump.whenIdle("s1");
+    expect(calls.filter(([id]) => id === "s1")).toEqual([["s1", "a"]]);
   });
 
   test("dispose drops pending bytes without cancelling or replaying the in-flight write", async () => {
@@ -91,5 +105,20 @@ describe("terminalInputPump", () => {
     await pump.whenIdle("s1");
     expect(maxInFlight).toBe(1);
     expect(writes).toEqual([["s1", "a"], ["s1", "bc"]]);
+  });
+
+  test("disposeSession after failure unblocks a fresh generation of input", async () => {
+    const write = vi.fn(async (_sessionId: string, data: string) => {
+      if (data === "bad") throw new Error("fail");
+    });
+    const pump = createTerminalInputPump({ write });
+    pump.enqueue("s1", "bad");
+    await pump.whenIdle("s1");
+    expect(write).toHaveBeenCalledTimes(1);
+    pump.disposeSession("s1");
+    pump.enqueue("s1", "ok");
+    await pump.whenIdle("s1");
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(write.mock.calls[1]?.[1]).toBe("ok");
   });
 });

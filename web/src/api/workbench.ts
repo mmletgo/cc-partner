@@ -26,6 +26,7 @@ import {
   workbenchSaveTextResultDecoder,
   sessionSearchResultDecoder,
   workbenchSessionDecoder,
+  workbenchSessionReplayDecoder,
   workbenchSessionsDecoder,
   workbenchWorktreeDecoder,
   workbenchWorktreesDecoder,
@@ -53,6 +54,7 @@ import type {
   WorkbenchRemoteDirectoryEntry,
   WorkbenchRemotePathInfo,
   WorkbenchRemoteRoot,
+  WorkbenchSessionReplay,
   WorkbenchSqlitePreview,
   WorkbenchWorktree,
 } from '@/lib/types';
@@ -415,6 +417,20 @@ export const workbenchApi = {
           initialRows: initialSize?.rows ?? null,
         },
         workbenchSessionDecoder,
+      ),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   桌面 Provider 在 listener 就绪后需要 baseline replay，用 lastSeq 做 stream cutover。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded replay_workbench_session → WorkbenchSessionReplay。
+     */
+    replay: (sessionId: string) =>
+      invokeDecoded(
+        'replay_workbench_session',
+        { sessionId },
+        workbenchSessionReplayDecoder,
       ),
 
     /** 向指定 terminal window 的 PTY attach 写入输入数据。 */

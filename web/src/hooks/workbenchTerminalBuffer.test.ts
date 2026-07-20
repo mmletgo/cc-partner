@@ -395,7 +395,7 @@ describe('workbenchTerminalBuffer', () => {
     store.append('s1', 'b');
 
     expect(snapshot.buffer).toBe('a');
-    expect(snapshot.cursor).toEqual({ generation: 0, appendId: 1 });
+    expect(snapshot.cursor).toEqual({ generation: 0, appendId: 1, lastSeq: 0 });
     expect(deltas.map((delta) => delta.chunk)).toEqual(['a', 'b']);
     expect(
       deltas.filter(
@@ -450,5 +450,32 @@ describe('workbenchTerminalBuffer', () => {
     store.append('s1', '!');
     expect(store.getSnapshot('s1').buffer).toBe('new!');
     expect(deltas.at(-1)?.generation).toBe(1);
+  });
+
+  test('lastSeq cutover drops duplicate stream events after reset/baseline', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+
+    // 模拟 baseline replay：buffer 已含 seq=5 及之前的输出
+    store.reset('s1', 'BASE', 5);
+    expect(store.getLastSeq('s1')).toBe(5);
+    expect(store.getSnapshot('s1').cursor.lastSeq).toBe(5);
+
+    // stream 中仍排队的 <= lastSeq 事件必须丢弃
+    store.append('s1', 'dup', 4);
+    store.append('s1', 'dup5', 5);
+    expect(store.getBuffer('s1')).toBe('BASE');
+    expect(deltas).toHaveLength(0);
+
+    // 严格更大的 seq 才能 append
+    store.append('s1', 'live', 6);
+    expect(store.getBuffer('s1')).toBe('BASElive');
+    expect(store.getLastSeq('s1')).toBe(6);
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]?.chunk).toBe('live');
   });
 });

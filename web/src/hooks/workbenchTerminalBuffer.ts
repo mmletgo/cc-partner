@@ -30,6 +30,15 @@ export interface TerminalFrameScheduler {
 export interface TerminalBufferCursor {
   generation: number;
   appendId: number;
+  /**
+   * Business Logic（为什么需要这个字段）:
+   *   桌面 live stream 可能在 resync/baseline 完成前已推送相同 seq 的 chunk；
+   *   store 必须按 owner lastSeq 丢弃重复输出，避免 TUI 双写。
+   *
+   * Code Logic（这个字段做什么）:
+   *   可选的后端 PTY seq 上沿；undefined 表示本机 generation/appendId 握手路径。
+   */
+  lastSeq?: number;
 }
 
 /**
@@ -85,14 +94,30 @@ export interface WorkbenchTerminalBufferStore {
   getSnapshot: (sessionId: string | null) => TerminalBufferSnapshot;
   getBuffer: (sessionId: string | null) => string;
   getRevision: (sessionId: string | null) => number;
+  /** 读取 session 已应用的 owner lastSeq（无则 0）。 */
+  getLastSeq: (sessionId: string | null) => number;
   subscribe: (sessionId: string | null, listener: WorkbenchTerminalBufferListener) => () => void;
   subscribeLive: (
     sessionId: string | null,
     listener: WorkbenchTerminalLiveListener,
   ) => () => void;
   subscribeReset: (sessionId: string, listener: WorkbenchTerminalResetListener) => () => void;
-  append: (sessionId: string, chunk: string) => void;
-  reset: (sessionId: string, buffer?: string) => void;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   live terminal-output 可能带 seq；<= lastSeq 的事件在 baseline/resync 后必须丢弃。
+   *
+   * Code Logic（这个函数做什么）:
+   *   可选 seq；若提供且 seq<=session.lastSeq 则 no-op；成功 append 后推进 lastSeq。
+   */
+  append: (sessionId: string, chunk: string, seq?: number) => void;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   resync/baseline 写入完整 buffer 后必须记录 lastSeq 作为 cutover。
+   *
+   * Code Logic（这个函数做什么）:
+   *   提升 generation、seed buffer，并设置 lastSeq（缺省 0）。
+   */
+  reset: (sessionId: string, buffer?: string, lastSeq?: number) => void;
   remove: (sessionId: string) => void;
 }
 
@@ -119,11 +144,13 @@ interface SessionRingBuffer {
   generation: number;
   /** 同 generation 内每次成功 append 后递增 */
   appendId: number;
+  /** owner replay/output 的 lastSeq 上沿（用于 stream cutover） */
+  lastSeq: number;
 }
 
 const EMPTY_SNAPSHOT: TerminalBufferSnapshot = {
   buffer: '',
-  cursor: { generation: 0, appendId: 0 },
+  cursor: { generation: 0, appendId: 0, lastSeq: 0 },
   revision: 0,
 };
 
@@ -223,6 +250,7 @@ function createEmptySessionBuffer(): SessionRingBuffer {
     scheduledCancel: null,
     generation: 0,
     appendId: 0,
+    lastSeq: 0,
   };
 }
 
@@ -247,6 +275,7 @@ function createSessionBufferFromString(content: string): SessionRingBuffer {
     scheduledCancel: null,
     generation: 0,
     appendId: 0,
+    lastSeq: 0,
   };
 }
 
@@ -526,7 +555,11 @@ export function createWorkbenchTerminalBufferStore(
     if (!session) return EMPTY_SNAPSHOT;
     return {
       buffer: materializeSessionBuffer(session, onMaterializeForTest),
-      cursor: { generation: session.generation, appendId: session.appendId },
+      cursor: {
+        generation: session.generation,
+        appendId: session.appendId,
+        lastSeq: session.lastSeq,
+      },
       revision: session.revision,
     };
   };
@@ -539,6 +572,10 @@ export function createWorkbenchTerminalBufferStore(
     getRevision(sessionId) {
       if (!sessionId) return 0;
       return sessions.get(sessionId)?.revision ?? 0;
+    },
+    getLastSeq(sessionId) {
+      if (!sessionId) return 0;
+      return sessions.get(sessionId)?.lastSeq ?? 0;
     },
     subscribe(sessionId, listener) {
       if (!sessionId) return () => {};
@@ -575,28 +612,38 @@ export function createWorkbenchTerminalBufferStore(
         }
       };
     },
-    append(sessionId, chunk) {
+    append(sessionId, chunk, seq) {
       // 空 chunk 不改内容，也不发布 delta / schedule notify
       if (chunk.length === 0) return;
       const session = ensureSession(sessionId);
+      if (typeof seq === 'number' && Number.isFinite(seq) && seq <= session.lastSeq) {
+        // baseline/resync 已包含该 seq；丢弃重复 live 事件
+        return;
+      }
       session.chunks.push(chunk);
       session.length += chunk.length;
       session.materialized = null;
       trimSessionBuffer(session, maxChars, onCompactForTest);
       session.appendId += 1;
+      if (typeof seq === 'number' && Number.isFinite(seq) && seq > session.lastSeq) {
+        session.lastSeq = seq;
+      }
       notifyLive(sessionId, {
         sessionId,
         chunk,
         generation: session.generation,
         appendId: session.appendId,
+        lastSeq: session.lastSeq,
       });
       scheduleNotify(sessionId, session);
     },
-    reset(sessionId, buffer = '') {
+    reset(sessionId, buffer = '', lastSeq = 0) {
       const session = ensureSession(sessionId);
       cancelScheduledFrame(session);
       session.generation += 1;
       session.appendId = 0;
+      session.lastSeq =
+        typeof lastSeq === 'number' && Number.isFinite(lastSeq) && lastSeq > 0 ? lastSeq : 0;
       seedSessionBuffer(session, buffer);
       // reset 本身不伪造 live delta；只同步通知 reset listeners 再立即 bump revision
       notifyReset(sessionId);
@@ -609,6 +656,7 @@ export function createWorkbenchTerminalBufferStore(
       cancelScheduledFrame(existing);
       existing.generation += 1;
       existing.appendId = 0;
+      existing.lastSeq = 0;
       notifyReset(sessionId);
       sessions.set(sessionId, {
         chunks: [],
@@ -620,6 +668,7 @@ export function createWorkbenchTerminalBufferStore(
         scheduledCancel: null,
         generation: existing.generation,
         appendId: 0,
+        lastSeq: 0,
       });
       notify(sessionId);
     },

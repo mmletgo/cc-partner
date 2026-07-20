@@ -5,17 +5,24 @@
  *   xterm onData 在快速输入时会产生大量小字节片段；若每个片段直接并发 writeInput，
  *   会与 owner session mutex 竞态、放大 control HTTP 次数，且在失败时存在“是否应重放”
  *   的歧义。本泵按 session 保持 leading-edge FIFO：首批立即发送、in-flight 期间只拼接
- *   pending，settle 后整批发送；失败批次永不自动重放，只继续尚未发送的后续字节。
+ *   pending，settle 后整批发送；失败/未知结果后封锁 lane、清空 pending，永不自动重放。
  *
  * Code Logic（这个模块做什么）:
- *   维护 session → InputLane（generation/pending/running/idleWaiters）；enqueue 拼接并
- *   触发 drain；每个 lane 最多一个 in-flight write；disposeSession 丢弃 pending 并抬高
- *   generation，但保留 in-flight tombstone 直到 write settle，避免 dispose 后立刻 re-enqueue
- *   启动第二个并发 drain。
+ *   维护 session → InputLane（generation/pending/running/blocked/idleWaiters）；enqueue 拼接并
+ *   触发 drain；每个 lane 最多一个 in-flight write；write 失败立即 stop-on-failure；
+ *   disposeSession 丢弃 pending 并抬高 generation，但保留 in-flight tombstone 直到 write settle。
  */
 
 export interface TerminalInputPumpOptions {
   write: (sessionId: string, data: string) => Promise<unknown>;
+  /**
+   * Business Logic（为什么需要这个回调）:
+   *   写失败后 controller 需要向用户展示断连/错误，并阻止在权威状态确认前继续输入。
+   *
+   * Code Logic（这个回调做什么）:
+   *   drain 捕获到 write 异常后调用一次；不传 error 正文以外的终端 body。
+   */
+  onWriteError?: (sessionId: string, error: unknown) => void;
 }
 
 export interface TerminalInputPump {
@@ -29,13 +36,15 @@ interface InputLane {
   generation: number;
   pending: string;
   running: boolean;
+  /** 任一批次失败后封锁，直到 disposeSession 清掉，禁止继续 drain pending */
+  blocked: boolean;
   idleWaiters: Set<() => void>;
 }
 
 /**
  * Business Logic（为什么需要这个函数）:
  *   前端需要把终端输入从“每键一次 invoke”改为 per-session 有序批处理，
- *   同时保留字节顺序与“失败不重放”合同。
+ *   同时保留字节顺序与“失败不重放、失败后不续发后缀”合同。
  *
  * Code Logic（这个函数做什么）:
  *   创建跨 session 的输入泵；返回 enqueue/disposeSession/dispose/whenIdle 接口。
@@ -71,33 +80,43 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   每个 session 必须串行写出，且 in-flight 期间到达的字节要在 settle 后作为下一批发送。
+   *   每个 session 必须串行写出；任一批次失败/未知后必须停泵，禁止把 Enter 等后缀
+   *   发到可能已执行/可能丢失的命令前缀后面。
    *
    * Code Logic（这个函数做什么）:
-   *   循环取出完整 pending 作为 batch 调用 options.write；catch 后不重放本批；
-   *   generation 变化时保留 barrier 至本 drain 结束，再按需启动新 generation 的 drain。
+   *   循环取出完整 pending 作为 batch 调用 options.write；catch 后清空 pending、封锁
+   *   lane 并回调 onWriteError；generation 变化时保留 barrier 至本 drain 结束。
    */
   const drain = async (sessionId: string, lane: InputLane, generation: number): Promise<void> => {
     lane.running = true;
-    while (!disposed && lane.generation === generation && lane.pending.length > 0) {
+    while (
+      !disposed &&
+      !lane.blocked &&
+      lane.generation === generation &&
+      lane.pending.length > 0
+    ) {
       const batch = lane.pending;
       lane.pending = '';
       try {
         await options.write(sessionId, batch);
-      } catch {
-        // Mutation 不重放；后续已排队批次仍按原顺序继续。
+      } catch (error) {
+        // 失败批次永不自动重放；立刻清空尚未发送的后缀并封锁 lane。
+        lane.pending = '';
+        lane.blocked = true;
+        options.onWriteError?.(sessionId, error);
+        break;
       }
     }
 
     if (lane.generation !== generation) {
       // dispose 期间本 drain 作为 in-flight barrier；settle 后若有新 pending 则启动恰好一次新 drain。
-      if (!disposed && lane.pending.length > 0) {
+      if (!disposed && !lane.blocked && lane.pending.length > 0) {
         void drain(sessionId, lane, lane.generation);
         return;
       }
       lane.running = false;
       settleIdle(lane);
-      if (lane.pending.length === 0 && lane.idleWaiters.size === 0) {
+      if (lane.pending.length === 0 && lane.idleWaiters.size === 0 && !lane.blocked) {
         lanes.delete(sessionId);
       }
       return;
@@ -105,17 +124,17 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
 
     lane.running = false;
     settleIdle(lane);
-    if (lane.pending.length === 0 && lane.idleWaiters.size === 0) {
+    if (lane.pending.length === 0 && lane.idleWaiters.size === 0 && !lane.blocked) {
       lanes.delete(sessionId);
     }
   };
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   session close / offline / unmount 时必须丢弃尚未提交的输入，且不得重发 in-flight。
+   *   session close / offline / unmount / 失败恢复前必须丢弃尚未提交的输入，且不得重发 in-flight。
    *
    * Code Logic（这个函数做什么）:
-   *   generation++、清空 pending、强制 settle idle waiters；若无 in-flight 则删除 lane，
+   *   generation++、清空 pending、解除 blocked、强制 settle idle waiters；若无 in-flight 则删除 lane，
    *   若仍有 in-flight 则保留 tombstone（running 保持 true）直到旧 drain settle。
    */
   const disposeSession = (sessionId: string): void => {
@@ -123,6 +142,7 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
     if (!lane) return;
     lane.generation += 1;
     lane.pending = '';
+    lane.blocked = false;
     forceSettleIdle(lane);
     if (!lane.running) {
       lanes.delete(sessionId);
@@ -135,8 +155,7 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
      *   xterm onData 到达时需要尽快把字节交给 owner，同时遵守 per-session max in-flight=1。
      *
      * Code Logic（这个函数做什么）:
-     *   空串与全局 dispose 后 no-op；否则拼接 pending，若无 in-flight 则启动 drain；
-     *   dispose 后仍 in-flight 时复用 tombstone，不启动第二个并发 write。
+     *   空串、全局 dispose、blocked lane 后 no-op；否则拼接 pending，若无 in-flight 则启动 drain。
      */
     enqueue(sessionId, data) {
       if (disposed || data.length === 0) return;
@@ -144,8 +163,10 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
         generation: 0,
         pending: '',
         running: false,
+        blocked: false,
         idleWaiters: new Set<() => void>(),
       };
+      if (lane.blocked) return;
       lanes.set(sessionId, lane);
       lane.pending += data;
       if (!lane.running) void drain(sessionId, lane, lane.generation);

@@ -163,20 +163,25 @@ describe('terminalLiveWriter', () => {
     writer.dispose();
   });
 
-  test('generation change clears and replays the new snapshot before later deltas', () => {
+  test('generation change waits for in-flight write before clear+replay', () => {
     const terminal = new FakeTerminalWriter();
     const source = new FakeTerminalLiveSource('old', { generation: 0, appendId: 1 });
     createTerminalLiveWriter({ terminal, source, sessionId: 's1' });
-    terminal.completeWrite(0);
+    // snapshot write still in flight when reset arrives
     source.replace('new', { generation: 1, appendId: 0 });
+    // clear must not run until old write completes
+    expect(terminal.clearCalls).toBe(0);
+    expect(terminal.writes).toEqual(['old']);
+    terminal.completeWrite(0);
+    expect(terminal.clearCalls).toBe(1);
+    expect(terminal.writes).toEqual(['old', 'new']);
     source.emit({ sessionId: 's1', generation: 1, appendId: 1, chunk: '!' });
     terminal.completeWrite(1);
     terminal.completeWrite(2);
-    expect(terminal.clearCalls).toBe(1);
     expect(terminal.writes).toEqual(['old', 'new', '!']);
   });
 
-  test('coalesces unbounded high-rate deltas into a single next batch while writing', () => {
+  test('coalesces high-rate deltas into a single next batch while writing', () => {
     const terminal = new FakeTerminalWriter();
     const source = new FakeTerminalLiveSource('seed', { generation: 0, appendId: 0 });
     createTerminalLiveWriter({ terminal, source, sessionId: 's1' });
@@ -202,5 +207,38 @@ describe('terminalLiveWriter', () => {
     expect(terminal.writes[2]).toBe(expectedTail);
     terminal.completeWrite(2);
     expect(terminal.writes).toHaveLength(3);
+  });
+
+  test('overflow pending under stalled write switches to bounded snapshot replay', () => {
+    const terminal = new FakeTerminalWriter();
+    const source = new FakeTerminalLiveSource('seed', { generation: 0, appendId: 0 });
+    createTerminalLiveWriter({
+      terminal,
+      source,
+      sessionId: 's1',
+      maxPendingChars: 8,
+    });
+    terminal.completeWrite(0);
+    source.emit({ sessionId: 's1', generation: 0, appendId: 1, chunk: 'aaaa' });
+    expect(terminal.writes).toEqual(['seed', 'aaaa']);
+    // keep write in-flight and push over the hard cap with many large chunks
+    for (let i = 2; i <= 20; i += 1) {
+      source.emit({
+        sessionId: 's1',
+        generation: 0,
+        appendId: i,
+        chunk: 'xxxxxxxxxx',
+      });
+    }
+    // pending overflow must not schedule unbounded extra writes while stalled
+    expect(terminal.writes).toHaveLength(2);
+    // advance authoritative snapshot while write is still open
+    source.replace('SNAP', { generation: 1, appendId: 0 });
+    terminal.completeWrite(1);
+    // after stalled write completes: clear + replay latest bounded snapshot
+    expect(terminal.clearCalls).toBeGreaterThanOrEqual(1);
+    expect(terminal.writes[terminal.writes.length - 1]).toBe('SNAP');
+    // no third live pending batch for the overflowed x's
+    expect(terminal.writes.filter((w) => w.includes('xxxx')).length).toBeLessThanOrEqual(1);
   });
 });
