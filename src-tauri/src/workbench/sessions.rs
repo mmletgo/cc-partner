@@ -407,6 +407,20 @@ enum WaitClosingAction {
     Retry,
 }
 
+/// try_insert_handle_revalidating_barrier 的结果（R23 M1 补丁）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     concurrent reinsert 在 barrier 清除后只有一个赢家；其余不得因 Live 已存在而自旋死循环。
+///
+/// Code Logic（这个枚举做什么）:
+///     Inserted=本线程写入；AlreadyLive=registry 已有 Live；BarrierActive=Closing 仍在。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertCasResult {
+    Inserted,
+    AlreadyLive,
+    BarrierActive,
+}
+
 /// 一次锁内完成 classify + buffer/lease 的结果（R23 H1）。
 ///
 /// Business Logic（为什么需要这个枚举）:
@@ -2534,25 +2548,32 @@ impl WorkbenchSessionRegistry {
 
     /// Business Logic（为什么需要这个函数）:
     ///     reinsert 与 close install barrier 必须在同一 lifecycle 锁序下 CAS，禁止 wait 返回后
-    ///     再被 close 抢先挂 barrier 却仍 insert（R23 M1）。
+    ///     再被 close 抢先挂 barrier 却仍 insert（R23 M1）；也禁止覆盖仍 Live 的 generation，
+    ///     否则并发 close 会 remove 后继实例。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先取 sessions 锁，再取 closing_publish 锁；barrier 仍在则 false；否则 insert 返回 true。
+    ///     先取 sessions 锁，再取 closing_publish 锁；barrier → BarrierActive；已 Live → AlreadyLive；
+    ///     vacant 且无 barrier 时 insert → Inserted。
     fn try_insert_handle_revalidating_barrier(
         &self,
         session_id: &str,
         handle: Arc<Mutex<WorkbenchSessionHandle>>,
-    ) -> bool {
+    ) -> InsertCasResult {
         let mut sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
         let closing = self
             .closing_publish
             .lock()
             .expect("closing_publish 锁中毒");
+        // Closing barrier 仍在：禁止 reinsert。
         if closing.contains_key(session_id) {
-            return false;
+            return InsertCasResult::BarrierActive;
+        }
+        // 仍 Live：禁止覆盖；并发 reinsert 输家应停止自旋（AlreadyLive）。
+        if sessions.contains_key(session_id) {
+            return InsertCasResult::AlreadyLive;
         }
         sessions.insert(session_id.to_string(), handle);
-        true
+        InsertCasResult::Inserted
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2568,10 +2589,20 @@ impl WorkbenchSessionRegistry {
         loop {
             self.wait_for_closing_tombstone(session_id);
             let handle = build();
-            if self.try_insert_handle_revalidating_barrier(session_id, handle) {
-                return;
+            match self.try_insert_handle_revalidating_barrier(session_id, handle) {
+                InsertCasResult::Inserted => return,
+                InsertCasResult::AlreadyLive => {
+                    // 赢家可能是既有 Live；若 close 已在 CAS 后 remove，则继续重试 reinsert。
+                    if self.contains(session_id) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                InsertCasResult::BarrierActive => {
+                    // close 在 wait→insert 间隙挂了 barrier：丢弃 handle 后重 wait。
+                    thread::sleep(Duration::from_millis(1));
+                }
             }
-            // close 在 wait 与 insert 间隙挂了 barrier：丢弃本次 handle 后重试。
         }
     }
 
@@ -2930,16 +2961,37 @@ impl WorkbenchSessionRegistry {
                     child,
                 },
             }));
-            if self.try_insert_handle_revalidating_barrier(&session_id, handle.clone()) {
-                break (generation, publish, handle, reader);
-            }
-            // barrier 在 wait 与 insert 间隙被 close 挂上：kill 本轮 child 后重试。
-            {
-                let mut h = handle.lock().expect("workbench session 锁中毒");
-                if let SessionProcess::Pty { child, .. } = &mut h.process {
-                    if let Err(error) = normalize_terminal_kill_result(child.kill()) {
-                        tracing::debug!("spawn_row barrier CAS 失败后 kill PTY: {error}");
+            match self.try_insert_handle_revalidating_barrier(&session_id, handle.clone()) {
+                InsertCasResult::Inserted => break (generation, publish, handle, reader),
+                InsertCasResult::AlreadyLive => {
+                    // 并发赢家已 Live：kill 本轮 PTY，返回已有 row（不覆盖）。
+                    {
+                        let mut h = handle.lock().expect("workbench session 锁中毒");
+                        if let SessionProcess::Pty { child, .. } = &mut h.process {
+                            if let Err(error) = normalize_terminal_kill_result(child.kill()) {
+                                tracing::debug!("spawn_row AlreadyLive 后 kill PTY: {error}");
+                            }
+                        }
                     }
+                    let existing = self.get_handle(&session_id).map(|h| {
+                        h.lock().expect("workbench session 锁中毒").row.clone()
+                    });
+                    if let Ok(existing_row) = existing {
+                        return Ok(existing_row);
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                InsertCasResult::BarrierActive => {
+                    // barrier 在 wait 与 insert 间隙被挂上：kill 本轮 child 后重试。
+                    {
+                        let mut h = handle.lock().expect("workbench session 锁中毒");
+                        if let SessionProcess::Pty { child, .. } = &mut h.process {
+                            if let Err(error) = normalize_terminal_kill_result(child.kill()) {
+                                tracing::debug!("spawn_row barrier CAS 失败后 kill PTY: {error}");
+                            }
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(1));
                 }
             }
         };
@@ -7212,6 +7264,10 @@ mod tests {
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_fake_session_for_test("s-r23-m1", "p1");
         let gen1 = registry.session_generation_for_test("s-r23-m1").expect("gen1");
+        // 持 lease 强制 close 走 Closing barrier（soft-timeout 路径），覆盖 remove→barrier 与 reinsert CAS。
+        let lease = try_acquire_publication_lease(&registry.sessions, "s-r23-m1", gen1)
+            .expect("lease");
+        // main + closer + inserter 三方同步（必须 3，否则第三 waiter 永久阻塞）。
         let start = Arc::new(Barrier::new(3));
         let reg_close = registry.clone();
         let start_close = start.clone();
@@ -7219,25 +7275,26 @@ mod tests {
             start_close.wait();
             reg_close.close("s-r23-m1")
         });
-        let mut inserters = Vec::new();
-        for _ in 0..1 {
-            let reg = registry.clone();
-            let start = start.clone();
-            inserters.push(thread::spawn(move || {
-                start.wait();
-                // 紧跟 close：可能撞上 barrier；CAS 循环直至成功。
-                reg.insert_fake_session_for_test("s-r23-m1", "p1");
-                reg.session_generation_for_test("s-r23-m1")
-            }));
-        }
+        let reg_ins = registry.clone();
+        let start_ins = start.clone();
+        let inserter = thread::spawn(move || {
+            start_ins.wait();
+            // 等 Closing barrier 出现，确保 CAS 必须 revalidate（非覆盖 Live）。
+            for _ in 0..200 {
+                if reg_ins.has_closing_tombstone_for_test("s-r23-m1") {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            reg_ins.insert_fake_session_for_test("s-r23-m1", "p1");
+            reg_ins.session_generation_for_test("s-r23-m1")
+        });
         start.wait();
+        // close soft-wait 期间 barrier 已装；释放 lease 让 closer/reaper 完成 cleanup clear。
+        thread::sleep(Duration::from_millis(30));
+        drop(lease);
         closer.join().expect("closer").expect("close ok");
-        let gen2 = inserters
-            .pop()
-            .expect("one")
-            .join()
-            .expect("inserter")
-            .expect("gen2");
+        let gen2 = inserter.join().expect("inserter").expect("gen2");
         assert_ne!(gen1, gen2, "successor generation must differ");
         assert!(
             !registry.has_closing_tombstone_for_test("s-r23-m1"),
