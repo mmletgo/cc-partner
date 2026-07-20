@@ -113,12 +113,18 @@ pub(crate) async fn replay_workbench_session_for_state(
             .with_expected_device_id(&parsed.device_id)
             .replay(&base_url, &inner_session_id)
             .await?;
-        replay.session_id = session_id;
-        // bridged live 经本机 event_bus 再发布，GUI enrichment 使用本机 sidecar owner。
-        // cutover 必须无条件以本机 event_bus owner 覆盖远端 owner，避免 live/replay authority 分叉：
-        // live-first 会拒绝异 owner replay（挂载前历史永久丢失）；replay-first 会在首条 live 切换 authority 双写。
-        replay.owner_instance_id =
-            Some(state.config_runtime.owner_instance_id().to_string());
+        replay.session_id = session_id.clone();
+        // remote stream owner 来自 peer replay DTO；与 bridged live 的 producer owner 合成同一 composite。
+        // 远端 backend 重启后 remote owner 变化 → authority cutover → lastSeq 重置，避免静默冻结。
+        let remote_owner = replay.owner_instance_id.clone();
+        let local_bus = state.config_runtime.owner_instance_id();
+        replay.owner_instance_id = Some(
+            crate::workbench::terminal_authority::terminal_stream_authority(
+                &session_id,
+                local_bus,
+                remote_owner.as_deref(),
+            ),
+        );
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
         return Ok(replay);
     }

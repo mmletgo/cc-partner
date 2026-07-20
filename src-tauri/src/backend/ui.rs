@@ -317,6 +317,8 @@ pub async fn apply_gui_relay_message_with_cancel(
 /// Code Logic（这个函数做什么）:
 ///     operational:notification / workbench:agent-runtime / workbench:terminal-output
 ///     合并 ownerInstanceId（后两者还带 event-bus sequence）；其余事件原样转发。
+///     terminal-output：remote session 用 payload 中 producer owner 与 bus owner 合成 composite；
+///     local / 无 producer 时退化为 bus owner；agent-runtime / operational 保持纯 bus owner。
 fn emit_gui_relay_event(
     ui: &dyn BackendUi,
     event: String,
@@ -336,7 +338,23 @@ fn emit_gui_relay_event(
                 map
             }
         };
-        enriched.insert("ownerInstanceId".into(), Value::String(owner_instance_id));
+        let authority = if event == "workbench:terminal-output" {
+            let session_id = enriched
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let producer_owner = enriched
+                .get("ownerInstanceId")
+                .and_then(|v| v.as_str());
+            crate::workbench::terminal_authority::terminal_stream_authority(
+                session_id,
+                &owner_instance_id,
+                producer_owner,
+            )
+        } else {
+            owner_instance_id
+        };
+        enriched.insert("ownerInstanceId".into(), Value::String(authority));
         // agent/operational 握手依赖 event-bus sequence；terminal-output 也附带以便前端诊断。
         enriched.insert("sequence".into(), Value::Number(sequence.into()));
         ui.emit(&event, Value::Object(enriched));
@@ -731,8 +749,9 @@ async fn list_sessions_for_gap_resync(
 ///
 /// Code Logic（这个函数做什么）:
 ///     `list_sessions_for_gap_resync`（失败上抛）→ 仅对 `session_row_is_replayable_for_gap`
-///     为真的 id 调 `sessions.replay`（失败上抛）→ 注入 `ownerInstanceId` 后 emit resync；
-///     每步前检查 cancel；返回成功次数。
+///     为真的 id 调 `sessions.replay`（失败上抛）→ **pass-through** 已 stamp 的非空
+///     `ownerInstanceId`（for_state 已对 remote 合成 composite；R8 H1），仅缺/空时注入
+///     local bus owner 后 emit resync；每步前检查 cancel；返回成功次数。
 async fn resync_terminals_via_control(
     client: &BackendControlClient,
     ui: &dyn BackendUi,
@@ -769,13 +788,21 @@ async fn resync_terminals_via_control(
             .map_err(|e| {
                 AppError::generic(format!("gap_resync_replay_failed:{}", e.code()))
             })?;
-        // bridged live 与 GUI enrichment 均以本机 event_bus owner 为 authority。
-        // resync/replay 必须无条件覆盖远端 owner，避免 live-first 拒 replay 或 replay-first 切 authority 双写。
+        // R8 H1：for_state 已对 remote 合成 composite authority；此处 pass-through 已 stamp 的
+        // 非空 ownerInstanceId，禁止无条件覆盖为纯 local bus（否则远端重启后冻结复现）。
+        // 仅当 DTO 缺/空 owner 时注入 local bus owner（legacy/mock 兼容）。
         if let Some(obj) = replay.as_object_mut() {
-            obj.insert(
-                "ownerInstanceId".to_string(),
-                Value::String(owner_instance_id.to_string()),
-            );
+            let existing = obj
+                .get("ownerInstanceId")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if existing.is_none() {
+                obj.insert(
+                    "ownerInstanceId".to_string(),
+                    Value::String(owner_instance_id.to_string()),
+                );
+            }
         }
         ui.emit(WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
         count = count.saturating_add(1);
@@ -1703,18 +1730,23 @@ mod tests {
                         .get("sessionId")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    // 远端 DTO 故意携带 remote owner；resync 必须覆盖为本机 bus owner。
-                    let remote_owner = if sid.starts_with("remote:") {
-                        "owner-remote"
+                    // mock 绕过 for_state：直接返回 live 路径会使用的 authority
+                    // （local → bus owner；remote → composite(local, remote)）。
+                    // resync pass-through 后断言与 live 一致。
+                    let authority = if sid.starts_with("remote:") {
+                        crate::workbench::terminal_authority::compose_remote_terminal_authority(
+                            "owner-1",
+                            "owner-remote",
+                        )
                     } else {
-                        "owner-1"
+                        "owner-1".to_string()
                     };
                     json!({
                         "sessionId": sid,
                         "buffer": "buf",
                         "truncated": false,
                         "lastSeq": 3,
-                        "ownerInstanceId": remote_owner,
+                        "ownerInstanceId": authority,
                     })
                 }
                 _ => json!({ "ok": true }),
@@ -1761,13 +1793,112 @@ mod tests {
             .filter(|(name, _)| name == WORKBENCH_TERMINAL_RESYNC_EVENT)
             .collect();
         assert_eq!(resyncs.len(), 2);
+        let mut local_seen = false;
+        let mut remote_seen = false;
+        let expected_remote = crate::workbench::terminal_authority::compose_remote_terminal_authority(
+            "owner-1",
+            "owner-remote",
+        );
         for (_, payload) in &resyncs {
-            assert_eq!(
-                payload.get("ownerInstanceId").and_then(|v| v.as_str()),
-                Some("owner-1"),
-                "resync must stamp local event_bus owner, got {payload}"
-            );
+            let sid = payload
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let owner = payload.get("ownerInstanceId").and_then(|v| v.as_str());
+            if sid.starts_with("remote:") {
+                remote_seen = true;
+                assert_eq!(
+                    owner,
+                    Some(expected_remote.as_str()),
+                    "remote resync must pass through composite authority, got {payload}"
+                );
+            } else {
+                local_seen = true;
+                assert_eq!(
+                    owner,
+                    Some("owner-1"),
+                    "local resync must use local bus owner, got {payload}"
+                );
+            }
         }
+        assert!(local_seen && remote_seen, "must cover local and remote resync");
+    }
+
+    /// 验证 terminal-output live enrichment 对 remote session 合成 composite authority。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     远端 backend 重启后 remote producer owner 变化，live 必须 stamp composite 才能触发
+    ///     前端 authority cutover；local session 仍只用 bus owner。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     apply remote/local terminal-output Event，断言 emit 的 ownerInstanceId。
+    #[tokio::test]
+    async fn live_relay_composes_remote_terminal_authority() {
+        let ui = RecordingBackendUi::default();
+        let client = fake_resync_client_with_terminal_replay("s1", "p").await;
+        let mut state = GuiEventRelayState::default();
+
+        let remote_msg = RuntimeRelayMessage::Event {
+            owner_instance_id: "owner-1".into(),
+            sequence: 1,
+            event: "workbench:terminal-output".into(),
+            payload: json!({
+                "sessionId": "remote:device-a:s1",
+                "chunk": "x",
+                "seq": 1,
+                "ts": 1,
+                "ownerInstanceId": "remote-owner-b",
+            }),
+        };
+        assert_eq!(
+            apply_gui_relay_message(&client, &ui, &mut state, remote_msg).await,
+            GuiRelayApplyResult::NoGap
+        );
+        let events = ui.snapshot();
+        let remote_out = events
+            .iter()
+            .find(|(name, _)| name == "workbench:terminal-output")
+            .expect("remote terminal-output emitted");
+        let expected = crate::workbench::terminal_authority::compose_remote_terminal_authority(
+            "owner-1",
+            "remote-owner-b",
+        );
+        assert_eq!(
+            remote_out.1.get("ownerInstanceId").and_then(|v| v.as_str()),
+            Some(expected.as_str()),
+            "remote live must stamp composite, got {}",
+            remote_out.1
+        );
+
+        let ui_local = RecordingBackendUi::default();
+        let mut state_local = GuiEventRelayState::default();
+        let local_msg = RuntimeRelayMessage::Event {
+            owner_instance_id: "owner-1".into(),
+            sequence: 2,
+            event: "workbench:terminal-output".into(),
+            payload: json!({
+                "sessionId": "s1",
+                "chunk": "y",
+                "seq": 1,
+                "ts": 1,
+                "ownerInstanceId": "payload-producer-ignored",
+            }),
+        };
+        assert_eq!(
+            apply_gui_relay_message(&client, &ui_local, &mut state_local, local_msg).await,
+            GuiRelayApplyResult::NoGap
+        );
+        let local_events = ui_local.snapshot();
+        let local_out = local_events
+            .iter()
+            .find(|(name, _)| name == "workbench:terminal-output")
+            .expect("local terminal-output emitted");
+        assert_eq!(
+            local_out.1.get("ownerInstanceId").and_then(|v| v.as_str()),
+            Some("owner-1"),
+            "local live must keep pure bus owner, got {}",
+            local_out.1
+        );
     }
 
     /// 验证同 sequence 重复消息被 DropDuplicate。

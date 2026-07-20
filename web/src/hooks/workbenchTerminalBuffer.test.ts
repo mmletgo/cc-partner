@@ -917,6 +917,56 @@ describe('session cutover epoch / committed baseline', () => {
     expect(isTerminalAuthorityChange(state, localOwner)).toBe(false);
   });
 
+  test('remote composite authority cutover accepts seq restart after remote backend restart', () => {
+    // R8 H1：同 local bus owner，remote stream owner 变化（远端 backend 重启）必须 cutover，
+    // 否则 lastSeq 高位永久丢弃新低 seq，终端静默冻结。
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    let state = createEmptySessionCutoverState();
+    const sessionId = 'remote:peer:s1';
+    // 与后端 unit separator 合成格式一致：localremote
+    const authorityA = 'localremote-A';
+    const authorityB = 'localremote-B';
+
+    // generation A：高 lastSeq 已提交
+    expect(shouldAcceptTerminalCutover(state, 50, undefined, authorityA)).toBe(true);
+    applyTerminalBaselineCutover(store, sessionId, 'a', 50, [], authorityA, true);
+    state = commitTerminalCutover(state, 50, undefined, authorityA);
+    store.append(sessionId, 'a', 51, authorityA);
+    expect(store.getLastSeq(sessionId)).toBe(51);
+    expect(state.authorityId).toBe(authorityA);
+
+    // 已绑定 A 时，直接用 B 的 cutover 会被 reject（防 delayed clobber）
+    expect(shouldAcceptTerminalCutover(state, 1, undefined, authorityB)).toBe(false);
+
+    // live/resync 先 rebind authority（与 Provider 行为一致）
+    state = {
+      ...state,
+      authorityId: authorityB,
+      committedBaselineLastSeq: 0,
+      overflowHighWaterSeq: 0,
+      needsReplay: false,
+    };
+    expect(shouldAcceptTerminalCutover(state, 1, undefined, authorityB)).toBe(true);
+    applyTerminalBaselineCutover(store, sessionId, 'b', 1, [], authorityB, true);
+    state = commitTerminalCutover(state, 1, undefined, authorityB);
+    expect(store.getBuffer(sessionId)).toBe('b');
+    expect(store.getLastSeq(sessionId)).toBe(1);
+    expect(state.authorityId).toBe(authorityB);
+
+    // cutover 后新 live seq=2 追加
+    store.append(sessionId, 'b', 2, authorityB);
+    expect(store.getBuffer(sessionId)).toBe('bb');
+    expect(store.getLastSeq(sessionId)).toBe(2);
+
+    // 同 authority 下重复 seq 不双写
+    store.append(sessionId, 'x', 2, authorityB);
+    expect(store.getBuffer(sessionId)).toBe('bb');
+    expect(store.getLastSeq(sessionId)).toBe(2);
+  });
+
   test('shouldCollectHeldLive only during baseline window or replay', () => {
     const idle = createEmptySessionCutoverState();
     expect(shouldCollectHeldLiveTerminalEvent(idle, false)).toBe(true);

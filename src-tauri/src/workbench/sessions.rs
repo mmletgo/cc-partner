@@ -2677,6 +2677,8 @@ fn emit_terminal_output(
         chunk,
         seq: *seq,
         ts: now_millis(),
+        // 生产端 owner：远端 NDJSON live 消费者可据此合成 composite authority。
+        owner_instance_id: Some(state.config_runtime.owner_instance_id().to_string()),
     };
     publish_workbench_remote_event_from_state(
         state,

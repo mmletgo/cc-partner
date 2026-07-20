@@ -38,10 +38,12 @@ const BRIDGE_BASE_BACKOFF_SECS: u64 = 1;
 /// Workbench 远端终端输出 payload。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     remote terminal 需要把远端 PTY 增量输出传回本机 xterm。
+///     remote terminal 需要把远端 PTY 增量输出传回本机 xterm；
+///     同时携带 stream 生产端 owner（远端 backend 世代），供本机合成复合 authority。
 ///
 /// Code Logic（这个结构体做什么）:
-///     对齐本机 `workbench:terminal-output` event payload，字段使用 camelCase。
+///     对齐本机 `workbench:terminal-output` event payload，字段使用 camelCase；
+///     `owner_instance_id` 可选：生产者 stamp 的 instance id；legacy 缺省为 None。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchTerminalOutputPayload {
@@ -49,6 +51,9 @@ pub struct WorkbenchTerminalOutputPayload {
     pub chunk: String,
     pub seq: u64,
     pub ts: i64,
+    /// 终端输出 stream 生产端 owner（本机 PTY 侧为 sidecar owner；经 bridge 转发时保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_instance_id: Option<String>,
 }
 
 /// Workbench 远端终端状态 payload。
@@ -1156,6 +1161,7 @@ mod tests {
             chunk: "hello".to_string(),
             seq: 7,
             ts: 1000,
+            owner_instance_id: Some("remote-owner-a".to_string()),
         });
 
         let mapped = map_remote_event_for_device("device-a", &HashMap::new(), event);
@@ -1167,6 +1173,8 @@ mod tests {
                 chunk: "hello".to_string(),
                 seq: 7,
                 ts: 1000,
+                // map 只改 sessionId，必须保留远端 stream owner 供本机合成 composite authority。
+                owner_instance_id: Some("remote-owner-a".to_string()),
             })
         );
     }
@@ -1249,6 +1257,7 @@ mod tests {
                 chunk: "中文🚀输出".to_string(),
                 seq: 1,
                 ts: 1000,
+                owner_instance_id: None,
             })
         );
         assert!(buffer.is_empty());
