@@ -234,16 +234,17 @@ pub fn run() {
                 start_background_tasks(state.inner(), BackendRuntimeMode::Gui);
             }
 
-            // N1 Task5：GUI 订阅 sidecar 事件总线（afterSequence + Gap resync）。
+            // N1 Task5 / P1 Task3：GUI stream-first 订阅 sidecar 事件总线（afterSequence + Gap resync）。
             // 未确认 disclosure 时 sidecar 可能尚未 ensure，relay 会等待 control/health 就绪。
+            // cancel token 写入 AppState，shutdown_backend_runtime 时取消，避免幽灵 stream task。
             {
                 let state: tauri::State<'_, AppState> = app.state();
                 let ui = Arc::clone(&state.ui);
+                let clients = Arc::clone(&state.backend_control_client_runtime);
                 let cancel = tokio_util::sync::CancellationToken::new();
-                let cancel_for_task = cancel.clone();
-                let _ = cancel;
+                *state.gui_event_relay_cancel.lock().unwrap() = Some(cancel.clone());
                 tauri::async_runtime::spawn(async move {
-                    crate::backend::ui::run_gui_owner_event_relay(ui, cancel_for_task).await;
+                    crate::backend::ui::run_gui_owner_event_relay(ui, clients, cancel).await;
                 });
             }
 

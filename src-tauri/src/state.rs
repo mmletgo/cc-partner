@@ -42,6 +42,7 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
 /// 应用全局共享状态。Clone 仅增加 Arc 引用计数。
 #[derive(Clone)]
@@ -194,6 +195,8 @@ pub struct AppState {
     /// GUI control client 运行时缓存（复用 loopback client；mutation 失败仅失效、不自动重放）。
     /// HeadlessOwner 可持有但业务路径不使用，避免双构造路径。
     pub backend_control_client_runtime: Arc<BackendControlClientRuntime>,
+    /// GUI owner event relay 取消令牌（setup 时写入，shutdown 时 cancel，避免幽灵 stream task）。
+    pub gui_event_relay_cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl AppState {

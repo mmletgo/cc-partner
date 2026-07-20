@@ -599,6 +599,7 @@ pub async fn build_app_state_with_role(
         backend_control_client_runtime: Arc::new(
             crate::backend::control_client::BackendControlClientRuntime::new(),
         ),
+        gui_event_relay_cancel: Arc::new(Mutex::new(None)),
     })
 }
 
@@ -798,6 +799,7 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     );
     cancel_runtime_token(&state.agent_ledger_cancel, "Agent ledger retention");
     cancel_runtime_token(&state.health_cancel, "健康监测 daemon");
+    cancel_runtime_token(&state.gui_event_relay_cancel, "GUI owner event relay");
 
     let cleaned = state.workbench_sessions.shutdown_all();
     if cleaned > 0 {

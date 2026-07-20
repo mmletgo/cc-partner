@@ -13,12 +13,14 @@
 use app_lib::backend::authority::CONTROL_SCHEMA_VERSION;
 use app_lib::backend::control_client::rebind_control_token_body;
 use app_lib::backend::control_client::{
-    decide_hotkey_reconcile, BackendControlClient, HotkeyOsReconcileDecision,
+    decide_hotkey_reconcile, BackendControlClient, BackendControlClientRuntime,
+    HotkeyOsReconcileDecision,
 };
 use app_lib::backend::event_bus::{
     perform_gap_resync, BackendRuntimeCursor, GapResyncOutcome, GuiEventRelayState,
     RelayClientAction, RuntimeEventBus, RuntimeRelayMessage,
 };
+use app_lib::backend::ui::{run_gui_owner_event_relay, RecordingBackendUi};
 use app_lib::config::{
     AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
 };
@@ -29,14 +31,19 @@ use app_lib::config_store::MemoryConfigStore;
 use app_lib::error::AppError;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use futures_util::stream;
 use serde::Deserialize;
 use serde_json::json;
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 /// harness 鉴权 body。
 #[derive(Debug, Deserialize)]
@@ -989,4 +996,408 @@ async fn operational_notification_relay() {
 #[allow(dead_code)]
 fn _err_smoke() -> AppError {
     AppError::generic("x")
+}
+
+/// stream fixture 的可观测计数与断流控制。
+#[derive(Clone)]
+struct StreamFixtureMetrics {
+    stream_open_count: Arc<AtomicU64>,
+    catch_up_count: Arc<AtomicU64>,
+    stream_after_sequences: Arc<Mutex<Vec<Option<u64>>>>,
+    /// 当前活跃 stream 的取消发送端（break 时 take 并 drop 使连接结束）。
+    active_stream_cancel: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    /// 可选：强制 stream 404（unsupported）。
+    stream_unsupported: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// 隔离 control server fixture：支持 live stream / catch-up / break / 计数。
+///
+/// Business Logic（为什么需要这个结构）:
+///     Task3 要求验证 GUI relay 用 stream 作正常路径、重连带 afterSequence、404 才 fallback。
+///
+/// Code Logic（这个结构做什么）:
+///     event_bus + axum routes（stream/catch-up/workbench）+ BackendControlClientRuntime loader。
+struct RuntimeAuthorityFixture {
+    event_bus: Arc<RuntimeEventBus>,
+    owner_id: String,
+    token: String,
+    port: u16,
+    metrics: StreamFixtureMetrics,
+    _shutdown: oneshot::Sender<()>,
+}
+
+impl RuntimeAuthorityFixture {
+    /// 启动支持 stream 的隔离 owner harness。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     smoke 不得触碰用户 `~/.cc-partner`，且需真实 loopback HTTP + NDJSON stream。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     bind 127.0.0.1:0；挂 events/stream、events/catch-up、workbench；返回 fixture。
+    async fn start() -> Self {
+        Self::start_inner(false).await
+    }
+
+    /// 启动 stream 路由恒 404 的 fixture（mixed-version unsupported）。
+    async fn start_stream_unsupported() -> Self {
+        Self::start_inner(true).await
+    }
+
+    async fn start_inner(stream_unsupported: bool) -> Self {
+        let owner_id = format!("owner-stream-{}", uuid::Uuid::new_v4());
+        let token = format!("token-{}", uuid::Uuid::new_v4());
+        let event_bus = Arc::new(RuntimeEventBus::new(owner_id.clone()));
+        let metrics = StreamFixtureMetrics {
+            stream_open_count: Arc::new(AtomicU64::new(0)),
+            catch_up_count: Arc::new(AtomicU64::new(0)),
+            stream_after_sequences: Arc::new(Mutex::new(Vec::new())),
+            active_stream_cancel: Arc::new(Mutex::new(None)),
+            stream_unsupported: Arc::new(std::sync::atomic::AtomicBool::new(stream_unsupported)),
+        };
+        let state = StreamOwnerState {
+            token: token.clone(),
+            event_bus: Arc::clone(&event_bus),
+            metrics: metrics.clone(),
+        };
+
+        let app = Router::new()
+            .route(
+                "/api/backend/control/events/stream",
+                post(h_fixture_events_stream),
+            )
+            .route(
+                "/api/backend/control/events/catch-up",
+                post(h_fixture_events_catch_up),
+            )
+            .route("/api/backend/control/workbench", post(h_fixture_workbench))
+            .route(
+                "/api/backend/control/workbench/data",
+                post(h_fixture_workbench),
+            )
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stream fixture");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .ok();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        Self {
+            event_bus,
+            owner_id,
+            token,
+            port: addr.port(),
+            metrics,
+            _shutdown: tx,
+        }
+    }
+
+    /// 返回绑定本 fixture 的 control client runtime（测试 loader，不读 control file）。
+    fn control_client_runtime(&self) -> Arc<BackendControlClientRuntime> {
+        let port = self.port;
+        let token = self.token.clone();
+        let owner = self.owner_id.clone();
+        Arc::new(BackendControlClientRuntime::with_loader(move || {
+            BackendControlClient::for_test(port, &token, &owner)
+        }))
+    }
+
+    /// 发布一条 terminal-output 事件（payload 仅 sessionId/chunk/seq/ts，无敏感正文日志）。
+    fn publish_terminal_event(&self, session_id: &str, chunk: &str) {
+        let seq = self.event_bus.latest_sequence().saturating_add(1);
+        let _ = self.event_bus.publish(
+            "workbench:terminal-output",
+            json!({
+                "sessionId": session_id,
+                "chunk": chunk,
+                "seq": seq,
+                "ts": 1,
+            }),
+        );
+    }
+
+    /// 断开当前活跃 stream 连接，迫使 GUI relay 用 last cursor 重连。
+    async fn break_current_event_stream(&self) {
+        if let Some(tx) = self
+            .metrics
+            .active_stream_cancel
+            .lock()
+            .expect("stream cancel lock")
+            .take()
+        {
+            let _ = tx.send(());
+        }
+        // 给连接收尾一拍
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    fn stream_open_count(&self) -> u64 {
+        self.metrics.stream_open_count.load(Ordering::SeqCst)
+    }
+
+    fn catch_up_count(&self) -> u64 {
+        self.metrics.catch_up_count.load(Ordering::SeqCst)
+    }
+
+    /// 第二次 stream 打开时请求体中的 afterSequence。
+    fn second_stream_after_sequence(&self) -> Option<u64> {
+        let seqs = self
+            .metrics
+            .stream_after_sequences
+            .lock()
+            .expect("after seq lock");
+        seqs.get(1).copied().flatten()
+    }
+}
+
+#[derive(Clone)]
+struct StreamOwnerState {
+    token: String,
+    event_bus: Arc<RuntimeEventBus>,
+    metrics: StreamFixtureMetrics,
+}
+
+fn fixture_auth(state: &StreamOwnerState, token: &str) -> Result<(), StatusCode> {
+    if token != state.token {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
+async fn h_fixture_events_stream(
+    State(state): State<StreamOwnerState>,
+    Json(body): Json<EventsBody>,
+) -> Response {
+    if fixture_auth(&state, &body.control_token).is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"unauthorized","code":"unauthorized"})),
+        )
+            .into_response();
+    }
+    if state.metrics.stream_unsupported.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    state
+        .metrics
+        .stream_open_count
+        .fetch_add(1, Ordering::SeqCst);
+    state
+        .metrics
+        .stream_after_sequences
+        .lock()
+        .expect("after seq")
+        .push(body.after_sequence);
+
+    let after = match (body.after_owner_instance_id.as_deref(), body.after_sequence) {
+        (Some(owner), Some(seq)) if !owner.is_empty() => Some(BackendRuntimeCursor {
+            owner_instance_id: owner.to_string(),
+            sequence: seq,
+        }),
+        _ => None,
+    };
+    let relay = state.event_bus.open_relay(after.as_ref());
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    *state
+        .metrics
+        .active_stream_cancel
+        .lock()
+        .expect("active cancel") = Some(cancel_tx);
+
+    let stream = stream::unfold(
+        (relay, cancel_rx),
+        |(mut relay, mut cancel_rx)| async move {
+            tokio::select! {
+                _ = &mut cancel_rx => None,
+                msg = relay.recv() => {
+                    let msg = msg?;
+                    let line = serde_json::to_string(&msg).ok()?;
+                    Some((Ok::<_, Infallible>(format!("{line}\n")), (relay, cancel_rx)))
+                }
+            }
+        },
+    );
+    let mut response = Response::new(axum::body::Body::from_stream(stream));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/x-ndjson"),
+    );
+    response
+}
+
+async fn h_fixture_events_catch_up(
+    State(state): State<StreamOwnerState>,
+    Json(body): Json<EventsBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    fixture_auth(&state, &body.control_token)?;
+    state.metrics.catch_up_count.fetch_add(1, Ordering::SeqCst);
+    let after = match (body.after_owner_instance_id.as_deref(), body.after_sequence) {
+        (Some(owner), Some(seq)) if !owner.is_empty() => Some(BackendRuntimeCursor {
+            owner_instance_id: owner.to_string(),
+            sequence: seq,
+        }),
+        _ => None,
+    };
+    let mut relay = state.event_bus.open_relay(after.as_ref());
+    let mut messages = Vec::new();
+    while let Some(msg) = relay.try_recv() {
+        messages.push(msg);
+    }
+    let latest = BackendRuntimeCursor {
+        owner_instance_id: state.event_bus.owner_instance_id().to_string(),
+        sequence: state.event_bus.latest_sequence(),
+    };
+    Ok(Json(json!({
+        "messages": messages,
+        "latest": latest,
+    })))
+}
+
+async fn h_fixture_workbench(
+    State(state): State<StreamOwnerState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let token = body
+        .get("controlToken")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    fixture_auth(&state, token)?;
+    let op = body.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    let result = match op {
+        "sessions.list" => json!([]),
+        "sessions.replay" => json!({
+            "sessionId": body.get("payload").and_then(|p| p.get("sessionId")).cloned().unwrap_or(json!("s1")),
+            "buffer": "",
+            "truncated": false,
+            "lastSeq": 0,
+        }),
+        _ => json!({ "ok": true }),
+    };
+    Ok(Json(json!({
+        "ownerInstanceId": state.event_bus.owner_instance_id(),
+        "result": result,
+    })))
+}
+
+/// GUI relay 使用 live stream，断线后从 last cursor 重连。
+///
+/// Business Logic（为什么需要这个测试）:
+///     stream-first 是低延迟主路径；重连必须带 afterSequence，避免重复/丢失。
+///
+/// Code Logic（这个测试做什么）:
+///     发布 a → 100ms 内交付 → break stream → 发布 b → 两段 chunk 都到；
+///     stream_open_count=2，第二次 afterSequence=Some(1)；catch-up=0。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gui_relay_uses_live_stream_and_reconnects_from_last_cursor() {
+    let fixture = RuntimeAuthorityFixture::start().await;
+    let ui = Arc::new(RecordingBackendUi::default());
+    let cancel = CancellationToken::new();
+    let relay = tokio::spawn(run_gui_owner_event_relay(
+        ui.clone(),
+        fixture.control_client_runtime(),
+        cancel.clone(),
+    ));
+
+    fixture.publish_terminal_event("s1", "a");
+    ui.wait_for_event("workbench:terminal-output", Duration::from_millis(100))
+        .await;
+    fixture.break_current_event_stream().await;
+    fixture.publish_terminal_event("s1", "b");
+    ui.wait_for_terminal_chunks(&["a", "b"], Duration::from_secs(1))
+        .await;
+
+    assert_eq!(fixture.stream_open_count(), 2);
+    assert_eq!(fixture.second_stream_after_sequence(), Some(1));
+    assert_eq!(
+        fixture.catch_up_count(),
+        0,
+        "成功 stream 路径不得调用 events/catch-up"
+    );
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), relay)
+        .await
+        .expect("relay join timeout");
+}
+
+/// stream 404 时进入 catch-up poll fallback。
+///
+/// Business Logic（为什么需要这个测试）:
+///     mixed-version 旧 sidecar 无 stream 时仍需交付事件，且不得永久锁死。
+///
+/// Code Logic（这个测试做什么）:
+///     unsupported fixture 发布事件 → 在 1s 内经 catch-up 交付；catch_up_count>=1。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gui_relay_falls_back_to_catch_up_when_stream_unsupported() {
+    let fixture = RuntimeAuthorityFixture::start_stream_unsupported().await;
+    let ui = Arc::new(RecordingBackendUi::default());
+    let cancel = CancellationToken::new();
+    let relay = tokio::spawn(run_gui_owner_event_relay(
+        ui.clone(),
+        fixture.control_client_runtime(),
+        cancel.clone(),
+    ));
+
+    // 稍等 relay 进入 fallback 窗口
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    fixture.publish_terminal_event("s1", "fallback-chunk");
+    ui.wait_for_event("workbench:terminal-output", Duration::from_secs(1))
+        .await;
+    assert!(
+        fixture.catch_up_count() >= 1,
+        "unsupported 后应至少一次 catch-up"
+    );
+    assert_eq!(
+        fixture.stream_open_count(),
+        0,
+        "404 路径不计入成功 stream open"
+    );
+    // stream_unsupported 走 open 失败，open_events_stream 返回 Err 时 fixture 在 handler 前已 404，
+    // stream_open_count 在 auth 后、unsupported 检查后不递增——此处 open 在 handler 内先检查 unsupported。
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), relay)
+        .await
+        .expect("relay join timeout");
+}
+
+/// 同版本 stream 成功时 catch-up 调用数为 0。
+///
+/// Business Logic（为什么需要这个测试）:
+///     正常路径不得每 250ms 轮询 catch-up。
+///
+/// Code Logic（这个测试做什么）:
+///     stream 交付一条事件后等待 300ms，断言 catch_up_count 仍为 0。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gui_relay_successful_stream_does_not_call_catch_up() {
+    let fixture = RuntimeAuthorityFixture::start().await;
+    let ui = Arc::new(RecordingBackendUi::default());
+    let cancel = CancellationToken::new();
+    let relay = tokio::spawn(run_gui_owner_event_relay(
+        ui.clone(),
+        fixture.control_client_runtime(),
+        cancel.clone(),
+    ));
+
+    fixture.publish_terminal_event("s1", "only-stream");
+    ui.wait_for_event("workbench:terminal-output", Duration::from_millis(100))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fixture.catch_up_count(), 0);
+    assert!(fixture.stream_open_count() >= 1);
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), relay)
+        .await
+        .expect("relay join timeout");
 }

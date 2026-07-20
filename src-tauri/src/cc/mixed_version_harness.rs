@@ -415,6 +415,7 @@ async fn build_local_state(device_id: &str) -> AppState {
         backend_control_client_runtime: Arc::new(
             crate::backend::control_client::BackendControlClientRuntime::new(),
         ),
+        gui_event_relay_cancel: Arc::new(Mutex::new(None)),
     }
 }
 

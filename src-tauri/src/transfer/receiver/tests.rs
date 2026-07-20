@@ -232,6 +232,7 @@ async fn build_transfer_test_state(receive_dir: &Path) -> AppState {
         backend_control_client_runtime: Arc::new(
             crate::backend::control_client::BackendControlClientRuntime::new(),
         ),
+        gui_event_relay_cancel: Arc::new(Mutex::new(None)),
     }
 }
 

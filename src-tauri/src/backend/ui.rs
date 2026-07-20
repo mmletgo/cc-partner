@@ -7,13 +7,16 @@
 //! Code Logic（这个模块做什么）:
 //!     实现 `BackendUi` trait，以及 Tauri GUI 和 headless 两种适配器。
 
-use crate::backend::control_client::BackendControlClient;
-use crate::backend::event_bus::{GapResyncOutcome, GuiEventRelayState, RelayClientAction};
+use crate::backend::control_client::{BackendControlClient, BackendControlClientRuntime};
+use crate::backend::event_bus::{
+    BackendRuntimeCursor, GapResyncOutcome, GuiEventRelayState, RelayClientAction,
+    RuntimeRelayMessage,
+};
 use crate::error::AppError;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
@@ -92,103 +95,331 @@ impl BackendAsset {
     }
 }
 
-/// 运行 GUI 进程对本机 sidecar 的事件 relay 循环。
+/// 运行 GUI 进程对本机 sidecar 的事件 relay 循环（stream-first）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     sidecar 是唯一事件源；GUI 必须用 afterSequence 消费 owner 事件，Gap 时先 terminal/runtime
-///     真实恢复再 attach latest，禁止 silent loss。
+///     真实恢复再 attach latest，禁止 silent loss。正常路径使用 control NDJSON live stream，
+///     消除固定 250ms catch-up 轮询；仅旧 sidecar 不支持 stream 时退回 poll fallback。
 ///
 /// Code Logic（这个函数做什么）:
-///     循环：from_control_file → events_catch_up(after cursor) → GuiEventRelayState 处理；
-///     Deliver 转发原始 event；RequestResync → perform_gap_resync（sessions.list/replay +
-///     发 `backend:runtime-gap`）→ attach_at(latest)；cancel 或持续短暂退避。
-pub async fn run_gui_owner_event_relay(ui: Arc<dyn BackendUi>, cancel: CancellationToken) {
+///     循环：cached `BackendControlClientRuntime` → `open_events_stream(cursor)` →
+///     `apply_gui_relay_message`；EOF/网络错误按 50/100/250/500/1000ms 退避重连并失效缓存；
+///     `control_event_stream_unsupported` 进入 5s poll fallback（每轮一次 catch-up + 250ms wait，
+///     窗口内不重复 404 探测）；cancel token 退出。
+pub async fn run_gui_owner_event_relay(
+    ui: Arc<dyn BackendUi>,
+    client_runtime: Arc<BackendControlClientRuntime>,
+    cancel: CancellationToken,
+) {
     let mut relay_state = GuiEventRelayState::default();
+    let reconnect_delays = [50_u64, 100, 250, 500, 1_000];
+    let mut attempt = 0usize;
+    let mut poll_fallback_until: Option<tokio::time::Instant> = None;
     loop {
         if cancel.is_cancelled() {
-            break;
+            return;
         }
-        let client = match BackendControlClient::from_control_file() {
+        let client = match client_runtime.client() {
             Ok(client) => client,
             Err(_) => {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                wait_relay_retry(&cancel, 500).await;
                 continue;
             }
         };
-        let after = relay_state.cursor();
-        match client.events_catch_up(after.as_ref()).await {
-            Ok(batch) => {
-                for message in batch.messages {
-                    match relay_state.on_message(message) {
-                        RelayClientAction::Deliver {
-                            event,
-                            payload,
-                            owner_instance_id,
-                            sequence,
-                        } => {
-                            // 运营通知与 Agent runtime 需要附带 owner/sequence，供 GUI handshake 按游标 baseline/dedupe。
-                            if event
-                                == crate::orchestrator::notifications::OPERATIONAL_NOTIFICATION_EVENT
-                                || event == "workbench:agent-runtime"
-                            {
-                                let mut enriched = match payload {
-                                    serde_json::Value::Object(map) => map,
-                                    other => {
-                                        let mut map = serde_json::Map::new();
-                                        map.insert("payload".into(), other);
-                                        map
-                                    }
-                                };
-                                enriched.insert(
-                                    "ownerInstanceId".into(),
-                                    serde_json::Value::String(owner_instance_id),
-                                );
-                                enriched.insert(
-                                    "sequence".into(),
-                                    serde_json::Value::Number(sequence.into()),
-                                );
-                                ui.emit(&event, serde_json::Value::Object(enriched));
-                            } else {
-                                ui.emit(&event, payload);
+
+        if poll_fallback_until.is_some_and(|deadline| deadline > tokio::time::Instant::now()) {
+            if let Err(error) = run_poll_fallback_once(&client, ui.as_ref(), &mut relay_state).await
+            {
+                tracing::debug!("GUI owner event relay poll fallback 失败: {error}");
+                client_runtime.invalidate_if_current(&client);
+            }
+            wait_relay_retry(&cancel, 250).await;
+            continue;
+        }
+        poll_fallback_until = None;
+
+        match client
+            .open_events_stream(relay_state.cursor().as_ref())
+            .await
+        {
+            Ok(mut stream) => {
+                let mut received_message = false;
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        message = stream.next_message() => match message {
+                            Ok(Some(message)) => {
+                                received_message = true;
+                                apply_gui_relay_message(
+                                    &client,
+                                    ui.as_ref(),
+                                    &mut relay_state,
+                                    message,
+                                )
+                                .await;
                             }
-                        }
-                        RelayClientAction::DropDuplicate => {}
-                        RelayClientAction::RequestResync {
-                            owner_instance_id,
-                            oldest_available,
-                            latest,
-                        } => {
-                            let outcome = resync_after_gap(
-                                &client,
-                                ui.as_ref(),
-                                &owner_instance_id,
-                                oldest_available,
-                                latest,
-                            )
-                            .await;
-                            tracing::info!(
-                                terminal_replay_count = outcome.terminal_replay_count,
-                                runtime_snapshot_refresh_count =
-                                    outcome.runtime_snapshot_refresh_count,
-                                "GUI owner event relay gap resync completed"
-                            );
-                            // 真实 resync 完成后再 attach latest，避免后续 DropDuplicate 掩盖丢更新。
-                            relay_state.attach_at(batch.latest.clone());
+                            Ok(None) | Err(_) => break,
                         }
                     }
                 }
-                if relay_state.cursor().is_none() && batch.latest.sequence > 0 {
-                    relay_state.attach_at(batch.latest);
+                if received_message {
+                    attempt = 0;
                 }
+                client_runtime.invalidate_if_current(&client);
             }
-            Err(error) => {
-                tracing::debug!("GUI owner event relay catch-up 失败: {error}");
+            Err(error) if error.code() == "control_event_stream_unsupported" => {
+                tracing::info!(
+                    relay_mode = "pollFallback",
+                    "GUI owner event stream unsupported"
+                );
+                poll_fallback_until = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+                continue;
             }
+            Err(_) => client_runtime.invalidate_if_current(&client),
         }
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        let delay = reconnect_delays[attempt.min(reconnect_delays.len() - 1)];
+        attempt = attempt.saturating_add(1);
+        wait_relay_retry(&cancel, delay).await;
+    }
+}
+
+/// 统一处理单条 owner relay 消息（Deliver / DropDuplicate / Gap resync）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     stream 与 catch-up fallback 必须共享同一套 enrichment、去重与 Gap 恢复语义，
+///     避免双路径漂移导致重复投递或 silent loss。
+///
+/// Code Logic（这个函数做什么）:
+///     `GuiEventRelayState::on_message` → Deliver 走 `emit_gui_relay_event`；DropDuplicate
+///     静默；RequestResync 先 `resync_after_gap` 再 `attach_at(owner, latest)`。
+pub async fn apply_gui_relay_message(
+    client: &BackendControlClient,
+    ui: &dyn BackendUi,
+    relay_state: &mut GuiEventRelayState,
+    message: RuntimeRelayMessage,
+) {
+    match relay_state.on_message(message) {
+        RelayClientAction::Deliver {
+            event,
+            payload,
+            owner_instance_id,
+            sequence,
+        } => emit_gui_relay_event(ui, event, payload, owner_instance_id, sequence),
+        RelayClientAction::DropDuplicate => {}
+        RelayClientAction::RequestResync {
+            owner_instance_id,
+            oldest_available,
+            latest,
+        } => {
+            let outcome =
+                resync_after_gap(client, ui, &owner_instance_id, oldest_available, latest).await;
+            tracing::info!(
+                terminal_replay_count = outcome.terminal_replay_count,
+                runtime_snapshot_refresh_count = outcome.runtime_snapshot_refresh_count,
+                "GUI owner event relay gap resync completed"
+            );
+            // 真实 resync 完成后再 attach latest，避免后续 DropDuplicate 掩盖丢更新。
+            relay_state.attach_at(BackendRuntimeCursor {
+                owner_instance_id,
+                sequence: latest,
+            });
         }
+    }
+}
+
+/// 转发单条 Deliver 事件到 GUI（含运营通知/Agent runtime 游标 enrichment）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     部分事件需要把 owner/sequence 并入 payload 供前端 handshake 去重；其余事件原样转发。
+///
+/// Code Logic（这个函数做什么）:
+///     operational:notification 与 workbench:agent-runtime 合并 ownerInstanceId/sequence；
+///     其它事件直接 `ui.emit`。
+fn emit_gui_relay_event(
+    ui: &dyn BackendUi,
+    event: String,
+    payload: Value,
+    owner_instance_id: String,
+    sequence: u64,
+) {
+    if event == crate::orchestrator::notifications::OPERATIONAL_NOTIFICATION_EVENT
+        || event == "workbench:agent-runtime"
+    {
+        let mut enriched = match payload {
+            Value::Object(map) => map,
+            other => {
+                let mut map = serde_json::Map::new();
+                map.insert("payload".into(), other);
+                map
+            }
+        };
+        enriched.insert("ownerInstanceId".into(), Value::String(owner_instance_id));
+        enriched.insert("sequence".into(), Value::Number(sequence.into()));
+        ui.emit(&event, Value::Object(enriched));
+    } else {
+        ui.emit(&event, payload);
+    }
+}
+
+/// 旧 sidecar 不支持 stream 时执行单次 catch-up（不含 sleep）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     mixed-version 下仍需交付 owner 事件；fallback 必须可观测为 poll 模式，
+///     且不得把 250ms 等待塞进本函数，以便外层统一 cancel-aware 调度。
+///
+/// Code Logic（这个函数做什么）:
+///     `events_catch_up(after)` → 逐条 `apply_gui_relay_message`；空 cursor 时若 latest.sequence>0
+///     则 `attach_at(latest)`；transport 错误原样返回供调用方失效 client 缓存。
+async fn run_poll_fallback_once(
+    client: &BackendControlClient,
+    ui: &dyn BackendUi,
+    relay_state: &mut GuiEventRelayState,
+) -> Result<(), AppError> {
+    let after = relay_state.cursor();
+    let batch = client.events_catch_up(after.as_ref()).await?;
+    for message in batch.messages {
+        apply_gui_relay_message(client, ui, relay_state, message).await;
+    }
+    if relay_state.cursor().is_none() && batch.latest.sequence > 0 {
+        relay_state.attach_at(batch.latest);
+    }
+    Ok(())
+}
+
+/// cancel-aware 的 relay 重试等待。
+///
+/// Business Logic（为什么需要这个函数）:
+///     重连退避与 fallback 间隔必须在应用退出时立即中断，避免幽灵 stream task。
+///
+/// Code Logic（这个函数做什么）:
+///     `select!` cancel 与 sleep(ms)；cancel 时立即返回。
+async fn wait_relay_retry(cancel: &CancellationToken, delay_ms: u64) {
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+    }
+}
+
+/// 测试/smoke 用的可录制 UI adapter。
+///
+/// Business Logic（为什么需要这个结构）:
+///     unit/smoke 需要断言 relay 投递次数、事件名与 terminal chunk，而不能依赖真实 Tauri 窗口。
+///
+/// Code Logic（这个结构做什么）:
+///     Mutex 记录 `(event, payload)`；asset 恒为 None；提供计数与异步等待 helper。
+#[derive(Default)]
+pub struct RecordingBackendUi {
+    events: Mutex<Vec<(String, Value)>>,
+}
+
+impl RecordingBackendUi {
+    /// 统计指定事件名的投递次数。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     合同测试需要断言 live 一次投递、Gap 后 terminal-resync 等。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     扫描内部事件列表按 name 计数。
+    pub fn event_count(&self, event: &str) -> usize {
+        self.events
+            .lock()
+            .expect("recording ui 锁中毒")
+            .iter()
+            .filter(|(name, _)| name == event)
+            .count()
+    }
+
+    /// 返回已录制事件快照（按到达顺序）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     smoke 需要检查 payload 字段（如 chunk）而不只是计数。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     clone 内部 Vec。
+    pub fn snapshot(&self) -> Vec<(String, Value)> {
+        self.events.lock().expect("recording ui 锁中毒").clone()
+    }
+
+    /// 等待指定事件至少出现一次，超时则 panic。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     stream 交付应在几十毫秒内完成；测试用短超时失败更快定位回归。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     轮询 event_count，每 5ms 一次直到 timeout。
+    pub async fn wait_for_event(&self, event: &str, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.event_count(event) > 0 {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("等待事件 {event} 超时 ({timeout:?})");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// 等待 terminal-output 事件累计包含给定 chunk 序列。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     重连测试需要确认 stream 断线前后两段输出都到达 GUI。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     收集 `workbench:terminal-output` 的 payload.chunk，判断是否按序包含 expected。
+    pub async fn wait_for_terminal_chunks(&self, expected: &[&str], timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let chunks: Vec<String> = self
+                .snapshot()
+                .into_iter()
+                .filter(|(name, _)| name == "workbench:terminal-output")
+                .filter_map(|(_, payload)| {
+                    payload
+                        .get("chunk")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            if expected
+                .iter()
+                .all(|want| chunks.iter().any(|got| got == *want))
+            {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("等待 terminal chunks {expected:?} 超时；已收到 {chunks:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+impl BackendUi for RecordingBackendUi {
+    /// 记录 UI 事件到内存列表。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试断言 relay 真实 emit，而非 no-op。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     push `(event, payload)`。
+    fn emit(&self, event: &str, payload: Value) {
+        self.events
+            .lock()
+            .expect("recording ui 锁中毒")
+            .push((event.to_string(), payload));
+    }
+
+    /// 测试 adapter 不提供静态资源。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     relay 测试不依赖 /mobile asset。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     恒返回 None。
+    fn asset(&self, _asset_key: &str) -> Option<BackendAsset> {
+        None
     }
 }
 
@@ -525,6 +756,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State as AxumState;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     /// 验证 headless 静态资源拒绝父目录路径。
     ///
@@ -567,5 +803,238 @@ mod tests {
     fn headless_emit_is_noop() {
         let ui = HeadlessBackendUi::new(std::path::PathBuf::from("/tmp/missing"));
         ui.emit("workbench:terminal-output", serde_json::json!({"ok": true}));
+    }
+
+    /// 启动仅服务 sessions.list/replay 的 mock workbench control。
+    ///
+    /// Business Logic（为什么需要这个 helper）:
+    ///     Gap resync 测试需要真实 HTTP workbench 响应，但不能依赖完整 sidecar。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     bind 127.0.0.1:0；list 返回给定 session；replay 返回 buffer 文本。
+    async fn spawn_terminal_replay_workbench(
+        session_id: &str,
+        buffer: &str,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        #[derive(Clone)]
+        struct ReplayState {
+            session_id: String,
+            buffer: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WbReq {
+            #[allow(dead_code)]
+            control_token: String,
+            op: String,
+            #[serde(default)]
+            payload: Value,
+        }
+
+        let state = ReplayState {
+            session_id: session_id.to_string(),
+            buffer: buffer.to_string(),
+        };
+        // sessions.replay 走 workbench/data；sessions.list 走 workbench 元数据路径。
+        async fn handle_wb(
+            AxumState(s): AxumState<ReplayState>,
+            Json(body): Json<WbReq>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let result = match body.op.as_str() {
+                "sessions.list" => {
+                    json!([{ "id": s.session_id, "sessionId": s.session_id }])
+                }
+                "sessions.replay" => {
+                    let sid = body
+                        .payload
+                        .get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&s.session_id);
+                    json!({
+                        "sessionId": sid,
+                        "buffer": s.buffer,
+                        "truncated": false,
+                        "lastSeq": 1,
+                    })
+                }
+                _ => json!({ "ok": true }),
+            };
+            Ok(Json(json!({
+                "ownerInstanceId": "owner-1",
+                "result": result,
+            })))
+        }
+        let app = Router::new()
+            .route("/api/backend/control/workbench", post(handle_wb))
+            .route("/api/backend/control/workbench/data", post(handle_wb))
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replay fixture");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (port, server)
+    }
+
+    /// 构造带 terminal replay 的测试 control client。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     `apply_gui_relay_message` Gap 分支会调用 sessions.list/replay。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     启动 mock workbench 并用 `for_test` 绑定 port/token/owner。
+    async fn fake_resync_client_with_terminal_replay(
+        session_id: &str,
+        buffer: &str,
+    ) -> BackendControlClient {
+        let (port, _server) = spawn_terminal_replay_workbench(session_id, buffer).await;
+        // 泄漏 server join handle：测试进程结束即回收；端口保持到测试完成。
+        std::mem::forget(_server);
+        BackendControlClient::for_test(port, "token", "owner-1").expect("test client")
+    }
+
+    /// 验证 live Deliver 一次投递，Gap 触发 resync 并 attach latest。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     stream-first relay 的核心合同：同消息不重复；Gap 后 terminal-resync + cursor=latest。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     apply Event seq=1 → count=1；apply Gap latest=9 → cursor.sequence=9 且 resync=1。
+    #[tokio::test]
+    async fn live_relay_delivers_once_and_gap_resync_attaches_latest() {
+        let ui = RecordingBackendUi::default();
+        let client = fake_resync_client_with_terminal_replay("s1", "prompt$ ").await;
+        let mut state = GuiEventRelayState::default();
+        apply_gui_relay_message(
+            &client,
+            &ui,
+            &mut state,
+            RuntimeRelayMessage::Event {
+                owner_instance_id: "owner-1".into(),
+                sequence: 1,
+                event: "workbench:terminal-output".into(),
+                payload: json!({"sessionId":"s1","chunk":"x","seq":1,"ts":1}),
+            },
+        )
+        .await;
+        assert_eq!(ui.event_count("workbench:terminal-output"), 1);
+
+        apply_gui_relay_message(
+            &client,
+            &ui,
+            &mut state,
+            RuntimeRelayMessage::Gap {
+                owner_instance_id: "owner-1".into(),
+                oldest_available: 5,
+                latest: 9,
+            },
+        )
+        .await;
+        assert_eq!(state.cursor().unwrap().sequence, 9);
+        assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 1);
+        assert_eq!(ui.event_count(BACKEND_RUNTIME_GAP_EVENT), 1);
+    }
+
+    /// 验证同 sequence 重复消息被 DropDuplicate。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     stream 重连可能重放 ring 内已交付事件，GUI 不得双重写终端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     连续 apply 同一 Event 两次，output 计数仍为 1。
+    #[tokio::test]
+    async fn live_relay_drops_duplicate_sequence_within_owner() {
+        let ui = RecordingBackendUi::default();
+        let client = fake_resync_client_with_terminal_replay("s1", "p").await;
+        let mut state = GuiEventRelayState::default();
+        let msg = RuntimeRelayMessage::Event {
+            owner_instance_id: "owner-1".into(),
+            sequence: 3,
+            event: "workbench:terminal-output".into(),
+            payload: json!({"sessionId":"s1","chunk":"a","seq":3,"ts":1}),
+        };
+        apply_gui_relay_message(&client, &ui, &mut state, msg.clone()).await;
+        apply_gui_relay_message(&client, &ui, &mut state, msg).await;
+        assert_eq!(ui.event_count("workbench:terminal-output"), 1);
+        assert_eq!(state.cursor().unwrap().sequence, 3);
+    }
+
+    /// 验证 poll fallback 单次 catch-up 不 sleep（仅状态推进）。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     fallback 外层负责 250ms wait；内层只做一次 catch-up 以免双倍延迟。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     mock catch-up 返回一条 event；run_poll_fallback_once 后 cursor 推进且 emit 1 次。
+    #[tokio::test]
+    async fn poll_fallback_once_applies_catch_up_batch() {
+        #[derive(Clone)]
+        struct CatchState {
+            owner: String,
+            hits: Arc<AtomicU16>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct EventsBody {
+            #[allow(dead_code)]
+            control_token: String,
+            #[allow(dead_code)]
+            after_owner_instance_id: Option<String>,
+            #[allow(dead_code)]
+            after_sequence: Option<u64>,
+        }
+
+        let hits = Arc::new(AtomicU16::new(0));
+        let state = CatchState {
+            owner: "owner-1".into(),
+            hits: Arc::clone(&hits),
+        };
+        let app = Router::new()
+            .route(
+                "/api/backend/control/events/catch-up",
+                post(
+                    |AxumState(s): AxumState<CatchState>, Json(_body): Json<EventsBody>| async move {
+                        s.hits.fetch_add(1, Ordering::SeqCst);
+                        // 与生产 control_api 一致：经 RuntimeRelayMessage serde 输出 wire 格式。
+                        let message = RuntimeRelayMessage::Event {
+                            owner_instance_id: s.owner.clone(),
+                            sequence: 1,
+                            event: "workbench:terminal-output".into(),
+                            payload: json!({"sessionId":"s1","chunk":"z","seq":1,"ts":1}),
+                        };
+                        let latest = BackendRuntimeCursor {
+                            owner_instance_id: s.owner.clone(),
+                            sequence: 1,
+                        };
+                        Ok::<_, (StatusCode, Json<Value>)>(Json(json!({
+                            "messages": [message],
+                            "latest": latest,
+                        })))
+                    },
+                ),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let client = BackendControlClient::for_test(port, "token", "owner-1").unwrap();
+        let ui = RecordingBackendUi::default();
+        let mut relay_state = GuiEventRelayState::default();
+        run_poll_fallback_once(&client, &ui, &mut relay_state)
+            .await
+            .expect("poll once");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(ui.event_count("workbench:terminal-output"), 1);
+        assert_eq!(relay_state.cursor().unwrap().sequence, 1);
     }
 }
