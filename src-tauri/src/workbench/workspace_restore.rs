@@ -593,7 +593,11 @@ pub async fn safe_attach_workbench_session(
 
     // claim 防止并发重复 attach；未拿到 claim 时禁止 fallthrough（否则会无占位 attach，
     // 并可能用 armed RestoreClaimGuard 误释放他人 claim）。
-    let mut claimed = ctx.state.workbench_sessions.try_claim_restore(session_id);
+    use crate::workbench::sessions::RestoreClaimOutcome;
+    let mut claimed = matches!(
+        ctx.state.workbench_sessions.try_claim_restore(session_id),
+        RestoreClaimOutcome::Claimed
+    );
     if !claimed {
         // 另一路正在 attach 或已完成：优先 reuse
         if ctx.registry_contains(session_id) {
@@ -611,7 +615,10 @@ pub async fn safe_attach_workbench_session(
                     reused: true,
                 });
             }
-            if ctx.state.workbench_sessions.try_claim_restore(session_id) {
+            if matches!(
+                ctx.state.workbench_sessions.try_claim_restore(session_id),
+                RestoreClaimOutcome::Claimed
+            ) {
                 claimed = true;
                 break;
             }
@@ -1278,7 +1285,12 @@ mod tests {
             .tmux_target_present();
         // 模拟慢 holder：占 claim 但不写 registry、不 attach
         assert!(
-            fixture.ctx.state.workbench_sessions.try_claim_restore("s1"),
+            fixture
+                .ctx
+                .state
+                .workbench_sessions
+                .try_claim_restore("s1")
+                .is_claimed(),
             "holder must own claim"
         );
         let err = fixture
@@ -1295,7 +1307,12 @@ mod tests {
         assert_eq!(fixture.tmux_new_window_count(), 0);
         // holder 仍持 claim（waiter 不得误 release）
         assert!(
-            !fixture.ctx.state.workbench_sessions.try_claim_restore("s1"),
+            !fixture
+                .ctx
+                .state
+                .workbench_sessions
+                .try_claim_restore("s1")
+                .is_claimed(),
             "holder claim must still be held"
         );
         fixture

@@ -22,7 +22,7 @@ use crate::workbench::remote_events::{
 };
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
@@ -1464,6 +1464,66 @@ fn decode_utf8_chunk(bytes: &[u8], pending: &mut Vec<u8>) -> String {
     output
 }
 
+/// restore claim 原子占位结果（R14 M1）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     并发 `sessions.list` 不能把「另一路正在 restore」与「已 live」混成同一个 false。
+///     若并发 list 仍把 SQLite 持久行当可立即 replay 的会话返回，Provider 会立刻
+///     `sessions.replay` → registry 尚未就绪 → 永久 `not_found`，后续静默会话永不补历史。
+///
+/// Code Logic（这个枚举做什么）:
+///     `Claimed`：本 caller 独占 restore 并必须 release；
+///     `AlreadyLive`：sessions map 已有该 id，无需 restore；
+///     `RestoreInProgress`：另一路持有 claim，附带 watch receiver 供 await/共享完成信号。
+#[derive(Debug)]
+pub enum RestoreClaimOutcome {
+    /// 本 caller 独占 restore 责任。
+    Claimed,
+    /// 会话已在运行期 registry。
+    AlreadyLive,
+    /// 另一路正在 restore；receiver 在 release 时收到 true（或 sender drop）。
+    RestoreInProgress(tokio::sync::watch::Receiver<bool>),
+}
+
+impl RestoreClaimOutcome {
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧代码以 `bool` 判断是否拿到 claim；测试与 spin 等待路径仍需要简洁布尔。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅 `Claimed` 返回 true。
+    pub fn is_claimed(&self) -> bool {
+        matches!(self, Self::Claimed)
+    }
+}
+
+/// 等待共享 restore 完成（R14 M1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     并发 list 拿到 `RestoreInProgress` 后应等待 in-flight restore 结束再合并 DTO，
+///     避免把恢复中的持久行当作可立即 replay 的会话返回。
+///
+/// Code Logic（这个函数做什么）:
+///     若 receiver 已为 true 立即返回；否则 `changed()` 直到 true 或 sender drop；
+///     整体 60s 超时后返回（超时由调用方配合 `is_restore_claim_held` 省略/可恢复错误处理）。
+pub async fn wait_for_shared_restore(mut rx: tokio::sync::watch::Receiver<bool>) {
+    if *rx.borrow_and_update() {
+        return;
+    }
+    let wait = async {
+        loop {
+            match rx.changed().await {
+                Ok(()) => {
+                    if *rx.borrow_and_update() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(60), wait).await;
+}
+
 /// 工作台 PTY 会话注册表。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -1476,15 +1536,15 @@ fn decode_utf8_chunk(bytes: &[u8], pending: &mut Vec<u8>) -> String {
 pub struct WorkbenchSessionRegistry {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
-    /// 正在 restore 的 session_id 占位集合（Finding 5: TOCTOU 修复）。
+    /// 正在 restore 的 session_id 占位 map（Finding 5 + R14 M1）。
     ///
     /// Business Logic（为什么需要这个字段）:
-    ///     `restore_persisted_sessions` 先 `contains()` 再异步 `resolve_worktree` 后 `restore()`，
+    ///     `restore_persisted_sessions` 先 claim 再异步 `resolve_worktree` 后 `restore()`，
     ///     两个并发的 sessions/list 请求都能通过 contains() 检查并各自 spawn 一次 PTY/tmux 窗口。
-    ///     占位集合让"检查 + 占位"在同一个 Mutex 内原子完成：第一个 caller 拿到 claim，
-    ///     第二个直接跳过。restore 完成后由 caller 释放 claim（成功路径 spawn_row 已写入 sessions，
-    ///     contains 自然命中；失败路径释放后允许后续重试）。
-    restoring: Arc<Mutex<HashSet<String>>>,
+    ///     占位 map 让"检查 + 占位"原子完成：第一个 caller 拿到 claim 并持有 watch sender，
+    ///     第二个得到 `RestoreInProgress` 并可 wait。restore 完成后 release 通知 waiters
+    ///     （成功路径 spawn_row 已写入 sessions；失败路径释放后允许后续重试）。
+    restoring: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
 }
 
 /// Session 创建后的 RAII 补偿守卫：repo 持久化失败时自动关闭 attach，禁止 ghost registry/child。
@@ -1598,7 +1658,7 @@ impl WorkbenchSessionRegistry {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             replay_buffers: Arc::new(Mutex::new(HashMap::new())),
-            restoring: Arc::new(Mutex::new(HashSet::new())),
+            restoring: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1650,45 +1710,52 @@ impl WorkbenchSessionRegistry {
         self.contains(session_id)
     }
 
-    /// 原子占位：声明"我即将 restore 这个 session"（Finding 5: TOCTOU 修复）。
+    /// 原子占位：声明"我即将 restore 这个 session"（Finding 5 + R14 M1）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     `restore_persisted_sessions` 的旧实现 `contains() → await resolve_worktree → restore()`
     ///     存在 TOCTOU：两个并发的 sessions/list 请求都能通过 contains() 检查，各自 spawn 一个
     ///     PTY/tmux 窗口，导致同一持久化 session 被恢复两次。本方法把"检查 sessions map + 写入
-    ///     restoring 占位集合"放进同一个 `sessions` 锁内原子完成：第一个 caller 拿到 claim，
-    ///     第二个并发 caller 看到占位直接跳过。
+    ///     restoring 占位"原子完成：第一个 caller 拿到 `Claimed`，第二个得到
+    ///     `RestoreInProgress`（可 wait），已 live 则 `AlreadyLive`。
     ///
     /// Code Logic（这个函数做什么）:
     ///     1. 持 sessions 锁；
-    ///     2. 若 sessions map 已有该 session_id（已在运行期），返回 false（无需 restore）；
-    ///     3. 若 restoring 集合已有该 session_id（另一个 caller 正在 restore），返回 false；
-    ///     4. 否则写入 restoring 集合并返回 true（caller 独占 restore 责任）。
+    ///     2. 若 sessions map 已有该 session_id → `AlreadyLive`；
+    ///     3. 若 restoring map 已有该 session_id → `RestoreInProgress(subscribe)`；
+    ///     4. 否则写入 watch sender 并返回 `Claimed`（caller 独占 restore 责任）。
     ///
-    /// 返回 true 表示 caller 必须 restore 并在完成后调用 `release_restore_claim`
+    /// `Claimed` 时 caller 必须 restore 并在完成后调用 `release_restore_claim`
     ///（或持有 `RestoreClaimGuard` 直至结束）。
-    pub fn try_claim_restore(&self, session_id: &str) -> bool {
+    pub fn try_claim_restore(&self, session_id: &str) -> RestoreClaimOutcome {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
         if sessions.contains_key(session_id) {
-            return false;
+            return RestoreClaimOutcome::AlreadyLive;
         }
         let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
-        if restoring.contains(session_id) {
-            return false;
+        if let Some(tx) = restoring.get(session_id) {
+            return RestoreClaimOutcome::RestoreInProgress(tx.subscribe());
         }
-        restoring.insert(session_id.to_string());
-        true
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        restoring.insert(session_id.to_string(), tx);
+        RestoreClaimOutcome::Claimed
     }
 
-    /// 释放 restore 占位（Finding 5）。
+    /// 释放 restore 占位（Finding 5 + R14 M1）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     restore 完成（成功或失败）后必须释放占位，否则后续 sessions/list 永远跳过该 session。
     ///     成功路径：spawn_row 已把 session 写入 sessions map，contains 自然命中；
     ///     失败路径：释放占位允许后续请求重试 restore。
+    ///     并发 waiter 通过 watch 收到完成信号后才能安全返回 list / 发起 replay。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     从 restoring map 移除 sender 并 `send(true)` 通知所有 subscriber；幂等 no-op。
     pub fn release_restore_claim(&self, session_id: &str) {
         let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
-        restoring.remove(session_id);
+        if let Some(tx) = restoring.remove(session_id) {
+            let _ = tx.send(true);
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1736,16 +1803,16 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     测试需要查询 restore claim 是否仍占用，验证 Drop 是否释放。
+    ///     list/merge 与 replay 需要知道 session 是否仍在 restore 中，避免把恢复中行
+    ///     当作可立即 replay 返回，或把瞬时 not_found 误判为永久缺失。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     检查 restoring 集合是否包含 session_id。
-    #[cfg(test)]
+    ///     检查 restoring map 是否包含 session_id。
     pub fn is_restore_claim_held(&self, session_id: &str) -> bool {
         self.restoring
             .lock()
             .expect("restoring 集合锁中毒")
-            .contains(session_id)
+            .contains_key(session_id)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2893,12 +2960,12 @@ mod tests {
     #[test]
     fn restore_claim_guard_releases_on_drop() {
         let registry = WorkbenchSessionRegistry::new();
-        assert!(registry.try_claim_restore("s-restore"));
+        assert!(registry.try_claim_restore("s-restore").is_claimed());
         {
             let _guard = RestoreClaimGuard::new(registry.clone(), "s-restore".to_string());
         }
         assert!(!registry.is_restore_claim_held("s-restore"));
-        assert!(registry.try_claim_restore("s-restore"));
+        assert!(registry.try_claim_restore("s-restore").is_claimed());
         registry.release_restore_claim("s-restore");
     }
 
@@ -3807,27 +3874,30 @@ mod tests {
     }
 
     /// Business Logic（Finding 5: 为什么需要这个测试）:
-    ///     空 registry 上首次 claim 一个未运行也未被占位的 session 应成功，再次 claim 应失败
-    ///     （占位生效），从而消除并发 sessions/list 的 TOCTOU。
+    ///     空 registry 上首次 claim 一个未运行也未被占位的 session 应成功，再次 claim 应
+    ///     得到 RestoreInProgress（占位生效），从而消除并发 sessions/list 的 TOCTOU。
     #[test]
     fn try_claim_restore_serializes_concurrent_restore_for_same_session() {
         let registry = WorkbenchSessionRegistry::new();
 
         let first = registry.try_claim_restore("s1");
-        assert!(first, "首次 claim 应成功");
+        assert!(first.is_claimed(), "首次 claim 应成功");
 
         let second = registry.try_claim_restore("s1");
-        assert!(!second, "占位期间第二次 claim 应失败，避免重复 restore");
+        assert!(
+            matches!(second, RestoreClaimOutcome::RestoreInProgress(_)),
+            "占位期间第二次 claim 应为 RestoreInProgress，避免重复 restore"
+        );
 
         // 释放占位后允许后续重试。
         registry.release_restore_claim("s1");
         let third = registry.try_claim_restore("s1");
-        assert!(third, "释放占位后应允许重新 claim");
+        assert!(third.is_claimed(), "释放占位后应允许重新 claim");
         registry.release_restore_claim("s1");
     }
 
     /// Business Logic（Finding 5: 为什么需要这个测试）:
-    ///     session 已在运行期 registry 时，claim 应直接失败（contains 命中），不写入占位，
+    ///     session 已在运行期 registry 时，claim 应返回 AlreadyLive，不写入占位，
     ///     避免对活跃 session 做无意义的 restore。
     #[test]
     fn try_claim_restore_returns_false_when_session_already_live() {
@@ -3835,7 +3905,10 @@ mod tests {
         registry.insert_fake_session_for_test("live-1", "p1");
 
         let claimed = registry.try_claim_restore("live-1");
-        assert!(!claimed, "session 已在运行期 registry 时 claim 应失败");
+        assert!(
+            matches!(claimed, RestoreClaimOutcome::AlreadyLive),
+            "session 已在运行期 registry 时 claim 应为 AlreadyLive"
+        );
         // 释放不存在的占位应是 no-op，不应 panic。
         registry.release_restore_claim("live-1");
     }
@@ -3848,7 +3921,7 @@ mod tests {
 
         let a = registry.try_claim_restore("s-a");
         let b = registry.try_claim_restore("s-b");
-        assert!(a && b, "不同 session 的 claim 应互不干扰");
+        assert!(a.is_claimed() && b.is_claimed(), "不同 session 的 claim 应互不干扰");
 
         registry.release_restore_claim("s-a");
         registry.release_restore_claim("s-b");
@@ -3863,8 +3936,94 @@ mod tests {
         // 未 claim 直接 release — 不应 panic。
         registry.release_restore_claim("never-claimed");
         // 双重 release — 不应 panic。
-        registry.try_claim_restore("s1");
+        assert!(registry.try_claim_restore("s1").is_claimed());
         registry.release_restore_claim("s1");
         registry.release_restore_claim("s1");
+    }
+
+    /// Business Logic（R14 M1: 为什么需要这个测试）:
+    ///     并发 list 拿到 RestoreInProgress 后必须能 wait 到 holder release，否则仍会
+    ///     过早返回持久行并触发永久 not_found。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     holder claim → waiter 订阅 → spawn wait_for_shared_restore → release → wait 完成。
+    #[tokio::test]
+    async fn wait_for_shared_restore_unblocks_after_release() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-wait").is_claimed());
+        let second = registry.try_claim_restore("s-wait");
+        let RestoreClaimOutcome::RestoreInProgress(rx) = second else {
+            panic!("second claim must be RestoreInProgress");
+        };
+        let wait_handle = tokio::spawn(async move {
+            wait_for_shared_restore(rx).await;
+        });
+        // 给 waiter 一点时间进入 changed loop。
+        tokio::task::yield_now().await;
+        registry.release_restore_claim("s-wait");
+        wait_handle
+            .await
+            .expect("waiter task must join after release");
+        assert!(!registry.is_restore_claim_held("s-wait"));
+    }
+
+    /// Business Logic（R14 M1: 为什么需要这个测试）:
+    ///     启动时全局 list 与项目 list 并发：第一路 claim restore 并延迟完成；第二路必须
+    ///     wait/省略恢复中会话，且在 holder 完成前不得把 session 视为可 replay。
+    ///     否则 Provider 立刻 replay → permanent not_found。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     holder claim 后延迟插入 live + release；waiter RestoreInProgress → wait；
+    ///     wait 期间 is_restore_claim_held && !contains（不可 list/replay）；
+    ///     wait 结束后 session live 且 claim 已释放。
+    #[tokio::test]
+    async fn concurrent_list_waits_for_in_flight_restore_before_ready() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-concurrent").is_claimed());
+
+        let second = registry.try_claim_restore("s-concurrent");
+        let RestoreClaimOutcome::RestoreInProgress(rx) = second else {
+            panic!("second concurrent claim must be RestoreInProgress, not AlreadyLive/Claimed");
+        };
+
+        // 模拟 list merge 与 replay 守卫：恢复中不得当作 ready。
+        assert!(
+            registry.is_restore_claim_held("s-concurrent"),
+            "in-flight restore must hold claim"
+        );
+        assert!(
+            !registry.contains("s-concurrent"),
+            "registry must not be ready before holder finishes"
+        );
+
+        let reg_waiter = registry.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_shared_restore(rx).await;
+            // wait 结束后要么 live 要么 claim 已释放（失败路径也可重试）。
+            reg_waiter.contains("s-concurrent") || !reg_waiter.is_restore_claim_held("s-concurrent")
+        });
+
+        // 延迟首个 restore：先让 waiter 进入 wait，再完成 attach。
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            registry.is_restore_claim_held("s-concurrent"),
+            "delayed restore must still hold claim while waiter waits"
+        );
+        registry.insert_fake_session_for_test("s-concurrent", "p1");
+        registry.release_restore_claim("s-concurrent");
+
+        assert!(
+            waiter.await.expect("waiter join"),
+            "after shared restore, session must be ready or claim released"
+        );
+        assert!(registry.session_exists("s-concurrent"));
+        assert!(!registry.is_restore_claim_held("s-concurrent"));
+        assert!(
+            matches!(
+                registry.try_claim_restore("s-concurrent"),
+                RestoreClaimOutcome::AlreadyLive
+            ),
+            "live session after restore must report AlreadyLive"
+        );
     }
 }

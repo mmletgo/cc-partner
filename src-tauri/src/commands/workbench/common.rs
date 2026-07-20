@@ -465,9 +465,10 @@ pub(crate) async fn resolve_worktree(
 
 /// Business Logic（为什么需要这个函数）:
 ///     Workbench 会话列表既要包含 SQLite 中待恢复的历史 tab，也要优先展示当前运行期 registry 的实时状态。
+///     R14 M1：仍在 restore 中的持久行不得当作可立即 replay 的会话返回，否则并发 list 会触发永久 not_found。
 ///
 /// Code Logic（这个函数做什么）:
-///     先把持久化 row 投影为 DTO，再用 registry 中的实时 DTO 按 id 覆盖同名项。
+///     先把持久化 row 投影为 DTO（跳过 `is_restore_claim_held` 的 id），再用 registry 中的实时 DTO 按 id 覆盖同名项。
 pub(crate) async fn merged_session_dtos(
     state: &AppState,
     project_id: Option<&str>,
@@ -477,6 +478,7 @@ pub(crate) async fn merged_session_dtos(
         .list(project_id)
         .await?
         .iter()
+        .filter(|row| !state.workbench_sessions.is_restore_claim_held(&row.id))
         .map(|row| row.to_dto_with_pane_count(pane_count_for_row(row)))
         .collect();
     for live in state.workbench_sessions.list(project_id) {
@@ -493,24 +495,33 @@ pub(crate) async fn merged_session_dtos(
 ///     应用重启后，进入工作台项目时应自动恢复之前打开的终端 tab 和可重连上下文。
 ///     A8：list/open 路径默认 **skip-missing**——仅 attach 已存在 tmux target；
 ///     缺失 target / raw PTY 不创建 shell（只有用户显式新建终端才 `create_tmux_window`）。
+///     R14 M1：并发 list 遇到 in-progress restore 时 wait/共享完成，不得把恢复中行当 ready。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取持久化会话；用 `try_claim_restore` 原子占位避免并发重复恢复（Finding 5）；
+///     读取持久化会话；用 `try_claim_restore` 原子占位（Finding 5 + R14）：
+///     `Claimed` 独占 restore；`AlreadyLive` 跳过；`RestoreInProgress` await watch 完成。
 ///     项目存在时补齐可读 worktree 名再调用 registry.restore（内部 skip-missing），
 ///     成功后写回最新 row；失败标 disconnected；无论成功/失败都释放占位；项目缺失则删除孤儿会话。
 pub(crate) async fn restore_persisted_sessions(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<(), AppError> {
+    use crate::workbench::sessions::{wait_for_shared_restore, RestoreClaimOutcome};
+
     state.runtime_role.require_owner()?;
     let rows = state.workbench_session_repo.list(project_id).await?;
     for row in rows {
-        // Finding 5: 原子占位 — 把"已运行期 + 是否有其他 caller 在 restore"的检查合为单步，
-        // 消除 contains() 与 restore() 之间的 TOCTOU 窗口。
-        if !state.workbench_sessions.try_claim_restore(&row.id) {
-            continue;
+        // Finding 5 + R14 M1: 原子占位，区分 AlreadyLive / RestoreInProgress / Claimed。
+        match state.workbench_sessions.try_claim_restore(&row.id) {
+            RestoreClaimOutcome::AlreadyLive => continue,
+            RestoreClaimOutcome::RestoreInProgress(rx) => {
+                // 并发 list：共享 in-flight restore，等待完成后再进入 merge。
+                wait_for_shared_restore(rx).await;
+                continue;
+            }
+            RestoreClaimOutcome::Claimed => {}
         }
-        // RAII：任意 early return / Err 路径 Drop 都会释放 claim。
+        // RAII：任意 early return / Err 路径 Drop 都会释放 claim 并通知 waiters。
         let mut claim_guard = crate::workbench::sessions::RestoreClaimGuard::new(
             (*state.workbench_sessions).clone(),
             row.id.clone(),
