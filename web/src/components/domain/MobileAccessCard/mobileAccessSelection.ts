@@ -51,21 +51,38 @@ export function selectDefaultMobileAccessEntryId(entries: MobileAccessEntry[]): 
 }
 
 /**
+ * 压缩芯片上展示的主机地址。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   窄弹层里完整 IPv6 会撑破芯片行或被横向滚动裁成半截，扫码场景只需能区分网段。
+ *
+ * Code Logic（这个函数做什么）:
+ *   IPv4/hostname 原样返回；含冒号且长度超过 20 的地址做首尾省略（中间用 …），
+ *   完整地址仍由调用方放在 title / URL 行展示。
+ */
+export function formatMobileAccessDisplayHost(host: string): string {
+  const value = host.trim();
+  if (!value.includes(':') || value.length <= 20) return value;
+  return `${value.slice(0, 10)}…${value.slice(-6)}`;
+}
+
+/**
  * 格式化网段芯片标签文案。
  *
  * Business Logic（为什么需要这个函数）:
  *   可识别 wifi/wired 时展示角色+IP，帮助用户对照手机当前网段。
  *
  * Code Logic（这个函数做什么）:
- *   role 为 wifi/wired 时调用对应 labels 函数；否则返回裸 host。
+ *   先对 host 做展示压缩，再按 role 调用 wifi/wired labels；未知角色返回压缩后的 host。
  */
 export function formatMobileAccessChipLabel(
   entry: MobileAccessEntry,
   labels: { wifi: (ip: string) => string; wired: (ip: string) => string },
 ): string {
-  if (entry.role === 'wifi') return labels.wifi(entry.host);
-  if (entry.role === 'wired') return labels.wired(entry.host);
-  return entry.host;
+  const displayHost = formatMobileAccessDisplayHost(entry.host);
+  if (entry.role === 'wifi') return labels.wifi(displayHost);
+  if (entry.role === 'wired') return labels.wired(displayHost);
+  return displayHost;
 }
 
 /**

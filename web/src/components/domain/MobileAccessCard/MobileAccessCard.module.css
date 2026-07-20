@@ -66,16 +66,18 @@
 
 .networkGroup {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: var(--space-2);
-  overflow-x: auto;
+  min-width: 0;
   max-width: 100%;
-  padding-bottom: var(--space-1);
 }
 
 .networkChip,
 .networkChipSelected {
-  flex: 0 0 auto;
+  box-sizing: border-box;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-soft);
   background: var(--surface-warm);
@@ -84,6 +86,9 @@
   line-height: var(--leading-normal);
   padding: var(--space-1) var(--space-2);
   cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .networkChipSelected {

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, test } from 'vitest';
 import {
   formatMobileAccessChipLabel,
+  formatMobileAccessDisplayHost,
   resolveMobileAccessEntries,
   resolveSelectedMobileAccessEntry,
   selectDefaultMobileAccessEntryId,
@@ -124,6 +125,24 @@ describe('mobileAccessCard', () => {
       ),
       '1.2.3.4',
       'bare ip',
+    );
+  });
+
+  test('formatMobileAccessDisplayHost shortens long IPv6 for chips', () => {
+    assertEqual(formatMobileAccessDisplayHost('192.168.3.13'), '192.168.3.13', 'ipv4 full');
+    assertEqual(formatMobileAccessDisplayHost('fd7a:1'), 'fd7a:1', 'short ipv6 full');
+    const long = 'fd7a:115c:a1e0:b33f:1234:5678:9abc:def0';
+    const shown = formatMobileAccessDisplayHost(long);
+    if (!shown.includes('…') || shown.length >= long.length) {
+      throw new Error(`long ipv6 should be shortened, got ${shown}`);
+    }
+    assertEqual(
+      formatMobileAccessChipLabel(
+        { id: long, url: 'u', host: long, isDefault: false },
+        { wifi: (ip) => ip, wired: (ip) => ip },
+      ),
+      shown,
+      'chip label uses display host',
     );
   });
 

@@ -162,66 +162,70 @@ export function MobileAccessCard(props: MobileAccessCardProps) {
         {loading && !info ? (
           <p className={styles.state}>{t('mobileAccess.loading')}</p>
         ) : primaryUrl ? (
-          <div className={styles.contentGrid}>
-            <div className={styles.urlList}>
-              {entries.length >= 2 ? (
-                <div
-                  className={styles.networkGroup}
-                  role="radiogroup"
-                  aria-label={t('mobileAccess.networkGroupLabel')}
-                  data-testid="mobile-access-network-group"
-                >
-                  {entries.map((entry) => {
-                    const selected = entry.id === selectedEntry?.id;
-                    return (
-                      <button
-                        key={entry.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={selected}
-                        className={selected ? styles.networkChipSelected : styles.networkChip}
-                        data-testid={`mobile-access-network-${entry.id}`}
-                        onClick={() => {
-                          selectNetworkEntry(entry.id);
-                        }}
-                      >
-                        {formatMobileAccessChipLabel(entry, {
-                          wifi: (ip) => t('mobileAccess.roleWifi', { ip }),
-                          wired: (ip) => t('mobileAccess.roleWired', { ip }),
-                        })}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-              <code className={styles.url}>{primaryUrl}</code>
-              <div className={styles.actions}>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  icon={<CopyIcon />}
-                  loading={copying}
-                  onClick={() => void copyPrimaryUrl()}
-                >
-                  {copied ? t('mobileAccess.copied') : t('mobileAccess.copy')}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  icon={<SyncIcon />}
-                  loading={loading}
-                  onClick={() => void loadAccessInfo()}
-                >
-                  {t('mobileAccess.refresh')}
-                </Button>
+          <>
+            {entries.length >= 2 ? (
+              <div
+                className={styles.networkGroup}
+                role="radiogroup"
+                aria-label={t('mobileAccess.networkGroupLabel')}
+                data-testid="mobile-access-network-group"
+              >
+                {entries.map((entry) => {
+                  const selected = entry.id === selectedEntry?.id;
+                  const chipLabel = formatMobileAccessChipLabel(entry, {
+                    wifi: (ip) => t('mobileAccess.roleWifi', { ip }),
+                    wired: (ip) => t('mobileAccess.roleWired', { ip }),
+                  });
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      title={entry.host}
+                      className={selected ? styles.networkChipSelected : styles.networkChip}
+                      data-testid={`mobile-access-network-${entry.id}`}
+                      onClick={() => {
+                        selectNetworkEntry(entry.id);
+                      }}
+                    >
+                      {chipLabel}
+                    </button>
+                  );
+                })}
               </div>
+            ) : null}
+            <div className={styles.contentGrid}>
+              <div className={styles.urlList}>
+                <code className={styles.url}>{primaryUrl}</code>
+                <div className={styles.actions}>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<CopyIcon />}
+                    loading={copying}
+                    onClick={() => void copyPrimaryUrl()}
+                  >
+                    {copied ? t('mobileAccess.copied') : t('mobileAccess.copy')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<SyncIcon />}
+                    loading={loading}
+                    onClick={() => void loadAccessInfo()}
+                  >
+                    {t('mobileAccess.refresh')}
+                  </Button>
+                </div>
+              </div>
+              <div
+                className={styles.qr}
+                aria-label={t('mobileAccess.qrLabel')}
+                dangerouslySetInnerHTML={{ __html: qrSvg }}
+              />
             </div>
-            <div
-              className={styles.qr}
-              aria-label={t('mobileAccess.qrLabel')}
-              dangerouslySetInnerHTML={{ __html: qrSvg }}
-            />
-          </div>
+          </>
         ) : (
           <div className={styles.urlList}>
             <p className={styles.state}>{t('mobileAccess.empty')}</p>
