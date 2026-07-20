@@ -804,13 +804,15 @@ pub async fn close_workbench_pane(
 ///     用户关闭 tab 后，该会话应从运行期 registry 和 SQLite 中移除，并释放 PTY/tmux 资源。
 ///
 /// Code Logic（这个函数做什么）:
-///     优先关闭 registry 中的运行期句柄；若 registry 已无该会话但 SQLite 仍有记录，则清理持久后端并删除记录。
+///     优先关闭 registry 中的运行期句柄；若 registry 已无该会话但 SQLite 仍有记录，
+///     R25 H1：仍 install close intent/tombstone（取消 restoring claim），再 kill/delete/finish，
+///     禁止 claim-held 无 live handle 在 delete 后 re-upsert 复活。
 pub(crate) async fn local_close_workbench_session(
     state: &AppState,
     session_id: String,
 ) -> Result<serde_json::Value, AppError> {
     state.runtime_role.require_owner()?;
-    // R24 H1：registry close 返回 closer-owned cleanup；kill/SQLite 完成后再 finish_cleanup。
+    // R24 H1 / R25 H1：registry close 或 missing-handle close intent；kill/SQLite 成功后再 finish。
     match state.workbench_sessions.close(&session_id) {
         Ok(cleanup) => {
             kill_persisted_backend(cleanup.row());
@@ -823,8 +825,30 @@ pub(crate) async fn local_close_workbench_session(
                 .get(&session_id)
                 .await?
                 .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
-            kill_persisted_backend(&row);
+            // R25 H1：无 live handle 也要 close intent，阻断 stale restore re-upsert。
+            let cleanup = match state
+                .workbench_sessions
+                .begin_close_intent_for_missing_handle(&session_id, row.clone())
+            {
+                Ok(cleanup) => cleanup,
+                Err(AppError::Conflict(_)) => {
+                    // 竞态：claim 窗口内已 insert live；改走 registry close。
+                    match state.workbench_sessions.close(&session_id) {
+                        Ok(cleanup) => cleanup,
+                        Err(AppError::NotFound(_)) => {
+                            // live 又被并发 close：仍用 durable row 装 intent。
+                            state
+                                .workbench_sessions
+                                .begin_close_intent_for_missing_handle(&session_id, row)?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
+            kill_persisted_backend(cleanup.row());
             state.workbench_session_repo.delete(&session_id).await?;
+            cleanup.finish_cleanup();
         }
         Err(error) => return Err(error),
     }

@@ -1309,7 +1309,7 @@ pub(crate) async fn close_sessions_for_worktree(
         .await?;
     let mut closed = 0_usize;
     for row in sessions {
-        // R24 H1：persist cleanup 完成前保持 Closing barrier。
+        // R24 H1 / R25 H1：persist cleanup 成功前保持 Closing barrier；missing handle 也装 intent。
         match state.workbench_sessions.close(&row.id) {
             Ok(cleanup) => {
                 kill_persisted_backend(cleanup.row());
@@ -1317,8 +1317,23 @@ pub(crate) async fn close_sessions_for_worktree(
                 cleanup.finish_cleanup();
             }
             Err(AppError::NotFound(_)) => {
-                kill_persisted_backend(&row);
+                let cleanup = match state
+                    .workbench_sessions
+                    .begin_close_intent_for_missing_handle(&row.id, row.clone())
+                {
+                    Ok(cleanup) => cleanup,
+                    Err(AppError::Conflict(_)) => match state.workbench_sessions.close(&row.id) {
+                        Ok(cleanup) => cleanup,
+                        Err(AppError::NotFound(_)) => state
+                            .workbench_sessions
+                            .begin_close_intent_for_missing_handle(&row.id, row.clone())?,
+                        Err(error) => return Err(error),
+                    },
+                    Err(error) => return Err(error),
+                };
+                kill_persisted_backend(cleanup.row());
                 state.workbench_session_repo.delete(&row.id).await?;
+                cleanup.finish_cleanup();
             }
             Err(error) => return Err(error),
         }

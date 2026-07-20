@@ -2114,17 +2114,19 @@ impl Drop for SessionSpawnGuard {
     }
 }
 
-/// closer-owned Closing barrier 生命周期令牌（R24 H1）。
+/// closer-owned Closing barrier 生命周期令牌（R24 H1 / R25 M2）。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     registry `close` 只完成 remove/revoke/drain/PTY kill；tmux destroy 与 SQLite
 ///     delete/update 仍由调用方执行。若在 registry 返回时就 mark_cleanup_done + 清 barrier，
 ///     并发 restore 可 reinsert 同 id，随后旧 closer 的 kill_persisted_backend/delete
-///     会打到后继实例。令牌把 barrier 持有到外部 persist cleanup 完成。
+///     会打到后继实例。令牌把 barrier 持有到外部 persist cleanup **成功** 完成。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 session_id、row、PublishControl 身份与 drain 标志；`finish_cleanup`（或 Drop）
-///     才 `mark_cleanup_done`，并在 drained 时 closer 身份 CAS 清 barrier，否则 spawn reaper。
+///     持有 session_id、row、PublishControl 身份与 drain 标志；**仅**显式 `finish_cleanup`
+///     才 `mark_cleanup_done` 并 closer 身份 CAS 清 barrier（或 spawn reaper）。
+///     Drop **不清** barrier（R25 M2）：delete 失败/future cancel 时保留 barrier，
+///     禁止 restore 在 durable 未清理时复活。
 pub struct SessionCloseCleanup {
     registry: WorkbenchSessionRegistry,
     session_id: String,
@@ -2165,7 +2167,7 @@ impl SessionCloseCleanup {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     Drop 与显式 finish 共享同一收敛路径，禁止双清。
+    ///     显式成功 finish 是唯一清除 barrier 的路径（R25 M2）。
     ///
     /// Code Logic（这个函数做什么）:
     ///     finished 守卫后 mark + closer CAS clear 或 reaper。
@@ -2187,13 +2189,18 @@ impl SessionCloseCleanup {
 
 impl Drop for SessionCloseCleanup {
     /// Business Logic（为什么需要这个函数）:
-    ///     测试/panic/补偿路径若未显式 finish，仍须收敛 barrier，避免永久阻塞 reinsert。
-    ///     生产 close 调用方必须在 persist 完成后再 drop/finish，否则 Drop 仍可能偏早 clear。
+    ///     R25 M2：delete 失败 / future cancel / 调用方遗漏 finish 时，不得假装 cleanup 成功。
+    ///     保留 Closing barrier 阻断 stale restore/spawn，直到 owner 成功 finish 或后续 close 覆盖。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     委托 `finish_cleanup_inner`。
+    ///     未 finished 时仅 debug 记录；**不** mark_cleanup_done、**不** clear barrier。
     fn drop(&mut self) {
-        self.finish_cleanup_inner();
+        if !self.finished {
+            tracing::debug!(
+                session_id = %self.session_id,
+                "SessionCloseCleanup dropped without finish_cleanup; retaining Closing barrier"
+            );
+        }
     }
 }
 
@@ -2614,6 +2621,98 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     Abort spawn / close intent 需要在 wait/openpty 前快速判断 barrier 是否已存在。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读 `closing_publish` 是否含 session_id。
+    fn has_closing_barrier(&self, session_id: &str) -> bool {
+        self.closing_publish
+            .lock()
+            .expect("closing_publish 锁中毒")
+            .contains_key(session_id)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     R25 M1：Abort 策略不得 wait 既有 Closing barrier，否则会用 stale 快照在 barrier 清后继续 PTY/insert。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Abort + barrier 已存在 → 立即 `session_close_barrier_active`；否则 Ok。
+    fn abort_if_preexisting_closing_barrier(
+        &self,
+        session_id: &str,
+        barrier_policy: SpawnBarrierPolicy,
+    ) -> Result<(), AppError> {
+        if matches!(barrier_policy, SpawnBarrierPolicy::Abort) && self.has_closing_barrier(session_id)
+        {
+            return Err(AppError::unavailable(
+                "session_close_barrier_active".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     R25 H1：close 时 registry 无 live handle，但 restore claim 已占位尚未 insert；
+    ///     若仅走 NotFound 删 SQLite，旧 restore 仍会 INSERT OR REPLACE 复活同 id。
+    ///     close / restoring claim / Closing tombstone 必须共享同一 atomic lifecycle。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     锁序 sessions → restoring → closing_publish：
+    ///     - 已 live → AlreadyLive（调用方应走 close_inner）；
+    ///     - 已有 Closing barrier → 取消 restoring claim 并返回既有 intent 令牌；
+    ///     - 否则 install barrier、移除 restoring claim 并 Failed 广播，返回 closer-owned 令牌。
+    pub fn begin_close_intent_for_missing_handle(
+        &self,
+        session_id: &str,
+        row: WorkbenchSessionRow,
+    ) -> Result<SessionCloseCleanup, AppError> {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+        if sessions.contains_key(session_id) {
+            return Err(AppError::conflict(
+                "session_close_intent_already_live".to_string(),
+            ));
+        }
+        // 取消 in-flight restore claim，禁止 holder 后续 upsert/spawn 成功路径。
+        let cancel_tx = restoring.remove(session_id);
+        drop(restoring);
+        if let Some(tx) = cancel_tx {
+            let _ = tx.send(SharedRestoreNotification::Failed(
+                AppErrorCategory::Unavailable,
+            ));
+        }
+        // 已有 barrier：返回共享身份令牌，finish 时 CAS clear。
+        {
+            let closing = self
+                .closing_publish
+                .lock()
+                .expect("closing_publish 锁中毒");
+            if let Some(publish) = closing.get(session_id).cloned() {
+                let drained = publish.in_flight.load(Ordering::SeqCst) == 0;
+                return Ok(SessionCloseCleanup {
+                    registry: self.clone(),
+                    session_id: session_id.to_string(),
+                    publish,
+                    row,
+                    drained,
+                    finished: false,
+                });
+            }
+        }
+        let publish = PublishControl::new();
+        publish.revoke();
+        self.install_closing_tombstone(session_id, publish.clone());
+        Ok(SessionCloseCleanup {
+            registry: self.clone(),
+            session_id: session_id.to_string(),
+            publish,
+            row,
+            drained: true,
+            finished: false,
+        })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     close 完成 lease drain + 后端 cleanup 后必须按身份清除 barrier，允许同 id 合法 reinsert。
     ///     仅 closer（或 closer 启动的 drain reaper）可 clear，waiter 禁止（R23 H2）。
     ///
@@ -3023,7 +3122,8 @@ impl WorkbenchSessionRegistry {
     ///     R24 H2：restore/safe_attach 在 BarrierActive 时 Abort，禁止旧行快照无限重试复活。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     wait barrier → openpty/spawn → try_insert 再校验 barrier；
+    ///     R25 M1：Abort 且 pre-existing Closing barrier → 立即返回，不 wait/不 PTY/不 insert；
+    ///     否则 wait barrier → openpty/spawn → try_insert 再校验 barrier；
     ///     CAS 失败：AlreadyLive 返回既有；BarrierActive 按 policy Retry 或 Abort；
     ///     成功后分配 generation 绑定 reader/exit fence。
     fn spawn_row(
@@ -3036,9 +3136,18 @@ impl WorkbenchSessionRegistry {
         let cols = row.cols;
         let rows = row.rows;
 
+        // R25 M1：Abort 对 pre-installed barrier 立即 fail-closed（禁止 wait 后继续 stale snapshot）。
+        self.abort_if_preexisting_closing_barrier(&session_id, barrier_policy)?;
+
         // R21 H2 / R23 M1 / R24 H2：wait + openpty + insert CAS。
         let (generation, publish, handle, reader) = loop {
-            self.wait_for_closing_tombstone(&session_id);
+            // Retry 可 wait；Abort 若 wait 期间新挂 barrier，仍靠下方 CAS Abort 返回。
+            // 但 Abort 不得进入 wait_for_closing 去等待 pre-existing barrier 清掉后继续。
+            if matches!(barrier_policy, SpawnBarrierPolicy::Abort) {
+                self.abort_if_preexisting_closing_barrier(&session_id, barrier_policy)?;
+            } else {
+                self.wait_for_closing_tombstone(&session_id);
+            }
 
             let pty_system = native_pty_system();
             let pair = pty_system
@@ -3115,7 +3224,7 @@ impl WorkbenchSessionRegistry {
                             thread::sleep(Duration::from_millis(1));
                         }
                         SpawnBarrierPolicy::Abort => {
-                            // R24 H2：restore 不得无限重试 pre-close 快照；上层 re-read durable。
+                            // R24 H2 / R25 M1：restore 不得无限重试 pre-close 快照；上层 re-read durable。
                             return Err(AppError::unavailable(
                                 "session_close_barrier_active".to_string(),
                             ));
@@ -4062,6 +4171,15 @@ impl WorkbenchSessionRegistry {
             .lock()
             .expect("closing_publish 锁中毒")
             .contains_key(session_id)
+    }
+
+    /// 测试：R25 M1 Abort 对 pre-existing barrier 立即返回（不 wait / 不 PTY）。
+    #[cfg(test)]
+    pub fn abort_if_preexisting_closing_barrier_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        self.abort_if_preexisting_closing_barrier(session_id, SpawnBarrierPolicy::Abort)
     }
 
     /// 测试：generation-scoped append。
@@ -7558,6 +7676,217 @@ mod tests {
         ));
         registry.finish_restore_claim(
             "s-r24-h2",
+            SharedRestoreNotification::PersistedDisconnected,
+        );
+    }
+
+    /// Business Logic（R25 H1: 为什么需要这个测试）:
+    ///     restore 已 claim 但尚未 insert live handle 时，close/delete 若无 close intent，
+    ///     旧 restore 会在 delete 后 INSERT OR REPLACE 复活同 id。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim held + no registry → begin_close_intent → claim 被 Failed 取消；
+    ///     insert CAS BarrierActive；finish 前不得 re-claim 成功；finish 后才可 claim。
+    #[test]
+    fn close_intent_blocks_claimed_restore_without_live_handle() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-r25-h1").is_claimed());
+        assert!(!registry.contains("s-r25-h1"));
+        let row = WorkbenchSessionRow {
+            id: "s-r25-h1".into(),
+            project_id: "p1".into(),
+            worktree_id: None,
+            name: "n".into(),
+            command: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            status: "running".into(),
+            cols: 80,
+            rows: 24,
+            started_at: "t".into(),
+            exited_at: None,
+            exit_code: None,
+            backend: RAW_PTY_BACKEND.into(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let cleanup = registry
+            .begin_close_intent_for_missing_handle("s-r25-h1", row)
+            .expect("close intent");
+        assert!(registry.has_closing_tombstone_for_test("s-r25-h1"));
+        // claim 已被 close intent 取消；后续不得 Claimed，只应 BarrierActive。
+        assert!(matches!(
+            registry.try_claim_restore("s-r25-h1"),
+            RestoreClaimOutcome::BarrierActive
+        ));
+        let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
+            row: WorkbenchSessionRow {
+                id: "s-r25-h1".into(),
+                project_id: "p1".into(),
+                worktree_id: None,
+                name: "n".into(),
+                command: "/bin/sh".into(),
+                cwd: "/tmp".into(),
+                status: "running".into(),
+                cols: 80,
+                rows: 24,
+                started_at: "t".into(),
+                exited_at: None,
+                exit_code: None,
+                backend: RAW_PTY_BACKEND.into(),
+                backend_id: None,
+                backend_window_id: None,
+                created_at: "t".into(),
+                updated_at: "t".into(),
+            },
+            generation: 1,
+            durability: SessionDurability::Provisional,
+            publish: PublishControl::new(),
+            deferred_output: Vec::new(),
+            deferred_mutations: Vec::new(),
+            pending_exit: None,
+            process: SessionProcess::Fake,
+        }));
+        assert_eq!(
+            registry.try_insert_handle_revalidating_barrier("s-r25-h1", handle),
+            InsertCasResult::BarrierActive,
+            "stale restore must not re-upsert live handle under close intent"
+        );
+        assert!(!registry.contains("s-r25-h1"));
+        cleanup.finish_cleanup();
+        assert!(!registry.has_closing_tombstone_for_test("s-r25-h1"));
+        assert!(registry.try_claim_restore("s-r25-h1").is_claimed());
+        registry.finish_restore_claim(
+            "s-r25-h1",
+            SharedRestoreNotification::PersistedDisconnected,
+        );
+    }
+
+    /// Business Logic（R25 H2: 为什么需要这个测试）:
+    ///     project remove 若在 bulk delete 前 per-session finish，list/restore 可在窗口复活行。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     两 session close 收集 cleanup 令牌但不 finish；concurrent claim/insert 均被 barrier 挡；
+    ///     模拟 bulk delete 后统一 finish，再允许 claim。
+    #[test]
+    fn project_remove_defers_cleanup_finish_until_bulk_delete() {
+        use std::sync::Barrier;
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-r25-h2-a", "p-bulk");
+        registry.insert_fake_session_for_test("s-r25-h2-b", "p-bulk");
+        let mut cleanups = Vec::new();
+        for id in ["s-r25-h2-a", "s-r25-h2-b"] {
+            cleanups.push(registry.close(id).expect("close"));
+            assert!(registry.has_closing_tombstone_for_test(id));
+        }
+        // 模拟 bulk delete 尚未完成：barrier 必须挡住 concurrent restore claim。
+        let start = Arc::new(Barrier::new(3));
+        let mut claim_threads = Vec::new();
+        for id in ["s-r25-h2-a", "s-r25-h2-b"] {
+            let reg = registry.clone();
+            let start = start.clone();
+            let sid = id.to_string();
+            claim_threads.push(thread::spawn(move || {
+                start.wait();
+                matches!(
+                    reg.try_claim_restore(&sid),
+                    RestoreClaimOutcome::BarrierActive
+                )
+            }));
+        }
+        start.wait();
+        for t in claim_threads {
+            assert!(t.join().expect("claim thread"), "claim blocked before bulk finish");
+        }
+        // 模拟 delete_by_project 成功后再 finish。
+        for cleanup in cleanups {
+            cleanup.finish_cleanup();
+        }
+        assert!(!registry.has_closing_tombstone_for_test("s-r25-h2-a"));
+        assert!(!registry.has_closing_tombstone_for_test("s-r25-h2-b"));
+        assert!(registry.try_claim_restore("s-r25-h2-a").is_claimed());
+        registry.finish_restore_claim(
+            "s-r25-h2-a",
+            SharedRestoreNotification::PersistedDisconnected,
+        );
+    }
+
+    /// Business Logic（R25 M1: 为什么需要这个测试）:
+    ///     Abort spawn 若先 wait 既有 barrier，会在 barrier 清后用 stale 快照继续 PTY/insert。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     pre-install barrier → Abort precheck 立即 Err(session_close_barrier_active)；
+    ///     无 live insert。
+    #[test]
+    fn abort_spawn_returns_immediately_on_preexisting_barrier() {
+        let registry = WorkbenchSessionRegistry::new();
+        let publish = registry.install_closing_barrier_for_test("s-r25-m1");
+        let err = registry
+            .abort_if_preexisting_closing_barrier_for_test("s-r25-m1")
+            .expect_err("must abort");
+        match err {
+            AppError::Unavailable(msg) => {
+                assert_eq!(msg, "session_close_barrier_active");
+            }
+            other => panic!("unexpected error variant: {other}"),
+        }
+        assert!(!registry.contains("s-r25-m1"));
+        // barrier 仍在（precheck 不得 clear）。
+        assert!(registry.has_closing_tombstone_for_test("s-r25-m1"));
+        publish.mark_cleanup_done();
+        registry.clear_closing_tombstone_for_test("s-r25-m1");
+    }
+
+    /// Business Logic（R25 M2: 为什么需要这个测试）:
+    ///     SessionCloseCleanup Drop 若总是 clear barrier，delete 失败后 restore 会打开窗口。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     close → drop cleanup without finish → barrier 仍在；显式 finish 后才 clear。
+    #[test]
+    fn session_close_cleanup_drop_retains_barrier_until_finish() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-r25-m2", "p1");
+        let cleanup = registry.close("s-r25-m2").expect("close");
+        assert!(registry.has_closing_tombstone_for_test("s-r25-m2"));
+        // 模拟 delete 失败 / cancel：drop 令牌。
+        drop(cleanup);
+        assert!(
+            registry.has_closing_tombstone_for_test("s-r25-m2"),
+            "Drop must not clear barrier on incomplete cleanup"
+        );
+        assert!(matches!(
+            registry.try_claim_restore("s-r25-m2"),
+            RestoreClaimOutcome::BarrierActive
+        ));
+        // owner 成功 finish：用 begin_close_intent 取得同一 barrier 身份再 finish。
+        let row = WorkbenchSessionRow {
+            id: "s-r25-m2".into(),
+            project_id: "p1".into(),
+            worktree_id: None,
+            name: "n".into(),
+            command: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            status: "disconnected".into(),
+            cols: 80,
+            rows: 24,
+            started_at: "t".into(),
+            exited_at: Some("t".into()),
+            exit_code: None,
+            backend: RAW_PTY_BACKEND.into(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let cleanup2 = registry
+            .begin_close_intent_for_missing_handle("s-r25-m2", row)
+            .expect("reuse intent");
+        cleanup2.finish_cleanup();
+        assert!(!registry.has_closing_tombstone_for_test("s-r25-m2"));
+        assert!(registry.try_claim_restore("s-r25-m2").is_claimed());
+        registry.finish_restore_claim(
+            "s-r25-m2",
             SharedRestoreNotification::PersistedDisconnected,
         );
     }

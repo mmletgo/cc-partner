@@ -339,13 +339,36 @@ pub async fn remove_workbench_project(
     );
 
     let session_rows = state.workbench_session_repo.list(Some(&project_id)).await?;
+    // R25 H2：先收集全部 SessionCloseCleanup 令牌并 kill 后端；bulk SQLite 成功后才 finish。
+    let mut cleanups = Vec::new();
     for row in session_rows {
-        // R24 H1：每 session 在 kill + 项目级 delete 前 finish 各自 barrier。
-        if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
-            kill_persisted_backend(cleanup.row());
-            cleanup.finish_cleanup();
-        } else {
-            kill_persisted_backend(&row);
+        match state.workbench_sessions.close(&row.id) {
+            Ok(cleanup) => {
+                kill_persisted_backend(cleanup.row());
+                cleanups.push(cleanup);
+            }
+            Err(AppError::NotFound(_)) => {
+                // R25 H1：无 live handle 也 install close intent，阻断 restore 窗口 re-upsert。
+                match state
+                    .workbench_sessions
+                    .begin_close_intent_for_missing_handle(&row.id, row.clone())
+                {
+                    Ok(cleanup) => {
+                        kill_persisted_backend(cleanup.row());
+                        cleanups.push(cleanup);
+                    }
+                    Err(AppError::Conflict(_)) => {
+                        if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
+                            kill_persisted_backend(cleanup.row());
+                            cleanups.push(cleanup);
+                        } else {
+                            kill_persisted_backend(&row);
+                        }
+                    }
+                    Err(_) => kill_persisted_backend(&row),
+                }
+            }
+            Err(_) => kill_persisted_backend(&row),
         }
     }
     state
@@ -357,6 +380,9 @@ pub async fn remove_workbench_project(
         .delete_by_project(&project_id)
         .await?;
     state.workbench_project_repo.delete(&project_id).await?;
+    for cleanup in cleanups {
+        cleanup.finish_cleanup();
+    }
     Ok(serde_json::json!({ "ok": true, "projectId": project_id }))
 }
 

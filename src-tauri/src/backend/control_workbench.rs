@@ -150,13 +150,35 @@ async fn dispatch_workbench_op(
             let project_id = required_string(&payload, "projectId")?;
             let _ = workbench::get_project(state, &project_id).await?;
             let session_rows = state.workbench_session_repo.list(Some(&project_id)).await?;
+            // R25 H2：收集 close cleanup 令牌；bulk delete 成功后才 finish_cleanup。
+            let mut cleanups = Vec::new();
             for row in session_rows {
-                // R24 H1：registry close 令牌在 kill 后 finish，barrier 覆盖后端销毁。
-                if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
-                    kill_persisted_backend(cleanup.row());
-                    cleanup.finish_cleanup();
-                } else {
-                    kill_persisted_backend(&row);
+                match state.workbench_sessions.close(&row.id) {
+                    Ok(cleanup) => {
+                        kill_persisted_backend(cleanup.row());
+                        cleanups.push(cleanup);
+                    }
+                    Err(AppError::NotFound(_)) => {
+                        match state
+                            .workbench_sessions
+                            .begin_close_intent_for_missing_handle(&row.id, row.clone())
+                        {
+                            Ok(cleanup) => {
+                                kill_persisted_backend(cleanup.row());
+                                cleanups.push(cleanup);
+                            }
+                            Err(AppError::Conflict(_)) => {
+                                if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
+                                    kill_persisted_backend(cleanup.row());
+                                    cleanups.push(cleanup);
+                                } else {
+                                    kill_persisted_backend(&row);
+                                }
+                            }
+                            Err(_) => kill_persisted_backend(&row),
+                        }
+                    }
+                    Err(_) => kill_persisted_backend(&row),
                 }
             }
             state
@@ -168,6 +190,9 @@ async fn dispatch_workbench_op(
                 .delete_by_project(&project_id)
                 .await?;
             state.workbench_project_repo.delete(&project_id).await?;
+            for cleanup in cleanups {
+                cleanup.finish_cleanup();
+            }
             Ok(serde_json::json!({ "ok": true, "projectId": project_id }))
         }
         "projects.touch" => {
