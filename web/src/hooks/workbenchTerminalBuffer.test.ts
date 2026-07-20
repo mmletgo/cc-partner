@@ -851,6 +851,72 @@ describe('session cutover epoch / committed baseline', () => {
     expect(state.authorityId).toBe('owner-b');
   });
 
+  test('remote bridged live-before-replay accepts same local bus owner history', () => {
+    // R7 H1：bridged live 与 replay 统一本机 event_bus owner。
+    // live-first 绑定 local-owner 后，stamp 过的 replay 必须能补上挂载前历史；
+    // 若仍带 remote owner，则永久丢失 history。
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    let state = createEmptySessionCutoverState();
+    const localOwner = 'local-bus-owner';
+    const remoteOwner = 'remote-peer-owner';
+    const sessionId = 'remote:peer:s1';
+
+    // live 先到：GUI enrichment 绑定本机 bus owner
+    store.append(sessionId, 'live-2', 2, localOwner);
+    state = commitTerminalCutover(state, 0, undefined, localOwner);
+    expect(state.authorityId).toBe(localOwner);
+    expect(store.getLastSeq(sessionId)).toBe(2);
+
+    // 错误路径：远端 raw owner 的 replay 必须 reject（证明 authority 冲突后果）
+    expect(shouldAcceptTerminalCutover(state, 2, undefined, remoteOwner)).toBe(false);
+
+    // 正确路径：后端无条件 stamp 本机 owner 后，replay 可补历史并 cutover
+    expect(shouldAcceptTerminalCutover(state, 2, undefined, localOwner)).toBe(true);
+    applyTerminalBaselineCutover(store, sessionId, 'history-12', 2, [], localOwner, false);
+    state = commitTerminalCutover(state, 2, undefined, localOwner);
+    expect(store.getBuffer(sessionId)).toBe('history-12');
+    expect(store.getLastSeq(sessionId)).toBe(2);
+    expect(state.authorityId).toBe(localOwner);
+
+    // 后续 live seq=3 继续同 authority
+    store.append(sessionId, 'live-3', 3, localOwner);
+    expect(store.getBuffer(sessionId)).toBe('history-12live-3');
+    expect(store.getLastSeq(sessionId)).toBe(3);
+  });
+
+  test('remote bridged replay-before-live keeps single local bus authority without double-apply', () => {
+    // R7 H1：replay-first 时 replay/live 同 local owner，live 不得切换 authority 重置 lastSeq。
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    let state = createEmptySessionCutoverState();
+    const localOwner = 'local-bus-owner';
+    const sessionId = 'remote:peer:s1';
+
+    // replay 先到（已 stamp 本机 owner），建立 baseline lastSeq=2
+    expect(shouldAcceptTerminalCutover(state, 2, undefined, localOwner)).toBe(true);
+    applyTerminalBaselineCutover(store, sessionId, 'history-12', 2, [], localOwner, true);
+    state = commitTerminalCutover(state, 2, undefined, localOwner);
+    expect(store.getBuffer(sessionId)).toBe('history-12');
+    expect(store.getLastSeq(sessionId)).toBe(2);
+    expect(state.authorityId).toBe(localOwner);
+
+    // live 同 authority：seq<=lastSeq 的竞态 chunk 被 no-op（不双写）
+    store.append(sessionId, 'dup-2', 2, localOwner);
+    expect(store.getBuffer(sessionId)).toBe('history-12');
+    expect(store.getLastSeq(sessionId)).toBe(2);
+
+    // 新 live seq=3 追加；authority 不变
+    store.append(sessionId, 'live-3', 3, localOwner);
+    expect(store.getBuffer(sessionId)).toBe('history-12live-3');
+    expect(store.getLastSeq(sessionId)).toBe(3);
+    expect(isTerminalAuthorityChange(state, localOwner)).toBe(false);
+  });
+
   test('shouldCollectHeldLive only during baseline window or replay', () => {
     const idle = createEmptySessionCutoverState();
     expect(shouldCollectHeldLiveTerminalEvent(idle, false)).toBe(true);

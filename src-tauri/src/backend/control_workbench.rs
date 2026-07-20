@@ -561,7 +561,16 @@ async fn dispatch_workbench_op(
             Ok(serde_json::to_value(deleted)?)
         }
 
-        // ---- sessions ----
+        // ---- gap sources / sessions ----
+        // Gap inventory 只应对活跃 remote event bridge 设备 fail-closed。
+        "bridges.active_devices" => {
+            let ids: Vec<String> = state
+                .workbench_remote_event_bridges
+                .active_device_ids()
+                .into_iter()
+                .collect();
+            Ok(serde_json::to_value(ids)?)
+        }
         "sessions.list" => {
             let project_id = optional_string(&payload, "projectId");
             let items = workbench::list_workbench_sessions_for_state(state, project_id).await?;

@@ -602,16 +602,18 @@ fn session_row_is_replayable_for_gap(session: &serde_json::Value) -> bool {
     status.eq_ignore_ascii_case("running")
 }
 
-/// 收集 Gap resync 需要 inventory 的全部 session 行（本机 + remote shortcut）。
+/// 收集 Gap resync 需要 inventory 的全部 session 行（本机 + 活跃远端源）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     无 projectId 的 `sessions.list` 只返回本机会话，但远端 bridge 的 terminal-output
+///     无 projectId 的 `sessions.list` 只返回本机会话，但活跃 remote bridge 的 terminal-output
 ///     也发布进同一 event bus；若 Gap 只 replay 本机，会把远端缺口标 complete 并 attach latest。
+///     反之，任意已保存但无关的离线 remote shortcut 也不得把本机 terminal/runtime 永久拖进 incomplete。
 ///
 /// Code Logic（这个函数做什么）:
-///     1) `sessions.list({})` 本机行；2) `projects.list` 找 kind=remote 的 shortcut；
-///     3) 对每个 remote project 调 `sessions.list({projectId})`（失败上抛，fail-closed）；
-///     4) 按 session id 去重合并返回。
+///     1) `sessions.list({})` 本机行；2) `bridges.active_devices` 取仍在运行的桥设备；
+///     3) `projects.list` 找 kind=remote 的 shortcut；
+///     4) 仅当 remote.deviceId ∈ active_devices 时调 `sessions.list({projectId})`，失败 incomplete；
+///     5) 非活跃桥上的离线 shortcut 跳过；按 session id 去重合并返回。
 async fn list_sessions_for_gap_resync(
     client: &BackendControlClient,
     cancel: Option<&CancellationToken>,
@@ -634,6 +636,22 @@ async fn list_sessions_for_gap_resync(
             by_id.insert(id.to_string(), session);
         }
     }
+
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(AppError::generic("cancelled"));
+    }
+    // 活跃桥设备集合：失败时无法证明无远端事件源，必须 incomplete。
+    let active_devices: Vec<String> = client
+        .workbench_op("bridges.active_devices", json!({}))
+        .await
+        .map_err(|e| {
+            AppError::generic(format!(
+                "gap_resync_active_bridges_failed:{}",
+                e.code()
+            ))
+        })?;
+    let active_device_set: std::collections::HashSet<String> =
+        active_devices.into_iter().collect();
 
     if cancel.is_some_and(|c| c.is_cancelled()) {
         return Err(AppError::generic("cancelled"));
@@ -665,6 +683,17 @@ async fn list_sessions_for_gap_resync(
         else {
             continue;
         };
+        let device_id = project
+            .get("deviceId")
+            .or_else(|| project.get("device_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        // 无活跃桥的 shortcut：不是本 bus 的事件源，跳过 inventory（离线无关 shortcut 不得全局 incomplete）。
+        if device_id.is_empty() || !active_device_set.contains(&device_id) {
+            continue;
+        }
         let remote_sessions: Vec<Value> = client
             .workbench_op(
                 "sessions.list",
@@ -672,7 +701,7 @@ async fn list_sessions_for_gap_resync(
             )
             .await
             .map_err(|e| {
-                // 任一 remote inventory 失败：不得 attach latest 越过远端缺口。
+                // 活跃远端源 inventory 失败：不得 attach latest 越过该源缺口。
                 AppError::generic(format!(
                     "gap_resync_remote_list_failed:{}",
                     e.code()
@@ -740,20 +769,13 @@ async fn resync_terminals_via_control(
             .map_err(|e| {
                 AppError::generic(format!("gap_resync_replay_failed:{}", e.code()))
             })?;
-        // 前端 cutover 按 owner authority 重置 lastSeq；resync payload 必须带新 owner。
-        // 若 replay DTO 已自带 ownerInstanceId 则保留；否则注入 bus owner。
+        // bridged live 与 GUI enrichment 均以本机 event_bus owner 为 authority。
+        // resync/replay 必须无条件覆盖远端 owner，避免 live-first 拒 replay 或 replay-first 切 authority 双写。
         if let Some(obj) = replay.as_object_mut() {
-            let has_owner = obj
-                .get("ownerInstanceId")
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            if !has_owner {
-                obj.insert(
-                    "ownerInstanceId".to_string(),
-                    Value::String(owner_instance_id.to_string()),
-                );
-            }
+            obj.insert(
+                "ownerInstanceId".to_string(),
+                Value::String(owner_instance_id.to_string()),
+            );
         }
         ui.emit(WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
         count = count.saturating_add(1);
@@ -1099,7 +1121,8 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
-                // Gap resync 会先 projects.list 再 inventory remote；默认空列表（仅本机）。
+                // Gap resync 先取活跃桥设备，再 projects.list；默认无活跃远端源（仅本机）。
+                "bridges.active_devices" => Value::Array(vec![]),
                 "projects.list" => Value::Array(vec![]),
                 "sessions.list" => Value::Array(s.list_rows.clone()),
                 "sessions.replay" => {
@@ -1428,14 +1451,14 @@ mod tests {
         assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 0);
     }
 
-    /// remote inventory 失败时 Gap 必须 incomplete，不得 attach latest。
+    /// 活跃远端源 inventory 失败时 Gap 必须 incomplete，不得 attach latest。
     ///
     /// Business Logic（为什么需要这个测试）:
-    ///     R6 H3：sessions.list 无 projectId 仅本机，但 remote bridge 同样写 event bus；
-    ///     若 projects.list/remote sessions.list 失败仍 complete，会永久越过远端缺口。
+    ///     R7 M1 / R6 H3：sessions.list 无 projectId 仅本机，但活跃 remote bridge 同样写 event bus；
+    ///     若活跃远端 sessions.list 失败仍 complete，会永久越过远端缺口。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     mock control：local list 成功；projects.list 返回 remote 项目；
+    ///     mock control：bridges.active_devices 含 device-a；projects.list 返回该设备 remote 项目；
     ///     sessions.list(projectId) 返回 503 → resync incomplete → 不 attach latest。
     #[tokio::test]
     async fn gap_resync_remote_inventory_failure_is_incomplete() {
@@ -1453,10 +1476,12 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
+                "bridges.active_devices" => json!(["device-a"]),
                 "projects.list" => json!([{
                     "id": "remote-proj",
                     "kind": "remote",
                     "name": "remote",
+                    "deviceId": "device-a",
                 }]),
                 "sessions.list" => {
                     let project_id = body
@@ -1522,8 +1547,102 @@ mod tests {
         .await;
         assert!(
             outcome.is_none(),
-            "remote inventory failure must make Gap incomplete"
+            "active remote inventory failure must make Gap incomplete"
         );
+    }
+
+    /// 无关离线 remote shortcut 不得阻断本机 Gap complete。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     R7 M1：inventory 若遍历全部已保存 remote 并 fail-closed，离线无关 shortcut
+    ///     会永久停住本机 terminal/runtime 交付。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     bridges.active_devices 为空；projects.list 含 offline remote；local replay 成功
+    ///     → Some outcome；不得因 remote list 失败 incomplete。
+    #[tokio::test]
+    async fn gap_resync_unrelated_offline_shortcut_does_not_block_local() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WbReq {
+            #[allow(dead_code)]
+            control_token: String,
+            op: String,
+            #[serde(default)]
+            payload: Value,
+        }
+
+        async fn handle_wb(
+            Json(body): Json<WbReq>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let result = match body.op.as_str() {
+                "bridges.active_devices" => json!([]),
+                "projects.list" => json!([{
+                    "id": "offline-remote",
+                    "kind": "remote",
+                    "name": "offline",
+                    "deviceId": "device-offline",
+                }]),
+                "sessions.list" => {
+                    let project_id = body
+                        .payload
+                        .get("projectId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if project_id.is_empty() {
+                        json!([{
+                            "id": "local-s1",
+                            "sessionId": "local-s1",
+                            "status": "running",
+                        }])
+                    } else {
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({
+                                "error": "remote offline",
+                                "code": "unavailable",
+                            })),
+                        ));
+                    }
+                }
+                "sessions.replay" => json!({
+                    "sessionId": "local-s1",
+                    "buffer": "local-buf",
+                    "truncated": false,
+                    "lastSeq": 2,
+                    "ownerInstanceId": "owner-1",
+                }),
+                _ => json!({ "ok": true }),
+            };
+            Ok(Json(json!({
+                "ownerInstanceId": "owner-1",
+                "result": result,
+            })))
+        }
+
+        let app = Router::new()
+            .route("/api/backend/control/workbench", post(handle_wb))
+            .route("/api/backend/control/workbench/data", post(handle_wb));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind offline-shortcut fixture");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        std::mem::forget(server);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let client = BackendControlClient::for_test(port, "token", "owner-1").expect("client");
+        let ui = RecordingBackendUi::default();
+        let outcome = resync_after_gap(&client, &ui, "owner-1", 1, 9, None)
+            .await
+            .expect("offline unrelated shortcut must not block local Gap complete");
+        assert!(
+            outcome.terminal_replay_count >= 1,
+            "local running session must still resync"
+        );
+        assert_eq!(ui.event_count(WORKBENCH_TERMINAL_RESYNC_EVENT), 1);
     }
 
     /// remote + local running 会话均可 inventory 并 replay 时 Gap complete。
@@ -1532,8 +1651,9 @@ mod tests {
     ///     远端会话成功恢复时必须一并 resync，不能只完成本机。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     projects.list 含 remote；sessions.list 按 projectId 返回 remote session；
-    ///     两次 replay 成功 → Some outcome 且 terminal_replay_count>=2。
+    ///     bridges.active_devices 含 device-a；projects.list 含该设备 remote；
+    ///     sessions.list 按 projectId 返回 remote session；两次 replay 成功 → count>=2；
+    ///     远端 DTO 即使带 remote owner，resync 也覆盖为本机 bus owner。
     #[tokio::test]
     async fn gap_resync_includes_remote_running_sessions() {
         #[derive(serde::Deserialize)]
@@ -1550,10 +1670,12 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
+                "bridges.active_devices" => json!(["device-a"]),
                 "projects.list" => json!([{
                     "id": "remote-proj",
                     "kind": "remote",
                     "name": "remote",
+                    "deviceId": "device-a",
                 }]),
                 "sessions.list" => {
                     let project_id = body
@@ -1569,8 +1691,8 @@ mod tests {
                         }])
                     } else {
                         json!([{
-                            "id": "remote:dev:inner-s1",
-                            "sessionId": "remote:dev:inner-s1",
+                            "id": "remote:device-a:inner-s1",
+                            "sessionId": "remote:device-a:inner-s1",
                             "status": "running",
                         }])
                     }
@@ -1581,12 +1703,18 @@ mod tests {
                         .get("sessionId")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
+                    // 远端 DTO 故意携带 remote owner；resync 必须覆盖为本机 bus owner。
+                    let remote_owner = if sid.starts_with("remote:") {
+                        "owner-remote"
+                    } else {
+                        "owner-1"
+                    };
                     json!({
                         "sessionId": sid,
                         "buffer": "buf",
                         "truncated": false,
                         "lastSeq": 3,
-                        "ownerInstanceId": "owner-1",
+                        "ownerInstanceId": remote_owner,
                     })
                 }
                 _ => json!({ "ok": true }),
@@ -1633,6 +1761,13 @@ mod tests {
             .filter(|(name, _)| name == WORKBENCH_TERMINAL_RESYNC_EVENT)
             .collect();
         assert_eq!(resyncs.len(), 2);
+        for (_, payload) in &resyncs {
+            assert_eq!(
+                payload.get("ownerInstanceId").and_then(|v| v.as_str()),
+                Some("owner-1"),
+                "resync must stamp local event_bus owner, got {payload}"
+            );
+        }
     }
 
     /// 验证同 sequence 重复消息被 DropDuplicate。

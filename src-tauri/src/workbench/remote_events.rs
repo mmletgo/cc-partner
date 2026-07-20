@@ -370,6 +370,24 @@ impl RemoteEventBridgeRegistry {
         self.tasks.lock().expect("remote event bridge 锁中毒").len()
     }
 
+    /// 返回仍在运行（未 finished）的 bridge 设备 id 集合。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Gap inventory 只能对真正向本机 event_bus 再发布事件的活跃桥设备 fail-closed；
+    ///     无关离线 remote shortcut 不得阻断本机 terminal/runtime 恢复。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁过滤 `!is_finished()` 的 task，收集 device_id；不暴露 base_url/token/正文。
+    pub fn active_device_ids(&self) -> std::collections::HashSet<String> {
+        self.tasks
+            .lock()
+            .expect("remote event bridge 锁中毒")
+            .iter()
+            .filter(|(_, task)| !task.is_finished())
+            .map(|(device_id, _)| device_id.clone())
+            .collect()
+    }
+
     /// 收集全部 bridge 脱敏快照。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -1058,6 +1076,19 @@ mod tests {
         let registry = RemoteEventBridgeRegistry::new();
         assert_eq!(registry.active_bridge_count(), 0);
         assert!(registry.snapshots().is_empty());
+        assert!(registry.active_device_ids().is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Gap inventory 只应对未 finished 的桥设备 fail-closed；空 registry 必须返回空集合。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     新建 registry 断言 `active_device_ids()` 为空且 count=0。
+    #[test]
+    fn active_device_ids_empty_when_no_bridges() {
+        let registry = RemoteEventBridgeRegistry::new();
+        assert!(registry.active_device_ids().is_empty());
+        assert_eq!(registry.active_bridge_count(), 0);
     }
 
     /// Business Logic（为什么需要这个测试）:

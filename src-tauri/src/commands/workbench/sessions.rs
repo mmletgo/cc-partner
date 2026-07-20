@@ -114,19 +114,11 @@ pub(crate) async fn replay_workbench_session_for_state(
             .replay(&base_url, &inner_session_id)
             .await?;
         replay.session_id = session_id;
-        // 远端 DTO 可能已带对端 owner；若缺失则不得伪造本机 sidecar owner 冒充远端 authority。
-        // 本机 event bus 对 remote terminal-output 使用的是本机 sidecar owner（bridge 再发布），
-        // 因此 cutover 权威以本机 event_bus owner 为准，保证与 live enrichment 一致。
-        if replay
-            .owner_instance_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_none()
-        {
-            replay.owner_instance_id =
-                Some(state.config_runtime.owner_instance_id().to_string());
-        }
+        // bridged live 经本机 event_bus 再发布，GUI enrichment 使用本机 sidecar owner。
+        // cutover 必须无条件以本机 event_bus owner 覆盖远端 owner，避免 live/replay authority 分叉：
+        // live-first 会拒绝异 owner replay（挂载前历史永久丢失）；replay-first 会在首条 live 切换 authority 双写。
+        replay.owner_instance_id =
+            Some(state.config_runtime.owner_instance_id().to_string());
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
         return Ok(replay);
     }
