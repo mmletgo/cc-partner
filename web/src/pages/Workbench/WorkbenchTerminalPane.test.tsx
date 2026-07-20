@@ -15,13 +15,16 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import type { ReactElement, ReactNode } from 'react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback } from 'react';
 
 import { WorkbenchTerminalPane } from './WorkbenchTerminalPane';
 import type { TerminalCursorAnchor } from './WorkbenchTerminalPane';
 import { WorkbenchTerminalBuffersContext } from '@/hooks/workbenchTerminalBuffersContext';
 import type { WorkbenchTerminalBuffersContextValue } from '@/hooks/workbenchTerminalBuffersContext';
+import { createWorkbenchTerminalBufferStore } from '@/hooks/workbenchTerminalBuffer';
 import type { WorkbenchSession } from '@/lib/types';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 /* ---------------------------------------------------------------------------
  * vi.mock — xterm Terminal + FitAddon
@@ -146,7 +149,7 @@ vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 /* ---------------------------------------------------------------------------
  * 受控 buffer context helper
  *
- * Business Logic: 测试需要按 revision 推送 buffer 内容触发 replay；用一个受控 Provider 注入。
+ * Business Logic: 测试需要按 store API 推送 buffer 内容并触发 live writer；用真实 store Provider 注入。
  * ------------------------------------------------------------------------- */
 
 interface ControlledBuffer {
@@ -155,27 +158,38 @@ interface ControlledBuffer {
 }
 
 interface ControlledProviderProps {
-  snapshots: Record<string, ControlledBuffer>;
+  store: ReturnType<typeof createWorkbenchTerminalBufferStore>;
   children: ReactNode;
 }
 
-function ControlledBuffersProvider({ snapshots, children }: ControlledProviderProps): ReactElement {
+function ControlledBuffersProvider({ store, children }: ControlledProviderProps): ReactElement {
   const value: WorkbenchTerminalBuffersContextValue = {
-    store: {
-      subscribe: () => () => undefined,
-      getRevision: (sessionId: string | null) =>
-        sessionId ? snapshots[sessionId]?.revision ?? 0 : 0,
-      getBuffer: (sessionId: string | null) =>
-        sessionId ? snapshots[sessionId]?.buffer ?? '' : '',
-    } as unknown as WorkbenchTerminalBuffersContextValue['store'],
-    resetBuffer: vi.fn(),
-    removeBuffer: vi.fn(),
+    store,
+    resetBuffer: (sessionId: string) => store.reset(sessionId),
+    removeBuffer: (sessionId: string) => store.remove(sessionId),
   };
   return (
     <WorkbenchTerminalBuffersContext.Provider value={value}>
       {children}
     </WorkbenchTerminalBuffersContext.Provider>
   );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   旧测试用 snapshot 对象描述初始 buffer；新路径需要 seed 到真实 store。
+ *
+ * Code Logic（这个函数做什么）:
+ *   创建 store 并对每个 session reset(sessionId, buffer)。
+ */
+function createStoreFromSnapshots(
+  snapshots: Record<string, ControlledBuffer>,
+): ReturnType<typeof createWorkbenchTerminalBufferStore> {
+  const store = createWorkbenchTerminalBufferStore();
+  for (const [sessionId, snapshot] of Object.entries(snapshots)) {
+    store.reset(sessionId, snapshot.buffer);
+  }
+  return store;
 }
 
 /* ---------------------------------------------------------------------------
@@ -204,7 +218,7 @@ function buildSession(overrides: Partial<WorkbenchSession> = {}): WorkbenchSessi
 
 interface PaneHostProps {
   session: WorkbenchSession | null;
-  snapshots: Record<string, ControlledBuffer>;
+  store: ReturnType<typeof createWorkbenchTerminalBufferStore>;
   inputEnabled?: boolean;
   resizeRequestKey?: number;
   onInput?: (sessionId: string, data: string) => void;
@@ -222,7 +236,7 @@ interface PaneHostProps {
 function PaneHost(props: PaneHostProps): ReactElement {
   const {
     session,
-    snapshots,
+    store,
     inputEnabled = true,
     resizeRequestKey = 0,
     onInput,
@@ -243,7 +257,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
     [onCursorAnchorChange],
   );
   return (
-    <ControlledBuffersProvider snapshots={snapshots}>
+    <ControlledBuffersProvider store={store}>
       <WorkbenchTerminalPane
         session={session}
         placeholder={placeholder}
@@ -258,34 +272,20 @@ function PaneHost(props: PaneHostProps): ReactElement {
 }
 
 /**
- * 把 snapshots 升级到新 revision 并触发 Provider 重新读取（通过新对象引用）。
+ * Business Logic: live writer 通过 store reset/append 驱动写入；保留 stable callbacks 避免 xterm 重建。
  *
- * Business Logic: 受控 Provider 的 getRevision/getBuffer 直接读 snapshots 对象，需要新引用才能让
- * useSyncExternalStore 感知变化；这里通过 setState 包装组件实现 revision 变化。
+ * Code Logic: 创建真实 store，并提供 advanceRevision（reset）与 rerenderProps。
  */
 function renderPaneWithRevision() {
-  const states: ControlledBuffer[] = [{ buffer: '', revision: 0 }];
-  // Business Logic: 用 ref 持有 setSnap；在 Host 的 effect 里赋值，避免在渲染体内写外层变量（react-hooks/immutability）。
-  const setSnapshotRef: {
-    current: ((next: Record<string, ControlledBuffer>) => void) | null;
-  } = { current: null };
-
-  // Business Logic: onInput/onResize 必须跨 Host 重渲染保持引用稳定，与真实 Workbench 的 useCallback 行为一致，
-  // 否则 TerminalPane 的 mount effect 依赖数组会重新触发并销毁/重建 xterm。
+  const store = createWorkbenchTerminalBufferStore();
   const stableInput = vi.fn();
   const stableResize = vi.fn();
 
   function Host(props: { session?: WorkbenchSession | null; inputEnabled?: boolean; workspaceView?: string; resizeRequestKey?: number }): ReactElement {
-    const [snap, setSnap] = useState<Record<string, ControlledBuffer>>(() => ({
-      s1: states[0]!,
-    }));
-    useEffect(() => {
-      setSnapshotRef.current = setSnap;
-    }, [setSnap]);
     return (
       <PaneHost
         session={props.session ?? buildSession()}
-        snapshots={snap}
+        store={store}
         inputEnabled={props.inputEnabled}
         resizeRequestKey={props.resizeRequestKey}
         onInput={stableInput}
@@ -297,9 +297,9 @@ function renderPaneWithRevision() {
   const utils = render(<Host session={buildSession()} />);
   return {
     ...utils,
-    advanceRevision(sessionId: string, buffer: string, revision: number) {
-      states[0] = { buffer, revision };
-      setSnapshotRef.current?.({ [sessionId]: states[0]! });
+    store,
+    advanceRevision(sessionId: string, buffer: string) {
+      store.reset(sessionId, buffer);
     },
     rerenderProps(next: { session?: WorkbenchSession | null; inputEnabled?: boolean; workspaceView?: string; resizeRequestKey?: number }) {
       utils.rerender(<Host session={next.session ?? buildSession()} inputEnabled={next.inputEnabled} resizeRequestKey={next.resizeRequestKey} />);
@@ -334,13 +334,13 @@ afterEach(() => {
 describe('WorkbenchTerminalPane — xterm lifecycle', () => {
   test('creates exactly one xterm Terminal for a stable session identity and disposes it on unmount', () => {
     const session = buildSession({ id: 's1' });
-    const snapshots: Record<string, ControlledBuffer> = { s1: { buffer: '', revision: 0 } };
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
 
-    const { rerender, unmount } = render(<PaneHost session={session} snapshots={snapshots} />);
+    const { rerender, unmount } = render(<PaneHost session={session} store={store} />);
     expect(terminalEvents.constructCount).toBe(1);
 
-    // 父组件用相同 session 重渲染（例如 snapshots 引用变化）：不应创建新 Terminal。
-    rerender(<PaneHost session={session} snapshots={{ ...snapshots }} />);
+    // 父组件用相同 session 重渲染：不应创建新 Terminal。
+    rerender(<PaneHost session={session} store={store} />);
     expect(terminalEvents.constructCount).toBe(1);
     expect(terminalEvents.disposeCount).toBe(0);
 
@@ -352,23 +352,23 @@ describe('WorkbenchTerminalPane — xterm lifecycle', () => {
   test('disposes the previous Terminal and creates a new one when session identity changes', () => {
     const s1 = buildSession({ id: 's1' });
     const s2 = buildSession({ id: 's2' });
-    const snapshots: Record<string, ControlledBuffer> = {
+    const store = createStoreFromSnapshots({
       s1: { buffer: '', revision: 0 },
       s2: { buffer: '', revision: 0 },
-    };
+    });
 
-    const { rerender } = render(<PaneHost session={s1} snapshots={snapshots} />);
+    const { rerender } = render(<PaneHost session={s1} store={store} />);
     expect(terminalEvents.constructCount).toBe(1);
     expect(terminalEvents.disposeCount).toBe(0);
 
-    rerender(<PaneHost session={s2} snapshots={snapshots} />);
+    rerender(<PaneHost session={s2} store={store} />);
     expect(terminalEvents.constructCount).toBe(2);
     expect(terminalEvents.disposeCount).toBe(1);
   });
 
   test('no Terminal is created when session is null (empty state)', () => {
-    const snapshots: Record<string, ControlledBuffer> = {};
-    render(<PaneHost session={null} snapshots={snapshots} placeholder="empty" />);
+    const store = createStoreFromSnapshots({});
+    render(<PaneHost session={null} store={store} placeholder="empty" />);
     expect(terminalEvents.constructCount).toBe(0);
     expect(screen.getByText('empty')).toBeTruthy();
   });
@@ -380,7 +380,7 @@ describe('WorkbenchTerminalPane — replay gate', () => {
 
     // 推送一段历史 buffer（首屏 replay）。
     act(() => {
-      advanceRevision('s1', '\x1b[c$ ', 1);
+      advanceRevision('s1', '\x1b[c$ ');
     });
     // 让 xterm write callback 触发的 setTimeout(0) gate release 落地。
     await act(async () => {
@@ -393,46 +393,30 @@ describe('WorkbenchTerminalPane — replay gate', () => {
   });
 
   test('replay gate writes history buffer to xterm via write() then releases gate so subsequent onData forwards', async () => {
-    // Strengthen per Codex finding 4: verify the history buffer IS written to the Terminal during
-    // replay (not just onData registration), and that the gate blocks onData while closed but
-    // releases afterwards.
+    // live writer 在 store.reset 后 clear + replay 新 snapshot。
     const onInput = vi.fn();
     const session = buildSession({ id: 's1' });
-    const snapshots: Record<string, ControlledBuffer> = { s1: { buffer: '', revision: 0 } };
-    const { rerender } = render(
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+    render(
       <PaneHost
         session={session}
-        snapshots={snapshots}
+        store={store}
         inputEnabled={true}
         onInput={onInput}
       />,
     );
 
-    // Push a non-empty history buffer at revision 1; this triggers replay (clear + write).
     act(() => {
-      snapshots.s1 = { buffer: 'hist-data', revision: 1 };
-      rerender(
-        <PaneHost
-          session={session}
-          snapshots={{ ...snapshots }}
-          inputEnabled={true}
-          onInput={onInput}
-        />,
-      );
+      store.reset('s1', 'hist-data');
     });
-    // Allow the setTimeout(0) gate-release callback (scheduled inside writeTerminalReplay) to fire.
     await act(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     });
 
-    // The history buffer MUST have been written through Terminal.write (replay path).
     const written = terminalEvents.writeCalls.map((c) => c.data).join('');
     expect(written).toContain('hist-data');
 
-    // While gate was closed, onData must NOT have forwarded to onInput. After release, a new
-    // onData invocation MUST forward. Grab the latest registered onData callback.
     const dataCb = terminalEvents.dataCallbacks[terminalEvents.dataCallbacks.length - 1]!;
-    // Gate has been released by the setTimeout(0) above; forwarding now works.
     onInput.mockClear();
     act(() => {
       dataCb('ls');
@@ -441,39 +425,22 @@ describe('WorkbenchTerminalPane — replay gate', () => {
   });
 
   test('replay path triggers clear() when buffer cannot be appended (sliding truncation)', async () => {
-    // Cover the clear() branch in the replay path: when the new buffer is NOT a forward
-    // extension of the previously-written buffer (e.g. backend buffer slid), the pane must
-    // clear() before writeTerminalReplay. We trigger this by first writing buffer "first",
-    // then swapping to an unrelated "second" buffer.
+    // generation/reset 变化时 live writer 必须 clear + replay 新 snapshot。
     const session = buildSession({ id: 's1' });
-    const snapshots: Record<string, ControlledBuffer> = {
-      s1: { buffer: 'first', revision: 1 },
-    };
-    const { rerender } = render(
-      <PaneHost session={session} snapshots={snapshots} inputEnabled={true} />,
-    );
+    const store = createStoreFromSnapshots({ s1: { buffer: 'first', revision: 1 } });
+    render(<PaneHost session={session} store={store} inputEnabled={true} />);
     await act(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     });
 
-    // Now swap to a buffer that is NOT a forward extension of 'first' → triggers replay (clear).
     act(() => {
-      rerender(
-        <PaneHost
-          session={session}
-          snapshots={{ s1: { buffer: 'second', revision: 2 } }}
-          inputEnabled={true}
-        />,
-      );
+      store.reset('s1', 'second');
     });
     await act(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     });
 
-    // clear() must have been called at least once across the mount+swap lifecycle (the swap
-    // path is guaranteed to clear since 'second' is not append-able to 'first').
     expect(terminalEvents.clearCalls.length).toBeGreaterThanOrEqual(1);
-    // And the new buffer must have been written via write().
     const written = terminalEvents.writeCalls.map((c) => c.data).join('');
     expect(written).toContain('second');
   });
@@ -483,30 +450,28 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
   test('onData forwards to onInput only when inputEnabled is true', () => {
     const session = buildSession({ id: 's1' });
     const onInput = vi.fn();
-    const snapshots: Record<string, ControlledBuffer> = { s1: { buffer: '', revision: 0 } };
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
 
     const { rerender } = render(
       <PaneHost
         session={session}
-        snapshots={snapshots}
+        store={store}
         inputEnabled={true}
         onInput={onInput}
       />,
     );
 
-    // 拿到最新注册的 onData 回调（inputEnabled=true 时 replayGate 已 release）。
     const dataCb = terminalEvents.dataCallbacks[terminalEvents.dataCallbacks.length - 1]!;
     act(() => {
       dataCb('ls');
     });
     expect(onInput).toHaveBeenCalledWith('s1', 'ls');
 
-    // 切到 inputEnabled=false 后，onData 不应再转发。
     onInput.mockClear();
     rerender(
       <PaneHost
         session={session}
-        snapshots={snapshots}
+        store={store}
         inputEnabled={false}
         onInput={onInput}
       />,
@@ -521,12 +486,12 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
   test('ResizeObserver triggers fit and forwards clamped cols/rows to onResize', () => {
     const session = buildSession({ id: 's1' });
     const onResize = vi.fn();
-    const snapshots: Record<string, ControlledBuffer> = { s1: { buffer: '', revision: 0 } };
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
 
     render(
       <PaneHost
         session={session}
-        snapshots={snapshots}
+        store={store}
         inputEnabled={true}
         onResize={onResize}
       />,
@@ -545,12 +510,12 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
   test('resizeRequestKey increment re-invokes forceResize', () => {
     const session = buildSession({ id: 's1' });
     const onResize = vi.fn();
-    const snapshots: Record<string, ControlledBuffer> = { s1: { buffer: '', revision: 0 } };
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
 
     const { rerender } = render(
       <PaneHost
         session={session}
-        snapshots={snapshots}
+        store={store}
         inputEnabled={true}
         onResize={onResize}
         resizeRequestKey={0}
@@ -562,7 +527,7 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
     rerender(
       <PaneHost
         session={session}
-        snapshots={snapshots}
+        store={store}
         inputEnabled={true}
         onResize={onResize}
         resizeRequestKey={1}
@@ -628,12 +593,12 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
   test('forwards cursor anchor changes via onCursorAnchorChange', () => {
     const session = buildSession({ id: 's1' });
     const onCursorAnchorChange = vi.fn();
-    const snapshots: Record<string, ControlledBuffer> = { s1: { buffer: '', revision: 0 } };
+    const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
 
     const { unmount } = render(
       <PaneHost
         session={session}
-        snapshots={snapshots}
+        store={store}
         inputEnabled={true}
         onCursorAnchorChange={onCursorAnchorChange}
       />,
@@ -653,3 +618,14 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
 /**
  * 占位：保留对未来键盘事件转发测试的扩展点（当前用例不需要 fireEvent）。
  */
+
+describe('WorkbenchTerminalPane — live writer ownership', () => {
+  test('desktop pane uses createTerminalLiveWriter and no planTerminalBufferWrite', () => {
+    const workbenchTerminalPaneSource = readFileSync(
+      resolve(__dirname, './WorkbenchTerminalPane.tsx'),
+      'utf8',
+    );
+    expect(workbenchTerminalPaneSource).not.toContain('planTerminalBufferWrite');
+    expect(workbenchTerminalPaneSource).toContain('createTerminalLiveWriter');
+  });
+});

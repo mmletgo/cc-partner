@@ -118,9 +118,11 @@ export function writeTerminalReplay(
   data: string,
   gate: TerminalReplayGate,
   scheduleRelease: TerminalReplayReleaseScheduler = scheduleTerminalReplayGateRelease,
+  onWriteComplete?: () => void,
 ): void {
   if (data.length === 0) {
     gate.current = false;
+    onWriteComplete?.();
     return;
   }
 
@@ -132,5 +134,6 @@ export function writeTerminalReplay(
       if (gate.releaseId !== releaseId) return;
       gate.current = false;
     });
+    onWriteComplete?.();
   });
 }
