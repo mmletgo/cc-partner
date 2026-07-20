@@ -656,12 +656,19 @@ async fn revalidate_remote_session_live(
     let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
     let inner = remote_inner_session_id(&context.device_id, session_id)
         .unwrap_or_else(|_| session_id.to_string());
-    let sessions = client
-        .list_sessions(&context.base_url, Some(&context.inner_project_id))
-        .await?;
-    Ok(sessions.iter().any(|s| {
-        s.id == inner && s.status.eq_ignore_ascii_case("running")
-    }))
+    // R21 M2：不得把 list 的 status=running 单独当 Live；走 owner replay 的原子
+    // require_live_for_replay（仅 Ready+Live 成功；Provisional/claim → unavailable）。
+    match client.replay(&context.base_url, &inner).await {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            let cat = err.ipc_category_code();
+            if cat == "unavailable" || cat == "not_found" {
+                Ok(false)
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

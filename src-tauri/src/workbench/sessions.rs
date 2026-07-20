@@ -374,6 +374,8 @@ enum SessionProcess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionDurability {
     Provisional,
+    /// Ready 前 deferred flush 进行中：reader 继续缓冲，flush 与 live 共用 generation-scoped seq。
+    Flushing,
     Ready,
 }
 
@@ -401,6 +403,8 @@ enum SideEffectGate {
 struct PublishControl {
     allowed: AtomicBool,
     in_flight: AtomicUsize,
+    /// generation-scoped 输出序号分配器（从 0 起，allocate 后从 1 递增；R21 H1）。
+    next_seq: AtomicU64,
     wait: Mutex<()>,
     cv: Condvar,
 }
@@ -415,9 +419,19 @@ impl PublishControl {
         Arc::new(Self {
             allowed: AtomicBool::new(true),
             in_flight: AtomicUsize::new(0),
+            next_seq: AtomicU64::new(0),
             wait: Mutex::new(()),
             cv: Condvar::new(),
         })
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     deferred flush 与 live reader 必须共享同一 generation 内序号，禁止各自从 0 重开导致前端 dedup 丢字节。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `next_seq` 原子 +1 后返回新序号（首个为 1）。
+    fn allocate_seq(&self) -> u64 {
+        self.next_seq.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -432,25 +446,50 @@ impl PublishControl {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     close 必须等在途 publish 完成后再 kill，避免旧 worker 在 remove 后仍发事件。
+    ///     close 应尽量等在途 publish 完成后再 kill；若仍未 drain 不得把 barrier 当完成，需 tombstone。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     自旋/condvar 等待 `in_flight==0`，最长约 2s 后放弃等待继续 close。
-    fn wait_in_flight_drained(&self) {
+    ///     condvar 等待 `in_flight==0`；约 2s 仅打 warn 并返回是否已 drain（不假装完成）。
+    fn wait_in_flight_drained(&self) -> bool {
         let mut guard = self.wait.lock().expect("publish control wait 锁中毒");
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let soft_deadline = std::time::Instant::now() + Duration::from_secs(2);
         while self.in_flight.load(Ordering::SeqCst) > 0 {
             let now = std::time::Instant::now();
-            if now >= deadline {
-                tracing::warn!("publication lease drain timed out; proceeding with close");
-                break;
+            if now >= soft_deadline {
+                tracing::warn!(
+                    "publication lease drain soft-timeout; retaining generation tombstone until drained"
+                );
+                return false;
             }
-            let wait = deadline.saturating_duration_since(now);
+            let wait = soft_deadline.saturating_duration_since(now);
             let (next, _) = self
                 .cv
                 .wait_timeout(guard, wait)
                 .expect("publish control condvar 中毒");
             guard = next;
+        }
+        true
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     同 session_id 再 insert 前必须确认旧 generation 的 lease 已全部释放，否则旧 flush 会污染新实例。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     阻塞等待 `in_flight==0`（分段 soft warn，永不把未 drain 当成功）。
+    fn wait_in_flight_drained_blocking(&self) {
+        let mut guard = self.wait.lock().expect("publish control wait 锁中毒");
+        loop {
+            if self.in_flight.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            let (next, wait_result) = self
+                .cv
+                .wait_timeout(guard, Duration::from_secs(2))
+                .expect("publish control condvar 中毒");
+            guard = next;
+            if wait_result.timed_out() && self.in_flight.load(Ordering::SeqCst) > 0 {
+                tracing::warn!("waiting for publication lease tombstone drain");
+            }
         }
     }
 }
@@ -1840,6 +1879,14 @@ pub struct WorkbenchSessionRegistry {
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
     /// 下一个可分配的 session generation（从 1 起单调递增）。
     next_generation: Arc<AtomicU64>,
+    /// 已 close 但 lease 未 drain 的 generation tombstone（R21 H2）。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     soft-timeout 后仍不得允许同 session_id 再 insert，直到旧 generation 在途发布结束。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     session_id → 旧 PublishControl；insert 前 blocking drain 并移除。
+    closing_publish: Arc<Mutex<HashMap<String, Arc<PublishControl>>>>,
     /// 正在 restore 的 session_id 占位 map（Finding 5 + R14 M1）。
     ///
     /// Business Logic（为什么需要这个字段）:
@@ -1961,12 +2008,15 @@ impl SessionSpawnGuard {
 impl Drop for SessionSpawnGuard {
     /// Business Logic（为什么需要这个函数）:
     ///     任何未提交路径（含 panic）都必须关闭 attach，防止 ghost child/registry。
+    ///     不得按 session_id 误杀同 id 的后继 generation（R21 M1）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     未 commit 时 best-effort `close(session_id)`（会话已不存在则忽略）。
+    ///     未 commit 时 best-effort `close_if_generation(session_id, generation)`。
     fn drop(&mut self) {
         if !self.committed {
-            let _ = self.registry.close(&self.session_id);
+            let _ = self
+                .registry
+                .close_if_generation(&self.session_id, self.generation);
         }
     }
 }
@@ -2051,13 +2101,14 @@ impl WorkbenchSessionRegistry {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             replay_buffers: Arc::new(Mutex::new(HashMap::new())),
             next_generation: Arc::new(AtomicU64::new(1)),
+            closing_publish: Arc::new(Mutex::new(HashMap::new())),
             restoring: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     前端工作台需要列出全部会话，或只列出某个项目下的会话。
-    ///     R18/R19 M1：claim-held 或 Provisional handle 不得对外暴露为可 replay 会话。
+    ///     R18/R19 M1 / R21：claim-held 或 Provisional/Flushing handle 不得对外暴露为可 replay 会话。
     ///
     /// Code Logic（这个函数做什么）:
     ///     先持 sessions 锁再持 restoring 锁（与 claim 路径同序，避免死锁），
@@ -2135,7 +2186,7 @@ impl WorkbenchSessionRegistry {
                 if handle.durability == SessionDurability::Ready {
                     SessionRuntimePresence::Live
                 } else {
-                    // 无 claim 的 provisional（异常窗口）仍不得当 Live。
+                    // Provisional/Flushing 均不得当 Live（R21 M2）。
                     SessionRuntimePresence::RestoreInProgress
                 }
             }
@@ -2295,6 +2346,40 @@ impl WorkbenchSessionRegistry {
     ///     对 `next_generation` 做 `fetch_add(1, SeqCst)` 并返回旧值。
     fn allocate_generation(&self) -> u64 {
         self.next_generation.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     同 session_id 重建前必须 drain 旧 generation 的 publication tombstone，避免旧 lease 污染。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     取出 closing_publish[session_id] 后 blocking wait in_flight==0。
+    fn wait_for_closing_tombstone(&self, session_id: &str) {
+        let control = {
+            let mut closing = self
+                .closing_publish
+                .lock()
+                .expect("closing_publish 锁中毒");
+            closing.remove(session_id)
+        };
+        if let Some(control) = control {
+            control.wait_in_flight_drained_blocking();
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     close soft-timeout 后仍需阻止同 id reinsert，直到旧 lease 释放。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写入/覆盖 closing_publish 中该 session 的 PublishControl。
+    fn install_closing_tombstone(&self, session_id: &str, publish: Arc<PublishControl>) {
+        if publish.in_flight.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let mut closing = self
+            .closing_publish
+            .lock()
+            .expect("closing_publish 锁中毒");
+        closing.insert(session_id.to_string(), publish);
     }
 
     /// 判断 worker 捕获的 generation 是否仍对应当前 registry 句柄（R18 M2）。
@@ -2630,6 +2715,8 @@ impl WorkbenchSessionRegistry {
             .take_writer()
             .map_err(|error| AppError::generic(format!("创建 PTY writer 失败: {error}")))?;
 
+        // R21 H2：同 id 旧 generation tombstone 未 drain 前禁止 reinsert。
+        self.wait_for_closing_tombstone(&session_id);
         let generation = self.allocate_generation();
         let publish = PublishControl::new();
         let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
@@ -2688,15 +2775,17 @@ impl WorkbenchSessionRegistry {
         let _ = self.mark_session_ready_for_generation(session_id, generation, state);
     }
 
-    /// generation CAS 进入 Ready 并 flush Provisional 缓冲（R20 M1/H1）。
+    /// generation CAS 进入 Ready 并 flush Provisional 缓冲（R20 M1/H1 + R21 H1）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     并发 close 可能移除 handle 或同 id 重建；仅同 generation 才允许 Ready 与对外 running。
+    ///     deferred flush 与 live reader 必须共享 generation-scoped seq，禁止各自从 0 重开。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     锁内：同 gen + Provisional → Ready，取出 deferred_output/mutations/pending_exit；
-    ///     锁外：lease 持有下 emit running + flush 输出/mutation + 可选 exit status。
-    ///     返回是否成功进入 Ready。
+    ///     锁内：同 gen + Provisional → Flushing，取出 deferred；
+    ///     无 state：直接 Ready；有 state：lease 下 emit running + 共享 next_seq flush，
+    ///     再 CAS Flushing→Ready 并二次 flush 期间新缓冲。
+    ///     返回是否成功进入 Ready（或已 Ready 幂等）。
     pub fn mark_session_ready_for_generation(
         &self,
         session_id: &str,
@@ -2719,11 +2808,15 @@ impl WorkbenchSessionRegistry {
                         // 同 generation 已 Ready：幂等成功（测试 fake insert / 重复 commit）。
                         Some(false)
                     } else if handle.durability == SessionDurability::Provisional {
-                        handle.durability = SessionDurability::Ready;
+                        // R21 H1：先进入 Flushing，reader 继续缓冲直到 flush 完成。
+                        handle.durability = SessionDurability::Flushing;
                         deferred_output = std::mem::take(&mut handle.deferred_output);
                         deferred_mutations = std::mem::take(&mut handle.deferred_mutations);
                         pending_exit = handle.pending_exit.take();
                         Some(true)
+                    } else if handle.durability == SessionDurability::Flushing {
+                        // 另一路正在 flush：视为进行中，不二次进入。
+                        Some(false)
                     } else {
                         None
                     }
@@ -2735,46 +2828,199 @@ impl WorkbenchSessionRegistry {
             return false;
         };
         if !just_transitioned {
-            return true;
+            // 已 Ready：幂等成功；Flushing 进行中：本调用不重复 flush，返回 false。
+            return self
+                .session_durability(session_id)
+                .map(|d| d == SessionDurability::Ready)
+                .unwrap_or(false);
+        }
+        // 无 AppState：测试/兼容路径直接 Ready（无对外 flush）。
+        let Some(state) = state else {
+            return self.finish_ready_after_flush(session_id, generation, None, None);
+        };
+        let Some(_lease) = try_acquire_publication_lease(&self.sessions, session_id, generation)
+        else {
+            // lease 失败：回滚 Flushing → Provisional 并归还缓冲，避免永久卡 Flushing。
+            self.rollback_flushing_to_provisional(
+                session_id,
+                generation,
+                deferred_output,
+                deferred_mutations,
+                pending_exit,
+            );
+            return false;
+        };
+        emit_status(state, session_id, "running", None);
+        for chunk in deferred_output {
+            let _ = emit_terminal_output_with_lease(
+                state,
+                session_id,
+                Some(generation),
+                &self.sessions,
+                &mut 0u64, // 未使用：seq 由 publish.next_seq 分配
+                chunk,
+                &self.replay_buffers,
+            );
+        }
+        if !deferred_mutations.is_empty() {
+            forward_agent_osc_mutations(state, session_id, deferred_mutations);
+        }
+        if let Some(exit_code) = pending_exit {
+            if let Ok(handle) = self.get_handle(session_id) {
+                let mut handle = handle.lock().expect("workbench session 锁中毒");
+                if handle.generation == generation
+                    && handle.publish.allowed.load(Ordering::SeqCst)
+                {
+                    handle.row.status = "exited".to_string();
+                    handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
+                    handle.row.exit_code = exit_code;
+                    handle.row.updated_at = chrono::Utc::now().to_rfc3339();
+                }
+            }
+            emit_status(state, session_id, "exited", exit_code);
+        }
+        // Flushing → Ready；flush 期间新缓冲二次 drain（仍共享 next_seq）。
+        self.finish_ready_after_flush(session_id, generation, Some(state), pending_exit)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Flushing 结束必须进入 Ready，并把 flush 窗口内新缓冲在同一 seq 空间发出。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     锁内 Flushing→Ready 并 take 剩余 deferred；锁外可选二次 flush。
+    fn finish_ready_after_flush(
+        &self,
+        session_id: &str,
+        generation: u64,
+        state: Option<&AppState>,
+        _already_emitted_exit: Option<Option<i32>>,
+    ) -> bool {
+        let mut more_output = Vec::new();
+        let mut more_mutations = Vec::new();
+        let mut more_exit: Option<Option<i32>> = None;
+        let ok = {
+            let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+            match sessions.get(session_id) {
+                Some(handle) => {
+                    let mut handle = handle.lock().expect("workbench session 锁中毒");
+                    if handle.generation != generation
+                        || !handle.publish.allowed.load(Ordering::SeqCst)
+                    {
+                        false
+                    } else if handle.durability == SessionDurability::Ready {
+                        true
+                    } else if handle.durability == SessionDurability::Flushing {
+                        handle.durability = SessionDurability::Ready;
+                        more_output = std::mem::take(&mut handle.deferred_output);
+                        more_mutations = std::mem::take(&mut handle.deferred_mutations);
+                        more_exit = handle.pending_exit.take();
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        };
+        if !ok {
+            return false;
         }
         let Some(state) = state else {
             return true;
         };
-        if let Some(_lease) = try_acquire_publication_lease(&self.sessions, session_id, generation) {
-            emit_status(state, session_id, "running", None);
-            let mut seq = 0u64;
-            for chunk in deferred_output {
-                let _ = emit_terminal_output_with_lease(
-                    state,
-                    session_id,
-                    Some(generation),
-                    &self.sessions,
-                    &mut seq,
-                    chunk,
-                    &self.replay_buffers,
-                );
-            }
-            if !deferred_mutations.is_empty() {
-                forward_agent_osc_mutations(state, session_id, deferred_mutations);
-            }
-            if let Some(exit_code) = pending_exit {
-                if let Ok(handle) = self.get_handle(session_id) {
-                    let mut handle = handle.lock().expect("workbench session 锁中毒");
-                    if handle.generation == generation
-                        && handle.publish.allowed.load(Ordering::SeqCst)
-                    {
-                        handle.row.status = "exited".to_string();
-                        handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
-                        handle.row.exit_code = exit_code;
-                        handle.row.updated_at = chrono::Utc::now().to_rfc3339();
-                    }
-                }
-                emit_status(state, session_id, "exited", exit_code);
-            }
-            true
-        } else {
-            false
+        if more_output.is_empty() && more_mutations.is_empty() && more_exit.is_none() {
+            return true;
         }
+        let Some(_lease) = try_acquire_publication_lease(&self.sessions, session_id, generation)
+        else {
+            return true; // 已 Ready；后续 live 路径继续
+        };
+        for chunk in more_output {
+            let _ = emit_terminal_output_with_lease(
+                state,
+                session_id,
+                Some(generation),
+                &self.sessions,
+                &mut 0u64,
+                chunk,
+                &self.replay_buffers,
+            );
+        }
+        if !more_mutations.is_empty() {
+            forward_agent_osc_mutations(state, session_id, more_mutations);
+        }
+        if let Some(exit_code) = more_exit {
+            if let Ok(handle) = self.get_handle(session_id) {
+                let mut handle = handle.lock().expect("workbench session 锁中毒");
+                if handle.generation == generation
+                    && handle.publish.allowed.load(Ordering::SeqCst)
+                {
+                    handle.row.status = "exited".to_string();
+                    handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
+                    handle.row.exit_code = exit_code;
+                    handle.row.updated_at = chrono::Utc::now().to_rfc3339();
+                }
+            }
+            emit_status(state, session_id, "exited", exit_code);
+        }
+        true
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Flushing 若无法拿到 lease，不得永久卡死；回滚为 Provisional 保留缓冲。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     同 gen + Flushing 时写回 deferred 并设 Provisional。
+    fn rollback_flushing_to_provisional(
+        &self,
+        session_id: &str,
+        generation: u64,
+        deferred_output: Vec<String>,
+        deferred_mutations: Vec<AgentRuntimeMutation>,
+        pending_exit: Option<Option<i32>>,
+    ) {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        let Some(handle) = sessions.get(session_id) else {
+            return;
+        };
+        let mut handle = handle.lock().expect("workbench session 锁中毒");
+        if handle.generation != generation
+            || handle.durability != SessionDurability::Flushing
+        {
+            return;
+        }
+        handle.durability = SessionDurability::Provisional;
+        if handle.deferred_output.is_empty() {
+            handle.deferred_output = deferred_output;
+        } else {
+            let mut merged = deferred_output;
+            merged.append(&mut handle.deferred_output);
+            handle.deferred_output = merged;
+        }
+        if handle.deferred_mutations.is_empty() {
+            handle.deferred_mutations = deferred_mutations;
+        } else {
+            let mut merged = deferred_mutations;
+            merged.append(&mut handle.deferred_mutations);
+            handle.deferred_mutations = merged;
+        }
+        if handle.pending_exit.is_none() {
+            handle.pending_exit = pending_exit;
+        }
+    }
+
+    /// 读取当前 durability（内部 CAS/幂等判定用）。
+    fn session_durability(&self, session_id: &str) -> Option<SessionDurability> {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        sessions.get(session_id).map(|h| {
+            h.lock().expect("workbench session 锁中毒").durability
+        })
+    }
+
+    /// 测试：读取当前 durability。
+    #[cfg(test)]
+    fn session_durability_for_test(&self, session_id: &str) -> Option<SessionDurability> {
+        self.session_durability(session_id)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3031,23 +3277,83 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     从 HashMap 删除句柄，尽力 kill 仍在运行的子进程；缺失会话返回错误。
     pub fn close(&self, session_id: &str) -> Result<WorkbenchSessionRow, AppError> {
-        let handle = self
-            .sessions
-            .lock()
-            .expect("workbench sessions 锁中毒")
-            .remove(session_id)
-            .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
-        self.replay_buffers
-            .lock()
-            .expect("workbench replay buffers 锁中毒")
-            .remove(session_id);
-        // R20 H2：先 revoke + 等待在途 lease，再 kill；旧 worker 后续副作用全部 no-op。
+        self.close_inner(session_id, None)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     SessionSpawnGuard 补偿只能回收自己 spawn 的 generation，禁止误杀同 id 后继实例（R21 M1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     仅当 registry 中该 id 的 generation 匹配时 remove + revoke + drain/tombstone + kill。
+    pub fn close_if_generation(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<WorkbenchSessionRow, AppError> {
+        self.close_inner(session_id, Some(generation))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     close / close_if_generation 共享 revoke、lease barrier 与 tombstone 语义。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     generation 约束时 CAS remove；revoke 后 soft-wait；未 drain 则 tombstone；再 kill。
+    fn close_inner(
+        &self,
+        session_id: &str,
+        required_generation: Option<u64>,
+    ) -> Result<WorkbenchSessionRow, AppError> {
+        let handle = {
+            let mut sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+            match required_generation {
+                None => sessions
+                    .remove(session_id)
+                    .ok_or_else(|| AppError::not_found("工作台会话不存在"))?,
+                Some(generation) => {
+                    let Some(current) = sessions.get(session_id) else {
+                        return Err(AppError::not_found("工作台会话不存在"));
+                    };
+                    let current_gen = {
+                        let h = current.lock().expect("workbench session 锁中毒");
+                        h.generation
+                    };
+                    if current_gen != generation {
+                        return Err(AppError::not_found("工作台会话世代已变更"));
+                    }
+                    sessions
+                        .remove(session_id)
+                        .ok_or_else(|| AppError::not_found("工作台会话不存在"))?
+                }
+            }
+        };
+        // 仅当该 generation 仍绑定 replay 时移除（避免误清后继 generation buffer）。
+        if let Some(generation) = required_generation {
+            let mut buffers = self
+                .replay_buffers
+                .lock()
+                .expect("workbench replay buffers 锁中毒");
+            if buffers
+                .get(session_id)
+                .map(|b| b.generation == generation)
+                .unwrap_or(false)
+            {
+                buffers.remove(session_id);
+            }
+        } else {
+            self.replay_buffers
+                .lock()
+                .expect("workbench replay buffers 锁中毒")
+                .remove(session_id);
+        }
+        // R20/R21 H2：revoke + soft wait；未 drain 则 tombstone，禁止同 id 抢跑 reinsert。
         let publish = {
             let handle = handle.lock().expect("workbench session 锁中毒");
             handle.publish.clone()
         };
         publish.revoke();
-        publish.wait_in_flight_drained();
+        if !publish.wait_in_flight_drained() {
+            self.install_closing_tombstone(session_id, publish.clone());
+        }
         let mut handle = handle.lock().expect("workbench session 锁中毒");
         let was_running = handle.row.status == "running";
         match &mut handle.process {
@@ -3171,6 +3477,7 @@ impl WorkbenchSessionRegistry {
     #[cfg(test)]
     pub fn insert_fake_session_row_for_test(&self, row: WorkbenchSessionRow) {
         let session_id = row.id.clone();
+        self.wait_for_closing_tombstone(&session_id);
         let generation = self.allocate_generation();
         self.sessions
             .lock()
@@ -3217,6 +3524,7 @@ impl WorkbenchSessionRegistry {
             created_at: "2026-06-24T00:00:00Z".to_string(),
             updated_at: "2026-06-24T00:00:00Z".to_string(),
         };
+        self.wait_for_closing_tombstone(session_id);
         let generation = self.allocate_generation();
         self.sessions
             .lock()
@@ -3262,6 +3570,31 @@ impl WorkbenchSessionRegistry {
             .lock()
             .expect("workbench replay buffers 锁中毒");
         buffers.get(session_id).map(|b| b.last_seq)
+    }
+
+    /// 测试：通过 generation-scoped PublishControl 分配输出序号（R21 H1）。
+    #[cfg(test)]
+    pub fn allocate_output_seq_for_test(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> Option<u64> {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        let handle = sessions.get(session_id)?;
+        let handle = handle.lock().expect("workbench session 锁中毒");
+        if handle.generation != generation || !handle.publish.allowed.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(handle.publish.allocate_seq())
+    }
+
+    /// 测试：closing tombstone 是否仍在（R21 H2）。
+    #[cfg(test)]
+    pub fn has_closing_tombstone_for_test(&self, session_id: &str) -> bool {
+        self.closing_publish
+            .lock()
+            .expect("closing_publish 锁中毒")
+            .contains_key(session_id)
     }
 
     /// 测试：generation-scoped append。
@@ -3396,8 +3729,14 @@ fn classify_side_effect_gate(
                 SideEffectGate::Rejected
             } else if handle.durability == SessionDurability::Ready {
                 SideEffectGate::Ready
-            } else {
+            } else if matches!(
+                handle.durability,
+                SessionDurability::Provisional | SessionDurability::Flushing
+            ) {
+                // Flushing 期间 live reader 继续缓冲，禁止与 deferred flush 双写同一 seq 空间外路径。
                 SideEffectGate::Provisional
+            } else {
+                SideEffectGate::Rejected
             }
         })
         .unwrap_or(SideEffectGate::Rejected)
@@ -3435,7 +3774,10 @@ fn try_acquire_publication_lease(
     let handle = handle.lock().expect("workbench session 锁中毒");
     if handle.generation != generation
         || !handle.publish.allowed.load(Ordering::SeqCst)
-        || handle.durability != SessionDurability::Ready
+        || !matches!(
+            handle.durability,
+            SessionDurability::Ready | SessionDurability::Flushing
+        )
     {
         return None;
     }
@@ -3475,7 +3817,10 @@ fn buffer_provisional_output(
     let mut handle = handle.lock().expect("workbench session 锁中毒");
     if handle.generation != generation
         || !handle.publish.allowed.load(Ordering::SeqCst)
-        || handle.durability != SessionDurability::Provisional
+        || !matches!(
+            handle.durability,
+            SessionDurability::Provisional | SessionDurability::Flushing
+        )
     {
         return false;
     }
@@ -3511,7 +3856,10 @@ fn buffer_provisional_mutations(
     let mut handle = handle.lock().expect("workbench session 锁中毒");
     if handle.generation != generation
         || !handle.publish.allowed.load(Ordering::SeqCst)
-        || handle.durability != SessionDurability::Provisional
+        || !matches!(
+            handle.durability,
+            SessionDurability::Provisional | SessionDurability::Flushing
+        )
     {
         return false;
     }
@@ -3539,7 +3887,10 @@ fn record_pending_exit(
     let mut handle = handle.lock().expect("workbench session 锁中毒");
     if handle.generation != generation
         || !handle.publish.allowed.load(Ordering::SeqCst)
-        || handle.durability != SessionDurability::Provisional
+        || !matches!(
+            handle.durability,
+            SessionDurability::Provisional | SessionDurability::Flushing
+        )
     {
         return false;
     }
@@ -3854,7 +4205,7 @@ fn emit_terminal_output_with_lease(
     state: &AppState,
     session_id: &str,
     generation: Option<u64>,
-    _sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
     seq: &mut u64,
     chunk: String,
     replay_buffers: &Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
@@ -3862,25 +4213,45 @@ fn emit_terminal_output_with_lease(
     if chunk.is_empty() {
         return true;
     }
-    *seq += 1;
+    // R21 H1：优先用 generation-scoped PublishControl.next_seq，禁止 flush/reader 各自从 0 分配。
+    let allocated = if let Some(generation) = generation {
+        let sessions_guard = sessions.lock().expect("workbench sessions 锁中毒");
+        match sessions_guard.get(session_id) {
+            Some(handle) => {
+                let handle = handle.lock().expect("workbench session 锁中毒");
+                if handle.generation != generation
+                    || !handle.publish.allowed.load(Ordering::SeqCst)
+                {
+                    return false;
+                }
+                let n = handle.publish.allocate_seq();
+                *seq = n;
+                n
+            }
+            None => return false,
+        }
+    } else {
+        *seq += 1;
+        *seq
+    };
     {
         let mut buffers = replay_buffers
             .lock()
             .expect("workbench replay buffers 锁中毒");
         if let Some(buffer) = buffers.get_mut(session_id) {
             if let Some(generation) = generation {
-                if !buffer.append_if_generation(&chunk, *seq, generation) {
+                if !buffer.append_if_generation(&chunk, allocated, generation) {
                     return false;
                 }
             } else {
-                buffer.append(&chunk, *seq);
+                buffer.append(&chunk, allocated);
             }
         }
     }
     let event = WorkbenchTerminalOutputPayload {
         session_id: session_id.to_string(),
         chunk,
-        seq: *seq,
+        seq: allocated,
         ts: now_millis(),
         // 生产端 owner：远端 NDJSON live 消费者可据此合成 composite authority。
         owner_instance_id: Some(state.config_runtime.owner_instance_id().to_string()),
@@ -5867,22 +6238,44 @@ mod tests {
         }
     }
 
-    /// Business Logic（R20 H2: 为什么需要这个测试）:
-    ///     close 必须 revoke 并在 barrier 内等待在途 lease，旧 worker 不得继续 publish。
+    /// Business Logic（R20/R21 H2: 为什么需要这个测试）:
+    ///     close 必须 revoke 并等待在途 lease；soft-timeout 后仍保留 tombstone，
+    ///     同 id reinsert 不得在旧 lease 仍发布时发生。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     Ready gen1 持 lease 期间 close+reinsert gen2；旧 gen lease drop 后不可再 publish。
+    ///     Ready gen1 持 lease → close soft-timeout → tombstone；另一线程 reinsert 阻塞；
+    ///     drop lease 后 reinsert 得到 gen2，旧 gen 零 publish。
     #[test]
     fn publication_lease_barrier_blocks_stale_after_close() {
+        use std::sync::Barrier;
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_fake_session_for_test("s-lease", "p1");
         let gen1 = registry.session_generation_for_test("s-lease").expect("gen1");
         let lease = try_acquire_publication_lease(&registry.sessions, "s-lease", gen1)
             .expect("lease for live gen1");
-        // 模拟 close 期间旧 worker 仍持 lease。
+        // close：soft-timeout 后 tombstone（lease 仍持有）。
         registry.close("s-lease").expect("close");
-        registry.insert_fake_session_for_test("s-lease", "p1");
-        let gen2 = registry.session_generation_for_test("s-lease").expect("gen2");
+        assert!(
+            registry.has_closing_tombstone_for_test("s-lease"),
+            "undrained close must keep generation tombstone"
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let reg_ins = registry.clone();
+        let barrier_ins = barrier.clone();
+        let inserter = thread::spawn(move || {
+            barrier_ins.wait();
+            reg_ins.insert_fake_session_for_test("s-lease", "p1");
+            reg_ins.session_generation_for_test("s-lease")
+        });
+        barrier.wait();
+        // 给 inserter 时间卡在 tombstone wait。
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !registry.contains("s-lease"),
+            "reinsert must not complete while old lease held"
+        );
+        drop(lease);
+        let gen2 = inserter.join().expect("inserter").expect("gen2");
         assert_ne!(gen1, gen2);
         assert!(
             try_acquire_publication_lease(&registry.sessions, "s-lease", gen1).is_none(),
@@ -5892,11 +6285,122 @@ mod tests {
             try_acquire_publication_lease(&registry.sessions, "s-lease", gen2).is_some(),
             "new gen may publish"
         );
-        drop(lease);
         assert!(
             !registry.publish_token_alive_for_test("s-lease", gen1),
             "old token remains revoked"
         );
+        assert!(
+            !registry.has_closing_tombstone_for_test("s-lease"),
+            "tombstone must clear after successful reinsert drain"
+        );
+    }
+
+    /// Business Logic（R21 H1: 为什么需要这个测试）:
+    ///     deferred flush 与 live 输出必须共享 generation-scoped seq，禁止各自从 0 重开导致前端丢字节。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Ready 后连续 allocate_seq 得到 1..=n 严格递增；模拟 flush 后 live 继续。
+    #[test]
+    fn shared_generation_seq_is_monotonic_across_flush_and_live() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_provisional_fake_session_for_test("s-seq", "p1");
+        let gen = registry.session_generation_for_test("s-seq").expect("gen");
+        assert!(buffer_provisional_output(
+            &registry.sessions,
+            "s-seq",
+            gen,
+            "deferred-a".into(),
+        ));
+        assert!(buffer_provisional_output(
+            &registry.sessions,
+            "s-seq",
+            gen,
+            "deferred-b".into(),
+        ));
+        assert!(registry.mark_session_ready_for_generation("s-seq", gen, None));
+        // 模拟 deferred flush 用共享 allocator 写 2 段，再 live 写 2 段。
+        let mut seqs = Vec::new();
+        for text_chunk in ["deferred-a", "deferred-b", "live-c", "live-d"] {
+            let seq = registry
+                .allocate_output_seq_for_test("s-seq", gen)
+                .expect("seq");
+            assert!(
+                registry.append_replay_for_test("s-seq", gen, text_chunk, seq),
+                "append must accept shared seq"
+            );
+            seqs.push(seq);
+        }
+        assert_eq!(seqs, vec![1, 2, 3, 4], "seq must continue across flush/live");
+        assert_eq!(registry.replay_last_seq_for_test("s-seq"), Some(4));
+    }
+
+    /// Business Logic（R21 M1: 为什么需要这个测试）:
+    ///     SessionSpawnGuard Drop 只能回收捕获的 generation，不得 close 同 id 后继。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     gen1 provisional + guard → close gen1 + reinsert gen2 → Drop guard → gen2 仍 Live。
+    #[test]
+    fn spawn_guard_drop_only_closes_captured_generation() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_provisional_fake_session_for_test("s-guard", "p1");
+        let gen1 = registry.session_generation_for_test("s-guard").expect("gen1");
+        let guard = SessionSpawnGuard::new_with_generation(
+            registry.clone(),
+            "s-guard".to_string(),
+            gen1,
+            None,
+        );
+        registry.close("s-guard").expect("close gen1");
+        registry.insert_fake_session_for_test("s-guard", "p1");
+        let gen2 = registry.session_generation_for_test("s-guard").expect("gen2");
+        assert_ne!(gen1, gen2);
+        drop(guard);
+        assert!(
+            registry.contains("s-guard"),
+            "stale guard Drop must not remove successor generation"
+        );
+        assert_eq!(
+            registry.session_generation_for_test("s-guard"),
+            Some(gen2)
+        );
+        assert_eq!(
+            registry.runtime_presence("s-guard"),
+            SessionRuntimePresence::Live
+        );
+    }
+
+    /// Business Logic（R21 M2: 为什么需要这个测试）:
+    ///     create upsert→Ready 窗口的 Provisional 不得进入 list / Live presence。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     provisional running 行不在 list；presence=RestoreInProgress；Ready 后才 Live。
+    #[test]
+    fn provisional_create_window_not_projected_as_live() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_provisional_fake_session_for_test("s-create-win", "p1");
+        assert_eq!(
+            registry.runtime_presence("s-create-win"),
+            SessionRuntimePresence::RestoreInProgress
+        );
+        assert!(
+            registry
+                .list(Some("p1"))
+                .iter()
+                .all(|d| d.id != "s-create-win"),
+            "list must hide Provisional (not only claim-held)"
+        );
+        let gen = registry
+            .session_generation_for_test("s-create-win")
+            .expect("gen");
+        assert!(registry.mark_session_ready_for_generation("s-create-win", gen, None));
+        assert_eq!(
+            registry.runtime_presence("s-create-win"),
+            SessionRuntimePresence::Live
+        );
+        assert!(registry
+            .list(Some("p1"))
+            .iter()
+            .any(|d| d.id == "s-create-win"));
     }
 
     /// Business Logic（R20 M1: 为什么需要这个测试）:
