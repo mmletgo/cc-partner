@@ -318,35 +318,48 @@ export function useWorkbenchTerminalController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   sessions.list 权威刷新成功后，必须解除所有写失败封锁，让用户可再次输入；
-   *   但绝不能自动重放失败批次。
+   *   sessions.list 权威刷新成功后，只应对仍真正可写的 session 解除写失败封锁，让用户可再次输入；
+   *   exited/disconnected 仍在列表中的 session 不得解锁；绝不能自动重放失败批次。
    *
    * Code Logic（这个函数做什么）:
-   *   对当前 blocked ids 调用 pump.recoverSession，再清空 React blocked Set。
+   *   对当前 blocked ids：仅当权威 list 中对应 entry 的 status 严格为 `'running'` 时
+   *   调用 pump.recoverSession 并从 React blocked Set 移除；其余保持 blocked。
+   *   列表中已消失的 id 由 loadSessions 既有 dispose+untrack 处理，本函数不重复 untrack。
    */
-  const recoverAllWriteBlockedSessions = useCallback((): void => {
+  const recoverAllWriteBlockedSessions = useCallback((list: WorkbenchSession[]): void => {
     const blocked = writeBlockedSessionIdsRef.current;
     if (blocked.size === 0) return;
+    const runningIds = new Set(
+      list.filter((session) => session.status === 'running').map((session) => session.id),
+    );
+    const next = new Set(blocked);
+    let changed = false;
     for (const sessionId of blocked) {
+      if (!runningIds.has(sessionId)) continue;
       terminalInputPumpRef.current?.recoverSession(sessionId);
+      next.delete(sessionId);
+      changed = true;
     }
-    const empty = new Set<string>();
-    writeBlockedSessionIdsRef.current = empty;
-    setWriteBlockedSessionIds(empty);
+    if (!changed) return;
+    writeBlockedSessionIdsRef.current = next;
+    setWriteBlockedSessionIds(next);
   }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   瞬时 control/write 故障会把 lane 永久 blocked 且 `inputEnabled=false`；生产路径不会主动
-   *   loadSessions，用户又不会为此切项目，因此 write fail 后必须 kick 一次只读 status check，
-   *   确认 session 仍存在后立即解锁，且绝不能自动重放失败输入批次。
+   *   loadSessions，用户又不会为此切项目，因此 write fail 后必须 kick 一次只读 status check。
+   *   仅当权威 list 显示 session 仍严格 `running` 时才能解锁；exited/disconnected 仍在列表中
+   *   不得解锁，否则用户会对已退出终端误以为可输入。绝不能自动重放失败输入批次。
    *
    * Code Logic（这个函数做什么）:
    *   1. 同一 session 并发 check 合并为 in-flight Promise；
    *   2. 读取 activeProjectId，调用只读 sessions.list（不得 writeInput / 重放）；
-   *   3. stale guard：project 仍 active、session 仍 blocked、list 仍含该 session；
-   *   4. 成功：recoverSession + untrackWriteBlocked；若 blocked 集合空则清 sessionError；
-   *   5. 失败或 session 已消失：保持 blocked + sessionError，等待后续 loadSessions / 手动重试。
+   *   3. stale guard：project 仍 active、session 仍 blocked；
+   *   4. 在 list 中按 id 查找 entry；若找到则把 status/exitCode/exitedAt 同步进 React sessions；
+   *   5. 仅当 found.status === 'running'：recoverSession + untrackWriteBlocked；
+   *      blocked 集合空时清 sessionError；
+   *   6. 未找到或 status !== 'running'：保持 blocked + sessionError，不 recover。
    */
   const checkAndRecoverWriteBlock = useCallback(async (sessionId: string): Promise<void> => {
     const inflight = writeBlockRecoveryInflightRef.current.get(sessionId);
@@ -363,7 +376,31 @@ export function useWorkbenchTerminalController(
         const list = await workbenchApi.sessions.list(projectId);
         if (!isCurrentProjectRef.current(projectId)) return;
         if (!writeBlockedSessionIdsRef.current.has(sessionId)) return;
-        if (!list.some((session) => session.id === sessionId)) return;
+        const found = list.find((session) => session.id === sessionId);
+        if (!found) return;
+        // Business Logic: status check 拿到权威元数据后先同步到 UI，让 exited 等状态立即可见，
+        // 再决定是否 unlock；避免 React sessions 仍显示 running 而输入已错误解锁。
+        setSessions((prev) => {
+          const index = prev.findIndex((session) => session.id === sessionId);
+          if (index < 0) return prev;
+          const current = prev[index];
+          if (
+            current.status === found.status &&
+            current.exitCode === found.exitCode &&
+            current.exitedAt === found.exitedAt
+          ) {
+            return prev;
+          }
+          const next = prev.slice();
+          next[index] = {
+            ...current,
+            status: found.status,
+            exitCode: found.exitCode,
+            exitedAt: found.exitedAt,
+          };
+          return next;
+        });
+        if (found.status !== 'running') return;
         terminalInputPumpRef.current?.recoverSession(sessionId);
         untrackWriteBlocked(sessionId);
         if (writeBlockedSessionIdsRef.current.size === 0) {
@@ -647,9 +684,10 @@ export function useWorkbenchTerminalController(
           }
         }
         knownSessionIdsRef.current = nextIds;
-        // Business Logic: 权威 list 成功后解除写失败封锁；recoverSession 只开新 generation，
+        // Business Logic: 权威 list 成功后仅对 status==='running' 的 blocked session 解锁；
+        // exited/disconnected 仍在列表中保持 blocked；recoverSession 只开新 generation，
         // 绝不自动重放失败批次。sessionError 已在 try 开头清空。
-        recoverAllWriteBlockedSessions();
+        recoverAllWriteBlockedSessions(list);
         setSessions(list);
         updateActiveSession(list);
         void refreshProjectSessionStats(resolvedProjectId);

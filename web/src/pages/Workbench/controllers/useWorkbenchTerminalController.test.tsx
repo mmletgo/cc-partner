@@ -1442,6 +1442,79 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     expect(calls).toEqual(['bad', 'ok']);
   });
 
+  test('write failure stays blocked when status check returns exited session; no unlock or replay', async () => {
+    // M3: exited session 仍在 list 中不得仅因 id 存在就 unlock；也不得重放失败输入。
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const running = buildSession({ id: 's1', worktreeId: worktree.id, status: 'running' });
+    const exited = buildSession({
+      id: 's1',
+      worktreeId: worktree.id,
+      status: 'exited',
+      exitCode: 1,
+      exitedAt: '2026-07-01T00:01:00.000Z',
+    });
+    fakeSessionsApi.list.mockResolvedValue([running]);
+    const calls: string[] = [];
+    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+      calls.push(data);
+      if (data === 'bad') {
+        throw new Error('write failed');
+      }
+      return { ok: true, sessionId: 's1' };
+    });
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    // auto status check 返回 exited：同步 status，保持 blocked，不 recover。
+    fakeSessionsApi.list.mockResolvedValueOnce([exited]);
+    await act(async () => {
+      void result.current.handleInput('s1', 'bad');
+      void result.current.handleInput('s1', 'suffix');
+      await flushMicrotasks(20);
+    });
+
+    expect(calls).toEqual(['bad']);
+    expect(result.current.isWriteBlocked('s1')).toBe(true);
+    expect(result.current.hasWriteBlockedSessions).toBe(true);
+    expect(result.current.sessionError).toContain('write failed');
+    expect(result.current.sessions[0]?.status).toBe('exited');
+    expect(result.current.sessions[0]?.exitCode).toBe(1);
+    expect(result.current.sessions[0]?.exitedAt).toBe('2026-07-01T00:01:00.000Z');
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'more');
+      await flushMicrotasks(6);
+    });
+    expect(calls).toEqual(['bad']);
+
+    // loadSessions 返回仍为 exited 的 list 时也不得 unlock。
+    fakeSessionsApi.list.mockResolvedValueOnce([exited]);
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks(12);
+    });
+    expect(result.current.isWriteBlocked('s1')).toBe(true);
+    expect(calls).toEqual(['bad']);
+  });
+
   test('handleResize clamps cols/rows to min bounds and forwards to API', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();
