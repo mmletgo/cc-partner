@@ -495,32 +495,41 @@ pub(crate) async fn merged_session_dtos(
 ///     应用重启后，进入工作台项目时应自动恢复之前打开的终端 tab 和可重连上下文。
 ///     A8：list/open 路径默认 **skip-missing**——仅 attach 已存在 tmux target；
 ///     缺失 target / raw PTY 不创建 shell（只有用户显式新建终端才 `create_tmux_window`）。
-///     R14 M1：并发 list 遇到 in-progress restore 时 wait/共享完成，不得把恢复中行当 ready。
+///     R14–R16：并发 list 等待 in-flight restore 的**结果**，不得把恢复中行当 ready，
+///     也不得把 holder Failed 当成功合并不可 replay 会话。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取持久化会话；用 `try_claim_restore` 原子占位（Finding 5 + R14 + R15）：
-///     `Claimed` 独占 restore；`AlreadyLive` 跳过；`RestoreInProgress` await watch 完成。
-///     共享 wait 超时返回 retryable `timeout(session_restore_wait_timeout)`，禁止继续 merge 部分清单。
+///     读取持久化会话；用 `try_claim_restore` 原子占位（Finding 5 + R14 + R15 + R16）：
+///     `Claimed` 独占 restore；`AlreadyLive` 跳过；`RestoreInProgress` await watch 结果。
+///     Ready/PersistedDisconnected → continue；Failed → 映射稳定错误返回；
+///     TimedOut → `timeout(session_restore_wait_timeout)`；禁止部分成功清单。
 ///     项目存在时补齐可读 worktree 名再调用 registry.restore（内部 skip-missing），
-///     成功后写回最新 row；失败标 disconnected；无论成功/失败都释放占位；项目缺失则删除孤儿会话。
+///     成功写回最新 row 并 finish Ready；upsert 失败 finish Failed；
+///     restore Err 时尝试持久化 disconnected，成功 finish PersistedDisconnected，
+///     失败 finish Failed；project 查询/删除 `?` 失败由 guard Drop 广播 Failed。
 pub(crate) async fn restore_persisted_sessions(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<(), AppError> {
     use crate::workbench::sessions::{
-        wait_for_shared_restore, RestoreClaimOutcome, SharedRestoreWaitResult,
+        shared_restore_failed_error, wait_for_shared_restore, RestoreClaimOutcome,
+        SharedRestoreNotification, SharedRestoreWaitResult,
     };
 
     state.runtime_role.require_owner()?;
     let rows = state.workbench_session_repo.list(project_id).await?;
     for row in rows {
-        // Finding 5 + R14 M1: 原子占位，区分 AlreadyLive / RestoreInProgress / Claimed。
+        // Finding 5 + R14/R16: 原子占位，区分 AlreadyLive / RestoreInProgress / Claimed。
         match state.workbench_sessions.try_claim_restore(&row.id) {
             RestoreClaimOutcome::AlreadyLive => continue,
             RestoreClaimOutcome::RestoreInProgress(rx) => {
-                // 并发 list：共享 in-flight restore；超时必须 fail closed，禁止部分成功清单。
+                // 并发 list：共享 in-flight restore 结果；Failed/超时 fail closed。
                 match wait_for_shared_restore(rx).await {
-                    SharedRestoreWaitResult::Completed => continue,
+                    SharedRestoreWaitResult::Ready
+                    | SharedRestoreWaitResult::PersistedDisconnected => continue,
+                    SharedRestoreWaitResult::Failed(category) => {
+                        return Err(shared_restore_failed_error(category));
+                    }
                     SharedRestoreWaitResult::TimedOut => {
                         return Err(AppError::timeout(
                             "session_restore_wait_timeout".to_string(),
@@ -530,14 +539,15 @@ pub(crate) async fn restore_persisted_sessions(
             }
             RestoreClaimOutcome::Claimed => {}
         }
-        // RAII：任意 early return / Err 路径 Drop 都会释放 claim 并通知 waiters。
+        // RAII：任意 early return / Err 路径 Drop 都会 finish Failed 并通知 waiters。
         let mut claim_guard = crate::workbench::sessions::RestoreClaimGuard::new(
             (*state.workbench_sessions).clone(),
             row.id.clone(),
         );
         let Some(project) = state.workbench_project_repo.get(&row.project_id).await? else {
             state.workbench_session_repo.delete(&row.id).await?;
-            // claim_guard Drop 释放占位
+            // 孤儿删除成功：无会话可合并；广播 PersistedDisconnected 让 waiter 安全 continue。
+            claim_guard.finish(SharedRestoreNotification::PersistedDisconnected);
             continue;
         };
         let worktree_name =
@@ -555,7 +565,7 @@ pub(crate) async fn restore_persisted_sessions(
             .restore(state.clone(), project, row.clone(), worktree_name)
         {
             Ok(restored) => {
-                // spawn 成功后 upsert 失败也必须回收 attach。
+                // spawn 成功后 upsert 失败也必须回收 attach，并广播 Failed。
                 let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new(
                     (*state.workbench_sessions).clone(),
                     restored.id.clone(),
@@ -563,10 +573,12 @@ pub(crate) async fn restore_persisted_sessions(
                 match state.workbench_session_repo.upsert(&restored).await {
                     Ok(()) => {
                         spawn_guard.commit();
+                        claim_guard.finish(SharedRestoreNotification::Ready);
                     }
                     Err(error) => {
                         tracing::warn!("恢复工作台终端后持久化失败，已回收 attach: {error}");
-                        // spawn_guard Drop → close
+                        // spawn_guard Drop → close；会话不可 replay → Failed。
+                        claim_guard.finish(SharedRestoreNotification::Failed(error.classify()));
                     }
                 }
             }
@@ -576,12 +588,24 @@ pub(crate) async fn restore_persisted_sessions(
                 disconnected.status = "disconnected".to_string();
                 disconnected.exited_at = Some(now_iso());
                 disconnected.updated_at = now_iso();
-                let _ = state.workbench_session_repo.upsert(&disconnected).await;
+                match state.workbench_session_repo.upsert(&disconnected).await {
+                    Ok(()) => {
+                        // skip-missing 已落盘 disconnected：list 可合并该行，不可 live replay。
+                        claim_guard.finish(SharedRestoreNotification::PersistedDisconnected);
+                    }
+                    Err(persist_error) => {
+                        tracing::warn!(
+                            "恢复失败后写入 disconnected 状态失败，会话可能不可 replay: {persist_error}"
+                        );
+                        // 不得吞掉：waiter 若 continue 会合并出 running 持久行但无 registry。
+                        claim_guard.finish(SharedRestoreNotification::Failed(
+                            persist_error.classify(),
+                        ));
+                    }
+                }
             }
         }
-        // 显式 disarm 也可；即使不 disarm，Drop 幂等 release 也安全。
-        claim_guard.disarm();
-        state.workbench_sessions.release_restore_claim(&row.id);
+        // 若上面未显式 finish，Drop 默认 Failed(Internal)。
     }
     Ok(())
 }

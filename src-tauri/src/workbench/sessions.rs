@@ -9,7 +9,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::AppError;
+use crate::error::{AppError, AppErrorCategory};
 use crate::state::AppState;
 use crate::workbench::agent_runtime::{
     try_enqueue_agent_mutation, AgentOscDecoder, AgentRuntimeMutation,
@@ -1472,17 +1472,17 @@ fn decode_utf8_chunk(bytes: &[u8], pending: &mut Vec<u8>) -> String {
 ///     `sessions.replay` → registry 尚未就绪 → 永久 `not_found`，后续静默会话永不补历史。
 ///
 /// Code Logic（这个枚举做什么）:
-///     `Claimed`：本 caller 独占 restore 并必须 release；
+///     `Claimed`：本 caller 独占 restore 并必须 finish；
 ///     `AlreadyLive`：sessions map 已有该 id，无需 restore；
-///     `RestoreInProgress`：另一路持有 claim，附带 watch receiver 供 await/共享完成信号。
+///     `RestoreInProgress`：另一路持有 claim，附带 watch receiver 供 await/共享结果。
 #[derive(Debug)]
 pub enum RestoreClaimOutcome {
     /// 本 caller 独占 restore 责任。
     Claimed,
     /// 会话已在运行期 registry。
     AlreadyLive,
-    /// 另一路正在 restore；receiver 在 release 时收到 true（或 sender drop）。
-    RestoreInProgress(tokio::sync::watch::Receiver<bool>),
+    /// 另一路正在 restore；receiver 在 finish 时收到终态结果（或 sender drop → Failed）。
+    RestoreInProgress(tokio::sync::watch::Receiver<SharedRestoreNotification>),
 }
 
 impl RestoreClaimOutcome {
@@ -1505,22 +1505,108 @@ impl RestoreClaimOutcome {
 ///     `wait_for_shared_restore` 与集成测试共用同一上限，避免字面量漂移。
 pub const SHARED_RESTORE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 共享 restore 等待结果（R15 M2）。
+/// 共享 restore 完成通知（R16 M1）。
 ///
 /// Business Logic（为什么需要这个枚举）:
-///     调用方必须区分「restore 已结束」与「等待超时」。超时后若继续 `merged_session_dtos`
-///     会过滤仍持 claim 的行并返回成功的部分清单，启动 Provider 会把枚举当完成、
-///     永不重试遗漏的静默会话。
+///     并发 list 不能把 claim 释放本身当成成功：holder 在 project 查询/删除 `?`、
+///     或 DB upsert 失败后仍会释放 claim，若只广播「已结束」，waiter 会合并出
+///     registry 中不存在、却仍像 running 的持久行，后续 replay 永久 `not_found`。
 ///
 /// Code Logic（这个枚举做什么）:
-///     `Completed`：watch 收到 true 或 sender drop；
-///     `TimedOut`：超过 `SHARED_RESTORE_WAIT_TIMEOUT` 仍未完成。
+///     `Pending`：claim 仍进行中（watch 初值）；
+///     `Ready`：registry live，可立即 replay；
+///     `PersistedDisconnected`：已 skip-missing 持久化为 disconnected，list 可合并该行；
+///     `Failed(category)`：holder 失败且会话可能仍非可 replay，waiter 必须 fail closed。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedRestoreNotification {
+    /// claim 进行中，尚未给出终态。
+    Pending,
+    /// restore attach 成功且 registry live。
+    Ready,
+    /// 已把会话持久化为 disconnected（可列清单，不可 live replay）。
+    PersistedDisconnected,
+    /// holder 失败；附带稳定 `AppErrorCategory` 供 waiter 映射 retryable 错误。
+    Failed(AppErrorCategory),
+}
+
+impl SharedRestoreNotification {
+    /// Business Logic（为什么需要这个函数）:
+    ///     watch 初值与终态共用同一类型；等待方需判断是否已可退出 wait loop。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `Pending` 为 false，其余终态为 true。
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+}
+
+/// 共享 restore 等待结果（R15 M2 + R16 M1）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     调用方必须区分 Ready / PersistedDisconnected / Failed / TimedOut。
+///     超时或 Failed 后若继续 `merged_session_dtos` 会返回成功但含不可 replay 会话，
+///     启动 Provider 会把清单当完成、永不重试遗漏或坏状态的静默会话。
+///
+/// Code Logic（这个枚举做什么）:
+///     映射自 `SharedRestoreNotification` 终态，或等待超时得到 `TimedOut`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharedRestoreWaitResult {
-    /// in-flight restore 已结束（成功或失败释放 claim）。
-    Completed,
-    /// 等待超时，调用方应返回 retryable timeout/unavailable。
+    /// registry live，可立即 replay。
+    Ready,
+    /// 已持久化为 disconnected，list 可安全合并该行。
+    PersistedDisconnected,
+    /// holder 失败；会话可能仍非可 replay。
+    Failed(AppErrorCategory),
+    /// 等待超时，调用方应返回 retryable timeout。
     TimedOut,
+}
+
+impl SharedRestoreWaitResult {
+    /// Business Logic（为什么需要这个函数）:
+    ///     list 路径只需知道「能否 continue 合并」与「如何构造错误」。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Ready/PersistedDisconnected → true；Failed/TimedOut → false。
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Ready | Self::PersistedDisconnected)
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     共享 restore Failed 时，waiter 必须返回与 holder 同类目的稳定错误，而不是 continue。
+///
+/// Code Logic（这个函数做什么）:
+///     按 `AppErrorCategory` 构造对应 AppError，消息固定为 `session_restore_shared_failed`。
+pub fn shared_restore_failed_error(category: AppErrorCategory) -> AppError {
+    let msg = "session_restore_shared_failed".to_string();
+    match category {
+        AppErrorCategory::Validation => AppError::validation(msg),
+        AppErrorCategory::NotFound => AppError::not_found(msg),
+        AppErrorCategory::Conflict => AppError::conflict(msg),
+        AppErrorCategory::Unavailable => AppError::unavailable(msg),
+        AppErrorCategory::Timeout => AppError::timeout(msg),
+        AppErrorCategory::Internal => AppError::generic(msg),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     watch 终态通知与 wait 结果枚举需要一一映射，避免 list 路径重复 match 漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     Pending → None；其余 → 对应 SharedRestoreWaitResult。
+fn wait_result_from_notification(
+    note: SharedRestoreNotification,
+) -> Option<SharedRestoreWaitResult> {
+    match note {
+        SharedRestoreNotification::Pending => None,
+        SharedRestoreNotification::Ready => Some(SharedRestoreWaitResult::Ready),
+        SharedRestoreNotification::PersistedDisconnected => {
+            Some(SharedRestoreWaitResult::PersistedDisconnected)
+        }
+        SharedRestoreNotification::Failed(category) => {
+            Some(SharedRestoreWaitResult::Failed(category))
+        }
+    }
 }
 
 /// 运行期 session 可见性的原子判定结果（R15 M1）。
@@ -1543,36 +1629,42 @@ pub enum SessionRuntimePresence {
     Missing,
 }
 
-/// 等待共享 restore 完成（R14 M1 + R15 M2）。
+/// 等待共享 restore 完成（R14 M1 + R15 M2 + R16 M1）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     并发 list 拿到 `RestoreInProgress` 后应等待 in-flight restore 结束再合并 DTO，
-///     避免把恢复中的持久行当作可立即 replay 的会话返回。超时必须显式上报，
-///     禁止调用方在超时后继续返回成功的部分清单。
+///     并发 list 拿到 `RestoreInProgress` 后应等待 in-flight restore 的**结果**再合并 DTO。
+///     仅「claim 已释放」不够：Failed 时若 continue 会把不可 replay 的持久行返回成功。
+///     超时必须显式上报 TimedOut，禁止部分成功清单。
 ///
 /// Code Logic（这个函数做什么）:
-///     若 receiver 已为 true 立即 `Completed`；否则 `changed()` 直到 true 或 sender drop；
-///     超过 `SHARED_RESTORE_WAIT_TIMEOUT` 返回 `TimedOut`。
+///     若 receiver 已是终态立即映射；否则 `changed()` 直到终态；
+///     sender drop 且仍 Pending → `Failed(Internal)`；
+///     超过 `SHARED_RESTORE_WAIT_TIMEOUT` → `TimedOut`。
 pub async fn wait_for_shared_restore(
-    mut rx: tokio::sync::watch::Receiver<bool>,
+    mut rx: tokio::sync::watch::Receiver<SharedRestoreNotification>,
 ) -> SharedRestoreWaitResult {
-    if *rx.borrow_and_update() {
-        return SharedRestoreWaitResult::Completed;
+    if let Some(result) = wait_result_from_notification(*rx.borrow_and_update()) {
+        return result;
     }
     let wait = async {
         loop {
             match rx.changed().await {
                 Ok(()) => {
-                    if *rx.borrow_and_update() {
-                        break;
+                    if let Some(result) = wait_result_from_notification(*rx.borrow_and_update()) {
+                        return result;
                     }
                 }
-                Err(_) => break,
+                Err(_) => {
+                    // sender drop：无显式终态 → 视为 Failed，禁止当作 Ready。
+                    return wait_result_from_notification(*rx.borrow_and_update()).unwrap_or(
+                        SharedRestoreWaitResult::Failed(AppErrorCategory::Internal),
+                    );
+                }
             }
         }
     };
     match tokio::time::timeout(SHARED_RESTORE_WAIT_TIMEOUT, wait).await {
-        Ok(()) => SharedRestoreWaitResult::Completed,
+        Ok(result) => result,
         Err(_) => SharedRestoreWaitResult::TimedOut,
     }
 }
@@ -1595,9 +1687,10 @@ pub struct WorkbenchSessionRegistry {
     ///     `restore_persisted_sessions` 先 claim 再异步 `resolve_worktree` 后 `restore()`，
     ///     两个并发的 sessions/list 请求都能通过 contains() 检查并各自 spawn 一次 PTY/tmux 窗口。
     ///     占位 map 让"检查 + 占位"原子完成：第一个 caller 拿到 claim 并持有 watch sender，
-    ///     第二个得到 `RestoreInProgress` 并可 wait。restore 完成后 release 通知 waiters
-    ///     （成功路径 spawn_row 已写入 sessions；失败路径释放后允许后续重试）。
-    restoring: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+    ///     第二个得到 `RestoreInProgress` 并可 wait。restore 完成后 finish 携带
+    ///     Ready / PersistedDisconnected / Failed 通知 waiters（禁止仅「ended」）。
+    restoring:
+        Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<SharedRestoreNotification>>>>,
 }
 
 /// Session 创建后的 RAII 补偿守卫：repo 持久化失败时自动关闭 attach，禁止 ghost registry/child。
@@ -1651,13 +1744,14 @@ impl Drop for SessionSpawnGuard {
     }
 }
 
-/// restore claim 的 RAII 守卫：任何 early return 都释放占位，避免永久跳过恢复。
+/// restore claim 的 RAII 守卫：任何 early return 都 finish 为 Failed，避免永久跳过恢复。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     `try_claim_restore` 成功后若中途失败却未释放 claim，后续 list 永远不会再恢复该 session。
+///     `try_claim_restore` 成功后若中途失败却未 finish claim，后续 list 永远不会再恢复该 session；
+///     且必须广播 Failed 而非「ended」，否则 waiter 会误判成功。
 ///
 /// Code Logic（这个结构体做什么）:
-///     Drop 时若未 `disarm`/`commit` 则调用 `release_restore_claim`。
+///     Drop 时若未 `disarm` 则 `finish_restore_claim(Failed(Internal))`。
 pub struct RestoreClaimGuard {
     registry: WorkbenchSessionRegistry,
     session_id: String,
@@ -1666,7 +1760,7 @@ pub struct RestoreClaimGuard {
 
 impl RestoreClaimGuard {
     /// Business Logic（为什么需要这个函数）:
-    ///     claim 成功后立刻接管释放责任。
+    ///     claim 成功后立刻接管 finish 责任。
     ///
     /// Code Logic（这个函数做什么）:
     ///     记录 registry/session_id，armed=true。
@@ -1679,24 +1773,41 @@ impl RestoreClaimGuard {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     调用方已显式 release 时禁止 Drop 二次释放（幂等但仍避免重复日志路径）。
+    ///     调用方已显式 finish 时禁止 Drop 二次广播。
     ///
     /// Code Logic（这个函数做什么）:
     ///     armed=false。
     pub fn disarm(&mut self) {
         self.armed = false;
     }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     holder 正常路径应显式广播 Ready / PersistedDisconnected / Failed，
+    ///     再 disarm，避免 Drop 默认 Failed(Internal) 覆盖真实结果。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `finish_restore_claim` + `disarm`。
+    pub fn finish(&mut self, result: SharedRestoreNotification) {
+        if self.armed {
+            self.registry
+                .finish_restore_claim(&self.session_id, result);
+            self.armed = false;
+        }
+    }
 }
 
 impl Drop for RestoreClaimGuard {
     /// Business Logic（为什么需要这个函数）:
-    ///     restore 任意失败出口都必须释放 claim。
+    ///     restore 任意失败出口都必须 finish claim 并通知 waiters Failed。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     armed 时调用 `release_restore_claim`。
+    ///     armed 时 `finish_restore_claim(Failed(Internal))`。
     fn drop(&mut self) {
         if self.armed {
-            self.registry.release_restore_claim(&self.session_id);
+            self.registry.finish_restore_claim(
+                &self.session_id,
+                SharedRestoreNotification::Failed(AppErrorCategory::Internal),
+            );
         }
     }
 }
@@ -1819,7 +1930,7 @@ impl WorkbenchSessionRegistry {
     ///     3. 若 restoring map 已有该 session_id → `RestoreInProgress(subscribe)`；
     ///     4. 否则写入 watch sender 并返回 `Claimed`（caller 独占 restore 责任）。
     ///
-    /// `Claimed` 时 caller 必须 restore 并在完成后调用 `release_restore_claim`
+    /// `Claimed` 时 caller 必须 restore 并在完成后调用 `finish_restore_claim`
     ///（或持有 `RestoreClaimGuard` 直至结束）。
     pub fn try_claim_restore(&self, session_id: &str) -> RestoreClaimOutcome {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
@@ -1830,26 +1941,46 @@ impl WorkbenchSessionRegistry {
         if let Some(tx) = restoring.get(session_id) {
             return RestoreClaimOutcome::RestoreInProgress(tx.subscribe());
         }
-        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let (tx, _rx) =
+            tokio::sync::watch::channel(SharedRestoreNotification::Pending);
         restoring.insert(session_id.to_string(), tx);
         RestoreClaimOutcome::Claimed
     }
 
-    /// 释放 restore 占位（Finding 5 + R14 M1）。
+    /// 结束 restore 占位并广播显式结果（Finding 5 + R14/R15 + R16 M1）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     restore 完成（成功或失败）后必须释放占位，否则后续 sessions/list 永远跳过该 session。
-    ///     成功路径：spawn_row 已把 session 写入 sessions map，contains 自然命中；
-    ///     失败路径：释放占位允许后续请求重试 restore。
-    ///     并发 waiter 通过 watch 收到完成信号后才能安全返回 list / 发起 replay。
+    ///     restore 完成（Ready / PersistedDisconnected / Failed）后必须释放占位并携带结果。
+    ///     仅「ended」会导致 waiter 把 holder 失败当成成功合并不可 replay 会话。
+    ///     失败路径释放后允许后续请求重试 restore。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     从 restoring map 移除 sender 并 `send(true)` 通知所有 subscriber；幂等 no-op。
-    pub fn release_restore_claim(&self, session_id: &str) {
+    ///     从 restoring map 移除 sender 并 `send(result)`（若 result 为 Pending 则升为 Failed(Internal)）；
+    ///     幂等 no-op。
+    pub fn finish_restore_claim(&self, session_id: &str, result: SharedRestoreNotification) {
+        let note = if result.is_terminal() {
+            result
+        } else {
+            SharedRestoreNotification::Failed(AppErrorCategory::Internal)
+        };
         let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
         if let Some(tx) = restoring.remove(session_id) {
-            let _ = tx.send(true);
+            let _ = tx.send(note);
         }
+    }
+
+    /// 兼容旧 release API：默认广播 Failed(Internal)。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     既有测试/路径在「只释放占位」语义下调用；R16 后无结果的 release 不得伪装 Ready。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `finish_restore_claim(Failed(Internal))`。
+    pub fn release_restore_claim(&self, session_id: &str) {
+        self.finish_restore_claim(
+            session_id,
+            SharedRestoreNotification::Failed(AppErrorCategory::Internal),
+        );
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -4035,12 +4166,12 @@ mod tests {
         registry.release_restore_claim("s1");
     }
 
-    /// Business Logic（R14 M1: 为什么需要这个测试）:
-    ///     并发 list 拿到 RestoreInProgress 后必须能 wait 到 holder release，否则仍会
-    ///     过早返回持久行并触发永久 not_found。
+    /// Business Logic（R14/R16: 为什么需要这个测试）:
+    ///     并发 list 拿到 RestoreInProgress 后必须能 wait 到 holder 的**结果**，
+    ///     否则会过早返回持久行并触发永久 not_found。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     holder claim → waiter 订阅 → spawn wait_for_shared_restore → release → wait Completed。
+    ///     holder claim → waiter 订阅 → finish Ready → wait Ready。
     #[tokio::test]
     async fn wait_for_shared_restore_unblocks_after_release() {
         let registry = WorkbenchSessionRegistry::new();
@@ -4052,12 +4183,68 @@ mod tests {
         let wait_handle = tokio::spawn(async move { wait_for_shared_restore(rx).await });
         // 给 waiter 一点时间进入 changed loop。
         tokio::task::yield_now().await;
-        registry.release_restore_claim("s-wait");
+        registry.finish_restore_claim("s-wait", SharedRestoreNotification::Ready);
         let result = wait_handle
             .await
-            .expect("waiter task must join after release");
-        assert_eq!(result, SharedRestoreWaitResult::Completed);
+            .expect("waiter task must join after finish");
+        assert_eq!(result, SharedRestoreWaitResult::Ready);
         assert!(!registry.is_restore_claim_held("s-wait"));
+    }
+
+    /// Business Logic（R16 M1: 为什么需要这个测试）:
+    ///     holder 失败时必须广播 Failed；waiter 不得把 claim 释放当成功。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim + 订阅 → finish Failed(Unavailable) → wait Failed，且 is_success=false。
+    #[tokio::test]
+    async fn wait_for_shared_restore_surfaces_holder_failure() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-fail").is_claimed());
+        let second = registry.try_claim_restore("s-fail");
+        let RestoreClaimOutcome::RestoreInProgress(rx) = second else {
+            panic!("second claim must be RestoreInProgress");
+        };
+        let wait_handle = tokio::spawn(async move { wait_for_shared_restore(rx).await });
+        tokio::task::yield_now().await;
+        registry.finish_restore_claim(
+            "s-fail",
+            SharedRestoreNotification::Failed(AppErrorCategory::Unavailable),
+        );
+        let result = wait_handle.await.expect("failed waiter must join");
+        assert_eq!(
+            result,
+            SharedRestoreWaitResult::Failed(AppErrorCategory::Unavailable)
+        );
+        assert!(!result.is_success());
+        assert!(!registry.is_restore_claim_held("s-fail"));
+        // 失败后允许重新 claim 重试 restore。
+        assert!(registry.try_claim_restore("s-fail").is_claimed());
+        registry.finish_restore_claim(
+            "s-fail",
+            SharedRestoreNotification::PersistedDisconnected,
+        );
+    }
+
+    /// Business Logic（R16 M1: 为什么需要这个测试）:
+    ///     无显式结果的 release 不得伪装 Ready；默认 Failed(Internal)。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim + 订阅 → release_restore_claim → wait Failed(Internal)。
+    #[tokio::test]
+    async fn release_without_result_is_failed_not_ready() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-bare-release").is_claimed());
+        let second = registry.try_claim_restore("s-bare-release");
+        let RestoreClaimOutcome::RestoreInProgress(rx) = second else {
+            panic!("second claim must be RestoreInProgress");
+        };
+        let wait_handle = tokio::spawn(async move { wait_for_shared_restore(rx).await });
+        tokio::task::yield_now().await;
+        registry.release_restore_claim("s-bare-release");
+        assert_eq!(
+            wait_handle.await.expect("join"),
+            SharedRestoreWaitResult::Failed(AppErrorCategory::Internal)
+        );
     }
 
     /// Business Logic（R14 M1: 为什么需要这个测试）:
@@ -4066,7 +4253,7 @@ mod tests {
     ///     否则 Provider 立刻 replay → permanent not_found。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     holder claim 后延迟插入 live + release；waiter RestoreInProgress → wait；
+    ///     holder claim 后延迟插入 live + finish Ready；waiter RestoreInProgress → wait；
     ///     wait 期间 is_restore_claim_held && !contains（不可 list/replay）；
     ///     wait 结束后 session live 且 claim 已释放。
     #[tokio::test]
@@ -4100,7 +4287,6 @@ mod tests {
         let reg_waiter = registry.clone();
         let waiter = tokio::spawn(async move {
             let wait = wait_for_shared_restore(rx).await;
-            // wait 结束后要么 live 要么 claim 已释放（失败路径也可重试）。
             (
                 wait,
                 reg_waiter.contains("s-concurrent")
@@ -4115,13 +4301,13 @@ mod tests {
             "delayed restore must still hold claim while waiter waits"
         );
         registry.insert_fake_session_for_test("s-concurrent", "p1");
-        registry.release_restore_claim("s-concurrent");
+        registry.finish_restore_claim("s-concurrent", SharedRestoreNotification::Ready);
 
         let (wait_result, ready) = waiter.await.expect("waiter join");
-        assert_eq!(wait_result, SharedRestoreWaitResult::Completed);
+        assert_eq!(wait_result, SharedRestoreWaitResult::Ready);
         assert!(
             ready,
-            "after shared restore, session must be ready or claim released"
+            "after shared restore Ready, session must be ready or claim released"
         );
         assert!(registry.session_exists("s-concurrent"));
         assert!(!registry.is_restore_claim_held("s-concurrent"));
@@ -4194,7 +4380,7 @@ mod tests {
     ///
     /// Code Logic（这个测试做什么）:
     ///     pause 时间 → claim + 订阅 wait → advance 超过 SHARED_RESTORE_WAIT_TIMEOUT
-    ///     → 结果 TimedOut；release 后新 wait 在已完成通道上 Completed。
+    ///     → 结果 TimedOut；finish Ready 后新 wait 在已完成通道上 Ready。
     #[tokio::test]
     async fn wait_for_shared_restore_times_out_and_reports_timed_out() {
         tokio::time::pause();
@@ -4222,28 +4408,28 @@ mod tests {
             SessionRuntimePresence::RestoreInProgress
         );
 
-        // release 后后续 wait 应 Completed（已完成信号）。
-        registry.release_restore_claim("s-timeout");
+        // finish 后后续 wait 应 Ready。
+        registry.finish_restore_claim("s-timeout", SharedRestoreNotification::Ready);
         let third = registry.try_claim_restore("s-timeout");
         assert!(third.is_claimed());
         let fourth = registry.try_claim_restore("s-timeout");
         let RestoreClaimOutcome::RestoreInProgress(rx2) = fourth else {
             panic!("fourth claim must be RestoreInProgress");
         };
-        registry.release_restore_claim("s-timeout");
+        registry.finish_restore_claim("s-timeout", SharedRestoreNotification::Ready);
         assert_eq!(
             wait_for_shared_restore(rx2).await,
-            SharedRestoreWaitResult::Completed
+            SharedRestoreWaitResult::Ready
         );
     }
 
-    /// Business Logic（R15 M1/M2: 为什么需要这个测试）:
+    /// Business Logic（R15 M1/M2 + R16: 为什么需要这个测试）:
     ///     并发 restore/replay 窗口：claim held + 未 live 时 require_live 必须 unavailable；
     ///     wait 超时后仍不可伪装成功 list；holder 完成后可 replay。
     ///
     /// Code Logic（这个测试做什么）:
     ///     holder claim → concurrent presence/replay 守卫 → pause 超时 TimedOut →
-    ///     holder insert+release → presence Live → require_live Ok。
+    ///     holder insert+finish Ready → presence Live → require_live Ok。
     #[tokio::test]
     async fn concurrent_restore_replay_presence_and_wait_timeout_reenumerate() {
         tokio::time::pause();
@@ -4277,7 +4463,7 @@ mod tests {
 
         // holder 最终完成 → 可 re-enumerate / replay。
         registry.insert_fake_session_for_test("s-route", "p1");
-        registry.release_restore_claim("s-route");
+        registry.finish_restore_claim("s-route", SharedRestoreNotification::Ready);
         assert_eq!(
             registry.runtime_presence("s-route"),
             SessionRuntimePresence::Live
@@ -4286,5 +4472,55 @@ mod tests {
         let replay = registry.replay("s-route");
         assert_eq!(replay.session_id, "s-route");
         // 不校验 buffer 正文内容，避免敏感/噪声断言。
+    }
+
+    /// Business Logic（R16 M1: 为什么需要这个测试）:
+    ///     并发 list 模拟：holder 注入 Failed 后，waiter 必须得到 Failed，
+    ///     不得 continue 成含不可 replay 会话的成功清单。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     holder claim 后不 insert live，finish Failed；waiter wait → Failed 且
+    ///     registry 仍 missing、require_live not_found。
+    #[tokio::test]
+    async fn concurrent_list_waiter_must_fail_when_holder_fails_without_live_session() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-non-replayable").is_claimed());
+
+        let second = registry.try_claim_restore("s-non-replayable");
+        let RestoreClaimOutcome::RestoreInProgress(rx) = second else {
+            panic!("second claim must be RestoreInProgress");
+        };
+
+        let reg_waiter = registry.clone();
+        let waiter = tokio::spawn(async move {
+            let wait = wait_for_shared_restore(rx).await;
+            let presence = reg_waiter.runtime_presence("s-non-replayable");
+            let replay_err = reg_waiter.require_live_for_replay("s-non-replayable");
+            (wait, presence, replay_err.map_err(|e| e.ipc_category_code().to_string()))
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // 模拟 project 查询/删除 `?` 或 upsert 失败后 finish Failed，且未 live。
+        registry.finish_restore_claim(
+            "s-non-replayable",
+            SharedRestoreNotification::Failed(AppErrorCategory::Internal),
+        );
+
+        let (wait, presence, replay_err) = waiter.await.expect("waiter join");
+        assert_eq!(
+            wait,
+            SharedRestoreWaitResult::Failed(AppErrorCategory::Internal),
+            "waiter must not treat holder failure as Ready/PersistedDisconnected"
+        );
+        assert!(!wait.is_success());
+        assert_eq!(presence, SessionRuntimePresence::Missing);
+        assert_eq!(
+            replay_err.expect_err("must not be replayable"),
+            "not_found"
+        );
+        // list 路径应用 shared_restore_failed_error 返回错误，而不是成功合并。
+        let list_err = shared_restore_failed_error(AppErrorCategory::Internal);
+        assert_eq!(list_err.ipc_category_code(), "internal");
+        assert_eq!(list_err.to_string(), "session_restore_shared_failed");
     }
 }

@@ -670,10 +670,8 @@ pub async fn safe_attach_workbench_session(
         )?;
     }
 
-    guard.disarm();
-    ctx.state
-        .workbench_sessions
-        .release_restore_claim(session_id);
+    // R16：显式广播 Ready，禁止仅 release 让 waiter 误判。
+    guard.finish(crate::workbench::sessions::SharedRestoreNotification::Ready);
 
     Ok(SafeAttachResult {
         session_id: session_id.to_string(),
