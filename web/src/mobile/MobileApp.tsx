@@ -106,6 +106,46 @@ export function MobileApp(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   满足 Context startup baseline failure 合同；移动端恒 null（R13 M1）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   恒返回 null。
+   */
+  const getStartupBaselineFailure = useCallback(() => null, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   满足 Context 可订阅合同；移动端 no-op。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回空 unsubscribe。
+   */
+  const subscribeStartupBaselineFailure = useCallback((_listener: () => void) => {
+    return () => undefined;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   满足 Context revision 合同；移动端恒 0。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回 0。
+   */
+  const getStartupBaselineFailureRevision = useCallback(() => 0, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   满足 Context retry 合同；移动端 no-op。
+   *
+   * Code Logic（这个函数做什么）:
+   *   空实现。
+   */
+  const retryStartupBaseline = useCallback(() => {
+    // mobile 无桌面 startup list recovery。
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   AttentionProvider 需要稳定的 loadSnapshot 引用，避免不必要的 effect 重跑。
    *
    * Code Logic（这个函数做什么）:
@@ -125,15 +165,23 @@ export function MobileApp(): ReactElement {
       subscribeHistorySyncFailures,
       getHistorySyncFailuresRevision,
       retryHistorySync,
+      getStartupBaselineFailure,
+      subscribeStartupBaselineFailure,
+      getStartupBaselineFailureRevision,
+      retryStartupBaseline,
     }),
     [
       getHistorySyncFailure,
       getHistorySyncFailuresRevision,
+      getStartupBaselineFailure,
+      getStartupBaselineFailureRevision,
       removeBuffer,
       resetBuffer,
       retryHistorySync,
+      retryStartupBaseline,
       store,
       subscribeHistorySyncFailures,
+      subscribeStartupBaselineFailure,
     ],
   );
 

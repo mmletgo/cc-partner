@@ -803,10 +803,23 @@ describe('session cutover epoch / committed baseline', () => {
     expect(switched!.state.committedBaselineLastSeq).toBe(0);
     expect(switched!.state.overflowHighWaterSeq).toBe(0);
     expect(switched!.state.needsReplay).toBe(true);
+    // R13 H1：authority 切换同样保留 inFlight（无在途时为 false）。
     expect(switched!.state.replayInFlight).toBe(false);
     expect(switched!.state.cutoverEpoch).toBe(state.cutoverEpoch + 1);
     // 切换后必须 held 新 authority live，直到匹配 epoch 的 replay 成功。
     expect(shouldCollectHeldLiveTerminalEvent(switched!.state, true)).toBe(true);
+
+    const inFlightSwitch = beginAuthorityChangeReplay(
+      {
+        ...state,
+        authorityId: 'owner-a',
+        replayInFlight: true,
+      },
+      'owner-c',
+    );
+    expect(inFlightSwitch).not.toBeNull();
+    expect(inFlightSwitch!.state.replayInFlight).toBe(true);
+    expect(inFlightSwitch!.state.needsReplay).toBe(true);
   });
 
   test('terminalReplayRecoveryDelayMs caps backoff and shouldTrigger respects cooldown', () => {
@@ -885,7 +898,8 @@ describe('session cutover epoch / committed baseline', () => {
     expect(stopped.replayInFlight).toBe(false);
     expect(stopped.cutoverEpoch).toBe(2);
 
-    // beginStartupBaselineReplay：抬 epoch + needsReplay，不重置 authority/seq
+    // beginStartupBaselineReplay：抬 epoch + needsReplay，不重置 authority/seq；
+    // R13 H1：保留既有 replayInFlight，禁止 list 路径清门闩制造并发 cutover。
     const base = {
       ...createEmptySessionCutoverState(),
       authorityId: 'auth-A',
@@ -899,10 +913,16 @@ describe('session cutover epoch / committed baseline', () => {
     expect(started.requestEpoch).toBe(5);
     expect(started.state.cutoverEpoch).toBe(5);
     expect(started.state.needsReplay).toBe(true);
-    expect(started.state.replayInFlight).toBe(false);
+    expect(started.state.replayInFlight).toBe(true);
     expect(started.state.authorityId).toBe('auth-A');
     expect(started.state.committedBaselineLastSeq).toBe(9);
     expect(started.state.overflowHighWaterSeq).toBe(3);
+
+    const idle = beginStartupBaselineReplay({
+      ...base,
+      replayInFlight: false,
+    });
+    expect(idle.state.replayInFlight).toBe(false);
   });
 
   test('owner authority change accepts lower lastSeq and resets store baseline', () => {

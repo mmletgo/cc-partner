@@ -83,6 +83,10 @@ vi.mock('@/hooks/workbenchTerminalBuffersContext', () => ({
     subscribeHistorySyncFailures: () => () => undefined,
     getHistorySyncFailuresRevision: () => 0,
     retryHistorySync: () => undefined,
+    getStartupBaselineFailure: () => null,
+    subscribeStartupBaselineFailure: () => () => undefined,
+    getStartupBaselineFailureRevision: () => 0,
+    retryStartupBaseline: () => undefined,
   }),
 }));
 

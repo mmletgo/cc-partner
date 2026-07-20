@@ -4,9 +4,11 @@
  * Business Logic（为什么需要这个模块）:
  *   Workbench 页面切换到其他路由后会卸载，但 PTY/tmux 仍在运行；终端输出缓存必须跨路由保留。
  *   R12 M3：historySyncFailure 必须可订阅，Workbench UI 才能在终端产品路径展示永久失败。
+ *   R13 M1：启动 sessions.list 永久失败也必须可观察，并可手动重试枚举。
  *
  * Code Logic（这个模块做什么）:
- *   定义 Context value、创建 React Context，并提供 store / snapshot / historySyncFailure 读取 hook。
+ *   定义 Context value、创建 React Context，并提供 store / snapshot / historySyncFailure /
+ *   startupBaselineFailure 读取 hook。
  */
 
 import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from 'react';
@@ -15,6 +17,19 @@ import type {
   TerminalHistorySyncFailure,
   WorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffer';
+
+/**
+ * 启动 sessions.list 基线枚举的可观察失败状态（R13 M1）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   list 是静默既有 session 的唯一枚举入口；永久失败后 UI 必须可观察并可手动重试。
+ *
+ * Code Logic（这个类型做什么）:
+ *   kind 仅稳定 token；不含 path/body/session 列表。
+ */
+export type StartupBaselineFailure = {
+  kind: 'startup_list_failed';
+};
 
 export interface WorkbenchTerminalBuffersContextValue {
   store: WorkbenchTerminalBufferStore;
@@ -54,6 +69,38 @@ export interface WorkbenchTerminalBuffersContextValue {
    *   clear failure → 抬 epoch needsReplay → requestSessionReplay。
    */
   retryHistorySync: (sessionId: string) => void;
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   启动 sessions.list 永久失败后 UI 需展示可观察状态（R13 M1）。
+   *
+   * Code Logic（这个方法做什么）:
+   *   返回 StartupBaselineFailure 或 null；仅稳定 kind。
+   */
+  getStartupBaselineFailure: () => StartupBaselineFailure | null;
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   订阅启动 list 失败状态变更（R13 M1）。
+   *
+   * Code Logic（这个方法做什么）:
+   *   注册 listener，返回 unsubscribe。
+   */
+  subscribeStartupBaselineFailure: (listener: () => void) => () => void;
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   useSyncExternalStore 读取 startup baseline failure revision。
+   *
+   * Code Logic（这个方法做什么）:
+   *   返回 revision 号。
+   */
+  getStartupBaselineFailureRevision: () => number;
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   用户可在启动 list 永久失败后手动重试枚举与 baseline schedule（R13 M1）。
+   *
+   * Code Logic（这个方法做什么）:
+   *   清 failure → 重新执行有界 list + schedule 路径。
+   */
+  retryStartupBaseline: () => void;
 }
 
 /**
@@ -155,4 +202,31 @@ export function useTerminalHistorySyncFailure(
     void revision;
     return getHistorySyncFailure(sessionId);
   }, [getHistorySyncFailure, revision, sessionId]);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Workbench 在启动 sessions.list 永久失败时需展示可观察 StatusMessage（R13 M1）。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用 useSyncExternalStore 订阅 startupBaselineFailure revision，再读 getStartupBaselineFailure。
+ *   hooks 全部在 early return 前。
+ */
+export function useStartupBaselineFailure(): StartupBaselineFailure | null {
+  const {
+    getStartupBaselineFailure,
+    subscribeStartupBaselineFailure,
+    getStartupBaselineFailureRevision,
+  } = useWorkbenchTerminalBuffers();
+
+  const revision = useSyncExternalStore(
+    subscribeStartupBaselineFailure,
+    getStartupBaselineFailureRevision,
+    () => 0,
+  );
+
+  return useMemo(() => {
+    void revision;
+    return getStartupBaselineFailure();
+  }, [getStartupBaselineFailure, revision]);
 }

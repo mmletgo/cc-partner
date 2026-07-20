@@ -56,6 +56,7 @@ import {
   WorkbenchTerminalBuffersProvider,
 } from './useWorkbenchTerminalBuffers';
 import {
+  useStartupBaselineFailure,
   useWorkbenchTerminalBuffers,
   useWorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffersContext';
@@ -1027,5 +1028,359 @@ describe('WorkbenchTerminalBuffersProvider startup baseline (R12 M1/M3)', () => 
     });
     // 永久错误不得进入无限 3-burst
     expect(replayCalls).toBe(callsAfterFailure);
+  });
+
+  test('R13 H1 live-first replay preserves inFlight; list does not spawn concurrent cutover', async () => {
+    const sessionId = 'local-live-first-s1';
+    const authority = 'owner-live-first';
+
+    // list 故意 defer：让 live-first authority replay 先起飞。
+    const listDeferred = deferred<Array<{ id: string }>>();
+    listMock.mockImplementation(() => listDeferred.promise);
+
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    renderProvider(storeRef);
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+
+    // live-first：首条 live 绑定 authority 并启动 epoch N replay。
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'LIVE-1',
+          seq: 1,
+          ownerInstanceId: authority,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(pendingReplays.length).toBe(1);
+    });
+
+    // list 完成：beginStartupBaselineReplay 应保留 inFlight，不得再起第二个 flight。
+    await act(async () => {
+      listDeferred.resolve([{ id: sessionId }]);
+      await listDeferred.promise;
+    });
+
+    // 给 list 调度路径一个 microtask 窗口；仍应只有 1 个 in-flight replay。
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(pendingReplays.length).toBe(1);
+
+    // 旧 epoch snapshot 与更高 seq live 交错：先注入更高 seq live，再 settle 旧请求。
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'LIVE-5',
+          seq: 5,
+          ownerInstanceId: authority,
+        },
+      });
+    });
+
+    // 旧 owner（epoch N）结束：apply 被 reject（epoch 已抬），串行启动 epoch N+1 唯一替代。
+    await act(async () => {
+      pendingReplays[0]!.resolve({
+        sessionId,
+        buffer: 'STALE-BASE',
+        truncated: false,
+        lastSeq: 1,
+        ownerInstanceId: authority,
+      });
+      await pendingReplays[0]!.promise;
+    });
+
+    await waitFor(() => {
+      expect(pendingReplays.length).toBe(2);
+    });
+
+    // 唯一有效 cutover：新 epoch baseline + held live seq=5。
+    await act(async () => {
+      pendingReplays[1]!.resolve({
+        sessionId,
+        buffer: 'BASE-1-4',
+        truncated: false,
+        lastSeq: 4,
+        ownerInstanceId: authority,
+      });
+      await pendingReplays[1]!.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('BASE-1-4LIVE-5');
+      expect(storeRef.current?.getLastSeq(sessionId)).toBe(5);
+    });
+
+    // 不得再起第三个同 session 并发 replay。
+    expect(pendingReplays.length).toBe(2);
+  });
+});
+
+describe('WorkbenchTerminalBuffersProvider startup list recovery (R13 M1)', () => {
+  beforeEach(() => {
+    listenerHandlers.clear();
+    listMock.mockReset();
+    replayMock.mockReset();
+    listenMock.mockReset();
+    vi.useRealTimers();
+
+    listenMock.mockImplementation(
+      async (eventName: string, handler: EventHandler) => {
+        listenerHandlers.set(eventName, handler);
+        return () => {
+          listenerHandlers.delete(eventName);
+        };
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+
+  test('startup list first reject then success recovers history without live', async () => {
+    const sessionId = 'local-list-retry-s1';
+    const authority = 'owner-list-retry';
+
+    let listCalls = 0;
+    listMock.mockImplementation(() => {
+      listCalls += 1;
+      if (listCalls === 1) {
+        return Promise.reject(
+          normalizeError({ error: 'sidecar unavailable', code: 'unavailable' }),
+        );
+      }
+      return Promise.resolve([{ id: sessionId }]);
+    });
+
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    const historySyncRef: {
+      current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
+    } = { current: null };
+
+    function StartupProbe() {
+      const failure = useStartupBaselineFailure();
+      return (
+        <div data-testid="startup-baseline-probe">
+          {failure ? failure.kind : 'none'}
+        </div>
+      );
+    }
+
+    (window as Window & {
+      __TAURI_INTERNALS__?: { transformCallback?: unknown };
+    }).__TAURI_INTERNALS__ = {
+      transformCallback: () => undefined,
+    };
+
+    const { findByTestId } = render(
+      <WorkbenchTerminalBuffersProvider>
+        <StoreProbe storeRef={storeRef} historySyncRef={historySyncRef} />
+        <StartupProbe />
+      </WorkbenchTerminalBuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+    await waitFor(() => {
+      expect(listCalls).toBeGreaterThanOrEqual(1);
+    });
+
+    // 失败期间不得误报 permanent failure（仍在有界重试窗口）。
+    expect((await findByTestId('startup-baseline-probe')).textContent).toBe('none');
+
+    vi.useFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    vi.useRealTimers();
+
+    await waitFor(() => {
+      expect(listCalls).toBeGreaterThanOrEqual(2);
+      expect(pendingReplays.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // 无任何 live：仅靠 list 恢复后的 schedule replay 回填历史。
+    await act(async () => {
+      pendingReplays[0]!.resolve({
+        sessionId,
+        buffer: 'LIST-RECOVERED',
+        truncated: false,
+        lastSeq: 3,
+        ownerInstanceId: authority,
+      });
+      await pendingReplays[0]!.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('LIST-RECOVERED');
+      expect(storeRef.current?.getLastSeq(sessionId)).toBe(3);
+    });
+    expect((await findByTestId('startup-baseline-probe')).textContent).toBe('none');
+    expect(historySyncRef.current?.(sessionId)).toBeNull();
+  });
+
+  test('startup list permanent failure is observable and manual retry recovers', async () => {
+    const sessionId = 'local-list-perm-s1';
+    const authority = 'owner-list-perm';
+
+    // 每 attempt 一个 deferred，显式 reject 以绕过 fake/real timer 混用竞态。
+    const listDeferreds: Array<ReturnType<typeof deferred<Array<{ id: string }>>>> = [];
+    let listCalls = 0;
+    listMock.mockImplementation(() => {
+      listCalls += 1;
+      const d = deferred<Array<{ id: string }>>();
+      listDeferreds.push(d);
+      return d.promise;
+    });
+
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+
+    function StartupProbe() {
+      const failure = useStartupBaselineFailure();
+      const { retryStartupBaseline } = useWorkbenchTerminalBuffers();
+      return (
+        <div>
+          <div data-testid="startup-baseline-probe">
+            {failure?.kind ?? 'none'}
+          </div>
+          <button
+            type="button"
+            data-testid="startup-baseline-retry"
+            onClick={() => retryStartupBaseline()}
+          >
+            retry
+          </button>
+        </div>
+      );
+    }
+
+    (window as Window & {
+      __TAURI_INTERNALS__?: { transformCallback?: unknown };
+    }).__TAURI_INTERNALS__ = {
+      transformCallback: () => undefined,
+    };
+
+    const { findByTestId } = render(
+      <WorkbenchTerminalBuffersProvider>
+        <StoreProbe storeRef={storeRef} />
+        <StartupProbe />
+      </WorkbenchTerminalBuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+    await waitFor(() => {
+      expect(listDeferreds.length).toBe(1);
+    });
+
+    vi.useFakeTimers();
+
+    // 有界 5 次 list：reject → advance 退避 → 下一 attempt；避免 waitFor+fake timer 混用。
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      expect(listDeferreds.length).toBe(attempt);
+      await act(async () => {
+        listDeferreds[attempt - 1]!.reject(
+          normalizeError({ error: 'control plane down', code: 'unavailable' }),
+        );
+        await listDeferreds[attempt - 1]!.promise.catch(() => undefined);
+      });
+      if (attempt < 5) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5_000);
+        });
+        expect(listDeferreds.length).toBe(attempt + 1);
+      }
+    }
+
+    // 第 5 次失败后应写入 permanent failure（仍在 fake timer 下 flush microtasks）。
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(listCalls).toBe(5);
+    expect(pendingReplays.length).toBe(0);
+
+    vi.useRealTimers();
+
+    await waitFor(async () => {
+      const probe = await findByTestId('startup-baseline-probe');
+      expect(probe.textContent).toBe('startup_list_failed');
+    });
+
+    // 手动重试：list 恢复后 schedule replay。
+    const retryList = deferred<Array<{ id: string }>>();
+    listMock.mockImplementation(() => {
+      listCalls += 1;
+      return retryList.promise;
+    });
+    await act(async () => {
+      (await findByTestId('startup-baseline-retry')).click();
+    });
+    await act(async () => {
+      retryList.resolve([{ id: sessionId }]);
+      await retryList.promise;
+    });
+
+    await waitFor(() => {
+      expect(pendingReplays.length).toBeGreaterThanOrEqual(1);
+    });
+
+    await act(async () => {
+      pendingReplays[0]!.resolve({
+        sessionId,
+        buffer: 'MANUAL-RETRY-OK',
+        truncated: false,
+        lastSeq: 1,
+        ownerInstanceId: authority,
+      });
+      await pendingReplays[0]!.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('MANUAL-RETRY-OK');
+    });
+    await waitFor(async () => {
+      const probe = await findByTestId('startup-baseline-probe');
+      expect(probe.textContent).toBe('none');
+    });
   });
 });

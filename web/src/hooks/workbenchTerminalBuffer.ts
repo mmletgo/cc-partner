@@ -434,7 +434,8 @@ export function beginHeldOverflowReplay(
  * Code Logic（这个函数做什么）:
  *   入参 authorityId 非空且与 state.authorityId 不同（含 state 尚为 null 的首次绑定）时生效：
  *   绑定新 authorityId、committedBaselineLastSeq/overflowHighWaterSeq=0、
- *   cutoverEpoch+=1、needsReplay=true、replayInFlight=false；
+ *   cutoverEpoch+=1、needsReplay=true；**保留**既有 replayInFlight（R13 H1：不得解除
+ *   在途请求所有权；旧 flight finally 发现 epoch 抬高后串行启动唯一替代请求）；
  *   返回新 state 与 requestEpoch。同 authority 或无效 authority 返回 null。
  */
 export function beginAuthorityChangeReplay(
@@ -458,7 +459,8 @@ export function beginAuthorityChangeReplay(
       overflowHighWaterSeq: 0,
       cutoverEpoch,
       needsReplay: true,
-      replayInFlight: false,
+      // 保留 in-flight 所有权；禁止清门闩制造同 epoch 并发 cutover。
+      replayInFlight: state.replayInFlight,
     },
     requestEpoch: cutoverEpoch,
   };
@@ -558,11 +560,14 @@ export function classifyTerminalReplayError(error: unknown): TerminalReplayError
  * Business Logic（为什么需要这个函数）:
  *   启动 baseline 必须与 authority/overflow 一样走 requestSessionReplay，
  *   才能复用 classify + 有界重试 + historySyncFailure，禁止吞错的直接 sessions.replay。
+ *   live-first 路径可能已启动 epoch N 且 replayInFlight=true；list 路径不得解除门闩，
+ *   否则会并发 cutover 并用旧快照 reset 抹掉更高 seq live（R13 H1）。
  *
  * Code Logic（这个函数做什么）:
- *   cutoverEpoch += 1，needsReplay=true，replayInFlight=false；
+ *   cutoverEpoch += 1，needsReplay=true；**保留**既有 replayInFlight（不得 stomp 在途所有权）；
  *   不重置 authorityId / committedBaselineLastSeq / overflowHighWaterSeq；
  *   返回新 state 与 requestEpoch（= 抬高后的 cutoverEpoch）。
+ *   调用方在 inFlight 时不必另起请求——旧 flight finally 见 epoch 抬高后串行补拉。
  */
 export function beginStartupBaselineReplay(
   state: SessionCutoverState,
@@ -573,11 +578,23 @@ export function beginStartupBaselineReplay(
       ...state,
       cutoverEpoch,
       needsReplay: true,
-      replayInFlight: false,
+      // R13 H1：保留 in-flight 所有权，禁止 list 路径清门闩制造并发 cutover。
+      replayInFlight: state.replayInFlight,
     },
     requestEpoch: cutoverEpoch,
   };
 }
+
+/**
+ * 启动 sessions.list 有界重试次数上限（含首次；R13 M1）。
+ *
+ * Business Logic（为什么需要这个常量）:
+ *   list 是静默既有 session 的唯一枚举入口；单次失败吞错会永久跳过历史恢复。
+ *
+ * Code Logic（这个常量做什么）:
+ *   Provider 对 startup list 最多尝试该次数，耗尽后写入可观察 permanent failure。
+ */
+export const STARTUP_SESSION_LIST_MAX_ATTEMPTS = 5;
 
 /**
  * Business Logic（为什么需要这个函数）:

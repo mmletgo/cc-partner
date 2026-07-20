@@ -853,5 +853,9 @@
     "notFound": "Terminal history is unavailable because this session no longer exists.",
     "failed": "Terminal history could not be synchronized. Automatic retries have stopped.",
     "retry": "Retry history sync"
+  },
+  "startupBaseline": {
+    "listFailed": "Could not enumerate local terminal sessions at startup; pre-mount history may be missing.",
+    "retry": "Retry session enumeration"
   }
 }

@@ -12,9 +12,12 @@
  *   **authority 绑定 / 切换**（R9 M1 + R10 M1）：首次绑定与已绑定切换一律抬 epoch +
  *   needsReplay=true + 暂存新 authority live，并立即 sessions.replay；禁止 light rebind 且
  *   needsReplay=false（启动 list 无 projectId 仅本地，远端历史不会出现在 launch baseline）。
- *   **启动 baseline**（R12 M1）：list 后各 session 走 beginStartupBaselineReplay +
+ *   **启动 baseline**（R12 M1 + R13 H1/M1）：list 后各 session 走 beginStartupBaselineReplay +
  *   requestSessionReplay，与 authority/overflow 共用 classify / 有界重试 / historySyncFailure；
- *   禁止直接 await sessions.replay 并吞错。
+ *   禁止直接 await sessions.replay 并吞错。beginStartupBaselineReplay **保留**既有
+ *   replayInFlight；请求以 epoch 为所有权 token，仅当前 owner 可清门闩，避免 live-first
+ *   与 list 并发 cutover。startup list 有界退避重试；永久失败写入可观察状态且可手动重试；
+ *   仅成功枚举并 schedule 各 session（或永久失败）后才 mark baselineSettled。
  *   **replay 失败恢复**（R10 M2 + R11 M1 + R12 M2）：同 epoch 立即最多 3 次；耗尽后 capped
  *   backoff 仅对 **可恢复** 错误（timeout/unavailable/network；按稳定 IPC code 分类）持续重试。
  *   **永久错误**停止自动重试；historySyncFailure 可订阅并在 Workbench UI 展示（R12 M3）。
@@ -22,12 +25,12 @@
  * Code Logic（这个模块做什么）:
  *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline schedule；
  *   live 带 seq 的事件在 baseline 未 settle / needsReplay / replayInFlight 时写入有界 held；
- *   authority 变化走 beginAuthorityChangeReplay → requestSessionReplay（首次绑定亦强制）；
+ *   authority 变化走 beginAuthorityChangeReplay → requestSessionReplay（首次绑定亦强制；保留 inFlight）；
  *   resync/baseline 先 shouldAcceptTerminalCutover(authority)，再 applyTerminalBaselineCutover
  *   并 commitTerminalCutover(requestEpoch?, authorityId)；held 溢出先算 highWater 再清空
- *   held、beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch；
+ *   held、beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch 所有权；
  *   replay catch 经 classifyTerminalReplayError 分流 recoverable / not_found / permanent；
- *   historySyncFailure 用 revision + listeners 可订阅 store，Context 暴露 get/subscribe/retry。
+ *   historySyncFailure 与 startupBaselineFailure 用 revision + listeners 可订阅 store。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -53,6 +56,7 @@ import {
   stopTerminalCutoverReplay,
   terminalHistorySyncFailureFromClass,
   terminalReplayRecoveryDelayMs,
+  STARTUP_SESSION_LIST_MAX_ATTEMPTS,
   TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS,
   type HeldLiveTerminalEvent,
   type SessionCutoverState,
@@ -61,6 +65,7 @@ import {
 } from './workbenchTerminalBuffer';
 import {
   WorkbenchTerminalBuffersContext,
+  type StartupBaselineFailure,
   type WorkbenchTerminalBuffersContextValue,
 } from './workbenchTerminalBuffersContext';
 
@@ -171,6 +176,28 @@ export function WorkbenchTerminalBuffersProvider({
   const requestSessionReplayRef = useRef<
     ((sessionId: string, requestEpoch: number, attempt?: number) => void) | null
   >(null);
+  /**
+   * Business Logic（为什么需要这个 ref）:
+   *   retryStartupBaseline 在 effect 外暴露，但 list+schedule 定义在 effect 内（R13 M1）。
+   *
+   * Code Logic（这个 ref 做什么）:
+   *   effect setup 写入 runStartupBaseline；cleanup 置 null。
+   */
+  const runStartupBaselineRef = useRef<(() => void) | null>(null);
+  /**
+   * Business Logic（为什么需要这个 ref）:
+   *   启动 sessions.list 永久失败必须可观察（R13 M1）。
+   *
+   * Code Logic（这个 ref 做什么）:
+   *   保存 StartupBaselineFailure 或 null；配合 revision + listeners。
+   */
+  const startupBaselineFailureRef = useRef<StartupBaselineFailure | null>(null);
+  /** startup baseline failure 外部 store revision。 */
+  const startupBaselineRevisionRef = useRef(0);
+  /** startup baseline failure 订阅者集合。 */
+  const startupBaselineListenersRef = useRef(new Set<() => void>());
+  /** 是否已有 startup list 在飞，避免手动重试与自动路径并发。 */
+  const startupListInFlightRef = useRef(false);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -315,6 +342,91 @@ export function WorkbenchTerminalBuffersProvider({
     },
     [clearHistorySyncFailure, clearReplayRecovery, ensureCutoverState],
   );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   startupBaselineFailure 变更必须让订阅者 re-render（R13 M1）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   revision++ 并通知全部 listeners。
+   */
+  const notifyStartupBaselineListeners = useCallback((): void => {
+    startupBaselineRevisionRef.current += 1;
+    for (const listener of startupBaselineListenersRef.current) {
+      listener();
+    }
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   设置或清除启动 list 永久失败状态。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 ref；状态变化时 notify。
+   */
+  const setStartupBaselineFailure = useCallback(
+    (failure: StartupBaselineFailure | null): void => {
+      const prev = startupBaselineFailureRef.current;
+      const same =
+        (prev === null && failure === null) ||
+        (prev !== null && failure !== null && prev.kind === failure.kind);
+      if (same) return;
+      startupBaselineFailureRef.current = failure;
+      notifyStartupBaselineListeners();
+    },
+    [notifyStartupBaselineListeners],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   上层 UI 读取启动 list 是否永久失败（R13 M1）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回 ref 中的 failure 或 null。
+   */
+  const getStartupBaselineFailure = useCallback((): StartupBaselineFailure | null => {
+    return startupBaselineFailureRef.current;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   React 订阅 startup baseline failure revision。
+   *
+   * Code Logic（这个函数做什么）:
+   *   注册 listener，返回 unsubscribe。
+   */
+  const subscribeStartupBaselineFailure = useCallback(
+    (listener: () => void): (() => void) => {
+      startupBaselineListenersRef.current.add(listener);
+      return () => {
+        startupBaselineListenersRef.current.delete(listener);
+      };
+    },
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   useSyncExternalStore 读取 startup baseline failure revision。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回 revision。
+   */
+  const getStartupBaselineFailureRevision = useCallback((): number => {
+    return startupBaselineRevisionRef.current;
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在启动 list 永久失败后手动重试枚举（R13 M1）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清 failure → 调 runStartupBaselineRef。
+   */
+  const retryStartupBaseline = useCallback((): void => {
+    setStartupBaselineFailure(null);
+    runStartupBaselineRef.current?.();
+  }, [setStartupBaselineFailure]);
 
   const resetBuffer = useCallback((sessionId: string) => {
     store.reset(sessionId);
@@ -467,18 +579,21 @@ export function WorkbenchTerminalBuffersProvider({
     /**
      * Business Logic（为什么需要这个函数）:
      *   held 溢出或显式 re-baseline 时需拉 sessions.replay；同 session 不得并发狂刷，
-     *   但 overflow 抬 epoch 后旧 in-flight 结果必须失效并在 settle 后补拉；
+     *   但 overflow / startup / authority 抬 epoch 后旧 in-flight 结果必须失效并在 settle
+     *   后由**当前 owner**串行补拉（R13 H1）；
      *   同 epoch **可恢复** 瞬时失败也不能立刻放弃，需有界立即重试 + 可恢复 backoff；
      *   **永久** not-found / validation/decode 必须停止自动重试（R11 M1）。
      *
      * Code Logic（这个函数做什么）:
-     *   已有 replayInFlight 则仅依赖调用方已抬高的 epoch；否则标记 inFlight，
+     *   已有 replayInFlight 则 return（调用方只抬 epoch；旧 owner finally 串行替代）；
+     *   否则标记 inFlight 并绑定 requestEpoch 为所有权 token；
      *   await replay → applyCutover(requestEpoch)；catch 经 classifyTerminalReplayError：
      *   - recoverable：同 epoch 立即最多 TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS 次，
      *     间隔 terminalReplayRecoveryDelayMs；耗尽后 scheduleRecoverableReplay；
      *   - not_found / permanent：clearReplayRecovery + stopTerminalCutoverReplay +
      *     写入 historySyncFailureBySessionRef，不再 schedule；
-     *   finally 清 inFlight；若 needsReplay 且 epoch 已抬高则用新 epoch 再请求。
+     *   finally：**仅当 current.cutoverEpoch === requestEpoch 时**清 inFlight；
+     *   若 needsReplay 且 epoch 已抬高则用新 epoch 再请求（单飞 cutover）。
      */
     const requestSessionReplay = (
       sessionId: string,
@@ -487,6 +602,11 @@ export function WorkbenchTerminalBuffersProvider({
     ): void => {
       const state = ensureCutoverState(sessionId);
       if (state.replayInFlight) {
+        // R13 H1：已有 owner 在飞；调用方只需抬高 epoch，本请求不得并发。
+        return;
+      }
+      // 调用方 requestEpoch 必须对应当前 cutoverEpoch，否则是过期调度。
+      if (state.cutoverEpoch !== requestEpoch) {
         return;
       }
       cutoverBySessionRef.current.set(
@@ -518,10 +638,13 @@ export function WorkbenchTerminalBuffersProvider({
         } finally {
           if (cancelled) return;
           const current = ensureCutoverState(sessionId);
+          // 单飞：本请求是唯一 in-flight 持有者，结束时必须清门闩。
+          // beginStartup/authority 只抬 epoch 保留 inFlight，不得另起并发 flight（R13 H1）。
           const cleared = setTerminalCutoverReplayInFlight(current, false);
           cutoverBySessionRef.current.set(sessionId, cleared);
 
-          // in-flight 期间 overflow 抬高了 epoch：旧结果已失效，需用新 epoch 再拉一次。
+          // in-flight 期间 overflow/startup/authority 抬高了 epoch：旧结果已失效，
+          // 串行启动唯一替代请求（单飞 cutover）。
           if (
             cleared.needsReplay &&
             cleared.cutoverEpoch > requestEpoch &&
@@ -539,6 +662,7 @@ export function WorkbenchTerminalBuffersProvider({
             return;
           }
 
+          // epoch 已不一致且未走上方替代路径：不得按旧 epoch 重试。
           if (
             cleared.cutoverEpoch !== requestEpoch ||
             cleared.replayInFlight
@@ -739,33 +863,82 @@ export function WorkbenchTerminalBuffersProvider({
         return;
       }
 
-      // baseline（R12 M1）：统一走 requestSessionReplay，复用 classify / 有界重试 / historySyncFailure。
-      // sessions.list() 无 projectId 时仅枚举本机；远端 session 由后续 live/resync 强制 replay。
-      // 不 await 单 session 成功；schedule 完即可，finally 仍 mark baselineSettled。
-      try {
-        const sessions = await workbenchApi.sessions.list();
+      /**
+       * Business Logic（为什么需要这个函数）:
+       *   启动 sessions.list 是静默既有 session 的唯一枚举入口（R13 M1）。
+       *   单次失败吞错会永久跳过无 live 的 session 历史恢复；必须有界退避 + 可观察失败。
+       *
+       * Code Logic（这个函数做什么）:
+       *   有界 STARTUP_SESSION_LIST_MAX_ATTEMPTS 次 list；成功后逐 session
+       *   beginStartupBaselineReplay + requestSessionReplay（不 await 单 session 成功）；
+       *   仅成功 schedule 后 mark baselineSettled。永久失败写 startupBaselineFailure
+       *   并仍 mark baselineSettled（避免 held 永久膨胀），等待手动 retry 或 live/resync。
+       */
+      const runStartupBaseline = async (attempt = 1): Promise<void> => {
         if (cancelled) return;
-        for (const session of sessions) {
-          const current = ensureCutoverState(session.id);
-          const { state, requestEpoch } = beginStartupBaselineReplay(current);
-          cutoverBySessionRef.current.set(session.id, state);
-          clearReplayRecovery(session.id);
-          clearHistorySyncFailure(session.id);
-          requestSessionReplay(session.id, requestEpoch);
+        if (startupListInFlightRef.current && attempt === 1) {
+          // 手动重试与自动路径互斥；已有 in-flight 时跳过二次入口。
+          return;
         }
-      } catch {
-        // list 失败：依赖后续 terminal-resync 与项目 loadSessions 路径闭合 race。
-      } finally {
-        if (!cancelled) {
-          baselineSettled = true;
+        startupListInFlightRef.current = true;
+        try {
+          const sessions = await workbenchApi.sessions.list();
+          if (cancelled) return;
+          setStartupBaselineFailure(null);
+          for (const session of sessions) {
+            const current = ensureCutoverState(session.id);
+            const { state, requestEpoch } = beginStartupBaselineReplay(current);
+            cutoverBySessionRef.current.set(session.id, state);
+            clearReplayRecovery(session.id);
+            clearHistorySyncFailure(session.id);
+            // 已有 in-flight 时 requestSessionReplay 会 return；旧 owner finally 串行补拉。
+            requestSessionReplay(session.id, requestEpoch);
+          }
+          // 仅成功枚举并 schedule 后 settle baseline 窗口。
+          if (!cancelled) {
+            baselineSettled = true;
+          }
+        } catch {
+          if (cancelled) return;
+          if (attempt < STARTUP_SESSION_LIST_MAX_ATTEMPTS) {
+            const delayMs = terminalReplayRecoveryDelayMs(attempt);
+            await new Promise<void>((resolve) => {
+              globalThis.setTimeout(resolve, delayMs);
+            });
+            if (cancelled) return;
+            // 递归前先释放 in-flight，让下一 attempt 合法进入。
+            startupListInFlightRef.current = false;
+            await runStartupBaseline(attempt + 1);
+            return;
+          }
+          // 永久失败：可观察 + 手动重试；仍 settle 以免 held 永久收集。
+          setStartupBaselineFailure({ kind: 'startup_list_failed' });
+          console.warn(
+            '[workbench-terminal] startup list failed',
+            'startup_list_failed',
+          );
+          if (!cancelled) {
+            baselineSettled = true;
+          }
+        } finally {
+          startupListInFlightRef.current = false;
         }
-      }
+      };
+
+      runStartupBaselineRef.current = () => {
+        void runStartupBaseline(1);
+      };
+
+      // baseline（R12 M1 + R13 M1）：统一走 requestSessionReplay；list 有界重试。
+      // sessions.list() 无 projectId 时仅枚举本机；远端 session 由后续 live/resync 强制 replay。
+      await runStartupBaseline(1);
     };
 
     void setup();
     return () => {
       cancelled = true;
       requestSessionReplayRef.current = null;
+      runStartupBaselineRef.current = null;
       unlistenOutput?.();
       unlistenResync?.();
       for (const [sessionId, entry] of replayRecoveryBySessionRef.current) {
@@ -778,13 +951,19 @@ export function WorkbenchTerminalBuffersProvider({
         historySyncFailureBySessionRef.current.clear();
         notifyHistorySyncListeners();
       }
+      if (startupBaselineFailureRef.current !== null) {
+        startupBaselineFailureRef.current = null;
+        notifyStartupBaselineListeners();
+      }
     };
   }, [
     clearHistorySyncFailure,
     clearReplayRecovery,
     ensureCutoverState,
     notifyHistorySyncListeners,
+    notifyStartupBaselineListeners,
     setHistorySyncFailure,
+    setStartupBaselineFailure,
     store,
   ]);
 
@@ -797,15 +976,23 @@ export function WorkbenchTerminalBuffersProvider({
       subscribeHistorySyncFailures,
       getHistorySyncFailuresRevision,
       retryHistorySync,
+      getStartupBaselineFailure,
+      subscribeStartupBaselineFailure,
+      getStartupBaselineFailureRevision,
+      retryStartupBaseline,
     }),
     [
       getHistorySyncFailure,
       getHistorySyncFailuresRevision,
+      getStartupBaselineFailure,
+      getStartupBaselineFailureRevision,
       removeBuffer,
       resetBuffer,
       retryHistorySync,
+      retryStartupBaseline,
       store,
       subscribeHistorySyncFailures,
+      subscribeStartupBaselineFailure,
     ],
   );
 

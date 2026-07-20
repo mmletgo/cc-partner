@@ -183,6 +183,10 @@ function ControlledBuffersProvider({ store, children }: ControlledProviderProps)
     subscribeHistorySyncFailures: () => () => undefined,
     getHistorySyncFailuresRevision: () => 0,
     retryHistorySync: () => undefined,
+    getStartupBaselineFailure: () => null,
+    subscribeStartupBaselineFailure: () => () => undefined,
+    getStartupBaselineFailureRevision: () => 0,
+    retryStartupBaseline: () => undefined,
   };
   return (
     <WorkbenchTerminalBuffersContext.Provider value={value}>
