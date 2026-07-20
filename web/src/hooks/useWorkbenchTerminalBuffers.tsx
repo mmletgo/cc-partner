@@ -12,8 +12,11 @@
  *   **authority 绑定 / 切换**（R9 M1 + R10 M1）：首次绑定与已绑定切换一律抬 epoch +
  *   needsReplay=true + 暂存新 authority live，并立即 sessions.replay；禁止 light rebind 且
  *   needsReplay=false（启动 list 无 projectId 仅本地，远端历史不会出现在 launch baseline）。
- *   **replay 失败恢复**（R10 M2）：同 epoch 立即最多 3 次；耗尽后 capped backoff 持续重试，
- *   并允许后续 live 在 cooldown 后重新触发，直到成功或 session 被移除。
+ *   **replay 失败恢复**（R10 M2 + R11 M1）：同 epoch 立即最多 3 次；耗尽后 capped backoff
+ *   仅对 **可恢复** 错误（timeout/unavailable/network）持续重试，并允许后续 live 在 cooldown
+ *   后重新触发，直到成功或 session 被移除。**永久错误**分类：not-found 终止并清理该 session
+ *   的 replay 需求；validation/decode 停止自动重试并暴露 history_sync_failed 状态（禁止
+ *   无限 3-burst + ~5s 静默循环）。
  *
  * Code Logic（这个模块做什么）:
  *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline replay；
@@ -21,7 +24,8 @@
  *   authority 变化走 beginAuthorityChangeReplay → requestSessionReplay（首次绑定亦强制）；
  *   resync/baseline 先 shouldAcceptTerminalCutover(authority)，再 applyTerminalBaselineCutover
  *   并 commitTerminalCutover(requestEpoch?, authorityId)；held 溢出先算 highWater 再清空
- *   held、beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch。
+ *   held、beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch；
+ *   replay catch 经 classifyTerminalReplayError 分流 recoverable / not_found / permanent。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -33,6 +37,7 @@ import {
   applyTerminalBaselineCutover,
   beginAuthorityChangeReplay,
   beginHeldOverflowReplay,
+  classifyTerminalReplayError,
   commitTerminalCutover,
   createEmptySessionCutoverState,
   createWorkbenchTerminalBufferStore,
@@ -42,10 +47,13 @@ import {
   shouldAcceptTerminalCutover,
   shouldCollectHeldLiveTerminalEvent,
   shouldTriggerTerminalReplayRecovery,
+  stopTerminalCutoverReplay,
+  terminalHistorySyncFailureFromClass,
   terminalReplayRecoveryDelayMs,
   TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS,
   type HeldLiveTerminalEvent,
   type SessionCutoverState,
+  type TerminalHistorySyncFailure,
   type WorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffer';
 import {
@@ -62,11 +70,12 @@ interface TauriInternalsWindow extends Window {
 /**
  * Business Logic（为什么需要这个接口）:
  *   同 epoch 立即重试耗尽后，仍需跨 live 事件与 timer 共享失败计数与 cooldown，
- *   避免永久静默缺口或每个 live chunk 狂刷 replay。
+ *   避免瞬时故障下永久静默缺口或每个 live chunk 狂刷 replay（R10 M2）。
  *
  * Code Logic（这个接口做什么）:
  *   consecutiveFailures 累计失败次数；nextRetryAt 为可 live 触发的最早时刻；
  *   timerId 为可取消的恢复 setTimeout 句柄。
+ *   仅 recoverable 错误写入本状态；永久错误走 historySyncFailureBySessionRef。
  */
 interface SessionReplayRecoveryState {
   consecutiveFailures: number;
@@ -135,6 +144,16 @@ export function WorkbenchTerminalBuffersProvider({
   const replayRecoveryBySessionRef = useRef<Map<string, SessionReplayRecoveryState>>(
     new Map(),
   );
+  /**
+   * Business Logic（为什么需要这个 ref）:
+   *   R11 M1：永久 replay 错误必须停止自动重试并暴露可观察状态，禁止 silent infinite loop。
+   *
+   * Code Logic（这个 ref 做什么）:
+   *   sessionId → TerminalHistorySyncFailure；成功 cutover / 新 authority / removeBuffer 清理。
+   */
+  const historySyncFailureBySessionRef = useRef<
+    Map<string, TerminalHistorySyncFailure>
+  >(new Map());
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -167,6 +186,31 @@ export function WorkbenchTerminalBuffersProvider({
     replayRecoveryBySessionRef.current.delete(sessionId);
   }, []);
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   成功 cutover / 新 authority 切换后必须清除旧的 history sync 失败标记。
+   *
+   * Code Logic（这个函数做什么）:
+   *   从 historySyncFailureBySessionRef 删除该 session。
+   */
+  const clearHistorySyncFailure = useCallback((sessionId: string): void => {
+    historySyncFailureBySessionRef.current.delete(sessionId);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   上层（诊断/后续 UI）需要读取 session 是否已停止 history 自动重试。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回 map 中的 failure 或 null。
+   */
+  const getHistorySyncFailure = useCallback(
+    (sessionId: string): TerminalHistorySyncFailure | null => {
+      return historySyncFailureBySessionRef.current.get(sessionId) ?? null;
+    },
+    [],
+  );
+
   const resetBuffer = useCallback((sessionId: string) => {
     store.reset(sessionId);
   }, [store]);
@@ -179,6 +223,7 @@ export function WorkbenchTerminalBuffersProvider({
       globalThis.clearTimeout(entry.timerId);
     }
     replayRecoveryBySessionRef.current.delete(sessionId);
+    historySyncFailureBySessionRef.current.delete(sessionId);
     store.remove(sessionId);
   }, [store]);
 
@@ -197,7 +242,7 @@ export function WorkbenchTerminalBuffersProvider({
      * Code Logic（这个函数做什么）:
      *   shouldAccept(authority) → held + applyTerminalBaselineCutover(authorityChanged) →
      *   commitTerminalCutover(state, lastSeq, requestEpoch, authorityId) 回写 map；
-     *   成功后清除该 session 的 replay recovery 状态。
+     *   成功后清除该 session 的 replay recovery 与 history sync 失败状态。
      */
     const applyCutover = (
       sessionId: string,
@@ -230,8 +275,9 @@ export function WorkbenchTerminalBuffersProvider({
         sessionId,
         commitTerminalCutover(state, lastSeq, requestEpoch, authorityId),
       );
-      // 成功 baseline 后关闭可恢复重试闸门。
+      // 成功 baseline 后关闭可恢复重试闸门与永久失败标记。
       clearReplayRecovery(sessionId);
+      clearHistorySyncFailure(sessionId);
       return true;
     };
 
@@ -317,14 +363,17 @@ export function WorkbenchTerminalBuffersProvider({
      * Business Logic（为什么需要这个函数）:
      *   held 溢出或显式 re-baseline 时需拉 sessions.replay；同 session 不得并发狂刷，
      *   但 overflow 抬 epoch 后旧 in-flight 结果必须失效并在 settle 后补拉；
-     *   同 epoch 瞬时失败也不能立刻放弃，需有界立即重试 + 可恢复 backoff。
+     *   同 epoch **可恢复** 瞬时失败也不能立刻放弃，需有界立即重试 + 可恢复 backoff；
+     *   **永久** not-found / validation/decode 必须停止自动重试（R11 M1）。
      *
      * Code Logic（这个函数做什么）:
      *   已有 replayInFlight 则仅依赖调用方已抬高的 epoch；否则标记 inFlight，
-     *   最多 TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS 次 await replay → applyCutover(requestEpoch)；
-     *   失败间隔由 terminalReplayRecoveryDelayMs 决定；finally 清 inFlight；
-     *   若 needsReplay 且 epoch 已抬高则用新 epoch 再请求；同 epoch 立即耗尽后
-     *   scheduleRecoverableReplay。
+     *   await replay → applyCutover(requestEpoch)；catch 经 classifyTerminalReplayError：
+     *   - recoverable：同 epoch 立即最多 TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS 次，
+     *     间隔 terminalReplayRecoveryDelayMs；耗尽后 scheduleRecoverableReplay；
+     *   - not_found / permanent：clearReplayRecovery + stopTerminalCutoverReplay +
+     *     写入 historySyncFailureBySessionRef，不再 schedule；
+     *   finally 清 inFlight；若 needsReplay 且 epoch 已抬高则用新 epoch 再请求。
      */
     const requestSessionReplay = (
       sessionId: string,
@@ -342,6 +391,7 @@ export function WorkbenchTerminalBuffersProvider({
 
       void (async () => {
         let applySucceeded = false;
+        let errorClass: ReturnType<typeof classifyTerminalReplayError> | null = null;
         try {
           const replay = await workbenchApi.sessions.replay(sessionId);
           if (cancelled) return;
@@ -357,8 +407,9 @@ export function WorkbenchTerminalBuffersProvider({
             requestEpoch,
             authorityId,
           );
-        } catch {
+        } catch (reason) {
           applySucceeded = false;
+          errorClass = classifyTerminalReplayError(reason);
         } finally {
           if (cancelled) return;
           const current = ensureCutoverState(sessionId);
@@ -371,8 +422,9 @@ export function WorkbenchTerminalBuffersProvider({
             cleared.cutoverEpoch > requestEpoch &&
             !cleared.replayInFlight
           ) {
-            // 新 epoch 重置失败计数。
+            // 新 epoch 重置失败计数与永久失败标记。
             clearReplayRecovery(sessionId);
+            clearHistorySyncFailure(sessionId);
             requestSessionReplay(sessionId, cleared.cutoverEpoch);
             return;
           }
@@ -386,6 +438,25 @@ export function WorkbenchTerminalBuffersProvider({
             cleared.cutoverEpoch !== requestEpoch ||
             cleared.replayInFlight
           ) {
+            return;
+          }
+
+          // R11 M1：永久错误立即终止自动重试，禁止 3-burst + 5s 静默循环。
+          if (errorClass === 'not_found' || errorClass === 'permanent') {
+            clearReplayRecovery(sessionId);
+            historySyncFailureBySessionRef.current.set(
+              sessionId,
+              terminalHistorySyncFailureFromClass(errorClass),
+            );
+            cutoverBySessionRef.current.set(
+              sessionId,
+              stopTerminalCutoverReplay(cleared),
+            );
+            // 受控诊断：仅稳定 kind，禁止打印 buffer/body/path/token。
+            console.warn(
+              '[workbench-terminal] history sync stopped',
+              errorClass === 'not_found' ? 'not_found' : 'history_sync_failed',
+            );
             return;
           }
 
@@ -448,6 +519,7 @@ export function WorkbenchTerminalBuffersProvider({
       );
       cutoverBySessionRef.current.set(sessionId, next);
       clearReplayRecovery(sessionId);
+      clearHistorySyncFailure(sessionId);
       requestSessionReplay(sessionId, requestEpoch);
     };
 
@@ -485,6 +557,7 @@ export function WorkbenchTerminalBuffersProvider({
               heldLiveBySessionRef.current.delete(sessionId);
               cutoverBySessionRef.current.set(sessionId, authoritySwitch.state);
               clearReplayRecovery(sessionId);
+              clearHistorySyncFailure(sessionId);
               requestSessionReplay(sessionId, authoritySwitch.requestEpoch);
             } else {
               // 同 authority 下：若处于恢复窗口，live 可 cooldown 触发再请求。
@@ -530,6 +603,7 @@ export function WorkbenchTerminalBuffersProvider({
           if (authoritySwitch) {
             heldLiveBySessionRef.current.delete(sessionId);
             clearReplayRecovery(sessionId);
+            clearHistorySyncFailure(sessionId);
             cutoverBySessionRef.current.set(sessionId, {
               ...authoritySwitch.state,
               // resync 即 baseline：不需要再拉 sessions.replay
@@ -604,16 +678,18 @@ export function WorkbenchTerminalBuffersProvider({
         }
         replayRecoveryBySessionRef.current.delete(sessionId);
       }
+      historySyncFailureBySessionRef.current.clear();
     };
-  }, [clearReplayRecovery, ensureCutoverState, store]);
+  }, [clearHistorySyncFailure, clearReplayRecovery, ensureCutoverState, store]);
 
   const value = useMemo<WorkbenchTerminalBuffersContextValue>(
     () => ({
       store,
       resetBuffer,
       removeBuffer,
+      getHistorySyncFailure,
     }),
-    [removeBuffer, resetBuffer, store],
+    [getHistorySyncFailure, removeBuffer, resetBuffer, store],
   );
 
   return (

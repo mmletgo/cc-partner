@@ -11,6 +11,7 @@
 import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from 'react';
 import type {
   TerminalBufferSnapshot,
+  TerminalHistorySyncFailure,
   WorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffer';
 
@@ -18,6 +19,16 @@ export interface WorkbenchTerminalBuffersContextValue {
   store: WorkbenchTerminalBufferStore;
   resetBuffer: (sessionId: string) => void;
   removeBuffer: (sessionId: string) => void;
+  /**
+   * Business Logic（为什么需要这个方法）:
+   *   永久 replay 错误停止自动重试后，上层需要读取受控的 history sync 失败状态
+   *   （R11 M1），避免无限静默重试且不向用户暴露失败。
+   *
+   * Code Logic（这个方法做什么）:
+   *   返回 session 的 TerminalHistorySyncFailure；无失败时返回 null。
+   *   仅稳定 kind token，不含 buffer/body/path。
+   */
+  getHistorySyncFailure: (sessionId: string) => TerminalHistorySyncFailure | null;
 }
 
 /**

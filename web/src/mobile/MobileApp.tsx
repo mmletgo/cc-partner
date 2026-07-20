@@ -62,6 +62,19 @@ export function MobileApp(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   桌面 Provider 暴露 history sync 失败状态；移动端当前无对等 IPC replay recovery，
+   *   仍需满足 Context 合同，避免类型与消费者崩溃（R11 M1）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   恒返回 null（移动端 HTTP replay 路径暂不跟踪永久 history sync failure）。
+   */
+  const getHistorySyncFailure = useCallback(
+    (_sessionId: string) => null,
+    [],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   AttentionProvider 需要稳定的 loadSnapshot 引用，避免不必要的 effect 重跑。
    *
    * Code Logic（这个函数做什么）:
@@ -77,8 +90,9 @@ export function MobileApp(): ReactElement {
       store,
       resetBuffer,
       removeBuffer,
+      getHistorySyncFailure,
     }),
-    [removeBuffer, resetBuffer, store],
+    [getHistorySyncFailure, removeBuffer, resetBuffer, store],
   );
 
   return (

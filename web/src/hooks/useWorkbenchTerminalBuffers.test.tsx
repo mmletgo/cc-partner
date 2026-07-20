@@ -8,12 +8,15 @@
  *   启动 baseline 的 sessions.list 无 projectId 仅本机；首次远端 live 若 light rebind
  *   needsReplay=false，bridge 前 ring/TUI 历史永不补回（R10 M1）。
  *   authority replay 三次失败后若不再安排恢复，安静终端永久缺口（R10 M2）。
+ *   永久 not-found / validation 若仍 3-burst+5s 循环，会静默刷 IPC（R11 M1）。
  *
  * Code Logic（这个测试做什么）:
  *   mock Tauri listen + workbenchApi.sessions.list/replay：
  *   - R9：先建立 A 高 seq baseline，再注入 B 首条 live，断言强制 replay 并 settle held。
  *   - R10 M1：启动 list 仅本地，随后远端首条 live → 强制 replay 并回填历史。
  *   - R10 M2：三次 replay 失败后服务恢复，live/cooldown 路径 settle held。
+ *   - R11 M1：not-found / validation 终止自动重试并暴露 history sync failure；
+ *     多轮瞬时失败后仍可恢复。
  *   测试不包含终端 body 明文日志；chunk 仅为可识别标记。
  */
 
@@ -53,8 +56,10 @@ import {
   WorkbenchTerminalBuffersProvider,
 } from './useWorkbenchTerminalBuffers';
 import {
+  useWorkbenchTerminalBuffers,
   useWorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffersContext';
+import type { TerminalHistorySyncFailure } from './workbenchTerminalBuffer';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -83,17 +88,25 @@ type ReplayDto = {
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   测试需在 Provider 内读取 store 引用。
+ *   测试需在 Provider 内读取 store 与 history sync failure。
  *
  * Code Logic（这个组件做什么）:
- *   把 store 写入 ref 容器。
+ *   把 store / getHistorySyncFailure 写入 ref 容器。
  */
 function StoreProbe({
   storeRef,
+  historySyncRef,
 }: {
   storeRef: { current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null };
+  historySyncRef?: {
+    current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
+  };
 }) {
-  storeRef.current = useWorkbenchTerminalBufferStore();
+  const ctx = useWorkbenchTerminalBuffers();
+  storeRef.current = ctx.store;
+  if (historySyncRef) {
+    historySyncRef.current = ctx.getHistorySyncFailure;
+  }
   return null;
 }
 
@@ -104,9 +117,14 @@ function StoreProbe({
  * Code Logic（这个函数做什么）:
  *   注入 transformCallback 后 render Provider + StoreProbe。
  */
-function renderProvider(storeRef: {
-  current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
-}) {
+function renderProvider(
+  storeRef: {
+    current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+  },
+  historySyncRef?: {
+    current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
+  },
+) {
   (window as Window & {
     __TAURI_INTERNALS__?: { transformCallback?: unknown };
   }).__TAURI_INTERNALS__ = {
@@ -117,7 +135,10 @@ function renderProvider(storeRef: {
     <WorkbenchTerminalBuffersProvider>{children}</WorkbenchTerminalBuffersProvider>
   );
 
-  return render(<StoreProbe storeRef={storeRef} />, { wrapper });
+  return render(
+    <StoreProbe storeRef={storeRef} historySyncRef={historySyncRef} />,
+    { wrapper },
+  );
 }
 
 describe('WorkbenchTerminalBuffersProvider authority change (R9 M1)', () => {
@@ -522,5 +543,326 @@ describe('WorkbenchTerminalBuffersProvider recoverable replay (R10 M2)', () => {
 
     expect(storeRef.current?.getBuffer(sessionId)).toBe('B0B1B2B-HELD-3B-HELD-4');
     expect(storeRef.current?.getLastSeq(sessionId)).toBe(4);
+  });
+});
+
+describe('WorkbenchTerminalBuffersProvider permanent replay errors (R11 M1)', () => {
+  beforeEach(() => {
+    listenerHandlers.clear();
+    listMock.mockReset();
+    replayMock.mockReset();
+    listenMock.mockReset();
+    vi.useRealTimers();
+
+    listenMock.mockImplementation(
+      async (eventName: string, handler: EventHandler) => {
+        listenerHandlers.set(eventName, handler);
+        return () => {
+          listenerHandlers.delete(eventName);
+        };
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+
+  test('permanent not-found stops auto-retry without infinite recovery loop', async () => {
+    const sessionId = 'remote:peer:s-gone';
+    const authorityA = 'localremote-A';
+    const authorityB = 'localremote-B';
+
+    listMock.mockResolvedValue([{ id: sessionId }]);
+
+    let replayCalls = 0;
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      replayCalls += 1;
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    const historySyncRef: {
+      current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
+    } = { current: null };
+
+    renderProvider(storeRef, historySyncRef);
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+
+    await act(async () => {
+      expect(pendingReplays.length).toBeGreaterThanOrEqual(1);
+      pendingReplays[0]!.resolve({
+        sessionId,
+        buffer: 'A-BASE',
+        truncated: false,
+        lastSeq: 8,
+        ownerInstanceId: authorityA,
+      });
+      await pendingReplays[0]!.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('A-BASE');
+    });
+    const baselineCalls = replayCalls;
+
+    vi.useFakeTimers();
+
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'B-HELD-1',
+          seq: 1,
+          ownerInstanceId: authorityB,
+        },
+      });
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+
+    // 首次即 not-found：不得进入 3-burst 或 5s recovery
+    await act(async () => {
+      const idx = pendingReplays.length - 1;
+      pendingReplays[idx]!.reject(new Error('工作台会话不存在'));
+      await pendingReplays[idx]!.promise.catch(() => undefined);
+    });
+
+    expect(historySyncRef.current?.(sessionId)).toEqual({ kind: 'not_found' });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+
+    // cooldown 后 live 也不得再触发
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'B-HELD-2',
+          seq: 2,
+          ownerInstanceId: authorityB,
+        },
+      });
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+    expect(historySyncRef.current?.(sessionId)).toEqual({ kind: 'not_found' });
+  });
+
+  test('permanent validation stops auto-retry and exposes history_sync_failed', async () => {
+    const sessionId = 'remote:peer:s-decode';
+    const authorityA = 'localremote-A';
+    const authorityB = 'localremote-B';
+
+    listMock.mockResolvedValue([{ id: sessionId }]);
+
+    let replayCalls = 0;
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      replayCalls += 1;
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    const historySyncRef: {
+      current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
+    } = { current: null };
+
+    renderProvider(storeRef, historySyncRef);
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+
+    await act(async () => {
+      expect(pendingReplays.length).toBeGreaterThanOrEqual(1);
+      pendingReplays[0]!.resolve({
+        sessionId,
+        buffer: 'A-BASE',
+        truncated: false,
+        lastSeq: 5,
+        ownerInstanceId: authorityA,
+      });
+      await pendingReplays[0]!.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('A-BASE');
+    });
+    const baselineCalls = replayCalls;
+
+    vi.useFakeTimers();
+
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'B-HELD-1',
+          seq: 1,
+          ownerInstanceId: authorityB,
+        },
+      });
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+
+    const decodeErr = new Error(
+      'Contract "WorkbenchSessionReplay" failed at $.lastSeq: got primitive',
+    );
+    decodeErr.name = 'ContractDecodeError';
+    await act(async () => {
+      const idx = pendingReplays.length - 1;
+      pendingReplays[idx]!.reject(decodeErr);
+      await pendingReplays[idx]!.promise.catch(() => undefined);
+    });
+
+    expect(historySyncRef.current?.(sessionId)).toEqual({
+      kind: 'history_sync_failed',
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'B-HELD-9',
+          seq: 9,
+          ownerInstanceId: authorityB,
+        },
+      });
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+  });
+
+  test('multi-round recoverable failures then recover still works', async () => {
+    const sessionId = 'remote:peer:s-multi';
+    const authorityA = 'localremote-A';
+    const authorityB = 'localremote-B';
+
+    listMock.mockResolvedValue([{ id: sessionId }]);
+
+    let replayCalls = 0;
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      replayCalls += 1;
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    const historySyncRef: {
+      current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
+    } = { current: null };
+
+    renderProvider(storeRef, historySyncRef);
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+
+    await act(async () => {
+      expect(pendingReplays.length).toBeGreaterThanOrEqual(1);
+      pendingReplays[0]!.resolve({
+        sessionId,
+        buffer: 'A-BASE',
+        truncated: false,
+        lastSeq: 10,
+        ownerInstanceId: authorityA,
+      });
+      await pendingReplays[0]!.promise;
+    });
+
+    await waitFor(() => {
+      expect(storeRef.current?.getBuffer(sessionId)).toBe('A-BASE');
+    });
+    const baselineCalls = replayCalls;
+
+    vi.useFakeTimers();
+
+    await act(async () => {
+      listenerHandlers.get('workbench:terminal-output')?.({
+        payload: {
+          sessionId,
+          chunk: 'B-HELD-3',
+          seq: 3,
+          ownerInstanceId: authorityB,
+        },
+      });
+    });
+    expect(replayCalls).toBe(baselineCalls + 1);
+
+    // 第一波：3 次 timeout 立即失败
+    for (let i = 0; i < 3; i += 1) {
+      const idx = pendingReplays.length - 1;
+      await act(async () => {
+        pendingReplays[idx]!.reject(new Error('request timeout'));
+        await pendingReplays[idx]!.promise.catch(() => undefined);
+      });
+      if (i < 2) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(i === 0 ? 50 : 100);
+        });
+      }
+    }
+    expect(replayCalls).toBe(baselineCalls + 3);
+    expect(historySyncRef.current?.(sessionId)).toBeNull();
+
+    // 第二波：recovery timer 再失败一次
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(replayCalls).toBe(baselineCalls + 4);
+    await act(async () => {
+      const idx = pendingReplays.length - 1;
+      pendingReplays[idx]!.reject(new Error('replay_unavailable'));
+      await pendingReplays[idx]!.promise.catch(() => undefined);
+    });
+
+    // 第三波：再等 backoff 后成功
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(replayCalls).toBe(baselineCalls + 5);
+
+    const successIdx = pendingReplays.length - 1;
+    await act(async () => {
+      pendingReplays[successIdx]!.resolve({
+        sessionId,
+        buffer: 'B0B1B2',
+        truncated: false,
+        lastSeq: 2,
+        ownerInstanceId: authorityB,
+      });
+      await pendingReplays[successIdx]!.promise;
+    });
+
+    expect(storeRef.current?.getBuffer(sessionId)).toBe('B0B1B2B-HELD-3');
+    expect(storeRef.current?.getLastSeq(sessionId)).toBe(3);
+    expect(historySyncRef.current?.(sessionId)).toBeNull();
   });
 });

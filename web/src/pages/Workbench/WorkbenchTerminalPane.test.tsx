@@ -179,6 +179,7 @@ function ControlledBuffersProvider({ store, children }: ControlledProviderProps)
     store,
     resetBuffer: (sessionId: string) => store.reset(sessionId),
     removeBuffer: (sessionId: string) => store.remove(sessionId),
+    getHistorySyncFailure: () => null,
   };
   return (
     <WorkbenchTerminalBuffersContext.Provider value={value}>

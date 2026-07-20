@@ -18,7 +18,10 @@ import {
   shouldClearTerminalNeedsReplay,
   shouldCollectHeldLiveTerminalEvent,
   shouldTriggerTerminalReplayRecovery,
+  stopTerminalCutoverReplay,
+  terminalHistorySyncFailureFromClass,
   terminalReplayRecoveryDelayMs,
+  classifyTerminalReplayError,
   TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS,
   TERMINAL_REPLAY_RECOVERY_BACKOFF_CAP_MS,
   type HeldLiveTerminalEvent,
@@ -818,6 +821,43 @@ describe('session cutover epoch / committed baseline', () => {
     expect(shouldTriggerTerminalReplayRecovery(0, 1000)).toBe(true);
     expect(shouldTriggerTerminalReplayRecovery(500, 1000)).toBe(true);
     expect(shouldTriggerTerminalReplayRecovery(1500, 1000)).toBe(false);
+  });
+
+  test('classifyTerminalReplayError separates recoverable vs permanent classes (R11 M1)', () => {
+    expect(classifyTerminalReplayError(new Error('replay_unavailable'))).toBe('recoverable');
+    expect(classifyTerminalReplayError(new Error('request timeout'))).toBe('recoverable');
+    expect(classifyTerminalReplayError(new Error('network offline'))).toBe('recoverable');
+    expect(classifyTerminalReplayError(new Error('unknown boom'))).toBe('recoverable');
+    expect(classifyTerminalReplayError(null)).toBe('recoverable');
+
+    expect(classifyTerminalReplayError(new Error('工作台会话不存在'))).toBe('not_found');
+    expect(classifyTerminalReplayError(new Error('session not found'))).toBe('not_found');
+    expect(
+      classifyTerminalReplayError(
+        Object.assign(new Error('missing'), { code: 'not_found' }),
+      ),
+    ).toBe('not_found');
+
+    const decodeErr = new Error('Contract "WorkbenchSessionReplay" failed at $.lastSeq: got primitive');
+    decodeErr.name = 'ContractDecodeError';
+    expect(classifyTerminalReplayError(decodeErr)).toBe('permanent');
+    expect(classifyTerminalReplayError(new Error('validation failed'))).toBe('permanent');
+    expect(classifyTerminalReplayError(new Error('malformed dto'))).toBe('permanent');
+
+    expect(terminalHistorySyncFailureFromClass('not_found')).toEqual({ kind: 'not_found' });
+    expect(terminalHistorySyncFailureFromClass('permanent')).toEqual({
+      kind: 'history_sync_failed',
+    });
+
+    const stopped = stopTerminalCutoverReplay({
+      ...createEmptySessionCutoverState(),
+      needsReplay: true,
+      replayInFlight: true,
+      cutoverEpoch: 2,
+    });
+    expect(stopped.needsReplay).toBe(false);
+    expect(stopped.replayInFlight).toBe(false);
+    expect(stopped.cutoverEpoch).toBe(2);
   });
 
   test('owner authority change accepts lower lastSeq and resets store baseline', () => {

@@ -471,9 +471,127 @@ export const TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS = 3;
 export const TERMINAL_REPLAY_RECOVERY_BACKOFF_CAP_MS = 5_000;
 
 /**
+ * sessions.replay 失败的可恢复性分类（R11 M1）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   timeout/unavailable 等瞬时故障应退避重试；会话已关闭或 DTO 永久不兼容时
+ *   继续三连+5s 循环只会静默刷 IPC，并长期持有不完整历史。
+ *
+ * Code Logic（这个类型做什么）:
+ *   recoverable → 继续有界立即重试与 capped backoff；
+ *   not_found → 终止 recovery 并清理该 session 的 replay 需求；
+ *   permanent → 停止自动重试并暴露 history sync failed 状态。
+ */
+export type TerminalReplayErrorClass = 'recoverable' | 'not_found' | 'permanent';
+
+/**
+ * 终端历史同步永久失败的对外状态（R11 M1）。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   用户/上层需要知道某 session 的 history 同步已停止自动重试，而不是 silent held。
+ *
+ * Code Logic（这个接口做什么）:
+ *   kind 仅稳定 token，禁止携带 buffer/body/path/token。
+ */
+export interface TerminalHistorySyncFailure {
+  /** 永久失败种类：会话不存在或契约/校验失败。 */
+  kind: 'not_found' | 'history_sync_failed';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Provider 在 catch 中不能再吞掉全部异常；必须先分类再决定是否 schedule recovery。
+ *
+ * Code Logic（这个函数做什么）:
+ *   - ContractDecodeError / validation / decode / malformed → permanent；
+ *   - not_found / 会话不存在 / session_not_found → not_found；
+ *   - timeout / unavailable / network / offline / abort 及其它未知 → recoverable
+ *     （保持 R10 M2 瞬时恢复默认，避免误杀）。
+ *   仅读取 name/message/code 的小写文本与稳定字段；不序列化 payload body。
+ */
+export function classifyTerminalReplayError(error: unknown): TerminalReplayErrorClass {
+  if (error == null) {
+    return 'recoverable';
+  }
+
+  const record =
+    typeof error === 'object' && error !== null
+      ? (error as Record<string, unknown>)
+      : null;
+  const name =
+    (typeof record?.name === 'string' ? record.name : '') ||
+    (error instanceof Error ? error.name : '');
+  const message =
+    (typeof record?.message === 'string' ? record.message : '') ||
+    (error instanceof Error ? error.message : typeof error === 'string' ? error : '');
+  const code = typeof record?.code === 'string' ? record.code : '';
+  const nameLower = name.toLowerCase();
+  const messageLower = message.toLowerCase();
+  const codeLower = code.toLowerCase();
+
+  if (
+    nameLower === 'contractdecodeerror' ||
+    codeLower === 'validation' ||
+    codeLower === 'validation_error' ||
+    messageLower.includes('validation') ||
+    messageLower.includes('decode') ||
+    messageLower.includes('contract "') ||
+    messageLower.includes('malformed')
+  ) {
+    return 'permanent';
+  }
+
+  if (
+    codeLower === 'not_found' ||
+    codeLower === 'session_not_found' ||
+    messageLower.includes('not_found') ||
+    messageLower.includes('not found') ||
+    messageLower.includes('session_not_found') ||
+    messageLower.includes('不存在')
+  ) {
+    return 'not_found';
+  }
+
+  // 其余（含 timeout/unavailable/network/unknown）默认 recoverable。
+  return 'recoverable';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   分类结果需要映射为可观察的 history sync failure token，供 Context 读取。
+ *
+ * Code Logic（这个函数做什么）:
+ *   not_found → kind not_found；permanent → kind history_sync_failed。
+ */
+export function terminalHistorySyncFailureFromClass(
+  errorClass: Exclude<TerminalReplayErrorClass, 'recoverable'>,
+): TerminalHistorySyncFailure {
+  if (errorClass === 'not_found') {
+    return { kind: 'not_found' };
+  }
+  return { kind: 'history_sync_failed' };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   永久 replay 错误必须停止同 epoch 的 needsReplay 闸门，否则 live/timer 会继续触发。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回浅拷贝，将 needsReplay 与 replayInFlight 置 false。
+ */
+export function stopTerminalCutoverReplay(state: SessionCutoverState): SessionCutoverState {
+  return {
+    ...state,
+    needsReplay: false,
+    replayInFlight: false,
+  };
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   authority replay 在瞬时失败后需要有界立即重试；三次仍失败时不得永久静默停滞，
  *   必须按 capped backoff 继续可恢复重试，直到成功或 session 被移除（R10 M2）。
+ *   永久错误不得进入本退避表（R11 M1：先 classifyTerminalReplayError）。
  *
  * Code Logic（这个函数做什么）:
  *   consecutiveFailures 从 1 起：
