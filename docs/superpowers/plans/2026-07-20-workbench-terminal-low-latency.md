@@ -1591,14 +1591,21 @@ git commit -m "test: lock terminal latency and recovery contracts"
 
 ---
 
-## Execution Order and Review Gates
+## Task Dependency Graph
 
-1. Task 1 → review stream framing、timeout 和资源上限。
-2. Task 2 → review cache invalidation 与 mutation 零重放。
-3. Task 3 → review cursor、Gap、fallback 和 shutdown；此时应已消除固定 250ms 主延迟。
-4. Task 4 与 Task 5 可在 Task 3 后并行；分别 review 输入顺序和 replay DTO 等价。
-5. Task 6 依赖现有 provider/replay 合同，但可与 Task 5 并行；重点 review subscribe-before-snapshot 竞态。
-6. Task 7 依赖 Task 6 的 TerminalPane 最终结构。
-7. Task 8 最后执行，不得用 mock E2E 代替 L2 PTY 或 L3 GUI 性能证据。
+```text
+T1 -> T2 -> T3 -> [T4, T5, T6]
+T6 -> T7
+[T4, T5, T7] -> T8
+```
+
+任务波次与 review 重点：
+
+1. Wave 1：Task 1；review stream framing、timeout 和资源上限。
+2. Wave 2：Task 2；review cache invalidation 与 mutation 零重放。
+3. Wave 3：Task 3；review cursor、Gap、fallback 和 shutdown；此时应已消除固定 250ms 主延迟。
+4. Wave 4：Task 4、Task 5、Task 6 最多三路并行，必须使用独立 worktree；分别 review 输入顺序、replay DTO 等价和 subscribe-before-snapshot 竞态。
+5. Wave 5：Task 7，依赖 Task 6 的 TerminalPane 最终结构。
+6. Wave 6：Task 8，依赖 Task 4、Task 5、Task 7；不得用 mock E2E 代替 L2 PTY 或 L3 GUI 性能证据。
 
 每个任务必须先看失败测试，再看最小实现，再看定向绿测和 diff；不得把 Task 1–7 合成一个不可定位回归的大提交。
