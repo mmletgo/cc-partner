@@ -22,7 +22,7 @@ use crate::workbench::remote_events::{
 };
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
@@ -196,17 +196,34 @@ pub struct WorkbenchSessionReplayDto {
     pub last_seq: u64,
 }
 
+/// 工作台终端 replay 中的增量输出块。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     长会话里每次 append 若重建整段 120k 字符，会把延迟拖到与历史长度成正比；按 chunk 保存才能只摊销裁剪成本。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存一段 UTF-8 文本及其 Unicode scalar 数量，供 ring buffer 整块丢弃或部分切头。
+#[derive(Debug, Clone)]
+struct ReplayChunk {
+    text: String,
+    char_count: usize,
+}
+
 /// 工作台终端最近输出 ring buffer。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     移动端进入远端终端时需要看到最近屏幕输出，而不是只能等待新事件。
 ///
 /// Code Logic（这个结构体做什么）:
-///     以字符数量为容量上限保存输出尾部，记录是否曾截断以及最新 terminal output seq。
+///     以 Unicode scalar 容量上限保存增量 chunk deque；append 只追加尾部并摊销裁剪，
+///     记录是否曾截断以及最新 terminal output seq；snapshot 时再拼接为 DTO buffer。
 #[derive(Debug, Clone)]
 struct SessionReplayBuffer {
     max_chars: usize,
-    buffer: String,
+    /// 测试与内部裁剪需要直接观察 deque 长度与字符计数。
+    pub(super) chunks: VecDeque<ReplayChunk>,
+    pub(super) char_count: usize,
+    byte_count: usize,
     truncated: bool,
     last_seq: u64,
 }
@@ -216,11 +233,13 @@ impl SessionReplayBuffer {
     ///     每个 Workbench session 创建或恢复时都需要初始化自己的最近输出缓存。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造空 buffer，并记录最大保留 Unicode scalar 数量。
+    ///     构造空 chunk deque，并记录最大保留 Unicode scalar 数量。
     fn new(max_chars: usize) -> Self {
         Self {
             max_chars,
-            buffer: String::new(),
+            chunks: VecDeque::new(),
+            char_count: 0,
+            byte_count: 0,
             truncated: false,
             last_seq: 0,
         }
@@ -230,44 +249,73 @@ impl SessionReplayBuffer {
     ///     终端 reader 每收到一个非空输出 chunk，都要让移动端 replay 能补上这段历史输出。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     追加 UTF-8 文本、更新 last_seq，并在超过 max_chars 时按 char 边界保留尾部。
+    ///     非空文本入队并累计 char/byte 计数，更新 last_seq，再按 max_chars 摊销裁剪头部。
     fn append(&mut self, chunk: &str, seq: u64) {
-        self.buffer.push_str(chunk);
+        let char_count = chunk.chars().count();
+        if !chunk.is_empty() {
+            self.byte_count += chunk.len();
+            self.char_count += char_count;
+            self.chunks.push_back(ReplayChunk {
+                text: chunk.to_string(),
+                char_count,
+            });
+        }
         self.last_seq = seq;
-        self.truncate_to_limit();
+        self.trim_to_limit();
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     replay 截断不能破坏中文或 emoji，否则移动端渲染可能出现乱码或 panic。
+    ///     replay 截断不能破坏中文或 emoji，且热路径不能对整段历史做 O(n) 重建。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     当字符数超过上限时，从 chars 迭代器重建最后 max_chars 个字符，避免按字节切开 UTF-8。
-    fn truncate_to_limit(&mut self) {
-        let char_count = self.buffer.chars().count();
-        if char_count <= self.max_chars {
+    ///     当 char_count 超限时整块 pop_front；若头部 chunk 只需部分丢弃，则按 char 边界切掉前缀后 push_front 回 deque。
+    fn trim_to_limit(&mut self) {
+        if self.char_count <= self.max_chars {
             return;
         }
-
         self.truncated = true;
-        if self.max_chars == 0 {
-            self.buffer.clear();
-            return;
+        let mut overflow = self.char_count - self.max_chars;
+        while overflow > 0 {
+            let Some(front) = self.chunks.pop_front() else {
+                break;
+            };
+            self.byte_count -= front.text.len();
+            self.char_count -= front.char_count;
+            if overflow >= front.char_count {
+                overflow -= front.char_count;
+                continue;
+            }
+            let byte_offset = front
+                .text
+                .char_indices()
+                .nth(overflow)
+                .map(|(index, _)| index)
+                .unwrap_or(front.text.len());
+            let text = front.text[byte_offset..].to_string();
+            let kept_chars = front.char_count - overflow;
+            self.byte_count += text.len();
+            self.char_count += kept_chars;
+            self.chunks.push_front(ReplayChunk {
+                text,
+                char_count: kept_chars,
+            });
+            overflow = 0;
         }
-
-        let mut kept: Vec<char> = self.buffer.chars().rev().take(self.max_chars).collect();
-        kept.reverse();
-        self.buffer = kept.into_iter().collect();
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     HTTP replay route 需要返回当前 session 的一致性快照，避免暴露内部可变 buffer。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     克隆当前 buffer 状态并补入调用方传入的 session_id。
+    ///     按 deque 顺序拼接全部 chunk，补入 session_id 与 truncated/last_seq 元数据。
     fn snapshot(&self, session_id: &str) -> WorkbenchSessionReplayDto {
+        let mut buffer = String::with_capacity(self.byte_count);
+        for chunk in &self.chunks {
+            buffer.push_str(&chunk.text);
+        }
         WorkbenchSessionReplayDto {
             session_id: session_id.to_string(),
-            buffer: self.buffer.clone(),
+            buffer,
             truncated: self.truncated,
             last_seq: self.last_seq,
         }
@@ -1938,10 +1986,7 @@ impl WorkbenchSessionRegistry {
         };
         let target = tmux_target_for_row(row)?;
         let bump_rows = tmux_force_redraw_bump_rows(row.rows);
-        for (cols, rows) in [
-            (row.cols, bump_rows),
-            (row.cols, row.rows),
-        ] {
+        for (cols, rows) in [(row.cols, bump_rows), (row.cols, row.rows)] {
             let args = tmux_resize_window_args(&target, cols, rows);
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             run_tmux_command(&tmux, &arg_refs)?;
@@ -2256,9 +2301,7 @@ impl WorkbenchSessionRegistry {
             SessionProcess::Fake => {}
         }
         if let Err(error) = self.force_tmux_window_size(&handle.row) {
-            tracing::debug!(
-                "调整工作台 tmux window 尺寸失败 session_id={session_id}: {error}"
-            );
+            tracing::debug!("调整工作台 tmux window 尺寸失败 session_id={session_id}: {error}");
         }
         Ok(handle.row.clone())
     }
@@ -2926,6 +2969,105 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     chunk ring 在裁剪多字节字符时必须保持 Unicode scalar 边界，并继续维护 tail/last_seq 合同。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     容量 4 时依次 append 中文+emoji 与 ASCII，断言 snapshot 尾部、truncated、last_seq 与 char_count。
+    #[test]
+    fn replay_chunk_ring_preserves_unicode_and_tail_contract() {
+        let mut buffer = SessionReplayBuffer::new(4);
+        buffer.append("你🙂", 1);
+        buffer.append("ab", 2);
+        buffer.append("c", 3);
+        let snapshot = buffer.snapshot("s1");
+        assert_eq!(snapshot.buffer, "🙂abc");
+        assert!(snapshot.truncated);
+        assert_eq!(snapshot.last_seq, 3);
+        assert_eq!(buffer.char_count, 4);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     零容量与超大单 chunk 是 ring 裁剪的边界场景，错误实现会留下敏感全文或错误 chunk 数。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     max=0 时 append 后 buffer 为空且 truncated；max=3 时单 chunk "abcdef" 只保留 "def" 且 chunks 长度为 1。
+    #[test]
+    fn replay_chunk_ring_handles_zero_and_large_single_chunk() {
+        let mut zero = SessionReplayBuffer::new(0);
+        zero.append("secret", 1);
+        assert_eq!(zero.snapshot("s0").buffer, "");
+        assert!(zero.snapshot("s0").truncated);
+
+        let mut small = SessionReplayBuffer::new(3);
+        small.append("abcdef", 4);
+        assert_eq!(small.snapshot("s1").buffer, "def");
+        assert_eq!(small.chunks.len(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     满环后每个小 append 应只摊销丢弃头部小 chunk，避免整段历史重建。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     容量 8 填满 a..h 后再 append i，断言尾部为 bcdefghi 且 char_count 仍为 8。
+    #[test]
+    fn full_replay_ring_drops_one_small_head_chunk_per_small_append() {
+        let mut buffer = SessionReplayBuffer::new(8);
+        for (seq, value) in ["a", "b", "c", "d", "e", "f", "g", "h"].iter().enumerate() {
+            buffer.append(value, seq as u64 + 1);
+        }
+        buffer.append("i", 9);
+        assert_eq!(buffer.snapshot("s").buffer, "bcdefghi");
+        assert_eq!(buffer.char_count, 8);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     生产容量 120k 下持续增量 append 不能让 chunk 数或 char_count 随总写入线性膨胀。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先写入 120_000 个单字符 chunk，再追加 10_000 次，断言 char_count 恒定、chunks.len 不增长、snapshot 尾部正确。
+    #[test]
+    fn replay_chunk_ring_large_capacity_keeps_amortized_bounds() {
+        let capacity = SESSION_REPLAY_MAX_CHARS;
+        let mut buffer = SessionReplayBuffer::new(capacity);
+        for i in 0..capacity {
+            let ch = char::from(b'a' + (i % 26) as u8);
+            let text = ch.to_string();
+            buffer.append(&text, (i as u64) + 1);
+        }
+        assert_eq!(buffer.char_count, capacity);
+        assert_eq!(buffer.chunks.len(), capacity);
+        let chunks_before = buffer.chunks.len();
+
+        let extra = 10_000usize;
+        for j in 0..extra {
+            let i = capacity + j;
+            let ch = char::from(b'a' + (i % 26) as u8);
+            let text = ch.to_string();
+            buffer.append(&text, (i as u64) + 1);
+            assert_eq!(buffer.char_count, capacity);
+            assert!(buffer.chunks.len() <= chunks_before);
+        }
+
+        assert!(buffer.snapshot("large").truncated);
+        assert_eq!(buffer.char_count, capacity);
+        assert_eq!(buffer.chunks.len(), capacity);
+
+        let snapshot = buffer.snapshot("large");
+        assert_eq!(snapshot.buffer.chars().count(), capacity);
+        let tail: String = (0..16)
+            .map(|k| {
+                let i = capacity + extra - 16 + k;
+                char::from(b'a' + (i % 26) as u8)
+            })
+            .collect();
+        assert!(
+            snapshot.buffer.ends_with(&tail),
+            "snapshot tail must match last appended characters"
+        );
+        assert_eq!(snapshot.last_seq, (capacity + extra) as u64);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     工作台打开终端时需要先按前端可见区域启动 PTY，避免交互式程序首屏按默认列宽绘制后错位。
     ///
     /// Code Logic（这个测试做什么）:
@@ -3336,7 +3478,10 @@ mod tests {
             ]
         );
         assert_eq!(tmux_force_redraw_bump_rows(42), 41);
-        assert_eq!(tmux_force_redraw_bump_rows(MIN_TERMINAL_ROWS), MIN_TERMINAL_ROWS + 1);
+        assert_eq!(
+            tmux_force_redraw_bump_rows(MIN_TERMINAL_ROWS),
+            MIN_TERMINAL_ROWS + 1
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:
