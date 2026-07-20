@@ -1105,6 +1105,9 @@ mod tests {
             event_bus: Arc::new(crate::backend::event_bus::RuntimeEventBus::new(
                 "test-owner",
             )),
+            backend_control_client_runtime: Arc::new(
+                crate::backend::control_client::BackendControlClientRuntime::new(),
+            ),
         };
         (state, tmp)
     }

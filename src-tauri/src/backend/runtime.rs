@@ -596,6 +596,9 @@ pub async fn build_app_state_with_role(
         runtime_metrics: Arc::new(RuntimeMetrics::new()),
         runtime_role,
         event_bus,
+        backend_control_client_runtime: Arc::new(
+            crate::backend::control_client::BackendControlClientRuntime::new(),
+        ),
     })
 }
 

@@ -36,6 +36,7 @@ use crate::workbench::operation_ledger::MutationTransportClass;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// control 查询超时。
@@ -669,6 +670,22 @@ impl BackendControlClient {
     ///     返回缓存的 control_schema_version。
     pub fn control_schema_version(&self) -> u32 {
         self.control_schema_version
+    }
+
+    /// 比较两个客户端是否绑定同一 control descriptor。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime cache 在失效时必须只清掉“当前仍是同一 descriptor”的缓存，
+    ///     避免误清后来者新加载的 client。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     比较 port、control_token、owner_instance_id 与 control_schema_version；
+    ///     不打印这些字段，也不比较 http client 句柄。
+    pub fn same_descriptor(&self, other: &Self) -> bool {
+        self.port == other.port
+            && self.control_token == other.control_token
+            && self.owner_instance_id == other.owner_instance_id
+            && self.control_schema_version == other.control_schema_version
     }
 
     /// 查询 owner status（安全查询：连接失败可一次性刷新 control file）。
@@ -2126,6 +2143,142 @@ pub fn decide_hotkey_reconcile(
     HotkeyOsReconcileDecision::ManualReconcile
 }
 
+/// control client 加载器类型：生产读 control file，测试可注入固定 client。
+type ControlClientLoader = dyn Fn() -> Result<BackendControlClient, AppError> + Send + Sync;
+
+/// GUI 侧 Backend control client 运行时缓存。
+///
+/// Business Logic（为什么需要这个结构）:
+///     Workbench GUI 每次 proxy 若都重新读 control file + 新建 HTTP client，会放大终端写路径延迟；
+///     同时 mutation 失败后只允许失效缓存，严禁自动重放同一输入批。
+///
+/// Code Logic（这个结构做什么）:
+///     用 Mutex 缓存最近一次成功加载的 `BackendControlClient`；`client()` 命中缓存直接 clone；
+///     `invalidate_if_current` 仅在 descriptor 仍匹配时清空；`workbench_*` 包装失败后失效，
+///     不在同一调用内重新加载并重发 mutation。
+pub struct BackendControlClientRuntime {
+    cached: std::sync::Mutex<Option<BackendControlClient>>,
+    loader: Arc<ControlClientLoader>,
+}
+
+impl BackendControlClientRuntime {
+    /// 构造生产用 runtime：从本机 control file 加载 client。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     AppState / GUI 启动只需一份 runtime，共享缓存直到显式失效。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     loader 绑定 `BackendControlClient::from_control_file`。
+    pub fn new() -> Self {
+        Self::with_loader(BackendControlClient::from_control_file)
+    }
+
+    /// 注入 loader 的构造（测试 / 可替换入口）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     单元测试不得依赖真实 `~/.cc-partner` control file。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     包装任意 `Fn() -> Result<BackendControlClient, AppError>` 为 Arc loader，缓存初始为空。
+    pub fn with_loader(
+        loader: impl Fn() -> Result<BackendControlClient, AppError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            cached: std::sync::Mutex::new(None),
+            loader: Arc::new(loader),
+        }
+    }
+
+    /// 获取可复用的 control client（缓存未命中时加载一次）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI proxy 需要低开销拿到当前 sidecar descriptor 对应的 client。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     锁内若有缓存则 clone 返回；否则调 loader，成功后写入缓存再返回。
+    pub fn client(&self) -> Result<BackendControlClient, AppError> {
+        let mut cached = self.cached.lock().expect("control client cache 锁中毒");
+        if let Some(client) = cached.as_ref() {
+            return Ok(client.clone());
+        }
+        let client = (self.loader)()?;
+        *cached = Some(client.clone());
+        Ok(client)
+    }
+
+    /// 若缓存仍是 observed 同一 descriptor，则清空缓存。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     mutation/查询失败后应在下次业务调用重新读 control file，但不能清掉后来者新缓存。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     锁内比较 `same_descriptor`；匹配才置 None。
+    pub fn invalidate_if_current(&self, observed: &BackendControlClient) {
+        let mut cached = self.cached.lock().expect("control client cache 锁中毒");
+        if cached
+            .as_ref()
+            .is_some_and(|current| current.same_descriptor(observed))
+        {
+            *cached = None;
+        }
+    }
+
+    /// 经缓存 client 执行 workbench 查询/操作（失败时失效缓存，不重放）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient Workbench proxy 应复用缓存 client，错误后让后续调用刷新 descriptor。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `client()` 一次 → `workbench_op`；`Err` 时 `invalidate_if_current`，原样返回错误。
+    pub async fn workbench_op<T: DeserializeOwned>(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<T, AppError> {
+        let client = self.client()?;
+        let result = client.workbench_op(op, payload).await;
+        if result.is_err() {
+            self.invalidate_if_current(&client);
+        }
+        result
+    }
+
+    /// 经缓存 client 执行 workbench mutation（失败时失效缓存，永不自动重放）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     `sessions.write` 等 mutation 在 Failed/Uncertain 后只允许上层构造成 unknown envelope
+    ///     或返回错误；runtime 不得因 cache miss 在本调用内二次发送。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `client()` 一次 → `workbench_mutation_op_value`；`Err` 时 `invalidate_if_current`；
+    ///     不在错误后重新 loader 或再次 POST。
+    pub async fn workbench_mutation_op_value(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<serde_json::Value, MutationControlError> {
+        let client = self.client().map_err(MutationControlError::Failed)?;
+        let result = client.workbench_mutation_op_value(op, payload).await;
+        if result.is_err() {
+            self.invalidate_if_current(&client);
+        }
+        result
+    }
+}
+
+impl Default for BackendControlClientRuntime {
+    /// 默认与 `new()` 相同：生产 control-file loader。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     满足 `Default` 约束，便于测试/结构体字面量。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `Self::new()`。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2642,5 +2795,128 @@ mod tests {
         let body = captured.lock().unwrap().clone().unwrap();
         assert_eq!(body["afterOwnerInstanceId"], "owner-1");
         assert_eq!(body["afterSequence"], 7);
+    }
+
+    /// 验证 runtime 在显式失效前复用同一 client 加载结果。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 热路径必须复用 control client，避免每次 proxy 重读 control file。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     loader 计数：两次 client() 只加载 1 次；invalidate_if_current 后再 client() 加载第 2 次。
+    #[test]
+    fn control_runtime_reuses_client_until_explicit_invalidation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let loads = Arc::new(AtomicUsize::new(0));
+        let runtime = BackendControlClientRuntime::with_loader({
+            let loads = Arc::clone(&loads);
+            move || {
+                loads.fetch_add(1, Ordering::SeqCst);
+                BackendControlClient::for_test(62116, "token", "owner-1")
+            }
+        });
+        let first = runtime.client().unwrap();
+        let second = runtime.client().unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        runtime.invalidate_if_current(&first);
+        let third = runtime.client().unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        assert!(first.same_descriptor(&second));
+        assert!(second.same_descriptor(&third));
+    }
+
+    /// 启动始终失败的 control workbench fixture，计数 sessions.write 调用。
+    ///
+    /// Business Logic（为什么需要这个 helper）:
+    ///     证明 mutation 失败路径不会自动重放同一输入批。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     bind 127.0.0.1:0；workbench/data 对 sessions.write 返回 500 并 AtomicUsize++。
+    async fn spawn_failing_control_workbench_fixture() -> (
+        u16,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::extract::State as AxumState;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct FailState {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WbReq {
+            #[allow(dead_code)]
+            control_token: String,
+            op: String,
+            #[serde(default)]
+            #[allow(dead_code)]
+            payload: serde_json::Value,
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let state = FailState {
+            calls: Arc::clone(&calls),
+        };
+        let app = Router::new()
+            .route(
+                "/api/backend/control/workbench/data",
+                post(
+                    |AxumState(s): AxumState<FailState>, Json(body): Json<WbReq>| async move {
+                        if body.op == "sessions.write" {
+                            s.calls.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err::<Json<serde_json::Value>, _>((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "error": "inject: sessions.write failed",
+                                "code": "internal"
+                            })),
+                        ))
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (port, calls, server)
+    }
+
+    /// 验证 workbench mutation 失败会失效缓存但绝不自动重放。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     sessions.write 失败后重放会把同一输入批写两次，破坏终端语义。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     failing fixture 上调用 workbench_mutation_op_value；断言 Err 且 HTTP 调用数恰好 1。
+    #[tokio::test]
+    async fn workbench_mutation_failure_invalidates_but_never_replays() {
+        use std::sync::atomic::Ordering;
+
+        let (port, calls, _server) = spawn_failing_control_workbench_fixture().await;
+        let runtime = BackendControlClientRuntime::with_loader(move || {
+            BackendControlClient::for_test(port, "token", "owner-1")
+        });
+        let result = runtime
+            .workbench_mutation_op_value(
+                "sessions.write",
+                serde_json::json!({"sessionId":"s1","data":"x"}),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

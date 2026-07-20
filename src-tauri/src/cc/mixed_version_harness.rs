@@ -412,6 +412,9 @@ async fn build_local_state(device_id: &str) -> AppState {
         event_bus: Arc::new(crate::backend::event_bus::RuntimeEventBus::new(format!(
             "mixed-{device_id}"
         ))),
+        backend_control_client_runtime: Arc::new(
+            crate::backend::control_client::BackendControlClientRuntime::new(),
+        ),
     }
 }
 

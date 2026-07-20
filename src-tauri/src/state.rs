@@ -16,6 +16,7 @@
 //!     discovery 句柄用 Mutex<Option<...>>（仅启动/关闭时写）。
 
 use crate::backend::authority::RuntimeRole;
+use crate::backend::control_client::BackendControlClientRuntime;
 use crate::backend::event_bus::RuntimeEventBus;
 use crate::backend::runtime_metrics::RuntimeMetrics;
 use crate::backend::ui::{serialize_event_payload, BackendAsset, BackendUi};
@@ -190,6 +191,9 @@ pub struct AppState {
     pub runtime_role: RuntimeRole,
     /// sidecar 有界事件总线（owner 发布；GUI 经 control relay afterSequence 消费）。
     pub event_bus: Arc<RuntimeEventBus>,
+    /// GUI control client 运行时缓存（复用 loopback client；mutation 失败仅失效、不自动重放）。
+    /// HeadlessOwner 可持有但业务路径不使用，避免双构造路径。
+    pub backend_control_client_runtime: Arc<BackendControlClientRuntime>,
 }
 
 impl AppState {

@@ -7,7 +7,7 @@
 //!     monofile 前部共享定义。
 
 use crate::backend::authority::RuntimeRole;
-use crate::backend::control_client::{BackendControlClient, MutationControlError};
+use crate::backend::control_client::MutationControlError;
 use crate::error::AppError;
 use crate::models::device::Device;
 use crate::state::AppState;
@@ -30,15 +30,15 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// GuiClient 时经 control client 代理 workbench op；否则返回 None 让调用方走本地 owner 路径。
+/// GuiClient 时经缓存 control client 代理 workbench op；否则返回 None 让调用方走本地 owner 路径。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     桌面 GUI 进程是 GuiClient，不得直接执行 Workbench owner 逻辑（PTY/tmux/RemoteClient/bridge）；
 ///     必须把完整 op 代理到 sidecar HeadlessOwner，保证唯一 runtime owner。
 ///
 /// Code Logic（这个函数做什么）:
-///     若 `runtime_role != GuiClient` 返回 `Ok(None)`；否则 `BackendControlClient::from_control_file`
-///     后调用 `workbench_op(op, payload)`，成功时 `Ok(Some(T))`。
+///     若 `runtime_role != GuiClient` 返回 `Ok(None)`；否则经
+///     `state.backend_control_client_runtime.workbench_op` 复用缓存 client，成功时 `Ok(Some(T))`。
 pub(crate) async fn proxy_workbench_if_gui<T: DeserializeOwned>(
     state: &AppState,
     op: &str,
@@ -47,8 +47,12 @@ pub(crate) async fn proxy_workbench_if_gui<T: DeserializeOwned>(
     if state.runtime_role != RuntimeRole::GuiClient {
         return Ok(None);
     }
-    let client = BackendControlClient::from_control_file()?;
-    Ok(Some(client.workbench_op(op, payload).await?))
+    Ok(Some(
+        state
+            .backend_control_client_runtime
+            .workbench_op(op, payload)
+            .await?,
+    ))
 }
 
 /// GuiClient 时代理 workbench mutation 并保留 uncertain→unknown envelope。
@@ -58,8 +62,9 @@ pub(crate) async fn proxy_workbench_if_gui<T: DeserializeOwned>(
 ///     必须保留 unknown envelope（禁止自动重放），不能把 Uncertain 折叠成普通 AppError。
 ///
 /// Code Logic（这个函数做什么）:
-///     非 GuiClient 返回 `Ok(None)`；GuiClient 调 `workbench_mutation_op_value`：
-///     Ok→反序列化 envelope；Uncertain→`WorkbenchMutationEnvelopeDto::unknown`；Failed→Err。
+///     非 GuiClient 返回 `Ok(None)`；GuiClient 经 runtime `workbench_mutation_op_value`
+///     （失败仅失效缓存，不重放当前 mutation）：Ok→反序列化 envelope；
+///     Uncertain→`WorkbenchMutationEnvelopeDto::unknown`；Failed→Err。
 pub(crate) async fn proxy_workbench_mutation_if_gui<T: DeserializeOwned>(
     state: &AppState,
     op: &str,
@@ -69,8 +74,11 @@ pub(crate) async fn proxy_workbench_mutation_if_gui<T: DeserializeOwned>(
     if state.runtime_role != RuntimeRole::GuiClient {
         return Ok(None);
     }
-    let client = BackendControlClient::from_control_file()?;
-    match client.workbench_mutation_op_value(op, payload).await {
+    match state
+        .backend_control_client_runtime
+        .workbench_mutation_op_value(op, payload)
+        .await
+    {
         Ok(value) => {
             let env: WorkbenchMutationEnvelopeDto<T> =
                 serde_json::from_value(value).map_err(|e| {

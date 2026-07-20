@@ -1593,6 +1593,9 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         event_bus: Arc::new(crate::backend::event_bus::RuntimeEventBus::new(
             "session-index-test-owner",
         )),
+        backend_control_client_runtime: Arc::new(
+            crate::backend::control_client::BackendControlClientRuntime::new(),
+        ),
     }
 }
 
