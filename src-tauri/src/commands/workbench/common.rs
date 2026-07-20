@@ -498,15 +498,18 @@ pub(crate) async fn merged_session_dtos(
 ///     R14 M1：并发 list 遇到 in-progress restore 时 wait/共享完成，不得把恢复中行当 ready。
 ///
 /// Code Logic（这个函数做什么）:
-///     读取持久化会话；用 `try_claim_restore` 原子占位（Finding 5 + R14）：
+///     读取持久化会话；用 `try_claim_restore` 原子占位（Finding 5 + R14 + R15）：
 ///     `Claimed` 独占 restore；`AlreadyLive` 跳过；`RestoreInProgress` await watch 完成。
+///     共享 wait 超时返回 retryable `timeout(session_restore_wait_timeout)`，禁止继续 merge 部分清单。
 ///     项目存在时补齐可读 worktree 名再调用 registry.restore（内部 skip-missing），
 ///     成功后写回最新 row；失败标 disconnected；无论成功/失败都释放占位；项目缺失则删除孤儿会话。
 pub(crate) async fn restore_persisted_sessions(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<(), AppError> {
-    use crate::workbench::sessions::{wait_for_shared_restore, RestoreClaimOutcome};
+    use crate::workbench::sessions::{
+        wait_for_shared_restore, RestoreClaimOutcome, SharedRestoreWaitResult,
+    };
 
     state.runtime_role.require_owner()?;
     let rows = state.workbench_session_repo.list(project_id).await?;
@@ -515,9 +518,15 @@ pub(crate) async fn restore_persisted_sessions(
         match state.workbench_sessions.try_claim_restore(&row.id) {
             RestoreClaimOutcome::AlreadyLive => continue,
             RestoreClaimOutcome::RestoreInProgress(rx) => {
-                // 并发 list：共享 in-flight restore，等待完成后再进入 merge。
-                wait_for_shared_restore(rx).await;
-                continue;
+                // 并发 list：共享 in-flight restore；超时必须 fail closed，禁止部分成功清单。
+                match wait_for_shared_restore(rx).await {
+                    SharedRestoreWaitResult::Completed => continue,
+                    SharedRestoreWaitResult::TimedOut => {
+                        return Err(AppError::timeout(
+                            "session_restore_wait_timeout".to_string(),
+                        ));
+                    }
+                }
             }
             RestoreClaimOutcome::Claimed => {}
         }

@@ -1496,18 +1496,68 @@ impl RestoreClaimOutcome {
     }
 }
 
-/// 等待共享 restore 完成（R14 M1）。
+/// 共享 restore 等待的最大时长（R14/R15）。
+///
+/// Business Logic（为什么需要这个常量）:
+///     并发 list 不能无限阻塞；超时后必须返回可重试错误，而不是静默给出不完整清单。
+///
+/// Code Logic（这个常量做什么）:
+///     `wait_for_shared_restore` 与集成测试共用同一上限，避免字面量漂移。
+pub const SHARED_RESTORE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 共享 restore 等待结果（R15 M2）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     调用方必须区分「restore 已结束」与「等待超时」。超时后若继续 `merged_session_dtos`
+///     会过滤仍持 claim 的行并返回成功的部分清单，启动 Provider 会把枚举当完成、
+///     永不重试遗漏的静默会话。
+///
+/// Code Logic（这个枚举做什么）:
+///     `Completed`：watch 收到 true 或 sender drop；
+///     `TimedOut`：超过 `SHARED_RESTORE_WAIT_TIMEOUT` 仍未完成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedRestoreWaitResult {
+    /// in-flight restore 已结束（成功或失败释放 claim）。
+    Completed,
+    /// 等待超时，调用方应返回 retryable timeout/unavailable。
+    TimedOut,
+}
+
+/// 运行期 session 可见性的原子判定结果（R15 M1）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     local / control / mobile / P2P replay 必须共享同一语义：restore claim 已建立但
+///     session 尚未写入 registry 时，不能返回永久 `not_found`（前端会停止 auto-replay）。
+///
+/// Code Logic（这个枚举做什么）:
+///     `Live`：sessions map 已有该 id；
+///     `RestoreInProgress`：restoring map 持有 claim；
+///     `Missing`：既无 live 也无 claim。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRuntimePresence {
+    /// 会话已在运行期 registry，可立即 replay。
+    Live,
+    /// 另一路正在 restore，应返回 retryable unavailable。
+    RestoreInProgress,
+    /// 无 live 也无 claim，才可映射为 not_found。
+    Missing,
+}
+
+/// 等待共享 restore 完成（R14 M1 + R15 M2）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     并发 list 拿到 `RestoreInProgress` 后应等待 in-flight restore 结束再合并 DTO，
-///     避免把恢复中的持久行当作可立即 replay 的会话返回。
+///     避免把恢复中的持久行当作可立即 replay 的会话返回。超时必须显式上报，
+///     禁止调用方在超时后继续返回成功的部分清单。
 ///
 /// Code Logic（这个函数做什么）:
-///     若 receiver 已为 true 立即返回；否则 `changed()` 直到 true 或 sender drop；
-///     整体 60s 超时后返回（超时由调用方配合 `is_restore_claim_held` 省略/可恢复错误处理）。
-pub async fn wait_for_shared_restore(mut rx: tokio::sync::watch::Receiver<bool>) {
+///     若 receiver 已为 true 立即 `Completed`；否则 `changed()` 直到 true 或 sender drop；
+///     超过 `SHARED_RESTORE_WAIT_TIMEOUT` 返回 `TimedOut`。
+pub async fn wait_for_shared_restore(
+    mut rx: tokio::sync::watch::Receiver<bool>,
+) -> SharedRestoreWaitResult {
     if *rx.borrow_and_update() {
-        return;
+        return SharedRestoreWaitResult::Completed;
     }
     let wait = async {
         loop {
@@ -1521,7 +1571,10 @@ pub async fn wait_for_shared_restore(mut rx: tokio::sync::watch::Receiver<bool>)
             }
         }
     };
-    let _ = tokio::time::timeout(Duration::from_secs(60), wait).await;
+    match tokio::time::timeout(SHARED_RESTORE_WAIT_TIMEOUT, wait).await {
+        Ok(()) => SharedRestoreWaitResult::Completed,
+        Err(_) => SharedRestoreWaitResult::TimedOut,
+    }
 }
 
 /// 工作台 PTY 会话注册表。
@@ -1708,6 +1761,47 @@ impl WorkbenchSessionRegistry {
     ///     复用 contains 的只读 HashMap 检查，作为路由层的公开语义化 helper。
     pub fn session_exists(&self, session_id: &str) -> bool {
         self.contains(session_id)
+    }
+
+    /// 原子判定 session 运行期可见性（R15 M1）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     P2P / local / control / mobile 的 replay 入口必须在同一次快照下区分
+    ///     Live / RestoreInProgress / Missing。若先查 row 再单独 `session_exists`，
+    ///     claim 已建立但尚未 insert 时会误报永久 not_found。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先持 sessions 锁检查 live；未命中时在仍持有 sessions 锁下检查 restoring map，
+    ///     与 `try_claim_restore` 相同的锁顺序，返回 `SessionRuntimePresence`。
+    pub fn runtime_presence(&self, session_id: &str) -> SessionRuntimePresence {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        if sessions.contains_key(session_id) {
+            return SessionRuntimePresence::Live;
+        }
+        let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+        if restoring.contains_key(session_id) {
+            SessionRuntimePresence::RestoreInProgress
+        } else {
+            SessionRuntimePresence::Missing
+        }
+    }
+
+    /// 为 replay 路径要求 session 已 live（R15 M1）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     统一 local/control/mobile/P2P replay 的错误语义：restore 中 → retryable
+    ///     `unavailable(session_restore_in_progress)`；缺失 → `not_found`。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 `runtime_presence` 并映射为 `Result<(), AppError>`。
+    pub fn require_live_for_replay(&self, session_id: &str) -> Result<(), AppError> {
+        match self.runtime_presence(session_id) {
+            SessionRuntimePresence::Live => Ok(()),
+            SessionRuntimePresence::RestoreInProgress => Err(AppError::unavailable(
+                "session_restore_in_progress".to_string(),
+            )),
+            SessionRuntimePresence::Missing => Err(AppError::not_found("工作台会话不存在")),
+        }
     }
 
     /// 原子占位：声明"我即将 restore 这个 session"（Finding 5 + R14 M1）。
@@ -3946,7 +4040,7 @@ mod tests {
     ///     过早返回持久行并触发永久 not_found。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     holder claim → waiter 订阅 → spawn wait_for_shared_restore → release → wait 完成。
+    ///     holder claim → waiter 订阅 → spawn wait_for_shared_restore → release → wait Completed。
     #[tokio::test]
     async fn wait_for_shared_restore_unblocks_after_release() {
         let registry = WorkbenchSessionRegistry::new();
@@ -3955,15 +4049,14 @@ mod tests {
         let RestoreClaimOutcome::RestoreInProgress(rx) = second else {
             panic!("second claim must be RestoreInProgress");
         };
-        let wait_handle = tokio::spawn(async move {
-            wait_for_shared_restore(rx).await;
-        });
+        let wait_handle = tokio::spawn(async move { wait_for_shared_restore(rx).await });
         // 给 waiter 一点时间进入 changed loop。
         tokio::task::yield_now().await;
         registry.release_restore_claim("s-wait");
-        wait_handle
+        let result = wait_handle
             .await
             .expect("waiter task must join after release");
+        assert_eq!(result, SharedRestoreWaitResult::Completed);
         assert!(!registry.is_restore_claim_held("s-wait"));
     }
 
@@ -3995,12 +4088,24 @@ mod tests {
             !registry.contains("s-concurrent"),
             "registry must not be ready before holder finishes"
         );
+        assert_eq!(
+            registry.runtime_presence("s-concurrent"),
+            SessionRuntimePresence::RestoreInProgress
+        );
+        assert!(
+            registry.require_live_for_replay("s-concurrent").is_err(),
+            "restore-in-progress must block replay as unavailable, not ready"
+        );
 
         let reg_waiter = registry.clone();
         let waiter = tokio::spawn(async move {
-            wait_for_shared_restore(rx).await;
+            let wait = wait_for_shared_restore(rx).await;
             // wait 结束后要么 live 要么 claim 已释放（失败路径也可重试）。
-            reg_waiter.contains("s-concurrent") || !reg_waiter.is_restore_claim_held("s-concurrent")
+            (
+                wait,
+                reg_waiter.contains("s-concurrent")
+                    || !reg_waiter.is_restore_claim_held("s-concurrent"),
+            )
         });
 
         // 延迟首个 restore：先让 waiter 进入 wait，再完成 attach。
@@ -4012,12 +4117,19 @@ mod tests {
         registry.insert_fake_session_for_test("s-concurrent", "p1");
         registry.release_restore_claim("s-concurrent");
 
+        let (wait_result, ready) = waiter.await.expect("waiter join");
+        assert_eq!(wait_result, SharedRestoreWaitResult::Completed);
         assert!(
-            waiter.await.expect("waiter join"),
+            ready,
             "after shared restore, session must be ready or claim released"
         );
         assert!(registry.session_exists("s-concurrent"));
         assert!(!registry.is_restore_claim_held("s-concurrent"));
+        assert_eq!(
+            registry.runtime_presence("s-concurrent"),
+            SessionRuntimePresence::Live
+        );
+        assert!(registry.require_live_for_replay("s-concurrent").is_ok());
         assert!(
             matches!(
                 registry.try_claim_restore("s-concurrent"),
@@ -4025,5 +4137,154 @@ mod tests {
             ),
             "live session after restore must report AlreadyLive"
         );
+    }
+
+    /// Business Logic（R15 M1: 为什么需要这个测试）:
+    ///     P2P/local/control/mobile replay 必须共享原子 presence：claim 已建立但尚未 live 时
+    ///     只能是 RestoreInProgress，禁止单独 session_exists 漏判成 Missing/not_found。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     空 registry → Missing；claim 后 → RestoreInProgress + require_live unavailable；
+    ///     insert live 后仍 claim → Live（sessions 优先）；release 后 Missing 或 Live。
+    #[test]
+    fn runtime_presence_atomic_live_restore_missing() {
+        let registry = WorkbenchSessionRegistry::new();
+        assert_eq!(
+            registry.runtime_presence("s-presence"),
+            SessionRuntimePresence::Missing
+        );
+        let missing_err = registry
+            .require_live_for_replay("s-presence")
+            .expect_err("missing must be not_found");
+        assert_eq!(missing_err.ipc_category_code(), "not_found");
+
+        assert!(registry.try_claim_restore("s-presence").is_claimed());
+        assert_eq!(
+            registry.runtime_presence("s-presence"),
+            SessionRuntimePresence::RestoreInProgress
+        );
+        // 关键：单独 session_exists 会漏掉 claim 窗口。
+        assert!(!registry.session_exists("s-presence"));
+        let restore_err = registry
+            .require_live_for_replay("s-presence")
+            .expect_err("restore-in-progress must be unavailable");
+        assert_eq!(restore_err.ipc_category_code(), "unavailable");
+        assert_eq!(
+            restore_err.to_string(),
+            "session_restore_in_progress"
+        );
+
+        registry.insert_fake_session_for_test("s-presence", "p1");
+        // live 优先于 claim（与 try_claim_restore 顺序一致）。
+        assert_eq!(
+            registry.runtime_presence("s-presence"),
+            SessionRuntimePresence::Live
+        );
+        assert!(registry.require_live_for_replay("s-presence").is_ok());
+        registry.release_restore_claim("s-presence");
+        assert_eq!(
+            registry.runtime_presence("s-presence"),
+            SessionRuntimePresence::Live
+        );
+    }
+
+    /// Business Logic（R15 M2: 为什么需要这个测试）:
+    ///     共享 wait 超时后必须返回 TimedOut，list 路径据此 fail closed；
+    ///     禁止静默返回成功的不完整会话清单，否则 Provider 永不重试遗漏会话。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     pause 时间 → claim + 订阅 wait → advance 超过 SHARED_RESTORE_WAIT_TIMEOUT
+    ///     → 结果 TimedOut；release 后新 wait 在已完成通道上 Completed。
+    #[tokio::test]
+    async fn wait_for_shared_restore_times_out_and_reports_timed_out() {
+        tokio::time::pause();
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-timeout").is_claimed());
+        let second = registry.try_claim_restore("s-timeout");
+        let RestoreClaimOutcome::RestoreInProgress(rx) = second else {
+            panic!("second claim must be RestoreInProgress");
+        };
+
+        let wait_handle = tokio::spawn(async move { wait_for_shared_restore(rx).await });
+        // 让 waiter 进入 timeout future。
+        tokio::task::yield_now().await;
+        tokio::time::advance(SHARED_RESTORE_WAIT_TIMEOUT + Duration::from_secs(1)).await;
+        let result = wait_handle.await.expect("timeout waiter must join");
+        assert_eq!(
+            result,
+            SharedRestoreWaitResult::TimedOut,
+            "timeout must surface TimedOut so list can return retryable error"
+        );
+        // claim 仍持有：调用方不得把会话当 ready 返回。
+        assert!(registry.is_restore_claim_held("s-timeout"));
+        assert_eq!(
+            registry.runtime_presence("s-timeout"),
+            SessionRuntimePresence::RestoreInProgress
+        );
+
+        // release 后后续 wait 应 Completed（已完成信号）。
+        registry.release_restore_claim("s-timeout");
+        let third = registry.try_claim_restore("s-timeout");
+        assert!(third.is_claimed());
+        let fourth = registry.try_claim_restore("s-timeout");
+        let RestoreClaimOutcome::RestoreInProgress(rx2) = fourth else {
+            panic!("fourth claim must be RestoreInProgress");
+        };
+        registry.release_restore_claim("s-timeout");
+        assert_eq!(
+            wait_for_shared_restore(rx2).await,
+            SharedRestoreWaitResult::Completed
+        );
+    }
+
+    /// Business Logic（R15 M1/M2: 为什么需要这个测试）:
+    ///     并发 restore/replay 窗口：claim held + 未 live 时 require_live 必须 unavailable；
+    ///     wait 超时后仍不可伪装成功 list；holder 完成后可 replay。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     holder claim → concurrent presence/replay 守卫 → pause 超时 TimedOut →
+    ///     holder insert+release → presence Live → require_live Ok。
+    #[tokio::test]
+    async fn concurrent_restore_replay_presence_and_wait_timeout_reenumerate() {
+        tokio::time::pause();
+        let registry = WorkbenchSessionRegistry::new();
+        assert!(registry.try_claim_restore("s-route").is_claimed());
+
+        // 并发 replay 窗口：必须 retryable unavailable，不是 not_found。
+        let err = registry
+            .require_live_for_replay("s-route")
+            .expect_err("in-progress restore blocks replay");
+        assert_eq!(err.ipc_category_code(), "unavailable");
+        assert_eq!(
+            registry.runtime_presence("s-route"),
+            SessionRuntimePresence::RestoreInProgress
+        );
+
+        let second = registry.try_claim_restore("s-route");
+        let RestoreClaimOutcome::RestoreInProgress(rx) = second else {
+            panic!("second claim must be RestoreInProgress");
+        };
+        let wait_handle = tokio::spawn(async move { wait_for_shared_restore(rx).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(SHARED_RESTORE_WAIT_TIMEOUT + Duration::from_millis(500)).await;
+        assert_eq!(
+            wait_handle.await.expect("timeout join"),
+            SharedRestoreWaitResult::TimedOut
+        );
+        // 超时后 claim 仍在：模拟 list 不得成功返回该 session。
+        assert!(registry.is_restore_claim_held("s-route"));
+        assert!(registry.require_live_for_replay("s-route").is_err());
+
+        // holder 最终完成 → 可 re-enumerate / replay。
+        registry.insert_fake_session_for_test("s-route", "p1");
+        registry.release_restore_claim("s-route");
+        assert_eq!(
+            registry.runtime_presence("s-route"),
+            SessionRuntimePresence::Live
+        );
+        assert!(registry.require_live_for_replay("s-route").is_ok());
+        let replay = registry.replay("s-route");
+        assert_eq!(replay.session_id, "s-route");
+        // 不校验 buffer 正文内容，避免敏感/噪声断言。
     }
 }

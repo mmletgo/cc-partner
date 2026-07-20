@@ -1105,7 +1105,9 @@ pub async fn mobile_lan_fleet(
 ///     移动端首次打开 terminal 时错过了历史事件，需要先 replay 最近输出，再接 `/api/workbench/events` 增量。
 ///
 /// Code Logic（这个函数做什么）:
-///     接收 sessionId，先确认它属于对端本机 local 项目且仍在运行期 registry 中，再返回 replay DTO。
+///     接收 sessionId，确认它属于对端本机 local 项目；再以原子
+///     `require_live_for_replay` 判定 Live|RestoreInProgress|Missing，
+///     restore 中映射为 retryable unavailable，避免永久 not_found。
 pub async fn replay_workbench_session(
     State(state): State<AppState>,
     Extension(ctx): Extension<P2pRequestContext>,
@@ -1114,9 +1116,11 @@ pub async fn replay_workbench_session(
     ensure_remote_gateway_local_session_id(&state, &req.session_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.replay"))?;
-    if !state.workbench_sessions.session_exists(&req.session_id) {
-        return Err(P2pError::not_found("工作台会话不存在", &ctx));
-    }
+    // R15 M1：统一原子 presence；RestoreInProgress → unavailable（retryable）。
+    state
+        .workbench_sessions
+        .require_live_for_replay(&req.session_id)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.replay"))?;
     let mut replay = state.workbench_sessions.replay(&req.session_id);
     // P2P 对端 replay 必须携带本机 owner，便于调用方 cutover 按 authority 绑定。
     replay.owner_instance_id = Some(state.config_runtime.owner_instance_id().to_string());

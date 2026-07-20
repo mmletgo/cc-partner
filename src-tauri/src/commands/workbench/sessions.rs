@@ -128,14 +128,10 @@ pub(crate) async fn replay_workbench_session_for_state(
         ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
         return Ok(replay);
     }
-    // R14 M1：restore 仍在进行时禁止永久 not_found；返回 recoverable unavailable，
-    // 让前端 classify 为 recoverable 并继续有界重试，而不是停掉 auto-retry。
-    if state.workbench_sessions.is_restore_claim_held(&session_id) {
-        return Err(AppError::unavailable("session_restore_in_progress".to_string()));
-    }
-    if !state.workbench_sessions.session_exists(&session_id) {
-        return Err(AppError::not_found("工作台会话不存在"));
-    }
+    // R15 M1：原子 Live|RestoreInProgress|Missing；restore 中 → recoverable unavailable。
+    state
+        .workbench_sessions
+        .require_live_for_replay(&session_id)?;
     let mut replay = state.workbench_sessions.replay(&session_id);
     // 本机 PTY ring 的 authority 即 sidecar ownerInstanceId。
     replay.owner_instance_id = Some(state.config_runtime.owner_instance_id().to_string());
