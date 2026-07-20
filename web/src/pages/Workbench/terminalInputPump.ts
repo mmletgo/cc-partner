@@ -10,7 +10,8 @@
  * Code Logic（这个模块做什么）:
  *   维护 session → InputLane（generation/pending/running/blocked/idleWaiters）；enqueue 拼接并
  *   触发 drain；每个 lane 最多一个 in-flight write；write 失败立即 stop-on-failure；
- *   disposeSession 丢弃 pending 并抬高 generation，但保留 in-flight tombstone 直到 write settle。
+ *   disposeSession / recoverSession 丢弃 pending、解除 blocked 并抬高 generation，但保留
+ *   in-flight tombstone 直到 write settle；blocked 状态持续到 disposeSession 或 recoverSession。
  */
 
 export interface TerminalInputPumpOptions {
@@ -28,6 +29,25 @@ export interface TerminalInputPumpOptions {
 export interface TerminalInputPump {
   enqueue: (sessionId: string, data: string) => void;
   disposeSession: (sessionId: string) => void;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   write 失败后 lane 永久 blocked，enqueue 会静默 no-op；sessions.list 等权威刷新成功后
+   *   需要重新开放输入，但绝不能自动重放失败批次（未知是否已执行）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   与 disposeSession 相同：generation++、清空 pending、解除 blocked、settle idle；
+   *   不重放任何已失败或 pending 字节。
+   */
+  recoverSession: (sessionId: string) => void;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   UI / controller 需要查询 lane 是否仍处于 stop-on-write-failure 封锁，以便禁用 xterm 输入
+   *   并避免“键盘黑洞”。
+   *
+   * Code Logic（这个函数做什么）:
+   *   返回该 session 的 lane.blocked；无 lane 时为 false。
+   */
+  isBlocked: (sessionId: string) => boolean;
   dispose: () => void;
   whenIdle: (sessionId: string) => Promise<void>;
 }
@@ -36,7 +56,7 @@ interface InputLane {
   generation: number;
   pending: string;
   running: boolean;
-  /** 任一批次失败后封锁，直到 disposeSession 清掉，禁止继续 drain pending */
+  /** 任一批次失败后封锁，直到 disposeSession / recoverSession 清掉，禁止继续 drain pending */
   blocked: boolean;
   idleWaiters: Set<() => void>;
 }
@@ -47,7 +67,7 @@ interface InputLane {
  *   同时保留字节顺序与“失败不重放、失败后不续发后缀”合同。
  *
  * Code Logic（这个函数做什么）:
- *   创建跨 session 的输入泵；返回 enqueue/disposeSession/dispose/whenIdle 接口。
+ *   创建跨 session 的输入泵；返回 enqueue/disposeSession/recoverSession/isBlocked/dispose/whenIdle。
  */
 export function createTerminalInputPump(options: TerminalInputPumpOptions): TerminalInputPump {
   const lanes = new Map<string, InputLane>();
@@ -131,13 +151,15 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   session close / offline / unmount / 失败恢复前必须丢弃尚未提交的输入，且不得重发 in-flight。
+   *   session close / offline / unmount / 写失败恢复前必须丢弃尚未提交的输入，且不得重发 in-flight。
+   *   disposeSession 与 recoverSession 共享此实现：都抬 generation、清 pending、解 blocked，
+   *   永不自动重放失败批次。
    *
    * Code Logic（这个函数做什么）:
    *   generation++、清空 pending、解除 blocked、强制 settle idle waiters；若无 in-flight 则删除 lane，
    *   若仍有 in-flight 则保留 tombstone（running 保持 true）直到旧 drain settle。
    */
-  const disposeSession = (sessionId: string): void => {
+  const resetSessionLane = (sessionId: string): void => {
     const lane = lanes.get(sessionId);
     if (!lane) return;
     lane.generation += 1;
@@ -171,7 +193,33 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
       lane.pending += data;
       if (!lane.running) void drain(sessionId, lane, lane.generation);
     },
-    disposeSession,
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   session close / offline / unmount 时必须丢弃尚未提交的输入，并解除可能残留的 blocked。
+     *
+     * Code Logic（这个函数做什么）:
+     *   委托 resetSessionLane：generation++、清 pending、解 blocked；保留 in-flight tombstone。
+     */
+    disposeSession: resetSessionLane,
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   write 失败后 lane 永久 blocked，enqueue 静默 no-op 会造成键盘黑洞；权威 sessions.list
+     *   刷新成功后需要重新开放输入，但绝不能自动重放失败批次。
+     *
+     * Code Logic（这个函数做什么）:
+     *   与 disposeSession 共享 resetSessionLane：抬 generation、清 pending/blocked，不重放任何字节。
+     */
+    recoverSession: resetSessionLane,
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   UI / controller 需要知道 session 是否因写失败被封锁，以便禁用 xterm 输入并展示错误。
+     *
+     * Code Logic（这个函数做什么）:
+     *   读取 lane.blocked；无 lane 时返回 false。
+     */
+    isBlocked(sessionId) {
+      return lanes.get(sessionId)?.blocked === true;
+    },
     /**
      * Business Logic（为什么需要这个函数）:
      *   controller unmount 时必须清理全部 lane，避免卸载后仍继续写。
@@ -181,7 +229,7 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
      */
     dispose() {
       disposed = true;
-      for (const sessionId of [...lanes.keys()]) disposeSession(sessionId);
+      for (const sessionId of [...lanes.keys()]) resetSessionLane(sessionId);
     },
     /**
      * Business Logic（为什么需要这个函数）:

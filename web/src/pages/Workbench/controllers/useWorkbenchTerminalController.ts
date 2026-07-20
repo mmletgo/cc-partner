@@ -180,6 +180,15 @@ export interface WorkbenchTerminalControllerResult extends WorkbenchTerminalBrid
   handleCloseSession: (sessionId: string) => Promise<void>;
   handleRenameSession: () => Promise<void>;
   handleInput: (sessionId: string, data: string) => Promise<void>;
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   write 失败后 pump lane 永久 blocked，若 xterm 仍启用输入会变成静默键盘黑洞；
+   *   视图需按 session 禁用 input，直到 loadSessions 成功 recover。
+   *
+   * Code Logic（这个函数做什么）:
+   *   查询 writeBlockedSessionIds 是否包含该 sessionId。
+   */
+  isWriteBlocked: (sessionId: string) => boolean;
   handleResize: (sessionId: string, cols: number, rows: number) => Promise<void>;
   handleRefreshTerminalSize: () => void;
   handleEnterTerminalFullscreen: () => void;
@@ -225,6 +234,11 @@ export function useWorkbenchTerminalController(
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
   const [terminalResizeRequestKey, setTerminalResizeRequestKey] = useState<number>(0);
+  // Business Logic: write 失败后 lane.blocked 对 React 不可见；用 Set 跟踪 blocked session，
+  // 供 UI 禁用 xterm 输入，直到 loadSessions 成功 recoverSession。
+  const [writeBlockedSessionIds, setWriteBlockedSessionIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
   // Business Logic: 异步加载回调返回时，active project / worktree 可能已经切换；用 ref 读取最新 id 做 stale guard。
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
@@ -243,6 +257,8 @@ export function useWorkbenchTerminalController(
   const terminalInputPumpRef = useRef<TerminalInputPump | null>(null);
   // Business Logic: write 失败上报回调经 ref 注入，泵 effect 保持 [] 依赖，避免 StrictMode/依赖抖动。
   const reportWriteErrorRef = useRef<(sessionId: string, error: unknown) => void>(() => {});
+  // Business Logic: onWriteError / loadSessions / dispose 路径都要读写 blocked 集合；ref 保证异步回调读到最新 Set。
+  const writeBlockedSessionIdsRef = useRef<ReadonlySet<string>>(writeBlockedSessionIds);
   useEffect(() => {
     canListenToTauriEventsRef.current = canListenToTauriEventsParam;
   });
@@ -255,6 +271,47 @@ export function useWorkbenchTerminalController(
     activeWorktreeIdRef.current = activeWorktreeId;
   }, [activeWorktreeId]);
 
+  useEffect(() => {
+    writeBlockedSessionIdsRef.current = writeBlockedSessionIds;
+  }, [writeBlockedSessionIds]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   session 消失（close / list 替换 / worktree clear）时，对应 write-blocked 跟踪必须同步移除，
+   *   否则 UI 可能对已不存在的 id 保留陈旧封锁标记。
+   *
+   * Code Logic（这个函数做什么）:
+   *   若 Set 含 sessionId 则删掉并 setState；无变化时保持同一 Set 引用。
+   */
+  const untrackWriteBlocked = useCallback((sessionId: string): void => {
+    setWriteBlockedSessionIds((prev) => {
+      if (!prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.delete(sessionId);
+      writeBlockedSessionIdsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   sessions.list 权威刷新成功后，必须解除所有写失败封锁，让用户可再次输入；
+   *   但绝不能自动重放失败批次。
+   *
+   * Code Logic（这个函数做什么）:
+   *   对当前 blocked ids 调用 pump.recoverSession，再清空 React blocked Set。
+   */
+  const recoverAllWriteBlockedSessions = useCallback((): void => {
+    const blocked = writeBlockedSessionIdsRef.current;
+    if (blocked.size === 0) return;
+    for (const sessionId of blocked) {
+      terminalInputPumpRef.current?.recoverSession(sessionId);
+    }
+    const empty = new Set<string>();
+    writeBlockedSessionIdsRef.current = empty;
+    setWriteBlockedSessionIds(empty);
+  }, []);
+
   // Business Logic: sessions 变化时同步 knownSessionIdsRef；对已消失的 session 丢弃输入 pending，
   // 覆盖 close / loadSessions 项目切换 / 列表替换，但不触碰仍存活的 session。
   useEffect(() => {
@@ -262,10 +319,11 @@ export function useWorkbenchTerminalController(
     for (const previousId of knownSessionIdsRef.current) {
       if (!nextIds.has(previousId)) {
         terminalInputPumpRef.current?.disposeSession(previousId);
+        untrackWriteBlocked(previousId);
       }
     }
     knownSessionIdsRef.current = nextIds;
-  }, [sessions]);
+  }, [sessions, untrackWriteBlocked]);
 
   // Business Logic: mount 时创建输入泵；unmount/StrictMode cleanup 时 dispose 并清空 ref，
   // 下次 setup 重建，避免 disposed 泵永久吞掉全部 enqueue。
@@ -290,6 +348,11 @@ export function useWorkbenchTerminalController(
     if (!prevRemoteWriteDisabledRef.current && remoteWriteDisabled) {
       for (const sessionId of knownSessionIdsRef.current) {
         terminalInputPumpRef.current?.disposeSession(sessionId);
+      }
+      if (writeBlockedSessionIdsRef.current.size > 0) {
+        const empty = new Set<string>();
+        writeBlockedSessionIdsRef.current = empty;
+        setWriteBlockedSessionIds(empty);
       }
     }
     prevRemoteWriteDisabledRef.current = remoteWriteDisabled;
@@ -356,10 +419,18 @@ export function useWorkbenchTerminalController(
     [translateError],
   );
 
-  // Business Logic: 输入泵 write 失败后封锁 lane，并把错误投影到 sessionError 供 UI 提示。
+  // Business Logic: 输入泵 write 失败后封锁 lane，投影 sessionError，并记录 blocked session
+  // 供 UI 禁用 xterm 输入（避免 enqueue 静默 no-op 变成键盘黑洞）。
   useEffect(() => {
-    reportWriteErrorRef.current = (_sessionId, error) => {
+    reportWriteErrorRef.current = (sessionId, error) => {
       setSessionError(displayErrorMessage(error, t('writeSession')));
+      setWriteBlockedSessionIds((prev) => {
+        if (prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        next.add(sessionId);
+        writeBlockedSessionIdsRef.current = next;
+        return next;
+      });
     };
   }, [displayErrorMessage, t]);
 
@@ -482,9 +553,13 @@ export function useWorkbenchTerminalController(
         for (const previousId of knownSessionIdsRef.current) {
           if (!nextIds.has(previousId)) {
             terminalInputPumpRef.current?.disposeSession(previousId);
+            untrackWriteBlocked(previousId);
           }
         }
         knownSessionIdsRef.current = nextIds;
+        // Business Logic: 权威 list 成功后解除写失败封锁；recoverSession 只开新 generation，
+        // 绝不自动重放失败批次。sessionError 已在 try 开头清空。
+        recoverAllWriteBlockedSessions();
         setSessions(list);
         updateActiveSession(list);
         void refreshProjectSessionStats(resolvedProjectId);
@@ -504,8 +579,10 @@ export function useWorkbenchTerminalController(
       isCurrentProject,
       markRequestFailure,
       markRequestSuccess,
+      recoverAllWriteBlockedSessions,
       refreshProjectSessionStats,
       t,
+      untrackWriteBlocked,
       updateActiveSession,
     ],
   );
@@ -678,6 +755,7 @@ export function useWorkbenchTerminalController(
         knownSessionIdsRef.current.delete(result.sessionId);
         removeTerminalBuffer(result.sessionId);
         terminalInputPumpRef.current?.disposeSession(result.sessionId);
+        untrackWriteBlocked(result.sessionId);
       }
       await loadSessions(projectId);
     } catch (error) {
@@ -692,6 +770,7 @@ export function useWorkbenchTerminalController(
     removeTerminalBuffer,
     remoteWriteDisabled,
     t,
+    untrackWriteBlocked,
     updateActiveSession,
   ]);
 
@@ -728,6 +807,7 @@ export function useWorkbenchTerminalController(
         knownSessionIdsRef.current.delete(sessionId);
         removeTerminalBuffer(sessionId);
         terminalInputPumpRef.current?.disposeSession(sessionId);
+        untrackWriteBlocked(sessionId);
         if (sourceProjectId) void refreshProjectSessionStats(sourceProjectId);
       } catch (error) {
         if (activeProjectIdRef.current !== sourceProjectId) {
@@ -745,6 +825,7 @@ export function useWorkbenchTerminalController(
       removeTerminalBuffer,
       remoteWriteDisabled,
       t,
+      untrackWriteBlocked,
       updateActiveSession,
     ],
   );
@@ -799,6 +880,19 @@ export function useWorkbenchTerminalController(
       terminalInputPumpRef.current?.enqueue(sessionId, data);
     },
     [remoteWriteDisabled],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   write 失败后 pump 会 silent-block enqueue；视图需用本查询禁用 xterm 输入，
+   *   并配合 sessionError 让用户看到错误而非键盘黑洞。
+   *
+   * Code Logic（这个函数做什么）:
+   *   查询 writeBlockedSessionIds 是否包含 sessionId。
+   */
+  const isWriteBlocked = useCallback(
+    (sessionId: string): boolean => writeBlockedSessionIds.has(sessionId),
+    [writeBlockedSessionIds],
   );
 
   /**
@@ -870,9 +964,10 @@ export function useWorkbenchTerminalController(
       sessionsForWorktree(sessions, worktreeId).forEach((session) => {
         removeTerminalBuffer(session.id);
         terminalInputPumpRef.current?.disposeSession(session.id);
+        untrackWriteBlocked(session.id);
       });
     },
-    [removeTerminalBuffer, sessions],
+    [removeTerminalBuffer, sessions, untrackWriteBlocked],
   );
 
   // Business Logic: 与原 Workbench.tsx 行为一致——scopedSessions 变化时（如 worktree 切换、close session）
@@ -981,6 +1076,7 @@ export function useWorkbenchTerminalController(
     handleCloseSession,
     handleRenameSession,
     handleInput,
+    isWriteBlocked,
     handleResize,
     handleRefreshTerminalSize,
     handleEnterTerminalFullscreen,

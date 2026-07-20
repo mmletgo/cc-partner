@@ -9,16 +9,20 @@
  *
  * Code Logic（这个模块做什么）:
  *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline replay；
- *   append 携带 seq 做 cutover；reset 写入 buffer + lastSeq。
+ *   live 带 seq 的事件写入有界 held map；resync/baseline 走 applyTerminalBaselineCutover
+ *   （reset 后再 re-append seq > lastSeq 的 held live）。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { workbenchApi } from '@/api/workbench';
 import type { WorkbenchTerminalOutputEvent } from '@/lib/types';
 import {
+  applyTerminalBaselineCutover,
   createWorkbenchTerminalBufferStore,
+  MAX_HELD_LIVE_TERMINAL_EVENTS,
+  type HeldLiveTerminalEvent,
   type WorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffer';
 import {
@@ -64,12 +68,24 @@ export function WorkbenchTerminalBuffersProvider({
   const [store] = useState<WorkbenchTerminalBufferStore>(() =>
     createWorkbenchTerminalBufferStore(),
   );
+  /**
+   * Business Logic（为什么需要这个 ref）:
+   *   baseline/resync 异步完成前 live 事件可能已带更新 seq 到达；必须跨 listener 闭包
+   *   稳定暂存，供 cutover 后写回，否则 reset 会永久抹掉 relay 不会重发的 chunk。
+   *
+   * Code Logic（这个 ref 做什么）:
+   *   sessionId → 最近有界 HeldLiveTerminalEvent[]；listener 只读写 ref.current。
+   */
+  const heldLiveBySessionRef = useRef<Map<string, HeldLiveTerminalEvent[]>>(
+    new Map(),
+  );
 
   const resetBuffer = useCallback((sessionId: string) => {
     store.reset(sessionId);
   }, [store]);
 
   const removeBuffer = useCallback((sessionId: string) => {
+    heldLiveBySessionRef.current.delete(sessionId);
     store.remove(sessionId);
   }, [store]);
 
@@ -81,10 +97,37 @@ export function WorkbenchTerminalBuffersProvider({
 
     /**
      * Business Logic（为什么需要这个函数）:
+     *   cutover 路径（resync / baseline replay）不能只 reset，否则会抹掉 held 中更新的 live。
+     *
+     * Code Logic（这个函数做什么）:
+     *   读取 session held → applyTerminalBaselineCutover → 用 pruned 列表回写 map。
+     */
+    const applyCutover = (
+      sessionId: string,
+      buffer: string,
+      lastSeq: number,
+    ): void => {
+      const held = heldLiveBySessionRef.current.get(sessionId) ?? [];
+      const pruned = applyTerminalBaselineCutover(
+        store,
+        sessionId,
+        buffer,
+        lastSeq,
+        held,
+      );
+      if (pruned.length === 0) {
+        heldLiveBySessionRef.current.delete(sessionId);
+      } else {
+        heldLiveBySessionRef.current.set(sessionId, pruned);
+      }
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
      *   必须先挂 listener 再 baseline，避免 subscribe 与 replay 之间的 live 输出永久丢失。
      *
      * Code Logic（这个函数做什么）:
-     *   await 两个 listen；output 带 seq append；resync 用 buffer+lastSeq reset；
+     *   await 两个 listen；output 暂存带 seq live 后 append；resync/baseline 走 cutover；
      *   随后 list 全部 session 并逐个 replay baseline（单 session 失败跳过）。
      */
     const setup = async (): Promise<void> => {
@@ -94,7 +137,19 @@ export function WorkbenchTerminalBuffersProvider({
           (event) => {
             const payload = event.payload;
             if (!payload?.sessionId) return;
-            store.append(payload.sessionId, payload.chunk ?? '', payload.seq);
+            const sessionId = payload.sessionId;
+            const chunk = payload.chunk ?? '';
+            const seq = payload.seq;
+            if (typeof seq === 'number' && Number.isFinite(seq)) {
+              const held =
+                heldLiveBySessionRef.current.get(sessionId) ?? [];
+              held.push({ chunk, seq });
+              if (held.length > MAX_HELD_LIVE_TERMINAL_EVENTS) {
+                held.splice(0, held.length - MAX_HELD_LIVE_TERMINAL_EVENTS);
+              }
+              heldLiveBySessionRef.current.set(sessionId, held);
+            }
+            store.append(sessionId, chunk, seq);
           },
         );
         unlistenResync = await listen<{
@@ -109,7 +164,7 @@ export function WorkbenchTerminalBuffersProvider({
             typeof payload.lastSeq === 'number' && Number.isFinite(payload.lastSeq)
               ? payload.lastSeq
               : 0;
-          store.reset(sessionId, payload.buffer ?? '', lastSeq);
+          applyCutover(sessionId, payload.buffer ?? '', lastSeq);
         });
       } catch {
         // 非 Tauri 或 listen 失败：不 baseline
@@ -131,7 +186,7 @@ export function WorkbenchTerminalBuffersProvider({
             try {
               const replay = await workbenchApi.sessions.replay(session.id);
               if (cancelled) return;
-              store.reset(replay.sessionId, replay.buffer, replay.lastSeq);
+              applyCutover(replay.sessionId, replay.buffer, replay.lastSeq);
             } catch {
               // 单 session replay 失败不阻断其它 session；后续 resync / live 仍可恢复。
             }

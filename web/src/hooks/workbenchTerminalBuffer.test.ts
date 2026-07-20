@@ -2,10 +2,12 @@ import { describe, expect, test } from 'vitest';
 import { planTerminalBufferWrite } from '@/pages/Workbench/terminalReplay';
 import {
   appendWorkbenchTerminalOutput,
+  applyTerminalBaselineCutover,
   createWorkbenchTerminalBufferStore,
   MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
   removeWorkbenchTerminalBuffer,
   resetWorkbenchTerminalBuffer,
+  type HeldLiveTerminalEvent,
   type TerminalBufferDelta,
   type TerminalFrameScheduler,
 } from './workbenchTerminalBuffer';
@@ -477,5 +479,82 @@ describe('workbenchTerminalBuffer', () => {
     expect(store.getLastSeq('s1')).toBe(6);
     expect(deltas).toHaveLength(1);
     expect(deltas[0]?.chunk).toBe('live');
+  });
+});
+
+describe('applyTerminalBaselineCutover', () => {
+  test('stale baseline lastSeq=N-1 re-applies held live seq=N after reset', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+
+    // live seq=N 先到达并 append（模拟 race 中 held 侧也记录了该事件）
+    store.append('s1', 'liveN', 10);
+    expect(store.getBuffer('s1')).toBe('liveN');
+    expect(store.getLastSeq('s1')).toBe(10);
+
+    const held: HeldLiveTerminalEvent[] = [{ chunk: 'liveN', seq: 10 }];
+
+    // 过期 baseline/replay 完成：lastSeq=N-1，若只 reset 会抹掉 liveN
+    const pruned = applyTerminalBaselineCutover(
+      store,
+      's1',
+      'BASE',
+      9,
+      held,
+    );
+
+    expect(store.getBuffer('s1')).toBe('BASEliveN');
+    expect(store.getLastSeq('s1')).toBe(10);
+    expect(pruned).toEqual([{ chunk: 'liveN', seq: 10 }]);
+  });
+
+  test('resync cutover drops held events with seq <= lastSeq and keeps newer ones', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+
+    // 模拟 live 先入队：旧 seq 与更新 seq 均 held
+    store.append('s1', 'old8', 8);
+    store.append('s1', 'liveN', 10);
+
+    const held: HeldLiveTerminalEvent[] = [
+      { chunk: 'old8', seq: 8 },
+      { chunk: 'dup9', seq: 9 },
+      { chunk: 'liveN', seq: 10 },
+      { chunk: 'live11', seq: 11 },
+    ];
+
+    // resync：buffer 覆盖到 lastSeq=9
+    const pruned = applyTerminalBaselineCutover(
+      store,
+      's1',
+      'BASE',
+      9,
+      held,
+    );
+
+    expect(store.getBuffer('s1')).toBe('BASEliveNlive11');
+    expect(store.getLastSeq('s1')).toBe(11);
+    expect(pruned).toEqual([
+      { chunk: 'liveN', seq: 10 },
+      { chunk: 'live11', seq: 11 },
+    ]);
+  });
+
+  test('empty held list is pure reset cutover', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    store.append('s1', 'stale', 3);
+
+    const pruned = applyTerminalBaselineCutover(store, 's1', 'BASE', 5, []);
+
+    expect(store.getBuffer('s1')).toBe('BASE');
+    expect(store.getLastSeq('s1')).toBe(5);
+    expect(pruned).toEqual([]);
   });
 });

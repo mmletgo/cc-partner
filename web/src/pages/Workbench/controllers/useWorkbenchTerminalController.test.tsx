@@ -1254,6 +1254,74 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     expect(calls).toEqual(['a']);
   });
 
+  test('write failure blocks input until successful loadSessions recovers without replaying failed batch', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const session = buildSession({ id: 's1' });
+    fakeSessionsApi.list.mockResolvedValue([session]);
+    const calls: string[] = [];
+    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+      calls.push(data);
+      if (data === 'bad') {
+        throw new Error('write failed');
+      }
+      return { ok: true, sessionId: 's1' };
+    });
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'bad');
+      // 失败前缀后的后缀不得发送；blocked 后 enqueue 必须 no-op。
+      void result.current.handleInput('s1', 'suffix');
+      await flushMicrotasks(12);
+    });
+
+    expect(calls).toEqual(['bad']);
+    expect(result.current.sessionError).toContain('write failed');
+    expect(result.current.isWriteBlocked('s1')).toBe(true);
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'more');
+      await flushMicrotasks(6);
+    });
+    expect(calls).toEqual(['bad']);
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks(12);
+    });
+
+    // 成功 list 解除封锁；不得自动重放 failed batch / blocked 期间 pending。
+    expect(result.current.isWriteBlocked('s1')).toBe(false);
+    expect(result.current.sessionError).toBeNull();
+    expect(calls).toEqual(['bad']);
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'ok');
+      await flushMicrotasks(12);
+    });
+    expect(calls).toEqual(['bad', 'ok']);
+    expect(result.current.isWriteBlocked('s1')).toBe(false);
+  });
+
   test('handleResize clamps cols/rows to min bounds and forwards to API', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();

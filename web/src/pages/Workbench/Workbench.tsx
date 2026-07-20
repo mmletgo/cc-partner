@@ -188,6 +188,7 @@ export function Workbench() {
     handleCloseSession,
     handleRenameSession,
     handleInput,
+    isWriteBlocked,
     handleResize,
     handleRefreshTerminalSize,
   } = terminalController;
@@ -1055,6 +1056,7 @@ export function Workbench() {
               renderedActiveSessionId={renderedActiveSessionId}
               terminalResizeRequestKey={terminalResizeRequestKey}
               handleInput={handleInput}
+              isWriteBlocked={isWriteBlocked}
               handleResize={handleResize}
               handleCursorAnchorChange={handleCursorAnchorChange}
               focusSession={focusSession}

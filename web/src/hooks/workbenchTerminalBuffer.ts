@@ -155,6 +155,53 @@ const EMPTY_SNAPSHOT: TerminalBufferSnapshot = {
 };
 
 /**
+ * Business Logic（为什么需要这个类型）:
+ *   baseline/resync Promise 完成前，live terminal-output 可能已带着更新的 seq 到达；
+ *   Provider 需要暂存这些事件，避免 cutover 后永久丢失 relay 不会重发的 chunk。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述一条带 owner seq 的 live 输出；chunk 为原始字符串，seq 为有限 number。
+ */
+export interface HeldLiveTerminalEvent {
+  chunk: string;
+  seq: number;
+}
+
+/** Provider 侧每个 session 最多暂存的带 seq live 事件条数（有界，防内存膨胀）。 */
+export const MAX_HELD_LIVE_TERMINAL_EVENTS = 256;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   过期 baseline/resync 的 reset 会抹掉 reset 前已 append 的更新 live chunk，
+ *   而 owner relay 不会重发这些 seq；cutover 必须在 reset 后把 held 中更新的事件写回。
+ *
+ * Code Logic（这个函数做什么）:
+ *   先 store.reset(sessionId, buffer, lastSeq)；再按序对 held 中 seq > lastSeq 的事件
+ *   store.append(sessionId, chunk, seq)；返回仍应保留跟踪的 pruned held 列表。
+ */
+export function applyTerminalBaselineCutover(
+  store: WorkbenchTerminalBufferStore,
+  sessionId: string,
+  buffer: string,
+  lastSeq: number,
+  heldLiveEvents: readonly HeldLiveTerminalEvent[],
+): HeldLiveTerminalEvent[] {
+  store.reset(sessionId, buffer, lastSeq);
+  const pruned: HeldLiveTerminalEvent[] = [];
+  for (const event of heldLiveEvents) {
+    if (typeof event.seq !== 'number' || !Number.isFinite(event.seq)) {
+      continue;
+    }
+    if (event.seq <= lastSeq) {
+      continue;
+    }
+    store.append(sessionId, event.chunk, event.seq);
+    pruned.push(event);
+  }
+  return pruned;
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   Workbench 页面切出后，常驻终端 Provider 仍要持续缓存 PTY/tmux 输出，切回时 xterm 可 replay。
  *

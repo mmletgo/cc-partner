@@ -47,6 +47,14 @@ export interface WorkbenchTerminalAreaProps {
   renderedActiveSessionId: string | null;
   terminalResizeRequestKey: number;
   handleInput: (sessionId: string, data: string) => void;
+  /**
+   * Business Logic（为什么需要这个回调）:
+   *   write 失败后输入泵 silent-block enqueue；UI 必须禁用 xterm 输入，避免键盘黑洞。
+   *
+   * Code Logic（这个回调做什么）:
+   *   查询 controller 的 isWriteBlocked(sessionId)；true 时 inputEnabled=false。
+   */
+  isWriteBlocked: (sessionId: string) => boolean;
   handleResize: (sessionId: string, cols: number, rows: number) => void;
   handleCursorAnchorChange: (anchor: TerminalCursorAnchor | null) => void;
   focusSession: (sessionId: string) => void;
@@ -81,6 +89,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
     renderedActiveSessionId,
     terminalResizeRequestKey,
     handleInput,
+    isWriteBlocked,
     handleResize,
     handleCursorAnchorChange,
     focusSession,
@@ -162,7 +171,8 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
                 !automationConsoleOpen &&
                 workspaceView === 'terminal' &&
                 session.id === renderedActiveSessionId &&
-                !remoteWriteDisabled
+                !remoteWriteDisabled &&
+                !isWriteBlocked(session.id)
               }
               onCursorAnchorChange={
                 !automationConsoleOpen &&

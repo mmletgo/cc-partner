@@ -121,4 +121,31 @@ describe("terminalInputPump", () => {
     expect(write).toHaveBeenCalledTimes(2);
     expect(write.mock.calls[1]?.[1]).toBe("ok");
   });
+
+  test("recoverSession unblocks after failure without replaying failed batch or pending", async () => {
+    const write = vi.fn(async (_sessionId: string, data: string) => {
+      if (data === "bad") throw new Error("fail");
+    });
+    const pump = createTerminalInputPump({ write });
+    pump.enqueue("s1", "bad");
+    await pump.whenIdle("s1");
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(pump.isBlocked("s1")).toBe(true);
+
+    // blocked 期间 enqueue 必须 no-op，且 recover 不得重放这些字节。
+    pump.enqueue("s1", "should-not-send");
+    await pump.whenIdle("s1");
+    expect(write).toHaveBeenCalledTimes(1);
+
+    pump.recoverSession("s1");
+    expect(pump.isBlocked("s1")).toBe(false);
+    // recover 后不得自动重放 failed batch 或 blocked 期间的 pending。
+    await pump.whenIdle("s1");
+    expect(write).toHaveBeenCalledTimes(1);
+
+    pump.enqueue("s1", "ok");
+    await pump.whenIdle("s1");
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(write.mock.calls[1]?.[1]).toBe("ok");
+  });
 });
