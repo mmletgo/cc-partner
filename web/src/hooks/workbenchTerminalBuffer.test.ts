@@ -13,6 +13,7 @@ import {
   resetWorkbenchTerminalBuffer,
   setTerminalCutoverReplayInFlight,
   shouldAcceptTerminalCutover,
+  shouldClearTerminalNeedsReplay,
   type HeldLiveTerminalEvent,
   type TerminalBufferDelta,
   type TerminalFrameScheduler,
@@ -619,19 +620,36 @@ describe('session cutover epoch / committed baseline', () => {
     let state = createEmptySessionCutoverState();
     state = commitTerminalCutover(state, 5);
     expect(state.needsReplay).toBe(false);
+    expect(state.overflowHighWaterSeq).toBe(0);
 
-    const first = beginHeldOverflowReplay(state);
+    const first = beginHeldOverflowReplay(state, 40);
     expect(first.requestEpoch).toBe(1);
     expect(first.state.cutoverEpoch).toBe(1);
     expect(first.state.needsReplay).toBe(true);
     expect(first.state.committedBaselineLastSeq).toBe(5);
+    expect(first.state.overflowHighWaterSeq).toBe(40);
 
-    // 并发再次 overflow：抬 epoch，旧 in-flight 的 requestEpoch=1 应失效
-    const second = beginHeldOverflowReplay(first.state);
+    // 并发再次 overflow：抬 epoch，旧 in-flight 的 requestEpoch=1 应失效；high water 取 max
+    const second = beginHeldOverflowReplay(first.state, 30);
     expect(second.requestEpoch).toBe(2);
     expect(second.state.cutoverEpoch).toBe(2);
+    expect(second.state.overflowHighWaterSeq).toBe(40);
     expect(shouldAcceptTerminalCutover(second.state, 100, 1)).toBe(false);
     expect(shouldAcceptTerminalCutover(second.state, 100, 2)).toBe(true);
+  });
+
+  test('beginHeldOverflowReplay records max high water across successive overflows', () => {
+    let state = createEmptySessionCutoverState();
+    const first = beginHeldOverflowReplay(state, 10);
+    expect(first.state.overflowHighWaterSeq).toBe(10);
+
+    const second = beginHeldOverflowReplay(first.state, 25);
+    expect(second.state.overflowHighWaterSeq).toBe(25);
+
+    const third = beginHeldOverflowReplay(second.state, 12);
+    expect(third.state.overflowHighWaterSeq).toBe(25);
+    expect(third.state.needsReplay).toBe(true);
+    expect(third.requestEpoch).toBe(3);
   });
 
   test('held overflow decision: >MAX_HELD requires clear+replay, not drop-oldest', () => {
@@ -648,10 +666,16 @@ describe('session cutover epoch / committed baseline', () => {
     const overflowed = held.length > MAX_HELD_LIVE_TERMINAL_EVENTS;
     expect(overflowed).toBe(true);
 
-    // 正确语义：清空 held + 抬 epoch
+    // 正确语义：清空 held 前算 highWater + 抬 epoch
+    let highWater = 0;
+    for (const event of held) {
+      if (typeof event.seq === 'number' && Number.isFinite(event.seq)) {
+        highWater = Math.max(highWater, event.seq);
+      }
+    }
     const cleared: HeldLiveTerminalEvent[] = [];
     let state = createEmptySessionCutoverState();
-    const { state: next, requestEpoch } = beginHeldOverflowReplay(state);
+    const { state: next, requestEpoch } = beginHeldOverflowReplay(state, highWater);
     state = setTerminalCutoverReplayInFlight(next, true);
 
     expect(cleared).toEqual([]);
@@ -659,6 +683,7 @@ describe('session cutover epoch / committed baseline', () => {
     expect(state.needsReplay).toBe(true);
     expect(state.replayInFlight).toBe(true);
     expect(state.cutoverEpoch).toBe(1);
+    expect(state.overflowHighWaterSeq).toBe(MAX_HELD_LIVE_TERMINAL_EVENTS + 1);
 
     // 禁止 drop-oldest：若错误 splice 会保留尾部 256 条并丢前缀，语义不可接受。
     const wrongDropOldest = held.slice(-(MAX_HELD_LIVE_TERMINAL_EVENTS));
@@ -666,15 +691,77 @@ describe('session cutover epoch / committed baseline', () => {
     expect(cleared.length).toBe(0); // 正确路径不保留任何 held 缺口
   });
 
-  test('commitTerminalCutover clears needsReplay after successful apply', () => {
+  test('commit with matching requestEpoch clears needsReplay after overflow', () => {
     let state = createEmptySessionCutoverState();
-    const overflow = beginHeldOverflowReplay(state);
+    const overflow = beginHeldOverflowReplay(state, 100);
+    state = overflow.state;
+    expect(state.needsReplay).toBe(true);
+    expect(state.overflowHighWaterSeq).toBe(100);
+
+    // matching epoch 即使 lastSeq < highWater 也清 needsReplay
+    state = commitTerminalCutover(state, 42, overflow.requestEpoch);
+    expect(state.committedBaselineLastSeq).toBe(42);
+    expect(state.needsReplay).toBe(false);
+    expect(state.overflowHighWaterSeq).toBe(0);
+    expect(state.cutoverEpoch).toBe(1); // epoch 不回退
+  });
+
+  test('overflow then epoch-less commit with lastSeq < highWater keeps needsReplay', () => {
+    let state = createEmptySessionCutoverState();
+    const overflow = beginHeldOverflowReplay(state, 100);
+    state = overflow.state;
+    expect(state.needsReplay).toBe(true);
+    expect(state.overflowHighWaterSeq).toBe(100);
+
+    // launch baseline / terminal-resync 无 epoch；lastSeq 未盖住 high-water 不得清 needsReplay
+    state = commitTerminalCutover(state, 50);
+    expect(state.committedBaselineLastSeq).toBe(50);
+    expect(state.needsReplay).toBe(true);
+    expect(state.overflowHighWaterSeq).toBe(100);
+    expect(state.cutoverEpoch).toBe(1);
+  });
+
+  test('epoch-less commit with lastSeq >= highWater clears needsReplay', () => {
+    let state = createEmptySessionCutoverState();
+    const overflow = beginHeldOverflowReplay(state, 80);
     state = overflow.state;
     expect(state.needsReplay).toBe(true);
 
-    state = commitTerminalCutover(state, 42);
-    expect(state.committedBaselineLastSeq).toBe(42);
+    state = commitTerminalCutover(state, 80);
+    expect(state.committedBaselineLastSeq).toBe(80);
     expect(state.needsReplay).toBe(false);
-    expect(state.cutoverEpoch).toBe(1); // epoch 不回退
+    expect(state.overflowHighWaterSeq).toBe(0);
+  });
+
+  test('shouldClearTerminalNeedsReplay: epoch match / highWater / nothing-to-protect', () => {
+    const empty = createEmptySessionCutoverState();
+    expect(shouldClearTerminalNeedsReplay(empty, 0)).toBe(true);
+
+    let state = beginHeldOverflowReplay(empty, 100).state;
+    expect(shouldClearTerminalNeedsReplay(state, 50)).toBe(false);
+    expect(shouldClearTerminalNeedsReplay(state, 100)).toBe(true);
+    expect(shouldClearTerminalNeedsReplay(state, 50, 1)).toBe(true);
+    expect(shouldClearTerminalNeedsReplay(state, 50, 0)).toBe(false);
+  });
+
+  test('stale epoch-less baseline after overflow does not clear needsReplay', () => {
+    // Provider 决策：overflow 后 launch baseline 无 epoch 且 lastSeq < highWater
+    // 可 accept+commit 抬 committed，但 needsReplay 必须保留直至匹配 epoch 或盖住 highWater。
+    let state = createEmptySessionCutoverState();
+    state = commitTerminalCutover(state, 10);
+    const overflow = beginHeldOverflowReplay(state, 60);
+    state = overflow.state;
+
+    expect(shouldAcceptTerminalCutover(state, 30)).toBe(true);
+    state = commitTerminalCutover(state, 30); // epoch-less
+    expect(state.committedBaselineLastSeq).toBe(30);
+    expect(state.needsReplay).toBe(true);
+    expect(state.overflowHighWaterSeq).toBe(60);
+
+    // 当前 epoch replay 成功才真正清闸
+    expect(shouldAcceptTerminalCutover(state, 70, overflow.requestEpoch)).toBe(true);
+    state = commitTerminalCutover(state, 70, overflow.requestEpoch);
+    expect(state.needsReplay).toBe(false);
+    expect(state.overflowHighWaterSeq).toBe(0);
   });
 });

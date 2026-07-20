@@ -7,13 +7,15 @@
  *   桌面 GUI 在 React 挂载前已从 owner stream 转发 terminal-output，因此 Provider 必须
  *   listener-first + baseline replay，并用 lastSeq 丢弃 resync 后的重复 live 事件。
  *   乱序 baseline 与 held 溢出不得静默丢 chunk：per-session cutover epoch + committed lastSeq
- *   拒绝更旧 cutover；held 超限触发 re-baseline 而非 drop-oldest。
+ *   拒绝更旧 cutover；held 超限触发 re-baseline 而非 drop-oldest；溢出 high-water 防止
+ *   无 epoch 的旧 launch baseline 误清 needsReplay 后留下永久缺口。
  *
  * Code Logic（这个模块做什么）:
  *   先注册 terminal-output / terminal-resync 监听，再对活跃 sessions 做 baseline replay；
  *   live 带 seq 的事件写入有界 held map；resync/baseline 先 shouldAcceptTerminalCutover，
- *   再 applyTerminalBaselineCutover 并 commitTerminalCutover；held 溢出清空 held、
- *   beginHeldOverflowReplay 后 sessions.replay，in-flight 绑定 requestEpoch。
+ *   再 applyTerminalBaselineCutover 并 commitTerminalCutover(requestEpoch?)；held 溢出
+ *   先算 highWater 再清空 held、beginHeldOverflowReplay 后 sessions.replay，in-flight
+ *   绑定 requestEpoch，失败时同 epoch 有界重试。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -131,10 +133,12 @@ export function WorkbenchTerminalBuffersProvider({
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   cutover 路径（resync / baseline replay）不能只 reset，且不能接受更旧 lastSeq/epoch。
+     *   cutover 路径（resync / baseline replay）不能只 reset，且不能接受更旧 lastSeq/epoch；
+     *   commit 时必须把 requestEpoch 传给 helper，否则 stale 无 epoch baseline 会误清 needsReplay。
      *
      * Code Logic（这个函数做什么）:
-     *   shouldAccept → held + applyTerminalBaselineCutover → commitTerminalCutover 回写 map。
+     *   shouldAccept → held + applyTerminalBaselineCutover →
+     *   commitTerminalCutover(state, lastSeq, requestEpoch) 回写 map。
      */
     const applyCutover = (
       sessionId: string,
@@ -161,7 +165,7 @@ export function WorkbenchTerminalBuffersProvider({
       }
       cutoverBySessionRef.current.set(
         sessionId,
-        commitTerminalCutover(state, lastSeq),
+        commitTerminalCutover(state, lastSeq, requestEpoch),
       );
       return true;
     };
@@ -169,14 +173,20 @@ export function WorkbenchTerminalBuffersProvider({
     /**
      * Business Logic（为什么需要这个函数）:
      *   held 溢出或显式 re-baseline 时需拉 sessions.replay；同 session 不得并发狂刷，
-     *   但 overflow 抬 epoch 后旧 in-flight 结果必须失效并在 settle 后补拉。
+     *   但 overflow 抬 epoch 后旧 in-flight 结果必须失效并在 settle 后补拉；
+     *   同 epoch 瞬时失败也不能立刻放弃，需有界重试以免永久缺口。
      *
      * Code Logic（这个函数做什么）:
-     *   已有 replayInFlight 则仅依赖调用方已抬高的 epoch；否则标记 inFlight 并
-     *   await replay → applyCutover(requestEpoch)；finally 清 inFlight，若 needsReplay
-     *   且 epoch 已抬高则用当前 epoch 再请求一次。
+     *   已有 replayInFlight 则仅依赖调用方已抬高的 epoch；否则标记 inFlight，
+     *   最多 3 次（含首次）await replay → applyCutover(requestEpoch)，失败间隔
+     *   50/100/200ms；finally 清 inFlight，若 needsReplay 且 epoch 已抬高则用新 epoch
+     *   再请求；同 epoch 最终失败则保留 needsReplay。
      */
-    const requestSessionReplay = (sessionId: string, requestEpoch: number): void => {
+    const requestSessionReplay = (
+      sessionId: string,
+      requestEpoch: number,
+      attempt = 1,
+    ): void => {
       const state = ensureCutoverState(sessionId);
       if (state.replayInFlight) {
         return;
@@ -187,22 +197,24 @@ export function WorkbenchTerminalBuffersProvider({
       );
 
       void (async () => {
+        let applySucceeded = false;
         try {
           const replay = await workbenchApi.sessions.replay(sessionId);
           if (cancelled) return;
-          applyCutover(
+          applySucceeded = applyCutover(
             replay.sessionId,
             replay.buffer,
             replay.lastSeq,
             requestEpoch,
           );
         } catch {
-          // 单次 replay 失败不狂刷；needsReplay 可保留至后续 overflow / terminal-resync。
+          applySucceeded = false;
         } finally {
           if (cancelled) return;
           const current = ensureCutoverState(sessionId);
           const cleared = setTerminalCutoverReplayInFlight(current, false);
           cutoverBySessionRef.current.set(sessionId, cleared);
+
           // in-flight 期间 overflow 抬高了 epoch：旧结果已失效，需用新 epoch 再拉一次。
           if (
             cleared.needsReplay &&
@@ -210,6 +222,29 @@ export function WorkbenchTerminalBuffersProvider({
             !cleared.replayInFlight
           ) {
             requestSessionReplay(sessionId, cleared.cutoverEpoch);
+            return;
+          }
+
+          // 同 epoch 失败：有界重试（最多 3 次，含首次），避免瞬时失败变永久缺口。
+          if (
+            !applySucceeded &&
+            cleared.needsReplay &&
+            cleared.cutoverEpoch === requestEpoch &&
+            !cleared.replayInFlight &&
+            attempt < 3
+          ) {
+            const delayMs = attempt === 1 ? 50 : attempt === 2 ? 100 : 200;
+            globalThis.setTimeout(() => {
+              if (cancelled) return;
+              const latest = ensureCutoverState(sessionId);
+              if (
+                latest.needsReplay &&
+                latest.cutoverEpoch === requestEpoch &&
+                !latest.replayInFlight
+              ) {
+                requestSessionReplay(sessionId, requestEpoch, attempt + 1);
+              }
+            }, delayMs);
           }
         }
       })();
@@ -220,12 +255,23 @@ export function WorkbenchTerminalBuffersProvider({
      *   held 超过 256 条时静默 drop-oldest 会留下 relay 永不补发的缺口。
      *
      * Code Logic（这个函数做什么）:
-     *   清空 held → beginHeldOverflowReplay → 必要时 requestSessionReplay。
+     *   清空 held 前先取 held 中最大有限 seq 作 highWater → beginHeldOverflowReplay
+     *   → requestSessionReplay。
      */
     const handleHeldOverflow = (sessionId: string): void => {
+      const held = heldLiveBySessionRef.current.get(sessionId) ?? [];
+      let highWater = 0;
+      for (const event of held) {
+        if (typeof event.seq === 'number' && Number.isFinite(event.seq)) {
+          highWater = Math.max(highWater, event.seq);
+        }
+      }
       heldLiveBySessionRef.current.set(sessionId, []);
       const state = ensureCutoverState(sessionId);
-      const { state: next, requestEpoch } = beginHeldOverflowReplay(state);
+      const { state: next, requestEpoch } = beginHeldOverflowReplay(
+        state,
+        highWater,
+      );
       cutoverBySessionRef.current.set(sessionId, next);
       requestSessionReplay(sessionId, requestEpoch);
     };

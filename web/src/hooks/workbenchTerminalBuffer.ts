@@ -173,16 +173,27 @@ export const MAX_HELD_LIVE_TERMINAL_EVENTS = 256;
 /**
  * Business Logic（为什么需要这个接口）:
  *   乱序 baseline/resync 与 held 溢出 re-baseline 并发时，必须按 session 单调拒绝
- *   更旧的 cutover，否则已提交的较新 baseline 会被晚到的旧 A 再次 reset 抹掉。
+ *   更旧的 cutover，否则已提交的较新 baseline 会被晚到的旧 A 再次 reset 抹掉；
+ *   溢出后还要记住 high-water seq，避免无 epoch 的旧 launch baseline 误清 needsReplay。
  *
  * Code Logic（这个接口做什么）:
- *   记录已提交 baseline lastSeq、cutover 代数 epoch、needsReplay 与 replayInFlight。
+ *   记录已提交 baseline lastSeq、cutover 代数 epoch、needsReplay、replayInFlight，
+ *   以及 overflowHighWaterSeq（0 表示无溢出水位）。
  */
 export interface SessionCutoverState {
   committedBaselineLastSeq: number;
   cutoverEpoch: number;
   needsReplay: boolean;
   replayInFlight: boolean;
+  /**
+   * Business Logic（为什么需要这个字段）:
+   *   held 溢出清空后，无 epoch 的 launch/resync cutover 若 lastSeq 未盖住溢出水位，
+   *   不得清 needsReplay，否则当前 epoch 的 replay 失败会留下永久终端缺口。
+   *
+   * Code Logic（这个字段做什么）:
+   *   溢出时取 max(已有水位, 被清空 held 的最大有限 seq, 0)；0 表示无溢出保护水位。
+   */
+  overflowHighWaterSeq: number;
 }
 
 /**
@@ -190,7 +201,8 @@ export interface SessionCutoverState {
  *   每个终端 session 首次遇到 live/baseline 时需要统一的 cutover 初始态。
  *
  * Code Logic（这个函数做什么）:
- *   返回 committedBaselineLastSeq/cutoverEpoch=0、needsReplay/replayInFlight=false 的新状态。
+ *   返回 committedBaselineLastSeq/cutoverEpoch/overflowHighWaterSeq=0、
+ *   needsReplay/replayInFlight=false 的新状态。
  */
 export function createEmptySessionCutoverState(): SessionCutoverState {
   return {
@@ -198,6 +210,7 @@ export function createEmptySessionCutoverState(): SessionCutoverState {
     cutoverEpoch: 0,
     needsReplay: false,
     replayInFlight: false,
+    overflowHighWaterSeq: 0,
   };
 }
 
@@ -232,40 +245,87 @@ export function shouldAcceptTerminalCutover(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   成功 apply baseline/resync 后必须抬高已提交 lastSeq，并清掉 needsReplay，
- *   后续更旧 cutover 才能被拒绝。
+ *   overflow 后 needsReplay 是防永久缺口的闸门；无 epoch 的旧 baseline 只要 lastSeq
+ *   未盖住 overflow high-water，就绝不能清掉 needsReplay。
  *
  * Code Logic（这个函数做什么）:
- *   返回浅拷贝：committedBaselineLastSeq=lastSeq、needsReplay=false；保留 epoch/inFlight。
+ *   !needsReplay → true；requestEpoch 有限且等于 cutoverEpoch → true；
+ *   overflowHighWaterSeq>0 且 lastSeq>=highWater → true；否则 false。
+ */
+export function shouldClearTerminalNeedsReplay(
+  state: SessionCutoverState,
+  lastSeq: number,
+  requestEpoch?: number,
+): boolean {
+  if (!state.needsReplay) {
+    return true;
+  }
+  if (
+    typeof requestEpoch === 'number' &&
+    Number.isFinite(requestEpoch) &&
+    requestEpoch === state.cutoverEpoch
+  ) {
+    return true;
+  }
+  if (state.overflowHighWaterSeq > 0 && lastSeq >= state.overflowHighWaterSeq) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   成功 apply baseline/resync 后必须抬高已提交 lastSeq；但只有在当前 epoch 匹配
+ *   或 lastSeq 盖住 overflow high-water 时才清 needsReplay，避免 stale baseline 误关闸。
+ *
+ * Code Logic（这个函数做什么）:
+ *   总是更新 committedBaselineLastSeq=lastSeq；仅当 shouldClearTerminalNeedsReplay
+ *   为真时置 needsReplay=false 且 overflowHighWaterSeq=0；保留 cutoverEpoch/replayInFlight。
  */
 export function commitTerminalCutover(
   state: SessionCutoverState,
   lastSeq: number,
+  requestEpoch?: number,
 ): SessionCutoverState {
+  const clearNeedsReplay = shouldClearTerminalNeedsReplay(
+    state,
+    lastSeq,
+    requestEpoch,
+  );
   return {
     ...state,
     committedBaselineLastSeq: lastSeq,
-    needsReplay: false,
+    needsReplay: clearNeedsReplay ? false : state.needsReplay,
+    overflowHighWaterSeq: clearNeedsReplay ? 0 : state.overflowHighWaterSeq,
   };
 }
 
 /**
  * Business Logic（为什么需要这个函数）:
  *   held live 超过有界上限时，静默 drop-oldest 会在 cutover 后留下永久缺口（relay 不重发）；
- *   必须抬高 cutover epoch、标记 needsReplay，让 in-flight 旧结果失效并触发 re-baseline。
+ *   必须抬高 cutover epoch、标记 needsReplay，并记录溢出 high-water，让无 epoch 的旧
+ *   baseline 无法误清 needsReplay，同时让 in-flight 旧结果失效并触发 re-baseline。
  *
  * Code Logic（这个函数做什么）:
- *   cutoverEpoch+=1、needsReplay=true；返回新 state 与供 in-flight 请求绑定的 requestEpoch。
+ *   cutoverEpoch+=1、needsReplay=true；overflowHighWaterSeq=max(已有, 入参 high water, 0)；
+ *   返回新 state 与供 in-flight 请求绑定的 requestEpoch。
  */
 export function beginHeldOverflowReplay(
   state: SessionCutoverState,
+  overflowHighWaterSeq?: number,
 ): { state: SessionCutoverState; requestEpoch: number } {
   const cutoverEpoch = state.cutoverEpoch + 1;
+  const provided =
+    typeof overflowHighWaterSeq === 'number' && Number.isFinite(overflowHighWaterSeq)
+      ? overflowHighWaterSeq
+      : 0;
+  const highWater = Math.max(state.overflowHighWaterSeq, provided, 0);
   return {
     state: {
       ...state,
       cutoverEpoch,
       needsReplay: true,
+      overflowHighWaterSeq: highWater,
     },
     requestEpoch: cutoverEpoch,
   };
