@@ -292,18 +292,48 @@ export interface BackendStatus {
 }
 
 /**
+ * 移动端访问入口角色（网卡启发式）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   多网段芯片在可识别时显示「Wi‑Fi / 有线 · IP」，帮助用户选择手机所在网段。
+ *
+ * Code Logic（字段说明）:
+ *   仅 `wifi` | `wired`；推断失败时字段为 null/undefined，UI 只显示裸 IP。
+ */
+export type MobileAccessRole = 'wifi' | 'wired';
+
+/**
+ * 单条移动端局域网访问入口。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   本机可能有多块网卡/多局域网地址，前端需要按条目切换 URL、复制与二维码。
+ *
+ * Code Logic（字段说明）:
+ *   id 通常等于 host；url 为 `http://host:port/mobile`；role 可选；isDefault 标记默认出站 IP。
+ */
+export interface MobileAccessEntry {
+  id: string;
+  url: string;
+  host: string;
+  role?: MobileAccessRole | null;
+  isDefault: boolean;
+}
+
+/**
  * 移动端局域网访问入口信息。
  *
  * Business Logic（为什么需要这个接口）:
  *   桌面端需要把当前设备可供手机浏览器访问的 `/mobile` URL 展示给用户或二维码组件。
  *
  * Code Logic（字段说明）:
- *   deviceName/port 来自后端当前配置和实际 HTTP 端口；urls 是过滤 loopback 后的同源访问地址列表。
+ *   deviceName/port 来自后端当前配置和实际 HTTP 端口；urls 与 entries[].url 同序兼容字段；
+ *   entries 为结构化多网段入口（含 role/isDefault），供芯片选择与默认项解析。
  */
 export interface MobileAccessInfo {
   deviceName: string;
   port: number;
   urls: string[];
+  entries: MobileAccessEntry[];
 }
 
 export type PromptOptimizerFillLanguage = 'zh' | 'en';

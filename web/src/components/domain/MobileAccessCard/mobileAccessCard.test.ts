@@ -2,6 +2,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, test } from 'vitest';
+import {
+  formatMobileAccessChipLabel,
+  resolveMobileAccessEntries,
+  resolveSelectedMobileAccessEntry,
+  selectDefaultMobileAccessEntryId,
+} from './mobileAccessSelection';
 import { selectPrimaryMobileUrl } from './mobileQr';
 
 /**
@@ -59,6 +65,75 @@ describe('mobileAccessCard', () => {
       'blank URLs should be skipped',
     );
     assertEqual(selectPrimaryMobileUrl([]), null, 'empty URL list should return null');
+  });
+
+  test('resolveMobileAccessEntries prefers entries and falls back to urls', () => {
+    const fromEntries = resolveMobileAccessEntries({
+      deviceName: 'd',
+      port: 1,
+      urls: ['http://1.1.1.1:1/mobile'],
+      entries: [
+        {
+          id: '192.168.1.2',
+          url: 'http://192.168.1.2:1/mobile',
+          host: '192.168.1.2',
+          role: 'wifi',
+          isDefault: true,
+        },
+      ],
+    });
+    assertEqual(fromEntries.length, 1, 'entries length');
+    assertEqual(fromEntries[0]?.host, '192.168.1.2', 'host');
+
+    const fromUrls = resolveMobileAccessEntries({
+      deviceName: 'd',
+      port: 1,
+      urls: ['http://10.0.0.2:1/mobile', ''],
+      entries: [],
+    });
+    assertEqual(fromUrls.length, 1, 'url fallback length');
+    assertEqual(fromUrls[0]?.host, '10.0.0.2', 'url host');
+    assertEqual(fromUrls[0]?.isDefault, true, 'first url default');
+  });
+
+  test('selectDefaultMobileAccessEntryId prefers isDefault', () => {
+    const id = selectDefaultMobileAccessEntryId([
+      { id: 'a', url: 'u1', host: 'a', isDefault: false },
+      { id: 'b', url: 'u2', host: 'b', isDefault: true },
+    ]);
+    assertEqual(id, 'b', 'default id');
+  });
+
+  test('formatMobileAccessChipLabel uses role or bare ip', () => {
+    const labels = {
+      wifi: (ip: string) => `Wi‑Fi · ${ip}`,
+      wired: (ip: string) => `有线 · ${ip}`,
+    };
+    assertEqual(
+      formatMobileAccessChipLabel(
+        { id: '1', url: 'u', host: '1.2.3.4', role: 'wifi', isDefault: false },
+        labels,
+      ),
+      'Wi‑Fi · 1.2.3.4',
+      'wifi label',
+    );
+    assertEqual(
+      formatMobileAccessChipLabel(
+        { id: '1', url: 'u', host: '1.2.3.4', isDefault: false },
+        labels,
+      ),
+      '1.2.3.4',
+      'bare ip',
+    );
+  });
+
+  test('resolveSelectedMobileAccessEntry keeps selection or falls back', () => {
+    const entries = [
+      { id: 'a', url: 'u1', host: 'a', isDefault: true },
+      { id: 'b', url: 'u2', host: 'b', isDefault: false },
+    ];
+    assertEqual(resolveSelectedMobileAccessEntry(entries, 'b')?.id, 'b', 'keep');
+    assertEqual(resolveSelectedMobileAccessEntry(entries, 'missing')?.id, 'a', 'fallback default');
   });
 
   test('fixed unauthenticated lan risk wording is present without mode claims', () => {
