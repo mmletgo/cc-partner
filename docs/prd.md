@@ -501,7 +501,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | /api/health | 健康检查 |
-| GET | /api/mobile/access-info | 获取局域网 `/mobile` 访问链接与二维码数据（无身份鉴权） |
+| GET | /api/mobile/access-info | 返回多网段 `entries`（及兼容 `urls`）供桌面弹层切换局域网链接/二维码（无身份鉴权） |
 | POST | /api/sync/pull | 拉取 Prompt（含向量时钟摘要） |
 | POST | /api/sync/push | 推送 Prompt |
 | POST | /api/scratchpad/sync/pull | 拉取 Scratchpad 页面（含向量时钟摘要） |
