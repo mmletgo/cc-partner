@@ -8,7 +8,7 @@
 
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control_client::MutationControlError;
-use crate::error::AppError;
+use crate::error::{AppError, AppErrorCategory};
 use crate::models::device::Device;
 use crate::state::AppState;
 use crate::workbench::models::{
@@ -584,8 +584,29 @@ pub(crate) async fn restore_persisted_sessions(
                 );
                 match state.workbench_session_repo.upsert(&restored).await {
                     Ok(()) => {
-                        spawn_guard.commit();
-                        claim_guard.finish(SharedRestoreNotification::Ready);
+                        // R20 M1：仅 generation CAS 真正 Ready 才 finish(Ready)；否则补偿并 Failed。
+                        if spawn_guard.commit() {
+                            claim_guard.finish(SharedRestoreNotification::Ready);
+                        } else {
+                            tracing::warn!(
+                                session_id = %restored.id,
+                                "restore upsert 后 mark Ready CAS 失败；补偿 close 并 Failed"
+                            );
+                            // commit 失败时 guard 未 committed，Drop 会 close；显式 drop 先 reclaim。
+                            drop(spawn_guard);
+                            // 并发 close 可能已删行；best-effort 标 disconnected，避免 zombie running 行。
+                            let mut disconnected = restored.clone();
+                            disconnected.status = "disconnected".to_string();
+                            disconnected.exited_at = Some(now_iso());
+                            disconnected.updated_at = now_iso();
+                            let _ = state.workbench_session_repo.upsert(&disconnected).await;
+                            claim_guard.finish(SharedRestoreNotification::Failed(
+                                AppErrorCategory::Unavailable,
+                            ));
+                            return Err(AppError::unavailable(
+                                "session_restore_ready_cas_miss".to_string(),
+                            ));
+                        }
                     }
                     Err(error) => {
                         tracing::warn!("恢复工作台终端后持久化失败，已回收 attach: {error}");

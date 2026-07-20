@@ -92,7 +92,12 @@ pub(crate) async fn local_create_workbench_session(
         state.clone(),
     );
     state.workbench_session_repo.upsert(&row).await?;
-    spawn_guard.commit();
+    // R20 M1：generation CAS 失败不得对外宣称 running/Ready。
+    if !spawn_guard.commit() {
+        return Err(AppError::unavailable(
+            "session_spawn_ready_cas_miss".to_string(),
+        ));
+    }
     Ok(row.to_dto())
 }
 

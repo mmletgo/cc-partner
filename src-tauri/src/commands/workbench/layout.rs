@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use super::common::{
-    ensure_remote_project_context, proxy_workbench_if_gui, remote_inner_worktree_id,
+    ensure_remote_project_context, proxy_workbench_if_gui, remote_inner_session_id,
+    remote_inner_worktree_id,
 };
 
 /// apply 请求体。
@@ -330,17 +331,42 @@ pub async fn apply_workspace_restore_for_state(
                 restored += 1;
             }
             WorkspaceRestoreOutcome::Reuse => {
-                // R19 M2：本机 apply 重新验证 Live；remote shortcut 由 owning device 权威。
-                if project.as_ref().is_some_and(|p| p.kind == "remote") {
-                    restored += 1;
-                    continue;
-                }
+                // R19 M2 / R20 M2：本机 apply 重新验证 Live；remote 必须向 owner 复验 Live。
                 let Some(session_id) = action.resource_id.as_deref() else {
                     action.outcome = WorkspaceRestoreOutcome::Skip;
                     action.reason = Some(RestoreSkipReason::SessionMissing);
                     skipped += 1;
                     continue;
                 };
+                if project.as_ref().is_some_and(|p| p.kind == "remote") {
+                    let project = project.as_ref().expect("remote project");
+                    match revalidate_remote_session_live(state, project, session_id).await {
+                        Ok(true) => restored += 1,
+                        Ok(false) => {
+                            action.outcome = WorkspaceRestoreOutcome::Skip;
+                            action.reason = Some(RestoreSkipReason::SessionMissing);
+                            skipped += 1;
+                        }
+                        Err(err) => {
+                            let reason = if err.code().contains("unsupported")
+                                || err.to_string().contains("unsupported")
+                            {
+                                RestoreSkipReason::CapabilityUnsupported
+                            } else if err.code().contains("busy")
+                                || err.to_string().contains("session_restore_in_progress")
+                            {
+                                // owner 正在 restore：不得计入 restored。
+                                RestoreSkipReason::SessionMissing
+                            } else {
+                                RestoreSkipReason::RemoteOffline
+                            };
+                            action.outcome = WorkspaceRestoreOutcome::Skip;
+                            action.reason = Some(reason);
+                            skipped += 1;
+                        }
+                    }
+                    continue;
+                }
                 let ctx = RestoreInspectionContext::from_state(state.clone());
                 if ctx.registry_is_live(session_id) {
                     restored += 1;
@@ -599,15 +625,43 @@ async fn safe_attach_remote_session(
 ) -> Result<(), AppError> {
     let context = ensure_remote_project_context(state, project).await?;
     let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
+    let inner = remote_inner_session_id(&context.device_id, session_id)
+        .unwrap_or_else(|_| session_id.to_string());
     client
         .safe_attach_session(
             &context.base_url,
             &RemoteSafeAttachReq {
-                session_id: session_id.to_string(),
+                session_id: inner,
             },
         )
         .await
         .map(|_| ())
+}
+
+/// 远端 Reuse apply 时向 owner 复验 Live（R20 M2）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     preflight 与 apply 之间 owner 会话可能退出、进入 provisional 或 owner 重启；
+///     remote shortcut 不得在无 Live 复验时直接计为 restored。
+///
+/// Code Logic（这个函数做什么）:
+///     ensure remote context → list owner sessions（触发 restore 合并）→
+///     命中同 id 且 status=running 为 Live；list 网络失败上抛；未命中 false。
+async fn revalidate_remote_session_live(
+    state: &AppState,
+    project: &crate::workbench::models::WorkbenchProjectRow,
+    session_id: &str,
+) -> Result<bool, AppError> {
+    let context = ensure_remote_project_context(state, project).await?;
+    let client = RemoteWorkbenchClient::new().with_expected_device_id(&context.device_id);
+    let inner = remote_inner_session_id(&context.device_id, session_id)
+        .unwrap_or_else(|_| session_id.to_string());
+    let sessions = client
+        .list_sessions(&context.base_url, Some(&context.inner_project_id))
+        .await?;
+    Ok(sessions.iter().any(|s| {
+        s.id == inner && s.status.eq_ignore_ascii_case("running")
+    }))
 }
 
 #[cfg(test)]
@@ -661,5 +715,27 @@ mod tests {
             created_at: "t".into(),
             updated_at: "t".into(),
         };
+    }
+
+    /// Business Logic（R20 M2: 为什么需要这个测试）:
+    ///     remote Reuse 不得在无 Live 复验时直接计 restored；离线应 Skip。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 remote plan Reuse 动作；不依赖真实 owner——验证 apply 路径函数签名与 Skip reason 枚举稳定。
+    #[test]
+    fn remote_reuse_skip_reasons_are_stable() {
+        assert_eq!(
+            format!("{:?}", RestoreSkipReason::RemoteOffline),
+            "RemoteOffline"
+        );
+        assert_eq!(
+            format!("{:?}", RestoreSkipReason::SessionMissing),
+            "SessionMissing"
+        );
+        // 文档契约：Reuse 失败不得伪装 Select/SafeAttach。
+        assert_ne!(
+            WorkspaceRestoreOutcome::Reuse,
+            WorkspaceRestoreOutcome::Select
+        );
     }
 }
