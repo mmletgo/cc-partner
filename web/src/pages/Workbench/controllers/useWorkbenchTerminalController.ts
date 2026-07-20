@@ -24,6 +24,8 @@ import { listen } from '@tauri-apps/api/event';
 import type { WorkbenchTerminalStatusEvent, WorkbenchSession } from '@/lib/types';
 import { workbenchApi } from '@/api/workbench';
 import type { WorkbenchPaneSplitDirection } from '@/api/workbench';
+import { createTerminalInputPump } from '../terminalInputPump';
+import type { TerminalInputPump } from '../terminalInputPump';
 import { mountedTerminalSessions, visibleTerminalSessions } from '../terminalSessionOrder';
 import { canRefreshTerminalSize } from '../terminalSizing';
 import type { TerminalLayoutMode } from '../terminalSizing';
@@ -235,6 +237,13 @@ export function useWorkbenchTerminalController(
   // Business Logic: terminal-status listen 只想在 mount 时注册一次；用 ref 读取最新的 canListenToTauriEvents，
   // 避免把它放进 effect 依赖导致 listener 反复重注册（与原 Workbench.tsx 的 [] 依赖行为一致）。
   const canListenToTauriEventsRef = useRef(canListenToTauriEventsParam);
+  // Business Logic: 每 session 有序输入泵稳定挂在 controller 生命周期上，避免每键并发 writeInput。
+  const terminalInputPumpRef = useRef<TerminalInputPump | null>(null);
+  if (terminalInputPumpRef.current === null) {
+    terminalInputPumpRef.current = createTerminalInputPump({
+      write: (sessionId, data) => workbenchApi.sessions.writeInput(sessionId, data),
+    });
+  }
   useEffect(() => {
     canListenToTauriEventsRef.current = canListenToTauriEventsParam;
   });
@@ -247,10 +256,35 @@ export function useWorkbenchTerminalController(
     activeWorktreeIdRef.current = activeWorktreeId;
   }, [activeWorktreeId]);
 
-  // Business Logic: 与原 Workbench.tsx 行为一致——sessions 变化时同步 knownSessionIdsRef。
+  // Business Logic: sessions 变化时同步 knownSessionIdsRef；对已消失的 session 丢弃输入 pending，
+  // 覆盖 close / loadSessions 项目切换 / 列表替换，但不触碰仍存活的 session。
   useEffect(() => {
-    knownSessionIdsRef.current = new Set(sessions.map((session) => session.id));
+    const nextIds = new Set(sessions.map((session) => session.id));
+    for (const previousId of knownSessionIdsRef.current) {
+      if (!nextIds.has(previousId)) {
+        terminalInputPumpRef.current?.disposeSession(previousId);
+      }
+    }
+    knownSessionIdsRef.current = nextIds;
   }, [sessions]);
+
+  // Business Logic: controller unmount 时清理全部输入 lane，丢弃 pending，不伪取消 in-flight。
+  useEffect(() => {
+    const pump = terminalInputPumpRef.current;
+    return () => pump?.dispose();
+  }, []);
+
+  // Business Logic: 远端进入 offline 后写路径已禁用；丢弃当前 session 的 pending 输入，
+  // 避免恢复在线后把离线期间积压字节误送；in-flight 请求仍由后端 settle，不重放。
+  const prevRemoteWriteDisabledRef = useRef(remoteWriteDisabled);
+  useEffect(() => {
+    if (!prevRemoteWriteDisabledRef.current && remoteWriteDisabled) {
+      for (const sessionId of knownSessionIdsRef.current) {
+        terminalInputPumpRef.current?.disposeSession(sessionId);
+      }
+    }
+    prevRemoteWriteDisabledRef.current = remoteWriteDisabled;
+  }, [remoteWriteDisabled]);
 
   const scopedSessions = useMemo(
     () => sessionsForWorktree(sessions, activeWorktreeId),
@@ -426,7 +460,15 @@ export function useWorkbenchTerminalController(
           return;
         }
         markRequestSuccess(resolvedProjectId);
-        knownSessionIdsRef.current = new Set(list.map((session) => session.id));
+        // Business Logic: 项目切换 / 列表替换时，先对消失 session 丢弃 pending 输入，
+        // 再更新 known ids；不能只写 Set，否则 sessions effect 读不到旧 id。
+        const nextIds = new Set(list.map((session) => session.id));
+        for (const previousId of knownSessionIdsRef.current) {
+          if (!nextIds.has(previousId)) {
+            terminalInputPumpRef.current?.disposeSession(previousId);
+          }
+        }
+        knownSessionIdsRef.current = nextIds;
         setSessions(list);
         updateActiveSession(list);
         void refreshProjectSessionStats(resolvedProjectId);
@@ -619,6 +661,7 @@ export function useWorkbenchTerminalController(
         });
         knownSessionIdsRef.current.delete(result.sessionId);
         removeTerminalBuffer(result.sessionId);
+        terminalInputPumpRef.current?.disposeSession(result.sessionId);
       }
       await loadSessions(projectId);
     } catch (error) {
@@ -668,6 +711,7 @@ export function useWorkbenchTerminalController(
         });
         knownSessionIdsRef.current.delete(sessionId);
         removeTerminalBuffer(sessionId);
+        terminalInputPumpRef.current?.disposeSession(sessionId);
         if (sourceProjectId) void refreshProjectSessionStats(sourceProjectId);
       } catch (error) {
         if (activeProjectIdRef.current !== sourceProjectId) {
@@ -727,15 +771,16 @@ export function useWorkbenchTerminalController(
   /**
    * Business Logic（为什么需要这个函数）:
    *   xterm onData 把用户输入转发到后端 PTY；remoteWriteDisabled 时静默拒绝，避免必然失败的远端写。
+   *   快速输入必须经 per-session 有序泵：leading-edge 立即发送、in-flight 期间 coalescing，
+   *   失败批次永不自动重放，避免重复写入 PTY。
+   *
+   * Code Logic（这个函数做什么）:
+   *   remoteWriteDisabled 时直接返回；否则 enqueue 到 terminalInputPump（不 await write settle）。
    */
   const handleInput = useCallback(
     async (sessionId: string, data: string): Promise<void> => {
       if (remoteWriteDisabled) return;
-      try {
-        await workbenchApi.sessions.writeInput(sessionId, data);
-      } catch {
-        // 输入写入失败时通常是会话刚退出；状态事件或下一次操作会反映错误。
-      }
+      terminalInputPumpRef.current?.enqueue(sessionId, data);
     },
     [remoteWriteDisabled],
   );
@@ -808,6 +853,7 @@ export function useWorkbenchTerminalController(
     (worktreeId: string): void => {
       sessionsForWorktree(sessions, worktreeId).forEach((session) => {
         removeTerminalBuffer(session.id);
+        terminalInputPumpRef.current?.disposeSession(session.id);
       });
     },
     [removeTerminalBuffer, sessions],

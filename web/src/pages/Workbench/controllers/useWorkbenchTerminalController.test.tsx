@@ -1149,6 +1149,111 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     expect(fakeSessionsApi.writeInput).not.toHaveBeenCalled();
   });
 
+  test('handleInput serializes rapid keys per session and coalesces only while in flight', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    let resolveFirst!: () => void;
+    const firstWrite = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const calls: Array<[string, string]> = [];
+    fakeSessionsApi.writeInput.mockImplementation(async (sessionId: string, data: string) => {
+      calls.push([sessionId, data]);
+      if (calls.length === 1) {
+        await firstWrite;
+      }
+      return { ok: true, sessionId };
+    });
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'a');
+      void result.current.handleInput('s1', 'b');
+      void result.current.handleInput('s1', '\u007f');
+      await flushMicrotasks();
+    });
+    expect(calls).toEqual([['s1', 'a']]);
+
+    await act(async () => {
+      resolveFirst();
+      await flushMicrotasks(12);
+    });
+    expect(calls).toEqual([
+      ['s1', 'a'],
+      ['s1', 'b\u007f'],
+    ]);
+  });
+
+  test('handleInput drops pending bytes after successful close without replaying in-flight write', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const session = buildSession({ id: 's1' });
+    fakeSessionsApi.list.mockResolvedValueOnce([session]);
+    let resolveFirst!: () => void;
+    const firstWrite = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const calls: string[] = [];
+    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+      calls.push(data);
+      if (calls.length === 1) {
+        await firstWrite;
+      }
+      return { ok: true, sessionId: 's1' };
+    });
+    fakeSessionsApi.close.mockResolvedValueOnce({ ok: true, sessionId: 's1' });
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      void result.current.handleInput('s1', 'a');
+      void result.current.handleInput('s1', 'b');
+      await flushMicrotasks();
+    });
+    expect(calls).toEqual(['a']);
+
+    await act(async () => {
+      await result.current.handleCloseSession('s1');
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      resolveFirst();
+      await flushMicrotasks(12);
+    });
+    expect(calls).toEqual(['a']);
+  });
+
   test('handleResize clamps cols/rows to min bounds and forwards to API', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();
