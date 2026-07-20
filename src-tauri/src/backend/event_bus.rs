@@ -6,7 +6,8 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 `RuntimeEventBus`：有界 broadcast + 有界 replay ring；`BackendRuntimeCursor` 与
-//!     `RuntimeRelayMessage::{Event,Gap}`；`GuiEventRelayState` 在 owner 变化时重置、同 owner 去重，
+//!     `RuntimeRelayMessage::{Event,Gap}`；`open_relay` 在 after 不同 owner 或同 owner 游标早于 ring
+//!     时强制 Gap（不回放 partial ring）；`GuiEventRelayState` 在 owner 变化时重置、同 owner 去重，
 //!     并在 Gap/Lag 时要求 terminal replay + runtime snapshot resync；incomplete Gap 保留 pre-gap
 //!     recovery cursor，禁止以 `cursor=None` 重连成 brand-new consumer。
 
@@ -240,10 +241,17 @@ impl RuntimeEventBus {
     /// 打开一个 catch-up + live relay 会话。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     GUI 重连时需要 afterSequence 回放，若游标早于 ring 必须先收到 Gap 再 attach live。
+    ///     GUI 重连时需要 afterSequence 回放；同 owner 游标早于 ring 必须 Gap；
+    ///     **owner 变化（after 携带不同 owner_instance_id）必须强制 Gap**，禁止只回放
+    ///     新 owner 当前 ring 的尾部——新 owner 若在 GUI 重连前已发布超过 ring 容量的
+    ///     事件，pre-capacity 事件会静默丢失，GUI 会误 attach 低 sequence 而不 resync。
     ///
     /// Code Logic（这个函数做什么）:
     ///     先 subscribe live，再在锁内计算 gap/replay，避免丢失窗口内新事件；
+    ///     - after=None（brand-new consumer）：回放整个 ring 后接 live；
+    ///     - after 同 owner 且 after_seq < oldest：仅 pending Gap，max_replayed=latest；
+    ///     - after 不同 owner：无论 ring 是否为空/是否截断，仅 pending Gap，强制 GUI resync；
+    ///     - 其它同 owner：从 after_seq 之后回放 ring 内 Event；
     ///     live 路径跳过已回放 sequence。
     pub fn open_relay(&self, after: Option<&BackendRuntimeCursor>) -> RuntimeEventRelay {
         let live_rx = self.tx.subscribe();
@@ -257,23 +265,32 @@ impl RuntimeEventBus {
             let same_owner = after
                 .map(|c| c.owner_instance_id == self.owner_instance_id)
                 .unwrap_or(false);
+            // owner 变化：强制 Gap（不走 after_seq=0 的 partial ring replay）。
+            // brand-new（after=None）保持 after_seq=0 全量 ring 回放。
+            let owner_changed = after.is_some() && !same_owner;
             let after_seq = if same_owner {
                 after.map(|c| c.sequence).unwrap_or(0)
             } else {
-                // owner 变化：清旧游标，从 ring 头开始（若有）或直接 live。
                 0
             };
 
-            if same_owner && after_seq > 0 && oldest > 0 && after_seq < oldest.saturating_sub(0) {
-                // after_seq 严格早于 ring 最旧条（即 after_seq + 1 < oldest 或 after 不在 ring 覆盖范围）
-                if after_seq < oldest {
-                    pending.push(RuntimeRelayMessage::Gap {
-                        owner_instance_id: self.owner_instance_id.clone(),
-                        oldest_available: oldest,
-                        latest,
-                    });
-                    max_replayed = latest;
-                }
+            if owner_changed {
+                // 不同 owner 的 after 游标：始终 Gap，强制 GUI terminal/runtime resync。
+                // 空 ring 时 oldest_available=0，latest=0；有 ring 时与 truncated 同形态。
+                pending.push(RuntimeRelayMessage::Gap {
+                    owner_instance_id: self.owner_instance_id.clone(),
+                    oldest_available: oldest,
+                    latest,
+                });
+                max_replayed = latest;
+            } else if same_owner && after_seq > 0 && oldest > 0 && after_seq < oldest {
+                // 同 owner：after_seq 严格早于 ring 最旧条 → Gap，不回放 partial ring。
+                pending.push(RuntimeRelayMessage::Gap {
+                    owner_instance_id: self.owner_instance_id.clone(),
+                    oldest_available: oldest,
+                    latest,
+                });
+                max_replayed = latest;
             }
 
             if pending.is_empty() {
@@ -653,6 +670,80 @@ mod tests {
             }
             other => panic!("expected gap, got {other:?}"),
         }
+        // Gap 后不得再交付 partial ring Event。
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// owner 重启后已发布超过 ring 容量，GUI 持旧 owner 游标重连必须收到 Gap。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner 变化时若只回放新 owner ring 尾部，pre-capacity 事件会 silent loss，
+    ///     GUI 误 attach 低 sequence 而不走 terminal/runtime resync。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     capacity=2 的 owner-b 发布 3 条（ring 保留 2,3）；after 为 owner-a 任意 sequence；
+    ///     首条必须是 Gap{oldest=2, latest=3}，且不得交付 Event-only partial ring。
+    #[test]
+    fn open_relay_owner_change_with_truncated_ring_emits_gap() {
+        let bus = RuntimeEventBus::with_capacity("owner-b", 2, 8);
+        let _ = bus.publish("e", json!(1));
+        let _ = bus.publish("e", json!(2));
+        let _ = bus.publish("e", json!(3)); // ring keeps 2,3；oldest > 1
+        let old_owner_cursor = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 5,
+        };
+        let mut relay = bus.open_relay(Some(&old_owner_cursor));
+        let msg = relay.try_recv().expect("gap");
+        match msg {
+            RuntimeRelayMessage::Gap {
+                owner_instance_id,
+                oldest_available,
+                latest,
+            } => {
+                assert_eq!(owner_instance_id, "owner-b");
+                assert_eq!(oldest_available, 2);
+                assert_eq!(latest, 3);
+            }
+            other => panic!("expected Gap on owner change, got {other:?}"),
+        }
+        // 不得在 Gap 之外再交付 partial ring Event。
+        assert!(
+            relay.try_recv().is_none(),
+            "owner-change Gap must not also push partial ring events"
+        );
+    }
+
+    /// owner 变化且 ring 为空时仍应 Gap，强制 GUI resync。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     新 owner 尚未发布任何事件时，旧游标重连也不得 silent attach 成 brand-new
+    ///     live-only 消费者，否则 GUI 跳过 terminal/runtime snapshot resync。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     owner-b 空 ring；after=owner-a → 首条 Gap{oldest=0, latest=0}，无 Event。
+    #[test]
+    fn open_relay_owner_change_with_empty_ring_emits_gap() {
+        let bus = RuntimeEventBus::with_capacity("owner-b", 2, 8);
+        let old_owner_cursor = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 5,
+        };
+        let mut relay = bus.open_relay(Some(&old_owner_cursor));
+        let msg = relay.try_recv().expect("gap");
+        match msg {
+            RuntimeRelayMessage::Gap {
+                owner_instance_id,
+                oldest_available,
+                latest,
+            } => {
+                assert_eq!(owner_instance_id, "owner-b");
+                assert_eq!(oldest_available, 0);
+                assert_eq!(latest, 0);
+            }
+            other => panic!("expected Gap on owner change with empty ring, got {other:?}"),
+        }
+        assert!(relay.try_recv().is_none());
     }
 
     #[test]
