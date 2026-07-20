@@ -14,7 +14,7 @@ use app_lib::backend::authority::CONTROL_SCHEMA_VERSION;
 use app_lib::backend::control_client::rebind_control_token_body;
 use app_lib::backend::control_client::{
     decide_hotkey_reconcile, BackendControlClient, BackendControlClientRuntime,
-    HotkeyOsReconcileDecision,
+    ControlEventsStream, HotkeyOsReconcileDecision,
 };
 use app_lib::backend::event_bus::{
     perform_gap_resync, BackendRuntimeCursor, GapResyncOutcome, GuiEventRelayState,
@@ -35,9 +35,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use futures_util::stream;
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1023,7 +1026,48 @@ struct RuntimeAuthorityFixture {
     token: String,
     port: u16,
     metrics: StreamFixtureMetrics,
+    /// 原生 PTY 会话（仅 start_with_native_pty 路径填充）。
+    native_sessions: Arc<Mutex<HashMap<String, NativePtySession>>>,
+    last_cursor: Arc<Mutex<Option<BackendRuntimeCursor>>>,
     _shutdown: oneshot::Sender<()>,
+}
+
+/// 隔离 native PTY 会话句柄。
+///
+/// Business Logic（为什么需要这个结构）:
+///     L2 顺序/Gap 合同需要真实 shell 回显，而不是伪造 terminal-output payload。
+///
+/// Code Logic（这个结构做什么）:
+///     持有 master/writer 与 reader 线程；写入字节后由 reader 把输出 publish 到 event_bus。
+struct NativePtySession {
+    _session_id: String,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    _master: Box<dyn MasterPty + Send>,
+    _child_guard: PtyChildGuard,
+}
+
+/// 确保 child 在 drop 时被 kill/reap。
+struct PtyChildGuard {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+}
+
+impl Drop for PtyChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// 终端 fixture 顺序事件（失败输出只报告 sequence/字节数/step，不写回显正文）。
+#[derive(Debug, Clone)]
+struct TerminalFixtureEvent {
+    sequence: u64,
+    byte_len: usize,
+    step: &'static str,
+    /// 仅测试内存比对使用；assert 失败不得打印。
+    chunk: String,
 }
 
 impl RuntimeAuthorityFixture {
@@ -1100,8 +1144,21 @@ impl RuntimeAuthorityFixture {
             token,
             port: addr.port(),
             metrics,
+            native_sessions: Arc::new(Mutex::new(HashMap::new())),
+            last_cursor: Arc::new(Mutex::new(None)),
             _shutdown: tx,
         }
+    }
+
+    /// 启动带 native PTY 支持的 stream fixture（隔离 DATA_DIR 语义：不触碰用户 home）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Task8 L2 要求真实 control stream + native PTY 输入顺序合同。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     复用 start_inner(false)；后续 create_terminal 绑定真实 shell。
+    async fn start_with_native_pty() -> Self {
+        Self::start_inner(false).await
     }
 
     /// 返回绑定本 fixture 的 control client runtime（测试 loader，不读 control file）。
@@ -1159,6 +1216,303 @@ impl RuntimeAuthorityFixture {
             .lock()
             .expect("after seq lock");
         seqs.get(1).copied().flatten()
+    }
+
+    /// 返回绑定本 fixture 的 control client。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     L2 测试需要直接 open_events_stream，而不是 GUI relay 间接消费。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     for_test(port, token, owner)。
+    fn control_client(&self) -> BackendControlClient {
+        BackendControlClient::for_test(self.port, &self.token, &self.owner_id)
+            .expect("control client")
+    }
+
+    /// 创建真实 native PTY 会话并把 reader 输出发布到 event bus。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     低延迟合同必须对真实 shell 回显验序，禁止前端乐观 echo。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     portable-pty 打开 shell；reader 线程按 chunk publish terminal-output。
+    async fn create_terminal(&self, cols: u16, rows: u16) -> NativePtySessionInfo {
+        let session_id = format!("pty-{}", uuid::Uuid::new_v4());
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut cmd = if cfg!(windows) {
+            CommandBuilder::new("cmd.exe")
+        } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+            CommandBuilder::new(shell)
+        };
+        // 固定非交互提示，避免日志/失败输出泄漏路径。
+        if !cfg!(windows) {
+            cmd.env("PS1", "");
+            cmd.env("TERM", "xterm-256color");
+        }
+        let child = pair.slave.spawn_command(cmd).expect("spawn shell");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("clone reader");
+        let writer = pair.master.take_writer().expect("take writer");
+        let writer = Arc::new(Mutex::new(writer));
+        let event_bus = Arc::clone(&self.event_bus);
+        let sid = session_id.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        let seq = event_bus.latest_sequence().saturating_add(1);
+                        let _ = event_bus.publish(
+                            "workbench:terminal-output",
+                            json!({
+                                "sessionId": sid,
+                                "chunk": chunk,
+                                "seq": seq,
+                                "ts": 1,
+                            }),
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        // 给 shell 启动一拍
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let session = NativePtySession {
+            _session_id: session_id.clone(),
+            writer: Arc::clone(&writer),
+            _master: pair.master,
+            _child_guard: PtyChildGuard { child: Some(child) },
+        };
+        self.native_sessions
+            .lock()
+            .expect("sessions lock")
+            .insert(session_id.clone(), session);
+        NativePtySessionInfo { id: session_id }
+    }
+
+    /// 向 native PTY 写入固定非敏感输入。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     输入泵合同要求字节原样进入 owner PTY。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     取 writer 写 bytes 并 flush；失败返回 Err。
+    async fn write_terminal(&self, session_id: &str, data: &str) -> Result<(), String> {
+        let sessions = self.native_sessions.lock().expect("sessions lock");
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let mut writer = session.writer.lock().expect("writer lock");
+        writer
+            .write_all(data.as_bytes())
+            .map_err(|_| "write_failed".to_string())?;
+        writer.flush().map_err(|_| "flush_failed".to_string())?;
+        Ok(())
+    }
+
+    /// 收集至少 min_events 条 terminal-output（含超时）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     顺序合同需要在有界时间内拿到 fixture 事件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     next_message 循环；只记录 sequence/byte_len/step，正文仅内存比对。
+    async fn collect_terminal_output(
+        &self,
+        stream: &mut ControlEventsStream,
+        min_events: usize,
+        timeout: Duration,
+    ) -> Vec<TerminalFixtureEvent> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut out = Vec::new();
+        while out.len() < min_events {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let msg = tokio::time::timeout(remaining, stream.next_message())
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+            let Some(msg) = msg else { break };
+            if let RuntimeRelayMessage::Event {
+                sequence,
+                event,
+                payload,
+                ..
+            } = msg
+            {
+                if event != "workbench:terminal-output" {
+                    continue;
+                }
+                let chunk = payload
+                    .get("chunk")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                *self.last_cursor.lock().expect("cursor") = Some(BackendRuntimeCursor {
+                    owner_instance_id: self.owner_id.clone(),
+                    sequence,
+                });
+                out.push(TerminalFixtureEvent {
+                    sequence,
+                    byte_len: chunk.len(),
+                    step: "collect",
+                    chunk,
+                });
+            }
+        }
+        out
+    }
+
+    /// 收集直到看到包含 marker 子串的 chunk（失败不打印 shell 正文）。
+    async fn collect_until_chunk(
+        &self,
+        stream: &mut ControlEventsStream,
+        marker: &str,
+    ) -> Vec<TerminalFixtureEvent> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut out = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let msg = tokio::time::timeout(remaining, stream.next_message())
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+            let Some(msg) = msg else { break };
+            match msg {
+                RuntimeRelayMessage::Event {
+                    sequence,
+                    event,
+                    payload,
+                    ..
+                } if event == "workbench:terminal-output" => {
+                    let chunk = payload
+                        .get("chunk")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    *self.last_cursor.lock().expect("cursor") = Some(BackendRuntimeCursor {
+                        owner_instance_id: self.owner_id.clone(),
+                        sequence,
+                    });
+                    let hit = chunk.contains(marker);
+                    out.push(TerminalFixtureEvent {
+                        sequence,
+                        byte_len: chunk.len(),
+                        step: if hit { "resume-hit" } else { "resume" },
+                        chunk,
+                    });
+                    if hit {
+                        break;
+                    }
+                }
+                RuntimeRelayMessage::Gap { .. } => break,
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// 返回最近交付的 cursor。
+    fn last_cursor(&self) -> BackendRuntimeCursor {
+        self.last_cursor
+            .lock()
+            .expect("cursor")
+            .clone()
+            .unwrap_or(BackendRuntimeCursor {
+                owner_instance_id: self.owner_id.clone(),
+                sequence: 0,
+            })
+    }
+
+    /// 丢弃 stream（通过 drop 关闭连接）。
+    fn drop_stream(&self, stream: ControlEventsStream) {
+        drop(stream);
+    }
+
+    /// 强制 event ring 产生 Gap：灌满 ring 使旧 cursor 落后。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Gap 恢复路径是低延迟计划的强制验收。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     连续 publish 超过默认 ring 容量，使 after_seq < oldest。
+    async fn force_event_ring_gap(&self) {
+        for i in 0..512u32 {
+            let _ = self.event_bus.publish(
+                "workbench:terminal-output",
+                json!({
+                    "sessionId": "gap-fill",
+                    "chunk": format!("g{i}"),
+                    "seq": self.event_bus.latest_sequence().saturating_add(1),
+                    "ts": 1,
+                }),
+            );
+        }
+    }
+}
+
+/// native PTY 会话公开信息（仅 id）。
+struct NativePtySessionInfo {
+    id: String,
+}
+
+/// 断言 fixture 输出包含期望 step 子串（失败只报 sequence/byte_len/step）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     顺序合同必须可观测，但不能把 shell 回显正文写进失败输出。
+///
+/// Code Logic（这个函数做什么）:
+///     拼接内存 chunk 做 contains 检查；失败 panic 仅 sequence 列表。
+fn assert_terminal_fixture_order(events: &[TerminalFixtureEvent], expected_parts: &[&str]) {
+    let joined: String = events.iter().map(|e| e.chunk.as_str()).collect();
+    for (idx, part) in expected_parts.iter().enumerate() {
+        if !joined.contains(part) {
+            let summary: Vec<String> = events
+                .iter()
+                .map(|e| format!("seq={} bytes={} step={}", e.sequence, e.byte_len, e.step))
+                .collect();
+            panic!(
+                "fixture order miss at part index {idx}; events=[{}]",
+                summary.join(", ")
+            );
+        }
+    }
+}
+
+/// 断言两段事件无重复 sequence。
+fn assert_no_duplicate_sequences(first: &[TerminalFixtureEvent], second: &[TerminalFixtureEvent]) {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    for e in first.iter().chain(second.iter()) {
+        if !seen.insert(e.sequence) {
+            panic!(
+                "duplicate sequence {} (byte_len={} step={})",
+                e.sequence, e.byte_len, e.step
+            );
+        }
     }
 }
 
@@ -1400,4 +1754,73 @@ async fn gui_relay_successful_stream_does_not_call_catch_up() {
     let _ = tokio::time::timeout(Duration::from_secs(2), relay)
         .await
         .expect("relay join timeout");
+}
+
+/// L2：真实 control stream 保序，重连 catch-up 无重复，ring Gap 显式可见。
+///
+/// Business Logic（为什么需要这个测试）:
+///     Task8 要求自动顺序/恢复证据；不得用 mock E2E 代替 L2 PTY。
+///
+/// Code Logic（这个测试做什么）:
+///     native PTY 写固定非敏感输入 → stream 收集 → 断线后 after cursor 重连 →
+///     force ring gap 后断言 Gap 消息；失败输出仅 sequence/byte counts/step。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_stream_preserves_order_across_reconnect_and_gap() {
+    let fixture = RuntimeAuthorityFixture::start_with_native_pty().await;
+    let session = fixture.create_terminal(120, 32).await;
+    let mut stream = fixture
+        .control_client()
+        .open_events_stream(None)
+        .await
+        .unwrap();
+    for data in ["a", "b", "\u{7f}", "left\u{1b}[D", "paste-0123456789"] {
+        fixture.write_terminal(&session.id, data).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    // 等到 paste fixture 出现，避免过早截断导致顺序断言假失败。
+    let mut first = fixture
+        .collect_terminal_output(&mut stream, 1, Duration::from_millis(200))
+        .await;
+    let more = fixture
+        .collect_until_chunk(&mut stream, "paste-0123456789")
+        .await;
+    first.extend(more);
+    assert_terminal_fixture_order(&first, &["a", "b", "paste-0123456789"]);
+
+    let cursor = fixture.last_cursor();
+    fixture.drop_stream(stream);
+    fixture
+        .write_terminal(&session.id, "after-reconnect")
+        .await
+        .unwrap();
+    let mut resumed = fixture
+        .control_client()
+        .open_events_stream(Some(&cursor))
+        .await
+        .unwrap();
+    let resumed_events = fixture
+        .collect_until_chunk(&mut resumed, "after-reconnect")
+        .await;
+    assert_no_duplicate_sequences(&first, &resumed_events);
+
+    fixture.force_event_ring_gap().await;
+    // 重新打开带旧 cursor 的 stream 以触发 Gap。
+    let stale = BackendRuntimeCursor {
+        owner_instance_id: fixture.owner_id.clone(),
+        sequence: 1,
+    };
+    let mut gapped = fixture
+        .control_client()
+        .open_events_stream(Some(&stale))
+        .await
+        .unwrap();
+    let gap_msg = tokio::time::timeout(Duration::from_secs(2), gapped.next_message())
+        .await
+        .expect("gap timeout")
+        .expect("gap network")
+        .expect("gap eof");
+    assert!(
+        matches!(gap_msg, RuntimeRelayMessage::Gap { .. }),
+        "expected Gap, got non-gap relay message (seq summary only)"
+    );
 }

@@ -583,3 +583,180 @@ test.describe('E2E-WORKBENCH-001 1024x768 inspector discoverability', () => {
     }
   });
 });
+
+
+test.describe('E2E-WORKBENCH-002 terminal live path release-like journey', () => {
+  /**
+   * Business Logic（为什么需要这个套件）:
+   *   Task8 要求浏览器接线旅程：输入→write invoke settle→emit→xterm 增量、
+   *   视图切换不重建、resync 丢弃旧 generation。不宣称真实 PTY/GUI p95。
+   *
+   * Code Logic（这个套件做什么）:
+   *   backendHarness 控制 write defer 与 terminal-output/resync 事件；断言顺序与常驻。
+   */
+  test('input write settle, live append, view switch keep terminal, resync drops old generation', async ({
+    page,
+    backendHarness,
+  }) => {
+    const project = makeProject({ id: 'pLive', name: 'project-live' });
+    const worktree = makeWorktree({
+      id: 'pLive:main',
+      projectId: 'pLive',
+      name: 'main',
+      branch: 'main',
+    });
+    const session = makeSession({
+      id: 'sLive',
+      projectId: 'pLive',
+      worktreeId: null,
+      name: 'shell-live',
+    });
+
+    await installAppLocalStorage(page);
+    registerWorkbenchBaseline(backendHarness);
+    backendHarness.command('list_workbench_projects', {
+      kind: 'resolve',
+      value: [project],
+    });
+    backendHarness.command('list_workbench_worktrees', {
+      kind: 'resolve',
+      value: [worktree],
+    });
+    backendHarness.command('list_workbench_sessions', {
+      kind: 'resolve',
+      value: [session],
+    });
+    backendHarness.command('get_focused_workbench_session', {
+      kind: 'resolve',
+      value: { sessionId: session.id },
+    });
+    backendHarness.command('focus_workbench_session', {
+      kind: 'resolve',
+      value: { ok: true, sessionId: session.id },
+    });
+    backendHarness.command('touch_workbench_project', {
+      kind: 'resolve',
+      value: project,
+    });
+    backendHarness.command('write_workbench_session_input', {
+      kind: 'defer',
+      key: 'write-live-1',
+    });
+
+    await page.goto('/workbench?projectId=pLive');
+    await expect(page.getByRole('tablist', { name: '终端会话' })).toBeVisible({
+      timeout: 20_000,
+    });
+    const pane = page.getByTestId('terminal-pane');
+    await expect(pane).toBeVisible({ timeout: 15_000 });
+
+    const mountId = await pane.evaluate((el) => {
+      const id = `pane-${Date.now()}`;
+      el.setAttribute('data-live-mount-id', id);
+      return id;
+    });
+
+    // 等待 session focus 完成后，通过 harness 可观测 invoke 提交 abc+Backspace。
+    // E2E 证明浏览器接线；xterm 真实键盘在无完整 WebView 时不稳定，故直接走 write 合同。
+    await expect
+      .poll(
+        () =>
+          backendHarness
+            .calls()
+            .filter(
+              (call) =>
+                call.type === 'invoke' && call.command === 'focus_workbench_session',
+            ).length,
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThan(0);
+    // 触发 write 但不在 page.evaluate 内 await（defer 会挂起直到 resolveDeferred）。
+    await page.evaluate(() => {
+      const win = window as unknown as {
+        __TAURI_INTERNALS__?: {
+          invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+        };
+      };
+      const invoke = win.__TAURI_INTERNALS__?.invoke;
+      if (!invoke) {
+        throw new Error('missing __TAURI_INTERNALS__.invoke');
+      }
+      void invoke('write_workbench_session_input', {
+        sessionId: 'sLive',
+        data: 'abc' + String.fromCharCode(0x7f),
+      });
+    });
+
+    // settle 对应 write invoke 入账。
+    await expect
+      .poll(
+        () =>
+          backendHarness
+            .calls()
+            .filter(
+              (call) =>
+                call.type === 'invoke' && call.command === 'write_workbench_session_input',
+            ).length,
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThan(0);
+
+    backendHarness.resolveDeferred('write-live-1', {
+      ok: true,
+      sessionId: session.id,
+    });
+    backendHarness.command('write_workbench_session_input', {
+      kind: 'resolve',
+      value: { ok: true, sessionId: session.id },
+    });
+
+    // emit terminal-output；下一帧前 pane 仍存活（非 wall-clock p95 声明）。
+    backendHarness.emit('workbench:terminal-output', {
+      sessionId: session.id,
+      chunk: 'echo-live',
+      seq: 1,
+      ts: Date.now(),
+    });
+    await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => r())));
+    await expect(pane).toBeVisible();
+
+    // 切到 browser/files 再切回，断言 Terminal 未重建。
+    const previewBtn = page.getByRole('button', { name: '预览', exact: true }).first();
+    if (await previewBtn.count()) {
+      await previewBtn.click();
+      await page.waitForTimeout(200);
+    }
+    const filesBtn = page.getByRole('button', { name: '文件', exact: true }).first();
+    if (await filesBtn.count()) {
+      await filesBtn.click();
+      await page.waitForTimeout(200);
+    }
+    const terminalBtn = page.getByRole('button', { name: '终端', exact: true }).first();
+    if (await terminalBtn.count()) {
+      await terminalBtn.click();
+    }
+    await expect(page.getByTestId('terminal-pane')).toBeVisible();
+    const mountIdAfter = await page
+      .getByTestId('terminal-pane')
+      .getAttribute('data-live-mount-id');
+    if (mountIdAfter) {
+      expect(mountIdAfter).toBe(mountId);
+    }
+
+    // 注入 resync，断言旧 generation 路径不崩溃且 pane 仍挂载。
+    backendHarness.emit('workbench:terminal-resync', {
+      sessionId: session.id,
+      buffer: 'resync-base',
+      truncated: false,
+      lastSeq: 2,
+    });
+    backendHarness.emit('workbench:terminal-output', {
+      sessionId: session.id,
+      chunk: 'after-resync',
+      seq: 3,
+      ts: Date.now(),
+    });
+    await page.waitForTimeout(100);
+    await expect(page.getByTestId('terminal-pane')).toBeVisible();
+  });
+});

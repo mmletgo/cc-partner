@@ -133,8 +133,8 @@ unless noted. Never transport-auto-retry mutations.
 | POST | `/api/backend/control/orchestrator/runtime-snapshot` | owner runtime snapshot |
 | POST | `/api/backend/control/orchestrator/complete-agent-run` | owner complete agent run (verify/deliver) |
 | POST | `/api/backend/control/orchestrator/dispatch-once` | owner one-shot scheduler tick |
-| POST | `/api/backend/control/events/catch-up` | event bus replay / Gap |
-| POST | `/api/backend/control/events/stream` | NDJSON catch-up + live |
+| POST | `/api/backend/control/events/catch-up` | recovery / mixed-version fallback only（GUI normal path 不得周期性轮询） |
+| POST | `/api/backend/control/events/stream` | **GUI normal path**：NDJSON catch-up + live；断线按 cursor 重连，Gap 先 replay 再 live |
 | POST | `/api/backend/control/cloud-sync/trigger` | owner Cloud Sync full cycle |
 | POST | `/api/backend/control/cloud-sync/test` | owner Cloud Sync connectivity |
 | POST | `/api/backend/control/cloud-sync/claude-md-push` | owner CLAUDE.md Git push |

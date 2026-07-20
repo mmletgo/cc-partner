@@ -8,8 +8,11 @@
  * Code Logic: 通过 fake invoke 记录命令序列（waitForInvoke 等待 effect 链路完成）；通过 emitWorkbenchEvent
  * 触发 terminal-status 事件；通过 data-testid 桩组件 + DOM 断言验证视图切换。
  */
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { fireEvent, screen } from '@testing-library/react';
+import { createTerminalInputPump } from './terminalInputPump';
+import { createTerminalLiveWriter } from './terminalLiveWriter';
+import { createWorkbenchTerminalBufferStore } from '@/hooks/workbenchTerminalBuffer';
 
 import {
   buildDependencyContextValue,
@@ -360,5 +363,98 @@ describe('Workbench terminal domain (characterization)', () => {
 
     const statusCard = document.querySelector('[class*="statusCard"]');
     expect(statusCard?.textContent).toContain('已退出');
+  });
+});
+
+
+describe('Workbench terminal latency contracts (Task 8)', () => {
+  test('1000 ordered inputs coalesce with max concurrency 1 and exact payload', async () => {
+    /**
+     * Business Logic（为什么需要这个测试）:
+     *   快速输入时必须 per-session 串行提交且拼接结果精确相等，失败不得重放。
+     *
+     * Code Logic（这个测试做什么）:
+     *   fake writer 首批 defer；连续 enqueue 1000 个确定字符/控制序列；
+     *   settle 后断言拼接精确相等、并发峰值 1。
+     */
+    let resolveFirst!: () => void;
+    const firstPromise = new Promise<void>((ok) => {
+      resolveFirst = ok;
+    });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const writes: string[] = [];
+    const write = vi.fn(async (_sessionId: string, data: string) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      writes.push(data);
+      try {
+        if (writes.length === 1) {
+          await firstPromise;
+        }
+      } finally {
+        inFlight -= 1;
+      }
+    });
+    const pump = createTerminalInputPump({ write });
+    const parts: string[] = [];
+    for (let i = 0; i < 1000; i += 1) {
+      const piece =
+        i % 17 === 0
+          ? '\u007f'
+          : i % 23 === 0
+            ? '\u001b[D'
+            : String.fromCharCode(97 + (i % 26));
+      parts.push(piece);
+      pump.enqueue('s-latency', piece);
+    }
+    expect(writes.length).toBe(1);
+    expect(maxInFlight).toBe(1);
+    resolveFirst();
+    await pump.whenIdle('s-latency');
+    expect(maxInFlight).toBe(1);
+    expect(writes.join('')).toBe(parts.join(''));
+  });
+
+  test('live delta reaches terminal.write before manual rAF scheduler flush', () => {
+    /**
+     * Business Logic（为什么需要这个测试）:
+     *   已挂载 xterm 的 live 路径不得等 rAF/React revision 才写入。
+     *
+     * Code Logic（这个测试做什么）:
+     *   注入 deferred frameScheduler；append 后立刻断言 write 调用发生在 flush 前。
+     *   这不是 wall-clock 测试。
+     */
+    let scheduled: Array<() => void> = [];
+    const frameScheduler = {
+      schedule(cb: () => void) {
+        scheduled.push(cb);
+        return () => {
+          scheduled = scheduled.filter((item) => item !== cb);
+        };
+      },
+    };
+    const store = createWorkbenchTerminalBufferStore({ frameScheduler });
+    store.reset('s-live', '');
+    const writes: string[] = [];
+    const terminal = {
+      clear() {},
+      write(data: string, cb?: () => void) {
+        writes.push(data);
+        cb?.();
+      },
+    };
+    const writer = createTerminalLiveWriter({
+      terminal,
+      source: store,
+      sessionId: 's-live',
+    });
+    writes.length = 0;
+    scheduled = [];
+    store.append('s-live', 'live-fast');
+    expect(writes).toEqual(['live-fast']);
+    for (const cb of [...scheduled]) cb();
+    expect(writes).toEqual(['live-fast']);
+    writer.dispose();
   });
 });
