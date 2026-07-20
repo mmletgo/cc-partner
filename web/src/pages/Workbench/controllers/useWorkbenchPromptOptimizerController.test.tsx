@@ -536,6 +536,29 @@ describe('useWorkbenchPromptOptimizerController', () => {
     expect(result.current.promptPanelPosition.top).not.toBe(initialTop);
   });
 
+  test('closed prompt panel does not measure terminal area on cursor movement', () => {
+    const getBoundingClientRect = vi.fn(() => ({
+      left: 0,
+      top: 0,
+      width: 800,
+      height: 600,
+      right: 800,
+      bottom: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    }));
+    const areaEl = { getBoundingClientRect } as unknown as HTMLDivElement;
+    const areaRef = { current: areaEl };
+    const { result } = renderController(buildHarness({ terminalAreaRef: areaRef }));
+
+    expect(result.current.promptPanelOpen).toBe(false);
+    act(() => {
+      result.current.handleCursorAnchorChange({ left: 1, top: 2, bottom: 3 });
+    });
+    expect(getBoundingClientRect).not.toHaveBeenCalled();
+  });
+
   test('unmount removes the keyboard shortcut listener', () => {
     const { unmount } = renderController(buildHarness({ workspaceView: 'terminal' }));
     unmount();

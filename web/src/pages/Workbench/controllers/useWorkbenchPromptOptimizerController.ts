@@ -411,18 +411,19 @@ export function useWorkbenchPromptOptimizerController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   浮层定位跟随终端光标；光标高频移动，浮层关闭时不应因此触发重渲染。
+   *   浮层定位跟随终端光标；光标高频移动，浮层关闭时不应强制布局读取或触发重渲染。
    *
    * Code Logic（这个函数做什么）:
-   *   更新 cursorAnchorRef；仅在浮层打开且 left/top 变化时提交新定位（shouldCommitPromptOptimizerPanelPosition gate）。
+   *   始终更新 cursorAnchorRef；仅当浮层打开且 anchor 非空时才读 terminalArea.getBoundingClientRect 并
+   *   在 left/top 变化时提交新定位（shouldCommitPromptOptimizerPanelPosition gate）。
    */
   const handleCursorAnchorChange = useCallback(
     (anchor: TerminalCursorAnchor | null) => {
       cursorAnchorRef.current = anchor;
+      if (!promptPanelOpenRef.current || !anchor) return;
       const area = terminalAreaRef.current;
-      if (!area || !anchor) return;
+      if (!area) return;
       const nextPosition = promptOptimizerPanelPosition(area.getBoundingClientRect(), anchor);
-      if (!promptPanelOpenRef.current) return;
       setPromptPanelPosition((current) =>
         shouldCommitPromptOptimizerPanelPosition(true, current, nextPosition)
           ? nextPosition

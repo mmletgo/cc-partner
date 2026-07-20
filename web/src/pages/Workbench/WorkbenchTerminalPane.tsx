@@ -40,6 +40,20 @@ export interface TerminalCursorAnchor {
   bottom: number;
 }
 
+/**
+ * Business Logic（为什么需要这个类型）:
+ *   光标锚点换算依赖 viewport 原点与 cell 尺寸；缓存后可在高频 onCursorMove 上避免重复强制布局读取。
+ *
+ * Code Logic（这个类型做什么）:
+ *   保存 viewport 左上角与单个 cell 的宽高（像素）。
+ */
+interface TerminalCursorMetrics {
+  left: number;
+  top: number;
+  cellWidth: number;
+  cellHeight: number;
+}
+
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
 
@@ -53,6 +67,43 @@ const MIN_TERMINAL_ROWS = 6;
 function clampU16(value: number, min: number): number {
   const rounded = Math.max(min, Math.round(value));
   return Math.min(65535, rounded);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Prompt 浮层需要把 xterm 光标坐标换算为 viewport 像素锚点，首次或失效后需要一次同步布局读取。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读取 viewport.getBoundingClientRect，按 terminal.cols/rows 估算 cell 尺寸并返回 metrics。
+ */
+function measureTerminalCursorMetrics(
+  viewport: HTMLDivElement,
+  terminal: Terminal,
+): TerminalCursorMetrics {
+  const rect = viewport.getBoundingClientRect();
+  return {
+    left: rect.left,
+    top: rect.top,
+    cellWidth: rect.width / Math.max(terminal.cols, 1),
+    cellHeight: rect.height / Math.max(terminal.rows, 1),
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   浮层定位消费的是 viewport 像素坐标，而 xterm 只暴露 cell 行列。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用缓存 metrics 与 cursorX/cursorY 计算 left/top/bottom 锚点。
+ */
+function cursorAnchorFromMetrics(
+  metrics: TerminalCursorMetrics,
+  cursorX: number,
+  cursorY: number,
+): TerminalCursorAnchor {
+  const left = metrics.left + cursorX * metrics.cellWidth;
+  const top = metrics.top + cursorY * metrics.cellHeight;
+  return { left, top, bottom: top + metrics.cellHeight };
 }
 
 /**
@@ -83,6 +134,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const cursorAnchorCallbackRef = useRef<WorkbenchTerminalPaneProps['onCursorAnchorChange']>(
     onCursorAnchorChange,
   );
+  // Business Logic: resize/theme 后 cell 尺寸会变；缓存 metrics，避免每个 onCursorMove 强制布局。
+  const cursorMetricsRef = useRef<TerminalCursorMetrics | null>(null);
   const sessionId = session?.id ?? null;
   const store = useWorkbenchTerminalBufferStore();
 
@@ -103,16 +156,28 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     terminal.loadAddon(fit);
     terminal.open(viewport);
     fit.fit();
-    const emitCursorAnchor = () => {
+    cursorMetricsRef.current = null;
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Prompt 浮层定位依赖光标锚点，但 inactive pane / 非 terminal 视图不会注册回调；
+     *   高频 onCursorMove 不得在无消费者时强制 getBoundingClientRect。
+     *
+     * Code Logic（这个函数做什么）:
+     *   无 callback 时立即返回；有 callback 时用缓存 metrics（缺失则测量一次）换算并回调。
+     */
+    const emitCursorAnchor = (): void => {
+      const callback = cursorAnchorCallbackRef.current;
+      if (!callback) return;
       try {
-        const rect = viewport.getBoundingClientRect();
-        const cellWidth = rect.width / Math.max(terminal.cols, 1);
-        const cellHeight = rect.height / Math.max(terminal.rows, 1);
-        const cursorX = terminal.buffer.active.cursorX;
-        const cursorY = terminal.buffer.active.cursorY;
-        const left = rect.left + cursorX * cellWidth;
-        const top = rect.top + cursorY * cellHeight;
-        cursorAnchorCallbackRef.current?.({ left, top, bottom: top + cellHeight });
+        const metrics = cursorMetricsRef.current ?? measureTerminalCursorMetrics(viewport, terminal);
+        cursorMetricsRef.current = metrics;
+        callback(
+          cursorAnchorFromMetrics(
+            metrics,
+            terminal.buffer.active.cursorX,
+            terminal.buffer.active.cursorY,
+          ),
+        );
       } catch {
         // 光标定位仅用于浮层摆放，失败不影响终端显示与输入。
       }
@@ -133,6 +198,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     const resize = () => {
       try {
         fit.fit();
+        // fit 后 cell 尺寸变化，失效缓存；仅 callback 存在时由 emitCursorAnchor 重算。
+        cursorMetricsRef.current = null;
         // 始终把当前 cols/rows 回传：即使与上次相同，后端也会 bump 尺寸强制
         // tmux/PTY 重绘，避免冷启动 replay 后 status bar 停在历史帧中间。
         onResize(
@@ -196,6 +263,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       const terminal = terminalRef.current;
       if (terminal) {
         terminal.options.theme = workbenchTerminalTheme();
+        // 主题切换可能改变 cell 度量相关样式，失效缓存。
+        cursorMetricsRef.current = null;
       }
     };
     window.addEventListener('cp-theme-change', applyTheme);

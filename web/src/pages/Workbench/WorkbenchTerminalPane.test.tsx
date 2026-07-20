@@ -38,6 +38,8 @@ interface MockTerminal {
   options: { theme?: unknown };
   onData: (cb: (data: string) => void) => { dispose: () => void };
   onCursorMove: (cb: () => void) => { dispose: () => void };
+  /** 测试用：主动触发已注册的 onCursorMove 回调。 */
+  emitCursorMove: () => void;
   onResize: (cb: () => void) => { dispose: () => void };
   loadAddon: (addon: unknown) => void;
   open: (el: HTMLElement) => void;
@@ -102,6 +104,16 @@ vi.mock('@xterm/xterm', () => {
     onCursorMove(cb: () => void) {
       this.cursorMoveCb = cb;
       return { dispose: () => { if (this.cursorMoveCb === cb) this.cursorMoveCb = null; } };
+    }
+    /**
+     * Business Logic（为什么需要这个方法）:
+     *   契约测试需要主动触发 xterm 的 onCursorMove，验证无回调时不读布局。
+     *
+     * Code Logic（这个方法做什么）:
+     *   调用最近注册的 cursorMove 回调；无回调时 no-op。
+     */
+    emitCursorMove() {
+      this.cursorMoveCb?.();
     }
     onResize(cb: () => void) {
       this.resizeCb = cb;
@@ -256,6 +268,8 @@ function PaneHost(props: PaneHostProps): ReactElement {
     (anchor: TerminalCursorAnchor | null) => onCursorAnchorChange?.(anchor),
     [onCursorAnchorChange],
   );
+  // Business Logic: 生产路径在 inactive pane / 非 terminal 视图会传 undefined；
+  // 测试 harness 必须原样透传，不能把 undefined 包装成永远 truthy 的 no-op。
   return (
     <ControlledBuffersProvider store={store}>
       <WorkbenchTerminalPane
@@ -265,10 +279,47 @@ function PaneHost(props: PaneHostProps): ReactElement {
         onInput={stableInput}
         onResize={stableResize}
         resizeRequestKey={resizeRequestKey}
-        onCursorAnchorChange={stableCursor}
+        onCursorAnchorChange={onCursorAnchorChange ? stableCursor : undefined}
       />
     </ControlledBuffersProvider>
   );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   光标布局热路径测试需要一个最小 render 入口，并可省略 anchor callback。
+ *
+ * Code Logic（这个函数做什么）:
+ *   用默认 session/store 渲染 PaneHost；透传 onCursorAnchorChange。
+ */
+function renderPane(options: {
+  onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
+} = {}) {
+  const session = buildSession({ id: 's1' });
+  const store = createStoreFromSnapshots({ s1: { buffer: '', revision: 0 } });
+  return render(
+    <PaneHost
+      session={session}
+      store={store}
+      inputEnabled={true}
+      onCursorAnchorChange={options.onCursorAnchorChange}
+    />,
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   测试需要触发最近一个 mock Terminal 的 onCursorMove。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回 terminalEvents.instances 末项；不存在时抛错。
+ */
+function latestTerminal(): MockTerminal {
+  const terminal = terminalEvents.instances[terminalEvents.instances.length - 1];
+  if (!terminal) {
+    throw new Error('expected at least one mock Terminal instance');
+  }
+  return terminal;
 }
 
 /**
@@ -612,6 +663,16 @@ describe('WorkbenchTerminalPane — fires initial cursor anchor and cleanup null
     // unmount 时清理回调应触发一次 null anchor。
     unmount();
     expect(onCursorAnchorChange).toHaveBeenCalledWith(null);
+  });
+
+  test('cursor move does not measure viewport when no anchor callback is registered', () => {
+    renderPane({ onCursorAnchorChange: undefined });
+    const viewport = screen.getByTestId('terminal-pane').firstElementChild as HTMLDivElement;
+    const rect = vi.spyOn(viewport, 'getBoundingClientRect');
+    act(() => {
+      latestTerminal().emitCursorMove();
+    });
+    expect(rect).not.toHaveBeenCalled();
   });
 });
 
