@@ -326,8 +326,29 @@ pub async fn apply_workspace_restore_for_state(
 
     for action in &mut actions {
         match action.outcome {
-            WorkspaceRestoreOutcome::Select | WorkspaceRestoreOutcome::Reuse => {
+            WorkspaceRestoreOutcome::Select => {
                 restored += 1;
+            }
+            WorkspaceRestoreOutcome::Reuse => {
+                // R19 M2：本机 apply 重新验证 Live；remote shortcut 由 owning device 权威。
+                if project.as_ref().is_some_and(|p| p.kind == "remote") {
+                    restored += 1;
+                    continue;
+                }
+                let Some(session_id) = action.resource_id.as_deref() else {
+                    action.outcome = WorkspaceRestoreOutcome::Skip;
+                    action.reason = Some(RestoreSkipReason::SessionMissing);
+                    skipped += 1;
+                    continue;
+                };
+                let ctx = RestoreInspectionContext::from_state(state.clone());
+                if ctx.registry_is_live(session_id) {
+                    restored += 1;
+                } else {
+                    action.outcome = WorkspaceRestoreOutcome::Skip;
+                    action.reason = Some(RestoreSkipReason::SessionMissing);
+                    skipped += 1;
+                }
             }
             WorkspaceRestoreOutcome::Skip => {
                 skipped += 1;

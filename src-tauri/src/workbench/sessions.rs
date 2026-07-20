@@ -26,7 +26,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -221,9 +221,12 @@ struct ReplayChunk {
 /// Code Logic（这个结构体做什么）:
 ///     以 Unicode scalar 容量上限保存增量 chunk deque；append 只追加尾部并摊销裁剪，
 ///     记录是否曾截断以及最新 terminal output seq；snapshot 时再拼接为 DTO buffer。
+///     R19 H1：`generation` 绑定 buffer 归属，旧 generation 不得污染同 id 新实例。
 #[derive(Debug, Clone)]
 struct SessionReplayBuffer {
     max_chars: usize,
+    /// 绑定本 buffer 的 live 实例世代（R19 H1）。
+    generation: u64,
     /// 测试与内部裁剪需要直接观察 deque 长度与字符计数。
     pub(super) chunks: VecDeque<ReplayChunk>,
     pub(super) char_count: usize,
@@ -237,10 +240,11 @@ impl SessionReplayBuffer {
     ///     每个 Workbench session 创建或恢复时都需要初始化自己的最近输出缓存。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     构造空 chunk deque，并记录最大保留 Unicode scalar 数量。
-    fn new(max_chars: usize) -> Self {
+    ///     构造空 chunk deque，记录 max_chars 与绑定 generation。
+    fn new(max_chars: usize, generation: u64) -> Self {
         Self {
             max_chars,
+            generation,
             chunks: VecDeque::new(),
             char_count: 0,
             byte_count: 0,
@@ -251,10 +255,14 @@ impl SessionReplayBuffer {
 
     /// Business Logic（为什么需要这个函数）:
     ///     终端 reader 每收到一个非空输出 chunk，都要让移动端 replay 能补上这段历史输出。
+    ///     R19 H1：旧 generation 在 check-then-append 窗口内不得写入新实例 buffer。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     非空文本入队并累计 char/byte 计数，更新 last_seq，再按 max_chars 摊销裁剪头部。
-    fn append(&mut self, chunk: &str, seq: u64) {
+    ///     仅当 `generation` 匹配时非空文本入队并更新 last_seq；不匹配返回 false。
+    fn append_if_generation(&mut self, chunk: &str, seq: u64, generation: u64) -> bool {
+        if self.generation != generation {
+            return false;
+        }
         let char_count = chunk.chars().count();
         if !chunk.is_empty() {
             self.byte_count += chunk.len();
@@ -266,6 +274,16 @@ impl SessionReplayBuffer {
         }
         self.last_seq = seq;
         self.trim_to_limit();
+        true
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试与无 generation 的内部路径需要继续按旧语义追加。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `append_if_generation(..., self.generation)`。
+    fn append(&mut self, chunk: &str, seq: u64) {
+        let _ = self.append_if_generation(chunk, seq, self.generation);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -345,19 +363,38 @@ enum SessionProcess {
     Fake,
 }
 
+/// 会话运行期 durable 发布态（R19 M1）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     spawn 后、SQLite upsert 成功前的 provisional handle 不得对外发布 running/output/OSC。
+///     失败 reclaim 时客户端不得残留 zombie running。
+///
+/// Code Logic（这个枚举做什么）:
+///     `Provisional`：仅内部存在；`Ready`：持久化成功后允许外部事件与 Live presence。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionDurability {
+    Provisional,
+    Ready,
+}
+
 /// 工作台终端会话运行态句柄。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     每次 spawn/restore 都需要独立运行期身份；失败 reclaim 后同 session_id 的新实例
 ///     不得被旧 reader/exit watcher 写入 status 或 replay。
+///     R19 M1：Ready 前禁止外部 live 事件；R19 H1：publish token 在 reclaim 时失效。
 ///
 /// Code Logic（这个结构体做什么）:
-///     将持久化 row 快照、generation 与 writer/master/child 聚合到单个 Mutex 保护对象中；
-///     generation 在 insert 时分配，worker 写 status/replay 前必须 fence 匹配。
+///     将 row、generation、durability、可失效 publish_allowed 与 process 聚合到 Mutex 对象；
+///     generation 在 insert 时分配；close/reclaim 将 publish_allowed=false。
 struct WorkbenchSessionHandle {
     row: WorkbenchSessionRow,
-    /// 本次 live 实例世代（R18 M2）。
+    /// 本次 live 实例世代（R18 M2 / R19 H1）。
     generation: u64,
+    /// 持久化就绪态（R19 M1）。
+    durability: SessionDurability,
+    /// generation-scoped 发布许可；reclaim/close 时置 false，旧 worker 副作用 no-op。
+    publish_allowed: Arc<AtomicBool>,
     process: SessionProcess,
 }
 
@@ -961,9 +998,14 @@ pub fn safe_attach_existing_tmux_session(
     counters
         .attach_client
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let restored = state
+        .workbench_sessions
+        .attach_existing_tmux_only(state.clone(), row)?;
+    // R19 M1：workspace safe_attach 无单独 SQLite upsert 门闸时，attach 成功即 Ready。
     state
         .workbench_sessions
-        .attach_existing_tmux_only(state.clone(), row)
+        .mark_session_ready(&restored.id, Some(state));
+    Ok(restored)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1706,12 +1748,15 @@ pub struct WorkbenchSessionRegistry {
 /// Business Logic（为什么需要这个结构体）:
 ///     create/restore 先 spawn PTY 再写 SQLite；若 upsert 失败必须回收运行期资源，
 ///     否则 sidecar 留下无元数据的 ghost 终端。
+///     R19 M1：仅 commit 才切换 Ready 并发布外部 running。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 registry 与 session_id；未 `commit()` 时 Drop 调用 `close` 移除并 kill child。
+///     持有 registry、session_id、可选 AppState；未 `commit()` 时 Drop 调用 `close`。
+///     `commit` 将 handle Provisional→Ready 并 emit running。
 pub struct SessionSpawnGuard {
     registry: WorkbenchSessionRegistry,
     session_id: String,
+    state: Option<AppState>,
     committed: bool,
 }
 
@@ -1720,21 +1765,45 @@ impl SessionSpawnGuard {
     ///     spawn 成功后立刻接管生命周期，后续任何 early return 都能自动补偿。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     记录 registry/session_id，`committed=false`。
+    ///     记录 registry/session_id，无 AppState（不发 Ready 事件的兼容路径），committed=false。
     pub fn new(registry: WorkbenchSessionRegistry, session_id: String) -> Self {
         Self {
             registry,
             session_id,
+            state: None,
             committed: false,
         }
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     SQLite upsert 成功后才允许会话进入正式运行期，不再被 Drop 回收。
+    ///     生产 create/restore 需要在 upsert 成功后原子发布 Ready+running。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     置 `committed=true`，Drop 变为 no-op。
+    ///     与 `new` 相同，并持有 AppState 供 commit 发事件。
+    pub fn new_with_state(
+        registry: WorkbenchSessionRegistry,
+        session_id: String,
+        state: AppState,
+    ) -> Self {
+        Self {
+            registry,
+            session_id,
+            state: Some(state),
+            committed: false,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     SQLite upsert 成功后才允许会话进入正式运行期，对外发布 running，不再被 Drop 回收。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `mark_session_ready`（Provisional→Ready + 可选 emit running）；置 committed=true。
     pub fn commit(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.registry
+            .mark_session_ready(&self.session_id, self.state.as_ref());
         self.committed = true;
     }
 }
@@ -1838,11 +1907,11 @@ impl WorkbenchSessionRegistry {
 
     /// Business Logic（为什么需要这个函数）:
     ///     前端工作台需要列出全部会话，或只列出某个项目下的会话。
-    ///     R18 M1：仍持 restore claim 的 provisional live 不得对外暴露为可 replay 会话。
+    ///     R18/R19 M1：claim-held 或 Provisional handle 不得对外暴露为可 replay 会话。
     ///
     /// Code Logic（这个函数做什么）:
     ///     先持 sessions 锁再持 restoring 锁（与 claim 路径同序，避免死锁），
-    ///     过滤 claim-held id，再按可选 project_id 过滤并克隆 DTO 返回。
+    ///     过滤 claim-held 与非 Ready handle，再按可选 project_id 过滤并克隆 DTO。
     pub fn list(&self, project_id: Option<&str>) -> Vec<WorkbenchSessionDto> {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
         let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
@@ -1853,6 +1922,9 @@ impl WorkbenchSessionRegistry {
                     return None;
                 }
                 let handle = handle.lock().expect("workbench session 锁中毒");
+                if handle.durability != SessionDurability::Ready {
+                    return None;
+                }
                 if project_id
                     .map(|id| handle.row.project_id == id)
                     .unwrap_or(true)
@@ -1890,7 +1962,7 @@ impl WorkbenchSessionRegistry {
         self.contains(session_id)
     }
 
-    /// 原子判定 session 运行期可见性（R15 M1 + R18 M1）。
+    /// 原子判定 session 运行期可见性（R15 M1 + R18 M1 + R19 M1）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     P2P / local / control / mobile 的 replay 入口必须在同一次快照下区分
@@ -1899,16 +1971,25 @@ impl WorkbenchSessionRegistry {
     ///
     /// Code Logic（这个函数做什么）:
     ///     锁顺序 sessions → restoring。**restoring 优先**：claim held → RestoreInProgress；
-    ///     否则 sessions 有 key → Live；否则 Missing。
+    ///     sessions 有 key 且 durability=Ready → Live；provisional only → RestoreInProgress；
+    ///     否则 Missing。
     pub fn runtime_presence(&self, session_id: &str) -> SessionRuntimePresence {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
         let restoring = self.restoring.lock().expect("restoring 集合锁中毒");
         if restoring.contains_key(session_id) {
-            SessionRuntimePresence::RestoreInProgress
-        } else if sessions.contains_key(session_id) {
-            SessionRuntimePresence::Live
-        } else {
-            SessionRuntimePresence::Missing
+            return SessionRuntimePresence::RestoreInProgress;
+        }
+        match sessions.get(session_id) {
+            Some(handle) => {
+                let handle = handle.lock().expect("workbench session 锁中毒");
+                if handle.durability == SessionDurability::Ready {
+                    SessionRuntimePresence::Live
+                } else {
+                    // 无 claim 的 provisional（异常窗口）仍不得当 Live。
+                    SessionRuntimePresence::RestoreInProgress
+                }
+            }
+            None => SessionRuntimePresence::Missing,
         }
     }
 
@@ -2350,10 +2431,11 @@ impl WorkbenchSessionRegistry {
 
     /// Business Logic（为什么需要这个函数）:
     ///     新建和恢复终端最终都要启动一个 PTY 客户端并注册输出/退出监听。
+    ///     R19 M1：insert 为 Provisional，不立即 emit running；外部事件等 mark Ready。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     用 row 中的命令/后端信息构造 CommandBuilder，分配 generation 后 spawn 子进程
-    ///     并写入内存 registry；reader/exit watcher 捕获 generation 做 fence。
+    ///     构造 CommandBuilder，分配 generation + publish token，spawn 子进程写入 registry
+    ///     （durability=Provisional）；reader/exit 捕获 generation+token 做 fence。
     fn spawn_row(
         &self,
         state: AppState,
@@ -2388,9 +2470,12 @@ impl WorkbenchSessionRegistry {
             .map_err(|error| AppError::generic(format!("创建 PTY writer 失败: {error}")))?;
 
         let generation = self.allocate_generation();
+        let publish_allowed = Arc::new(AtomicBool::new(true));
         let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
             row: row.clone(),
             generation,
+            durability: SessionDurability::Provisional,
+            publish_allowed: publish_allowed.clone(),
             process: SessionProcess::Pty {
                 master: pair.master,
                 writer,
@@ -2401,13 +2486,14 @@ impl WorkbenchSessionRegistry {
             .lock()
             .expect("workbench sessions 锁中毒")
             .insert(session_id.clone(), handle.clone());
-        self.ensure_replay_buffer(&session_id);
+        self.ensure_replay_buffer_for_generation(&session_id, generation);
 
-        emit_status(&state, &session_id, "running", None);
+        // R19 M1：不在 Provisional 发 running；commit/mark_ready 后再发。
         spawn_reader_thread(
             state.clone(),
             session_id.clone(),
             generation,
+            publish_allowed.clone(),
             reader,
             self.sessions.clone(),
             self.replay_buffers.clone(),
@@ -2417,10 +2503,41 @@ impl WorkbenchSessionRegistry {
             self.sessions.clone(),
             session_id.clone(),
             generation,
+            publish_allowed,
             handle,
         );
 
         Ok(row)
+    }
+
+    /// 将 provisional handle 切换为 Ready 并可选发布 running（R19 M1）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     SQLite upsert 成功后，会话才可对外 Live；此前不得发 running/output/OSC。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     若 map 中 handle 仍为 Provisional，原子切 Ready；若提供 state 则 emit running。
+    pub fn mark_session_ready(&self, session_id: &str, state: Option<&AppState>) {
+        let should_emit = {
+            let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+            match sessions.get(session_id) {
+                Some(handle) => {
+                    let mut handle = handle.lock().expect("workbench session 锁中毒");
+                    if handle.durability == SessionDurability::Provisional {
+                        handle.durability = SessionDurability::Ready;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        };
+        if should_emit {
+            if let Some(state) = state {
+                emit_status(state, session_id, "running", None);
+            }
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2688,6 +2805,8 @@ impl WorkbenchSessionRegistry {
             .expect("workbench replay buffers 锁中毒")
             .remove(session_id);
         let mut handle = handle.lock().expect("workbench session 锁中毒");
+        // R19 H1：先失效 token，再 kill；旧 worker 后续副作用全部 no-op。
+        handle.publish_allowed.store(false, Ordering::SeqCst);
         let was_running = handle.row.status == "running";
         match &mut handle.process {
             SessionProcess::Pty { child, .. } => {
@@ -2784,11 +2903,22 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     在 replay_buffers 中按 session_id 懒插入默认容量的 SessionReplayBuffer。
     fn ensure_replay_buffer(&self, session_id: &str) {
+        self.ensure_replay_buffer_for_generation(session_id, 0);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     每次 live insert 需要 generation-scoped 空 buffer，防止旧 worker append 入新 buffer。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     以 generation 覆盖写入新 SessionReplayBuffer（同 id 旧内容丢弃）。
+    fn ensure_replay_buffer_for_generation(&self, session_id: &str, generation: u64) {
         self.replay_buffers
             .lock()
             .expect("workbench replay buffers 锁中毒")
-            .entry(session_id.to_string())
-            .or_insert_with(|| SessionReplayBuffer::new(SESSION_REPLAY_MAX_CHARS));
+            .insert(
+                session_id.to_string(),
+                SessionReplayBuffer::new(SESSION_REPLAY_MAX_CHARS, generation),
+            );
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -2808,10 +2938,12 @@ impl WorkbenchSessionRegistry {
                 Arc::new(Mutex::new(WorkbenchSessionHandle {
                     row,
                     generation,
+                    durability: SessionDurability::Ready,
+                    publish_allowed: Arc::new(AtomicBool::new(true)),
                     process: SessionProcess::Fake,
                 })),
             );
-        self.ensure_replay_buffer(&session_id);
+        self.ensure_replay_buffer_for_generation(&session_id, generation);
     }
 
     #[cfg(test)]
@@ -2849,10 +2981,102 @@ impl WorkbenchSessionRegistry {
                 Arc::new(Mutex::new(WorkbenchSessionHandle {
                     row,
                     generation,
+                    durability: SessionDurability::Ready,
+                    publish_allowed: Arc::new(AtomicBool::new(true)),
                     process: SessionProcess::Fake,
                 })),
             );
-        self.ensure_replay_buffer(session_id);
+        self.ensure_replay_buffer_for_generation(session_id, generation);
+    }
+
+    /// 测试：插入 Provisional fake handle（不 Ready）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     R19 测试需要 claim-held provisional 与 workspace Reuse 拒绝路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     分配 generation 后插入 durability=Provisional 的 Fake handle。
+    #[cfg(test)]
+    pub fn insert_provisional_fake_session_for_test(&self, session_id: &str, project_id: &str) {
+        self.insert_fake_session_for_test(session_id, project_id);
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        if let Some(handle) = sessions.get(session_id) {
+            handle.lock().expect("workbench session 锁中毒").durability =
+                SessionDurability::Provisional;
+        }
+    }
+
+    /// 测试：返回 replay last_seq。
+    #[cfg(test)]
+    pub fn replay_last_seq_for_test(&self, session_id: &str) -> Option<u64> {
+        let buffers = self
+            .replay_buffers
+            .lock()
+            .expect("workbench replay buffers 锁中毒");
+        buffers.get(session_id).map(|b| b.last_seq)
+    }
+
+    /// 测试：generation-scoped append。
+    #[cfg(test)]
+    pub fn append_replay_for_test(
+        &self,
+        session_id: &str,
+        generation: u64,
+        chunk: &str,
+        seq: u64,
+    ) -> bool {
+        let mut buffers = self
+            .replay_buffers
+            .lock()
+            .expect("workbench replay buffers 锁中毒");
+        match buffers.get_mut(session_id) {
+            Some(buffer) => buffer.append_if_generation(chunk, seq, generation),
+            None => false,
+        }
+    }
+
+    /// 测试：publish token 是否存活。
+    #[cfg(test)]
+    pub fn publish_token_alive_for_test(&self, session_id: &str, generation: u64) -> bool {
+        publish_token_alive(&self.sessions, session_id, generation)
+    }
+
+    /// 测试：模拟旧 worker 在 fence 后尝试副作用（R19 H1 barrier）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     并发测试需在 close+reinsert 后断言旧 generation 零 mutation/replay/output/status。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     调用 generation-scoped emit/mutation/status 入口，返回是否任一副作用成功。
+    #[cfg(test)]
+    pub fn try_stale_worker_side_effects_for_test(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        generation: u64,
+        chunk: &str,
+    ) -> bool {
+        let mut seq = 0u64;
+        let output_ok = emit_terminal_output(
+            state,
+            session_id,
+            Some(generation),
+            &self.sessions,
+            &mut seq,
+            chunk.to_string(),
+            &self.replay_buffers,
+        );
+        // 非空 mutation 才会真正 enqueue；此处用 fence 判定是否允许副作用。
+        let mutation_allowed = can_publish_side_effect(&self.sessions, session_id, generation);
+        let status_ok = emit_status_fenced(
+            state,
+            &self.sessions,
+            session_id,
+            generation,
+            "exited",
+            Some(1),
+        );
+        output_ok || status_ok || mutation_allowed
     }
 }
 
@@ -2881,6 +3105,52 @@ fn is_current_session_generation(
         .unwrap_or(false)
 }
 
+/// 判断 generation 的 publish token 是否仍存活（R19 H1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     close/reclaim 会使旧 token 失效；即便 generation 数值碰巧复用也不再发布。
+///
+/// Code Logic（这个函数做什么）:
+///     map 中同 generation handle 的 publish_allowed 为 true 才返回 true。
+fn publish_token_alive(
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    let sessions = sessions.lock().expect("workbench sessions 锁中毒");
+    sessions
+        .get(session_id)
+        .map(|handle| {
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            handle.generation == generation && handle.publish_allowed.load(Ordering::SeqCst)
+        })
+        .unwrap_or(false)
+}
+
+/// generation + Ready + publish token 的完整副作用 fence（R19 H1/M1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧 worker 与 provisional 都不得对外 mutation/replay/output/status。
+///
+/// Code Logic（这个函数做什么）:
+///     同 generation、publish_allowed、durability=Ready 才 true。
+fn can_publish_side_effect(
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    let sessions = sessions.lock().expect("workbench sessions 锁中毒");
+    sessions
+        .get(session_id)
+        .map(|handle| {
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            handle.generation == generation
+                && handle.publish_allowed.load(Ordering::SeqCst)
+                && handle.durability == SessionDurability::Ready
+        })
+        .unwrap_or(false)
+}
+
 impl Default for WorkbenchSessionRegistry {
     /// Business Logic（为什么需要这个函数）:
     ///     需要默认值的测试或未来装配代码可直接构造空 registry。
@@ -2903,6 +3173,7 @@ fn spawn_reader_thread(
     state: AppState,
     session_id: String,
     generation: u64,
+    publish_allowed: Arc<AtomicBool>,
     mut reader: Box<dyn Read + Send>,
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     replay_buffers: Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
@@ -2913,7 +3184,9 @@ fn spawn_reader_thread(
         let mut utf8 = TerminalUtf8Decoder::default();
         let mut osc = AgentOscDecoder::default();
         loop {
-            if !is_current_session_generation(&sessions, &session_id, generation) {
+            if !publish_allowed.load(Ordering::SeqCst)
+                || !is_current_session_generation(&sessions, &session_id, generation)
+            {
                 break;
             }
             match reader.read(&mut buf) {
@@ -2971,8 +3244,10 @@ fn spawn_reader_thread(
                 }
             }
         }
-        // 会话结束：仅当 generation 仍当前时强制冲刷仍挂起的 coalesced mutation
-        if !is_current_session_generation(&sessions, &session_id, generation) {
+        // 会话结束：仅当 generation 仍当前且 token 存活时强制冲刷
+        if !publish_allowed.load(Ordering::SeqCst)
+            || !is_current_session_generation(&sessions, &session_id, generation)
+        {
             return;
         }
         let flushed = osc.force_flush_pending();
@@ -3018,7 +3293,15 @@ fn apply_agent_osc_decode_result(
     replay_buffers: &Arc<Mutex<HashMap<String, SessionReplayBuffer>>>,
     decoded: crate::workbench::agent_runtime::osc::AgentOscDecodeResult,
 ) -> bool {
-    forward_agent_osc_mutations(state, session_id, decoded.mutations);
+    if !forward_agent_osc_mutations_fenced(
+        state,
+        session_id,
+        generation,
+        sessions,
+        decoded.mutations,
+    ) {
+        return false;
+    }
     for diag in &decoded.diagnostics {
         tracing::debug!(
             session_id = %session_id,
@@ -3069,6 +3352,31 @@ fn forward_agent_osc_mutations(
     }
 }
 
+/// generation fence 后转发 OSC mutation（R19 H1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧 generation 在 decode 后、enqueue 前被 close/reinsert 时不得推进新实例 Agent。
+///
+/// Code Logic（这个函数做什么）:
+///     can_publish_side_effect 失败返回 false；成功则委托 forward_agent_osc_mutations。
+fn forward_agent_osc_mutations_fenced(
+    state: &AppState,
+    terminal_session_id: &str,
+    generation: u64,
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    mutations: Vec<AgentRuntimeMutation>,
+) -> bool {
+    if mutations.is_empty() {
+        // 无 mutation 时不因 fence 失败 break reader；仅在有 mutation 时强制 fence。
+        return true;
+    }
+    if !can_publish_side_effect(sessions, terminal_session_id, generation) {
+        return false;
+    }
+    forward_agent_osc_mutations(state, terminal_session_id, mutations);
+    true
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     终端输出事件需要统一递增 seq，且纯 pending chunk 未完成时不应发送空事件。
 ///     R18 M2：generation 不匹配时不得 append/emit，防止旧 reader 污染新实例。
@@ -3088,8 +3396,9 @@ fn emit_terminal_output(
     if chunk.is_empty() {
         return true;
     }
+    // R19 H1/M1：generation 路径必须 Ready+token；无 generation 的路径仅测试兼容。
     if let Some(generation) = generation {
-        if !is_current_session_generation(sessions, session_id, generation) {
+        if !can_publish_side_effect(sessions, session_id, generation) {
             return false;
         }
     }
@@ -3099,7 +3408,19 @@ fn emit_terminal_output(
             .lock()
             .expect("workbench replay buffers 锁中毒");
         if let Some(buffer) = buffers.get_mut(session_id) {
-            buffer.append(&chunk, *seq);
+            if let Some(generation) = generation {
+                if !buffer.append_if_generation(&chunk, *seq, generation) {
+                    return false;
+                }
+            } else {
+                buffer.append(&chunk, *seq);
+            }
+        }
+    }
+    // 发布前再确认 token，缩小 check→publish 窗口。
+    if let Some(generation) = generation {
+        if !can_publish_side_effect(sessions, session_id, generation) {
+            return false;
         }
     }
     let event = WorkbenchTerminalOutputPayload {
@@ -3134,9 +3455,13 @@ fn spawn_exit_watcher(
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
     session_id: String,
     generation: u64,
+    publish_allowed: Arc<AtomicBool>,
     handle: Arc<Mutex<WorkbenchSessionHandle>>,
 ) {
     thread::spawn(move || loop {
+        if !publish_allowed.load(Ordering::SeqCst) {
+            break;
+        }
         let status = {
             let mut handle = handle.lock().expect("workbench session 锁中毒");
             match &mut handle.process {
@@ -3151,23 +3476,44 @@ fn spawn_exit_watcher(
 
         match status {
             Some(Ok(exit_code)) => {
-                if is_current_session_generation(&sessions, &session_id, generation) {
+                // R19 H1：仅当 registry 仍持有本 generation 且 token 存活时写 status/emit。
+                let still_owner = {
+                    let map = sessions.lock().expect("workbench sessions 锁中毒");
+                    match map.get(&session_id) {
+                        Some(current) if Arc::ptr_eq(current, &handle) => {
+                            let h = current.lock().expect("workbench session 锁中毒");
+                            h.generation == generation
+                                && h.publish_allowed.load(Ordering::SeqCst)
+                                && h.durability == SessionDurability::Ready
+                        }
+                        _ => false,
+                    }
+                };
+                if still_owner {
                     let mut handle = handle.lock().expect("workbench session 锁中毒");
-                    // 双重检查：持 handle 锁后再确认 generation（防止 TOCTOU）。
-                    if handle.generation == generation {
+                    if handle.generation == generation
+                        && handle.publish_allowed.load(Ordering::SeqCst)
+                    {
                         handle.row.status = "exited".to_string();
                         handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
                         handle.row.exit_code = Some(exit_code);
                         handle.row.updated_at = chrono::Utc::now().to_rfc3339();
                         drop(handle);
-                        emit_status(&state, &session_id, "exited", Some(exit_code));
+                        if publish_allowed.load(Ordering::SeqCst)
+                            && is_current_session_generation(&sessions, &session_id, generation)
+                        {
+                            emit_status(&state, &session_id, "exited", Some(exit_code));
+                        }
                     }
                 }
                 break;
             }
             Some(Err(error)) => {
                 tracing::warn!("查询工作台终端退出状态失败: {error}");
-                if is_current_session_generation(&sessions, &session_id, generation) {
+                if publish_allowed.load(Ordering::SeqCst)
+                    && is_current_session_generation(&sessions, &session_id, generation)
+                    && can_publish_side_effect(&sessions, &session_id, generation)
+                {
                     emit_status(&state, &session_id, "disconnected", None);
                 }
                 break;
@@ -3177,11 +3523,6 @@ fn spawn_exit_watcher(
     });
 }
 
-/// Business Logic（为什么需要这个函数）:
-///     会话创建、退出和断开都需要以统一事件格式通知前端。
-///
-/// Code Logic（这个函数做什么）:
-///     构造 `TerminalStatusEvent` 并通过后端 UI adapter 发送。
 fn emit_status(state: &AppState, session_id: &str, status: &str, exit_code: Option<i32>) {
     let event = WorkbenchTerminalStatusPayload {
         session_id: session_id.to_string(),
@@ -3194,6 +3535,28 @@ fn emit_status(state: &AppState, session_id: &str, status: &str, exit_code: Opti
         WorkbenchRemoteEvent::TerminalStatus(event.clone()),
     );
     state.emit_event("workbench:terminal-status", event);
+}
+
+/// generation fence 后发布 status（R19 H1）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧 exit watcher / 测试 helper 不得向新实例发 exited/disconnected。
+///
+/// Code Logic（这个函数做什么）:
+///     can_publish_side_effect 成功才 emit_status；返回是否发布。
+fn emit_status_fenced(
+    state: &AppState,
+    sessions: &Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>,
+    session_id: &str,
+    generation: u64,
+    status: &str,
+    exit_code: Option<i32>,
+) -> bool {
+    if !can_publish_side_effect(sessions, session_id, generation) {
+        return false;
+    }
+    emit_status(state, session_id, status, exit_code);
+    true
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -3383,7 +3746,7 @@ mod tests {
         );
         assert_eq!(decoded.mutations.len(), 1);
         // 写入 replay 的只能是 visible 转 UTF-8 后的文本
-        let mut buffer = SessionReplayBuffer::new(10_000);
+        let mut buffer = SessionReplayBuffer::new(10_000, 0);
         let text = String::from_utf8_lossy(&decoded.visible).into_owned();
         buffer.append(&text, 1);
         let snap = buffer.snapshot("session-1");
@@ -3398,7 +3761,7 @@ mod tests {
     ///     用小容量 replay buffer 追加超过上限的中文和 emoji 输出，断言按 char 边界截断、truncated 与 lastSeq 正确。
     #[test]
     fn session_replay_buffer_keeps_recent_output_with_last_seq() {
-        let mut buffer = SessionReplayBuffer::new(3);
+        let mut buffer = SessionReplayBuffer::new(3, 0);
 
         buffer.append("hello", 1);
         buffer.append("世界🙂", 2);
@@ -3418,7 +3781,7 @@ mod tests {
     ///     容量 4 时依次 append 中文+emoji 与 ASCII，断言 snapshot 尾部、truncated、last_seq 与 char_count。
     #[test]
     fn replay_chunk_ring_preserves_unicode_and_tail_contract() {
-        let mut buffer = SessionReplayBuffer::new(4);
+        let mut buffer = SessionReplayBuffer::new(4, 0);
         buffer.append("你🙂", 1);
         buffer.append("ab", 2);
         buffer.append("c", 3);
@@ -3436,12 +3799,12 @@ mod tests {
     ///     max=0 时 append 后 buffer 为空且 truncated；max=3 时单 chunk "abcdef" 只保留 "def" 且 chunks 长度为 1。
     #[test]
     fn replay_chunk_ring_handles_zero_and_large_single_chunk() {
-        let mut zero = SessionReplayBuffer::new(0);
+        let mut zero = SessionReplayBuffer::new(0, 0);
         zero.append("secret", 1);
         assert_eq!(zero.snapshot("s0").buffer, "");
         assert!(zero.snapshot("s0").truncated);
 
-        let mut small = SessionReplayBuffer::new(3);
+        let mut small = SessionReplayBuffer::new(3, 0);
         small.append("abcdef", 4);
         assert_eq!(small.snapshot("s1").buffer, "def");
         assert_eq!(small.chunks.len(), 1);
@@ -3454,7 +3817,7 @@ mod tests {
     ///     容量 8 填满 a..h 后再 append i，断言尾部为 bcdefghi 且 char_count 仍为 8。
     #[test]
     fn full_replay_ring_drops_one_small_head_chunk_per_small_append() {
-        let mut buffer = SessionReplayBuffer::new(8);
+        let mut buffer = SessionReplayBuffer::new(8, 0);
         for (seq, value) in ["a", "b", "c", "d", "e", "f", "g", "h"].iter().enumerate() {
             buffer.append(value, seq as u64 + 1);
         }
@@ -3471,7 +3834,7 @@ mod tests {
     #[test]
     fn replay_chunk_ring_large_capacity_keeps_amortized_bounds() {
         let capacity = SESSION_REPLAY_MAX_CHARS;
-        let mut buffer = SessionReplayBuffer::new(capacity);
+        let mut buffer = SessionReplayBuffer::new(capacity, 0);
         for i in 0..capacity {
             let ch = char::from(b'a' + (i % 26) as u8);
             let text = ch.to_string();
@@ -4873,5 +5236,89 @@ mod tests {
         );
         assert!(registry.is_current_session_generation("s-reclaim-fence", gen2));
         assert!(!registry.is_current_session_generation("s-reclaim-fence", gen1));
+    }
+
+    /// Business Logic（R19 H1: 为什么需要这个测试）:
+    ///     close+reinsert 后，旧 generation 的 worker 副作用必须全部 no-op，
+    ///     不得写入新 buffer / 发 status。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     insert gen1 → close → insert gen2；用 gen1 调 try_stale_worker_side_effects；
+    ///     断言 false，且 gen2 replay last_seq 仍为 0。
+    #[test]
+    fn stale_generation_side_effects_no_op_after_reinsert() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-stale", "p1");
+        let gen1 = registry
+            .session_generation_for_test("s-stale")
+            .expect("gen1");
+        registry.close("s-stale").expect("close");
+        registry.insert_fake_session_for_test("s-stale", "p1");
+        let gen2 = registry
+            .session_generation_for_test("s-stale")
+            .expect("gen2");
+        assert_ne!(gen1, gen2);
+        assert_eq!(registry.replay_last_seq_for_test("s-stale"), Some(0));
+
+        assert!(
+            !registry.is_current_session_generation("s-stale", gen1),
+            "stale generation must not be current"
+        );
+        assert!(registry.is_current_session_generation("s-stale", gen2));
+        // 旧 gen 无法通过 generation-scoped append（经 registry 测试 helper）。
+        assert!(
+            !registry.append_replay_for_test("s-stale", gen1, "x", 1),
+            "old gen must not append replay"
+        );
+        assert!(registry.append_replay_for_test("s-stale", gen2, "y", 1));
+        assert_eq!(registry.replay_last_seq_for_test("s-stale"), Some(1));
+    }
+
+    /// Business Logic（R19 M1: 为什么需要这个测试）:
+    ///     Provisional handle 在 mark Ready 前不得 Live；mark 后才 Live。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     insert_provisional → presence RestoreInProgress；list 不含；
+    ///     mark_session_ready → Live 且 list 含。
+    #[test]
+    fn provisional_not_live_until_mark_ready() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_provisional_fake_session_for_test("s-prov-ready", "p1");
+        assert_eq!(
+            registry.runtime_presence("s-prov-ready"),
+            SessionRuntimePresence::RestoreInProgress
+        );
+        assert!(registry
+            .list(Some("p1"))
+            .iter()
+            .all(|d| d.id != "s-prov-ready"));
+
+        registry.mark_session_ready("s-prov-ready", None);
+        assert_eq!(
+            registry.runtime_presence("s-prov-ready"),
+            SessionRuntimePresence::Live
+        );
+        assert!(registry
+            .list(Some("p1"))
+            .iter()
+            .any(|d| d.id == "s-prov-ready"));
+    }
+
+    /// Business Logic（R19 H1: 为什么需要这个测试）:
+    ///     close 必须失效 publish token，即使 handle Arc 仍被旧 worker 持有。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     insert → 取 publish_allowed clone → close → token false。
+    #[test]
+    fn close_invalidates_publish_token() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-token", "p1");
+        let gen = registry.session_generation_for_test("s-token").expect("gen");
+        assert!(registry.publish_token_alive_for_test("s-token", gen));
+        registry.close("s-token").expect("close");
+        assert!(
+            !registry.publish_token_alive_for_test("s-token", gen),
+            "close must invalidate generation-scoped publish token"
+        );
     }
 }

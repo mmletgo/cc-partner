@@ -289,10 +289,11 @@ impl RestoreInspectionContext {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     判断 session 是否已在运行期 registry。
+    ///     判断 session 是否已在运行期 registry（map 级，含 provisional）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     真实 registry 优先；再合并测试 mock 集合。
+    ///     真实 registry contains；再合并测试 mock 集合。
+    #[allow(dead_code)]
     pub fn registry_contains(&self, session_id: &str) -> bool {
         if self.state.workbench_sessions.contains(session_id) {
             return true;
@@ -301,6 +302,37 @@ impl RestoreInspectionContext {
             return set.contains(session_id);
         }
         false
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     workspace preflight/safe_attach 必须匹配 runtime_presence：仅 Live 可 Reuse。
+    ///     claim-held provisional 不得被当成可复用会话。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     mock set 命中视为 Live；否则委托 `runtime_presence`。
+    pub fn runtime_presence(
+        &self,
+        session_id: &str,
+    ) -> crate::workbench::sessions::SessionRuntimePresence {
+        use crate::workbench::sessions::SessionRuntimePresence;
+        if let Some(ref set) = self.mock_registry_sessions {
+            if set.contains(session_id) {
+                return SessionRuntimePresence::Live;
+            }
+        }
+        self.state.workbench_sessions.runtime_presence(session_id)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Reuse 快捷路径仅对 Live Ready 会话成立。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `runtime_presence == Live`。
+    pub fn registry_is_live(&self, session_id: &str) -> bool {
+        matches!(
+            self.runtime_presence(session_id),
+            crate::workbench::sessions::SessionRuntimePresence::Live
+        )
     }
 }
 
@@ -432,7 +464,7 @@ pub async fn preflight_workspace_restore(
                             outcome: WorkspaceRestoreOutcome::Skip,
                             reason: Some(RestoreSkipReason::SessionOwnershipMismatch),
                         });
-                    } else if ctx.registry_contains(session_id) {
+                    } else if ctx.registry_is_live(session_id) {
                         resolved_session_id = Some(session_id.clone());
                         actions.push(WorkspaceRestoreAction {
                             target: "session".to_string(),
@@ -565,12 +597,47 @@ pub async fn safe_attach_workbench_session(
     ctx: &RestoreInspectionContext,
     session_id: &str,
 ) -> Result<SafeAttachResult, AppError> {
-    // 已在 registry：直接 reuse
-    if ctx.registry_contains(session_id) {
-        return Ok(SafeAttachResult {
-            session_id: session_id.to_string(),
-            reused: true,
-        });
+    use crate::workbench::sessions::{RestoreClaimOutcome, SessionRuntimePresence};
+
+    // R19 M2：仅 Live Ready 可 reuse。
+    // RestoreInProgress：短自旋等待 holder 结束（Ready→reuse / 释放→可 claim）；
+    // 超时仍 in-progress → retryable busy（workspace apply 不得挂满 60s）。
+    match ctx.runtime_presence(session_id) {
+        SessionRuntimePresence::Live => {
+            return Ok(SafeAttachResult {
+                session_id: session_id.to_string(),
+                reused: true,
+            });
+        }
+        SessionRuntimePresence::RestoreInProgress => {
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                match ctx.runtime_presence(session_id) {
+                    SessionRuntimePresence::Live => {
+                        return Ok(SafeAttachResult {
+                            session_id: session_id.to_string(),
+                            reused: true,
+                        });
+                    }
+                    SessionRuntimePresence::Missing => break,
+                    SessionRuntimePresence::RestoreInProgress => continue,
+                }
+            }
+            if ctx.registry_is_live(session_id) {
+                return Ok(SafeAttachResult {
+                    session_id: session_id.to_string(),
+                    reused: true,
+                });
+            }
+            if matches!(
+                ctx.runtime_presence(session_id),
+                SessionRuntimePresence::RestoreInProgress
+            ) {
+                return Err(AppError::unavailable("safe_attach_claim_busy".to_string()));
+            }
+            // claim 已释放且非 Live：fallthrough 重新 claim / attach。
+        }
+        SessionRuntimePresence::Missing => {}
     }
 
     let row = ctx
@@ -593,14 +660,13 @@ pub async fn safe_attach_workbench_session(
 
     // claim 防止并发重复 attach；未拿到 claim 时禁止 fallthrough（否则会无占位 attach，
     // 并可能用 armed RestoreClaimGuard 误释放他人 claim）。
-    use crate::workbench::sessions::RestoreClaimOutcome;
     let mut claimed = matches!(
         ctx.state.workbench_sessions.try_claim_restore(session_id),
         RestoreClaimOutcome::Claimed
     );
     if !claimed {
         // 另一路正在 attach 或已完成：优先 reuse
-        if ctx.registry_contains(session_id) {
+        if ctx.registry_is_live(session_id) {
             return Ok(SafeAttachResult {
                 session_id: session_id.to_string(),
                 reused: true,
@@ -609,7 +675,7 @@ pub async fn safe_attach_workbench_session(
         // 短暂自旋等待 holder 完成并进入 registry，或 claim 释放后由本路接手
         for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            if ctx.registry_contains(session_id) {
+            if ctx.registry_is_live(session_id) {
                 return Ok(SafeAttachResult {
                     session_id: session_id.to_string(),
                     reused: true,
@@ -624,7 +690,7 @@ pub async fn safe_attach_workbench_session(
             }
         }
         if !claimed {
-            if ctx.registry_contains(session_id) {
+            if ctx.registry_is_live(session_id) {
                 return Ok(SafeAttachResult {
                     session_id: session_id.to_string(),
                     reused: true,
@@ -651,9 +717,14 @@ pub async fn safe_attach_workbench_session(
         #[cfg(test)]
         {
             ctx.counters.attach_client.fetch_add(1, Ordering::SeqCst);
+            let sid = row.id.clone();
             ctx.state
                 .workbench_sessions
                 .insert_fake_session_row_for_test(row);
+            // insert_fake 默认 Ready；显式 mark 保持语义一致。
+            ctx.state
+                .workbench_sessions
+                .mark_session_ready(&sid, Some(&ctx.state));
         }
         #[cfg(not(test))]
         {
@@ -1180,6 +1251,85 @@ mod tests {
             .persisted_tmux("s1")
             .await
             .registry_has("s1");
+        let plan = fixture.preflight().await.unwrap();
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| a.target == "session" && a.outcome == WorkspaceRestoreOutcome::Reuse));
+    }
+
+    /// Business Logic（R19 M2: 为什么需要这个测试）:
+    ///     claim-held provisional 不得 preflight Reuse。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim + provisional fake insert → preflight 不为 Reuse。
+    #[tokio::test]
+    async fn preflight_does_not_reuse_claim_held_provisional() {
+        let fixture = RestoreFixture::base()
+            .await
+            .persisted_tmux("s1")
+            .await;
+        assert!(fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .try_claim_restore("s1")
+            .is_claimed());
+        fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .insert_provisional_fake_session_for_test("s1", "p1");
+        assert!(fixture.ctx.state.workbench_sessions.contains("s1"));
+        assert!(!fixture.ctx.registry_is_live("s1"));
+
+        let plan = fixture.preflight().await.unwrap();
+        assert!(
+            plan.actions.iter().all(|a| {
+                a.target != "session" || a.outcome != WorkspaceRestoreOutcome::Reuse
+            }),
+            "provisional claim-held session must not be Reuse"
+        );
+        fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .release_restore_claim("s1");
+    }
+
+    /// Business Logic（R19 M2: 为什么需要这个测试）:
+    ///     provisional 随后 Ready 后，preflight 才可 Reuse。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim + provisional → mark Ready + finish Ready → preflight Reuse。
+    #[tokio::test]
+    async fn preflight_reuses_after_provisional_becomes_ready() {
+        let fixture = RestoreFixture::base()
+            .await
+            .persisted_tmux("s1")
+            .await;
+        assert!(fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .try_claim_restore("s1")
+            .is_claimed());
+        fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .insert_provisional_fake_session_for_test("s1", "p1");
+        fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .mark_session_ready("s1", None);
+        fixture.ctx.state.workbench_sessions.finish_restore_claim(
+            "s1",
+            crate::workbench::sessions::SharedRestoreNotification::Ready,
+        );
+        assert!(fixture.ctx.registry_is_live("s1"));
+
         let plan = fixture.preflight().await.unwrap();
         assert!(plan
             .actions

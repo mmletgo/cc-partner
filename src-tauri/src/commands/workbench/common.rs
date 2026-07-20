@@ -577,9 +577,10 @@ pub(crate) async fn restore_persisted_sessions(
         {
             Ok(restored) => {
                 // spawn 成功后 upsert 失败也必须回收 attach，并广播 Failed + 返回 Err。
-                let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new(
+                let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new_with_state(
                     (*state.workbench_sessions).clone(),
                     restored.id.clone(),
+                    state.clone(),
                 );
                 match state.workbench_session_repo.upsert(&restored).await {
                     Ok(()) => {

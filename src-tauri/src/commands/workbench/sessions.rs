@@ -86,9 +86,10 @@ pub(crate) async fn local_create_workbench_session(
         initial_rows,
     )?;
     // RAII：upsert 失败时 Drop 自动 close，避免 ghost PTY/registry。
-    let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new(
+    let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new_with_state(
         (*state.workbench_sessions).clone(),
         row.id.clone(),
+        state.clone(),
     );
     state.workbench_session_repo.upsert(&row).await?;
     spawn_guard.commit();
