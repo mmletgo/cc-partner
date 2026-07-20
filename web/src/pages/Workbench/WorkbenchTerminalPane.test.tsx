@@ -180,6 +180,9 @@ function ControlledBuffersProvider({ store, children }: ControlledProviderProps)
     resetBuffer: (sessionId: string) => store.reset(sessionId),
     removeBuffer: (sessionId: string) => store.remove(sessionId),
     getHistorySyncFailure: () => null,
+    subscribeHistorySyncFailures: () => () => undefined,
+    getHistorySyncFailuresRevision: () => 0,
+    retryHistorySync: () => undefined,
   };
   return (
     <WorkbenchTerminalBuffersContext.Provider value={value}>

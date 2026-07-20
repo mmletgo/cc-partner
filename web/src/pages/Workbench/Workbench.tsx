@@ -30,7 +30,10 @@ import { WorkbenchWorkspaceNav } from '@/components/layout';
 import { Button, StatusMessage } from '@/components/primitives';
 import { useWorkbenchDependency } from '@/hooks/workbenchDependencyContext';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
-import { useWorkbenchTerminalBuffers } from '@/hooks/workbenchTerminalBuffersContext';
+import {
+  useTerminalHistorySyncFailure,
+  useWorkbenchTerminalBuffers,
+} from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention } from '@/hooks/useAttention';
 import {
   BrowserIcon, EditIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
@@ -93,8 +96,11 @@ export function Workbench() {
     refreshProjectSessionStats,
     chooseAndAddProject,
   } = useWorkbenchProjects();
-  const { resetBuffer: resetTerminalBuffer, removeBuffer: removeTerminalBuffer } =
-    useWorkbenchTerminalBuffers();
+  const {
+    resetBuffer: resetTerminalBuffer,
+    removeBuffer: removeTerminalBuffer,
+    retryHistorySync,
+  } = useWorkbenchTerminalBuffers();
   const locationSearch = location.search;
   const workbenchDeepLink = useMemo(
     () => parseWorkbenchDeepLink(locationSearch),
@@ -192,6 +198,8 @@ export function Workbench() {
     handleResize,
     handleRefreshTerminalSize,
   } = terminalController;
+  // R12 M3：history sync 永久失败可订阅状态（hooks 必须在 early return 前）。
+  const historySyncFailure = useTerminalHistorySyncFailure(activeSessionId);
   // Business Logic: worktree/Git 域（worktree 生命周期 + 创建表单/busy/error + Git 提交刷新 + merge 阶段）
   // 由独立 controller 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调 +
   // terminalBridge，不复制邻接域 state。activeWorktreeId 仍由页面持有（终端域 controller / 文件 effect /
@@ -847,6 +855,30 @@ export function Workbench() {
             </div>
           ) : null}
           {sessionError ? <StatusMessage tone="danger" className={styles.errorBox} action={terminalController.hasWriteBlockedSessions ? <Button variant="secondary" size="sm" onClick={() => { void terminalController.retryWriteBlockRecovery(); }}>{t('workbench:recheckWriteBlock')}</Button> : undefined}>{sessionError}</StatusMessage> : null}
+          {historySyncFailure ? (
+            <StatusMessage
+              tone="warn"
+              className={styles.errorBox}
+              data-testid="terminal-history-sync-failure"
+              action={
+                activeSessionId ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      retryHistorySync(activeSessionId);
+                    }}
+                  >
+                    {t('workbench:historySync.retry')}
+                  </Button>
+                ) : undefined
+              }
+            >
+              {historySyncFailure.kind === 'not_found'
+                ? t('workbench:historySync.notFound')
+                : t('workbench:historySync.failed')}
+            </StatusMessage>
+          ) : null}
           {worktreeError ? <StatusMessage tone="danger" className={styles.errorBox}>{worktreeError}</StatusMessage> : null}
           {agentRuntime.phase === 'error' && agentRuntime.error ? <StatusMessage tone="warn" className={styles.errorBox} action={<Button variant="secondary" size="sm" onClick={() => { void agentRuntime.refresh(); }}>{t('workbench:refresh')}</Button>}>{agentRuntime.error.message}</StatusMessage> : null}
           {dependencyStatus.status !== 'ready' ? <WorkbenchDependencyCard compact className={styles.dependencyNotice} /> : null}

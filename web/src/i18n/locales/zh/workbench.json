@@ -841,5 +841,10 @@
     "delete": "删除",
     "confirmDelete": "确认删除",
     "empty": "暂无命名快照"
+  },
+  "historySync": {
+    "notFound": "终端历史不可用：该会话已不存在。",
+    "failed": "终端历史同步失败，已停止自动重试。",
+    "retry": "重试历史同步"
   }
 }

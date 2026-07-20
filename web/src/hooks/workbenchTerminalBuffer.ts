@@ -501,13 +501,15 @@ export interface TerminalHistorySyncFailure {
 /**
  * Business Logic（为什么需要这个函数）:
  *   Provider 在 catch 中不能再吞掉全部异常；必须先分类再决定是否 schedule recovery。
+ *   R12 M2：分类只依赖稳定字段，禁止本地化 message 子串判定 permanent/not_found。
  *
  * Code Logic（这个函数做什么）:
- *   - ContractDecodeError / validation / decode / malformed → permanent；
- *   - not_found / 会话不存在 / session_not_found → not_found；
- *   - timeout / unavailable / network / offline / abort 及其它未知 → recoverable
- *     （保持 R10 M2 瞬时恢复默认，避免误杀）。
- *   仅读取 name/message/code 的小写文本与稳定字段；不序列化 payload body。
+ *   - name === ContractDecodeError（大小写不敏感）→ permanent；
+ *   - code ∈ validation / validation_error → permanent；
+ *   - code ∈ not_found / session_not_found → not_found；
+ *   - code ∈ unavailable / timeout / conflict / internal → recoverable（显式）；
+ *   - 无 code 且非 ContractDecodeError → 默认 recoverable（保持瞬时恢复默认）。
+ *   仅读 name/code；不序列化 payload body，不 includes message 文案。
  */
 export function classifyTerminalReplayError(error: unknown): TerminalReplayErrorClass {
   if (error == null) {
@@ -521,39 +523,60 @@ export function classifyTerminalReplayError(error: unknown): TerminalReplayError
   const name =
     (typeof record?.name === 'string' ? record.name : '') ||
     (error instanceof Error ? error.name : '');
-  const message =
-    (typeof record?.message === 'string' ? record.message : '') ||
-    (error instanceof Error ? error.message : typeof error === 'string' ? error : '');
   const code = typeof record?.code === 'string' ? record.code : '';
   const nameLower = name.toLowerCase();
-  const messageLower = message.toLowerCase();
   const codeLower = code.toLowerCase();
 
-  if (
-    nameLower === 'contractdecodeerror' ||
-    codeLower === 'validation' ||
-    codeLower === 'validation_error' ||
-    messageLower.includes('validation') ||
-    messageLower.includes('decode') ||
-    messageLower.includes('contract "') ||
-    messageLower.includes('malformed')
-  ) {
+  // 契约解码失败：永久不兼容，禁止自动重试。
+  if (nameLower === 'contractdecodeerror') {
     return 'permanent';
   }
 
-  if (
-    codeLower === 'not_found' ||
-    codeLower === 'session_not_found' ||
-    messageLower.includes('not_found') ||
-    messageLower.includes('not found') ||
-    messageLower.includes('session_not_found') ||
-    messageLower.includes('不存在')
-  ) {
+  if (codeLower === 'validation' || codeLower === 'validation_error') {
+    return 'permanent';
+  }
+
+  if (codeLower === 'not_found' || codeLower === 'session_not_found') {
     return 'not_found';
   }
 
-  // 其余（含 timeout/unavailable/network/unknown）默认 recoverable。
+  // 显式可恢复/内部瞬时类：保持 recoverable 语义。
+  if (
+    codeLower === 'unavailable' ||
+    codeLower === 'timeout' ||
+    codeLower === 'conflict' ||
+    codeLower === 'internal'
+  ) {
+    return 'recoverable';
+  }
+
+  // 无稳定 code：默认 recoverable（避免误杀网络/未知瞬时故障）。
   return 'recoverable';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   启动 baseline 必须与 authority/overflow 一样走 requestSessionReplay，
+ *   才能复用 classify + 有界重试 + historySyncFailure，禁止吞错的直接 sessions.replay。
+ *
+ * Code Logic（这个函数做什么）:
+ *   cutoverEpoch += 1，needsReplay=true，replayInFlight=false；
+ *   不重置 authorityId / committedBaselineLastSeq / overflowHighWaterSeq；
+ *   返回新 state 与 requestEpoch（= 抬高后的 cutoverEpoch）。
+ */
+export function beginStartupBaselineReplay(
+  state: SessionCutoverState,
+): { state: SessionCutoverState; requestEpoch: number } {
+  const cutoverEpoch = state.cutoverEpoch + 1;
+  return {
+    state: {
+      ...state,
+      cutoverEpoch,
+      needsReplay: true,
+      replayInFlight: false,
+    },
+    requestEpoch: cutoverEpoch,
+  };
 }
 
 /**

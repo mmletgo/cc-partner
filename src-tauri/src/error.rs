@@ -73,8 +73,8 @@ pub enum AppError {
     Tauri(#[from] tauri::Error),
     /// 客户端输入校验失败（参数缺失、格式非法、超长等）。
     ///
-    /// Business Logic: 新增 variant 仅为 HTTP/P2P 边界提供稳定的 400 分类，
-    ///     不改变既有 IPC 序列化（Serialize impl 仍统一输出 `{"error": "..."}`）。
+    /// Business Logic: 为 HTTP/P2P 边界提供稳定的 400 分类；IPC Serialize 输出
+    ///     `{"error":"...","code":"validation"}`（R12 M2 稳定 category code）。
     /// Code Logic: Display 直接展示消息，分类时映射到 `AppErrorCategory::Validation`。
     #[error("{0}")]
     Validation(String),
@@ -101,7 +101,7 @@ pub enum AppError {
     /// Business Logic（Finding 3）: 远端 client（orchestrator/workbench）经 `parse_peer_response`
     ///     解析对端错误后，把 `PeerCallError::Remote` 的 code/status/retryable/request_id 原样
     ///     存入本 variant，让 `classify()` 据稳定 code（而非人类可读文案）映射分类，
-    ///     供上层重试/退避决策使用。Display 只展示 message，IPC Serialize 仍输出 `{"error": "..."}`。
+    ///     供上层重试/退避决策使用。Display 只展示 message；IPC Serialize 输出 error+category code。
     #[error("{message}")]
     Remote {
         /// 人类可读错误消息（v1 信封 `error` 字段或 v0 老形态原文）。
@@ -287,19 +287,44 @@ impl AppError {
     }
 }
 
-/// 让 AppError 可序列化为 `{"error": "<message>"}` 给前端。
+impl AppError {
+    /// 返回稳定 IPC 分类 code token（R12 M2）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     前端 terminal replay 等路径必须按稳定 code 分类可恢复/永久错误，
+    ///     不能再依赖本地化 message 子串（中英文都会漂移）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 `classify()` 映射为固定 `&'static str`：
+    ///     validation / not_found / conflict / unavailable / timeout / internal。
+    ///     **不是** P2P 信封的 domain.action token（如 validation_error），IPC 边界保持短 token。
+    pub fn ipc_category_code(&self) -> &'static str {
+        match self.classify() {
+            AppErrorCategory::Validation => "validation",
+            AppErrorCategory::NotFound => "not_found",
+            AppErrorCategory::Conflict => "conflict",
+            AppErrorCategory::Unavailable => "unavailable",
+            AppErrorCategory::Timeout => "timeout",
+            AppErrorCategory::Internal => "internal",
+        }
+    }
+}
+
+/// 让 AppError 可序列化为 `{"error": "<message>", "code": "<category>"}` 给前端。
 ///
-/// Business Logic: Tauri invoke 的 Result Err 分支会把 E 序列化后传给前端 reject，
-/// 前端期望 error 字段为字符串消息，与 Python HTTP 500 的 `{"error": str(e)}` 一致。
+/// Business Logic: Tauri invoke 的 Result Err 分支会把 E 序列化后传给前端 reject。
+/// R12 M2 起 IPC 同时输出稳定 category code，供前端分类；仍禁止泄漏 request_id/retryable/details。
+/// HTTP `IntoResponse` 与 P2P 信封契约独立，不在此扩大。
 impl serde::Serialize for AppError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("error", 1)?;
+        let mut s = serializer.serialize_struct("error", 2)?;
         // Display 实现已由 thiserror 提供，返回友好的中文消息
         s.serialize_field("error", &self.to_string())?;
+        s.serialize_field("code", self.ipc_category_code())?;
         s.end()
     }
 }
@@ -325,38 +350,47 @@ mod tests {
     use super::*;
 
     /// Business Logic（为什么需要这个回归测试）:
-    ///     Task 5 引入了新的 AppError variant（Validation/Conflict/Unavailable/Timeout），
-    ///     必须保证 Tauri IPC 序列化仍是老形态 `{"error": "<message>"}`，不能因新增 variant
-    ///     漏出 code/request_id 等字段，否则前端老逻辑会解析失败。
+    ///     R12 M2 要求 Tauri IPC 错误同时携带稳定 category `code`，供前端分类；
+    ///     但仍禁止泄漏 request_id/retryable/details（那些属于 P2P 信封）。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     对每个 variant 序列化，断言 JSON 恰为单字段 `error`，且不含 code/request_id/retryable/details。
+    ///     对每个 variant 序列化，断言 JSON 恰为 `error`+`code` 两字段，
+    ///     code 为 validation/not_found/conflict/unavailable/timeout/internal 之一，
+    ///     且不含 request_id/retryable/details。
     #[test]
-    fn app_error_ipc_serialization_remains_legacy_form() {
-        fn assert_legacy(app: AppError, expected_message: &str) {
+    fn app_error_ipc_serialization_includes_stable_category_code() {
+        fn assert_ipc(app: AppError, expected_message: &str, expected_code: &str) {
             let json = serde_json::to_value(&app).expect("AppError 应可序列化");
             assert_eq!(
                 json,
-                serde_json::json!({ "error": expected_message }),
-                "IPC 序列化必须保持 {{error}} 老形态"
+                serde_json::json!({ "error": expected_message, "code": expected_code }),
+                "IPC 序列化必须输出 {{error, code}} 且 code 为稳定 category token"
             );
-            // 显式断言没有泄漏新字段，防止未来误改。
+            // 显式断言没有泄漏 P2P 信封字段，防止未来误改。
             let obj = json.as_object().expect("应为对象");
-            assert_eq!(obj.len(), 1, "IPC 错误对象应只有 error 一个字段");
-            assert!(obj.get("code").is_none());
+            assert_eq!(obj.len(), 2, "IPC 错误对象应只有 error 与 code 两个字段");
             assert!(obj.get("request_id").is_none());
             assert!(obj.get("retryable").is_none());
             assert!(obj.get("details").is_none());
+            assert_eq!(app.ipc_category_code(), expected_code);
         }
 
-        assert_legacy(AppError::not_found("Prompt 不存在"), "Prompt 不存在");
-        assert_legacy(AppError::generic("boom"), "boom");
-        assert_legacy(AppError::validation("参数非法"), "参数非法");
-        assert_legacy(AppError::conflict("状态冲突"), "状态冲突");
-        assert_legacy(AppError::unavailable("暂不可用"), "暂不可用");
-        assert_legacy(AppError::timeout("超时"), "超时");
-        // 带前缀的既有 variant 也应保持老形态。
-        assert_legacy(AppError::Io(std::io::Error::other("disk")), "IO 错误: disk");
+        assert_ipc(
+            AppError::not_found("Prompt 不存在"),
+            "Prompt 不存在",
+            "not_found",
+        );
+        assert_ipc(AppError::generic("boom"), "boom", "internal");
+        assert_ipc(AppError::validation("参数非法"), "参数非法", "validation");
+        assert_ipc(AppError::conflict("状态冲突"), "状态冲突", "conflict");
+        assert_ipc(AppError::unavailable("暂不可用"), "暂不可用", "unavailable");
+        assert_ipc(AppError::timeout("超时"), "超时", "timeout");
+        // 带前缀的既有 variant 也应输出 internal code。
+        assert_ipc(
+            AppError::Io(std::io::Error::other("disk")),
+            "IO 错误: disk",
+            "internal",
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

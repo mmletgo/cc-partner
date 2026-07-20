@@ -80,6 +80,9 @@ vi.mock('@/hooks/workbenchTerminalBuffersContext', () => ({
     resetBuffer: vi.fn(),
     removeBuffer: vi.fn(),
     getHistorySyncFailure: () => null,
+    subscribeHistorySyncFailures: () => () => undefined,
+    getHistorySyncFailuresRevision: () => 0,
+    retryHistorySync: () => undefined,
   }),
 }));
 

@@ -848,5 +848,10 @@
     "delete": "Delete",
     "confirmDelete": "Confirm delete",
     "empty": "No named snapshots yet"
+  },
+  "historySync": {
+    "notFound": "Terminal history is unavailable because this session no longer exists.",
+    "failed": "Terminal history could not be synchronized. Automatic retries have stopped.",
+    "retry": "Retry history sync"
   }
 }

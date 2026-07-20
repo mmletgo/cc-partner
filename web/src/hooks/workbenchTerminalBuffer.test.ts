@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'vitest';
 import { planTerminalBufferWrite } from '@/pages/Workbench/terminalReplay';
+import { normalizeError } from '@/api/client';
 import {
   appendWorkbenchTerminalOutput,
   applyTerminalBaselineCutover,
   beginAuthorityChangeReplay,
+  beginStartupBaselineReplay,
   beginHeldOverflowReplay,
   commitTerminalCutover,
   createEmptySessionCutoverState,
@@ -823,26 +825,50 @@ describe('session cutover epoch / committed baseline', () => {
     expect(shouldTriggerTerminalReplayRecovery(1500, 1000)).toBe(false);
   });
 
-  test('classifyTerminalReplayError separates recoverable vs permanent classes (R11 M1)', () => {
+  test('classifyTerminalReplayError uses stable code / ContractDecodeError only (R12 M2)', () => {
+    // 无 code 且非 ContractDecodeError → 默认 recoverable（禁止 message 子串判定）
     expect(classifyTerminalReplayError(new Error('replay_unavailable'))).toBe('recoverable');
     expect(classifyTerminalReplayError(new Error('request timeout'))).toBe('recoverable');
     expect(classifyTerminalReplayError(new Error('network offline'))).toBe('recoverable');
     expect(classifyTerminalReplayError(new Error('unknown boom'))).toBe('recoverable');
     expect(classifyTerminalReplayError(null)).toBe('recoverable');
+    // 中文/英文 not-found 文案不再触发 not_found
+    expect(classifyTerminalReplayError(new Error('工作台会话不存在'))).toBe('recoverable');
+    expect(classifyTerminalReplayError(new Error('session not found'))).toBe('recoverable');
+    expect(classifyTerminalReplayError(new Error('validation failed'))).toBe('recoverable');
+    expect(classifyTerminalReplayError(new Error('malformed dto'))).toBe('recoverable');
 
-    expect(classifyTerminalReplayError(new Error('工作台会话不存在'))).toBe('not_found');
-    expect(classifyTerminalReplayError(new Error('session not found'))).toBe('not_found');
+    // 稳定 code 路径（含 normalizeError 透传）
     expect(
       classifyTerminalReplayError(
-        Object.assign(new Error('missing'), { code: 'not_found' }),
+        normalizeError({ error: '远端 Workbench 网关只接受对端本机项目', code: 'validation' }),
       ),
+    ).toBe('permanent');
+    expect(
+      classifyTerminalReplayError(normalizeError({ error: 'missing', code: 'validation_error' })),
+    ).toBe('permanent');
+    expect(
+      classifyTerminalReplayError(normalizeError({ error: 'gone', code: 'not_found' })),
     ).toBe('not_found');
+    expect(
+      classifyTerminalReplayError(normalizeError({ error: 'gone', code: 'session_not_found' })),
+    ).toBe('not_found');
+    expect(
+      classifyTerminalReplayError(normalizeError({ error: 'busy', code: 'unavailable' })),
+    ).toBe('recoverable');
+    expect(
+      classifyTerminalReplayError(normalizeError({ error: 'slow', code: 'timeout' })),
+    ).toBe('recoverable');
+    expect(
+      classifyTerminalReplayError(normalizeError({ error: 'race', code: 'conflict' })),
+    ).toBe('recoverable');
+    expect(
+      classifyTerminalReplayError(normalizeError({ error: 'boom', code: 'internal' })),
+    ).toBe('recoverable');
 
     const decodeErr = new Error('Contract "WorkbenchSessionReplay" failed at $.lastSeq: got primitive');
     decodeErr.name = 'ContractDecodeError';
     expect(classifyTerminalReplayError(decodeErr)).toBe('permanent');
-    expect(classifyTerminalReplayError(new Error('validation failed'))).toBe('permanent');
-    expect(classifyTerminalReplayError(new Error('malformed dto'))).toBe('permanent');
 
     expect(terminalHistorySyncFailureFromClass('not_found')).toEqual({ kind: 'not_found' });
     expect(terminalHistorySyncFailureFromClass('permanent')).toEqual({
@@ -858,6 +884,25 @@ describe('session cutover epoch / committed baseline', () => {
     expect(stopped.needsReplay).toBe(false);
     expect(stopped.replayInFlight).toBe(false);
     expect(stopped.cutoverEpoch).toBe(2);
+
+    // beginStartupBaselineReplay：抬 epoch + needsReplay，不重置 authority/seq
+    const base = {
+      ...createEmptySessionCutoverState(),
+      authorityId: 'auth-A',
+      committedBaselineLastSeq: 9,
+      overflowHighWaterSeq: 3,
+      cutoverEpoch: 4,
+      needsReplay: false,
+      replayInFlight: true,
+    };
+    const started = beginStartupBaselineReplay(base);
+    expect(started.requestEpoch).toBe(5);
+    expect(started.state.cutoverEpoch).toBe(5);
+    expect(started.state.needsReplay).toBe(true);
+    expect(started.state.replayInFlight).toBe(false);
+    expect(started.state.authorityId).toBe('auth-A');
+    expect(started.state.committedBaselineLastSeq).toBe(9);
+    expect(started.state.overflowHighWaterSeq).toBe(3);
   });
 
   test('owner authority change accepts lower lastSeq and resets store baseline', () => {

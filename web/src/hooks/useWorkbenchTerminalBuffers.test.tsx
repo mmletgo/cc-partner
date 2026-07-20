@@ -60,6 +60,8 @@ import {
   useWorkbenchTerminalBufferStore,
 } from './workbenchTerminalBuffersContext';
 import type { TerminalHistorySyncFailure } from './workbenchTerminalBuffer';
+import { normalizeError } from '@/api/client';
+import { useTerminalHistorySyncFailure } from './workbenchTerminalBuffersContext';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -633,7 +635,7 @@ describe('WorkbenchTerminalBuffersProvider permanent replay errors (R11 M1)', ()
     // 首次即 not-found：不得进入 3-burst 或 5s recovery
     await act(async () => {
       const idx = pendingReplays.length - 1;
-      pendingReplays[idx]!.reject(new Error('工作台会话不存在'));
+      pendingReplays[idx]!.reject(normalizeError({ error: '工作台会话不存在', code: 'not_found' }));
       await pendingReplays[idx]!.promise.catch(() => undefined);
     });
 
@@ -864,5 +866,166 @@ describe('WorkbenchTerminalBuffersProvider permanent replay errors (R11 M1)', ()
     expect(storeRef.current?.getBuffer(sessionId)).toBe('B0B1B2B-HELD-3');
     expect(storeRef.current?.getLastSeq(sessionId)).toBe(3);
     expect(historySyncRef.current?.(sessionId)).toBeNull();
+  });
+});
+
+
+describe('WorkbenchTerminalBuffersProvider startup baseline (R12 M1/M3)', () => {
+  beforeEach(() => {
+    listenerHandlers.clear();
+    listMock.mockReset();
+    replayMock.mockReset();
+    listenMock.mockReset();
+    vi.useRealTimers();
+
+    listenMock.mockImplementation(
+      async (eventName: string, handler: EventHandler) => {
+        listenerHandlers.set(eventName, handler);
+        return () => {
+          listenerHandlers.delete(eventName);
+        };
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+
+  test('startup recoverable failure then success settles buffer', async () => {
+    const sessionId = 'local-startup-s1';
+    const authority = 'owner-local-1';
+    listMock.mockResolvedValue([{ id: sessionId }]);
+
+    let replayCalls = 0;
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      replayCalls += 1;
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    const historySyncRef: {
+      current: ((sessionId: string) => TerminalHistorySyncFailure | null) | null;
+    } = { current: null };
+
+    renderProvider(storeRef, historySyncRef);
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+    await waitFor(() => {
+      expect(pendingReplays.length).toBeGreaterThanOrEqual(1);
+    });
+
+    vi.useFakeTimers();
+
+    // 首次 startup replay: timeout（可恢复）
+    await act(async () => {
+      pendingReplays[0]!.reject(normalizeError({ error: 'request timeout', code: 'timeout' }));
+      await pendingReplays[0]!.promise.catch(() => undefined);
+    });
+    expect(historySyncRef.current?.(sessionId)).toBeNull();
+
+    // 立即重试窗口
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(replayCalls).toBeGreaterThanOrEqual(2);
+
+    const successIdx = pendingReplays.length - 1;
+    await act(async () => {
+      pendingReplays[successIdx]!.resolve({
+        sessionId,
+        buffer: 'STARTUP-OK',
+        truncated: false,
+        lastSeq: 2,
+        ownerInstanceId: authority,
+      });
+      await pendingReplays[successIdx]!.promise;
+    });
+
+    expect(storeRef.current?.getBuffer(sessionId)).toBe('STARTUP-OK');
+    expect(storeRef.current?.getLastSeq(sessionId)).toBe(2);
+    expect(historySyncRef.current?.(sessionId)).toBeNull();
+  });
+
+  test('startup permanent validation sets observable historySyncFailure', async () => {
+    const sessionId = 'local-startup-perm';
+    listMock.mockResolvedValue([{ id: sessionId }]);
+
+    let replayCalls = 0;
+    const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
+    replayMock.mockImplementation(() => {
+      replayCalls += 1;
+      const d = deferred<ReplayDto>();
+      pendingReplays.push(d);
+      return d.promise;
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+
+    function FailureProbe() {
+      const failure = useTerminalHistorySyncFailure(sessionId);
+      return (
+        <div data-testid="history-sync-probe">
+          {failure ? failure.kind : 'none'}
+        </div>
+      );
+    }
+
+    (window as Window & {
+      __TAURI_INTERNALS__?: { transformCallback?: unknown };
+    }).__TAURI_INTERNALS__ = {
+      transformCallback: () => undefined,
+    };
+
+    const { findByTestId } = render(
+      <WorkbenchTerminalBuffersProvider>
+        <StoreProbe storeRef={storeRef} />
+        <FailureProbe />
+      </WorkbenchTerminalBuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(listenerHandlers.has('workbench:terminal-output')).toBe(true);
+    });
+    await waitFor(() => {
+      expect(pendingReplays.length).toBeGreaterThanOrEqual(1);
+    });
+
+    const probeBefore = await findByTestId('history-sync-probe');
+    expect(probeBefore.textContent).toBe('none');
+
+    await act(async () => {
+      pendingReplays[0]!.reject(
+        normalizeError({
+          error: '远端 Workbench 网关只接受对端本机项目',
+          code: 'validation',
+        }),
+      );
+      await pendingReplays[0]!.promise.catch(() => undefined);
+    });
+
+    await waitFor(async () => {
+      const probe = await findByTestId('history-sync-probe');
+      expect(probe.textContent).toBe('history_sync_failed');
+    });
+
+    const callsAfterFailure = replayCalls;
+    vi.useFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    // 永久错误不得进入无限 3-burst
+    expect(replayCalls).toBe(callsAfterFailure);
   });
 });

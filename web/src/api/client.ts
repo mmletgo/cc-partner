@@ -3,14 +3,15 @@
  *
  * Business Logic（为什么需要这个模块）:
  *   迁移到 Tauri 后，前端不再有任何本地 HTTP 调用，统一通过 invoke() 直达 Rust 后端。
- *   本模块对 invoke 做薄封装：把 Rust 后端 reject 的错误（{ error: "中文消息" }）
- *   规整为带 message 的 Error，供各 service 与组件层用 instanceof Error / err.message 统一处理。
+ *   本模块对 invoke 做薄封装：把 Rust 后端 reject 的错误（`{ error, code }`）
+ *   规整为带 message 与稳定 category code 的 Error，供各 service 与终端 replay 分类使用。
  *   关键 DTO 可通过 invokeDecoded 在边界 runtime decode，fail closed 且不泄露 payload。
  *
  * Code Logic（这个模块做什么）:
  *   - `invoke<T>(cmd, args?)`：透传 @tauri-apps/api/core 的 invoke，泛型保留返回类型。
  *   - `invokeDecoded`：invoke 成功后用 Decoder 校验 body，ContractDecodeError 原样抛出。
- *   - `normalizeError`：invoke reject 的值可能是 { error } 对象或字符串，统一转成 Error。
+ *   - `normalizeError`：invoke reject 的值可能是 { error, code } 对象或字符串，统一转成 Error，
+ *     并透传稳定 IPC category code（validation/not_found/conflict/unavailable/timeout/internal）。
  */
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
@@ -18,23 +19,35 @@ import type { Decoder } from '@/lib/runtimeSchema';
 import { ContractDecodeError } from '@/lib/runtimeSchema';
 
 /**
- * 将 invoke reject 抛出的任意值规整为 Error。
+ * 将 invoke reject 抛出的任意值规整为 Error，并保留稳定 IPC `code`（R12 M2）。
  *
  * Business Logic（为什么需要这个函数）:
- *   Rust 后端的 AppError 经 serde 序列化为 `{ error: "中文消息" }`，
- *   Tauri 会把它作为 reject reason 透传给前端。这里提取出可读消息，
- *   既兼容 { error } 对象，也兼容裸字符串或其他形态。
+ *   Rust 后端的 AppError 经 serde 序列化为 `{ error: "中文消息", code: "validation" }`，
+ *   Tauri 会把它作为 reject reason 透传给前端。提取可读消息的同时必须透传稳定 code，
+ *   让 terminal replay 等路径按 code 分类，而不是解析本地化文案子串。
  *
  * Code Logic（这个函数做什么）:
- *   Error 原样返回；string → Error；对象取 error/message 字段；否则 String(reason)。
+ *   Error 原样返回（若已有 code 属性则保留）；string → Error；
+ *   对象取 error/message 为 message，string 型 code 用 Object.assign 挂到 Error 上；
+ *   否则 String(reason)。不读取 body/path/token。
  */
-function normalizeError(reason: unknown): Error {
+export function normalizeError(reason: unknown): Error {
   if (reason instanceof Error) return reason;
   if (typeof reason === 'string') return new Error(reason);
   if (reason && typeof reason === 'object') {
     const obj = reason as Record<string, unknown>;
     const msg = obj.error ?? obj.message;
-    if (typeof msg === 'string') return new Error(msg);
+    const code = typeof obj.code === 'string' ? obj.code : undefined;
+    if (typeof msg === 'string') {
+      const err = new Error(msg);
+      if (code !== undefined) {
+        return Object.assign(err, { code });
+      }
+      return err;
+    }
+    if (code !== undefined) {
+      return Object.assign(new Error(String(reason)), { code });
+    }
   }
   return new Error(String(reason));
 }
