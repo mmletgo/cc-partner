@@ -4,7 +4,13 @@ import { getMobileAccessInfo } from '@/api/mobile';
 import type { MobileAccessInfo } from '@/lib/types';
 import { Button, Card } from '@/components/primitives';
 import { CopyIcon, SyncIcon } from '@/lib/icons';
-import { renderMobileQrSvg, selectPrimaryMobileUrl } from './mobileQr';
+import { renderMobileQrSvg } from './mobileQr';
+import {
+  formatMobileAccessChipLabel,
+  resolveMobileAccessEntries,
+  resolveSelectedMobileAccessEntry,
+  selectDefaultMobileAccessEntryId,
+} from './mobileAccessSelection';
 import styles from './MobileAccessCard.module.css';
 
 export interface MobileAccessCardProps {
@@ -28,28 +34,37 @@ function getErrorMessage(reason: unknown): string {
  * MobileAccessCard（移动端访问链接与二维码卡片）
  *
  * Business Logic（为什么需要这个组件）:
- *   用户需要在桌面端同时看到局域网访问链接和二维码，才能用手机浏览器打开移动 Workbench。
+ *   用户需要在桌面端同时看到局域网访问链接和二维码，才能用手机浏览器打开移动 Workbench；
+ *   多网卡时还需在网段芯片间切换，使 URL/复制/二维码始终指向同一入口。
  *
  * Code Logic（这个组件做什么）:
- *   请求 `/api/mobile/access-info`，选择主 URL 生成二维码 SVG，并提供复制和刷新操作。
+ *   请求 mobile access-info，用 entries 解析选中入口；≥2 条时渲染 radiogroup 芯片；
+ *   选中项驱动主 URL、复制与二维码 SVG。
  */
 export function MobileAccessCard(props: MobileAccessCardProps) {
   const { compact = false, className } = props;
   const { t } = useTranslation(['settings']);
   const [info, setInfo] = useState<MobileAccessInfo | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [qrSvg, setQrSvg] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
   const [copying, setCopying] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const primaryUrl = useMemo(() => selectPrimaryMobileUrl(info?.urls ?? []), [info]);
+
+  const entries = useMemo(() => resolveMobileAccessEntries(info), [info]);
+  const selectedEntry = useMemo(
+    () => resolveSelectedMobileAccessEntry(entries, selectedId),
+    [entries, selectedId],
+  );
+  const primaryUrl = selectedEntry?.url ?? null;
 
   /**
    * Business Logic（为什么需要这个函数）:
    *   用户可能在网络切换后需要重新获取局域网 URL，设置页和 Workbench 卡片都应能刷新。
    *
    * Code Logic（这个函数做什么）:
-   *   调用 mobile access-info API 并写入本地状态；失败时展示错误，成功时清理旧复制状态。
+   *   调用 mobile access-info API；成功后写 info，并在仍有效时保留 selectedId，否则回落默认入口。
    */
   const loadAccessInfo = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -57,12 +72,30 @@ export function MobileAccessCard(props: MobileAccessCardProps) {
     try {
       const nextInfo = await getMobileAccessInfo();
       setInfo(nextInfo);
+      const nextEntries = resolveMobileAccessEntries(nextInfo);
+      setSelectedId((prev) =>
+        prev && nextEntries.some((entry) => entry.id === prev)
+          ? prev
+          : selectDefaultMobileAccessEntryId(nextEntries),
+      );
       setCopied(false);
     } catch (reason) {
       setError(getErrorMessage(reason));
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在多网段芯片间切换后，复制态应复位，避免误以为仍是旧 URL。
+   *
+   * Code Logic（这个函数做什么）:
+   *   写入 selectedId 并清除 copied 标记。
+   */
+  const selectNetworkEntry = useCallback((entryId: string): void => {
+    setSelectedId(entryId);
+    setCopied(false);
   }, []);
 
   /* eslint-disable react-hooks/set-state-in-effect -- 组件挂载与 URL 变化时需要拉取/生成外部 access-info 与二维码 */
@@ -95,7 +128,7 @@ export function MobileAccessCard(props: MobileAccessCardProps) {
    *   桌面端展示访问链接后，用户通常会复制到聊天或手机浏览器。
    *
    * Code Logic（这个函数做什么）:
-   *   使用 Clipboard API 写入主 URL；成功后短暂切换按钮文本，失败时展示错误。
+   *   使用 Clipboard API 写入当前选中入口 URL；成功后短暂切换按钮文本，失败时展示错误。
    */
   const copyPrimaryUrl = useCallback(async (): Promise<void> => {
     if (!primaryUrl) return;
@@ -131,11 +164,37 @@ export function MobileAccessCard(props: MobileAccessCardProps) {
         ) : primaryUrl ? (
           <div className={styles.contentGrid}>
             <div className={styles.urlList}>
-              {(info?.urls ?? []).map((url) => (
-                <code className={styles.url} key={url}>
-                  {url}
-                </code>
-              ))}
+              {entries.length >= 2 ? (
+                <div
+                  className={styles.networkGroup}
+                  role="radiogroup"
+                  aria-label={t('mobileAccess.networkGroupLabel')}
+                  data-testid="mobile-access-network-group"
+                >
+                  {entries.map((entry) => {
+                    const selected = entry.id === selectedEntry?.id;
+                    return (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        className={selected ? styles.networkChipSelected : styles.networkChip}
+                        data-testid={`mobile-access-network-${entry.id}`}
+                        onClick={() => {
+                          selectNetworkEntry(entry.id);
+                        }}
+                      >
+                        {formatMobileAccessChipLabel(entry, {
+                          wifi: (ip) => t('mobileAccess.roleWifi', { ip }),
+                          wired: (ip) => t('mobileAccess.roleWired', { ip }),
+                        })}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+              <code className={styles.url}>{primaryUrl}</code>
               <div className={styles.actions}>
                 <Button
                   variant="primary"

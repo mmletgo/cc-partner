@@ -185,6 +185,18 @@ describe('mobileAccessCard', () => {
     if (!cardSource.includes('primaryUrl') || !cardSource.includes('qrSvg')) {
       throw new Error('MobileAccessCard must still show QR/URLs when LAN URLs exist');
     }
+    if (!cardSource.includes('role="radiogroup"')) {
+      throw new Error('MobileAccessCard must expose a radiogroup for multi-LAN chips');
+    }
+    if (!cardSource.includes('entries.length >= 2') && !cardSource.includes('entries.length >=2')) {
+      throw new Error('MobileAccessCard must show network chips only when entries.length >= 2');
+    }
+    if (!cardSource.includes('resolveSelectedMobileAccessEntry')) {
+      throw new Error('MobileAccessCard must resolve a single selected entry for primaryUrl');
+    }
+    if (cardSource.includes('(info?.urls ?? []).map')) {
+      throw new Error('MobileAccessCard must not map all info.urls for display');
+    }
 
     const firewallCard = readFileSync(
       resolve(

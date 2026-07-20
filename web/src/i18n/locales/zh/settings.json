@@ -172,7 +172,10 @@
     "copyUnavailable": "当前环境不支持直接复制，请手动选中链接复制。",
     "copied": "已复制",
     "refresh": "刷新",
-    "qrLabel": "移动端 Workbench 访问二维码"
+    "qrLabel": "移动端 Workbench 访问二维码",
+    "networkGroupLabel": "选择局域网",
+    "roleWifi": "Wi‑Fi · {{ip}}",
+    "roleWired": "有线 · {{ip}}"
   },
   "lanFirewall": {
     "title": "局域网互联防火墙",

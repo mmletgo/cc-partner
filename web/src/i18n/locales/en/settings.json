@@ -172,7 +172,10 @@
     "copyUnavailable": "Clipboard access is unavailable here. Select and copy the link manually.",
     "copied": "Copied",
     "refresh": "Refresh",
-    "qrLabel": "Mobile Workbench access QR code"
+    "qrLabel": "Mobile Workbench access QR code",
+    "networkGroupLabel": "Select network",
+    "roleWifi": "Wi‑Fi · {{ip}}",
+    "roleWired": "Ethernet · {{ip}}"
   },
   "lanFirewall": {
     "title": "LAN firewall",
