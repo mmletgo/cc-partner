@@ -45,7 +45,7 @@ csv = "1.4"
 tauri = { version = "2.11.3", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "chrono"] }
 dirs = "5"

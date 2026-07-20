@@ -35,10 +35,13 @@ use crate::orchestrator::workflow::WorkflowDocument;
 use crate::workbench::operation_ledger::MutationTransportClass;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 /// control 查询超时。
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+/// control 事件 NDJSON 单行最大字节（1 MiB）。
+const CONTROL_EVENT_STREAM_MAX_LINE_BYTES: usize = 1024 * 1024;
 /// control mutation 超时（配置落盘可能稍慢）。
 const MUTATE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Cloud Sync mutation 超时（覆盖 Wait{300s} 门闸 + git 网络操作）。
@@ -307,6 +310,124 @@ struct ControlEventsBody {
     after_sequence: Option<u64>,
 }
 
+/// 有界 NDJSON 行解码器：跨 chunk 重组完整事件行。
+///
+/// Business Logic（为什么需要这个结构）:
+///     control events/stream 以 NDJSON 推送 terminal/runtime 消息；网络 chunk 可能切开 UTF-8
+///     或多行，客户端必须按完整换行边界解析，并对超大/损坏行给出稳定错误码。
+///
+/// Code Logic（这个结构做什么）:
+///     维护 pending 字节缓冲；`push` 按 `\n`（可选 `\r`）切行并反序列化为 `RuntimeRelayMessage`；
+///     单行或 pending 超 1 MiB → `control_event_stream_line_too_large`；非法 JSON →
+///     `control_event_stream_malformed`；`finish` 遇非空白残留 → `control_event_stream_truncated`。
+#[derive(Debug, Default)]
+struct ControlEventStreamDecoder {
+    pending: Vec<u8>,
+}
+
+impl ControlEventStreamDecoder {
+    /// 向解码器追加字节并吐出完整 NDJSON 消息。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     流式 body 以任意大小 chunk 到达，调用方需要增量解析而不阻塞整响应。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     追加到 pending，扫描完整行，反序列化为 `RuntimeRelayMessage`；错误消息只用稳定 code，
+    ///     禁止拼接原始 line 内容。
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<RuntimeRelayMessage>, AppError> {
+        self.pending.extend_from_slice(bytes);
+        let mut messages = Vec::new();
+        let mut line_start = 0usize;
+        for newline in 0..self.pending.len() {
+            if self.pending[newline] != b'\n' {
+                continue;
+            }
+            if newline - line_start > CONTROL_EVENT_STREAM_MAX_LINE_BYTES {
+                self.pending.clear();
+                return Err(AppError::validation("control_event_stream_line_too_large"));
+            }
+            let mut line = &self.pending[line_start..newline];
+            line_start = newline + 1;
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
+            }
+            if line.is_empty() {
+                continue;
+            }
+            let message = serde_json::from_slice::<RuntimeRelayMessage>(line)
+                .map_err(|_| AppError::generic("control_event_stream_malformed"))?;
+            messages.push(message);
+        }
+        if line_start > 0 {
+            self.pending.drain(..line_start);
+        }
+        if self.pending.len() > CONTROL_EVENT_STREAM_MAX_LINE_BYTES {
+            self.pending.clear();
+            return Err(AppError::validation("control_event_stream_line_too_large"));
+        }
+        Ok(messages)
+    }
+
+    /// 流结束后冲刷解码器。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     连接正常结束时若还有半行 JSON，必须报 truncated 以便上层 resync，而不是静默丢弃。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     pending 全空白则清空返回空；否则清空并返回 `control_event_stream_truncated`。
+    fn finish(&mut self) -> Result<Vec<RuntimeRelayMessage>, AppError> {
+        if self.pending.iter().all(|byte| byte.is_ascii_whitespace()) {
+            self.pending.clear();
+            return Ok(Vec::new());
+        }
+        self.pending.clear();
+        Err(AppError::generic("control_event_stream_truncated"))
+    }
+}
+
+/// control events/stream 的 live NDJSON 读取器。
+///
+/// Business Logic（为什么需要这个结构）:
+///     GUI 需要可取消的长连接 relay：先读响应头建立流，再按消息粒度消费 `RuntimeRelayMessage`。
+///
+/// Code Logic（这个结构做什么）:
+///     持有无全局 timeout 的 `reqwest::Response` + decoder + 就绪队列；`next_message` 拉取 chunk
+///     并解码，EOF 时 finish；网络错误映射为 `control_event_stream_network`。
+pub struct ControlEventsStream {
+    response: reqwest::Response,
+    decoder: ControlEventStreamDecoder,
+    ready: VecDeque<RuntimeRelayMessage>,
+    ended: bool,
+}
+
+impl ControlEventsStream {
+    /// 读取下一条 relay 消息；流结束返回 `None`。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     上层 relay 循环需要逐条处理 Event/Gap，而不是自己管理 NDJSON 缓冲。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     优先弹出 ready；否则 `response.chunk()` → decoder.push；EOF → finish 并标记 ended。
+    pub async fn next_message(&mut self) -> Result<Option<RuntimeRelayMessage>, AppError> {
+        loop {
+            if let Some(message) = self.ready.pop_front() {
+                return Ok(Some(message));
+            }
+            if self.ended {
+                return Ok(None);
+            }
+            match self.response.chunk().await {
+                Ok(Some(bytes)) => self.ready.extend(self.decoder.push(&bytes)?),
+                Ok(None) => {
+                    self.ready.extend(self.decoder.finish()?);
+                    self.ended = true;
+                }
+                Err(_) => return Err(AppError::unavailable("control_event_stream_network")),
+            }
+        }
+    }
+}
+
 /// CLAUDE.md 云端推送 control body（token + 本机已保存 row 字段）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -468,7 +589,8 @@ impl BackendControlClient {
     ///     生产 GUI 命令在 sidecar 已 ensure 后读取 control file 获得 port/token。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     读 control file；缺失或非权威描述符返回 conflict/unavailable；构造带超时的 reqwest client。
+    ///     读 control file；缺失或非权威描述符返回 conflict/unavailable；构造无全局 timeout 的 reqwest client
+    ///     （逐请求 timeout 由 send_once 的 RequestBuilder 设置；stream body 不得被 client 级 timeout 截断）。
     pub fn from_control_file() -> Result<Self, AppError> {
         let control = control::read_control_file()?
             .ok_or_else(|| AppError::unavailable("后端控制文件不存在，请先启动 sidecar"))?;
@@ -481,7 +603,7 @@ impl BackendControlClient {
     ///     harness/测试可注入内存 control，无需依赖进程全局路径。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     校验 schema/owner 权威性后填充字段。
+    ///     校验 schema/owner 权威性后填充字段；http client 无 overall timeout。
     pub fn from_control(control: &BackendControlFile) -> Result<Self, AppError> {
         if !classify_control_descriptor(control).is_authoritative() {
             return Err(AppError::conflict(
@@ -492,7 +614,6 @@ impl BackendControlClient {
             return Err(AppError::unavailable("控制令牌为空"));
         }
         let http = reqwest::Client::builder()
-            .timeout(MUTATE_TIMEOUT)
             .build()
             .map_err(|e| AppError::generic(format!("构造 control client 失败: {e}")))?;
         Ok(Self {
@@ -510,14 +631,13 @@ impl BackendControlClient {
     ///     单元/ smoke harness 启动临时 owner HTTP 后，不依赖真实 control 文件路径竞争。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     填充权威 schema 与 owner id，构造 client。
+    ///     填充权威 schema 与 owner id，构造无全局 timeout 的 client。
     pub fn for_test(
         port: u16,
         control_token: &str,
         owner_instance_id: &str,
     ) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
-            .timeout(MUTATE_TIMEOUT)
             .build()
             .map_err(|e| AppError::generic(format!("构造 control client 失败: {e}")))?;
         Ok(Self {
@@ -849,6 +969,49 @@ impl BackendControlClient {
             },
         )
         .await
+    }
+
+    /// 打开 control events/stream 长连接并返回 live NDJSON 读取器。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 需要低延迟 live relay；catch-up 批量查询不足以承载持续 terminal 输出。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `events/stream`；仅对 `.send()` 套 `QUERY_TIMEOUT`（连接/响应头）；成功后返回
+    ///     无 body overall timeout 的 `ControlEventsStream`。404 → unsupported；连接失败/网络 →
+    ///     稳定 unavailable code；错误消息禁止拼接 payload/chunk 文本。
+    pub async fn open_events_stream(
+        &self,
+        after: Option<&BackendRuntimeCursor>,
+    ) -> Result<ControlEventsStream, AppError> {
+        let url = format!(
+            "http://127.0.0.1:{}/api/backend/control/events/stream",
+            self.port
+        );
+        let body = ControlEventsBody {
+            control_token: self.control_token.clone(),
+            after_owner_instance_id: after.map(|cursor| cursor.owner_instance_id.clone()),
+            after_sequence: after.map(|cursor| cursor.sequence),
+        };
+        let send = self.http.post(url).json(&body).send();
+        let response = tokio::time::timeout(QUERY_TIMEOUT, send)
+            .await
+            .map_err(|_| AppError::timeout("control_event_stream_connect_timeout"))?
+            .map_err(|_| AppError::unavailable("control_event_stream_connect_failed"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(if status == reqwest::StatusCode::NOT_FOUND {
+                AppError::validation("control_event_stream_unsupported")
+            } else {
+                AppError::unavailable(format!("control_event_stream_http_{status}"))
+            });
+        }
+        Ok(ControlEventsStream {
+            response,
+            decoder: ControlEventStreamDecoder::default(),
+            ready: VecDeque::new(),
+            ended: false,
+        })
     }
 
     /// 经 control API 拉取运营通知 baseline snapshot。
@@ -2323,5 +2486,161 @@ mod tests {
             "workbench/data"
         );
         assert_eq!(workbench_control_path("sessions.write"), "workbench/data");
+    }
+
+    /// 验证 NDJSON decoder 可跨 chunk 重组 UTF-8 与多行消息。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     流式 body 可能把多字节汉字拆在不同 chunk，decoder 不得丢行或误报截断。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     分三次 push 拆开的 event JSON（含半截 UTF-8）与 gap 行，断言 2 条消息且 finish 为空。
+    ///     字段名与既有 `RuntimeRelayMessage` wire 对齐（enum rename_all 只改 variant，字段为 snake_case）。
+    #[test]
+    fn control_event_decoder_preserves_split_utf8_and_multiple_lines() {
+        let mut decoder = ControlEventStreamDecoder::default();
+        let first = br#"{"kind":"event","owner_instance_id":"o1","sequence":1,"event":"workbench:terminal-output","payload":{"chunk":""#;
+        assert!(decoder.push(first).unwrap().is_empty());
+        assert!(decoder.push(&[0xE4, 0xBD]).unwrap().is_empty());
+        let mut tail = vec![0xA0];
+        tail.extend_from_slice(
+            br#""}}
+{"kind":"gap","owner_instance_id":"o1","oldest_available":2,"latest":9}
+"#,
+        );
+        let messages = decoder.push(&tail).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            messages[1],
+            RuntimeRelayMessage::Gap { latest: 9, .. }
+        ));
+        assert!(decoder.finish().unwrap().is_empty());
+    }
+
+    /// 验证 NDJSON decoder 对超大行 / 非法 JSON / 半行 EOF 使用稳定错误码。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     客户端必须拒绝异常流并暴露稳定 code，禁止把原始 line 拼进错误消息。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     oversize → line_too_large；malformed → malformed；partial finish → truncated。
+    #[test]
+    fn control_event_decoder_rejects_oversize_malformed_and_partial_eof() {
+        let mut oversize = ControlEventStreamDecoder::default();
+        let error = oversize
+            .push(&vec![b'x'; CONTROL_EVENT_STREAM_MAX_LINE_BYTES + 1])
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("control_event_stream_line_too_large"));
+
+        let mut malformed = ControlEventStreamDecoder::default();
+        let error = malformed.push(b"{not-json}\n").unwrap_err();
+        assert!(error.to_string().contains("control_event_stream_malformed"));
+
+        let mut partial = ControlEventStreamDecoder::default();
+        partial.push(br#"{"kind":"event"}"#).unwrap();
+        let error = partial.finish().unwrap_err();
+        assert!(error.to_string().contains("control_event_stream_truncated"));
+    }
+
+    /// 启动 mock control events/stream：立即返回响应头，延迟 16s 再写第一条 NDJSON。
+    ///
+    /// Business Logic（为什么需要这个 helper）:
+    ///     paused-time 测试需证明 client 无 overall timeout 时 body 可在旧 15s 边界后仍可读。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     bind 127.0.0.1:0；捕获请求 body 中 afterOwner/afterSequence；流首行 event sequence=8。
+    async fn spawn_control_event_stream_fixture() -> (
+        u16,
+        std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::extract::State as AxumState;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use futures_util::stream;
+        use std::convert::Infallible;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct StreamState {
+            captured: Arc<Mutex<Option<serde_json::Value>>>,
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let state = StreamState {
+            captured: Arc::clone(&captured),
+        };
+        let app = Router::new()
+            .route(
+                "/api/backend/control/events/stream",
+                post(
+                    |AxumState(s): AxumState<StreamState>, body: Json<serde_json::Value>| async move {
+                        *s.captured.lock().unwrap() = Some(body.0);
+                        // 与 RuntimeRelayMessage 既有 wire 对齐：字段 snake_case。
+                        let line = r#"{"kind":"event","owner_instance_id":"owner-1","sequence":8,"event":"workbench:terminal-output","payload":{"chunk":"x"}}"#;
+                        let stream = stream::once(async move {
+                            tokio::time::sleep(Duration::from_secs(16)).await;
+                            Ok::<_, Infallible>(format!("{line}\n"))
+                        });
+                        let mut response = axum::response::Response::new(
+                            axum::body::Body::from_stream(stream),
+                        );
+                        *response.status_mut() = axum::http::StatusCode::OK;
+                        response.headers_mut().insert(
+                            axum::http::header::CONTENT_TYPE,
+                            axum::http::HeaderValue::from_static("application/x-ndjson"),
+                        );
+                        response.into_response()
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        // 真实时间短暂等待，确保 accept 已注册（connect 阶段不用 paused clock）。
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (port, captured, server)
+    }
+
+    /// 验证 open_events_stream 发送 cursor 且 body 不被 client overall timeout 杀死。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     live relay 可能长时间空闲；旧 builder 15s overall timeout 会截断 body 导致误断开。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先用真实时间完成 connect（避免 start_paused auto-advance 误触 QUERY_TIMEOUT）；
+    ///     建流后 `pause()`，advance 15s 越过旧 overall timeout，再 advance 到第 16s 读到 sequence=8；
+    ///     并断言请求 body 含 afterOwnerInstanceId/afterSequence。
+    #[tokio::test]
+    async fn events_stream_sends_cursor_and_reads_live_message_without_overall_timeout() {
+        let (port, captured, _server) = spawn_control_event_stream_fixture().await;
+        let client = BackendControlClient::for_test(port, "token", "owner-1").unwrap();
+        let cursor = BackendRuntimeCursor {
+            owner_instance_id: "owner-1".into(),
+            sequence: 7,
+        };
+        let mut stream = client.open_events_stream(Some(&cursor)).await.unwrap();
+        // 响应头已返回；后续 body 延迟用虚拟时钟推进，避免真实等待 16s。
+        tokio::time::pause();
+        let next = tokio::spawn(async move { stream.next_message().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(15)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let message = next.await.unwrap().unwrap().unwrap();
+        assert!(matches!(
+            message,
+            RuntimeRelayMessage::Event { sequence: 8, .. }
+        ));
+        let body = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(body["afterOwnerInstanceId"], "owner-1");
+        assert_eq!(body["afterSequence"], 7);
     }
 }
