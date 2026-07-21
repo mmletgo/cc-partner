@@ -450,12 +450,14 @@ pub enum RelayClientAction {
 ///
 /// Code Logic（这个结构做什么）:
 ///     持有 live cursor、pre-gap recovery cursor 与 recovery_pending；
-///     Gap 时保留 last committed 为 recovery 并清空 live；incomplete 时 restore recovery；
+///     Gap 时保留 last committed 为 recovery 并清空 live；**首帧 Gap 无 pre-gap 时 seed
+///     recovery = gap.owner + sequence 0**；incomplete 时 restore recovery；
 ///     complete attach 清 recovery；处理 Event/Gap 并产出动作列表。
 #[derive(Debug, Clone, Default)]
 pub struct GuiEventRelayState {
     cursor: Option<BackendRuntimeCursor>,
     /// Gap 前最后一次已提交游标；complete resync 前保留，供 incomplete 恢复重连。
+    /// 首帧 Gap 无 live cursor 时为 gap.owner + sequence 0（禁止 after=None brand-new）。
     recovery_cursor: Option<BackendRuntimeCursor>,
     /// 已见 Gap 且尚未 complete attach；阻止 poll fallback 以 brand-new 方式 attach latest。
     recovery_pending: bool,
@@ -493,7 +495,8 @@ impl GuiEventRelayState {
     ///     owner 重启不得当重复；Gap 必须触发 resync 而非 silent drop。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     Gap → 若有 live cursor 则写入 recovery_cursor，清空 live，置 recovery_pending，RequestResync；
+    ///     Gap → 若有 live cursor 则写入 recovery_cursor 并清空 live；**无 live 且尚无 recovery 时
+    ///     seed gap.owner+0**（重复 Gap 不覆盖既有 recovery）；置 recovery_pending，RequestResync；
     ///     Event：owner 不同则重置后投递；同 owner sequence<=cursor 则 DropDuplicate；否则推进游标并 Deliver。
     pub fn on_message(&mut self, message: RuntimeRelayMessage) -> RelayClientAction {
         match message {
@@ -502,9 +505,16 @@ impl GuiEventRelayState {
                 oldest_available,
                 latest,
             } => {
-                // 仅在 live 有已提交游标时覆盖 recovery；重复 Gap/incomplete 重试保留原 pre-gap。
+                // 有 live 已提交游标时覆盖 recovery；首帧无 live 且尚无 recovery 时 seed owner+0，
+                // 禁止 incomplete 后以 after=None 重连成 brand-new（与 mobile R32 M1 对齐）。
+                // 重复 Gap / incomplete 重试：保留原 pre-gap recovery，不覆盖。
                 if let Some(committed) = self.cursor.take() {
                     self.recovery_cursor = Some(committed);
+                } else if self.recovery_cursor.is_none() && !owner_instance_id.is_empty() {
+                    self.recovery_cursor = Some(BackendRuntimeCursor {
+                        owner_instance_id: owner_instance_id.clone(),
+                        sequence: 0,
+                    });
                 }
                 self.recovery_pending = true;
                 self.resync_count = self.resync_count.saturating_add(1);
@@ -549,7 +559,8 @@ impl GuiEventRelayState {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     resync 失败/取消时若把 cursor 留在 None，外层重连会被 owner 当 brand-new consumer，
-    ///     只回放 ring 且不再报原 Gap，导致永久 silent loss。
+    ///     只回放 ring 且不再报原 Gap，导致永久 silent loss。首帧 Gap 同样必须 restore 到
+    ///     gap.owner+0，使 afterSequence=0 仍能在 truncated ring 上再次触发 Gap。
     ///
     /// Code Logic（这个函数做什么）:
     ///     将 `recovery_cursor` 写回 live `cursor`（若存在）；`recovery_pending` 保持 true。
@@ -967,8 +978,60 @@ mod tests {
         });
         assert!(matches!(action, RelayClientAction::RequestResync { .. }));
         assert_eq!(state.resync_count, 1);
+        // 首帧 Gap 不立即推进 live cursor；recovery seed 由 restore_recovery_cursor 写回。
         assert!(state.cursor().is_none());
         assert!(state.recovery_pending());
+    }
+
+    /// Business Logic（R33: 为什么需要这个测试）:
+    ///     桌面 GUI 首帧 Gap 无 pre-gap 时若 incomplete 仍 after=None 重连，owner 当 brand-new
+    ///     只回放 truncated ring 且不再报原 Gap，造成永久 silent loss（与 mobile R32 M1 对齐）。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     首帧 Gap → restore → cursor = owner-a/0 且 recovery_pending；重复 Gap 不覆盖 seed；
+    ///     attach_at 后清 recovery。
+    #[test]
+    fn gui_state_first_gap_seeds_owner_zero_recovery_cursor() {
+        let mut state = GuiEventRelayState::default();
+        let action = state.on_message(RuntimeRelayMessage::Gap {
+            owner_instance_id: "owner-a".into(),
+            oldest_available: 10,
+            latest: 20,
+        });
+        assert!(matches!(action, RelayClientAction::RequestResync { .. }));
+        assert!(state.cursor().is_none());
+        assert!(state.recovery_pending());
+        state.restore_recovery_cursor();
+        assert_eq!(
+            state.cursor().unwrap(),
+            BackendRuntimeCursor {
+                owner_instance_id: "owner-a".into(),
+                sequence: 0,
+            }
+        );
+        assert!(state.recovery_pending());
+
+        // 重复 Gap 不得覆盖既有 recovery seed。
+        let _ = state.on_message(RuntimeRelayMessage::Gap {
+            owner_instance_id: "owner-b".into(),
+            oldest_available: 30,
+            latest: 40,
+        });
+        state.restore_recovery_cursor();
+        assert_eq!(
+            state.cursor().unwrap(),
+            BackendRuntimeCursor {
+                owner_instance_id: "owner-a".into(),
+                sequence: 0,
+            }
+        );
+
+        state.attach_at(BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 20,
+        });
+        assert!(!state.recovery_pending());
+        assert_eq!(state.cursor().unwrap().sequence, 20);
     }
 
     /// 验证 Gap 会保存 pre-gap 游标，incomplete 后可恢复，complete attach 清 recovery。

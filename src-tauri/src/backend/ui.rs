@@ -1393,9 +1393,10 @@ mod tests {
     ///
     /// Business Logic（为什么需要这个测试）:
     ///     瞬时 control 错误若仍 attach latest，会永久越过缺口且无法自愈。
+    ///     首帧 incomplete 也不得 after=None：必须 seed gap.owner+0 重连（R33）。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     无 pre-gap cursor 时 incomplete Gap → cursor 仍 None + GapIncomplete + recovery_pending。
+    ///     无 pre-gap cursor 时 incomplete Gap → cursor = owner-1/0 + GapIncomplete + recovery_pending。
     #[tokio::test]
     async fn incomplete_gap_resync_does_not_attach_latest() {
         let ui = RecordingBackendUi::default();
@@ -1415,9 +1416,11 @@ mod tests {
         .await;
         assert_eq!(result, GuiRelayApplyResult::GapIncomplete);
         assert!(result.should_reconnect_stream());
-        assert!(
-            state.cursor().is_none(),
-            "incomplete gap without pre-gap cursor must not invent latest"
+        let cursor = state.cursor().expect("first incomplete gap seeds owner+0");
+        assert_eq!(cursor.owner_instance_id, "owner-1");
+        assert_eq!(
+            cursor.sequence, 0,
+            "first incomplete gap must reconnect with afterSequence=0, not invent latest"
         );
         assert!(
             state.recovery_pending(),
