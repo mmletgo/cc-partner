@@ -9492,4 +9492,56 @@ mod tests {
         assert!(handle.join().expect("join"), "drain after all releases");
         assert_eq!(registry.project_op_lease_count_for_test("p-r28-h4"), 0);
     }
+
+    /// Business Logic（R29 H2: 为什么需要这个测试）:
+    ///     missing-handle close 不得在 sessions 检查后释放锁再装 tombstone，否则 restore 可插入 Ready 后 close 只删 SQLite。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     claim held、无 live → begin_close_intent 后立刻 has tombstone 且 claim revoked；
+    ///     try_claim 不得 AlreadyLive。
+    #[test]
+    fn missing_handle_close_intent_atomic_with_claim_revoke() {
+        let registry = WorkbenchSessionRegistry::new();
+        let generation = registry
+            .try_claim_restore("s-r29-h2")
+            .claim_generation()
+            .expect("claimed");
+        assert!(registry.is_restore_claim_held("s-r29-h2"));
+        let row = WorkbenchSessionRow {
+            id: "s-r29-h2".into(),
+            project_id: "p1".into(),
+            worktree_id: None,
+            name: "n".into(),
+            command: "/bin/sh".into(),
+            cwd: "/tmp".into(),
+            status: "running".into(),
+            cols: 80,
+            rows: 24,
+            started_at: "t".into(),
+            exited_at: None,
+            exit_code: None,
+            backend: RAW_PTY_BACKEND.into(),
+            backend_id: None,
+            backend_window_id: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let cleanup = registry
+            .begin_close_intent_for_missing_handle("s-r29-h2", row)
+            .expect("close intent");
+        assert!(
+            registry.has_closing_tombstone_for_test("s-r29-h2"),
+            "tombstone must exist immediately"
+        );
+        assert!(!registry.is_restore_claim_generation_active("s-r29-h2", generation));
+        assert!(!registry.contains("s-r29-h2"));
+        assert!(
+            matches!(
+                registry.try_claim_restore("s-r29-h2"),
+                RestoreClaimOutcome::BarrierActive | RestoreClaimOutcome::RestoreInProgress(_)
+            ) || registry.has_closing_tombstone_for_test("s-r29-h2"),
+            "must not allow fresh live without barrier"
+        );
+        cleanup.finish_cleanup();
+    }
 }

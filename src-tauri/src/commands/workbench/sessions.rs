@@ -74,12 +74,13 @@ pub(crate) async fn local_create_workbench_session(
     initial_rows: Option<u16>,
 ) -> Result<WorkbenchSessionDto, AppError> {
     state.runtime_role.require_owner()?;
-    let project = get_project(state, &project_id).await?;
-    let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
-    // R28 H4：project op lease 覆盖 create→spawn→upsert→Ready 全窗口。
+    // R29 H1：在 get_project/resolve_worktree 之前持有 project op lease，
+    // 防止 remove 在项目读取后完成 bulk delete 并清除 barrier，create 再用陈旧快照 orphan spawn。
     let _project_lease = state
         .workbench_sessions
         .try_acquire_project_op_lease(&project_id)?;
+    let project = get_project(state, &project_id).await?;
+    let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
     let row = state.workbench_sessions.create(
         state.clone(),
         project,
