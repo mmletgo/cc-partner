@@ -556,6 +556,157 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
   });
 
   /**
+   * Business Logic（R42 M2: 为什么需要这个测试）:
+   *   同设备活跃 P1 + 失效 P2 时，device 级 inventory 会 list 到 P2 并 fail-closed 阻塞整次 resync。
+   *   必须只 inventory active mapped local project ids。
+   *
+   * Code Logic（这个测试做什么）:
+   *   1) mapped 含 P1 不含 P2：只 list P1，P2 失败也不会被调用。
+   *   2) mapped 空数组：remote list 调用次数为 0。
+   *   3) mapped 端点 throw：fail-soft skip-offline，P2 list 失败不挡本机。
+   *   4) 未注入 mapped、仅 device：仍走 device 级兼容（P1+P2 同 device 都会 list）。
+   */
+  test('resync inventories only active mapped projects on same device', async () => {
+    const reset = vi.fn();
+    const store = { reset } as unknown as WorkbenchTerminalBufferStore;
+    const p1 = 'remote:dev:p1';
+    const p2 = 'remote:dev:p2';
+
+    // 1) mapped 只含 P1：仅 inventory P1；P2 不得 list。
+    const mappedOnlyP1 = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) return [{ id: 'local-run', status: 'running' }];
+        if (projectId === p1) {
+          return [{ id: 'remote:dev:s1', status: 'running' }];
+        }
+        if (projectId === p2) {
+          throw new Error('stale P2 list failed');
+        }
+        return [];
+      }),
+      listProjects: vi.fn(async () => [
+        { id: p1, kind: 'remote', deviceId: 'dev' },
+        { id: p2, kind: 'remote', deviceId: 'dev' },
+      ]),
+      listActiveMappedProjects: vi.fn(async () => [p1]),
+      listActiveBridgeDevices: vi.fn(async () => ['dev']),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: 'buf',
+        truncated: false,
+        lastSeq: sessionId === 'local-run' ? 1 : 9,
+        ownerInstanceId: 'own',
+      })),
+    };
+
+    await resyncWorkbenchSessionsAfterGap(store, mappedOnlyP1);
+
+    expect(mappedOnlyP1.listActiveMappedProjects).toHaveBeenCalledTimes(1);
+    expect(mappedOnlyP1.listActiveBridgeDevices).not.toHaveBeenCalled();
+    expect(mappedOnlyP1.list).toHaveBeenCalledWith();
+    expect(mappedOnlyP1.list).toHaveBeenCalledWith(p1);
+    expect(mappedOnlyP1.list).not.toHaveBeenCalledWith(p2);
+    expect(mappedOnlyP1.replay).toHaveBeenCalledWith('local-run');
+    expect(mappedOnlyP1.replay).toHaveBeenCalledWith('remote:dev:s1');
+    expect(reset).toHaveBeenCalledWith('local-run', 'buf', 1, 'own');
+    expect(reset).toHaveBeenCalledWith('remote:dev:s1', 'buf', 9, 'own');
+
+    // 2) 空 mapped：跳过全部 remote。
+    const emptyMapped = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) return [{ id: 'local-run', status: 'running' }];
+        throw new Error('should-not-list-remote');
+      }),
+      listProjects: vi.fn(async () => [
+        { id: p1, kind: 'remote', deviceId: 'dev' },
+        { id: p2, kind: 'remote', deviceId: 'dev' },
+      ]),
+      listActiveMappedProjects: vi.fn(async () => [] as string[]),
+      listActiveBridgeDevices: vi.fn(async () => ['dev']),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: 'local-only',
+        truncated: false,
+        lastSeq: 7,
+        ownerInstanceId: 'local-own',
+      })),
+    };
+    const emptyReset = vi.fn();
+    const emptyStore = { reset: emptyReset } as unknown as WorkbenchTerminalBufferStore;
+    await expect(resyncWorkbenchSessionsAfterGap(emptyStore, emptyMapped)).resolves.toBeUndefined();
+    expect(emptyMapped.listActiveMappedProjects).toHaveBeenCalledTimes(1);
+    expect(emptyMapped.listActiveBridgeDevices).not.toHaveBeenCalled();
+    expect(emptyMapped.list).toHaveBeenCalledTimes(1);
+    expect(emptyMapped.list).toHaveBeenCalledWith();
+    expect(emptyMapped.list).not.toHaveBeenCalledWith(p1);
+    expect(emptyMapped.list).not.toHaveBeenCalledWith(p2);
+    expect(emptyMapped.replay).toHaveBeenCalledWith('local-run');
+    expect(emptyReset).toHaveBeenCalledWith('local-run', 'local-only', 7, 'local-own');
+
+    // 3) mapped endpoint 失败：fail-soft skip-offline，P2 throw 不挡本机。
+    const mappedFailSoft = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) return [{ id: 'local-run', status: 'running' }];
+        if (projectId === p1) return [{ id: 'remote:dev:s1', status: 'running' }];
+        throw new Error('stale P2 list failed');
+      }),
+      listProjects: vi.fn(async () => [
+        { id: p1, kind: 'remote', deviceId: 'dev' },
+        { id: p2, kind: 'remote', deviceId: 'dev' },
+      ]),
+      listActiveMappedProjects: vi.fn(async () => {
+        throw new Error('mapped endpoint unavailable');
+      }),
+      listActiveBridgeDevices: vi.fn(async () => ['dev']),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: 'buf',
+        truncated: false,
+        lastSeq: 3,
+        ownerInstanceId: 'own',
+      })),
+    };
+    const softReset = vi.fn();
+    const softStore = { reset: softReset } as unknown as WorkbenchTerminalBufferStore;
+    await expect(resyncWorkbenchSessionsAfterGap(softStore, mappedFailSoft)).resolves.toBeUndefined();
+    expect(mappedFailSoft.listActiveMappedProjects).toHaveBeenCalledTimes(1);
+    // fail-soft 不走 device fail-closed。
+    expect(mappedFailSoft.listActiveBridgeDevices).not.toHaveBeenCalled();
+    expect(mappedFailSoft.list).toHaveBeenCalledWith(p1);
+    expect(mappedFailSoft.list).toHaveBeenCalledWith(p2);
+    expect(mappedFailSoft.replay).toHaveBeenCalledWith('local-run');
+    expect(mappedFailSoft.replay).toHaveBeenCalledWith('remote:dev:s1');
+    expect(softReset).toHaveBeenCalledWith('local-run', 'buf', 3, 'own');
+    expect(softReset).toHaveBeenCalledWith('remote:dev:s1', 'buf', 3, 'own');
+
+    // 4) 未注入 mapped：device 级兼容，同 device 的 P1+P2 都会 list；P2 失败 fail-closed。
+    const deviceCompat = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) return [{ id: 'local-run', status: 'running' }];
+        if (projectId === p1) return [{ id: 'remote:dev:s1', status: 'running' }];
+        throw new Error('stale P2 list failed');
+      }),
+      listProjects: vi.fn(async () => [
+        { id: p1, kind: 'remote', deviceId: 'dev' },
+        { id: p2, kind: 'remote', deviceId: 'dev' },
+      ]),
+      listActiveBridgeDevices: vi.fn(async () => ['dev']),
+      replay: vi.fn(async () => ({
+        sessionId: 'x',
+        buffer: '',
+        truncated: false,
+        lastSeq: 0,
+      })),
+    };
+    await expect(resyncWorkbenchSessionsAfterGap(store, deviceCompat)).rejects.toThrow(
+      /stale P2 list failed/,
+    );
+    expect(deviceCompat.listActiveBridgeDevices).toHaveBeenCalledTimes(1);
+    expect(deviceCompat.list).toHaveBeenCalledWith(p1);
+    expect(deviceCompat.list).toHaveBeenCalledWith(p2);
+  });
+
+  /**
    * Business Logic（R41 M5: 为什么需要这个测试）:
    *   Gap 期间 terminalStatus 可能被 ring 丢弃；inventory 中 exited/disconnected 必须投影到
    *   onTerminalStatus，否则 Mobile UI 会继续显示 running 并允许危险写操作。

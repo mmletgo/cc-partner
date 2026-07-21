@@ -50,6 +50,7 @@ import {
   workbenchMutationOperationDecoder,
   workbenchRemoveResultDecoder,
   workbenchActiveBridgeDevicesDecoder,
+  workbenchActiveMappedProjectsDecoder,
 } from '@/lib/schemas/workbench';
 import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
 import { lanFleetSnapshotDecoder } from '@/lib/schemas/lanFleet';
@@ -1030,6 +1031,27 @@ export async function listActiveBridgeDevicesHttp(): Promise<string[]> {
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   Mobile Gap inventory 必须对齐桌面 active mapped projects（R42 M2）：
+ *   同设备失效 shortcut 不得因 device 级枚举 list 失败阻塞整次 resync。
+ *
+ * Code Logic（这个函数做什么）:
+ *   POST `/api/mobile/workbench/bridges/active-mapped-projects` body `{}`，
+ *   返回排序后的 localProjectIds。
+ */
+export async function listActiveMappedProjectsHttp(): Promise<string[]> {
+  const body = await postJson<{ localProjectIds: string[] }>(
+    `${MOBILE_WORKBENCH_API_PREFIX}/bridges/active-mapped-projects`,
+    {},
+    {
+      policy: { kind: 'query' },
+      decoder: workbenchActiveMappedProjectsDecoder,
+    },
+  );
+  return body.localProjectIds;
+}
+
+/**
  * Workbench Git mutation 请求体（HTTP envelope 路径）。
  *
  * Business Logic（为什么需要这个类型）:
@@ -1113,6 +1135,14 @@ export const workbenchHttp = {
      *   委托 listActiveBridgeDevicesHttp。
      */
     activeDevices: (): Promise<string[]> => listActiveBridgeDevicesHttp(),
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   R42 M2：Gap inventory 优先取 active mapped local project ids。
+     *
+     * Code Logic（这个函数做什么）:
+     *   委托 listActiveMappedProjectsHttp。
+     */
+    activeMappedProjects: (): Promise<string[]> => listActiveMappedProjectsHttp(),
   },
   git: {
     /**

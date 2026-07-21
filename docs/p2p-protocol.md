@@ -272,6 +272,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/browser-verification/artifact` | `routes/browser_verification.rs` | none; returns base64 screenshot bytes | read-only | body `{runId,artifactId}`; rejects path traversal; max 8 MiB PNG |
 | GET | `/api/mobile/workbench/projects/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/bridges/active-devices` | `routes/workbench.rs` | none; returns sorted unfinished remote event bridge device ids | read-only | body `{}` ignored; camelCase `{deviceIds}` for Mobile Gap inventory fail-closed subset |
+| POST | `/api/mobile/workbench/bridges/active-mapped-projects` | `routes/workbench.rs` | none; returns sorted local shortcut project ids mapped on unfinished bridges | read-only | body `{}` ignored; camelCase `{localProjectIds}` for Mobile Gap inventory project-level fail-closed subset (R42 M2; empty skips all remotes) |
 | POST | `/api/mobile/workbench/projects/open` | `routes/workbench.rs` | upserts a `local` project row keyed by canonical path | naturally-idempotent | reuses same project id for same path |
 | POST | `/api/mobile/workbench/worktrees/list` | `routes/workbench.rs` | none | read-only | — |
 | POST | `/api/mobile/workbench/worktrees/create` | `routes/workbench.rs` | `git worktree add` + new SQLite row | requires-idempotency-key | no dedupe key yet; clients MUST NOT auto-retry |

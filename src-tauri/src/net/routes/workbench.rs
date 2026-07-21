@@ -1583,6 +1583,40 @@ pub async fn mobile_list_active_bridge_devices(
     Ok(Json(MobileActiveBridgeDevicesDto { device_ids }))
 }
 
+/// Mobile Gap inventory 活跃 mapped local project 列表 DTO（camelCase）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     R42 M2：同设备活跃 P1 + 失效 P2 时，仅按 device 枚举会 list 失败阻塞整次 resync；
+///     必须返回 active bridge 上已映射的 local shortcut projectId。
+///
+/// Code Logic（这个结构体做什么）:
+///     序列化为 `{ localProjectIds: string[] }`；ids 已排序去重。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileActiveMappedProjectsDto {
+    pub local_project_ids: Vec<String>,
+}
+
+/// 手机端读取 active bridge 上已映射的 local shortcut project id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Mobile Gap inventory 对齐桌面 `bridges.active_mapped_projects`（R41 M4 / R42 M2）：
+///     仅 inventory 已映射活跃 project，空集跳过全部 remote。
+///
+/// Code Logic（这个函数做什么）:
+///     复用 registry `active_mapped_local_project_ids()`，返回 camelCase `{ localProjectIds }`；
+///     body 忽略。
+pub async fn mobile_list_active_mapped_projects(
+    State(state): State<AppState>,
+    Extension(_ctx): Extension<P2pRequestContext>,
+    Json(_req): Json<serde_json::Value>,
+) -> P2pResult<Json<MobileActiveMappedProjectsDto>> {
+    let local_project_ids = state
+        .workbench_remote_event_bridges
+        .active_mapped_local_project_ids();
+    Ok(Json(MobileActiveMappedProjectsDto { local_project_ids }))
+}
+
 /// 手机端打开本机路径为 Workbench 项目。
 ///
 /// Business Logic（为什么需要这个函数）:

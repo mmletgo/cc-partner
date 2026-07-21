@@ -1088,6 +1088,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::mobile_list_active_bridge_devices),
         )
         .route(
+            "/api/mobile/workbench/bridges/active-mapped-projects",
+            post(workbench::mobile_list_active_mapped_projects),
+        )
+        .route(
             "/api/mobile/workbench/projects/open",
             post(workbench::mobile_open_project),
         )

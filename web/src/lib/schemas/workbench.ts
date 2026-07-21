@@ -100,6 +100,18 @@ export const workbenchActiveBridgeDevicesDecoder: Decoder<{ deviceIds: string[] 
   },
 );
 
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   Mobile Gap inventory 需要 active mapped localProjectIds，损坏响应不得静默当成空集合。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 camelCase `{ localProjectIds: string[] }`。
+ */
+export const workbenchActiveMappedProjectsDecoder: Decoder<{ localProjectIds: string[] }> =
+  objectDecoder('WorkbenchActiveMappedProjects', {
+    localProjectIds: arrayDecoder(stringDecoder),
+  });
+
 const gitStatusDecoder: Decoder<WorkbenchGitStatus> = objectDecoder('WorkbenchGitStatus', {
   branch: nullableDecoder(stringDecoder),
   changed: numberDecoder,

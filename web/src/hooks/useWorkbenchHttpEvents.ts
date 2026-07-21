@@ -26,6 +26,7 @@ import { agentSessionRuntimeDtoDecoder } from '@/lib/schemas/agentRuntime';
 import {
   httpWorkbenchTransport,
   listActiveBridgeDevicesHttp,
+  listActiveMappedProjectsHttp,
 } from '@/api/workbenchHttp';
 import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
@@ -107,13 +108,14 @@ export type WorkbenchNdjsonFrame =
  *   R37 M1：无 project 的 sessions.list 会漏 remote shortcut 会话，需可注入 listProjects。
  *   R38 M1 / R39 M1：offline remote shortcut 不得 fail-closed 挡本机恢复；
  *   production 默认注入 active bridge 设备，仅这些 remote fail-closed。
+ *   R42 M2：进一步改为 active mapped local project ids（同设备失效 shortcut 不得挡 resync）。
  *
  * Code Logic（字段说明）:
  *   list 返回至少含 id/status，可选 exitCode（R41 M5 投影 terminalStatus 时用）；
  *   replay 返回 buffer/lastSeq/可选 ownerInstanceId；
  *   listProjects 可选：返回至少 id/kind（可选 deviceId），remote 项目再按 projectId list；
- *   listActiveBridgeDevices 可选：一旦提供（含空数组）即作为权威 active set——
- *   空集合跳过全部 remote；非空时仅 inventory 集合内设备且失败 fail-closed。
+ *   listActiveMappedProjects 可选（优先）：一旦提供（含空数组）即按 local project id inventory；
+ *   listActiveBridgeDevices 可选：mapped 未提供时的 device 级兼容路径。
  */
 export interface WorkbenchHttpEventsSessionDeps {
   list: (
@@ -130,11 +132,22 @@ export interface WorkbenchHttpEventsSessionDeps {
   listProjects?: () => Promise<Array<{ id: string; kind?: string; deviceId?: string }>>;
   /**
    * Business Logic（为什么需要这个字段）:
+   *   R42 M2：对齐桌面 bridges.active_mapped_projects——仅 inventory 活跃 bridge 上
+   *   已映射的 local shortcut projectId；同设备 stale P2 不得因 list 失败阻塞 P1。
+   *
+   * Code Logic（字段说明）:
+   *   可选：active mapped local project id 列表。
+   *   **已提供且调用成功**（含空数组）→ 权威：空集合跳过全部 remote；非空仅 list 命中 id 且
+   *   fail-closed。**调用失败** → fail-soft skip-offline（不永久阻塞）。**未提供** → 走 device 级/fallback。
+   */
+  listActiveMappedProjects?: () => Promise<string[]>;
+  /**
+   * Business Logic（为什么需要这个字段）:
    *   对齐桌面 active-bridge：仅活跃 bridge 上的 remote 失败才应 fail-closed，
    *   无关 offline remote 不得永久阻塞本机 Gap recovery。
    *
    * Code Logic（字段说明）:
-   *   可选：活跃 bridge 设备 id 列表。
+   *   可选：活跃 bridge 设备 id 列表（mapped inventory 未注入时的兼容路径）。
    *   **已提供**（含空数组）→ 始终构造 Set：空集合跳过全部 remote；非空仅 inventory 集合内
    *   device 且 fail-closed。**未提供** → 兼容 fallback：全部 remote 走 skip-offline。
    */
@@ -531,20 +544,21 @@ export function projectInventoryTerminalStatuses(
  * Business Logic（为什么需要这个函数）:
  *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
  *   R37 M1：裸 sessions.list() 无 project 会漏 remote shortcut；存在 remote 时必须按项目 inventory。
- *   R38 M1 / R39 M1 / R40 M1：production 默认注入 listActiveBridgeDevices；
+ *   R38 M1 / R39 M1 / R40 M1：production 曾注入 listActiveBridgeDevices；
  *   仅活跃 bridge remote fail-closed；**空 active set 跳过全部 remote**（不探测离线 shortcut）。
  *   R41 M5：inventory 成功后须投影全部 listed session 的 terminalStatus（含 exited/disconnected），
  *   不能只 replay running；否则 Mobile UI 会卡在 running。
+ *   R42 M2：优先 listActiveMappedProjects（active bridge 已映射 local project ids）；
+ *   同设备活跃 P1 + 失效 P2 时只 inventory P1，stale P2 list 失败不得挡整次 resync。
  *
  * Code Logic（这个函数做什么）:
  *   本机 sessions.list()（无 projectId）失败仍 throw。
  *   有 listProjects 时取 kind===remote 的项目：
- *   - listActiveBridgeDevices **已提供**（含返回空数组）：始终构造 Set；
- *     空集合必须跳过全部 remote（不 list）；
- *     deviceId 落在 active set 的 remote fail-closed throw；
- *     不在 set 内的 remote 完全跳过。
- *   - listActiveBridgeDevices **未提供**：兼容 fallback——每个 remote try list，
- *     成功 merge、失败 skip（不 throw）。
+ *   - listActiveMappedProjects **已提供且调用成功**（含空数组）：仅 inventory 命中 project.id；
+ *     空集合跳过全部 remote；命中 id fail-closed。
+ *   - listActiveMappedProjects **调用失败**：fail-soft 对全部 remote skip-offline（不永久阻塞）。
+ *   - mapped **未提供**且 listActiveBridgeDevices **已提供**：device 级兼容路径（R39/R40）。
+ *   - 两者都未提供：兼容 fallback——每个 remote try list，成功 merge、失败 skip。
  *   无 listProjects 时退回 sessions.list()。
  *   仅 status===running 调 replay → store.reset(sessionId, buffer, lastSeq, ownerInstanceId?)。
  *   inventory + running replay 完成后：projectInventoryTerminalStatuses 对全部 listed 行投影 status。
@@ -570,39 +584,79 @@ export async function resyncWorkbenchSessionsAfterGap(
     }
   };
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   skip-offline 路径：offline / unavailable remote 不得挡本机 Gap recovery。
+   *
+   * Code Logic（这个函数做什么）:
+   *   try list(projectId)；成功 merge，失败吞掉。
+   */
+  const listRemoteSkipOffline = async (projectId: string): Promise<void> => {
+    try {
+      mergeListed(await sessions.list(projectId));
+    } catch {
+      // R38 M1：offline / unavailable remote 不得挡本机 Gap recovery。
+    }
+  };
+
   // 本机全局 list（无 projectId）失败必须 throw，不得被 remote skip 掩盖。
   mergeListed(await sessions.list());
 
   if (sessions.listProjects) {
     const projects = await sessions.listProjects();
     const remoteProjects = projects.filter((project) => project.kind === 'remote');
-    // R40 M1：依赖是否注入与返回值是否为空必须分离——
-    // 已注入时空数组是合法“当前无活跃 bridge”，必须跳过全部 remote；
-    // 仅未注入时才走 skip-offline best-effort fallback。
-    const hasActiveBridgeInventory = typeof sessions.listActiveBridgeDevices === 'function';
-    const activeSet = hasActiveBridgeInventory
-      ? new Set(
-          (await sessions.listActiveBridgeDevices!()).filter((id) => id.trim().length > 0),
-        )
-      : null;
 
-    for (const project of remoteProjects) {
-      if (activeSet) {
-        const deviceId = resolveRemoteProjectDeviceId(project);
-        if (!deviceId || !activeSet.has(deviceId)) {
-          // 非活跃 / 空 active set：完全跳过，不 list、不唤醒离线远端。
+    // R42 M2：mapped projects 优先于 device 级 inventory。
+    const hasMappedInventory = typeof sessions.listActiveMappedProjects === 'function';
+    let mappedSet: Set<string> | null = null;
+    let mappedFetchFailed = false;
+    if (hasMappedInventory) {
+      try {
+        mappedSet = new Set(
+          (await sessions.listActiveMappedProjects!()).filter((id) => id.trim().length > 0),
+        );
+      } catch {
+        // mapped endpoint 失败：fail-soft，避免永久阻塞本机 recovery。
+        mappedFetchFailed = true;
+        mappedSet = null;
+      }
+    }
+
+    if (mappedSet) {
+      // 权威 mapped inventory：空集合跳过全部 remote；命中 id fail-closed。
+      for (const project of remoteProjects) {
+        if (!mappedSet.has(project.id)) {
           continue;
         }
-        // 活跃 bridge remote：fail-closed。
         mergeListed(await sessions.list(project.id));
-        continue;
       }
+    } else if (mappedFetchFailed) {
+      // mapped 调用失败：不回退 device fail-closed，全部 remote skip-offline。
+      for (const project of remoteProjects) {
+        await listRemoteSkipOffline(project.id);
+      }
+    } else {
+      // mapped 未注入：device 级兼容（R39/R40）或 skip-offline fallback。
+      const hasActiveBridgeInventory = typeof sessions.listActiveBridgeDevices === 'function';
+      const activeSet = hasActiveBridgeInventory
+        ? new Set(
+            (await sessions.listActiveBridgeDevices!()).filter((id) => id.trim().length > 0),
+          )
+        : null;
 
-      // 兼容 fallback（未注入 listActiveBridgeDevices）：skip-offline。
-      try {
-        mergeListed(await sessions.list(project.id));
-      } catch {
-        // R38 M1：offline / unavailable remote 不得挡本机 Gap recovery。
+      for (const project of remoteProjects) {
+        if (activeSet) {
+          const deviceId = resolveRemoteProjectDeviceId(project);
+          if (!deviceId || !activeSet.has(deviceId)) {
+            // 非活跃 / 空 active set：完全跳过，不 list、不唤醒离线远端。
+            continue;
+          }
+          // 活跃 bridge remote：fail-closed。
+          mergeListed(await sessions.list(project.id));
+          continue;
+        }
+
+        await listRemoteSkipOffline(project.id);
       }
     }
   }
@@ -826,9 +880,10 @@ export function useWorkbenchHttpEvents({
     sessions ?? {
       list: (projectId) => httpWorkbenchTransport.sessions.list(projectId),
       replay: (sessionId) => httpWorkbenchTransport.sessions.replay(sessionId),
-      // R37 M1 / R38 M1 / R39 M1：默认注入 projects.list + active-bridge devices，
-      // 使 production mobile Gap 对活跃 bridge remote fail-closed，offline 跳过。
+      // R37 M1 / R42 M2：默认注入 projects.list + active mapped projects；
+      // mapped 优先 inventory；device 级 API 仅作 mapped 未注入时的兼容 fallback。
       listProjects: () => httpWorkbenchTransport.projects.list(),
+      listActiveMappedProjects: () => listActiveMappedProjectsHttp(),
       listActiveBridgeDevices: () => listActiveBridgeDevicesHttp(),
     },
   );
