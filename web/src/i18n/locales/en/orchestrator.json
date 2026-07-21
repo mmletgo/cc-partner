@@ -268,7 +268,10 @@
     "title": "Candidate experiments",
     "empty": "No experiment groups yet. Create a comparative experiment from the create dialog.",
     "create": "Create comparative experiment",
-    "approveReason": "User approved recommended winner"
+    "approveReason": "User approved recommended winner",
+    "selectCandidate": "Select this candidate",
+    "approveRecommended": "Approve recommended",
+    "cancelExperiment": "Cancel experiment"
   },
   "workflowWizard": {
     "open": "WORKFLOW wizard",

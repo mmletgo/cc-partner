@@ -708,7 +708,9 @@ test.describe('frontend foundation smoke', () => {
     expect(hrefs[0]).toBe('/');
     expect(hrefs).toContain('/workbench');
     expect(hrefs).toContain('/attention');
-    expect(hrefs).toContain('/settings');
+    // 设置入口固定在侧栏 footer 齿轮 NavLink，不在主导航 System 组（AppShell 合同）。
+    expect(hrefs.filter((href) => href === '/settings')).toHaveLength(0);
+    await expect(page.locator('aside a[href="/settings"]')).toBeVisible();
     expect(hrefs.filter((href) => href === '/discover')).toHaveLength(0);
 
     // 每条主导航链接是一个 tab stop（无 tabindex=-1）

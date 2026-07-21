@@ -268,7 +268,10 @@
     "title": "候选实验组",
     "empty": "暂无实验组。可在创建弹窗中发起比较实验。",
     "create": "创建比较实验",
-    "approveReason": "用户采用推荐 winner"
+    "approveReason": "用户采用推荐 winner",
+    "selectCandidate": "选择此候选",
+    "approveRecommended": "采用推荐",
+    "cancelExperiment": "取消实验"
   },
   "workflowWizard": {
     "open": "WORKFLOW 向导",

@@ -125,19 +125,17 @@ export function AutomationSettingsPanel({
         <Card variant="flat" padding="md">
           <Card.Header>
             <h2 className={styles.sectionTitle}>
-              {t('settings:automation.agentAdaptersTitle', {
-                defaultValue: 'Agent adapters',
-              })}
+              {t('settings:automation.agentAdaptersTitle')}
             </h2>
           </Card.Header>
           <Card.Body padding="md">
             <p className={styles.helper}>
-              {t('settings:automation.agentAdaptersHint', {
-                defaultValue:
-                  'Owner-local adapter availability (no executable path or credentials).',
-              })}
+              {t('settings:automation.agentAdaptersHint')}
             </p>
-            <ul className={styles.toggleList} aria-label="Agent adapter catalog">
+            <ul
+              className={styles.toggleList}
+              aria-label={t('settings:automation.agentAdaptersAriaLabel')}
+            >
               {agentAdapters.map((item) => (
                 <li key={item.provider} className={styles.toggleRow}>
                   <div className={styles.toggleText}>
@@ -150,11 +148,11 @@ export function AutomationSettingsPanel({
                   <span className={styles.toggleState}>
                     {item.available ? (
                       <Pill tone="success" dot>
-                        available
+                        {t('settings:automation.adapterAvailable')}
                       </Pill>
                     ) : (
                       <Pill tone="neutral" dot>
-                        unavailable
+                        {t('settings:automation.adapterUnavailable')}
                       </Pill>
                     )}
                   </span>

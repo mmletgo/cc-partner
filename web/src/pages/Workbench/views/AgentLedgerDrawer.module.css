@@ -38,13 +38,13 @@
 .subtitle {
   margin: 0;
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .state {
   margin: 0;
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .error {
@@ -82,7 +82,7 @@
 
 .summaryGrid dt {
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .summaryGrid dd {
@@ -101,7 +101,7 @@
 .muted {
   margin: 0;
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .entryList {
@@ -140,7 +140,7 @@
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-3);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
   font-variant-numeric: tabular-nums;
 }
 

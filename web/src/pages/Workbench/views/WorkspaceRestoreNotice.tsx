@@ -10,6 +10,7 @@
 
 import { useId, useState } from 'react';
 import type { ReactElement } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives/Button';
 import type { WorkspaceRestoreSummary } from '../workspaceRestore';
 import { formatRestoreNotice } from '../workspaceRestore';
@@ -31,6 +32,7 @@ export function WorkspaceRestoreNotice(
   props: WorkspaceRestoreNoticeProps,
 ): ReactElement | null {
   const { summary, onDismiss } = props;
+  const { t } = useTranslation(['workbench']);
   const [expanded, setExpanded] = useState(false);
   const titleId = useId();
 
@@ -58,11 +60,13 @@ export function WorkspaceRestoreNotice(
               onClick={() => setExpanded((v) => !v)}
               aria-expanded={expanded}
             >
-              {expanded ? '收起原因' : '查看原因'}
+              {expanded
+                ? t('workbench:workspaceRestore.collapseReasons')
+                : t('workbench:workspaceRestore.viewReasons')}
             </Button>
           ) : null}
           <Button variant="ghost" size="sm" type="button" onClick={onDismiss}>
-            关闭
+            {t('workbench:workspaceRestore.close')}
           </Button>
         </div>
       </div>

@@ -7,6 +7,7 @@
  *   纯展示组件：接收 experiment DTO 与动作回调。
  */
 import type { JSX } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives/Button';
 import type { OrchestratorExperiment } from '@/lib/types/orchestrator';
 import styles from './OrchestratorExperimentPanel.module.css';
@@ -29,6 +30,7 @@ export function OrchestratorExperimentPanel(
   props: OrchestratorExperimentPanelProps,
 ): JSX.Element {
   const { experiment, onApproveRecommended, onSelectCandidate, onCancel } = props;
+  const { t } = useTranslation(['orchestrator']);
   const needsDecision = experiment.status === 'needsDecision' || experiment.status === 'winnerReady';
   const readyCandidates = (experiment.candidates ?? []).filter(
     (c) => c.outcome === 'candidateReady' || c.outcome === 'winner',
@@ -63,7 +65,7 @@ export function OrchestratorExperimentPanel(
                 size="sm"
                 onClick={() => onSelectCandidate(experiment.id, c.taskId)}
               >
-                选择此候选
+                {t('orchestrator:experiments.selectCandidate')}
               </Button>
             ) : null}
           </li>
@@ -77,12 +79,12 @@ export function OrchestratorExperimentPanel(
               size="sm"
               onClick={() => onApproveRecommended(experiment.id, recommendedId)}
             >
-              采用推荐
+              {t('orchestrator:experiments.approveRecommended')}
             </Button>
           ) : null}
           {onCancel ? (
             <Button variant="danger" size="sm" onClick={() => onCancel(experiment.id)}>
-              取消实验
+              {t('orchestrator:experiments.cancelExperiment')}
             </Button>
           ) : null}
         </div>

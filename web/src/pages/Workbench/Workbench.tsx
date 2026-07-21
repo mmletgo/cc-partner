@@ -794,7 +794,7 @@ export function Workbench() {
               type="button"
               onClick={openSnapshotDialog}
             >
-              现场快照
+              {t('workbench:workspaceSnapshot.openButton')}
             </Button>
             <div className={styles.projectAutomationMeta}>
               <span>{t('workbench:projectAutomation.scope')}</span>

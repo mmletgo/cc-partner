@@ -6,6 +6,7 @@
  *   复用 OrchestratorExperimentPanel 渲染实验列表。
  */
 import type { JSX } from 'react';
+import { useTranslation } from 'react-i18next';
 import { OrchestratorExperimentPanel } from '@/pages/Orchestrator/views/OrchestratorExperimentPanel';
 import type { OrchestratorExperiment } from '@/lib/types/orchestrator';
 
@@ -26,8 +27,9 @@ export function MobileAutomationExperiments(
   props: MobileAutomationExperimentsProps,
 ): JSX.Element {
   const { experiments, onApproveRecommended, onCancel } = props;
+  const { t } = useTranslation(['orchestrator']);
   if (experiments.length === 0) {
-    return <p>暂无实验组</p>;
+    return <p>{t('orchestrator:experiments.empty')}</p>;
   }
   return (
     <div>

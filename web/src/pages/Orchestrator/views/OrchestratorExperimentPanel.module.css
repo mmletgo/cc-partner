@@ -24,17 +24,17 @@
 
 .status {
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-full);
-  background: var(--surface-muted);
+  background: var(--surface-warm);
 }
 
 .goal,
 .reason {
   margin: 0;
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .candidates {

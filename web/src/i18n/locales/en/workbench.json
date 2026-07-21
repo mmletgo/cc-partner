@@ -824,6 +824,7 @@
     "completed": "Completed",
     "failed": "Failed",
     "duration": "Duration",
+    "durationMs": "{{ms}} ms",
     "inputTokens": "Input tokens",
     "outputTokens": "Output tokens",
     "unavailable": "Not provided",
@@ -840,6 +841,7 @@
   },
   "workspaceSnapshot": {
     "title": "Workspace snapshots",
+    "openButton": "Workspace snapshot",
     "hint": "Saves project/worktree/terminal selection and view structure only — not terminal output, commands, or file contents.",
     "namePlaceholder": "Snapshot name",
     "nameAriaLabel": "Snapshot name",
@@ -848,6 +850,11 @@
     "delete": "Delete",
     "confirmDelete": "Confirm delete",
     "empty": "No named snapshots yet"
+  },
+  "workspaceRestore": {
+    "close": "Close",
+    "viewReasons": "View reasons",
+    "collapseReasons": "Hide reasons"
   },
   "historySync": {
     "notFound": "Terminal history is unavailable because this session no longer exists.",

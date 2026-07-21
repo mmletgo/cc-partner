@@ -56,7 +56,7 @@
   width: 6px;
   height: 6px;
   border-radius: var(--radius-full);
-  background: var(--fg-muted);
+  background: var(--fg-muted-readable);
 }
 
 .agentStatusDot[data-tone='working'] {
@@ -74,7 +74,7 @@
   padding: 0 var(--space-1);
   border-radius: var(--radius-full);
   background: var(--danger-soft, var(--danger));
-  color: var(--danger-on, var(--accent-on));
+  color: var(--accent-on);
   font-size: var(--text-xs);
   line-height: 16px;
   text-align: center;
@@ -82,7 +82,7 @@
 }
 
 .offlineText {
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
   font-size: var(--text-xs);
 }
 

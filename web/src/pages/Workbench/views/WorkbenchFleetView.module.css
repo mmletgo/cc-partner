@@ -26,7 +26,7 @@
 .subtitle {
   margin: var(--space-1) 0 0;
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .headerActions {
@@ -60,13 +60,13 @@
 }
 
 .refreshButton:hover {
-  background: var(--surface-hover, var(--surface));
+  background: var(--surface-warm);
 }
 
 .state {
   margin: 0;
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .error {
@@ -112,12 +112,12 @@
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-4);
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .metaLabel {
   margin-right: var(--space-1);
-  color: var(--fg-subtle, var(--fg-muted));
+  color: var(--fg-muted-readable);
 }
 
 .projectList {
@@ -152,7 +152,7 @@
 
 .projectKind {
   font-size: var(--text-xs);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .projectStats {
@@ -164,7 +164,7 @@
 }
 
 .projectStats dt {
-  color: var(--fg-subtle, var(--fg-muted));
+  color: var(--fg-muted-readable);
   font-weight: var(--weight-regular);
 }
 
@@ -179,7 +179,7 @@
   padding: 0 var(--space-1);
   border-radius: var(--radius-full);
   background: var(--danger-soft, var(--danger));
-  color: var(--danger-on, var(--accent-on));
+  color: var(--accent-on);
   font-size: var(--text-xs);
 }
 

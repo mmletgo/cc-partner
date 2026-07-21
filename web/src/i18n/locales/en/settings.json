@@ -150,7 +150,12 @@
     "notifyTaskDoneHint": "Send a system notification when a task completes (off by default).",
     "applyFailed": "Failed to apply automation config",
     "saved": "Automation config applied",
-    "dirty": "You have unapplied automation changes"
+    "dirty": "You have unapplied automation changes",
+    "agentAdaptersTitle": "Agent adapters",
+    "agentAdaptersHint": "Owner-local adapter availability (no executable path or credentials).",
+    "agentAdaptersAriaLabel": "Agent adapter catalog",
+    "adapterAvailable": "available",
+    "adapterUnavailable": "unavailable"
   },
   "health": {
     "title": "Health reminder",

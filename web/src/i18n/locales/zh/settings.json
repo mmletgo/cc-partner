@@ -150,7 +150,12 @@
     "notifyTaskDoneHint": "有任务完成时发送系统通知（默认关闭）。",
     "applyFailed": "应用自动化配置失败",
     "saved": "自动化配置已应用",
-    "dirty": "有未应用的自动化修改"
+    "dirty": "有未应用的自动化修改",
+    "agentAdaptersTitle": "Agent adapters",
+    "agentAdaptersHint": "本机 owner 可见的 adapter 可用性（不展示可执行路径或凭据）。",
+    "agentAdaptersAriaLabel": "Agent adapter 目录",
+    "adapterAvailable": "可用",
+    "adapterUnavailable": "不可用"
   },
   "health": {
     "title": "健康提醒",

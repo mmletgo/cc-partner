@@ -164,7 +164,9 @@ export function AgentLedgerDrawer({
               </div>
               <div>
                 <dt>{t('workbench:agentLedger.duration')}</dt>
-                <dd>{summary.durationMs} ms</dd>
+                <dd>
+                  {t('workbench:agentLedger.durationMs', { ms: summary.durationMs })}
+                </dd>
               </div>
               <div>
                 <dt>{t('workbench:agentLedger.inputTokens')}</dt>

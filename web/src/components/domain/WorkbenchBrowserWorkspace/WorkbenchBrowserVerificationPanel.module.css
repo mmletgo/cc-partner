@@ -24,7 +24,7 @@
   flex-direction: column;
   gap: var(--space-1);
   font-size: var(--text-sm);
-  color: var(--fg-muted);
+  color: var(--fg-muted-readable);
 }
 
 .shot {
