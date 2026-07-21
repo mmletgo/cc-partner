@@ -1376,37 +1376,20 @@ pub(crate) async fn cleanup_merged_worktree(
         ));
     }
     // barrier 下 re-snapshot close，拦截 merge 期间并发 create。
-    if let Err(error) = close_sessions_for_worktree(state, &row.project_id, &row.id).await {
-        return Err(error);
-    }
+    close_sessions_for_worktree(state, &row.project_id, &row.id).await?;
     // 二次 close：close_sessions 与 bulk delete 之间仍可能有竞态窗口内的新行
     // （barrier 下 create 应失败；再扫一次防御 SQLite 残留）。
-    if let Err(error) = close_sessions_for_worktree(state, &row.project_id, &row.id).await {
-        return Err(error);
-    }
-    if let Err(error) = state
+    close_sessions_for_worktree(state, &row.project_id, &row.id).await?;
+    state
         .workbench_session_repo
         .delete_by_worktree(&row.project_id, &row.id)
-        .await
-    {
-        return Err(error);
-    }
+        .await?;
     let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
-    if let Err(error) =
-        workbench_git::remove_worktree(Path::new(&repo_root), Path::new(&row.path), false)
-    {
-        return Err(error);
-    }
+    workbench_git::remove_worktree(Path::new(&repo_root), Path::new(&row.path), false)?;
     if let Some(branch) = row.branch.as_deref() {
-        if let Err(error) =
-            workbench_git::delete_local_branch_if_merged(Path::new(&repo_root), branch, "HEAD")
-        {
-            return Err(error);
-        }
+        workbench_git::delete_local_branch_if_merged(Path::new(&repo_root), branch, "HEAD")?;
     }
-    if let Err(error) = state.workbench_worktree_repo.delete(&row.id).await {
-        return Err(error);
-    }
+    state.workbench_worktree_repo.delete(&row.id).await?;
     if !state
         .workbench_sessions
         .wait_project_op_leases_drained(&row.project_id)

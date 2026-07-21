@@ -448,10 +448,7 @@ enum SpawnBarrierPolicy {
 ///     `Rejected`：stale。
 enum PreparedSideEffect<T> {
     Buffered,
-    Live {
-        lease: PublicationLease,
-        payload: T,
-    },
+    Live { lease: PublicationLease, payload: T },
     Rejected,
 }
 
@@ -600,7 +597,11 @@ impl Drop for PublicationLease {
     ///     `in_flight` 递减 + condvar notify_all。
     fn drop(&mut self) {
         self.control.in_flight.fetch_sub(1, Ordering::SeqCst);
-        let _guard = self.control.wait.lock().expect("publish control wait 锁中毒");
+        let _guard = self
+            .control
+            .wait
+            .lock()
+            .expect("publish control wait 锁中毒");
         self.control.cv.notify_all();
     }
 }
@@ -1367,6 +1368,8 @@ pub fn reset_tmux_create_guard_reclaim_count_for_test() {
 ///     session 不存在时执行 `tmux new-session -d -s <session> -n <window> -x/-y`；存在时执行 `tmux new-window`；
 ///     两者都用 `-P -F #{window_id}` 读取真实 window id。new-window 不支持 -x/-y，创建后统一
 ///     `resize-window -x/-y`，避免 detached window 以默认小尺寸绘制导致 status bar 错位。
+// tmux window 参数是固定集合（tmux/session/window/cwd/shell/agent/cols/rows），不宜再拆 struct。
+#[allow(clippy::too_many_arguments)]
 fn create_tmux_window(
     tmux: &TmuxCommand,
     session_name: &str,
@@ -1565,9 +1568,7 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError>
     else {
         // R32 H1 / R35 M3：list-windows 失败且无 window_id → fail closed，不 kill-session，
         // 且返回 Err 阻止调用方删除 SQLite（无法确认可安全销毁）。
-        tracing::debug!(
-            "kill_persisted_backend skipped: list-windows failed without window_id"
-        );
+        tracing::debug!("kill_persisted_backend skipped: list-windows failed without window_id");
         return Err(AppError::unavailable(
             "tmux_destroy_probe_failed_without_window_id".to_string(),
         ));
@@ -1625,9 +1626,7 @@ fn run_tmux_destroy_command(tmux: &TmuxCommand, args: &[String]) -> Result<(), A
     );
     let detail = stderr.trim();
     if detail.is_empty() {
-        Err(AppError::unavailable(
-            "tmux_destroy_failed".to_string(),
-        ))
+        Err(AppError::unavailable("tmux_destroy_failed".to_string()))
     } else {
         Err(AppError::unavailable(format!(
             "tmux_destroy_failed: {detail}"
@@ -2495,9 +2494,8 @@ pub async fn wait_for_shared_restore(
                 }
                 Err(_) => {
                     // sender drop：无显式终态 → 视为 Failed，禁止当作 Ready。
-                    return wait_result_from_notification(*rx.borrow_and_update()).unwrap_or(
-                        SharedRestoreWaitResult::Failed(AppErrorCategory::Internal),
-                    );
+                    return wait_result_from_notification(*rx.borrow_and_update())
+                        .unwrap_or(SharedRestoreWaitResult::Failed(AppErrorCategory::Internal));
                 }
             }
         }
@@ -2997,10 +2995,7 @@ impl WorkbenchSessionRegistry {
                 // R22 M1：Closing barrier 期间不得报永久 Missing（list/restore 不得抢跑 reinsert）。
                 drop(restoring);
                 drop(sessions);
-                let closing = self
-                    .closing_publish
-                    .lock()
-                    .expect("closing_publish 锁中毒");
+                let closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
                 if closing.contains_key(session_id) {
                     SessionRuntimePresence::RestoreInProgress
                 } else {
@@ -3056,10 +3051,7 @@ impl WorkbenchSessionRegistry {
         }
         // R24 H2：Closing barrier 参与 claim CAS——不得 Claimed 后用旧行快照越过 close lifecycle。
         {
-            let closing = self
-                .closing_publish
-                .lock()
-                .expect("closing_publish 锁中毒");
+            let closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
             if closing.contains_key(session_id) {
                 return RestoreClaimOutcome::BarrierActive;
             }
@@ -3201,10 +3193,7 @@ impl WorkbenchSessionRegistry {
     ///     若 barrier 已存在：owners++ 并返回既有 generation（join，不 steal）。
     ///     否则分配新 generation，owners=1 写入 map 并返回。
     pub fn begin_project_closing_barrier(&self, project_id: &str) -> u64 {
-        let mut map = self
-            .project_closing
-            .lock()
-            .expect("project_closing 锁中毒");
+        let mut map = self.project_closing.lock().expect("project_closing 锁中毒");
         if let Some(entry) = map.get_mut(project_id) {
             entry.owners = entry.owners.saturating_add(1);
             return entry.generation;
@@ -3229,10 +3218,7 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     generation 不匹配 → no-op；匹配则 owners--，仅 owners 归零时 remove。
     pub fn finish_project_closing_barrier(&self, project_id: &str, generation: u64) {
-        let mut map = self
-            .project_closing
-            .lock()
-            .expect("project_closing 锁中毒");
+        let mut map = self.project_closing.lock().expect("project_closing 锁中毒");
         let Some(entry) = map.get_mut(project_id) else {
             return;
         };
@@ -3252,10 +3238,7 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     project_closing 含 project_id → `unavailable(project_closing_barrier_active)`。
     pub fn require_project_not_closing(&self, project_id: &str) -> Result<(), AppError> {
-        let map = self
-            .project_closing
-            .lock()
-            .expect("project_closing 锁中毒");
+        let map = self.project_closing.lock().expect("project_closing 锁中毒");
         if map.contains_key(project_id) {
             Err(AppError::unavailable(
                 "project_closing_barrier_active".to_string(),
@@ -3455,10 +3438,7 @@ impl WorkbenchSessionRegistry {
     fn wait_for_closing_tombstone(&self, session_id: &str) {
         loop {
             let control = {
-                let closing = self
-                    .closing_publish
-                    .lock()
-                    .expect("closing_publish 锁中毒");
+                let closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
                 closing.get(session_id).cloned()
             };
             let Some(control) = control else {
@@ -3469,10 +3449,7 @@ impl WorkbenchSessionRegistry {
                 control.wait_in_flight_drained_blocking();
             }
             let action = {
-                let closing = self
-                    .closing_publish
-                    .lock()
-                    .expect("closing_publish 锁中毒");
+                let closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
                 match closing.get(session_id) {
                     None => WaitClosingAction::Gone,
                     Some(current) if !Arc::ptr_eq(current, &control) => WaitClosingAction::Replaced,
@@ -3504,10 +3481,7 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     无条件写入/覆盖 closing_publish[session_id]（含 in_flight==0，直至 closer cleanup+drain 才清）。
     fn install_closing_tombstone(&self, session_id: &str, publish: Arc<PublishControl>) {
-        let mut closing = self
-            .closing_publish
-            .lock()
-            .expect("closing_publish 锁中毒");
+        let mut closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
         closing.insert(session_id.to_string(), publish);
     }
 
@@ -3533,7 +3507,8 @@ impl WorkbenchSessionRegistry {
         session_id: &str,
         barrier_policy: SpawnBarrierPolicy,
     ) -> Result<(), AppError> {
-        if matches!(barrier_policy, SpawnBarrierPolicy::Abort) && self.has_closing_barrier(session_id)
+        if matches!(barrier_policy, SpawnBarrierPolicy::Abort)
+            && self.has_closing_barrier(session_id)
         {
             return Err(AppError::unavailable(
                 "session_close_barrier_active".to_string(),
@@ -3582,10 +3557,7 @@ impl WorkbenchSessionRegistry {
                 }
                 state
             };
-            let mut closing = self
-                .closing_publish
-                .lock()
-                .expect("closing_publish 锁中毒");
+            let mut closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
             let publish = if let Some(publish) = closing.get(session_id).cloned() {
                 publish
             } else {
@@ -3674,10 +3646,7 @@ impl WorkbenchSessionRegistry {
             self.install_closing_tombstone(session_id, publish.clone());
             publish
         } else {
-            let closing = self
-                .closing_publish
-                .lock()
-                .expect("closing_publish 锁中毒");
+            let closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
             if let Some(publish) = closing.get(session_id).cloned() {
                 publish
             } else {
@@ -3715,10 +3684,7 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     仅当 closing_publish[session_id] 仍是同一 PublishControl Arc 时 remove 并 notify。
     fn clear_closing_tombstone_if_same(&self, session_id: &str, publish: &Arc<PublishControl>) {
-        let mut closing = self
-            .closing_publish
-            .lock()
-            .expect("closing_publish 锁中毒");
+        let mut closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
         let should_clear = closing
             .get(session_id)
             .map(|current| Arc::ptr_eq(current, publish))
@@ -3788,14 +3754,8 @@ impl WorkbenchSessionRegistry {
             h.row.project_id.clone()
         };
         let mut sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
-        let closing = self
-            .closing_publish
-            .lock()
-            .expect("closing_publish 锁中毒");
-        let project_closing = self
-            .project_closing
-            .lock()
-            .expect("project_closing 锁中毒");
+        let closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
+        let project_closing = self.project_closing.lock().expect("project_closing 锁中毒");
         // Closing barrier 仍在：禁止 reinsert。
         if closing.contains_key(session_id) {
             return InsertCasResult::BarrierActive;
@@ -3868,12 +3828,9 @@ impl WorkbenchSessionRegistry {
     ///     若 session 存在则返回其 generation，否则 None。
     pub fn session_generation(&self, session_id: &str) -> Option<u64> {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
-        sessions.get(session_id).map(|handle| {
-            handle
-                .lock()
-                .expect("workbench session 锁中毒")
-                .generation
-        })
+        sessions
+            .get(session_id)
+            .map(|handle| handle.lock().expect("workbench session 锁中毒").generation)
     }
 
     /// 测试兼容别名：读取 generation。
@@ -4242,13 +4199,9 @@ impl WorkbenchSessionRegistry {
                 self.wait_for_closing_tombstone(&session_id);
             }
             // openpty 前再 revalidate：close/remove 可能在 wait 期间发生。
-            if let Err(error) = self.require_project_not_closing(&project_id) {
-                return Err(error);
-            }
+            self.require_project_not_closing(&project_id)?;
             if let Some(generation) = restore_claim_generation {
-                if let Err(error) = self.require_restore_claim_active(&session_id, generation) {
-                    return Err(error);
-                }
+                self.require_restore_claim_active(&session_id, generation)?;
             }
 
             let pty_system = native_pty_system();
@@ -4285,9 +4238,8 @@ impl WorkbenchSessionRegistry {
                 }
             };
             if self.require_project_not_closing(&project_id).is_err()
-                || restore_claim_generation.is_some_and(|g| {
-                    self.require_restore_claim_active(&session_id, g).is_err()
-                })
+                || restore_claim_generation
+                    .is_some_and(|g| self.require_restore_claim_active(&session_id, g).is_err())
             {
                 // 构造临时 handle 以统一 kill 路径。
                 let generation = self.allocate_generation();
@@ -4340,9 +4292,9 @@ impl WorkbenchSessionRegistry {
                 InsertCasResult::AlreadyLive => {
                     // 并发赢家已 Live：kill 本轮 PTY，返回已有 row（不覆盖）。
                     kill_spawned_handle(&handle);
-                    let existing = self.get_handle(&session_id).map(|h| {
-                        h.lock().expect("workbench session 锁中毒").row.clone()
-                    });
+                    let existing = self
+                        .get_handle(&session_id)
+                        .map(|h| h.lock().expect("workbench session 锁中毒").row.clone());
                     if let Ok(existing_row) = existing {
                         return Ok(existing_row);
                     }
@@ -4441,7 +4393,10 @@ impl WorkbenchSessionRegistry {
                 return false;
             }
             if let Some(claim_gen) = claim_gen {
-                if self.require_restore_claim_active(session_id, claim_gen).is_err() {
+                if self
+                    .require_restore_claim_active(session_id, claim_gen)
+                    .is_err()
+                {
                     return false;
                 }
             }
@@ -4452,10 +4407,7 @@ impl WorkbenchSessionRegistry {
         let mut pending_exit: Option<Option<i32>> = None;
         let transition = {
             let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
-            let project_closing = self
-                .project_closing
-                .lock()
-                .expect("project_closing 锁中毒");
+            let project_closing = self.project_closing.lock().expect("project_closing 锁中毒");
             match sessions.get(session_id) {
                 Some(handle) => {
                     let mut handle = handle.lock().expect("workbench session 锁中毒");
@@ -4530,8 +4482,7 @@ impl WorkbenchSessionRegistry {
         if let Some(exit_code) = pending_exit {
             if let Ok(handle) = self.get_handle(session_id) {
                 let mut handle = handle.lock().expect("workbench session 锁中毒");
-                if handle.generation == generation
-                    && handle.publish.allowed.load(Ordering::SeqCst)
+                if handle.generation == generation && handle.publish.allowed.load(Ordering::SeqCst)
                 {
                     handle.row.status = "exited".to_string();
                     handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
@@ -4670,9 +4621,7 @@ impl WorkbenchSessionRegistry {
             return;
         };
         let mut handle = handle.lock().expect("workbench session 锁中毒");
-        if handle.generation != generation
-            || handle.durability != SessionDurability::Flushing
-        {
+        if handle.generation != generation || handle.durability != SessionDurability::Flushing {
             return;
         }
         handle.durability = SessionDurability::Provisional;
@@ -4698,9 +4647,9 @@ impl WorkbenchSessionRegistry {
     /// 读取当前 durability（内部 CAS/幂等判定用）。
     fn session_durability(&self, session_id: &str) -> Option<SessionDurability> {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
-        sessions.get(session_id).map(|h| {
-            h.lock().expect("workbench session 锁中毒").durability
-        })
+        sessions
+            .get(session_id)
+            .map(|h| h.lock().expect("workbench session 锁中毒").durability)
     }
 
     /// 测试：读取当前 durability。
@@ -5384,10 +5333,7 @@ impl WorkbenchSessionRegistry {
     /// 测试：标记 closer cleanup 完成（R23 H2）。
     #[cfg(test)]
     fn mark_closing_cleanup_done_for_test(&self, session_id: &str) {
-        let closing = self
-            .closing_publish
-            .lock()
-            .expect("closing_publish 锁中毒");
+        let closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
         if let Some(control) = closing.get(session_id) {
             control.mark_cleanup_done();
         }
@@ -5397,10 +5343,7 @@ impl WorkbenchSessionRegistry {
     #[cfg(test)]
     fn clear_closing_tombstone_for_test(&self, session_id: &str) {
         let control = {
-            let closing = self
-                .closing_publish
-                .lock()
-                .expect("closing_publish 锁中毒");
+            let closing = self.closing_publish.lock().expect("closing_publish 锁中毒");
             closing.get(session_id).cloned()
         };
         if let Some(control) = control {
@@ -5444,8 +5387,10 @@ impl WorkbenchSessionRegistry {
     ) {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
         if let Some(handle) = sessions.get(session_id) {
-            handle.lock().expect("workbench session 锁中毒").restore_claim_generation =
-                claim_generation;
+            handle
+                .lock()
+                .expect("workbench session 锁中毒")
+                .restore_claim_generation = claim_generation;
         }
     }
 
@@ -5474,8 +5419,8 @@ impl WorkbenchSessionRegistry {
             ));
         }
         drop(sessions);
-        let (publish, restore_claim_for_drain, leases_drained) = self
-            .revoke_restore_claim_install_tombstone_with_timeout(session_id, None, timeout);
+        let (publish, restore_claim_for_drain, leases_drained) =
+            self.revoke_restore_claim_install_tombstone_with_timeout(session_id, None, timeout);
         let drained = publish.in_flight.load(Ordering::SeqCst) == 0 && leases_drained;
         Ok(SessionCloseCleanup {
             registry: self.clone(),
@@ -5496,9 +5441,7 @@ impl WorkbenchSessionRegistry {
 
     /// 测试：观察 cleanup 是否仍持有 restore claim 供 reaper。
     #[cfg(test)]
-    pub fn session_close_cleanup_has_restore_claim_for_test(
-        cleanup: &SessionCloseCleanup,
-    ) -> bool {
+    pub fn session_close_cleanup_has_restore_claim_for_test(cleanup: &SessionCloseCleanup) -> bool {
         cleanup.restore_claim_for_drain.is_some()
     }
 
@@ -5514,11 +5457,7 @@ impl WorkbenchSessionRegistry {
 
     /// 测试：通过 generation-scoped PublishControl 分配输出序号（R21 H1）。
     #[cfg(test)]
-    pub fn allocate_output_seq_for_test(
-        &self,
-        session_id: &str,
-        generation: u64,
-    ) -> Option<u64> {
+    pub fn allocate_output_seq_for_test(&self, session_id: &str, generation: u64) -> Option<u64> {
         let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
         let handle = sessions.get(session_id)?;
         let handle = handle.lock().expect("workbench session 锁中毒");
@@ -5625,13 +5564,7 @@ fn is_current_session_generation(
     let sessions = sessions.lock().expect("workbench sessions 锁中毒");
     sessions
         .get(session_id)
-        .map(|handle| {
-            handle
-                .lock()
-                .expect("workbench session 锁中毒")
-                .generation
-                == generation
-        })
+        .map(|handle| handle.lock().expect("workbench session 锁中毒").generation == generation)
         .unwrap_or(false)
 }
 
@@ -5744,7 +5677,11 @@ fn try_acquire_publication_lease_locked(
     // 二次确认：revoke 可能与 +1 交错。
     if !handle.publish.allowed.load(Ordering::SeqCst) {
         handle.publish.in_flight.fetch_sub(1, Ordering::SeqCst);
-        let _guard = handle.publish.wait.lock().expect("publish control wait 锁中毒");
+        let _guard = handle
+            .publish
+            .wait
+            .lock()
+            .expect("publish control wait 锁中毒");
         handle.publish.cv.notify_all();
         return None;
     }
@@ -6114,6 +6051,8 @@ fn spawn_reader_thread(
 /// Code Logic（这个函数做什么）:
 ///     forward mutations → debug diagnostics → 非空 visible 走 UTF-8/emit；
 ///     Rejected 时返回 false 让 reader break；Provisional 缓冲后继续 true。
+// OSC 解码出口固定需要 state/session/generation/seq/utf8/sessions/replay/decoded 这一组参数。
+#[allow(clippy::too_many_arguments)]
 fn apply_agent_osc_decode_result(
     state: &AppState,
     session_id: &str,
@@ -6205,7 +6144,10 @@ fn forward_agent_osc_mutations_fenced(
     // R23 H1：classify+buffer/lease 一次锁，避免 Ready 过渡把 reader 永久打死。
     match prepare_mutation_side_effect(sessions, terminal_session_id, generation, mutations) {
         PreparedSideEffect::Buffered => true,
-        PreparedSideEffect::Live { lease: _lease, payload } => {
+        PreparedSideEffect::Live {
+            lease: _lease,
+            payload,
+        } => {
             forward_agent_osc_mutations(state, terminal_session_id, payload);
             true
         }
@@ -6292,8 +6234,7 @@ fn emit_terminal_output_with_lease(
         match sessions_guard.get(session_id) {
             Some(handle) => {
                 let handle = handle.lock().expect("workbench session 锁中毒");
-                if handle.generation != generation
-                    || !handle.publish.allowed.load(Ordering::SeqCst)
+                if handle.generation != generation || !handle.publish.allowed.load(Ordering::SeqCst)
                 {
                     return false;
                 }
@@ -6375,12 +6316,8 @@ fn spawn_exit_watcher(
         match status {
             Some(Ok(exit_code)) => {
                 // R20 H1 / R23 H1：一次锁记录 pending_exit 或持 lease 写 status/emit。
-                match prepare_exit_side_effect(
-                    &sessions,
-                    &session_id,
-                    generation,
-                    Some(exit_code),
-                ) {
+                match prepare_exit_side_effect(&sessions, &session_id, generation, Some(exit_code))
+                {
                     PreparedSideEffect::Buffered => {}
                     PreparedSideEffect::Live {
                         lease: _lease,
@@ -6389,10 +6326,10 @@ fn spawn_exit_watcher(
                         // 仅当仍是同一 handle Arc 时写 status（防止同 id 后继被污染）。
                         let still_owner = {
                             let map = sessions.lock().expect("workbench sessions 锁中毒");
-                            match map.get(&session_id) {
-                                Some(current) if Arc::ptr_eq(current, &handle) => true,
-                                _ => false,
-                            }
+                            matches!(
+                                map.get(&session_id),
+                                Some(current) if Arc::ptr_eq(current, &handle)
+                            )
                         };
                         if still_owner {
                             let mut handle = handle.lock().expect("workbench session 锁中毒");
@@ -7572,23 +7509,14 @@ mod tests {
             "",
             "can't find window: @1"
         ));
-        assert!(tmux_destroy_exit_is_already_gone(
-            "Can't Find session",
-            ""
-        ));
+        assert!(tmux_destroy_exit_is_already_gone("Can't Find session", ""));
         assert!(tmux_destroy_exit_is_already_gone(
             "",
             "no server running on /tmp/tmux-1000/default"
         ));
-        assert!(tmux_destroy_exit_is_already_gone(
-            "",
-            "no such window: @9"
-        ));
+        assert!(tmux_destroy_exit_is_already_gone("", "no such window: @9"));
         assert!(tmux_destroy_exit_is_already_gone("", "session not found"));
-        assert!(!tmux_destroy_exit_is_already_gone(
-            "",
-            "permission denied"
-        ));
+        assert!(!tmux_destroy_exit_is_already_gone("", "permission denied"));
         assert!(!tmux_destroy_exit_is_already_gone("", ""));
     }
 
@@ -7766,7 +7694,10 @@ mod tests {
 
         let a = registry.try_claim_restore("s-a");
         let b = registry.try_claim_restore("s-b");
-        assert!(a.is_claimed() && b.is_claimed(), "不同 session 的 claim 应互不干扰");
+        assert!(
+            a.is_claimed() && b.is_claimed(),
+            "不同 session 的 claim 应互不干扰"
+        );
 
         registry.release_restore_claim("s-a");
         registry.release_restore_claim("s-b");
@@ -7839,10 +7770,7 @@ mod tests {
         assert!(!registry.is_restore_claim_held("s-fail"));
         // 失败后允许重新 claim 重试 restore。
         assert!(registry.try_claim_restore("s-fail").is_claimed());
-        registry.finish_restore_claim(
-            "s-fail",
-            SharedRestoreNotification::PersistedDisconnected,
-        );
+        registry.finish_restore_claim("s-fail", SharedRestoreNotification::PersistedDisconnected);
     }
 
     /// Business Logic（R16 M1: 为什么需要这个测试）:
@@ -7976,10 +7904,7 @@ mod tests {
             .require_live_for_replay("s-presence")
             .expect_err("restore-in-progress must be unavailable");
         assert_eq!(restore_err.ipc_category_code(), "unavailable");
-        assert_eq!(
-            restore_err.to_string(),
-            "session_restore_in_progress"
-        );
+        assert_eq!(restore_err.to_string(), "session_restore_in_progress");
 
         // R18 M1：claim 优先于 provisional live。
         registry.insert_fake_session_for_test("s-presence", "p1");
@@ -7991,10 +7916,7 @@ mod tests {
             .require_live_for_replay("s-presence")
             .expect_err("claim-held provisional live must block replay");
         assert_eq!(provisional_err.ipc_category_code(), "unavailable");
-        assert_eq!(
-            provisional_err.to_string(),
-            "session_restore_in_progress"
-        );
+        assert_eq!(provisional_err.to_string(), "session_restore_in_progress");
         registry.release_restore_claim("s-presence");
         assert_eq!(
             registry.runtime_presence("s-presence"),
@@ -8125,7 +8047,11 @@ mod tests {
             let wait = wait_for_shared_restore(rx).await;
             let presence = reg_waiter.runtime_presence("s-non-replayable");
             let replay_err = reg_waiter.require_live_for_replay("s-non-replayable");
-            (wait, presence, replay_err.map_err(|e| e.ipc_category_code().to_string()))
+            (
+                wait,
+                presence,
+                replay_err.map_err(|e| e.ipc_category_code().to_string()),
+            )
         });
 
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -8143,10 +8069,7 @@ mod tests {
         );
         assert!(!wait.is_success());
         assert_eq!(presence, SessionRuntimePresence::Missing);
-        assert_eq!(
-            replay_err.expect_err("must not be replayable"),
-            "not_found"
-        );
+        assert_eq!(replay_err.expect_err("must not be replayable"), "not_found");
         // list 路径应用 shared_restore_failed_error 返回错误，而不是成功合并。
         let list_err = shared_restore_failed_error(AppErrorCategory::Internal);
         assert_eq!(list_err.ipc_category_code(), "internal");
@@ -8171,13 +8094,9 @@ mod tests {
             .expect("claimed");
         registry.insert_fake_session_for_test("s-cleanup-order", "p1");
 
-        let mut claim_guard = RestoreClaimGuard::new(
-            registry.clone(),
-            "s-cleanup-order".to_string(),
-            generation,
-        );
-        let spawn_guard =
-            SessionSpawnGuard::new(registry.clone(), "s-cleanup-order".to_string());
+        let mut claim_guard =
+            RestoreClaimGuard::new(registry.clone(), "s-cleanup-order".to_string(), generation);
+        let spawn_guard = SessionSpawnGuard::new(registry.clone(), "s-cleanup-order".to_string());
 
         // 正确顺序：先 reclaim spawn。R27 H2：close 会 revoke restore claim，避免 delete 后 re-upsert。
         drop(spawn_guard);
@@ -8186,7 +8105,9 @@ mod tests {
         // claim 已被 close 撤销并从 restoring 移除（或 finish 前已 not active）。
         assert!(!registry.is_restore_claim_generation_active("s-cleanup-order", generation));
         // finish 幂等（generation 已撤销时 no-op）。
-        claim_guard.finish(SharedRestoreNotification::Failed(AppErrorCategory::Internal));
+        claim_guard.finish(SharedRestoreNotification::Failed(
+            AppErrorCategory::Internal,
+        ));
         assert!(!registry.is_restore_claim_held("s-cleanup-order"));
         // Closing barrier 可能仍在（SessionSpawnGuard finish_cleanup 后应清）；presence 不得 Live。
         assert_ne!(
@@ -8222,7 +8143,9 @@ mod tests {
         let spawn_guard = SessionSpawnGuard::new(registry.clone(), "s-wrong-order".to_string());
 
         // 错误顺序：先放 claim。
-        claim_guard.finish(SharedRestoreNotification::Failed(AppErrorCategory::Internal));
+        claim_guard.finish(SharedRestoreNotification::Failed(
+            AppErrorCategory::Internal,
+        ));
         assert!(!registry.is_restore_claim_held("s-wrong-order"));
         assert!(registry.contains("s-wrong-order"));
         assert!(
@@ -8306,7 +8229,10 @@ mod tests {
             .expect("gen1 must exist");
         assert!(registry.is_current_session_generation("s-gen", gen1));
 
-        registry.close("s-gen").expect("close gen1").finish_cleanup();
+        registry
+            .close("s-gen")
+            .expect("close gen1")
+            .finish_cleanup();
         assert!(!registry.is_current_session_generation("s-gen", gen1));
 
         registry.insert_fake_session_for_test("s-gen", "p1");
@@ -8339,7 +8265,9 @@ mod tests {
         );
 
         // 失败 reclaim：先 close spawn 再放 claim。
-        let _ = registry.close("s-reclaim-fence").map(|c| c.finish_cleanup());
+        let _ = registry
+            .close("s-reclaim-fence")
+            .map(|c| c.finish_cleanup());
         registry.finish_restore_claim(
             "s-reclaim-fence",
             SharedRestoreNotification::Failed(AppErrorCategory::Internal),
@@ -8438,7 +8366,9 @@ mod tests {
     fn close_invalidates_publish_token() {
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_fake_session_for_test("s-token", "p1");
-        let gen = registry.session_generation_for_test("s-token").expect("gen");
+        let gen = registry
+            .session_generation_for_test("s-token")
+            .expect("gen");
         assert!(registry.publish_token_alive_for_test("s-token", gen));
         registry.close("s-token").expect("close").finish_cleanup();
         assert!(
@@ -8462,12 +8392,7 @@ mod tests {
             SideEffectGate::Provisional
         );
         assert!(
-            buffer_provisional_output(
-                &registry.sessions,
-                "s-buf",
-                gen,
-                "first-screen".to_string(),
-            ),
+            buffer_provisional_output(&registry.sessions, "s-buf", gen, "first-screen".to_string(),),
             "provisional output must buffer instead of rejecting"
         );
         assert_eq!(registry.replay_last_seq_for_test("s-buf"), Some(0));
@@ -8508,7 +8433,10 @@ mod tests {
         {
             let sessions = registry.sessions.lock().expect("lock");
             let handle = sessions.get("s-exit").expect("handle").lock().expect("h");
-            assert_eq!(handle.pending_exit, None, "ready CAS must take pending_exit");
+            assert_eq!(
+                handle.pending_exit, None,
+                "ready CAS must take pending_exit"
+            );
             assert_eq!(handle.durability, SessionDurability::Ready);
         }
     }
@@ -8525,7 +8453,9 @@ mod tests {
         use std::sync::Barrier;
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_fake_session_for_test("s-lease", "p1");
-        let gen1 = registry.session_generation_for_test("s-lease").expect("gen1");
+        let gen1 = registry
+            .session_generation_for_test("s-lease")
+            .expect("gen1");
         let lease = try_acquire_publication_lease(&registry.sessions, "s-lease", gen1)
             .expect("lease for live gen1");
         // close：soft-timeout 后 tombstone（lease 仍持有）。
@@ -8605,7 +8535,11 @@ mod tests {
             );
             seqs.push(seq);
         }
-        assert_eq!(seqs, vec![1, 2, 3, 4], "seq must continue across flush/live");
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3, 4],
+            "seq must continue across flush/live"
+        );
         assert_eq!(registry.replay_last_seq_for_test("s-seq"), Some(4));
     }
 
@@ -8618,26 +8552,30 @@ mod tests {
     fn spawn_guard_drop_only_closes_captured_generation() {
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_provisional_fake_session_for_test("s-guard", "p1");
-        let gen1 = registry.session_generation_for_test("s-guard").expect("gen1");
+        let gen1 = registry
+            .session_generation_for_test("s-guard")
+            .expect("gen1");
         let guard = SessionSpawnGuard::new_with_generation(
             registry.clone(),
             "s-guard".to_string(),
             gen1,
             None,
         );
-        registry.close("s-guard").expect("close gen1").finish_cleanup();
+        registry
+            .close("s-guard")
+            .expect("close gen1")
+            .finish_cleanup();
         registry.insert_fake_session_for_test("s-guard", "p1");
-        let gen2 = registry.session_generation_for_test("s-guard").expect("gen2");
+        let gen2 = registry
+            .session_generation_for_test("s-guard")
+            .expect("gen2");
         assert_ne!(gen1, gen2);
         drop(guard);
         assert!(
             registry.contains("s-guard"),
             "stale guard Drop must not remove successor generation"
         );
-        assert_eq!(
-            registry.session_generation_for_test("s-guard"),
-            Some(gen2)
-        );
+        assert_eq!(registry.session_generation_for_test("s-guard"), Some(gen2));
         assert_eq!(
             registry.runtime_presence("s-guard"),
             SessionRuntimePresence::Live
@@ -8688,8 +8626,12 @@ mod tests {
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_provisional_fake_session_for_test("s-cas", "p1");
         let gen = registry.session_generation_for_test("s-cas").expect("gen");
-        let mut guard =
-            SessionSpawnGuard::new_with_generation(registry.clone(), "s-cas".to_string(), gen, None);
+        let mut guard = SessionSpawnGuard::new_with_generation(
+            registry.clone(),
+            "s-cas".to_string(),
+            gen,
+            None,
+        );
         registry.close("s-cas").expect("close").finish_cleanup();
         assert!(!guard.commit(), "commit must fail when generation removed");
         // 标记 committed 假成功路径不应发生；Drop 因 committed=false 会 close miss → ok。
@@ -8779,11 +8721,7 @@ mod tests {
         // 锁下 deferred 必须已空。
         {
             let sessions = registry.sessions.lock().expect("lock");
-            let handle = sessions
-                .get("s-flush-order")
-                .expect("h")
-                .lock()
-                .expect("h");
+            let handle = sessions.get("s-flush-order").expect("h").lock().expect("h");
             assert!(
                 handle.deferred_output.is_empty(),
                 "Ready 时 deferred 必须空"
@@ -8799,10 +8737,7 @@ mod tests {
             seqs.push(seq);
         }
         assert_eq!(seqs, vec![1, 2, 3]);
-        assert_eq!(
-            registry.replay_last_seq_for_test("s-flush-order"),
-            Some(3)
-        );
+        assert_eq!(registry.replay_last_seq_for_test("s-flush-order"), Some(3));
     }
 
     /// Business Logic（R22 H1: 为什么需要这个测试）:
@@ -8820,11 +8755,7 @@ mod tests {
             .expect("gen");
         {
             let sessions = registry.sessions.lock().expect("lock");
-            let mut handle = sessions
-                .get("s-flush-gate")
-                .expect("h")
-                .lock()
-                .expect("h");
+            let mut handle = sessions.get("s-flush-gate").expect("h").lock().expect("h");
             handle.durability = SessionDurability::Flushing;
             handle.deferred_output.push("pending".into());
         }
@@ -8931,7 +8862,9 @@ mod tests {
         use std::sync::Barrier;
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_provisional_fake_session_for_test("s-r23-out", "p1");
-        let gen = registry.session_generation_for_test("s-r23-out").expect("gen");
+        let gen = registry
+            .session_generation_for_test("s-r23-out")
+            .expect("gen");
         {
             let sessions = registry.sessions.lock().expect("lock");
             let mut handle = sessions.get("s-r23-out").expect("h").lock().expect("h");
@@ -8957,7 +8890,10 @@ mod tests {
                 format!("chunk-{i}"),
             ) {
                 PreparedSideEffect::Buffered => saw_buffered = true,
-                PreparedSideEffect::Live { lease: _lease, payload: _ } => {
+                PreparedSideEffect::Live {
+                    lease: _lease,
+                    payload: _,
+                } => {
                     saw_live = true;
                 }
                 PreparedSideEffect::Rejected => saw_rejected = true,
@@ -8990,7 +8926,9 @@ mod tests {
         use std::sync::Barrier;
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_provisional_fake_session_for_test("s-r23-mut", "p1");
-        let gen = registry.session_generation_for_test("s-r23-mut").expect("gen");
+        let gen = registry
+            .session_generation_for_test("s-r23-mut")
+            .expect("gen");
         {
             let sessions = registry.sessions.lock().expect("lock");
             let mut handle = sessions.get("s-r23-mut").expect("h").lock().expect("h");
@@ -9025,7 +8963,7 @@ mod tests {
                 PreparedSideEffect::Rejected => rejected = true,
                 PreparedSideEffect::Buffered | PreparedSideEffect::Live { .. } => {}
             }
-            match prepare_exit_side_effect(&registry.sessions, "s-r23-mut", gen, Some(i as i32)) {
+            match prepare_exit_side_effect(&registry.sessions, "s-r23-mut", gen, Some(i)) {
                 PreparedSideEffect::Rejected => rejected = true,
                 PreparedSideEffect::Buffered | PreparedSideEffect::Live { .. } => {}
             }
@@ -9053,10 +8991,7 @@ mod tests {
             registry.has_closing_tombstone_for_test("s-r23-h2"),
             "barrier installed"
         );
-        assert!(
-            !publish.is_cleanup_done(),
-            "cleanup_done must start false"
-        );
+        assert!(!publish.is_cleanup_done(), "cleanup_done must start false");
         assert_eq!(publish.in_flight.load(Ordering::SeqCst), 0);
         let start = Arc::new(Barrier::new(2));
         let reg_ins = registry.clone();
@@ -9096,10 +9031,12 @@ mod tests {
         use std::sync::Barrier;
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_fake_session_for_test("s-r23-m1", "p1");
-        let gen1 = registry.session_generation_for_test("s-r23-m1").expect("gen1");
+        let gen1 = registry
+            .session_generation_for_test("s-r23-m1")
+            .expect("gen1");
         // 持 lease 强制 close 走 Closing barrier（soft-timeout 路径），覆盖 remove→barrier 与 reinsert CAS。
-        let lease = try_acquire_publication_lease(&registry.sessions, "s-r23-m1", gen1)
-            .expect("lease");
+        let lease =
+            try_acquire_publication_lease(&registry.sessions, "s-r23-m1", gen1).expect("lease");
         // main + closer + inserter 三方同步（必须 3，否则第三 waiter 永久阻塞）。
         let start = Arc::new(Barrier::new(3));
         let reg_close = registry.clone();
@@ -9137,10 +9074,7 @@ mod tests {
             !registry.has_closing_tombstone_for_test("s-r23-m1"),
             "barrier must be gone after close cleanup + successful reinsert"
         );
-        assert_eq!(
-            registry.session_generation_for_test("s-r23-m1"),
-            Some(gen2)
-        );
+        assert_eq!(registry.session_generation_for_test("s-r23-m1"), Some(gen2));
         assert_eq!(
             registry.runtime_presence("s-r23-m1"),
             SessionRuntimePresence::Live
@@ -9159,7 +9093,9 @@ mod tests {
         use std::sync::Barrier;
         let registry = WorkbenchSessionRegistry::new();
         registry.insert_fake_session_for_test("s-r24-h1", "p1");
-        let gen1 = registry.session_generation_for_test("s-r24-h1").expect("gen1");
+        let gen1 = registry
+            .session_generation_for_test("s-r24-h1")
+            .expect("gen1");
         let cleanup = registry.close("s-r24-h1").expect("close");
         assert!(
             registry.has_closing_tombstone_for_test("s-r24-h1"),
@@ -9193,10 +9129,7 @@ mod tests {
         let gen2 = inserter.join().expect("inserter").expect("gen2");
         assert_ne!(gen1, gen2);
         assert!(!registry.has_closing_tombstone_for_test("s-r24-h1"));
-        assert_eq!(
-            registry.session_generation_for_test("s-r24-h1"),
-            Some(gen2)
-        );
+        assert_eq!(registry.session_generation_for_test("s-r24-h1"), Some(gen2));
     }
 
     /// Business Logic（R24 H2: 为什么需要这个测试）:
@@ -9253,10 +9186,7 @@ mod tests {
         publish.mark_cleanup_done();
         registry.clear_closing_tombstone_for_test("s-r24-h2");
         assert!(registry.try_claim_restore("s-r24-h2").is_claimed());
-        registry.finish_restore_claim(
-            "s-r24-h2",
-            SharedRestoreNotification::PersistedDisconnected,
-        );
+        registry.finish_restore_claim("s-r24-h2", SharedRestoreNotification::PersistedDisconnected);
     }
 
     /// Business Logic（R25 H1: 为什么需要这个测试）:
@@ -9337,10 +9267,7 @@ mod tests {
         cleanup.finish_cleanup();
         assert!(!registry.has_closing_tombstone_for_test("s-r25-h1"));
         assert!(registry.try_claim_restore("s-r25-h1").is_claimed());
-        registry.finish_restore_claim(
-            "s-r25-h1",
-            SharedRestoreNotification::PersistedDisconnected,
-        );
+        registry.finish_restore_claim("s-r25-h1", SharedRestoreNotification::PersistedDisconnected);
     }
 
     /// Business Logic（R25 H2: 为什么需要这个测试）:
@@ -9377,7 +9304,10 @@ mod tests {
         }
         start.wait();
         for t in claim_threads {
-            assert!(t.join().expect("claim thread"), "claim blocked before bulk finish");
+            assert!(
+                t.join().expect("claim thread"),
+                "claim blocked before bulk finish"
+            );
         }
         // 模拟 delete_by_project 成功后再 finish。
         for cleanup in cleanups {
@@ -9465,10 +9395,7 @@ mod tests {
         cleanup2.finish_cleanup();
         assert!(!registry.has_closing_tombstone_for_test("s-r25-m2"));
         assert!(registry.try_claim_restore("s-r25-m2").is_claimed());
-        registry.finish_restore_claim(
-            "s-r25-m2",
-            SharedRestoreNotification::PersistedDisconnected,
-        );
+        registry.finish_restore_claim("s-r25-m2", SharedRestoreNotification::PersistedDisconnected);
     }
 
     /// Business Logic（R26 H1: 为什么需要这个测试）:
@@ -9485,8 +9412,7 @@ mod tests {
             .try_claim_restore("s-r26-h1")
             .claim_generation()
             .expect("claimed");
-        let guard =
-            RestoreClaimGuard::new(registry.clone(), "s-r26-h1".to_string(), generation);
+        let guard = RestoreClaimGuard::new(registry.clone(), "s-r26-h1".to_string(), generation);
         assert!(guard.is_active());
         assert!(registry.is_restore_claim_generation_active("s-r26-h1", generation));
 
@@ -9640,11 +9566,9 @@ mod tests {
         let cleanup = closer.join().expect("closer join");
         assert!(registry.has_closing_tombstone_for_test("s-r26-h1-lease"));
         assert!(!registry.is_restore_claim_generation_active("s-r26-h1-lease", generation));
-        assert!(
-            registry
-                .try_acquire_restore_persist_lease("s-r26-h1-lease", generation)
-                .is_none()
-        );
+        assert!(registry
+            .try_acquire_restore_persist_lease("s-r26-h1-lease", generation)
+            .is_none());
         cleanup.finish_cleanup();
     }
 
@@ -9677,7 +9601,10 @@ mod tests {
             reg.require_project_not_closing("p-r26-m1").is_err()
         });
         start.wait();
-        assert!(observer.join().expect("observer"), "create blocked during remove");
+        assert!(
+            observer.join().expect("observer"),
+            "create blocked during remove"
+        );
 
         registry.finish_project_closing_barrier("p-r26-m1", gen);
         assert!(!registry.has_project_closing_barrier_for_test("p-r26-m1"));
@@ -9743,15 +9670,15 @@ mod tests {
             .claim_generation()
             .expect("claimed");
         let project_gen = registry.begin_project_closing_barrier("p-r26-restore");
-        assert!(
-            registry
-                .require_project_not_closing("p-r26-restore")
-                .is_err()
-        );
+        assert!(registry
+            .require_project_not_closing("p-r26-restore")
+            .is_err());
         // claim generation 本身仍 active，但 project barrier 独立阻止 spawn/upsert。
         assert!(registry.is_restore_claim_generation_active("s-r26-m1-restore", claim_gen));
         registry.finish_project_closing_barrier("p-r26-restore", project_gen);
-        assert!(registry.require_project_not_closing("p-r26-restore").is_ok());
+        assert!(registry
+            .require_project_not_closing("p-r26-restore")
+            .is_ok());
         registry.finish_restore_claim_for_generation(
             "s-r26-m1-restore",
             claim_gen,
@@ -9780,11 +9707,9 @@ mod tests {
         assert!(registry.has_closing_tombstone_for_test("s-r27-h2"));
         assert!(!registry.contains("s-r27-h2"));
         assert!(!registry.is_restore_claim_generation_active("s-r27-h2", generation));
-        assert!(
-            registry
-                .try_acquire_restore_persist_lease("s-r27-h2", generation)
-                .is_none()
-        );
+        assert!(registry
+            .try_acquire_restore_persist_lease("s-r27-h2", generation)
+            .is_none());
 
         let handle = Arc::new(Mutex::new(WorkbenchSessionHandle {
             row: WorkbenchSessionRow {

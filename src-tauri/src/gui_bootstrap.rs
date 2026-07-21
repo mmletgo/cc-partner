@@ -234,7 +234,10 @@ mod tests {
             gui_bootstrap_file_name(AppFlavor::Release),
             GUI_BOOTSTRAP_FILE_RELEASE
         );
-        assert_eq!(gui_bootstrap_file_name(AppFlavor::Dev), GUI_BOOTSTRAP_FILE_DEV);
+        assert_eq!(
+            gui_bootstrap_file_name(AppFlavor::Dev),
+            GUI_BOOTSTRAP_FILE_DEV
+        );
         assert_ne!(GUI_BOOTSTRAP_FILE_RELEASE, GUI_BOOTSTRAP_FILE_DEV);
     }
 
@@ -332,6 +335,9 @@ mod tests {
         save_gui_bootstrap_to_path(&path, &GuiBootstrapState::default()).unwrap();
         let loaded = load_gui_bootstrap_from_path(&path).unwrap();
         assert_eq!(loaded, GuiBootstrapState::default());
-        assert!(!is_acknowledged_for_version(&loaded, LAN_DISCLOSURE_VERSION));
+        assert!(!is_acknowledged_for_version(
+            &loaded,
+            LAN_DISCLOSURE_VERSION
+        ));
     }
 }

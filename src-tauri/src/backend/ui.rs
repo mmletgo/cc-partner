@@ -343,9 +343,7 @@ fn emit_gui_relay_event(
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let producer_owner = enriched
-                .get("ownerInstanceId")
-                .and_then(|v| v.as_str());
+            let producer_owner = enriched.get("ownerInstanceId").and_then(|v| v.as_str());
             crate::workbench::terminal_authority::terminal_stream_authority(
                 session_id,
                 &owner_instance_id,
@@ -681,16 +679,10 @@ async fn list_sessions_for_gap_resync(
                     continue;
                 }
                 let remote_sessions: Vec<Value> = client
-                    .workbench_op(
-                        "sessions.list",
-                        json!({ "projectId": project_id }),
-                    )
+                    .workbench_op("sessions.list", json!({ "projectId": project_id }))
                     .await
                     .map_err(|e| {
-                        AppError::generic(format!(
-                            "gap_resync_remote_list_failed:{}",
-                            e.code()
-                        ))
+                        AppError::generic(format!("gap_resync_remote_list_failed:{}", e.code()))
                     })?;
                 for session in remote_sessions {
                     if let Some(id) = session
@@ -702,7 +694,7 @@ async fn list_sessions_for_gap_resync(
                     }
                 }
             }
-            return Ok(by_id.into_values().collect());
+            Ok(by_id.into_values().collect())
         }
         Err(error) if is_unknown_workbench_control_op_error(&error) => {
             tracing::warn!(
@@ -752,14 +744,8 @@ async fn list_sessions_for_gap_resync_legacy_active_devices(
     let active_devices: Vec<String> = client
         .workbench_op("bridges.active_devices", json!({}))
         .await
-        .map_err(|e| {
-            AppError::generic(format!(
-                "gap_resync_active_bridges_failed:{}",
-                e.code()
-            ))
-        })?;
-    let active_device_set: std::collections::HashSet<String> =
-        active_devices.into_iter().collect();
+        .map_err(|e| AppError::generic(format!("gap_resync_active_bridges_failed:{}", e.code())))?;
+    let active_device_set: std::collections::HashSet<String> = active_devices.into_iter().collect();
 
     if cancel.is_some_and(|c| c.is_cancelled()) {
         return Err(AppError::generic("cancelled"));
@@ -767,9 +753,7 @@ async fn list_sessions_for_gap_resync_legacy_active_devices(
     let projects: Vec<Value> = client
         .workbench_op("projects.list", json!({}))
         .await
-        .map_err(|e| {
-            AppError::generic(format!("gap_resync_projects_list_failed:{}", e.code()))
-        })?;
+        .map_err(|e| AppError::generic(format!("gap_resync_projects_list_failed:{}", e.code())))?;
 
     for project in projects {
         if cancel.is_some_and(|c| c.is_cancelled()) {
@@ -801,16 +785,10 @@ async fn list_sessions_for_gap_resync_legacy_active_devices(
             continue;
         }
         let remote_sessions: Vec<Value> = client
-            .workbench_op(
-                "sessions.list",
-                json!({ "projectId": project_id }),
-            )
+            .workbench_op("sessions.list", json!({ "projectId": project_id }))
             .await
             .map_err(|e| {
-                AppError::generic(format!(
-                    "gap_resync_remote_list_failed:{}",
-                    e.code()
-                ))
+                AppError::generic(format!("gap_resync_remote_list_failed:{}", e.code()))
             })?;
         for session in remote_sessions {
             if let Some(id) = session
@@ -872,9 +850,7 @@ async fn resync_terminals_via_control(
                 json!({ "sessionId": session_id }),
             )
             .await
-            .map_err(|e| {
-                AppError::generic(format!("gap_resync_replay_failed:{}", e.code()))
-            })?;
+            .map_err(|e| AppError::generic(format!("gap_resync_replay_failed:{}", e.code())))?;
         // R8 H1：for_state 已对 remote 合成 composite authority；此处 pass-through 已 stamp 的
         // 非空 ownerInstanceId，禁止无条件覆盖为纯 local bus（否则远端重启后冻结复现）。
         // 仅当 DTO 缺/空 owner 时注入 local bus owner（legacy/mock 兼容）。
@@ -1646,15 +1622,7 @@ mod tests {
 
         let client = BackendControlClient::for_test(port, "token", "owner-1").expect("client");
         let ui = RecordingBackendUi::default();
-        let outcome = resync_after_gap(
-            &client,
-            &ui,
-            "owner-1",
-            1,
-            9,
-            None,
-        )
-        .await;
+        let outcome = resync_after_gap(&client, &ui, "owner-1", 1, 9, None).await;
         assert!(
             outcome.is_none(),
             "active remote inventory failure must make Gap incomplete"
@@ -1853,16 +1821,9 @@ mod tests {
 
         let client = BackendControlClient::for_test(port, "token", "owner-1").expect("client");
         let ui = RecordingBackendUi::default();
-        let outcome = resync_after_gap(
-            &client,
-            &ui,
-            "owner-1",
-            1,
-            9,
-            None,
-        )
-        .await
-        .expect("remote+local inventory must complete");
+        let outcome = resync_after_gap(&client, &ui, "owner-1", 1, 9, None)
+            .await
+            .expect("remote+local inventory must complete");
         assert!(
             outcome.terminal_replay_count >= 2,
             "must replay local and remote running sessions, got {}",
@@ -1876,10 +1837,11 @@ mod tests {
         assert_eq!(resyncs.len(), 2);
         let mut local_seen = false;
         let mut remote_seen = false;
-        let expected_remote = crate::workbench::terminal_authority::compose_remote_terminal_authority(
-            "owner-1",
-            "owner-remote",
-        );
+        let expected_remote =
+            crate::workbench::terminal_authority::compose_remote_terminal_authority(
+                "owner-1",
+                "owner-remote",
+            );
         for (_, payload) in &resyncs {
             let sid = payload
                 .get("sessionId")
@@ -1902,7 +1864,10 @@ mod tests {
                 );
             }
         }
-        assert!(local_seen && remote_seen, "must cover local and remote resync");
+        assert!(
+            local_seen && remote_seen,
+            "must cover local and remote resync"
+        );
     }
 
     /// 验证 terminal-output live enrichment 对 remote session 合成 composite authority。

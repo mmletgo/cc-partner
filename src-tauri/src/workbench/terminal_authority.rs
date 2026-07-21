@@ -20,7 +20,10 @@ pub const TERMINAL_AUTHORITY_SEPARATOR: char = '\u{001f}';
 ///
 /// Code Logic（这个函数做什么）:
 ///     返回 `"{local_bus_owner}\u{001f}{remote_stream_owner}"`。
-pub fn compose_remote_terminal_authority(local_bus_owner: &str, remote_stream_owner: &str) -> String {
+pub fn compose_remote_terminal_authority(
+    local_bus_owner: &str,
+    remote_stream_owner: &str,
+) -> String {
     format!("{local_bus_owner}{TERMINAL_AUTHORITY_SEPARATOR}{remote_stream_owner}")
 }
 
@@ -90,10 +93,7 @@ mod tests {
             terminal_stream_authority("s1", "owner-1", Some("owner-remote")),
             "owner-1"
         );
-        assert_eq!(
-            terminal_stream_authority("s1", "owner-1", None),
-            "owner-1"
-        );
+        assert_eq!(terminal_stream_authority("s1", "owner-1", None), "owner-1");
         assert!(!is_remote_workbench_session_id("s1"));
         assert!(!is_remote_workbench_session_id("  s1"));
     }

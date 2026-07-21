@@ -317,7 +317,6 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
    */
   test('first-frame gap recovery never reconnects bare without after cursor', () => {
     let streamCursor: { ownerInstanceId: string; sequence: number } | null = null;
-    let recoveryPending = false;
     const gap = {
       ownerInstanceId: 'owner-first',
       oldestAvailable: 5,
@@ -326,7 +325,7 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
 
     // 模拟 first-frame Gap + resync 失败。
     streamCursor = resolveCursorAfterGap(streamCursor, gap, false);
-    recoveryPending = true;
+    const recoveryPending = true;
 
     expect(streamCursor).toEqual({ ownerInstanceId: 'owner-first', sequence: 0 });
     expect(canOpenWorkbenchEventsRequest(streamCursor, recoveryPending)).toBe(true);
@@ -354,11 +353,11 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
       ownerInstanceId: 'owner-old',
       sequence: 8,
     };
-    let recoveryPending = true;
     const gap = { ownerInstanceId: 'owner-new', oldestAvailable: 0, latest: 0 };
     const resyncSucceeded = true;
 
     streamCursor = resolveCursorAfterGap(streamCursor, gap, resyncSucceeded);
+    let recoveryPending: boolean;
     if (
       resyncSucceeded &&
       streamCursor &&

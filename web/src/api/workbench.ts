@@ -54,7 +54,6 @@ import type {
   WorkbenchRemoteDirectoryEntry,
   WorkbenchRemotePathInfo,
   WorkbenchRemoteRoot,
-  WorkbenchSessionReplay,
   WorkbenchSqlitePreview,
   WorkbenchWorktree,
 } from '@/lib/types';

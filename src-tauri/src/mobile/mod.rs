@@ -145,9 +145,7 @@ pub fn build_mobile_access_info(
             continue;
         }
         let url = format!("http://{}:{port}/mobile", format_url_host(&host));
-        let is_default = default_normalized
-            .as_ref()
-            .is_some_and(|d| d == &host);
+        let is_default = default_normalized.as_ref().is_some_and(|d| d == &host);
         entries.push(MobileAccessEntryDto {
             id: host.clone(),
             url,
@@ -401,12 +399,7 @@ mod tests {
     fn access_info_formats_non_loopback_ipv6_hosts() {
         let config = test_config();
 
-        let info = build_mobile_access_info(
-            &config,
-            14203,
-            vec![candidate("2001:db8::5")],
-            None,
-        );
+        let info = build_mobile_access_info(&config, 14203, vec![candidate("2001:db8::5")], None);
 
         assert_eq!(
             info.urls,

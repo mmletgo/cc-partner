@@ -22,7 +22,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, render, waitFor } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 
 const listMock = vi.fn();
 const replayMock = vi.fn();
@@ -106,10 +106,13 @@ function StoreProbe({
   };
 }) {
   const ctx = useWorkbenchTerminalBuffers();
-  storeRef.current = ctx.store;
-  if (historySyncRef) {
-    historySyncRef.current = ctx.getHistorySyncFailure;
-  }
+  // refs 只能在 effect 中写入，禁止在 render 阶段赋值（react-hooks/refs）。
+  useEffect(() => {
+    storeRef.current = ctx.store;
+    if (historySyncRef) {
+      historySyncRef.current = ctx.getHistorySyncFailure;
+    }
+  });
   return null;
 }
 

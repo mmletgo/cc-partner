@@ -68,10 +68,10 @@ export function MobileApp(): ReactElement {
    * Code Logic（这个函数做什么）:
    *   恒返回 null（移动端 HTTP replay 路径暂不跟踪永久 history sync failure）。
    */
-  const getHistorySyncFailure = useCallback(
-    (_sessionId: string) => null,
-    [],
-  );
+  const getHistorySyncFailure = useCallback((sessionId: string) => {
+    void sessionId;
+    return null;
+  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -80,7 +80,8 @@ export function MobileApp(): ReactElement {
    * Code Logic（这个函数做什么）:
    *   返回空 unsubscribe。
    */
-  const subscribeHistorySyncFailures = useCallback((_listener: () => void) => {
+  const subscribeHistorySyncFailures = useCallback((listener: () => void) => {
+    void listener;
     return () => undefined;
   }, []);
 
@@ -100,8 +101,9 @@ export function MobileApp(): ReactElement {
    * Code Logic（这个函数做什么）:
    *   空实现。
    */
-  const retryHistorySync = useCallback((_sessionId: string) => {
+  const retryHistorySync = useCallback((sessionId: string) => {
     // mobile 无桌面 IPC replay recovery。
+    void sessionId;
   }, []);
 
   /**
@@ -120,7 +122,8 @@ export function MobileApp(): ReactElement {
    * Code Logic（这个函数做什么）:
    *   返回空 unsubscribe。
    */
-  const subscribeStartupBaselineFailure = useCallback((_listener: () => void) => {
+  const subscribeStartupBaselineFailure = useCallback((listener: () => void) => {
+    void listener;
     return () => undefined;
   }, []);
 

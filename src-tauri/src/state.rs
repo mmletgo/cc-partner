@@ -115,8 +115,7 @@ pub struct AppState {
     #[allow(dead_code)]
     pub workbench_sessions: Arc<crate::workbench::sessions::WorkbenchSessionRegistry>,
     /// Workbench 远端事件有序总线（owner+sequence + ring catch-up + Gap；供 `/api/workbench/events`）
-    pub workbench_remote_events:
-        Arc<crate::workbench::remote_events::WorkbenchRemoteEventBus>,
+    pub workbench_remote_events: Arc<crate::workbench::remote_events::WorkbenchRemoteEventBus>,
     /// Workbench 远端事件桥接登记表（本机订阅其他设备 `/api/workbench/events`，按设备去重）
     pub workbench_remote_event_bridges:
         Arc<crate::workbench::remote_events::RemoteEventBridgeRegistry>,

@@ -670,14 +670,11 @@ pub async fn safe_attach_workbench_session(
     // claim 防止并发重复 attach；未拿到 claim 时禁止 fallthrough（否则会无占位 attach，
     // 并可能用 armed RestoreClaimGuard 误释放他人 claim）。
     // R26 H1：Claimed 携带可撤销 generation。
-    let mut claim_generation: Option<u64> = match ctx
-        .state
-        .workbench_sessions
-        .try_claim_restore(session_id)
-    {
-        RestoreClaimOutcome::Claimed { generation } => Some(generation),
-        _ => None,
-    };
+    let mut claim_generation: Option<u64> =
+        match ctx.state.workbench_sessions.try_claim_restore(session_id) {
+            RestoreClaimOutcome::Claimed { generation } => Some(generation),
+            _ => None,
+        };
     if claim_generation.is_none() {
         // 另一路正在 attach 或已完成：优先 reuse
         if ctx.registry_is_live(session_id) {
@@ -1365,10 +1362,7 @@ mod tests {
     ///     claim + provisional fake insert → preflight 不为 Reuse。
     #[tokio::test]
     async fn preflight_does_not_reuse_claim_held_provisional() {
-        let fixture = RestoreFixture::base()
-            .await
-            .persisted_tmux("s1")
-            .await;
+        let fixture = RestoreFixture::base().await.persisted_tmux("s1").await;
         assert!(fixture
             .ctx
             .state
@@ -1385,9 +1379,9 @@ mod tests {
 
         let plan = fixture.preflight().await.unwrap();
         assert!(
-            plan.actions.iter().all(|a| {
-                a.target != "session" || a.outcome != WorkspaceRestoreOutcome::Reuse
-            }),
+            plan.actions
+                .iter()
+                .all(|a| { a.target != "session" || a.outcome != WorkspaceRestoreOutcome::Reuse }),
             "provisional claim-held session must not be Reuse"
         );
         fixture
@@ -1404,10 +1398,7 @@ mod tests {
     ///     claim + provisional → mark Ready + finish Ready → preflight Reuse。
     #[tokio::test]
     async fn preflight_reuses_after_provisional_becomes_ready() {
-        let fixture = RestoreFixture::base()
-            .await
-            .persisted_tmux("s1")
-            .await;
+        let fixture = RestoreFixture::base().await.persisted_tmux("s1").await;
         assert!(fixture
             .ctx
             .state

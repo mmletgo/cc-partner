@@ -435,7 +435,10 @@ mod tests {
         let repo = setup_repo().await;
         let first = row("s-inject-1", "p1", "2026-07-21T00:00:00Z");
         repo.inject_fail_next_upserts(1);
-        let err = repo.upsert(&first).await.expect_err("injected upsert must fail");
+        let err = repo
+            .upsert(&first)
+            .await
+            .expect_err("injected upsert must fail");
         assert_eq!(err.code(), "workbench_session_upsert_injected_failure");
         assert!(repo.list(Some("p1")).await.unwrap().is_empty());
 

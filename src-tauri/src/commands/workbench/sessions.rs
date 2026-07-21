@@ -279,14 +279,11 @@ pub(crate) async fn create_workbench_session_for_state(
                 "project_closing_barrier_active".to_string(),
             ));
         }
-        let session = map_remote_session_dtos(
-            &context.device_id,
-            &context.local_project_id,
-            vec![item],
-        )
-        .into_iter()
-        .next()
-        .ok_or_else(|| AppError::generic("远端 session 创建结果为空"))?;
+        let session =
+            map_remote_session_dtos(&context.device_id, &context.local_project_id, vec![item])
+                .into_iter()
+                .next()
+                .ok_or_else(|| AppError::generic("远端 session 创建结果为空"))?;
         // R35 M2 / R41 M2：session-keyed watch + project_running_sessions 归属，
         // 使 create-only（未 list）会话在 project remove 时也能被 clear 释放。
         let _ = state

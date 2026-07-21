@@ -217,7 +217,8 @@ pub enum WorkbenchRemoteRelayMessage {
     Event {
         owner_instance_id: String,
         sequence: u64,
-        event: WorkbenchRemoteEvent,
+        /// 业务 payload 体积远大于 Gap 字段；Box 避免 large_enum_variant。
+        event: Box<WorkbenchRemoteEvent>,
     },
     /// owner 变化、after 早于 ring 或 live lag 后的显式缺口。
     Gap {
@@ -319,7 +320,10 @@ impl WorkbenchRemoteEventBus {
     /// Code Logic（这个函数做什么）:
     ///     同一把 inner 锁内分配 sequence、写入 ring、broadcast send，保证交付顺序与 sequence 单调。
     pub fn publish(&self, event: WorkbenchRemoteEvent) -> BackendRuntimeCursor {
-        let mut inner = self.inner.lock().expect("workbench remote event bus 锁中毒");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("workbench remote event bus 锁中毒");
         let sequence = inner.next_sequence;
         inner.next_sequence = inner.next_sequence.saturating_add(1);
         if inner.ring.len() >= inner.ring_capacity {
@@ -332,7 +336,7 @@ impl WorkbenchRemoteEventBus {
         let message = WorkbenchRemoteRelayMessage::Event {
             owner_instance_id: self.owner_instance_id.clone(),
             sequence,
-            event,
+            event: Box::new(event),
         };
         let _ = self.tx.send(message);
         BackendRuntimeCursor {
@@ -349,7 +353,10 @@ impl WorkbenchRemoteEventBus {
     /// Code Logic（这个函数做什么）:
     ///     `next_sequence - 1`（未发布时 0）。
     pub fn latest_sequence(&self) -> u64 {
-        let inner = self.inner.lock().expect("workbench remote event bus 锁中毒");
+        let inner = self
+            .inner
+            .lock()
+            .expect("workbench remote event bus 锁中毒");
         inner.next_sequence.saturating_sub(1)
     }
 
@@ -361,7 +368,10 @@ impl WorkbenchRemoteEventBus {
     /// Code Logic（这个函数做什么）:
     ///     返回 ring front 的 sequence，空则 0。
     pub fn oldest_available_sequence(&self) -> u64 {
-        let inner = self.inner.lock().expect("workbench remote event bus 锁中毒");
+        let inner = self
+            .inner
+            .lock()
+            .expect("workbench remote event bus 锁中毒");
         inner.ring.front().map(|e| e.sequence).unwrap_or(0)
     }
 
@@ -381,7 +391,10 @@ impl WorkbenchRemoteEventBus {
     pub fn open_relay(&self, after: Option<&BackendRuntimeCursor>) -> WorkbenchRemoteEventRelay {
         let live_rx = self.tx.subscribe();
         let (pending, max_replayed) = {
-            let inner = self.inner.lock().expect("workbench remote event bus 锁中毒");
+            let inner = self
+                .inner
+                .lock()
+                .expect("workbench remote event bus 锁中毒");
             let latest = inner.next_sequence.saturating_sub(1);
             let oldest = inner.ring.front().map(|e| e.sequence).unwrap_or(0);
             let mut pending = Vec::new();
@@ -420,7 +433,7 @@ impl WorkbenchRemoteEventBus {
                         pending.push(WorkbenchRemoteRelayMessage::Event {
                             owner_instance_id: self.owner_instance_id.clone(),
                             sequence: entry.sequence,
-                            event: entry.event.clone(),
+                            event: Box::new(entry.event.clone()),
                         });
                         max_replayed = entry.sequence;
                     }
@@ -545,10 +558,7 @@ pub fn encode_workbench_remote_relay_ndjson(
         } => {
             let mut value = serde_json::to_value(event)?;
             if let Value::Object(map) = &mut value {
-                map.insert(
-                    "ownerInstanceId".to_string(),
-                    json!(owner_instance_id),
-                );
+                map.insert("ownerInstanceId".to_string(), json!(owner_instance_id));
                 map.insert("sequence".to_string(), json!(sequence));
             }
             serde_json::to_string(&value)
@@ -576,9 +586,7 @@ pub fn encode_workbench_remote_relay_ndjson(
 /// Code Logic（这个函数做什么）:
 ///     先解析为 Value；读 type；业务 type 反序列化为 WorkbenchRemoteEvent 并读 top-level
 ///     ownerInstanceId/sequence（缺省 ""/0）；gap 读 payload 游标字段；heartbeat/未知 → Ok(None)。
-pub fn decode_remote_event(
-    line: &str,
-) -> Result<Option<WorkbenchRemoteStreamMessage>, AppError> {
+pub fn decode_remote_event(line: &str) -> Result<Option<WorkbenchRemoteStreamMessage>, AppError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|e| AppError::validation(format!("invalid remote event json: {e}")))?;
     let event_type = value
@@ -586,10 +594,7 @@ pub fn decode_remote_event(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::validation("remote event missing type".to_string()))?;
     match event_type {
-        "terminalOutput"
-        | "terminalStatus"
-        | "mergeProgress"
-        | "agentRuntime"
+        "terminalOutput" | "terminalStatus" | "mergeProgress" | "agentRuntime"
         | "terminalResync" => {
             let event: WorkbenchRemoteEvent = serde_json::from_value(value.clone())
                 .map_err(|e| AppError::validation(format!("invalid remote event payload: {e}")))?;
@@ -598,14 +603,11 @@ pub fn decode_remote_event(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let sequence = value
-                .get("sequence")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let sequence = value.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
             Ok(Some(WorkbenchRemoteStreamMessage::Event {
                 owner_instance_id,
                 sequence,
-                event,
+                event: Box::new(event),
             }))
         }
         "gap" => {
@@ -619,10 +621,7 @@ pub fn decode_remote_event(
                 .get("oldestAvailable")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let latest = payload
-                .get("latest")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let latest = payload.get("latest").and_then(|v| v.as_u64()).unwrap_or(0);
             Ok(Some(WorkbenchRemoteStreamMessage::Gap {
                 owner_instance_id,
                 oldest_available,
@@ -881,10 +880,7 @@ impl BridgeRuntimeState {
     ///
     /// Code Logic（这个函数做什么）:
     ///     持 project_watch 锁返回 `(epochs[project] 或 0, running_sessions[project] 克隆或空)`。
-    fn project_watch_epoch_and_running(
-        &self,
-        project_local_id: &str,
-    ) -> (u64, HashSet<String>) {
+    fn project_watch_epoch_and_running(&self, project_local_id: &str) -> (u64, HashSet<String>) {
         let watch = self
             .project_watch
             .lock()
@@ -990,7 +986,11 @@ impl BridgeRuntimeState {
         project_local_id: &str,
         running_session_ids: &[String],
     ) -> Option<usize> {
-        self.reconcile_project_running_sessions_if_epoch(project_local_id, running_session_ids, None)
+        self.reconcile_project_running_sessions_if_epoch(
+            project_local_id,
+            running_session_ids,
+            None,
+        )
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1049,10 +1049,7 @@ impl BridgeRuntimeState {
                 .get(project_local_id)
                 .cloned()
                 .unwrap_or_default();
-            let to_release: Vec<String> = previous
-                .difference(&running_set)
-                .cloned()
-                .collect();
+            let to_release: Vec<String> = previous.difference(&running_set).cloned().collect();
             // 原子 full replace + bump，使并发 note 无法插在 previous 与 commit 之间。
             watch
                 .running_sessions
@@ -1321,8 +1318,7 @@ impl RemoteEventBridgeRegistry {
             let project_ids = Arc::clone(&existing.project_ids);
             let transferred_cursor = existing.runtime.load_after_cursor();
             let transferred_watch_keys = existing.runtime.clone_watch_keys();
-            let transferred_project_running =
-                existing.runtime.clone_project_running_sessions();
+            let transferred_project_running = existing.runtime.clone_project_running_sessions();
             *existing = spawn_bridge_task(
                 device_id,
                 base_url,
@@ -1447,7 +1443,8 @@ impl RemoteEventBridgeRegistry {
         let Some(task) = tasks.get(device_id) else {
             return (0, HashSet::new());
         };
-        task.runtime.project_watch_epoch_and_running(project_local_id)
+        task.runtime
+            .project_watch_epoch_and_running(project_local_id)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1558,9 +1555,7 @@ impl RemoteEventBridgeRegistry {
         expected_epoch: u64,
     ) -> Option<usize> {
         let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
-        let Some(task) = tasks.get(device_id) else {
-            return None;
-        };
+        let task = tasks.get(device_id)?;
         task.runtime.reconcile_project_running_sessions_if_epoch(
             project_local_id,
             running_session_ids,
@@ -1577,11 +1572,7 @@ impl RemoteEventBridgeRegistry {
     /// Code Logic（这个函数做什么）:
     ///     持锁找到 device task 后调 runtime.clear_project_running_sessions；
     ///     无 task 时 no-op 返回 false；有 task 返回 true（无论 released 数量）。
-    pub fn clear_project_running_sessions(
-        &self,
-        device_id: &str,
-        project_local_id: &str,
-    ) -> bool {
+    pub fn clear_project_running_sessions(&self, device_id: &str, project_local_id: &str) -> bool {
         let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
         let Some(task) = tasks.get(device_id) else {
             return false;
@@ -2043,7 +2034,7 @@ async fn read_remote_event_stream(
                             sequence,
                             event,
                         } => {
-                            emit_mapped_remote_event(state, event);
+                            emit_mapped_remote_event(state, *event);
                             if !owner_instance_id.is_empty() && sequence > 0 {
                                 *after_cursor = Some(BackendRuntimeCursor {
                                     owner_instance_id,
@@ -2174,7 +2165,11 @@ fn process_event_chunk_to_messages(
                     messages.push(WorkbenchRemoteStreamMessage::Event {
                         owner_instance_id,
                         sequence,
-                        event: map_remote_event_for_device(device_id, project_ids, event),
+                        event: Box::new(map_remote_event_for_device(
+                            device_id,
+                            project_ids,
+                            *event,
+                        )),
                     });
                 }
                 Ok(Some(gap @ WorkbenchRemoteStreamMessage::Gap { .. })) => {
@@ -2208,7 +2203,7 @@ fn process_event_chunk_to_events(
     Ok(messages
         .into_iter()
         .filter_map(|msg| match msg {
-            WorkbenchRemoteStreamMessage::Event { event, .. } => Some(event),
+            WorkbenchRemoteStreamMessage::Event { event, .. } => Some(*event),
             WorkbenchRemoteStreamMessage::Gap { .. } => None,
         })
         .collect())
@@ -2391,7 +2386,6 @@ fn map_remote_event_for_device(
     }
 }
 
-
 /// Business Logic（为什么需要这个函数）:
 ///     Gap 后 bridge 必须在权威 resync 成功时才推进 after_cursor，失败时保留 recovery，
 ///     禁止带着旧 after 永久 Gap 循环（R28 H1）。
@@ -2537,14 +2531,11 @@ async fn resync_remote_bridge_after_gap(
             // R37 H2：Mobile 订阅本机 bus，需 TerminalResync；桌面仍走 Tauri resync emit。
             publish_workbench_remote_event_from_state(
                 state,
-                WorkbenchRemoteEvent::TerminalResync(
-                    WorkbenchTerminalResyncPayload::from_replay(&replay),
-                ),
+                WorkbenchRemoteEvent::TerminalResync(WorkbenchTerminalResyncPayload::from_replay(
+                    &replay,
+                )),
             );
-            state.emit_event(
-                crate::backend::ui::WORKBENCH_TERMINAL_RESYNC_EVENT,
-                replay,
-            );
+            state.emit_event(crate::backend::ui::WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
         }
         // R44：仅 epoch 匹配 full commit 后才 previous−listed → disconnected。
         let reconcile_committed = if !local_shortcut_id.trim().is_empty() {
@@ -2561,21 +2552,16 @@ async fn resync_remote_bridge_after_gap(
             // 无 local shortcut 映射时无 project watch 状态；不投影 previous disconnected。
             false
         };
-        for missing_id in gap_resync_missing_ids_for_disconnect(
-            &previous_ids,
-            &listed_ids,
-            reconcile_committed,
-        ) {
+        for missing_id in
+            gap_resync_missing_ids_for_disconnect(&previous_ids, &listed_ids, reconcile_committed)
+        {
             let status_payload = WorkbenchTerminalStatusPayload {
                 session_id: missing_id,
                 status: "disconnected".to_string(),
                 exit_code: None,
                 ts: now_ts,
             };
-            emit_mapped_remote_event(
-                state,
-                WorkbenchRemoteEvent::TerminalStatus(status_payload),
-            );
+            emit_mapped_remote_event(state, WorkbenchRemoteEvent::TerminalStatus(status_payload));
         }
     }
     Ok(())
@@ -2590,9 +2576,7 @@ async fn resync_remote_bridge_after_gap(
 fn event_stream_url(base_url: &str, after: Option<&BackendRuntimeCursor>) -> String {
     let base = format!("{}/api/workbench/events", base_url.trim_end_matches('/'));
     match after {
-        Some(cursor)
-            if !cursor.owner_instance_id.is_empty() =>
-        {
+        Some(cursor) if !cursor.owner_instance_id.is_empty() => {
             format!(
                 "{base}?afterOwnerInstanceId={}&afterSequence={}",
                 cursor.owner_instance_id, cursor.sequence
@@ -2876,7 +2860,7 @@ mod tests {
         match &second[0] {
             WorkbenchRemoteStreamMessage::Event { event, .. } => {
                 assert_eq!(
-                    event,
+                    event.as_ref(),
                     &WorkbenchRemoteEvent::TerminalOutput(WorkbenchTerminalOutputPayload {
                         session_id: "remote:device-a:inner-session".to_string(),
                         chunk: "中文🚀输出".to_string(),
@@ -3115,7 +3099,7 @@ mod tests {
         let msg = WorkbenchRemoteRelayMessage::Event {
             owner_instance_id: "owner-a".into(),
             sequence: 4,
-            event: sample_status_event(4),
+            event: Box::new(sample_status_event(4)),
         };
         let line = encode_workbench_remote_relay_ndjson(&msg).unwrap();
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -3466,10 +3450,7 @@ mod tests {
         );
         // 第二次 list：仅 s1 still running → s2 消失。
         assert_eq!(
-            runtime.reconcile_project_running_sessions(
-                "project-a",
-                &["remote:dev:s1".into()],
-            ),
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:s1".into()],),
             Some(1)
         );
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
@@ -3691,10 +3672,7 @@ mod tests {
         assert!(!keys.contains("remote:dev:a1"));
         assert!(keys.contains("remote:dev:b1"));
         let map = runtime.clone_project_running_sessions();
-        assert!(map
-            .get("project-a")
-            .expect("project-a")
-            .is_empty());
+        assert!(map.get("project-a").expect("project-a").is_empty());
         assert!(map
             .get("project-b")
             .expect("project-b")
@@ -3840,11 +3818,8 @@ mod tests {
 
         // stale 空 list：union-only，None，不得 release new/old。
         assert_eq!(
-            runtime.reconcile_project_running_sessions_if_epoch(
-                "project-a",
-                &[],
-                Some(list_epoch),
-            ),
+            runtime
+                .reconcile_project_running_sessions_if_epoch("project-a", &[], Some(list_epoch),),
             None
         );
         let keys = runtime.clone_watch_keys();
@@ -3863,11 +3838,8 @@ mod tests {
 
         // matching epoch 空 list：full commit，release 仍在 map 的 sessions。
         let epoch_now = runtime.project_watch_epoch("project-a");
-        let released = runtime.reconcile_project_running_sessions_if_epoch(
-            "project-a",
-            &[],
-            Some(epoch_now),
-        );
+        let released =
+            runtime.reconcile_project_running_sessions_if_epoch("project-a", &[], Some(epoch_now));
         assert_eq!(released, Some(2));
         let keys = runtime.clone_watch_keys();
         assert!(!keys.contains("remote:dev:old"));
@@ -3917,10 +3889,8 @@ mod tests {
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
 
         // Gap list 仅见 B（尚未有 B 的 watch lease）。
-        let released = runtime.reconcile_project_running_sessions(
-            "project-a",
-            &["remote:dev:b".into()],
-        );
+        let released =
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:b".into()]);
         assert_eq!(released, Some(1), "A must be released as previous−running");
         let keys = runtime.clone_watch_keys();
         assert!(
@@ -3979,8 +3949,14 @@ mod tests {
             None
         );
         let keys = runtime.clone_watch_keys();
-        assert!(keys.contains("remote:dev:a"), "stale must not release previous A");
-        assert!(keys.contains("remote:dev:c"), "stale must not release noted C");
+        assert!(
+            keys.contains("remote:dev:a"),
+            "stale must not release previous A"
+        );
+        assert!(
+            keys.contains("remote:dev:c"),
+            "stale must not release noted C"
+        );
         assert!(
             keys.contains("remote:dev:b"),
             "stale path must still retain listed running B (R45)"
@@ -4029,10 +4005,7 @@ mod tests {
         assert!(restarted.retain_watch_key("remote:dev:s1"));
         assert!(restarted.retain_watch_key("remote:dev:s2"));
         assert_eq!(
-            restarted.reconcile_project_running_sessions(
-                "project-a",
-                &["remote:dev:s1".into()],
-            ),
+            restarted.reconcile_project_running_sessions("project-a", &["remote:dev:s1".into()],),
             Some(1)
         );
         assert_eq!(restarted.subscribers.load(Ordering::SeqCst), 1);
@@ -4123,12 +4096,15 @@ mod tests {
         let mut relay = bus.open_relay(None);
         match relay.try_recv() {
             Some(WorkbenchRemoteRelayMessage::Event {
-                sequence,
-                event: WorkbenchRemoteEvent::TerminalStatus(payload),
-                ..
+                sequence, event, ..
             }) => {
                 assert_eq!(sequence, 1);
-                assert_eq!(payload.session_id, "remote:dev-1:inner-s1");
+                match *event {
+                    WorkbenchRemoteEvent::TerminalStatus(payload) => {
+                        assert_eq!(payload.session_id, "remote:dev-1:inner-s1");
+                    }
+                    other => panic!("expected TerminalStatus payload, got {other:?}"),
+                }
             }
             other => panic!("expected mapped terminal status on local bus, got {other:?}"),
         }
@@ -4194,12 +4170,10 @@ mod tests {
         );
         match &messages[0] {
             WorkbenchRemoteStreamMessage::Event {
-                sequence,
-                event,
-                ..
+                sequence, event, ..
             } => {
                 assert_eq!(*sequence, 3);
-                match event {
+                match event.as_ref() {
                     WorkbenchRemoteEvent::TerminalOutput(payload) => {
                         assert_eq!(payload.session_id, "remote:device-a:inner-session");
                         assert_eq!(payload.chunk, "ok");
@@ -4208,7 +4182,7 @@ mod tests {
                 }
                 // R38 H1：process 产出的 mapped event 已是 remote:；若 emit 再检查会误杀。
                 assert!(
-                    inbound_event_has_remote_entity_id(event),
+                    inbound_event_has_remote_entity_id(event.as_ref()),
                     "mapped live event must report remote entity id; emit must not re-drop it (R38 H1)"
                 );
             }
@@ -4251,7 +4225,7 @@ mod tests {
         let line = encode_workbench_remote_relay_ndjson(&WorkbenchRemoteRelayMessage::Event {
             owner_instance_id: "local-owner".into(),
             sequence: 12,
-            event: event.clone(),
+            event: Box::new(event.clone()),
         })
         .expect("encode");
         assert!(line.contains("\"type\":\"terminalResync\""));
@@ -4262,15 +4236,20 @@ mod tests {
             WorkbenchRemoteStreamMessage::Event {
                 owner_instance_id,
                 sequence,
-                event: WorkbenchRemoteEvent::TerminalResync(payload),
+                event,
             } => {
                 assert_eq!(owner_instance_id, "local-owner");
                 assert_eq!(sequence, 12);
-                assert_eq!(payload.session_id, "remote:dev:s1");
-                assert_eq!(payload.buffer, "screen");
-                assert!(payload.truncated);
-                assert_eq!(payload.last_seq, 88);
-                assert_eq!(payload.owner_instance_id.as_deref(), Some("comp-owner"));
+                match *event {
+                    WorkbenchRemoteEvent::TerminalResync(payload) => {
+                        assert_eq!(payload.session_id, "remote:dev:s1");
+                        assert_eq!(payload.buffer, "screen");
+                        assert!(payload.truncated);
+                        assert_eq!(payload.last_seq, 88);
+                        assert_eq!(payload.owner_instance_id.as_deref(), Some("comp-owner"));
+                    }
+                    other => panic!("expected TerminalResync payload, got {other:?}"),
+                }
             }
             other => panic!("expected TerminalResync event, got {other:?}"),
         }
@@ -4300,12 +4279,9 @@ mod tests {
         // 模拟 list reconcile / status exited：释放非 running。
         assert!(runtime.release_watch_key("remote:dev:s-exited"));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
-        assert!(runtime
-            .clone_watch_keys()
-            .contains("remote:dev:s-running"));
+        assert!(runtime.clone_watch_keys().contains("remote:dev:s-running"));
         assert!(!runtime.clone_watch_keys().contains("remote:dev:s-exited"));
         assert!(runtime.release_watch_key("remote:dev:s-running"));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
     }
-
 }

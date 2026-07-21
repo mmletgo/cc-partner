@@ -6,6 +6,7 @@
 //! Code Logic（这个模块做什么）:
 //!     将 P2P local-only 网关、远端目录 helper 和 mobile remote-aware helper 包装为 axum handler。
 
+use crate::backend::event_bus::BackendRuntimeCursor;
 use crate::commands::prompt_optimizer::{
     local_stream_optimize_prompt_to_workbench_session,
     stream_optimize_prompt_to_workbench_session_for_state,
@@ -59,6 +60,7 @@ use crate::workbench::models::{
     WorkbenchSessionDto, WorkbenchSqlitePreview, WorkbenchWorktreeDto,
 };
 use crate::workbench::remote_directory;
+use crate::workbench::remote_events::encode_workbench_remote_relay_ndjson;
 use crate::workbench::remote_protocol::{
     RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
     RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
@@ -72,8 +74,6 @@ use crate::workbench::remote_protocol::{
 use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
-use crate::backend::event_bus::BackendRuntimeCursor;
-use crate::workbench::remote_events::encode_workbench_remote_relay_ndjson;
 use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, Query, State};
 use axum::http::header;

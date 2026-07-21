@@ -72,7 +72,9 @@ pub async fn acknowledge_lan_disclosure_and_start_backend(
 ///     2) 调用 `stop_backend_process`（幂等）；
 ///     3) 返回 `{ok, lanDisclosureReset, backendStopped}`。不碰 data.db / 前端 localStorage。
 #[tauri::command]
-pub async fn reset_onboarding_gates(app: AppHandle) -> Result<ResetOnboardingGatesResult, AppError> {
+pub async fn reset_onboarding_gates(
+    app: AppHandle,
+) -> Result<ResetOnboardingGatesResult, AppError> {
     gui_bootstrap::reset_lan_disclosure()?;
     let status = crate::commands::backend::stop_backend_process(app).await?;
     let backend_stopped = matches!(status.kind, BackendStatusKind::Stopped);

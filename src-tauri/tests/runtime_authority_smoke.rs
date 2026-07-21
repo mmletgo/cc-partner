@@ -677,15 +677,19 @@ async fn event_relay_disconnect_reconnect_replays_from_after_sequence() {
 ///     慢消费者或游标早于 ring 时，GUI 必须先 terminal/runtime 恢复再接 live。
 ///
 /// Code Logic（这个测试做什么）:
-///     小 ring 挤掉旧事件 → open_relay after 旧 cursor → Gap；GuiEventRelayState 记 resync。
+///     小 ring 挤掉旧事件 → open_relay after_seq=0（true gap：oldest>after+1）→ Gap；
+///     GuiEventRelayState 记 resync。R28：连续边界 oldest==after+1 只回放 Event 不发 Gap。
 #[tokio::test]
 async fn event_relay_broadcast_lag_emits_gap_and_triggers_resync() {
     let bus = RuntimeEventBus::with_capacity("owner-lag", 2, 2);
-    let stale = bus.publish("e", json!(1));
+    let _ = bus.publish("e", json!(1));
     let _ = bus.publish("e", json!(2));
-    let _ = bus.publish("e", json!(3)); // ring: 2,3
-
-    let mut relay = bus.open_relay(Some(&stale));
+    let _ = bus.publish("e", json!(3)); // ring oldest=2 latest=3
+    let after_zero = BackendRuntimeCursor {
+        owner_instance_id: "owner-lag".into(),
+        sequence: 0,
+    };
+    let mut relay = bus.open_relay(Some(&after_zero));
     let msg = relay.try_recv().expect("gap");
     assert!(
         matches!(

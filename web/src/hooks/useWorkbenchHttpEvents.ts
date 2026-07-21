@@ -1084,7 +1084,7 @@ export function useWorkbenchHttpEvents({
         gapHandled = true;
         livePaused = true;
         const preGapCursor = streamCursor;
-        let resyncSucceeded = false;
+        let resyncSucceeded: boolean;
         try {
           await resyncWorkbenchSessionsAfterGap(store, sessionsRef.current, {
             onTerminalStatus: onTerminalStatusRef.current,

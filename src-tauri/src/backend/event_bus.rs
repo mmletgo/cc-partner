@@ -708,7 +708,10 @@ mod tests {
         while let Some(msg) = relay.try_recv() {
             match msg {
                 RuntimeRelayMessage::Event { sequence, .. } => {
-                    assert!(sequence > last, "live delivery reordered: {sequence} after {last}");
+                    assert!(
+                        sequence > last,
+                        "live delivery reordered: {sequence} after {last}"
+                    );
                     last = sequence;
                 }
                 RuntimeRelayMessage::Gap { .. } => {
@@ -1133,6 +1136,4 @@ mod tests {
         }
         assert!(relay.try_recv().is_none());
     }
-
-
 }

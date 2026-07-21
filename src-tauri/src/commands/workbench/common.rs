@@ -701,9 +701,8 @@ pub(crate) async fn restore_persisted_sessions(
                             disconnected.status = "disconnected".to_string();
                             disconnected.exited_at = Some(now_iso());
                             disconnected.updated_at = now_iso();
-                            if let Some(mut lease) = state
-                                .workbench_sessions
-                                .try_acquire_restore_persist_lease(
+                            if let Some(mut lease) =
+                                state.workbench_sessions.try_acquire_restore_persist_lease(
                                     &disconnected.id,
                                     claim_generation,
                                 )
@@ -1506,8 +1505,8 @@ mod restore_holder_fail_closed_tests {
     use crate::storage::{
         ClaudeHistoryRepo, ClaudeMdRepo, DatabaseMaintenanceGate, PromptRepo, ScratchpadRepo,
         SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
-        WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorktreeRepo,
-        WorkbenchWorkspaceLayoutRepo,
+        WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo,
+        WorkbenchWorktreeRepo,
     };
     use crate::transfer::registry::TransferRegistry;
     use crate::updater::UpdateRuntime;
@@ -1748,20 +1747,20 @@ mod restore_holder_fail_closed_tests {
         assert_eq!(err.code(), "workbench_session_upsert_injected_failure");
         assert_eq!(err.ipc_category_code(), "internal");
         assert!(!state.workbench_sessions.contains("s-holder-fail"));
-        assert!(!state.workbench_sessions.is_restore_claim_held("s-holder-fail"));
+        assert!(!state
+            .workbench_sessions
+            .is_restore_claim_held("s-holder-fail"));
         // SQLite 仍可能是 running（upsert 未成功）；不得被当作成功 list DTO。
-        let rows = state
-            .workbench_session_repo
-            .list(Some("p1"))
-            .await
-            .unwrap();
+        let rows = state.workbench_session_repo.list(Some("p1")).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, "running");
         // 模拟若 holder 吞掉错误继续 merge：会返回 running DTO；生产路径禁止。
         let merged = merged_session_dtos(&state, Some("p1")).await.unwrap();
         // claim 已释放，merge 会看到 stale running 行——这正是 holder 必须 return Err 的原因。
         assert!(
-            merged.iter().any(|s| s.id == "s-holder-fail" && s.status == "running"),
+            merged
+                .iter()
+                .any(|s| s.id == "s-holder-fail" && s.status == "running"),
             "stale running row still in sqlite; success path would leak non-replayable DTO"
         );
         assert!(
@@ -1789,14 +1788,16 @@ mod restore_holder_fail_closed_tests {
 
         let holder_state = state.clone();
         let waiter_state = state.clone();
-        let holder = tokio::spawn(async move {
-            restore_persisted_sessions(&holder_state, Some("p1")).await
-        });
+        let holder =
+            tokio::spawn(
+                async move { restore_persisted_sessions(&holder_state, Some("p1")).await },
+            );
         // 给 holder 一点时间 claim，确保 waiter 更可能走 RestoreInProgress。
         tokio::time::sleep(Duration::from_millis(5)).await;
-        let waiter = tokio::spawn(async move {
-            restore_persisted_sessions(&waiter_state, Some("p1")).await
-        });
+        let waiter =
+            tokio::spawn(
+                async move { restore_persisted_sessions(&waiter_state, Some("p1")).await },
+            );
 
         let holder_res = holder.await.expect("holder join");
         let waiter_res = waiter.await.expect("waiter join");
@@ -1844,11 +1845,7 @@ mod restore_holder_fail_closed_tests {
 
         // 若最终 SQLite 仍 running，说明 upsert 失败且无人写 disconnected；
         // 生产路径禁止把该状态当成功 list（holder/waiter 已 Err）。
-        let rows = state
-            .workbench_session_repo
-            .list(Some("p1"))
-            .await
-            .unwrap();
+        let rows = state.workbench_session_repo.list(Some("p1")).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert!(
             rows[0].status == "running" || rows[0].status == "disconnected",
@@ -1873,11 +1870,7 @@ mod restore_holder_fail_closed_tests {
         seed_raw_pty_running(&state, "s-race-deleted").await;
 
         // 模拟 restore_persisted_sessions 的 list 快照。
-        let snapshot = state
-            .workbench_session_repo
-            .list(Some("p1"))
-            .await
-            .unwrap();
+        let snapshot = state.workbench_session_repo.list(Some("p1")).await.unwrap();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].id, "s-race-deleted");
 
@@ -1940,11 +1933,7 @@ mod restore_holder_fail_closed_tests {
         assert!(!state
             .workbench_sessions
             .is_restore_claim_held("s-race-deleted"));
-        let after = state
-            .workbench_session_repo
-            .list(Some("p1"))
-            .await
-            .unwrap();
+        let after = state.workbench_session_repo.list(Some("p1")).await.unwrap();
         assert!(
             after.is_empty(),
             "deleted session must not be resurrected by stale restore snapshot"

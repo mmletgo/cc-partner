@@ -630,9 +630,7 @@ async fn safe_attach_remote_session(
     client
         .safe_attach_session(
             &context.base_url,
-            &RemoteSafeAttachReq {
-                session_id: inner,
-            },
+            &RemoteSafeAttachReq { session_id: inner },
         )
         .await
         .map(|_| ())

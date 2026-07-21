@@ -651,7 +651,7 @@ describe('session cutover epoch / committed baseline', () => {
   });
 
   test('beginHeldOverflowReplay records max high water across successive overflows', () => {
-    let state = createEmptySessionCutoverState();
+    const state = createEmptySessionCutoverState();
     const first = beginHeldOverflowReplay(state, 10);
     expect(first.state.overflowHighWaterSeq).toBe(10);
 
@@ -749,7 +749,7 @@ describe('session cutover epoch / committed baseline', () => {
     const empty = createEmptySessionCutoverState();
     expect(shouldClearTerminalNeedsReplay(empty, 0)).toBe(true);
 
-    let state = beginHeldOverflowReplay(empty, 100).state;
+    const state = beginHeldOverflowReplay(empty, 100).state;
     expect(shouldClearTerminalNeedsReplay(state, 50)).toBe(false);
     expect(shouldClearTerminalNeedsReplay(state, 100)).toBe(true);
     expect(shouldClearTerminalNeedsReplay(state, 50, 1)).toBe(true);
@@ -792,7 +792,7 @@ describe('session cutover epoch / committed baseline', () => {
     expect(beginAuthorityChangeReplay(unbound, null)).toBeNull();
     expect(beginAuthorityChangeReplay(unbound, '')).toBeNull();
 
-    let state = commitTerminalCutover(unbound, 100, undefined, 'owner-a');
+    const state = commitTerminalCutover(unbound, 100, undefined, 'owner-a');
     expect(state.authorityId).toBe('owner-a');
     expect(beginAuthorityChangeReplay(state, 'owner-a')).toBeNull();
 

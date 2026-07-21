@@ -617,9 +617,24 @@ export function WorkbenchTerminalBuffersProvider({
       void (async () => {
         let applySucceeded = false;
         let errorClass: ReturnType<typeof classifyTerminalReplayError> | null = null;
+        // finally 内禁止 return（no-unsafe-finally）；用本地标志在 try/catch/finally 后分流。
+        let cancelledExit = false;
+        let shouldReplace = false;
+        let replaceEpoch = 0;
+        let clearRecoveryOnly = false;
+        let epochMismatchExit = false;
+        let permanentErrorClass: 'not_found' | 'permanent' | null = null;
+        let scheduleImmediate = false;
+        let scheduleRecoverable = false;
+        let consecutiveFailures = 0;
+        let clearedState: ReturnType<typeof ensureCutoverState> | null = null;
+
         try {
           const replay = await workbenchApi.sessions.replay(sessionId);
-          if (cancelled) return;
+          if (cancelled) {
+            cancelledExit = true;
+            return;
+          }
           const authorityId =
             typeof replay.ownerInstanceId === 'string' &&
             replay.ownerInstanceId.length > 0
@@ -636,89 +651,111 @@ export function WorkbenchTerminalBuffersProvider({
           applySucceeded = false;
           errorClass = classifyTerminalReplayError(reason);
         } finally {
-          if (cancelled) return;
-          const current = ensureCutoverState(sessionId);
-          // 单飞：本请求是唯一 in-flight 持有者，结束时必须清门闩。
-          // beginStartup/authority 只抬 epoch 保留 inFlight，不得另起并发 flight（R13 H1）。
-          const cleared = setTerminalCutoverReplayInFlight(current, false);
-          cutoverBySessionRef.current.set(sessionId, cleared);
+          // 仅清理 / 写标志；控制流 return 全部移到 finally 之后。
+          if (cancelled || cancelledExit) {
+            cancelledExit = true;
+          } else {
+            const current = ensureCutoverState(sessionId);
+            // 单飞：本请求是唯一 in-flight 持有者，结束时必须清门闩。
+            // beginStartup/authority 只抬 epoch 保留 inFlight，不得另起并发 flight（R13 H1）。
+            const cleared = setTerminalCutoverReplayInFlight(current, false);
+            cutoverBySessionRef.current.set(sessionId, cleared);
+            clearedState = cleared;
 
-          // in-flight 期间 overflow/startup/authority 抬高了 epoch：旧结果已失效，
-          // 串行启动唯一替代请求（单飞 cutover）。
-          if (
-            cleared.needsReplay &&
-            cleared.cutoverEpoch > requestEpoch &&
-            !cleared.replayInFlight
-          ) {
-            // 新 epoch 重置失败计数与永久失败标记。
-            clearReplayRecovery(sessionId);
-            clearHistorySyncFailure(sessionId);
-            requestSessionReplay(sessionId, cleared.cutoverEpoch);
-            return;
-          }
-
-          if (applySucceeded || !cleared.needsReplay) {
-            clearReplayRecovery(sessionId);
-            return;
-          }
-
-          // epoch 已不一致且未走上方替代路径：不得按旧 epoch 重试。
-          if (
-            cleared.cutoverEpoch !== requestEpoch ||
-            cleared.replayInFlight
-          ) {
-            return;
-          }
-
-          // R11 M1：永久错误立即终止自动重试，禁止 3-burst + 5s 静默循环。
-          if (errorClass === 'not_found' || errorClass === 'permanent') {
-            clearReplayRecovery(sessionId);
-            setHistorySyncFailure(
-              sessionId,
-              terminalHistorySyncFailureFromClass(errorClass),
-            );
-            cutoverBySessionRef.current.set(
-              sessionId,
-              stopTerminalCutoverReplay(cleared),
-            );
-            // 受控诊断：仅稳定 kind，禁止打印 buffer/body/path/token。
-            console.warn(
-              '[workbench-terminal] history sync stopped',
-              errorClass === 'not_found' ? 'not_found' : 'history_sync_failed',
-            );
-            return;
-          }
-
-          const prev = replayRecoveryBySessionRef.current.get(sessionId);
-          const consecutiveFailures = (prev?.consecutiveFailures ?? 0) + 1;
-
-          // 同 epoch 有界立即重试（最多 3 次，含首次）。
-          // 立即窗口内也写入 cooldown，防止 held live 在 attempt 间隙狂刷。
-          if (attempt < TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS) {
-            const delayMs = terminalReplayRecoveryDelayMs(attempt);
-            if (prev?.timerId != null) {
-              globalThis.clearTimeout(prev.timerId);
-            }
-            replayRecoveryBySessionRef.current.set(sessionId, {
-              consecutiveFailures,
-              nextRetryAt: Date.now() + delayMs,
-              timerId: null,
-            });
-            globalThis.setTimeout(() => {
-              if (cancelled) return;
-              const latest = ensureCutoverState(sessionId);
-              if (
-                latest.needsReplay &&
-                latest.cutoverEpoch === requestEpoch &&
-                !latest.replayInFlight
-              ) {
-                requestSessionReplay(sessionId, requestEpoch, attempt + 1);
+            // in-flight 期间 overflow/startup/authority 抬高了 epoch：旧结果已失效，
+            // 串行启动唯一替代请求（单飞 cutover）。
+            if (
+              cleared.needsReplay &&
+              cleared.cutoverEpoch > requestEpoch &&
+              !cleared.replayInFlight
+            ) {
+              shouldReplace = true;
+              replaceEpoch = cleared.cutoverEpoch;
+            } else if (applySucceeded || !cleared.needsReplay) {
+              clearRecoveryOnly = true;
+            } else if (
+              cleared.cutoverEpoch !== requestEpoch ||
+              cleared.replayInFlight
+            ) {
+              // epoch 已不一致且未走上方替代路径：不得按旧 epoch 重试。
+              epochMismatchExit = true;
+            } else if (errorClass === 'not_found' || errorClass === 'permanent') {
+              // R11 M1：永久错误立即终止自动重试，禁止 3-burst + 5s 静默循环。
+              permanentErrorClass = errorClass;
+            } else {
+              const prev = replayRecoveryBySessionRef.current.get(sessionId);
+              consecutiveFailures = (prev?.consecutiveFailures ?? 0) + 1;
+              // 同 epoch 有界立即重试（最多 3 次，含首次）。
+              if (attempt < TERMINAL_REPLAY_IMMEDIATE_ATTEMPTS) {
+                scheduleImmediate = true;
+              } else {
+                // 立即耗尽：进入 capped backoff 可恢复重试，直到成功或 session 移除。
+                scheduleRecoverable = true;
               }
-            }, delayMs);
-            return;
+            }
           }
+        }
 
-          // 立即耗尽：进入 capped backoff 可恢复重试，直到成功或 session 移除。
+        if (cancelledExit) {
+          return;
+        }
+        if (shouldReplace) {
+          // 新 epoch 重置失败计数与永久失败标记。
+          clearReplayRecovery(sessionId);
+          clearHistorySyncFailure(sessionId);
+          requestSessionReplay(sessionId, replaceEpoch);
+          return;
+        }
+        if (clearRecoveryOnly) {
+          clearReplayRecovery(sessionId);
+          return;
+        }
+        if (epochMismatchExit) {
+          return;
+        }
+        if (permanentErrorClass != null && clearedState != null) {
+          clearReplayRecovery(sessionId);
+          setHistorySyncFailure(
+            sessionId,
+            terminalHistorySyncFailureFromClass(permanentErrorClass),
+          );
+          cutoverBySessionRef.current.set(
+            sessionId,
+            stopTerminalCutoverReplay(clearedState),
+          );
+          // 受控诊断：仅稳定 kind，禁止打印 buffer/body/path/token。
+          console.warn(
+            '[workbench-terminal] history sync stopped',
+            permanentErrorClass === 'not_found' ? 'not_found' : 'history_sync_failed',
+          );
+          return;
+        }
+        if (scheduleImmediate) {
+          // 立即窗口内也写入 cooldown，防止 held live 在 attempt 间隙狂刷。
+          const prev = replayRecoveryBySessionRef.current.get(sessionId);
+          const delayMs = terminalReplayRecoveryDelayMs(attempt);
+          if (prev?.timerId != null) {
+            globalThis.clearTimeout(prev.timerId);
+          }
+          replayRecoveryBySessionRef.current.set(sessionId, {
+            consecutiveFailures,
+            nextRetryAt: Date.now() + delayMs,
+            timerId: null,
+          });
+          globalThis.setTimeout(() => {
+            if (cancelled) return;
+            const latest = ensureCutoverState(sessionId);
+            if (
+              latest.needsReplay &&
+              latest.cutoverEpoch === requestEpoch &&
+              !latest.replayInFlight
+            ) {
+              requestSessionReplay(sessionId, requestEpoch, attempt + 1);
+            }
+          }, delayMs);
+          return;
+        }
+        if (scheduleRecoverable) {
           scheduleRecoverableReplay(sessionId, requestEpoch, consecutiveFailures);
         }
       })();

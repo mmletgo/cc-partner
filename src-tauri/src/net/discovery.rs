@@ -386,8 +386,24 @@ pub fn is_blocked_mobile_interface_name(name: &str) -> bool {
         return true;
     }
     const PREFIXES: &[&str] = &[
-        "docker", "br-", "veth", "cni", "flannel", "cbridge", "vmnet", "vbox", "virbr", "hyper-v",
-        "vethernet", "awdl", "llw", "ap", "bridge", "gif", "stf", "p2p",
+        "docker",
+        "br-",
+        "veth",
+        "cni",
+        "flannel",
+        "cbridge",
+        "vmnet",
+        "vbox",
+        "virbr",
+        "hyper-v",
+        "vethernet",
+        "awdl",
+        "llw",
+        "ap",
+        "bridge",
+        "gif",
+        "stf",
+        "p2p",
     ];
     PREFIXES.iter().any(|p| n.starts_with(p))
 }

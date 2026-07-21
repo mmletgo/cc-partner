@@ -1709,10 +1709,7 @@ async fn delivery_lease_blocks_cancel_atomically_until_released() {
         .unwrap();
     let canceled = repo.cancel_task(&created.id).await.unwrap();
     assert_eq!(canceled.status, OrchestratorTaskStatus::Aborted);
-    assert_eq!(
-        canceled.workflow_state,
-        OrchestratorWorkflowState::Canceled
-    );
+    assert_eq!(canceled.workflow_state, OrchestratorWorkflowState::Canceled);
 }
 
 /// Business Logic（为什么需要这个函数）:

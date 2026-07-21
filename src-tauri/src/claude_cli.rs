@@ -68,10 +68,7 @@ pub(crate) fn resolve_cli_path_with_search(
 ) -> String {
     let normalized = normalize_cli_path(path);
     let candidate = Path::new(&normalized);
-    if candidate.is_absolute()
-        || normalized.contains('/')
-        || normalized.contains('\\')
-    {
+    if candidate.is_absolute() || normalized.contains('/') || normalized.contains('\\') {
         return normalized;
     }
 
@@ -98,10 +95,7 @@ pub(crate) fn cli_command_path_env() -> OsString {
     )
 }
 
-fn cli_command_path_env_with(
-    home: Option<&Path>,
-    path_env: Option<&std::ffi::OsStr>,
-) -> OsString {
+fn cli_command_path_env_with(home: Option<&Path>, path_env: Option<&std::ffi::OsStr>) -> OsString {
     let mut dirs = cli_search_dirs(home, path_env);
     // 保证系统基础路径始终存在，避免完全覆盖 PATH 后丢 /usr/bin。
     for system in [
@@ -812,7 +806,11 @@ mod tests {
         let home = temp.path();
         let path = cli_command_path_env_with(Some(home), Some(std::ffi::OsStr::new("/usr/bin")));
         let joined = path.to_string_lossy();
-        let local = home.join(".local").join("bin").to_string_lossy().into_owned();
+        let local = home
+            .join(".local")
+            .join("bin")
+            .to_string_lossy()
+            .into_owned();
         assert!(
             joined.contains(&local),
             "增强 PATH 应包含 ~/.local/bin: {joined}"
