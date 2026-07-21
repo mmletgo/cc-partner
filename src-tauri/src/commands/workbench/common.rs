@@ -578,6 +578,19 @@ pub(crate) async fn restore_persisted_sessions(
             ));
             return Err(error);
         }
+        // R28 H4：project op lease 覆盖 restore→spawn→upsert→Ready/claim finish 全窗口。
+        let _project_lease = match state
+            .workbench_sessions
+            .try_acquire_project_op_lease(&row.project_id)
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                claim_guard.finish(SharedRestoreNotification::Failed(
+                    AppErrorCategory::Unavailable,
+                ));
+                return Err(error);
+            }
+        };
         let Some(project) = state.workbench_project_repo.get(&row.project_id).await? else {
             state.workbench_session_repo.delete(&row.id).await?;
             // 孤儿删除成功：无会话可合并；广播 PersistedDisconnected 让 waiter 安全 continue。
@@ -1313,6 +1326,20 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
     let project_barrier = state
         .workbench_sessions
         .begin_project_closing_barrier(project_id);
+
+    // R28 H4：barrier 后先 drain 既有 project op leases，再 re-snapshot，禁止 create 在途 upsert 越过 bulk delete。
+    if !state
+        .workbench_sessions
+        .wait_project_op_leases_drained(project_id)
+    {
+        tracing::warn!(
+            project_id = %project_id,
+            "project op leases still in-flight before remove snapshot; retaining project barrier"
+        );
+        return Err(AppError::unavailable(
+            "project_op_lease_drain_timeout".to_string(),
+        ));
+    }
 
     let session_rows = state.workbench_session_repo.list(Some(project_id)).await?;
     // R25 H2 / R26 M1：先收集全部 SessionCloseCleanup；bulk SQLite 成功后才 finish。

@@ -3874,8 +3874,9 @@ impl WorkbenchSessionRegistry {
 
         // R25 M1：Abort 对 pre-installed barrier 立即 fail-closed（禁止 wait 后继续 stale snapshot）。
         self.abort_if_preexisting_closing_barrier(&session_id, barrier_policy)?;
-        // R26 / R27 H4：spawn 入口 revalidate project + 占用 project op lease + restore claim。
-        let _project_lease = self.try_acquire_project_op_lease(&project_id)?;
+        // R26 / R27 / R28 H4：spawn 入口 revalidate project + restore claim。
+        // project op lease 由 create/restore 最外层持有至 upsert/Ready/claim finish（禁止在 spawn 返回前 drop）。
+        self.require_project_not_closing(&project_id)?;
         if let Some(generation) = restore_claim_generation {
             self.require_restore_claim_active(&session_id, generation)?;
         }
@@ -4642,15 +4643,19 @@ impl WorkbenchSessionRegistry {
     ///     且仅 closer 身份在 `SessionCloseCleanup::finish_cleanup` 后 CAS 清除。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     sessions 锁内：generation CAS remove + revoke + 立即 install Closing barrier；
-    ///     锁外 soft-wait drain + kill PTY/replay → **不** mark_cleanup_done；
+    ///     R28 H3：sessions→restoring→closing_publish 同一临界区完成 generation CAS remove、
+    ///     PublishControl revoke、restore claim revoke/remove、Closing tombstone install；
+    ///     锁外 soft-wait publish+restore leases + kill PTY/replay → **不** mark_cleanup_done；
     ///     返回 SessionCloseCleanup 令牌，由调用方在 persist cleanup 后 finish。
     fn close_inner(
         &self,
         session_id: &str,
         required_generation: Option<u64>,
     ) -> Result<SessionCloseCleanup, AppError> {
-        let handle = {
+        // R28 H3：remove handle + revoke restore claim + install Closing tombstone
+        // 必须在同一 lifecycle 临界区（sessions → restoring → closing_publish），
+        // 消除 remove 与 tombstone 之间的 Missing 窗口（并发 restore 可抢跑 claim/insert）。
+        let (handle, publish, revoked_claim) = {
             let mut sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
             let handle = match required_generation {
                 None => sessions
@@ -4672,21 +4677,47 @@ impl WorkbenchSessionRegistry {
                         .ok_or_else(|| AppError::not_found("工作台会话不存在"))?
                 }
             };
-            // R22 M1：与 remove 同一临界区 revoke PublishControl。
-            {
+            let publish = {
                 let handle = handle.lock().expect("workbench session 锁中毒");
-                handle.publish.revoke();
-            }
-            handle
+                handle.publish.clone()
+            };
+            publish.revoke();
+
+            // 同临界区：revoke restore claim（若有）并从 restoring 移除。
+            let revoked_claim = {
+                let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+                let state = restoring.get(session_id).cloned();
+                if let Some(ref claim) = state {
+                    claim.revoke();
+                    let _ = claim.tx.send(SharedRestoreNotification::Failed(
+                        AppErrorCategory::Unavailable,
+                    ));
+                    restoring.remove(session_id);
+                }
+                state
+            };
+
+            // 同临界区：install Closing tombstone（无条件）。
+            self.install_closing_tombstone(session_id, publish.clone());
+            (handle, publish, revoked_claim)
         };
 
-        // R27 H2：共享 claim revoke + tombstone + restore-lease drain。
-        let handle_publish = {
-            let h = handle.lock().expect("workbench session 锁中毒");
-            h.publish.clone()
+        // 锁外：wait restore persist leases（超时 fail-closed）。
+        let mut leases_drained = true;
+        let restore_claim_for_drain = if let Some(state) = revoked_claim {
+            if !state.wait_leases_drained(RESTORE_CLAIM_LEASE_DRAIN_TIMEOUT) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "restore claim persist leases still in-flight after close revoke; retaining barrier"
+                );
+                leases_drained = false;
+                Some(state)
+            } else {
+                None
+            }
+        } else {
+            None
         };
-        let (publish, restore_claim_for_drain, leases_drained) =
-            self.revoke_restore_claim_install_tombstone(session_id, Some(handle_publish));
 
         // 仅当该 generation 仍绑定 replay 时移除（避免误清后继 generation buffer）。
         if let Some(generation) = required_generation {
@@ -9330,5 +9361,93 @@ mod tests {
             !registry.mark_session_ready_for_generation("s-r27-h5b", gen_b, None),
             "revoked claim must block Ready"
         );
+    }
+
+    /// Business Logic（R28 H3: 为什么需要这个测试）:
+    ///     close 的 remove handle 与 Closing tombstone 安装不得拆分临界区，否则 restore 可抢跑 Missing 窗口。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     live session close 后立刻 has_closing_tombstone 且 contains=false、runtime 非 Live。
+    #[test]
+    fn close_installs_tombstone_atomically_with_handle_remove() {
+        let registry = WorkbenchSessionRegistry::new();
+        registry.insert_fake_session_for_test("s-r28-h3", "p1");
+        let cleanup = registry.close("s-r28-h3").expect("close");
+        assert!(!registry.contains("s-r28-h3"));
+        assert!(
+            registry.has_closing_tombstone_for_test("s-r28-h3"),
+            "tombstone must be present immediately after close returns"
+        );
+        assert_ne!(
+            registry.runtime_presence("s-r28-h3"),
+            SessionRuntimePresence::Live
+        );
+        // insert 在 barrier 下不得越过。
+        assert_eq!(
+            registry.try_insert_handle_revalidating_barrier(
+                "s-r28-h3",
+                Arc::new(Mutex::new(WorkbenchSessionHandle {
+                    row: WorkbenchSessionRow {
+                        id: "s-r28-h3".into(),
+                        project_id: "p1".into(),
+                        worktree_id: None,
+                        name: "n".into(),
+                        command: "/bin/sh".into(),
+                        cwd: "/tmp".into(),
+                        status: "running".into(),
+                        cols: 80,
+                        rows: 24,
+                        started_at: "t".into(),
+                        exited_at: None,
+                        exit_code: None,
+                        backend: RAW_PTY_BACKEND.into(),
+                        backend_id: None,
+                        backend_window_id: None,
+                        created_at: "t".into(),
+                        updated_at: "t".into(),
+                    },
+                    generation: 9,
+                    durability: SessionDurability::Provisional,
+                    publish: PublishControl::new(),
+                    deferred_output: Vec::new(),
+                    deferred_mutations: Vec::new(),
+                    pending_exit: None,
+                    restore_claim_generation: None,
+                    process: SessionProcess::Fake,
+                }))
+            ),
+            InsertCasResult::BarrierActive
+        );
+        cleanup.finish_cleanup();
+        assert!(!registry.has_closing_tombstone_for_test("s-r28-h3"));
+    }
+
+    /// Business Logic（R28 H4: 为什么需要这个测试）:
+    ///     project op lease 必须阻断 remove 的 pre-snapshot drain，直到 create/restore 完成。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     持 lease 时 wait_project_op_leases_drained 阻塞；drop 后 drain 成功。
+    #[test]
+    fn project_op_lease_held_blocks_remove_drain_until_release() {
+        let registry = WorkbenchSessionRegistry::new();
+        let lease = registry
+            .try_acquire_project_op_lease("p-r28-h4")
+            .expect("lease");
+        assert_eq!(registry.project_op_lease_count_for_test("p-r28-h4"), 1);
+        // lease 为计数器：允许多个 in-flight create/restore；remove 的 drain 须等全部归零。
+        let lease2 = registry
+            .try_acquire_project_op_lease("p-r28-h4")
+            .expect("second lease");
+        assert_eq!(registry.project_op_lease_count_for_test("p-r28-h4"), 2);
+        let reg = registry.clone();
+        let handle = thread::spawn(move || reg.wait_project_op_leases_drained("p-r28-h4"));
+        thread::sleep(Duration::from_millis(80));
+        assert!(!handle.is_finished(), "drain must wait while lease held");
+        drop(lease);
+        thread::sleep(Duration::from_millis(40));
+        assert!(!handle.is_finished(), "still waiting for second lease");
+        drop(lease2);
+        assert!(handle.join().expect("join"), "drain after all releases");
+        assert_eq!(registry.project_op_lease_count_for_test("p-r28-h4"), 0);
     }
 }

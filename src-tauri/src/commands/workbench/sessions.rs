@@ -76,6 +76,10 @@ pub(crate) async fn local_create_workbench_session(
     state.runtime_role.require_owner()?;
     let project = get_project(state, &project_id).await?;
     let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
+    // R28 H4：project op lease 覆盖 create→spawn→upsert→Ready 全窗口。
+    let _project_lease = state
+        .workbench_sessions
+        .try_acquire_project_op_lease(&project_id)?;
     let row = state.workbench_sessions.create(
         state.clone(),
         project,
@@ -117,6 +121,7 @@ pub(crate) async fn local_create_workbench_session(
             "session_spawn_ready_cas_miss".to_string(),
         ));
     }
+    // lease drops after Ready commit when function returns.
     Ok(row.to_dto())
 }
 
