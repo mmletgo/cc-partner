@@ -9,9 +9,15 @@
 //!     owner+sequence 总线（ring catch-up + live + Gap，镜像 RuntimeEventBus；
 //!     after_seq=0 且 ring 截断仍 Gap）；远端桥收到 Gap 后先 resync running terminal，
 //!     仅成功才推进 after_cursor（R28 H1）；L3 多机 cutover **NOT VERIFIED**。
-//!     R37 H1：inbound 已带 `remote:` entity id 的事件在 map/publish 前 drop（破 A↔B 环路）；
+//!     R37 H1：inbound 已带 `remote:` entity id 的事件在 process/map 前 drop（破 A↔B 环路）；
+//!     R38 H1：`emit_mapped_remote_event` 接收的是已 map 的 native-from-peer 事件（entity 已是
+//!     `remote:`），必须 publish+emit；禁止再二次 drop mapped remote ids（否则全部 live 被杀）。
 //!     R37 H2：resync 另发布 `TerminalResync` 到本机 bus，Mobile 与桌面 Tauri resync 对齐；
 //!     R37 H3：仅 running 持 session watch；非 running status/list reconcile 释放。
+//!     R38 M2：project-scoped last-seen running reconcile——list 只处理返回行，peer list 中消失
+//!     的 session（无 status 事件）会永远占 watch；按 local_project_id 记录上次 list 见过的
+//!     running remote session ids，对 previous−running 调 release_watch_key，不碰其它 project 与
+//!     `__device__`；restart 时 transfer project_running_sessions（与 after_cursor/watch_keys 一致）。
 //!     提供本机事件发布 helper，并维护 sidecar 拥有的 `RemoteEventBridgeRegistry`
 //!     （CancellationToken、订阅 lease/refcount + idle TTL、指数退避上限 60s、1 MiB 行/pending、
 //!     8 KiB 错误前缀、共享 after 游标跨 task restart 保留、Gap fail-closed、
@@ -717,10 +723,13 @@ pub struct RemoteEventBridgeProjectMapping {
 ///     供 TTL、诊断与 task restart 后游标恢复读取（R30 M3）。
 ///     R35 M2：多 terminal 共用同一 device bridge 时，必须以 session-keyed lease 计数，
 ///     避免 close 一次把整个设备订阅打到 0。
+///     R38 M2：按 local_project_id 记录上次 list 见过的 running remote session ids，
+///     以便 list 中消失的 session（无 status 事件）也能 release watch。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     Arc 原子/互斥字段；`watch_keys` 记录活跃 lease key，`subscribers` 与 set 大小同步；
-///     subscribers>0 时 idle_for=ZERO；after_cursor 跨 loop restart 保留；不含 URL/正文。
+///     subscribers>0 时 idle_for=ZERO；after_cursor 跨 loop restart 保留；
+///     `project_running_sessions` 跨 restart transfer；不含 URL/正文。
 struct BridgeRuntimeState {
     last_used: Mutex<Instant>,
     phase: Mutex<String>,
@@ -733,6 +742,8 @@ struct BridgeRuntimeState {
     watch_keys: Mutex<HashSet<String>>,
     /// 已提交的远端 stream after 游标；task restart / 重连共享（R30 M3）。
     after_cursor: Mutex<Option<BackendRuntimeCursor>>,
+    /// local_project_id -> 上次 list 见过的 running remote session ids（R38 M2）。
+    project_running_sessions: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl BridgeRuntimeState {
@@ -740,7 +751,8 @@ impl BridgeRuntimeState {
     ///     新建 bridge 时需要初始化 runtime 观测字段。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     last_used=now、phase=connecting、attempt=0、subscribers=0、watch_keys 空、after_cursor=None。
+    ///     last_used=now、phase=connecting、attempt=0、subscribers=0、watch_keys 空、
+    ///     after_cursor=None、project_running_sessions 空。
     fn new() -> Self {
         Self {
             last_used: Mutex::new(Instant::now()),
@@ -751,6 +763,7 @@ impl BridgeRuntimeState {
             subscribers: AtomicU32::new(0),
             watch_keys: Mutex::new(HashSet::new()),
             after_cursor: Mutex::new(None),
+            project_running_sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -860,6 +873,65 @@ impl BridgeRuntimeState {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     list reconcile 只处理返回行；peer list 中消失的 running session（无 status 事件）
+    ///     会永远占 watch。按 project 比较上次见过的 running ids 并释放差集（R38 M2）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     取 previous set；对 previous−running 每个 session key 调 release_watch_key；
+    ///     写入 previous=running（HashSet）；不碰其它 project 与 `__device__`；返回 released 数量。
+    fn reconcile_project_running_sessions(
+        &self,
+        project_local_id: &str,
+        running_session_ids: &[String],
+    ) -> usize {
+        let running_set: HashSet<String> = running_session_ids.iter().cloned().collect();
+        let previous = {
+            let map = self
+                .project_running_sessions
+                .lock()
+                .expect("bridge project_running_sessions 锁中毒");
+            map.get(project_local_id).cloned().unwrap_or_default()
+        };
+        let mut released = 0usize;
+        for session_id in previous.difference(&running_set) {
+            if self.release_watch_key(session_id) {
+                released += 1;
+            }
+        }
+        let mut map = self
+            .project_running_sessions
+            .lock()
+            .expect("bridge project_running_sessions 锁中毒");
+        map.insert(project_local_id.to_string(), running_set);
+        released
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     URL 变化 / task restart 时必须把 project-scoped last-seen running 映射迁到新 runtime，
+    ///     否则下一次 list 会把仍存活 session 误当消失而 release（R38 M2）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     克隆 project_running_sessions 全表。
+    fn clone_project_running_sessions(&self) -> HashMap<String, HashSet<String>> {
+        self.project_running_sessions
+            .lock()
+            .expect("bridge project_running_sessions 锁中毒")
+            .clone()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     spawn 新 bridge task 时用旧 runtime 的 project running map 重建 reconcile 状态（R38 M2）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     覆盖写入 project_running_sessions。
+    fn seed_project_running_sessions(&self, map: HashMap<String, HashSet<String>>) {
+        *self
+            .project_running_sessions
+            .lock()
+            .expect("bridge project_running_sessions 锁中毒") = map;
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     重连 / restart 后需要读取已提交 after 游标，禁止 brand-new attach 丢恢复点。
     ///
     /// Code Logic（这个函数做什么）:
@@ -958,7 +1030,8 @@ impl RemoteEventBridgeTask {
 ///
 /// Code Logic（这个结构体做什么）:
 ///     Mutex<HashMap<device_id, task>>；ensure 刷新 last_used；session-keyed watch lease；
-///     restart 时 transfer after_cursor + watch_keys；shutdown_all 取消并 await。
+///     restart 时 transfer after_cursor + watch_keys + project_running_sessions（R38 M2）；
+///     shutdown_all 取消并 await。
 #[derive(Default)]
 pub struct RemoteEventBridgeRegistry {
     tasks: Mutex<HashMap<String, RemoteEventBridgeTask>>,
@@ -1026,7 +1099,8 @@ impl RemoteEventBridgeRegistry {
     /// Code Logic（这个函数做什么）:
     ///     校验 runtime_role 为 HeadlessOwner；按 device_id 更新映射与 last_used；
     ///     URL 变化或任务结束时 cancel 旧任务并 spawn 新循环，transfer after_cursor +
-    ///     watch_keys（subscribers 由 keys.len 派生）到新 runtime（R30 M3 / R35 M2）。
+    ///     watch_keys（subscribers 由 keys.len 派生）+ project_running_sessions 到新 runtime
+    ///     （R30 M3 / R35 M2 / R38 M2）。
     pub fn ensure_bridge(
         &self,
         device_id: String,
@@ -1049,6 +1123,8 @@ impl RemoteEventBridgeRegistry {
             let project_ids = Arc::clone(&existing.project_ids);
             let transferred_cursor = existing.runtime.load_after_cursor();
             let transferred_watch_keys = existing.runtime.clone_watch_keys();
+            let transferred_project_running =
+                existing.runtime.clone_project_running_sessions();
             *existing = spawn_bridge_task(
                 device_id,
                 base_url,
@@ -1056,6 +1132,7 @@ impl RemoteEventBridgeRegistry {
                 state,
                 transferred_cursor,
                 transferred_watch_keys,
+                transferred_project_running,
             );
             return;
         }
@@ -1069,6 +1146,7 @@ impl RemoteEventBridgeRegistry {
             state,
             None,
             HashSet::new(),
+            HashMap::new(),
         );
         tasks.insert(device_id, task);
     }
@@ -1130,6 +1208,31 @@ impl RemoteEventBridgeRegistry {
             return false;
         };
         task.runtime.release_watch_key(session_id);
+        true
+    }
+
+    /// 按项目 reconcile list 中消失的 running session watch（R38 M2）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     list reconcile 只处理返回行；peer list 中消失的 session（无 status 事件）会永远占 watch，
+    ///     必须在 list 后对 previous−running 释放，且不得影响其它 project 的 keys。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 device task 后调 runtime.reconcile_project_running_sessions；
+    ///     无 task 时 no-op 返回 false；有 task 返回 true（无论 released 数量）。
+    pub fn reconcile_session_watches_for_project(
+        &self,
+        device_id: &str,
+        project_local_id: &str,
+        running_session_ids: &[String],
+    ) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        let _ = task
+            .runtime
+            .reconcile_project_running_sessions(project_local_id, running_session_ids);
         true
     }
 
@@ -1209,11 +1312,13 @@ impl RemoteEventBridgeRegistry {
 
 /// Business Logic（为什么需要这个函数）:
 ///     事件桥 registry 需要把任务创建细节集中处理，保证 replacement 和首次创建使用同一套状态字段；
-///     URL 变化 restart 时必须继承 after_cursor 与 watch_keys，避免 brand-new attach 或
-///     session release 下溢（R30 M3 / R35 M2）。
+///     URL 变化 restart 时必须继承 after_cursor、watch_keys 与 project_running_sessions，
+///     避免 brand-new attach、session release 下溢或 list 误 release 仍存活 session
+///     （R30 M3 / R35 M2 / R38 M2）。
 ///
 /// Code Logic（这个函数做什么）:
-///     创建 cancel/runtime（seed cursor + watch_keys）并 spawn remote_event_loop；结束后置 finished。
+///     创建 cancel/runtime（seed cursor + watch_keys + project_running_sessions）并 spawn
+///     remote_event_loop；结束后置 finished。
 fn spawn_bridge_task(
     device_id: String,
     base_url: String,
@@ -1221,6 +1326,7 @@ fn spawn_bridge_task(
     state: AppState,
     initial_after_cursor: Option<BackendRuntimeCursor>,
     initial_watch_keys: HashSet<String>,
+    initial_project_running_sessions: HashMap<String, HashSet<String>>,
 ) -> RemoteEventBridgeTask {
     let cancel = CancellationToken::new();
     let runtime = Arc::new(BridgeRuntimeState::new());
@@ -1229,6 +1335,9 @@ fn spawn_bridge_task(
     }
     if !initial_watch_keys.is_empty() {
         runtime.seed_watch_keys(initial_watch_keys);
+    }
+    if !initial_project_running_sessions.is_empty() {
+        runtime.seed_project_running_sessions(initial_project_running_sessions);
     }
     let loop_cancel = cancel.clone();
     let loop_runtime = Arc::clone(&runtime);
@@ -1675,8 +1784,9 @@ fn process_event_chunk_to_messages(
                     sequence,
                     event,
                 })) => {
-                    // R37 H1：已带 remote: 的 entity id 是 peer 回灌本机 bus 的环路事件。
-                    // 原生 peer 事件从不带 remote: 前缀；在 map/emit/publish 前完整 drop。
+                    // R37 H1 / R38 H1：已带 remote: 的 entity id 是 peer 回灌本机 bus 的环路事件。
+                    // 原生 peer 事件从不带 remote: 前缀；环路防护只在 process 路径 pre-map drop。
+                    // map 后 entity 会变成 remote:*，emit 不得再二次检查（否则全部 live 被杀）。
                     if inbound_event_has_remote_entity_id(&event) {
                         continue;
                     }
@@ -1789,20 +1899,18 @@ fn inbound_event_has_remote_entity_id(event: &WorkbenchRemoteEvent) -> bool {
 ///     本机前端只监听 Tauri event，不关心事件来自本机 PTY 还是远端 HTTP stream。
 ///     R36 H2：Mobile `/api/workbench/events` 读的是本机 `workbench_remote_events` bus，
 ///     仅 `emit_event`（Tauri/GUI）会让 bridged remote live 到不了 mobile 订阅者。
-///     R37 H1：环路 inbound（entity 已带 remote:）必须在 publish/emit 前 drop。
+///     R38 H1：本函数接收的是 process 路径已经 map 过的 native-from-peer 事件（entity 已是
+///     `remote:`），必须 publish+emit；环路 inbound 只在 `process_event_chunk_to_messages`
+///     pre-map drop，不会到达此处。禁止再二次 drop mapped remote ids，否则全部 live 被杀。
 ///     R37 H3：非 running 的 TerminalStatus 释放对应 session watch，避免 leaked lease 挡 Gap inventory。
 ///
 /// Code Logic（这个函数做什么）:
-///     已 remote: 前缀的事件直接 return（不 map/publish/emit，cursor 由上层 Event 消息推进）；
-///     否则 clone 后 publish 到本机 bus，再按类型 emit `workbench:*`；
+///     直接 clone 后 publish 到本机 bus，再按类型 emit `workbench:*`（事件已是 mapped remote ids）；
 ///     TerminalStatus 非 running 时 release session watch（composite remote session id）。
 ///     TerminalResync 仅 GUI emit + bus publish，不二次 map。
 fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
-    // R37 H1：环路事件在 process 路径可能仍上浮（为推进 cursor），此处最终 drop。
-    if inbound_event_has_remote_entity_id(&event) {
-        return;
-    }
-    // R36 H2：GUI emit + local bus publish 共用同一 mapped 事件。
+    // R36 H2 / R38 H1：GUI emit + local bus publish 共用同一 mapped 事件。
+    // 此处事件已 map 为 remote:*，必须 publish+emit；环路防护只在 process 路径。
     publish_workbench_remote_event_from_state(state, event.clone());
     match event {
         WorkbenchRemoteEvent::TerminalOutput(payload) => {
@@ -2827,6 +2935,156 @@ mod tests {
         assert_eq!(restarted.subscribers.load(Ordering::SeqCst), 1);
     }
 
+    /// Business Logic（R38 M2: 为什么需要这个测试）:
+    ///     同一 project 上次 list 见过 s1,s2，本次仅 running=[s1] 时必须 release s2，
+    ///     否则 list 中消失的 session（无 status 事件）会永远占 watch。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     retain s1,s2 → reconcile project-A 只 running=[s1] → s2 released、subscribers 下降、
+    ///     project map 更新为 {s1}。
+    #[test]
+    fn project_running_sessions_reconcile_releases_disappeared_sessions() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:s1"));
+        assert!(runtime.retain_watch_key("remote:dev:s2"));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 2);
+        // 首次 seed：previous 空 → 只写入 running set，不 release。
+        assert_eq!(
+            runtime.reconcile_project_running_sessions(
+                "project-a",
+                &["remote:dev:s1".into(), "remote:dev:s2".into()],
+            ),
+            0
+        );
+        // 第二次 list：仅 s1 still running → s2 消失。
+        assert_eq!(
+            runtime.reconcile_project_running_sessions(
+                "project-a",
+                &["remote:dev:s1".into()],
+            ),
+            1
+        );
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        let keys = runtime.clone_watch_keys();
+        assert!(keys.contains("remote:dev:s1"));
+        assert!(!keys.contains("remote:dev:s2"));
+        let map = runtime.clone_project_running_sessions();
+        let project_a = map.get("project-a").expect("project-a tracked");
+        assert!(project_a.contains("remote:dev:s1"));
+        assert!(!project_a.contains("remote:dev:s2"));
+    }
+
+    /// Business Logic（R38 M2: 为什么需要这个测试）:
+    ///     不同 project 的 last-seen running set 必须隔离；A reconcile 不得 release B 的 keys。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     project-A 与 project-B 各 retain 一 session；仅 A reconcile 为空 → 只释放 A 的 key，
+    ///     B 的 key 与 project map 不变。
+    #[test]
+    fn project_running_sessions_reconcile_is_project_scoped() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:a1"));
+        assert!(runtime.retain_watch_key("remote:dev:b1"));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:a1".into()]),
+            0
+        );
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-b", &["remote:dev:b1".into()]),
+            0
+        );
+        // project-A list 空：释放 a1，不影响 b1 / project-B map。
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-a", &[]),
+            1
+        );
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        let keys = runtime.clone_watch_keys();
+        assert!(!keys.contains("remote:dev:a1"));
+        assert!(keys.contains("remote:dev:b1"));
+        let map = runtime.clone_project_running_sessions();
+        assert!(map
+            .get("project-a")
+            .expect("project-a")
+            .is_empty());
+        assert!(map
+            .get("project-b")
+            .expect("project-b")
+            .contains("remote:dev:b1"));
+        // 设备级 key 不在 project map 里，reconcile 不得碰它。
+        assert!(runtime.retain_watch_key(WATCH_KEY_DEVICE));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-b", &[]),
+            1
+        );
+        assert!(runtime.clone_watch_keys().contains(WATCH_KEY_DEVICE));
+    }
+
+    /// Business Logic（R38 M2: 为什么需要这个测试）:
+    ///     registry 无 task 时 reconcile 必须 no-op 安全返回 false。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     空 registry 调 reconcile_session_watches_for_project → false。
+    #[test]
+    fn registry_reconcile_session_watches_noops_without_task() {
+        let registry = RemoteEventBridgeRegistry::new();
+        assert!(!registry.reconcile_session_watches_for_project(
+            "missing-device",
+            "project-a",
+            &["remote:dev:s1".into()],
+        ));
+    }
+
+    /// Business Logic（R38 M2: 为什么需要这个测试）:
+    ///     URL 变化 / task restart 时 project_running_sessions 必须与 after_cursor/watch_keys
+    ///     一样 transfer，否则下一次 list 会把仍存活 session 误当消失而 release。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     seed project map → clone/seed 到新 runtime；映射内容一致。
+    #[test]
+    fn project_running_sessions_preserved_across_restart() {
+        let runtime = BridgeRuntimeState::new();
+        assert_eq!(
+            runtime.reconcile_project_running_sessions(
+                "project-a",
+                &["remote:dev:s1".into(), "remote:dev:s2".into()],
+            ),
+            0
+        );
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-b", &["remote:dev:b1".into()]),
+            0
+        );
+        let transferred = runtime.clone_project_running_sessions();
+        let restarted = BridgeRuntimeState::new();
+        restarted.seed_project_running_sessions(transferred);
+        let map = restarted.clone_project_running_sessions();
+        assert_eq!(map.len(), 2);
+        assert!(map
+            .get("project-a")
+            .expect("project-a")
+            .contains("remote:dev:s1"));
+        assert!(map
+            .get("project-a")
+            .expect("project-a")
+            .contains("remote:dev:s2"));
+        assert!(map
+            .get("project-b")
+            .expect("project-b")
+            .contains("remote:dev:b1"));
+        // restart 后仍可对 previous−running 正确 release。
+        assert!(restarted.retain_watch_key("remote:dev:s1"));
+        assert!(restarted.retain_watch_key("remote:dev:s2"));
+        assert_eq!(
+            restarted.reconcile_project_running_sessions(
+                "project-a",
+                &["remote:dev:s1".into()],
+            ),
+            1
+        );
+        assert_eq!(restarted.subscribers.load(Ordering::SeqCst), 1);
+    }
+
     /// Business Logic（R30 M3 / R35 M2: 为什么需要这个测试）:
     ///     registry acquire/release/session-watch 在无 bridge 时必须 no-op 安全；
     ///     runtime 路径按 key 驱动 subscribers。
@@ -2840,6 +3098,11 @@ mod tests {
         assert!(!registry.release_subscription("missing-device"));
         assert!(!registry.ensure_session_watch("missing-device", "session-a"));
         assert!(!registry.release_session_watch("missing-device", "session-a"));
+        assert!(!registry.reconcile_session_watches_for_project(
+            "missing-device",
+            "project-a",
+            &[],
+        ));
 
         // 直接测 runtime 路径与 registry 语义对齐（避免构造完整 AppState 任务）。
         let runtime = BridgeRuntimeState::new();
@@ -2876,12 +3139,14 @@ mod tests {
         );
     }
 
-    /// Business Logic（R36 H2: 为什么需要这个测试）:
+    /// Business Logic（R36 H2 / R38 H1: 为什么需要这个测试）:
     ///     bridged remote live 经映射后必须能发布到本机 `workbench_remote_events`，
     ///     Mobile `/api/workbench/events` 才能收到；仅 Tauri emit 不够。
+    ///     R38 H1：emit 不得再二次 drop mapped remote ids；mapped 事件必须能 publish。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     将 mapped-style TerminalStatus 写入 local bus，断言 sequence 递增且 open_relay 可收到。
+    ///     将 mapped-style TerminalStatus（entity 已是 remote:）写入 local bus，
+    ///     断言 sequence 递增且 open_relay 可收到——证明 mapped remote ids 合法且可交付。
     #[test]
     fn mapped_remote_event_can_publish_to_local_bus_for_mobile_live() {
         let bus = WorkbenchRemoteEventBus::new("local-owner");
@@ -2891,7 +3156,12 @@ mod tests {
             exit_code: None,
             ts: 42,
         });
-        // 模拟 emit_mapped_remote_event 的 clone+publish 路径（不构造完整 AppState）。
+        // R38 H1：mapped 事件 entity 已是 remote:；若 emit 再调 inbound_event_has_remote_entity_id
+        // 会误杀。此处模拟 emit 的 clone+publish 路径（不构造完整 AppState），必须成功。
+        assert!(
+            inbound_event_has_remote_entity_id(&mapped),
+            "mapped live events carry remote: ids; emit must not drop them (R38 H1)"
+        );
         let published = mapped.clone();
         let cursor = bus.publish(published);
         assert_eq!(cursor.sequence, 1);
@@ -2918,11 +3188,15 @@ mod tests {
         }
     }
 
-    /// Business Logic（R37 H1: 为什么需要这个测试）:
-    ///     peer bus 导出的 `remote:*` 事件若再 map/publish 会形成 A↔B 无限环路。
+    /// Business Logic（R37 H1 / R38 H1: 为什么需要这个测试）:
+    ///     peer bus 导出的 `remote:*` 事件若再 map/publish 会形成 A↔B 无限环路；
+    ///     环路防护只在 process 路径 pre-map drop。map 后的合法 live 事件 entity 已是
+    ///     remote:，若 emit 再检查会误杀全部 live（R38 H1）。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     原生 sessionId 经 process 后 map 一次；已带 remote: 的 inbound 被完整 drop（无输出消息）。
+    ///     原生 sessionId 经 process 后 map 一次进入消息列表；已带 remote: 的 inbound
+    ///     被完整 drop（不进消息列表）。并断言 process 产出的 mapped event 上
+    ///     `inbound_event_has_remote_entity_id` 为 true——证明若 emit 再检查会误杀。
     #[test]
     fn inbound_already_remote_session_id_is_dropped_before_map() {
         let project_ids = HashMap::new();
@@ -2960,16 +3234,30 @@ mod tests {
             format!("{native}{looped}").as_bytes(),
         )
         .expect("parse ok");
-        assert_eq!(messages.len(), 1, "loop inbound must be dropped");
+        assert_eq!(
+            messages.len(),
+            1,
+            "already-remote inbound must be dropped on process path; native maps once"
+        );
         match &messages[0] {
             WorkbenchRemoteStreamMessage::Event {
                 sequence,
-                event: WorkbenchRemoteEvent::TerminalOutput(payload),
+                event,
                 ..
             } => {
                 assert_eq!(*sequence, 3);
-                assert_eq!(payload.session_id, "remote:device-a:inner-session");
-                assert_eq!(payload.chunk, "ok");
+                match event {
+                    WorkbenchRemoteEvent::TerminalOutput(payload) => {
+                        assert_eq!(payload.session_id, "remote:device-a:inner-session");
+                        assert_eq!(payload.chunk, "ok");
+                    }
+                    other => panic!("expected mapped TerminalOutput, got {other:?}"),
+                }
+                // R38 H1：process 产出的 mapped event 已是 remote:；若 emit 再检查会误杀。
+                assert!(
+                    inbound_event_has_remote_entity_id(event),
+                    "mapped live event must report remote entity id; emit must not re-drop it (R38 H1)"
+                );
             }
             other => panic!("expected single mapped native event, got {other:?}"),
         }

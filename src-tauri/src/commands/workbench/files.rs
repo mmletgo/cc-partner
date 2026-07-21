@@ -321,10 +321,14 @@ pub(crate) async fn local_list_workbench_sessions(
 /// Business Logic（为什么需要这个函数）:
 ///     前端需要按项目查看本机或远端 terminal window；未选项目时保持本机列表，避免轮询全部远端设备。
 ///     R37 H3：远端 list 只能为 running 持有 session watch；非 running 释放，避免 leaked lease 挡 Gap inventory。
+///     R38 M2：list 只处理返回行时，peer 上消失的 session（无 status 事件）会永远占 watch；
+///     在 map 返回前按 project 做 last-seen running reconcile，释放 previous−running 差集。
 ///
 /// Code Logic（这个函数做什么）:
 ///     project_id 指向 remote shortcut 时先建立事件桥与项目映射，再转发到远端并映射 session/worktree id；
-///     list 响应后对 running ensure_session_watch、非 running release_session_watch；否则调用本地 helper。
+///     list 响应后对 running ensure_session_watch、非 running release_session_watch；
+///     收集本响应 running composite remote session ids，调用
+///     `reconcile_session_watches_for_project`；否则调用本地 helper。
 pub(crate) async fn list_workbench_sessions_for_state(
     state: &AppState,
     project_id: Option<String>,
@@ -340,6 +344,8 @@ pub(crate) async fn list_workbench_sessions_for_state(
                 .await?;
             // R37 H3：仅 running session ensure watch；listed 非 running 释放残留 lease，
             // 避免 exited/disconnected 永久占 subscribers 导致 Gap inventory incomplete。
+            // R38 M2：同时收集 running composite ids，供 project-scoped disappear reconcile。
+            let mut running_ids: Vec<String> = Vec::new();
             for item in &items {
                 let remote_session_id = remote_entity_id(&context.device_id, &item.id);
                 let status = item.status.trim();
@@ -347,12 +353,21 @@ pub(crate) async fn list_workbench_sessions_for_state(
                     let _ = state
                         .workbench_remote_event_bridges
                         .ensure_session_watch(&context.device_id, &remote_session_id);
+                    running_ids.push(remote_session_id);
                 } else {
                     let _ = state
                         .workbench_remote_event_bridges
                         .release_session_watch(&context.device_id, &remote_session_id);
                 }
             }
+            // R38 M2：释放上次 list 见过、本响应不再 running 的 session watch（含 list 中消失行）。
+            let _ = state
+                .workbench_remote_event_bridges
+                .reconcile_session_watches_for_project(
+                    &context.device_id,
+                    &context.local_project_id,
+                    &running_ids,
+                );
             return Ok(map_remote_session_dtos(
                 &context.device_id,
                 &context.local_project_id,

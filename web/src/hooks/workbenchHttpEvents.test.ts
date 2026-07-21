@@ -9,6 +9,7 @@ import {
   parseWorkbenchNdjsonFrame,
   parseWorkbenchNdjsonFrames,
   resolveCursorAfterGap,
+  resolveRemoteProjectDeviceId,
   resyncWorkbenchSessionsAfterGap,
   WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
   type WorkbenchNdjsonParserState,
@@ -416,15 +417,17 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
   });
 
   /**
-   * Business Logic（为什么需要这个测试）:
-   *   R37 M1：Mobile Gap inventory 必须覆盖 remote shortcut running sessions；
-   *   remote inventory 失败必须 fail-closed。
+   * Business Logic（R38 M1: 为什么需要这个测试）:
+   *   Mobile Gap inventory 必须覆盖 remote shortcut running sessions，
+   *   但默认 offline remote 不得 fail-closed 挡本机恢复；仅 active bridge 子集 fail-closed。
    *
    * Code Logic（这个测试做什么）:
-   *   listProjects 返回 local+remote；对 remote list(projectId)；union 去重后只 replay running；
-   *   remote list 失败上抛。
+   *   1) 成功 inventory：local+remote union 去重后只 replay running。
+   *   2) 默认（无 listActiveBridgeDevices）：remote list reject 不 throw，本机 running 仍 resync。
+   *   3) 注入 listActiveBridgeDevices 且含该 device：remote list 失败 throw。
+   *   4) resolveRemoteProjectDeviceId 优先 deviceId，否则解析 remote:device:...。
    */
-  test('resync inventories remote project sessions and fail-closes on remote list error', async () => {
+  test('resync inventories remote sessions; offline remote skips unless active bridge', async () => {
     const reset = vi.fn();
     const store = { reset } as unknown as WorkbenchTerminalBufferStore;
     const sessions = {
@@ -464,12 +467,40 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
     expect(reset).toHaveBeenCalledWith('local-run', 'buf', 1, 'own');
     expect(reset).toHaveBeenCalledWith('remote:dev:s1', 'buf', 9, 'own');
 
-    const failingRemote = {
+    // R38 M1 默认 skip-offline：remote reject 不得 throw，本机 running 仍完成 resync。
+    const localReset = vi.fn();
+    const localStore = { reset: localReset } as unknown as WorkbenchTerminalBufferStore;
+    const offlineRemote = {
       list: vi.fn(async (projectId?: string | null) => {
-        if (!projectId) return [];
+        if (!projectId) return [{ id: 'local-run', status: 'running' }];
         throw new Error('remote offline');
       }),
       listProjects: vi.fn(async () => [{ id: 'remote:dev:shortcut', kind: 'remote' }]),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: 'local-buf',
+        truncated: false,
+        lastSeq: 3,
+        ownerInstanceId: 'local-own',
+      })),
+    };
+    await expect(resyncWorkbenchSessionsAfterGap(localStore, offlineRemote)).resolves.toBeUndefined();
+    expect(offlineRemote.list).toHaveBeenCalledWith();
+    expect(offlineRemote.list).toHaveBeenCalledWith('remote:dev:shortcut');
+    expect(offlineRemote.replay).toHaveBeenCalledWith('local-run');
+    expect(localReset).toHaveBeenCalledWith('local-run', 'local-buf', 3, 'local-own');
+
+    // 注入非空 active bridge → 该 device 上 remote list 失败 fail-closed。
+    const activeBridgeFail = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) return [{ id: 'local-run', status: 'running' }];
+        throw new Error('remote offline');
+      }),
+      listProjects: vi.fn(async () => [
+        { id: 'remote:dev:shortcut', kind: 'remote', deviceId: 'dev' },
+        { id: 'remote:other:shortcut', kind: 'remote' },
+      ]),
+      listActiveBridgeDevices: vi.fn(async () => ['dev']),
       replay: vi.fn(async () => ({
         sessionId: 'x',
         buffer: '',
@@ -477,9 +508,19 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
         lastSeq: 0,
       })),
     };
-    await expect(resyncWorkbenchSessionsAfterGap(store, failingRemote)).rejects.toThrow(
+    await expect(resyncWorkbenchSessionsAfterGap(store, activeBridgeFail)).rejects.toThrow(
       /remote offline/,
     );
+    expect(activeBridgeFail.listActiveBridgeDevices).toHaveBeenCalledTimes(1);
+    expect(activeBridgeFail.list).toHaveBeenCalledWith('remote:dev:shortcut');
+    expect(activeBridgeFail.list).not.toHaveBeenCalledWith('remote:other:shortcut');
+
+    // resolveRemoteProjectDeviceId：deviceId 优先，否则 parse remote:device:...
+    expect(resolveRemoteProjectDeviceId({ id: 'remote:dev:p1', deviceId: 'explicit' })).toBe(
+      'explicit',
+    );
+    expect(resolveRemoteProjectDeviceId({ id: 'remote:dev:p1' })).toBe('dev');
+    expect(resolveRemoteProjectDeviceId({ id: 'local-p' })).toBeNull();
   });
 });
 

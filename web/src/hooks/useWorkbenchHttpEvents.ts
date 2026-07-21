@@ -101,22 +101,35 @@ export type WorkbenchNdjsonFrame =
  * Business Logic（为什么需要这个接口）:
  *   Gap 后必须对 running session 做权威 replay，测试不能打真实 HTTP。
  *   R37 M1：无 project 的 sessions.list 会漏 remote shortcut 会话，需可注入 listProjects。
+ *   R38 M1：offline remote shortcut 不得 fail-closed 挡本机恢复；可选 active bridge 设备才 fail-closed。
  *
  * Code Logic（字段说明）:
  *   list 返回至少含 id/status；replay 返回 buffer/lastSeq/可选 ownerInstanceId；
- *   listProjects 可选：返回至少 id/kind，remote 项目再按 projectId list。
+ *   listProjects 可选：返回至少 id/kind（可选 deviceId），remote 项目再按 projectId list；
+ *   listActiveBridgeDevices 可选：非空时仅 inventory 这些设备上的 remote，且失败 fail-closed。
  */
 export interface WorkbenchHttpEventsSessionDeps {
   list: (projectId?: string | null) => Promise<Array<{ id: string; status: string }>>;
   replay: (sessionId: string) => Promise<WorkbenchSessionReplay>;
   /**
    * Business Logic（为什么需要这个字段）:
-   *   Mobile Gap inventory 必须覆盖本机与全部 remote shortcut 的 running sessions。
+   *   Mobile Gap inventory 必须覆盖本机与 remote shortcut 的 running sessions。
    *
    * Code Logic（字段说明）:
-   *   返回至少 id + kind；kind===remote 时对每个 id 再 list(projectId)。
+   *   返回至少 id + kind；可选 deviceId；kind===remote 时再按策略 list(projectId)。
    */
-  listProjects?: () => Promise<Array<{ id: string; kind?: string }>>;
+  listProjects?: () => Promise<Array<{ id: string; kind?: string; deviceId?: string }>>;
+  /**
+   * Business Logic（为什么需要这个字段）:
+   *   对齐桌面 active-bridge：仅活跃 bridge 上的 remote 失败才应 fail-closed，
+   *   无关 offline remote 不得永久阻塞本机 Gap recovery。
+   *
+   * Code Logic（字段说明）:
+   *   可选：活跃 bridge 设备 id 列表。
+   *   非空时只 inventory 这些设备上的 remote project，且这些失败 fail-closed；
+   *   undefined 或空数组 → 全部 remote 走 skip-offline（错误 skip，不 throw）。
+   */
+  listActiveBridgeDevices?: () => Promise<string[]>;
 }
 
 /**
@@ -430,13 +443,39 @@ export function canOpenWorkbenchEventsRequest(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
- *   R37 M1：裸 sessions.list() 无 project 会漏 remote shortcut；存在 remote 时必须按项目 inventory。
+ *   Gap inventory 需要把 remote shortcut 归属到 owning device，
+ *   以便按 active bridge 过滤，避免 offline 设备永久挡本机恢复。
  *
  * Code Logic（这个函数做什么）:
- *   有 listProjects 时：对本机 list() + 每个 remote project list(projectId) 做 id 去重并集；
- *   remote shortcut 存在且任一 remote inventory 失败 → fail-closed 上抛。
- *   无 listProjects 时退回 sessions.list()（单测/兼容）。
+ *   优先返回 project.deviceId；否则解析 `remote:<deviceId>:<rest>` 的 device 段；
+ *   解析失败返回 null。
+ */
+export function resolveRemoteProjectDeviceId(project: {
+  id: string;
+  deviceId?: string;
+}): string | null {
+  if (typeof project.deviceId === 'string' && project.deviceId.trim().length > 0) {
+    return project.deviceId;
+  }
+  const match = /^remote:([^:]+):/.exec(project.id);
+  if (!match) return null;
+  const deviceId = match[1]?.trim();
+  return deviceId && deviceId.length > 0 ? deviceId : null;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
+ *   R37 M1：裸 sessions.list() 无 project 会漏 remote shortcut；存在 remote 时必须按项目 inventory。
+ *   R38 M1：默认 offline remote skip；仅注入非空 listActiveBridgeDevices 时对该子集 fail-closed。
+ *
+ * Code Logic（这个函数做什么）:
+ *   本机 sessions.list()（无 projectId）失败仍 throw。
+ *   有 listProjects 时取 kind===remote 的项目：
+ *   - listActiveBridgeDevices 返回非空：只 inventory deviceId 落在 active set 的 remote；失败 throw；
+ *     不在 active set 的 remote 完全跳过（不 list）。
+ *   - listActiveBridgeDevices 未提供或空数组：对每个 remote try list，成功 merge，失败 skip（不 throw）。
+ *   无 listProjects 时退回 sessions.list()。
  *   仅 status===running 调 replay → store.reset(sessionId, buffer, lastSeq, ownerInstanceId?)。
  */
 export async function resyncWorkbenchSessionsAfterGap(
@@ -445,6 +484,13 @@ export async function resyncWorkbenchSessionsAfterGap(
 ): Promise<void> {
   const byId = new Map<string, { id: string; status: string }>();
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   inventory 结果按 session id 去重合并，避免 local/remote 重复 replay。
+   *
+   * Code Logic（这个函数做什么）:
+   *   将 list 返回的行写入 byId Map（后写覆盖同 id）。
+   */
   const mergeListed = (rows: Array<{ id: string; status: string }>): void => {
     for (const row of rows) {
       if (!row.id) continue;
@@ -452,23 +498,37 @@ export async function resyncWorkbenchSessionsAfterGap(
     }
   };
 
+  // 本机全局 list（无 projectId）失败必须 throw，不得被 remote skip 掩盖。
+  mergeListed(await sessions.list());
+
   if (sessions.listProjects) {
     const projects = await sessions.listProjects();
     const remoteProjects = projects.filter((project) => project.kind === 'remote');
-    // 本机全局 list（无 projectId）覆盖 local running sessions。
-    mergeListed(await sessions.list());
+    const activeDevices = sessions.listActiveBridgeDevices
+      ? await sessions.listActiveBridgeDevices()
+      : [];
+    const activeSet =
+      activeDevices.length > 0 ? new Set(activeDevices.filter((id) => id.trim().length > 0)) : null;
+
     for (const project of remoteProjects) {
+      if (activeSet) {
+        const deviceId = resolveRemoteProjectDeviceId(project);
+        if (!deviceId || !activeSet.has(deviceId)) {
+          // 非活跃 bridge 上的 remote：完全跳过，不 list。
+          continue;
+        }
+        // 活跃 bridge remote：fail-closed。
+        mergeListed(await sessions.list(project.id));
+        continue;
+      }
+
+      // 默认 skip-offline：任意 list 错误都 skip 该 project，不 throw。
       try {
         mergeListed(await sessions.list(project.id));
-      } catch (error) {
-        // R37 M1：有 remote shortcut 时 inventory 必须完整，否则 fail-closed。
-        throw error instanceof Error
-          ? error
-          : new Error('remote session inventory failed during gap resync');
+      } catch {
+        // R38 M1：offline / unavailable remote 不得挡本机 Gap recovery。
       }
     }
-  } else {
-    mergeListed(await sessions.list());
   }
 
   for (const session of byId.values()) {
@@ -686,7 +746,8 @@ export function useWorkbenchHttpEvents({
     sessions ?? {
       list: (projectId) => httpWorkbenchTransport.sessions.list(projectId),
       replay: (sessionId) => httpWorkbenchTransport.sessions.replay(sessionId),
-      // R37 M1：默认注入 projects.list，使 Gap inventory 覆盖 remote shortcuts。
+      // R37 M1 / R38 M1：默认注入 projects.list 覆盖 remote shortcuts；
+      // 不注入 listActiveBridgeDevices → remote inventory 走 skip-offline。
       listProjects: () => httpWorkbenchTransport.projects.list(),
     },
   );
