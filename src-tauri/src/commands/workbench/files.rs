@@ -325,10 +325,11 @@ pub(crate) async fn local_list_workbench_sessions(
 ///     在 map 返回前按 project 做 last-seen running reconcile，释放 previous−running 差集。
 ///
 /// Code Logic（这个函数做什么）:
-///     project_id 指向 remote shortcut 时先 `require_project_not_closing`（R40 M2），
+///     project_id 指向 remote shortcut 时：
+///     R42 H2：先 `try_acquire_project_op_lease(project_id)`，lease 内 re-get durable project，
 ///     再建立事件桥与项目映射、转发远端 list 并映射 session/worktree id；
-///     R41 M1：remote 路径先 `try_acquire_project_op_lease`，持有至 RPC + bridge +
-///     watch reconcile 结束；RPC 后 revalidate project barrier。
+///     R41 M1：lease 持有至 RPC + bridge + watch reconcile 结束；RPC 后 revalidate project barrier。
+///     R42 M1：list 开始时捕获 project watch epoch；仅 epoch 未变时 reconcile。
 ///     list 响应后对 running ensure_session_watch、非 running release_session_watch；
 ///     收集本响应 running composite remote session ids，调用
 ///     `reconcile_session_watches_for_project`；否则调用本地 helper。
@@ -337,15 +338,19 @@ pub(crate) async fn list_workbench_sessions_for_state(
     project_id: Option<String>,
 ) -> Result<Vec<WorkbenchSessionDto>, AppError> {
     if let Some(project_id_value) = project_id.as_deref() {
+        // R42 H2：先 lease 再读 project，覆盖“get_project 后 remove 完成再 lease”的竞态。
+        let project_lease = state
+            .workbench_sessions
+            .try_acquire_project_op_lease(project_id_value)?;
         let project = get_project(state, project_id_value).await?;
         if project.kind == "remote" {
-            // R41 M1：ProjectOpLease 覆盖 remote list RPC + bridge ensure + watch reconcile，
-            // 防止 project remove 中途完成清理后旧响应再写回 watch/mapping。
-            let _project_lease = state
-                .workbench_sessions
-                .try_acquire_project_op_lease(project_id_value)?;
+            let _project_lease = project_lease;
             let context = ensure_remote_project_context(state, &project).await?;
             ensure_remote_event_bridge_for_context(state, &context);
+            // R42 M1：捕获 list 起点的 project watch epoch；create/note 会 bump，迟到的空 list 不得覆盖。
+            let list_epoch = state
+                .workbench_remote_event_bridges
+                .project_watch_epoch(&context.device_id, &context.local_project_id);
             let items = RemoteWorkbenchClient::new()
                 .with_expected_device_id(&context.device_id)
                 .list_sessions(&context.base_url, Some(&context.inner_project_id))
@@ -372,13 +377,14 @@ pub(crate) async fn list_workbench_sessions_for_state(
                         .release_session_watch(&context.device_id, &remote_session_id);
                 }
             }
-            // R38 M2：释放上次 list 见过、本响应不再 running 的 session watch（含 list 中消失行）。
+            // R38 M2 / R42 M1：epoch 未变时才 reconcile；变则跳过，防迟到空 list 撤销 create watch。
             let _ = state
                 .workbench_remote_event_bridges
-                .reconcile_session_watches_for_project(
+                .reconcile_session_watches_for_project_if_epoch(
                     &context.device_id,
                     &context.local_project_id,
                     &running_ids,
+                    list_epoch,
                 );
             return Ok(map_remote_session_dtos(
                 &context.device_id,
@@ -386,6 +392,7 @@ pub(crate) async fn list_workbench_sessions_for_state(
                 items,
             ));
         }
+        drop(project_lease);
     }
     local_list_workbench_sessions(state, project_id).await
 }

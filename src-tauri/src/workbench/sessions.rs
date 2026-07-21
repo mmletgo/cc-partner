@@ -2280,6 +2280,20 @@ impl ProjectOpLeaseState {
     }
 }
 
+/// project closing barrier 条目（R42 H1）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     merge cleanup 与 project remove 可能并发持有同一 project barrier；
+///     必须共享 generation + owner 计数，禁止后启动者覆盖并抢先 clear。
+///
+/// Code Logic（这个结构体做什么）:
+///     `generation` 是首次 begin 分配的屏障代际；`owners` 为嵌套 begin 引用计数。
+#[derive(Debug, Clone, Copy)]
+struct ProjectClosingBarrierEntry {
+    generation: u64,
+    owners: u32,
+}
+
 /// project 在途操作 lease 的 RAII 守卫（R27 H4）。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -2526,15 +2540,17 @@ pub struct WorkbenchSessionRegistry {
     ///     可撤销状态；第二个得到 `RestoreInProgress` 并可 wait。close 可 revoke generation，
     ///     禁止 holder 在 delete 后 re-upsert。
     restoring: Arc<Mutex<HashMap<String, Arc<RestoreClaimState>>>>,
-    /// 项目级 closing barrier generation（R26 M1）。
+    /// 项目级 closing barrier（R26 M1 / R42 H1）。
     ///
     /// Business Logic（为什么需要这个字段）:
     ///     project remove 从 snapshot 到 bulk delete 期间，并发 create/restore 不得
     ///     为已删除项目 spawn 出 orphan live session。
+    ///     并发 merge cleanup 与 project remove 交错时，后启动者不得覆盖并抢先清除 barrier。
     ///
     /// Code Logic（这个字段做什么）:
-    ///     project_id → barrier generation；create/restore revalidate 比对该 generation。
-    project_closing: Arc<Mutex<HashMap<String, u64>>>,
+    ///     project_id → `{generation, owners}`：同 project 二次 begin 加入同一 generation（owners++），
+    ///     仅当 matching generation 的最后 owner finish 才清除。
+    project_closing: Arc<Mutex<HashMap<String, ProjectClosingBarrierEntry>>>,
     /// 项目 barrier generation 单调分配器（R26 M1）。
     next_project_barrier_generation: Arc<AtomicU64>,
     /// 项目级 in-flight create/restore lease（R27 H4）。
@@ -3177,36 +3193,57 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     project remove 从 snapshot 到 bulk delete 期间，create/restore 不得再为该项目
-    ///     生成 orphan live session（R26 M1）。
+    ///     project remove / merge cleanup 从 snapshot 到 bulk delete 期间，create/restore
+    ///     不得再为该项目生成 orphan live session（R26 M1）。
+    ///     并发 cleanup 不得覆盖 active generation 并抢先 clear（R42 H1）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     分配新 generation 写入 `project_closing[project_id]` 并返回该 generation。
+    ///     若 barrier 已存在：owners++ 并返回既有 generation（join，不 steal）。
+    ///     否则分配新 generation，owners=1 写入 map 并返回。
     pub fn begin_project_closing_barrier(&self, project_id: &str) -> u64 {
-        let generation = self
-            .next_project_barrier_generation
-            .fetch_add(1, Ordering::SeqCst);
         let mut map = self
             .project_closing
             .lock()
             .expect("project_closing 锁中毒");
-        map.insert(project_id.to_string(), generation);
+        if let Some(entry) = map.get_mut(project_id) {
+            entry.owners = entry.owners.saturating_add(1);
+            return entry.generation;
+        }
+        let generation = self
+            .next_project_barrier_generation
+            .fetch_add(1, Ordering::SeqCst);
+        map.insert(
+            project_id.to_string(),
+            ProjectClosingBarrierEntry {
+                generation,
+                owners: 1,
+            },
+        );
         generation
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     bulk delete 成功后必须清除 barrier，允许同 project_id 再创建（若用户重新添加）。
+    ///     嵌套 cleanup 只有最后一个 owner 才能 clear（R42 H1）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     仅当 generation 匹配时 remove；否则 no-op。
+    ///     generation 不匹配 → no-op；匹配则 owners--，仅 owners 归零时 remove。
     pub fn finish_project_closing_barrier(&self, project_id: &str, generation: u64) {
         let mut map = self
             .project_closing
             .lock()
             .expect("project_closing 锁中毒");
-        if map.get(project_id).copied() == Some(generation) {
-            map.remove(project_id);
+        let Some(entry) = map.get_mut(project_id) else {
+            return;
+        };
+        if entry.generation != generation {
+            return;
         }
+        if entry.owners > 1 {
+            entry.owners -= 1;
+            return;
+        }
+        map.remove(project_id);
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -3308,6 +3345,35 @@ impl WorkbenchSessionRegistry {
             .lock()
             .expect("project_closing 锁中毒")
             .contains_key(project_id)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     单测验证嵌套 begin 的 owner 引用计数（R42 H1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 project_closing 中该 project 的 owners；无 barrier 时返回 0。
+    #[cfg(test)]
+    pub fn project_closing_owners_for_test(&self, project_id: &str) -> u32 {
+        self.project_closing
+            .lock()
+            .expect("project_closing 锁中毒")
+            .get(project_id)
+            .map(|e| e.owners)
+            .unwrap_or(0)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     单测读取 active barrier generation（R42 H1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 generation；无 barrier 时返回 None。
+    #[cfg(test)]
+    pub fn project_closing_generation_for_test(&self, project_id: &str) -> Option<u64> {
+        self.project_closing
+            .lock()
+            .expect("project_closing 锁中毒")
+            .get(project_id)
+            .map(|e| e.generation)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -5123,9 +5189,12 @@ impl WorkbenchSessionRegistry {
 
     /// Business Logic（为什么需要这个函数）:
     ///     应用退出时，运行期 PTY attach 应被显式终止；tmux 后端的真实 shell 上下文要保留给下次重连。
+    ///     R42 M4：close kill 失败后的 generation-scoped handle 也必须再试 kill，
+    ///     否则进程退出后内存句柄丢失、raw PTY 可能成为不可恢复孤儿。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     遍历 registry 中全部会话句柄，逐个尽力 kill 仍运行的 PTY child，并把内存状态标记为 disconnected。
+    ///     遍历 registry 中全部会话句柄，逐个尽力 kill 仍运行的 PTY child，并把内存状态标记为 disconnected；
+    ///     再 drain `failed_kill_handles` 并对仍存活 child 再次 kill。
     pub fn shutdown_all(&self) -> usize {
         let handles: Vec<Arc<Mutex<WorkbenchSessionHandle>>> = self
             .sessions
@@ -5144,6 +5213,28 @@ impl WorkbenchSessionRegistry {
                         if let Err(error) = normalize_terminal_kill_result(child.kill()) {
                             tracing::debug!("清理工作台终端时 kill 失败: {error}");
                         }
+                    }
+                }
+                SessionProcess::Fake => {}
+            }
+            handle.row.status = "disconnected".to_string();
+            handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
+            handle.row.updated_at = chrono::Utc::now().to_rfc3339();
+        }
+        // R42 M4：drain failed_kill_handles 并再次 kill，避免 close 失败后直接退出留下孤儿。
+        let failed_handles: Vec<Arc<Mutex<WorkbenchSessionHandle>>> = {
+            let mut map = self
+                .failed_kill_handles
+                .lock()
+                .expect("failed_kill_handles 锁中毒");
+            map.drain().map(|(_, handle)| handle).collect()
+        };
+        for handle in failed_handles {
+            let mut handle = handle.lock().expect("workbench session 锁中毒");
+            match &mut handle.process {
+                SessionProcess::Pty { child, .. } => {
+                    if let Err(error) = normalize_terminal_kill_result(child.kill()) {
+                        tracing::debug!("shutdown 重试 failed_kill_handles kill 失败: {error}");
                     }
                 }
                 SessionProcess::Fake => {}
@@ -9600,6 +9691,42 @@ mod tests {
         );
         registry.finish_project_closing_barrier("p-r26-m1", gen2);
         assert!(!registry.has_project_closing_barrier_for_test("p-r26-m1"));
+    }
+
+    /// Business Logic（R42 H1: 为什么需要这个测试）:
+    ///     并发 merge cleanup 与 project remove 必须 join 同一 barrier，禁止后启动者
+    ///     覆盖 generation 并抢先 clear，留下前一个 owner 窗口中的 orphan live。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     double begin 返回同一 generation 且 owners=2；
+    ///     第一次 finish 后 barrier 仍在；第二次 finish 才 clear；
+    ///     错误 generation finish 全程 no-op。
+    #[test]
+    fn project_closing_barrier_double_begin_joins_and_wrong_finish_is_noop() {
+        let registry = WorkbenchSessionRegistry::new();
+        let gen1 = registry.begin_project_closing_barrier("p-r42-h1");
+        let gen2 = registry.begin_project_closing_barrier("p-r42-h1");
+        assert_eq!(gen1, gen2, "second begin must join same generation");
+        assert_eq!(
+            registry.project_closing_generation_for_test("p-r42-h1"),
+            Some(gen1)
+        );
+        assert_eq!(registry.project_closing_owners_for_test("p-r42-h1"), 2);
+        // 错误 generation finish 不得减少 owners 或 clear。
+        registry.finish_project_closing_barrier("p-r42-h1", gen1.wrapping_add(99));
+        assert_eq!(registry.project_closing_owners_for_test("p-r42-h1"), 2);
+        assert!(registry.has_project_closing_barrier_for_test("p-r42-h1"));
+        // 第一个 owner finish：仍 active。
+        registry.finish_project_closing_barrier("p-r42-h1", gen1);
+        assert!(
+            registry.has_project_closing_barrier_for_test("p-r42-h1"),
+            "first finish of nested owners must keep barrier"
+        );
+        assert_eq!(registry.project_closing_owners_for_test("p-r42-h1"), 1);
+        // 最后一个 owner finish：clear。
+        registry.finish_project_closing_barrier("p-r42-h1", gen2);
+        assert!(!registry.has_project_closing_barrier_for_test("p-r42-h1"));
+        assert_eq!(registry.project_closing_owners_for_test("p-r42-h1"), 0);
     }
 
     /// Business Logic（R26 M1: 为什么需要这个测试）:

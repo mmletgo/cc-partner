@@ -744,6 +744,14 @@ struct BridgeRuntimeState {
     after_cursor: Mutex<Option<BackendRuntimeCursor>>,
     /// local_project_id -> 上次 list 见过的 running remote session ids（R38 M2）。
     project_running_sessions: Mutex<HashMap<String, HashSet<String>>>,
+    /// local_project_id -> project watch mutation epoch（R42 M1）。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     迟到的空 list 快照不得撤销 list 发起后 create 新建的 watch。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     create/note 与成功 reconcile 时 bump；list 起点捕获 epoch，仅 epoch 未变才 commit reconcile。
+    project_watch_epochs: Mutex<HashMap<String, u64>>,
 }
 
 impl BridgeRuntimeState {
@@ -764,6 +772,7 @@ impl BridgeRuntimeState {
             watch_keys: Mutex::new(HashSet::new()),
             after_cursor: Mutex::new(None),
             project_running_sessions: Mutex::new(HashMap::new()),
+            project_watch_epochs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -804,15 +813,49 @@ impl BridgeRuntimeState {
     ///     watch 会永久占 subscribers（R41 M2）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     将 session_id 幂等插入 project_running_sessions[project_local_id]；不 touch、不改 watch_keys。
+    ///     将 session_id 幂等插入 project_running_sessions[project_local_id]；
+    ///     若为新 session 则 bump project_watch_epochs；不 touch、不改 watch_keys。
     fn note_project_running_session(&self, project_local_id: &str, session_id: &str) {
-        let mut map = self
-            .project_running_sessions
+        let inserted = {
+            let mut map = self
+                .project_running_sessions
+                .lock()
+                .expect("bridge project_running_sessions 锁中毒");
+            map.entry(project_local_id.to_string())
+                .or_default()
+                .insert(session_id.to_string())
+        };
+        if inserted {
+            self.bump_project_watch_epoch(project_local_id);
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     create/note 会改变 project 的权威 running 集合；list 必须能检测到该变化（R42 M1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     project_watch_epochs[project] = prev.saturating_add(1)（缺省 prev=0）。
+    fn bump_project_watch_epoch(&self, project_local_id: &str) {
+        let mut epochs = self
+            .project_watch_epochs
             .lock()
-            .expect("bridge project_running_sessions 锁中毒");
-        map.entry(project_local_id.to_string())
-            .or_default()
-            .insert(session_id.to_string());
+            .expect("bridge project_watch_epochs 锁中毒");
+        let entry = epochs.entry(project_local_id.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     list 在发起 RPC 前捕获 epoch，reconcile 时比对是否仍匹配。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 project_watch_epochs[project]，缺省 0。
+    fn project_watch_epoch(&self, project_local_id: &str) -> u64 {
+        self.project_watch_epochs
+            .lock()
+            .expect("bridge project_watch_epochs 锁中毒")
+            .get(project_local_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -895,16 +938,52 @@ impl BridgeRuntimeState {
     /// Business Logic（为什么需要这个函数）:
     ///     list reconcile 只处理返回行；peer list 中消失的 running session（无 status 事件）
     ///     会永远占 watch。按 project 比较上次见过的 running ids 并释放差集（R38 M2）。
+    ///     R42 M1：list 发起后 create 可能 note 新 session；expected_epoch 不匹配时跳过 commit。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     取 previous set；对 previous−running 每个 session key 调 release_watch_key；
-    ///     写入 previous=running（HashSet）；不碰其它 project 与 `__device__`；返回 released 数量。
+    ///     若 expected_epoch 与当前 project_watch_epochs 不一致 → 返回 0 且不改 map；
+    ///     否则取 previous set；对 previous−running 每个 session key 调 release_watch_key；
+    ///     写入 previous=running（HashSet），并 bump epoch；不碰其它 project 与 `__device__`；
+    ///     返回 released 数量。
     fn reconcile_project_running_sessions(
         &self,
         project_local_id: &str,
         running_session_ids: &[String],
     ) -> usize {
+        self.reconcile_project_running_sessions_if_epoch(project_local_id, running_session_ids, None)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     迟到 list 必须在 create/note 之后检测 epoch 变化，避免释放 create 新建的 watch（R42 M1）。
+    ///     epoch 不匹配时仍 union 当前 running，但**禁止 release**（并发 list 也不得互相抹掉）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     expected_epoch=Some 且与当前不一致 → union running 到 map，不 release，返回 0；
+    ///     否则 full replace + release previous−running + bump epoch；
+    ///     expected_epoch=None 时无条件 full reconcile（Gap resync 权威路径）。
+    fn reconcile_project_running_sessions_if_epoch(
+        &self,
+        project_local_id: &str,
+        running_session_ids: &[String],
+        expected_epoch: Option<u64>,
+    ) -> usize {
         let running_set: HashSet<String> = running_session_ids.iter().cloned().collect();
+        if let Some(expected) = expected_epoch {
+            let current = self.project_watch_epoch(project_local_id);
+            if current != expected {
+                // Stale list：只合并 running，绝不 release create 后新 note 的 session。
+                if !running_set.is_empty() {
+                    let mut map = self
+                        .project_running_sessions
+                        .lock()
+                        .expect("bridge project_running_sessions 锁中毒");
+                    map.entry(project_local_id.to_string())
+                        .or_default()
+                        .extend(running_set);
+                }
+                return 0;
+            }
+        }
         let previous = {
             let map = self
                 .project_running_sessions
@@ -918,11 +997,15 @@ impl BridgeRuntimeState {
                 released += 1;
             }
         }
-        let mut map = self
-            .project_running_sessions
-            .lock()
-            .expect("bridge project_running_sessions 锁中毒");
-        map.insert(project_local_id.to_string(), running_set);
+        {
+            let mut map = self
+                .project_running_sessions
+                .lock()
+                .expect("bridge project_running_sessions 锁中毒");
+            map.insert(project_local_id.to_string(), running_set);
+        }
+        // 成功 full reconcile 后 bump epoch，使更早 list 无法再 release 本结果。
+        self.bump_project_watch_epoch(project_local_id);
         released
     }
 
@@ -1264,6 +1347,39 @@ impl RemoteEventBridgeRegistry {
         true
     }
 
+    /// Business Logic（为什么需要这个函数）:
+    ///     list 在发起 RPC 前需要捕获 project watch epoch，供 reconcile 防 stale 覆盖（R42 M1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 device task 后返回 runtime.project_watch_epoch；无 task 时返回 0。
+    pub fn project_watch_epoch(&self, device_id: &str, project_local_id: &str) -> u64 {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return 0;
+        };
+        task.runtime.project_watch_epoch(project_local_id)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Gap resync 需对 previous−listed 投影 disconnected，防止 UI 永久 running（R42 M3）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 project_running_sessions[project] 的克隆；无 task/key 时返回空 Vec。
+    pub fn project_running_session_ids(
+        &self,
+        device_id: &str,
+        project_local_id: &str,
+    ) -> Vec<String> {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return Vec::new();
+        };
+        let map = task.runtime.clone_project_running_sessions();
+        map.get(project_local_id)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// 返回仍在运行的 bridge 上已映射的本机 shortcut projectId 列表（R41 M4）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -1333,6 +1449,31 @@ impl RemoteEventBridgeRegistry {
         let _ = task
             .runtime
             .reconcile_project_running_sessions(project_local_id, running_session_ids);
+        true
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     list 路径在捕获 epoch 后 reconcile；create 期间 epoch 变化时跳过 stale 覆盖（R42 M1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 task 后调 runtime.reconcile_project_running_sessions_if_epoch(Some(epoch))；
+    ///     无 task 时 no-op 返回 false。
+    pub fn reconcile_session_watches_for_project_if_epoch(
+        &self,
+        device_id: &str,
+        project_local_id: &str,
+        running_session_ids: &[String],
+        expected_epoch: u64,
+    ) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        let _ = task.runtime.reconcile_project_running_sessions_if_epoch(
+            project_local_id,
+            running_session_ids,
+            Some(expected_epoch),
+        );
         true
     }
 
@@ -2196,10 +2337,13 @@ fn after_cursor_after_gap_resync(
 /// Business Logic（为什么需要这个函数）:
 ///     远端 ring 截断/owner 重启后 live 事件缺口必须用 sessions.list + sessions.replay
 ///     权威 cutover，再允许 after_cursor 前进；否则 GUI 终端永久停更。
+///     R42 M3：非 running listed sessions 必须投影 terminalStatus；收集 running ids 并
+///     project-scoped reconcile；lifecycle/watch 完成前不得 Ok（调用方才推进 cursor）。
 ///
 /// Code Logic（这个函数做什么）:
-///     遍历 bridge project_ids 映射的远端 project：list running sessions → replay →
-///     映射 remote entity id 与 composite authority → emit workbench:terminal-resync；
+///     遍历 bridge project_ids 映射的远端 project：list all sessions →
+///     running 则 replay+resync；非 running 则 emit TerminalStatus；
+///     每项目 reconcile_session_watches_for_project(running_ids)；
 ///     取消 → Cancelled；list/replay 失败 → Network（不推进 cursor）；零会话仍 Ok。
 async fn resync_remote_bridge_after_gap(
     state: &AppState,
@@ -2218,7 +2362,8 @@ async fn resync_remote_bridge_after_gap(
     let local_bus_owner = state.config_runtime.owner_instance_id().to_string();
     let client = crate::workbench::remote_client::RemoteWorkbenchClient::new()
         .with_expected_device_id(device_id);
-    for (inner_project_id, _local_shortcut_id) in project_map {
+    let now_ts = chrono::Utc::now().timestamp_millis();
+    for (inner_project_id, local_shortcut_id) in project_map {
         if cancel.is_cancelled() {
             return Err(EventStreamError::Cancelled);
         }
@@ -2226,19 +2371,44 @@ async fn resync_remote_bridge_after_gap(
             .list_sessions(base_url, Some(inner_project_id.as_str()))
             .await
             .map_err(|_| EventStreamError::Network)?;
+        let previous_ids: HashSet<String> = if !local_shortcut_id.trim().is_empty() {
+            state
+                .workbench_remote_event_bridges
+                .project_running_session_ids(device_id, &local_shortcut_id)
+                .into_iter()
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let mut running_ids: Vec<String> = Vec::new();
+        let mut listed_ids: HashSet<String> = HashSet::new();
         for session in sessions {
             if cancel.is_cancelled() {
                 return Err(EventStreamError::Cancelled);
             }
             let status = session.status.trim();
-            if !status.is_empty() && !status.eq_ignore_ascii_case("running") {
+            let remote_session_id = remote_entity_id(device_id, &session.id);
+            listed_ids.insert(remote_session_id.clone());
+            let is_running = status.is_empty() || status.eq_ignore_ascii_case("running");
+            if !is_running {
+                // R42 M3：投影 listed 非 running 终态，避免 Gap 中 status 事件被越过后 UI 永 running。
+                let status_payload = WorkbenchTerminalStatusPayload {
+                    session_id: remote_session_id.clone(),
+                    status: status.to_string(),
+                    exit_code: None,
+                    ts: now_ts,
+                };
+                emit_mapped_remote_event(
+                    state,
+                    WorkbenchRemoteEvent::TerminalStatus(status_payload),
+                );
                 continue;
             }
+            running_ids.push(remote_session_id.clone());
             let mut replay = client
                 .replay(base_url, &session.id)
                 .await
                 .map_err(|_| EventStreamError::Network)?;
-            let remote_session_id = remote_entity_id(device_id, &session.id);
             replay.session_id = remote_session_id.clone();
             let remote_owner = replay.owner_instance_id.clone();
             replay.owner_instance_id = Some(
@@ -2259,6 +2429,29 @@ async fn resync_remote_bridge_after_gap(
                 crate::backend::ui::WORKBENCH_TERMINAL_RESYNC_EVENT,
                 replay,
             );
+        }
+        // R42 M3：previous−listed 投影 disconnected，防止 UI 永久保留 running。
+        for missing_id in previous_ids.difference(&listed_ids) {
+            let status_payload = WorkbenchTerminalStatusPayload {
+                session_id: missing_id.clone(),
+                status: "disconnected".to_string(),
+                exit_code: None,
+                ts: now_ts,
+            };
+            emit_mapped_remote_event(
+                state,
+                WorkbenchRemoteEvent::TerminalStatus(status_payload),
+            );
+        }
+        // R42 M3：lifecycle/watch 对账完成后再允许调用方推进 cursor。
+        if !local_shortcut_id.trim().is_empty() {
+            let _ = state
+                .workbench_remote_event_bridges
+                .reconcile_session_watches_for_project(
+                    device_id,
+                    &local_shortcut_id,
+                    &running_ids,
+                );
         }
     }
     Ok(())
@@ -3163,6 +3356,52 @@ mod tests {
         let project_a = map.get("project-a").expect("project-a tracked");
         assert!(project_a.contains("remote:dev:s1"));
         assert!(!project_a.contains("remote:dev:s2"));
+    }
+
+    /// Business Logic（R42 M1: 为什么需要这个测试）:
+    ///     迟到的空 list 不得撤销 list 发起后 create 新建的 watch。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     full reconcile seed 后捕获 epoch；note 新 session（bump）；
+    ///     用旧 epoch 空 list reconcile → released=0 且新 session watch 仍在。
+    #[test]
+    fn stale_list_epoch_must_not_release_create_noted_session() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:old"));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:old".into()]),
+            0
+        );
+        let epoch_at_list_start = runtime.project_watch_epoch("project-a");
+        // create 路径 note 新 session 并 retain watch。
+        assert!(runtime.retain_watch_key("remote:dev:new"));
+        runtime.note_project_running_session("project-a", "remote:dev:new");
+        assert!(
+            runtime.project_watch_epoch("project-a") > epoch_at_list_start,
+            "note must bump epoch"
+        );
+        // 迟到的空 list 用旧 epoch：不得 release create 的 new。
+        assert_eq!(
+            runtime.reconcile_project_running_sessions_if_epoch(
+                "project-a",
+                &[],
+                Some(epoch_at_list_start),
+            ),
+            0
+        );
+        let keys = runtime.clone_watch_keys();
+        assert!(
+            keys.contains("remote:dev:new"),
+            "stale empty list must not release create-noted session"
+        );
+        assert!(
+            keys.contains("remote:dev:old"),
+            "stale empty list must not release previous either"
+        );
+        let map = runtime.clone_project_running_sessions();
+        let project_a = map.get("project-a").expect("project-a");
+        assert!(project_a.contains("remote:dev:new"));
+        assert!(project_a.contains("remote:dev:old"));
     }
 
     /// Business Logic（R38 M2: 为什么需要这个测试）:

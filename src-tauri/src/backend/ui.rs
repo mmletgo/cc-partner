@@ -661,27 +661,143 @@ async fn list_sessions_for_gap_resync(
     if cancel.is_some_and(|c| c.is_cancelled()) {
         return Err(AppError::generic("cancelled"));
     }
-    // R41 M4：项目级 active inventory；失败无法证明无远端源 → incomplete。
-    // 空集合 = 无活跃映射远端源，跳过 projects.list（对齐 R40 空 active 语义）。
-    let active_mapped_projects: Vec<String> = client
-        .workbench_op("bridges.active_mapped_projects", json!({}))
+    // R41 M4 / R42 M5：优先项目级 active inventory。
+    // 旧 sidecar 未知 op 时 graceful fallback 到 active_devices + projects.list + skip-offline，
+    // 禁止 unknown-op 永久 incomplete 阻塞 Gap 恢复。
+    match client
+        .workbench_op::<Vec<String>>("bridges.active_mapped_projects", json!({}))
+        .await
+    {
+        Ok(active_mapped_projects) => {
+            if active_mapped_projects.is_empty() {
+                return Ok(by_id.into_values().collect());
+            }
+            for project_id in active_mapped_projects {
+                if cancel.is_some_and(|c| c.is_cancelled()) {
+                    return Err(AppError::generic("cancelled"));
+                }
+                let project_id = project_id.trim().to_string();
+                if project_id.is_empty() {
+                    continue;
+                }
+                let remote_sessions: Vec<Value> = client
+                    .workbench_op(
+                        "sessions.list",
+                        json!({ "projectId": project_id }),
+                    )
+                    .await
+                    .map_err(|e| {
+                        AppError::generic(format!(
+                            "gap_resync_remote_list_failed:{}",
+                            e.code()
+                        ))
+                    })?;
+                for session in remote_sessions {
+                    if let Some(id) = session
+                        .get("id")
+                        .or_else(|| session.get("sessionId"))
+                        .and_then(|v| v.as_str())
+                    {
+                        by_id.insert(id.to_string(), session);
+                    }
+                }
+            }
+            return Ok(by_id.into_values().collect());
+        }
+        Err(error) if is_unknown_workbench_control_op_error(&error) => {
+            tracing::warn!(
+                error = %error,
+                "bridges.active_mapped_projects unsupported; falling back to active_devices inventory"
+            );
+            list_sessions_for_gap_resync_legacy_active_devices(client, cancel, by_id).await
+        }
+        Err(error) => Err(AppError::generic(format!(
+            "gap_resync_active_mapped_projects_failed:{}",
+            error.code()
+        ))),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     新 GUI 可能连上未实现 `bridges.active_mapped_projects` 的旧 sidecar；
+///     若把 unknown-op 当永久 incomplete，Gap 恢复会卡死（R42 M5）。
+///
+/// Code Logic（这个函数做什么）:
+///     识别 validation 消息中的「未知 workbench control op」/ unknown op 形态。
+fn is_unknown_workbench_control_op_error(error: &AppError) -> bool {
+    let code = error.code();
+    let msg = error.to_string();
+    let lower = msg.to_ascii_lowercase();
+    code.contains("未知 workbench control op")
+        || lower.contains("未知 workbench control op")
+        || lower.contains("unknown workbench control op")
+        || (lower.contains("unknown") && lower.contains("op") && lower.contains("workbench"))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     旧 sidecar 无 mapped-projects op 时，回退 R40 active_devices + projects.list 路径，
+///     跳过无活跃桥的 offline shortcut，避免无关项目阻断本机 cutover（R42 M5）。
+///
+/// Code Logic（这个函数做什么）:
+///     bridges.active_devices → projects.list → 仅 deviceId ∈ active 的 remote 调 sessions.list；
+///     合并进 by_id 后返回。
+async fn list_sessions_for_gap_resync_legacy_active_devices(
+    client: &BackendControlClient,
+    cancel: Option<&CancellationToken>,
+    mut by_id: std::collections::BTreeMap<String, Value>,
+) -> Result<Vec<Value>, AppError> {
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(AppError::generic("cancelled"));
+    }
+    let active_devices: Vec<String> = client
+        .workbench_op("bridges.active_devices", json!({}))
         .await
         .map_err(|e| {
             AppError::generic(format!(
-                "gap_resync_active_mapped_projects_failed:{}",
+                "gap_resync_active_bridges_failed:{}",
                 e.code()
             ))
         })?;
-    if active_mapped_projects.is_empty() {
-        return Ok(by_id.into_values().collect());
-    }
+    let active_device_set: std::collections::HashSet<String> =
+        active_devices.into_iter().collect();
 
-    for project_id in active_mapped_projects {
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(AppError::generic("cancelled"));
+    }
+    let projects: Vec<Value> = client
+        .workbench_op("projects.list", json!({}))
+        .await
+        .map_err(|e| {
+            AppError::generic(format!("gap_resync_projects_list_failed:{}", e.code()))
+        })?;
+
+    for project in projects {
         if cancel.is_some_and(|c| c.is_cancelled()) {
             return Err(AppError::generic("cancelled"));
         }
-        let project_id = project_id.trim().to_string();
-        if project_id.is_empty() {
+        let kind = project
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("local");
+        if !kind.eq_ignore_ascii_case("remote") {
+            continue;
+        }
+        let Some(project_id) = project
+            .get("id")
+            .or_else(|| project.get("projectId"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
+            continue;
+        };
+        let device_id = project
+            .get("deviceId")
+            .or_else(|| project.get("device_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if device_id.is_empty() || !active_device_set.contains(&device_id) {
             continue;
         }
         let remote_sessions: Vec<Value> = client
@@ -691,7 +807,6 @@ async fn list_sessions_for_gap_resync(
             )
             .await
             .map_err(|e| {
-                // 活跃映射远端源 inventory 失败：不得 attach latest 越过该源缺口。
                 AppError::generic(format!(
                     "gap_resync_remote_list_failed:{}",
                     e.code()

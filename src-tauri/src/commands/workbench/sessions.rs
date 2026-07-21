@@ -220,7 +220,8 @@ pub async fn replay_workbench_session(
 ///     用户在 remote shortcut 上打开终端时，真实 shell 应运行在远端设备；本机项目仍走本机 registry。
 ///
 /// Code Logic（这个函数做什么）:
-///     remote：`try_acquire_project_op_lease` 后 open context、create-session、最终 revalidate；
+///     remote：先 `try_acquire_project_op_lease(project_id)`，lease 内 re-get durable project，
+///     再 open context、create-session、最终 revalidate；
 ///     revalidate 失败 best-effort close 远端 session；成功则
 ///     `ensure_session_watch_for_project` 登记 watch+project map 并映射 DTO。
 ///     local：委托 local_create（自身已持 project lease）。
@@ -231,13 +232,15 @@ pub(crate) async fn create_workbench_session_for_state(
     initial_cols: Option<u16>,
     initial_rows: Option<u16>,
 ) -> Result<WorkbenchSessionDto, AppError> {
+    // R42 H2：先按 project_id 取得 lease（不读 project 快照），再在 lease 内 re-get。
+    // 若非 remote，立刻释放 lease 并走 local_create（其内部会重新 acquire）。
+    let project_lease = state
+        .workbench_sessions
+        .try_acquire_project_op_lease(&project_id)?;
     let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        // R41 M1：ProjectOpLease 覆盖 remote create RPC + mapping + project-scoped watch，
-        // 与 local create 一样防止 remove barrier 与在途 create 交错留下孤儿终端。
-        let _project_lease = state
-            .workbench_sessions
-            .try_acquire_project_op_lease(&project_id)?;
+        // R41 M1 / R42 H2：ProjectOpLease 全程覆盖 remote create RPC + mapping + project-scoped watch。
+        let _project_lease = project_lease;
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         ensure_remote_event_bridge_for_context(state, &context);
@@ -295,6 +298,7 @@ pub(crate) async fn create_workbench_session_for_state(
             );
         return Ok(session);
     }
+    drop(project_lease);
     local_create_workbench_session(state, project_id, worktree_id, initial_cols, initial_rows).await
 }
 
@@ -1619,16 +1623,21 @@ pub async fn get_claude_session_preview(
 ///     local 分支：读 config.github_trending.claude_cli_path → check_claude_cli_available（失败转中文业务错误）
 ///     → resolve_worktree → local_create_workbench_session（默认 120x32）→ local_write_workbench_session_input 注入 resume 命令
 ///     → 返回 ResumeClaudeSessionResult（sessionId 为本机新建 terminal id）。
-///     remote 分支：解析 inner worktreeId → 委托 remote_client.resume_claude_session → 把 inner sessionId 包装为
-///     `remote:<device_id>:<inner_session_id>` 返回。
+///     remote 分支（R42 H3）：先 project lease → re-get project → resume RPC → revalidate；
+///     失败补偿 close 远端 session；成功 ensure_session_watch_for_project 并返回 wrapped id。
 pub(crate) async fn resume_claude_session_for_state(
     state: &AppState,
     project_id: &str,
     worktree_id: Option<&str>,
     session_id: &str,
 ) -> Result<ResumeClaudeSessionResult, AppError> {
+    // R42 H3：remote resume 实际会创建 terminal；与 create 一样先 lease 再读项目。
+    let project_lease = state
+        .workbench_sessions
+        .try_acquire_project_op_lease(project_id)?;
     let project = get_project(state, project_id).await?;
     if project.kind == "remote" {
+        let _project_lease = project_lease;
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id =
             remote_inner_worktree_id(&context.device_id, worktree_id.map(str::to_string))?;
@@ -1642,13 +1651,44 @@ pub(crate) async fn resume_claude_session_for_state(
             .with_expected_device_id(&context.device_id)
             .resume_claude_session(&context.base_url, req)
             .await?;
+        // R42 H3：远端已创建 terminal 后若 project 进入 closing，补偿 close 并 fail-closed。
+        if state
+            .workbench_sessions
+            .require_project_not_closing(project_id)
+            .is_err()
+        {
+            let inner_session_id = remote_result.session_id.clone();
+            if let Err(close_error) = RemoteWorkbenchClient::new()
+                .with_expected_device_id(&context.device_id)
+                .close_session(&context.base_url, &inner_session_id)
+                .await
+            {
+                tracing::debug!(
+                    error = %close_error,
+                    session_id = %inner_session_id,
+                    "remote resume compensation close failed after project closing"
+                );
+            }
+            return Err(AppError::unavailable(
+                "project_closing_barrier_active".to_string(),
+            ));
+        }
         // 把远端新建的 inner terminal sessionId 包装成本机统一 remote sessionId
         let wrapped = remote_entity_id(&context.device_id, &remote_result.session_id);
+        // R42 H3：project-scoped watch，避免依赖前端 loadSessions 补建。
+        let _ = state
+            .workbench_remote_event_bridges
+            .ensure_session_watch_for_project(
+                &context.device_id,
+                &context.local_project_id,
+                &wrapped,
+            );
         return Ok(ResumeClaudeSessionResult {
             ok: remote_result.ok,
             session_id: wrapped,
         });
     }
+    drop(project_lease);
     // local 分支：先检测 Claude CLI 可用，失败给清晰中文错误
     let cli_path = state
         .config
