@@ -1459,35 +1459,32 @@ fn create_tmux_window(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     关闭最后一个 pane 会关闭所属 window；worktree tmux session 只剩最后一个 window 时必须销毁整个 session。
-///     R32 H1：list-windows 探测失败不得降级 kill-session，避免毁掉同 worktree 兄弟 terminal。
+///     关闭 terminal window 时需销毁对应 tmux 后端；R36 H1：已知 window_id 时永远只 kill-window，
+///     禁止用 count==1 降级 kill-session——并发/重试 close 可能先杀掉目标窗，再把 count==1 误读为
+///     “只剩自己”而 kill 整个 session，毁掉仍存活的兄弟 terminal。末窗 kill-window 后 tmux 会自行
+///     回收空 session。仅 legacy 行缺 window_id 且 count 可知时才 kill-session。
+///     R32 H1：list-windows 探测失败不得降级 kill-session。
 ///
 /// Code Logic（这个函数做什么）:
-///     - 已知 window_id 且 count>1 → kill-window；
-///     - 已知 window_id 但 list-windows 失败（count=None）→ 仍 kill-window only；
-///     - 已知 count==1 或无 window_id 且 count 可知 → kill-session；
-///     - window_id 缺失且 list-windows 失败 → None（fail closed，不发 kill-session）。
+///     - window_id = Some → 始终 `kill-window -t session:window`（忽略 count，含 count=1/None）；
+///     - window_id = None 且 count 可知 → `kill-session -t session`（legacy 路径）；
+///     - window_id = None 且 count=None → None（fail closed，不发 kill-session）。
 fn tmux_destroy_backend_args(
     session_name: &str,
     window_id: Option<&str>,
     window_count: Option<usize>,
 ) -> Option<Vec<String>> {
     match (window_id, window_count) {
-        (Some(window_id), Some(count)) if count > 1 => Some(vec![
-            "kill-window".to_string(),
-            "-t".to_string(),
-            tmux_window_target(session_name, window_id),
-        ]),
-        // R32 H1：探测失败但有已知 window_id → 仅 kill 该 window，永不 kill-session。
-        (Some(window_id), None) => Some(vec![
+        // R36 H1 / R32 H1：有 window_id 永远只杀该 window，永不 kill-session。
+        (Some(window_id), _) => Some(vec![
             "kill-window".to_string(),
             "-t".to_string(),
             tmux_window_target(session_name, window_id),
         ]),
         // 探测失败且无 window_id：fail closed，禁止盲杀整 session。
         (None, None) => None,
-        // 最后一窗 / 旧记录缺 window_id 但 count 可知 → kill-session。
-        _ => Some(vec![
+        // legacy：缺 window_id 但 count 可知 → kill-session。
+        (None, Some(_)) => Some(vec![
             "kill-session".to_string(),
             "-t".to_string(),
             session_name.to_string(),
@@ -1533,8 +1530,10 @@ fn kill_created_tmux_window_only(row: &WorkbenchSessionRow) {
 /// Code Logic（这个函数做什么）:
 ///     - 非 tmux backend / 缺 backend_id → Ok（无需销毁）；
 ///     - tmux backend 但 tmux 不可用 → Err(unavailable)，禁止删元数据；
-///     - list-windows 探测 window_count；多 window 或探测失败但有 window_id 时 kill-window；
-///     - 最后一窗 kill-session；探测失败且无 window_id 时 fail closed 返回 Err（不杀、不删）；
+///     - list-windows 探测 window_count；经 `tmux_destroy_backend_args`：
+///       有 window_id → 始终 kill-window（R36 H1，含 count==1）；
+///       无 window_id 且 count 可知 → kill-session（legacy）；
+///       探测失败且无 window_id → fail closed 返回 Err（不杀、不删）；
 ///     - destroy 非零退出：仅当 stderr/stdout 表明 already-gone 时 Ok，否则 Err；
 ///     - command.output() IO 错误 → Err。
 pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError> {
@@ -4898,12 +4897,15 @@ impl WorkbenchSessionRegistry {
     ///     R22 M1 / R23 H2 / R24 H1：remove 与 Closing barrier 必须同临界区；barrier 覆盖
     ///     drain **与** registry PTY/replay cleanup **与** 调用方 tmux/SQLite cleanup，
     ///     且仅 closer 身份在 `SessionCloseCleanup::finish_cleanup` 后 CAS 清除。
+    ///     R36 M：running PTY `child.kill` 失败（非 already-gone）不得返回 finishable cleanup，
+    ///     否则调用方会误删 SQLite；应 Err 并保留 Closing barrier + durable 元数据。
     ///
     /// Code Logic（这个函数做什么）:
     ///     R28 H3：sessions→restoring→closing_publish 同一临界区完成 generation CAS remove、
     ///     PublishControl revoke、restore claim revoke/remove、Closing tombstone install；
     ///     锁外 soft-wait publish+restore leases + kill PTY/replay → **不** mark_cleanup_done；
-    ///     返回 SessionCloseCleanup 令牌，由调用方在 persist cleanup 后 finish。
+    ///     running PTY kill 经 `normalize_terminal_kill_result`：Ok 才返回 SessionCloseCleanup；
+    ///     kill Err 返回 AppError（barrier 已装，无 finishable cleanup）。
     fn close_inner(
         &self,
         session_id: &str,
@@ -5000,15 +5002,23 @@ impl WorkbenchSessionRegistry {
         let drained = publish_drained && leases_drained;
         let mut handle = handle.lock().expect("workbench session 锁中毒");
         let was_running = handle.row.status == "running";
+        // R36 M：running PTY kill 失败（非 already-gone）不得返回 finishable cleanup，
+        // 否则调用方会 SQLite delete；barrier 已装，返回 Err 保留 metadata。
+        let mut pty_kill_error: Option<AppError> = None;
         match &mut handle.process {
             SessionProcess::Pty { child, .. } => {
                 if was_running {
                     if let Err(error) = normalize_terminal_kill_result(child.kill()) {
                         tracing::debug!("关闭工作台终端时 kill 失败: {error}");
+                        pty_kill_error = Some(error);
                     }
                 }
             }
             SessionProcess::Fake => {}
+        }
+        if let Some(error) = pty_kill_error {
+            drop(handle);
+            return Err(error);
         }
         handle.row.status = "disconnected".to_string();
         handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
@@ -7297,19 +7307,21 @@ mod tests {
         assert_eq!(pane_count_from_tmux_output("\n"), 0);
     }
 
-    /// Business Logic（为什么需要这个测试）:
-    ///     关闭最后一个 pane 会关闭所属 window；如果它也是 worktree tmux session 的最后一个 window，必须销毁 session。
+    /// Business Logic（R36 H1: 为什么需要这个测试）:
+    ///     已知 window_id 时即使 count==1 也只能 kill-window，禁止并发/重试 close 把兄弟 terminal
+    ///     连同整个 session 一起杀掉；多 window 与 last-window 路径一致。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言 window_count 为 1 时生成 kill-session，多 window 时才生成 kill-window。
+    ///     Some(@1)+count1 / Some(@1)+count2 均生成 kill-window；
+    ///     None+count1 仍允许 legacy kill-session。
     #[test]
-    fn tmux_destroy_backend_args_kill_session_for_last_window() {
+    fn tmux_destroy_backend_args_always_kill_window_when_window_id_known() {
         assert_eq!(
             tmux_destroy_backend_args("cc-partner-project-p1", Some("@1"), Some(1)),
             Some(vec![
-                "kill-session".to_string(),
+                "kill-window".to_string(),
                 "-t".to_string(),
-                "cc-partner-project-p1".to_string(),
+                "cc-partner-project-p1:@1".to_string(),
             ])
         );
         assert_eq!(
@@ -7318,6 +7330,15 @@ mod tests {
                 "kill-window".to_string(),
                 "-t".to_string(),
                 "cc-partner-project-p1:@1".to_string(),
+            ])
+        );
+        // legacy：无 window_id + 已知 count → kill-session。
+        assert_eq!(
+            tmux_destroy_backend_args("cc-partner-project-p1", None, Some(1)),
+            Some(vec![
+                "kill-session".to_string(),
+                "-t".to_string(),
+                "cc-partner-project-p1".to_string(),
             ])
         );
     }

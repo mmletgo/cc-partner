@@ -1010,11 +1010,11 @@ impl RemoteEventBridgeRegistry {
         tasks.insert(device_id, task);
     }
 
-    /// 为活跃 remote 查看者增加设备级订阅 lease（阻止 idle TTL 回收）。
+    /// 为活跃 remote 查看者增加设备级订阅 lease（测试/兼容 API；生产走 session watch）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     仅依赖 ensure_bridge touch 时，长时间观看 terminal 而不再调用 ensure 仍会 idle reclaim；
-    ///     订阅 lease 保证有查看者时 bridge 不退出（R30 M3）。
+    ///     设备级 lease 仍可供测试与显式 acquire 路径使用；生产 ensure_bridge 不再调用它（R36 H4），
+    ///     避免 `__device__` 永久占用导致 idle/Gap inventory 无法收敛。
     ///
     /// Code Logic（这个函数做什么）:
     ///     持锁找到 device 的 task 后 retain `"__device__"` key；无 task 时 no-op 返回 false。
@@ -1023,8 +1023,8 @@ impl RemoteEventBridgeRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     ensure_bridge 后应建立设备级 watch lease，避免 ensure 频繁调用导致 refcount 无限增长，
-    ///     同时覆盖长时间观看路径（R31 / R35 M2）。
+    ///     保留设备级 watch API 供测试/兼容；生产 ensure_remote_event_bridge_* 不得调用（R36 H4），
+    ///     否则 `__device__` 永不 release，subscribers 无法归零，offline bridge 永久占 inventory。
     ///
     /// Code Logic（这个函数做什么）:
     ///     持锁：task 存在时幂等 retain `"__device__"`；无 task 时 no-op 返回 false。
@@ -1693,10 +1693,16 @@ fn trim_ascii_whitespace_bytes(mut bytes: &[u8]) -> &[u8] {
 
 /// Business Logic（为什么需要这个函数）:
 ///     本机前端只监听 Tauri event，不关心事件来自本机 PTY 还是远端 HTTP stream。
+///     R36 H2：Mobile `/api/workbench/events` 读的是本机 `workbench_remote_events` bus，
+///     仅 `emit_event`（Tauri/GUI）会让 bridged remote live 到不了 mobile 订阅者。
 ///
 /// Code Logic（这个函数做什么）:
-///     按事件类型 emit 到现有 `workbench:*` 事件名；headless adapter 可安全 no-op。
+///     先 clone 后 `publish_workbench_remote_event_from_state` 写入本机 remote-events bus，
+///     再按事件类型 emit 到现有 `workbench:*` 事件名；headless adapter emit 可安全 no-op。
+///     本函数由 outbound bridge reader 调用；再发布到本地 bus **不会**回灌同一 NDJSON reader。
 fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
+    // R36 H2：GUI emit + local bus publish 共用同一 mapped 事件。
+    publish_workbench_remote_event_from_state(state, event.clone());
     match event {
         WorkbenchRemoteEvent::TerminalOutput(payload) => {
             state.emit_event("workbench:terminal-output", payload);
@@ -2698,6 +2704,74 @@ mod tests {
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
         assert!(runtime.release_watch_key(WATCH_KEY_DEVICE));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（R36 H4: 为什么需要这个测试）:
+    ///     生产 ensure_bridge 不再 retain `__device__`；仅 session keys 时，最后一 session
+    ///     release 必须把 subscribers 归零并允许 idle，否则 offline bridge 挡 Gap inventory。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     仅 retain 两个 session key（无 device key）→ release 全部 → subscribers=0 且可 idle；
+    ///     watch_keys 不含 `__device__`。
+    #[test]
+    fn last_session_release_zeros_subscribers_without_device_key() {
+        let runtime = BridgeRuntimeState::new();
+        runtime.set_phase("connecting");
+        assert!(runtime.retain_watch_key("session-a"));
+        assert!(runtime.retain_watch_key("session-b"));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 2);
+        assert!(!runtime.clone_watch_keys().contains(WATCH_KEY_DEVICE));
+        assert!(runtime.release_watch_key("session-a"));
+        assert!(runtime.release_watch_key("session-b"));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert!(
+            runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
+            "session-only leases must idle after last release (R36 H4)"
+        );
+    }
+
+    /// Business Logic（R36 H2: 为什么需要这个测试）:
+    ///     bridged remote live 经映射后必须能发布到本机 `workbench_remote_events`，
+    ///     Mobile `/api/workbench/events` 才能收到；仅 Tauri emit 不够。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     将 mapped-style TerminalStatus 写入 local bus，断言 sequence 递增且 open_relay 可收到。
+    #[test]
+    fn mapped_remote_event_can_publish_to_local_bus_for_mobile_live() {
+        let bus = WorkbenchRemoteEventBus::new("local-owner");
+        let mapped = WorkbenchRemoteEvent::TerminalStatus(WorkbenchTerminalStatusPayload {
+            session_id: "remote:dev-1:inner-s1".into(),
+            status: "running".into(),
+            exit_code: None,
+            ts: 42,
+        });
+        // 模拟 emit_mapped_remote_event 的 clone+publish 路径（不构造完整 AppState）。
+        let published = mapped.clone();
+        let cursor = bus.publish(published);
+        assert_eq!(cursor.sequence, 1);
+        assert_eq!(cursor.owner_instance_id, "local-owner");
+        assert_eq!(bus.latest_sequence(), 1);
+        let mut relay = bus.open_relay(None);
+        match relay.try_recv() {
+            Some(WorkbenchRemoteRelayMessage::Event {
+                sequence,
+                event: WorkbenchRemoteEvent::TerminalStatus(payload),
+                ..
+            }) => {
+                assert_eq!(sequence, 1);
+                assert_eq!(payload.session_id, "remote:dev-1:inner-s1");
+            }
+            other => panic!("expected mapped terminal status on local bus, got {other:?}"),
+        }
+        // clone 后原事件仍可再用于 GUI emit 侧（形状不变）。
+        match mapped {
+            WorkbenchRemoteEvent::TerminalStatus(payload) => {
+                assert_eq!(payload.session_id, "remote:dev-1:inner-s1");
+            }
+            other => panic!("mapped event clone must preserve TerminalStatus, got {other:?}"),
+        }
     }
 
 }

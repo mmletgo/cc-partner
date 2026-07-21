@@ -1248,9 +1248,12 @@ pub(crate) fn ensure_remote_event_bridge_for_context(
 
 /// Business Logic（为什么需要这个函数）:
 ///     id-only remote session/worktree 操作拿到 inner projectId 后，也要把事件桥项目映射补齐。
+///     R36 H4：生产 ensure 不得永久 retain `__device__` watch key，否则 close 只 release session key
+///     时 subscribers 永不归零，offline bridge 挡 Gap inventory。
 ///
 /// Code Logic（这个函数做什么）:
-///     用指定 device/base_url 和 inner/local projectId 调 registry，确保桥接任务存在并更新 project 映射。
+///     用指定 device/base_url 和 inner/local projectId 调 registry，确保桥接任务存在并更新 project 映射；
+///     **不**调用 `ensure_watch_subscription`（session create/list 的 ensure_session_watch 持有 lease）。
 pub(crate) fn ensure_remote_event_bridge_for_project_mapping(
     state: &AppState,
     device_id: &str,
@@ -1270,10 +1273,9 @@ pub(crate) fn ensure_remote_event_bridge_for_project_mapping(
         }),
         state.clone(),
     );
-    // R31：ensure 后建立至少 1 个 watch subscription，阻止 backoff/idle 期间误回收。
-    let _ = state
-        .workbench_remote_event_bridges
-        .ensure_watch_subscription(device_id);
+    // R36 H4：生产 ensure_bridge 路径不得永久 retain `__device__`；
+    // 订阅仅由 session create/list 的 ensure_session_watch 持有，最后一 session close
+    // 才能把 subscribers 归零并允许 idle，避免 offline bridge 永久占 Gap inventory。
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1281,6 +1283,7 @@ pub(crate) fn ensure_remote_event_bridge_for_project_mapping(
 ///
 /// Code Logic（这个函数做什么）:
 ///     委托 registry 以 None project mapping 启动或复用该设备事件桥。
+///     R36 H4：不调用 ensure_watch_subscription（session watch 才持有 lease）。
 pub(crate) fn ensure_remote_event_bridge_for_device(
     state: &AppState,
     device_id: &str,
@@ -1295,10 +1298,7 @@ pub(crate) fn ensure_remote_event_bridge_for_device(
         None,
         state.clone(),
     );
-    // R31：device-only ensure 同样建立 watch subscription。
-    let _ = state
-        .workbench_remote_event_bridges
-        .ensure_watch_subscription(device_id);
+    // R36 H4：不 retain `__device__`；见 ensure_remote_event_bridge_for_project_mapping。
 }
 
 /// Business Logic（为什么需要这个函数）:

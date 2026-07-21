@@ -1345,14 +1345,19 @@ pub(crate) async fn close_sessions_for_worktree(
 
 /// Business Logic（为什么需要这个函数）:
 ///     merge 成功后，已合并 worktree 不应继续占用 terminal metadata、SQLite worktree row 或磁盘 worktree。
+///     R36 H3：merge 耗时期间可能并发 create 新 session；仅 bulk `delete_by_worktree` 会留下
+///     未 close 的 live/tmux 孤儿，必须在 bulk delete 前再跑一遍 Result-gated close。
 ///
 /// Code Logic（这个函数做什么）:
-///     再次删除该 worktree 下残留 session row，执行 `git worktree remove`，最后删除 worktree 元数据。
+///     先 `close_sessions_for_worktree`（close/intent + kill_persisted_backend + 单行 delete + finish）；
+///     再 `delete_by_worktree` 清 bulk 残留；然后 `git worktree remove` 与 worktree 元数据删除。
 pub(crate) async fn cleanup_merged_worktree(
     state: &AppState,
     project: &WorkbenchProjectRow,
     row: &WorkbenchWorktreeRow,
 ) -> Result<(), AppError> {
+    // R36 H3：bulk delete 前再次 close snapshot，拦截 merge 期间并发 create。
+    close_sessions_for_worktree(state, &row.project_id, &row.id).await?;
     state
         .workbench_session_repo
         .delete_by_worktree(&row.project_id, &row.id)
