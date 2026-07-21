@@ -1688,10 +1688,12 @@ fn map_remote_event_for_device(
 /// Business Logic（为什么需要这个函数）:
 ///     Gap 后 bridge 必须在权威 resync 成功时才推进 after_cursor，失败时保留 recovery，
 ///     禁止带着旧 after 永久 Gap 循环（R28 H1）。
+///     首帧 Gap 无 pre-gap 时 incomplete 也不得 bare after=None 重连（R34）。
 ///
 /// Code Logic（这个函数做什么）:
-///     resync_ok → Some(owner=gap_owner, sequence=gap_latest)；
-///     失败 → recovery.cloned()（可能为 None）。
+///     resync_ok → Some(owner=gap_owner, sequence=gap_latest)（含 latest=0）；
+///     失败 → recovery.cloned()；**recovery 为空且 gap_owner 非空时 seed owner+0**；
+///     空 owner 且无 recovery → None。
 fn after_cursor_after_gap_resync(
     recovery: Option<&BackendRuntimeCursor>,
     gap_owner: &str,
@@ -1703,8 +1705,16 @@ fn after_cursor_after_gap_resync(
             owner_instance_id: gap_owner.to_string(),
             sequence: gap_latest,
         })
+    } else if let Some(cursor) = recovery.cloned() {
+        Some(cursor)
+    } else if !gap_owner.is_empty() {
+        // 首帧 Gap 无 pre-gap：seed after=(owner,0)，truncated ring 上仍会再次 Gap。
+        Some(BackendRuntimeCursor {
+            owner_instance_id: gap_owner.to_string(),
+            sequence: 0,
+        })
     } else {
-        recovery.cloned()
+        None
     }
 }
 
@@ -2375,11 +2385,13 @@ mod tests {
         assert!(relay.try_recv().is_none());
     }
 
-    /// Business Logic（R28 H1: 为什么需要这个测试）:
-    ///     Gap resync 成功才推进 after_cursor；失败保留 recovery。
+    /// Business Logic（R28 H1 / R34: 为什么需要这个测试）:
+    ///     Gap resync 成功才推进 after_cursor；失败保留 recovery；
+    ///     首帧无 recovery 时 seed gap.owner+0，禁止 bare after=None 重连。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     成功 → cursor=gap latest（含 gap_latest==0）；失败 → Some(recovery) 或 None。
+    ///     成功 → cursor=gap latest（含 gap_latest==0）；失败有 recovery → 保留；
+    ///     失败无 recovery → owner-new/0；空 owner 仍 None。
     #[test]
     fn after_cursor_after_gap_resync_advances_only_on_success() {
         let recovery = BackendRuntimeCursor {
@@ -2398,7 +2410,11 @@ mod tests {
         let keep = after_cursor_after_gap_resync(Some(&recovery), "owner-new", 42, false)
             .expect("recovery");
         assert_eq!(keep, recovery);
-        assert!(after_cursor_after_gap_resync(None, "owner-new", 42, false).is_none());
+        // R34：首帧 incomplete 必须 seed owner+0，不得 None brand-new。
+        let first = after_cursor_after_gap_resync(None, "owner-new", 42, false).expect("seed");
+        assert_eq!(first.owner_instance_id, "owner-new");
+        assert_eq!(first.sequence, 0);
+        assert!(after_cursor_after_gap_resync(None, "", 42, false).is_none());
     }
 
     /// Business Logic（R28 H1: 为什么需要这个测试）:
