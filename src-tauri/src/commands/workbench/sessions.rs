@@ -97,14 +97,20 @@ pub(crate) async fn local_create_workbench_session(
         state.clone(),
     );
     // R26 M1：upsert 前再 revalidate project barrier；失败 reclaim PTY。
+    // R30 M2：SessionSpawnGuard 只杀 PTY，不 destroy tmux window；失败路径显式 kill_persisted_backend。
     if let Err(error) = state
         .workbench_sessions
         .require_project_not_closing(&row.project_id)
     {
         drop(spawn_guard);
+        kill_persisted_backend(&row);
         return Err(error);
     }
-    state.workbench_session_repo.upsert(&row).await?;
+    if let Err(error) = state.workbench_session_repo.upsert(&row).await {
+        drop(spawn_guard);
+        kill_persisted_backend(&row);
+        return Err(error);
+    }
     // upsert 后再 revalidate：project remove 可能在写库期间完成。
     if state
         .workbench_sessions
@@ -112,12 +118,16 @@ pub(crate) async fn local_create_workbench_session(
         .is_err()
     {
         drop(spawn_guard);
+        kill_persisted_backend(&row);
         return Err(AppError::unavailable(
             "project_closing_barrier_active".to_string(),
         ));
     }
     // R20 M1：generation CAS 失败不得对外宣称 running/Ready。
     if !spawn_guard.commit() {
+        // commit 失败：Drop 回收 PTY；仍需销毁 create 新建的 tmux window。
+        drop(spawn_guard);
+        kill_persisted_backend(&row);
         return Err(AppError::unavailable(
             "session_spawn_ready_cas_miss".to_string(),
         ));

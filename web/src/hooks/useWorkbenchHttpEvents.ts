@@ -3,21 +3,25 @@
  *
  * Business Logic（为什么需要这个模块）:
  *   `/mobile` 普通浏览器没有 Tauri event，需要通过 `/api/workbench/events` 长连接接收终端输出等事件。
+ *   ring lag / owner 切换 / after 早于 ring 时 server 发显式 Gap 帧；客户端必须 fail-closed 暂停 live、权威 resync，再以 after 游标重连。
  *
  * Code Logic（这个模块做什么）:
- *   提供 NDJSON chunk parser（含 typed heartbeat），并提供 React hook：
- *   lifecycle AbortController + 每连接 child controller；35s watchdog 仅 abort 子连接并重连。
+ *   提供 NDJSON chunk parser（含 typed heartbeat / Gap）、stream cursor 与 after URL 纯 helper，并提供 React hook：
+ *   lifecycle AbortController + 每连接 child controller；35s watchdog 仅 abort 子连接并重连；
+ *   Gap 后 pause live → sessions.list+running replay → store.reset → 推进或保留 pre-gap cursor 后重连。
  */
 
 import { useEffect, useRef } from 'react';
 import type {
   WorkbenchHttpEvent,
   WorkbenchMergeProgressEvent,
+  WorkbenchSessionReplay,
   WorkbenchTerminalOutputEvent,
   WorkbenchTerminalStatusEvent,
 } from '@/lib/types';
 import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
 import { agentSessionRuntimeDtoDecoder } from '@/lib/schemas/agentRuntime';
+import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 /** 断线后重连延迟（毫秒）。 */
@@ -41,18 +45,68 @@ export interface WorkbenchNdjsonParserState {
 }
 
 /**
- * NDJSON 帧：业务事件、heartbeat 或未知 type（忽略）。
+ * `/api/workbench/events` 流游标（afterOwnerInstanceId + afterSequence）。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   断线/Gap 后重连必须带 after 游标做 catch-up；incomplete resync 必须保留 pre-gap recovery，禁止 brand-new None。
+ *
+ * Code Logic（字段说明）:
+ *   ownerInstanceId 为 bus owner；sequence 为已提交的最新 sequence。
+ */
+export interface WorkbenchHttpStreamCursor {
+  ownerInstanceId: string;
+  sequence: number;
+}
+
+/**
+ * Gap 帧 payload 形状（与 server NDJSON 对齐）。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   ring lag / owner 切换后 server 显式 Gap；客户端用其做 resync 与 cursor 推进决策。
+ *
+ * Code Logic（字段说明）:
+ *   ownerInstanceId / oldestAvailable / latest 均来自 gap.payload。
+ */
+export interface WorkbenchHttpGapFrame {
+  ownerInstanceId: string;
+  oldestAvailable: number;
+  latest: number;
+}
+
+/**
+ * NDJSON 帧：业务事件、heartbeat、Gap 或未知 type（忽略）。
  *
  * Business Logic（为什么需要这个类型）:
- *   heartbeat 不是业务事件，但必须重置 watchdog；未知 type 不得断开流。
+ *   heartbeat 不是业务事件但必须重置 watchdog；Gap 是一等恢复帧；未知 type 不得断开流。
  *
  * Code Logic（联合形态）:
- *   event 携带 WorkbenchHttpEvent；heartbeat 携带 RFC3339 sentAt；ignored 供前向兼容。
+ *   event 携带 WorkbenchHttpEvent 与可选 envelope owner/sequence；
+ *   heartbeat 携带 RFC3339 sentAt；gap 携带游标字段；ignored 供前向兼容。
  */
 export type WorkbenchNdjsonFrame =
-  | { kind: 'event'; event: WorkbenchHttpEvent }
+  | {
+      kind: 'event';
+      event: WorkbenchHttpEvent;
+      ownerInstanceId?: string;
+      sequence?: number;
+    }
   | { kind: 'heartbeat'; sentAt: string }
+  | { kind: 'gap'; ownerInstanceId: string; oldestAvailable: number; latest: number }
   | { kind: 'ignored'; type: string };
+
+/**
+ * Gap resync 所需的 sessions 依赖（可注入，便于单测）。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   Gap 后必须对 running session 做权威 replay，测试不能打真实 HTTP。
+ *
+ * Code Logic（字段说明）:
+ *   list 返回至少含 id/status；replay 返回 buffer/lastSeq/可选 ownerInstanceId。
+ */
+export interface WorkbenchHttpEventsSessionDeps {
+  list: (projectId?: string | null) => Promise<Array<{ id: string; status: string }>>;
+  replay: (sessionId: string) => Promise<WorkbenchSessionReplay>;
+}
 
 /**
  * Workbench HTTP 事件 hook 参数。
@@ -63,7 +117,7 @@ export type WorkbenchNdjsonFrame =
  *
  * Code Logic（字段说明）:
  *   store 接收 terminalOutput；enabled 控制连接生命周期；
- *   onTerminalStatus/onAgentRuntime 可选回调；reconnectDelayMs/watchdogMs 供测试注入。
+ *   onTerminalStatus/onAgentRuntime 可选回调；reconnectDelayMs/watchdogMs/sessions 供测试注入。
  */
 export interface UseWorkbenchHttpEventsOptions {
   store: WorkbenchTerminalBufferStore;
@@ -74,6 +128,8 @@ export interface UseWorkbenchHttpEventsOptions {
   onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
   /** agentRuntime 实时回调（Agent phase 投影）。 */
   onAgentRuntime?: (payload: { agentSession: AgentSessionRuntimeDto }) => void;
+  /** Gap resync 会话依赖；默认 httpWorkbenchTransport.sessions。 */
+  sessions?: WorkbenchHttpEventsSessionDeps;
 }
 
 /**
@@ -170,11 +226,151 @@ function isHeartbeatFrame(value: unknown): value is { type: 'heartbeat'; sentAt:
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   parser 需要把 JSON.parse 的 unknown 值缩窄成业务事件或 heartbeat。
+ *   Gap 是 ring lag / owner 切换的一等恢复帧；payload 畸形不得 silent ignore 成 live 继续。
  *
  * Code Logic（这个函数做什么）:
- *   先识别 heartbeat；再按 serde tag `type` 分支校验 payload；
+ *   校验 payload 含 ownerInstanceId 字符串与 oldestAvailable/latest 有限数字。
+ */
+export function isWorkbenchHttpGapPayload(value: unknown): value is WorkbenchHttpGapFrame {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.ownerInstanceId === 'string' &&
+    typeof value.oldestAvailable === 'number' &&
+    Number.isFinite(value.oldestAvailable) &&
+    typeof value.latest === 'number' &&
+    Number.isFinite(value.latest)
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   业务帧 envelope 的 ownerInstanceId+sequence 用于 after 游标推进，与 terminal payload.seq 分离。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读取 top-level ownerInstanceId（非空字符串）与 sequence（有限数字）；缺省返回 undefined。
+ */
+function readEnvelopeCursor(
+  value: Record<string, unknown>,
+): { ownerInstanceId?: string; sequence?: number } {
+  const ownerInstanceId =
+    typeof value.ownerInstanceId === 'string' && value.ownerInstanceId.trim().length > 0
+      ? value.ownerInstanceId
+      : undefined;
+  const sequence =
+    typeof value.sequence === 'number' && Number.isFinite(value.sequence)
+      ? value.sequence
+      : undefined;
+  return { ownerInstanceId, sequence };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   live 业务帧到达后必须推进 stream cursor，供断线/Gap 后 after 重连，避免 brand-new catch-up。
+ *
+ * Code Logic（这个函数做什么）:
+ *   owner 变化时重置为新 owner+sequence；同 owner 仅当 sequence 更大时推进；非法输入返回 current。
+ */
+export function advanceWorkbenchHttpStreamCursor(
+  current: WorkbenchHttpStreamCursor | null,
+  ownerInstanceId: string | undefined,
+  sequence: number | undefined,
+): WorkbenchHttpStreamCursor | null {
+  if (typeof ownerInstanceId !== 'string' || ownerInstanceId.trim().length === 0) {
+    return current;
+  }
+  if (typeof sequence !== 'number' || !Number.isFinite(sequence) || sequence < 0) {
+    return current;
+  }
+  if (!current || current.ownerInstanceId !== ownerInstanceId) {
+    return { ownerInstanceId, sequence };
+  }
+  if (sequence > current.sequence) {
+    return { ownerInstanceId, sequence };
+  }
+  return current;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Gap resync 成功后应 attach 到 gap.latest；失败或不完整必须保留 pre-gap recovery，禁止 cursor=None brand-new。
+ *
+ * Code Logic（这个函数做什么）:
+ *   resyncSucceeded 且 owner 非空且 latest>0 → `{owner, latest}`；否则返回 preGapCursor（可为 null）。
+ */
+export function resolveCursorAfterGap(
+  preGapCursor: WorkbenchHttpStreamCursor | null,
+  gap: WorkbenchHttpGapFrame,
+  resyncSucceeded: boolean,
+): WorkbenchHttpStreamCursor | null {
+  if (
+    resyncSucceeded &&
+    typeof gap.ownerInstanceId === 'string' &&
+    gap.ownerInstanceId.trim().length > 0 &&
+    gap.latest > 0
+  ) {
+    return { ownerInstanceId: gap.ownerInstanceId, sequence: gap.latest };
+  }
+  return preGapCursor;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   重连必须附 afterOwnerInstanceId+afterSequence，server 才能 catch-up 或显式 Gap。
+ *
+ * Code Logic（这个函数做什么）:
+ *   无有效 cursor 时返回裸 `/api/workbench/events`；否则附 camelCase query（URLSearchParams）。
+ */
+export function buildWorkbenchEventsUrl(cursor: WorkbenchHttpStreamCursor | null): string {
+  if (
+    !cursor ||
+    typeof cursor.ownerInstanceId !== 'string' ||
+    cursor.ownerInstanceId.trim().length === 0 ||
+    typeof cursor.sequence !== 'number' ||
+    !Number.isFinite(cursor.sequence) ||
+    cursor.sequence < 0
+  ) {
+    return '/api/workbench/events';
+  }
+  const params = new URLSearchParams({
+    afterOwnerInstanceId: cursor.ownerInstanceId,
+    afterSequence: String(cursor.sequence),
+  });
+  return `/api/workbench/events?${params.toString()}`;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
+ *
+ * Code Logic（这个函数做什么）:
+ *   list sessions → 仅 status===running 调 replay → store.reset(sessionId, buffer, lastSeq, ownerInstanceId?)。
+ *   任一步失败上抛，调用方保留 pre-gap cursor 重连。
+ */
+export async function resyncWorkbenchSessionsAfterGap(
+  store: WorkbenchTerminalBufferStore,
+  sessions: WorkbenchHttpEventsSessionDeps,
+): Promise<void> {
+  const listed = await sessions.list();
+  for (const session of listed) {
+    if (session.status !== 'running') continue;
+    const replay = await sessions.replay(session.id);
+    store.reset(
+      session.id,
+      replay.buffer,
+      replay.lastSeq,
+      replay.ownerInstanceId ?? null,
+    );
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   parser 需要把 JSON.parse 的 unknown 值缩窄成业务事件、heartbeat 或 Gap。
+ *
+ * Code Logic（这个函数做什么）:
+ *   先识别 heartbeat；再识别 gap；再按 serde tag `type` 分支校验 payload；
  *   未知 type → ignored（不重连）；已知 type 但 payload 畸形 → 抛 Error。
+ *   业务 event 额外附带 top-level ownerInstanceId/sequence（若存在）。
  */
 export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame {
   if (isHeartbeatFrame(value)) {
@@ -184,23 +380,49 @@ export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame 
     throw new Error('Workbench HTTP event 缺少 type');
   }
 
+  if (value.type === 'gap') {
+    if (!isWorkbenchHttpGapPayload(value.payload)) {
+      throw new Error('Workbench HTTP event gap payload 非法');
+    }
+    return {
+      kind: 'gap',
+      ownerInstanceId: value.payload.ownerInstanceId,
+      oldestAvailable: value.payload.oldestAvailable,
+      latest: value.payload.latest,
+    };
+  }
+
+  const envelope = readEnvelopeCursor(value);
+
   if (value.type === 'terminalOutput') {
     if (!isTerminalOutputPayload(value.payload)) {
       throw new Error('Workbench HTTP event terminalOutput payload 非法');
     }
-    return { kind: 'event', event: { type: value.type, payload: value.payload } };
+    return {
+      kind: 'event',
+      event: { type: value.type, payload: value.payload },
+      ...envelope,
+    };
   }
   if (value.type === 'terminalStatus') {
     if (!isTerminalStatusPayload(value.payload)) {
       throw new Error('Workbench HTTP event terminalStatus payload 非法');
     }
-    return { kind: 'event', event: { type: value.type, payload: value.payload } };
+    return {
+      kind: 'event',
+      event: { type: value.type, payload: value.payload },
+      ...envelope,
+    };
   }
   if (value.type === 'mergeProgress') {
     if (!isMergeProgressPayload(value.payload)) {
       throw new Error('Workbench HTTP event mergeProgress payload 非法');
     }
-    return { kind: 'event', event: { type: value.type, payload: value.payload } };
+    return {
+      kind: 'event',
+      event: { type: value.type, payload: value.payload },
+      ...envelope,
+    };
   }
   if (value.type === 'agentRuntime') {
     if (!isAgentRuntimePayload(value.payload)) {
@@ -216,6 +438,7 @@ export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame 
           ),
         },
       },
+      ...envelope,
     };
   }
 
@@ -225,10 +448,10 @@ export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame 
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   `/api/workbench/events` 使用 NDJSON，移动端必须跨 chunk 拼接完整行，并识别 heartbeat。
+ *   `/api/workbench/events` 使用 NDJSON，移动端必须跨 chunk 拼接完整行，并识别 heartbeat/Gap。
  *
  * Code Logic（这个函数做什么）:
- *   将 state.pending 与新 chunk 合并，只解析以换行结束的完整 JSON 行；返回 frames（含 heartbeat）。
+ *   将 state.pending 与新 chunk 合并，只解析以换行结束的完整 JSON 行；返回 frames（含 heartbeat/gap）。
  */
 export function parseWorkbenchNdjsonFrames(
   state: WorkbenchNdjsonParserState,
@@ -249,7 +472,7 @@ export function parseWorkbenchNdjsonFrames(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   既有测试与消费路径以业务事件数组为主；heartbeat 不进入业务事件列表。
+ *   既有测试与消费路径以业务事件数组为主；heartbeat/gap 不进入业务事件列表。
  *
  * Code Logic（这个函数做什么）:
  *   解析 frames 后仅收集 kind=event 的 WorkbenchHttpEvent。
@@ -266,9 +489,11 @@ export function parseWorkbenchNdjsonChunk(
 /**
  * Business Logic（为什么需要这个函数）:
  *   终端输出事件可能高频到达，移动端必须写入外部 store；status/agent 走回调。
+ *   seq/owner 必须传入 append，与桌面 authority/lastSeq 去重对齐。
  *
  * Code Logic（这个函数做什么）:
- *   terminalOutput → store.append；terminalStatus/agentRuntime → 可选回调。
+ *   terminalOutput → store.append(sessionId, chunk, seq, owner)；
+ *   terminalStatus/agentRuntime → 可选回调。
  */
 function consumeWorkbenchHttpEvent(
   store: WorkbenchTerminalBufferStore,
@@ -277,9 +502,11 @@ function consumeWorkbenchHttpEvent(
     onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
     onAgentRuntime?: (payload: { agentSession: AgentSessionRuntimeDto }) => void;
   },
+  envelopeOwnerInstanceId?: string,
 ): void {
   if (event.type === 'terminalOutput') {
-    store.append(event.payload.sessionId, event.payload.chunk);
+    const authorityId = event.payload.ownerInstanceId ?? envelopeOwnerInstanceId ?? null;
+    store.append(event.payload.sessionId, event.payload.chunk, event.payload.seq, authorityId);
     return;
   }
   if (event.type === 'terminalStatus') {
@@ -295,10 +522,12 @@ function consumeWorkbenchHttpEvent(
  * useWorkbenchHttpEvents（移动端 Workbench HTTP 事件订阅）
  *
  * Business Logic（为什么需要这个 hook）:
- *   `/mobile` 页面需要持续接收同源 HTTP NDJSON terminal 输出与 agent 状态，半开连接需 heartbeat watchdog 后重连。
+ *   `/mobile` 页面需要持续接收同源 HTTP NDJSON terminal 输出与 agent 状态；
+ *   半开连接需 heartbeat watchdog 后重连；Gap 必须 pause live + 权威 resync + after 游标重连。
  *
  * Code Logic（这个 hook 做什么）:
  *   lifecycle AbortController 覆盖 hook 生命周期；每次 connect 新建 child controller；
+ *   业务帧推进 stream cursor；Gap 暂停 live、resync running sessions、按结果推进/保留 cursor 后 abort 重连；
  *   业务帧与 heartbeat 均重置 35s watchdog；watchdog 仅 abort child 并在 lifecycle 仍活跃时重连。
  */
 export function useWorkbenchHttpEvents({
@@ -308,13 +537,25 @@ export function useWorkbenchHttpEvents({
   watchdogMs = WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
   onTerminalStatus,
   onAgentRuntime,
+  sessions,
 }: UseWorkbenchHttpEventsOptions): void {
   const onTerminalStatusRef = useRef(onTerminalStatus);
   const onAgentRuntimeRef = useRef(onAgentRuntime);
+  const sessionsRef = useRef<WorkbenchHttpEventsSessionDeps>(
+    sessions ?? {
+      list: (projectId) => httpWorkbenchTransport.sessions.list(projectId),
+      replay: (sessionId) => httpWorkbenchTransport.sessions.replay(sessionId),
+    },
+  );
   useEffect(() => {
     onTerminalStatusRef.current = onTerminalStatus;
     onAgentRuntimeRef.current = onAgentRuntime;
   }, [onTerminalStatus, onAgentRuntime]);
+  useEffect(() => {
+    if (sessions) {
+      sessionsRef.current = sessions;
+    }
+  }, [sessions]);
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -323,10 +564,12 @@ export function useWorkbenchHttpEvents({
     let stopped = false;
     let reconnectTimer: number | null = null;
     let activeConnectionController: AbortController | null = null;
+    /** 已提交 live cursor；Gap incomplete 时作 recovery，禁止 brand-new None。 */
+    let streamCursor: WorkbenchHttpStreamCursor | null = null;
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   HTTP 长连接可能因为网络切换、桌面端重启或 heartbeat 丢失而断开，移动端需要自动恢复事件流。
+     *   HTTP 长连接可能因为网络切换、桌面端重启、Gap 或 heartbeat 丢失而断开，移动端需要自动恢复事件流。
      *
      * Code Logic（这个函数做什么）:
      *   在指定延迟后重新调用 connect；lifecycle 已 abort 或已停止时不再调度。
@@ -340,10 +583,11 @@ export function useWorkbenchHttpEvents({
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   移动端 Workbench 需要把同源 NDJSON 事件流持续转成终端 buffer 增量，并检测半开连接。
+     *   移动端 Workbench 需要把同源 NDJSON 事件流持续转成终端 buffer 增量，并在 Gap 时权威恢复。
      *
      * Code Logic（这个函数做什么）:
-     *   建立 fetch 长连接（child signal），逐段读取 ReadableStream；
+     *   建立 fetch 长连接（child signal + after 游标），逐段读取 ReadableStream；
+     *   业务帧推进 cursor 并消费；Gap 则 pause live、resync、解析 next cursor 后 abort 重连；
      *   业务帧与 heartbeat 重置 watchdog；异常或 watchdog abort 后若 lifecycle 仍在则重连。
      */
     async function connect(): Promise<void> {
@@ -366,6 +610,10 @@ export function useWorkbenchHttpEvents({
       const parserState: WorkbenchNdjsonParserState = { pending: '' };
       const decoder = new TextDecoder();
       let watchdogTimer: number | null = null;
+      /** Gap 后禁止继续应用本连接 live 帧（防 laggy 尾部与 resync 双写）。 */
+      let livePaused = false;
+      /** 本连接已因 Gap 调度过重连，finally 不再二次 schedule。 */
+      let gapHandled = false;
 
       /**
        * Business Logic（为什么需要这个函数）:
@@ -384,8 +632,31 @@ export function useWorkbenchHttpEvents({
       };
       resetWatchdog();
 
+      /**
+       * Business Logic（为什么需要这个函数）:
+       *   Gap 帧意味着 silent loss 风险；必须立刻 pause live 并权威 resync，再以正确 cursor 重连。
+       *
+       * Code Logic（这个函数做什么）:
+       *   冻结 pre-gap cursor → resync running sessions → resolveCursorAfterGap → abort child。
+       */
+      const handleGap = async (gap: WorkbenchHttpGapFrame): Promise<void> => {
+        if (gapHandled || stopped || lifecycleController.signal.aborted) return;
+        gapHandled = true;
+        livePaused = true;
+        const preGapCursor = streamCursor;
+        let resyncSucceeded = false;
+        try {
+          await resyncWorkbenchSessionsAfterGap(store, sessionsRef.current);
+          resyncSucceeded = true;
+        } catch {
+          resyncSucceeded = false;
+        }
+        streamCursor = resolveCursorAfterGap(preGapCursor, gap, resyncSucceeded);
+        connectionController.abort();
+      };
+
       try {
-        const response = await fetch('/api/workbench/events', {
+        const response = await fetch(buildWorkbenchEventsUrl(streamCursor), {
           method: 'GET',
           headers: {
             Accept: 'application/x-ndjson',
@@ -396,37 +667,71 @@ export function useWorkbenchHttpEvents({
         if (!response.body) throw new Error('Workbench HTTP event stream 不可用');
 
         const reader = response.body.getReader();
-        while (!stopped && !lifecycleController.signal.aborted) {
+        while (!stopped && !lifecycleController.signal.aborted && !livePaused) {
           const { done, value } = await reader.read();
           if (done) break;
           if (!value) continue;
           const chunk = decoder.decode(value, { stream: true });
-          parseWorkbenchNdjsonFrames(parserState, chunk).forEach((frame) => {
-            // 业务帧与 heartbeat 都重置 watchdog；ignored 也重置（仍是合法 NDJSON 行）。
+          const frames = parseWorkbenchNdjsonFrames(parserState, chunk);
+          for (const frame of frames) {
+            // 业务帧 / heartbeat / gap / ignored 都重置 watchdog（仍是合法 NDJSON 行）。
             resetWatchdog();
-            if (frame.kind === 'event') {
-              consumeWorkbenchHttpEvent(store, frame.event, {
-                onTerminalStatus: onTerminalStatusRef.current,
-                onAgentRuntime: onAgentRuntimeRef.current,
-              });
+            if (livePaused) break;
+            if (frame.kind === 'gap') {
+              await handleGap(frame);
+              break;
             }
-          });
+            if (frame.kind === 'event') {
+              streamCursor = advanceWorkbenchHttpStreamCursor(
+                streamCursor,
+                frame.ownerInstanceId,
+                frame.sequence,
+              );
+              consumeWorkbenchHttpEvent(
+                store,
+                frame.event,
+                {
+                  onTerminalStatus: onTerminalStatusRef.current,
+                  onAgentRuntime: onAgentRuntimeRef.current,
+                },
+                frame.ownerInstanceId,
+              );
+            }
+          }
         }
 
-        const trailingChunk = decoder.decode();
-        if (trailingChunk) {
-          parseWorkbenchNdjsonFrames(parserState, trailingChunk).forEach((frame) => {
-            resetWatchdog();
-            if (frame.kind === 'event') {
-              consumeWorkbenchHttpEvent(store, frame.event, {
-                onTerminalStatus: onTerminalStatusRef.current,
-                onAgentRuntime: onAgentRuntimeRef.current,
-              });
+        if (!livePaused) {
+          const trailingChunk = decoder.decode();
+          if (trailingChunk) {
+            const frames = parseWorkbenchNdjsonFrames(parserState, trailingChunk);
+            for (const frame of frames) {
+              resetWatchdog();
+              if (livePaused) break;
+              if (frame.kind === 'gap') {
+                await handleGap(frame);
+                break;
+              }
+              if (frame.kind === 'event') {
+                streamCursor = advanceWorkbenchHttpStreamCursor(
+                  streamCursor,
+                  frame.ownerInstanceId,
+                  frame.sequence,
+                );
+                consumeWorkbenchHttpEvent(
+                  store,
+                  frame.event,
+                  {
+                    onTerminalStatus: onTerminalStatusRef.current,
+                    onAgentRuntime: onAgentRuntimeRef.current,
+                  },
+                  frame.ownerInstanceId,
+                );
+              }
             }
-          });
+          }
         }
       } catch {
-        // lifecycle abort：不再重连；child-only abort（watchdog/网络）进入 finally 重连。
+        // lifecycle abort：不再重连；child-only abort（watchdog/网络/Gap）进入 finally 重连。
         if (lifecycleController.signal.aborted) return;
       } finally {
         if (watchdogTimer !== null) {

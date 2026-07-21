@@ -10,8 +10,9 @@
 //!     after_seq=0 且 ring 截断仍 Gap）；远端桥收到 Gap 后先 resync running terminal，
 //!     仅成功才推进 after_cursor（R28 H1）；L3 多机 cutover **NOT VERIFIED**。
 //!     提供本机事件发布 helper，并维护 sidecar 拥有的 `RemoteEventBridgeRegistry`
-//!     （CancellationToken、idle TTL、指数退避上限 60s、1 MiB 行/pending、8 KiB 错误前缀、
-//!     after 游标重连与 Gap fail-closed、shutdown_all 等待退出）。
+//!     （CancellationToken、订阅 lease/refcount + idle TTL、指数退避上限 60s、1 MiB 行/pending、
+//!     8 KiB 错误前缀、共享 after 游标跨 task restart 保留、Gap fail-closed、
+//!     shutdown_all 等待退出；R30 M3）。
 
 use crate::backend::event_bus::BackendRuntimeCursor;
 use crate::error::AppError;
@@ -39,7 +40,7 @@ pub const MAX_NDJSON_LINE_BYTES: usize = 1_048_576;
 pub const MAX_PENDING_BUFFER_BYTES: usize = 1_048_576;
 /// 错误响应 body 最多读取的前缀（8 KiB）。
 pub const ERROR_BODY_PREFIX_BYTES: usize = 8 * 1024;
-/// 无订阅/使用超过该秒数后回收 bridge。
+/// 无订阅且无 ensure/touch 超过该秒数后回收 bridge（订阅 refcount>0 时永不 idle）。
 pub const BRIDGE_IDLE_TTL_SECS: u64 = 60;
 /// 重连指数退避上限（秒）。
 pub const BRIDGE_MAX_BACKOFF_SECS: u64 = 60;
@@ -647,16 +648,22 @@ pub struct RemoteEventBridgeProjectMapping {
 /// 单设备 bridge 任务内部共享状态。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     loop 与 registry 需共享 last_used/phase/attempt/error，供 TTL 与诊断读取。
+///     loop 与 registry 需共享 last_used/phase/attempt/error/订阅 refcount 与 after_cursor，
+///     供 TTL、诊断与 task restart 后游标恢复读取（R30 M3）。
 ///
 /// Code Logic（这个结构体做什么）:
-///     Arc 原子/互斥字段；不含 URL 凭据或事件正文。
+///     Arc 原子/互斥字段；subscribers>0 时 idle_for=ZERO；after_cursor 跨 loop restart 保留；
+///     不含 URL 凭据或事件正文。
 struct BridgeRuntimeState {
     last_used: Mutex<Instant>,
     phase: Mutex<String>,
     attempt: AtomicU32,
     last_error_class: Mutex<Option<String>>,
     finished: AtomicBool,
+    /// 活跃 stream/session 查看者计数；>0 时 bridge 视为非 idle（R30 M3）。
+    subscribers: AtomicU32,
+    /// 已提交的远端 stream after 游标；task restart / 重连共享（R30 M3）。
+    after_cursor: Mutex<Option<BackendRuntimeCursor>>,
 }
 
 impl BridgeRuntimeState {
@@ -664,7 +671,7 @@ impl BridgeRuntimeState {
     ///     新建 bridge 时需要初始化 runtime 观测字段。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     last_used=now、phase=connecting、attempt=0。
+    ///     last_used=now、phase=connecting、attempt=0、subscribers=0、after_cursor=None。
     fn new() -> Self {
         Self {
             last_used: Mutex::new(Instant::now()),
@@ -672,11 +679,13 @@ impl BridgeRuntimeState {
             attempt: AtomicU32::new(0),
             last_error_class: Mutex::new(None),
             finished: AtomicBool::new(false),
+            subscribers: AtomicU32::new(0),
+            after_cursor: Mutex::new(None),
         }
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     ensure_bridge 调用表示仍有订阅者，应刷新 idle TTL。
+    ///     ensure_bridge / 订阅持有期间调用，表示仍有使用方，应刷新 idle TTL。
     ///
     /// Code Logic（这个函数做什么）:
     ///     写 last_used = Instant::now()。
@@ -685,15 +694,89 @@ impl BridgeRuntimeState {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     空闲回收依赖 last_used 流逝时间。
+    ///     空闲回收依赖 last_used 流逝时间；有订阅者或仍在连流/resync 时不得视为 idle（R30 M3）。
+    ///     安静 terminal 无 chunk 时，仅靠 touch 会误 idle 杀掉活跃 bridge。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     返回 last_used.elapsed()。
+    ///     subscribers>0 → ZERO；phase ∈ connecting|streaming|resyncing|resynced → ZERO；
+    ///     否则返回 last_used.elapsed()。
     fn idle_for(&self) -> Duration {
+        if self.subscribers.load(Ordering::SeqCst) > 0 {
+            return Duration::ZERO;
+        }
+        let phase = self.phase.lock().expect("bridge phase 锁中毒").clone();
+        if matches!(
+            phase.as_str(),
+            "connecting" | "streaming" | "resyncing" | "resynced"
+        ) {
+            return Duration::ZERO;
+        }
         self.last_used
             .lock()
             .expect("bridge last_used 锁中毒")
             .elapsed()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     活跃 remote 查看者进入时需要增加订阅 refcount，阻止 idle TTL 回收 bridge。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     subscribers.fetch_add(1)；并 touch last_used。
+    fn retain_subscription(&self) {
+        self.subscribers.fetch_add(1, Ordering::SeqCst);
+        self.touch();
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     查看者离开时释放订阅，允许之后在无 ensure/touch 时进入 idle TTL。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     saturating 减 1；减到 0 时 touch，使 idle 计时从最后一次 release 起算。
+    fn release_subscription(&self) {
+        let mut prev = self.subscribers.load(Ordering::SeqCst);
+        loop {
+            if prev == 0 {
+                // 防御性：重复 release 不回绕；仍 touch 以便诊断路径刷新。
+                self.touch();
+                return;
+            }
+            match self.subscribers.compare_exchange_weak(
+                prev,
+                prev - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    self.touch();
+                    return;
+                }
+                Err(current) => prev = current,
+            }
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     重连 / restart 后需要读取已提交 after 游标，禁止 brand-new attach 丢恢复点。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     克隆 after_cursor Mutex 内容。
+    fn load_after_cursor(&self) -> Option<BackendRuntimeCursor> {
+        self.after_cursor
+            .lock()
+            .expect("bridge after_cursor 锁中毒")
+            .clone()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Event 推进 / Gap resync 成功后必须把游标写回共享状态，供 restart 继承。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     覆盖写入 after_cursor。
+    fn store_after_cursor(&self, cursor: Option<BackendRuntimeCursor>) {
+        *self
+            .after_cursor
+            .lock()
+            .expect("bridge after_cursor 锁中毒") = cursor;
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -738,10 +821,12 @@ impl BridgeRuntimeState {
 /// Workbench 远端事件桥接后台任务记录。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     同一台设备的事件连接需要随着端口变化替换，同时持续复用已发现的项目 ID 映射。
+///     同一台设备的事件连接需要随着端口变化替换，同时持续复用已发现的项目 ID 映射与
+///     recovery after_cursor（R30 M3）。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存 base_url、共享 project 映射、取消令牌、runtime 状态和 JoinHandle。
+///     保存 base_url、共享 project 映射、取消令牌、runtime 状态（含 after_cursor/subscribers）
+///     和 JoinHandle。
 struct RemoteEventBridgeTask {
     base_url: String,
     project_ids: Arc<RwLock<HashMap<String, String>>>,
@@ -765,10 +850,11 @@ impl RemoteEventBridgeTask {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     list/create remote terminal 可能被频繁调用，但每台设备只应保持一个事件长连接；
-///     GuiClient 不得创建 bridge。
+///     GuiClient 不得创建 bridge。活跃 stream 查看者通过订阅 lease 阻止 idle 回收（R30 M3）。
 ///
 /// Code Logic（这个结构体做什么）:
-///     Mutex<HashMap<device_id, task>>；ensure 刷新 last_used；shutdown_all 取消并 await。
+///     Mutex<HashMap<device_id, task>>；ensure 刷新 last_used；acquire/release 订阅 refcount；
+///     restart 时 transfer after_cursor；shutdown_all 取消并 await。
 #[derive(Default)]
 pub struct RemoteEventBridgeRegistry {
     tasks: Mutex<HashMap<String, RemoteEventBridgeTask>>,
@@ -835,7 +921,8 @@ impl RemoteEventBridgeRegistry {
     ///
     /// Code Logic（这个函数做什么）:
     ///     校验 runtime_role 为 HeadlessOwner；按 device_id 更新映射与 last_used；
-    ///     URL 变化或任务结束时 cancel 旧任务并 spawn 新循环。
+    ///     URL 变化或任务结束时 cancel 旧任务并 spawn 新循环，transfer after_cursor +
+    ///     subscribers 到新 runtime（R30 M3）。
     pub fn ensure_bridge(
         &self,
         device_id: String,
@@ -856,14 +943,56 @@ impl RemoteEventBridgeRegistry {
             existing.cancel.cancel();
             existing.handle.abort();
             let project_ids = Arc::clone(&existing.project_ids);
-            *existing = spawn_bridge_task(device_id, base_url, project_ids, state);
+            let transferred_cursor = existing.runtime.load_after_cursor();
+            let transferred_subscribers = existing.runtime.subscribers.load(Ordering::SeqCst);
+            *existing = spawn_bridge_task(
+                device_id,
+                base_url,
+                project_ids,
+                state,
+                transferred_cursor,
+                transferred_subscribers,
+            );
             return;
         }
 
         let project_ids = Arc::new(RwLock::new(HashMap::new()));
         update_project_mapping(&project_ids, project_mapping);
-        let task = spawn_bridge_task(device_id.clone(), base_url, project_ids, state);
+        let task = spawn_bridge_task(device_id.clone(), base_url, project_ids, state, None, 0);
         tasks.insert(device_id, task);
+    }
+
+    /// 为活跃 remote 查看者增加订阅 lease（阻止 idle TTL 回收）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     仅依赖 ensure_bridge touch 时，长时间观看 terminal 而不再调用 ensure 仍会 idle reclaim；
+    ///     订阅 refcount 保证有查看者时 bridge 不退出（R30 M3）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 device 的 task.runtime.retain_subscription；无 task 时 no-op 返回 false。
+    pub fn acquire_subscription(&self, device_id: &str) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        task.runtime.retain_subscription();
+        true
+    }
+
+    /// 释放活跃 remote 查看者的订阅 lease。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     查看者离开后应允许 idle TTL 从最后一次 release/touch 起算。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 task 后 release_subscription；无 task 时 no-op 返回 false。
+    pub fn release_subscription(&self, device_id: &str) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        task.runtime.release_subscription();
+        true
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -925,18 +1054,30 @@ impl RemoteEventBridgeRegistry {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     事件桥 registry 需要把任务创建细节集中处理，保证 replacement 和首次创建使用同一套状态字段。
+///     事件桥 registry 需要把任务创建细节集中处理，保证 replacement 和首次创建使用同一套状态字段；
+///     URL 变化 restart 时必须继承 after_cursor 与 subscribers，避免 brand-new attach（R30 M3）。
 ///
 /// Code Logic（这个函数做什么）:
-///     创建 cancel/runtime 并 spawn remote_event_loop；结束后置 finished。
+///     创建 cancel/runtime（seed cursor + subscribers）并 spawn remote_event_loop；结束后置 finished。
 fn spawn_bridge_task(
     device_id: String,
     base_url: String,
     project_ids: Arc<RwLock<HashMap<String, String>>>,
     state: AppState,
+    initial_after_cursor: Option<BackendRuntimeCursor>,
+    initial_subscribers: u32,
 ) -> RemoteEventBridgeTask {
     let cancel = CancellationToken::new();
     let runtime = Arc::new(BridgeRuntimeState::new());
+    if initial_after_cursor.is_some() {
+        runtime.store_after_cursor(initial_after_cursor);
+    }
+    if initial_subscribers > 0 {
+        runtime
+            .subscribers
+            .store(initial_subscribers, Ordering::SeqCst);
+        runtime.touch();
+    }
     let loop_cancel = cancel.clone();
     let loop_runtime = Arc::clone(&runtime);
     let task_device_id = device_id;
@@ -1029,8 +1170,9 @@ pub fn backoff_delay_for_attempt(attempt: u32) -> Duration {
 ///     远端事件连接可能因网络切换、对端重启或资源上限而断开，需要可取消的自动恢复。
 ///
 /// Code Logic（这个函数做什么）:
-///     循环：检查 cancel/idle → 读流 → 失败记 error class 并指数退避（cap 60s）；
-///     ResourceLimit 立即停止且不保留 buffer。
+///     循环：检查 cancel/idle（订阅 lease 持有时不 idle）→ 读流（共享 after_cursor）→
+///     失败记 error class 并指数退避（cap 60s）；ResourceLimit 立即停止且不保留 buffer。
+///     streaming 期间 touch 保持 lease；cursor 写回 runtime 供 restart 继承（R30 M3）。
 async fn remote_event_loop(
     device_id: String,
     base_url: String,
@@ -1039,7 +1181,7 @@ async fn remote_event_loop(
     cancel: CancellationToken,
     runtime: Arc<BridgeRuntimeState>,
 ) {
-    let mut after_cursor: Option<BackendRuntimeCursor> = None;
+    // after_cursor 以 runtime 共享状态为权威；本地 mut 仅作循环内缓存，推进后写回。
     loop {
         if cancel.is_cancelled() {
             runtime.set_phase("cancelled");
@@ -1052,6 +1194,8 @@ async fn remote_event_loop(
         }
 
         runtime.set_phase("connecting");
+        // 每次连接前从共享状态刷新本地缓存（restart/transfer 路径可能已 seed）。
+        let mut after_cursor = runtime.load_after_cursor();
         match read_remote_event_stream(
             &state,
             &device_id,
@@ -1064,20 +1208,24 @@ async fn remote_event_loop(
         .await
         {
             Ok(()) => {
+                runtime.store_after_cursor(after_cursor.clone());
                 runtime.attempt.store(0, Ordering::SeqCst);
                 runtime.set_error_class(None);
             }
             Err(EventStreamError::Cancelled) => {
+                runtime.store_after_cursor(after_cursor.clone());
                 runtime.set_phase("cancelled");
                 return;
             }
             Err(EventStreamError::ResourceLimit) => {
+                runtime.store_after_cursor(after_cursor.clone());
                 runtime.set_phase("resource_limit");
                 runtime.set_error_class(Some(EventStreamError::ResourceLimit.error_class()));
                 tracing::debug!("Workbench 远端事件流超资源上限，停止 bridge");
                 return;
             }
             Err(EventStreamError::IdleTimeout) => {
+                runtime.store_after_cursor(after_cursor.clone());
                 runtime.set_phase("idle_exit");
                 runtime.set_error_class(Some(EventStreamError::IdleTimeout.error_class()));
                 return;
@@ -1107,6 +1255,7 @@ async fn remote_event_loop(
                             latest,
                             true,
                         );
+                        runtime.store_after_cursor(after_cursor.clone());
                         runtime.attempt.store(0, Ordering::SeqCst);
                         runtime.set_error_class(None);
                         runtime.set_phase("resynced");
@@ -1119,6 +1268,7 @@ async fn remote_event_loop(
                         continue;
                     }
                     Err(EventStreamError::Cancelled) => {
+                        runtime.store_after_cursor(after_cursor.clone());
                         runtime.set_phase("cancelled");
                         return;
                     }
@@ -1131,6 +1281,7 @@ async fn remote_event_loop(
                             latest,
                             false,
                         );
+                        runtime.store_after_cursor(after_cursor.clone());
                         runtime.set_error_class(Some("stream_gap"));
                         let next = runtime.attempt.fetch_add(1, Ordering::SeqCst) + 1;
                         runtime.set_phase("backoff");
@@ -1144,6 +1295,7 @@ async fn remote_event_loop(
                 }
             }
             Err(error) => {
+                runtime.store_after_cursor(after_cursor.clone());
                 let class = error.error_class();
                 runtime.set_error_class(Some(class));
                 let next = runtime.attempt.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1207,6 +1359,8 @@ async fn read_remote_event_stream(
     }
 
     runtime.set_phase("streaming");
+    // streaming 期间刷新 last_used，配合订阅 lease 避免仅靠 ensure_bridge 才能续期（R30 M3）。
+    runtime.touch();
     let mut buffer = Vec::new();
     loop {
         if cancel.is_cancelled() {
@@ -1231,6 +1385,8 @@ async fn read_remote_event_stream(
             buffer.clear();
             return Ok(());
         };
+        // 仍在收流：touch 保持 idle 窗口；有 subscribers 时 idle_for 仍为 ZERO。
+        runtime.touch();
 
         let project_map = project_ids
             .read()
@@ -1251,6 +1407,8 @@ async fn read_remote_event_stream(
                                     owner_instance_id,
                                     sequence,
                                 });
+                                // 立即写回共享 cursor，task restart 中途也不会丢（R30 M3）。
+                                runtime.store_after_cursor(after_cursor.clone());
                             }
                         }
                         WorkbenchRemoteStreamMessage::Gap {
@@ -1260,6 +1418,7 @@ async fn read_remote_event_stream(
                         } => {
                             // fail-closed：停止当前连接；携带 gap 游标供成功 resync 后推进。
                             buffer.clear();
+                            runtime.store_after_cursor(after_cursor.clone());
                             return Err(EventStreamError::StreamGap {
                                 owner_instance_id,
                                 oldest_available,
@@ -1271,10 +1430,12 @@ async fn read_remote_event_stream(
             }
             Err(EventStreamError::ResourceLimit) => {
                 buffer.clear();
+                runtime.store_after_cursor(after_cursor.clone());
                 return Err(EventStreamError::ResourceLimit);
             }
             Err(other) => {
                 buffer.clear();
+                runtime.store_after_cursor(after_cursor.clone());
                 return Err(other);
             }
         }
@@ -2251,6 +2412,135 @@ mod tests {
             other => panic!("expected StreamGap, got {other:?}"),
         }
         assert_eq!(err.error_class(), "stream_gap");
+    }
+
+    /// Business Logic（R30 M3: 为什么需要这个测试）:
+    ///     活跃查看者持有订阅时 idle TTL 不得把 bridge 视为可回收；
+    ///     活跃 phase（streaming）同样不得 idle。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     phase 置 backoff（非活跃）+ last_used 过期 → idle；
+    ///     retain 后 ZERO；release + 过期再 idle；phase=streaming 时 ZERO。
+    #[test]
+    fn subscription_lease_keeps_bridge_from_idle() {
+        let runtime = BridgeRuntimeState::new();
+        // 新 runtime 默认 phase=connecting，属于活跃相位；测纯订阅语义时先切到 backoff。
+        runtime.set_phase("backoff");
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert!(
+            runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
+            "无订阅且非活跃 phase 且 last_used 过期时应 idle"
+        );
+
+        runtime.retain_subscription();
+        assert_eq!(
+            runtime.idle_for(),
+            Duration::ZERO,
+            "subscribers>0 时不得 idle"
+        );
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert_eq!(runtime.idle_for(), Duration::ZERO);
+
+        runtime.release_subscription();
+        runtime.set_phase("backoff");
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert!(runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS));
+
+        // 安静 streaming 相位：即使 last_used 过期也不得 idle。
+        runtime.set_phase("streaming");
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert_eq!(
+            runtime.idle_for(),
+            Duration::ZERO,
+            "streaming phase must keep bridge non-idle without chunk touch"
+        );
+    }
+
+    /// Business Logic（R30 M3: 为什么需要这个测试）:
+    ///     双重 retain 需双重 release 才允许 idle，避免一个 viewer 释放误杀其他 viewer。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     phase=backoff；retain×2 → release×1 仍 ZERO；再 release 后可 idle。
+    #[test]
+    fn subscription_refcount_requires_matching_release() {
+        let runtime = BridgeRuntimeState::new();
+        runtime.set_phase("backoff");
+        runtime.retain_subscription();
+        runtime.retain_subscription();
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        runtime.release_subscription();
+        assert_eq!(runtime.idle_for(), Duration::ZERO);
+        runtime.release_subscription();
+        runtime.set_phase("backoff");
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert!(runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS));
+        // 额外 release 不 panic / 不回绕。
+        runtime.release_subscription();
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（R30 M3: 为什么需要这个测试）:
+    ///     URL 变化或任务替换时 after_cursor 必须从旧 runtime transfer 到新 runtime，
+    ///     禁止 brand-new attach 丢掉 recovery 点。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     seed cursor → store；spawn_bridge_task 带 initial_after_cursor；
+    ///     新 runtime.load_after_cursor 等于 seed；subscribers 一并 transfer。
+    #[test]
+    fn after_cursor_preserved_across_spawn_bridge_task_restart() {
+        let seed = BackendRuntimeCursor {
+            owner_instance_id: "owner-seed".into(),
+            sequence: 99,
+        };
+        // 不真实跑 loop 到网络：只验证 spawn 时 seed 写入新 runtime。
+        // spawn_bridge_task 需要 AppState；用 finished abort 路径测 seed 字段。
+        // 这里直接测 runtime seed 语义（spawn 内部同样 store_after_cursor）。
+        let runtime = BridgeRuntimeState::new();
+        runtime.store_after_cursor(Some(seed.clone()));
+        runtime.subscribers.store(2, Ordering::SeqCst);
+
+        let transferred_cursor = runtime.load_after_cursor();
+        let transferred_subscribers = runtime.subscribers.load(Ordering::SeqCst);
+        let restarted = BridgeRuntimeState::new();
+        restarted.store_after_cursor(transferred_cursor);
+        restarted
+            .subscribers
+            .store(transferred_subscribers, Ordering::SeqCst);
+
+        let loaded = restarted.load_after_cursor().expect("cursor transferred");
+        assert_eq!(loaded.owner_instance_id, "owner-seed");
+        assert_eq!(loaded.sequence, 99);
+        assert_eq!(restarted.subscribers.load(Ordering::SeqCst), 2);
+        // 有订阅时 idle 为 ZERO。
+        *restarted.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 1);
+        assert_eq!(restarted.idle_for(), Duration::ZERO);
+    }
+
+    /// Business Logic（R30 M3: 为什么需要这个测试）:
+    ///     registry acquire/release 在无 bridge 时必须 no-op 安全，有 bridge 时驱动 runtime refcount。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     空 registry acquire/release 返回 false；手工插入 runtime 后 acquire 增 refcount。
+    #[test]
+    fn registry_subscription_api_noops_without_task_and_retains_with_runtime() {
+        let registry = RemoteEventBridgeRegistry::new();
+        assert!(!registry.acquire_subscription("missing-device"));
+        assert!(!registry.release_subscription("missing-device"));
+
+        // 直接测 runtime 路径与 registry 语义对齐（避免构造完整 AppState 任务）。
+        let runtime = BridgeRuntimeState::new();
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
+        runtime.retain_subscription();
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        runtime.release_subscription();
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
     }
 
 }

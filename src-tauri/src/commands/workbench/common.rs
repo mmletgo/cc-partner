@@ -520,6 +520,10 @@ pub(crate) async fn merged_session_dtos(
 ///     `Claimed` 独占 restore；`AlreadyLive` 跳过；`RestoreInProgress` await watch 结果。
 ///     Ready/PersistedDisconnected → continue；Failed → 映射稳定错误返回；
 ///     TimedOut → `timeout(session_restore_wait_timeout)`；禁止部分成功清单。
+///     **R30 M1**：`Claimed` 后、spawn / disconnected upsert / worktree resolve 前
+///     `workbench_session_repo.get` re-read durable；缺失（list 快照与 concurrent close
+///     竞态）finish `PersistedDisconnected` 并 continue，**禁止**用 stale 快照复活已删 tab；
+///     存在则用 re-read 行继续后续 restore（保留 R24–R29 barrier/lease/claim generation）。
 ///     项目存在时补齐可读 worktree 名再调用 registry.restore（内部 skip-missing）。
 ///     成功写回最新 row 并 finish Ready。
 ///     restore 成功但 upsert 失败：先显式 `drop(SessionSpawnGuard)` 回收 attach，
@@ -539,9 +543,9 @@ pub(crate) async fn restore_persisted_sessions(
 
     state.runtime_role.require_owner()?;
     let rows = state.workbench_session_repo.list(project_id).await?;
-    for row in rows {
+    for snapshot in rows {
         // Finding 5 + R14/R16: 原子占位，区分 AlreadyLive / RestoreInProgress / Claimed。
-        let claim_generation = match state.workbench_sessions.try_claim_restore(&row.id) {
+        let claim_generation = match state.workbench_sessions.try_claim_restore(&snapshot.id) {
             RestoreClaimOutcome::AlreadyLive => continue,
             // R24 H2：Closing barrier 下不 claim；下一次 list re-read durable（已删除则不再 restore）。
             RestoreClaimOutcome::BarrierActive => continue,
@@ -565,9 +569,15 @@ pub(crate) async fn restore_persisted_sessions(
         // RAII：任意 early return / Err 路径 Drop 都会 generation-scoped finish Failed。
         let mut claim_guard = crate::workbench::sessions::RestoreClaimGuard::new(
             (*state.workbench_sessions).clone(),
-            row.id.clone(),
+            snapshot.id.clone(),
             claim_generation,
         );
+        // R30 M1：list 快照可能在 claim 前被 concurrent close 删除；claim 成功后 re-read durable，
+        // 缺失则 finish PersistedDisconnected 且不 project/worktree/spawn/upsert，禁止复活已关 tab。
+        let Some(row) = state.workbench_session_repo.get(&snapshot.id).await? else {
+            claim_guard.finish(SharedRestoreNotification::PersistedDisconnected);
+            continue;
+        };
         // R26 M1：project remove 窗口内不得继续 restore。
         if let Err(error) = state
             .workbench_sessions
@@ -1451,7 +1461,8 @@ mod restore_holder_fail_closed_tests {
     use crate::updater::UpdateRuntime;
     use crate::workbench::models::{WorkbenchProjectRow, WorkbenchSessionRow};
     use crate::workbench::sessions::{
-        shared_restore_failed_error, RestoreClaimOutcome, SharedRestoreWaitResult,
+        shared_restore_failed_error, RestoreClaimGuard, RestoreClaimOutcome,
+        SharedRestoreNotification, SharedRestoreWaitResult,
     };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
@@ -1794,5 +1805,97 @@ mod restore_holder_fail_closed_tests {
         );
         let _ = SharedRestoreWaitResult::Failed(crate::error::AppErrorCategory::Internal);
         let _ = RestoreClaimOutcome::AlreadyLive;
+    }
+
+    /// Business Logic（R30 M1: 为什么需要这个测试）:
+    ///     list 一次快照后 concurrent close 可先删 durable 行；若 restore 仍用 stale 快照
+    ///     spawn/upsert，已关 tab 会被复活。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     seed → list 快照 → delete durable → 生产 list 路径 no-op；
+    ///     再模拟 claim 后 re-read：缺失则 finish PersistedDisconnected、不 upsert/spawn，
+    ///     断言 id 仍不存在且无 live/claim。
+    #[tokio::test]
+    async fn restore_claim_reread_skips_deleted_session_without_resurrection() {
+        let state = build_restore_fail_state().await;
+        seed_raw_pty_running(&state, "s-race-deleted").await;
+
+        // 模拟 restore_persisted_sessions 的 list 快照。
+        let snapshot = state
+            .workbench_session_repo
+            .list(Some("p1"))
+            .await
+            .unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id, "s-race-deleted");
+
+        // concurrent close 在 claim/spawn 前删掉 durable 行（barrier 已清的竞态形状）。
+        state
+            .workbench_session_repo
+            .delete("s-race-deleted")
+            .await
+            .unwrap();
+        assert!(state
+            .workbench_session_repo
+            .get("s-race-deleted")
+            .await
+            .unwrap()
+            .is_none());
+
+        // delete 发生在 list 之前时：生产路径 list 为空，直接 Ok，不得复活。
+        restore_persisted_sessions(&state, Some("p1"))
+            .await
+            .expect("empty durable list restore must succeed");
+        assert!(state
+            .workbench_session_repo
+            .get("s-race-deleted")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!state.workbench_sessions.contains("s-race-deleted"));
+
+        // 关键竞态：stale list 快照 + claim 后 re-read（与生产 Claimed 分支一致）。
+        let stale = &snapshot[0];
+        let claim_generation = match state.workbench_sessions.try_claim_restore(&stale.id) {
+            RestoreClaimOutcome::Claimed { generation } => generation,
+            _ => panic!("expected Claimed for deleted-but-stale session id"),
+        };
+        let mut claim_guard = RestoreClaimGuard::new(
+            (*state.workbench_sessions).clone(),
+            stale.id.clone(),
+            claim_generation,
+        );
+        // 生产：claim 后 re-read durable；缺失则 finish PersistedDisconnected 并 continue。
+        let durable = state
+            .workbench_session_repo
+            .get(&stale.id)
+            .await
+            .expect("get after delete must succeed");
+        assert!(
+            durable.is_none(),
+            "re-read after concurrent delete must observe missing durable row"
+        );
+        // 禁止用 stale 快照走 restore/disconnected upsert。
+        claim_guard.finish(SharedRestoreNotification::PersistedDisconnected);
+
+        assert!(state
+            .workbench_session_repo
+            .get("s-race-deleted")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!state.workbench_sessions.contains("s-race-deleted"));
+        assert!(!state
+            .workbench_sessions
+            .is_restore_claim_held("s-race-deleted"));
+        let after = state
+            .workbench_session_repo
+            .list(Some("p1"))
+            .await
+            .unwrap();
+        assert!(
+            after.is_empty(),
+            "deleted session must not be resurrected by stale restore snapshot"
+        );
     }
 }

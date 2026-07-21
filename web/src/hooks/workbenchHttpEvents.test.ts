@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
+  advanceWorkbenchHttpStreamCursor,
+  buildWorkbenchEventsUrl,
+  isWorkbenchHttpGapPayload,
   parseWorkbenchNdjsonChunk,
+  parseWorkbenchNdjsonFrame,
   parseWorkbenchNdjsonFrames,
+  resolveCursorAfterGap,
+  resyncWorkbenchSessionsAfterGap,
   WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
   type WorkbenchNdjsonParserState,
 } from './useWorkbenchHttpEvents';
+import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -122,6 +129,249 @@ describe('workbenchHttpEvents', () => {
         '{"type":"agentRuntime","payload":{"agentSession":{"id":"a"}}}\n',
       ),
     ).toThrow(/agentRuntime/);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Gap 是 ring lag / owner 切换后的一等恢复帧；mobile 不得当 ignored 或继续 live。
+   *
+   * Code Logic（这个测试做什么）:
+   *   解析三种协议形态（lag / ring truncate / owner switch）的 gap 帧，断言 kind=gap 与游标字段；
+   *   畸形 gap 抛错；业务 chunk 过滤掉 gap。
+   */
+  test('parses gap frames as first-class (lag / ring truncate / owner switch)', () => {
+    const lag = parseWorkbenchNdjsonFrame({
+      type: 'gap',
+      payload: { ownerInstanceId: 'owner-a', oldestAvailable: 12, latest: 40 },
+    });
+    expect(lag).toEqual({
+      kind: 'gap',
+      ownerInstanceId: 'owner-a',
+      oldestAvailable: 12,
+      latest: 40,
+    });
+
+    const ringTruncate = parseWorkbenchNdjsonFrames(
+      { pending: '' },
+      '{"type":"gap","payload":{"ownerInstanceId":"owner-a","oldestAvailable":3,"latest":9}}\n',
+    );
+    expect(ringTruncate).toEqual([
+      { kind: 'gap', ownerInstanceId: 'owner-a', oldestAvailable: 3, latest: 9 },
+    ]);
+
+    const ownerSwitch = parseWorkbenchNdjsonFrame({
+      type: 'gap',
+      payload: { ownerInstanceId: 'owner-b', oldestAvailable: 0, latest: 1 },
+    });
+    expect(ownerSwitch).toEqual({
+      kind: 'gap',
+      ownerInstanceId: 'owner-b',
+      oldestAvailable: 0,
+      latest: 1,
+    });
+
+    expect(isWorkbenchHttpGapPayload({ ownerInstanceId: 'o', oldestAvailable: 1, latest: 2 })).toBe(
+      true,
+    );
+    expect(isWorkbenchHttpGapPayload({ oldestAvailable: 1, latest: 2 })).toBe(false);
+
+    expect(() =>
+      parseWorkbenchNdjsonFrame({ type: 'gap', payload: { ownerInstanceId: 'x' } }),
+    ).toThrow(/gap/);
+
+    const mixed = parseWorkbenchNdjsonChunk(
+      { pending: '' },
+      '{"type":"gap","payload":{"ownerInstanceId":"o","oldestAvailable":1,"latest":2}}\n' +
+        '{"type":"terminalStatus","payload":{"sessionId":"s","status":"running","exitCode":null,"ts":1}}\n',
+    );
+    expect(mixed).toHaveLength(1);
+    expect(mixed[0]?.type).toBe('terminalStatus');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   live 业务帧 envelope 的 owner+sequence 必须可解析，供 stream cursor 推进。
+   *
+   * Code Logic（这个测试做什么）:
+   *   解析带 top-level ownerInstanceId/sequence 的 terminalOutput，断言 frame 附带 envelope。
+   */
+  test('parses envelope ownerInstanceId and sequence on event frames', () => {
+    const frame = parseWorkbenchNdjsonFrame({
+      type: 'terminalOutput',
+      ownerInstanceId: 'owner-a',
+      sequence: 7,
+      payload: { sessionId: 's1', chunk: 'x', seq: 3, ts: 1 },
+    });
+    expect(frame.kind).toBe('event');
+    if (frame.kind === 'event') {
+      expect(frame.ownerInstanceId).toBe('owner-a');
+      expect(frame.sequence).toBe(7);
+      expect(frame.event.type).toBe('terminalOutput');
+    }
+  });
+});
+
+describe('workbenchHttpEvents stream cursor helpers', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   after 游标必须在同 owner 单调推进，owner 切换时重置，禁止 brand-new None 丢 recovery。
+   *
+   * Code Logic（这个测试做什么）:
+   *   覆盖 advance / resolveCursorAfterGap / buildWorkbenchEventsUrl 的核心合同。
+   */
+  test('advances cursor, resolves gap attach vs recovery, and builds after URL', () => {
+    expect(advanceWorkbenchHttpStreamCursor(null, 'owner-a', 5)).toEqual({
+      ownerInstanceId: 'owner-a',
+      sequence: 5,
+    });
+    expect(
+      advanceWorkbenchHttpStreamCursor(
+        { ownerInstanceId: 'owner-a', sequence: 5 },
+        'owner-a',
+        9,
+      ),
+    ).toEqual({ ownerInstanceId: 'owner-a', sequence: 9 });
+    expect(
+      advanceWorkbenchHttpStreamCursor(
+        { ownerInstanceId: 'owner-a', sequence: 9 },
+        'owner-a',
+        4,
+      ),
+    ).toEqual({ ownerInstanceId: 'owner-a', sequence: 9 });
+    expect(
+      advanceWorkbenchHttpStreamCursor(
+        { ownerInstanceId: 'owner-a', sequence: 9 },
+        'owner-b',
+        1,
+      ),
+    ).toEqual({ ownerInstanceId: 'owner-b', sequence: 1 });
+    expect(advanceWorkbenchHttpStreamCursor({ ownerInstanceId: 'owner-a', sequence: 2 }, '', 3)).toEqual(
+      { ownerInstanceId: 'owner-a', sequence: 2 },
+    );
+
+    const pre = { ownerInstanceId: 'owner-a', sequence: 8 };
+    const gap = { ownerInstanceId: 'owner-a', oldestAvailable: 12, latest: 40 };
+    expect(resolveCursorAfterGap(pre, gap, true)).toEqual({
+      ownerInstanceId: 'owner-a',
+      sequence: 40,
+    });
+    expect(resolveCursorAfterGap(pre, gap, false)).toEqual(pre);
+    expect(
+      resolveCursorAfterGap(pre, { ownerInstanceId: 'owner-b', oldestAvailable: 0, latest: 0 }, true),
+    ).toEqual(pre);
+
+    expect(buildWorkbenchEventsUrl(null)).toBe('/api/workbench/events');
+    expect(buildWorkbenchEventsUrl({ ownerInstanceId: 'owner-a', sequence: 9 })).toBe(
+      '/api/workbench/events?afterOwnerInstanceId=owner-a&afterSequence=9',
+    );
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Gap resync 只对 running session replay，并用 replay 的 lastSeq/owner 权威 reset buffer。
+   *
+   * Code Logic（这个测试做什么）:
+   *   注入 list/replay 与 store.reset spy；断言只 reset running、带 lastSeq/owner；失败上抛。
+   *   不断言任何 terminal I/O body 内容。
+   */
+  test('resyncs only running sessions and resets store with replay authority', async () => {
+    const reset = vi.fn();
+    const store = { reset } as unknown as WorkbenchTerminalBufferStore;
+    const sessions = {
+      list: vi.fn(async () => [
+        { id: 'run-1', status: 'running' },
+        { id: 'exit-1', status: 'exited' },
+        { id: 'run-2', status: 'running' },
+      ]),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: '',
+        truncated: false,
+        lastSeq: sessionId === 'run-1' ? 11 : 22,
+        ownerInstanceId: 'owner-x',
+      })),
+    };
+
+    await resyncWorkbenchSessionsAfterGap(store, sessions);
+
+    expect(sessions.list).toHaveBeenCalledTimes(1);
+    expect(sessions.replay).toHaveBeenCalledTimes(2);
+    expect(sessions.replay).toHaveBeenCalledWith('run-1');
+    expect(sessions.replay).toHaveBeenCalledWith('run-2');
+    expect(reset).toHaveBeenCalledTimes(2);
+    expect(reset).toHaveBeenNthCalledWith(1, 'run-1', '', 11, 'owner-x');
+    expect(reset).toHaveBeenNthCalledWith(2, 'run-2', '', 22, 'owner-x');
+
+    const failing = {
+      list: vi.fn(async () => [{ id: 'run-1', status: 'running' }]),
+      replay: vi.fn(async () => {
+        throw new Error('network');
+      }),
+    };
+    await expect(resyncWorkbenchSessionsAfterGap(store, failing)).rejects.toThrow(/network/);
+  });
+});
+
+describe('workbenchHttpEvents gap handling contract', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   Gap 后不得继续应用本连接 live 尾部；resync 成功 attach latest，失败保留 pre-gap recovery。
+   *
+   * Code Logic（这个测试做什么）:
+   *   纯函数复刻 hook 内 gap 合同：pause 后丢弃后续 event；成功/失败两种 cursor 决策。
+   *   不包含 terminal I/O body 断言。
+   */
+  test('pauses live after gap and never brand-new None after incomplete resync', () => {
+    let livePaused = false;
+    let streamCursor: { ownerInstanceId: string; sequence: number } | null = {
+      ownerInstanceId: 'owner-a',
+      sequence: 8,
+    };
+    const appliedEvents: string[] = [];
+
+    const frames = parseWorkbenchNdjsonFrames(
+      { pending: '' },
+      [
+        '{"type":"terminalStatus","payload":{"sessionId":"s","status":"running","exitCode":null,"ts":1},"ownerInstanceId":"owner-a","sequence":8}\n',
+        '{"type":"gap","payload":{"ownerInstanceId":"owner-a","oldestAvailable":12,"latest":40}}\n',
+        '{"type":"terminalStatus","payload":{"sessionId":"s","status":"running","exitCode":null,"ts":2},"ownerInstanceId":"owner-a","sequence":41}\n',
+      ].join(''),
+    );
+
+    for (const frame of frames) {
+      if (livePaused) break;
+      if (frame.kind === 'gap') {
+        livePaused = true;
+        const pre = streamCursor;
+        // 模拟 incomplete resync
+        streamCursor = resolveCursorAfterGap(pre, frame, false);
+        break;
+      }
+      if (frame.kind === 'event') {
+        streamCursor = advanceWorkbenchHttpStreamCursor(
+          streamCursor,
+          frame.ownerInstanceId,
+          frame.sequence,
+        );
+        appliedEvents.push(frame.event.type);
+      }
+    }
+
+    expect(livePaused).toBe(true);
+    expect(appliedEvents).toEqual(['terminalStatus']);
+    expect(streamCursor).toEqual({ ownerInstanceId: 'owner-a', sequence: 8 });
+    expect(buildWorkbenchEventsUrl(streamCursor)).toContain('afterSequence=8');
+
+    // 成功 resync 才 attach latest
+    const afterSuccess = resolveCursorAfterGap(
+      { ownerInstanceId: 'owner-a', sequence: 8 },
+      { ownerInstanceId: 'owner-a', oldestAvailable: 12, latest: 40 },
+      true,
+    );
+    expect(afterSuccess).toEqual({ ownerInstanceId: 'owner-a', sequence: 40 });
+    expect(buildWorkbenchEventsUrl(afterSuccess)).toBe(
+      '/api/workbench/events?afterOwnerInstanceId=owner-a&afterSequence=40',
+    );
   });
 });
 

@@ -1333,6 +1333,32 @@ pub fn reset_create_tmux_window_call_count_for_test() {
     CREATE_TMUX_WINDOW_CALL_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// 测试用：`TmuxCreateGuard` 未 commit Drop 触发的 reclaim 次数（R30 M2）。
+/// 仅 guard Drop 路径计数，避免与其它 close/kill_persisted_backend 并行测试交叉。
+#[cfg(test)]
+static TMUX_CREATE_GUARD_RECLAIM_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Business Logic（为什么需要这个函数）:
+///     单测断言 TmuxCreateGuard Drop / barrier 失败路径会销毁刚创建的 window。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 `TMUX_CREATE_GUARD_RECLAIM_COUNT`。
+#[cfg(test)]
+pub fn tmux_create_guard_reclaim_count_for_test() -> u64 {
+    TMUX_CREATE_GUARD_RECLAIM_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     测试间隔离 reclaim 计数。
+///
+/// Code Logic（这个函数做什么）:
+///     归零原子计数器。
+#[cfg(test)]
+pub fn reset_tmux_create_guard_reclaim_count_for_test() {
+    TMUX_CREATE_GUARD_RECLAIM_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     新建 tab 时，需要在 worktree 级 tmux session 内创建一个 window 承载真实 shell 上下文。
 ///     **不得**被 list/open restore 路径调用（A8：缺失 target 时 skip，不创建 shell）。
@@ -1458,6 +1484,7 @@ fn tmux_destroy_backend_args(
 
 /// Business Logic（为什么需要这个函数）:
 ///     用户关闭终端 tab 时，如果该 tab 使用 tmux 承载上下文，应销毁对应 tmux session，避免后台残留。
+///     R30 M2：create 在 registry insert 前失败时，TmuxCreateGuard Drop 也走此路径回收 orphan window。
 ///
 /// Code Logic（这个函数做什么）:
 ///     多 window 项目执行 `kill-window -t <session:window>`；最后一个 window 或旧记录退回 kill-session。
@@ -1489,6 +1516,60 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     let output = command.output();
     if let Err(error) = output {
         tracing::debug!("销毁工作台 tmux 会话失败: {error}");
+    }
+}
+
+/// create 路径在 `create_tmux_window` 成功后、create 完全提交前的 window 回收守卫（R30 M2）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     create 可先成功创建不可见 tmux window，再因 project barrier / spawn_row 失败；
+///     `SessionSpawnGuard` 只覆盖 registry 内 PTY attach，无法回收 pre-spawn window。
+///
+/// Code Logic（这个结构体做什么）:
+///     持有已创建 window 的 row 快照；未 `commit()` 时 Drop 调用 `kill_persisted_backend`。
+struct TmuxCreateGuard {
+    row: WorkbenchSessionRow,
+    committed: bool,
+}
+
+impl TmuxCreateGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     `create_tmux_window` 成功后立刻接管 window 生命周期，任何 early return 都能销毁 orphan。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     记录 row，committed=false。
+    fn new(row: WorkbenchSessionRow) -> Self {
+        Self {
+            row,
+            committed: false,
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     spawn_row 成功后 window 所有权移交 registry/command 层，禁止 Drop 误杀合法 window。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     标记 committed=true。
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TmuxCreateGuard {
+    /// Business Logic（为什么需要这个函数）:
+    ///     barrier / spawn 失败（含 panic）必须销毁刚创建的 invisible window，禁止后台残留 shell。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     未 commit 时 best-effort `kill_persisted_backend`（不记录 terminal body）；
+    ///     测试环境额外累加 `TMUX_CREATE_GUARD_RECLAIM_COUNT`。
+    fn drop(&mut self) {
+        if !self.committed {
+            #[cfg(test)]
+            {
+                TMUX_CREATE_GUARD_RECLAIM_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            kill_persisted_backend(&self.row);
+        }
     }
 }
 
@@ -3622,8 +3703,9 @@ impl WorkbenchSessionRegistry {
     ///     用户在工作台中创建本机终端时，需要在当前 worktree 根目录中启动普通 shell。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     R26 M1：先 revalidate project closing barrier；通过后创建 portable-pty pair，
-    ///     cwd 指向 active worktree 路径，spawn 系统 shell，并启动输出与退出监听线程。
+    ///     R26 M1：先 revalidate project closing barrier；通过后优先 `create_tmux_window`，
+    ///     再构建 row 并 `spawn_row`。R30 M2：window 创建成功后装 `TmuxCreateGuard`，
+    ///     仅在 spawn_row Ok 后 commit；barrier / spawn 失败 Drop 销毁 orphan window。
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -3717,9 +3799,25 @@ impl WorkbenchSessionRegistry {
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        // spawn 前再 revalidate：create 期间 project 可能被 remove。
+        // R30 M2：create_tmux_window 成功后立刻装 RAII；spawn 提交前任何失败路径 Drop 回收 window。
+        let mut tmux_create_guard = if row.backend == TMUX_BACKEND
+            && row.backend_id.is_some()
+            && row.backend_window_id.is_some()
+        {
+            Some(TmuxCreateGuard::new(row.clone()))
+        } else {
+            None
+        };
+
+        // spawn 前再 revalidate：create 期间 project 可能被 remove；失败则 Drop 回收 window。
         self.require_project_not_closing(&project.id)?;
-        self.spawn_row(state, row, SpawnBarrierPolicy::Retry, None)
+        // spawn 失败时 `?` 离开作用域 → TmuxCreateGuard Drop 回收 pre-insert orphan window。
+        let spawned = self.spawn_row(state, row, SpawnBarrierPolicy::Retry, None)?;
+        // spawn 成功：window 由 registry/command 层（SessionSpawnGuard + close path）接管。
+        if let Some(guard) = tmux_create_guard.as_mut() {
+            guard.commit();
+        }
+        Ok(spawned)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -6189,6 +6287,90 @@ mod tests {
         }
         assert_eq!(registry.registry_len(), 1);
         assert!(registry.contains("s-keep"));
+    }
+
+    /// 串行化 R30 M2 reclaim 计数断言：reset/assert 窗口需互斥。
+    static TMUX_CREATE_GUARD_RECLAIM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Business Logic（R30 M2: 为什么需要这个测试）:
+    ///     create_tmux_window 成功后若 project barrier / spawn 失败，不得留下 invisible orphan window。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 tmux row → TmuxCreateGuard 不 commit → Drop 后 reclaim 计数 +1。
+    #[test]
+    fn tmux_create_guard_drop_reclaims_window_without_commit() {
+        let _lock = TMUX_CREATE_GUARD_RECLAIM_TEST_LOCK
+            .lock()
+            .expect("tmux create guard reclaim test lock");
+        reset_tmux_create_guard_reclaim_count_for_test();
+        let row = fake_tmux_row("s-r30-m2", "p-r30", Some("wt1"), "@9");
+        {
+            let _guard = TmuxCreateGuard::new(row);
+            // 模拟 barrier / spawn_row 失败：不 commit。
+        }
+        assert_eq!(
+            tmux_create_guard_reclaim_count_for_test(),
+            1,
+            "uncommitted TmuxCreateGuard must reclaim on Drop"
+        );
+    }
+
+    /// Business Logic（R30 M2: 为什么需要这个测试）:
+    ///     spawn_row 成功后 window 归 registry/command 层；TmuxCreateGuard 不得误杀合法 window。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     commit 后 Drop → reclaim 计数仍为 0。
+    #[test]
+    fn tmux_create_guard_commit_skips_kill_on_drop() {
+        let _lock = TMUX_CREATE_GUARD_RECLAIM_TEST_LOCK
+            .lock()
+            .expect("tmux create guard reclaim test lock");
+        reset_tmux_create_guard_reclaim_count_for_test();
+        let row = fake_tmux_row("s-r30-m2-ok", "p-r30", Some("wt1"), "@10");
+        {
+            let mut guard = TmuxCreateGuard::new(row);
+            guard.commit();
+        }
+        assert_eq!(
+            tmux_create_guard_reclaim_count_for_test(),
+            0,
+            "committed TmuxCreateGuard must not reclaim window"
+        );
+    }
+
+    /// Business Logic（R30 M2: 为什么需要这个测试）:
+    ///     create 路径在 create_tmux_window 之后、spawn 之前 revalidate barrier 失败时必须回收 window。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     模拟 create 成功装 guard 后 require_project_not_closing Err → Drop 回收。
+    #[test]
+    fn project_barrier_after_tmux_window_create_reclaims_via_guard() {
+        let _lock = TMUX_CREATE_GUARD_RECLAIM_TEST_LOCK
+            .lock()
+            .expect("tmux create guard reclaim test lock");
+        reset_tmux_create_guard_reclaim_count_for_test();
+        let registry = WorkbenchSessionRegistry::new();
+        let _gen = registry.begin_project_closing_barrier("p-r30-barrier");
+        let row = fake_tmux_row("s-r30-barrier", "p-r30-barrier", Some("wt1"), "@11");
+        // 对齐 create：window 成功后装 guard，再 revalidate barrier。
+        let result = {
+            let _guard = TmuxCreateGuard::new(row);
+            match registry.require_project_not_closing("p-r30-barrier") {
+                Ok(()) => Ok(()),
+                Err(error) => Err(error),
+            }
+            // guard Drop on early return path
+        };
+        assert!(
+            matches!(result, Err(AppError::Unavailable(ref m)) if m == "project_closing_barrier_active"),
+            "barrier must reject create revalidate"
+        );
+        assert_eq!(
+            tmux_create_guard_reclaim_count_for_test(),
+            1,
+            "barrier after create_tmux_window must reclaim via TmuxCreateGuard Drop"
+        );
+        registry.finish_project_closing_barrier("p-r30-barrier", _gen);
     }
 
     /// Business Logic（为什么需要这个测试）:
