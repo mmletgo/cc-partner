@@ -1546,6 +1546,43 @@ pub async fn mobile_list_projects(
     Ok(Json(rows.iter().map(WorkbenchProjectRow::to_dto).collect()))
 }
 
+/// Mobile Gap inventory 活跃 remote event bridge 设备列表 DTO（camelCase）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Mobile Gap recovery 只应对活跃 bridge 上的 remote shortcut fail-closed，
+///     需要稳定可读的 deviceIds 列表（R39 M1）。
+///
+/// Code Logic（这个结构体做什么）:
+///     序列化为 `{ deviceIds: string[] }`；ids 已排序。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileActiveBridgeDevicesDto {
+    pub device_ids: Vec<String>,
+}
+
+/// 手机端读取仍在运行的 remote event bridge 设备 id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Mobile production Gap inventory 必须对齐桌面 `bridges.active_devices`：
+///     仅对活跃 bridge 设备 fail-closed，offline remote 跳过（R39 M1）。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 `workbench_remote_event_bridges.active_device_ids()`，排序后返回
+///     camelCase `{ deviceIds }`；body 忽略（与其它 mobile workbench POST 一致）。
+pub async fn mobile_list_active_bridge_devices(
+    State(state): State<AppState>,
+    Extension(_ctx): Extension<P2pRequestContext>,
+    Json(_req): Json<serde_json::Value>,
+) -> P2pResult<Json<MobileActiveBridgeDevicesDto>> {
+    let mut device_ids: Vec<String> = state
+        .workbench_remote_event_bridges
+        .active_device_ids()
+        .into_iter()
+        .collect();
+    device_ids.sort();
+    Ok(Json(MobileActiveBridgeDevicesDto { device_ids }))
+}
+
 /// 手机端打开本机路径为 Workbench 项目。
 ///
 /// Business Logic（为什么需要这个函数）:

@@ -423,8 +423,8 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
    *
    * Code Logic（这个测试做什么）:
    *   1) 成功 inventory：local+remote union 去重后只 replay running。
-   *   2) 默认（无 listActiveBridgeDevices）：remote list reject 不 throw，本机 running 仍 resync。
-   *   3) 注入 listActiveBridgeDevices 且含该 device：remote list 失败 throw。
+   *   2) 无 listActiveBridgeDevices（或空数组）：remote list reject 不 throw，本机 running 仍 resync。
+   *   3) 注入 listActiveBridgeDevices 且含该 device：remote list 失败 throw（production 默认路径）。
    *   4) resolveRemoteProjectDeviceId 优先 deviceId，否则解析 remote:device:...。
    */
   test('resync inventories remote sessions; offline remote skips unless active bridge', async () => {

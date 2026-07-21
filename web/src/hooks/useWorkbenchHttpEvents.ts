@@ -22,7 +22,10 @@ import type {
 } from '@/lib/types';
 import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
 import { agentSessionRuntimeDtoDecoder } from '@/lib/schemas/agentRuntime';
-import { httpWorkbenchTransport } from '@/api/workbenchHttp';
+import {
+  httpWorkbenchTransport,
+  listActiveBridgeDevicesHttp,
+} from '@/api/workbenchHttp';
 import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 /** 断线后重连延迟（毫秒）。 */
@@ -101,7 +104,8 @@ export type WorkbenchNdjsonFrame =
  * Business Logic（为什么需要这个接口）:
  *   Gap 后必须对 running session 做权威 replay，测试不能打真实 HTTP。
  *   R37 M1：无 project 的 sessions.list 会漏 remote shortcut 会话，需可注入 listProjects。
- *   R38 M1：offline remote shortcut 不得 fail-closed 挡本机恢复；可选 active bridge 设备才 fail-closed。
+ *   R38 M1 / R39 M1：offline remote shortcut 不得 fail-closed 挡本机恢复；
+ *   production 默认注入 active bridge 设备，仅这些 remote fail-closed。
  *
  * Code Logic（字段说明）:
  *   list 返回至少含 id/status；replay 返回 buffer/lastSeq/可选 ownerInstanceId；
@@ -467,7 +471,8 @@ export function resolveRemoteProjectDeviceId(project: {
  * Business Logic（为什么需要这个函数）:
  *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
  *   R37 M1：裸 sessions.list() 无 project 会漏 remote shortcut；存在 remote 时必须按项目 inventory。
- *   R38 M1：默认 offline remote skip；仅注入非空 listActiveBridgeDevices 时对该子集 fail-closed。
+ *   R38 M1 / R39 M1：production 默认注入 listActiveBridgeDevices；
+ *   仅活跃 bridge remote fail-closed，offline remote skip。
  *
  * Code Logic（这个函数做什么）:
  *   本机 sessions.list()（无 projectId）失败仍 throw。
@@ -746,9 +751,10 @@ export function useWorkbenchHttpEvents({
     sessions ?? {
       list: (projectId) => httpWorkbenchTransport.sessions.list(projectId),
       replay: (sessionId) => httpWorkbenchTransport.sessions.replay(sessionId),
-      // R37 M1 / R38 M1：默认注入 projects.list 覆盖 remote shortcuts；
-      // 不注入 listActiveBridgeDevices → remote inventory 走 skip-offline。
+      // R37 M1 / R38 M1 / R39 M1：默认注入 projects.list + active-bridge devices，
+      // 使 production mobile Gap 对活跃 bridge remote fail-closed，offline 跳过。
       listProjects: () => httpWorkbenchTransport.projects.list(),
+      listActiveBridgeDevices: () => listActiveBridgeDevicesHttp(),
     },
   );
   useEffect(() => {

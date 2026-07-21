@@ -49,6 +49,7 @@ import {
   workbenchMutationEnvelopeDecoder,
   workbenchMutationOperationDecoder,
   workbenchRemoveResultDecoder,
+  workbenchActiveBridgeDevicesDecoder,
 } from '@/lib/schemas/workbench';
 import { agentRuntimeSnapshotDecoder } from '@/lib/schemas/agentRuntime';
 import { lanFleetSnapshotDecoder } from '@/lib/schemas/lanFleet';
@@ -1010,6 +1011,25 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
 };
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   Mobile Gap inventory 必须对齐桌面 active-bridge：仅活跃 bridge 上 remote fail-closed。
+ *
+ * Code Logic（这个函数做什么）:
+ *   POST `/api/mobile/workbench/bridges/active-devices` body `{}`，返回排序后的 deviceIds。
+ */
+export async function listActiveBridgeDevicesHttp(): Promise<string[]> {
+  const body = await postJson<{ deviceIds: string[] }>(
+    `${MOBILE_WORKBENCH_API_PREFIX}/bridges/active-devices`,
+    {},
+    {
+      policy: { kind: 'query' },
+      decoder: workbenchActiveBridgeDevicesDecoder,
+    },
+  );
+  return body.deviceIds;
+}
+
+/**
  * Workbench Git mutation 请求体（HTTP envelope 路径）。
  *
  * Business Logic（为什么需要这个类型）:
@@ -1084,6 +1104,16 @@ async function postWorkbenchMutationEnvelope<T>(
  *   POST `/api/mobile/workbench/worktrees/{commit,push,merge,remove}`，decoder envelope，catch 仅 timeout/network。
  */
 export const workbenchHttp = {
+  bridges: {
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Mobile Gap inventory 默认 deps 经 workbenchHttp.bridges.activeDevices 取活跃桥设备。
+     *
+     * Code Logic（这个函数做什么）:
+     *   委托 listActiveBridgeDevicesHttp。
+     */
+    activeDevices: (): Promise<string[]> => listActiveBridgeDevicesHttp(),
+  },
   git: {
     /**
      * Business Logic（为什么需要这个函数）:

@@ -1341,7 +1341,17 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
     use crate::workbench::sessions::kill_persisted_backend;
 
     state.runtime_role.require_owner()?;
-    let _project = get_project(state, project_id).await?;
+    let project = get_project(state, project_id).await?;
+    // R39 M2：remote shortcut 移除时 best-effort 清 project-scoped watch map 并 release 仍占的 session key。
+    // device_id 缺失则跳过（不挡 remove）；无 bridge task 时 registry 内 no-op。
+    if project.kind == "remote" {
+        let device_id = project.device_id.trim();
+        if !device_id.is_empty() {
+            let _ = state
+                .workbench_remote_event_bridges
+                .clear_project_running_sessions(device_id, project_id);
+        }
+    }
     let project_barrier = state
         .workbench_sessions
         .begin_project_closing_barrier(project_id);

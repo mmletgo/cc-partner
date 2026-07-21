@@ -932,6 +932,30 @@ impl BridgeRuntimeState {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     remote project remove 后必须释放该 project 上次 list 仍占着的 session watch，
+    ///     否则 project 已删而 bridge lease 仍占，会挡 idle 回收与 Gap inventory（R39 M2）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     取出并移除 project 条目；对 previous set 中每个 session key 调 release_watch_key；
+    ///     不碰其它 project 与 `__device__`；返回 released 数量。
+    fn clear_project_running_sessions(&self, project_local_id: &str) -> usize {
+        let previous = {
+            let mut map = self
+                .project_running_sessions
+                .lock()
+                .expect("bridge project_running_sessions 锁中毒");
+            map.remove(project_local_id).unwrap_or_default()
+        };
+        let mut released = 0usize;
+        for session_id in previous {
+            if self.release_watch_key(&session_id) {
+                released += 1;
+            }
+        }
+        released
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     重连 / restart 后需要读取已提交 after 游标，禁止 brand-new attach 丢恢复点。
     ///
     /// Code Logic（这个函数做什么）:
@@ -1233,6 +1257,30 @@ impl RemoteEventBridgeRegistry {
         let _ = task
             .runtime
             .reconcile_project_running_sessions(project_local_id, running_session_ids);
+        true
+    }
+
+    /// 清除指定 remote project 的 project-scoped running-session watch 状态（R39 M2）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户移除 remote shortcut 后，该 project 上次 list 持有的 session watch 必须释放，
+    ///     否则 bridge 仍占 lease，idle/Gap inventory 无法收敛。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 device task 后调 runtime.clear_project_running_sessions；
+    ///     无 task 时 no-op 返回 false；有 task 返回 true（无论 released 数量）。
+    pub fn clear_project_running_sessions(
+        &self,
+        device_id: &str,
+        project_local_id: &str,
+    ) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        let _ = task
+            .runtime
+            .clear_project_running_sessions(project_local_id);
         true
     }
 
@@ -3033,6 +3081,57 @@ mod tests {
             "project-a",
             &["remote:dev:s1".into()],
         ));
+    }
+
+    /// Business Logic（R39 M2: 为什么需要这个测试）:
+    ///     remote project remove 必须释放该 project 的 previous running session watches，
+    ///     并从 project map 移除条目，且不得影响其它 project。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     seed project-A/B → clear A → A 的 keys released、map 无 A；B 保留。
+    #[test]
+    fn clear_project_running_sessions_releases_and_removes_project() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:a1"));
+        assert!(runtime.retain_watch_key("remote:dev:a2"));
+        assert!(runtime.retain_watch_key("remote:dev:b1"));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions(
+                "project-a",
+                &["remote:dev:a1".into(), "remote:dev:a2".into()],
+            ),
+            0
+        );
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-b", &["remote:dev:b1".into()]),
+            0
+        );
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 3);
+        assert_eq!(runtime.clear_project_running_sessions("project-a"), 2);
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        let keys = runtime.clone_watch_keys();
+        assert!(!keys.contains("remote:dev:a1"));
+        assert!(!keys.contains("remote:dev:a2"));
+        assert!(keys.contains("remote:dev:b1"));
+        let map = runtime.clone_project_running_sessions();
+        assert!(!map.contains_key("project-a"));
+        assert!(map
+            .get("project-b")
+            .expect("project-b")
+            .contains("remote:dev:b1"));
+        // 再次 clear 同一 project 是 no-op。
+        assert_eq!(runtime.clear_project_running_sessions("project-a"), 0);
+    }
+
+    /// Business Logic（R39 M2: 为什么需要这个测试）:
+    ///     registry 无 task 时 clear_project_running_sessions 必须 no-op 安全返回 false。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     空 registry 调 clear → false。
+    #[test]
+    fn registry_clear_project_running_sessions_noops_without_task() {
+        let registry = RemoteEventBridgeRegistry::new();
+        assert!(!registry.clear_project_running_sessions("missing-device", "project-a"));
     }
 
     /// Business Logic（R38 M2: 为什么需要这个测试）:

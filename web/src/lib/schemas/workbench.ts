@@ -86,6 +86,20 @@ export const workbenchProjectDecoder: Decoder<WorkbenchProject> = objectDecoder(
 export const workbenchProjectsDecoder: Decoder<WorkbenchProject[]> =
   arrayDecoder(workbenchProjectDecoder);
 
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   Mobile Gap inventory 需要活跃 bridge deviceIds，损坏响应不得静默当成空集合。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   解码 camelCase `{ deviceIds: string[] }`。
+ */
+export const workbenchActiveBridgeDevicesDecoder: Decoder<{ deviceIds: string[] }> = objectDecoder(
+  'WorkbenchActiveBridgeDevices',
+  {
+    deviceIds: arrayDecoder(stringDecoder),
+  },
+);
+
 const gitStatusDecoder: Decoder<WorkbenchGitStatus> = objectDecoder('WorkbenchGitStatus', {
   branch: nullableDecoder(stringDecoder),
   changed: numberDecoder,
