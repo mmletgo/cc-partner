@@ -1311,10 +1311,11 @@ pub(crate) fn ensure_remote_event_bridge_for_worktree_context(
 ///
 /// Code Logic（这个函数做什么）:
 ///     1) begin project closing barrier generation；
-///     2) list sessions 快照；
-///     3) 逐 session close / close intent + kill_persisted_backend，收集 cleanup 令牌；
-///     4) delete sessions/worktrees/project；
-///     5) finish session cleanups + finish project barrier。
+///     2) drain project op leases；
+///     3) re-snapshot list sessions（R28 H4）；
+///     4) 逐 session close / close intent + kill_persisted_backend，收集 cleanup 令牌；
+///     5) delete sessions/worktrees/project；
+///     6) finish session cleanups + wait leases + finish project barrier。
 pub(crate) async fn remove_local_workbench_project_with_barrier(
     state: &AppState,
     project_id: &str,

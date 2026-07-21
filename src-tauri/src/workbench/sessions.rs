@@ -3269,17 +3269,59 @@ impl WorkbenchSessionRegistry {
         session_id: &str,
         row: WorkbenchSessionRow,
     ) -> Result<SessionCloseCleanup, AppError> {
-        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
-        if sessions.contains_key(session_id) {
-            return Err(AppError::conflict(
-                "session_close_intent_already_live".to_string(),
-            ));
-        }
-        drop(sessions);
+        // R28 H3：sessions（确认 Missing）→ restoring → closing_publish 同一临界区，
+        // 禁止 drop sessions 后 restore 抢插 live。
+        let (publish, revoked_claim) = {
+            let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+            if sessions.contains_key(session_id) {
+                return Err(AppError::conflict(
+                    "session_close_intent_already_live".to_string(),
+                ));
+            }
+            let revoked_claim = {
+                let mut restoring = self.restoring.lock().expect("restoring 集合锁中毒");
+                let state = restoring.get(session_id).cloned();
+                if let Some(ref claim) = state {
+                    claim.revoke();
+                    let _ = claim.tx.send(SharedRestoreNotification::Failed(
+                        AppErrorCategory::Unavailable,
+                    ));
+                    restoring.remove(session_id);
+                }
+                state
+            };
+            let mut closing = self
+                .closing_publish
+                .lock()
+                .expect("closing_publish 锁中毒");
+            let publish = if let Some(publish) = closing.get(session_id).cloned() {
+                publish
+            } else {
+                let publish = PublishControl::new();
+                publish.revoke();
+                closing.insert(session_id.to_string(), publish.clone());
+                publish
+            };
+            drop(closing);
+            drop(sessions);
+            (publish, revoked_claim)
+        };
 
-        // R27 H2/H3：与 close_inner 共享 claim revoke + tombstone + lease drain。
-        let (publish, restore_claim_for_drain, leases_drained) =
-            self.revoke_restore_claim_install_tombstone(session_id, None);
+        let mut leases_drained = true;
+        let restore_claim_for_drain = if let Some(state) = revoked_claim {
+            if !state.wait_leases_drained(RESTORE_CLAIM_LEASE_DRAIN_TIMEOUT) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "restore claim persist leases still in-flight after close intent; retaining barrier"
+                );
+                leases_drained = false;
+                Some(state)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let drained = publish.in_flight.load(Ordering::SeqCst) == 0 && leases_drained;
         Ok(SessionCloseCleanup {
             registry: self.clone(),
