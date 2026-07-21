@@ -3,6 +3,7 @@ import {
   advanceWorkbenchHttpStreamCursor,
   buildWorkbenchEventsUrl,
   canOpenWorkbenchEventsRequest,
+  consumeWorkbenchHttpEvent,
   isWorkbenchHttpGapPayload,
   parseWorkbenchNdjsonChunk,
   parseWorkbenchNdjsonFrame,
@@ -412,6 +413,133 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
       }),
     };
     await expect(resyncWorkbenchSessionsAfterGap(store, failing)).rejects.toThrow(/network/);
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   R37 M1：Mobile Gap inventory 必须覆盖 remote shortcut running sessions；
+   *   remote inventory 失败必须 fail-closed。
+   *
+   * Code Logic（这个测试做什么）:
+   *   listProjects 返回 local+remote；对 remote list(projectId)；union 去重后只 replay running；
+   *   remote list 失败上抛。
+   */
+  test('resync inventories remote project sessions and fail-closes on remote list error', async () => {
+    const reset = vi.fn();
+    const store = { reset } as unknown as WorkbenchTerminalBufferStore;
+    const sessions = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) {
+          return [{ id: 'local-run', status: 'running' }];
+        }
+        if (projectId === 'remote:dev:shortcut') {
+          return [
+            { id: 'remote:dev:s1', status: 'running' },
+            { id: 'remote:dev:s2', status: 'exited' },
+          ];
+        }
+        return [];
+      }),
+      listProjects: vi.fn(async () => [
+        { id: 'local-p', kind: 'local' },
+        { id: 'remote:dev:shortcut', kind: 'remote' },
+      ]),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: 'buf',
+        truncated: false,
+        lastSeq: sessionId === 'local-run' ? 1 : 9,
+        ownerInstanceId: 'own',
+      })),
+    };
+
+    await resyncWorkbenchSessionsAfterGap(store, sessions);
+
+    expect(sessions.listProjects).toHaveBeenCalledTimes(1);
+    expect(sessions.list).toHaveBeenCalledWith();
+    expect(sessions.list).toHaveBeenCalledWith('remote:dev:shortcut');
+    expect(sessions.replay).toHaveBeenCalledWith('local-run');
+    expect(sessions.replay).toHaveBeenCalledWith('remote:dev:s1');
+    expect(sessions.replay).not.toHaveBeenCalledWith('remote:dev:s2');
+    expect(reset).toHaveBeenCalledWith('local-run', 'buf', 1, 'own');
+    expect(reset).toHaveBeenCalledWith('remote:dev:s1', 'buf', 9, 'own');
+
+    const failingRemote = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) return [];
+        throw new Error('remote offline');
+      }),
+      listProjects: vi.fn(async () => [{ id: 'remote:dev:shortcut', kind: 'remote' }]),
+      replay: vi.fn(async () => ({
+        sessionId: 'x',
+        buffer: '',
+        truncated: false,
+        lastSeq: 0,
+      })),
+    };
+    await expect(resyncWorkbenchSessionsAfterGap(store, failingRemote)).rejects.toThrow(
+      /remote offline/,
+    );
+  });
+});
+
+describe('workbenchHttpEvents terminalResync', () => {
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   R37 H2：bridge Gap resync 发布 terminalResync 后 Mobile 必须 parse 并 reset buffer。
+   *
+   * Code Logic（这个测试做什么）:
+   *   parse terminalResync frame；畸形 payload 抛错；未知 type 仍 ignored。
+   */
+  test('parses terminalResync frames for store reset', () => {
+    const frame = parseWorkbenchNdjsonFrame({
+      type: 'terminalResync',
+      ownerInstanceId: 'bus-owner',
+      sequence: 15,
+      payload: {
+        sessionId: 'remote:dev:s1',
+        buffer: 'history',
+        truncated: true,
+        lastSeq: 42,
+        ownerInstanceId: 'comp-owner',
+      },
+    });
+    expect(frame.kind).toBe('event');
+    if (frame.kind === 'event') {
+      expect(frame.ownerInstanceId).toBe('bus-owner');
+      expect(frame.sequence).toBe(15);
+      expect(frame.event.type).toBe('terminalResync');
+      if (frame.event.type === 'terminalResync') {
+        expect(frame.event.payload).toEqual({
+          sessionId: 'remote:dev:s1',
+          buffer: 'history',
+          truncated: true,
+          lastSeq: 42,
+          ownerInstanceId: 'comp-owner',
+        });
+      }
+    }
+
+    expect(() =>
+      parseWorkbenchNdjsonFrame({
+        type: 'terminalResync',
+        payload: { sessionId: 's', buffer: 'b' },
+      }),
+    ).toThrow(/terminalResync payload 非法/);
+
+    const reset = vi.fn();
+    const store = { reset } as unknown as WorkbenchTerminalBufferStore;
+    consumeWorkbenchHttpEvent(store, {
+      type: 'terminalResync',
+      payload: {
+        sessionId: 'remote:dev:s1',
+        buffer: 'history',
+        truncated: true,
+        lastSeq: 42,
+        ownerInstanceId: 'comp-owner',
+      },
+    });
+    expect(reset).toHaveBeenCalledWith('remote:dev:s1', 'history', 42, 'comp-owner');
   });
 });
 

@@ -17,6 +17,7 @@ import type {
   WorkbenchMergeProgressEvent,
   WorkbenchSessionReplay,
   WorkbenchTerminalOutputEvent,
+  WorkbenchTerminalResyncHttpPayload,
   WorkbenchTerminalStatusEvent,
 } from '@/lib/types';
 import type { AgentSessionRuntimeDto } from '@/lib/types/agentRuntime';
@@ -99,13 +100,23 @@ export type WorkbenchNdjsonFrame =
  *
  * Business Logic（为什么需要这个接口）:
  *   Gap 后必须对 running session 做权威 replay，测试不能打真实 HTTP。
+ *   R37 M1：无 project 的 sessions.list 会漏 remote shortcut 会话，需可注入 listProjects。
  *
  * Code Logic（字段说明）:
- *   list 返回至少含 id/status；replay 返回 buffer/lastSeq/可选 ownerInstanceId。
+ *   list 返回至少含 id/status；replay 返回 buffer/lastSeq/可选 ownerInstanceId；
+ *   listProjects 可选：返回至少 id/kind，remote 项目再按 projectId list。
  */
 export interface WorkbenchHttpEventsSessionDeps {
   list: (projectId?: string | null) => Promise<Array<{ id: string; status: string }>>;
   replay: (sessionId: string) => Promise<WorkbenchSessionReplay>;
+  /**
+   * Business Logic（为什么需要这个字段）:
+   *   Mobile Gap inventory 必须覆盖本机与全部 remote shortcut 的 running sessions。
+   *
+   * Code Logic（字段说明）:
+   *   返回至少 id + kind；kind===remote 时对每个 id 再 list(projectId)。
+   */
+  listProjects?: () => Promise<Array<{ id: string; kind?: string }>>;
 }
 
 /**
@@ -175,6 +186,29 @@ function isTerminalStatusPayload(value: unknown): value is WorkbenchTerminalStat
     (typeof value.exitCode === 'number' || value.exitCode === null) &&
     typeof value.ts === 'number'
   );
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Gap resync 权威 terminalResync 必须结构正确才能 store.reset，否则会抹掉正确 buffer。
+ *
+ * Code Logic（这个函数做什么）:
+ *   校验 sessionId/buffer/truncated/lastSeq，可选 ownerInstanceId。
+ */
+function isTerminalResyncPayload(value: unknown): value is WorkbenchTerminalResyncHttpPayload {
+  if (!isRecord(value)) return false;
+  if (
+    typeof value.sessionId !== 'string' ||
+    typeof value.buffer !== 'string' ||
+    typeof value.truncated !== 'boolean' ||
+    typeof value.lastSeq !== 'number'
+  ) {
+    return false;
+  }
+  if (value.ownerInstanceId !== undefined && typeof value.ownerInstanceId !== 'string') {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -397,17 +431,47 @@ export function canOpenWorkbenchEventsRequest(
 /**
  * Business Logic（为什么需要这个函数）:
  *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
+ *   R37 M1：裸 sessions.list() 无 project 会漏 remote shortcut；存在 remote 时必须按项目 inventory。
  *
  * Code Logic（这个函数做什么）:
- *   list sessions → 仅 status===running 调 replay → store.reset(sessionId, buffer, lastSeq, ownerInstanceId?)。
- *   任一步失败上抛，调用方保留 pre-gap cursor 重连。
+ *   有 listProjects 时：对本机 list() + 每个 remote project list(projectId) 做 id 去重并集；
+ *   remote shortcut 存在且任一 remote inventory 失败 → fail-closed 上抛。
+ *   无 listProjects 时退回 sessions.list()（单测/兼容）。
+ *   仅 status===running 调 replay → store.reset(sessionId, buffer, lastSeq, ownerInstanceId?)。
  */
 export async function resyncWorkbenchSessionsAfterGap(
   store: WorkbenchTerminalBufferStore,
   sessions: WorkbenchHttpEventsSessionDeps,
 ): Promise<void> {
-  const listed = await sessions.list();
-  for (const session of listed) {
+  const byId = new Map<string, { id: string; status: string }>();
+
+  const mergeListed = (rows: Array<{ id: string; status: string }>): void => {
+    for (const row of rows) {
+      if (!row.id) continue;
+      byId.set(row.id, row);
+    }
+  };
+
+  if (sessions.listProjects) {
+    const projects = await sessions.listProjects();
+    const remoteProjects = projects.filter((project) => project.kind === 'remote');
+    // 本机全局 list（无 projectId）覆盖 local running sessions。
+    mergeListed(await sessions.list());
+    for (const project of remoteProjects) {
+      try {
+        mergeListed(await sessions.list(project.id));
+      } catch (error) {
+        // R37 M1：有 remote shortcut 时 inventory 必须完整，否则 fail-closed。
+        throw error instanceof Error
+          ? error
+          : new Error('remote session inventory failed during gap resync');
+      }
+    }
+  } else {
+    mergeListed(await sessions.list());
+  }
+
+  for (const session of byId.values()) {
     if (session.status !== 'running') continue;
     const replay = await sessions.replay(session.id);
     store.reset(
@@ -497,6 +561,16 @@ export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame 
       ...envelope,
     };
   }
+  if (value.type === 'terminalResync') {
+    if (!isTerminalResyncPayload(value.payload)) {
+      throw new Error('Workbench HTTP event terminalResync payload 非法');
+    }
+    return {
+      kind: 'event',
+      event: { type: value.type, payload: value.payload },
+      ...envelope,
+    };
+  }
 
   // 未知 type：前向兼容，不抛错、不重连
   return { kind: 'ignored', type: value.type };
@@ -546,23 +620,34 @@ export function parseWorkbenchNdjsonChunk(
  * Business Logic（为什么需要这个函数）:
  *   终端输出事件可能高频到达，移动端必须写入外部 store；status/agent 走回调。
  *   seq/owner 必须传入 append，与桌面 authority/lastSeq 去重对齐。
+ *   R37 H2：terminalResync 是 Gap cutover 权威快照，必须 store.reset。
  *
  * Code Logic（这个函数做什么）:
  *   terminalOutput → store.append(sessionId, chunk, seq, owner)；
+ *   terminalResync → store.reset(sessionId, buffer, lastSeq, owner)；
  *   terminalStatus/agentRuntime → 可选回调。
  */
-function consumeWorkbenchHttpEvent(
+export function consumeWorkbenchHttpEvent(
   store: WorkbenchTerminalBufferStore,
   event: WorkbenchHttpEvent,
   callbacks: {
     onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
     onAgentRuntime?: (payload: { agentSession: AgentSessionRuntimeDto }) => void;
-  },
+  } = {},
   envelopeOwnerInstanceId?: string,
 ): void {
   if (event.type === 'terminalOutput') {
     const authorityId = event.payload.ownerInstanceId ?? envelopeOwnerInstanceId ?? null;
     store.append(event.payload.sessionId, event.payload.chunk, event.payload.seq, authorityId);
+    return;
+  }
+  if (event.type === 'terminalResync') {
+    store.reset(
+      event.payload.sessionId,
+      event.payload.buffer,
+      event.payload.lastSeq,
+      event.payload.ownerInstanceId ?? envelopeOwnerInstanceId ?? null,
+    );
     return;
   }
   if (event.type === 'terminalStatus') {
@@ -601,6 +686,8 @@ export function useWorkbenchHttpEvents({
     sessions ?? {
       list: (projectId) => httpWorkbenchTransport.sessions.list(projectId),
       replay: (sessionId) => httpWorkbenchTransport.sessions.replay(sessionId),
+      // R37 M1：默认注入 projects.list，使 Gap inventory 覆盖 remote shortcuts。
+      listProjects: () => httpWorkbenchTransport.projects.list(),
     },
   );
   useEffect(() => {

@@ -320,9 +320,11 @@ pub(crate) async fn local_list_workbench_sessions(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     前端需要按项目查看本机或远端 terminal window；未选项目时保持本机列表，避免轮询全部远端设备。
+///     R37 H3：远端 list 只能为 running 持有 session watch；非 running 释放，避免 leaked lease 挡 Gap inventory。
 ///
 /// Code Logic（这个函数做什么）:
-///     project_id 指向 remote shortcut 时先建立事件桥与项目映射，再转发到远端并映射 session/worktree id；否则调用本地 helper。
+///     project_id 指向 remote shortcut 时先建立事件桥与项目映射，再转发到远端并映射 session/worktree id；
+///     list 响应后对 running ensure_session_watch、非 running release_session_watch；否则调用本地 helper。
 pub(crate) async fn list_workbench_sessions_for_state(
     state: &AppState,
     project_id: Option<String>,
@@ -336,12 +338,20 @@ pub(crate) async fn list_workbench_sessions_for_state(
                 .with_expected_device_id(&context.device_id)
                 .list_sessions(&context.base_url, Some(&context.inner_project_id))
                 .await?;
-            // R35 M2：list 已知 remote session 时幂等 ensure session-keyed watch lease。
+            // R37 H3：仅 running session ensure watch；listed 非 running 释放残留 lease，
+            // 避免 exited/disconnected 永久占 subscribers 导致 Gap inventory incomplete。
             for item in &items {
                 let remote_session_id = remote_entity_id(&context.device_id, &item.id);
-                let _ = state
-                    .workbench_remote_event_bridges
-                    .ensure_session_watch(&context.device_id, &remote_session_id);
+                let status = item.status.trim();
+                if status.eq_ignore_ascii_case("running") {
+                    let _ = state
+                        .workbench_remote_event_bridges
+                        .ensure_session_watch(&context.device_id, &remote_session_id);
+                } else {
+                    let _ = state
+                        .workbench_remote_event_bridges
+                        .release_session_watch(&context.device_id, &remote_session_id);
+                }
             }
             return Ok(map_remote_session_dtos(
                 &context.device_id,

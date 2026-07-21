@@ -715,6 +715,24 @@ export interface WorkbenchAgentRuntimeHttpPayload {
 }
 
 /**
+ * Workbench HTTP terminalResync 事件 payload（Gap resync 权威回放）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   bridge Gap resync 后 Mobile 必须收到权威 buffer/lastSeq/owner 才能 store.reset；
+ *   仅桌面 Tauri `workbench:terminal-resync` 不够。
+ *
+ * Code Logic（字段说明）:
+ *   对齐 Rust WorkbenchTerminalResyncPayload / WorkbenchSessionReplayDto 字段子集。
+ */
+export interface WorkbenchTerminalResyncHttpPayload {
+  sessionId: string;
+  buffer: string;
+  truncated: boolean;
+  lastSeq: number;
+  ownerInstanceId?: string;
+}
+
+/**
  * Workbench HTTP NDJSON 事件。
  *
  * Business Logic（为什么需要这个类型）:
@@ -723,13 +741,14 @@ export interface WorkbenchAgentRuntimeHttpPayload {
  * Code Logic（类型说明）:
  *   对齐 Rust `#[serde(tag="type", content="payload", rename_all="camelCase")]`；
  *   terminalOutput/status 复用桌面事件 payload，mergeProgress 复用已有阶段进度 payload，
- *   agentRuntime 为 A1 投影。
+ *   agentRuntime 为 A1 投影，terminalResync 为 Gap 权威 cutover（R37 H2）。
  */
 export type WorkbenchHttpEvent =
   | { type: 'terminalOutput'; payload: WorkbenchTerminalOutputEvent }
   | { type: 'terminalStatus'; payload: WorkbenchTerminalStatusEvent }
   | { type: 'mergeProgress'; payload: WorkbenchMergeProgressEvent }
-  | { type: 'agentRuntime'; payload: WorkbenchAgentRuntimeHttpPayload };
+  | { type: 'agentRuntime'; payload: WorkbenchAgentRuntimeHttpPayload }
+  | { type: 'terminalResync'; payload: WorkbenchTerminalResyncHttpPayload };
 
 /**
  * Claude session 搜索命中结果（对齐后端 SessionSearchHitDto，camelCase）。

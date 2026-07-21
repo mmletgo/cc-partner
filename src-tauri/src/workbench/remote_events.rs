@@ -9,6 +9,9 @@
 //!     owner+sequence 总线（ring catch-up + live + Gap，镜像 RuntimeEventBus；
 //!     after_seq=0 且 ring 截断仍 Gap）；远端桥收到 Gap 后先 resync running terminal，
 //!     仅成功才推进 after_cursor（R28 H1）；L3 多机 cutover **NOT VERIFIED**。
+//!     R37 H1：inbound 已带 `remote:` entity id 的事件在 map/publish 前 drop（破 A↔B 环路）；
+//!     R37 H2：resync 另发布 `TerminalResync` 到本机 bus，Mobile 与桌面 Tauri resync 对齐；
+//!     R37 H3：仅 running 持 session watch；非 running status/list reconcile 释放。
 //!     提供本机事件发布 helper，并维护 sidecar 拥有的 `RemoteEventBridgeRegistry`
 //!     （CancellationToken、订阅 lease/refcount + idle TTL、指数退避上限 60s、1 MiB 行/pending、
 //!     8 KiB 错误前缀、共享 after 游标跨 task restart 保留、Gap fail-closed、
@@ -18,7 +21,8 @@ use crate::backend::event_bus::BackendRuntimeCursor;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::agent_runtime::snapshot::AgentSessionRuntimeDto;
-use crate::workbench::remote_ids::remote_entity_id;
+use crate::workbench::remote_ids::{is_remote_id, parse_remote_entity_id, remote_entity_id};
+use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -114,10 +118,63 @@ pub struct WorkbenchAgentRuntimePayload {
     pub agent_session: AgentSessionRuntimeDto,
 }
 
+/// Gap resync 权威终端回放 payload（与 `workbench:terminal-resync` / replay DTO 对齐）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     bridge Gap resync 后桌面靠 Tauri `workbench:terminal-resync` cutover；
+///     Mobile 只订阅本机 `workbench_remote_events` NDJSON bus，必须收到同形态权威快照才能 `store.reset`。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 字段对齐 `WorkbenchSessionReplayDto`：sessionId/buffer/truncated/lastSeq/ownerInstanceId?。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchTerminalResyncPayload {
+    pub session_id: String,
+    pub buffer: String,
+    pub truncated: bool,
+    pub last_seq: u64,
+    /// cutover 权威；缺失时前端不得重置已绑定 authority。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_instance_id: Option<String>,
+}
+
+impl WorkbenchTerminalResyncPayload {
+    /// Business Logic（为什么需要这个函数）:
+    ///     resync 路径已构造 `WorkbenchSessionReplayDto`，需要无损转成 bus payload 发布给 Mobile。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     字段一一拷贝到 `WorkbenchTerminalResyncPayload`。
+    pub fn from_replay(replay: &WorkbenchSessionReplayDto) -> Self {
+        Self {
+            session_id: replay.session_id.clone(),
+            buffer: replay.buffer.clone(),
+            truncated: replay.truncated,
+            last_seq: replay.last_seq,
+            owner_instance_id: replay.owner_instance_id.clone(),
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     desktop Tauri emit 继续走既有 `WorkbenchSessionReplayDto` 形状，避免第二套前端契约。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     字段一一拷贝为 `WorkbenchSessionReplayDto`。
+    pub fn to_replay(&self) -> WorkbenchSessionReplayDto {
+        WorkbenchSessionReplayDto {
+            session_id: self.session_id.clone(),
+            buffer: self.buffer.clone(),
+            truncated: self.truncated,
+            last_seq: self.last_seq,
+            owner_instance_id: self.owner_instance_id.clone(),
+        }
+    }
+}
+
 /// Workbench 可跨 HTTP NDJSON 传输的事件。
 ///
 /// Business Logic（为什么需要这个枚举）:
-///     远端事件流需要在一条连接中承载 terminal output、terminal status、merge progress 与 agent runtime。
+///     远端事件流需要在一条连接中承载 terminal output、terminal status、merge progress、
+///     agent runtime 与 Gap resync 权威 terminalResync。
 ///
 /// Code Logic（这个枚举做什么）:
 ///     使用 serde 内部 tag `{type,payload}`，type 按 camelCase 输出为前端和桥接层约定的稳定值。
@@ -131,6 +188,8 @@ pub enum WorkbenchRemoteEvent {
     MergeProgress(WorkbenchMergeProgressPayload),
     /// Agent session runtime 投影（capability workbench.agent-runtime.v1）
     AgentRuntime(WorkbenchAgentRuntimePayload),
+    /// Gap resync 权威终端快照（R37 H2；wire type `terminalResync`）
+    TerminalResync(WorkbenchTerminalResyncPayload),
 }
 
 /// Workbench 远端事件流消息（业务 Event 或显式 Gap）。
@@ -516,7 +575,11 @@ pub fn decode_remote_event(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::validation("remote event missing type".to_string()))?;
     match event_type {
-        "terminalOutput" | "terminalStatus" | "mergeProgress" | "agentRuntime" => {
+        "terminalOutput"
+        | "terminalStatus"
+        | "mergeProgress"
+        | "agentRuntime"
+        | "terminalResync" => {
             let event: WorkbenchRemoteEvent = serde_json::from_value(value.clone())
                 .map_err(|e| AppError::validation(format!("invalid remote event payload: {e}")))?;
             let owner_instance_id = value
@@ -1612,6 +1675,11 @@ fn process_event_chunk_to_messages(
                     sequence,
                     event,
                 })) => {
+                    // R37 H1：已带 remote: 的 entity id 是 peer 回灌本机 bus 的环路事件。
+                    // 原生 peer 事件从不带 remote: 前缀；在 map/emit/publish 前完整 drop。
+                    if inbound_event_has_remote_entity_id(&event) {
+                        continue;
+                    }
                     messages.push(WorkbenchRemoteStreamMessage::Event {
                         owner_instance_id,
                         sequence,
@@ -1692,15 +1760,48 @@ fn trim_ascii_whitespace_bytes(mut bytes: &[u8]) -> &[u8] {
 }
 
 /// Business Logic（为什么需要这个函数）:
+///     R37 H1：peer A 的 bus 可能导出 B 经 bridge 再发布的 `remote:*` 事件；
+///     若再 map/publish 会形成 A↔B 无限 remap 洪泛。
+///
+/// Code Logic（这个函数做什么）:
+///     检查 terminal sessionId / merge worktreeId / agent terminal/session ids 是否已是 remote: 实体；
+///     TerminalResync 同理检查 sessionId。
+fn inbound_event_has_remote_entity_id(event: &WorkbenchRemoteEvent) -> bool {
+    match event {
+        WorkbenchRemoteEvent::TerminalOutput(payload) => is_remote_id(&payload.session_id),
+        WorkbenchRemoteEvent::TerminalStatus(payload) => is_remote_id(&payload.session_id),
+        WorkbenchRemoteEvent::TerminalResync(payload) => is_remote_id(&payload.session_id),
+        WorkbenchRemoteEvent::MergeProgress(payload) => {
+            is_remote_id(&payload.worktree_id) || is_remote_id(&payload.project_id)
+        }
+        WorkbenchRemoteEvent::AgentRuntime(payload) => {
+            let s = &payload.agent_session;
+            is_remote_id(&s.id)
+                || is_remote_id(&s.terminal_session_id)
+                || is_remote_id(&s.project_id)
+                || s.worktree_id.as_deref().is_some_and(is_remote_id)
+                || s.orchestrator_task_id.as_deref().is_some_and(is_remote_id)
+        }
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
 ///     本机前端只监听 Tauri event，不关心事件来自本机 PTY 还是远端 HTTP stream。
 ///     R36 H2：Mobile `/api/workbench/events` 读的是本机 `workbench_remote_events` bus，
 ///     仅 `emit_event`（Tauri/GUI）会让 bridged remote live 到不了 mobile 订阅者。
+///     R37 H1：环路 inbound（entity 已带 remote:）必须在 publish/emit 前 drop。
+///     R37 H3：非 running 的 TerminalStatus 释放对应 session watch，避免 leaked lease 挡 Gap inventory。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 clone 后 `publish_workbench_remote_event_from_state` 写入本机 remote-events bus，
-///     再按事件类型 emit 到现有 `workbench:*` 事件名；headless adapter emit 可安全 no-op。
-///     本函数由 outbound bridge reader 调用；再发布到本地 bus **不会**回灌同一 NDJSON reader。
+///     已 remote: 前缀的事件直接 return（不 map/publish/emit，cursor 由上层 Event 消息推进）；
+///     否则 clone 后 publish 到本机 bus，再按类型 emit `workbench:*`；
+///     TerminalStatus 非 running 时 release session watch（composite remote session id）。
+///     TerminalResync 仅 GUI emit + bus publish，不二次 map。
 fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
+    // R37 H1：环路事件在 process 路径可能仍上浮（为推进 cursor），此处最终 drop。
+    if inbound_event_has_remote_entity_id(&event) {
+        return;
+    }
     // R36 H2：GUI emit + local bus publish 共用同一 mapped 事件。
     publish_workbench_remote_event_from_state(state, event.clone());
     match event {
@@ -1708,6 +1809,8 @@ fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
             state.emit_event("workbench:terminal-output", payload);
         }
         WorkbenchRemoteEvent::TerminalStatus(payload) => {
+            // R37 H3：exited/disconnected 等非 running 状态释放 session watch。
+            maybe_release_session_watch_on_status(state, &payload);
             state.emit_event("workbench:terminal-status", payload);
         }
         WorkbenchRemoteEvent::MergeProgress(payload) => {
@@ -1716,14 +1819,44 @@ fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
         WorkbenchRemoteEvent::AgentRuntime(payload) => {
             state.emit_event("workbench:agent-runtime", payload);
         }
+        WorkbenchRemoteEvent::TerminalResync(payload) => {
+            // 桌面仍走既有 resync event 名；payload 对齐 replay DTO。
+            state.emit_event(
+                crate::backend::ui::WORKBENCH_TERMINAL_RESYNC_EVENT,
+                payload.to_replay(),
+            );
+        }
     };
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     list/create 可能为已退出 session 残留 watch key；status 事件是权威生命周期信号，
+///     非 running 时必须释放，否则 bridge 永非 idle，Gap inventory 永久 incomplete。
+///
+/// Code Logic（这个函数做什么）:
+///     status 忽略大小写比较；仅 remote composite sessionId 才 release_session_watch。
+fn maybe_release_session_watch_on_status(
+    state: &AppState,
+    payload: &WorkbenchTerminalStatusPayload,
+) {
+    let status = payload.status.trim();
+    if status.is_empty() || status.eq_ignore_ascii_case("running") {
+        return;
+    }
+    let Some(parsed) = parse_remote_entity_id(&payload.session_id) else {
+        return;
+    };
+    let _ = state
+        .workbench_remote_event_bridges
+        .release_session_watch(&parsed.device_id, &payload.session_id);
 }
 
 /// Business Logic（为什么需要这个函数）:
 ///     远端设备发出的事件只包含自己的 local ID，本机 UI 需要可区分设备归属的 remote ID。
 ///
 /// Code Logic（这个函数做什么）:
-///     根据事件类型把 sessionId/projectId/worktreeId 映射为 `remote:<device_id>:<inner_id>`。
+///     根据事件类型把 sessionId/projectId/worktreeId 映射为 `remote:<device_id>:<inner_id>`；
+///     TerminalResync 的 sessionId 同样加 remote 前缀（通常由本机 resync 路径直接构造，此处仅防御）。
 fn map_remote_event_for_device(
     device_id: &str,
     project_ids: &HashMap<String, String>,
@@ -1761,6 +1894,10 @@ fn map_remote_event_for_device(
                 *task = remote_entity_id(device_id, task);
             }
             WorkbenchRemoteEvent::AgentRuntime(payload)
+        }
+        WorkbenchRemoteEvent::TerminalResync(mut payload) => {
+            payload.session_id = remote_entity_id(device_id, &payload.session_id);
+            WorkbenchRemoteEvent::TerminalResync(payload)
         }
     }
 }
@@ -1852,6 +1989,13 @@ async fn resync_remote_bridge_after_gap(
                     &remote_session_id,
                     &local_bus_owner,
                     remote_owner.as_deref(),
+                ),
+            );
+            // R37 H2：Mobile 订阅本机 bus，需 TerminalResync；桌面仍走 Tauri resync emit。
+            publish_workbench_remote_event_from_state(
+                state,
+                WorkbenchRemoteEvent::TerminalResync(
+                    WorkbenchTerminalResyncPayload::from_replay(&replay),
                 ),
             );
             state.emit_event(
@@ -2772,6 +2916,155 @@ mod tests {
             }
             other => panic!("mapped event clone must preserve TerminalStatus, got {other:?}"),
         }
+    }
+
+    /// Business Logic（R37 H1: 为什么需要这个测试）:
+    ///     peer bus 导出的 `remote:*` 事件若再 map/publish 会形成 A↔B 无限环路。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     原生 sessionId 经 process 后 map 一次；已带 remote: 的 inbound 被完整 drop（无输出消息）。
+    #[test]
+    fn inbound_already_remote_session_id_is_dropped_before_map() {
+        let project_ids = HashMap::new();
+        let mut buffer = Vec::new();
+        let native = serde_json::json!({
+            "type": "terminalOutput",
+            "payload": {
+                "sessionId": "inner-session",
+                "chunk": "ok",
+                "seq": 1,
+                "ts": 1
+            },
+            "ownerInstanceId": "peer-owner",
+            "sequence": 3
+        })
+        .to_string()
+            + "\n";
+        let looped = serde_json::json!({
+            "type": "terminalOutput",
+            "payload": {
+                "sessionId": "remote:device-a:inner-session",
+                "chunk": "loop",
+                "seq": 2,
+                "ts": 2
+            },
+            "ownerInstanceId": "peer-owner",
+            "sequence": 4
+        })
+        .to_string()
+            + "\n";
+        let messages = process_event_chunk_to_messages(
+            "device-a",
+            &project_ids,
+            &mut buffer,
+            format!("{native}{looped}").as_bytes(),
+        )
+        .expect("parse ok");
+        assert_eq!(messages.len(), 1, "loop inbound must be dropped");
+        match &messages[0] {
+            WorkbenchRemoteStreamMessage::Event {
+                sequence,
+                event: WorkbenchRemoteEvent::TerminalOutput(payload),
+                ..
+            } => {
+                assert_eq!(*sequence, 3);
+                assert_eq!(payload.session_id, "remote:device-a:inner-session");
+                assert_eq!(payload.chunk, "ok");
+            }
+            other => panic!("expected single mapped native event, got {other:?}"),
+        }
+        assert!(inbound_event_has_remote_entity_id(
+            &WorkbenchRemoteEvent::TerminalOutput(WorkbenchTerminalOutputPayload {
+                session_id: "remote:device-a:x".into(),
+                chunk: String::new(),
+                seq: 0,
+                ts: 0,
+                owner_instance_id: None,
+            })
+        ));
+        assert!(!inbound_event_has_remote_entity_id(
+            &WorkbenchRemoteEvent::TerminalOutput(WorkbenchTerminalOutputPayload {
+                session_id: "native-x".into(),
+                chunk: String::new(),
+                seq: 0,
+                ts: 0,
+                owner_instance_id: None,
+            })
+        ));
+    }
+
+    /// Business Logic（R37 H2: 为什么需要这个测试）:
+    ///     Mobile 通过 NDJSON bus 消费 terminalResync；encode/decode 必须 round-trip。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     encode TerminalResync Event → decode 还原 sessionId/buffer/lastSeq/owner。
+    #[test]
+    fn terminal_resync_event_encodes_and_decodes_for_mobile_bus() {
+        let event = WorkbenchRemoteEvent::TerminalResync(WorkbenchTerminalResyncPayload {
+            session_id: "remote:dev:s1".into(),
+            buffer: "screen".into(),
+            truncated: true,
+            last_seq: 88,
+            owner_instance_id: Some("comp-owner".into()),
+        });
+        let line = encode_workbench_remote_relay_ndjson(&WorkbenchRemoteRelayMessage::Event {
+            owner_instance_id: "local-owner".into(),
+            sequence: 12,
+            event: event.clone(),
+        })
+        .expect("encode");
+        assert!(line.contains("\"type\":\"terminalResync\""));
+        let decoded = decode_remote_event(&line)
+            .expect("decode ok")
+            .expect("Some event");
+        match decoded {
+            WorkbenchRemoteStreamMessage::Event {
+                owner_instance_id,
+                sequence,
+                event: WorkbenchRemoteEvent::TerminalResync(payload),
+            } => {
+                assert_eq!(owner_instance_id, "local-owner");
+                assert_eq!(sequence, 12);
+                assert_eq!(payload.session_id, "remote:dev:s1");
+                assert_eq!(payload.buffer, "screen");
+                assert!(payload.truncated);
+                assert_eq!(payload.last_seq, 88);
+                assert_eq!(payload.owner_instance_id.as_deref(), Some("comp-owner"));
+            }
+            other => panic!("expected TerminalResync event, got {other:?}"),
+        }
+        // from_replay / to_replay 与 DTO 字段对齐。
+        let replay = WorkbenchSessionReplayDto {
+            session_id: "s".into(),
+            buffer: "b".into(),
+            truncated: false,
+            last_seq: 3,
+            owner_instance_id: Some("o".into()),
+        };
+        let payload = WorkbenchTerminalResyncPayload::from_replay(&replay);
+        assert_eq!(payload.to_replay(), replay);
+    }
+
+    /// Business Logic（R37 H3: 为什么需要这个测试）:
+    ///     多 session watch 中仅 running 应保留；exited 释放后 subscribers 必须下降。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     retain 两个 session key；release 一个后 subscribers=1；再 release 后 idle。
+    #[test]
+    fn multi_session_watch_releases_non_running_keys() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:s-running"));
+        assert!(runtime.retain_watch_key("remote:dev:s-exited"));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 2);
+        // 模拟 list reconcile / status exited：释放非 running。
+        assert!(runtime.release_watch_key("remote:dev:s-exited"));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        assert!(runtime
+            .clone_watch_keys()
+            .contains("remote:dev:s-running"));
+        assert!(!runtime.clone_watch_keys().contains("remote:dev:s-exited"));
+        assert!(runtime.release_watch_key("remote:dev:s-running"));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
     }
 
 }
