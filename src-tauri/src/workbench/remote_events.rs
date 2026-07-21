@@ -18,6 +18,9 @@
 //!     的 session（无 status 事件）会永远占 watch；按 local_project_id 记录上次 list 见过的
 //!     running remote session ids，对 previous−running 调 release_watch_key，不碰其它 project 与
 //!     `__device__`；restart 时 transfer project_running_sessions（与 after_cursor/watch_keys 一致）。
+//!     R42 M1 / R43 M1：project_watch（epochs + running_sessions）同一互斥临界区覆盖 note 与
+//!     reconcile 的 epoch compare + previous snapshot + set commit + epoch bump；to_release 差集
+//!     在锁内确定，release_watch_key 锁外执行，堵住 create note 与 stale/full list 的竞态窗口。
 //!     提供本机事件发布 helper，并维护 sidecar 拥有的 `RemoteEventBridgeRegistry`
 //!     （CancellationToken、订阅 lease/refcount + idle TTL、指数退避上限 60s、1 MiB 行/pending、
 //!     8 KiB 错误前缀、共享 after 游标跨 task restart 保留、Gap fail-closed、
@@ -716,6 +719,36 @@ pub struct RemoteEventBridgeProjectMapping {
     pub local_project_id: String,
 }
 
+/// 单 project 的 watch mutation epoch 与 last-seen running set（R43 M1）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     epoch 与 running set 若分两把锁，create note 可插在 reconcile 的 epoch 读与 previous
+///     快照/commit 之间，绕过 R42 防护：要么被 stale list release，要么被 full-replace 覆盖。
+///
+/// Code Logic（这个结构体做什么）:
+///     同一互斥状态持有 `epochs` 与 `running_sessions`；note / bump / reconcile 路径的
+///     epoch compare + previous snapshot + set commit + epoch bump 必须在同一临界区完成。
+#[derive(Default)]
+struct ProjectWatchState {
+    /// local_project_id -> project watch mutation epoch（R42 M1 / R43 M1）。
+    epochs: HashMap<String, u64>,
+    /// local_project_id -> 上次 list 见过的 running remote session ids（R38 M2）。
+    running_sessions: HashMap<String, HashSet<String>>,
+}
+
+impl ProjectWatchState {
+    /// Business Logic（为什么需要这个函数）:
+    ///     create/note 与成功 full reconcile 会改变 project 的权威 running 集合；
+    ///     list 必须能通过 epoch 检测到该变化（R42 M1 / R43 M1）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     epochs[project] = prev.saturating_add(1)（缺省 prev=0）；调用方须已持有外层 project_watch 锁。
+    fn bump_epoch(&mut self, project_local_id: &str) {
+        let entry = self.epochs.entry(project_local_id.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+}
+
 /// 单设备 bridge 任务内部共享状态。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -725,11 +758,12 @@ pub struct RemoteEventBridgeProjectMapping {
 ///     避免 close 一次把整个设备订阅打到 0。
 ///     R38 M2：按 local_project_id 记录上次 list 见过的 running remote session ids，
 ///     以便 list 中消失的 session（无 status 事件）也能 release watch。
+///     R43 M1：epoch 与 running set 合并为同一互斥 `project_watch`，堵住 note/reconcile 竞态。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     Arc 原子/互斥字段；`watch_keys` 记录活跃 lease key，`subscribers` 与 set 大小同步；
 ///     subscribers>0 时 idle_for=ZERO；after_cursor 跨 loop restart 保留；
-///     `project_running_sessions` 跨 restart transfer；不含 URL/正文。
+///     `project_watch.running_sessions` 跨 restart transfer；不含 URL/正文。
 struct BridgeRuntimeState {
     last_used: Mutex<Instant>,
     phase: Mutex<String>,
@@ -742,16 +776,8 @@ struct BridgeRuntimeState {
     watch_keys: Mutex<HashSet<String>>,
     /// 已提交的远端 stream after 游标；task restart / 重连共享（R30 M3）。
     after_cursor: Mutex<Option<BackendRuntimeCursor>>,
-    /// local_project_id -> 上次 list 见过的 running remote session ids（R38 M2）。
-    project_running_sessions: Mutex<HashMap<String, HashSet<String>>>,
-    /// local_project_id -> project watch mutation epoch（R42 M1）。
-    ///
-    /// Business Logic（为什么需要这个字段）:
-    ///     迟到的空 list 快照不得撤销 list 发起后 create 新建的 watch。
-    ///
-    /// Code Logic（这个字段做什么）:
-    ///     create/note 与成功 reconcile 时 bump；list 起点捕获 epoch，仅 epoch 未变才 commit reconcile。
-    project_watch_epochs: Mutex<HashMap<String, u64>>,
+    /// project-scoped epoch + last-seen running set（R42 M1 / R43 M1 同一把锁）。
+    project_watch: Mutex<ProjectWatchState>,
 }
 
 impl BridgeRuntimeState {
@@ -760,7 +786,7 @@ impl BridgeRuntimeState {
     ///
     /// Code Logic（这个函数做什么）:
     ///     last_used=now、phase=connecting、attempt=0、subscribers=0、watch_keys 空、
-    ///     after_cursor=None、project_running_sessions 空。
+    ///     after_cursor=None、project_watch 空。
     fn new() -> Self {
         Self {
             last_used: Mutex::new(Instant::now()),
@@ -771,8 +797,7 @@ impl BridgeRuntimeState {
             subscribers: AtomicU32::new(0),
             watch_keys: Mutex::new(HashSet::new()),
             after_cursor: Mutex::new(None),
-            project_running_sessions: Mutex::new(HashMap::new()),
-            project_watch_epochs: Mutex::new(HashMap::new()),
+            project_watch: Mutex::new(ProjectWatchState::default()),
         }
     }
 
@@ -811,48 +836,37 @@ impl BridgeRuntimeState {
     ///     create 成功后若只 ensure_session_watch 而不登记 project_running_sessions，
     ///     用户在首次 list 前 remove project 时 clear_project_running_sessions 找不到 key，
     ///     watch 会永久占 subscribers（R41 M2）。
+    ///     R43 M1：insert + epoch bump 必须在同一 project_watch 临界区，避免 stale reconcile
+    ///     在两锁间隙把新 session 当 previous 差集 release 或被 full-replace 覆盖。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     将 session_id 幂等插入 project_running_sessions[project_local_id]；
-    ///     若为新 session 则 bump project_watch_epochs；不 touch、不改 watch_keys。
+    ///     同一把 project_watch 锁内：幂等 insert session 到 running_sessions[project]；
+    ///     若为新 session 则 bump epochs[project]；不 touch、不改 watch_keys。
     fn note_project_running_session(&self, project_local_id: &str, session_id: &str) {
-        let inserted = {
-            let mut map = self
-                .project_running_sessions
-                .lock()
-                .expect("bridge project_running_sessions 锁中毒");
-            map.entry(project_local_id.to_string())
-                .or_default()
-                .insert(session_id.to_string())
-        };
-        if inserted {
-            self.bump_project_watch_epoch(project_local_id);
-        }
-    }
-
-    /// Business Logic（为什么需要这个函数）:
-    ///     create/note 会改变 project 的权威 running 集合；list 必须能检测到该变化（R42 M1）。
-    ///
-    /// Code Logic（这个函数做什么）:
-    ///     project_watch_epochs[project] = prev.saturating_add(1)（缺省 prev=0）。
-    fn bump_project_watch_epoch(&self, project_local_id: &str) {
-        let mut epochs = self
-            .project_watch_epochs
+        let mut watch = self
+            .project_watch
             .lock()
-            .expect("bridge project_watch_epochs 锁中毒");
-        let entry = epochs.entry(project_local_id.to_string()).or_insert(0);
-        *entry = entry.saturating_add(1);
+            .expect("bridge project_watch 锁中毒");
+        let inserted = watch
+            .running_sessions
+            .entry(project_local_id.to_string())
+            .or_default()
+            .insert(session_id.to_string());
+        if inserted {
+            watch.bump_epoch(project_local_id);
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:
     ///     list 在发起 RPC 前捕获 epoch，reconcile 时比对是否仍匹配。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     返回 project_watch_epochs[project]，缺省 0。
+    ///     持 project_watch 锁返回 epochs[project]，缺省 0。
     fn project_watch_epoch(&self, project_local_id: &str) -> u64 {
-        self.project_watch_epochs
+        self.project_watch
             .lock()
-            .expect("bridge project_watch_epochs 锁中毒")
+            .expect("bridge project_watch 锁中毒")
+            .epochs
             .get(project_local_id)
             .copied()
             .unwrap_or(0)
@@ -939,12 +953,10 @@ impl BridgeRuntimeState {
     ///     list reconcile 只处理返回行；peer list 中消失的 running session（无 status 事件）
     ///     会永远占 watch。按 project 比较上次见过的 running ids 并释放差集（R38 M2）。
     ///     R42 M1：list 发起后 create 可能 note 新 session；expected_epoch 不匹配时跳过 commit。
+    ///     R43 M1：epoch compare / previous snapshot / set commit / epoch bump 同临界区。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     若 expected_epoch 与当前 project_watch_epochs 不一致 → 返回 0 且不改 map；
-    ///     否则取 previous set；对 previous−running 每个 session key 调 release_watch_key；
-    ///     写入 previous=running（HashSet），并 bump epoch；不碰其它 project 与 `__device__`；
-    ///     返回 released 数量。
+    ///     委托 `reconcile_project_running_sessions_if_epoch(..., None)`。
     fn reconcile_project_running_sessions(
         &self,
         project_local_id: &str,
@@ -956,11 +968,16 @@ impl BridgeRuntimeState {
     /// Business Logic（为什么需要这个函数）:
     ///     迟到 list 必须在 create/note 之后检测 epoch 变化，避免释放 create 新建的 watch（R42 M1）。
     ///     epoch 不匹配时仍 union 当前 running，但**禁止 release**（并发 list 也不得互相抹掉）。
+    ///     R43 M1：与 note 共享同一 project_watch 锁，堵住：
+    ///     - note 在 epoch 读后、previous 快照前插入 → 新 session 进 previous 但不在 running_set → 被 release
+    ///     - note 在 previous 后、insert 前 → insert 覆盖掉新 session 项目归属
     ///
     /// Code Logic（这个函数做什么）:
-    ///     expected_epoch=Some 且与当前不一致 → union running 到 map，不 release，返回 0；
-    ///     否则 full replace + release previous−running + bump epoch；
-    ///     expected_epoch=None 时无条件 full reconcile（Gap resync 权威路径）。
+    ///     在同一 project_watch 临界区内：
+    ///     expected_epoch=Some 且与当前不一致 → union running 到 map，**不 release**，不 bump 成功
+    ///     full-replace 路径 epoch，返回 0；
+    ///     匹配或 expected_epoch=None → 计算 to_release=previous−running，full replace + bump epoch，
+    ///     再在锁外对 to_release 调 release_watch_key；返回 released 数量。
     fn reconcile_project_running_sessions_if_epoch(
         &self,
         project_local_id: &str,
@@ -968,44 +985,49 @@ impl BridgeRuntimeState {
         expected_epoch: Option<u64>,
     ) -> usize {
         let running_set: HashSet<String> = running_session_ids.iter().cloned().collect();
-        if let Some(expected) = expected_epoch {
-            let current = self.project_watch_epoch(project_local_id);
-            if current != expected {
-                // Stale list：只合并 running，绝不 release create 后新 note 的 session。
-                if !running_set.is_empty() {
-                    let mut map = self
-                        .project_running_sessions
-                        .lock()
-                        .expect("bridge project_running_sessions 锁中毒");
-                    map.entry(project_local_id.to_string())
-                        .or_default()
-                        .extend(running_set);
-                }
-                return 0;
-            }
-        }
-        let previous = {
-            let map = self
-                .project_running_sessions
+        // 临界区：epoch compare + previous snapshot + set commit + epoch bump；
+        // release 仅用临界区内确定的差集，在锁外执行（避免 watch_keys 与 project_watch 交叉死锁）。
+        let to_release: Vec<String> = {
+            let mut watch = self
+                .project_watch
                 .lock()
-                .expect("bridge project_running_sessions 锁中毒");
-            map.get(project_local_id).cloned().unwrap_or_default()
+                .expect("bridge project_watch 锁中毒");
+            if let Some(expected) = expected_epoch {
+                let current = watch.epochs.get(project_local_id).copied().unwrap_or(0);
+                if current != expected {
+                    // Stale list：只合并 running，绝不 release create 后新 note 的 session。
+                    if !running_set.is_empty() {
+                        watch
+                            .running_sessions
+                            .entry(project_local_id.to_string())
+                            .or_default()
+                            .extend(running_set);
+                    }
+                    return 0;
+                }
+            }
+            let previous = watch
+                .running_sessions
+                .get(project_local_id)
+                .cloned()
+                .unwrap_or_default();
+            let to_release: Vec<String> = previous
+                .difference(&running_set)
+                .cloned()
+                .collect();
+            // 原子 full replace + bump，使并发 note 无法插在 previous 与 commit 之间。
+            watch
+                .running_sessions
+                .insert(project_local_id.to_string(), running_set);
+            watch.bump_epoch(project_local_id);
+            to_release
         };
         let mut released = 0usize;
-        for session_id in previous.difference(&running_set) {
-            if self.release_watch_key(session_id) {
+        for session_id in to_release {
+            if self.release_watch_key(&session_id) {
                 released += 1;
             }
         }
-        {
-            let mut map = self
-                .project_running_sessions
-                .lock()
-                .expect("bridge project_running_sessions 锁中毒");
-            map.insert(project_local_id.to_string(), running_set);
-        }
-        // 成功 full reconcile 后 bump epoch，使更早 list 无法再 release 本结果。
-        self.bump_project_watch_epoch(project_local_id);
         released
     }
 
@@ -1014,11 +1036,12 @@ impl BridgeRuntimeState {
     ///     否则下一次 list 会把仍存活 session 误当消失而 release（R38 M2）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     克隆 project_running_sessions 全表。
+    ///     持 project_watch 锁克隆 running_sessions 全表。
     fn clone_project_running_sessions(&self) -> HashMap<String, HashSet<String>> {
-        self.project_running_sessions
+        self.project_watch
             .lock()
-            .expect("bridge project_running_sessions 锁中毒")
+            .expect("bridge project_watch 锁中毒")
+            .running_sessions
             .clone()
     }
 
@@ -1026,12 +1049,13 @@ impl BridgeRuntimeState {
     ///     spawn 新 bridge task 时用旧 runtime 的 project running map 重建 reconcile 状态（R38 M2）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     覆盖写入 project_running_sessions。
+    ///     持 project_watch 锁覆盖写入 running_sessions（epochs 保持默认，由后续 note/reconcile 推进）。
     fn seed_project_running_sessions(&self, map: HashMap<String, HashSet<String>>) {
-        *self
-            .project_running_sessions
+        let mut watch = self
+            .project_watch
             .lock()
-            .expect("bridge project_running_sessions 锁中毒") = map;
+            .expect("bridge project_watch 锁中毒");
+        watch.running_sessions = map;
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1039,15 +1063,20 @@ impl BridgeRuntimeState {
     ///     否则 project 已删而 bridge lease 仍占，会挡 idle 回收与 Gap inventory（R39 M2）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     取出并移除 project 条目；对 previous set 中每个 session key 调 release_watch_key；
+    ///     持 project_watch 锁取出并移除 project 的 running_sessions 与 epochs 条目；
+    ///     锁外对 previous set 中每个 session key 调 release_watch_key；
     ///     不碰其它 project 与 `__device__`；返回 released 数量。
     fn clear_project_running_sessions(&self, project_local_id: &str) -> usize {
         let previous = {
-            let mut map = self
-                .project_running_sessions
+            let mut watch = self
+                .project_watch
                 .lock()
-                .expect("bridge project_running_sessions 锁中毒");
-            map.remove(project_local_id).unwrap_or_default()
+                .expect("bridge project_watch 锁中毒");
+            watch.epochs.remove(project_local_id);
+            watch
+                .running_sessions
+                .remove(project_local_id)
+                .unwrap_or_default()
         };
         let mut released = 0usize;
         for session_id in previous {
@@ -3402,6 +3431,140 @@ mod tests {
         let project_a = map.get("project-a").expect("project-a");
         assert!(project_a.contains("remote:dev:new"));
         assert!(project_a.contains("remote:dev:old"));
+    }
+
+    /// Business Logic（R43 M1: 为什么需要这个测试）:
+    ///     竞态窗口 1：note 若插在 epoch 读后、previous 快照前，新 session 会进入 previous 却不在
+    ///     running_set，被 stale empty list 误 release。同一把 project_watch 锁必须堵住该窗口。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     seed old + 捕获 epoch → note new（同锁 bump）→ 旧 epoch 空 list reconcile；
+    ///     断言 released=0、new watch 与 project map 均保留；另用 thread 并发 note + 旧 epoch
+    ///     空 list 反复 reconcile，断言 new 始终保留。
+    #[test]
+    fn atomic_project_watch_protects_note_between_epoch_and_previous() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:old"));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:old".into()]),
+            0
+        );
+        let epoch_at_list_start = runtime.project_watch_epoch("project-a");
+        assert!(runtime.retain_watch_key("remote:dev:new"));
+        runtime.note_project_running_session("project-a", "remote:dev:new");
+        // 单线程原子路径：旧 epoch 空 list 不得 release create note。
+        assert_eq!(
+            runtime.reconcile_project_running_sessions_if_epoch(
+                "project-a",
+                &[],
+                Some(epoch_at_list_start),
+            ),
+            0
+        );
+        assert!(runtime.clone_watch_keys().contains("remote:dev:new"));
+        assert!(runtime
+            .clone_project_running_sessions()
+            .get("project-a")
+            .expect("project-a")
+            .contains("remote:dev:new"));
+
+        // 并发：一个线程 note 新 session，另一个用旧 epoch 空 list 反复 reconcile。
+        let runtime = Arc::new(BridgeRuntimeState::new());
+        assert!(runtime.retain_watch_key("remote:dev:base"));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:base".into()]),
+            0
+        );
+        let epoch = runtime.project_watch_epoch("project-a");
+        assert!(runtime.retain_watch_key("remote:dev:racer"));
+        let note_runtime = Arc::clone(&runtime);
+        let reconcile_runtime = Arc::clone(&runtime);
+        let note_handle = std::thread::spawn(move || {
+            note_runtime.note_project_running_session("project-a", "remote:dev:racer");
+        });
+        let reconcile_handle = std::thread::spawn(move || {
+            for _ in 0..64 {
+                let _ = reconcile_runtime.reconcile_project_running_sessions_if_epoch(
+                    "project-a",
+                    &[],
+                    Some(epoch),
+                );
+            }
+        });
+        note_handle.join().expect("note thread");
+        reconcile_handle.join().expect("reconcile thread");
+        assert!(
+            runtime.clone_watch_keys().contains("remote:dev:racer"),
+            "concurrent stale empty list must not release noted session (window: epoch→previous)"
+        );
+        assert!(
+            runtime
+                .clone_project_running_sessions()
+                .get("project-a")
+                .expect("project-a")
+                .contains("remote:dev:racer"),
+            "noted session must remain in project map after concurrent stale reconcile"
+        );
+    }
+
+    /// Business Logic（R43 M1: 为什么需要这个测试）:
+    ///     竞态窗口 2：note 若插在 previous 快照后、map.insert 前，full-replace 会覆盖掉新
+    ///     session 的项目归属；同一临界区 commit 必须保证 note 要么进 previous/差集决策，
+    ///     要么在 commit 后重新 insert+bump。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     并发：note 新 session vs 匹配 epoch 的 full reconcile（running=[base]）；
+    ///     结束后若 epoch 已因 note bump，则 racer 必须仍在 watch_keys 与 project map
+    ///     （即 note 未在 insert 前被覆盖丢弃）；若 note 落在 full reconcile 之后，map 含 racer。
+    #[test]
+    fn atomic_project_watch_protects_note_between_previous_and_insert() {
+        let runtime = Arc::new(BridgeRuntimeState::new());
+        assert!(runtime.retain_watch_key("remote:dev:base"));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:base".into()]),
+            0
+        );
+        let epoch = runtime.project_watch_epoch("project-a");
+        assert!(runtime.retain_watch_key("remote:dev:racer"));
+
+        let note_runtime = Arc::clone(&runtime);
+        let reconcile_runtime = Arc::clone(&runtime);
+        let note_handle = std::thread::spawn(move || {
+            // 多次 note 增大与 reconcile 交错概率。
+            for _ in 0..32 {
+                note_runtime.note_project_running_session("project-a", "remote:dev:racer");
+            }
+        });
+        let reconcile_handle = std::thread::spawn(move || {
+            for _ in 0..32 {
+                let _ = reconcile_runtime.reconcile_project_running_sessions_if_epoch(
+                    "project-a",
+                    &["remote:dev:base".into()],
+                    Some(epoch),
+                );
+            }
+        });
+        note_handle.join().expect("note thread");
+        reconcile_handle.join().expect("reconcile thread");
+
+        // 权威不变量：create 已 retain 的 racer watch 不得被 full-replace 窗口抹掉；
+        // project map 若 epoch 因 note 推进过，racer 必须仍登记（否则是 insert 覆盖 bug）。
+        assert!(
+            runtime.clone_watch_keys().contains("remote:dev:racer"),
+            "noted session watch must survive concurrent full reconcile (window: previous→insert)"
+        );
+        let map = runtime.clone_project_running_sessions();
+        let project_a = map.get("project-a").expect("project-a");
+        assert!(
+            project_a.contains("remote:dev:base"),
+            "base from matching reconcile must remain when committed"
+        );
+        // note 与 matching reconcile 原子交错后：要么 note 最终赢（含 racer），要么
+        // note 在 full replace 之后再 insert（含 racer）。若 racer 消失则说明 insert 覆盖了 note。
+        assert!(
+            project_a.contains("remote:dev:racer"),
+            "atomic critical section must not drop create-noted session from project map"
+        );
     }
 
     /// Business Logic（R38 M2: 为什么需要这个测试）:
