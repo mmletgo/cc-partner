@@ -694,24 +694,18 @@ impl BridgeRuntimeState {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     空闲回收依赖 last_used 流逝时间；有订阅者或仍在连流/resync 时不得视为 idle（R30 M3）。
-    ///     安静 terminal 无 chunk 时，仅靠 touch 会误 idle 杀掉活跃 bridge。
+    ///     空闲回收依赖 last_used 流逝时间；有订阅者时不得视为 idle（R30 M3）。
+    ///     R32 M2：connecting/streaming/backoff 仅在 subscribers>0 时非 idle；
+    ///     零订阅者按 last_used TTL 计时，使最后一 tab 关闭后 bridge 可 idle 回收。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     subscribers>0 → ZERO；phase ∈ connecting|streaming|resyncing|resynced → ZERO；
-    ///     否则返回 last_used.elapsed()。
+    ///     subscribers>0 → ZERO（任意 phase）；
+    ///     subscribers==0 → last_used.elapsed()（含 connecting/streaming/backoff）。
     fn idle_for(&self) -> Duration {
         if self.subscribers.load(Ordering::SeqCst) > 0 {
             return Duration::ZERO;
         }
-        let phase = self.phase.lock().expect("bridge phase 锁中毒").clone();
-        // R31：backoff 仍在重连恢复中，不得按 idle TTL 退出（max backoff=60s 时 last_used 会已过期）。
-        if matches!(
-            phase.as_str(),
-            "connecting" | "streaming" | "resyncing" | "resynced" | "backoff"
-        ) {
-            return Duration::ZERO;
-        }
+        // R32 M2：零订阅者一律走 last_used TTL；最后 close 后可 idle 回收 stale bridge。
         self.last_used
             .lock()
             .expect("bridge last_used 锁中毒")
@@ -2434,88 +2428,107 @@ mod tests {
         assert_eq!(err.error_class(), "stream_gap");
     }
 
-    /// Business Logic（R31: 为什么需要这个测试）:
-    ///     backoff 重连期间不得因 last_used 过期被 idle TTL 杀掉 bridge。
+    /// Business Logic（R32 M2: 为什么需要这个测试）:
+    ///     最后一 tab 关闭后 bridge 必须可 idle，否则 stale bridge 阻挡 Gap inventory。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     phase=backoff、subscribers=0 时 idle_for 为 ZERO。
+    ///     phase=streaming + subscribers=0 + last_used 过期 → idle；
+    ///     retain 后 ZERO；release 后按 last_used TTL 再 idle。
     #[test]
-    fn backoff_phase_is_not_idle() {
+    fn last_subscription_release_allows_idle_even_while_streaming() {
         let runtime = BridgeRuntimeState::new();
-        runtime.set_phase("backoff");
-        assert_eq!(runtime.idle_for(), Duration::ZERO);
-    }
-
-    /// Business Logic（R30 M3 / R31: 为什么需要这个测试）:
-    ///     活跃查看者持有订阅时 idle TTL 不得把 bridge 视为可回收；
-    ///     活跃 phase（streaming）同样不得 idle。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     phase 置 idle_exit（非活跃）+ last_used 过期 → idle；
-    ///     retain 后 ZERO；release + 过期再 idle；phase=streaming 时 ZERO。
-    #[test]
-    fn subscription_lease_keeps_bridge_from_idle() {
-        let runtime = BridgeRuntimeState::new();
-        // 测纯订阅语义：使用非活跃 phase（backoff 在 R31 已是活跃）。
-        runtime.set_phase("idle_exit");
+        runtime.set_phase("streaming");
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
         assert!(
             runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
-            "无订阅且非活跃 phase 且 last_used 过期时应 idle"
+            "zero subscribers + streaming + last_used expired must idle (R32 M2)"
         );
 
         runtime.retain_subscription();
         assert_eq!(
             runtime.idle_for(),
             Duration::ZERO,
-            "subscribers>0 时不得 idle"
+            "subscribers>0 keeps bridge non-idle regardless of phase"
         );
+        // 即使 last_used 过期，有订阅仍 ZERO。
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
         assert_eq!(runtime.idle_for(), Duration::ZERO);
 
+        // 最后一 tab 关闭：release 会 touch，刚释放时尚未 idle。
         runtime.release_subscription();
-        runtime.set_phase("idle_exit");
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
+        assert!(
+            runtime.idle_for() < Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
+            "release touches last_used so idle clock restarts"
+        );
+        // 模拟 TTL 过后：必须 idle，允许 bridge 回收。
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
-        assert!(runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS));
-
-        // 安静 streaming 相位：即使 last_used 过期也不得 idle。
-        runtime.set_phase("streaming");
-        *runtime.last_used.lock().expect("last_used") =
-            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
-        assert_eq!(
-            runtime.idle_for(),
-            Duration::ZERO,
-            "streaming phase must keep bridge non-idle without chunk touch"
+        assert!(
+            runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
+            "last close after TTL must idle streaming bridge"
         );
     }
 
-    /// Business Logic（R30 M3: 为什么需要这个测试）:
-    ///     双重 retain 需双重 release 才允许 idle，避免一个 viewer 释放误杀其他 viewer。
+    /// Business Logic（R32 M2: 为什么需要这个测试）:
+    ///     multi-tab 中关闭一个不得误 idle 杀掉其它 viewer 仍在用的 bridge。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     phase=backoff；retain×2 → release×1 仍 ZERO；再 release 后可 idle。
+    ///     retain×2 → release×1 仍 ZERO；再 release + 过期后 idle。
     #[test]
-    fn subscription_refcount_requires_matching_release() {
+    fn multi_tab_release_one_keeps_bridge_non_idle() {
         let runtime = BridgeRuntimeState::new();
-        // 非活跃 phase：backoff 在 R31 已是活跃，用 idle_exit 测纯 refcount。
-        runtime.set_phase("idle_exit");
+        runtime.set_phase("connecting");
         runtime.retain_subscription();
         runtime.retain_subscription();
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        // 关掉一个 tab：仍有 1 个订阅 → 非 idle。
         runtime.release_subscription();
-        assert_eq!(runtime.idle_for(), Duration::ZERO);
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime.idle_for(),
+            Duration::ZERO,
+            "one remaining subscriber keeps bridge non-idle"
+        );
+        // 关掉最后一个。
         runtime.release_subscription();
-        runtime.set_phase("idle_exit");
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
         assert!(runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS));
         // 额外 release 不 panic / 不回绕。
         runtime.release_subscription();
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（R32 M2: 为什么需要这个测试）:
+    ///     离线 backoff 且零订阅者时 bridge 必须可 idle，禁止永久占着 inventory 槽。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     phase=backoff + subscribers=0 + last_used 过期 → idle；
+    ///     有订阅时 backoff 仍 ZERO。
+    #[test]
+    fn offline_backoff_with_zero_subscribers_idles() {
+        let runtime = BridgeRuntimeState::new();
+        runtime.set_phase("backoff");
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert!(
+            runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
+            "backoff + zero subs + expired last_used must idle (R32 M2)"
+        );
+
+        runtime.retain_subscription();
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert_eq!(
+            runtime.idle_for(),
+            Duration::ZERO,
+            "backoff with subscribers must stay non-idle"
+        );
     }
 
     /// Business Logic（R30 M3: 为什么需要这个测试）:

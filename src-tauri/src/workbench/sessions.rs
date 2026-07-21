@@ -1460,34 +1460,77 @@ fn create_tmux_window(
 
 /// Business Logic（为什么需要这个函数）:
 ///     关闭最后一个 pane 会关闭所属 window；worktree tmux session 只剩最后一个 window 时必须销毁整个 session。
+///     R32 H1：list-windows 探测失败不得降级 kill-session，避免毁掉同 worktree 兄弟 terminal。
 ///
 /// Code Logic（这个函数做什么）:
-///     根据 window_id 与当前 window_count 构造 kill-window 或 kill-session 参数。
+///     - 已知 window_id 且 count>1 → kill-window；
+///     - 已知 window_id 但 list-windows 失败（count=None）→ 仍 kill-window only；
+///     - 已知 count==1 或无 window_id 且 count 可知 → kill-session；
+///     - window_id 缺失且 list-windows 失败 → None（fail closed，不发 kill-session）。
 fn tmux_destroy_backend_args(
     session_name: &str,
     window_id: Option<&str>,
     window_count: Option<usize>,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     match (window_id, window_count) {
-        (Some(window_id), Some(count)) if count > 1 => vec![
+        (Some(window_id), Some(count)) if count > 1 => Some(vec![
             "kill-window".to_string(),
             "-t".to_string(),
             tmux_window_target(session_name, window_id),
-        ],
-        _ => vec![
+        ]),
+        // R32 H1：探测失败但有已知 window_id → 仅 kill 该 window，永不 kill-session。
+        (Some(window_id), None) => Some(vec![
+            "kill-window".to_string(),
+            "-t".to_string(),
+            tmux_window_target(session_name, window_id),
+        ]),
+        // 探测失败且无 window_id：fail closed，禁止盲杀整 session。
+        (None, None) => None,
+        // 最后一窗 / 旧记录缺 window_id 但 count 可知 → kill-session。
+        _ => Some(vec![
             "kill-session".to_string(),
             "-t".to_string(),
             session_name.to_string(),
-        ],
+        ]),
     }
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     用户关闭终端 tab 时，如果该 tab 使用 tmux 承载上下文，应销毁对应 tmux session，避免后台残留。
-///     R30 M2：create 在 registry insert 前失败时，TmuxCreateGuard Drop 也走此路径回收 orphan window。
+///     create 路径 TmuxCreateGuard 回收 orphan window 时，必须只杀已知 window_id，
+///     绝不能因 list-windows 失败走 kill-session 毁掉同 worktree 其它 terminal（R32 H1）。
 ///
 /// Code Logic（这个函数做什么）:
-///     多 window 项目执行 `kill-window -t <session:window>`；最后一个 window 或旧记录退回 kill-session。
+///     仅当 row 有 backend_id + backend_window_id 时构造 `kill-window -t session:window`；
+///     缺 window_id 时 fail closed 直接返回，不探测、不 kill-session。
+fn kill_created_tmux_window_only(row: &WorkbenchSessionRow) {
+    if row.backend != TMUX_BACKEND {
+        return;
+    }
+    let Some(session_name) = row.backend_id.as_deref() else {
+        return;
+    };
+    let Some(window_id) = row.backend_window_id.as_deref() else {
+        // 无已知 window_id 时 fail closed：禁止 kill-session 盲杀兄弟窗。
+        tracing::debug!("TmuxCreateGuard reclaim skipped: missing backend_window_id");
+        return;
+    };
+    let Some(tmux) = available_tmux_command() else {
+        return;
+    };
+    let target = tmux_window_target(session_name, window_id);
+    let mut command = tmux.std_command();
+    command.args(["kill-window", "-t", &target]);
+    if let Err(error) = command.output() {
+        tracing::debug!("TmuxCreateGuard kill-window 失败: {error}");
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户关闭终端 tab 时，如果该 tab 使用 tmux 承载上下文，应销毁对应 tmux window/session，避免后台残留。
+///
+/// Code Logic（这个函数做什么）:
+///     list-windows 探测 window_count；多 window 或探测失败但有 window_id 时 kill-window；
+///     最后一窗 kill-session；探测失败且无 window_id 时 fail closed 不杀。
 pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     if row.backend != TMUX_BACKEND {
         return;
@@ -1509,8 +1552,15 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
             .filter(|line| !line.trim().is_empty())
             .count()
     });
-    let args =
-        tmux_destroy_backend_args(session_name, row.backend_window_id.as_deref(), window_count);
+    let Some(args) =
+        tmux_destroy_backend_args(session_name, row.backend_window_id.as_deref(), window_count)
+    else {
+        // R32 H1：list-windows 失败且无 window_id → fail closed，不 kill-session。
+        tracing::debug!(
+            "kill_persisted_backend skipped: list-windows failed without window_id"
+        );
+        return;
+    };
     let mut command = tmux.std_command();
     command.args(args.iter().map(String::as_str));
     let output = command.output();
@@ -1519,14 +1569,15 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     }
 }
 
-/// create 路径在 `create_tmux_window` 成功后、create 完全提交前的 window 回收守卫（R30 M2）。
+/// create 路径在 `create_tmux_window` 成功后、create 完全提交前的 window 回收守卫（R30 M2 / R32 H1）。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     create 可先成功创建不可见 tmux window，再因 project barrier / spawn_row 失败；
 ///     `SessionSpawnGuard` 只覆盖 registry 内 PTY attach，无法回收 pre-spawn window。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有已创建 window 的 row 快照；未 `commit()` 时 Drop 调用 `kill_persisted_backend`。
+///     持有已创建 window 的 row 快照；未 `commit()` 时 Drop 调用 `kill_created_tmux_window_only`
+///    （仅 kill-window，永不 kill-session）。
 struct TmuxCreateGuard {
     row: WorkbenchSessionRow,
     committed: bool,
@@ -1560,15 +1611,15 @@ impl Drop for TmuxCreateGuard {
     ///     barrier / spawn 失败（含 panic）必须销毁刚创建的 invisible window，禁止后台残留 shell。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     未 commit 时 best-effort `kill_persisted_backend`（不记录 terminal body）；
-    ///     测试环境额外累加 `TMUX_CREATE_GUARD_RECLAIM_COUNT`。
+    ///     未 commit 时 best-effort `kill_created_tmux_window_only`（仅 kill 已知 window_id，
+    ///     永不 kill-session；不记录 terminal body）；测试环境额外累加 reclaim 计数。
     fn drop(&mut self) {
         if !self.committed {
             #[cfg(test)]
             {
                 TMUX_CREATE_GUARD_RECLAIM_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
-            kill_persisted_backend(&self.row);
+            kill_created_tmux_window_only(&self.row);
         }
     }
 }
@@ -7189,12 +7240,63 @@ mod tests {
     fn tmux_destroy_backend_args_kill_session_for_last_window() {
         assert_eq!(
             tmux_destroy_backend_args("cc-partner-project-p1", Some("@1"), Some(1)),
-            vec!["kill-session", "-t", "cc-partner-project-p1"]
+            Some(vec![
+                "kill-session".to_string(),
+                "-t".to_string(),
+                "cc-partner-project-p1".to_string(),
+            ])
         );
         assert_eq!(
             tmux_destroy_backend_args("cc-partner-project-p1", Some("@1"), Some(2)),
-            vec!["kill-window", "-t", "cc-partner-project-p1:@1"]
+            Some(vec![
+                "kill-window".to_string(),
+                "-t".to_string(),
+                "cc-partner-project-p1:@1".to_string(),
+            ])
         );
+    }
+
+    /// Business Logic（R32 H1: 为什么需要这个测试）:
+    ///     multi-window session 中 list-windows 探测失败时，不得降级 kill-session 毁掉兄弟 terminal。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     window_id 已知 + count=None → kill-window only；
+    ///     window_id 缺失 + count=None → None（fail closed）；
+    ///     kill_created_tmux_window_only 纯语义：有 window_id 才构造 kill-window target。
+    #[test]
+    fn tmux_destroy_args_probe_failure_never_kills_session_with_window_id() {
+        // 多窗 + 探测失败：仅 kill 已知 window。
+        assert_eq!(
+            tmux_destroy_backend_args("wt-session", Some("@7"), None),
+            Some(vec![
+                "kill-window".to_string(),
+                "-t".to_string(),
+                "wt-session:@7".to_string(),
+            ])
+        );
+        // 无 window_id + 探测失败：fail closed，不发 kill-session。
+        assert_eq!(tmux_destroy_backend_args("wt-session", None, None), None);
+        // 无 window_id 但 count==1 可知：仍允许 kill-session（关闭路径最后一窗）。
+        assert_eq!(
+            tmux_destroy_backend_args("wt-session", None, Some(1)),
+            Some(vec![
+                "kill-session".to_string(),
+                "-t".to_string(),
+                "wt-session".to_string(),
+            ])
+        );
+        // TmuxCreateGuard reclaim 必须只走 window target，不依赖 count。
+        let row = fake_tmux_row("s-r32-h1", "p-r32", Some("wt1"), "@42");
+        let session = row.backend_id.as_deref().expect("session");
+        let window = row.backend_window_id.as_deref().expect("window");
+        assert_eq!(
+            tmux_window_target(session, window),
+            format!("{session}:{window}")
+        );
+        // 缺 window_id 的 row：guard reclaim 应 no-op（不 panic）。
+        let mut missing = fake_tmux_row("s-r32-h1-miss", "p-r32", Some("wt1"), "@99");
+        missing.backend_window_id = None;
+        kill_created_tmux_window_only(&missing);
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -292,10 +292,12 @@ export function advanceWorkbenchHttpStreamCursor(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Gap resync 成功后应 attach 到 gap.latest；失败或不完整必须保留 pre-gap recovery，禁止 cursor=None brand-new。
+ *   Gap resync 成功后应 attach 到 gap.latest；失败或不完整必须保留 recovery，禁止 cursor=None brand-new。
+ *   R32 M1：首帧 Gap（pre-gap cursor 为空）时，recovery 用 gap owner + sequence 0，避免重连变 brand-new consumer。
  *
  * Code Logic（这个函数做什么）:
- *   resyncSucceeded 且 owner 非空且 latest>0 → `{owner, latest}`；否则返回 preGapCursor（可为 null）。
+ *   resyncSucceeded 且 owner 非空且 latest>0 → `{owner, latest}`；
+ *   否则优先 preGapCursor；若 pre 为空且 gap owner 合法 → `{owner, 0}`（sequence 0 recovery）。
  */
 export function resolveCursorAfterGap(
   preGapCursor: WorkbenchHttpStreamCursor | null,
@@ -310,32 +312,85 @@ export function resolveCursorAfterGap(
   ) {
     return { ownerInstanceId: gap.ownerInstanceId, sequence: gap.latest };
   }
-  return preGapCursor;
+  if (preGapCursor) {
+    return preGapCursor;
+  }
+  // R32 M1：first-frame Gap + incomplete resync → recovery cursor = gap owner + seq 0。
+  if (
+    typeof gap.ownerInstanceId === 'string' &&
+    gap.ownerInstanceId.trim().length > 0
+  ) {
+    return { ownerInstanceId: gap.ownerInstanceId, sequence: 0 };
+  }
+  return null;
 }
 
 /**
  * Business Logic（为什么需要这个函数）:
  *   重连必须附 afterOwnerInstanceId+afterSequence，server 才能 catch-up 或显式 Gap。
+ *   R32 M1：recoveryPending 期间禁止裸 URL（无 after），即使 cursor 暂时为空也 fail-closed 用
+ *   兜底 recovery cursor 构造 after query。
  *
  * Code Logic（这个函数做什么）:
- *   无有效 cursor 时返回裸 `/api/workbench/events`；否则附 camelCase query（URLSearchParams）。
+ *   有效 cursor 时附 camelCase query；recoveryPending 且无 cursor 时若提供 fallback 仍附 after；
+ *   仅 brand-new（非 recovery）才返回裸 `/api/workbench/events`。
  */
-export function buildWorkbenchEventsUrl(cursor: WorkbenchHttpStreamCursor | null): string {
-  if (
-    !cursor ||
-    typeof cursor.ownerInstanceId !== 'string' ||
-    cursor.ownerInstanceId.trim().length === 0 ||
-    typeof cursor.sequence !== 'number' ||
-    !Number.isFinite(cursor.sequence) ||
-    cursor.sequence < 0
-  ) {
+export function buildWorkbenchEventsUrl(
+  cursor: WorkbenchHttpStreamCursor | null,
+  options?: { recoveryPending?: boolean; recoveryFallback?: WorkbenchHttpStreamCursor | null },
+): string {
+  const effective =
+    cursor &&
+    typeof cursor.ownerInstanceId === 'string' &&
+    cursor.ownerInstanceId.trim().length > 0 &&
+    typeof cursor.sequence === 'number' &&
+    Number.isFinite(cursor.sequence) &&
+    cursor.sequence >= 0
+      ? cursor
+      : options?.recoveryPending
+        ? options.recoveryFallback &&
+          typeof options.recoveryFallback.ownerInstanceId === 'string' &&
+          options.recoveryFallback.ownerInstanceId.trim().length > 0 &&
+          typeof options.recoveryFallback.sequence === 'number' &&
+          Number.isFinite(options.recoveryFallback.sequence) &&
+          options.recoveryFallback.sequence >= 0
+          ? options.recoveryFallback
+          : null
+        : null;
+
+  if (!effective) {
+    // recoveryPending 且仍无有效 after：宁可 delay 重连也不 brand-new。
+    // 调用方应保证 recoveryPending 时至少有 recovery cursor；此处仍返回裸 URL 作最后兜底
+    // 但 hook 层会在 recoveryPending 时拒绝无 after 的 fetch。
     return '/api/workbench/events';
   }
   const params = new URLSearchParams({
-    afterOwnerInstanceId: cursor.ownerInstanceId,
-    afterSequence: String(cursor.sequence),
+    afterOwnerInstanceId: effective.ownerInstanceId,
+    afterSequence: String(effective.sequence),
   });
   return `/api/workbench/events?${params.toString()}`;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   recovery 未完成时不得以 brand-new consumer 重连，否则首帧 Gap 后的 incomplete resync 会掩盖 gap。
+ *
+ * Code Logic（这个函数做什么）:
+ *   当 recoveryPending 为 true 时要求 cursor 有效（含 sequence 0）；否则允许 null（brand-new 首连）。
+ */
+export function canOpenWorkbenchEventsRequest(
+  cursor: WorkbenchHttpStreamCursor | null,
+  recoveryPending: boolean,
+): boolean {
+  if (!recoveryPending) return true;
+  return (
+    !!cursor &&
+    typeof cursor.ownerInstanceId === 'string' &&
+    cursor.ownerInstanceId.trim().length > 0 &&
+    typeof cursor.sequence === 'number' &&
+    Number.isFinite(cursor.sequence) &&
+    cursor.sequence >= 0
+  );
 }
 
 /**
@@ -566,6 +621,12 @@ export function useWorkbenchHttpEvents({
     let activeConnectionController: AbortController | null = null;
     /** 已提交 live cursor；Gap incomplete 时作 recovery，禁止 brand-new None。 */
     let streamCursor: WorkbenchHttpStreamCursor | null = null;
+    /**
+     * R32 M1：Gap 后 resync 未完成（失败或首帧 Gap 无 pre cursor）时置 true。
+     * recovery 完成（成功 attach latest 或 live 业务帧推进）后清 false。
+     * true 期间禁止 bare events URL（无 after）。
+     */
+    let recoveryPending = false;
 
     /**
      * Business Logic（为什么需要这个函数）:
@@ -589,9 +650,16 @@ export function useWorkbenchHttpEvents({
      *   建立 fetch 长连接（child signal + after 游标），逐段读取 ReadableStream；
      *   业务帧推进 cursor 并消费；Gap 则 pause live、resync、解析 next cursor 后 abort 重连；
      *   业务帧与 heartbeat 重置 watchdog；异常或 watchdog abort 后若 lifecycle 仍在则重连。
+     *   R32 M1：recoveryPending 时绝不 bare reconnect。
      */
     async function connect(): Promise<void> {
       if (stopped || lifecycleController.signal.aborted) return;
+
+      // R32 M1：recovery 未完成且 cursor 无效时，禁止 brand-new fetch；延后重试。
+      if (!canOpenWorkbenchEventsRequest(streamCursor, recoveryPending)) {
+        scheduleReconnect();
+        return;
+      }
 
       const connectionController = new AbortController();
       activeConnectionController = connectionController;
@@ -637,7 +705,8 @@ export function useWorkbenchHttpEvents({
        *   Gap 帧意味着 silent loss 风险；必须立刻 pause live 并权威 resync，再以正确 cursor 重连。
        *
        * Code Logic（这个函数做什么）:
-       *   冻结 pre-gap cursor → resync running sessions → resolveCursorAfterGap → abort child。
+       *   冻结 pre-gap cursor → resync running sessions → resolveCursorAfterGap →
+       *   设置 recoveryPending（失败/首帧）→ abort child。
        */
       const handleGap = async (gap: WorkbenchHttpGapFrame): Promise<void> => {
         if (gapHandled || stopped || lifecycleController.signal.aborted) return;
@@ -652,11 +721,31 @@ export function useWorkbenchHttpEvents({
           resyncSucceeded = false;
         }
         streamCursor = resolveCursorAfterGap(preGapCursor, gap, resyncSucceeded);
+        // R32 M1：成功 attach latest 清 recovery；失败或 first-gap 保留 recoveryPending。
+        recoveryPending = !resyncSucceeded || !streamCursor;
+        // 若 resync 成功但 latest==0 导致仍用 recovery，同样保持 pending 直至 live 推进。
+        if (resyncSucceeded && streamCursor && streamCursor.sequence > 0) {
+          recoveryPending = false;
+        } else if (!streamCursor) {
+          // resolve 应至少给出 gap owner+0；仍为空则保持 pending，禁止 bare。
+          recoveryPending = true;
+        } else if (!resyncSucceeded) {
+          recoveryPending = true;
+        }
         connectionController.abort();
       };
 
       try {
-        const response = await fetch(buildWorkbenchEventsUrl(streamCursor), {
+        const eventsUrl = buildWorkbenchEventsUrl(streamCursor, {
+          recoveryPending,
+          recoveryFallback: streamCursor,
+        });
+        // 二次守护：recovery 期间 URL 必须含 after。
+        if (recoveryPending && !eventsUrl.includes('afterOwnerInstanceId=')) {
+          scheduleReconnect();
+          return;
+        }
+        const response = await fetch(eventsUrl, {
           method: 'GET',
           headers: {
             Accept: 'application/x-ndjson',
@@ -687,6 +776,10 @@ export function useWorkbenchHttpEvents({
                 frame.ownerInstanceId,
                 frame.sequence,
               );
+              // live 业务帧成功推进后 recovery 完成。
+              if (streamCursor && streamCursor.sequence > 0) {
+                recoveryPending = false;
+              }
               consumeWorkbenchHttpEvent(
                 store,
                 frame.event,
@@ -717,6 +810,9 @@ export function useWorkbenchHttpEvents({
                   frame.ownerInstanceId,
                   frame.sequence,
                 );
+                if (streamCursor && streamCursor.sequence > 0) {
+                  recoveryPending = false;
+                }
                 consumeWorkbenchHttpEvent(
                   store,
                   frame.event,

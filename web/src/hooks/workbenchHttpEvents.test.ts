@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   advanceWorkbenchHttpStreamCursor,
   buildWorkbenchEventsUrl,
+  canOpenWorkbenchEventsRequest,
   isWorkbenchHttpGapPayload,
   parseWorkbenchNdjsonChunk,
   parseWorkbenchNdjsonFrame,
@@ -260,10 +261,67 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
       resolveCursorAfterGap(pre, { ownerInstanceId: 'owner-b', oldestAvailable: 0, latest: 0 }, true),
     ).toEqual(pre);
 
+    // R32 M1：first-frame Gap + incomplete resync → gap owner + sequence 0，禁止 null。
+    expect(resolveCursorAfterGap(null, gap, false)).toEqual({
+      ownerInstanceId: 'owner-a',
+      sequence: 0,
+    });
+    // first-frame Gap + success still attaches latest when latest>0。
+    expect(resolveCursorAfterGap(null, gap, true)).toEqual({
+      ownerInstanceId: 'owner-a',
+      sequence: 40,
+    });
+
     expect(buildWorkbenchEventsUrl(null)).toBe('/api/workbench/events');
     expect(buildWorkbenchEventsUrl({ ownerInstanceId: 'owner-a', sequence: 9 })).toBe(
       '/api/workbench/events?afterOwnerInstanceId=owner-a&afterSequence=9',
     );
+    // sequence 0 recovery cursor 必须生成 after query（非 bare）。
+    expect(buildWorkbenchEventsUrl({ ownerInstanceId: 'owner-a', sequence: 0 })).toBe(
+      '/api/workbench/events?afterOwnerInstanceId=owner-a&afterSequence=0',
+    );
+
+    // recoveryPending 门闩：无 cursor 时禁止 open；有 recovery cursor（含 seq 0）允许。
+    expect(canOpenWorkbenchEventsRequest(null, false)).toBe(true);
+    expect(canOpenWorkbenchEventsRequest(null, true)).toBe(false);
+    expect(
+      canOpenWorkbenchEventsRequest({ ownerInstanceId: 'owner-a', sequence: 0 }, true),
+    ).toBe(true);
+  });
+
+  /**
+   * Business Logic（R32 M1: 为什么需要这个测试）:
+   *   首帧 Gap 后 resync 失败不得以 bare events URL 重连，否则变成 brand-new consumer 掩盖 gap。
+   *
+   * Code Logic（这个测试做什么）:
+   *   pre-gap cursor=null → incomplete resolve → recovery={owner,0} → URL 含 afterSequence=0；
+   *   recoveryPending 时 canOpen 拒绝 null。
+   */
+  test('first-frame gap recovery never reconnects bare without after cursor', () => {
+    let streamCursor: { ownerInstanceId: string; sequence: number } | null = null;
+    let recoveryPending = false;
+    const gap = {
+      ownerInstanceId: 'owner-first',
+      oldestAvailable: 5,
+      latest: 20,
+    };
+
+    // 模拟 first-frame Gap + resync 失败。
+    streamCursor = resolveCursorAfterGap(streamCursor, gap, false);
+    recoveryPending = true;
+
+    expect(streamCursor).toEqual({ ownerInstanceId: 'owner-first', sequence: 0 });
+    expect(canOpenWorkbenchEventsRequest(streamCursor, recoveryPending)).toBe(true);
+    const url = buildWorkbenchEventsUrl(streamCursor, {
+      recoveryPending,
+      recoveryFallback: streamCursor,
+    });
+    expect(url).toContain('afterOwnerInstanceId=owner-first');
+    expect(url).toContain('afterSequence=0');
+    expect(url).not.toBe('/api/workbench/events');
+
+    // 若错误地清空 cursor，门闩必须拒绝 bare open。
+    expect(canOpenWorkbenchEventsRequest(null, true)).toBe(false);
   });
 
   /**
