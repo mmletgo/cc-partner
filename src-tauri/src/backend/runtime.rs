@@ -529,7 +529,11 @@ pub async fn build_app_state_with_role(
         maintenance_gate.clone(),
     ));
     let workbench_sessions = Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new());
-    let (workbench_remote_events, _) = tokio::sync::broadcast::channel(1024);
+    let workbench_remote_events = Arc::new(
+        crate::workbench::remote_events::WorkbenchRemoteEventBus::new(
+            config_runtime.owner_instance_id().to_string(),
+        ),
+    );
     let workbench_remote_event_bridges =
         Arc::new(crate::workbench::remote_events::RemoteEventBridgeRegistry::new());
     let workbench_dependency =

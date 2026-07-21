@@ -1368,6 +1368,19 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
             for cleanup in cleanups {
                 cleanup.finish_cleanup();
             }
+            // R27 H4：finish project barrier 前 wait project op leases；超时 fail-closed 保留 barrier。
+            if !state
+                .workbench_sessions
+                .wait_project_op_leases_drained(project_id)
+            {
+                tracing::warn!(
+                    project_id = %project_id,
+                    "project op leases still in-flight after remove; retaining project barrier"
+                );
+                return Err(AppError::unavailable(
+                    "project_op_lease_drain_timeout".to_string(),
+                ));
+            }
             state
                 .workbench_sessions
                 .finish_project_closing_barrier(project_id, project_barrier);
@@ -1554,10 +1567,9 @@ mod restore_holder_fail_closed_tests {
             workbench_sessions: Arc::new(
                 crate::workbench::sessions::WorkbenchSessionRegistry::new(),
             ),
-            workbench_remote_events: {
-                let (tx, _) = tokio::sync::broadcast::channel(8);
-                tx
-            },
+            workbench_remote_events: std::sync::Arc::new(
+                crate::workbench::remote_events::WorkbenchRemoteEventBus::new("test-owner"),
+            ),
             workbench_remote_event_bridges: Arc::new(
                 crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
             ),

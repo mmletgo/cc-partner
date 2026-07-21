@@ -722,15 +722,33 @@ pub async fn safe_attach_workbench_session(
     if ctx.mock_tmux_targets.is_some() {
         #[cfg(test)]
         {
+            // R27 H5：mock 路径也必须 revalidate claim generation 后才 Ready。
+            ctx.state
+                .workbench_sessions
+                .require_restore_claim_active(&row.id, claim_generation)?;
             ctx.counters.attach_client.fetch_add(1, Ordering::SeqCst);
             let sid = row.id.clone();
             ctx.state
                 .workbench_sessions
                 .insert_fake_session_row_for_test(row);
-            // insert_fake 默认 Ready；显式 mark 保持语义一致。
             ctx.state
                 .workbench_sessions
-                .mark_session_ready(&sid, Some(&ctx.state));
+                .bind_restore_claim_generation_for_test(&sid, Some(claim_generation));
+            let gen = ctx
+                .state
+                .workbench_sessions
+                .session_generation_for_test(&sid)
+                .expect("generation after fake insert");
+            // insert_fake 已 Ready；幂等 Ready 仍会 revalidate claim/project。
+            if !ctx
+                .state
+                .workbench_sessions
+                .mark_session_ready_for_generation(&sid, gen, Some(&ctx.state))
+            {
+                return Err(AppError::unavailable(
+                    "session_restore_claim_revoked".to_string(),
+                ));
+            }
         }
         #[cfg(not(test))]
         {
@@ -744,6 +762,7 @@ pub async fn safe_attach_workbench_session(
             &ctx.state,
             row,
             &ctx.counters,
+            Some(claim_generation),
         )?;
     }
 
@@ -1162,10 +1181,9 @@ mod tests {
             workbench_sessions: Arc::new(
                 crate::workbench::sessions::WorkbenchSessionRegistry::new(),
             ),
-            workbench_remote_events: {
-                let (tx, _) = tokio::sync::broadcast::channel(8);
-                tx
-            },
+            workbench_remote_events: std::sync::Arc::new(
+                crate::workbench::remote_events::WorkbenchRemoteEventBus::new("test-owner"),
+            ),
             workbench_remote_event_bridges: Arc::new(
                 crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
             ),

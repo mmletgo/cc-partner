@@ -5,22 +5,31 @@
 //!     N1 Task 6 要求 bridge 仅由 sidecar owner 创建，带取消/TTL/退避与 1 MiB 资源上限。
 //!
 //! Code Logic（这个模块做什么）:
-//!     定义可通过 broadcast/NDJSON 传输的事件 DTO，提供本机事件发布 helper，
-//!     并维护 sidecar 拥有的 `RemoteEventBridgeRegistry`（CancellationToken、idle TTL、
-//!     指数退避上限 60s、1 MiB 行/pending、8 KiB 错误前缀、shutdown_all 等待退出）。
+//!     定义可通过 broadcast/NDJSON 传输的事件 DTO；`WorkbenchRemoteEventBus` 为有界
+//!     owner+sequence 总线（ring catch-up + live + Gap，镜像 RuntimeEventBus）；
+//!     提供本机事件发布 helper，并维护 sidecar 拥有的 `RemoteEventBridgeRegistry`
+//!     （CancellationToken、idle TTL、指数退避上限 60s、1 MiB 行/pending、8 KiB 错误前缀、
+//!     after 游标重连与 Gap fail-closed、shutdown_all 等待退出）。
 
+use crate::backend::event_bus::BackendRuntimeCursor;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::agent_runtime::snapshot::AgentSessionRuntimeDto;
 use crate::workbench::remote_ids::remote_entity_id;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{json, Value};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+
+/// 默认 replay ring 容量（事件条数）。
+const DEFAULT_REPLAY_RING_CAPACITY: usize = 256;
+/// 默认 live broadcast 容量。
+const DEFAULT_BROADCAST_CAPACITY: usize = 256;
 
 /// NDJSON 单行上限（1 MiB）。
 pub const MAX_NDJSON_LINE_BYTES: usize = 1_048_576;
@@ -119,15 +128,376 @@ pub enum WorkbenchRemoteEvent {
     AgentRuntime(WorkbenchAgentRuntimePayload),
 }
 
-/// 解码单行 NDJSON：已知事件 → Some；未知 type → None（不重连）；非法 JSON → Err。
+/// Workbench 远端事件流消息（业务 Event 或显式 Gap）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     remote bridge / Mobile 订阅 `/api/workbench/events` 时必须区分业务事件与 ring 外/lag
+///     造成的缺口，禁止静默丢弃 Lagged。
+///
+/// Code Logic（这个枚举做什么）:
+///     Event 携带 owner+sequence+业务 payload；Gap 携带 oldestAvailable/latest。
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkbenchRemoteRelayMessage {
+    /// 带游标的业务事件。
+    Event {
+        owner_instance_id: String,
+        sequence: u64,
+        event: WorkbenchRemoteEvent,
+    },
+    /// owner 变化、after 早于 ring 或 live lag 后的显式缺口。
+    Gap {
+        owner_instance_id: String,
+        oldest_available: u64,
+        latest: u64,
+    },
+}
+
+/// wire 解码结果别名（与 relay 消息同形）。
+pub type WorkbenchRemoteStreamMessage = WorkbenchRemoteRelayMessage;
+
+/// ring 内单条 Workbench 远端事件。
+#[derive(Debug, Clone)]
+struct WorkbenchRemoteRingEntry {
+    sequence: u64,
+    event: WorkbenchRemoteEvent,
+}
+
+/// 总线内部可变状态。
+#[derive(Debug)]
+struct WorkbenchRemoteEventBusInner {
+    next_sequence: u64,
+    ring: VecDeque<WorkbenchRemoteRingEntry>,
+    ring_capacity: usize,
+}
+
+/// Workbench 远端事件有界总线（owner+sequence + ring + live）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     远端/Mobile 订阅者需要 after 游标 catch-up 与显式 Gap，禁止 bare broadcast 静默丢消息。
+///
+/// Code Logic（这个结构做什么）:
+///     Mutex 保护 sequence/ring；broadcast 推送 `WorkbenchRemoteRelayMessage`；
+///     `open_relay` 先 subscribe 再 ring catch-up，owner 变化或 after < oldest → Gap；lag → Gap。
+#[derive(Debug)]
+pub struct WorkbenchRemoteEventBus {
+    owner_instance_id: String,
+    inner: Mutex<WorkbenchRemoteEventBusInner>,
+    tx: broadcast::Sender<WorkbenchRemoteRelayMessage>,
+}
+
+impl WorkbenchRemoteEventBus {
+    /// 使用默认容量创建总线。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     生产 AppState 与 harness 需要快速挂上标准容量远端事件总线。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `with_capacity` 使用默认 ring/broadcast 容量。
+    pub fn new(owner_instance_id: impl Into<String>) -> Self {
+        Self::with_capacity(
+            owner_instance_id,
+            DEFAULT_REPLAY_RING_CAPACITY,
+            DEFAULT_BROADCAST_CAPACITY,
+        )
+    }
+
+    /// 使用指定容量创建总线。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     测试需要极小 ring/broadcast 以确定性触发 gap 与 lag。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     sequence 从 1 起；broadcast 至少容量 1。
+    pub fn with_capacity(
+        owner_instance_id: impl Into<String>,
+        ring_capacity: usize,
+        broadcast_capacity: usize,
+    ) -> Self {
+        let (tx, _) = broadcast::channel(broadcast_capacity.max(1));
+        Self {
+            owner_instance_id: owner_instance_id.into(),
+            inner: Mutex::new(WorkbenchRemoteEventBusInner {
+                next_sequence: 1,
+                ring: VecDeque::new(),
+                ring_capacity: ring_capacity.max(1),
+            }),
+            tx,
+        }
+    }
+
+    /// 当前 owner 实例 id。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     NDJSON 信封与 after 游标需要绑定同一 owner 身份。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回内部 owner_instance_id。
+    pub fn owner_instance_id(&self) -> &str {
+        &self.owner_instance_id
+    }
+
+    /// 发布一条业务事件并返回新游标。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     terminal/merge/agent 远端事件必须单调编号后才能被订阅方 catch-up/去重。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     同一把 inner 锁内分配 sequence、写入 ring、broadcast send，保证交付顺序与 sequence 单调。
+    pub fn publish(&self, event: WorkbenchRemoteEvent) -> BackendRuntimeCursor {
+        let mut inner = self.inner.lock().expect("workbench remote event bus 锁中毒");
+        let sequence = inner.next_sequence;
+        inner.next_sequence = inner.next_sequence.saturating_add(1);
+        if inner.ring.len() >= inner.ring_capacity {
+            inner.ring.pop_front();
+        }
+        inner.ring.push_back(WorkbenchRemoteRingEntry {
+            sequence,
+            event: event.clone(),
+        });
+        let message = WorkbenchRemoteRelayMessage::Event {
+            owner_instance_id: self.owner_instance_id.clone(),
+            sequence,
+            event,
+        };
+        let _ = self.tx.send(message);
+        BackendRuntimeCursor {
+            owner_instance_id: self.owner_instance_id.clone(),
+            sequence,
+        }
+    }
+
+    /// 当前最新 sequence（0 表示尚未发布）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Gap/诊断需要 live 上沿。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `next_sequence - 1`（未发布时 0）。
+    pub fn latest_sequence(&self) -> u64 {
+        let inner = self.inner.lock().expect("workbench remote event bus 锁中毒");
+        inner.next_sequence.saturating_sub(1)
+    }
+
+    /// ring 中最旧可用 sequence（空 ring 时为 0）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     判断 afterSequence 是否早于 ring。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回 ring front 的 sequence，空则 0。
+    pub fn oldest_available_sequence(&self) -> u64 {
+        let inner = self.inner.lock().expect("workbench remote event bus 锁中毒");
+        inner.ring.front().map(|e| e.sequence).unwrap_or(0)
+    }
+
+    /// 打开 catch-up + live relay 会话。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     订阅方重连需要 after 回放；同 owner 游标早于 ring 或 owner 变化必须 Gap；
+    ///     禁止 silent Lagged drop。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先 subscribe live，再在锁内计算 gap/replay；live 路径跳过已回放 sequence。
+    pub fn open_relay(&self, after: Option<&BackendRuntimeCursor>) -> WorkbenchRemoteEventRelay {
+        let live_rx = self.tx.subscribe();
+        let (pending, max_replayed) = {
+            let inner = self.inner.lock().expect("workbench remote event bus 锁中毒");
+            let latest = inner.next_sequence.saturating_sub(1);
+            let oldest = inner.ring.front().map(|e| e.sequence).unwrap_or(0);
+            let mut pending = Vec::new();
+            let mut max_replayed = 0_u64;
+
+            let same_owner = after
+                .map(|c| c.owner_instance_id == self.owner_instance_id)
+                .unwrap_or(false);
+            let owner_changed = after.is_some() && !same_owner;
+            let after_seq = if same_owner {
+                after.map(|c| c.sequence).unwrap_or(0)
+            } else {
+                0
+            };
+
+            if owner_changed {
+                pending.push(WorkbenchRemoteRelayMessage::Gap {
+                    owner_instance_id: self.owner_instance_id.clone(),
+                    oldest_available: oldest,
+                    latest,
+                });
+                max_replayed = latest;
+            } else if same_owner && after_seq > 0 && oldest > 0 && after_seq < oldest {
+                pending.push(WorkbenchRemoteRelayMessage::Gap {
+                    owner_instance_id: self.owner_instance_id.clone(),
+                    oldest_available: oldest,
+                    latest,
+                });
+                max_replayed = latest;
+            }
+
+            if pending.is_empty() {
+                for entry in inner.ring.iter() {
+                    if entry.sequence > after_seq {
+                        pending.push(WorkbenchRemoteRelayMessage::Event {
+                            owner_instance_id: self.owner_instance_id.clone(),
+                            sequence: entry.sequence,
+                            event: entry.event.clone(),
+                        });
+                        max_replayed = entry.sequence;
+                    }
+                }
+            }
+
+            (pending, max_replayed)
+        };
+
+        WorkbenchRemoteEventRelay {
+            owner_instance_id: self.owner_instance_id.clone(),
+            pending: pending.into(),
+            live_rx,
+            skip_through_sequence: max_replayed,
+        }
+    }
+}
+
+/// 单次 Workbench 远端 relay 会话（先 catch-up 再 live）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     HTTP NDJSON 与单测需要同一套 afterSequence 语义。
+///
+/// Code Logic（这个结构做什么）:
+///     pending 队列 + broadcast receiver；lag 转为 Gap。
+pub struct WorkbenchRemoteEventRelay {
+    owner_instance_id: String,
+    pending: VecDeque<WorkbenchRemoteRelayMessage>,
+    live_rx: broadcast::Receiver<WorkbenchRemoteRelayMessage>,
+    skip_through_sequence: u64,
+}
+
+impl WorkbenchRemoteEventRelay {
+    /// 拉取下一条消息（catch-up 或 live）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     路由用异步循环消费 relay，直到取消。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先弹 pending；再 await live；Lagged → Gap；同 sequence 已回放则跳过。
+    pub async fn recv(&mut self) -> Option<WorkbenchRemoteRelayMessage> {
+        loop {
+            if let Some(msg) = self.pending.pop_front() {
+                return Some(msg);
+            }
+            match self.live_rx.recv().await {
+                Ok(msg) => {
+                    if let WorkbenchRemoteRelayMessage::Event { sequence, .. } = &msg {
+                        if *sequence <= self.skip_through_sequence {
+                            continue;
+                        }
+                        self.skip_through_sequence = *sequence;
+                    }
+                    return Some(msg);
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let latest = self.skip_through_sequence;
+                    return Some(WorkbenchRemoteRelayMessage::Gap {
+                        owner_instance_id: self.owner_instance_id.clone(),
+                        oldest_available: latest.saturating_add(1),
+                        latest,
+                    });
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+
+    /// 非阻塞尝试拉取（测试用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     单测需要在不挂死的情况下排空 catch-up。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     先 pending；再 `try_recv` live；Lagged → Gap。
+    pub fn try_recv(&mut self) -> Option<WorkbenchRemoteRelayMessage> {
+        if let Some(msg) = self.pending.pop_front() {
+            return Some(msg);
+        }
+        loop {
+            match self.live_rx.try_recv() {
+                Ok(msg) => {
+                    if let WorkbenchRemoteRelayMessage::Event { sequence, .. } = &msg {
+                        if *sequence <= self.skip_through_sequence {
+                            continue;
+                        }
+                        self.skip_through_sequence = *sequence;
+                    }
+                    return Some(msg);
+                }
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    let latest = self.skip_through_sequence;
+                    return Some(WorkbenchRemoteRelayMessage::Gap {
+                        owner_instance_id: self.owner_instance_id.clone(),
+                        oldest_available: latest.saturating_add(1),
+                        latest,
+                    });
+                }
+                Err(broadcast::error::TryRecvError::Empty)
+                | Err(broadcast::error::TryRecvError::Closed) => return None,
+            }
+        }
+    }
+}
+
+/// 将 relay 消息编码为 NDJSON 行（不含末尾换行）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     扩展新事件前，旧客户端必须忽略未知 type，禁止因 serde 失败断开 bridge。
+///     `/api/workbench/events` 必须在业务信封上附 ownerInstanceId+sequence，并输出标准 Gap 帧。
 ///
 /// Code Logic（这个函数做什么）:
-///     先解析为 Value；读 type 字段；匹配已知集合则反序列化为 WorkbenchRemoteEvent；
-///     未知 type 返回 Ok(None)；缺 type/非法结构返回 AppError::validation。
-pub fn decode_remote_event(line: &str) -> Result<Option<WorkbenchRemoteEvent>, AppError> {
+///     Event：序列化 `{type,payload}` 后插入 top-level ownerInstanceId/sequence；
+///     Gap：`{type:"gap",payload:{ownerInstanceId,oldestAvailable,latest}}`。
+pub fn encode_workbench_remote_relay_ndjson(
+    msg: &WorkbenchRemoteRelayMessage,
+) -> Result<String, serde_json::Error> {
+    match msg {
+        WorkbenchRemoteRelayMessage::Event {
+            owner_instance_id,
+            sequence,
+            event,
+        } => {
+            let mut value = serde_json::to_value(event)?;
+            if let Value::Object(map) = &mut value {
+                map.insert(
+                    "ownerInstanceId".to_string(),
+                    json!(owner_instance_id),
+                );
+                map.insert("sequence".to_string(), json!(sequence));
+            }
+            serde_json::to_string(&value)
+        }
+        WorkbenchRemoteRelayMessage::Gap {
+            owner_instance_id,
+            oldest_available,
+            latest,
+        } => serde_json::to_string(&json!({
+            "type": "gap",
+            "payload": {
+                "ownerInstanceId": owner_instance_id,
+                "oldestAvailable": oldest_available,
+                "latest": latest,
+            }
+        })),
+    }
+}
+
+/// 解码单行 NDJSON：业务 Event / Gap → Some；heartbeat/未知 type → None；非法 JSON → Err。
+///
+/// Business Logic（为什么需要这个函数）:
+///     扩展新事件前，旧客户端必须忽略未知 type；Gap 必须识别以便 fail-closed 重连。
+///
+/// Code Logic（这个函数做什么）:
+///     先解析为 Value；读 type；业务 type 反序列化为 WorkbenchRemoteEvent 并读 top-level
+///     ownerInstanceId/sequence（缺省 ""/0）；gap 读 payload 游标字段；heartbeat/未知 → Ok(None)。
+pub fn decode_remote_event(
+    line: &str,
+) -> Result<Option<WorkbenchRemoteStreamMessage>, AppError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|e| AppError::validation(format!("invalid remote event json: {e}")))?;
     let event_type = value
@@ -136,9 +506,43 @@ pub fn decode_remote_event(line: &str) -> Result<Option<WorkbenchRemoteEvent>, A
         .ok_or_else(|| AppError::validation("remote event missing type".to_string()))?;
     match event_type {
         "terminalOutput" | "terminalStatus" | "mergeProgress" | "agentRuntime" => {
-            let event: WorkbenchRemoteEvent = serde_json::from_value(value)
+            let event: WorkbenchRemoteEvent = serde_json::from_value(value.clone())
                 .map_err(|e| AppError::validation(format!("invalid remote event payload: {e}")))?;
-            Ok(Some(event))
+            let owner_instance_id = value
+                .get("ownerInstanceId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let sequence = value
+                .get("sequence")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Ok(Some(WorkbenchRemoteStreamMessage::Event {
+                owner_instance_id,
+                sequence,
+                event,
+            }))
+        }
+        "gap" => {
+            let payload = value.get("payload").cloned().unwrap_or(Value::Null);
+            let owner_instance_id = payload
+                .get("ownerInstanceId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let oldest_available = payload
+                .get("oldestAvailable")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let latest = payload
+                .get("latest")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Ok(Some(WorkbenchRemoteStreamMessage::Gap {
+                owner_instance_id,
+                oldest_available,
+                latest,
+            }))
         }
         // heartbeat 等非业务帧
         "heartbeat" => Ok(None),
@@ -165,6 +569,8 @@ pub enum EventStreamError {
     Http { status: u16 },
     /// 网络/IO 失败（不含正文）。
     Network,
+    /// 远端流显式 Gap：序列不连续，必须 fail-closed 重连。
+    StreamGap,
 }
 
 impl EventStreamError {
@@ -180,6 +586,7 @@ impl EventStreamError {
             Self::IdleTimeout => "idle_timeout",
             Self::Http { .. } => "http_error",
             Self::Network => "network_error",
+            Self::StreamGap => "stream_gap",
         }
     }
 }
@@ -192,6 +599,7 @@ impl std::fmt::Display for EventStreamError {
             Self::IdleTimeout => write!(f, "event stream idle timeout"),
             Self::Http { status } => write!(f, "event stream http {status}"),
             Self::Network => write!(f, "event stream network error"),
+            Self::StreamGap => write!(f, "event stream gap"),
         }
     }
 }
@@ -580,14 +988,12 @@ fn bridge_should_restart(existing_base_url: &str, finished: bool, next_base_url:
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     本机 session/merge 事件 emit 时，也要同步发布到 HTTP broadcast channel 供远端设备订阅。
+///     本机 session/merge 事件 emit 时，也要同步发布到有序远端事件总线供远端设备订阅。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppState 向 `workbench_remote_events` broadcast sender 发送事件；无订阅者时记录 debug 后忽略。
+///     经 `WorkbenchRemoteEventBus::publish` 分配 sequence 并广播；无订阅者时忽略。
 pub fn publish_workbench_remote_event_from_state(state: &AppState, event: WorkbenchRemoteEvent) {
-    if let Err(error) = state.workbench_remote_events.send(event) {
-        tracing::debug!("无 Workbench 远端事件订阅者: {error}");
-    }
+    let _cursor = state.workbench_remote_events.publish(event);
 }
 
 /// 计算有界指数退避（含轻量 jitter），上限 60s。
@@ -621,6 +1027,7 @@ async fn remote_event_loop(
     cancel: CancellationToken,
     runtime: Arc<BridgeRuntimeState>,
 ) {
+    let mut after_cursor: Option<BackendRuntimeCursor> = None;
     loop {
         if cancel.is_cancelled() {
             runtime.set_phase("cancelled");
@@ -640,6 +1047,7 @@ async fn remote_event_loop(
             &project_ids,
             &cancel,
             &runtime,
+            &mut after_cursor,
         )
         .await
         {
@@ -661,6 +1069,15 @@ async fn remote_event_loop(
                 runtime.set_phase("idle_exit");
                 runtime.set_error_class(Some(EventStreamError::IdleTimeout.error_class()));
                 return;
+            }
+            Err(EventStreamError::StreamGap) => {
+                // Gap：保留 last committed after_cursor，以 after 重连；不把后续帧当连续 live。
+                runtime.set_error_class(Some(EventStreamError::StreamGap.error_class()));
+                let next = runtime.attempt.fetch_add(1, Ordering::SeqCst) + 1;
+                runtime.set_phase("backoff");
+                tracing::debug!(
+                    "Workbench 远端事件流 gap，将退避重连: class=stream_gap attempt={next}"
+                );
             }
             Err(error) => {
                 let class = error.error_class();
@@ -695,11 +1112,12 @@ async fn remote_event_loop(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     一次远端事件连接负责持续读取 NDJSON 并把远端内部 ID 映射成本机 remote ID。
+///     一次远端事件连接负责持续读取 NDJSON 并把远端内部 ID 映射成本机 remote ID；
+///     断线后需携带 after 游标重连，收到 Gap 必须 fail-closed。
 ///
 /// Code Logic（这个函数做什么）:
-///     复用 `PeerClient::open_ndjson_stream`；错误 body 只读 8 KiB 前缀；
-///     chunk 解析受 1 MiB 限制，超限返回 ResourceLimit 并清空 buffer。
+///     复用 `PeerClient::open_ndjson_stream` 并带 after 游标；错误 body 只读 8 KiB 前缀；
+///     chunk 解析受 1 MiB 限制；Event 推进 after_cursor；Gap 清空 buffer 并返回 StreamGap。
 async fn read_remote_event_stream(
     state: &AppState,
     device_id: &str,
@@ -707,8 +1125,9 @@ async fn read_remote_event_stream(
     project_ids: &Arc<RwLock<HashMap<String, String>>>,
     cancel: &CancellationToken,
     runtime: &BridgeRuntimeState,
+    after_cursor: &mut Option<BackendRuntimeCursor>,
 ) -> Result<(), EventStreamError> {
-    let url = event_stream_url(base_url);
+    let url = event_stream_url(base_url, after_cursor.as_ref());
     let mut response = tokio::select! {
         _ = cancel.cancelled() => return Err(EventStreamError::Cancelled),
         result = state.peer_client.open_ndjson_stream(&url) => {
@@ -753,10 +1172,29 @@ async fn read_remote_event_stream(
             .read()
             .expect("remote event bridge project 映射读锁中毒")
             .clone();
-        match process_event_chunk_to_events(device_id, &project_map, &mut buffer, &chunk) {
-            Ok(events) => {
-                for event in events {
-                    emit_mapped_remote_event(state, event);
+        match process_event_chunk_to_messages(device_id, &project_map, &mut buffer, &chunk) {
+            Ok(messages) => {
+                for message in messages {
+                    match message {
+                        WorkbenchRemoteStreamMessage::Event {
+                            owner_instance_id,
+                            sequence,
+                            event,
+                        } => {
+                            emit_mapped_remote_event(state, event);
+                            if !owner_instance_id.is_empty() && sequence > 0 {
+                                *after_cursor = Some(BackendRuntimeCursor {
+                                    owner_instance_id,
+                                    sequence,
+                                });
+                            }
+                        }
+                        WorkbenchRemoteStreamMessage::Gap { .. } => {
+                            // fail-closed：停止当前连接，迫使带 after 重连，不静默续读 live。
+                            buffer.clear();
+                            return Err(EventStreamError::StreamGap);
+                        }
+                    }
                 }
             }
             Err(EventStreamError::ResourceLimit) => {
@@ -798,17 +1236,17 @@ async fn read_error_body_prefix(response: &mut reqwest::Response) -> String {
 
 /// Business Logic（为什么需要这个函数）:
 ///     远端事件流中的用户输出可能包含中文或 emoji，跨 chunk 解析必须以完整 NDJSON 行为边界；
-///     超 1 MiB 必须停止并清空，禁止保留超大 buffer。
+///     超 1 MiB 必须停止并清空，禁止保留超大 buffer；Gap 帧必须透传给上层 fail-closed。
 ///
 /// Code Logic（这个函数做什么）:
 ///     以 byte buffer 追加 chunk；任一行或 pending 超限 → clear + ResourceLimit；
-///     完整行 UTF-8 解码 + serde 解析后映射设备前缀。
-fn process_event_chunk_to_events(
+///     完整行 UTF-8 解码 + `decode_remote_event`；Event 映射设备前缀，Gap 原样透传。
+fn process_event_chunk_to_messages(
     device_id: &str,
     project_ids: &HashMap<String, String>,
     buffer: &mut Vec<u8>,
     chunk: &[u8],
-) -> Result<Vec<WorkbenchRemoteEvent>, EventStreamError> {
+) -> Result<Vec<WorkbenchRemoteStreamMessage>, EventStreamError> {
     // 快速路径：追加前检查 pending 预算。
     if buffer.len().saturating_add(chunk.len()) > MAX_PENDING_BUFFER_BYTES {
         // 若合并后仍无换行且超限 → 资源上限。
@@ -827,7 +1265,7 @@ fn process_event_chunk_to_events(
         return Err(EventStreamError::ResourceLimit);
     }
 
-    let mut events = Vec::new();
+    let mut messages = Vec::new();
     while let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
         if index > MAX_NDJSON_LINE_BYTES {
             buffer.clear();
@@ -847,8 +1285,19 @@ fn process_event_chunk_to_events(
         }
         match std::str::from_utf8(line) {
             Ok(text) => match decode_remote_event(text) {
-                Ok(Some(event)) => {
-                    events.push(map_remote_event_for_device(device_id, project_ids, event))
+                Ok(Some(WorkbenchRemoteStreamMessage::Event {
+                    owner_instance_id,
+                    sequence,
+                    event,
+                })) => {
+                    messages.push(WorkbenchRemoteStreamMessage::Event {
+                        owner_instance_id,
+                        sequence,
+                        event: map_remote_event_for_device(device_id, project_ids, event),
+                    });
+                }
+                Ok(Some(gap @ WorkbenchRemoteStreamMessage::Gap { .. })) => {
+                    messages.push(gap);
                 }
                 Ok(None) => {
                     // 未知 type / heartbeat：忽略，不中断 stream
@@ -863,7 +1312,25 @@ fn process_event_chunk_to_events(
         buffer.clear();
         return Err(EventStreamError::ResourceLimit);
     }
-    Ok(events)
+    Ok(messages)
+}
+
+/// 兼容测试入口：仅收集业务 Event（忽略 Gap）。
+#[cfg(test)]
+fn process_event_chunk_to_events(
+    device_id: &str,
+    project_ids: &HashMap<String, String>,
+    buffer: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<Vec<WorkbenchRemoteEvent>, EventStreamError> {
+    let messages = process_event_chunk_to_messages(device_id, project_ids, buffer, chunk)?;
+    Ok(messages
+        .into_iter()
+        .filter_map(|msg| match msg {
+            WorkbenchRemoteStreamMessage::Event { event, .. } => Some(event),
+            WorkbenchRemoteStreamMessage::Gap { .. } => None,
+        })
+        .collect())
 }
 
 /// 测试/诊断入口：按 chunk 列表解析 NDJSON，传播 ResourceLimit。
@@ -971,12 +1438,24 @@ fn map_remote_event_for_device(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     远端设备 base URL 可能带尾斜杠，事件桥必须拼出稳定 endpoint。
+///     远端设备 base URL 可能带尾斜杠；重连时需附带 after 游标做 catch-up。
 ///
 /// Code Logic（这个函数做什么）:
-///     去掉 base URL 尾部 `/` 后追加 `/api/workbench/events`。
-fn event_stream_url(base_url: &str) -> String {
-    format!("{}/api/workbench/events", base_url.trim_end_matches('/'))
+///     去掉 base URL 尾部 `/` 后追加 `/api/workbench/events`；
+///     若有 after 游标则附 `afterOwnerInstanceId` + `afterSequence` 查询（不记录 URL）。
+fn event_stream_url(base_url: &str, after: Option<&BackendRuntimeCursor>) -> String {
+    let base = format!("{}/api/workbench/events", base_url.trim_end_matches('/'));
+    match after {
+        Some(cursor)
+            if !cursor.owner_instance_id.is_empty() =>
+        {
+            format!(
+                "{base}?afterOwnerInstanceId={}&afterSequence={}",
+                cursor.owner_instance_id, cursor.sequence
+            )
+        }
+        _ => base,
+    }
 }
 
 #[cfg(test)]
@@ -1105,9 +1584,9 @@ mod tests {
     fn unknown_remote_event_is_ignored_without_reconnect() {
         // 兼容计划示例的 event 键：无 type 视为 validation；带未知 type 则 ignore
         let line = r#"{"type":"futureEvent","payload":{}}"#;
-        assert_eq!(decode_remote_event(line).unwrap(), None);
+        assert!(decode_remote_event(line).unwrap().is_none());
         let heartbeat = r#"{"type":"heartbeat","sentAt":"2026-07-15T00:00:00Z"}"#;
-        assert_eq!(decode_remote_event(heartbeat).unwrap(), None);
+        assert!(decode_remote_event(heartbeat).unwrap().is_none());
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -1233,14 +1712,14 @@ mod tests {
         let mut buffer = Vec::new();
         let project_ids = HashMap::new();
 
-        let first = process_event_chunk_to_events(
+        let first = process_event_chunk_to_messages(
             "device-a",
             &project_ids,
             &mut buffer,
             &bytes[..split_at],
         )
         .expect("first chunk ok");
-        let second = process_event_chunk_to_events(
+        let second = process_event_chunk_to_messages(
             "device-a",
             &project_ids,
             &mut buffer,
@@ -1250,16 +1729,21 @@ mod tests {
 
         assert!(first.is_empty());
         assert_eq!(second.len(), 1);
-        assert_eq!(
-            second[0],
-            WorkbenchRemoteEvent::TerminalOutput(WorkbenchTerminalOutputPayload {
-                session_id: "remote:device-a:inner-session".to_string(),
-                chunk: "中文🚀输出".to_string(),
-                seq: 1,
-                ts: 1000,
-                owner_instance_id: None,
-            })
-        );
+        match &second[0] {
+            WorkbenchRemoteStreamMessage::Event { event, .. } => {
+                assert_eq!(
+                    event,
+                    &WorkbenchRemoteEvent::TerminalOutput(WorkbenchTerminalOutputPayload {
+                        session_id: "remote:device-a:inner-session".to_string(),
+                        chunk: "中文🚀输出".to_string(),
+                        seq: 1,
+                        ts: 1000,
+                        owner_instance_id: None,
+                    })
+                );
+            }
+            other => panic!("expected StreamMessage::Event, got {other:?}"),
+        }
         assert!(buffer.is_empty());
     }
 
@@ -1295,8 +1779,16 @@ mod tests {
     #[test]
     fn event_stream_url_trims_trailing_slash() {
         assert_eq!(
-            event_stream_url("http://127.0.0.1:1420/"),
+            event_stream_url("http://127.0.0.1:1420/", None),
             "http://127.0.0.1:1420/api/workbench/events"
+        );
+        let after = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 9,
+        };
+        assert_eq!(
+            event_stream_url("http://127.0.0.1:1420/", Some(&after)),
+            "http://127.0.0.1:1420/api/workbench/events?afterOwnerInstanceId=owner-a&afterSequence=9"
         );
     }
 
@@ -1311,5 +1803,181 @@ mod tests {
         registry.shutdown_all().await;
         registry.force_shutdown();
         assert_eq!(registry.active_bridge_count(), 0);
+    }
+
+    fn sample_status_event(n: u64) -> WorkbenchRemoteEvent {
+        WorkbenchRemoteEvent::TerminalStatus(WorkbenchTerminalStatusPayload {
+            session_id: format!("s{n}"),
+            status: "running".into(),
+            exit_code: None,
+            ts: n as i64,
+        })
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     总线必须为每条事件分配单调 sequence，供 after 游标去重。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     连续 publish 3 条，断言 sequence 1..3 且 owner 一致。
+    #[test]
+    fn publish_assigns_monotonic_sequence() {
+        let bus = WorkbenchRemoteEventBus::new("owner-a");
+        let c1 = bus.publish(sample_status_event(1));
+        let c2 = bus.publish(sample_status_event(2));
+        let c3 = bus.publish(sample_status_event(3));
+        assert_eq!(c1.sequence, 1);
+        assert_eq!(c2.sequence, 2);
+        assert_eq!(c3.sequence, 3);
+        assert_eq!(c3.owner_instance_id, "owner-a");
+        assert_eq!(bus.latest_sequence(), 3);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     重连 afterSequence 只应回放更新事件，避免重复交付。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     publish 1..3 后 open_relay(after=1)，try_recv 得到 sequence 2 与 3。
+    #[test]
+    fn open_relay_after_sequence_replays_only_newer() {
+        let bus = WorkbenchRemoteEventBus::new("owner-a");
+        let c1 = bus.publish(sample_status_event(1));
+        bus.publish(sample_status_event(2));
+        bus.publish(sample_status_event(3));
+        let mut relay = bus.open_relay(Some(&c1));
+        match relay.try_recv() {
+            Some(WorkbenchRemoteRelayMessage::Event { sequence, .. }) => assert_eq!(sequence, 2),
+            other => panic!("expected event 2, got {other:?}"),
+        }
+        match relay.try_recv() {
+            Some(WorkbenchRemoteRelayMessage::Event { sequence, .. }) => assert_eq!(sequence, 3),
+            other => panic!("expected event 3, got {other:?}"),
+        }
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     after 早于 ring 必须 Gap，禁止 partial replay 造成 silent loss。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     ring=2 时 publish 1..4，after=1 触发 Gap 且无 Event。
+    #[test]
+    fn open_relay_after_earlier_than_ring_emits_gap() {
+        let bus = WorkbenchRemoteEventBus::with_capacity("owner-a", 2, 8);
+        bus.publish(sample_status_event(1));
+        bus.publish(sample_status_event(2));
+        bus.publish(sample_status_event(3));
+        bus.publish(sample_status_event(4));
+        let stale = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 1,
+        };
+        let mut relay = bus.open_relay(Some(&stale));
+        match relay.try_recv() {
+            Some(WorkbenchRemoteRelayMessage::Gap {
+                oldest_available,
+                latest,
+                ..
+            }) => {
+                assert_eq!(oldest_available, 3);
+                assert_eq!(latest, 4);
+            }
+            other => panic!("expected gap, got {other:?}"),
+        }
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     owner 变化必须强制 Gap，禁止只回放新 owner ring 尾部。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     after 携带不同 owner，open_relay 首条为 Gap。
+    #[test]
+    fn open_relay_owner_change_emits_gap() {
+        let bus = WorkbenchRemoteEventBus::new("owner-b");
+        bus.publish(sample_status_event(1));
+        let old = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 9,
+        };
+        let mut relay = bus.open_relay(Some(&old));
+        match relay.try_recv() {
+            Some(WorkbenchRemoteRelayMessage::Gap {
+                owner_instance_id, ..
+            }) => assert_eq!(owner_instance_id, "owner-b"),
+            other => panic!("expected gap, got {other:?}"),
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     live lag 不得静默丢弃，必须显式 Gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     broadcast 容量 1：先 subscribe 再 publish 多条不消费，try_recv 得到 Gap。
+    #[test]
+    fn relay_lag_emits_gap() {
+        let bus = WorkbenchRemoteEventBus::with_capacity("owner-a", 8, 1);
+        let mut relay = bus.open_relay(None);
+        bus.publish(sample_status_event(1));
+        bus.publish(sample_status_event(2));
+        bus.publish(sample_status_event(3));
+        // 可能先收到 ring catch-up event，也可能直接 Lagged→Gap；排空到首条 Gap 即通过。
+        let mut saw_gap = false;
+        for _ in 0..8 {
+            match relay.try_recv() {
+                Some(WorkbenchRemoteRelayMessage::Gap { .. }) => {
+                    saw_gap = true;
+                    break;
+                }
+                Some(WorkbenchRemoteRelayMessage::Event { .. }) => continue,
+                None => break,
+            }
+        }
+        assert!(saw_gap, "lagged live must surface Gap");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     wire Gap 帧必须被 decode 识别，供 bridge fail-closed。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     decode gap JSON → Some(Gap)；未知 type 仍 Ok(None)。
+    #[test]
+    fn decode_gap_frame_is_recognized() {
+        let line = r#"{"type":"gap","payload":{"ownerInstanceId":"owner-a","oldestAvailable":3,"latest":9}}"#;
+        match decode_remote_event(line).unwrap() {
+            Some(WorkbenchRemoteStreamMessage::Gap {
+                owner_instance_id,
+                oldest_available,
+                latest,
+            }) => {
+                assert_eq!(owner_instance_id, "owner-a");
+                assert_eq!(oldest_available, 3);
+                assert_eq!(latest, 9);
+            }
+            other => panic!("expected gap, got {other:?}"),
+        }
+        assert_eq!(
+            decode_remote_event(r#"{"type":"futureEvent","payload":{}}"#).unwrap(),
+            None
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     业务 NDJSON 信封必须附 ownerInstanceId+sequence。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     encode Event 后 JSON 含 type/ownerInstanceId/sequence，且无 terminal body 断言依赖。
+    #[test]
+    fn encode_event_includes_owner_and_sequence() {
+        let msg = WorkbenchRemoteRelayMessage::Event {
+            owner_instance_id: "owner-a".into(),
+            sequence: 4,
+            event: sample_status_event(4),
+        };
+        let line = encode_workbench_remote_relay_ndjson(&msg).unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "terminalStatus");
+        assert_eq!(value["ownerInstanceId"], "owner-a");
+        assert_eq!(value["sequence"], 4);
+        assert!(value.get("payload").is_some());
     }
 }

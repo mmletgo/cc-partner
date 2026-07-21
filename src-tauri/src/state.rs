@@ -114,9 +114,9 @@ pub struct AppState {
     /// 工作台 PTY 会话注册表（运行期 PTY/tmux attach 句柄，元数据由 workbench_session_repo 持久化）
     #[allow(dead_code)]
     pub workbench_sessions: Arc<crate::workbench::sessions::WorkbenchSessionRegistry>,
-    /// Workbench 远端事件广播通道（本机 terminal/merge 事件发布为 NDJSON，供局域网远端订阅）
+    /// Workbench 远端事件有序总线（owner+sequence + ring catch-up + Gap；供 `/api/workbench/events`）
     pub workbench_remote_events:
-        tokio::sync::broadcast::Sender<crate::workbench::remote_events::WorkbenchRemoteEvent>,
+        Arc<crate::workbench::remote_events::WorkbenchRemoteEventBus>,
     /// Workbench 远端事件桥接登记表（本机订阅其他设备 `/api/workbench/events`，按设备去重）
     pub workbench_remote_event_bridges:
         Arc<crate::workbench::remote_events::RemoteEventBridgeRegistry>,

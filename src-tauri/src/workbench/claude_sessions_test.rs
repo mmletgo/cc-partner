@@ -1559,10 +1559,9 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
             .expect("browser verification test service"),
         ),
         workbench_sessions: Arc::new(crate::workbench::sessions::WorkbenchSessionRegistry::new()),
-        workbench_remote_events: {
-            let (tx, _) = tokio::sync::broadcast::channel(8);
-            tx
-        },
+        workbench_remote_events: std::sync::Arc::new(
+            crate::workbench::remote_events::WorkbenchRemoteEventBus::new("test-owner"),
+        ),
         workbench_remote_event_bridges: Arc::new(
             crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
         ),

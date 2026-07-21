@@ -72,20 +72,24 @@ use crate::workbench::remote_protocol::{
 use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
+use crate::backend::event_bus::BackendRuntimeCursor;
+use crate::workbench::remote_events::encode_workbench_remote_relay_ndjson;
 use axum::body::Body;
-use axum::extract::{Extension, Path as AxumPath, State};
+use axum::extract::{Extension, Path as AxumPath, Query, State};
 use axum::http::header;
 use axum::http::Request;
 use axum::response::Response;
 use axum::Json;
 use chrono::Utc;
 use futures_util::stream;
+use serde::Deserialize;
 use serde_json::Value;
 use std::convert::Infallible;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::interval;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::StreamExt;
 
@@ -917,24 +921,65 @@ pub fn workbench_event_heartbeat_line(sent_at: &str) -> String {
     format!(r#"{{"type":"heartbeat","sentAt":"{sent_at}"}}"#) + "\n"
 }
 
+/// `/api/workbench/events` 可选 after 游标查询参数。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     bridge/Mobile 重连需要 afterOwnerInstanceId + afterSequence 做 catch-up 或显式 Gap。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase 查询字段；两者齐全且 owner 非空时构成 `BackendRuntimeCursor`。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchEventsQuery {
+    pub after_owner_instance_id: Option<String>,
+    pub after_sequence: Option<u64>,
+}
+
 /// 订阅本机 Workbench 远端事件流。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     其他局域网设备需要持续接收本机 terminal 输出、终端状态和 merge 进度，用于 remote shortcut UI；
+///     重连必须带 after 游标；lag/owner 变化/after 早于 ring 必须显式 Gap，禁止静默丢弃 Lagged；
 ///     同时每 15 秒发送 typed heartbeat，防止半开连接卡死。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 AppState broadcast channel 订阅事件，与 interval heartbeat 合并为 NDJSON stream。
-pub async fn workbench_events(State(state): State<AppState>) -> Response<Body> {
-    let receiver = state.workbench_remote_events.subscribe();
-    let event_stream = BroadcastStream::new(receiver).filter_map(|event| match event {
-        Ok(event) => serde_json::to_string(&event)
-            .ok()
-            .map(|line| Ok::<String, Infallible>(format!("{line}\n"))),
-        Err(error) => {
-            tracing::debug!("Workbench 远端事件流跳过消息: {error}");
-            None
+///     解析 afterOwnerInstanceId/afterSequence → `open_relay`；将 Event/Gap 编码为 NDJSON，
+///     与 interval heartbeat 合并为 stream。
+pub async fn workbench_events(
+    State(state): State<AppState>,
+    Query(query): Query<WorkbenchEventsQuery>,
+) -> Response<Body> {
+    let after = match (
+        query.after_owner_instance_id.as_deref(),
+        query.after_sequence,
+    ) {
+        (Some(owner), Some(seq)) if !owner.is_empty() => Some(BackendRuntimeCursor {
+            owner_instance_id: owner.to_string(),
+            sequence: seq,
+        }),
+        _ => None,
+    };
+    let relay = state.workbench_remote_events.open_relay(after.as_ref());
+    let relay = Arc::new(Mutex::new(relay));
+    let event_stream = stream::unfold(relay, |relay| async move {
+        let msg = {
+            let mut guard = relay.lock().await;
+            guard.recv().await
+        };
+        match msg {
+            Some(message) => match encode_workbench_remote_relay_ndjson(&message) {
+                Ok(line) => Some((Ok::<String, Infallible>(format!("{line}\n")), relay)),
+                Err(_) => {
+                    tracing::debug!("Workbench 远端事件编码失败，跳过本条（无 body）");
+                    Some((Ok::<String, Infallible>(String::new()), relay))
+                }
+            },
+            None => None,
         }
+    })
+    .filter(|item| match item {
+        Ok(line) => !line.is_empty(),
+        Err(_) => true,
     });
 
     // 首个 tick 在 interval 后触发，避免连接瞬间立刻发 heartbeat 掩盖业务帧。
