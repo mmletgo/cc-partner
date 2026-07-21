@@ -6,7 +6,9 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     定义可通过 broadcast/NDJSON 传输的事件 DTO；`WorkbenchRemoteEventBus` 为有界
-//!     owner+sequence 总线（ring catch-up + live + Gap，镜像 RuntimeEventBus）；
+//!     owner+sequence 总线（ring catch-up + live + Gap，镜像 RuntimeEventBus；
+//!     after_seq=0 且 ring 截断仍 Gap）；远端桥收到 Gap 后先 resync running terminal，
+//!     仅成功才推进 after_cursor（R28 H1）；L3 多机 cutover **NOT VERIFIED**。
 //!     提供本机事件发布 helper，并维护 sidecar 拥有的 `RemoteEventBridgeRegistry`
 //!     （CancellationToken、idle TTL、指数退避上限 60s、1 MiB 行/pending、8 KiB 错误前缀、
 //!     after 游标重连与 Gap fail-closed、shutdown_all 等待退出）。
@@ -293,11 +295,16 @@ impl WorkbenchRemoteEventBus {
     /// 打开 catch-up + live relay 会话。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     订阅方重连需要 after 回放；同 owner 游标早于 ring 或 owner 变化必须 Gap；
-    ///     禁止 silent Lagged drop。
+    ///     订阅方重连需要 after 回放；同 owner 游标与 ring 存在空洞或 owner 变化必须 Gap；
+    ///     after_seq=0 且 ring 已截断同样 Gap，禁止 silent partial replay；禁止 silent Lagged drop。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     先 subscribe live，再在锁内计算 gap/replay；live 路径跳过已回放 sequence。
+    ///     先 subscribe live，再在锁内计算 gap/replay；
+    ///     - after=None：brand-new 全量 ring 回放；
+    ///     - after=Some(同 owner, seq)（含 seq=0）：`oldest > after_seq.saturating_add(1)` 时 Gap；
+    ///       连续边界 after_seq+1==oldest 不 Gap；
+    ///     - owner 变化强制 Gap；
+    ///     live 路径跳过已回放 sequence。
     pub fn open_relay(&self, after: Option<&BackendRuntimeCursor>) -> WorkbenchRemoteEventRelay {
         let live_rx = self.tx.subscribe();
         let (pending, max_replayed) = {
@@ -324,7 +331,8 @@ impl WorkbenchRemoteEventBus {
                     latest,
                 });
                 max_replayed = latest;
-            } else if same_owner && after_seq > 0 && oldest > 0 && after_seq < oldest {
+            } else if same_owner && oldest > after_seq.saturating_add(1) {
+                // R28 H2：after_seq=0 且 oldest>1 也必须 Gap，禁止 silent partial replay。
                 pending.push(WorkbenchRemoteRelayMessage::Gap {
                     owner_instance_id: self.owner_instance_id.clone(),
                     oldest_available: oldest,
@@ -556,7 +564,7 @@ pub fn decode_remote_event(
 ///     超限必须停止 bridge 并清空 buffer，不能继续累积内存；诊断只映射 error class。
 ///
 /// Code Logic（这个枚举做什么）:
-///     ResourceLimit 表示行/pending 超 1 MiB；其余为网络/HTTP/取消/空闲。
+///     ResourceLimit 表示行/pending 超 1 MiB；StreamGap 携带 owner/latest 供成功 resync 后推进 after_cursor；其余为网络/HTTP/取消/空闲。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventStreamError {
     /// 行或 pending buffer 超过预算。
@@ -569,8 +577,12 @@ pub enum EventStreamError {
     Http { status: u16 },
     /// 网络/IO 失败（不含正文）。
     Network,
-    /// 远端流显式 Gap：序列不连续，必须 fail-closed 重连。
-    StreamGap,
+    /// 远端流显式 Gap：序列不连续；携带 owner/oldest/latest 供成功 resync 后推进 after_cursor（R28 H1）。
+    StreamGap {
+        owner_instance_id: String,
+        oldest_available: u64,
+        latest: u64,
+    },
 }
 
 impl EventStreamError {
@@ -586,7 +598,7 @@ impl EventStreamError {
             Self::IdleTimeout => "idle_timeout",
             Self::Http { .. } => "http_error",
             Self::Network => "network_error",
-            Self::StreamGap => "stream_gap",
+            Self::StreamGap { .. } => "stream_gap",
         }
     }
 }
@@ -599,7 +611,7 @@ impl std::fmt::Display for EventStreamError {
             Self::IdleTimeout => write!(f, "event stream idle timeout"),
             Self::Http { status } => write!(f, "event stream http {status}"),
             Self::Network => write!(f, "event stream network error"),
-            Self::StreamGap => write!(f, "event stream gap"),
+            Self::StreamGap { .. } => write!(f, "event stream gap"),
         }
     }
 }
@@ -1070,14 +1082,66 @@ async fn remote_event_loop(
                 runtime.set_error_class(Some(EventStreamError::IdleTimeout.error_class()));
                 return;
             }
-            Err(EventStreamError::StreamGap) => {
-                // Gap：保留 last committed after_cursor，以 after 重连；不把后续帧当连续 live。
-                runtime.set_error_class(Some(EventStreamError::StreamGap.error_class()));
-                let next = runtime.attempt.fetch_add(1, Ordering::SeqCst) + 1;
-                runtime.set_phase("backoff");
-                tracing::debug!(
-                    "Workbench 远端事件流 gap，将退避重连: class=stream_gap attempt={next}"
-                );
+            Err(EventStreamError::StreamGap {
+                owner_instance_id,
+                oldest_available,
+                latest,
+            }) => {
+                // R28 H1：Gap 后先权威 resync；仅成功才推进 after_cursor 到 gap.latest。
+                runtime.set_error_class(Some("stream_gap"));
+                runtime.set_phase("resyncing");
+                let recovery = after_cursor.clone();
+                match resync_remote_bridge_after_gap(
+                    &state,
+                    &device_id,
+                    &base_url,
+                    &project_ids,
+                    &cancel,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        after_cursor = after_cursor_after_gap_resync(
+                            recovery.as_ref(),
+                            &owner_instance_id,
+                            latest,
+                            true,
+                        );
+                        runtime.attempt.store(0, Ordering::SeqCst);
+                        runtime.set_error_class(None);
+                        runtime.set_phase("resynced");
+                        tracing::debug!(
+                            oldest_available,
+                            latest,
+                            "Workbench 远端事件流 gap resync 成功，推进 after_cursor"
+                        );
+                        // 成功后立即以新 cursor 重连，无需退避。
+                        continue;
+                    }
+                    Err(EventStreamError::Cancelled) => {
+                        runtime.set_phase("cancelled");
+                        return;
+                    }
+                    Err(err) => {
+                        // 失败不推进 cursor；error class 固定 stream_gap（不把 network 覆盖 gap 语义）。
+                        let _ = err;
+                        after_cursor = after_cursor_after_gap_resync(
+                            recovery.as_ref(),
+                            &owner_instance_id,
+                            latest,
+                            false,
+                        );
+                        runtime.set_error_class(Some("stream_gap"));
+                        let next = runtime.attempt.fetch_add(1, Ordering::SeqCst) + 1;
+                        runtime.set_phase("backoff");
+                        tracing::debug!(
+                            attempt = next,
+                            oldest_available,
+                            latest,
+                            "Workbench 远端事件流 gap resync 失败，保留 recovery cursor 退避重连: class=stream_gap"
+                        );
+                    }
+                }
             }
             Err(error) => {
                 let class = error.error_class();
@@ -1189,10 +1253,18 @@ async fn read_remote_event_stream(
                                 });
                             }
                         }
-                        WorkbenchRemoteStreamMessage::Gap { .. } => {
-                            // fail-closed：停止当前连接，迫使带 after 重连，不静默续读 live。
+                        WorkbenchRemoteStreamMessage::Gap {
+                            owner_instance_id,
+                            oldest_available,
+                            latest,
+                        } => {
+                            // fail-closed：停止当前连接；携带 gap 游标供成功 resync 后推进。
                             buffer.clear();
-                            return Err(EventStreamError::StreamGap);
+                            return Err(EventStreamError::StreamGap {
+                                owner_instance_id,
+                                oldest_available,
+                                latest,
+                            });
                         }
                     }
                 }
@@ -1435,6 +1507,94 @@ fn map_remote_event_for_device(
             WorkbenchRemoteEvent::AgentRuntime(payload)
         }
     }
+}
+
+
+/// Business Logic（为什么需要这个函数）:
+///     Gap 后 bridge 必须在权威 resync 成功时才推进 after_cursor，失败时保留 recovery，
+///     禁止带着旧 after 永久 Gap 循环（R28 H1）。
+///
+/// Code Logic（这个函数做什么）:
+///     resync_ok → Some(owner=gap_owner, sequence=gap_latest)；
+///     失败 → recovery.cloned()（可能为 None）。
+fn after_cursor_after_gap_resync(
+    recovery: Option<&BackendRuntimeCursor>,
+    gap_owner: &str,
+    gap_latest: u64,
+    resync_ok: bool,
+) -> Option<BackendRuntimeCursor> {
+    if resync_ok {
+        Some(BackendRuntimeCursor {
+            owner_instance_id: gap_owner.to_string(),
+            sequence: gap_latest,
+        })
+    } else {
+        recovery.cloned()
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     远端 ring 截断/owner 重启后 live 事件缺口必须用 sessions.list + sessions.replay
+///     权威 cutover，再允许 after_cursor 前进；否则 GUI 终端永久停更。
+///
+/// Code Logic（这个函数做什么）:
+///     遍历 bridge project_ids 映射的远端 project：list running sessions → replay →
+///     映射 remote entity id 与 composite authority → emit workbench:terminal-resync；
+///     取消 → Cancelled；list/replay 失败 → Network（不推进 cursor）；零会话仍 Ok。
+async fn resync_remote_bridge_after_gap(
+    state: &AppState,
+    device_id: &str,
+    base_url: &str,
+    project_ids: &Arc<RwLock<HashMap<String, String>>>,
+    cancel: &CancellationToken,
+) -> Result<(), EventStreamError> {
+    if cancel.is_cancelled() {
+        return Err(EventStreamError::Cancelled);
+    }
+    let project_map = project_ids
+        .read()
+        .expect("remote event bridge project 映射读锁中毒")
+        .clone();
+    let local_bus_owner = state.config_runtime.owner_instance_id().to_string();
+    let client = crate::workbench::remote_client::RemoteWorkbenchClient::new()
+        .with_expected_device_id(device_id);
+    for (inner_project_id, _local_shortcut_id) in project_map {
+        if cancel.is_cancelled() {
+            return Err(EventStreamError::Cancelled);
+        }
+        let sessions = client
+            .list_sessions(base_url, Some(inner_project_id.as_str()))
+            .await
+            .map_err(|_| EventStreamError::Network)?;
+        for session in sessions {
+            if cancel.is_cancelled() {
+                return Err(EventStreamError::Cancelled);
+            }
+            let status = session.status.trim();
+            if !status.is_empty() && !status.eq_ignore_ascii_case("running") {
+                continue;
+            }
+            let mut replay = client
+                .replay(base_url, &session.id)
+                .await
+                .map_err(|_| EventStreamError::Network)?;
+            let remote_session_id = remote_entity_id(device_id, &session.id);
+            replay.session_id = remote_session_id.clone();
+            let remote_owner = replay.owner_instance_id.clone();
+            replay.owner_instance_id = Some(
+                crate::workbench::terminal_authority::terminal_stream_authority(
+                    &remote_session_id,
+                    &local_bus_owner,
+                    remote_owner.as_deref(),
+                ),
+            );
+            state.emit_event(
+                crate::backend::ui::WORKBENCH_TERMINAL_RESYNC_EVENT,
+                replay,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1980,4 +2140,117 @@ mod tests {
         assert_eq!(value["sequence"], 4);
         assert!(value.get("payload").is_some());
     }
+
+    /// Business Logic（R28 H2: 为什么需要这个测试）:
+    ///     after sequence=0 在 ring 截断后必须 Gap，禁止 silent partial replay。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     ring=2 publish 1..4 → after=(owner,0) → Gap oldest=3 latest=4。
+    #[test]
+    fn open_relay_after_sequence_zero_with_truncated_ring_emits_gap() {
+        let bus = WorkbenchRemoteEventBus::with_capacity("owner-a", 2, 8);
+        bus.publish(sample_status_event(1));
+        bus.publish(sample_status_event(2));
+        bus.publish(sample_status_event(3));
+        bus.publish(sample_status_event(4));
+        let after_zero = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 0,
+        };
+        let mut relay = bus.open_relay(Some(&after_zero));
+        match relay.try_recv() {
+            Some(WorkbenchRemoteRelayMessage::Gap {
+                oldest_available,
+                latest,
+                ..
+            }) => {
+                assert_eq!(oldest_available, 3);
+                assert_eq!(latest, 4);
+            }
+            other => panic!("expected gap for after_seq=0 truncated ring, got {other:?}"),
+        }
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// Business Logic（R28 H2: 为什么需要这个测试）:
+    ///     连续边界 after_seq+1 == oldest 不得误报 Gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     after=2、ring 含 3,4 → Event 3 与 4，无 Gap。
+    #[test]
+    fn open_relay_continuous_boundary_does_not_gap() {
+        let bus = WorkbenchRemoteEventBus::with_capacity("owner-a", 2, 8);
+        bus.publish(sample_status_event(1));
+        bus.publish(sample_status_event(2));
+        bus.publish(sample_status_event(3));
+        bus.publish(sample_status_event(4));
+        let after = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 2,
+        };
+        let mut relay = bus.open_relay(Some(&after));
+        match relay.try_recv() {
+            Some(WorkbenchRemoteRelayMessage::Event { sequence, .. }) => assert_eq!(sequence, 3),
+            other => panic!("expected event 3, got {other:?}"),
+        }
+        match relay.try_recv() {
+            Some(WorkbenchRemoteRelayMessage::Event { sequence, .. }) => assert_eq!(sequence, 4),
+            other => panic!("expected event 4, got {other:?}"),
+        }
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// Business Logic（R28 H1: 为什么需要这个测试）:
+    ///     Gap resync 成功才推进 after_cursor；失败保留 recovery。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     成功 → cursor=gap latest（含 gap_latest==0）；失败 → Some(recovery) 或 None。
+    #[test]
+    fn after_cursor_after_gap_resync_advances_only_on_success() {
+        let recovery = BackendRuntimeCursor {
+            owner_instance_id: "owner-old".into(),
+            sequence: 7,
+        };
+        let ok = after_cursor_after_gap_resync(Some(&recovery), "owner-new", 42, true)
+            .expect("advanced");
+        assert_eq!(ok.owner_instance_id, "owner-new");
+        assert_eq!(ok.sequence, 42);
+        // gap_latest==0 成功时仍推进（空 ring 的 latest=0 也是合法新游标）。
+        let zero = after_cursor_after_gap_resync(Some(&recovery), "owner-new", 0, true)
+            .expect("advanced zero");
+        assert_eq!(zero.sequence, 0);
+        assert_eq!(zero.owner_instance_id, "owner-new");
+        let keep = after_cursor_after_gap_resync(Some(&recovery), "owner-new", 42, false)
+            .expect("recovery");
+        assert_eq!(keep, recovery);
+        assert!(after_cursor_after_gap_resync(None, "owner-new", 42, false).is_none());
+    }
+
+    /// Business Logic（R28 H1: 为什么需要这个测试）:
+    ///     StreamGap 必须携带 owner/oldest/latest 字段供 resync 决策，error_class 仍为 stream_gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 StreamGap 变体，断言字段与 error_class。
+    #[test]
+    fn stream_gap_error_carries_fields_and_class() {
+        let err = EventStreamError::StreamGap {
+            owner_instance_id: "owner-a".into(),
+            oldest_available: 3,
+            latest: 9,
+        };
+        match &err {
+            EventStreamError::StreamGap {
+                owner_instance_id,
+                oldest_available,
+                latest,
+            } => {
+                assert_eq!(owner_instance_id, "owner-a");
+                assert_eq!(*oldest_available, 3);
+                assert_eq!(*latest, 9);
+            }
+            other => panic!("expected StreamGap, got {other:?}"),
+        }
+        assert_eq!(err.error_class(), "stream_gap");
+    }
+
 }

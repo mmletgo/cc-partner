@@ -6,10 +6,11 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 `RuntimeEventBus`：有界 broadcast + 有界 replay ring；`BackendRuntimeCursor` 与
-//!     `RuntimeRelayMessage::{Event,Gap}`；`open_relay` 在 after 不同 owner 或同 owner 游标早于 ring
-//!     时强制 Gap（不回放 partial ring）；`GuiEventRelayState` 在 owner 变化时重置、同 owner 去重，
-//!     并在 Gap/Lag 时要求 terminal replay + runtime snapshot resync；incomplete Gap 保留 pre-gap
-//!     recovery cursor，禁止以 `cursor=None` 重连成 brand-new consumer。
+//!     `RuntimeRelayMessage::{Event,Gap}`；`open_relay` 在 after 不同 owner、或同 owner 且
+//!     `oldest > after_seq+1`（含 after_seq=0 的 truncated ring）时强制 Gap（不回放 partial ring）；
+//!     连续边界 `oldest == after_seq+1` 不 Gap；`GuiEventRelayState` 在 owner 变化时重置、同 owner
+//!     去重，并在 Gap/Lag 时要求 terminal replay + runtime snapshot resync；incomplete Gap 保留
+//!     pre-gap recovery cursor，禁止以 `cursor=None` 重连成 brand-new consumer。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -243,15 +244,19 @@ impl RuntimeEventBus {
     /// 打开一个 catch-up + live relay 会话。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     GUI 重连时需要 afterSequence 回放；同 owner 游标早于 ring 必须 Gap；
+    ///     GUI 重连时需要 afterSequence 回放；同 owner 游标与 ring 之间存在空洞必须 Gap；
+    ///     **after_seq=0 且 ring 已截断（oldest>1）同样必须 Gap**，禁止把 truncated ring 当
+    ///     brand-new 全量回放而静默丢失 pre-capacity 事件；
     ///     **owner 变化（after 携带不同 owner_instance_id）必须强制 Gap**，禁止只回放
     ///     新 owner 当前 ring 的尾部——新 owner 若在 GUI 重连前已发布超过 ring 容量的
     ///     事件，pre-capacity 事件会静默丢失，GUI 会误 attach 低 sequence 而不 resync。
     ///
     /// Code Logic（这个函数做什么）:
     ///     先 subscribe live，再在锁内计算 gap/replay，避免丢失窗口内新事件；
-    ///     - after=None（brand-new consumer）：回放整个 ring 后接 live；
-    ///     - after 同 owner 且 after_seq < oldest：仅 pending Gap，max_replayed=latest；
+    ///     - after=None（brand-new consumer）：same_owner=false、after_seq=0，回放整个 ring 后接 live；
+    ///     - after=Some(同 owner, seq)（含 seq=0）：当 `oldest > after_seq.saturating_add(1)` 时仅 pending Gap；
+    ///       连续边界（after_seq+1 == oldest，如 after=0/oldest=1、after=2/oldest=3）不 Gap；
+    ///       空 ring（oldest=0）与 after_seq=0 时 `0 > 1` 为假，不 Gap；
     ///     - after 不同 owner：无论 ring 是否为空/是否截断，仅 pending Gap，强制 GUI resync；
     ///     - 其它同 owner：从 after_seq 之后回放 ring 内 Event；
     ///     live 路径跳过已回放 sequence。
@@ -285,8 +290,9 @@ impl RuntimeEventBus {
                     latest,
                 });
                 max_replayed = latest;
-            } else if same_owner && after_seq > 0 && oldest > 0 && after_seq < oldest {
-                // 同 owner：after_seq 严格早于 ring 最旧条 → Gap，不回放 partial ring。
+            } else if same_owner && oldest > after_seq.saturating_add(1) {
+                // R28 H2：同 owner 且 ring 最旧条严格晚于 after_seq+1 → Gap。
+                // 覆盖 after_seq=0 且 oldest>1 的截断场景；连续边界 oldest==after_seq+1 不 Gap。
                 pending.push(RuntimeRelayMessage::Gap {
                     owner_instance_id: self.owner_instance_id.clone(),
                     oldest_available: oldest,
@@ -715,19 +721,61 @@ mod tests {
         assert!(relay.try_recv().is_none());
     }
 
+    /// after_seq 严格早于 ring 且存在空洞（oldest > after_seq+1）必须 Gap。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     同 owner 游标落后超过 1 个 sequence 时 ring 无法补齐空洞，必须显式 Gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     capacity=2 发布 1..4（oldest=3）；after=1 → 3 > 2 → Gap{oldest=3,latest=4}，无 Event。
+    ///     注意 after=1/oldest=2 是连续边界，不再走本用例。
     #[test]
     fn cursor_before_ring_emits_gap() {
         let bus = RuntimeEventBus::with_capacity("owner-a", 2, 8);
         let _ = bus.publish("e", json!(1));
         let _ = bus.publish("e", json!(2));
-        let _ = bus.publish("e", json!(3)); // ring keeps 2,3
+        let _ = bus.publish("e", json!(3));
+        let _ = bus.publish("e", json!(4)); // ring keeps 3,4; oldest=3
         let stale = BackendRuntimeCursor {
             owner_instance_id: "owner-a".into(),
-            sequence: 1,
+            sequence: 1, // oldest 3 > 1+1 → gap
         };
         let mut relay = bus.open_relay(Some(&stale));
         let msg = relay.try_recv().expect("gap");
         match msg {
+            RuntimeRelayMessage::Gap {
+                oldest_available,
+                latest,
+                ..
+            } => {
+                assert_eq!(oldest_available, 3);
+                assert_eq!(latest, 4);
+            }
+            other => panic!("expected gap, got {other:?}"),
+        }
+        // Gap 后不得再交付 partial ring Event。
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// after_seq=0 但 ring 已截断（oldest>1）必须 Gap，禁止 partial ring 静默丢失。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     同 owner 的 after=0 不是 brand-new；ring 已截断时仍需 Gap 触发 resync。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     capacity=2 发布 1..3（oldest=2）；after_seq=0 首条 Gap{oldest=2,latest=3}，无 Event。
+    #[test]
+    fn open_relay_after_zero_with_truncated_ring_emits_gap() {
+        let bus = RuntimeEventBus::with_capacity("owner-a", 2, 8);
+        let _ = bus.publish("e", json!(1));
+        let _ = bus.publish("e", json!(2));
+        let _ = bus.publish("e", json!(3)); // ring keeps 2,3; oldest=2
+        let after_zero = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 0,
+        };
+        let mut relay = bus.open_relay(Some(&after_zero));
+        match relay.try_recv().expect("gap") {
             RuntimeRelayMessage::Gap {
                 oldest_available,
                 latest,
@@ -738,7 +786,58 @@ mod tests {
             }
             other => panic!("expected gap, got {other:?}"),
         }
-        // Gap 后不得再交付 partial ring Event。
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// after_seq+1 == oldest 为连续边界，不得 Gap。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     after=0 且 oldest=1 是连续边界，应回放 event 1 而非假阳性 Gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     capacity 足够，publish 1 后 after_seq=0 → Event{sequence:1}，无 Gap。
+    #[test]
+    fn open_relay_continuous_boundary_after_zero_oldest_one_no_gap() {
+        let bus = RuntimeEventBus::with_capacity("owner-a", 8, 8);
+        let _ = bus.publish("e", json!(1));
+        let after_zero = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 0,
+        };
+        let mut relay = bus.open_relay(Some(&after_zero));
+        match relay.try_recv().expect("event 1") {
+            RuntimeRelayMessage::Event { sequence: 1, .. } => {}
+            other => panic!("expected event 1, got {other:?}"),
+        }
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// after_seq+1 == oldest 连续边界（非 0）不得 Gap，应回放 ring 中更新事件。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     after=1 且 oldest=2 是连续边界，禁止误报 Gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     capacity=2 发布 1..3（oldest=2,latest=3）；after=1 → Event 2 与 3，无 Gap。
+    #[test]
+    fn open_relay_continuous_boundary_after_seq_plus_one_equals_oldest_no_gap() {
+        let bus = RuntimeEventBus::with_capacity("owner-a", 2, 8);
+        let _ = bus.publish("e", json!(1));
+        let _ = bus.publish("e", json!(2));
+        let _ = bus.publish("e", json!(3)); // oldest=2, latest=3
+        let after = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 1, // continuous: oldest 2 == after+1
+        };
+        let mut relay = bus.open_relay(Some(&after));
+        match relay.try_recv().expect("event 2") {
+            RuntimeRelayMessage::Event { sequence: 2, .. } => {}
+            other => panic!("expected event 2, got {other:?}"),
+        }
+        match relay.try_recv().expect("event 3") {
+            RuntimeRelayMessage::Event { sequence: 3, .. } => {}
+            other => panic!("expected event 3, got {other:?}"),
+        }
         assert!(relay.try_recv().is_none());
     }
 
@@ -913,4 +1012,64 @@ mod tests {
         assert!(!state.recovery_pending());
         assert_eq!(state.cursor().unwrap().sequence, 20);
     }
+    /// Business Logic（R28 H2: 为什么需要这个测试）:
+    ///     after sequence=0 在 ring 截断后必须 Gap，禁止 silent partial replay。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     ring=2 publish 1..4 → after=(owner,0) → Gap oldest=3 latest=4。
+    #[test]
+    fn open_relay_after_sequence_zero_with_truncated_ring_emits_gap() {
+        let bus = RuntimeEventBus::with_capacity("owner-a", 2, 8);
+        bus.publish("e", json!(1));
+        bus.publish("e", json!(2));
+        bus.publish("e", json!(3));
+        bus.publish("e", json!(4));
+        let after_zero = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 0,
+        };
+        let mut relay = bus.open_relay(Some(&after_zero));
+        match relay.try_recv() {
+            Some(RuntimeRelayMessage::Gap {
+                oldest_available,
+                latest,
+                ..
+            }) => {
+                assert_eq!(oldest_available, 3);
+                assert_eq!(latest, 4);
+            }
+            other => panic!("expected gap for after_seq=0 truncated ring, got {other:?}"),
+        }
+        assert!(relay.try_recv().is_none());
+    }
+
+    /// Business Logic（R28 H2: 为什么需要这个测试）:
+    ///     连续边界 after_seq+1 == oldest 不得误报 Gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     after=2、ring 含 3,4 → Event 3/4，无 Gap。
+    #[test]
+    fn open_relay_continuous_boundary_does_not_gap() {
+        let bus = RuntimeEventBus::with_capacity("owner-a", 2, 8);
+        bus.publish("e", json!(1));
+        bus.publish("e", json!(2));
+        bus.publish("e", json!(3));
+        bus.publish("e", json!(4));
+        let after = BackendRuntimeCursor {
+            owner_instance_id: "owner-a".into(),
+            sequence: 2,
+        };
+        let mut relay = bus.open_relay(Some(&after));
+        match relay.try_recv() {
+            Some(RuntimeRelayMessage::Event { sequence, .. }) => assert_eq!(sequence, 3),
+            other => panic!("expected event 3, got {other:?}"),
+        }
+        match relay.try_recv() {
+            Some(RuntimeRelayMessage::Event { sequence, .. }) => assert_eq!(sequence, 4),
+            other => panic!("expected event 4, got {other:?}"),
+        }
+        assert!(relay.try_recv().is_none());
+    }
+
+
 }
