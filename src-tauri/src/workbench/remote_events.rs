@@ -705,9 +705,10 @@ impl BridgeRuntimeState {
             return Duration::ZERO;
         }
         let phase = self.phase.lock().expect("bridge phase 锁中毒").clone();
+        // R31：backoff 仍在重连恢复中，不得按 idle TTL 退出（max backoff=60s 时 last_used 会已过期）。
         if matches!(
             phase.as_str(),
-            "connecting" | "streaming" | "resyncing" | "resynced"
+            "connecting" | "streaming" | "resyncing" | "resynced" | "backoff"
         ) {
             return Duration::ZERO;
         }
@@ -976,6 +977,25 @@ impl RemoteEventBridgeRegistry {
             return false;
         };
         task.runtime.retain_subscription();
+        true
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     ensure_bridge 后若尚无查看者 lease，应建立至少 1 个 watch subscription，
+    ///     避免 ensure 频繁调用导致 refcount 无限增长，同时覆盖长时间观看路径（R31）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁：task 存在且 subscribers==0 时 retain 一次；已有订阅则仅 touch 返回 true。
+    pub fn ensure_watch_subscription(&self, device_id: &str) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        if task.runtime.subscribers.load(Ordering::SeqCst) == 0 {
+            task.runtime.retain_subscription();
+        } else {
+            task.runtime.touch();
+        }
         true
     }
 
@@ -2414,18 +2434,30 @@ mod tests {
         assert_eq!(err.error_class(), "stream_gap");
     }
 
-    /// Business Logic（R30 M3: 为什么需要这个测试）:
+    /// Business Logic（R31: 为什么需要这个测试）:
+    ///     backoff 重连期间不得因 last_used 过期被 idle TTL 杀掉 bridge。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     phase=backoff、subscribers=0 时 idle_for 为 ZERO。
+    #[test]
+    fn backoff_phase_is_not_idle() {
+        let runtime = BridgeRuntimeState::new();
+        runtime.set_phase("backoff");
+        assert_eq!(runtime.idle_for(), Duration::ZERO);
+    }
+
+    /// Business Logic（R30 M3 / R31: 为什么需要这个测试）:
     ///     活跃查看者持有订阅时 idle TTL 不得把 bridge 视为可回收；
     ///     活跃 phase（streaming）同样不得 idle。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     phase 置 backoff（非活跃）+ last_used 过期 → idle；
+    ///     phase 置 idle_exit（非活跃）+ last_used 过期 → idle；
     ///     retain 后 ZERO；release + 过期再 idle；phase=streaming 时 ZERO。
     #[test]
     fn subscription_lease_keeps_bridge_from_idle() {
         let runtime = BridgeRuntimeState::new();
-        // 新 runtime 默认 phase=connecting，属于活跃相位；测纯订阅语义时先切到 backoff。
-        runtime.set_phase("backoff");
+        // 测纯订阅语义：使用非活跃 phase（backoff 在 R31 已是活跃）。
+        runtime.set_phase("idle_exit");
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
         assert!(
@@ -2444,7 +2476,7 @@ mod tests {
         assert_eq!(runtime.idle_for(), Duration::ZERO);
 
         runtime.release_subscription();
-        runtime.set_phase("backoff");
+        runtime.set_phase("idle_exit");
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
         assert!(runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS));
@@ -2468,7 +2500,8 @@ mod tests {
     #[test]
     fn subscription_refcount_requires_matching_release() {
         let runtime = BridgeRuntimeState::new();
-        runtime.set_phase("backoff");
+        // 非活跃 phase：backoff 在 R31 已是活跃，用 idle_exit 测纯 refcount。
+        runtime.set_phase("idle_exit");
         runtime.retain_subscription();
         runtime.retain_subscription();
         *runtime.last_used.lock().expect("last_used") =
@@ -2476,7 +2509,7 @@ mod tests {
         runtime.release_subscription();
         assert_eq!(runtime.idle_for(), Duration::ZERO);
         runtime.release_subscription();
-        runtime.set_phase("backoff");
+        runtime.set_phase("idle_exit");
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
         assert!(runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS));

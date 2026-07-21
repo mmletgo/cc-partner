@@ -1270,6 +1270,10 @@ pub(crate) fn ensure_remote_event_bridge_for_project_mapping(
         }),
         state.clone(),
     );
+    // R31：ensure 后建立至少 1 个 watch subscription，阻止 backoff/idle 期间误回收。
+    let _ = state
+        .workbench_remote_event_bridges
+        .ensure_watch_subscription(device_id);
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1291,6 +1295,10 @@ pub(crate) fn ensure_remote_event_bridge_for_device(
         None,
         state.clone(),
     );
+    // R31：device-only ensure 同样建立 watch subscription。
+    let _ = state
+        .workbench_remote_event_bridges
+        .ensure_watch_subscription(device_id);
 }
 
 /// Business Logic（为什么需要这个函数）:

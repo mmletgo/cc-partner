@@ -801,7 +801,15 @@ pub(crate) async fn close_workbench_pane_for_state(
             .with_expected_device_id(&parsed.device_id)
             .close_pane(&base_url, &inner_session_id)
             .await?;
-        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        if closed_window {
+            // 关闭整个 window 等价于关闭 tab：释放一次 watch subscription。
+            let _ = state
+                .workbench_remote_event_bridges
+                .release_subscription(&parsed.device_id);
+        } else {
+            // 仍有 pane：保持 bridge watch。
+            ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        }
         return Ok(
             serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": closed_window }),
         );
@@ -908,7 +916,10 @@ pub(crate) async fn close_workbench_session_for_state(
             .with_expected_device_id(&parsed.device_id)
             .close_session(&base_url, &inner_session_id)
             .await?;
-        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        // R31：关闭远端 terminal window 后释放一次 watch subscription。
+        let _ = state
+            .workbench_remote_event_bridges
+            .release_subscription(&parsed.device_id);
         return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
     }
     local_close_workbench_session(state, session_id).await
