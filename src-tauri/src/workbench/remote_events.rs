@@ -1001,13 +1001,15 @@ impl BridgeRuntimeState {
     ///     - note 在 previous 后、insert 前 → insert 覆盖掉新 session 项目归属
     ///     R44：调用方（尤其 Gap resync）需区分 stale（None）与 committed（Some），
     ///     仅 committed 才可对 previous−listed 投影 disconnected。
+    ///     R45：Gap/list 发现的 running session 必须同步 retain session watch lease；
+    ///     否则 previous−running 被 release 后 subscribers 可归零，60s idle 杀掉仍在跑的新会话 bridge。
     ///
     /// Code Logic（这个函数做什么）:
     ///     在同一 project_watch 临界区内：
     ///     expected_epoch=Some 且与当前不一致 → union running 到 map，**不 release**，不 bump 成功
-    ///     full-replace 路径 epoch，返回 `None`；
+    ///     full-replace 路径 epoch，锁外仍 retain 全部 running ids，返回 `None`；
     ///     匹配或 expected_epoch=None → 计算 to_release=previous−running，full replace + bump epoch，
-    ///     再在锁外对 to_release 调 release_watch_key；返回 `Some(released)`。
+    ///     锁外先 retain 全部 running，再 release to_release；返回 `Some(released)`。
     fn reconcile_project_running_sessions_if_epoch(
         &self,
         project_local_id: &str,
@@ -1016,8 +1018,9 @@ impl BridgeRuntimeState {
     ) -> Option<usize> {
         let running_set: HashSet<String> = running_session_ids.iter().cloned().collect();
         // 临界区：epoch compare + previous snapshot + set commit + epoch bump；
-        // release 仅用临界区内确定的差集，在锁外执行（避免 watch_keys 与 project_watch 交叉死锁）。
-        let to_release: Vec<String> = {
+        // retain/release 在锁外执行（避免 watch_keys 与 project_watch 交叉死锁）。
+        // R45：无论 stale 还是 commit，listed running 都必须 retain，避免 project map 有会话却无 lease。
+        let to_release: Option<Vec<String>> = {
             let mut watch = self
                 .project_watch
                 .lock()
@@ -1031,7 +1034,12 @@ impl BridgeRuntimeState {
                             .running_sessions
                             .entry(project_local_id.to_string())
                             .or_default()
-                            .extend(running_set);
+                            .extend(running_set.iter().cloned());
+                    }
+                    // 锁外 retain running 后返回 None。
+                    drop(watch);
+                    for session_id in &running_set {
+                        let _ = self.retain_watch_key(session_id);
                     }
                     return None;
                 }
@@ -1048,12 +1056,16 @@ impl BridgeRuntimeState {
             // 原子 full replace + bump，使并发 note 无法插在 previous 与 commit 之间。
             watch
                 .running_sessions
-                .insert(project_local_id.to_string(), running_set);
+                .insert(project_local_id.to_string(), running_set.clone());
             watch.bump_epoch(project_local_id);
-            to_release
+            Some(to_release)
         };
+        // R45：先 retain running，再 release 差集，保证 A→B 替换时 B 不会短暂/永久丢 lease。
+        for session_id in &running_set {
+            let _ = self.retain_watch_key(session_id);
+        }
         let mut released = 0usize;
-        for session_id in to_release {
+        for session_id in to_release.expect("commit path always Some") {
             if self.release_watch_key(&session_id) {
                 released += 1;
             }
@@ -2439,12 +2451,15 @@ fn gap_resync_missing_ids_for_disconnect(
 ///     project-scoped reconcile；lifecycle/watch 完成前不得 Ok（调用方才推进 cursor）。
 ///     R44：list **前**原子捕获 epoch+previous；`reconcile_if_epoch`；仅 committed 时
 ///     previous−listed → disconnected；stale 只 union、不 release、不假 disconnected。
+///     R45：reconcile 路径必须 retain 所有 listed running session watch lease，
+///     防止 previous−running release 后 subscribers 归零、idle 杀掉仍 running 的新会话 bridge。
 ///
 /// Code Logic（这个函数做什么）:
 ///     遍历 bridge project_ids 映射的远端 project：local_shortcut 非空时 list 前
 ///     `project_watch_epoch_and_running` → list all sessions →
 ///     running 则 replay+resync；非 running 则 emit TerminalStatus；
-///     每项目 `reconcile_session_watches_for_project_if_epoch(..., list_epoch)`；
+///     每项目 `reconcile_session_watches_for_project_if_epoch(..., list_epoch)`
+///     （内部 retain running + 仅 committed 时 release previous−running）；
 ///     仅 Some(_) 时对 previous−listed 投影 disconnected；
 ///     取消 → Cancelled；list/replay 失败 → Network（不推进 cursor）；零会话仍 Ok。
 async fn resync_remote_bridge_after_gap(
@@ -3882,6 +3897,95 @@ mod tests {
             gap_resync_missing_ids_for_disconnect(&previous, &previous, true).is_empty(),
             "no missing when listed covers previous"
         );
+    }
+
+    /// Business Logic（R45: 为什么需要这个测试）:
+    ///     Gap resync 发现 running={B} 且 previous={A} 时，reconcile commit 会 release A；
+    ///     若不同时 retain B，subscribers 归零 → idle 回收 bridge，B 的 live 永久冻结。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     seed A watch + project map → reconcile running=[B] →
+    ///     A 被 release、B 在 watch_keys、subscribers>0、idle 不因 last_used 过期而触发。
+    #[test]
+    fn r45_gap_resync_must_retain_running_session_watches_on_commit() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:a"));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:a".into()]),
+            Some(0)
+        );
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+
+        // Gap list 仅见 B（尚未有 B 的 watch lease）。
+        let released = runtime.reconcile_project_running_sessions(
+            "project-a",
+            &["remote:dev:b".into()],
+        );
+        assert_eq!(released, Some(1), "A must be released as previous−running");
+        let keys = runtime.clone_watch_keys();
+        assert!(
+            !keys.contains("remote:dev:a"),
+            "A must leave watch_keys after commit"
+        );
+        assert!(
+            keys.contains("remote:dev:b"),
+            "B must be retained on Gap reconcile commit (R45)"
+        );
+        assert_eq!(
+            runtime.subscribers.load(Ordering::SeqCst),
+            1,
+            "subscribers must stay >0 so bridge does not idle while B is running"
+        );
+        let map = runtime.clone_project_running_sessions();
+        let project_a = map.get("project-a").expect("project-a");
+        assert!(project_a.contains("remote:dev:b"));
+        assert!(!project_a.contains("remote:dev:a"));
+
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        assert_eq!(
+            runtime.idle_for(),
+            Duration::ZERO,
+            "retained running lease must keep bridge non-idle"
+        );
+    }
+
+    /// Business Logic（R45: 为什么需要这个测试）:
+    ///     stale Gap list 不得 release previous，但仍必须 retain 新发现的 running ids，
+    ///     避免 list 已见到 B 却只写入 project map、永不建 session lease。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     seed A → capture epoch → note C（bump）→ reconcile_if_epoch(old, [B]) → None；
+    ///     A/C 仍在 watch；B 也被 retain。
+    #[test]
+    fn r45_gap_resync_stale_still_retains_listed_running_watches() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:a"));
+        assert_eq!(
+            runtime.reconcile_project_running_sessions("project-a", &["remote:dev:a".into()]),
+            Some(0)
+        );
+        let list_epoch = runtime.project_watch_epoch("project-a");
+        assert!(runtime.retain_watch_key("remote:dev:c"));
+        runtime.note_project_running_session("project-a", "remote:dev:c");
+        assert!(runtime.project_watch_epoch("project-a") > list_epoch);
+
+        assert_eq!(
+            runtime.reconcile_project_running_sessions_if_epoch(
+                "project-a",
+                &["remote:dev:b".into()],
+                Some(list_epoch),
+            ),
+            None
+        );
+        let keys = runtime.clone_watch_keys();
+        assert!(keys.contains("remote:dev:a"), "stale must not release previous A");
+        assert!(keys.contains("remote:dev:c"), "stale must not release noted C");
+        assert!(
+            keys.contains("remote:dev:b"),
+            "stale path must still retain listed running B (R45)"
+        );
+        assert!(runtime.subscribers.load(Ordering::SeqCst) >= 3);
     }
 
     /// Business Logic（R38 M2: 为什么需要这个测试）:
