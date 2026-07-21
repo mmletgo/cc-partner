@@ -768,18 +768,21 @@ impl BridgeRuntimeState {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     ensure_bridge / 订阅持有期间调用，表示仍有使用方，应刷新 idle TTL。
+    ///     ensure_bridge / retain/release watch 等**外部需求**路径调用，刷新 idle TTL 起点。
+    ///     R41 M3：仅 demand 可 touch；heartbeat/入站网络流量不得刷新该时钟，
+    ///     否则零订阅 + peer 在线时 15s heartbeat 会永久挡 60s idle 回收。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     写 last_used = Instant::now()。
+    ///     写 last_used = Instant::now()（demand last_used）。
     fn touch(&self) {
         *self.last_used.lock().expect("bridge last_used 锁中毒") = Instant::now();
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     空闲回收依赖 last_used 流逝时间；有订阅者时不得视为 idle（R30 M3）。
+    ///     空闲回收依赖 demand last_used 流逝时间；有订阅者时不得视为 idle（R30 M3）。
     ///     R32 M2：connecting/streaming/backoff 仅在 subscribers>0 时非 idle；
     ///     零订阅者按 last_used TTL 计时，使最后一 tab 关闭后 bridge 可 idle 回收。
+    ///     R41 M3：零订阅时 idle 只看 demand touch（ensure/retain/release），忽略网络活动。
     ///
     /// Code Logic（这个函数做什么）:
     ///     subscribers>0 → ZERO（任意 phase）；
@@ -788,11 +791,28 @@ impl BridgeRuntimeState {
         if self.subscribers.load(Ordering::SeqCst) > 0 {
             return Duration::ZERO;
         }
-        // R32 M2：零订阅者一律走 last_used TTL；最后 close 后可 idle 回收 stale bridge。
+        // R32 M2 / R41 M3：零订阅者一律走 demand last_used TTL。
         self.last_used
             .lock()
             .expect("bridge last_used 锁中毒")
             .elapsed()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     create 成功后若只 ensure_session_watch 而不登记 project_running_sessions，
+    ///     用户在首次 list 前 remove project 时 clear_project_running_sessions 找不到 key，
+    ///     watch 会永久占 subscribers（R41 M2）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     将 session_id 幂等插入 project_running_sessions[project_local_id]；不 touch、不改 watch_keys。
+    fn note_project_running_session(&self, project_local_id: &str, session_id: &str) {
+        let mut map = self
+            .project_running_sessions
+            .lock()
+            .expect("bridge project_running_sessions 锁中毒");
+        map.entry(project_local_id.to_string())
+            .or_default()
+            .insert(session_id.to_string());
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -1216,6 +1236,62 @@ impl RemoteEventBridgeRegistry {
         };
         task.runtime.retain_watch_key(session_id);
         true
+    }
+
+    /// 为 create 路径建立 project-scoped session watch（R41 M2）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote create 成功后若只 ensure_session_watch，session 不进 project_running_sessions；
+    ///     用户在首次 list 前 remove shortcut 时 clear_project_running_sessions 找不到该 key，
+    ///     running watch 会长期占 subscribers 并向已删项目注入事件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 device task：retain session watch key，并 note_project_running_session；
+    ///     无 task 时 no-op 返回 false。
+    pub fn ensure_session_watch_for_project(
+        &self,
+        device_id: &str,
+        project_local_id: &str,
+        session_id: &str,
+    ) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        task.runtime.retain_watch_key(session_id);
+        task.runtime
+            .note_project_running_session(project_local_id, session_id);
+        true
+    }
+
+    /// 返回仍在运行的 bridge 上已映射的本机 shortcut projectId 列表（R41 M4）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Gap inventory 若按 device 枚举该设备下全部 remote shortcut，同设备失效 shortcut 的
+    ///     sessions.list 失败会让整次 recovery incomplete，阻塞其它活跃项目 cutover。
+    ///     必须只 inventory 仍挂在 active bridge project_ids 上的 local project。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁过滤 `!is_finished()` 的 task；读取 project_ids 的 value（local_project_id）；
+    ///     去重后返回 Vec；不暴露 base_url/token/正文。
+    pub fn active_mapped_local_project_ids(&self) -> Vec<String> {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let mut ids = std::collections::BTreeSet::new();
+        for task in tasks.values() {
+            if task.is_finished() {
+                continue;
+            }
+            let map = task
+                .project_ids
+                .read()
+                .expect("remote event bridge project 映射读锁中毒");
+            for local_id in map.values() {
+                if !local_id.trim().is_empty() {
+                    ids.insert(local_id.clone());
+                }
+            }
+        }
+        ids.into_iter().collect()
     }
 
     /// 释放指定 remote session 的 watch lease（R35 M2）。
@@ -1694,8 +1770,8 @@ async fn read_remote_event_stream(
     }
 
     runtime.set_phase("streaming");
-    // streaming 期间刷新 last_used，配合订阅 lease 避免仅靠 ensure_bridge 才能续期（R30 M3）。
-    runtime.touch();
+    // R41 M3：streaming 开始与入站 chunk（含 15s heartbeat）**不得** demand-touch last_used。
+    // 有 subscribers 时 idle_for 已是 ZERO；零订阅时仅 ensure/retain/release 刷新 demand 时钟。
     let mut buffer = Vec::new();
     loop {
         if cancel.is_cancelled() {
@@ -1720,8 +1796,7 @@ async fn read_remote_event_stream(
             buffer.clear();
             return Ok(());
         };
-        // 仍在收流：touch 保持 idle 窗口；有 subscribers 时 idle_for 仍为 ZERO。
-        runtime.touch();
+        // R41 M3：入站流量（业务事件 + heartbeat）不 touch demand last_used。
 
         let project_map = project_ids
             .read()
@@ -2849,6 +2924,48 @@ mod tests {
             other => panic!("expected StreamGap, got {other:?}"),
         }
         assert_eq!(err.error_class(), "stream_gap");
+    }
+
+    /// Business Logic（R41 M3: 为什么需要这个测试）:
+    ///     零订阅时 peer heartbeat/入站网络不得刷新 demand last_used，否则 15s heartbeat
+    ///     会永久挡 60s idle TTL，active-device 集合无法收敛。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     过期 last_used 后模拟 stream loop 不 touch；idle_for 仍达 TTL；
+    ///     仅 demand touch() 会刷新时钟。
+    #[test]
+    fn network_activity_does_not_refresh_demand_idle_at_zero_subscribers() {
+        let runtime = BridgeRuntimeState::new();
+        runtime.set_phase("streaming");
+        *runtime.last_used.lock().expect("last_used") =
+            Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
+        // 模拟 stream loop 收 heartbeat 但不 touch demand last_used。
+        assert!(
+            runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
+            "zero subscribers must idle without demand touch even while streaming"
+        );
+        runtime.touch();
+        assert!(
+            runtime.idle_for() < Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
+            "demand touch restarts idle clock"
+        );
+    }
+
+    /// Business Logic（R41 M2: 为什么需要这个测试）:
+    ///     create 登记的 session 必须进入 project_running_sessions，remove 才能 clear。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     note_project_running_session 后 clear_project_running_sessions 释放该 key。
+    #[test]
+    fn note_project_running_session_is_cleared_on_project_remove() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key("remote:dev:s1"));
+        runtime.note_project_running_session("project-a", "remote:dev:s1");
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.clear_project_running_sessions("project-a"), 1);
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
+        let map = runtime.clone_project_running_sessions();
+        assert!(!map.contains_key("project-a"));
     }
 
     /// Business Logic（R32 M2 / R35 M2: 为什么需要这个测试）:

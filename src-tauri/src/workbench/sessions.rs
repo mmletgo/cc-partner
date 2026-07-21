@@ -1538,7 +1538,8 @@ fn kill_created_tmux_window_only(row: &WorkbenchSessionRow) {
 ///     - command.output() IO 错误 → Err。
 pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError> {
     if row.backend != TMUX_BACKEND {
-        return Ok(());
+        // R41 M7：raw/pty 无独立后端可杀；missing-handle 路径不得把 running 当自动成功。
+        return raw_pty_kill_persisted_policy(row);
     }
     let Some(session_name) = row.backend_id.as_deref() else {
         return Ok(());
@@ -1921,6 +1922,23 @@ fn normalize_terminal_kill_result(result: std::io::Result<()>) -> Result<(), App
         Ok(()) => Ok(()),
         Err(error) if is_terminal_process_already_gone(&error) => Ok(()),
         Err(error) => Err(AppError::from(error)),
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     R41 M7：raw PTY 没有独立 tmux backend 可 destroy；若 close 已丢失 live handle，
+///     不得把 status=running 的 raw 行当成“无需销毁成功”，否则会删 SQLite 留下活进程。
+///
+/// Code Logic（这个函数做什么）:
+///     backend 非 tmux 且 status=running → Err(unavailable raw_pty_kill_requires_live_handle)；
+///     非 running（disconnected/exited）→ Ok（无活进程可证）。
+fn raw_pty_kill_persisted_policy(row: &WorkbenchSessionRow) -> Result<(), AppError> {
+    if row.status.eq_ignore_ascii_case("running") {
+        Err(AppError::unavailable(
+            "raw_pty_kill_requires_live_handle".to_string(),
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -2527,6 +2545,16 @@ pub struct WorkbenchSessionRegistry {
     /// Code Logic（这个字段做什么）:
     ///     project_id → ProjectOpLeaseState。
     project_op_leases: Arc<Mutex<HashMap<String, Arc<ProjectOpLeaseState>>>>,
+    /// generation-scoped raw PTY kill 失败后的可重试 handle（R41 M7）。
+    ///
+    /// Business Logic（为什么需要这个字段）:
+    ///     close_inner 在 child.kill 前已从 sessions 移除 handle；kill 非 already-gone 失败时
+    ///     若丢弃 handle，重试会走 missing-handle + kill_persisted_backend(raw)=Ok，
+    ///     最终删 SQLite 却可能留下仍存活的 raw shell。
+    ///
+    /// Code Logic（这个字段做什么）:
+    ///     session_id → 仍持有 Child 的 handle（含 generation）；retry close 优先从此 map 取回再 kill。
+    failed_kill_handles: Arc<Mutex<HashMap<String, Arc<Mutex<WorkbenchSessionHandle>>>>>,
 }
 
 /// Session 创建后的 RAII 补偿守卫：repo 持久化失败时自动关闭 attach，禁止 ghost registry/child。
@@ -2861,6 +2889,7 @@ impl WorkbenchSessionRegistry {
             project_closing: Arc::new(Mutex::new(HashMap::new())),
             next_project_barrier_generation: Arc::new(AtomicU64::new(1)),
             project_op_leases: Arc::new(Mutex::new(HashMap::new())),
+            failed_kill_handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -4897,43 +4926,83 @@ impl WorkbenchSessionRegistry {
     ///     R22 M1 / R23 H2 / R24 H1：remove 与 Closing barrier 必须同临界区；barrier 覆盖
     ///     drain **与** registry PTY/replay cleanup **与** 调用方 tmux/SQLite cleanup，
     ///     且仅 closer 身份在 `SessionCloseCleanup::finish_cleanup` 后 CAS 清除。
-    ///     R36 M：running PTY `child.kill` 失败（非 already-gone）不得返回 finishable cleanup，
-    ///     否则调用方会误删 SQLite；应 Err 并保留 Closing barrier + durable 元数据。
+    ///     R36 M / R41 M7：running PTY `child.kill` 失败（非 already-gone）不得返回 finishable
+    ///     cleanup；handle 必须 generation-scoped 保留在 failed_kill_handles 供重试，
+    ///     否则 missing-handle 路径会把 raw PTY 当自动成功并删 SQLite。
     ///
     /// Code Logic（这个函数做什么）:
     ///     R28 H3：sessions→restoring→closing_publish 同一临界区完成 generation CAS remove、
     ///     PublishControl revoke、restore claim revoke/remove、Closing tombstone install；
+    ///     若 sessions 无 handle，尝试从 failed_kill_handles 取回（R41 M7 重试）；
     ///     锁外 soft-wait publish+restore leases + kill PTY/replay → **不** mark_cleanup_done；
     ///     running PTY kill 经 `normalize_terminal_kill_result`：Ok 才返回 SessionCloseCleanup；
-    ///     kill Err 返回 AppError（barrier 已装，无 finishable cleanup）。
+    ///     kill Err 写入 failed_kill_handles 后返回 AppError（barrier 已装，无 finishable cleanup）。
     fn close_inner(
         &self,
         session_id: &str,
         required_generation: Option<u64>,
     ) -> Result<SessionCloseCleanup, AppError> {
-        // R28 H3：remove handle + revoke restore claim + install Closing tombstone
-        // 必须在同一 lifecycle 临界区（sessions → restoring → closing_publish），
-        // 消除 remove 与 tombstone 之间的 Missing 窗口（并发 restore 可抢跑 claim/insert）。
+        // R28 H3 / R41 M7：remove handle + revoke restore claim + install Closing tombstone
+        // 必须在同一 lifecycle 临界区（sessions → restoring → closing_publish）；
+        // sessions miss 时再尝试 failed_kill_handles（上次 kill 失败的 generation-scoped handle）。
         let (handle, publish, revoked_claim) = {
             let mut sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
             let handle = match required_generation {
-                None => sessions
-                    .remove(session_id)
-                    .ok_or_else(|| AppError::not_found("工作台会话不存在"))?,
-                Some(generation) => {
-                    let Some(current) = sessions.get(session_id) else {
-                        return Err(AppError::not_found("工作台会话不存在"));
-                    };
-                    let current_gen = {
-                        let h = current.lock().expect("workbench session 锁中毒");
-                        h.generation
-                    };
-                    if current_gen != generation {
-                        return Err(AppError::not_found("工作台会话世代已变更"));
+                None => {
+                    if let Some(h) = sessions.remove(session_id) {
+                        // 成功从 live map 取出时清掉可能陈旧的 failed-kill 条目。
+                        self.failed_kill_handles
+                            .lock()
+                            .expect("failed_kill_handles 锁中毒")
+                            .remove(session_id);
+                        h
+                    } else {
+                        // R41 M7：优先重试上次 kill 失败仍保留的 handle。
+                        let mut failed = self
+                            .failed_kill_handles
+                            .lock()
+                            .expect("failed_kill_handles 锁中毒");
+                        failed
+                            .remove(session_id)
+                            .ok_or_else(|| AppError::not_found("工作台会话不存在"))?
                     }
-                    sessions
-                        .remove(session_id)
-                        .ok_or_else(|| AppError::not_found("工作台会话不存在"))?
+                }
+                Some(generation) => {
+                    if let Some(current) = sessions.get(session_id) {
+                        let current_gen = {
+                            let h = current.lock().expect("workbench session 锁中毒");
+                            h.generation
+                        };
+                        if current_gen != generation {
+                            return Err(AppError::not_found("工作台会话世代已变更"));
+                        }
+                        let h = sessions
+                            .remove(session_id)
+                            .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
+                        self.failed_kill_handles
+                            .lock()
+                            .expect("failed_kill_handles 锁中毒")
+                            .remove(session_id);
+                        h
+                    } else {
+                        let mut failed = self
+                            .failed_kill_handles
+                            .lock()
+                            .expect("failed_kill_handles 锁中毒");
+                        let Some(current) = failed.get(session_id) else {
+                            return Err(AppError::not_found("工作台会话不存在"));
+                        };
+                        let current_gen = {
+                            let h = current.lock().expect("workbench session 锁中毒");
+                            h.generation
+                        };
+                        if current_gen != generation {
+                            return Err(AppError::not_found("工作台会话世代已变更"));
+                        }
+                        failed
+                            .remove(session_id)
+                            .ok_or_else(|| AppError::not_found("工作台会话不存在"))?
+                    }
                 }
             };
             let publish = {
@@ -5000,31 +5069,46 @@ impl WorkbenchSessionRegistry {
         // soft-wait 在途 publish lease；restore leases 已在 helper 中处理。
         let publish_drained = publish.wait_in_flight_drained();
         let drained = publish_drained && leases_drained;
-        let mut handle = handle.lock().expect("workbench session 锁中毒");
-        let was_running = handle.row.status == "running";
-        // R36 M：running PTY kill 失败（非 already-gone）不得返回 finishable cleanup，
-        // 否则调用方会 SQLite delete；barrier 已装，返回 Err 保留 metadata。
+        let was_running = {
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            handle.row.status == "running"
+        };
+        // R36 M / R41 M7：running PTY kill 失败不得返回 finishable cleanup；
+        // 必须把 generation-scoped handle 放回 failed_kill_handles 供重试。
         let mut pty_kill_error: Option<AppError> = None;
-        match &mut handle.process {
-            SessionProcess::Pty { child, .. } => {
-                if was_running {
-                    if let Err(error) = normalize_terminal_kill_result(child.kill()) {
-                        tracing::debug!("关闭工作台终端时 kill 失败: {error}");
-                        pty_kill_error = Some(error);
+        {
+            let mut h = handle.lock().expect("workbench session 锁中毒");
+            match &mut h.process {
+                SessionProcess::Pty { child, .. } => {
+                    if was_running {
+                        if let Err(error) = normalize_terminal_kill_result(child.kill()) {
+                            tracing::debug!("关闭工作台终端时 kill 失败: {error}");
+                            pty_kill_error = Some(error);
+                        }
                     }
                 }
+                SessionProcess::Fake => {}
             }
-            SessionProcess::Fake => {}
         }
         if let Some(error) = pty_kill_error {
-            drop(handle);
+            self.failed_kill_handles
+                .lock()
+                .expect("failed_kill_handles 锁中毒")
+                .insert(session_id.to_string(), handle);
             return Err(error);
         }
-        handle.row.status = "disconnected".to_string();
-        handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
-        handle.row.updated_at = chrono::Utc::now().to_rfc3339();
-        let row = handle.row.clone();
-        drop(handle);
+        let row = {
+            let mut handle = handle.lock().expect("workbench session 锁中毒");
+            handle.row.status = "disconnected".to_string();
+            handle.row.exited_at = Some(chrono::Utc::now().to_rfc3339());
+            handle.row.updated_at = chrono::Utc::now().to_rfc3339();
+            handle.row.clone()
+        };
+        // kill 成功：清掉任何残留 failed-kill 条目。
+        self.failed_kill_handles
+            .lock()
+            .expect("failed_kill_handles 锁中毒")
+            .remove(session_id);
         // R24 H1 / R27 H3：不在 registry close 时 mark/clear；lease 未 drain 时 drained=false。
         Ok(SessionCloseCleanup {
             registry: self.clone(),
@@ -7417,18 +7501,25 @@ mod tests {
         assert!(!tmux_destroy_exit_is_already_gone("", ""));
     }
 
-    /// Business Logic（R35 M3: 为什么需要这个测试）:
-    ///     非 tmux / 无 backend_id 时 kill 应 Ok（无后端可杀），避免误阻 SQLite delete。
+    /// Business Logic（R35 M3 / R41 M7: 为什么需要这个测试）:
+    ///     无 tmux backend 可杀时不应误阻 SQLite delete；但 running raw 不得自动成功，
+    ///     否则 missing-handle 路径会删元数据却留下活 PTY。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     构造 raw/pty 行与缺 backend_id 的 tmux 行，断言 kill_persisted_backend 返回 Ok。
+    ///     disconnected raw → Ok；running raw → Err(raw_pty_kill_requires_live_handle)；
+    ///     缺 backend_id 的 tmux → Ok（无 session 可 destroy）。
     #[test]
     fn kill_persisted_backend_ok_when_no_tmux_backend_to_destroy() {
         let mut raw = fake_tmux_row("s-raw", "p1", Some("wt1"), "@1");
         raw.backend = "raw".to_string();
         raw.backend_id = None;
         raw.backend_window_id = None;
+        raw.status = "disconnected".to_string();
         assert!(kill_persisted_backend(&raw).is_ok());
+
+        raw.status = "running".to_string();
+        let err = kill_persisted_backend(&raw).expect_err("running raw must not auto-ok");
+        assert_eq!(err.code(), "raw_pty_kill_requires_live_handle");
 
         let mut no_id = fake_tmux_row("s-no-id", "p1", Some("wt1"), "@1");
         no_id.backend_id = None;

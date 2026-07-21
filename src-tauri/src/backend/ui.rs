@@ -626,12 +626,15 @@ fn session_row_is_replayable_for_gap(session: &serde_json::Value) -> bool {
 ///     无 projectId 的 `sessions.list` 只返回本机会话，但活跃 remote bridge 的 terminal-output
 ///     也发布进同一 event bus；若 Gap 只 replay 本机，会把远端缺口标 complete 并 attach latest。
 ///     反之，任意已保存但无关的离线 remote shortcut 也不得把本机 terminal/runtime 永久拖进 incomplete。
+///     R41 M4：同设备其它失效/未映射 shortcut 的 list 失败不得阻塞仍映射的活跃项目；
+///     active mapped 集合为空时跳过 projects.list，避免无关 projects 故障阻断本机恢复。
 ///
 /// Code Logic（这个函数做什么）:
-///     1) `sessions.list({})` 本机行；2) `bridges.active_devices` 取仍在运行的桥设备；
-///     3) `projects.list` 找 kind=remote 的 shortcut；
-///     4) 仅当 remote.deviceId ∈ active_devices 时调 `sessions.list({projectId})`，失败 incomplete；
-///     5) 非活跃桥上的离线 shortcut 跳过；按 session id 去重合并返回。
+///     1) `sessions.list({})` 本机行；
+///     2) `bridges.active_mapped_projects` 取 active bridge 上已映射 local projectId；
+///     3) 集合为空 → 只返回本机（不调 projects.list）；
+///     4) 仅对这些 projectId 调 `sessions.list({projectId})`，失败 incomplete；
+///     5) 按 session id 去重合并返回。
 async fn list_sessions_for_gap_resync(
     client: &BackendControlClient,
     cancel: Option<&CancellationToken>,
@@ -658,58 +661,27 @@ async fn list_sessions_for_gap_resync(
     if cancel.is_some_and(|c| c.is_cancelled()) {
         return Err(AppError::generic("cancelled"));
     }
-    // 活跃桥设备集合：失败时无法证明无远端事件源，必须 incomplete。
-    let active_devices: Vec<String> = client
-        .workbench_op("bridges.active_devices", json!({}))
+    // R41 M4：项目级 active inventory；失败无法证明无远端源 → incomplete。
+    // 空集合 = 无活跃映射远端源，跳过 projects.list（对齐 R40 空 active 语义）。
+    let active_mapped_projects: Vec<String> = client
+        .workbench_op("bridges.active_mapped_projects", json!({}))
         .await
         .map_err(|e| {
             AppError::generic(format!(
-                "gap_resync_active_bridges_failed:{}",
+                "gap_resync_active_mapped_projects_failed:{}",
                 e.code()
             ))
         })?;
-    let active_device_set: std::collections::HashSet<String> =
-        active_devices.into_iter().collect();
-
-    if cancel.is_some_and(|c| c.is_cancelled()) {
-        return Err(AppError::generic("cancelled"));
+    if active_mapped_projects.is_empty() {
+        return Ok(by_id.into_values().collect());
     }
-    let projects: Vec<Value> = client
-        .workbench_op("projects.list", json!({}))
-        .await
-        .map_err(|e| {
-            // projects.list 失败时无法证明无活跃远端源，必须 incomplete（fail-closed）。
-            AppError::generic(format!("gap_resync_projects_list_failed:{}", e.code()))
-        })?;
 
-    for project in projects {
+    for project_id in active_mapped_projects {
         if cancel.is_some_and(|c| c.is_cancelled()) {
             return Err(AppError::generic("cancelled"));
         }
-        let kind = project
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("local");
-        if !kind.eq_ignore_ascii_case("remote") {
-            continue;
-        }
-        let Some(project_id) = project
-            .get("id")
-            .or_else(|| project.get("projectId"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-        else {
-            continue;
-        };
-        let device_id = project
-            .get("deviceId")
-            .or_else(|| project.get("device_id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        // 无活跃桥的 shortcut：不是本 bus 的事件源，跳过 inventory（离线无关 shortcut 不得全局 incomplete）。
-        if device_id.is_empty() || !active_device_set.contains(&device_id) {
+        let project_id = project_id.trim().to_string();
+        if project_id.is_empty() {
             continue;
         }
         let remote_sessions: Vec<Value> = client
@@ -719,7 +691,7 @@ async fn list_sessions_for_gap_resync(
             )
             .await
             .map_err(|e| {
-                // 活跃远端源 inventory 失败：不得 attach latest 越过该源缺口。
+                // 活跃映射远端源 inventory 失败：不得 attach latest 越过该源缺口。
                 AppError::generic(format!(
                     "gap_resync_remote_list_failed:{}",
                     e.code()
@@ -1148,9 +1120,8 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
-                // Gap resync 先取活跃桥设备，再 projects.list；默认无活跃远端源（仅本机）。
-                "bridges.active_devices" => Value::Array(vec![]),
-                "projects.list" => Value::Array(vec![]),
+                // Gap resync 先取 active mapped projects；默认无活跃远端源（仅本机）。
+                "bridges.active_mapped_projects" => Value::Array(vec![]),
                 "sessions.list" => Value::Array(s.list_rows.clone()),
                 "sessions.replay" => {
                     let sid = body
@@ -1488,7 +1459,7 @@ mod tests {
     ///     若活跃远端 sessions.list 失败仍 complete，会永久越过远端缺口。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     mock control：bridges.active_devices 含 device-a；projects.list 返回该设备 remote 项目；
+    ///     mock control：bridges.active_mapped_projects 含 remote-proj；
     ///     sessions.list(projectId) 返回 503 → resync incomplete → 不 attach latest。
     #[tokio::test]
     async fn gap_resync_remote_inventory_failure_is_incomplete() {
@@ -1506,13 +1477,7 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
-                "bridges.active_devices" => json!(["device-a"]),
-                "projects.list" => json!([{
-                    "id": "remote-proj",
-                    "kind": "remote",
-                    "name": "remote",
-                    "deviceId": "device-a",
-                }]),
+                "bridges.active_mapped_projects" => json!(["remote-proj"]),
                 "sessions.list" => {
                     let project_id = body
                         .payload
@@ -1588,8 +1553,8 @@ mod tests {
     ///     会永久停住本机 terminal/runtime 交付。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     bridges.active_devices 为空；projects.list 含 offline remote；local replay 成功
-    ///     → Some outcome；不得因 remote list 失败 incomplete。
+    ///     bridges.active_mapped_projects 为空；projects.list 即使含 offline remote 也不被调用；
+    ///     local replay 成功 → Some outcome；不得因无关 remote 失败 incomplete。
     #[tokio::test]
     async fn gap_resync_unrelated_offline_shortcut_does_not_block_local() {
         #[derive(serde::Deserialize)]
@@ -1606,13 +1571,17 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
-                "bridges.active_devices" => json!([]),
-                "projects.list" => json!([{
-                    "id": "offline-remote",
-                    "kind": "remote",
-                    "name": "offline",
-                    "deviceId": "device-offline",
-                }]),
+                "bridges.active_mapped_projects" => json!([]),
+                "projects.list" => {
+                    // R41 M4：空 active mapped 时不得调用 projects.list。
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "projects.list must not be called when mapped set empty",
+                            "code": "internal",
+                        })),
+                    ));
+                }
                 "sessions.list" => {
                     let project_id = body
                         .payload
@@ -1681,7 +1650,7 @@ mod tests {
     ///     远端会话成功恢复时必须一并 resync，不能只完成本机。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     bridges.active_devices 含 device-a；projects.list 含该设备 remote；
+    ///     bridges.active_mapped_projects 含 remote-proj；
     ///     sessions.list 按 projectId 返回 remote session；两次 replay 成功 → count>=2；
     ///     远端 DTO 即使带 remote owner，resync 也覆盖为本机 bus owner。
     #[tokio::test]
@@ -1700,13 +1669,7 @@ mod tests {
             Json(body): Json<WbReq>,
         ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             let result = match body.op.as_str() {
-                "bridges.active_devices" => json!(["device-a"]),
-                "projects.list" => json!([{
-                    "id": "remote-proj",
-                    "kind": "remote",
-                    "name": "remote",
-                    "deviceId": "device-a",
-                }]),
+                "bridges.active_mapped_projects" => json!(["remote-proj"]),
                 "sessions.list" => {
                     let project_id = body
                         .payload

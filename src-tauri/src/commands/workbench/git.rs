@@ -1345,29 +1345,84 @@ pub(crate) async fn close_sessions_for_worktree(
 
 /// Business Logic（为什么需要这个函数）:
 ///     merge 成功后，已合并 worktree 不应继续占用 terminal metadata、SQLite worktree row 或磁盘 worktree。
-///     R36 H3：merge 耗时期间可能并发 create 新 session；仅 bulk `delete_by_worktree` 会留下
-///     未 close 的 live/tmux 孤儿，必须在 bulk delete 前再跑一遍 Result-gated close。
+///     R36 H3 / R41 M6：merge 耗时期间可能并发 create 新 session；仅 bulk `delete_by_worktree`
+///     会留下未 close 的 live/tmux 孤儿。必须在 project closing barrier 下 drain lease、
+///     re-snapshot close，再 bulk delete，防止 create 在 close 快照之后 upsert 再被只删 SQLite。
 ///
 /// Code Logic（这个函数做什么）:
-///     先 `close_sessions_for_worktree`（close/intent + kill_persisted_backend + 单行 delete + finish）；
-///     再 `delete_by_worktree` 清 bulk 残留；然后 `git worktree remove` 与 worktree 元数据删除。
+///     begin_project_closing_barrier → wait project op leases → close_sessions_for_worktree
+///     （再次 re-snapshot）→ delete_by_worktree → git remove/branch → worktree row delete →
+///     wait leases → finish barrier。任何 close/kill/delete 失败保留 barrier fail-closed。
 pub(crate) async fn cleanup_merged_worktree(
     state: &AppState,
     project: &WorkbenchProjectRow,
     row: &WorkbenchWorktreeRow,
 ) -> Result<(), AppError> {
-    // R36 H3：bulk delete 前再次 close snapshot，拦截 merge 期间并发 create。
-    close_sessions_for_worktree(state, &row.project_id, &row.id).await?;
-    state
+    // R41 M6：复用 project closing barrier + lease drain，覆盖 close→bulk delete 窗口。
+    let project_barrier = state
+        .workbench_sessions
+        .begin_project_closing_barrier(&row.project_id);
+    if !state
+        .workbench_sessions
+        .wait_project_op_leases_drained(&row.project_id)
+    {
+        tracing::warn!(
+            project_id = %row.project_id,
+            worktree_id = %row.id,
+            "project op leases still in-flight before merge cleanup; retaining project barrier"
+        );
+        return Err(AppError::unavailable(
+            "project_op_lease_drain_timeout".to_string(),
+        ));
+    }
+    // barrier 下 re-snapshot close，拦截 merge 期间并发 create。
+    if let Err(error) = close_sessions_for_worktree(state, &row.project_id, &row.id).await {
+        return Err(error);
+    }
+    // 二次 close：close_sessions 与 bulk delete 之间仍可能有竞态窗口内的新行
+    // （barrier 下 create 应失败；再扫一次防御 SQLite 残留）。
+    if let Err(error) = close_sessions_for_worktree(state, &row.project_id, &row.id).await {
+        return Err(error);
+    }
+    if let Err(error) = state
         .workbench_session_repo
         .delete_by_worktree(&row.project_id, &row.id)
-        .await?;
-    let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
-    workbench_git::remove_worktree(Path::new(&repo_root), Path::new(&row.path), false)?;
-    if let Some(branch) = row.branch.as_deref() {
-        workbench_git::delete_local_branch_if_merged(Path::new(&repo_root), branch, "HEAD")?;
+        .await
+    {
+        return Err(error);
     }
-    state.workbench_worktree_repo.delete(&row.id).await?;
+    let repo_root = workbench_git::repo_root(Path::new(&project.path))?;
+    if let Err(error) =
+        workbench_git::remove_worktree(Path::new(&repo_root), Path::new(&row.path), false)
+    {
+        return Err(error);
+    }
+    if let Some(branch) = row.branch.as_deref() {
+        if let Err(error) =
+            workbench_git::delete_local_branch_if_merged(Path::new(&repo_root), branch, "HEAD")
+        {
+            return Err(error);
+        }
+    }
+    if let Err(error) = state.workbench_worktree_repo.delete(&row.id).await {
+        return Err(error);
+    }
+    if !state
+        .workbench_sessions
+        .wait_project_op_leases_drained(&row.project_id)
+    {
+        tracing::warn!(
+            project_id = %row.project_id,
+            worktree_id = %row.id,
+            "project op leases still in-flight after merge cleanup; retaining project barrier"
+        );
+        return Err(AppError::unavailable(
+            "project_op_lease_drain_timeout".to_string(),
+        ));
+    }
+    state
+        .workbench_sessions
+        .finish_project_closing_barrier(&row.project_id, project_barrier);
     Ok(())
 }
 

@@ -220,7 +220,10 @@ pub async fn replay_workbench_session(
 ///     用户在 remote shortcut 上打开终端时，真实 shell 应运行在远端设备；本机项目仍走本机 registry。
 ///
 /// Code Logic（这个函数做什么）:
-///     remote 项目恢复远端 local projectId，剥离 remote worktreeId 后调用远端 create-session 并映射 DTO。
+///     remote：`try_acquire_project_op_lease` 后 open context、create-session、最终 revalidate；
+///     revalidate 失败 best-effort close 远端 session；成功则
+///     `ensure_session_watch_for_project` 登记 watch+project map 并映射 DTO。
+///     local：委托 local_create（自身已持 project lease）。
 pub(crate) async fn create_workbench_session_for_state(
     state: &AppState,
     project_id: String,
@@ -230,10 +233,11 @@ pub(crate) async fn create_workbench_session_for_state(
 ) -> Result<WorkbenchSessionDto, AppError> {
     let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
-        // R40 M2：project remove barrier 期间禁止 create 重新 ensure watch / 写回映射。
-        state
+        // R41 M1：ProjectOpLease 覆盖 remote create RPC + mapping + project-scoped watch，
+        // 与 local create 一样防止 remove barrier 与在途 create 交错留下孤儿终端。
+        let _project_lease = state
             .workbench_sessions
-            .require_project_not_closing(&project_id)?;
+            .try_acquire_project_op_lease(&project_id)?;
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         ensure_remote_event_bridge_for_context(state, &context);
@@ -249,6 +253,29 @@ pub(crate) async fn create_workbench_session_for_state(
                 },
             )
             .await?;
+        // R41 M1：远端已创建成功后若 project 进入 closing，best-effort 关闭远端 session，
+        // 禁止本机无 shortcut 可管理的孤儿终端。
+        if state
+            .workbench_sessions
+            .require_project_not_closing(&project_id)
+            .is_err()
+        {
+            let inner_session_id = item.id.clone();
+            if let Err(close_error) = RemoteWorkbenchClient::new()
+                .with_expected_device_id(&context.device_id)
+                .close_session(&context.base_url, &inner_session_id)
+                .await
+            {
+                tracing::debug!(
+                    error = %close_error,
+                    session_id = %inner_session_id,
+                    "remote create compensation close failed after project closing"
+                );
+            }
+            return Err(AppError::unavailable(
+                "project_closing_barrier_active".to_string(),
+            ));
+        }
         let session = map_remote_session_dtos(
             &context.device_id,
             &context.local_project_id,
@@ -257,11 +284,15 @@ pub(crate) async fn create_workbench_session_for_state(
         .into_iter()
         .next()
         .ok_or_else(|| AppError::generic("远端 session 创建结果为空"))?;
-        // R35 M2：每个 remote terminal window 独立 session-keyed watch lease，
-        // 关闭其中一个不得把其它仍打开的 session 订阅打到 0。
+        // R35 M2 / R41 M2：session-keyed watch + project_running_sessions 归属，
+        // 使 create-only（未 list）会话在 project remove 时也能被 clear 释放。
         let _ = state
             .workbench_remote_event_bridges
-            .ensure_session_watch(&context.device_id, &session.id);
+            .ensure_session_watch_for_project(
+                &context.device_id,
+                &context.local_project_id,
+                &session.id,
+            );
         return Ok(session);
     }
     local_create_workbench_session(state, project_id, worktree_id, initial_cols, initial_rows).await

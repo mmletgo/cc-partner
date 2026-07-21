@@ -327,6 +327,8 @@ pub(crate) async fn local_list_workbench_sessions(
 /// Code Logic（这个函数做什么）:
 ///     project_id 指向 remote shortcut 时先 `require_project_not_closing`（R40 M2），
 ///     再建立事件桥与项目映射、转发远端 list 并映射 session/worktree id；
+///     R41 M1：remote 路径先 `try_acquire_project_op_lease`，持有至 RPC + bridge +
+///     watch reconcile 结束；RPC 后 revalidate project barrier。
 ///     list 响应后对 running ensure_session_watch、非 running release_session_watch；
 ///     收集本响应 running composite remote session ids，调用
 ///     `reconcile_session_watches_for_project`；否则调用本地 helper。
@@ -337,16 +339,21 @@ pub(crate) async fn list_workbench_sessions_for_state(
     if let Some(project_id_value) = project_id.as_deref() {
         let project = get_project(state, project_id_value).await?;
         if project.kind == "remote" {
-            // R40 M2：project remove 窗口禁止 list 重新 ensure/reconcile watch。
-            state
+            // R41 M1：ProjectOpLease 覆盖 remote list RPC + bridge ensure + watch reconcile，
+            // 防止 project remove 中途完成清理后旧响应再写回 watch/mapping。
+            let _project_lease = state
                 .workbench_sessions
-                .require_project_not_closing(project_id_value)?;
+                .try_acquire_project_op_lease(project_id_value)?;
             let context = ensure_remote_project_context(state, &project).await?;
             ensure_remote_event_bridge_for_context(state, &context);
             let items = RemoteWorkbenchClient::new()
                 .with_expected_device_id(&context.device_id)
                 .list_sessions(&context.base_url, Some(&context.inner_project_id))
                 .await?;
+            // R40/R41：RPC 后 revalidate；remove 已完成则不得 ensure/reconcile。
+            state
+                .workbench_sessions
+                .require_project_not_closing(project_id_value)?;
             // R37 H3：仅 running session ensure watch；listed 非 running 释放残留 lease，
             // 避免 exited/disconnected 永久占 subscribers 导致 Gap inventory incomplete。
             // R38 M2：同时收集 running composite ids，供 project-scoped disappear reconcile。

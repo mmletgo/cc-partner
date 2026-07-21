@@ -547,13 +547,21 @@ async fn dispatch_workbench_op(
         }
 
         // ---- gap sources / sessions ----
-        // Gap inventory 只应对活跃 remote event bridge 设备 fail-closed。
+        // Gap inventory：活跃 bridge 设备集合（兼容旧客户端）。
         "bridges.active_devices" => {
             let ids: Vec<String> = state
                 .workbench_remote_event_bridges
                 .active_device_ids()
                 .into_iter()
                 .collect();
+            Ok(serde_json::to_value(ids)?)
+        }
+        // R41 M4：仅返回 active bridge 上已映射的 local shortcut projectId，
+        // Gap inventory 不得因同设备其它失效 shortcut 的 list 失败而全局 incomplete。
+        "bridges.active_mapped_projects" => {
+            let ids = state
+                .workbench_remote_event_bridges
+                .active_mapped_local_project_ids();
             Ok(serde_json::to_value(ids)?)
         }
         "sessions.list" => {
