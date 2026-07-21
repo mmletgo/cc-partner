@@ -8,7 +8,8 @@
  * Code Logic（这个模块做什么）:
  *   提供 NDJSON chunk parser（含 typed heartbeat / Gap）、stream cursor 与 after URL 纯 helper，并提供 React hook：
  *   lifecycle AbortController + 每连接 child controller；35s watchdog 仅 abort 子连接并重连；
- *   Gap 后 pause live → sessions.list+running replay → store.reset → 推进或保留 pre-gap cursor 后重连。
+ *   Gap 后 pause live → sessions.list+running replay → store.reset →
+ *   投影全部 listed session 的 terminalStatus → 推进或保留 pre-gap cursor 后重连。
  */
 
 import { useEffect, useRef } from 'react';
@@ -108,13 +109,16 @@ export type WorkbenchNdjsonFrame =
  *   production 默认注入 active bridge 设备，仅这些 remote fail-closed。
  *
  * Code Logic（字段说明）:
- *   list 返回至少含 id/status；replay 返回 buffer/lastSeq/可选 ownerInstanceId；
+ *   list 返回至少含 id/status，可选 exitCode（R41 M5 投影 terminalStatus 时用）；
+ *   replay 返回 buffer/lastSeq/可选 ownerInstanceId；
  *   listProjects 可选：返回至少 id/kind（可选 deviceId），remote 项目再按 projectId list；
  *   listActiveBridgeDevices 可选：一旦提供（含空数组）即作为权威 active set——
  *   空集合跳过全部 remote；非空时仅 inventory 集合内设备且失败 fail-closed。
  */
 export interface WorkbenchHttpEventsSessionDeps {
-  list: (projectId?: string | null) => Promise<Array<{ id: string; status: string }>>;
+  list: (
+    projectId?: string | null,
+  ) => Promise<Array<{ id: string; status: string; exitCode?: number | null }>>;
   replay: (sessionId: string) => Promise<WorkbenchSessionReplay>;
   /**
    * Business Logic（为什么需要这个字段）:
@@ -135,6 +139,35 @@ export interface WorkbenchHttpEventsSessionDeps {
    *   device 且 fail-closed。**未提供** → 兼容 fallback：全部 remote 走 skip-offline。
    */
   listActiveBridgeDevices?: () => Promise<string[]>;
+}
+
+/**
+ * Gap inventory 中的 session 行（list 去重后）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   R41 M5：Gap 期间 running→exited 等状态迁移必须投影到 Mobile UI，
+ *   inventory 行是唯一权威来源（live terminalStatus 可能已丢）。
+ *
+ * Code Logic（字段说明）:
+ *   id/status 必填；exitCode 可选，缺省投影为 null。
+ */
+export interface WorkbenchGapInventorySession {
+  id: string;
+  status: string;
+  exitCode?: number | null;
+}
+
+/**
+ * resyncWorkbenchSessionsAfterGap 可选副作用（状态投影等）。
+ *
+ * Business Logic（为什么需要这个接口）:
+ *   running replay 只恢复 buffer；status 迁移须单独投影，避免 Mobile 卡在 running。
+ *
+ * Code Logic（字段说明）:
+ *   onTerminalStatus：inventory 成功后对每个 listed session 调用（含 exited/disconnected）。
+ */
+export interface ResyncWorkbenchSessionsAfterGapOptions {
+  onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
 }
 
 /**
@@ -470,10 +503,38 @@ export function resolveRemoteProjectDeviceId(project: {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   Gap 期间丢弃的 terminalStatus 帧不会重放；inventory 行是 Mobile 恢复 tab 状态的权威来源。
+ *   仅 replay running 会让 running→exited 会话继续显示 running 并允许危险写操作。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对每个 inventory session 构造 WorkbenchTerminalStatusEvent（exitCode 缺省 null，ts=now），
+ *   调用 onTerminalStatus；无回调时 no-op。
+ */
+export function projectInventoryTerminalStatuses(
+  sessions: Iterable<WorkbenchGapInventorySession>,
+  onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void,
+): void {
+  if (!onTerminalStatus) return;
+  const ts = Date.now();
+  for (const session of sessions) {
+    if (!session.id) continue;
+    onTerminalStatus({
+      sessionId: session.id,
+      status: session.status,
+      exitCode: session.exitCode ?? null,
+      ts,
+    });
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
  *   R37 M1：裸 sessions.list() 无 project 会漏 remote shortcut；存在 remote 时必须按项目 inventory。
  *   R38 M1 / R39 M1 / R40 M1：production 默认注入 listActiveBridgeDevices；
  *   仅活跃 bridge remote fail-closed；**空 active set 跳过全部 remote**（不探测离线 shortcut）。
+ *   R41 M5：inventory 成功后须投影全部 listed session 的 terminalStatus（含 exited/disconnected），
+ *   不能只 replay running；否则 Mobile UI 会卡在 running。
  *
  * Code Logic（这个函数做什么）:
  *   本机 sessions.list()（无 projectId）失败仍 throw。
@@ -486,21 +547,23 @@ export function resolveRemoteProjectDeviceId(project: {
  *     成功 merge、失败 skip（不 throw）。
  *   无 listProjects 时退回 sessions.list()。
  *   仅 status===running 调 replay → store.reset(sessionId, buffer, lastSeq, ownerInstanceId?)。
+ *   inventory + running replay 完成后：projectInventoryTerminalStatuses 对全部 listed 行投影 status。
  */
 export async function resyncWorkbenchSessionsAfterGap(
   store: WorkbenchTerminalBufferStore,
   sessions: WorkbenchHttpEventsSessionDeps,
+  options?: ResyncWorkbenchSessionsAfterGapOptions,
 ): Promise<void> {
-  const byId = new Map<string, { id: string; status: string }>();
+  const byId = new Map<string, WorkbenchGapInventorySession>();
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   inventory 结果按 session id 去重合并，避免 local/remote 重复 replay。
+   *   inventory 结果按 session id 去重合并，避免 local/remote 重复 replay / 重复 status 投影。
    *
    * Code Logic（这个函数做什么）:
    *   将 list 返回的行写入 byId Map（后写覆盖同 id）。
    */
-  const mergeListed = (rows: Array<{ id: string; status: string }>): void => {
+  const mergeListed = (rows: Array<{ id: string; status: string; exitCode?: number | null }>): void => {
     for (const row of rows) {
       if (!row.id) continue;
       byId.set(row.id, row);
@@ -554,6 +617,9 @@ export async function resyncWorkbenchSessionsAfterGap(
       replay.ownerInstanceId ?? null,
     );
   }
+
+  // R41 M5：成功 inventory 后投影全部 listed session 状态（不只 running）。
+  projectInventoryTerminalStatuses(byId.values(), options?.onTerminalStatus);
 }
 
 /**
@@ -741,7 +807,8 @@ export function consumeWorkbenchHttpEvent(
  *
  * Code Logic（这个 hook 做什么）:
  *   lifecycle AbortController 覆盖 hook 生命周期；每次 connect 新建 child controller；
- *   业务帧推进 stream cursor；Gap 暂停 live、resync running sessions、按结果推进/保留 cursor 后 abort 重连；
+ *   业务帧推进 stream cursor；Gap 暂停 live、resync running sessions、投影 listed terminalStatus、
+ *   按结果推进/保留 cursor 后 abort 重连；
  *   业务帧与 heartbeat 均重置 35s watchdog；watchdog 仅 abort child 并在 lifecycle 仍活跃时重连。
  */
 export function useWorkbenchHttpEvents({
@@ -867,9 +934,11 @@ export function useWorkbenchHttpEvents({
        * Business Logic（为什么需要这个函数）:
        *   Gap 帧意味着 silent loss 风险；必须立刻 pause live 并权威 resync，再以正确 cursor 重连。
        *   新 owner latest=0 的成功 cutover 也必须清 recoveryPending，避免卡在 Gap 循环。
+       *   R41 M5：resync 还须把 inventory 中的 terminalStatus（含 exited）投影给 UI。
        *
        * Code Logic（这个函数做什么）:
-       *   冻结 pre-gap cursor → resync running sessions → resolveCursorAfterGap →
+       *   冻结 pre-gap cursor → resync running sessions + project listed terminalStatus →
+       *   resolveCursorAfterGap →
        *   resync 成功且 cursor 已 attach 到 gap owner（含 sequence 0）则清 recoveryPending；
        *   否则保持 recoveryPending → abort child。
        */
@@ -880,7 +949,9 @@ export function useWorkbenchHttpEvents({
         const preGapCursor = streamCursor;
         let resyncSucceeded = false;
         try {
-          await resyncWorkbenchSessionsAfterGap(store, sessionsRef.current);
+          await resyncWorkbenchSessionsAfterGap(store, sessionsRef.current, {
+            onTerminalStatus: onTerminalStatusRef.current,
+          });
           resyncSucceeded = true;
         } catch {
           resyncSucceeded = false;

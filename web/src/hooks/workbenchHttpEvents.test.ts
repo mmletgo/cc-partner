@@ -9,6 +9,7 @@ import {
   parseWorkbenchNdjsonFrame,
   parseWorkbenchNdjsonFrames,
   resolveCursorAfterGap,
+  projectInventoryTerminalStatuses,
   resolveRemoteProjectDeviceId,
   resyncWorkbenchSessionsAfterGap,
   WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
@@ -552,6 +553,102 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
     );
     expect(resolveRemoteProjectDeviceId({ id: 'remote:dev:p1' })).toBe('dev');
     expect(resolveRemoteProjectDeviceId({ id: 'local-p' })).toBeNull();
+  });
+
+  /**
+   * Business Logic（R41 M5: 为什么需要这个测试）:
+   *   Gap 期间 terminalStatus 可能被 ring 丢弃；inventory 中 exited/disconnected 必须投影到
+   *   onTerminalStatus，否则 Mobile UI 会继续显示 running 并允许危险写操作。
+   *
+   * Code Logic（这个测试做什么）:
+   *   1) list 含 running+exited+disconnected；仅 running 走 replay；
+   *      onTerminalStatus 对全部 listed id 各调用一次，exited 带 exitCode。
+   *   2) 无 onTerminalStatus 时仍完成 resync（可选回调）。
+   *   3) projectInventoryTerminalStatuses 无回调 no-op；有回调时 exitCode 缺省 null。
+   */
+  test('gap resync projects terminalStatus for all inventoried sessions including exited', async () => {
+    const reset = vi.fn();
+    const store = { reset } as unknown as WorkbenchTerminalBufferStore;
+    const onTerminalStatus = vi.fn();
+    const sessions = {
+      list: vi.fn(async () => [
+        { id: 'run-1', status: 'running' },
+        { id: 'exit-1', status: 'exited', exitCode: 1 },
+        { id: 'disc-1', status: 'disconnected' },
+      ]),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: 'buf',
+        truncated: false,
+        lastSeq: 5,
+        ownerInstanceId: 'owner-x',
+      })),
+    };
+
+    await resyncWorkbenchSessionsAfterGap(store, sessions, { onTerminalStatus });
+
+    expect(sessions.replay).toHaveBeenCalledTimes(1);
+    expect(sessions.replay).toHaveBeenCalledWith('run-1');
+    expect(reset).toHaveBeenCalledTimes(1);
+    expect(onTerminalStatus).toHaveBeenCalledTimes(3);
+
+    const byId = new Map(
+      onTerminalStatus.mock.calls.map((call) => {
+        const payload = call[0] as {
+          sessionId: string;
+          status: string;
+          exitCode: number | null;
+          ts: number;
+        };
+        return [payload.sessionId, payload];
+      }),
+    );
+    expect(byId.get('run-1')).toMatchObject({
+      sessionId: 'run-1',
+      status: 'running',
+      exitCode: null,
+    });
+    expect(byId.get('exit-1')).toMatchObject({
+      sessionId: 'exit-1',
+      status: 'exited',
+      exitCode: 1,
+    });
+    expect(byId.get('disc-1')).toMatchObject({
+      sessionId: 'disc-1',
+      status: 'disconnected',
+      exitCode: null,
+    });
+    for (const payload of byId.values()) {
+      expect(typeof payload.ts).toBe('number');
+      expect(payload.ts).toBeGreaterThan(0);
+    }
+
+    // 无回调时仍可完成 resync。
+    await expect(resyncWorkbenchSessionsAfterGap(store, sessions)).resolves.toBeUndefined();
+
+    // helper：无回调 no-op；缺省 exitCode → null。
+    expect(() =>
+      projectInventoryTerminalStatuses([{ id: 's', status: 'exited' }]),
+    ).not.toThrow();
+    const helperCb = vi.fn();
+    projectInventoryTerminalStatuses(
+      [
+        { id: 'a', status: 'exited' },
+        { id: 'b', status: 'running', exitCode: 0 },
+      ],
+      helperCb,
+    );
+    expect(helperCb).toHaveBeenCalledTimes(2);
+    expect(helperCb.mock.calls[0][0]).toMatchObject({
+      sessionId: 'a',
+      status: 'exited',
+      exitCode: null,
+    });
+    expect(helperCb.mock.calls[1][0]).toMatchObject({
+      sessionId: 'b',
+      status: 'running',
+      exitCode: 0,
+    });
   });
 });
 
