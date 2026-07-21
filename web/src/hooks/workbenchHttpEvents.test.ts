@@ -422,10 +422,11 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
    *   但默认 offline remote 不得 fail-closed 挡本机恢复；仅 active bridge 子集 fail-closed。
    *
    * Code Logic（这个测试做什么）:
-   *   1) 成功 inventory：local+remote union 去重后只 replay running。
-   *   2) 无 listActiveBridgeDevices（或空数组）：remote list reject 不 throw，本机 running 仍 resync。
+   *   1) 成功 inventory：local+remote union 去重后只 replay running（未注入 active bridge 时）。
+   *   2) 无 listActiveBridgeDevices：remote list reject 不 throw，本机 running 仍 resync。
    *   3) 注入 listActiveBridgeDevices 且含该 device：remote list 失败 throw（production 默认路径）。
-   *   4) resolveRemoteProjectDeviceId 优先 deviceId，否则解析 remote:device:...。
+   *   4) 注入 listActiveBridgeDevices 返回空数组：remote list 调用次数为 0（R40 M1）。
+   *   5) resolveRemoteProjectDeviceId 优先 deviceId，否则解析 remote:device:...。
    */
   test('resync inventories remote sessions; offline remote skips unless active bridge', async () => {
     const reset = vi.fn();
@@ -514,6 +515,36 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
     expect(activeBridgeFail.listActiveBridgeDevices).toHaveBeenCalledTimes(1);
     expect(activeBridgeFail.list).toHaveBeenCalledWith('remote:dev:shortcut');
     expect(activeBridgeFail.list).not.toHaveBeenCalledWith('remote:other:shortcut');
+
+    // R40 M1：生产 API 合法返回空 active-device 列表时，remote list 调用次数必须为 0。
+    const emptyActive = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) return [{ id: 'local-run', status: 'running' }];
+        throw new Error('should-not-list-remote');
+      }),
+      listProjects: vi.fn(async () => [
+        { id: 'remote:dev:shortcut', kind: 'remote', deviceId: 'dev' },
+        { id: 'remote:other:shortcut', kind: 'remote' },
+      ]),
+      listActiveBridgeDevices: vi.fn(async () => [] as string[]),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: 'local-only',
+        truncated: false,
+        lastSeq: 7,
+        ownerInstanceId: 'local-own',
+      })),
+    };
+    const emptyReset = vi.fn();
+    const emptyStore = { reset: emptyReset } as unknown as WorkbenchTerminalBufferStore;
+    await expect(resyncWorkbenchSessionsAfterGap(emptyStore, emptyActive)).resolves.toBeUndefined();
+    expect(emptyActive.listActiveBridgeDevices).toHaveBeenCalledTimes(1);
+    expect(emptyActive.list).toHaveBeenCalledTimes(1);
+    expect(emptyActive.list).toHaveBeenCalledWith();
+    expect(emptyActive.list).not.toHaveBeenCalledWith('remote:dev:shortcut');
+    expect(emptyActive.list).not.toHaveBeenCalledWith('remote:other:shortcut');
+    expect(emptyActive.replay).toHaveBeenCalledWith('local-run');
+    expect(emptyReset).toHaveBeenCalledWith('local-run', 'local-only', 7, 'local-own');
 
     // resolveRemoteProjectDeviceId：deviceId 优先，否则 parse remote:device:...
     expect(resolveRemoteProjectDeviceId({ id: 'remote:dev:p1', deviceId: 'explicit' })).toBe(

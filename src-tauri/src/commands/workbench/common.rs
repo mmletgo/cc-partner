@@ -1342,16 +1342,19 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
 
     state.runtime_role.require_owner()?;
     let project = get_project(state, project_id).await?;
-    // R39 M2：remote shortcut 移除时 best-effort 清 project-scoped watch map 并 release 仍占的 session key。
-    // device_id 缺失则跳过（不挡 remove）；无 bridge task 时 registry 内 no-op。
-    if project.kind == "remote" {
+    // R40 M2：先挂 project closing barrier，再 drain/close/delete；
+    // watch/project_ids 清理仅在 DB delete 成功后提交（失败路径保留 watch 与映射）。
+    // remote list/reconcile 见 require_project_not_closing，避免 clear 后被 list 重新 ensure。
+    let remote_device_id_for_bridge = if project.kind == "remote" {
         let device_id = project.device_id.trim();
-        if !device_id.is_empty() {
-            let _ = state
-                .workbench_remote_event_bridges
-                .clear_project_running_sessions(device_id, project_id);
+        if device_id.is_empty() {
+            None
+        } else {
+            Some(device_id.to_string())
         }
-    }
+    } else {
+        None
+    };
     let project_barrier = state
         .workbench_sessions
         .begin_project_closing_barrier(project_id);
@@ -1443,6 +1446,15 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
 
     match delete_result {
         Ok(()) => {
+            // R40 M2：仅 DB 删除成功后提交 remote watch + project_ids 映射清理。
+            if let Some(device_id) = remote_device_id_for_bridge.as_deref() {
+                let _ = state
+                    .workbench_remote_event_bridges
+                    .clear_project_running_sessions(device_id, project_id);
+                let _ = state
+                    .workbench_remote_event_bridges
+                    .remove_project_mapping_by_local_id(device_id, project_id);
+            }
             for cleanup in cleanups {
                 cleanup.finish_cleanup();
             }
@@ -1465,8 +1477,8 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
             Ok(serde_json::json!({ "ok": true, "projectId": project_id }))
         }
         Err(error) => {
-            // delete 失败：保留 session + project barrier，禁止 orphan create/restore。
-            // cleanup Drop 本身也不清 session barrier（R25 M2）。
+            // delete 失败：保留 session + project barrier + remote watches/mappings，
+            // 禁止 orphan create/restore 与静默丢失 live。cleanup Drop 不清 barrier（R25 M2）。
             drop(cleanups);
             Err(error)
         }

@@ -1260,7 +1260,7 @@ impl RemoteEventBridgeRegistry {
         true
     }
 
-    /// 清除指定 remote project 的 project-scoped running-session watch 状态（R39 M2）。
+    /// 清除指定 remote project 的 project-scoped running-session watch 状态（R39 M2 / R40 M2）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     用户移除 remote shortcut 后，该 project 上次 list 持有的 session watch 必须释放，
@@ -1281,6 +1281,32 @@ impl RemoteEventBridgeRegistry {
         let _ = task
             .runtime
             .clear_project_running_sessions(project_local_id);
+        true
+    }
+
+    /// 按本机 shortcut projectId 删除 bridge 的 project_ids 映射（R40 M2）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     project 已成功从 DB 删除后，Gap resync 仍可能按 project_ids 枚举已删 shortcut 的
+    ///     inner project 并因该项目失败阻塞同设备其它项目 cutover；必须按 local id 摘映射。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 device task；从 project_ids 中 remove 所有 value==local_project_id 的条目；
+    ///     无 task 返回 false；有 task 返回 true。
+    pub fn remove_project_mapping_by_local_id(
+        &self,
+        device_id: &str,
+        local_project_id: &str,
+    ) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        let mut map = task
+            .project_ids
+            .write()
+            .expect("remote event bridge project 映射写锁中毒");
+        map.retain(|_, mapped_local| mapped_local != local_project_id);
         true
     }
 
@@ -3132,6 +3158,42 @@ mod tests {
     fn registry_clear_project_running_sessions_noops_without_task() {
         let registry = RemoteEventBridgeRegistry::new();
         assert!(!registry.clear_project_running_sessions("missing-device", "project-a"));
+    }
+
+    /// Business Logic（R40 M2: 为什么需要这个测试）:
+    ///     project 删除成功后必须按 local shortcut id 摘掉 bridge project_ids 映射，
+    ///     避免 Gap resync 继续枚举已删项目。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     写入两条映射（同 local / 不同 local）后 remove_project_mapping_by_local_id，
+    ///     仅目标 local 被移除；无 task 时 no-op false。
+    #[tokio::test]
+    async fn remove_project_mapping_by_local_id_retains_other_projects() {
+        let registry = RemoteEventBridgeRegistry::new();
+        assert!(!registry.remove_project_mapping_by_local_id("missing-device", "local-a"));
+
+        let project_ids = Arc::new(RwLock::new(HashMap::from([
+            ("inner-a".to_string(), "local-a".to_string()),
+            ("inner-a2".to_string(), "local-a".to_string()),
+            ("inner-b".to_string(), "local-b".to_string()),
+        ])));
+        {
+            let mut tasks = registry.tasks.lock().expect("lock");
+            tasks.insert(
+                "device-x".to_string(),
+                RemoteEventBridgeTask {
+                    base_url: "http://127.0.0.1:1".to_string(),
+                    project_ids: Arc::clone(&project_ids),
+                    cancel: CancellationToken::new(),
+                    runtime: Arc::new(BridgeRuntimeState::new()),
+                    handle: tauri::async_runtime::spawn(async {}),
+                },
+            );
+        }
+        assert!(registry.remove_project_mapping_by_local_id("device-x", "local-a"));
+        let map = project_ids.read().expect("read");
+        assert!(!map.values().any(|v| v == "local-a"));
+        assert_eq!(map.get("inner-b").map(String::as_str), Some("local-b"));
     }
 
     /// Business Logic（R38 M2: 为什么需要这个测试）:

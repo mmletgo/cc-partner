@@ -110,7 +110,8 @@ export type WorkbenchNdjsonFrame =
  * Code Logic（字段说明）:
  *   list 返回至少含 id/status；replay 返回 buffer/lastSeq/可选 ownerInstanceId；
  *   listProjects 可选：返回至少 id/kind（可选 deviceId），remote 项目再按 projectId list；
- *   listActiveBridgeDevices 可选：非空时仅 inventory 这些设备上的 remote，且失败 fail-closed。
+ *   listActiveBridgeDevices 可选：一旦提供（含空数组）即作为权威 active set——
+ *   空集合跳过全部 remote；非空时仅 inventory 集合内设备且失败 fail-closed。
  */
 export interface WorkbenchHttpEventsSessionDeps {
   list: (projectId?: string | null) => Promise<Array<{ id: string; status: string }>>;
@@ -130,8 +131,8 @@ export interface WorkbenchHttpEventsSessionDeps {
    *
    * Code Logic（字段说明）:
    *   可选：活跃 bridge 设备 id 列表。
-   *   非空时只 inventory 这些设备上的 remote project，且这些失败 fail-closed；
-   *   undefined 或空数组 → 全部 remote 走 skip-offline（错误 skip，不 throw）。
+   *   **已提供**（含空数组）→ 始终构造 Set：空集合跳过全部 remote；非空仅 inventory 集合内
+   *   device 且 fail-closed。**未提供** → 兼容 fallback：全部 remote 走 skip-offline。
    */
   listActiveBridgeDevices?: () => Promise<string[]>;
 }
@@ -471,15 +472,18 @@ export function resolveRemoteProjectDeviceId(project: {
  * Business Logic（为什么需要这个函数）:
  *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
  *   R37 M1：裸 sessions.list() 无 project 会漏 remote shortcut；存在 remote 时必须按项目 inventory。
- *   R38 M1 / R39 M1：production 默认注入 listActiveBridgeDevices；
- *   仅活跃 bridge remote fail-closed，offline remote skip。
+ *   R38 M1 / R39 M1 / R40 M1：production 默认注入 listActiveBridgeDevices；
+ *   仅活跃 bridge remote fail-closed；**空 active set 跳过全部 remote**（不探测离线 shortcut）。
  *
  * Code Logic（这个函数做什么）:
  *   本机 sessions.list()（无 projectId）失败仍 throw。
  *   有 listProjects 时取 kind===remote 的项目：
- *   - listActiveBridgeDevices 返回非空：只 inventory deviceId 落在 active set 的 remote；失败 throw；
- *     不在 active set 的 remote 完全跳过（不 list）。
- *   - listActiveBridgeDevices 未提供或空数组：对每个 remote try list，成功 merge，失败 skip（不 throw）。
+ *   - listActiveBridgeDevices **已提供**（含返回空数组）：始终构造 Set；
+ *     空集合必须跳过全部 remote（不 list）；
+ *     deviceId 落在 active set 的 remote fail-closed throw；
+ *     不在 set 内的 remote 完全跳过。
+ *   - listActiveBridgeDevices **未提供**：兼容 fallback——每个 remote try list，
+ *     成功 merge、失败 skip（不 throw）。
  *   无 listProjects 时退回 sessions.list()。
  *   仅 status===running 调 replay → store.reset(sessionId, buffer, lastSeq, ownerInstanceId?)。
  */
@@ -509,17 +513,21 @@ export async function resyncWorkbenchSessionsAfterGap(
   if (sessions.listProjects) {
     const projects = await sessions.listProjects();
     const remoteProjects = projects.filter((project) => project.kind === 'remote');
-    const activeDevices = sessions.listActiveBridgeDevices
-      ? await sessions.listActiveBridgeDevices()
-      : [];
-    const activeSet =
-      activeDevices.length > 0 ? new Set(activeDevices.filter((id) => id.trim().length > 0)) : null;
+    // R40 M1：依赖是否注入与返回值是否为空必须分离——
+    // 已注入时空数组是合法“当前无活跃 bridge”，必须跳过全部 remote；
+    // 仅未注入时才走 skip-offline best-effort fallback。
+    const hasActiveBridgeInventory = typeof sessions.listActiveBridgeDevices === 'function';
+    const activeSet = hasActiveBridgeInventory
+      ? new Set(
+          (await sessions.listActiveBridgeDevices!()).filter((id) => id.trim().length > 0),
+        )
+      : null;
 
     for (const project of remoteProjects) {
       if (activeSet) {
         const deviceId = resolveRemoteProjectDeviceId(project);
         if (!deviceId || !activeSet.has(deviceId)) {
-          // 非活跃 bridge 上的 remote：完全跳过，不 list。
+          // 非活跃 / 空 active set：完全跳过，不 list、不唤醒离线远端。
           continue;
         }
         // 活跃 bridge remote：fail-closed。
@@ -527,7 +535,7 @@ export async function resyncWorkbenchSessionsAfterGap(
         continue;
       }
 
-      // 默认 skip-offline：任意 list 错误都 skip 该 project，不 throw。
+      // 兼容 fallback（未注入 listActiveBridgeDevices）：skip-offline。
       try {
         mergeListed(await sessions.list(project.id));
       } catch {

@@ -325,7 +325,8 @@ pub(crate) async fn local_list_workbench_sessions(
 ///     在 map 返回前按 project 做 last-seen running reconcile，释放 previous−running 差集。
 ///
 /// Code Logic（这个函数做什么）:
-///     project_id 指向 remote shortcut 时先建立事件桥与项目映射，再转发到远端并映射 session/worktree id；
+///     project_id 指向 remote shortcut 时先 `require_project_not_closing`（R40 M2），
+///     再建立事件桥与项目映射、转发远端 list 并映射 session/worktree id；
 ///     list 响应后对 running ensure_session_watch、非 running release_session_watch；
 ///     收集本响应 running composite remote session ids，调用
 ///     `reconcile_session_watches_for_project`；否则调用本地 helper。
@@ -336,6 +337,10 @@ pub(crate) async fn list_workbench_sessions_for_state(
     if let Some(project_id_value) = project_id.as_deref() {
         let project = get_project(state, project_id_value).await?;
         if project.kind == "remote" {
+            // R40 M2：project remove 窗口禁止 list 重新 ensure/reconcile watch。
+            state
+                .workbench_sessions
+                .require_project_not_closing(project_id_value)?;
             let context = ensure_remote_project_context(state, &project).await?;
             ensure_remote_event_bridge_for_context(state, &context);
             let items = RemoteWorkbenchClient::new()

@@ -230,6 +230,10 @@ pub(crate) async fn create_workbench_session_for_state(
 ) -> Result<WorkbenchSessionDto, AppError> {
     let project = get_project(state, &project_id).await?;
     if project.kind == "remote" {
+        // R40 M2：project remove barrier 期间禁止 create 重新 ensure watch / 写回映射。
+        state
+            .workbench_sessions
+            .require_project_not_closing(&project_id)?;
         let context = ensure_remote_project_context(state, &project).await?;
         let inner_worktree_id = remote_inner_worktree_id(&context.device_id, worktree_id)?;
         ensure_remote_event_bridge_for_context(state, &context);
