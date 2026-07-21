@@ -384,6 +384,12 @@ manual evidence, not claimed by the smoke.
 - Backup archives and inspect previews must not be shared if they contain user
   Prompt/Scratchpad text; control tokens never appear in export packages.
 
+## Workbench terminal low-latency (P1 residual)
+
+- Desktop normal path: control NDJSON **stream-first** (not 250ms catch-up poll).
+- Input: max one in-flight write per session; failed/uncertain batches are **never** auto-replayed.
+- **L3 GUI latency: NOT VERIFIED** as of `a25f8caa` — release GUI key-to-visible (p95≤50ms / p99≤100ms) and publish→listener (p95≤20ms) plus 1000 mixed-input ordering were not measured on a packaged app in this delivery. L0–L2 and P1 Superpowers dual review do **not** substitute for L3.
+
 ## Related
 
 - Product overview & quick CLI: [`README.md`](../../README.md)
