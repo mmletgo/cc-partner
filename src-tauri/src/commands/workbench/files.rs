@@ -15,6 +15,7 @@ use crate::workbench::models::{
 use crate::workbench::{
     file_content, fs as workbench_fs, html_assets,
     remote_client::RemoteWorkbenchClient,
+    remote_ids::remote_entity_id,
     remote_protocol::{RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq, RemoteSaveTextReq},
     sqlite_preview,
 };
@@ -335,6 +336,13 @@ pub(crate) async fn list_workbench_sessions_for_state(
                 .with_expected_device_id(&context.device_id)
                 .list_sessions(&context.base_url, Some(&context.inner_project_id))
                 .await?;
+            // R35 M2：list 已知 remote session 时幂等 ensure session-keyed watch lease。
+            for item in &items {
+                let remote_session_id = remote_entity_id(&context.device_id, &item.id);
+                let _ = state
+                    .workbench_remote_event_bridges
+                    .ensure_session_watch(&context.device_id, &remote_session_id);
+            }
             return Ok(map_remote_session_dtos(
                 &context.device_id,
                 &context.local_project_id,

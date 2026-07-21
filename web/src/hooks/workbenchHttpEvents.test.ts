@@ -257,20 +257,33 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
       sequence: 40,
     });
     expect(resolveCursorAfterGap(pre, gap, false)).toEqual(pre);
+    // R35 M1：成功 resync 后即使 latest=0 也必须 cutover 到新 owner，禁止保留旧 pre cursor。
     expect(
       resolveCursorAfterGap(pre, { ownerInstanceId: 'owner-b', oldestAvailable: 0, latest: 0 }, true),
-    ).toEqual(pre);
+    ).toEqual({ ownerInstanceId: 'owner-b', sequence: 0 });
+    // 旧 owner pre + 成功 gap 新 owner latest=0 → 新 owner/0。
+    expect(
+      resolveCursorAfterGap(
+        { ownerInstanceId: 'owner-old', sequence: 12 },
+        { ownerInstanceId: 'owner-new', oldestAvailable: 0, latest: 0 },
+        true,
+      ),
+    ).toEqual({ ownerInstanceId: 'owner-new', sequence: 0 });
 
     // R32 M1：first-frame Gap + incomplete resync → gap owner + sequence 0，禁止 null。
     expect(resolveCursorAfterGap(null, gap, false)).toEqual({
       ownerInstanceId: 'owner-a',
       sequence: 0,
     });
-    // first-frame Gap + success still attaches latest when latest>0。
+    // first-frame Gap + success attaches latest（含 latest>0）。
     expect(resolveCursorAfterGap(null, gap, true)).toEqual({
       ownerInstanceId: 'owner-a',
       sequence: 40,
     });
+    // first-frame Gap + success latest=0 → 直接 attach owner/0 并应清 recovery。
+    expect(
+      resolveCursorAfterGap(null, { ownerInstanceId: 'owner-z', oldestAvailable: 0, latest: 0 }, true),
+    ).toEqual({ ownerInstanceId: 'owner-z', sequence: 0 });
 
     expect(buildWorkbenchEventsUrl(null)).toBe('/api/workbench/events');
     expect(buildWorkbenchEventsUrl({ ownerInstanceId: 'owner-a', sequence: 9 })).toBe(
@@ -322,6 +335,38 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
 
     // 若错误地清空 cursor，门闩必须拒绝 bare open。
     expect(canOpenWorkbenchEventsRequest(null, true)).toBe(false);
+  });
+
+  /**
+   * Business Logic（R35 M1: 为什么需要这个测试）:
+   *   新 owner latest=0 成功 resync 后必须 cutover 并清 recoveryPending，否则会无限 Gap。
+   *
+   * Code Logic（这个测试做什么）:
+   *   复刻 handleGap recovery 决策：success + attach gap owner（含 seq 0）→ recoveryPending=false。
+   */
+  test('successful latest=0 owner cutover clears recoveryPending', () => {
+    let streamCursor: { ownerInstanceId: string; sequence: number } | null = {
+      ownerInstanceId: 'owner-old',
+      sequence: 8,
+    };
+    let recoveryPending = true;
+    const gap = { ownerInstanceId: 'owner-new', oldestAvailable: 0, latest: 0 };
+    const resyncSucceeded = true;
+
+    streamCursor = resolveCursorAfterGap(streamCursor, gap, resyncSucceeded);
+    if (
+      resyncSucceeded &&
+      streamCursor &&
+      streamCursor.ownerInstanceId === gap.ownerInstanceId
+    ) {
+      recoveryPending = false;
+    } else {
+      recoveryPending = true;
+    }
+
+    expect(streamCursor).toEqual({ ownerInstanceId: 'owner-new', sequence: 0 });
+    expect(recoveryPending).toBe(false);
+    expect(canOpenWorkbenchEventsRequest(streamCursor, recoveryPending)).toBe(true);
   });
 
   /**

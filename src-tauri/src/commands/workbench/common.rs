@@ -1331,7 +1331,7 @@ pub(crate) fn ensure_remote_event_bridge_for_worktree_context(
 ///     1) begin project closing barrier generation；
 ///     2) drain project op leases；
 ///     3) re-snapshot list sessions（R28 H4）；
-///     4) 逐 session close / close intent + kill_persisted_backend，收集 cleanup 令牌；
+///     4) 逐 session close / close intent + kill_persisted_backend（R35 M3：kill Err 立即返回，不 bulk delete）；
 ///     5) delete sessions/worktrees/project；
 ///     6) finish session cleanups + wait leases + finish project barrier。
 pub(crate) async fn remove_local_workbench_project_with_barrier(
@@ -1361,12 +1361,17 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
     }
 
     let session_rows = state.workbench_session_repo.list(Some(project_id)).await?;
-    // R25 H2 / R26 M1：先收集全部 SessionCloseCleanup；bulk SQLite 成功后才 finish。
+    // R25 H2 / R26 M1 / R35 M3：先收集全部 SessionCloseCleanup；
+    // kill 失败立即返回 Err（不 bulk delete、不 finish_cleanup，Drop 保留 barrier）。
     let mut cleanups = Vec::new();
     for row in session_rows {
         match state.workbench_sessions.close(&row.id) {
             Ok(cleanup) => {
-                kill_persisted_backend(cleanup.row());
+                if let Err(error) = kill_persisted_backend(cleanup.row()) {
+                    drop(cleanups);
+                    // cleanup Drop 保留 session barrier；project barrier 仍 active。
+                    return Err(error);
+                }
                 cleanups.push(cleanup);
             }
             Err(AppError::NotFound(_)) => {
@@ -1376,21 +1381,38 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
                     .begin_close_intent_for_missing_handle(&row.id, row.clone())
                 {
                     Ok(cleanup) => {
-                        kill_persisted_backend(cleanup.row());
+                        if let Err(error) = kill_persisted_backend(cleanup.row()) {
+                            drop(cleanups);
+                            return Err(error);
+                        }
                         cleanups.push(cleanup);
                     }
                     Err(AppError::Conflict(_)) => {
                         if let Ok(cleanup) = state.workbench_sessions.close(&row.id) {
-                            kill_persisted_backend(cleanup.row());
+                            if let Err(error) = kill_persisted_backend(cleanup.row()) {
+                                drop(cleanups);
+                                return Err(error);
+                            }
                             cleanups.push(cleanup);
-                        } else {
-                            kill_persisted_backend(&row);
+                        } else if let Err(error) = kill_persisted_backend(&row) {
+                            drop(cleanups);
+                            return Err(error);
                         }
                     }
-                    Err(_) => kill_persisted_backend(&row),
+                    Err(_) => {
+                        if let Err(error) = kill_persisted_backend(&row) {
+                            drop(cleanups);
+                            return Err(error);
+                        }
+                    }
                 }
             }
-            Err(_) => kill_persisted_backend(&row),
+            Err(_) => {
+                if let Err(error) = kill_persisted_backend(&row) {
+                    drop(cleanups);
+                    return Err(error);
+                }
+            }
         }
     }
 

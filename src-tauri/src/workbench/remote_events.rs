@@ -21,7 +21,7 @@ use crate::workbench::agent_runtime::snapshot::AgentSessionRuntimeDto;
 use crate::workbench::remote_ids::remote_entity_id;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -46,6 +46,8 @@ pub const BRIDGE_IDLE_TTL_SECS: u64 = 60;
 pub const BRIDGE_MAX_BACKOFF_SECS: u64 = 60;
 /// 初始退避基数（秒）。
 const BRIDGE_BASE_BACKOFF_SECS: u64 = 1;
+/// 设备级 watch lease 的稳定 key（R35 M2：与 session key 并列，幂等 retain）。
+const WATCH_KEY_DEVICE: &str = "__device__";
 
 /// Workbench 远端终端输出 payload。
 ///
@@ -650,18 +652,22 @@ pub struct RemoteEventBridgeProjectMapping {
 /// Business Logic（为什么需要这个结构体）:
 ///     loop 与 registry 需共享 last_used/phase/attempt/error/订阅 refcount 与 after_cursor，
 ///     供 TTL、诊断与 task restart 后游标恢复读取（R30 M3）。
+///     R35 M2：多 terminal 共用同一 device bridge 时，必须以 session-keyed lease 计数，
+///     避免 close 一次把整个设备订阅打到 0。
 ///
 /// Code Logic（这个结构体做什么）:
-///     Arc 原子/互斥字段；subscribers>0 时 idle_for=ZERO；after_cursor 跨 loop restart 保留；
-///     不含 URL 凭据或事件正文。
+///     Arc 原子/互斥字段；`watch_keys` 记录活跃 lease key，`subscribers` 与 set 大小同步；
+///     subscribers>0 时 idle_for=ZERO；after_cursor 跨 loop restart 保留；不含 URL/正文。
 struct BridgeRuntimeState {
     last_used: Mutex<Instant>,
     phase: Mutex<String>,
     attempt: AtomicU32,
     last_error_class: Mutex<Option<String>>,
     finished: AtomicBool,
-    /// 活跃 stream/session 查看者计数；>0 时 bridge 视为非 idle（R30 M3）。
+    /// 活跃 stream/session 查看者计数；与 watch_keys.len 同步，>0 时 bridge 非 idle。
     subscribers: AtomicU32,
+    /// session/device 级 watch lease 集合；幂等 retain/release，驱动 subscribers（R35 M2）。
+    watch_keys: Mutex<HashSet<String>>,
     /// 已提交的远端 stream after 游标；task restart / 重连共享（R30 M3）。
     after_cursor: Mutex<Option<BackendRuntimeCursor>>,
 }
@@ -671,7 +677,7 @@ impl BridgeRuntimeState {
     ///     新建 bridge 时需要初始化 runtime 观测字段。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     last_used=now、phase=connecting、attempt=0、subscribers=0、after_cursor=None。
+    ///     last_used=now、phase=connecting、attempt=0、subscribers=0、watch_keys 空、after_cursor=None。
     fn new() -> Self {
         Self {
             last_used: Mutex::new(Instant::now()),
@@ -680,6 +686,7 @@ impl BridgeRuntimeState {
             last_error_class: Mutex::new(None),
             finished: AtomicBool::new(false),
             subscribers: AtomicU32::new(0),
+            watch_keys: Mutex::new(HashSet::new()),
             after_cursor: Mutex::new(None),
         }
     }
@@ -713,40 +720,79 @@ impl BridgeRuntimeState {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     活跃 remote 查看者进入时需要增加订阅 refcount，阻止 idle TTL 回收 bridge。
+    ///     设备/session 进入可见态时需要幂等持有一条 watch lease，避免 ensure 路径无限加计数，
+    ///     同时让多 session 各自持有独立 key（R35 M2）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     subscribers.fetch_add(1)；并 touch last_used。
-    fn retain_subscription(&self) {
-        self.subscribers.fetch_add(1, Ordering::SeqCst);
+    ///     向 watch_keys insert key；若为新 key 则 subscribers+=1 并 touch；已存在仅 touch。
+    ///     返回是否新插入。
+    fn retain_watch_key(&self, key: &str) -> bool {
+        let mut keys = self.watch_keys.lock().expect("bridge watch_keys 锁中毒");
+        let inserted = keys.insert(key.to_string());
+        if inserted {
+            self.subscribers.fetch_add(1, Ordering::SeqCst);
+        }
+        drop(keys);
         self.touch();
+        inserted
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     查看者离开时释放订阅，允许之后在无 ensure/touch 时进入 idle TTL。
+    ///     session/设备离开时只释放自己的 key，剩余 key 仍可阻止 bridge idle 回收（R35 M2）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     saturating 减 1；减到 0 时 touch，使 idle 计时从最后一次 release 起算。
-    fn release_subscription(&self) {
-        let mut prev = self.subscribers.load(Ordering::SeqCst);
-        loop {
-            if prev == 0 {
-                // 防御性：重复 release 不回绕；仍 touch 以便诊断路径刷新。
-                self.touch();
-                return;
-            }
-            match self.subscribers.compare_exchange_weak(
-                prev,
-                prev - 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => {
-                    self.touch();
-                    return;
+    ///     从 watch_keys remove key；若移除成功则 saturating 减 subscribers 并 touch；
+    ///     key 不存在时 no-op（防重复 close 下溢），仍 touch。
+    ///     返回是否真正移除。
+    fn release_watch_key(&self, key: &str) -> bool {
+        let mut keys = self.watch_keys.lock().expect("bridge watch_keys 锁中毒");
+        let removed = keys.remove(key);
+        drop(keys);
+        if removed {
+            let mut prev = self.subscribers.load(Ordering::SeqCst);
+            loop {
+                if prev == 0 {
+                    break;
                 }
-                Err(current) => prev = current,
+                match self.subscribers.compare_exchange_weak(
+                    prev,
+                    prev - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(current) => prev = current,
+                }
             }
+        }
+        self.touch();
+        removed
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     URL 变化/task restart 时必须把已持有的 session/device keys 迁到新 runtime，
+    ///     否则 close 会因 key 丢失而无法正确 release，subscribers 也与现实脱节。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     克隆 watch_keys 集合。
+    fn clone_watch_keys(&self) -> HashSet<String> {
+        self.watch_keys
+            .lock()
+            .expect("bridge watch_keys 锁中毒")
+            .clone()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     spawn 新 bridge task 时用旧 runtime 的 keys 重建 lease 状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     覆盖写入 watch_keys，并把 subscribers 设为 keys.len()；非空时 touch。
+    fn seed_watch_keys(&self, keys: HashSet<String>) {
+        let count = keys.len() as u32;
+        *self.watch_keys.lock().expect("bridge watch_keys 锁中毒") = keys;
+        self.subscribers.store(count, Ordering::SeqCst);
+        if count > 0 {
+            self.touch();
         }
     }
 
@@ -848,8 +894,8 @@ impl RemoteEventBridgeTask {
 ///     GuiClient 不得创建 bridge。活跃 stream 查看者通过订阅 lease 阻止 idle 回收（R30 M3）。
 ///
 /// Code Logic（这个结构体做什么）:
-///     Mutex<HashMap<device_id, task>>；ensure 刷新 last_used；acquire/release 订阅 refcount；
-///     restart 时 transfer after_cursor；shutdown_all 取消并 await。
+///     Mutex<HashMap<device_id, task>>；ensure 刷新 last_used；session-keyed watch lease；
+///     restart 时 transfer after_cursor + watch_keys；shutdown_all 取消并 await。
 #[derive(Default)]
 pub struct RemoteEventBridgeRegistry {
     tasks: Mutex<HashMap<String, RemoteEventBridgeTask>>,
@@ -917,7 +963,7 @@ impl RemoteEventBridgeRegistry {
     /// Code Logic（这个函数做什么）:
     ///     校验 runtime_role 为 HeadlessOwner；按 device_id 更新映射与 last_used；
     ///     URL 变化或任务结束时 cancel 旧任务并 spawn 新循环，transfer after_cursor +
-    ///     subscribers 到新 runtime（R30 M3）。
+    ///     watch_keys（subscribers 由 keys.len 派生）到新 runtime（R30 M3 / R35 M2）。
     pub fn ensure_bridge(
         &self,
         device_id: String,
@@ -939,73 +985,104 @@ impl RemoteEventBridgeRegistry {
             existing.handle.abort();
             let project_ids = Arc::clone(&existing.project_ids);
             let transferred_cursor = existing.runtime.load_after_cursor();
-            let transferred_subscribers = existing.runtime.subscribers.load(Ordering::SeqCst);
+            let transferred_watch_keys = existing.runtime.clone_watch_keys();
             *existing = spawn_bridge_task(
                 device_id,
                 base_url,
                 project_ids,
                 state,
                 transferred_cursor,
-                transferred_subscribers,
+                transferred_watch_keys,
             );
             return;
         }
 
         let project_ids = Arc::new(RwLock::new(HashMap::new()));
         update_project_mapping(&project_ids, project_mapping);
-        let task = spawn_bridge_task(device_id.clone(), base_url, project_ids, state, None, 0);
+        let task = spawn_bridge_task(
+            device_id.clone(),
+            base_url,
+            project_ids,
+            state,
+            None,
+            HashSet::new(),
+        );
         tasks.insert(device_id, task);
     }
 
-    /// 为活跃 remote 查看者增加订阅 lease（阻止 idle TTL 回收）。
+    /// 为活跃 remote 查看者增加设备级订阅 lease（阻止 idle TTL 回收）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     仅依赖 ensure_bridge touch 时，长时间观看 terminal 而不再调用 ensure 仍会 idle reclaim；
-    ///     订阅 refcount 保证有查看者时 bridge 不退出（R30 M3）。
+    ///     订阅 lease 保证有查看者时 bridge 不退出（R30 M3）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     持锁找到 device 的 task.runtime.retain_subscription；无 task 时 no-op 返回 false。
+    ///     持锁找到 device 的 task 后 retain `"__device__"` key；无 task 时 no-op 返回 false。
     pub fn acquire_subscription(&self, device_id: &str) -> bool {
-        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
-        let Some(task) = tasks.get(device_id) else {
-            return false;
-        };
-        task.runtime.retain_subscription();
-        true
+        self.ensure_watch_subscription(device_id)
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     ensure_bridge 后若尚无查看者 lease，应建立至少 1 个 watch subscription，
-    ///     避免 ensure 频繁调用导致 refcount 无限增长，同时覆盖长时间观看路径（R31）。
+    ///     ensure_bridge 后应建立设备级 watch lease，避免 ensure 频繁调用导致 refcount 无限增长，
+    ///     同时覆盖长时间观看路径（R31 / R35 M2）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     持锁：task 存在且 subscribers==0 时 retain 一次；已有订阅则仅 touch 返回 true。
+    ///     持锁：task 存在时幂等 retain `"__device__"`；无 task 时 no-op 返回 false。
     pub fn ensure_watch_subscription(&self, device_id: &str) -> bool {
         let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
         let Some(task) = tasks.get(device_id) else {
             return false;
         };
-        if task.runtime.subscribers.load(Ordering::SeqCst) == 0 {
-            task.runtime.retain_subscription();
-        } else {
-            task.runtime.touch();
-        }
+        task.runtime.retain_watch_key(WATCH_KEY_DEVICE);
         true
     }
 
-    /// 释放活跃 remote 查看者的订阅 lease。
+    /// 为指定 remote session 建立 watch lease（R35 M2）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     查看者离开后应允许 idle TTL 从最后一次 release/touch 起算。
+    ///     每个打开的 remote terminal 应独立持有一条 lease；关闭其中一个不得释放其它 session 的订阅。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     持锁找到 task 后 release_subscription；无 task 时 no-op 返回 false。
+    ///     持锁找到 device task 后 retain session key（幂等）；无 task 时 no-op 返回 false。
+    pub fn ensure_session_watch(&self, device_id: &str, session_id: &str) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        task.runtime.retain_watch_key(session_id);
+        true
+    }
+
+    /// 释放指定 remote session 的 watch lease（R35 M2）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     close session / close 最后一 pane 只应释放该 session 的 lease；
+    ///     其它仍打开的 session key 保持 subscribers>0。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 task 后 release session key；无 task 时 no-op 返回 false。
+    pub fn release_session_watch(&self, device_id: &str, session_id: &str) -> bool {
+        let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(task) = tasks.get(device_id) else {
+            return false;
+        };
+        task.runtime.release_watch_key(session_id);
+        true
+    }
+
+    /// 释放设备级订阅 lease（兼容旧路径；优先用 release_session_watch）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     设备级查看者离开后应允许 idle TTL 从最后一次 release/touch 起算。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     持锁找到 task 后 release `"__device__"` key；无 task 时 no-op 返回 false。
     pub fn release_subscription(&self, device_id: &str) -> bool {
         let tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
         let Some(task) = tasks.get(device_id) else {
             return false;
         };
-        task.runtime.release_subscription();
+        task.runtime.release_watch_key(WATCH_KEY_DEVICE);
         true
     }
 
@@ -1069,28 +1146,26 @@ impl RemoteEventBridgeRegistry {
 
 /// Business Logic（为什么需要这个函数）:
 ///     事件桥 registry 需要把任务创建细节集中处理，保证 replacement 和首次创建使用同一套状态字段；
-///     URL 变化 restart 时必须继承 after_cursor 与 subscribers，避免 brand-new attach（R30 M3）。
+///     URL 变化 restart 时必须继承 after_cursor 与 watch_keys，避免 brand-new attach 或
+///     session release 下溢（R30 M3 / R35 M2）。
 ///
 /// Code Logic（这个函数做什么）:
-///     创建 cancel/runtime（seed cursor + subscribers）并 spawn remote_event_loop；结束后置 finished。
+///     创建 cancel/runtime（seed cursor + watch_keys）并 spawn remote_event_loop；结束后置 finished。
 fn spawn_bridge_task(
     device_id: String,
     base_url: String,
     project_ids: Arc<RwLock<HashMap<String, String>>>,
     state: AppState,
     initial_after_cursor: Option<BackendRuntimeCursor>,
-    initial_subscribers: u32,
+    initial_watch_keys: HashSet<String>,
 ) -> RemoteEventBridgeTask {
     let cancel = CancellationToken::new();
     let runtime = Arc::new(BridgeRuntimeState::new());
     if initial_after_cursor.is_some() {
         runtime.store_after_cursor(initial_after_cursor);
     }
-    if initial_subscribers > 0 {
-        runtime
-            .subscribers
-            .store(initial_subscribers, Ordering::SeqCst);
-        runtime.touch();
+    if !initial_watch_keys.is_empty() {
+        runtime.seed_watch_keys(initial_watch_keys);
     }
     let loop_cancel = cancel.clone();
     let loop_runtime = Arc::clone(&runtime);
@@ -2444,12 +2519,12 @@ mod tests {
         assert_eq!(err.error_class(), "stream_gap");
     }
 
-    /// Business Logic（R32 M2: 为什么需要这个测试）:
+    /// Business Logic（R32 M2 / R35 M2: 为什么需要这个测试）:
     ///     最后一 tab 关闭后 bridge 必须可 idle，否则 stale bridge 阻挡 Gap inventory。
     ///
     /// Code Logic（这个测试做什么）:
     ///     phase=streaming + subscribers=0 + last_used 过期 → idle；
-    ///     retain 后 ZERO；release 后按 last_used TTL 再 idle。
+    ///     retain_watch_key 后 ZERO；release 后按 last_used TTL 再 idle。
     #[test]
     fn last_subscription_release_allows_idle_even_while_streaming() {
         let runtime = BridgeRuntimeState::new();
@@ -2461,7 +2536,7 @@ mod tests {
             "zero subscribers + streaming + last_used expired must idle (R32 M2)"
         );
 
-        runtime.retain_subscription();
+        assert!(runtime.retain_watch_key("session-a"));
         assert_eq!(
             runtime.idle_for(),
             Duration::ZERO,
@@ -2473,7 +2548,7 @@ mod tests {
         assert_eq!(runtime.idle_for(), Duration::ZERO);
 
         // 最后一 tab 关闭：release 会 touch，刚释放时尚未 idle。
-        runtime.release_subscription();
+        assert!(runtime.release_watch_key("session-a"));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
         assert!(
             runtime.idle_for() < Duration::from_secs(BRIDGE_IDLE_TTL_SECS),
@@ -2488,36 +2563,52 @@ mod tests {
         );
     }
 
-    /// Business Logic（R32 M2: 为什么需要这个测试）:
-    ///     multi-tab 中关闭一个不得误 idle 杀掉其它 viewer 仍在用的 bridge。
+    /// Business Logic（R35 M2: 为什么需要这个测试）:
+    ///     multi-session 中关闭一个不得误 idle 杀掉其它 session 仍在用的 bridge。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     retain×2 → release×1 仍 ZERO；再 release + 过期后 idle。
+    ///     retain 两个不同 session key → release 一个仍 ZERO；再 release + 过期后 idle。
     #[test]
-    fn multi_tab_release_one_keeps_bridge_non_idle() {
+    fn multi_session_release_one_keeps_bridge_non_idle() {
         let runtime = BridgeRuntimeState::new();
         runtime.set_phase("connecting");
-        runtime.retain_subscription();
-        runtime.retain_subscription();
+        assert!(runtime.retain_watch_key("session-a"));
+        assert!(runtime.retain_watch_key("session-b"));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 2);
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
-        // 关掉一个 tab：仍有 1 个订阅 → 非 idle。
-        runtime.release_subscription();
+        // 关掉一个 session：仍有 1 个 key → 非 idle。
+        assert!(runtime.release_watch_key("session-a"));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
         assert_eq!(
             runtime.idle_for(),
             Duration::ZERO,
-            "one remaining subscriber keeps bridge non-idle"
+            "one remaining session key keeps bridge non-idle"
         );
         // 关掉最后一个。
-        runtime.release_subscription();
+        assert!(runtime.release_watch_key("session-b"));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
         assert!(runtime.idle_for() >= Duration::from_secs(BRIDGE_IDLE_TTL_SECS));
         // 额外 release 不 panic / 不回绕。
-        runtime.release_subscription();
+        assert!(!runtime.release_watch_key("session-b"));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
+    }
+
+    /// Business Logic（R35 M2: 为什么需要这个测试）:
+    ///     ensure_watch_subscription 的设备级 key 必须幂等，重复 ensure 不得膨胀 subscribers。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同一 key retain 两次只插入一次；subscribers 保持 1。
+    #[test]
+    fn ensure_watch_subscription_device_key_is_idempotent() {
+        let runtime = BridgeRuntimeState::new();
+        assert!(runtime.retain_watch_key(WATCH_KEY_DEVICE));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        assert!(!runtime.retain_watch_key(WATCH_KEY_DEVICE));
+        assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.idle_for(), Duration::ZERO);
     }
 
     /// Business Logic（R32 M2: 为什么需要这个测试）:
@@ -2537,7 +2628,7 @@ mod tests {
             "backoff + zero subs + expired last_used must idle (R32 M2)"
         );
 
-        runtime.retain_subscription();
+        assert!(runtime.retain_watch_key("session-a"));
         *runtime.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 5);
         assert_eq!(
@@ -2547,61 +2638,65 @@ mod tests {
         );
     }
 
-    /// Business Logic（R30 M3: 为什么需要这个测试）:
-    ///     URL 变化或任务替换时 after_cursor 必须从旧 runtime transfer 到新 runtime，
-    ///     禁止 brand-new attach 丢掉 recovery 点。
+    /// Business Logic（R30 M3 / R35 M2: 为什么需要这个测试）:
+    ///     URL 变化或任务替换时 after_cursor 与 watch_keys 必须从旧 runtime transfer 到新 runtime，
+    ///     禁止 brand-new attach 丢掉 recovery 点或 session lease。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     seed cursor → store；spawn_bridge_task 带 initial_after_cursor；
-    ///     新 runtime.load_after_cursor 等于 seed；subscribers 一并 transfer。
+    ///     seed cursor + 两个 session keys → clone/seed 到新 runtime；
+    ///     cursor/keys/subscribers 一致；idle ZERO。
     #[test]
-    fn after_cursor_preserved_across_spawn_bridge_task_restart() {
+    fn after_cursor_and_watch_keys_preserved_across_restart() {
         let seed = BackendRuntimeCursor {
             owner_instance_id: "owner-seed".into(),
             sequence: 99,
         };
-        // 不真实跑 loop 到网络：只验证 spawn 时 seed 写入新 runtime。
-        // spawn_bridge_task 需要 AppState；用 finished abort 路径测 seed 字段。
-        // 这里直接测 runtime seed 语义（spawn 内部同样 store_after_cursor）。
         let runtime = BridgeRuntimeState::new();
         runtime.store_after_cursor(Some(seed.clone()));
-        runtime.subscribers.store(2, Ordering::SeqCst);
+        assert!(runtime.retain_watch_key("session-a"));
+        assert!(runtime.retain_watch_key("session-b"));
 
         let transferred_cursor = runtime.load_after_cursor();
-        let transferred_subscribers = runtime.subscribers.load(Ordering::SeqCst);
+        let transferred_keys = runtime.clone_watch_keys();
         let restarted = BridgeRuntimeState::new();
         restarted.store_after_cursor(transferred_cursor);
-        restarted
-            .subscribers
-            .store(transferred_subscribers, Ordering::SeqCst);
+        restarted.seed_watch_keys(transferred_keys);
 
         let loaded = restarted.load_after_cursor().expect("cursor transferred");
         assert_eq!(loaded.owner_instance_id, "owner-seed");
         assert_eq!(loaded.sequence, 99);
         assert_eq!(restarted.subscribers.load(Ordering::SeqCst), 2);
+        assert!(restarted.clone_watch_keys().contains("session-a"));
+        assert!(restarted.clone_watch_keys().contains("session-b"));
         // 有订阅时 idle 为 ZERO。
         *restarted.last_used.lock().expect("last_used") =
             Instant::now() - Duration::from_secs(BRIDGE_IDLE_TTL_SECS + 1);
         assert_eq!(restarted.idle_for(), Duration::ZERO);
+        // restart 后仍可按 session 释放。
+        assert!(restarted.release_watch_key("session-a"));
+        assert_eq!(restarted.subscribers.load(Ordering::SeqCst), 1);
     }
 
-    /// Business Logic（R30 M3: 为什么需要这个测试）:
-    ///     registry acquire/release 在无 bridge 时必须 no-op 安全，有 bridge 时驱动 runtime refcount。
+    /// Business Logic（R30 M3 / R35 M2: 为什么需要这个测试）:
+    ///     registry acquire/release/session-watch 在无 bridge 时必须 no-op 安全；
+    ///     runtime 路径按 key 驱动 subscribers。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     空 registry acquire/release 返回 false；手工插入 runtime 后 acquire 增 refcount。
+    ///     空 registry 返回 false；runtime retain/release 同步 subscribers。
     #[test]
     fn registry_subscription_api_noops_without_task_and_retains_with_runtime() {
         let registry = RemoteEventBridgeRegistry::new();
         assert!(!registry.acquire_subscription("missing-device"));
         assert!(!registry.release_subscription("missing-device"));
+        assert!(!registry.ensure_session_watch("missing-device", "session-a"));
+        assert!(!registry.release_session_watch("missing-device", "session-a"));
 
         // 直接测 runtime 路径与 registry 语义对齐（避免构造完整 AppState 任务）。
         let runtime = BridgeRuntimeState::new();
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
-        runtime.retain_subscription();
+        assert!(runtime.retain_watch_key(WATCH_KEY_DEVICE));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 1);
-        runtime.release_subscription();
+        assert!(runtime.release_watch_key(WATCH_KEY_DEVICE));
         assert_eq!(runtime.subscribers.load(Ordering::SeqCst), 0);
     }
 

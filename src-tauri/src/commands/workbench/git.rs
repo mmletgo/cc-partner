@@ -1312,7 +1312,8 @@ pub(crate) async fn close_sessions_for_worktree(
         // R24 H1 / R25 H1：persist cleanup 成功前保持 Closing barrier；missing handle 也装 intent。
         match state.workbench_sessions.close(&row.id) {
             Ok(cleanup) => {
-                kill_persisted_backend(cleanup.row());
+                // R35 M3：kill 失败不 delete、不 finish（Drop 保留 barrier）。
+                kill_persisted_backend(cleanup.row())?;
                 state.workbench_session_repo.delete(&row.id).await?;
                 cleanup.finish_cleanup();
             }
@@ -1331,7 +1332,7 @@ pub(crate) async fn close_sessions_for_worktree(
                     },
                     Err(error) => return Err(error),
                 };
-                kill_persisted_backend(cleanup.row());
+                kill_persisted_backend(cleanup.row())?;
                 state.workbench_session_repo.delete(&row.id).await?;
                 cleanup.finish_cleanup();
             }

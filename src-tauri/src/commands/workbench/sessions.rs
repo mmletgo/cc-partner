@@ -103,12 +103,18 @@ pub(crate) async fn local_create_workbench_session(
         .require_project_not_closing(&row.project_id)
     {
         drop(spawn_guard);
-        kill_persisted_backend(&row);
+        // create 失败 reclaim：best-effort destroy；metadata 尚未 durable 提交成功，
+        // kill 失败仍返回原始业务错误（不伪装 create 成功）。
+        if let Err(kill_error) = kill_persisted_backend(&row) {
+            tracing::debug!(error = %kill_error, "create reclaim kill_persisted_backend failed");
+        }
         return Err(error);
     }
     if let Err(error) = state.workbench_session_repo.upsert(&row).await {
         drop(spawn_guard);
-        kill_persisted_backend(&row);
+        if let Err(kill_error) = kill_persisted_backend(&row) {
+            tracing::debug!(error = %kill_error, "create reclaim kill_persisted_backend failed");
+        }
         return Err(error);
     }
     // upsert 后再 revalidate：project remove 可能在写库期间完成。
@@ -118,7 +124,9 @@ pub(crate) async fn local_create_workbench_session(
         .is_err()
     {
         drop(spawn_guard);
-        kill_persisted_backend(&row);
+        if let Err(kill_error) = kill_persisted_backend(&row) {
+            tracing::debug!(error = %kill_error, "create reclaim kill_persisted_backend failed");
+        }
         return Err(AppError::unavailable(
             "project_closing_barrier_active".to_string(),
         ));
@@ -127,7 +135,9 @@ pub(crate) async fn local_create_workbench_session(
     if !spawn_guard.commit() {
         // commit 失败：Drop 回收 PTY；仍需销毁 create 新建的 tmux window。
         drop(spawn_guard);
-        kill_persisted_backend(&row);
+        if let Err(kill_error) = kill_persisted_backend(&row) {
+            tracing::debug!(error = %kill_error, "create reclaim kill_persisted_backend failed");
+        }
         return Err(AppError::unavailable(
             "session_spawn_ready_cas_miss".to_string(),
         ));
@@ -235,10 +245,20 @@ pub(crate) async fn create_workbench_session_for_state(
                 },
             )
             .await?;
-        return map_remote_session_dtos(&context.device_id, &context.local_project_id, vec![item])
-            .into_iter()
-            .next()
-            .ok_or_else(|| AppError::generic("远端 session 创建结果为空"));
+        let session = map_remote_session_dtos(
+            &context.device_id,
+            &context.local_project_id,
+            vec![item],
+        )
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::generic("远端 session 创建结果为空"))?;
+        // R35 M2：每个 remote terminal window 独立 session-keyed watch lease，
+        // 关闭其中一个不得把其它仍打开的 session 订阅打到 0。
+        let _ = state
+            .workbench_remote_event_bridges
+            .ensure_session_watch(&context.device_id, &session.id);
+        return Ok(session);
     }
     local_create_workbench_session(state, project_id, worktree_id, initial_cols, initial_rows).await
 }
@@ -774,8 +794,9 @@ pub(crate) async fn local_close_workbench_pane(
             Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": false }))
         }
         PaneCloseOutcome::WindowClosed(cleanup) => {
-            // R24 H1：Closing barrier 覆盖 kill/delete；完成后 finish_cleanup。
-            kill_persisted_backend(cleanup.row());
+            // R24 H1 / R35 M3：kill 成功才 delete + finish_cleanup；
+            // kill 失败保留 barrier/row（SessionCloseCleanup Drop 不清 barrier）。
+            kill_persisted_backend(cleanup.row())?;
             state.workbench_session_repo.delete(&session_id).await?;
             cleanup.finish_cleanup();
             Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": true }))
@@ -802,13 +823,16 @@ pub(crate) async fn close_workbench_pane_for_state(
             .close_pane(&base_url, &inner_session_id)
             .await?;
         if closed_window {
-            // 关闭整个 window 等价于关闭 tab：释放一次 watch subscription。
+            // R35 M2：关闭整个 window 等价于关闭 tab：仅释放该 session 的 watch lease。
             let _ = state
                 .workbench_remote_event_bridges
-                .release_subscription(&parsed.device_id);
+                .release_session_watch(&parsed.device_id, &session_id);
         } else {
-            // 仍有 pane：保持 bridge watch。
+            // 仍有 pane：保持 bridge + 本 session watch。
             ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+            let _ = state
+                .workbench_remote_event_bridges
+                .ensure_session_watch(&parsed.device_id, &session_id);
         }
         return Ok(
             serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": closed_window }),
@@ -858,7 +882,8 @@ pub(crate) async fn local_close_workbench_session(
     // R24 H1 / R25 H1：registry close 或 missing-handle close intent；kill/SQLite 成功后再 finish。
     match state.workbench_sessions.close(&session_id) {
         Ok(cleanup) => {
-            kill_persisted_backend(cleanup.row());
+            // R35 M3：仅 kill Ok 才 delete + finish；Err 时 Drop 保留 barrier。
+            kill_persisted_backend(cleanup.row())?;
             state.workbench_session_repo.delete(&session_id).await?;
             cleanup.finish_cleanup();
         }
@@ -889,7 +914,7 @@ pub(crate) async fn local_close_workbench_session(
                 }
                 Err(error) => return Err(error),
             };
-            kill_persisted_backend(cleanup.row());
+            kill_persisted_backend(cleanup.row())?;
             state.workbench_session_repo.delete(&session_id).await?;
             cleanup.finish_cleanup();
         }
@@ -916,10 +941,11 @@ pub(crate) async fn close_workbench_session_for_state(
             .with_expected_device_id(&parsed.device_id)
             .close_session(&base_url, &inner_session_id)
             .await?;
-        // R31：关闭远端 terminal window 后释放一次 watch subscription。
+        // R35 M2：关闭远端 terminal window 后仅释放该 session 的 watch lease，
+        // 其它仍打开的 remote terminal 保持 subscribers>0。
         let _ = state
             .workbench_remote_event_bridges
-            .release_subscription(&parsed.device_id);
+            .release_session_watch(&parsed.device_id, &session_id);
         return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
     }
     local_close_workbench_session(state, session_id).await

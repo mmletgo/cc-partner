@@ -588,16 +588,23 @@ pub async fn preflight_workspace_restore(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     apply 阶段仅对 preflight 标记 safeAttach 的 session 做幂等 attach。
+///     apply 阶段仅对 preflight 标记 safeAttach 的 session 做幂等 attach；
+///     claim 后必须 re-read durable 并持 project op lease，禁止用预 claim 快照复活已关 tab
+///     或与 project remove 竞态 attach。
 ///
 /// Code Logic（这个函数做什么）:
-///     复核 persisted tmux + target 存在；registry 已有则 reuse；否则仅创建 attach client。
+///     复核 persisted tmux + target 存在；registry 已有则 reuse；否则 claim 后 re-get row、
+///     require_project_not_closing + try_acquire_project_op_lease，用 re-read 行 attach。
+///     缺失 durable 则 finish PersistedDisconnected 且不 attach。
 ///     禁止 new-session/new-window、raw PTY、terminal write、agent resume。
 pub async fn safe_attach_workbench_session(
     ctx: &RestoreInspectionContext,
     session_id: &str,
 ) -> Result<SafeAttachResult, AppError> {
-    use crate::workbench::sessions::{RestoreClaimOutcome, SessionRuntimePresence};
+    use crate::error::AppErrorCategory;
+    use crate::workbench::sessions::{
+        RestoreClaimOutcome, SessionRuntimePresence, SharedRestoreNotification,
+    };
 
     // R19 M2：仅 Live Ready 可 reuse。
     // RestoreInProgress：短自旋等待 holder 结束（Ready→reuse / 释放→可 claim）；
@@ -640,21 +647,23 @@ pub async fn safe_attach_workbench_session(
         SessionRuntimePresence::Missing => {}
     }
 
-    let row = ctx
+    // claim 前 fail-fast：raw PTY / 缺失 target 不进入 claim 路径（避免无意义 claim thrash）。
+    // 真正 attach 以 claim 后 re-read 行为准（R35 M4 / 对齐 R30 restore revalidation）。
+    let preclaim = ctx
         .state
         .workbench_session_repo
         .get(session_id)
         .await?
         .ok_or_else(|| AppError::not_found("session_not_found".to_string()))?;
 
-    if row.backend != "tmux" {
+    if preclaim.backend != "tmux" {
         return Err(AppError::validation(
             "safe_attach_requires_tmux".to_string(),
         ));
     }
 
-    let target = crate::workbench::sessions::tmux_target_string_for_row(&row)?;
-    if !ctx.tmux_target_exists(&target) {
+    let preclaim_target = crate::workbench::sessions::tmux_target_string_for_row(&preclaim)?;
+    if !ctx.tmux_target_exists(&preclaim_target) {
         return Err(AppError::unavailable("tmux_target_missing".to_string()));
     }
 
@@ -707,14 +716,65 @@ pub async fn safe_attach_workbench_session(
 
     let claim_generation = claim_generation.expect("claim generation present after spin");
     // 仅在确认 claimed 后构造 guard（Drop 才安全 generation-scoped 释放本路 claim）
-    let mut guard = crate::workbench::sessions::RestoreClaimGuard::new(
+    let mut claim_guard = crate::workbench::sessions::RestoreClaimGuard::new(
         (*ctx.state.workbench_sessions).clone(),
         session_id.to_string(),
         claim_generation,
     );
 
-    // 再次确认 target（preflight 与 apply 之间可能消失）
+    // R35 M4（对齐 R30 M1）：claim 前快照可能在 claim 窗口被 concurrent close 删除；
+    // claim 成功后 re-read durable，缺失则 finish PersistedDisconnected 且禁止 attach。
+    let Some(row) = ctx.state.workbench_session_repo.get(session_id).await? else {
+        claim_guard.finish(SharedRestoreNotification::PersistedDisconnected);
+        return Err(AppError::not_found("session_not_found".to_string()));
+    };
+    // R26 M1 / R28 H4：project remove 窗口内不得继续 attach；lease 覆盖 attach→Ready。
+    if let Err(error) = ctx
+        .state
+        .workbench_sessions
+        .require_project_not_closing(&row.project_id)
+    {
+        claim_guard.finish(SharedRestoreNotification::Failed(
+            AppErrorCategory::Unavailable,
+        ));
+        return Err(error);
+    }
+    let _project_lease = match ctx
+        .state
+        .workbench_sessions
+        .try_acquire_project_op_lease(&row.project_id)
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            claim_guard.finish(SharedRestoreNotification::Failed(
+                AppErrorCategory::Unavailable,
+            ));
+            return Err(error);
+        }
+    };
+
+    // 用 re-read 行复核 backend/target（claim 窗口内 backend/target 可能变化或消失）
+    if row.backend != "tmux" {
+        claim_guard.finish(SharedRestoreNotification::Failed(
+            AppErrorCategory::Validation,
+        ));
+        return Err(AppError::validation(
+            "safe_attach_requires_tmux".to_string(),
+        ));
+    }
+    let target = match crate::workbench::sessions::tmux_target_string_for_row(&row) {
+        Ok(t) => t,
+        Err(error) => {
+            claim_guard.finish(SharedRestoreNotification::Failed(
+                AppErrorCategory::Validation,
+            ));
+            return Err(error);
+        }
+    };
     if !ctx.tmux_target_exists(&target) {
+        claim_guard.finish(SharedRestoreNotification::Failed(
+            AppErrorCategory::Unavailable,
+        ));
         return Err(AppError::unavailable("tmux_target_missing".to_string()));
     }
 
@@ -723,9 +783,16 @@ pub async fn safe_attach_workbench_session(
         #[cfg(test)]
         {
             // R27 H5：mock 路径也必须 revalidate claim generation 后才 Ready。
-            ctx.state
+            if let Err(error) = ctx
+                .state
                 .workbench_sessions
-                .require_restore_claim_active(&row.id, claim_generation)?;
+                .require_restore_claim_active(&row.id, claim_generation)
+            {
+                claim_guard.finish(SharedRestoreNotification::Failed(
+                    AppErrorCategory::Unavailable,
+                ));
+                return Err(error);
+            }
             ctx.counters.attach_client.fetch_add(1, Ordering::SeqCst);
             let sid = row.id.clone();
             ctx.state
@@ -745,6 +812,9 @@ pub async fn safe_attach_workbench_session(
                 .workbench_sessions
                 .mark_session_ready_for_generation(&sid, gen, Some(&ctx.state))
             {
+                claim_guard.finish(SharedRestoreNotification::Failed(
+                    AppErrorCategory::Unavailable,
+                ));
                 return Err(AppError::unavailable(
                     "session_restore_claim_revoked".to_string(),
                 ));
@@ -753,21 +823,27 @@ pub async fn safe_attach_workbench_session(
         #[cfg(not(test))]
         {
             let _ = row;
+            claim_guard.finish(SharedRestoreNotification::Failed(
+                AppErrorCategory::Internal,
+            ));
             return Err(AppError::generic(
                 "safe_attach mock path is test-only".to_string(),
             ));
         }
-    } else {
-        crate::workbench::sessions::safe_attach_existing_tmux_session(
-            &ctx.state,
-            row,
-            &ctx.counters,
-            Some(claim_generation),
-        )?;
+    } else if let Err(error) = crate::workbench::sessions::safe_attach_existing_tmux_session(
+        &ctx.state,
+        row,
+        &ctx.counters,
+        Some(claim_generation),
+    ) {
+        claim_guard.finish(SharedRestoreNotification::Failed(
+            AppErrorCategory::Unavailable,
+        ));
+        return Err(error);
     }
 
     // R16：显式广播 Ready，禁止仅 release 让 waiter 误判。
-    guard.finish(crate::workbench::sessions::SharedRestoreNotification::Ready);
+    claim_guard.finish(SharedRestoreNotification::Ready);
 
     Ok(SafeAttachResult {
         session_id: session_id.to_string(),
@@ -1645,5 +1721,58 @@ mod tests {
         let err = fixture.safe_attach("s1").await.unwrap_err();
         assert_eq!(err.code(), "tmux_target_missing");
         assert_eq!(fixture.attach_client_count(), 0);
+    }
+
+    /// Business Logic（R35 M4: 为什么需要这个测试）:
+    ///     claim 成功后 durable 行可能已被 concurrent close 删除；safe_attach 必须 re-read，
+    ///     缺失则 not_found，禁止用 pre-claim 快照 attach。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     先 upsert tmux 行与 target，再 delete 后调用 safe_attach；断言 session_not_found
+    ///     且 attach_client 仍为 0（claim 前 get 即 miss；亦覆盖 re-read miss 同出口）。
+    #[tokio::test]
+    async fn safe_attach_rejects_missing_after_delete() {
+        let fixture = RestoreFixture::base()
+            .await
+            .persisted_tmux("s1")
+            .await
+            .tmux_target_present();
+        fixture
+            .ctx
+            .state
+            .workbench_session_repo
+            .delete("s1")
+            .await
+            .unwrap();
+        let err = fixture.safe_attach("s1").await.unwrap_err();
+        assert_eq!(err.code(), "session_not_found");
+        assert_eq!(fixture.attach_client_count(), 0);
+        assert_eq!(fixture.tmux_new_session_count(), 0);
+        assert!(!fixture.ctx.state.workbench_sessions.contains("s1"));
+    }
+
+    /// Business Logic（R35 M4: 为什么需要这个测试）:
+    ///     project remove 窗口内不得继续 safe_attach，须持 project op lease 并 fail-closed。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     begin_project_closing_barrier 后 safe_attach；断言 project_closing_barrier_active，
+    ///     且未创建 attach client。
+    #[tokio::test]
+    async fn safe_attach_rejects_when_project_closing() {
+        let fixture = RestoreFixture::base()
+            .await
+            .persisted_tmux("s1")
+            .await
+            .tmux_target_present();
+        let _ = fixture
+            .ctx
+            .state
+            .workbench_sessions
+            .begin_project_closing_barrier("p1");
+        let err = fixture.safe_attach("s1").await.unwrap_err();
+        assert_eq!(err.code(), "project_closing_barrier_active");
+        assert_eq!(fixture.attach_client_count(), 0);
+        assert_eq!(fixture.tmux_new_session_count(), 0);
+        assert!(!fixture.ctx.state.workbench_sessions.contains("s1"));
     }
 }

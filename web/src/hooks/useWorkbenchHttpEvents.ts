@@ -292,11 +292,13 @@ export function advanceWorkbenchHttpStreamCursor(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Gap resync 成功后应 attach 到 gap.latest；失败或不完整必须保留 recovery，禁止 cursor=None brand-new。
- *   R32 M1：首帧 Gap（pre-gap cursor 为空）时，recovery 用 gap owner + sequence 0，避免重连变 brand-new consumer。
+ *   Gap resync 成功后应 attach 到 gap.latest（含 latest=0 的新 owner cutover），
+ *   否则旧 preGapCursor 会让客户端继续按旧 owner 追赶，形成无限 Gap 循环。
+ *   失败或不完整必须保留 recovery，禁止 cursor=None brand-new。
+ *   R32 M1：首帧 Gap（pre-gap cursor 为空）且 resync 未成功时，recovery 用 gap owner + sequence 0。
  *
  * Code Logic（这个函数做什么）:
- *   resyncSucceeded 且 owner 非空且 latest>0 → `{owner, latest}`；
+ *   resyncSucceeded 且 owner 非空 → 始终 `{owner, latest}`（允许 latest=0）；
  *   否则优先 preGapCursor；若 pre 为空且 gap owner 合法 → `{owner, 0}`（sequence 0 recovery）。
  */
 export function resolveCursorAfterGap(
@@ -307,8 +309,7 @@ export function resolveCursorAfterGap(
   if (
     resyncSucceeded &&
     typeof gap.ownerInstanceId === 'string' &&
-    gap.ownerInstanceId.trim().length > 0 &&
-    gap.latest > 0
+    gap.ownerInstanceId.trim().length > 0
   ) {
     return { ownerInstanceId: gap.ownerInstanceId, sequence: gap.latest };
   }
@@ -703,10 +704,12 @@ export function useWorkbenchHttpEvents({
       /**
        * Business Logic（为什么需要这个函数）:
        *   Gap 帧意味着 silent loss 风险；必须立刻 pause live 并权威 resync，再以正确 cursor 重连。
+       *   新 owner latest=0 的成功 cutover 也必须清 recoveryPending，避免卡在 Gap 循环。
        *
        * Code Logic（这个函数做什么）:
        *   冻结 pre-gap cursor → resync running sessions → resolveCursorAfterGap →
-       *   设置 recoveryPending（失败/首帧）→ abort child。
+       *   resync 成功且 cursor 已 attach 到 gap owner（含 sequence 0）则清 recoveryPending；
+       *   否则保持 recoveryPending → abort child。
        */
       const handleGap = async (gap: WorkbenchHttpGapFrame): Promise<void> => {
         if (gapHandled || stopped || lifecycleController.signal.aborted) return;
@@ -721,15 +724,20 @@ export function useWorkbenchHttpEvents({
           resyncSucceeded = false;
         }
         streamCursor = resolveCursorAfterGap(preGapCursor, gap, resyncSucceeded);
-        // R32 M1：成功 attach latest 清 recovery；失败或 first-gap 保留 recoveryPending。
-        recoveryPending = !resyncSucceeded || !streamCursor;
-        // 若 resync 成功但 latest==0 导致仍用 recovery，同样保持 pending 直至 live 推进。
-        if (resyncSucceeded && streamCursor && streamCursor.sequence > 0) {
+        // R35 M1：成功 attach 到 gap owner（含 latest=0）即清 recovery；否则保持 pending。
+        if (
+          resyncSucceeded &&
+          streamCursor &&
+          streamCursor.ownerInstanceId === gap.ownerInstanceId
+        ) {
           recoveryPending = false;
         } else if (!streamCursor) {
           // resolve 应至少给出 gap owner+0；仍为空则保持 pending，禁止 bare。
           recoveryPending = true;
         } else if (!resyncSucceeded) {
+          recoveryPending = true;
+        } else {
+          // 兜底：成功但未 attach 到 gap owner 时仍保持 pending。
           recoveryPending = true;
         }
         connectionController.abort();

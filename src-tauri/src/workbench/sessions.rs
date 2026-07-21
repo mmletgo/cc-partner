@@ -1527,19 +1527,27 @@ fn kill_created_tmux_window_only(row: &WorkbenchSessionRow) {
 
 /// Business Logic（为什么需要这个函数）:
 ///     用户关闭终端 tab 时，如果该 tab 使用 tmux 承载上下文，应销毁对应 tmux window/session，避免后台残留。
+///     R35 M3：销毁失败时不得假装成功——调用方据此决定是否删除 SQLite 元数据与 finish_cleanup；
+///     无法确认后端已销毁时必须保留 metadata/barrier，禁止留下“元数据已删、tmux 仍活”的孤儿。
 ///
 /// Code Logic（这个函数做什么）:
-///     list-windows 探测 window_count；多 window 或探测失败但有 window_id 时 kill-window；
-///     最后一窗 kill-session；探测失败且无 window_id 时 fail closed 不杀。
-pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
+///     - 非 tmux backend / 缺 backend_id → Ok（无需销毁）；
+///     - tmux backend 但 tmux 不可用 → Err(unavailable)，禁止删元数据；
+///     - list-windows 探测 window_count；多 window 或探测失败但有 window_id 时 kill-window；
+///     - 最后一窗 kill-session；探测失败且无 window_id 时 fail closed 返回 Err（不杀、不删）；
+///     - destroy 非零退出：仅当 stderr/stdout 表明 already-gone 时 Ok，否则 Err；
+///     - command.output() IO 错误 → Err。
+pub fn kill_persisted_backend(row: &WorkbenchSessionRow) -> Result<(), AppError> {
     if row.backend != TMUX_BACKEND {
-        return;
+        return Ok(());
     }
     let Some(session_name) = row.backend_id.as_deref() else {
-        return;
+        return Ok(());
     };
     let Some(tmux) = available_tmux_command() else {
-        return;
+        return Err(AppError::unavailable(
+            "tmux_unavailable_for_persisted_backend_kill".to_string(),
+        ));
     };
     let window_count = run_tmux_command(
         &tmux,
@@ -1555,17 +1563,75 @@ pub fn kill_persisted_backend(row: &WorkbenchSessionRow) {
     let Some(args) =
         tmux_destroy_backend_args(session_name, row.backend_window_id.as_deref(), window_count)
     else {
-        // R32 H1：list-windows 失败且无 window_id → fail closed，不 kill-session。
+        // R32 H1 / R35 M3：list-windows 失败且无 window_id → fail closed，不 kill-session，
+        // 且返回 Err 阻止调用方删除 SQLite（无法确认可安全销毁）。
         tracing::debug!(
             "kill_persisted_backend skipped: list-windows failed without window_id"
         );
-        return;
+        return Err(AppError::unavailable(
+            "tmux_destroy_probe_failed_without_window_id".to_string(),
+        ));
     };
+    run_tmux_destroy_command(&tmux, &args)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     destroy 命令非零退出时，目标 window/session 可能早已不存在（竞态/重复 close）；
+///     这类“已经没了”应视为成功，否则会卡住 barrier、永远删不掉元数据。
+///
+/// Code Logic（这个函数做什么）:
+///     对 stdout+stderr 做大小写不敏感子串匹配：can't find / no server / no such / not found。
+fn tmux_destroy_exit_is_already_gone(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    combined.contains("can't find")
+        || combined.contains("can not find")
+        || combined.contains("no server")
+        || combined.contains("no such")
+        || combined.contains("not found")
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     kill_persisted_backend 需要把 destroy 子进程的 exit/IO 语义统一成 Result，
+///     避免调用方各自解析 command.output() 并误把失败当成功。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 tmux destroy args；success exit → Ok；already-gone 文案 → Ok；其它非零/IO → Err。
+fn run_tmux_destroy_command(tmux: &TmuxCommand, args: &[String]) -> Result<(), AppError> {
     let mut command = tmux.std_command();
     command.args(args.iter().map(String::as_str));
-    let output = command.output();
-    if let Err(error) = output {
-        tracing::debug!("销毁工作台 tmux 会话失败: {error}");
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::debug!("销毁工作台 tmux 会话 IO 失败: {error}");
+            return Err(AppError::from(error));
+        }
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if tmux_destroy_exit_is_already_gone(&stdout, &stderr) {
+        tracing::debug!(
+            stderr = %stderr,
+            "tmux destroy already gone; treating as success"
+        );
+        return Ok(());
+    }
+    tracing::debug!(
+        status = ?output.status,
+        stderr = %stderr,
+        "销毁工作台 tmux 会话非零退出"
+    );
+    let detail = stderr.trim();
+    if detail.is_empty() {
+        Err(AppError::unavailable(
+            "tmux_destroy_failed".to_string(),
+        ))
+    } else {
+        Err(AppError::unavailable(format!(
+            "tmux_destroy_failed: {detail}"
+        )))
     }
 }
 
@@ -7297,6 +7363,55 @@ mod tests {
         let mut missing = fake_tmux_row("s-r32-h1-miss", "p-r32", Some("wt1"), "@99");
         missing.backend_window_id = None;
         kill_created_tmux_window_only(&missing);
+    }
+
+    /// Business Logic（R35 M3: 为什么需要这个测试）:
+    ///     destroy 非零退出时，already-gone 文案必须映射为成功，否则 close 路径会永远卡在 barrier。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     覆盖 can't find / no server / no such / not found 及大小写；无关错误返回 false。
+    #[test]
+    fn tmux_destroy_exit_is_already_gone_detects_common_messages() {
+        assert!(tmux_destroy_exit_is_already_gone(
+            "",
+            "can't find window: @1"
+        ));
+        assert!(tmux_destroy_exit_is_already_gone(
+            "Can't Find session",
+            ""
+        ));
+        assert!(tmux_destroy_exit_is_already_gone(
+            "",
+            "no server running on /tmp/tmux-1000/default"
+        ));
+        assert!(tmux_destroy_exit_is_already_gone(
+            "",
+            "no such window: @9"
+        ));
+        assert!(tmux_destroy_exit_is_already_gone("", "session not found"));
+        assert!(!tmux_destroy_exit_is_already_gone(
+            "",
+            "permission denied"
+        ));
+        assert!(!tmux_destroy_exit_is_already_gone("", ""));
+    }
+
+    /// Business Logic（R35 M3: 为什么需要这个测试）:
+    ///     非 tmux / 无 backend_id 时 kill 应 Ok（无后端可杀），避免误阻 SQLite delete。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 raw/pty 行与缺 backend_id 的 tmux 行，断言 kill_persisted_backend 返回 Ok。
+    #[test]
+    fn kill_persisted_backend_ok_when_no_tmux_backend_to_destroy() {
+        let mut raw = fake_tmux_row("s-raw", "p1", Some("wt1"), "@1");
+        raw.backend = "raw".to_string();
+        raw.backend_id = None;
+        raw.backend_window_id = None;
+        assert!(kill_persisted_backend(&raw).is_ok());
+
+        let mut no_id = fake_tmux_row("s-no-id", "p1", Some("wt1"), "@1");
+        no_id.backend_id = None;
+        assert!(kill_persisted_backend(&no_id).is_ok());
     }
 
     /// Business Logic（为什么需要这个测试）:
