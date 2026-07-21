@@ -4,6 +4,7 @@ import {
   buildWorkbenchEventsUrl,
   canOpenWorkbenchEventsRequest,
   consumeWorkbenchHttpEvent,
+  isMappedInventoryUnsupportedError,
   isWorkbenchHttpGapPayload,
   parseWorkbenchNdjsonChunk,
   parseWorkbenchNdjsonFrame,
@@ -15,6 +16,7 @@ import {
   WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
   type WorkbenchNdjsonParserState,
 } from './useWorkbenchHttpEvents';
+import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
 import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 /**
@@ -556,16 +558,43 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
   });
 
   /**
-   * Business Logic（R42 M2: 为什么需要这个测试）:
+   * Business Logic（R42 M2 / R43 M2: 为什么需要这个测试）:
    *   同设备活跃 P1 + 失效 P2 时，device 级 inventory 会 list 到 P2 并 fail-closed 阻塞整次 resync。
    *   必须只 inventory active mapped local project ids。
+   *   R43 M2：mapped inventory 普通失败必须 fail-closed；仅 404/unsupported 回退 device 级。
    *
    * Code Logic（这个测试做什么）:
    *   1) mapped 含 P1 不含 P2：只 list P1，P2 失败也不会被调用。
    *   2) mapped 空数组：remote list 调用次数为 0。
-   *   3) mapped 端点 throw：fail-soft skip-offline，P2 list 失败不挡本机。
-   *   4) 未注入 mapped、仅 device：仍走 device 级兼容（P1+P2 同 device 都会 list）。
+   *   3) mapped 端点普通失败：resync rejects，不走 device / skip-offline soft-success。
+   *   4) mapped 404/unsupported：回退 active devices fail-closed（P2 list 失败则整次 reject）。
+   *   5) 未注入 mapped、仅 device：仍走 device 级兼容（P1+P2 同 device 都会 list）。
    */
+
+  /**
+   * Business Logic（R43 M2: 为什么需要这个测试）:
+   *   mapped inventory 失败分类必须只把 404/unsupported 当兼容回退，不能把 network 当 soft-success。
+   *
+   * Code Logic（这个测试做什么）:
+   *   校验 isMappedInventoryUnsupportedError 对 404/unsupported/protocol+HTTP 404 为 true，
+   *   对 network/普通 unavailable 为 false。
+   */
+  test('isMappedInventoryUnsupportedError only accepts 404/unsupported', () => {
+    expect(isMappedInventoryUnsupportedError(new Error('mapped endpoint unavailable'))).toBe(false);
+    expect(
+      isMappedInventoryUnsupportedError(new OrchestratorRuntimeTransportError('network down', 'network')),
+    ).toBe(false);
+    expect(
+      isMappedInventoryUnsupportedError(new OrchestratorRuntimeTransportError('HTTP 500', 'protocol')),
+    ).toBe(false);
+    expect(
+      isMappedInventoryUnsupportedError(new OrchestratorRuntimeTransportError('HTTP 404', 'protocol')),
+    ).toBe(true);
+    expect(isMappedInventoryUnsupportedError(new Error('route not found'))).toBe(true);
+    expect(isMappedInventoryUnsupportedError(new Error('unsupported mapped inventory'))).toBe(true);
+    expect(isMappedInventoryUnsupportedError({ status: 404, message: 'missing' })).toBe(true);
+  });
+
   test('resync inventories only active mapped projects on same device', async () => {
     const reset = vi.fn();
     const store = { reset } as unknown as WorkbenchTerminalBufferStore;
@@ -643,8 +672,8 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
     expect(emptyMapped.replay).toHaveBeenCalledWith('local-run');
     expect(emptyReset).toHaveBeenCalledWith('local-run', 'local-only', 7, 'local-own');
 
-    // 3) mapped endpoint 失败：fail-soft skip-offline，P2 throw 不挡本机。
-    const mappedFailSoft = {
+    // 3) mapped endpoint 普通失败：fail-closed reject，不得 skip-offline soft-success。
+    const mappedFailHard = {
       list: vi.fn(async (projectId?: string | null) => {
         if (!projectId) return [{ id: 'local-run', status: 'running' }];
         if (projectId === p1) return [{ id: 'remote:dev:s1', status: 'running' }];
@@ -666,20 +695,52 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
         ownerInstanceId: 'own',
       })),
     };
-    const softReset = vi.fn();
-    const softStore = { reset: softReset } as unknown as WorkbenchTerminalBufferStore;
-    await expect(resyncWorkbenchSessionsAfterGap(softStore, mappedFailSoft)).resolves.toBeUndefined();
-    expect(mappedFailSoft.listActiveMappedProjects).toHaveBeenCalledTimes(1);
-    // fail-soft 不走 device fail-closed。
-    expect(mappedFailSoft.listActiveBridgeDevices).not.toHaveBeenCalled();
-    expect(mappedFailSoft.list).toHaveBeenCalledWith(p1);
-    expect(mappedFailSoft.list).toHaveBeenCalledWith(p2);
-    expect(mappedFailSoft.replay).toHaveBeenCalledWith('local-run');
-    expect(mappedFailSoft.replay).toHaveBeenCalledWith('remote:dev:s1');
-    expect(softReset).toHaveBeenCalledWith('local-run', 'buf', 3, 'own');
-    expect(softReset).toHaveBeenCalledWith('remote:dev:s1', 'buf', 3, 'own');
+    const hardReset = vi.fn();
+    const hardStore = { reset: hardReset } as unknown as WorkbenchTerminalBufferStore;
+    await expect(resyncWorkbenchSessionsAfterGap(hardStore, mappedFailHard)).rejects.toThrow(
+      /mapped endpoint unavailable/,
+    );
+    expect(mappedFailHard.listActiveMappedProjects).toHaveBeenCalledTimes(1);
+    // 非 404/unsupported 不得回退 device，也不得 list remote。
+    expect(mappedFailHard.listActiveBridgeDevices).not.toHaveBeenCalled();
+    expect(mappedFailHard.list).toHaveBeenCalledTimes(1);
+    expect(mappedFailHard.list).toHaveBeenCalledWith();
+    expect(mappedFailHard.list).not.toHaveBeenCalledWith(p1);
+    expect(mappedFailHard.list).not.toHaveBeenCalledWith(p2);
+    expect(mappedFailHard.replay).not.toHaveBeenCalled();
+    expect(hardReset).not.toHaveBeenCalled();
 
-    // 4) 未注入 mapped：device 级兼容，同 device 的 P1+P2 都会 list；P2 失败 fail-closed。
+    // 4) mapped 404/unsupported：回退 active devices fail-closed；P2 list 失败则整次 reject。
+    const mappedUnsupported = {
+      list: vi.fn(async (projectId?: string | null) => {
+        if (!projectId) return [{ id: 'local-run', status: 'running' }];
+        if (projectId === p1) return [{ id: 'remote:dev:s1', status: 'running' }];
+        throw new Error('stale P2 list failed');
+      }),
+      listProjects: vi.fn(async () => [
+        { id: p1, kind: 'remote', deviceId: 'dev' },
+        { id: p2, kind: 'remote', deviceId: 'dev' },
+      ]),
+      listActiveMappedProjects: vi.fn(async () => {
+        throw new OrchestratorRuntimeTransportError('HTTP 404', 'protocol');
+      }),
+      listActiveBridgeDevices: vi.fn(async () => ['dev']),
+      replay: vi.fn(async () => ({
+        sessionId: 'x',
+        buffer: '',
+        truncated: false,
+        lastSeq: 0,
+      })),
+    };
+    await expect(resyncWorkbenchSessionsAfterGap(store, mappedUnsupported)).rejects.toThrow(
+      /stale P2 list failed/,
+    );
+    expect(mappedUnsupported.listActiveMappedProjects).toHaveBeenCalledTimes(1);
+    expect(mappedUnsupported.listActiveBridgeDevices).toHaveBeenCalledTimes(1);
+    expect(mappedUnsupported.list).toHaveBeenCalledWith(p1);
+    expect(mappedUnsupported.list).toHaveBeenCalledWith(p2);
+
+    // 5) 未注入 mapped：device 级兼容，同 device 的 P1+P2 都会 list；P2 失败 fail-closed。
     const deviceCompat = {
       list: vi.fn(async (projectId?: string | null) => {
         if (!projectId) return [{ id: 'local-run', status: 'running' }];

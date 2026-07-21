@@ -28,6 +28,7 @@ import {
   listActiveBridgeDevicesHttp,
   listActiveMappedProjectsHttp,
 } from '@/api/workbenchHttp';
+import { OrchestratorRuntimeTransportError } from '@/api/orchestratorRuntimeTransportError';
 import type { WorkbenchTerminalBufferStore } from './workbenchTerminalBuffer';
 
 /** 断线后重连延迟（毫秒）。 */
@@ -138,7 +139,9 @@ export interface WorkbenchHttpEventsSessionDeps {
    * Code Logic（字段说明）:
    *   可选：active mapped local project id 列表。
    *   **已提供且调用成功**（含空数组）→ 权威：空集合跳过全部 remote；非空仅 list 命中 id 且
-   *   fail-closed。**调用失败** → fail-soft skip-offline（不永久阻塞）。**未提供** → 走 device 级/fallback。
+   *   fail-closed。**调用失败且为 404/unsupported** → device 级兼容回退（R43 M2）。
+   *   **其他调用失败** → throw fail-closed（禁止 skip-offline soft-success）。
+   *   **未提供** → 走 device 级/fallback。
    */
   listActiveMappedProjects?: () => Promise<string[]>;
   /**
@@ -542,6 +545,64 @@ export function projectInventoryTerminalStatuses(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   R43 M2：Gap mapped inventory 失败时，仅旧后端无路由（404/unsupported）才允许
+ *   device 级兼容回退；network/timeout/5xx 等必须 fail-closed，禁止 soft-success。
+ *
+ * Code Logic（这个函数做什么）:
+ *   识别明确的 unsupported/404 错误：
+ *   - 对象带 status/statusCode/httpStatus === 404
+ *   - message 含 404 / not found / unsupported（大小写不敏感）
+ *   - OrchestratorRuntimeTransportError 且 kind==='protocol' 且 message 暗示 404/unsupported
+ *   不对任意 network/timeout 失败返回 true。
+ */
+export function isMappedInventoryUnsupportedError(error: unknown): boolean {
+  if (error == null) return false;
+
+  const statusCandidates: unknown[] = [];
+  if (typeof error === 'object') {
+    const record = error as Record<string, unknown>;
+    statusCandidates.push(record.status, record.statusCode, record.httpStatus);
+  }
+  for (const status of statusCandidates) {
+    if (status === 404 || status === '404') return true;
+  }
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : typeof error === 'object' &&
+            error !== null &&
+            'message' in error &&
+            typeof (error as { message: unknown }).message === 'string'
+          ? (error as { message: string }).message
+          : '';
+  const lower = message.toLowerCase();
+  const looksUnsupported =
+    lower.includes('unsupported') ||
+    lower.includes('404') ||
+    lower.includes('not found');
+
+  if (
+    error instanceof OrchestratorRuntimeTransportError &&
+    error.kind === 'protocol' &&
+    looksUnsupported
+  ) {
+    return true;
+  }
+
+  // 普通 Error / 协议消息：仅当 message 明确暗示 404/unsupported。
+  if (looksUnsupported && !(error instanceof OrchestratorRuntimeTransportError)) {
+    return true;
+  }
+
+  // protocol kind 但 message 无 404/unsupported 暗示：不是旧路由兼容失败。
+  return false;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Gap 后不能继续消费 laggy live 尾部；必须对 running session 做权威 replay 覆盖 buffer。
  *   R37 M1：裸 sessions.list() 无 project 会漏 remote shortcut；存在 remote 时必须按项目 inventory。
  *   R38 M1 / R39 M1 / R40 M1：production 曾注入 listActiveBridgeDevices；
@@ -550,13 +611,19 @@ export function projectInventoryTerminalStatuses(
  *   不能只 replay running；否则 Mobile UI 会卡在 running。
  *   R42 M2：优先 listActiveMappedProjects（active bridge 已映射 local project ids）；
  *   同设备活跃 P1 + 失效 P2 时只 inventory P1，stale P2 list 失败不得挡整次 resync。
+ *   R43 M2：mapped inventory 失败不得 soft-success 推进 Gap cursor。
+ *   仅明确 404/unsupported（旧后端无路由）才 device 级兼容回退；其余失败 throw fail-closed。
  *
  * Code Logic（这个函数做什么）:
  *   本机 sessions.list()（无 projectId）失败仍 throw。
  *   有 listProjects 时取 kind===remote 的项目：
  *   - listActiveMappedProjects **已提供且调用成功**（含空数组）：仅 inventory 命中 project.id；
  *     空集合跳过全部 remote；命中 id fail-closed。
- *   - listActiveMappedProjects **调用失败**：fail-soft 对全部 remote skip-offline（不永久阻塞）。
+ *   - listActiveMappedProjects **调用失败且 isMappedInventoryUnsupportedError**：
+ *     device 级兼容回退到 listActiveBridgeDevices（active set 空→跳过全部 remote；
+ *     device 在 set 内 sessions.list fail-closed；不在 set→skip）。
+ *   - listActiveMappedProjects **其他失败**（network/timeout/5xx/protocol 等）：**throw**，
+ *     禁止 skip-offline soft-success，禁止推进 Gap cursor。
  *   - mapped **未提供**且 listActiveBridgeDevices **已提供**：device 级兼容路径（R39/R40）。
  *   - 两者都未提供：兼容 fallback——每个 remote try list，成功 merge、失败 skip。
  *   无 listProjects 时退回 sessions.list()。
@@ -599,6 +666,41 @@ export async function resyncWorkbenchSessionsAfterGap(
     }
   };
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   device 级兼容路径：mapped 未注入或旧后端 mapped 路由 404/unsupported 时，
+   *   仍须按 active bridge devices fail-closed inventory，不得 skip-offline soft-success。
+   *
+   * Code Logic（这个函数做什么）:
+   *   有 listActiveBridgeDevices 则构造 active set（空 set 跳过全部 remote；
+   *   device 在 set 内 list fail-closed；不在 set 跳过）；否则全部 remote skip-offline。
+   */
+  const inventoryRemoteByDeviceCompat = async (
+    remoteProjects: Array<{ id: string; kind?: string; deviceId?: string }>,
+  ): Promise<void> => {
+    const hasActiveBridgeInventory = typeof sessions.listActiveBridgeDevices === 'function';
+    const activeSet = hasActiveBridgeInventory
+      ? new Set(
+          (await sessions.listActiveBridgeDevices!()).filter((id) => id.trim().length > 0),
+        )
+      : null;
+
+    for (const project of remoteProjects) {
+      if (activeSet) {
+        const deviceId = resolveRemoteProjectDeviceId(project);
+        if (!deviceId || !activeSet.has(deviceId)) {
+          // 非活跃 / 空 active set：完全跳过，不 list、不唤醒离线远端。
+          continue;
+        }
+        // 活跃 bridge remote：fail-closed。
+        mergeListed(await sessions.list(project.id));
+        continue;
+      }
+
+      await listRemoteSkipOffline(project.id);
+    }
+  };
+
   // 本机全局 list（无 projectId）失败必须 throw，不得被 remote skip 掩盖。
   mergeListed(await sessions.list());
 
@@ -606,18 +708,22 @@ export async function resyncWorkbenchSessionsAfterGap(
     const projects = await sessions.listProjects();
     const remoteProjects = projects.filter((project) => project.kind === 'remote');
 
-    // R42 M2：mapped projects 优先于 device 级 inventory。
+    // R42 M2 / R43 M2：mapped projects 优先；仅 404/unsupported 回退 device 级。
     const hasMappedInventory = typeof sessions.listActiveMappedProjects === 'function';
     let mappedSet: Set<string> | null = null;
-    let mappedFetchFailed = false;
+    let mappedUnsupportedFallback = false;
     if (hasMappedInventory) {
       try {
         mappedSet = new Set(
           (await sessions.listActiveMappedProjects!()).filter((id) => id.trim().length > 0),
         );
-      } catch {
-        // mapped endpoint 失败：fail-soft，避免永久阻塞本机 recovery。
-        mappedFetchFailed = true;
+      } catch (error) {
+        // R43 M2：仅旧后端无 mapped 路由（404/unsupported）才 device 级兼容；
+        // network/timeout/5xx 等必须 throw，禁止 skip-offline soft-success 推进 cursor。
+        if (!isMappedInventoryUnsupportedError(error)) {
+          throw error;
+        }
+        mappedUnsupportedFallback = true;
         mappedSet = null;
       }
     }
@@ -630,34 +736,9 @@ export async function resyncWorkbenchSessionsAfterGap(
         }
         mergeListed(await sessions.list(project.id));
       }
-    } else if (mappedFetchFailed) {
-      // mapped 调用失败：不回退 device fail-closed，全部 remote skip-offline。
-      for (const project of remoteProjects) {
-        await listRemoteSkipOffline(project.id);
-      }
-    } else {
-      // mapped 未注入：device 级兼容（R39/R40）或 skip-offline fallback。
-      const hasActiveBridgeInventory = typeof sessions.listActiveBridgeDevices === 'function';
-      const activeSet = hasActiveBridgeInventory
-        ? new Set(
-            (await sessions.listActiveBridgeDevices!()).filter((id) => id.trim().length > 0),
-          )
-        : null;
-
-      for (const project of remoteProjects) {
-        if (activeSet) {
-          const deviceId = resolveRemoteProjectDeviceId(project);
-          if (!deviceId || !activeSet.has(deviceId)) {
-            // 非活跃 / 空 active set：完全跳过，不 list、不唤醒离线远端。
-            continue;
-          }
-          // 活跃 bridge remote：fail-closed。
-          mergeListed(await sessions.list(project.id));
-          continue;
-        }
-
-        await listRemoteSkipOffline(project.id);
-      }
+    } else if (mappedUnsupportedFallback || !hasMappedInventory) {
+      // mapped 404/unsupported 回退，或 mapped 未注入：device 级兼容 / skip-offline。
+      await inventoryRemoteByDeviceCompat(remoteProjects);
     }
   }
 
@@ -675,6 +756,7 @@ export async function resyncWorkbenchSessionsAfterGap(
   // R41 M5：成功 inventory 后投影全部 listed session 状态（不只 running）。
   projectInventoryTerminalStatuses(byId.values(), options?.onTerminalStatus);
 }
+
 
 /**
  * Business Logic（为什么需要这个函数）:
