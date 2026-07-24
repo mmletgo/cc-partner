@@ -10,7 +10,7 @@
  * Code Logic（这个页面做什么）:
  *   - 顶部 page header（eyebrow/title/lead）
  *   - 工具栏：「刷新采集」按钮（ccHistoryApi.refresh）+「同步」按钮（promptsApi.sync）
- *   - 主体双栏 grid：左栏项目列表（点击高亮选中）、右栏项目筛选器 + 搜索框 + prompt 时间线
+ *   - 主体双栏 grid：左栏项目筛选器、项目搜索与列表，右栏 Prompt 搜索框 + 时间线
  *   - 数据流：loadProjects → 进页默认选中第一个项目；selectedProjectPath/search 变化 → loadPrompts
  *   - 使用独立 projectGuard / promptGuard（createLatestRequestGuard）在 success/catch/finally
  *     写状态前校验 token+context；selectedProject 变为 null 时 invalidate promptGuard
@@ -477,9 +477,28 @@ export function CcHistory() {
         <aside className={styles.sidebar} aria-label={t('ccHistory:projectListAriaLabel')}>
           {projects.length > 0 ? (
             <div className={styles.projectSearch}>
+              <label className={styles.filterField}>
+                <span className={styles.filterLabel}>{t('ccHistory:projectFilterLabel')}</span>
+                <span className={styles.selectWrap}>
+                  <select
+                    className={styles.projectSelect}
+                    value={selectedProjectPath ?? ''}
+                    onChange={(event) => setSelectedProjectPath(event.target.value)}
+                    aria-label={t('ccHistory:projectFilterAriaLabel')}
+                  >
+                    {projects.map((project) => (
+                      <option key={project.projectPath} value={project.projectPath}>
+                        {project.projectName} · {project.projectPath}
+                      </option>
+                    ))}
+                  </select>
+                  <span className={styles.selectArrow} aria-hidden="true">
+                    ▾
+                  </span>
+                </span>
+              </label>
               <Input
                 type="search"
-                size="sm"
                 value={projectSearch}
                 onChange={(e) => setProjectSearch(e.target.value)}
                 placeholder={t('ccHistory:projectSearchPlaceholder')}
@@ -547,29 +566,9 @@ export function CcHistory() {
 
         {/* 右栏：prompt 时间线 */}
         <div className={styles.detail} aria-label={t('ccHistory:promptListAriaLabel')}>
-          {/* 项目筛选 + Prompt 搜索 */}
+          {/* Prompt 搜索 */}
           {selectedProject ? (
             <div className={styles.searchWrap}>
-              <label className={styles.filterField}>
-                <span className={styles.filterLabel}>{t('ccHistory:projectFilterLabel')}</span>
-                <span className={styles.selectWrap}>
-                  <select
-                    className={styles.projectSelect}
-                    value={selectedProjectPath ?? ''}
-                    onChange={(event) => setSelectedProjectPath(event.target.value)}
-                    aria-label={t('ccHistory:projectFilterAriaLabel')}
-                  >
-                    {projects.map((project) => (
-                      <option key={project.projectPath} value={project.projectPath}>
-                        {project.projectName} · {project.projectPath}
-                      </option>
-                    ))}
-                  </select>
-                  <span className={styles.selectArrow} aria-hidden="true">
-                    ▾
-                  </span>
-                </span>
-              </label>
               <label className={[styles.filterField, styles.promptFilter].join(' ')}>
                 <span className={styles.filterLabel}>{t('ccHistory:searchLabel')}</span>
                 <Input

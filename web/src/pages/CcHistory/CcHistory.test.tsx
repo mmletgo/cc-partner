@@ -12,7 +12,7 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 
 import i18n from '@/i18n';
@@ -162,7 +162,8 @@ describe('CcHistory stale response guards', () => {
 
     renderPage();
 
-    const projectFilter = await screen.findByRole('combobox', {
+    const projectSidebar = await screen.findByLabelText('Claude 项目列表');
+    const projectFilter = within(projectSidebar).getByRole('combobox', {
       name: '按项目筛选 Claude 历史',
     });
     expect((projectFilter as HTMLSelectElement).value).toBe('/projects/A');
