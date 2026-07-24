@@ -141,6 +141,41 @@ afterEach(() => {
 });
 
 describe('CcHistory stale response guards', () => {
+  test('可从项目筛选器直接选择项目并加载对应 Prompt', async () => {
+    const projectA = buildProject({
+      projectPath: '/projects/A',
+      projectName: 'ProjectA',
+    });
+    const projectB = buildProject({
+      projectPath: '/projects/B',
+      projectName: 'ProjectB',
+    });
+    fakeCcHistoryApi.listProjects.mockResolvedValue([projectA, projectB]);
+    fakeCcHistoryApi.listPrompts.mockImplementation(async (projectPath: string) => [
+      buildPrompt({
+        id: `prompt-${projectPath}`,
+        projectPath,
+        projectName: projectPath === '/projects/A' ? 'ProjectA' : 'ProjectB',
+        content: projectPath === '/projects/A' ? 'PROJECT-A-PROMPT' : 'PROJECT-B-PROMPT',
+      }),
+    ]);
+
+    renderPage();
+
+    const projectFilter = await screen.findByRole('combobox', {
+      name: '按项目筛选 Claude 历史',
+    });
+    expect((projectFilter as HTMLSelectElement).value).toBe('/projects/A');
+    expect(screen.getByRole('option', { name: 'ProjectB · /projects/B' })).toBeTruthy();
+
+    fireEvent.change(projectFilter, { target: { value: '/projects/B' } });
+
+    await waitFor(() => {
+      expect(fakeCcHistoryApi.listPrompts).toHaveBeenCalledWith('/projects/B', undefined);
+      expect(screen.getByText('PROJECT-B-PROMPT')).toBeTruthy();
+    });
+  });
+
   test('项目 A→B 时逆序 resolve 只保留 B 的 prompts', async () => {
     const projectA = buildProject({
       projectPath: '/projects/A',
