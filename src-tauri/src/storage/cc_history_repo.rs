@@ -27,7 +27,7 @@ use crate::storage::maintenance_gate::{
 };
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// 同步 manifest 分页 limit 上限（与协议 `CC_MANIFEST_PAGE_LIMIT_MAX` 对齐）。
@@ -592,6 +592,54 @@ impl ClaudeHistoryRepo {
         .await
     }
 
+    /// 批量软删除被采集器确认由 Claude 生成的历史项。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧采集规则曾把子 Agent 指令、系统通知和压缩摘要当成用户 prompt 入库；
+    ///     新规则重扫 transcript 后必须清理存量数据，并以墓碑同步到其它设备。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     单事务读取未删除历史，仅处理命中 ids 的行；逐条递增本机 vector_clock，
+    ///     写 deleted=1 与统一更新时间，返回实际清理数量。
+    pub async fn soft_delete_generated_ids(
+        &self,
+        ids: &HashSet<String>,
+        device_id: &str,
+    ) -> Result<usize, AppError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
+        let rows = sqlx::query("SELECT id, vector_clock FROM claude_history WHERE deleted = 0")
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut removed = 0usize;
+        for row in &rows {
+            let id: String = row.try_get("id")?;
+            if !ids.contains(&id) {
+                continue;
+            }
+            let vector_clock_text: String = row.try_get("vector_clock")?;
+            let mut vector_clock: HashMap<String, u64> = serde_json::from_str(&vector_clock_text)?;
+            *vector_clock.entry(device_id.to_string()).or_insert(0) += 1;
+            sqlx::query(
+                "UPDATE claude_history \
+                 SET deleted = 1, updated_at = ?, vector_clock = ? \
+                 WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(serde_json::to_string(&vector_clock)?)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+            removed += 1;
+        }
+        tx.commit().await?;
+        drop(permit);
+        Ok(removed)
+    }
+
     /// 更新某 jsonl 文件的扫描状态（mtime/size/scanned_at），用于增量去重。
     ///
     /// Business Logic: 采集器每扫完一个文件记录其 (mtime, size)，下次扫描比对，未变则跳过。
@@ -938,6 +986,27 @@ mod tests {
         // get_all_for_sync 仍含已删除（同步需传播删除）
         let synced = repo.get_all_for_sync().await.unwrap();
         assert_eq!(synced.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn soft_delete_generated_ids_only_removes_matching_history() {
+        let repo = setup_repo().await;
+        repo.bulk_ingest(&[
+            row("user", "/p", "用户输入", 1),
+            row("generated", "/p", "Agent 生成", 1),
+        ])
+        .await
+        .unwrap();
+        let ids = HashSet::from(["generated".to_string(), "missing".to_string()]);
+
+        let removed = repo.soft_delete_generated_ids(&ids, "d1").await.unwrap();
+
+        assert_eq!(removed, 1);
+        let user = repo.get("user").await.unwrap().unwrap();
+        let generated = repo.get("generated").await.unwrap().unwrap();
+        assert!(!user.deleted);
+        assert!(generated.deleted);
+        assert_eq!(generated.vector_clock.get("d1"), Some(&2));
     }
 
     #[tokio::test]

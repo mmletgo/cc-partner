@@ -4,7 +4,8 @@
 //!     用户在本机用 Claude Code 时，每次"用户输入 prompt"都 append 到
 //!     `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`。这些 prompt 分散在大量 jsonl
 //!     文件中，难以检索和跨设备复用。本模块定时扫描这些文件，提取真正的"用户输入"
-//!     （过滤掉 slash 命令、`!` bash 命令、工具结果回显、空内容），按项目(cwd)归类入库，
+//!     （过滤掉 slash 命令、`!` bash 命令、工具结果回显、Agent sidechain、系统通知、
+//!     压缩摘要与 SDK 自动输入），按项目(cwd)归类入库，
 //!     并通过 scan_state 记录每个文件的 (mtime, size) 实现增量去重——文件未变则跳过。
 //!
 //! Code Logic（这个模块做什么）:
@@ -24,12 +25,14 @@ use crate::error::AppError;
 use crate::state::AppState;
 use chrono::Utc;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 /// 扫描间隔（秒）。对照任务规格 300s。
 const SCAN_INTERVAL_SECS: u64 = 300;
+/// 扫描状态版本前缀；过滤规则升级时改变前缀，触发存量 transcript 一次性重扫与清理。
+const SCAN_STATE_FILTER_VERSION: &str = "user-authored-v2:";
 
 /// 返回 Claude Code projects 目录：`~/.claude/projects`。
 ///
@@ -61,6 +64,27 @@ struct JsonlLine {
     git_branch: Option<String>,
     #[serde(default, rename = "version")]
     cc_version: Option<String>,
+    #[serde(default, rename = "isMeta")]
+    is_meta: bool,
+    #[serde(default, rename = "isSidechain")]
+    is_sidechain: bool,
+    #[serde(default, rename = "isVisibleInTranscriptOnly")]
+    is_visible_in_transcript_only: bool,
+    #[serde(default, rename = "isCompactSummary")]
+    is_compact_summary: bool,
+    #[serde(default)]
+    entrypoint: Option<String>,
+    #[serde(default, rename = "promptSource")]
+    prompt_source: Option<String>,
+    #[serde(default)]
+    origin: Option<PromptOrigin>,
+}
+
+/// Claude Code prompt 来源；只读取稳定的 kind 标记，忽略其它演进字段。
+#[derive(Debug, Default, Deserialize)]
+struct PromptOrigin {
+    #[serde(default)]
+    kind: String,
 }
 
 /// message 字段的宽松结构（仅关心 role 与 content）。
@@ -83,6 +107,99 @@ struct Extracted {
     timestamp: String,
 }
 
+/// 已完成基础格式校验的 prompt，并携带是否由用户直接输入的来源判定。
+struct ClassifiedPrompt {
+    extracted: Extracted,
+    user_authored: bool,
+}
+
+/// 判断 Claude transcript 的 user 行是否确由用户直接输入。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 会把子 Agent 指令、任务通知、压缩摘要和 SDK 注入也写成 `type=user`，
+///     仅检查 message.role 会把 Agent 自生成文本误收进“Claude 历史”。
+///
+/// Code Logic（这个函数做什么）:
+///     显式内部标记、sidechain、非交互 CLI entrypoint、非 typed promptSource、
+///     非 human origin 任一命中即判为非用户输入；旧版本缺少来源字段时保持兼容。
+fn is_user_authored(parsed: &JsonlLine) -> bool {
+    if parsed.is_meta
+        || parsed.is_sidechain
+        || parsed.is_visible_in_transcript_only
+        || parsed.is_compact_summary
+    {
+        return false;
+    }
+    if parsed
+        .entrypoint
+        .as_deref()
+        .is_some_and(|value| value != "cli")
+    {
+        return false;
+    }
+    if parsed
+        .prompt_source
+        .as_deref()
+        .is_some_and(|value| value != "typed")
+    {
+        return false;
+    }
+    if parsed
+        .origin
+        .as_ref()
+        .is_some_and(|origin| origin.kind != "human")
+    {
+        return false;
+    }
+    true
+}
+
+/// 解析一行可能的文本 prompt，并区分用户输入与 Claude 生成内容。
+///
+/// Business Logic（为什么需要这个函数）:
+///     扫描器既要录入真正用户输入，也要识别已被旧版本误收的生成内容并创建删除墓碑。
+///
+/// Code Logic（这个函数做什么）:
+///     完成 user/string/命令/必填字段校验后构造 Extracted，再附加来源分类结果。
+fn classify_prompt(line: &str) -> Option<ClassifiedPrompt> {
+    let parsed: JsonlLine = serde_json::from_str(line).ok()?;
+    if parsed.r#type != "user" {
+        return None;
+    }
+    let message = parsed.message.as_ref()?;
+    if message.role != "user" {
+        return None;
+    }
+    let content_str = match &message.content {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => return None,
+    };
+    let trimmed = content_str.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('!') {
+        return None;
+    }
+    let user_authored = is_user_authored(&parsed);
+    let uuid = parsed.uuid.clone()?;
+    let cwd = parsed.cwd.clone()?;
+    let timestamp = parsed.timestamp.clone()?;
+    let session_id = parsed
+        .session_id
+        .clone()
+        .unwrap_or_else(|| format!("unknown-{}", &timestamp));
+    Some(ClassifiedPrompt {
+        extracted: Extracted {
+            uuid,
+            cwd,
+            session_id,
+            content: trimmed.to_string(),
+            git_branch: parsed.git_branch.clone(),
+            cc_version: parsed.cc_version.clone(),
+            timestamp,
+        },
+        user_authored,
+    })
+}
+
 /// 从一行 jsonl 解析并过滤，返回有效 prompt 的 Extracted（不符合条件返回 None）。
 ///
 /// Business Logic: Claude Code jsonl 里 type==user 的行包含"真正用户输入"和"工具结果回显"
@@ -96,47 +213,24 @@ struct Extracted {
 ///     4. trim 后非空；
 ///     5. 不以 '/' 开头（slash 命令）；
 ///     6. 不以 '!' 开头（bash 命令）；
-///     7. uuid / cwd / timestamp 齐全。
+///     7. 来源标记证明不是 Agent/系统/SDK 自动生成；
+///     8. uuid / cwd / timestamp 齐全。
 ///     session_id 缺失时回退用 timestamp 派生（极少数旧版本无 sessionId）。
+#[cfg(test)]
 fn extract_prompt(line: &str) -> Option<Extracted> {
-    let parsed: JsonlLine = serde_json::from_str(line).ok()?;
-    if parsed.r#type != "user" {
-        return None;
-    }
-    let message = parsed.message.as_ref()?;
-    if message.role != "user" {
-        return None;
-    }
-    // content 必须是纯字符串（工具结果回显是 array，跳过）
-    let content_str = match &message.content {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        _ => return None,
-    };
-    let trimmed = content_str.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    // 排除 slash 命令与 bash 命令
-    if trimmed.starts_with('/') || trimmed.starts_with('!') {
-        return None;
-    }
-    let uuid = parsed.uuid.clone()?;
-    let cwd = parsed.cwd.clone()?;
-    let timestamp = parsed.timestamp.clone()?;
-    // session_id 缺失时回退（避免 id 拼接失败），正常路径取 jsonl 的 sessionId
-    let session_id = parsed
-        .session_id
-        .clone()
-        .unwrap_or_else(|| format!("unknown-{}", &timestamp));
-    Some(Extracted {
-        uuid,
-        cwd,
-        session_id,
-        content: trimmed.to_string(),
-        git_branch: parsed.git_branch.clone(),
-        cc_version: parsed.cc_version.clone(),
-        timestamp,
-    })
+    classify_prompt(line)
+        .filter(|classified| classified.user_authored)
+        .map(|classified| classified.extracted)
+}
+
+/// 生成与 ClaudeHistoryRow 一致的稳定主键。
+fn extracted_history_id(extracted: &Extracted) -> String {
+    format!("{}:{}", extracted.session_id, extracted.uuid)
+}
+
+/// 为扫描状态生成带过滤规则版本的 key。
+fn scan_state_key(path: &std::path::Path) -> String {
+    format!("{SCAN_STATE_FILTER_VERSION}{}", path.to_string_lossy())
 }
 
 /// 把 Extracted 转成 ClaudeHistoryRow。
@@ -167,7 +261,7 @@ fn extracted_to_row_with_project_path(
     let mut vc = HashMap::new();
     vc.insert(device_id.to_string(), 1u64);
     ClaudeHistoryRow {
-        id: format!("{}:{}", e.session_id, e.uuid),
+        id: extracted_history_id(e),
         project_name: ClaudeHistoryRow::derive_project_name(&project_path),
         project_path,
         session_id: e.session_id.clone(),
@@ -213,13 +307,15 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
 
     // await 前 clone device_id（Arc<String>），避免跨 await 持引用
     let device_id: String = state.device_id.as_ref().clone();
+    let scan_device_id = device_id.clone();
 
     // 读取 scan_state 快照（HashMap clone，spawn_blocking 内只读使用）
     let scan_states = state.cc_history_repo.get_scan_states().await?;
 
     // spawn_blocking 内做全部 fs IO（枚举目录、读 metadata、流式读 jsonl）
-    let (rows, changed_files, scan_errors) = tokio::task::spawn_blocking(move || {
+    let (rows, rejected_ids, changed_files, scan_errors) = tokio::task::spawn_blocking(move || {
         let mut rows: Vec<ClaudeHistoryRow> = Vec::new();
+        let mut rejected_ids: HashSet<String> = HashSet::new();
         let mut changed_files: Vec<(PathBuf, i64, i64)> = Vec::new();
         let mut scan_errors: usize = 0;
         let mut project_path_cache: HashMap<String, String> = HashMap::new();
@@ -230,7 +326,7 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
             Ok(rd) => rd,
             Err(e) => {
                 tracing::warn!("读取 projects 目录失败: {e}");
-                return (rows, changed_files, scan_errors);
+                return (rows, rejected_ids, changed_files, scan_errors);
             }
         };
 
@@ -267,7 +363,7 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                let key = path.to_string_lossy().to_string();
+                let key = scan_state_key(&path);
                 // 增量比对：mtime 与 size 都未变 → 跳过
                 if let Some((prev_mtime, prev_size)) = scan_states.get(&key) {
                     if *prev_mtime == mtime_sec && *prev_size == size {
@@ -287,16 +383,21 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
                 for line_res in reader.lines() {
                     match line_res {
                         Ok(line) => {
-                            if let Some(e) = extract_prompt(&line) {
+                            if let Some(classified) = classify_prompt(&line) {
+                                let e = classified.extracted;
+                                if !classified.user_authored {
+                                    rejected_ids.insert(extracted_history_id(&e));
+                                    continue;
+                                }
                                 if let Some(project_path) = project_path_cache.get(&e.cwd) {
                                     rows.push(extracted_to_row_with_project_path(
                                         &e,
-                                        &device_id,
+                                        &scan_device_id,
                                         &now,
                                         project_path.clone(),
                                     ));
                                 } else {
-                                    let row = extracted_to_row(&e, &device_id, &now);
+                                    let row = extracted_to_row(&e, &scan_device_id, &now);
                                     project_path_cache
                                         .insert(e.cwd.clone(), row.project_path.clone());
                                     rows.push(row);
@@ -313,7 +414,7 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
             }
         }
 
-        (rows, changed_files, scan_errors)
+        (rows, rejected_ids, changed_files, scan_errors)
     })
     .await
     .map_err(|e| AppError::generic(format!("采集任务 join 失败: {e}")))?;
@@ -324,11 +425,15 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
 
     // 入库（INSERT OR IGNORE，绝不覆盖已存在行）
     let inserted = state.cc_history_repo.bulk_ingest(&rows).await?;
+    let removed = state
+        .cc_history_repo
+        .soft_delete_generated_ids(&rejected_ids, &device_id)
+        .await?;
 
     // 更新 scan_state（仅变化的文件）
     let scanned_at = Utc::now().to_rfc3339();
     for (path, mtime_sec, size) in &changed_files {
-        let key = path.to_string_lossy().to_string();
+        let key = scan_state_key(path);
         if let Err(e) = state
             .cc_history_repo
             .update_scan_state(&key, *mtime_sec, *size, &scanned_at)
@@ -339,9 +444,10 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
     }
 
     tracing::info!(
-        "CC 历史扫描完成：解析出 {} 条候选，新入库 {} 条，扫描 {} 个文件",
+        "CC 历史扫描完成：解析出 {} 条用户输入，新入库 {} 条，清理 {} 条生成内容，扫描 {} 个文件",
         rows.len(),
         inserted,
+        removed,
         changed_files.len()
     );
     Ok(inserted)
@@ -419,6 +525,21 @@ mod tests {
         // content 是 array（工具结果回显）→ 跳过
         let tool_result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"..."}]},"uuid":"u","cwd":"/p","timestamp":"t"}"#;
         assert!(extract_prompt(tool_result).is_none());
+    }
+
+    #[test]
+    fn extract_skips_claude_generated_user_messages() {
+        let sidechain = r#"{"type":"user","isSidechain":true,"agentId":"agent-1","entrypoint":"cli","message":{"role":"user","content":"由主 Agent 生成的子任务 Prompt"},"uuid":"sidechain","cwd":"/p","timestamp":"t"}"#;
+        assert!(extract_prompt(sidechain).is_none());
+
+        let meta = r#"{"type":"user","isMeta":true,"entrypoint":"cli","message":{"role":"user","content":"内部元消息"},"uuid":"meta","cwd":"/p","timestamp":"t"}"#;
+        assert!(extract_prompt(meta).is_none());
+
+        let system_notification = r#"{"type":"user","isSidechain":false,"entrypoint":"cli","promptSource":"system","origin":{"kind":"task-notification"},"message":{"role":"user","content":"Agent 任务通知"},"uuid":"notification","cwd":"/p","timestamp":"t"}"#;
+        assert!(extract_prompt(system_notification).is_none());
+
+        let compact_summary = r#"{"type":"user","isSidechain":false,"entrypoint":"cli","isVisibleInTranscriptOnly":true,"isCompactSummary":true,"message":{"role":"user","content":"Claude 自动生成的压缩摘要"},"uuid":"summary","cwd":"/p","timestamp":"t"}"#;
+        assert!(extract_prompt(compact_summary).is_none());
     }
 
     #[test]
