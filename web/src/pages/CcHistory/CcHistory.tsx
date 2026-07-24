@@ -80,6 +80,8 @@ export function CcHistory() {
     kind: 'saveAsPrompt' | 'delete';
     message: string;
     item: CcHistoryItem;
+    /** 删除 worktree Prompt 时所属的主项目聚合路径；供失败重试保持同一计数归属。 */
+    groupProjectPath?: string;
   } | null>(null);
 
   // ── 独立 latest-request 守卫（项目列表 / prompt 列表）──
@@ -316,18 +318,18 @@ export function CcHistory() {
    *   成功删除不暴露假 Undo（当前无 restore/vector-clock 合同）。
    *
    * Code Logic（这个函数做什么）:
-   *   先快照条目，乐观从 prompts/projects 计数移除；remove 成功清 actionError；
-   *   失败则把快照插回列表并恢复 count，写入可重试 actionError。
+   *   先快照条目，按当前主项目聚合路径乐观从 prompts/projects 计数移除；
+   *   remove 成功清 actionError；失败则把快照插回列表并恢复 count，
+   *   并把聚合路径写入 actionError，确保稍后重试仍更新同一个主项目。
    */
   const performDelete = useCallback(
-    async (item: CcHistoryItem) => {
+    async (item: CcHistoryItem, groupProjectPath = selectedProjectPath ?? item.projectPath) => {
       const id = item.id;
-      const projectPath = item.projectPath;
 
       setPrompts((prev) => prev.filter((p) => p.id !== id));
       setProjects((prev) =>
         prev.map((p) =>
-          p.projectPath === projectPath
+          p.projectPath === groupProjectPath
             ? { ...p, count: Math.max(0, p.count - 1) }
             : p,
         ),
@@ -347,7 +349,7 @@ export function CcHistory() {
         });
         setProjects((prev) =>
           prev.map((p) =>
-            p.projectPath === projectPath ? { ...p, count: p.count + 1 } : p,
+            p.projectPath === groupProjectPath ? { ...p, count: p.count + 1 } : p,
           ),
         );
         const message =
@@ -356,10 +358,11 @@ export function CcHistory() {
           kind: 'delete',
           message: t('ccHistory:deleteFailed', { error: message }),
           item,
+          groupProjectPath,
         });
       }
     },
-    [t],
+    [selectedProjectPath, t],
   );
 
   /**
@@ -378,8 +381,8 @@ export function CcHistory() {
         : null);
     setPendingDeleteId(null);
     if (!snapshot) return;
-    await performDelete(snapshot);
-  }, [pendingDeleteId, prompts, actionError, performDelete]);
+    await performDelete(snapshot, selectedProjectPath ?? snapshot.projectPath);
+  }, [pendingDeleteId, prompts, actionError, performDelete, selectedProjectPath]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -394,7 +397,7 @@ export function CcHistory() {
       await handleSaveAsPrompt(actionError.item);
       return;
     }
-    await performDelete(actionError.item);
+    await performDelete(actionError.item, actionError.groupProjectPath);
   }, [actionError, handleSaveAsPrompt, performDelete]);
 
   // ── 选中项目对象（用于右栏标题等）──

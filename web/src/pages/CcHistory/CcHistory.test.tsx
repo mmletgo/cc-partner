@@ -521,4 +521,39 @@ describe('CcHistory action failure recovery', () => {
     expect(screen.queryByRole('button', { name: /撤销|Undo/i })).toBeNull();
     expect(screen.queryByText(/撤销|Undo/i)).toBeNull();
   });
+
+  test('删除 worktree Prompt 时递减主项目聚合计数', async () => {
+    const worktreePrompt = buildPrompt({
+      id: 'worktree-prompt',
+      projectPath: '/tmp/repo-feature',
+      projectName: 'repo-feature',
+      content: 'WORKTREE-PROMPT',
+    });
+    fakeCcHistoryApi.listProjects.mockResolvedValue([
+      buildProject({
+        projectPath: '/projects/repo',
+        projectName: 'repo',
+        count: 2,
+      }),
+    ]);
+    fakeCcHistoryApi.listPrompts.mockResolvedValue([worktreePrompt]);
+    fakeCcHistoryApi.remove.mockResolvedValue({ ok: true });
+    renderPage();
+
+    const projectButton = await screen.findByRole('button', { name: /repo.*\/projects\/repo/i });
+    expect(within(projectButton).getByText('2')).toBeTruthy();
+    await screen.findByText('WORKTREE-PROMPT');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    await waitFor(() => {
+      expect(screen.getByText(/确认要从历史中删除/)).toBeTruthy();
+    });
+    const confirmButtons = screen.getAllByRole('button', { name: '删除' });
+    fireEvent.click(confirmButtons[confirmButtons.length - 1]);
+
+    await waitFor(() => {
+      expect(fakeCcHistoryApi.remove).toHaveBeenCalledWith('worktree-prompt');
+      expect(within(projectButton).getByText('1')).toBeTruthy();
+    });
+  });
 });

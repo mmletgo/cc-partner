@@ -81,15 +81,36 @@ impl ClaudeHistoryRepo {
         })
     }
 
-    /// 按项目聚合列表（排除已删除），按最近活动时间降序。
+    /// 按主项目聚合列表（排除已删除），按最近活动时间降序。
     ///
-    /// Business Logic: 前端项目侧边栏展示所有有过 Claude Code 历史的项目及数量。
-    /// Code Logic: GROUP BY project_path，COUNT + MAX(occurred_at)，ORDER BY last_at DESC。
+    /// Business Logic:
+    ///     前端项目侧边栏应把同一个 Workbench 项目的主工作区与全部 worktree 视为一个项目，
+    ///     避免每创建一个 worktree 就出现一个新的 Claude 历史项目。
+    ///
+    /// Code Logic:
+    ///     先从本机 Workbench 项目/工作树构造 `history_path -> main project` 别名表；
+    ///     已登记路径按主项目 path/name 聚合，未登记路径仍按历史原始 cwd 聚合。
+    ///     最终 COUNT + MAX(occurred_at)，按最近活动时间降序。
     pub async fn list_projects(&self) -> Result<Vec<CcProjectDto>, AppError> {
         let rows = sqlx::query(
-            "SELECT project_path, project_name, COUNT(*) AS cnt, MAX(occurred_at) AS last_at \
-             FROM claude_history WHERE deleted = 0 \
-             GROUP BY project_path ORDER BY last_at DESC",
+            "WITH project_aliases AS (\
+               SELECT p.path AS project_path, p.name AS project_name, p.path AS history_path \
+               FROM workbench_projects p WHERE p.kind = 'local' \
+               UNION \
+               SELECT p.path AS project_path, p.name AS project_name, w.path AS history_path \
+               FROM workbench_worktrees w \
+               JOIN workbench_projects p ON p.id = w.project_id \
+               WHERE p.kind = 'local'\
+             ) \
+             SELECT COALESCE(a.project_path, h.project_path) AS project_path, \
+                    COALESCE(a.project_name, h.project_name) AS project_name, \
+                    COUNT(*) AS cnt, MAX(h.occurred_at) AS last_at \
+             FROM claude_history h \
+             LEFT JOIN project_aliases a ON a.history_path = h.project_path \
+             WHERE h.deleted = 0 \
+             GROUP BY COALESCE(a.project_path, h.project_path), \
+                      COALESCE(a.project_name, h.project_name) \
+             ORDER BY last_at DESC",
         )
         .fetch_all(&self.db)
         .await?;
@@ -106,10 +127,15 @@ impl ClaudeHistoryRepo {
         Ok(out)
     }
 
-    /// 按项目列出历史 prompt（排除已删除），可选内容搜索，按 occurred_at 降序，限 500 条。
+    /// 按主项目列出历史 prompt（排除已删除），可选内容搜索，按 occurred_at 降序，限 500 条。
     ///
-    /// Business Logic: 前端进入某项目后展示该项目的 prompt 列表，支持关键词过滤。
-    /// Code Logic: WHERE project_path=? AND deleted=0 [AND content LIKE ?] ORDER BY occurred_at DESC LIMIT 500。
+    /// Business Logic:
+    ///     用户进入一个 Claude 历史项目后，需要同时看到主工作区和该项目全部已登记 worktree
+    ///     中产生的 prompt；未登记项目继续保持原 cwd 精确匹配。
+    ///
+    /// Code Logic:
+    ///     `selected_paths` 包含所选主路径及其本机 Workbench worktree 路径；
+    ///     用 IN 子查询筛选原始 `claude_history.project_path`，保留每条记录的来源 cwd。
     pub async fn list_by_project(
         &self,
         project_path: &str,
@@ -118,22 +144,43 @@ impl ClaudeHistoryRepo {
         let rows = if let Some(kw) = search {
             let pattern = format!("%{}%", kw);
             sqlx::query(
-                "SELECT id, project_path, project_name, session_id, content, git_branch, cc_version, \
-                 occurred_at, device_id, vector_clock, created_at, updated_at, deleted \
-                 FROM claude_history WHERE project_path = ? AND deleted = 0 AND content LIKE ? \
-                 ORDER BY occurred_at DESC LIMIT 500",
+                "WITH selected_paths(path) AS (\
+                   SELECT ? \
+                   UNION \
+                   SELECT w.path FROM workbench_worktrees w \
+                   JOIN workbench_projects p ON p.id = w.project_id \
+                   WHERE p.kind = 'local' AND p.path = ?\
+                 ) \
+                 SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
+                        h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
+                        h.created_at, h.updated_at, h.deleted \
+                 FROM claude_history h \
+                 WHERE h.project_path IN (SELECT path FROM selected_paths) \
+                   AND h.deleted = 0 AND h.content LIKE ? \
+                 ORDER BY h.occurred_at DESC LIMIT 500",
             )
+            .bind(project_path)
             .bind(project_path)
             .bind(&pattern)
             .fetch_all(&self.db)
             .await?
         } else {
             sqlx::query(
-                "SELECT id, project_path, project_name, session_id, content, git_branch, cc_version, \
-                 occurred_at, device_id, vector_clock, created_at, updated_at, deleted \
-                 FROM claude_history WHERE project_path = ? AND deleted = 0 \
-                 ORDER BY occurred_at DESC LIMIT 500",
+                "WITH selected_paths(path) AS (\
+                   SELECT ? \
+                   UNION \
+                   SELECT w.path FROM workbench_worktrees w \
+                   JOIN workbench_projects p ON p.id = w.project_id \
+                   WHERE p.kind = 'local' AND p.path = ?\
+                 ) \
+                 SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
+                        h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
+                        h.created_at, h.updated_at, h.deleted \
+                 FROM claude_history h \
+                 WHERE h.project_path IN (SELECT path FROM selected_paths) AND h.deleted = 0 \
+                 ORDER BY h.occurred_at DESC LIMIT 500",
             )
+            .bind(project_path)
             .bind(project_path)
             .fetch_all(&self.db)
             .await?
@@ -556,6 +603,24 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_projects (\
+             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
+             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_worktrees (\
+             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, branch TEXT, \
+             base_branch TEXT, path TEXT NOT NULL, is_main INTEGER NOT NULL, created_at TEXT NOT NULL, \
+             updated_at TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         ClaudeHistoryRepo::new(pool)
     }
 
@@ -577,6 +642,42 @@ mod tests {
             created_at: "2024-01-01T00:00:00+00:00".to_string(),
             updated_at: "2024-01-01T00:00:00+00:00".to_string(),
             deleted: false,
+        }
+    }
+
+    /// 为测试登记一个本机 Workbench 项目及其主工作区、附加 worktree。
+    async fn register_workbench_project(
+        repo: &ClaudeHistoryRepo,
+        project_id: &str,
+        project_name: &str,
+        project_path: &str,
+        worktree_paths: &[&str],
+    ) {
+        sqlx::query(
+            "INSERT INTO workbench_projects \
+             (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
+             VALUES (?, ?, 'local', 'd1', 'local', ?, '2024-01-01', '2024-01-01', '2024-01-01')",
+        )
+        .bind(project_id)
+        .bind(project_name)
+        .bind(project_path)
+        .execute(&repo.db)
+        .await
+        .unwrap();
+        for (index, worktree_path) in worktree_paths.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO workbench_worktrees \
+                 (id, project_id, name, branch, base_branch, path, is_main, created_at, updated_at) \
+                 VALUES (?, ?, ?, NULL, NULL, ?, ?, '2024-01-01', '2024-01-01')",
+            )
+            .bind(format!("{project_id}-wt-{index}"))
+            .bind(project_id)
+            .bind(format!("wt-{index}"))
+            .bind(worktree_path)
+            .bind(i64::from(*worktree_path == project_path))
+            .execute(&repo.db)
+            .await
+            .unwrap();
         }
     }
 
@@ -633,6 +734,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_projects_groups_registered_worktrees_under_main_project() {
+        let repo = setup_repo().await;
+        register_workbench_project(
+            &repo,
+            "project-1",
+            "repo",
+            "/projects/repo",
+            &["/projects/repo", "/tmp/repo-feature", "/tmp/repo-fix"],
+        )
+        .await;
+        repo.bulk_ingest(&[
+            row("main", "/projects/repo", "main prompt", 1),
+            row("feature", "/tmp/repo-feature", "feature prompt", 1),
+            row("fix", "/tmp/repo-fix", "fix prompt", 1),
+        ])
+        .await
+        .unwrap();
+
+        let projects = repo.list_projects().await.unwrap();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].project_path, "/projects/repo");
+        assert_eq!(projects[0].project_name, "repo");
+        assert_eq!(projects[0].count, 3);
+    }
+
+    #[tokio::test]
     async fn list_by_project_supports_search() {
         let repo = setup_repo().await;
         repo.bulk_ingest(&[
@@ -648,6 +776,42 @@ mod tests {
         let filtered = repo.list_by_project("/p", Some("hello")).await.unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "a");
+    }
+
+    #[tokio::test]
+    async fn list_by_project_includes_prompts_from_registered_worktrees() {
+        let repo = setup_repo().await;
+        register_workbench_project(
+            &repo,
+            "project-1",
+            "repo",
+            "/projects/repo",
+            &["/projects/repo", "/tmp/repo-feature"],
+        )
+        .await;
+        repo.bulk_ingest(&[
+            row("main", "/projects/repo", "shared keyword", 1),
+            row("feature", "/tmp/repo-feature", "shared keyword", 1),
+            row("other", "/projects/other", "shared keyword", 1),
+        ])
+        .await
+        .unwrap();
+
+        let all = repo.list_by_project("/projects/repo", None).await.unwrap();
+        let filtered = repo
+            .list_by_project("/projects/repo", Some("shared"))
+            .await
+            .unwrap();
+
+        let mut all_ids = all.iter().map(|item| item.id.as_str()).collect::<Vec<_>>();
+        all_ids.sort_unstable();
+        let mut filtered_ids = filtered
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        filtered_ids.sort_unstable();
+        assert_eq!(all_ids, vec!["feature", "main"]);
+        assert_eq!(filtered_ids, vec!["feature", "main"]);
     }
 
     #[tokio::test]
