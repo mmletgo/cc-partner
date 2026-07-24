@@ -103,7 +103,8 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 **描述**：采集本机 Claude Code 历史会话中的用户输入 Prompt，按项目维度浏览、复用和同步。
 
 **功能点**：
-- 从本机 Claude Code 历史目录采集用户输入 Prompt，并按主项目聚合展示；已登记到同一 Workbench 项目的主工作区与所有 worktree 共用一个项目入口，单条历史仍保留产生 Prompt 时的原始 cwd
+- 从本机 Claude Code 历史目录采集用户输入 Prompt，并按 Git 主项目聚合展示；仓库子目录、当前 worktree 与遵循 `.worktrees/` / `.claude/worktrees/` 约定的已删除 worktree 共用主项目入口，不依赖 Workbench 是否仍登记该 worktree
+- 旧版按 cwd 存储的历史在首次读取项目列表时持久迁移到 Git 主项目路径，同时推进本机向量时钟，使路径变更可通过既有 CC 历史同步链路收敛
 - 项目列表展示每个项目的 Prompt 数量和最近更新时间
 - 历史页提供明确的项目下拉筛选器，并与项目列表选中态同步；选中项目内的 Prompt 时间线支持文本搜索、详情查看和一键复制
 - 支持把历史 Prompt 一键转存到正式 Prompt 库

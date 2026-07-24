@@ -18,3 +18,4 @@ pub mod merger;
 /// S5 Task6 mixed-version 同步集成 harness（供 tests/backend_scale.rs 调用）。
 pub mod mixed_version_harness;
 pub mod models;
+pub mod project_identity;

@@ -131,12 +131,14 @@ impl ClaudeHistoryRow {
     ///
     /// Business Logic: 前端项目归组展示需要一个简短名称，取路径末段（如
     ///     `/Users/hans/foo` → `foo`）；末段为空（路径以 / 结尾）时回退整个路径。
-    /// Code Logic: 用 std::path::Path 取 file_name，失败回退原路径字符串。
+    /// Code Logic: 同时按 `/` 与 `\` 分隔，兼容本机查看跨平台同步来的路径；
+    ///     无有效末段时回退原路径字符串。
     pub fn derive_project_name(project_path: &str) -> String {
-        std::path::Path::new(project_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
+        project_path
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .find(|segment| !segment.is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| project_path.to_string())
     }
 }

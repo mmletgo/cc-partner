@@ -19,6 +19,7 @@
 //!       提供 CancellationToken 供应用退出时优雅停止。
 
 use crate::cc::models::ClaudeHistoryRow;
+use crate::cc::project_identity::canonical_project_path;
 use crate::error::AppError;
 use crate::state::AppState;
 use chrono::Utc;
@@ -144,12 +145,31 @@ fn extract_prompt(line: &str) -> Option<Extracted> {
 ///     同步合并出的因果历史）；id 用 `{session_id}:{uuid}` 保证同 session 内 uuid 唯一、
 ///     跨 session 隔离；created_at/updated_at 用当前入库时间。
 fn extracted_to_row(e: &Extracted, device_id: &str, now: &str) -> ClaudeHistoryRow {
+    let project_path = canonical_project_path(&e.cwd);
+    extracted_to_row_with_project_path(e, device_id, now, project_path)
+}
+
+/// 使用已解析的主项目路径把 Extracted 转成 ClaudeHistoryRow。
+///
+/// Business Logic（为什么需要这个函数）:
+///     单个 jsonl 会包含大量相同 cwd 的 Prompt，采集时应复用项目身份缓存，
+///     避免为每一行重复启动 Git 子进程。
+///
+/// Code Logic（这个函数做什么）:
+///     接收调用方已解析的 project_path，构造稳定 id、项目名和初始向量时钟；
+///     其余历史字段保持原提取结果。
+fn extracted_to_row_with_project_path(
+    e: &Extracted,
+    device_id: &str,
+    now: &str,
+    project_path: String,
+) -> ClaudeHistoryRow {
     let mut vc = HashMap::new();
     vc.insert(device_id.to_string(), 1u64);
     ClaudeHistoryRow {
         id: format!("{}:{}", e.session_id, e.uuid),
-        project_path: e.cwd.clone(),
-        project_name: ClaudeHistoryRow::derive_project_name(&e.cwd),
+        project_name: ClaudeHistoryRow::derive_project_name(&project_path),
+        project_path,
         session_id: e.session_id.clone(),
         content: e.content.clone(),
         git_branch: e.git_branch.clone(),
@@ -202,6 +222,7 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
         let mut rows: Vec<ClaudeHistoryRow> = Vec::new();
         let mut changed_files: Vec<(PathBuf, i64, i64)> = Vec::new();
         let mut scan_errors: usize = 0;
+        let mut project_path_cache: HashMap<String, String> = HashMap::new();
         let now = Utc::now().to_rfc3339();
 
         // 枚举 projects 一级子目录
@@ -267,7 +288,19 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
                     match line_res {
                         Ok(line) => {
                             if let Some(e) = extract_prompt(&line) {
-                                rows.push(extracted_to_row(&e, &device_id, &now));
+                                if let Some(project_path) = project_path_cache.get(&e.cwd) {
+                                    rows.push(extracted_to_row_with_project_path(
+                                        &e,
+                                        &device_id,
+                                        &now,
+                                        project_path.clone(),
+                                    ));
+                                } else {
+                                    let row = extracted_to_row(&e, &device_id, &now);
+                                    project_path_cache
+                                        .insert(e.cwd.clone(), row.project_path.clone());
+                                    rows.push(row);
+                                }
                             }
                         }
                         Err(e) => {
@@ -445,6 +478,55 @@ mod tests {
         assert_eq!(row.vector_clock.get("d1"), Some(&1));
         assert_eq!(row.vector_clock.len(), 1);
         assert!(!row.deleted);
+    }
+
+    #[test]
+    fn extracted_row_uses_main_project_for_conventional_worktree_path() {
+        let e = Extracted {
+            uuid: "uuid-worktree".to_string(),
+            cwd: "/projects/repo/.claude/worktrees/feature-a/apps/api".to_string(),
+            session_id: "sess-worktree".to_string(),
+            content: "hi".to_string(),
+            git_branch: Some("feature/a".to_string()),
+            cc_version: None,
+            timestamp: "t".to_string(),
+        };
+
+        let row = extracted_to_row(&e, "d1", "2026-01-01T00:00:00+00:00");
+
+        assert_eq!(row.project_path, "/projects/repo");
+        assert_eq!(row.project_name, "repo");
+    }
+
+    #[test]
+    fn extracted_row_uses_git_root_when_prompt_cwd_is_a_project_subdirectory() {
+        let temp = tempfile::tempdir().expect("应创建临时目录");
+        let repo_path = temp.path().join("repo");
+        let nested_path = repo_path.join("apps").join("api");
+        std::fs::create_dir_all(&nested_path).expect("应创建项目子目录");
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .arg(&repo_path)
+            .output()
+            .expect("应能执行 git init");
+        assert!(init.status.success(), "git init 应成功");
+        let e = Extracted {
+            uuid: "uuid-subdir".to_string(),
+            cwd: nested_path.to_string_lossy().into_owned(),
+            session_id: "sess-subdir".to_string(),
+            content: "hi".to_string(),
+            git_branch: None,
+            cc_version: None,
+            timestamp: "t".to_string(),
+        };
+
+        let row = extracted_to_row(&e, "d1", "2026-01-01T00:00:00+00:00");
+
+        assert_eq!(
+            std::path::Path::new(&row.project_path),
+            repo_path.canonicalize().expect("Git 根目录应可规范化")
+        );
+        assert_eq!(row.project_name, "repo");
     }
 
     #[test]

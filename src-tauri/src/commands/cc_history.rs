@@ -24,7 +24,10 @@ fn now_iso() -> String {
 /// 列出所有有 Claude Code 历史的项目（聚合 count + 最近活动时间），按最近活动降序。
 #[tauri::command]
 pub async fn list_cc_projects(state: State<'_, AppState>) -> Result<Vec<CcProjectDto>, AppError> {
-    state.cc_history_repo.list_projects().await
+    state
+        .cc_history_repo
+        .list_projects(state.device_id.as_ref())
+        .await
 }
 
 /// 列出某项目下的历史 prompt（可选关键词搜索），按 occurred_at 降序，最多 500 条。
@@ -36,7 +39,7 @@ pub async fn list_cc_prompts(
 ) -> Result<Vec<ClaudeHistoryDto>, AppError> {
     let rows = state
         .cc_history_repo
-        .list_by_project(&project_path, search.as_deref())
+        .list_by_project(&project_path, search.as_deref(), state.device_id.as_ref())
         .await?;
     Ok(rows.iter().map(|r| r.to_dto()).collect())
 }

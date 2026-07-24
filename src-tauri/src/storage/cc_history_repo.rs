@@ -20,6 +20,7 @@
 //!     经 `begin_shared_write` 显式 commit，任一行失败整批 rollback。
 
 use crate::cc::models::{CcProjectDto, CcSyncSummary, ClaudeHistoryRow};
+use crate::cc::project_identity::canonical_project_path;
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{
     begin_shared_write, with_shared_write_lease, DatabaseMaintenanceGate,
@@ -81,6 +82,75 @@ impl ClaudeHistoryRepo {
         })
     }
 
+    /// 持久迁移历史记录中的 cwd 为稳定主项目路径。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧版本按原始 cwd 存储历史，导致仓库子目录、当前或已删除 worktree 各自成为项目。
+    ///     读取历史项目前必须一次性修正这些旧记录，并推进本机向量时钟让变更可同步收敛。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取 distinct project_path，在 blocking pool 中解析 Git 主项目路径；
+    ///     有变更时开启 shared write transaction，逐行更新 project_path/project_name/updated_at，
+    ///     并递增 `vector_clock[device_id]`。返回实际迁移行数。
+    async fn normalize_project_paths(&self, device_id: &str) -> Result<usize, AppError> {
+        let path_rows = sqlx::query("SELECT DISTINCT project_path FROM claude_history")
+            .fetch_all(&self.db)
+            .await?;
+        let project_paths = path_rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("project_path"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let replacements = tokio::task::spawn_blocking(move || {
+            project_paths
+                .into_iter()
+                .filter_map(|source_path| {
+                    let target_path = canonical_project_path(&source_path);
+                    (target_path != source_path).then_some((source_path, target_path))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .await
+        .map_err(|error| AppError::generic(format!("Claude 历史项目路径迁移失败: {error}")))?;
+        if replacements.is_empty() {
+            return Ok(0);
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let (permit, mut tx) = begin_shared_write(&self.db, &self.gate).await?;
+        let history_rows = sqlx::query("SELECT id, project_path, vector_clock FROM claude_history")
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut migrated = 0usize;
+        for history_row in &history_rows {
+            let source_path: String = history_row.try_get("project_path")?;
+            let Some(target_path) = replacements.get(&source_path) else {
+                continue;
+            };
+            let id: String = history_row.try_get("id")?;
+            let vector_clock_text: String = history_row.try_get("vector_clock")?;
+            let mut vector_clock: HashMap<String, u64> = serde_json::from_str(&vector_clock_text)?;
+            *vector_clock.entry(device_id.to_string()).or_insert(0) += 1;
+            let target_name = ClaudeHistoryRow::derive_project_name(target_path);
+            let updated_vector_clock = serde_json::to_string(&vector_clock)?;
+            sqlx::query(
+                "UPDATE claude_history \
+                 SET project_path = ?, project_name = ?, updated_at = ?, vector_clock = ? \
+                 WHERE id = ?",
+            )
+            .bind(target_path)
+            .bind(target_name)
+            .bind(&now)
+            .bind(updated_vector_clock)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            migrated += 1;
+        }
+        tx.commit().await?;
+        drop(permit);
+        Ok(migrated)
+    }
+
     /// 按主项目聚合列表（排除已删除），按最近活动时间降序。
     ///
     /// Business Logic:
@@ -91,7 +161,8 @@ impl ClaudeHistoryRepo {
     ///     先从本机 Workbench 项目/工作树构造 `history_path -> main project` 别名表；
     ///     已登记路径按主项目 path/name 聚合，未登记路径仍按历史原始 cwd 聚合。
     ///     最终 COUNT + MAX(occurred_at)，按最近活动时间降序。
-    pub async fn list_projects(&self) -> Result<Vec<CcProjectDto>, AppError> {
+    pub async fn list_projects(&self, device_id: &str) -> Result<Vec<CcProjectDto>, AppError> {
+        self.normalize_project_paths(device_id).await?;
         let rows = sqlx::query(
             "WITH project_aliases AS (\
                SELECT p.path AS project_path, p.name AS project_name, p.path AS history_path \
@@ -103,13 +174,12 @@ impl ClaudeHistoryRepo {
                WHERE p.kind = 'local'\
              ) \
              SELECT COALESCE(a.project_path, h.project_path) AS project_path, \
-                    COALESCE(a.project_name, h.project_name) AS project_name, \
+                    COALESCE(MAX(a.project_name), MAX(h.project_name)) AS project_name, \
                     COUNT(*) AS cnt, MAX(h.occurred_at) AS last_at \
              FROM claude_history h \
              LEFT JOIN project_aliases a ON a.history_path = h.project_path \
              WHERE h.deleted = 0 \
-             GROUP BY COALESCE(a.project_path, h.project_path), \
-                      COALESCE(a.project_name, h.project_name) \
+             GROUP BY COALESCE(a.project_path, h.project_path) \
              ORDER BY last_at DESC",
         )
         .fetch_all(&self.db)
@@ -140,7 +210,9 @@ impl ClaudeHistoryRepo {
         &self,
         project_path: &str,
         search: Option<&str>,
+        device_id: &str,
     ) -> Result<Vec<ClaudeHistoryRow>, AppError> {
+        self.normalize_project_paths(device_id).await?;
         let rows = if let Some(kw) = search {
             let pattern = format!("%{}%", kw);
             sqlx::query(
@@ -723,7 +795,7 @@ mod tests {
         ])
         .await
         .unwrap();
-        let projects = repo.list_projects().await.unwrap();
+        let projects = repo.list_projects("d1").await.unwrap();
         // 两个项目
         assert_eq!(projects.len(), 2);
         // 找到 p1 的聚合 count=2
@@ -752,12 +824,38 @@ mod tests {
         .await
         .unwrap();
 
-        let projects = repo.list_projects().await.unwrap();
+        let projects = repo.list_projects("d1").await.unwrap();
 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].project_path, "/projects/repo");
         assert_eq!(projects[0].project_name, "repo");
         assert_eq!(projects[0].count, 3);
+    }
+
+    #[tokio::test]
+    async fn list_projects_persistently_migrates_removed_conventional_worktree_history() {
+        let repo = setup_repo().await;
+        repo.bulk_ingest(&[
+            row("main", "/projects/repo", "main prompt", 1),
+            row(
+                "removed-worktree",
+                "/projects/repo/.worktrees/feature-a/apps/api",
+                "worktree prompt",
+                1,
+            ),
+        ])
+        .await
+        .unwrap();
+
+        let projects = repo.list_projects("d1").await.unwrap();
+        let migrated = repo.get("removed-worktree").await.unwrap().unwrap();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].project_path, "/projects/repo");
+        assert_eq!(projects[0].count, 2);
+        assert_eq!(migrated.project_path, "/projects/repo");
+        assert_eq!(migrated.project_name, "repo");
+        assert_eq!(migrated.vector_clock.get("d1"), Some(&2));
     }
 
     #[tokio::test]
@@ -770,10 +868,13 @@ mod tests {
         .await
         .unwrap();
         // 无搜索：2 条
-        let all = repo.list_by_project("/p", None).await.unwrap();
+        let all = repo.list_by_project("/p", None, "d1").await.unwrap();
         assert_eq!(all.len(), 2);
         // 搜索 hello：1 条
-        let filtered = repo.list_by_project("/p", Some("hello")).await.unwrap();
+        let filtered = repo
+            .list_by_project("/p", Some("hello"), "d1")
+            .await
+            .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "a");
     }
@@ -797,9 +898,12 @@ mod tests {
         .await
         .unwrap();
 
-        let all = repo.list_by_project("/projects/repo", None).await.unwrap();
+        let all = repo
+            .list_by_project("/projects/repo", None, "d1")
+            .await
+            .unwrap();
         let filtered = repo
-            .list_by_project("/projects/repo", Some("shared"))
+            .list_by_project("/projects/repo", Some("shared"), "d1")
             .await
             .unwrap();
 
@@ -829,7 +933,7 @@ mod tests {
         let got = repo.get("a").await.unwrap().unwrap();
         assert!(got.deleted);
         assert_eq!(got.vector_clock.get("d1"), Some(&2));
-        let listed = repo.list_by_project("/p", None).await.unwrap();
+        let listed = repo.list_by_project("/p", None, "d1").await.unwrap();
         assert!(listed.is_empty());
         // get_all_for_sync 仍含已删除（同步需传播删除）
         let synced = repo.get_all_for_sync().await.unwrap();
