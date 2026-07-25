@@ -377,7 +377,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 ## Claude Code 历史采集与同步已落地行为约定（src/cc/ + storage/cc_history_repo.rs + commands/cc_history.rs + net/routes/cc_history.rs）
 
-- **功能定位**：自动采集本机 Claude Code 所有 session jsonl 里的「用户输入 prompt」，按稳定 Git 主项目路径存入 `claude_history`，并跨设备同步（复用向量时钟基础设施但走独立同步链路）。前端入口「CC 历史」页面；项目身份由 `cc/project_identity.rs` 解析，不依赖临时 Workbench 注册状态：`.worktrees/<name>` / `.claude/worktrees/<name>` 即使目录已删除也可按字符串恢复主项目，现存仓库子目录或任意外置 linked worktree 通过 `git rev-parse --git-common-dir` 解析到主工作区根。无法证明属于 Git 项目的路径保持原值。
+- **功能定位**：自动采集本机 Claude Code 所有 session jsonl 里的「用户输入 prompt」，按稳定 Git 主项目路径存入 `claude_history`，并跨设备同步（复用向量时钟基础设施但走独立同步链路）。前端入口「CC 历史」页面；项目身份由 `cc/project_identity.rs` 解析，不依赖目录命名或临时 Workbench 注册状态：对现存仓库子目录或任意外置 linked worktree 执行 `git worktree list --porcelain -z`，读取 Git 报告的全部 worktree 并以列表首项（主工作区）作为项目身份。Git 无法证明归属的已删除/不存在路径保持原值，不按 `.worktrees` / `.claude/worktrees` / `.pando/worktrees` 字符串猜测。
 - **数据来源**：`~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`（跨平台用 `dirs::home_dir()`）。原始 cwd 取 jsonl 行的 `cwd` 字段（**不反推目录名**，因目录名是把 `/` 编码成 `-` 的不可逆编码），随后经 `canonical_project_path` 解析为 Git 主项目路径入库。
 - **jsonl 行解析（cc/collector.rs）**：宽松反序列化（`#[serde(default)]` + 未知字段忽略 + content 为 `Option<Value>`）。camelCase 字段需 `#[serde(rename)]`：`sessionId`/`gitBranch`/`version`（Rust 字段名 snake_case，rename 到 jsonl 的 camelCase）。过滤条件：`type=="user" && message.role=="user" && content 为 Value::String && trim 非空 && 不以 '/' 开头(slash命令) && 不以 '!' 开头(bash命令) && uuid/cwd/timestamp 齐全` → 产出 Extracted。content 为 array（工具结果回显）跳过。sessionId 缺失回退 `unknown-{timestamp}`。
 - **两条入库路径严格分离（关键约束）**：

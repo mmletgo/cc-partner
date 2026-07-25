@@ -154,32 +154,20 @@ impl ClaudeHistoryRepo {
     /// 按主项目聚合列表（排除已删除），按最近活动时间降序。
     ///
     /// Business Logic:
-    ///     前端项目侧边栏应把同一个 Workbench 项目的主工作区与全部 worktree 视为一个项目，
+    ///     前端项目侧边栏应把同一个 Git 项目的主工作区与全部 worktree 视为一个项目，
     ///     避免每创建一个 worktree 就出现一个新的 Claude 历史项目。
     ///
     /// Code Logic:
-    ///     先从本机 Workbench 项目/工作树构造 `history_path -> main project` 别名表；
-    ///     已登记路径按主项目 path/name 聚合，未登记路径仍按历史原始 cwd 聚合。
-    ///     最终 COUNT + MAX(occurred_at)，按最近活动时间降序。
+    ///     先用 Git worktree 清单持久迁移可解析路径，再仅按规范化主路径执行
+    ///     COUNT + MAX(occurred_at)，按最近活动时间降序。
     pub async fn list_projects(&self, device_id: &str) -> Result<Vec<CcProjectDto>, AppError> {
         self.normalize_project_paths(device_id).await?;
         let rows = sqlx::query(
-            "WITH project_aliases AS (\
-               SELECT p.path AS project_path, p.name AS project_name, p.path AS history_path \
-               FROM workbench_projects p WHERE p.kind = 'local' \
-               UNION \
-               SELECT p.path AS project_path, p.name AS project_name, w.path AS history_path \
-               FROM workbench_worktrees w \
-               JOIN workbench_projects p ON p.id = w.project_id \
-               WHERE p.kind = 'local'\
-             ) \
-             SELECT COALESCE(a.project_path, h.project_path) AS project_path, \
-                    COALESCE(MAX(a.project_name), MAX(h.project_name)) AS project_name, \
+            "SELECT h.project_path AS project_path, MAX(h.project_name) AS project_name, \
                     COUNT(*) AS cnt, MAX(h.occurred_at) AS last_at \
              FROM claude_history h \
-             LEFT JOIN project_aliases a ON a.history_path = h.project_path \
              WHERE h.deleted = 0 \
-             GROUP BY COALESCE(a.project_path, h.project_path) \
+             GROUP BY h.project_path \
              ORDER BY last_at DESC",
         )
         .fetch_all(&self.db)
@@ -200,12 +188,12 @@ impl ClaudeHistoryRepo {
     /// 按主项目列出历史 prompt（排除已删除），可选内容搜索，按 occurred_at 降序，限 500 条。
     ///
     /// Business Logic:
-    ///     用户进入一个 Claude 历史项目后，需要同时看到主工作区和该项目全部已登记 worktree
-    ///     中产生的 prompt；未登记项目继续保持原 cwd 精确匹配。
+    ///     用户进入一个 Claude 历史项目后，需要同时看到 Git 报告的主工作区与全部
+    ///     linked worktree 中产生的 prompt。
     ///
     /// Code Logic:
-    ///     `selected_paths` 包含所选主路径及其本机 Workbench worktree 路径；
-    ///     用 IN 子查询筛选原始 `claude_history.project_path`，保留每条记录的来源 cwd。
+    ///     先把可解析的历史 cwd 持久迁移到 Git worktree 清单首项（主工作区），
+    ///     再按规范化后的 project_path 精确筛选。
     pub async fn list_by_project(
         &self,
         project_path: &str,
@@ -216,43 +204,26 @@ impl ClaudeHistoryRepo {
         let rows = if let Some(kw) = search {
             let pattern = format!("%{}%", kw);
             sqlx::query(
-                "WITH selected_paths(path) AS (\
-                   SELECT ? \
-                   UNION \
-                   SELECT w.path FROM workbench_worktrees w \
-                   JOIN workbench_projects p ON p.id = w.project_id \
-                   WHERE p.kind = 'local' AND p.path = ?\
-                 ) \
-                 SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
+                "SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
                         h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
                         h.created_at, h.updated_at, h.deleted \
                  FROM claude_history h \
-                 WHERE h.project_path IN (SELECT path FROM selected_paths) \
-                   AND h.deleted = 0 AND h.content LIKE ? \
+                 WHERE h.project_path = ? AND h.deleted = 0 AND h.content LIKE ? \
                  ORDER BY h.occurred_at DESC LIMIT 500",
             )
-            .bind(project_path)
             .bind(project_path)
             .bind(&pattern)
             .fetch_all(&self.db)
             .await?
         } else {
             sqlx::query(
-                "WITH selected_paths(path) AS (\
-                   SELECT ? \
-                   UNION \
-                   SELECT w.path FROM workbench_worktrees w \
-                   JOIN workbench_projects p ON p.id = w.project_id \
-                   WHERE p.kind = 'local' AND p.path = ?\
-                 ) \
-                 SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
+                "SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
                         h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
                         h.created_at, h.updated_at, h.deleted \
                  FROM claude_history h \
-                 WHERE h.project_path IN (SELECT path FROM selected_paths) AND h.deleted = 0 \
+                 WHERE h.project_path = ? AND h.deleted = 0 \
                  ORDER BY h.occurred_at DESC LIMIT 500",
             )
-            .bind(project_path)
             .bind(project_path)
             .fetch_all(&self.db)
             .await?
@@ -693,6 +664,8 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::process::Command;
     use std::str::FromStr;
 
     /// 构造内存 SQLite 并建好 claude_history + scan_state 表，返回仓库。
@@ -723,24 +696,6 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS workbench_projects (\
-             id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL, \
-             device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL, \
-             created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS workbench_worktrees (\
-             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, branch TEXT, \
-             base_branch TEXT, path TEXT NOT NULL, is_main INTEGER NOT NULL, created_at TEXT NOT NULL, \
-             updated_at TEXT NOT NULL)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
         ClaudeHistoryRepo::new(pool)
     }
 
@@ -765,39 +720,58 @@ mod tests {
         }
     }
 
-    /// 为测试登记一个本机 Workbench 项目及其主工作区、附加 worktree。
-    async fn register_workbench_project(
-        repo: &ClaudeHistoryRepo,
-        project_id: &str,
-        project_name: &str,
-        project_path: &str,
-        worktree_paths: &[&str],
-    ) {
-        sqlx::query(
-            "INSERT INTO workbench_projects \
-             (id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at) \
-             VALUES (?, ?, 'local', 'd1', 'local', ?, '2024-01-01', '2024-01-01', '2024-01-01')",
-        )
-        .bind(project_id)
-        .bind(project_name)
-        .bind(project_path)
-        .execute(&repo.db)
-        .await
-        .unwrap();
-        for (index, worktree_path) in worktree_paths.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO workbench_worktrees \
-                 (id, project_id, name, branch, base_branch, path, is_main, created_at, updated_at) \
-                 VALUES (?, ?, ?, NULL, NULL, ?, ?, '2024-01-01', '2024-01-01')",
-            )
-            .bind(format!("{project_id}-wt-{index}"))
-            .bind(project_id)
-            .bind(format!("wt-{index}"))
-            .bind(worktree_path)
-            .bind(i64::from(*worktree_path == project_path))
-            .execute(&repo.db)
-            .await
-            .unwrap();
+    /// 持有真实 Git 主工作区与任意外置 linked worktree 的测试夹具。
+    struct GitWorktreeFixture {
+        _temp: tempfile::TempDir,
+        main: PathBuf,
+        linked: PathBuf,
+    }
+
+    impl GitWorktreeFixture {
+        /// 初始化提交并通过 `git worktree add` 创建 linked worktree。
+        fn create() -> Self {
+            let temp = tempfile::tempdir().expect("应创建临时目录");
+            let main = temp.path().join("main");
+            let linked = temp.path().join("linked-anywhere");
+            let main_text = main.to_string_lossy().into_owned();
+            let linked_text = linked.to_string_lossy().into_owned();
+            std::fs::create_dir_all(&main).expect("应创建主仓库目录");
+            for args in [
+                vec!["init", main_text.as_str()],
+                vec!["-C", main_text.as_str(), "config", "user.name", "Test"],
+                vec![
+                    "-C",
+                    main_text.as_str(),
+                    "config",
+                    "user.email",
+                    "test@example.com",
+                ],
+            ] {
+                let output = Command::new("git").args(args).output().expect("应执行 git");
+                assert!(output.status.success());
+            }
+            std::fs::write(main.join("README.md"), "base\n").expect("应写入测试文件");
+            for args in [
+                vec!["-C", main_text.as_str(), "add", "README.md"],
+                vec!["-C", main_text.as_str(), "commit", "-m", "init"],
+                vec![
+                    "-C",
+                    main_text.as_str(),
+                    "worktree",
+                    "add",
+                    "-b",
+                    "feature",
+                    linked_text.as_str(),
+                ],
+            ] {
+                let output = Command::new("git").args(args).output().expect("应执行 git");
+                assert!(output.status.success());
+            }
+            Self {
+                _temp: temp,
+                main: main.canonicalize().expect("主仓库应可规范化"),
+                linked: linked.canonicalize().expect("linked worktree 应可规范化"),
+            }
         }
     }
 
@@ -854,20 +828,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_projects_groups_registered_worktrees_under_main_project() {
+    async fn list_projects_groups_git_discovered_worktrees_under_main_project() {
         let repo = setup_repo().await;
-        register_workbench_project(
-            &repo,
-            "project-1",
-            "repo",
-            "/projects/repo",
-            &["/projects/repo", "/tmp/repo-feature", "/tmp/repo-fix"],
-        )
-        .await;
+        let git = GitWorktreeFixture::create();
+        let main = git.main.to_string_lossy().into_owned();
+        let linked = git.linked.to_string_lossy().into_owned();
         repo.bulk_ingest(&[
-            row("main", "/projects/repo", "main prompt", 1),
-            row("feature", "/tmp/repo-feature", "feature prompt", 1),
-            row("fix", "/tmp/repo-fix", "fix prompt", 1),
+            row("main", &main, "main prompt", 1),
+            row("feature", &linked, "feature prompt", 1),
         ])
         .await
         .unwrap();
@@ -875,13 +843,15 @@ mod tests {
         let projects = repo.list_projects("d1").await.unwrap();
 
         assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].project_path, "/projects/repo");
-        assert_eq!(projects[0].project_name, "repo");
-        assert_eq!(projects[0].count, 3);
+        assert_eq!(projects[0].project_path, main);
+        assert_eq!(projects[0].count, 2);
+        let migrated = repo.get("feature").await.unwrap().unwrap();
+        assert_eq!(migrated.project_path, projects[0].project_path);
+        assert_eq!(migrated.vector_clock.get("d1"), Some(&2));
     }
 
     #[tokio::test]
-    async fn list_projects_persistently_migrates_removed_conventional_worktree_history() {
+    async fn list_projects_does_not_guess_removed_worktree_identity_from_path_name() {
         let repo = setup_repo().await;
         repo.bulk_ingest(&[
             row("main", "/projects/repo", "main prompt", 1),
@@ -898,12 +868,12 @@ mod tests {
         let projects = repo.list_projects("d1").await.unwrap();
         let migrated = repo.get("removed-worktree").await.unwrap().unwrap();
 
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].project_path, "/projects/repo");
-        assert_eq!(projects[0].count, 2);
-        assert_eq!(migrated.project_path, "/projects/repo");
-        assert_eq!(migrated.project_name, "repo");
-        assert_eq!(migrated.vector_clock.get("d1"), Some(&2));
+        assert_eq!(projects.len(), 2);
+        assert_eq!(
+            migrated.project_path,
+            "/projects/repo/.worktrees/feature-a/apps/api"
+        );
+        assert_eq!(migrated.vector_clock.get("d1"), Some(&1));
     }
 
     #[tokio::test]
@@ -928,30 +898,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_by_project_includes_prompts_from_registered_worktrees() {
+    async fn list_by_project_includes_prompts_from_git_discovered_worktrees() {
         let repo = setup_repo().await;
-        register_workbench_project(
-            &repo,
-            "project-1",
-            "repo",
-            "/projects/repo",
-            &["/projects/repo", "/tmp/repo-feature"],
-        )
-        .await;
+        let git = GitWorktreeFixture::create();
+        let main = git.main.to_string_lossy().into_owned();
+        let linked = git.linked.to_string_lossy().into_owned();
         repo.bulk_ingest(&[
-            row("main", "/projects/repo", "shared keyword", 1),
-            row("feature", "/tmp/repo-feature", "shared keyword", 1),
+            row("main", &main, "shared keyword", 1),
+            row("feature", &linked, "shared keyword", 1),
             row("other", "/projects/other", "shared keyword", 1),
         ])
         .await
         .unwrap();
 
-        let all = repo
-            .list_by_project("/projects/repo", None, "d1")
-            .await
-            .unwrap();
+        let all = repo.list_by_project(&main, None, "d1").await.unwrap();
         let filtered = repo
-            .list_by_project("/projects/repo", Some("shared"), "d1")
+            .list_by_project(&main, Some("shared"), "d1")
             .await
             .unwrap();
 

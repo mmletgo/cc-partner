@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn extracted_row_uses_main_project_for_conventional_worktree_path() {
+    fn extracted_row_does_not_guess_missing_worktree_project_from_path_name() {
         let e = Extracted {
             uuid: "uuid-worktree".to_string(),
             cwd: "/projects/repo/.claude/worktrees/feature-a/apps/api".to_string(),
@@ -615,8 +615,11 @@ mod tests {
 
         let row = extracted_to_row(&e, "d1", "2026-01-01T00:00:00+00:00");
 
-        assert_eq!(row.project_path, "/projects/repo");
-        assert_eq!(row.project_name, "repo");
+        assert_eq!(
+            row.project_path,
+            "/projects/repo/.claude/worktrees/feature-a/apps/api"
+        );
+        assert_eq!(row.project_name, "api");
     }
 
     #[test]
