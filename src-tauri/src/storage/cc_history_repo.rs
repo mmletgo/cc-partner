@@ -160,16 +160,21 @@ impl ClaudeHistoryRepo {
     /// Code Logic:
     ///     先用 Git worktree 清单持久迁移可解析路径，再仅按规范化主路径执行
     ///     COUNT + MAX(occurred_at)，按最近活动时间降序。
-    pub async fn list_projects(&self, device_id: &str) -> Result<Vec<CcProjectDto>, AppError> {
-        self.normalize_project_paths(device_id).await?;
+    pub async fn list_projects(
+        &self,
+        local_device_id: &str,
+        owner_device_id: &str,
+    ) -> Result<Vec<CcProjectDto>, AppError> {
+        self.normalize_project_paths(local_device_id).await?;
         let rows = sqlx::query(
             "SELECT h.project_path AS project_path, MAX(h.project_name) AS project_name, \
                     COUNT(*) AS cnt, MAX(h.occurred_at) AS last_at \
              FROM claude_history h \
-             WHERE h.deleted = 0 \
+             WHERE h.deleted = 0 AND h.device_id = ? \
              GROUP BY h.project_path \
              ORDER BY last_at DESC",
         )
+        .bind(owner_device_id)
         .fetch_all(&self.db)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
@@ -185,6 +190,28 @@ impl ClaudeHistoryRepo {
         Ok(out)
     }
 
+    /// 列出未删除历史中出现过的设备 id，按 id 稳定排序。
+    ///
+    /// Business Logic:
+    ///     前端设备筛选器必须覆盖已同步但当前离线的历史来源，不能只依赖 mDNS 在线设备。
+    ///
+    /// Code Logic:
+    ///     对未删除 claude_history 执行 DISTINCT device_id；显示名由命令层结合运行时设备表补全。
+    pub async fn list_device_ids(&self) -> Result<Vec<String>, AppError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT device_id FROM claude_history \
+             WHERE deleted = 0 ORDER BY device_id ASC",
+        )
+        .fetch_all(&self.db)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                row.try_get::<String, _>("device_id")
+                    .map_err(AppError::from)
+            })
+            .collect()
+    }
+
     /// 按主项目列出历史 prompt（排除已删除），可选内容搜索，按 occurred_at 降序，限 500 条。
     ///
     /// Business Logic:
@@ -198,9 +225,10 @@ impl ClaudeHistoryRepo {
         &self,
         project_path: &str,
         search: Option<&str>,
-        device_id: &str,
+        local_device_id: &str,
+        owner_device_id: &str,
     ) -> Result<Vec<ClaudeHistoryRow>, AppError> {
-        self.normalize_project_paths(device_id).await?;
+        self.normalize_project_paths(local_device_id).await?;
         let rows = if let Some(kw) = search {
             let pattern = format!("%{}%", kw);
             sqlx::query(
@@ -208,10 +236,11 @@ impl ClaudeHistoryRepo {
                         h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
                         h.created_at, h.updated_at, h.deleted \
                  FROM claude_history h \
-                 WHERE h.project_path = ? AND h.deleted = 0 AND h.content LIKE ? \
+                 WHERE h.project_path = ? AND h.device_id = ? AND h.deleted = 0 AND h.content LIKE ? \
                  ORDER BY h.occurred_at DESC LIMIT 500",
             )
             .bind(project_path)
+            .bind(owner_device_id)
             .bind(&pattern)
             .fetch_all(&self.db)
             .await?
@@ -221,10 +250,11 @@ impl ClaudeHistoryRepo {
                         h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
                         h.created_at, h.updated_at, h.deleted \
                  FROM claude_history h \
-                 WHERE h.project_path = ? AND h.deleted = 0 \
+                 WHERE h.project_path = ? AND h.device_id = ? AND h.deleted = 0 \
                  ORDER BY h.occurred_at DESC LIMIT 500",
             )
             .bind(project_path)
+            .bind(owner_device_id)
             .fetch_all(&self.db)
             .await?
         };
@@ -817,7 +847,7 @@ mod tests {
         ])
         .await
         .unwrap();
-        let projects = repo.list_projects("d1").await.unwrap();
+        let projects = repo.list_projects("d1", "d1").await.unwrap();
         // 两个项目
         assert_eq!(projects.len(), 2);
         // 找到 p1 的聚合 count=2
@@ -825,6 +855,35 @@ mod tests {
         assert_eq!(p1.count, 2);
         let p2 = projects.iter().find(|p| p.project_path == "/p2").unwrap();
         assert_eq!(p2.count, 1);
+    }
+
+    #[tokio::test]
+    async fn list_projects_and_prompts_filter_by_owner_device() {
+        let repo = setup_repo().await;
+        let local = row("local", "/shared", "local prompt", 1);
+        let mut remote = row("remote", "/shared", "remote prompt", 1);
+        remote.device_id = "d2".to_string();
+        remote.vector_clock = HashMap::from([("d2".to_string(), 1)]);
+        repo.bulk_ingest(&[local, remote]).await.unwrap();
+
+        let device_ids = repo.list_device_ids().await.unwrap();
+        assert_eq!(device_ids, vec!["d1", "d2"]);
+
+        let local_projects = repo.list_projects("d1", "d1").await.unwrap();
+        let remote_projects = repo.list_projects("d1", "d2").await.unwrap();
+        assert_eq!(local_projects[0].count, 1);
+        assert_eq!(remote_projects[0].count, 1);
+
+        let local_prompts = repo
+            .list_by_project("/shared", None, "d1", "d1")
+            .await
+            .unwrap();
+        let remote_prompts = repo
+            .list_by_project("/shared", None, "d1", "d2")
+            .await
+            .unwrap();
+        assert_eq!(local_prompts[0].id, "local");
+        assert_eq!(remote_prompts[0].id, "remote");
     }
 
     #[tokio::test]
@@ -840,7 +899,7 @@ mod tests {
         .await
         .unwrap();
 
-        let projects = repo.list_projects("d1").await.unwrap();
+        let projects = repo.list_projects("d1", "d1").await.unwrap();
 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].project_path, main);
@@ -865,7 +924,7 @@ mod tests {
         .await
         .unwrap();
 
-        let projects = repo.list_projects("d1").await.unwrap();
+        let projects = repo.list_projects("d1", "d1").await.unwrap();
         let migrated = repo.get("removed-worktree").await.unwrap().unwrap();
 
         assert_eq!(projects.len(), 2);
@@ -886,11 +945,11 @@ mod tests {
         .await
         .unwrap();
         // 无搜索：2 条
-        let all = repo.list_by_project("/p", None, "d1").await.unwrap();
+        let all = repo.list_by_project("/p", None, "d1", "d1").await.unwrap();
         assert_eq!(all.len(), 2);
         // 搜索 hello：1 条
         let filtered = repo
-            .list_by_project("/p", Some("hello"), "d1")
+            .list_by_project("/p", Some("hello"), "d1", "d1")
             .await
             .unwrap();
         assert_eq!(filtered.len(), 1);
@@ -911,9 +970,9 @@ mod tests {
         .await
         .unwrap();
 
-        let all = repo.list_by_project(&main, None, "d1").await.unwrap();
+        let all = repo.list_by_project(&main, None, "d1", "d1").await.unwrap();
         let filtered = repo
-            .list_by_project(&main, Some("shared"), "d1")
+            .list_by_project(&main, Some("shared"), "d1", "d1")
             .await
             .unwrap();
 
@@ -943,7 +1002,7 @@ mod tests {
         let got = repo.get("a").await.unwrap().unwrap();
         assert!(got.deleted);
         assert_eq!(got.vector_clock.get("d1"), Some(&2));
-        let listed = repo.list_by_project("/p", None, "d1").await.unwrap();
+        let listed = repo.list_by_project("/p", None, "d1", "d1").await.unwrap();
         assert!(listed.is_empty());
         // get_all_for_sync 仍含已删除（同步需传播删除）
         let synced = repo.get_all_for_sync().await.unwrap();

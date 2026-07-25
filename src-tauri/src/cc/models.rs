@@ -88,6 +88,18 @@ pub struct CcProjectDto {
     pub last_occurred_at: String,
 }
 
+/// Claude Code 历史所属设备 DTO（camelCase，前端设备筛选器用）。
+///
+/// Business Logic: 同步后历史可能来自多台设备，页面需要稳定设备 id、可读名称以及本机标记，
+///     才能默认只显示本机项目，并允许用户显式切换到其他设备。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcHistoryDeviceDto {
+    pub id: String,
+    pub name: String,
+    pub is_self: bool,
+}
+
 /// Claude Code 历史同步摘要（snake_case，P2P manifest 页用）。
 ///
 /// Business Logic（为什么需要这个类型）:

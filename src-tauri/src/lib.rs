@@ -371,7 +371,8 @@ pub fn run() {
             updater_cmd::get_download_status,
             updater_cmd::cancel_download,
             updater_cmd::install_update,
-            // Claude Code 历史（5 命令：项目列表 / 项目内 prompt 列表 / 详情 / 手动刷新 / 删除）
+            // Claude Code 历史（6 命令：设备 / 项目 / prompt / 详情 / 手动刷新 / 删除）
+            cc_history_cmd::list_cc_history_devices,
             cc_history_cmd::list_cc_projects,
             cc_history_cmd::list_cc_prompts,
             cc_history_cmd::get_cc_prompt,

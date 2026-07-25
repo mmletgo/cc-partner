@@ -10,7 +10,7 @@
 //!     推进 vector_clock[device_id] += 1（CRDT 删除是一次写入，需让对端感知）。
 
 use crate::cc::collector;
-use crate::cc::models::{CcProjectDto, ClaudeHistoryDto};
+use crate::cc::models::{CcHistoryDeviceDto, CcProjectDto, ClaudeHistoryDto};
 use crate::error::AppError;
 use crate::state::AppState;
 use chrono::Utc;
@@ -21,25 +21,65 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
-/// 列出所有有 Claude Code 历史的项目（聚合 count + 最近活动时间），按最近活动降序。
+/// 列出历史中出现过的设备；始终包含本机，离线旧设备名称回退为设备 id。
 #[tauri::command]
-pub async fn list_cc_projects(state: State<'_, AppState>) -> Result<Vec<CcProjectDto>, AppError> {
+pub async fn list_cc_history_devices(
+    state: State<'_, AppState>,
+) -> Result<Vec<CcHistoryDeviceDto>, AppError> {
+    let local_id = state.device_id.as_ref();
+    let local_name = state.device_name();
+    let mut ids = state.cc_history_repo.list_device_ids().await?;
+    if !ids.iter().any(|id| id == local_id) {
+        ids.push(local_id.clone());
+    }
+    let peers = state.devices.read().expect("devices 读锁中毒");
+    let mut devices = ids
+        .into_iter()
+        .map(|id| {
+            let is_self = id == *local_id;
+            let name = if is_self {
+                local_name.clone()
+            } else {
+                peers
+                    .get(&id)
+                    .map(|device| device.name.clone())
+                    .unwrap_or_else(|| id.clone())
+            };
+            CcHistoryDeviceDto { id, name, is_self }
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|a, b| b.is_self.cmp(&a.is_self).then_with(|| a.name.cmp(&b.name)));
+    Ok(devices)
+}
+
+/// 列出指定设备有 Claude Code 历史的项目（聚合 count + 最近活动时间），按最近活动降序。
+#[tauri::command]
+pub async fn list_cc_projects(
+    state: State<'_, AppState>,
+    device_id: String,
+) -> Result<Vec<CcProjectDto>, AppError> {
     state
         .cc_history_repo
-        .list_projects(state.device_id.as_ref())
+        .list_projects(state.device_id.as_ref(), &device_id)
         .await
 }
 
-/// 列出某项目下的历史 prompt（可选关键词搜索），按 occurred_at 降序，最多 500 条。
+/// 列出指定设备、某项目下的历史 prompt（可选关键词搜索），按 occurred_at 降序，最多 500 条。
 #[tauri::command]
 pub async fn list_cc_prompts(
     state: State<'_, AppState>,
     project_path: String,
     search: Option<String>,
+    device_id: String,
 ) -> Result<Vec<ClaudeHistoryDto>, AppError> {
     let rows = state
         .cc_history_repo
-        .list_by_project(&project_path, search.as_deref(), state.device_id.as_ref())
+        .list_by_project(
+            &project_path,
+            search.as_deref(),
+            state.device_id.as_ref(),
+            &device_id,
+        )
         .await?;
     Ok(rows.iter().map(|r| r.to_dto()).collect())
 }

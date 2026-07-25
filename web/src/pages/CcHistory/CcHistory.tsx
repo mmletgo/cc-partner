@@ -9,9 +9,9 @@
  *
  * Code Logic（这个页面做什么）:
  *   - 顶部 page header（eyebrow/title/lead）
- *   - 工具栏：「刷新采集」按钮（ccHistoryApi.refresh）+「同步」按钮（promptsApi.sync）
+ *   - 工具栏：所属设备筛选（默认本机）+「刷新采集」+「同步」
  *   - 主体双栏 grid：左栏项目筛选器、项目搜索与列表，右栏 Prompt 搜索框 + 时间线
- *   - 数据流：loadProjects → 进页默认选中第一个项目；selectedProjectPath/search 变化 → loadPrompts
+ *   - 数据流：loadDevices → 默认本机 → loadProjects；设备/项目/search 变化 → loadPrompts
  *   - 使用独立 projectGuard / promptGuard（createLatestRequestGuard）在 success/catch/finally
  *     写状态前校验 token+context；selectedProject 变为 null 时 invalidate promptGuard
  *   - 复制/转存：成功后顶部 toast 提示；刷新/同步失败同样 toast（非阻塞）
@@ -28,7 +28,7 @@ import { Button, Card, Dialog, Input, StatusMessage } from '@/components/primiti
 import { CcHistoryCard } from '@/components/domain';
 import { ccHistoryApi } from '@/api/ccHistory';
 import { promptsApi } from '@/api/prompts';
-import type { CcProject, CcHistoryItem } from '@/lib/types';
+import type { CcHistoryDevice, CcProject, CcHistoryItem } from '@/lib/types';
 import { SearchIcon, SyncIcon, TrashIcon, HistoryIcon } from '@/lib/icons';
 import { debounce, formatRelativeTime } from '@/lib/format';
 import {
@@ -50,6 +50,10 @@ type LoadState = 'loading' | 'success' | 'error';
  */
 export function CcHistory() {
   const { t, i18n } = useTranslation(['ccHistory', 'common']);
+
+  // ── 所属设备（默认本机）──
+  const [devices, setDevices] = useState<CcHistoryDevice[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
 
   // ── 项目列表 ──
   const [projects, setProjects] = useState<CcProject[]>([]);
@@ -85,8 +89,30 @@ export function CcHistory() {
   } | null>(null);
 
   // ── 独立 latest-request 守卫（项目列表 / prompt 列表）──
-  const projectGuardRef = useRef(createLatestRequestGuard<null>());
+  const projectGuardRef = useRef(createLatestRequestGuard<string>());
   const promptGuardRef = useRef(createLatestRequestGuard<string>());
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Claude 历史同步后可能包含多台设备的数据；页面必须知道可筛选设备，并默认定位本机。
+   *
+   * Code Logic（这个函数做什么）:
+   *   拉取历史设备列表，保留仍有效的当前选择；首次加载优先选择 isSelf 设备。
+   */
+  const loadDevices = useCallback(async () => {
+    try {
+      const data = await ccHistoryApi.listDevices();
+      const list = Array.isArray(data) ? data : [];
+      setDevices(list);
+      setSelectedDeviceId((prev) => {
+        if (prev && list.some((device) => device.id === prev)) return prev;
+        return list.find((device) => device.isSelf)?.id ?? list[0]?.id ?? null;
+      });
+    } catch (err) {
+      setProjectsLoadState('error');
+      setProjectsError(err instanceof Error ? err.message : t('ccHistory:loadFailedGeneric'));
+    }
+  }, [t]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -96,12 +122,12 @@ export function CcHistory() {
    *   begin projectGuard → listProjects；仅 isCurrent 时写 projects/error/loadState；
    *   成功后若当前选中失效则回落到列表首项。
    */
-  const loadProjects = useCallback(async () => {
-    const token = projectGuardRef.current.begin(null);
+  const loadProjects = useCallback(async (deviceId: string) => {
+    const token = projectGuardRef.current.begin(deviceId);
     setProjectsLoadState('loading');
     try {
-      const data = await ccHistoryApi.listProjects();
-      if (!projectGuardRef.current.isCurrent(token, null)) return;
+      const data = await ccHistoryApi.listProjects(deviceId);
+      if (!projectGuardRef.current.isCurrent(token, deviceId)) return;
       const list = Array.isArray(data) ? data : [];
       setProjects(list);
       setProjectsLoadState('success');
@@ -111,7 +137,7 @@ export function CcHistory() {
         return list.length > 0 ? list[0].projectPath : null;
       });
     } catch (err) {
-      if (!projectGuardRef.current.isCurrent(token, null)) return;
+      if (!projectGuardRef.current.isCurrent(token, deviceId)) return;
       setProjectsLoadState('error');
       setProjectsError(err instanceof Error ? err.message : t('ccHistory:loadFailedGeneric'));
     }
@@ -119,8 +145,18 @@ export function CcHistory() {
 
   /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
   useEffect(() => {
-    void loadProjects();
-  }, [loadProjects]);
+    void loadDevices();
+  }, [loadDevices]);
+
+  useEffect(() => {
+    if (!selectedDeviceId) {
+      projectGuardRef.current.invalidate();
+      setProjects([]);
+      setSelectedProjectPath(null);
+      return;
+    }
+    void loadProjects(selectedDeviceId);
+  }, [loadProjects, selectedDeviceId]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
@@ -132,12 +168,12 @@ export function CcHistory() {
    *   在 success/catch 写状态前 isCurrent 校验。
    */
   const loadPrompts = useCallback(
-    async (projectPath: string, searchTerm?: string) => {
-      const context = buildCcHistoryPromptContext(projectPath, searchTerm);
+    async (projectPath: string, deviceId: string, searchTerm?: string) => {
+      const context = `${deviceId}\0${buildCcHistoryPromptContext(projectPath, searchTerm)}`;
       const token = promptGuardRef.current.begin(context);
       setPromptsLoadState('loading');
       try {
-        const data = await ccHistoryApi.listPrompts(projectPath, searchTerm);
+        const data = await ccHistoryApi.listPrompts(projectPath, searchTerm, deviceId);
         if (!promptGuardRef.current.isCurrent(token, context)) return;
         setPrompts(Array.isArray(data) ? data : []);
         setPromptsLoadState('success');
@@ -153,15 +189,15 @@ export function CcHistory() {
 
   /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
   useEffect(() => {
-    if (!selectedProjectPath) {
+    if (!selectedProjectPath || !selectedDeviceId) {
       promptGuardRef.current.invalidate();
       setPrompts([]);
       setPromptsLoadState('success');
       setPromptsError(null);
       return;
     }
-    void loadPrompts(selectedProjectPath, search || undefined);
-  }, [selectedProjectPath, search, loadPrompts]);
+    void loadPrompts(selectedProjectPath, selectedDeviceId, search || undefined);
+  }, [selectedProjectPath, selectedDeviceId, search, loadPrompts]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ── 搜索 300ms debounce ──
@@ -221,9 +257,12 @@ export function CcHistory() {
     try {
       const res = await ccHistoryApi.refresh();
       // 采集完成后刷新项目 + 当前选中项目的 prompt（复用带守卫的 loader）
-      await loadProjects();
-      if (selectedProjectPath) {
-        await loadPrompts(selectedProjectPath, search || undefined);
+      await loadDevices();
+      if (selectedDeviceId) {
+        await loadProjects(selectedDeviceId);
+      }
+      if (selectedProjectPath && selectedDeviceId) {
+        await loadPrompts(selectedProjectPath, selectedDeviceId, search || undefined);
       }
       if (res?.ok) {
         showToast(t('ccHistory:refreshDone', { count: res.collected }));
@@ -234,7 +273,16 @@ export function CcHistory() {
     } finally {
       setRefreshing(false);
     }
-  }, [loadProjects, loadPrompts, selectedProjectPath, search, showToast, t]);
+  }, [
+    loadDevices,
+    loadProjects,
+    loadPrompts,
+    selectedProjectPath,
+    selectedDeviceId,
+    search,
+    showToast,
+    t,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -246,15 +294,27 @@ export function CcHistory() {
   const handleSync = useCallback(async () => {
     try {
       await promptsApi.sync();
-      await loadProjects();
-      if (selectedProjectPath) {
-        await loadPrompts(selectedProjectPath, search || undefined);
+      await loadDevices();
+      if (selectedDeviceId) {
+        await loadProjects(selectedDeviceId);
+      }
+      if (selectedProjectPath && selectedDeviceId) {
+        await loadPrompts(selectedProjectPath, selectedDeviceId, search || undefined);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : t('ccHistory:syncFailedGeneric');
       showToast(t('ccHistory:syncFailed', { error: message }));
     }
-  }, [loadProjects, loadPrompts, selectedProjectPath, search, showToast, t]);
+  }, [
+    loadDevices,
+    loadProjects,
+    loadPrompts,
+    selectedProjectPath,
+    selectedDeviceId,
+    search,
+    showToast,
+    t,
+  ]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -433,6 +493,38 @@ export function CcHistory() {
 
       {/* 工具栏 */}
       <div className={styles.toolbar}>
+        {devices.length > 0 && selectedDeviceId ? (
+          <label className={[styles.filterField, styles.deviceFilter].join(' ')}>
+            <span className={styles.filterLabel}>{t('ccHistory:deviceFilterLabel')}</span>
+            <span className={styles.selectWrap}>
+              <select
+                className={styles.projectSelect}
+                value={selectedDeviceId}
+                onChange={(event) => {
+                  setSelectedDeviceId(event.target.value);
+                  setProjects([]);
+                  setSelectedProjectPath(null);
+                  setPrompts([]);
+                  setProjectSearch('');
+                  setSearchInput('');
+                  setSearch('');
+                }}
+                aria-label={t('ccHistory:deviceFilterAriaLabel')}
+              >
+                {devices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.isSelf
+                      ? `${t('ccHistory:localDevice')} · ${device.name}`
+                      : device.name}
+                  </option>
+                ))}
+              </select>
+              <span className={styles.selectArrow} aria-hidden="true">
+                ▾
+              </span>
+            </span>
+          </label>
+        ) : null}
         <div className={styles.toolbarActions}>
           <Button
             variant="secondary"

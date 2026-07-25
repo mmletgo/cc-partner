@@ -43,6 +43,7 @@ function deferred<T>(): Deferred<T> {
 }
 
 const fakeCcHistoryApi = vi.hoisted(() => ({
+  listDevices: vi.fn(),
   listProjects: vi.fn(),
   listPrompts: vi.fn(),
   refresh: vi.fn(),
@@ -126,6 +127,10 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  fakeCcHistoryApi.listDevices.mockReset();
+  fakeCcHistoryApi.listDevices.mockResolvedValue([
+    { id: 'dev-1', name: 'This Mac', isSelf: true },
+  ]);
   fakeCcHistoryApi.listProjects.mockReset();
   fakeCcHistoryApi.listPrompts.mockReset();
   fakeCcHistoryApi.refresh.mockReset();
@@ -141,6 +146,65 @@ afterEach(() => {
 });
 
 describe('CcHistory stale response guards', () => {
+  test('默认只显示本机项目与 Prompt，并可按所属设备切换', async () => {
+    const localProject = buildProject({
+      projectPath: '/projects/local',
+      projectName: 'LocalProject',
+    });
+    const remoteProject = buildProject({
+      projectPath: '/projects/remote',
+      projectName: 'RemoteProject',
+    });
+    fakeCcHistoryApi.listDevices.mockResolvedValue([
+      { id: 'dev-1', name: 'This Mac', isSelf: true },
+      { id: 'dev-2', name: 'Studio Mac', isSelf: false },
+    ]);
+    fakeCcHistoryApi.listProjects.mockImplementation(async (deviceId?: string) =>
+      deviceId === 'dev-2' ? [remoteProject] : [localProject],
+    );
+    fakeCcHistoryApi.listPrompts.mockImplementation(
+      async (projectPath: string, _search?: string, deviceId?: string) => [
+        buildPrompt({
+          id: deviceId === 'dev-2' ? 'remote-prompt' : 'local-prompt',
+          projectPath,
+          projectName: deviceId === 'dev-2' ? 'RemoteProject' : 'LocalProject',
+          content: deviceId === 'dev-2' ? 'REMOTE-DEVICE-PROMPT' : 'LOCAL-DEVICE-PROMPT',
+          deviceId: deviceId ?? 'dev-1',
+        }),
+      ],
+    );
+
+    renderPage();
+
+    const deviceFilter = await screen.findByRole('combobox', {
+      name: '按所属设备筛选 Claude 历史',
+    });
+    expect((deviceFilter as HTMLSelectElement).value).toBe('dev-1');
+    await waitFor(() => {
+      expect(fakeCcHistoryApi.listProjects).toHaveBeenCalledWith('dev-1');
+      expect(fakeCcHistoryApi.listPrompts).toHaveBeenCalledWith(
+        '/projects/local',
+        undefined,
+        'dev-1',
+      );
+      expect(screen.getByText('LOCAL-DEVICE-PROMPT')).toBeTruthy();
+      expect(screen.queryByText('RemoteProject')).toBeNull();
+    });
+
+    fireEvent.change(deviceFilter, { target: { value: 'dev-2' } });
+
+    await waitFor(() => {
+      expect(fakeCcHistoryApi.listProjects).toHaveBeenCalledWith('dev-2');
+      expect(fakeCcHistoryApi.listPrompts).toHaveBeenCalledWith(
+        '/projects/remote',
+        undefined,
+        'dev-2',
+      );
+      expect(screen.getByText('REMOTE-DEVICE-PROMPT')).toBeTruthy();
+      expect(screen.queryByText('LocalProject')).toBeNull();
+    });
+  });
+
   test('可从项目筛选器直接选择项目并加载对应 Prompt', async () => {
     const projectA = buildProject({
       projectPath: '/projects/A',
@@ -163,7 +227,7 @@ describe('CcHistory stale response guards', () => {
     renderPage();
 
     const projectSidebar = await screen.findByLabelText('Claude 项目列表');
-    const projectFilter = within(projectSidebar).getByRole('combobox', {
+    const projectFilter = await within(projectSidebar).findByRole('combobox', {
       name: '按项目筛选 Claude 历史',
     });
     expect((projectFilter as HTMLSelectElement).value).toBe('/projects/A');
@@ -172,7 +236,11 @@ describe('CcHistory stale response guards', () => {
     fireEvent.change(projectFilter, { target: { value: '/projects/B' } });
 
     await waitFor(() => {
-      expect(fakeCcHistoryApi.listPrompts).toHaveBeenCalledWith('/projects/B', undefined);
+      expect(fakeCcHistoryApi.listPrompts).toHaveBeenCalledWith(
+        '/projects/B',
+        undefined,
+        'dev-1',
+      );
       expect(screen.getByText('PROJECT-B-PROMPT')).toBeTruthy();
     });
   });

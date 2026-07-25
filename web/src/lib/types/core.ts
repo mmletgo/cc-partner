@@ -439,6 +439,19 @@ export interface CcProject {
 }
 
 /**
+ * Claude 历史采集——历史记录所属设备。
+ * 字段与 Rust 后端 list_cc_history_devices 命令返回对齐（camelCase）。
+ */
+export interface CcHistoryDevice {
+  /** 稳定设备 id（历史筛选键） */
+  id: string;
+  /** 当前可解析的设备显示名；离线旧设备回退为 id */
+  name: string;
+  /** 是否为当前运行设备 */
+  isSelf: boolean;
+}
+
+/**
  * Claude 历史采集——单条用户输入 prompt
  * 字段与 Rust 后端 list_cc_prompts / get_cc_prompt 命令返回对齐（camelCase）。
  */

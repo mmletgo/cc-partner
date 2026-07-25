@@ -7,22 +7,27 @@
  *   跨设备同步复用 promptsApi.sync()（trigger_sync 已覆盖 cc 同步），不在此重复。
  *
  * Code Logic（这个模块做什么）:
- *   - listProjects: list_cc_projects → 按 cwd 聚合的项目分组
- *   - listPrompts: list_cc_prompts → 指定项目下（可选搜索词）的 prompt 列表
+ *   - listDevices: list_cc_history_devices → 历史所属设备（本机标记 + 离线设备）
+ *   - listProjects: list_cc_projects → 指定设备内按 cwd 聚合的项目分组
+ *   - listPrompts: list_cc_prompts → 指定设备、项目下（可选搜索词）的 prompt 列表
  *   - refresh: refresh_cc_history → 重新扫描本地 ~/.claude 采集入库
  *   - remove: delete_cc_prompt → 软删除单条
  */
 
 import { invoke } from './client';
-import type { CcProject, CcHistoryItem } from '@/lib/types';
+import type { CcHistoryDevice, CcProject, CcHistoryItem } from '@/lib/types';
 
 export const ccHistoryApi = {
-  /** 列出所有采集到的 Claude 项目（按 cwd 分组） */
-  listProjects: () => invoke<CcProject[]>('list_cc_projects'),
+  /** 列出历史中出现过的设备；本机条目带 isSelf=true。 */
+  listDevices: () => invoke<CcHistoryDevice[]>('list_cc_history_devices'),
 
-  /** 列出指定项目下的 prompt（可选搜索关键词） */
-  listPrompts: (projectPath: string, search?: string) =>
-    invoke<CcHistoryItem[]>('list_cc_prompts', { projectPath, search }),
+  /** 列出指定设备采集到的 Claude 项目（按 cwd 分组） */
+  listProjects: (deviceId: string) =>
+    invoke<CcProject[]>('list_cc_projects', { deviceId }),
+
+  /** 列出指定设备、指定项目下的 prompt（可选搜索关键词） */
+  listPrompts: (projectPath: string, search: string | undefined, deviceId: string) =>
+    invoke<CcHistoryItem[]>('list_cc_prompts', { projectPath, search, deviceId }),
 
   /** 立即刷新采集：扫描本地 ~/.claude 入库，返回本次新增条数 */
   refresh: () => invoke<{ ok: boolean; collected: number }>('refresh_cc_history'),
