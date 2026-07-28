@@ -309,6 +309,7 @@ Git lane 与 LAN push 共用 `SnapshotEnvelope v1`，避免两条通道分别发
 规则：
 
 - `snapshotHash` 是移除 `snapshotHash` 字段后，对 RFC 8785 canonical JSON 做 SHA-256 的结果；`objects` 按 hash 排序并记录 byte size，payload/tree 由 revision hash 引用；
+- builder 先对 selection 与所选 heads/revisions/variants/conflicts/aliases/objects 的身份集合计算内部 `selectionStateHash`；同一 selection 的状态未变化时复用上次已完成 envelope 的 `snapshotId`、`createdAt` 与 `snapshotHash`，避免 Git 因纯生成时间变化产生空提交；
 - `selection`、asset logical identity、revision parents、tombstone、target variants 与 unresolved conflict 都是 manifest 的显式字段，不能依赖目录遍历猜测；
 - 接收方先按 revision ID、object hash 和 external aliases 去重，再从本地/远端 head 的 DAG 最近共同祖先合并；
 - Git 可读目录是 envelope 的展开表示，重新打包后必须产生同一 canonical manifest 与 object hashes；
@@ -714,6 +715,9 @@ MCP headers、env、URL credentials 和其他凭据不脱敏、不删除、不�
 - 不从任意普通 stdout 文本猜测完成；
 - native session ID 只在可靠时关联，未知不阻塞 Runner；
 - 资产更新不修改运行中的 session；UI 显示下次 session/restart 生效。
+- `openCodeVisible` 由 opted-in project 的 cc-partner 派生 `.opencode/plugins/cc-partner-runtime.ts` 监听官方 session/permission events，并输出 app-private OSC；该文件是可预览的 system materialization，不进入 canonical snapshot；
+- OpenCode 的 `session.idle` 只有在同一 native session 已出现 active/busy/retry/permission 事件后才表示 Completed，启动前 idle 不得误完成任务；
+- OpenCode TUI idle 时仍占用原 PTY；resume 使用同 worktree 的新可见 terminal 与新 Agent Runtime ID，再以可靠 native session ID 调用 `--session`，不向旧 TUI 注入 shell 命令。
 
 ### 14.3 首版范围
 
@@ -774,7 +778,8 @@ Attention 新增 `agentHubConflict` 和 `agentHubProjectionBlocked` source，只
 ### 17.2 P2P 与旧版本
 
 - 新客户端只用 `agent-hub.v1` 做新 Hub push；
-- 旧 Claude assets inventory/bundle 与 CLAUDE.md push 路由在迁移窗口内保持原行为，但不接收/产生多 CLI Hub revision；
+- 旧 Claude assets inventory/bundle 与 CLAUDE.md push 路由在迁移窗口内保持 wire/DTO/幂等行为，但当前版本同样取消内容脱敏并发送原值；它们仍不接收/产生多 CLI Hub revision；
+- 新版本继续接受旧 peer 已经产生的 `__REDACTED_BY_CLAUDE_PARTNER__` placeholder 以完成混合版本解析，但不得把 placeholder 当真实 credential 覆盖 Hub；该项显示 `legacyLossy` 并要求从具备原值的源重新 push；
 - 新 UI 不展示旧 target-side pull 入口；旧路由仅供 N/N+1 混合版本兼容，不计入 Agent Hub 成功状态；
 - 不用旧路由伪造新 Hub 同步成功；
 - 移除旧路由前先更新 P2P inventory、协议文档和混合版本测试。
