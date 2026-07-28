@@ -37,6 +37,8 @@ cc-partner 当前的 Agent 相关能力以 Claude Code 为中心：
 10. 局域网不提供目标侧任意 pull 产品流程；源设备选择一个或多个目标后主动 push。
 11. 冲突使用上次投影作为 base 做三方合并；不相交变更自动合并，同一逻辑块或同一配置键冲突时暂停相关资产并进入 Attention。
 12. 首版不同步模型选择、provider 账号、审批/权限策略、会话、认证状态或 CLI 历史。
+13. 项目 opt-in 覆盖该 Workbench 项目的主 checkout，以及当前和未来由 Workbench 登记的 worktree；非 Workbench 管理的外部 worktree 不自动写入。
+14. Hub 管理的 Skill 不同时写入会被多个 CLI 扫描的兼容目录；Claude/Codex 使用各自隔离的受管 Plugin，OpenCode 使用原生 `.opencode` 路径。
 
 ## 3. 目标
 
@@ -149,29 +151,35 @@ Agent Runtime Registry
 
 - `id`
 - `scopeId`
-- `kind`：`instruction | skill | command | agent | mcp | plugin`
+- `kind`：`instruction | skill | command | agent | mcp | plugin | hook`
+- `originNamespace`：`standalone` 或 `plugin:<pluginId>`
 - `logicalKey`
 - `displayName`
 - `policy`：`shared | adapted | targetOnly`
+- `lineageIds`：本地与已映射远端资产的历史 lineage；
 - `currentRevisionId`
 - `deletedAt`
 
-同名资产在不同作用域是不同 LogicalAsset。同一作用域内以 `kind + logicalKey` 唯一。
+同名资产在不同作用域是不同 LogicalAsset；同一作用域中，standalone 资产与 Plugin component 也保持不同身份。唯一键为 `scopeId + kind + originNamespace + logicalKey`。如果目标 CLI 无法同时承载相同 materialized name，adapter 生成稳定 alias 或标记 collision，不能把两个来源静默合并。
 
 ### 6.3 版本
 
 每次被接受的本地编辑、UI 编辑、LAN push 或 Git import 都生成不可变 `Revision`：
 
-- `id`
-- `assetId`
-- `parentRevisionId`
+- `id`：跨设备唯一 UUIDv7，导入时保留原 ID；
+- `assetLineageId`：创建该历史分支的原始 LogicalAsset ID，导入时不改写；
+- `parents`：普通 revision 一个 parent，初始 revision 无 parent，merge revision 两个 parent；
+- `generation`：`max(parent.generation) + 1`，用于确定性选择共同祖先；
+- `operation`：`upsert | delete`；
 - `originKind`：`filesystem | ui | lan | git | migration`
 - `originTarget`：`claude | codex | opencode | null`
-- `originDeviceId`
+- `originReplicaId`：安装时生成并持久化的 device replica ID；
 - `payloadHash` 或 `treeManifestHash`
 - `createdAt`
 
-Revision 是线性本地提交链。并发输入先通过三方合并收敛；无法收敛时不推进 current revision。
+Revision 构成可跨 Hub 复制的 DAG，而不是只在本机成立的线性链。普通编辑以当前 head 为 parent；两个设备分叉后，接收方计算“本身不是另一共同祖先之祖先”的 maximal common ancestors。只有一个时直接作为 base；有多个时按 revision ID 排序并递归合并为 ephemeral virtual base，virtual base 自身出现冲突则建立 Conflict。内容可合并时创建同时引用 local/incoming head 的 merge revision；无法合并时保留两个不可变 head，不推进 current revision。`generation` 只用于加速祖先搜索，不能代替 maximal-ancestor 判断。没有共同祖先时，完全相同内容可折叠为 merge revision，否则视为双来源首次导入并进入 conflict。
+
+删除也是 `operation=delete` 的 tombstone revision。远端资产 ID 与本地同一 logical identity 的资产不一致时，LogicalAsset 记录多个 lineage IDs，并把远端 ID 保存为 external asset alias；revision 的 lineage ID、revision ID、parents 与 hashes 全部保持原样。后续按 logical identity 聚合 heads、按 revision ID/DAG 去重，不能重写远端历史。
 
 ### 6.4 Target variant
 
@@ -186,7 +194,13 @@ Target extension 只能表达对应 adapter 已声明的字段，未知字段以
 
 ### 6.5 Materialization
 
-每个 `asset + target + localScopeMapping` 有一条 materialization：
+每个 `asset + target + localScopeMapping + checkoutBinding` 有一条 `TargetBinding` 与 materialization。TargetBinding 保存：
+
+- `desiredPresence`：`present | absent`；
+- `desiredEnabled`：target-local 布尔值；
+- target-local activation 参数。
+
+Materialization 保存：
 
 - 原生目标路径或 registry key；
 - 上次成功投影的 revision；
@@ -195,9 +209,12 @@ Target extension 只能表达对应 adapter 已声明的字段，未知字段以
 - rendered hash；
 - 最后观察到的外部 hash；
 - adapter ID、adapter schema version、CLI version；
+- 实际 enabled/activation state；
 - 生效方式；
-- 状态：`synced | pending | drift | partial | conflict | blocked | unsupported`；
+- 状态：`synced | pending | drift | detached | conflict | blocked | unsupported | activationRequired | externalCollision`；
 - 最近 job/error。
+
+`sourceOnly` 是 adapter 对“此 target 没有可投影表示”的兼容性结果，不是假装存在的 materialization；`full` 也不是可写状态。只有所有 `desiredPresence=present` 的 target bindings 均为 synced，资产汇总才显示 full；任一 binding 为 sourceOnly、unsupported、activationRequired、externalCollision 或失败时，汇总显示 partial 并列出原因。
 
 ### 6.6 Conflict
 
@@ -209,7 +226,7 @@ Conflict 保存：
 - 冲突块、文件路径或配置键；
 - 创建时间和解决状态。
 
-Conflict 只冻结相关资产和受影响 target。其他作用域、资产与目标继续收敛。
+Target-only/variant 冲突只冻结该资产的受影响 target；checkout 中仅有物理文件前置条件冲突时只冻结该 checkout binding。共同正文或 canonical payload 的 head 未决时，冻结该资产的全部目标投影，避免不同目标继续从不同 common head 发散。其他作用域和资产继续收敛。
 
 ## 7. 物理存储
 
@@ -247,6 +264,7 @@ Git 不提交 SQLite 或内部 CAS 布局，而提交确定性、可读、可完
 agent-hub/
 └── devices/<deviceId>/
     ├── snapshot.json
+    ├── history/<assetId>/<revisionId>/
     ├── user/
     │   ├── instructions/
     │   ├── skills/
@@ -262,7 +280,41 @@ agent-hub/
 
 每台设备只写自己的 lane，避免两个自动 push 直接改同一 snapshot 文件。后台允许 fetch/rebase 以完成 push，但不会把其他 device lane 导入 Hub。
 
-snapshot 包含完整明文凭据。凭据一旦进入 Git 历史，删除当前文件不等于从历史安全擦除；产品不能承诺可恢复的 secure erase。
+“完整 snapshot”包含本 spec 范围内的 active assets、保留中的 revisions、target variants、tombstones、未解决 conflicts、Plugin residual payload、项目可移植身份与完整明文凭据；不包含本机绝对路径、watcher cursor、projection 临时文件、CLI probe cache、session/auth 状态等机器瞬态。凭据一旦进入 Git 历史，删除当前文件不等于从历史安全擦除；产品不能承诺可恢复的 secure erase。
+
+### 7.4 可移植 Snapshot Envelope
+
+Git lane 与 LAN push 共用 `SnapshotEnvelope v1`，避免两条通道分别发明历史语义。`snapshot.json` 至少包含：
+
+```json
+{
+  "format": "cc-partner-agent-hub",
+  "formatVersion": 1,
+  "canonicalization": "RFC8785-JSON",
+  "snapshotId": "<uuidv7>",
+  "snapshotHash": "<sha256>",
+  "sourceReplicaId": "<uuid>",
+  "createdAt": "<rfc3339>",
+  "selection": {
+    "scopeIds": [],
+    "assetIds": [],
+    "includeHistory": true
+  },
+  "assetHeads": {},
+  "revisions": [],
+  "objects": []
+}
+```
+
+规则：
+
+- `snapshotHash` 是移除 `snapshotHash` 字段后，对 RFC 8785 canonical JSON 做 SHA-256 的结果；`objects` 按 hash 排序并记录 byte size，payload/tree 由 revision hash 引用；
+- `selection`、asset logical identity、revision parents、tombstone、target variants 与 unresolved conflict 都是 manifest 的显式字段，不能依赖目录遍历猜测；
+- 接收方先按 revision ID、object hash 和 external aliases 去重，再从本地/远端 head 的 DAG 最近共同祖先合并；
+- Git 可读目录是 envelope 的展开表示，重新打包后必须产生同一 canonical manifest 与 object hashes；
+- Unix 上 Hub 目录和临时目录使用 `0700`、含正文/凭据的文件使用 `0600`；Windows 使用当前用户专属 ACL。这里不改变“凭据明文保存”的产品决策，只防止意外扩大本机文件可读范围。
+
+v1 硬上限为：每个 selection 最多 100,000 个目录项、未压缩总量 2 GiB、单 blob 512 MiB、manifest 32 MiB；LAN object chunk 固定不超过 8 MiB。超过上限时保持 canonical 数据不变，snapshot/push 状态进入 blocked，不能导出不完整快照并声称成功。
 
 ## 8. Instruction Compiler
 
@@ -280,6 +332,13 @@ snapshot 包含完整明文凭据。凭据一旦进入 Git 历史，删除当前
 
 ### 8.2 目标路径
 
+下表是默认路径，不是硬编码常量。`TargetPathResolver` 在每次 probe 时解析实际 target home：
+
+- Codex config home 优先使用 `CODEX_HOME`，否则为 `~/.codex`；Codex 的兼容 Skill 发现根与 config home 分开记录；
+- OpenCode 优先解析 `OPENCODE_CONFIG` 指向的配置文件和 `OPENCODE_CONFIG_DIR` 指向的目录，否则使用 `XDG_CONFIG_HOME/opencode`，最后才是 `~/.config/opencode`；
+- Claude 使用 adapter 已验证的官方配置根覆盖和默认 `~/.claude`；
+- 解析结果、CLI executable realpath 和环境 fingerprint 一起保存；环境变化时旧路径先进入 detached preview，不能在新旧 home 间盲目搬移。
+
 | 作用域 | Claude | Codex | OpenCode |
 |---|---|---|---|
 | 用户级 | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.override.md` | `~/.config/opencode/AGENTS.md` |
@@ -289,11 +348,14 @@ snapshot 包含完整明文凭据。凭据一旦进入 Git 历史，删除当前
 
 ### 8.3 首次纳管
 
-1. 只有一个目标文件存在：整份正文按 shared 导入；随后生成其他已启用目标。
-2. 多个目标文件存在且完全相同：导入为同一 shared 文档。
-3. 多个目标文件不同：完全相同的 Markdown 块归为 shared；其余块先保留为对应 targetOnly，不通过模型猜测共同意图。
-4. 用户可在 preview 中把多个独有块配对为 adapted variants，或提升为 shared。
-5. 任何目标文件被覆盖前都必须显示精确 diff；项目还需完成一次性写入启用。
+1. 项目非根子目录只有一个目标文件存在：整份正文按 shared 导入；这是用户已确认的子目录默认。
+2. 用户级或项目根只有一个目标文件存在：先按来源 targetOnly 导入；preview 可整篇或逐块提升为 shared，已识别的 structured intent 可转为 adapted。
+3. 多个目标文件存在且完全相同：导入为同一 shared 文档。
+4. 多个目标文件不同：完全相同的 Markdown 块归为 shared；其余块先保留为对应 targetOnly，不通过模型猜测共同意图。
+5. 用户可在 preview 中把多个独有块配对为 adapted variants，或提升为 shared。
+6. 任何目标文件被覆盖前都必须显示精确 diff；项目还需完成一次性写入启用。
+
+Codex 扫描必须同时报告同一层可能存在的 `AGENTS.override.md`、`AGENTS.md` 与配置的 fallback 文件。当前生效文件按 Codex 优先级导入；被遮蔽但非空的文件作为 inactive source 出现在 preview 中，不能因即将生成 override 而静默丢弃。
 
 ### 8.4 后续外部编辑
 
@@ -317,7 +379,19 @@ src-tauri/CLAUDE.md 的普通说明变化
      src-tauri/AGENTS.md
 ```
 
-父目录内容不展开到子目录。三种 CLI 继续使用各自原生的根到 cwd 指令发现和继承机制。
+父目录内容不展开到子目录。Claude/Codex 继续使用各自原生的分层发现；OpenCode 当前会从 cwd 向上查找本地规则，并在本地规则类别中采用首个命中，因此不能声称它原生拼接完整祖先链。
+
+每个由 Hub 管理的 OpenCode 子目录 `AGENTS.md` 前置一段 target-only contract。compiler 根据当前 checkout 的相对目录生成从项目根到父目录的**明确相对路径列表**，要求 OpenCode 在首次 Read/Edit 前按列表顺序读取这些文件，再应用当前文件。它不依赖模型自行猜测父目录、不复制父正文，也不反向进入 shared block。例如：
+
+```markdown
+<!-- 该段由 cc-partner OpenCode adapter 生成，用户正文从下一标题开始 -->
+在处理本目录前，依次读取并遵守：
+1. ../../AGENTS.md
+2. ../AGENTS.md
+然后应用当前 AGENTS.md；更深层规则覆盖更上层规则。
+```
+
+materialization base map 单独记录 prelude 与用户正文；外部编辑 prelude 时只更新 OpenCode target variant 或恢复建议，不能把它传播给 Claude/Codex。
 
 ### 8.5 确定性适配
 
@@ -335,19 +409,29 @@ src-tauri/CLAUDE.md 的普通说明变化
 
 它分别渲染为 Claude 的 `CLAUDE.md` 发现措辞、Codex 的 `AGENTS.override.md → AGENTS.md → fallback` 优先级，以及 OpenCode 的 `AGENTS.md` 与 `opencode.json instructions` 语义。
 
-任意自由文本若含 CLI 文件名、CLI 专属工具名、hook event、配置路径或调用语法，只产生 `needsAdaptation` 建议，不做无约束模型重写。用户确认一次 variants 后，后续自动同步这些 variants。
+任意自由文本若含 CLI 文件名、CLI 专属工具名、hook event、配置路径或调用语法，确定性 scanner 将该块从“子目录默认 shared”中隔离为来源 targetOnly，并产生 `needsAdaptation`；在 variants 或 structured intent 确认前不投影到其他 CLI，也不做无约束模型重写。用户确认一次后，后续自动同步这些 variants。
+
+OpenCode 子目录投影自动引用这一 structured intent；它是 cc-partner 管理的 target-only contract，不会被反向合并为共享项目正文。
 
 ## 9. 资产规范化与目标适配
+
+### 9.0 物理可见性隔离
+
+OpenCode 会兼容扫描 `.opencode/skills`、`.claude/skills` 和 `.agents/skills`。因此“给三个 target 各复制一份目录”会让 OpenCode 同时看到多份 Skill，甚至读到 Claude/Codex targetOnly 内容。Hub 使用以下硬规则：
+
+| Target | 受管 Skill 的唯一投影面 | 兼容路径用途 |
+|---|---|---|
+| Claude | cc-partner 生成并按 user/project scope 激活的 Claude Plugin | `.claude/skills` 只扫描、导入和迁移，不作为受管终态 |
+| Codex | cc-partner marketplace 中生成并按 user/project scope 激活的 Codex Plugin | `.agents/skills` 只扫描、导入和迁移，不作为受管终态 |
+| OpenCode | 解析后 config root 下的 `skills/` 或项目 `.opencode/skills` | `.claude/skills`、`.agents/skills` 只作为兼容来源检测 |
+
+首次纳管 preview 必须列出 legacy standalone source。用户确认 user scope 或 project opt-in 后，Hub 先导入原字节，再把可成功激活的 Claude/Codex source 原子迁移到受管 Plugin 投影；原目录进入 Hub source archive/CAS，不继续留在 OpenCode 会扫描的位置。若 adapter 无法完成激活、路径内有未知文件或外部进程改变 precondition，则保留原目录并标记 `externalCollision`，不生成第二份投影，也不声称 target 隔离完成。
+
+启用后的新外部 legacy source 走同一流程。自动迁移只在 target activation 已通过合同 probe 时执行；否则进入 Attention。UI 始终显示 canonical name、materialized invocation 和 target package，避免 Plugin namespace 改变调用名时让用户误以为仍是原 slash/skill 名。
 
 ### 9.1 Skill
 
 Canonical Skill 是一个包含 `SKILL.md` 与 supporting files 的目录树。
-
-| Target | 用户级 | 项目级 |
-|---|---|---|
-| Claude | `~/.claude/skills/<name>` | `.claude/skills/<name>` |
-| Codex | `~/.agents/skills/<name>` | `.agents/skills/<name>` |
-| OpenCode | `~/.config/opencode/skills/<name>` | `.opencode/skills/<name>` |
 
 规则：
 
@@ -356,8 +440,7 @@ Canonical Skill 是一个包含 `SKILL.md` 与 supporting files 的目录树。
 - supporting files 原字节同步；
 - 脚本内容不自动改写。脚本引用专属 executable、工具名或绝对路径时显示 portability diagnostic；
 - 名称不满足目标约束时，target adapter 生成稳定 alias，并在 UI 显示 canonical name 与 materialized name。
-
-虽然 OpenCode 能读取 `.claude/skills` 和 `.agents/skills`，仍投影到 `.opencode/skills`，以便清楚区分 OpenCode target variant，避免隐式兼容路径掩盖冲突。
+- Plugin namespace 导致的 invocation 变化保存在 materialization，不能反写 canonical name。
 
 ### 9.2 Command
 
@@ -365,7 +448,7 @@ Canonical Command 保存名称、description、prompt template、参数占位语
 
 - Claude：原生 command Markdown；
 - OpenCode：原生 `.opencode/commands/*.md` 或用户级 commands；
-- Codex：适配为显式调用 Skill；不伪造不存在的 Claude/OpenCode slash-command 语义。
+- Codex：适配为受管 Codex Plugin 内的显式调用 Skill；不写 `.agents/skills`，也不伪造不存在的 Claude/OpenCode slash-command 语义。
 
 无法等价映射的 shell interpolation、agent/model override 等字段保留 target extension，并将 Codex 投影标记 partial。
 
@@ -406,7 +489,8 @@ PluginPackage
 │   ├── Skill
 │   ├── MCP
 │   ├── Command
-│   └── Agent
+│   ├── Agent
+│   └── Hook
 └── residualPayloads[]
     ├── Claude hooks/runtime
     ├── Codex hooks/assets
@@ -415,31 +499,67 @@ PluginPackage
 
 分解规则：
 
-- Skill、MCP、Command、Agent 先归一化并独立投影；
+- Skill、MCP、Command、Agent、Hook 先归一化为带 `originNamespace=plugin:<pluginId>` 的独立资产；
 - manifest 展示信息可映射时生成目标 manifest；
-- hook 只有在事件、输入输出与信任模型存在显式 adapter 时才转换；
+- Hook canonical payload 保存 event intent、输入输出合同、命令/脚本 tree 与 target extension；默认 targetOnly，只有事件、输入输出与信任模型存在显式 adapter 时才转换；
 - OpenCode JS/TS plugin、custom tool 与 npm package 默认只在 OpenCode 投影；
 - Claude/Codex runtime 文件默认只回到来源 target；
 - package 中部分 component 成功时状态为 partial，不回滚已可移植 component，也不显示为 full synced。
 
-Codex target 使用 cc-partner 管理的 personal/repo marketplace 与 `.codex-plugin/plugin.json` 结构。若当前 Codex 版本没有稳定的无交互 activation surface，Hub 仍生成并更新 package/marketplace，但状态为 `activationRequired`；不得调用仍标记 under development 的 App Server plugin install API 冒充稳定支持。
+Plugin revision 固定引用每个 component revision ID；更新 component 不改写旧 package revision。删除 package 时，只对该 package 拥有且没有 standalone/其他 package 引用的 component 生成 tombstone；共享引用使用引用计数保留，不能因卸载一个 package 删除另一个来源的同名资产。
+
+Codex target 使用 cc-partner 管理的 personal/repo marketplace 与 `.codex-plugin/plugin.json` 结构。activation 优先调用 adapter 通过 `codex plugin --help` probe 到的稳定 `codex plugin` / `codex plugin marketplace` 命令，并在调用后重新 probe 实际状态。只有稳定 CLI surface 不存在或调用失败时才落为 `activationRequired`；不得调用仍标记 under development 的 App Server plugin install API，也不得为“看起来已安装”直接改写未知 registry。
 
 OpenCode 原生 JS/TS/npm plugin 只做同 target 同步。跨 target 时只抽取其可识别的 Skill、MCP、Command、Agent，运行时代码保留 source-only。
+
+### 9.6 启停、删除与整文件删除
+
+启用状态是 target-local materialization state，不是 common asset 内容：
+
+- 在一个 CLI 中 disable，只改变该 target 的 enabled state，不关闭其他 CLI；
+- Hub 提供显式“从此 target 移除”和“从所有 target 删除”两个不同动作；
+- “从所有 target 删除”生成 canonical tombstone，再由各 target adapter 卸载；
+- targetOnly 资产从唯一 target 删除后可生成 tombstone，shared/adapted 资产不能因单 target 文件消失而自动全局删除。
+
+外部直接删除整个受管指令文件或资产目录时，Hub 将该 materialization 标为 `detached` 并进入 Attention，提供“恢复此 target / 仅从此 target 移除 / 从所有 target 删除”。它不会立即重新生成文件，也不会把删除自动传播为全局数据丢失。文档内部删除已知 shared 块仍按 8.4 自动传播。
+
+文本指令与结构化配置必须是 UTF-8；无效 UTF-8 进入 blocked 并保留原文件。Skill/Plugin supporting binary files 按原字节存储。
+
+### 9.7 Adapter 支持合同
+
+每个 adapter 随版本发布机器可读 support manifest，至少记录：
+
+- adapter/schema version；
+- 目标 CLI 的 `minTestedVersion` 与 `currentTestedVersion`；
+- executable/config root probe 方法；
+- scan/render/activate/deactivate/live-reload 的逐能力支持级别；
+- 对应 quality-matrix evidence ID。
+
+任一版本字段或真实 CLI 合同 evidence 为空时，该 adapter 不能把写能力标记为 supported。低于 `minTestedVersion`、高于已知破坏性 major 或 probe 行为不一致的 CLI 只读扫描并进入 blocked；不能用“命令退出码碰巧为 0”替代能力合同。每次 CLI realpath/version/config-root 改变都使旧 probe 失效并重新检查。
 
 ## 10. 同机自动对账
 
 ### 10.1 Sidecar 生命周期
 
-独立后端 owner 启动后：
+Agent Hub 复用现有独立后端 owner/control plane，不创建第二个后台进程。只有取得 backend single-owner lock 且完成数据库 migration 的进程可以启动 scheduler。owner 启动后：
 
 1. probe 三个 CLI 的 executable、版本与功能；
 2. 加载 user scope 和已启用项目；
 3. 建立文件 watcher；
-4. 做一次完整 bounded scan；
+4. 做一次最多 100,000 entries/scope 的完整 scan；
 5. 恢复未完成 projection jobs；
-6. 持续对账，并用低频 rescan 弥补 watcher 丢事件。
+6. 持续对账，并每 30 秒 rescan 已观察到变更的目录、每 10 分钟做一次全 scope rescan。
 
 GUI 只订阅状态和发起用户动作，不成为第二 watcher 或 writer。
+
+用户首次启用 Agent Hub 时，backend lifecycle adapter 同时注册无 sudo 的当前用户登录自启动：macOS LaunchAgent、Windows 当前用户 Task/Startup、Linux systemd user service；平台能力不可用时显示 `backgroundStartUnavailable`，不能宣称 GUI 关闭后始终自动同步。OS supervisor 在异常退出后按 1、2、4、8、16、32、60 秒上限退避重启；正常“停止后端”不在同一登录会话自动拉起，下次登录或用户手动启动再恢复。
+
+GUI 与 backend handshake 包含 Agent Hub API/schema version：
+
+- GUI 较新且 backend 不支持写协议：只读展示并请求受控 restart/upgrade，禁止直接写 DB；
+- backend 较新：只提供声明兼容的读写能力，其余返回 `upgradeRequired`；
+- 升级时旧 owner 停止接收新 job、等待当前原子替换结束、持久化 job ledger、释放 lock，新 owner 再恢复；
+- 两个版本争抢 lock 时，失败者只连接 control plane，不能启动 watcher。
 
 ### 10.2 变更去环
 
@@ -448,8 +568,8 @@ GUI 只订阅状态和发起用户动作，不成为第二 watcher 或 writer。
 - watcher 观察到 rendered hash：视为自己的写入，no-op；
 - hash 不同：作为外部编辑进入 Reconciler；
 - projection 前再次比较 expected external hash，失败则放弃本次写入并重新 reconcile；
-- 同一资产的 scan/reconcile/project job 串行，不同资产可有限并行；
-- 连续文件事件合并防抖，目录级 rename 触发一次 manifest rescan。
+- 同一资产的 scan/reconcile/project job 串行；全局最多并行 4 个不同资产 projection job；
+- 连续文件事件使用 500 ms trailing debounce；目录级 rename 触发一次 manifest rescan。
 
 ### 10.3 文件系统与数据库提交边界
 
@@ -484,7 +604,20 @@ Workbench 项目默认只扫描和预览，不写入。启用页面必须列出�
 
 用户确认后写入 project opt-in。新增子目录 instruction 可在该项目 opt-in 下自动纳管。
 
-### 11.2 项目身份映射
+### 11.2 ProjectCheckoutBinding
+
+Canonical project scope 不绑定一个绝对路径，而由本机 `ProjectCheckoutBinding` 展开：
+
+- Git 项目至少有 main checkout binding；
+- project opt-in 明确覆盖当前和未来由 Workbench 创建或登记、且 Git common-dir 指向同一项目的 worktree；
+- Workbench 新建 worktree 后、启动 Agent terminal 前先创建 binding 并投影；存在外部同名文件或 precondition 冲突时只阻塞该 checkout 的投影并给出 diff/Attention，Agent 启动入口显示“规则未同步”警告但不禁止用户显式继续；
+- 每个 checkout 有独立 materialization/base hash，但外部编辑归并到同一 project logical asset，因此两个 worktree 同时改同一 shared block 会走同一 DAG/conflict 规则；
+- 非 Workbench 登记的外部 worktree 不扫描、不写入；登记后继承既有 project opt-in；
+- 非 Git 项目只有一个 checkout binding。
+
+cc-partner 的投影会让对应 worktree 出现未提交文件变化，这是 opt-in preview 的显式后果；Hub 仍不执行 `git add`、commit 或 push。
+
+### 11.3 项目身份映射
 
 跨设备收到 project scope 时：
 
@@ -492,6 +625,8 @@ Workbench 项目默认只扫描和预览，不写入。启用页面必须列出�
 2. 没有映射时按规范化 Git remote fingerprint 提议候选；
 3. 非 Git 或候选不唯一时保持 `unmapped`；
 4. 用户确认本机项目后保存映射，并单独完成该项目的一次性写入启用。
+
+如果两个设备在互不知情时为同一 Git 项目生成了不同 `hubProjectId`，目标映射表把远端 ID 保存为本地项目的 external alias；导入资产合并到本地 canonical project scope，不重写远端 snapshot，也不创建第二个本机项目。
 
 未映射项目的 canonical 资产仍可完整进入 Hub/Git backup，但不得写入任意猜测路径。
 
@@ -508,21 +643,21 @@ Workbench 项目默认只扫描和预览，不写入。启用页面必须列出�
 
 ### 12.2 协议
 
-单一 capability：`agent-hub.v1`。
+单一 capability：`agent-hub.v1`。LAN 使用 7.4 的 `SnapshotEnvelope formatVersion=1`，selection manifest 必须列出用户选择的 scope/asset、每个 asset head、所需 revision ancestry、tombstone、variants、object hash/size；不能只传当前文件而丢失合并祖先。
 
 协议分三步：
 
-1. `prepare`：发送 snapshot manifest、revision 摘要与 object hashes，目标返回缺失 object；
-2. `objects`：分块发送缺失 blob，逐个校验 SHA-256；
-3. `commit`：在目标数据库事务中导入 revisions/variants，并登记幂等 outcome。
+1. `prepare`：发送 canonical snapshot manifest 与 `selectionHash`，目标校验 schema/资源上限后返回缺失 revisions 与 objects；
+2. `objects`：按不超过 8 MiB 的 chunk 发送缺失 blob，chunk 记录 offset/length，完成后逐 object 校验 SHA-256；
+3. `commit`：确认所有 parents/objects 可达后，在目标数据库事务中导入 revisions、variants、tombstones、aliases 与 asset heads，并登记幂等 outcome；随后异步 reconcile，不把文件投影成功混入协议提交成功。
 
 同一 `sourceDeviceId + clientRequestId`：
 
-- manifest hash 相同：返回原 outcome；
+- `selectionHash` 与 manifest hash 相同：返回原 outcome；
 - hash 不同：返回 conflict；
 - 传输中断：不提交半个 snapshot，下次可复用已校验 object。
 
-传输保留现有 Host/Origin/Content-Type、body 上限、路径校验与资源上限。这些是协议完整性约束，不是设备身份鉴权。
+manifest body 上限 32 MiB；selection、entry、blob 和总量上限与 7.4 相同。传输保留现有 Host/Origin/Content-Type、路径校验与资源上限。这些是协议完整性约束，不是设备身份鉴权。
 
 MCP headers、env、URL credentials 和其他凭据不脱敏、不删除、不替换为 placeholder。
 
@@ -531,10 +666,10 @@ MCP headers、env、URL credentials 和其他凭据不脱敏、不删除、不�
 ### 13.1 自动 push
 
 - 复用 Settings 中的私有仓库、分支和本机 Git 凭证；
-- snapshot 改变后防抖并进入现有 cloud singleflight；
+- snapshot 改变后使用 2 秒 trailing debounce 并进入现有 cloud singleflight；
 - 只更新本 device lane；
 - push 前允许 fetch/rebase 远端 Git 历史，但不得因此导入其他 lane；
-- non-fast-forward 时有界重试，仍失败则进入 Attention；
+- non-fast-forward 或暂时网络失败时立即最多重试 3 次，间隔 1/2/4 秒；仍失败则保留 pending ledger、进入 Attention，并在 backend 在线时每 5 分钟重试；
 - snapshot 内容 hash 不变时不创建空 commit。
 
 ### 13.2 pull/import
@@ -590,8 +725,8 @@ Workbench 新建 Agent terminal 与 Orchestrator provider picker支持三种 CLI
 
 - CLI 状态：安装路径、版本、adapter 支持级别、上次扫描；
 - scope：用户级 / 项目 / 子目录；
-- asset kind：Instructions / Skills / Commands / Agents / MCP / Plugins；
-- target matrix：Claude / Codex / OpenCode 的 synced、partial、conflict、unsupported、activationRequired；
+- asset kind：Instructions / Skills / Commands / Agents / MCP / Plugins / Hooks；
+- target matrix：Claude / Codex / OpenCode 的 desired presence/enabled、synced、detached、conflict、unsupported、sourceOnly、externalCollision、activationRequired；full/partial 只作为派生汇总；
 - shared/adapted/targetOnly 块编辑；
 - project enable preview；
 - LAN 选择目标并 push；
@@ -607,6 +742,7 @@ Attention 新增 `agentHubConflict` 和 `agentHubProjectionBlocked` source，只
 - CLI 未安装：保留 canonical，target 显示 unsupported，不删除该 target 的历史 variant。
 - CLI 版本未知：只执行 adapter 声明为兼容的读操作，写入 blocked。
 - 配置解析失败：保留原文件，生成 projection blocked；禁止用空配置覆盖。
+- 受管整文件/目录被外部删除：进入 detached/Attention，等待用户选择 target removal 或 canonical deletion。
 - precondition hash 变化：重新 reconcile，不重试盲写。
 - 同块、同文件、同 MCP key 或 delete-vs-edit 冲突：建立 Conflict。
 - 可移植 component 成功、runtime component 不可移植：Plugin partial。
@@ -629,63 +765,126 @@ Attention 新增 `agentHubConflict` 和 `agentHubProjectionBlocked` source，只
 2. 迁移为 user instruction asset 和首个 revision；
 3. 扫描 Claude skills、commands、plugins、MCP；
 4. 检测 Codex/OpenCode 原生资产；
-5. 生成只读 preview；
-6. 用户级确认后启用自动投影；项目逐个确认。
+5. 检测 `.claude/skills` / `.agents/skills` 被 OpenCode 兼容扫描造成的 physical visibility collision，并生成原路径 → 受管 Plugin/OpenCode native path 的迁移 preview；
+6. 生成只读 preview；
+7. 用户级确认后启用自动投影；项目逐个确认。只有 activation 合同已通过的 legacy source 才迁移，其他保持原位并显示 externalCollision。
 
-现有 `claude_md` 数据保留。一个回滚窗口内把 user Claude 投影摘要 dual-write 到旧表；旧表不再参与冲突裁决。
+现有 `claude_md` 数据保留。N/N+1 期间把 user Claude 投影摘要 dual-write 到旧表；旧表不再参与冲突裁决。
 
 ### 17.2 P2P 与旧版本
 
 - 新客户端只用 `agent-hub.v1` 做新 Hub push；
 - 旧 Claude assets inventory/bundle 与 CLAUDE.md push 路由在迁移窗口内保持原行为，但不接收/产生多 CLI Hub revision；
+- 新 UI 不展示旧 target-side pull 入口；旧路由仅供 N/N+1 混合版本兼容，不计入 Agent Hub 成功状态；
 - 不用旧路由伪造新 Hub 同步成功；
 - 移除旧路由前先更新 P2P inventory、协议文档和混合版本测试。
 
 ### 17.3 回滚
 
+- Agent Hub GA 版本记为 N：N 与下一稳定版本 N+1 保留旧表 dual-write 和旧 P2P 路由；最早从 N+2 删除兼容写入，删除前必须有一次稳定版迁移 evidence；
 - 关闭 Agent Hub watcher/projector 后，三个 CLI 保留最后一次成功物化文件；
 - 新表和 object 不自动删除；
 - 未完成 job 在旧版本中保持不可见；
 - 回滚版本继续使用旧 CLAUDE.md/Claude assets 功能，不得把新表当空数据清理。
 
-## 18. 测试与验收
+## 18. 分阶段交付门
 
-### 18.1 单元测试
+整体设计保持一个 Hub，但实现按四个可独立验收的 gate 交付；后一个 gate 不能用未验证的占位实现绕过前一个 gate。
+
+### Gate A — Hub Foundation + Instructions
+
+范围：
+
+- SQLite/CAS、Revision DAG、tombstone、Conflict、persistent projection jobs；
+- sidecar single-owner、登录启动、watch/rescan、版本 handshake；
+- target path resolver；
+- user/project/directory scope、ProjectCheckoutBinding、一次性 project preview；
+- Instruction Compiler、三目标文件投影、OpenCode 显式祖先路径 prelude；
+- 旧 CLAUDE.md 数据只读迁移 preview、最小统一资产/Attention UI。
+
+通过条件：在 GUI 关闭和 crash recovery 后，三个 CLI 的用户级、项目根和嵌套共享/专属指令仍能收敛；未 opt-in 项目零写入；同块并发修改形成可见 conflict；所有 Workbench worktree 的行为符合 11.2。
+
+### Gate B — Portable Assets + Physical Isolation
+
+范围：
+
+- Skill、Command、Agent、MCP canonical schemas/adapters；
+- Claude/Codex 受管 Plugin 与 OpenCode native path；
+- legacy source adoption、externalCollision、materialized invocation；
+- target desired presence/enabled、support manifest 与真实 CLI probe；
+- unified target matrix。
+
+通过条件：三个真实 CLI 各自只发现一份 shared Skill，Claude/Codex targetOnly Skill 不被 OpenCode 兼容扫描泄漏；MCP/Command/Agent round-trip 不覆盖 unmanaged config；unsupported/activationRequired 不显示 full。
+
+### Gate C — Replication + Backup
+
+范围：
+
+- SnapshotEnvelope v1、revision ancestry/object negotiation；
+- source-selected LAN multi-target push；
+- Git device lane 自动 push、preview/confirm import；
+- project/external asset aliases、完整明文 credential-bearing assets；
+- N/N+1 旧 P2P 兼容。
+
+通过条件：两个 Hub 从共同 ancestor 分叉后可自动 merge 或保留双 head conflict；LAN 断点/幂等不半提交；Git clone 可完整恢复 Hub；凭据在 Hub/LAN/Git/target 字节一致且日志不包含 fixture。
+
+### Gate D — Plugin Decomposition + Runtime
+
+范围：
+
+- PluginPackage、Hook、component ownership/reference 与 residual runtime；
+- Claude/Codex activation、OpenCode JS/TS/npm source-only/同 target 投影；
+- `openCodeVisible` Workbench/Orchestrator adapter；
+- 完整迁移入口、运行时状态和 N+2 旧入口移除准备。
+
+通过条件：混合 Plugin 准确显示每个 component 的 full/partial/sourceOnly/activationRequired；卸载不误删共享 component；OpenCode Runner 完成启动、completion、失败和人工接管合同测试。
+
+每个 gate 先在独立 feature flag 下通过该 gate 的单元、集成和真实 CLI evidence，再成为下一 gate 的 migration base；数据库 migration 只向前追加，不能让关闭后续 flag 破坏已完成 gate。
+
+## 19. 测试与验收
+
+### 19.1 单元测试
 
 1. Scope/project/directory 规范化和跨设备 mapping。
 2. 三个 CLI 的用户级、根目录和嵌套指令路径。
-3. 单来源首次导入整篇 shared。
+3. 项目非根子目录单来源整篇 shared；用户级/项目根单来源保持 source targetOnly。
 4. 多来源 identical/shared 与 unique/targetOnly 划分。
 5. shared、adapted、targetOnly 的正向渲染和反向编辑映射。
 6. 用户示例的 `instruction.discovery.before-edit` 三目标确定性输出。
 7. Skill frontmatter、supporting tree、alias 与 target extension。
 8. Command→Codex Skill、Agent→Codex config、MCP JSON/TOML/JSONC round-trip。
-9. Plugin component decomposition 与 partial/source-only 状态。
+9. Plugin Hook/component ownership、引用删除与 partial/source-only 状态。
 10. 文本、目录树、MCP key、delete-vs-edit 三方合并。
-11. write token 去环、precondition race、job crash recovery。
-12. snapshot 确定性与 object GC 引用关系。
+11. Revision DAG 最近共同祖先、双 parent merge、无祖先冲突、tombstone 与 external alias。
+12. desired presence/enabled 与 materialization/derived summary 状态机。
+13. `CODEX_HOME`、`OPENCODE_CONFIG`、`OPENCODE_CONFIG_DIR`、XDG 和 target home 变化。
+14. write token 去环、precondition race、job crash recovery。
+15. SnapshotEnvelope canonical hash、selection/lineage、资源上限与 object GC 引用关系。
 
-### 18.2 集成测试
+### 19.2 集成测试
 
 使用隔离临时 HOME 和三个 fake CLI fixture：
 
-- 修改嵌套 `CLAUDE.md` 的 shared 正文后，同目录两个 AGENTS 投影更新且上级内容不被复制；
+- 修改嵌套 `CLAUDE.md` 的 shared 正文后，同目录两个 AGENTS 投影更新且上级内容不被复制；OpenCode prelude 列出全部祖先相对路径；
 - 修改 Codex adapted variant 不覆盖 Claude/OpenCode variant；
+- Claude/Codex 受管 Skill 不落入 OpenCode 兼容扫描目录；每个 target 只发现一份 shared Skill，Claude targetOnly fixture 对 OpenCode 不可见；
 - 同时修改两个 target 的不同 shared 块自动合并；
 - 同块冲突进入 Attention，相关 asset 停止投影；
-- sidecar 运行、GUI 关闭时 watcher 仍收敛；
+- sidecar single-owner、GUI 关闭、异常重启与 GUI/backend 版本不匹配时均遵守生命周期合同；
 - CLI 后安装时 pending target 自动 materialize；
-- project 未 opt-in 时零写入，启用后写入但 Git index/HEAD 不变化；
+- project 未 opt-in 时零写入；启用后主 checkout/Workbench worktrees 投影但 Git index/HEAD 不变化，外部 worktree 保持不动；
 - MCP secret fixture 在本机投影、LAN 目标和 Git snapshot 字节一致，日志不含 fixture；
+- 两个 Hub 同 asset 分叉后以 revision DAG merge；无共同祖先时不静默覆盖；
 - LAN prepare/object/commit 可断点、幂等且不半提交；
 - Git 自动 push 只改本 device lane，远端 lane 不自动导入；
 - OpenCode visible Runner 可启动、完成、失败和保留接管现场。
 
-### 18.3 真实 CLI 合同测试
+### 19.3 真实 CLI 合同测试
 
 对支持矩阵中的最低版本和当前版本分别验证：
 
 - 指令发现顺序与嵌套覆盖；
+- 从嵌套目录启动 OpenCode，验证根/中间/当前三层的唯一事实均进入实际上下文；
 - Skill discovery；
 - MCP 启用；
 - Agent/Command 映射；
@@ -693,9 +892,9 @@ Attention 新增 `agentHubConflict` 和 `agentHubProjectionBlocked` source，只
 - 更新后是即时、新 session 还是重启生效；
 - Workbench/Orchestrator launch 与 completion。
 
-未执行的真实 Windows/Linux/macOS 场景必须保持 `NOT VERIFIED`，不能用单元测试替代 L3 结论。
+每个 adapter 的 exact tested versions 写入 support manifest 与 quality matrix；缺少 exact version 或 evidence 时写能力保持 blocked。未执行的真实 Windows/Linux/macOS 场景必须保持 `NOT VERIFIED`，不能用单元测试替代 L3 结论。
 
-### 18.4 完成标准
+### 19.4 完成标准
 
 1. 同机三个 CLI 对 user 和 opted-in project 的共享资产自动收敛。
 2. 子目录普通 `CLAUDE.md` 变更原样同步到同目录 Codex/OpenCode 文件。
@@ -707,8 +906,10 @@ Attention 新增 `agentHubConflict` 和 `agentHubProjectionBlocked` source，只
 8. 项目文件可后台更新，但 cc-partner 从不自动 commit/push 项目仓库。
 9. OpenCode 可作为可见 Workbench/Orchestrator provider。
 10. 既有 Claude 数据可迁移且具备数据库/文件回滚路径。
+11. OpenCode 不会因兼容扫描路径看到 Claude/Codex targetOnly Skill 或同一 shared Skill 的重复副本。
+12. LAN/Git 导入保留 revision ancestry、tombstone 和双 head conflict，跨设备不会退化为 last-write-wins。
 
-## 19. 实现时需要更新的持久文档
+## 20. 实现时需要更新的持久文档
 
 - `docs/prd.md`：产品从 Claude-only 资产升级为 Agent Hub；修改 user CLAUDE.md、LAN、Git、资产管理和 Settings 行为，明确完整凭据同步。
 - `docs/p2p-protocol.md`：`agent-hub.v1` capability、prepare/objects/commit、幂等、资源上限与旧路由迁移。
@@ -717,7 +918,7 @@ Attention 新增 `agentHubConflict` 和 `agentHubProjectionBlocked` source，只
 - `web/CLAUDE.md`：统一资产页 controller/view、Attention source、project preview 与测试入口。
 - 根 `AGENTS.md`：若组件清单或顶级目录职责发生变化，再做精简更新。
 
-## 20. 官方行为依据
+## 21. 官方行为依据
 
 - Codex 分层指令与 override 优先级：<https://learn.chatgpt.com/docs/agent-configuration/agents-md>
 - Codex Skills 与用户/项目路径：<https://learn.chatgpt.com/docs/build-skills>
