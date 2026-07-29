@@ -381,6 +381,8 @@ pub fn run() {
             agent_hub_cmd::agent_hub_set_target_enabled,
             agent_hub_cmd::agent_hub_restore_detached_target,
             agent_hub_cmd::agent_hub_delete_asset_everywhere,
+            agent_hub_cmd::agent_hub_push_selection,
+            agent_hub_cmd::agent_hub_get_push_report,
             device_cmd::list_devices,
             device_cmd::get_local_device,
             sync_cmd::trigger_sync,

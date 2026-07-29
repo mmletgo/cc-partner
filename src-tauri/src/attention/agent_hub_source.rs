@@ -10,9 +10,10 @@
 //!     纯投影 helper 供单测与 collect 共用。
 
 use crate::agent_hub::models::{AgentHubConflict, Materialization, MaterializationStatus};
+use crate::agent_hub::replication::sender::{list_failed_source_push_targets, SourcePushTargetRow};
 use crate::attention::models::{
-    AttentionCategory, AttentionFreshness, AttentionItemDto, AttentionSourceKind,
-    AttentionTargetDto,
+    AttentionCategory, AttentionDeviceRef, AttentionFreshness, AttentionItemDto,
+    AttentionSourceKind, AttentionTargetDto,
 };
 use crate::attention::source::AttentionSource;
 use crate::error::AppError;
@@ -47,13 +48,19 @@ impl AttentionSource for AgentHubAttentionSource {
 ///     Tauri/Mobile v1 与 v2 共用同一 Agent Hub 投影入口。
 ///
 /// Code Logic（这个函数做什么）:
-///     list unresolved conflicts + blocked materializations → 纯投影。
+///     list unresolved conflicts + blocked materializations + failed source push → 纯投影。
 pub async fn collect_agent_hub_attention_items(
     state: &AppState,
 ) -> Result<Vec<AttentionItemDto>, AppError> {
     let conflicts = state.agent_hub_repo.list_unresolved_conflicts().await?;
     let blocked = state.agent_hub_repo.list_blocked_materializations().await?;
-    Ok(project_agent_hub_rows(&conflicts, &blocked))
+    // 源侧 multi-target push 失败：peer label + counts + error code，永不 payload。
+    let push_failed = list_failed_source_push_targets(state)
+        .await
+        .unwrap_or_default();
+    let mut items = project_agent_hub_rows(&conflicts, &blocked);
+    items.extend(project_source_push_failures(&push_failed));
+    Ok(items)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -79,6 +86,57 @@ pub fn project_agent_hub_rows(
         items.push(project_blocked_item(mat));
     }
     items
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     源侧 push 失败需进 Inbox，只展示 peer 标签/计数/错误码，禁止 payload。
+///
+/// Code Logic（这个函数做什么）:
+///     稳定 ID `agent-hub:push-failed:<requestId>:<peerId>`；category=Blocked。
+pub fn project_source_push_failures(rows: &[SourcePushTargetRow]) -> Vec<AttentionItemDto> {
+    rows.iter().map(project_source_push_failure_item).collect()
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     单条失败 target 映射为 blocked 条目。
+///
+/// Code Logic（这个函数做什么）:
+///     summary 含 peer label、missing/transferred 计数与 error_code；无 envelope/正文。
+pub fn project_source_push_failure_item(row: &SourcePushTargetRow) -> AttentionItemDto {
+    let code = row
+        .error_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown");
+    // 永不包含 payload / envelope / object bytes
+    let summary = format!(
+        "推送到 {} 失败（missing={} transferred={} code={}）",
+        row.peer_label, row.missing_object_count, row.transferred_object_count, code
+    );
+    AttentionItemDto {
+        id: format!(
+            "agent-hub:push-failed:{}:{}",
+            row.request_id, row.peer_device_id
+        ),
+        category: AttentionCategory::Blocked,
+        // 复用 projection blocked kind（v1+v2 均展示）；导航到 Agent Hub 资产首页。
+        source_kind: AttentionSourceKind::AgentHubProjectionBlocked,
+        title: "Agent Hub 局域网推送失败".to_string(),
+        summary,
+        updated_at: row.updated_at.clone(),
+        freshness: AttentionFreshness::Live,
+        cached_at: None,
+        project: None,
+        device: Some(AttentionDeviceRef {
+            id: row.peer_device_id.clone(),
+            name: row.peer_label.clone(),
+        }),
+        target: AttentionTargetDto::AgentHubAsset {
+            asset_id: String::new(),
+            conflict_id: None,
+        },
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -320,5 +378,38 @@ mod tests {
             items[1].source_kind,
             AttentionSourceKind::AgentHubProjectionBlocked
         );
+    }
+
+    /// Business Logic: push 失败 Attention 含 peer label/counts/code，永不 payload。
+    /// Code Logic: project_source_push_failure_item 稳定 ID 与 summary。
+    #[test]
+    fn project_source_push_failure_uses_label_counts_and_code_never_payload() {
+        use crate::agent_hub::replication::sender::{SourcePushTargetRow, TargetPushStatus};
+        let row = SourcePushTargetRow {
+            request_id: "req-1".into(),
+            peer_device_id: "peer-x".into(),
+            peer_label: "Mac Mini".into(),
+            client_request_id: "req-1:peer-x".into(),
+            status: TargetPushStatus::Failed,
+            retryable: true,
+            error_code: Some("transport_network".into()),
+            transfer_id: None,
+            missing_object_count: 3,
+            transferred_object_count: 1,
+            created_at: "2026-07-29T00:00:00Z".into(),
+            updated_at: "2026-07-29T01:00:00Z".into(),
+        };
+        let item = project_source_push_failure_item(&row);
+        assert_eq!(item.id, "agent-hub:push-failed:req-1:peer-x");
+        assert_eq!(item.category, AttentionCategory::Blocked);
+        assert!(item.summary.contains("Mac Mini"));
+        assert!(item.summary.contains("missing=3"));
+        assert!(item.summary.contains("transferred=1"));
+        assert!(item.summary.contains("transport_network"));
+        // 永不出现 payload/envelope/凭据
+        assert!(!item.summary.to_lowercase().contains("payload"));
+        assert!(!item.summary.to_lowercase().contains("envelope"));
+        assert!(!item.summary.contains("token="));
+        assert!(item.device.as_ref().unwrap().name == "Mac Mini");
     }
 }

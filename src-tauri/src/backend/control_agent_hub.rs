@@ -9,6 +9,9 @@
 //!     按 `op` 分发到 `AgentHubService`；mutation 额外校验 agentHubApiVersion；
 //!     响应 ≤1 MiB；永不记录 instruction content。
 
+use crate::agent_hub::replication::sender::{
+    get_push_report_for_state, push_selection_for_state, PushAgentHubSelectionRequest,
+};
 use crate::agent_hub::service::{
     AgentHubService, DeleteAssetEverywhereRequest, ListAssetsRequest,
     PairInstructionVariantsRequest, ResolveConflictRequest, RestoreDetachedTargetRequest,
@@ -27,6 +30,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::SocketAddr;
+use tokio_util::sync::CancellationToken;
 
 /// Agent Hub control 请求（token + op + payload）。
 ///
@@ -201,6 +205,19 @@ async fn dispatch_agent_hub_op(
             let dto = AgentHubService::delete_asset_everywhere(state, req).await?;
             Ok(serde_json::to_value(dto)?)
         }
+        "agent_hub.push_selection" => {
+            let req: PushAgentHubSelectionRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("push_selection payload: {e}")))?;
+            // 仅源侧 push，不提供目标 pull。
+            let cancel = CancellationToken::new();
+            let report = push_selection_for_state(state, req, &cancel).await?;
+            Ok(serde_json::to_value(report)?)
+        }
+        "agent_hub.get_push_report" => {
+            let request_id = required_string(&payload, "requestId")?;
+            let report = get_push_report_for_state(state, &request_id).await?;
+            Ok(serde_json::to_value(report)?)
+        }
         other => Err(AppError::validation(format!(
             "未知 agent hub control op: {other}"
         ))),
@@ -227,6 +244,7 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.set_target_enabled"
             | "agent_hub.restore_detached_target"
             | "agent_hub.delete_asset_everywhere"
+            | "agent_hub.push_selection"
     )
 }
 
@@ -389,9 +407,13 @@ mod tests {
             "agent_hub.set_target_enabled",
             "agent_hub.restore_detached_target",
             "agent_hub.delete_asset_everywhere",
+            "agent_hub.push_selection",
+            "agent_hub.get_push_report",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
+        let forbidden_op = format!("{}{}", "agent_hub.", "pull");
+        assert!(!src.contains(&forbidden_op));
     }
 
     /// Business Logic: mutation 必须在版本不匹配时 upgradeRequired。
@@ -404,7 +426,9 @@ mod tests {
         assert!(is_mutation_op("agent_hub.set_target_enabled"));
         assert!(is_mutation_op("agent_hub.restore_detached_target"));
         assert!(is_mutation_op("agent_hub.delete_asset_everywhere"));
+        assert!(is_mutation_op("agent_hub.push_selection"));
         assert!(!is_mutation_op("agent_hub.get_status"));
         assert!(!is_mutation_op("agent_hub.preview_project"));
+        assert!(!is_mutation_op("agent_hub.get_push_report"));
     }
 }

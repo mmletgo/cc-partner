@@ -1037,7 +1037,20 @@ impl BackendControlClient {
         op: &str,
         payload: impl Serialize,
     ) -> Result<serde_json::Value, AppError> {
-        // 与 workbench 共用 {controlToken,op,payload}/{ownerInstanceId,result} 信封。
+        self.agent_hub_op_value_with_timeout(op, payload, MUTATE_TIMEOUT)
+            .await
+    }
+
+    /// 带自定义超时的 Agent Hub control op（raw JSON）。
+    ///
+    /// Business Logic: LAN multi-target push 需要长于默认 mutation 的预算。
+    /// Code Logic: send_once(path, body, timeout)。
+    pub async fn agent_hub_op_value_with_timeout(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, AppError> {
         let body = ControlWorkbenchRequestBody {
             control_token: self.control_token.clone(),
             op: op.to_string(),
@@ -1045,7 +1058,7 @@ impl BackendControlClient {
                 .map_err(|e| AppError::generic(format!("序列化 agent hub payload 失败: {e}")))?,
         };
         let resp: ControlWorkbenchResponseBody =
-            match self.send_once("agent-hub", &body, MUTATE_TIMEOUT).await {
+            match self.send_once("agent-hub", &body, timeout).await {
                 ControlCallOutcome::Ok(v) => v,
                 ControlCallOutcome::Failed(e) => return Err(e),
                 ControlCallOutcome::Uncertain(e) => {
@@ -1060,6 +1073,24 @@ impl BackendControlClient {
             ));
         }
         Ok(resp.result)
+    }
+
+    /// 带自定义超时的 Agent Hub control op（typed）。
+    ///
+    /// Business Logic: push_selection 等长操作。
+    /// Code Logic: op_value_with_timeout + from_value。
+    pub async fn agent_hub_op_with_timeout<T: DeserializeOwned>(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+        timeout: Duration,
+    ) -> Result<T, AppError> {
+        let value = self
+            .agent_hub_op_value_with_timeout(op, payload, timeout)
+            .await?;
+        serde_json::from_value(value).map_err(|e| {
+            AppError::generic(format!("agent hub control result 解析失败 ({op}): {e}"))
+        })
     }
 
     /// Business Logic: 首屏 status。
@@ -1212,6 +1243,32 @@ impl BackendControlClient {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
         self.agent_hub_op("agent_hub.delete_asset_everywhere", req)
             .await
+    }
+
+    /// Business Logic: 源侧 multi-target LAN push（mutation，无 pull）。
+    /// Code Logic: agent_hub.push_selection；长超时覆盖多 peer chunk 传输。
+    pub async fn agent_hub_push_selection(
+        &self,
+        req: crate::agent_hub::replication::sender::PushAgentHubSelectionRequest,
+    ) -> Result<crate::agent_hub::replication::sender::MultiTargetPushReport, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        // LAN multi-peer 可能超过默认 mutation 15s。
+        self.agent_hub_op_with_timeout("agent_hub.push_selection", req, Duration::from_secs(360))
+            .await
+    }
+
+    /// Business Logic: 读取源侧 push 进度（只读）。
+    /// Code Logic: agent_hub.get_push_report。
+    pub async fn agent_hub_get_push_report(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<crate::agent_hub::replication::sender::MultiTargetPushReport>, AppError>
+    {
+        self.agent_hub_op(
+            "agent_hub.get_push_report",
+            serde_json::json!({ "requestId": request_id }),
+        )
+        .await
     }
 
     /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。

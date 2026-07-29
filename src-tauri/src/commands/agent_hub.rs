@@ -9,6 +9,10 @@
 //!     mutation 前 client 调用 require_agent_hub_write_compatibility。
 
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
+use crate::agent_hub::replication::sender::{
+    get_push_report_for_state, push_selection_for_state, MultiTargetPushReport,
+    PushAgentHubSelectionRequest,
+};
 use crate::agent_hub::service::{
     AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubService, AgentHubStatusDto,
     DeleteAssetEverywhereRequest, InstructionBlockDto, ListAssetsRequest,
@@ -23,6 +27,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use std::collections::BTreeMap;
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
 /// Business Logic: 首屏 status。
 /// Code Logic: owner service / GuiClient control query。
@@ -315,6 +320,37 @@ pub async fn agent_hub_delete_asset_everywhere(
     AgentHubService::delete_asset_everywhere(state.inner(), req).await
 }
 
+/// Business Logic: 源侧 multi-target LAN push（仅 push，无目标 pull）。
+/// Code Logic: mutation + write compatibility；GuiClient 经 control 代理。
+#[tauri::command]
+pub async fn agent_hub_push_selection(
+    state: State<'_, AppState>,
+    request: PushAgentHubSelectionRequest,
+) -> Result<MultiTargetPushReport, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_push_selection(request).await;
+    }
+    let cancel = CancellationToken::new();
+    push_selection_for_state(state.inner(), request, &cancel).await
+}
+
+/// Business Logic: GUI reconnect 读取源侧 push 进度。
+/// Code Logic: 只读 query；无 pull 语义。
+#[tauri::command]
+pub async fn agent_hub_get_push_report(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<Option<MultiTargetPushReport>, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_get_push_report(&request_id)
+            .await;
+    }
+    get_push_report_for_state(state.inner(), &request_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,12 +376,17 @@ mod tests {
             "agent_hub_set_target_enabled",
             "agent_hub_restore_detached_target",
             "agent_hub_delete_asset_everywhere",
+            "agent_hub_push_selection",
+            "agent_hub_get_push_report",
         ] {
             assert!(src.contains(name), "missing command {name}");
         }
         assert!(src.contains("RuntimeRole::GuiClient"));
         assert!(src.contains("BackendControlClient"));
         assert!(src.contains("require_agent_hub_write_compatibility"));
+        // 禁止目标侧 pull API（拼接避免自命中）
+        let forbidden = format!("{}{}", "agent_hub_", "pull");
+        assert!(!src.contains(&forbidden));
     }
 
     /// Business Logic: 旧 backend agentHubApiVersion 必须阻断 mutation。
@@ -408,8 +449,12 @@ mod tests {
             "agent_hub.set_target_enabled",
             "agent_hub.restore_detached_target",
             "agent_hub.delete_asset_everywhere",
+            "agent_hub.push_selection",
+            "agent_hub.get_push_report",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
+        let forbidden_op = format!("{}{}", "agent_hub.", "pull");
+        assert!(!src.contains(&forbidden_op));
     }
 }
