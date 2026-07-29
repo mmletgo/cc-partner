@@ -7,15 +7,17 @@
 //! Code Logic（这个模块做什么）:
 //!     Gate A Task 1：canonical 数据模型（models）；
 //!     Gate A Task 2：明文 CAS（object_store）与 Revision DAG merge-base（revision_graph）；
+//!     Gate A Task 3：targets（path resolver + instruction-only AssetAdapter 合同）；
 //!     Gate A Task 5：project_scope（opt-in preview/enable/refresh checkout bindings）；
 //!     Gate A Task 8：用户级登录自启动（autostart）。
-//!     后续任务再组装 service、projection、runtime 与 target adapter。
+//!     后续任务再组装 service、projection、runtime 与完整 compiler。
 
 pub mod autostart;
 pub mod models;
 pub mod object_store;
 pub mod project_scope;
 pub mod revision_graph;
+pub mod targets;
 
 pub use models::{
     AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
@@ -34,4 +36,10 @@ pub use project_scope::{
 };
 pub use revision_graph::{
     ContentMergeResult, MergeBaseOutcome, MergePayload, RevisionGraph, MAX_VISITED_REVISIONS,
+};
+pub use targets::{
+    AdapterSupportLevel, AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,
+    InstructionDocument, InstructionRenderContext, InstructionSource, InstructionSourceRole,
+    LocalScopeMapping, OpenCodeHomePaths, OpenCodeInstructionAdapter, RenderedInstruction,
+    TargetEnvironment, TargetHomePaths, TargetHomes, TargetPathResolver, TargetProbe,
 };
