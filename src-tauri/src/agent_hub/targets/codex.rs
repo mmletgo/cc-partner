@@ -1,21 +1,28 @@
-//! agent_hub/targets/codex — Codex CLI instruction adapter
+//! agent_hub/targets/codex — Codex CLI instruction + portable-asset adapter
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     Codex 与 OpenCode 都可能使用 AGENTS.md；Hub 用 `AGENTS.override.md` 作为受管投影，
 //!     使 OpenCode 专属 AGENTS.md 保持 target-specific，同时扫描被遮蔽非空源。
+//!     Gate B：解析 config.toml 中 MCP/agents；`.agents/skills` 仅作 legacy standalone。
 //!
 //! Code Logic（这个模块做什么）:
 //!     实现 `AssetAdapter`：probe `codex`；扫描 override / AGENTS.md / fallback；
-//!     生效优先级 override > AGENTS.md > 首个非空 fallback；render 输出 AGENTS.override.md。
+//!     扫描 portable MCP/agents + legacy skills；render 输出。
 
 use super::paths::{
     is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
+};
+use super::portable::{
+    merge_discoveries, parse_codex_agents_toml, parse_codex_mcp_toml, render_portable_payload,
+    scan_skill_dirs, AssetRenderContext, DiscoveredPortableAsset, PortableOriginKind,
+    TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
     InstructionSource, InstructionSourceRole, LocalScopeMapping, RenderedInstruction,
     TargetEnvironment, TargetProbe,
 };
+use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
@@ -23,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// Codex 默认额外扫描的 fallback 文件名（当 scope 未注入时）。
 const DEFAULT_CODEX_FALLBACKS: &[&str] = &["AGENTS.fallback.md", "agents.md"];
 
-/// Codex 指令适配器（Gate A 仅指令）。
+/// Codex 指令/资产适配器。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     必须同时报告生效源与被遮蔽非空源，避免 override 投影静默丢弃用户文件。
@@ -90,6 +97,120 @@ impl AssetAdapter for CodexInstructionAdapter {
         );
         Ok(RenderedInstruction::from_compiled(compiled))
     }
+
+    /// 扫描 Codex portable 资产。
+    ///
+    /// Business Logic: MCP/agents 来自 config.toml；`.agents/skills` 仅 legacy standalone。
+    /// Code Logic: 读 CODEX_HOME/config.toml；skill_compat_root 用 LegacyStandalone。
+    fn scan_portable_assets(
+        &self,
+        scope: &LocalScopeMapping,
+        env: &TargetEnvironment,
+    ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+        let homes = TargetPathResolver::resolve_all(env);
+        let mut parts: Vec<Vec<DiscoveredPortableAsset>> = Vec::new();
+
+        if scope.scope_kind == ScopeKind::User {
+            let config_path = homes.codex.config_root.join("config.toml");
+            if config_path.is_file() {
+                let text = std::fs::read_to_string(&config_path)?;
+                parts.push(parse_codex_mcp_toml(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &text,
+                    &config_path,
+                )?);
+                parts.push(parse_codex_agents_toml(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &text,
+                    &config_path,
+                )?);
+            }
+            // Plugin-provided skills under config_root/plugins/** 若存在则 native/plugin
+            let plugins = homes.codex.config_root.join("plugins");
+            if plugins.is_dir() {
+                parts.push(scan_codex_plugin_skills(scope.scope_kind, &plugins)?);
+            }
+            if let Some(compat) = &homes.codex.skill_compat_root {
+                // skill_compat_root 指向 ~/.agents，skills 在 .agents/skills
+                let skills_root = if compat.ends_with("skills") {
+                    compat.clone()
+                } else {
+                    compat.join("skills")
+                };
+                parts.push(scan_skill_dirs(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &skills_root,
+                    PortableOriginKind::LegacyStandalone,
+                )?);
+            }
+        } else {
+            // 项目级：可选 .codex/config.toml 与项目 .agents/skills
+            let project_config = scope.absolute_path.join(".codex").join("config.toml");
+            if project_config.is_file() {
+                let text = std::fs::read_to_string(&project_config)?;
+                parts.push(parse_codex_mcp_toml(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &text,
+                    &project_config,
+                )?);
+                parts.push(parse_codex_agents_toml(
+                    AgentTarget::Codex,
+                    scope.scope_kind,
+                    &text,
+                    &project_config,
+                )?);
+            }
+            parts.push(scan_skill_dirs(
+                AgentTarget::Codex,
+                scope.scope_kind,
+                &scope.absolute_path.join(".agents").join("skills"),
+                PortableOriginKind::LegacyStandalone,
+            )?);
+        }
+
+        Ok(merge_discoveries(parts))
+    }
+
+    /// 渲染 Codex portable 投影计划。
+    ///
+    /// Business Logic: 最终物化进受管 plugin；本方法只生成相对路径计划。
+    /// Code Logic: 委托 `render_portable_payload`。
+    fn render_portable_asset(
+        &self,
+        asset: &PortableAssetPayload,
+        _context: &AssetRenderContext,
+    ) -> Result<TargetAssetProjection, AppError> {
+        render_portable_payload(AgentTarget::Codex, asset)
+    }
+}
+
+/// 扫描 Codex plugins 目录下的 skills（若存在）。
+fn scan_codex_plugin_skills(
+    scope_kind: ScopeKind,
+    plugins_root: &Path,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let mut out = Vec::new();
+    let read = match std::fs::read_dir(plugins_root) {
+        Ok(r) => r,
+        Err(_) => return Ok(vec![]),
+    };
+    for entry in read {
+        let entry = entry?;
+        let skills = entry.path().join("skills");
+        if skills.is_dir() {
+            out.extend(scan_skill_dirs(
+                AgentTarget::Codex,
+                scope_kind,
+                &skills,
+                PortableOriginKind::Plugin,
+            )?);
+        }
+    }
+    Ok(out)
 }
 
 /// 扫描单层 Codex 指令候选。

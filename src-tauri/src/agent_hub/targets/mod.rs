@@ -1,17 +1,19 @@
-//! agent_hub/targets — CLI target path probe 与 instruction-only adapter 合同
+//! agent_hub/targets — CLI target path probe 与 AssetAdapter 合同
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     Multi-CLI Agent Hub 需要按环境解析 Claude/Codex/OpenCode 配置根与可执行文件，
-//!     并只扫描/渲染指令文档（Gate A 不含 Skill/Command 写激活）。
+//!     扫描/渲染指令文档（Gate A）以及 Skill/Command/Agent/MCP 可移植资产（Gate B Task 3）。
 //!
 //! Code Logic（这个模块做什么）:
-//!     定义 `AssetAdapter` trait 与共享 DTO；导出 paths 解析与三 target adapter。
+//!     定义 `AssetAdapter` trait 与共享 DTO；导出 paths 解析、portable 扫描 DTO 与三 target adapter。
 
 pub mod claude;
 pub mod codex;
 pub mod opencode;
 pub mod paths;
+pub mod portable;
 
+use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,10 @@ pub use paths::{
     compute_probe_fingerprint, is_non_empty_utf8_file, probe_cli_version, read_utf8_file,
     resolve_executable, OpenCodeHomePaths, TargetEnvironment, TargetHomePaths, TargetHomes,
     TargetPathResolver,
+};
+pub use portable::{
+    AssetRenderContext, DiscoveredPortableAsset, PortableAssetOrigin, PortableDiscoveryStatus,
+    PortableOriginKind, ProjectedAssetFile, TargetAssetProjection,
 };
 
 /// adapter 能力支持级别。
@@ -269,13 +275,14 @@ impl RenderedInstruction {
     }
 }
 
-/// 目标资产适配器合同（Gate A 仅指令 scan/render）。
+/// 目标资产适配器合同（指令 + Gate B portable 资产 scan/render）。
 ///
 /// Business Logic（为什么需要这个 trait）:
 ///     每个 CLI 的路径、生效优先级与渲染措辞不同，但 service 层只依赖统一合同。
 ///
 /// Code Logic（这个 trait 做什么）:
-///     target / probe / scan_instruction_sources / render_instruction。
+///     target / probe / scan_instruction_sources / render_instruction /
+///     scan_portable_assets / render_portable_asset。
 pub trait AssetAdapter: Send + Sync {
     /// 返回适配的目标枚举。
     ///
@@ -308,6 +315,26 @@ pub trait AssetAdapter: Send + Sync {
         document: &InstructionDocument,
         context: &InstructionRenderContext,
     ) -> Result<RenderedInstruction, AppError>;
+
+    /// 扫描 Skill/Command/Agent/MCP 可移植资产（只读，无写盘）。
+    ///
+    /// Business Logic: 每个 origin 独立发现；兼容路径不得标为 native 输出候选。
+    /// Code Logic: 返回 `DiscoveredPortableAsset` 列表（含 path/hash/status/diagnostics）。
+    fn scan_portable_assets(
+        &self,
+        scope: &LocalScopeMapping,
+        env: &TargetEnvironment,
+    ) -> Result<Vec<DiscoveredPortableAsset>, AppError>;
+
+    /// 渲染可移植资产为目标投影计划（不写盘）。
+    ///
+    /// Business Logic: projection/package 任务消费 relative files；本方法只生成字节计划。
+    /// Code Logic: `PortableAssetPayload` → `TargetAssetProjection`。
+    fn render_portable_asset(
+        &self,
+        asset: &PortableAssetPayload,
+        context: &AssetRenderContext,
+    ) -> Result<TargetAssetProjection, AppError>;
 }
 
 /// 根据可执行与版本决定支持级别。
