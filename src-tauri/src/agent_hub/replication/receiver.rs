@@ -181,12 +181,15 @@ async fn cas_has_blob(store: &ObjectStore, hash: &str) -> bool {
 /// prepare：校验 envelope/selection，创建或回放 ledger，返回 missing hashes。
 ///
 /// Business Logic:
-///     - 同 (source,request) + 同 selection/snapshot → 回放 prior prepared/committed；
+///     - 同 (source,request) + 同 selection/snapshot → 回放 prior prepared/committed，
+///       并 **始终** re-ensure object 行（修复中途崩溃后缺 object 登记）；
 ///     - 不同 hash → conflict；
-///     - invalid manifest → validation，不建 active ledger。
+///     - invalid manifest → validation，不建 active ledger；
+///     - 并发 UNIQUE：re-get 同 hash 当 replay，不同 hash 仍 conflict。
 ///
 /// Code Logic:
-///     validate_snapshot → hash_selection 比对 → ledger get/insert → diff CAS/verified。
+///     validate_snapshot → hash_selection 比对 → ledger get 或
+///     insert_prepared_with_objects（同 TX）→ 冲突 re-read → build_prepare_response。
 pub async fn prepare_push(
     _repo: &AgentHubRepo,
     objects: &ObjectStore,
@@ -230,6 +233,21 @@ pub async fn prepare_push(
     }
     let snapshot_hash = envelope.snapshot_hash.clone();
 
+    // 预解析 object size（insert 前校验，避免半截 ledger）
+    let mut object_specs: Vec<(String, u64)> = Vec::with_capacity(envelope.objects.len());
+    for desc in &envelope.objects {
+        let size: u64 = desc.size.parse().map_err(|_| {
+            AppError::validation(format!("agent_hub_push_object_size_invalid:{}", desc.hash))
+        })?;
+        if size > limits.max_blob_bytes {
+            return Err(AppError::validation(format!(
+                "agent_hub_push_blob_too_large:hash={}:size={size}:limit={}",
+                desc.hash, limits.max_blob_bytes
+            )));
+        }
+        object_specs.push((desc.hash.clone(), size));
+    }
+
     // ── 幂等查重 ───────────────────────────────────────────────────────
     if let Some(existing) = ledger.get_request(source, client_req).await? {
         if existing.selection_hash != req.selection_hash || existing.snapshot_hash != snapshot_hash
@@ -238,7 +256,16 @@ pub async fn prepare_push(
                 "agent_hub_push_idempotency_hash_conflict".to_string(),
             ));
         }
-        return build_prepare_response(objects, ledger, data_dir, &existing, &envelope).await;
+        // same-hash replay：补齐可能缺失的 object 行（中途崩溃修复）
+        return build_prepare_response(
+            objects,
+            ledger,
+            data_dir,
+            &existing,
+            &envelope,
+            &object_specs,
+        )
+        .await;
     }
 
     // ── 新建 prepared ──────────────────────────────────────────────────
@@ -255,42 +282,74 @@ pub async fn prepare_push(
         let _ = std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    let row = ledger
-        .insert_prepared(
+    let row = match ledger
+        .insert_prepared_with_objects(
             source,
             client_req,
             &transfer_id,
             &req.selection_hash,
             &snapshot_hash,
             &envelope_json,
+            &object_specs,
         )
-        .await?;
-
-    // 登记 object 期望 size
-    for desc in &envelope.objects {
-        let size: u64 = desc.size.parse().map_err(|_| {
-            AppError::validation(format!("agent_hub_push_object_size_invalid:{}", desc.hash))
-        })?;
-        if size > limits.max_blob_bytes {
-            // 清理半建 ledger：校验在 insert 后发现则仍应 conflict/validation
-            return Err(AppError::validation(format!(
-                "agent_hub_push_blob_too_large:hash={}:size={size}:limit={}",
-                desc.hash, limits.max_blob_bytes
-            )));
+        .await
+    {
+        Ok(row) => row,
+        Err(err) if err.ipc_category_code() == "conflict" => {
+            // 并发同 key：re-get；同 hash → replay；不同 hash → conflict
+            match ledger
+                .resolve_after_insert_conflict(
+                    source,
+                    client_req,
+                    &req.selection_hash,
+                    &snapshot_hash,
+                )
+                .await?
+            {
+                Some(existing) => {
+                    // 丢弃本 racer 的 staging 目录（orphan 由 GC 兜底）
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return build_prepare_response(
+                        objects,
+                        ledger,
+                        data_dir,
+                        &existing,
+                        &envelope,
+                        &object_specs,
+                    )
+                    .await;
+                }
+                None => {
+                    // 极罕见：UNIQUE 后又被 GC/删；上抛原 conflict
+                    return Err(err);
+                }
+            }
         }
-        ledger.ensure_object(&transfer_id, &desc.hash, size).await?;
-    }
+        Err(err) => return Err(err),
+    };
 
-    build_prepare_response(objects, ledger, data_dir, &row, &envelope).await
+    build_prepare_response(objects, ledger, data_dir, &row, &envelope, &object_specs).await
 }
 
+/// 构建 prepare 响应；prepared 路径始终 re-ensure envelope 内 object 行。
+///
+/// Business Logic: same-hash replay 必须恢复 usable put_chunk 路径。
+/// Code Logic: 对 prepared 逐 object ensure_object（idempotent），再 diff CAS/verified。
 async fn build_prepare_response(
     objects: &ObjectStore,
     ledger: &ReplicationLedger,
     data_dir: &Path,
     row: &crate::agent_hub::replication::ledger::PushRequestRow,
     envelope: &SnapshotEnvelopeV1,
+    object_specs: &[(String, u64)],
 ) -> Result<PreparePushResponse, AppError> {
+    // prepared 回放/新建均 re-ensure：修复 insert 后中途崩溃导致缺 object 行
+    if row.status == PushRequestStatus::Prepared {
+        for (hash, size) in object_specs {
+            ledger.ensure_object(&row.transfer_id, hash, *size).await?;
+        }
+    }
+
     let mut missing_object_hashes = Vec::new();
     for desc in &envelope.objects {
         if object_available(objects, ledger, data_dir, &row.transfer_id, desc).await? {
@@ -1092,5 +1151,146 @@ mod tests {
             "verified staging should be reused: {:?}",
             prep2.missing_object_hashes
         );
+    }
+
+    /// Business Logic: insert 后 ensure 中途崩溃导致无 object 行时，same-hash prepare
+    /// 必须 re-ensure 并恢复 usable put_chunk 路径。
+    /// Code Logic: 只 insert request、不写 objects → prepare replay → put_object_chunk Ok。
+    #[tokio::test]
+    async fn prepare_replay_repairs_missing_object_rows() {
+        let (repo, store, dir, ledger) = test_env().await;
+        let (envelope, bytes) = sample_envelope_with_bytes();
+        let object_hash = envelope.objects[0].hash.clone();
+        let sel = hash_selection(&envelope.selection).unwrap();
+        let snap = envelope.snapshot_hash.clone();
+        let transfer_id = "repair-xfer-1".to_string();
+        let envelope_json = serde_json::to_string(&envelope).unwrap();
+
+        // 模拟 insert_prepared 成功但 ensure_object 未完成
+        ledger
+            .insert_prepared(
+                "dev-a",
+                "req-repair",
+                &transfer_id,
+                &sel,
+                &snap,
+                &envelope_json,
+            )
+            .await
+            .unwrap();
+        assert!(
+            ledger
+                .get_object(&transfer_id, &object_hash)
+                .await
+                .unwrap()
+                .is_none(),
+            "precondition: no object rows"
+        );
+
+        // 未 repair 前 put 应失败
+        let bare = put_object_chunk(
+            &ledger,
+            dir.path(),
+            &transfer_id,
+            &object_hash,
+            0,
+            &bytes,
+            Some(&sha256_hex(&bytes)),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            bare.to_string().contains("object_not_declared"),
+            "expected not_declared before repair: {bare}"
+        );
+
+        // same-hash prepare replay 应 re-ensure
+        let prep = prepare_push(
+            &repo,
+            &store,
+            &ledger,
+            dir.path(),
+            PreparePushRequest {
+                envelope: envelope.clone(),
+                source_device_id: "dev-a".into(),
+                client_request_id: "req-repair".into(),
+                selection_hash: sel,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(prep.transfer_id, transfer_id);
+        assert_eq!(prep.missing_object_hashes, vec![object_hash.clone()]);
+        assert!(
+            ledger
+                .get_object(&transfer_id, &object_hash)
+                .await
+                .unwrap()
+                .is_some(),
+            "replay must re-register object rows"
+        );
+
+        let put = put_object_chunk(
+            &ledger,
+            dir.path(),
+            &transfer_id,
+            &object_hash,
+            0,
+            &bytes,
+            Some(&sha256_hex(&bytes)),
+        )
+        .await
+        .unwrap();
+        assert!(put.verified, "chunk path usable after repair: {put:?}");
+    }
+
+    /// Business Logic: 并发同 key prepare 的 UNIQUE 路径必须 re-read 成 same-hash replay。
+    /// Code Logic: 先 insert；第二次 prepare 命中 get 或 unique→resolve 返回同一 transfer_id。
+    #[tokio::test]
+    async fn concurrent_same_key_prepare_unique_reread_replays() {
+        let (repo, store, dir, ledger) = test_env().await;
+        let (envelope, _) = sample_envelope_with_bytes();
+        let sel = hash_selection(&envelope.selection).unwrap();
+        let req = PreparePushRequest {
+            envelope: envelope.clone(),
+            source_device_id: "dev-a".into(),
+            client_request_id: "req-race".into(),
+            selection_hash: sel.clone(),
+        };
+        let first = prepare_push(&repo, &store, &ledger, dir.path(), req.clone())
+            .await
+            .unwrap();
+
+        // 直接走 unique 插入路径（模拟两方都 miss get 后的后到者）
+        let objects: Vec<(String, u64)> = envelope
+            .objects
+            .iter()
+            .map(|d| (d.hash.clone(), d.size.parse().unwrap()))
+            .collect();
+        let unique_err = ledger
+            .insert_prepared_with_objects(
+                "dev-a",
+                "req-race",
+                "loser-xfer",
+                &sel,
+                &envelope.snapshot_hash,
+                &serde_json::to_string(&envelope).unwrap(),
+                &objects,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(unique_err.ipc_category_code(), "conflict");
+        let resolved = ledger
+            .resolve_after_insert_conflict("dev-a", "req-race", &sel, &envelope.snapshot_hash)
+            .await
+            .unwrap()
+            .expect("same-hash unique must re-read");
+        assert_eq!(resolved.transfer_id, first.transfer_id);
+
+        // prepare 入口本身也应幂等回放
+        let second = prepare_push(&repo, &store, &ledger, dir.path(), req)
+            .await
+            .unwrap();
+        assert_eq!(second.transfer_id, first.transfer_id);
     }
 }

@@ -172,7 +172,7 @@ impl ReplicationLedger {
     /// 首次写入 prepared 请求（UNIQUE 冲突上抛）。
     ///
     /// Business Logic: 仅在校验通过后创建 active ledger。
-    /// Code Logic: INSERT；unique → Conflict。
+    /// Code Logic: INSERT；unique → Conflict（调用方应 re-get 并按 hash 决定 replay/conflict）。
     pub async fn insert_prepared(
         &self,
         source_device_id: &str,
@@ -182,8 +182,42 @@ impl ReplicationLedger {
         snapshot_hash: &str,
         envelope_json: &str,
     ) -> Result<PushRequestRow, AppError> {
+        self.insert_prepared_with_objects(
+            source_device_id,
+            client_request_id,
+            transfer_id,
+            selection_hash,
+            snapshot_hash,
+            envelope_json,
+            &[],
+        )
+        .await
+    }
+
+    /// 同一 SQLite 写事务写入 prepared 请求 + object 登记行。
+    ///
+    /// Business Logic:
+    ///     prepare 中途崩溃不得留下「有 request 无 object 行」的半截 active ledger；
+    ///     UNIQUE 冲突上抛 `agent_hub_push_request_conflict`，由调用方 re-get 判定
+    ///     same-hash replay 或不同 hash conflict。
+    ///
+    /// Code Logic:
+    ///     shared lease → BEGIN → INSERT request → INSERT objects → COMMIT；
+    ///     unique → rollback + Conflict；object 用 INSERT OR IGNORE 保幂等。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_prepared_with_objects(
+        &self,
+        source_device_id: &str,
+        client_request_id: &str,
+        transfer_id: &str,
+        selection_hash: &str,
+        snapshot_hash: &str,
+        envelope_json: &str,
+        objects: &[(String, u64)],
+    ) -> Result<PushRequestRow, AppError> {
         with_shared_write_lease(&self.gate, async {
             let now = Utc::now().to_rfc3339();
+            let mut tx = self.pool.begin().await?;
             let result = sqlx::query(
                 "INSERT INTO agent_hub_push_requests
                  (source_device_id, client_request_id, transfer_id, selection_hash, snapshot_hash,
@@ -198,22 +232,40 @@ impl ReplicationLedger {
             .bind(envelope_json)
             .bind(&now)
             .bind(&now)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await;
             match result {
-                Ok(_) => Ok(PushRequestRow {
-                    source_device_id: source_device_id.to_string(),
-                    client_request_id: client_request_id.to_string(),
-                    transfer_id: transfer_id.to_string(),
-                    selection_hash: selection_hash.to_string(),
-                    snapshot_hash: snapshot_hash.to_string(),
-                    status: PushRequestStatus::Prepared,
-                    envelope_json: envelope_json.to_string(),
-                    outcome_json: None,
-                    created_at: now.clone(),
-                    updated_at: now,
-                }),
+                Ok(_) => {
+                    for (object_hash, expected_size) in objects {
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO agent_hub_push_objects
+                             (transfer_id, object_hash, expected_size, received_bytes, verified, updated_at)
+                             VALUES (?, ?, ?, 0, 0, ?)",
+                        )
+                        .bind(transfer_id)
+                        .bind(object_hash)
+                        .bind(*expected_size as i64)
+                        .bind(&now)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    tx.commit().await?;
+                    Ok(PushRequestRow {
+                        source_device_id: source_device_id.to_string(),
+                        client_request_id: client_request_id.to_string(),
+                        transfer_id: transfer_id.to_string(),
+                        selection_hash: selection_hash.to_string(),
+                        snapshot_hash: snapshot_hash.to_string(),
+                        status: PushRequestStatus::Prepared,
+                        envelope_json: envelope_json.to_string(),
+                        outcome_json: None,
+                        created_at: now.clone(),
+                        updated_at: now,
+                    })
+                }
                 Err(e) => {
+                    // 显式 rollback（Drop 也会，但错误路径更清晰）
+                    let _ = tx.rollback().await;
                     if is_unique_violation(&e) {
                         Err(AppError::conflict(
                             "agent_hub_push_request_conflict".to_string(),
@@ -225,6 +277,34 @@ impl ReplicationLedger {
             }
         })
         .await
+    }
+
+    /// UNIQUE 冲突后 re-get：同 hash 返回 existing；不同 hash 保持 conflict。
+    ///
+    /// Business Logic: 并发同 key prepare 必须收敛到 prior outcome，不得硬冲突。
+    /// Code Logic: get_request；hash 匹配 → Ok(Some)；不匹配 → Conflict；无行 → Ok(None)。
+    pub async fn resolve_after_insert_conflict(
+        &self,
+        source_device_id: &str,
+        client_request_id: &str,
+        selection_hash: &str,
+        snapshot_hash: &str,
+    ) -> Result<Option<PushRequestRow>, AppError> {
+        match self
+            .get_request(source_device_id, client_request_id)
+            .await?
+        {
+            Some(existing)
+                if existing.selection_hash == selection_hash
+                    && existing.snapshot_hash == snapshot_hash =>
+            {
+                Ok(Some(existing))
+            }
+            Some(_) => Err(AppError::conflict(
+                "agent_hub_push_idempotency_hash_conflict".to_string(),
+            )),
+            None => Ok(None),
+        }
     }
 
     /// 标记 committed 并写入 outcome JSON。
@@ -528,5 +608,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again.status, PushRequestStatus::Committed);
+    }
+
+    /// Business Logic: 请求与 object 行必须同事务；UNIQUE 后 re-get 同 hash 可 replay。
+    /// Code Logic: insert_prepared_with_objects 登记 objects；二次 insert conflict 经
+    /// resolve_after_insert_conflict 返回 first transfer。
+    #[tokio::test]
+    async fn insert_prepared_with_objects_atomic_and_unique_reread() {
+        let ledger = test_ledger().await;
+        let objects = vec![("a".repeat(64), 12u64), ("b".repeat(64), 34u64)];
+        let row = ledger
+            .insert_prepared_with_objects(
+                "src-a",
+                "req-u",
+                "xfer-1",
+                "sel-hash",
+                "snap-hash",
+                r#"{"format":"cc-partner-agent-hub"}"#,
+                &objects,
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.transfer_id, "xfer-1");
+        let listed = ledger.list_objects("xfer-1").await.unwrap();
+        assert_eq!(listed.len(), 2);
+
+        let err = ledger
+            .insert_prepared_with_objects(
+                "src-a",
+                "req-u",
+                "xfer-2",
+                "sel-hash",
+                "snap-hash",
+                r#"{"format":"cc-partner-agent-hub"}"#,
+                &objects,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.ipc_category_code(), "conflict");
+
+        let resolved = ledger
+            .resolve_after_insert_conflict("src-a", "req-u", "sel-hash", "snap-hash")
+            .await
+            .unwrap()
+            .expect("same-hash unique should re-read existing");
+        assert_eq!(resolved.transfer_id, "xfer-1");
+
+        let differ = ledger
+            .resolve_after_insert_conflict("src-a", "req-u", "other-sel", "other-snap")
+            .await
+            .unwrap_err();
+        assert_eq!(differ.ipc_category_code(), "conflict");
     }
 }
