@@ -321,9 +321,13 @@ pub async fn handle_native_agent_event(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     repair/resume 必须使用原 provider，禁止静默换成 Claude。
+///     OpenCode 的 idle TUI 仍占 PTY，必须 Fresh 终端 + 预分配 agent id。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 task policy provider；adapter.build_resume_plan；创建新 agent session 行（resumed_from）。
+///     读 task policy provider；adapter.build_resume_plan；
+///     Fresh：新建 terminal/agent 并写入 resume plan；
+///     Reuse：在给定 terminal 创建 agent 行并写入 resume plan。
+///     写失败 → mark Failed，attempt 保持 repairable。
 pub async fn resume_runner_attempt(
     state: &AppState,
     task_id: &str,
@@ -332,6 +336,11 @@ pub async fn resume_runner_attempt(
     native_session_id: Option<&str>,
     previous_agent_session_id: Option<&str>,
 ) -> Result<AgentSessionRuntime, AppError> {
+    use crate::commands::workbench::local_write_workbench_session_input;
+    use crate::orchestrator::agent_adapter::{
+        render_terminal_command, ResumeTerminalPolicy, TerminalShellDialect,
+    };
+
     let task = state.orchestrator_repo.get_task(task_id).await?;
     let provider = AgentProviderId::parse_legacy(task.runner_provider.as_deref())?;
     let registry = registry_from_state(state)?;
@@ -342,27 +351,121 @@ pub async fn resume_runner_attempt(
             provider.as_str()
         )));
     }
+
+    let attempt = task.attempt.max(1) as u32;
+    let policy = adapter.resume_terminal_policy();
+
+    let (write_terminal_id, agent_prealloc, session_command) = match policy {
+        ResumeTerminalPolicy::Fresh => {
+            let worktree_id = task.worktree_id.clone().ok_or_else(|| {
+                AppError::generic("OpenCode resume 需要已有 worktree，禁止无现场 resume")
+            })?;
+            let terminal_id = uuid::Uuid::new_v4().to_string();
+            let agent_id = uuid::Uuid::new_v4().to_string();
+            let session =
+                crate::commands::workbench::local_create_workbench_session_with_preallocated_ids(
+                    state,
+                    task.project_id.clone(),
+                    Some(worktree_id),
+                    Some(120),
+                    Some(32),
+                    terminal_id.clone(),
+                    agent_id.clone(),
+                )
+                .await?;
+            // 原子更新 active attempt 的 terminal/agent（best-effort CAS）。
+            let _ = state
+                .orchestrator_repo
+                .update_active_runner_session_and_agent(
+                    &task.id,
+                    attempt as i64,
+                    &session.id,
+                    Some(&agent_id),
+                )
+                .await;
+            (session.id, Some(agent_id), session.command)
+        }
+        ResumeTerminalPolicy::Reuse => {
+            // 旧终端：command 未知时按 Posix 渲染。
+            (terminal_session_id.to_string(), None, String::new())
+        }
+    };
+
     let request = AgentLaunchRequest {
-        agent_session_id: previous_agent_session_id.unwrap_or("").to_string(),
-        terminal_session_id: terminal_session_id.to_string(),
+        agent_session_id: agent_prealloc
+            .clone()
+            .unwrap_or_else(|| previous_agent_session_id.unwrap_or("").to_string()),
+        terminal_session_id: write_terminal_id.clone(),
         cwd: String::new(),
         prompt: prompt.to_string(),
         native_session_id: native_session_id.map(str::to_string),
         max_turns: task.runner_max_turns.unwrap_or(1).clamp(1, 20) as u32,
         stall_timeout_ms: task.runner_stall_timeout_ms.unwrap_or(300_000).max(0) as u64,
     };
-    let _plan = adapter.build_resume_plan(&request)?;
-    create_launching_agent_for_runner_with_provider(
+    let plan = adapter.build_resume_plan(&request)?;
+
+    let runtime = create_launching_agent_for_runner_with_provider_and_id(
         state,
         &task.project_id,
         task.worktree_id.as_deref(),
-        terminal_session_id,
+        &write_terminal_id,
         task_id,
-        task.attempt.max(1) as u32,
+        attempt,
         provider,
         previous_agent_session_id,
+        agent_prealloc.as_deref(),
     )
-    .await
+    .await?;
+
+    let dialect = if session_command.is_empty() {
+        TerminalShellDialect::Posix
+    } else {
+        TerminalShellDialect::from_command(&session_command)
+    };
+    let input = match render_terminal_command(&plan, dialect) {
+        Ok(s) => s,
+        Err(err) => {
+            let _ = mark_agent_failed_best_effort(state, &runtime.id, &write_terminal_id).await;
+            return Err(err);
+        }
+    };
+    if let Err(err) =
+        local_write_workbench_session_input(state, write_terminal_id.clone(), input).await
+    {
+        let _ = mark_agent_failed_best_effort(state, &runtime.id, &write_terminal_id).await;
+        return Err(err);
+    }
+    Ok(runtime)
+}
+
+/// resume 写失败时将新 runtime 标 Failed（best-effort）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     写终端失败后不得留下 Launching 悬挂；attempt 保持可修复。
+///
+/// Code Logic（这个函数做什么）:
+///     apply Failed mutation 或 end_active_for_terminal。
+async fn mark_agent_failed_best_effort(
+    state: &AppState,
+    agent_session_id: &str,
+    terminal_session_id: &str,
+) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
+    if let Ok(Some(current)) = reducer.repo().get(agent_session_id).await {
+        let mutation = AgentRuntimeMutation {
+            agent_session_id: agent_session_id.to_string(),
+            terminal_session_id: terminal_session_id.to_string(),
+            expected_version: current.version,
+            event_version: current.version.saturating_add(1),
+            phase: AgentSessionPhase::Failed,
+            native_session_id: None,
+            outcome_code: Some("resume_write_failed".into()),
+            occurred_at: now,
+        };
+        let _ = reducer.apply(mutation).await;
+    }
+    Ok(())
 }
 
 /// 处理归一化 Agent event（OSC / Hook 入站后）。

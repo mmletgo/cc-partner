@@ -14,7 +14,9 @@ use crate::commands::workbench::{
 };
 use crate::error::AppError;
 use crate::orchestrator::agent_adapter::{
+    ensure_opencode_bridge_verified, opencode_preflight_block_reason, render_terminal_command,
     resolve_task_runner_policy, AgentAdapterRegistry, AgentAvailability, AgentLaunchRequest,
+    AgentProviderId, TerminalShellDialect,
 };
 use crate::orchestrator::claude_runtime::associate_claude_runtime;
 use crate::orchestrator::models::{
@@ -27,6 +29,7 @@ use crate::orchestrator::runner_limits::{
 };
 use crate::orchestrator::workflow::{resolve_project_workflow, PromptTaskContext};
 use crate::state::AppState;
+use crate::workbench::agent_runtime::opencode_bridge::OpenCodeRuntimeBridge;
 use std::path::Path;
 use std::time::Duration;
 
@@ -240,32 +243,24 @@ pub async fn prepare_runner_attempt(
             .reason_code
             .as_deref()
             .unwrap_or("provider_unavailable");
-        if let Ok(Some(blocked)) = state
-            .orchestrator_repo
-            .try_transition_task_status(
-                &task.id,
-                OrchestratorTaskStatus::Preparing,
-                OrchestratorTaskStatus::Blocked,
-                Some(reason),
-            )
-            .await
-        {
-            let _ = state
-                .orchestrator_repo
-                .add_evidence(
-                    &task.id,
-                    "runnerAdapter",
-                    "Agent adapter unavailable",
-                    reason,
-                    &format!(
-                        "provider={}\navailability=unavailable\nreason={reason}",
-                        runner_policy.provider.as_str()
-                    ),
-                )
+        return block_preparing_for_adapter(state, &task.id, runner_policy.provider, reason).await;
+    }
+
+    // OpenCode：worktree/session 前 fail-closed（opt-in / bridge / L3）。
+    // 禁止缺 bridge 时创建现场或回落 Sentinel。
+    let mut opencode_opted_in = false;
+    if runner_policy.provider == AgentProviderId::OpenCodeVisible {
+        let mapping = state
+            .agent_hub_repo
+            .get_project_mapping_by_local_workbench_id(&task.project_id)
+            .await?;
+        opencode_opted_in = mapping.as_ref().map(|m| m.opted_in).unwrap_or(false);
+        let project_root = Path::new(&project.path);
+        let bridge_preview = OpenCodeRuntimeBridge::preview(project_root, opencode_opted_in);
+        if let Some(reason) = opencode_preflight_block_reason(&probe, &bridge_preview) {
+            return block_preparing_for_adapter(state, &task.id, runner_policy.provider, reason)
                 .await;
-            return Ok(blocked);
         }
-        return state.orchestrator_repo.get_task(&task.id).await;
     }
 
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
@@ -276,16 +271,55 @@ pub async fn prepare_runner_attempt(
     {
         return state.orchestrator_repo.get_task(&task.id).await;
     }
-    let session = local_create_workbench_session(
-        state,
-        task.project_id.clone(),
-        Some(worktree.id.clone()),
-        Some(DEFAULT_TERMINAL_COLS),
-        Some(DEFAULT_TERMINAL_ROWS),
-    )
-    .await?;
+
+    // OpenCode：新 worktree 必须 materialize+verify bridge 后才写输入。
+    if runner_policy.provider == AgentProviderId::OpenCodeVisible {
+        if let Err(err) =
+            ensure_opencode_bridge_verified(Path::new(&worktree.path), opencode_opted_in)
+        {
+            let reason = err.to_string();
+            let code = if reason.contains("externalCollision") {
+                "externalCollision"
+            } else if reason.contains("runtimeBridgeRequired") {
+                "runtimeBridgeRequired"
+            } else {
+                "runtime_bridge_verify_failed"
+            };
+            return block_preparing_for_adapter(state, &task.id, runner_policy.provider, code)
+                .await;
+        }
+    }
+
+    // OpenCode 需要预分配 terminal/agent UUID，以便 shell env 与 runtime 行一致。
+    let (session, agent_session_id_prealloc) =
+        if runner_policy.provider == AgentProviderId::OpenCodeVisible {
+            let terminal_id = uuid::Uuid::new_v4().to_string();
+            let agent_id = uuid::Uuid::new_v4().to_string();
+            let session = local_create_workbench_session_with_preallocated_ids(
+                state,
+                task.project_id.clone(),
+                Some(worktree.id.clone()),
+                Some(DEFAULT_TERMINAL_COLS),
+                Some(DEFAULT_TERMINAL_ROWS),
+                terminal_id,
+                agent_id.clone(),
+            )
+            .await?;
+            (session, Some(agent_id))
+        } else {
+            let session = local_create_workbench_session(
+                state,
+                task.project_id.clone(),
+                Some(worktree.id.clone()),
+                Some(DEFAULT_TERMINAL_COLS),
+                Some(DEFAULT_TERMINAL_ROWS),
+            )
+            .await?;
+            (session, None)
+        };
+
     // A1/A3：按冻结 policy 的 provider 创建 Agent runtime（Launching）
-    let agent_runtime = match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner_with_provider(
+    let agent_runtime = match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner_with_provider_and_id(
         state,
         &task.project_id,
         Some(&worktree.id),
@@ -294,6 +328,7 @@ pub async fn prepare_runner_attempt(
         attempt as u32,
         runner_policy.provider,
         None,
+        agent_session_id_prealloc.as_deref(),
     )
     .await
     {
@@ -308,7 +343,10 @@ pub async fn prepare_runner_attempt(
             None
         }
     };
-    let agent_session_id = agent_runtime.as_ref().map(|r| r.id.clone());
+    let agent_session_id = agent_runtime
+        .as_ref()
+        .map(|r| r.id.clone())
+        .or(agent_session_id_prealloc);
     // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
     if !state
         .orchestrator_repo
@@ -424,8 +462,9 @@ pub async fn prepare_runner_attempt(
     {
         return Ok(current);
     }
-    local_write_workbench_session_input(state, session.id.clone(), launch_plan.to_terminal_input())
-        .await?;
+    let dialect = TerminalShellDialect::from_command(&session.command);
+    let terminal_input = render_terminal_command(&launch_plan, dialect)?;
+    local_write_workbench_session_input(state, session.id.clone(), terminal_input).await?;
 
     running_task = state
         .orchestrator_repo
@@ -754,6 +793,75 @@ fn truncate_slug(slug: &str, max_len: usize) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Preparing 任务因 adapter/preflight 失败而 Blocked。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode/probe 失败必须在创建 worktree 前写稳定 reason + evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     CAS Preparing→Blocked + runnerAdapter evidence。
+async fn block_preparing_for_adapter(
+    state: &AppState,
+    task_id: &str,
+    provider: AgentProviderId,
+    reason: &str,
+) -> Result<OrchestratorTaskRow, AppError> {
+    if let Ok(Some(blocked)) = state
+        .orchestrator_repo
+        .try_transition_task_status(
+            task_id,
+            OrchestratorTaskStatus::Preparing,
+            OrchestratorTaskStatus::Blocked,
+            Some(reason),
+        )
+        .await
+    {
+        let _ = state
+            .orchestrator_repo
+            .add_evidence(
+                task_id,
+                "runnerAdapter",
+                "Agent adapter unavailable",
+                reason,
+                &format!(
+                    "provider={}\navailability=unavailable\nreason={reason}",
+                    provider.as_str()
+                ),
+            )
+            .await;
+        return Ok(blocked);
+    }
+    state.orchestrator_repo.get_task(task_id).await
+}
+
+/// 带预分配 terminal/agent id 创建本机 Workbench session。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode bridge 要求 shell 启动前 `CC_PARTNER_AGENT_SESSION_ID` 已存在。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `local_create_workbench_session_with_preallocated_ids`。
+async fn local_create_workbench_session_with_preallocated_ids(
+    state: &AppState,
+    project_id: String,
+    worktree_id: Option<String>,
+    initial_cols: Option<u16>,
+    initial_rows: Option<u16>,
+    terminal_session_id: String,
+    agent_session_id: String,
+) -> Result<crate::workbench::models::WorkbenchSessionDto, AppError> {
+    crate::commands::workbench::local_create_workbench_session_with_preallocated_ids(
+        state,
+        project_id,
+        worktree_id,
+        initial_cols,
+        initial_rows,
+        terminal_session_id,
+        agent_session_id,
+    )
+    .await
 }
 
 #[cfg(test)]

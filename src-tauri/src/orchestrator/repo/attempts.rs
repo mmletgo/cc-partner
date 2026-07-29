@@ -497,6 +497,61 @@ impl OrchestratorRepo {
         self.get_task(task_id).await
     }
 
+    /// 将 active Running attempt 的 terminal/agent 切换到 Fresh resume 现场。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     OpenCode resume 新建 terminal/agent 后，task 与 attempt 必须原子指向新 id，
+    ///     否则 completion/sentinel 反查仍绑旧 idle TUI。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     同事务更新 tasks + running attempt 的 session_id/agent_session_id（按 task_id+attempt）。
+    pub async fn update_active_runner_session_and_agent(
+        &self,
+        task_id: &str,
+        attempt: i64,
+        session_id: &str,
+        agent_session_id: Option<&str>,
+    ) -> Result<OrchestratorTaskRow, AppError> {
+        if attempt <= 0 {
+            return Err(AppError::generic("任务尝试轮次必须大于 0"));
+        }
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Err(AppError::generic("任务尝试缺少 session"));
+        }
+        let now = Utc::now().to_rfc3339();
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "UPDATE orchestrator_tasks \
+                 SET session_id = ?, agent_session_id = ?, updated_at = ? \
+                 WHERE id = ? AND status = ? AND attempt = ?",
+            )
+            .bind(session_id)
+            .bind(agent_session_id)
+            .bind(&now)
+            .bind(task_id)
+            .bind(OrchestratorTaskStatus::Running.as_str())
+            .bind(attempt)
+            .execute(&self.pool)
+            .await?;
+            sqlx::query(
+                "UPDATE orchestrator_task_attempts \
+                 SET session_id = ?, agent_session_id = ? \
+                 WHERE task_id = ? AND attempt = ? AND status = ?",
+            )
+            .bind(session_id)
+            .bind(agent_session_id)
+            .bind(task_id)
+            .bind(attempt)
+            .bind(OrchestratorAttemptStatus::Running.as_str())
+            .execute(&self.pool)
+            .await?;
+            Ok::<(), AppError>(())
+        })
+        .await?;
+        self.get_task(task_id).await
+    }
+
     /// Business Logic（为什么需要这个函数）:
     ///     Claude Code visible runtime 关联是可选增强；旧 runner 迟到关联不能覆盖新 attempt 的 session/transcript。
     ///
