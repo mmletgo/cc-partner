@@ -147,6 +147,8 @@ pub(crate) async fn local_create_workbench_worktree(
                 existing.updated_at = now;
                 state.workbench_worktree_repo.upsert(&existing).await?;
             }
+            // opt-in 项目：binding 必须在 helper 返回前存在。
+            refresh_agent_hub_bindings_best_effort(state, &project_id).await;
             return Ok(worktree_to_dto(&existing));
         }
         let row = WorkbenchWorktreeRow {
@@ -161,6 +163,7 @@ pub(crate) async fn local_create_workbench_worktree(
             updated_at: now,
         };
         state.workbench_worktree_repo.upsert(&row).await?;
+        refresh_agent_hub_bindings_best_effort(state, &project_id).await;
         return Ok(worktree_to_dto(&row));
     }
 
@@ -186,7 +189,28 @@ pub(crate) async fn local_create_workbench_worktree(
         updated_at: now,
     };
     state.workbench_worktree_repo.upsert(&row).await?;
+    // 新建 worktree：opt-in 时 binding 先于返回创建。
+    refresh_agent_hub_bindings_best_effort(state, &project_id).await;
     Ok(worktree_to_dto(&row))
+}
+
+/// 幂等刷新 Agent Hub checkout bindings（失败仅 debug）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     create/remove worktree 后需同步 binding；未 opt-in 时 refresh 为空且零写入。
+///
+/// Code Logic（这个函数做什么）:
+///     调用 project_scope::refresh_checkout_bindings；错误 tracing::debug。
+async fn refresh_agent_hub_bindings_best_effort(state: &AppState, project_id: &str) {
+    if let Err(err) =
+        crate::agent_hub::project_scope::refresh_checkout_bindings(state, project_id).await
+    {
+        tracing::debug!(
+            project_id = %project_id,
+            error = %err,
+            "agent_hub refresh_checkout_bindings best-effort failed"
+        );
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1789,6 +1813,20 @@ pub(crate) async fn local_remove_workbench_worktree_with_ledger(
             .workbench_worktree_repo
             .delete(&wt_for_exec)
             .await?;
+        // 删除后 refresh：对应 binding 标记 detached，不 tombstone Hub 资产。
+        if let Err(err) = crate::agent_hub::project_scope::refresh_checkout_bindings(
+            &state_for_exec,
+            &row_for_exec.project_id,
+        )
+        .await
+        {
+            tracing::debug!(
+                project_id = %row_for_exec.project_id,
+                worktree_id = %wt_for_exec,
+                error = %err,
+                "agent_hub refresh_checkout_bindings after remove worktree failed"
+            );
+        }
         Ok(serde_json::json!({ "ok": true, "worktreeId": wt_for_exec }))
     })
     .await

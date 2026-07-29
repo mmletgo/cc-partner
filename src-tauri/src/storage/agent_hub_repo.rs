@@ -5,8 +5,9 @@
 //!     target binding、materialization 与 conflict。写入必须经 maintenance gate，旧库升级幂等。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `ensure_schema` 建 13 张表与索引；`insert_scope/insert_asset/append_revision/
-//!     upsert_target_binding` 等写路径走 `with_shared_write_lease`；revision 多行更新同事务。
+//!     `ensure_schema` 建 13 张表与索引，并对 project_mappings/checkout_bindings 做 PRAGMA 列升级；
+//!     `insert_scope/insert_asset/append_revision/upsert_target_binding` 与 mapping/binding upsert
+//!     写路径走 `with_shared_write_lease`；revision 多行更新同事务。
 
 use crate::agent_hub::models::{
     AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, NewLogicalAsset,
@@ -77,6 +78,7 @@ impl AgentHubRepo {
         for stmt in AGENT_HUB_SCHEMA_STATEMENTS {
             sqlx::query(stmt).execute(pool).await?;
         }
+        migrate_agent_hub_columns(pool).await?;
         Ok(())
     }
 
@@ -563,6 +565,409 @@ impl AgentHubRepo {
         .await?;
         rows.iter().map(row_to_target_binding).collect()
     }
+
+    /// 按本地 Workbench project id 读取 Hub 项目映射。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     project opt-in 与 checkout binding 刷新都需要从本机 Workbench 项目定位 portable hubProjectId。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `SELECT ... WHERE local_workbench_project_id = ?`，解析 opted_in 整型为 bool。
+    pub async fn get_project_mapping_by_local_workbench_id(
+        &self,
+        local_workbench_project_id: &str,
+    ) -> Result<Option<AgentHubProjectMappingRow>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, hub_project_id, local_workbench_project_id, git_remote_fingerprint,
+                    local_absolute_path, opted_in, created_at, updated_at
+             FROM agent_hub_project_mappings
+             WHERE local_workbench_project_id = ?",
+        )
+        .bind(local_workbench_project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_project_mapping(&r)).transpose()
+    }
+
+    /// 按 hub_project_id 读取项目映射。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     跨设备 portable 身份以 hub_project_id 为主键，需要按它回查本机映射。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `SELECT ... WHERE hub_project_id = ? LIMIT 1`。
+    pub async fn get_project_mapping_by_hub_project_id(
+        &self,
+        hub_project_id: &str,
+    ) -> Result<Option<AgentHubProjectMappingRow>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, hub_project_id, local_workbench_project_id, git_remote_fingerprint,
+                    local_absolute_path, opted_in, created_at, updated_at
+             FROM agent_hub_project_mappings
+             WHERE hub_project_id = ?
+             LIMIT 1",
+        )
+        .bind(hub_project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_project_mapping(&r)).transpose()
+    }
+
+    /// 幂等写入/更新项目映射（含 opt-in）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户确认 project opt-in 后需要持久化 hubProjectId、Git remote fingerprint 与本机路径映射。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     若 local_workbench_project_id 或 hub_project_id 已有行则 UPDATE，否则 INSERT；写路径经 shared lease。
+    pub async fn upsert_project_mapping(
+        &self,
+        input: UpsertAgentHubProjectMapping,
+    ) -> Result<AgentHubProjectMappingRow, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let existing = if let Some(local_id) = input.local_workbench_project_id.as_deref() {
+                self.get_project_mapping_by_local_workbench_id(local_id)
+                    .await?
+            } else {
+                None
+            };
+            let existing = match existing {
+                Some(row) => Some(row),
+                None => {
+                    self.get_project_mapping_by_hub_project_id(&input.hub_project_id)
+                        .await?
+                }
+            };
+            if let Some(prev) = existing {
+                sqlx::query(
+                    "UPDATE agent_hub_project_mappings
+                     SET hub_project_id = ?, local_workbench_project_id = ?,
+                         git_remote_fingerprint = ?, local_absolute_path = ?,
+                         opted_in = ?, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(&input.hub_project_id)
+                .bind(&input.local_workbench_project_id)
+                .bind(&input.git_remote_fingerprint)
+                .bind(&input.local_absolute_path)
+                .bind(if input.opted_in { 1 } else { 0 })
+                .bind(&now)
+                .bind(&prev.id)
+                .execute(&self.pool)
+                .await?;
+                return Ok(AgentHubProjectMappingRow {
+                    id: prev.id,
+                    hub_project_id: input.hub_project_id,
+                    local_workbench_project_id: input.local_workbench_project_id,
+                    git_remote_fingerprint: input.git_remote_fingerprint,
+                    local_absolute_path: input.local_absolute_path,
+                    opted_in: input.opted_in,
+                    created_at: prev.created_at,
+                    updated_at: now,
+                });
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO agent_hub_project_mappings
+                 (id, hub_project_id, local_workbench_project_id, git_remote_fingerprint,
+                  local_absolute_path, opted_in, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&input.hub_project_id)
+            .bind(&input.local_workbench_project_id)
+            .bind(&input.git_remote_fingerprint)
+            .bind(&input.local_absolute_path)
+            .bind(if input.opted_in { 1 } else { 0 })
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(AgentHubProjectMappingRow {
+                id,
+                hub_project_id: input.hub_project_id,
+                local_workbench_project_id: input.local_workbench_project_id,
+                git_remote_fingerprint: input.git_remote_fingerprint,
+                local_absolute_path: input.local_absolute_path,
+                opted_in: input.opted_in,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+        })
+        .await
+    }
+
+    /// 列出某 hub 项目下全部 checkout bindings。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     preview/status/refresh 需要看到主 checkout 与全部 worktree 绑定状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `SELECT ... WHERE hub_project_id = ? ORDER BY created_at ASC`。
+    pub async fn list_checkout_bindings_by_hub_project(
+        &self,
+        hub_project_id: &str,
+    ) -> Result<Vec<AgentHubCheckoutBindingRow>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, hub_project_id, workbench_worktree_id, checkout_kind, relative_root,
+                    local_absolute_path, enabled, status, warning, created_at, updated_at
+             FROM agent_hub_checkout_bindings
+             WHERE hub_project_id = ?
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(hub_project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_checkout_binding).collect()
+    }
+
+    /// 按 hub + worktree id 读取单条 binding。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     upsert 前需要定位既有 binding，main 与 feature worktree 均以 workbench_worktree_id 区分。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     worktree_id 为 None 时匹配 `workbench_worktree_id IS NULL`，否则精确匹配。
+    pub async fn get_checkout_binding_by_worktree(
+        &self,
+        hub_project_id: &str,
+        workbench_worktree_id: Option<&str>,
+    ) -> Result<Option<AgentHubCheckoutBindingRow>, AppError> {
+        let row = if let Some(wt) = workbench_worktree_id {
+            sqlx::query(
+                "SELECT id, hub_project_id, workbench_worktree_id, checkout_kind, relative_root,
+                        local_absolute_path, enabled, status, warning, created_at, updated_at
+                 FROM agent_hub_checkout_bindings
+                 WHERE hub_project_id = ? AND workbench_worktree_id = ?",
+            )
+            .bind(hub_project_id)
+            .bind(wt)
+            .fetch_optional(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, hub_project_id, workbench_worktree_id, checkout_kind, relative_root,
+                        local_absolute_path, enabled, status, warning, created_at, updated_at
+                 FROM agent_hub_checkout_bindings
+                 WHERE hub_project_id = ? AND workbench_worktree_id IS NULL",
+            )
+            .bind(hub_project_id)
+            .fetch_optional(&self.pool)
+            .await?
+        };
+        row.map(|r| row_to_checkout_binding(&r)).transpose()
+    }
+
+    /// 幂等 upsert checkout binding（绝对路径仅存本表）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     opt-in 后主 checkout 与 Workbench worktree 需要本地 binding，供 projection 寻址。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 hub_project_id + workbench_worktree_id 定位，UPDATE 或 INSERT；经 shared lease。
+    pub async fn upsert_checkout_binding(
+        &self,
+        input: UpsertAgentHubCheckoutBinding,
+    ) -> Result<AgentHubCheckoutBindingRow, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let existing = self
+                .get_checkout_binding_by_worktree(
+                    &input.hub_project_id,
+                    input.workbench_worktree_id.as_deref(),
+                )
+                .await?;
+            if let Some(prev) = existing {
+                sqlx::query(
+                    "UPDATE agent_hub_checkout_bindings
+                     SET checkout_kind = ?, relative_root = ?, local_absolute_path = ?,
+                         enabled = ?, status = ?, warning = ?, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(&input.checkout_kind)
+                .bind(&input.relative_root)
+                .bind(&input.local_absolute_path)
+                .bind(if input.enabled { 1 } else { 0 })
+                .bind(&input.status)
+                .bind(&input.warning)
+                .bind(&now)
+                .bind(&prev.id)
+                .execute(&self.pool)
+                .await?;
+                return Ok(AgentHubCheckoutBindingRow {
+                    id: prev.id,
+                    hub_project_id: input.hub_project_id,
+                    workbench_worktree_id: input.workbench_worktree_id,
+                    checkout_kind: input.checkout_kind,
+                    relative_root: input.relative_root,
+                    local_absolute_path: input.local_absolute_path,
+                    enabled: input.enabled,
+                    status: input.status,
+                    warning: input.warning,
+                    created_at: prev.created_at,
+                    updated_at: now,
+                });
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO agent_hub_checkout_bindings
+                 (id, hub_project_id, workbench_worktree_id, checkout_kind, relative_root,
+                  local_absolute_path, enabled, status, warning, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&input.hub_project_id)
+            .bind(&input.workbench_worktree_id)
+            .bind(&input.checkout_kind)
+            .bind(&input.relative_root)
+            .bind(&input.local_absolute_path)
+            .bind(if input.enabled { 1 } else { 0 })
+            .bind(&input.status)
+            .bind(&input.warning)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(AgentHubCheckoutBindingRow {
+                id,
+                hub_project_id: input.hub_project_id,
+                workbench_worktree_id: input.workbench_worktree_id,
+                checkout_kind: input.checkout_kind,
+                relative_root: input.relative_root,
+                local_absolute_path: input.local_absolute_path,
+                enabled: input.enabled,
+                status: input.status,
+                warning: input.warning,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+        })
+        .await
+    }
+
+    /// 将 binding 标记为 detached（保留行，不删 canonical 资产）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Workbench 删除 worktree 后 binding 应变 detached，且不得 tombstone Hub 资产。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `UPDATE status='detached', enabled=0, updated_at=now WHERE id=?`。
+    pub async fn mark_checkout_binding_detached(&self, id: &str) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "UPDATE agent_hub_checkout_bindings
+                 SET status = 'detached', enabled = 0, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 按 hub_project_id 查找 project 级 ScopeNode。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     enable 时需要幂等确保 project scope 存在，且 scope 不得写入本机绝对路径。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `SELECT ... WHERE kind='project' AND hub_project_id=? LIMIT 1`。
+    pub async fn get_project_scope_by_hub_project_id(
+        &self,
+        hub_project_id: &str,
+    ) -> Result<Option<ScopeNode>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, kind, hub_project_id, relative_path, created_at
+             FROM agent_hub_scopes
+             WHERE kind = 'project' AND hub_project_id = ?
+             LIMIT 1",
+        )
+        .bind(hub_project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_scope(&r)).transpose()
+    }
+}
+
+/// Agent Hub 项目映射行（本机 portable 身份）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     hubProjectId 与本机 Workbench project/Git fingerprint 的映射是 opt-in 与跨设备对齐的基础。
+///
+/// Code Logic（这个结构体做什么）:
+///     镜像 agent_hub_project_mappings 列（含 opted_in）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHubProjectMappingRow {
+    pub id: String,
+    pub hub_project_id: String,
+    pub local_workbench_project_id: Option<String>,
+    pub git_remote_fingerprint: Option<String>,
+    pub local_absolute_path: Option<String>,
+    pub opted_in: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 写入项目映射的输入。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     enable_project_scope 需要与完整行分离的 upsert 输入。
+///
+/// Code Logic（这个结构体做什么）:
+///     不含 id/时间戳，由 repo 生成或保留。
+#[derive(Debug, Clone)]
+pub struct UpsertAgentHubProjectMapping {
+    pub hub_project_id: String,
+    pub local_workbench_project_id: Option<String>,
+    pub git_remote_fingerprint: Option<String>,
+    pub local_absolute_path: Option<String>,
+    pub opted_in: bool,
+}
+
+/// Checkout binding 行（本地绝对路径仅存此处）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     projection 需要按 checkout 定位路径；绝对路径绝不能进入 portable scope/asset。
+///
+/// Code Logic（这个结构体做什么）:
+///     镜像 agent_hub_checkout_bindings 列（含 status/warning/local_absolute_path）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHubCheckoutBindingRow {
+    pub id: String,
+    pub hub_project_id: String,
+    pub workbench_worktree_id: Option<String>,
+    pub checkout_kind: String,
+    pub relative_root: Option<String>,
+    pub local_absolute_path: Option<String>,
+    pub enabled: bool,
+    pub status: String,
+    pub warning: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 写入 checkout binding 的输入。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     refresh_checkout_bindings 需要 upsert 主/worktree 绑定。
+///
+/// Code Logic（这个结构体做什么）:
+///     不含 id/时间戳。
+#[derive(Debug, Clone)]
+pub struct UpsertAgentHubCheckoutBinding {
+    pub hub_project_id: String,
+    pub workbench_worktree_id: Option<String>,
+    pub checkout_kind: String,
+    pub relative_root: Option<String>,
+    pub local_absolute_path: Option<String>,
+    pub enabled: bool,
+    pub status: String,
+    pub warning: Option<String>,
 }
 
 /// 幂等建表 SQL 列表。
@@ -682,6 +1087,7 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
         local_workbench_project_id TEXT,
         git_remote_fingerprint TEXT,
         local_absolute_path TEXT,
+        opted_in INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )",
@@ -691,7 +1097,10 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
         workbench_worktree_id TEXT,
         checkout_kind TEXT NOT NULL,
         relative_root TEXT,
+        local_absolute_path TEXT,
         enabled INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        warning TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )",
@@ -709,6 +1118,138 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_assets_scope
      ON agent_hub_assets(scope_id)",
 ];
+
+/// 升级旧库：为 mappings/bindings 补列与唯一索引。
+///
+/// Business Logic（为什么需要这个函数）:
+///     已有 Gate A Task1 库缺少 opt-in/status/绝对路径列时，必须幂等 ALTER，不能重建丢行。
+///
+/// Code Logic（这个函数做什么）:
+///     PRAGMA table_info 检测缺失列后 ALTER ADD COLUMN；再建 unique index。
+async fn migrate_agent_hub_columns(pool: &SqlitePool) -> Result<(), AppError> {
+    let mapping_cols = table_column_names(pool, "agent_hub_project_mappings").await?;
+    if !mapping_cols.iter().any(|c| c == "opted_in") {
+        sqlx::query(
+            "ALTER TABLE agent_hub_project_mappings
+             ADD COLUMN opted_in INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    let binding_cols = table_column_names(pool, "agent_hub_checkout_bindings").await?;
+    if !binding_cols.iter().any(|c| c == "local_absolute_path") {
+        sqlx::query(
+            "ALTER TABLE agent_hub_checkout_bindings
+             ADD COLUMN local_absolute_path TEXT",
+        )
+        .execute(pool)
+        .await?;
+    }
+    if !binding_cols.iter().any(|c| c == "status") {
+        sqlx::query(
+            "ALTER TABLE agent_hub_checkout_bindings
+             ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+        )
+        .execute(pool)
+        .await?;
+    }
+    if !binding_cols.iter().any(|c| c == "warning") {
+        sqlx::query("ALTER TABLE agent_hub_checkout_bindings ADD COLUMN warning TEXT")
+            .execute(pool)
+            .await?;
+    }
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_checkout_bindings_unique
+         ON agent_hub_checkout_bindings(
+            hub_project_id, IFNULL(workbench_worktree_id, '')
+         )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_project_mappings_local
+         ON agent_hub_project_mappings(local_workbench_project_id)
+         WHERE local_workbench_project_id IS NOT NULL",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_project_mappings_hub
+         ON agent_hub_project_mappings(hub_project_id)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 读取表列名集合。
+///
+/// Business Logic（为什么需要这个函数）:
+///     升级迁移需幂等检测缺列，避免重复 ALTER 失败。
+///
+/// Code Logic（这个函数做什么）:
+///     `PRAGMA table_info(table)` 收集 name 列。
+async fn table_column_names(pool: &SqlitePool, table: &str) -> Result<Vec<String>, AppError> {
+    // table 名来自本模块常量，非用户输入。
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await?;
+    let mut names = Vec::with_capacity(rows.len());
+    for row in rows {
+        names.push(row.try_get::<String, _>("name")?);
+    }
+    Ok(names)
+}
+
+/// 解析 project mapping 行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     读路径需把 SQLite INTEGER opted_in 转为 bool。
+///
+/// Code Logic（这个函数做什么）:
+///     try_get 字段并构造 AgentHubProjectMappingRow。
+fn row_to_project_mapping(row: &SqliteRow) -> Result<AgentHubProjectMappingRow, AppError> {
+    let opted_in_i: i64 = row.try_get("opted_in")?;
+    Ok(AgentHubProjectMappingRow {
+        id: row.try_get("id")?,
+        hub_project_id: row.try_get("hub_project_id")?,
+        local_workbench_project_id: row.try_get("local_workbench_project_id")?,
+        git_remote_fingerprint: row.try_get("git_remote_fingerprint")?,
+        local_absolute_path: row.try_get("local_absolute_path")?,
+        opted_in: opted_in_i != 0,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// 解析 checkout binding 行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     refresh/status 需要完整 binding 字段（含 status/warning/绝对路径）。
+///
+/// Code Logic（这个函数做什么）:
+///     try_get 字段并构造 AgentHubCheckoutBindingRow；缺 status 时默认 active。
+fn row_to_checkout_binding(row: &SqliteRow) -> Result<AgentHubCheckoutBindingRow, AppError> {
+    let enabled_i: i64 = row.try_get("enabled")?;
+    let status: String = row
+        .try_get::<Option<String>, _>("status")?
+        .unwrap_or_else(|| "active".to_string());
+    Ok(AgentHubCheckoutBindingRow {
+        id: row.try_get("id")?,
+        hub_project_id: row.try_get("hub_project_id")?,
+        workbench_worktree_id: row.try_get("workbench_worktree_id")?,
+        checkout_kind: row.try_get("checkout_kind")?,
+        relative_root: row.try_get("relative_root")?,
+        local_absolute_path: row.try_get("local_absolute_path")?,
+        enabled: enabled_i != 0,
+        status,
+        warning: row.try_get("warning")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
 
 /// 判断 sqlx 错误是否为 UNIQUE 约束冲突。
 ///
