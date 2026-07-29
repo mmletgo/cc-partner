@@ -622,9 +622,10 @@ pub struct Revision {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     append_revision 由调用方提供 id/parents/内容元数据；generation 由 repo 计算。
+///     并发写同一 asset head 时需要 expected parent CAS，避免后写静默覆盖先写。
 ///
 /// Code Logic（这个结构体做什么）:
-///     不含 generation。
+///     不含 generation；`expected_parent_id` 为 None 时按 parents 推导 CAS 条件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewRevision {
@@ -648,6 +649,10 @@ pub struct NewRevision {
     pub tree_manifest_hash: Option<String>,
     /// 创建时间 RFC3339
     pub created_at: String,
+    /// 期望当前 head（单 parent upsert CAS）；None 表示按 parents 推导
+    /// （migration 首 revision / multi-parent merge 等）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_parent_id: Option<RevisionId>,
 }
 
 /// Target 绑定（desired 状态）。

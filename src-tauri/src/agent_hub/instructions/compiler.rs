@@ -403,11 +403,12 @@ pub struct ImportClassification {
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     1) 非根单来源 ordinary→shared；2) 根/用户单来源→targetOnly；
-///     3) 三文件相同→shared；4) 部分相同→identical shared + unique targetOnly；
-///     5) CLI 术语→source targetOnly + needsAdaptation。
+///     3) 全源文件 identical 且无 CLI 术语→shared；含 CLI 术语→每 source target 各一份 targetOnly + needsAdaptation；
+///     4) 部分源 identical（present 真子集）→不得 Shared 注入缺失源，改为每个 present targetOnly；
+///     5) CLI 术语块一律 source targetOnly + needsAdaptation。
 ///
 /// Code Logic（这个函数做什么）:
-///     切块 → 按规范化文本对齐 → 赋 mode/id → 扫描隔离。
+///     切块 → 按规范化文本对齐 → 赋 mode/id → 扫描隔离；Shared 仅在 all targets 均持有且无术语时创建。
 pub fn classify_import(
     relative_key: impl Into<String>,
     scope: ImportScopeContext,
@@ -468,7 +469,7 @@ pub fn classify_import(
         .map(|s| (s.target, parse_markdown_blocks(&s.markdown)))
         .collect();
 
-    // 若所有源文件全文完全相同 → 全部 shared
+    // 若所有源文件全文完全相同
     if sources
         .windows(2)
         .all(|w| normalize_for_compare(&w[0].markdown) == normalize_for_compare(&w[1].markdown))
@@ -478,25 +479,29 @@ pub fn classify_import(
         let mut blocks = Vec::new();
         for p in parsed {
             let needs = block_needs_target_isolation(&p.text);
-            let id = new_block_id();
             if needs {
-                // 即使全文相同，含术语的块仍 targetOnly 到所有？规范：隔离为来源 targetOnly
-                // 多来源相同术语块：为每个出现的 target 各建？更合理：标 needsAdaptation 且 shared 不投影？
-                // 规格：scanner 将该块从 shared 隔离为来源 targetOnly。
-                // 多来源相同时，对每个 target 建 targetOnly 会重复；采用 adapted 无 common + 同文 variants 不合适。
-                // 实践：全文相同且有术语 → 整块 shared 但 needs_adaptation=true 诊断，仍不跨无约束改写。
-                // 更贴规格：每 target 一份 targetOnly（相同文本）— 太吵。
-                // 采用：needs → 每个 source target 若文本相同则仍 shared + needsAdaptation 诊断，
-                // 但 mode 改为每个 target 的 targetOnly 只在单来源。多来源相同术语：shared + diagnostic。
-                diagnostics.push(PortabilityDiagnostic::needs_adaptation(
-                    &id,
-                    "块含 CLI 专属术语，建议确认适配",
-                ));
-                let mut b = InstructionBlock::shared(id, p.text, p.heading_path);
-                b.needs_adaptation = true;
-                blocks.push(b);
+                // H6：全文 identical 但含 CLI 术语 → 每个 source target 各建 targetOnly（同文）+ 诊断
+                // 禁止 Shared（否则 compile_render 会把术语块注入全部 target，掩盖隔离意图）
+                for src in sources {
+                    let bid = new_block_id();
+                    diagnostics.push(PortabilityDiagnostic::needs_adaptation(
+                        &bid,
+                        "块含 CLI 专属术语，保留来源 targetOnly",
+                    ));
+                    blocks.push(InstructionBlock::target_only(
+                        bid,
+                        src.target,
+                        p.text.clone(),
+                        p.heading_path.clone(),
+                        true,
+                    ));
+                }
             } else {
-                blocks.push(InstructionBlock::shared(id, p.text, p.heading_path));
+                blocks.push(InstructionBlock::shared(
+                    new_block_id(),
+                    p.text,
+                    p.heading_path,
+                ));
             }
         }
         return ImportClassification {
@@ -565,6 +570,7 @@ pub fn classify_import(
                 .values()
                 .all(|v| normalize_for_compare(v) == key)
         {
+            // 全部 source 均持有 identical 块且无术语 → Shared
             blocks.push(InstructionBlock::shared(id, sample, heading_path));
         } else if present.len() == 1 {
             let t = present[0];
@@ -577,25 +583,17 @@ pub fn classify_import(
                 false,
             ));
         } else {
-            // 部分 target 相同：shared 给共有者？规格：完全相同的块 shared，unique targetOnly。
-            // 此处 present 子集 identical → 作为 shared 但仍只投影到 present？
-            // 简化：多 target 相同文本 → shared（投影到全部，缺失源的 target 也会得到该块——可接受）
-            if variants_map.len() > 1
-                && variants_map
-                    .values()
-                    .all(|v| normalize_for_compare(v) == key)
-            {
-                blocks.push(InstructionBlock::shared(id, sample, heading_path));
-            } else {
-                for (t, text) in variants_map {
-                    blocks.push(InstructionBlock::target_only(
-                        new_block_id(),
-                        t,
-                        text,
-                        heading_path.clone(),
-                        false,
-                    ));
-                }
+            // H7：部分 source identical（present 真子集）→ 禁止 Shared 注入缺失源
+            // Adapted 在 resolve_block_text 会对无 variant 的 target 回退 common，仍会注入；
+            // 因此对每个 present target 建独立 targetOnly（文本可相同）。
+            for (t, text) in variants_map {
+                blocks.push(InstructionBlock::target_only(
+                    new_block_id(),
+                    t,
+                    text,
+                    heading_path.clone(),
+                    false,
+                ));
             }
         }
     }
@@ -1066,6 +1064,122 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.code == "needsAdaptation"));
+    }
+
+    /// H6：三方 identical 全文含 CLAUDE.md 术语 → 每 target 一份 targetOnly，禁止 Shared。
+    #[test]
+    fn import_identical_three_files_with_cli_terms_are_target_only_per_source() {
+        let body = "Always read CLAUDE.md before Edit and respect PreToolUse hooks.\n";
+        let sources = [
+            TargetMarkdownSource {
+                target: AgentTarget::Claude,
+                markdown: body.into(),
+            },
+            TargetMarkdownSource {
+                target: AgentTarget::Codex,
+                markdown: body.into(),
+            },
+            TargetMarkdownSource {
+                target: AgentTarget::OpenCode,
+                markdown: body.into(),
+            },
+        ];
+        let result = classify_import("src", ImportScopeContext::project_subdirectory(), &sources);
+        assert!(
+            result
+                .document
+                .blocks
+                .iter()
+                .all(|b| b.mode == InstructionBlockMode::TargetOnly),
+            "blocks={:?}",
+            result.document.blocks
+        );
+        assert!(
+            result.document.blocks.iter().all(|b| b.needs_adaptation),
+            "all CLI-term blocks need adaptation"
+        );
+        for t in [
+            AgentTarget::Claude,
+            AgentTarget::Codex,
+            AgentTarget::OpenCode,
+        ] {
+            assert!(
+                result
+                    .document
+                    .blocks
+                    .iter()
+                    .any(|b| b.source_target == Some(t)
+                        && b.variants
+                            .get(&t)
+                            .map(|s| s.contains("CLAUDE.md"))
+                            .unwrap_or(false)),
+                "missing targetOnly for {t:?}"
+            );
+        }
+        assert!(
+            !result
+                .document
+                .blocks
+                .iter()
+                .any(|b| b.mode == InstructionBlockMode::Shared),
+            "must not keep Shared for multi-source CLI terms"
+        );
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "needsAdaptation"));
+    }
+
+    /// H7：Claude+Codex 共有段落、OpenCode 缺失 → 不得 Shared 注入 OpenCode 渲染。
+    #[test]
+    fn import_partial_shared_paragraph_does_not_inject_into_missing_target() {
+        let claude = "# A\n\nshared by two only\n\n# ClaudeOnly\n\nclaude secret\n";
+        let codex = "# A\n\nshared by two only\n\n# CodexOnly\n\ncodex secret\n";
+        let opencode = "# A\n\nopencode different para\n";
+        let sources = [
+            TargetMarkdownSource {
+                target: AgentTarget::Claude,
+                markdown: claude.into(),
+            },
+            TargetMarkdownSource {
+                target: AgentTarget::Codex,
+                markdown: codex.into(),
+            },
+            TargetMarkdownSource {
+                target: AgentTarget::OpenCode,
+                markdown: opencode.into(),
+            },
+        ];
+        let result = classify_import("pkg", ImportScopeContext::project_subdirectory(), &sources);
+
+        // 不得出现会把 "shared by two only" 投影给全部 target 的 Shared
+        assert!(
+            !result.document.blocks.iter().any(|b| {
+                b.mode == InstructionBlockMode::Shared
+                    && b.common_markdown
+                        .as_deref()
+                        .map(|t| t.contains("shared by two only"))
+                        .unwrap_or(false)
+            }),
+            "partial identical must not become Shared; blocks={:?}",
+            result.document.blocks
+        );
+
+        let ctx = InstructionRenderContext {
+            project_root: None,
+            directory_relative: Some("pkg".into()),
+            ancestor_agent_paths: vec![],
+        };
+        let oc = compile_render(&result.document, AgentTarget::OpenCode, &ctx);
+        assert!(
+            !oc.content_str().contains("shared by two only"),
+            "OpenCode render must not contain paragraph missing from its source: {}",
+            oc.content_str()
+        );
+        let claude_out = compile_render(&result.document, AgentTarget::Claude, &ctx);
+        let codex_out = compile_render(&result.document, AgentTarget::Codex, &ctx);
+        assert!(claude_out.content_str().contains("shared by two only"));
+        assert!(codex_out.content_str().contains("shared by two only"));
     }
 
     #[test]

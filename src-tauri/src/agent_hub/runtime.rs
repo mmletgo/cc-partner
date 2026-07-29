@@ -10,9 +10,17 @@
 //!     10min 全 scope ticker（MissedTickBehavior::Skip）；扫描先比 stored external/rendered hash
 //!     再读字节，Hub 自身 rendered hash 视为 no-op。
 
-use crate::agent_hub::models::{Materialization, MaterializationStatus};
+use crate::agent_hub::instructions::{
+    compile_render, reconcile_instruction, ExternalObservation, InstructionDocument,
+    InstructionReconcileOutcome, ReconcileInput,
+};
+use crate::agent_hub::models::{
+    DesiredPresence, Materialization, MaterializationStatus, NewMaterialization, NewRevision,
+    ProjectionPayloadKind, RevisionId, RevisionOperation, RevisionOriginKind,
+};
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
-use crate::agent_hub::projection::ProjectionScheduler;
+use crate::agent_hub::projection::{ProjectionRequest, ProjectionScheduler};
+use crate::agent_hub::targets::InstructionRenderContext;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::storage::AgentHubRepo;
@@ -562,23 +570,19 @@ impl ProductionScanner {
             }
             match classify_materialization_file(&mat, &path) {
                 FileClass::Missing => {
-                    // 外部删除：标 Drifted，完整 Detached 语义留给后续 reconcile service
-                    if mat.status != MaterializationStatus::Drift {
-                        let _ = self
-                            .repo
-                            .upsert_materialization(crate::agent_hub::models::NewMaterialization {
-                                asset_id: mat.asset_id.clone(),
-                                target: mat.target,
-                                target_binding_id: mat.target_binding_id.clone(),
-                                native_path: mat.native_path.clone(),
-                                last_projected_revision_id: mat.last_projected_revision_id.clone(),
-                                rendered_hash: mat.rendered_hash.clone(),
-                                observed_external_hash: None,
-                                status: MaterializationStatus::Drift,
-                                last_error: Some("target_file_missing".into()),
-                            })
-                            .await;
-                        stats.external_revisions += 1;
+                    match self
+                        .reconcile_external_observation(&mat, ExternalObservation::Missing, None)
+                        .await
+                    {
+                        Ok(true) => stats.external_revisions += 1,
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                asset_id = %mat.asset_id,
+                                "agent hub external missing reconcile failed"
+                            );
+                        }
                     }
                 }
                 FileClass::MatchesRendered => {
@@ -588,23 +592,34 @@ impl ProductionScanner {
                     stats.hash_skips += 1;
                 }
                 FileClass::ExternalEdit { hash } => {
-                    let _ = self
-                        .repo
-                        .upsert_materialization(crate::agent_hub::models::NewMaterialization {
-                            asset_id: mat.asset_id.clone(),
-                            target: mat.target,
-                            target_binding_id: mat.target_binding_id.clone(),
-                            native_path: mat.native_path.clone(),
-                            last_projected_revision_id: mat.last_projected_revision_id.clone(),
-                            rendered_hash: mat.rendered_hash.clone(),
-                            observed_external_hash: Some(hash),
-                            status: MaterializationStatus::Drift,
-                            last_error: Some("external_edit_pending_reconcile".into()),
-                        })
-                        .await;
-                    // 完整三方 reconcile + multi-target projection 由后续 service 任务消费 Drifted。
-                    // 此处计数外部编辑，供运行时观测；Task7 单测主路径用 DeLoopScanner。
-                    stats.external_revisions += 1;
+                    let bytes = match std::fs::read(&path) {
+                        Ok(b) => b,
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "agent hub external edit read failed"
+                            );
+                            continue;
+                        }
+                    };
+                    match self
+                        .reconcile_external_observation(
+                            &mat,
+                            ExternalObservation::Present { bytes },
+                            Some(hash),
+                        )
+                        .await
+                    {
+                        Ok(true) => stats.external_revisions += 1,
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                asset_id = %mat.asset_id,
+                                "agent hub external edit reconcile failed"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -619,6 +634,285 @@ impl ProductionScanner {
         }
 
         Ok(stats)
+    }
+
+    /// 对单个 materialization 执行三方 reconcile 并必要时 append revision / 入队投影。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     外部编辑/删除不能只标 Drift；必须走 instructions::reconcile，冲突冻结，
+    ///     可自动合并时推进 Filesystem revision 并对非 frozen Present binding 入队投影。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     加载 base/hub 文档 → reconcile_instruction → Revision|Conflict|Detached|Blocked|NoChange；
+    ///     成功推进 revision 后对同资产 Present 绑定 enqueue_projection；返回是否计为 external_revisions。
+    async fn reconcile_external_observation(
+        &self,
+        mat: &Materialization,
+        external: ExternalObservation,
+        observed_hash: Option<String>,
+    ) -> Result<bool, AppError> {
+        let asset = match self.repo.get_asset(&mat.asset_id).await? {
+            Some(a) => a,
+            None => return Ok(false),
+        };
+        let hub_doc = self.load_document_for_asset(&asset).await?;
+        let base_doc = if let Some(base_rev) = mat.last_projected_revision_id.as_ref() {
+            self.load_document_for_revision(&asset, base_rev).await?
+        } else {
+            hub_doc.clone()
+        };
+
+        let outcome = reconcile_instruction(&ReconcileInput {
+            base_document: base_doc,
+            hub_document: hub_doc.clone(),
+            external,
+            target: mat.target,
+            managed_prefix_len: 0,
+            base_block_records: vec![],
+        });
+
+        match outcome {
+            InstructionReconcileOutcome::NoChange => {
+                let _ = self
+                    .repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: mat.asset_id.clone(),
+                        target: mat.target,
+                        target_binding_id: mat.target_binding_id.clone(),
+                        native_path: mat.native_path.clone(),
+                        last_projected_revision_id: mat.last_projected_revision_id.clone(),
+                        rendered_hash: mat.rendered_hash.clone(),
+                        observed_external_hash: observed_hash.or_else(|| mat.rendered_hash.clone()),
+                        status: MaterializationStatus::Synced,
+                        last_error: None,
+                    })
+                    .await;
+                Ok(false)
+            }
+            InstructionReconcileOutcome::Revision(new_rev) => {
+                let bytes = serde_json::to_vec(&new_rev.document).map_err(|e| {
+                    AppError::generic(format!("agent_hub_external_serialize_failed:{e}"))
+                })?;
+                let store = ObjectStore::open(
+                    crate::config::data_dir()?.join("agent-hub").join("objects"),
+                )?;
+                let stored = store.put_blob(&bytes).await?;
+                let now = chrono::Utc::now().to_rfc3339();
+                let parents = asset
+                    .current_revision_id
+                    .clone()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let expected_parent_id = asset.current_revision_id.clone();
+                let rev = self
+                    .repo
+                    .append_revision(NewRevision {
+                        id: RevisionId::new_v7(),
+                        asset_lineage_id: asset.id.clone(),
+                        parents,
+                        operation: RevisionOperation::Upsert,
+                        origin_kind: RevisionOriginKind::Filesystem,
+                        origin_target: Some(mat.target),
+                        origin_replica_id: "local".into(),
+                        payload_hash: Some(stored.hash),
+                        tree_manifest_hash: None,
+                        created_at: now,
+                        expected_parent_id,
+                    })
+                    .await?;
+                let asset = self.repo.get_asset(&mat.asset_id).await?.unwrap_or(asset);
+                let doc = new_rev.document;
+                self.enqueue_present_projections(&asset, &doc, Some(&rev.id))
+                    .await?;
+                Ok(true)
+            }
+            InstructionReconcileOutcome::Conflict(conflict) => {
+                let detail = serde_json::to_string(&conflict)
+                    .unwrap_or_else(|_| "{\"kind\":\"external_conflict\"}".into());
+                let _ = self
+                    .repo
+                    .insert_conflict(&mat.asset_id, conflict.target, &detail)
+                    .await;
+                let _ = self
+                    .repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: mat.asset_id.clone(),
+                        target: mat.target,
+                        target_binding_id: mat.target_binding_id.clone(),
+                        native_path: mat.native_path.clone(),
+                        last_projected_revision_id: mat.last_projected_revision_id.clone(),
+                        rendered_hash: mat.rendered_hash.clone(),
+                        observed_external_hash: observed_hash,
+                        status: MaterializationStatus::Conflict,
+                        last_error: Some("external_reconcile_conflict".into()),
+                    })
+                    .await;
+                Ok(true)
+            }
+            InstructionReconcileOutcome::Detached { detail } => {
+                let _ = self
+                    .repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: mat.asset_id.clone(),
+                        target: mat.target,
+                        target_binding_id: mat.target_binding_id.clone(),
+                        native_path: mat.native_path.clone(),
+                        last_projected_revision_id: mat.last_projected_revision_id.clone(),
+                        rendered_hash: mat.rendered_hash.clone(),
+                        observed_external_hash: None,
+                        status: MaterializationStatus::Detached,
+                        last_error: Some(detail),
+                    })
+                    .await;
+                Ok(true)
+            }
+            InstructionReconcileOutcome::Blocked { detail, .. } => {
+                let _ = self
+                    .repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: mat.asset_id.clone(),
+                        target: mat.target,
+                        target_binding_id: mat.target_binding_id.clone(),
+                        native_path: mat.native_path.clone(),
+                        last_projected_revision_id: mat.last_projected_revision_id.clone(),
+                        rendered_hash: mat.rendered_hash.clone(),
+                        observed_external_hash: observed_hash,
+                        status: MaterializationStatus::Blocked,
+                        last_error: Some(detail),
+                    })
+                    .await;
+                Ok(true)
+            }
+        }
+    }
+
+    /// 加载资产 head 文档。
+    ///
+    /// Business Logic: reconcile 需要 Hub current。
+    /// Code Logic: current_revision → CAS blob → JSON 或 markdown。
+    async fn load_document_for_asset(
+        &self,
+        asset: &crate::agent_hub::models::LogicalAsset,
+    ) -> Result<InstructionDocument, AppError> {
+        let Some(rev_id) = asset.current_revision_id.as_ref() else {
+            return Ok(InstructionDocument {
+                relative_key: asset.logical_key.clone(),
+                blocks: vec![],
+            });
+        };
+        self.load_document_for_revision(asset, rev_id).await
+    }
+
+    /// 按 revision 加载文档。
+    ///
+    /// Business Logic: base 文档来自 last_projected_revision。
+    /// Code Logic: get_revision → get_blob → parse。
+    async fn load_document_for_revision(
+        &self,
+        asset: &crate::agent_hub::models::LogicalAsset,
+        rev_id: &RevisionId,
+    ) -> Result<InstructionDocument, AppError> {
+        let revision = self.repo.get_revision(rev_id).await?.ok_or_else(|| {
+            AppError::not_found(format!("agent_hub_revision_not_found:{}", rev_id.as_str()))
+        })?;
+        let Some(hash) = revision.payload_hash.as_ref() else {
+            return Ok(InstructionDocument {
+                relative_key: asset.logical_key.clone(),
+                blocks: vec![],
+            });
+        };
+        let store =
+            ObjectStore::open(crate::config::data_dir()?.join("agent-hub").join("objects"))?;
+        let bytes = store.get_blob(hash).await?;
+        if let Ok(doc) = serde_json::from_slice::<InstructionDocument>(&bytes) {
+            return Ok(doc);
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        Ok(InstructionDocument::from_shared_markdown(
+            asset.logical_key.clone(),
+            text,
+        ))
+    }
+
+    /// 对资产所有 Present 绑定 compile_render 并 enqueue（跳过 unresolved conflict 由 scheduler 处理）。
+    ///
+    /// Business Logic: 外部编辑推进 head 后需 multi-target 投影收敛。
+    /// Code Logic: list bindings → Present only → compile → enqueue。
+    async fn enqueue_present_projections(
+        &self,
+        asset: &crate::agent_hub::models::LogicalAsset,
+        document: &InstructionDocument,
+        revision_id: Option<&RevisionId>,
+    ) -> Result<(), AppError> {
+        let bindings = self.repo.list_target_bindings_for_asset(&asset.id).await?;
+        let scope = self.repo.get_scope(&asset.scope_id).await?;
+        let hub_project_id = scope.as_ref().and_then(|s| s.hub_project_id.clone());
+        let ctx = InstructionRenderContext::default();
+        for binding in bindings {
+            if binding.desired_presence != DesiredPresence::Present {
+                // Absent 也入队，由 scheduler 安全处理
+                if binding.desired_presence != DesiredPresence::Absent {
+                    continue;
+                }
+            }
+            // checkout blocked 硬门：有 checkout 且 blocked 则跳过 Present 写
+            if binding.desired_presence == DesiredPresence::Present {
+                if let Some(cb_id) = binding.checkout_binding_id.as_deref() {
+                    if let Ok(Some(cb)) = self.repo.get_checkout_binding(cb_id).await {
+                        if cb.status == "blocked" {
+                            continue;
+                        }
+                    }
+                }
+            }
+            let native = match self
+                .repo
+                .get_materialization_by_binding(&binding.id)
+                .await?
+                .and_then(|m| m.native_path)
+            {
+                Some(p) => p,
+                None => continue,
+            };
+            let path = PathBuf::from(&native);
+            let existing = std::fs::read(&path).ok();
+            let expected = existing.as_ref().map(|b| sha256_hex(b));
+            let rendered_bytes = if binding.desired_presence == DesiredPresence::Present {
+                compile_render(document, binding.target, &ctx).bytes
+            } else {
+                // Absent: empty payload；scheduler 用 expected/base 安全删除
+                Vec::new()
+            };
+            let rendered_hash = sha256_hex(&rendered_bytes);
+            let req = ProjectionRequest {
+                asset_id: asset.id.clone(),
+                target: binding.target,
+                target_binding_id: binding.id.clone(),
+                desired_revision_id: revision_id
+                    .cloned()
+                    .or_else(|| asset.current_revision_id.clone()),
+                target_path: native,
+                expected_external_hash: expected.clone(),
+                rendered_hash,
+                rendered_bytes,
+                desired_presence: binding.desired_presence,
+                desired_enabled: binding.desired_enabled,
+                payload_kind: ProjectionPayloadKind::File,
+                directory_entries: None,
+                managed_paths: None,
+                hub_project_id: hub_project_id.clone(),
+                base_hash: expected,
+            };
+            if let Err(err) = self.scheduler.enqueue_projection(req).await {
+                tracing::warn!(
+                    error = %err,
+                    asset_id = %asset.id,
+                    target = %binding.target.as_str(),
+                    "agent hub enqueue after external reconcile failed"
+                );
+            }
+        }
+        Ok(())
     }
 }
 

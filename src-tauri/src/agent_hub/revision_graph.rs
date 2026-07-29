@@ -440,6 +440,7 @@ mod tests {
             payload_hash: payload.map(|s| s.to_string()),
             tree_manifest_hash: None,
             created_at: "2026-07-29T00:00:00Z".into(),
+            expected_parent_id: None,
         })
         .await
         .unwrap()

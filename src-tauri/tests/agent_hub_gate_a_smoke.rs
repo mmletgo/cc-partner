@@ -11,7 +11,8 @@
 //!     library-level process smoke（不启动完整 backend 二进制）：
 //!     A) ProjectionScheduler recover_on_startup 对账 writing/prepared
 //!     B) 临时 git 仓库只读 scan，hash/mtime/HEAD/cached 不变，opted_in=false
-//!     C) compile_render + opt-in enqueue/run 三目标共享正文 + OpenCode prelude
+//!     C) **library integration**（非 owner 闭环）：手动 compile_render + enqueue/run
+//!        验证三目标共享正文 + OpenCode prelude；不宣称 production scanner 自动 intake
 //!     D) reconcile_instruction 同块 conflict + insert_conflict + list_unresolved
 //!     E) git rev-parse HEAD 与 git diff --cached 不变
 //!     F) migrate_user_claude_md_state_with 幂等 seed（既有 Task10 证据）
@@ -537,16 +538,16 @@ async fn gate_a_pre_opt_in_scan_zero_writes() {
 /// C. opt-in 后嵌套 Claude 编辑向同目录 Codex/OpenCode 收敛 + OpenCode prelude。
 ///
 /// Business Logic（为什么需要这个测试）:
-///     用户在嵌套目录改 Claude 共享正文后，同目录 Codex override 与 OpenCode AGENTS.md
-///     应收到同一 shared body；OpenCode 须带 managed prelude 列出祖先相对路径。
+///     库级证据：编译器+调度器在 opt-in 后可将 shared 正文投影到同目录三目标；
+///     OpenCode 须带 managed prelude。**不**证明 ProductionScanner/owner 闭环自动 intake。
 ///
 /// Code Logic（这个测试做什么）:
 ///     1) upsert opted_in mapping；
-///     2) compile_render 三目标断言 body 对齐与 prelude；
-///     3) ProjectionScheduler 将渲染字节写入同目录三文件；
+///     2) 测试体内 compile_render（非 owner 路径）；
+///     3) 手工 enqueue_projection + run_ready_jobs；
 ///     4) git HEAD/index 不变。
 #[tokio::test]
-async fn gate_a_post_opt_in_nested_claude_converges_with_opencode_prelude() {
+async fn gate_a_library_opt_in_compile_enqueue_converges_shared_body_with_prelude() {
     let env = setup_isolated_env("converge");
     init_project_fixture(&env.project_root);
     let before_head = run_stdout(&env.project_root, &["git", "rev-parse", "HEAD"]);

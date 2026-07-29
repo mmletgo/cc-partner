@@ -466,23 +466,36 @@ impl AgentHubService {
     }
 
     /// Business Logic: 启用项目。
-    /// Code Logic: enable confirm=true。
+    /// Code Logic: enable confirm=true → ensure enabled + schedule project projections。
     pub async fn enable_project(
         state: &AppState,
         project_id: &str,
     ) -> Result<AgentHubProjectStatus, AppError> {
-        enable_project_scope(
+        let status = enable_project_scope(
             state,
             EnableAgentHubProjectRequest {
                 project_id: project_id.to_string(),
                 confirm: true,
             },
         )
-        .await
+        .await?;
+        if let Err(e) = crate::agent_hub::projection_ops::ensure_agent_hub_enabled(state).await {
+            tracing::warn!(error = %e, "agent_hub enable_project ensure enabled failed");
+        }
+        if let Err(e) =
+            crate::agent_hub::projection_ops::schedule_project_projections(state, project_id).await
+        {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "agent_hub enable_project schedule projections failed"
+            );
+        }
+        Ok(status)
     }
 
     /// Business Logic: 解决冲突。
-    /// Code Logic: optional revision + resolve_conflict；返回刷新后详情。
+    /// Code Logic: keepExternal/manual 要求 content；resolve 后 best-effort 调度投影。
     pub async fn resolve_conflict(
         state: &AppState,
         req: ResolveConflictRequest,
@@ -501,11 +514,15 @@ impl AgentHubService {
         match req.resolution.as_str() {
             "keepHub" => {}
             "keepExternal" | "manual" => {
-                if let Some(md) = req.content_markdown.as_deref() {
-                    let doc =
-                        InstructionDocument::from_shared_markdown(asset.logical_key.clone(), md);
-                    persist_instruction_document(state, &asset, &doc).await?;
-                }
+                let md = req
+                    .content_markdown
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty());
+                let Some(md) = md else {
+                    return Err(AppError::validation("agent_hub_resolve_content_required"));
+                };
+                let doc = InstructionDocument::from_shared_markdown(asset.logical_key.clone(), md);
+                persist_instruction_document(state, &asset, &doc).await?;
             }
             other => {
                 return Err(AppError::validation(format!(
@@ -518,11 +535,23 @@ impl AgentHubService {
             .agent_hub_repo
             .resolve_conflict(&req.conflict_id, &now)
             .await?;
+        if let Err(e) = crate::agent_hub::projection_ops::ensure_agent_hub_enabled(state).await {
+            tracing::warn!(error = %e, "agent_hub resolve_conflict ensure enabled failed");
+        }
+        if let Err(e) =
+            crate::agent_hub::projection_ops::schedule_asset_projections(state, &req.asset_id).await
+        {
+            tracing::warn!(
+                asset_id = %req.asset_id,
+                error = %e,
+                "agent_hub resolve_conflict schedule projections failed"
+            );
+        }
         get_asset_for_state(state, &req.asset_id).await
     }
 
     /// Business Logic: 设置 target binding。
-    /// Code Logic: upsert + 返回 summary。
+    /// Code Logic: upsert + ensure enabled + schedule projections + 返回 summary。
     pub async fn set_target_binding(
         state: &AppState,
         req: SetTargetBindingRequest,
@@ -539,6 +568,18 @@ impl AgentHubService {
                 desired_enabled: req.desired_enabled,
             })
             .await?;
+        if let Err(e) = crate::agent_hub::projection_ops::ensure_agent_hub_enabled(state).await {
+            tracing::warn!(error = %e, "agent_hub set_target_binding ensure enabled failed");
+        }
+        if let Err(e) =
+            crate::agent_hub::projection_ops::schedule_asset_projections(state, &req.asset_id).await
+        {
+            tracing::warn!(
+                asset_id = %req.asset_id,
+                error = %e,
+                "agent_hub set_target_binding schedule projections failed"
+            );
+        }
         // re-read asset for current head
         let asset = load_asset_or_not_found(state, &req.asset_id).await?;
         build_summary(state, &asset).await
@@ -1091,16 +1132,18 @@ async fn require_instruction_asset(
     Ok(asset)
 }
 
-/// CAS expected revision。
+/// CAS expected revision（Ui 路径 fail-closed）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     并发编辑时拒绝 stale write。
+///     UI 并发编辑必须携带 expected_revision_id；缺失则拒绝，避免静默覆盖。
+///     Migration/Filesystem 等非 Ui 路径不经过本函数。
 ///
 /// Code Logic（这个函数做什么）:
-///     expected 非空且不等于 current → conflict。
+///     expected 为 None/空 → validation `agent_hub_expected_revision_required`；
+///     与 current 不等 → conflict `agent_hub_revision_conflict`。
 fn ensure_expected_revision(asset: &LogicalAsset, expected: Option<&str>) -> Result<(), AppError> {
     let Some(expected) = expected.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(());
+        return Err(AppError::validation("agent_hub_expected_revision_required"));
     };
     let current = asset
         .current_revision_id
@@ -1146,6 +1189,8 @@ async fn persist_instruction_document(
         .clone()
         .into_iter()
         .collect::<Vec<_>>();
+    // Ui 写路径强制 head CAS：expected_parent = 调用前观测到的 current head
+    let expected_parent_id = asset.current_revision_id.clone();
     state
         .agent_hub_repo
         .append_revision(NewRevision {
@@ -1159,25 +1204,40 @@ async fn persist_instruction_document(
             payload_hash: Some(stored.hash),
             tree_manifest_hash: None,
             created_at: now,
+            expected_parent_id,
         })
         .await?;
 
-    // N/N+1 dual-write：仅用户级 CLAUDE.md 指令摘要写回 legacy 表；失败不阻断 Hub。
+    // N/N+1 dual-write：仅用户级 CLAUDE.md 指令摘要写回 legacy 表 + 文件；失败不阻断 Hub。
     // legacy vector_clock 永不裁决 Hub 冲突。
     if let Err(e) = maybe_dual_write_user_claude_md_summary(state, asset, document).await {
         tracing::warn!("agent_hub dual_write legacy claude_md failed: {e}");
     }
+    // 生产投影：ensure enabled + 按 binding 入队（best-effort，不阻断 revision commit）。
+    if let Err(e) = crate::agent_hub::projection_ops::ensure_agent_hub_enabled(state).await {
+        tracing::warn!(error = %e, "agent_hub persist ensure enabled failed");
+    }
+    if let Err(e) =
+        crate::agent_hub::projection_ops::schedule_asset_projections(state, &asset.id).await
+    {
+        tracing::warn!(
+            asset_id = %asset.id,
+            error = %e,
+            "agent_hub persist schedule projections failed"
+        );
+    }
     Ok(())
 }
 
-/// 用户级 CLAUDE.md 资产成功写 revision 后 dual-write legacy 摘要。
+/// 用户级 CLAUDE.md 资产成功写 revision 后 dual-write legacy 摘要 + 文件。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     旧 CLAUDE.md 页/P2P 仍读 `claude_md` 表；Hub 写用户指令后需同步摘要，
-///     且不得让 legacy VC 参与 Hub merge。
+///     旧 CLAUDE.md 页/P2P 仍读 `claude_md` 表；Hub 写用户指令后需同步摘要与
+///     `~/.claude/CLAUDE.md`，且不得让 legacy VC 参与 Hub merge。
 ///
 /// Code Logic（这个函数做什么）:
-///     scope=User + Instruction + logical_key=CLAUDE.md → 取 Claude 摘要 → dual_write。
+///     scope=User + Instruction + logical_key=CLAUDE.md → Claude 摘要 → dual_write DB
+///     + `write_file_if_changed` 落盘（失败上抛，由调用方 warn）。
 async fn maybe_dual_write_user_claude_md_summary(
     state: &AppState,
     asset: &LogicalAsset,
@@ -1196,7 +1256,9 @@ async fn maybe_dual_write_user_claude_md_summary(
         return Ok(());
     }
     let summary = crate::agent_hub::migration::claude_summary_markdown_from_document(document);
-    crate::agent_hub::migration::dual_write_legacy_claude_md_summary(state, &summary).await
+    crate::agent_hub::migration::dual_write_legacy_claude_md_summary(state, &summary).await?;
+    crate::sync::claude_md::write_file_if_changed(&summary).await?;
+    Ok(())
 }
 
 /// 加载 instruction 视图（markdown 摘要 + blocks）。

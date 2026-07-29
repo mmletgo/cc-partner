@@ -374,17 +374,61 @@ impl AgentHubRepo {
                 } else {
                     None
                 };
-                sqlx::query(
-                    "UPDATE agent_hub_assets
-                     SET current_revision_id = ?, deleted_at = ?, updated_at = ?
-                     WHERE id = ?",
-                )
-                .bind(input.id.as_str())
-                .bind(&deleted_at)
-                .bind(&now)
-                .bind(&asset_id)
-                .execute(&mut *tx)
-                .await?;
+                // Head CAS：仅当调用方提供 expected_parent_id 时 fail-closed 原子推进 head
+                // （UI/产品写路径）；None 时无条件推进 head（migration/DAG 构图/import）。
+                // 单 parent 且 expected 缺省时仍按 parents[0] 做 CAS，避免并发静默丢写。
+                // 仅 expected_parent_id=Some 时 hard CAS（Ui/Filesystem 产品写路径会设置）；
+                // None 时无条件推进 head，兼容 revision_graph DAG 构图与 migration。
+                if let Some(expected) = input
+                    .expected_parent_id
+                    .as_ref()
+                    .map(|r| r.as_str().to_string())
+                {
+                    let result = sqlx::query(
+                        "UPDATE agent_hub_assets
+                         SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+                         WHERE id = ?
+                           AND (current_revision_id IS NULL OR current_revision_id = ?)",
+                    )
+                    .bind(input.id.as_str())
+                    .bind(&deleted_at)
+                    .bind(&now)
+                    .bind(&asset_id)
+                    .bind(&expected)
+                    .execute(&mut *tx)
+                    .await?;
+                    if result.rows_affected() == 0 {
+                        return Err(AppError::conflict(
+                            "agent_hub_revision_conflict".to_string(),
+                        ));
+                    }
+                } else if input.parents.is_empty() {
+                    // 首 revision 且无 expected：允许 NULL head 或幂等覆盖（migration）
+                    sqlx::query(
+                        "UPDATE agent_hub_assets
+                         SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+                         WHERE id = ?",
+                    )
+                    .bind(input.id.as_str())
+                    .bind(&deleted_at)
+                    .bind(&now)
+                    .bind(&asset_id)
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    // 无 expected：无条件推进 head（DAG 构图/migration 后续）
+                    sqlx::query(
+                        "UPDATE agent_hub_assets
+                         SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+                         WHERE id = ?",
+                    )
+                    .bind(input.id.as_str())
+                    .bind(&deleted_at)
+                    .bind(&now)
+                    .bind(&asset_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
             }
 
             tx.commit().await?;
@@ -723,6 +767,28 @@ impl AgentHubRepo {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_checkout_binding).collect()
+    }
+
+    /// 按主键读取 checkout binding。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     投影前需按 target_binding.checkout_binding_id 判定 blocked，避免覆盖预存 AGENTS.md。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT by id → row_to_checkout_binding。
+    pub async fn get_checkout_binding(
+        &self,
+        id: &str,
+    ) -> Result<Option<AgentHubCheckoutBindingRow>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, hub_project_id, workbench_worktree_id, checkout_kind, relative_root,
+                    local_absolute_path, enabled, status, warning, created_at, updated_at
+             FROM agent_hub_checkout_bindings WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_checkout_binding(&r)).transpose()
     }
 
     /// 按 hub + worktree id 读取单条 binding。
@@ -1115,10 +1181,13 @@ impl AgentHubRepo {
         with_shared_write_lease(&self.gate, async {
             let mut tx = self.pool.begin().await?;
             let now = chrono::Utc::now().to_rfc3339();
+            // state CAS：仅 writing/prepared 可提交，防止已 committed/failed 的旧 job 覆盖
+            // （attempt 在 writing 路径已 +1，内存 job.attempt 可能落后，故不强制 attempt 等值）
             let result = sqlx::query(
                 "UPDATE agent_hub_projection_jobs
                  SET state = ?, last_error = NULL, updated_at = ?
-                 WHERE id = ?",
+                 WHERE id = ?
+                   AND state IN ('writing', 'prepared')",
             )
             .bind(ProjectionJobState::Committed.as_str())
             .bind(&now)
@@ -1126,8 +1195,8 @@ impl AgentHubRepo {
             .execute(&mut *tx)
             .await?;
             if result.rows_affected() == 0 {
-                return Err(AppError::not_found(format!(
-                    "agent_hub_projection_job_not_found:{}",
+                return Err(AppError::conflict(format!(
+                    "agent_hub_projection_job_commit_cas_miss:{}",
                     job.id
                 )));
             }
@@ -2414,6 +2483,7 @@ mod tests {
                 payload_hash: Some("a".repeat(64)),
                 tree_manifest_hash: None,
                 created_at: "2026-07-29T00:00:00Z".into(),
+                expected_parent_id: None,
             })
             .await
             .unwrap();
@@ -2499,6 +2569,7 @@ mod tests {
                 payload_hash: Some("b".repeat(64)),
                 tree_manifest_hash: None,
                 created_at: "2026-07-29T00:00:01Z".into(),
+                expected_parent_id: None,
             })
             .await
             .unwrap();
@@ -2514,6 +2585,7 @@ mod tests {
                 payload_hash: Some("c".repeat(64)),
                 tree_manifest_hash: None,
                 created_at: "2026-07-29T00:00:02Z".into(),
+                expected_parent_id: None,
             })
             .await
             .unwrap();
@@ -2531,6 +2603,7 @@ mod tests {
                 payload_hash: Some("d".repeat(64)),
                 tree_manifest_hash: None,
                 created_at: "2026-07-29T00:00:03Z".into(),
+                expected_parent_id: None,
             })
             .await
             .unwrap();
@@ -2570,6 +2643,7 @@ mod tests {
                 payload_hash: Some("e".repeat(64)),
                 tree_manifest_hash: None,
                 created_at: "2026-07-29T00:00:00Z".into(),
+                expected_parent_id: None,
             })
             .await
             .unwrap_err();
@@ -2587,6 +2661,7 @@ mod tests {
                 payload_hash: Some("f".repeat(64)),
                 tree_manifest_hash: None,
                 created_at: "2026-07-29T00:00:00Z".into(),
+                expected_parent_id: None,
             })
             .await
             .unwrap_err();
@@ -2604,6 +2679,7 @@ mod tests {
                 payload_hash: None,
                 tree_manifest_hash: None,
                 created_at: "2026-07-29T00:00:00Z".into(),
+                expected_parent_id: None,
             })
             .await
             .unwrap();
@@ -2676,5 +2752,76 @@ mod tests {
                 .unwrap()
                 .desired_enabled
         );
+    }
+
+    /// Business Logic: 并发写同一 head 时后写必须 CAS 失败，不得静默覆盖。
+    /// Code Logic: 两次 append 相同 expected_parent_id，第二次 conflict。
+    #[tokio::test]
+    async fn append_revision_head_cas_rejects_stale_parent() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: "cas".into(),
+                display_name: "cas".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let r1 = repo
+            .append_revision(NewRevision {
+                id: RevisionId::from("cas-r1"),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "d".into(),
+                payload_hash: Some("a".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T00:00:00Z".into(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        let _r2 = repo
+            .append_revision(NewRevision {
+                id: RevisionId::from("cas-r2"),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![r1.id.clone()],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "d".into(),
+                payload_hash: Some("b".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T00:00:01Z".into(),
+                expected_parent_id: Some(r1.id.clone()),
+            })
+            .await
+            .unwrap();
+        let stale = repo
+            .append_revision(NewRevision {
+                id: RevisionId::from("cas-r3-stale"),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![r1.id.clone()],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "d".into(),
+                payload_hash: Some("c".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T00:00:02Z".into(),
+                expected_parent_id: Some(r1.id.clone()),
+            })
+            .await;
+        assert!(stale.is_err(), "stale parent must CAS fail");
+        let err = stale.unwrap_err();
+        assert_eq!(err.code(), "agent_hub_revision_conflict");
+        let head = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(head.current_revision_id.unwrap().as_str(), "cas-r2");
     }
 }

@@ -316,6 +316,7 @@ impl ProjectionScheduler {
     /// Business Logic（为什么需要这个函数）:
     ///     prepared + 目标未变 → 可重试；目标已是 rendered → commit；
     ///     目标仍是 base → 重试替换；目标双不符 → drift。
+    ///     Absent 目标：文件已不存在 → 直接 commit；hash 仍匹配 managed → 重试删除；否则 drift。
     ///
     /// Code Logic（这个函数做什么）:
     ///     读目标 hash 分支处理，绝不仅凭 DB 状态 commit。
@@ -323,6 +324,32 @@ impl ProjectionScheduler {
         &self,
         job: ProjectionJob,
     ) -> Result<JobExecResult, AppError> {
+        if job.desired_presence == DesiredPresence::Absent {
+            let target = PathBuf::from(&job.target_path);
+            let current =
+                current_target_hash(&target, job.payload_kind, job.managed_paths_json.as_deref())?;
+            if current.is_none() {
+                // 已满足 absent：补 materialization
+                self.commit_absent_job_db(&job).await?;
+                return Ok(JobExecResult::AlreadySynced);
+            }
+            if absent_hash_is_managed(&job, current.as_deref()) {
+                self.repo
+                    .update_projection_job_state(
+                        &job.id,
+                        ProjectionJobState::Prepared,
+                        job.attempt,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await?;
+                return self.execute_job_by_id(&job.id).await;
+            }
+            self.mark_absent_drift(&job, current.as_deref()).await?;
+            return Ok(JobExecResult::Drifted);
+        }
+
         let target = PathBuf::from(&job.target_path);
         let current =
             current_target_hash(&target, job.payload_kind, job.managed_paths_json.as_deref())?;
@@ -417,19 +444,42 @@ impl ProjectionScheduler {
             return Ok(JobExecResult::Skipped);
         }
 
+        // checkout blocked：预存 AGENTS.md 冲突时禁止 Present 写覆盖
+        if job.desired_presence == DesiredPresence::Present {
+            if let Some(reason) = self.checkout_write_block_reason(&job).await? {
+                self.repo
+                    .update_projection_job_state(
+                        &job.id,
+                        ProjectionJobState::Blocked,
+                        job.attempt,
+                        Some(&reason),
+                        None,
+                        None,
+                    )
+                    .await?;
+                self.repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: job.asset_id.clone(),
+                        target: job.target,
+                        target_binding_id: job.target_binding_id.clone(),
+                        native_path: Some(job.target_path.clone()),
+                        last_projected_revision_id: None,
+                        rendered_hash: Some(job.rendered_hash.clone()),
+                        observed_external_hash: current_target_hash(
+                            Path::new(&job.target_path),
+                            job.payload_kind,
+                            job.managed_paths_json.as_deref(),
+                        )?,
+                        status: MaterializationStatus::Blocked,
+                        last_error: Some(reason),
+                    })
+                    .await?;
+                return Ok(JobExecResult::Skipped);
+            }
+        }
+
         if job.desired_presence == DesiredPresence::Absent {
-            // Gate A：删除路径后续任务；此处标记 blocked 以免盲写
-            self.repo
-                .update_projection_job_state(
-                    &job.id,
-                    ProjectionJobState::Blocked,
-                    job.attempt,
-                    Some("desired_presence_absent_not_implemented"),
-                    None,
-                    None,
-                )
-                .await?;
-            return Ok(JobExecResult::Skipped);
+            return self.handle_absent_job(job).await;
         }
 
         let asset_lock = self.asset_lock(&job.asset_id).await;
@@ -612,6 +662,184 @@ impl ProjectionScheduler {
         Ok(())
     }
 
+    /// 安全执行 desiredPresence=Absent（删除受管文件或确认已不存在）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Present→Absent 必须只删除 Hub 已知受管内容；外部改动不得静默删。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     文件不存在 → Synced commit；hash 命中 rendered/expected/base → remove_file 后 Synced；
+    ///     否则 Drift + absent_blocked_external_divergence，禁止删除。
+    async fn handle_absent_job(&self, job: ProjectionJob) -> Result<JobExecResult, AppError> {
+        let asset_lock = self.asset_lock(&job.asset_id).await;
+        let _asset_guard = asset_lock.lock().await;
+        let _slot = self
+            .global_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AppError::generic("projection semaphore closed"))?;
+
+        let attempt = job.attempt.saturating_add(1);
+        self.repo
+            .update_projection_job_state(
+                &job.id,
+                ProjectionJobState::Writing,
+                attempt,
+                None,
+                None,
+                None,
+            )
+            .await?;
+
+        let target = PathBuf::from(&job.target_path);
+        let current =
+            current_target_hash(&target, job.payload_kind, job.managed_paths_json.as_deref())?;
+
+        match current {
+            None => {
+                // 已符合 absent：无写盘，materialization Synced
+                self.commit_absent_job_db(&job).await?;
+                Ok(JobExecResult::AlreadySynced)
+            }
+            Some(ref hash) if absent_hash_is_managed(&job, Some(hash.as_str())) => {
+                // 仅当内容仍是 Hub 管理的已知 hash 才安全删除
+                if job.payload_kind == ProjectionPayloadKind::File {
+                    if target.is_file() {
+                        std::fs::remove_file(&target).map_err(|e| {
+                            AppError::generic(format!("absent remove_file failed: {e}"))
+                        })?;
+                    }
+                } else {
+                    // directory absent：只删 managed_paths 内文件，且每项 hash 已由 fingerprint 对齐
+                    let managed: Vec<String> = job
+                        .managed_paths_json
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default();
+                    for rel in managed {
+                        let p = target.join(&rel);
+                        if p.is_file() {
+                            let _ = std::fs::remove_file(&p);
+                        }
+                    }
+                }
+                // 删除后再确认不存在
+                let after = current_target_hash(
+                    &target,
+                    job.payload_kind,
+                    job.managed_paths_json.as_deref(),
+                )?;
+                if after.is_some() && job.payload_kind == ProjectionPayloadKind::File {
+                    // 文件仍在 → 失败
+                    self.repo
+                        .update_projection_job_state(
+                            &job.id,
+                            ProjectionJobState::Failed,
+                            attempt,
+                            Some("absent_delete_still_present"),
+                            None,
+                            None,
+                        )
+                        .await?;
+                    return Ok(JobExecResult::Failed);
+                }
+                self.commit_absent_job_db(&job).await?;
+                Ok(JobExecResult::Committed)
+            }
+            Some(ref hash) => {
+                self.mark_absent_drift(&job, Some(hash.as_str())).await?;
+                Ok(JobExecResult::Drifted)
+            }
+        }
+    }
+
+    /// Absent 成功：job committed + materialization Synced（matches desired absent）。
+    ///
+    /// Business Logic: 文件已不存在或已安全删除即视为与 desired absent 对齐。
+    /// Code Logic: 复用 commit_projection_job，observed 用空串 hash（文件不存在）。
+    async fn commit_absent_job_db(&self, job: &ProjectionJob) -> Result<(), AppError> {
+        let empty_hash = sha256_hex(b"");
+        self.repo.commit_projection_job(job, &empty_hash).await?;
+        // 将 rendered_hash 观测为空（absent）；若 commit 写入了 job.rendered_hash，再 upsert 澄清
+        self.repo
+            .upsert_materialization(NewMaterialization {
+                asset_id: job.asset_id.clone(),
+                target: job.target,
+                target_binding_id: job.target_binding_id.clone(),
+                native_path: Some(job.target_path.clone()),
+                last_projected_revision_id: job.desired_revision_id.clone(),
+                rendered_hash: None,
+                observed_external_hash: None,
+                status: MaterializationStatus::Synced,
+                last_error: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Absent 因外部漂移阻塞删除。
+    ///
+    /// Business Logic: 不得静默删外部改过的文件；Attention 友好 last_error。
+    /// Code Logic: job Drifted + materialization Drift + absent_blocked_external_divergence。
+    async fn mark_absent_drift(
+        &self,
+        job: &ProjectionJob,
+        current_hash: Option<&str>,
+    ) -> Result<(), AppError> {
+        let msg = "absent_blocked_external_divergence";
+        self.repo
+            .update_projection_job_state(
+                &job.id,
+                ProjectionJobState::Drifted,
+                job.attempt,
+                Some(msg),
+                None,
+                None,
+            )
+            .await?;
+        self.repo
+            .upsert_materialization(NewMaterialization {
+                asset_id: job.asset_id.clone(),
+                target: job.target,
+                target_binding_id: job.target_binding_id.clone(),
+                native_path: Some(job.target_path.clone()),
+                last_projected_revision_id: None,
+                rendered_hash: Some(job.rendered_hash.clone()),
+                observed_external_hash: current_hash.map(|s| s.to_string()),
+                status: MaterializationStatus::Drift,
+                last_error: Some(msg.into()),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// 若 target binding 关联 checkout 且 status=blocked，返回阻塞原因。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     预存 AGENTS.md 的 checkout 标 blocked 时，禁止 Present 写覆盖用户文件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     get_target_binding → checkout_binding_id → get_checkout_binding；status=="blocked" → Some(token)。
+    async fn checkout_write_block_reason(
+        &self,
+        job: &ProjectionJob,
+    ) -> Result<Option<String>, AppError> {
+        let Some(binding) = self.repo.get_target_binding(&job.target_binding_id).await? else {
+            return Ok(None);
+        };
+        let Some(checkout_id) = binding.checkout_binding_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(checkout) = self.repo.get_checkout_binding(checkout_id).await? else {
+            return Ok(None);
+        };
+        if checkout.status == "blocked" {
+            return Ok(Some("checkout_binding_blocked".into()));
+        }
+        Ok(None)
+    }
+
     async fn asset_lock(&self, asset_id: &str) -> Arc<Mutex<()>> {
         let mut map = self.asset_locks.lock().await;
         map.entry(asset_id.to_string())
@@ -637,6 +865,26 @@ enum JobExecResult {
     Drifted,
     Skipped,
     Failed,
+}
+
+/// 判断当前文件 hash 是否仍属 Hub 受管（可安全 delete for Absent）。
+///
+/// Business Logic: Present→Absent 时 rendered 可能为空串 hash，需用 expected/base/rendered 任一匹配。
+/// Code Logic: 与 rendered_hash / expected_external_hash / base_hash 任一相等。
+fn absent_hash_is_managed(job: &ProjectionJob, current: Option<&str>) -> bool {
+    let Some(hash) = current else {
+        return false;
+    };
+    if !job.rendered_hash.is_empty() && hash == job.rendered_hash {
+        return true;
+    }
+    if job.expected_external_hash.as_deref() == Some(hash) {
+        return true;
+    }
+    if job.base_hash.as_deref() == Some(hash) {
+        return true;
+    }
+    false
 }
 
 /// 计算当前目标 hash（file 或 directory fingerprint）。
@@ -955,5 +1203,186 @@ mod tests {
         assert!(stats.drifted >= 1);
         let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
         assert_ne!(done.state, ProjectionJobState::Committed);
+    }
+
+    /// Absent：文件 hash 命中 expected/base → 安全删除并 Synced。
+    #[tokio::test]
+    async fn absent_job_deletes_when_hash_matches_expected() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("CLAUDE.md");
+        let managed = b"managed content";
+        std::fs::write(&target, managed).unwrap();
+        let managed_hash = sha256_hex(managed);
+        let empty = b"";
+        let empty_hash = sha256_hex(empty);
+        let mut req = file_req(&asset, &binding, &target, empty, Some(&managed_hash));
+        req.desired_presence = DesiredPresence::Absent;
+        req.rendered_hash = empty_hash;
+        req.base_hash = Some(managed_hash.clone());
+        req.expected_external_hash = Some(managed_hash);
+        let job = sched.enqueue_projection(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert_eq!(stats.committed, 1, "stats={stats:?}");
+        assert!(!target.exists(), "managed file must be deleted");
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Committed);
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Synced);
+        assert!(mat.last_error.is_none());
+    }
+
+    /// Absent：外部漂移 → 不删除 + Drift + absent_blocked_external_divergence。
+    #[tokio::test]
+    async fn absent_job_blocks_on_external_divergence() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("CLAUDE.md");
+        std::fs::write(&target, b"external divergence").unwrap();
+        let empty = b"";
+        let empty_hash = sha256_hex(empty);
+        let mut req = file_req(
+            &asset,
+            &binding,
+            &target,
+            empty,
+            Some(&sha256_hex(b"old managed")),
+        );
+        req.desired_presence = DesiredPresence::Absent;
+        req.rendered_hash = empty_hash;
+        req.base_hash = Some(sha256_hex(b"old managed"));
+        let job = sched.enqueue_projection(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert!(stats.drifted >= 1, "stats={stats:?}");
+        assert!(target.exists(), "diverged file must not be deleted");
+        assert_eq!(std::fs::read(&target).unwrap(), b"external divergence");
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Drifted);
+        assert_eq!(
+            done.last_error.as_deref(),
+            Some("absent_blocked_external_divergence")
+        );
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Drift);
+    }
+
+    /// Absent：目标已不存在 → 无写盘，直接 Synced/Committed。
+    #[tokio::test]
+    async fn absent_job_when_file_already_missing_is_synced() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("missing.md");
+        assert!(!target.exists());
+        let empty = b"";
+        let empty_hash = sha256_hex(empty);
+        let mut req = file_req(&asset, &binding, &target, empty, None);
+        req.desired_presence = DesiredPresence::Absent;
+        req.rendered_hash = empty_hash;
+        req.base_hash = None;
+        req.expected_external_hash = None;
+        let job = sched.enqueue_projection(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert_eq!(stats.committed, 1, "stats={stats:?}");
+        assert!(!target.exists());
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Committed);
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Synced);
+    }
+
+    /// checkout status=blocked 时 Present 写 AGENTS.md 路径必须 Blocked，不得覆盖预存文件。
+    #[tokio::test]
+    async fn checkout_binding_blocked_skips_present_write() {
+        use crate::storage::UpsertAgentHubCheckoutBinding;
+
+        let (sched, tmp, repo) = setup().await;
+        let scope = repo
+            .insert_scope(NewScopeNode {
+                id: Some("user-checkout".into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id,
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: "root".into(),
+                display_name: "root".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let checkout = repo
+            .upsert_checkout_binding(UpsertAgentHubCheckoutBinding {
+                hub_project_id: "hub-blocked".into(),
+                workbench_worktree_id: None,
+                checkout_kind: "main".into(),
+                relative_root: Some(String::new()),
+                local_absolute_path: Some(tmp.path().to_string_lossy().to_string()),
+                enabled: true,
+                status: "blocked".into(),
+                warning: Some("AGENTS.md pre-exists".into()),
+            })
+            .await
+            .unwrap();
+        let binding = repo
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::OpenCode,
+                local_scope_mapping_id: None,
+                checkout_binding_id: Some(checkout.id.clone()),
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .unwrap();
+        let target = tmp.path().join("AGENTS.md");
+        std::fs::write(&target, b"user pre-existing agents").unwrap();
+        let old = sha256_hex(b"user pre-existing agents");
+        let mut req = file_req(
+            &asset.id,
+            &binding.id,
+            &target,
+            b"hub overwrite",
+            Some(&old),
+        );
+        req.target = AgentTarget::OpenCode;
+        let job = sched.enqueue_projection(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert_eq!(stats.skipped, 1, "stats={stats:?}");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"user pre-existing agents",
+            "must not overwrite blocked checkout AGENTS.md"
+        );
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Blocked);
+        assert_eq!(done.last_error.as_deref(), Some("checkout_binding_blocked"));
+        let mat = repo
+            .get_materialization_by_binding(&binding.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Blocked);
     }
 }
