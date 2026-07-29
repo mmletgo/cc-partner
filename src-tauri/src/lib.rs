@@ -50,6 +50,9 @@ pub use transfer::sender::{
 };
 mod claude_cli;
 mod claude_code_assets;
+// Gate C N/N+1: mixed_version harness cites Gate B fail-closed by stable production function name.
+#[cfg(test)]
+pub use claude_code_assets::prove_legacy_lossy_placeholder_never_overwrites_canonical_credential;
 pub mod cloud_sync;
 mod commands;
 pub mod config;

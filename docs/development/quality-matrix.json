@@ -1404,16 +1404,18 @@
         "rust"
       ],
       "exclusions": [
-        "real dual-host mDNS / multi-process backend",
         "LAN identity authentication",
+        "automatic Git import (product-forbidden)",
         "packaged desktop GUI",
-        "automatic Git import (product-forbidden)"
+        "projection scheduler crash inject (callback-flag independence only)",
+        "real dual-host mDNS / multi-process backend"
       ],
       "docs": [
         "docs/development/testing.md",
         "docs/p2p-protocol.md",
         "docs/prd.md"
-      ]
+      ],
+      "notes": "L2 dual isolated data_dir prepare/chunk-resume/commit + capability gate. Same-block is proven as target-side SnapshotImporter dual-head conflict (list_unresolved_conflicts non-empty; left/right heads retained, not LWW wiped). Separate coverage: clientRequestId payload-hash ledger idempotency conflict. Projection failure is post-commit callback flag independence, not scheduler crash inject. L3 dual-host mDNS NOT VERIFIED."
     },
     {
       "id": "L2-AGENT-HUB-C-GIT-001",
@@ -1428,14 +1430,16 @@
         "rust"
       ],
       "exclusions": [
-        "real GitHub private repo dual-host",
         "automatic Git import",
-        "packaged desktop GUI"
+        "exact restore of every residual class when importer does not rehydrate envelope conflicts",
+        "packaged desktop GUI",
+        "real GitHub private repo dual-host"
       ],
       "docs": [
         "docs/development/testing.md",
         "docs/prd.md"
-      ]
+      ],
+      "notes": "L2 expand full-lane archive into third env; inspect/preview zero-write; confirm maps hub-mapped and leaves hub-unmapped residual-ready (no guessed local path / not auto opted-in). Fixture seeds multi-revision parent lineage + Delete tombstone residual + conflict/variant residual class. Does not claim exact restore for residual classes that remain empty after import if importer does not rehydrate them. Not automatic Git import; not real GitHub dual-host."
     },
     {
       "id": "E2E-AGENT-HUB-C-001",
@@ -1450,15 +1454,16 @@
         "chromium-linux"
       ],
       "exclusions": [
-        "real multi-host LAN push",
-        "real Git device-lane filesystem",
         "LAN identity authentication",
-        "packaged desktop GUI"
+        "packaged desktop GUI",
+        "real Git device-lane filesystem",
+        "real multi-host LAN push"
       ],
       "docs": [
         "docs/development/testing.md",
         "docs/prd.md"
-      ]
+      ],
+      "notes": "L1 mock: LAN peer selection/progress (committed + unsupported), credential disclosure, Git inspect/preview/map/confirm, stale preview, Attention deep link. Negative UI: no old remote inventory/pull control testids or copy on Agent Hub page / LAN / Git drawers. N/N+1 runtime legacyLossy fail-closed cited by stable Gate B test name legacy_placeholder_import_is_legacy_lossy_and_does_not_overwrite and exercised via sync::mixed_version assert_legacy_lossy_placeholder_contract_present."
     },
     {
       "id": "L3-AGENT-HUB-C-LAN-001",

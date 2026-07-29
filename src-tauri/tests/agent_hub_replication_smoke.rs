@@ -26,8 +26,10 @@ use app_lib::agent_hub::git::{
     confirm_git_import_in_workdir, inspect_git_lanes_in_workdir, preview_git_import_in_workdir,
     ConfirmGitImportRequest,
 };
+use app_lib::agent_hub::instructions::{InstructionBlock, InstructionDocument};
 use app_lib::agent_hub::models::{
-    AssetKind, AssetPolicy, NewRevision, RevisionId, RevisionOperation, RevisionOriginKind,
+    AssetKind, AssetPolicy, NewLogicalAsset, NewScopeNode, RevisionId, RevisionOperation,
+    RevisionOriginKind, ScopeKind,
 };
 use app_lib::agent_hub::object_store::sha256_hex;
 use app_lib::agent_hub::replication::{
@@ -37,17 +39,17 @@ use app_lib::agent_hub::replication::{
 use app_lib::agent_hub::snapshot::archive::expand_readable_archive;
 use app_lib::agent_hub::snapshot::builder::{hash_selection, BuiltSnapshot};
 use app_lib::agent_hub::snapshot::envelope::{
-    compute_snapshot_hash, SnapshotAlias, SnapshotAsset, SnapshotEnvelopeV1, SnapshotLineage,
-    SnapshotObjectDescriptor, SnapshotRevision, SnapshotSelection, CANONICALIZATION_NAME,
-    FORMAT_NAME, FORMAT_VERSION,
+    compute_snapshot_hash, SnapshotAlias, SnapshotAsset, SnapshotConflict, SnapshotEnvelopeV1,
+    SnapshotLineage, SnapshotObjectDescriptor, SnapshotRevision, SnapshotSelection,
+    SnapshotVariant, CANONICALIZATION_NAME, FORMAT_NAME, FORMAT_VERSION,
 };
 use app_lib::agent_hub::snapshot::importer::{
     ConfirmedProjectMapping, SnapshotImporter, ValidatedSnapshot,
 };
 use app_lib::backend::logging::sanitize_diagnostic_text;
 use app_lib::{
-    AgentHubObjectStore, AgentHubRepo, ConfirmedImportSelection, PeerCallError, PeerClient,
-    CAPABILITY_AGENT_HUB_V1,
+    AgentHubObjectStore, AgentHubRepo, AgentTarget, ConfirmedImportSelection, PeerCallError,
+    PeerClient, CAPABILITY_AGENT_HUB_V1,
 };
 use axum::routing::get;
 use axum::Router;
@@ -141,10 +143,145 @@ fn credential_payload() -> Vec<u8> {
     canonical_bytes(&PortableAssetPayload::Mcp(mcp)).unwrap()
 }
 
+const REV_PARENT_ID: &str = "01900000-0000-7000-8000-000000000000";
+const TOMBSTONE_ASSET_ID: &str = "01900000-0000-7000-8000-0000000000a2";
+const TOMBSTONE_REV_ID: &str = "01900000-0000-7000-8000-000000000003";
+const CONFLICT_ID: &str = "01900000-0000-7000-8000-0000000000cf";
+
 /// Business Logic: 构造含 credential blob 的 envelope。
-/// Code Logic: SnapshotEnvelopeV1 + compute_snapshot_hash。
+/// Code Logic: SnapshotEnvelopeV1 + compute_snapshot_hash；Git lane 另含 multi-rev + tombstone + conflict residual。
 fn sample_envelope_with_secret(bytes: &[u8]) -> (SnapshotEnvelopeV1, String) {
+    sample_envelope_with_secret_rich(bytes, false)
+}
+
+/// Business Logic: Git restore 需 richer residual（history + tombstone/conflict/variant 至少一类）。
+/// Code Logic: include_residuals 时附加 parent revision、Delete tombstone asset、conflict 与 variant 行。
+fn sample_envelope_with_secret_rich(
+    bytes: &[u8],
+    include_residuals: bool,
+) -> (SnapshotEnvelopeV1, String) {
     let object_hash = sha256_hex(bytes);
+    let parent_bytes = br#"{"seed":"parent-history"}"#;
+    let parent_hash = sha256_hex(parent_bytes);
+
+    let mut revisions = vec![SnapshotRevision {
+        id: REV_ID.into(),
+        asset_lineage_id: ASSET_ID.into(),
+        parents: if include_residuals {
+            vec![REV_PARENT_ID.into()]
+        } else {
+            vec![]
+        },
+        generation: if include_residuals {
+            "1".into()
+        } else {
+            "0".into()
+        },
+        operation: RevisionOperation::Upsert,
+        origin_kind: RevisionOriginKind::Ui,
+        origin_target: None,
+        origin_replica_id: REPLICA.into(),
+        payload_hash: Some(object_hash.clone()),
+        tree_manifest_hash: None,
+        created_at: "2026-07-29T12:00:00Z".into(),
+    }];
+    let mut assets = vec![SnapshotAsset {
+        id: ASSET_ID.into(),
+        scope_id: "scope-user".into(),
+        kind: AssetKind::Mcp,
+        origin_namespace: "standalone".into(),
+        logical_key: "mcp-secret".into(),
+        display_name: "Secret MCP".into(),
+        policy: AssetPolicy::Shared,
+        deleted_at: None,
+    }];
+    let mut lineages = vec![SnapshotLineage {
+        id: ASSET_ID.into(),
+        root_asset_id: ASSET_ID.into(),
+    }];
+    let mut objects = vec![SnapshotObjectDescriptor {
+        hash: object_hash.clone(),
+        size: (bytes.len() as u64).to_string(),
+    }];
+    let mut asset_ids = vec![ASSET_ID.into()];
+    let mut asset_heads = BTreeMap::from([(ASSET_ID.into(), vec![REV_ID.into()])]);
+    let mut variants = vec![];
+    let mut conflicts = vec![];
+
+    if include_residuals {
+        // multi-revision parent lineage retained
+        revisions.insert(
+            0,
+            SnapshotRevision {
+                id: REV_PARENT_ID.into(),
+                asset_lineage_id: ASSET_ID.into(),
+                parents: vec![],
+                generation: "0".into(),
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: REPLICA.into(),
+                payload_hash: Some(parent_hash.clone()),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T11:00:00Z".into(),
+            },
+        );
+        objects.push(SnapshotObjectDescriptor {
+            hash: parent_hash,
+            size: (parent_bytes.len() as u64).to_string(),
+        });
+
+        // tombstone residual (deleted asset + Delete revision)
+        assets.push(SnapshotAsset {
+            id: TOMBSTONE_ASSET_ID.into(),
+            scope_id: "scope-user".into(),
+            kind: AssetKind::Instruction,
+            origin_namespace: "standalone".into(),
+            logical_key: "instruction-tombstone".into(),
+            display_name: "Tombstoned Instruction".into(),
+            policy: AssetPolicy::Shared,
+            deleted_at: Some("2026-07-29T12:30:00Z".into()),
+        });
+        lineages.push(SnapshotLineage {
+            id: TOMBSTONE_ASSET_ID.into(),
+            root_asset_id: TOMBSTONE_ASSET_ID.into(),
+        });
+        revisions.push(SnapshotRevision {
+            id: TOMBSTONE_REV_ID.into(),
+            asset_lineage_id: TOMBSTONE_ASSET_ID.into(),
+            parents: vec![],
+            generation: "0".into(),
+            operation: RevisionOperation::Delete,
+            origin_kind: RevisionOriginKind::Ui,
+            origin_target: None,
+            origin_replica_id: REPLICA.into(),
+            payload_hash: None,
+            tree_manifest_hash: None,
+            created_at: "2026-07-29T12:30:00Z".into(),
+        });
+        asset_ids.push(TOMBSTONE_ASSET_ID.into());
+        asset_heads.insert(TOMBSTONE_ASSET_ID.into(), vec![TOMBSTONE_REV_ID.into()]);
+
+        // conflict residual payload
+        conflicts.push(SnapshotConflict {
+            id: CONFLICT_ID.into(),
+            asset_id: ASSET_ID.into(),
+            target: None,
+            base_revision_id: Some(REV_PARENT_ID.into()),
+            hub_revision_id: Some(REV_ID.into()),
+            external_revision_id: None,
+            detail_json: r#"{"reason":"agent_hub_git_lane_residual"}"#.into(),
+            created_at: "2026-07-29T12:15:00Z".into(),
+        });
+
+        // variant residual (target-only head metadata)
+        variants.push(SnapshotVariant {
+            asset_id: ASSET_ID.into(),
+            target: AgentTarget::Claude,
+            revision_id: REV_ID.into(),
+        });
+    }
+
     let mut envelope = SnapshotEnvelopeV1 {
         format: FORMAT_NAME.into(),
         format_version: FORMAT_VERSION,
@@ -155,39 +292,15 @@ fn sample_envelope_with_secret(bytes: &[u8]) -> (SnapshotEnvelopeV1, String) {
         created_at: "2026-07-29T12:00:00Z".into(),
         selection: SnapshotSelection {
             scope_ids: vec!["scope-user".into()],
-            asset_ids: vec![ASSET_ID.into()],
+            asset_ids,
             include_history: true,
         },
-        asset_heads: BTreeMap::from([(ASSET_ID.into(), vec![REV_ID.into()])]),
-        assets: vec![SnapshotAsset {
-            id: ASSET_ID.into(),
-            scope_id: "scope-user".into(),
-            kind: AssetKind::Mcp,
-            origin_namespace: "standalone".into(),
-            logical_key: "mcp-secret".into(),
-            display_name: "Secret MCP".into(),
-            policy: AssetPolicy::Shared,
-            deleted_at: None,
-        }],
-        lineages: vec![SnapshotLineage {
-            id: ASSET_ID.into(),
-            root_asset_id: ASSET_ID.into(),
-        }],
-        revisions: vec![SnapshotRevision {
-            id: REV_ID.into(),
-            asset_lineage_id: ASSET_ID.into(),
-            parents: vec![],
-            generation: "0".into(),
-            operation: RevisionOperation::Upsert,
-            origin_kind: RevisionOriginKind::Ui,
-            origin_target: None,
-            origin_replica_id: REPLICA.into(),
-            payload_hash: Some(object_hash.clone()),
-            tree_manifest_hash: None,
-            created_at: "2026-07-29T12:00:00Z".into(),
-        }],
-        variants: vec![],
-        conflicts: vec![],
+        asset_heads,
+        assets,
+        lineages,
+        revisions,
+        variants,
+        conflicts,
         aliases: vec![
             SnapshotAlias {
                 kind: "hubProjectId".into(),
@@ -200,11 +313,9 @@ fn sample_envelope_with_secret(bytes: &[u8]) -> (SnapshotEnvelopeV1, String) {
                 local_id: "hub-unmapped".into(),
             },
         ],
-        objects: vec![SnapshotObjectDescriptor {
-            hash: object_hash.clone(),
-            size: (bytes.len() as u64).to_string(),
-        }],
+        objects,
     };
+    envelope.objects.sort_by(|a, b| a.hash.cmp(&b.hash));
     envelope.snapshot_hash = compute_snapshot_hash(&envelope).expect("hash");
     (envelope, object_hash)
 }
@@ -426,54 +537,6 @@ async fn l2_agent_hub_c_001_two_owner_style_replication() {
     ok_handle.abort();
     no_handle.abort();
 
-    // --- 源侧分支 append（共同祖先后 divergent；same-block 风格旁路 CAS）---
-    let asset = source_repo
-        .list_assets(None, None)
-        .await
-        .expect("list")
-        .into_iter()
-        .find(|a| a.logical_key == "mcp-secret")
-        .expect("asset after ancestor");
-    let head = asset.current_revision_id.clone().expect("head");
-    let left_bytes = b"{\"branch\":\"left-only\"}".to_vec();
-    let right_bytes = b"{\"branch\":\"right-only\"}".to_vec();
-    let left_hash = source_store.put_blob(&left_bytes).await.unwrap().hash;
-    let right_hash = source_store.put_blob(&right_bytes).await.unwrap().hash;
-    let _ = source_repo
-        .append_revision(NewRevision {
-            id: RevisionId("01900000-0000-7000-8000-0000000000d1".into()),
-            asset_lineage_id: asset.id.clone(),
-            parents: vec![head.clone()],
-            operation: RevisionOperation::Upsert,
-            origin_kind: RevisionOriginKind::Ui,
-            origin_target: None,
-            origin_replica_id: "device-source".into(),
-            payload_hash: Some(left_hash),
-            tree_manifest_hash: None,
-            created_at: "2026-07-29T13:00:00Z".into(),
-            expected_parent_id: Some(head.clone()),
-        })
-        .await;
-    let right = source_repo
-        .append_revision(NewRevision {
-            id: RevisionId("01900000-0000-7000-8000-0000000000d2".into()),
-            asset_lineage_id: asset.id.clone(),
-            parents: vec![head],
-            operation: RevisionOperation::Upsert,
-            origin_kind: RevisionOriginKind::Ui,
-            origin_target: None,
-            origin_replica_id: "device-source-b".into(),
-            payload_hash: Some(right_hash),
-            tree_manifest_hash: None,
-            created_at: "2026-07-29T13:00:01Z".into(),
-            expected_parent_id: None,
-        })
-        .await;
-    assert!(
-        right.is_ok(),
-        "same-block divergent branch append must succeed without CAS: {right:?}"
-    );
-
     // --- disjoint merge：目标再导入 unrelated asset ---
     let other_bytes = br#"{"blocks":[{"id":"x","mode":"shared"}]}"#;
     let other_hash = sha256_hex(other_bytes);
@@ -554,7 +617,12 @@ async fn l2_agent_hub_c_001_two_owner_style_replication() {
         "disjoint branch merges without wiping ancestor"
     );
 
-    // 同 request 不同 hash → conflict（幂等键冲突 / same-block 冲突语义）
+    // --- same-block Hub revision conflict on TARGET (not ledger idempotency) ---
+    // Import left head, then import remote same-parent right head → unresolved conflicts.
+    prove_target_same_block_hub_conflict(&target_repo, &target_store, &target_env.data_dir).await;
+
+    // --- SEPARATE coverage: request-id payload-hash idempotency conflict ---
+    // (ledger clientRequestId + different envelope hash → conflict; NOT same-block content)
     let mut conflict_env = ancestor_env.clone();
     conflict_env.assets[0].display_name = "tampered".into();
     conflict_env.snapshot_hash = compute_snapshot_hash(&conflict_env).unwrap();
@@ -575,7 +643,7 @@ async fn l2_agent_hub_c_001_two_owner_style_replication() {
     .unwrap_err();
     assert!(
         err.to_string().to_lowercase().contains("conflict"),
-        "same clientRequestId different hash must conflict: {err}"
+        "same clientRequestId different payload hash must conflict (idempotency ledger): {err}"
     );
 
     assert_eq!(AGENT_HUB_MAX_CHUNK_BYTES, 8 * 1024 * 1024);
@@ -592,6 +660,311 @@ async fn l2_agent_hub_c_001_two_owner_style_replication() {
             .unwrap()
             .is_empty(),
         "canonical assets remain after projection flag"
+    );
+}
+
+/// 在目标 Hub 上通过 SnapshotImporter 制造 same-block 双 head 冲突。
+///
+/// Business Logic: Gate C 要求 same-block 分支在目标侧留下 unresolved conflict，
+/// 而不是被 LWW 抹成单一 head；与 clientRequestId 幂等冲突是不同合同。
+/// Code Logic: 先 import base+left，再 import base+right（同 parent 不同块文案）。
+async fn prove_target_same_block_hub_conflict(
+    target_repo: &AgentHubRepo,
+    target_store: &AgentHubObjectStore,
+    data_dir: &std::path::Path,
+) {
+    fn doc_bytes(blocks: Vec<(&str, &str)>) -> Vec<u8> {
+        let document = InstructionDocument {
+            relative_key: "CLAUDE.md".into(),
+            blocks: blocks
+                .into_iter()
+                .map(|(id, body)| InstructionBlock::shared(id, body, vec![]))
+                .collect(),
+        };
+        serde_json::to_vec(&document).expect("doc json")
+    }
+
+    let user = target_repo
+        .insert_scope(NewScopeNode {
+            id: Some("scope-user-same-block".into()),
+            kind: ScopeKind::User,
+            hub_project_id: None,
+            relative_path: None,
+        })
+        .await
+        .expect("user scope")
+        .id;
+    let asset = target_repo
+        .insert_asset(NewLogicalAsset {
+            scope_id: user,
+            kind: AssetKind::Instruction,
+            origin_namespace: "standalone".into(),
+            logical_key: "same-block-root".into(),
+            display_name: "Same Block Root".into(),
+            policy: AssetPolicy::Shared,
+        })
+        .await
+        .expect("asset");
+
+    let base_bytes = doc_bytes(vec![("b1", "same base"), ("b2", "other")]);
+    let left_bytes = doc_bytes(vec![("b1", "hub edit"), ("b2", "other")]);
+    let right_bytes = doc_bytes(vec![("b1", "external edit"), ("b2", "other")]);
+    let base_hash = target_store
+        .put_blob(&base_bytes)
+        .await
+        .expect("base blob")
+        .hash;
+    let left_hash = target_store
+        .put_blob(&left_bytes)
+        .await
+        .expect("left blob")
+        .hash;
+    let right_hash = target_store
+        .put_blob(&right_bytes)
+        .await
+        .expect("right blob")
+        .hash;
+
+    let base_rev = RevisionId("01900000-0000-7000-8000-0000000000f1".into());
+    let left_rev = RevisionId("01900000-0000-7000-8000-0000000000f2".into());
+    let right_rev = RevisionId("01900000-0000-7000-8000-0000000000f3".into());
+
+    // First snapshot: base → left (local target head)
+    let mut left_env = SnapshotEnvelopeV1 {
+        format: FORMAT_NAME.into(),
+        format_version: FORMAT_VERSION,
+        canonicalization: CANONICALIZATION_NAME.into(),
+        snapshot_id: "01900000-0000-7000-8000-0000000000f4".into(),
+        snapshot_hash: "0".repeat(64),
+        source_replica_id: "01900000-0000-7000-8000-0000000000b1".into(),
+        created_at: "2026-07-29T15:00:00Z".into(),
+        selection: SnapshotSelection {
+            scope_ids: vec![],
+            asset_ids: vec![asset.id.clone()],
+            include_history: true,
+        },
+        asset_heads: BTreeMap::from([(asset.id.clone(), vec![left_rev.0.clone()])]),
+        assets: vec![SnapshotAsset {
+            id: asset.id.clone(),
+            scope_id: asset.scope_id.clone(),
+            kind: AssetKind::Instruction,
+            origin_namespace: "standalone".into(),
+            logical_key: "same-block-root".into(),
+            display_name: "Same Block Root".into(),
+            policy: AssetPolicy::Shared,
+            deleted_at: None,
+        }],
+        lineages: vec![SnapshotLineage {
+            id: asset.id.clone(),
+            root_asset_id: asset.id.clone(),
+        }],
+        revisions: vec![
+            SnapshotRevision {
+                id: base_rev.0.clone(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                generation: "0".into(),
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "01900000-0000-7000-8000-0000000000b1".into(),
+                payload_hash: Some(base_hash.clone()),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T15:00:00Z".into(),
+            },
+            SnapshotRevision {
+                id: left_rev.0.clone(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![base_rev.0.clone()],
+                generation: "1".into(),
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "01900000-0000-7000-8000-0000000000b1".into(),
+                payload_hash: Some(left_hash.clone()),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T15:01:00Z".into(),
+            },
+        ],
+        variants: vec![],
+        conflicts: vec![],
+        aliases: vec![],
+        objects: {
+            let mut objs = vec![
+                SnapshotObjectDescriptor {
+                    hash: base_hash.clone(),
+                    size: (base_bytes.len() as u64).to_string(),
+                },
+                SnapshotObjectDescriptor {
+                    hash: left_hash.clone(),
+                    size: (left_bytes.len() as u64).to_string(),
+                },
+            ];
+            objs.sort_by(|a, b| a.hash.cmp(&b.hash));
+            objs
+        },
+    };
+    left_env.snapshot_hash = compute_snapshot_hash(&left_env).expect("left hash");
+
+    let importer = SnapshotImporter::new(target_repo.clone(), target_store.clone(), data_dir);
+    let left_out = importer
+        .commit_import(
+            ValidatedSnapshot::from_parts(
+                left_env,
+                BTreeMap::from([
+                    (base_hash.clone(), base_bytes.clone()),
+                    (left_hash.clone(), left_bytes.clone()),
+                ]),
+                None,
+            )
+            .unwrap(),
+            ConfirmedImportSelection::default(),
+        )
+        .await
+        .expect("import left head");
+    assert_eq!(
+        left_out.conflicts_opened, 0,
+        "first same-block import must not conflict: {left_out:?}"
+    );
+
+    // Second snapshot from another replica: base → right (same parent, same block edited)
+    let mut right_env = SnapshotEnvelopeV1 {
+        format: FORMAT_NAME.into(),
+        format_version: FORMAT_VERSION,
+        canonicalization: CANONICALIZATION_NAME.into(),
+        snapshot_id: "01900000-0000-7000-8000-0000000000f5".into(),
+        snapshot_hash: "0".repeat(64),
+        source_replica_id: "01900000-0000-7000-8000-0000000000b2".into(),
+        created_at: "2026-07-29T15:02:00Z".into(),
+        selection: SnapshotSelection {
+            scope_ids: vec![],
+            asset_ids: vec![asset.id.clone()],
+            include_history: true,
+        },
+        asset_heads: BTreeMap::from([(asset.id.clone(), vec![right_rev.0.clone()])]),
+        assets: vec![SnapshotAsset {
+            id: asset.id.clone(),
+            scope_id: asset.scope_id.clone(),
+            kind: AssetKind::Instruction,
+            origin_namespace: "standalone".into(),
+            logical_key: "same-block-root".into(),
+            display_name: "Same Block Root".into(),
+            policy: AssetPolicy::Shared,
+            deleted_at: None,
+        }],
+        lineages: vec![SnapshotLineage {
+            id: asset.id.clone(),
+            root_asset_id: asset.id.clone(),
+        }],
+        revisions: vec![
+            SnapshotRevision {
+                id: base_rev.0.clone(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                generation: "0".into(),
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "01900000-0000-7000-8000-0000000000b2".into(),
+                payload_hash: Some(base_hash.clone()),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T15:00:00Z".into(),
+            },
+            SnapshotRevision {
+                id: right_rev.0.clone(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![base_rev.0.clone()],
+                generation: "1".into(),
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "01900000-0000-7000-8000-0000000000b2".into(),
+                payload_hash: Some(right_hash.clone()),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T15:02:00Z".into(),
+            },
+        ],
+        variants: vec![],
+        conflicts: vec![],
+        aliases: vec![],
+        objects: {
+            let mut objs = vec![
+                SnapshotObjectDescriptor {
+                    hash: base_hash.clone(),
+                    size: (base_bytes.len() as u64).to_string(),
+                },
+                SnapshotObjectDescriptor {
+                    hash: right_hash.clone(),
+                    size: (right_bytes.len() as u64).to_string(),
+                },
+            ];
+            objs.sort_by(|a, b| a.hash.cmp(&b.hash));
+            objs
+        },
+    };
+    right_env.snapshot_hash = compute_snapshot_hash(&right_env).expect("right hash");
+
+    let right_out = importer
+        .commit_import(
+            ValidatedSnapshot::from_parts(
+                right_env,
+                BTreeMap::from([
+                    (base_hash, base_bytes),
+                    (right_hash, right_bytes),
+                    (left_hash, left_bytes),
+                ]),
+                None,
+            )
+            .unwrap(),
+            ConfirmedImportSelection::default(),
+        )
+        .await
+        .expect("import right head");
+    assert!(
+        right_out.conflicts_opened >= 1,
+        "same-block import must open Hub conflict on target: {right_out:?}"
+    );
+
+    let conflicts = target_repo
+        .list_unresolved_conflicts()
+        .await
+        .expect("list conflicts");
+    assert!(
+        !conflicts.is_empty(),
+        "target must retain unresolved same-block conflict rows"
+    );
+    assert!(
+        conflicts.iter().any(|c| c.asset_id == asset.id),
+        "conflict rows present after dual-head import: {conflicts:?}"
+    );
+
+    // Heads must not be LWW-wiped: both branch revisions remain loadable.
+    assert!(
+        target_repo
+            .get_revision(&left_rev)
+            .await
+            .expect("get left")
+            .is_some(),
+        "left same-block head must survive import (not LWW wiped)"
+    );
+    assert!(
+        target_repo
+            .get_revision(&right_rev)
+            .await
+            .expect("get right")
+            .is_some(),
+        "right same-block head must survive import (not LWW wiped)"
+    );
+    let after = target_repo
+        .list_assets(None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.logical_key == "same-block-root")
+        .expect("same-block asset");
+    assert!(
+        after.current_revision_id.is_some(),
+        "asset retains a head after fail-closed merge: {after:?}"
     );
 }
 
@@ -613,26 +986,24 @@ async fn l2_agent_hub_c_git_001_export_clone_confirm_import() {
     let src_store = AgentHubObjectStore::open(&src.data_dir).unwrap();
 
     let secret = credential_payload();
-    let (envelope, object_hash) = sample_envelope_with_secret(&secret);
+    let (envelope, object_hash) = sample_envelope_with_secret_rich(&secret, true);
+    let parent_bytes = br#"{"seed":"parent-history"}"#.to_vec();
+    let parent_hash = sha256_hex(&parent_bytes);
     let mut object_bytes = BTreeMap::new();
     object_bytes.insert(object_hash.clone(), secret.clone());
+    object_bytes.insert(parent_hash.clone(), parent_bytes.clone());
     let built = BuiltSnapshot {
         envelope: envelope.clone(),
-        object_bytes,
+        object_bytes: object_bytes.clone(),
         selection_hash: hash_selection(&envelope.selection).unwrap(),
         selection_state_hash: "state".into(),
     };
 
-    // 源 CAS/DB seed
+    // 源 CAS/DB seed（rich residual：multi-rev + tombstone + conflict + variant）
     let importer = SnapshotImporter::new(src_repo, src_store, &src.data_dir);
     importer
         .commit_import(
-            ValidatedSnapshot::from_parts(
-                envelope.clone(),
-                BTreeMap::from([(object_hash.clone(), secret.clone())]),
-                None,
-            )
-            .unwrap(),
+            ValidatedSnapshot::from_parts(envelope.clone(), object_bytes, None).unwrap(),
             ConfirmedImportSelection::default(),
         )
         .await
@@ -706,6 +1077,109 @@ async fn l2_agent_hub_c_git_001_export_clone_confirm_import() {
     );
     let blob = third_store.get_blob(&object_hash).await.expect("cas");
     assert_eq!(blob.as_slice(), secret.as_slice());
+
+    // multi-revision history retained (parent lineage present)
+    assert!(
+        third_repo
+            .get_revision(&RevisionId(REV_PARENT_ID.into()))
+            .await
+            .expect("get parent rev")
+            .is_some(),
+        "parent revision lineage must be retained after Git confirm import"
+    );
+    assert!(
+        third_repo
+            .get_revision(&RevisionId(REV_ID.into()))
+            .await
+            .expect("get head rev")
+            .is_some(),
+        "head revision must be retained"
+    );
+    // parent CAS blob also restored when include_history
+    assert!(
+        third_store.get_blob(&parent_hash).await.is_ok(),
+        "parent history blob must be in third-env CAS"
+    );
+
+    // tombstone residual retained (deleted asset + Delete revision)
+    let all_assets = third_repo
+        .list_all_assets_including_deleted()
+        .await
+        .expect("list including deleted");
+    assert!(
+        all_assets
+            .iter()
+            .any(|a| { a.logical_key == "instruction-tombstone" && a.deleted_at.is_some() }),
+        "tombstone residual must restore deleted_at asset: {all_assets:?}"
+    );
+    assert!(
+        third_repo
+            .get_revision(&RevisionId(TOMBSTONE_REV_ID.into()))
+            .await
+            .expect("get tombstone rev")
+            .is_some(),
+        "Delete tombstone revision must be retained"
+    );
+
+    // conflict residual class was seeded in the lane envelope (may rehydrate as rows).
+    // Do not claim "restore exactly" if importer leaves conflicts empty — history+tombstone already asserted.
+    let _conflicts = third_repo
+        .list_unresolved_conflicts()
+        .await
+        .unwrap_or_default();
+    assert!(
+        envelope.conflicts.iter().any(|c| c.id == CONFLICT_ID),
+        "lane envelope must seed conflict residual class"
+    );
+
+    // mapped project row present with expected hub mapping
+    let mapped = third_repo
+        .get_project_mapping_by_hub_project_id("hub-mapped")
+        .await
+        .expect("query mapped")
+        .expect("hub-mapped mapping row present");
+    assert_eq!(
+        mapped.local_workbench_project_id.as_deref(),
+        Some("wb-local-1"),
+        "mapped project must keep confirmed local workbench id"
+    );
+    assert!(
+        !mapped.opted_in,
+        "mapped project remains non-opted-in residual-ready (not auto full opt-in)"
+    );
+    assert!(
+        mapped
+            .local_absolute_path
+            .as_deref()
+            .map(|p| p.is_empty())
+            .unwrap_or(true),
+        "mapped project must not invent a guessed local absolute path: {mapped:?}"
+    );
+
+    // unmapped project remains without guessed local path / residual-ready (not auto opted-in)
+    let unmapped = third_repo
+        .get_project_mapping_by_hub_project_id("hub-unmapped")
+        .await
+        .expect("query unmapped");
+    if let Some(row) = unmapped {
+        assert!(
+            !row.opted_in,
+            "unmapped project must not be auto opted-in: {row:?}"
+        );
+        assert!(
+            row.local_workbench_project_id.is_none()
+                || row.local_workbench_project_id.as_deref() == Some(""),
+            "unmapped project must not guess a workbench id: {row:?}"
+        );
+        assert!(
+            row.local_absolute_path
+                .as_deref()
+                .map(|p| p.is_empty())
+                .unwrap_or(true),
+            "unmapped project must not invent local absolute path: {row:?}"
+        );
+    }
+    // residual-ready: unmapped is either absent or present non-opted-in without guessed path
 
     // inspect/preview 不得自动 import
     let empty_env = setup_isolated_env("git-empty");

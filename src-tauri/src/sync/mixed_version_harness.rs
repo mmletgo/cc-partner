@@ -767,8 +767,11 @@ pub fn assert_agent_hub_n_n1_route_inventory_both_generations() {
     );
 }
 
-/// Business Logic: legacy placeholder 不得覆盖 canonical credential（合同指向 assets 测试）。
-/// Code Logic: 源码盘点 `__REDACTED_BY_CLAUDE_PARTNER__` → legacyLossy 标记仍在。
+/// Business Logic: legacy placeholder 不得覆盖 canonical credential。
+/// Code Logic:
+///   1) 源码盘点 sentinel/label 仍在；
+///   2) 调用 Gate B 稳定名 `legacy_placeholder_import_is_legacy_lossy_and_does_not_overwrite`
+///      背后的生产路径 helper，runtime 证明 placeholder 永不覆盖 canonical credential。
 pub fn assert_legacy_lossy_placeholder_contract_present() {
     let assets_src = include_str!("../claude_code_assets.rs");
     assert!(
@@ -780,6 +783,14 @@ pub fn assert_legacy_lossy_placeholder_contract_present() {
             || assets_src.contains("REDACTED_BY_CLAUDE_PARTNER"),
         "legacy redaction sentinel must remain for N/N+1 import guard"
     );
+    // Stable Gate B name must remain wired in claude_code_assets tests.
+    assert!(
+        assets_src.contains("fn legacy_placeholder_import_is_legacy_lossy_and_does_not_overwrite"),
+        "Gate B stable test name must remain for matrix notes citation"
+    );
+    // Runtime fail-closed (not just string presence) — only available under cfg(test).
+    #[cfg(test)]
+    crate::prove_legacy_lossy_placeholder_never_overwrites_canonical_credential();
 }
 
 #[cfg(test)]

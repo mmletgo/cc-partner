@@ -782,10 +782,29 @@ test.describe('E2E-AGENT-HUB-C-001 Agent Hub Gate C replication UI', () => {
     await expect(page.getByTestId('agent-hub-open-lan-push')).toBeVisible();
     await expect(page.getByTestId('agent-hub-open-git-import')).toBeVisible();
 
+    // N/N+1 negative: new Agent Hub UI must not expose old remote inventory/pull controls
+    await expect(page.getByTestId('agent-hub-open-remote-pull')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-remote-inventory')).toHaveCount(0);
+    await expect(page.getByTestId('agent-hub-pull-inventory')).toHaveCount(0);
+    await expect(
+      page.getByRole('button', { name: /remote inventory|pull inventory|拉取清单|远程拉取/i }),
+    ).toHaveCount(0);
+    // Body must not advertise target-side pull inventory actions (source-push only)
+    await expect(page.locator('body')).not.toContainText(
+      /remote inventory|pull inventory|目标端 pull|远程资产清单/i,
+    );
+
     // --- LAN source-push：选择 peer、preview、per-target progress（含 unsupported）---
     await page.getByTestId('agent-hub-open-lan-push').click();
     await expect(page.getByTestId('lan-push-dialog')).toBeVisible();
     await expect(page.getByTestId('lan-push-plaintext-disclosure')).toBeVisible();
+    // negative inside LAN dialog: no pull / remote inventory actions
+    await expect(
+      page.getByTestId('lan-push-dialog').getByRole('button', { name: /^pull$|拉取$/i }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId('lan-push-dialog')).not.toContainText(
+      /remote inventory|pull inventory/i,
+    );
     await expect(page.getByTestId('lan-push-peer-peer-ok')).toBeVisible();
     await expect(page.getByTestId('lan-push-peer-peer-unsupported')).toBeVisible();
     await page.getByTestId('lan-push-peer-peer-ok').check();
@@ -807,6 +826,13 @@ test.describe('E2E-AGENT-HUB-C-001 Agent Hub Gate C replication UI', () => {
     await page.getByTestId('agent-hub-open-git-import').click();
     await expect(page.getByTestId('git-import-drawer')).toBeVisible();
     await expect(page.getByTestId('git-import-plaintext-disclosure')).toBeVisible();
+    // negative inside Git drawer: no old pull inventory control
+    await expect(
+      page.getByTestId('git-import-drawer').getByRole('button', { name: /^pull$|拉取$/i }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId('git-import-drawer')).not.toContainText(
+      /remote inventory|pull inventory/i,
+    );
     await page.getByTestId('git-import-inspect-btn').click();
     await expect(page.getByTestId('git-import-lane-list')).toBeVisible({ timeout: 5_000 });
     await page.getByTestId('git-import-lane-device-remote-1').click();
