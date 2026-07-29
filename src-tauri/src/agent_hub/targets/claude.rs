@@ -230,3 +230,23 @@ fn scan_mcp_json_file(
 pub fn claude_managed_plugin_selector() -> &'static str {
     crate::agent_hub::packages::PLUGIN_SELECTOR
 }
+
+/// 从 Claude Plugin 根目录构造 `DiscoveredPluginSource`（不扫描 child）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Gate D 分解入口需要 target 侧稳定构造发现记录；实际 component 扫描在 `plugins::decompose`。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 `.claude-plugin/plugin.json` 的 name/version/description（若存在），否则用目录名。
+pub fn discover_claude_plugin_source(
+    root: &std::path::Path,
+    scope_id: impl Into<String>,
+    scope_kind: ScopeKind,
+) -> Result<crate::agent_hub::plugins::DiscoveredPluginSource, AppError> {
+    crate::agent_hub::plugins::decompose::discover_plugin_source_for_target(
+        crate::agent_hub::models::AgentTarget::Claude,
+        root,
+        scope_id,
+        scope_kind,
+    )
+}

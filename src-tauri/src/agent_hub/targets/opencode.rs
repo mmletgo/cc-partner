@@ -355,3 +355,23 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 pub fn opencode_activation_strategy() -> &'static str {
     "native_path_projection"
 }
+
+/// 从 OpenCode 本地 Plugin 根目录构造 `DiscoveredPluginSource`（不扫描 child）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode 原生 JS/TS/npm plugin 仍进入同一分解路径；runtime 默认 source residual。
+///
+/// Code Logic（这个函数做什么）:
+///     优先 `package.json` name/version/description，否则用目录名。
+pub fn discover_opencode_plugin_source(
+    root: &std::path::Path,
+    scope_id: impl Into<String>,
+    scope_kind: ScopeKind,
+) -> Result<crate::agent_hub::plugins::DiscoveredPluginSource, AppError> {
+    crate::agent_hub::plugins::decompose::discover_plugin_source_for_target(
+        crate::agent_hub::models::AgentTarget::OpenCode,
+        root,
+        scope_id,
+        scope_kind,
+    )
+}
