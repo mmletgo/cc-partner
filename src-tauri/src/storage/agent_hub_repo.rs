@@ -5,14 +5,17 @@
 //!     target binding、materialization 与 conflict。写入必须经 maintenance gate，旧库升级幂等。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `ensure_schema` 建 13 张表与索引，并对 project_mappings/checkout_bindings 做 PRAGMA 列升级；
-//!     `insert_scope/insert_asset/append_revision/upsert_target_binding` 与 mapping/binding upsert
-//!     写路径走 `with_shared_write_lease`；revision 多行更新同事务。
+//!     `ensure_schema` 建 13 张表与索引，并对 project_mappings/checkout_bindings/projection_jobs
+//!     做 PRAGMA 列升级；`insert_scope/insert_asset/append_revision/upsert_target_binding`、
+//!     mapping/binding/materialization/projection_job 写路径走 `with_shared_write_lease`；
+//!     revision 多行更新同事务。
 
 use crate::agent_hub::models::{
-    AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, NewLogicalAsset,
-    NewRevision, NewScopeNode, NewTargetBinding, Revision, RevisionId, RevisionOperation,
-    RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
+    AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, Materialization,
+    MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob, NewRevision,
+    NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState, ProjectionPayloadKind,
+    Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode,
+    TargetBinding,
 };
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
@@ -892,6 +895,566 @@ impl AgentHubRepo {
         .await?;
         row.map(|r| row_to_scope(&r)).transpose()
     }
+
+    /// 插入 projection job（初始 prepared）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Hub revision commit 后必须持久化 projection job，崩溃后可对账恢复。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     INSERT prepared job；返回完整 ProjectionJob。
+    pub async fn insert_projection_job(
+        &self,
+        input: NewProjectionJob,
+    ) -> Result<ProjectionJob, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            let state = ProjectionJobState::Prepared;
+            let desired_revision = input
+                .desired_revision_id
+                .as_ref()
+                .map(|r| r.as_str().to_string());
+            sqlx::query(
+                "INSERT INTO agent_hub_projection_jobs (
+                    id, asset_id, target, target_binding_id, desired_revision_id, state, attempt,
+                    last_error, target_path, expected_external_hash, rendered_hash,
+                    rendered_object_hash, write_token, desired_presence, desired_enabled,
+                    payload_kind, managed_paths_json, hub_project_id, staging_path, backup_path,
+                    base_hash, created_at, updated_at
+                 ) VALUES (
+                    ?,?,?,?,?,?,0,NULL,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?
+                 )",
+            )
+            .bind(&id)
+            .bind(&input.asset_id)
+            .bind(input.target.as_str())
+            .bind(&input.target_binding_id)
+            .bind(desired_revision.as_deref())
+            .bind(state.as_str())
+            .bind(&input.target_path)
+            .bind(input.expected_external_hash.as_deref())
+            .bind(&input.rendered_hash)
+            .bind(&input.rendered_object_hash)
+            .bind(&input.write_token)
+            .bind(input.desired_presence.as_str())
+            .bind(if input.desired_enabled { 1_i64 } else { 0_i64 })
+            .bind(input.payload_kind.as_str())
+            .bind(input.managed_paths_json.as_deref())
+            .bind(input.hub_project_id.as_deref())
+            .bind(input.base_hash.as_deref())
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(ProjectionJob {
+                id,
+                asset_id: input.asset_id,
+                target: input.target,
+                target_binding_id: input.target_binding_id,
+                desired_revision_id: input.desired_revision_id,
+                state,
+                attempt: 0,
+                last_error: None,
+                target_path: input.target_path,
+                expected_external_hash: input.expected_external_hash,
+                rendered_hash: input.rendered_hash,
+                rendered_object_hash: input.rendered_object_hash,
+                write_token: input.write_token,
+                desired_presence: input.desired_presence,
+                desired_enabled: input.desired_enabled,
+                payload_kind: input.payload_kind,
+                managed_paths_json: input.managed_paths_json,
+                hub_project_id: input.hub_project_id,
+                staging_path: None,
+                backup_path: None,
+                base_hash: input.base_hash,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+        })
+        .await
+    }
+
+    /// 按 id 读取 projection job。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     crash recovery 与测试需按 id 取 job 最新状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT by id → row_to_projection_job。
+    pub async fn get_projection_job(&self, id: &str) -> Result<Option<ProjectionJob>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, asset_id, target, target_binding_id, desired_revision_id, state, attempt,
+                    last_error, target_path, expected_external_hash, rendered_hash,
+                    rendered_object_hash, write_token, desired_presence, desired_enabled,
+                    payload_kind, managed_paths_json, hub_project_id, staging_path, backup_path,
+                    base_hash, created_at, updated_at
+             FROM agent_hub_projection_jobs WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_projection_job(&r)).transpose()
+    }
+
+    /// 列出 prepared/writing 的可恢复 job。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     owner 启动时必须先对账未完成 job，再处理 watcher 事件。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT WHERE state IN (prepared, writing) ORDER BY created_at。
+    pub async fn list_recoverable_projection_jobs(&self) -> Result<Vec<ProjectionJob>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, target_binding_id, desired_revision_id, state, attempt,
+                    last_error, target_path, expected_external_hash, rendered_hash,
+                    rendered_object_hash, write_token, desired_presence, desired_enabled,
+                    payload_kind, managed_paths_json, hub_project_id, staging_path, backup_path,
+                    base_hash, created_at, updated_at
+             FROM agent_hub_projection_jobs
+             WHERE state IN ('prepared', 'writing')
+             ORDER BY created_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(row_to_projection_job(&row)?);
+        }
+        Ok(out)
+    }
+
+    /// 列出 ready 可跑的 prepared job。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     scheduler 每轮领取 prepared job。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT prepared ORDER BY created_at LIMIT。
+    pub async fn list_prepared_projection_jobs(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ProjectionJob>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, target_binding_id, desired_revision_id, state, attempt,
+                    last_error, target_path, expected_external_hash, rendered_hash,
+                    rendered_object_hash, write_token, desired_presence, desired_enabled,
+                    payload_kind, managed_paths_json, hub_project_id, staging_path, backup_path,
+                    base_hash, created_at, updated_at
+             FROM agent_hub_projection_jobs
+             WHERE state = 'prepared'
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(row_to_projection_job(&row)?);
+        }
+        Ok(out)
+    }
+
+    /// 更新 projection job 状态与路径元数据。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     writing/committed/failed/drifted 必须原子写回 ledger。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     UPDATE state/attempt/error/staging/backup/updated_at。
+    pub async fn update_projection_job_state(
+        &self,
+        id: &str,
+        state: ProjectionJobState,
+        attempt: u32,
+        last_error: Option<&str>,
+        staging_path: Option<&str>,
+        backup_path: Option<&str>,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let result = sqlx::query(
+                "UPDATE agent_hub_projection_jobs
+                 SET state = ?, attempt = ?, last_error = ?, staging_path = ?, backup_path = ?,
+                     updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(state.as_str())
+            .bind(attempt as i64)
+            .bind(last_error)
+            .bind(staging_path)
+            .bind(backup_path)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() == 0 {
+                return Err(AppError::not_found(format!(
+                    "agent_hub_projection_job_not_found:{id}"
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 标记 job committed 并 upsert materialization。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     只有目标 hash 校验通过后才能同时提交 job + materialization。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     同事务 UPDATE job=committed 并 upsert materialization synced。
+    pub async fn commit_projection_job(
+        &self,
+        job: &ProjectionJob,
+        observed_hash: &str,
+    ) -> Result<Materialization, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let mut tx = self.pool.begin().await?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let result = sqlx::query(
+                "UPDATE agent_hub_projection_jobs
+                 SET state = ?, last_error = NULL, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(ProjectionJobState::Committed.as_str())
+            .bind(&now)
+            .bind(&job.id)
+            .execute(&mut *tx)
+            .await?;
+            if result.rows_affected() == 0 {
+                return Err(AppError::not_found(format!(
+                    "agent_hub_projection_job_not_found:{}",
+                    job.id
+                )));
+            }
+
+            let existing = sqlx::query(
+                "SELECT id, asset_id, target, target_binding_id, native_path,
+                        last_projected_revision_id, rendered_hash, observed_external_hash,
+                        status, last_error, created_at, updated_at
+                 FROM agent_hub_materializations
+                 WHERE target_binding_id = ?",
+            )
+            .bind(&job.target_binding_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            let mat = if let Some(row) = existing {
+                let id: String = row.try_get("id")?;
+                let created_at: String = row.try_get("created_at")?;
+                sqlx::query(
+                    "UPDATE agent_hub_materializations
+                     SET native_path = ?, last_projected_revision_id = ?, rendered_hash = ?,
+                         observed_external_hash = ?, status = ?, last_error = NULL, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(&job.target_path)
+                .bind(
+                    job.desired_revision_id
+                        .as_ref()
+                        .map(|r| r.as_str().to_string()),
+                )
+                .bind(&job.rendered_hash)
+                .bind(observed_hash)
+                .bind(MaterializationStatus::Synced.as_str())
+                .bind(&now)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+                Materialization {
+                    id,
+                    asset_id: job.asset_id.clone(),
+                    target: job.target,
+                    target_binding_id: job.target_binding_id.clone(),
+                    native_path: Some(job.target_path.clone()),
+                    last_projected_revision_id: job.desired_revision_id.clone(),
+                    rendered_hash: Some(job.rendered_hash.clone()),
+                    observed_external_hash: Some(observed_hash.to_string()),
+                    status: MaterializationStatus::Synced,
+                    last_error: None,
+                    created_at,
+                    updated_at: now,
+                }
+            } else {
+                let id = uuid::Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO agent_hub_materializations (
+                        id, asset_id, target, target_binding_id, native_path,
+                        last_projected_revision_id, rendered_hash, observed_external_hash,
+                        status, last_error, created_at, updated_at
+                     ) VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?)",
+                )
+                .bind(&id)
+                .bind(&job.asset_id)
+                .bind(job.target.as_str())
+                .bind(&job.target_binding_id)
+                .bind(&job.target_path)
+                .bind(
+                    job.desired_revision_id
+                        .as_ref()
+                        .map(|r| r.as_str().to_string()),
+                )
+                .bind(&job.rendered_hash)
+                .bind(observed_hash)
+                .bind(MaterializationStatus::Synced.as_str())
+                .bind(&now)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+                Materialization {
+                    id,
+                    asset_id: job.asset_id.clone(),
+                    target: job.target,
+                    target_binding_id: job.target_binding_id.clone(),
+                    native_path: Some(job.target_path.clone()),
+                    last_projected_revision_id: job.desired_revision_id.clone(),
+                    rendered_hash: Some(job.rendered_hash.clone()),
+                    observed_external_hash: Some(observed_hash.to_string()),
+                    status: MaterializationStatus::Synced,
+                    last_error: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                }
+            };
+
+            tx.commit().await?;
+            Ok(mat)
+        })
+        .await
+    }
+
+    /// 标记 materialization 为 drift/blocked 等观测状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     precondition 失败或未知外部文件时不能写盘，只更新观测。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     upsert materialization by target_binding_id。
+    pub async fn upsert_materialization(
+        &self,
+        input: NewMaterialization,
+    ) -> Result<Materialization, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let existing = sqlx::query(
+                "SELECT id, created_at FROM agent_hub_materializations
+                 WHERE target_binding_id = ?",
+            )
+            .bind(&input.target_binding_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(row) = existing {
+                let id: String = row.try_get("id")?;
+                let created_at: String = row.try_get("created_at")?;
+                sqlx::query(
+                    "UPDATE agent_hub_materializations
+                     SET native_path = ?, last_projected_revision_id = ?, rendered_hash = ?,
+                         observed_external_hash = ?, status = ?, last_error = ?, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(input.native_path.as_deref())
+                .bind(
+                    input
+                        .last_projected_revision_id
+                        .as_ref()
+                        .map(|r| r.as_str().to_string()),
+                )
+                .bind(input.rendered_hash.as_deref())
+                .bind(input.observed_external_hash.as_deref())
+                .bind(input.status.as_str())
+                .bind(input.last_error.as_deref())
+                .bind(&now)
+                .bind(&id)
+                .execute(&self.pool)
+                .await?;
+                Ok(Materialization {
+                    id,
+                    asset_id: input.asset_id,
+                    target: input.target,
+                    target_binding_id: input.target_binding_id,
+                    native_path: input.native_path,
+                    last_projected_revision_id: input.last_projected_revision_id,
+                    rendered_hash: input.rendered_hash,
+                    observed_external_hash: input.observed_external_hash,
+                    status: input.status,
+                    last_error: input.last_error,
+                    created_at,
+                    updated_at: now,
+                })
+            } else {
+                let id = uuid::Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO agent_hub_materializations (
+                        id, asset_id, target, target_binding_id, native_path,
+                        last_projected_revision_id, rendered_hash, observed_external_hash,
+                        status, last_error, created_at, updated_at
+                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                )
+                .bind(&id)
+                .bind(&input.asset_id)
+                .bind(input.target.as_str())
+                .bind(&input.target_binding_id)
+                .bind(input.native_path.as_deref())
+                .bind(
+                    input
+                        .last_projected_revision_id
+                        .as_ref()
+                        .map(|r| r.as_str().to_string()),
+                )
+                .bind(input.rendered_hash.as_deref())
+                .bind(input.observed_external_hash.as_deref())
+                .bind(input.status.as_str())
+                .bind(input.last_error.as_deref())
+                .bind(&now)
+                .bind(&now)
+                .execute(&self.pool)
+                .await?;
+                Ok(Materialization {
+                    id,
+                    asset_id: input.asset_id,
+                    target: input.target,
+                    target_binding_id: input.target_binding_id,
+                    native_path: input.native_path,
+                    last_projected_revision_id: input.last_projected_revision_id,
+                    rendered_hash: input.rendered_hash,
+                    observed_external_hash: input.observed_external_hash,
+                    status: input.status,
+                    last_error: input.last_error,
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+            }
+        })
+        .await
+    }
+
+    /// 按 target_binding 读取 materialization。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     调度与 UI 需查询当前投影观测。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT by target_binding_id。
+    pub async fn get_materialization_by_binding(
+        &self,
+        target_binding_id: &str,
+    ) -> Result<Option<Materialization>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, asset_id, target, target_binding_id, native_path,
+                    last_projected_revision_id, rendered_hash, observed_external_hash,
+                    status, last_error, created_at, updated_at
+             FROM agent_hub_materializations
+             WHERE target_binding_id = ?",
+        )
+        .bind(target_binding_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_materialization(&r)).transpose()
+    }
+
+    /// 是否存在未解决的 asset 级（canonical）conflict。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     canonical conflict 冻结该资产全部 target 投影。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT EXISTS unresolved conflict WHERE target IS NULL。
+    pub async fn has_unresolved_canonical_conflict(
+        &self,
+        asset_id: &str,
+    ) -> Result<bool, AppError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(1) FROM agent_hub_conflicts
+             WHERE asset_id = ? AND resolved = 0 AND target IS NULL",
+        )
+        .bind(asset_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 > 0)
+    }
+
+    /// 是否存在未解决的 target 级 conflict。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     target conflict 仅冻结该 target/checkout 投影。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT COUNT unresolved conflict for asset+target。
+    pub async fn has_unresolved_target_conflict(
+        &self,
+        asset_id: &str,
+        target: AgentTarget,
+    ) -> Result<bool, AppError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(1) FROM agent_hub_conflicts
+             WHERE asset_id = ? AND resolved = 0 AND target = ?",
+        )
+        .bind(asset_id)
+        .bind(target.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 > 0)
+    }
+
+    /// 插入未解决 conflict（调度冻结测试与 reconcile 共用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     冲突出现时必须落库，投影入口据此冻结。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     INSERT conflict resolved=0。
+    pub async fn insert_conflict(
+        &self,
+        asset_id: &str,
+        target: Option<AgentTarget>,
+        detail_json: &str,
+    ) -> Result<String, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO agent_hub_conflicts (
+                    id, asset_id, target, base_revision_id, hub_revision_id,
+                    external_revision_id, detail_json, resolved, created_at, resolved_at
+                 ) VALUES (?,?,?,NULL,NULL,NULL,?,0,?,NULL)",
+            )
+            .bind(&id)
+            .bind(asset_id)
+            .bind(target.map(|t| t.as_str().to_string()))
+            .bind(detail_json)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(id)
+        })
+        .await
+    }
+
+    /// 检查 hub_project 是否已 opt-in。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     未 opt-in 项目禁止插入 projection job。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT opted_in FROM project_mappings。
+    pub async fn is_hub_project_opted_in(&self, hub_project_id: &str) -> Result<bool, AppError> {
+        let row =
+            sqlx::query("SELECT opted_in FROM agent_hub_project_mappings WHERE hub_project_id = ?")
+                .bind(hub_project_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(match row {
+            Some(r) => {
+                let v: i64 = r.try_get("opted_in")?;
+                v != 0
+            }
+            None => false,
+        })
+    }
 }
 
 /// Agent Hub 项目映射行（本机 portable 身份）。
@@ -1066,6 +1629,19 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
         state TEXT NOT NULL,
         attempt INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
+        target_path TEXT,
+        expected_external_hash TEXT,
+        rendered_hash TEXT,
+        rendered_object_hash TEXT,
+        write_token TEXT,
+        desired_presence TEXT,
+        desired_enabled INTEGER NOT NULL DEFAULT 1,
+        payload_kind TEXT NOT NULL DEFAULT 'file',
+        managed_paths_json TEXT,
+        hub_project_id TEXT,
+        staging_path TEXT,
+        backup_path TEXT,
+        base_hash TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )",
@@ -1178,6 +1754,60 @@ async fn migrate_agent_hub_columns(pool: &SqlitePool) -> Result<(), AppError> {
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_project_mappings_hub
          ON agent_hub_project_mappings(hub_project_id)",
+    )
+    .execute(pool)
+    .await?;
+
+    let job_cols = table_column_names(pool, "agent_hub_projection_jobs").await?;
+    for (col, ddl) in [
+        ("target_path", "ALTER TABLE agent_hub_projection_jobs ADD COLUMN target_path TEXT"),
+        (
+            "expected_external_hash",
+            "ALTER TABLE agent_hub_projection_jobs ADD COLUMN expected_external_hash TEXT",
+        ),
+        ("rendered_hash", "ALTER TABLE agent_hub_projection_jobs ADD COLUMN rendered_hash TEXT"),
+        (
+            "rendered_object_hash",
+            "ALTER TABLE agent_hub_projection_jobs ADD COLUMN rendered_object_hash TEXT",
+        ),
+        ("write_token", "ALTER TABLE agent_hub_projection_jobs ADD COLUMN write_token TEXT"),
+        (
+            "desired_presence",
+            "ALTER TABLE agent_hub_projection_jobs ADD COLUMN desired_presence TEXT",
+        ),
+        (
+            "desired_enabled",
+            "ALTER TABLE agent_hub_projection_jobs ADD COLUMN desired_enabled INTEGER NOT NULL DEFAULT 1",
+        ),
+        (
+            "payload_kind",
+            "ALTER TABLE agent_hub_projection_jobs ADD COLUMN payload_kind TEXT NOT NULL DEFAULT 'file'",
+        ),
+        (
+            "managed_paths_json",
+            "ALTER TABLE agent_hub_projection_jobs ADD COLUMN managed_paths_json TEXT",
+        ),
+        (
+            "hub_project_id",
+            "ALTER TABLE agent_hub_projection_jobs ADD COLUMN hub_project_id TEXT",
+        ),
+        ("staging_path", "ALTER TABLE agent_hub_projection_jobs ADD COLUMN staging_path TEXT"),
+        ("backup_path", "ALTER TABLE agent_hub_projection_jobs ADD COLUMN backup_path TEXT"),
+        ("base_hash", "ALTER TABLE agent_hub_projection_jobs ADD COLUMN base_hash TEXT"),
+    ] {
+        if !job_cols.iter().any(|c| c == col) {
+            sqlx::query(ddl).execute(pool).await?;
+        }
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_agent_hub_projection_jobs_state
+         ON agent_hub_projection_jobs(state, updated_at)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_agent_hub_projection_jobs_asset
+         ON agent_hub_projection_jobs(asset_id, state)",
     )
     .execute(pool)
     .await?;
@@ -1389,6 +2019,100 @@ fn row_to_target_binding(row: &SqliteRow) -> Result<TargetBinding, AppError> {
         checkout_binding_id: row.try_get("checkout_binding_id")?,
         desired_presence,
         desired_enabled: enabled_i != 0,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// 解析 projection job 行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     crash recovery 与调度需完整 job 字段。
+///
+/// Code Logic（这个函数做什么）:
+///     fail-closed 解析枚举与可选字段。
+fn row_to_projection_job(row: &SqliteRow) -> Result<ProjectionJob, AppError> {
+    let target_raw: String = row.try_get("target")?;
+    let target = AgentTarget::parse(&target_raw)
+        .ok_or_else(|| AppError::generic(format!("agent_hub_unknown_agent_target:{target_raw}")))?;
+    let state_raw: String = row.try_get("state")?;
+    let state = ProjectionJobState::parse(&state_raw).ok_or_else(|| {
+        AppError::generic(format!("agent_hub_unknown_projection_state:{state_raw}"))
+    })?;
+    let presence_raw: Option<String> = row.try_get("desired_presence")?;
+    let desired_presence = match presence_raw.as_deref() {
+        None | Some("") => DesiredPresence::Present,
+        Some(s) => DesiredPresence::parse(s)
+            .ok_or_else(|| AppError::generic(format!("agent_hub_unknown_desired_presence:{s}")))?,
+    };
+    let enabled_i: i64 = row.try_get("desired_enabled").unwrap_or(1);
+    let kind_raw: String = row
+        .try_get::<Option<String>, _>("payload_kind")?
+        .unwrap_or_else(|| "file".to_string());
+    let payload_kind = ProjectionPayloadKind::parse(&kind_raw)
+        .ok_or_else(|| AppError::generic(format!("agent_hub_unknown_payload_kind:{kind_raw}")))?;
+    let attempt_i: i64 = row.try_get("attempt")?;
+    let rev: Option<String> = row.try_get("desired_revision_id")?;
+    let target_path: Option<String> = row.try_get("target_path")?;
+    let rendered_hash: Option<String> = row.try_get("rendered_hash")?;
+    let rendered_object_hash: Option<String> = row.try_get("rendered_object_hash")?;
+    let write_token: Option<String> = row.try_get("write_token")?;
+    Ok(ProjectionJob {
+        id: row.try_get("id")?,
+        asset_id: row.try_get("asset_id")?,
+        target,
+        target_binding_id: row.try_get("target_binding_id")?,
+        desired_revision_id: rev.map(RevisionId),
+        state,
+        attempt: attempt_i.max(0) as u32,
+        last_error: row.try_get("last_error")?,
+        target_path: target_path.unwrap_or_default(),
+        expected_external_hash: row.try_get("expected_external_hash")?,
+        rendered_hash: rendered_hash.unwrap_or_default(),
+        rendered_object_hash: rendered_object_hash.unwrap_or_default(),
+        write_token: write_token.unwrap_or_default(),
+        desired_presence,
+        desired_enabled: enabled_i != 0,
+        payload_kind,
+        managed_paths_json: row.try_get("managed_paths_json")?,
+        hub_project_id: row.try_get("hub_project_id")?,
+        staging_path: row.try_get("staging_path")?,
+        backup_path: row.try_get("backup_path")?,
+        base_hash: row.try_get("base_hash")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// 解析 materialization 行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     观测状态 round-trip 依赖完整 Materialization。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 target/status 与 hash 字段。
+fn row_to_materialization(row: &SqliteRow) -> Result<Materialization, AppError> {
+    let target_raw: String = row.try_get("target")?;
+    let target = AgentTarget::parse(&target_raw)
+        .ok_or_else(|| AppError::generic(format!("agent_hub_unknown_agent_target:{target_raw}")))?;
+    let status_raw: String = row.try_get("status")?;
+    let status = MaterializationStatus::parse(&status_raw).ok_or_else(|| {
+        AppError::generic(format!(
+            "agent_hub_unknown_materialization_status:{status_raw}"
+        ))
+    })?;
+    let rev: Option<String> = row.try_get("last_projected_revision_id")?;
+    Ok(Materialization {
+        id: row.try_get("id")?,
+        asset_id: row.try_get("asset_id")?,
+        target,
+        target_binding_id: row.try_get("target_binding_id")?,
+        native_path: row.try_get("native_path")?,
+        last_projected_revision_id: rev.map(RevisionId),
+        rendered_hash: row.try_get("rendered_hash")?,
+        observed_external_hash: row.try_get("observed_external_hash")?,
+        status,
+        last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

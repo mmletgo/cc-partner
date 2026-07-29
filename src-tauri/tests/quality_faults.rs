@@ -17,6 +17,7 @@
 //!     - `L2-FAULT-TRANSFER-SEND-001`：`malformed_transfer_init_dto_fails_closed`
 //!     - `L2-FAULT-SCRATCH-TX-001`：`scratchpad_inject_fail_rolls_back_batch`
 //!     - `L2-FAULT-SETTINGS-001`：`settings_partial_command_failure_isolates_fields`
+//!     - `L2-FAULT-AGENT-HUB-PROJECTION-001`：`agent_hub_projection_*` 故障注入（temp/sync/precondition/rename/db commit）
 //!     - `L2-LAN-BOUNDARY-001`：**不在本文件重复**；权威自动化矩阵见
 //!       `tests/lan_trust_boundary_smoke.rs` + `lan_trust_boundary_harness`
 //!       （无凭据 loopback/mobile 读写、Host/Origin、stop loopback+token、
@@ -42,8 +43,11 @@ use app_lib::config_store::{
     ConfigIoStage, ConfigStore, FaultInjectingConfigIo, FsConfigStore, StdConfigIo,
 };
 use app_lib::{
-    ClaudeHistoryRepo, ClaudeHistoryRow, PeerCallError, PeerClient, ScratchpadRepo, ScratchpadRow,
-    TransferCompletePolicy,
+    agent_hub_sha256_hex, AgentHubObjectStore, AgentHubRepo, AgentTarget, AssetKind, AssetPolicy,
+    ClaudeHistoryRepo, ClaudeHistoryRow, DesiredPresence, NewLogicalAsset, NewScopeNode,
+    NewTargetBinding, PeerCallError, PeerClient, ProjectionJobState, ProjectionPayloadKind,
+    ProjectionRequest, ProjectionScheduler, ProjectionWriteFault, RevisionId, ScopeKind,
+    ScratchpadRepo, ScratchpadRow, TransferCompletePolicy,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -197,7 +201,7 @@ fn sample_settings_config(data_dir: &Path, device_name: &str) -> AppConfig {
         health: Default::default(),
         orchestrator: Default::default(),
         github_trending: Default::default(),
-        agent_hub: crate::config::AgentHubConfig::default(),
+        agent_hub: app_lib::config::AgentHubConfig::default(),
     }
 }
 
@@ -841,5 +845,228 @@ fn lan_boundary_l2_entry_is_documented_not_duplicated() {
     assert!(
         !label.to_ascii_lowercase().contains("verified production"),
         "label must not imply production multi-host verification"
+    );
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Agent Hub projection 故障注入需要隔离 SQLite + CAS 根，避免污染用户库。
+///
+/// Code Logic（这个函数做什么）:
+///     临时目录建 schema、ObjectStore、ProjectionScheduler。
+async fn setup_agent_hub_projection() -> (ProjectionScheduler, AgentHubRepo, tempfile::TempDir) {
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("agent_hub_projection.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("connect");
+    AgentHubRepo::ensure_schema(&pool).await.expect("schema");
+    let repo = AgentHubRepo::new(pool);
+    let store = AgentHubObjectStore::open(dir.path()).expect("object store");
+    let sched = ProjectionScheduler::new(repo.clone(), store);
+    (sched, repo, dir)
+}
+
+/// 种子 asset + binding。
+///
+/// Business Logic: fault 测试需要合法 binding 才能入队。
+/// Code Logic: user scope + instruction asset + claude binding。
+async fn seed_projection_binding(repo: &AgentHubRepo) -> (String, String) {
+    let scope = repo
+        .insert_scope(NewScopeNode {
+            id: Some("scope-user".into()),
+            kind: ScopeKind::User,
+            hub_project_id: None,
+            relative_path: None,
+        })
+        .await
+        .expect("scope");
+    let asset = repo
+        .insert_asset(NewLogicalAsset {
+            scope_id: scope.id,
+            kind: AssetKind::Instruction,
+            origin_namespace: "standalone".into(),
+            logical_key: "root".into(),
+            display_name: "root".into(),
+            policy: AssetPolicy::Shared,
+        })
+        .await
+        .expect("asset");
+    let binding = repo
+        .upsert_target_binding(NewTargetBinding {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: true,
+        })
+        .await
+        .expect("binding");
+    (asset.id, binding.id)
+}
+
+fn file_projection_request(
+    asset_id: &str,
+    binding_id: &str,
+    path: &Path,
+    bytes: &[u8],
+    expected: Option<&str>,
+) -> ProjectionRequest {
+    let hash = agent_hub_sha256_hex(bytes);
+    ProjectionRequest {
+        asset_id: asset_id.into(),
+        target: AgentTarget::Claude,
+        target_binding_id: binding_id.into(),
+        desired_revision_id: Some(RevisionId::new_v7()),
+        target_path: path.to_string_lossy().to_string(),
+        expected_external_hash: expected.map(|s| s.to_string()),
+        rendered_hash: hash,
+        rendered_bytes: bytes.to_vec(),
+        desired_presence: DesiredPresence::Present,
+        desired_enabled: true,
+        payload_kind: ProjectionPayloadKind::File,
+        directory_entries: None,
+        managed_paths: None,
+        hub_project_id: None,
+        base_hash: expected.map(|s| s.to_string()),
+    }
+}
+
+/// L2-FAULT-AGENT-HUB-PROJECTION-001：temp write 故障不得留下半截目标。
+///
+/// Business Logic（为什么需要这个测试）:
+///     投影在 temp write 失败时必须保留旧完整文件。
+///
+/// Code Logic（这个测试做什么）:
+///     inject TempWrite → run_ready_jobs failed → 目标仍为 old，无 .tmp 残留。
+#[tokio::test]
+async fn agent_hub_projection_temp_write_fault_preserves_old_file() {
+    let (sched, repo, dir) = setup_agent_hub_projection().await;
+    let (asset, binding) = seed_projection_binding(&repo).await;
+    let target = dir.path().join("CLAUDE.md");
+    std::fs::write(&target, b"old-complete").unwrap();
+    let old = agent_hub_sha256_hex(b"old-complete");
+    let req = file_projection_request(&asset, &binding, &target, b"new-complete", Some(&old));
+    let _job = sched.enqueue_projection(req).await.expect("enqueue");
+    sched
+        .inject_write_fault(Some(ProjectionWriteFault::TempWrite))
+        .await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let stats = sched.run_ready_jobs(&cancel).await.expect("run");
+    assert_eq!(stats.failed, 1);
+    assert_eq!(std::fs::read(&target).unwrap(), b"old-complete");
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "no partial temps: {leftovers:?}");
+}
+
+/// L2：file sync / rename 故障同样保留旧文件。
+#[tokio::test]
+async fn agent_hub_projection_file_sync_and_rename_faults_preserve_old() {
+    for fault in [ProjectionWriteFault::FileSync, ProjectionWriteFault::Rename] {
+        // 每故障独立 fixture，避免前一轮 prepared 残留抬高 failed 计数。
+        let (sched, repo, dir) = setup_agent_hub_projection().await;
+        let (asset, binding) = seed_projection_binding(&repo).await;
+        let target = dir.path().join(format!("f-{fault:?}.md"));
+        std::fs::write(&target, b"old-complete").unwrap();
+        let old = agent_hub_sha256_hex(b"old-complete");
+        let req = file_projection_request(&asset, &binding, &target, b"new-complete", Some(&old));
+        let _ = sched.enqueue_projection(req).await.unwrap();
+        sched.inject_write_fault(Some(fault)).await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert_eq!(stats.failed, 1, "fault={fault:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old-complete");
+    }
+}
+
+/// L2：precondition recheck 故障/漂移 → 目标不变。
+#[tokio::test]
+async fn agent_hub_projection_precondition_fault_or_drift() {
+    let (sched, repo, dir) = setup_agent_hub_projection().await;
+    let (asset, binding) = seed_projection_binding(&repo).await;
+    let target = dir.path().join("drift.md");
+    std::fs::write(&target, b"base").unwrap();
+    let base = agent_hub_sha256_hex(b"base");
+    let req = file_projection_request(&asset, &binding, &target, b"hub", Some(&base));
+    let job = sched.enqueue_projection(req).await.unwrap();
+    // 外部改动
+    std::fs::write(&target, b"external-edit").unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+    assert!(stats.drifted >= 1 || stats.failed >= 1);
+    assert_eq!(std::fs::read(&target).unwrap(), b"external-edit");
+    let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+    assert_ne!(done.state, ProjectionJobState::Committed);
+}
+
+/// L2：DB commit 故障后按实际 hash 恢复，不得仅凭 DB prepared→committed。
+#[tokio::test]
+async fn agent_hub_projection_db_commit_fault_then_hash_recover() {
+    let (sched, repo, dir) = setup_agent_hub_projection().await;
+    let (asset, binding) = seed_projection_binding(&repo).await;
+    let target = dir.path().join("recover.md");
+    std::fs::write(&target, b"old").unwrap();
+    let old = agent_hub_sha256_hex(b"old");
+    let new_bytes = b"new-after-rename";
+    let req = file_projection_request(&asset, &binding, &target, new_bytes, Some(&old));
+    let job = sched.enqueue_projection(req).await.unwrap();
+    sched.inject_db_commit_failure(true).await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _ = sched.run_ready_jobs(&cancel).await;
+    let mid = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+    assert_ne!(
+        mid.state,
+        ProjectionJobState::Committed,
+        "must not commit on DB-only state after inject"
+    );
+    sched.inject_db_commit_failure(false).await;
+    if std::fs::read(&target).unwrap() == new_bytes {
+        let stats = sched.recover_on_startup().await.unwrap();
+        assert!(stats.recovered >= 1);
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Committed);
+        assert_eq!(std::fs::read(&target).unwrap(), new_bytes);
+    }
+}
+
+/// L2：directory 未知外部文件 → drift，绝不删除。
+#[tokio::test]
+async fn agent_hub_projection_directory_unknown_files_never_deleted() {
+    use app_lib::{AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest};
+    let dir = TempDir::new().unwrap();
+    let target = dir.path().join("skill");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("SKILL.md"), b"managed").unwrap();
+    std::fs::write(target.join("user-notes.txt"), b"keep-me").unwrap();
+    let managed = vec!["SKILL.md".to_string()];
+    let entries = vec![("SKILL.md".to_string(), b"new".to_vec())];
+    let writer = AtomicProjectionWriter::new();
+    let out = writer
+        .write_directory(DirectoryWriteRequest {
+            target_dir: &target,
+            managed_paths: &managed,
+            entries: &entries,
+            rendered_hash: &agent_hub_sha256_hex(b"tree"),
+            expected_external_hash: Some("base"),
+        })
+        .unwrap();
+    assert!(matches!(
+        out,
+        AtomicWriteOutcome::DirectoryUnknownFiles { .. }
+    ));
+    assert_eq!(
+        std::fs::read(target.join("user-notes.txt")).unwrap(),
+        b"keep-me"
     );
 }

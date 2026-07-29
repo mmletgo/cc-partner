@@ -771,3 +771,249 @@ pub struct AgentHubConflict {
     /// 解决时间
     pub resolved_at: Option<String>,
 }
+
+/// 投影 job 持久状态。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     文件系统与 DB 无法单事务，必须用 job ledger 对账 crash recovery。
+///
+/// Code Logic（这个枚举做什么）:
+///     prepared/writing/committed/failed/blocked/drifted。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectionJobState {
+    /// 已入队，尚未写盘
+    Prepared,
+    /// 正在写临时文件/原子替换
+    Writing,
+    /// materialization 已提交
+    Committed,
+    /// 可重试失败
+    Failed,
+    /// 冲突/前置条件阻塞
+    Blocked,
+    /// 目标漂移，需 reconcile
+    Drifted,
+}
+
+impl ProjectionJobState {
+    /// 稳定 wire/DB 字符串。
+    ///
+    /// Business Logic: job ledger 与 crash recovery 依赖稳定 token。
+    /// Code Logic: camelCase as_str。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Writing => "writing",
+            Self::Committed => "committed",
+            Self::Failed => "failed",
+            Self::Blocked => "blocked",
+            Self::Drifted => "drifted",
+        }
+    }
+
+    /// 解析 wire/DB 字符串。
+    ///
+    /// Business Logic: 未知状态 fail-closed。
+    /// Code Logic: 仅匹配 as_str。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "prepared" => Some(Self::Prepared),
+            "writing" => Some(Self::Writing),
+            "committed" => Some(Self::Committed),
+            "failed" => Some(Self::Failed),
+            "blocked" => Some(Self::Blocked),
+            "drifted" => Some(Self::Drifted),
+            _ => None,
+        }
+    }
+
+    /// 是否仍处于未完成、可恢复状态。
+    ///
+    /// Business Logic: owner 启动时只对账 prepared/writing。
+    /// Code Logic: prepared|writing。
+    pub fn is_recoverable(self) -> bool {
+        matches!(self, Self::Prepared | Self::Writing)
+    }
+}
+
+/// 投影 payload 形态。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     单文件与目录（Skill/Plugin）原子替换策略不同。
+///
+/// Code Logic（这个枚举做什么）:
+///     `file` / `directory`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectionPayloadKind {
+    /// 单文件原子替换
+    File,
+    /// 目录 sibling staging + backup rename
+    Directory,
+}
+
+impl ProjectionPayloadKind {
+    /// 稳定 wire/DB 字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+        }
+    }
+
+    /// 解析 wire/DB 字符串。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "file" => Some(Self::File),
+            "directory" => Some(Self::Directory),
+            _ => None,
+        }
+    }
+}
+
+/// 持久 projection job。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     crash 后必须根据 job + 实际 hash 判定继续/回滚/re-reconcile，不能只信 DB。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存目标路径、expected/rendered hash、CAS 对象引用与状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionJob {
+    /// 主键
+    pub id: String,
+    /// 逻辑资产 id
+    pub asset_id: String,
+    /// 目标 CLI
+    pub target: AgentTarget,
+    /// target binding id
+    pub target_binding_id: String,
+    /// 期望 revision
+    pub desired_revision_id: Option<RevisionId>,
+    /// job 状态
+    pub state: ProjectionJobState,
+    /// 尝试次数
+    pub attempt: u32,
+    /// 最近错误
+    pub last_error: Option<String>,
+    /// 目标绝对路径
+    pub target_path: String,
+    /// 写前期望的外部 hash（空=目标不存在）
+    pub expected_external_hash: Option<String>,
+    /// 渲染后内容 hash
+    pub rendered_hash: String,
+    /// CAS 中渲染正文/树 manifest 的 object hash
+    pub rendered_object_hash: String,
+    /// 去环 write token
+    pub write_token: String,
+    /// desired presence
+    pub desired_presence: DesiredPresence,
+    /// desired enabled
+    pub desired_enabled: bool,
+    /// file 或 directory
+    pub payload_kind: ProjectionPayloadKind,
+    /// 目录投影受管相对路径 JSON 数组
+    pub managed_paths_json: Option<String>,
+    /// 关联 hub project（opt-in 过滤；user scope 为空）
+    pub hub_project_id: Option<String>,
+    /// 临时 staging 路径
+    pub staging_path: Option<String>,
+    /// 目录备份路径
+    pub backup_path: Option<String>,
+    /// 写前 base hash 快照
+    pub base_hash: Option<String>,
+    /// 创建时间
+    pub created_at: String,
+    /// 更新时间
+    pub updated_at: String,
+}
+
+/// 新建 projection job 输入（入队前）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     scheduler 入队只需业务字段，id/时间戳由仓储生成。
+///
+/// Code Logic（这个结构体做什么）:
+///     不含 id/state/attempt。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewProjectionJob {
+    /// 逻辑资产 id
+    pub asset_id: String,
+    /// 目标 CLI
+    pub target: AgentTarget,
+    /// target binding id
+    pub target_binding_id: String,
+    /// 期望 revision
+    pub desired_revision_id: Option<RevisionId>,
+    /// 目标绝对路径
+    pub target_path: String,
+    /// 写前期望外部 hash
+    pub expected_external_hash: Option<String>,
+    /// 渲染 hash
+    pub rendered_hash: String,
+    /// CAS object hash
+    pub rendered_object_hash: String,
+    /// write token
+    pub write_token: String,
+    /// desired presence
+    pub desired_presence: DesiredPresence,
+    /// desired enabled
+    pub desired_enabled: bool,
+    /// payload 形态
+    pub payload_kind: ProjectionPayloadKind,
+    /// 受管路径 JSON
+    pub managed_paths_json: Option<String>,
+    /// hub project id
+    pub hub_project_id: Option<String>,
+    /// base hash
+    pub base_hash: Option<String>,
+}
+
+/// 新建 materialization 输入。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     投影成功后 upsert materialization 观测状态。
+///
+/// Code Logic（这个结构体做什么）:
+///     不含 id/时间戳。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewMaterialization {
+    /// 逻辑资产 id
+    pub asset_id: String,
+    /// 目标 CLI
+    pub target: AgentTarget,
+    /// target binding id
+    pub target_binding_id: String,
+    /// 原生路径
+    pub native_path: Option<String>,
+    /// 上次成功 revision
+    pub last_projected_revision_id: Option<RevisionId>,
+    /// 渲染 hash
+    pub rendered_hash: Option<String>,
+    /// 观测外部 hash
+    pub observed_external_hash: Option<String>,
+    /// 状态
+    pub status: MaterializationStatus,
+    /// 最近错误
+    pub last_error: Option<String>,
+}
+
+/// 未解决 conflict 摘要（调度冻结用）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     canonical conflict 冻结资产全部 target；target conflict 仅冻结该 target。
+///
+/// Code Logic（这个结构体做什么）:
+///     asset_id + optional target。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictFreezeKey {
+    /// 资产 id
+    pub asset_id: String,
+    /// None = canonical 级冲突
+    pub target: Option<AgentTarget>,
+}
