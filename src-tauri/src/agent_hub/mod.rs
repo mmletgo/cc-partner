@@ -22,6 +22,7 @@
 //!     Gate B Task 4：`support` 版本化 adapter support manifest（fail-closed 写能力）。
 //!     Gate B Task 5：`packages` 隔离 managed package 物化 + target activator。
 //!     Gate B Task 6：`packages/adoption` legacy standalone 纳管（激活-before-removal，无双发现）。
+//!     Gate B Task 7：target presence/enabled/detach/delete 语义与聚合状态。
 
 pub mod assets;
 pub mod autostart;
@@ -66,11 +67,13 @@ pub use migration::{
     USER_INSTRUCTION_NAMESPACE, USER_SCOPE_STABLE_ID,
 };
 pub use models::{
-    AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget, AssetKind, AssetPolicy,
-    DesiredPresence, LogicalAsset, Materialization, MaterializationStatus, NewLogicalAsset,
-    NewMaterialization, NewProjectionJob, NewRevision, NewScopeNode, NewTargetBinding,
-    ProjectionJob, ProjectionJobState, ProjectionPayloadKind, Revision, RevisionId,
-    RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
+    compute_asset_aggregate_status, AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget,
+    AssetAggregateStatus, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, Materialization,
+    MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob, NewRevision,
+    NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState, ProjectionPayloadKind,
+    Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode,
+    TargetBinding, TargetBindingIntent, TargetBindingTransition, TargetDisableStrategy,
+    TargetStatusSnapshot,
 };
 pub use object_store::{
     sha256_hex, ObjectStore, PutTreeResult, StoredObject, TreeEntry, TreeEntryDiagnostic,
@@ -110,9 +113,11 @@ pub use service::{
     set_target_binding_for_state, update_instruction_block_for_state, update_instruction_for_state,
     AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubConflictDto,
     AgentHubConflictResolution, AgentHubInstructionBlockDto, AgentHubProbeDto, AgentHubService,
-    AgentHubStatusDto, AgentHubTargetBindingDto, AgentHubTargetCellDto, InstructionBlockDto,
-    ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
-    SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
+    AgentHubStatusDto, AgentHubTargetBindingDto, AgentHubTargetCellDto,
+    DeleteAssetEverywhereRequest, InstructionBlockDto, ListAssetsRequest,
+    PairInstructionVariantsRequest, ResolveConflictRequest, RestoreDetachedTargetRequest,
+    SetTargetBindingRequest, SetTargetEnabledRequest, SetTargetPresenceRequest,
+    UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
 pub use support::{
     builtin_support_manifest, evaluate_target_support, find_target_record, format_probe_identity,

@@ -574,6 +574,43 @@ impl ProjectionScheduler {
             }
         }
 
+        // 外部整文件/目录删除 → detached：Present 不得自动重建；需 restore_detached_target。
+        if job.desired_presence == DesiredPresence::Present {
+            if let Some(mat) = self
+                .repo
+                .get_materialization_by_binding(&job.target_binding_id)
+                .await?
+            {
+                if mat.status == MaterializationStatus::Detached {
+                    self.repo
+                        .update_projection_job_state(
+                            &job.id,
+                            ProjectionJobState::Blocked,
+                            job.attempt,
+                            Some("detached_no_auto_recreate"),
+                            None,
+                            None,
+                        )
+                        .await?;
+                    // 保持 Detached 观测，不写盘
+                    self.repo
+                        .upsert_materialization(NewMaterialization {
+                            asset_id: mat.asset_id,
+                            target: mat.target,
+                            target_binding_id: mat.target_binding_id,
+                            native_path: mat.native_path.or(Some(job.target_path.clone())),
+                            last_projected_revision_id: mat.last_projected_revision_id,
+                            rendered_hash: mat.rendered_hash,
+                            observed_external_hash: None,
+                            status: MaterializationStatus::Detached,
+                            last_error: Some("detached_no_auto_recreate".into()),
+                        })
+                        .await?;
+                    return Ok(JobExecResult::Skipped);
+                }
+            }
+        }
+
         if job.desired_presence == DesiredPresence::Absent {
             return self.handle_absent_job(job).await;
         }
@@ -1595,5 +1632,82 @@ mod tests {
             }
             other => panic!("expected block, got {other:?}"),
         }
+    }
+
+    /// Business Logic: 外部整文件删除 → detached，Present job 不得自动重建。
+    /// Code Logic: materialization Detached + Present enqueue → skipped，文件仍缺失。
+    #[tokio::test]
+    async fn external_whole_file_delete_stays_detached_without_auto_recreate() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("CLAUDE.md");
+        // 不创建文件：模拟外部已删
+        let req = file_req(&asset, &binding, &target, b"should-not-write", None);
+        // 先标记 detached
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: asset.clone(),
+            target: AgentTarget::Claude,
+            target_binding_id: binding.clone(),
+            native_path: Some(target.to_string_lossy().to_string()),
+            last_projected_revision_id: None,
+            rendered_hash: Some(sha256_hex(b"old")),
+            observed_external_hash: None,
+            status: MaterializationStatus::Detached,
+            last_error: Some("external_whole_file_missing".into()),
+        })
+        .await
+        .unwrap();
+
+        let job = sched.enqueue_projection(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert_eq!(stats.committed, 0);
+        assert!(!target.exists(), "detached must not auto-recreate file");
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Detached);
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Blocked);
+        assert_eq!(
+            done.last_error.as_deref(),
+            Some("detached_no_auto_recreate")
+        );
+    }
+
+    /// Business Logic: desiredPresence=absent 仅删除该 target 受管文件，其它路径保留。
+    /// Code Logic: Absent job 删除 managed 文件后 Synced；sibling 文件不删。
+    #[tokio::test]
+    async fn absent_removes_only_target_owned_path() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("CLAUDE.md");
+        let sibling = tmp.path().join("NOTES.md");
+        let managed = b"hub content";
+        std::fs::write(&target, managed).unwrap();
+        std::fs::write(&sibling, b"user notes").unwrap();
+        let managed_hash = sha256_hex(managed);
+        let empty = b"";
+        let empty_hash = sha256_hex(empty);
+        let mut req = file_req(&asset, &binding, &target, empty, Some(&managed_hash));
+        req.desired_presence = DesiredPresence::Absent;
+        req.rendered_hash = empty_hash;
+        req.base_hash = Some(managed_hash.clone());
+        req.expected_external_hash = Some(managed_hash);
+
+        let _job = sched.enqueue_projection(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert!(stats.committed >= 1);
+        assert!(!target.exists());
+        assert!(sibling.exists(), "non-owned sibling must remain");
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Synced);
     }
 }

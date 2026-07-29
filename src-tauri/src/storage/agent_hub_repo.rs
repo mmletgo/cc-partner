@@ -3088,6 +3088,191 @@ mod tests {
         );
     }
 
+    /// Business Logic: disable 一 target 后其它 binding + canonical revision 不变。
+    /// Code Logic: Claude enabled=false；Codex present/enabled 与 head revision 保持。
+    #[tokio::test]
+    async fn disable_one_target_leaves_other_bindings_and_revision_untouched() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: "rev-keep".into(),
+                display_name: "rev-keep".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let rev = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "dev".into(),
+                payload_hash: Some("aa".repeat(32)),
+                tree_manifest_hash: None,
+                created_at: "t0".into(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        let head_before = rev.id.clone();
+        repo.upsert_target_binding(NewTargetBinding {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: true,
+        })
+        .await
+        .unwrap();
+        repo.upsert_target_binding(NewTargetBinding {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Codex,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: true,
+        })
+        .await
+        .unwrap();
+
+        // disable Claude only
+        repo.upsert_target_binding(NewTargetBinding {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: false,
+        })
+        .await
+        .unwrap();
+
+        let listed = repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        let claude = listed
+            .iter()
+            .find(|b| b.target == AgentTarget::Claude)
+            .unwrap();
+        let codex = listed
+            .iter()
+            .find(|b| b.target == AgentTarget::Codex)
+            .unwrap();
+        assert!(!claude.desired_enabled);
+        assert_eq!(claude.desired_presence, DesiredPresence::Present);
+        assert!(codex.desired_enabled);
+        assert_eq!(codex.desired_presence, DesiredPresence::Present);
+        let asset_after = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(
+            asset_after.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(head_before.as_str())
+        );
+        assert!(asset_after.deleted_at.is_none());
+    }
+
+    /// Business Logic: delete_everywhere 语义下 fan-out Absent + 一条 delete tombstone。
+    /// Code Logic: 两个 present binding → Absent/disabled；append 一次 Delete revision。
+    #[tokio::test]
+    async fn delete_everywhere_fans_out_absent_and_one_tombstone() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "everywhere".into(),
+                display_name: "everywhere".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let r1 = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "dev".into(),
+                payload_hash: Some("bb".repeat(32)),
+                tree_manifest_hash: None,
+                created_at: "t0".into(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        for target in [AgentTarget::Claude, AgentTarget::Codex] {
+            repo.upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .unwrap();
+        }
+
+        // fan-out absent
+        for target in [AgentTarget::Claude, AgentTarget::Codex] {
+            repo.upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Absent,
+                desired_enabled: false,
+            })
+            .await
+            .unwrap();
+        }
+        // one tombstone
+        let tomb = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![r1.id.clone()],
+                operation: RevisionOperation::Delete,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "dev".into(),
+                payload_hash: None,
+                tree_manifest_hash: None,
+                created_at: "t1".into(),
+                expected_parent_id: Some(r1.id.clone()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tomb.operation, RevisionOperation::Delete);
+
+        let listed = repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed
+            .iter()
+            .all(|b| { b.desired_presence == DesiredPresence::Absent && !b.desired_enabled }));
+        let asset_after = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(
+            asset_after.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(tomb.id.as_str())
+        );
+        assert!(asset_after.deleted_at.is_some());
+    }
+
     /// Business Logic: 并发写同一 head 时后写必须 CAS 失败，不得静默覆盖。
     /// Code Logic: 两次 append 相同 expected_parent_id，第二次 conflict。
     #[tokio::test]

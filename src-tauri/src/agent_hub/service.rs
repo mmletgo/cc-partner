@@ -10,8 +10,9 @@
 
 use crate::agent_hub::instructions::{InstructionBlock, InstructionBlockMode, InstructionDocument};
 use crate::agent_hub::models::{
-    AgentTarget, AssetKind, DesiredPresence, LogicalAsset, Materialization, NewRevision,
-    NewTargetBinding, RevisionId, RevisionOperation, RevisionOriginKind,
+    AgentTarget, AssetKind, DesiredPresence, LogicalAsset, Materialization, MaterializationStatus,
+    NewMaterialization, NewRevision, NewTargetBinding, RevisionId, RevisionOperation,
+    RevisionOriginKind, TargetBinding, TargetBindingIntent, TargetBindingTransition,
 };
 use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::project_scope::{
@@ -291,6 +292,47 @@ pub struct SetTargetBindingRequest {
     pub target: AgentTarget,
     pub desired_presence: DesiredPresence,
     pub desired_enabled: bool,
+}
+
+/// 设置 target presence 请求。
+///
+/// Business Logic: desiredPresence 是 target-local；Absent 只卸该 target。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTargetPresenceRequest {
+    pub asset_id: String,
+    pub target: AgentTarget,
+    pub desired_presence: DesiredPresence,
+}
+
+/// 设置 target enabled 请求。
+///
+/// Business Logic: desiredEnabled 是 target-local；不改其它 CLI。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTargetEnabledRequest {
+    pub asset_id: String,
+    pub target: AgentTarget,
+    pub desired_enabled: bool,
+}
+
+/// 恢复 detached target 请求。
+///
+/// Business Logic: 外部整文件删除后用户显式恢复，调度投影。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDetachedTargetRequest {
+    pub asset_id: String,
+    pub target: AgentTarget,
+}
+
+/// 从所有 target 删除资产请求。
+///
+/// Business Logic: 唯一生成 canonical tombstone 的入口。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAssetEverywhereRequest {
+    pub asset_id: String,
 }
 
 /// 冲突解决策略枚举（自由函数 API 使用）。
@@ -584,6 +626,325 @@ impl AgentHubService {
         let asset = load_asset_or_not_found(state, &req.asset_id).await?;
         build_summary(state, &asset).await
     }
+
+    /// Business Logic: 设置 target-local desiredPresence。
+    /// Code Logic: apply_intent → upsert binding → 可选 schedule。
+    pub async fn set_target_presence(
+        state: &AppState,
+        req: SetTargetPresenceRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        apply_target_intent(
+            state,
+            &req.asset_id,
+            req.target,
+            TargetBindingIntent::SetPresence(req.desired_presence),
+        )
+        .await
+    }
+
+    /// Business Logic: 设置 target-local desiredEnabled。
+    /// Code Logic: apply_intent → upsert enabled → schedule。
+    pub async fn set_target_enabled(
+        state: &AppState,
+        req: SetTargetEnabledRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        apply_target_intent(
+            state,
+            &req.asset_id,
+            req.target,
+            TargetBindingIntent::SetEnabled(req.desired_enabled),
+        )
+        .await
+    }
+
+    /// Business Logic: 恢复 detached materialization 并调度投影。
+    /// Code Logic: apply_intent RestoreDetached → clear Detached → Present schedule。
+    pub async fn restore_detached_target(
+        state: &AppState,
+        req: RestoreDetachedTargetRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        apply_target_intent(
+            state,
+            &req.asset_id,
+            req.target,
+            TargetBindingIntent::RestoreDetached,
+        )
+        .await
+    }
+
+    /// Business Logic: 一条 canonical tombstone + 全部 target fan-out Absent。
+    /// Code Logic: apply_intent DeleteEverywhere（target 参数仅用于定位策略入口）。
+    pub async fn delete_asset_everywhere(
+        state: &AppState,
+        req: DeleteAssetEverywhereRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        let asset = load_asset_or_not_found(state, &req.asset_id).await?;
+        let bindings = state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await?;
+        // 任选一个 present binding 或首个 binding 作为意图入口
+        let entry_target = bindings
+            .iter()
+            .find(|b| b.desired_presence == DesiredPresence::Present)
+            .or(bindings.first())
+            .map(|b| b.target)
+            .unwrap_or(AgentTarget::Claude);
+        apply_target_intent(
+            state,
+            &req.asset_id,
+            entry_target,
+            TargetBindingIntent::DeleteEverywhere,
+        )
+        .await
+    }
+}
+
+/// 执行 target binding 意图（presence/enabled/restore/everywhere）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     四条命令共享同一转移表；禁止各自猜测 tombstone。
+///
+/// Code Logic（这个函数做什么）:
+///     加载 binding/materialization → apply_intent → 写库/调度 → summary。
+async fn apply_target_intent(
+    state: &AppState,
+    asset_id: &str,
+    target: AgentTarget,
+    intent: TargetBindingIntent,
+) -> Result<AgentHubAssetSummaryDto, AppError> {
+    let asset = load_asset_or_not_found(state, asset_id).await?;
+    let bindings = state
+        .agent_hub_repo
+        .list_target_bindings_for_asset(&asset.id)
+        .await?;
+    let present_count = bindings
+        .iter()
+        .filter(|b| b.desired_presence == DesiredPresence::Present)
+        .count();
+    let binding = bindings
+        .iter()
+        .find(|b| b.target == target)
+        .cloned()
+        .unwrap_or(TargetBinding {
+            id: String::new(),
+            asset_id: asset.id.clone(),
+            target,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Absent,
+            desired_enabled: false,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        });
+    let mat = if binding.id.is_empty() {
+        None
+    } else {
+        state
+            .agent_hub_repo
+            .get_materialization_by_binding(&binding.id)
+            .await?
+    };
+    let removal_blocked: Vec<String> = Vec::new();
+    let transition = binding.apply_intent(
+        intent,
+        mat.as_ref().map(|m| m.status),
+        asset.policy,
+        present_count,
+        &removal_blocked,
+    );
+
+    match transition {
+        TargetBindingTransition::UpdateEnabled {
+            desired_enabled,
+            schedule_projection,
+            ..
+        } => {
+            state
+                .agent_hub_repo
+                .upsert_target_binding(NewTargetBinding {
+                    asset_id: asset.id.clone(),
+                    target,
+                    local_scope_mapping_id: binding.local_scope_mapping_id.clone(),
+                    checkout_binding_id: binding.checkout_binding_id.clone(),
+                    desired_presence: binding.desired_presence,
+                    desired_enabled,
+                })
+                .await?;
+            if schedule_projection {
+                schedule_after_binding_change(state, &asset.id).await;
+            }
+        }
+        TargetBindingTransition::UpdatePresence {
+            desired_presence,
+            schedule_projection,
+            ..
+        } => {
+            let enabled = if desired_presence == DesiredPresence::Absent {
+                false
+            } else {
+                binding.desired_enabled
+            };
+            state
+                .agent_hub_repo
+                .upsert_target_binding(NewTargetBinding {
+                    asset_id: asset.id.clone(),
+                    target,
+                    local_scope_mapping_id: binding.local_scope_mapping_id.clone(),
+                    checkout_binding_id: binding.checkout_binding_id.clone(),
+                    desired_presence,
+                    desired_enabled: enabled,
+                })
+                .await?;
+            if schedule_projection {
+                schedule_after_binding_change(state, &asset.id).await;
+            }
+        }
+        TargetBindingTransition::RestoreDetached {
+            desired_presence,
+            schedule_projection,
+            clear_detached_status,
+        } => {
+            let updated = state
+                .agent_hub_repo
+                .upsert_target_binding(NewTargetBinding {
+                    asset_id: asset.id.clone(),
+                    target,
+                    local_scope_mapping_id: binding.local_scope_mapping_id.clone(),
+                    checkout_binding_id: binding.checkout_binding_id.clone(),
+                    desired_presence,
+                    desired_enabled: true,
+                })
+                .await?;
+            if clear_detached_status {
+                // Pending 表示等待投影；禁止保持 Detached 否则 scheduler 会 no-op
+                state
+                    .agent_hub_repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: asset.id.clone(),
+                        target,
+                        target_binding_id: updated.id.clone(),
+                        native_path: mat.as_ref().and_then(|m| m.native_path.clone()),
+                        last_projected_revision_id: mat
+                            .as_ref()
+                            .and_then(|m| m.last_projected_revision_id.clone()),
+                        rendered_hash: mat.as_ref().and_then(|m| m.rendered_hash.clone()),
+                        observed_external_hash: None,
+                        status: MaterializationStatus::Pending,
+                        last_error: None,
+                    })
+                    .await?;
+            }
+            if schedule_projection {
+                schedule_after_binding_change(state, &asset.id).await;
+            }
+        }
+        TargetBindingTransition::DeleteEverywhere {
+            append_canonical_tombstone,
+            fan_out_absent,
+        } => {
+            if append_canonical_tombstone {
+                append_delete_tombstone(state, &asset).await?;
+            }
+            if fan_out_absent {
+                let all = state
+                    .agent_hub_repo
+                    .list_target_bindings_for_asset(&asset.id)
+                    .await?;
+                if all.is_empty() {
+                    // 确保至少把入口 target 标 absent
+                    state
+                        .agent_hub_repo
+                        .upsert_target_binding(NewTargetBinding {
+                            asset_id: asset.id.clone(),
+                            target,
+                            local_scope_mapping_id: None,
+                            checkout_binding_id: None,
+                            desired_presence: DesiredPresence::Absent,
+                            desired_enabled: false,
+                        })
+                        .await?;
+                } else {
+                    for b in all {
+                        state
+                            .agent_hub_repo
+                            .upsert_target_binding(NewTargetBinding {
+                                asset_id: asset.id.clone(),
+                                target: b.target,
+                                local_scope_mapping_id: b.local_scope_mapping_id,
+                                checkout_binding_id: b.checkout_binding_id,
+                                desired_presence: DesiredPresence::Absent,
+                                desired_enabled: false,
+                            })
+                            .await?;
+                    }
+                }
+                schedule_after_binding_change(state, &asset.id).await;
+            }
+        }
+        TargetBindingTransition::RejectLastTargetOnlyRequiresEverywhere { code } => {
+            return Err(AppError::validation(code));
+        }
+        TargetBindingTransition::RejectRemovalBlocked {
+            code,
+            preview_paths,
+        } => {
+            return Err(AppError::validation(format!(
+                "{code}:{}",
+                preview_paths.join(",")
+            )));
+        }
+    }
+
+    let asset = load_asset_or_not_found(state, asset_id).await?;
+    build_summary(state, &asset).await
+}
+
+/// ensure enabled + schedule projections（best-effort）。
+async fn schedule_after_binding_change(state: &AppState, asset_id: &str) {
+    if let Err(e) = crate::agent_hub::projection_ops::ensure_agent_hub_enabled(state).await {
+        tracing::warn!(error = %e, "agent_hub binding change ensure enabled failed");
+    }
+    if let Err(e) =
+        crate::agent_hub::projection_ops::schedule_asset_projections(state, asset_id).await
+    {
+        tracing::warn!(
+            asset_id = %asset_id,
+            error = %e,
+            "agent_hub binding change schedule projections failed"
+        );
+    }
+}
+
+/// 追加一条 delete tombstone revision 并推进 head。
+///
+/// Business Logic: delete_everywhere 只能生成一条 canonical tombstone。
+/// Code Logic: append_revision(Delete, Ui) + expected_parent head CAS。
+async fn append_delete_tombstone(state: &AppState, asset: &LogicalAsset) -> Result<(), AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let parents = asset
+        .current_revision_id
+        .clone()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let expected_parent_id = asset.current_revision_id.clone();
+    state
+        .agent_hub_repo
+        .append_revision(NewRevision {
+            id: RevisionId::new_v7(),
+            asset_lineage_id: asset.id.clone(),
+            parents,
+            operation: RevisionOperation::Delete,
+            origin_kind: RevisionOriginKind::Ui,
+            origin_target: None,
+            origin_replica_id: state.device_id.as_str().to_string(),
+            payload_hash: None,
+            tree_manifest_hash: None,
+            created_at: now,
+            expected_parent_id,
+        })
+        .await?;
+    Ok(())
 }
 
 /// 读取 Agent Hub 运行时状态。
@@ -1422,5 +1783,42 @@ mod tests {
             serde_json::to_value(AgentHubConflictResolution::Manual).unwrap(),
             serde_json::json!("manual")
         );
+    }
+
+    /// Business Logic: Gate B presence/enabled/restore/everywhere 请求 DTO 必须 camelCase 稳定。
+    /// Code Logic: serde 键名断言。
+    #[test]
+    fn presence_mutation_request_dto_camel_case_keys() {
+        let presence = SetTargetPresenceRequest {
+            asset_id: "a".into(),
+            target: AgentTarget::Claude,
+            desired_presence: DesiredPresence::Absent,
+        };
+        let v = serde_json::to_value(&presence).unwrap();
+        assert!(v.get("assetId").is_some());
+        assert!(v.get("desiredPresence").is_some());
+        assert_eq!(v.get("desiredPresence").unwrap(), "absent");
+
+        let enabled = SetTargetEnabledRequest {
+            asset_id: "a".into(),
+            target: AgentTarget::Codex,
+            desired_enabled: false,
+        };
+        let v = serde_json::to_value(&enabled).unwrap();
+        assert!(v.get("desiredEnabled").is_some());
+
+        let restore = RestoreDetachedTargetRequest {
+            asset_id: "a".into(),
+            target: AgentTarget::OpenCode,
+        };
+        let v = serde_json::to_value(&restore).unwrap();
+        assert!(v.get("assetId").is_some());
+        assert!(v.get("target").is_some());
+
+        let everywhere = DeleteAssetEverywhereRequest {
+            asset_id: "a".into(),
+        };
+        let v = serde_json::to_value(&everywhere).unwrap();
+        assert_eq!(v.get("assetId").unwrap(), "a");
     }
 }
