@@ -2,6 +2,8 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     局域网设备之间需要先展示远端 inventory，再按用户勾选的 items 生成 bundle 拉取。
+//!     Gate D Task 7：N/N+1 期间旧路由保持注册；只读 inventory/bundle 不二次 mutation target，
+//!     永不清理 CAS / 未知 Hub 表（删除受 N+2 门闩约束）。
 //!
 //! Code Logic（这个模块做什么）:
 //!     GET inventory 返回摘要 DTO；POST bundle 接收 selectors，返回只包含所选 assets 的 zip
@@ -26,10 +28,14 @@ pub async fn assets_inventory(
 }
 
 /// 按 selectors 生成 zip bundle。MCP 配置保留原文（Gate B 起不脱敏）。
+///
+/// Business Logic: 只读导出；不 GC CAS。
+/// Code Logic: build_bundle → application/zip。
 pub async fn assets_bundle(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<AssetsBundleReq>,
 ) -> P2pResult<Response<Body>> {
+    debug_assert!(!claude_code_assets::legacy_facade_allows_cas_gc());
     let bytes = claude_code_assets::build_bundle(req.items)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "assets.bundle"))?;

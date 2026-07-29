@@ -5,14 +5,18 @@
 //!     图形化入口来查看、启用/禁用、安装/卸载这些个人级资产，并能从局域网其它设备中选择性拉取。
 //!     Gate B 起扫描/归一化语义逐步迁入 Claude adapter；本模块保留旧 DTO 与 mutation 路径，
 //!     并对 P2P MCP 导出停止脱敏；旧 peer placeholder 导入标记 legacyLossy 且不得覆盖真凭据。
+//!     Gate D Task 7：Hub 启用时旧 mutation 不得二次直接写 target（须走 Agent Hub）；Hub 关闭时
+//!     继续读最后成功 target 文件，忽略未知 Hub 表，永不清理 CAS。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - 扫描 `~/.claude/skills`、`~/.claude/commands`、`claude plugin list --json` 和 user-scope MCP；
 //!     - 对 plugin/MCP 优先调用 Claude Code CLI，skills/commands 通过安全移动目录实现启停；
 //!     - P2P 导出 zip bundle 时 MCP 保留原文（env/headers/url）；
 //!     - 导入时检测 `__REDACTED_BY_CLAUDE_PARTNER__` → legacyLossy/blocked，不把 placeholder 写入为凭据；
-//!     - 诊断日志仍 value-redacted。
+//!     - 诊断日志仍 value-redacted；
+//!     - `require_legacy_direct_mutation_allowed`：Hub on 时 fail-closed。
 
+use crate::agent_hub::migration::{legacy_facade_policy, LegacyFacadePolicy};
 use crate::config;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -34,6 +38,48 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 /// 旧版本 P2P 导出写入的 MCP 脱敏占位符（仅 import 检测，新导出不再写入）。
 pub const REDACTED_PLACEHOLDER: &str = "__REDACTED_BY_CLAUDE_PARTNER__";
 const CLI_TIMEOUT_SECS: u64 = 45;
+
+/// 读取当前 Agent Hub 是否启用（配置缺失/锁失败 → false，兼容降级）。
+///
+/// Business Logic: N/N+1 façade 需要知道是否应禁止直接 mutation。
+/// Code Logic: 读 config_runtime 快照的 `agent_hub.enabled`。
+pub fn is_agent_hub_enabled(state: &AppState) -> bool {
+    state
+        .config
+        .read()
+        .map(|c| c.agent_hub.enabled)
+        .unwrap_or(false)
+}
+
+/// 当前旧入口 façade 策略（Hub 开/关）。
+///
+/// Business Logic: commands/routes 在 mutation 前查询；Hub on 时 translate、禁直接写。
+/// Code Logic: `legacy_facade_policy(is_agent_hub_enabled)`。
+pub fn current_legacy_facade_policy(state: &AppState) -> LegacyFacadePolicy {
+    legacy_facade_policy(is_agent_hub_enabled(state))
+}
+
+/// Hub 启用时拒绝旧入口对 target 的二次直接 mutation。
+///
+/// Business Logic: N/N+1 旧 DTO 只能从 Hub 翻译；mutation 必须走 Agent Hub 路径。
+/// Code Logic: `allow_direct_target_mutation=false` → Validation。
+pub fn require_legacy_direct_mutation_allowed(state: &AppState) -> Result<(), AppError> {
+    let policy = current_legacy_facade_policy(state);
+    if policy.allow_direct_target_mutation {
+        return Ok(());
+    }
+    Err(AppError::validation(
+        "agent_hub_legacy_mutation_disabled_use_agent_hub".to_string(),
+    ))
+}
+
+/// 兼容 façade 永远不得清理 CAS（降级/旧路由合同）。
+///
+/// Business Logic: 关闭 Hub 后新表与 object 不自动删除；旧版本不得当空数据清理。
+/// Code Logic: 恒返回 false（供测试与 checklist 引用）。
+pub fn legacy_facade_allows_cas_gc() -> bool {
+    false
+}
 
 /// MCP 导入时对旧 peer placeholder 的判定结果。
 ///
@@ -212,12 +258,29 @@ pub async fn list_assets() -> Result<Vec<ClaudeCodeAsset>, AppError> {
     Ok(assets)
 }
 
-/// 设置某个资产的启用状态。
+/// 设置某个资产的启用状态（无 Hub 门闩；单测 / 内部 helper 用）。
+///
+/// Business Logic: Hub 启用时旧入口不得二次直接 mutation。
+/// Code Logic: 委托 `set_asset_enabled_with_hub_guard(None, ...)`。
+#[allow(dead_code)]
 pub async fn set_asset_enabled(
     kind: ClaudeCodeAssetKind,
     id: String,
     enabled: bool,
 ) -> Result<ClaudeCodeAssetInstallReport, AppError> {
+    set_asset_enabled_with_hub_guard(None, kind, id, enabled).await
+}
+
+/// 带 Hub 门闩的 set_asset_enabled（commands 层传入 AppState）。
+pub async fn set_asset_enabled_with_hub_guard(
+    hub_guard: Option<&AppState>,
+    kind: ClaudeCodeAssetKind,
+    id: String,
+    enabled: bool,
+) -> Result<ClaudeCodeAssetInstallReport, AppError> {
+    if let Some(state) = hub_guard {
+        require_legacy_direct_mutation_allowed(state)?;
+    }
     match kind {
         ClaudeCodeAssetKind::Plugin => {
             let action = if enabled { "enable" } else { "disable" };
@@ -263,10 +326,22 @@ pub async fn set_asset_enabled(
     }
 }
 
-/// 从本机路径或 JSON 配置安装一个资产。
+/// 从本机路径或 JSON 配置安装一个资产（无 Hub 门闩；单测 / 内部 helper 用）。
+#[allow(dead_code)]
 pub async fn install_asset(
     source: ClaudeCodeInstallSource,
 ) -> Result<ClaudeCodeAssetInstallReport, AppError> {
+    install_asset_with_hub_guard(None, source).await
+}
+
+/// 带 Hub 门闩的 install_asset。
+pub async fn install_asset_with_hub_guard(
+    hub_guard: Option<&AppState>,
+    source: ClaudeCodeInstallSource,
+) -> Result<ClaudeCodeAssetInstallReport, AppError> {
+    if let Some(state) = hub_guard {
+        require_legacy_direct_mutation_allowed(state)?;
+    }
     let item = match source.kind {
         ClaudeCodeAssetKind::Skill => install_skill_from_source(&source)?,
         ClaudeCodeAssetKind::Command => install_command_from_source(&source)?,
@@ -276,12 +351,26 @@ pub async fn install_asset(
     Ok(report_from_items(vec![item]))
 }
 
-/// 卸载一个本机资产。卸载前会备份到 cc-partner 自己的备份目录。
+/// 卸载一个本机资产。卸载前会备份到 cc-partner 自己的备份目录（无 Hub 门闩）。
+#[allow(dead_code)]
 pub async fn uninstall_asset(
     kind: ClaudeCodeAssetKind,
     id: String,
     keep_data: bool,
 ) -> Result<ClaudeCodeAssetInstallReport, AppError> {
+    uninstall_asset_with_hub_guard(None, kind, id, keep_data).await
+}
+
+/// 带 Hub 门闩的 uninstall_asset。
+pub async fn uninstall_asset_with_hub_guard(
+    hub_guard: Option<&AppState>,
+    kind: ClaudeCodeAssetKind,
+    id: String,
+    keep_data: bool,
+) -> Result<ClaudeCodeAssetInstallReport, AppError> {
+    if let Some(state) = hub_guard {
+        require_legacy_direct_mutation_allowed(state)?;
+    }
     match kind {
         ClaudeCodeAssetKind::Plugin => {
             let mut args = vec!["plugin", "uninstall", &id, "--scope", "user"];

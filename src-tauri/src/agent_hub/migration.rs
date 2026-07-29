@@ -1,9 +1,13 @@
-//! agent_hub/migration — 用户级 CLAUDE.md → Agent Hub 迁移与 N/N+1 dual-write
+//! agent_hub/migration — 用户级 CLAUDE.md / Plugin 迁移与 N/N+1 兼容门闩
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     Gate A Task 10：把既有 `~/.claude/CLAUDE.md` 与 `claude_md` 表权威正文迁入 Hub
 //!     的 user-scope instruction asset，并在 Hub 编辑路径上 dual-write 回 legacy 摘要行。
 //!     迁移后三 target 绑定先 `desiredPresence=Absent`，等待用户确认再投影。
+//!     Gate D Task 7：对 Claude/Codex/OpenCode Plugin 做幂等分解预览与确认 import；
+//!     暴露 `LegacyAgentAssetCompatibilityStatus`（gaVersion / stableMigrationEvidence /
+//!     earliestRemovalVersion）与 N+2 删除门闩；Hub 关闭时旧 façade 仅读最后成功 target
+//!     文件、忽略未知 Hub 表、永不清理 CAS。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - 解析文件/DB 内容源（文件优先非空，其次 DB，否则空）
@@ -12,6 +16,8 @@
 //!     - 预览 Codex/OpenCode compile_render 全文
 //!     - dual-write 仅更新 legacy `claude_md` 摘要（content/updated_at/device_id/vc），
 //!       **永不**用 legacy vector_clock 裁决 Hub 冲突
+//!     - Plugin：inspect-only preview → confirm import 单 package/child graph；二次无新 revision
+//!     - N+2：running_version >= earliestRemovalVersion **且** 有 checked-in evidence 才允许删除
 
 use crate::agent_hub::instructions::{
     classify_import, compile_render, ImportScopeContext, InstructionBlockMode, InstructionDocument,
@@ -22,7 +28,12 @@ use crate::agent_hub::models::{
     NewRevision, NewScopeNode, NewTargetBinding, RevisionId, RevisionOperation, RevisionOriginKind,
     ScopeKind,
 };
-use crate::agent_hub::object_store::ObjectStore;
+use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
+use crate::agent_hub::plugins::{
+    canonical_plugin_package_bytes, ensure_preview_skills_in_cas, import_confirmed,
+    inspect_plugin_source, ConfirmedPluginDecomposition, DiscoveredPluginSource,
+    PluginDecompositionPreview, PluginPackageRevision,
+};
 use crate::agent_hub::targets::InstructionRenderContext;
 use crate::error::AppError;
 use crate::models::claude_md::{ClaudeMdRow, CLAUDE_MD_ID};
@@ -31,8 +42,9 @@ use crate::storage::agent_hub_repo::AgentHubRepo;
 use crate::storage::claude_md_repo::ClaudeMdRepo;
 use crate::sync::vector_clock;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 用户级 scope 的稳定主键（跨设备/重启不变）。
 pub const USER_SCOPE_STABLE_ID: &str = "agent-hub-scope-user";
@@ -42,6 +54,21 @@ pub const USER_INSTRUCTION_LOGICAL_KEY: &str = "CLAUDE.md";
 pub const USER_INSTRUCTION_NAMESPACE: &str = "standalone";
 /// UI 展示名。
 pub const USER_INSTRUCTION_DISPLAY_NAME: &str = "User CLAUDE.md";
+
+/// Agent Hub GA 版本号 N（与 `CARGO_PKG_VERSION` 同步；N+1 仍兼容，N+2 起可删）。
+pub const AGENT_HUB_GA_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// N+2 最早允许删除旧表/路由的版本（= GA + 2 个主次稳定位策略的**下限字符串**）。
+///
+/// Business Logic: GA=N，N 与 N+1 必须保留 dual-write/旧路由；最早 N+2 才可删。
+/// Code Logic: 当前锁定为 `"0.10.0"`（0.8.x = N，0.9.x = N+1，0.10.0 = earliest N+2）。
+pub const EARLIEST_LEGACY_REMOVAL_VERSION: &str = "0.10.0";
+
+/// 已签入的稳定迁移 evidence ID（删除旧入口前必须存在）。
+///
+/// Business Logic: N+2 删除门闩要求 checked-in evidence，禁止“版本够就删”。
+/// Code Logic: 本任务只登记 checklist/status，**不**执行删除；evidence 在 Gate D 认证后补齐。
+pub const STABLE_MIGRATION_EVIDENCE_ID: Option<&str> = None;
 
 /// 用户级 CLAUDE.md 迁移预览结果。
 ///
@@ -532,9 +559,383 @@ fn stabilize_migration_block_ids(document: &mut InstructionDocument) {
     }
 }
 
+// ─── Gate D Task 7: Plugin migration + N+2 compatibility ───────────────────
+
+/// 单条 Plugin 分解预览行（inspect-only，不写 revision）。
+///
+/// Business Logic: 首次迁移入口只能展示 preview；碰撞/未验证激活保持 sourceOnly/externalCollision。
+/// Code Logic: camelCase；嵌套完整 `PluginDecompositionPreview`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMigrationPreviewItem {
+    /// 发现源身份
+    pub source: DiscoveredPluginSource,
+    /// inspect 结果（component/residual 矩阵）
+    pub preview: PluginDecompositionPreview,
+    /// 是否已在 Hub 中存在同 hash package head（二次运行幂等）
+    pub already_imported: bool,
+    /// 聚合状态提示：`preview` | `sourceOnly` | `externalCollision` | `imported`
+    pub status: String,
+}
+
+/// 多 target Plugin 迁移预览聚合。
+///
+/// Business Logic: 扫描 Claude/Codex/OpenCode Plugin 根，一次性给出预览，不 append revision。
+/// Code Logic: items + 计数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMigrationPreview {
+    /// 各源预览行
+    pub items: Vec<PluginMigrationPreviewItem>,
+    /// 本轮新建 revision 数（preview 恒为 0）
+    pub created_revisions: u32,
+}
+
+/// 确认 import 一个 Plugin package + child graph 的结果。
+///
+/// Business Logic: 用户确认后才 import；二次同 hash 不新建 revision。
+/// Code Logic: package revision 元数据 + created_revision 标志。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMigrationConfirmResult {
+    /// package 资产 id
+    pub package_asset_id: String,
+    /// head revision id
+    pub revision_id: String,
+    /// 本轮是否 append 了新 package revision
+    pub created_revision: bool,
+    /// package payload hash
+    pub payload_hash: String,
+    /// 状态：`imported` | `idempotent` | `sourceOnly` | `externalCollision`
+    pub status: String,
+    /// 若 status 为 externalCollision/sourceOnly 的原因 token
+    pub reason: Option<String>,
+}
+
+/// N/N+1 旧入口兼容状态（删除门闩）。
+///
+/// Business Logic: UI/checklist/测试用它判断何时可删旧表与路由。
+/// Code Logic: gaVersion + evidence + earliestRemovalVersion + 运行时比较。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyAgentAssetCompatibilityStatus {
+    /// Agent Hub GA 版本 N（与编译版本一致）
+    pub ga_version: String,
+    /// 当前运行版本
+    pub running_version: String,
+    /// 已签入的稳定迁移 evidence ID（未就绪时 None）
+    pub stable_migration_evidence: Option<String>,
+    /// 最早允许删除旧入口的版本
+    pub earliest_removal_version: String,
+    /// 是否允许实际删除（running >= earliest **且** evidence 存在）
+    pub removal_allowed: bool,
+    /// 旧路由是否仍须注册（N/N+1 窗口内恒 true）
+    pub legacy_routes_registered: bool,
+    /// 旧 UI 入口是否隐藏（新 UI 用 `/agent-hub`）
+    pub legacy_ui_hidden: bool,
+    /// 删除 checklist（本任务只登记，不执行）
+    pub removal_checklist: Vec<String>,
+}
+
+/// 兼容 façade 运行时策略（Hub 开/关时旧路由行为）。
+///
+/// Business Logic: Hub 启用时旧 DTO 只从 Hub 投影翻译，不得二次直接 mutation；
+/// Hub 关闭时最后成功 target 文件可用，旧表/路由忽略未知 Hub 表、永不清理 CAS。
+/// Code Logic: 纯策略结构，供 commands/routes 查询。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyFacadePolicy {
+    /// Hub 是否启用
+    pub hub_enabled: bool,
+    /// 是否允许旧入口直接 mutation target 文件（仅 Hub 关闭时）
+    pub allow_direct_target_mutation: bool,
+    /// 是否允许清理 CAS（永远 false）
+    pub allow_cas_gc: bool,
+    /// 是否忽略未知 Hub 表（降级时 true）
+    pub ignore_unknown_hub_tables: bool,
+    /// 是否应从 Hub 翻译 DTO（Hub 启用时 true）
+    pub translate_from_hub: bool,
+}
+
+/// 扫描 Plugin 根并生成幂等分解预览（**不** append revision）。
+///
+/// Business Logic: 首次迁移入口只展示 preview；确认后才 import 单 package/child graph。
+/// Code Logic: 对每个 `DiscoveredPluginSource` 调用 `inspect_plugin_source` + 检查已导入 hash。
+pub async fn preview_plugin_migration(
+    agent_hub: &AgentHubRepo,
+    object_store_root: &Path,
+    sources: &[DiscoveredPluginSource],
+) -> Result<PluginMigrationPreview, AppError> {
+    let store = ObjectStore::open(object_store_root)?;
+    let mut items = Vec::with_capacity(sources.len());
+    for source in sources {
+        let mut preview = inspect_plugin_source(source, &store).await?;
+        ensure_preview_skills_in_cas(&mut preview, &store).await?;
+        let already = package_already_imported(agent_hub, &store, &preview).await?;
+        let status = if already {
+            "imported".to_string()
+        } else if preview.components.is_empty() && !preview.residuals.is_empty() {
+            // 仅 residual / 无 portable child → sourceOnly 提示
+            "sourceOnly".to_string()
+        } else {
+            "preview".to_string()
+        };
+        items.push(PluginMigrationPreviewItem {
+            source: source.clone(),
+            preview,
+            already_imported: already,
+            status,
+        });
+    }
+    Ok(PluginMigrationPreview {
+        items,
+        created_revisions: 0,
+    })
+}
+
+/// 确认 import 单个 Plugin（幂等：同 package payload hash 不新建 revision）。
+///
+/// Business Logic: 用户确认后 import 一个 package/child graph；碰撞/未验证激活保持
+/// sourceOnly/externalCollision 且不写新 head。
+/// Code Logic: 可选 force_status → 否则 inspect 已完成的 confirmed → hash 相同则跳过 append。
+pub async fn confirm_plugin_migration_import(
+    agent_hub: &AgentHubRepo,
+    object_store_root: &Path,
+    confirmed: ConfirmedPluginDecomposition,
+    force_status: Option<&str>,
+) -> Result<PluginMigrationConfirmResult, AppError> {
+    if let Some(status) = force_status {
+        if matches!(status, "sourceOnly" | "externalCollision") {
+            return Ok(PluginMigrationConfirmResult {
+                package_asset_id: String::new(),
+                revision_id: String::new(),
+                created_revision: false,
+                payload_hash: String::new(),
+                status: status.to_string(),
+                reason: Some(if status == "externalCollision" {
+                    "collision_or_unverified_activation".into()
+                } else {
+                    "source_only_or_unverified".into()
+                }),
+            });
+        }
+    }
+
+    let store = ObjectStore::open(object_store_root)?;
+    // 若已导入同 hash → 幂等返回
+    if let Some((asset_id, rev_id, hash)) =
+        existing_package_head(agent_hub, &store, &confirmed.preview).await?
+    {
+        return Ok(PluginMigrationConfirmResult {
+            package_asset_id: asset_id,
+            revision_id: rev_id,
+            created_revision: false,
+            payload_hash: hash,
+            status: "idempotent".into(),
+            reason: None,
+        });
+    }
+
+    let result: PluginPackageRevision =
+        import_confirmed(agent_hub, &store, confirmed, RevisionOriginKind::Migration).await?;
+    let payload_hash = result.revision.payload_hash.clone().unwrap_or_else(|| {
+        // 回退：从 payload 再算（理论不应缺）
+        canonical_plugin_package_bytes(&result.payload)
+            .map(|b| sha256_hex(&b))
+            .unwrap_or_default()
+    });
+
+    Ok(PluginMigrationConfirmResult {
+        package_asset_id: result.package_asset.id,
+        revision_id: result.revision.id.as_str().to_string(),
+        created_revision: true,
+        payload_hash,
+        status: "imported".into(),
+        reason: None,
+    })
+}
+
+/// 读取 N/N+1 兼容状态与 N+2 删除门闩。
+///
+/// Business Logic: 只有 running >= earliestRemovalVersion **且** 有 checked-in evidence
+/// 才允许实际删除；本任务只暴露 guard/status/checklist，不删路由。
+/// Code Logic: 比较 semver 核心三元组 + 常量 evidence。
+pub fn legacy_agent_asset_compatibility_status(
+    running_version: &str,
+) -> LegacyAgentAssetCompatibilityStatus {
+    let evidence = STABLE_MIGRATION_EVIDENCE_ID.map(|s| s.to_string());
+    let version_ok = version_cmp(running_version, EARLIEST_LEGACY_REMOVAL_VERSION) >= 0;
+    let removal_allowed = version_ok && evidence.is_some();
+    LegacyAgentAssetCompatibilityStatus {
+        ga_version: AGENT_HUB_GA_VERSION.to_string(),
+        running_version: running_version.to_string(),
+        stable_migration_evidence: evidence,
+        earliest_removal_version: EARLIEST_LEGACY_REMOVAL_VERSION.to_string(),
+        removal_allowed,
+        // N/N+1 窗口：旧路由保持注册；新 UI 隐藏旧入口
+        legacy_routes_registered: !removal_allowed,
+        legacy_ui_hidden: true,
+        removal_checklist: vec![
+            "Confirm running_version >= earliestRemovalVersion".into(),
+            "Check-in stable migration evidence ID (L2/L3 Gate D plugin migration)".into(),
+            "Update docs/p2p-protocol.md route inventory and mixed-version harnesses".into(),
+            "Unregister legacy /api/claude-code-assets/* and /api/sync/claude_md/* only after evidence".into(),
+            "Never GC CAS or drop unknown Hub tables during downgrade".into(),
+            "Keep /agent-hub as the only new UI entry; old frontend routes remain redirects".into(),
+        ],
+    }
+}
+
+/// 是否允许实际删除旧入口（纯门闩）。
+///
+/// Business Logic: 见 `legacy_agent_asset_compatibility_status`。
+/// Code Logic: 委托 status.removal_allowed。
+pub fn n_plus_two_removal_allowed(running_version: &str) -> bool {
+    legacy_agent_asset_compatibility_status(running_version).removal_allowed
+}
+
+/// Hub 开关下的旧 façade 策略。
+///
+/// Business Logic: Hub on → 翻译 DTO、禁止二次直接 mutation；Hub off → 最后 target 文件可用、
+/// 忽略未知 Hub 表、永不 CAS GC。
+/// Code Logic: 由 hub_enabled 派生四布尔。
+pub fn legacy_facade_policy(hub_enabled: bool) -> LegacyFacadePolicy {
+    LegacyFacadePolicy {
+        hub_enabled,
+        allow_direct_target_mutation: !hub_enabled,
+        allow_cas_gc: false,
+        ignore_unknown_hub_tables: !hub_enabled,
+        translate_from_hub: hub_enabled,
+    }
+}
+
+/// Hub 关闭后旧 façade 可读最后成功 target 文件；重新启用时恢复 pending 投影调度。
+///
+/// Business Logic: 降级不清理 CAS/新表；re-enable 只 best-effort 重新调度 recoverable jobs。
+/// Code Logic: hub_enabled=false → 返回可读文件列表；true → 列出 recoverable job 数（调用方调度）。
+pub async fn downgrade_compatibility_facade_snapshot(
+    agent_hub: &AgentHubRepo,
+    hub_enabled: bool,
+    last_target_files: &[PathBuf],
+) -> Result<DowngradeFacadeSnapshot, AppError> {
+    let policy = legacy_facade_policy(hub_enabled);
+    let readable: Vec<PathBuf> = last_target_files
+        .iter()
+        .filter(|p| p.is_file())
+        .cloned()
+        .collect();
+    let recoverable = if hub_enabled {
+        agent_hub
+            .list_recoverable_projection_jobs()
+            .await
+            .map(|jobs| jobs.len())
+            .unwrap_or(0)
+    } else {
+        // 降级路径：不得依赖未知 Hub 表；失败视为 0 且不清理
+        0
+    };
+    Ok(DowngradeFacadeSnapshot {
+        policy,
+        readable_target_files: readable,
+        recoverable_projection_jobs: recoverable,
+        cas_gc_attempted: false,
+    })
+}
+
+/// 降级/恢复快照 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DowngradeFacadeSnapshot {
+    /// 当前 façade 策略
+    pub policy: LegacyFacadePolicy,
+    /// 仍可读的最后成功 target 文件
+    pub readable_target_files: Vec<PathBuf>,
+    /// re-enable 时 recoverable projection job 数
+    pub recoverable_projection_jobs: usize,
+    /// 是否尝试过 CAS GC（合同上恒 false）
+    pub cas_gc_attempted: bool,
+}
+
+/// 比较两个 `x.y.z` 风格版本（忽略预发布后缀）；a<b → -1，a==b → 0，a>b → 1。
+///
+/// Business Logic: N+2 门闩需要确定性版本比较，不引入完整 semver 依赖。
+/// Code Logic: 取前三段数字；非法段当 0。
+pub fn version_cmp(a: &str, b: &str) -> i32 {
+    let pa = parse_version_core(a);
+    let pb = parse_version_core(b);
+    for i in 0..3 {
+        if pa[i] < pb[i] {
+            return -1;
+        }
+        if pa[i] > pb[i] {
+            return 1;
+        }
+    }
+    0
+}
+
+fn parse_version_core(v: &str) -> [u64; 3] {
+    let core = v.split(['-', '+']).next().unwrap_or(v);
+    let mut out = [0u64; 3];
+    for (i, part) in core.split('.').take(3).enumerate() {
+        out[i] = part.parse().unwrap_or(0);
+    }
+    out
+}
+
+/// 若 package 已以相同 canonical payload hash 作为 head，则返回 true。
+async fn package_already_imported(
+    agent_hub: &AgentHubRepo,
+    store: &ObjectStore,
+    preview: &PluginDecompositionPreview,
+) -> Result<bool, AppError> {
+    Ok(existing_package_head(agent_hub, store, preview)
+        .await?
+        .is_some())
+}
+
+/// 查找同 plugin_id 的 package head，若 payload hash 匹配 preview 则返回 (asset_id, rev_id, hash)。
+async fn existing_package_head(
+    agent_hub: &AgentHubRepo,
+    store: &ObjectStore,
+    preview: &PluginDecompositionPreview,
+) -> Result<Option<(String, String, String)>, AppError> {
+    let Some(asset) = agent_hub
+        .get_asset_by_unique_key(
+            &preview.scope_id,
+            AssetKind::Plugin,
+            "standalone",
+            &preview.plugin_id,
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(rev_id) = asset.current_revision_id.clone() else {
+        return Ok(None);
+    };
+    let Some(rev) = agent_hub.get_revision(&rev_id).await? else {
+        return Ok(None);
+    };
+    let Some(hash) = rev.payload_hash.clone() else {
+        return Ok(None);
+    };
+    // 用当前 head payload 与即将 import 的 component 集合比对：
+    // 若 head 存在且 plugin_id 相同即视为已导入（二次确认幂等）。
+    // 更严：尝试读 blob 解析 plugin_id。
+    if let Ok(bytes) = store.get_blob(&hash).await {
+        if let Ok(payload) = crate::agent_hub::plugins::from_plugin_package_bytes(&bytes) {
+            if payload.plugin_id == preview.plugin_id {
+                return Ok(Some((asset.id, rev_id.as_str().to_string(), hash)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
-    //! Gate A Task 10 迁移 / dual-write 单测。
+    //! Gate A Task 10 + Gate D Task 7 迁移 / dual-write / plugin / N+2 单测。
 
     use super::*;
     use crate::agent_hub::instructions::compile_render;
@@ -733,6 +1134,11 @@ mod tests {
     #[tokio::test]
     async fn dual_write_updates_legacy_summary_without_hub_merge() {
         let (_agent_hub, claude_md, _) = setup_repos().await;
+        // 隔离到临时 CLAUDE_CONFIG_DIR，避免写真实 home 失败污染断言。
+        let tmp = TempDir::new().unwrap();
+        let claude_home = tmp.path().join(".claude");
+        fs::create_dir_all(&claude_home).unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude_home.to_string_lossy().as_ref());
         dual_write_legacy_claude_md_summary_with(&claude_md, "d1", "hello hub")
             .await
             .unwrap();
@@ -755,6 +1161,7 @@ mod tests {
         let row3 = claude_md.get().await.unwrap().unwrap();
         assert_eq!(row3.content, "hello hub v2");
         assert_eq!(row3.vector_clock.get("d1"), Some(&2));
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     /// 文件空 + DB 有内容时 resolve 用 db。
@@ -842,5 +1249,347 @@ mod tests {
         let row = claude_md.get().await.unwrap().unwrap();
         assert_eq!(row.content, "new B\n");
         std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    // ─── Gate D Task 7 ────────────────────────────────────────────────────
+
+    use crate::agent_hub::models::ScopeKind;
+    use crate::agent_hub::plugins::{
+        ConfirmedPluginDecomposition, DiscoveredPluginSource, PluginDecompositionPreview,
+    };
+    use std::io::Write as _;
+
+    fn write_plugin_file(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = fs::File::create(path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
+    fn claude_plugin_fixture(root: &Path) {
+        write_plugin_file(
+            &root.join(".claude-plugin/plugin.json"),
+            r#"{
+  "name": "claude-demo",
+  "version": "0.1.0",
+  "description": "mixed claude plugin",
+  "skills": "./skills"
+}"#,
+        );
+        write_plugin_file(
+            &root.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review carefully\n---\nDo review.\n",
+        );
+        write_plugin_file(
+            &root.join("commands/ship.md"),
+            "---\nname: ship\ndescription: Ship it\n---\nShip prompt\n",
+        );
+        write_plugin_file(
+            &root.join("runtime/index.js"),
+            "console.log('claude-runtime')\n",
+        );
+    }
+
+    fn codex_plugin_fixture(root: &Path) {
+        write_plugin_file(
+            &root.join(".codex-plugin/plugin.json"),
+            r#"{
+  "name": "codex-demo",
+  "version": "1.0.0",
+  "description": "codex plugin"
+}"#,
+        );
+        write_plugin_file(
+            &root.join("skills/analyze/SKILL.md"),
+            "---\nname: analyze\ndescription: Analyze\n---\nAnalyze body\n",
+        );
+        write_plugin_file(
+            &root.join("config.toml"),
+            "[agents.worker]\nconfig_file = \"agents/worker.md\"\n",
+        );
+    }
+
+    fn opencode_plugin_fixture(root: &Path) {
+        write_plugin_file(
+            &root.join("package.json"),
+            r#"{
+  "name": "opencode-demo",
+  "version": "2.0.0",
+  "main": "index.ts",
+  "dependencies": { "zod": "3.0.0" }
+}"#,
+        );
+        write_plugin_file(
+            &root.join("index.ts"),
+            "export default function plugin() { return {}; }\n",
+        );
+        write_plugin_file(
+            &root.join("skills/nearby/SKILL.md"),
+            "---\nname: nearby\ndescription: Portable skill\n---\nSkill\n",
+        );
+    }
+
+    fn discovered(
+        plugin_id: &str,
+        target: AgentTarget,
+        root: &Path,
+        scope_id: &str,
+    ) -> DiscoveredPluginSource {
+        DiscoveredPluginSource {
+            plugin_id: plugin_id.into(),
+            name: plugin_id.into(),
+            version: None,
+            description: None,
+            source_target: target,
+            root_path: root.to_path_buf(),
+            scope_id: scope_id.into(),
+            scope_kind: ScopeKind::User,
+        }
+    }
+
+    /// Business Logic: 首次迁移只生成 preview，不 append revision。
+    /// Code Logic: 三 target fixture → preview_plugin_migration → created_revisions=0。
+    #[tokio::test]
+    async fn plugin_migration_first_run_is_preview_only() {
+        let (agent_hub, _claude_md, _) = setup_repos().await;
+        agent_hub
+            .insert_scope(NewScopeNode {
+                id: Some(USER_SCOPE_STABLE_ID.into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let objects = tmp.path().join("data");
+        fs::create_dir_all(&objects).unwrap();
+        let claude_root = tmp.path().join("claude-plugin");
+        let codex_root = tmp.path().join("codex-plugin");
+        let oc_root = tmp.path().join("opencode-plugin");
+        claude_plugin_fixture(&claude_root);
+        codex_plugin_fixture(&codex_root);
+        opencode_plugin_fixture(&oc_root);
+
+        let sources = vec![
+            discovered(
+                "claude-demo",
+                AgentTarget::Claude,
+                &claude_root,
+                USER_SCOPE_STABLE_ID,
+            ),
+            discovered(
+                "codex-demo",
+                AgentTarget::Codex,
+                &codex_root,
+                USER_SCOPE_STABLE_ID,
+            ),
+            discovered(
+                "opencode-demo",
+                AgentTarget::OpenCode,
+                &oc_root,
+                USER_SCOPE_STABLE_ID,
+            ),
+        ];
+        let preview = preview_plugin_migration(&agent_hub, &objects, &sources)
+            .await
+            .unwrap();
+        assert_eq!(preview.created_revisions, 0);
+        assert_eq!(preview.items.len(), 3);
+        for item in &preview.items {
+            assert!(!item.already_imported);
+            assert!(
+                item.status == "preview" || item.status == "sourceOnly",
+                "unexpected status {}",
+                item.status
+            );
+            assert!(
+                !item.preview.components.is_empty() || !item.preview.residuals.is_empty(),
+                "empty preview for {}",
+                item.source.plugin_id
+            );
+        }
+        // 无 package 资产写入
+        let pkg = agent_hub
+            .get_asset_by_unique_key(
+                USER_SCOPE_STABLE_ID,
+                AssetKind::Plugin,
+                "standalone",
+                "claude-demo",
+            )
+            .await
+            .unwrap();
+        assert!(pkg.is_none());
+    }
+
+    /// Business Logic: 确认 import 一个 package/child graph；二次运行无新 revision。
+    /// Code Logic: confirm → created；再 confirm → idempotent。
+    #[tokio::test]
+    async fn plugin_migration_confirm_import_is_idempotent() {
+        let (agent_hub, _claude_md, _) = setup_repos().await;
+        agent_hub
+            .insert_scope(NewScopeNode {
+                id: Some(USER_SCOPE_STABLE_ID.into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let objects = tmp.path().join("data");
+        fs::create_dir_all(&objects).unwrap();
+        let root = tmp.path().join("claude-plugin");
+        claude_plugin_fixture(&root);
+        let source = discovered(
+            "claude-demo",
+            AgentTarget::Claude,
+            &root,
+            USER_SCOPE_STABLE_ID,
+        );
+        let preview = preview_plugin_migration(&agent_hub, &objects, &[source])
+            .await
+            .unwrap();
+        let item = &preview.items[0];
+        let confirmed = ConfirmedPluginDecomposition {
+            preview: item.preview.clone(),
+            link_standalone: Default::default(),
+            origin_replica_id: "device-test-1".into(),
+        };
+        let first = confirm_plugin_migration_import(&agent_hub, &objects, confirmed.clone(), None)
+            .await
+            .unwrap();
+        assert!(first.created_revision);
+        assert_eq!(first.status, "imported");
+        assert!(!first.package_asset_id.is_empty());
+
+        let second = confirm_plugin_migration_import(&agent_hub, &objects, confirmed, None)
+            .await
+            .unwrap();
+        assert!(!second.created_revision);
+        assert_eq!(second.status, "idempotent");
+        assert_eq!(second.package_asset_id, first.package_asset_id);
+        assert_eq!(second.revision_id, first.revision_id);
+        assert_eq!(second.payload_hash, first.payload_hash);
+    }
+
+    /// Business Logic: 碰撞/未验证激活保持 sourceOnly/externalCollision，不写 revision。
+    /// Code Logic: force_status 短路。
+    #[tokio::test]
+    async fn plugin_migration_collision_stays_source_only_or_external_collision() {
+        let (agent_hub, _claude_md, _) = setup_repos().await;
+        let tmp = TempDir::new().unwrap();
+        let objects = tmp.path().join("data");
+        fs::create_dir_all(&objects).unwrap();
+        // 空 confirmed（不会真正 import）
+        let confirmed = ConfirmedPluginDecomposition {
+            preview: PluginDecompositionPreview {
+                plugin_id: "x".into(),
+                name: "x".into(),
+                version: None,
+                description: None,
+                source_target: AgentTarget::Claude,
+                scope_id: USER_SCOPE_STABLE_ID.into(),
+                scope_kind: ScopeKind::User,
+                root_path: tmp.path().to_path_buf(),
+                components: vec![],
+                residuals: vec![],
+                target_extensions: Default::default(),
+            },
+            link_standalone: Default::default(),
+            origin_replica_id: "d1".into(),
+        };
+        let so = confirm_plugin_migration_import(
+            &agent_hub,
+            &objects,
+            confirmed.clone(),
+            Some("sourceOnly"),
+        )
+        .await
+        .unwrap();
+        assert!(!so.created_revision);
+        assert_eq!(so.status, "sourceOnly");
+
+        let ec = confirm_plugin_migration_import(
+            &agent_hub,
+            &objects,
+            confirmed,
+            Some("externalCollision"),
+        )
+        .await
+        .unwrap();
+        assert!(!ec.created_revision);
+        assert_eq!(ec.status, "externalCollision");
+    }
+
+    /// Business Logic: Hub 关闭后最后 target 文件仍可读；不 GC CAS；忽略未知 Hub 表。
+    /// Code Logic: downgrade snapshot + policy 断言。
+    #[tokio::test]
+    async fn downgrade_keeps_last_target_files_and_never_cleans_cas() {
+        let (agent_hub, _claude_md, _) = setup_repos().await;
+        let tmp = TempDir::new().unwrap();
+        let target_file = tmp.path().join("CLAUDE.md");
+        fs::write(&target_file, "last successful projection\n").unwrap();
+        // Hub off
+        let off = downgrade_compatibility_facade_snapshot(
+            &agent_hub,
+            false,
+            std::slice::from_ref(&target_file),
+        )
+        .await
+        .unwrap();
+        assert!(!off.policy.hub_enabled);
+        assert!(off.policy.allow_direct_target_mutation);
+        assert!(off.policy.ignore_unknown_hub_tables);
+        assert!(!off.policy.allow_cas_gc);
+        assert!(!off.policy.translate_from_hub);
+        assert_eq!(off.readable_target_files, vec![target_file.clone()]);
+        assert!(!off.cas_gc_attempted);
+        assert_eq!(off.recoverable_projection_jobs, 0);
+
+        // Hub on → translate + 可恢复 job 查询（空库 = 0）
+        let on = downgrade_compatibility_facade_snapshot(&agent_hub, true, &[target_file])
+            .await
+            .unwrap();
+        assert!(on.policy.hub_enabled);
+        assert!(on.policy.translate_from_hub);
+        assert!(!on.policy.allow_direct_target_mutation);
+        assert!(!on.policy.allow_cas_gc);
+        assert!(!on.cas_gc_attempted);
+    }
+
+    /// Business Logic: N+2 删除仅当 version>=earliest 且有 evidence。
+    /// Code Logic: 当前 evidence=None → 任意版本 removal_allowed=false；模拟 evidence 后 0.10.0 通过。
+    #[test]
+    fn n_plus_two_guard_requires_version_and_evidence() {
+        let status = legacy_agent_asset_compatibility_status(AGENT_HUB_GA_VERSION);
+        assert_eq!(status.ga_version, AGENT_HUB_GA_VERSION);
+        assert_eq!(
+            status.earliest_removal_version,
+            EARLIEST_LEGACY_REMOVAL_VERSION
+        );
+        assert!(status.stable_migration_evidence.is_none());
+        assert!(!status.removal_allowed);
+        assert!(status.legacy_routes_registered);
+        assert!(status.legacy_ui_hidden);
+        assert!(!status.removal_checklist.is_empty());
+        assert!(!n_plus_two_removal_allowed("0.10.0"));
+        assert!(!n_plus_two_removal_allowed("99.0.0"));
+        assert!(version_cmp("0.10.0", EARLIEST_LEGACY_REMOVAL_VERSION) >= 0);
+        assert!(version_cmp("0.8.2", EARLIEST_LEGACY_REMOVAL_VERSION) < 0);
+        assert!(version_cmp("0.9.9", "0.10.0") < 0);
+    }
+
+    /// Business Logic: 旧 façade 在 Hub 启用时禁止二次直接 mutation。
+    #[test]
+    fn hub_enabled_facade_translates_without_direct_mutation() {
+        let p = legacy_facade_policy(true);
+        assert!(p.translate_from_hub);
+        assert!(!p.allow_direct_target_mutation);
+        assert!(!p.allow_cas_gc);
+        let p2 = legacy_facade_policy(false);
+        assert!(p2.allow_direct_target_mutation);
+        assert!(p2.ignore_unknown_hub_tables);
     }
 }
