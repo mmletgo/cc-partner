@@ -35,7 +35,7 @@ function buildProps(
   overrides: Partial<UseAgentHubControllerResult> = {},
 ): UseAgentHubControllerResult {
   const base: UseAgentHubControllerResult = {
-    t: i18n.t.bind(i18n) as UseAgentHubControllerResult['t'],
+    t: i18n.t.bind(i18n) as unknown as UseAgentHubControllerResult['t'],
     loading: false,
     refreshing: false,
     stale: false,

@@ -9,7 +9,6 @@
  */
 
 import { useMemo, useRef } from 'react';
-import { useTranslation } from 'react-i18next';
 import { AgentAssetRow } from '@/components/domain/AgentAssetRow';
 import { Button, Card, Dialog, Drawer, Input, Pill, StatusMessage } from '@/components/primitives';
 import type {
