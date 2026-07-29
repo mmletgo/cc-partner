@@ -24,6 +24,7 @@ import {
   agentHubResolvedProjectMappingDecoder,
   agentHubStatusDecoder,
   instructionBlockDtoDecoder,
+  pluginPackageReportDecoder,
 } from '@/lib/schemas/agentHub';
 import type {
   AgentHubAssetDetail,
@@ -44,6 +45,7 @@ import type {
   DesiredPresence,
   InstructionBlockDto,
   InstructionBlockMode,
+  PluginPackageReport,
 } from '@/lib/types/agentHub';
 import { invokeDecoded } from './client';
 
@@ -75,6 +77,8 @@ export const AGENT_HUB_COMMANDS = {
   previewGitImport: 'agent_hub_preview_git_import',
   confirmGitImport: 'agent_hub_confirm_git_import',
   confirmProjectMapping: 'agent_hub_confirm_project_mapping',
+  getPluginPackageReport: 'agent_hub_get_plugin_package_report',
+  previewPluginDelete: 'agent_hub_preview_plugin_delete',
 } as const;
 
 /**
@@ -454,5 +458,27 @@ export const agentHubApi = {
       AGENT_HUB_COMMANDS.confirmProjectMapping,
       { request },
       agentHubResolvedProjectMappingDecoder,
+    ),
+
+  /**
+   * Business Logic: 拉取 Plugin package per-component 投影报告。
+   * Code Logic: agent_hub_get_plugin_package_report → PluginPackageReport。
+   */
+  getPluginPackageReport: (assetId: string): Promise<PluginPackageReport> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.getPluginPackageReport,
+      { assetId },
+      pluginPackageReportDecoder,
+    ),
+
+  /**
+   * Business Logic: 删除 preview（tombstone vs preserve）零写。
+   * Code Logic: agent_hub_preview_plugin_delete。
+   */
+  previewPluginDelete: (assetId: string): Promise<PluginPackageReport> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.previewPluginDelete,
+      { assetId },
+      pluginPackageReportDecoder,
     ),
 };

@@ -3,6 +3,8 @@
 //! Business Logic（为什么需要这个模块）:
 //!     user 级 CLAUDE.md（~/.claude/CLAUDE.md）只在用户主动点击推送时传播。push 让触发设备
 //!     把自己的 CLAUDE.md 推过来，本端必须覆盖为发送方版本；pull 仅保留兼容旧同步协议。
+//!     Gate D Task 7：N/N+1 保留本路由；legacy 摘要 dual-write 不裁决 Hub 冲突；
+//!     关闭 Hub 时不得清理 CAS / 未知 Hub 表；实际删除受 N+2 门闩约束。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - POST /api/sync/claude_md/pull：body `{vector_clock: {...}}`，比对后若本端领先/并发
@@ -112,7 +114,19 @@ pub async fn claude_md_push(
 }
 
 /// claude_md_push 业务实现：覆盖落库 + 写文件，返回是否实际发生变化。
+///
+/// Business Logic: legacy 摘要路径；不裁决 Hub 冲突、不 GC CAS。
+/// Code Logic: upsert + write_file_if_changed；忽略未知 Hub 表。
 async fn claude_md_push_impl(state: &AppState, req: ClaudeMdPushReq) -> Result<bool, AppError> {
+    // N/N+1：push 不触碰 CAS / 不读未知 Hub schema；Hub 冲突由 revision DAG 裁决。
+    let _ignore_unknown_hub = crate::agent_hub::migration::legacy_facade_policy(
+        state
+            .config
+            .read()
+            .map(|c| c.agent_hub.enabled)
+            .unwrap_or(false),
+    )
+    .ignore_unknown_hub_tables;
     let local = state.claude_md_repo.get().await?;
     // 用 `Option::map_or` 而非 `Option::is_none_or`（后者 1.82 才 stable），
     // 项目 MSRV 是 1.77.2，clippy 的 `-D warnings` 会阻断。

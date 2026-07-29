@@ -532,21 +532,54 @@ export type WorkflowDocumentLoadState = 'idle' | 'loading' | 'ready' | 'error';
 
 
 /**
+ * Runner / adapter provider wire id（四内置）。
+ *
+ * Business Logic: 未知 wire 值必须 decoder error，禁止 silent 映射 Claude。
+ * Code Logic: claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible。
+ */
+export type AgentProviderId =
+  | 'claudeCodeVisible'
+  | 'codexVisible'
+  | 'genericTerminal'
+  | 'openCodeVisible'
+
+/**
+ * Agent 完成合同。
+ *
+ * Business Logic: OpenCode 必须 HookEvent；不得 silently 改 Sentinel。
+ * Code Logic: sentinelLine|hookEvent|manual。
+ */
+export type AgentCompletionContract = 'sentinelLine' | 'hookEvent' | 'manual'
+
+/**
  * Agent adapter catalog 条目（无 path/env）。
  *
  * Business Logic（为什么需要这个类型）:
- *   Settings 与 remote 只展示 provider 可用性与完成合同。
+ *   Settings 与 remote 只展示 provider 可用性与完成合同；OpenCode 附 bridge 状态。
  *
  * Code Logic（这个类型做什么）:
- *   对齐 Rust OrchestratorAgentAdapterCatalogItem camelCase。
+ *   对齐 Rust OrchestratorAgentAdapterCatalogItem camelCase + 可选 OpenCode bridge 字段。
  */
 export interface OrchestratorAgentAdapterCatalogItem {
-  provider: string
+  provider: AgentProviderId | string
   available: boolean
-  completionContract: string
+  completionContract: AgentCompletionContract | string
   supportsResume: boolean
   supportsUsage: boolean
   reasonCode?: string | null
+  /** CLI 可执行路径摘要（redacted；可选） */
+  executable?: string | null
+  /** CLI 版本摘要（可选） */
+  version?: string | null
+  /** support / evidence 摘要 token（可选） */
+  supportEvidence?: string | null
+  /**
+   * OpenCode project bridge 状态：ready | previewRequired | conflict | unsupported。
+   * 其它 provider 可缺省。
+   */
+  bridgeStatus?: 'ready' | 'previewRequired' | 'conflict' | 'unsupported' | null
+  /** 阻断选择的稳定 reason（可选） */
+  blockedReason?: string | null
 }
 
 /**

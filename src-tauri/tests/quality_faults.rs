@@ -21,6 +21,8 @@
 //!     - `L2-FAULT-AGENT-HUB-ADOPTION-001`：`agent_hub_adoption_*` legacy 纳管故障点（激活失败/archive 前崩溃/DB commit 前崩溃）
 //!     - `L2-FAULT-AGENT-HUB-IMPORT-001`：`agent_hub_import_*` SnapshotImporter 两阶段故障
 //!       （corrupt object / DB commit 前崩溃 / CAS 后残留未计 imported asset）
+//!     - `L2-FAULT-OPENCODE-RUNTIME-BRIDGE-001`：`opencode_runtime_bridge_*`
+//!       （hash 钉死 / 未 opt-in fail-closed / externalCollision 不覆盖 / OSC 可解码）
 //!     - `L2-LAN-BOUNDARY-001`：**不在本文件重复**；权威自动化矩阵见
 //!       `tests/lan_trust_boundary_smoke.rs` + `lan_trust_boundary_harness`
 //!       （无凭据 loopback/mobile 读写、Host/Origin、stop loopback+token、
@@ -49,10 +51,11 @@ use app_lib::{
     agent_hub_sha256_hex, AdoptionEngine, AdoptionFault, AdoptionOutcome, AdoptionRequest,
     AdoptionState, AgentHubImportFault, AgentHubObjectStore, AgentHubRepo, AgentTarget, AssetKind,
     AssetPolicy, ClaudeHistoryRepo, ClaudeHistoryRow, ConfirmedImportSelection, DesiredPresence,
-    NewLogicalAsset, NewScopeNode, NewTargetBinding, PeerCallError, PeerClient, ProjectionJobState,
+    NewLogicalAsset, NewScopeNode, NewTargetBinding, OpenCodeBridgeOutcome, OpenCodeEventMapper,
+    OpenCodeOfficialEvent, OpenCodeRuntimeBridge, PeerCallError, PeerClient, ProjectionJobState,
     ProjectionPayloadKind, ProjectionRequest, ProjectionScheduler, ProjectionWriteFault,
     RevisionId, ScopeKind, ScratchpadRepo, ScratchpadRow, SnapshotImporter, TransferCompletePolicy,
-    ValidatedSnapshot,
+    ValidatedSnapshot, OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -1427,4 +1430,100 @@ async fn agent_hub_import_unreferenced_cas_not_reported() {
     );
     // residual may exist
     let _ = store.get_blob(&junk_hash).await;
+}
+
+/// L2-FAULT-OPENCODE-RUNTIME-BRIDGE-001：生成源 hash 钉死。
+///
+/// Business Logic（为什么需要这个测试）:
+///     app 升级若改 bridge 源，必须显式更新钉死 hash 并出现 project preview diff。
+///
+/// Code Logic（这个测试做什么）:
+///     live sha256 == OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH；源含 event hook 与 OSC 前缀。
+#[test]
+fn opencode_runtime_bridge_source_hash_is_pinned() {
+    let src = OpenCodeRuntimeBridge::generated_source();
+    let live = agent_hub_sha256_hex(src.as_bytes());
+    assert_eq!(live, OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH);
+    assert!(src.contains("CC_PARTNER_AGENT_SESSION_ID"));
+    assert!(src.contains("CC_PARTNER_TERMINAL_SESSION_ID"));
+    assert!(src.contains("session.status"));
+    assert!(src.contains("permission.asked"));
+    assert!(src.contains("cc-partner-agent-v1"));
+    assert!(!src.contains("API_KEY"));
+}
+
+/// L2：未 opt-in 不得 materialize；仅 RuntimeBridgeRequired。
+#[test]
+fn opencode_runtime_bridge_unopted_fail_closed() {
+    let dir = TempDir::new().unwrap();
+    let preview = OpenCodeRuntimeBridge::preview(dir.path(), false);
+    assert!(matches!(
+        preview,
+        OpenCodeBridgeOutcome::RuntimeBridgeRequired { .. }
+    ));
+    let mat = OpenCodeRuntimeBridge::materialize(dir.path(), false).unwrap();
+    assert!(matches!(
+        mat,
+        OpenCodeBridgeOutcome::RuntimeBridgeRequired { .. }
+    ));
+    assert!(!OpenCodeRuntimeBridge::absolute_path(dir.path()).exists());
+}
+
+/// L2：opt-in materialize + verify；externalCollision 不覆盖。
+#[test]
+fn opencode_runtime_bridge_materialize_collision_no_overwrite() {
+    let dir = TempDir::new().unwrap();
+    let mat = OpenCodeRuntimeBridge::materialize(dir.path(), true).unwrap();
+    assert!(matches!(
+        mat,
+        OpenCodeBridgeOutcome::Materialized { .. } | OpenCodeBridgeOutcome::Verified { .. }
+    ));
+    let v = OpenCodeRuntimeBridge::verify(dir.path(), true);
+    assert!(matches!(v, OpenCodeBridgeOutcome::Verified { .. }));
+
+    let path = OpenCodeRuntimeBridge::absolute_path(dir.path());
+    std::fs::write(&path, b"foreign-plugin-bytes\n").unwrap();
+    let coll = OpenCodeRuntimeBridge::materialize(dir.path(), true).unwrap();
+    assert!(
+        matches!(coll, OpenCodeBridgeOutcome::ExternalCollision { .. }),
+        "{coll:?}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"foreign-plugin-bytes\n",
+        "must not overwrite external bytes"
+    );
+}
+
+/// L2：事件映射 version 从 2 起；pre-active idle 不得 completed。
+#[test]
+fn opencode_runtime_bridge_events_decode_via_osc() {
+    let mut mapper = OpenCodeEventMapper::new("agent-qf", "term-qf");
+    let frame = mapper
+        .map_event(&OpenCodeOfficialEvent::SessionStatus {
+            session_id: "native-qf".into(),
+            status: "busy".into(),
+        })
+        .expect("busy maps");
+    assert_eq!(frame.event_version, 2);
+    assert!(!frame.osc_bytes.is_empty());
+    assert!(frame.occurred_at.contains('T') || frame.occurred_at.contains('t'));
+
+    let mut cold = OpenCodeEventMapper::new("a", "t");
+    let idle = cold
+        .map_event(&OpenCodeOfficialEvent::SessionIdle {
+            session_id: "n".into(),
+        })
+        .unwrap();
+    // pre-active idle stays Idle (Debug string contains Idle)
+    assert!(format!("{:?}", idle.phase).contains("Idle"));
+    assert_eq!(idle.event_version, 2);
+
+    // after seenActive, session.idle -> Completed
+    let done = mapper
+        .map_event(&OpenCodeOfficialEvent::SessionIdle {
+            session_id: "native-qf".into(),
+        })
+        .unwrap();
+    assert!(format!("{:?}", done.phase).contains("Completed"));
 }

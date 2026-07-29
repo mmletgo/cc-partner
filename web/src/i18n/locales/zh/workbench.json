@@ -857,5 +857,20 @@
   "startupBaseline": {
     "listFailed": "启动时无法枚举本地终端会话，挂载前历史可能缺失。",
     "retry": "重试会话枚举"
+  },
+  "providers": {
+    "claudeCodeVisible": "Claude",
+    "codexVisible": "Codex",
+    "genericTerminal": "通用终端",
+    "openCodeVisible": "OpenCode"
+  },
+  "openCodeBridge": {
+    "title": "OpenCode runtime bridge",
+    "ready": "就绪",
+    "previewRequired": "需要为 .opencode/plugins/cc-partner-runtime.ts 做项目 preview",
+    "conflict": "Bridge 路径存在外部碰撞",
+    "unsupported": "缺少 runtime evidence，不支持",
+    "blocked": "阻塞：{{reason}}",
+    "openPreview": "打开项目 preview"
   }
 }

@@ -204,6 +204,11 @@ export interface AgentHubAssetDetail extends AgentHubAssetSummary {
   blocks?: InstructionBlockDto[];
   contentMarkdown?: string | null;
   conflicts?: AgentHubConflictDto[];
+  /**
+   * Plugin package 投影报告（kind=plugin 时可选透传）。
+   * Business Logic: Drawer 消费 per-component matrix / delete preview。
+   */
+  pluginReport?: PluginPackageReport | null;
 }
 
 /**
@@ -489,4 +494,147 @@ export interface AgentHubPushSelectionRequest {
   hubProjectIds?: string[];
   includeHistory?: boolean;
   requestId?: string | null;
+}
+
+/**
+ * Plugin component 在 destination target 上的投影状态。
+ *
+ * Business Logic: per-component 矩阵不得压成 package 级 green synced。
+ * Code Logic: camelCase wire tokens。
+ */
+export type PluginComponentTargetStatus =
+  | 'verified'
+  | 'partial'
+  | 'sourceOnly'
+  | 'activationRequired'
+  | 'externalCollision'
+  | 'blocked';
+
+/**
+ * Component 相对 package 的所有权。
+ *
+ * Business Logic: 删除 preview 区分 tombstone / preserve。
+ * Code Logic: packageOwned | shared | standalone。
+ */
+export type PluginComponentOwnership = 'packageOwned' | 'shared' | 'standalone';
+
+/**
+ * Residual 类别。
+ */
+export type PluginResidualKind = 'runtime' | 'hooks' | 'assets' | 'npm' | 'customTool';
+
+/**
+ * Package 删除时 component 处置。
+ *
+ * Business Logic: 独占才 tombstone；共享/standalone 保留。
+ * Code Logic: tombstoneOwned | preserveShared | preserveStandalone。
+ */
+export type PluginComponentDeleteDecision =
+  | 'tombstoneOwned'
+  | 'preserveShared'
+  | 'preserveStandalone';
+
+/**
+ * 单 component 在某 destination 上的投影单元格。
+ */
+export interface PluginComponentTargetCell {
+  target: AgentTarget;
+  status: PluginComponentTargetStatus;
+  reasons: string[];
+  projectedPaths: string[];
+  materializedAlias?: string | null;
+}
+
+/**
+ * 固定 revision 的 component 报告行。
+ *
+ * Business Logic: Drawer 按 component 展示 target matrix / ownership / residual reason。
+ * Code Logic: 固定 revisionId + 三端 cells。
+ */
+export interface PluginComponentReport {
+  kind: string;
+  assetId: string;
+  displayName: string;
+  canonicalRevisionId: string;
+  ownership: PluginComponentOwnership;
+  sourceTarget: AgentTarget;
+  targets: PluginComponentTargetCell[];
+  residualReason?: string | null;
+}
+
+/**
+ * Residual 投影报告。
+ */
+export interface PluginResidualReport {
+  residualTarget: AgentTarget;
+  residualKind: PluginResidualKind;
+  treeManifestHash: string;
+  included: boolean;
+  reasons: string[];
+}
+
+/**
+ * 删除 preview 中单个 component 的处置行。
+ */
+export interface PluginDeletePreviewComponent {
+  assetId: string;
+  displayName: string;
+  kind: string;
+  ownership: PluginComponentOwnership;
+  decision: PluginComponentDeleteDecision;
+}
+
+/**
+ * Package 删除 preview。
+ *
+ * Business Logic: 列出将 tombstone vs 因引用保留的 component。
+ * Code Logic: package 级 + components 决策表。
+ */
+export interface PluginDeletePreview {
+  packageAssetId: string;
+  packageDisplayName: string;
+  components: PluginDeletePreviewComponent[];
+}
+
+/**
+ * Package 级聚合投影报告（UI 入口）。
+ *
+ * Business Logic: mixed package 不得 compress 为 synced；partial 必须点名 blockers。
+ * Code Logic: components + residuals + aggregate + optional deletePreview。
+ */
+export interface PluginPackageReport {
+  packageAssetId: string;
+  packageDisplayName: string;
+  sourceTarget: AgentTarget;
+  destinationTarget?: AgentTarget | null;
+  aggregateStatus: AssetAggregateStatus;
+  activationState: string;
+  diagnostics: string[];
+  components: PluginComponentReport[];
+  residuals: PluginResidualReport[];
+  /** partial blockers 精确 token 列表（target:reason） */
+  partialBlockers: string[];
+  deletePreview?: PluginDeletePreview | null;
+}
+
+/**
+ * OpenCode project runtime bridge 状态。
+ *
+ * Business Logic: openCodeVisible 选择前必须 fail-closed 展示 bridge 状态。
+ * Code Logic: ready | previewRequired | conflict | unsupported。
+ */
+export type OpenCodeBridgeStatus =
+  | 'ready'
+  | 'previewRequired'
+  | 'conflict'
+  | 'unsupported';
+
+/**
+ * 派生 bridge 视图模型（无 secret）。
+ */
+export interface OpenCodeBridgeView {
+  status: OpenCodeBridgeStatus;
+  relativePath: string;
+  blockedReason?: string | null;
+  requiresProjectPreview: boolean;
 }

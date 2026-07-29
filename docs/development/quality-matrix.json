@@ -1299,6 +1299,32 @@
       "status": "NOT VERIFIED"
     },
     {
+      "id": "L3-AGENT-HUB-OPENCODE-RUNTIME-001",
+      "surface": "agent-hub",
+      "level": "L3",
+      "tests": [
+        "src-tauri/tests/agent_hub_cli_contract.rs",
+        "src-tauri/src/orchestrator/agent_adapter/opencode.rs"
+      ],
+      "command": "CC_PARTNER_L3_TARGET=opencode cargo test --locked --test agent_hub_cli_contract -- --ignored --nocapture --test-threads=1; manual: exact pinned OpenCode visible TUI launch/resume/HookEvent via runtime bridge in real PTY",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "not executed in CI",
+        "requires exact OpenCode version + configured provider credentials",
+        "hosted runner substitute"
+      ],
+      "docs": [
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-d-plugin-runtime.md",
+        "docs/development/testing.md"
+      ],
+      "status": "NOT VERIFIED"
+    },
+    {
       "id": "L3-AGENT-HUB-B-CLI-001",
       "surface": "agent-hub",
       "level": "L3",
@@ -1487,6 +1513,109 @@
         "docs/development/testing.md"
       ],
       "status": "NOT VERIFIED"
+    },
+    {
+      "id": "L2-AGENT-HUB-D-PLUGIN-001",
+      "surface": "agent-hub",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test agent_hub_gate_d_runtime_smoke -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real OpenCode/Claude/Codex product installs",
+        "real dual-host mDNS Plugin push",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-d-plugin-runtime.md"
+      ],
+      "notes": "L2 isolated data_dir mixed Plugin projection: portable Skill/MCP/Command/Agent + targetOnly Hook + OpenCode residual; per-target full/partial/sourceOnly; activationRequired via natural ActivationPlan.activation_required merge (not force-flag-only); Snapshot residual CAS closure; package delete preserves shared/standalone refs. Not real CLI TUI or marketplace activation side effects."
+    },
+    {
+      "id": "L2-AGENT-HUB-D-RUNTIME-001",
+      "surface": "agent-hub",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test agent_hub_gate_d_runtime_smoke l2_agent_hub_d_runtime_001 -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real OpenCode TUI / session.idle / NeedsInput / Ctrl-C takeover",
+        "exact pinned OpenCode version L3 evidence",
+        "packaged desktop GUI",
+        "behavioral store mock of update_active_runner_session_and_agent (order proof is Fresh-arm window source contract)"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-d-plugin-runtime.md"
+      ],
+      "notes": "L2 library-level: OpenCode bridge generated_source_hash pin, preview/materialize/verify + collision, OSC strip from visible terminal bytes, preflight fail-closed without bridge/L3, Fresh resume CAS fail-closed order proof (CAS strictly inside ResumeTerminalPolicy::Fresh arm and before build_resume_plan/terminal write; not a weak global contains scan). Does not launch real opencode CLI."
+    },
+    {
+      "id": "L3-AGENT-HUB-D-OPENCODE-001",
+      "surface": "agent-hub",
+      "level": "L3",
+      "tests": [
+        "src-tauri/tests/agent_hub_cli_contract.rs",
+        "src-tauri/src/orchestrator/agent_adapter/opencode.rs",
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "CC_PARTNER_L3_TARGET=opencode cargo test --locked --test agent_hub_cli_contract -- --ignored --nocapture --test-threads=1; manual: exact pinned OpenCode visible TUI launch/resume/HookEvent via runtime bridge in real PTY",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "not executed in CI",
+        "requires exact OpenCode version + configured provider credentials",
+        "hosted runner substitute"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-d-plugin-runtime.md"
+      ],
+      "status": "NOT VERIFIED",
+      "notes": "Gate D Task 8 honesty: L2 runtime smoke is not a substitute. Only exact exercised OpenCode/provider fixture may flip this row."
+    },
+    {
+      "id": "E2E-AGENT-HUB-D-001",
+      "surface": "agent-hub",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode filesystem projection",
+        "real OpenCode TUI runtime",
+        "marketplace plugin activation",
+        "packaged desktop GUI",
+        "real Agent phase transitions / OSC Working→Completed in UI (L1 navigation-only for Attention)",
+        "Workbench live runner phase projection under real PTY"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md"
+      ],
+      "notes": "L1 mock: Plugin drawer component matrix + ownership delete preview + residual statuses; OpenCode provider catalog fail-closed without ready bridge + effectively-available runner selection surface (Claude/Codex available, OpenCode/generic blocked); Agent Hub bridge project preview deep link; Attention agentHubProjectionBlocked → /agent-hub?assetId= navigation-only. Not real multi-CLI write, Agent phase runtime, or TUI."
     }
   ]
 }

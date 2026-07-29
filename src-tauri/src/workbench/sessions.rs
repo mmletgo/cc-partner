@@ -27,9 +27,64 @@ use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+
+/// 预分配 agent session id 暂存（create → spawn_row 窗口内）。
+///
+/// Business Logic（为什么需要这个 map）:
+///     raw PTY spawn 走 `command_builder_for_row`，row 上无 agent 字段；
+///     Orchestrator 预分配路径必须在 shell env 注入 `CC_PARTNER_AGENT_SESSION_ID`。
+///
+/// Code Logic（这个 map 做什么）:
+///     terminal_session_id → agent_session_id；create_with_ids 写入，spawn 读取，完成后清除。
+static PREALLOCATED_AGENT_SESSION_IDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+/// 记录预分配 agent session id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     create 与 spawn_row 之间必须把 agent id 传给 env 注入。
+///
+/// Code Logic（这个函数做什么）:
+///     insert/overwrite map 条目。
+fn remember_preallocated_agent_session(terminal_session_id: &str, agent_session_id: &str) {
+    let map = PREALLOCATED_AGENT_SESSION_IDS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(
+            terminal_session_id.to_string(),
+            agent_session_id.to_string(),
+        );
+    }
+}
+
+/// 清除预分配 agent session id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     spawn 结束后不得泄漏跨会话映射。
+///
+/// Code Logic（这个函数做什么）:
+///     remove map 条目。
+fn forget_preallocated_agent_session(terminal_session_id: &str) {
+    if let Some(map) = PREALLOCATED_AGENT_SESSION_IDS.get() {
+        if let Ok(mut guard) = map.lock() {
+            guard.remove(terminal_session_id);
+        }
+    }
+}
+
+/// 查询预分配 agent session id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     command_builder / agent_context 组装时读取可选 agent id。
+///
+/// Code Logic（这个函数做什么）:
+///     clone map 中的值。
+fn lookup_preallocated_agent_session(terminal_session_id: &str) -> Option<String> {
+    let map = PREALLOCATED_AGENT_SESSION_IDS.get()?;
+    let guard = map.lock().ok()?;
+    guard.get(terminal_session_id).cloned()
+}
 
 const DEFAULT_COLS: u16 = 98;
 const DEFAULT_ROWS: u16 = 32;
@@ -861,9 +916,11 @@ fn tmux_window_target(session_name: &str, window_id: &str) -> String {
 ///
 /// Business Logic（为什么需要这个类型）:
 ///     Hook/OSC 需要 project/worktree/terminal/owner 关联，但不得注入 control token 或凭据。
+///     Orchestrator/OpenCode 路径可额外预分配 `agent_session_id` 注入 shell。
 ///
 /// Code Logic（这个类型做什么）:
-///     四字段纯 ID；由 spawn 路径从 row + AppState 组装。
+///     四字段纯 ID + 可选 agent_session_id；由 spawn 路径从 row + AppState 组装。
+///     普通用户终端保持 `agent_session_id=None`（不写 `CC_PARTNER_AGENT_SESSION_ID`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalAgentContextIds {
     /// 项目 id
@@ -874,6 +931,8 @@ pub struct TerminalAgentContextIds {
     pub terminal_session_id: String,
     /// owner 实例 id
     pub owner_instance_id: String,
+    /// 可选预分配 Agent session id（Orchestrator/OpenCode bridge）
+    pub agent_session_id: Option<String>,
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -894,18 +953,28 @@ fn apply_workbench_terminal_env(
     }
 }
 
-/// 注入四条非敏感 Agent 上下文环境变量。
+/// 注入非敏感 Agent 上下文环境变量。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     tmux 与 raw PTY 的 pane/shell 必须能读到同一套 CC_PARTNER_*_ID，供 Hook 关联 session。
 ///
 /// Code Logic（这个函数做什么）:
-///     仅设置 PROJECT/WORKTREE/TERMINAL_SESSION/OWNER_INSTANCE_ID；不设置任何 token/credential。
+///     设置 PROJECT/WORKTREE/TERMINAL_SESSION/OWNER_INSTANCE_ID；
+///     仅当 `agent_session_id` 非空时设置 `CC_PARTNER_AGENT_SESSION_ID`；
+///     不设置任何 token/credential。
 fn apply_agent_context_env(command: &mut CommandBuilder, ctx: &TerminalAgentContextIds) {
     command.env("CC_PARTNER_PROJECT_ID", &ctx.project_id);
     command.env("CC_PARTNER_WORKTREE_ID", &ctx.worktree_id);
     command.env("CC_PARTNER_TERMINAL_SESSION_ID", &ctx.terminal_session_id);
     command.env("CC_PARTNER_OWNER_INSTANCE_ID", &ctx.owner_instance_id);
+    if let Some(agent_id) = ctx
+        .agent_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        command.env("CC_PARTNER_AGENT_SESSION_ID", agent_id);
+    }
 }
 
 /// 生成 tmux `new-session` / `new-window` 的 `-e KEY=VAL` 参数（Agent 上下文）。
@@ -914,9 +983,9 @@ fn apply_agent_context_env(command: &mut CommandBuilder, ctx: &TerminalAgentCont
 ///     tmux pane 内 shell 继承创建时的 -e 环境；attach 客户端 env 不会进入已有 pane。
 ///
 /// Code Logic（这个函数做什么）:
-///     返回交错的 `-e` / `KEY=VAL` 列表，仅含四条 CC_PARTNER_*_ID。
+///     返回交错的 `-e` / `KEY=VAL` 列表；含四条基础 ID，可选 AGENT_SESSION_ID。
 fn tmux_agent_context_env_args(ctx: &TerminalAgentContextIds) -> Vec<String> {
-    let pairs = [
+    let mut pairs: Vec<(&str, &str)> = vec![
         ("CC_PARTNER_PROJECT_ID", ctx.project_id.as_str()),
         ("CC_PARTNER_WORKTREE_ID", ctx.worktree_id.as_str()),
         (
@@ -928,6 +997,14 @@ fn tmux_agent_context_env_args(ctx: &TerminalAgentContextIds) -> Vec<String> {
             ctx.owner_instance_id.as_str(),
         ),
     ];
+    if let Some(agent_id) = ctx
+        .agent_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        pairs.push(("CC_PARTNER_AGENT_SESSION_ID", agent_id));
+    }
     let mut args = Vec::with_capacity(pairs.len() * 2);
     for (k, v) in pairs {
         args.push("-e".to_string());
@@ -1695,7 +1772,8 @@ impl Drop for TmuxCreateGuard {
 ///     spawn/attach 需要把稳定 ID 注入 shell，Hook 才能关联 OSC。
 ///
 /// Code Logic（这个函数做什么）:
-///     worktree 缺省为空串；owner_instance_id 原样拷贝。
+///     worktree 缺省为空串；owner_instance_id 原样拷贝；agent_session_id 默认 None
+///     （预分配路径用 `create_with_preallocated_ids` 注入）。
 fn agent_context_from_row(
     row: &WorkbenchSessionRow,
     owner_instance_id: &str,
@@ -1705,6 +1783,7 @@ fn agent_context_from_row(
         worktree_id: row.worktree_id.clone().unwrap_or_default(),
         terminal_session_id: row.id.clone(),
         owner_instance_id: owner_instance_id.to_string(),
+        agent_session_id: lookup_preallocated_agent_session(&row.id),
     }
 }
 
@@ -3885,9 +3964,83 @@ impl WorkbenchSessionRegistry {
         initial_cols: Option<u16>,
         initial_rows: Option<u16>,
     ) -> Result<WorkbenchSessionRow, AppError> {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        self.create_with_ids(
+            state,
+            project,
+            cwd,
+            worktree_id,
+            worktree_name,
+            initial_cols,
+            initial_rows,
+            session_id,
+            None,
+        )
+    }
+
+    /// Orchestrator 专用：预分配 terminal + agent session UUID 后创建 shell。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     OpenCode bridge 在 shell 启动前必须能读到 `CC_PARTNER_AGENT_SESSION_ID`，
+    ///     且 Agent Runtime 行必须使用同一 UUID；失败时调用方回滚 runtime/terminal。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     使用给定 session_id 建 terminal，并把 agent_session_id 注入 env（tmux -e / raw PTY）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_preallocated_ids(
+        &self,
+        state: AppState,
+        project: WorkbenchProjectRow,
+        cwd: String,
+        worktree_id: Option<String>,
+        worktree_name: Option<String>,
+        initial_cols: Option<u16>,
+        initial_rows: Option<u16>,
+        terminal_session_id: String,
+        agent_session_id: String,
+    ) -> Result<WorkbenchSessionRow, AppError> {
+        let terminal_session_id = terminal_session_id.trim().to_string();
+        let agent_session_id = agent_session_id.trim().to_string();
+        if terminal_session_id.is_empty() || agent_session_id.is_empty() {
+            return Err(AppError::validation(
+                "preallocated terminal/agent session id 不能为空".to_string(),
+            ));
+        }
+        self.create_with_ids(
+            state,
+            project,
+            cwd,
+            worktree_id,
+            worktree_name,
+            initial_cols,
+            initial_rows,
+            terminal_session_id,
+            Some(agent_session_id),
+        )
+    }
+
+    /// 内部 create：固定 session_id + 可选 agent_session_id 注入。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     普通 create 与 Orchestrator 预分配路径共享 tmux/raw 启动逻辑。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     require project barrier → create_tmux_window（带 agent_ctx）→ spawn_row。
+    #[allow(clippy::too_many_arguments)]
+    fn create_with_ids(
+        &self,
+        state: AppState,
+        project: WorkbenchProjectRow,
+        cwd: String,
+        worktree_id: Option<String>,
+        worktree_name: Option<String>,
+        initial_cols: Option<u16>,
+        initial_rows: Option<u16>,
+        session_id: String,
+        agent_session_id: Option<String>,
+    ) -> Result<WorkbenchSessionRow, AppError> {
         // R26 M1：project remove 窗口内禁止 create 产生 orphan live。
         self.require_project_not_closing(&project.id)?;
-        let session_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let (cols, rows) = initial_terminal_size(initial_cols, initial_rows);
         let terminal_command = default_terminal_command();
@@ -3896,6 +4049,10 @@ impl WorkbenchSessionRegistry {
             worktree_id: worktree_id.clone().unwrap_or_default(),
             terminal_session_id: session_id.clone(),
             owner_instance_id: state.config_runtime.owner_instance_id().to_string(),
+            agent_session_id: agent_session_id
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         };
         let (backend, backend_id, backend_window_id, command) = match available_tmux_command() {
             Some(tmux) => {
@@ -3980,6 +4137,18 @@ impl WorkbenchSessionRegistry {
         // spawn 前再 revalidate：create 期间 project 可能被 remove；失败则 Drop 回收 window。
         self.require_project_not_closing(&project.id)?;
         // spawn 失败时 `?` 离开作用域 → TmuxCreateGuard Drop 回收 pre-insert orphan window。
+        // raw PTY spawn 通过 map 注入 AGENT_SESSION_ID；tmux 已在 -e 注入。
+        // 使用 RAII 确保失败路径也清除 map，避免泄漏。
+        struct PreallocAgentGuard(String);
+        impl Drop for PreallocAgentGuard {
+            fn drop(&mut self) {
+                forget_preallocated_agent_session(&self.0);
+            }
+        }
+        let _prealloc_guard = agent_ctx.agent_session_id.as_ref().map(|agent_id| {
+            remember_preallocated_agent_session(&session_id, agent_id);
+            PreallocAgentGuard(session_id.clone())
+        });
         let spawned = self.spawn_row(state, row, SpawnBarrierPolicy::Retry, None)?;
         // spawn 成功：window 由 registry/command 层（SessionSpawnGuard + close path）接管。
         if let Some(guard) = tmux_create_guard.as_mut() {
@@ -7024,6 +7193,7 @@ mod tests {
             worktree_id: "wt-1".to_string(),
             terminal_session_id: "term-1".to_string(),
             owner_instance_id: "owner-1".to_string(),
+            agent_session_id: None,
         };
         apply_workbench_terminal_env(&mut command, Some(&ctx));
 
@@ -7051,6 +7221,8 @@ mod tests {
                 .and_then(|v| v.to_str()),
             Some("owner-1")
         );
+        // 普通用户终端不注入 AGENT_SESSION_ID
+        assert!(command.get_env("CC_PARTNER_AGENT_SESSION_ID").is_none());
         assert!(command.get_env("CC_PARTNER_CONTROL_TOKEN").is_none());
         assert!(command.get_env("CC_PARTNER_DEVICE_TOKEN").is_none());
         assert!(command.get_env("CC_PARTNER_AUTH_TOKEN").is_none());
@@ -7065,6 +7237,30 @@ mod tests {
         assert!(tmux_args
             .iter()
             .any(|a| a == "CC_PARTNER_PROJECT_ID=proj-1"));
+        assert!(!tmux_args
+            .iter()
+            .any(|a| a.starts_with("CC_PARTNER_AGENT_SESSION_ID=")));
+
+        // Orchestrator 预分配路径：注入 AGENT_SESSION_ID
+        let mut command2 = CommandBuilder::new("/bin/sh");
+        let ctx2 = TerminalAgentContextIds {
+            project_id: "proj-1".to_string(),
+            worktree_id: "wt-1".to_string(),
+            terminal_session_id: "term-1".to_string(),
+            owner_instance_id: "owner-1".to_string(),
+            agent_session_id: Some("agent-prealloc-1".to_string()),
+        };
+        apply_workbench_terminal_env(&mut command2, Some(&ctx2));
+        assert_eq!(
+            command2
+                .get_env("CC_PARTNER_AGENT_SESSION_ID")
+                .and_then(|v| v.to_str()),
+            Some("agent-prealloc-1")
+        );
+        let tmux2 = tmux_agent_context_env_args(&ctx2);
+        assert!(tmux2
+            .iter()
+            .any(|a| a == "CC_PARTNER_AGENT_SESSION_ID=agent-prealloc-1"));
     }
 
     /// Business Logic（为什么需要这个测试）:

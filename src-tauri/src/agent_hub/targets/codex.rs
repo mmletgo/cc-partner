@@ -177,7 +177,8 @@ impl AssetAdapter for CodexInstructionAdapter {
 
     /// 渲染 Codex portable 投影计划。
     ///
-    /// Business Logic: 最终物化进受管 plugin；本方法只生成相对路径计划。
+    /// Business Logic: 最终物化进受管 plugin；本方法只生成相对路径计划；
+    /// Gate D plugin package render 复用同一 portable renderer。
     /// Code Logic: 委托 `render_portable_payload`。
     fn render_portable_asset(
         &self,
@@ -304,6 +305,26 @@ fn scan_codex_layer(
 /// Code Logic: 委托 packages::PLUGIN_SELECTOR。
 pub fn codex_managed_plugin_selector() -> &'static str {
     crate::agent_hub::packages::PLUGIN_SELECTOR
+}
+
+/// 从 Codex Plugin 根目录构造 `DiscoveredPluginSource`（不扫描 child）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Gate D 分解入口需要 target 侧稳定构造发现记录；实际 component 扫描在 `plugins::decompose`。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 `.codex-plugin/plugin.json` 的 name/version/description（若存在），否则用目录名。
+pub fn discover_codex_plugin_source(
+    root: &std::path::Path,
+    scope_id: impl Into<String>,
+    scope_kind: ScopeKind,
+) -> Result<crate::agent_hub::plugins::DiscoveredPluginSource, AppError> {
+    crate::agent_hub::plugins::decompose::discover_plugin_source_for_target(
+        crate::agent_hub::models::AgentTarget::Codex,
+        root,
+        scope_id,
+        scope_kind,
+    )
 }
 
 /// Codex disable 策略：remove-with-binding-retained。

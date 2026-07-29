@@ -446,6 +446,8 @@ async fn gate_b_scanners_shared_once_and_target_only_isolated() {
                 visible_targets: vec![AgentTarget::Codex],
             },
         ],
+        commands: vec![],
+        agents: vec![],
     };
     let oc_pkg = materialize_package(&pkg_input(AgentTarget::OpenCode)).expect("oc pkg");
     assert!(

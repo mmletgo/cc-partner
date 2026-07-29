@@ -9,12 +9,178 @@
 use super::claude_code::ClaudeCodeAdapter;
 use super::codex::CodexAdapter;
 use super::generic_terminal::{GenericTerminalAdapter, GenericTerminalConfig};
+use super::opencode::OpenCodeAdapter;
 use super::types::{AgentCompletionContract, AgentProviderId};
 use crate::error::AppError;
 use crate::workbench::agent_runtime::{AgentRuntimeMutation, AgentSessionPhase};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// 可见终端 shell 方言（用于安全渲染 argv）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     OpenCode `--prompt` 可含任意用户文本；必须按真实 shell 做字面量转义，禁止执行 prompt 内容。
+///
+/// Code Logic（这个枚举做什么）:
+///     Posix / PowerShell / Cmd 三态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TerminalShellDialect {
+    /// sh/bash/zsh 等 POSIX shell
+    Posix,
+    /// Windows PowerShell
+    PowerShell,
+    /// cmd.exe
+    Cmd,
+}
+
+impl TerminalShellDialect {
+    /// 从 session command 字符串启发式推断方言。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Runner 写入终端前需要与实际 shell 一致的转义规则。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     路径/名字含 powershell/pwsh → PowerShell；cmd → Cmd；默认 Posix（含 WSL/bash）。
+    pub fn from_command(command: &str) -> Self {
+        let lower = command.to_ascii_lowercase();
+        if lower.contains("powershell") || lower.contains("pwsh") {
+            Self::PowerShell
+        } else if lower.contains("cmd.exe") || lower.ends_with("\\cmd") || lower.ends_with("/cmd") {
+            Self::Cmd
+        } else {
+            Self::Posix
+        }
+    }
+}
+
+/// resume 时终端复用策略。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     空闲 TUI 仍占用 PTY 时，向旧终端注入第二条 shell 命令不是合法 resume。
+///
+/// Code Logic（这个枚举做什么）:
+///     Reuse=写回同一终端；Fresh=新建终端与 agent runtime。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResumeTerminalPolicy {
+    /// 复用当前 terminal 写入 resume plan
+    Reuse,
+    /// 新建 terminal（同一 worktree）写入 resume plan
+    Fresh,
+}
+
+/// 将 plan 渲染为安全的终端输入文本。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `--prompt` 与 env 字面量必须按 shell 方言转义；不得执行 prompt 内 `$()`/`%VAR%` 等。
+///
+/// Code Logic（这个函数做什么）:
+///     可选 env 前缀 + `executable` + 每个 arg 的字面量转义 + `\n` + 可选 stdin。
+pub fn render_terminal_command(
+    plan: &AgentLaunchPlan,
+    dialect: TerminalShellDialect,
+) -> Result<String, AppError> {
+    if plan.executable.trim().is_empty() {
+        return Err(AppError::generic("AgentLaunchPlan.executable 不能为空"));
+    }
+    let mut out = String::new();
+    for (key, value) in &plan.env {
+        if key.trim().is_empty() {
+            return Err(AppError::generic("AgentLaunchPlan.env key 不能为空"));
+        }
+        // 拒绝换行 key，防止 env 注入多语句。
+        if key.contains('\n') || key.contains('\r') || key.contains('=') {
+            return Err(AppError::generic("AgentLaunchPlan.env key 含非法字符"));
+        }
+        match dialect {
+            TerminalShellDialect::Posix => {
+                out.push_str(key);
+                out.push('=');
+                out.push_str(&shell_quote_posix(value));
+                out.push(' ');
+            }
+            TerminalShellDialect::PowerShell => {
+                // `$env:KEY = 'value';` 形式，值按单引号字面量。
+                out.push_str("$env:");
+                out.push_str(key);
+                out.push_str(" = ");
+                out.push_str(&shell_quote_powershell(value));
+                out.push_str("; ");
+            }
+            TerminalShellDialect::Cmd => {
+                out.push_str("set \"");
+                out.push_str(key);
+                out.push('=');
+                // set "K=V"：转义内嵌双引号；% 加倍防止变量展开。
+                out.push_str(&value.replace('%', "%%").replace('"', "\"\""));
+                out.push_str("\" & ");
+            }
+        }
+    }
+    out.push_str(&shell_quote_for(plan.executable.as_str(), dialect));
+    for arg in &plan.args {
+        out.push(' ');
+        out.push_str(&shell_quote_for(arg, dialect));
+    }
+    out.push('\n');
+    if let Some(stdin) = &plan.stdin {
+        out.push_str(stdin);
+    }
+    Ok(out)
+}
+
+fn shell_quote_for(value: &str, dialect: TerminalShellDialect) -> String {
+    match dialect {
+        TerminalShellDialect::Posix => shell_quote_posix(value),
+        TerminalShellDialect::PowerShell => shell_quote_powershell(value),
+        TerminalShellDialect::Cmd => shell_quote_cmd(value),
+    }
+}
+
+/// POSIX 单引号字面量：`'...'`，内部 `'` → `'\''`。
+fn shell_quote_posix(value: &str) -> String {
+    let mut s = String::with_capacity(value.len() + 2);
+    s.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            s.push_str("'\\''");
+        } else {
+            s.push(ch);
+        }
+    }
+    s.push('\'');
+    s
+}
+
+/// PowerShell 单引号字面量：`'...'`，内部 `'` → `''`。
+fn shell_quote_powershell(value: &str) -> String {
+    let mut s = String::with_capacity(value.len() + 2);
+    s.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            s.push_str("''");
+        } else {
+            s.push(ch);
+        }
+    }
+    s.push('\'');
+    s
+}
+
+/// cmd.exe 双引号字面量：`"..."`，`"` → `""`，`%` → `%%`。
+fn shell_quote_cmd(value: &str) -> String {
+    let mut s = String::with_capacity(value.len() + 2);
+    s.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => s.push_str("\"\""),
+            '%' => s.push_str("%%"),
+            _ => s.push(ch),
+        }
+    }
+    s.push('"');
+    s
+}
 
 /// probe 结果缓存 TTL（60 秒）。
 const PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -83,24 +249,36 @@ pub struct AgentLaunchPlan {
 }
 
 impl AgentLaunchPlan {
-    /// 渲染为可见终端写入文本（无 shell）。
+    /// 渲染为可见终端写入文本（兼容 Claude/Codex 简单形态）。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     Workbench terminal 接收键入流，需要把 plan 转成等价于历史 Claude 注入的输入。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     `executable [args...]\n` + 可选 stdin；args 以空格连接（adapter 保证无 metachar）。
+    ///     无 args 时：`executable\n` + stdin；有 args 时走 Posix 安全 renderer（含 env）。
+    ///     新路径应显式调用 `render_terminal_command` 并传入 session 方言。
     pub fn to_terminal_input(&self) -> String {
-        let mut line = self.executable.clone();
-        for arg in &self.args {
-            line.push(' ');
-            line.push_str(arg);
+        if self.args.is_empty() && self.env.is_empty() {
+            let mut line = self.executable.clone();
+            line.push('\n');
+            if let Some(stdin) = &self.stdin {
+                line.push_str(stdin);
+            }
+            return line;
         }
-        line.push('\n');
-        if let Some(stdin) = &self.stdin {
-            line.push_str(stdin);
-        }
-        line
+        render_terminal_command(self, TerminalShellDialect::Posix).unwrap_or_else(|_| {
+            // fail-soft 兼容：退回空格连接（不应在 OpenCode 路径发生）。
+            let mut line = self.executable.clone();
+            for arg in &self.args {
+                line.push(' ');
+                line.push_str(arg);
+            }
+            line.push('\n');
+            if let Some(stdin) = &self.stdin {
+                line.push_str(stdin);
+            }
+            line
+        })
     }
 }
 
@@ -168,7 +346,7 @@ impl AgentUsageDelta {
 /// Agent adapter 合同。
 ///
 /// Business Logic（为什么需要这个 trait）:
-///     Claude/Codex/generic 共享 probe/launch/resume/normalize/usage/interrupt 边界。
+///     Claude/Codex/generic/OpenCode 共享 probe/launch/resume/normalize/usage/interrupt 边界。
 ///
 /// Code Logic（这个 trait 做什么）:
 ///     全部方法 Send+Sync；normalize 返回 A1 `AgentRuntimeMutation`。
@@ -211,6 +389,17 @@ pub trait AgentAdapter: Send + Sync {
     fn completion_contract(&self) -> AgentCompletionContract {
         self.provider_id().default_completion_contract()
     }
+
+    /// resume 终端策略；默认 Reuse（Claude/Codex 兼容）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     OpenCode 空闲 TUI 仍占 PTY，resume 必须 Fresh 终端。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     默认 `Reuse`；OpenCode 覆盖为 `Fresh`。
+    fn resume_terminal_policy(&self) -> ResumeTerminalPolicy {
+        ResumeTerminalPolicy::Reuse
+    }
 }
 
 /// probe 缓存条目。
@@ -225,7 +414,7 @@ struct ProbeCacheEntry {
 ///     Runner / catalog / watchdog 需要按 provider 解析同一组内置 adapter。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有三个内置 adapter；probe 结果缓存 60s。
+///     持有四个内置 adapter；probe 结果缓存 60s。
 pub struct AgentAdapterRegistry {
     adapters: HashMap<AgentProviderId, Arc<dyn AgentAdapter>>,
     probe_cache: Mutex<HashMap<AgentProviderId, ProbeCacheEntry>>,
@@ -235,10 +424,11 @@ impl AgentAdapterRegistry {
     /// 构造默认内置 registry（无 generic allowlist）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     大多数路径只需 Claude+Codex；generic 在无 allowlist 时 probe 为 Unavailable。
+    ///     大多数路径只需 Claude+Codex；generic 在无 allowlist 时 probe 为 Unavailable；
+    ///     OpenCode 缺 L3/bridge 时 probe 为 Unavailable。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     注册 Claude/Codex/Generic(None)。
+    ///     注册 Claude/Codex/Generic(None)/OpenCode。
     pub fn with_defaults() -> Self {
         Self::new(None)
     }
@@ -249,7 +439,7 @@ impl AgentAdapterRegistry {
     ///     owner 可在本地 config 启用受控 generic terminal。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     注册三个 adapter。
+    ///     注册四个 adapter。
     pub fn new(generic: Option<GenericTerminalConfig>) -> Self {
         let mut adapters: HashMap<AgentProviderId, Arc<dyn AgentAdapter>> = HashMap::new();
         adapters.insert(
@@ -261,6 +451,7 @@ impl AgentAdapterRegistry {
             AgentProviderId::GenericTerminal,
             Arc::new(GenericTerminalAdapter::new(generic)),
         );
+        adapters.insert(AgentProviderId::OpenCodeVisible, Arc::new(OpenCodeAdapter));
         Self {
             adapters,
             probe_cache: Mutex::new(HashMap::new()),
@@ -318,7 +509,7 @@ impl AgentAdapterRegistry {
     /// 列出全部内置 adapter 的 probe 摘要（含本地 path，调用方负责 redact）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     Settings catalog 需要三 provider 状态。
+    ///     Settings catalog 需要四 provider 状态。
     ///
     /// Code Logic（这个函数做什么）:
     ///     按固定顺序 probe_cached。
@@ -327,6 +518,7 @@ impl AgentAdapterRegistry {
             AgentProviderId::ClaudeCodeVisible,
             AgentProviderId::CodexVisible,
             AgentProviderId::GenericTerminal,
+            AgentProviderId::OpenCodeVisible,
         ];
         order.into_iter().map(|id| self.probe_cached(id)).collect()
     }
@@ -367,10 +559,10 @@ mod tests {
     use super::*;
 
     /// Business Logic（为什么需要这个测试）:
-    ///     registry 必须注册三个内置 provider。
+    ///     registry 必须注册四个内置 provider。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     get 三个 id 成功。
+    ///     get 四个 id 成功。
     #[test]
     fn registry_registers_built_in_providers() {
         let reg = AgentAdapterRegistry::with_defaults();
@@ -378,6 +570,7 @@ mod tests {
             AgentProviderId::ClaudeCodeVisible,
             AgentProviderId::CodexVisible,
             AgentProviderId::GenericTerminal,
+            AgentProviderId::OpenCodeVisible,
         ] {
             assert_eq!(reg.get(id).unwrap().provider_id(), id);
         }
@@ -398,5 +591,77 @@ mod tests {
             completion: AgentCompletionContract::SentinelLine,
         };
         assert_eq!(plan.to_terminal_input(), "claude\nfix tests\n");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     任意用户 prompt 必须作为单一字面 argv，不能触发 shell 展开。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     含空格/引号/$()/backtick/%VAR%/分号/Unicode 的 prompt → 三方言均可渲染。
+    #[test]
+    fn render_terminal_command_keeps_prompt_literal_across_dialects() {
+        let dangerous = "a b\n$(rm -rf /) `id`; echo %PATH% \"q\" 's' 你好";
+        let plan = AgentLaunchPlan {
+            executable: "opencode".into(),
+            args: vec!["--prompt".into(), dangerous.into()],
+            stdin: None,
+            env: vec![("CC_PARTNER_AGENT_SESSION_ID".into(), "agent-1".into())],
+            completion: AgentCompletionContract::HookEvent,
+        };
+        for dialect in [
+            TerminalShellDialect::Posix,
+            TerminalShellDialect::PowerShell,
+            TerminalShellDialect::Cmd,
+        ] {
+            let rendered = render_terminal_command(&plan, dialect).unwrap();
+            assert!(
+                rendered.contains("opencode"),
+                "dialect={dialect:?} missing exe: {rendered}"
+            );
+            assert!(
+                rendered.contains("--prompt"),
+                "dialect={dialect:?} missing flag: {rendered}"
+            );
+            // 危险片段必须出现在引号字面量中；POSIX 单引号使 $(...) 不被展开。
+            assert!(
+                rendered.contains("$(rm -rf /)") || rendered.contains("rm -rf"),
+                "dialect={dialect:?} missing literal payload: {rendered}"
+            );
+        }
+        let posix = render_terminal_command(&plan, TerminalShellDialect::Posix).unwrap();
+        assert!(posix.contains("CC_PARTNER_AGENT_SESSION_ID="));
+        // 整段 prompt 在一对单引号字面量中（换行也在引号内）。
+        assert!(posix.contains("'opencode'"));
+        assert!(posix.contains("'--prompt'"));
+        assert!(posix.contains("$(rm -rf /)"));
+        assert!(posix.contains("你好"));
+        // 单引号字面量：奇数个未转义 ' 前出现的 $( 表示仍在字面量内。
+        let prompt_start = posix.find("'--prompt'").expect("prompt flag");
+        let after_flag = &posix[prompt_start..];
+        assert!(
+            after_flag.contains("'a b\n$(rm -rf /)"),
+            "prompt not single-quoted as one argv: {posix}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     OpenCode resume 必须声明 Fresh 策略。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     registry.get(OpenCode).resume_terminal_policy == Fresh。
+    #[test]
+    fn opencode_resume_terminal_policy_is_fresh() {
+        let reg = AgentAdapterRegistry::with_defaults();
+        let adapter = reg.get(AgentProviderId::OpenCodeVisible).unwrap();
+        assert_eq!(
+            adapter.resume_terminal_policy(),
+            ResumeTerminalPolicy::Fresh
+        );
+        assert_eq!(
+            reg.get(AgentProviderId::ClaudeCodeVisible)
+                .unwrap()
+                .resume_terminal_policy(),
+            ResumeTerminalPolicy::Reuse
+        );
     }
 }

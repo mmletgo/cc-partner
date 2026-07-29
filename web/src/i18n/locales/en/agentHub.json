@@ -102,7 +102,8 @@
     "restoreTarget": "Restore",
     "removeTarget": "Remove target",
     "deleteEverywhere": "Delete everywhere",
-    "openCollision": "Collision preview"
+    "openCollision": "Collision preview",
+    "openPluginComponents": "Plugin components"
   },
   "adoption": {
     "title": "Adoption / collision preview",
@@ -129,7 +130,8 @@
     "enable": "Enable project",
     "checkouts": "Checkouts",
     "plannedActions": "Planned actions",
-    "noCommitDefault": "cc-partner will not commit or push the project repository."
+    "noCommitDefault": "cc-partner will not commit or push the project repository.",
+    "bridgeNotice": "OpenCode runtime bridge preview for {{path}}. Nothing is written until you confirm enable."
   },
   "conflict": {
     "title": "Conflicts",
@@ -210,5 +212,51 @@
     "stepConfirm": "4. Confirm import",
     "confirmAction": "Confirm import",
     "confirmSummary": "Imported {{assets}} assets · {{revisions}} revisions · projections scheduled {{projections}}"
+  },
+  "plugin": {
+    "drawerTitle": "Plugin components",
+    "noReport": "No plugin package report loaded.",
+    "loadFailed": "Failed to load plugin package report.",
+    "mixedStatusWarning": "Package is not fully synced. Mixed component status is not compressed to green.",
+    "activationState": "Activation: {{state}}",
+    "componentsAria": "Plugin components",
+    "residualsAria": "Plugin residuals",
+    "residualsTitle": "Residuals",
+    "residualReason": "Residual: {{reason}}",
+    "residualIncluded": "included",
+    "residualOmitted": "omitted",
+    "deletePreviewAria": "Plugin delete preview",
+    "deletePreviewTitle": "Delete preview",
+    "deletePreviewHint": "Only exclusive unreferenced components are tombstoned. Shared or standalone refs remain.",
+    "tombstoneGroup": "Will tombstone",
+    "preserveGroup": "Will preserve",
+    "deleteNone": "None",
+    "confirmDelete": "Confirm package delete",
+    "ownership": {
+      "packageOwned": "Package owned",
+      "shared": "Shared",
+      "standalone": "Standalone"
+    },
+    "decision": {
+      "tombstoneOwned": "Tombstone owned",
+      "preserveShared": "Preserve shared",
+      "preserveStandalone": "Preserve standalone"
+    },
+    "componentStatus": {
+      "verified": "Verified",
+      "partial": "Partial",
+      "sourceOnly": "Source only",
+      "activationRequired": "Activation required",
+      "externalCollision": "External collision",
+      "blocked": "Blocked",
+      "missing": "Missing cell"
+    },
+    "residualKind": {
+      "runtime": "Runtime",
+      "hooks": "Hooks",
+      "assets": "Assets",
+      "npm": "npm",
+      "customTool": "Custom tool"
+    }
   }
 }

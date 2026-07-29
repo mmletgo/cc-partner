@@ -25,6 +25,8 @@ const setTargetPresence = vi.fn();
 const setTargetEnabled = vi.fn();
 const restoreDetachedTarget = vi.fn();
 const deleteAssetEverywhere = vi.fn();
+const getPluginPackageReport = vi.fn();
+const previewPluginDelete = vi.fn();
 
 vi.mock('@/api/agentHub', () => ({
   agentHubApi: {
@@ -42,6 +44,8 @@ vi.mock('@/api/agentHub', () => ({
     setTargetEnabled: (...args: unknown[]) => setTargetEnabled(...args),
     restoreDetachedTarget: (...args: unknown[]) => restoreDetachedTarget(...args),
     deleteAssetEverywhere: (...args: unknown[]) => deleteAssetEverywhere(...args),
+    getPluginPackageReport: (...args: unknown[]) => getPluginPackageReport(...args),
+    previewPluginDelete: (...args: unknown[]) => previewPluginDelete(...args),
   },
 }));
 
@@ -177,6 +181,56 @@ describe('useAgentHubController', () => {
       await result.current.runEnableProject();
     });
     expect(enableProject).toHaveBeenCalledWith('proj-1');
+  });
+
+  test('loadPluginReport always calls previewPluginDelete and merges deletePreview', async () => {
+    getPluginPackageReport.mockResolvedValue({
+      packageAssetId: 'plugin-1',
+      packageDisplayName: 'Demo Plugin',
+      sourceTarget: 'claude',
+      aggregateStatus: 'partial',
+      activationState: 'inactive',
+      diagnostics: [],
+      components: [],
+      residuals: [],
+      partialBlockers: ['x'],
+      deletePreview: null,
+    });
+    previewPluginDelete.mockResolvedValue({
+      packageAssetId: 'plugin-1',
+      packageDisplayName: 'Demo Plugin',
+      sourceTarget: 'claude',
+      aggregateStatus: 'partial',
+      activationState: 'inactive',
+      diagnostics: [],
+      components: [],
+      residuals: [],
+      partialBlockers: ['x'],
+      deletePreview: {
+        packageAssetId: 'plugin-1',
+        components: [
+          {
+            componentId: 'c1',
+            displayName: 'Hook A',
+            decision: 'tombstoneOwned',
+            reasons: ['owned'],
+          },
+        ],
+      },
+    });
+
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.loadPluginReport('plugin-1');
+    });
+
+    expect(getPluginPackageReport).toHaveBeenCalledWith('plugin-1');
+    expect(previewPluginDelete).toHaveBeenCalledWith('plugin-1');
+    expect(result.current.pluginReport?.deletePreview?.components[0].decision).toBe(
+      'tombstoneOwned',
+    );
   });
 
   test('conflict resolve and request sequence for select asset', async () => {

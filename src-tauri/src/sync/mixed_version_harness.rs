@@ -817,4 +817,24 @@ mod tests {
         assert_agent_hub_n_n1_route_inventory_both_generations();
         assert_legacy_lossy_placeholder_contract_present();
     }
+
+    /// Business Logic: N+2 删除门闩在无 evidence 时拒绝，旧路由仍须注册。
+    /// Code Logic: 断言 compatibility status + inventory 双代并存。
+    #[test]
+    fn n_plus_two_guard_blocks_legacy_removal_without_evidence() {
+        use crate::agent_hub::migration::{
+            legacy_agent_asset_compatibility_status, n_plus_two_removal_allowed,
+            AGENT_HUB_GA_VERSION, EARLIEST_LEGACY_REMOVAL_VERSION,
+        };
+        let status = legacy_agent_asset_compatibility_status(AGENT_HUB_GA_VERSION);
+        assert!(!status.removal_allowed);
+        assert!(status.legacy_routes_registered);
+        assert!(status.legacy_ui_hidden);
+        assert_eq!(
+            status.earliest_removal_version,
+            EARLIEST_LEGACY_REMOVAL_VERSION
+        );
+        assert!(!n_plus_two_removal_allowed(EARLIEST_LEGACY_REMOVAL_VERSION));
+        assert_agent_hub_n_n1_route_inventory_both_generations();
+    }
 }

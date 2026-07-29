@@ -70,6 +70,9 @@ pub fn validate_create_request(
                 "candidates[{i}].providerId 不能为空"
             )));
         }
+        // fail-closed：未知 provider 不得创建 experiment candidate。
+        crate::orchestrator::agent_adapter::AgentProviderId::parse(c.provider_id.trim())
+            .map_err(|e| AppError::generic(format!("candidates[{i}].providerId 无效: {e}")))?;
         if c.strategy_label.trim().is_empty() {
             return Err(AppError::generic(format!(
                 "candidates[{i}].strategyLabel 不能为空"

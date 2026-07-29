@@ -12,8 +12,11 @@
  *   - 不直接调用 orchestratorApi；hooks 全部位于渲染分支之前
  */
 import type { JSX } from 'react';
+import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Button, Card, Pill } from '@/components/primitives';
+import { openCodeBridgePreviewHref } from '@/lib/agentAdapterPresentation';
 import { PlusIcon, RefreshIcon, SettingsIcon, SyncIcon } from '@/lib/icons';
 import type {
   OrchestratorRuntimeEvent,
@@ -30,6 +33,7 @@ import {
   RUN_STATE_LABEL_KEYS,
   WORKFLOW_STATE_LABEL_KEYS,
 } from './orchestratorViewHelpers';
+import { AgentAdapterCatalogStrip } from './views/AgentAdapterCatalogStrip';
 import { OrchestratorBoard } from './views/OrchestratorBoard';
 import { OrchestratorCreateDialog } from './views/OrchestratorCreateDialog';
 import { OrchestratorExperimentPanel } from './views/OrchestratorExperimentPanel';
@@ -52,6 +56,10 @@ export type { OrchestratorPanelProps };
 export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
   const c = useOrchestratorController(props);
   const { t } = useTranslation(['orchestrator', 'nav', 'common']);
+  const navigate = useNavigate();
+  const handleOpenOpenCodeBridgePreview = useCallback(() => {
+    navigate(openCodeBridgePreviewHref(c.activeProjectId));
+  }, [c.activeProjectId, navigate]);
 
   return (
     <div className={c.embedded ? styles.embedded : styles.page}>
@@ -333,6 +341,12 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): JSX.Element {
                 onDiscard={(outboxId) => {
                   void c.handleDiscardRemoteOutbox(outboxId);
                 }}
+              />
+            ) : null}
+            {!c.loading ? (
+              <AgentAdapterCatalogStrip
+                agentAdapters={c.agentAdapters}
+                onOpenOpenCodeBridgePreview={handleOpenOpenCodeBridgePreview}
               />
             ) : null}
             {!c.loading ? (

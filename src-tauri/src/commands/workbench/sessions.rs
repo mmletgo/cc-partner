@@ -146,6 +146,89 @@ pub(crate) async fn local_create_workbench_session(
     Ok(row.to_dto())
 }
 
+/// 创建带预分配 terminal/agent session UUID 的本机 shell。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode runtime bridge 要求 shell 启动前 env 中已有 `CC_PARTNER_AGENT_SESSION_ID`，
+///     且 Agent Runtime 行使用同一 UUID。
+///
+/// Code Logic（这个函数做什么）:
+///     与 `local_create_workbench_session` 相同的 lease/upsert/Ready CAS 路径，
+///     但调用 `create_with_preallocated_ids`。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn local_create_workbench_session_with_preallocated_ids(
+    state: &AppState,
+    project_id: String,
+    worktree_id: Option<String>,
+    initial_cols: Option<u16>,
+    initial_rows: Option<u16>,
+    terminal_session_id: String,
+    agent_session_id: String,
+) -> Result<WorkbenchSessionDto, AppError> {
+    state.runtime_role.require_owner()?;
+    let _project_lease = state
+        .workbench_sessions
+        .try_acquire_project_op_lease(&project_id)?;
+    let project = get_project(state, &project_id).await?;
+    let worktree = resolve_worktree(state, &project, worktree_id.as_deref()).await?;
+    let row = state.workbench_sessions.create_with_preallocated_ids(
+        state.clone(),
+        project,
+        worktree.path.clone(),
+        Some(worktree.id.clone()),
+        Some(worktree.name.clone()),
+        initial_cols,
+        initial_rows,
+        terminal_session_id,
+        agent_session_id,
+    )?;
+    let mut spawn_guard = crate::workbench::sessions::SessionSpawnGuard::new_with_state(
+        (*state.workbench_sessions).clone(),
+        row.id.clone(),
+        state.clone(),
+    );
+    if let Err(error) = state
+        .workbench_sessions
+        .require_project_not_closing(&row.project_id)
+    {
+        drop(spawn_guard);
+        if let Err(kill_error) = kill_persisted_backend(&row) {
+            tracing::debug!(error = %kill_error, "create reclaim kill_persisted_backend failed");
+        }
+        return Err(error);
+    }
+    if let Err(error) = state.workbench_session_repo.upsert(&row).await {
+        drop(spawn_guard);
+        if let Err(kill_error) = kill_persisted_backend(&row) {
+            tracing::debug!(error = %kill_error, "create reclaim kill_persisted_backend failed");
+        }
+        return Err(error);
+    }
+    if state
+        .workbench_sessions
+        .require_project_not_closing(&row.project_id)
+        .is_err()
+    {
+        drop(spawn_guard);
+        if let Err(kill_error) = kill_persisted_backend(&row) {
+            tracing::debug!(error = %kill_error, "create reclaim kill_persisted_backend failed");
+        }
+        return Err(AppError::unavailable(
+            "project_closing_barrier_active".to_string(),
+        ));
+    }
+    if !spawn_guard.commit() {
+        drop(spawn_guard);
+        if let Err(kill_error) = kill_persisted_backend(&row) {
+            tracing::debug!(error = %kill_error, "create reclaim kill_persisted_backend failed");
+        }
+        return Err(AppError::unavailable(
+            "session_spawn_ready_cas_miss".to_string(),
+        ));
+    }
+    Ok(row.to_dto())
+}
+
 /// 拉取工作台终端最近输出。
 ///
 /// Business Logic（为什么需要这个函数）:

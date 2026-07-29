@@ -14,7 +14,9 @@ use crate::commands::workbench::{
 };
 use crate::error::AppError;
 use crate::orchestrator::agent_adapter::{
+    ensure_opencode_bridge_verified, opencode_preflight_block_reason, render_terminal_command,
     resolve_task_runner_policy, AgentAdapterRegistry, AgentAvailability, AgentLaunchRequest,
+    AgentProviderId, TerminalShellDialect,
 };
 use crate::orchestrator::claude_runtime::associate_claude_runtime;
 use crate::orchestrator::models::{
@@ -27,6 +29,7 @@ use crate::orchestrator::runner_limits::{
 };
 use crate::orchestrator::workflow::{resolve_project_workflow, PromptTaskContext};
 use crate::state::AppState;
+use crate::workbench::agent_runtime::opencode_bridge::OpenCodeRuntimeBridge;
 use std::path::Path;
 use std::time::Duration;
 
@@ -240,32 +243,24 @@ pub async fn prepare_runner_attempt(
             .reason_code
             .as_deref()
             .unwrap_or("provider_unavailable");
-        if let Ok(Some(blocked)) = state
-            .orchestrator_repo
-            .try_transition_task_status(
-                &task.id,
-                OrchestratorTaskStatus::Preparing,
-                OrchestratorTaskStatus::Blocked,
-                Some(reason),
-            )
-            .await
-        {
-            let _ = state
-                .orchestrator_repo
-                .add_evidence(
-                    &task.id,
-                    "runnerAdapter",
-                    "Agent adapter unavailable",
-                    reason,
-                    &format!(
-                        "provider={}\navailability=unavailable\nreason={reason}",
-                        runner_policy.provider.as_str()
-                    ),
-                )
+        return block_preparing_for_adapter(state, &task.id, runner_policy.provider, reason).await;
+    }
+
+    // OpenCode：worktree/session 前 fail-closed（opt-in / bridge / L3）。
+    // 禁止缺 bridge 时创建现场或回落 Sentinel。
+    let mut opencode_opted_in = false;
+    if runner_policy.provider == AgentProviderId::OpenCodeVisible {
+        let mapping = state
+            .agent_hub_repo
+            .get_project_mapping_by_local_workbench_id(&task.project_id)
+            .await?;
+        opencode_opted_in = mapping.as_ref().map(|m| m.opted_in).unwrap_or(false);
+        let project_root = Path::new(&project.path);
+        let bridge_preview = OpenCodeRuntimeBridge::preview(project_root, opencode_opted_in);
+        if let Err(reason) = open_code_preflight_gate(&probe, &bridge_preview) {
+            return block_preparing_for_adapter(state, &task.id, runner_policy.provider, reason)
                 .await;
-            return Ok(blocked);
         }
-        return state.orchestrator_repo.get_task(&task.id).await;
     }
 
     let worktree = prepare_worktree_for_attempt(state, task, &branch_name, attempt).await?;
@@ -276,16 +271,57 @@ pub async fn prepare_runner_attempt(
     {
         return state.orchestrator_repo.get_task(&task.id).await;
     }
-    let session = local_create_workbench_session(
-        state,
-        task.project_id.clone(),
-        Some(worktree.id.clone()),
-        Some(DEFAULT_TERMINAL_COLS),
-        Some(DEFAULT_TERMINAL_ROWS),
-    )
-    .await?;
+
+    // OpenCode：新 worktree 必须 materialize+verify bridge 后才写输入。
+    if runner_policy.provider == AgentProviderId::OpenCodeVisible {
+        if let Err(err) =
+            ensure_opencode_bridge_verified(Path::new(&worktree.path), opencode_opted_in)
+        {
+            let reason = err.to_string();
+            let code = if reason.contains("externalCollision") {
+                "externalCollision"
+            } else if reason.contains("runtimeBridgeRequired") {
+                "runtimeBridgeRequired"
+            } else {
+                "runtime_bridge_verify_failed"
+            };
+            return block_preparing_for_adapter(state, &task.id, runner_policy.provider, code)
+                .await;
+        }
+    }
+
+    // OpenCode 需要预分配 terminal/agent UUID，以便 shell env 与 runtime 行一致。
+    let (session, agent_session_id_prealloc) =
+        if runner_policy.provider == AgentProviderId::OpenCodeVisible {
+            let terminal_id = uuid::Uuid::new_v4().to_string();
+            let agent_id = uuid::Uuid::new_v4().to_string();
+            let session = local_create_workbench_session_with_preallocated_ids(
+                state,
+                task.project_id.clone(),
+                Some(worktree.id.clone()),
+                Some(DEFAULT_TERMINAL_COLS),
+                Some(DEFAULT_TERMINAL_ROWS),
+                terminal_id,
+                agent_id.clone(),
+            )
+            .await?;
+            (session, Some(agent_id))
+        } else {
+            let session = local_create_workbench_session(
+                state,
+                task.project_id.clone(),
+                Some(worktree.id.clone()),
+                Some(DEFAULT_TERMINAL_COLS),
+                Some(DEFAULT_TERMINAL_ROWS),
+            )
+            .await?;
+            (session, None)
+        };
+
     // A1/A3：按冻结 policy 的 provider 创建 Agent runtime（Launching）
-    let agent_runtime = match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner_with_provider(
+    // OpenCode 完成契约仅为 HookEvent：runtime 行缺失则 OSC Completed 无人收，
+    // 不得继续写 terminal prompt；Claude/Codex 仍可 Sentinel 降级继续。
+    let agent_runtime = match crate::orchestrator::agent_runtime_bridge::create_launching_agent_for_runner_with_provider_and_id(
         state,
         &task.project_id,
         Some(&worktree.id),
@@ -294,11 +330,27 @@ pub async fn prepare_runner_attempt(
         attempt as u32,
         runner_policy.provider,
         None,
+        agent_session_id_prealloc.as_deref(),
     )
     .await
     {
         Ok(row) => Some(row),
         Err(error) => {
+            if should_fail_closed_on_agent_runtime_create(runner_policy.provider) {
+                tracing::warn!(
+                    task_id = %task.id,
+                    session_id = %session.id,
+                    provider = %runner_policy.provider.as_str(),
+                    "创建 Agent runtime 失败（OpenCode fail-closed）: {error}"
+                );
+                return block_preparing_for_adapter(
+                    state,
+                    &task.id,
+                    runner_policy.provider,
+                    "agent_runtime_create_failed",
+                )
+                .await;
+            }
             tracing::warn!(
                 task_id = %task.id,
                 session_id = %session.id,
@@ -308,7 +360,10 @@ pub async fn prepare_runner_attempt(
             None
         }
     };
-    let agent_session_id = agent_runtime.as_ref().map(|r| r.id.clone());
+    let agent_session_id = agent_runtime
+        .as_ref()
+        .map(|r| r.id.clone())
+        .or(agent_session_id_prealloc);
     // session 创建后再续租一次，覆盖慢盘/hook 场景，再 CAS 进 Running。
     if !state
         .orchestrator_repo
@@ -424,8 +479,9 @@ pub async fn prepare_runner_attempt(
     {
         return Ok(current);
     }
-    local_write_workbench_session_input(state, session.id.clone(), launch_plan.to_terminal_input())
-        .await?;
+    let dialect = TerminalShellDialect::from_command(&session.command);
+    let terminal_input = render_terminal_command(&launch_plan, dialect)?;
+    local_write_workbench_session_input(state, session.id.clone(), terminal_input).await?;
 
     running_task = state
         .orchestrator_repo
@@ -756,9 +812,113 @@ fn truncate_slug(slug: &str, max_len: usize) -> String {
     }
 }
 
+/// OpenCode 在创建 worktree/session 前的门槛。
+///
+/// Business Logic（为什么需要这个函数）:
+///     unopted / collision / unsupported CLI / 缺 L3 时必须稳定阻断，且不得创建 worktree/terminal。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `opencode_preflight_block_reason`；Some(reason) 时调用方禁止 prepare_worktree。
+fn open_code_preflight_gate(
+    probe: &crate::orchestrator::agent_adapter::AgentProbeResult,
+    bridge_preview: &crate::workbench::agent_runtime::opencode_bridge::OpenCodeBridgeOutcome,
+) -> Result<(), &'static str> {
+    match opencode_preflight_block_reason(probe, bridge_preview) {
+        Some(reason) => Err(reason),
+        None => Ok(()),
+    }
+}
+
+/// HookEvent-only provider 在 agent runtime 创建失败时必须 fail-closed。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode 无 Sentinel 降级；runtime 行缺失会使 OSC Completed 无人接收。
+///
+/// Code Logic（这个函数做什么）:
+///     仅 `OpenCodeVisible` 返回 true。
+fn should_fail_closed_on_agent_runtime_create(provider: AgentProviderId) -> bool {
+    provider == AgentProviderId::OpenCodeVisible
+}
+
+/// Preparing 任务因 adapter/preflight 失败而 Blocked。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode/probe 失败必须在创建 worktree 前写稳定 reason + evidence。
+///
+/// Code Logic（这个函数做什么）:
+///     CAS Preparing→Blocked + runnerAdapter evidence。
+async fn block_preparing_for_adapter(
+    state: &AppState,
+    task_id: &str,
+    provider: AgentProviderId,
+    reason: &str,
+) -> Result<OrchestratorTaskRow, AppError> {
+    if let Ok(Some(blocked)) = state
+        .orchestrator_repo
+        .try_transition_task_status(
+            task_id,
+            OrchestratorTaskStatus::Preparing,
+            OrchestratorTaskStatus::Blocked,
+            Some(reason),
+        )
+        .await
+    {
+        let _ = state
+            .orchestrator_repo
+            .add_evidence(
+                task_id,
+                "runnerAdapter",
+                "Agent adapter unavailable",
+                reason,
+                &format!(
+                    "provider={}\navailability=unavailable\nreason={reason}",
+                    provider.as_str()
+                ),
+            )
+            .await;
+        return Ok(blocked);
+    }
+    state.orchestrator_repo.get_task(task_id).await
+}
+
+/// 带预分配 terminal/agent id 创建本机 Workbench session。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode bridge 要求 shell 启动前 `CC_PARTNER_AGENT_SESSION_ID` 已存在。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `local_create_workbench_session_with_preallocated_ids`。
+async fn local_create_workbench_session_with_preallocated_ids(
+    state: &AppState,
+    project_id: String,
+    worktree_id: Option<String>,
+    initial_cols: Option<u16>,
+    initial_rows: Option<u16>,
+    terminal_session_id: String,
+    agent_session_id: String,
+) -> Result<crate::workbench::models::WorkbenchSessionDto, AppError> {
+    crate::commands::workbench::local_create_workbench_session_with_preallocated_ids(
+        state,
+        project_id,
+        worktree_id,
+        initial_cols,
+        initial_rows,
+        terminal_session_id,
+        agent_session_id,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::orchestrator::agent_adapter::{
+        AgentAvailability, AgentProbeResult, AgentProviderId, REASON_EXTERNAL_COLLISION,
+        REASON_L3_RUNTIME_EVIDENCE_MISSING, REASON_RUNTIME_BRIDGE_REQUIRED,
+        REASON_UNSUPPORTED_CLI_VERSION,
+    };
     use crate::orchestrator::models::{OrchestratorTaskRow, OrchestratorTaskStatus};
+    use crate::workbench::agent_runtime::opencode_bridge::OpenCodeBridgeOutcome;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Business Logic（为什么需要这个函数）:
     ///     Runner attempt 规则测试需要完整任务 Row，避免只测试零散字段。
@@ -785,6 +945,86 @@ mod tests {
             started_at: None,
             finished_at: None,
             ..OrchestratorTaskRow::default_for_status(OrchestratorTaskStatus::Preparing)
+        }
+    }
+
+    /// 模拟 prepare_worktree/session 创建计数，证明 preflight 阻断后零调用。
+    struct WorktreeTerminalCounters {
+        worktree_creates: AtomicUsize,
+        terminal_creates: AtomicUsize,
+    }
+
+    impl WorktreeTerminalCounters {
+        fn new() -> Self {
+            Self {
+                worktree_creates: AtomicUsize::new(0),
+                terminal_creates: AtomicUsize::new(0),
+            }
+        }
+
+        /// Code Logic（这个函数做什么）:
+        ///     与 prepare 路径相同：preflight gate 失败则不递增任何 create 计数。
+        fn run_preflight_then_maybe_prepare(
+            &self,
+            probe: &AgentProbeResult,
+            bridge: &OpenCodeBridgeOutcome,
+        ) -> Result<(), &'static str> {
+            super::open_code_preflight_gate(probe, bridge)?;
+            self.worktree_creates.fetch_add(1, Ordering::SeqCst);
+            self.terminal_creates.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn worktree_creates(&self) -> usize {
+            self.worktree_creates.load(Ordering::SeqCst)
+        }
+
+        fn terminal_creates(&self) -> usize {
+            self.terminal_creates.load(Ordering::SeqCst)
+        }
+    }
+
+    fn available_probe() -> AgentProbeResult {
+        AgentProbeResult {
+            provider_id: AgentProviderId::OpenCodeVisible,
+            availability: AgentAvailability::Available,
+            executable: Some("opencode".into()),
+            version: Some("1.0.0".into()),
+            reason_code: None,
+        }
+    }
+
+    fn unavailable_probe(reason: &str) -> AgentProbeResult {
+        AgentProbeResult {
+            provider_id: AgentProviderId::OpenCodeVisible,
+            availability: AgentAvailability::Unavailable,
+            executable: None,
+            version: None,
+            reason_code: Some(reason.into()),
+        }
+    }
+
+    fn bridge_required() -> OpenCodeBridgeOutcome {
+        OpenCodeBridgeOutcome::RuntimeBridgeRequired {
+            relative_path: ".opencode/plugins/cc-partner-runtime.ts".into(),
+            source_hash: "abc".into(),
+        }
+    }
+
+    fn bridge_collision() -> OpenCodeBridgeOutcome {
+        OpenCodeBridgeOutcome::ExternalCollision {
+            relative_path: ".opencode/plugins/cc-partner-runtime.ts".into(),
+            source_hash: "abc".into(),
+            absolute_path: "/tmp/x".into(),
+            current_hash: Some("def".into()),
+        }
+    }
+
+    fn bridge_verified() -> OpenCodeBridgeOutcome {
+        OpenCodeBridgeOutcome::Verified {
+            relative_path: ".opencode/plugins/cc-partner-runtime.ts".into(),
+            source_hash: "abc".into(),
+            absolute_path: "/tmp/x".into(),
         }
     }
 
@@ -918,5 +1158,91 @@ mod tests {
         assert!(evidence.content.contains("branch: agent/task-fix"));
         assert!(evidence.content.contains("worktreeId: worktree-1"));
         assert!(evidence.content.contains("sessionId: session-1"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     unopted project（runtimeBridgeRequired）不得创建 worktree/terminal。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     preflight gate Err → counters 保持 0。
+    #[test]
+    fn opencode_preflight_unopted_creates_no_worktree_or_terminal() {
+        let counters = WorktreeTerminalCounters::new();
+        let err = counters
+            .run_preflight_then_maybe_prepare(&available_probe(), &bridge_required())
+            .expect_err("unopted must block");
+        assert_eq!(err, REASON_RUNTIME_BRIDGE_REQUIRED);
+        assert_eq!(counters.worktree_creates(), 0);
+        assert_eq!(counters.terminal_creates(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     bridge collision 必须 fail-closed 且零 worktree/terminal。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     ExternalCollision → counters 0。
+    #[test]
+    fn opencode_preflight_collision_creates_no_worktree_or_terminal() {
+        let counters = WorktreeTerminalCounters::new();
+        let err = counters
+            .run_preflight_then_maybe_prepare(&available_probe(), &bridge_collision())
+            .expect_err("collision must block");
+        assert_eq!(err, REASON_EXTERNAL_COLLISION);
+        assert_eq!(counters.worktree_creates(), 0);
+        assert_eq!(counters.terminal_creates(), 0);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     unsupported CLI / 缺 L3 证据不得创建现场。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Unavailable probe 两种 reason → counters 0。
+    #[test]
+    fn opencode_preflight_unsupported_or_missing_l3_creates_no_worktree_or_terminal() {
+        for reason in [
+            REASON_UNSUPPORTED_CLI_VERSION,
+            REASON_L3_RUNTIME_EVIDENCE_MISSING,
+        ] {
+            let counters = WorktreeTerminalCounters::new();
+            let err = counters
+                .run_preflight_then_maybe_prepare(&unavailable_probe(reason), &bridge_verified())
+                .expect_err("unsupported/missing L3 must block");
+            assert_eq!(err, reason);
+            assert_eq!(counters.worktree_creates(), 0);
+            assert_eq!(counters.terminal_creates(), 0);
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     preflight 通过后才允许 prepare 路径递增 worktree/terminal 计数。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     Available + Verified → Ok 且 counters=1。
+    #[test]
+    fn opencode_preflight_pass_allows_worktree_and_terminal_create() {
+        let counters = WorktreeTerminalCounters::new();
+        counters
+            .run_preflight_then_maybe_prepare(&available_probe(), &bridge_verified())
+            .expect("verified bridge must pass");
+        assert_eq!(counters.worktree_creates(), 1);
+        assert_eq!(counters.terminal_creates(), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     OpenCode runtime create 失败必须 fail-closed；Claude 可继续。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     should_fail_closed_on_agent_runtime_create 仅 OpenCodeVisible。
+    #[test]
+    fn opencode_runtime_create_failure_is_fail_closed_unlike_claude() {
+        assert!(super::should_fail_closed_on_agent_runtime_create(
+            AgentProviderId::OpenCodeVisible
+        ));
+        assert!(!super::should_fail_closed_on_agent_runtime_create(
+            AgentProviderId::ClaudeCodeVisible
+        ));
+        assert!(!super::should_fail_closed_on_agent_runtime_create(
+            AgentProviderId::CodexVisible
+        ));
     }
 }

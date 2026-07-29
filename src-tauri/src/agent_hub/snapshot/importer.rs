@@ -15,6 +15,7 @@ use crate::agent_hub::models::{
     AssetKind, NewScopeNode, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
 };
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
+use crate::agent_hub::plugins::from_plugin_package_bytes;
 use crate::agent_hub::revision_graph::{MergePayload, RevisionGraph};
 use crate::agent_hub::snapshot::envelope::{
     validate_snapshot, SnapshotEnvelopeV1, SnapshotError, SnapshotLimits, SnapshotRevision,
@@ -22,7 +23,8 @@ use crate::agent_hub::snapshot::envelope::{
 use crate::error::AppError;
 use crate::storage::agent_hub_repo::{
     AgentHubRepo, ImportAssetRow, ImportBundle, ImportConflictRow, ImportHeadDecision,
-    ImportRevisionRow, ImportVariantRow, UpsertAgentHubProjectMapping,
+    ImportPluginComponentEdge, ImportPluginResidualEdge, ImportRevisionRow, ImportVariantRow,
+    UpsertAgentHubProjectMapping,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -357,7 +359,10 @@ impl SnapshotImporter {
         // ── Plan Phase B bundle ─────────────────────────────────────────
         let plan = self.plan_import_bundle(env, &selection).await?;
         let projections_scheduled = plan.projections_scheduled;
-        let bundle = plan.bundle;
+        // Gate D C1：plugin package 边必须与 revision/head 同 TX 恢复
+        let mut bundle = plan.bundle;
+        self.enrich_plugin_edges_for_import(&mut bundle, env, &snapshot.object_bytes)
+            .await?;
 
         // ── Phase B: single write TX ────────────────────────────────────
         let result = self.repo.commit_import_bundle(bundle).await?;
@@ -822,9 +827,178 @@ impl SnapshotImporter {
                 conflicts,
                 head_decisions: head_map.into_values().collect(),
                 project_mappings,
+                // commit_import 在 Phase A CAS 后用 package payload 填充
+                plugin_components: Vec::new(),
+                plugin_residuals: Vec::new(),
             },
             projections_scheduled,
         })
+    }
+
+    /// 从 package payload 重建 plugin component/residual 边并 fail-closed 校验 refs。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     本地 append_plugin_package_revision 双写边表；import 若只恢复 revision/CAS，
+    ///     ownership delete 与 re-export residual 闭包都会静默损坏。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对每个 AssetKind::Plugin Upsert revision：读 payload CAS → parse →
+    ///     remap component asset id → 校验 component revision 在 import set/CAS 存在 →
+    ///     residual tree 在 CAS 存在 → 填入 bundle edges。
+    async fn enrich_plugin_edges_for_import(
+        &self,
+        bundle: &mut ImportBundle,
+        env: &SnapshotEnvelopeV1,
+        object_bytes: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), AppError> {
+        // snapshot asset id → local asset id（unique-key 合并后）
+        let mut remote_to_local: HashMap<String, String> = HashMap::new();
+        for a in &env.assets {
+            let local_scope = bundle
+                .assets
+                .iter()
+                .find(|row| {
+                    row.kind == a.kind
+                        && row.origin_namespace == a.origin_namespace
+                        && row.logical_key == a.logical_key
+                })
+                .map(|row| row.scope_id.clone())
+                .unwrap_or_else(|| a.scope_id.clone());
+            let existing = self
+                .repo
+                .get_asset_by_unique_key(&local_scope, a.kind, &a.origin_namespace, &a.logical_key)
+                .await?;
+            let local_id = existing.map(|ex| ex.id).unwrap_or_else(|| a.id.clone());
+            remote_to_local.insert(a.id.clone(), local_id);
+        }
+        // also honor lineages already planned
+        for (local, lineage) in &bundle.lineages {
+            remote_to_local
+                .entry(lineage.clone())
+                .or_insert_with(|| local.clone());
+        }
+
+        let imported_revision_ids: HashSet<String> =
+            bundle.revisions.iter().map(|r| r.id.clone()).collect();
+        let imported_asset_ids: HashSet<String> = bundle
+            .assets
+            .iter()
+            .map(|a| a.id.clone())
+            .chain(remote_to_local.values().cloned())
+            .collect();
+
+        let mut plugin_components: Vec<ImportPluginComponentEdge> = Vec::new();
+        let mut plugin_residuals: Vec<ImportPluginResidualEdge> = Vec::new();
+
+        for rev in &bundle.revisions {
+            if rev.operation == RevisionOperation::Delete {
+                continue;
+            }
+            // 仅 package 资产的 revision 才可能是 PluginPackagePayload
+            let package_asset_kind = env
+                .assets
+                .iter()
+                .find(|a| {
+                    a.id == rev.asset_lineage_id
+                        || remote_to_local
+                            .get(&a.id)
+                            .map(|local| local == &rev.asset_lineage_id)
+                            .unwrap_or(false)
+                })
+                .map(|a| a.kind)
+                .or_else(|| {
+                    // 若 lineage 已是 local asset id，从 bundle assets 找
+                    bundle
+                        .assets
+                        .iter()
+                        .find(|a| a.id == rev.asset_lineage_id)
+                        .map(|a| a.kind)
+                });
+            let Some(AssetKind::Plugin) = package_asset_kind else {
+                continue;
+            };
+            let Some(payload_hash) = rev.payload_hash.as_deref() else {
+                return Err(AppError::validation(format!(
+                    "agent_hub_import_plugin_revision_missing_payload_hash:{}",
+                    rev.id
+                )));
+            };
+            let bytes = if let Some(b) = object_bytes.get(payload_hash) {
+                b.clone()
+            } else {
+                self.objects.get_blob(payload_hash).await.map_err(|_| {
+                    AppError::validation(format!(
+                        "agent_hub_import_plugin_payload_missing:{payload_hash}"
+                    ))
+                })?
+            };
+            let payload = from_plugin_package_bytes(&bytes).map_err(|e| {
+                AppError::validation(format!(
+                    "agent_hub_import_plugin_payload_invalid:{}:{e}",
+                    rev.id
+                ))
+            })?;
+
+            for cref in &payload.component_refs {
+                let local_component_id = remote_to_local
+                    .get(&cref.asset_id)
+                    .cloned()
+                    .unwrap_or_else(|| cref.asset_id.clone());
+                // component asset must be present in import set or already local
+                if !imported_asset_ids.contains(&local_component_id)
+                    && self.repo.get_asset(&local_component_id).await?.is_none()
+                {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_import_plugin_component_asset_missing:{}",
+                        cref.asset_id
+                    )));
+                }
+                let comp_rev_id = cref.revision_id.as_str().to_string();
+                if !imported_revision_ids.contains(&comp_rev_id)
+                    && self
+                        .repo
+                        .get_revision(&RevisionId::from(comp_rev_id.clone()))
+                        .await?
+                        .is_none()
+                {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_import_plugin_component_revision_missing:{comp_rev_id}"
+                    )));
+                }
+                plugin_components.push(ImportPluginComponentEdge {
+                    package_revision_id: rev.id.clone(),
+                    component_kind: cref.kind,
+                    component_asset_id: local_component_id,
+                    component_revision_id: comp_rev_id,
+                    ownership: cref.ownership,
+                });
+            }
+
+            for rref in &payload.residual_refs {
+                // residual tree must exist in CAS (already staged in Phase A or local)
+                if self
+                    .objects
+                    .get_tree(&rref.tree_manifest_hash)
+                    .await
+                    .is_err()
+                {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_import_plugin_residual_tree_missing:{}",
+                        rref.tree_manifest_hash
+                    )));
+                }
+                plugin_residuals.push(ImportPluginResidualEdge {
+                    package_revision_id: rev.id.clone(),
+                    target: rref.target,
+                    residual_kind: rref.residual_kind,
+                    tree_manifest_hash: rref.tree_manifest_hash.clone(),
+                });
+            }
+        }
+
+        bundle.plugin_components = plugin_components;
+        bundle.plugin_residuals = plugin_residuals;
+        Ok(())
     }
 
     /// 收敛 local head 与 remote head。
@@ -2343,5 +2517,261 @@ mod tests {
             aliases: vec![],
             objects: vec![],
         }
+    }
+
+    /// Gate D C1: import 两个共享 skill 的 package 后，删除一个 package 必须保留 skill；
+    /// re-export 仍闭合 residual/component 边。
+    #[tokio::test]
+    async fn import_shared_plugin_skill_preserves_on_delete_and_reexport() {
+        use crate::agent_hub::assets::PortableAssetPayload;
+        use crate::agent_hub::models::{AssetPolicy, NewLogicalAsset};
+        use crate::agent_hub::plugins::{
+            ComponentOwnership, PluginComponentRef, PluginPackagePayload, PluginResidualRef,
+            ResidualKind,
+        };
+        use crate::agent_hub::snapshot::builder::{
+            build_snapshot, SnapshotSelectionMode, SnapshotSelectionRequest,
+        };
+
+        clear_envelope_cache_for_test();
+        let (repo_a, store_a, _dir_a) = test_env().await;
+        let user = seed_user(&repo_a).await;
+
+        // shared skill S
+        let skill = repo_a
+            .insert_asset(NewLogicalAsset {
+                scope_id: user.clone(),
+                kind: AssetKind::Skill,
+                origin_namespace: "plugin:shared".into(),
+                logical_key: "shared-skill".into(),
+                display_name: "shared-skill".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let md = store_a.put_blob(b"shared-skill-body").await.unwrap();
+        let tree = store_a
+            .put_tree(&crate::agent_hub::object_store::TreeManifest {
+                entries: vec![crate::agent_hub::object_store::TreeEntry {
+                    path: "SKILL.md".into(),
+                    blob_hash: md.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                }],
+            })
+            .await
+            .unwrap();
+        let skill_rev = repo_a
+            .append_portable_asset_revision(
+                &skill.id,
+                &PortableAssetPayload::Skill(crate::agent_hub::assets::PortableSkill {
+                    name: "shared-skill".into(),
+                    description: "d".into(),
+                    skill_markdown_hash: md.hash.clone(),
+                    tree_manifest_hash: tree.hash.clone(),
+                    target_extensions: BTreeMap::new(),
+                }),
+                &store_a,
+                RevisionOriginKind::Ui,
+                Some(crate::agent_hub::models::AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                None,
+            )
+            .await
+            .unwrap();
+
+        let residual_blob = store_a.put_blob(b"runtime-shared").await.unwrap();
+        let residual_tree = store_a
+            .put_tree(&crate::agent_hub::object_store::TreeManifest {
+                entries: vec![crate::agent_hub::object_store::TreeEntry {
+                    path: "index.js".into(),
+                    blob_hash: residual_blob.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                }],
+            })
+            .await
+            .unwrap();
+
+        let mut package_ids = Vec::new();
+        for (key, residual_kind) in [
+            ("pkg-a", ResidualKind::Runtime),
+            ("pkg-b", ResidualKind::Runtime),
+        ] {
+            let plugin = repo_a
+                .insert_asset(NewLogicalAsset {
+                    scope_id: user.clone(),
+                    kind: AssetKind::Plugin,
+                    origin_namespace: "standalone".into(),
+                    logical_key: key.into(),
+                    display_name: key.into(),
+                    policy: AssetPolicy::TargetOnly,
+                })
+                .await
+                .unwrap();
+            let payload = PluginPackagePayload {
+                plugin_id: key.into(),
+                name: key.into(),
+                version: Some("1".into()),
+                description: None,
+                source_target: crate::agent_hub::models::AgentTarget::Claude,
+                component_refs: vec![PluginComponentRef {
+                    kind: AssetKind::Skill,
+                    asset_id: skill.id.clone(),
+                    revision_id: skill_rev.id.clone(),
+                    ownership: if key == "pkg-a" {
+                        ComponentOwnership::PackageOwned
+                    } else {
+                        ComponentOwnership::Shared
+                    },
+                }],
+                residual_refs: vec![PluginResidualRef {
+                    target: crate::agent_hub::models::AgentTarget::Claude,
+                    residual_kind,
+                    tree_manifest_hash: residual_tree.hash.clone(),
+                }],
+                target_extensions: BTreeMap::new(),
+            };
+            let _ = repo_a
+                .append_plugin_package_revision(
+                    &plugin.id,
+                    &payload,
+                    &store_a,
+                    RevisionOriginKind::Ui,
+                    Some(crate::agent_hub::models::AgentTarget::Claude),
+                    "01900000-0000-7000-8000-0000000000d1",
+                    None,
+                )
+                .await
+                .unwrap();
+            package_ids.push(plugin.id);
+        }
+
+        // export both packages + skill (full hub of user scope assets)
+        let built = build_snapshot(
+            &repo_a,
+            &store_a,
+            SnapshotSelectionRequest {
+                mode: SnapshotSelectionMode::FullHub,
+                scope_ids: vec![],
+                asset_ids: vec![],
+                hub_project_ids: vec![],
+                include_history: true,
+                source_replica_id: "01900000-0000-7000-8000-0000000000b1".into(),
+                limits: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // import into empty B
+        let (repo_b, store_b, dir_b) = test_env().await;
+        let importer = SnapshotImporter::new(repo_b.clone(), store_b.clone(), dir_b.path());
+        let out = importer
+            .commit_import(
+                ValidatedSnapshot::from_parts(
+                    built.envelope.clone(),
+                    built.object_bytes.clone(),
+                    None,
+                )
+                .unwrap(),
+                ConfirmedImportSelection::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.inserted_revisions >= 3,
+            "expected packages+skill: {out:?}"
+        );
+
+        // edges restored for both package heads
+        let assets_b = repo_b.list_assets(None, None).await.unwrap();
+        let plugins_b: Vec<_> = assets_b
+            .iter()
+            .filter(|a| a.kind == AssetKind::Plugin && a.deleted_at.is_none())
+            .collect();
+        assert_eq!(plugins_b.len(), 2, "two live plugins after import");
+        for p in &plugins_b {
+            let head = p.current_revision_id.as_ref().expect("plugin head");
+            let comps = repo_b
+                .list_plugin_components_for_revision(head.as_str())
+                .await
+                .unwrap();
+            assert_eq!(
+                comps.len(),
+                1,
+                "import must restore component edges for {}",
+                p.logical_key
+            );
+            let residuals = repo_b
+                .list_plugin_residuals_for_revision(head.as_str())
+                .await
+                .unwrap();
+            assert_eq!(residuals.len(), 1, "import must restore residual edges");
+        }
+
+        let skill_b = assets_b
+            .iter()
+            .find(|a| a.kind == AssetKind::Skill && a.logical_key == "shared-skill")
+            .expect("skill imported");
+        let skill_id = skill_b.id.clone();
+
+        // delete one package — shared skill must be preserved
+        let pkg_to_delete = plugins_b[0].id.clone();
+        let del = repo_b
+            .delete_plugin_package_with_ownership(
+                &pkg_to_delete,
+                &store_b,
+                RevisionOriginKind::Ui,
+                "01900000-0000-7000-8000-0000000000d1",
+            )
+            .await
+            .unwrap();
+        assert!(
+            del.component_decisions.iter().any(|d| {
+                d.component_asset_id == skill_id
+                    && d.decision
+                        == crate::agent_hub::plugins::ComponentDeleteDecision::PreserveShared
+            }),
+            "shared skill must PreserveShared after import, got {:?}",
+            del.component_decisions
+        );
+        let skill_after = repo_b.get_asset(&skill_id).await.unwrap().unwrap();
+        assert!(
+            skill_after.deleted_at.is_none(),
+            "shared skill must survive package delete after import"
+        );
+
+        // re-export remaining package still closes residual tree via restored edges
+        let remaining = plugins_b
+            .iter()
+            .find(|p| p.id != pkg_to_delete)
+            .expect("remaining package");
+        let rebuilt = build_snapshot(
+            &repo_b,
+            &store_b,
+            SnapshotSelectionRequest {
+                mode: SnapshotSelectionMode::ExplicitAssets,
+                scope_ids: vec![],
+                asset_ids: vec![remaining.id.clone()],
+                hub_project_ids: vec![],
+                include_history: true,
+                source_replica_id: "01900000-0000-7000-8000-0000000000b2".into(),
+                limits: None,
+            },
+        )
+        .await
+        .unwrap();
+        let obj_hashes: BTreeSet<_> = rebuilt
+            .envelope
+            .objects
+            .iter()
+            .map(|o| o.hash.as_str())
+            .collect();
+        assert!(
+            obj_hashes.contains(residual_tree.hash.as_str())
+                || obj_hashes.contains(residual_blob.hash.as_str()),
+            "re-export after import must close residual via edges"
+        );
     }
 }

@@ -38,6 +38,18 @@ import type {
   InstructionBlockDto,
   InstructionBlockMode,
   MaterializationStatus,
+  OpenCodeBridgeStatus,
+  OpenCodeBridgeView,
+  PluginComponentDeleteDecision,
+  PluginComponentOwnership,
+  PluginComponentReport,
+  PluginComponentTargetCell,
+  PluginComponentTargetStatus,
+  PluginDeletePreview,
+  PluginDeletePreviewComponent,
+  PluginPackageReport,
+  PluginResidualKind,
+  PluginResidualReport,
 } from '../types/agentHub';
 import {
   arrayDecoder,
@@ -244,25 +256,7 @@ export const agentHubConflictDtoDecoder: Decoder<AgentHubConflictDto> = objectDe
  * Business Logic: 资产详情含 blocks 与 aggregateStatus。
  * Code Logic: summary 字段 + optional blocks/conflicts。
  */
-export const agentHubAssetDetailDecoder: Decoder<AgentHubAssetDetail> = objectDecoder(
-  'AgentHubAssetDetail',
-  {
-    assetId: stringDecoder,
-    scopeId: stringDecoder,
-    kind: stringDecoder,
-    displayName: stringDecoder,
-    logicalKey: stringDecoder,
-    originNamespace: stringDecoder,
-    policy: stringDecoder,
-    currentRevisionId: optionalDecoder(nullableDecoder(stringDecoder)),
-    targets: arrayDecoder(agentHubTargetCellDecoder),
-    hasConflict: optionalDecoder(booleanDecoder),
-    aggregateStatus: assetAggregateStatusDecoder,
-    blocks: optionalDecoder(arrayDecoder(instructionBlockDtoDecoder)),
-    contentMarkdown: optionalDecoder(nullableDecoder(stringDecoder)),
-    conflicts: optionalDecoder(arrayDecoder(agentHubConflictDtoDecoder)),
-  },
-);
+// plugin decoders are declared below; detail decoder references them after definition.
 
 /**
  * Business Logic: status+assets 组合快照，用于 schema 合同与首屏解码。
@@ -463,3 +457,165 @@ export const agentHubConfirmGitImportOutcomeDecoder: Decoder<AgentHubConfirmGitI
     import: agentHubSnapshotImportOutcomeDecoder,
     resolvedMappings: arrayDecoder(agentHubResolvedProjectMappingDecoder),
   });
+
+/**
+ * Business Logic: component target status 严格校验，禁止 silent fallback。
+ * Code Logic: 六态 enum。
+ */
+export const pluginComponentTargetStatusDecoder: Decoder<PluginComponentTargetStatus> =
+  enumDecoder('PluginComponentTargetStatus', [
+    'verified',
+    'partial',
+    'sourceOnly',
+    'activationRequired',
+    'externalCollision',
+    'blocked',
+  ] as const);
+
+/**
+ * Business Logic: ownership 决定删除预览。
+ * Code Logic: packageOwned | shared | standalone。
+ */
+export const pluginComponentOwnershipDecoder: Decoder<PluginComponentOwnership> = enumDecoder(
+  'PluginComponentOwnership',
+  ['packageOwned', 'shared', 'standalone'] as const,
+);
+
+/**
+ * Business Logic: residual 分类诊断。
+ * Code Logic: residual kind enum。
+ */
+export const pluginResidualKindDecoder: Decoder<PluginResidualKind> = enumDecoder(
+  'PluginResidualKind',
+  ['runtime', 'hooks', 'assets', 'npm', 'customTool'] as const,
+);
+
+/**
+ * Business Logic: 删除处置严格区分 tombstone vs preserve。
+ * Code Logic: delete decision enum。
+ */
+export const pluginComponentDeleteDecisionDecoder: Decoder<PluginComponentDeleteDecision> =
+  enumDecoder('PluginComponentDeleteDecision', [
+    'tombstoneOwned',
+    'preserveShared',
+    'preserveStandalone',
+  ] as const);
+
+/**
+ * Business Logic: OpenCode bridge 状态 fail-closed。
+ * Code Logic: ready | previewRequired | conflict | unsupported。
+ */
+export const openCodeBridgeStatusDecoder: Decoder<OpenCodeBridgeStatus> = enumDecoder(
+  'OpenCodeBridgeStatus',
+  ['ready', 'previewRequired', 'conflict', 'unsupported'] as const,
+);
+
+export const pluginComponentTargetCellDecoder: Decoder<PluginComponentTargetCell> = objectDecoder(
+  'PluginComponentTargetCell',
+  {
+    target: agentTargetDecoder,
+    status: pluginComponentTargetStatusDecoder,
+    reasons: arrayDecoder(stringDecoder),
+    projectedPaths: arrayDecoder(stringDecoder),
+    materializedAlias: optionalDecoder(nullableDecoder(stringDecoder)),
+  },
+);
+
+export const pluginComponentReportDecoder: Decoder<PluginComponentReport> = objectDecoder(
+  'PluginComponentReport',
+  {
+    kind: stringDecoder,
+    assetId: stringDecoder,
+    displayName: stringDecoder,
+    canonicalRevisionId: stringDecoder,
+    ownership: pluginComponentOwnershipDecoder,
+    sourceTarget: agentTargetDecoder,
+    targets: arrayDecoder(pluginComponentTargetCellDecoder),
+    residualReason: optionalDecoder(nullableDecoder(stringDecoder)),
+  },
+);
+
+export const pluginResidualReportDecoder: Decoder<PluginResidualReport> = objectDecoder(
+  'PluginResidualReport',
+  {
+    residualTarget: agentTargetDecoder,
+    residualKind: pluginResidualKindDecoder,
+    treeManifestHash: stringDecoder,
+    included: booleanDecoder,
+    reasons: arrayDecoder(stringDecoder),
+  },
+);
+
+export const pluginDeletePreviewComponentDecoder: Decoder<PluginDeletePreviewComponent> =
+  objectDecoder('PluginDeletePreviewComponent', {
+    assetId: stringDecoder,
+    displayName: stringDecoder,
+    kind: stringDecoder,
+    ownership: pluginComponentOwnershipDecoder,
+    decision: pluginComponentDeleteDecisionDecoder,
+  });
+
+export const pluginDeletePreviewDecoder: Decoder<PluginDeletePreview> = objectDecoder(
+  'PluginDeletePreview',
+  {
+    packageAssetId: stringDecoder,
+    packageDisplayName: stringDecoder,
+    components: arrayDecoder(pluginDeletePreviewComponentDecoder),
+  },
+);
+
+/**
+ * Business Logic: package report 解码后 fail-closed；非法 ownership/status 拒绝整包。
+ * Code Logic: objectDecoder package report。
+ */
+export const pluginPackageReportDecoder: Decoder<PluginPackageReport> = objectDecoder(
+  'PluginPackageReport',
+  {
+    packageAssetId: stringDecoder,
+    packageDisplayName: stringDecoder,
+    sourceTarget: agentTargetDecoder,
+    destinationTarget: optionalDecoder(nullableDecoder(agentTargetDecoder)),
+    aggregateStatus: assetAggregateStatusDecoder,
+    activationState: stringDecoder,
+    diagnostics: arrayDecoder(stringDecoder),
+    components: arrayDecoder(pluginComponentReportDecoder),
+    residuals: arrayDecoder(pluginResidualReportDecoder),
+    partialBlockers: arrayDecoder(stringDecoder),
+    deletePreview: optionalDecoder(nullableDecoder(pluginDeletePreviewDecoder)),
+  },
+);
+
+export const openCodeBridgeViewDecoder: Decoder<OpenCodeBridgeView> = objectDecoder(
+  'OpenCodeBridgeView',
+  {
+    status: openCodeBridgeStatusDecoder,
+    relativePath: stringDecoder,
+    blockedReason: optionalDecoder(nullableDecoder(stringDecoder)),
+    requiresProjectPreview: booleanDecoder,
+  },
+);
+
+/**
+ * Business Logic: 资产详情含 blocks/conflicts 与可选 pluginReport。
+ * Code Logic: summary 字段 + optional blocks/conflicts/pluginReport。
+ */
+export const agentHubAssetDetailDecoder: Decoder<AgentHubAssetDetail> = objectDecoder(
+  'AgentHubAssetDetail',
+  {
+    assetId: stringDecoder,
+    scopeId: stringDecoder,
+    kind: stringDecoder,
+    displayName: stringDecoder,
+    logicalKey: stringDecoder,
+    originNamespace: stringDecoder,
+    policy: stringDecoder,
+    currentRevisionId: optionalDecoder(nullableDecoder(stringDecoder)),
+    targets: arrayDecoder(agentHubTargetCellDecoder),
+    hasConflict: optionalDecoder(booleanDecoder),
+    aggregateStatus: assetAggregateStatusDecoder,
+    blocks: optionalDecoder(arrayDecoder(instructionBlockDtoDecoder)),
+    contentMarkdown: optionalDecoder(nullableDecoder(stringDecoder)),
+    conflicts: optionalDecoder(arrayDecoder(agentHubConflictDtoDecoder)),
+    pluginReport: optionalDecoder(nullableDecoder(pluginPackageReportDecoder)),
+  },
+);

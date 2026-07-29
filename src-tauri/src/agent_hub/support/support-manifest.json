@@ -8,8 +8,12 @@
       "currentTestedVersion": "1.0.0",
       "guardedMajor": 1,
       "executableProbe": {
-        "commandNames": ["claude"],
-        "versionArgs": ["--version"],
+        "commandNames": [
+          "claude"
+        ],
+        "versionArgs": [
+          "--version"
+        ],
         "versionPrefix": null,
         "versionSuffix": null,
         "helpFingerprint": null
@@ -24,7 +28,10 @@
         "deactivatePackage": "blocked",
         "liveReload": "blocked"
       },
-      "evidenceIds": ["L3-AGENT-HUB-CLAUDE-001", "L3-AGENT-HUB-B-CLI-001"]
+      "evidenceIds": [
+        "L3-AGENT-HUB-CLAUDE-001",
+        "L3-AGENT-HUB-B-CLI-001"
+      ]
     },
     {
       "target": "codex",
@@ -33,8 +40,12 @@
       "currentTestedVersion": "1.0.0",
       "guardedMajor": 1,
       "executableProbe": {
-        "commandNames": ["codex"],
-        "versionArgs": ["--version"],
+        "commandNames": [
+          "codex"
+        ],
+        "versionArgs": [
+          "--version"
+        ],
         "versionPrefix": null,
         "versionSuffix": null,
         "helpFingerprint": null
@@ -49,7 +60,10 @@
         "deactivatePackage": "blocked",
         "liveReload": "blocked"
       },
-      "evidenceIds": ["L3-AGENT-HUB-CODEX-001", "L3-AGENT-HUB-B-CLI-001"]
+      "evidenceIds": [
+        "L3-AGENT-HUB-CODEX-001",
+        "L3-AGENT-HUB-B-CLI-001"
+      ]
     },
     {
       "target": "opencode",
@@ -58,8 +72,12 @@
       "currentTestedVersion": "1.0.0",
       "guardedMajor": 1,
       "executableProbe": {
-        "commandNames": ["opencode"],
-        "versionArgs": ["--version"],
+        "commandNames": [
+          "opencode"
+        ],
+        "versionArgs": [
+          "--version"
+        ],
         "versionPrefix": null,
         "versionSuffix": null,
         "helpFingerprint": null
@@ -74,7 +92,12 @@
         "deactivatePackage": "blocked",
         "liveReload": "blocked"
       },
-      "evidenceIds": ["L3-AGENT-HUB-OPENCODE-001", "L3-AGENT-HUB-B-CLI-001"]
+      "evidenceIds": [
+        "L3-AGENT-HUB-OPENCODE-001",
+        "L3-AGENT-HUB-B-CLI-001",
+        "L3-AGENT-HUB-OPENCODE-RUNTIME-001"
+      ]
     }
-  ]
+  ],
+  "hookMappings": []
 }

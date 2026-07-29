@@ -60,6 +60,56 @@ pub fn is_managed_package_target_path(path: &str) -> bool {
     norm.contains("agent-hub/materialized-packages")
 }
 
+/// 判定是否为 OpenCode runtime bridge 保留路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `.opencode/plugins/cc-partner-runtime.ts` 是 app 派生物，不是用户 Plugin / Snapshot 资产；
+///     portable 扫描命中匹配字节应忽略，不同字节 externalCollision，禁止投影 job 静默覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     规范化相对路径后与 `OPENCODE_RUNTIME_BRIDGE_REL_PATH` 精确比较。
+pub fn is_opencode_runtime_bridge_reserved_path(path: &str) -> bool {
+    use crate::workbench::agent_runtime::opencode_bridge::OPENCODE_RUNTIME_BRIDGE_REL_PATH;
+    let norm = path
+        .trim_start_matches("./")
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string();
+    // 允许绝对路径后缀匹配
+    norm == OPENCODE_RUNTIME_BRIDGE_REL_PATH
+        || norm.ends_with(&format!("/{OPENCODE_RUNTIME_BRIDGE_REL_PATH}"))
+}
+
+/// 若路径为 bridge 保留位且磁盘字节与期望不同，返回 externalCollision 诊断。
+///
+/// Business Logic（为什么需要这个函数）:
+///     projection/scheduler 与 portable 扫描共用碰撞检测，禁止静默 overwrite。
+///
+/// Code Logic（这个函数做什么）:
+///     非保留路径 → Ok(None)；匹配生成 hash → Ok(Some(false=ours))；不同 → Ok(Some(true=collision))。
+pub fn opencode_runtime_bridge_collision(
+    absolute_or_relative_path: &str,
+    file_bytes: Option<&[u8]>,
+) -> Option<bool> {
+    if !is_opencode_runtime_bridge_reserved_path(absolute_or_relative_path) {
+        return None;
+    }
+    let Some(bytes) = file_bytes else {
+        // 缺失：不是 collision，调用方应 materialize
+        return Some(false);
+    };
+    use crate::workbench::agent_runtime::opencode_bridge::OpenCodeRuntimeBridge;
+    // Some(true)=ours / Some(false)=collision in classify; invert to collision flag
+    match OpenCodeRuntimeBridge::classify_reserved_path(
+        crate::workbench::agent_runtime::opencode_bridge::OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+        bytes,
+    ) {
+        Some(true) => Some(false), // ours, not collision
+        Some(false) => Some(true), // external collision
+        None => None,
+    }
+}
+
 /// package 激活状态机：当前状态 + inspect/apply 结果 → 下一动作。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -1517,6 +1567,39 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mat.status, MaterializationStatus::Blocked);
+    }
+
+    /// Business Logic: OpenCode runtime bridge 保留路径精确匹配与碰撞分类。
+    #[test]
+    fn opencode_runtime_bridge_reserved_path_and_collision() {
+        use crate::workbench::agent_runtime::opencode_bridge::{
+            OpenCodeRuntimeBridge, OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+        };
+        assert!(is_opencode_runtime_bridge_reserved_path(
+            OPENCODE_RUNTIME_BRIDGE_REL_PATH
+        ));
+        assert!(is_opencode_runtime_bridge_reserved_path(&format!(
+            "/tmp/proj/{OPENCODE_RUNTIME_BRIDGE_REL_PATH}"
+        )));
+        assert!(!is_opencode_runtime_bridge_reserved_path(
+            ".opencode/plugins/other.ts"
+        ));
+        let ours = OpenCodeRuntimeBridge::generated_source().as_bytes();
+        assert_eq!(
+            opencode_runtime_bridge_collision(OPENCODE_RUNTIME_BRIDGE_REL_PATH, Some(ours)),
+            Some(false)
+        );
+        assert_eq!(
+            opencode_runtime_bridge_collision(
+                OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+                Some(b"foreign-plugin")
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            opencode_runtime_bridge_collision("other.ts", Some(b"x")),
+            None
+        );
     }
 
     #[test]

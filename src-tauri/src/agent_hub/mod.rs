@@ -15,6 +15,7 @@
 //!     Gate A Task 8：用户级登录自启动（autostart）。
 //!     Gate A Task 9：service 门面 + Attention conflict/blocked 投影 + control/commands。
 //!     Gate A Task 10：migration（用户 CLAUDE.md seed + N/N+1 dual-write 摘要）。
+//!     Gate D Task 7：Plugin 幂等迁移 preview/confirm + LegacyAgentAssetCompatibilityStatus + N+2 门闩。
 //!     Gate A fix r1：`projection_ops` 生产投影调度 + `agent_hub.enabled` 武装路径。
 //!     Gate B Task 1：`assets` typed portable payload（Skill/Command/Agent/MCP）。
 //!     Gate B Task 2：`config_patch` ownership-aware TOML/JSONC 语义 patch。
@@ -29,6 +30,8 @@
 //!     Gate C Task 4：`replication` LAN push 接收端 + 幂等 ledger（prepare/objects/commit）。
 //!     Gate C Task 5：`replication/sender` 源侧 multi-target LAN push + source ledger + Attention。
 //!     Gate C Task 6：`git` 本机 device-lane 自动备份导出（CloudSyncRuntime 单飞，不自动 import 远端 lane）。
+//!     Gate D Task 1：`plugins` 不可变 PluginPackage/Hook/residual schema 与边表引用。
+//!     Gate D Task 3：`plugins/hook_mapping` + `plugins/render` 证据化 Hook 映射与 package 投影。
 
 pub mod assets;
 pub mod autostart;
@@ -39,6 +42,7 @@ pub mod migration;
 pub mod models;
 pub mod object_store;
 pub mod packages;
+pub mod plugins;
 pub mod project_scope;
 pub mod projection;
 pub mod projection_ops;
@@ -70,10 +74,16 @@ pub use instructions::{
     StructuredInstructionIntent,
 };
 pub use migration::{
-    dual_write_legacy_claude_md_summary, migrate_user_claude_md_state,
-    migrate_user_claude_md_state_with, resolve_user_claude_md_content, ClaudeMdMigrationPreview,
-    MigrationDeps, USER_INSTRUCTION_DISPLAY_NAME, USER_INSTRUCTION_LOGICAL_KEY,
-    USER_INSTRUCTION_NAMESPACE, USER_SCOPE_STABLE_ID,
+    confirm_plugin_migration_import, downgrade_compatibility_facade_snapshot,
+    dual_write_legacy_claude_md_summary, legacy_agent_asset_compatibility_status,
+    legacy_facade_policy, migrate_user_claude_md_state, migrate_user_claude_md_state_with,
+    n_plus_two_removal_allowed, preview_plugin_migration, resolve_user_claude_md_content,
+    version_cmp, ClaudeMdMigrationPreview, DowngradeFacadeSnapshot,
+    LegacyAgentAssetCompatibilityStatus, LegacyFacadePolicy, MigrationDeps,
+    PluginMigrationConfirmResult, PluginMigrationPreview, PluginMigrationPreviewItem,
+    AGENT_HUB_GA_VERSION, EARLIEST_LEGACY_REMOVAL_VERSION, STABLE_MIGRATION_EVIDENCE_ID,
+    USER_INSTRUCTION_DISPLAY_NAME, USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE,
+    USER_SCOPE_STABLE_ID,
 };
 pub use models::{
     compute_asset_aggregate_status, AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget,
@@ -94,8 +104,24 @@ pub use packages::{
     ActivationInspection, ActivationPlan, ActivationResult, AdoptionEngine, AdoptionFault,
     AdoptionOutcome, AdoptionPreview, AdoptionRequest, ClaudePackageActivator,
     CodexPackageActivator, GeneratedTargetPackage, ManagedPackageActivator,
-    OpenCodePackageActivator, PackageBuildInput, PackageMaterializationMeta, PackageSkillInput,
-    PLUGIN_SELECTOR,
+    OpenCodePackageActivator, PackageAgentInput, PackageBuildInput, PackageCommandInput,
+    PackageMaterializationMeta, PackageSkillInput, PLUGIN_SELECTOR,
+};
+pub use plugins::{
+    builtin_hook_mapping_registry, canonical_plugin_package_bytes, canonical_portable_hook_bytes,
+    decide_component_delete, ensure_component_kind_allowed, ensure_preview_skills_in_cas,
+    evaluate_hook_mapping, from_plugin_package_bytes, from_portable_hook_bytes,
+    hook_mapping_registry_from_manifest, import_confirmed, inspect_plugin_source,
+    merge_activation_into_report, project_plugin_package, render_component_for_target,
+    sort_plugin_package_payload, validate_plugin_package_payload, validate_portable_hook,
+    ComponentDeleteDecision, ComponentOwnership, ComponentPayloadPreview, ComponentPortability,
+    ComponentPreview, ComponentProjectionReport, ComponentTargetStatus,
+    ConfirmedPluginDecomposition, DefaultPluginDecomposer, DiscoveredPluginSource, HookEventIntent,
+    HookMappingDecision, HookMappingRecord, HookTrustModel, PackageAggregateStatus,
+    PackageProjectionReport, PackageRenderInput, PluginComponentRef, PluginDecomposer,
+    PluginDecompositionPreview, PluginPackagePayload, PluginPackageRevision, PluginResidualRef,
+    PortableHook, ResidualKind, ResidualPreview, ResidualProjectionReport,
+    ResolvedComponentPayload,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,

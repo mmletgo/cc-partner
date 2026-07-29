@@ -9,6 +9,7 @@
 import type { JSX } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/primitives/Button';
+import { agentProviderLabelKey } from '@/lib/agentAdapterPresentation';
 import type { OrchestratorExperiment } from '@/lib/types/orchestrator';
 import styles from './OrchestratorExperimentPanel.module.css';
 
@@ -50,10 +51,20 @@ export function OrchestratorExperimentPanel(
         </p>
       ) : null}
       <ul className={styles.candidates}>
-        {(experiment.candidates ?? []).map((c) => (
-          <li key={c.taskId} className={styles.candidate}>
+        {(experiment.candidates ?? []).map((c) => {
+          const providerKey = agentProviderLabelKey(c.providerId);
+          const providerLabel = providerKey
+            ? t(`orchestrator:${providerKey}`)
+            : c.providerId;
+          return (
+          <li
+            key={c.taskId}
+            className={styles.candidate}
+            data-provider={c.providerId}
+            data-testid={`experiment-candidate-${c.taskId}`}
+          >
             <span>
-              #{c.ordinal} {c.strategyLabel} · {c.providerId}
+              #{c.ordinal} {c.strategyLabel} · {providerLabel}
             </span>
             <span>{c.outcome}</span>
             {needsDecision &&
@@ -69,7 +80,8 @@ export function OrchestratorExperimentPanel(
               </Button>
             ) : null}
           </li>
-        ))}
+          );
+        })}
       </ul>
       {needsDecision ? (
         <div className={styles.actions}>

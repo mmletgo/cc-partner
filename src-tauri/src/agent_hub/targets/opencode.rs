@@ -174,7 +174,8 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
 
     /// 渲染 OpenCode portable 投影。
     ///
-    /// Business Logic: 只写入原生 `.opencode`/config-root 计划路径。
+    /// Business Logic: 只写入原生 `.opencode`/config-root 计划路径；
+    /// Gate D plugin package render 复用同一 portable renderer，residual 默认 source-only。
     /// Code Logic: 委托 `render_portable_payload`。
     fn render_portable_asset(
         &self,
@@ -354,4 +355,24 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 /// Code Logic: 返回策略 token。
 pub fn opencode_activation_strategy() -> &'static str {
     "native_path_projection"
+}
+
+/// 从 OpenCode 本地 Plugin 根目录构造 `DiscoveredPluginSource`（不扫描 child）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode 原生 JS/TS/npm plugin 仍进入同一分解路径；runtime 默认 source residual。
+///
+/// Code Logic（这个函数做什么）:
+///     优先 `package.json` name/version/description，否则用目录名。
+pub fn discover_opencode_plugin_source(
+    root: &std::path::Path,
+    scope_id: impl Into<String>,
+    scope_kind: ScopeKind,
+) -> Result<crate::agent_hub::plugins::DiscoveredPluginSource, AppError> {
+    crate::agent_hub::plugins::decompose::discover_plugin_source_for_target(
+        crate::agent_hub::models::AgentTarget::OpenCode,
+        root,
+        scope_id,
+        scope_kind,
+    )
 }

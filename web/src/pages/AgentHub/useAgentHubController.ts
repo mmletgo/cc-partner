@@ -40,6 +40,7 @@ import type {
   AgentHubStatus,
   AgentTarget,
   DesiredPresence,
+  PluginPackageReport,
 } from '@/lib/types/agentHub';
 import type { LanPushPeerOption } from './LanPushDialog';
 
@@ -81,6 +82,11 @@ export interface UseAgentHubControllerResult {
   blocksDrawerOpen: boolean;
   openBlocksDrawer: () => void;
   closeBlocksDrawer: () => void;
+  pluginDrawerOpen: boolean;
+  pluginReport: import('@/lib/types/agentHub').PluginPackageReport | null;
+  openPluginDrawer: (assetId?: string) => void;
+  closePluginDrawer: () => void;
+  loadPluginReport: (assetId: string) => Promise<void>;
   adoptionOpen: boolean;
   adoptionPreview: AgentHubAdoptionPreview | null;
   openAdoptionPreview: (asset: AgentHubAssetSummary, target: AgentTarget) => void;
@@ -91,6 +97,8 @@ export interface UseAgentHubControllerResult {
   closeDeleteEverywhere: () => void;
   confirmDeleteEverywhere: () => Promise<void>;
   deepLinkConflictId: string | null;
+  /** OpenCode bridge deep link 相对路径（仅展示，不写盘）。 */
+  deepLinkBridgePath: string | null;
   reload: () => Promise<void>;
   resolveConflict: (args: Omit<AgentHubResolveConflictArgs, 'assetId'>) => Promise<void>;
   updateInstruction: (args: Omit<AgentHubUpdateInstructionArgs, 'assetId'>) => Promise<void>;
@@ -169,6 +177,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   const deepLinkAssetId = searchParams.get('assetId');
   const deepLinkConflictId = searchParams.get('conflictId');
+  const deepLinkPreview = searchParams.get('preview');
+  const deepLinkProjectId = searchParams.get('projectId');
+  const deepLinkBridge = searchParams.get('bridge');
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -201,10 +212,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(deepLinkAssetId);
   const [selectedAsset, setSelectedAsset] = useState<AgentHubAssetDetail | null>(null);
   const [preview, setPreview] = useState<AgentHubProjectPreview | null>(null);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewProjectId, setPreviewProjectId] = useState('');
+  const [previewOpen, setPreviewOpen] = useState(
+    deepLinkPreview === '1' || deepLinkPreview === 'true',
+  );
+  const [previewProjectId, setPreviewProjectId] = useState(deepLinkProjectId?.trim() ?? '');
   const [conflictDrawerOpen, setConflictDrawerOpen] = useState(Boolean(deepLinkConflictId));
   const [blocksDrawerOpen, setBlocksDrawerOpen] = useState(false);
+  const [pluginDrawerOpen, setPluginDrawerOpen] = useState(false);
+  const [pluginReport, setPluginReport] = useState<PluginPackageReport | null>(null);
   const [adoptionOpen, setAdoptionOpen] = useState(false);
   const [adoptionPreview, setAdoptionPreview] = useState<AgentHubAdoptionPreview | null>(null);
   const [deleteEverywhereOpen, setDeleteEverywhereOpen] = useState(false);
@@ -216,6 +231,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const mountedRef = useRef(true);
   const filtersBootstrappedRef = useRef(false);
   const appliedDeepLinkRef = useRef<string | null>(null);
+  const appliedPreviewDeepLinkRef = useRef<string | null>(null);
   const scopeFilterRef = useRef(scopeFilter);
   const kindFilterRef = useRef(kindFilter);
   scopeFilterRef.current = scopeFilter;
@@ -329,6 +345,21 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     void loadAssetDetail(deepLinkAssetId);
   }, [deepLinkAssetId, deepLinkConflictId, loadAssetDetail]);
 
+  useEffect(() => {
+    // OpenCode bridge / project preview deep link：打开既有 preview dialog，不 enable。
+    const wantsPreview = deepLinkPreview === '1' || deepLinkPreview === 'true';
+    if (!wantsPreview && !deepLinkBridge) return;
+    const key = `preview|${deepLinkPreview ?? ''}|${deepLinkProjectId ?? ''}|${deepLinkBridge ?? ''}`;
+    if (appliedPreviewDeepLinkRef.current === key) return;
+    appliedPreviewDeepLinkRef.current = key;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+    setPreviewOpen(true);
+    if (deepLinkProjectId?.trim()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+      setPreviewProjectId(deepLinkProjectId.trim());
+    }
+  }, [deepLinkBridge, deepLinkPreview, deepLinkProjectId]);
+
   const filteredAssets = useMemo(() => {
     const scope = scopeFilter.trim().toLowerCase();
     const kind = kindFilter.trim().toLowerCase();
@@ -412,6 +443,76 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const closeBlocksDrawer = useCallback(() => {
     if (actionBusy) return;
     setBlocksDrawerOpen(false);
+  }, [actionBusy]);
+
+  /**
+   * Business Logic: 打开 Plugin 组件矩阵并加载 delete preview（tombstone/preserve）。
+   * Code Logic: getPluginPackageReport（或 detail fallback）后始终调用 previewPluginDelete 合并 deletePreview。
+   */
+  const loadPluginReport = useCallback(
+    async (assetId: string) => {
+      setActionBusy(true);
+      setActionError(null);
+      try {
+        let base: PluginPackageReport | null = null;
+        if (selectedAsset?.assetId === assetId && selectedAsset.pluginReport) {
+          base = selectedAsset.pluginReport;
+        } else {
+          try {
+            base = await agentHubApi.getPluginPackageReport(assetId);
+          } catch {
+            if (selectedAsset?.assetId === assetId && selectedAsset.pluginReport) {
+              base = selectedAsset.pluginReport;
+            }
+          }
+        }
+
+        // 生产路径必须调用 previewPluginDelete；不得只依赖 fixture 嵌入的 deletePreview。
+        try {
+          const deleteReport = await agentHubApi.previewPluginDelete(assetId);
+          if (!mountedRef.current) return;
+          if (!base) {
+            base = deleteReport;
+          } else {
+            base = {
+              ...base,
+              deletePreview: deleteReport.deletePreview ?? base.deletePreview ?? null,
+            };
+          }
+        } catch {
+          // delete preview 失败时仍可展示 package matrix；drawer 在无 deletePreview 时隐藏 delete 区。
+        }
+
+        if (!mountedRef.current) return;
+        if (!base) {
+          throw new Error(t('agentHub:plugin.loadFailed'));
+        }
+        setPluginReport(base);
+      } catch (reason) {
+        if (!mountedRef.current) return;
+        setActionError(toErrorMessage(reason));
+        setPluginReport(null);
+      } finally {
+        if (mountedRef.current) setActionBusy(false);
+      }
+    },
+    [selectedAsset, t],
+  );
+
+  const openPluginDrawer = useCallback(
+    (assetId?: string) => {
+      const id = assetId ?? selectedAssetId;
+      setPluginDrawerOpen(true);
+      if (id) {
+        void loadPluginReport(id);
+      }
+    },
+    [loadPluginReport, selectedAssetId],
+  );
+
+  const closePluginDrawer = useCallback(() => {
+    if (actionBusy) return;
+    setPluginDrawerOpen(false);
   }, [actionBusy]);
 
   const openAdoptionPreview = useCallback(
@@ -927,6 +1028,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     blocksDrawerOpen,
     openBlocksDrawer,
     closeBlocksDrawer,
+    pluginDrawerOpen,
+    pluginReport,
+    openPluginDrawer,
+    closePluginDrawer,
+    loadPluginReport,
     adoptionOpen,
     adoptionPreview,
     openAdoptionPreview,
@@ -937,6 +1043,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     closeDeleteEverywhere,
     confirmDeleteEverywhere,
     deepLinkConflictId,
+    deepLinkBridgePath: deepLinkBridge,
     reload,
     resolveConflict,
     updateInstruction,

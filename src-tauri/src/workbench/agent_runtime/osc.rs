@@ -446,7 +446,7 @@ fn decode_payload_bytes(payload: &[u8]) -> Result<AgentRuntimeMutation, AgentOsc
 ///     单测需要稳定构造合法/分片帧，避免手写 base64 易错。
 ///
 /// Code Logic（这个函数做什么）:
-///     JSON camelCase → URL_SAFE_NO_PAD → 前缀 + payload + ST。
+///     委托 `encode_agent_osc_frame_full`（无 provider/native/outcome）。
 #[allow(dead_code)] // 单测 / adapter 参考帧构造 API surface
 pub fn encode_agent_osc_frame(
     agent_session_id: &str,
@@ -455,21 +455,84 @@ pub fn encode_agent_osc_frame(
     version: u64,
     occurred_at: &str,
 ) -> Vec<u8> {
-    let json = serde_json::json!({
-        "agentSessionId": agent_session_id,
-        "terminalSessionId": terminal_session_id,
-        "phase": match phase {
-            AgentSessionPhase::Launching => "launching",
-            AgentSessionPhase::Working => "working",
-            AgentSessionPhase::NeedsInput => "needsInput",
-            AgentSessionPhase::Idle => "idle",
-            AgentSessionPhase::Completed => "completed",
-            AgentSessionPhase::Failed => "failed",
-            AgentSessionPhase::Disconnected => "disconnected",
-        },
-        "version": version,
-        "occurredAt": occurred_at,
-    });
+    encode_agent_osc_frame_full(
+        agent_session_id,
+        terminal_session_id,
+        None,
+        None,
+        phase,
+        version,
+        occurred_at,
+        None,
+    )
+}
+
+/// 编码完整 wire 字段的 OSC 帧（含 provider/native）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode bridge 帧必须携带 nativeSessionId/providerId，且不得含 prompt 正文。
+///
+/// Code Logic（这个函数做什么）:
+///     JSON camelCase（可选字段仅在 Some 时写入）→ URL_SAFE_NO_PAD → 前缀 + payload + ST。
+#[allow(clippy::too_many_arguments)] // wire 字段完整枚举
+pub fn encode_agent_osc_frame_full(
+    agent_session_id: &str,
+    terminal_session_id: &str,
+    provider_id: Option<&str>,
+    native_session_id: Option<&str>,
+    phase: AgentSessionPhase,
+    version: u64,
+    occurred_at: &str,
+    outcome_code: Option<&str>,
+) -> Vec<u8> {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "agentSessionId".into(),
+        serde_json::Value::String(agent_session_id.to_string()),
+    );
+    map.insert(
+        "terminalSessionId".into(),
+        serde_json::Value::String(terminal_session_id.to_string()),
+    );
+    if let Some(p) = provider_id {
+        map.insert(
+            "providerId".into(),
+            serde_json::Value::String(p.to_string()),
+        );
+    }
+    if let Some(n) = native_session_id {
+        map.insert(
+            "nativeSessionId".into(),
+            serde_json::Value::String(n.to_string()),
+        );
+    }
+    map.insert(
+        "phase".into(),
+        serde_json::Value::String(
+            match phase {
+                AgentSessionPhase::Launching => "launching",
+                AgentSessionPhase::Working => "working",
+                AgentSessionPhase::NeedsInput => "needsInput",
+                AgentSessionPhase::Idle => "idle",
+                AgentSessionPhase::Completed => "completed",
+                AgentSessionPhase::Failed => "failed",
+                AgentSessionPhase::Disconnected => "disconnected",
+            }
+            .to_string(),
+        ),
+    );
+    map.insert("version".into(), serde_json::json!(version));
+    map.insert(
+        "occurredAt".into(),
+        serde_json::Value::String(occurred_at.to_string()),
+    );
+    if let Some(o) = outcome_code {
+        map.insert(
+            "outcomeCode".into(),
+            serde_json::Value::String(o.to_string()),
+        );
+    }
+    let json = serde_json::Value::Object(map);
     let b64 = URL_SAFE_NO_PAD.encode(json.to_string().as_bytes());
     let mut out = Vec::with_capacity(OSC_PREFIX.len() + b64.len() + 2);
     out.extend_from_slice(OSC_PREFIX);

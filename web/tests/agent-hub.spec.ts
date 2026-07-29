@@ -1,6 +1,6 @@
 /**
- * E2E-AGENT-HUB-A-001 / E2E-AGENT-HUB-B-001 / E2E-AGENT-HUB-C-001 —
- * Agent Hub Gate A + Gate B + Gate C UI journeys.
+ * E2E-AGENT-HUB-A-001 / E2E-AGENT-HUB-B-001 / E2E-AGENT-HUB-C-001 / E2E-AGENT-HUB-D-001 —
+ * Agent Hub Gate A + Gate B + Gate C + Gate D UI journeys.
  *
  * Business Logic（为什么需要这个套件）:
  *   Gate A 交付 Multi-CLI Agent Hub 指令基础：用户必须能看到 CLI probe 状态、
@@ -9,12 +9,16 @@
  *   invocation alias、externalCollision adoption 预览、detached restore/remove、
  *   target enable 与 delete-everywhere。Gate C 扩展 LAN source-push 选择/进度、
  *   unsupported peer 报告、Git lane inspect/preview/confirm、credential 披露、
- *   stale preview 错误与 project mapping。本 L1 用 mock 锁定 UI 旅程，
- *   不宣称真实 Claude/Codex/OpenCode 写盘、marketplace 激活或真实多机 LAN Hub 复制。
+ *   stale preview 错误与 project mapping。Gate D 扩展 Plugin 组件 Drawer、ownership
+ *   delete preview、residual statuses、OpenCode provider catalog / bridge preview 与
+ *   fail-closed availability、provider runner 有效性选择表面，以及 Gate D Attention
+ *   agentHubProjectionBlocked → Agent Hub 导航。本 L1 用 mock 锁定 UI 旅程，不宣称真实
+ *   Claude/Codex/OpenCode 写盘、marketplace 激活、真实 TUI runtime 或真实多机 LAN Hub 复制。
  *
  * Code Logic（这个套件做什么）:
  *   backendHarness + installAppLocalStorage + registerAppShellCommands；
- *   mock agent_hub_* 命令与合法 DTO；断言 data-testid 旅程。
+ *   mock agent_hub_* / list_orchestrator_agent_adapters / list_attention_items(_v2)
+ *   命令与合法 DTO；断言 data-testid 旅程。
  */
 
 import { expect, test } from './fixtures';
@@ -863,5 +867,372 @@ test.describe('E2E-AGENT-HUB-C-001 Agent Hub Gate C replication UI', () => {
     await expect(page.getByTestId('agent-hub-conflict-drawer')).toBeVisible({
       timeout: 10_000,
     });
+  });
+});
+
+const PLUGIN_ASSET_ID = 'asset-plugin-mixed-1';
+
+/**
+ * Business Logic: Gate D Plugin 行需要 kind=plugin 以暴露 openPlugin 按钮。
+ * Code Logic: 构造 partial aggregate + three-target matrix 摘要。
+ */
+function makePluginAssetSummary(): AssetSummary {
+  return {
+    assetId: PLUGIN_ASSET_ID,
+    scopeId: 'user',
+    kind: 'plugin',
+    displayName: 'Mixed Plugin',
+    logicalKey: 'demo.mixed',
+    originNamespace: 'plugin:demo.mixed',
+    policy: 'targetOnly',
+    currentRevisionId: 'rev-plugin-1',
+    hasConflict: false,
+    aggregateStatus: 'partial',
+    targets: [
+      {
+        target: 'claude',
+        desiredPresence: 'present',
+        desiredEnabled: true,
+        materializationStatus: 'synced',
+        lastError: null,
+        requested: true,
+        supported: true,
+        sourceOnly: false,
+        verified: true,
+      },
+      {
+        target: 'codex',
+        desiredPresence: 'present',
+        desiredEnabled: true,
+        materializationStatus: 'activationRequired',
+        lastError: null,
+        requested: true,
+        supported: true,
+        sourceOnly: false,
+        verified: false,
+      },
+      {
+        target: 'opencode',
+        desiredPresence: 'present',
+        desiredEnabled: true,
+        materializationStatus: 'synced',
+        lastError: null,
+        requested: true,
+        supported: true,
+        sourceOnly: false,
+        verified: true,
+      },
+    ],
+  };
+}
+
+/**
+ * Business Logic: Plugin drawer 需要 fixed revision matrix + residual + delete preview。
+ * Code Logic: 对齐 PluginPackageReport DTO（partial blockers 点名）。
+ */
+function makePluginPackageReport() {
+  return {
+    packageAssetId: PLUGIN_ASSET_ID,
+    packageDisplayName: 'Mixed Plugin',
+    sourceTarget: 'opencode',
+    aggregateStatus: 'partial',
+    activationState: 'planned',
+    diagnostics: ['partial_command'],
+    partialBlockers: [
+      'Skill A@codex:portable_partial',
+      'Hook B@claude:hook_mapping_absent',
+    ],
+    components: [
+      {
+        kind: 'skill',
+        assetId: 'c-skill',
+        displayName: 'Skill A',
+        canonicalRevisionId: 'rev-skill-1',
+        ownership: 'packageOwned',
+        sourceTarget: 'opencode',
+        targets: [
+          {
+            target: 'claude',
+            status: 'verified',
+            reasons: [],
+            projectedPaths: ['skills/review'],
+            materializedAlias: 'review',
+          },
+          {
+            target: 'codex',
+            status: 'partial',
+            reasons: ['portable_partial'],
+            projectedPaths: [],
+          },
+          {
+            target: 'opencode',
+            status: 'verified',
+            reasons: [],
+            projectedPaths: ['skills/review'],
+          },
+        ],
+      },
+      {
+        kind: 'hook',
+        assetId: 'c-hook',
+        displayName: 'Hook B',
+        canonicalRevisionId: 'rev-hook-1',
+        ownership: 'shared',
+        sourceTarget: 'opencode',
+        residualReason: 'targetOnly_no_mapping',
+        targets: [
+          {
+            target: 'claude',
+            status: 'sourceOnly',
+            reasons: ['hook_mapping_absent'],
+            projectedPaths: [],
+          },
+          {
+            target: 'codex',
+            status: 'blocked',
+            reasons: ['hook_mapping_absent'],
+            projectedPaths: [],
+          },
+          {
+            target: 'opencode',
+            status: 'verified',
+            reasons: [],
+            projectedPaths: ['hooks/pre-tool'],
+          },
+        ],
+      },
+    ],
+    residuals: [
+      {
+        residualTarget: 'opencode',
+        residualKind: 'runtime',
+        treeManifestHash: 'ab'.repeat(32),
+        included: true,
+        reasons: [],
+      },
+      {
+        residualTarget: 'claude',
+        residualKind: 'runtime',
+        treeManifestHash: 'cd'.repeat(32),
+        included: false,
+        reasons: ['residual_omitted_other_runtime'],
+      },
+    ],
+    deletePreview: {
+      packageAssetId: PLUGIN_ASSET_ID,
+      packageDisplayName: 'Mixed Plugin',
+      components: [
+        {
+          assetId: 'c-skill',
+          displayName: 'Skill A',
+          kind: 'skill',
+          ownership: 'packageOwned',
+          decision: 'tombstoneOwned',
+        },
+        {
+          assetId: 'c-hook',
+          displayName: 'Hook B',
+          kind: 'hook',
+          ownership: 'shared',
+          decision: 'preserveShared',
+        },
+      ],
+    },
+  };
+}
+
+test.describe('E2E-AGENT-HUB-D-001 Agent Hub Gate D Plugin + OpenCode UI', () => {
+  test('Plugin drawer, delete preview, residual, OpenCode catalog fail-closed, bridge preview', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    const plugin = makePluginAssetSummary();
+    const report = makePluginPackageReport();
+    registerAgentHubBase(backendHarness, {
+      assets: [plugin],
+      detail: {
+        ...plugin,
+        contentMarkdown: '',
+        blocks: [],
+        conflicts: [],
+      },
+    });
+    backendHarness.command('agent_hub_get_plugin_package_report', {
+      kind: 'resolve',
+      value: report,
+    });
+    backendHarness.command('agent_hub_preview_plugin_delete', {
+      kind: 'resolve',
+      value: report,
+    });
+    // OpenCode provider catalog: missing bridge must not render available green.
+    backendHarness.command('list_orchestrator_agent_adapters', {
+      kind: 'resolve',
+      value: {
+        adapters: [
+          {
+            provider: 'claudeCodeVisible',
+            available: true,
+            completionContract: 'sentinelLine',
+            supportsResume: true,
+            supportsUsage: true,
+          },
+          {
+            provider: 'codexVisible',
+            available: true,
+            completionContract: 'sentinelLine',
+            supportsResume: true,
+            supportsUsage: true,
+          },
+          {
+            provider: 'genericTerminal',
+            available: false,
+            completionContract: 'manual',
+            supportsResume: false,
+            supportsUsage: false,
+          },
+          {
+            provider: 'openCodeVisible',
+            available: true,
+            completionContract: 'hookEvent',
+            supportsResume: true,
+            supportsUsage: true,
+            executable: 'opencode',
+            version: '0.1.0',
+            supportEvidence: 'L3-AGENT-HUB-OPENCODE-RUNTIME-001',
+            bridgeStatus: 'previewRequired',
+            blockedReason: 'runtime_bridge_required',
+            reasonCode: 'l3_runtime_evidence_missing',
+          },
+        ],
+      },
+    });
+
+    // --- Plugin components drawer + ownership-aware delete preview ---
+    await page.goto('/agent-hub');
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId(`agent-asset-row-${PLUGIN_ASSET_ID}`)).toBeVisible();
+    await expect(page.getByTestId(`agent-asset-plugin-${PLUGIN_ASSET_ID}`)).toBeVisible();
+    await page.getByTestId(`agent-asset-plugin-${PLUGIN_ASSET_ID}`).click();
+    await expect(page.getByTestId('plugin-components-drawer')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByTestId('plugin-package-aggregate')).toHaveAttribute(
+      'data-aggregate',
+      'partial',
+    );
+    await expect(page.getByTestId('plugin-package-not-synced')).toBeVisible();
+    await expect(page.getByTestId('plugin-package-partial-blockers')).toContainText(
+      'portable_partial',
+    );
+    await expect(page.getByTestId('plugin-component-c-skill')).toHaveAttribute(
+      'data-ownership',
+      'packageOwned',
+    );
+    await expect(page.getByTestId('plugin-component-cell-c-skill-codex')).toHaveAttribute(
+      'data-status',
+      'partial',
+    );
+    await expect(page.getByTestId('plugin-component-cell-c-hook-claude')).toHaveAttribute(
+      'data-status',
+      'sourceOnly',
+    );
+    await expect(page.getByTestId('plugin-residuals')).toBeVisible();
+    await expect(page.getByTestId('plugin-delete-preview')).toBeVisible();
+    await expect(page.getByTestId('plugin-delete-tombstone')).toContainText('Skill A');
+    await expect(page.getByTestId('plugin-delete-preserve')).toContainText('Hook B');
+    // partial must never look fully synced / green-only
+    await expect(page.getByTestId('plugin-package-aggregate')).not.toHaveAttribute(
+      'data-aggregate',
+      'full',
+    );
+    await page.getByTestId('plugin-components-close').click();
+    await expect(page.getByTestId('plugin-components-drawer')).toHaveCount(0, {
+      timeout: 5_000,
+    });
+
+    // --- OpenCode bridge project preview deep link (collision/opt-in surface) ---
+    await page.goto(
+      `/agent-hub?preview=1&projectId=${encodeURIComponent(PROJECT_ID)}&bridge=${encodeURIComponent(
+        '.opencode/plugins/cc-partner-runtime.ts',
+      )}`,
+    );
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('agent-hub-preview-dialog')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('agent-hub-preview-bridge-notice')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-preview-bridge-notice')).toContainText(
+      'cc-partner-runtime',
+    );
+
+    // --- Settings automation catalog: four providers; OpenCode fail-closed ---
+    // Runner selection surface: effectively-available marks which providers may be chosen.
+    await page.goto('/settings?tab=automation');
+    await expect(page.locator('#settings-panel-automation')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('agent-adapter-claudeCodeVisible')).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId('agent-adapter-codexVisible')).toBeVisible();
+    await expect(page.getByTestId('agent-adapter-genericTerminal')).toBeVisible();
+    const openCodeRow = page.getByTestId('agent-adapter-openCodeVisible');
+    await expect(openCodeRow).toBeVisible();
+    await expect(openCodeRow).toHaveAttribute('data-bridge-status', 'previewRequired');
+    await expect(openCodeRow).toHaveAttribute('data-effectively-available', 'false');
+    await expect(openCodeRow).toHaveAttribute('data-completion', 'hookEvent');
+    // available:true in raw catalog must not present as green available without ready bridge
+    await expect(openCodeRow).not.toHaveAttribute('data-effectively-available', 'true');
+    // Provider selection honesty: Claude/Codex available; generic unavailable; OpenCode blocked.
+    await expect(page.getByTestId('agent-adapter-claudeCodeVisible')).toHaveAttribute(
+      'data-effectively-available',
+      'true',
+    );
+    await expect(page.getByTestId('agent-adapter-codexVisible')).toHaveAttribute(
+      'data-effectively-available',
+      'true',
+    );
+    await expect(page.getByTestId('agent-adapter-genericTerminal')).toHaveAttribute(
+      'data-effectively-available',
+      'false',
+    );
+
+    // --- Gate D Attention navigation: agentHubProjectionBlocked → Agent Hub asset ---
+    // L1 mock: navigation-only; does not exercise real Agent phase transitions / TUI.
+    const blockedItemId = `agent-hub:blocked:${PLUGIN_ASSET_ID}`;
+    const attentionSnapshot = {
+      generatedAt: TS,
+      counts: { total: 1, decision: 0, blocked: 1, environment: 0 },
+      items: [
+        {
+          id: blockedItemId,
+          category: 'blocked' as const,
+          sourceKind: 'agentHubProjectionBlocked' as const,
+          title: 'Plugin projection blocked',
+          summary: 'activation or residual gate',
+          updatedAt: TS,
+          freshness: 'live' as const,
+          cachedAt: null,
+          project: null,
+          device: null,
+          target: {
+            kind: 'agentHubAsset' as const,
+            assetId: PLUGIN_ASSET_ID,
+            conflictId: null,
+          },
+        },
+      ],
+    };
+    backendHarness.command('list_attention_items', {
+      kind: 'resolve',
+      value: attentionSnapshot,
+    });
+    backendHarness.command('list_attention_items_v2', {
+      kind: 'resolve',
+      value: attentionSnapshot,
+    });
+    await page.goto('/attention');
+    await expect(page.getByTestId(`attention-item-${blockedItemId}`)).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId(`attention-item-${blockedItemId}`).click();
+    await expect(page).toHaveURL(new RegExp(`/agent-hub\\?.*assetId=${PLUGIN_ASSET_ID}`));
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
   });
 });
