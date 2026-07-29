@@ -803,6 +803,49 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// open 契约：data_dir 只 join 一次 agent-hub/objects。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     防止 runtime 把已 join 的 CAS 根再 open 一次，嵌套成
+    ///     `.../agent-hub/objects/agent-hub/objects`，造成跨路径 blob miss。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     同一 data_dir 两次 open 的 root 相等；blob 经 data_dir open 写入后
+    ///     可被另一 data_dir open 读回；预 join 后的 open 根与正确根不等。
+    #[tokio::test]
+    async fn open_accepts_data_dir_not_prejoined_objects_root() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path();
+        let writer = ObjectStore::open(data_dir).unwrap();
+        let expected_root = data_dir.join("agent-hub").join("objects");
+        assert_eq!(writer.root(), expected_root.as_path());
+
+        let object = writer
+            .put_blob(b"gate-a-object-store-root-contract")
+            .await
+            .unwrap();
+
+        // 生产正确调用方：service / projection_ops / 修复后 runtime 都只传 data_dir。
+        let reader = ObjectStore::open(data_dir).unwrap();
+        assert_eq!(reader.root(), writer.root());
+        assert_eq!(
+            reader.get_blob(&object.hash).await.unwrap(),
+            b"gate-a-object-store-root-contract"
+        );
+
+        // 回归：预 join 会打开嵌套 CAS 根，与正确根不同，读不到同一 blob。
+        let nested = ObjectStore::open(data_dir.join("agent-hub").join("objects")).unwrap();
+        assert_ne!(nested.root(), writer.root());
+        assert!(nested.root().ends_with(
+            Path::new("agent-hub")
+                .join("objects")
+                .join("agent-hub")
+                .join("objects")
+        ));
+        let miss = nested.get_blob(&object.hash).await;
+        assert!(miss.is_err(), "nested CAS must not see writer blobs");
+    }
+
     #[tokio::test]
     async fn invalid_hash_never_escapes_cas_root() {
         let (_tmp, store) = open_temp_store();
