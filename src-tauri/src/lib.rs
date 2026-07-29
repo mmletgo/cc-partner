@@ -38,7 +38,10 @@ pub use models::transfer::{
     TransferDirection, TransferFailure, TransferFailureStage, TransferOpenAction,
     TransferOperationStatus, TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
 };
-pub use net::protocol::{server_protocol_info, CAPABILITY_TRANSFER_RESUME_V1, PROTOCOL_VERSION_V1};
+pub use net::protocol::{
+    server_protocol_info, CAPABILITY_AGENT_HUB_V1, CAPABILITY_TRANSFER_RESUME_V1,
+    PROTOCOL_VERSION_V1,
+};
 pub use storage::transfer_repo::SenderClaimOutcome;
 pub use storage::TransferRepo;
 // T3：integration smoke 可直接调用发送端 operation 查询与 lost-ACK 对账。
@@ -47,6 +50,9 @@ pub use transfer::sender::{
 };
 mod claude_cli;
 mod claude_code_assets;
+// Gate C N/N+1: mixed_version harness cites Gate B fail-closed by stable production function name.
+#[cfg(test)]
+pub use claude_code_assets::prove_legacy_lossy_placeholder_never_overwrites_canonical_credential;
 pub mod cloud_sync;
 mod commands;
 pub mod config;

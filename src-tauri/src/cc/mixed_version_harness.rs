@@ -861,3 +861,48 @@ pub fn assert_batch_too_large_halves_until_success() {
 pub fn assert_concurrent_vector_clock_merges() {
     block_on_current(assert_concurrent_vector_clock_merges_async())
 }
+
+/// Gate C N/N+1：CC history paged + agent-hub.v1 双代 capability 并存。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧 peer 继续 legacy CC history；新 Hub peers 仅用 agent-hub.v1；两代
+///     capability 同宣告，legacy 结果永不冒充 Hub push 成功。
+///
+/// Code Logic（这个函数做什么）:
+///     断言 server_protocol_info 同时含 cc-history.paged-sync.v1 与 agent-hub.v1。
+pub fn assert_agent_hub_and_cc_history_both_generations() {
+    use crate::net::protocol::{
+        server_protocol_info, CAPABILITY_AGENT_HUB_V1, CAPABILITY_CC_HISTORY_PAGED_SYNC_V1,
+    };
+    let info = server_protocol_info();
+    assert!(
+        info.capabilities
+            .iter()
+            .any(|c| c == CAPABILITY_CC_HISTORY_PAGED_SYNC_V1),
+        "cc-history paged capability must remain: {:?}",
+        info.capabilities
+    );
+    assert!(
+        info.capabilities
+            .iter()
+            .any(|c| c == CAPABILITY_AGENT_HUB_V1),
+        "agent-hub.v1 must be advertised alongside legacy cc routes: {:?}",
+        info.capabilities
+    );
+    // 无 pull 风格 agent-hub 路径
+    let routes = include_str!("../net/routes/agent_hub.rs");
+    assert!(
+        !routes.contains(&format!("/api/agent-hub/{}", "pull")),
+        "agent-hub must remain source-push only"
+    );
+}
+
+#[cfg(test)]
+mod agent_hub_n_n1_tests {
+    use super::*;
+
+    #[test]
+    fn agent_hub_and_cc_history_both_generations() {
+        assert_agent_hub_and_cc_history_both_generations();
+    }
+}
