@@ -864,5 +864,20 @@
   "startupBaseline": {
     "listFailed": "Could not enumerate local terminal sessions at startup; pre-mount history may be missing.",
     "retry": "Retry session enumeration"
+  },
+  "providers": {
+    "claudeCodeVisible": "Claude",
+    "codexVisible": "Codex",
+    "genericTerminal": "Generic",
+    "openCodeVisible": "OpenCode"
+  },
+  "openCodeBridge": {
+    "title": "OpenCode runtime bridge",
+    "ready": "Ready",
+    "previewRequired": "Preview required for .opencode/plugins/cc-partner-runtime.ts",
+    "conflict": "External collision on bridge path",
+    "unsupported": "Unsupported without runtime evidence",
+    "blocked": "Blocked: {{reason}}",
+    "openPreview": "Open project preview"
   }
 }

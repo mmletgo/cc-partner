@@ -13,6 +13,9 @@ import {
   agentHubAssetSummaryListDecoder,
   agentHubAssetSummaryDecoder,
   assetAggregateStatusDecoder,
+  pluginPackageReportDecoder,
+  pluginComponentOwnershipDecoder,
+  openCodeBridgeStatusDecoder,
 } from './agentHub';
 
 const validStatus = {
@@ -148,5 +151,88 @@ describe('agentHub schemas', () => {
       assets: [validAsset],
     };
     expect(() => agentHubSnapshotDecoder.decode(bad)).toThrow(ContractDecodeError);
+  });
+
+  const validPluginReport = {
+    packageAssetId: 'pkg-1',
+    packageDisplayName: 'demo',
+    sourceTarget: 'claude',
+    destinationTarget: 'codex',
+    aggregateStatus: 'partial',
+    activationState: 'none',
+    diagnostics: [],
+    components: [
+      {
+        kind: 'skill',
+        assetId: 'c1',
+        displayName: 'Skill',
+        canonicalRevisionId: 'rev-1',
+        ownership: 'packageOwned',
+        sourceTarget: 'claude',
+        residualReason: null,
+        targets: [
+          {
+            target: 'claude',
+            status: 'verified',
+            reasons: [],
+            projectedPaths: ['a'],
+            materializedAlias: 'alias',
+          },
+        ],
+      },
+    ],
+    residuals: [
+      {
+        residualTarget: 'claude',
+        residualKind: 'runtime',
+        treeManifestHash: 'hash',
+        included: true,
+        reasons: [],
+      },
+    ],
+    partialBlockers: ['Skill@codex:partial'],
+    deletePreview: {
+      packageAssetId: 'pkg-1',
+      packageDisplayName: 'demo',
+      components: [
+        {
+          assetId: 'c1',
+          displayName: 'Skill',
+          kind: 'skill',
+          ownership: 'packageOwned',
+          decision: 'tombstoneOwned',
+        },
+      ],
+    },
+  };
+
+  test('decodes plugin package report with ownership residual and delete preview', () => {
+    const decoded = pluginPackageReportDecoder.decode(validPluginReport);
+    expect(decoded.components[0].ownership).toBe('packageOwned');
+    expect(decoded.components[0].canonicalRevisionId).toBe('rev-1');
+    expect(decoded.residuals[0].residualKind).toBe('runtime');
+    expect(decoded.deletePreview?.components[0].decision).toBe('tombstoneOwned');
+    expect(decoded.partialBlockers).toEqual(['Skill@codex:partial']);
+  });
+
+  test('rejects unknown ownership without serializing payload', () => {
+    const bad = structuredClone(validPluginReport);
+    bad.components[0].ownership = 'totally-unknown-ownership';
+    bad.packageDisplayName = 'secret-plugin-name';
+    try {
+      pluginPackageReportDecoder.decode(bad);
+      expect.unreachable('should throw');
+    } catch (reason) {
+      expect(reason).toBeInstanceOf(ContractDecodeError);
+      const err = reason as ContractDecodeError;
+      expect(JSON.stringify(err)).not.toContain('secret-plugin-name');
+      expect(JSON.stringify(err)).not.toContain('totally-unknown-ownership');
+    }
+  });
+
+  test('openCode bridge status enum is strict', () => {
+    expect(openCodeBridgeStatusDecoder.decode('previewRequired')).toBe('previewRequired');
+    expect(() => openCodeBridgeStatusDecoder.decode('maybe')).toThrow(ContractDecodeError);
+    expect(pluginComponentOwnershipDecoder.decode('shared')).toBe('shared');
   });
 });

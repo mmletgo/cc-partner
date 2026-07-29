@@ -1,10 +1,12 @@
 /**
  * @vitest-environment jsdom
  */
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { OrchestratorExperiment } from '@/lib/types/orchestrator';
 import { OrchestratorExperimentPanel } from './OrchestratorExperimentPanel';
+
+afterEach(() => cleanup());
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -67,7 +69,17 @@ describe('OrchestratorExperimentPanel', () => {
         onCancel={vi.fn()}
       />,
     );
-    expect(screen.getAllByRole('button', { name: '采用推荐' })).toHaveLength(1);
+    expect(
+      screen.getAllByRole('button', {
+        name: /采用推荐|orchestrator:experiments.approveRecommended/,
+      }),
+    ).toHaveLength(1);
     expect(screen.queryByText(/Changes|Diff|批注/)).toBeNull();
+    expect(screen.getByTestId('experiment-candidate-task-1').getAttribute('data-provider')).toBe(
+      'claudeCodeVisible',
+    );
+    expect(screen.getByTestId('experiment-candidate-task-2').getAttribute('data-provider')).toBe(
+      'codexVisible',
+    );
   });
 });

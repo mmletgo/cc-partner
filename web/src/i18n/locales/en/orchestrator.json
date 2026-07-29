@@ -330,5 +330,11 @@
       "title": "Experiment needs a decision",
       "body": "An experiment needs your choice. Open the app to continue."
     }
+  },
+  "providers": {
+    "claudeCodeVisible": "Claude",
+    "codexVisible": "Codex",
+    "genericTerminal": "Generic",
+    "openCodeVisible": "OpenCode"
   }
 }

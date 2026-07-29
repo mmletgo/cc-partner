@@ -13,8 +13,10 @@
  *   - loading / core loadError early return 保留在壳层（hooks 已在 controller 无条件执行）
  *   - 所有用户可见文案经 i18next 翻译（settings ns + common ns）
  */
-import { useEffect, useRef, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, type ReactElement } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/primitives';
+import { openCodeBridgePreviewHref } from '@/lib/agentAdapterPresentation';
 import { AutomationSettingsPanel } from './AutomationSettingsPanel';
 import { HealthPanel } from './HealthPanel';
 import { SettingsGeneralPanel } from './SettingsGeneralPanel';
@@ -41,7 +43,16 @@ import styles from './Settings.module.css';
 export function Settings(): ReactElement {
   const ctrl = useSettingsController();
   const { t } = ctrl;
+  const navigate = useNavigate();
   const tablistRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Business Logic: OpenCode previewRequired 打开既有 Agent Hub 项目预览，禁止静默 enable。
+   * Code Logic: navigate(`/agent-hub?preview=1&bridge=...`)。
+   */
+  const handleOpenOpenCodeBridgePreview = useCallback(() => {
+    navigate(openCodeBridgePreviewHref());
+  }, [navigate]);
 
   /**
    * Business Logic（为什么需要这个 effect）:
@@ -455,6 +466,7 @@ export function Settings(): ReactElement {
                 onSave={() => void ctrl.handleSaveAutomation()}
                 canResetDefaults={ctrl.canResetAutomationDefaults}
                 agentAdapters={ctrl.agentAdapters}
+                onOpenOpenCodeBridgePreview={handleOpenOpenCodeBridgePreview}
               />
             )}
           </div>

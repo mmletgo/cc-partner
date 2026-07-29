@@ -23,6 +23,7 @@ import { AssetAdoptionDialog } from './AssetAdoptionDialog';
 import { GitImportDrawer } from './GitImportDrawer';
 import { LanPushDialog } from './LanPushDialog';
 import { InstructionBlocksDrawer } from './InstructionBlocksDrawer';
+import { PluginComponentsDrawer } from './PluginComponentsDrawer';
 import {
   useAgentHubController,
   type UseAgentHubControllerResult,
@@ -114,6 +115,10 @@ export function AgentHubView(props: AgentHubViewProps) {
     blocksDrawerOpen,
     openBlocksDrawer,
     closeBlocksDrawer,
+    pluginDrawerOpen,
+    pluginReport,
+    openPluginDrawer,
+    closePluginDrawer,
     adoptionOpen,
     adoptionPreview,
     openAdoptionPreview,
@@ -122,6 +127,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     closeDeleteEverywhere,
     confirmDeleteEverywhere,
     deepLinkConflictId,
+    deepLinkBridgePath,
     reload,
     resolveConflict,
     updateInstructionBlock,
@@ -147,6 +153,15 @@ export function AgentHubView(props: AgentHubViewProps) {
   function handleOpenBlocks(asset: AgentHubAssetSummary) {
     selectAsset(asset.assetId);
     openBlocksDrawer();
+  }
+
+  /**
+   * Business Logic: Plugin 资产打开组件矩阵 Drawer。
+   * Code Logic: select + openPluginDrawer。
+   */
+  function handleOpenPlugin(asset: AgentHubAssetSummary) {
+    selectAsset(asset.assetId);
+    openPluginDrawer(asset.assetId);
   }
 
   /**
@@ -375,6 +390,7 @@ export function AgentHubView(props: AgentHubViewProps) {
                 writeBlocked={writeBlocked}
                 onSelect={(item) => selectAsset(item.assetId)}
                 onOpenBlocks={handleOpenBlocks}
+                onOpenPlugin={handleOpenPlugin}
                 onOpenConflicts={handleOpenConflicts}
                 onToggleTarget={handleToggleTarget}
                 onRemoveTarget={(item, target) => {
@@ -405,6 +421,11 @@ export function AgentHubView(props: AgentHubViewProps) {
             {t('agentHub:preview.title')}
           </h2>
           <p className={styles.drawerSubtitle}>{t('agentHub:preview.desc')}</p>
+          {deepLinkBridgePath ? (
+            <p className={styles.hint} data-testid="agent-hub-preview-bridge-notice">
+              {t('agentHub:preview.bridgeNotice', { path: deepLinkBridgePath })}
+            </p>
+          ) : null}
           <label className={styles.filterField}>
             <span>{t('agentHub:preview.projectId')}</span>
             <Input
@@ -581,6 +602,14 @@ export function AgentHubView(props: AgentHubViewProps) {
           )}
         </div>
       </Drawer>
+
+      <PluginComponentsDrawer
+        open={pluginDrawerOpen}
+        report={pluginReport}
+        busy={actionBusy}
+        error={actionError}
+        onClose={closePluginDrawer}
+      />
 
       <InstructionBlocksDrawer
         open={blocksDrawerOpen}

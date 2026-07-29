@@ -155,7 +155,25 @@
     "agentAdaptersHint": "本机 owner 可见的 adapter 可用性（不展示可执行路径或凭据）。",
     "agentAdaptersAriaLabel": "Agent adapter 目录",
     "adapterAvailable": "可用",
-    "adapterUnavailable": "不可用"
+    "adapterUnavailable": "不可用",
+    "completionContract": "完成合同：{{contract}}",
+    "executable": "可执行文件：{{path}}",
+    "version": "版本：{{version}}",
+    "supportEvidence": "证据：{{evidence}}",
+    "blockedReason": "阻塞：{{reason}}",
+    "provider": {
+      "claudeCodeVisible": "Claude（可见）",
+      "codexVisible": "Codex（可见）",
+      "genericTerminal": "通用终端",
+      "openCodeVisible": "OpenCode（可见）"
+    },
+    "bridgeStatus": {
+      "ready": "Bridge 就绪",
+      "previewRequired": "需要项目 preview",
+      "conflict": "Bridge 路径冲突",
+      "unsupported": "Bridge 不支持"
+    },
+    "bridgePath": "Bridge 文件：{{path}}"
   },
   "health": {
     "title": "健康提醒",

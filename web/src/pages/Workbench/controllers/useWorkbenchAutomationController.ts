@@ -34,8 +34,10 @@
  */
 import { useCallback, useEffect, useRef } from 'react';
 
-import type { WorkbenchDeepLink } from '../workbenchDeepLink';
+import type { OrchestratorAgentAdapterCatalogItem } from '@/lib/types';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import { useAgentAdapterCatalog } from '@/pages/Orchestrator/controllers/useAgentAdapterCatalog';
+import type { WorkbenchDeepLink } from '../workbenchDeepLink';
 import type { WorkbenchFileWorkspaceView } from '../workbenchFiles';
 
 /**
@@ -91,6 +93,11 @@ export interface WorkbenchAutomationControllerResult {
   focusTaskId: string | null;
   /** Attention/automation deep link 的 outbox 焦点。 */
   focusOutboxId: string | null;
+  /**
+   * Owner adapter catalog（OpenCode bridge/blocked/completion 与 Settings 同源 fail-closed）。
+   * 控制台打开时 best-effort 拉取；失败保持空数组。
+   */
+  agentAdapters: OrchestratorAgentAdapterCatalogItem[];
   openAutomation: () => void;
   closeAutomation: () => void;
   applyAutomationDeepLink: (target: WorkbenchDeepLink) => Promise<boolean>;
@@ -131,6 +138,9 @@ export function useWorkbenchAutomationController(
   const deepLinkProjectId = deepLink.projectId;
   const deepLinkWorktreeId = deepLink.worktreeId;
   const deepLinkSessionId = deepLink.sessionId;
+
+  // Shared fail-closed catalog (loaded on mount; console open only displays it).
+  const agentAdapters = useAgentAdapterCatalog();
 
   // Business Logic: 与原 Workbench.tsx 行为一致——用 ref 记录当前 search 已应用到的
   // projectId/worktreeId/sessionId/path，防止同一段被重复应用；search 切换时整体重置为 null。
@@ -356,6 +366,7 @@ export function useWorkbenchAutomationController(
     automationOpen: automationConsoleOpen,
     focusTaskId: isAutomationDeepLink ? deepLinkTaskId : null,
     focusOutboxId: isAutomationDeepLink ? deepLinkOutboxId : null,
+    agentAdapters,
     openAutomation,
     closeAutomation,
     applyAutomationDeepLink,

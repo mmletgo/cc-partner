@@ -31,6 +31,7 @@ export interface AgentAssetRowProps {
   writeBlocked?: boolean;
   onSelect?: (asset: AgentHubAssetSummary) => void;
   onOpenBlocks?: (asset: AgentHubAssetSummary) => void;
+  onOpenPlugin?: (asset: AgentHubAssetSummary) => void;
   onOpenConflicts?: (asset: AgentHubAssetSummary) => void;
   onToggleTarget?: (
     asset: AgentHubAssetSummary,
@@ -53,6 +54,7 @@ export function AgentAssetRow({
   writeBlocked = false,
   onSelect,
   onOpenBlocks,
+  onOpenPlugin,
   onOpenConflicts,
   onToggleTarget,
   onRemoveTarget,
@@ -62,6 +64,7 @@ export function AgentAssetRow({
 }: AgentAssetRowProps) {
   const { t } = useTranslation(['agentHub', 'common']);
   const hasConflict = Boolean(asset.hasConflict);
+  const isPlugin = asset.kind === 'plugin';
   const partialReasons =
     asset.aggregateStatus === 'partial' ? listPartialReasons(asset) : [];
 
@@ -121,15 +124,27 @@ export function AgentAssetRow({
           ) : null}
         </div>
         <div className={styles.actions}>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={busy}
-            onClick={() => onOpenBlocks?.(asset)}
-            data-testid={`agent-asset-blocks-${asset.assetId}`}
-          >
-            {t('agentHub:actions.openBlocks')}
-          </Button>
+          {isPlugin ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy}
+              onClick={() => onOpenPlugin?.(asset)}
+              data-testid={`agent-asset-plugin-${asset.assetId}`}
+            >
+              {t('agentHub:actions.openPluginComponents')}
+            </Button>
+          ) : (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy}
+              onClick={() => onOpenBlocks?.(asset)}
+              data-testid={`agent-asset-blocks-${asset.assetId}`}
+            >
+              {t('agentHub:actions.openBlocks')}
+            </Button>
+          )}
           {hasConflict ? (
             <Button
               variant="danger"

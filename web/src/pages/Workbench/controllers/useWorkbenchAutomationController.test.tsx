@@ -14,7 +14,7 @@
  *   - 调用 openAutomation / closeAutomation / applyAutomationDeepLink / openTaskWorkbench，
  *     断言 automationOpen、selectProjectFromDeepLink、setActiveWorktreeId、focusSession、navigate 调用日志。
  */
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 
 import { useWorkbenchAutomationController } from './useWorkbenchAutomationController';
@@ -22,6 +22,15 @@ import type { WorkbenchAutomationControllerParams } from './useWorkbenchAutomati
 import type { WorkbenchDeepLink } from '../workbenchDeepLink';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import type { WorkbenchFileWorkspaceView } from '../workbenchFiles';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const listOrchestratorAgentAdapters = vi.fn();
+
+vi.mock('@/api/orchestrator', () => ({
+  listOrchestratorAgentAdapters: (...args: unknown[]) => listOrchestratorAgentAdapters(...args),
+}));
 
 function buildLocalProject(overrides: Partial<WorkbenchProject> = {}): WorkbenchProject {
   return {
@@ -146,6 +155,35 @@ afterEach(() => {
 });
 
 describe('useWorkbenchAutomationController', () => {
+  beforeEach(() => {
+    listOrchestratorAgentAdapters.mockReset();
+    listOrchestratorAgentAdapters.mockResolvedValue({ adapters: [] });
+  });
+
+  test('loads agent adapter catalog for automation surfaces', async () => {
+    listOrchestratorAgentAdapters.mockResolvedValue({
+      adapters: [
+        {
+          provider: 'openCodeVisible',
+          available: true,
+          completionContract: 'hookEvent',
+          supportsResume: true,
+          supportsUsage: true,
+          bridgeStatus: 'previewRequired',
+          blockedReason: 'runtime_bridge_required',
+        },
+      ],
+    });
+
+    const { result } = renderController(buildHarness({ automationConsoleOpen: true }));
+    await waitFor(() => {
+      expect(listOrchestratorAgentAdapters).toHaveBeenCalled();
+      expect(result.current.agentAdapters).toHaveLength(1);
+    });
+    expect(result.current.agentAdapters[0]?.provider).toBe('openCodeVisible');
+    expect(result.current.agentAdapters[0]?.bridgeStatus).toBe('previewRequired');
+  });
+
   test('automationOpen reflects the injected automationConsoleOpen state', () => {
     const { result, rerender } = renderController(buildHarness({ automationConsoleOpen: false }));
     expect(result.current.automationOpen).toBe(false);
@@ -473,5 +511,29 @@ describe('useWorkbenchAutomationController', () => {
     expect(setAutomationConsoleOpen).toHaveBeenCalledWith(false);
     expect(requestWorkspaceView).toHaveBeenCalledWith('files');
     expect(focusSession).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Business Logic: Gate D Task6 禁止新增第八个 Workbench page controller。
+   * Code Logic: 扫描 controllers 目录仍只有既有 7 个 useWorkbench*Controller。
+   */
+  test('does not introduce an eighth Workbench page controller', () => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const files = fs
+      .readdirSync(here)
+      .filter((name) => /^useWorkbench.*Controller\.ts$/.test(name));
+    expect(files.sort()).toEqual(
+      [
+        'useWorkbenchAutomationController.ts',
+        'useWorkbenchFileController.ts',
+        'useWorkbenchProjectController.ts',
+        'useWorkbenchPromptOptimizerController.ts',
+        'useWorkbenchSessionSearchController.ts',
+        'useWorkbenchTerminalController.ts',
+        'useWorkbenchWorktreeGitController.ts',
+      ].sort(),
+    );
+    expect(files).toHaveLength(7);
+    expect(files.some((name) => /useWorkbenchController\.ts$/.test(name))).toBe(false);
   });
 });

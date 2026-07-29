@@ -330,5 +330,11 @@
       "title": "实验需要决策",
       "body": "有实验需要你做出选择。请打开应用查看。"
     }
+  },
+  "providers": {
+    "claudeCodeVisible": "Claude",
+    "codexVisible": "Codex",
+    "genericTerminal": "通用终端",
+    "openCodeVisible": "OpenCode"
   }
 }
