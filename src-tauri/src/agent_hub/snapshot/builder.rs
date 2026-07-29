@@ -5,8 +5,8 @@
 //!     相同 selection + Hub 状态必须复用 snapshotId/createdAt/snapshotHash。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `build_snapshot` 读选中 heads/ancestry/variants/conflicts/aliases，
-//!     流式 re-hash CAS objects，计算 selectionStateHash 并缓存 last envelope。
+//!     `build_snapshot` 经 repo 单读事务冻结身份集合后，流式 re-hash CAS objects，
+//!     计算 selectionStateHash（与 repack 共用纯函数）并缓存 last envelope。
 
 use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::snapshot::canonical_json::canonicalize_value;
@@ -17,7 +17,7 @@ use crate::agent_hub::snapshot::envelope::{
     CANONICALIZATION_NAME, FORMAT_NAME, FORMAT_VERSION,
 };
 use crate::error::AppError;
-use crate::storage::agent_hub_repo::AgentHubRepo;
+use crate::storage::agent_hub_repo::{AgentHubRepo, SnapshotIdentityMode, SnapshotIdentityRequest};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -101,8 +101,8 @@ pub struct BuiltSnapshot {
 ///     源侧 LAN push / Git device lane 的唯一导出入口；失败不得半截成功。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析 selection → 读 assets/lineages/revisions/variants/conflicts/aliases →
-///     re-hash CAS → selectionStateHash 缓存复用 → 填 envelope 并 validate。
+///     单读事务 `load_snapshot_identity_bundle` 冻结身份 → re-hash CAS →
+///     selectionStateHash 缓存复用 → 填 envelope 并 validate。
 pub async fn build_snapshot(
     repo: &AgentHubRepo,
     objects: &ObjectStore,
@@ -113,26 +113,37 @@ pub async fn build_snapshot(
         .clone()
         .unwrap_or_else(default_snapshot_limits);
 
-    // 1) resolve selected assets
-    let assets = resolve_selected_assets(repo, &request).await?;
+    // 1) 单读事务：selection heads + ancestry + variants/conflicts/aliases
+    let identity = repo
+        .load_snapshot_identity_bundle(&SnapshotIdentityRequest {
+            mode: match request.mode {
+                SnapshotSelectionMode::FullHub => SnapshotIdentityMode::FullHub,
+                SnapshotSelectionMode::UserScope => SnapshotIdentityMode::UserScope,
+                SnapshotSelectionMode::Project => SnapshotIdentityMode::Project,
+                SnapshotSelectionMode::ExplicitAssets => SnapshotIdentityMode::ExplicitAssets,
+            },
+            scope_ids: request.scope_ids.clone(),
+            asset_ids: request.asset_ids.clone(),
+            hub_project_ids: request.hub_project_ids.clone(),
+            include_history: request.include_history,
+        })
+        .await?;
+    let assets = identity.assets;
     if assets.is_empty() && matches!(request.mode, SnapshotSelectionMode::ExplicitAssets) {
         return Err(AppError::validation(
             "agent_hub_snapshot_empty_selection".to_string(),
         ));
     }
 
-    let asset_ids: Vec<String> = assets.iter().map(|a| a.id.clone()).collect();
-
-    // 2) lineages
-    let lineage_pairs = repo.list_lineages_for_assets(&asset_ids).await?;
-    let mut lineages: Vec<SnapshotLineage> = lineage_pairs
+    // 2) lineages（TX 结果 + 自 lineage 兜底）
+    let mut lineages: Vec<SnapshotLineage> = identity
+        .lineages
         .iter()
         .map(|(asset_id, lineage_id)| SnapshotLineage {
             id: lineage_id.clone(),
             root_asset_id: asset_id.clone(),
         })
         .collect();
-    // ensure every asset has at least self lineage
     let mut lineage_set: BTreeSet<String> = lineages.iter().map(|l| l.id.clone()).collect();
     for a in &assets {
         if lineage_set.insert(a.id.clone()) {
@@ -145,92 +156,23 @@ pub async fn build_snapshot(
     lineages.sort_by(|a, b| a.id.cmp(&b.id));
     lineages.dedup_by(|a, b| a.id == b.id);
 
-    // 3) heads
+    // 3) heads（身份集合已冻结）
     let mut asset_heads: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut head_ids: Vec<String> = Vec::new();
     for a in &assets {
         if let Some(rev) = &a.current_revision_id {
             asset_heads.insert(a.id.clone(), vec![rev.as_str().to_string()]);
-            head_ids.push(rev.as_str().to_string());
         } else {
             asset_heads.insert(a.id.clone(), vec![]);
         }
     }
 
-    // 4) revisions (history or heads only)
-    let revisions = if request.include_history {
-        repo.collect_revision_ancestry(&head_ids).await?
-    } else {
-        let mut only = Vec::new();
-        for h in &head_ids {
-            if let Some(r) = repo
-                .get_revision(&crate::agent_hub::models::RevisionId(h.clone()))
-                .await?
-            {
-                only.push(r);
-            }
-        }
-        only.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-        only
-    };
+    // 4–7) revisions / variants / conflicts / aliases（均来自同一 TX 冻结结果）
+    let revisions = identity.revisions;
+    let variant_rows = identity.variants;
+    let conflicts = identity.conflicts;
+    let alias_rows = identity.aliases;
 
-    // 5) variants — only for selected assets; include their revision ids in ancestry
-    let variant_rows = repo.list_variants_for_assets(&asset_ids).await?;
-    let mut variant_rev_ids: Vec<String> =
-        variant_rows.iter().map(|v| v.revision_id.clone()).collect();
-    let mut revisions = revisions;
-    if request.include_history && !variant_rev_ids.is_empty() {
-        // ensure variant revisions' ancestry is closed
-        let extra = repo.collect_revision_ancestry(&variant_rev_ids).await?;
-        let mut by_id: BTreeMap<String, _> = revisions
-            .into_iter()
-            .map(|r| (r.id.as_str().to_string(), r))
-            .collect();
-        for r in extra {
-            by_id.insert(r.id.as_str().to_string(), r);
-        }
-        revisions = by_id.into_values().collect();
-    } else if !variant_rev_ids.is_empty() {
-        let mut by_id: BTreeMap<String, _> = revisions
-            .into_iter()
-            .map(|r| (r.id.as_str().to_string(), r))
-            .collect();
-        for vid in &variant_rev_ids {
-            if let Some(r) = repo
-                .get_revision(&crate::agent_hub::models::RevisionId(vid.clone()))
-                .await?
-            {
-                by_id.insert(r.id.as_str().to_string(), r);
-            }
-        }
-        revisions = by_id.into_values().collect();
-    }
-    let _ = &mut variant_rev_ids;
-
-    // 6) conflicts
-    let conflicts = repo
-        .list_unresolved_conflicts_for_assets(&asset_ids)
-        .await?;
-
-    // 7) aliases (project portable only)
-    let hub_ids: Vec<String> = {
-        let mut set = BTreeSet::new();
-        for sid in &request.hub_project_ids {
-            set.insert(sid.clone());
-        }
-        // scopes of selected assets may be project scopes
-        for a in &assets {
-            if let Some(scope) = repo.get_scope(&a.scope_id).await? {
-                if let Some(hub) = scope.hub_project_id {
-                    set.insert(hub);
-                }
-            }
-        }
-        set.into_iter().collect()
-    };
-    let alias_rows = repo.list_portable_project_aliases(&hub_ids).await?;
-
-    // 8) collect object hashes from revisions + variants extension
+    // 8) collect object hashes from revisions + variants extension（CAS 可在 TX 外）
     let mut object_hashes: BTreeSet<String> = BTreeSet::new();
     for rev in &revisions {
         if let Some(h) = &rev.payload_hash {
@@ -455,46 +397,6 @@ pub async fn build_snapshot(
     Ok(built)
 }
 
-/// 解析 selection 对应的资产集合。
-///
-/// Business Logic: full/user/project/explicit 四档互斥主路径。
-/// Code Logic: 委托 repo list helpers；含 deleted。
-async fn resolve_selected_assets(
-    repo: &AgentHubRepo,
-    request: &SnapshotSelectionRequest,
-) -> Result<Vec<crate::agent_hub::models::LogicalAsset>, AppError> {
-    match request.mode {
-        SnapshotSelectionMode::FullHub => repo.list_all_assets_including_deleted().await,
-        SnapshotSelectionMode::UserScope => {
-            let scope_ids = if !request.scope_ids.is_empty() {
-                request.scope_ids.clone()
-            } else if let Some(id) = repo.resolve_user_scope_id().await? {
-                vec![id]
-            } else {
-                return Ok(Vec::new());
-            };
-            repo.list_assets_in_scopes_including_deleted(&scope_ids)
-                .await
-        }
-        SnapshotSelectionMode::Project => {
-            let mut scope_ids = request.scope_ids.clone();
-            for hub in &request.hub_project_ids {
-                if let Some(sid) = repo.resolve_project_scope_id(hub).await? {
-                    scope_ids.push(sid);
-                }
-            }
-            scope_ids.sort();
-            scope_ids.dedup();
-            repo.list_assets_in_scopes_including_deleted(&scope_ids)
-                .await
-        }
-        SnapshotSelectionMode::ExplicitAssets => {
-            repo.list_assets_by_ids_including_deleted(&request.asset_ids)
-                .await
-        }
-    }
-}
-
 /// 从 request + 选中资产构造 envelope.selection。
 ///
 /// Business Logic: selection 字段必须稳定且反映导出意图。
@@ -521,11 +423,14 @@ fn build_envelope_selection(
     }
 }
 
-/// SHA-256 hex of canonical SnapshotSelection.
+/// SHA-256 hex of canonical SnapshotSelection。
 ///
-/// Business Logic: LAN prepare 的 selectionHash。
-/// Code Logic: serde → canonicalize → sha256.
-fn hash_selection(selection: &SnapshotSelection) -> Result<String, AppError> {
+/// Business Logic（为什么需要这个函数）:
+///     LAN prepare 与 expand→repack 必须共用同一 selectionHash 公式。
+///
+/// Code Logic（这个函数做什么）:
+///     serde → canonicalize → sha256。
+pub fn hash_selection(selection: &SnapshotSelection) -> Result<String, AppError> {
     let value = serde_json::to_value(selection)
         .map_err(|e| AppError::generic(format!("selection_to_value:{e}")))?;
     let bytes = canonicalize_value(&value)
@@ -535,10 +440,13 @@ fn hash_selection(selection: &SnapshotSelection) -> Result<String, AppError> {
 
 /// selectionStateHash：selection + 选中身份集合（无 payload 正文）。
 ///
-/// Business Logic: 同一 Hub 状态复用 envelope，避免纯时间戳 Git 空提交。
-/// Code Logic: 稳定 JSON 数组 identity 字段 → canonical → sha256。
+/// Business Logic（为什么需要这个函数）:
+///     同一 Hub 状态复用 envelope；build 与 repack 必须共享公式，否则缓存键漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     稳定 JSON 身份字段（含 assetDeletedAt / revisionParents 等富字段）→ canonical → sha256。
 #[allow(clippy::too_many_arguments)]
-fn hash_selection_state(
+pub fn hash_selection_state(
     selection: &SnapshotSelection,
     assets: &[SnapshotAsset],
     lineages: &[SnapshotLineage],
@@ -642,7 +550,9 @@ mod tests {
         AgentTarget, AssetKind, AssetPolicy, NewLogicalAsset, NewRevision, NewScopeNode,
         RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
     };
-    use crate::storage::agent_hub_repo::{AgentHubRepo, UpsertAgentHubProjectMapping};
+    use crate::storage::agent_hub_repo::{
+        AgentHubRepo, SnapshotIdentityMode, SnapshotIdentityRequest, UpsertAgentHubProjectMapping,
+    };
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
 
@@ -1132,5 +1042,78 @@ mod tests {
         // envelope JSON 不含 secret 明文（secret 只在 objects 正文）
         let env_json = serde_json::to_string(&built.envelope).unwrap();
         assert!(!env_json.contains(SECRET));
+    }
+
+    /// Business Logic: production build 必须经单读事务 helper，而非自由 N 次 auto-commit 查询。
+    /// Code Logic: 直接调用 load_snapshot_identity_bundle 并与 build_snapshot 结果身份集合对齐。
+    #[tokio::test]
+    async fn build_snapshot_uses_single_read_tx_identity_bundle() {
+        clear_envelope_cache_for_test();
+        let (repo, store, _dir) = test_env().await;
+        let user = seed_user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: user,
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".to_string(),
+                logical_key: "tx-contract".to_string(),
+                display_name: "TX".to_string(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let h = put_text(&store, "tx-body").await;
+        let rev = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "01900000-0000-7000-8000-0000000000b1".to_string(),
+                payload_hash: Some(h),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T10:00:00Z".to_string(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let bundle = repo
+            .load_snapshot_identity_bundle(&SnapshotIdentityRequest {
+                mode: SnapshotIdentityMode::FullHub,
+                scope_ids: vec![],
+                asset_ids: vec![],
+                hub_project_ids: vec![],
+                include_history: true,
+            })
+            .await
+            .expect("single-tx identity load");
+        assert_eq!(bundle.assets.len(), 1);
+        assert_eq!(bundle.assets[0].id, asset.id);
+        assert!(bundle.revisions.iter().any(|r| r.id == rev.id));
+
+        let built = build_snapshot(
+            &repo,
+            &store,
+            SnapshotSelectionRequest {
+                mode: SnapshotSelectionMode::FullHub,
+                scope_ids: vec![],
+                asset_ids: vec![],
+                hub_project_ids: vec![],
+                include_history: true,
+                source_replica_id: "01900000-0000-7000-8000-0000000000b1".to_string(),
+                limits: None,
+            },
+        )
+        .await
+        .expect("build via production path");
+        assert_eq!(built.envelope.assets.len(), bundle.assets.len());
+        assert_eq!(built.envelope.revisions.len(), bundle.revisions.len());
+        assert_eq!(
+            built.envelope.assets[0].id, bundle.assets[0].id,
+            "build_snapshot must surface the same TX-frozen asset set"
+        );
     }
 }

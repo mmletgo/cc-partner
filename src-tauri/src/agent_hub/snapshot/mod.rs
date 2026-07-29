@@ -5,7 +5,8 @@
 //!     builder 从 Hub DAG/CAS 导出确定性 envelope；archive 展开/重打包保持字节稳定。
 //!
 //! Code Logic（这个模块做什么）:
-//!     导出 `canonical_json`、`envelope`、`builder`、`archive` 公共 API。
+//!     导出 `canonical_json`、`envelope`、`builder`、`archive` 公共 API；
+//!     builder 经单读事务冻结身份；build/repack 共用 selection_state_hash 公式。
 
 pub mod archive;
 pub mod builder;
@@ -13,7 +14,10 @@ pub mod canonical_json;
 pub mod envelope;
 
 pub use archive::{expand_readable_archive, repack_readable_archive, ExpandedSnapshot};
-pub use builder::{build_snapshot, BuiltSnapshot, SnapshotSelectionMode, SnapshotSelectionRequest};
+pub use builder::{
+    build_snapshot, hash_selection, hash_selection_state, BuiltSnapshot, SnapshotSelectionMode,
+    SnapshotSelectionRequest,
+};
 pub use canonical_json::{
     canonicalize_value, parse_json_value_strict, CanonicalJsonError, MAX_SAFE_INTEGER,
 };

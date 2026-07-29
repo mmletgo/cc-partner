@@ -62,7 +62,8 @@ pub fn expand_readable_archive(
             ));
         }
         if destination.is_dir() {
-            // 允许空或覆盖：仅当目录可写
+            // 已存在目录也强制 0700（含父级路径段）
+            create_dir_mode(destination)?;
         } else {
             return Err(AppError::validation(
                 "agent_hub_snapshot_archive_destination_not_dir".to_string(),
@@ -290,31 +291,19 @@ pub fn repack_readable_archive(
         object_bytes.insert(desc.hash.clone(), bytes);
     }
 
-    // selection hashes recomputed from envelope identity
-    let selection_hash = {
-        let value = serde_json::to_value(&envelope.selection)
-            .map_err(|e| AppError::generic(format!("sel:{e}")))?;
-        let bytes = canonicalize_value(&value)
-            .map_err(|e| AppError::validation(format!("sel_canon:{e}")))?;
-        format!("{:x}", Sha256::digest(bytes))
-    };
-    let selection_state_hash = {
-        // identity-only state from envelope fields
-        let state = serde_json::json!({
-            "selection": envelope.selection,
-            "assetIds": envelope.assets.iter().map(|a| &a.id).collect::<Vec<_>>(),
-            "revisionIds": envelope.revisions.iter().map(|r| &r.id).collect::<Vec<_>>(),
-            "assetHeads": envelope.asset_heads,
-            "objects": envelope.objects,
-            "variants": envelope.variants,
-            "conflictIds": envelope.conflicts.iter().map(|c| &c.id).collect::<Vec<_>>(),
-            "aliases": envelope.aliases,
-            "lineageIds": envelope.lineages.iter().map(|l| &l.id).collect::<Vec<_>>(),
-        });
-        let bytes = canonicalize_value(&state)
-            .map_err(|e| AppError::validation(format!("state_canon:{e}")))?;
-        format!("{:x}", Sha256::digest(bytes))
-    };
+    // selection hashes：与 build_snapshot 共用同一纯函数（富身份输入）
+    let selection_hash = crate::agent_hub::snapshot::builder::hash_selection(&envelope.selection)?;
+    let selection_state_hash = crate::agent_hub::snapshot::builder::hash_selection_state(
+        &envelope.selection,
+        &envelope.assets,
+        &envelope.lineages,
+        &envelope.revisions,
+        &envelope.asset_heads,
+        &envelope.variants,
+        &envelope.conflicts,
+        &envelope.aliases,
+        &envelope.objects,
+    )?;
 
     Ok(BuiltSnapshot {
         envelope,
@@ -444,12 +433,67 @@ fn envelope_canonical_json(envelope: &SnapshotEnvelopeV1) -> Result<String, AppE
     String::from_utf8(bytes).map_err(|e| AppError::generic(format!("envelope_utf8:{e}")))
 }
 
+/// 逐段创建缺失目录并把本路径上**新创建的每一级**及最终 path 设为 0700。
+///
+/// Business Logic（为什么需要这个函数）:
+///     凭据对象树不得落在 umask 留下的 0755 中间目录下；预存在 destination 也必须收紧。
+///
+/// Code Logic（这个函数做什么）:
+///     自叶向根收集缺失段 → 自浅到深 create_dir 并 chmod 0700；path 已存在则校验非
+///     symlink 目录并 chmod 0700。**不**改写更浅的已存在系统祖先（避免 chmod `/`）。
 fn create_dir_mode(path: &Path) -> Result<(), AppError> {
-    fs::create_dir_all(path).map_err(AppError::from)?;
-    #[cfg(unix)]
-    {
-        let perms = fs::Permissions::from_mode(DIR_MODE);
-        fs::set_permissions(path, perms).map_err(AppError::from)?;
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if cur.as_os_str().is_empty() {
+            break;
+        }
+        if cur.exists() {
+            let meta = fs::symlink_metadata(&cur).map_err(AppError::from)?;
+            if meta.file_type().is_symlink() {
+                return Err(AppError::validation(
+                    "agent_hub_snapshot_archive_symlink_dir".to_string(),
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(AppError::validation(
+                    "agent_hub_snapshot_archive_path_not_dir".to_string(),
+                ));
+            }
+            break;
+        }
+        missing.push(cur.clone());
+        match cur.parent() {
+            Some(parent) if parent != cur.as_path() => cur = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    for p in missing.into_iter().rev() {
+        fs::create_dir(&p).map_err(AppError::from)?;
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(DIR_MODE);
+            fs::set_permissions(&p, perms).map_err(AppError::from)?;
+        }
+    }
+    // 最终 path 已存在（含仅 chmod 预存在 destination）时也强制 0700
+    if path.exists() {
+        let meta = fs::symlink_metadata(path).map_err(AppError::from)?;
+        if meta.file_type().is_symlink() {
+            return Err(AppError::validation(
+                "agent_hub_snapshot_archive_symlink_dir".to_string(),
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(AppError::validation(
+                "agent_hub_snapshot_archive_path_not_dir".to_string(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(DIR_MODE);
+            fs::set_permissions(path, perms).map_err(AppError::from)?;
+        }
     }
     Ok(())
 }
@@ -789,15 +833,32 @@ mod tests {
             assert_eq!(dir_meta.permissions().mode() & 0o777, 0o700);
             let snap_meta = fs::metadata(dest.join("snapshot.json")).unwrap();
             assert_eq!(snap_meta.permissions().mode() & 0o777, 0o600);
-            // object file
+            // object file + intermediate dirs 0700
             let any_hash = built.envelope.objects[0].hash.clone();
-            let obj_path = dest
-                .join("objects")
-                .join("sha256")
-                .join(&any_hash[..2])
-                .join(&any_hash);
+            let objects_dir = dest.join("objects");
+            let sha_dir = objects_dir.join("sha256");
+            let prefix_dir = sha_dir.join(&any_hash[..2]);
+            let obj_path = prefix_dir.join(&any_hash);
+            for d in [&objects_dir, &sha_dir, &prefix_dir] {
+                let m = fs::metadata(d).unwrap();
+                assert_eq!(
+                    m.permissions().mode() & 0o777,
+                    0o700,
+                    "intermediate dir must be 0700: {}",
+                    d.display()
+                );
+            }
             let obj_meta = fs::metadata(obj_path).unwrap();
             assert_eq!(obj_meta.permissions().mode() & 0o777, 0o600);
+            // history intermediate dirs
+            if let Some(rev) = built.envelope.revisions.first() {
+                let hist = dest
+                    .join("history")
+                    .join(&rev.asset_lineage_id)
+                    .join(&rev.id);
+                let m = fs::metadata(&hist).unwrap();
+                assert_eq!(m.permissions().mode() & 0o777, 0o700);
+            }
         }
 
         let repacked = repack_readable_archive(&dest, &default_snapshot_limits()).expect("repack");
@@ -809,6 +870,12 @@ mod tests {
             repacked.envelope.snapshot_hash
         );
         assert_eq!(built.object_bytes, repacked.object_bytes);
+        // Important #2: expand→repack 必须保留 builder 的 selection_state_hash 公式
+        assert_eq!(
+            built.selection_state_hash, repacked.selection_state_hash,
+            "selection_state_hash must match after repack"
+        );
+        assert_eq!(built.selection_hash, repacked.selection_hash);
 
         // unused mcp_rev silence
         let _ = mcp_rev;
