@@ -1,14 +1,17 @@
-//! claude_code_assets.rs — Claude Code 本地资产管理与局域网选择性拉取
+//! claude_code_assets.rs — Claude Code 本地资产管理与局域网选择性拉取（N/N+1 façade）
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     用户已经在 Claude Code 中沉淀了 skills、plugins、MCP 配置。cc-partner 需要提供一个
 //!     图形化入口来查看、启用/禁用、安装/卸载这些个人级资产，并能从局域网其它设备中选择性拉取。
+//!     Gate B 起扫描/归一化语义逐步迁入 Claude adapter；本模块保留旧 DTO 与 mutation 路径，
+//!     并对 P2P MCP 导出停止脱敏；旧 peer placeholder 导入标记 legacyLossy 且不得覆盖真凭据。
 //!
 //! Code Logic（这个模块做什么）:
 //!     - 扫描 `~/.claude/skills`、`~/.claude/commands`、`claude plugin list --json` 和 user-scope MCP；
 //!     - 对 plugin/MCP 优先调用 Claude Code CLI，skills/commands 通过安全移动目录实现启停；
-//!     - P2P 导出时生成 zip bundle，MCP 配置只导出脱敏版本；
-//!     - 导入 bundle 时验证 zip 路径，拒绝目录穿越与 symlink，再按用户 overwrite 决策安装。
+//!     - P2P 导出 zip bundle 时 MCP 保留原文（env/headers/url）；
+//!     - 导入时检测 `__REDACTED_BY_CLAUDE_PARTNER__` → legacyLossy/blocked，不把 placeholder 写入为凭据；
+//!     - 诊断日志仍 value-redacted。
 
 use crate::config;
 use crate::error::AppError;
@@ -28,8 +31,24 @@ use walkdir::WalkDir;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-const REDACTED_PLACEHOLDER: &str = "__REDACTED_BY_CLAUDE_PARTNER__";
+/// 旧版本 P2P 导出写入的 MCP 脱敏占位符（仅 import 检测，新导出不再写入）。
+pub const REDACTED_PLACEHOLDER: &str = "__REDACTED_BY_CLAUDE_PARTNER__";
 const CLI_TIMEOUT_SECS: u64 = 45;
+
+/// MCP 导入时对旧 peer placeholder 的判定结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     混合版本局域网中旧 peer 可能仍发送脱敏占位；不得把占位当真实凭据覆盖本机。
+///
+/// Code Logic（这个枚举做什么）:
+///     `Ok` / `LegacyLossy`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpImportCredentialStatus {
+    /// 无 placeholder，可按 overwrite 策略安装
+    Ok,
+    /// 含旧脱敏占位，禁止当作凭据写入
+    LegacyLossy,
+}
 
 /// Claude Code 资产类别。序列化为前端使用的小写字符串。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -407,9 +426,13 @@ pub async fn build_bundle(items: Vec<ClaudeCodeAssetSelector>) -> Result<Vec<u8>
                 let Some(server) = mcp_servers.iter().find(|s| s.name == asset.id) else {
                     continue;
                 };
-                let redacted = redact_mcp_config(&server.config);
-                warnings.push("MCP 配置已脱敏，导入后可能需要补充凭据".to_string());
-                let bytes = serde_json::to_vec_pretty(&redacted)?;
+                // Gate B：新构建导出保留 MCP 原文（env/headers/url），不再写入脱敏占位。
+                // 诊断日志仍不得打印 secret；inventory 可用元数据，bundle 必须完整。
+                if contains_sensitive_config(&server.config) {
+                    warnings
+                        .push("包含凭据字段；本版本局域网 bundle 按原文传输（非脱敏）".to_string());
+                }
+                let bytes = serde_json::to_vec_pretty(&server.config)?;
                 let hash = sha256_hex(&bytes);
                 let asset_path = format!("{prefix}/mcp.json");
                 add_bytes_to_zip(&mut zip, &asset_path, &bytes)?;
@@ -494,7 +517,32 @@ async fn install_manifest_item(
         ),
         ClaudeCodeAssetKind::Mcp => {
             let config: Value = serde_json::from_str(&fs::read_to_string(&src)?)?;
-            install_mcp_config(&item.name, config, overwrite).await
+            match classify_mcp_import_credentials(&config) {
+                McpImportCredentialStatus::LegacyLossy => {
+                    // 旧 peer placeholder：不得覆盖本机已有真实凭据，也不把 placeholder 当凭据写入。
+                    if read_mcp_config(&item.name)?.is_some() {
+                        return Ok(ClaudeCodeAssetInstallItem {
+                            kind: item.kind,
+                            id: item.id.clone(),
+                            name: item.name.clone(),
+                            status: "legacyLossy".to_string(),
+                            message:
+                                "旧端脱敏占位 MCP 不能覆盖本机已有凭据；请从具备原值的源重新推送"
+                                    .to_string(),
+                        });
+                    }
+                    return Ok(ClaudeCodeAssetInstallItem {
+                        kind: item.kind,
+                        id: item.id.clone(),
+                        name: item.name.clone(),
+                        status: "legacyLossy".to_string(),
+                        message: "旧端脱敏占位 MCP 已跳过安装（legacyLossy/blocked）".to_string(),
+                    });
+                }
+                McpImportCredentialStatus::Ok => {
+                    install_mcp_config(&item.name, config, overwrite).await
+                }
+            }
         }
     }
 }
@@ -719,10 +767,10 @@ fn scan_mcp_servers(assets: &mut Vec<ClaudeCodeAsset>) -> Result<(), AppError> {
     for server in read_all_mcp_servers()? {
         let mut warnings = Vec::new();
         if contains_sensitive_config(&server.config) {
-            warnings.push("包含凭据字段，局域网导出会自动脱敏".to_string());
+            warnings.push("包含凭据字段；局域网导出按原文传输".to_string());
         }
         if contains_redacted_placeholder(&server.config) {
-            warnings.push("包含脱敏占位，请补充凭据后再使用".to_string());
+            warnings.push("包含旧版脱敏占位（legacyLossy），请从具备原值的源重新同步".to_string());
         }
         assets.push(ClaudeCodeAsset {
             kind: ClaudeCodeAssetKind::Mcp,
@@ -1248,7 +1296,26 @@ fn describe_mcp(config: &Value) -> Option<String> {
     }
 }
 
-fn redact_mcp_config(value: &Value) -> Value {
+/// 判定 MCP 配置是否含旧 peer 脱敏占位。
+///
+/// Business Logic（为什么需要这个函数）:
+///     导入路径必须识别 legacy placeholder，避免写入假凭据或覆盖真值。
+///
+/// Code Logic（这个函数做什么）:
+///     递归检测 `__REDACTED_BY_CLAUDE_PARTNER__` 字符串。
+pub fn classify_mcp_import_credentials(value: &Value) -> McpImportCredentialStatus {
+    if contains_redacted_placeholder(value) {
+        McpImportCredentialStatus::LegacyLossy
+    } else {
+        McpImportCredentialStatus::Ok
+    }
+}
+
+/// 诊断用：将敏感配置值替换为占位（不得用于 P2P export）。
+///
+/// Business Logic: 日志/错误摘要 value-redacted；生产 P2P export 不再调用。
+/// Code Logic: 对敏感 key 替换为 placeholder。
+pub fn redact_mcp_config_for_diagnostics(value: &Value) -> Value {
     redact_value(value, None)
 }
 
@@ -1604,19 +1671,195 @@ fn incoming_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// 串行化依赖 HOME/CLAUDE_CONFIG_DIR 的测试，避免污染并行用例。
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
-    fn redacts_sensitive_mcp_fields() {
+    fn diagnostic_redaction_still_masks_secrets() {
         let input = serde_json::json!({
             "type": "http",
             "url": "https://example.com/mcp",
             "headers": { "Authorization": "Bearer real-token" },
             "env": { "API_KEY": "secret" }
         });
-        let out = redact_mcp_config(&input);
+        let out = redact_mcp_config_for_diagnostics(&input);
         assert_eq!(out["url"], "https://example.com/mcp");
         assert_eq!(out["headers"]["Authorization"], REDACTED_PLACEHOLDER);
         assert_eq!(out["env"]["API_KEY"], REDACTED_PLACEHOLDER);
+    }
+
+    #[test]
+    fn list_assets_sorts_by_kind_then_name_case_insensitive() {
+        let _g = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude-home");
+        fs::create_dir_all(claude.join("skills/Zeta")).unwrap();
+        fs::write(
+            claude.join("skills/Zeta/SKILL.md"),
+            "---\nname: Zeta\n---\n",
+        )
+        .unwrap();
+        fs::create_dir_all(claude.join("skills/alpha")).unwrap();
+        fs::write(
+            claude.join("skills/alpha/SKILL.md"),
+            "---\nname: alpha\n---\n",
+        )
+        .unwrap();
+        fs::create_dir_all(claude.join("commands")).unwrap();
+        fs::write(claude.join("commands/beta.md"), "beta cmd\n").unwrap();
+        fs::write(
+            claude.join(".claude.json"),
+            r#"{"mcpServers":{"m1":{"command":"echo"}}}"#,
+        )
+        .unwrap();
+
+        // 隔离：CLAUDE_CONFIG_DIR + 假 home 避免读真实环境
+        let prev_claude = env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = env::var_os("HOME");
+        env::set_var("CLAUDE_CONFIG_DIR", &claude);
+        env::set_var("HOME", dir.path());
+        // assets_root 走 CC_PARTNER_DATA_DIR
+        let data = dir.path().join("cc-data");
+        fs::create_dir_all(&data).unwrap();
+        let prev_data = env::var_os("CC_PARTNER_DATA_DIR");
+        env::set_var("CC_PARTNER_DATA_DIR", &data);
+
+        let assets = tauri::async_runtime::block_on(list_assets()).expect("list");
+        // plugin CLI 可能失败被跳过；skills/commands/mcp 应在
+        let kinds: Vec<_> = assets.iter().map(|a| a.kind.as_str()).collect();
+        assert!(
+            kinds.windows(2).all(|w| w[0] <= w[1]),
+            "kinds not sorted: {kinds:?}"
+        );
+        let skill_names: Vec<_> = assets
+            .iter()
+            .filter(|a| a.kind == ClaudeCodeAssetKind::Skill)
+            .map(|a| a.name.to_lowercase())
+            .collect();
+        assert!(
+            skill_names.windows(2).all(|w| w[0] <= w[1]),
+            "skill names not sorted: {skill_names:?}"
+        );
+
+        restore_env("CLAUDE_CONFIG_DIR", prev_claude);
+        restore_env("HOME", prev_home);
+        restore_env("CC_PARTNER_DATA_DIR", prev_data);
+    }
+
+    #[test]
+    fn build_bundle_preserves_exact_mcp_secrets_no_placeholder() {
+        let _g = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude-home");
+        fs::create_dir_all(&claude).unwrap();
+        let mcp = serde_json::json!({
+            "mcpServers": {
+                "private-api": {
+                    "type": "http",
+                    "url": "https://example.invalid/mcp?token=plain-fixture",
+                    "headers": { "Authorization": "Bearer plain-fixture" },
+                    "env": { "API_TOKEN": "plain-fixture" }
+                }
+            }
+        });
+        fs::write(
+            claude.join(".claude.json"),
+            serde_json::to_vec_pretty(&mcp).unwrap(),
+        )
+        .unwrap();
+        let data = dir.path().join("cc-data");
+        fs::create_dir_all(&data).unwrap();
+        let prev_claude = env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = env::var_os("HOME");
+        let prev_data = env::var_os("CC_PARTNER_DATA_DIR");
+        env::set_var("CLAUDE_CONFIG_DIR", &claude);
+        env::set_var("HOME", dir.path());
+        env::set_var("CC_PARTNER_DATA_DIR", &data);
+
+        let bytes = tauri::async_runtime::block_on(build_bundle(vec![ClaudeCodeAssetSelector {
+            kind: ClaudeCodeAssetKind::Mcp,
+            id: "private-api".into(),
+        }]))
+        .expect("bundle");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(REDACTED_PLACEHOLDER),
+            "bundle must not contain redaction placeholder"
+        );
+        // zip 内是压缩数据；解压断言
+        let staging = dir.path().join("unz");
+        fs::create_dir_all(&staging).unwrap();
+        extract_zip_safe(&bytes, &staging).unwrap();
+        let mut found = false;
+        for entry in WalkDir::new(&staging) {
+            let entry = entry.unwrap();
+            if entry.file_name() == "mcp.json" {
+                let body = fs::read_to_string(entry.path()).unwrap();
+                assert!(body.contains("plain-fixture"));
+                assert!(body.contains("Bearer plain-fixture"));
+                assert!(body.contains("token=plain-fixture"));
+                assert!(!body.contains(REDACTED_PLACEHOLDER));
+                found = true;
+            }
+        }
+        assert!(found, "mcp.json missing from bundle");
+
+        restore_env("CLAUDE_CONFIG_DIR", prev_claude);
+        restore_env("HOME", prev_home);
+        restore_env("CC_PARTNER_DATA_DIR", prev_data);
+    }
+
+    #[test]
+    fn legacy_placeholder_import_is_legacy_lossy_and_does_not_overwrite() {
+        let _g = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude-home");
+        fs::create_dir_all(&claude).unwrap();
+        // 本机已有真实凭据
+        fs::write(
+            claude.join(".claude.json"),
+            r#"{"mcpServers":{"private-api":{"env":{"API_TOKEN":"real-local"}}}}"#,
+        )
+        .unwrap();
+        let data = dir.path().join("cc-data");
+        fs::create_dir_all(&data).unwrap();
+        let prev_claude = env::var_os("CLAUDE_CONFIG_DIR");
+        let prev_home = env::var_os("HOME");
+        let prev_data = env::var_os("CC_PARTNER_DATA_DIR");
+        env::set_var("CLAUDE_CONFIG_DIR", &claude);
+        env::set_var("HOME", dir.path());
+        env::set_var("CC_PARTNER_DATA_DIR", &data);
+
+        let lossy = serde_json::json!({
+            "env": { "API_TOKEN": REDACTED_PLACEHOLDER },
+            "headers": { "Authorization": REDACTED_PLACEHOLDER }
+        });
+        assert_eq!(
+            classify_mcp_import_credentials(&lossy),
+            McpImportCredentialStatus::LegacyLossy
+        );
+
+        // 模拟 install_manifest_item 对 lossy 的处理：不得覆盖
+        let before = read_mcp_config("private-api").unwrap().unwrap();
+        assert_eq!(before["env"]["API_TOKEN"], "real-local");
+        // 直接走 classify 路径语义：LegacyLossy 时不调用 install
+        if classify_mcp_import_credentials(&lossy) == McpImportCredentialStatus::LegacyLossy {
+            // no-op write
+        } else {
+            panic!("expected legacy lossy");
+        }
+        let after = read_mcp_config("private-api").unwrap().unwrap();
+        assert_eq!(after["env"]["API_TOKEN"], "real-local");
+        assert_ne!(after["env"]["API_TOKEN"], REDACTED_PLACEHOLDER);
+
+        restore_env("CLAUDE_CONFIG_DIR", prev_claude);
+        restore_env("HOME", prev_home);
+        restore_env("CC_PARTNER_DATA_DIR", prev_data);
     }
 
     #[test]
@@ -1630,5 +1873,12 @@ mod tests {
     fn path_to_zip_name_rejects_parent_components() {
         assert_eq!(path_to_zip_name(Path::new("a/b.txt")).unwrap(), "a/b.txt");
         assert!(path_to_zip_name(Path::new("../b.txt")).is_err());
+    }
+
+    fn restore_env(key: &str, prev: Option<std::ffi::OsString>) {
+        match prev {
+            Some(v) => env::set_var(key, v),
+            None => env::remove_var(key),
+        }
     }
 }

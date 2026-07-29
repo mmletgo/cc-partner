@@ -18,6 +18,7 @@
 //!     Gate A fix r1：`projection_ops` 生产投影调度 + `agent_hub.enabled` 武装路径。
 //!     Gate B Task 1：`assets` typed portable payload（Skill/Command/Agent/MCP）。
 //!     Gate B Task 2：`config_patch` ownership-aware TOML/JSONC 语义 patch。
+//!     Gate B Task 3：targets portable scan/render + Claude assets N/N+1 façade。
 
 pub mod assets;
 pub mod autostart;
@@ -100,8 +101,10 @@ pub use service::{
     SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
 pub use targets::{
-    AdapterSupportLevel, AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,
-    InstructionDocument, InstructionRenderContext, InstructionSource, InstructionSourceRole,
-    LocalScopeMapping, OpenCodeHomePaths, OpenCodeInstructionAdapter, RenderedInstruction,
+    AdapterSupportLevel, AssetAdapter, AssetRenderContext, ClaudeInstructionAdapter,
+    CodexInstructionAdapter, DiscoveredPortableAsset, InstructionDocument,
+    InstructionRenderContext, InstructionSource, InstructionSourceRole, LocalScopeMapping,
+    OpenCodeHomePaths, OpenCodeInstructionAdapter, PortableAssetOrigin, PortableDiscoveryStatus,
+    PortableOriginKind, ProjectedAssetFile, RenderedInstruction, TargetAssetProjection,
     TargetEnvironment, TargetHomePaths, TargetHomes, TargetPathResolver, TargetProbe,
 };
