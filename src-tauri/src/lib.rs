@@ -83,6 +83,7 @@ pub use agent_hub::projection::{
     AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest, FileWriteRequest,
     ProjectionRequest, ProjectionScheduler, ProjectionWriteFault,
 };
+pub use agent_hub::snapshot::{ConfirmedImportSelection, SnapshotImporter, ValidatedSnapshot};
 pub use agent_hub::targets::portable::{
     hash_skill_directory, DiscoveredPortableAsset, PortableAssetOrigin, PortableDiscoveryStatus,
     PortableOriginKind,
@@ -94,6 +95,7 @@ pub use agent_hub::{
     ScopeKind,
 };
 pub use models::claude_md::{ClaudeMdRow, CLAUDE_MD_ID};
+pub use storage::AgentHubImportFault;
 pub use storage::AgentHubRepo;
 pub use storage::ClaudeMdRepo;
 pub use storage::DatabaseMaintenanceGate;
