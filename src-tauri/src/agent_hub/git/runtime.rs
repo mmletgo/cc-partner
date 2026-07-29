@@ -38,6 +38,9 @@ pub const EXPORT_DEBOUNCE: Duration = Duration::from_secs(2);
 pub const RETRY_IMMEDIATE_SECS: [u64; 3] = [1, 2, 4];
 /// 立即重试耗尽后的 pending 重试间隔。
 pub const PENDING_RETRY: Duration = Duration::from_secs(300);
+/// fake clock 墙钟基准（Unix ms）；与 debounce 共用 `clock_ms` 偏移。
+#[cfg(any(test, debug_assertions))]
+const FAKE_CLOCK_EPOCH_MS: i64 = 1_700_000_000_000;
 
 /// 计算第 `attempt` 次失败后的下次重试延迟（秒）。
 ///
@@ -80,6 +83,12 @@ pub struct AgentHubGitRuntime {
     /// 测试注入：强制 push 失败次数（剩余）
     #[cfg(any(test, debug_assertions))]
     push_fail_remaining: AtomicU64,
+    /// 测试注入：export 入口提前失败次数（剩余；不经 Git）
+    #[cfg(any(test, debug_assertions))]
+    early_export_fail_remaining: AtomicU64,
+    /// 测试注入：durable export-state upsert 失败次数（剩余）
+    #[cfg(any(test, debug_assertions))]
+    state_upsert_fail_remaining: AtomicU64,
 }
 
 impl Default for AgentHubGitRuntime {
@@ -105,13 +114,17 @@ impl AgentHubGitRuntime {
             start: std::time::Instant::now(),
             #[cfg(any(test, debug_assertions))]
             push_fail_remaining: AtomicU64::new(0),
+            #[cfg(any(test, debug_assertions))]
+            early_export_fail_remaining: AtomicU64::new(0),
+            #[cfg(any(test, debug_assertions))]
+            state_upsert_fail_remaining: AtomicU64::new(0),
         }
     }
 
     /// 启用 fake clock（单测）。
     ///
     /// Business Logic: 20 次变更 2s 合并、retry 调度不得真实 sleep。
-    /// Code Logic: use_fake_clock=true，clock_ms=0。
+    /// Code Logic: use_fake_clock=true，clock_ms=0（墙钟基准见 `FAKE_CLOCK_EPOCH_MS`）。
     #[cfg(any(test, debug_assertions))]
     pub fn enable_fake_clock(&self) {
         self.use_fake_clock.store(true, Ordering::SeqCst);
@@ -130,13 +143,58 @@ impl AgentHubGitRuntime {
         self.push_fail_remaining.store(n, Ordering::SeqCst);
     }
 
-    /// 当前单调毫秒。
+    /// 注入后续 N 次 export 入口失败（跳过 Git，专测 backoff 组合）。
+    #[cfg(any(test, debug_assertions))]
+    pub fn inject_early_export_failures(&self, n: u64) {
+        self.early_export_fail_remaining.store(n, Ordering::SeqCst);
+    }
+
+    /// 注入后续 N 次 git-export-state upsert 失败（fail-closed 单测）。
+    #[cfg(any(test, debug_assertions))]
+    pub fn inject_state_upsert_failures(&self, n: u64) {
+        self.state_upsert_fail_remaining.store(n, Ordering::SeqCst);
+    }
+
+    /// 当前单调毫秒（debounce / dirty 用）。
     fn now_ms(&self) -> u64 {
         if self.use_fake_clock.load(Ordering::SeqCst) {
             self.clock_ms.load(Ordering::SeqCst)
         } else {
             self.start.elapsed().as_millis() as u64
         }
+    }
+
+    /// 当前墙钟（next_attempt_at / pending_due；fake clock 可注入）。
+    ///
+    /// Business Logic: retry 1/2/4/300s 必须与 debounce 同一时间源，测试才能推进 backoff。
+    /// Code Logic: test/debug fake → `FAKE_CLOCK_EPOCH_MS + now_ms`；否则 `Utc::now`。
+    fn now_wall(&self) -> chrono::DateTime<chrono::Utc> {
+        #[cfg(any(test, debug_assertions))]
+        if self.use_fake_clock.load(Ordering::SeqCst) {
+            let ms = FAKE_CLOCK_EPOCH_MS.saturating_add(self.now_ms() as i64);
+            return chrono::DateTime::from_timestamp_millis(ms).unwrap_or_else(chrono::Utc::now);
+        }
+        chrono::Utc::now()
+    }
+
+    /// 持久化 git export state（可注入失败；失败 fail-closed）。
+    async fn persist_export_state(
+        &self,
+        state: &AppState,
+        row: &AgentHubGitExportState,
+    ) -> Result<(), AppError> {
+        #[cfg(any(test, debug_assertions))]
+        {
+            let rem = self.state_upsert_fail_remaining.load(Ordering::SeqCst);
+            if rem > 0 {
+                self.state_upsert_fail_remaining
+                    .store(rem.saturating_sub(1), Ordering::SeqCst);
+                return Err(AppError::generic(
+                    "agent_hub_git_export_state_upsert_injected_failure",
+                ));
+            }
+        }
+        state.agent_hub_repo.upsert_git_export_state(row).await
     }
 
     /// 标记 Hub 规范状态已变更，需 debounce 后导出。
@@ -207,23 +265,30 @@ impl AgentHubGitRuntime {
         force: bool,
         policy: CloudSyncBusyPolicy,
     ) -> Result<AgentHubGitFlushOutcome, AppError> {
-        // 检查 next_attempt_at（pending 退避）
+        // next_attempt_at：同一 pending 必须遵守 1/2/4/300s；仅 force 可绕过。
+        // 新 dirty 不得绕过进行中的 backoff（FailedPending 清 dirty，mark_dirty 再开 debounce）。
         if !force {
-            if let Ok(Some(row)) = state
+            match state
                 .agent_hub_repo
                 .get_git_export_state(state.device_id.as_str())
                 .await
             {
-                if let Some(next) = row.next_attempt_at.as_ref() {
-                    if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(next) {
-                        if chrono::Utc::now() < ts.with_timezone(&chrono::Utc) {
-                            // 仍在退避窗口；若仅 pending 且无新 dirty，跳过
-                            if !self.dirty.load(Ordering::SeqCst) {
+                Ok(Some(row)) => {
+                    if let Some(next) = row.next_attempt_at.as_ref() {
+                        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(next) {
+                            if self.now_wall() < ts.with_timezone(&chrono::Utc) {
                                 return Ok(AgentHubGitFlushOutcome::SkippedBackoff);
                             }
-                            // 有新 dirty 但仍在 immediate retry 窗口外由 debounce 控制
                         }
                     }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "agent_hub_git: read export state failed; skip flush fail-closed"
+                    );
+                    return Err(e);
                 }
             }
         }
@@ -259,6 +324,10 @@ impl AgentHubGitRuntime {
         let push_fail_slot = self.push_fail_remaining.load(Ordering::SeqCst);
         #[cfg(not(any(test, debug_assertions)))]
         let push_fail_slot = 0u64;
+        #[cfg(any(test, debug_assertions))]
+        let early_fail_slot = self.early_export_fail_remaining.load(Ordering::SeqCst);
+        #[cfg(not(any(test, debug_assertions)))]
+        let early_fail_slot = 0u64;
 
         let outcome = run_cloud_sync_exclusive(
             &runtime,
@@ -266,7 +335,7 @@ impl AgentHubGitRuntime {
             policy,
             || {
                 let state = state.clone();
-                async move { export_local_lane_once(&state, push_fail_slot).await }
+                async move { export_local_lane_once(&state, push_fail_slot, early_fail_slot).await }
             },
         )
         .await?;
@@ -275,50 +344,91 @@ impl AgentHubGitRuntime {
             None => Ok(AgentHubGitFlushOutcome::SkippedBusy),
             Some(ExportOnceResult::SkippedNoRepo) => Ok(AgentHubGitFlushOutcome::SkippedNoRepo),
             Some(ExportOnceResult::NoopSameHash { snapshot_hash }) => {
+                let row = AgentHubGitExportState {
+                    device_id: state.device_id.to_string(),
+                    last_exported_snapshot_hash: Some(snapshot_hash.clone()),
+                    last_pushed_snapshot_hash: Some(snapshot_hash),
+                    pending_snapshot_hash: None,
+                    attempt_count: 0,
+                    next_attempt_at: None,
+                    last_error: None,
+                };
+                if let Err(e) = self.persist_export_state(state, &row).await {
+                    tracing::error!(
+                        error = %e,
+                        "agent_hub_git: NoopSameHash state upsert failed; keep pending intent"
+                    );
+                    // 不 clear dirty：可再试落库；Git 侧已无新 commit
+                    return Err(e);
+                }
                 self.dirty.store(false, Ordering::SeqCst);
-                let _ = state
-                    .agent_hub_repo
-                    .upsert_git_export_state(&AgentHubGitExportState {
-                        device_id: state.device_id.to_string(),
-                        last_exported_snapshot_hash: Some(snapshot_hash.clone()),
-                        last_pushed_snapshot_hash: Some(snapshot_hash),
-                        pending_snapshot_hash: None,
-                        attempt_count: 0,
-                        next_attempt_at: None,
-                        last_error: None,
-                    })
-                    .await;
                 Ok(AgentHubGitFlushOutcome::NoopSameHash)
             }
             Some(ExportOnceResult::Pushed { snapshot_hash }) => {
-                self.dirty.store(false, Ordering::SeqCst);
-                let _ = state
-                    .agent_hub_repo
-                    .upsert_git_export_state(&AgentHubGitExportState {
+                let row = AgentHubGitExportState {
+                    device_id: state.device_id.to_string(),
+                    last_exported_snapshot_hash: Some(snapshot_hash.clone()),
+                    last_pushed_snapshot_hash: Some(snapshot_hash),
+                    pending_snapshot_hash: None,
+                    attempt_count: 0,
+                    next_attempt_at: None,
+                    last_error: None,
+                };
+                if let Err(e) = self.persist_export_state(state, &row).await {
+                    tracing::error!(
+                        error = %e,
+                        "agent_hub_git: Pushed state upsert failed; keep retryable pending"
+                    );
+                    // Git 已成功但 durable 失败：写入/保留 pending，禁止假装 fully pushed
+                    let retry_row = AgentHubGitExportState {
                         device_id: state.device_id.to_string(),
-                        last_exported_snapshot_hash: Some(snapshot_hash.clone()),
-                        last_pushed_snapshot_hash: Some(snapshot_hash),
-                        pending_snapshot_hash: None,
+                        last_exported_snapshot_hash: row.last_exported_snapshot_hash.clone(),
+                        last_pushed_snapshot_hash: None,
+                        pending_snapshot_hash: row.last_exported_snapshot_hash.clone(),
                         attempt_count: 0,
-                        next_attempt_at: None,
-                        last_error: None,
-                    })
-                    .await;
+                        next_attempt_at: Some(
+                            (self.now_wall() + chrono::Duration::seconds(1)).to_rfc3339(),
+                        ),
+                        last_error: Some(format!("export_state_upsert_failed: {e}")),
+                    };
+                    if let Err(e2) = self.persist_export_state(state, &retry_row).await {
+                        tracing::error!(
+                            error = %e2,
+                            "agent_hub_git: pending fallback after Pushed upsert fail also failed"
+                        );
+                    }
+                    // 保持 dirty，recover/loop 可重试
+                    self.dirty.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+                self.dirty.store(false, Ordering::SeqCst);
                 Ok(AgentHubGitFlushOutcome::Pushed)
             }
             Some(ExportOnceResult::Failed {
                 snapshot_hash,
                 error,
                 consumed_push_fails,
+                consumed_early_fails,
             }) => {
                 #[cfg(any(test, debug_assertions))]
-                if consumed_push_fails > 0 {
-                    let cur = self.push_fail_remaining.load(Ordering::SeqCst);
-                    let next = cur.saturating_sub(consumed_push_fails);
-                    self.push_fail_remaining.store(next, Ordering::SeqCst);
+                {
+                    if consumed_push_fails > 0 {
+                        let cur = self.push_fail_remaining.load(Ordering::SeqCst);
+                        let next = cur.saturating_sub(consumed_push_fails);
+                        self.push_fail_remaining.store(next, Ordering::SeqCst);
+                    }
+                    if consumed_early_fails > 0 {
+                        let cur = self.early_export_fail_remaining.load(Ordering::SeqCst);
+                        let next = cur.saturating_sub(consumed_early_fails);
+                        self.early_export_fail_remaining
+                            .store(next, Ordering::SeqCst);
+                    }
                 }
                 #[cfg(not(any(test, debug_assertions)))]
-                let _ = consumed_push_fails;
+                {
+                    let _ = consumed_push_fails;
+                    let _ = consumed_early_fails;
+                }
 
                 let prev = state
                     .agent_hub_repo
@@ -333,23 +443,39 @@ impl AgentHubGitRuntime {
                         next_attempt_at: None,
                         last_error: None,
                     });
-                let attempts = prev.attempt_count.saturating_add(1);
+                // 同一 pending hash 累加 attempt；新 hash 重置计数
+                let same_pending = prev
+                    .pending_snapshot_hash
+                    .as_ref()
+                    .is_some_and(|h| h == &snapshot_hash);
+                let attempts = if same_pending {
+                    prev.attempt_count.saturating_add(1)
+                } else {
+                    1
+                };
                 let delay = next_retry_delay_secs(attempts);
                 let next_at =
-                    (chrono::Utc::now() + chrono::Duration::seconds(delay as i64)).to_rfc3339();
-                // dirty 保持 true，以便退避后继续
-                let _ = state
-                    .agent_hub_repo
-                    .upsert_git_export_state(&AgentHubGitExportState {
-                        device_id: state.device_id.to_string(),
-                        last_exported_snapshot_hash: Some(snapshot_hash.clone()),
-                        last_pushed_snapshot_hash: prev.last_pushed_snapshot_hash,
-                        pending_snapshot_hash: Some(snapshot_hash),
-                        attempt_count: attempts,
-                        next_attempt_at: Some(next_at),
-                        last_error: Some(error),
-                    })
-                    .await;
+                    (self.now_wall() + chrono::Duration::seconds(delay as i64)).to_rfc3339();
+                let pending_row = AgentHubGitExportState {
+                    device_id: state.device_id.to_string(),
+                    last_exported_snapshot_hash: Some(snapshot_hash.clone()),
+                    last_pushed_snapshot_hash: prev.last_pushed_snapshot_hash,
+                    pending_snapshot_hash: Some(snapshot_hash),
+                    attempt_count: attempts,
+                    next_attempt_at: Some(next_at),
+                    last_error: Some(error),
+                };
+                if let Err(e) = self.persist_export_state(state, &pending_row).await {
+                    tracing::error!(
+                        error = %e,
+                        "agent_hub_git: FailedPending state upsert failed; keep dirty for recover"
+                    );
+                    // 保持 dirty，下 tick 可再写 pending
+                    self.dirty.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+                // 方案 (a)：清 in-memory dirty，仅靠 durable pending + next_attempt_at 调度
+                self.dirty.store(false, Ordering::SeqCst);
                 Ok(AgentHubGitFlushOutcome::FailedPending)
             }
         }
@@ -371,7 +497,7 @@ impl AgentHubGitRuntime {
         }
         if let Some(next) = row.next_attempt_at.as_ref() {
             if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(next) {
-                return Ok(chrono::Utc::now() >= ts.with_timezone(&chrono::Utc));
+                return Ok(self.now_wall() >= ts.with_timezone(&chrono::Utc));
             }
         }
         Ok(true)
@@ -412,6 +538,7 @@ enum ExportOnceResult {
         snapshot_hash: String,
         error: String,
         consumed_push_fails: u64,
+        consumed_early_fails: u64,
     },
 }
 
@@ -422,7 +549,19 @@ enum ExportOnceResult {
 async fn export_local_lane_once(
     state: &AppState,
     push_fail_remaining: u64,
+    early_export_fail_remaining: u64,
 ) -> Result<ExportOnceResult, AppError> {
+    // 测试：入口失败，验证 FailedPending + next_attempt_at 退避（不碰 Git）
+    // 固定 snapshot_hash，使 attempt_count 在同一 pending 上累加（1→2→3→4）
+    if early_export_fail_remaining > 0 {
+        return Ok(ExportOnceResult::Failed {
+            snapshot_hash: "early-export-fail-stable-hash".to_string(),
+            error: "agent_hub_git_export_injected_early_failure".to_string(),
+            consumed_push_fails: 0,
+            consumed_early_fails: 1,
+        });
+    }
+
     let repo_configured = {
         let cfg = state.config.read().unwrap();
         cfg.cloud_sync_repo_url
@@ -509,6 +648,7 @@ async fn export_local_lane_once(
             snapshot_hash,
             error: format!("expand: {e}"),
             consumed_push_fails: 0,
+            consumed_early_fails: 0,
         });
     }
 
@@ -518,6 +658,7 @@ async fn export_local_lane_once(
             snapshot_hash,
             error: format!("replace_lane: {e}"),
             consumed_push_fails: 0,
+            consumed_early_fails: 0,
         });
     }
     let _ = std::fs::remove_dir_all(&staging);
@@ -548,6 +689,7 @@ async fn export_local_lane_once(
                     snapshot_hash,
                     error: format!("expand_retry: {e}"),
                     consumed_push_fails,
+                    consumed_early_fails: 0,
                 });
             }
             if let Err(e) = replace_device_lane(&workdir, state.device_id.as_str(), &staging2) {
@@ -556,6 +698,7 @@ async fn export_local_lane_once(
                     snapshot_hash,
                     error: format!("replace_retry: {e}"),
                     consumed_push_fails,
+                    consumed_early_fails: 0,
                 });
             }
             let _ = std::fs::remove_dir_all(&staging2);
@@ -568,6 +711,7 @@ async fn export_local_lane_once(
                     snapshot_hash,
                     error: format!("commit: {e}"),
                     consumed_push_fails,
+                    consumed_early_fails: 0,
                 });
             }
         };
@@ -585,6 +729,7 @@ async fn export_local_lane_once(
                 snapshot_hash,
                 error: "agent_hub_git_push_injected_failure".to_string(),
                 consumed_push_fails,
+                consumed_early_fails: 0,
             });
         }
 
@@ -601,6 +746,7 @@ async fn export_local_lane_once(
                     snapshot_hash,
                     error: "agent_hub_git_push_rejected".to_string(),
                     consumed_push_fails,
+                    consumed_early_fails: 0,
                 });
             }
             Err(PushError::Other(e)) => {
@@ -608,6 +754,7 @@ async fn export_local_lane_once(
                     snapshot_hash,
                     error: format!("push: {e}"),
                     consumed_push_fails,
+                    consumed_early_fails: 0,
                 });
             }
         }
@@ -617,6 +764,7 @@ async fn export_local_lane_once(
         snapshot_hash,
         error: "agent_hub_git_push_exhausted".to_string(),
         consumed_push_fails,
+        consumed_early_fails: 0,
     })
 }
 
@@ -1098,5 +1246,392 @@ mod tests {
         assert!(!already);
         rt.mark_dirty();
         assert!(rt.dirty.load(Ordering::SeqCst));
+    }
+
+    /// 轻量 AppState：flush_pending / backoff / durable upsert 单测。
+    async fn mini_git_export_state(device_id: &str) -> (tempfile::TempDir, AppState) {
+        use crate::backend::authority::RuntimeRole;
+        use crate::backend::event_bus::RuntimeEventBus;
+        use crate::backend::runtime_metrics::RuntimeMetrics;
+        use crate::backend::ui::HeadlessBackendUi;
+        use crate::cloud_sync::runtime::CloudSyncRuntime;
+        use crate::config::{
+            AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+        };
+        use crate::config_runtime::ConfigRuntime;
+        use crate::config_store::MemoryConfigStore;
+        use crate::net::peer_client::PeerClient;
+        use crate::orchestrator::repo::OrchestratorRepo;
+        use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
+        use crate::storage::maintenance_gate::DatabaseMaintenanceGate;
+        use crate::storage::{
+            ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo, SshTargetRepo,
+            TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo, WorkbenchProjectRepo,
+            WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo, WorkbenchWorktreeRepo,
+        };
+        use crate::transfer::registry::TransferRegistry;
+        use std::sync::atomic::AtomicU16;
+        use std::sync::{Arc, Mutex, RwLock};
+
+        let data = tempfile::tempdir().unwrap();
+        let db_path = data.path().join("t.db");
+        let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        AgentHubRepo::ensure_schema(&pool).await.unwrap();
+        for stmt in [
+            "CREATE TABLE IF NOT EXISTS workbench_projects (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL, path TEXT NOT NULL, last_opened_at TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS workbench_worktrees (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, branch TEXT,
+                base_branch TEXT, path TEXT NOT NULL, is_main INTEGER NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS workbench_sessions (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL,
+                command TEXT NOT NULL, cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL,
+                rows INTEGER NOT NULL, started_at TEXT NOT NULL, exited_at TEXT, exit_code INTEGER,
+                backend TEXT NOT NULL, backend_id TEXT, backend_window_id TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS workbench_mutation_operations (
+                client_operation_id TEXT PRIMARY KEY NOT NULL, kind TEXT NOT NULL,
+                payload_hash TEXT NOT NULL, intent_json TEXT NOT NULL, state TEXT NOT NULL,
+                outcome_json TEXT, error_message TEXT, project_id TEXT, worktree_id TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        let layout_repo = WorkbenchWorkspaceLayoutRepo::new(pool.clone());
+        layout_repo.ensure_schema().await.unwrap();
+
+        let config = AppConfig {
+            device_id: device_id.to_string(),
+            device_name: "test".to_string(),
+            http_port: 0,
+            receive_dir: "/tmp".to_string(),
+            db_path: db_path.to_string_lossy().to_string(),
+            screenshot_hotkey: "<cmd>+s".to_string(),
+            prompt_optimizer_hotkey: "<ctrl>".to_string(),
+            prompt_optimizer_fill_language: "zh".to_string(),
+            cloud_sync_repo_url: Some("file:///tmp/unused-cloud-sync.git".into()),
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: Some("main".into()),
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
+        };
+        let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
+        let config_runtime = Arc::new(ConfigRuntime::new(config, store));
+        let config = config_runtime.shared_value();
+        let maintenance_gate = Arc::new(DatabaseMaintenanceGate::new());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let event_bus = Arc::new(RuntimeEventBus::new(owner));
+        let git_rt = Arc::new(AgentHubGitRuntime::new());
+        git_rt.enable_fake_clock();
+
+        let state = AppState {
+            config,
+            config_runtime,
+            db: pool.clone(),
+            maintenance_gate: maintenance_gate.clone(),
+            prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
+            transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
+            claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
+            scratchpad_repo: Arc::new(ScratchpadRepo::new(pool.clone())),
+            ssh_target_repo: Arc::new(SshTargetRepo::new(pool.clone())),
+            device_id: Arc::new(device_id.to_string()),
+            devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            actual_http_port: Arc::new(AtomicU16::new(0)),
+            discovery: Arc::new(Mutex::new(None)),
+            peer_client: Arc::new(PeerClient::new()),
+            transfers: Arc::new(TransferRegistry::new()),
+            ui: Arc::new(HeadlessBackendUi::new(PathBuf::from("/tmp"))),
+            update_runtime: Arc::new(crate::updater::UpdateRuntime::new()),
+            cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
+            workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
+            workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
+            workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
+            workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
+            workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
+            agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
+            agent_ledger_service: Arc::new(
+                crate::workbench::agent_ledger::AgentLedgerService::new(
+                    crate::storage::AgentLedgerRepo::new(pool.clone()),
+                ),
+            ),
+            agent_hub_repo: Arc::new(AgentHubRepo::new(pool.clone())),
+            workbench_workspace_layout_repo: Arc::new(layout_repo),
+            browser_verification: Arc::new(
+                crate::workbench::browser_verification::BrowserVerificationService::new(
+                    Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),
+                    PathBuf::from("/tmp/browser-verification-git-export"),
+                    "test-owner".into(),
+                )
+                .expect("browser verification fixture"),
+            ),
+            workbench_browser_previews: Arc::new(
+                crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
+            ),
+            workbench_sessions: Arc::new(
+                crate::workbench::sessions::WorkbenchSessionRegistry::new(),
+            ),
+            workbench_remote_events: Arc::new(
+                crate::workbench::remote_events::WorkbenchRemoteEventBus::new("test-owner"),
+            ),
+            workbench_remote_event_bridges: Arc::new(
+                crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
+            ),
+            workbench_dependency: Arc::new(
+                crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
+            ),
+            cc_collector_cancel: Arc::new(Mutex::new(None)),
+            cloud_sync_runtime: Arc::new(CloudSyncRuntime::new()),
+            cloud_sync_cancel: Arc::new(Mutex::new(None)),
+            health: Arc::new(crate::health::HealthRuntime::new()),
+            health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),
+            health_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_repo: Arc::new(OrchestratorRepo::new(pool.clone())),
+            orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::default(),
+            orchestrator_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            agent_ledger_cancel: Arc::new(Mutex::new(None)),
+            agent_hub_cancel: Arc::new(Mutex::new(None)),
+            agent_hub_git_runtime: git_rt,
+            agent_hub_git_cancel: Arc::new(Mutex::new(None)),
+            workbench_claude_session_indexes: Arc::new(RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_watchers: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_index_dispose_epochs: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            runtime_metrics: Arc::new(RuntimeMetrics::new()),
+            runtime_role: RuntimeRole::HeadlessOwner,
+            event_bus,
+            backend_control_client_runtime: Arc::new(
+                crate::backend::control_client::BackendControlClientRuntime::new(),
+            ),
+            gui_event_relay_cancel: Arc::new(Mutex::new(None)),
+        };
+        (data, state)
+    }
+
+    /// Business Logic: push/export 失败后必须等 1s→2s→4s→300s，不得因 dirty 绕过。
+    /// Code Logic: early-export inject + fake clock 驱动 flush_pending 组合路径。
+    #[tokio::test]
+    async fn failed_pending_honors_retry_backoff_schedule() {
+        let (_tmp, state) = mini_git_export_state(DEVICE_A).await;
+        let rt = state.agent_hub_git_runtime.clone();
+        // 足够覆盖 1+2+4 三次失败与中间 backoff 检查
+        rt.inject_early_export_failures(10);
+
+        rt.mark_dirty();
+        rt.advance_ms(EXPORT_DEBOUNCE.as_millis() as u64);
+        let o1 = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .unwrap();
+        assert_eq!(o1, AgentHubGitFlushOutcome::FailedPending);
+        assert!(
+            !rt.dirty.load(Ordering::SeqCst),
+            "FailedPending must clear in-memory dirty"
+        );
+        let row1 = state
+            .agent_hub_repo
+            .get_git_export_state(DEVICE_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row1.attempt_count, 1);
+        assert!(row1.next_attempt_at.is_some());
+        assert_eq!(
+            row1.pending_snapshot_hash.as_deref(),
+            Some("early-export-fail-stable-hash")
+        );
+
+        // 1s 退避内：不得二次 export
+        let o_skip = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .unwrap();
+        assert_eq!(o_skip, AgentHubGitFlushOutcome::SkippedBackoff);
+        let still = state
+            .agent_hub_repo
+            .get_git_export_state(DEVICE_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still.attempt_count, 1, "must not re-export before 1s");
+
+        // +1s → 第 2 次失败 → 等 2s
+        rt.advance_ms(1000);
+        let o2 = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .unwrap();
+        assert_eq!(o2, AgentHubGitFlushOutcome::FailedPending);
+        let row2 = state
+            .agent_hub_repo
+            .get_git_export_state(DEVICE_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row2.attempt_count, 2);
+
+        // 2s 窗口内仍 skip
+        rt.advance_ms(1999);
+        assert_eq!(
+            rt.flush_pending(&state, false, scheduler_policy())
+                .await
+                .unwrap(),
+            AgentHubGitFlushOutcome::SkippedBackoff
+        );
+        assert_eq!(
+            state
+                .agent_hub_repo
+                .get_git_export_state(DEVICE_A)
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_count,
+            2
+        );
+
+        // +1ms 过 2s → 第 3 次 → 等 4s
+        rt.advance_ms(1);
+        let o3 = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .unwrap();
+        assert_eq!(o3, AgentHubGitFlushOutcome::FailedPending);
+        assert_eq!(
+            state
+                .agent_hub_repo
+                .get_git_export_state(DEVICE_A)
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_count,
+            3
+        );
+
+        rt.advance_ms(3999);
+        assert_eq!(
+            rt.flush_pending(&state, false, scheduler_policy())
+                .await
+                .unwrap(),
+            AgentHubGitFlushOutcome::SkippedBackoff
+        );
+        rt.advance_ms(1);
+        let o4 = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .unwrap();
+        assert_eq!(o4, AgentHubGitFlushOutcome::FailedPending);
+        let row4 = state
+            .agent_hub_repo
+            .get_git_export_state(DEVICE_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row4.attempt_count, 4);
+        // 第 4 次失败后应进入 300s pending
+        assert_eq!(next_retry_delay_secs(4), 300);
+        rt.advance_ms(299_999);
+        assert_eq!(
+            rt.flush_pending(&state, false, scheduler_policy())
+                .await
+                .unwrap(),
+            AgentHubGitFlushOutcome::SkippedBackoff
+        );
+        rt.advance_ms(1);
+        // 到期可再试（仍 early-fail 注入中）
+        let o5 = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .unwrap();
+        assert_eq!(o5, AgentHubGitFlushOutcome::FailedPending);
+        assert_eq!(
+            state
+                .agent_hub_repo
+                .get_git_export_state(DEVICE_A)
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt_count,
+            5
+        );
+    }
+
+    /// Business Logic: durable upsert 失败不得假装成功；须 fail-closed 保留 retry 意图。
+    #[tokio::test]
+    async fn export_state_upsert_failure_is_fail_closed() {
+        let (_tmp, state) = mini_git_export_state(DEVICE_A).await;
+        let rt = state.agent_hub_git_runtime.clone();
+        // 两次 early-fail：第一次 upsert 注入失败；第二次正常落 pending
+        rt.inject_early_export_failures(2);
+        rt.inject_state_upsert_failures(1);
+
+        rt.mark_dirty();
+        rt.advance_ms(EXPORT_DEBOUNCE.as_millis() as u64);
+        let err = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .expect_err("upsert inject must surface");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("upsert_injected_failure") || msg.contains("agent_hub_git_export_state"),
+            "unexpected err: {msg}"
+        );
+        assert!(
+            rt.dirty.load(Ordering::SeqCst),
+            "upsert fail must keep dirty for recover"
+        );
+        // 失败注入时 pending 可能未落盘
+        let row = state
+            .agent_hub_repo
+            .get_git_export_state(DEVICE_A)
+            .await
+            .unwrap();
+        assert!(
+            row.is_none()
+                || row
+                    .as_ref()
+                    .and_then(|r| r.pending_snapshot_hash.as_ref())
+                    .is_none(),
+            "injected upsert fail must not silently claim durable pending"
+        );
+
+        // upsert inject 已耗尽：可落 pending
+        let o = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .unwrap();
+        assert_eq!(o, AgentHubGitFlushOutcome::FailedPending);
+        let pending = state
+            .agent_hub_repo
+            .get_git_export_state(DEVICE_A)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending.pending_snapshot_hash.as_deref(),
+            Some("early-export-fail-stable-hash")
+        );
+        assert!(!rt.dirty.load(Ordering::SeqCst));
     }
 }
