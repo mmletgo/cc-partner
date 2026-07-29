@@ -720,6 +720,68 @@ pub async fn assert_v2_peer_uses_manifest_routes() {
     );
 }
 
+/// Gate C N/N+1：路由 inventory 与 capability 同时保留 agent-hub.v1 与 legacy 内容同步。
+///
+/// Business Logic（为什么需要这个函数）:
+///     N/N+1 期间新 UI 只用 agent-hub.v1 source-push；旧 CLAUDE.md/Claude asset 与
+///     content sync 路由继续可达；两者并存直至 N+2 移除门闸。
+///
+/// Code Logic（这个函数做什么）:
+///     断言 `server_protocol_info` 同时宣告 `agent-hub.v1` 与 `sync.manifest.v2`；
+///     源码盘点无目标 pull Hub 路由；legacyLossy 占位符合同由 claude_code_assets 单测证明。
+pub fn assert_agent_hub_n_n1_route_inventory_both_generations() {
+    use crate::net::protocol::{
+        server_protocol_info, CAPABILITY_AGENT_HUB_V1, CAPABILITY_SYNC_MANIFEST_V2,
+    };
+    let info = server_protocol_info();
+    assert!(
+        info.capabilities
+            .iter()
+            .any(|c| c == CAPABILITY_AGENT_HUB_V1),
+        "server_protocol_info must advertise agent-hub.v1: {:?}",
+        info.capabilities
+    );
+    assert!(
+        info.capabilities
+            .iter()
+            .any(|c| c == CAPABILITY_SYNC_MANIFEST_V2),
+        "N/N+1 must keep legacy content-sync capability: {:?}",
+        info.capabilities
+    );
+
+    // 生产路由层禁止目标 pull 风格 Hub API（source-push only）
+    let routes_src = include_str!("../net/routes/agent_hub.rs");
+    let forbidden = format!("/api/agent-hub/{}", "pull");
+    assert!(
+        !routes_src.contains(&forbidden),
+        "agent-hub routes must not expose target pull path"
+    );
+
+    // legacy claude_md sync 路由仍存在（N/N+1 保留）
+    let http_src = include_str!("../net/http_server.rs");
+    assert!(
+        http_src.contains("/api/sync/claude_md/pull")
+            || http_src.contains("claude_md_pull")
+            || http_src.contains("claude_md"),
+        "legacy claude_md routes must remain mounted through N/N+1"
+    );
+}
+
+/// Business Logic: legacy placeholder 不得覆盖 canonical credential（合同指向 assets 测试）。
+/// Code Logic: 源码盘点 `__REDACTED_BY_CLAUDE_PARTNER__` → legacyLossy 标记仍在。
+pub fn assert_legacy_lossy_placeholder_contract_present() {
+    let assets_src = include_str!("../claude_code_assets.rs");
+    assert!(
+        assets_src.contains("legacyLossy"),
+        "legacyLossy labeling must remain for old-peer placeholders"
+    );
+    assert!(
+        assets_src.contains("__REDACTED_BY_CLAUDE_PARTNER__")
+            || assets_src.contains("REDACTED_BY_CLAUDE_PARTNER"),
+        "legacy redaction sentinel must remain for N/N+1 import guard"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,5 +799,11 @@ mod tests {
     #[tokio::test]
     async fn content_sync_mixed_version_v2_peer_uses_manifest() {
         assert_v2_peer_uses_manifest_routes().await;
+    }
+
+    #[test]
+    fn agent_hub_n_n1_inventory_both_generations() {
+        assert_agent_hub_n_n1_route_inventory_both_generations();
+        assert_legacy_lossy_placeholder_contract_present();
     }
 }

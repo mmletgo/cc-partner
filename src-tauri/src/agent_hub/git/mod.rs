@@ -20,8 +20,9 @@ pub use lane::{
     device_lane_rel_path, inventory_agent_hub_device_lanes, replace_device_lane, AGENT_HUB_GIT_ROOT,
 };
 pub use preview::{
-    confirm_git_import_for_state, confirm_project_mapping_for_state, inspect_git_lanes_for_state,
-    preview_git_import_for_state, ConfirmGitImportOutcome, ConfirmGitImportRequest,
+    confirm_git_import_for_state, confirm_git_import_in_workdir, confirm_project_mapping_for_state,
+    inspect_git_lanes_for_state, inspect_git_lanes_in_workdir, preview_git_import_for_state,
+    preview_git_import_in_workdir, ConfirmGitImportOutcome, ConfirmGitImportRequest,
     ConfirmProjectMappingRequest, GitImportPreview, GitLaneInspectReport, GitLaneSummary,
 };
 pub use runtime::{

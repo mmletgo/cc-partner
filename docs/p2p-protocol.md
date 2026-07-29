@@ -88,6 +88,7 @@ and gate the client call behind `PeerProtocolInfo::supports(...)`. The current
 advertised capabilities are:
 
 - `agent-hub.v1` — Agent Hub LAN **source-only** push receiver (`POST /api/agent-hub/push/prepare`, `PUT /api/agent-hub/push/:transferId/objects/:objectHash`, `POST /api/agent-hub/push/:transferId/commit`); SnapshotEnvelope v1 + idempotency ledger on `(sourceDeviceId, clientRequestId)`; labels/expected-device are **binding/idempotency only, not authentication**; no target-initiated pull API
+  - N/N+1: keep legacy CLAUDE.md / Claude asset / content-sync routes; new UI never exposes target pull of Hub assets; legacy outcomes must not be counted as Hub push success; credential bytes stay plaintext in CAS/envelope/targets while logs/UI remain redacted; **not** LAN identity auth; Git device lanes are confirm-only (no automatic import)
 - `attention.v1` — Mobile Attention snapshot (`GET /api/mobile/attention`); v1 sources only (no Agent/Experiment variants)
 - `attention.v2` — Attention snapshot with Agent needsInput/failed projections (`GET /api/mobile/attention/v2`, Tauri `list_attention_items_v2`); clients prefer v2 and fall back to v1
 - `cc-history.paged-sync.v1` — bounded CC History paged sync (`POST /api/cc-history/sync/{manifest-page,items,push-batch}`); token and the three routes ship atomically

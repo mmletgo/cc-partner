@@ -1,13 +1,16 @@
 /**
- * E2E-AGENT-HUB-A-001 / E2E-AGENT-HUB-B-001 — Agent Hub Gate A + Gate B UI journeys.
+ * E2E-AGENT-HUB-A-001 / E2E-AGENT-HUB-B-001 / E2E-AGENT-HUB-C-001 —
+ * Agent Hub Gate A + Gate B + Gate C UI journeys.
  *
  * Business Logic（为什么需要这个套件）:
  *   Gate A 交付 Multi-CLI Agent Hub 指令基础：用户必须能看到 CLI probe 状态、
  *   资产 target matrix、项目 opt-in preview/confirm，以及 Attention 冲突 deep link；
  *   旧 `/claude-md` 入口必须落到 Hub。Gate B 扩展 portable 资产矩阵：scope/kind 过滤、
  *   invocation alias、externalCollision adoption 预览、detached restore/remove、
- *   target enable 与 delete-everywhere。本 L1 用 mock 锁定 UI 旅程，
- *   不宣称真实 Claude/Codex/OpenCode 写盘、marketplace 激活或 LAN Hub 复制。
+ *   target enable 与 delete-everywhere。Gate C 扩展 LAN source-push 选择/进度、
+ *   unsupported peer 报告、Git lane inspect/preview/confirm、credential 披露、
+ *   stale preview 错误与 project mapping。本 L1 用 mock 锁定 UI 旅程，
+ *   不宣称真实 Claude/Codex/OpenCode 写盘、marketplace 激活或真实多机 LAN Hub 复制。
  *
  * Code Logic（这个套件做什么）:
  *   backendHarness + installAppLocalStorage + registerAppShellCommands；
@@ -277,6 +280,184 @@ function registerAgentHubBase(
   harness.command('agent_hub_delete_asset_everywhere', {
     kind: 'resolve',
     value: assets[0],
+  });
+
+  // Gate C LAN / Git 默认 no-op 基线（C-001 用例可覆盖）
+  harness.command('list_devices', {
+    kind: 'resolve',
+    value: [
+      {
+        id: 'peer-ok',
+        name: 'Peer OK',
+        address: '192.168.1.10',
+        port: 62116,
+        online: true,
+        capabilities: ['agent-hub.v1'],
+        protoVersion: 1,
+      },
+      {
+        id: 'peer-unsupported',
+        name: 'Peer Old',
+        address: '192.168.1.11',
+        port: 62116,
+        online: true,
+        capabilities: [],
+        protoVersion: 0,
+      },
+    ],
+  });
+  harness.command('agent_hub_preview_lan_push', {
+    kind: 'resolve',
+    value: {
+      snapshotHash: 'a'.repeat(64),
+      snapshotId: 'snap-e2e-1',
+      selectionHash: 'b'.repeat(64),
+      assetCount: 2,
+      revisionCount: 3,
+      credentialBearingAssetCount: 1,
+      peerDeviceIds: ['peer-ok'],
+      mode: 'fullHub',
+      plaintextBackupDisclosure:
+        'Hub snapshots store credential-bearing assets as plaintext bytes in CAS/archive.',
+      hasCredentialBearingAssets: true,
+    },
+  });
+  harness.command('agent_hub_start_lan_push', {
+    kind: 'resolve',
+    value: {
+      requestId: 'req-e2e-1',
+      selectionHash: 'b'.repeat(64),
+      snapshotHash: 'a'.repeat(64),
+      status: 'completed',
+      targets: [
+        {
+          peerDeviceId: 'peer-ok',
+          peerLabel: 'Peer OK',
+          clientRequestId: 'req-e2e-1:peer-ok',
+          status: 'committed',
+          retryable: false,
+          errorCode: null,
+          transferId: 'xfer-1',
+          missingObjectCount: 0,
+          transferredObjectCount: 2,
+          updatedAt: TS,
+        },
+        {
+          peerDeviceId: 'peer-unsupported',
+          peerLabel: 'Peer Old',
+          clientRequestId: 'req-e2e-1:peer-unsupported',
+          status: 'failed',
+          retryable: false,
+          errorCode: 'unsupported',
+          transferId: null,
+          missingObjectCount: 0,
+          transferredObjectCount: 0,
+          updatedAt: TS,
+        },
+      ],
+    },
+  });
+  harness.command('agent_hub_inspect_git_lanes', {
+    kind: 'resolve',
+    value: {
+      workdirPresent: true,
+      localDeviceId: 'local-e2e',
+      lanes: [
+        {
+          laneDeviceId: 'device-remote-1',
+          snapshotHash: 'c'.repeat(64),
+          snapshotId: 'snap-lane-1',
+          sourceReplicaId: 'replica-1',
+          assetCount: 2,
+          revisionCount: 4,
+          status: 'ok',
+          errorCode: null,
+        },
+      ],
+    },
+  });
+  harness.command('agent_hub_preview_git_import', {
+    kind: 'resolve',
+    value: {
+      laneDeviceId: 'device-remote-1',
+      snapshotId: 'snap-lane-1',
+      snapshotHash: 'c'.repeat(64),
+      sourceReplicaId: 'replica-1',
+      assetCount: 2,
+      revisionCount: 4,
+      changeCounts: {
+        added: 1,
+        modified: 0,
+        deleted: 0,
+        conflict: 0,
+        unchanged: 1,
+        credentialBearing: 1,
+      },
+      assets: [
+        {
+          assetId: 'asset-mcp-1',
+          kind: 'mcp',
+          logicalKey: 'secret-mcp',
+          displayName: 'Secret MCP',
+          changeKind: 'added',
+          hasCredential: true,
+          localHead: null,
+          remoteHead: 'rev-1',
+          remoteDeleted: false,
+        },
+      ],
+      projectCandidates: [
+        {
+          hubProjectId: 'hub-mapped',
+          candidateKind: 'hubProjectId',
+          candidateExternalId: 'hub-mapped',
+          localWorkbenchProjectId: null,
+        },
+        {
+          hubProjectId: 'hub-unmapped',
+          candidateKind: 'hubProjectId',
+          candidateExternalId: 'hub-unmapped',
+          localWorkbenchProjectId: null,
+        },
+      ],
+      resolvedMappings: [],
+      plaintextBackupDisclosure:
+        'Hub snapshots store credential-bearing assets as plaintext bytes in CAS/archive.',
+      hasCredentialBearingAssets: true,
+    },
+  });
+  harness.command('agent_hub_confirm_project_mapping', {
+    kind: 'resolve',
+    value: {
+      hubProjectId: 'hub-mapped',
+      localWorkbenchProjectId: 'wb-local-1',
+      optedIn: false,
+    },
+  });
+  harness.command('agent_hub_confirm_git_import', {
+    kind: 'resolve',
+    value: {
+      laneDeviceId: 'device-remote-1',
+      snapshotHash: 'c'.repeat(64),
+      import: {
+        snapshotId: 'snap-lane-1',
+        snapshotHash: 'c'.repeat(64),
+        importedAssetIds: ['asset-mcp-1'],
+        insertedRevisions: 1,
+        dedupedRevisions: 0,
+        headsAdvanced: 1,
+        conflictsOpened: 0,
+        projectionsScheduled: 0,
+        importedObjectHashes: ['d'.repeat(64)],
+      },
+      resolvedMappings: [
+        {
+          hubProjectId: 'hub-mapped',
+          localWorkbenchProjectId: 'wb-local-1',
+          optedIn: false,
+        },
+      ],
+    },
   });
 }
 
@@ -584,5 +765,77 @@ test.describe('E2E-AGENT-HUB-B-001 Agent Hub Gate B portable matrix', () => {
     await page.getByTestId(`agent-target-toggle-${skill.assetId}-claude`).click();
     // still on page after toggle mutation mock
     await expect(page.getByTestId('agent-hub-page')).toBeVisible();
+  });
+});
+
+test.describe('E2E-AGENT-HUB-C-001 Agent Hub Gate C replication UI', () => {
+  test('LAN selection/progress, unsupported peer, Git inspect, credential, mapping, Attention link', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    registerAgentHubBase(backendHarness);
+
+    await page.goto('/agent-hub');
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('agent-hub-lan-push-notice')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-open-lan-push')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-open-git-import')).toBeVisible();
+
+    // --- LAN source-push：选择 peer、preview、per-target progress（含 unsupported）---
+    await page.getByTestId('agent-hub-open-lan-push').click();
+    await expect(page.getByTestId('lan-push-dialog')).toBeVisible();
+    await expect(page.getByTestId('lan-push-plaintext-disclosure')).toBeVisible();
+    await expect(page.getByTestId('lan-push-peer-peer-ok')).toBeVisible();
+    await expect(page.getByTestId('lan-push-peer-peer-unsupported')).toBeVisible();
+    await page.getByTestId('lan-push-peer-peer-ok').check();
+    await page.getByTestId('lan-push-peer-peer-unsupported').check();
+    await page.getByTestId('lan-push-mode-fullHub').check();
+    await page.getByTestId('lan-push-preview-btn').click();
+    await expect(page.getByTestId('lan-push-preview')).toBeVisible({ timeout: 5_000 });
+    await page.getByTestId('lan-push-start-btn').click();
+    await expect(page.getByTestId('lan-push-report')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByTestId('lan-push-target-peer-ok')).toContainText(/committed/i);
+    await expect(page.getByTestId('lan-push-target-peer-unsupported')).toContainText(
+      /failed|unsupported/i,
+    );
+    // 关闭 LAN dialog（ghost cancel）
+    await page.getByRole('button', { name: /cancel|取消/i }).first().click();
+    await expect(page.getByTestId('lan-push-dialog')).toHaveCount(0, { timeout: 5_000 });
+
+    // --- Git lane inspect / credential disclosure / mapping / confirm ---
+    await page.getByTestId('agent-hub-open-git-import').click();
+    await expect(page.getByTestId('git-import-drawer')).toBeVisible();
+    await expect(page.getByTestId('git-import-plaintext-disclosure')).toBeVisible();
+    await page.getByTestId('git-import-inspect-btn').click();
+    await expect(page.getByTestId('git-import-lane-list')).toBeVisible({ timeout: 5_000 });
+    await page.getByTestId('git-import-lane-device-remote-1').click();
+    await page.getByTestId('git-import-preview-btn').click();
+    await expect(page.getByTestId('git-import-preview')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByTestId('git-import-asset-asset-mcp-1')).toBeVisible();
+    // map one project; leave hub-unmapped unmapped
+    await page.getByTestId('git-import-map-hub-mapped').fill('wb-local-1');
+    await page.getByTestId('git-import-map-confirm-hub-mapped').click();
+    await expect(page.getByTestId('git-import-last-mapping')).toBeVisible({ timeout: 5_000 });
+    await page.getByTestId('git-import-confirm-btn').click();
+    await expect(page.getByTestId('git-import-outcome')).toBeVisible({ timeout: 5_000 });
+
+    // stale preview：覆盖 confirm 返回 reject
+    backendHarness.command('agent_hub_confirm_git_import', {
+      kind: 'reject',
+      error: { message: 'previewStale: snapshot hash changed', code: 'conflict' },
+    });
+    await page.getByTestId('git-import-confirm-btn').click();
+    await expect(page.getByTestId('git-import-error')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByTestId('git-import-error')).toContainText(/stale|conflict|hash/i);
+
+    // Attention deep link 仍可达（Gate A/C 导航-only）
+    await page.goto(
+      `/agent-hub?assetId=${encodeURIComponent(ASSET_ID)}&conflictId=${encodeURIComponent(CONFLICT_ID)}`,
+    );
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('agent-hub-conflict-drawer')).toBeVisible({
+      timeout: 10_000,
+    });
   });
 });

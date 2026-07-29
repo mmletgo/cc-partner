@@ -38,7 +38,10 @@ pub use models::transfer::{
     TransferDirection, TransferFailure, TransferFailureStage, TransferOpenAction,
     TransferOperationStatus, TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
 };
-pub use net::protocol::{server_protocol_info, CAPABILITY_TRANSFER_RESUME_V1, PROTOCOL_VERSION_V1};
+pub use net::protocol::{
+    server_protocol_info, CAPABILITY_AGENT_HUB_V1, CAPABILITY_TRANSFER_RESUME_V1,
+    PROTOCOL_VERSION_V1,
+};
 pub use storage::transfer_repo::SenderClaimOutcome;
 pub use storage::TransferRepo;
 // T3：integration smoke 可直接调用发送端 operation 查询与 lost-ACK 对账。
