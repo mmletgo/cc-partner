@@ -222,3 +222,11 @@ fn scan_mcp_json_file(
         true,
     ))
 }
+
+/// Claude managed package 激活选择器（`plugin@cc-partner`）。
+///
+/// Business Logic: 安装/列表检查必须使用稳定 selector，禁止猜测 marketplace 名。
+/// Code Logic: 委托 packages::PLUGIN_SELECTOR。
+pub fn claude_managed_plugin_selector() -> &'static str {
+    crate::agent_hub::packages::PLUGIN_SELECTOR
+}

@@ -16,5 +16,6 @@ pub use atomic_writer::{
     ProjectionWriteFault,
 };
 pub use scheduler::{
+    advance_package_activation, is_managed_package_target_path, PackageActivationAdvance,
     ProjectionRequest, ProjectionRunStats, ProjectionScheduler, MAX_GLOBAL_PROJECTION_PARALLELISM,
 };

@@ -347,3 +347,11 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
         _ => false,
     }
 }
+
+/// OpenCode 受管输出使用原生 skills/commands/agents，而非 plugin CLI。
+///
+/// Business Logic: 激活 = 原子 native-path 投影 + scanner 验证。
+/// Code Logic: 返回策略 token。
+pub fn opencode_activation_strategy() -> &'static str {
+    "native_path_projection"
+}
