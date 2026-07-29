@@ -31,6 +31,11 @@ type TargetCell = {
   desiredEnabled: boolean;
   materializationStatus: string | null;
   lastError: string | null;
+  requested: boolean;
+  supported: boolean;
+  sourceOnly: boolean;
+  verified: boolean;
+  invocationAlias?: string | null;
 };
 
 type AssetSummary = {
@@ -43,6 +48,7 @@ type AssetSummary = {
   policy: string;
   currentRevisionId: string | null;
   hasConflict: boolean;
+  aggregateStatus: string;
   targets: TargetCell[];
 };
 
@@ -124,6 +130,7 @@ function makeAssetSummary(): AssetSummary {
     policy: 'targetOnly',
     currentRevisionId: 'rev-1',
     hasConflict: true,
+    aggregateStatus: 'partial',
     targets: [
       {
         target: 'claude',
@@ -131,6 +138,10 @@ function makeAssetSummary(): AssetSummary {
         desiredEnabled: true,
         materializationStatus: 'synced',
         lastError: null,
+        requested: true,
+        supported: true,
+        sourceOnly: false,
+        verified: true,
       },
       {
         target: 'codex',
@@ -138,6 +149,10 @@ function makeAssetSummary(): AssetSummary {
         desiredEnabled: false,
         materializationStatus: null,
         lastError: null,
+        requested: false,
+        supported: true,
+        sourceOnly: false,
+        verified: false,
       },
       {
         target: 'opencode',
@@ -145,6 +160,10 @@ function makeAssetSummary(): AssetSummary {
         desiredEnabled: false,
         materializationStatus: 'unsupported',
         lastError: null,
+        requested: false,
+        supported: false,
+        sourceOnly: false,
+        verified: false,
       },
     ],
   };
@@ -241,6 +260,22 @@ function registerAgentHubBase(
     kind: 'resolve',
     value: assets[0],
   });
+  harness.command('agent_hub_set_target_enabled', {
+    kind: 'resolve',
+    value: assets[0],
+  });
+  harness.command('agent_hub_set_target_presence', {
+    kind: 'resolve',
+    value: assets[0],
+  });
+  harness.command('agent_hub_restore_detached_target', {
+    kind: 'resolve',
+    value: assets[0],
+  });
+  harness.command('agent_hub_delete_asset_everywhere', {
+    kind: 'resolve',
+    value: assets[0],
+  });
 }
 
 test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
@@ -312,5 +347,19 @@ test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
     await expect(page).toHaveURL(/\/agent-hub/, { timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-status-card')).toBeVisible();
+  });
+
+  test('legacy /claude-code redirects to /agent-hub and Gate C LAN push copy is visible', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    registerAgentHubBase(backendHarness);
+
+    await page.goto('/claude-code');
+    await expect(page).toHaveURL(/\/agent-hub/, { timeout: 15_000 });
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('agent-hub-lan-push-notice')).toBeVisible();
+    await expect(page.getByTestId(`agent-asset-aggregate-${ASSET_ID}`)).toBeVisible();
   });
 });

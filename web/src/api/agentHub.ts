@@ -49,6 +49,10 @@ export const AGENT_HUB_COMMANDS = {
   enableProject: 'agent_hub_enable_project',
   resolveConflict: 'agent_hub_resolve_conflict',
   setTargetBinding: 'agent_hub_set_target_binding',
+  setTargetPresence: 'agent_hub_set_target_presence',
+  setTargetEnabled: 'agent_hub_set_target_enabled',
+  restoreDetachedTarget: 'agent_hub_restore_detached_target',
+  deleteAssetEverywhere: 'agent_hub_delete_asset_everywhere',
 } as const;
 
 /**
@@ -111,6 +115,39 @@ export interface AgentHubSetTargetBindingArgs {
   target: AgentTarget;
   desiredPresence: DesiredPresence;
   desiredEnabled: boolean;
+}
+
+/**
+ * 设置 target presence（target-local）。
+ */
+export interface AgentHubSetTargetPresenceArgs {
+  assetId: string;
+  target: AgentTarget;
+  desiredPresence: DesiredPresence;
+}
+
+/**
+ * 设置 target enabled（target-local）。
+ */
+export interface AgentHubSetTargetEnabledArgs {
+  assetId: string;
+  target: AgentTarget;
+  desiredEnabled: boolean;
+}
+
+/**
+ * 恢复 detached target。
+ */
+export interface AgentHubRestoreDetachedTargetArgs {
+  assetId: string;
+  target: AgentTarget;
+}
+
+/**
+ * 从所有 target 删除资产。
+ */
+export interface AgentHubDeleteAssetEverywhereArgs {
+  assetId: string;
 }
 
 /**
@@ -250,6 +287,65 @@ export const agentHubApi = {
         desiredPresence: args.desiredPresence,
         desiredEnabled: args.desiredEnabled,
       },
+      agentHubAssetSummaryDecoder,
+    ),
+
+  /**
+   * Business Logic: 仅改 target presence（Absent 只卸该 target）。
+   * Code Logic: agent_hub_set_target_presence。
+   */
+  setTargetPresence: (args: AgentHubSetTargetPresenceArgs): Promise<AgentHubAssetSummary> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.setTargetPresence,
+      {
+        assetId: args.assetId,
+        target: args.target,
+        desiredPresence: args.desiredPresence,
+      },
+      agentHubAssetSummaryDecoder,
+    ),
+
+  /**
+   * Business Logic: 仅改 target enabled，不改其它 CLI。
+   * Code Logic: agent_hub_set_target_enabled。
+   */
+  setTargetEnabled: (args: AgentHubSetTargetEnabledArgs): Promise<AgentHubAssetSummary> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.setTargetEnabled,
+      {
+        assetId: args.assetId,
+        target: args.target,
+        desiredEnabled: args.desiredEnabled,
+      },
+      agentHubAssetSummaryDecoder,
+    ),
+
+  /**
+   * Business Logic: 外部整文件删除后用户显式恢复。
+   * Code Logic: agent_hub_restore_detached_target。
+   */
+  restoreDetachedTarget: (
+    args: AgentHubRestoreDetachedTargetArgs,
+  ): Promise<AgentHubAssetSummary> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.restoreDetachedTarget,
+      {
+        assetId: args.assetId,
+        target: args.target,
+      },
+      agentHubAssetSummaryDecoder,
+    ),
+
+  /**
+   * Business Logic: 唯一生成 canonical tombstone 的入口。
+   * Code Logic: agent_hub_delete_asset_everywhere。
+   */
+  deleteAssetEverywhere: (
+    args: AgentHubDeleteAssetEverywhereArgs,
+  ): Promise<AgentHubAssetSummary> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.deleteAssetEverywhere,
+      { assetId: args.assetId },
       agentHubAssetSummaryDecoder,
     ),
 };

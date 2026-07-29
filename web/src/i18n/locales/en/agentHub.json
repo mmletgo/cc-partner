@@ -1,11 +1,12 @@
 {
   "title": "Agent Hub",
-  "subtitle": "Manage multi-CLI instructions for Claude, Codex, and OpenCode from one workspace.",
+  "subtitle": "Manage multi-CLI instructions and portable assets for Claude, Codex, and OpenCode from one workspace.",
   "loading": "Loading Agent Hub…",
   "stale": "Status may be out of date. Refresh to reload.",
   "empty": "No assets match the current filters.",
   "listAria": "Agent Hub assets",
   "upgradeRequired": "Backend Agent Hub API is incompatible for writes. Upgrade the backend sidecar to continue editing.",
+  "lanPushGateC": "LAN push of Hub assets arrives in Gate C. This release does not ship cross-device push or silent Skill directory moves.",
   "status": {
     "enabled": "Hub enabled",
     "disabled": "Hub disabled",
@@ -52,6 +53,26 @@
     "activationRequired": "Activation required",
     "externalCollision": "External collision"
   },
+  "aggregate": {
+    "full": "Full",
+    "partial": "Partial",
+    "sourceOnly": "Source only",
+    "activationRequired": "Activation required",
+    "externalCollision": "External collision",
+    "detached": "Detached",
+    "blocked": "Blocked"
+  },
+  "matrix": {
+    "verified": "Verified",
+    "sourceOnly": "Source only",
+    "unsupported": "Unsupported",
+    "canonical": "Canonical name",
+    "invocation": "Invocation alias",
+    "aggregate": "Aggregate",
+    "activationHint": "Manual activation is required on this target before projection can verify.",
+    "blockedReason": "Blocked: {{reason}}",
+    "noInstallElsewhere": "Source-only asset: no install action on this target."
+  },
   "filters": {
     "scope": "Scope",
     "kind": "Kind",
@@ -77,7 +98,27 @@
     "openBlocks": "Instruction blocks",
     "openConflicts": "Conflicts",
     "enableTarget": "Enable",
-    "disableTarget": "Disable"
+    "disableTarget": "Disable",
+    "restoreTarget": "Restore",
+    "removeTarget": "Remove target",
+    "deleteEverywhere": "Delete everywhere",
+    "openCollision": "Collision preview"
+  },
+  "adoption": {
+    "title": "Adoption / collision preview",
+    "desc": "Review the external collision diagnostics before any adoption decision. Legacy LAN pull and direct Skill directory moves are no longer exposed here.",
+    "lanPushGateC": "Cross-device LAN push is scheduled for Gate C and is not available in this release.",
+    "logicalKey": "Logical key",
+    "origin": "Origin namespace",
+    "target": "Target",
+    "noDiagnostics": "No additional diagnostics.",
+    "empty": "No collision selected.",
+    "confirm": "Acknowledge"
+  },
+  "deleteEverywhere": {
+    "title": "Delete asset everywhere",
+    "desc": "This appends one canonical tombstone and fans out removals to all present targets. This cannot be undone from the matrix UI.",
+    "confirm": "Delete everywhere"
   },
   "preview": {
     "title": "Project enable preview",

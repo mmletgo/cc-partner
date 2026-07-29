@@ -1,11 +1,12 @@
 {
   "title": "Agent Hub",
-  "subtitle": "在同一工作区管理 Claude / Codex / OpenCode 的指令投影。",
+  "subtitle": "在同一工作区管理 Claude / Codex / OpenCode 的指令与可移植资产投影。",
   "loading": "正在加载 Agent Hub…",
   "stale": "状态可能已过期，请刷新重试。",
   "empty": "当前筛选条件下没有资产。",
   "listAria": "Agent Hub 资产列表",
   "upgradeRequired": "后端 Agent Hub API 不兼容写操作。请升级 backend sidecar 后再编辑。",
+  "lanPushGateC": "Hub 资产的局域网 push 将在 Gate C 提供。本版本不提供跨设备 push，也不会静默移动 Skill 目录。",
   "status": {
     "enabled": "Hub 已启用",
     "disabled": "Hub 未启用",
@@ -52,6 +53,26 @@
     "activationRequired": "需激活",
     "externalCollision": "外部碰撞"
   },
+  "aggregate": {
+    "full": "完整",
+    "partial": "部分",
+    "sourceOnly": "仅源端",
+    "activationRequired": "需激活",
+    "externalCollision": "外部碰撞",
+    "detached": "已脱离",
+    "blocked": "已阻塞"
+  },
+  "matrix": {
+    "verified": "已验证",
+    "sourceOnly": "仅源端",
+    "unsupported": "不支持",
+    "canonical": "规范名",
+    "invocation": "调用别名",
+    "aggregate": "聚合状态",
+    "activationHint": "该目标需要手动激活后才能完成验证投影。",
+    "blockedReason": "已阻塞：{{reason}}",
+    "noInstallElsewhere": "仅源端资产：此目标不提供安装动作。"
+  },
   "filters": {
     "scope": "作用域",
     "kind": "类型",
@@ -77,7 +98,27 @@
     "openBlocks": "指令块",
     "openConflicts": "冲突",
     "enableTarget": "启用",
-    "disableTarget": "停用"
+    "disableTarget": "停用",
+    "restoreTarget": "恢复",
+    "removeTarget": "移除目标",
+    "deleteEverywhere": "全部删除",
+    "openCollision": "碰撞预览"
+  },
+  "adoption": {
+    "title": "纳管 / 碰撞预览",
+    "desc": "在做出纳管决策前请先审阅外部碰撞诊断。旧版局域网拉取与直接移动 Skill 目录的入口已从此界面移除。",
+    "lanPushGateC": "跨设备局域网 push 计划在 Gate C 提供，本版本尚不可用。",
+    "logicalKey": "逻辑键",
+    "origin": "来源命名空间",
+    "target": "目标",
+    "noDiagnostics": "没有额外诊断信息。",
+    "empty": "尚未选择碰撞项。",
+    "confirm": "已知悉"
+  },
+  "deleteEverywhere": {
+    "title": "从所有目标删除资产",
+    "desc": "将追加一条规范 tombstone 并向所有 present 目标扇出删除。矩阵界面无法撤销该操作。",
+    "confirm": "全部删除"
   },
   "preview": {
     "title": "项目启用预览",

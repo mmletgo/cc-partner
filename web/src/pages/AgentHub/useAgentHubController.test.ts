@@ -1,7 +1,7 @@
 /**
  * useAgentHubController 单元测试。
  *
- * Business Logic: 锁定首载错误、stale refresh、preview/enable/conflict/sequence。
+ * Business Logic: 锁定首载错误、stale refresh、preview/enable/conflict/sequence、矩阵 mutation。
  * Code Logic: mock agentHubApi + renderHook。
  */
 
@@ -9,7 +9,7 @@
 
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import type { AgentHubAssetDetail, AgentHubStatus } from '@/lib/types/agentHub';
+import type { AgentHubAssetDetail, AgentHubAssetSummary, AgentHubStatus } from '@/lib/types/agentHub';
 
 const getStatus = vi.fn();
 const listAssets = vi.fn();
@@ -21,6 +21,10 @@ const updateInstruction = vi.fn();
 const updateInstructionBlock = vi.fn();
 const pairInstructionVariants = vi.fn();
 const setTargetBinding = vi.fn();
+const setTargetPresence = vi.fn();
+const setTargetEnabled = vi.fn();
+const restoreDetachedTarget = vi.fn();
+const deleteAssetEverywhere = vi.fn();
 
 vi.mock('@/api/agentHub', () => ({
   agentHubApi: {
@@ -34,6 +38,10 @@ vi.mock('@/api/agentHub', () => ({
     updateInstructionBlock: (...args: unknown[]) => updateInstructionBlock(...args),
     pairInstructionVariants: (...args: unknown[]) => pairInstructionVariants(...args),
     setTargetBinding: (...args: unknown[]) => setTargetBinding(...args),
+    setTargetPresence: (...args: unknown[]) => setTargetPresence(...args),
+    setTargetEnabled: (...args: unknown[]) => setTargetEnabled(...args),
+    restoreDetachedTarget: (...args: unknown[]) => restoreDetachedTarget(...args),
+    deleteAssetEverywhere: (...args: unknown[]) => deleteAssetEverywhere(...args),
   },
 }));
 
@@ -65,7 +73,7 @@ const statusOk: AgentHubStatus = {
   blockedMaterializationCount: 0,
 };
 
-const assetSummary = {
+const assetSummary: AgentHubAssetSummary = {
   assetId: 'asset-1',
   scopeId: 'user',
   kind: 'instruction',
@@ -76,14 +84,19 @@ const assetSummary = {
   currentRevisionId: 'r1',
   targets: [
     {
-      target: 'claude' as const,
-      desiredPresence: 'present' as const,
+      target: 'claude',
+      desiredPresence: 'present',
       desiredEnabled: true,
       materializationStatus: 'synced',
       lastError: null,
+      requested: true,
+      supported: true,
+      sourceOnly: false,
+      verified: true,
     },
   ],
   hasConflict: true,
+  aggregateStatus: 'full',
 };
 
 const assetDetail: AgentHubAssetDetail = {
@@ -118,6 +131,10 @@ describe('useAgentHubController', () => {
     });
     enableProject.mockResolvedValue({ projectId: 'p1', optedIn: true });
     resolveConflict.mockResolvedValue(assetDetail);
+    setTargetEnabled.mockResolvedValue(assetSummary);
+    setTargetPresence.mockResolvedValue(assetSummary);
+    restoreDetachedTarget.mockResolvedValue(assetSummary);
+    deleteAssetEverywhere.mockResolvedValue(assetSummary);
   });
 
   test('first-load error surfaces error without assets', async () => {
@@ -196,6 +213,117 @@ describe('useAgentHubController', () => {
     });
     expect(resolveConflict).toHaveBeenCalledWith(
       expect.objectContaining({ assetId: 'asset-1', conflictId: 'c1' }),
+    );
+  });
+
+  test('enable/disable one target refreshes via revision cursor', async () => {
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => {
+      await result.current.setTargetEnabled({
+        assetId: 'asset-1',
+        target: 'claude',
+        desiredEnabled: false,
+      });
+    });
+    expect(setTargetEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({ assetId: 'asset-1', desiredEnabled: false }),
+    );
+    expect(listAssets).toHaveBeenCalled();
+  });
+
+  test('target removal and restore call presence/restore APIs', async () => {
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => {
+      await result.current.removeTarget({ assetId: 'asset-1', target: 'claude' });
+    });
+    expect(setTargetPresence).toHaveBeenCalledWith(
+      expect.objectContaining({ desiredPresence: 'absent', target: 'claude' }),
+    );
+    await act(async () => {
+      await result.current.restoreDetachedTarget({ assetId: 'asset-1', target: 'claude' });
+    });
+    expect(restoreDetachedTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ assetId: 'asset-1', target: 'claude' }),
+    );
+  });
+
+  test('delete everywhere confirmation mutates then reloads', async () => {
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => {
+      result.current.openDeleteEverywhere('asset-1');
+    });
+    expect(result.current.deleteEverywhereOpen).toBe(true);
+    await act(async () => {
+      await result.current.confirmDeleteEverywhere();
+    });
+    expect(deleteAssetEverywhere).toHaveBeenCalledWith({ assetId: 'asset-1' });
+    expect(result.current.deleteEverywhereOpen).toBe(false);
+  });
+
+  test('rapid scope switching drops stale list responses', async () => {
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let resolveSlow: (value: AgentHubAssetSummary[]) => void = () => undefined;
+    const slow = new Promise<AgentHubAssetSummary[]>((resolve) => {
+      resolveSlow = resolve;
+    });
+    listAssets.mockImplementationOnce(() => slow);
+    listAssets.mockResolvedValueOnce([
+      {
+        ...assetSummary,
+        assetId: 'asset-scope-b',
+        scopeId: 'project-b',
+        displayName: 'Project B',
+      },
+    ]);
+
+    act(() => {
+      result.current.setScopeFilter('project-a');
+    });
+    act(() => {
+      result.current.setScopeFilter('project-b');
+    });
+
+    await waitFor(() => expect(listAssets).toHaveBeenCalledTimes(3));
+
+    await act(async () => {
+      resolveSlow([{ ...assetSummary, assetId: 'asset-scope-a', scopeId: 'project-a' }]);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.assets[0]?.assetId).toBe('asset-scope-b');
+    });
+    expect(result.current.assets.some((a) => a.assetId === 'asset-scope-a')).toBe(false);
+  });
+
+  test('openAdoptionPreview builds collision diagnostics', async () => {
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => {
+      result.current.openAdoptionPreview(
+        {
+          ...assetSummary,
+          aggregateStatus: 'externalCollision',
+          targets: [
+            {
+              ...assetSummary.targets[0],
+              materializationStatus: 'externalCollision',
+              lastError: 'collision-path',
+              verified: false,
+            },
+          ],
+        },
+        'claude',
+      );
+    });
+    expect(result.current.adoptionOpen).toBe(true);
+    expect(result.current.adoptionPreview?.diagnostics).toEqual(
+      expect.arrayContaining(['collision-path', 'materialization:externalCollision']),
     );
   });
 });
