@@ -2626,6 +2626,80 @@ mod tests {
         assert_eq!(still.desired_presence, DesiredPresence::Present);
     }
 
+    /// Business Logic: DeleteEverywhere 在任意 target 路径 blocked 时拒绝，且不写 tombstone/binding。
+    /// Code Logic: collect_removal_blocked_for_asset → RejectRemovalBlocked；asset 仍 live。
+    #[tokio::test]
+    async fn service_delete_everywhere_rejects_before_mutation_when_paths_blocked() {
+        let (state, tmp) = build_service_state().await;
+        let asset = seed_instruction_asset(
+            &state,
+            crate::agent_hub::models::AssetPolicy::Shared,
+            &[
+                (AgentTarget::Claude, DesiredPresence::Present, true),
+                (AgentTarget::Codex, DesiredPresence::Present, true),
+            ],
+        )
+        .await;
+        let bindings = state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        let claude = bindings
+            .iter()
+            .find(|x| x.target == AgentTarget::Claude)
+            .unwrap();
+        let path = tmp.path().join("everywhere-drift.md");
+        std::fs::write(&path, b"external").unwrap();
+        state
+            .agent_hub_repo
+            .upsert_materialization(NewMaterialization {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                target_binding_id: claude.id.clone(),
+                native_path: Some(path.to_string_lossy().into_owned()),
+                last_projected_revision_id: None,
+                rendered_hash: Some(sha256_hex(b"managed")),
+                observed_external_hash: Some(sha256_hex(b"managed")),
+                status: MaterializationStatus::Synced,
+                last_error: None,
+            })
+            .await
+            .unwrap();
+        let before_rev = asset.current_revision_id.clone();
+        let err = AgentHubService::delete_asset_everywhere(
+            &state,
+            DeleteAssetEverywhereRequest {
+                asset_id: asset.id.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("agent_hub_removal_blocked_unknown_or_changed_paths"),
+            "msg={msg}"
+        );
+        // 全部 binding 与 head 均未变
+        let still_asset = state
+            .agent_hub_repo
+            .get_asset(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(still_asset.deleted_at.is_none());
+        assert_eq!(still_asset.current_revision_id, before_rev);
+        for b in state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap()
+        {
+            assert_eq!(b.desired_presence, DesiredPresence::Present);
+            assert!(b.desired_enabled);
+        }
+    }
+
     /// Business Logic: restore_detached 清 Detached、Present+enabled、schedule 投影意图。
     /// Code Logic: materialization Pending；binding Present。
     #[tokio::test]

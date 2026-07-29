@@ -1410,10 +1410,19 @@ impl TargetBinding {
                     clear_detached_status: true,
                 }
             }
-            TargetBindingIntent::DeleteEverywhere => TargetBindingTransition::DeleteEverywhere {
-                append_canonical_tombstone: true,
-                fan_out_absent: true,
-            },
+            TargetBindingIntent::DeleteEverywhere => {
+                // 与 Absent 同契约：未知/变更路径必须 fail-closed，禁止 tombstone 或 fan-out。
+                if !removal_blocked_paths.is_empty() {
+                    return TargetBindingTransition::RejectRemovalBlocked {
+                        code: "agent_hub_removal_blocked_unknown_or_changed_paths".into(),
+                        preview_paths: removal_blocked_paths.to_vec(),
+                    };
+                }
+                TargetBindingTransition::DeleteEverywhere {
+                    append_canonical_tombstone: true,
+                    fan_out_absent: true,
+                }
+            }
         }
     }
 }
@@ -1669,6 +1678,30 @@ mod target_presence_tests {
             } => {
                 assert!(append_canonical_tombstone);
                 assert!(fan_out_absent);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Business Logic: DeleteEverywhere 与 Absent 同 fail-closed，未知路径阻塞 tombstone。
+    #[test]
+    fn unknown_paths_block_delete_everywhere_with_preview() {
+        let binding = sample_binding(AgentTarget::Codex, DesiredPresence::Present, true);
+        let blocked = vec!["plugin/extra.toml".into()];
+        let transition = binding.apply_intent(
+            TargetBindingIntent::DeleteEverywhere,
+            Some(MaterializationStatus::Synced),
+            AssetPolicy::Shared,
+            2,
+            &blocked,
+        );
+        match transition {
+            TargetBindingTransition::RejectRemovalBlocked {
+                code,
+                preview_paths,
+            } => {
+                assert_eq!(code, "agent_hub_removal_blocked_unknown_or_changed_paths");
+                assert_eq!(preview_paths, blocked);
             }
             other => panic!("unexpected {other:?}"),
         }
