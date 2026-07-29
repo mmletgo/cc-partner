@@ -172,7 +172,8 @@
       "previewRequired": "Project preview required",
       "conflict": "Bridge path conflict",
       "unsupported": "Bridge unsupported"
-    }
+    },
+    "bridgePath": "Bridge file: {{path}}"
   },
   "health": {
     "title": "Health reminder",

@@ -13,6 +13,13 @@ import type { ChangeEvent, ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button, Input, Pill } from '@/components/primitives';
 import { CheckIcon, XIcon } from '@/lib/icons';
+import {
+  OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+  agentAdapterAvailabilityTone,
+  agentAdapterBlockedReason,
+  effectiveOpenCodeBridgeStatus,
+  isAgentAdapterEffectivelyAvailable,
+} from '@/lib/agentAdapterPresentation';
 import type { OrchestratorAgentAdapterCatalogItem } from '@/lib/types';
 import type { AutomationSettingsForm } from './automationSettingsState';
 import {
@@ -44,6 +51,11 @@ interface AutomationSettingsPanelProps {
   canResetDefaults?: boolean;
   /** owner adapter catalog（只读可用性，无 path/env） */
   agentAdapters?: OrchestratorAgentAdapterCatalogItem[];
+  /**
+   * OpenCode bridge 需要项目 preview 时，打开既有 Agent Hub 项目预览路径。
+   * 不得直接 enable/overwrite。
+   */
+  onOpenOpenCodeBridgePreview?: () => void;
 }
 
 interface ToggleRowProps {
@@ -114,8 +126,9 @@ export function AutomationSettingsPanel({
   onSave,
   canResetDefaults = true,
   agentAdapters = [],
+  onOpenOpenCodeBridgePreview,
 }: AutomationSettingsPanelProps): ReactElement {
-  const { t } = useTranslation(['settings', 'common']);
+  const { t } = useTranslation(['settings', 'common', 'workbench']);
   const resetDisabled =
     saving || !canResetDefaults || !isAutomationFormDirty(form, defaults);
 
@@ -138,19 +151,14 @@ export function AutomationSettingsPanel({
             >
               {agentAdapters.map((item) => {
                 const isOpenCode = item.provider === 'openCodeVisible';
-                const bridgeStatus = item.bridgeStatus ?? null;
-                const blocked =
-                  item.blockedReason ??
-                  item.reasonCode ??
-                  (isOpenCode && bridgeStatus && bridgeStatus !== 'ready'
-                    ? bridgeStatus
-                    : null);
-                const availableTone =
-                  item.available && (!isOpenCode || bridgeStatus === 'ready')
-                    ? 'success'
-                    : isOpenCode && bridgeStatus === 'previewRequired'
-                      ? 'warn'
-                      : 'neutral';
+                const bridgeStatus = isOpenCode
+                  ? effectiveOpenCodeBridgeStatus(item)
+                  : (item.bridgeStatus ?? null);
+                const blocked = agentAdapterBlockedReason(item);
+                const availableTone = agentAdapterAvailabilityTone(item);
+                const effectivelyAvailable = isAgentAdapterEffectivelyAvailable(item);
+                const needsBridgePreview =
+                  isOpenCode && bridgeStatus !== null && bridgeStatus !== 'ready';
                 return (
                   <li
                     key={item.provider}
@@ -159,6 +167,7 @@ export function AutomationSettingsPanel({
                     data-provider={item.provider}
                     data-bridge-status={bridgeStatus ?? undefined}
                     data-completion={item.completionContract}
+                    data-effectively-available={effectivelyAvailable ? 'true' : 'false'}
                   >
                     <div className={styles.toggleText}>
                       <span className={styles.toggleLabel}>
@@ -188,15 +197,32 @@ export function AutomationSettingsPanel({
                         {isOpenCode && bridgeStatus
                           ? ` · ${t(`settings:automation.bridgeStatus.${bridgeStatus}`)}`
                           : ''}
+                        {isOpenCode
+                          ? ` · ${t('settings:automation.bridgePath', {
+                              path: OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+                            })}`
+                          : ''}
                         {blocked
                           ? ` · ${t('settings:automation.blockedReason', {
                               reason: blocked,
                             })}`
                           : ''}
                       </span>
+                      {needsBridgePreview && onOpenOpenCodeBridgePreview ? (
+                        <div className={styles.field}>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={onOpenOpenCodeBridgePreview}
+                            data-testid="open-code-bridge-preview"
+                          >
+                            {t('workbench:openCodeBridge.openPreview')}
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
                     <span className={styles.toggleState}>
-                      {item.available && (!isOpenCode || bridgeStatus === 'ready') ? (
+                      {effectivelyAvailable ? (
                         <Pill tone={availableTone} dot>
                           {t('settings:automation.adapterAvailable')}
                         </Pill>

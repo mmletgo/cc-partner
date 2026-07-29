@@ -130,7 +130,8 @@
     "enable": "Enable project",
     "checkouts": "Checkouts",
     "plannedActions": "Planned actions",
-    "noCommitDefault": "cc-partner will not commit or push the project repository."
+    "noCommitDefault": "cc-partner will not commit or push the project repository.",
+    "bridgeNotice": "OpenCode runtime bridge preview for {{path}}. Nothing is written until you confirm enable."
   },
   "conflict": {
     "title": "Conflicts",

@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { orchestratorApi } from '@/api/orchestrator';
 import { promptOptimizerApi } from '@/api/promptOptimizer';
+import { buildExperimentCandidates, useAgentAdapterCatalog } from './useAgentAdapterCatalog';
 import { requestAttentionInvalidation } from '@/hooks/attentionInvalidation';
 import { useOrchestratorRuntimeSnapshot } from '@/hooks/useOrchestratorRuntimeSnapshot';
 import { useWorkbenchProjects } from '@/hooks/workbenchProjectsContext';
@@ -51,6 +52,7 @@ import type {
   WorkflowDiagnostic,
   WorkflowDocumentLoadState,
   WorkflowDocumentStatus,
+  OrchestratorAgentAdapterCatalogItem,
 } from '@/lib/types';
 import type { OrchestratorDetailTab } from '../views/OrchestratorTaskDrawer';
 import type { OrchestratorBoardGroups } from '../orchestratorBoard';
@@ -254,6 +256,7 @@ export interface UseOrchestratorControllerResult {
   handleCreateExperiment: () => Promise<void>;
   handleApproveExperimentWinner: (experimentId: string, winnerTaskId: string) => Promise<void>;
   handleCancelExperiment: (experimentId: string) => Promise<void>;
+  agentAdapters: OrchestratorAgentAdapterCatalogItem[];
 }
 
 /**
@@ -326,6 +329,7 @@ export function useOrchestratorController(
   );
   const [creatingExperiment, setCreatingExperiment] = useState(false);
   const [experimentActionId, setExperimentActionId] = useState<string | null>(null);
+  const agentAdapters = useAgentAdapterCatalog();
   const activeProjectId = activeProject?.id ?? null;
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   const taskLoadDecision = useMemo(
@@ -652,7 +656,6 @@ export function useOrchestratorController(
   const handleOpenAutomationSettings = useCallback(() => {
     navigate('/settings?tab=automation');
   }, [navigate]);
-
   useEffect(() => {
     if (taskLoadDecision.kind !== 'load') return undefined;
 
@@ -906,11 +909,7 @@ export function useOrchestratorController(
         title,
         goal,
         acceptance,
-        maxParallel: 1,
-        candidates: [
-          { providerId: 'claudeCodeVisible', strategyLabel: 'baseline' },
-          { providerId: 'openCodeVisible', strategyLabel: 'opencode-visible' },
-        ],
+        maxParallel: 1, candidates: buildExperimentCandidates(agentAdapters),
       });
       if (activeProjectIdRef.current !== projectId) return;
       setExperiments((current) => {
@@ -936,16 +935,7 @@ export function useOrchestratorController(
         setCreatingExperiment(false);
       }
     }
-  }, [
-    activeProject,
-    activeProjectId,
-    form.acceptanceCriteria,
-    form.goal,
-    form.title,
-    refreshRuntimeSnapshot,
-    reloadTaskViewsForActiveProject,
-    t,
-  ]);
+  }, [activeProject, activeProjectId, agentAdapters, form.acceptanceCriteria, form.goal, form.title, refreshRuntimeSnapshot, reloadTaskViewsForActiveProject, t]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1924,6 +1914,6 @@ export function useOrchestratorController(
     experimentActionId,
     handleCreateExperiment,
     handleApproveExperimentWinner,
-    handleCancelExperiment,
+    handleCancelExperiment, agentAdapters,
   };
 }

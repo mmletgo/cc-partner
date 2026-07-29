@@ -82,23 +82,32 @@ export function agentPhaseI18nKey(
 /**
  * Business Logic（为什么需要这个函数）:
  *   tab 上只显示短 provider 标签；未知 id 原样安全展示。
+ *   有 i18n translator 时优先 workbench.providers.*；否则回落稳定英文短名。
  *
  * Code Logic（这个函数做什么）:
  *   已知 provider 映射短名；否则截断过长 id。
  */
-export function agentProviderShortLabel(providerId: string): string {
-  if (providerId === 'claudeCodeVisible' || providerId === 'claudeCode') {
-    return 'Claude';
+export function agentProviderShortLabel(
+  providerId: string,
+  t?: (key: string) => string,
+): string {
+  const key =
+    providerId === 'claudeCodeVisible' || providerId === 'claudeCode'
+      ? 'providers.claudeCodeVisible'
+      : providerId === 'codexVisible' || providerId === 'codex'
+        ? 'providers.codexVisible'
+        : providerId === 'genericTerminal'
+          ? 'providers.genericTerminal'
+          : providerId === 'openCodeVisible' || providerId === 'opencode'
+            ? 'providers.openCodeVisible'
+            : null;
+  if (key && t) {
+    return t(`workbench:${key}`);
   }
-  if (providerId === 'codexVisible' || providerId === 'codex') {
-    return 'Codex';
-  }
-  if (providerId === 'genericTerminal') {
-    return 'Generic';
-  }
-  if (providerId === 'openCodeVisible' || providerId === 'opencode') {
-    return 'OpenCode';
-  }
+  if (key === 'providers.claudeCodeVisible') return 'Claude';
+  if (key === 'providers.codexVisible') return 'Codex';
+  if (key === 'providers.genericTerminal') return 'Generic';
+  if (key === 'providers.openCodeVisible') return 'OpenCode';
   if (providerId.length > 16) {
     return `${providerId.slice(0, 14)}…`;
   }

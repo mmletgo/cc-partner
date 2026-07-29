@@ -79,14 +79,46 @@ describe('AutomationSettingsPanel OpenCode catalog', () => {
           },
           openCodeItem(),
         ]}
+        onOpenOpenCodeBridgePreview={vi.fn()}
       />,
     );
 
     const row = screen.getByTestId('agent-adapter-openCodeVisible');
     expect(row.getAttribute('data-completion')).toBe('hookEvent');
     expect(row.getAttribute('data-bridge-status')).toBe('previewRequired');
+    expect(row.getAttribute('data-effectively-available')).toBe('false');
     expect(row.textContent).toContain('runtime_bridge_required');
     expect(row.textContent).toContain('L3-AGENT-HUB-OPENCODE-RUNTIME-001');
     expect(row.textContent).toContain('opencode');
+    expect(screen.getByTestId('open-code-bridge-preview')).toBeTruthy();
+  });
+
+  test('available true without bridgeStatus is fail-closed not green available', () => {
+    render(
+      <AutomationSettingsPanel
+        form={baseForm}
+        defaults={baseForm}
+        dirty={false}
+        saving={false}
+        error={null}
+        saved={false}
+        onChange={() => undefined}
+        onResetDefaults={() => undefined}
+        onSave={() => undefined}
+        agentAdapters={[
+          openCodeItem({
+            available: true,
+            bridgeStatus: undefined,
+            blockedReason: undefined,
+            reasonCode: undefined,
+          }),
+        ]}
+      />,
+    );
+
+    const row = screen.getByTestId('agent-adapter-openCodeVisible');
+    expect(row.getAttribute('data-bridge-status')).toBe('previewRequired');
+    expect(row.getAttribute('data-effectively-available')).toBe('false');
+    expect(row.textContent).not.toMatch(/adapterAvailable/);
   });
 });

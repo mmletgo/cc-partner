@@ -152,18 +152,8 @@ export function isPreserveDeleteDecision(decision: PluginComponentDeleteDecision
   return decision === 'preserveShared' || decision === 'preserveStandalone';
 }
 
-/**
- * Business Logic: OpenCode bridge 是否允许启用 openCodeVisible。
- * Code Logic: 仅 ready。
- */
-export function isOpenCodeBridgeReady(
-  status: 'ready' | 'previewRequired' | 'conflict' | 'unsupported' | null | undefined,
-): boolean {
-  return status === 'ready';
-}
-
-/**
- * Business Logic: preview 路径固定为派生 Plugin 文件。
- * Code Logic: 常量相对路径。
- */
-export const OPENCODE_RUNTIME_BRIDGE_REL_PATH = '.opencode/plugins/cc-partner-runtime.ts';
+// OpenCode bridge helpers live in shared lib so Settings/Workbench/Orchestrator share fail-closed rules.
+export {
+  OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+  isOpenCodeBridgeReady,
+} from '@/lib/agentAdapterPresentation';

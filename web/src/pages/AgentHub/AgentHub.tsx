@@ -127,6 +127,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     closeDeleteEverywhere,
     confirmDeleteEverywhere,
     deepLinkConflictId,
+    deepLinkBridgePath,
     reload,
     resolveConflict,
     updateInstructionBlock,
@@ -420,6 +421,11 @@ export function AgentHubView(props: AgentHubViewProps) {
             {t('agentHub:preview.title')}
           </h2>
           <p className={styles.drawerSubtitle}>{t('agentHub:preview.desc')}</p>
+          {deepLinkBridgePath ? (
+            <p className={styles.hint} data-testid="agent-hub-preview-bridge-notice">
+              {t('agentHub:preview.bridgeNotice', { path: deepLinkBridgePath })}
+            </p>
+          ) : null}
           <label className={styles.filterField}>
             <span>{t('agentHub:preview.projectId')}</span>
             <Input

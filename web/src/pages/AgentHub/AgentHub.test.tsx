@@ -191,6 +191,7 @@ function buildProps(
     closeDeleteEverywhere: vi.fn(),
     confirmDeleteEverywhere: vi.fn(async () => undefined),
     deepLinkConflictId: null,
+    deepLinkBridgePath: null,
     reload: vi.fn(async () => undefined),
     resolveConflict: vi.fn(async () => undefined),
     updateInstruction: vi.fn(async () => undefined),

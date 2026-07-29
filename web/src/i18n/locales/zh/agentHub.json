@@ -130,7 +130,8 @@
     "enable": "启用项目",
     "checkouts": "检出列表",
     "plannedActions": "计划动作",
-    "noCommitDefault": "cc-partner 不会 commit/push 项目仓库。"
+    "noCommitDefault": "cc-partner 不会 commit/push 项目仓库。",
+    "bridgeNotice": "OpenCode runtime bridge 预览：{{path}}。在你确认启用之前不会写入。"
   },
   "conflict": {
     "title": "冲突",

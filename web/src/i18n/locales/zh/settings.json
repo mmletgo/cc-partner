@@ -172,7 +172,8 @@
       "previewRequired": "需要项目 preview",
       "conflict": "Bridge 路径冲突",
       "unsupported": "Bridge 不支持"
-    }
+    },
+    "bridgePath": "Bridge 文件：{{path}}"
   },
   "health": {
     "title": "健康提醒",
