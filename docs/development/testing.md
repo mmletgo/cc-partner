@@ -35,11 +35,15 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `E2E-AGENT-HUB-A-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate A: status card / preview+enable / target matrix / conflict deep link / `/claude-md` redirect (mock only) |
 | `E2E-AGENT-HUB-B-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate B: scope/kind filters / alias / adoption preview / detached restore-remove / delete everywhere (mock only) |
 | `E2E-AGENT-HUB-C-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate C: LAN source-push selection/progress / unsupported peer / Git inspect+confirm / credential disclosure / stale preview / mapping / Attention deep link (mock only) |
+| `E2E-AGENT-HUB-D-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate D: Plugin drawer matrix / ownership delete preview / residual statuses / OpenCode catalog fail-closed / bridge preview deep link (mock only) |
 | `L2-AGENT-HUB-B-001` | `src-tauri/tests/agent_hub_gate_b_smoke.rs` | Portable discovery / targetOnly isolation / unmanaged config / adoption recovery / credential redaction |
 | `L2-AGENT-HUB-C-001` | `src-tauri/tests/agent_hub_replication_smoke.rs` | Two-owner-style LAN prepare/chunk-resume/commit / idempotency / credential bytes + log redaction / projection-fail-after-commit |
 | `L2-AGENT-HUB-C-GIT-001` | `src-tauri/tests/agent_hub_replication_smoke.rs` | Git device-lane expand → third-env inspect/preview/confirm; map one project leave another unmapped |
+| `L2-AGENT-HUB-D-PLUGIN-001` | `src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs` | Mixed Plugin projection full/partial/sourceOnly/activationRequired + Snapshot residual CAS + package delete preserve shared/standalone |
+| `L2-AGENT-HUB-D-RUNTIME-001` | `src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs` | OpenCode bridge hash/preview/verify + OSC strip + preflight fail-closed + Fresh resume CAS contract (library-level; not real TUI) |
 | `L3-AGENT-HUB-B-CLI-001` | `src-tauri/tests/agent_hub_cli_contract.rs` | Real CLI exact-version support pins (manual / ignored; default NOT VERIFIED) |
 | `L3-AGENT-HUB-C-LAN-001` | dual-host manual | Real multi-host mDNS agent-hub.v1 source-push + Git confirm import — **NOT VERIFIED** |
+| `L3-AGENT-HUB-D-OPENCODE-001` | real OpenCode TUI manual | Exact pinned OpenCode visible session/completion via runtime bridge — **NOT VERIFIED** |
 
 Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY-001`, `E2E-FRONTEND-FOUNDATION-001`, `E2E-SCREENSHOT-OVERLAY-001`, `E2E-AGENT-LEDGER-001`.
 
@@ -58,6 +62,8 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | `L2-AGENT-HUB-GATE-A-001` | L2 | `src-tauri/tests/agent_hub_gate_a_smoke.rs` — isolated HOME/data-dir Gate A process smoke (opt-in zero-write before enable, nested projection after opt-in, conflict Attention). **Does not** certify real multi-CLI product installs |
 | `L2-AGENT-HUB-C-001` | L2 | `src-tauri/tests/agent_hub_replication_smoke.rs` — isolated dual-data_dir source-push contracts (chunk resume, idempotency, credential plaintext in CAS + absent from logs, projection failure does not roll back). **Does not** certify dual-host mDNS |
 | `L2-AGENT-HUB-C-GIT-001` | L2 | Same smoke file Git path: export lane archive → third env inspect/confirm; unmapped projects importable without auto path/opt-in. **Never** auto Git import |
+| `L2-AGENT-HUB-D-PLUGIN-001` | L2 | `src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs` — mixed Plugin portable + targetOnly Hook + residual projection and ownership-aware delete. **Does not** certify real CLI marketplace installs |
+| `L2-AGENT-HUB-D-RUNTIME-001` | L2 | Same smoke file runtime path: bridge hash pin, OSC never enters visible terminal, preflight fail-closed, Fresh resume CAS source contract. **Does not** launch real OpenCode TUI |
 | `L2-PTY-SMOKE-001` | L2 | `src-tauri/tests/pty_smoke.rs` |
 | `L2-TRANSACTIONAL-RUNTIME-001` | L2 | `src-tauri/tests/transactional_runtime_smoke.rs` |
 | `L3-MACOS-GUI-PERMISSIONS-001` | L3 | Packaged macOS GUI + permission grant/deny/retry + screenshot clipboard — **NOT VERIFIED** (canonical aggregate; architecture executions under `macos-aarch64-beta` only) ([real-device-certification.md](real-device-certification.md)) |
@@ -182,14 +188,53 @@ Evidence IDs:
 - `E2E-AGENT-HUB-B-001` — `web/tests/agent-hub.spec.ts` Gate B describe (PASS when e2e green; else NOT VERIFIED if Playwright env missing)
 - `L2-AGENT-HUB-C-001` / `L2-AGENT-HUB-C-GIT-001` — `src-tauri/tests/agent_hub_replication_smoke.rs` (PASS when smoke suite green; dual-host mDNS remains L3)
 - `E2E-AGENT-HUB-C-001` — `web/tests/agent-hub.spec.ts` Gate C describe (PASS when e2e green; mock-only, not real multi-host)
+- `L2-AGENT-HUB-D-PLUGIN-001` / `L2-AGENT-HUB-D-RUNTIME-001` — `src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs` (PASS when smoke suite green; real OpenCode TUI remains L3)
+- `E2E-AGENT-HUB-D-001` — `web/tests/agent-hub.spec.ts` Gate D describe (PASS when e2e green; mock-only, not real TUI/runtime)
 - `L3-AGENT-HUB-B-CLI-001` — `src-tauri/tests/agent_hub_cli_contract.rs` ignored real-CLI harness; remains **NOT VERIFIED** without pinned local CLI
 - `L3-AGENT-HUB-C-LAN-001` — dual-host agent-hub.v1 + Git confirm; remains **NOT VERIFIED** until real-device certification
+- `L3-AGENT-HUB-D-OPENCODE-001` / `L3-AGENT-HUB-OPENCODE-RUNTIME-001` — exact OpenCode visible TUI + runtime bridge evidence; remain **NOT VERIFIED** until real pinned CLI + provider credentials are exercised
+
+### Agent Hub Gate D verification (Plugin + OpenCode runtime)
+
+```bash
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked agent_hub::plugins
+cargo test --locked orchestrator::agent_adapter
+cargo test --locked orchestrator::agent_runtime_bridge
+cargo test --locked --test agent_hub_gate_d_runtime_smoke -- --nocapture --test-threads=1
+# optional: replication still green after Gate D
+cargo test --locked --test agent_hub_replication_smoke -- --nocapture --test-threads=1
+
+cd ../web
+npm run lint
+npm run check:css-tokens
+npm run check:i18n
+npm test -- AgentHub PluginComponentsDrawer AutomationSettings localeParity
+npm run build
+npm run test:e2e -- agent-hub.spec.ts
+
+cd ..
+node scripts/check-agent-hub-support-manifest.mjs --gate-d
+node scripts/check-p2p-route-inventory.mjs
+node scripts/check-quality-traceability.mjs
+node scripts/check-docs.mjs
+```
+
+Official behavior references (documentation only; not CI substitutes):
+
+- https://opencode.ai/docs/cli/
+- https://opencode.ai/docs/plugins/
+- https://developers.openai.com/codex/cli/reference/
+- https://code.claude.com/docs/en/cli-reference
 
 Optional real CLI contract (manual; exact version only):
 
 ```bash
 cd src-tauri
 CC_PARTNER_L3_TARGET=claude cargo test --locked --test agent_hub_cli_contract -- --ignored --nocapture --test-threads=1
+CC_PARTNER_L3_TARGET=opencode cargo test --locked --test agent_hub_cli_contract -- --ignored --nocapture --test-threads=1
 ```
 
 Playwright browsers (match CI; avoid floating installers):

@@ -74,10 +74,11 @@ mod transfer;
 mod tray;
 pub mod updater;
 mod workbench;
-/// Gate D Task4：OpenCode OSC runtime bridge（quality_faults / unit 集成）。
+/// Gate D Task4/8：OpenCode OSC runtime bridge + OSC decoder（L2 certification smoke）。
 pub use workbench::agent_runtime::{
-    OpenCodeBridgeOutcome, OpenCodeEventMapper, OpenCodeOfficialEvent, OpenCodeRuntimeBridge,
-    OPENCODE_RUNTIME_BRIDGE_REL_PATH, OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH,
+    AgentOscDecoder, AgentSessionPhase, OpenCodeBridgeOutcome, OpenCodeEventMapper,
+    OpenCodeOfficialEvent, OpenCodeRuntimeBridge, OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+    OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH,
 };
 /// A5：集成 smoke / 外部 crate 测试需要直连浏览器验证服务与 FakeEngine。
 pub use workbench::browser_verification;

@@ -146,11 +146,24 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - N/N+1 继续保留旧 CLAUDE.md / Claude asset / content-sync 路由；新 UI 不展示旧 remote inventory/pull；legacy 结果不能算 Hub push 成功；`legacyLossy` 占位不得覆盖 canonical credential
 - 验证证据：`L2-AGENT-HUB-C-001` / `L2-AGENT-HUB-C-GIT-001` / `E2E-AGENT-HUB-C-001`
 
-**明确未交付（后续 Gate / L3；不得宣称已完成）**：
+**已交付（Gate D Plugin 分解 + OpenCode runtime 合同；库路径 + L2/E2E）**：
+- Plugin package 不是最低同步单位：拆成固定 revision 的 Skill/MCP/Command/Agent/Hook 与 residual runtime，进入同一 Revision DAG / CAS / Snapshot 路径
+- package 投影聚合态必须区分 `full` / `partial` / `sourceOnly` / `activationRequired` / `externalCollision` / `blocked`；source package 写成功不得 overstate full
+- Hook 默认 `targetOnly`；只有 support manifest 中具备双端 schema、信任模型与真实 CLI evidence 的 mapping 才跨 target
+- residual（OpenCode JS/TS/npm/custom-tool 等）默认只投影回 source target；跨 target 省略并诊断
+- 删除 package 只 tombstone 独占 component；shared / standalone 引用从边表实时查询并保留（不维护易漂移计数器）
+- OpenCode runtime bridge 是 **app-version 派生物**（`.opencode/plugins/cc-partner-runtime.ts`），**不是**用户 canonical Plugin，不进入 Snapshot；project opt-in preview 必须列出文件写入；hash 验证失败 / 碰撞 / 未 opt-in → fail-closed
+- `openCodeVisible` completion 仅接受官方 Plugin event 经 app-private OSC 进入既有 reducer；OSC 字节不得进入 terminal replay/UI；缺 bridge 时禁止 Sentinel/stdout 猜测完成
+- 四 provider 目录（`claudeCodeVisible` / `codexVisible` / `genericTerminal` / `openCodeVisible`）在 Settings / Workbench / Orchestrator 同合同；OpenCode 未 ready bridge 不得呈现 available green
+- N/N+1 保留旧入口；N+2 实际删除旧表/路由须 `runningVersion ≥ earliestRemovalVersion` 且有稳定迁移 evidence（当前 evidence id 仍未解锁删除）
+- 验证证据：`L2-AGENT-HUB-D-PLUGIN-001` / `L2-AGENT-HUB-D-RUNTIME-001` / `E2E-AGENT-HUB-D-001`
+- 官方行为参考（文档，非 CI 替代）：[OpenCode CLI](https://opencode.ai/docs/cli/)、[OpenCode Plugins](https://opencode.ai/docs/plugins/)、[Codex CLI reference](https://developers.openai.com/codex/cli/reference/)、[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+
+**明确未交付（后续 L3；不得宣称已完成）**：
 - 真实双主机 mDNS / 全平台 LAN Hub 复制（`L3-AGENT-HUB-C-LAN-001` **NOT VERIFIED**）
-- Plugin 市场分解 / OpenCode 完整 runtime 能力（Gate D）
+- 真实 OpenCode 可见 TUI session/permission/completion/resume/Ctrl-C（`L3-AGENT-HUB-D-OPENCODE-001` / `L3-AGENT-HUB-OPENCODE-RUNTIME-001` **NOT VERIFIED**；L2 library smoke 不是替代）
 - 真实多机 / 全平台 CLI 写盘与 exact 版本认证（含 `L3-AGENT-HUB-B-CLI-001` **NOT VERIFIED**）
-- **不得**宣称 LAN 身份认证或自动 Git import
+- **不得**宣称 LAN 身份认证、自动 Git import，或未 pin 的 OpenCode 版本 runtime 已认证
 
 ### 2.6 设备自动发现与互联
 
