@@ -1144,3 +1144,685 @@ pub struct ConflictFreezeKey {
     /// None = canonical 级冲突
     pub target: Option<AgentTarget>,
 }
+
+/// Target-local 意图（presence / enabled / restore / 全网删除）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     启停与删除必须是显式意图；单 target 删除不得猜 canonical tombstone。
+///
+/// Code Logic（这个枚举做什么）:
+///     输入到 `TargetBinding::apply_intent` 的意图表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TargetBindingIntent {
+    /// 设置 desiredPresence（present / absent）
+    SetPresence(DesiredPresence),
+    /// 设置 desiredEnabled（adapter disable 策略）
+    SetEnabled(bool),
+    /// 从 detached 恢复并调度投影
+    RestoreDetached,
+    /// 从所有 target 删除（canonical tombstone + fan-out）
+    DeleteEverywhere,
+}
+
+/// Adapter 声明的 disable 策略。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     desiredEnabled=false 不得一律删除或一律留文件；Codex 用 remove-with-binding-retained。
+///
+/// Code Logic（这个枚举做什么）:
+///     稳定 token 供 activator / 测试断言。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TargetDisableStrategy {
+    /// 卸载/移除插件但保留 binding 与 desiredPresence
+    RemoveWithBindingRetained,
+    /// 仅翻转 enabled 标记（文件可保留，依赖 target 配置）
+    ToggleEnabledFlag,
+}
+
+impl TargetDisableStrategy {
+    /// 稳定 wire/DB 字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoveWithBindingRetained => "remove_with_binding_retained",
+            Self::ToggleEnabledFlag => "toggle_enabled_flag",
+        }
+    }
+
+    /// 解析稳定 token。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "remove_with_binding_retained" => Some(Self::RemoveWithBindingRetained),
+            "toggle_enabled_flag" => Some(Self::ToggleEnabledFlag),
+            _ => None,
+        }
+    }
+
+    /// 按 target 返回 adapter 声明策略。
+    ///
+    /// Business Logic: Codex 为 remove-with-binding-retained；Claude/OpenCode 默认同策略。
+    /// Code Logic: 静态表。
+    pub fn for_target(target: AgentTarget) -> Self {
+        match target {
+            AgentTarget::Codex => Self::RemoveWithBindingRetained,
+            AgentTarget::Claude | AgentTarget::OpenCode => Self::RemoveWithBindingRetained,
+        }
+    }
+}
+
+/// 资产级聚合状态（派生，不可写）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     UI/API 不能仅凭 package write 成功推断 full；需汇总所有 requested target。
+///
+/// Code Logic（这个枚举做什么）:
+///     camelCase 派生 token。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AssetAggregateStatus {
+    /// 每个 requested target 均 supported/present/enabled-as-desired/verified
+    Full,
+    /// 部分 target 未达标
+    Partial,
+    /// 仅有 source 表示，无可投影 materialization
+    SourceOnly,
+    /// 需要用户激活
+    ActivationRequired,
+    /// 与外部同名资产碰撞
+    ExternalCollision,
+    /// 外部整文件/目录删除后 detached
+    Detached,
+    /// 写/投影被阻塞
+    Blocked,
+}
+
+impl AssetAggregateStatus {
+    /// 稳定 wire token。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Partial => "partial",
+            Self::SourceOnly => "sourceOnly",
+            Self::ActivationRequired => "activationRequired",
+            Self::ExternalCollision => "externalCollision",
+            Self::Detached => "detached",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    /// 解析 wire token。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "full" => Some(Self::Full),
+            "partial" => Some(Self::Partial),
+            "sourceOnly" => Some(Self::SourceOnly),
+            "activationRequired" => Some(Self::ActivationRequired),
+            "externalCollision" => Some(Self::ExternalCollision),
+            "detached" => Some(Self::Detached),
+            "blocked" => Some(Self::Blocked),
+            _ => None,
+        }
+    }
+}
+
+/// apply_intent 结果动作（不直接写盘；由 service/scheduler 执行）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     把允许的状态转移集中成表，避免命令层各自猜测 tombstone/fan-out。
+///
+/// Code Logic（这个枚举做什么）:
+///     描述 binding 更新、投影调度、tombstone 与拒绝原因。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TargetBindingTransition {
+    /// 仅更新 target-local enabled；canonical revision 不变
+    UpdateEnabled {
+        /// 新 desired_enabled
+        desired_enabled: bool,
+        /// adapter disable 策略
+        disable_strategy: TargetDisableStrategy,
+        /// 是否调度投影（disable/enable 需要）
+        schedule_projection: bool,
+    },
+    /// 更新 target-local desiredPresence
+    UpdatePresence {
+        /// 新 desired_presence
+        desired_presence: DesiredPresence,
+        /// Absent 时保留 binding，只移除该 target 物化
+        remove_owned_materialization_only: bool,
+        /// 调度投影
+        schedule_projection: bool,
+    },
+    /// 从 detached 恢复
+    RestoreDetached {
+        /// 恢复后 desired_presence
+        desired_presence: DesiredPresence,
+        /// 必须调度投影（禁止静默 no-op）
+        schedule_projection: bool,
+        /// 清除 detached 观测
+        clear_detached_status: bool,
+    },
+    /// 全 target 删除：一条 canonical tombstone + fan-out Absent
+    DeleteEverywhere {
+        /// 生成一条 delete revision
+        append_canonical_tombstone: bool,
+        /// 所有 binding → Absent + disabled
+        fan_out_absent: bool,
+    },
+    /// 拒绝：targetOnly 最后一 target 删除必须显式 everywhere
+    RejectLastTargetOnlyRequiresEverywhere {
+        /// 稳定错误 token
+        code: String,
+    },
+    /// 拒绝：未知/漂移路径阻塞删除，返回精确 preview
+    RejectRemovalBlocked {
+        /// 稳定错误 token
+        code: String,
+        /// 阻塞路径预览
+        preview_paths: Vec<String>,
+    },
+}
+
+/// 单 target 观测输入（聚合状态计算用）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     full 需要每个 requested target 都 supported/present/enabled/verified。
+///
+/// Code Logic（这个结构体做什么）:
+///     纯输入快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetStatusSnapshot {
+    /// 是否在 requested 集合中
+    pub requested: bool,
+    /// desired presence
+    pub desired_presence: DesiredPresence,
+    /// desired enabled
+    pub desired_enabled: bool,
+    /// 是否 supported
+    pub supported: bool,
+    /// 是否仅 sourceOnly（无可投影表示）
+    pub source_only: bool,
+    /// materialization 状态
+    pub materialization_status: Option<MaterializationStatus>,
+    /// 是否 verified（activation/list 通过）
+    pub verified: bool,
+}
+
+impl TargetBinding {
+    /// 应用显式意图，返回允许的状态转移。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     disable 一列不关其它 CLI；Absent 只卸本 target；整文件外部删除 → detached 不自动重建；
+    ///     restore 调度投影；delete_everywhere 一条 tombstone；targetOnly 最后一 target 不得猜 everywhere。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     纯函数转移表；不写库。
+    pub fn apply_intent(
+        &self,
+        intent: TargetBindingIntent,
+        materialization_status: Option<MaterializationStatus>,
+        policy: AssetPolicy,
+        present_binding_count: usize,
+        removal_blocked_paths: &[String],
+    ) -> TargetBindingTransition {
+        match intent {
+            TargetBindingIntent::SetEnabled(enabled) => TargetBindingTransition::UpdateEnabled {
+                desired_enabled: enabled,
+                disable_strategy: TargetDisableStrategy::for_target(self.target),
+                schedule_projection: true,
+            },
+            TargetBindingIntent::SetPresence(DesiredPresence::Present) => {
+                TargetBindingTransition::UpdatePresence {
+                    desired_presence: DesiredPresence::Present,
+                    remove_owned_materialization_only: false,
+                    schedule_projection: true,
+                }
+            }
+            TargetBindingIntent::SetPresence(DesiredPresence::Absent) => {
+                // targetOnly 且为最后一 present binding：不得隐式 tombstone
+                if policy == AssetPolicy::TargetOnly
+                    && self.desired_presence == DesiredPresence::Present
+                    && present_binding_count <= 1
+                {
+                    return TargetBindingTransition::RejectLastTargetOnlyRequiresEverywhere {
+                        code: "agent_hub_target_only_last_target_requires_everywhere".into(),
+                    };
+                }
+                if !removal_blocked_paths.is_empty() {
+                    return TargetBindingTransition::RejectRemovalBlocked {
+                        code: "agent_hub_removal_blocked_unknown_or_changed_paths".into(),
+                        preview_paths: removal_blocked_paths.to_vec(),
+                    };
+                }
+                TargetBindingTransition::UpdatePresence {
+                    desired_presence: DesiredPresence::Absent,
+                    remove_owned_materialization_only: true,
+                    schedule_projection: true,
+                }
+            }
+            TargetBindingIntent::RestoreDetached => {
+                // 无论当前 materialization 是否已 detached，restore 都强制 present + schedule
+                let _ = materialization_status;
+                TargetBindingTransition::RestoreDetached {
+                    desired_presence: DesiredPresence::Present,
+                    schedule_projection: true,
+                    clear_detached_status: true,
+                }
+            }
+            TargetBindingIntent::DeleteEverywhere => {
+                // 与 Absent 同契约：未知/变更路径必须 fail-closed，禁止 tombstone 或 fan-out。
+                if !removal_blocked_paths.is_empty() {
+                    return TargetBindingTransition::RejectRemovalBlocked {
+                        code: "agent_hub_removal_blocked_unknown_or_changed_paths".into(),
+                        preview_paths: removal_blocked_paths.to_vec(),
+                    };
+                }
+                TargetBindingTransition::DeleteEverywhere {
+                    append_canonical_tombstone: true,
+                    fan_out_absent: true,
+                }
+            }
+        }
+    }
+}
+
+/// 由各 target 快照计算资产聚合状态。
+///
+/// Business Logic（为什么需要这个函数）:
+///     full 要求全部 requested target supported + present + enabled-as-desired + verified；
+///     任一 unsupported/sourceOnly/activationRequired/externalCollision/detached/blocked → 对应/partial。
+///
+/// Code Logic（这个函数做什么）:
+///     优先级：Blocked > ExternalCollision > Detached > ActivationRequired > SourceOnly > Partial > Full。
+pub fn compute_asset_aggregate_status(targets: &[TargetStatusSnapshot]) -> AssetAggregateStatus {
+    let requested: Vec<&TargetStatusSnapshot> = targets.iter().filter(|t| t.requested).collect();
+    if requested.is_empty() {
+        return AssetAggregateStatus::Partial;
+    }
+
+    let mut any_blocked = false;
+    let mut any_collision = false;
+    let mut any_detached = false;
+    let mut any_activation = false;
+    let mut any_source_only = false;
+    let mut any_partial = false;
+
+    for t in &requested {
+        if t.source_only {
+            any_source_only = true;
+            continue;
+        }
+        if !t.supported {
+            any_partial = true;
+            continue;
+        }
+        match t.materialization_status {
+            Some(MaterializationStatus::Blocked) | Some(MaterializationStatus::Unsupported) => {
+                any_blocked = true;
+            }
+            Some(MaterializationStatus::ExternalCollision) => any_collision = true,
+            Some(MaterializationStatus::Detached) => any_detached = true,
+            Some(MaterializationStatus::ActivationRequired) => any_activation = true,
+            Some(MaterializationStatus::Synced) => {
+                if t.desired_presence == DesiredPresence::Present && !t.verified {
+                    // package write 成功但未 verified → 不得 full
+                    any_partial = true;
+                }
+                if t.desired_presence == DesiredPresence::Present && !t.desired_enabled {
+                    // disabled-as-desired 且 synced 可计为达标；enabled mismatch 走 partial
+                }
+            }
+            Some(MaterializationStatus::Pending)
+            | Some(MaterializationStatus::Drift)
+            | Some(MaterializationStatus::Conflict)
+            | None => {
+                if t.desired_presence == DesiredPresence::Present {
+                    any_partial = true;
+                }
+            }
+        }
+        if t.desired_presence == DesiredPresence::Present
+            && t.desired_enabled
+            && t.materialization_status == Some(MaterializationStatus::Synced)
+            && !t.verified
+        {
+            any_partial = true;
+        }
+    }
+
+    if any_blocked {
+        return AssetAggregateStatus::Blocked;
+    }
+    if any_collision {
+        return AssetAggregateStatus::ExternalCollision;
+    }
+    if any_detached {
+        return AssetAggregateStatus::Detached;
+    }
+    if any_activation {
+        return AssetAggregateStatus::ActivationRequired;
+    }
+    if any_source_only && requested.iter().all(|t| t.source_only || !t.supported) {
+        return AssetAggregateStatus::SourceOnly;
+    }
+    if any_source_only || any_partial {
+        return AssetAggregateStatus::Partial;
+    }
+
+    let all_ok = requested.iter().all(|t| {
+        if t.source_only || !t.supported {
+            return false;
+        }
+        match t.desired_presence {
+            DesiredPresence::Absent => {
+                matches!(
+                    t.materialization_status,
+                    Some(MaterializationStatus::Synced) | None
+                )
+            }
+            DesiredPresence::Present => {
+                t.materialization_status == Some(MaterializationStatus::Synced) && t.verified
+            }
+        }
+    });
+    if all_ok {
+        AssetAggregateStatus::Full
+    } else {
+        AssetAggregateStatus::Partial
+    }
+}
+
+#[cfg(test)]
+mod target_presence_tests {
+    use super::*;
+
+    fn sample_binding(
+        target: AgentTarget,
+        presence: DesiredPresence,
+        enabled: bool,
+    ) -> TargetBinding {
+        TargetBinding {
+            id: format!("b-{}", target.as_str()),
+            asset_id: "asset-1".into(),
+            target,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: presence,
+            desired_enabled: enabled,
+            created_at: "t0".into(),
+            updated_at: "t0".into(),
+        }
+    }
+
+    /// Business Logic: disable 一 target 不得改写其它 binding 的语义结果（仅本 binding intent）。
+    /// Code Logic: SetEnabled(false) → UpdateEnabled + disable strategy；presence 保持由调用方保留。
+    #[test]
+    fn disable_one_target_uses_adapter_strategy_without_presence_change() {
+        let binding = sample_binding(AgentTarget::Codex, DesiredPresence::Present, true);
+        let transition = binding.apply_intent(
+            TargetBindingIntent::SetEnabled(false),
+            Some(MaterializationStatus::Synced),
+            AssetPolicy::Shared,
+            2,
+            &[],
+        );
+        match transition {
+            TargetBindingTransition::UpdateEnabled {
+                desired_enabled,
+                disable_strategy,
+                schedule_projection,
+            } => {
+                assert!(!desired_enabled);
+                assert_eq!(
+                    disable_strategy,
+                    TargetDisableStrategy::RemoveWithBindingRetained
+                );
+                assert!(schedule_projection);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // presence 不变：intent 不包含 UpdatePresence
+        assert_eq!(binding.desired_presence, DesiredPresence::Present);
+    }
+
+    /// Business Logic: desiredPresence=absent 只卸本 target 物化。
+    #[test]
+    fn absent_removes_only_owned_materialization() {
+        let binding = sample_binding(AgentTarget::Claude, DesiredPresence::Present, true);
+        let transition = binding.apply_intent(
+            TargetBindingIntent::SetPresence(DesiredPresence::Absent),
+            Some(MaterializationStatus::Synced),
+            AssetPolicy::Shared,
+            2,
+            &[],
+        );
+        match transition {
+            TargetBindingTransition::UpdatePresence {
+                desired_presence,
+                remove_owned_materialization_only,
+                schedule_projection,
+            } => {
+                assert_eq!(desired_presence, DesiredPresence::Absent);
+                assert!(remove_owned_materialization_only);
+                assert!(schedule_projection);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Business Logic: 未知/变更路径阻塞删除并返回精确 preview。
+    #[test]
+    fn unknown_paths_block_removal_with_preview() {
+        let binding = sample_binding(AgentTarget::Claude, DesiredPresence::Present, true);
+        let blocked = vec!["extra.md".into(), "nested/secret".into()];
+        let transition = binding.apply_intent(
+            TargetBindingIntent::SetPresence(DesiredPresence::Absent),
+            Some(MaterializationStatus::Synced),
+            AssetPolicy::Shared,
+            2,
+            &blocked,
+        );
+        match transition {
+            TargetBindingTransition::RejectRemovalBlocked {
+                code,
+                preview_paths,
+            } => {
+                assert_eq!(code, "agent_hub_removal_blocked_unknown_or_changed_paths");
+                assert_eq!(preview_paths, blocked);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Business Logic: restore_detached 必须 schedule projection。
+    #[test]
+    fn restore_detached_schedules_projection() {
+        let binding = sample_binding(AgentTarget::OpenCode, DesiredPresence::Present, true);
+        let transition = binding.apply_intent(
+            TargetBindingIntent::RestoreDetached,
+            Some(MaterializationStatus::Detached),
+            AssetPolicy::Shared,
+            1,
+            &[],
+        );
+        match transition {
+            TargetBindingTransition::RestoreDetached {
+                desired_presence,
+                schedule_projection,
+                clear_detached_status,
+            } => {
+                assert_eq!(desired_presence, DesiredPresence::Present);
+                assert!(schedule_projection);
+                assert!(clear_detached_status);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Business Logic: delete_everywhere 一条 canonical tombstone + fan-out。
+    #[test]
+    fn delete_everywhere_appends_one_tombstone_and_fans_out() {
+        let binding = sample_binding(AgentTarget::Claude, DesiredPresence::Present, true);
+        let transition = binding.apply_intent(
+            TargetBindingIntent::DeleteEverywhere,
+            Some(MaterializationStatus::Synced),
+            AssetPolicy::Shared,
+            3,
+            &[],
+        );
+        match transition {
+            TargetBindingTransition::DeleteEverywhere {
+                append_canonical_tombstone,
+                fan_out_absent,
+            } => {
+                assert!(append_canonical_tombstone);
+                assert!(fan_out_absent);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Business Logic: DeleteEverywhere 与 Absent 同 fail-closed，未知路径阻塞 tombstone。
+    #[test]
+    fn unknown_paths_block_delete_everywhere_with_preview() {
+        let binding = sample_binding(AgentTarget::Codex, DesiredPresence::Present, true);
+        let blocked = vec!["plugin/extra.toml".into()];
+        let transition = binding.apply_intent(
+            TargetBindingIntent::DeleteEverywhere,
+            Some(MaterializationStatus::Synced),
+            AssetPolicy::Shared,
+            2,
+            &blocked,
+        );
+        match transition {
+            TargetBindingTransition::RejectRemovalBlocked {
+                code,
+                preview_paths,
+            } => {
+                assert_eq!(code, "agent_hub_removal_blocked_unknown_or_changed_paths");
+                assert_eq!(preview_paths, blocked);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Business Logic: targetOnly 最后一 target 删除必须显式 everywhere，不得猜测。
+    #[test]
+    fn target_only_last_target_delete_requires_everywhere() {
+        let binding = sample_binding(AgentTarget::Claude, DesiredPresence::Present, true);
+        let transition = binding.apply_intent(
+            TargetBindingIntent::SetPresence(DesiredPresence::Absent),
+            Some(MaterializationStatus::Synced),
+            AssetPolicy::TargetOnly,
+            1,
+            &[],
+        );
+        match transition {
+            TargetBindingTransition::RejectLastTargetOnlyRequiresEverywhere { code } => {
+                assert_eq!(
+                    code,
+                    "agent_hub_target_only_last_target_requires_everywhere"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Business Logic: full 需要 verified；仅 package write 成功不够。
+    #[test]
+    fn aggregate_full_requires_verified_not_just_package_write() {
+        let snaps = vec![TargetStatusSnapshot {
+            requested: true,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: true,
+            supported: true,
+            source_only: false,
+            materialization_status: Some(MaterializationStatus::Synced),
+            verified: false,
+        }];
+        assert_eq!(
+            compute_asset_aggregate_status(&snaps),
+            AssetAggregateStatus::Partial
+        );
+
+        let snaps_ok = vec![TargetStatusSnapshot {
+            requested: true,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: true,
+            supported: true,
+            source_only: false,
+            materialization_status: Some(MaterializationStatus::Synced),
+            verified: true,
+        }];
+        assert_eq!(
+            compute_asset_aggregate_status(&snaps_ok),
+            AssetAggregateStatus::Full
+        );
+    }
+
+    /// Business Logic: detached / activationRequired / externalCollision 有独立聚合态。
+    #[test]
+    fn aggregate_priority_for_detached_activation_collision_blocked() {
+        assert_eq!(
+            compute_asset_aggregate_status(&[TargetStatusSnapshot {
+                requested: true,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+                supported: true,
+                source_only: false,
+                materialization_status: Some(MaterializationStatus::Detached),
+                verified: false,
+            }]),
+            AssetAggregateStatus::Detached
+        );
+        assert_eq!(
+            compute_asset_aggregate_status(&[TargetStatusSnapshot {
+                requested: true,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+                supported: true,
+                source_only: false,
+                materialization_status: Some(MaterializationStatus::ActivationRequired),
+                verified: false,
+            }]),
+            AssetAggregateStatus::ActivationRequired
+        );
+        assert_eq!(
+            compute_asset_aggregate_status(&[TargetStatusSnapshot {
+                requested: true,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+                supported: true,
+                source_only: false,
+                materialization_status: Some(MaterializationStatus::ExternalCollision),
+                verified: false,
+            }]),
+            AssetAggregateStatus::ExternalCollision
+        );
+        assert_eq!(
+            compute_asset_aggregate_status(&[TargetStatusSnapshot {
+                requested: true,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+                supported: true,
+                source_only: false,
+                materialization_status: Some(MaterializationStatus::Blocked),
+                verified: false,
+            }]),
+            AssetAggregateStatus::Blocked
+        );
+        assert_eq!(
+            compute_asset_aggregate_status(&[TargetStatusSnapshot {
+                requested: true,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+                supported: false,
+                source_only: true,
+                materialization_status: None,
+                verified: false,
+            }]),
+            AssetAggregateStatus::SourceOnly
+        );
+    }
+}

@@ -10,8 +10,10 @@
 //!     响应 ≤1 MiB；永不记录 instruction content。
 
 use crate::agent_hub::service::{
-    AgentHubService, ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
-    SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
+    AgentHubService, DeleteAssetEverywhereRequest, ListAssetsRequest,
+    PairInstructionVariantsRequest, ResolveConflictRequest, RestoreDetachedTargetRequest,
+    SetTargetBindingRequest, SetTargetEnabledRequest, SetTargetPresenceRequest,
+    UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
 use crate::backend::control::{self, BackendControlFile, AGENT_HUB_API_VERSION};
 use crate::backend::control_api::CONTROL_RESPONSE_BODY_LIMIT_BYTES;
@@ -171,6 +173,34 @@ async fn dispatch_agent_hub_op(
             let dto = AgentHubService::set_target_binding(state, req).await?;
             Ok(serde_json::to_value(dto)?)
         }
+        "agent_hub.set_target_presence" => {
+            let req: SetTargetPresenceRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("set_target_presence payload: {e}")))?;
+            let dto = AgentHubService::set_target_presence(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.set_target_enabled" => {
+            let req: SetTargetEnabledRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("set_target_enabled payload: {e}")))?;
+            let dto = AgentHubService::set_target_enabled(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.restore_detached_target" => {
+            let req: RestoreDetachedTargetRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("restore_detached_target payload: {e}"))
+                })?;
+            let dto = AgentHubService::restore_detached_target(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.delete_asset_everywhere" => {
+            let req: DeleteAssetEverywhereRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("delete_asset_everywhere payload: {e}"))
+                })?;
+            let dto = AgentHubService::delete_asset_everywhere(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
         other => Err(AppError::validation(format!(
             "未知 agent hub control op: {other}"
         ))),
@@ -193,6 +223,10 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.enable_project"
             | "agent_hub.resolve_conflict"
             | "agent_hub.set_target_binding"
+            | "agent_hub.set_target_presence"
+            | "agent_hub.set_target_enabled"
+            | "agent_hub.restore_detached_target"
+            | "agent_hub.delete_asset_everywhere"
     )
 }
 
@@ -335,7 +369,7 @@ mod tests {
         );
     }
 
-    /// Business Logic: 10 个 op 是前端/control client 的稳定合同。
+    /// Business Logic: Gate A + presence ops 是前端/control client 的稳定合同。
     /// Code Logic: 源文件包含全部 op 字符串。
     #[test]
     fn source_contains_all_ten_op_strings() {
@@ -351,6 +385,10 @@ mod tests {
             "agent_hub.enable_project",
             "agent_hub.resolve_conflict",
             "agent_hub.set_target_binding",
+            "agent_hub.set_target_presence",
+            "agent_hub.set_target_enabled",
+            "agent_hub.restore_detached_target",
+            "agent_hub.delete_asset_everywhere",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
@@ -362,6 +400,10 @@ mod tests {
     fn mutation_ops_cover_write_paths() {
         assert!(is_mutation_op("agent_hub.update_instruction"));
         assert!(is_mutation_op("agent_hub.enable_project"));
+        assert!(is_mutation_op("agent_hub.set_target_presence"));
+        assert!(is_mutation_op("agent_hub.set_target_enabled"));
+        assert!(is_mutation_op("agent_hub.restore_detached_target"));
+        assert!(is_mutation_op("agent_hub.delete_asset_everywhere"));
         assert!(!is_mutation_op("agent_hub.get_status"));
         assert!(!is_mutation_op("agent_hub.preview_project"));
     }

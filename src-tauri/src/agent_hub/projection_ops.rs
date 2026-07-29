@@ -62,6 +62,72 @@ pub async fn ensure_agent_hub_enabled(state: &AppState) -> Result<(), AppError> 
     }
 }
 
+/// 为 package 资产调度 deactivation（desiredEnabled=false）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     disable 不得只 flip DB；package 资产需 remove-with-binding-retained 语义，
+///     将 materialization 标 Pending + 策略 token，供 runtime/activator 消费。
+///
+/// Code Logic（这个函数做什么）:
+///     非 package kind → 0；列出 Present 且 disabled 的 binding；materialization 标 Pending；
+///     返回处理条数（best-effort，无 CLI 执行，真实 uninstall 由后续 activator 路径完成）。
+pub async fn schedule_package_deactivation(
+    state: &AppState,
+    asset_id: &str,
+) -> Result<u32, AppError> {
+    let asset = state
+        .agent_hub_repo
+        .get_asset(asset_id)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("agent_hub_asset_not_found:{asset_id}")))?;
+    if !matches!(
+        asset.kind,
+        AssetKind::Skill
+            | AssetKind::Command
+            | AssetKind::Agent
+            | AssetKind::Plugin
+            | AssetKind::Mcp
+    ) {
+        return Ok(0);
+    }
+    let bindings = state
+        .agent_hub_repo
+        .list_target_bindings_for_asset(&asset.id)
+        .await?;
+    let mut n = 0u32;
+    for b in bindings {
+        if b.desired_presence != DesiredPresence::Present || b.desired_enabled {
+            continue;
+        }
+        let mat = state
+            .agent_hub_repo
+            .get_materialization_by_binding(&b.id)
+            .await?;
+        let strategy = crate::agent_hub::models::TargetDisableStrategy::for_target(b.target);
+        state
+            .agent_hub_repo
+            .upsert_materialization(crate::agent_hub::models::NewMaterialization {
+                asset_id: asset.id.clone(),
+                target: b.target,
+                target_binding_id: b.id.clone(),
+                native_path: mat.as_ref().and_then(|m| m.native_path.clone()),
+                last_projected_revision_id: mat
+                    .as_ref()
+                    .and_then(|m| m.last_projected_revision_id.clone()),
+                rendered_hash: mat.as_ref().and_then(|m| m.rendered_hash.clone()),
+                observed_external_hash: mat.as_ref().and_then(|m| m.observed_external_hash.clone()),
+                status: crate::agent_hub::models::MaterializationStatus::Pending,
+                last_error: Some(format!(
+                    "disable_strategy:{}:deactivation_scheduled",
+                    strategy.as_str()
+                )),
+            })
+            .await?;
+        n = n.saturating_add(1);
+    }
+    Ok(n)
+}
+
 /// 为单个 instruction 资产调度全部 target 投影 job。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -77,7 +143,8 @@ pub async fn schedule_asset_projections(state: &AppState, asset_id: &str) -> Res
         .await?
         .ok_or_else(|| AppError::not_found(format!("agent_hub_asset_not_found:{asset_id}")))?;
     if asset.kind != AssetKind::Instruction {
-        return Ok(0);
+        // package disable 路径走 schedule_package_deactivation；其它 kind 当前 0
+        return schedule_package_deactivation(state, asset_id).await;
     }
     let Some(rev_id) = asset.current_revision_id.clone() else {
         return Ok(0);

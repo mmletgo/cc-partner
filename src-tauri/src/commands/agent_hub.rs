@@ -11,8 +11,10 @@
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
 use crate::agent_hub::service::{
     AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubService, AgentHubStatusDto,
-    InstructionBlockDto, ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
-    SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
+    DeleteAssetEverywhereRequest, InstructionBlockDto, ListAssetsRequest,
+    PairInstructionVariantsRequest, ResolveConflictRequest, RestoreDetachedTargetRequest,
+    SetTargetBindingRequest, SetTargetEnabledRequest, SetTargetPresenceRequest,
+    UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control::AGENT_HUB_API_VERSION;
@@ -225,12 +227,100 @@ pub async fn agent_hub_set_target_binding(
     AgentHubService::set_target_binding(state.inner(), req).await
 }
 
+/// Business Logic: 设置 target-local desiredPresence。
+/// Code Logic: mutation + write compatibility。
+#[tauri::command]
+pub async fn agent_hub_set_target_presence(
+    state: State<'_, AppState>,
+    asset_id: String,
+    target: String,
+    desired_presence: String,
+) -> Result<AgentHubAssetSummaryDto, AppError> {
+    use crate::agent_hub::models::{AgentTarget, DesiredPresence};
+    let target = AgentTarget::parse(target.trim())
+        .ok_or_else(|| AppError::validation(format!("未知 target: {target}")))?;
+    let desired_presence = DesiredPresence::parse(desired_presence.trim())
+        .ok_or_else(|| AppError::validation(format!("未知 desiredPresence: {desired_presence}")))?;
+    let req = SetTargetPresenceRequest {
+        asset_id,
+        target,
+        desired_presence,
+    };
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_set_target_presence(req).await;
+    }
+    AgentHubService::set_target_presence(state.inner(), req).await
+}
+
+/// Business Logic: 设置 target-local desiredEnabled。
+/// Code Logic: mutation + write compatibility。
+#[tauri::command]
+pub async fn agent_hub_set_target_enabled(
+    state: State<'_, AppState>,
+    asset_id: String,
+    target: String,
+    desired_enabled: bool,
+) -> Result<AgentHubAssetSummaryDto, AppError> {
+    use crate::agent_hub::models::AgentTarget;
+    let target = AgentTarget::parse(target.trim())
+        .ok_or_else(|| AppError::validation(format!("未知 target: {target}")))?;
+    let req = SetTargetEnabledRequest {
+        asset_id,
+        target,
+        desired_enabled,
+    };
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_set_target_enabled(req).await;
+    }
+    AgentHubService::set_target_enabled(state.inner(), req).await
+}
+
+/// Business Logic: 恢复 detached target 并调度投影。
+/// Code Logic: mutation + write compatibility。
+#[tauri::command]
+pub async fn agent_hub_restore_detached_target(
+    state: State<'_, AppState>,
+    asset_id: String,
+    target: String,
+) -> Result<AgentHubAssetSummaryDto, AppError> {
+    use crate::agent_hub::models::AgentTarget;
+    let target = AgentTarget::parse(target.trim())
+        .ok_or_else(|| AppError::validation(format!("未知 target: {target}")))?;
+    let req = RestoreDetachedTargetRequest { asset_id, target };
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_restore_detached_target(req).await;
+    }
+    AgentHubService::restore_detached_target(state.inner(), req).await
+}
+
+/// Business Logic: 从所有 target 删除（canonical tombstone + fan-out）。
+/// Code Logic: mutation + write compatibility。
+#[tauri::command]
+pub async fn agent_hub_delete_asset_everywhere(
+    state: State<'_, AppState>,
+    asset_id: String,
+) -> Result<AgentHubAssetSummaryDto, AppError> {
+    let req = DeleteAssetEverywhereRequest { asset_id };
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_delete_asset_everywhere(req).await;
+    }
+    AgentHubService::delete_asset_everywhere(state.inner(), req).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::control_client::BackendControlClient;
 
-    /// Business Logic: 10 个命令名是前端 AGENT_HUB_COMMANDS 合同。
+    /// Business Logic: Gate A + Gate B presence 命令是前端 AGENT_HUB_COMMANDS 合同。
     /// Code Logic: 源文件含全部 snake_case 命令与 GuiClient 代理符号。
     #[test]
     fn source_contains_all_ten_commands_and_gui_proxy_symbols() {
@@ -246,6 +336,10 @@ mod tests {
             "agent_hub_enable_project",
             "agent_hub_resolve_conflict",
             "agent_hub_set_target_binding",
+            "agent_hub_set_target_presence",
+            "agent_hub_set_target_enabled",
+            "agent_hub_restore_detached_target",
+            "agent_hub_delete_asset_everywhere",
         ] {
             assert!(src.contains(name), "missing command {name}");
         }
@@ -295,7 +389,7 @@ mod tests {
     }
 
     /// Business Logic: control op 字符串必须与 command 层 1:1。
-    /// Code Logic: 读取 control_agent_hub 源，断言 10 个 op。
+    /// Code Logic: 读取 control_agent_hub 源，断言 Gate A + presence ops。
     #[test]
     fn control_agent_hub_source_contains_all_ops() {
         let src = include_str!("../backend/control_agent_hub.rs");
@@ -310,6 +404,10 @@ mod tests {
             "agent_hub.enable_project",
             "agent_hub.resolve_conflict",
             "agent_hub.set_target_binding",
+            "agent_hub.set_target_presence",
+            "agent_hub.set_target_enabled",
+            "agent_hub.restore_detached_target",
+            "agent_hub.delete_asset_everywhere",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
