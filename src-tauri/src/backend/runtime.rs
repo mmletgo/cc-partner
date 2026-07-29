@@ -597,6 +597,8 @@ pub async fn build_app_state_with_role(
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
         agent_ledger_cancel: Arc::new(Mutex::new(None)),
         agent_hub_cancel: Arc::new(Mutex::new(None)),
+        agent_hub_git_runtime: Arc::new(crate::agent_hub::git::AgentHubGitRuntime::new()),
+        agent_hub_git_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
@@ -829,6 +831,10 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
             start_cancelled_task_once(&state.agent_hub_cancel, "Agent Hub runtime", || {
                 crate::agent_hub::AgentHubRuntime::start(state.clone())
             });
+            // Gate C Task6：Agent Hub Git device-lane 备份（recover + debounce/pending flush）
+            start_cancelled_task_once(&state.agent_hub_git_cancel, "Agent Hub git export", || {
+                crate::agent_hub::git::runtime::start_agent_hub_git_export_loop(state.clone())
+            });
         }
         BackendRuntimeMode::Gui => {
             tracing::info!("GUI 模式跳过 headless 后台任务启动");
@@ -855,6 +861,7 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     );
     cancel_runtime_token(&state.agent_ledger_cancel, "Agent ledger retention");
     cancel_runtime_token(&state.agent_hub_cancel, "Agent Hub runtime");
+    cancel_runtime_token(&state.agent_hub_git_cancel, "Agent Hub git export");
     cancel_runtime_token(&state.health_cancel, "健康监测 daemon");
     cancel_runtime_token(&state.gui_event_relay_cancel, "GUI owner event relay");
 

@@ -2362,6 +2362,8 @@ mod tests {
             orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
             agent_ledger_cancel: Arc::new(Mutex::new(None)),
             agent_hub_cancel: Arc::new(Mutex::new(None)),
+            agent_hub_git_runtime: Arc::new(crate::agent_hub::git::AgentHubGitRuntime::new()),
+            agent_hub_git_cancel: Arc::new(Mutex::new(None)),
             workbench_claude_session_indexes: Arc::new(RwLock::new(
                 std::collections::HashMap::new(),
             )),

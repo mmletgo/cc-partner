@@ -28,10 +28,12 @@
 //!     Gate C Task 3：`snapshot/importer` 两阶段导入 lineage/alias/head（MCA 合并，禁止 LWW）。
 //!     Gate C Task 4：`replication` LAN push 接收端 + 幂等 ledger（prepare/objects/commit）。
 //!     Gate C Task 5：`replication/sender` 源侧 multi-target LAN push + source ledger + Attention。
+//!     Gate C Task 6：`git` 本机 device-lane 自动备份导出（CloudSyncRuntime 单飞，不自动 import 远端 lane）。
 
 pub mod assets;
 pub mod autostart;
 pub mod config_patch;
+pub mod git;
 pub mod instructions;
 pub mod migration;
 pub mod models;

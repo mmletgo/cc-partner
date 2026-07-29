@@ -601,6 +601,21 @@ pub async fn test_connection(state: &AppState) -> TestCloudSyncResult {
     result
 }
 
+/// 确保云端 git 工作区就绪并解析同步分支（供 Agent Hub device-lane 导出等共享）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Agent Hub Git 导出与完整 cloud sync / CLAUDE.md push 共用同一 workdir 与凭证；
+///     必须走同一 ensure/clone 路径，避免第二套 workdir。
+///
+/// Code Logic（这个函数做什么）:
+///     委托内部 `ensure_repo`（获锁后由调用方保证 singleflight）。
+pub async fn ensure_repo_public(
+    state: &AppState,
+    git: &Path,
+) -> Result<(PathBuf, String), AppError> {
+    ensure_repo(state, git).await
+}
+
 /// 确保同步工作区就绪并返回 (workdir, branch)。
 ///
 /// Business Logic: 首次同步需 clone 远端到工作区；后续复用。分支优先用 config 显式配置，

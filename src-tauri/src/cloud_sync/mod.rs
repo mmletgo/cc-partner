@@ -12,11 +12,14 @@
 //!     - `git_cli`：tokio::process::Command 封装系统 git CLI（detect/run/clone/fetch/
 //!       reset_hard/commit_all/push 等），应用不管理认证（复用本机 git 凭证）。
 //!     - `snapshot`：工作区 JSON 文件 ↔ DB Row 的导入导出（含 id→文件名可逆映射）。
-//!     - `engine`：拼装完整同步流程（含 push rejected 一次重试收敛）+ 测试连通。
-//!     - `runtime`：CloudSyncRuntime 全流程单飞门闸（手动/scheduler/CLAUDE.md push）。
+//!     - `engine`：拼装完整同步流程（含 push rejected 一次重试收敛）+ 测试连通；
+//!       并导出 `ensure_repo_public` 供 Agent Hub device-lane 导出复用同一 workdir。
+//!     - `runtime`：CloudSyncRuntime 全流程单飞门闸（手动/scheduler/CLAUDE.md push/
+//!       AgentHubGitExport）。
 //!     - `scheduler`：后台轮询任务，每 tick 重读 config 决定是否真同步、用多少间隔。
 //!
 //! 同步范围：prompts + CC 历史 + SSH 目标（含软删除传播）。
+//! Agent Hub 远端 device lane **永不**经本模块 `snapshot::import_to_db` 自动导入。
 
 pub mod engine;
 pub mod git_cli;
