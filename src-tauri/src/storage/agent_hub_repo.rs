@@ -10,6 +10,9 @@
 //!     mapping/binding/materialization/projection_job 写路径走 `with_shared_write_lease`；
 //!     revision 多行更新同事务。
 
+use crate::agent_hub::assets::{
+    canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, PortableAssetPayload,
+};
 use crate::agent_hub::models::{
     AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
     Materialization, MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob,
@@ -17,6 +20,7 @@ use crate::agent_hub::models::{
     ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
     ScopeNode, TargetBinding,
 };
+use crate::agent_hub::object_store::ObjectStore;
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
@@ -448,6 +452,109 @@ impl AgentHubRepo {
             })
         })
         .await
+    }
+
+    /// 追加可移植资产 revision（typed payload → CAS blob → DAG）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Skill/Command/Agent/MCP 的 revision payload 只存 typed canonical JSON；
+    ///     Skill supporting files 通过 `tree_manifest_hash` 引用，不重写脚本。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在开启 SQL 事务前校验 `AssetKind` 与 payload tag 一致并 `validate`；
+    ///     Skill 可选校验 CAS 树含 SKILL.md；`canonical_bytes` → `put_blob` →
+    ///     `append_revision`（payload_hash + 可选 tree_manifest_hash）。
+    pub async fn append_portable_asset_revision(
+        &self,
+        asset_id: &str,
+        payload: &PortableAssetPayload,
+        store: &ObjectStore,
+        origin_kind: RevisionOriginKind,
+        origin_target: Option<AgentTarget>,
+        origin_replica_id: impl Into<String>,
+        expected_parent_id: Option<RevisionId>,
+    ) -> Result<Revision, AppError> {
+        let asset = self
+            .get_asset(asset_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent_hub_asset_not_found".to_string()))?;
+        // Fail-closed before SQL transaction / CAS write
+        ensure_kind_matches_payload(asset.kind, payload)?;
+        payload.validate()?;
+        if let PortableAssetPayload::Skill(skill) = payload {
+            // Validate tree without rewriting scripts when tree is already in CAS
+            if let Ok(manifest) = store.get_tree(&skill.tree_manifest_hash).await {
+                skill.validate_tree_manifest(&manifest)?;
+            }
+        }
+        let bytes = canonical_bytes(payload)?;
+        let stored = store.put_blob(&bytes).await?;
+        let tree_manifest_hash = payload.tree_manifest_hash().map(|s| s.to_string());
+        let parents = expected_parent_id
+            .clone()
+            .or_else(|| asset.current_revision_id.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let expected = expected_parent_id.or_else(|| asset.current_revision_id.clone());
+        self.append_revision(NewRevision {
+            id: RevisionId::new_v7(),
+            asset_lineage_id: asset.id,
+            parents,
+            operation: RevisionOperation::Upsert,
+            origin_kind,
+            origin_target,
+            origin_replica_id: origin_replica_id.into(),
+            payload_hash: Some(stored.hash),
+            tree_manifest_hash,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expected_parent_id: expected,
+        })
+        .await
+    }
+
+    /// 加载资产当前 head 的可移植 typed payload。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     投影/UI/扫描需要从 CAS 还原 Skill/Command/Agent/MCP canonical 形态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     get_asset → current revision → payload_hash → get_blob → from_canonical_bytes；
+    ///     无 head / 非 portable kind / 缺 payload 返回错误或 None。
+    pub async fn load_portable_asset(
+        &self,
+        asset_id: &str,
+        store: &ObjectStore,
+    ) -> Result<Option<PortableAssetPayload>, AppError> {
+        let Some(asset) = self.get_asset(asset_id).await? else {
+            return Ok(None);
+        };
+        match asset.kind {
+            AssetKind::Skill | AssetKind::Command | AssetKind::Agent | AssetKind::Mcp => {}
+            _ => {
+                return Err(AppError::validation(format!(
+                    "agent_hub_asset_kind_not_portable:{}",
+                    asset.kind.as_str()
+                )));
+            }
+        }
+        let Some(rev_id) = asset.current_revision_id else {
+            return Ok(None);
+        };
+        let Some(revision) = self.get_revision(&rev_id).await? else {
+            return Ok(None);
+        };
+        if revision.operation == RevisionOperation::Delete {
+            return Ok(None);
+        }
+        let Some(hash) = revision.payload_hash.as_deref() else {
+            return Err(AppError::validation(
+                "agent_hub_portable_revision_missing_payload_hash".to_string(),
+            ));
+        };
+        let bytes = store.get_blob(hash).await?;
+        let payload = from_canonical_bytes(&bytes)?;
+        ensure_kind_matches_payload(asset.kind, &payload)?;
+        Ok(Some(payload))
     }
 
     /// 按 id 读取 revision（含有序 parents）。
@@ -2823,5 +2930,190 @@ mod tests {
         assert_eq!(err.code(), "agent_hub_revision_conflict");
         let head = repo.get_asset(&asset.id).await.unwrap().unwrap();
         assert_eq!(head.current_revision_id.unwrap().as_str(), "cas-r2");
+    }
+
+    #[tokio::test]
+    async fn portable_mcp_revision_round_trip_preserves_secrets_in_cas() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Mcp,
+                origin_namespace: "standalone".into(),
+                logical_key: "private-api".into(),
+                display_name: "private-api".into(),
+                policy: AssetPolicy::Adapted,
+            })
+            .await
+            .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let payload = PortableAssetPayload::Mcp(crate::agent_hub::assets::PortableMcpServer {
+            key: "private-api".into(),
+            transport: crate::agent_hub::assets::McpTransport::Http {
+                url: "https://example.invalid/mcp?token=plain-fixture".into(),
+                headers: std::collections::BTreeMap::from([(
+                    "Authorization".into(),
+                    "Bearer plain-fixture".into(),
+                )]),
+            },
+            env: std::collections::BTreeMap::from([("API_TOKEN".into(), "plain-fixture".into())]),
+            enabled: true,
+            tool_allow: vec![],
+            tool_deny: vec![],
+            target_extensions: std::collections::BTreeMap::new(),
+        });
+
+        let rev = repo
+            .append_portable_asset_revision(
+                &asset.id,
+                &payload,
+                &store,
+                RevisionOriginKind::Ui,
+                None,
+                "device-1",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(rev.payload_hash.is_some());
+        assert!(rev.tree_manifest_hash.is_none());
+
+        let loaded = repo
+            .load_portable_asset(&asset.id, &store)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, payload);
+
+        // CAS blob still holds exact secrets
+        let bytes = store
+            .get_blob(rev.payload_hash.as_deref().unwrap())
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("plain-fixture"));
+        assert!(text.contains("Bearer plain-fixture"));
+    }
+
+    #[tokio::test]
+    async fn portable_kind_mismatch_rejected_before_write() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Command,
+                origin_namespace: "standalone".into(),
+                logical_key: "ship".into(),
+                display_name: "ship".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let skill = PortableAssetPayload::Skill(crate::agent_hub::assets::PortableSkill {
+            name: "review".into(),
+            description: "d".into(),
+            skill_markdown_hash: "a".repeat(64),
+            tree_manifest_hash: "b".repeat(64),
+            target_extensions: std::collections::BTreeMap::new(),
+        });
+        let err = repo
+            .append_portable_asset_revision(
+                &asset.id,
+                &skill,
+                &store,
+                RevisionOriginKind::Ui,
+                None,
+                "d",
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("kind_mismatch") || err.code().contains("kind_mismatch"));
+        // no revision head
+        let a = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert!(a.current_revision_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn portable_skill_binary_supporting_file_round_trip() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "review".into(),
+                display_name: "review".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+
+        // binary supporting file exact bytes
+        let bin = vec![0u8, 1, 2, 255, 0, 128];
+        let bin_obj = store.put_blob(&bin).await.unwrap();
+        let md = b"# Review\n\nDo review.\n".to_vec();
+        let md_obj = store.put_blob(&md).await.unwrap();
+        let tree = crate::agent_hub::object_store::TreeManifest {
+            entries: vec![
+                crate::agent_hub::object_store::TreeEntry {
+                    path: "SKILL.md".into(),
+                    blob_hash: md_obj.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                },
+                crate::agent_hub::object_store::TreeEntry {
+                    path: "assets/icon.bin".into(),
+                    blob_hash: bin_obj.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                },
+            ],
+        };
+        let tree_obj = store.put_tree(&tree).await.unwrap();
+
+        let payload = PortableAssetPayload::Skill(crate::agent_hub::assets::PortableSkill {
+            name: "review".into(),
+            description: "Review skill".into(),
+            skill_markdown_hash: md_obj.hash.clone(),
+            tree_manifest_hash: tree_obj.hash.clone(),
+            target_extensions: std::collections::BTreeMap::new(),
+        });
+        let rev = repo
+            .append_portable_asset_revision(
+                &asset.id,
+                &payload,
+                &store,
+                RevisionOriginKind::Filesystem,
+                Some(AgentTarget::Claude),
+                "d",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rev.tree_manifest_hash.as_deref(),
+            Some(tree_obj.hash.as_str())
+        );
+
+        let loaded = repo
+            .load_portable_asset(&asset.id, &store)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, payload);
+
+        // binary unchanged
+        let again = store.get_blob(&bin_obj.hash).await.unwrap();
+        assert_eq!(again, bin);
     }
 }
