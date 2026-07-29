@@ -27,6 +27,7 @@
 //!     Gate C Task 2：`snapshot/builder` + `snapshot/archive` 确定性导出与可读 archive 展开/重打包。
 //!     Gate C Task 3：`snapshot/importer` 两阶段导入 lineage/alias/head（MCA 合并，禁止 LWW）。
 //!     Gate C Task 4：`replication` LAN push 接收端 + 幂等 ledger（prepare/objects/commit）。
+//!     Gate C Task 5：`replication/sender` 源侧 multi-target LAN push + source ledger + Attention。
 
 pub mod assets;
 pub mod autostart;

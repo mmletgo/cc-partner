@@ -3559,6 +3559,34 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_push_requests_status
      ON agent_hub_push_requests(status, updated_at)",
+    // Gate C Task 5：源侧 multi-target push 进度（GUI reconnect / Attention）
+    "CREATE TABLE IF NOT EXISTS agent_hub_source_push_requests (
+        request_id TEXT PRIMARY KEY,
+        selection_mode TEXT NOT NULL,
+        selection_json TEXT NOT NULL,
+        selection_hash TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS agent_hub_source_push_targets (
+        request_id TEXT NOT NULL,
+        peer_device_id TEXT NOT NULL,
+        peer_label TEXT NOT NULL,
+        client_request_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        retryable INTEGER NOT NULL DEFAULT 0,
+        error_code TEXT,
+        transfer_id TEXT,
+        missing_object_count INTEGER NOT NULL DEFAULT 0,
+        transferred_object_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (request_id, peer_device_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_source_push_targets_status
+     ON agent_hub_source_push_targets(status, updated_at)",
 ];
 
 /// 升级旧库：为 mappings/bindings 补列与唯一索引。
