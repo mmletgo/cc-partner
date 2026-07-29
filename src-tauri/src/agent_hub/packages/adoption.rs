@@ -407,6 +407,8 @@ impl AdoptionEngine {
             target: request.discovered.origin.target,
             scope_id: request.scope_id.clone(),
             skills: vec![skill_input],
+            commands: vec![],
+            agents: vec![],
         })?;
 
         // 3) activate via support-gated activator（测试可 inject bypass）

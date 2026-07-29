@@ -13,6 +13,6 @@ pub mod manifest;
 pub use manifest::{
     builtin_support_manifest, evaluate_target_support, find_target_record, format_probe_identity,
     load_support_manifest_from_str, parse_semver_core, CapabilitySupport, EvaluatedSupportMode,
-    EvaluatedTargetSupport, ExecutableProbeSpec, RuntimeProbeSnapshot, SupportManifest,
-    TargetCapability, TargetSupportRecord, SUPPORT_MANIFEST_JSON,
+    EvaluatedTargetSupport, ExecutableProbeSpec, RuntimeProbeSnapshot, SupportHookMappingRecord,
+    SupportManifest, TargetCapability, TargetSupportRecord, SUPPORT_MANIFEST_JSON,
 };

@@ -177,7 +177,8 @@ impl AssetAdapter for CodexInstructionAdapter {
 
     /// 渲染 Codex portable 投影计划。
     ///
-    /// Business Logic: 最终物化进受管 plugin；本方法只生成相对路径计划。
+    /// Business Logic: 最终物化进受管 plugin；本方法只生成相对路径计划；
+    /// Gate D plugin package render 复用同一 portable renderer。
     /// Code Logic: 委托 `render_portable_payload`。
     fn render_portable_asset(
         &self,

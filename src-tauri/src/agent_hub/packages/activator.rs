@@ -8,6 +8,8 @@
 //! Code Logic（这个模块做什么）:
 //!     `ManagedPackageActivator::{build_plan,apply,inspect}`；可注入 `ProcessRunner`；
 //!     Claude/Codex/OpenCode 三个 activator 实现。
+//!     Gate D package render 通过 `merge_activation_into_report` 消费 plan/result，
+//!     不得因 package 物化成功而把 activationRequired/blocked 抬成 full。
 
 use crate::agent_hub::models::{DesiredPresence, TargetBinding};
 use crate::agent_hub::packages::builder::{
@@ -759,6 +761,8 @@ mod tests {
                 target_only: false,
                 visible_targets: vec![],
             }],
+            commands: vec![],
+            agents: vec![],
         };
         materialize_package(&input).unwrap()
     }

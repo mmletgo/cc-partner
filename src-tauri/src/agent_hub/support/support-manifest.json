@@ -98,5 +98,6 @@
         "L3-AGENT-HUB-OPENCODE-RUNTIME-001"
       ]
     }
-  ]
+  ],
+  "hookMappings": []
 }

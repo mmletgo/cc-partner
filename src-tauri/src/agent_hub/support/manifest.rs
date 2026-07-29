@@ -219,10 +219,40 @@ pub struct TargetSupportRecord {
     pub evidence_ids: Vec<String>,
 }
 
+/// support-manifest 中的 Hook 跨 target 映射原始行（字符串 intent/trust，避免 support→plugins 循环依赖）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     Hook mapping 合同与 target support 同文件发布；解析校验在 plugins::hook_mapping。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase；intent/trustModel 为稳定 wire 字符串。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportHookMappingRecord {
+    /// 事件意图 token（如 preToolUse）
+    pub intent: String,
+    /// 来源 target
+    pub source_target: AgentTarget,
+    /// 目标 target
+    pub destination_target: AgentTarget,
+    /// schema 版本
+    pub schema_version: u32,
+    /// 信任模型 token（如 exactContract）
+    pub trust_model: String,
+    /// quality-matrix evidence ID
+    pub evidence_id: String,
+    /// 输入合同 required fields
+    #[serde(default)]
+    pub required_input_fields: Vec<String>,
+    /// 输出合同 required fields
+    #[serde(default)]
+    pub required_output_fields: Vec<String>,
+}
+
 /// 完整 support manifest 根对象。
 ///
-/// Business Logic: 一次发布内三 target 合同必须齐套。
-/// Code Logic: schemaVersion + targets[]。
+/// Business Logic: 一次发布内三 target 合同必须齐套；Hook 跨 target mapping 默认空。
+/// Code Logic: schemaVersion + targets[] + optional hookMappings[]。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SupportManifest {
@@ -230,6 +260,9 @@ pub struct SupportManifest {
     pub schema_version: u32,
     /// 三 target 记录
     pub targets: Vec<TargetSupportRecord>,
+    /// 证据驱动的 Hook 跨 target 映射（初始可为空）
+    #[serde(default)]
+    pub hook_mappings: Vec<SupportHookMappingRecord>,
 }
 
 /// 运行时 probe 快照（用于与 manifest 比对）。
