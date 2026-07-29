@@ -1,26 +1,34 @@
-//! agent_hub/targets/opencode — OpenCode instruction adapter
+//! agent_hub/targets/opencode — OpenCode instruction + portable-asset adapter
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     OpenCode 从 cwd 向上找本地 AGENTS.md 并采用最近命中；Hub 不能声称原生拼接祖先链，
 //!     必须把祖先规则列为显式 prelude 依赖，并在渲染时写入 target-only contract。
+//!     Gate B：原生 `.opencode`/config-root Skills/Commands/Agents/MCP；
+//!     `.claude/skills` 与 `.agents/skills` 仅 compatibility origins。
 //!
 //! Code Logic（这个模块做什么）:
-//!     实现 `AssetAdapter`：probe `opencode` 与 OPENCODE_* 路径；scan 最近 native-active
-//!     与祖先 prelude；render 前置祖先相对路径列表。
+//!     实现 `AssetAdapter`：probe `opencode` 与 OPENCODE_* 路径；scan 指令与 portable；
+//!     render 指令 prelude 与 portable 投影。
 
 use super::paths::{
     is_non_empty_utf8_file, probe_cli_version, resolve_executable, TargetPathResolver,
+};
+use super::portable::{
+    merge_discoveries, parse_json_or_jsonc, parse_mcp_servers_json_map, render_portable_payload,
+    scan_agent_markdown_dir, scan_command_markdown_dir, scan_skill_dirs, AssetRenderContext,
+    DiscoveredPortableAsset, PortableOriginKind, TargetAssetProjection,
 };
 use super::{
     build_probe, relative_path_string, AssetAdapter, InstructionDocument, InstructionRenderContext,
     InstructionSource, InstructionSourceRole, LocalScopeMapping, RenderedInstruction,
     TargetEnvironment, TargetProbe,
 };
+use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
 
-/// OpenCode 指令适配器（Gate A 仅指令）。
+/// OpenCode 指令/资产适配器。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     嵌套目录必须列出祖先规则相对路径，不复制祖先正文。
@@ -86,6 +94,146 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
         );
         Ok(RenderedInstruction::from_compiled(compiled))
     }
+
+    /// 扫描 OpenCode portable 资产（native + compatibility）。
+    ///
+    /// Business Logic: `.claude/skills` / `.agents/skills` 标记 compatibility，非 native 输出。
+    /// Code Logic: config_root 原生树 + home 兼容 skills + opencode.json(c) MCP。
+    fn scan_portable_assets(
+        &self,
+        scope: &LocalScopeMapping,
+        env: &TargetEnvironment,
+    ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+        let homes = TargetPathResolver::resolve_all(env);
+        let mut parts: Vec<Vec<DiscoveredPortableAsset>> = Vec::new();
+
+        let native_root = match scope.scope_kind {
+            ScopeKind::User => homes.opencode.config_root.clone(),
+            ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".opencode"),
+        };
+
+        parts.push(scan_skill_dirs(
+            AgentTarget::OpenCode,
+            scope.scope_kind,
+            &native_root.join("skills"),
+            PortableOriginKind::Native,
+        )?);
+        parts.push(scan_command_markdown_dir(
+            AgentTarget::OpenCode,
+            scope.scope_kind,
+            &native_root.join("commands"),
+            PortableOriginKind::Native,
+        )?);
+        parts.push(scan_agent_markdown_dir(
+            AgentTarget::OpenCode,
+            scope.scope_kind,
+            &native_root.join("agents"),
+            PortableOriginKind::Native,
+        )?);
+
+        // MCP from OPENCODE_CONFIG / opencode.json(c)
+        if scope.scope_kind == ScopeKind::User {
+            parts.push(scan_opencode_mcp_config(scope.scope_kind, env, &homes)?);
+            // Compatibility skill roots (user home)
+            parts.push(scan_skill_dirs(
+                AgentTarget::OpenCode,
+                scope.scope_kind,
+                &env.home.join(".claude").join("skills"),
+                PortableOriginKind::Compatibility,
+            )?);
+            parts.push(scan_skill_dirs(
+                AgentTarget::OpenCode,
+                scope.scope_kind,
+                &env.home.join(".agents").join("skills"),
+                PortableOriginKind::Compatibility,
+            )?);
+        } else {
+            // 项目级兼容路径
+            parts.push(scan_skill_dirs(
+                AgentTarget::OpenCode,
+                scope.scope_kind,
+                &scope.absolute_path.join(".claude").join("skills"),
+                PortableOriginKind::Compatibility,
+            )?);
+            parts.push(scan_skill_dirs(
+                AgentTarget::OpenCode,
+                scope.scope_kind,
+                &scope.absolute_path.join(".agents").join("skills"),
+                PortableOriginKind::Compatibility,
+            )?);
+            for name in ["opencode.json", "opencode.jsonc"] {
+                let p = scope.absolute_path.join(name);
+                if p.is_file() {
+                    parts.push(scan_mcp_file(scope.scope_kind, &p)?);
+                }
+            }
+        }
+
+        Ok(merge_discoveries(parts))
+    }
+
+    /// 渲染 OpenCode portable 投影。
+    ///
+    /// Business Logic: 只写入原生 `.opencode`/config-root 计划路径。
+    /// Code Logic: 委托 `render_portable_payload`。
+    fn render_portable_asset(
+        &self,
+        asset: &PortableAssetPayload,
+        _context: &AssetRenderContext,
+    ) -> Result<TargetAssetProjection, AppError> {
+        render_portable_payload(AgentTarget::OpenCode, asset)
+    }
+}
+
+/// 扫描 OpenCode 用户 MCP 配置文件。
+fn scan_opencode_mcp_config(
+    scope_kind: ScopeKind,
+    env: &TargetEnvironment,
+    homes: &super::paths::TargetHomes,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let mut candidates = vec![homes.opencode.config_file.clone()];
+    // 常见额外文件名
+    candidates.push(homes.opencode.config_root.join("opencode.jsonc"));
+    candidates.push(homes.opencode.config_root.join("opencode.json"));
+    // 测试/用户可能把 OPENCODE_CONFIG 指到 home 根
+    if let Some(p) = env.var("OPENCODE_CONFIG") {
+        candidates.insert(0, PathBuf::from(p));
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        let key = path.to_string_lossy().to_string();
+        if !seen.insert(key) {
+            continue;
+        }
+        out.extend(scan_mcp_file(scope_kind, &path)?);
+    }
+    Ok(out)
+}
+
+fn scan_mcp_file(
+    scope_kind: ScopeKind,
+    path: &Path,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let text = std::fs::read_to_string(path)?;
+    let value = match parse_json_or_jsonc(&text) {
+        Ok(v) => v,
+        Err(_) => return Ok(vec![]),
+    };
+    let Some(map) = value.get("mcpServers").and_then(|v| v.as_object()).cloned() else {
+        return Ok(vec![]);
+    };
+    Ok(parse_mcp_servers_json_map(
+        AgentTarget::OpenCode,
+        scope_kind,
+        &map,
+        path,
+        PortableOriginKind::Native,
+        true,
+    ))
 }
 
 /// 扫描用户级 OpenCode AGENTS.md。
@@ -198,4 +346,12 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
         (Ok(ca), Ok(cb)) => ca == cb,
         _ => false,
     }
+}
+
+/// OpenCode 受管输出使用原生 skills/commands/agents，而非 plugin CLI。
+///
+/// Business Logic: 激活 = 原子 native-path 投影 + scanner 验证。
+/// Code Logic: 返回策略 token。
+pub fn opencode_activation_strategy() -> &'static str {
+    "native_path_projection"
 }

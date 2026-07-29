@@ -308,6 +308,60 @@
   border-top: 1px solid var(--border);
 }
 
+.targetCell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  min-width: 0;
+}
+
+.targetLabel {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg-2);
+}
+
+.targetActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.invocationMeta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+}
+
+.metaLabel {
+  font-weight: var(--weight-medium);
+  color: var(--fg-2);
+  margin-right: var(--space-2);
+}
+
+.metaBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.cellError {
+  font-size: var(--text-xs);
+}
+
 @media (max-width: 900px) {
   .probeGrid,
   .filters,

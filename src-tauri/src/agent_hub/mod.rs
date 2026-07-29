@@ -16,19 +16,42 @@
 //!     Gate A Task 9：service 门面 + Attention conflict/blocked 投影 + control/commands。
 //!     Gate A Task 10：migration（用户 CLAUDE.md seed + N/N+1 dual-write 摘要）。
 //!     Gate A fix r1：`projection_ops` 生产投影调度 + `agent_hub.enabled` 武装路径。
+//!     Gate B Task 1：`assets` typed portable payload（Skill/Command/Agent/MCP）。
+//!     Gate B Task 2：`config_patch` ownership-aware TOML/JSONC 语义 patch。
+//!     Gate B Task 3：targets portable scan/render + Claude assets N/N+1 façade。
+//!     Gate B Task 4：`support` 版本化 adapter support manifest（fail-closed 写能力）。
+//!     Gate B Task 5：`packages` 隔离 managed package 物化 + target activator。
+//!     Gate B Task 6：`packages/adoption` legacy standalone 纳管（激活-before-removal，无双发现）。
+//!     Gate B Task 7：target presence/enabled/detach/delete 语义与聚合状态。
 
+pub mod assets;
 pub mod autostart;
+pub mod config_patch;
 pub mod instructions;
 pub mod migration;
 pub mod models;
 pub mod object_store;
+pub mod packages;
 pub mod project_scope;
 pub mod projection;
 pub mod projection_ops;
 pub mod revision_graph;
 pub mod runtime;
 pub mod service;
+pub mod support;
 pub mod targets;
+
+pub use assets::{
+    canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, CommandArgument,
+    McpTransport, PortableAgent, PortableAssetPayload, PortableCommand, PortableMcpServer,
+    PortableSkill,
+};
+pub use config_patch::{
+    apply_config_patch_atomically, parse_owned_path_meta, prepare_config_projection,
+    serialize_owned_path_meta, value_content_hash, ConfigOwnedPathMeta, ConfigPatchOutcome,
+    ConfigPathDiff, JsoncConfigPatcher, ManagedConfigPatch, OwnedConfigValue, PatchedConfig,
+    PreparedConfigProjection, SemanticConfigPatcher, TomlConfigPatcher,
+};
 
 pub use instructions::{
     classify_import, compile_render, reconcile_instruction, AgentHubConflictScope,
@@ -44,15 +67,26 @@ pub use migration::{
     USER_INSTRUCTION_NAMESPACE, USER_SCOPE_STABLE_ID,
 };
 pub use models::{
-    AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
-    Materialization, MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob,
-    NewRevision, NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState,
-    ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
-    ScopeNode, TargetBinding,
+    compute_asset_aggregate_status, AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget,
+    AssetAggregateStatus, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, Materialization,
+    MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob, NewRevision,
+    NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState, ProjectionPayloadKind,
+    Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode,
+    TargetBinding, TargetBindingIntent, TargetBindingTransition, TargetDisableStrategy,
+    TargetStatusSnapshot,
 };
 pub use object_store::{
     sha256_hex, ObjectStore, PutTreeResult, StoredObject, TreeEntry, TreeEntryDiagnostic,
     TreeEntryType, TreeManifest,
+};
+pub use packages::{
+    build_package_id, count_opencode_compat_skills, generation_blocked_for_asset,
+    mark_pending_legacy_sources, materialize_package, package_materialized_root,
+    ActivationInspection, ActivationPlan, ActivationResult, AdoptionEngine, AdoptionFault,
+    AdoptionOutcome, AdoptionPreview, AdoptionRequest, ClaudePackageActivator,
+    CodexPackageActivator, GeneratedTargetPackage, ManagedPackageActivator,
+    OpenCodePackageActivator, PackageBuildInput, PackageMaterializationMeta, PackageSkillInput,
+    PLUGIN_SELECTOR,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,
@@ -64,7 +98,8 @@ pub use projection::{
     ProjectionWriteFault, MAX_GLOBAL_PROJECTION_PARALLELISM,
 };
 pub use projection_ops::{
-    ensure_agent_hub_enabled, schedule_asset_projections, schedule_project_projections,
+    ensure_agent_hub_enabled, schedule_asset_projections, schedule_package_deactivation,
+    schedule_project_projections,
 };
 pub use revision_graph::{
     ContentMergeResult, MergeBaseOutcome, MergePayload, RevisionGraph, MAX_VISITED_REVISIONS,
@@ -79,13 +114,23 @@ pub use service::{
     set_target_binding_for_state, update_instruction_block_for_state, update_instruction_for_state,
     AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubConflictDto,
     AgentHubConflictResolution, AgentHubInstructionBlockDto, AgentHubProbeDto, AgentHubService,
-    AgentHubStatusDto, AgentHubTargetBindingDto, AgentHubTargetCellDto, InstructionBlockDto,
-    ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
-    SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
+    AgentHubStatusDto, AgentHubTargetBindingDto, AgentHubTargetCellDto,
+    DeleteAssetEverywhereRequest, InstructionBlockDto, ListAssetsRequest,
+    PairInstructionVariantsRequest, ResolveConflictRequest, RestoreDetachedTargetRequest,
+    SetTargetBindingRequest, SetTargetEnabledRequest, SetTargetPresenceRequest,
+    UpdateInstructionBlockRequest, UpdateInstructionRequest,
+};
+pub use support::{
+    builtin_support_manifest, evaluate_target_support, find_target_record, format_probe_identity,
+    load_support_manifest_from_str, parse_semver_core, CapabilitySupport, EvaluatedSupportMode,
+    EvaluatedTargetSupport, ExecutableProbeSpec, RuntimeProbeSnapshot, SupportManifest,
+    TargetCapability, TargetSupportRecord, SUPPORT_MANIFEST_JSON,
 };
 pub use targets::{
-    AdapterSupportLevel, AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,
-    InstructionDocument, InstructionRenderContext, InstructionSource, InstructionSourceRole,
-    LocalScopeMapping, OpenCodeHomePaths, OpenCodeInstructionAdapter, RenderedInstruction,
+    AdapterSupportLevel, AssetAdapter, AssetRenderContext, ClaudeInstructionAdapter,
+    CodexInstructionAdapter, DiscoveredPortableAsset, InstructionDocument,
+    InstructionRenderContext, InstructionSource, InstructionSourceRole, LocalScopeMapping,
+    OpenCodeHomePaths, OpenCodeInstructionAdapter, PortableAssetOrigin, PortableDiscoveryStatus,
+    PortableOriginKind, ProjectedAssetFile, RenderedInstruction, TargetAssetProjection,
     TargetEnvironment, TargetHomePaths, TargetHomes, TargetPathResolver, TargetProbe,
 };

@@ -1171,6 +1171,49 @@ impl BackendControlClient {
         self.agent_hub_op("agent_hub.set_target_binding", req).await
     }
 
+    /// Business Logic: 设置 target presence（mutation）。
+    /// Code Logic: agent_hub.set_target_presence。
+    pub async fn agent_hub_set_target_presence(
+        &self,
+        req: crate::agent_hub::service::SetTargetPresenceRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.set_target_presence", req)
+            .await
+    }
+
+    /// Business Logic: 设置 target enabled（mutation）。
+    /// Code Logic: agent_hub.set_target_enabled。
+    pub async fn agent_hub_set_target_enabled(
+        &self,
+        req: crate::agent_hub::service::SetTargetEnabledRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.set_target_enabled", req).await
+    }
+
+    /// Business Logic: 恢复 detached target（mutation）。
+    /// Code Logic: agent_hub.restore_detached_target。
+    pub async fn agent_hub_restore_detached_target(
+        &self,
+        req: crate::agent_hub::service::RestoreDetachedTargetRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.restore_detached_target", req)
+            .await
+    }
+
+    /// Business Logic: 全 target 删除（mutation）。
+    /// Code Logic: agent_hub.delete_asset_everywhere。
+    pub async fn agent_hub_delete_asset_everywhere(
+        &self,
+        req: crate::agent_hub::service::DeleteAssetEverywhereRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.delete_asset_everywhere", req)
+            .await
+    }
+
     /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。
     ///
     /// Business Logic（为什么需要这个函数）:

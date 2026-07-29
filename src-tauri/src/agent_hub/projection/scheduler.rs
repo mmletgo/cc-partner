@@ -29,6 +29,94 @@ use uuid::Uuid;
 /// 全局并行投影资产上限。
 pub const MAX_GLOBAL_PROJECTION_PARALLELISM: usize = 4;
 
+/// package 激活阶段推进结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     ActivationRequired / Unsupported 不得变成 committed/full；blocked 与 verified 分流。
+///
+/// Code Logic（这个枚举做什么）:
+///     描述下一状态或终态决策。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageActivationAdvance {
+    /// 进入下一阶段
+    Next(ProjectionJobState),
+    /// 可提交 materialization（activationVerified 之后或无需激活）
+    CommitReady,
+    /// 阻塞（support blocked / activation required / unsupported）
+    Block {
+        /// materialization 状态
+        status: MaterializationStatus,
+        /// 稳定原因 token
+        reason: String,
+    },
+}
+
+/// 判定目标路径是否为 managed package 物化根下的路径。
+///
+/// Business Logic: 指令文件投影不得进入 package 激活阶段。
+/// Code Logic: 路径包含 `agent-hub/materialized-packages`。
+pub fn is_managed_package_target_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    norm.contains("agent-hub/materialized-packages")
+}
+
+/// package 激活状态机：当前状态 + inspect/apply 结果 → 下一动作。
+///
+/// Business Logic（为什么需要这个函数）:
+///     recovery 必须先 inspect 再决定是否重复 CLI 命令；ActivationRequired 永不 committed。
+///
+/// Code Logic（这个函数做什么）:
+///     pure 决策，无 IO。
+pub fn advance_package_activation(
+    current: ProjectionJobState,
+    inspect_present: bool,
+    inspect_enabled_matches: bool,
+    activation_required: bool,
+    support_blocked: bool,
+    apply_ok: bool,
+) -> PackageActivationAdvance {
+    if support_blocked {
+        return PackageActivationAdvance::Block {
+            status: MaterializationStatus::Blocked,
+            reason: "package_activation_support_blocked".into(),
+        };
+    }
+    if activation_required {
+        return PackageActivationAdvance::Block {
+            status: MaterializationStatus::ActivationRequired,
+            reason: "package_activation_required".into(),
+        };
+    }
+    match current {
+        ProjectionJobState::Prepared | ProjectionJobState::Writing => {
+            PackageActivationAdvance::Next(ProjectionJobState::PackageWritten)
+        }
+        ProjectionJobState::PackageWritten => {
+            if inspect_present && inspect_enabled_matches {
+                // recovery：已符合期望，跳过重复命令
+                PackageActivationAdvance::Next(ProjectionJobState::ActivationVerified)
+            } else {
+                PackageActivationAdvance::Next(ProjectionJobState::ActivationRequested)
+            }
+        }
+        ProjectionJobState::ActivationRequested => {
+            if apply_ok || (inspect_present && inspect_enabled_matches) {
+                PackageActivationAdvance::Next(ProjectionJobState::ActivationVerified)
+            } else {
+                PackageActivationAdvance::Block {
+                    status: MaterializationStatus::Blocked,
+                    reason: "package_activation_apply_failed".into(),
+                }
+            }
+        }
+        ProjectionJobState::ActivationVerified => PackageActivationAdvance::CommitReady,
+        other => PackageActivationAdvance::Block {
+            status: MaterializationStatus::Blocked,
+            reason: format!("package_activation_invalid_state:{}", other.as_str()),
+        },
+    }
+}
+
 /// 投影请求（入队输入）。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -134,6 +222,14 @@ impl ProjectionScheduler {
             #[cfg(any(test, debug_assertions))]
             inject_db_commit_fail: Mutex::new(false),
         }
+    }
+
+    /// 克隆内部 CAS 句柄（adoption recovery 复用同一 object root）。
+    ///
+    /// Business Logic: owner recovery 不得另开嵌套 CAS 根。
+    /// Code Logic: clone ObjectStore。
+    pub fn object_store_handle(&self) -> ObjectStore {
+        self.object_store.clone()
     }
 
     /// 测试注入写故障。
@@ -475,6 +571,43 @@ impl ProjectionScheduler {
                     })
                     .await?;
                 return Ok(JobExecResult::Skipped);
+            }
+        }
+
+        // 外部整文件/目录删除 → detached：Present 不得自动重建；需 restore_detached_target。
+        if job.desired_presence == DesiredPresence::Present {
+            if let Some(mat) = self
+                .repo
+                .get_materialization_by_binding(&job.target_binding_id)
+                .await?
+            {
+                if mat.status == MaterializationStatus::Detached {
+                    self.repo
+                        .update_projection_job_state(
+                            &job.id,
+                            ProjectionJobState::Blocked,
+                            job.attempt,
+                            Some("detached_no_auto_recreate"),
+                            None,
+                            None,
+                        )
+                        .await?;
+                    // 保持 Detached 观测，不写盘
+                    self.repo
+                        .upsert_materialization(NewMaterialization {
+                            asset_id: mat.asset_id,
+                            target: mat.target,
+                            target_binding_id: mat.target_binding_id,
+                            native_path: mat.native_path.or(Some(job.target_path.clone())),
+                            last_projected_revision_id: mat.last_projected_revision_id,
+                            rendered_hash: mat.rendered_hash,
+                            observed_external_hash: None,
+                            status: MaterializationStatus::Detached,
+                            last_error: Some("detached_no_auto_recreate".into()),
+                        })
+                        .await?;
+                    return Ok(JobExecResult::Skipped);
+                }
             }
         }
 
@@ -1384,5 +1517,197 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mat.status, MaterializationStatus::Blocked);
+    }
+
+    #[test]
+    fn package_activation_phase_order_and_recovery() {
+        use super::{
+            advance_package_activation, is_managed_package_target_path, PackageActivationAdvance,
+        };
+        use crate::agent_hub::models::{MaterializationStatus, ProjectionJobState};
+
+        assert!(is_managed_package_target_path(
+            "/data/agent-hub/materialized-packages/claude/user/pkg"
+        ));
+        assert!(!is_managed_package_target_path(
+            "/home/user/.claude/CLAUDE.md"
+        ));
+
+        // prepared → packageWritten
+        let n = advance_package_activation(
+            ProjectionJobState::Prepared,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            n,
+            PackageActivationAdvance::Next(ProjectionJobState::PackageWritten)
+        );
+
+        // packageWritten + not present → activationRequested
+        let n = advance_package_activation(
+            ProjectionJobState::PackageWritten,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            n,
+            PackageActivationAdvance::Next(ProjectionJobState::ActivationRequested)
+        );
+
+        // packageWritten + already present (recovery inspect) → skip to verified
+        let n = advance_package_activation(
+            ProjectionJobState::PackageWritten,
+            true,
+            true,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            n,
+            PackageActivationAdvance::Next(ProjectionJobState::ActivationVerified)
+        );
+
+        // activationRequested + apply ok → verified
+        let n = advance_package_activation(
+            ProjectionJobState::ActivationRequested,
+            false,
+            false,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(
+            n,
+            PackageActivationAdvance::Next(ProjectionJobState::ActivationVerified)
+        );
+
+        // verified → commit ready
+        let n = advance_package_activation(
+            ProjectionJobState::ActivationVerified,
+            true,
+            true,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(n, PackageActivationAdvance::CommitReady);
+
+        // activation required never commit
+        let n = advance_package_activation(
+            ProjectionJobState::PackageWritten,
+            false,
+            false,
+            true,
+            false,
+            false,
+        );
+        match n {
+            PackageActivationAdvance::Block { status, .. } => {
+                assert_eq!(status, MaterializationStatus::ActivationRequired);
+            }
+            other => panic!("expected block, got {other:?}"),
+        }
+
+        // support blocked never commit
+        let n = advance_package_activation(
+            ProjectionJobState::PackageWritten,
+            false,
+            false,
+            false,
+            true,
+            false,
+        );
+        match n {
+            PackageActivationAdvance::Block { status, reason } => {
+                assert_eq!(status, MaterializationStatus::Blocked);
+                assert!(reason.contains("support_blocked"));
+            }
+            other => panic!("expected block, got {other:?}"),
+        }
+    }
+
+    /// Business Logic: 外部整文件删除 → detached，Present job 不得自动重建。
+    /// Code Logic: materialization Detached + Present enqueue → skipped，文件仍缺失。
+    #[tokio::test]
+    async fn external_whole_file_delete_stays_detached_without_auto_recreate() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("CLAUDE.md");
+        // 不创建文件：模拟外部已删
+        let req = file_req(&asset, &binding, &target, b"should-not-write", None);
+        // 先标记 detached
+        repo.upsert_materialization(NewMaterialization {
+            asset_id: asset.clone(),
+            target: AgentTarget::Claude,
+            target_binding_id: binding.clone(),
+            native_path: Some(target.to_string_lossy().to_string()),
+            last_projected_revision_id: None,
+            rendered_hash: Some(sha256_hex(b"old")),
+            observed_external_hash: None,
+            status: MaterializationStatus::Detached,
+            last_error: Some("external_whole_file_missing".into()),
+        })
+        .await
+        .unwrap();
+
+        let job = sched.enqueue_projection(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert_eq!(stats.committed, 0);
+        assert!(!target.exists(), "detached must not auto-recreate file");
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Detached);
+        let done = repo.get_projection_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(done.state, ProjectionJobState::Blocked);
+        assert_eq!(
+            done.last_error.as_deref(),
+            Some("detached_no_auto_recreate")
+        );
+    }
+
+    /// Business Logic: desiredPresence=absent 仅删除该 target 受管文件，其它路径保留。
+    /// Code Logic: Absent job 删除 managed 文件后 Synced；sibling 文件不删。
+    #[tokio::test]
+    async fn absent_removes_only_target_owned_path() {
+        let (sched, tmp, repo) = setup().await;
+        let (asset, binding) = seed_asset_binding(&repo).await;
+        let target = tmp.path().join("CLAUDE.md");
+        let sibling = tmp.path().join("NOTES.md");
+        let managed = b"hub content";
+        std::fs::write(&target, managed).unwrap();
+        std::fs::write(&sibling, b"user notes").unwrap();
+        let managed_hash = sha256_hex(managed);
+        let empty = b"";
+        let empty_hash = sha256_hex(empty);
+        let mut req = file_req(&asset, &binding, &target, empty, Some(&managed_hash));
+        req.desired_presence = DesiredPresence::Absent;
+        req.rendered_hash = empty_hash;
+        req.base_hash = Some(managed_hash.clone());
+        req.expected_external_hash = Some(managed_hash);
+
+        let _job = sched.enqueue_projection(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let stats = sched.run_ready_jobs(&cancel).await.unwrap();
+        assert!(stats.committed >= 1);
+        assert!(!target.exists());
+        assert!(sibling.exists(), "non-owned sibling must remain");
+        let mat = repo
+            .get_materialization_by_binding(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Synced);
     }
 }

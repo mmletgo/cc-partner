@@ -27,6 +27,44 @@ afterEach(() => {
   cleanup();
 });
 
+function baseTargets() {
+  return [
+    {
+      target: 'claude' as const,
+      desiredPresence: 'present' as const,
+      desiredEnabled: true,
+      materializationStatus: 'synced',
+      lastError: null,
+      requested: true,
+      supported: true,
+      sourceOnly: false,
+      verified: true,
+    },
+    {
+      target: 'codex' as const,
+      desiredPresence: 'present' as const,
+      desiredEnabled: true,
+      materializationStatus: 'blocked',
+      lastError: 'blocked',
+      requested: true,
+      supported: true,
+      sourceOnly: false,
+      verified: false,
+    },
+    {
+      target: 'opencode' as const,
+      desiredPresence: 'absent' as const,
+      desiredEnabled: false,
+      materializationStatus: 'unsupported',
+      lastError: null,
+      requested: false,
+      supported: false,
+      sourceOnly: false,
+      verified: false,
+    },
+  ];
+}
+
 /**
  * Business Logic: 构造可渲染的 controller 快照。
  * Code Logic: 覆盖 status/assets/drawers 默认值，允许 overrides。
@@ -68,29 +106,8 @@ function buildProps(
         policy: 'shared',
         currentRevisionId: 'r1',
         hasConflict: true,
-        targets: [
-          {
-            target: 'claude',
-            desiredPresence: 'present',
-            desiredEnabled: true,
-            materializationStatus: 'synced',
-            lastError: null,
-          },
-          {
-            target: 'codex',
-            desiredPresence: 'present',
-            desiredEnabled: true,
-            materializationStatus: 'blocked',
-            lastError: 'blocked',
-          },
-          {
-            target: 'opencode',
-            desiredPresence: 'absent',
-            desiredEnabled: false,
-            materializationStatus: 'unsupported',
-            lastError: null,
-          },
-        ],
+        aggregateStatus: 'partial',
+        targets: baseTargets(),
       },
     ],
     scopeFilter: '',
@@ -108,7 +125,8 @@ function buildProps(
       policy: 'shared',
       currentRevisionId: 'r1',
       hasConflict: true,
-      targets: [],
+      aggregateStatus: 'partial',
+      targets: baseTargets(),
       blocks: [
         {
           id: 'b1',
@@ -158,6 +176,15 @@ function buildProps(
     blocksDrawerOpen: false,
     openBlocksDrawer: vi.fn(),
     closeBlocksDrawer: vi.fn(),
+    adoptionOpen: false,
+    adoptionPreview: null,
+    openAdoptionPreview: vi.fn(),
+    closeAdoptionDialog: vi.fn(),
+    deleteEverywhereOpen: false,
+    deleteEverywhereAssetId: null,
+    openDeleteEverywhere: vi.fn(),
+    closeDeleteEverywhere: vi.fn(),
+    confirmDeleteEverywhere: vi.fn(async () => undefined),
     deepLinkConflictId: null,
     reload: vi.fn(async () => undefined),
     resolveConflict: vi.fn(async () => undefined),
@@ -165,6 +192,10 @@ function buildProps(
     updateInstructionBlock: vi.fn(async () => undefined),
     pairInstructionVariants: vi.fn(async () => undefined),
     setTargetBinding: vi.fn(async () => undefined),
+    setTargetEnabled: vi.fn(async () => undefined),
+    setTargetPresence: vi.fn(async () => undefined),
+    restoreDetachedTarget: vi.fn(async () => undefined),
+    removeTarget: vi.fn(async () => undefined),
     writeBlocked: false,
     upgradeRequired: false,
     ...overrides,
@@ -189,8 +220,12 @@ describe('AgentHub page characterization', () => {
   test('pure view source does not import @/api/', () => {
     const source = readFileSync(resolve(pageDir, './AgentHub.tsx'), 'utf8');
     const drawerSource = readFileSync(resolve(pageDir, './InstructionBlocksDrawer.tsx'), 'utf8');
+    const adoptionSource = readFileSync(resolve(pageDir, './AssetAdoptionDialog.tsx'), 'utf8');
+    const cellSource = readFileSync(resolve(pageDir, './TargetStatusCell.tsx'), 'utf8');
     expect(source).not.toMatch(/from\s+['"]@\/api\//);
     expect(drawerSource).not.toMatch(/from\s+['"]@\/api\//);
+    expect(adoptionSource).not.toMatch(/from\s+['"]@\/api\//);
+    expect(cellSource).not.toMatch(/from\s+['"]@\/api\//);
   });
 
   test('renders probe summary, filters, and target cells', () => {
@@ -203,6 +238,8 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('agent-target-claude')).toBeTruthy();
     expect(screen.getByTestId('agent-target-codex')).toBeTruthy();
     expect(screen.getByTestId('agent-target-opencode')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-lan-push-notice')).toBeTruthy();
+    expect(screen.getByTestId('agent-asset-aggregate-asset-1')).toBeTruthy();
   });
 
   test('filter inputs call controller setters', () => {
@@ -243,5 +280,97 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('probe-opencode').textContent?.toLowerCase()).toMatch(
       /unsupported|不支持/,
     );
+  });
+
+  test('detached cells expose restore/remove actions', () => {
+    const restoreDetachedTarget = vi.fn(async () => undefined);
+    const removeTarget = vi.fn(async () => undefined);
+    renderView({
+      restoreDetachedTarget,
+      removeTarget,
+      filteredAssets: [
+        {
+          assetId: 'asset-detached',
+          scopeId: 'user',
+          kind: 'skill',
+          displayName: 'Detached skill',
+          logicalKey: 'user/skill/d',
+          originNamespace: 'claude',
+          policy: 'shared',
+          currentRevisionId: 'r2',
+          hasConflict: false,
+          aggregateStatus: 'detached',
+          targets: [
+            {
+              target: 'claude',
+              desiredPresence: 'present',
+              desiredEnabled: true,
+              materializationStatus: 'detached',
+              lastError: null,
+              requested: true,
+              supported: true,
+              sourceOnly: false,
+              verified: false,
+            },
+            {
+              target: 'codex',
+              desiredPresence: 'absent',
+              desiredEnabled: false,
+              materializationStatus: null,
+              lastError: null,
+              requested: false,
+              supported: true,
+              sourceOnly: false,
+              verified: false,
+            },
+            {
+              target: 'opencode',
+              desiredPresence: 'absent',
+              desiredEnabled: false,
+              materializationStatus: null,
+              lastError: null,
+              requested: false,
+              supported: true,
+              sourceOnly: false,
+              verified: false,
+            },
+          ],
+        },
+      ],
+    });
+    fireEvent.click(screen.getByTestId('agent-target-restore-asset-detached-claude'));
+    fireEvent.click(screen.getByTestId('agent-target-remove-asset-detached-claude'));
+    expect(restoreDetachedTarget).toHaveBeenCalled();
+    expect(removeTarget).toHaveBeenCalled();
+  });
+
+  test('delete everywhere confirmation dialog', () => {
+    const confirmDeleteEverywhere = vi.fn(async () => undefined);
+    renderView({
+      deleteEverywhereOpen: true,
+      deleteEverywhereAssetId: 'asset-1',
+      confirmDeleteEverywhere,
+    });
+    expect(screen.getByTestId('agent-hub-delete-everywhere-dialog')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('agent-hub-delete-everywhere-confirm'));
+    expect(confirmDeleteEverywhere).toHaveBeenCalled();
+  });
+
+  test('external collision opens adoption dialog', () => {
+    renderView({
+      adoptionOpen: true,
+      adoptionPreview: {
+        assetId: 'asset-1',
+        displayName: 'User instruction',
+        logicalKey: 'user/instruction',
+        originNamespace: 'claude',
+        target: 'claude',
+        diagnostics: ['materialization:externalCollision'],
+        aggregateStatus: 'externalCollision',
+      },
+    });
+    expect(screen.getByTestId('agent-hub-adoption-dialog')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-lan-push-gate-c')).toBeTruthy();
+    expect(screen.getByTestId('adoption-canonical').textContent).toContain('User instruction');
   });
 });

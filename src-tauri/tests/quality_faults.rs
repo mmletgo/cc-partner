@@ -18,6 +18,7 @@
 //!     - `L2-FAULT-SCRATCH-TX-001`：`scratchpad_inject_fail_rolls_back_batch`
 //!     - `L2-FAULT-SETTINGS-001`：`settings_partial_command_failure_isolates_fields`
 //!     - `L2-FAULT-AGENT-HUB-PROJECTION-001`：`agent_hub_projection_*` 故障注入（temp/sync/precondition/rename/db commit）
+//!     - `L2-FAULT-AGENT-HUB-ADOPTION-001`：`agent_hub_adoption_*` legacy 纳管故障点（激活失败/archive 前崩溃/DB commit 前崩溃）
 //!     - `L2-LAN-BOUNDARY-001`：**不在本文件重复**；权威自动化矩阵见
 //!       `tests/lan_trust_boundary_smoke.rs` + `lan_trust_boundary_harness`
 //!       （无凭据 loopback/mobile 读写、Host/Origin、stop loopback+token、
@@ -43,7 +44,8 @@ use app_lib::config_store::{
     ConfigIoStage, ConfigStore, FaultInjectingConfigIo, FsConfigStore, StdConfigIo,
 };
 use app_lib::{
-    agent_hub_sha256_hex, AgentHubObjectStore, AgentHubRepo, AgentTarget, AssetKind, AssetPolicy,
+    agent_hub_sha256_hex, AdoptionEngine, AdoptionFault, AdoptionOutcome, AdoptionRequest,
+    AdoptionState, AgentHubObjectStore, AgentHubRepo, AgentTarget, AssetKind, AssetPolicy,
     ClaudeHistoryRepo, ClaudeHistoryRow, DesiredPresence, NewLogicalAsset, NewScopeNode,
     NewTargetBinding, PeerCallError, PeerClient, ProjectionJobState, ProjectionPayloadKind,
     ProjectionRequest, ProjectionScheduler, ProjectionWriteFault, RevisionId, ScopeKind,
@@ -1069,4 +1071,149 @@ async fn agent_hub_projection_directory_unknown_files_never_deleted() {
         std::fs::read(target.join("user-notes.txt")).unwrap(),
         b"keep-me"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Gate B Task 6 — legacy adoption fault points (L2-FAULT-AGENT-HUB-ADOPTION-001)
+// ---------------------------------------------------------------------------
+
+use app_lib::{
+    hash_skill_directory, DiscoveredPortableAsset, FakeProcessRunner, PortableAssetOrigin,
+    PortableAssetPayload, PortableDiscoveryStatus, PortableOriginKind, PortableSkill,
+};
+use std::path::PathBuf;
+
+async fn setup_agent_hub_adoption() -> (AdoptionEngine, AgentHubRepo, tempfile::TempDir, PathBuf) {
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("agent_hub_adoption.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("connect");
+    AgentHubRepo::ensure_schema(&pool).await.expect("schema");
+    let repo = AgentHubRepo::new(pool);
+    let store = AgentHubObjectStore::open(dir.path()).expect("object store");
+    let runner = Arc::new(FakeProcessRunner::new());
+    for _ in 0..16 {
+        runner.push_ok("ok");
+    }
+    let engine = AdoptionEngine::new(repo.clone(), store, runner);
+    // 事务语义测试：FakeProcessRunner 仅经 inject 绕过 support baseline
+    engine.inject_support_bypass(true);
+    for _ in 0..16 {
+        // setup 已 push_ok；inspect 额外消耗 list 响应
+    }
+    let data = dir.path().to_path_buf();
+    (engine, repo, dir, data)
+}
+
+fn write_legacy_skill(root: &Path, name: &str, body: &str) -> PathBuf {
+    let p = root.join(name);
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(
+        p.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: test\n---\n{body}\n"),
+    )
+    .unwrap();
+    p
+}
+
+fn discovered_legacy(target: AgentTarget, path: &Path) -> DiscoveredPortableAsset {
+    let (content, tree, _, diags) = hash_skill_directory(path).unwrap();
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    DiscoveredPortableAsset {
+        kind: AssetKind::Skill,
+        semantic_name: name.clone(),
+        scope_kind: ScopeKind::User,
+        payload: PortableAssetPayload::Skill(PortableSkill {
+            name: name.clone(),
+            description: "test".into(),
+            skill_markdown_hash: content.clone(),
+            tree_manifest_hash: tree.clone(),
+            target_extensions: Default::default(),
+        }),
+        origin: PortableAssetOrigin {
+            target,
+            path: path.to_path_buf(),
+            origin_kind: PortableOriginKind::LegacyStandalone,
+            native_id: name,
+            content_hash: content,
+            tree_hash: Some(tree),
+            status: PortableDiscoveryStatus::Active,
+            native_output_candidate: false,
+        },
+        diagnostics: diags,
+    }
+}
+
+fn adoption_request(data: &Path, discovered: DiscoveredPortableAsset) -> AdoptionRequest {
+    AdoptionRequest {
+        data_dir: data.to_path_buf(),
+        scope_id: "user".into(),
+        scope_kind: ScopeKind::User,
+        confirmed: true,
+        discovered,
+        origin_namespace: "legacy".into(),
+        origin_replica_id: "quality-faults".into(),
+    }
+}
+
+/// L2-FAULT-AGENT-HUB-ADOPTION-001：激活失败保留 legacy 目录，无第二 discoverable 副本。
+#[tokio::test]
+async fn agent_hub_adoption_activation_failure_preserves_legacy() {
+    let (engine, _repo, _dir, data) = setup_agent_hub_adoption().await;
+    let root = data.join("home/.claude/skills");
+    let skill = write_legacy_skill(&root, "review", "body");
+    let disc = discovered_legacy(AgentTarget::Claude, &skill);
+    engine.inject_fault(AdoptionFault::ForceActivationFailure);
+    let out = engine.adopt(adoption_request(&data, disc)).await.unwrap();
+    assert!(
+        matches!(out, AdoptionOutcome::Blocked { .. }),
+        "got {out:?}"
+    );
+    assert!(skill.is_dir(), "legacy source must remain");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+}
+
+/// L2：archive 前崩溃保留 legacy 源。
+#[tokio::test]
+async fn agent_hub_adoption_crash_before_archive_preserves_legacy() {
+    let (engine, _repo, _dir, data) = setup_agent_hub_adoption().await;
+    let root = data.join("home/.claude/skills");
+    let skill = write_legacy_skill(&root, "review", "body");
+    let disc = discovered_legacy(AgentTarget::Claude, &skill);
+    engine.inject_fault(AdoptionFault::CrashBeforeArchive);
+    let out = engine.adopt(adoption_request(&data, disc)).await.unwrap();
+    assert!(matches!(out, AdoptionOutcome::Blocked { .. }));
+    assert!(skill.is_dir(), "crash before archive keeps source");
+}
+
+/// L2：DB commit 前崩溃 → 源在 staging（可恢复），兼容路径 0 份；recovery 完成后 committed。
+#[tokio::test]
+async fn agent_hub_adoption_crash_before_db_commit_recoverable() {
+    let (engine, repo, _dir, data) = setup_agent_hub_adoption().await;
+    let root = data.join("home/.claude/skills");
+    let skill = write_legacy_skill(&root, "review", "body");
+    let disc = discovered_legacy(AgentTarget::Claude, &skill);
+    engine.inject_fault(AdoptionFault::CrashBeforeDbCommit);
+    let out = engine.adopt(adoption_request(&data, disc)).await.unwrap();
+    assert!(matches!(out, AdoptionOutcome::Blocked { .. }));
+    assert!(!skill.exists(), "renamed into staging");
+    let staging = data.join("agent-hub/adoption-staging");
+    assert!(staging.is_dir(), "staging holds archive");
+    let rows = repo.list_adoptions().await.unwrap();
+    let archived = rows
+        .into_iter()
+        .find(|r| r.state == AdoptionState::Archived)
+        .expect("archived row");
+    engine.inject_fault(AdoptionFault::None);
+    let recovered = engine.recover_adoption(&archived.id).await.unwrap();
+    assert!(matches!(recovered, AdoptionOutcome::Adopted { .. }));
+    let done = repo.get_adoption(&archived.id).await.unwrap().unwrap();
+    assert_eq!(done.state, AdoptionState::Committed);
 }

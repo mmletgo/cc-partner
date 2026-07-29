@@ -33,6 +33,9 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `E2E-MOBILE-001` | `web/tests/mobile-workbench.spec.ts` | Mobile 390×844 navigation/HTTP write |
 | `E2E-LAN-001` | `web/tests/lan-boundary.spec.ts` | L1 credential-free + simulated boundary reject |
 | `E2E-AGENT-HUB-A-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate A: status card / preview+enable / target matrix / conflict deep link / `/claude-md` redirect (mock only) |
+| `E2E-AGENT-HUB-B-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate B: scope/kind filters / alias / adoption preview / detached restore-remove / delete everywhere (mock only) |
+| `L2-AGENT-HUB-B-001` | `src-tauri/tests/agent_hub_gate_b_smoke.rs` | Portable discovery / targetOnly isolation / unmanaged config / adoption recovery / credential redaction |
+| `L3-AGENT-HUB-B-CLI-001` | `src-tauri/tests/agent_hub_cli_contract.rs` | Real CLI exact-version support pins (manual / ignored; default NOT VERIFIED) |
 
 Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY-001`, `E2E-FRONTEND-FOUNDATION-001`, `E2E-SCREENSHOT-OVERLAY-001`, `E2E-AGENT-LEDGER-001`.
 
@@ -124,7 +127,7 @@ cd web && npm run test:all
 
 ### Agent Hub Gate A verification
 
-Focused Gate A commands (instruction foundation only; do **not** claim full multi-CLI skill/MCP/plugin sync):
+Focused Gate A commands (instruction foundation):
 
 ```bash
 # Rust unit / domain
@@ -133,11 +136,52 @@ cd src-tauri && cargo test --locked agent_hub
 # Process smoke (isolated data dir; serialize)
 cd src-tauri && cargo test --locked --test agent_hub_gate_a_smoke -- --test-threads=1
 
-# L1 UI journey (backendHarness mocks)
+# L1 UI journey (backendHarness mocks) — also covers Gate B UI cases in the same file
 cd web && npm run test:e2e -- agent-hub.spec.ts
 ```
 
-**NOT VERIFIED by the above:** real Claude / Codex / OpenCode product installs and path writes on macos/windows/ubuntu; Skill / MCP / Plugin surfaces; LAN Hub replication / multi-host Agent Hub state; packaged desktop GUI. Those stay L3 `NOT VERIFIED` rows in `quality-matrix.json` until real-device certification lands.
+**NOT VERIFIED by the above alone:** real Claude / Codex / OpenCode product installs and path writes on macos/windows/ubuntu; LAN Hub replication / multi-host Agent Hub state; packaged desktop GUI. Those stay L3 `NOT VERIFIED` rows in `quality-matrix.json` until real-device certification lands.
+
+### Agent Hub Gate B verification (portable assets)
+
+Focused Gate B commands (shared Skill/Command/Agent/MCP discovery, managed packages, legacy adoption, config patch isolation). Do **not** claim real CLI write support unless the exact L3 version pin was exercised:
+
+```bash
+cd src-tauri
+cargo fmt --check
+# clippy may be heavy; still preferred
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked agent_hub::assets
+cargo test --locked agent_hub::targets
+cargo test --locked agent_hub::packages
+# L2 process smoke — isolated HOME/data; FakeProcessRunner + support bypass
+cargo test --locked --test agent_hub_gate_b_smoke -- --nocapture --test-threads=1
+
+cd ../web
+npm run lint
+npm run check:css-tokens
+npm run check:i18n
+npm test -- AgentHub agentHub AgentAssetRow localeParity
+npm run build
+npm run test:e2e -- agent-hub.spec.ts
+
+cd ..
+node scripts/check-agent-hub-support-manifest.mjs --gate-b
+node scripts/check-quality-traceability.mjs
+node scripts/check-docs.mjs
+```
+
+Evidence IDs:
+- `L2-AGENT-HUB-B-001` — `src-tauri/tests/agent_hub_gate_b_smoke.rs` (PASS when smoke suite green)
+- `E2E-AGENT-HUB-B-001` — `web/tests/agent-hub.spec.ts` Gate B describe (PASS when e2e green; else NOT VERIFIED if Playwright env missing)
+- `L3-AGENT-HUB-B-CLI-001` — `src-tauri/tests/agent_hub_cli_contract.rs` ignored real-CLI harness; remains **NOT VERIFIED** without pinned local CLI
+
+Optional real CLI contract (manual; exact version only):
+
+```bash
+cd src-tauri
+CC_PARTNER_L3_TARGET=claude cargo test --locked --test agent_hub_cli_contract -- --ignored --nocapture --test-threads=1
+```
 
 Playwright browsers (match CI; avoid floating installers):
 

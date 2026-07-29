@@ -10,13 +10,17 @@
 //!     mapping/binding/materialization/projection_job 写路径走 `with_shared_write_lease`；
 //!     revision 多行更新同事务。
 
-use crate::agent_hub::models::{
-    AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
-    Materialization, MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob,
-    NewRevision, NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState,
-    ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
-    ScopeNode, TargetBinding,
+use crate::agent_hub::assets::{
+    canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, PortableAssetPayload,
 };
+use crate::agent_hub::models::{
+    AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget, AssetKind, AssetPolicy,
+    DesiredPresence, LogicalAsset, Materialization, MaterializationStatus, NewLogicalAsset,
+    NewMaterialization, NewProjectionJob, NewRevision, NewScopeNode, NewTargetBinding,
+    ProjectionJob, ProjectionJobState, ProjectionPayloadKind, Revision, RevisionId,
+    RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
+};
+use crate::agent_hub::object_store::ObjectStore;
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
@@ -450,6 +454,110 @@ impl AgentHubRepo {
         .await
     }
 
+    /// 追加可移植资产 revision（typed payload → CAS blob → DAG）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Skill/Command/Agent/MCP 的 revision payload 只存 typed canonical JSON；
+    ///     Skill supporting files 通过 `tree_manifest_hash` 引用，不重写脚本。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     在开启 SQL 事务前校验 `AssetKind` 与 payload tag 一致并 `validate`；
+    ///     Skill 可选校验 CAS 树含 SKILL.md；`canonical_bytes` → `put_blob` →
+    ///     `append_revision`（payload_hash + 可选 tree_manifest_hash）。
+    #[allow(clippy::too_many_arguments)] // portable revision CAS 需 origin + parent 全上下文
+    pub async fn append_portable_asset_revision(
+        &self,
+        asset_id: &str,
+        payload: &PortableAssetPayload,
+        store: &ObjectStore,
+        origin_kind: RevisionOriginKind,
+        origin_target: Option<AgentTarget>,
+        origin_replica_id: impl Into<String>,
+        expected_parent_id: Option<RevisionId>,
+    ) -> Result<Revision, AppError> {
+        let asset = self
+            .get_asset(asset_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent_hub_asset_not_found".to_string()))?;
+        // Fail-closed before SQL transaction / CAS write
+        ensure_kind_matches_payload(asset.kind, payload)?;
+        payload.validate()?;
+        if let PortableAssetPayload::Skill(skill) = payload {
+            // Validate tree without rewriting scripts when tree is already in CAS
+            if let Ok(manifest) = store.get_tree(&skill.tree_manifest_hash).await {
+                skill.validate_tree_manifest(&manifest)?;
+            }
+        }
+        let bytes = canonical_bytes(payload)?;
+        let stored = store.put_blob(&bytes).await?;
+        let tree_manifest_hash = payload.tree_manifest_hash().map(|s| s.to_string());
+        let parents = expected_parent_id
+            .clone()
+            .or_else(|| asset.current_revision_id.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let expected = expected_parent_id.or_else(|| asset.current_revision_id.clone());
+        self.append_revision(NewRevision {
+            id: RevisionId::new_v7(),
+            asset_lineage_id: asset.id,
+            parents,
+            operation: RevisionOperation::Upsert,
+            origin_kind,
+            origin_target,
+            origin_replica_id: origin_replica_id.into(),
+            payload_hash: Some(stored.hash),
+            tree_manifest_hash,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expected_parent_id: expected,
+        })
+        .await
+    }
+
+    /// 加载资产当前 head 的可移植 typed payload。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     投影/UI/扫描需要从 CAS 还原 Skill/Command/Agent/MCP canonical 形态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     get_asset → current revision → payload_hash → get_blob → from_canonical_bytes；
+    ///     无 head / 非 portable kind / 缺 payload 返回错误或 None。
+    pub async fn load_portable_asset(
+        &self,
+        asset_id: &str,
+        store: &ObjectStore,
+    ) -> Result<Option<PortableAssetPayload>, AppError> {
+        let Some(asset) = self.get_asset(asset_id).await? else {
+            return Ok(None);
+        };
+        match asset.kind {
+            AssetKind::Skill | AssetKind::Command | AssetKind::Agent | AssetKind::Mcp => {}
+            _ => {
+                return Err(AppError::validation(format!(
+                    "agent_hub_asset_kind_not_portable:{}",
+                    asset.kind.as_str()
+                )));
+            }
+        }
+        let Some(rev_id) = asset.current_revision_id else {
+            return Ok(None);
+        };
+        let Some(revision) = self.get_revision(&rev_id).await? else {
+            return Ok(None);
+        };
+        if revision.operation == RevisionOperation::Delete {
+            return Ok(None);
+        }
+        let Some(hash) = revision.payload_hash.as_deref() else {
+            return Err(AppError::validation(
+                "agent_hub_portable_revision_missing_payload_hash".to_string(),
+            ));
+        };
+        let bytes = store.get_blob(hash).await?;
+        let payload = from_canonical_bytes(&bytes)?;
+        ensure_kind_matches_payload(asset.kind, &payload)?;
+        Ok(Some(payload))
+    }
+
     /// 按 id 读取 revision（含有序 parents）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -568,6 +676,208 @@ impl AgentHubRepo {
                     updated_at: now,
                 })
             }
+        })
+        .await
+    }
+
+    /// 单 write-lease 事务：一条 Delete tombstone + fan-out Absent bindings。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     delete_everywhere 不得在 tombstone 成功、fan-out 中途失败时留下半状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     with_shared_write_lease → 同事务 append_revision(Delete, CAS head) + 逐 binding upsert Absent/disabled。
+    pub async fn delete_asset_everywhere_atomic(
+        &self,
+        asset_id: &str,
+        tombstone: NewRevision,
+        fan_out: Vec<NewTargetBinding>,
+    ) -> Result<Revision, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            if tombstone.operation != RevisionOperation::Delete {
+                return Err(AppError::validation(
+                    "agent_hub_delete_everywhere_requires_delete_revision",
+                ));
+            }
+            if tombstone.payload_hash.is_some() || tombstone.tree_manifest_hash.is_some() {
+                return Err(AppError::validation(
+                    "agent_hub_delete_revision_rejects_payload_hash",
+                ));
+            }
+            let mut tx = self.pool.begin().await?;
+
+            // lineage/asset 存在性
+            let asset_exists: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_assets WHERE id = ?")
+                    .bind(asset_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if asset_exists == 0 {
+                return Err(AppError::not_found("agent_hub_asset_not_found"));
+            }
+
+            let mut max_parent_generation: Option<u64> = None;
+            for parent in &tombstone.parents {
+                let gen: Option<i64> =
+                    sqlx::query_scalar("SELECT generation FROM agent_hub_revisions WHERE id = ?")
+                        .bind(parent.as_str())
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                let Some(g) = gen else {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_revision_parent_missing:{}",
+                        parent.as_str()
+                    )));
+                };
+                let g = g as u64;
+                max_parent_generation = Some(max_parent_generation.map_or(g, |m| m.max(g)));
+            }
+            let generation = max_parent_generation.map_or(0, |m| m.saturating_add(1));
+
+            let insert_result = sqlx::query(
+                "INSERT INTO agent_hub_revisions
+                 (id, asset_lineage_id, generation, operation, origin_kind, origin_target,
+                  origin_replica_id, payload_hash, tree_manifest_hash, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(tombstone.id.as_str())
+            .bind(&tombstone.asset_lineage_id)
+            .bind(generation as i64)
+            .bind(tombstone.operation.as_str())
+            .bind(tombstone.origin_kind.as_str())
+            .bind(tombstone.origin_target.map(|t| t.as_str()))
+            .bind(&tombstone.origin_replica_id)
+            .bind(&tombstone.payload_hash)
+            .bind(&tombstone.tree_manifest_hash)
+            .bind(&tombstone.created_at)
+            .execute(&mut *tx)
+            .await;
+            if let Err(e) = insert_result {
+                if is_unique_violation(&e) {
+                    return Err(AppError::conflict(
+                        "agent_hub_revision_id_conflict".to_string(),
+                    ));
+                }
+                return Err(e.into());
+            }
+
+            for (pos, parent) in tombstone.parents.iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO agent_hub_revision_parents
+                     (revision_id, parent_revision_id, parent_order)
+                     VALUES (?, ?, ?)",
+                )
+                .bind(tombstone.id.as_str())
+                .bind(parent.as_str())
+                .bind(pos as i64)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            let deleted_at = Some(tombstone.created_at.clone());
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(expected) = tombstone
+                .expected_parent_id
+                .as_ref()
+                .map(|r| r.as_str().to_string())
+            {
+                let result = sqlx::query(
+                    "UPDATE agent_hub_assets
+                     SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+                     WHERE id = ?
+                       AND (current_revision_id IS NULL OR current_revision_id = ?)",
+                )
+                .bind(tombstone.id.as_str())
+                .bind(&deleted_at)
+                .bind(&now)
+                .bind(asset_id)
+                .bind(&expected)
+                .execute(&mut *tx)
+                .await?;
+                if result.rows_affected() == 0 {
+                    return Err(AppError::conflict(
+                        "agent_hub_revision_conflict".to_string(),
+                    ));
+                }
+            } else {
+                sqlx::query(
+                    "UPDATE agent_hub_assets
+                     SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(tombstone.id.as_str())
+                .bind(&deleted_at)
+                .bind(&now)
+                .bind(asset_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            // fan-out Absent/disabled
+            for input in fan_out {
+                let mapping = input.local_scope_mapping_id.clone().unwrap_or_default();
+                let checkout = input.checkout_binding_id.clone().unwrap_or_default();
+                let existing: Option<(String, String)> = sqlx::query_as(
+                    "SELECT id, created_at FROM agent_hub_target_bindings
+                     WHERE asset_id = ? AND target = ?
+                       AND IFNULL(local_scope_mapping_id, '') = ?
+                       AND IFNULL(checkout_binding_id, '') = ?",
+                )
+                .bind(&input.asset_id)
+                .bind(input.target.as_str())
+                .bind(&mapping)
+                .bind(&checkout)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let bind_now = chrono::Utc::now().to_rfc3339();
+                if let Some((id, _)) = existing {
+                    sqlx::query(
+                        "UPDATE agent_hub_target_bindings
+                         SET desired_presence = ?, desired_enabled = ?, updated_at = ?
+                         WHERE id = ?",
+                    )
+                    .bind(input.desired_presence.as_str())
+                    .bind(if input.desired_enabled { 1_i64 } else { 0_i64 })
+                    .bind(&bind_now)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    sqlx::query(
+                        "INSERT INTO agent_hub_target_bindings
+                         (id, asset_id, target, local_scope_mapping_id, checkout_binding_id,
+                          desired_presence, desired_enabled, created_at, updated_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    )
+                    .bind(&id)
+                    .bind(&input.asset_id)
+                    .bind(input.target.as_str())
+                    .bind(&input.local_scope_mapping_id)
+                    .bind(&input.checkout_binding_id)
+                    .bind(input.desired_presence.as_str())
+                    .bind(if input.desired_enabled { 1_i64 } else { 0_i64 })
+                    .bind(&bind_now)
+                    .bind(&bind_now)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+
+            tx.commit().await?;
+            Ok(Revision {
+                id: tombstone.id,
+                asset_lineage_id: tombstone.asset_lineage_id,
+                parents: tombstone.parents,
+                generation,
+                operation: tombstone.operation,
+                origin_kind: tombstone.origin_kind,
+                origin_target: tombstone.origin_target,
+                origin_replica_id: tombstone.origin_replica_id,
+                payload_hash: tombstone.payload_hash,
+                tree_manifest_hash: tombstone.tree_manifest_hash,
+                created_at: tombstone.created_at,
+            })
         })
         .await
     }
@@ -1181,13 +1491,19 @@ impl AgentHubRepo {
         with_shared_write_lease(&self.gate, async {
             let mut tx = self.pool.begin().await?;
             let now = chrono::Utc::now().to_rfc3339();
-            // state CAS：仅 writing/prepared 可提交，防止已 committed/failed 的旧 job 覆盖
+            // state CAS：仅 writing/prepared 与 Gate B 激活中间态可提交，防止已 committed/failed 旧 job 覆盖
             // （attempt 在 writing 路径已 +1，内存 job.attempt 可能落后，故不强制 attempt 等值）
             let result = sqlx::query(
                 "UPDATE agent_hub_projection_jobs
                  SET state = ?, last_error = NULL, updated_at = ?
                  WHERE id = ?
-                   AND state IN ('writing', 'prepared')",
+                   AND state IN (
+                     'writing',
+                     'prepared',
+                     'packageWritten',
+                     'activationRequested',
+                     'activationVerified'
+                   )",
             )
             .bind(ProjectionJobState::Committed.as_str())
             .bind(&now)
@@ -1464,6 +1780,176 @@ impl AgentHubRepo {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_materialization).collect()
+    }
+
+    /// 按 (scope, kind, origin_namespace, logical_key) 查找资产。
+    ///
+    /// Business Logic: 纳管同一 skill 名时复用 shared LogicalAsset，避免双资产。
+    /// Code Logic: SELECT 唯一键。
+    pub async fn find_asset_by_key(
+        &self,
+        scope_id: &str,
+        kind: AssetKind,
+        origin_namespace: &str,
+        logical_key: &str,
+    ) -> Result<Option<LogicalAsset>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                    current_revision_id, deleted_at, created_at, updated_at
+             FROM agent_hub_assets
+             WHERE scope_id = ? AND kind = ? AND origin_namespace = ? AND logical_key = ?
+               AND deleted_at IS NULL
+             LIMIT 1",
+        )
+        .bind(scope_id)
+        .bind(kind.as_str())
+        .bind(origin_namespace)
+        .bind(logical_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_asset(&r)).transpose()
+    }
+
+    /// 写入/更新 adoption 行（Gate B Task 6）。
+    ///
+    /// Business Logic: prepared→activated→archived→committed 需可崩溃恢复。
+    /// Code Logic: INSERT OR REPLACE by id。
+    pub async fn upsert_adoption(&self, rec: AdoptionRecord) -> Result<AdoptionRecord, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO agent_hub_adoptions (
+                    id, asset_id, target, origin_path, origin_tree_hash, archive_tree_hash,
+                    materialization_id, package_id, staging_path, state, last_error,
+                    confirmed, created_at, updated_at
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    asset_id=excluded.asset_id,
+                    target=excluded.target,
+                    origin_path=excluded.origin_path,
+                    origin_tree_hash=excluded.origin_tree_hash,
+                    archive_tree_hash=excluded.archive_tree_hash,
+                    materialization_id=excluded.materialization_id,
+                    package_id=excluded.package_id,
+                    staging_path=excluded.staging_path,
+                    state=excluded.state,
+                    last_error=excluded.last_error,
+                    confirmed=excluded.confirmed,
+                    updated_at=excluded.updated_at",
+            )
+            .bind(&rec.id)
+            .bind(rec.asset_id.as_deref())
+            .bind(rec.target.as_str())
+            .bind(&rec.origin_path)
+            .bind(&rec.origin_tree_hash)
+            .bind(rec.archive_tree_hash.as_deref())
+            .bind(rec.materialization_id.as_deref())
+            .bind(rec.package_id.as_deref())
+            .bind(rec.staging_path.as_deref())
+            .bind(rec.state.as_str())
+            .bind(rec.last_error.as_deref())
+            .bind(if rec.confirmed { 1 } else { 0 })
+            .bind(&rec.created_at)
+            .bind(&rec.updated_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(rec)
+        })
+        .await
+    }
+
+    /// 更新 adoption 状态与可选字段。
+    ///
+    /// Business Logic: 事务步骤推进时局部更新，避免整行重写竞态。
+    /// Code Logic: UPDATE SET state/... WHERE id。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_adoption_state(
+        &self,
+        id: &str,
+        state: AdoptionState,
+        last_error: Option<&str>,
+        asset_id: Option<&str>,
+        package_id: Option<&str>,
+        archive_tree_hash: Option<&str>,
+        materialization_id: Option<&str>,
+        staging_path: Option<&str>,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let n = sqlx::query(
+                "UPDATE agent_hub_adoptions
+                 SET state = ?,
+                     last_error = COALESCE(?, last_error),
+                     asset_id = COALESCE(?, asset_id),
+                     package_id = COALESCE(?, package_id),
+                     archive_tree_hash = COALESCE(?, archive_tree_hash),
+                     materialization_id = COALESCE(?, materialization_id),
+                     staging_path = COALESCE(?, staging_path),
+                     updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(state.as_str())
+            .bind(last_error)
+            .bind(asset_id)
+            .bind(package_id)
+            .bind(archive_tree_hash)
+            .bind(materialization_id)
+            .bind(staging_path)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if n == 0 {
+                return Err(AppError::not_found(format!(
+                    "agent_hub_adoption_not_found:{id}"
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 读取单条 adoption。
+    pub async fn get_adoption(&self, id: &str) -> Result<Option<AdoptionRecord>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, asset_id, target, origin_path, origin_tree_hash, archive_tree_hash,
+                    materialization_id, package_id, staging_path, state, last_error,
+                    confirmed, created_at, updated_at
+             FROM agent_hub_adoptions WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_adoption(&r)).transpose()
+    }
+
+    /// 列出全部 adoption（recovery / 测试）。
+    pub async fn list_adoptions(&self) -> Result<Vec<AdoptionRecord>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, origin_path, origin_tree_hash, archive_tree_hash,
+                    materialization_id, package_id, staging_path, state, last_error,
+                    confirmed, created_at, updated_at
+             FROM agent_hub_adoptions
+             ORDER BY updated_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_adoption).collect()
+    }
+
+    /// 列出未完成 adoption（prepared/activated/archived）供 startup recovery。
+    pub async fn list_incomplete_adoptions(&self) -> Result<Vec<AdoptionRecord>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, origin_path, origin_tree_hash, archive_tree_hash,
+                    materialization_id, package_id, staging_path, state, last_error,
+                    confirmed, created_at, updated_at
+             FROM agent_hub_adoptions
+             WHERE state IN ('prepared', 'activated', 'archived')
+             ORDER BY updated_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_adoption).collect()
     }
 
     /// 列出全部未解决 conflict（Attention 投影用）。
@@ -1930,6 +2416,26 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
      ON agent_hub_revision_parents(parent_revision_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_assets_scope
      ON agent_hub_assets(scope_id)",
+    "CREATE TABLE IF NOT EXISTS agent_hub_adoptions (
+        id TEXT PRIMARY KEY,
+        asset_id TEXT,
+        target TEXT NOT NULL,
+        origin_path TEXT NOT NULL,
+        origin_tree_hash TEXT NOT NULL,
+        archive_tree_hash TEXT,
+        materialization_id TEXT,
+        package_id TEXT,
+        staging_path TEXT,
+        state TEXT NOT NULL,
+        last_error TEXT,
+        confirmed INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_adoptions_state
+     ON agent_hub_adoptions(state, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_adoptions_origin
+     ON agent_hub_adoptions(origin_path)",
 ];
 
 /// 升级旧库：为 mappings/bindings 补列与唯一索引。
@@ -2389,6 +2895,37 @@ fn row_to_materialization(row: &SqliteRow) -> Result<Materialization, AppError> 
     })
 }
 
+/// 解析 adoption 行。
+///
+/// Business Logic: crash recovery / UI 需要完整 AdoptionRecord。
+/// Code Logic: 解析 target/state 枚举与 confirmed 整型。
+fn row_to_adoption(row: &SqliteRow) -> Result<AdoptionRecord, AppError> {
+    let target_raw: String = row.try_get("target")?;
+    let target = AgentTarget::parse(&target_raw)
+        .ok_or_else(|| AppError::generic(format!("agent_hub_unknown_agent_target:{target_raw}")))?;
+    let state_raw: String = row.try_get("state")?;
+    let state = AdoptionState::parse(&state_raw).ok_or_else(|| {
+        AppError::generic(format!("agent_hub_unknown_adoption_state:{state_raw}"))
+    })?;
+    let confirmed_i: i64 = row.try_get("confirmed")?;
+    Ok(AdoptionRecord {
+        id: row.try_get("id")?,
+        asset_id: row.try_get("asset_id")?,
+        target,
+        origin_path: row.try_get("origin_path")?,
+        origin_tree_hash: row.try_get("origin_tree_hash")?,
+        archive_tree_hash: row.try_get("archive_tree_hash")?,
+        materialization_id: row.try_get("materialization_id")?,
+        package_id: row.try_get("package_id")?,
+        staging_path: row.try_get("staging_path")?,
+        state,
+        last_error: row.try_get("last_error")?,
+        confirmed: confirmed_i != 0,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2754,6 +3291,191 @@ mod tests {
         );
     }
 
+    /// Business Logic: disable 一 target 后其它 binding + canonical revision 不变。
+    /// Code Logic: Claude enabled=false；Codex present/enabled 与 head revision 保持。
+    #[tokio::test]
+    async fn disable_one_target_leaves_other_bindings_and_revision_untouched() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: "rev-keep".into(),
+                display_name: "rev-keep".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let rev = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "dev".into(),
+                payload_hash: Some("aa".repeat(32)),
+                tree_manifest_hash: None,
+                created_at: "t0".into(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        let head_before = rev.id.clone();
+        repo.upsert_target_binding(NewTargetBinding {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: true,
+        })
+        .await
+        .unwrap();
+        repo.upsert_target_binding(NewTargetBinding {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Codex,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: true,
+        })
+        .await
+        .unwrap();
+
+        // disable Claude only
+        repo.upsert_target_binding(NewTargetBinding {
+            asset_id: asset.id.clone(),
+            target: AgentTarget::Claude,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: false,
+        })
+        .await
+        .unwrap();
+
+        let listed = repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        let claude = listed
+            .iter()
+            .find(|b| b.target == AgentTarget::Claude)
+            .unwrap();
+        let codex = listed
+            .iter()
+            .find(|b| b.target == AgentTarget::Codex)
+            .unwrap();
+        assert!(!claude.desired_enabled);
+        assert_eq!(claude.desired_presence, DesiredPresence::Present);
+        assert!(codex.desired_enabled);
+        assert_eq!(codex.desired_presence, DesiredPresence::Present);
+        let asset_after = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(
+            asset_after.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(head_before.as_str())
+        );
+        assert!(asset_after.deleted_at.is_none());
+    }
+
+    /// Business Logic: delete_everywhere 语义下 fan-out Absent + 一条 delete tombstone。
+    /// Code Logic: 两个 present binding → Absent/disabled；append 一次 Delete revision。
+    #[tokio::test]
+    async fn delete_everywhere_fans_out_absent_and_one_tombstone() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "everywhere".into(),
+                display_name: "everywhere".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let r1 = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "dev".into(),
+                payload_hash: Some("bb".repeat(32)),
+                tree_manifest_hash: None,
+                created_at: "t0".into(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        for target in [AgentTarget::Claude, AgentTarget::Codex] {
+            repo.upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .unwrap();
+        }
+
+        // fan-out absent
+        for target in [AgentTarget::Claude, AgentTarget::Codex] {
+            repo.upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Absent,
+                desired_enabled: false,
+            })
+            .await
+            .unwrap();
+        }
+        // one tombstone
+        let tomb = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![r1.id.clone()],
+                operation: RevisionOperation::Delete,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "dev".into(),
+                payload_hash: None,
+                tree_manifest_hash: None,
+                created_at: "t1".into(),
+                expected_parent_id: Some(r1.id.clone()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tomb.operation, RevisionOperation::Delete);
+
+        let listed = repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed
+            .iter()
+            .all(|b| { b.desired_presence == DesiredPresence::Absent && !b.desired_enabled }));
+        let asset_after = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(
+            asset_after.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(tomb.id.as_str())
+        );
+        assert!(asset_after.deleted_at.is_some());
+    }
+
     /// Business Logic: 并发写同一 head 时后写必须 CAS 失败，不得静默覆盖。
     /// Code Logic: 两次 append 相同 expected_parent_id，第二次 conflict。
     #[tokio::test]
@@ -2823,5 +3545,190 @@ mod tests {
         assert_eq!(err.code(), "agent_hub_revision_conflict");
         let head = repo.get_asset(&asset.id).await.unwrap().unwrap();
         assert_eq!(head.current_revision_id.unwrap().as_str(), "cas-r2");
+    }
+
+    #[tokio::test]
+    async fn portable_mcp_revision_round_trip_preserves_secrets_in_cas() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Mcp,
+                origin_namespace: "standalone".into(),
+                logical_key: "private-api".into(),
+                display_name: "private-api".into(),
+                policy: AssetPolicy::Adapted,
+            })
+            .await
+            .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let payload = PortableAssetPayload::Mcp(crate::agent_hub::assets::PortableMcpServer {
+            key: "private-api".into(),
+            transport: crate::agent_hub::assets::McpTransport::Http {
+                url: "https://example.invalid/mcp?token=plain-fixture".into(),
+                headers: std::collections::BTreeMap::from([(
+                    "Authorization".into(),
+                    "Bearer plain-fixture".into(),
+                )]),
+            },
+            env: std::collections::BTreeMap::from([("API_TOKEN".into(), "plain-fixture".into())]),
+            enabled: true,
+            tool_allow: vec![],
+            tool_deny: vec![],
+            target_extensions: std::collections::BTreeMap::new(),
+        });
+
+        let rev = repo
+            .append_portable_asset_revision(
+                &asset.id,
+                &payload,
+                &store,
+                RevisionOriginKind::Ui,
+                None,
+                "device-1",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(rev.payload_hash.is_some());
+        assert!(rev.tree_manifest_hash.is_none());
+
+        let loaded = repo
+            .load_portable_asset(&asset.id, &store)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, payload);
+
+        // CAS blob still holds exact secrets
+        let bytes = store
+            .get_blob(rev.payload_hash.as_deref().unwrap())
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("plain-fixture"));
+        assert!(text.contains("Bearer plain-fixture"));
+    }
+
+    #[tokio::test]
+    async fn portable_kind_mismatch_rejected_before_write() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Command,
+                origin_namespace: "standalone".into(),
+                logical_key: "ship".into(),
+                display_name: "ship".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let skill = PortableAssetPayload::Skill(crate::agent_hub::assets::PortableSkill {
+            name: "review".into(),
+            description: "d".into(),
+            skill_markdown_hash: "a".repeat(64),
+            tree_manifest_hash: "b".repeat(64),
+            target_extensions: std::collections::BTreeMap::new(),
+        });
+        let err = repo
+            .append_portable_asset_revision(
+                &asset.id,
+                &skill,
+                &store,
+                RevisionOriginKind::Ui,
+                None,
+                "d",
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("kind_mismatch") || err.code().contains("kind_mismatch"));
+        // no revision head
+        let a = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert!(a.current_revision_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn portable_skill_binary_supporting_file_round_trip() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Skill,
+                origin_namespace: "standalone".into(),
+                logical_key: "review".into(),
+                display_name: "review".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+
+        // binary supporting file exact bytes
+        let bin = vec![0u8, 1, 2, 255, 0, 128];
+        let bin_obj = store.put_blob(&bin).await.unwrap();
+        let md = b"# Review\n\nDo review.\n".to_vec();
+        let md_obj = store.put_blob(&md).await.unwrap();
+        let tree = crate::agent_hub::object_store::TreeManifest {
+            entries: vec![
+                crate::agent_hub::object_store::TreeEntry {
+                    path: "SKILL.md".into(),
+                    blob_hash: md_obj.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                },
+                crate::agent_hub::object_store::TreeEntry {
+                    path: "assets/icon.bin".into(),
+                    blob_hash: bin_obj.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                },
+            ],
+        };
+        let tree_obj = store.put_tree(&tree).await.unwrap();
+
+        let payload = PortableAssetPayload::Skill(crate::agent_hub::assets::PortableSkill {
+            name: "review".into(),
+            description: "Review skill".into(),
+            skill_markdown_hash: md_obj.hash.clone(),
+            tree_manifest_hash: tree_obj.hash.clone(),
+            target_extensions: std::collections::BTreeMap::new(),
+        });
+        let rev = repo
+            .append_portable_asset_revision(
+                &asset.id,
+                &payload,
+                &store,
+                RevisionOriginKind::Filesystem,
+                Some(AgentTarget::Claude),
+                "d",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rev.tree_manifest_hash.as_deref(),
+            Some(tree_obj.hash.as_str())
+        );
+
+        let loaded = repo
+            .load_portable_asset(&asset.id, &store)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, payload);
+
+        // binary unchanged
+        let again = store.get_blob(&bin_obj.hash).await.unwrap();
+        assert_eq!(again, bin);
     }
 }

@@ -69,6 +69,21 @@ export type MaterializationStatus =
   | string;
 
 /**
+ * 资产聚合状态（Gate B Task 7/8）。
+ *
+ * Business Logic: 列表与矩阵汇总 full/partial 与阻塞态，禁止仅凭 package write 推断 full。
+ * Code Logic: 严格 wire token。
+ */
+export type AssetAggregateStatus =
+  | 'full'
+  | 'partial'
+  | 'sourceOnly'
+  | 'activationRequired'
+  | 'externalCollision'
+  | 'detached'
+  | 'blocked';
+
+/**
  * 单 CLI 探测结果。
  *
  * Business Logic: 页面顶部展示可执行文件、版本与支持级别。
@@ -102,8 +117,8 @@ export interface AgentHubStatus {
 /**
  * 资产在某一 target 上的单元格。
  *
- * Business Logic: 列表行按 Claude/Codex/OpenCode 三列展示投影状态。
- * Code Logic: desired presence + enabled + optional materialization。
+ * Business Logic: 列表行按 Claude/Codex/OpenCode 三列展示投影状态与聚合输入。
+ * Code Logic: desired + materialization + requested/supported/sourceOnly/verified。
  */
 export interface AgentHubTargetCell {
   target: AgentTarget;
@@ -111,18 +126,32 @@ export interface AgentHubTargetCell {
   desiredEnabled: boolean;
   materializationStatus?: MaterializationStatus | null;
   lastError?: string | null;
+  /** 是否在 requested 集合（有 binding 行） */
+  requested: boolean;
+  /** 目标当前是否 supported */
+  supported: boolean;
+  /** 是否仅 sourceOnly（无可投影 materialization） */
+  sourceOnly: boolean;
+  /** 是否 verified（package activation/list 通过；指令 Synced 即 verified） */
+  verified: boolean;
+  /**
+   * 可选 materialized invocation alias（若后端未来透传）。
+   * Business Logic: 与 canonical displayName 分开展示。
+   */
+  invocationAlias?: string | null;
 }
 
 /**
  * 资产列表摘要。
  *
- * Business Logic: Hub 列表以 instruction 为主展示逻辑资产。
- * Code Logic: 含 targets 三元单元格与冲突标记。
+ * Business Logic: Hub 列表以 instruction/portable 资产为主展示逻辑资产。
+ * Code Logic: 含 targets 三元单元格、冲突标记与 aggregateStatus。
  */
 export interface AgentHubAssetSummary {
   assetId: string;
   scopeId: string;
   kind: string;
+  /** Canonical 名称（与 materialized alias 分离） */
   displayName: string;
   logicalKey: string;
   originNamespace: string;
@@ -130,6 +159,10 @@ export interface AgentHubAssetSummary {
   currentRevisionId?: string | null;
   targets: AgentHubTargetCell[];
   hasConflict?: boolean;
+  /**
+   * 派生聚合状态：full|partial|sourceOnly|activationRequired|externalCollision|detached|blocked
+   */
+  aggregateStatus: AssetAggregateStatus;
 }
 
 /**
@@ -215,4 +248,20 @@ export interface AgentHubProjectStatus {
 export interface AgentHubSnapshot {
   status: AgentHubStatus;
   assets: AgentHubAssetSummary[];
+}
+
+/**
+ * externalCollision / adoption 预览（UI 侧从资产单元格派生）。
+ *
+ * Business Logic: Task 8 碰撞对话框展示来源与诊断；不发明后端 adopt IPC。
+ * Code Logic: pure view model。
+ */
+export interface AgentHubAdoptionPreview {
+  assetId: string;
+  displayName: string;
+  logicalKey: string;
+  originNamespace: string;
+  target: AgentTarget;
+  diagnostics: string[];
+  aggregateStatus: AssetAggregateStatus;
 }

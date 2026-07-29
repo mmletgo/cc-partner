@@ -95,6 +95,11 @@ jobs:
           node scripts/check-quality-traceability.mjs --self-test
           node scripts/check-quality-traceability.mjs
 
+      - name: Agent Hub support manifest contract
+        run: |
+          node scripts/check-agent-hub-support-manifest.mjs --self-test
+          node scripts/check-agent-hub-support-manifest.mjs --gate-b
+
       - name: Frontend build (tsc 类型检查 + vite build)
         run: cd web && npm run build
 
@@ -112,6 +117,30 @@ jobs:
       - name: Rust tests
         working-directory: src-tauri
         run: cargo test --locked
+
+      # Gate B Task 4：从 support-manifest 读取 pinned min/current 版本。
+      # 无 reproducible installer 的 target 保持 write=Blocked，本 job 只打印版本并确认
+      # 非 ignored 合同 harness 编译；不把“本地碰巧装了 CLI”提升为 L3 PASS。
+      - name: Agent Hub support unit + CLI contract compile
+        working-directory: src-tauri
+        run: |
+          cargo test --locked agent_hub::support --lib
+          cargo test --locked --test agent_hub_cli_contract
+          node -e "
+            const fs=require('fs');
+            const m=JSON.parse(fs.readFileSync('../src-tauri/src/agent_hub/support/support-manifest.json','utf8'));
+            for (const t of m.targets) {
+              console.log(
+                'pinned', t.target,
+                'min=' + t.minTestedVersion,
+                'current=' + t.currentTestedVersion,
+                'writeCaps=' + Object.entries(t.capabilities||{})
+                  .filter(([k,v]) => /render|activate|deactivate|liveReload/i.test(k))
+                  .map(([k,v]) => k+':'+v).join(',')
+              );
+            }
+            console.log('NOTE: ignored L3 contract tests require CC_PARTNER_L3_TARGET + installed CLI; not executed here');
+          "
 
   frontend-unit:
     name: Frontend Unit (Vitest)

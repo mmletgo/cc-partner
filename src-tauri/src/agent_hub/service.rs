@@ -10,10 +10,12 @@
 
 use crate::agent_hub::instructions::{InstructionBlock, InstructionBlockMode, InstructionDocument};
 use crate::agent_hub::models::{
-    AgentTarget, AssetKind, DesiredPresence, LogicalAsset, Materialization, NewRevision,
-    NewTargetBinding, RevisionId, RevisionOperation, RevisionOriginKind,
+    compute_asset_aggregate_status, AgentTarget, AssetKind, DesiredPresence, LogicalAsset,
+    Materialization, MaterializationStatus, NewMaterialization, NewRevision, NewTargetBinding,
+    RevisionId, RevisionOperation, RevisionOriginKind, TargetBinding, TargetBindingIntent,
+    TargetBindingTransition, TargetDisableStrategy, TargetStatusSnapshot,
 };
-use crate::agent_hub::object_store::ObjectStore;
+use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::project_scope::{
     build_project_enable_preview, enable_project_scope, AgentHubProjectPreview,
     AgentHubProjectStatus, EnableAgentHubProjectRequest,
@@ -80,10 +82,11 @@ pub struct AgentHubStatusDto {
 /// 资产 target 单元格。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     列表按 Claude/Codex/OpenCode 三列展示 desired 与 materialization。
+///     列表按 Claude/Codex/OpenCode 三列展示 desired 与 materialization；
+///     Task 8 矩阵需要 supported/verified/sourceOnly 输入，禁止仅凭 Synced 推断 full。
 ///
 /// Code Logic（这个结构体做什么）:
-///     camelCase 单元格（无 binding id，供前端矩阵）。
+///     camelCase 单元格（无 binding id）+ 聚合输入字段。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentHubTargetCellDto {
@@ -92,6 +95,14 @@ pub struct AgentHubTargetCellDto {
     pub desired_enabled: bool,
     pub materialization_status: Option<String>,
     pub last_error: Option<String>,
+    /// 是否在 requested 集合（有 binding 行）
+    pub requested: bool,
+    /// 目标当前是否 supported（probe 失败/unsupported → false）
+    pub supported: bool,
+    /// 是否仅 sourceOnly（无可投影 materialization）
+    pub source_only: bool,
+    /// 是否 verified（package activation/list 通过；指令 Synced 即 verified）
+    pub verified: bool,
 }
 
 /// 资产在某一 target 上的绑定摘要（含 id）。
@@ -116,10 +127,10 @@ pub struct AgentHubTargetBindingDto {
 /// 资产列表摘要。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     Hub 列表展示 logical asset 与 target 单元格。
+///     Hub 列表展示 logical asset 与 target 单元格；聚合态供矩阵 UI 直接消费。
 ///
 /// Code Logic（这个结构体做什么）:
-///     camelCase summary + hasConflict。
+///     camelCase summary + hasConflict + aggregateStatus。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentHubAssetSummaryDto {
@@ -133,6 +144,8 @@ pub struct AgentHubAssetSummaryDto {
     pub current_revision_id: Option<String>,
     pub targets: Vec<AgentHubTargetCellDto>,
     pub has_conflict: bool,
+    /// 派生聚合状态：`full|partial|sourceOnly|activationRequired|externalCollision|detached|blocked`
+    pub aggregate_status: String,
 }
 
 /// 指令块 DTO。
@@ -176,7 +189,7 @@ pub struct AgentHubConflictDto {
 /// 资产详情。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     选中资产后展示矩阵、正文、块与冲突。
+///     选中资产后展示矩阵、正文、块与冲突；聚合态与 summary 同源。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     扁平 summary 字段 + blocks/content/conflicts。
@@ -193,6 +206,8 @@ pub struct AgentHubAssetDetailDto {
     pub current_revision_id: Option<String>,
     pub targets: Vec<AgentHubTargetCellDto>,
     pub has_conflict: bool,
+    /// 派生聚合状态（与 summary 同源）
+    pub aggregate_status: String,
     pub blocks: Vec<InstructionBlockDto>,
     pub content_markdown: Option<String>,
     pub conflicts: Vec<AgentHubConflictDto>,
@@ -291,6 +306,47 @@ pub struct SetTargetBindingRequest {
     pub target: AgentTarget,
     pub desired_presence: DesiredPresence,
     pub desired_enabled: bool,
+}
+
+/// 设置 target presence 请求。
+///
+/// Business Logic: desiredPresence 是 target-local；Absent 只卸该 target。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTargetPresenceRequest {
+    pub asset_id: String,
+    pub target: AgentTarget,
+    pub desired_presence: DesiredPresence,
+}
+
+/// 设置 target enabled 请求。
+///
+/// Business Logic: desiredEnabled 是 target-local；不改其它 CLI。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTargetEnabledRequest {
+    pub asset_id: String,
+    pub target: AgentTarget,
+    pub desired_enabled: bool,
+}
+
+/// 恢复 detached target 请求。
+///
+/// Business Logic: 外部整文件删除后用户显式恢复，调度投影。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDetachedTargetRequest {
+    pub asset_id: String,
+    pub target: AgentTarget,
+}
+
+/// 从所有 target 删除资产请求。
+///
+/// Business Logic: 唯一生成 canonical tombstone 的入口。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAssetEverywhereRequest {
+    pub asset_id: String,
 }
 
 /// 冲突解决策略枚举（自由函数 API 使用）。
@@ -584,6 +640,511 @@ impl AgentHubService {
         let asset = load_asset_or_not_found(state, &req.asset_id).await?;
         build_summary(state, &asset).await
     }
+
+    /// Business Logic: 设置 target-local desiredPresence。
+    /// Code Logic: apply_intent → upsert binding → 可选 schedule。
+    pub async fn set_target_presence(
+        state: &AppState,
+        req: SetTargetPresenceRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        apply_target_intent(
+            state,
+            &req.asset_id,
+            req.target,
+            TargetBindingIntent::SetPresence(req.desired_presence),
+        )
+        .await
+    }
+
+    /// Business Logic: 设置 target-local desiredEnabled。
+    /// Code Logic: apply_intent → upsert enabled → schedule。
+    pub async fn set_target_enabled(
+        state: &AppState,
+        req: SetTargetEnabledRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        apply_target_intent(
+            state,
+            &req.asset_id,
+            req.target,
+            TargetBindingIntent::SetEnabled(req.desired_enabled),
+        )
+        .await
+    }
+
+    /// Business Logic: 恢复 detached materialization 并调度投影。
+    /// Code Logic: apply_intent RestoreDetached → clear Detached → Present schedule。
+    pub async fn restore_detached_target(
+        state: &AppState,
+        req: RestoreDetachedTargetRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        apply_target_intent(
+            state,
+            &req.asset_id,
+            req.target,
+            TargetBindingIntent::RestoreDetached,
+        )
+        .await
+    }
+
+    /// Business Logic: 一条 canonical tombstone + 全部 target fan-out Absent。
+    /// Code Logic: apply_intent DeleteEverywhere（target 参数仅用于定位策略入口）。
+    pub async fn delete_asset_everywhere(
+        state: &AppState,
+        req: DeleteAssetEverywhereRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        let asset = load_asset_or_not_found(state, &req.asset_id).await?;
+        let bindings = state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await?;
+        // 任选一个 present binding 或首个 binding 作为意图入口
+        let entry_target = bindings
+            .iter()
+            .find(|b| b.desired_presence == DesiredPresence::Present)
+            .or(bindings.first())
+            .map(|b| b.target)
+            .unwrap_or(AgentTarget::Claude);
+        apply_target_intent(
+            state,
+            &req.asset_id,
+            entry_target,
+            TargetBindingIntent::DeleteEverywhere,
+        )
+        .await
+    }
+}
+
+/// 执行 target binding 意图（presence/enabled/restore/everywhere）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     四条命令共享同一转移表；禁止各自猜测 tombstone。
+///
+/// Code Logic（这个函数做什么）:
+///     加载 binding/materialization → apply_intent → 写库/调度 → summary。
+async fn apply_target_intent(
+    state: &AppState,
+    asset_id: &str,
+    target: AgentTarget,
+    intent: TargetBindingIntent,
+) -> Result<AgentHubAssetSummaryDto, AppError> {
+    let asset = load_asset_or_not_found(state, asset_id).await?;
+    let bindings = state
+        .agent_hub_repo
+        .list_target_bindings_for_asset(&asset.id)
+        .await?;
+    let present_count = bindings
+        .iter()
+        .filter(|b| b.desired_presence == DesiredPresence::Present)
+        .count();
+    let binding = bindings
+        .iter()
+        .find(|b| b.target == target)
+        .cloned()
+        .unwrap_or(TargetBinding {
+            id: String::new(),
+            asset_id: asset.id.clone(),
+            target,
+            local_scope_mapping_id: None,
+            checkout_binding_id: None,
+            desired_presence: DesiredPresence::Absent,
+            desired_enabled: false,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        });
+    let mat = if binding.id.is_empty() {
+        None
+    } else {
+        state
+            .agent_hub_repo
+            .get_materialization_by_binding(&binding.id)
+            .await?
+    };
+    // Absent / DeleteEverywhere 前先计算 removal-blocked 预览；绑定尚未变更。
+    let needs_removal_preflight = matches!(
+        intent,
+        TargetBindingIntent::SetPresence(DesiredPresence::Absent)
+            | TargetBindingIntent::DeleteEverywhere
+    );
+    let removal_blocked = if needs_removal_preflight {
+        match intent {
+            TargetBindingIntent::DeleteEverywhere => {
+                collect_removal_blocked_for_asset(state, &asset.id).await?
+            }
+            _ => compute_removal_blocked_paths(mat.as_ref()),
+        }
+    } else {
+        Vec::new()
+    };
+    let transition = binding.apply_intent(
+        intent,
+        mat.as_ref().map(|m| m.status),
+        asset.policy,
+        present_count,
+        &removal_blocked,
+    );
+
+    match transition {
+        TargetBindingTransition::UpdateEnabled {
+            desired_enabled,
+            disable_strategy,
+            schedule_projection,
+        } => {
+            let updated = state
+                .agent_hub_repo
+                .upsert_target_binding(NewTargetBinding {
+                    asset_id: asset.id.clone(),
+                    target,
+                    local_scope_mapping_id: binding.local_scope_mapping_id.clone(),
+                    checkout_binding_id: binding.checkout_binding_id.clone(),
+                    desired_presence: binding.desired_presence,
+                    desired_enabled,
+                })
+                .await?;
+            // disable 必须落到 adapter 策略，而非仅 flip DB 位。
+            if !desired_enabled {
+                apply_disable_strategy(state, &asset, &updated, mat.as_ref(), disable_strategy)
+                    .await?;
+            } else if let Some(m) = mat.as_ref() {
+                // re-enable：Pending 等待投影/激活重新应用
+                state
+                    .agent_hub_repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: asset.id.clone(),
+                        target,
+                        target_binding_id: updated.id.clone(),
+                        native_path: m.native_path.clone(),
+                        last_projected_revision_id: m.last_projected_revision_id.clone(),
+                        rendered_hash: m.rendered_hash.clone(),
+                        observed_external_hash: m.observed_external_hash.clone(),
+                        status: MaterializationStatus::Pending,
+                        last_error: Some(format!("enable_strategy:{}", disable_strategy.as_str())),
+                    })
+                    .await?;
+            }
+            if schedule_projection {
+                schedule_after_binding_change(state, &asset.id).await;
+            }
+        }
+        TargetBindingTransition::UpdatePresence {
+            desired_presence,
+            schedule_projection,
+            ..
+        } => {
+            let enabled = if desired_presence == DesiredPresence::Absent {
+                false
+            } else {
+                binding.desired_enabled
+            };
+            state
+                .agent_hub_repo
+                .upsert_target_binding(NewTargetBinding {
+                    asset_id: asset.id.clone(),
+                    target,
+                    local_scope_mapping_id: binding.local_scope_mapping_id.clone(),
+                    checkout_binding_id: binding.checkout_binding_id.clone(),
+                    desired_presence,
+                    desired_enabled: enabled,
+                })
+                .await?;
+            if schedule_projection {
+                schedule_after_binding_change(state, &asset.id).await;
+            }
+        }
+        TargetBindingTransition::RestoreDetached {
+            desired_presence,
+            schedule_projection,
+            clear_detached_status,
+        } => {
+            let updated = state
+                .agent_hub_repo
+                .upsert_target_binding(NewTargetBinding {
+                    asset_id: asset.id.clone(),
+                    target,
+                    local_scope_mapping_id: binding.local_scope_mapping_id.clone(),
+                    checkout_binding_id: binding.checkout_binding_id.clone(),
+                    desired_presence,
+                    desired_enabled: true,
+                })
+                .await?;
+            if clear_detached_status {
+                // Pending 表示等待投影；禁止保持 Detached 否则 scheduler 会 no-op
+                state
+                    .agent_hub_repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: asset.id.clone(),
+                        target,
+                        target_binding_id: updated.id.clone(),
+                        native_path: mat.as_ref().and_then(|m| m.native_path.clone()),
+                        last_projected_revision_id: mat
+                            .as_ref()
+                            .and_then(|m| m.last_projected_revision_id.clone()),
+                        rendered_hash: mat.as_ref().and_then(|m| m.rendered_hash.clone()),
+                        observed_external_hash: None,
+                        status: MaterializationStatus::Pending,
+                        last_error: None,
+                    })
+                    .await?;
+            }
+            if schedule_projection {
+                schedule_after_binding_change(state, &asset.id).await;
+            }
+        }
+        TargetBindingTransition::DeleteEverywhere {
+            append_canonical_tombstone,
+            fan_out_absent,
+        } => {
+            // 单 write-lease 事务：tombstone + fan-out，避免中途失败留下半状态。
+            if append_canonical_tombstone || fan_out_absent {
+                let parents = asset
+                    .current_revision_id
+                    .clone()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let expected_parent_id = asset.current_revision_id.clone();
+                let fan_out: Vec<NewTargetBinding> = {
+                    let all = state
+                        .agent_hub_repo
+                        .list_target_bindings_for_asset(&asset.id)
+                        .await?;
+                    if all.is_empty() {
+                        vec![NewTargetBinding {
+                            asset_id: asset.id.clone(),
+                            target,
+                            local_scope_mapping_id: None,
+                            checkout_binding_id: None,
+                            desired_presence: DesiredPresence::Absent,
+                            desired_enabled: false,
+                        }]
+                    } else {
+                        all.into_iter()
+                            .map(|b| NewTargetBinding {
+                                asset_id: asset.id.clone(),
+                                target: b.target,
+                                local_scope_mapping_id: b.local_scope_mapping_id,
+                                checkout_binding_id: b.checkout_binding_id,
+                                desired_presence: DesiredPresence::Absent,
+                                desired_enabled: false,
+                            })
+                            .collect()
+                    }
+                };
+                state
+                    .agent_hub_repo
+                    .delete_asset_everywhere_atomic(
+                        &asset.id,
+                        NewRevision {
+                            id: RevisionId::new_v7(),
+                            asset_lineage_id: asset.id.clone(),
+                            parents,
+                            operation: RevisionOperation::Delete,
+                            origin_kind: RevisionOriginKind::Ui,
+                            origin_target: None,
+                            origin_replica_id: state.device_id.as_str().to_string(),
+                            payload_hash: None,
+                            tree_manifest_hash: None,
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            expected_parent_id,
+                        },
+                        fan_out,
+                    )
+                    .await?;
+                schedule_after_binding_change(state, &asset.id).await;
+            }
+        }
+        TargetBindingTransition::RejectLastTargetOnlyRequiresEverywhere { code } => {
+            return Err(AppError::validation(code));
+        }
+        TargetBindingTransition::RejectRemovalBlocked {
+            code,
+            preview_paths,
+        } => {
+            return Err(AppError::validation(format!(
+                "{code}:{}",
+                preview_paths.join(",")
+            )));
+        }
+    }
+
+    let asset = load_asset_or_not_found(state, asset_id).await?;
+    build_summary(state, &asset).await
+}
+
+/// ensure enabled + schedule projections（best-effort）。
+async fn schedule_after_binding_change(state: &AppState, asset_id: &str) {
+    if let Err(e) = crate::agent_hub::projection_ops::ensure_agent_hub_enabled(state).await {
+        tracing::warn!(error = %e, "agent_hub binding change ensure enabled failed");
+    }
+    if let Err(e) =
+        crate::agent_hub::projection_ops::schedule_asset_projections(state, asset_id).await
+    {
+        tracing::warn!(
+            asset_id = %asset_id,
+            error = %e,
+            "agent_hub binding change schedule projections failed"
+        );
+    }
+}
+
+/// 计算单个 materialization 的 removal-blocked 路径预览。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Absent 前必须返回精确 preview；外部改动/未知子项不得先把 binding 标 Absent。
+///
+/// Code Logic（这个函数做什么）:
+///     文件：current hash 与 rendered/observed 均不一致 → 路径入 preview；
+///     目录：未知子项或 managed 子路径 hash 漂移 → 路径入 preview；
+///     路径不存在或 hash 命中 managed 集合 → 可删（空 preview）。
+pub(crate) fn compute_removal_blocked_paths(mat: Option<&Materialization>) -> Vec<String> {
+    let Some(mat) = mat else {
+        return Vec::new();
+    };
+    let Some(path_str) = mat.native_path.as_deref().filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let path = PathBuf::from(path_str);
+    if !path.exists() {
+        return Vec::new();
+    }
+    let managed: Vec<String> = [
+        mat.rendered_hash.clone(),
+        mat.observed_external_hash.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .collect();
+    if path.is_file() {
+        return match std::fs::read(&path) {
+            Ok(bytes) => {
+                let current = sha256_hex(&bytes);
+                if managed.iter().any(|h| h == &current) {
+                    Vec::new()
+                } else {
+                    vec![path_str.to_string()]
+                }
+            }
+            Err(_) => vec![path_str.to_string()],
+        };
+    }
+    if path.is_dir() {
+        let mut blocked = Vec::new();
+        let entries = match std::fs::read_dir(&path) {
+            Ok(e) => e,
+            Err(_) => return vec![path_str.to_string()],
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if !child.is_file() {
+                // 未知子目录/非文件一律阻塞，禁止递归删
+                blocked.push(child.to_string_lossy().into_owned());
+                continue;
+            }
+            match std::fs::read(&child) {
+                Ok(bytes) => {
+                    let current = sha256_hex(&bytes);
+                    if !managed.iter().any(|h| h == &current) {
+                        blocked.push(child.to_string_lossy().into_owned());
+                    }
+                }
+                Err(_) => blocked.push(child.to_string_lossy().into_owned()),
+            }
+        }
+        return blocked;
+    }
+    vec![path_str.to_string()]
+}
+
+/// 汇总资产全部 binding 的 removal-blocked 路径（DeleteEverywhere 预检）。
+///
+/// Business Logic: everywhere 任一条路径被外部改过 → 整次拒绝并返回完整 preview。
+/// Code Logic: list bindings + materializations → 合并 compute_removal_blocked_paths。
+async fn collect_removal_blocked_for_asset(
+    state: &AppState,
+    asset_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let bindings = state
+        .agent_hub_repo
+        .list_target_bindings_for_asset(asset_id)
+        .await?;
+    let mut out = Vec::new();
+    for b in bindings {
+        let mat = state
+            .agent_hub_repo
+            .get_materialization_by_binding(&b.id)
+            .await?;
+        out.extend(compute_removal_blocked_paths(mat.as_ref()));
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// 执行 adapter 声明的 disable 策略。
+///
+/// Business Logic（为什么需要这个函数）:
+///     desiredEnabled=false 不得只改 DB 位；package 资产需 remove-with-binding-retained，
+///     指令资产通过 schedule Present+disabled 投影（内容可保留但 desired 已禁用）。
+///
+/// Code Logic（这个函数做什么）:
+///     更新 materialization 为 Pending + 策略 token；package 路径若存在则 best-effort 标记
+///     deactivate 作业意图（真实 CLI uninstall 由后续 activator/runtime 消费 binding）。
+async fn apply_disable_strategy(
+    state: &AppState,
+    asset: &LogicalAsset,
+    binding: &TargetBinding,
+    mat: Option<&Materialization>,
+    strategy: TargetDisableStrategy,
+) -> Result<(), AppError> {
+    let is_package = matches!(
+        asset.kind,
+        AssetKind::Skill
+            | AssetKind::Command
+            | AssetKind::Agent
+            | AssetKind::Plugin
+            | AssetKind::Mcp
+    );
+    let strategy_token = strategy.as_str();
+    // 无论是否已有 materialization，都写入 Pending + 策略 token，
+    // 避免仅 flip desired_enabled 而无可观测 deactivation 意图。
+    let (native_path, last_rev, rendered_hash, observed) = match mat {
+        Some(m) => (
+            m.native_path.clone(),
+            m.last_projected_revision_id.clone(),
+            m.rendered_hash.clone(),
+            m.observed_external_hash.clone(),
+        ),
+        None => (None, None, None, None),
+    };
+    let _ = is_package; // 策略 token 区分 package/instruction 由 strategy.as_str
+    state
+        .agent_hub_repo
+        .upsert_materialization(NewMaterialization {
+            asset_id: asset.id.clone(),
+            target: binding.target,
+            target_binding_id: binding.id.clone(),
+            native_path,
+            last_projected_revision_id: last_rev,
+            rendered_hash,
+            observed_external_hash: observed,
+            status: MaterializationStatus::Pending,
+            last_error: Some(format!("disable_strategy:{strategy_token}")),
+        })
+        .await?;
+    // 调度 deactivation job：package 走 projection_ops package 路径（若有）；
+    // 当前 instruction schedule 已覆盖 Present+disabled；package 调度 best-effort。
+    if is_package {
+        if let Err(e) =
+            crate::agent_hub::projection_ops::schedule_package_deactivation(state, &asset.id).await
+        {
+            tracing::warn!(
+                asset_id = %asset.id,
+                target = %binding.target.as_str(),
+                error = %e,
+                "agent_hub disable strategy schedule deactivation failed (best-effort)"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 读取 Agent Hub 运行时状态。
@@ -1005,20 +1566,40 @@ async fn build_summary(
         .iter()
         .map(|m| (m.target_binding_id.clone(), m))
         .collect();
+    // probe 一次，三 target 共享 support 输入
+    let support_by_target = probe_support_map();
     let mut targets = Vec::new();
+    let mut snaps = Vec::new();
     for target in [
         AgentTarget::Claude,
         AgentTarget::Codex,
         AgentTarget::OpenCode,
     ] {
+        let supported = support_by_target.get(&target).copied().unwrap_or(false);
         if let Some(b) = bindings.iter().find(|b| b.target == target) {
             let mat = mat_by_binding.get(&b.id).copied();
+            let mat_status = mat.map(|m| m.status);
+            let source_only = is_source_only_cell(asset, mat_status);
+            let verified = is_verified_cell(asset, b, mat);
             targets.push(AgentHubTargetCellDto {
                 target,
                 desired_presence: b.desired_presence,
                 desired_enabled: b.desired_enabled,
-                materialization_status: mat.map(|m| m.status.as_str().to_string()),
+                materialization_status: mat_status.map(|s| s.as_str().to_string()),
                 last_error: mat.and_then(|m| m.last_error.clone()),
+                requested: true,
+                supported,
+                source_only,
+                verified,
+            });
+            snaps.push(TargetStatusSnapshot {
+                requested: true,
+                desired_presence: b.desired_presence,
+                desired_enabled: b.desired_enabled,
+                supported,
+                source_only,
+                materialization_status: mat_status,
+                verified,
             });
         } else {
             targets.push(AgentHubTargetCellDto {
@@ -1027,9 +1608,15 @@ async fn build_summary(
                 desired_enabled: false,
                 materialization_status: None,
                 last_error: None,
+                requested: false,
+                supported,
+                source_only: false,
+                verified: false,
             });
+            // 无 binding 的 target 不进入 requested 聚合
         }
     }
+    let aggregate_status = compute_asset_aggregate_status(&snaps).as_str().to_string();
     let has_conflict = state
         .agent_hub_repo
         .has_unresolved_canonical_conflict(&asset.id)
@@ -1060,7 +1647,86 @@ async fn build_summary(
             .map(|r| r.as_str().to_string()),
         targets,
         has_conflict,
+        aggregate_status,
     })
+}
+
+/// best-effort 三 target support 探测映射。
+///
+/// Business Logic: 聚合 full 需 supported；probe 失败不得伪装 supported。
+/// Code Logic: 复用 adapters；失败 → false。
+fn probe_support_map() -> BTreeMap<AgentTarget, bool> {
+    let env = current_target_environment_for_summary();
+    let adapters: Vec<(Box<dyn AssetAdapter>, AgentTarget)> = vec![
+        (Box::new(ClaudeInstructionAdapter), AgentTarget::Claude),
+        (Box::new(CodexInstructionAdapter), AgentTarget::Codex),
+        (Box::new(OpenCodeInstructionAdapter), AgentTarget::OpenCode),
+    ];
+    let mut map = BTreeMap::new();
+    for (adapter, target) in adapters {
+        let supported = match adapter.probe(&env) {
+            Ok(p) => p.support.as_str() != "unsupported",
+            Err(_) => false,
+        };
+        map.insert(target, supported);
+    }
+    map
+}
+
+/// summary 用 TargetEnvironment（复用 probe 环境构造）。
+fn current_target_environment_for_summary() -> TargetEnvironment {
+    current_target_environment()
+}
+
+/// 单元格是否 sourceOnly。
+///
+/// Business Logic: 无可投影 materialization 且 kind 无法在该 target 落地。
+/// Code Logic: 无 mat 且 desired Present → sourceOnly 倾向；指令有 path 可投影 → false。
+fn is_source_only_cell(asset: &LogicalAsset, mat_status: Option<MaterializationStatus>) -> bool {
+    if mat_status.is_some() {
+        return false;
+    }
+    // Instruction 始终可投影路径；package 缺 mat 时视为 sourceOnly（仅 hub 源）
+    !matches!(asset.kind, AssetKind::Instruction)
+}
+
+/// 单元格是否 verified。
+///
+/// Business Logic: full 禁止仅凭 package write 成功；需 activation/list 通过。
+/// Code Logic: Instruction Synced → verified；package Synced + 无 disable_strategy 错误 → verified；
+/// ActivationRequired/Pending/Blocked 等 → false。
+fn is_verified_cell(
+    asset: &LogicalAsset,
+    binding: &TargetBinding,
+    mat: Option<&Materialization>,
+) -> bool {
+    let Some(mat) = mat else {
+        return binding.desired_presence == DesiredPresence::Absent;
+    };
+    match mat.status {
+        MaterializationStatus::Synced => {
+            if binding.desired_presence == DesiredPresence::Absent {
+                return true;
+            }
+            // package：若 last_error 标记仍待激活则非 verified
+            if !matches!(asset.kind, AssetKind::Instruction) {
+                if let Some(err) = mat.last_error.as_deref() {
+                    if err.contains("activation") || err.contains("disable_strategy") {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+        MaterializationStatus::ActivationRequired
+        | MaterializationStatus::Pending
+        | MaterializationStatus::Blocked
+        | MaterializationStatus::Unsupported
+        | MaterializationStatus::Drift
+        | MaterializationStatus::Conflict
+        | MaterializationStatus::Detached
+        | MaterializationStatus::ExternalCollision => false,
+    }
 }
 
 /// summary → detail。
@@ -1087,6 +1753,7 @@ fn detail_from_summary(
         current_revision_id: summary.current_revision_id,
         targets: summary.targets,
         has_conflict: summary.has_conflict,
+        aggregate_status: summary.aggregate_status,
         blocks,
         content_markdown,
         conflicts,
@@ -1422,5 +2089,744 @@ mod tests {
             serde_json::to_value(AgentHubConflictResolution::Manual).unwrap(),
             serde_json::json!("manual")
         );
+    }
+
+    /// Business Logic: Gate B presence/enabled/restore/everywhere 请求 DTO 必须 camelCase 稳定。
+    /// Code Logic: serde 键名断言。
+    #[test]
+    fn presence_mutation_request_dto_camel_case_keys() {
+        let presence = SetTargetPresenceRequest {
+            asset_id: "a".into(),
+            target: AgentTarget::Claude,
+            desired_presence: DesiredPresence::Absent,
+        };
+        let v = serde_json::to_value(&presence).unwrap();
+        assert!(v.get("assetId").is_some());
+        assert!(v.get("desiredPresence").is_some());
+        assert_eq!(v.get("desiredPresence").unwrap(), "absent");
+
+        let enabled = SetTargetEnabledRequest {
+            asset_id: "a".into(),
+            target: AgentTarget::Codex,
+            desired_enabled: false,
+        };
+        let v = serde_json::to_value(&enabled).unwrap();
+        assert!(v.get("desiredEnabled").is_some());
+
+        let restore = RestoreDetachedTargetRequest {
+            asset_id: "a".into(),
+            target: AgentTarget::OpenCode,
+        };
+        let v = serde_json::to_value(&restore).unwrap();
+        assert!(v.get("assetId").is_some());
+        assert!(v.get("target").is_some());
+
+        let everywhere = DeleteAssetEverywhereRequest {
+            asset_id: "a".into(),
+        };
+        let v = serde_json::to_value(&everywhere).unwrap();
+        assert_eq!(v.get("assetId").unwrap(), "a");
+    }
+
+    /// Business Logic: summary/detail 必须暴露 aggregateStatus 与 cell-level 输入。
+    /// Code Logic: serde 键名断言。
+    #[test]
+    fn summary_and_cell_dto_expose_aggregate_and_cell_inputs() {
+        let cell = AgentHubTargetCellDto {
+            target: AgentTarget::Claude,
+            desired_presence: DesiredPresence::Present,
+            desired_enabled: true,
+            materialization_status: Some("synced".into()),
+            last_error: None,
+            requested: true,
+            supported: true,
+            source_only: false,
+            verified: true,
+        };
+        let v = serde_json::to_value(&cell).unwrap();
+        assert!(v.get("requested").is_some());
+        assert!(v.get("supported").is_some());
+        assert!(v.get("sourceOnly").is_some());
+        assert!(v.get("verified").is_some());
+
+        let summary = AgentHubAssetSummaryDto {
+            asset_id: "a".into(),
+            scope_id: "s".into(),
+            kind: "instruction".into(),
+            display_name: "d".into(),
+            logical_key: "k".into(),
+            origin_namespace: "n".into(),
+            policy: "shared".into(),
+            current_revision_id: None,
+            targets: vec![cell],
+            has_conflict: false,
+            aggregate_status: "full".into(),
+        };
+        let v = serde_json::to_value(&summary).unwrap();
+        assert_eq!(v.get("aggregateStatus").unwrap(), "full");
+        assert!(v.get("hasConflict").is_some());
+    }
+
+    /// Business Logic: managed hash 匹配可删；漂移/未知子项阻塞并返回精确路径。
+    /// Code Logic: tempfile 文件/目录场景。
+    #[test]
+    fn removal_blocked_paths_detect_hash_drift_and_unknown_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("CLAUDE.md");
+        std::fs::write(&file, b"managed-content").unwrap();
+        let managed = sha256_hex(b"managed-content");
+        let mat = Materialization {
+            id: "m1".into(),
+            asset_id: "a".into(),
+            target: AgentTarget::Claude,
+            target_binding_id: "b1".into(),
+            native_path: Some(file.to_string_lossy().into_owned()),
+            last_projected_revision_id: None,
+            rendered_hash: Some(managed.clone()),
+            observed_external_hash: Some(managed.clone()),
+            status: MaterializationStatus::Synced,
+            last_error: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        assert!(compute_removal_blocked_paths(Some(&mat)).is_empty());
+
+        std::fs::write(&file, b"external-edit").unwrap();
+        let blocked = compute_removal_blocked_paths(Some(&mat));
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked[0].ends_with("CLAUDE.md"));
+
+        // 目录：未知子文件阻塞
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("extra.txt"), b"unknown").unwrap();
+        let dir_mat = Materialization {
+            id: "m2".into(),
+            asset_id: "a".into(),
+            target: AgentTarget::Codex,
+            target_binding_id: "b2".into(),
+            native_path: Some(pkg.to_string_lossy().into_owned()),
+            last_projected_revision_id: None,
+            rendered_hash: Some(managed),
+            observed_external_hash: None,
+            status: MaterializationStatus::Synced,
+            last_error: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let blocked_dir = compute_removal_blocked_paths(Some(&dir_mat));
+        assert!(!blocked_dir.is_empty());
+        assert!(blocked_dir.iter().any(|p| p.ends_with("extra.txt")));
+    }
+
+    /// 构建最小 HeadlessOwner AppState 供 presence mutation 集成测。
+    ///
+    /// Business Logic: Step 1 六项断言必须经 public service 方法，而非手写 upsert。
+    /// Code Logic: tempfile sqlite + AgentHubRepo schema + 精简 AppState 字段。
+    async fn build_service_state() -> (AppState, tempfile::TempDir) {
+        use crate::backend::authority::RuntimeRole;
+        use crate::backend::event_bus::RuntimeEventBus;
+        use crate::backend::runtime_metrics::RuntimeMetrics;
+        use crate::backend::ui::HeadlessBackendUi;
+        use crate::cloud_sync::runtime::CloudSyncRuntime;
+        use crate::config::{
+            AppConfig, GithubTrendingConfig, HealthConfig, OrchestratorAutomationConfig,
+        };
+        use crate::config_runtime::ConfigRuntime;
+        use crate::config_store::MemoryConfigStore;
+        use crate::net::peer_client::PeerClient;
+        use crate::orchestrator::repo::OrchestratorRepo;
+        use crate::orchestrator::scheduler::OrchestratorSchedulerTelemetry;
+        use crate::storage::maintenance_gate::DatabaseMaintenanceGate;
+        use crate::storage::{
+            AgentHubRepo, ClaudeHistoryRepo, ClaudeMdRepo, PromptRepo, ScratchpadRepo,
+            SshTargetRepo, TransferRepo, WorkbenchAgentSessionRepo, WorkbenchBrowserRepo,
+            WorkbenchProjectRepo, WorkbenchSessionRepo, WorkbenchWorkspaceLayoutRepo,
+            WorkbenchWorktreeRepo,
+        };
+        use crate::transfer::registry::TransferRegistry;
+        use crate::updater::UpdateRuntime;
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        use std::sync::atomic::AtomicU16;
+        use std::sync::{Arc, Mutex, RwLock};
+
+        let tmp = tempfile::tempdir().unwrap();
+        // 隔离 data_dir，避免 schedule/object_store 写真实 home
+        std::env::set_var("CC_PARTNER_DATA_DIR", tmp.path());
+        let db_path = tmp.path().join("data.db");
+        let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+        let options = SqliteConnectOptions::from_str(&db_url)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        AgentHubRepo::ensure_schema(&pool).await.unwrap();
+        let agent_hub = AgentHubRepo::new(pool.clone());
+
+        let config = AppConfig {
+            device_id: "svc-test".to_string(),
+            device_name: "svc-test".to_string(),
+            http_port: 0,
+            receive_dir: tmp.path().join("recv").to_string_lossy().to_string(),
+            db_path: db_path.to_string_lossy().to_string(),
+            screenshot_hotkey: "<cmd>+s".to_string(),
+            prompt_optimizer_hotkey: "<ctrl>".to_string(),
+            prompt_optimizer_fill_language: "zh".to_string(),
+            cloud_sync_repo_url: None,
+            cloud_sync_enabled: false,
+            cloud_sync_auto: false,
+            cloud_sync_interval_secs: 600,
+            cloud_sync_branch: None,
+            health: HealthConfig::default(),
+            orchestrator: OrchestratorAutomationConfig::default(),
+            github_trending: GithubTrendingConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
+        };
+        let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
+        let config_runtime = Arc::new(ConfigRuntime::new(config, store));
+        let config = config_runtime.shared_value();
+        let maintenance_gate = Arc::new(DatabaseMaintenanceGate::new());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let event_bus = Arc::new(RuntimeEventBus::new(owner));
+        let layout_repo = WorkbenchWorkspaceLayoutRepo::new(pool.clone());
+        let _ = layout_repo.ensure_schema().await;
+
+        let state = AppState {
+            config,
+            config_runtime,
+            db: pool.clone(),
+            maintenance_gate: maintenance_gate.clone(),
+            prompt_repo: Arc::new(PromptRepo::new(pool.clone())),
+            transfer_repo: Arc::new(TransferRepo::new(pool.clone())),
+            claude_md_repo: Arc::new(ClaudeMdRepo::new(pool.clone())),
+            scratchpad_repo: Arc::new(ScratchpadRepo::new(pool.clone())),
+            ssh_target_repo: Arc::new(SshTargetRepo::new(pool.clone())),
+            device_id: Arc::new("svc-test".to_string()),
+            devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            actual_http_port: Arc::new(AtomicU16::new(0)),
+            discovery: Arc::new(Mutex::new(None)),
+            peer_client: Arc::new(PeerClient::new()),
+            transfers: Arc::new(TransferRegistry::new()),
+            ui: Arc::new(HeadlessBackendUi::new(tmp.path().to_path_buf())),
+            update_runtime: Arc::new(UpdateRuntime::new()),
+            cc_history_repo: Arc::new(ClaudeHistoryRepo::new(pool.clone())),
+            workbench_project_repo: Arc::new(WorkbenchProjectRepo::new(pool.clone())),
+            workbench_session_repo: Arc::new(WorkbenchSessionRepo::new(pool.clone())),
+            workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
+            workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
+            workbench_agent_session_repo: Arc::new(WorkbenchAgentSessionRepo::new(pool.clone())),
+            agent_ledger_repo: Arc::new(crate::storage::AgentLedgerRepo::new(pool.clone())),
+            agent_ledger_service: Arc::new(
+                crate::workbench::agent_ledger::AgentLedgerService::new(
+                    crate::storage::AgentLedgerRepo::new(pool.clone()),
+                ),
+            ),
+            agent_hub_repo: Arc::new(agent_hub),
+            workbench_workspace_layout_repo: Arc::new(layout_repo),
+            browser_verification: Arc::new(
+                crate::workbench::browser_verification::BrowserVerificationService::new(
+                    Arc::new(crate::workbench::browser_verification::FakeEngine::succeeds()),
+                    tmp.path().join("browser-verification"),
+                    "test-owner".into(),
+                )
+                .expect("browser verification fixture"),
+            ),
+            workbench_browser_previews: Arc::new(
+                crate::workbench::browser_proxy::WorkbenchBrowserPreviewRegistry::new(),
+            ),
+            workbench_sessions: Arc::new(
+                crate::workbench::sessions::WorkbenchSessionRegistry::new(),
+            ),
+            workbench_remote_events: Arc::new(
+                crate::workbench::remote_events::WorkbenchRemoteEventBus::new("test-owner"),
+            ),
+            workbench_remote_event_bridges: Arc::new(
+                crate::workbench::remote_events::RemoteEventBridgeRegistry::new(),
+            ),
+            workbench_dependency: Arc::new(
+                crate::workbench::dependencies::WorkbenchDependencyInstallRuntime::new(),
+            ),
+            cc_collector_cancel: Arc::new(Mutex::new(None)),
+            cloud_sync_runtime: Arc::new(CloudSyncRuntime::new()),
+            cloud_sync_cancel: Arc::new(Mutex::new(None)),
+            health: Arc::new(crate::health::HealthRuntime::new()),
+            health_repo: Arc::new(crate::storage::health_repo::HealthRepo::new(pool.clone())),
+            health_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_repo: Arc::new(OrchestratorRepo::new(pool.clone())),
+            orchestrator_scheduler_telemetry: OrchestratorSchedulerTelemetry::default(),
+            orchestrator_cancel: Arc::new(Mutex::new(None)),
+            orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
+            agent_ledger_cancel: Arc::new(Mutex::new(None)),
+            agent_hub_cancel: Arc::new(Mutex::new(None)),
+            workbench_claude_session_indexes: Arc::new(RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_watchers: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            workbench_claude_session_index_dispose_epochs: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            runtime_metrics: Arc::new(RuntimeMetrics::new()),
+            runtime_role: RuntimeRole::HeadlessOwner,
+            event_bus,
+            backend_control_client_runtime: Arc::new(
+                crate::backend::control_client::BackendControlClientRuntime::new(),
+            ),
+            gui_event_relay_cancel: Arc::new(Mutex::new(None)),
+        };
+        (state, tmp)
+    }
+
+    /// seed user scope + instruction asset + revision + multi bindings。
+    async fn seed_instruction_asset(
+        state: &AppState,
+        policy: crate::agent_hub::models::AssetPolicy,
+        targets: &[(AgentTarget, DesiredPresence, bool)],
+    ) -> LogicalAsset {
+        use crate::agent_hub::models::{
+            AssetKind, NewLogicalAsset, NewRevision, NewScopeNode, NewTargetBinding, RevisionId,
+            RevisionOperation, RevisionOriginKind, ScopeKind,
+        };
+        let scope = state
+            .agent_hub_repo
+            .insert_scope(NewScopeNode {
+                id: None,
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let asset = state
+            .agent_hub_repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: format!("lk-{}", uuid::Uuid::new_v4().simple()),
+                display_name: "demo".into(),
+                policy,
+            })
+            .await
+            .unwrap();
+        let _rev = state
+            .agent_hub_repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "svc-test".into(),
+                payload_hash: Some("aa".repeat(32)),
+                tree_manifest_hash: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        for (target, presence, enabled) in targets {
+            state
+                .agent_hub_repo
+                .upsert_target_binding(NewTargetBinding {
+                    asset_id: asset.id.clone(),
+                    target: *target,
+                    local_scope_mapping_id: None,
+                    checkout_binding_id: None,
+                    desired_presence: *presence,
+                    desired_enabled: *enabled,
+                })
+                .await
+                .unwrap();
+        }
+        state
+            .agent_hub_repo
+            .get_asset(&asset.id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Business Logic: disable 一 target 不改其它 binding 与 canonical revision。
+    /// Code Logic: set_target_enabled(false) 公共路径。
+    #[tokio::test]
+    async fn service_disable_one_target_leaves_other_bindings_and_revision() {
+        let (state, _tmp) = build_service_state().await;
+        let asset = seed_instruction_asset(
+            &state,
+            crate::agent_hub::models::AssetPolicy::Shared,
+            &[
+                (AgentTarget::Claude, DesiredPresence::Present, true),
+                (AgentTarget::Codex, DesiredPresence::Present, true),
+            ],
+        )
+        .await;
+        let head_before = asset.current_revision_id.clone();
+        let summary = AgentHubService::set_target_enabled(
+            &state,
+            SetTargetEnabledRequest {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                desired_enabled: false,
+            },
+        )
+        .await
+        .unwrap();
+        let claude = summary
+            .targets
+            .iter()
+            .find(|t| t.target == AgentTarget::Claude)
+            .unwrap();
+        let codex = summary
+            .targets
+            .iter()
+            .find(|t| t.target == AgentTarget::Codex)
+            .unwrap();
+        assert!(!claude.desired_enabled);
+        assert_eq!(claude.desired_presence, DesiredPresence::Present);
+        assert!(codex.desired_enabled);
+        assert_eq!(codex.desired_presence, DesiredPresence::Present);
+        let after = state
+            .agent_hub_repo
+            .get_asset(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.current_revision_id, head_before);
+        // disable 策略落地：materialization 带 disable_strategy token
+        let bindings = state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        let claude_b = bindings
+            .iter()
+            .find(|b| b.target == AgentTarget::Claude)
+            .unwrap();
+        let mat = state
+            .agent_hub_repo
+            .get_materialization_by_binding(&claude_b.id)
+            .await
+            .unwrap();
+        assert!(mat
+            .as_ref()
+            .and_then(|m| m.last_error.as_ref())
+            .is_some_and(|e| e.contains("disable_strategy")));
+        assert!(!summary.aggregate_status.is_empty());
+    }
+
+    /// Business Logic: desiredPresence=absent 只卸本 target。
+    /// Code Logic: set_target_presence(Absent) 公共路径。
+    #[tokio::test]
+    async fn service_absent_is_target_local_only() {
+        let (state, _tmp) = build_service_state().await;
+        let asset = seed_instruction_asset(
+            &state,
+            crate::agent_hub::models::AssetPolicy::Shared,
+            &[
+                (AgentTarget::Claude, DesiredPresence::Present, true),
+                (AgentTarget::Codex, DesiredPresence::Present, true),
+            ],
+        )
+        .await;
+        let summary = AgentHubService::set_target_presence(
+            &state,
+            SetTargetPresenceRequest {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                desired_presence: DesiredPresence::Absent,
+            },
+        )
+        .await
+        .unwrap();
+        let claude = summary
+            .targets
+            .iter()
+            .find(|t| t.target == AgentTarget::Claude)
+            .unwrap();
+        let codex = summary
+            .targets
+            .iter()
+            .find(|t| t.target == AgentTarget::Codex)
+            .unwrap();
+        assert_eq!(claude.desired_presence, DesiredPresence::Absent);
+        assert!(!claude.desired_enabled);
+        assert_eq!(codex.desired_presence, DesiredPresence::Present);
+        assert!(codex.desired_enabled);
+    }
+
+    /// Business Logic: 外部漂移路径在 binding 变更前拒绝，并返回精确 preview。
+    /// Code Logic: materialization native_path hash 漂移 → validation reject。
+    #[tokio::test]
+    async fn service_absent_rejects_before_mutation_when_paths_blocked() {
+        let (state, tmp) = build_service_state().await;
+        let asset = seed_instruction_asset(
+            &state,
+            crate::agent_hub::models::AssetPolicy::Shared,
+            &[(AgentTarget::Claude, DesiredPresence::Present, true)],
+        )
+        .await;
+        let bindings = state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        let b = bindings
+            .iter()
+            .find(|x| x.target == AgentTarget::Claude)
+            .unwrap();
+        let path = tmp.path().join("external.md");
+        std::fs::write(&path, b"external").unwrap();
+        state
+            .agent_hub_repo
+            .upsert_materialization(NewMaterialization {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                target_binding_id: b.id.clone(),
+                native_path: Some(path.to_string_lossy().into_owned()),
+                last_projected_revision_id: None,
+                rendered_hash: Some(sha256_hex(b"managed")),
+                observed_external_hash: Some(sha256_hex(b"managed")),
+                status: MaterializationStatus::Synced,
+                last_error: None,
+            })
+            .await
+            .unwrap();
+        let err = AgentHubService::set_target_presence(
+            &state,
+            SetTargetPresenceRequest {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                desired_presence: DesiredPresence::Absent,
+            },
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("agent_hub_removal_blocked_unknown_or_changed_paths"),
+            "msg={msg}"
+        );
+        // binding 未变
+        let still = state
+            .agent_hub_repo
+            .get_target_binding(&b.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still.desired_presence, DesiredPresence::Present);
+    }
+
+    /// Business Logic: DeleteEverywhere 在任意 target 路径 blocked 时拒绝，且不写 tombstone/binding。
+    /// Code Logic: collect_removal_blocked_for_asset → RejectRemovalBlocked；asset 仍 live。
+    #[tokio::test]
+    async fn service_delete_everywhere_rejects_before_mutation_when_paths_blocked() {
+        let (state, tmp) = build_service_state().await;
+        let asset = seed_instruction_asset(
+            &state,
+            crate::agent_hub::models::AssetPolicy::Shared,
+            &[
+                (AgentTarget::Claude, DesiredPresence::Present, true),
+                (AgentTarget::Codex, DesiredPresence::Present, true),
+            ],
+        )
+        .await;
+        let bindings = state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        let claude = bindings
+            .iter()
+            .find(|x| x.target == AgentTarget::Claude)
+            .unwrap();
+        let path = tmp.path().join("everywhere-drift.md");
+        std::fs::write(&path, b"external").unwrap();
+        state
+            .agent_hub_repo
+            .upsert_materialization(NewMaterialization {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                target_binding_id: claude.id.clone(),
+                native_path: Some(path.to_string_lossy().into_owned()),
+                last_projected_revision_id: None,
+                rendered_hash: Some(sha256_hex(b"managed")),
+                observed_external_hash: Some(sha256_hex(b"managed")),
+                status: MaterializationStatus::Synced,
+                last_error: None,
+            })
+            .await
+            .unwrap();
+        let before_rev = asset.current_revision_id.clone();
+        let err = AgentHubService::delete_asset_everywhere(
+            &state,
+            DeleteAssetEverywhereRequest {
+                asset_id: asset.id.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("agent_hub_removal_blocked_unknown_or_changed_paths"),
+            "msg={msg}"
+        );
+        // 全部 binding 与 head 均未变
+        let still_asset = state
+            .agent_hub_repo
+            .get_asset(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(still_asset.deleted_at.is_none());
+        assert_eq!(still_asset.current_revision_id, before_rev);
+        for b in state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap()
+        {
+            assert_eq!(b.desired_presence, DesiredPresence::Present);
+            assert!(b.desired_enabled);
+        }
+    }
+
+    /// Business Logic: restore_detached 清 Detached、Present+enabled、schedule 投影意图。
+    /// Code Logic: materialization Pending；binding Present。
+    #[tokio::test]
+    async fn service_restore_detached_clears_and_schedules() {
+        let (state, _tmp) = build_service_state().await;
+        let asset = seed_instruction_asset(
+            &state,
+            crate::agent_hub::models::AssetPolicy::Shared,
+            &[(AgentTarget::Claude, DesiredPresence::Present, false)],
+        )
+        .await;
+        let bindings = state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        let b = bindings.first().unwrap();
+        state
+            .agent_hub_repo
+            .upsert_materialization(NewMaterialization {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                target_binding_id: b.id.clone(),
+                native_path: Some("/tmp/x".into()),
+                last_projected_revision_id: None,
+                rendered_hash: Some("hh".into()),
+                observed_external_hash: None,
+                status: MaterializationStatus::Detached,
+                last_error: Some("external_delete".into()),
+            })
+            .await
+            .unwrap();
+        let summary = AgentHubService::restore_detached_target(
+            &state,
+            RestoreDetachedTargetRequest {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+            },
+        )
+        .await
+        .unwrap();
+        let cell = summary
+            .targets
+            .iter()
+            .find(|t| t.target == AgentTarget::Claude)
+            .unwrap();
+        assert_eq!(cell.desired_presence, DesiredPresence::Present);
+        assert!(cell.desired_enabled);
+        let mat = state
+            .agent_hub_repo
+            .get_materialization_by_binding(&b.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mat.status, MaterializationStatus::Pending);
+    }
+
+    /// Business Logic: delete_everywhere 一条 tombstone + 全部 Absent。
+    /// Code Logic: 公共 delete_asset_everywhere；CAS head 推进一次。
+    #[tokio::test]
+    async fn service_delete_everywhere_one_tombstone_and_fan_out() {
+        let (state, _tmp) = build_service_state().await;
+        let asset = seed_instruction_asset(
+            &state,
+            crate::agent_hub::models::AssetPolicy::Shared,
+            &[
+                (AgentTarget::Claude, DesiredPresence::Present, true),
+                (AgentTarget::Codex, DesiredPresence::Present, true),
+            ],
+        )
+        .await;
+        let head_before = asset.current_revision_id.clone().unwrap();
+        let summary = AgentHubService::delete_asset_everywhere(
+            &state,
+            DeleteAssetEverywhereRequest {
+                asset_id: asset.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(summary
+            .targets
+            .iter()
+            .filter(|t| t.requested)
+            .all(|t| t.desired_presence == DesiredPresence::Absent && !t.desired_enabled));
+        let after = state
+            .agent_hub_repo
+            .get_asset(&asset.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.deleted_at.is_some());
+        assert_ne!(
+            after.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(head_before.as_str())
+        );
+    }
+
+    /// Business Logic: targetOnly 最后一 target 不得猜 everywhere。
+    /// Code Logic: set_target_presence(Absent) → AppError validation token。
+    #[tokio::test]
+    async fn service_target_only_last_target_requires_everywhere() {
+        let (state, _tmp) = build_service_state().await;
+        let asset = seed_instruction_asset(
+            &state,
+            crate::agent_hub::models::AssetPolicy::TargetOnly,
+            &[(AgentTarget::Claude, DesiredPresence::Present, true)],
+        )
+        .await;
+        let err = AgentHubService::set_target_presence(
+            &state,
+            SetTargetPresenceRequest {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                desired_presence: DesiredPresence::Absent,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("agent_hub_target_only_last_target_requires_everywhere"));
+        let still = state
+            .agent_hub_repo
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(still[0].desired_presence, DesiredPresence::Present);
     }
 }

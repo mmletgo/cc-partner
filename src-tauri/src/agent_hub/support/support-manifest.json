@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "target": "claude",
+      "adapterSchemaVersion": 1,
+      "minTestedVersion": "1.0.0",
+      "currentTestedVersion": "1.0.0",
+      "guardedMajor": 1,
+      "executableProbe": {
+        "commandNames": ["claude"],
+        "versionArgs": ["--version"],
+        "versionPrefix": null,
+        "versionSuffix": null,
+        "helpFingerprint": null
+      },
+      "activationCommandFingerprints": {},
+      "capabilities": {
+        "scanInstruction": "readOnly",
+        "renderInstruction": "blocked",
+        "scanPortableAssets": "readOnly",
+        "renderPortableAssets": "blocked",
+        "activatePackage": "blocked",
+        "deactivatePackage": "blocked",
+        "liveReload": "blocked"
+      },
+      "evidenceIds": ["L3-AGENT-HUB-CLAUDE-001", "L3-AGENT-HUB-B-CLI-001"]
+    },
+    {
+      "target": "codex",
+      "adapterSchemaVersion": 1,
+      "minTestedVersion": "1.0.0",
+      "currentTestedVersion": "1.0.0",
+      "guardedMajor": 1,
+      "executableProbe": {
+        "commandNames": ["codex"],
+        "versionArgs": ["--version"],
+        "versionPrefix": null,
+        "versionSuffix": null,
+        "helpFingerprint": null
+      },
+      "activationCommandFingerprints": {},
+      "capabilities": {
+        "scanInstruction": "readOnly",
+        "renderInstruction": "blocked",
+        "scanPortableAssets": "readOnly",
+        "renderPortableAssets": "blocked",
+        "activatePackage": "blocked",
+        "deactivatePackage": "blocked",
+        "liveReload": "blocked"
+      },
+      "evidenceIds": ["L3-AGENT-HUB-CODEX-001", "L3-AGENT-HUB-B-CLI-001"]
+    },
+    {
+      "target": "opencode",
+      "adapterSchemaVersion": 1,
+      "minTestedVersion": "1.0.0",
+      "currentTestedVersion": "1.0.0",
+      "guardedMajor": 1,
+      "executableProbe": {
+        "commandNames": ["opencode"],
+        "versionArgs": ["--version"],
+        "versionPrefix": null,
+        "versionSuffix": null,
+        "helpFingerprint": null
+      },
+      "activationCommandFingerprints": {},
+      "capabilities": {
+        "scanInstruction": "readOnly",
+        "renderInstruction": "blocked",
+        "scanPortableAssets": "readOnly",
+        "renderPortableAssets": "blocked",
+        "activatePackage": "blocked",
+        "deactivatePackage": "blocked",
+        "liveReload": "blocked"
+      },
+      "evidenceIds": ["L3-AGENT-HUB-OPENCODE-001", "L3-AGENT-HUB-B-CLI-001"]
+    }
+  ]
+}
