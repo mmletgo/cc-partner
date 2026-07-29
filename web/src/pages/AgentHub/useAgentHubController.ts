@@ -349,6 +349,15 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     [loadCore, requireSelectedAssetId],
   );
 
+  /**
+   * Business Logic: UI mutation 必须带详情页 head CAS，避免并发静默丢写。
+   * Code Logic: 优先用 selectedAsset.currentRevisionId；缺失则 undefined 由后端 fail-closed。
+   */
+  const expectedRevisionFromSelection = useCallback((): string | null => {
+    const rev = selectedAsset?.currentRevisionId?.trim();
+    return rev && rev.length > 0 ? rev : null;
+  }, [selectedAsset]);
+
   const updateInstruction = useCallback(
     async (args: Omit<AgentHubUpdateInstructionArgs, 'assetId'>) => {
       const assetId = requireSelectedAssetId();
@@ -356,7 +365,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setActionBusy(true);
       setActionError(null);
       try {
-        const detail = await agentHubApi.updateInstruction({ ...args, assetId });
+        const detail = await agentHubApi.updateInstruction({
+          ...args,
+          assetId,
+          expectedRevisionId: args.expectedRevisionId ?? expectedRevisionFromSelection(),
+        });
         if (!mountedRef.current) return;
         setSelectedAsset(detail);
         await loadCore(true);
@@ -367,7 +380,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [loadCore, requireSelectedAssetId],
+    [expectedRevisionFromSelection, loadCore, requireSelectedAssetId],
   );
 
   const updateInstructionBlock = useCallback(
@@ -377,7 +390,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setActionBusy(true);
       setActionError(null);
       try {
-        await agentHubApi.updateInstructionBlock({ ...args, assetId });
+        await agentHubApi.updateInstructionBlock({
+          ...args,
+          assetId,
+          expectedRevisionId: args.expectedRevisionId ?? expectedRevisionFromSelection(),
+        });
         if (!mountedRef.current) return;
         await loadAssetDetail(assetId);
         await loadCore(true);
@@ -388,7 +405,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [loadAssetDetail, loadCore, requireSelectedAssetId],
+    [expectedRevisionFromSelection, loadAssetDetail, loadCore, requireSelectedAssetId],
   );
 
   const pairInstructionVariants = useCallback(
@@ -398,7 +415,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setActionBusy(true);
       setActionError(null);
       try {
-        const detail = await agentHubApi.pairInstructionVariants({ ...args, assetId });
+        const detail = await agentHubApi.pairInstructionVariants({
+          ...args,
+          assetId,
+          expectedRevisionId: args.expectedRevisionId ?? expectedRevisionFromSelection(),
+        });
         if (!mountedRef.current) return;
         setSelectedAsset(detail);
         await loadCore(true);
@@ -409,7 +430,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [loadCore, requireSelectedAssetId],
+    [expectedRevisionFromSelection, loadCore, requireSelectedAssetId],
   );
 
   const setTargetBinding = useCallback(

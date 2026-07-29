@@ -217,12 +217,21 @@ pub async fn migrate_user_claude_md_state_with(
     let (created_revision, revision_id) =
         ensure_migration_revision(deps, &asset, &payload_hash).await?;
 
-    // 三 target 绑定：未确认前 Absent + disabled
+    // 三 target 绑定：仅 seed 缺失行为 Absent+disabled；不得覆盖用户已确认 Present/enabled
+    let existing_bindings = deps
+        .agent_hub
+        .list_target_bindings_for_asset(&asset.id)
+        .await?;
+    let existing_targets: std::collections::BTreeSet<AgentTarget> =
+        existing_bindings.iter().map(|b| b.target).collect();
     for target in [
         AgentTarget::Claude,
         AgentTarget::Codex,
         AgentTarget::OpenCode,
     ] {
+        if existing_targets.contains(&target) {
+            continue;
+        }
         deps.agent_hub
             .upsert_target_binding(NewTargetBinding {
                 asset_id: asset.id.clone(),
@@ -257,15 +266,16 @@ pub async fn migrate_user_claude_md_state_with(
     })
 }
 
-/// Dual-write legacy `claude_md` 摘要行（仅 content + 元数据）。
+/// Dual-write legacy `claude_md` 摘要行 + 用户 `CLAUDE.md` 文件。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     N/N+1 兼容旧 CLAUDE.md 页面/P2P：Hub 写成功后同步摘要到旧表，
-///     但 **legacy vector_clock 永不裁决 Hub 冲突**（Hub 以 revision DAG 为权威）。
+///     N/N+1 兼容旧 CLAUDE.md 页面/P2P：Hub 写成功后同步摘要到旧表与磁盘文件，
+///     避免 file-wins reconcile 用旧磁盘正文回滚 Hub revision。
+///     **legacy vector_clock 永不裁决 Hub 冲突**（Hub 以 revision DAG 为权威）。
 ///
 /// Code Logic（这个函数做什么）:
-///     content 与现有行相等 → no-op；否则 upsert content/updated_at/device_id +
-///     `increment(device_id)`（仅服务旧表 peer 兼容，不读 VC 做 merge 决策）。
+///     解析用户 CLAUDE.md 路径 → 写文件（best-effort 建目录）→ content 与 DB 相等则文件已写后 no-op DB；
+///     否则 upsert content/updated_at/device_id + `increment(device_id)`。
 pub async fn dual_write_legacy_claude_md_summary(
     state: &AppState,
     content: &str,
@@ -281,7 +291,7 @@ pub async fn dual_write_legacy_claude_md_summary(
 /// Dual-write legacy 摘要（可注入 repo）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     单测与生产共用摘要 upsert 语义。
+///     单测与生产共用摘要 upsert 语义；同时写磁盘文件防止 reconcile 回滚 Hub。
 ///
 /// Code Logic（这个函数做什么）:
 ///     见 `dual_write_legacy_claude_md_summary`。
@@ -290,6 +300,8 @@ pub async fn dual_write_legacy_claude_md_summary_with(
     device_id: &str,
     content: &str,
 ) -> Result<(), AppError> {
+    // 先写文件：与 DB 对齐，阻断 file-wins 用旧正文覆盖 Hub 新摘要
+    write_user_claude_md_file(content)?;
     let existing = claude_md.get().await?;
     if let Some(row) = existing.as_ref() {
         if row.content == content {
@@ -309,6 +321,58 @@ pub async fn dual_write_legacy_claude_md_summary_with(
         vector_clock: vector_clock::increment(&old_vc, device_id),
     };
     claude_md.upsert(&row).await?;
+    Ok(())
+}
+
+/// 解析用户级 CLAUDE.md 磁盘路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     dual-write 必须与 Claude adapter 同一路径空间（CLAUDE_CONFIG_DIR 或 ~/.claude）。
+///
+/// Code Logic（这个函数做什么）:
+///     优先 CLAUDE_CONFIG_DIR 环境变量；否则 home/.claude/CLAUDE.md。
+pub fn user_claude_md_file_path() -> Result<std::path::PathBuf, AppError> {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return Ok(std::path::PathBuf::from(trimmed).join("CLAUDE.md"));
+        }
+    }
+    let home = dirs::home_dir()
+        .ok_or_else(|| AppError::validation("agent_hub_dual_write_home_missing".to_string()))?;
+    Ok(home.join(".claude").join("CLAUDE.md"))
+}
+
+/// 将 Hub 用户指令摘要写入磁盘 CLAUDE.md。
+///
+/// Business Logic（为什么需要这个函数）:
+///     仅写 legacy DB 会在 reconcile_from_file 时被旧文件冲掉；文件必须同步。
+///
+/// Code Logic（这个函数做什么）:
+///     ensure parent dir → 写 sibling temp → rename 覆盖（失败回退 fs::write）。
+fn write_user_claude_md_file(content: &str) -> Result<(), AppError> {
+    let path = user_claude_md_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| AppError::generic(format!("agent_hub_dual_write_mkdir_failed:{e}")))?;
+    }
+    let tmp = path.with_extension("md.tmp");
+    match fs::write(&tmp, content.as_bytes()) {
+        Ok(()) => {
+            if let Err(e) = fs::rename(&tmp, &path) {
+                let _ = fs::remove_file(&tmp);
+                fs::write(&path, content.as_bytes()).map_err(|e2| {
+                    AppError::generic(format!(
+                        "agent_hub_dual_write_file_failed:rename={e};write={e2}"
+                    ))
+                })?;
+            }
+        }
+        Err(_) => {
+            fs::write(&path, content.as_bytes())
+                .map_err(|e| AppError::generic(format!("agent_hub_dual_write_file_failed:{e}")))?;
+        }
+    }
     Ok(())
 }
 
@@ -432,6 +496,7 @@ async fn ensure_migration_revision(
             payload_hash: Some(payload_hash.to_string()),
             tree_manifest_hash: None,
             created_at: Utc::now().to_rfc3339(),
+            expected_parent_id: None,
         })
         .await?;
     Ok((true, Some(revision.id.as_str().to_string())))
@@ -714,5 +779,68 @@ mod tests {
             .unwrap();
         assert_eq!(source, "db");
         assert_eq!(content, "from-db");
+    }
+
+    /// Business Logic: 迁移二次运行不得把用户已确认 Present binding 刷回 Absent。
+    /// Code Logic: first migrate → set Claude Present → second migrate → still Present。
+    #[tokio::test]
+    async fn migration_second_run_preserves_present_binding() {
+        let (agent_hub, claude_md, _) = setup_repos().await;
+        let tmp = TempDir::new().unwrap();
+        let objects_root = tmp.path().join("data");
+        fs::create_dir_all(&objects_root).unwrap();
+        let claude_file = tmp.path().join("CLAUDE.md");
+        fs::write(&claude_file, "body for present preserve\n").unwrap();
+        let d = deps(&agent_hub, &claude_md, &objects_root);
+        let first = migrate_user_claude_md_state_with(&d, &claude_file)
+            .await
+            .unwrap();
+        agent_hub
+            .upsert_target_binding(NewTargetBinding {
+                asset_id: first.asset_id.clone(),
+                target: AgentTarget::Claude,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .unwrap();
+        let second = migrate_user_claude_md_state_with(&d, &claude_file)
+            .await
+            .unwrap();
+        assert_eq!(second.asset_id, first.asset_id);
+        let bindings = agent_hub
+            .list_target_bindings_for_asset(&first.asset_id)
+            .await
+            .unwrap();
+        let claude = bindings
+            .iter()
+            .find(|b| b.target == AgentTarget::Claude)
+            .expect("claude binding");
+        assert_eq!(claude.desired_presence, DesiredPresence::Present);
+        assert!(claude.desired_enabled);
+    }
+
+    /// Business Logic: dual-write 写文件后，文件内容与摘要一致，不会被旧文件回滚。
+    /// Code Logic: dual_write content B 后 user path 文件内容为 B。
+    #[tokio::test]
+    async fn dual_write_also_writes_user_claude_file() {
+        let (_agent_hub, claude_md, _) = setup_repos().await;
+        let tmp = TempDir::new().unwrap();
+        let claude_home = tmp.path().join(".claude");
+        fs::create_dir_all(&claude_home).unwrap();
+        let file = claude_home.join("CLAUDE.md");
+        fs::write(&file, "old A\n").unwrap();
+        // 通过环境变量指向临时 CLAUDE_CONFIG_DIR
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude_home.to_string_lossy().as_ref());
+        dual_write_legacy_claude_md_summary_with(&claude_md, "device-test-1", "new B\n")
+            .await
+            .unwrap();
+        let written = fs::read_to_string(user_claude_md_file_path().unwrap()).unwrap();
+        assert_eq!(written, "new B\n");
+        let row = claude_md.get().await.unwrap().unwrap();
+        assert_eq!(row.content, "new B\n");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 }

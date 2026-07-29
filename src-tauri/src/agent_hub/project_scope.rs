@@ -282,6 +282,9 @@ pub async fn enable_project_scope(
 
     let bindings = refresh_checkout_bindings(state, &request.project_id).await?;
     let warnings = collect_binding_warnings(&bindings);
+    if let Err(e) = crate::agent_hub::projection_ops::ensure_agent_hub_enabled(state).await {
+        tracing::warn!(error = %e, "agent_hub enable_project_scope ensure enabled failed");
+    }
     Ok(AgentHubProjectStatus {
         project_id: request.project_id,
         hub_project_id: mapping.hub_project_id,
@@ -300,7 +303,8 @@ pub async fn enable_project_scope(
 ///
 /// Code Logic（这个函数做什么）:
 ///     若未 opt-in 返回空；否则 ensure_main + 登记 worktree upsert active/blocked，
-///     缺失 worktree 的 binding mark detached；runtime dirty 填 DTO；stub schedule_projection。
+///     缺失 worktree 的 binding mark detached；runtime dirty 填 DTO；
+///     已 opt-in 时 best-effort `schedule_project_projections`。
 pub async fn refresh_checkout_bindings(
     state: &AppState,
     project_id: &str,
@@ -371,19 +375,17 @@ pub async fn refresh_checkout_bindings(
         .map(binding_row_to_dto)
         .collect::<Vec<_>>();
 
-    schedule_projection_if_opted_in(project_id);
+    // 已 opt-in 路径才到达此处；best-effort 调度项目指令投影。
+    if let Err(e) =
+        crate::agent_hub::projection_ops::schedule_project_projections(state, project_id).await
+    {
+        tracing::warn!(
+            project_id = %project_id,
+            error = %e,
+            "agent_hub refresh_checkout_bindings schedule projections failed"
+        );
+    }
     Ok(dto)
-}
-
-/// 未 opt-in 时不调度；已 opt-in 时后续 Task 接入真实 projection（当前 no-op）。
-///
-/// Business Logic（为什么需要这个函数）:
-///     lifecycle 钩子只能在 opt-in 后触发投影，避免未确认项目被写入。
-///
-/// Code Logic（这个函数做什么）:
-///     Gate A Task5 stub：no-op。
-fn schedule_projection_if_opted_in(_project_id: &str) {
-    // Task 6+ 接入真实 scheduler。
 }
 
 /// 加载本机 Workbench 项目；remote shortcut 拒绝。

@@ -15,6 +15,7 @@
 //!     Gate A Task 8：用户级登录自启动（autostart）。
 //!     Gate A Task 9：service 门面 + Attention conflict/blocked 投影 + control/commands。
 //!     Gate A Task 10：migration（用户 CLAUDE.md seed + N/N+1 dual-write 摘要）。
+//!     Gate A fix r1：`projection_ops` 生产投影调度 + `agent_hub.enabled` 武装路径。
 
 pub mod autostart;
 pub mod instructions;
@@ -23,6 +24,7 @@ pub mod models;
 pub mod object_store;
 pub mod project_scope;
 pub mod projection;
+pub mod projection_ops;
 pub mod revision_graph;
 pub mod runtime;
 pub mod service;
@@ -60,6 +62,9 @@ pub use project_scope::{
 pub use projection::{
     AtomicProjectionWriter, ProjectionRequest, ProjectionRunStats, ProjectionScheduler,
     ProjectionWriteFault, MAX_GLOBAL_PROJECTION_PARALLELISM,
+};
+pub use projection_ops::{
+    ensure_agent_hub_enabled, schedule_asset_projections, schedule_project_projections,
 };
 pub use revision_graph::{
     ContentMergeResult, MergeBaseOutcome, MergePayload, RevisionGraph, MAX_VISITED_REVISIONS,
