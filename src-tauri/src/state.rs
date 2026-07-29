@@ -150,6 +150,10 @@ pub struct AppState {
     pub agent_ledger_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Multi-CLI Agent Hub owner watch/reconcile 循环取消令牌（仅 Headless；GUI 永不启动）
     pub agent_hub_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Agent Hub Git device-lane 导出运行时（debounce + pending；与 CloudSyncRuntime 共享门闸）
+    pub agent_hub_git_runtime: Arc<crate::agent_hub::git::AgentHubGitRuntime>,
+    /// Agent Hub Git 导出后台循环取消令牌（仅 Headless）
+    pub agent_hub_git_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Workbench Claude session 搜索的内存索引，key = worktree_path canonical string。
     /// 首次搜索某 worktree 时 lazy 初始化并启动文件监听。
     pub workbench_claude_session_indexes: Arc<

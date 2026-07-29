@@ -205,6 +205,8 @@ pub async fn schedule_asset_projections(state: &AppState, asset_id: &str) -> Res
             }
         }
     }
+    // Gate C Task6：规范变更 best-effort 触发 Git device-lane 备份（不阻塞投影）
+    crate::agent_hub::git::runtime::mark_agent_hub_git_dirty(state);
     Ok(successes)
 }
 

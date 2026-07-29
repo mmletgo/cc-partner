@@ -34,6 +34,8 @@ pub enum CloudSyncTrigger {
     Scheduler,
     /// CLAUDE.md 页面主动推送到 GitHub
     ClaudeMdPush,
+    /// Agent Hub 本机 device-lane 自动备份导出
+    AgentHubGitExport,
 }
 
 /// 门闸繁忙时的策略。

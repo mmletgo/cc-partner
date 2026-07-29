@@ -2673,6 +2673,105 @@ impl AgentHubRepo {
         self.get_asset_by_unique_key(scope_id, kind, origin_namespace, logical_key)
             .await
     }
+
+    /// 读取本机 device-lane Git 导出状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     export runtime 需要 last_pushed / pending / attempt 决定是否空提交与退避。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 device_id 查询 `agent_hub_git_export_state`。
+    pub async fn get_git_export_state(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<AgentHubGitExportState>, AppError> {
+        let row = sqlx::query(
+            "SELECT device_id, last_exported_snapshot_hash, last_pushed_snapshot_hash,
+                    pending_snapshot_hash, attempt_count, next_attempt_at, last_error
+             FROM agent_hub_git_export_state WHERE device_id = ?",
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| AgentHubGitExportState {
+            device_id: r.get("device_id"),
+            last_exported_snapshot_hash: r.get("last_exported_snapshot_hash"),
+            last_pushed_snapshot_hash: r.get("last_pushed_snapshot_hash"),
+            pending_snapshot_hash: r.get("pending_snapshot_hash"),
+            attempt_count: r.get::<i64, _>("attempt_count") as u32,
+            next_attempt_at: r.get("next_attempt_at"),
+            last_error: r.get("last_error"),
+        }))
+    }
+
+    /// 写入/更新本机 device-lane Git 导出状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     push 成功清 pending；失败保留 pending_hash + attempt + next_attempt。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     shared write lease + INSERT OR REPLACE。
+    pub async fn upsert_git_export_state(
+        &self,
+        state: &AgentHubGitExportState,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO agent_hub_git_export_state (
+                    device_id, last_exported_snapshot_hash, last_pushed_snapshot_hash,
+                    pending_snapshot_hash, attempt_count, next_attempt_at, last_error,
+                    created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(device_id) DO UPDATE SET
+                    last_exported_snapshot_hash=excluded.last_exported_snapshot_hash,
+                    last_pushed_snapshot_hash=excluded.last_pushed_snapshot_hash,
+                    pending_snapshot_hash=excluded.pending_snapshot_hash,
+                    attempt_count=excluded.attempt_count,
+                    next_attempt_at=excluded.next_attempt_at,
+                    last_error=excluded.last_error,
+                    updated_at=excluded.updated_at",
+            )
+            .bind(&state.device_id)
+            .bind(&state.last_exported_snapshot_hash)
+            .bind(&state.last_pushed_snapshot_hash)
+            .bind(&state.pending_snapshot_hash)
+            .bind(state.attempt_count as i64)
+            .bind(&state.next_attempt_at)
+            .bind(&state.last_error)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+/// 本机 Git device-lane 导出持久状态。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     崩溃后需恢复 pending export；snapshotHash 不变时禁止空 commit。
+///
+/// Code Logic（这个结构体做什么）:
+///     镜像 `agent_hub_git_export_state` 业务列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHubGitExportState {
+    /// 本机 device_id
+    pub device_id: String,
+    /// 最近一次成功构建并写出 lane 的 snapshotHash
+    pub last_exported_snapshot_hash: Option<String>,
+    /// 最近一次成功 push 的 snapshotHash
+    pub last_pushed_snapshot_hash: Option<String>,
+    /// 待重试的 snapshotHash
+    pub pending_snapshot_hash: Option<String>,
+    /// 连续失败次数
+    pub attempt_count: u32,
+    /// 下次尝试 RFC3339
+    pub next_attempt_at: Option<String>,
+    /// 最近错误摘要（脱敏）
+    pub last_error: Option<String>,
 }
 
 /// Import 故障注入点。
@@ -3587,6 +3686,18 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_source_push_targets_status
      ON agent_hub_source_push_targets(status, updated_at)",
+    // Gate C Task 6：本机 device-lane Git 导出 pending / last-pushed 状态
+    "CREATE TABLE IF NOT EXISTS agent_hub_git_export_state (
+        device_id TEXT PRIMARY KEY,
+        last_exported_snapshot_hash TEXT,
+        last_pushed_snapshot_hash TEXT,
+        pending_snapshot_hash TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )",
 ];
 
 /// 升级旧库：为 mappings/bindings 补列与唯一索引。
