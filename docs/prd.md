@@ -115,9 +115,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 单条历史正文与单批同步体量有固定上限；超限时本轮同步以稳定错误结束该批次，不静默丢弃或半写入
 - Claude Code 历史纳入 GitHub 私有仓库云端同步范围
 
-### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份）
+### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份 + Gate D Plugin/Runtime）
 
-**描述**：Agent Hub 以 `/agent-hub` 为权威入口，统一管理 Claude / Codex / OpenCode 的指令与可移植资产。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；旧 `/claude-md` / `/claude-code` 仅 N/N+1 重定向。Gate B 在指令基础之上交付 **Skill / Command / Agent / MCP** 的 portable 资产支持（扫描、managed package、legacy adoption、target 矩阵动作）。Gate C 交付 **SnapshotEnvelope v1**、**LAN source-only push**（capability `agent-hub.v1`）与 **Git device-lane 确认式导入**（从不自动 import）。
+**描述**：Agent Hub 以 `/agent-hub` 为权威入口，统一管理 Claude / Codex / OpenCode 的指令与可移植资产。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；旧 `/claude-md` / `/claude-code` 仅 N/N+1 重定向。Gate B 在指令基础之上交付 **Skill / Command / Agent / MCP** 的 portable 资产支持（扫描、managed package、legacy adoption、target 矩阵动作）。Gate C 交付 **SnapshotEnvelope v1**、**LAN source-only push**（capability `agent-hub.v1`）与 **Git device-lane 确认式导入**（从不自动 import）。Gate D 交付 **Plugin 分解投影** 与 **OpenCode runtime bridge 合同**（库路径 + L2/E2E；非真实 TUI）。
 
 **已交付（Gate A）**：
 - Hub 首屏展示 CLI probe 状态、write 兼容性、冲突/阻塞计数
@@ -163,7 +163,14 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 真实双主机 mDNS / 全平台 LAN Hub 复制（`L3-AGENT-HUB-C-LAN-001` **NOT VERIFIED**）
 - 真实 OpenCode 可见 TUI session/permission/completion/resume/Ctrl-C（`L3-AGENT-HUB-D-OPENCODE-001` / `L3-AGENT-HUB-OPENCODE-RUNTIME-001` **NOT VERIFIED**；L2 library smoke 不是替代）
 - 真实多机 / 全平台 CLI 写盘与 exact 版本认证（含 `L3-AGENT-HUB-B-CLI-001` **NOT VERIFIED**）
+- 真实 Claude / Codex / OpenCode 产品安装路径写盘族（`L3-AGENT-HUB-CLAUDE-001` / `L3-AGENT-HUB-CODEX-001` / `L3-AGENT-HUB-OPENCODE-001` **NOT VERIFIED**）
 - **不得**宣称 LAN 身份认证、自动 Git import，或未 pin 的 OpenCode 版本 runtime 已认证
+
+**Program-wide certification（Program Task 5，integration after Gate D @ `b1b01d89`，2026-07-30）**：
+- 已在集成树上复跑 Gate A–D 聚焦 Rust 串行 lib/smoke、前端 unit/build/E2E 与协议/文档门禁；L2/E2E 证据 ID 保持可追溯，**不**把 L1/L2 升格为 L3
+- `cargo test --lib agent_hub` **以 `--test-threads=1` 为认证模式**（默认并行下 importer 全局 fault inject 可 flake）；详见 `docs/development/testing.md` program-wide 表
+- 前端 `npm run lint` 与默认 strict `check:bundle` 在本轮 **未**宣称通过（lint 债务集中于 Agent Hub hooks/React Compiler；bundle 仅 final-only 硬顶可通过）
+- 命令矩阵与完整 NOT VERIFIED 清单：`.superpowers/sdd/reports/program-task-5-report.md`
 
 ### 2.6 设备自动发现与互联
 
