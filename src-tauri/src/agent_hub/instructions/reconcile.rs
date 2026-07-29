@@ -440,6 +440,124 @@ fn normalize(s: &str) -> String {
     t
 }
 
+/// 指令文档内容三方合并结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     Snapshot import 在 local/remote head 分叉时需要块级合并：不相交改动自动 merge，
+///     同块双侧编辑必须 Conflict，禁止 LWW。
+///
+/// Code Logic（这个枚举做什么）:
+///     Merged 携带合并后的 InstructionDocument；Conflict 表示同块冲突。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstructionContentMerge {
+    /// 自动合并成功
+    Merged(InstructionDocument),
+    /// 同块冲突
+    Conflict,
+}
+
+/// 对两份指令文档做 base 可选的三方/两方块级合并（import / virtual base 共用）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Gate C import 与 RevisionGraph multi-base virtual base 需要可复用的 instruction 内容合并器；
+///     不相交块改动合并，同块双侧改动冲突，禁止静默覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     以 block id 对齐；base 存在时做三方决策，否则两侧指纹相等才 Merged，否则 Conflict；
+///     输出块顺序 = left 顺序 + right 独有块。
+pub fn merge_instruction_documents(
+    base: Option<&InstructionDocument>,
+    left: &InstructionDocument,
+    right: &InstructionDocument,
+) -> InstructionContentMerge {
+    let base_by_id: BTreeMap<&str, &InstructionBlock> = base
+        .map(|d| d.blocks.iter().map(|b| (b.id.as_str(), b)).collect())
+        .unwrap_or_default();
+    let left_by_id: BTreeMap<&str, &InstructionBlock> =
+        left.blocks.iter().map(|b| (b.id.as_str(), b)).collect();
+    let right_by_id: BTreeMap<&str, &InstructionBlock> =
+        right.blocks.iter().map(|b| (b.id.as_str(), b)).collect();
+
+    let mut order: Vec<String> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for b in &left.blocks {
+        if seen.insert(b.id.clone()) {
+            order.push(b.id.clone());
+        }
+    }
+    for b in &right.blocks {
+        if seen.insert(b.id.clone()) {
+            order.push(b.id.clone());
+        }
+    }
+
+    let mut out_blocks = Vec::new();
+    for id in order {
+        let l = left_by_id.get(id.as_str()).copied();
+        let r = right_by_id.get(id.as_str()).copied();
+        let b = base_by_id.get(id.as_str()).copied();
+        match (b, l, r) {
+            (base_opt, Some(lv), Some(rv)) => {
+                let lf = lv.content_fingerprint();
+                let rf = rv.content_fingerprint();
+                if lf == rf {
+                    out_blocks.push(lv.clone());
+                    continue;
+                }
+                if let Some(base_block) = base_opt {
+                    let bf = base_block.content_fingerprint();
+                    if lf == bf {
+                        out_blocks.push(rv.clone());
+                        continue;
+                    }
+                    if rf == bf {
+                        out_blocks.push(lv.clone());
+                        continue;
+                    }
+                    // 双侧相对 base 均改且内容不同 → conflict
+                    return InstructionContentMerge::Conflict;
+                }
+                // 无 base 且两侧不同 → conflict
+                return InstructionContentMerge::Conflict;
+            }
+            (_, Some(lv), None) => out_blocks.push(lv.clone()),
+            (_, None, Some(rv)) => out_blocks.push(rv.clone()),
+            _ => {}
+        }
+    }
+
+    InstructionContentMerge::Merged(InstructionDocument {
+        relative_key: if left.relative_key.is_empty() {
+            right.relative_key.clone()
+        } else {
+            left.relative_key.clone()
+        },
+        blocks: out_blocks,
+    })
+}
+
+/// 供 RevisionGraph merge_base 使用的 instruction payload 内容合并器。
+///
+/// Business Logic（为什么需要这个函数）:
+///     multi-base virtual base 只比较 payload/tree/delete 摘要；指令路径在 import 层用完整文档合并。
+///
+/// Code Logic（这个函数做什么）:
+///     delete 对 edit → Conflict；同 hash → Merged；否则 Conflict（非指令 blob 无法块级合并）。
+pub fn merge_revision_payload_summary(
+    left: crate::agent_hub::revision_graph::MergePayload,
+    right: crate::agent_hub::revision_graph::MergePayload,
+) -> crate::agent_hub::revision_graph::ContentMergeResult {
+    use crate::agent_hub::revision_graph::ContentMergeResult;
+    if left.content_eq(&right) {
+        return ContentMergeResult::Merged(left);
+    }
+    if left.is_delete != right.is_delete {
+        return ContentMergeResult::Conflict;
+    }
+    // 无完整文档字节时，不同 hash 只能 Conflict（import 层会用 merge_instruction_documents）
+    ContentMergeResult::Conflict
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

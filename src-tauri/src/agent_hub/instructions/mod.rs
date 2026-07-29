@@ -24,6 +24,7 @@ pub use document::{
     RenderedBlockRange, StructuredInstructionIntent,
 };
 pub use reconcile::{
-    reconcile_against_rendered, reconcile_instruction, BaseBlockRecord, ExternalObservation,
+    merge_instruction_documents, merge_revision_payload_summary, reconcile_against_rendered,
+    reconcile_instruction, BaseBlockRecord, ExternalObservation, InstructionContentMerge,
     InstructionReconcileOutcome, ReconcileInput,
 };
