@@ -373,8 +373,9 @@ pub async fn resume_runner_attempt(
                     agent_id.clone(),
                 )
                 .await?;
-            // 原子更新 active attempt 的 terminal/agent（best-effort CAS）。
-            let _ = state
+            // Fresh resume 必须先 CAS 绑定新 terminal/agent；0-row miss 时 fail-closed，
+            // 禁止继续 create runtime 或写 opencode --session 输入。
+            state
                 .orchestrator_repo
                 .update_active_runner_session_and_agent(
                     &task.id,
@@ -382,7 +383,7 @@ pub async fn resume_runner_attempt(
                     &session.id,
                     Some(&agent_id),
                 )
-                .await;
+                .await?;
             (session.id, Some(agent_id), session.command)
         }
         ResumeTerminalPolicy::Reuse => {
@@ -758,6 +759,38 @@ mod tests {
         let json = serde_json::to_string(&dto).unwrap();
         assert!(!json.contains("nativeSessionId"));
         assert!(!json.contains("claude-native-xyz"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Fresh resume CAS miss 时不得继续写 OpenCode resume 输入。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 `update_active_runner_session_and_agent` Conflict 在 resume 路径上是 fail-closed 前置条件
+    ///     （CAS 在 write terminal input 之前）。
+    #[test]
+    fn fresh_resume_cas_miss_must_fail_closed_before_terminal_write() {
+        // 文档/契约测试：resume_runner_attempt 在 Fresh 分支对 CAS 使用 `?`，
+        // 不再 `let _ = ...` 忽略 0-row miss。源码字符级守卫防止回归。
+        let source = include_str!("agent_runtime_bridge.rs");
+        assert!(
+            source.contains("update_active_runner_session_and_agent("),
+            "resume must call CAS helper"
+        );
+        assert!(
+            !source.contains("let _ = state\n                .orchestrator_repo\n                .update_active_runner_session_and_agent"),
+            "CAS miss must not be ignored with let _ ="
+        );
+        // 成功路径在 build_resume_plan / local_write 之前 await? CAS。
+        let cas_pos = source
+            .find("update_active_runner_session_and_agent(")
+            .expect("CAS call");
+        let write_pos = source
+            .find("local_write_workbench_session_input(state, write_terminal_id.clone(), input)")
+            .expect("terminal write");
+        assert!(
+            cas_pos < write_pos,
+            "CAS must precede OpenCode resume terminal write"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

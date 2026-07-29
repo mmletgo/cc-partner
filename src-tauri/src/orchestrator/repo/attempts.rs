@@ -501,10 +501,12 @@ impl OrchestratorRepo {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     OpenCode resume 新建 terminal/agent 后，task 与 attempt 必须原子指向新 id，
-    ///     否则 completion/sentinel 反查仍绑旧 idle TUI。
+    ///     否则 completion/sentinel 反查仍绑旧 idle TUI。CAS miss 必须 fail-closed，
+    ///     禁止调用方继续写 resume 输入。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     同事务更新 tasks + running attempt 的 session_id/agent_session_id（按 task_id+attempt）。
+    ///     同一 SQLite 事务更新 tasks + running attempt 的 session_id/agent_session_id
+    ///     （按 task_id+attempt+Running）；任一 UPDATE rows_affected!=1 则 rollback 并 Conflict。
     pub async fn update_active_runner_session_and_agent(
         &self,
         task_id: &str,
@@ -521,7 +523,8 @@ impl OrchestratorRepo {
         }
         let now = Utc::now().to_rfc3339();
         with_shared_write_lease(&self.gate, async {
-            sqlx::query(
+            let mut tx = self.pool.begin().await?;
+            let task_result = sqlx::query(
                 "UPDATE orchestrator_tasks \
                  SET session_id = ?, agent_session_id = ?, updated_at = ? \
                  WHERE id = ? AND status = ? AND attempt = ?",
@@ -532,9 +535,19 @@ impl OrchestratorRepo {
             .bind(task_id)
             .bind(OrchestratorTaskStatus::Running.as_str())
             .bind(attempt)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            if task_result.rows_affected() != 1 {
+                tracing::debug!(
+                    task_id = %task_id,
+                    attempt,
+                    "update_active_runner_session_and_agent task CAS miss"
+                );
+                return Err(AppError::conflict(
+                    "Fresh resume CAS 未命中：任务未处于 Running 或 attempt 不匹配",
+                ));
+            }
+            let attempt_result = sqlx::query(
                 "UPDATE orchestrator_task_attempts \
                  SET session_id = ?, agent_session_id = ? \
                  WHERE task_id = ? AND attempt = ? AND status = ?",
@@ -544,8 +557,19 @@ impl OrchestratorRepo {
             .bind(task_id)
             .bind(attempt)
             .bind(OrchestratorAttemptStatus::Running.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+            if attempt_result.rows_affected() != 1 {
+                tracing::debug!(
+                    task_id = %task_id,
+                    attempt,
+                    "update_active_runner_session_and_agent attempt CAS miss"
+                );
+                return Err(AppError::conflict(
+                    "Fresh resume CAS 未命中：running attempt 未绑定新 terminal/agent",
+                ));
+            }
+            tx.commit().await?;
             Ok::<(), AppError>(())
         })
         .await?;
