@@ -87,18 +87,18 @@ impl AssetAdapter for ClaudeInstructionAdapter {
 
     /// 渲染 Claude `CLAUDE.md`。
     ///
-    /// Business Logic: Gate A 仅输出共同正文，完整块编译在 Task 4。
-    /// Code Logic: file_name=CLAUDE.md，content=common_markdown。
+    /// Business Logic: 经 Instruction Compiler 输出用户正文；无 managed prelude。
+    /// Code Logic: `compile_render` → `RenderedInstruction::from_compiled`。
     fn render_instruction(
         &self,
         document: &InstructionDocument,
-        _context: &InstructionRenderContext,
+        context: &InstructionRenderContext,
     ) -> Result<RenderedInstruction, AppError> {
-        Ok(RenderedInstruction {
-            target: AgentTarget::Claude,
-            file_name: "CLAUDE.md".into(),
-            content: document.common_markdown.clone(),
-            prelude: None,
-        })
+        let compiled = crate::agent_hub::instructions::compile_render(
+            &document.to_compiled_document(),
+            AgentTarget::Claude,
+            context,
+        );
+        Ok(RenderedInstruction::from_compiled(compiled))
     }
 }
