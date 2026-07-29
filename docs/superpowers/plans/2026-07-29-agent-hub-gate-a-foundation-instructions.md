@@ -44,6 +44,18 @@
 - Create: `web/src/api/agentHub.ts`, `web/src/lib/types/agentHub.ts`, `web/src/lib/schemas/agentHub.ts`。
 - Create: `web/src/i18n/locales/{en,zh}/agentHub.json`。
 
+## Task Dependency Graph
+
+```text
+A1 -> A2 -> A3 -> A4 --\
+  \-> A5 --------------+-> A6 -> A7 --\
+  \-> A8 -----------------------------+-> A9 -> A10
+```
+
+- Exact edges: `A1→A2→A3→A4`; `A1→A5`; `{A4,A5}→A6→A7`; `A1→A8`; `{A7,A8}→A9→A10`.
+- Dependency-ready waves: `[A1]`, `[A2,A5,A8]`, `[A3]`, `[A4]`, `[A6]`, `[A7]`, `[A9]`, `[A10]`.
+- `A2/A5/A8` may use isolated task worktrees concurrently; all other tasks wait for the listed predecessors and the wave integration baseline.
+
 ### Task 1: Add Canonical Models and Additive SQLite Schema
 
 **Files:**
@@ -1013,3 +1025,7 @@ Expected: all exit 0; no plaintext fixture appears in logs.
 git add src-tauri/src/agent_hub/migration.rs src-tauri/src/commands/claude_md.rs src-tauri/src/sync/claude_md.rs src-tauri/src/storage/claude_md_repo.rs src-tauri/tests/agent_hub_gate_a_smoke.rs web/tests/agent-hub.spec.ts docs/prd.md docs/development/testing.md docs/development/quality-matrix.json src-tauri/CLAUDE.md web/CLAUDE.md
 git commit -m "feat: complete agent hub instruction foundation"
 ```
+
+## Completion Contract
+
+Gate A is complete only when Task 10's full command set passes from a clean committed Gate A branch, the owner continues reconciliation with the GUI closed, nested instruction changes converge to the corresponding target document without overwriting target-only blocks, unopted projects remain write-free, Workbench worktrees obey the binding rules, and conflict/crash recovery evidence is recorded. Quality rows may mark only actually exercised versions/platforms verified; every unexecuted platform remains `NOT VERIFIED`.

@@ -40,6 +40,16 @@
 - Create: `src-tauri/tests/agent_hub_replication_smoke.rs`。
 - Test: `web/tests/agent-hub.spec.ts`。
 
+## Task Dependency Graph
+
+```text
+C1 -> C2 -> C3 -> C4 -> C5 -> C6 -> C7 -> C8
+```
+
+- Exact edges are the linear chain shown above: canonical envelope precedes archive/import, which precedes LAN transport, Git lanes and mixed-version certification.
+- Dependency-ready waves: `[C1]`, `[C2]`, `[C3]`, `[C4]`, `[C5]`, `[C6]`, `[C7]`, `[C8]`.
+- Do not overlap write workers inside Gate C; use a fresh task implementer and the integrated predecessor commit as each task baseline.
+
 ### Task 1: Implement SnapshotEnvelope v1 and the Canonical JSON Subset
 
 **Files:**
@@ -704,3 +714,7 @@ Document `agent-hub.v1` routes, limits, idempotency, source-push semantics, Git 
 git add src-tauri/tests/agent_hub_replication_smoke.rs src-tauri/src/sync/mixed_version_harness.rs src-tauri/src/cc/mixed_version_harness.rs web/tests/agent-hub.spec.ts docs/p2p-protocol.md docs/prd.md docs/development/testing.md docs/development/quality-matrix.json src-tauri/CLAUDE.md web/CLAUDE.md
 git commit -m "feat: complete agent hub replication and backup"
 ```
+
+## Completion Contract
+
+Gate C is complete only when Task 8's full command set passes from a clean committed Gate C branch, the same verified `SnapshotEnvelope v1` preserves lineage/tombstones/variants/conflicts and plaintext payload bytes across manual LAN push and Git device lanes, receiver idempotency and limits survive fault tests, Git never auto-imports a remote lane, unmapped projects never gain guessed paths or opt-in, and N/N+1 mixed-version routes still work. Only exercised L3 combinations may be verified; every other platform remains `NOT VERIFIED`.

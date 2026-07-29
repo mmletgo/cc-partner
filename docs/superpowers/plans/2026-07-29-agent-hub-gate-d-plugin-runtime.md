@@ -41,6 +41,18 @@
 - Create: `src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs`。
 - Test: `web/tests/agent-hub.spec.ts`。
 
+## Task Dependency Graph
+
+```text
+D1 -> D2 --\
+             +-> D3 --+-> D6 --\
+D4 -> D5 ---/         \-> D7 --+-> D8
+```
+
+- Exact edges: `D1→D2`; `D4→D5`; `{D2,D5}→D3`; `D3→D6`; `D3→D7`; `{D6,D7}→D8`. The `D5→D3` edge serializes their shared support-manifest contract.
+- Dependency-ready waves: `[D1,D4]`, `[D2,D5]`, `[D3]`, `[D6,D7]`, `[D8]`.
+- `D1/D4`, `D2/D5` and `D6/D7` may use isolated task worktrees concurrently; integrate each wave in listed task order before starting successors.
+
 ### Task 1: Add Immutable PluginPackage, Hook and Residual Schemas
 
 **Files:**
@@ -787,3 +799,7 @@ git commit -m "feat: complete multi-cli agent hub"
 ```
 
 Expected: omit `AGENTS.md` from `git add` when no top-level/component inventory entry changed.
+
+## Completion Contract
+
+Gate D is complete only when Task 8's full command set passes from a clean committed Gate D branch, immutable component refs and reference-counted deletion are correct, unsupported runtime/hook mappings remain source-only or blocked, the opted-in OpenCode bridge is hash/evidence verified and emits official session/completion events through the existing reducer, `openCodeVisible` fails closed without that bridge, the four-provider UI/runtime contracts agree, and N+2 removals remain gated by migration evidence. Only the exact exercised OpenCode/provider fixture may be verified; every other platform remains `NOT VERIFIED`.

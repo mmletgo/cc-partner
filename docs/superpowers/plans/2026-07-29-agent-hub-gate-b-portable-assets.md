@@ -39,6 +39,16 @@
 - Extend: `web/src/pages/AgentHub/`, `web/src/api/agentHub.ts`, `web/src/lib/{types,schemas}/agentHub.ts`。
 - Test: `web/tests/agent-hub.spec.ts`。
 
+## Task Dependency Graph
+
+```text
+B1 -> B2 -> B3 -> B4 -> B5 -> B6 -> B7 -> B8 -> B9
+```
+
+- Exact edges are the linear chain shown above because the tasks successively extend shared canonical models, target adapters, package activation, adoption, state transitions and UI DTOs.
+- Dependency-ready waves: `[B1]`, `[B2]`, `[B3]`, `[B4]`, `[B5]`, `[B6]`, `[B7]`, `[B8]`, `[B9]`.
+- Do not overlap write workers inside Gate B; use a fresh task implementer and the integrated predecessor commit as each task baseline.
+
 ### Task 1: Add Typed Canonical Payloads for Skill, Command, Agent and MCP
 
 **Files:**
@@ -842,3 +852,7 @@ Document shipped Gate B behavior, managed physical paths, support matrix and leg
 git add src-tauri/tests/agent_hub_gate_b_smoke.rs src-tauri/tests/agent_hub_cli_contract.rs web/tests/agent-hub.spec.ts docs/prd.md docs/development/testing.md docs/development/quality-matrix.json src-tauri/CLAUDE.md web/CLAUDE.md
 git commit -m "feat: complete portable agent asset support"
 ```
+
+## Completion Contract
+
+Gate B is complete only when Task 9's full command set passes from a clean committed Gate B branch, shared assets are discovered exactly once per target, target-only assets never leak to other CLIs, unmanaged TOML/JSONC survives round trips, adoption/crash recovery leaves one discoverable source, target-local enable/detach/delete semantics hold, credential bytes remain exact, and logs contain no credential fixture. Support evidence applies only to exact tested CLI versions; every unexecuted platform remains `NOT VERIFIED`.
