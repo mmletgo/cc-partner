@@ -693,11 +693,11 @@ pub async fn preview_plugin_migration(
     })
 }
 
-/// 确认 import 单个 Plugin（幂等：同 package payload hash 不新建 revision）。
+/// 确认 import 单个 Plugin（幂等：有序 component/residual 内容集合匹配 head 才短路）。
 ///
 /// Business Logic: 用户确认后 import 一个 package/child graph；碰撞/未验证激活保持
-/// sourceOnly/externalCollision 且不写新 head。
-/// Code Logic: 可选 force_status → 否则 inspect 已完成的 confirmed → hash 相同则跳过 append。
+/// sourceOnly/externalCollision 且不写新 head。仅同 plugin_id 不足以免陈旧 head 静默 no-op。
+/// Code Logic: 可选 force_status → 否则 confirmed → component/residual 集合相同则跳过 append。
 pub async fn confirm_plugin_migration_import(
     agent_hub: &AgentHubRepo,
     object_store_root: &Path,
@@ -883,7 +883,7 @@ fn parse_version_core(v: &str) -> [u64; 3] {
     out
 }
 
-/// 若 package 已以相同 canonical payload hash 作为 head，则返回 true。
+/// 若 package 已以相同 component/residual 内容集合作为 head，则返回 true。
 async fn package_already_imported(
     agent_hub: &AgentHubRepo,
     store: &ObjectStore,
@@ -894,7 +894,146 @@ async fn package_already_imported(
         .is_some())
 }
 
-/// 查找同 plugin_id 的 package head，若 payload hash 匹配 preview 则返回 (asset_id, rev_id, hash)。
+/// preview 侧有序 component 内容集合：(kind, logical_key, content_fp, tree_hash)。
+///
+/// Business Logic: 源更新后 content/tree 变化必须触发 append；不依赖尚未生成的 revision id。
+/// Code Logic: 从 typed ComponentPayloadPreview 派生稳定 content 指纹 + tree。
+fn preview_component_content_set(
+    preview: &PluginDecompositionPreview,
+) -> Result<Vec<(String, String, String, String)>, AppError> {
+    use crate::agent_hub::assets::{canonical_bytes, PortableAssetPayload};
+    use crate::agent_hub::plugins::{canonical_portable_hook_bytes, ComponentPayloadPreview};
+
+    let mut out: Vec<(String, String, String, String)> = Vec::new();
+    for c in &preview.components {
+        let (content, tree) = match &c.payload {
+            ComponentPayloadPreview::Portable { payload } => match payload {
+                PortableAssetPayload::Skill(s) => {
+                    (s.skill_markdown_hash.clone(), s.tree_manifest_hash.clone())
+                }
+                other => {
+                    let bytes = canonical_bytes(other)?;
+                    (sha256_hex(&bytes), c.tree_hash.clone().unwrap_or_default())
+                }
+            },
+            ComponentPayloadPreview::Hook { hook } => {
+                let bytes = canonical_portable_hook_bytes(hook)?;
+                (
+                    sha256_hex(&bytes),
+                    hook.command_tree_hash.clone().unwrap_or_default(),
+                )
+            }
+        };
+        out.push((
+            c.kind.as_str().to_string(),
+            c.logical_key.clone(),
+            content,
+            tree,
+        ));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// preview 侧有序 residual 集合：(target, residual_kind, tree_hash)。
+fn preview_residual_set(preview: &PluginDecompositionPreview) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = preview
+        .residuals
+        .iter()
+        .map(|r| {
+            (
+                r.target.as_str().to_string(),
+                r.residual_kind.as_str().to_string(),
+                r.tree_manifest_hash.clone(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// 从 package head 的固定 component revision 还原与 preview 同构的内容集合。
+///
+/// Business Logic: component revision 的 tree/content 指纹才是“包语义”身份，不是 plugin_id。
+/// Code Logic: load 每个 component revision payload；与 preview_component_content_set 同算法。
+async fn head_component_content_set(
+    agent_hub: &AgentHubRepo,
+    store: &ObjectStore,
+    payload: &crate::agent_hub::plugins::PluginPackagePayload,
+) -> Result<Vec<(String, String, String, String)>, AppError> {
+    use crate::agent_hub::assets::{from_canonical_bytes, PortableAssetPayload};
+    use crate::agent_hub::plugins::{canonical_portable_hook_bytes, from_portable_hook_bytes};
+
+    let mut out: Vec<(String, String, String, String)> = Vec::new();
+    for cref in &payload.component_refs {
+        let asset = agent_hub.get_asset(&cref.asset_id).await?;
+        let logical_key = asset
+            .map(|a| a.logical_key)
+            .unwrap_or_else(|| cref.asset_id.clone());
+        let Some(rev) = agent_hub.get_revision(&cref.revision_id).await? else {
+            return Err(AppError::validation(format!(
+                "agent_hub_plugin_component_revision_missing:{}",
+                cref.revision_id.as_str()
+            )));
+        };
+        let Some(ph) = rev.payload_hash.as_deref() else {
+            return Err(AppError::validation(
+                "agent_hub_plugin_component_missing_payload_hash".to_string(),
+            ));
+        };
+        let bytes = store.get_blob(ph).await?;
+        let (content, tree) = if let Ok(portable) = from_canonical_bytes(&bytes) {
+            match portable {
+                PortableAssetPayload::Skill(s) => (s.skill_markdown_hash, s.tree_manifest_hash),
+                other => {
+                    let _ = other;
+                    (
+                        ph.to_string(),
+                        rev.tree_manifest_hash.clone().unwrap_or_default(),
+                    )
+                }
+            }
+        } else if let Ok(hook) = from_portable_hook_bytes(&bytes) {
+            let hook_bytes = canonical_portable_hook_bytes(&hook)?;
+            (
+                sha256_hex(&hook_bytes),
+                hook.command_tree_hash.unwrap_or_default(),
+            )
+        } else {
+            (
+                ph.to_string(),
+                rev.tree_manifest_hash.clone().unwrap_or_default(),
+            )
+        };
+        out.push((cref.kind.as_str().to_string(), logical_key, content, tree));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// head residual 集合。
+fn head_residual_set(
+    payload: &crate::agent_hub::plugins::PluginPackagePayload,
+) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = payload
+        .residual_refs
+        .iter()
+        .map(|r| {
+            (
+                r.target.as_str().to_string(),
+                r.residual_kind.as_str().to_string(),
+                r.tree_manifest_hash.clone(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// 查找同 plugin_id 的 package head，**仅当有序 component/residual 内容集合匹配** 才幂等返回。
+///
+/// Business Logic: 同 plugin_id 但源更新必须走 append/update，禁止静默 no-op 保留陈旧 head。
+/// Code Logic: unique key 找 head → 解析 package payload → 比对 component content/tree 与 residual。
 async fn existing_package_head(
     agent_hub: &AgentHubRepo,
     store: &ObjectStore,
@@ -920,16 +1059,23 @@ async fn existing_package_head(
     let Some(hash) = rev.payload_hash.clone() else {
         return Ok(None);
     };
-    // 用当前 head payload 与即将 import 的 component 集合比对：
-    // 若 head 存在且 plugin_id 相同即视为已导入（二次确认幂等）。
-    // 更严：尝试读 blob 解析 plugin_id。
-    if let Ok(bytes) = store.get_blob(&hash).await {
-        if let Ok(payload) = crate::agent_hub::plugins::from_plugin_package_bytes(&bytes) {
-            if payload.plugin_id == preview.plugin_id {
-                return Ok(Some((asset.id, rev_id.as_str().to_string(), hash)));
-            }
-        }
+    let Ok(bytes) = store.get_blob(&hash).await else {
+        return Ok(None);
+    };
+    let Ok(payload) = crate::agent_hub::plugins::from_plugin_package_bytes(&bytes) else {
+        return Ok(None);
+    };
+    if payload.plugin_id != preview.plugin_id {
+        return Ok(None);
     }
+    let intended_components = preview_component_content_set(preview)?;
+    let intended_residuals = preview_residual_set(preview);
+    let head_components = head_component_content_set(agent_hub, store, &payload).await?;
+    let head_residuals = head_residual_set(&payload);
+    if intended_components == head_components && intended_residuals == head_residuals {
+        return Ok(Some((asset.id, rev_id.as_str().to_string(), hash)));
+    }
+    // plugin_id 相同但 component/residual 内容集合已变 → 调用方走 append/update
     Ok(None)
 }
 
@@ -1472,6 +1618,79 @@ mod tests {
         assert_eq!(second.package_asset_id, first.package_asset_id);
         assert_eq!(second.revision_id, first.revision_id);
         assert_eq!(second.payload_hash, first.payload_hash);
+    }
+
+    /// Business Logic: 同 plugin_id 但 component 内容集合变化时不得 idempotent 短路。
+    /// Code Logic: confirm → 改 skill 内容并 re-inspect → confirm 必须 created_revision。
+    #[tokio::test]
+    async fn plugin_migration_confirm_appends_when_component_content_changes() {
+        let (agent_hub, _claude_md, _) = setup_repos().await;
+        agent_hub
+            .insert_scope(NewScopeNode {
+                id: Some(USER_SCOPE_STABLE_ID.into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let objects = tmp.path().join("data");
+        fs::create_dir_all(&objects).unwrap();
+        let root = tmp.path().join("claude-plugin");
+        claude_plugin_fixture(&root);
+        let source = discovered(
+            "claude-demo",
+            AgentTarget::Claude,
+            &root,
+            USER_SCOPE_STABLE_ID,
+        );
+        let preview = preview_plugin_migration(&agent_hub, &objects, std::slice::from_ref(&source))
+            .await
+            .unwrap();
+        let first = confirm_plugin_migration_import(
+            &agent_hub,
+            &objects,
+            ConfirmedPluginDecomposition {
+                preview: preview.items[0].preview.clone(),
+                link_standalone: Default::default(),
+                origin_replica_id: "device-test-1".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(first.created_revision);
+
+        // mutate skill content so component content set diverges
+        write_plugin_file(
+            &root.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Portable skill UPDATED\n---\nSkill body changed\n",
+        );
+        let preview2 =
+            preview_plugin_migration(&agent_hub, &objects, std::slice::from_ref(&source))
+                .await
+                .unwrap();
+        let second = confirm_plugin_migration_import(
+            &agent_hub,
+            &objects,
+            ConfirmedPluginDecomposition {
+                preview: preview2.items[0].preview.clone(),
+                link_standalone: Default::default(),
+                origin_replica_id: "device-test-1".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            second.created_revision,
+            "source-updated re-confirm must append, got {:?}",
+            second
+        );
+        assert_eq!(second.status, "imported");
+        assert_ne!(second.revision_id, first.revision_id);
+        assert_ne!(second.payload_hash, first.payload_hash);
     }
 
     /// Business Logic: 碰撞/未验证激活保持 sourceOnly/externalCollision，不写 revision。

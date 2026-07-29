@@ -1106,15 +1106,18 @@ impl AgentHubRepo {
         Ok(decide_component_delete(has_standalone, other))
     }
 
-    /// 删除 package：先 tombstone package，再按引用派生决策处理 component。
+    /// 删除 package：单 shared-write lease TX 内 package tombstone + component 决策与条件删除。
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     只 tombstone 独占 component；共享/standalone 保留；旧 package revision 不改写。
+    ///     multi-step 删除会在 concurrent package-head 创建时 TOCTOU 误删/漏删。
     ///
     /// Code Logic（这个函数做什么）:
+    ///     单 with_shared_write_lease + 单 TX：
     ///     1) 读 package head 的 component 边；
-    ///     2) package Delete tombstone（delete_asset_everywhere_atomic）；
-    ///     3) 对每个 component fresh decide；TombstoneOwned 才 append Delete。
+    ///     2) package Delete tombstone first（head CAS）；
+    ///     3) 对每个 component 在同一 TX 内 re-decide（edges/heads 一致读）；
+    ///     4) TombstoneOwned 才 append child Delete。
     pub async fn delete_plugin_package_with_ownership(
         &self,
         package_asset_id: &str,
@@ -1123,90 +1126,114 @@ impl AgentHubRepo {
         origin_replica_id: impl Into<String>,
     ) -> Result<PluginPackageDeleteResult, AppError> {
         let origin_replica_id = origin_replica_id.into();
-        let package = self
-            .get_asset(package_asset_id)
+        with_shared_write_lease(&self.gate, async {
+            let mut tx = self.pool.begin().await?;
+
+            let package_row = sqlx::query(
+                "SELECT id, kind, current_revision_id, deleted_at
+                 FROM agent_hub_assets WHERE id = ?",
+            )
+            .bind(package_asset_id)
+            .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| AppError::not_found("agent_hub_asset_not_found".to_string()))?;
-        if package.kind != AssetKind::Plugin {
-            return Err(AppError::validation(format!(
-                "agent_hub_asset_kind_not_plugin:{}",
-                package.kind.as_str()
-            )));
-        }
-        let Some(head) = package.current_revision_id.clone() else {
-            return Err(AppError::validation(
-                "agent_hub_plugin_no_head_revision".to_string(),
-            ));
-        };
-        // 历史 head 的 component 列表（tombstone 后 head 变为 delete rev，边表仍挂在旧 rev）
-        let components = self
-            .list_plugin_components_for_revision(head.as_str())
-            .await?;
-
-        let package_tombstone = NewRevision {
-            id: RevisionId::new_v7(),
-            asset_lineage_id: package.id.clone(),
-            parents: vec![head.clone()],
-            operation: RevisionOperation::Delete,
-            origin_kind,
-            origin_target: None,
-            origin_replica_id: origin_replica_id.clone(),
-            payload_hash: None,
-            tree_manifest_hash: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            expected_parent_id: Some(head.clone()),
-        };
-        let package_revision = self
-            .delete_asset_everywhere_atomic(package_asset_id, package_tombstone, vec![])
-            .await?;
-
-        let mut component_decisions = Vec::new();
-        for cref in components {
-            // 事务后 fresh read（concurrent ref 创建会反映在边表/standalone）
-            let decision = self
-                .decide_component_delete(&cref.asset_id, Some(package_asset_id))
-                .await?;
-            component_decisions.push(ComponentDeleteOutcome {
-                component_asset_id: cref.asset_id.clone(),
-                kind: cref.kind,
-                decision,
-            });
-            if decision != ComponentDeleteDecision::TombstoneOwned {
-                continue;
+            let kind_s: String = package_row.try_get("kind")?;
+            let kind = AssetKind::parse(&kind_s).ok_or_else(|| {
+                AppError::validation(format!("agent_hub_asset_kind_unknown:{kind_s}"))
+            })?;
+            if kind != AssetKind::Plugin {
+                return Err(AppError::validation(format!(
+                    "agent_hub_asset_kind_not_plugin:{}",
+                    kind.as_str()
+                )));
             }
-            let comp_asset = match self.get_asset(&cref.asset_id).await? {
-                Some(a) if a.deleted_at.is_none() => a,
-                _ => continue,
+            let head: Option<String> = package_row.try_get("current_revision_id")?;
+            let Some(head) = head else {
+                return Err(AppError::validation(
+                    "agent_hub_plugin_no_head_revision".to_string(),
+                ));
             };
-            let parents = comp_asset
-                .current_revision_id
-                .clone()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let expected = comp_asset.current_revision_id.clone();
-            let tombstone = NewRevision {
-                id: RevisionId::new_v7(),
-                asset_lineage_id: comp_asset.id.clone(),
-                parents,
-                operation: RevisionOperation::Delete,
-                origin_kind,
-                origin_target: None,
-                origin_replica_id: origin_replica_id.clone(),
-                payload_hash: None,
-                tree_manifest_hash: None,
-                created_at: chrono::Utc::now().to_rfc3339(),
-                expected_parent_id: expected,
-            };
-            let _ = self
-                .delete_asset_everywhere_atomic(&comp_asset.id, tombstone, vec![])
-                .await?;
-        }
+            // 历史 head 的 component 列表（tombstone 后 head 变为 delete rev，边表仍挂在旧 rev）
+            let components = list_plugin_components_on_tx(&mut tx, &head).await?;
 
-        Ok(PluginPackageDeleteResult {
-            package_asset_id: package_asset_id.to_string(),
-            package_revision,
-            component_decisions,
+            let package_created_at = chrono::Utc::now().to_rfc3339();
+            let package_tombstone_id = RevisionId::new_v7();
+            let package_revision = insert_delete_revision_on_tx(
+                &mut tx,
+                package_asset_id,
+                package_asset_id,
+                &package_tombstone_id,
+                &[RevisionId::from(head.clone())],
+                Some(RevisionId::from(head.clone())),
+                origin_kind,
+                &origin_replica_id,
+                &package_created_at,
+            )
+            .await?;
+
+            let mut component_decisions = Vec::new();
+            for cref in components {
+                // 同一 TX 内 fresh decide（package head 已 tombstone，exclude 生效）
+                let has_standalone =
+                    component_has_standalone_ref_on_tx(&mut tx, &cref.asset_id).await?;
+                let other = count_other_live_package_head_refs_on_tx(
+                    &mut tx,
+                    &cref.asset_id,
+                    Some(package_asset_id),
+                )
+                .await?;
+                let decision = decide_component_delete(has_standalone, other);
+                component_decisions.push(ComponentDeleteOutcome {
+                    component_asset_id: cref.asset_id.clone(),
+                    kind: cref.kind,
+                    decision,
+                });
+                if decision != ComponentDeleteDecision::TombstoneOwned {
+                    continue;
+                }
+
+                let comp_row = sqlx::query(
+                    "SELECT id, current_revision_id, deleted_at
+                     FROM agent_hub_assets WHERE id = ?",
+                )
+                .bind(&cref.asset_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(comp_row) = comp_row else {
+                    continue;
+                };
+                let deleted_at: Option<String> = comp_row.try_get("deleted_at")?;
+                if deleted_at.is_some() {
+                    continue;
+                }
+                let current: Option<String> = comp_row.try_get("current_revision_id")?;
+                let parents: Vec<RevisionId> =
+                    current.clone().into_iter().map(RevisionId::from).collect();
+                let expected = current.map(RevisionId::from);
+                let child_created_at = chrono::Utc::now().to_rfc3339();
+                let child_tombstone_id = RevisionId::new_v7();
+                let _ = insert_delete_revision_on_tx(
+                    &mut tx,
+                    &cref.asset_id,
+                    &cref.asset_id,
+                    &child_tombstone_id,
+                    &parents,
+                    expected,
+                    origin_kind,
+                    &origin_replica_id,
+                    &child_created_at,
+                )
+                .await?;
+            }
+
+            tx.commit().await?;
+            Ok(PluginPackageDeleteResult {
+                package_asset_id: package_asset_id.to_string(),
+                package_revision,
+                component_decisions,
+            })
         })
+        .await
     }
 
     /// 追加 Hook 资产 revision（PortableHook → CAS）。
@@ -3630,7 +3657,8 @@ static IMPORT_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::
 /// 单事务 import 输入（Phase B）。
 ///
 /// Business Logic: importer 已完成 CAS 验证后，把可落库身份打包进一笔 TX。
-/// Code Logic: scopes/assets/lineages/revisions/variants/conflicts/head_decisions/mappings。
+/// Code Logic: scopes/assets/lineages/revisions/variants/conflicts/head_decisions/mappings +
+///     Gate D plugin component/residual 边（与 package revision 同 TX 恢复）。
 #[derive(Debug, Clone)]
 pub struct ImportBundle {
     /// 需要确保存在的 scopes
@@ -3649,6 +3677,44 @@ pub struct ImportBundle {
     pub head_decisions: Vec<ImportHeadDecision>,
     /// 确认后的 project mapping（opted_in 不自动 true）
     pub project_mappings: Vec<UpsertAgentHubProjectMapping>,
+    /// Gate D：plugin package revision → component 边（import 校验后写入）
+    pub plugin_components: Vec<ImportPluginComponentEdge>,
+    /// Gate D：plugin package revision → residual 边
+    pub plugin_residuals: Vec<ImportPluginResidualEdge>,
+}
+
+/// import 时恢复的 plugin component 边。
+///
+/// Business Logic: ownership/export 只查边表；import 必须与 package revision 同 TX 重建。
+/// Code Logic: 字段对齐 `agent_hub_plugin_components`；component_asset_id 已 remap 到本地。
+#[derive(Debug, Clone)]
+pub struct ImportPluginComponentEdge {
+    /// package revision id（snapshot 保留）
+    pub package_revision_id: String,
+    /// component kind
+    pub component_kind: AssetKind,
+    /// 本地 component asset id
+    pub component_asset_id: String,
+    /// component revision id（snapshot 保留）
+    pub component_revision_id: String,
+    /// ownership 标签
+    pub ownership: ComponentOwnership,
+}
+
+/// import 时恢复的 plugin residual 边。
+///
+/// Business Logic: residual tree 必须继续参与 re-export 闭包。
+/// Code Logic: 字段对齐 `agent_hub_plugin_residuals`。
+#[derive(Debug, Clone)]
+pub struct ImportPluginResidualEdge {
+    /// package revision id
+    pub package_revision_id: String,
+    /// residual target
+    pub target: AgentTarget,
+    /// residual 类别
+    pub residual_kind: ResidualKind,
+    /// residual tree manifest hash
+    pub tree_manifest_hash: String,
 }
 
 /// import 资产行。
@@ -3732,7 +3798,8 @@ pub struct ImportBundleResult {
 /// 在已开启的写事务内应用 import bundle。
 ///
 /// Business Logic: Phase B 核心；失败则整笔回滚。
-/// Code Logic: scopes → assets/lineages → revisions/parents → variants → conflicts → heads。
+/// Code Logic: scopes → assets/lineages → revisions/parents → plugin edges →
+///     variants → conflicts → heads。
 async fn apply_import_bundle_on_tx(
     tx: &mut Transaction<'_, Sqlite>,
     bundle: &ImportBundle,
@@ -4012,6 +4079,9 @@ async fn apply_import_bundle_on_tx(
         }
         result.inserted_revisions += 1;
     }
+
+    // 4b) plugin package component/residual edges（与 package revision 同 TX；幂等）
+    restore_plugin_edges_on_tx(tx, bundle).await?;
 
     // 5) variants
     for v in &bundle.variants {
@@ -5245,6 +5315,266 @@ async fn list_plugin_components_on_tx(
         });
     }
     Ok(out)
+}
+
+/// 在 import TX 内校验并幂等写入 plugin component/residual 边。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Snapshot/LAN/Git import 只恢复 revision/CAS 会让 ownership 边表为空；
+///     共享 component 在 package delete 时会被误判为独占并 tombstone。
+///
+/// Code Logic（这个函数做什么）:
+///     对每条边：package revision 存在；component asset/revision 存在；
+///     residual hash 非空；INSERT OR IGNORE 幂等。
+async fn restore_plugin_edges_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    bundle: &ImportBundle,
+) -> Result<(), AppError> {
+    for edge in &bundle.plugin_components {
+        let package_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
+                .bind(&edge.package_revision_id)
+                .fetch_one(&mut **tx)
+                .await?;
+        if package_exists == 0 {
+            return Err(AppError::validation(format!(
+                "agent_hub_import_plugin_package_revision_missing:{}",
+                edge.package_revision_id
+            )));
+        }
+        let asset_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_assets WHERE id = ?")
+                .bind(&edge.component_asset_id)
+                .fetch_one(&mut **tx)
+                .await?;
+        if asset_exists == 0 {
+            return Err(AppError::validation(format!(
+                "agent_hub_import_plugin_component_asset_missing:{}",
+                edge.component_asset_id
+            )));
+        }
+        let rev_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
+                .bind(&edge.component_revision_id)
+                .fetch_one(&mut **tx)
+                .await?;
+        if rev_exists == 0 {
+            return Err(AppError::validation(format!(
+                "agent_hub_import_plugin_component_revision_missing:{}",
+                edge.component_revision_id
+            )));
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO agent_hub_plugin_components
+             (package_revision_id, component_kind, component_asset_id,
+              component_revision_id, ownership)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&edge.package_revision_id)
+        .bind(edge.component_kind.as_str())
+        .bind(&edge.component_asset_id)
+        .bind(&edge.component_revision_id)
+        .bind(edge.ownership.as_str())
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    for edge in &bundle.plugin_residuals {
+        if edge.tree_manifest_hash.trim().is_empty() {
+            return Err(AppError::validation(
+                "agent_hub_import_plugin_residual_tree_empty".to_string(),
+            ));
+        }
+        let package_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
+                .bind(&edge.package_revision_id)
+                .fetch_one(&mut **tx)
+                .await?;
+        if package_exists == 0 {
+            return Err(AppError::validation(format!(
+                "agent_hub_import_plugin_package_revision_missing:{}",
+                edge.package_revision_id
+            )));
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO agent_hub_plugin_residuals
+             (package_revision_id, target, residual_kind, tree_manifest_hash)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&edge.package_revision_id)
+        .bind(edge.target.as_str())
+        .bind(edge.residual_kind.as_str())
+        .bind(&edge.tree_manifest_hash)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// 事务内：component 是否有 standalone 边。
+async fn component_has_standalone_ref_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    component_asset_id: &str,
+) -> Result<bool, AppError> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_hub_component_standalone_refs
+         WHERE component_asset_id = ?",
+    )
+    .bind(component_asset_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(n > 0)
+}
+
+/// 事务内：其它 live package head 对该 component 的引用数。
+async fn count_other_live_package_head_refs_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    component_asset_id: &str,
+    exclude_package_asset_id: Option<&str>,
+) -> Result<u64, AppError> {
+    let n: i64 = if let Some(exclude) = exclude_package_asset_id {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM agent_hub_plugin_components c
+             INNER JOIN agent_hub_assets a
+               ON a.current_revision_id = c.package_revision_id
+             WHERE c.component_asset_id = ?
+               AND a.kind = 'plugin'
+               AND a.deleted_at IS NULL
+               AND a.id != ?",
+        )
+        .bind(component_asset_id)
+        .bind(exclude)
+        .fetch_one(&mut **tx)
+        .await?
+    } else {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM agent_hub_plugin_components c
+             INNER JOIN agent_hub_assets a
+               ON a.current_revision_id = c.package_revision_id
+             WHERE c.component_asset_id = ?
+               AND a.kind = 'plugin'
+               AND a.deleted_at IS NULL",
+        )
+        .bind(component_asset_id)
+        .fetch_one(&mut **tx)
+        .await?
+    };
+    Ok(n as u64)
+}
+
+/// 事务内插入 Delete revision 并 CAS 推进 head（用于 multi-asset ownership delete）。
+#[allow(clippy::too_many_arguments)]
+async fn insert_delete_revision_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    asset_id: &str,
+    asset_lineage_id: &str,
+    revision_id: &RevisionId,
+    parents: &[RevisionId],
+    expected_parent_id: Option<RevisionId>,
+    origin_kind: RevisionOriginKind,
+    origin_replica_id: &str,
+    created_at: &str,
+) -> Result<Revision, AppError> {
+    let mut max_parent_generation: Option<u64> = None;
+    for parent in parents {
+        let gen: Option<i64> =
+            sqlx::query_scalar("SELECT generation FROM agent_hub_revisions WHERE id = ?")
+                .bind(parent.as_str())
+                .fetch_optional(&mut **tx)
+                .await?;
+        let Some(g) = gen else {
+            return Err(AppError::validation(format!(
+                "agent_hub_revision_parent_missing:{}",
+                parent.as_str()
+            )));
+        };
+        let g = g as u64;
+        max_parent_generation = Some(max_parent_generation.map_or(g, |m| m.max(g)));
+    }
+    let generation = max_parent_generation.map_or(0, |m| m.saturating_add(1));
+
+    sqlx::query(
+        "INSERT INTO agent_hub_revisions
+         (id, asset_lineage_id, generation, operation, origin_kind, origin_target,
+          origin_replica_id, payload_hash, tree_manifest_hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(revision_id.as_str())
+    .bind(asset_lineage_id)
+    .bind(generation as i64)
+    .bind(RevisionOperation::Delete.as_str())
+    .bind(origin_kind.as_str())
+    .bind::<Option<String>>(None)
+    .bind(origin_replica_id)
+    .bind::<Option<String>>(None)
+    .bind::<Option<String>>(None)
+    .bind(created_at)
+    .execute(&mut **tx)
+    .await?;
+
+    for (pos, parent) in parents.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO agent_hub_revision_parents
+             (revision_id, parent_revision_id, parent_order)
+             VALUES (?, ?, ?)",
+        )
+        .bind(revision_id.as_str())
+        .bind(parent.as_str())
+        .bind(pos as i64)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    let deleted_at = Some(created_at.to_string());
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Some(expected) = expected_parent_id.as_ref().map(|r| r.as_str().to_string()) {
+        let result = sqlx::query(
+            "UPDATE agent_hub_assets
+             SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+             WHERE id = ?
+               AND (current_revision_id IS NULL OR current_revision_id = ?)",
+        )
+        .bind(revision_id.as_str())
+        .bind(&deleted_at)
+        .bind(&now)
+        .bind(asset_id)
+        .bind(&expected)
+        .execute(&mut **tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::conflict(
+                "agent_hub_revision_conflict".to_string(),
+            ));
+        }
+    } else {
+        sqlx::query(
+            "UPDATE agent_hub_assets
+             SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(revision_id.as_str())
+        .bind(&deleted_at)
+        .bind(&now)
+        .bind(asset_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(Revision {
+        id: revision_id.clone(),
+        asset_lineage_id: asset_lineage_id.to_string(),
+        parents: parents.to_vec(),
+        generation,
+        operation: RevisionOperation::Delete,
+        origin_kind,
+        origin_target: None,
+        origin_replica_id: origin_replica_id.to_string(),
+        payload_hash: None,
+        tree_manifest_hash: None,
+        created_at: created_at.to_string(),
+    })
 }
 
 /// 事务内列出 package revision 的 residual 边。
