@@ -245,6 +245,74 @@ cd web && npm exec -- playwright install --with-deps chromium
 
 Do **not** document or use `npx --yes` / ad-hoc single-file runners for CI-shaped checks.
 
+### Agent Hub program-wide certification (Gates A–D integration)
+
+Run on the integrated tree after Gate D merge (Program Task 5). Prefer serial process/smoke tests; record honest FAIL/partials rather than greenwashing.
+
+```bash
+# Rust — prefer --lib for unit filters; serialize smoke/integration
+cd src-tauri
+# Tauri resource glob needs at least one file under resources/browser-runtime/
+# (gitignored; node scripts/prepare-tauri-sidecar.mjs or a local .platform-unavailable placeholder)
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked --lib agent_hub -- --test-threads=1
+cargo test --locked --lib orchestrator::agent_adapter
+cargo test --locked --test agent_hub_replication_smoke -- --nocapture --test-threads=1
+cargo test --locked --test agent_hub_gate_d_runtime_smoke -- --test-threads=1
+cargo test --locked --test agent_hub_gate_a_smoke -- --test-threads=1
+cargo test --locked --test agent_hub_gate_b_smoke -- --test-threads=1
+
+# Frontend
+cd ../web
+npm run check:css-tokens   # alias: check:tokens
+npm run check:i18n
+npm test -- AgentHub attention typeBarrel localeParity
+npm run build
+npm run test:e2e -- agent-hub.spec.ts
+# npm run lint — may carry pre-existing react-hooks / React Compiler debt; do not false-green
+# npm run check:bundle — default strict baseline ratchet; local drift hosts may use
+#   CC_PARTNER_BUNDLE_RATCHET=final-only (CI remains strict)
+
+# Docs / protocol
+cd ..
+node scripts/check-p2p-route-inventory.mjs
+node scripts/check-quality-traceability.mjs --self-test
+node scripts/check-quality-traceability.mjs
+node scripts/check-docs.mjs --self-test
+node scripts/check-docs.mjs
+node scripts/check-agent-hub-support-manifest.mjs --gate-d
+git diff --check
+```
+
+**Program Task 5 run (integration `sdd/agent-hub-2026-07-29` @ `b1b01d89`, worktree branch `sdd/agent-hub-program-t5`, 2026-07-30):**
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --check` | PASS |
+| `cargo clippy --all-targets --locked -- -D warnings` | PASS (after local gitignored browser-runtime placeholder) |
+| `cargo test --locked --lib agent_hub -- --test-threads=1` | PASS 363 |
+| same with default/parallel threads | **FAIL flake** (2 importer tests; process-global import fault injection races) — **serial is the certified mode** |
+| `cargo test --locked --lib orchestrator::agent_adapter` | PASS 24 |
+| `agent_hub_replication_smoke` serial | PASS 2 (`L2-AGENT-HUB-C-001` / `L2-AGENT-HUB-C-GIT-001`) |
+| `agent_hub_gate_d_runtime_smoke` serial | PASS 3 (`L2-AGENT-HUB-D-PLUGIN-001` / `L2-AGENT-HUB-D-RUNTIME-001` + honesty NOT VERIFIED guard) |
+| `agent_hub_gate_a_smoke` / `agent_hub_gate_b_smoke` serial | PASS 7 / PASS 5 |
+| `check:css-tokens` / `check:i18n` | PASS |
+| `npm test -- AgentHub attention typeBarrel localeParity` | PASS 109 (20 files); benign jsdom `document is not defined` MutationObserver noise after teardown |
+| `npm run build` | PASS |
+| `npm run test:e2e -- agent-hub.spec.ts` | PASS 8 (`E2E-AGENT-HUB-A-001` / `E2E-AGENT-HUB-B-001` / `E2E-AGENT-HUB-C-001` / `E2E-AGENT-HUB-D-001`) |
+| `npm run lint` | **FAIL** 96 errors / 14 warnings — concentrated in Agent Hub controller/tests (`react-hooks/preserve-manual-memoization` + exhaustive-deps); not claimed green |
+| `npm run check:bundle` strict | **FAIL** baseline ratchet overages; `CC_PARTNER_BUNDLE_RATCHET=final-only` PASS hard ceilings only (local drift; CI strict) |
+| P2P inventory / quality-traceability / docs / support-manifest `--gate-d` / `git diff --check` | PASS |
+
+**Still NOT VERIFIED (do not claim from this program run):**
+
+- `L3-AGENT-HUB-D-OPENCODE-001` / `L3-AGENT-HUB-OPENCODE-RUNTIME-001` — real pinned OpenCode TUI + provider credentials
+- `L3-AGENT-HUB-B-CLI-001` — real Claude/Codex/OpenCode exact-version product writes (`agent_hub_cli_contract` ignored harness)
+- `L3-AGENT-HUB-C-LAN-001` — dual-host mDNS `agent-hub.v1` source-push + Git confirm
+- `L3-AGENT-HUB-CLAUDE-001` / `L3-AGENT-HUB-CODEX-001` / `L3-AGENT-HUB-OPENCODE-001` (install-path family) — real multi-CLI product installs
+- Packaged desktop GUI / multi-platform Agent Hub matrix; marketplace activation side effects; N+2 legacy route/table deletion (migration evidence still locked)
+
 ## Local Ubuntu-style quality (Rust + frontend)
 
 ```bash
