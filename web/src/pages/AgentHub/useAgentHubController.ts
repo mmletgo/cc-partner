@@ -7,7 +7,7 @@
  *
  * Code Logic（这个 hook 做什么）:
  *   首屏加载 status+assets；scope/kind 过滤；stale sequence 防切换覆盖；
- *   暴露 preview/enable/resolve/update/pair/binding/select/drawer 动作。
+ *   暴露 preview/enable/resolve/update/pair/binding/presence/restore/everywhere 动作。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -19,10 +19,13 @@ import {
   type AgentHubPairInstructionVariantsArgs,
   type AgentHubResolveConflictArgs,
   type AgentHubSetTargetBindingArgs,
+  type AgentHubSetTargetEnabledArgs,
+  type AgentHubSetTargetPresenceArgs,
   type AgentHubUpdateInstructionArgs,
   type AgentHubUpdateInstructionBlockArgs,
 } from '@/api/agentHub';
 import type {
+  AgentHubAdoptionPreview,
   AgentHubAssetDetail,
   AgentHubAssetSummary,
   AgentHubProjectPreview,
@@ -69,6 +72,15 @@ export interface UseAgentHubControllerResult {
   blocksDrawerOpen: boolean;
   openBlocksDrawer: () => void;
   closeBlocksDrawer: () => void;
+  adoptionOpen: boolean;
+  adoptionPreview: AgentHubAdoptionPreview | null;
+  openAdoptionPreview: (asset: AgentHubAssetSummary, target: AgentTarget) => void;
+  closeAdoptionDialog: () => void;
+  deleteEverywhereOpen: boolean;
+  deleteEverywhereAssetId: string | null;
+  openDeleteEverywhere: (assetId: string) => void;
+  closeDeleteEverywhere: () => void;
+  confirmDeleteEverywhere: () => Promise<void>;
   deepLinkConflictId: string | null;
   reload: () => Promise<void>;
   resolveConflict: (args: Omit<AgentHubResolveConflictArgs, 'assetId'>) => Promise<void>;
@@ -82,6 +94,14 @@ export interface UseAgentHubControllerResult {
   setTargetBinding: (
     args: Omit<AgentHubSetTargetBindingArgs, 'assetId'> & { assetId?: string },
   ) => Promise<void>;
+  setTargetEnabled: (
+    args: Omit<AgentHubSetTargetEnabledArgs, 'assetId'> & { assetId?: string },
+  ) => Promise<void>;
+  setTargetPresence: (
+    args: Omit<AgentHubSetTargetPresenceArgs, 'assetId'> & { assetId?: string },
+  ) => Promise<void>;
+  restoreDetachedTarget: (args: { assetId?: string; target: AgentTarget }) => Promise<void>;
+  removeTarget: (args: { assetId?: string; target: AgentTarget }) => Promise<void>;
   writeBlocked: boolean;
   upgradeRequired: boolean;
 }
@@ -125,19 +145,31 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [previewProjectId, setPreviewProjectId] = useState('');
   const [conflictDrawerOpen, setConflictDrawerOpen] = useState(Boolean(deepLinkConflictId));
   const [blocksDrawerOpen, setBlocksDrawerOpen] = useState(false);
+  const [adoptionOpen, setAdoptionOpen] = useState(false);
+  const [adoptionPreview, setAdoptionPreview] = useState<AgentHubAdoptionPreview | null>(null);
+  const [deleteEverywhereOpen, setDeleteEverywhereOpen] = useState(false);
+  const [deleteEverywhereAssetId, setDeleteEverywhereAssetId] = useState<string | null>(null);
 
   const refreshSeqRef = useRef(0);
   const detailSeqRef = useRef(0);
+  const scopeCursorRef = useRef(0);
   const mountedRef = useRef(true);
   const filtersBootstrappedRef = useRef(false);
   const appliedDeepLinkRef = useRef<string | null>(null);
+  const scopeFilterRef = useRef(scopeFilter);
+  const kindFilterRef = useRef(kindFilter);
+  scopeFilterRef.current = scopeFilter;
+  kindFilterRef.current = kindFilter;
 
   /**
    * Business Logic: 首屏与手动刷新加载 status + assets。
-   * Code Logic: 递增 refreshSeq；过期响应不写入。
+   * Code Logic: 递增 refreshSeq + scopeCursor；过期/错 scope 响应不写入。
    */
   const loadCore = useCallback(async (isRefresh: boolean) => {
     const seq = ++refreshSeqRef.current;
+    const scopeCursor = ++scopeCursorRef.current;
+    const scopeAtRequest = scopeFilterRef.current;
+    const kindAtRequest = kindFilterRef.current;
     if (isRefresh) {
       setRefreshing(true);
     } else {
@@ -148,16 +180,25 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       const [nextStatus, nextAssets] = await Promise.all([
         agentHubApi.getStatus(),
         agentHubApi.listAssets({
-          scopeId: scopeFilter.trim() || null,
-          kind: kindFilter.trim() || null,
+          scopeId: scopeAtRequest.trim() || null,
+          kind: kindAtRequest.trim() || null,
         }),
       ]);
       if (!mountedRef.current || seq !== refreshSeqRef.current) return;
+      // 快速切换 scope/kind 时，旧响应不得覆盖新 filter 的列表
+      if (scopeCursor !== scopeCursorRef.current) return;
+      if (
+        scopeAtRequest !== scopeFilterRef.current ||
+        kindAtRequest !== kindFilterRef.current
+      ) {
+        return;
+      }
       setStatus(nextStatus);
       setAssets(nextAssets);
       setStale(false);
     } catch (reason) {
       if (!mountedRef.current || seq !== refreshSeqRef.current) return;
+      if (scopeCursor !== scopeCursorRef.current) return;
       setError(toErrorMessage(reason));
       // 有旧数据时标 stale，保留列表
       setStale((prev) => prev || status !== null || assets.length > 0);
@@ -165,7 +206,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     if (!mountedRef.current || seq !== refreshSeqRef.current) return;
     setLoading(false);
     setRefreshing(false);
-  }, [assets.length, kindFilter, scopeFilter, status]);
+  }, [assets.length, status]);
 
   /**
    * Business Logic: 选中资产后加载详情。
@@ -313,6 +354,47 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setBlocksDrawerOpen(false);
   }, [actionBusy]);
 
+  const openAdoptionPreview = useCallback(
+    (asset: AgentHubAssetSummary, target: AgentTarget) => {
+      const cell = asset.targets.find((item) => item.target === target) ?? null;
+      const diagnostics: string[] = [];
+      if (cell?.lastError) diagnostics.push(cell.lastError);
+      if (cell?.materializationStatus) {
+        diagnostics.push(`materialization:${cell.materializationStatus}`);
+      }
+      diagnostics.push(`aggregate:${asset.aggregateStatus}`);
+      setAdoptionPreview({
+        assetId: asset.assetId,
+        displayName: asset.displayName,
+        logicalKey: asset.logicalKey,
+        originNamespace: asset.originNamespace,
+        target,
+        diagnostics,
+        aggregateStatus: asset.aggregateStatus,
+      });
+      setAdoptionOpen(true);
+      setActionError(null);
+    },
+    [],
+  );
+
+  const closeAdoptionDialog = useCallback(() => {
+    if (actionBusy) return;
+    setAdoptionOpen(false);
+  }, [actionBusy]);
+
+  const openDeleteEverywhere = useCallback((assetId: string) => {
+    setDeleteEverywhereAssetId(assetId);
+    setDeleteEverywhereOpen(true);
+    setActionError(null);
+  }, []);
+
+  const closeDeleteEverywhere = useCallback(() => {
+    if (actionBusy) return;
+    setDeleteEverywhereOpen(false);
+    setDeleteEverywhereAssetId(null);
+  }, [actionBusy]);
+
   const reload = useCallback(async () => {
     await loadCore(true);
     if (selectedAssetId) {
@@ -433,20 +515,15 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     [expectedRevisionFromSelection, loadCore, requireSelectedAssetId],
   );
 
-  const setTargetBinding = useCallback(
-    async (args: Omit<AgentHubSetTargetBindingArgs, 'assetId'> & { assetId?: string }) => {
-      const assetId = args.assetId ?? requireSelectedAssetId();
-      if (!assetId) return;
+  const applySummaryMutation = useCallback(
+    async (assetId: string, mutate: () => Promise<AgentHubAssetSummary>) => {
       setActionBusy(true);
       setActionError(null);
+      const cursorBefore = scopeCursorRef.current;
       try {
-        await agentHubApi.setTargetBinding({
-          assetId,
-          target: args.target,
-          desiredPresence: args.desiredPresence,
-          desiredEnabled: args.desiredEnabled,
-        });
+        await mutate();
         if (!mountedRef.current) return;
+        if (cursorBefore !== scopeCursorRef.current) return;
         await loadCore(true);
         if (selectedAssetId === assetId) {
           await loadAssetDetail(assetId);
@@ -458,8 +535,105 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [loadAssetDetail, loadCore, requireSelectedAssetId, selectedAssetId],
+    [loadAssetDetail, loadCore, selectedAssetId],
   );
+
+  const setTargetBinding = useCallback(
+    async (args: Omit<AgentHubSetTargetBindingArgs, 'assetId'> & { assetId?: string }) => {
+      const assetId = args.assetId ?? requireSelectedAssetId();
+      if (!assetId) return;
+      await applySummaryMutation(assetId, () =>
+        agentHubApi.setTargetBinding({
+          assetId,
+          target: args.target,
+          desiredPresence: args.desiredPresence,
+          desiredEnabled: args.desiredEnabled,
+        }),
+      );
+    },
+    [applySummaryMutation, requireSelectedAssetId],
+  );
+
+  const setTargetEnabled = useCallback(
+    async (args: Omit<AgentHubSetTargetEnabledArgs, 'assetId'> & { assetId?: string }) => {
+      const assetId = args.assetId ?? requireSelectedAssetId();
+      if (!assetId) return;
+      await applySummaryMutation(assetId, () =>
+        agentHubApi.setTargetEnabled({
+          assetId,
+          target: args.target,
+          desiredEnabled: args.desiredEnabled,
+        }),
+      );
+    },
+    [applySummaryMutation, requireSelectedAssetId],
+  );
+
+  const setTargetPresence = useCallback(
+    async (args: Omit<AgentHubSetTargetPresenceArgs, 'assetId'> & { assetId?: string }) => {
+      const assetId = args.assetId ?? requireSelectedAssetId();
+      if (!assetId) return;
+      await applySummaryMutation(assetId, () =>
+        agentHubApi.setTargetPresence({
+          assetId,
+          target: args.target,
+          desiredPresence: args.desiredPresence,
+        }),
+      );
+    },
+    [applySummaryMutation, requireSelectedAssetId],
+  );
+
+  const restoreDetachedTarget = useCallback(
+    async (args: { assetId?: string; target: AgentTarget }) => {
+      const assetId = args.assetId ?? requireSelectedAssetId();
+      if (!assetId) return;
+      await applySummaryMutation(assetId, () =>
+        agentHubApi.restoreDetachedTarget({ assetId, target: args.target }),
+      );
+    },
+    [applySummaryMutation, requireSelectedAssetId],
+  );
+
+  const removeTarget = useCallback(
+    async (args: { assetId?: string; target: AgentTarget }) => {
+      const assetId = args.assetId ?? requireSelectedAssetId();
+      if (!assetId) return;
+      await applySummaryMutation(assetId, () =>
+        agentHubApi.setTargetPresence({
+          assetId,
+          target: args.target,
+          desiredPresence: 'absent',
+        }),
+      );
+    },
+    [applySummaryMutation, requireSelectedAssetId],
+  );
+
+  const confirmDeleteEverywhere = useCallback(async () => {
+    const assetId = deleteEverywhereAssetId ?? requireSelectedAssetId();
+    if (!assetId) return;
+    setActionBusy(true);
+    setActionError(null);
+    const cursorBefore = scopeCursorRef.current;
+    try {
+      await agentHubApi.deleteAssetEverywhere({ assetId });
+      if (!mountedRef.current) return;
+      if (cursorBefore !== scopeCursorRef.current) return;
+      setDeleteEverywhereOpen(false);
+      setDeleteEverywhereAssetId(null);
+      if (selectedAssetId === assetId) {
+        setSelectedAssetId(null);
+        setSelectedAsset(null);
+      }
+      await loadCore(true);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setActionError(toErrorMessage(reason));
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [deleteEverywhereAssetId, loadCore, requireSelectedAssetId, selectedAssetId]);
 
   const writeBlocked = Boolean(status && !status.writeCompatible);
   const upgradeRequired = writeBlocked;
@@ -496,6 +670,15 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     blocksDrawerOpen,
     openBlocksDrawer,
     closeBlocksDrawer,
+    adoptionOpen,
+    adoptionPreview,
+    openAdoptionPreview,
+    closeAdoptionDialog,
+    deleteEverywhereOpen,
+    deleteEverywhereAssetId,
+    openDeleteEverywhere,
+    closeDeleteEverywhere,
+    confirmDeleteEverywhere,
     deepLinkConflictId,
     reload,
     resolveConflict,
@@ -503,6 +686,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     updateInstructionBlock,
     pairInstructionVariants,
     setTargetBinding,
+    setTargetEnabled,
+    setTargetPresence,
+    restoreDetachedTarget,
+    removeTarget,
     writeBlocked,
     upgradeRequired,
   };

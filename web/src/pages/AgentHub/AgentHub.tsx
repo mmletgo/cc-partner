@@ -2,7 +2,7 @@
  * Agent Hub 页面 — Multi-CLI 指令与资产工作区。
  *
  * Business Logic（为什么需要这个页面）:
- *   统一管理 Claude / Codex / OpenCode 指令投影、冲突与项目 opt-in。
+ *   统一管理 Claude / Codex / OpenCode 指令与 portable 资产投影、冲突与项目 opt-in。
  *
  * Code Logic（这个页面做什么）:
  *   controller 持有数据/动作；AgentHubView 为 pure 视图（禁止 @/api/*）。
@@ -19,6 +19,7 @@ import type {
   AgentHubStatus,
   AgentTarget,
 } from '@/lib/types/agentHub';
+import { AssetAdoptionDialog } from './AssetAdoptionDialog';
 import { InstructionBlocksDrawer } from './InstructionBlocksDrawer';
 import {
   useAgentHubController,
@@ -78,12 +79,22 @@ export function AgentHubView(props: AgentHubViewProps) {
     blocksDrawerOpen,
     openBlocksDrawer,
     closeBlocksDrawer,
+    adoptionOpen,
+    adoptionPreview,
+    openAdoptionPreview,
+    closeAdoptionDialog,
+    deleteEverywhereOpen,
+    closeDeleteEverywhere,
+    confirmDeleteEverywhere,
     deepLinkConflictId,
     reload,
     resolveConflict,
     updateInstructionBlock,
     pairInstructionVariants,
-    setTargetBinding,
+    setTargetEnabled,
+    restoreDetachedTarget,
+    removeTarget,
+    openDeleteEverywhere,
     writeBlocked,
     upgradeRequired,
   } = props;
@@ -113,19 +124,18 @@ export function AgentHubView(props: AgentHubViewProps) {
   }
 
   /**
-   * Business Logic: 切换 target enabled/presence。
-   * Code Logic: present+enabled 或 absent。
+   * Business Logic: 切换 target enabled（target-local）。
+   * Code Logic: setTargetEnabled。
    */
   function handleToggleTarget(
     asset: AgentHubAssetSummary,
     target: AgentTarget,
     nextEnabled: boolean,
   ) {
-    void setTargetBinding({
+    void setTargetEnabled({
       assetId: asset.assetId,
       target,
       desiredEnabled: nextEnabled,
-      desiredPresence: nextEnabled ? 'present' : 'absent',
     });
   }
 
@@ -196,6 +206,10 @@ export function AgentHubView(props: AgentHubViewProps) {
             </Button>
           </div>
         </header>
+
+        <StatusMessage tone="info" live="off" data-testid="agent-hub-lan-push-notice">
+          {t('agentHub:lanPushGateC')}
+        </StatusMessage>
 
         {upgradeRequired || writeBlocked ? (
           <StatusMessage tone="warn" data-testid="agent-hub-upgrade-required">
@@ -312,6 +326,14 @@ export function AgentHubView(props: AgentHubViewProps) {
                 onOpenBlocks={handleOpenBlocks}
                 onOpenConflicts={handleOpenConflicts}
                 onToggleTarget={handleToggleTarget}
+                onRemoveTarget={(item, target) => {
+                  void removeTarget({ assetId: item.assetId, target });
+                }}
+                onRestoreTarget={(item, target) => {
+                  void restoreDetachedTarget({ assetId: item.assetId, target });
+                }}
+                onOpenCollision={(item, target) => openAdoptionPreview(item, target)}
+                onDeleteEverywhere={(item) => openDeleteEverywhere(item.assetId)}
               />
             ))
           )}
@@ -389,6 +411,50 @@ export function AgentHubView(props: AgentHubViewProps) {
           ) : null}
         </div>
       </Dialog>
+
+      <Dialog
+        open={deleteEverywhereOpen}
+        titleId="agent-hub-delete-everywhere-title"
+        onClose={closeDeleteEverywhere}
+        closeOnEscape={!actionBusy}
+        closeOnBackdrop={!actionBusy}
+        className={styles.dialogSurface}
+      >
+        <div className={styles.dialogBody} data-testid="agent-hub-delete-everywhere-dialog">
+          <h2 id="agent-hub-delete-everywhere-title" className={styles.drawerTitle}>
+            {t('agentHub:deleteEverywhere.title')}
+          </h2>
+          <p className={styles.drawerSubtitle}>{t('agentHub:deleteEverywhere.desc')}</p>
+          <div className={styles.dialogActions}>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={actionBusy}
+              onClick={closeDeleteEverywhere}
+              data-testid="agent-hub-delete-everywhere-cancel"
+            >
+              {t('common:action.cancel')}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              loading={actionBusy}
+              disabled={writeBlocked}
+              onClick={() => void confirmDeleteEverywhere()}
+              data-testid="agent-hub-delete-everywhere-confirm"
+            >
+              {t('agentHub:deleteEverywhere.confirm')}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+
+      <AssetAdoptionDialog
+        open={adoptionOpen}
+        preview={adoptionPreview}
+        busy={actionBusy}
+        onClose={closeAdoptionDialog}
+      />
 
       <Drawer
         open={conflictDrawerOpen}

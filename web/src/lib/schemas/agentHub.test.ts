@@ -2,7 +2,7 @@
  * Agent Hub schema 合同测试。
  *
  * Business Logic: required status enum 非法时 fail-closed，且错误不含 payload。
- * Code Logic: 覆盖 status/snapshot 解码与未知 support enum。
+ * Code Logic: 覆盖 status/snapshot/Gate B aggregate + cell 解码。
  */
 
 import { describe, expect, test } from 'vitest';
@@ -11,6 +11,8 @@ import {
   agentHubSnapshotDecoder,
   agentHubStatusDecoder,
   agentHubAssetSummaryListDecoder,
+  agentHubAssetSummaryDecoder,
+  assetAggregateStatusDecoder,
 } from './agentHub';
 
 const validStatus = {
@@ -32,6 +34,18 @@ const validStatus = {
   blockedMaterializationCount: 0,
 };
 
+const validTargetCell = {
+  target: 'claude' as const,
+  desiredPresence: 'present' as const,
+  desiredEnabled: true,
+  materializationStatus: 'synced',
+  lastError: null,
+  requested: true,
+  supported: true,
+  sourceOnly: false,
+  verified: true,
+};
+
 const validAsset = {
   assetId: 'a1',
   scopeId: 'user',
@@ -41,17 +55,20 @@ const validAsset = {
   originNamespace: 'claude',
   policy: 'shared',
   currentRevisionId: 'r1',
-  targets: [
-    {
-      target: 'claude',
-      desiredPresence: 'present',
-      desiredEnabled: true,
-      materializationStatus: 'synced',
-      lastError: null,
-    },
-  ],
+  targets: [validTargetCell],
   hasConflict: false,
+  aggregateStatus: 'full' as const,
 };
+
+const AGGREGATE_STATUSES = [
+  'full',
+  'partial',
+  'sourceOnly',
+  'activationRequired',
+  'externalCollision',
+  'detached',
+  'blocked',
+] as const;
 
 describe('agentHub schemas', () => {
   test('decodes valid status', () => {
@@ -65,6 +82,46 @@ describe('agentHub schemas', () => {
 
   test('decodes asset list', () => {
     expect(agentHubAssetSummaryListDecoder.decode([validAsset])).toEqual([validAsset]);
+  });
+
+  test('decodes every Gate B aggregate status', () => {
+    for (const status of AGGREGATE_STATUSES) {
+      expect(assetAggregateStatusDecoder.decode(status)).toBe(status);
+      const asset = { ...validAsset, aggregateStatus: status };
+      expect(agentHubAssetSummaryDecoder.decode(asset).aggregateStatus).toBe(status);
+    }
+  });
+
+  test('requires Gate B cell fields requested/supported/sourceOnly/verified', () => {
+    const missing = {
+      ...validAsset,
+      targets: [
+        {
+          target: 'claude',
+          desiredPresence: 'present',
+          desiredEnabled: true,
+          materializationStatus: 'synced',
+        },
+      ],
+    };
+    expect(() => agentHubAssetSummaryDecoder.decode(missing)).toThrow(ContractDecodeError);
+  });
+
+  test('rejects unknown aggregate status without serializing payload', () => {
+    const bad = {
+      ...validAsset,
+      aggregateStatus: 'totally-unknown-aggregate',
+      displayName: 'secret-name-must-not-leak',
+    };
+    try {
+      agentHubAssetSummaryDecoder.decode(bad);
+      expect.unreachable('should throw');
+    } catch (reason) {
+      expect(reason).toBeInstanceOf(ContractDecodeError);
+      const err = reason as ContractDecodeError;
+      expect(err.message).not.toContain('totally-unknown-aggregate');
+      expect(JSON.stringify(err)).not.toContain('secret-name-must-not-leak');
+    }
   });
 
   test('unknown required status enum rejects without serializing payload', () => {

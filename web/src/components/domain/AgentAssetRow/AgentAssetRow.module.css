@@ -64,6 +64,13 @@
   color: var(--fg-muted-readable);
 }
 
+.partialList {
+  margin: 0;
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--fg-2);
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;
@@ -75,27 +82,6 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-3);
-}
-
-.targetCell {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg);
-  min-width: 0;
-}
-
-.targetLabel {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  color: var(--fg-2);
-}
-
-.cellError {
-  font-size: var(--text-xs);
 }
 
 @media (max-width: 900px) {

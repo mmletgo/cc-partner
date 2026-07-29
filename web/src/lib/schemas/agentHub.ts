@@ -21,6 +21,7 @@ import type {
   AgentHubStatus,
   AgentHubTargetCell,
   AgentTarget,
+  AssetAggregateStatus,
   DesiredPresence,
   InstructionBlockDto,
   InstructionBlockMode,
@@ -65,6 +66,23 @@ export const desiredPresenceDecoder: Decoder<DesiredPresence> = enumDecoder('Des
 export const instructionBlockModeDecoder: Decoder<InstructionBlockMode> = enumDecoder(
   'InstructionBlockMode',
   ['shared', 'adapted', 'targetOnly'] as const,
+);
+
+/**
+ * Business Logic: 资产聚合态是矩阵汇总真源，非法值拒绝整包。
+ * Code Logic: 严格 enum。
+ */
+export const assetAggregateStatusDecoder: Decoder<AssetAggregateStatus> = enumDecoder(
+  'AssetAggregateStatus',
+  [
+    'full',
+    'partial',
+    'sourceOnly',
+    'activationRequired',
+    'externalCollision',
+    'detached',
+    'blocked',
+  ] as const,
 );
 
 /**
@@ -129,7 +147,7 @@ export const agentHubStatusDecoder: Decoder<AgentHubStatus> = objectDecoder('Age
 });
 
 /**
- * Business Logic: 目标单元格 presence 为 required enum。
+ * Business Logic: 目标单元格 presence 与 Gate B 聚合输入为 required。
  * Code Logic: objectDecoder target cell。
  */
 export const agentHubTargetCellDecoder: Decoder<AgentHubTargetCell> = objectDecoder(
@@ -142,11 +160,16 @@ export const agentHubTargetCellDecoder: Decoder<AgentHubTargetCell> = objectDeco
       nullableDecoder(knownMaterializationStatusDecoder),
     ),
     lastError: optionalDecoder(nullableDecoder(stringDecoder)),
+    requested: booleanDecoder,
+    supported: booleanDecoder,
+    sourceOnly: booleanDecoder,
+    verified: booleanDecoder,
+    invocationAlias: optionalDecoder(nullableDecoder(stringDecoder)),
   },
 );
 
 /**
- * Business Logic: 列表行摘要。
+ * Business Logic: 列表行摘要，aggregateStatus 严格校验。
  * Code Logic: objectDecoder asset summary。
  */
 export const agentHubAssetSummaryDecoder: Decoder<AgentHubAssetSummary> = objectDecoder(
@@ -162,6 +185,7 @@ export const agentHubAssetSummaryDecoder: Decoder<AgentHubAssetSummary> = object
     currentRevisionId: optionalDecoder(nullableDecoder(stringDecoder)),
     targets: arrayDecoder(agentHubTargetCellDecoder),
     hasConflict: optionalDecoder(booleanDecoder),
+    aggregateStatus: assetAggregateStatusDecoder,
   },
 );
 
@@ -205,7 +229,7 @@ export const agentHubConflictDtoDecoder: Decoder<AgentHubConflictDto> = objectDe
 );
 
 /**
- * Business Logic: 资产详情含 blocks。
+ * Business Logic: 资产详情含 blocks 与 aggregateStatus。
  * Code Logic: summary 字段 + optional blocks/conflicts。
  */
 export const agentHubAssetDetailDecoder: Decoder<AgentHubAssetDetail> = objectDecoder(
@@ -221,6 +245,7 @@ export const agentHubAssetDetailDecoder: Decoder<AgentHubAssetDetail> = objectDe
     currentRevisionId: optionalDecoder(nullableDecoder(stringDecoder)),
     targets: arrayDecoder(agentHubTargetCellDecoder),
     hasConflict: optionalDecoder(booleanDecoder),
+    aggregateStatus: assetAggregateStatusDecoder,
     blocks: optionalDecoder(arrayDecoder(instructionBlockDtoDecoder)),
     contentMarkdown: optionalDecoder(nullableDecoder(stringDecoder)),
     conflicts: optionalDecoder(arrayDecoder(agentHubConflictDtoDecoder)),
