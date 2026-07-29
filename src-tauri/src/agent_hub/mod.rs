@@ -20,6 +20,7 @@
 //!     Gate B Task 2：`config_patch` ownership-aware TOML/JSONC 语义 patch。
 //!     Gate B Task 3：targets portable scan/render + Claude assets N/N+1 façade。
 //!     Gate B Task 4：`support` 版本化 adapter support manifest（fail-closed 写能力）。
+//!     Gate B Task 5：`packages` 隔离 managed package 物化 + target activator。
 
 pub mod assets;
 pub mod autostart;
@@ -28,6 +29,7 @@ pub mod instructions;
 pub mod migration;
 pub mod models;
 pub mod object_store;
+pub mod packages;
 pub mod project_scope;
 pub mod projection;
 pub mod projection_ops;
@@ -72,6 +74,12 @@ pub use models::{
 pub use object_store::{
     sha256_hex, ObjectStore, PutTreeResult, StoredObject, TreeEntry, TreeEntryDiagnostic,
     TreeEntryType, TreeManifest,
+};
+pub use packages::{
+    build_package_id, materialize_package, package_materialized_root, ActivationInspection,
+    ActivationPlan, ActivationResult, ClaudePackageActivator, CodexPackageActivator,
+    GeneratedTargetPackage, ManagedPackageActivator, OpenCodePackageActivator, PackageBuildInput,
+    PackageMaterializationMeta, PackageSkillInput, PLUGIN_SELECTOR,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,

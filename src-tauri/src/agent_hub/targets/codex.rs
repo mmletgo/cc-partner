@@ -297,3 +297,19 @@ fn scan_codex_layer(
     }
     Ok(sources)
 }
+
+/// Codex managed package 激活选择器（`plugin@cc-partner`）。
+///
+/// Business Logic: plugin add/remove 使用与 marketplace 一致的 selector。
+/// Code Logic: 委托 packages::PLUGIN_SELECTOR。
+pub fn codex_managed_plugin_selector() -> &'static str {
+    crate::agent_hub::packages::PLUGIN_SELECTOR
+}
+
+/// Codex disable 策略：remove-with-binding-retained。
+///
+/// Business Logic: desiredEnabled=false 不生成 canonical tombstone，只 remove plugin。
+/// Code Logic: 返回稳定策略 token。
+pub fn codex_disable_strategy() -> &'static str {
+    "remove_with_binding_retained"
+}

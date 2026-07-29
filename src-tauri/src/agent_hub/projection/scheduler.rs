@@ -29,6 +29,94 @@ use uuid::Uuid;
 /// 全局并行投影资产上限。
 pub const MAX_GLOBAL_PROJECTION_PARALLELISM: usize = 4;
 
+/// package 激活阶段推进结果。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     ActivationRequired / Unsupported 不得变成 committed/full；blocked 与 verified 分流。
+///
+/// Code Logic（这个枚举做什么）:
+///     描述下一状态或终态决策。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageActivationAdvance {
+    /// 进入下一阶段
+    Next(ProjectionJobState),
+    /// 可提交 materialization（activationVerified 之后或无需激活）
+    CommitReady,
+    /// 阻塞（support blocked / activation required / unsupported）
+    Block {
+        /// materialization 状态
+        status: MaterializationStatus,
+        /// 稳定原因 token
+        reason: String,
+    },
+}
+
+/// 判定目标路径是否为 managed package 物化根下的路径。
+///
+/// Business Logic: 指令文件投影不得进入 package 激活阶段。
+/// Code Logic: 路径包含 `agent-hub/materialized-packages`。
+pub fn is_managed_package_target_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    norm.contains("agent-hub/materialized-packages")
+}
+
+/// package 激活状态机：当前状态 + inspect/apply 结果 → 下一动作。
+///
+/// Business Logic（为什么需要这个函数）:
+///     recovery 必须先 inspect 再决定是否重复 CLI 命令；ActivationRequired 永不 committed。
+///
+/// Code Logic（这个函数做什么）:
+///     pure 决策，无 IO。
+pub fn advance_package_activation(
+    current: ProjectionJobState,
+    inspect_present: bool,
+    inspect_enabled_matches: bool,
+    activation_required: bool,
+    support_blocked: bool,
+    apply_ok: bool,
+) -> PackageActivationAdvance {
+    if support_blocked {
+        return PackageActivationAdvance::Block {
+            status: MaterializationStatus::Blocked,
+            reason: "package_activation_support_blocked".into(),
+        };
+    }
+    if activation_required {
+        return PackageActivationAdvance::Block {
+            status: MaterializationStatus::ActivationRequired,
+            reason: "package_activation_required".into(),
+        };
+    }
+    match current {
+        ProjectionJobState::Prepared | ProjectionJobState::Writing => {
+            PackageActivationAdvance::Next(ProjectionJobState::PackageWritten)
+        }
+        ProjectionJobState::PackageWritten => {
+            if inspect_present && inspect_enabled_matches {
+                // recovery：已符合期望，跳过重复命令
+                PackageActivationAdvance::Next(ProjectionJobState::ActivationVerified)
+            } else {
+                PackageActivationAdvance::Next(ProjectionJobState::ActivationRequested)
+            }
+        }
+        ProjectionJobState::ActivationRequested => {
+            if apply_ok || (inspect_present && inspect_enabled_matches) {
+                PackageActivationAdvance::Next(ProjectionJobState::ActivationVerified)
+            } else {
+                PackageActivationAdvance::Block {
+                    status: MaterializationStatus::Blocked,
+                    reason: "package_activation_apply_failed".into(),
+                }
+            }
+        }
+        ProjectionJobState::ActivationVerified => PackageActivationAdvance::CommitReady,
+        other => PackageActivationAdvance::Block {
+            status: MaterializationStatus::Blocked,
+            reason: format!("package_activation_invalid_state:{}", other.as_str()),
+        },
+    }
+}
+
 /// 投影请求（入队输入）。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -1384,5 +1472,120 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mat.status, MaterializationStatus::Blocked);
+    }
+
+    #[test]
+    fn package_activation_phase_order_and_recovery() {
+        use super::{
+            advance_package_activation, is_managed_package_target_path, PackageActivationAdvance,
+        };
+        use crate::agent_hub::models::{MaterializationStatus, ProjectionJobState};
+
+        assert!(is_managed_package_target_path(
+            "/data/agent-hub/materialized-packages/claude/user/pkg"
+        ));
+        assert!(!is_managed_package_target_path(
+            "/home/user/.claude/CLAUDE.md"
+        ));
+
+        // prepared → packageWritten
+        let n = advance_package_activation(
+            ProjectionJobState::Prepared,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            n,
+            PackageActivationAdvance::Next(ProjectionJobState::PackageWritten)
+        );
+
+        // packageWritten + not present → activationRequested
+        let n = advance_package_activation(
+            ProjectionJobState::PackageWritten,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            n,
+            PackageActivationAdvance::Next(ProjectionJobState::ActivationRequested)
+        );
+
+        // packageWritten + already present (recovery inspect) → skip to verified
+        let n = advance_package_activation(
+            ProjectionJobState::PackageWritten,
+            true,
+            true,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            n,
+            PackageActivationAdvance::Next(ProjectionJobState::ActivationVerified)
+        );
+
+        // activationRequested + apply ok → verified
+        let n = advance_package_activation(
+            ProjectionJobState::ActivationRequested,
+            false,
+            false,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(
+            n,
+            PackageActivationAdvance::Next(ProjectionJobState::ActivationVerified)
+        );
+
+        // verified → commit ready
+        let n = advance_package_activation(
+            ProjectionJobState::ActivationVerified,
+            true,
+            true,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(n, PackageActivationAdvance::CommitReady);
+
+        // activation required never commit
+        let n = advance_package_activation(
+            ProjectionJobState::PackageWritten,
+            false,
+            false,
+            true,
+            false,
+            false,
+        );
+        match n {
+            PackageActivationAdvance::Block { status, .. } => {
+                assert_eq!(status, MaterializationStatus::ActivationRequired);
+            }
+            other => panic!("expected block, got {other:?}"),
+        }
+
+        // support blocked never commit
+        let n = advance_package_activation(
+            ProjectionJobState::PackageWritten,
+            false,
+            false,
+            false,
+            true,
+            false,
+        );
+        match n {
+            PackageActivationAdvance::Block { status, reason } => {
+                assert_eq!(status, MaterializationStatus::Blocked);
+                assert!(reason.contains("support_blocked"));
+            }
+            other => panic!("expected block, got {other:?}"),
+        }
     }
 }

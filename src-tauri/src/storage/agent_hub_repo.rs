@@ -1288,13 +1288,19 @@ impl AgentHubRepo {
         with_shared_write_lease(&self.gate, async {
             let mut tx = self.pool.begin().await?;
             let now = chrono::Utc::now().to_rfc3339();
-            // state CAS：仅 writing/prepared 可提交，防止已 committed/failed 的旧 job 覆盖
+            // state CAS：仅 writing/prepared 与 Gate B 激活中间态可提交，防止已 committed/failed 旧 job 覆盖
             // （attempt 在 writing 路径已 +1，内存 job.attempt 可能落后，故不强制 attempt 等值）
             let result = sqlx::query(
                 "UPDATE agent_hub_projection_jobs
                  SET state = ?, last_error = NULL, updated_at = ?
                  WHERE id = ?
-                   AND state IN ('writing', 'prepared')",
+                   AND state IN (
+                     'writing',
+                     'prepared',
+                     'packageWritten',
+                     'activationRequested',
+                     'activationVerified'
+                   )",
             )
             .bind(ProjectionJobState::Committed.as_str())
             .bind(&now)

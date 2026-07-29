@@ -781,9 +781,12 @@ pub struct AgentHubConflict {
 ///
 /// Business Logic（为什么需要这个枚举）:
 ///     文件系统与 DB 无法单事务，必须用 job ledger 对账 crash recovery。
+///     Gate B package 激活扩展：prepared → packageWritten → activationRequested
+///     → activationVerified → committed；ActivationRequired/Unsupported 永不 committed/full。
 ///
 /// Code Logic（这个枚举做什么）:
-///     prepared/writing/committed/failed/blocked/drifted。
+///     prepared/writing/packageWritten/activationRequested/activationVerified/
+///     committed/failed/blocked/drifted。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProjectionJobState {
@@ -791,6 +794,12 @@ pub enum ProjectionJobState {
     Prepared,
     /// 正在写临时文件/原子替换
     Writing,
+    /// managed package 已物化到 materialized-packages（Gate B）
+    PackageWritten,
+    /// 已请求 CLI 激活（marketplace install / native verify）
+    ActivationRequested,
+    /// 已 inspect CLI 状态并确认激活结果
+    ActivationVerified,
     /// materialization 已提交
     Committed,
     /// 可重试失败
@@ -810,6 +819,9 @@ impl ProjectionJobState {
         match self {
             Self::Prepared => "prepared",
             Self::Writing => "writing",
+            Self::PackageWritten => "packageWritten",
+            Self::ActivationRequested => "activationRequested",
+            Self::ActivationVerified => "activationVerified",
             Self::Committed => "committed",
             Self::Failed => "failed",
             Self::Blocked => "blocked",
@@ -825,6 +837,9 @@ impl ProjectionJobState {
         match s {
             "prepared" => Some(Self::Prepared),
             "writing" => Some(Self::Writing),
+            "packageWritten" => Some(Self::PackageWritten),
+            "activationRequested" => Some(Self::ActivationRequested),
+            "activationVerified" => Some(Self::ActivationVerified),
             "committed" => Some(Self::Committed),
             "failed" => Some(Self::Failed),
             "blocked" => Some(Self::Blocked),
@@ -835,10 +850,28 @@ impl ProjectionJobState {
 
     /// 是否仍处于未完成、可恢复状态。
     ///
-    /// Business Logic: owner 启动时只对账 prepared/writing。
-    /// Code Logic: prepared|writing。
+    /// Business Logic: owner 启动时对账 prepared/writing 与 Gate B 激活中间态。
+    /// Code Logic: prepared|writing|packageWritten|activationRequested|activationVerified。
     pub fn is_recoverable(self) -> bool {
-        matches!(self, Self::Prepared | Self::Writing)
+        matches!(
+            self,
+            Self::Prepared
+                | Self::Writing
+                | Self::PackageWritten
+                | Self::ActivationRequested
+                | Self::ActivationVerified
+        )
+    }
+
+    /// 是否为 package 激活管线中间态（Gate B）。
+    ///
+    /// Business Logic: recovery 时先 inspect CLI 再决定是否重复命令。
+    /// Code Logic: packageWritten|activationRequested|activationVerified。
+    pub fn is_package_activation_phase(self) -> bool {
+        matches!(
+            self,
+            Self::PackageWritten | Self::ActivationRequested | Self::ActivationVerified
+        )
     }
 }
 
