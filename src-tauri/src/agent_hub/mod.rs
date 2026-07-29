@@ -10,14 +10,16 @@
 //!     Gate A Task 3：targets（path resolver + instruction-only AssetAdapter 合同）；
 //!     Gate A Task 4：instructions（块编译 / OpenCode prelude / 三方 reconcile）；
 //!     Gate A Task 5：project_scope（opt-in preview/enable/refresh checkout bindings）；
+//!     Gate A Task 6：projection（durable jobs + atomic writer + scheduler recovery）；
 //!     Gate A Task 8：用户级登录自启动（autostart）。
-//!     后续任务再组装 service、projection、runtime。
+//!     后续任务再组装 service、runtime。
 
 pub mod autostart;
 pub mod instructions;
 pub mod models;
 pub mod object_store;
 pub mod project_scope;
+pub mod projection;
 pub mod revision_graph;
 pub mod targets;
 
@@ -30,8 +32,9 @@ pub use instructions::{
 };
 pub use models::{
     AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
-    Materialization, MaterializationStatus, NewLogicalAsset, NewRevision, NewScopeNode,
-    NewTargetBinding, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
+    Materialization, MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob,
+    NewRevision, NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState,
+    ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
     ScopeNode, TargetBinding,
 };
 pub use object_store::{
@@ -42,6 +45,10 @@ pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,
     AgentHubProjectPreview, AgentHubProjectStatus, EnableAgentHubProjectRequest,
     PreviewCheckoutEntry, PreviewPlannedAction, ProjectCheckoutBinding,
+};
+pub use projection::{
+    AtomicProjectionWriter, ProjectionRequest, ProjectionRunStats, ProjectionScheduler,
+    ProjectionWriteFault, MAX_GLOBAL_PROJECTION_PARALLELISM,
 };
 pub use revision_graph::{
     ContentMergeResult, MergeBaseOutcome, MergePayload, RevisionGraph, MAX_VISITED_REVISIONS,

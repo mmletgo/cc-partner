@@ -70,6 +70,19 @@ pub mod updater;
 mod workbench;
 /// A5：集成 smoke / 外部 crate 测试需要直连浏览器验证服务与 FakeEngine。
 pub use workbench::browser_verification;
+// Gate A Task6：quality_faults 故障注入需要直连 projection scheduler / CAS / repo。
+pub use agent_hub::object_store::{
+    sha256_hex as agent_hub_sha256_hex, ObjectStore as AgentHubObjectStore,
+};
+pub use agent_hub::projection::{
+    AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest, FileWriteRequest,
+    ProjectionRequest, ProjectionScheduler, ProjectionWriteFault,
+};
+pub use agent_hub::{
+    AgentTarget, AssetKind, AssetPolicy, DesiredPresence, NewLogicalAsset, NewScopeNode,
+    NewTargetBinding, ProjectionJobState, ProjectionPayloadKind, RevisionId, ScopeKind,
+};
+pub use storage::AgentHubRepo;
 
 use std::sync::Arc;
 
