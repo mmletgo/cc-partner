@@ -217,7 +217,7 @@ impl ProjectionScheduler {
         let managed_paths_json = request
             .managed_paths
             .as_ref()
-            .map(|p| serde_json::to_string(p))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| AppError::generic(format!("managed_paths_json: {e}")))?;
 

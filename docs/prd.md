@@ -115,18 +115,23 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 单条历史正文与单批同步体量有固定上限；超限时本轮同步以稳定错误结束该批次，不静默丢弃或半写入
 - Claude Code 历史纳入 GitHub 私有仓库云端同步范围
 
-### 2.5 user 级 CLAUDE.md 管理
+### 2.5 Multi-CLI Agent Hub（Gate A 指令基础）
 
-**描述**：在应用内编辑 user 级 `~/.claude/CLAUDE.md`，并由用户主动推送到局域网设备和 GitHub 云端。
+**描述**：Gate A 交付 **Agent Hub 指令基础**。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；不再把旧单页编辑器当作长期权威入口。导航与路由以 `/agent-hub` 为准，旧 `/claude-md` / `/claude-code` 仅 N/N+1 重定向。
 
-**功能点**：
-- 进入页面时读取 `~/.claude/CLAUDE.md`，并与本地 SQLite 同步元数据对账
-- 提供文本编辑器、未保存状态提示、字符统计和保存操作
-- 保存时写回本机 `~/.claude/CLAUDE.md`，并推进本机向量时钟
-- 推送时先保存当前编辑内容，再把本机版本主动推送到在线局域网设备
-- 推送时同时把 `CLAUDE.md` 写入 GitHub 私有仓库云端同步工作区并提交该文件
-- `CLAUDE.md` 不参与普通全局自动同步和普通 GitHub 云端同步导入，避免远端版本自动覆盖本机编辑器内容
-- P2P 协议保留 `pull/push` 端点，但产品语义以用户主动推送本机版本为主
+**已交付（Gate A）**：
+- Hub 首屏展示 CLI probe 状态、write 兼容性、冲突/阻塞计数
+- instruction 资产列表与 Claude / Codex / OpenCode **target matrix**（desired presence / materialization 单元格）
+- 项目 opt-in：**preview 零写入** → 用户确认 **enable** 后才绑定 checkout 与投影意图
+- 迁移进 Hub 的用户 CLAUDE.md 记为 Claude **targetOnly** 指令；生成 Codex/OpenCode 差异仅供预览/确认，**投影绑定默认 `desiredPresence=absent`，须用户确认后才 present**
+- 冲突 deep link（`/agent-hub?assetId=…&conflictId=…`）打开冲突抽屉；Attention 只导航不执行写动作
+- N/N+1 期间：已接受的用户 Claude 投影 **仅 dual-write legacy summary**（旧 `claude_md` 行摘要）；**legacy 向量时钟不裁决 Hub 冲突**
+
+**明确未交付（后续 Gate；不得宣称已完成）**：
+- Skill / MCP / Plugin 多 CLI 同步与资产管理
+- LAN Hub 复制 / 跨设备 Agent Hub 状态同步
+- Git 远程指令仓、OpenCode 完整 runtime 能力
+- 真实多机 / 全平台 CLI 写盘认证（见质量矩阵 L3 `NOT VERIFIED` 行）
 
 ### 2.6 设备自动发现与互联
 

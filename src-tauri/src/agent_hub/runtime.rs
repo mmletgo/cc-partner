@@ -115,6 +115,14 @@ impl SystemClock {
     }
 }
 
+impl Default for SystemClock {
+    /// Business Logic: 默认系统时钟与 new 同语义。
+    /// Code Logic: 委托 Self::new。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeClock for SystemClock {
     fn now_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64

@@ -1161,6 +1161,142 @@
         "docs/development/testing.md"
       ],
       "status": "NOT VERIFIED"
+    },
+    {
+      "id": "E2E-AGENT-HUB-A-001",
+      "surface": "agent-hub",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode filesystem projection",
+        "Skill/MCP/Plugin surfaces",
+        "LAN Hub replication",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md"
+      ]
+    },
+    {
+      "id": "L0-AGENT-HUB-MIGRATION-001",
+      "surface": "agent-hub",
+      "level": "L0",
+      "tests": [
+        "src-tauri/src/agent_hub"
+      ],
+      "command": "cd src-tauri && cargo test --locked agent_hub",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real multi-CLI product installs",
+        "packaged GUI migration UX"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md"
+      ]
+    },
+    {
+      "id": "L2-AGENT-HUB-GATE-A-001",
+      "surface": "agent-hub",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/agent_hub_gate_a_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test agent_hub_gate_a_smoke -- --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode on macos/windows/ubuntu product paths",
+        "Skill/MCP/Plugin",
+        "LAN Hub replication",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md"
+      ]
+    },
+    {
+      "id": "L3-AGENT-HUB-CLAUDE-001",
+      "surface": "agent-hub",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: real Claude Code CLI install path write + user/project instruction projection on macos/windows/ubuntu",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "not executed in CI",
+        "hosted runner substitute"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ],
+      "status": "NOT VERIFIED"
+    },
+    {
+      "id": "L3-AGENT-HUB-CODEX-001",
+      "surface": "agent-hub",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: real Codex CLI install path write + AGENTS.override projection on macos/windows/ubuntu",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "not executed in CI",
+        "hosted runner substitute"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ],
+      "status": "NOT VERIFIED"
+    },
+    {
+      "id": "L3-AGENT-HUB-OPENCODE-001",
+      "surface": "agent-hub",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: real OpenCode CLI install path write + AGENTS.md/prelude projection on macos/windows/ubuntu",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "not executed in CI",
+        "hosted runner substitute"
+      ],
+      "docs": [
+        "docs/development/testing.md"
+      ],
+      "status": "NOT VERIFIED"
     }
   ]
 }

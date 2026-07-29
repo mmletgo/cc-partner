@@ -71,6 +71,10 @@ mod workbench;
 /// A5：集成 smoke / 外部 crate 测试需要直连浏览器验证服务与 FakeEngine。
 pub use workbench::browser_verification;
 // Gate A Task6：quality_faults 故障注入需要直连 projection scheduler / CAS / repo。
+pub use agent_hub::migration::{
+    migrate_user_claude_md_state_with, ClaudeMdMigrationPreview, MigrationDeps,
+    USER_INSTRUCTION_LOGICAL_KEY, USER_SCOPE_STABLE_ID,
+};
 pub use agent_hub::object_store::{
     sha256_hex as agent_hub_sha256_hex, ObjectStore as AgentHubObjectStore,
 };
@@ -82,7 +86,12 @@ pub use agent_hub::{
     AgentTarget, AssetKind, AssetPolicy, DesiredPresence, NewLogicalAsset, NewScopeNode,
     NewTargetBinding, ProjectionJobState, ProjectionPayloadKind, RevisionId, ScopeKind,
 };
+pub use models::claude_md::{ClaudeMdRow, CLAUDE_MD_ID};
 pub use storage::AgentHubRepo;
+pub use storage::ClaudeMdRepo;
+pub use storage::DatabaseMaintenanceGate;
+// Gate A Task10 smoke：opt-in mapping 需要公开 upsert 输入类型。
+pub use storage::UpsertAgentHubProjectMapping;
 
 use std::sync::Arc;
 

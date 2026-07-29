@@ -262,12 +262,12 @@ impl AgentHubRepo {
     ///     同事务写 revisions/parents/assets.current_revision_id。
     pub async fn append_revision(&self, input: NewRevision) -> Result<Revision, AppError> {
         with_shared_write_lease(&self.gate, async {
-            if input.operation == RevisionOperation::Delete {
-                if input.payload_hash.is_some() || input.tree_manifest_hash.is_some() {
-                    return Err(AppError::validation(
-                        "agent_hub_delete_revision_rejects_payload_hash".to_string(),
-                    ));
-                }
+            if input.operation == RevisionOperation::Delete
+                && (input.payload_hash.is_some() || input.tree_manifest_hash.is_some())
+            {
+                return Err(AppError::validation(
+                    "agent_hub_delete_revision_rejects_payload_hash".to_string(),
+                ));
             }
 
             let mut tx = self.pool.begin().await?;
@@ -2669,13 +2669,12 @@ mod tests {
         assert!(!claude_loaded.desired_enabled);
         assert!(codex_loaded.desired_enabled);
         // 关闭 Claude 不影响 Codex
-        assert_eq!(
+        assert!(
             repo.get_target_binding(&codex.id)
                 .await
                 .unwrap()
                 .unwrap()
-                .desired_enabled,
-            true
+                .desired_enabled
         );
     }
 }
