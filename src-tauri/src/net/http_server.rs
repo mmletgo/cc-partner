@@ -1564,6 +1564,7 @@ mod tests {
             control_token: "expected-token".to_string(),
             control_schema_version: crate::backend::authority::CONTROL_SCHEMA_VERSION,
             owner_instance_id: Some("owner-test".to_string()),
+            agent_hub_api_version: crate::backend::control::AGENT_HUB_API_VERSION,
         }
     }
 

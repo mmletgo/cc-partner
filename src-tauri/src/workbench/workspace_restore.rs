@@ -1201,6 +1201,7 @@ mod tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
         let config_runtime = Arc::new(ConfigRuntime::new(config, store));

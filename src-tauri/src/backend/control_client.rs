@@ -580,6 +580,7 @@ pub struct BackendControlClient {
     control_token: String,
     owner_instance_id: Option<String>,
     control_schema_version: u32,
+    agent_hub_api_version: u32,
     http: reqwest::Client,
 }
 
@@ -622,6 +623,7 @@ impl BackendControlClient {
             control_token: control.control_token.clone(),
             owner_instance_id: control.owner_instance_id.clone(),
             control_schema_version: control.control_schema_version,
+            agent_hub_api_version: control.agent_hub_api_version,
             http,
         })
     }
@@ -632,7 +634,8 @@ impl BackendControlClient {
     ///     单元/ smoke harness 启动临时 owner HTTP 后，不依赖真实 control 文件路径竞争。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     填充权威 schema 与 owner id，构造无全局 timeout 的 client。
+    ///     填充权威 schema 与 owner id，构造无全局 timeout 的 client；
+    ///     agent_hub_api_version 默认 `AGENT_HUB_API_VERSION`。
     pub fn for_test(
         port: u16,
         control_token: &str,
@@ -646,8 +649,28 @@ impl BackendControlClient {
             control_token: control_token.to_string(),
             owner_instance_id: Some(owner_instance_id.to_string()),
             control_schema_version: CONTROL_SCHEMA_VERSION,
+            agent_hub_api_version: crate::backend::control::AGENT_HUB_API_VERSION,
             http,
         })
+    }
+
+    /// 测试用：注入指定 Agent Hub API 版本。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     握手单测需要模拟旧 backend（0）与更高不兼容 major。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `for_test` 后覆盖 `agent_hub_api_version`。
+    #[cfg(test)]
+    pub fn for_test_with_agent_hub_version(
+        port: u16,
+        control_token: &str,
+        owner_instance_id: &str,
+        agent_hub_api_version: u32,
+    ) -> Result<Self, AppError> {
+        let mut client = Self::for_test(port, control_token, owner_instance_id)?;
+        client.agent_hub_api_version = agent_hub_api_version;
+        Ok(client)
     }
 
     /// 当前 control 中的 owner 实例 id（若有）。
@@ -672,6 +695,37 @@ impl BackendControlClient {
         self.control_schema_version
     }
 
+    /// 返回 Agent Hub API 主版本（来自 control 文件）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 状态条/只读 gate 需要展示 backend 宣告的 Hub 协议版本。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回缓存的 `agent_hub_api_version`（legacy 为 0）。
+    pub fn agent_hub_api_version(&self) -> u32 {
+        self.agent_hub_api_version
+    }
+
+    /// 校验 Agent Hub 写路径兼容性。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧/缺失 `agentHubApiVersion` 允许 status/preview，但 mutation 必须拒绝并提示 upgrade；
+    ///     backend 宣告更高不兼容 major 时同样只读。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     要求 `self.agent_hub_api_version == required_version`；
+    ///     不匹配返回 `AppError::conflict("upgradeRequired")`（稳定 code 供前端分支）。
+    ///     调用方须在**每一个** Agent Hub mutation 路径前调用本 helper。
+    pub fn require_agent_hub_write_compatibility(
+        &self,
+        required_version: u32,
+    ) -> Result<(), AppError> {
+        if self.agent_hub_api_version == required_version {
+            return Ok(());
+        }
+        Err(AppError::conflict("upgradeRequired"))
+    }
+
     /// 比较两个客户端是否绑定同一 control descriptor。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -679,13 +733,14 @@ impl BackendControlClient {
     ///     避免误清后来者新加载的 client。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     比较 port、control_token、owner_instance_id 与 control_schema_version；
-    ///     不打印这些字段，也不比较 http client 句柄。
+    ///     比较 port、control_token、owner_instance_id、control_schema_version 与
+    ///     agent_hub_api_version；不打印这些字段，也不比较 http client 句柄。
     pub fn same_descriptor(&self, other: &Self) -> bool {
         self.port == other.port
             && self.control_token == other.control_token
             && self.owner_instance_id == other.owner_instance_id
             && self.control_schema_version == other.control_schema_version
+            && self.agent_hub_api_version == other.agent_hub_api_version
     }
 
     /// 查询 owner status（安全查询：连接失败可一次性刷新 control file）。
@@ -2404,6 +2459,7 @@ mod tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = Arc::new(ConfigRuntime::with_owner(initial, store, owner.into()));
@@ -2918,5 +2974,59 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 旧/缺失 agentHubApiVersion 拒绝 mutation，允许读路径不调用本 helper。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 较新而后端未宣告写协议时，status/preview 可读，写路径必须 upgradeRequired。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     version=0 的 client 对 required=1 返回 conflict upgradeRequired。
+    #[test]
+    fn agent_hub_write_compat_rejects_missing_or_zero_version() {
+        let client =
+            BackendControlClient::for_test_with_agent_hub_version(1, "tok", "owner", 0).unwrap();
+        let err = client
+            .require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)
+            .unwrap_err();
+        assert_eq!(err.code(), "upgradeRequired");
+        assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
+    }
+
+    /// 同 major v1 写兼容通过。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     新 GUI ↔ v1 backend 必须允许 mutation。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     for_test 默认 AGENT_HUB_API_VERSION=1，require(1) → Ok。
+    #[test]
+    fn agent_hub_write_compat_accepts_matching_v1() {
+        let client = BackendControlClient::for_test(1, "tok", "owner").unwrap();
+        assert_eq!(
+            client.agent_hub_api_version(),
+            crate::backend::control::AGENT_HUB_API_VERSION
+        );
+        client
+            .require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)
+            .unwrap();
+    }
+
+    /// 更高不兼容 major → 只读（upgradeRequired）。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     backend 宣告更高 major 时，旧 GUI 不得盲目写。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     version=2、required=1 → upgradeRequired。
+    #[test]
+    fn agent_hub_write_compat_rejects_higher_incompatible_major() {
+        let client =
+            BackendControlClient::for_test_with_agent_hub_version(1, "tok", "owner", 2).unwrap();
+        let err = client
+            .require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)
+            .unwrap_err();
+        assert_eq!(err.code(), "upgradeRequired");
     }
 }

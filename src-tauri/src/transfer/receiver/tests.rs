@@ -145,6 +145,7 @@ async fn build_transfer_test_state(receive_dir: &Path) -> AppState {
         health: HealthConfig::default(),
         orchestrator: OrchestratorAutomationConfig::default(),
         github_trending: GithubTrendingConfig::default(),
+        agent_hub: crate::config::AgentHubConfig::default(),
     };
     let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
         config.clone(),

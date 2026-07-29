@@ -329,6 +329,7 @@ async fn build_local_state(device_id: &str) -> AppState {
         health: HealthConfig::default(),
         orchestrator: OrchestratorAutomationConfig::default(),
         github_trending: GithubTrendingConfig::default(),
+        agent_hub: crate::config::AgentHubConfig::default(),
     };
     // S3 ConfigRuntime + UpdateRuntime；与 config 共享同一 Arc。
     let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(

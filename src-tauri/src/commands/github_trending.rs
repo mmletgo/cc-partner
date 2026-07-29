@@ -979,6 +979,7 @@ mod config_writer_tests {
                 claude_model: "sonnet".into(),
                 cache_ttl_hours: 24,
             },
+            agent_hub: crate::config::AgentHubConfig::default(),
         }
     }
 
