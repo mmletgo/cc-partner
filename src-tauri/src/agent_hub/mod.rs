@@ -98,7 +98,8 @@ pub use projection::{
     ProjectionWriteFault, MAX_GLOBAL_PROJECTION_PARALLELISM,
 };
 pub use projection_ops::{
-    ensure_agent_hub_enabled, schedule_asset_projections, schedule_project_projections,
+    ensure_agent_hub_enabled, schedule_asset_projections, schedule_package_deactivation,
+    schedule_project_projections,
 };
 pub use revision_graph::{
     ContentMergeResult, MergeBaseOutcome, MergePayload, RevisionGraph, MAX_VISITED_REVISIONS,

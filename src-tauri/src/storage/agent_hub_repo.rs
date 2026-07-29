@@ -679,6 +679,208 @@ impl AgentHubRepo {
         .await
     }
 
+    /// 单 write-lease 事务：一条 Delete tombstone + fan-out Absent bindings。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     delete_everywhere 不得在 tombstone 成功、fan-out 中途失败时留下半状态。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     with_shared_write_lease → 同事务 append_revision(Delete, CAS head) + 逐 binding upsert Absent/disabled。
+    pub async fn delete_asset_everywhere_atomic(
+        &self,
+        asset_id: &str,
+        tombstone: NewRevision,
+        fan_out: Vec<NewTargetBinding>,
+    ) -> Result<Revision, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            if tombstone.operation != RevisionOperation::Delete {
+                return Err(AppError::validation(
+                    "agent_hub_delete_everywhere_requires_delete_revision",
+                ));
+            }
+            if tombstone.payload_hash.is_some() || tombstone.tree_manifest_hash.is_some() {
+                return Err(AppError::validation(
+                    "agent_hub_delete_revision_rejects_payload_hash",
+                ));
+            }
+            let mut tx = self.pool.begin().await?;
+
+            // lineage/asset 存在性
+            let asset_exists: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_assets WHERE id = ?")
+                    .bind(asset_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if asset_exists == 0 {
+                return Err(AppError::not_found("agent_hub_asset_not_found"));
+            }
+
+            let mut max_parent_generation: Option<u64> = None;
+            for parent in &tombstone.parents {
+                let gen: Option<i64> =
+                    sqlx::query_scalar("SELECT generation FROM agent_hub_revisions WHERE id = ?")
+                        .bind(parent.as_str())
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                let Some(g) = gen else {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_revision_parent_missing:{}",
+                        parent.as_str()
+                    )));
+                };
+                let g = g as u64;
+                max_parent_generation = Some(max_parent_generation.map_or(g, |m| m.max(g)));
+            }
+            let generation = max_parent_generation.map_or(0, |m| m.saturating_add(1));
+
+            let insert_result = sqlx::query(
+                "INSERT INTO agent_hub_revisions
+                 (id, asset_lineage_id, generation, operation, origin_kind, origin_target,
+                  origin_replica_id, payload_hash, tree_manifest_hash, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(tombstone.id.as_str())
+            .bind(&tombstone.asset_lineage_id)
+            .bind(generation as i64)
+            .bind(tombstone.operation.as_str())
+            .bind(tombstone.origin_kind.as_str())
+            .bind(tombstone.origin_target.map(|t| t.as_str()))
+            .bind(&tombstone.origin_replica_id)
+            .bind(&tombstone.payload_hash)
+            .bind(&tombstone.tree_manifest_hash)
+            .bind(&tombstone.created_at)
+            .execute(&mut *tx)
+            .await;
+            if let Err(e) = insert_result {
+                if is_unique_violation(&e) {
+                    return Err(AppError::conflict(
+                        "agent_hub_revision_id_conflict".to_string(),
+                    ));
+                }
+                return Err(e.into());
+            }
+
+            for (pos, parent) in tombstone.parents.iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO agent_hub_revision_parents
+                     (revision_id, parent_revision_id, parent_order)
+                     VALUES (?, ?, ?)",
+                )
+                .bind(tombstone.id.as_str())
+                .bind(parent.as_str())
+                .bind(pos as i64)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            let deleted_at = Some(tombstone.created_at.clone());
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Some(expected) = tombstone
+                .expected_parent_id
+                .as_ref()
+                .map(|r| r.as_str().to_string())
+            {
+                let result = sqlx::query(
+                    "UPDATE agent_hub_assets
+                     SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+                     WHERE id = ?
+                       AND (current_revision_id IS NULL OR current_revision_id = ?)",
+                )
+                .bind(tombstone.id.as_str())
+                .bind(&deleted_at)
+                .bind(&now)
+                .bind(asset_id)
+                .bind(&expected)
+                .execute(&mut *tx)
+                .await?;
+                if result.rows_affected() == 0 {
+                    return Err(AppError::conflict(
+                        "agent_hub_revision_conflict".to_string(),
+                    ));
+                }
+            } else {
+                sqlx::query(
+                    "UPDATE agent_hub_assets
+                     SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(tombstone.id.as_str())
+                .bind(&deleted_at)
+                .bind(&now)
+                .bind(asset_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            // fan-out Absent/disabled
+            for input in fan_out {
+                let mapping = input.local_scope_mapping_id.clone().unwrap_or_default();
+                let checkout = input.checkout_binding_id.clone().unwrap_or_default();
+                let existing: Option<(String, String)> = sqlx::query_as(
+                    "SELECT id, created_at FROM agent_hub_target_bindings
+                     WHERE asset_id = ? AND target = ?
+                       AND IFNULL(local_scope_mapping_id, '') = ?
+                       AND IFNULL(checkout_binding_id, '') = ?",
+                )
+                .bind(&input.asset_id)
+                .bind(input.target.as_str())
+                .bind(&mapping)
+                .bind(&checkout)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let bind_now = chrono::Utc::now().to_rfc3339();
+                if let Some((id, _)) = existing {
+                    sqlx::query(
+                        "UPDATE agent_hub_target_bindings
+                         SET desired_presence = ?, desired_enabled = ?, updated_at = ?
+                         WHERE id = ?",
+                    )
+                    .bind(input.desired_presence.as_str())
+                    .bind(if input.desired_enabled { 1_i64 } else { 0_i64 })
+                    .bind(&bind_now)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    sqlx::query(
+                        "INSERT INTO agent_hub_target_bindings
+                         (id, asset_id, target, local_scope_mapping_id, checkout_binding_id,
+                          desired_presence, desired_enabled, created_at, updated_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    )
+                    .bind(&id)
+                    .bind(&input.asset_id)
+                    .bind(input.target.as_str())
+                    .bind(&input.local_scope_mapping_id)
+                    .bind(&input.checkout_binding_id)
+                    .bind(input.desired_presence.as_str())
+                    .bind(if input.desired_enabled { 1_i64 } else { 0_i64 })
+                    .bind(&bind_now)
+                    .bind(&bind_now)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+
+            tx.commit().await?;
+            Ok(Revision {
+                id: tombstone.id,
+                asset_lineage_id: tombstone.asset_lineage_id,
+                parents: tombstone.parents,
+                generation,
+                operation: tombstone.operation,
+                origin_kind: tombstone.origin_kind,
+                origin_target: tombstone.origin_target,
+                origin_replica_id: tombstone.origin_replica_id,
+                payload_hash: tombstone.payload_hash,
+                tree_manifest_hash: tombstone.tree_manifest_hash,
+                created_at: tombstone.created_at,
+            })
+        })
+        .await
+    }
+
     /// 按 id 读取 target binding。
     ///
     /// Business Logic（为什么需要这个函数）:
