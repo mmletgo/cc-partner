@@ -16,7 +16,9 @@
 //!     Gate A Task 9：service 门面 + Attention conflict/blocked 投影 + control/commands。
 //!     Gate A Task 10：migration（用户 CLAUDE.md seed + N/N+1 dual-write 摘要）。
 //!     Gate A fix r1：`projection_ops` 生产投影调度 + `agent_hub.enabled` 武装路径。
+//!     Gate B Task 1：`assets` typed portable payload（Skill/Command/Agent/MCP）。
 
+pub mod assets;
 pub mod autostart;
 pub mod instructions;
 pub mod migration;
@@ -29,6 +31,12 @@ pub mod revision_graph;
 pub mod runtime;
 pub mod service;
 pub mod targets;
+
+pub use assets::{
+    canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, CommandArgument,
+    McpTransport, PortableAgent, PortableAssetPayload, PortableCommand, PortableMcpServer,
+    PortableSkill,
+};
 
 pub use instructions::{
     classify_import, compile_render, reconcile_instruction, AgentHubConflictScope,
