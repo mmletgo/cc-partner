@@ -14,7 +14,9 @@ use crate::agent_hub::git::lane::{device_lane_abs_path, inventory_agent_hub_devi
 use crate::agent_hub::models::AssetKind;
 use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::snapshot::archive::repack_readable_archive;
-use crate::agent_hub::snapshot::envelope::{default_snapshot_limits, SnapshotEnvelopeV1};
+use crate::agent_hub::snapshot::envelope::{
+    compute_snapshot_hash, default_snapshot_limits, SnapshotEnvelopeV1,
+};
 use crate::agent_hub::snapshot::importer::{
     ConfirmedImportSelection, ConfirmedProjectMapping, ProjectMappingCandidate,
     ResolvedProjectMapping, SnapshotImportOutcome, SnapshotImporter, ValidatedSnapshot,
@@ -298,19 +300,24 @@ pub async fn preview_git_import_in_workdir(
 /// 确认 import：hash 精确匹配后调用 SnapshotImporter。
 ///
 /// Business Logic: fetch 后 lane hash 变化 → previewStale，永不在旧确认下导入新快照。
-/// Code Logic: load → compare hash → 可选过滤 asset → commit_import。
+/// Code Logic: load → compare full-lane hash → 可选过滤 asset 并重算 selection-local hash → commit_import。
 pub async fn confirm_git_import_for_state(
     state: &AppState,
     request: ConfirmGitImportRequest,
 ) -> Result<ConfirmGitImportOutcome, AppError> {
     let workdir = cloud_sync_workdir();
-    confirm_git_import_in_workdir(&workdir, state, request).await
+    let data_dir = crate::config::data_dir()?;
+    confirm_git_import_in_workdir(&workdir, state.agent_hub_repo.as_ref(), &data_dir, request).await
 }
 
-/// workdir + AppState confirm（可测）。
+/// workdir + repo confirm（生产与单测共用；无需完整 AppState）。
+///
+/// Business Logic: lane-level `snapshotHash` 门闩永远对照未过滤 full-lane；子集仅影响 importer 载荷。
+/// Code Logic: load → full-lane hash gate → 可选 filter 后 recompute selection-local hash → validate → commit。
 pub async fn confirm_git_import_in_workdir(
     workdir: &Path,
-    state: &AppState,
+    repo: &AgentHubRepo,
+    data_dir: &Path,
     request: ConfirmGitImportRequest,
 ) -> Result<ConfirmGitImportOutcome, AppError> {
     let expected = request.snapshot_hash.trim();
@@ -320,11 +327,14 @@ pub async fn confirm_git_import_in_workdir(
         ));
     }
     let built = load_lane_snapshot(workdir, &request.lane_device_id)?;
+    // Lane-level gate: 用户确认的是整 lane preview hash；不得在 stale lane 上导入。
     if built.envelope.snapshot_hash != expected {
         return Err(AppError::conflict("previewStale"));
     }
 
-    // 可选子集：仅导入 selectedAssetIds（空=全部）
+    // 可选子集：仅导入 selectedAssetIds（空=全部）。
+    // 过滤后 envelope 内容变化，必须 recompute selection-local snapshotHash 才能通过
+    // ValidatedSnapshot / validate_snapshot 完整性校验；lane gate 已在上面完成。
     let mut envelope = built.envelope;
     let mut object_bytes = built.object_bytes;
     if !request.selected_asset_ids.is_empty() {
@@ -334,16 +344,30 @@ pub async fn confirm_git_import_in_workdir(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        if selected.is_empty() {
+            return Err(AppError::validation(
+                "agent_hub_git_import_empty_selected_assets".to_string(),
+            ));
+        }
+        // 未知 id 不静默吞掉：防止 UI 勾选了不存在的资产却导入全量
+        let available: BTreeSet<String> = envelope.assets.iter().map(|a| a.id.clone()).collect();
+        for id in &selected {
+            if !available.contains(id) {
+                return Err(AppError::validation(format!(
+                    "agent_hub_git_import_unknown_asset:{id}"
+                )));
+            }
+        }
         filter_envelope_to_assets(&mut envelope, &mut object_bytes, &selected)?;
-        // 过滤后 hash 变化，但用户确认的是整 lane hash；子集 import 仍要求 lane 未变。
-        // 重新计算 selection 内 hash 不是 confirm 门闩——门闩已是整 lane snapshotHash。
+        envelope.snapshot_hash = compute_snapshot_hash(&envelope).map_err(|e| {
+            AppError::validation(format!("agent_hub_git_import_selection_hash_failed:{e}"))
+        })?;
     }
 
     let validated =
         ValidatedSnapshot::from_parts(envelope, object_bytes, Some(default_snapshot_limits()))?;
-    let data_dir = crate::config::data_dir()?;
-    let objects = ObjectStore::open(&data_dir)?;
-    let importer = SnapshotImporter::new((*state.agent_hub_repo).clone(), objects, &data_dir);
+    let objects = ObjectStore::open(data_dir)?;
+    let importer = SnapshotImporter::new(repo.clone(), objects, data_dir);
     let selection = ConfirmedImportSelection {
         project_mappings: request.project_mappings.clone(),
         import_unmapped_projects: request.import_unmapped_projects,
@@ -353,8 +377,7 @@ pub async fn confirm_git_import_in_workdir(
     // 回报 mapping 状态（import 后）
     let mut resolved = Vec::new();
     for m in &request.project_mappings {
-        if let Some(row) = state
-            .agent_hub_repo
+        if let Some(row) = repo
             .get_project_mapping_by_hub_project_id(&m.hub_project_id)
             .await?
         {
@@ -374,6 +397,7 @@ pub async fn confirm_git_import_in_workdir(
 
     Ok(ConfirmGitImportOutcome {
         lane_device_id: request.lane_device_id,
+        // 对外回报用户确认的 lane-level hash（非 selection-local recompute）
         snapshot_hash: expected.to_string(),
         import: outcome,
         resolved_mappings: resolved,
@@ -935,7 +959,7 @@ mod tests {
         let _ = built2;
     }
 
-    /// Business Logic: lane hash 变化时 confirm 返回 previewStale。
+    /// Business Logic: 错误 snapshotHash 经生产 confirm 路径 fail-closed → previewStale，零 revision 写入。
     #[tokio::test]
     async fn confirm_rejects_stale_preview_hash() {
         let (dir, repo) = test_repo().await;
@@ -951,27 +975,186 @@ mod tests {
         let built =
             make_lane_snapshot("a1", br#"{"blocks":[]}"#, AssetKind::Instruction, "k", 0x33);
         let workdir = dir.path().join("cloud-sync");
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
         let lane = workdir.join("agent-hub").join("devices").join("device-x");
         expand_readable_archive(&built, &lane).unwrap();
         let real = built.envelope.snapshot_hash.clone();
+        assert!(!real.is_empty());
 
-        // hash gate only (no full AppState): load + compare
-        let loaded = load_lane_snapshot(&workdir, "device-x").unwrap();
-        assert_eq!(loaded.envelope.snapshot_hash, real);
-        let stale = AppError::conflict("previewStale");
-        assert_eq!(stale.code(), "previewStale");
-        assert_eq!(stale.ipc_category_code(), "conflict");
-        // 模拟 confirm 路径的 stale 分支
-        assert_ne!(
-            real,
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        let before_assets = repo
+            .list_all_assets_including_deleted()
+            .await
+            .unwrap()
+            .len();
+
+        let err = confirm_git_import_in_workdir(
+            &workdir,
+            &repo,
+            &data_dir,
+            ConfirmGitImportRequest {
+                lane_device_id: "device-x".into(),
+                snapshot_hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                    .into(),
+                selected_asset_ids: vec![],
+                project_mappings: vec![],
+                import_unmapped_projects: true,
+            },
+        )
+        .await
+        .expect_err("stale hash must fail closed");
+        assert_eq!(err.code(), "previewStale");
+        assert_eq!(err.ipc_category_code(), "conflict");
+
+        let after_assets = repo
+            .list_all_assets_including_deleted()
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(
+            before_assets, after_assets,
+            "stale confirm must write zero hub assets"
         );
-        if loaded.envelope.snapshot_hash
-            != "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-        {
-            let err = AppError::conflict("previewStale");
-            assert_eq!(err.code(), "previewStale");
-        }
+
+        // Optional path: mutate on-disk lane hash between preview and confirm.
+        let mut on_disk = load_lane_snapshot(&workdir, "device-x").unwrap();
+        assert_eq!(on_disk.envelope.snapshot_hash, real);
+        on_disk.envelope.snapshot_id = "01900000-0000-7000-8000-00000000beef".into();
+        on_disk.envelope.snapshot_hash = compute_snapshot_hash(&on_disk.envelope).unwrap();
+        // 覆盖 lane 文件：expand 会写新 snapshot.json/objects
+        expand_readable_archive(&on_disk, &lane).unwrap();
+        assert_ne!(on_disk.envelope.snapshot_hash, real);
+
+        let err2 = confirm_git_import_in_workdir(
+            &workdir,
+            &repo,
+            &data_dir,
+            ConfirmGitImportRequest {
+                lane_device_id: "device-x".into(),
+                snapshot_hash: real,
+                selected_asset_ids: vec![],
+                project_mappings: vec![],
+                import_unmapped_projects: true,
+            },
+        )
+        .await
+        .expect_err("mutated lane must reject old preview hash");
+        assert_eq!(err2.code(), "previewStale");
+        let after_mut = repo
+            .list_all_assets_including_deleted()
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(before_assets, after_mut);
+    }
+
+    /// Business Logic: 非空 proper subset selectedAssetIds 必须成功导入，不得因 self-filter 触发 HashMismatch。
+    #[tokio::test]
+    async fn confirm_subset_selected_assets_succeeds() {
+        let (dir, repo) = test_repo().await;
+        let _ = repo
+            .insert_scope(NewScopeNode {
+                id: Some("scope-user".into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+
+        // two-asset lane
+        let built_a = make_lane_snapshot(
+            "remote-a",
+            br#"{"blocks":[{"id":"a"}]}"#,
+            AssetKind::Instruction,
+            "asset-a",
+            0x41,
+        );
+        let built_b = make_lane_snapshot(
+            "remote-b",
+            br#"{"blocks":[{"id":"b"}]}"#,
+            AssetKind::Instruction,
+            "asset-b",
+            0x42,
+        );
+        let mut object_bytes = built_a.object_bytes.clone();
+        object_bytes.extend(built_b.object_bytes.clone());
+        let mut env = built_a.envelope.clone();
+        env.snapshot_id = "01900000-0000-7000-8000-0000000000ab".into();
+        env.assets.extend(built_b.envelope.assets.clone());
+        env.lineages.extend(built_b.envelope.lineages.clone());
+        env.revisions.extend(built_b.envelope.revisions.clone());
+        env.revisions.sort_by(|a, b| a.id.cmp(&b.id));
+        env.asset_heads.extend(built_b.envelope.asset_heads.clone());
+        env.objects.extend(built_b.envelope.objects.clone());
+        env.objects.sort_by(|a, b| a.hash.cmp(&b.hash));
+        env.objects.dedup_by(|a, b| a.hash == b.hash);
+        env.selection.asset_ids = env.assets.iter().map(|a| a.id.clone()).collect();
+        env.snapshot_hash = compute_snapshot_hash(&env).unwrap();
+        let combined = BuiltSnapshot {
+            envelope: env,
+            object_bytes,
+            selection_hash: "s".into(),
+            selection_state_hash: "t".into(),
+        };
+        let full_hash = combined.envelope.snapshot_hash.clone();
+
+        let workdir = dir.path().join("cloud-sync");
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let lane = workdir
+            .join("agent-hub")
+            .join("devices")
+            .join("device-subset");
+        expand_readable_archive(&combined, &lane).unwrap();
+
+        // Proper subset: only remote-a
+        let outcome = confirm_git_import_in_workdir(
+            &workdir,
+            &repo,
+            &data_dir,
+            ConfirmGitImportRequest {
+                lane_device_id: "device-subset".into(),
+                snapshot_hash: full_hash.clone(),
+                selected_asset_ids: vec!["remote-a".into()],
+                project_mappings: vec![],
+                import_unmapped_projects: true,
+            },
+        )
+        .await
+        .expect("subset confirm must succeed without HashMismatch");
+
+        assert_eq!(outcome.lane_device_id, "device-subset");
+        assert_eq!(
+            outcome.snapshot_hash, full_hash,
+            "response must echo lane-level confirmed hash"
+        );
+        assert!(
+            outcome
+                .import
+                .imported_asset_ids
+                .contains(&"remote-a".into()),
+            "selected asset must import: {:?}",
+            outcome.import.imported_asset_ids
+        );
+        assert!(
+            !outcome
+                .import
+                .imported_asset_ids
+                .contains(&"remote-b".into()),
+            "unselected asset must not import: {:?}",
+            outcome.import.imported_asset_ids
+        );
+        assert!(
+            outcome.import.inserted_revisions >= 1,
+            "subset import must insert revisions: {:?}",
+            outcome.import
+        );
+
+        let assets = repo.list_all_assets_including_deleted().await.unwrap();
+        let ids: BTreeSet<_> = assets.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains("remote-a"));
+        assert!(!ids.contains("remote-b"));
     }
 
     /// Business Logic: mapping 默认 not opted-in。
