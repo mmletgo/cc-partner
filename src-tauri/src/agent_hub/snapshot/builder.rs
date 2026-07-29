@@ -172,7 +172,8 @@ pub async fn build_snapshot(
     let conflicts = identity.conflicts;
     let alias_rows = identity.aliases;
 
-    // 8) collect object hashes from revisions + variants extension（CAS 可在 TX 外）
+    // 8) collect object hashes from revisions + variants extension + plugin residual trees
+    //    （CAS 可在 TX 外；Gate D residual 即使非 active head 也必须闭合）
     let mut object_hashes: BTreeSet<String> = BTreeSet::new();
     for rev in &revisions {
         if let Some(h) = &rev.payload_hash {
@@ -192,6 +193,18 @@ pub async fn build_snapshot(
     for v in &variant_rows {
         if let Some(h) = &v.extension_payload_hash {
             object_hashes.insert(h.clone());
+        }
+    }
+    for h in &identity.residual_tree_hashes {
+        object_hashes.insert(h.clone());
+        let tree = objects.get_tree(h).await.map_err(|e| {
+            AppError::validation(format!(
+                "agent_hub_snapshot_plugin_residual_tree_missing:{}",
+                short_err(&e)
+            ))
+        })?;
+        for entry in tree.entries {
+            object_hashes.insert(entry.blob_hash);
         }
     }
 
