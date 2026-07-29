@@ -151,6 +151,10 @@ describe('getAttentionActionI18nKey', () => {
       'attention:action.viewFailed',
     );
     expect(getAttentionActionI18nKey('workbenchDependency')).toBe('attention:action.openSettings');
+    expect(getAttentionActionI18nKey('agentHubConflict')).toBe('attention:action.openAgentHub');
+    expect(getAttentionActionI18nKey('agentHubProjectionBlocked')).toBe(
+      'attention:action.openAgentHub',
+    );
   });
 });
 
@@ -178,5 +182,13 @@ describe('buildDesktopAttentionTargetUrl', () => {
         tab: 'dependencies',
       }),
     ).toBe('/settings?tab=dependencies');
+
+    expect(
+      buildDesktopAttentionTargetUrl({
+        kind: 'agentHubAsset',
+        assetId: 'asset-1',
+        conflictId: 'c-9',
+      }),
+    ).toBe('/agent-hub?assetId=asset-1&conflictId=c-9');
   });
 });

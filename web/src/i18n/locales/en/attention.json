@@ -41,7 +41,8 @@
     "viewFailed": "View failed item",
     "openSettings": "Open settings",
     "openTerminal": "Open terminal",
-    "openExperiment": "Open experiment"
+    "openExperiment": "Open experiment",
+    "openAgentHub": "Open Agent Hub"
   },
   "nav": {
     "label": "Inbox"

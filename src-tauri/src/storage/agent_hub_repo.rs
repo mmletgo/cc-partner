@@ -11,11 +11,11 @@
 //!     revision 多行更新同事务。
 
 use crate::agent_hub::models::{
-    AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, Materialization,
-    MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob, NewRevision,
-    NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState, ProjectionPayloadKind,
-    Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode,
-    TargetBinding,
+    AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
+    Materialization, MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob,
+    NewRevision, NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState,
+    ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
+    ScopeNode, TargetBinding,
 };
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
@@ -1376,6 +1376,47 @@ impl AgentHubRepo {
         rows.iter().map(row_to_materialization).collect()
     }
 
+    /// 列出阻塞中的 materialization（Attention/status 投影用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Inbox 与 status 需要展示 blocked/drift/conflict 投影，让用户导航到受影响资产。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT WHERE status IN ('blocked','drift','conflict') ORDER BY updated_at DESC, id ASC。
+    pub async fn list_blocked_materializations(&self) -> Result<Vec<Materialization>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, target_binding_id, native_path,
+                    last_projected_revision_id, rendered_hash, observed_external_hash,
+                    status, last_error, created_at, updated_at
+             FROM agent_hub_materializations
+             WHERE status IN ('blocked', 'drift', 'conflict')
+             ORDER BY updated_at DESC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_materialization).collect()
+    }
+
+    /// 列出全部未解决 conflict（Attention 投影用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     未解决 conflict 必须进入 Inbox 决策列表，并冻结相关投影。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT WHERE resolved=0 ORDER BY created_at DESC, id ASC。
+    pub async fn list_unresolved_conflicts(&self) -> Result<Vec<AgentHubConflict>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, base_revision_id, hub_revision_id,
+                    external_revision_id, detail_json, resolved, created_at, resolved_at
+             FROM agent_hub_conflicts
+             WHERE resolved = 0
+             ORDER BY created_at DESC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_conflict).collect()
+    }
+
     /// 是否存在未解决的 asset 级（canonical）conflict。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -1450,6 +1491,113 @@ impl AgentHubRepo {
             .execute(&self.pool)
             .await?;
             Ok(id)
+        })
+        .await
+    }
+
+    /// 列出逻辑资产（默认排除软删除）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Agent Hub UI 与 service 层需要按 scope/kind 过滤当前可管理资产。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `deleted_at IS NULL`；可选 `scope_id` / `kind` 过滤；按 display_name/id 排序。
+    pub async fn list_assets(
+        &self,
+        scope_id: Option<&str>,
+        kind: Option<AssetKind>,
+    ) -> Result<Vec<LogicalAsset>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                    current_revision_id, deleted_at, created_at, updated_at
+             FROM agent_hub_assets
+             WHERE deleted_at IS NULL
+               AND (?1 IS NULL OR scope_id = ?1)
+               AND (?2 IS NULL OR kind = ?2)
+             ORDER BY display_name ASC, id ASC",
+        )
+        .bind(scope_id)
+        .bind(kind.map(|k| k.as_str().to_string()))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_asset).collect()
+    }
+
+    /// 列出全部 scope 节点。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     前端 scope 过滤器与服务层映射需要完整 scope 列表。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT scopes 按 kind/id 排序。
+    pub async fn list_scopes(&self) -> Result<Vec<ScopeNode>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, kind, hub_project_id, relative_path, created_at
+             FROM agent_hub_scopes
+             ORDER BY kind ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_scope).collect()
+    }
+
+    /// 按 id 读取 conflict。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     resolve 与详情页需要单条 conflict 完整字段。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT by id → row_to_conflict。
+    pub async fn get_conflict(&self, id: &str) -> Result<Option<AgentHubConflict>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, asset_id, target, base_revision_id, hub_revision_id,
+                    external_revision_id, detail_json, resolved, created_at, resolved_at
+             FROM agent_hub_conflicts WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_conflict(&r)).transpose()
+    }
+
+    /// 标记 conflict 已解决。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户选择 KeepHub/KeepExternal/Manual 后必须解冻投影。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     写 `resolved=1` + `resolved_at=now`；已解决幂等返回；缺失 → not_found。
+    pub async fn resolve_conflict(
+        &self,
+        id: &str,
+        now: &str,
+    ) -> Result<AgentHubConflict, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let updated = sqlx::query(
+                "UPDATE agent_hub_conflicts
+                 SET resolved = 1, resolved_at = ?
+                 WHERE id = ? AND resolved = 0",
+            )
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if updated == 0 {
+                let existing = self.get_conflict(id).await?;
+                return match existing {
+                    Some(c) if c.resolved => Ok(c),
+                    Some(_) => Err(AppError::conflict(
+                        "agent_hub_conflict_resolve_race".to_string(),
+                    )),
+                    None => Err(AppError::not_found(format!(
+                        "agent_hub_conflict_not_found:{id}"
+                    ))),
+                };
+            }
+            self.get_conflict(id)
+                .await?
+                .ok_or_else(|| AppError::not_found(format!("agent_hub_conflict_not_found:{id}")))
         })
         .await
     }
@@ -2101,6 +2249,40 @@ fn row_to_projection_job(row: &SqliteRow) -> Result<ProjectionJob, AppError> {
         base_hash: row.try_get("base_hash")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// 解析 conflict 行。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Attention 与调度冻结需要完整 AgentHubConflict。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 target/revision 可选字段与 resolved 标志。
+fn row_to_conflict(row: &SqliteRow) -> Result<AgentHubConflict, AppError> {
+    let target_raw: Option<String> = row.try_get("target")?;
+    let target =
+        match target_raw.as_deref() {
+            None => None,
+            Some(raw) => Some(AgentTarget::parse(raw).ok_or_else(|| {
+                AppError::generic(format!("agent_hub_unknown_agent_target:{raw}"))
+            })?),
+        };
+    let base: Option<String> = row.try_get("base_revision_id")?;
+    let hub: Option<String> = row.try_get("hub_revision_id")?;
+    let external: Option<String> = row.try_get("external_revision_id")?;
+    let resolved_i: i64 = row.try_get("resolved")?;
+    Ok(AgentHubConflict {
+        id: row.try_get("id")?,
+        asset_id: row.try_get("asset_id")?,
+        target,
+        base_revision_id: base.map(RevisionId),
+        hub_revision_id: hub.map(RevisionId),
+        external_revision_id: external.map(RevisionId),
+        detail_json: row.try_get("detail_json")?,
+        resolved: resolved_i != 0,
+        created_at: row.try_get("created_at")?,
+        resolved_at: row.try_get("resolved_at")?,
     })
 }
 

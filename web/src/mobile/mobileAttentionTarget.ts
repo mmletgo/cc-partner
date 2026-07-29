@@ -52,6 +52,13 @@ export type MobileAttentionNavigation =
       projectId: string;
       experimentId: string;
       panel: 'automation';
+    }
+  | {
+      /** Desktop Agent Hub 资产冲突；mobile 无独立 AgentHub 面板，回退到 Attention 并保留 asset 身份供文案/后续扩展 */
+      kind: 'agentHubAsset';
+      assetId: string;
+      conflictId: string | null;
+      panel: 'attention';
     };
 
 /**
@@ -98,6 +105,14 @@ export function mapMobileAttentionTarget(target: AttentionTarget): MobileAttenti
         projectId: target.projectId,
         experimentId: target.experimentId,
         panel: 'automation',
+      };
+    case 'agentHubAsset':
+      // Gate A：Agent Hub 以桌面权威界面为准；mobile 只导航回 Attention 列表（导航-only，无动作）。
+      return {
+        kind: 'agentHubAsset',
+        assetId: target.assetId,
+        conflictId: target.conflictId ?? null,
+        panel: 'attention',
       };
     default: {
       const _exhaustive: never = target;

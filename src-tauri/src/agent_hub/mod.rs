@@ -13,7 +13,7 @@
 //!     Gate A Task 6：projection（durable jobs + atomic writer + scheduler recovery）；
 //!     Gate A Task 7：runtime（sidecar owner watch/debounce/ticker/de-loop scan）；
 //!     Gate A Task 8：用户级登录自启动（autostart）。
-//!     后续任务再组装 service 层完整三方 reconcile→revision→多目标 projection 编排。
+//!     Gate A Task 9：service 门面 + Attention conflict/blocked 投影 + control/commands。
 
 pub mod autostart;
 pub mod instructions;
@@ -23,6 +23,7 @@ pub mod project_scope;
 pub mod projection;
 pub mod revision_graph;
 pub mod runtime;
+pub mod service;
 pub mod targets;
 
 pub use instructions::{
@@ -58,6 +59,16 @@ pub use revision_graph::{
 pub use runtime::{
     AgentHubRuntime, ChangedDirLedger, DeLoopScanner, DirtyDebouncer, FakeClock, ScanScope,
     ScanStats, CHANGED_DIR_TICK, FULL_SCOPE_TICK, WATCH_DEBOUNCE,
+};
+pub use service::{
+    enable_project_for_state, get_asset_for_state, get_status_for_state, list_assets_for_state,
+    pair_instruction_variants_for_state, preview_project_for_state, resolve_conflict_for_state,
+    set_target_binding_for_state, update_instruction_block_for_state, update_instruction_for_state,
+    AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubConflictDto,
+    AgentHubConflictResolution, AgentHubInstructionBlockDto, AgentHubProbeDto, AgentHubService,
+    AgentHubStatusDto, AgentHubTargetBindingDto, AgentHubTargetCellDto, InstructionBlockDto,
+    ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
+    SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
 pub use targets::{
     AdapterSupportLevel, AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,

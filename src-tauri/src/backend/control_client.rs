@@ -13,6 +13,12 @@
 //!     mutation 含 deliver-reviewed / workflow-document validate|save；
 //!     截图快捷键走两阶段补偿（CAS 预检 → OS replace → owner durable commit → 响应丢失对账）。
 
+use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
+use crate::agent_hub::service::{
+    AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubStatusDto, InstructionBlockDto,
+    ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
+    SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
+};
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
 use crate::backend::control_api::WorkbenchLaunchSummaryDto;
@@ -998,6 +1004,171 @@ impl BackendControlClient {
             )));
         }
         Ok((resp.owner_instance_id, resp.result))
+    }
+
+    /// 经 control API 代理 Agent Hub 操作并反序列化 result。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得自建 Agent Hub 写路径；全部 op 代理到 sidecar owner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/backend/control/agent-hub`；body={controlToken,op,payload}；
+    ///     send_once MUTATE_TIMEOUT；解包 result 为 T。
+    pub async fn agent_hub_op<T: DeserializeOwned>(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<T, AppError> {
+        let value = self.agent_hub_op_value(op, payload).await?;
+        serde_json::from_value(value).map_err(|e| {
+            AppError::generic(format!("agent hub control result 解析失败 ({op}): {e}"))
+        })
+    }
+
+    /// 经 control API 代理 Agent Hub 操作，返回原始 JSON result。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     与 workbench_op_value 对齐，供不强制 DTO 的调用方使用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST agent-hub；send_once；校验 ownerInstanceId 非空后返回 result。
+    pub async fn agent_hub_op_value(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<serde_json::Value, AppError> {
+        // 与 workbench 共用 {controlToken,op,payload}/{ownerInstanceId,result} 信封。
+        let body = ControlWorkbenchRequestBody {
+            control_token: self.control_token.clone(),
+            op: op.to_string(),
+            payload: serde_json::to_value(payload)
+                .map_err(|e| AppError::generic(format!("序列化 agent hub payload 失败: {e}")))?,
+        };
+        let resp: ControlWorkbenchResponseBody =
+            match self.send_once("agent-hub", &body, MUTATE_TIMEOUT).await {
+                ControlCallOutcome::Ok(v) => v,
+                ControlCallOutcome::Failed(e) => return Err(e),
+                ControlCallOutcome::Uncertain(e) => {
+                    return Err(AppError::unavailable(format!(
+                        "control_response_uncertain: {e}"
+                    )));
+                }
+            };
+        if resp.owner_instance_id.trim().is_empty() {
+            return Err(AppError::generic(
+                "agent hub control 响应缺少 ownerInstanceId",
+            ));
+        }
+        Ok(resp.result)
+    }
+
+    /// Business Logic: 首屏 status。
+    /// Code Logic: agent_hub.get_status 查询（非 mutation）。
+    pub async fn agent_hub_get_status(&self) -> Result<AgentHubStatusDto, AppError> {
+        self.agent_hub_op("agent_hub.get_status", serde_json::json!({}))
+            .await
+    }
+
+    /// Business Logic: 资产列表。
+    /// Code Logic: agent_hub.list_assets。
+    pub async fn agent_hub_list_assets(
+        &self,
+        req: ListAssetsRequest,
+    ) -> Result<Vec<AgentHubAssetSummaryDto>, AppError> {
+        self.agent_hub_op("agent_hub.list_assets", req).await
+    }
+
+    /// Business Logic: 资产详情。
+    /// Code Logic: agent_hub.get_asset。
+    pub async fn agent_hub_get_asset(
+        &self,
+        asset_id: &str,
+    ) -> Result<AgentHubAssetDetailDto, AppError> {
+        self.agent_hub_op(
+            "agent_hub.get_asset",
+            serde_json::json!({ "assetId": asset_id }),
+        )
+        .await
+    }
+
+    /// Business Logic: 保存整份指令（mutation）。
+    /// Code Logic: 调用方须先 require_agent_hub_write_compatibility；再 agent_hub.update_instruction。
+    pub async fn agent_hub_update_instruction(
+        &self,
+        req: UpdateInstructionRequest,
+    ) -> Result<AgentHubAssetDetailDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.update_instruction", req).await
+    }
+
+    /// Business Logic: 更新指令块（mutation）。
+    /// Code Logic: agent_hub.update_instruction_block。
+    pub async fn agent_hub_update_instruction_block(
+        &self,
+        req: UpdateInstructionBlockRequest,
+    ) -> Result<InstructionBlockDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.update_instruction_block", req)
+            .await
+    }
+
+    /// Business Logic: 配对变体（mutation）。
+    /// Code Logic: agent_hub.pair_instruction_variants。
+    pub async fn agent_hub_pair_instruction_variants(
+        &self,
+        req: PairInstructionVariantsRequest,
+    ) -> Result<AgentHubAssetDetailDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.pair_instruction_variants", req)
+            .await
+    }
+
+    /// Business Logic: 项目启用预览（只读）。
+    /// Code Logic: agent_hub.preview_project。
+    pub async fn agent_hub_preview_project(
+        &self,
+        project_id: &str,
+    ) -> Result<AgentHubProjectPreview, AppError> {
+        self.agent_hub_op(
+            "agent_hub.preview_project",
+            serde_json::json!({ "projectId": project_id }),
+        )
+        .await
+    }
+
+    /// Business Logic: 启用项目（mutation）。
+    /// Code Logic: agent_hub.enable_project + confirm。
+    pub async fn agent_hub_enable_project(
+        &self,
+        project_id: &str,
+        confirm: bool,
+    ) -> Result<AgentHubProjectStatus, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op(
+            "agent_hub.enable_project",
+            serde_json::json!({ "projectId": project_id, "confirm": confirm }),
+        )
+        .await
+    }
+
+    /// Business Logic: 解决冲突（mutation）。
+    /// Code Logic: agent_hub.resolve_conflict。
+    pub async fn agent_hub_resolve_conflict(
+        &self,
+        req: ResolveConflictRequest,
+    ) -> Result<AgentHubAssetDetailDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.resolve_conflict", req).await
+    }
+
+    /// Business Logic: 设置 target binding（mutation）。
+    /// Code Logic: agent_hub.set_target_binding。
+    pub async fn agent_hub_set_target_binding(
+        &self,
+        req: SetTargetBindingRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.set_target_binding", req).await
     }
 
     /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。
