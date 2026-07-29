@@ -8,6 +8,7 @@
 //!     导出领域模型、OSC 解码与 mutation ingress；reducer/snapshot 由后续任务叠加。
 
 pub mod models;
+pub mod opencode_bridge;
 pub mod osc;
 pub mod reducer;
 pub mod snapshot;
@@ -15,9 +16,14 @@ pub mod snapshot;
 pub use models::{
     AgentRuntimeMutation, AgentSessionPhase, AgentSessionRuntime, CreateActiveAgentSession,
 };
+pub use opencode_bridge::{
+    OpenCodeBridgeOutcome, OpenCodeEventMapper, OpenCodeOfficialEvent, OpenCodeRuntimeBridge,
+    OPENCODE_RUNTIME_BRIDGE_REL_PATH, OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH,
+};
 #[cfg(test)]
 pub use osc::encode_agent_osc_frame;
 pub use osc::AgentOscDecoder;
+// encode_agent_osc_frame_full is used by opencode_bridge within the crate; keep module public API narrow.
 pub use reducer::{collect_alive_terminal_ids, AgentReduceOutcome, AgentRuntimeReducer};
 pub use snapshot::{
     emit_agent_runtime_changed, get_agent_runtime_snapshot_for_state, AgentRuntimeSnapshot,
