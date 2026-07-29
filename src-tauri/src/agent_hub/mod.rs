@@ -77,12 +77,13 @@ pub use object_store::{
     TreeEntryType, TreeManifest,
 };
 pub use packages::{
-    build_package_id, count_opencode_compat_skills, mark_pending_legacy_sources,
-    materialize_package, package_materialized_root, ActivationInspection, ActivationPlan,
-    ActivationResult, AdoptionEngine, AdoptionFault, AdoptionOutcome, AdoptionPreview,
-    AdoptionRequest, ClaudePackageActivator, CodexPackageActivator, GeneratedTargetPackage,
-    ManagedPackageActivator, OpenCodePackageActivator, PackageBuildInput,
-    PackageMaterializationMeta, PackageSkillInput, PLUGIN_SELECTOR,
+    build_package_id, count_opencode_compat_skills, generation_blocked_for_asset,
+    mark_pending_legacy_sources, materialize_package, package_materialized_root,
+    ActivationInspection, ActivationPlan, ActivationResult, AdoptionEngine, AdoptionFault,
+    AdoptionOutcome, AdoptionPreview, AdoptionRequest, ClaudePackageActivator,
+    CodexPackageActivator, GeneratedTargetPackage, ManagedPackageActivator,
+    OpenCodePackageActivator, PackageBuildInput, PackageMaterializationMeta, PackageSkillInput,
+    PLUGIN_SELECTOR,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,

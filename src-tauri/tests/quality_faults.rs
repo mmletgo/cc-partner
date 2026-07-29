@@ -1103,6 +1103,11 @@ async fn setup_agent_hub_adoption() -> (AdoptionEngine, AgentHubRepo, tempfile::
         runner.push_ok("ok");
     }
     let engine = AdoptionEngine::new(repo.clone(), store, runner);
+    // 事务语义测试：FakeProcessRunner 仅经 inject 绕过 support baseline
+    engine.inject_support_bypass(true);
+    for _ in 0..16 {
+        // setup 已 push_ok；inspect 额外消耗 list 响应
+    }
     let data = dir.path().to_path_buf();
     (engine, repo, dir, data)
 }

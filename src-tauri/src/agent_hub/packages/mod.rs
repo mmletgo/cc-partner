@@ -23,8 +23,8 @@ pub use activator::{
     OpenCodePackageActivator, ProcessOutcome, ProcessRunner, ProcessSpec,
 };
 pub use adoption::{
-    count_opencode_compat_skills, mark_pending_legacy_sources, AdoptionEngine, AdoptionFault,
-    AdoptionOutcome, AdoptionPreview, AdoptionRequest,
+    count_opencode_compat_skills, generation_blocked_for_asset, mark_pending_legacy_sources,
+    AdoptionEngine, AdoptionFault, AdoptionOutcome, AdoptionPreview, AdoptionRequest,
 };
 // AdoptionRecord/State 定义在 models，经 packages 再导出供调用方统一入口。
 pub use crate::agent_hub::models::{AdoptionRecord, AdoptionState};
