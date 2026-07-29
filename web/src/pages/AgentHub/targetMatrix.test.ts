@@ -98,69 +98,121 @@ describe('targetMatrix status table', () => {
   });
 
   test('sourceOnly -> source target shown, no install action elsewhere', () => {
-    const asset = makeAsset(
-      'sourceOnly',
-      [
-        makeCell({ target: 'claude', sourceOnly: true, verified: false }),
-        makeCell({
-          target: 'codex',
-          desiredPresence: 'absent',
-          desiredEnabled: false,
-          sourceOnly: false,
-          verified: false,
-        }),
-        makeCell({
-          target: 'opencode',
-          desiredPresence: 'absent',
-          desiredEnabled: false,
-          sourceOnly: false,
-          verified: false,
-        }),
-      ],
-      { originNamespace: 'claude' },
-    );
+    const claude = makeCell({ target: 'claude', sourceOnly: true, verified: false });
+    const codex = makeCell({
+      target: 'codex',
+      desiredPresence: 'absent',
+      desiredEnabled: false,
+      sourceOnly: false,
+      verified: false,
+    });
+    const opencode = makeCell({
+      target: 'opencode',
+      desiredPresence: 'absent',
+      desiredEnabled: false,
+      sourceOnly: false,
+      verified: false,
+    });
+    const asset = makeAsset('sourceOnly', [claude, codex, opencode], {
+      originNamespace: 'claude',
+    });
     expect(isSourceTarget(asset, 'claude')).toBe(true);
     expect(isSourceTarget(asset, 'codex')).toBe(false);
-    // sourceOnly cell 不允许 toggle install
-    expect(canToggleEnabled(makeCell({ sourceOnly: true }))).toBe(false);
-    expect(canToggleEnabled(makeCell({ target: 'codex', supported: true, sourceOnly: false }))).toBe(
-      true,
-    );
+    // sourceOnly cell 不允许 toggle；非源 target 在 sourceOnly 聚合下也不允许
+    expect(canToggleEnabled(asset, 'claude', claude)).toBe(false);
+    expect(canToggleEnabled(asset, 'codex', codex)).toBe(false);
+    // full 聚合下 supported 非 sourceOnly cell 仍可 toggle
+    const fullAsset = makeAsset('full', [
+      makeCell({ target: 'claude' }),
+      makeCell({ target: 'codex', supported: true, sourceOnly: false }),
+    ]);
+    expect(
+      canToggleEnabled(
+        fullAsset,
+        'codex',
+        makeCell({ target: 'codex', supported: true, sourceOnly: false }),
+      ),
+    ).toBe(true);
   });
 
-  test('activationRequired -> manual activation instructions', () => {
-    const cell = makeCell({
+  test('activationRequired -> only affected cell needs activation', () => {
+    const activated = makeCell({
       target: 'codex',
       materializationStatus: 'activationRequired',
       verified: false,
     });
-    const asset = makeAsset('activationRequired', [cell]);
-    expect(needsActivation(asset, cell)).toBe(true);
+    const absent = makeCell({
+      target: 'opencode',
+      desiredPresence: 'absent',
+      desiredEnabled: false,
+      verified: false,
+      materializationStatus: null,
+    });
+    const asset = makeAsset('activationRequired', [activated, absent]);
+    expect(needsActivation(asset, activated)).toBe(true);
+    expect(needsActivation(asset, absent)).toBe(false);
   });
 
-  test('externalCollision -> adoption/collision preview', () => {
-    const cell = makeCell({
+  test('externalCollision -> only affected cell opens collision', () => {
+    const collided = makeCell({
+      target: 'claude',
       materializationStatus: 'externalCollision',
       verified: false,
     });
-    const asset = makeAsset('externalCollision', [cell]);
-    expect(hasExternalCollision(asset, cell)).toBe(true);
+    const absent = makeCell({
+      target: 'codex',
+      desiredPresence: 'absent',
+      desiredEnabled: false,
+      verified: false,
+      materializationStatus: null,
+    });
+    const asset = makeAsset('externalCollision', [collided, absent]);
+    expect(hasExternalCollision(asset, collided)).toBe(true);
+    expect(hasExternalCollision(asset, absent)).toBe(false);
   });
 
-  test('detached -> restore/remove/everywhere choices', () => {
-    const cell = makeCell({ materializationStatus: 'detached', verified: false });
-    const asset = makeAsset('detached', [cell]);
-    expect(isDetachedCell(asset, cell)).toBe(true);
+  test('detached -> only detached cell exposes restore/remove', () => {
+    const detached = makeCell({
+      target: 'claude',
+      materializationStatus: 'detached',
+      verified: false,
+    });
+    const absent = makeCell({
+      target: 'codex',
+      desiredPresence: 'absent',
+      desiredEnabled: false,
+      verified: false,
+      materializationStatus: null,
+    });
+    const synced = makeCell({
+      target: 'opencode',
+      materializationStatus: 'synced',
+      verified: true,
+    });
+    const asset = makeAsset('detached', [detached, absent, synced]);
+    expect(isDetachedCell(asset, detached)).toBe(true);
+    expect(isDetachedCell(asset, absent)).toBe(false);
+    expect(isDetachedCell(asset, synced)).toBe(false);
   });
 
-  test('blocked -> support/evidence reason', () => {
-    const cell = makeCell({
+  test('blocked -> only affected cell shows reason', () => {
+    const blocked = makeCell({
+      target: 'claude',
       materializationStatus: 'blocked',
       lastError: 'support_blocked:scanOnly',
       verified: false,
     });
-    const asset = makeAsset('blocked', [cell]);
-    expect(blockedReason(asset, cell)).toBe('support_blocked:scanOnly');
+    const absent = makeCell({
+      target: 'codex',
+      desiredPresence: 'absent',
+      desiredEnabled: false,
+      verified: false,
+      materializationStatus: null,
+      lastError: null,
+    });
+    const asset = makeAsset('blocked', [blocked, absent]);
+    expect(blockedReason(asset, blocked)).toBe('support_blocked:scanOnly');
+    expect(blockedReason(asset, absent)).toBeNull();
   });
 
   test('canonical name is separate from invocation alias label', () => {

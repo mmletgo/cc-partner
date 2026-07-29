@@ -164,21 +164,33 @@ describe('AgentAssetRow matrix', () => {
     expect(screen.queryByTestId('agent-target-toggle-row-1-codex')).toBeNull();
   });
 
-  test('activationRequired -> manual activation instructions', () => {
+  test('activationRequired -> only affected cell shows instructions', () => {
     renderRow(
       asset('activationRequired', [
         cell('claude', {
           materializationStatus: 'activationRequired',
           verified: false,
         }),
-        cell('codex', { desiredPresence: 'absent', desiredEnabled: false, verified: false }),
-        cell('opencode', { desiredPresence: 'absent', desiredEnabled: false, verified: false }),
+        cell('codex', {
+          desiredPresence: 'absent',
+          desiredEnabled: false,
+          verified: false,
+          materializationStatus: null,
+        }),
+        cell('opencode', {
+          desiredPresence: 'absent',
+          desiredEnabled: false,
+          verified: false,
+          materializationStatus: null,
+        }),
       ]),
     );
     expect(screen.getByTestId('agent-target-activation-claude')).toBeTruthy();
+    expect(screen.queryByTestId('agent-target-activation-codex')).toBeNull();
+    expect(screen.queryByTestId('agent-target-activation-opencode')).toBeNull();
   });
 
-  test('externalCollision -> adoption/collision preview action', () => {
+  test('externalCollision -> only affected cell opens collision', () => {
     const { onOpenCollision } = renderRow(
       asset('externalCollision', [
         cell('claude', {
@@ -186,20 +198,42 @@ describe('AgentAssetRow matrix', () => {
           verified: false,
           lastError: 'collision',
         }),
-        cell('codex', { desiredPresence: 'absent', desiredEnabled: false, verified: false }),
-        cell('opencode', { desiredPresence: 'absent', desiredEnabled: false, verified: false }),
+        cell('codex', {
+          desiredPresence: 'absent',
+          desiredEnabled: false,
+          verified: false,
+          materializationStatus: null,
+        }),
+        cell('opencode', {
+          desiredPresence: 'absent',
+          desiredEnabled: false,
+          verified: false,
+          materializationStatus: null,
+        }),
       ]),
     );
     fireEvent.click(screen.getByTestId('agent-target-collision-row-1-claude'));
     expect(onOpenCollision).toHaveBeenCalled();
+    expect(screen.queryByTestId('agent-target-collision-row-1-codex')).toBeNull();
+    expect(screen.queryByTestId('agent-target-collision-row-1-opencode')).toBeNull();
   });
 
-  test('detached -> restore/remove/everywhere choices', () => {
+  test('detached -> restore/remove only on detached cell; everywhere once at row', () => {
     const { onRestoreTarget, onRemoveTarget, onDeleteEverywhere } = renderRow(
       asset('detached', [
         cell('claude', { materializationStatus: 'detached', verified: false }),
-        cell('codex', { desiredPresence: 'absent', desiredEnabled: false, verified: false }),
-        cell('opencode', { desiredPresence: 'absent', desiredEnabled: false, verified: false }),
+        cell('codex', {
+          desiredPresence: 'absent',
+          desiredEnabled: false,
+          verified: false,
+          materializationStatus: null,
+        }),
+        cell('opencode', {
+          desiredPresence: 'absent',
+          desiredEnabled: false,
+          verified: false,
+          materializationStatus: null,
+        }),
       ]),
     );
     fireEvent.click(screen.getByTestId('agent-target-restore-row-1-claude'));
@@ -208,9 +242,14 @@ describe('AgentAssetRow matrix', () => {
     expect(onRestoreTarget).toHaveBeenCalled();
     expect(onRemoveTarget).toHaveBeenCalled();
     expect(onDeleteEverywhere).toHaveBeenCalled();
+    // 无关 target 不得出现 restore/remove（aggregate detached 不再波及）
+    expect(screen.queryByTestId('agent-target-restore-row-1-codex')).toBeNull();
+    expect(screen.queryByTestId('agent-target-remove-row-1-codex')).toBeNull();
+    expect(screen.queryByTestId('agent-target-restore-row-1-opencode')).toBeNull();
+    expect(screen.queryByTestId('agent-target-remove-row-1-opencode')).toBeNull();
   });
 
-  test('blocked -> support/evidence reason', () => {
+  test('blocked -> only affected cell shows support/evidence reason', () => {
     renderRow(
       asset('blocked', [
         cell('claude', {
@@ -218,13 +257,27 @@ describe('AgentAssetRow matrix', () => {
           verified: false,
           lastError: 'support_blocked:scanOnly',
         }),
-        cell('codex', { desiredPresence: 'absent', desiredEnabled: false, verified: false }),
-        cell('opencode', { desiredPresence: 'absent', desiredEnabled: false, verified: false }),
+        cell('codex', {
+          desiredPresence: 'absent',
+          desiredEnabled: false,
+          verified: false,
+          materializationStatus: null,
+          lastError: null,
+        }),
+        cell('opencode', {
+          desiredPresence: 'absent',
+          desiredEnabled: false,
+          verified: false,
+          materializationStatus: null,
+          lastError: null,
+        }),
       ]),
     );
     expect(screen.getByTestId('agent-target-blocked-claude').textContent).toContain(
       'support_blocked:scanOnly',
     );
+    expect(screen.queryByTestId('agent-target-blocked-codex')).toBeNull();
+    expect(screen.queryByTestId('agent-target-blocked-opencode')).toBeNull();
   });
 
   test('enable/disable one target callback', () => {

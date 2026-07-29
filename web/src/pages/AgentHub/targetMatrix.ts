@@ -82,63 +82,67 @@ export function isSourceTarget(asset: AgentHubAssetSummary, target: AgentTarget)
 
 /**
  * Business Logic: 是否允许 enable/disable 该 target。
- * Code Logic: 有 cell、supported、非 writeBlocked 语义由调用方叠加。
+ * Code Logic: 有 cell、supported、非 sourceOnly；sourceOnly 聚合仅源 target 可 toggle。
+ *   writeBlocked 由调用方叠加。
  */
-export function canToggleEnabled(cell: AgentHubTargetCell | null): boolean {
+export function canToggleEnabled(
+  asset: AgentHubAssetSummary,
+  target: AgentTarget,
+  cell: AgentHubTargetCell | null,
+): boolean {
   if (!cell) return false;
   if (!cell.supported) return false;
   if (cell.sourceOnly) return false;
+  // aggregate sourceOnly 时其它 CLI 不提供 install/toggle
+  if (asset.aggregateStatus === 'sourceOnly' && !isSourceTarget(asset, target)) {
+    return false;
+  }
   return true;
 }
 
 /**
  * Business Logic: detached 提供 restore/remove 选择。
- * Code Logic: mat detached 或 aggregate detached。
+ * Code Logic: 仅该 cell 的 mat 为 detached（不因 row aggregate 波及其它 target）。
  */
 export function isDetachedCell(
-  asset: AgentHubAssetSummary,
+  _asset: AgentHubAssetSummary,
   cell: AgentHubTargetCell | null,
 ): boolean {
-  if (asset.aggregateStatus === 'detached') return true;
-  const mat = cell?.materializationStatus;
-  return mat === 'detached';
+  return cell?.materializationStatus === 'detached';
 }
 
 /**
  * Business Logic: activationRequired 展示手动激活说明。
- * Code Logic: aggregate 或 mat 命中。
+ * Code Logic: 仅该 cell mat 命中（不因 row aggregate 波及其它 target）。
  */
 export function needsActivation(
-  asset: AgentHubAssetSummary,
+  _asset: AgentHubAssetSummary,
   cell: AgentHubTargetCell | null,
 ): boolean {
-  if (asset.aggregateStatus === 'activationRequired') return true;
   return cell?.materializationStatus === 'activationRequired';
 }
 
 /**
  * Business Logic: externalCollision 打开 adoption/collision 预览。
- * Code Logic: aggregate 或 mat 命中。
+ * Code Logic: 仅该 cell mat 命中（不因 row aggregate 波及其它 target）。
  */
 export function hasExternalCollision(
-  asset: AgentHubAssetSummary,
+  _asset: AgentHubAssetSummary,
   cell: AgentHubTargetCell | null,
 ): boolean {
-  if (asset.aggregateStatus === 'externalCollision') return true;
   return cell?.materializationStatus === 'externalCollision';
 }
 
 /**
  * Business Logic: blocked 展示 support/evidence reason。
- * Code Logic: lastError 优先，否则 mat/aggregate。
+ * Code Logic: lastError 优先，否则 cell mat blocked（不因 row aggregate 波及其它 target）。
  */
 export function blockedReason(
-  asset: AgentHubAssetSummary,
+  _asset: AgentHubAssetSummary,
   cell: AgentHubTargetCell | null,
 ): string | null {
   if (cell?.lastError) return cell.lastError;
   if (cell?.materializationStatus === 'blocked') return 'blocked';
-  if (asset.aggregateStatus === 'blocked') return 'blocked';
   return null;
 }
 

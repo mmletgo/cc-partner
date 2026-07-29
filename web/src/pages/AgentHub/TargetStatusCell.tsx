@@ -59,13 +59,14 @@ export function TargetStatusCell({
   const enabled = cell?.desiredEnabled ?? false;
   const presence = cell?.desiredPresence ?? 'absent';
   const mat = cell?.materializationStatus ?? null;
+  // 动作/提示按 cell mat 本地判定，禁止 row aggregate 波及无关 target
   const detached = isDetachedCell(asset, cell);
   const activation = needsActivation(asset, cell);
   const collision = hasExternalCollision(asset, cell);
   const blocked = blockedReason(asset, cell);
   const sourceOnly = Boolean(cell?.sourceOnly) || asset.aggregateStatus === 'sourceOnly';
   const showInstall = !sourceOnly || isSourceTarget(asset, target);
-  const toggleOk = canToggleEnabled(cell) && showInstall && !writeBlocked;
+  const toggleOk = canToggleEnabled(asset, target, cell) && showInstall && !writeBlocked;
   const invocation = resolveInvocationLabel(asset, target);
 
   return (
