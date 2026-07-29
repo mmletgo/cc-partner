@@ -29,6 +29,7 @@
 //!     Gate C Task 4：`replication` LAN push 接收端 + 幂等 ledger（prepare/objects/commit）。
 //!     Gate C Task 5：`replication/sender` 源侧 multi-target LAN push + source ledger + Attention。
 //!     Gate C Task 6：`git` 本机 device-lane 自动备份导出（CloudSyncRuntime 单飞，不自动 import 远端 lane）。
+//!     Gate D Task 1：`plugins` 不可变 PluginPackage/Hook/residual schema 与边表引用。
 
 pub mod assets;
 pub mod autostart;
@@ -39,6 +40,7 @@ pub mod migration;
 pub mod models;
 pub mod object_store;
 pub mod packages;
+pub mod plugins;
 pub mod project_scope;
 pub mod projection;
 pub mod projection_ops;
@@ -96,6 +98,12 @@ pub use packages::{
     CodexPackageActivator, GeneratedTargetPackage, ManagedPackageActivator,
     OpenCodePackageActivator, PackageBuildInput, PackageMaterializationMeta, PackageSkillInput,
     PLUGIN_SELECTOR,
+};
+pub use plugins::{
+    canonical_plugin_package_bytes, canonical_portable_hook_bytes, ensure_component_kind_allowed,
+    from_plugin_package_bytes, from_portable_hook_bytes, sort_plugin_package_payload,
+    validate_plugin_package_payload, validate_portable_hook, ComponentOwnership, HookEventIntent,
+    PluginComponentRef, PluginPackagePayload, PluginResidualRef, PortableHook, ResidualKind,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,

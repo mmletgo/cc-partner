@@ -5,10 +5,11 @@
 //!     target binding、materialization 与 conflict。写入必须经 maintenance gate，旧库升级幂等。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `ensure_schema` 建 13 张表与索引，并对 project_mappings/checkout_bindings/projection_jobs
-//!     做 PRAGMA 列升级；`insert_scope/insert_asset/append_revision/upsert_target_binding`、
+//!     `ensure_schema` 建 Agent Hub 表与索引（含 Gate D plugin 边表），并对
+//!     project_mappings/checkout_bindings/projection_jobs 做 PRAGMA 列升级；
+//!     `insert_scope/insert_asset/append_revision/upsert_target_binding`、
 //!     mapping/binding/materialization/projection_job 写路径走 `with_shared_write_lease`；
-//!     revision 多行更新同事务。
+//!     revision 多行更新同事务；package revision 与 component/residual refs 同事务。
 
 use crate::agent_hub::assets::{
     canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, PortableAssetPayload,
@@ -21,6 +22,13 @@ use crate::agent_hub::models::{
     RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
 };
 use crate::agent_hub::object_store::ObjectStore;
+use crate::agent_hub::plugins::{
+    canonical_plugin_package_bytes, canonical_portable_hook_bytes, from_plugin_package_bytes,
+    from_portable_hook_bytes, sort_plugin_package_payload, validate_plugin_package_payload,
+    validate_portable_hook, ComponentOwnership, PluginComponentRef, PluginPackagePayload,
+    PluginResidualRef, PortableHook, ResidualKind,
+};
+use crate::agent_hub::snapshot::envelope::default_snapshot_limits;
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
@@ -556,6 +564,507 @@ impl AgentHubRepo {
         let payload = from_canonical_bytes(&bytes)?;
         ensure_kind_matches_payload(asset.kind, &payload)?;
         Ok(Some(payload))
+    }
+
+    /// 追加 PluginPackage revision，并同事务写入 component/residual 边表。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     package 固定引用 component revision；后续 component 更新不得改写旧 package 行；
+    ///     边表支撑 Snapshot 闭包与删除时引用计数（不维护易漂移计数器）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     事务前：排序/校验 payload、显式校验 component asset/revision kind 与 residual tree 存在；
+    ///     CAS put_blob package JSON；同事务 append revision + 边表 INSERT。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_plugin_package_revision(
+        &self,
+        asset_id: &str,
+        payload: &PluginPackagePayload,
+        store: &ObjectStore,
+        origin_kind: RevisionOriginKind,
+        origin_target: Option<AgentTarget>,
+        origin_replica_id: impl Into<String>,
+        expected_parent_id: Option<RevisionId>,
+    ) -> Result<Revision, AppError> {
+        let asset = self
+            .get_asset(asset_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent_hub_asset_not_found".to_string()))?;
+        if asset.kind != AssetKind::Plugin {
+            return Err(AppError::validation(format!(
+                "agent_hub_plugin_asset_kind_mismatch:{}",
+                asset.kind.as_str()
+            )));
+        }
+        let mut payload = payload.clone();
+        sort_plugin_package_payload(&mut payload);
+        validate_plugin_package_payload(&payload)?;
+
+        // 显式 FK 校验（不依赖 SQLite foreign_keys pragma）
+        for cref in &payload.component_refs {
+            let Some(comp_asset) = self.get_asset(&cref.asset_id).await? else {
+                return Err(AppError::validation(format!(
+                    "agent_hub_plugin_component_asset_missing:{}",
+                    cref.asset_id
+                )));
+            };
+            if comp_asset.kind != cref.kind {
+                return Err(AppError::validation(format!(
+                    "agent_hub_plugin_component_kind_mismatch:asset={},expected={},actual={}",
+                    cref.asset_id,
+                    cref.kind.as_str(),
+                    comp_asset.kind.as_str()
+                )));
+            }
+            let Some(comp_rev) = self.get_revision(&cref.revision_id).await? else {
+                return Err(AppError::validation(format!(
+                    "agent_hub_plugin_component_revision_missing:{}",
+                    cref.revision_id.as_str()
+                )));
+            };
+            if comp_rev.asset_lineage_id != cref.asset_id
+                && comp_rev.asset_lineage_id != comp_asset.id
+            {
+                // lineage_id 通常等于 asset.id；否则必须可映射到该 component
+                let lineages = self
+                    .list_lineages_for_assets(std::slice::from_ref(&cref.asset_id))
+                    .await?;
+                let ok = lineages
+                    .iter()
+                    .any(|(_, lid)| lid == &comp_rev.asset_lineage_id);
+                if !ok {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_plugin_component_revision_asset_mismatch:{}:{}",
+                        cref.asset_id,
+                        cref.revision_id.as_str()
+                    )));
+                }
+            }
+        }
+        for rref in &payload.residual_refs {
+            store
+                .get_tree(&rref.tree_manifest_hash)
+                .await
+                .map_err(|_| {
+                    AppError::validation(format!(
+                        "agent_hub_plugin_residual_tree_missing:{}:{}",
+                        rref.target.as_str(),
+                        rref.residual_kind.as_str()
+                    ))
+                })?;
+        }
+
+        let bytes = canonical_plugin_package_bytes(&payload)?;
+        let stored = store.put_blob(&bytes).await?;
+        let origin_replica_id = origin_replica_id.into();
+        let parents = expected_parent_id
+            .clone()
+            .or_else(|| asset.current_revision_id.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let expected = expected_parent_id.or_else(|| asset.current_revision_id.clone());
+        let revision_id = RevisionId::new_v7();
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        with_shared_write_lease(&self.gate, async {
+            let mut tx = self.pool.begin().await?;
+
+            let mut max_parent_generation: Option<u64> = None;
+            for parent in &parents {
+                let gen: Option<i64> =
+                    sqlx::query_scalar("SELECT generation FROM agent_hub_revisions WHERE id = ?")
+                        .bind(parent.as_str())
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                let Some(g) = gen else {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_revision_parent_missing:{}",
+                        parent.as_str()
+                    )));
+                };
+                let g = g as u64;
+                max_parent_generation = Some(max_parent_generation.map_or(g, |m| m.max(g)));
+            }
+            let generation = max_parent_generation.map_or(0, |m| m.saturating_add(1));
+
+            sqlx::query(
+                "INSERT INTO agent_hub_revisions
+                 (id, asset_lineage_id, generation, operation, origin_kind, origin_target,
+                  origin_replica_id, payload_hash, tree_manifest_hash, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(revision_id.as_str())
+            .bind(&asset.id)
+            .bind(generation as i64)
+            .bind(RevisionOperation::Upsert.as_str())
+            .bind(origin_kind.as_str())
+            .bind(origin_target.map(|t| t.as_str()))
+            .bind(&origin_replica_id)
+            .bind(&stored.hash)
+            .bind::<Option<String>>(None)
+            .bind(&created_at)
+            .execute(&mut *tx)
+            .await?;
+
+            for (pos, parent) in parents.iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO agent_hub_revision_parents
+                     (revision_id, parent_revision_id, parent_order)
+                     VALUES (?, ?, ?)",
+                )
+                .bind(revision_id.as_str())
+                .bind(parent.as_str())
+                .bind(pos as i64)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            // head CAS / 推进
+            let now = created_at.clone();
+            if let Some(expected) = expected.as_ref().map(|r| r.as_str().to_string()) {
+                let result = sqlx::query(
+                    "UPDATE agent_hub_assets
+                     SET current_revision_id = ?, deleted_at = NULL, updated_at = ?
+                     WHERE id = ?
+                       AND (current_revision_id IS NULL OR current_revision_id = ?)",
+                )
+                .bind(revision_id.as_str())
+                .bind(&now)
+                .bind(&asset.id)
+                .bind(&expected)
+                .execute(&mut *tx)
+                .await?;
+                if result.rows_affected() == 0 {
+                    return Err(AppError::conflict(
+                        "agent_hub_revision_conflict".to_string(),
+                    ));
+                }
+            } else {
+                sqlx::query(
+                    "UPDATE agent_hub_assets
+                     SET current_revision_id = ?, deleted_at = NULL, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(revision_id.as_str())
+                .bind(&now)
+                .bind(&asset.id)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            for cref in &payload.component_refs {
+                // 事务内再验 revision 行存在
+                let exists: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
+                        .bind(cref.revision_id.as_str())
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if exists == 0 {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_plugin_component_revision_missing:{}",
+                        cref.revision_id.as_str()
+                    )));
+                }
+                let asset_exists: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_assets WHERE id = ?")
+                        .bind(&cref.asset_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if asset_exists == 0 {
+                    return Err(AppError::validation(format!(
+                        "agent_hub_plugin_component_asset_missing:{}",
+                        cref.asset_id
+                    )));
+                }
+                sqlx::query(
+                    "INSERT INTO agent_hub_plugin_components
+                     (package_revision_id, component_kind, component_asset_id,
+                      component_revision_id, ownership)
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(revision_id.as_str())
+                .bind(cref.kind.as_str())
+                .bind(&cref.asset_id)
+                .bind(cref.revision_id.as_str())
+                .bind(cref.ownership.as_str())
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            for rref in &payload.residual_refs {
+                sqlx::query(
+                    "INSERT INTO agent_hub_plugin_residuals
+                     (package_revision_id, target, residual_kind, tree_manifest_hash)
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(revision_id.as_str())
+                .bind(rref.target.as_str())
+                .bind(rref.residual_kind.as_str())
+                .bind(&rref.tree_manifest_hash)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            tx.commit().await?;
+            Ok(Revision {
+                id: revision_id,
+                asset_lineage_id: asset.id,
+                parents,
+                generation,
+                operation: RevisionOperation::Upsert,
+                origin_kind,
+                origin_target,
+                origin_replica_id,
+                payload_hash: Some(stored.hash),
+                tree_manifest_hash: None,
+                created_at,
+            })
+        })
+        .await
+    }
+
+    /// 加载 package 资产 head 的 PluginPackagePayload。
+    ///
+    /// Business Logic: UI/Snapshot/删除路径需要 typed package 视图。
+    /// Code Logic: get_asset(Plugin) → head revision → payload blob → from_plugin_package_bytes。
+    pub async fn load_plugin_package(
+        &self,
+        asset_id: &str,
+        store: &ObjectStore,
+    ) -> Result<Option<PluginPackagePayload>, AppError> {
+        let Some(asset) = self.get_asset(asset_id).await? else {
+            return Ok(None);
+        };
+        if asset.kind != AssetKind::Plugin {
+            return Err(AppError::validation(format!(
+                "agent_hub_asset_kind_not_plugin:{}",
+                asset.kind.as_str()
+            )));
+        }
+        let Some(rev_id) = asset.current_revision_id else {
+            return Ok(None);
+        };
+        self.load_plugin_package_revision(&rev_id, store).await
+    }
+
+    /// 按 package revision id 加载 PluginPackagePayload。
+    ///
+    /// Business Logic: 历史 package revision 必须可精确还原固定 refs。
+    /// Code Logic: get_revision → payload_hash → from_plugin_package_bytes。
+    pub async fn load_plugin_package_revision(
+        &self,
+        revision_id: &RevisionId,
+        store: &ObjectStore,
+    ) -> Result<Option<PluginPackagePayload>, AppError> {
+        let Some(revision) = self.get_revision(revision_id).await? else {
+            return Ok(None);
+        };
+        if revision.operation == RevisionOperation::Delete {
+            return Ok(None);
+        }
+        let Some(hash) = revision.payload_hash.as_deref() else {
+            return Err(AppError::validation(
+                "agent_hub_plugin_revision_missing_payload_hash".to_string(),
+            ));
+        };
+        let bytes = store.get_blob(hash).await?;
+        Ok(Some(from_plugin_package_bytes(&bytes)?))
+    }
+
+    /// 列出 package revision 的 component 边。
+    ///
+    /// Business Logic: Snapshot 与删除引用计数从边表查询。
+    /// Code Logic: SELECT ORDER BY kind, asset, revision。
+    pub async fn list_plugin_components_for_revision(
+        &self,
+        package_revision_id: &str,
+    ) -> Result<Vec<PluginComponentRef>, AppError> {
+        let rows = sqlx::query(
+            "SELECT component_kind, component_asset_id, component_revision_id, ownership
+             FROM agent_hub_plugin_components
+             WHERE package_revision_id = ?
+             ORDER BY component_kind ASC, component_asset_id ASC, component_revision_id ASC",
+        )
+        .bind(package_revision_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let kind_s: String = row.try_get("component_kind")?;
+            let kind = AssetKind::parse(&kind_s).ok_or_else(|| {
+                AppError::validation(format!("agent_hub_plugin_component_kind_unknown:{kind_s}"))
+            })?;
+            let asset_id: String = row.try_get("component_asset_id")?;
+            let rev: String = row.try_get("component_revision_id")?;
+            let own_s: String = row.try_get("ownership")?;
+            let ownership = ComponentOwnership::parse(&own_s).ok_or_else(|| {
+                AppError::validation(format!("agent_hub_plugin_ownership_unknown:{own_s}"))
+            })?;
+            out.push(PluginComponentRef {
+                kind,
+                asset_id,
+                revision_id: RevisionId::from(rev),
+                ownership,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 列出 package revision 的 residual 边。
+    ///
+    /// Business Logic: Snapshot 必须带走 residual tree 即使 package 非 active head。
+    /// Code Logic: SELECT ORDER BY target, kind, hash。
+    pub async fn list_plugin_residuals_for_revision(
+        &self,
+        package_revision_id: &str,
+    ) -> Result<Vec<PluginResidualRef>, AppError> {
+        let rows = sqlx::query(
+            "SELECT target, residual_kind, tree_manifest_hash
+             FROM agent_hub_plugin_residuals
+             WHERE package_revision_id = ?
+             ORDER BY target ASC, residual_kind ASC, tree_manifest_hash ASC",
+        )
+        .bind(package_revision_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let target_s: String = row.try_get("target")?;
+            let target = AgentTarget::parse(&target_s).ok_or_else(|| {
+                AppError::validation(format!(
+                    "agent_hub_plugin_residual_target_unknown:{target_s}"
+                ))
+            })?;
+            let kind_s: String = row.try_get("residual_kind")?;
+            let residual_kind = ResidualKind::parse(&kind_s).ok_or_else(|| {
+                AppError::validation(format!("agent_hub_plugin_residual_kind_unknown:{kind_s}"))
+            })?;
+            let tree_manifest_hash: String = row.try_get("tree_manifest_hash")?;
+            out.push(PluginResidualRef {
+                target,
+                residual_kind,
+                tree_manifest_hash,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 登记 component → standalone 逻辑资产引用（删除时 PreserveStandalone）。
+    ///
+    /// Business Logic: 引用数从边表查询，不维护计数器。
+    /// Code Logic: INSERT OR IGNORE。
+    pub async fn upsert_component_standalone_ref(
+        &self,
+        component_asset_id: &str,
+        standalone_asset_id: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_hub_component_standalone_refs
+                 (component_asset_id, standalone_asset_id, created_at)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(component_asset_id)
+            .bind(standalone_asset_id)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 追加 Hook 资产 revision（PortableHook → CAS）。
+    ///
+    /// Business Logic: Hook 作为独立 component 进入 DAG；合同体积受 Snapshot limits 约束。
+    /// Code Logic: kind=Hook 校验 → canonical_portable_hook_bytes → append_revision。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_portable_hook_revision(
+        &self,
+        asset_id: &str,
+        hook: &PortableHook,
+        store: &ObjectStore,
+        origin_kind: RevisionOriginKind,
+        origin_target: Option<AgentTarget>,
+        origin_replica_id: impl Into<String>,
+        expected_parent_id: Option<RevisionId>,
+    ) -> Result<Revision, AppError> {
+        let asset = self
+            .get_asset(asset_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent_hub_asset_not_found".to_string()))?;
+        if asset.kind != AssetKind::Hook {
+            return Err(AppError::validation(format!(
+                "agent_hub_hook_asset_kind_mismatch:{}",
+                asset.kind.as_str()
+            )));
+        }
+        validate_portable_hook(hook, &default_snapshot_limits())?;
+        if let Some(hash) = &hook.command_tree_hash {
+            // residual/command tree 存在才可钉住
+            let _ = store.get_tree(hash).await.map_err(|_| {
+                AppError::validation("agent_hub_hook_command_tree_missing".to_string())
+            })?;
+        }
+        let bytes = canonical_portable_hook_bytes(hook)?;
+        let stored = store.put_blob(&bytes).await?;
+        let parents = expected_parent_id
+            .clone()
+            .or_else(|| asset.current_revision_id.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let expected = expected_parent_id.or_else(|| asset.current_revision_id.clone());
+        self.append_revision(NewRevision {
+            id: RevisionId::new_v7(),
+            asset_lineage_id: asset.id,
+            parents,
+            operation: RevisionOperation::Upsert,
+            origin_kind,
+            origin_target,
+            origin_replica_id: origin_replica_id.into(),
+            payload_hash: Some(stored.hash),
+            tree_manifest_hash: hook.command_tree_hash.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expected_parent_id: expected,
+        })
+        .await
+    }
+
+    /// 加载 Hook 资产 head 的 PortableHook。
+    ///
+    /// Business Logic: 投影/诊断需要 typed Hook 合同。
+    /// Code Logic: get_asset(Hook) → head → from_portable_hook_bytes。
+    pub async fn load_portable_hook(
+        &self,
+        asset_id: &str,
+        store: &ObjectStore,
+    ) -> Result<Option<PortableHook>, AppError> {
+        let Some(asset) = self.get_asset(asset_id).await? else {
+            return Ok(None);
+        };
+        if asset.kind != AssetKind::Hook {
+            return Err(AppError::validation(format!(
+                "agent_hub_asset_kind_not_hook:{}",
+                asset.kind.as_str()
+            )));
+        }
+        let Some(rev_id) = asset.current_revision_id else {
+            return Ok(None);
+        };
+        let Some(revision) = self.get_revision(&rev_id).await? else {
+            return Ok(None);
+        };
+        if revision.operation == RevisionOperation::Delete {
+            return Ok(None);
+        }
+        let Some(hash) = revision.payload_hash.as_deref() else {
+            return Err(AppError::validation(
+                "agent_hub_hook_revision_missing_payload_hash".to_string(),
+            ));
+        };
+        let bytes = store.get_blob(hash).await?;
+        Ok(Some(from_portable_hook_bytes(&bytes)?))
     }
 
     /// 按 id 读取 revision（含有序 parents）。
@@ -2197,7 +2706,6 @@ impl AgentHubRepo {
         let mut tx = self.pool.begin().await?;
         let assets = resolve_selected_assets_on_tx(&mut tx, request).await?;
         let asset_ids: Vec<String> = assets.iter().map(|a| a.id.clone()).collect();
-        let lineages = list_lineages_for_assets_on_tx(&mut tx, &asset_ids).await?;
 
         let mut head_ids: Vec<String> = Vec::new();
         for a in &assets {
@@ -2231,6 +2739,80 @@ impl AgentHubRepo {
             only
         };
 
+        // Gate D：package revision 固定 component revision refs / residual trees 进入闭包，
+        // 即使 component 不是 selection active head。闭包内每个 revision 都查边表
+        // （非 package 修订返回空集）。
+        let mut package_rev_ids: Vec<String> = revisions
+            .iter()
+            .map(|r| r.id.as_str().to_string())
+            .collect();
+        for a in &assets {
+            if a.kind == AssetKind::Plugin {
+                if let Some(rev) = &a.current_revision_id {
+                    package_rev_ids.push(rev.as_str().to_string());
+                }
+            }
+        }
+        package_rev_ids.sort();
+        package_rev_ids.dedup();
+
+        let mut extra_asset_ids: std::collections::BTreeSet<String> =
+            asset_ids.iter().cloned().collect();
+        let mut extra_seed_revs: Vec<String> = seed_rev_ids.clone();
+        let mut residual_tree_hashes: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+
+        for pkg_rev in &package_rev_ids {
+            let comps = list_plugin_components_on_tx(&mut tx, pkg_rev).await?;
+            for c in comps {
+                extra_asset_ids.insert(c.asset_id.clone());
+                extra_seed_revs.push(c.revision_id.as_str().to_string());
+            }
+            let residuals = list_plugin_residuals_on_tx(&mut tx, pkg_rev).await?;
+            for r in residuals {
+                residual_tree_hashes.insert(r.tree_manifest_hash);
+            }
+        }
+
+        // 扩展 assets 集合（component 可能不在原 selection）
+        let mut expanded_assets = assets;
+        for id in &extra_asset_ids {
+            if expanded_assets.iter().any(|a| a.id == *id) {
+                continue;
+            }
+            if let Some(a) = get_asset_on_tx(&mut tx, id).await? {
+                expanded_assets.push(a);
+            }
+        }
+        expanded_assets.sort_by(|a, b| a.id.cmp(&b.id));
+        expanded_assets.dedup_by(|a, b| a.id == b.id);
+        let assets = expanded_assets;
+        let asset_ids: Vec<String> = assets.iter().map(|a| a.id.clone()).collect();
+        let lineages = list_lineages_for_assets_on_tx(&mut tx, &asset_ids).await?;
+        // variants 可能因新增 component assets 而缺失；重新加载
+        let variant_rows = list_variants_for_assets_on_tx(&mut tx, &asset_ids).await?;
+
+        extra_seed_revs.sort();
+        extra_seed_revs.dedup();
+        let revisions = if request.include_history {
+            collect_revision_ancestry_on_tx(&mut tx, &extra_seed_revs).await?
+        } else {
+            let mut only = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            for id in &extra_seed_revs {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(r) = get_revision_on_tx(&mut tx, id).await? {
+                    only.push(r);
+                }
+            }
+            only.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+            only
+        };
+
+        let residual_tree_hashes: Vec<String> = residual_tree_hashes.into_iter().collect();
+
         let conflicts = list_unresolved_conflicts_for_assets_on_tx(&mut tx, &asset_ids).await?;
 
         let mut hub_ids: std::collections::BTreeSet<String> =
@@ -2254,6 +2836,7 @@ impl AgentHubRepo {
             conflicts,
             aliases,
             hub_project_ids,
+            residual_tree_hashes,
         })
     }
 
@@ -3324,7 +3907,8 @@ pub enum SnapshotIdentityMode {
 ///     builder 在 CAS 流式 re-hash 前必须持有一致身份集合；TX 结束后集合只读。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存 assets/lineages/revisions/variants/conflicts/aliases/hub ids。
+///     保存 assets/lineages/revisions/variants/conflicts/aliases/hub ids/
+///     residual tree hashes（Gate D package residual 闭包）。
 #[derive(Debug, Clone)]
 pub struct SnapshotIdentityBundle {
     /// 选中资产（含 tombstone）
@@ -3341,6 +3925,8 @@ pub struct SnapshotIdentityBundle {
     pub aliases: Vec<AgentHubPortableAliasRow>,
     /// 相关 hub project ids
     pub hub_project_ids: Vec<String>,
+    /// Plugin residual tree_manifest_hash（即使非 active head 也闭合）
+    pub residual_tree_hashes: Vec<String>,
 }
 
 /// Snapshot 用 variant 行。
@@ -3698,6 +4284,34 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )",
+    // Gate D Task 1：PluginPackage 固定 component/residual 引用边表 + standalone 引用
+    "CREATE TABLE IF NOT EXISTS agent_hub_plugin_components (
+        package_revision_id TEXT NOT NULL,
+        component_kind TEXT NOT NULL,
+        component_asset_id TEXT NOT NULL,
+        component_revision_id TEXT NOT NULL,
+        ownership TEXT NOT NULL,
+        PRIMARY KEY (package_revision_id, component_kind, component_asset_id, component_revision_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_plugin_components_component
+     ON agent_hub_plugin_components(component_asset_id, component_revision_id)",
+    "CREATE TABLE IF NOT EXISTS agent_hub_plugin_residuals (
+        package_revision_id TEXT NOT NULL,
+        target TEXT NOT NULL,
+        residual_kind TEXT NOT NULL,
+        tree_manifest_hash TEXT NOT NULL,
+        PRIMARY KEY (package_revision_id, target, residual_kind, tree_manifest_hash)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_plugin_residuals_tree
+     ON agent_hub_plugin_residuals(tree_manifest_hash)",
+    "CREATE TABLE IF NOT EXISTS agent_hub_component_standalone_refs (
+        component_asset_id TEXT NOT NULL,
+        standalone_asset_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (component_asset_id, standalone_asset_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_component_standalone_refs_standalone
+     ON agent_hub_component_standalone_refs(standalone_asset_id)",
 ];
 
 /// 升级旧库：为 mappings/bindings 补列与唯一索引。
@@ -4338,6 +4952,103 @@ async fn list_lineages_for_assets_on_tx(
     }
     out.sort();
     out.dedup();
+    Ok(out)
+}
+
+/// 事务内按 id 读取资产（含 deleted）。
+///
+/// Business Logic: package component 可能不在 selection；闭包扩展 assets 时需同 TX 读。
+/// Code Logic: SELECT agent_hub_assets WHERE id = ?。
+async fn get_asset_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<Option<LogicalAsset>, AppError> {
+    let row = sqlx::query(
+        "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                current_revision_id, deleted_at, created_at, updated_at
+         FROM agent_hub_assets WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|r| row_to_asset(&r)).transpose()
+}
+
+/// 事务内列出 package revision 的 component 边。
+///
+/// Business Logic: Snapshot 闭包必须钉住固定 component revision，即使非 active head。
+/// Code Logic: SELECT agent_hub_plugin_components。
+async fn list_plugin_components_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    package_revision_id: &str,
+) -> Result<Vec<PluginComponentRef>, AppError> {
+    let rows = sqlx::query(
+        "SELECT component_kind, component_asset_id, component_revision_id, ownership
+         FROM agent_hub_plugin_components
+         WHERE package_revision_id = ?
+         ORDER BY component_kind ASC, component_asset_id ASC, component_revision_id ASC",
+    )
+    .bind(package_revision_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kind_s: String = row.try_get("component_kind")?;
+        let kind = AssetKind::parse(&kind_s).ok_or_else(|| {
+            AppError::validation(format!("agent_hub_plugin_component_kind_unknown:{kind_s}"))
+        })?;
+        let asset_id: String = row.try_get("component_asset_id")?;
+        let rev: String = row.try_get("component_revision_id")?;
+        let own_s: String = row.try_get("ownership")?;
+        let ownership = ComponentOwnership::parse(&own_s).ok_or_else(|| {
+            AppError::validation(format!("agent_hub_plugin_ownership_unknown:{own_s}"))
+        })?;
+        out.push(PluginComponentRef {
+            kind,
+            asset_id,
+            revision_id: RevisionId::from(rev),
+            ownership,
+        });
+    }
+    Ok(out)
+}
+
+/// 事务内列出 package revision 的 residual 边。
+///
+/// Business Logic: residual tree 必须进 snapshot objects，即使 package 非 active head。
+/// Code Logic: SELECT agent_hub_plugin_residuals。
+async fn list_plugin_residuals_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    package_revision_id: &str,
+) -> Result<Vec<PluginResidualRef>, AppError> {
+    let rows = sqlx::query(
+        "SELECT target, residual_kind, tree_manifest_hash
+         FROM agent_hub_plugin_residuals
+         WHERE package_revision_id = ?
+         ORDER BY target ASC, residual_kind ASC, tree_manifest_hash ASC",
+    )
+    .bind(package_revision_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let target_s: String = row.try_get("target")?;
+        let target = AgentTarget::parse(&target_s).ok_or_else(|| {
+            AppError::validation(format!(
+                "agent_hub_plugin_residual_target_unknown:{target_s}"
+            ))
+        })?;
+        let kind_s: String = row.try_get("residual_kind")?;
+        let residual_kind = ResidualKind::parse(&kind_s).ok_or_else(|| {
+            AppError::validation(format!("agent_hub_plugin_residual_kind_unknown:{kind_s}"))
+        })?;
+        let tree_manifest_hash: String = row.try_get("tree_manifest_hash")?;
+        out.push(PluginResidualRef {
+            target,
+            residual_kind,
+            tree_manifest_hash,
+        });
+    }
     Ok(out)
 }
 
@@ -5383,5 +6094,514 @@ mod tests {
         // binary unchanged
         let again = store.get_blob(&bin_obj.hash).await.unwrap();
         assert_eq!(again, bin);
+    }
+
+    /// 创建 temp ObjectStore。
+    async fn test_store() -> (tempfile::TempDir, ObjectStore) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::open(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    /// 插入 Skill 组件 revision 并返回 (asset, revision)。
+    async fn seed_skill_component(
+        repo: &AgentHubRepo,
+        store: &ObjectStore,
+        scope_id: &str,
+        key: &str,
+        body: &str,
+    ) -> (LogicalAsset, Revision) {
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope_id.into(),
+                kind: AssetKind::Skill,
+                origin_namespace: "plugin:demo".into(),
+                logical_key: key.into(),
+                display_name: key.into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let md = store.put_blob(body.as_bytes()).await.unwrap();
+        let tree = store
+            .put_tree(&crate::agent_hub::object_store::TreeManifest {
+                entries: vec![crate::agent_hub::object_store::TreeEntry {
+                    path: "SKILL.md".into(),
+                    blob_hash: md.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                }],
+            })
+            .await
+            .unwrap();
+        let payload = PortableAssetPayload::Skill(crate::agent_hub::assets::PortableSkill {
+            name: key.into(),
+            description: "d".into(),
+            skill_markdown_hash: md.hash,
+            tree_manifest_hash: tree.hash,
+            target_extensions: std::collections::BTreeMap::new(),
+        });
+        let rev = repo
+            .append_portable_asset_revision(
+                &asset.id,
+                &payload,
+                store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                None,
+            )
+            .await
+            .unwrap();
+        (asset, rev)
+    }
+
+    #[tokio::test]
+    async fn plugin_package_immutable_refs_survive_component_update() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let (_dir, store) = test_store().await;
+
+        let (skill, s1) =
+            seed_skill_component(&repo, &store, &scope.id, "review", "skill-v1").await;
+        let residual_body = b"runtime-v1";
+        let residual_blob = store.put_blob(residual_body).await.unwrap();
+        let residual_tree = store
+            .put_tree(&crate::agent_hub::object_store::TreeManifest {
+                entries: vec![crate::agent_hub::object_store::TreeEntry {
+                    path: "index.js".into(),
+                    blob_hash: residual_blob.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                }],
+            })
+            .await
+            .unwrap();
+
+        let plugin = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Plugin,
+                origin_namespace: "standalone".into(),
+                logical_key: "demo.plugin".into(),
+                display_name: "Demo Plugin".into(),
+                policy: AssetPolicy::TargetOnly,
+            })
+            .await
+            .unwrap();
+
+        let p1_payload = PluginPackagePayload {
+            plugin_id: "demo.plugin".into(),
+            name: "Demo".into(),
+            version: Some("1".into()),
+            description: None,
+            source_target: AgentTarget::Claude,
+            component_refs: vec![PluginComponentRef {
+                kind: AssetKind::Skill,
+                asset_id: skill.id.clone(),
+                revision_id: s1.id.clone(),
+                ownership: ComponentOwnership::PackageOwned,
+            }],
+            residual_refs: vec![PluginResidualRef {
+                target: AgentTarget::Claude,
+                residual_kind: ResidualKind::Runtime,
+                tree_manifest_hash: residual_tree.hash.clone(),
+            }],
+            target_extensions: std::collections::BTreeMap::new(),
+        };
+        let p1 = repo
+            .append_plugin_package_revision(
+                &plugin.id,
+                &p1_payload,
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // append skill S2
+        let s2_md = store.put_blob(b"skill-v2-body").await.unwrap();
+        let s2_tree = store
+            .put_tree(&crate::agent_hub::object_store::TreeManifest {
+                entries: vec![crate::agent_hub::object_store::TreeEntry {
+                    path: "SKILL.md".into(),
+                    blob_hash: s2_md.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                }],
+            })
+            .await
+            .unwrap();
+        let s2_payload = PortableAssetPayload::Skill(crate::agent_hub::assets::PortableSkill {
+            name: "review".into(),
+            description: "v2".into(),
+            skill_markdown_hash: s2_md.hash,
+            tree_manifest_hash: s2_tree.hash,
+            target_extensions: std::collections::BTreeMap::new(),
+        });
+        let s2 = repo
+            .append_portable_asset_revision(
+                &skill.id,
+                &s2_payload,
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                Some(s1.id.clone()),
+            )
+            .await
+            .unwrap();
+
+        // P1 still pins S1
+        let comps = repo
+            .list_plugin_components_for_revision(p1.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0].revision_id, s1.id);
+        let loaded_p1 = repo
+            .load_plugin_package_revision(&p1.id, &store)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded_p1.component_refs[0].revision_id, s1.id);
+
+        // P2 pins S2
+        let p2_payload = PluginPackagePayload {
+            plugin_id: "demo.plugin".into(),
+            name: "Demo".into(),
+            version: Some("2".into()),
+            description: None,
+            source_target: AgentTarget::Claude,
+            component_refs: vec![PluginComponentRef {
+                kind: AssetKind::Skill,
+                asset_id: skill.id.clone(),
+                revision_id: s2.id.clone(),
+                ownership: ComponentOwnership::PackageOwned,
+            }],
+            residual_refs: vec![PluginResidualRef {
+                target: AgentTarget::Claude,
+                residual_kind: ResidualKind::Runtime,
+                tree_manifest_hash: residual_tree.hash.clone(),
+            }],
+            target_extensions: std::collections::BTreeMap::new(),
+        };
+        let p2 = repo
+            .append_plugin_package_revision(
+                &plugin.id,
+                &p2_payload,
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                Some(p1.id.clone()),
+            )
+            .await
+            .unwrap();
+        assert_ne!(p1.id, p2.id);
+        let p1_again = repo
+            .list_plugin_components_for_revision(p1.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(p1_again[0].revision_id, s1.id);
+        let p2_comps = repo
+            .list_plugin_components_for_revision(p2.id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(p2_comps[0].revision_id, s2.id);
+
+        // residual exact bytes
+        let restored = store.get_blob(&residual_blob.hash).await.unwrap();
+        assert_eq!(restored, residual_body);
+    }
+
+    #[tokio::test]
+    async fn plugin_package_rejects_missing_component_revision_and_residual_tree() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let (_dir, store) = test_store().await;
+        let (skill, s1) = seed_skill_component(&repo, &store, &scope.id, "x", "body").await;
+        let plugin = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Plugin,
+                origin_namespace: "standalone".into(),
+                logical_key: "p".into(),
+                display_name: "P".into(),
+                policy: AssetPolicy::TargetOnly,
+            })
+            .await
+            .unwrap();
+
+        let missing_rev = PluginPackagePayload {
+            plugin_id: "p".into(),
+            name: "P".into(),
+            version: None,
+            description: None,
+            source_target: AgentTarget::Claude,
+            component_refs: vec![PluginComponentRef {
+                kind: AssetKind::Skill,
+                asset_id: skill.id.clone(),
+                revision_id: RevisionId::from("does-not-exist"),
+                ownership: ComponentOwnership::PackageOwned,
+            }],
+            residual_refs: vec![],
+            target_extensions: std::collections::BTreeMap::new(),
+        };
+        let err = repo
+            .append_plugin_package_revision(
+                &plugin.id,
+                &missing_rev,
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("component_revision_missing"));
+
+        let kind_mismatch = PluginPackagePayload {
+            plugin_id: "p".into(),
+            name: "P".into(),
+            version: None,
+            description: None,
+            source_target: AgentTarget::Claude,
+            component_refs: vec![PluginComponentRef {
+                kind: AssetKind::Command,
+                asset_id: skill.id.clone(),
+                revision_id: s1.id.clone(),
+                ownership: ComponentOwnership::PackageOwned,
+            }],
+            residual_refs: vec![],
+            target_extensions: std::collections::BTreeMap::new(),
+        };
+        let err = repo
+            .append_plugin_package_revision(
+                &plugin.id,
+                &kind_mismatch,
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("component_kind_mismatch"));
+
+        let missing_tree = PluginPackagePayload {
+            plugin_id: "p".into(),
+            name: "P".into(),
+            version: None,
+            description: None,
+            source_target: AgentTarget::Claude,
+            component_refs: vec![PluginComponentRef {
+                kind: AssetKind::Skill,
+                asset_id: skill.id.clone(),
+                revision_id: s1.id.clone(),
+                ownership: ComponentOwnership::PackageOwned,
+            }],
+            residual_refs: vec![PluginResidualRef {
+                target: AgentTarget::Claude,
+                residual_kind: ResidualKind::Runtime,
+                tree_manifest_hash: "f".repeat(64),
+            }],
+            target_extensions: std::collections::BTreeMap::new(),
+        };
+        let err = repo
+            .append_plugin_package_revision(
+                &plugin.id,
+                &missing_tree,
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("residual_tree_missing"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_closure_includes_historical_plugin_component_refs() {
+        use crate::agent_hub::snapshot::builder::{
+            build_snapshot, SnapshotSelectionMode, SnapshotSelectionRequest,
+        };
+
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let (_dir, store) = test_store().await;
+        let (skill, s1) = seed_skill_component(&repo, &store, &scope.id, "hist", "s1").await;
+        let s2_md = store.put_blob(b"s2").await.unwrap();
+        let s2_tree = store
+            .put_tree(&crate::agent_hub::object_store::TreeManifest {
+                entries: vec![crate::agent_hub::object_store::TreeEntry {
+                    path: "SKILL.md".into(),
+                    blob_hash: s2_md.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                }],
+            })
+            .await
+            .unwrap();
+        let s2 = repo
+            .append_portable_asset_revision(
+                &skill.id,
+                &PortableAssetPayload::Skill(crate::agent_hub::assets::PortableSkill {
+                    name: "hist".into(),
+                    description: "s2".into(),
+                    skill_markdown_hash: s2_md.hash,
+                    tree_manifest_hash: s2_tree.hash,
+                    target_extensions: std::collections::BTreeMap::new(),
+                }),
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                Some(s1.id.clone()),
+            )
+            .await
+            .unwrap();
+
+        let residual_blob = store.put_blob(b"res-hist").await.unwrap();
+        let residual_tree = store
+            .put_tree(&crate::agent_hub::object_store::TreeManifest {
+                entries: vec![crate::agent_hub::object_store::TreeEntry {
+                    path: "r.js".into(),
+                    blob_hash: residual_blob.hash.clone(),
+                    entry_type: crate::agent_hub::object_store::TreeEntryType::File,
+                    executable: false,
+                }],
+            })
+            .await
+            .unwrap();
+
+        let plugin = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Plugin,
+                origin_namespace: "standalone".into(),
+                logical_key: "hist.plugin".into(),
+                display_name: "Hist".into(),
+                policy: AssetPolicy::TargetOnly,
+            })
+            .await
+            .unwrap();
+        let p1 = repo
+            .append_plugin_package_revision(
+                &plugin.id,
+                &PluginPackagePayload {
+                    plugin_id: "hist.plugin".into(),
+                    name: "Hist".into(),
+                    version: None,
+                    description: None,
+                    source_target: AgentTarget::Claude,
+                    component_refs: vec![PluginComponentRef {
+                        kind: AssetKind::Skill,
+                        asset_id: skill.id.clone(),
+                        revision_id: s1.id.clone(),
+                        ownership: ComponentOwnership::PackageOwned,
+                    }],
+                    residual_refs: vec![PluginResidualRef {
+                        target: AgentTarget::Claude,
+                        residual_kind: ResidualKind::Runtime,
+                        tree_manifest_hash: residual_tree.hash.clone(),
+                    }],
+                    target_extensions: std::collections::BTreeMap::new(),
+                },
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                None,
+            )
+            .await
+            .unwrap();
+        let _p2 = repo
+            .append_plugin_package_revision(
+                &plugin.id,
+                &PluginPackagePayload {
+                    plugin_id: "hist.plugin".into(),
+                    name: "Hist".into(),
+                    version: Some("2".into()),
+                    description: None,
+                    source_target: AgentTarget::Claude,
+                    component_refs: vec![PluginComponentRef {
+                        kind: AssetKind::Skill,
+                        asset_id: skill.id.clone(),
+                        revision_id: s2.id.clone(),
+                        ownership: ComponentOwnership::PackageOwned,
+                    }],
+                    residual_refs: vec![PluginResidualRef {
+                        target: AgentTarget::Claude,
+                        residual_kind: ResidualKind::Runtime,
+                        tree_manifest_hash: residual_tree.hash.clone(),
+                    }],
+                    target_extensions: std::collections::BTreeMap::new(),
+                },
+                &store,
+                RevisionOriginKind::Ui,
+                Some(AgentTarget::Claude),
+                "01900000-0000-7000-8000-0000000000d1",
+                Some(p1.id.clone()),
+            )
+            .await
+            .unwrap();
+
+        // skill head is S2; historical P1 still references S1 — snapshot of plugin with history
+        // must include S1 payload + residual tree
+        let built = build_snapshot(
+            &repo,
+            &store,
+            SnapshotSelectionRequest {
+                mode: SnapshotSelectionMode::ExplicitAssets,
+                scope_ids: vec![],
+                asset_ids: vec![plugin.id.clone()],
+                hub_project_ids: vec![],
+                include_history: true,
+                source_replica_id: "01900000-0000-7000-8000-0000000000b1".into(),
+                limits: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let rev_ids: std::collections::BTreeSet<_> = built
+            .envelope
+            .revisions
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert!(
+            rev_ids.contains(s1.id.as_str()),
+            "historical component revision S1 must be in snapshot closure"
+        );
+        assert!(
+            rev_ids.contains(s2.id.as_str()),
+            "current component revision S2 must be in snapshot closure"
+        );
+        assert!(
+            rev_ids.contains(p1.id.as_str()),
+            "historical package P1 must be retained with history"
+        );
+        let obj_hashes: std::collections::BTreeSet<_> = built
+            .envelope
+            .objects
+            .iter()
+            .map(|o| o.hash.as_str())
+            .collect();
+        assert!(
+            obj_hashes.contains(residual_tree.hash.as_str())
+                || obj_hashes.contains(residual_blob.hash.as_str()),
+            "residual tree/blob must be in snapshot objects"
+        );
+        // residual blob must be present after tree expansion
+        assert!(obj_hashes.contains(residual_blob.hash.as_str()));
     }
 }
