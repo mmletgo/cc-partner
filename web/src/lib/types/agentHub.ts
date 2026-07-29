@@ -265,3 +265,228 @@ export interface AgentHubAdoptionPreview {
   diagnostics: string[];
   aggregateStatus: AssetAggregateStatus;
 }
+
+
+/**
+ * LAN push selection mode.
+ */
+export type AgentHubPushSelectionMode = 'fullHub' | 'userScope' | 'project' | 'explicitAssets';
+
+/**
+ * LAN push preview (zero transfer).
+ */
+export interface AgentHubLanPushPreview {
+  snapshotHash: string;
+  snapshotId: string;
+  selectionHash: string;
+  assetCount: number;
+  revisionCount: number;
+  credentialBearingAssetCount: number;
+  peerDeviceIds: string[];
+  mode: AgentHubPushSelectionMode | string;
+  plaintextBackupDisclosure: string;
+  hasCredentialBearingAssets: boolean;
+}
+
+/**
+ * 单目标 push 状态。
+ */
+export type AgentHubTargetPushStatus =
+  | 'pending'
+  | 'prepared'
+  | 'transferred'
+  | 'committed'
+  | 'failed';
+
+/**
+ * 单目标 push outcome。
+ */
+export interface AgentHubTargetPushOutcome {
+  peerDeviceId: string;
+  peerLabel: string;
+  clientRequestId: string;
+  status: AgentHubTargetPushStatus | string;
+  retryable: boolean;
+  errorCode?: string | null;
+  transferId?: string | null;
+  missingObjectCount: number;
+  transferredObjectCount: number;
+  updatedAt: string;
+}
+
+/**
+ * multi-target push report。
+ */
+export interface AgentHubMultiTargetPushReport {
+  requestId: string;
+  selectionHash: string;
+  snapshotHash: string;
+  status: string;
+  targets: AgentHubTargetPushOutcome[];
+}
+
+/**
+ * Git lane 清单条目。
+ */
+export interface AgentHubGitLaneSummary {
+  laneDeviceId: string;
+  snapshotHash: string;
+  snapshotId: string;
+  sourceReplicaId: string;
+  assetCount: number;
+  revisionCount: number;
+  status: string;
+  errorCode?: string | null;
+}
+
+/**
+ * Git lanes inspect report。
+ */
+export interface AgentHubGitLaneInspectReport {
+  workdirPresent: boolean;
+  lanes: AgentHubGitLaneSummary[];
+  localDeviceId: string;
+}
+
+/**
+ * Git asset change kind。
+ */
+export type AgentHubGitAssetChangeKind =
+  | 'added'
+  | 'modified'
+  | 'deleted'
+  | 'conflict'
+  | 'unchanged';
+
+/**
+ * Git asset diff entry（无 secret）。
+ */
+export interface AgentHubGitAssetDiffEntry {
+  assetId: string;
+  kind: string;
+  logicalKey: string;
+  displayName: string;
+  changeKind: AgentHubGitAssetChangeKind | string;
+  hasCredential: boolean;
+  localHead?: string | null;
+  remoteHead?: string | null;
+  remoteDeleted: boolean;
+}
+
+/**
+ * Git import change counts。
+ */
+export interface AgentHubGitAssetChangeCounts {
+  added: number;
+  modified: number;
+  deleted: number;
+  conflict: number;
+  unchanged: number;
+  credentialBearing: number;
+}
+
+/**
+ * Project mapping candidate。
+ */
+export interface AgentHubProjectMappingCandidate {
+  hubProjectId: string;
+  candidateKind: string;
+  candidateExternalId: string;
+  localWorkbenchProjectId?: string | null;
+}
+
+/**
+ * Resolved project mapping。
+ */
+export interface AgentHubResolvedProjectMapping {
+  hubProjectId: string;
+  localWorkbenchProjectId?: string | null;
+  optedIn: boolean;
+}
+
+/**
+ * Git import preview。
+ */
+export interface AgentHubGitImportPreview {
+  laneDeviceId: string;
+  snapshotId: string;
+  snapshotHash: string;
+  sourceReplicaId: string;
+  assetCount: number;
+  revisionCount: number;
+  changeCounts: AgentHubGitAssetChangeCounts;
+  assets: AgentHubGitAssetDiffEntry[];
+  projectCandidates: AgentHubProjectMappingCandidate[];
+  resolvedMappings: AgentHubResolvedProjectMapping[];
+  plaintextBackupDisclosure: string;
+  hasCredentialBearingAssets: boolean;
+}
+
+/**
+ * Confirmed project mapping input。
+ */
+export interface AgentHubConfirmedProjectMapping {
+  hubProjectId: string;
+  localWorkbenchProjectId?: string | null;
+  gitRemoteFingerprint?: string | null;
+  optedIn?: boolean;
+}
+
+/**
+ * Confirm git import request。
+ */
+export interface AgentHubConfirmGitImportRequest {
+  laneDeviceId: string;
+  snapshotHash: string;
+  selectedAssetIds?: string[];
+  projectMappings?: AgentHubConfirmedProjectMapping[];
+  importUnmappedProjects?: boolean;
+}
+
+/**
+ * Snapshot import outcome。
+ */
+export interface AgentHubSnapshotImportOutcome {
+  snapshotId: string;
+  snapshotHash: string;
+  importedAssetIds: string[];
+  insertedRevisions: number;
+  dedupedRevisions: number;
+  headsAdvanced: number;
+  conflictsOpened: number;
+  projectionsScheduled: number;
+  importedObjectHashes: string[];
+}
+
+/**
+ * Confirm git import outcome。
+ */
+export interface AgentHubConfirmGitImportOutcome {
+  laneDeviceId: string;
+  snapshotHash: string;
+  import: AgentHubSnapshotImportOutcome;
+  resolvedMappings: AgentHubResolvedProjectMapping[];
+}
+
+/**
+ * Confirm project mapping request。
+ */
+export interface AgentHubConfirmProjectMappingRequest {
+  hubProjectId: string;
+  localWorkbenchProjectId?: string | null;
+  gitRemoteFingerprint?: string | null;
+  optedIn?: boolean;
+}
+
+/**
+ * Push selection request。
+ */
+export interface AgentHubPushSelectionRequest {
+  peerDeviceIds: string[];
+  mode: AgentHubPushSelectionMode;
+  scopeIds?: string[];
+  assetIds?: string[];
+  hubProjectIds?: string[];
+  includeHistory?: boolean;
+  requestId?: string | null;
+}

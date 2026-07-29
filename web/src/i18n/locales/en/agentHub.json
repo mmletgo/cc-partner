@@ -6,7 +6,7 @@
   "empty": "No assets match the current filters.",
   "listAria": "Agent Hub assets",
   "upgradeRequired": "Backend Agent Hub API is incompatible for writes. Upgrade the backend sidecar to continue editing.",
-  "lanPushGateC": "LAN push of Hub assets arrives in Gate C. This release does not ship cross-device push or silent Skill directory moves.",
+  "lanPushGateC": "Use LAN Push to send selected Hub assets to explicit peers. There is no target-side pull.",
   "status": {
     "enabled": "Hub enabled",
     "disabled": "Hub disabled",
@@ -107,7 +107,7 @@
   "adoption": {
     "title": "Adoption / collision preview",
     "desc": "Review the external collision diagnostics before any adoption decision. Legacy LAN pull and direct Skill directory moves are no longer exposed here.",
-    "lanPushGateC": "Cross-device LAN push is scheduled for Gate C and is not available in this release.",
+    "lanPushGateC": "Cross-device LAN push is available via the LAN Push dialog on this page.",
     "logicalKey": "Logical key",
     "origin": "Origin namespace",
     "target": "Target",
@@ -161,5 +161,54 @@
   "errors": {
     "projectIdRequired": "Project id is required.",
     "assetRequired": "Select an asset first."
+  },
+  "replication": {
+    "plaintextDisclosure": "Hub snapshots may store credential-bearing assets as plaintext bytes. Secret values are never shown here.",
+    "hasCredentials": "Contains credential-bearing assets",
+    "credentialLabel": "credential"
+  },
+  "lanPush": {
+    "title": "LAN Push",
+    "open": "LAN Push",
+    "hint": "Source-only push. Select explicit peers and one selection mode. Each peer is reported independently.",
+    "peers": "Peers",
+    "peersAria": "Select LAN peers",
+    "noPeers": "No online peers discovered.",
+    "mode": "Selection mode",
+    "modeAria": "Selection mode",
+    "modeFull": "Full Hub",
+    "modeUser": "User scope",
+    "modeProject": "Projects",
+    "modeAssets": "Assets",
+    "assetIdsPlaceholder": "asset ids, comma-separated",
+    "assetIdsAria": "Asset ids",
+    "projectIdsPlaceholder": "hub project ids, comma-separated",
+    "projectIdsAria": "Hub project ids",
+    "preview": "Preview",
+    "previewSummary": "{{assets}} assets · {{revisions}} revisions · hash {{hash}}…",
+    "previewAction": "Preview",
+    "startAction": "Start push",
+    "report": "Per-peer report",
+    "reportAria": "Push results per peer"
+  },
+  "gitImport": {
+    "title": "Git Import",
+    "open": "Git Import",
+    "hint": "Inspect remote device lanes, preview changes, map projects, then confirm. Nothing is imported automatically.",
+    "stepInspect": "1. Inspect lanes",
+    "inspectAction": "Inspect lanes",
+    "stepPreview": "2. Preview lane",
+    "previewAction": "Preview selected lane",
+    "previewSummary": "added {{added}} · modified {{modified}} · deleted {{deleted}} · conflict {{conflict}} · hash {{hash}}…",
+    "stepMapping": "3. Map unmapped projects",
+    "noUnmapped": "No unmapped projects in this preview.",
+    "localProjectPlaceholder": "local workbench project id",
+    "localProjectAria": "Local project id for {{hub}}",
+    "mapAction": "Save mapping",
+    "mapThenOptIn": "Mapping does not opt-in. Use Project preview/enable before local file writes.",
+    "mappingSaved": "Mapped {{hub}} (optedIn={{optedIn}})",
+    "stepConfirm": "4. Confirm import",
+    "confirmAction": "Confirm import",
+    "confirmSummary": "Imported {{assets}} assets · {{revisions}} revisions · projections scheduled {{projections}}"
   }
 }

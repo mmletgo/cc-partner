@@ -373,3 +373,96 @@
     flex-direction: column;
   }
 }
+
+
+/* Gate C replication surfaces */
+.replicationBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-2);
+}
+
+.replicationHint {
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+  margin: 0;
+}
+
+.replicationDisclosure {
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+  margin: 0;
+  padding: var(--space-2);
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+}
+
+.replicationSectionTitle {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin: 0 0 var(--space-2);
+}
+
+.replicationList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.replicationCheckRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.replicationModeRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.replicationActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.replicationLaneBtn {
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.replicationLaneBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.replicationLaneBtn[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.replicationMapRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+@media (max-width: 900px) {
+  .replicationMapRow {
+    grid-template-columns: 1fr;
+  }
+}

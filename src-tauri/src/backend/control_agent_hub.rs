@@ -9,6 +9,11 @@
 //!     按 `op` 分发到 `AgentHubService`；mutation 额外校验 agentHubApiVersion；
 //!     响应 ≤1 MiB；永不记录 instruction content。
 
+use crate::agent_hub::git::preview::{
+    confirm_git_import_for_state, confirm_project_mapping_for_state, inspect_git_lanes_for_state,
+    preview_git_import_for_state, ConfirmGitImportRequest, ConfirmProjectMappingRequest,
+};
+use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::replication::sender::{
     get_push_report_for_state, push_selection_for_state, PushAgentHubSelectionRequest,
 };
@@ -18,6 +23,7 @@ use crate::agent_hub::service::{
     SetTargetBindingRequest, SetTargetEnabledRequest, SetTargetPresenceRequest,
     UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
+use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionRequest};
 use crate::backend::control::{self, BackendControlFile, AGENT_HUB_API_VERSION};
 use crate::backend::control_api::CONTROL_RESPONSE_BODY_LIMIT_BYTES;
 use crate::error::AppError;
@@ -218,6 +224,79 @@ async fn dispatch_agent_hub_op(
             let report = get_push_report_for_state(state, &request_id).await?;
             Ok(serde_json::to_value(report)?)
         }
+        "agent_hub.preview_lan_push" => {
+            let req: PushAgentHubSelectionRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("preview_lan_push payload: {e}")))?;
+            let data_dir = crate::config::data_dir()?;
+            let objects = ObjectStore::open(&data_dir)?;
+            let built = build_snapshot(
+                &state.agent_hub_repo,
+                &objects,
+                SnapshotSelectionRequest {
+                    mode: req.mode,
+                    scope_ids: req.scope_ids.clone(),
+                    asset_ids: req.asset_ids.clone(),
+                    hub_project_ids: req.hub_project_ids.clone(),
+                    include_history: req.include_history,
+                    source_replica_id: state.device_id.as_ref().clone(),
+                    limits: None,
+                },
+            )
+            .await?;
+            let credential_bearing = built
+                .envelope
+                .assets
+                .iter()
+                .filter(|a| matches!(a.kind, crate::agent_hub::models::AssetKind::Mcp))
+                .count() as u64;
+            Ok(serde_json::json!({
+                "snapshotHash": built.envelope.snapshot_hash,
+                "snapshotId": built.envelope.snapshot_id,
+                "selectionHash": built.selection_hash,
+                "assetCount": built.envelope.assets.len() as u64,
+                "revisionCount": built.envelope.revisions.len() as u64,
+                "credentialBearingAssetCount": credential_bearing,
+                "peerDeviceIds": req.peer_device_ids,
+                "mode": req.mode,
+                "plaintextBackupDisclosure": crate::agent_hub::git::preview::PLAINTEXT_BACKUP_DISCLOSURE,
+                "hasCredentialBearingAssets": credential_bearing > 0,
+            }))
+        }
+        "agent_hub.start_lan_push" => {
+            let req: PushAgentHubSelectionRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("start_lan_push payload: {e}")))?;
+            let cancel = CancellationToken::new();
+            let report = push_selection_for_state(state, req, &cancel).await?;
+            Ok(serde_json::to_value(report)?)
+        }
+        "agent_hub.get_lan_push" => {
+            let request_id = required_string(&payload, "requestId")?;
+            let report = get_push_report_for_state(state, &request_id).await?;
+            Ok(serde_json::to_value(report)?)
+        }
+        "agent_hub.inspect_git_lanes" => {
+            let report = inspect_git_lanes_for_state(state).await?;
+            Ok(serde_json::to_value(report)?)
+        }
+        "agent_hub.preview_git_import" => {
+            let lane_device_id = required_string(&payload, "laneDeviceId")?;
+            let preview = preview_git_import_for_state(state, &lane_device_id).await?;
+            Ok(serde_json::to_value(preview)?)
+        }
+        "agent_hub.confirm_git_import" => {
+            let req: ConfirmGitImportRequest = serde_json::from_value(payload)
+                .map_err(|e| AppError::validation(format!("confirm_git_import payload: {e}")))?;
+            let outcome = confirm_git_import_for_state(state, req).await?;
+            Ok(serde_json::to_value(outcome)?)
+        }
+        "agent_hub.confirm_project_mapping" => {
+            let req: ConfirmProjectMappingRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("confirm_project_mapping payload: {e}"))
+                })?;
+            let mapping = confirm_project_mapping_for_state(state, req).await?;
+            Ok(serde_json::to_value(mapping)?)
+        }
         other => Err(AppError::validation(format!(
             "未知 agent hub control op: {other}"
         ))),
@@ -245,6 +324,9 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.restore_detached_target"
             | "agent_hub.delete_asset_everywhere"
             | "agent_hub.push_selection"
+            | "agent_hub.start_lan_push"
+            | "agent_hub.confirm_git_import"
+            | "agent_hub.confirm_project_mapping"
     )
 }
 
@@ -409,6 +491,13 @@ mod tests {
             "agent_hub.delete_asset_everywhere",
             "agent_hub.push_selection",
             "agent_hub.get_push_report",
+            "agent_hub.preview_lan_push",
+            "agent_hub.start_lan_push",
+            "agent_hub.get_lan_push",
+            "agent_hub.inspect_git_lanes",
+            "agent_hub.preview_git_import",
+            "agent_hub.confirm_git_import",
+            "agent_hub.confirm_project_mapping",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
@@ -427,8 +516,15 @@ mod tests {
         assert!(is_mutation_op("agent_hub.restore_detached_target"));
         assert!(is_mutation_op("agent_hub.delete_asset_everywhere"));
         assert!(is_mutation_op("agent_hub.push_selection"));
+        assert!(is_mutation_op("agent_hub.start_lan_push"));
+        assert!(is_mutation_op("agent_hub.confirm_git_import"));
+        assert!(is_mutation_op("agent_hub.confirm_project_mapping"));
         assert!(!is_mutation_op("agent_hub.get_status"));
         assert!(!is_mutation_op("agent_hub.preview_project"));
         assert!(!is_mutation_op("agent_hub.get_push_report"));
+        assert!(!is_mutation_op("agent_hub.preview_lan_push"));
+        assert!(!is_mutation_op("agent_hub.inspect_git_lanes"));
+        assert!(!is_mutation_op("agent_hub.preview_git_import"));
+        assert!(!is_mutation_op("agent_hub.get_lan_push"));
     }
 }

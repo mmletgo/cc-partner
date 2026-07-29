@@ -24,15 +24,24 @@ import {
   type AgentHubUpdateInstructionArgs,
   type AgentHubUpdateInstructionBlockArgs,
 } from '@/api/agentHub';
+import { devicesApi } from '@/api/devices';
 import type {
   AgentHubAdoptionPreview,
   AgentHubAssetDetail,
   AgentHubAssetSummary,
+  AgentHubConfirmGitImportOutcome,
+  AgentHubGitImportPreview,
+  AgentHubGitLaneInspectReport,
+  AgentHubLanPushPreview,
+  AgentHubMultiTargetPushReport,
   AgentHubProjectPreview,
+  AgentHubPushSelectionMode,
+  AgentHubResolvedProjectMapping,
   AgentHubStatus,
   AgentTarget,
   DesiredPresence,
 } from '@/lib/types/agentHub';
+import type { LanPushPeerOption } from './LanPushDialog';
 
 /**
  * Controller 返回值。
@@ -102,6 +111,40 @@ export interface UseAgentHubControllerResult {
   ) => Promise<void>;
   restoreDetachedTarget: (args: { assetId?: string; target: AgentTarget }) => Promise<void>;
   removeTarget: (args: { assetId?: string; target: AgentTarget }) => Promise<void>;
+  // Gate C replication surfaces
+  lanPushOpen: boolean;
+  openLanPushDialog: () => void;
+  closeLanPushDialog: () => void;
+  lanPeers: LanPushPeerOption[];
+  lanSelectedPeerIds: string[];
+  toggleLanPeer: (deviceId: string) => void;
+  lanMode: AgentHubPushSelectionMode;
+  setLanMode: (mode: AgentHubPushSelectionMode) => void;
+  lanAssetIdsText: string;
+  setLanAssetIdsText: (value: string) => void;
+  lanHubProjectIdsText: string;
+  setLanHubProjectIdsText: (value: string) => void;
+  lanPreview: AgentHubLanPushPreview | null;
+  lanReport: AgentHubMultiTargetPushReport | null;
+  runLanPreview: () => Promise<void>;
+  runLanStart: () => Promise<void>;
+  gitImportOpen: boolean;
+  openGitImportDrawer: () => void;
+  closeGitImportDrawer: () => void;
+  gitInspectReport: AgentHubGitLaneInspectReport | null;
+  gitSelectedLaneDeviceId: string | null;
+  selectGitLane: (laneDeviceId: string) => void;
+  gitPreview: AgentHubGitImportPreview | null;
+  gitSelectedAssetIds: string[];
+  toggleGitAsset: (assetId: string) => void;
+  gitMappingDrafts: Record<string, string>;
+  setGitMappingDraft: (hubProjectId: string, localProjectId: string) => void;
+  gitConfirmOutcome: AgentHubConfirmGitImportOutcome | null;
+  gitLastMapping: AgentHubResolvedProjectMapping | null;
+  runGitInspect: () => Promise<void>;
+  runGitPreview: () => Promise<void>;
+  runGitConfirmMapping: (hubProjectId: string) => Promise<void>;
+  runGitConfirmImport: () => Promise<void>;
   writeBlocked: boolean;
   upgradeRequired: boolean;
 }
@@ -133,6 +176,23 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  // Gate C LAN push / Git import UI state
+  const [lanPushOpen, setLanPushOpen] = useState(false);
+  const [lanPeers, setLanPeers] = useState<LanPushPeerOption[]>([]);
+  const [lanSelectedPeerIds, setLanSelectedPeerIds] = useState<string[]>([]);
+  const [lanMode, setLanMode] = useState<AgentHubPushSelectionMode>('fullHub');
+  const [lanAssetIdsText, setLanAssetIdsText] = useState('');
+  const [lanHubProjectIdsText, setLanHubProjectIdsText] = useState('');
+  const [lanPreview, setLanPreview] = useState<AgentHubLanPushPreview | null>(null);
+  const [lanReport, setLanReport] = useState<AgentHubMultiTargetPushReport | null>(null);
+  const [gitImportOpen, setGitImportOpen] = useState(false);
+  const [gitInspectReport, setGitInspectReport] = useState<AgentHubGitLaneInspectReport | null>(null);
+  const [gitSelectedLaneDeviceId, setGitSelectedLaneDeviceId] = useState<string | null>(null);
+  const [gitPreview, setGitPreview] = useState<AgentHubGitImportPreview | null>(null);
+  const [gitSelectedAssetIds, setGitSelectedAssetIds] = useState<string[]>([]);
+  const [gitMappingDrafts, setGitMappingDrafts] = useState<Record<string, string>>({});
+  const [gitConfirmOutcome, setGitConfirmOutcome] = useState<AgentHubConfirmGitImportOutcome | null>(null);
+  const [gitLastMapping, setGitLastMapping] = useState<AgentHubResolvedProjectMapping | null>(null);
   const [status, setStatus] = useState<AgentHubStatus | null>(null);
   const [assets, setAssets] = useState<AgentHubAssetSummary[]>([]);
   const [scopeFilter, setScopeFilter] = useState('');
@@ -635,6 +695,203 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     }
   }, [deleteEverywhereAssetId, loadCore, requireSelectedAssetId, selectedAssetId]);
 
+
+  const openLanPushDialog = useCallback(() => {
+    setLanPushOpen(true);
+    setActionError(null);
+    setLanPreview(null);
+    setLanReport(null);
+    void devicesApi.list().then((list) => {
+      if (!mountedRef.current) return;
+      setLanPeers(list.map((d) => ({ deviceId: d.id, name: d.name })));
+    }).catch((reason) => {
+      if (!mountedRef.current) return;
+      setActionError(toErrorMessage(reason));
+    });
+  }, []);
+
+  const closeLanPushDialog = useCallback(() => {
+    if (actionBusy) return;
+    setLanPushOpen(false);
+  }, [actionBusy]);
+
+  const toggleLanPeer = useCallback((deviceId: string) => {
+    setLanSelectedPeerIds((prev) =>
+      prev.includes(deviceId) ? prev.filter((id) => id !== deviceId) : [...prev, deviceId],
+    );
+  }, []);
+
+  const buildLanRequest = useCallback(() => {
+    const assetIds = lanAssetIdsText
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const hubProjectIds = lanHubProjectIdsText
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return {
+      peerDeviceIds: lanSelectedPeerIds,
+      mode: lanMode,
+      scopeIds: [],
+      assetIds,
+      hubProjectIds,
+      includeHistory: true,
+    };
+  }, [lanAssetIdsText, lanHubProjectIdsText, lanMode, lanSelectedPeerIds]);
+
+  const runLanPreview = useCallback(async () => {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const previewResult = await agentHubApi.previewLanPush(buildLanRequest());
+      if (!mountedRef.current) return;
+      setLanPreview(previewResult);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setActionError(toErrorMessage(reason));
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [buildLanRequest]);
+
+  const runLanStart = useCallback(async () => {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const report = await agentHubApi.startLanPush(buildLanRequest());
+      if (!mountedRef.current) return;
+      setLanReport(report);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setActionError(toErrorMessage(reason));
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [buildLanRequest]);
+
+  const openGitImportDrawer = useCallback(() => {
+    setGitImportOpen(true);
+    setActionError(null);
+    setGitInspectReport(null);
+    setGitSelectedLaneDeviceId(null);
+    setGitPreview(null);
+    setGitSelectedAssetIds([]);
+    setGitMappingDrafts({});
+    setGitConfirmOutcome(null);
+    setGitLastMapping(null);
+  }, []);
+
+  const closeGitImportDrawer = useCallback(() => {
+    if (actionBusy) return;
+    setGitImportOpen(false);
+  }, [actionBusy]);
+
+  const selectGitLane = useCallback((laneDeviceId: string) => {
+    setGitSelectedLaneDeviceId(laneDeviceId);
+    setGitPreview(null);
+    setGitSelectedAssetIds([]);
+    setGitConfirmOutcome(null);
+  }, []);
+
+  const runGitInspect = useCallback(async () => {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const report = await agentHubApi.inspectGitLanes();
+      if (!mountedRef.current) return;
+      setGitInspectReport(report);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setActionError(toErrorMessage(reason));
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, []);
+
+  const runGitPreview = useCallback(async () => {
+    if (!gitSelectedLaneDeviceId) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const previewResult = await agentHubApi.previewGitImport(gitSelectedLaneDeviceId);
+      if (!mountedRef.current) return;
+      setGitPreview(previewResult);
+      setGitSelectedAssetIds([]);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setActionError(toErrorMessage(reason));
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [gitSelectedLaneDeviceId]);
+
+  const toggleGitAsset = useCallback((assetId: string) => {
+    setGitSelectedAssetIds((prev) => {
+      // empty means "all"; first toggle materializes all then removes/adds
+      if (prev.length === 0 && gitPreview) {
+        const all = gitPreview.assets.map((a) => a.assetId);
+        return all.filter((id) => id !== assetId);
+      }
+      return prev.includes(assetId) ? prev.filter((id) => id !== assetId) : [...prev, assetId];
+    });
+  }, [gitPreview]);
+
+  const setGitMappingDraft = useCallback((hubProjectId: string, localProjectId: string) => {
+    setGitMappingDrafts((prev) => ({ ...prev, [hubProjectId]: localProjectId }));
+  }, []);
+
+  const runGitConfirmMapping = useCallback(async (hubProjectId: string) => {
+    const local = (gitMappingDrafts[hubProjectId] ?? '').trim();
+    if (!local) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const mapping = await agentHubApi.confirmProjectMapping({
+        hubProjectId,
+        localWorkbenchProjectId: local,
+        optedIn: false,
+      });
+      if (!mountedRef.current) return;
+      setGitLastMapping(mapping);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setActionError(toErrorMessage(reason));
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [gitMappingDrafts]);
+
+  const runGitConfirmImport = useCallback(async () => {
+    if (!gitPreview) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const projectMappings = Object.entries(gitMappingDrafts)
+        .filter(([, v]) => v.trim())
+        .map(([hubProjectId, localWorkbenchProjectId]) => ({
+          hubProjectId,
+          localWorkbenchProjectId: localWorkbenchProjectId.trim(),
+          optedIn: false,
+        }));
+      const outcome = await agentHubApi.confirmGitImport({
+        laneDeviceId: gitPreview.laneDeviceId,
+        snapshotHash: gitPreview.snapshotHash,
+        selectedAssetIds: gitSelectedAssetIds,
+        projectMappings,
+        importUnmappedProjects: true,
+      });
+      if (!mountedRef.current) return;
+      setGitConfirmOutcome(outcome);
+      await loadCore(true);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setActionError(toErrorMessage(reason));
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [gitMappingDrafts, gitPreview, gitSelectedAssetIds, loadCore]);
+
   const writeBlocked = Boolean(status && !status.writeCompatible);
   const upgradeRequired = writeBlocked;
 
@@ -690,6 +947,39 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setTargetPresence,
     restoreDetachedTarget,
     removeTarget,
+    lanPushOpen,
+    openLanPushDialog,
+    closeLanPushDialog,
+    lanPeers,
+    lanSelectedPeerIds,
+    toggleLanPeer,
+    lanMode,
+    setLanMode,
+    lanAssetIdsText,
+    setLanAssetIdsText,
+    lanHubProjectIdsText,
+    setLanHubProjectIdsText,
+    lanPreview,
+    lanReport,
+    runLanPreview,
+    runLanStart,
+    gitImportOpen,
+    openGitImportDrawer,
+    closeGitImportDrawer,
+    gitInspectReport,
+    gitSelectedLaneDeviceId,
+    selectGitLane,
+    gitPreview,
+    gitSelectedAssetIds,
+    toggleGitAsset,
+    gitMappingDrafts,
+    setGitMappingDraft,
+    gitConfirmOutcome,
+    gitLastMapping,
+    runGitInspect,
+    runGitPreview,
+    runGitConfirmMapping,
+    runGitConfirmImport,
     writeBlocked,
     upgradeRequired,
   };

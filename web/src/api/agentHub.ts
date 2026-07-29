@@ -14,16 +14,31 @@ import {
   agentHubAssetDetailDecoder,
   agentHubAssetSummaryDecoder,
   agentHubAssetSummaryListDecoder,
+  agentHubConfirmGitImportOutcomeDecoder,
+  agentHubGitImportPreviewDecoder,
+  agentHubGitLaneInspectReportDecoder,
+  agentHubLanPushPreviewDecoder,
+  agentHubMultiTargetPushReportDecoder,
   agentHubProjectPreviewDecoder,
   agentHubProjectStatusDecoder,
+  agentHubResolvedProjectMappingDecoder,
   agentHubStatusDecoder,
   instructionBlockDtoDecoder,
 } from '@/lib/schemas/agentHub';
 import type {
   AgentHubAssetDetail,
   AgentHubAssetSummary,
+  AgentHubConfirmGitImportOutcome,
+  AgentHubConfirmGitImportRequest,
+  AgentHubConfirmProjectMappingRequest,
+  AgentHubGitImportPreview,
+  AgentHubGitLaneInspectReport,
+  AgentHubLanPushPreview,
+  AgentHubMultiTargetPushReport,
   AgentHubProjectPreview,
   AgentHubProjectStatus,
+  AgentHubPushSelectionRequest,
+  AgentHubResolvedProjectMapping,
   AgentHubStatus,
   AgentTarget,
   DesiredPresence,
@@ -53,6 +68,13 @@ export const AGENT_HUB_COMMANDS = {
   setTargetEnabled: 'agent_hub_set_target_enabled',
   restoreDetachedTarget: 'agent_hub_restore_detached_target',
   deleteAssetEverywhere: 'agent_hub_delete_asset_everywhere',
+  previewLanPush: 'agent_hub_preview_lan_push',
+  startLanPush: 'agent_hub_start_lan_push',
+  getLanPush: 'agent_hub_get_lan_push',
+  inspectGitLanes: 'agent_hub_inspect_git_lanes',
+  previewGitImport: 'agent_hub_preview_git_import',
+  confirmGitImport: 'agent_hub_confirm_git_import',
+  confirmProjectMapping: 'agent_hub_confirm_project_mapping',
 } as const;
 
 /**
@@ -347,5 +369,90 @@ export const agentHubApi = {
       AGENT_HUB_COMMANDS.deleteAssetEverywhere,
       { assetId: args.assetId },
       agentHubAssetSummaryDecoder,
+    ),
+
+  /**
+   * Business Logic: LAN push 前预览 selection 计数/hash（零传输）。
+   * Code Logic: agent_hub_preview_lan_push。
+   */
+  previewLanPush: (request: AgentHubPushSelectionRequest): Promise<AgentHubLanPushPreview> =>
+    invokeDecoded(AGENT_HUB_COMMANDS.previewLanPush, { request }, agentHubLanPushPreviewDecoder),
+
+  /**
+   * Business Logic: 启动源侧 multi-target LAN push。
+   * Code Logic: agent_hub_start_lan_push。
+   */
+  startLanPush: (
+    request: AgentHubPushSelectionRequest,
+  ): Promise<AgentHubMultiTargetPushReport> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.startLanPush,
+      { request },
+      agentHubMultiTargetPushReportDecoder,
+    ),
+
+  /**
+   * Business Logic: 读取 LAN push 进度。
+   * Code Logic: agent_hub_get_lan_push。
+   */
+  getLanPush: (requestId: string): Promise<AgentHubMultiTargetPushReport | null> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.getLanPush,
+      { requestId },
+      {
+        name: 'AgentHubMultiTargetPushReport|null',
+        decode(value, path = '$') {
+          if (value === null || value === undefined) return null;
+          return agentHubMultiTargetPushReportDecoder.decode(value, path);
+        },
+      },
+    ),
+
+  /**
+   * Business Logic: 只读枚举 Git device lanes。
+   * Code Logic: agent_hub_inspect_git_lanes。
+   */
+  inspectGitLanes: (): Promise<AgentHubGitLaneInspectReport> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.inspectGitLanes,
+      undefined,
+      agentHubGitLaneInspectReportDecoder,
+    ),
+
+  /**
+   * Business Logic: Git lane import 预览（零写入）。
+   * Code Logic: agent_hub_preview_git_import。
+   */
+  previewGitImport: (laneDeviceId: string): Promise<AgentHubGitImportPreview> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.previewGitImport,
+      { laneDeviceId },
+      agentHubGitImportPreviewDecoder,
+    ),
+
+  /**
+   * Business Logic: 确认 Git import（hash 精确匹配）。
+   * Code Logic: agent_hub_confirm_git_import。
+   */
+  confirmGitImport: (
+    request: AgentHubConfirmGitImportRequest,
+  ): Promise<AgentHubConfirmGitImportOutcome> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.confirmGitImport,
+      { request },
+      agentHubConfirmGitImportOutcomeDecoder,
+    ),
+
+  /**
+   * Business Logic: 保存 project mapping（默认 not opted-in）。
+   * Code Logic: agent_hub_confirm_project_mapping。
+   */
+  confirmProjectMapping: (
+    request: AgentHubConfirmProjectMappingRequest,
+  ): Promise<AgentHubResolvedProjectMapping> =>
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.confirmProjectMapping,
+      { request },
+      agentHubResolvedProjectMappingDecoder,
     ),
 };
