@@ -12,6 +12,7 @@
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
 pub mod agent_cli;
+pub mod agent_hub;
 mod attention;
 pub mod backend;
 pub mod backup;

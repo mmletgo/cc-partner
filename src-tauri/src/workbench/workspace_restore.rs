@@ -1239,6 +1239,7 @@ mod tests {
                     crate::storage::AgentLedgerRepo::new(pool.clone()),
                 ),
             ),
+            agent_hub_repo: Arc::new(crate::storage::AgentHubRepo::new(pool.clone())),
             workbench_workspace_layout_repo: Arc::new(layout_repo),
             browser_verification: Arc::new(
                 crate::workbench::browser_verification::BrowserVerificationService::new(

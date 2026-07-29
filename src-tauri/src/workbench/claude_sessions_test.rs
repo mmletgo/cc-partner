@@ -1542,6 +1542,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         agent_ledger_service: Arc::new(crate::workbench::agent_ledger::AgentLedgerService::new(
             crate::storage::AgentLedgerRepo::new(pool.clone()),
         )),
+        agent_hub_repo: Arc::new(crate::storage::AgentHubRepo::new(pool.clone())),
         workbench_worktree_repo: Arc::new(WorkbenchWorktreeRepo::new(pool.clone())),
         workbench_browser_repo: Arc::new(WorkbenchBrowserRepo::new(pool.clone())),
         workbench_workspace_layout_repo: Arc::new(

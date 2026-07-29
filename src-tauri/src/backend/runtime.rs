@@ -395,6 +395,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     WorkbenchAgentSessionRepo::ensure_schema(&pool).await?;
     // A9 Agent Metadata Ledger：metadata-only 历史表
     AgentLedgerRepo::ensure_schema(&pool).await?;
+    // Gate A Task1：Multi-CLI Agent Hub canonical schema（幂等 CREATE IF NOT EXISTS）
+    crate::storage::AgentHubRepo::ensure_schema(&pool).await?;
     WorkbenchWorkspaceLayoutRepo::new(pool.clone())
         .ensure_schema()
         .await?;
@@ -494,6 +496,10 @@ pub async fn build_app_state_with_role(
         maintenance_gate.clone(),
     ));
     let agent_ledger_service = Arc::new(AgentLedgerService::new((*agent_ledger_repo).clone()));
+    let agent_hub_repo = Arc::new(crate::storage::AgentHubRepo::with_gate(
+        pool.clone(),
+        maintenance_gate.clone(),
+    ));
     let workbench_worktree_repo = Arc::new(WorkbenchWorktreeRepo::with_gate(
         pool.clone(),
         maintenance_gate.clone(),
@@ -568,6 +574,7 @@ pub async fn build_app_state_with_role(
         workbench_agent_session_repo,
         agent_ledger_repo,
         agent_ledger_service,
+        agent_hub_repo,
         workbench_worktree_repo,
         workbench_browser_repo,
         workbench_workspace_layout_repo,
