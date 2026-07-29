@@ -148,6 +148,8 @@ pub struct AppState {
     pub orchestrator_outbox_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Agent Metadata Ledger 保留清理后台任务取消令牌
     pub agent_ledger_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Multi-CLI Agent Hub owner watch/reconcile 循环取消令牌（仅 Headless；GUI 永不启动）
+    pub agent_hub_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Workbench Claude session 搜索的内存索引，key = worktree_path canonical string。
     /// 首次搜索某 worktree 时 lazy 初始化并启动文件监听。
     pub workbench_claude_session_indexes: Arc<

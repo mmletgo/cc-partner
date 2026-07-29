@@ -596,6 +596,7 @@ pub async fn build_app_state_with_role(
         orchestrator_cancel: Arc::new(Mutex::new(None)),
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
         agent_ledger_cancel: Arc::new(Mutex::new(None)),
+        agent_hub_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
@@ -785,9 +786,14 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                     )
                 },
             );
+            // Gate A Task7：Agent Hub watch/reconcile 仅 Headless owner 启动
+            start_cancelled_task_once(&state.agent_hub_cancel, "Agent Hub runtime", || {
+                crate::agent_hub::AgentHubRuntime::start(state.clone())
+            });
         }
         BackendRuntimeMode::Gui => {
             tracing::info!("GUI 模式跳过 headless 后台任务启动");
+            tracing::info!("GUI 模式跳过 Agent Hub watcher（仅 sidecar owner 监听）");
         }
     }
 }
@@ -809,6 +815,7 @@ pub fn shutdown_backend_runtime(state: &AppState) {
         "Orchestrator remote outbox dispatcher",
     );
     cancel_runtime_token(&state.agent_ledger_cancel, "Agent ledger retention");
+    cancel_runtime_token(&state.agent_hub_cancel, "Agent Hub runtime");
     cancel_runtime_token(&state.health_cancel, "健康监测 daemon");
     cancel_runtime_token(&state.gui_event_relay_cancel, "GUI owner event relay");
 

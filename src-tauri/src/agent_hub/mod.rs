@@ -11,8 +11,9 @@
 //!     Gate A Task 4：instructions（块编译 / OpenCode prelude / 三方 reconcile）；
 //!     Gate A Task 5：project_scope（opt-in preview/enable/refresh checkout bindings）；
 //!     Gate A Task 6：projection（durable jobs + atomic writer + scheduler recovery）；
+//!     Gate A Task 7：runtime（sidecar owner watch/debounce/ticker/de-loop scan）；
 //!     Gate A Task 8：用户级登录自启动（autostart）。
-//!     后续任务再组装 service、runtime。
+//!     后续任务再组装 service 层完整三方 reconcile→revision→多目标 projection 编排。
 
 pub mod autostart;
 pub mod instructions;
@@ -21,6 +22,7 @@ pub mod object_store;
 pub mod project_scope;
 pub mod projection;
 pub mod revision_graph;
+pub mod runtime;
 pub mod targets;
 
 pub use instructions::{
@@ -52,6 +54,10 @@ pub use projection::{
 };
 pub use revision_graph::{
     ContentMergeResult, MergeBaseOutcome, MergePayload, RevisionGraph, MAX_VISITED_REVISIONS,
+};
+pub use runtime::{
+    AgentHubRuntime, ChangedDirLedger, DeLoopScanner, DirtyDebouncer, FakeClock, ScanScope,
+    ScanStats, CHANGED_DIR_TICK, FULL_SCOPE_TICK, WATCH_DEBOUNCE,
 };
 pub use targets::{
     AdapterSupportLevel, AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,

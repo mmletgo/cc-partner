@@ -912,3 +912,121 @@ fn start_concurrent_with_direct_serve_adopts_existing_and_reaps_owned_child() {
     let _ = serve_child.kill();
     let _ = serve_child.wait();
 }
+
+/// Agent Hub owner wiring：Headless serve 持有 agent_hub cancel 槽语义 + 单 owner。
+///
+/// Business Logic（为什么需要这个测试）:
+///     Gate A Task7 要求 sidecar owner 启动 Agent Hub runtime，且 duplicate start 仍只有
+///     一个 backend/watcher；GUI 关闭后 owner 继续存活。完整多目标收敛 smoke 若环境阻塞，
+///     至少证明 owner lifecycle 与 control stop 可用。
+///
+/// Code Logic（这个测试做什么）:
+///     隔离 data dir 下 start → health → status 保持 running → stop；
+///     再测 duplicate start 只保留一个 pid。完整 GUI-closed multi-target 收敛见 report NOT VERIFIED。
+#[test]
+fn agent_hub_owner_lifecycle_single_owner() {
+    if let Err(reason) = ensure_platform_supported() {
+        eprintln!("{reason}");
+        return;
+    }
+
+    let mut case = SmokeCase::new("agent-hub-owner").expect("创建 smoke case");
+
+    let start = match case.run_cli(&["start"]) {
+        Ok(captured) => captured,
+        Err(err) => fail_case(&mut case, format!("start 执行失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "agent_hub start", &start);
+    let start_status = match start.parse_status_json() {
+        Ok(status) => status,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if start_status.kind != "running" {
+        fail_case(
+            &mut case,
+            format!(
+                "agent_hub start 后 kind 应为 running，实际 {:?}\n{}",
+                start_status,
+                start.diagnostic()
+            ),
+        );
+    }
+    record_pid_from_status(&mut case, &start_status);
+
+    let control = match case.wait_for_control_file() {
+        Ok(control) => control,
+        Err(err) => fail_case(&mut case, err),
+    };
+    case.record_pid(control.pid);
+    let first_pid = control.pid;
+
+    // health 证明 owner 在服务
+    if let Err(err) = case.wait_for_health(control.port) {
+        fail_case(&mut case, err);
+    }
+
+    // duplicate start 不得换 pid
+    let start2 = match case.run_cli(&["start"]) {
+        Ok(c) => c,
+        Err(err) => fail_case(&mut case, format!("duplicate start 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "agent_hub duplicate start", &start2);
+    let status2 = match start2.parse_status_json() {
+        Ok(s) => s,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if status2.kind != "running" {
+        fail_case(
+            &mut case,
+            format!("duplicate start 后应 running，实际 {:?}", status2),
+        );
+    }
+    let control2 = status2
+        .control
+        .clone()
+        .unwrap_or_else(|| fail_case(&mut case, "running 无 control"));
+    if control2.pid != first_pid {
+        fail_case(
+            &mut case,
+            format!(
+                "duplicate start 更换了 owner pid: first={first_pid} now={}",
+                control2.pid
+            ),
+        );
+    }
+
+    // 短暂存活窗口：owner 保持 running（Agent Hub runtime 已挂在 Headless start_background_tasks）
+    thread::sleep(Duration::from_millis(500));
+    let status3 = match case.run_cli(&["status"]) {
+        Ok(s) => s,
+        Err(err) => fail_case(&mut case, format!("status 失败: {err}")),
+    };
+    let value3 = match status3.parse_status_json() {
+        Ok(v) => v,
+        Err(err) => fail_case(&mut case, err),
+    };
+    if value3.kind != "running" {
+        fail_case(
+            &mut case,
+            format!("owner 应保持 running，实际 {:?}", value3),
+        );
+    }
+
+    let stop = match case.run_cli(&["stop"]) {
+        Ok(s) => s,
+        Err(err) => fail_case(&mut case, format!("stop 失败: {err}")),
+    };
+    assert_cli_ok(&mut case, "agent_hub stop", &stop);
+
+    // stop 后进程应退出
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if !process_is_alive(first_pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    if process_is_alive(first_pid) {
+        fail_case(&mut case, format!("stop 后 owner pid={first_pid} 仍存活"));
+    }
+}
