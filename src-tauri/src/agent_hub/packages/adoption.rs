@@ -133,6 +133,8 @@ pub enum AdoptionFault {
     ForceActivationFailure,
     /// 激活前篡改源 hash（漂移）
     ForceHashDrift,
+    /// 激活成功后、archive rename 前篡改源 hash（漂移）
+    ForceHashDriftBeforeRename,
 }
 
 /// 纳管引擎（可注入 runner / fault / support bypass）。
@@ -211,8 +213,9 @@ impl AdoptionEngine {
     ///     2) 未知文件 / 目标 package 非空 unmanaged 冲突 → ExternalCollision，源不动
     ///     3) 导入 CAS + 物化 package + support-gated 激活 → inspect/re-scan → archive rename → DB commit
     ///     4) 任意失败保留 legacy 且不暴露第二 discoverable 副本
+    ///     5) 激活后非 Adopted 且 origin 仍在（含 hash drift ExternalCollision）→ reverse_activation
     ///
-    /// Code Logic: prepared 行 → activate → post-activate gate → put_tree_from_directory → rename → commit。
+    /// Code Logic: prepared 行 → activate → post-activate gate → finish_archive → reverse_if_non_adopted。
     pub async fn adopt(&self, request: AdoptionRequest) -> Result<AdoptionOutcome, AppError> {
         let preview = Self::preview(&request)?;
         if preview.requires_confirmation && !request.confirmed {
@@ -503,13 +506,25 @@ impl AdoptionEngine {
 
         let fault = *self.fault.lock().unwrap();
         if matches!(fault, AdoptionFault::CrashBeforeArchive) {
-            // 源仍在；Activated 状态供 recovery 完成或 reverse
+            // 模拟进程崩溃：保留 Activated + legacy 供 recover finish-or-reverse。
+            // 与 abandon 路径不同——recover 负责消除双发现。
             return Ok(AdoptionOutcome::Blocked {
                 reason: "injected_crash_before_archive".into(),
             });
         }
+        if matches!(fault, AdoptionFault::ForceHashDriftBeforeRename) {
+            // 激活后、rename 前外部改写源树（覆盖 finish_archive 的 re-hash 前置条件）
+            let skill_md = preview.origin_path.join("SKILL.md");
+            if skill_md.is_file() {
+                let mut t = fs::read_to_string(&skill_md).unwrap_or_default();
+                t.push_str("\n# post-activate drift\n");
+                let _ = fs::write(&skill_md, t);
+            }
+        }
 
         // 4) archive: rename legacy → private staging
+        // ExternalCollision（含 source_hash_drift_before_rename）等非 Adopted
+        // 且 origin 仍在时必须 reverse_activation，与 post_activate gate / Err 路径一致。
         match self
             .finish_archive_and_commit(
                 &adoption_id,
@@ -522,7 +537,18 @@ impl AdoptionEngine {
             )
             .await
         {
-            Ok(out) => Ok(out),
+            Ok(out) => {
+                reverse_if_post_activate_non_adopted(
+                    &out,
+                    request.discovered.origin.target,
+                    &pkg,
+                    &binding,
+                    &preview.origin_path,
+                    self.runner.as_ref(),
+                    support_bypass,
+                );
+                Ok(out)
+            }
             Err(e) => {
                 // rename/commit 失败：尽量 reverse activation，保留 legacy 单源
                 let _ = reverse_activation(
@@ -530,7 +556,7 @@ impl AdoptionEngine {
                     &pkg,
                     &binding,
                     self.runner.as_ref(),
-                    *self.support_bypass.lock().unwrap(),
+                    support_bypass,
                 );
                 Err(e)
             }
@@ -846,7 +872,7 @@ impl AdoptionEngine {
                                 origin_replica_id: "recovery".into(),
                             };
                             // 临时清除 CrashBeforeDbCommit 类 fault 由调用方负责
-                            return self
+                            let out = self
                                 .finish_archive_and_commit(
                                     &rec.id,
                                     &req,
@@ -857,6 +883,30 @@ impl AdoptionEngine {
                                     &archive,
                                 )
                                 .await;
+                            return match out {
+                                Ok(outcome) => {
+                                    reverse_if_post_activate_non_adopted(
+                                        &outcome,
+                                        rec.target,
+                                        &pkg,
+                                        &binding,
+                                        &origin,
+                                        self.runner.as_ref(),
+                                        bypass,
+                                    );
+                                    Ok(outcome)
+                                }
+                                Err(e) => {
+                                    let _ = reverse_activation(
+                                        rec.target,
+                                        &pkg,
+                                        &binding,
+                                        self.runner.as_ref(),
+                                        bypass,
+                                    );
+                                    Err(e)
+                                }
+                            };
                         }
                     }
                 }
@@ -1601,6 +1651,30 @@ fn path_under_legacy_discover_roots(path: &Path) -> bool {
         || s.contains("\\.agents\\skills")
 }
 
+/// post-activate 非 Adopted 且 legacy origin 仍可发现时 reverse。
+///
+/// Business Logic: hash drift ExternalCollision 等失败不得留下「已激活 managed + 原 legacy」。
+/// CrashBeforeDbCommit（origin 已 rename）与 Adopted 不 reverse，避免零源。
+/// Code Logic: !Adopted && origin.is_dir() → reverse_activation。
+fn should_reverse_post_activate_outcome(outcome: &AdoptionOutcome, origin_path: &Path) -> bool {
+    !matches!(outcome, AdoptionOutcome::Adopted { .. }) && origin_path.is_dir()
+}
+
+/// 对 post-activate 非 Adopted 结果 best-effort reverse（origin 仍在时）。
+fn reverse_if_post_activate_non_adopted(
+    outcome: &AdoptionOutcome,
+    target: AgentTarget,
+    pkg: &GeneratedTargetPackage,
+    binding: &TargetBinding,
+    origin_path: &Path,
+    runner: &dyn ProcessRunner,
+    support_bypass: bool,
+) {
+    if should_reverse_post_activate_outcome(outcome, origin_path) {
+        let _ = reverse_activation(target, pkg, binding, runner, support_bypass);
+    }
+}
+
 /// reverse activation：uninstall/disable plugin，保留 binding/legacy。
 ///
 /// Business Logic: crash recovery 或 post-activate gate 失败时撤销激活，避免双发现。
@@ -1770,7 +1844,12 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
 
-    async fn setup() -> (AdoptionEngine, tempfile::TempDir, PathBuf) {
+    async fn setup() -> (
+        AdoptionEngine,
+        tempfile::TempDir,
+        PathBuf,
+        Arc<FakeProcessRunner>,
+    ) {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("adopt.db");
         let options =
@@ -1790,11 +1869,11 @@ mod tests {
         for _ in 0..32 {
             runner.push_ok(r#"{"plugins":["plugin@cc-partner"]}"#);
         }
-        let engine = AdoptionEngine::new(repo, store, runner);
+        let engine = AdoptionEngine::new(repo, store, runner.clone());
         // 单元测试验证事务语义：inject support bypass（生产路径不绕过）
         engine.inject_support_bypass(true);
         let data = dir.path().to_path_buf();
-        (engine, dir, data)
+        (engine, dir, data, runner)
     }
 
     fn write_skill(root: &Path, name: &str, body: &str) -> PathBuf {
@@ -1858,7 +1937,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_claude_legacy_skill_archives_and_removes_source() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let claude_skills = data.join("home/.claude/skills");
         let skill = write_skill(&claude_skills, "review", "Review carefully.");
         let disc = discovery_for(
@@ -1900,7 +1979,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopt_codex_legacy_skill_archives_and_removes_source() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let agents = data.join("home/.agents/skills");
         let skill = write_skill(&agents, "review", "Codex review.");
         let disc = discovery_for(
@@ -1918,7 +1997,7 @@ mod tests {
 
     #[tokio::test]
     async fn opencode_sees_one_shared_skill_after_both_adoptions() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let claude_skills = data.join("home/.claude/skills");
         let agents = data.join("home/.agents/skills");
         let body = "Shared review body.";
@@ -1963,7 +2042,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_file_preserves_legacy_no_second_copy() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "x");
         #[cfg(unix)]
@@ -1996,7 +2075,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_hash_drift_preserves_legacy() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "stable");
         let disc = discovery_for(
@@ -2011,8 +2090,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_activate_source_hash_drift_reverses_activation() {
+        let (engine, _tmp, data, runner) = setup().await;
+        let root = data.join("home/.claude/skills");
+        let skill = write_skill(&root, "review", "stable");
+        let disc = discovery_for(
+            AgentTarget::Claude,
+            &skill,
+            PortableOriginKind::LegacyStandalone,
+        );
+        engine.inject_fault(AdoptionFault::ForceHashDriftBeforeRename);
+        let out = engine.adopt(request(&data, disc, true)).await.unwrap();
+        assert!(
+            matches!(out, AdoptionOutcome::ExternalCollision { .. }),
+            "post-activate hash drift must ExternalCollision, got {out:?}"
+        );
+        assert!(
+            skill.is_dir(),
+            "legacy origin must remain exactly once after drift"
+        );
+        assert_eq!(
+            count_opencode_compat_skills(&root, &data.join("none"), "review").unwrap(),
+            1,
+            "exactly one legacy discoverable source"
+        );
+        let calls = runner.calls();
+        let reverse_called = calls.iter().any(|c| {
+            c.args
+                .windows(2)
+                .any(|w| w[0] == "plugin" && (w[1] == "uninstall" || w[1] == "remove"))
+        });
+        assert!(
+            reverse_called,
+            "reverse_activation must uninstall/remove plugin; calls={calls:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn failed_activation_preserves_legacy() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "x");
         let disc = discovery_for(
@@ -2028,7 +2144,7 @@ mod tests {
 
     #[tokio::test]
     async fn destination_collision_preserves_legacy() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "x");
         // 真实非空 unmanaged destination（无 magic marker）
@@ -2065,7 +2181,7 @@ mod tests {
 
     #[tokio::test]
     async fn support_gate_blocks_activation_without_bypass() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         engine.inject_support_bypass(false);
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "x");
@@ -2084,7 +2200,7 @@ mod tests {
 
     #[tokio::test]
     async fn crash_before_archive_preserves_legacy_and_recovers() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "x");
         let disc = discovery_for(
@@ -2129,7 +2245,7 @@ mod tests {
 
     #[tokio::test]
     async fn crash_before_db_commit_leaves_recoverable_archive() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "x");
         let disc = discovery_for(
@@ -2159,7 +2275,7 @@ mod tests {
 
     #[tokio::test]
     async fn unconfirmed_user_adoption_is_blocked() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "x");
         let disc = discovery_for(
@@ -2179,7 +2295,7 @@ mod tests {
 
     #[tokio::test]
     async fn mark_pending_legacy_sources_never_deletes_and_freezes() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "new-skill", "x");
         let disc = discovery_for(
@@ -2233,7 +2349,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_freezes_generation_until_confirmed_adopt() {
-        let (engine, _tmp, data) = setup().await;
+        let (engine, _tmp, data, _runner) = setup().await;
         let root = data.join("home/.claude/skills");
         let skill = write_skill(&root, "review", "x");
         let disc = discovery_for(
