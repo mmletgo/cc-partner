@@ -1010,6 +1010,95 @@ pub struct NewProjectionJob {
     pub base_hash: Option<String>,
 }
 
+/// 纳管事务状态（Gate B Task 6）。
+///
+/// Business Logic: prepared→activated→archived→committed；失败/碰撞保留唯一发现源。
+/// Code Logic: camelCase DB token。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdoptionState {
+    /// 已写入 prepared 行
+    Prepared,
+    /// package 已物化并激活
+    Activated,
+    /// 原树已进 CAS 且 legacy 已 rename 到 staging
+    Archived,
+    /// DB 已 commit，staging 可删
+    Committed,
+    /// 外部碰撞
+    ExternalCollision,
+    /// 阻塞
+    Blocked,
+    /// 失败（源应仍在）
+    Failed,
+}
+
+impl AdoptionState {
+    /// 稳定 DB token。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Activated => "activated",
+            Self::Archived => "archived",
+            Self::Committed => "committed",
+            Self::ExternalCollision => "externalCollision",
+            Self::Blocked => "blocked",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// 解析 DB token。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "prepared" => Some(Self::Prepared),
+            "activated" => Some(Self::Activated),
+            "archived" => Some(Self::Archived),
+            "committed" => Some(Self::Committed),
+            "externalCollision" => Some(Self::ExternalCollision),
+            "blocked" => Some(Self::Blocked),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// DB 中的 adoption 行。
+///
+/// Business Logic: crash recovery 用 hash 完成或还原源。
+/// Code Logic: camelCase 持久化字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptionRecord {
+    /// 主键
+    pub id: String,
+    /// 逻辑资产 id（成功后填）
+    pub asset_id: Option<String>,
+    /// 目标
+    pub target: AgentTarget,
+    /// 源路径
+    pub origin_path: String,
+    /// 源 tree hash（prepared 时）
+    pub origin_tree_hash: String,
+    /// archive CAS tree hash
+    pub archive_tree_hash: Option<String>,
+    /// materialization id
+    pub materialization_id: Option<String>,
+    /// package id
+    pub package_id: Option<String>,
+    /// staging 绝对路径（rename 目标）
+    pub staging_path: Option<String>,
+    /// 状态
+    pub state: AdoptionState,
+    /// 最近错误
+    pub last_error: Option<String>,
+    /// 是否确认
+    pub confirmed: bool,
+    /// 创建时间
+    pub created_at: String,
+    /// 更新时间
+    pub updated_at: String,
+}
+
 /// 新建 materialization 输入。
 ///
 /// Business Logic（为什么需要这个结构体）:

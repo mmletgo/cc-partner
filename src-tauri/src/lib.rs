@@ -78,13 +78,20 @@ pub use agent_hub::migration::{
 pub use agent_hub::object_store::{
     sha256_hex as agent_hub_sha256_hex, ObjectStore as AgentHubObjectStore,
 };
+pub use agent_hub::packages::activator::FakeProcessRunner;
 pub use agent_hub::projection::{
     AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest, FileWriteRequest,
     ProjectionRequest, ProjectionScheduler, ProjectionWriteFault,
 };
+pub use agent_hub::targets::portable::{
+    hash_skill_directory, DiscoveredPortableAsset, PortableAssetOrigin, PortableDiscoveryStatus,
+    PortableOriginKind,
+};
 pub use agent_hub::{
-    AgentTarget, AssetKind, AssetPolicy, DesiredPresence, NewLogicalAsset, NewScopeNode,
-    NewTargetBinding, ProjectionJobState, ProjectionPayloadKind, RevisionId, ScopeKind,
+    AdoptionEngine, AdoptionFault, AdoptionOutcome, AdoptionRequest, AdoptionState, AgentTarget,
+    AssetKind, AssetPolicy, DesiredPresence, NewLogicalAsset, NewScopeNode, NewTargetBinding,
+    PortableAssetPayload, PortableSkill, ProjectionJobState, ProjectionPayloadKind, RevisionId,
+    ScopeKind,
 };
 pub use models::claude_md::{ClaudeMdRow, CLAUDE_MD_ID};
 pub use storage::AgentHubRepo;

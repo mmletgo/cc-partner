@@ -14,11 +14,11 @@ use crate::agent_hub::assets::{
     canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, PortableAssetPayload,
 };
 use crate::agent_hub::models::{
-    AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
-    Materialization, MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob,
-    NewRevision, NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState,
-    ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
-    ScopeNode, TargetBinding,
+    AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget, AssetKind, AssetPolicy,
+    DesiredPresence, LogicalAsset, Materialization, MaterializationStatus, NewLogicalAsset,
+    NewMaterialization, NewProjectionJob, NewRevision, NewScopeNode, NewTargetBinding,
+    ProjectionJob, ProjectionJobState, ProjectionPayloadKind, Revision, RevisionId,
+    RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
 };
 use crate::agent_hub::object_store::ObjectStore;
 use crate::error::AppError;
@@ -1579,6 +1579,176 @@ impl AgentHubRepo {
         rows.iter().map(row_to_materialization).collect()
     }
 
+    /// 按 (scope, kind, origin_namespace, logical_key) 查找资产。
+    ///
+    /// Business Logic: 纳管同一 skill 名时复用 shared LogicalAsset，避免双资产。
+    /// Code Logic: SELECT 唯一键。
+    pub async fn find_asset_by_key(
+        &self,
+        scope_id: &str,
+        kind: AssetKind,
+        origin_namespace: &str,
+        logical_key: &str,
+    ) -> Result<Option<LogicalAsset>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                    current_revision_id, deleted_at, created_at, updated_at
+             FROM agent_hub_assets
+             WHERE scope_id = ? AND kind = ? AND origin_namespace = ? AND logical_key = ?
+               AND deleted_at IS NULL
+             LIMIT 1",
+        )
+        .bind(scope_id)
+        .bind(kind.as_str())
+        .bind(origin_namespace)
+        .bind(logical_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_asset(&r)).transpose()
+    }
+
+    /// 写入/更新 adoption 行（Gate B Task 6）。
+    ///
+    /// Business Logic: prepared→activated→archived→committed 需可崩溃恢复。
+    /// Code Logic: INSERT OR REPLACE by id。
+    pub async fn upsert_adoption(&self, rec: AdoptionRecord) -> Result<AdoptionRecord, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO agent_hub_adoptions (
+                    id, asset_id, target, origin_path, origin_tree_hash, archive_tree_hash,
+                    materialization_id, package_id, staging_path, state, last_error,
+                    confirmed, created_at, updated_at
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    asset_id=excluded.asset_id,
+                    target=excluded.target,
+                    origin_path=excluded.origin_path,
+                    origin_tree_hash=excluded.origin_tree_hash,
+                    archive_tree_hash=excluded.archive_tree_hash,
+                    materialization_id=excluded.materialization_id,
+                    package_id=excluded.package_id,
+                    staging_path=excluded.staging_path,
+                    state=excluded.state,
+                    last_error=excluded.last_error,
+                    confirmed=excluded.confirmed,
+                    updated_at=excluded.updated_at",
+            )
+            .bind(&rec.id)
+            .bind(rec.asset_id.as_deref())
+            .bind(rec.target.as_str())
+            .bind(&rec.origin_path)
+            .bind(&rec.origin_tree_hash)
+            .bind(rec.archive_tree_hash.as_deref())
+            .bind(rec.materialization_id.as_deref())
+            .bind(rec.package_id.as_deref())
+            .bind(rec.staging_path.as_deref())
+            .bind(rec.state.as_str())
+            .bind(rec.last_error.as_deref())
+            .bind(if rec.confirmed { 1 } else { 0 })
+            .bind(&rec.created_at)
+            .bind(&rec.updated_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(rec)
+        })
+        .await
+    }
+
+    /// 更新 adoption 状态与可选字段。
+    ///
+    /// Business Logic: 事务步骤推进时局部更新，避免整行重写竞态。
+    /// Code Logic: UPDATE SET state/... WHERE id。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_adoption_state(
+        &self,
+        id: &str,
+        state: AdoptionState,
+        last_error: Option<&str>,
+        asset_id: Option<&str>,
+        package_id: Option<&str>,
+        archive_tree_hash: Option<&str>,
+        materialization_id: Option<&str>,
+        staging_path: Option<&str>,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let n = sqlx::query(
+                "UPDATE agent_hub_adoptions
+                 SET state = ?,
+                     last_error = COALESCE(?, last_error),
+                     asset_id = COALESCE(?, asset_id),
+                     package_id = COALESCE(?, package_id),
+                     archive_tree_hash = COALESCE(?, archive_tree_hash),
+                     materialization_id = COALESCE(?, materialization_id),
+                     staging_path = COALESCE(?, staging_path),
+                     updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(state.as_str())
+            .bind(last_error)
+            .bind(asset_id)
+            .bind(package_id)
+            .bind(archive_tree_hash)
+            .bind(materialization_id)
+            .bind(staging_path)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if n == 0 {
+                return Err(AppError::not_found(format!(
+                    "agent_hub_adoption_not_found:{id}"
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 读取单条 adoption。
+    pub async fn get_adoption(&self, id: &str) -> Result<Option<AdoptionRecord>, AppError> {
+        let row = sqlx::query(
+            "SELECT id, asset_id, target, origin_path, origin_tree_hash, archive_tree_hash,
+                    materialization_id, package_id, staging_path, state, last_error,
+                    confirmed, created_at, updated_at
+             FROM agent_hub_adoptions WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_adoption(&r)).transpose()
+    }
+
+    /// 列出全部 adoption（recovery / 测试）。
+    pub async fn list_adoptions(&self) -> Result<Vec<AdoptionRecord>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, origin_path, origin_tree_hash, archive_tree_hash,
+                    materialization_id, package_id, staging_path, state, last_error,
+                    confirmed, created_at, updated_at
+             FROM agent_hub_adoptions
+             ORDER BY updated_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_adoption).collect()
+    }
+
+    /// 列出未完成 adoption（prepared/activated/archived）供 startup recovery。
+    pub async fn list_incomplete_adoptions(&self) -> Result<Vec<AdoptionRecord>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, origin_path, origin_tree_hash, archive_tree_hash,
+                    materialization_id, package_id, staging_path, state, last_error,
+                    confirmed, created_at, updated_at
+             FROM agent_hub_adoptions
+             WHERE state IN ('prepared', 'activated', 'archived')
+             ORDER BY updated_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_adoption).collect()
+    }
+
     /// 列出全部未解决 conflict（Attention 投影用）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -2043,6 +2213,26 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
      ON agent_hub_revision_parents(parent_revision_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_assets_scope
      ON agent_hub_assets(scope_id)",
+    "CREATE TABLE IF NOT EXISTS agent_hub_adoptions (
+        id TEXT PRIMARY KEY,
+        asset_id TEXT,
+        target TEXT NOT NULL,
+        origin_path TEXT NOT NULL,
+        origin_tree_hash TEXT NOT NULL,
+        archive_tree_hash TEXT,
+        materialization_id TEXT,
+        package_id TEXT,
+        staging_path TEXT,
+        state TEXT NOT NULL,
+        last_error TEXT,
+        confirmed INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_adoptions_state
+     ON agent_hub_adoptions(state, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_adoptions_origin
+     ON agent_hub_adoptions(origin_path)",
 ];
 
 /// 升级旧库：为 mappings/bindings 补列与唯一索引。
@@ -2497,6 +2687,37 @@ fn row_to_materialization(row: &SqliteRow) -> Result<Materialization, AppError> 
         observed_external_hash: row.try_get("observed_external_hash")?,
         status,
         last_error: row.try_get("last_error")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// 解析 adoption 行。
+///
+/// Business Logic: crash recovery / UI 需要完整 AdoptionRecord。
+/// Code Logic: 解析 target/state 枚举与 confirmed 整型。
+fn row_to_adoption(row: &SqliteRow) -> Result<AdoptionRecord, AppError> {
+    let target_raw: String = row.try_get("target")?;
+    let target = AgentTarget::parse(&target_raw)
+        .ok_or_else(|| AppError::generic(format!("agent_hub_unknown_agent_target:{target_raw}")))?;
+    let state_raw: String = row.try_get("state")?;
+    let state = AdoptionState::parse(&state_raw).ok_or_else(|| {
+        AppError::generic(format!("agent_hub_unknown_adoption_state:{state_raw}"))
+    })?;
+    let confirmed_i: i64 = row.try_get("confirmed")?;
+    Ok(AdoptionRecord {
+        id: row.try_get("id")?,
+        asset_id: row.try_get("asset_id")?,
+        target,
+        origin_path: row.try_get("origin_path")?,
+        origin_tree_hash: row.try_get("origin_tree_hash")?,
+        archive_tree_hash: row.try_get("archive_tree_hash")?,
+        materialization_id: row.try_get("materialization_id")?,
+        package_id: row.try_get("package_id")?,
+        staging_path: row.try_get("staging_path")?,
+        state,
+        last_error: row.try_get("last_error")?,
+        confirmed: confirmed_i != 0,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

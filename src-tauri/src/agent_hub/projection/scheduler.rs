@@ -224,6 +224,14 @@ impl ProjectionScheduler {
         }
     }
 
+    /// 克隆内部 CAS 句柄（adoption recovery 复用同一 object root）。
+    ///
+    /// Business Logic: owner recovery 不得另开嵌套 CAS 根。
+    /// Code Logic: clone ObjectStore。
+    pub fn object_store_handle(&self) -> ObjectStore {
+        self.object_store.clone()
+    }
+
     /// 测试注入写故障。
     #[cfg(any(test, debug_assertions))]
     pub async fn inject_write_fault(&self, fault: Option<ProjectionWriteFault>) {
