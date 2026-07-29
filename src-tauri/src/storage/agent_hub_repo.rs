@@ -3534,6 +3534,31 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
      ON agent_hub_adoptions(state, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_adoptions_origin
      ON agent_hub_adoptions(origin_path)",
+    // Gate C Task 4：LAN push 幂等 ledger（sourceDeviceId+clientRequestId 非认证标签）
+    "CREATE TABLE IF NOT EXISTS agent_hub_push_requests (
+        source_device_id TEXT NOT NULL,
+        client_request_id TEXT NOT NULL,
+        transfer_id TEXT NOT NULL UNIQUE,
+        selection_hash TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        envelope_json TEXT NOT NULL,
+        outcome_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source_device_id, client_request_id)
+    )",
+    "CREATE TABLE IF NOT EXISTS agent_hub_push_objects (
+        transfer_id TEXT NOT NULL,
+        object_hash TEXT NOT NULL,
+        expected_size INTEGER NOT NULL,
+        received_bytes INTEGER NOT NULL DEFAULT 0,
+        verified INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (transfer_id, object_hash)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_push_requests_status
+     ON agent_hub_push_requests(status, updated_at)",
 ];
 
 /// 升级旧库：为 mappings/bindings 补列与唯一索引。

@@ -233,6 +233,18 @@ pub const CAPABILITY_WORKBENCH_LAN_FLEET_V1: &str = "workbench.lan-fleet.v1";
 ///     字符串常量，列入 `server_protocol_info()`；与 summary 路由原子上线。
 pub const CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1: &str = "workbench.agent-ledger-summary.v1";
 
+/// 能力 token：Agent Hub LAN source-push 三阶段协议
+/// （`POST /api/agent-hub/push/prepare`、`PUT .../objects/:hash`、`POST .../commit`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     源侧 push SnapshotEnvelope v1 前必须确认对端同时具备 prepare/objects/commit；
+///     三路由与本 token 原子上线。`sourceDeviceId`/`clientRequestId`/expected-device 仅为
+///     路由绑定与幂等标签，**不是**身份认证或 LAN 信任。
+///
+/// Code Logic（这个常量做什么）:
+///     字符串常量 `agent-hub.v1`，列入 `server_protocol_info()`（字典序）。
+pub const CAPABILITY_AGENT_HUB_V1: &str = "agent-hub.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -285,6 +297,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
     PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
         capabilities: vec![
+            CAPABILITY_AGENT_HUB_V1.to_string(),
             CAPABILITY_ATTENTION_V1.to_string(),
             CAPABILITY_ATTENTION_V2.to_string(),
             CAPABILITY_CC_HISTORY_PAGED_SYNC_V1.to_string(),
@@ -449,6 +462,7 @@ mod tests {
         assert_eq!(
             info.capabilities,
             vec![
+                "agent-hub.v1".to_string(),
                 "attention.v1".to_string(),
                 "attention.v2".to_string(),
                 "cc-history.paged-sync.v1".to_string(),
@@ -470,6 +484,7 @@ mod tests {
                 "workbench.workspace-safe-restore.v1".to_string(),
             ]
         );
+        assert!(info.supports(CAPABILITY_AGENT_HUB_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
         assert!(info.supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1));
