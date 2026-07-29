@@ -35,6 +35,8 @@ use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintena
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
 use std::sync::Arc;
+#[cfg(any(test, debug_assertions))]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Agent Hub SQLite 仓库。
 ///
@@ -42,11 +44,14 @@ use std::sync::Arc;
 ///     sidecar owner 与单测 fixture 共用同一 schema/语义；生产路径共享 restore 写屏障。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 SqlitePool + DatabaseMaintenanceGate。
+///     持有 SqlitePool + DatabaseMaintenanceGate；test/debug 另持 per-instance import fault 槽位。
 #[derive(Clone)]
 pub struct AgentHubRepo {
     pool: SqlitePool,
     gate: Arc<DatabaseMaintenanceGate>,
+    /// 测试/debug：import TX 一次消费故障注入（per-repo，避免并行测试抢进程全局槽）。
+    #[cfg(any(test, debug_assertions))]
+    import_fault: Arc<AtomicU8>,
 }
 
 /// package 删除时单个 component 的决策结果。
@@ -95,9 +100,14 @@ impl AgentHubRepo {
     ///     ordinary writer 与 restore exclusive 必须共用同一 gate。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     保存 pool + Arc gate。
+    ///     保存 pool + Arc gate；test/debug 初始化独立 import fault 槽位。
     pub fn with_gate(pool: SqlitePool, gate: Arc<DatabaseMaintenanceGate>) -> Self {
-        Self { pool, gate }
+        Self {
+            pool,
+            gate,
+            #[cfg(any(test, debug_assertions))]
+            import_fault: Arc::new(AtomicU8::new(0)),
+        }
     }
 
     /// 返回底层 pool（fixture 跨实例验证）。
@@ -3423,21 +3433,22 @@ impl AgentHubRepo {
     ///
     /// Business Logic（为什么需要这个函数）:
     ///     quality_faults 需模拟 CAS 后 / head 更新前崩溃，证明无脏 head。
+    ///     故障槽必须 per-repo，否则并行 `cargo test agent_hub` 会互相偷走注入。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     设置一次消费的 fail point 原子标志。
+    ///     写入本实例 `import_fault` 一次消费的 fail point。
     #[cfg(any(test, debug_assertions))]
     pub fn inject_import_fault(&self, fault: AgentHubImportFault) {
-        IMPORT_FAULT.store(fault.as_u8(), std::sync::atomic::Ordering::SeqCst);
+        self.import_fault.store(fault.as_u8(), Ordering::SeqCst);
     }
 
     /// 读取并清除 import 故障点。
     ///
-    /// Business Logic: 测试断言后复位。
-    /// Code Logic: swap 0。
+    /// Business Logic: 测试断言后复位；不得影响其它 repo 实例。
+    /// Code Logic: 对本实例 `import_fault` swap 0。
     #[cfg(any(test, debug_assertions))]
     pub fn take_import_fault(&self) -> AgentHubImportFault {
-        AgentHubImportFault::from_u8(IMPORT_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst))
+        AgentHubImportFault::from_u8(self.import_fault.swap(0, Ordering::SeqCst))
     }
 
     /// 在单写事务中提交 snapshot import 身份与 DAG 收敛（不含 CAS 写）。
@@ -3458,7 +3469,8 @@ impl AgentHubRepo {
 
             #[cfg(any(test, debug_assertions))]
             {
-                let fault = IMPORT_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst);
+                // per-repo 槽：并行 import 测试互不抢 fault。
+                let fault = self.import_fault.swap(0, Ordering::SeqCst);
                 if fault == AgentHubImportFault::BeforeHeadUpdate.as_u8() {
                     return Err(AppError::generic(
                         "agent_hub_import_injected_before_head_update".to_string(),
@@ -3650,9 +3662,6 @@ impl AgentHubImportFault {
         }
     }
 }
-
-#[cfg(any(test, debug_assertions))]
-static IMPORT_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// 单事务 import 输入（Phase B）。
 ///
