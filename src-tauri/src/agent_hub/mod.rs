@@ -15,6 +15,7 @@
 //!     Gate A Task 8：用户级登录自启动（autostart）。
 //!     Gate A Task 9：service 门面 + Attention conflict/blocked 投影 + control/commands。
 //!     Gate A Task 10：migration（用户 CLAUDE.md seed + N/N+1 dual-write 摘要）。
+//!     Gate D Task 7：Plugin 幂等迁移 preview/confirm + LegacyAgentAssetCompatibilityStatus + N+2 门闩。
 //!     Gate A fix r1：`projection_ops` 生产投影调度 + `agent_hub.enabled` 武装路径。
 //!     Gate B Task 1：`assets` typed portable payload（Skill/Command/Agent/MCP）。
 //!     Gate B Task 2：`config_patch` ownership-aware TOML/JSONC 语义 patch。
@@ -73,10 +74,16 @@ pub use instructions::{
     StructuredInstructionIntent,
 };
 pub use migration::{
-    dual_write_legacy_claude_md_summary, migrate_user_claude_md_state,
-    migrate_user_claude_md_state_with, resolve_user_claude_md_content, ClaudeMdMigrationPreview,
-    MigrationDeps, USER_INSTRUCTION_DISPLAY_NAME, USER_INSTRUCTION_LOGICAL_KEY,
-    USER_INSTRUCTION_NAMESPACE, USER_SCOPE_STABLE_ID,
+    confirm_plugin_migration_import, downgrade_compatibility_facade_snapshot,
+    dual_write_legacy_claude_md_summary, legacy_agent_asset_compatibility_status,
+    legacy_facade_policy, migrate_user_claude_md_state, migrate_user_claude_md_state_with,
+    n_plus_two_removal_allowed, preview_plugin_migration, resolve_user_claude_md_content,
+    version_cmp, ClaudeMdMigrationPreview, DowngradeFacadeSnapshot,
+    LegacyAgentAssetCompatibilityStatus, LegacyFacadePolicy, MigrationDeps,
+    PluginMigrationConfirmResult, PluginMigrationPreview, PluginMigrationPreviewItem,
+    AGENT_HUB_GA_VERSION, EARLIEST_LEGACY_REMOVAL_VERSION, STABLE_MIGRATION_EVIDENCE_ID,
+    USER_INSTRUCTION_DISPLAY_NAME, USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE,
+    USER_SCOPE_STABLE_ID,
 };
 pub use models::{
     compute_asset_aggregate_status, AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget,

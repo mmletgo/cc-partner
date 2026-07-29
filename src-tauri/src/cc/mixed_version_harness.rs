@@ -905,4 +905,20 @@ mod agent_hub_n_n1_tests {
     fn agent_hub_and_cc_history_both_generations() {
         assert_agent_hub_and_cc_history_both_generations();
     }
+
+    /// Business Logic: N/N+1 兼容窗口内旧 CC history 与 agent-hub.v1 同宣告；N+2 门闩无 evidence 不删。
+    /// Code Logic: capability 断言 + migration N+2 status。
+    #[test]
+    fn n_plus_two_keeps_legacy_cc_routes_until_evidence() {
+        use crate::agent_hub::migration::{
+            legacy_agent_asset_compatibility_status, n_plus_two_removal_allowed,
+            AGENT_HUB_GA_VERSION,
+        };
+        assert_agent_hub_and_cc_history_both_generations();
+        let status = legacy_agent_asset_compatibility_status(AGENT_HUB_GA_VERSION);
+        assert!(!status.removal_allowed);
+        assert!(status.legacy_routes_registered);
+        assert!(!n_plus_two_removal_allowed("0.10.0"));
+        assert!(!crate::claude_code_assets::legacy_facade_allows_cas_gc());
+    }
 }
