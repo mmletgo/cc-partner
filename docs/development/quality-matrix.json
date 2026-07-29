@@ -1297,6 +1297,51 @@
         "docs/development/testing.md"
       ],
       "status": "NOT VERIFIED"
+    },
+    {
+      "id": "L3-AGENT-HUB-B-CLI-001",
+      "surface": "agent-hub",
+      "level": "L3",
+      "tests": [
+        "src-tauri/tests/agent_hub_cli_contract.rs"
+      ],
+      "command": "cd src-tauri && CC_PARTNER_L3_TARGET=claude cargo test --locked --test agent_hub_cli_contract -- --ignored --nocapture --test-threads=1",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "not executed in default CI",
+        "requires pinned CLI installers on runner",
+        "hosted runner may lack Claude/Codex/OpenCode"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-b-portable-assets.md"
+      ],
+      "status": "NOT VERIFIED"
+    },
+    {
+      "id": "L0-AGENT-HUB-SUPPORT-001",
+      "surface": "agent-hub",
+      "level": "L0",
+      "tests": [
+        "src-tauri/src/agent_hub/support"
+      ],
+      "command": "cd src-tauri && cargo test --locked agent_hub::support --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real CLI install",
+        "pinned multi-version matrix"
+      ],
+      "docs": [
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-b-portable-assets.md"
+      ]
     }
   ]
 }
