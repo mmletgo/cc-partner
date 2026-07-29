@@ -753,3 +753,17 @@ fn discovered_git_worktree_row_reuses_existing_row_for_same_path() {
     assert_eq!(row.branch.as_deref(), Some("feature/a"));
     assert_eq!(row.path, "/repo/worktrees/feature-a");
 }
+
+/// Business Logic（为什么需要这个测试）:
+///     Agent Hub project opt-in 依赖稳定的 Git remote fingerprint。
+///
+/// Code Logic（这个测试做什么）:
+///     断言 workbench::projects::normalize_git_remote_fingerprint 规范化 https URL。
+#[test]
+fn agent_hub_git_remote_fingerprint_helper_is_stable() {
+    use crate::workbench::projects::normalize_git_remote_fingerprint;
+    assert_eq!(
+        normalize_git_remote_fingerprint("https://GitHub.com/Org/Repo.git/"),
+        "https://github.com/org/repo"
+    );
+}
