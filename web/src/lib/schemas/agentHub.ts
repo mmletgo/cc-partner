@@ -13,13 +13,25 @@
 import type {
   AgentHubAssetDetail,
   AgentHubAssetSummary,
+  AgentHubConfirmGitImportOutcome,
   AgentHubConflictDto,
+  AgentHubGitAssetChangeCounts,
+  AgentHubGitAssetDiffEntry,
+  AgentHubGitImportPreview,
+  AgentHubGitLaneInspectReport,
+  AgentHubGitLaneSummary,
+  AgentHubLanPushPreview,
+  AgentHubMultiTargetPushReport,
   AgentHubProbe,
+  AgentHubProjectMappingCandidate,
   AgentHubProjectPreview,
   AgentHubProjectStatus,
+  AgentHubResolvedProjectMapping,
   AgentHubSnapshot,
+  AgentHubSnapshotImportOutcome,
   AgentHubStatus,
   AgentHubTargetCell,
+  AgentHubTargetPushOutcome,
   AgentTarget,
   AssetAggregateStatus,
   DesiredPresence,
@@ -305,3 +317,149 @@ export const agentHubProjectStatusDecoder: Decoder<AgentHubProjectStatus> = {
     return obj as AgentHubProjectStatus;
   },
 };
+
+
+/**
+ * Business Logic: LAN push preview 只读解码。
+ * Code Logic: objectDecoder counts/hashes。
+ */
+export const agentHubLanPushPreviewDecoder: Decoder<AgentHubLanPushPreview> = objectDecoder(
+  'AgentHubLanPushPreview',
+  {
+    snapshotHash: stringDecoder,
+    snapshotId: stringDecoder,
+    selectionHash: stringDecoder,
+    assetCount: numberDecoder,
+    revisionCount: numberDecoder,
+    credentialBearingAssetCount: numberDecoder,
+    peerDeviceIds: arrayDecoder(stringDecoder),
+    mode: stringDecoder,
+    plaintextBackupDisclosure: stringDecoder,
+    hasCredentialBearingAssets: booleanDecoder,
+  },
+);
+
+export const agentHubTargetPushOutcomeDecoder: Decoder<AgentHubTargetPushOutcome> = objectDecoder(
+  'AgentHubTargetPushOutcome',
+  {
+    peerDeviceId: stringDecoder,
+    peerLabel: stringDecoder,
+    clientRequestId: stringDecoder,
+    status: stringDecoder,
+    retryable: booleanDecoder,
+    errorCode: optionalDecoder(nullableDecoder(stringDecoder)),
+    transferId: optionalDecoder(nullableDecoder(stringDecoder)),
+    missingObjectCount: numberDecoder,
+    transferredObjectCount: numberDecoder,
+    updatedAt: stringDecoder,
+  },
+);
+
+export const agentHubMultiTargetPushReportDecoder: Decoder<AgentHubMultiTargetPushReport> =
+  objectDecoder('AgentHubMultiTargetPushReport', {
+    requestId: stringDecoder,
+    selectionHash: stringDecoder,
+    snapshotHash: stringDecoder,
+    status: stringDecoder,
+    targets: arrayDecoder(agentHubTargetPushOutcomeDecoder),
+  });
+
+export const agentHubGitLaneSummaryDecoder: Decoder<AgentHubGitLaneSummary> = objectDecoder(
+  'AgentHubGitLaneSummary',
+  {
+    laneDeviceId: stringDecoder,
+    snapshotHash: stringDecoder,
+    snapshotId: stringDecoder,
+    sourceReplicaId: stringDecoder,
+    assetCount: numberDecoder,
+    revisionCount: numberDecoder,
+    status: stringDecoder,
+    errorCode: optionalDecoder(nullableDecoder(stringDecoder)),
+  },
+);
+
+export const agentHubGitLaneInspectReportDecoder: Decoder<AgentHubGitLaneInspectReport> =
+  objectDecoder('AgentHubGitLaneInspectReport', {
+    workdirPresent: booleanDecoder,
+    lanes: arrayDecoder(agentHubGitLaneSummaryDecoder),
+    localDeviceId: stringDecoder,
+  });
+
+export const agentHubGitAssetChangeCountsDecoder: Decoder<AgentHubGitAssetChangeCounts> =
+  objectDecoder('AgentHubGitAssetChangeCounts', {
+    added: numberDecoder,
+    modified: numberDecoder,
+    deleted: numberDecoder,
+    conflict: numberDecoder,
+    unchanged: numberDecoder,
+    credentialBearing: numberDecoder,
+  });
+
+export const agentHubGitAssetDiffEntryDecoder: Decoder<AgentHubGitAssetDiffEntry> = objectDecoder(
+  'AgentHubGitAssetDiffEntry',
+  {
+    assetId: stringDecoder,
+    kind: stringDecoder,
+    logicalKey: stringDecoder,
+    displayName: stringDecoder,
+    changeKind: stringDecoder,
+    hasCredential: booleanDecoder,
+    localHead: optionalDecoder(nullableDecoder(stringDecoder)),
+    remoteHead: optionalDecoder(nullableDecoder(stringDecoder)),
+    remoteDeleted: booleanDecoder,
+  },
+);
+
+export const agentHubProjectMappingCandidateDecoder: Decoder<AgentHubProjectMappingCandidate> =
+  objectDecoder('AgentHubProjectMappingCandidate', {
+    hubProjectId: stringDecoder,
+    candidateKind: stringDecoder,
+    candidateExternalId: stringDecoder,
+    localWorkbenchProjectId: optionalDecoder(nullableDecoder(stringDecoder)),
+  });
+
+export const agentHubResolvedProjectMappingDecoder: Decoder<AgentHubResolvedProjectMapping> =
+  objectDecoder('AgentHubResolvedProjectMapping', {
+    hubProjectId: stringDecoder,
+    localWorkbenchProjectId: optionalDecoder(nullableDecoder(stringDecoder)),
+    optedIn: booleanDecoder,
+  });
+
+export const agentHubGitImportPreviewDecoder: Decoder<AgentHubGitImportPreview> = objectDecoder(
+  'AgentHubGitImportPreview',
+  {
+    laneDeviceId: stringDecoder,
+    snapshotId: stringDecoder,
+    snapshotHash: stringDecoder,
+    sourceReplicaId: stringDecoder,
+    assetCount: numberDecoder,
+    revisionCount: numberDecoder,
+    changeCounts: agentHubGitAssetChangeCountsDecoder,
+    assets: arrayDecoder(agentHubGitAssetDiffEntryDecoder),
+    projectCandidates: arrayDecoder(agentHubProjectMappingCandidateDecoder),
+    resolvedMappings: arrayDecoder(agentHubResolvedProjectMappingDecoder),
+    plaintextBackupDisclosure: stringDecoder,
+    hasCredentialBearingAssets: booleanDecoder,
+  },
+);
+
+export const agentHubSnapshotImportOutcomeDecoder: Decoder<AgentHubSnapshotImportOutcome> =
+  objectDecoder('AgentHubSnapshotImportOutcome', {
+    snapshotId: stringDecoder,
+    snapshotHash: stringDecoder,
+    importedAssetIds: arrayDecoder(stringDecoder),
+    insertedRevisions: numberDecoder,
+    dedupedRevisions: numberDecoder,
+    headsAdvanced: numberDecoder,
+    conflictsOpened: numberDecoder,
+    projectionsScheduled: numberDecoder,
+    importedObjectHashes: arrayDecoder(stringDecoder),
+  });
+
+export const agentHubConfirmGitImportOutcomeDecoder: Decoder<AgentHubConfirmGitImportOutcome> =
+  objectDecoder('AgentHubConfirmGitImportOutcome', {
+    laneDeviceId: stringDecoder,
+    snapshotHash: stringDecoder,
+    import: agentHubSnapshotImportOutcomeDecoder,
+    resolvedMappings: arrayDecoder(agentHubResolvedProjectMappingDecoder),
+  });

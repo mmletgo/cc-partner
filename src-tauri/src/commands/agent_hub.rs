@@ -8,6 +8,12 @@
 //!     HeadlessOwner → AgentHubService；GuiClient → BackendControlClient agent_hub_*；
 //!     mutation 前 client 调用 require_agent_hub_write_compatibility。
 
+use crate::agent_hub::git::preview::{
+    confirm_git_import_for_state, confirm_project_mapping_for_state, inspect_git_lanes_for_state,
+    preview_git_import_for_state, ConfirmGitImportOutcome, ConfirmGitImportRequest,
+    ConfirmProjectMappingRequest, GitImportPreview, GitLaneInspectReport,
+};
+use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
 use crate::agent_hub::replication::sender::{
     get_push_report_for_state, push_selection_for_state, MultiTargetPushReport,
@@ -20,6 +26,8 @@ use crate::agent_hub::service::{
     SetTargetBindingRequest, SetTargetEnabledRequest, SetTargetPresenceRequest,
     UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
+use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionRequest};
+use crate::agent_hub::snapshot::importer::ResolvedProjectMapping;
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control::AGENT_HUB_API_VERSION;
 use crate::backend::control_client::BackendControlClient;
@@ -351,6 +359,155 @@ pub async fn agent_hub_get_push_report(
     get_push_report_for_state(state.inner(), &request_id).await
 }
 
+/// Business Logic: LAN push 前预览 selection 计数/hash（零传输、零 import）。
+/// Code Logic: build_snapshot once；只返回 hash/counts，不 push。
+#[tauri::command]
+pub async fn agent_hub_preview_lan_push(
+    state: State<'_, AppState>,
+    request: PushAgentHubSelectionRequest,
+) -> Result<serde_json::Value, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_preview_lan_push(request)
+            .await;
+    }
+    preview_lan_push_for_state(state.inner(), request).await
+}
+
+/// Business Logic: 启动源侧 multi-target LAN push（别名 start_lan_push）。
+/// Code Logic: 复用 push_selection_for_state。
+#[tauri::command]
+pub async fn agent_hub_start_lan_push(
+    state: State<'_, AppState>,
+    request: PushAgentHubSelectionRequest,
+) -> Result<MultiTargetPushReport, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_start_lan_push(request).await;
+    }
+    let cancel = CancellationToken::new();
+    push_selection_for_state(state.inner(), request, &cancel).await
+}
+
+/// Business Logic: 读取 LAN push 进度（别名 get_lan_push）。
+/// Code Logic: 复用 get_push_report_for_state。
+#[tauri::command]
+pub async fn agent_hub_get_lan_push(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<Option<MultiTargetPushReport>, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_get_lan_push(&request_id)
+            .await;
+    }
+    get_push_report_for_state(state.inner(), &request_id).await
+}
+
+/// Business Logic: 只读枚举 Git device lanes。
+/// Code Logic: inspect_git_lanes_for_state。
+#[tauri::command]
+pub async fn agent_hub_inspect_git_lanes(
+    state: State<'_, AppState>,
+) -> Result<GitLaneInspectReport, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_inspect_git_lanes()
+            .await;
+    }
+    inspect_git_lanes_for_state(state.inner()).await
+}
+
+/// Business Logic: Git lane import 预览（零 Hub 写入）。
+/// Code Logic: preview_git_import_for_state。
+#[tauri::command]
+pub async fn agent_hub_preview_git_import(
+    state: State<'_, AppState>,
+    lane_device_id: String,
+) -> Result<GitImportPreview, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_preview_git_import(&lane_device_id)
+            .await;
+    }
+    preview_git_import_for_state(state.inner(), &lane_device_id).await
+}
+
+/// Business Logic: 确认 Git import（hash 精确匹配，否则 previewStale）。
+/// Code Logic: mutation + SnapshotImporter。
+#[tauri::command]
+pub async fn agent_hub_confirm_git_import(
+    state: State<'_, AppState>,
+    request: ConfirmGitImportRequest,
+) -> Result<ConfirmGitImportOutcome, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_confirm_git_import(request).await;
+    }
+    confirm_git_import_for_state(state.inner(), request).await
+}
+
+/// Business Logic: 保存 project mapping（默认 not opted-in）。
+/// Code Logic: mutation；不猜测路径。
+#[tauri::command]
+pub async fn agent_hub_confirm_project_mapping(
+    state: State<'_, AppState>,
+    request: ConfirmProjectMappingRequest,
+) -> Result<ResolvedProjectMapping, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_confirm_project_mapping(request).await;
+    }
+    confirm_project_mapping_for_state(state.inner(), request).await
+}
+
+/// LAN push 预览：build selection 但不传输。
+///
+/// Business Logic: 用户确认 peers/mode 前看到 asset/revision 计数与 snapshotHash。
+/// Code Logic: build_snapshot → camelCase JSON。
+async fn preview_lan_push_for_state(
+    state: &AppState,
+    request: PushAgentHubSelectionRequest,
+) -> Result<serde_json::Value, AppError> {
+    let data_dir = crate::config::data_dir()?;
+    let objects = ObjectStore::open(&data_dir)?;
+    let built = build_snapshot(
+        &state.agent_hub_repo,
+        &objects,
+        SnapshotSelectionRequest {
+            mode: request.mode,
+            scope_ids: request.scope_ids.clone(),
+            asset_ids: request.asset_ids.clone(),
+            hub_project_ids: request.hub_project_ids.clone(),
+            include_history: request.include_history,
+            source_replica_id: state.device_id.as_ref().clone(),
+            limits: None,
+        },
+    )
+    .await?;
+    let credential_bearing = built
+        .envelope
+        .assets
+        .iter()
+        .filter(|a| matches!(a.kind, crate::agent_hub::models::AssetKind::Mcp))
+        .count() as u64;
+    Ok(serde_json::json!({
+        "snapshotHash": built.envelope.snapshot_hash,
+        "snapshotId": built.envelope.snapshot_id,
+        "selectionHash": built.selection_hash,
+        "assetCount": built.envelope.assets.len() as u64,
+        "revisionCount": built.envelope.revisions.len() as u64,
+        "credentialBearingAssetCount": credential_bearing,
+        "peerDeviceIds": request.peer_device_ids,
+        "mode": request.mode,
+        "plaintextBackupDisclosure": crate::agent_hub::git::preview::PLAINTEXT_BACKUP_DISCLOSURE,
+        "hasCredentialBearingAssets": credential_bearing > 0,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +535,13 @@ mod tests {
             "agent_hub_delete_asset_everywhere",
             "agent_hub_push_selection",
             "agent_hub_get_push_report",
+            "agent_hub_preview_lan_push",
+            "agent_hub_start_lan_push",
+            "agent_hub_get_lan_push",
+            "agent_hub_inspect_git_lanes",
+            "agent_hub_preview_git_import",
+            "agent_hub_confirm_git_import",
+            "agent_hub_confirm_project_mapping",
         ] {
             assert!(src.contains(name), "missing command {name}");
         }
@@ -451,6 +615,13 @@ mod tests {
             "agent_hub.delete_asset_everywhere",
             "agent_hub.push_selection",
             "agent_hub.get_push_report",
+            "agent_hub.preview_lan_push",
+            "agent_hub.start_lan_push",
+            "agent_hub.get_lan_push",
+            "agent_hub.inspect_git_lanes",
+            "agent_hub.preview_git_import",
+            "agent_hub.confirm_git_import",
+            "agent_hub.confirm_project_mapping",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }

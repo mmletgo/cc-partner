@@ -1271,6 +1271,83 @@ impl BackendControlClient {
         .await
     }
 
+    /// Business Logic: LAN push 前预览 selection（只读）。
+    /// Code Logic: agent_hub.preview_lan_push。
+    pub async fn agent_hub_preview_lan_push(
+        &self,
+        req: crate::agent_hub::replication::sender::PushAgentHubSelectionRequest,
+    ) -> Result<serde_json::Value, AppError> {
+        self.agent_hub_op("agent_hub.preview_lan_push", req).await
+    }
+
+    /// Business Logic: 启动源侧 multi-target LAN push（mutation）。
+    /// Code Logic: agent_hub.start_lan_push；长超时。
+    pub async fn agent_hub_start_lan_push(
+        &self,
+        req: crate::agent_hub::replication::sender::PushAgentHubSelectionRequest,
+    ) -> Result<crate::agent_hub::replication::sender::MultiTargetPushReport, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op_with_timeout("agent_hub.start_lan_push", req, Duration::from_secs(360))
+            .await
+    }
+
+    /// Business Logic: 读取 LAN push 进度（只读）。
+    /// Code Logic: agent_hub.get_lan_push。
+    pub async fn agent_hub_get_lan_push(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<crate::agent_hub::replication::sender::MultiTargetPushReport>, AppError>
+    {
+        self.agent_hub_op(
+            "agent_hub.get_lan_push",
+            serde_json::json!({ "requestId": request_id }),
+        )
+        .await
+    }
+
+    /// Business Logic: 只读枚举 Git device lanes。
+    /// Code Logic: agent_hub.inspect_git_lanes。
+    pub async fn agent_hub_inspect_git_lanes(
+        &self,
+    ) -> Result<crate::agent_hub::git::preview::GitLaneInspectReport, AppError> {
+        self.agent_hub_op("agent_hub.inspect_git_lanes", serde_json::json!({}))
+            .await
+    }
+
+    /// Business Logic: Git import 预览（只读，零写入）。
+    /// Code Logic: agent_hub.preview_git_import。
+    pub async fn agent_hub_preview_git_import(
+        &self,
+        lane_device_id: &str,
+    ) -> Result<crate::agent_hub::git::preview::GitImportPreview, AppError> {
+        self.agent_hub_op(
+            "agent_hub.preview_git_import",
+            serde_json::json!({ "laneDeviceId": lane_device_id }),
+        )
+        .await
+    }
+
+    /// Business Logic: 确认 Git import（mutation）。
+    /// Code Logic: agent_hub.confirm_git_import。
+    pub async fn agent_hub_confirm_git_import(
+        &self,
+        req: crate::agent_hub::git::preview::ConfirmGitImportRequest,
+    ) -> Result<crate::agent_hub::git::preview::ConfirmGitImportOutcome, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.confirm_git_import", req).await
+    }
+
+    /// Business Logic: 保存 project mapping（mutation，默认 not opted-in）。
+    /// Code Logic: agent_hub.confirm_project_mapping。
+    pub async fn agent_hub_confirm_project_mapping(
+        &self,
+        req: crate::agent_hub::git::preview::ConfirmProjectMappingRequest,
+    ) -> Result<crate::agent_hub::snapshot::importer::ResolvedProjectMapping, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.confirm_project_mapping", req)
+            .await
+    }
+
     /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。
     ///
     /// Business Logic（为什么需要这个函数）:
