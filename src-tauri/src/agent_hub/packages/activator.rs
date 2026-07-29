@@ -836,7 +836,7 @@ mod tests {
         // 文档化期望 argv（support 放开后 build_plan 应生成）
         let program = PathBuf::from("/usr/bin/claude");
         let marketplace = "/data/agent-hub/materialized-packages/claude/user/pkg";
-        let cmds = vec![
+        let cmds = [
             ArgvPlan {
                 program: program.clone(),
                 args: vec![

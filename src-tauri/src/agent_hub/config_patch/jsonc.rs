@@ -524,8 +524,8 @@ impl JsoncConfigPatcher {
     ///
     /// Business Logic: 父必须是 object；中间路径缺失时 insert 路径。
     /// Code Logic: 递归 re-parse value spans。
-    fn find_member_at_path<'a>(
-        bytes: &'a [u8],
+    fn find_member_at_path(
+        bytes: &[u8],
         tokens: &[Tok],
         root: &ObjectLayer,
         path: &[String],
@@ -710,11 +710,7 @@ impl JsoncConfigPatcher {
                     // insert between { and }
                     out.extend_from_slice(&bytes[..=parent.open]);
                     out.extend_from_slice(insert_body.as_bytes());
-                    out.extend_from_slice(
-                        indent
-                            .trim_end_matches(|c| c == ' ' || c == '\t')
-                            .as_bytes(),
-                    );
+                    out.extend_from_slice(indent.trim_end_matches([' ', '\t']).as_bytes());
                     // closing with less indent — keep original close
                     out.extend_from_slice(&bytes[parent.close..]);
                 } else {

@@ -279,7 +279,7 @@ pub fn unknown_fields_extension(
     let mut ext_obj = serde_json::Map::new();
     let mut diags = Vec::new();
     for (k, v) in fields {
-        if known.iter().any(|kk| *kk == k.as_str()) {
+        if known.contains(&k.as_str()) {
             continue;
         }
         ext_obj.insert(k.clone(), Value::String(v.clone()));
@@ -624,7 +624,7 @@ pub fn scan_agent_markdown_dir(
         let tool_intents = fields
             .get("tools")
             .map(|s| {
-                s.split(|c| c == ',' || c == ' ')
+                s.split([',', ' '])
                     .map(str::trim)
                     .filter(|x| !x.is_empty())
                     .map(|x| x.to_string())

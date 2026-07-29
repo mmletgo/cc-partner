@@ -353,10 +353,10 @@ pub fn load_support_manifest_from_str(json: &str) -> Result<SupportManifest, App
 ///
 /// Business Logic: 缺失 target 视为无合同 → scan-only/blocked。
 /// Code Logic: 线性查找；重复时返回第一个（checker 另验唯一）。
-pub fn find_target_record<'a>(
-    manifest: &'a SupportManifest,
+pub fn find_target_record(
+    manifest: &SupportManifest,
     target: AgentTarget,
-) -> Option<&'a TargetSupportRecord> {
+) -> Option<&TargetSupportRecord> {
     manifest.targets.iter().find(|r| r.target == target)
 }
 
@@ -399,10 +399,7 @@ pub fn parse_semver_core(
         .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))
         .unwrap_or(s);
     // 去掉 build/pre-release 后缀：1.2.3-beta+build → 1.2.3
-    let core = candidate
-        .split(|c| c == '-' || c == '+')
-        .next()
-        .unwrap_or(candidate);
+    let core = candidate.split(['-', '+']).next().unwrap_or(candidate);
     let mut parts = core.split('.');
     let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;

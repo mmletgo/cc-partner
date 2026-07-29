@@ -201,7 +201,7 @@ pub fn redact_sensitive_text(text: &str) -> String {
     if let Some(idx) = out.find("token=") {
         let after = idx + "token=".len();
         let end = out[after..]
-            .find(|c: char| c == '&' || c == ' ' || c == '"' || c == '\'' || c == '>')
+            .find(['&', ' ', '"', '\'', '>'])
             .map(|i| after + i)
             .unwrap_or(out.len());
         out.replace_range(after..end, "<REDACTED>");
@@ -218,7 +218,7 @@ pub fn redact_sensitive_text(text: &str) -> String {
                 .map(|(i, _)| start + i)
                 .unwrap_or(start);
             let end = out[trimmed_start..]
-                .find(|c: char| c == ',' || c == '"' || c == '\'' || c == '\n' || c == '}')
+                .find([',', '"', '\'', '\n', '}'])
                 .map(|i| trimmed_start + i)
                 .unwrap_or(out.len());
             if trimmed_start < end {

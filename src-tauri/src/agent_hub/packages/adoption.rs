@@ -467,20 +467,22 @@ impl AdoptionEngine {
             .await?;
 
         // 3b) activate 后 inspect / discovery 安全门：失败则 reverse + 保留 legacy
+        // 先拷贝 support_bypass，避免 MutexGuard 跨越 await
+        let support_bypass = *self.support_bypass.lock().unwrap();
         if let Err(gate_reason) = post_activate_discovery_gate(
             request.discovered.origin.target,
             &pkg,
             &binding,
             &preview.origin_path,
             self.runner.as_ref(),
-            *self.support_bypass.lock().unwrap(),
+            support_bypass,
         ) {
             let _ = reverse_activation(
                 request.discovered.origin.target,
                 &pkg,
                 &binding,
                 self.runner.as_ref(),
-                *self.support_bypass.lock().unwrap(),
+                support_bypass,
             );
             self.repo
                 .update_adoption_state(
@@ -539,6 +541,7 @@ impl AdoptionEngine {
     ///
     /// Business Logic: Activated 之后唯一合法前进；hash 漂移 fail-closed 不删源。
     /// Code Logic: re-hash → rename → Archived → Synced mat → Committed → 删 staging。
+    #[allow(clippy::too_many_arguments)] // adoption identity + package + archive hash 同事务上下文
     async fn finish_archive_and_commit(
         &self,
         adoption_id: &str,
@@ -2238,7 +2241,7 @@ mod tests {
             &skill,
             PortableOriginKind::LegacyStandalone,
         );
-        mark_pending_legacy_sources(&engine.repo, &[disc.clone()])
+        mark_pending_legacy_sources(&engine.repo, std::slice::from_ref(&disc))
             .await
             .unwrap();
         let assets = engine

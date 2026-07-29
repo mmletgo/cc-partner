@@ -464,6 +464,7 @@ impl AgentHubRepo {
     ///     在开启 SQL 事务前校验 `AssetKind` 与 payload tag 一致并 `validate`；
     ///     Skill 可选校验 CAS 树含 SKILL.md；`canonical_bytes` → `put_blob` →
     ///     `append_revision`（payload_hash + 可选 tree_manifest_hash）。
+    #[allow(clippy::too_many_arguments)] // portable revision CAS 需 origin + parent 全上下文
     pub async fn append_portable_asset_revision(
         &self,
         asset_id: &str,
