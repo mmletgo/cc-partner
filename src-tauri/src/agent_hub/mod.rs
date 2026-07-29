@@ -23,6 +23,7 @@
 //!     Gate B Task 5：`packages` 隔离 managed package 物化 + target activator。
 //!     Gate B Task 6：`packages/adoption` legacy standalone 纳管（激活-before-removal，无双发现）。
 //!     Gate B Task 7：target presence/enabled/detach/delete 语义与聚合状态。
+//!     Gate C Task 1：`snapshot` SnapshotEnvelope v1 + RFC8785 兼容 canonical JSON 子集。
 
 pub mod assets;
 pub mod autostart;
@@ -38,6 +39,7 @@ pub mod projection_ops;
 pub mod revision_graph;
 pub mod runtime;
 pub mod service;
+pub mod snapshot;
 pub mod support;
 pub mod targets;
 
