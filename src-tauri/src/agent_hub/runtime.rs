@@ -508,6 +508,48 @@ fn open_owner_object_store(data_dir: impl AsRef<Path>) -> Result<ObjectStore, Ap
     ObjectStore::open(data_dir)
 }
 
+/// 恢复未完成 adoption（Gate B Task 6）。
+///
+/// Business Logic: crash 后用 hash 完成 archived 或把源从 staging 还原；永不静默双发现。
+/// Code Logic: list_incomplete_adoptions → AdoptionEngine::recover_adoption。
+async fn recover_incomplete_adoptions(
+    repo: &AgentHubRepo,
+    scheduler: &ProjectionScheduler,
+) -> Result<u32, AppError> {
+    use crate::agent_hub::packages::activator::FakeProcessRunner;
+    use crate::agent_hub::packages::adoption::AdoptionEngine;
+    use std::sync::Arc;
+
+    let incomplete = repo.list_incomplete_adoptions().await?;
+    if incomplete.is_empty() {
+        return Ok(0);
+    }
+    // recovery 不重新跑 CLI；仅 DB/filesystem 对账
+    let store = scheduler.object_store_handle();
+    let engine = AdoptionEngine::new(repo.clone(), store, Arc::new(FakeProcessRunner::new()));
+    let mut n = 0u32;
+    for rec in incomplete {
+        match engine.recover_adoption(&rec.id).await {
+            Ok(_) => {
+                n += 1;
+                tracing::info!(
+                    adoption_id = %rec.id,
+                    state = %rec.state.as_str(),
+                    "agent hub adoption recovered"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    adoption_id = %rec.id,
+                    error = %err,
+                    "agent hub adoption recovery item failed"
+                );
+            }
+        }
+    }
+    Ok(n)
+}
+
 /// 生产扫描：对 materialization 做 hash 比较与 projection recovery/run。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -561,6 +603,10 @@ impl ProductionScanner {
                     committed = rec.committed,
                     "agent hub projection recover_on_startup"
                 );
+            }
+            // Gate B Task 6：未完成 adoption 用 hash 完成或恢复源（不自动删除未识别树）
+            if let Err(err) = recover_incomplete_adoptions(&self.repo, &self.scheduler).await {
+                tracing::warn!(error = %err, "agent hub adoption recovery failed");
             }
             self.recovered.store(true, Ordering::SeqCst);
         }

@@ -21,6 +21,7 @@
 //!     Gate B Task 3：targets portable scan/render + Claude assets N/N+1 façade。
 //!     Gate B Task 4：`support` 版本化 adapter support manifest（fail-closed 写能力）。
 //!     Gate B Task 5：`packages` 隔离 managed package 物化 + target activator。
+//!     Gate B Task 6：`packages/adoption` legacy standalone 纳管（激活-before-removal，无双发现）。
 
 pub mod assets;
 pub mod autostart;
@@ -65,20 +66,22 @@ pub use migration::{
     USER_INSTRUCTION_NAMESPACE, USER_SCOPE_STABLE_ID,
 };
 pub use models::{
-    AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
-    Materialization, MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob,
-    NewRevision, NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState,
-    ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
-    ScopeNode, TargetBinding,
+    AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget, AssetKind, AssetPolicy,
+    DesiredPresence, LogicalAsset, Materialization, MaterializationStatus, NewLogicalAsset,
+    NewMaterialization, NewProjectionJob, NewRevision, NewScopeNode, NewTargetBinding,
+    ProjectionJob, ProjectionJobState, ProjectionPayloadKind, Revision, RevisionId,
+    RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
 };
 pub use object_store::{
     sha256_hex, ObjectStore, PutTreeResult, StoredObject, TreeEntry, TreeEntryDiagnostic,
     TreeEntryType, TreeManifest,
 };
 pub use packages::{
-    build_package_id, materialize_package, package_materialized_root, ActivationInspection,
-    ActivationPlan, ActivationResult, ClaudePackageActivator, CodexPackageActivator,
-    GeneratedTargetPackage, ManagedPackageActivator, OpenCodePackageActivator, PackageBuildInput,
+    build_package_id, count_opencode_compat_skills, mark_pending_legacy_sources,
+    materialize_package, package_materialized_root, ActivationInspection, ActivationPlan,
+    ActivationResult, AdoptionEngine, AdoptionFault, AdoptionOutcome, AdoptionPreview,
+    AdoptionRequest, ClaudePackageActivator, CodexPackageActivator, GeneratedTargetPackage,
+    ManagedPackageActivator, OpenCodePackageActivator, PackageBuildInput,
     PackageMaterializationMeta, PackageSkillInput, PLUGIN_SELECTOR,
 };
 pub use project_scope::{
