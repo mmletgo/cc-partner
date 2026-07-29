@@ -19,6 +19,7 @@
 //!     Gate B Task 1：`assets` typed portable payload（Skill/Command/Agent/MCP）。
 //!     Gate B Task 2：`config_patch` ownership-aware TOML/JSONC 语义 patch。
 //!     Gate B Task 3：targets portable scan/render + Claude assets N/N+1 façade。
+//!     Gate B Task 4：`support` 版本化 adapter support manifest（fail-closed 写能力）。
 
 pub mod assets;
 pub mod autostart;
@@ -33,6 +34,7 @@ pub mod projection_ops;
 pub mod revision_graph;
 pub mod runtime;
 pub mod service;
+pub mod support;
 pub mod targets;
 
 pub use assets::{
@@ -99,6 +101,12 @@ pub use service::{
     AgentHubStatusDto, AgentHubTargetBindingDto, AgentHubTargetCellDto, InstructionBlockDto,
     ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
     SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
+};
+pub use support::{
+    builtin_support_manifest, evaluate_target_support, find_target_record, format_probe_identity,
+    load_support_manifest_from_str, parse_semver_core, CapabilitySupport, EvaluatedSupportMode,
+    EvaluatedTargetSupport, ExecutableProbeSpec, RuntimeProbeSnapshot, SupportManifest,
+    TargetCapability, TargetSupportRecord, SUPPORT_MANIFEST_JSON,
 };
 pub use targets::{
     AdapterSupportLevel, AssetAdapter, AssetRenderContext, ClaudeInstructionAdapter,
