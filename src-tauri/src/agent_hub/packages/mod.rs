@@ -30,6 +30,6 @@ pub use adoption::{
 pub use crate::agent_hub::models::{AdoptionRecord, AdoptionState};
 pub use builder::{
     build_package_id, materialize_package, package_materialized_root, GeneratedTargetPackage,
-    PackageBuildInput, PackageMaterializationMeta, PackageSkillInput, MARKETPLACE_NAME,
-    PLUGIN_NAME, PLUGIN_SELECTOR,
+    PackageAgentInput, PackageBuildInput, PackageCommandInput, PackageMaterializationMeta,
+    PackageSkillInput, MARKETPLACE_NAME, PLUGIN_NAME, PLUGIN_SELECTOR,
 };

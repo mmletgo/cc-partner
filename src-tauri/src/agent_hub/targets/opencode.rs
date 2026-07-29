@@ -174,7 +174,8 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
 
     /// 渲染 OpenCode portable 投影。
     ///
-    /// Business Logic: 只写入原生 `.opencode`/config-root 计划路径。
+    /// Business Logic: 只写入原生 `.opencode`/config-root 计划路径；
+    /// Gate D plugin package render 复用同一 portable renderer，residual 默认 source-only。
     /// Code Logic: 委托 `render_portable_payload`。
     fn render_portable_asset(
         &self,

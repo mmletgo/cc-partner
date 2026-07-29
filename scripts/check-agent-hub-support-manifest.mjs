@@ -12,12 +12,14 @@
  *   - 读取 `docs/development/quality-matrix.json` 收集 evidence ID
  *   - 可选比对 `src-tauri/tests/support/agent_hub_l3_snapshots/*.json` 激活命令指纹
  *   - `--gate-b`：严格拒绝 null/空 min/current、无序版本、缺失 target、未知 Supported* evidence
+ *   - `--gate-d`：在 gate-b 基础上校验 `hookMappings`（可为空）；非空项须有 intent/双端/schema/trust/evidence
  *   - `--self-test`：内存 fixture 覆盖主要失败分支
  *   - 仅 Node 内置模块
  *
  * Usage:
  *   node scripts/check-agent-hub-support-manifest.mjs
  *   node scripts/check-agent-hub-support-manifest.mjs --gate-b
+ *   node scripts/check-agent-hub-support-manifest.mjs --gate-d
  *   node scripts/check-agent-hub-support-manifest.mjs --self-test
  */
 
@@ -161,14 +163,15 @@ export function loadActivationSnapshots(repoRoot) {
 /**
  * 校验单份 manifest 对象。
  *
- * Business Logic: --gate-b 拒绝开发态 null 版本；非 gate 模式仍检查结构与隐私。
+ * Business Logic: --gate-b 拒绝开发态 null 版本；--gate-d 额外校验 hookMappings。
  *
  * @param {any} manifest
- * @param {{ gateB?: boolean, evidenceIds?: Set<string>, snapshots?: Record<string, Record<string, string>>, rawText?: string }} options
+ * @param {{ gateB?: boolean, gateD?: boolean, evidenceIds?: Set<string>, snapshots?: Record<string, Record<string, string>>, rawText?: string }} options
  * @returns {string[]} errors
  */
 export function validateSupportManifest(manifest, options = {}) {
   const gateB = Boolean(options.gateB);
+  const gateD = Boolean(options.gateD);
   const evidenceIds = options.evidenceIds ?? new Set();
   const snapshots = options.snapshots ?? {};
   const rawText = options.rawText ?? JSON.stringify(manifest);
@@ -297,13 +300,15 @@ export function validateSupportManifest(manifest, options = {}) {
     }
   }
 
+  checkHookMappings(manifest, evidenceIds, errors, gateD);
+
   return errors;
 }
 
 /**
  * 主校验入口（仓库路径）。
  * @param {string} repoRoot
- * @param {{ gateB?: boolean }} options
+ * @param {{ gateB?: boolean, gateD?: boolean }} options
  * @returns {{ ok: boolean, errors: string[] }}
  */
 export function checkRepo(repoRoot, options = {}) {
@@ -327,6 +332,7 @@ export function checkRepo(repoRoot, options = {}) {
   const snapshots = loadActivationSnapshots(repoRoot);
   const errors = validateSupportManifest(manifest, {
     gateB: options.gateB,
+    gateD: options.gateD,
     evidenceIds,
     snapshots,
     rawText,
@@ -477,6 +483,62 @@ export function runSelfTest() {
 }
 
 /**
+ * 校验 hookMappings 数组（Gate D）。
+ *
+ * Business Logic: 初始可为空；非空项必须 evidence 进 quality-matrix，且双端不同。
+ * Code Logic: 结构 + evidence 存在性。
+ *
+ * @param {any} manifest
+ * @param {Set<string>} matrixIds
+ * @param {string[]} errors
+ * @param {boolean} gateD
+ */
+export function checkHookMappings(manifest, matrixIds, errors, gateD) {
+  if (!gateD) return;
+  if (manifest.hookMappings == null) {
+    errors.push('hook_mappings_missing_field');
+    return;
+  }
+  if (!Array.isArray(manifest.hookMappings)) {
+    errors.push('hook_mappings_not_array');
+    return;
+  }
+  // empty is valid
+  for (let i = 0; i < manifest.hookMappings.length; i++) {
+    const m = manifest.hookMappings[i];
+    const prefix = `hookMappings[${i}]`;
+    if (!m || typeof m !== 'object') {
+      errors.push(`${prefix}_not_object`);
+      continue;
+    }
+    for (const key of [
+      'intent',
+      'sourceTarget',
+      'destinationTarget',
+      'schemaVersion',
+      'trustModel',
+      'evidenceId',
+    ]) {
+      if (m[key] == null || m[key] === '') {
+        errors.push(`${prefix}_missing_${key}`);
+      }
+    }
+    if (m.sourceTarget === m.destinationTarget) {
+      errors.push(`${prefix}_same_source_destination`);
+    }
+    if (Number(m.schemaVersion) === 0 || Number.isNaN(Number(m.schemaVersion))) {
+      errors.push(`${prefix}_schema_version_invalid`);
+    }
+    if (m.trustModel && m.trustModel !== 'exactContract') {
+      errors.push(`${prefix}_unknown_trust_model:${m.trustModel}`);
+    }
+    if (m.evidenceId && !matrixIds.has(String(m.evidenceId))) {
+      errors.push(`${prefix}_evidence_not_in_matrix:${m.evidenceId}`);
+    }
+  }
+}
+
+/**
  * CLI 入口。
  * @returns {number}
  */
@@ -486,11 +548,12 @@ function main() {
     runSelfTest();
     return 0;
   }
-  const gateB = args.includes('--gate-b');
-  const result = checkRepo(REPO_ROOT, { gateB });
+  const gateB = args.includes('--gate-b') || args.includes('--gate-d');
+  const gateD = args.includes('--gate-d');
+  const result = checkRepo(REPO_ROOT, { gateB, gateD });
   if (!result.ok) {
     console.error(
-      `check-agent-hub-support-manifest: FAIL (${gateB ? 'gate-b' : 'default'})`,
+      `check-agent-hub-support-manifest: FAIL (${gateD ? 'gate-d' : gateB ? 'gate-b' : 'default'})`,
     );
     for (const e of result.errors) {
       console.error(`  - ${e}`);
@@ -498,7 +561,7 @@ function main() {
     return 1;
   }
   console.log(
-    `check-agent-hub-support-manifest: OK (${gateB ? 'gate-b' : 'default'})`,
+    `check-agent-hub-support-manifest: OK (${gateD ? 'gate-d' : gateB ? 'gate-b' : 'default'})`,
   );
   return 0;
 }

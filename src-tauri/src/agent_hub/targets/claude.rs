@@ -170,7 +170,8 @@ impl AssetAdapter for ClaudeInstructionAdapter {
 
     /// 渲染 Claude portable 投影。
     ///
-    /// Business Logic: 投影到 skills/commands/agents/mcp 相对路径计划，不写盘。
+    /// Business Logic: 投影到 skills/commands/agents/mcp 相对路径计划，不写盘；
+    /// Gate D plugin package render 复用同一 `render_portable_payload` 入口。
     /// Code Logic: 委托 `render_portable_payload`。
     fn render_portable_asset(
         &self,

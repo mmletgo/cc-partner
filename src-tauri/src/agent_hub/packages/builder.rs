@@ -7,6 +7,7 @@
 //! Code Logic（这个模块做什么）:
 //!     渲染 target 可见内容到 sibling staging，校验 manifest，hash 目录树，原子 rename 到
 //!     materialized-packages 根；记录 invocation alias / namespace 元数据。
+//!     Gate D：可选 command/agent 文件与 residual 同 target 旁路写入。
 
 use crate::agent_hub::models::AgentTarget;
 use crate::agent_hub::object_store::sha256_hex;
@@ -62,13 +63,43 @@ impl PackageSkillInput {
     }
 }
 
+/// package 内 Command 投影文件输入。
+///
+/// Business Logic: Gate D package render 可把 portable Command 一并物化进 managed package。
+/// Code Logic: name + markdown 正文。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageCommandInput {
+    /// 逻辑资产 id
+    pub logical_asset_id: String,
+    /// 命令名
+    pub name: String,
+    /// commands/<name>.md 正文
+    pub markdown: String,
+}
+
+/// package 内 Agent 投影文件输入。
+///
+/// Business Logic: Gate D package render 可把 portable Agent 一并物化。
+/// Code Logic: name + markdown 正文。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageAgentInput {
+    /// 逻辑资产 id
+    pub logical_asset_id: String,
+    /// agent 名
+    pub name: String,
+    /// agents/<name>.md 正文
+    pub markdown: String,
+}
+
 /// package 构建输入。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     builder 需要 data_dir、target、scope 与可见资产集合。
 ///
 /// Code Logic（这个结构体做什么）:
-///     聚合构建参数。
+///     聚合构建参数；commands/agents 默认空以保持 Gate B 兼容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageBuildInput {
@@ -80,6 +111,12 @@ pub struct PackageBuildInput {
     pub scope_id: String,
     /// 进入 package 的 skills
     pub skills: Vec<PackageSkillInput>,
+    /// 可选 commands
+    #[serde(default)]
+    pub commands: Vec<PackageCommandInput>,
+    /// 可选 agents
+    #[serde(default)]
+    pub agents: Vec<PackageAgentInput>,
 }
 
 /// 物化元数据（写入 package 根 `.cc-partner-package.json`）。
@@ -193,7 +230,13 @@ pub fn materialize_package(input: &PackageBuildInput) -> Result<GeneratedTargetP
         .iter()
         .filter(|s| s.visible_on(input.target))
         .collect();
-    let logical_ids: Vec<String> = visible.iter().map(|s| s.logical_asset_id.clone()).collect();
+    let mut logical_ids: Vec<String> = visible.iter().map(|s| s.logical_asset_id.clone()).collect();
+    for c in &input.commands {
+        logical_ids.push(c.logical_asset_id.clone());
+    }
+    for a in &input.agents {
+        logical_ids.push(a.logical_asset_id.clone());
+    }
     let package_id = build_package_id(input.target, &input.scope_id, &logical_ids);
     let dest = package_materialized_root(&input.data_dir)
         .join(input.target.as_str())
@@ -223,12 +266,18 @@ pub fn materialize_package(input: &PackageBuildInput) -> Result<GeneratedTargetP
     match input.target {
         AgentTarget::Claude => {
             write_claude_plugin(&staging, &visible, &mut relative_paths, &mut aliases)?;
+            write_command_files(&staging, &input.commands, &mut relative_paths)?;
+            write_agent_files(&staging, &input.agents, &mut relative_paths)?;
         }
         AgentTarget::Codex => {
             write_codex_plugin(&staging, &visible, &mut relative_paths, &mut aliases)?;
+            write_command_files(&staging, &input.commands, &mut relative_paths)?;
+            write_agent_files(&staging, &input.agents, &mut relative_paths)?;
         }
         AgentTarget::OpenCode => {
             write_opencode_native(&staging, &visible, &mut relative_paths, &mut aliases)?;
+            write_command_files(&staging, &input.commands, &mut relative_paths)?;
+            write_agent_files(&staging, &input.agents, &mut relative_paths)?;
         }
     }
 
@@ -415,6 +464,43 @@ fn skill_md_body(skill: &PackageSkillInput) -> String {
     }
 }
 
+/// 写入 commands/<name>.md。
+///
+/// Business Logic: managed package 需包含 portable Command 投影。
+/// Code Logic: 相对路径 `commands/{name}.md`。
+fn write_command_files(
+    root: &Path,
+    commands: &[PackageCommandInput],
+    relative_paths: &mut Vec<String>,
+) -> Result<(), AppError> {
+    for cmd in commands {
+        let rel = format!("commands/{}.md", sanitize_id_part(&cmd.name));
+        write_bytes(root, &rel, cmd.markdown.as_bytes().to_vec(), relative_paths)?;
+    }
+    Ok(())
+}
+
+/// 写入 agents/<name>.md。
+///
+/// Business Logic: managed package 需包含 portable Agent 投影。
+/// Code Logic: 相对路径 `agents/{name}.md`。
+fn write_agent_files(
+    root: &Path,
+    agents: &[PackageAgentInput],
+    relative_paths: &mut Vec<String>,
+) -> Result<(), AppError> {
+    for agent in agents {
+        let rel = format!("agents/{}.md", sanitize_id_part(&agent.name));
+        write_bytes(
+            root,
+            &rel,
+            agent.markdown.as_bytes().to_vec(),
+            relative_paths,
+        )?;
+    }
+    Ok(())
+}
+
 fn write_meta_file(
     root: &Path,
     meta: &PackageMaterializationMeta,
@@ -575,6 +661,8 @@ mod tests {
             target: AgentTarget::Claude,
             scope_id: "user".into(),
             skills: vec![shared_skill(), target_only_claude(), target_only_codex()],
+            commands: vec![],
+            agents: vec![],
         };
         let pkg = materialize_package(&input).expect("claude package");
         let manifest = pkg.package_root.join(".claude-plugin/plugin.json");
@@ -608,6 +696,8 @@ mod tests {
             target: AgentTarget::Codex,
             scope_id: "user".into(),
             skills: vec![shared_skill(), target_only_claude(), target_only_codex()],
+            commands: vec![],
+            agents: vec![],
         };
         let pkg = materialize_package(&input).expect("codex package");
         assert!(pkg.package_root.join(".codex-plugin/plugin.json").is_file());
@@ -630,6 +720,8 @@ mod tests {
             target: AgentTarget::OpenCode,
             scope_id: "project-demo".into(),
             skills: vec![shared_skill(), target_only_claude()],
+            commands: vec![],
+            agents: vec![],
         };
         let pkg = materialize_package(&input).expect("opencode package");
         assert!(pkg.package_root.join("skills").is_dir());
@@ -656,6 +748,8 @@ mod tests {
             target: AgentTarget::Claude,
             scope_id: "user".into(),
             skills: vec![shared_skill()],
+            commands: vec![],
+            agents: vec![],
         };
         let a = materialize_package(&input).unwrap();
         let b = materialize_package(&input).unwrap();
@@ -696,6 +790,8 @@ mod tests {
             target: AgentTarget::Claude,
             scope_id: "user".into(),
             skills: vec![shared_skill()],
+            commands: vec![],
+            agents: vec![],
         };
         let first = materialize_package(&input).unwrap();
         assert!(first

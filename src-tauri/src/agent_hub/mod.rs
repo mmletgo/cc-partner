@@ -30,6 +30,7 @@
 //!     Gate C Task 5：`replication/sender` 源侧 multi-target LAN push + source ledger + Attention。
 //!     Gate C Task 6：`git` 本机 device-lane 自动备份导出（CloudSyncRuntime 单飞，不自动 import 远端 lane）。
 //!     Gate D Task 1：`plugins` 不可变 PluginPackage/Hook/residual schema 与边表引用。
+//!     Gate D Task 3：`plugins/hook_mapping` + `plugins/render` 证据化 Hook 映射与 package 投影。
 
 pub mod assets;
 pub mod autostart;
@@ -96,18 +97,24 @@ pub use packages::{
     ActivationInspection, ActivationPlan, ActivationResult, AdoptionEngine, AdoptionFault,
     AdoptionOutcome, AdoptionPreview, AdoptionRequest, ClaudePackageActivator,
     CodexPackageActivator, GeneratedTargetPackage, ManagedPackageActivator,
-    OpenCodePackageActivator, PackageBuildInput, PackageMaterializationMeta, PackageSkillInput,
-    PLUGIN_SELECTOR,
+    OpenCodePackageActivator, PackageAgentInput, PackageBuildInput, PackageCommandInput,
+    PackageMaterializationMeta, PackageSkillInput, PLUGIN_SELECTOR,
 };
 pub use plugins::{
-    canonical_plugin_package_bytes, canonical_portable_hook_bytes, decide_component_delete,
-    ensure_component_kind_allowed, ensure_preview_skills_in_cas, from_plugin_package_bytes,
-    from_portable_hook_bytes, import_confirmed, inspect_plugin_source, sort_plugin_package_payload,
-    validate_plugin_package_payload, validate_portable_hook, ComponentDeleteDecision,
-    ComponentOwnership, ComponentPayloadPreview, ComponentPortability, ComponentPreview,
+    builtin_hook_mapping_registry, canonical_plugin_package_bytes, canonical_portable_hook_bytes,
+    decide_component_delete, ensure_component_kind_allowed, ensure_preview_skills_in_cas,
+    evaluate_hook_mapping, from_plugin_package_bytes, from_portable_hook_bytes,
+    hook_mapping_registry_from_manifest, import_confirmed, inspect_plugin_source,
+    merge_activation_into_report, project_plugin_package, render_component_for_target,
+    sort_plugin_package_payload, validate_plugin_package_payload, validate_portable_hook,
+    ComponentDeleteDecision, ComponentOwnership, ComponentPayloadPreview, ComponentPortability,
+    ComponentPreview, ComponentProjectionReport, ComponentTargetStatus,
     ConfirmedPluginDecomposition, DefaultPluginDecomposer, DiscoveredPluginSource, HookEventIntent,
-    PluginComponentRef, PluginDecomposer, PluginDecompositionPreview, PluginPackagePayload,
-    PluginPackageRevision, PluginResidualRef, PortableHook, ResidualKind, ResidualPreview,
+    HookMappingDecision, HookMappingRecord, HookTrustModel, PackageAggregateStatus,
+    PackageProjectionReport, PackageRenderInput, PluginComponentRef, PluginDecomposer,
+    PluginDecompositionPreview, PluginPackagePayload, PluginPackageRevision, PluginResidualRef,
+    PortableHook, ResidualKind, ResidualPreview, ResidualProjectionReport,
+    ResolvedComponentPayload,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,
