@@ -696,7 +696,7 @@ impl SnapshotImporter {
                         &local_head,
                         remote_head,
                         env,
-                        &snapshot_object_loader(env, &self.objects),
+                        &snapshot_object_loader(env, &self.objects, &self.repo),
                     )
                     .await?;
 
@@ -878,8 +878,9 @@ impl SnapshotImporter {
                 .await;
         }
 
-        // remote 可能尚未入库：用 snapshot parents + 本地库 BFS
-        let parent_index = build_parent_index(env, &self.repo).await?;
+        // remote 可能尚未入库：用 snapshot parents + 本地库 BFS。
+        // 必须 seed local/remote heads：本地独有 head 不在 envelope 时仍要能走 parents 求 MCA。
+        let parent_index = build_parent_index(env, &self.repo, &[local_head, remote_head]).await?;
         if is_ancestor_mem(&parent_index, remote_head, local_head) {
             return Ok(ConvergeDecision::AlreadyAncestor);
         }
@@ -1067,36 +1068,43 @@ enum ConvergeDecision {
 struct ObjectLoader<'a> {
     env: &'a SnapshotEnvelopeV1,
     objects: &'a ObjectStore,
-    env_bytes: BTreeMap<String, Vec<u8>>,
+    repo: &'a AgentHubRepo,
 }
 
 fn snapshot_object_loader<'a>(
     env: &'a SnapshotEnvelopeV1,
     objects: &'a ObjectStore,
+    repo: &'a AgentHubRepo,
 ) -> ObjectLoader<'a> {
-    ObjectLoader {
-        env,
-        objects,
-        env_bytes: BTreeMap::new(),
-    }
+    ObjectLoader { env, objects, repo }
 }
 
 impl ObjectLoader<'_> {
+    /// 加载 revision 对应的 InstructionDocument。
+    ///
+    /// Business Logic: multi-replica import 时 local head 已在 SQLite/CAS，通常不在 *incoming*
+    /// envelope；必须能读双方文档才能做不相交双 parent merge。
+    ///
+    /// Code Logic: envelope.payload_hash → 否则 `repo.get_revision` → `objects.get_blob`；
+    /// 仍不可读则 `Ok(None)`（调用方 fail-closed 开 conflict，禁止 LWW）。
     async fn load(&self, rev_id: &str) -> Result<Option<InstructionDocument>, AppError> {
         let hash = if let Some(r) = self.env.revisions.iter().find(|r| r.id == rev_id) {
             r.payload_hash.clone()
+        } else if let Some(r) = self
+            .repo
+            .get_revision(&RevisionId(rev_id.to_string()))
+            .await?
+        {
+            r.payload_hash
         } else {
-            // try db via objects only if we have hash from elsewhere — skip
             None
         };
-        // also try reading from DB via a side channel: get blob if hash known from merge path
         let Some(hash) = hash else {
             return Ok(None);
         };
-        let bytes = if let Some(b) = self.env_bytes.get(&hash) {
-            b.clone()
-        } else {
-            self.objects.get_blob(&hash).await?
+        let bytes = match self.objects.get_blob(&hash).await {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
         };
         if let Ok(doc) = serde_json::from_slice::<InstructionDocument>(&bytes) {
             return Ok(Some(doc));
@@ -1221,13 +1229,18 @@ fn topological_revisions(revs: &[SnapshotRevision]) -> Result<Vec<&SnapshotRevis
 async fn build_parent_index(
     env: &SnapshotEnvelopeV1,
     repo: &AgentHubRepo,
+    seed_ids: &[&str],
 ) -> Result<HashMap<String, Vec<String>>, AppError> {
     let mut idx: HashMap<String, Vec<String>> = HashMap::new();
     for r in &env.revisions {
         idx.insert(r.id.clone(), r.parents.clone());
     }
-    // 补充本地库中已有 revision 的 parents（有界）
+    // 从 envelope 节点 + 调用方 seed（local/remote heads）BFS 补本地 parents。
+    // multi-replica 场景 local head 往往不在 *incoming* envelope，不 seed 则 MCA 为空。
     let mut frontier: VecDeque<String> = idx.keys().cloned().collect();
+    for id in seed_ids {
+        frontier.push_back((*id).to_string());
+    }
     let mut visited = HashSet::new();
     while let Some(id) = frontier.pop_front() {
         if !visited.insert(id.clone()) {
@@ -1417,7 +1430,10 @@ mod tests {
         rev.id
     }
 
-    /// 两副本分叉：不相交块 → merge 双 parent。
+    /// 两副本分叉：不相交块 → 必须产出 dual-parent merge revision。
+    ///
+    /// multi-replica 真实路径：先 import A（base+left）进空 hub；再 import B（base+right），
+    /// 且 B 的 envelope **不**再列出 local-only head left——loader 必须从 DB/CAS 读 local head。
     #[tokio::test]
     async fn disjoint_blocks_merge_with_both_parents() {
         clear_envelope_cache_for_test();
@@ -1455,11 +1471,6 @@ mod tests {
         )
         .await;
 
-        // build snapshot from A at base only? 我们需要 remote 带 right 分支
-        // 重建：从 base 导出后在 B 分叉
-        // 简化：在 A 上再写 right 但不 CAS head（用 expected 失败路径）
-        // 直接构造 B 库：导入 base+left snapshot，再本地 right 分叉
-
         let built = build_snapshot(
             &repo_a,
             &store_a,
@@ -1487,13 +1498,12 @@ mod tests {
             .await
             .unwrap();
         assert!(out.inserted_revisions >= 2);
+        assert_eq!(
+            out.conflicts_opened, 0,
+            "first import must not conflict: {out:?}"
+        );
 
-        // B 在 base 上写 right（需要把 head 回退到 base 再分叉——通过直接 append 用 expected=base 会 conflict）
-        // 改用：在 A 再构造 right 快照导入 B
-        // 在 A 上：我们当前 head=left。创建 right 需要 expected=base 失败。
-        // 直接 SQL-less 路径：在 B 用 append 时 expected=None 无条件推进会 LWW——测试路径用 import 第二个 snapshot。
-
-        // 在独立 repo_r 构造 base→right
+        // 独立 replica R：common base + 不相交 right 块；envelope 不含 left
         let (repo_r, store_r, _dir_r) = test_env().await;
         let user_r = seed_user(&repo_r).await;
         let asset_r = repo_r
@@ -1507,7 +1517,6 @@ mod tests {
             })
             .await
             .unwrap();
-        // 复用相同 revision id；CAS 必须先有 base blob
         store_r
             .put_blob(&store_a.get_blob(&base_h).await.unwrap())
             .await
@@ -1545,19 +1554,6 @@ mod tests {
             })
             .await
             .unwrap();
-        // put blobs into store_b
-        store_b
-            .put_blob(&store_r.get_blob(&right_h).await.unwrap())
-            .await
-            .unwrap();
-        store_b
-            .put_blob(&store_a.get_blob(&base_h).await.unwrap())
-            .await
-            .unwrap();
-        store_b
-            .put_blob(&store_a.get_blob(&left_h).await.unwrap())
-            .await
-            .unwrap();
 
         let built_r = build_snapshot(
             &repo_r,
@@ -1574,44 +1570,55 @@ mod tests {
         )
         .await
         .unwrap();
-        // merge object bytes into store_b via import
-        let mut bytes = built_r.object_bytes.clone();
-        for (k, v) in built.object_bytes {
-            bytes.entry(k).or_insert(v);
-        }
-        // ensure right blob present
-        bytes.insert(right_h.clone(), store_r.get_blob(&right_h).await.unwrap());
 
-        let validated_r = ValidatedSnapshot::from_parts(built_r.envelope, bytes, None).unwrap();
+        // 严格 multi-replica：B envelope 不得再列出 local-only left head
+        assert!(
+            !built_r
+                .envelope
+                .revisions
+                .iter()
+                .any(|r| r.id == left.as_str()),
+            "side-B envelope must not re-list local-only left head"
+        );
+        // 仅带 B 侧 object_bytes（base + right）；left blob 已在 hub CAS
+        let validated_r =
+            ValidatedSnapshot::from_parts(built_r.envelope, built_r.object_bytes, None).unwrap();
         let out2 = importer_b
             .commit_import(validated_r, ConfirmedImportSelection::default())
             .await
             .unwrap();
-        // 不相交块应 merge（双 parent）或至少导入 remote revision 且无 LWW 丢历史
         assert!(
-            out2.inserted_revisions >= 1 || out2.deduped_revisions >= 1,
-            "expected import of remote branch: {out2:?}"
+            out2.inserted_revisions >= 1,
+            "expected remote branch + merge rev: {out2:?}"
         );
+        assert_eq!(
+            out2.conflicts_opened, 0,
+            "pure disjoint blocks must merge without conflict: {out2:?}"
+        );
+
         let local_assets = repo_b.list_assets(None, None).await.unwrap();
         assert_eq!(local_assets.len(), 1);
         let head = local_assets[0].current_revision_id.as_ref().expect("head");
         let head_rev = repo_b.get_revision(head).await.unwrap().unwrap();
-        if head_rev.parents.len() == 2 {
-            let ps: BTreeSet<_> = head_rev
-                .parents
-                .iter()
-                .map(|p| p.as_str().to_string())
-                .collect();
-            assert!(
-                ps.contains(left.as_str()) && ps.contains(right.id.as_str()),
-                "merge parents should be left+right, got {ps:?}"
-            );
-        } else {
-            // 若未产出 merge revision，至少双方 revision 都在库中（非 LWW 抹除）
-            assert!(repo_b.get_revision(&left).await.unwrap().is_some());
-            assert!(repo_b.get_revision(&right.id).await.unwrap().is_some());
-        }
-        let _ = dir_a;
+        assert_eq!(
+            head_rev.parents.len(),
+            2,
+            "must produce dual-parent merge revision, got parents={:?}",
+            head_rev.parents
+        );
+        let ps: BTreeSet<_> = head_rev
+            .parents
+            .iter()
+            .map(|p| p.as_str().to_string())
+            .collect();
+        assert!(
+            ps.contains(left.as_str()) && ps.contains(right.id.as_str()),
+            "merge parents should be left+right, got {ps:?}"
+        );
+        // 双方分支 revision 仍保留（非 LWW 抹除）
+        assert!(repo_b.get_revision(&left).await.unwrap().is_some());
+        assert!(repo_b.get_revision(&right.id).await.unwrap().is_some());
+        let _ = (dir_a, store_b);
     }
 
     /// 同块双侧编辑 → 双 head + conflict。
