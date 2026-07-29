@@ -19,6 +19,15 @@ const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 static SHUTDOWN_NOTIFIER: OnceLock<Mutex<Option<watch::Sender<bool>>>> = OnceLock::new();
 
+/// Agent Hub control API 主版本（写入控制文件 `agentHubApiVersion`）。
+///
+/// Business Logic（为什么需要这个常量）:
+///     GUI 与 backend 通过版本握手决定写路径是否可用；v1 是 Gate A 首个写兼容主版本。
+///
+/// Code Logic（这个常量做什么）:
+///     新建控制文件时填入；缺失/0 视为旧 backend，突变需 `upgradeRequired`。
+pub const AGENT_HUB_API_VERSION: u32 = 1;
+
 /// `/api/health` 响应中后端状态检查需要的字段。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -49,12 +58,14 @@ struct StopRouteResponse {
 ///
 /// Business Logic（为什么需要这个结构）:
 ///     GUI 和后续 `cc-partner-backend` CLI 需要用同一份控制文件识别后端进程、HTTP 端口和设备身份，
-///     从而支持 start/stop/status 的跨进程协作；并携带 versioned owner 描述符供 GUI 判断权威性。
+///     从而支持 start/stop/status 的跨进程协作；并携带 versioned owner 描述符供 GUI 判断权威性；
+///     另携带 Agent Hub API 版本供 GUI/backend 写路径握手。
 ///
 /// Code Logic（这个结构做什么）:
 ///     以 camelCase JSON 保存 pid、port、设备信息、启动时间、控制令牌、
-///     `control_schema_version` 与可选 `owner_instance_id`；读写 helper 直接序列化/反序列化该结构。
-///     schema/owner 字段带 serde default，legacy JSON 可先反序列化再由 authority 分类为 stale。
+///     `control_schema_version`、可选 `owner_instance_id` 与 `agent_hub_api_version`；
+///     读写 helper 直接序列化/反序列化该结构。schema/owner/agentHub 字段带 serde default，
+///     legacy JSON 可先反序列化再由 authority 分类为 stale。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendControlFile {
@@ -70,6 +81,9 @@ pub struct BackendControlFile {
     /// 本 sidecar 进程 owner 实例 id；legacy 文件为 None，不可作权威 owner。
     #[serde(default)]
     pub owner_instance_id: Option<String>,
+    /// Agent Hub 写协议主版本；缺失/0 表示旧 backend，status/preview 可读、mutation 需 upgrade。
+    #[serde(default)]
+    pub agent_hub_api_version: u32,
 }
 
 impl BackendControlFile {
@@ -80,7 +94,7 @@ impl BackendControlFile {
     ///
     /// Code Logic（这个函数做什么）:
     ///     用传入 pid、port、device_id 填充关键字段，并给 device_name、started_at、control_token 提供稳定占位值；
-    ///     schema/owner 默认为 legacy（0/None），需要权威描述符的测试再显式覆盖。
+    ///     schema/owner/agent_hub 默认为 legacy（0/None/0），需要权威描述符的测试再显式覆盖。
     #[cfg(test)]
     pub(crate) fn for_test(pid: u32, port: u16, device_id: &str) -> Self {
         Self {
@@ -92,6 +106,7 @@ impl BackendControlFile {
             control_token: "test-token".to_string(),
             control_schema_version: 0,
             owner_instance_id: None,
+            agent_hub_api_version: 0,
         }
     }
 }
@@ -697,9 +712,11 @@ mod tests {
         let mut file = BackendControlFile::for_test(1, 62116, "device-a");
         file.control_schema_version = 2;
         file.owner_instance_id = Some("owner-a".to_string());
+        file.agent_hub_api_version = AGENT_HUB_API_VERSION;
         let value = serde_json::to_value(&file).unwrap();
         assert_eq!(value["controlSchemaVersion"], 2);
         assert_eq!(value["ownerInstanceId"], "owner-a");
+        assert_eq!(value["agentHubApiVersion"], 1);
     }
 
     /// 验证 legacy 控制文件可反序列化但被分类为 needs_restart，不可作权威。
@@ -721,6 +738,32 @@ mod tests {
         });
         let parsed: BackendControlFile = serde_json::from_value(legacy).unwrap();
         assert!(classify_control_descriptor(&parsed).needs_restart());
+        // 旧文件缺 agentHubApiVersion 时 default 0，允许 status/preview 但拒绝写。
+        assert_eq!(parsed.agent_hub_api_version, 0);
+    }
+
+    /// 缺失 agentHubApiVersion 反序列化为 0。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 backend 控制文件不得因新字段无法解析；GUI 须按 0 做只读握手。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     完整权威字段但无 agentHubApiVersion → agent_hub_api_version == 0。
+    #[test]
+    fn missing_agent_hub_api_version_defaults_to_zero() {
+        let json = serde_json::json!({
+            "pid": 1,
+            "port": 62116,
+            "controlToken": "tok",
+            "deviceId": "device-a",
+            "deviceName": "Desk A",
+            "startedAt": "2026-07-14T00:00:00Z",
+            "controlSchemaVersion": 2,
+            "ownerInstanceId": "owner-a"
+        });
+        let parsed: BackendControlFile = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.agent_hub_api_version, 0);
+        assert_eq!(parsed.control_schema_version, 2);
     }
 
     /// 验证缺少控制文件时状态为停止。

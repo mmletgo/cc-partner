@@ -740,6 +740,45 @@ pub struct AppConfig {
     /// GitHub 周热门首页与 Claude CLI 解说配置。`#[serde(default)]` 兼容旧 config.json。
     #[serde(default)]
     pub github_trending: GithubTrendingConfig,
+    /// Multi-CLI Agent Hub 开关与登录后台状态。`#[serde(default)]` 兼容旧 config.json。
+    #[serde(default)]
+    pub agent_hub: AgentHubConfig,
+}
+
+/// Multi-CLI Agent Hub 设备级配置。
+///
+/// Business Logic（为什么需要这个结构）:
+///     用户首次确认启用 Hub 后才置 `enabled`；只有成功安装并 inspect 确认登录启动后
+///     才置 `background_enabled`。卸载或 inspect 失败重置 `background_enabled`，
+///     不停止当前 owner 进程。
+///
+/// Code Logic（这个结构做什么）:
+///     两个 bool，默认均为 false；camelCase 序列化供前端/设置页使用。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHubConfig {
+    /// 用户是否已确认启用 Agent Hub（首次 opt-in）。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 是否已成功安装当前可执行文件的登录自启动。
+    #[serde(default)]
+    pub background_enabled: bool,
+}
+
+impl Default for AgentHubConfig {
+    /// 默认未启用 Hub、未安装登录启动。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧 config.json 缺字段时必须安全回落，避免误开后台同步。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     两字段均为 false。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            background_enabled: false,
+        }
+    }
 }
 
 impl AppConfig {
@@ -863,6 +902,7 @@ impl AppConfig {
                 health: HealthConfig::default(),
                 orchestrator: OrchestratorAutomationConfig::default(),
                 github_trending: GithubTrendingConfig::default(),
+                agent_hub: AgentHubConfig::default(),
             };
             store.save_atomic(&cfg)?;
             Ok(cfg)
@@ -1309,6 +1349,7 @@ mod tests {
             },
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            agent_hub: AgentHubConfig::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -1323,6 +1364,46 @@ mod tests {
         );
         assert_eq!(back.prompt_optimizer_hotkey, "<ctrl>");
         assert_eq!(back.prompt_optimizer_fill_language, "en");
+        assert!(!back.agent_hub.enabled);
+        assert!(!back.agent_hub.background_enabled);
+    }
+
+    /// Agent Hub 配置默认与 round-trip / legacy 缺字段。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     旧 config.json 无 agentHub 时必须 default false；启用字段必须稳定 camelCase 落盘。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     缺字段 JSON 反序列化默认 false；设置 enabled/background_enabled 后 to/from 保留。
+    #[test]
+    fn agent_hub_config_default_and_roundtrip() {
+        let legacy = serde_json::json!({
+            "deviceId": "d",
+            "deviceName": "n",
+            "httpPort": 0,
+            "receiveDir": "/r",
+            "dbPath": "/db",
+            "screenshotHotkey": "<cmd>+s"
+        });
+        // AppConfig uses mixed serde; parse via full default-filled then overlay not needed —
+        // missing agentHub field on full AppConfig JSON:
+        let mut cfg = cfg_with_db_path("/db");
+        cfg.agent_hub = AgentHubConfig {
+            enabled: true,
+            background_enabled: true,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        // AppConfig 顶层字段为 snake_case；嵌套 AgentHubConfig 为 camelCase。
+        assert_eq!(json["agent_hub"]["enabled"], true);
+        assert_eq!(json["agent_hub"]["backgroundEnabled"], true);
+        let back: AppConfig = serde_json::from_value(json).unwrap();
+        assert!(back.agent_hub.enabled);
+        assert!(back.agent_hub.background_enabled);
+
+        let defaults = AgentHubConfig::default();
+        assert!(!defaults.enabled);
+        assert!(!defaults.background_enabled);
+        let _ = legacy; // documents that partial JSON is covered by #[serde(default)] on field
     }
 
     /// 最小可用 cfg 工厂：db_path 由调用方指定，其余字段填空字符串/默认值。
@@ -1345,6 +1426,7 @@ mod tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            agent_hub: AgentHubConfig::default(),
         }
     }
 

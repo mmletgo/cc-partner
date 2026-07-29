@@ -197,6 +197,7 @@ fn sample_settings_config(data_dir: &Path, device_name: &str) -> AppConfig {
         health: Default::default(),
         orchestrator: Default::default(),
         github_trending: Default::default(),
+        agent_hub: crate::config::AgentHubConfig::default(),
     }
 }
 

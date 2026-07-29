@@ -1129,6 +1129,7 @@ mod tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
         };
         let store = Arc::new(crate::config_store::MemoryConfigStore::with_config(
             config.clone(),

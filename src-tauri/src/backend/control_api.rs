@@ -2111,6 +2111,7 @@ mod tests {
             control_token: token.into(),
             control_schema_version: CONTROL_SCHEMA_VERSION,
             owner_instance_id: Some("owner-a".into()),
+            agent_hub_api_version: crate::backend::control::AGENT_HUB_API_VERSION,
         }
     }
 
@@ -2310,6 +2311,7 @@ mod tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = ConfigRuntime::with_owner(initial, store, "owner-a".into());

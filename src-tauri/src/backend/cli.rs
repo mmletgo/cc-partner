@@ -2,7 +2,7 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     远端设备或 GUI sidecar 模式需要无需桌面窗口即可启动 cc-partner 后端，并能通过
-//!     `start|serve|stop|status|doctor` 管理本机后台进程与健康检查。
+//!     `start|serve|stop|status|doctor|supervise` 管理本机后台进程与健康检查。
 //!
 //! Code Logic（这个模块做什么）:
 //!     提供 `run_from_env()` 入口；`serve` 装配共享 backend runtime 并等待 ctrl-c/control route；
@@ -107,8 +107,9 @@ pub fn run_from_env() -> i32 {
 ///     start/serve/stop/status/doctor 是独立用户入口，需要在同一套解析逻辑中保持用法和退出码契约。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析第二个参数作为子命令；doctor 走独立解析/退出码映射；其余异步命令通过 Tokio runtime 执行；
-///     start/serve/stop/status 成功 0、业务错误 1；未知命令/doctor 解析或采集失败 2。
+///     解析第二个参数作为子命令；doctor 走独立解析/退出码映射；supervise 同步监督循环；
+///     其余异步命令通过 Tokio runtime 执行；start/serve/stop/status/supervise 成功 0、业务错误 1；
+///     未知命令/doctor 解析或采集失败 2。
 fn dispatch<I, S>(args: I) -> i32
 where
     I: IntoIterator<Item = S>,
@@ -121,9 +122,12 @@ where
         Some("start") => map_lifecycle_result(run_async(start())),
         Some("stop") => map_lifecycle_result(run_async(stop())),
         Some("status") => map_lifecycle_result(run_async(print_status())),
+        Some("supervise") => map_lifecycle_result(crate::backend::supervisor::supervise()),
         Some("doctor") => dispatch_doctor(&args[2..]),
         _ => {
-            eprintln!("用法: cc-partner-backend <start|serve|stop|status|doctor [--json]>");
+            eprintln!(
+                "用法: cc-partner-backend <start|serve|stop|status|supervise|doctor [--json]>"
+            );
             2
         }
     }
@@ -764,6 +768,7 @@ fn build_control_file(state: &AppState, port: u16) -> BackendControlFile {
                 Some(id.to_string())
             }
         },
+        agent_hub_api_version: control::AGENT_HUB_API_VERSION,
     }
 }
 
@@ -1389,6 +1394,7 @@ mod tests {
             control_token: "expected-token".to_string(),
             control_schema_version: crate::backend::authority::CONTROL_SCHEMA_VERSION,
             owner_instance_id: Some("owner-test".to_string()),
+            agent_hub_api_version: crate::backend::control::AGENT_HUB_API_VERSION,
         }
     }
 

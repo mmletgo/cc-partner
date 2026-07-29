@@ -18,4 +18,5 @@ pub mod event_bus;
 pub mod logging;
 pub mod runtime;
 pub mod runtime_metrics;
+pub mod supervisor;
 pub mod ui;
