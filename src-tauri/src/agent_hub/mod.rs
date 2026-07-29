@@ -100,10 +100,14 @@ pub use packages::{
     PLUGIN_SELECTOR,
 };
 pub use plugins::{
-    canonical_plugin_package_bytes, canonical_portable_hook_bytes, ensure_component_kind_allowed,
-    from_plugin_package_bytes, from_portable_hook_bytes, sort_plugin_package_payload,
-    validate_plugin_package_payload, validate_portable_hook, ComponentOwnership, HookEventIntent,
-    PluginComponentRef, PluginPackagePayload, PluginResidualRef, PortableHook, ResidualKind,
+    canonical_plugin_package_bytes, canonical_portable_hook_bytes, decide_component_delete,
+    ensure_component_kind_allowed, ensure_preview_skills_in_cas, from_plugin_package_bytes,
+    from_portable_hook_bytes, import_confirmed, inspect_plugin_source, sort_plugin_package_payload,
+    validate_plugin_package_payload, validate_portable_hook, ComponentDeleteDecision,
+    ComponentOwnership, ComponentPayloadPreview, ComponentPortability, ComponentPreview,
+    ConfirmedPluginDecomposition, DefaultPluginDecomposer, DiscoveredPluginSource, HookEventIntent,
+    PluginComponentRef, PluginDecomposer, PluginDecompositionPreview, PluginPackagePayload,
+    PluginPackageRevision, PluginResidualRef, PortableHook, ResidualKind, ResidualPreview,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,

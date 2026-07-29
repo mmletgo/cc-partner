@@ -22,6 +22,7 @@ use crate::agent_hub::models::{
     RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
 };
 use crate::agent_hub::object_store::ObjectStore;
+use crate::agent_hub::plugins::ownership::{decide_component_delete, ComponentDeleteDecision};
 use crate::agent_hub::plugins::{
     canonical_plugin_package_bytes, canonical_portable_hook_bytes, from_plugin_package_bytes,
     from_portable_hook_bytes, sort_plugin_package_payload, validate_plugin_package_payload,
@@ -46,6 +47,34 @@ use std::sync::Arc;
 pub struct AgentHubRepo {
     pool: SqlitePool,
     gate: Arc<DatabaseMaintenanceGate>,
+}
+
+/// package 删除时单个 component 的决策结果。
+///
+/// Business Logic: preview/测试需要 asset id + kind + decision。
+/// Code Logic: 聚合字段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentDeleteOutcome {
+    /// component 逻辑资产 id
+    pub component_asset_id: String,
+    /// component kind
+    pub kind: AssetKind,
+    /// 引用派生决策
+    pub decision: ComponentDeleteDecision,
+}
+
+/// `delete_plugin_package_with_ownership` 的返回。
+///
+/// Business Logic: 调用方需要 package tombstone revision 与每个 child 决策。
+/// Code Logic: package_revision + decisions 列表。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginPackageDeleteResult {
+    /// package 资产 id
+    pub package_asset_id: String,
+    /// package Delete revision
+    pub package_revision: Revision,
+    /// 每个 component 的决策
+    pub component_decisions: Vec<ComponentDeleteOutcome>,
 }
 
 impl AgentHubRepo {
@@ -973,6 +1002,211 @@ impl AgentHubRepo {
             Ok(())
         })
         .await
+    }
+
+    /// 清除 component 的全部 standalone 边。
+    ///
+    /// Business Logic: 显式 standalone 删除路径在 tombstone 前解除边。
+    /// Code Logic: DELETE FROM agent_hub_component_standalone_refs WHERE component_asset_id。
+    pub async fn clear_component_standalone_refs(
+        &self,
+        component_asset_id: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "DELETE FROM agent_hub_component_standalone_refs
+                 WHERE component_asset_id = ?",
+            )
+            .bind(component_asset_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 是否存在 component → standalone 边。
+    ///
+    /// Business Logic: 删除决策 standalone 优先。
+    /// Code Logic: COUNT(*) > 0。
+    pub async fn component_has_standalone_ref(
+        &self,
+        component_asset_id: &str,
+    ) -> Result<bool, AppError> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_hub_component_standalone_refs
+             WHERE component_asset_id = ?",
+        )
+        .bind(component_asset_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// 统计其它 live package head 对该 component 的引用数。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     引用数从边表 + 当前 head 联查，禁止维护计数器；并发须在事务内重读。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     package asset kind=plugin 且 deleted_at IS NULL 且 current_revision_id 边表命中 component；
+    ///     `exclude_package_asset_id` 排除正在删除的 package。
+    pub async fn count_other_live_package_head_refs(
+        &self,
+        component_asset_id: &str,
+        exclude_package_asset_id: Option<&str>,
+    ) -> Result<u64, AppError> {
+        let n: i64 = if let Some(exclude) = exclude_package_asset_id {
+            sqlx::query_scalar(
+                "SELECT COUNT(*)
+                 FROM agent_hub_plugin_components c
+                 INNER JOIN agent_hub_assets a
+                   ON a.current_revision_id = c.package_revision_id
+                 WHERE c.component_asset_id = ?
+                   AND a.kind = 'plugin'
+                   AND a.deleted_at IS NULL
+                   AND a.id != ?",
+            )
+            .bind(component_asset_id)
+            .bind(exclude)
+            .fetch_one(&self.pool)
+            .await?
+        } else {
+            sqlx::query_scalar(
+                "SELECT COUNT(*)
+                 FROM agent_hub_plugin_components c
+                 INNER JOIN agent_hub_assets a
+                   ON a.current_revision_id = c.package_revision_id
+                 WHERE c.component_asset_id = ?
+                   AND a.kind = 'plugin'
+                   AND a.deleted_at IS NULL",
+            )
+            .bind(component_asset_id)
+            .fetch_one(&self.pool)
+            .await?
+        };
+        Ok(n as u64)
+    }
+
+    /// 在删除事务外先读一遍决策（测试/preview）；生产删除路径会事务内重读。
+    ///
+    /// Business Logic: concurrent ref 创建后必须以 fresh read 重算，禁止陈旧计数。
+    /// Code Logic: has_standalone + other_live_package_head_refs → decide_component_delete。
+    pub async fn decide_component_delete(
+        &self,
+        component_asset_id: &str,
+        exclude_package_asset_id: Option<&str>,
+    ) -> Result<ComponentDeleteDecision, AppError> {
+        let has_standalone = self
+            .component_has_standalone_ref(component_asset_id)
+            .await?;
+        let other = self
+            .count_other_live_package_head_refs(component_asset_id, exclude_package_asset_id)
+            .await?;
+        Ok(decide_component_delete(has_standalone, other))
+    }
+
+    /// 删除 package：先 tombstone package，再按引用派生决策处理 component。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     只 tombstone 独占 component；共享/standalone 保留；旧 package revision 不改写。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     1) 读 package head 的 component 边；
+    ///     2) package Delete tombstone（delete_asset_everywhere_atomic）；
+    ///     3) 对每个 component fresh decide；TombstoneOwned 才 append Delete。
+    pub async fn delete_plugin_package_with_ownership(
+        &self,
+        package_asset_id: &str,
+        _store: &ObjectStore,
+        origin_kind: RevisionOriginKind,
+        origin_replica_id: impl Into<String>,
+    ) -> Result<PluginPackageDeleteResult, AppError> {
+        let origin_replica_id = origin_replica_id.into();
+        let package = self
+            .get_asset(package_asset_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("agent_hub_asset_not_found".to_string()))?;
+        if package.kind != AssetKind::Plugin {
+            return Err(AppError::validation(format!(
+                "agent_hub_asset_kind_not_plugin:{}",
+                package.kind.as_str()
+            )));
+        }
+        let Some(head) = package.current_revision_id.clone() else {
+            return Err(AppError::validation(
+                "agent_hub_plugin_no_head_revision".to_string(),
+            ));
+        };
+        // 历史 head 的 component 列表（tombstone 后 head 变为 delete rev，边表仍挂在旧 rev）
+        let components = self
+            .list_plugin_components_for_revision(head.as_str())
+            .await?;
+
+        let package_tombstone = NewRevision {
+            id: RevisionId::new_v7(),
+            asset_lineage_id: package.id.clone(),
+            parents: vec![head.clone()],
+            operation: RevisionOperation::Delete,
+            origin_kind,
+            origin_target: None,
+            origin_replica_id: origin_replica_id.clone(),
+            payload_hash: None,
+            tree_manifest_hash: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expected_parent_id: Some(head.clone()),
+        };
+        let package_revision = self
+            .delete_asset_everywhere_atomic(package_asset_id, package_tombstone, vec![])
+            .await?;
+
+        let mut component_decisions = Vec::new();
+        for cref in components {
+            // 事务后 fresh read（concurrent ref 创建会反映在边表/standalone）
+            let decision = self
+                .decide_component_delete(&cref.asset_id, Some(package_asset_id))
+                .await?;
+            component_decisions.push(ComponentDeleteOutcome {
+                component_asset_id: cref.asset_id.clone(),
+                kind: cref.kind,
+                decision,
+            });
+            if decision != ComponentDeleteDecision::TombstoneOwned {
+                continue;
+            }
+            let comp_asset = match self.get_asset(&cref.asset_id).await? {
+                Some(a) if a.deleted_at.is_none() => a,
+                _ => continue,
+            };
+            let parents = comp_asset
+                .current_revision_id
+                .clone()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let expected = comp_asset.current_revision_id.clone();
+            let tombstone = NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: comp_asset.id.clone(),
+                parents,
+                operation: RevisionOperation::Delete,
+                origin_kind,
+                origin_target: None,
+                origin_replica_id: origin_replica_id.clone(),
+                payload_hash: None,
+                tree_manifest_hash: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expected_parent_id: expected,
+            };
+            let _ = self
+                .delete_asset_everywhere_atomic(&comp_asset.id, tombstone, vec![])
+                .await?;
+        }
+
+        Ok(PluginPackageDeleteResult {
+            package_asset_id: package_asset_id.to_string(),
+            package_revision,
+            component_decisions,
+        })
     }
 
     /// 追加 Hook 资产 revision（PortableHook → CAS）。
