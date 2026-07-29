@@ -3,7 +3,8 @@
 //!
 //! Business Logic（为什么需要这个测试文件）:
 //!     Gate D 必须在隔离 data_dir 下证明：mixed Plugin 的固定 revision 投影、
-//!     per-target full/partial/sourceOnly/activationRequired 聚合、package 删除引用派生
+//!     per-target full/partial/sourceOnly/activationRequired 聚合（activationRequired 走
+//!     自然 ActivationPlan.activation_required 合并，非 force 旗 alone）、package 删除引用派生
 //!     保留 shared/standalone，以及 OpenCode runtime bridge hash / OSC 剥离 /
 //!     preflight fail-closed / Fresh resume CAS 契约。真实 OpenCode TUI 不在本 smoke 宣称。
 //!
@@ -13,7 +14,8 @@
 //!       OpenCode residual 的 per-target 投影；Snapshot residual CAS 闭包；
 //!       package delete preserve shared/standalone。
 //!     - L2-AGENT-HUB-D-RUNTIME-001：bridge generated_source_hash 钉死、preview/materialize/
-//!       verify、OSC 可见剥离、preflight fail-closed、Fresh resume CAS 源码契约。
+//!       verify、OSC 可见剥离、preflight fail-closed、Fresh resume CAS fail-closed 顺序证明
+//!       （Fresh arm 窗口 + CAS 在 plan/write 之前；非宽松全局字符串扫描）。
 //!
 //! NOT VERIFIED（本 smoke 不宣称）:
 //!     - 真实 OpenCode CLI 可见 TUI / session.idle / permission NeedsInput / Ctrl-C takeover
@@ -32,18 +34,21 @@ use app_lib::agent_hub::models::{
 };
 use app_lib::agent_hub::object_store::{TreeEntry, TreeEntryType, TreeManifest};
 use app_lib::agent_hub::plugins::{
-    decide_component_delete, project_plugin_package, ComponentDeleteDecision, ComponentOwnership,
-    ComponentTargetStatus, HookEventIntent, PackageRenderInput, PluginComponentRef,
-    PluginPackagePayload, PluginResidualRef, PortableHook, ResidualKind, ResolvedComponentPayload,
+    decide_component_delete, merge_activation_into_report, project_plugin_package,
+    ComponentDeleteDecision, ComponentOwnership, ComponentTargetStatus, HookEventIntent,
+    PackageRenderInput, PluginComponentRef, PluginPackagePayload, PluginResidualRef, PortableHook,
+    ResidualKind, ResolvedComponentPayload,
 };
 use app_lib::agent_hub::snapshot::builder::{
     build_snapshot, SnapshotSelectionMode, SnapshotSelectionRequest,
 };
+use app_lib::agent_hub::ActivationPlan;
 use app_lib::agent_hub_sha256_hex;
 use app_lib::orchestrator::agent_adapter::{
     opencode_preflight_block_reason, AgentAvailability, AgentProbeResult, AgentProviderId,
     REASON_EXTERNAL_COLLISION, REASON_L3_RUNTIME_EVIDENCE_MISSING, REASON_RUNTIME_BRIDGE_REQUIRED,
 };
+use app_lib::DesiredPresence;
 use app_lib::{
     AgentHubObjectStore, AgentHubRepo, AgentOscDecoder, AgentSessionPhase, AgentTarget,
     OpenCodeBridgeOutcome, OpenCodeEventMapper, OpenCodeOfficialEvent, OpenCodeRuntimeBridge,
@@ -547,20 +552,48 @@ async fn l2_agent_hub_d_plugin_001_mixed_package_projection_and_delete() {
     assert_eq!(hook_cell.target_status, ComponentTargetStatus::SourceOnly);
     assert!(!claude_report.residuals[0].included);
 
-    // Codex activationRequired
-    let codex_report = project_plugin_package(&PackageRenderInput {
+    // Codex activationRequired — natural ActivationPlan path (not force-flag only).
+    // force_activation_required remains a unit-test seam; L2 smoke seeds activator gate.
+    let mut codex_report = project_plugin_package(&PackageRenderInput {
         package: package_payload.clone(),
         destination: AgentTarget::Codex,
         resolved: resolved.clone(),
-        force_activation_required: true,
+        force_activation_required: false,
         ..PackageRenderInput::default()
     })
-    .expect("codex project");
+    .expect("codex project without force flag");
+    assert_ne!(
+        codex_report.activation_state, "activationRequired",
+        "without activator plan, activationRequired must not appear from force flag default"
+    );
+    let natural_plan = ActivationPlan {
+        target: AgentTarget::Codex,
+        package_root: PathBuf::from("/tmp/pkg-codex-activation"),
+        plugin_selector: "plugin@cc-partner".into(),
+        marketplace_name: "cc-partner".into(),
+        desired_enabled: true,
+        desired_presence: DesiredPresence::Present,
+        commands: vec![],
+        steps: vec![],
+        blocked: false,
+        blocked_reason: None,
+        activation_required: true,
+        target_binding_id: "tb-codex-activation".into(),
+    };
+    merge_activation_into_report(&mut codex_report, Some(&natural_plan), None);
     assert_eq!(
         codex_report.aggregate_status,
-        AssetAggregateStatus::ActivationRequired
+        AssetAggregateStatus::ActivationRequired,
+        "natural ActivationPlan.activation_required must project ActivationRequired"
     );
     assert_eq!(codex_report.activation_state, "activationRequired");
+    assert!(
+        codex_report.components.iter().any(|c| {
+            c.target_status == ComponentTargetStatus::ActivationRequired
+                && c.reasons.iter().any(|r| r == "activation_required")
+        }),
+        "verified/partial components must be demoted to activationRequired"
+    );
 
     // Snapshot residual path: residual tree must be closed over for plugin package
     let built = build_snapshot(
@@ -831,22 +864,55 @@ fn l2_agent_hub_d_runtime_001_bridge_osc_preflight_resume_cas() {
         Some(REASON_EXTERNAL_COLLISION)
     );
 
-    // 5) Fresh resume CAS fail-closed contract (source-level)
+    // 5) Fresh resume CAS fail-closed — tight Fresh-arm window (order-sensitive).
+    // Weak `contains("Fresh") || cas < plan` would pass even if CAS moved after plan write.
     let bridge_src = include_str!("../src/orchestrator/agent_runtime_bridge.rs");
+    let fresh_marker = "ResumeTerminalPolicy::Fresh =>";
+    let reuse_marker = "ResumeTerminalPolicy::Reuse =>";
+    let fresh_idx = bridge_src
+        .find(fresh_marker)
+        .expect("Fresh arm marker missing");
+    let reuse_idx = bridge_src
+        .find(reuse_marker)
+        .expect("Reuse arm marker missing");
     assert!(
-        bridge_src.contains("update_active_runner_session_and_agent"),
-        "resume must call CAS helper"
+        fresh_idx < reuse_idx,
+        "Fresh arm must precede Reuse arm in resume_runner_attempt match"
+    );
+    let fresh_arm = &bridge_src[fresh_idx..reuse_idx];
+    assert!(
+        fresh_arm.contains("update_active_runner_session_and_agent("),
+        "CAS helper must be called inside Fresh arm"
+    );
+    assert!(
+        !fresh_arm.contains("let _ ="),
+        "Fresh arm must not ignore CAS/errors with let _ = (fail-closed)"
+    );
+    assert!(
+        fresh_arm.contains("await?"),
+        "Fresh arm must propagate CAS failure with await?"
     );
     let cas_idx = bridge_src
-        .find("update_active_runner_session_and_agent")
+        .find("update_active_runner_session_and_agent(")
         .expect("CAS call site");
-    // Fresh branch uses `?` on CAS before build_resume_plan / write paths.
+    // Use the real call site (`adapter.build_resume_plan`), not doc-comment mentions.
     let plan_idx = bridge_src
-        .find("build_resume_plan")
-        .expect("build_resume_plan");
+        .find("adapter.build_resume_plan(")
+        .expect("adapter.build_resume_plan call site");
+    let write_idx = bridge_src
+        .find("local_write_workbench_session_input(state, write_terminal_id.clone(), input)")
+        .expect("terminal write");
     assert!(
-        cas_idx < plan_idx || bridge_src.contains("Fresh"),
-        "CAS must participate in Fresh resume path before plan write"
+        cas_idx > fresh_idx && cas_idx < reuse_idx,
+        "CAS call site must lie strictly inside Fresh arm window"
+    );
+    assert!(
+        cas_idx < plan_idx && cas_idx < write_idx,
+        "CAS must precede build_resume_plan and terminal write (cas={cas_idx} plan={plan_idx} write={write_idx})"
+    );
+    assert!(
+        plan_idx > reuse_idx,
+        "plan write must occur after the Fresh/Reuse match arms (shared post-match path)"
     );
 }
 

@@ -11,12 +11,14 @@
  *   unsupported peer 报告、Git lane inspect/preview/confirm、credential 披露、
  *   stale preview 错误与 project mapping。Gate D 扩展 Plugin 组件 Drawer、ownership
  *   delete preview、residual statuses、OpenCode provider catalog / bridge preview 与
- *   fail-closed availability。本 L1 用 mock 锁定 UI 旅程，不宣称真实 Claude/Codex/
- *   OpenCode 写盘、marketplace 激活、真实 TUI runtime 或真实多机 LAN Hub 复制。
+ *   fail-closed availability、provider runner 有效性选择表面，以及 Gate D Attention
+ *   agentHubProjectionBlocked → Agent Hub 导航。本 L1 用 mock 锁定 UI 旅程，不宣称真实
+ *   Claude/Codex/OpenCode 写盘、marketplace 激活、真实 TUI runtime 或真实多机 LAN Hub 复制。
  *
  * Code Logic（这个套件做什么）:
  *   backendHarness + installAppLocalStorage + registerAppShellCommands；
- *   mock agent_hub_* / list_orchestrator_agent_adapters 命令与合法 DTO；断言 data-testid 旅程。
+ *   mock agent_hub_* / list_orchestrator_agent_adapters / list_attention_items(_v2)
+ *   命令与合法 DTO；断言 data-testid 旅程。
  */
 
 import { expect, test } from './fixtures';
@@ -1162,6 +1164,7 @@ test.describe('E2E-AGENT-HUB-D-001 Agent Hub Gate D Plugin + OpenCode UI', () =>
     );
 
     // --- Settings automation catalog: four providers; OpenCode fail-closed ---
+    // Runner selection surface: effectively-available marks which providers may be chosen.
     await page.goto('/settings?tab=automation');
     await expect(page.locator('#settings-panel-automation')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('agent-adapter-claudeCodeVisible')).toBeVisible({
@@ -1176,5 +1179,60 @@ test.describe('E2E-AGENT-HUB-D-001 Agent Hub Gate D Plugin + OpenCode UI', () =>
     await expect(openCodeRow).toHaveAttribute('data-completion', 'hookEvent');
     // available:true in raw catalog must not present as green available without ready bridge
     await expect(openCodeRow).not.toHaveAttribute('data-effectively-available', 'true');
+    // Provider selection honesty: Claude/Codex available; generic unavailable; OpenCode blocked.
+    await expect(page.getByTestId('agent-adapter-claudeCodeVisible')).toHaveAttribute(
+      'data-effectively-available',
+      'true',
+    );
+    await expect(page.getByTestId('agent-adapter-codexVisible')).toHaveAttribute(
+      'data-effectively-available',
+      'true',
+    );
+    await expect(page.getByTestId('agent-adapter-genericTerminal')).toHaveAttribute(
+      'data-effectively-available',
+      'false',
+    );
+
+    // --- Gate D Attention navigation: agentHubProjectionBlocked → Agent Hub asset ---
+    // L1 mock: navigation-only; does not exercise real Agent phase transitions / TUI.
+    const blockedItemId = `agent-hub:blocked:${PLUGIN_ASSET_ID}`;
+    const attentionSnapshot = {
+      generatedAt: TS,
+      counts: { total: 1, decision: 0, blocked: 1, environment: 0 },
+      items: [
+        {
+          id: blockedItemId,
+          category: 'blocked' as const,
+          sourceKind: 'agentHubProjectionBlocked' as const,
+          title: 'Plugin projection blocked',
+          summary: 'activation or residual gate',
+          updatedAt: TS,
+          freshness: 'live' as const,
+          cachedAt: null,
+          project: null,
+          device: null,
+          target: {
+            kind: 'agentHubAsset' as const,
+            assetId: PLUGIN_ASSET_ID,
+            conflictId: null,
+          },
+        },
+      ],
+    };
+    backendHarness.command('list_attention_items', {
+      kind: 'resolve',
+      value: attentionSnapshot,
+    });
+    backendHarness.command('list_attention_items_v2', {
+      kind: 'resolve',
+      value: attentionSnapshot,
+    });
+    await page.goto('/attention');
+    await expect(page.getByTestId(`attention-item-${blockedItemId}`)).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId(`attention-item-${blockedItemId}`).click();
+    await expect(page).toHaveURL(new RegExp(`/agent-hub\\?.*assetId=${PLUGIN_ASSET_ID}`));
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
   });
 });

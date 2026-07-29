@@ -1536,7 +1536,7 @@
         "docs/prd.md",
         "docs/superpowers/plans/2026-07-29-agent-hub-gate-d-plugin-runtime.md"
       ],
-      "notes": "L2 isolated data_dir mixed Plugin projection: portable Skill/MCP/Command/Agent + targetOnly Hook + OpenCode residual; per-target full/partial/sourceOnly/activationRequired; Snapshot residual CAS closure; package delete preserves shared/standalone refs. Not real CLI TUI."
+      "notes": "L2 isolated data_dir mixed Plugin projection: portable Skill/MCP/Command/Agent + targetOnly Hook + OpenCode residual; per-target full/partial/sourceOnly; activationRequired via natural ActivationPlan.activation_required merge (not force-flag-only); Snapshot residual CAS closure; package delete preserves shared/standalone refs. Not real CLI TUI or marketplace activation side effects."
     },
     {
       "id": "L2-AGENT-HUB-D-RUNTIME-001",
@@ -1553,14 +1553,15 @@
       "exclusions": [
         "real OpenCode TUI / session.idle / NeedsInput / Ctrl-C takeover",
         "exact pinned OpenCode version L3 evidence",
-        "packaged desktop GUI"
+        "packaged desktop GUI",
+        "behavioral store mock of update_active_runner_session_and_agent (order proof is Fresh-arm window source contract)"
       ],
       "docs": [
         "docs/development/testing.md",
         "docs/prd.md",
         "docs/superpowers/plans/2026-07-29-agent-hub-gate-d-plugin-runtime.md"
       ],
-      "notes": "L2 library-level: OpenCode bridge generated_source_hash pin, preview/materialize/verify + collision, OSC strip from visible terminal bytes, preflight fail-closed without bridge/L3, Fresh resume CAS source contract. Does not launch real opencode CLI."
+      "notes": "L2 library-level: OpenCode bridge generated_source_hash pin, preview/materialize/verify + collision, OSC strip from visible terminal bytes, preflight fail-closed without bridge/L3, Fresh resume CAS fail-closed order proof (CAS strictly inside ResumeTerminalPolicy::Fresh arm and before build_resume_plan/terminal write; not a weak global contains scan). Does not launch real opencode CLI."
     },
     {
       "id": "L3-AGENT-HUB-D-OPENCODE-001",
@@ -1606,13 +1607,15 @@
         "real Claude/Codex/OpenCode filesystem projection",
         "real OpenCode TUI runtime",
         "marketplace plugin activation",
-        "packaged desktop GUI"
+        "packaged desktop GUI",
+        "real Agent phase transitions / OSC Working→Completed in UI (L1 navigation-only for Attention)",
+        "Workbench live runner phase projection under real PTY"
       ],
       "docs": [
         "docs/development/testing.md",
         "docs/prd.md"
       ],
-      "notes": "L1 mock: Plugin drawer component matrix + ownership delete preview + residual statuses; OpenCode provider catalog fail-closed without ready bridge; Agent Hub bridge project preview deep link. Not real multi-CLI write or TUI."
+      "notes": "L1 mock: Plugin drawer component matrix + ownership delete preview + residual statuses; OpenCode provider catalog fail-closed without ready bridge + effectively-available runner selection surface (Claude/Codex available, OpenCode/generic blocked); Agent Hub bridge project preview deep link; Attention agentHubProjectionBlocked → /agent-hub?assetId= navigation-only. Not real multi-CLI write, Agent phase runtime, or TUI."
     }
   ]
 }
