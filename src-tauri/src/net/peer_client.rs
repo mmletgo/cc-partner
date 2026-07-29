@@ -250,6 +250,7 @@ fn status_json_bytes_fully_received(status: &serde_json::Value) -> bool {
 /// Business Logic: 所有对端调用复用同一 Client（内部连接池），提升效率。
 ///     Client 本身是 Clone 廉贵的（内部 Arc），故 PeerClient 可直接 Clone 共享。
 ///     长连接事件桥复用无默认超时的 `stream_client`，禁止每桥 `Client::new()`。
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct PeerClient {
     client: reqwest::Client,
@@ -258,6 +259,14 @@ pub struct PeerClient {
 }
 
 impl PeerClient {
+    /// 返回内部带超时分类的 HTTP client（crate 内：Agent Hub push 注入 expected-device）。
+    ///
+    /// Business Logic: 源侧 push 需在标准 helper 之外附加 expected-device header。
+    /// Code Logic: 暴露 `&reqwest::Client`，调用方仍按 PeerTimeoutClass 设 timeout。
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     /// 创建客户端（无默认 total-timeout，按 PeerTimeoutClass 逐请求设置）。
     ///
     /// Code Logic: reqwest::Client::builder 仅设 connect_timeout=Health；rustls-tls feature 已在

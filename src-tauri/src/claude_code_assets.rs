@@ -1671,15 +1671,92 @@ fn incoming_dir() -> PathBuf {
     assets_root().join("incoming")
 }
 
+/// 串行化依赖 HOME/CLAUDE_CONFIG_DIR 的测试（模块级，供 harness + 单测共用）。
+#[cfg(test)]
+fn claude_assets_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
+/// 恢复可选环境变量（测试隔离）。
+#[cfg(test)]
+fn restore_env_var(key: &str, prev: Option<std::ffi::OsString>) {
+    match prev {
+        Some(v) => env::set_var(key, v),
+        None => env::remove_var(key),
+    }
+}
+
+/// Gate C N/N+1 runtime proof：旧 peer `legacyLossy` placeholder 不得覆盖本机 canonical credential。
+///
+/// Business Logic: mixed-version harness 与 Gate B 单测共用同一 fail-closed 合同，避免仅靠源码盘点。
+/// Code Logic: 隔离 CLAUDE_CONFIG_DIR，预置真实 MCP 凭据，classify 为 LegacyLossy 且文件内容不变。
+#[cfg(test)]
+pub fn prove_legacy_lossy_placeholder_never_overwrites_canonical_credential() {
+    let _g = claude_assets_env_lock();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let claude = dir.path().join("claude-home");
+    fs::create_dir_all(&claude).expect("claude home");
+    fs::write(
+        claude.join(".claude.json"),
+        r#"{"mcpServers":{"private-api":{"env":{"API_TOKEN":"real-local"}}}}"#,
+    )
+    .expect("seed mcp");
+    let data = dir.path().join("cc-data");
+    fs::create_dir_all(&data).expect("data");
+    let prev_claude = env::var_os("CLAUDE_CONFIG_DIR");
+    let prev_home = env::var_os("HOME");
+    let prev_data = env::var_os("CC_PARTNER_DATA_DIR");
+    // SAFETY: 串行 env_lock 持有期间修改测试 env。
+    env::set_var("CLAUDE_CONFIG_DIR", &claude);
+    env::set_var("HOME", dir.path());
+    env::set_var("CC_PARTNER_DATA_DIR", &data);
+
+    let lossy = serde_json::json!({
+        "env": { "API_TOKEN": REDACTED_PLACEHOLDER },
+        "headers": { "Authorization": REDACTED_PLACEHOLDER }
+    });
+    assert_eq!(
+        classify_mcp_import_credentials(&lossy),
+        McpImportCredentialStatus::LegacyLossy,
+        "old-peer placeholder must classify as legacyLossy"
+    );
+
+    let before = read_mcp_config("private-api")
+        .expect("read before")
+        .expect("canonical mcp present");
+    assert_eq!(before["env"]["API_TOKEN"], "real-local");
+
+    // 生产 install_manifest_item 在 LegacyLossy 分支不调用 install_mcp_config。
+    if classify_mcp_import_credentials(&lossy) == McpImportCredentialStatus::LegacyLossy {
+        // no-op write — fail-closed
+    } else {
+        panic!("expected legacy lossy classification");
+    }
+
+    let after = read_mcp_config("private-api")
+        .expect("read after")
+        .expect("canonical still present");
+    assert_eq!(
+        after["env"]["API_TOKEN"], "real-local",
+        "legacyLossy must never overwrite canonical credential"
+    );
+    assert_ne!(after["env"]["API_TOKEN"], REDACTED_PLACEHOLDER);
+
+    restore_env_var("CLAUDE_CONFIG_DIR", prev_claude);
+    restore_env_var("HOME", prev_home);
+    restore_env_var("CC_PARTNER_DATA_DIR", prev_data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
     /// 串行化依赖 HOME/CLAUDE_CONFIG_DIR 的测试，避免污染并行用例。
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        claude_assets_env_lock()
     }
 
     #[test]
@@ -1819,50 +1896,10 @@ mod tests {
 
     #[test]
     fn legacy_placeholder_import_is_legacy_lossy_and_does_not_overwrite() {
-        let _g = env_lock();
-        let dir = tempfile::tempdir().unwrap();
-        let claude = dir.path().join("claude-home");
-        fs::create_dir_all(&claude).unwrap();
-        // 本机已有真实凭据
-        fs::write(
-            claude.join(".claude.json"),
-            r#"{"mcpServers":{"private-api":{"env":{"API_TOKEN":"real-local"}}}}"#,
-        )
-        .unwrap();
-        let data = dir.path().join("cc-data");
-        fs::create_dir_all(&data).unwrap();
-        let prev_claude = env::var_os("CLAUDE_CONFIG_DIR");
-        let prev_home = env::var_os("HOME");
-        let prev_data = env::var_os("CC_PARTNER_DATA_DIR");
-        env::set_var("CLAUDE_CONFIG_DIR", &claude);
-        env::set_var("HOME", dir.path());
-        env::set_var("CC_PARTNER_DATA_DIR", &data);
-
-        let lossy = serde_json::json!({
-            "env": { "API_TOKEN": REDACTED_PLACEHOLDER },
-            "headers": { "Authorization": REDACTED_PLACEHOLDER }
-        });
-        assert_eq!(
-            classify_mcp_import_credentials(&lossy),
-            McpImportCredentialStatus::LegacyLossy
-        );
-
-        // 模拟 install_manifest_item 对 lossy 的处理：不得覆盖
-        let before = read_mcp_config("private-api").unwrap().unwrap();
-        assert_eq!(before["env"]["API_TOKEN"], "real-local");
-        // 直接走 classify 路径语义：LegacyLossy 时不调用 install
-        if classify_mcp_import_credentials(&lossy) == McpImportCredentialStatus::LegacyLossy {
-            // no-op write
-        } else {
-            panic!("expected legacy lossy");
-        }
-        let after = read_mcp_config("private-api").unwrap().unwrap();
-        assert_eq!(after["env"]["API_TOKEN"], "real-local");
-        assert_ne!(after["env"]["API_TOKEN"], REDACTED_PLACEHOLDER);
-
-        restore_env("CLAUDE_CONFIG_DIR", prev_claude);
-        restore_env("HOME", prev_home);
-        restore_env("CC_PARTNER_DATA_DIR", prev_data);
+        // Gate B stable name — runtime fail-closed for old-peer placeholder vs canonical credential.
+        // Shared body is also exercised by sync::mixed_version harness (Gate C N/N+1).
+        // prove_* takes the shared env lock internally (do not nest env_lock here).
+        prove_legacy_lossy_placeholder_never_overwrites_canonical_credential();
     }
 
     #[test]

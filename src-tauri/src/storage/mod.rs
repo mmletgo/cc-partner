@@ -30,7 +30,7 @@ pub mod workbench_workspace_layout_repo;
 pub mod workbench_worktree_repo;
 
 pub use agent_hub_repo::{
-    AgentHubCheckoutBindingRow, AgentHubRepo, UpsertAgentHubCheckoutBinding,
+    AgentHubCheckoutBindingRow, AgentHubImportFault, AgentHubRepo, UpsertAgentHubCheckoutBinding,
     UpsertAgentHubProjectMapping,
 };
 // AgentHubProjectMappingRow 由调用方按需 `crate::storage::agent_hub_repo::` 全路径引用，避免 unused re-export。

@@ -1582,6 +1582,8 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
         agent_ledger_cancel: Arc::new(Mutex::new(None)),
         agent_hub_cancel: Arc::new(Mutex::new(None)),
+        agent_hub_git_runtime: Arc::new(crate::agent_hub::git::AgentHubGitRuntime::new()),
+        agent_hub_git_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(

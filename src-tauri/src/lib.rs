@@ -38,7 +38,10 @@ pub use models::transfer::{
     TransferDirection, TransferFailure, TransferFailureStage, TransferOpenAction,
     TransferOperationStatus, TransferPhase, TransferRecoveryKind, TransferStatus, TransferTask,
 };
-pub use net::protocol::{server_protocol_info, CAPABILITY_TRANSFER_RESUME_V1, PROTOCOL_VERSION_V1};
+pub use net::protocol::{
+    server_protocol_info, CAPABILITY_AGENT_HUB_V1, CAPABILITY_TRANSFER_RESUME_V1,
+    PROTOCOL_VERSION_V1,
+};
 pub use storage::transfer_repo::SenderClaimOutcome;
 pub use storage::TransferRepo;
 // T3：integration smoke 可直接调用发送端 operation 查询与 lost-ACK 对账。
@@ -47,6 +50,9 @@ pub use transfer::sender::{
 };
 mod claude_cli;
 mod claude_code_assets;
+// Gate C N/N+1: mixed_version harness cites Gate B fail-closed by stable production function name.
+#[cfg(test)]
+pub use claude_code_assets::prove_legacy_lossy_placeholder_never_overwrites_canonical_credential;
 pub mod cloud_sync;
 mod commands;
 pub mod config;
@@ -83,6 +89,7 @@ pub use agent_hub::projection::{
     AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest, FileWriteRequest,
     ProjectionRequest, ProjectionScheduler, ProjectionWriteFault,
 };
+pub use agent_hub::snapshot::{ConfirmedImportSelection, SnapshotImporter, ValidatedSnapshot};
 pub use agent_hub::targets::portable::{
     hash_skill_directory, DiscoveredPortableAsset, PortableAssetOrigin, PortableDiscoveryStatus,
     PortableOriginKind,
@@ -94,6 +101,7 @@ pub use agent_hub::{
     ScopeKind,
 };
 pub use models::claude_md::{ClaudeMdRow, CLAUDE_MD_ID};
+pub use storage::AgentHubImportFault;
 pub use storage::AgentHubRepo;
 pub use storage::ClaudeMdRepo;
 pub use storage::DatabaseMaintenanceGate;
@@ -379,6 +387,15 @@ pub fn run() {
             agent_hub_cmd::agent_hub_set_target_enabled,
             agent_hub_cmd::agent_hub_restore_detached_target,
             agent_hub_cmd::agent_hub_delete_asset_everywhere,
+            agent_hub_cmd::agent_hub_push_selection,
+            agent_hub_cmd::agent_hub_get_push_report,
+            agent_hub_cmd::agent_hub_preview_lan_push,
+            agent_hub_cmd::agent_hub_start_lan_push,
+            agent_hub_cmd::agent_hub_get_lan_push,
+            agent_hub_cmd::agent_hub_inspect_git_lanes,
+            agent_hub_cmd::agent_hub_preview_git_import,
+            agent_hub_cmd::agent_hub_confirm_git_import,
+            agent_hub_cmd::agent_hub_confirm_project_mapping,
             device_cmd::list_devices,
             device_cmd::get_local_device,
             sync_cmd::trigger_sync,

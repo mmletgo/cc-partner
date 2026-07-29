@@ -20,6 +20,8 @@ import type {
   AgentTarget,
 } from '@/lib/types/agentHub';
 import { AssetAdoptionDialog } from './AssetAdoptionDialog';
+import { GitImportDrawer } from './GitImportDrawer';
+import { LanPushDialog } from './LanPushDialog';
 import { InstructionBlocksDrawer } from './InstructionBlocksDrawer';
 import {
   useAgentHubController,
@@ -73,6 +75,39 @@ export function AgentHubView(props: AgentHubViewProps) {
     closePreviewDialog,
     runPreviewProject,
     runEnableProject,
+    openLanPushDialog,
+    closeLanPushDialog,
+    lanPushOpen,
+    lanPeers,
+    lanSelectedPeerIds,
+    toggleLanPeer,
+    lanMode,
+    setLanMode,
+    lanAssetIdsText,
+    setLanAssetIdsText,
+    lanHubProjectIdsText,
+    setLanHubProjectIdsText,
+    lanPreview,
+    lanReport,
+    runLanPreview,
+    runLanStart,
+    openGitImportDrawer,
+    closeGitImportDrawer,
+    gitImportOpen,
+    gitInspectReport,
+    gitSelectedLaneDeviceId,
+    selectGitLane,
+    gitPreview,
+    gitSelectedAssetIds,
+    toggleGitAsset,
+    gitMappingDrafts,
+    setGitMappingDraft,
+    gitConfirmOutcome,
+    gitLastMapping,
+    runGitInspect,
+    runGitPreview,
+    runGitConfirmMapping,
+    runGitConfirmImport,
     conflictDrawerOpen,
     openConflictDrawer,
     closeConflictDrawer,
@@ -203,6 +238,22 @@ export function AgentHubView(props: AgentHubViewProps) {
               data-testid="agent-hub-open-preview"
             >
               {t('agentHub:actions.previewProject')}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={openLanPushDialog}
+              data-testid="agent-hub-open-lan-push"
+            >
+              {t('agentHub:lanPush.open')}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={openGitImportDrawer}
+              data-testid="agent-hub-open-git-import"
+            >
+              {t('agentHub:gitImport.open')}
             </Button>
           </div>
         </header>
@@ -564,6 +615,47 @@ export function AgentHubView(props: AgentHubViewProps) {
             variants: patch.variants,
           });
         }}
+      />
+
+      <LanPushDialog
+        open={lanPushOpen}
+        busy={actionBusy}
+        error={actionError}
+        peers={lanPeers}
+        selectedPeerIds={lanSelectedPeerIds}
+        onTogglePeer={toggleLanPeer}
+        mode={lanMode}
+        onModeChange={setLanMode}
+        assetIdsText={lanAssetIdsText}
+        onAssetIdsTextChange={setLanAssetIdsText}
+        hubProjectIdsText={lanHubProjectIdsText}
+        onHubProjectIdsTextChange={setLanHubProjectIdsText}
+        preview={lanPreview}
+        report={lanReport}
+        onPreview={() => void runLanPreview()}
+        onStart={() => void runLanStart()}
+        onClose={closeLanPushDialog}
+      />
+
+      <GitImportDrawer
+        open={gitImportOpen}
+        busy={actionBusy}
+        error={actionError}
+        inspectReport={gitInspectReport}
+        selectedLaneDeviceId={gitSelectedLaneDeviceId}
+        preview={gitPreview}
+        selectedAssetIds={gitSelectedAssetIds}
+        mappingDrafts={gitMappingDrafts}
+        confirmOutcome={gitConfirmOutcome}
+        lastMapping={gitLastMapping}
+        onInspect={() => void runGitInspect()}
+        onSelectLane={selectGitLane}
+        onPreview={() => void runGitPreview()}
+        onToggleAsset={toggleGitAsset}
+        onMappingDraftChange={setGitMappingDraft}
+        onConfirmMapping={(hub) => void runGitConfirmMapping(hub)}
+        onConfirmImport={() => void runGitConfirmImport()}
+        onClose={closeGitImportDrawer}
       />
     </div>
   );

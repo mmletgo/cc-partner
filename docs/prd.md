@@ -115,9 +115,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 单条历史正文与单批同步体量有固定上限；超限时本轮同步以稳定错误结束该批次，不静默丢弃或半写入
 - Claude Code 历史纳入 GitHub 私有仓库云端同步范围
 
-### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产）
+### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份）
 
-**描述**：Agent Hub 以 `/agent-hub` 为权威入口，统一管理 Claude / Codex / OpenCode 的指令与可移植资产。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；旧 `/claude-md` / `/claude-code` 仅 N/N+1 重定向。Gate B 在指令基础之上交付 **Skill / Command / Agent / MCP** 的 portable 资产支持（扫描、managed package、legacy adoption、target 矩阵动作）。
+**描述**：Agent Hub 以 `/agent-hub` 为权威入口，统一管理 Claude / Codex / OpenCode 的指令与可移植资产。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；旧 `/claude-md` / `/claude-code` 仅 N/N+1 重定向。Gate B 在指令基础之上交付 **Skill / Command / Agent / MCP** 的 portable 资产支持（扫描、managed package、legacy adoption、target 矩阵动作）。Gate C 交付 **SnapshotEnvelope v1**、**LAN source-only push**（capability `agent-hub.v1`）与 **Git device-lane 确认式导入**（从不自动 import）。
 
 **已交付（Gate A）**：
 - Hub 首屏展示 CLI probe 状态、write 兼容性、冲突/阻塞计数
@@ -134,14 +134,23 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - **shared** 资产对三端可见；**targetOnly** 严格隔离（OpenCode 不接收 Claude/Codex targetOnly）
 - ownership-aware **TOML/JSONC** 语义 patch：managed 字段 enable/disable/update/remove 后，unmanaged 键与注释仍存活
 - **legacy adoption**：激活-before-removal；失败/崩溃恢复后恰好一份 discoverable source；destination 非空 unmanaged → externalCollision 预览
-- 前端矩阵：scope/kind 过滤、canonical 与 invocation alias 分离、aggregateStatus、target 本地 enable/detach restore/remove、delete everywhere、adoption 预览；LAN push 文案标明 **Gate C**
-- **support manifest** 写能力默认 fail-closed（Blocked），直到真实 CLI 版本 L3 认证
+- 前端矩阵：scope/kind 过滤、canonical 与 invocation alias 分离、aggregateStatus、target 本地 enable/detach restore/remove、delete everywhere、adoption 预览；LAN push / Git import 入口
 
-**明确未交付（后续 Gate；不得宣称已完成）**：
-- Snapshot / LAN Hub 复制 / 跨设备 Agent Hub 状态同步（Gate C）
+**已交付（Gate C Snapshot / LAN source-push / Git device-lane）**：
+- SnapshotEnvelope v1：`format=cc-partner-agent-hub`、`formatVersion=1`、`canonicalization=RFC8785-JSON`；硬上限 selection 100k / 未压缩 2GiB / 单 blob 512MiB / manifest 32MiB / LAN chunk ≤8MiB
+- LAN **仅源侧选择目标后的 push**（`POST prepare` / `PUT objects` / `POST commit`）；幂等键 `(sourceDeviceId, clientRequestId)`；`sourceDeviceId`/`clientRequestId`/expected-device header **只用于路由绑定与幂等，不是身份认证**
+- chunk 中断可从 offset 续传；同 request 同 hash 重放原 outcome；不同 hash → conflict
+- 凭据在 Hub / Snapshot / LAN / Git / 目标配置中保持**原字节**；日志、错误与 UI 摘要继续脱敏（UI 仅 boolean 披露）
+- Git 每台设备只写 `agent-hub/devices/<deviceId>/`；fetch/rebase **不等于**导入其它 lane；远端 lane 只有 **inspect → preview → 用户 confirm** 后才进 Hub；定时任务永不自动 import
+- 未映射项目可导入 canonical backup，但**不得猜测本机路径或自动 opt-in**；mapping 默认 `optedIn=false`
+- N/N+1 继续保留旧 CLAUDE.md / Claude asset / content-sync 路由；新 UI 不展示旧 remote inventory/pull；legacy 结果不能算 Hub push 成功；`legacyLossy` 占位不得覆盖 canonical credential
+- 验证证据：`L2-AGENT-HUB-C-001` / `L2-AGENT-HUB-C-GIT-001` / `E2E-AGENT-HUB-C-001`
+
+**明确未交付（后续 Gate / L3；不得宣称已完成）**：
+- 真实双主机 mDNS / 全平台 LAN Hub 复制（`L3-AGENT-HUB-C-LAN-001` **NOT VERIFIED**）
 - Plugin 市场分解 / OpenCode 完整 runtime 能力（Gate D）
-- Git 远程指令仓
-- 真实多机 / 全平台 CLI 写盘与 exact 版本认证（见质量矩阵 L3 `NOT VERIFIED` 行，含 `L3-AGENT-HUB-B-CLI-001`）
+- 真实多机 / 全平台 CLI 写盘与 exact 版本认证（含 `L3-AGENT-HUB-B-CLI-001` **NOT VERIFIED**）
+- **不得**宣称 LAN 身份认证或自动 Git import
 
 ### 2.6 设备自动发现与互联
 

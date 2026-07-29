@@ -34,8 +34,12 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `E2E-LAN-001` | `web/tests/lan-boundary.spec.ts` | L1 credential-free + simulated boundary reject |
 | `E2E-AGENT-HUB-A-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate A: status card / preview+enable / target matrix / conflict deep link / `/claude-md` redirect (mock only) |
 | `E2E-AGENT-HUB-B-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate B: scope/kind filters / alias / adoption preview / detached restore-remove / delete everywhere (mock only) |
+| `E2E-AGENT-HUB-C-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate C: LAN source-push selection/progress / unsupported peer / Git inspect+confirm / credential disclosure / stale preview / mapping / Attention deep link (mock only) |
 | `L2-AGENT-HUB-B-001` | `src-tauri/tests/agent_hub_gate_b_smoke.rs` | Portable discovery / targetOnly isolation / unmanaged config / adoption recovery / credential redaction |
+| `L2-AGENT-HUB-C-001` | `src-tauri/tests/agent_hub_replication_smoke.rs` | Two-owner-style LAN prepare/chunk-resume/commit / idempotency / credential bytes + log redaction / projection-fail-after-commit |
+| `L2-AGENT-HUB-C-GIT-001` | `src-tauri/tests/agent_hub_replication_smoke.rs` | Git device-lane expand → third-env inspect/preview/confirm; map one project leave another unmapped |
 | `L3-AGENT-HUB-B-CLI-001` | `src-tauri/tests/agent_hub_cli_contract.rs` | Real CLI exact-version support pins (manual / ignored; default NOT VERIFIED) |
+| `L3-AGENT-HUB-C-LAN-001` | dual-host manual | Real multi-host mDNS agent-hub.v1 source-push + Git confirm import — **NOT VERIFIED** |
 
 Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY-001`, `E2E-FRONTEND-FOUNDATION-001`, `E2E-SCREENSHOT-OVERLAY-001`, `E2E-AGENT-LEDGER-001`.
 
@@ -52,6 +56,8 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | `L2-BACKEND-DOCTOR-SMOKE-001` | L2 | `src-tauri/tests/backend_doctor_smoke.rs` |
 | `L2-AGENT-CLI-SMOKE-001` | L2 | `src-tauri/tests/agent_cli_smoke.rs` + `cargo test --locked agent_cli --lib` |
 | `L2-AGENT-HUB-GATE-A-001` | L2 | `src-tauri/tests/agent_hub_gate_a_smoke.rs` — isolated HOME/data-dir Gate A process smoke (opt-in zero-write before enable, nested projection after opt-in, conflict Attention). **Does not** certify real multi-CLI product installs |
+| `L2-AGENT-HUB-C-001` | L2 | `src-tauri/tests/agent_hub_replication_smoke.rs` — isolated dual-data_dir source-push contracts (chunk resume, idempotency, credential plaintext in CAS + absent from logs, projection failure does not roll back). **Does not** certify dual-host mDNS |
+| `L2-AGENT-HUB-C-GIT-001` | L2 | Same smoke file Git path: export lane archive → third env inspect/confirm; unmapped projects importable without auto path/opt-in. **Never** auto Git import |
 | `L2-PTY-SMOKE-001` | L2 | `src-tauri/tests/pty_smoke.rs` |
 | `L2-TRANSACTIONAL-RUNTIME-001` | L2 | `src-tauri/tests/transactional_runtime_smoke.rs` |
 | `L3-MACOS-GUI-PERMISSIONS-001` | L3 | Packaged macOS GUI + permission grant/deny/retry + screenshot clipboard — **NOT VERIFIED** (canonical aggregate; architecture executions under `macos-aarch64-beta` only) ([real-device-certification.md](real-device-certification.md)) |
@@ -174,7 +180,10 @@ node scripts/check-docs.mjs
 Evidence IDs:
 - `L2-AGENT-HUB-B-001` — `src-tauri/tests/agent_hub_gate_b_smoke.rs` (PASS when smoke suite green)
 - `E2E-AGENT-HUB-B-001` — `web/tests/agent-hub.spec.ts` Gate B describe (PASS when e2e green; else NOT VERIFIED if Playwright env missing)
+- `L2-AGENT-HUB-C-001` / `L2-AGENT-HUB-C-GIT-001` — `src-tauri/tests/agent_hub_replication_smoke.rs` (PASS when smoke suite green; dual-host mDNS remains L3)
+- `E2E-AGENT-HUB-C-001` — `web/tests/agent-hub.spec.ts` Gate C describe (PASS when e2e green; mock-only, not real multi-host)
 - `L3-AGENT-HUB-B-CLI-001` — `src-tauri/tests/agent_hub_cli_contract.rs` ignored real-CLI harness; remains **NOT VERIFIED** without pinned local CLI
+- `L3-AGENT-HUB-C-LAN-001` — dual-host agent-hub.v1 + Git confirm; remains **NOT VERIFIED** until real-device certification
 
 Optional real CLI contract (manual; exact version only):
 

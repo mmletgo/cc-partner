@@ -597,6 +597,8 @@ pub async fn build_app_state_with_role(
         orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
         agent_ledger_cancel: Arc::new(Mutex::new(None)),
         agent_hub_cancel: Arc::new(Mutex::new(None)),
+        agent_hub_git_runtime: Arc::new(crate::agent_hub::git::AgentHubGitRuntime::new()),
+        agent_hub_git_cancel: Arc::new(Mutex::new(None)),
         workbench_claude_session_indexes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         workbench_claude_session_watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
         workbench_claude_session_index_inflight: Arc::new(tokio::sync::Mutex::new(
@@ -768,6 +770,45 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                     }
                 });
             }
+            // Gate C：LAN push abandoned staging GC（24h prepared；保留 verified CAS）
+            {
+                let hub_gc_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // 启动后稍等，与 tombstone GC 错开
+                    tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                    loop {
+                        ticker.tick().await;
+                        let data_dir = match crate::config::data_dir() {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!("agent hub staging GC skip: data_dir: {e}");
+                                continue;
+                            }
+                        };
+                        let ledger = crate::agent_hub::replication::ReplicationLedger::new(
+                            hub_gc_state.agent_hub_repo.pool(),
+                            hub_gc_state.maintenance_gate.clone(),
+                        );
+                        match crate::agent_hub::replication::gc_abandoned_incoming_staging(
+                            &ledger, &data_dir,
+                        )
+                        .await
+                        {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(
+                                    "agent hub abandoned staging GC removed {n} prepared transfers"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("agent hub abandoned staging GC failed: {e}")
+                            }
+                        }
+                    }
+                });
+            }
             start_cancelled_task_once(&state.cc_collector_cancel, "CC 历史采集器", || {
                 crate::cc::collector::start(state.clone())
             });
@@ -789,6 +830,10 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
             // Gate A Task7：Agent Hub watch/reconcile 仅 Headless owner 启动
             start_cancelled_task_once(&state.agent_hub_cancel, "Agent Hub runtime", || {
                 crate::agent_hub::AgentHubRuntime::start(state.clone())
+            });
+            // Gate C Task6：Agent Hub Git device-lane 备份（recover + debounce/pending flush）
+            start_cancelled_task_once(&state.agent_hub_git_cancel, "Agent Hub git export", || {
+                crate::agent_hub::git::runtime::start_agent_hub_git_export_loop(state.clone())
             });
         }
         BackendRuntimeMode::Gui => {
@@ -816,6 +861,7 @@ pub fn shutdown_backend_runtime(state: &AppState) {
     );
     cancel_runtime_token(&state.agent_ledger_cancel, "Agent ledger retention");
     cancel_runtime_token(&state.agent_hub_cancel, "Agent Hub runtime");
+    cancel_runtime_token(&state.agent_hub_git_cancel, "Agent Hub git export");
     cancel_runtime_token(&state.health_cancel, "健康监测 daemon");
     cancel_runtime_token(&state.gui_event_relay_cancel, "GUI owner event relay");
 

@@ -24,7 +24,7 @@ use crate::agent_hub::object_store::ObjectStore;
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use std::sync::Arc;
 
 /// Agent Hub SQLite 仓库。
@@ -2178,6 +2178,1203 @@ impl AgentHubRepo {
             None => false,
         })
     }
+
+    // ── Snapshot builder 只读辅助（Gate C Task 2）────────────────────────
+
+    /// 在**单次** SQLite 读事务内加载 snapshot 身份集合。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Snapshot builder 必须在同一一致快照下读 heads/ancestry/variants/conflicts/aliases；
+    ///     多条 auto-commit 读会与并发 Hub writer 撕裂，产出从未提交过的 envelope 或假 missing。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `pool.begin()` 延迟读事务 → 解析 selection assets → lineages/heads/ancestry/variants/
+    ///     conflicts/scopes/aliases → `commit`；CAS 流式读取由调用方在 TX 外完成。
+    pub async fn load_snapshot_identity_bundle(
+        &self,
+        request: &SnapshotIdentityRequest,
+    ) -> Result<SnapshotIdentityBundle, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let assets = resolve_selected_assets_on_tx(&mut tx, request).await?;
+        let asset_ids: Vec<String> = assets.iter().map(|a| a.id.clone()).collect();
+        let lineages = list_lineages_for_assets_on_tx(&mut tx, &asset_ids).await?;
+
+        let mut head_ids: Vec<String> = Vec::new();
+        for a in &assets {
+            if let Some(rev) = &a.current_revision_id {
+                head_ids.push(rev.as_str().to_string());
+            }
+        }
+
+        let variant_rows = list_variants_for_assets_on_tx(&mut tx, &asset_ids).await?;
+        let mut seed_rev_ids = head_ids;
+        for v in &variant_rows {
+            seed_rev_ids.push(v.revision_id.clone());
+        }
+        seed_rev_ids.sort();
+        seed_rev_ids.dedup();
+
+        let revisions = if request.include_history {
+            collect_revision_ancestry_on_tx(&mut tx, &seed_rev_ids).await?
+        } else {
+            let mut only = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            for id in &seed_rev_ids {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(r) = get_revision_on_tx(&mut tx, id).await? {
+                    only.push(r);
+                }
+            }
+            only.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+            only
+        };
+
+        let conflicts = list_unresolved_conflicts_for_assets_on_tx(&mut tx, &asset_ids).await?;
+
+        let mut hub_ids: std::collections::BTreeSet<String> =
+            request.hub_project_ids.iter().cloned().collect();
+        for a in &assets {
+            if let Some(scope) = get_scope_on_tx(&mut tx, &a.scope_id).await? {
+                if let Some(hub) = scope.hub_project_id {
+                    hub_ids.insert(hub);
+                }
+            }
+        }
+        let hub_project_ids: Vec<String> = hub_ids.into_iter().collect();
+        let aliases = list_portable_project_aliases_on_tx(&mut tx, &hub_project_ids).await?;
+
+        tx.commit().await?;
+        Ok(SnapshotIdentityBundle {
+            assets,
+            lineages,
+            revisions,
+            variants: variant_rows,
+            conflicts,
+            aliases,
+            hub_project_ids,
+        })
+    }
+
+    /// 列出全部资产（含 tombstone / deleted_at 非空）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Snapshot 必须导出 tombstone 资产身份，不能只读 live 行。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT 全表 assets，按 id 升序。
+    pub async fn list_all_assets_including_deleted(&self) -> Result<Vec<LogicalAsset>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                    current_revision_id, deleted_at, created_at, updated_at
+             FROM agent_hub_assets
+             ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_asset).collect()
+    }
+
+    /// 按 id 列表读取资产（含 deleted）。
+    ///
+    /// Business Logic: 显式 asset selection 需要精确集合且保留 tombstone。
+    /// Code Logic: 逐 id get_asset 并过滤 None；保持调用方顺序去重后按 id 排序。
+    pub async fn list_assets_by_ids_including_deleted(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<LogicalAsset>, AppError> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for id in ids {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(a) = self.get_asset(id).await? {
+                out.push(a);
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    /// 按 scope id 列表读取资产（含 deleted）。
+    ///
+    /// Business Logic: user/project scope selection 闭包。
+    /// Code Logic: IN 列表逐条 OR 查询后按 id 排序。
+    pub async fn list_assets_in_scopes_including_deleted(
+        &self,
+        scope_ids: &[String],
+    ) -> Result<Vec<LogicalAsset>, AppError> {
+        if scope_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for scope_id in scope_ids {
+            let rows = sqlx::query(
+                "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                        current_revision_id, deleted_at, created_at, updated_at
+                 FROM agent_hub_assets
+                 WHERE scope_id = ?
+                 ORDER BY id ASC",
+            )
+            .bind(scope_id)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in rows {
+                out.push(row_to_asset(&row)?);
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out.dedup_by(|a, b| a.id == b.id);
+        Ok(out)
+    }
+
+    /// 读取资产关联的 lineage id 列表。
+    ///
+    /// Business Logic: snapshot lineages 必须覆盖 selected assets 的全部 lineage。
+    /// Code Logic: SELECT asset_id, lineage_id WHERE asset_id = ?。
+    pub async fn list_lineages_for_assets(
+        &self,
+        asset_ids: &[String],
+    ) -> Result<Vec<(String, String)>, AppError> {
+        let mut out = Vec::new();
+        for asset_id in asset_ids {
+            let rows = sqlx::query(
+                "SELECT asset_id, lineage_id FROM agent_hub_asset_lineages
+                 WHERE asset_id = ? ORDER BY lineage_id ASC",
+            )
+            .bind(asset_id)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in rows {
+                let a: String = row.try_get("asset_id")?;
+                let l: String = row.try_get("lineage_id")?;
+                out.push((a, l));
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// 从 heads 出发收集 revision ancestry（含 heads 自身）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Snapshot 必须闭合到 retained merge bases；缺 parent 则整包失败。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     队列 BFS parents；get_revision；按 id 排序返回。
+    pub async fn collect_revision_ancestry(
+        &self,
+        head_ids: &[String],
+    ) -> Result<Vec<Revision>, AppError> {
+        use std::collections::{BTreeMap, BTreeSet, VecDeque};
+        let mut visited: BTreeSet<String> = BTreeSet::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+        for h in head_ids {
+            if !h.is_empty() {
+                queue.push_back(h.clone());
+            }
+        }
+        let mut by_id: BTreeMap<String, Revision> = BTreeMap::new();
+        while let Some(id) = queue.pop_front() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            let rev = self
+                .get_revision(&RevisionId(id.clone()))
+                .await?
+                .ok_or_else(|| {
+                    AppError::not_found(format!("agent_hub_snapshot_revision_missing:{id}"))
+                })?;
+            for p in &rev.parents {
+                queue.push_back(p.as_str().to_string());
+            }
+            by_id.insert(id, rev);
+        }
+        Ok(by_id.into_values().collect())
+    }
+
+    /// 列出资产的 target variants。
+    ///
+    /// Business Logic: targetOnly/adapted 变体必须进入 snapshot。
+    /// Code Logic: SELECT asset_id,target,revision_id FROM agent_hub_variants。
+    pub async fn list_variants_for_assets(
+        &self,
+        asset_ids: &[String],
+    ) -> Result<Vec<AgentHubVariantRow>, AppError> {
+        let mut out = Vec::new();
+        for asset_id in asset_ids {
+            let rows = sqlx::query(
+                "SELECT id, asset_id, target, revision_id, extension_payload_hash, created_at
+                 FROM agent_hub_variants
+                 WHERE asset_id = ?
+                 ORDER BY target ASC, revision_id ASC",
+            )
+            .bind(asset_id)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in rows {
+                out.push(row_to_variant(&row)?);
+            }
+        }
+        out.sort_by(|a, b| {
+            a.asset_id
+                .cmp(&b.asset_id)
+                .then(a.target.as_str().cmp(b.target.as_str()))
+                .then(a.revision_id.cmp(&b.revision_id))
+        });
+        Ok(out)
+    }
+
+    /// 写入/覆盖一条 target variant（测试与 future importer）。
+    ///
+    /// Business Logic: variant head 需可持久化。
+    /// Code Logic: INSERT OR REPLACE by UNIQUE(asset,target,revision)。
+    pub async fn upsert_variant(
+        &self,
+        asset_id: &str,
+        target: AgentTarget,
+        revision_id: &str,
+    ) -> Result<AgentHubVariantRow, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            // 先删同 asset+target 旧行，再插当前 head（snapshot 只关心当前变体 head）
+            sqlx::query("DELETE FROM agent_hub_variants WHERE asset_id = ? AND target = ?")
+                .bind(asset_id)
+                .bind(target.as_str())
+                .execute(&self.pool)
+                .await?;
+            sqlx::query(
+                "INSERT INTO agent_hub_variants
+                 (id, asset_id, target, revision_id, extension_payload_hash, created_at)
+                 VALUES (?, ?, ?, ?, NULL, ?)",
+            )
+            .bind(&id)
+            .bind(asset_id)
+            .bind(target.as_str())
+            .bind(revision_id)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(AgentHubVariantRow {
+                id,
+                asset_id: asset_id.to_string(),
+                target,
+                revision_id: revision_id.to_string(),
+                extension_payload_hash: None,
+                created_at: now,
+            })
+        })
+        .await
+    }
+
+    /// 列出与 hub project ids 相关的便携别名（不含本机绝对路径）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Snapshot aliases 只导出 portable identity / external id，禁止 absolute checkout path。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读 project_mappings；输出 kind=`hubProjectId`，external=local fingerprint/workbench，
+    ///     local=hub_project_id；永不返回 local_absolute_path。
+    pub async fn list_portable_project_aliases(
+        &self,
+        hub_project_ids: &[String],
+    ) -> Result<Vec<AgentHubPortableAliasRow>, AppError> {
+        let mut out = Vec::new();
+        for hub_id in hub_project_ids {
+            let Some(row) = self.get_project_mapping_by_hub_project_id(hub_id).await? else {
+                // 仍导出 hub 自身 identity alias
+                out.push(AgentHubPortableAliasRow {
+                    kind: "hubProjectId".into(),
+                    external_id: hub_id.clone(),
+                    local_id: hub_id.clone(),
+                });
+                continue;
+            };
+            out.push(AgentHubPortableAliasRow {
+                kind: "hubProjectId".into(),
+                external_id: hub_id.clone(),
+                local_id: hub_id.clone(),
+            });
+            if let Some(fp) = row.git_remote_fingerprint {
+                if !fp.is_empty() {
+                    out.push(AgentHubPortableAliasRow {
+                        kind: "gitRemoteFingerprint".into(),
+                        external_id: fp,
+                        local_id: hub_id.clone(),
+                    });
+                }
+            }
+            if let Some(local) = row.local_workbench_project_id {
+                if !local.is_empty() {
+                    out.push(AgentHubPortableAliasRow {
+                        kind: "workbenchProjectId".into(),
+                        external_id: local,
+                        local_id: hub_id.clone(),
+                    });
+                }
+            }
+            // 故意不导出 local_absolute_path
+            let _ = row.local_absolute_path;
+        }
+        out.sort_by(|a, b| {
+            a.kind
+                .cmp(&b.kind)
+                .then(a.external_id.cmp(&b.external_id))
+                .then(a.local_id.cmp(&b.local_id))
+        });
+        out.dedup();
+        Ok(out)
+    }
+
+    /// 按资产过滤未解决 conflicts。
+    ///
+    /// Business Logic: 仅导出 selection 内资产的 freeze 状态。
+    /// Code Logic: list_unresolved_conflicts 后按 asset_id 过滤。
+    pub async fn list_unresolved_conflicts_for_assets(
+        &self,
+        asset_ids: &[String],
+    ) -> Result<Vec<AgentHubConflict>, AppError> {
+        let set: std::collections::BTreeSet<&str> = asset_ids.iter().map(String::as_str).collect();
+        let all = self.list_unresolved_conflicts().await?;
+        let mut out: Vec<_> = all
+            .into_iter()
+            .filter(|c| set.contains(c.asset_id.as_str()))
+            .collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    /// 按 hub_project_id 查 project scope（若存在）。
+    ///
+    /// Business Logic: project selection 需要 scope id。
+    /// Code Logic: 复用 get_project_scope_by_hub_project_id。
+    pub async fn resolve_project_scope_id(
+        &self,
+        hub_project_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        Ok(self
+            .get_project_scope_by_hub_project_id(hub_project_id)
+            .await?
+            .map(|s| s.id))
+    }
+
+    /// 查找 user scope id（kind=user，取字典序最小以稳定）。
+    ///
+    /// Business Logic: user-scope selection。
+    /// Code Logic: list_scopes 过滤 User。
+    pub async fn resolve_user_scope_id(&self) -> Result<Option<String>, AppError> {
+        let scopes = self.list_scopes().await?;
+        Ok(scopes
+            .into_iter()
+            .filter(|s| s.kind == ScopeKind::User)
+            .map(|s| s.id)
+            .min())
+    }
+
+    /// 注入 import 故障点（仅 test/debug）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     quality_faults 需模拟 CAS 后 / head 更新前崩溃，证明无脏 head。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     设置一次消费的 fail point 原子标志。
+    #[cfg(any(test, debug_assertions))]
+    pub fn inject_import_fault(&self, fault: AgentHubImportFault) {
+        IMPORT_FAULT.store(fault.as_u8(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 读取并清除 import 故障点。
+    ///
+    /// Business Logic: 测试断言后复位。
+    /// Code Logic: swap 0。
+    #[cfg(any(test, debug_assertions))]
+    pub fn take_import_fault(&self) -> AgentHubImportFault {
+        AgentHubImportFault::from_u8(IMPORT_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// 在单写事务中提交 snapshot import 身份与 DAG 收敛（不含 CAS 写）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     Phase B 必须原子 upsert aliases/lineages/assets/revisions/parents/variants/conflicts，
+    ///     并按 MCA 更新 head 或开 conflict；中途失败不得激活非法 head。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     with_shared_write_lease → begin TX → apply bundle → optional fail inject → commit。
+    pub async fn commit_import_bundle(
+        &self,
+        bundle: ImportBundle,
+    ) -> Result<ImportBundleResult, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let mut tx = self.pool.begin().await?;
+            let result = apply_import_bundle_on_tx(&mut tx, &bundle).await?;
+
+            #[cfg(any(test, debug_assertions))]
+            {
+                let fault = IMPORT_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst);
+                if fault == AgentHubImportFault::BeforeHeadUpdate.as_u8() {
+                    return Err(AppError::generic(
+                        "agent_hub_import_injected_before_head_update".to_string(),
+                    ));
+                }
+                if fault == AgentHubImportFault::BeforeTxCommit.as_u8() {
+                    return Err(AppError::generic(
+                        "agent_hub_import_injected_before_tx_commit".to_string(),
+                    ));
+                }
+            }
+
+            // head 收敛与 conflict 已在 apply 中完成；此处仅 commit。
+            tx.commit().await?;
+            Ok(result)
+        })
+        .await
+    }
+
+    /// 插入 lineage 映射（幂等）。
+    ///
+    /// Business Logic: 远端 asset id 作为 lineage alias 挂到本地 logical asset。
+    /// Code Logic: INSERT OR IGNORE asset_lineages。
+    pub async fn upsert_asset_lineage(
+        &self,
+        asset_id: &str,
+        lineage_id: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_hub_asset_lineages (asset_id, lineage_id, created_at)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(asset_id)
+            .bind(lineage_id)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 按 unique key 查找资产（含 deleted）。
+    ///
+    /// Business Logic: import 去重 logical identity。
+    /// Code Logic: 委托 get_asset_by_unique_key。
+    pub async fn find_asset_by_unique_key_including_deleted(
+        &self,
+        scope_id: &str,
+        kind: AssetKind,
+        origin_namespace: &str,
+        logical_key: &str,
+    ) -> Result<Option<LogicalAsset>, AppError> {
+        self.get_asset_by_unique_key(scope_id, kind, origin_namespace, logical_key)
+            .await
+    }
+
+    /// 读取本机 device-lane Git 导出状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     export runtime 需要 last_pushed / pending / attempt 决定是否空提交与退避。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     按 device_id 查询 `agent_hub_git_export_state`。
+    pub async fn get_git_export_state(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<AgentHubGitExportState>, AppError> {
+        let row = sqlx::query(
+            "SELECT device_id, last_exported_snapshot_hash, last_pushed_snapshot_hash,
+                    pending_snapshot_hash, attempt_count, next_attempt_at, last_error
+             FROM agent_hub_git_export_state WHERE device_id = ?",
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| AgentHubGitExportState {
+            device_id: r.get("device_id"),
+            last_exported_snapshot_hash: r.get("last_exported_snapshot_hash"),
+            last_pushed_snapshot_hash: r.get("last_pushed_snapshot_hash"),
+            pending_snapshot_hash: r.get("pending_snapshot_hash"),
+            attempt_count: r.get::<i64, _>("attempt_count") as u32,
+            next_attempt_at: r.get("next_attempt_at"),
+            last_error: r.get("last_error"),
+        }))
+    }
+
+    /// 写入/更新本机 device-lane Git 导出状态。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     push 成功清 pending；失败保留 pending_hash + attempt + next_attempt。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     shared write lease + INSERT OR REPLACE。
+    pub async fn upsert_git_export_state(
+        &self,
+        state: &AgentHubGitExportState,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO agent_hub_git_export_state (
+                    device_id, last_exported_snapshot_hash, last_pushed_snapshot_hash,
+                    pending_snapshot_hash, attempt_count, next_attempt_at, last_error,
+                    created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(device_id) DO UPDATE SET
+                    last_exported_snapshot_hash=excluded.last_exported_snapshot_hash,
+                    last_pushed_snapshot_hash=excluded.last_pushed_snapshot_hash,
+                    pending_snapshot_hash=excluded.pending_snapshot_hash,
+                    attempt_count=excluded.attempt_count,
+                    next_attempt_at=excluded.next_attempt_at,
+                    last_error=excluded.last_error,
+                    updated_at=excluded.updated_at",
+            )
+            .bind(&state.device_id)
+            .bind(&state.last_exported_snapshot_hash)
+            .bind(&state.last_pushed_snapshot_hash)
+            .bind(&state.pending_snapshot_hash)
+            .bind(state.attempt_count as i64)
+            .bind(&state.next_attempt_at)
+            .bind(&state.last_error)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+/// 本机 Git device-lane 导出持久状态。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     崩溃后需恢复 pending export；snapshotHash 不变时禁止空 commit。
+///
+/// Code Logic（这个结构体做什么）:
+///     镜像 `agent_hub_git_export_state` 业务列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHubGitExportState {
+    /// 本机 device_id
+    pub device_id: String,
+    /// 最近一次成功构建并写出 lane 的 snapshotHash
+    pub last_exported_snapshot_hash: Option<String>,
+    /// 最近一次成功 push 的 snapshotHash
+    pub last_pushed_snapshot_hash: Option<String>,
+    /// 待重试的 snapshotHash
+    pub pending_snapshot_hash: Option<String>,
+    /// 连续失败次数
+    pub attempt_count: u32,
+    /// 下次尝试 RFC3339
+    pub next_attempt_at: Option<String>,
+    /// 最近错误摘要（脱敏）
+    pub last_error: Option<String>,
+}
+
+/// Import 故障注入点。
+///
+/// Business Logic: 验证 Phase B 崩溃边界。
+/// Code Logic: u8 编码的一次消费标志。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentHubImportFault {
+    /// 无故障
+    #[default]
+    None,
+    /// head 更新前失败（在 apply 末尾、commit 前）
+    BeforeHeadUpdate,
+    /// TX commit 前失败
+    BeforeTxCommit,
+}
+
+impl AgentHubImportFault {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::BeforeHeadUpdate => 1,
+            Self::BeforeTxCommit => 2,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::BeforeHeadUpdate,
+            2 => Self::BeforeTxCommit,
+            _ => Self::None,
+        }
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+static IMPORT_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 单事务 import 输入（Phase B）。
+///
+/// Business Logic: importer 已完成 CAS 验证后，把可落库身份打包进一笔 TX。
+/// Code Logic: scopes/assets/lineages/revisions/variants/conflicts/head_decisions/mappings。
+#[derive(Debug, Clone)]
+pub struct ImportBundle {
+    /// 需要确保存在的 scopes
+    pub scopes: Vec<NewScopeNode>,
+    /// 资产 upsert（id 保留 snapshot id；unique key 冲突时挂 lineage）
+    pub assets: Vec<ImportAssetRow>,
+    /// 额外 lineage 对 (asset_id, lineage_id)
+    pub lineages: Vec<(String, String)>,
+    /// 按拓扑序 revision（id 保留）
+    pub revisions: Vec<ImportRevisionRow>,
+    /// variants
+    pub variants: Vec<ImportVariantRow>,
+    /// 直接落库 conflicts（含 snapshot 携带 + 新开）
+    pub conflicts: Vec<ImportConflictRow>,
+    /// 每个 local asset 的 head 决策
+    pub head_decisions: Vec<ImportHeadDecision>,
+    /// 确认后的 project mapping（opted_in 不自动 true）
+    pub project_mappings: Vec<UpsertAgentHubProjectMapping>,
+}
+
+/// import 资产行。
+#[derive(Debug, Clone)]
+pub struct ImportAssetRow {
+    pub id: String,
+    pub scope_id: String,
+    pub kind: AssetKind,
+    pub origin_namespace: String,
+    pub logical_key: String,
+    pub display_name: String,
+    pub policy: AssetPolicy,
+    pub deleted_at: Option<String>,
+}
+
+/// import revision 行（generation 由 parents 重算或采用 snapshot 值）。
+#[derive(Debug, Clone)]
+pub struct ImportRevisionRow {
+    pub id: String,
+    pub asset_lineage_id: String,
+    pub parents: Vec<String>,
+    pub generation: u64,
+    pub operation: RevisionOperation,
+    pub origin_kind: RevisionOriginKind,
+    pub origin_target: Option<AgentTarget>,
+    pub origin_replica_id: String,
+    pub payload_hash: Option<String>,
+    pub tree_manifest_hash: Option<String>,
+    pub created_at: String,
+}
+
+/// import variant 行。
+#[derive(Debug, Clone)]
+pub struct ImportVariantRow {
+    pub asset_id: String,
+    pub target: AgentTarget,
+    pub revision_id: String,
+}
+
+/// import conflict 行。
+#[derive(Debug, Clone)]
+pub struct ImportConflictRow {
+    pub id: String,
+    pub asset_id: String,
+    pub target: Option<AgentTarget>,
+    pub base_revision_id: Option<String>,
+    pub hub_revision_id: Option<String>,
+    pub external_revision_id: Option<String>,
+    pub detail_json: String,
+    pub created_at: String,
+}
+
+/// head 收敛决策。
+///
+/// Business Logic: 禁止 LWW；要么推进到 merge head，要么保留双 head 并 conflict。
+#[derive(Debug, Clone)]
+pub struct ImportHeadDecision {
+    /// 本地 logical asset id
+    pub asset_id: String,
+    /// 新 current head；None 表示不改 head（仅开 conflict）
+    pub new_head: Option<String>,
+    /// 是否 tombstone
+    pub deleted_at: Option<String>,
+}
+
+/// import TX 结果。
+#[derive(Debug, Clone, Default)]
+pub struct ImportBundleResult {
+    /// 新插入 revision 数
+    pub inserted_revisions: u64,
+    /// 已存在 dedupe 的 revision 数
+    pub deduped_revisions: u64,
+    /// 推进 head 的资产数
+    pub heads_advanced: u64,
+    /// 新开 conflict 数
+    pub conflicts_opened: u64,
+    /// 导入资产 id（local）
+    pub imported_asset_ids: Vec<String>,
+}
+
+/// 在已开启的写事务内应用 import bundle。
+///
+/// Business Logic: Phase B 核心；失败则整笔回滚。
+/// Code Logic: scopes → assets/lineages → revisions/parents → variants → conflicts → heads。
+async fn apply_import_bundle_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    bundle: &ImportBundle,
+) -> Result<ImportBundleResult, AppError> {
+    let mut result = ImportBundleResult::default();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // 1) scopes
+    for scope in &bundle.scopes {
+        let id = scope
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_scopes WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&mut **tx)
+            .await?;
+        if exists == 0 {
+            // 也按 hub_project_id 查 project scope 是否已有
+            if let Some(hub) = scope.hub_project_id.as_deref() {
+                let existing: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM agent_hub_scopes WHERE kind = 'project' AND hub_project_id = ? LIMIT 1",
+                )
+                .bind(hub)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if existing.is_some() {
+                    continue;
+                }
+            }
+            sqlx::query(
+                "INSERT INTO agent_hub_scopes (id, kind, hub_project_id, relative_path, created_at)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(scope.kind.as_str())
+            .bind(&scope.hub_project_id)
+            .bind(&scope.relative_path)
+            .bind(&now)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
+    // 2) project mappings（确认后；opted_in 由调用方决定，默认 false）
+    //    按 hub_project_id 或 local_workbench_project_id 去重，避免 UNIQUE(local) 冲突。
+    for m in &bundle.project_mappings {
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agent_hub_project_mappings WHERE hub_project_id = ? LIMIT 1",
+        )
+        .bind(&m.hub_project_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let existing = match existing {
+            Some(id) => Some(id),
+            None => {
+                if let Some(local) = m.local_workbench_project_id.as_deref() {
+                    sqlx::query_scalar(
+                        "SELECT id FROM agent_hub_project_mappings
+                         WHERE local_workbench_project_id = ? LIMIT 1",
+                    )
+                    .bind(local)
+                    .fetch_optional(&mut **tx)
+                    .await?
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(id) = existing {
+            sqlx::query(
+                "UPDATE agent_hub_project_mappings
+                 SET hub_project_id = ?,
+                     local_workbench_project_id = COALESCE(?, local_workbench_project_id),
+                     git_remote_fingerprint = COALESCE(?, git_remote_fingerprint),
+                     opted_in = CASE WHEN ? = 1 THEN 1 ELSE opted_in END,
+                     updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(&m.hub_project_id)
+            .bind(&m.local_workbench_project_id)
+            .bind(&m.git_remote_fingerprint)
+            .bind(if m.opted_in { 1 } else { 0 })
+            .bind(&now)
+            .bind(&id)
+            .execute(&mut **tx)
+            .await?;
+        } else {
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO agent_hub_project_mappings
+                 (id, hub_project_id, local_workbench_project_id, git_remote_fingerprint,
+                  local_absolute_path, opted_in, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&m.hub_project_id)
+            .bind(&m.local_workbench_project_id)
+            .bind(&m.git_remote_fingerprint)
+            .bind(&m.local_absolute_path)
+            .bind(if m.opted_in { 1 } else { 0 })
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
+    // 3) assets + self lineage + aliases
+    let mut imported_assets = std::collections::BTreeSet::new();
+    for a in &bundle.assets {
+        let existing: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM agent_hub_assets
+             WHERE scope_id = ? AND kind = ? AND origin_namespace = ? AND logical_key = ?
+             LIMIT 1",
+        )
+        .bind(&a.scope_id)
+        .bind(a.kind.as_str())
+        .bind(&a.origin_namespace)
+        .bind(&a.logical_key)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        let local_asset_id = if let Some((id,)) = existing {
+            // 挂远端 id 为 lineage alias
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_hub_asset_lineages (asset_id, lineage_id, created_at)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&a.id)
+            .bind(&now)
+            .execute(&mut **tx)
+            .await?;
+            // self lineage
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_hub_asset_lineages (asset_id, lineage_id, created_at)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&id)
+            .bind(&now)
+            .execute(&mut **tx)
+            .await?;
+            id
+        } else {
+            // 若 id 已存在则只补 lineage
+            let by_id: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_assets WHERE id = ?")
+                    .bind(&a.id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if by_id == 0 {
+                sqlx::query(
+                    "INSERT INTO agent_hub_assets
+                     (id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                      current_revision_id, deleted_at, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                )
+                .bind(&a.id)
+                .bind(&a.scope_id)
+                .bind(a.kind.as_str())
+                .bind(&a.origin_namespace)
+                .bind(&a.logical_key)
+                .bind(&a.display_name)
+                .bind(a.policy.as_str())
+                .bind(&a.deleted_at)
+                .bind(&now)
+                .bind(&now)
+                .execute(&mut **tx)
+                .await?;
+            }
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_hub_asset_lineages (asset_id, lineage_id, created_at)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(&a.id)
+            .bind(&a.id)
+            .bind(&now)
+            .execute(&mut **tx)
+            .await?;
+            a.id.clone()
+        };
+        imported_assets.insert(local_asset_id);
+    }
+
+    for (asset_id, lineage_id) in &bundle.lineages {
+        sqlx::query(
+            "INSERT OR IGNORE INTO agent_hub_asset_lineages (asset_id, lineage_id, created_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(asset_id)
+        .bind(lineage_id)
+        .bind(&now)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // 4) revisions + parents（幂等 dedupe by id）
+    for rev in &bundle.revisions {
+        if rev.operation == RevisionOperation::Delete
+            && (rev.payload_hash.is_some() || rev.tree_manifest_hash.is_some())
+        {
+            return Err(AppError::validation(
+                "agent_hub_delete_revision_rejects_payload_hash".to_string(),
+            ));
+        }
+        // 校验 parents 存在（或在本批更早插入）
+        for parent in &rev.parents {
+            let exists: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
+                    .bind(parent)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if exists == 0 {
+                return Err(AppError::validation(format!(
+                    "agent_hub_import_parent_missing:{parent}"
+                )));
+            }
+        }
+        let existing: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
+                .bind(&rev.id)
+                .fetch_one(&mut **tx)
+                .await?;
+        if existing > 0 {
+            result.deduped_revisions += 1;
+            continue;
+        }
+        // generation: 使用 snapshot 提供值，但若 parents 在本库，可取 max+1 校正
+        let mut max_parent: Option<u64> = None;
+        for parent in &rev.parents {
+            let g: Option<i64> =
+                sqlx::query_scalar("SELECT generation FROM agent_hub_revisions WHERE id = ?")
+                    .bind(parent)
+                    .fetch_optional(&mut **tx)
+                    .await?;
+            if let Some(g) = g {
+                let g = g as u64;
+                max_parent = Some(max_parent.map_or(g, |m| m.max(g)));
+            }
+        }
+        let generation = max_parent
+            .map(|m| m.saturating_add(1))
+            .unwrap_or(rev.generation);
+
+        sqlx::query(
+            "INSERT INTO agent_hub_revisions
+             (id, asset_lineage_id, generation, operation, origin_kind, origin_target,
+              origin_replica_id, payload_hash, tree_manifest_hash, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&rev.id)
+        .bind(&rev.asset_lineage_id)
+        .bind(generation as i64)
+        .bind(rev.operation.as_str())
+        .bind(rev.origin_kind.as_str())
+        .bind(rev.origin_target.map(|t| t.as_str()))
+        .bind(&rev.origin_replica_id)
+        .bind(&rev.payload_hash)
+        .bind(&rev.tree_manifest_hash)
+        .bind(&rev.created_at)
+        .execute(&mut **tx)
+        .await?;
+
+        for (pos, parent) in rev.parents.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO agent_hub_revision_parents
+                 (revision_id, parent_revision_id, parent_order)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(&rev.id)
+            .bind(parent)
+            .bind(pos as i64)
+            .execute(&mut **tx)
+            .await?;
+        }
+        result.inserted_revisions += 1;
+    }
+
+    // 5) variants
+    for v in &bundle.variants {
+        sqlx::query("DELETE FROM agent_hub_variants WHERE asset_id = ? AND target = ?")
+            .bind(&v.asset_id)
+            .bind(v.target.as_str())
+            .execute(&mut **tx)
+            .await?;
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO agent_hub_variants
+             (id, asset_id, target, revision_id, extension_payload_hash, created_at)
+             VALUES (?, ?, ?, ?, NULL, ?)",
+        )
+        .bind(&id)
+        .bind(&v.asset_id)
+        .bind(v.target.as_str())
+        .bind(&v.revision_id)
+        .bind(&now)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // 6) conflicts
+    for c in &bundle.conflicts {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_conflicts WHERE id = ?")
+                .bind(&c.id)
+                .fetch_one(&mut **tx)
+                .await?;
+        if exists > 0 {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO agent_hub_conflicts (
+                id, asset_id, target, base_revision_id, hub_revision_id,
+                external_revision_id, detail_json, resolved, created_at, resolved_at
+             ) VALUES (?,?,?,?,?,?,?,0,?,NULL)",
+        )
+        .bind(&c.id)
+        .bind(&c.asset_id)
+        .bind(c.target.map(|t| t.as_str().to_string()))
+        .bind(&c.base_revision_id)
+        .bind(&c.hub_revision_id)
+        .bind(&c.external_revision_id)
+        .bind(&c.detail_json)
+        .bind(&c.created_at)
+        .execute(&mut **tx)
+        .await?;
+        result.conflicts_opened += 1;
+    }
+
+    // 7) head decisions（仅显式 new_head 才推进；None 保留旧 head）
+    for d in &bundle.head_decisions {
+        if let Some(head) = &d.new_head {
+            // 确认 head revision 存在
+            let exists: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
+                    .bind(head)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if exists == 0 {
+                return Err(AppError::validation(format!(
+                    "agent_hub_import_head_missing:{head}"
+                )));
+            }
+            sqlx::query(
+                "UPDATE agent_hub_assets
+                 SET current_revision_id = ?, deleted_at = ?, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(head)
+            .bind(&d.deleted_at)
+            .bind(&now)
+            .bind(&d.asset_id)
+            .execute(&mut **tx)
+            .await?;
+            result.heads_advanced += 1;
+        }
+        imported_assets.insert(d.asset_id.clone());
+    }
+
+    result.imported_asset_ids = imported_assets.into_iter().collect();
+    Ok(result)
+}
+
+/// Snapshot 身份加载请求（与 builder selection 对齐的最小字段集）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     单读事务 API 需要与 builder 相同的 mode/id 列表，但不依赖 snapshot 模块反向引用。
+///
+/// Code Logic（这个结构体做什么）:
+///     mode + scope/asset/hub ids + include_history。
+#[derive(Debug, Clone)]
+pub struct SnapshotIdentityRequest {
+    /// full / user / project / explicit
+    pub mode: SnapshotIdentityMode,
+    /// 显式 scope ids
+    pub scope_ids: Vec<String>,
+    /// 显式 asset ids
+    pub asset_ids: Vec<String>,
+    /// project hubProjectId 列表
+    pub hub_project_ids: Vec<String>,
+    /// 是否闭合完整 ancestry
+    pub include_history: bool,
+}
+
+/// Snapshot 选择模式（repo 侧镜像，避免 storage→agent_hub::snapshot 反向依赖）。
+///
+/// Business Logic: full/user/project/explicit 四档。
+/// Code Logic: 与 builder::SnapshotSelectionMode 一一对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotIdentityMode {
+    /// 全部 Hub 资产
+    FullHub,
+    /// 用户 scope
+    UserScope,
+    /// 一个或多个 project
+    Project,
+    /// 显式 asset id 列表
+    ExplicitAssets,
+}
+
+/// 单读事务内冻结的 snapshot 身份集合。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     builder 在 CAS 流式 re-hash 前必须持有一致身份集合；TX 结束后集合只读。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 assets/lineages/revisions/variants/conflicts/aliases/hub ids。
+#[derive(Debug, Clone)]
+pub struct SnapshotIdentityBundle {
+    /// 选中资产（含 tombstone）
+    pub assets: Vec<LogicalAsset>,
+    /// (asset_id, lineage_id)
+    pub lineages: Vec<(String, String)>,
+    /// 闭合 revision 集合
+    pub revisions: Vec<Revision>,
+    /// 当前 variants
+    pub variants: Vec<AgentHubVariantRow>,
+    /// 未解决 conflicts
+    pub conflicts: Vec<AgentHubConflict>,
+    /// 便携 aliases（无绝对路径）
+    pub aliases: Vec<AgentHubPortableAliasRow>,
+    /// 相关 hub project ids
+    pub hub_project_ids: Vec<String>,
+}
+
+/// Snapshot 用 variant 行。
+///
+/// Business Logic: envelope variants 字段来源。
+/// Code Logic: 镜像 agent_hub_variants 列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHubVariantRow {
+    /// 主键
+    pub id: String,
+    /// 资产 id
+    pub asset_id: String,
+    /// CLI target
+    pub target: AgentTarget,
+    /// 变体 head revision
+    pub revision_id: String,
+    /// 可选扩展 payload hash
+    pub extension_payload_hash: Option<String>,
+    /// 创建时间
+    pub created_at: String,
+}
+
+/// Snapshot 用便携别名（无绝对路径）。
+///
+/// Business Logic: aliases 跨设备映射 portable identity。
+/// Code Logic: kind + external_id + local_id。
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
+pub struct AgentHubPortableAliasRow {
+    /// 别名种类
+    pub kind: String,
+    /// 外部 id
+    pub external_id: String,
+    /// 本地 canonical id
+    pub local_id: String,
 }
 
 /// Agent Hub 项目映射行（本机 portable 身份）。
@@ -2436,6 +3633,71 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
      ON agent_hub_adoptions(state, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_adoptions_origin
      ON agent_hub_adoptions(origin_path)",
+    // Gate C Task 4：LAN push 幂等 ledger（sourceDeviceId+clientRequestId 非认证标签）
+    "CREATE TABLE IF NOT EXISTS agent_hub_push_requests (
+        source_device_id TEXT NOT NULL,
+        client_request_id TEXT NOT NULL,
+        transfer_id TEXT NOT NULL UNIQUE,
+        selection_hash TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        envelope_json TEXT NOT NULL,
+        outcome_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source_device_id, client_request_id)
+    )",
+    "CREATE TABLE IF NOT EXISTS agent_hub_push_objects (
+        transfer_id TEXT NOT NULL,
+        object_hash TEXT NOT NULL,
+        expected_size INTEGER NOT NULL,
+        received_bytes INTEGER NOT NULL DEFAULT 0,
+        verified INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (transfer_id, object_hash)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_push_requests_status
+     ON agent_hub_push_requests(status, updated_at)",
+    // Gate C Task 5：源侧 multi-target push 进度（GUI reconnect / Attention）
+    "CREATE TABLE IF NOT EXISTS agent_hub_source_push_requests (
+        request_id TEXT PRIMARY KEY,
+        selection_mode TEXT NOT NULL,
+        selection_json TEXT NOT NULL,
+        selection_hash TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS agent_hub_source_push_targets (
+        request_id TEXT NOT NULL,
+        peer_device_id TEXT NOT NULL,
+        peer_label TEXT NOT NULL,
+        client_request_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        retryable INTEGER NOT NULL DEFAULT 0,
+        error_code TEXT,
+        transfer_id TEXT,
+        missing_object_count INTEGER NOT NULL DEFAULT 0,
+        transferred_object_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (request_id, peer_device_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_source_push_targets_status
+     ON agent_hub_source_push_targets(status, updated_at)",
+    // Gate C Task 6：本机 device-lane Git 导出 pending / last-pushed 状态
+    "CREATE TABLE IF NOT EXISTS agent_hub_git_export_state (
+        device_id TEXT PRIMARY KEY,
+        last_exported_snapshot_hash TEXT,
+        last_pushed_snapshot_hash TEXT,
+        pending_snapshot_hash TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )",
 ];
 
 /// 升级旧库：为 mappings/bindings 补列与唯一索引。
@@ -2827,6 +4089,24 @@ fn row_to_projection_job(row: &SqliteRow) -> Result<ProjectionJob, AppError> {
     })
 }
 
+/// 解析 variant 行。
+///
+/// Business Logic: snapshot builder 需要 target variants。
+/// Code Logic: try_get + AgentTarget::parse。
+fn row_to_variant(row: &SqliteRow) -> Result<AgentHubVariantRow, AppError> {
+    let target_raw: String = row.try_get("target")?;
+    let target = AgentTarget::parse(&target_raw)
+        .ok_or_else(|| AppError::generic(format!("agent_hub_unknown_target:{target_raw}")))?;
+    Ok(AgentHubVariantRow {
+        id: row.try_get("id")?,
+        asset_id: row.try_get("asset_id")?,
+        target,
+        revision_id: row.try_get("revision_id")?,
+        extension_payload_hash: row.try_get("extension_payload_hash")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
 /// 解析 conflict 行。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2924,6 +4204,379 @@ fn row_to_adoption(row: &SqliteRow) -> Result<AdoptionRecord, AppError> {
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+// ── Snapshot 单读事务 on_tx helpers（Gate C Task 2 fix）──────────────────
+
+/// 在事务连接上解析 selection 资产集合。
+///
+/// Business Logic: 与 builder 四档 selection 语义一致，且全部落在同一 TX。
+/// Code Logic: 按 mode 调用对应 on_tx 列表查询。
+async fn resolve_selected_assets_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    request: &SnapshotIdentityRequest,
+) -> Result<Vec<LogicalAsset>, AppError> {
+    match request.mode {
+        SnapshotIdentityMode::FullHub => list_all_assets_including_deleted_on_tx(tx).await,
+        SnapshotIdentityMode::UserScope => {
+            let scope_ids = if !request.scope_ids.is_empty() {
+                request.scope_ids.clone()
+            } else if let Some(id) = resolve_user_scope_id_on_tx(tx).await? {
+                vec![id]
+            } else {
+                return Ok(Vec::new());
+            };
+            list_assets_in_scopes_including_deleted_on_tx(tx, &scope_ids).await
+        }
+        SnapshotIdentityMode::Project => {
+            let mut scope_ids = request.scope_ids.clone();
+            for hub in &request.hub_project_ids {
+                if let Some(sid) = resolve_project_scope_id_on_tx(tx, hub).await? {
+                    scope_ids.push(sid);
+                }
+            }
+            scope_ids.sort();
+            scope_ids.dedup();
+            list_assets_in_scopes_including_deleted_on_tx(tx, &scope_ids).await
+        }
+        SnapshotIdentityMode::ExplicitAssets => {
+            list_assets_by_ids_including_deleted_on_tx(tx, &request.asset_ids).await
+        }
+    }
+}
+
+/// 事务内列出全部资产（含 deleted）。
+async fn list_all_assets_including_deleted_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> Result<Vec<LogicalAsset>, AppError> {
+    let rows = sqlx::query(
+        "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                current_revision_id, deleted_at, created_at, updated_at
+         FROM agent_hub_assets
+         ORDER BY id ASC",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    rows.iter().map(row_to_asset).collect()
+}
+
+/// 事务内按 id 列表读资产（含 deleted）。
+async fn list_assets_by_ids_including_deleted_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    ids: &[String],
+) -> Result<Vec<LogicalAsset>, AppError> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for id in ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let row = sqlx::query(
+            "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                    current_revision_id, deleted_at, created_at, updated_at
+             FROM agent_hub_assets WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(row) = row {
+            out.push(row_to_asset(&row)?);
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// 事务内按 scope 列表读资产（含 deleted）。
+async fn list_assets_in_scopes_including_deleted_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    scope_ids: &[String],
+) -> Result<Vec<LogicalAsset>, AppError> {
+    if scope_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for scope_id in scope_ids {
+        let rows = sqlx::query(
+            "SELECT id, scope_id, kind, origin_namespace, logical_key, display_name, policy,
+                    current_revision_id, deleted_at, created_at, updated_at
+             FROM agent_hub_assets
+             WHERE scope_id = ?
+             ORDER BY id ASC",
+        )
+        .bind(scope_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        for row in rows {
+            out.push(row_to_asset(&row)?);
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.dedup_by(|a, b| a.id == b.id);
+    Ok(out)
+}
+
+/// 事务内读资产 lineage 对。
+async fn list_lineages_for_assets_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    asset_ids: &[String],
+) -> Result<Vec<(String, String)>, AppError> {
+    let mut out = Vec::new();
+    for asset_id in asset_ids {
+        let rows = sqlx::query(
+            "SELECT asset_id, lineage_id FROM agent_hub_asset_lineages
+             WHERE asset_id = ? ORDER BY lineage_id ASC",
+        )
+        .bind(asset_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        for row in rows {
+            let a: String = row.try_get("asset_id")?;
+            let l: String = row.try_get("lineage_id")?;
+            out.push((a, l));
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// 事务内 get_revision（含有序 parents）。
+async fn get_revision_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<Option<Revision>, AppError> {
+    let row = sqlx::query(
+        "SELECT id, asset_lineage_id, generation, operation, origin_kind, origin_target,
+                origin_replica_id, payload_hash, tree_manifest_hash, created_at
+         FROM agent_hub_revisions WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let parent_rows = sqlx::query(
+        "SELECT parent_revision_id FROM agent_hub_revision_parents
+         WHERE revision_id = ? ORDER BY parent_order ASC",
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let parents = parent_rows
+        .iter()
+        .map(|r| {
+            let s: String = r.try_get("parent_revision_id")?;
+            Ok::<_, AppError>(RevisionId(s))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(row_to_revision(&row, parents)?))
+}
+
+/// 事务内从 heads BFS 闭合 ancestry。
+async fn collect_revision_ancestry_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    head_ids: &[String],
+) -> Result<Vec<Revision>, AppError> {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for h in head_ids {
+        if !h.is_empty() {
+            queue.push_back(h.clone());
+        }
+    }
+    let mut by_id: BTreeMap<String, Revision> = BTreeMap::new();
+    while let Some(id) = queue.pop_front() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        let rev = get_revision_on_tx(tx, &id).await?.ok_or_else(|| {
+            AppError::not_found(format!("agent_hub_snapshot_revision_missing:{id}"))
+        })?;
+        for p in &rev.parents {
+            queue.push_back(p.as_str().to_string());
+        }
+        by_id.insert(id, rev);
+    }
+    Ok(by_id.into_values().collect())
+}
+
+/// 事务内列 variants。
+async fn list_variants_for_assets_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    asset_ids: &[String],
+) -> Result<Vec<AgentHubVariantRow>, AppError> {
+    let mut out = Vec::new();
+    for asset_id in asset_ids {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, revision_id, extension_payload_hash, created_at
+             FROM agent_hub_variants
+             WHERE asset_id = ?
+             ORDER BY target ASC, revision_id ASC",
+        )
+        .bind(asset_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        for row in rows {
+            out.push(row_to_variant(&row)?);
+        }
+    }
+    out.sort_by(|a, b| {
+        a.asset_id
+            .cmp(&b.asset_id)
+            .then(a.target.as_str().cmp(b.target.as_str()))
+            .then(a.revision_id.cmp(&b.revision_id))
+    });
+    Ok(out)
+}
+
+/// 事务内按资产过滤未解决 conflicts。
+async fn list_unresolved_conflicts_for_assets_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    asset_ids: &[String],
+) -> Result<Vec<AgentHubConflict>, AppError> {
+    let set: std::collections::BTreeSet<&str> = asset_ids.iter().map(String::as_str).collect();
+    let rows = sqlx::query(
+        "SELECT id, asset_id, target, base_revision_id, hub_revision_id,
+                external_revision_id, detail_json, resolved, created_at, resolved_at
+         FROM agent_hub_conflicts
+         WHERE resolved = 0
+         ORDER BY created_at DESC, id ASC",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut out = Vec::new();
+    for row in rows {
+        let c = row_to_conflict(&row)?;
+        if set.contains(c.asset_id.as_str()) {
+            out.push(c);
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// 事务内 get_scope。
+async fn get_scope_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<Option<ScopeNode>, AppError> {
+    let row = sqlx::query(
+        "SELECT id, kind, hub_project_id, relative_path, created_at
+         FROM agent_hub_scopes WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|r| row_to_scope(&r)).transpose()
+}
+
+/// 事务内按 hub_project_id 取 project scope id。
+async fn resolve_project_scope_id_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    hub_project_id: &str,
+) -> Result<Option<String>, AppError> {
+    let row = sqlx::query(
+        "SELECT id, kind, hub_project_id, relative_path, created_at
+         FROM agent_hub_scopes
+         WHERE kind = 'project' AND hub_project_id = ?
+         LIMIT 1",
+    )
+    .bind(hub_project_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|r| row_to_scope(&r)).transpose()?.map(|s| s.id))
+}
+
+/// 事务内取字典序最小 user scope id。
+async fn resolve_user_scope_id_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> Result<Option<String>, AppError> {
+    let rows = sqlx::query(
+        "SELECT id, kind, hub_project_id, relative_path, created_at
+         FROM agent_hub_scopes
+         ORDER BY id ASC",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut user_ids = Vec::new();
+    for row in rows {
+        let scope = row_to_scope(&row)?;
+        if scope.kind == ScopeKind::User {
+            user_ids.push(scope.id);
+        }
+    }
+    Ok(user_ids.into_iter().min())
+}
+
+/// 事务内读 project mapping。
+async fn get_project_mapping_by_hub_project_id_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    hub_project_id: &str,
+) -> Result<Option<AgentHubProjectMappingRow>, AppError> {
+    let row = sqlx::query(
+        "SELECT id, hub_project_id, local_workbench_project_id, git_remote_fingerprint,
+                local_absolute_path, opted_in, created_at, updated_at
+         FROM agent_hub_project_mappings
+         WHERE hub_project_id = ?
+         LIMIT 1",
+    )
+    .bind(hub_project_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|r| row_to_project_mapping(&r)).transpose()
+}
+
+/// 事务内列 portable aliases（永不导出绝对路径）。
+async fn list_portable_project_aliases_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    hub_project_ids: &[String],
+) -> Result<Vec<AgentHubPortableAliasRow>, AppError> {
+    let mut out = Vec::new();
+    for hub_id in hub_project_ids {
+        let Some(row) = get_project_mapping_by_hub_project_id_on_tx(tx, hub_id).await? else {
+            out.push(AgentHubPortableAliasRow {
+                kind: "hubProjectId".into(),
+                external_id: hub_id.clone(),
+                local_id: hub_id.clone(),
+            });
+            continue;
+        };
+        out.push(AgentHubPortableAliasRow {
+            kind: "hubProjectId".into(),
+            external_id: hub_id.clone(),
+            local_id: hub_id.clone(),
+        });
+        if let Some(fp) = row.git_remote_fingerprint {
+            if !fp.is_empty() {
+                out.push(AgentHubPortableAliasRow {
+                    kind: "gitRemoteFingerprint".into(),
+                    external_id: fp,
+                    local_id: hub_id.clone(),
+                });
+            }
+        }
+        if let Some(local) = row.local_workbench_project_id {
+            if !local.is_empty() {
+                out.push(AgentHubPortableAliasRow {
+                    kind: "workbenchProjectId".into(),
+                    external_id: local,
+                    local_id: hub_id.clone(),
+                });
+            }
+        }
+        let _ = row.local_absolute_path;
+    }
+    out.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then(a.external_id.cmp(&b.external_id))
+            .then(a.local_id.cmp(&b.local_id))
+    });
+    out.dedup();
+    Ok(out)
 }
 
 #[cfg(test)]

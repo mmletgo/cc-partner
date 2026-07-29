@@ -19,6 +19,8 @@
 //!     - `L2-FAULT-SETTINGS-001`：`settings_partial_command_failure_isolates_fields`
 //!     - `L2-FAULT-AGENT-HUB-PROJECTION-001`：`agent_hub_projection_*` 故障注入（temp/sync/precondition/rename/db commit）
 //!     - `L2-FAULT-AGENT-HUB-ADOPTION-001`：`agent_hub_adoption_*` legacy 纳管故障点（激活失败/archive 前崩溃/DB commit 前崩溃）
+//!     - `L2-FAULT-AGENT-HUB-IMPORT-001`：`agent_hub_import_*` SnapshotImporter 两阶段故障
+//!       （corrupt object / DB commit 前崩溃 / CAS 后残留未计 imported asset）
 //!     - `L2-LAN-BOUNDARY-001`：**不在本文件重复**；权威自动化矩阵见
 //!       `tests/lan_trust_boundary_smoke.rs` + `lan_trust_boundary_harness`
 //!       （无凭据 loopback/mobile 读写、Host/Origin、stop loopback+token、
@@ -45,11 +47,12 @@ use app_lib::config_store::{
 };
 use app_lib::{
     agent_hub_sha256_hex, AdoptionEngine, AdoptionFault, AdoptionOutcome, AdoptionRequest,
-    AdoptionState, AgentHubObjectStore, AgentHubRepo, AgentTarget, AssetKind, AssetPolicy,
-    ClaudeHistoryRepo, ClaudeHistoryRow, DesiredPresence, NewLogicalAsset, NewScopeNode,
-    NewTargetBinding, PeerCallError, PeerClient, ProjectionJobState, ProjectionPayloadKind,
-    ProjectionRequest, ProjectionScheduler, ProjectionWriteFault, RevisionId, ScopeKind,
-    ScratchpadRepo, ScratchpadRow, TransferCompletePolicy,
+    AdoptionState, AgentHubImportFault, AgentHubObjectStore, AgentHubRepo, AgentTarget, AssetKind,
+    AssetPolicy, ClaudeHistoryRepo, ClaudeHistoryRow, ConfirmedImportSelection, DesiredPresence,
+    NewLogicalAsset, NewScopeNode, NewTargetBinding, PeerCallError, PeerClient, ProjectionJobState,
+    ProjectionPayloadKind, ProjectionRequest, ProjectionScheduler, ProjectionWriteFault,
+    RevisionId, ScopeKind, ScratchpadRepo, ScratchpadRow, SnapshotImporter, TransferCompletePolicy,
+    ValidatedSnapshot,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -1216,4 +1219,212 @@ async fn agent_hub_adoption_crash_before_db_commit_recoverable() {
     assert!(matches!(recovered, AdoptionOutcome::Adopted { .. }));
     let done = repo.get_adoption(&archived.id).await.unwrap().unwrap();
     assert_eq!(done.state, AdoptionState::Committed);
+}
+
+// ── Gate C Task 3: SnapshotImporter fault boundaries ─────────────────────
+
+/// L2-FAULT-AGENT-HUB-IMPORT-001 辅助：最小可导入 instruction snapshot。
+///
+/// Business Logic: 故障边界测试需要合法 envelope + object_bytes，失败时不得激活 head。
+/// Code Logic: 建 user scope/asset/revision + ValidatedSnapshot。
+async fn setup_agent_hub_import_snapshot() -> (
+    AgentHubRepo,
+    AgentHubObjectStore,
+    tempfile::TempDir,
+    ValidatedSnapshot,
+    String,
+) {
+    use app_lib::agent_hub::models::{
+        NewRevision, RevisionId, RevisionOperation, RevisionOriginKind,
+    };
+    use app_lib::agent_hub::snapshot::builder::{
+        build_snapshot, SnapshotSelectionMode, SnapshotSelectionRequest,
+    };
+
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("import.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    AgentHubRepo::ensure_schema(&pool).await.unwrap();
+    let repo = AgentHubRepo::new(pool);
+    let _ = repo.take_import_fault();
+    let store = AgentHubObjectStore::open(dir.path()).unwrap();
+    let scope = repo
+        .insert_scope(NewScopeNode {
+            id: Some("scope-user".into()),
+            kind: ScopeKind::User,
+            hub_project_id: None,
+            relative_path: None,
+        })
+        .await
+        .unwrap();
+    let asset = repo
+        .insert_asset(NewLogicalAsset {
+            scope_id: scope.id,
+            kind: AssetKind::Instruction,
+            origin_namespace: "standalone".into(),
+            logical_key: "root".into(),
+            display_name: "Root".into(),
+            policy: AssetPolicy::Shared,
+        })
+        .await
+        .unwrap();
+    let body = br#"{"relativeKey":"CLAUDE.md","blocks":[{"id":"b1","mode":"shared","commonMarkdown":"body","variants":{},"headingPath":[],"needsAdaptation":false}]}"#;
+    let hash = store.put_blob(body).await.unwrap().hash;
+    repo.append_revision(NewRevision {
+        id: RevisionId::new_v7(),
+        asset_lineage_id: asset.id.clone(),
+        parents: vec![],
+        operation: RevisionOperation::Upsert,
+        origin_kind: RevisionOriginKind::Ui,
+        origin_target: None,
+        origin_replica_id: "01900000-0000-7000-8000-0000000000b1".into(),
+        payload_hash: Some(hash.clone()),
+        tree_manifest_hash: None,
+        created_at: "2026-07-29T10:00:00Z".into(),
+        expected_parent_id: None,
+    })
+    .await
+    .unwrap();
+    let built = build_snapshot(
+        &repo,
+        &store,
+        SnapshotSelectionRequest {
+            mode: SnapshotSelectionMode::FullHub,
+            scope_ids: vec![],
+            asset_ids: vec![],
+            hub_project_ids: vec![],
+            include_history: true,
+            source_replica_id: "01900000-0000-7000-8000-0000000000b1".into(),
+            limits: None,
+        },
+    )
+    .await
+    .unwrap();
+    let snapshot = ValidatedSnapshot::from_parts(built.envelope, built.object_bytes, None).unwrap();
+    (repo, store, dir, snapshot, hash)
+}
+
+/// L2：corrupt object → import 失败，目标库无 active asset/head。
+#[tokio::test]
+async fn agent_hub_import_corrupt_object_does_not_activate_head() {
+    let (_src_repo, _src_store, _src_dir, mut snapshot, _hash) =
+        setup_agent_hub_import_snapshot().await;
+    // 破坏全部 object 字节
+    for v in snapshot.object_bytes.values_mut() {
+        v.push(b'!');
+    }
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("dst.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    AgentHubRepo::ensure_schema(&pool).await.unwrap();
+    let repo = AgentHubRepo::new(pool);
+    let _ = repo.take_import_fault();
+    let store = AgentHubObjectStore::open(dir.path()).unwrap();
+    let importer = SnapshotImporter::new(repo.clone(), store, dir.path());
+    let err = importer
+        .commit_import(snapshot, ConfirmedImportSelection::default())
+        .await
+        .expect_err("corrupt must fail");
+    assert!(
+        err.to_string().contains("corrupt") || err.to_string().contains("hash"),
+        "{err}"
+    );
+    assert!(
+        repo.list_assets(None, None).await.unwrap().is_empty(),
+        "no active assets after corrupt import"
+    );
+}
+
+/// L2：TX commit 前注入失败 → 无非法 head；CAS 对象可残留且不报告为 imported asset。
+#[tokio::test]
+async fn agent_hub_import_db_fail_before_commit_keeps_cas_not_heads() {
+    let (_src_repo, _src_store, _src_dir, snapshot, hash) = setup_agent_hub_import_snapshot().await;
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("dst.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    AgentHubRepo::ensure_schema(&pool).await.unwrap();
+    let repo = AgentHubRepo::new(pool);
+    let _ = repo.take_import_fault();
+    repo.inject_import_fault(AgentHubImportFault::BeforeTxCommit);
+    let store = AgentHubObjectStore::open(dir.path()).unwrap();
+    let importer = SnapshotImporter::new(repo.clone(), store.clone(), dir.path());
+    let err = importer
+        .commit_import(snapshot, ConfirmedImportSelection::default())
+        .await
+        .expect_err("injected fail");
+    let _ = repo.take_import_fault();
+    assert!(
+        err.to_string().contains("injected") || err.to_string().contains("import"),
+        "{err}"
+    );
+    assert!(
+        repo.list_assets(None, None).await.unwrap().is_empty(),
+        "failed TX must not leave assets"
+    );
+    // CAS residual allowed
+    assert!(
+        store.get_blob(&hash).await.is_ok(),
+        "CAS residual ok for GC"
+    );
+}
+
+/// L2：成功 import 后 imported_object_hashes 不含未引用 blob。
+#[tokio::test]
+async fn agent_hub_import_unreferenced_cas_not_reported() {
+    let (_src_repo, _src_store, _src_dir, mut snapshot, hash) =
+        setup_agent_hub_import_snapshot().await;
+    // 附加未引用对象
+    let junk = b"unreferenced-secret-not-for-report";
+    let junk_hash = agent_hub_sha256_hex(junk);
+    snapshot
+        .object_bytes
+        .insert(junk_hash.clone(), junk.to_vec());
+
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("dst.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    AgentHubRepo::ensure_schema(&pool).await.unwrap();
+    let repo = AgentHubRepo::new(pool);
+    let _ = repo.take_import_fault();
+    let store = AgentHubObjectStore::open(dir.path()).unwrap();
+    let importer = SnapshotImporter::new(repo.clone(), store.clone(), dir.path());
+    let out = importer
+        .commit_import(snapshot, ConfirmedImportSelection::default())
+        .await
+        .unwrap();
+    assert!(out.imported_object_hashes.contains(&hash));
+    assert!(
+        !out.imported_object_hashes.contains(&junk_hash),
+        "unreferenced CAS must not be reported as imported"
+    );
+    // residual may exist
+    let _ = store.get_blob(&junk_hash).await;
 }
