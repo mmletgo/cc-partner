@@ -17,9 +17,11 @@
 //!     Gate A Task 10：migration（用户 CLAUDE.md seed + N/N+1 dual-write 摘要）。
 //!     Gate A fix r1：`projection_ops` 生产投影调度 + `agent_hub.enabled` 武装路径。
 //!     Gate B Task 1：`assets` typed portable payload（Skill/Command/Agent/MCP）。
+//!     Gate B Task 2：`config_patch` ownership-aware TOML/JSONC 语义 patch。
 
 pub mod assets;
 pub mod autostart;
+pub mod config_patch;
 pub mod instructions;
 pub mod migration;
 pub mod models;
@@ -36,6 +38,12 @@ pub use assets::{
     canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, CommandArgument,
     McpTransport, PortableAgent, PortableAssetPayload, PortableCommand, PortableMcpServer,
     PortableSkill,
+};
+pub use config_patch::{
+    apply_config_patch_atomically, parse_owned_path_meta, prepare_config_projection,
+    serialize_owned_path_meta, value_content_hash, ConfigOwnedPathMeta, ConfigPatchOutcome,
+    ConfigPathDiff, JsoncConfigPatcher, ManagedConfigPatch, OwnedConfigValue, PatchedConfig,
+    PreparedConfigProjection, SemanticConfigPatcher, TomlConfigPatcher,
 };
 
 pub use instructions::{
