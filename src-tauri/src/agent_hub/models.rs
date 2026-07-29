@@ -18,7 +18,7 @@ use uuid::Uuid;
 ///
 /// Code Logic（这个枚举做什么）:
 ///     camelCase 序列化；OpenCode wire 为 `opencode`（与设计文档一致）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentTarget {
     /// Claude Code

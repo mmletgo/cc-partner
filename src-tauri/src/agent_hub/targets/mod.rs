@@ -167,13 +167,13 @@ pub struct InstructionSource {
     pub diagnostics: Vec<String>,
 }
 
-/// Gate A 最小指令文档（完整块模型在 Task 4）。
+/// Adapter 层指令文档输入（可从完整块文档降级）。
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     render_instruction 需要一份可渲染的正文与逻辑键，供 adapter 输出目标文件名与 prelude。
 ///
 /// Code Logic（这个结构体做什么）:
-///     持有 common_markdown 与 relative_key。
+///     持有 common_markdown 与 relative_key；Task 4 compiler 将其提升为块文档再渲染。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstructionDocument {
@@ -181,6 +181,19 @@ pub struct InstructionDocument {
     pub common_markdown: String,
     /// 逻辑相对键（如 "" / "src-tauri"）
     pub relative_key: String,
+}
+
+impl InstructionDocument {
+    /// 提升为完整块文档（整篇 shared）。
+    ///
+    /// Business Logic: adapter stub 输入进入 Task 4 compiler。
+    /// Code Logic: 委托 `instructions::InstructionDocument::from_shared_markdown`。
+    pub fn to_compiled_document(&self) -> crate::agent_hub::instructions::InstructionDocument {
+        crate::agent_hub::instructions::InstructionDocument::from_shared_markdown(
+            &self.relative_key,
+            &self.common_markdown,
+        )
+    }
 }
 
 /// 渲染上下文。
@@ -204,10 +217,10 @@ pub struct InstructionRenderContext {
 /// 渲染结果。
 ///
 /// Business Logic（为什么需要这个结构体）:
-///     projection 需要文件名、正文与可选 prelude 分段（materialization base map）。
+///     projection 需要文件名、正文、prelude 与 materialization base block map。
 ///
 /// Code Logic（这个结构体做什么）:
-///     保存 target / file_name / content / prelude。
+///     保存 target / file_name / content / prelude，以及 Task 4 的 bytes/block_map/managed_prefix_len/diagnostics。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderedInstruction {
@@ -219,6 +232,41 @@ pub struct RenderedInstruction {
     pub content: String,
     /// 独立 prelude 段（OpenCode）；其它 target 为 None
     pub prelude: Option<String>,
+    /// 完整文件字节（与 content 一致，UTF-8）
+    #[serde(default)]
+    pub bytes: Vec<u8>,
+    /// 块区间映射（materialization base map）
+    #[serde(default)]
+    pub block_map: Vec<crate::agent_hub::instructions::RenderedBlockRange>,
+    /// managed prelude 占用的前缀字节数
+    #[serde(default)]
+    pub managed_prefix_len: usize,
+    /// 诊断
+    #[serde(default)]
+    pub diagnostics: Vec<crate::agent_hub::instructions::PortabilityDiagnostic>,
+}
+
+impl RenderedInstruction {
+    /// 从 compiler 输出构造。
+    ///
+    /// Business Logic: 三 adapter 共用 compiler，保留 content/prelude 兼容字段。
+    /// Code Logic: bytes→content；managed_prefix→prelude。
+    pub fn from_compiled(
+        compiled: crate::agent_hub::instructions::CompiledRenderedInstruction,
+    ) -> Self {
+        let content = compiled.content_str().to_string();
+        let prelude = compiled.managed_prelude().map(|s| s.to_string());
+        Self {
+            target: compiled.target,
+            file_name: compiled.file_name,
+            content,
+            prelude,
+            bytes: compiled.bytes,
+            block_map: compiled.block_map,
+            managed_prefix_len: compiled.managed_prefix_len,
+            diagnostics: compiled.diagnostics,
+        }
+    }
 }
 
 /// 目标资产适配器合同（Gate A 仅指令 scan/render）。

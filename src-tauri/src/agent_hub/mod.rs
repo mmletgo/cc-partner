@@ -8,17 +8,26 @@
 //!     Gate A Task 1：canonical 数据模型（models）；
 //!     Gate A Task 2：明文 CAS（object_store）与 Revision DAG merge-base（revision_graph）；
 //!     Gate A Task 3：targets（path resolver + instruction-only AssetAdapter 合同）；
+//!     Gate A Task 4：instructions（块编译 / OpenCode prelude / 三方 reconcile）；
 //!     Gate A Task 5：project_scope（opt-in preview/enable/refresh checkout bindings）；
 //!     Gate A Task 8：用户级登录自启动（autostart）。
-//!     后续任务再组装 service、projection、runtime 与完整 compiler。
+//!     后续任务再组装 service、projection、runtime。
 
 pub mod autostart;
+pub mod instructions;
 pub mod models;
 pub mod object_store;
 pub mod project_scope;
 pub mod revision_graph;
 pub mod targets;
 
+pub use instructions::{
+    classify_import, compile_render, reconcile_instruction, AgentHubConflictScope,
+    CompiledRenderedInstruction, InstructionBlock, InstructionBlockMode,
+    InstructionDocument as CompiledInstructionDocument, InstructionReconcileOutcome,
+    NewAgentHubConflict, NewInstructionRevision, PortabilityDiagnostic,
+    StructuredInstructionIntent,
+};
 pub use models::{
     AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,
     Materialization, MaterializationStatus, NewLogicalAsset, NewRevision, NewScopeNode,

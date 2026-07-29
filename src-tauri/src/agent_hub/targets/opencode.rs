@@ -73,27 +73,18 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
     /// 渲染 OpenCode `AGENTS.md`，前置祖先 prelude contract。
     ///
     /// Business Logic: 明确相对路径列表，不复制祖先正文、不反向进入 shared。
-    /// Code Logic: prelude + common_markdown 拼成 content。
+    /// Code Logic: Instruction Compiler 写入 managed_prefix + 用户 body。
     fn render_instruction(
         &self,
         document: &InstructionDocument,
         context: &InstructionRenderContext,
     ) -> Result<RenderedInstruction, AppError> {
-        let prelude = if context.ancestor_agent_paths.is_empty() {
-            None
-        } else {
-            Some(render_opencode_prelude(&context.ancestor_agent_paths))
-        };
-        let content = match &prelude {
-            Some(p) => format!("{p}\n{}", document.common_markdown),
-            None => document.common_markdown.clone(),
-        };
-        Ok(RenderedInstruction {
-            target: AgentTarget::OpenCode,
-            file_name: "AGENTS.md".into(),
-            content,
-            prelude,
-        })
+        let compiled = crate::agent_hub::instructions::compile_render(
+            &document.to_compiled_document(),
+            AgentTarget::OpenCode,
+            context,
+        );
+        Ok(RenderedInstruction::from_compiled(compiled))
     }
 }
 
@@ -191,22 +182,6 @@ fn scan_project_chain(scope: &LocalScopeMapping) -> Result<Vec<InstructionSource
         });
     }
     Ok(sources)
-}
-
-/// 渲染 OpenCode prelude contract。
-///
-/// Business Logic: 要求模型在 Read/Edit 前按列表顺序读取祖先规则。
-/// Code Logic: 固定中文说明 + 编号相对路径。
-fn render_opencode_prelude(ancestor_paths: &[String]) -> String {
-    let mut out = String::from(
-        "<!-- 该段由 cc-partner OpenCode adapter 生成，用户正文从下一标题开始 -->\n\
-在处理本目录前，依次读取并遵守：\n",
-    );
-    for (i, p) in ancestor_paths.iter().enumerate() {
-        out.push_str(&format!("{}. {}\n", i + 1, p));
-    }
-    out.push_str("然后应用当前 AGENTS.md；更深层规则覆盖更上层规则。\n");
-    out
 }
 
 /// canonicalize 失败则 clone。

@@ -76,19 +76,19 @@ impl AssetAdapter for CodexInstructionAdapter {
 
     /// 渲染 Codex 受管投影 `AGENTS.override.md`。
     ///
-    /// Business Logic: Hub 写入 override，避免污染 OpenCode 的 AGENTS.md。
-    /// Code Logic: file_name=AGENTS.override.md。
+    /// Business Logic: Hub 写入 override，避免污染 OpenCode 的 AGENTS.md；经 compiler 输出。
+    /// Code Logic: `compile_render` → `RenderedInstruction::from_compiled`。
     fn render_instruction(
         &self,
         document: &InstructionDocument,
-        _context: &InstructionRenderContext,
+        context: &InstructionRenderContext,
     ) -> Result<RenderedInstruction, AppError> {
-        Ok(RenderedInstruction {
-            target: AgentTarget::Codex,
-            file_name: "AGENTS.override.md".into(),
-            content: document.common_markdown.clone(),
-            prelude: None,
-        })
+        let compiled = crate::agent_hub::instructions::compile_render(
+            &document.to_compiled_document(),
+            AgentTarget::Codex,
+            context,
+        );
+        Ok(RenderedInstruction::from_compiled(compiled))
     }
 }
 
