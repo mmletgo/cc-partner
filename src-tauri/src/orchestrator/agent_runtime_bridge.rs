@@ -145,7 +145,7 @@ pub async fn create_launching_agent_for_runner(
 ///     Codex/generic attempt 必须把真实 provider_id 写入 A1 runtime，resume 才能选对 adapter。
 ///
 /// Code Logic（这个函数做什么）:
-///     start_or_replace_active(Launching)；emit；返回 active runtime。
+///     委托 `create_launching_agent_for_runner_with_provider_and_id(..., None)`。
 #[allow(clippy::too_many_arguments)] // runner create 需要完整 identity 上下文
 pub async fn create_launching_agent_for_runner_with_provider(
     state: &AppState,
@@ -157,11 +157,48 @@ pub async fn create_launching_agent_for_runner_with_provider(
     provider: AgentProviderId,
     resumed_from: Option<&str>,
 ) -> Result<AgentSessionRuntime, AppError> {
+    create_launching_agent_for_runner_with_provider_and_id(
+        state,
+        project_id,
+        worktree_id,
+        terminal_session_id,
+        task_id,
+        attempt,
+        provider,
+        resumed_from,
+        None,
+    )
+    .await
+}
+
+/// 为 Runner 创建 Launching Agent session，可选固定预分配 agent id。
+///
+/// Business Logic（为什么需要这个函数）:
+///     OpenCode bridge 要求 shell env 的 `CC_PARTNER_AGENT_SESSION_ID` 与 runtime 行 id 完全一致。
+///
+/// Code Logic（这个函数做什么）:
+///     start_or_replace_active(Launching, id=preallocated?)；emit；返回 active runtime。
+#[allow(clippy::too_many_arguments)]
+pub async fn create_launching_agent_for_runner_with_provider_and_id(
+    state: &AppState,
+    project_id: &str,
+    worktree_id: Option<&str>,
+    terminal_session_id: &str,
+    task_id: &str,
+    attempt: u32,
+    provider: AgentProviderId,
+    resumed_from: Option<&str>,
+    preallocated_agent_session_id: Option<&str>,
+) -> Result<AgentSessionRuntime, AppError> {
     let reducer = AgentRuntimeReducer::new((*state.workbench_agent_session_repo).clone());
     let now = chrono::Utc::now().to_rfc3339();
+    let explicit_id = preallocated_agent_session_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let outcome = reducer
         .start_or_replace_active(CreateActiveAgentSession {
-            id: None,
+            id: explicit_id,
             project_id: project_id.to_string(),
             worktree_id: worktree_id.map(str::to_string),
             terminal_session_id: terminal_session_id.to_string(),

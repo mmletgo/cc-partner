@@ -462,6 +462,11 @@ fn push_preview_checkout(
 /// Code Logic（这个函数做什么）:
 ///     检查 CLAUDE.md / AGENTS.md / AGENTS.override.md 存在性并生成动作。
 fn build_planned_actions_for_path(root: &Path) -> Vec<PreviewPlannedAction> {
+    use crate::workbench::agent_runtime::opencode_bridge::{
+        OpenCodeRuntimeBridge, OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+        OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH,
+    };
+
     let targets = [
         ("CLAUDE.md", Some("claude"), "Claude Code 项目指令"),
         ("AGENTS.md", Some("opencode"), "OpenCode/共享 AGENTS.md"),
@@ -498,6 +503,48 @@ fn build_planned_actions_for_path(root: &Path) -> Vec<PreviewPlannedAction> {
                 detail: format!("{detail_base}：opt-in 后由 projection 创建（本预览不写盘）"),
             });
         }
+    }
+
+    // OpenCode runtime bridge：app-version 派生物，必须出现在 opt-in preview，不进 Snapshot。
+    let bridge_path = root.join(OPENCODE_RUNTIME_BRIDGE_REL_PATH);
+    if bridge_path.is_file() {
+        match std::fs::read(&bridge_path) {
+            Ok(bytes) => match OpenCodeRuntimeBridge::classify_reserved_path(
+                OPENCODE_RUNTIME_BRIDGE_REL_PATH,
+                &bytes,
+            ) {
+                Some(true) => actions.push(PreviewPlannedAction {
+                    relative_path: OPENCODE_RUNTIME_BRIDGE_REL_PATH.to_string(),
+                    action: "keep".to_string(),
+                    target: Some("opencode".to_string()),
+                    detail: format!(
+                        "OpenCode runtime bridge：已是当前 app 派生字节（hash={OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH}）"
+                    ),
+                }),
+                Some(false) => actions.push(PreviewPlannedAction {
+                    relative_path: OPENCODE_RUNTIME_BRIDGE_REL_PATH.to_string(),
+                    action: "skip".to_string(),
+                    target: Some("opencode".to_string()),
+                    detail: "OpenCode runtime bridge：externalCollision，保留外部文件且不覆盖".to_string(),
+                }),
+                None => {}
+            },
+            Err(_) => actions.push(PreviewPlannedAction {
+                relative_path: OPENCODE_RUNTIME_BRIDGE_REL_PATH.to_string(),
+                action: "skip".to_string(),
+                target: Some("opencode".to_string()),
+                detail: "OpenCode runtime bridge：路径不可读，跳过".to_string(),
+            }),
+        }
+    } else {
+        actions.push(PreviewPlannedAction {
+            relative_path: OPENCODE_RUNTIME_BRIDGE_REL_PATH.to_string(),
+            action: "create".to_string(),
+            target: Some("opencode".to_string()),
+            detail: format!(
+                "OpenCode runtime bridge：opt-in 后 materialize 派生 Plugin（hash={OPENCODE_RUNTIME_BRIDGE_SOURCE_HASH}；非 canonical Snapshot）"
+            ),
+        });
     }
     actions
 }
