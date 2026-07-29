@@ -1324,6 +1324,54 @@
       "status": "NOT VERIFIED"
     },
     {
+      "id": "L2-AGENT-HUB-B-001",
+      "surface": "agent-hub",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/agent_hub_gate_b_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test agent_hub_gate_b_smoke -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode product installs",
+        "pinned multi-version write activation",
+        "LAN Hub replication",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-b-portable-assets.md"
+      ]
+    },
+    {
+      "id": "E2E-AGENT-HUB-B-001",
+      "surface": "agent-hub",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode filesystem projection",
+        "marketplace plugin activation",
+        "LAN Hub replication",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-b-portable-assets.md"
+      ]
+    },
+    {
       "id": "L0-AGENT-HUB-SUPPORT-001",
       "surface": "agent-hub",
       "level": "L0",

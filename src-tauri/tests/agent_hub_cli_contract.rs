@@ -18,9 +18,11 @@
 //! CC_PARTNER_L3_TARGET=claude cargo test --locked --test agent_hub_cli_contract -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! NOT VERIFIED（本文件默认不宣称）:
+//! NOT VERIFIED（本文件默认不宣称；evidence `L3-AGENT-HUB-B-CLI-001` 保持 NOT VERIFIED
+//!     直至本机 exact version 的 ignored L3 实际跑通并更新 support manifest）:
 //!     - CI 未安装 CLI 时的写能力认证
-//!     - 真实 marketplace 激活副作用（Task 5+）
+//!     - 真实 marketplace 激活副作用
+//!     - 未 pin 的 Claude/Codex/OpenCode 版本写路径
 
 use app_lib::agent_hub::support::{
     builtin_support_manifest, evaluate_target_support, find_target_record, format_probe_identity,

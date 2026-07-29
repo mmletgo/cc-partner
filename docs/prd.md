@@ -115,9 +115,9 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 单条历史正文与单批同步体量有固定上限；超限时本轮同步以稳定错误结束该批次，不静默丢弃或半写入
 - Claude Code 历史纳入 GitHub 私有仓库云端同步范围
 
-### 2.5 Multi-CLI Agent Hub（Gate A 指令基础）
+### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产）
 
-**描述**：Gate A 交付 **Agent Hub 指令基础**。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；不再把旧单页编辑器当作长期权威入口。导航与路由以 `/agent-hub` 为准，旧 `/claude-md` / `/claude-code` 仅 N/N+1 重定向。
+**描述**：Agent Hub 以 `/agent-hub` 为权威入口，统一管理 Claude / Codex / OpenCode 的指令与可移植资产。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；旧 `/claude-md` / `/claude-code` 仅 N/N+1 重定向。Gate B 在指令基础之上交付 **Skill / Command / Agent / MCP** 的 portable 资产支持（扫描、managed package、legacy adoption、target 矩阵动作）。
 
 **已交付（Gate A）**：
 - Hub 首屏展示 CLI probe 状态、write 兼容性、冲突/阻塞计数
@@ -127,11 +127,21 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 冲突 deep link（`/agent-hub?assetId=…&conflictId=…`）打开冲突抽屉；Attention 只导航不执行写动作
 - N/N+1 期间：已接受的用户 Claude 投影 **仅 dual-write legacy summary**（旧 `claude_md` 行摘要）；**legacy 向量时钟不裁决 Hub 冲突**
 
+**已交付（Gate B 可移植资产）**：
+- Skill / Command / Agent / MCP 的 **canonical Hub 载荷**（common 字段 + `target_extensions`；MCP 凭据原文进 CAS，诊断/日志脱敏）
+- 三端 **只读 portable 扫描**（native / compatibility / legacyStandalone / plugin origin；扫描不写盘）
+- **managed package 物化**到 `<data_dir>/agent-hub/materialized-packages/<target>/<scope>/<package-id>/`：Claude/Codex 生成隔离 Plugin（`plugin@cc-partner`），OpenCode 写原生 `skills/commands/agents` 树；**禁止**把 managed 输出写进 `.claude/skills` / `.agents/skills`
+- **shared** 资产对三端可见；**targetOnly** 严格隔离（OpenCode 不接收 Claude/Codex targetOnly）
+- ownership-aware **TOML/JSONC** 语义 patch：managed 字段 enable/disable/update/remove 后，unmanaged 键与注释仍存活
+- **legacy adoption**：激活-before-removal；失败/崩溃恢复后恰好一份 discoverable source；destination 非空 unmanaged → externalCollision 预览
+- 前端矩阵：scope/kind 过滤、canonical 与 invocation alias 分离、aggregateStatus、target 本地 enable/detach restore/remove、delete everywhere、adoption 预览；LAN push 文案标明 **Gate C**
+- **support manifest** 写能力默认 fail-closed（Blocked），直到真实 CLI 版本 L3 认证
+
 **明确未交付（后续 Gate；不得宣称已完成）**：
-- Skill / MCP / Plugin 多 CLI 同步与资产管理
-- LAN Hub 复制 / 跨设备 Agent Hub 状态同步
-- Git 远程指令仓、OpenCode 完整 runtime 能力
-- 真实多机 / 全平台 CLI 写盘认证（见质量矩阵 L3 `NOT VERIFIED` 行）
+- Snapshot / LAN Hub 复制 / 跨设备 Agent Hub 状态同步（Gate C）
+- Plugin 市场分解 / OpenCode 完整 runtime 能力（Gate D）
+- Git 远程指令仓
+- 真实多机 / 全平台 CLI 写盘与 exact 版本认证（见质量矩阵 L3 `NOT VERIFIED` 行，含 `L3-AGENT-HUB-B-CLI-001`）
 
 ### 2.6 设备自动发现与互联
 

@@ -531,13 +531,13 @@ async fn install_manifest_item(
                                     .to_string(),
                         });
                     }
-                    return Ok(ClaudeCodeAssetInstallItem {
+                    Ok(ClaudeCodeAssetInstallItem {
                         kind: item.kind,
                         id: item.id.clone(),
                         name: item.name.clone(),
                         status: "legacyLossy".to_string(),
                         message: "旧端脱敏占位 MCP 已跳过安装（legacyLossy/blocked）".to_string(),
-                    });
+                    })
                 }
                 McpImportCredentialStatus::Ok => {
                     install_mcp_config(&item.name, config, overwrite).await
@@ -1315,10 +1315,13 @@ pub fn classify_mcp_import_credentials(value: &Value) -> McpImportCredentialStat
 ///
 /// Business Logic: 日志/错误摘要 value-redacted；生产 P2P export 不再调用。
 /// Code Logic: 对敏感 key 替换为 placeholder。
+/// 保留供诊断 facade / 单测；生产 export 已改走 classify 路径，故允许 dead_code。
+#[allow(dead_code)]
 pub fn redact_mcp_config_for_diagnostics(value: &Value) -> Value {
     redact_value(value, None)
 }
 
+#[allow(dead_code)]
 fn redact_value(value: &Value, key: Option<&str>) -> Value {
     let key_l = key.unwrap_or("").to_lowercase();
     if is_sensitive_key(&key_l) {
