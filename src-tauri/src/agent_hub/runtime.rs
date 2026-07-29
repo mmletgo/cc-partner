@@ -495,6 +495,19 @@ fn canonicalize_loose(path: &Path) -> PathBuf {
     }
 }
 
+/// 以 data_dir 契约打开 owner 侧 ObjectStore。
+///
+/// Business Logic（为什么需要这个函数）:
+///     `ObjectStore::open` 会自行 join `agent-hub/objects`。若 owner runtime 误传
+///     已 join 的 CAS 根，会嵌套成 `.../agent-hub/objects/agent-hub/objects`，
+///     导致 UI/service 写入的 blob 在 `run_ready_jobs` / external reconcile 时 miss。
+///
+/// Code Logic（这个函数做什么）:
+///     仅把 `data_dir` 交给 `ObjectStore::open`；禁止再 join `agent-hub/objects`。
+fn open_owner_object_store(data_dir: impl AsRef<Path>) -> Result<ObjectStore, AppError> {
+    ObjectStore::open(data_dir)
+}
+
 /// 生产扫描：对 materialization 做 hash 比较与 projection recovery/run。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -693,9 +706,8 @@ impl ProductionScanner {
                 let bytes = serde_json::to_vec(&new_rev.document).map_err(|e| {
                     AppError::generic(format!("agent_hub_external_serialize_failed:{e}"))
                 })?;
-                let store = ObjectStore::open(
-                    crate::config::data_dir()?.join("agent-hub").join("objects"),
-                )?;
+                // ObjectStore::open 内部 join agent-hub/objects；禁止预 join 造成嵌套 CAS。
+                let store = open_owner_object_store(crate::config::data_dir()?)?;
                 let stored = store.put_blob(&bytes).await?;
                 let now = chrono::Utc::now().to_rfc3339();
                 let parents = asset
@@ -821,8 +833,8 @@ impl ProductionScanner {
                 blocks: vec![],
             });
         };
-        let store =
-            ObjectStore::open(crate::config::data_dir()?.join("agent-hub").join("objects"))?;
+        // ObjectStore::open 内部 join agent-hub/objects；与 service/projection_ops 同一 data_dir 契约。
+        let store = open_owner_object_store(crate::config::data_dir()?)?;
         let bytes = store.get_blob(hash).await?;
         if let Ok(doc) = serde_json::from_slice::<InstructionDocument>(&bytes) {
             return Ok(doc);
@@ -1002,7 +1014,8 @@ async fn run_owner_loop(state: AppState, cancel: CancellationToken) -> Result<()
     }
 
     let data_root = crate::config::data_dir()?;
-    let object_store = ObjectStore::open(data_root.join("agent-hub").join("objects"))?;
+    // open 只收 data_dir；预 join agent-hub/objects 会嵌套到 .../objects/agent-hub/objects。
+    let object_store = open_owner_object_store(&data_root)?;
     let scanner = ProductionScanner::new((*state.agent_hub_repo).clone(), object_store);
 
     // 启动 full scan + recovery
@@ -1301,5 +1314,42 @@ mod tests {
         start_once(&slot, &starts);
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert!(slot.lock().unwrap().is_some());
+    }
+
+    /// owner runtime 打开 CAS 的根必须等于 ObjectStore::open(data_dir).root()。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     ProductionScanner / external put / load_document 必须与 service/projection_ops
+    ///     共用同一 CAS 根；预 join `agent-hub/objects` 会导致 projection job blob miss。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     open_owner_object_store(data_dir) 与 ObjectStore::open(data_dir) root 相等；
+    ///     writer 经 data_dir open 写入的 blob 可被 owner-style open 读回。
+    #[tokio::test]
+    async fn owner_object_store_open_uses_data_dir_root_contract() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let writer = ObjectStore::open(data_dir).expect("writer open");
+        let object = writer
+            .put_blob(b"owner-runtime-root-contract")
+            .await
+            .expect("put");
+
+        let owner = open_owner_object_store(data_dir).expect("owner open");
+        assert_eq!(owner.root(), writer.root());
+        assert_eq!(
+            owner.root(),
+            data_dir.join("agent-hub").join("objects").as_path()
+        );
+        assert_eq!(
+            owner.get_blob(&object.hash).await.expect("get"),
+            b"owner-runtime-root-contract"
+        );
+
+        // 旧错误调用：预 join 后 open 的根与 owner 正确根不同。
+        let nested =
+            ObjectStore::open(data_dir.join("agent-hub").join("objects")).expect("nested open");
+        assert_ne!(nested.root(), owner.root());
     }
 }

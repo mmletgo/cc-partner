@@ -9,7 +9,8 @@
 //!        合并后写回 DB 与文件。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `claude_md_path`：复用 dirs::home_dir，拼 ~/.claude/CLAUDE.md。
+//!     - `claude_md_path`：优先 `CLAUDE_CONFIG_DIR`（与 Agent Hub dual-write / Claude adapter 同一解析），
+//!       否则 home/.claude/CLAUDE.md。
 //!     - `merge_claude_md`：纯函数，复用 vector_clock::merge/compare，决策胜出方（与 merger.rs 同款语义）。
 //!     - `wins_concurrent_cm`：并发时的纯判定（与 merger::wins_concurrent 同款 tie-break，入参为 ClaudeMdRow）。
 //!     - `write_file_if_changed`：仅在内容变化时写文件，避免无谓 IO。
@@ -29,11 +30,21 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// 返回 user 级 CLAUDE.md 的绝对路径：~/.claude/CLAUDE.md。
+/// 返回 user 级 CLAUDE.md 的绝对路径。
 ///
-/// Business Logic: 该文件是 Claude Code 等工具读取的全局用户记忆，路径固定在 home 下的 .claude 目录。
-/// Code Logic: 复用 dirs::home_dir（与 config.rs 一致），拼 ".claude/CLAUDE.md"。
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 与 Agent Hub dual-write 都必须落在同一路径；官方允许
+///     `CLAUDE_CONFIG_DIR` 覆盖默认 `~/.claude`，固定 home 路径会把摘要写偏。
+///
+/// Code Logic（这个函数做什么）:
+///     优先非空 `CLAUDE_CONFIG_DIR` + `CLAUDE.md`；否则 home/.claude/CLAUDE.md。
 pub fn claude_md_path() -> PathBuf {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("CLAUDE.md");
+        }
+    }
     dirs::home_dir()
         .expect("无法定位用户 home 目录，环境异常")
         .join(".claude")
@@ -248,6 +259,23 @@ mod tests {
         // 反向传入也一致（对称性）
         let merged2 = merge_claude_md(&remote, &local);
         assert_eq!(merged2.content, "remote");
+    }
+
+    /// CLAUDE_CONFIG_DIR 覆盖默认 ~/.claude/CLAUDE.md。
+    ///
+    /// Business Logic: dual-write / reconcile 必须与 Claude adapter 同一路径。
+    /// Code Logic: 设置 env 后 path 以该目录/CLAUDE.md 结尾，并恢复 env。
+    #[test]
+    fn claude_md_path_respects_claude_config_dir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cfg = tmp.path().join("claude-home");
+        // SAFETY: 仅本串行单测内改 env。
+        std::env::set_var("CLAUDE_CONFIG_DIR", &cfg);
+        let path = claude_md_path();
+        assert_eq!(path, cfg.join("CLAUDE.md"));
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let fallback = claude_md_path();
+        assert!(fallback.ends_with(std::path::Path::new(".claude").join("CLAUDE.md")));
     }
 
     #[test]
