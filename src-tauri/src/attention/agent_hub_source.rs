@@ -48,16 +48,33 @@ impl AttentionSource for AgentHubAttentionSource {
 ///     Tauri/Mobile v1 与 v2 共用同一 Agent Hub 投影入口。
 ///
 /// Code Logic（这个函数做什么）:
-///     list unresolved conflicts + blocked materializations + failed source push → 纯投影。
+///     list unresolved conflicts + blocked materializations + failed source push → 纯投影；
+///     **任一 list 失败整源失败**（fail-closed，禁止 partial Live 快照）。
 pub async fn collect_agent_hub_attention_items(
     state: &AppState,
 ) -> Result<Vec<AttentionItemDto>, AppError> {
     let conflicts = state.agent_hub_repo.list_unresolved_conflicts().await?;
     let blocked = state.agent_hub_repo.list_blocked_materializations().await?;
     // 源侧 multi-target push 失败：peer label + counts + error code，永不 payload。
-    let push_failed = list_failed_source_push_targets(state)
-        .await
-        .unwrap_or_default();
+    // 与 conflicts/blocked 一致：错误必须上抛，禁止 unwrap_or_default 吞掉。
+    let push_failed = list_failed_source_push_targets(state).await?;
+    collect_agent_hub_attention_from_parts(Ok(conflicts), Ok(blocked), Ok(push_failed))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Attention 源契约：任一子列表失败必须失败整源，不能静默丢 push-failed 行。
+///
+/// Code Logic（这个函数做什么）:
+///     三路 Result 任一 Err 立即返回；成功则投影 conflicts/blocked/push-failed。
+///     单测可直接注入 list_failed Err 证明 fail-closed（无完整 AppState）。
+pub fn collect_agent_hub_attention_from_parts(
+    conflicts: Result<Vec<AgentHubConflict>, AppError>,
+    blocked: Result<Vec<Materialization>, AppError>,
+    push_failed: Result<Vec<SourcePushTargetRow>, AppError>,
+) -> Result<Vec<AttentionItemDto>, AppError> {
+    let conflicts = conflicts?;
+    let blocked = blocked?;
+    let push_failed = push_failed?;
     let mut items = project_agent_hub_rows(&conflicts, &blocked);
     items.extend(project_source_push_failures(&push_failed));
     Ok(items)
@@ -411,5 +428,32 @@ mod tests {
         assert!(!item.summary.to_lowercase().contains("envelope"));
         assert!(!item.summary.contains("token="));
         assert!(item.device.as_ref().unwrap().name == "Mac Mini");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     list_failed_source_push_targets 失败不得 silent empty；整源必须 fail-closed，
+    ///     否则 Inbox 会漏掉阻塞性 push 失败并伪装 Live 完整。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     conflicts/blocked 成功而 push_failed=Err 时 compose 返回 Err；
+    ///     不得产出 partial items。
+    #[test]
+    fn list_failed_source_push_error_fails_whole_agent_hub_source() {
+        let err = collect_agent_hub_attention_from_parts(
+            Ok(vec![sample_conflict("c-open", "asset-1")]),
+            Ok(vec![]),
+            Err(AppError::generic("list_failed boom".to_string())),
+        )
+        .expect_err("push-failed list error must fail whole source");
+        assert!(err.to_string().contains("list_failed boom"), "err={err}");
+        // 对照：三路皆 Ok 才产出投影
+        let ok = collect_agent_hub_attention_from_parts(
+            Ok(vec![sample_conflict("c-open", "asset-1")]),
+            Ok(vec![]),
+            Ok(vec![]),
+        )
+        .expect("all ok");
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].id, "agent-hub:conflict:c-open");
     }
 }

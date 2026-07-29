@@ -8,6 +8,9 @@
 //!     构建 snapshot 一次；每 peer 先 capability `agent-hub.v1` 再调 push 路由；
 //!     ≤8 MiB chunk + 从 peer offset 续传；稳定 clientRequestId；并发上限 3；
 //!     SQLite 持久化 source request/target outcome 供 GUI reconnect 与 Attention。
+//!     **终态**（committed/failed）persist 失败 fail-closed：改写 in-memory 为
+//!     `error_code=agent_hub_push_persist_failed` + `retryable=true`，禁止内存终态而 DB 仍 pending；
+//!     **中途** prepared/transferred checkpoint 失败 best-effort + `tracing::warn!`。
 
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::replication::receiver::{
@@ -37,6 +40,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+#[cfg(any(test, debug_assertions))]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+/// test/debug: 下一次 `persist_target_outcome` 一次消费失败（模拟写库/lease 压力）。
+#[cfg(any(test, debug_assertions))]
+static PERSIST_OUTCOME_FAULT: AtomicBool = AtomicBool::new(false);
+
+/// 注入一次 terminal/checkpoint persist 故障（仅 test/debug）。
+///
+/// Business Logic: 证明终态落库失败会 fail-closed，而不是静默丢弃。
+/// Code Logic: 原子 swap 一次消费标志。
+#[cfg(any(test, debug_assertions))]
+pub fn inject_persist_outcome_fault_once() {
+    PERSIST_OUTCOME_FAULT.store(true, AtomicOrdering::SeqCst);
+}
+
+/// 清除 persist 故障注入（测试复位）。
+#[cfg(any(test, debug_assertions))]
+pub fn clear_persist_outcome_fault() {
+    PERSIST_OUTCOME_FAULT.store(false, AtomicOrdering::SeqCst);
+}
 
 /// 源侧目标并发上限。
 pub const MAX_TARGET_PARALLELISM: usize = 3;
@@ -357,8 +382,8 @@ impl AgentHubPushSender {
                             transferred_object_count: 0,
                             updated_at: Utc::now().to_rfc3339(),
                         };
-                        let _ = persist_target_outcome(&pool, &gate, &request_id, &outcome).await;
-                        return outcome;
+                        // 终态 failed：persist 失败 fail-closed，禁止静默丢弃
+                        return finalize_target_outcome(&pool, &gate, &request_id, outcome).await;
                     }
                     let sender = AgentHubPushSender {
                         pool: pool.clone(),
@@ -378,8 +403,8 @@ impl AgentHubPushSender {
                             cancel: &cancel,
                         })
                         .await;
-                    let _ = persist_target_outcome(&pool, &gate, &request_id, &outcome).await;
-                    outcome
+                    // 终态 committed/failed 必须落库或 fail-closed 改写 outcome
+                    finalize_target_outcome(&pool, &gate, &request_id, outcome).await
                 }
             })
             .buffer_unordered(MAX_TARGET_PARALLELISM)
@@ -552,7 +577,8 @@ impl AgentHubPushSender {
             transferred_object_count: 0,
             updated_at: now(),
         };
-        let _ = persist_target_outcome(&self.pool, &self.gate, request_id, &outcome).await;
+        // mid-flight prepared checkpoint：best-effort（终态由 fan-out finalize 保证）
+        persist_checkpoint_best_effort(&self.pool, &self.gate, request_id, &outcome).await;
 
         // 3) stream missing objects
         let mut transferred = 0u32;
@@ -586,13 +612,15 @@ impl AgentHubPushSender {
             outcome.transferred_object_count = transferred;
             outcome.status = TargetPushStatus::Transferred;
             outcome.updated_at = now();
-            let _ = persist_target_outcome(&self.pool, &self.gate, request_id, &outcome).await;
+            // mid-flight transferred checkpoint：best-effort
+            persist_checkpoint_best_effort(&self.pool, &self.gate, request_id, &outcome).await;
         }
 
         outcome.status = TargetPushStatus::Transferred;
         outcome.transferred_object_count = transferred;
         outcome.updated_at = now();
-        let _ = persist_target_outcome(&self.pool, &self.gate, request_id, &outcome).await;
+        // mid-flight：objects 完成仍非终态；fan-out 在 commit 后 finalize
+        persist_checkpoint_best_effort(&self.pool, &self.gate, request_id, &outcome).await;
 
         // 4) commit
         if cancel.is_cancelled() {
@@ -951,12 +979,98 @@ fn classify_peer_error(
     }
 }
 
+/// 是否为终端状态（须 durable 或 fail-closed）。
+fn is_terminal_status(status: TargetPushStatus) -> bool {
+    matches!(
+        status,
+        TargetPushStatus::Committed | TargetPushStatus::Failed
+    )
+}
+
+/// 终态 outcome 落库：成功返回原 outcome；失败则 fail-closed 改写为 retryable persist error。
+///
+/// Business Logic: 禁止内存已 committed/failed 而 DB 仍 pending，否则 reconnect/Attention 撒谎。
+/// Code Logic: persist 失败 → 改写 Failed + `agent_hub_push_persist_failed` + 再 best-effort 写一次。
+async fn finalize_target_outcome(
+    pool: &SqlitePool,
+    gate: &Arc<DatabaseMaintenanceGate>,
+    request_id: &str,
+    mut outcome: TargetPushOutcome,
+) -> TargetPushOutcome {
+    match persist_target_outcome(pool, gate, request_id, &outcome).await {
+        Ok(()) => outcome,
+        Err(err) => {
+            if !is_terminal_status(outcome.status) {
+                // 非终态不应走本路径；退化为 checkpoint 语义
+                tracing::warn!(
+                    request_id = %request_id,
+                    peer = %outcome.peer_device_id,
+                    status = outcome.status.as_str(),
+                    error = %err,
+                    "agent_hub_push non-terminal finalize treated as checkpoint"
+                );
+                return outcome;
+            }
+            tracing::error!(
+                request_id = %request_id,
+                peer = %outcome.peer_device_id,
+                status = outcome.status.as_str(),
+                error = %err,
+                "agent_hub_push terminal outcome persist failed; fail-closed"
+            );
+            // 改写 in-memory，与 MultiTargetPushReport / reconnect 对齐
+            outcome.status = TargetPushStatus::Failed;
+            outcome.retryable = true;
+            outcome.error_code = Some("agent_hub_push_persist_failed".into());
+            outcome.updated_at = Utc::now().to_rfc3339();
+            if let Err(e2) = persist_target_outcome(pool, gate, request_id, &outcome).await {
+                tracing::error!(
+                    request_id = %request_id,
+                    peer = %outcome.peer_device_id,
+                    error = %e2,
+                    "agent_hub_push persist-failed marker also failed to land"
+                );
+            }
+            outcome
+        }
+    }
+}
+
+/// 中途 prepared/transferred checkpoint：best-effort + warn，不改写 outcome。
+///
+/// Business Logic: 进度点丢失可接受；终态由 finalize_target_outcome 保证。
+/// Code Logic: persist Err → tracing::warn，返回。
+async fn persist_checkpoint_best_effort(
+    pool: &SqlitePool,
+    gate: &Arc<DatabaseMaintenanceGate>,
+    request_id: &str,
+    outcome: &TargetPushOutcome,
+) {
+    if let Err(err) = persist_target_outcome(pool, gate, request_id, outcome).await {
+        tracing::warn!(
+            request_id = %request_id,
+            peer = %outcome.peer_device_id,
+            status = outcome.status.as_str(),
+            error = %err,
+            "agent_hub_push mid-flight checkpoint persist failed (best-effort)"
+        );
+    }
+}
+
 async fn persist_target_outcome(
     pool: &SqlitePool,
     gate: &Arc<DatabaseMaintenanceGate>,
     request_id: &str,
     outcome: &TargetPushOutcome,
 ) -> Result<(), AppError> {
+    #[cfg(any(test, debug_assertions))]
+    {
+        if PERSIST_OUTCOME_FAULT.swap(false, AtomicOrdering::SeqCst) {
+            return Err(AppError::generic(
+                "agent_hub_push_persist_injected".to_string(),
+            ));
+        }
+    }
     with_shared_write_lease(gate, async {
         sqlx::query(
             "UPDATE agent_hub_source_push_targets
@@ -1624,5 +1738,66 @@ mod tests {
         assert!(!src.contains(&forbidden_path));
         assert!(src.contains("pub async fn push_selection"));
         assert!(src.contains("push_selection_for_state"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     终态 committed 落库失败不得静默成功；in-memory 与 reconnect 必须反映 retryable
+    ///     `agent_hub_push_persist_failed`，禁止 DB 仍 pending 而内存已 committed。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     inject 一次 persist 故障 → finalize committed → 改写 Failed + 落库 failed 标记。
+    #[tokio::test]
+    async fn terminal_persist_failure_fail_closed_marks_retryable() {
+        clear_persist_outcome_fault();
+        let pool = test_pool().await;
+        let gate = Arc::new(DatabaseMaintenanceGate::new());
+        let dir = tempfile::tempdir().unwrap();
+        let sender = AgentHubPushSender::new(pool.clone(), gate.clone(), "src", dir.path());
+        sender
+            .insert_source_request("req-pf", "fullHub", "{}", "sel", "snap")
+            .await
+            .unwrap();
+        sender
+            .upsert_target_pending("req-pf", "p1", "Label", "req-pf:p1")
+            .await
+            .unwrap();
+
+        let committed = TargetPushOutcome {
+            peer_device_id: "p1".into(),
+            peer_label: "Label".into(),
+            client_request_id: "req-pf:p1".into(),
+            status: TargetPushStatus::Committed,
+            retryable: false,
+            error_code: None,
+            transfer_id: Some("xfer-1".into()),
+            missing_object_count: 0,
+            transferred_object_count: 2,
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        // 第一次 persist（committed）失败；第二次（fail-closed marker）成功
+        inject_persist_outcome_fault_once();
+        let finalized = finalize_target_outcome(&pool, &gate, "req-pf", committed.clone()).await;
+        assert_eq!(finalized.status, TargetPushStatus::Failed);
+        assert!(finalized.retryable);
+        assert_eq!(
+            finalized.error_code.as_deref(),
+            Some("agent_hub_push_persist_failed")
+        );
+        // transfer_id / counts 保留，便于 reconnect 诊断
+        assert_eq!(finalized.transfer_id.as_deref(), Some("xfer-1"));
+        assert_eq!(finalized.transferred_object_count, 2);
+
+        let row = sender.get_target("req-pf", "p1").await.unwrap().unwrap();
+        assert_eq!(row.status, TargetPushStatus::Failed);
+        assert!(row.retryable);
+        assert_eq!(
+            row.error_code.as_deref(),
+            Some("agent_hub_push_persist_failed")
+        );
+        // 不得残留 pending 终态撒谎
+        assert_ne!(row.status, TargetPushStatus::Pending);
+        assert_ne!(row.status, TargetPushStatus::Committed);
+        clear_persist_outcome_fault();
     }
 }
