@@ -14,9 +14,11 @@
 //!     Gate A Task 7：runtime（sidecar owner watch/debounce/ticker/de-loop scan）；
 //!     Gate A Task 8：用户级登录自启动（autostart）。
 //!     Gate A Task 9：service 门面 + Attention conflict/blocked 投影 + control/commands。
+//!     Gate A Task 10：migration（用户 CLAUDE.md seed + N/N+1 dual-write 摘要）。
 
 pub mod autostart;
 pub mod instructions;
+pub mod migration;
 pub mod models;
 pub mod object_store;
 pub mod project_scope;
@@ -32,6 +34,12 @@ pub use instructions::{
     InstructionDocument as CompiledInstructionDocument, InstructionReconcileOutcome,
     NewAgentHubConflict, NewInstructionRevision, PortabilityDiagnostic,
     StructuredInstructionIntent,
+};
+pub use migration::{
+    dual_write_legacy_claude_md_summary, migrate_user_claude_md_state,
+    migrate_user_claude_md_state_with, resolve_user_claude_md_content, ClaudeMdMigrationPreview,
+    MigrationDeps, USER_INSTRUCTION_DISPLAY_NAME, USER_INSTRUCTION_LOGICAL_KEY,
+    USER_INSTRUCTION_NAMESPACE, USER_SCOPE_STABLE_ID,
 };
 pub use models::{
     AgentHubConflict, AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset,

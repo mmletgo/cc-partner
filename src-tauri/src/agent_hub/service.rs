@@ -1161,7 +1161,42 @@ async fn persist_instruction_document(
             created_at: now,
         })
         .await?;
+
+    // N/N+1 dual-write：仅用户级 CLAUDE.md 指令摘要写回 legacy 表；失败不阻断 Hub。
+    // legacy vector_clock 永不裁决 Hub 冲突。
+    if let Err(e) = maybe_dual_write_user_claude_md_summary(state, asset, document).await {
+        tracing::warn!("agent_hub dual_write legacy claude_md failed: {e}");
+    }
     Ok(())
+}
+
+/// 用户级 CLAUDE.md 资产成功写 revision 后 dual-write legacy 摘要。
+///
+/// Business Logic（为什么需要这个函数）:
+///     旧 CLAUDE.md 页/P2P 仍读 `claude_md` 表；Hub 写用户指令后需同步摘要，
+///     且不得让 legacy VC 参与 Hub merge。
+///
+/// Code Logic（这个函数做什么）:
+///     scope=User + Instruction + logical_key=CLAUDE.md → 取 Claude 摘要 → dual_write。
+async fn maybe_dual_write_user_claude_md_summary(
+    state: &AppState,
+    asset: &LogicalAsset,
+    document: &InstructionDocument,
+) -> Result<(), AppError> {
+    if asset.kind != AssetKind::Instruction {
+        return Ok(());
+    }
+    if asset.logical_key != crate::agent_hub::migration::USER_INSTRUCTION_LOGICAL_KEY {
+        return Ok(());
+    }
+    let Some(scope) = state.agent_hub_repo.get_scope(&asset.scope_id).await? else {
+        return Ok(());
+    };
+    if scope.kind != crate::agent_hub::models::ScopeKind::User {
+        return Ok(());
+    }
+    let summary = crate::agent_hub::migration::claude_summary_markdown_from_document(document);
+    crate::agent_hub::migration::dual_write_legacy_claude_md_summary(state, &summary).await
 }
 
 /// 加载 instruction 视图（markdown 摘要 + blocks）。

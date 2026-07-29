@@ -166,8 +166,8 @@ pub fn reconcile_instruction(input: &ReconcileInput) -> InstructionReconcileOutc
             normalize_block_text(&external_blocks[i].text),
         ));
     }
-    for i in map_len..external_blocks.len() {
-        external_aligned.push((None, normalize_block_text(&external_blocks[i].text)));
+    for block in external_blocks.iter().skip(map_len) {
+        external_aligned.push((None, normalize_block_text(&block.text)));
     }
 
     let mut conflicts: Vec<NewAgentHubConflict> = Vec::new();

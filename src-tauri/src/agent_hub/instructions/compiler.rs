@@ -830,10 +830,8 @@ fn resolve_block_text(
         &block.structured_intent
     {
         // targetOnly intent 仅当 source 匹配或 mode 非 targetOnly
-        if block.mode == InstructionBlockMode::TargetOnly {
-            if block.source_target != Some(target) {
-                return None;
-            }
+        if block.mode == InstructionBlockMode::TargetOnly && block.source_target != Some(target) {
+            return None;
         }
         return Some(render_discovery_before_edit(target, *version, relative_key));
     }

@@ -14,6 +14,12 @@
 //!     - `wins_concurrent_cm`：并发时的纯判定（与 merger::wins_concurrent 同款 tie-break，入参为 ClaudeMdRow）。
 //!     - `write_file_if_changed`：仅在内容变化时写文件，避免无谓 IO。
 //!     - `reconcile_from_file`：文件↔DB 对账（DB 无行→初始化；内容一致→no-op；不一致→以文件为准推进时钟）。
+//!
+//! N/N+1 / Agent Hub（Gate A Task10）:
+//!     dual-write 仅把摘要 content 写入 legacy `claude_md` 行（供旧页/P2P），
+//!     **legacy vector_clock 永不裁决 Agent Hub 冲突**（Hub 以 revision DAG 为权威）。
+//!     reconcile 成功后 best-effort 触发 `migrate_user_claude_md_state`（seed Absent 绑定），
+//!     失败只 warn，不得把 Hub 冲突推回本模块。
 
 use crate::error::AppError;
 use crate::models::claude_md::{ClaudeMdRow, CLAUDE_MD_ID};
@@ -162,6 +168,17 @@ pub async fn reconcile_from_file(state: &crate::state::AppState) -> Result<(), A
             state.claude_md_repo.upsert(&row).await?;
         }
     }
+
+    // Gate A Task10：legacy 对账成功后 best-effort 迁入 Hub；
+    // dual-write 是摘要-only，VC 永不裁决 Hub 冲突；失败不阻断 reconcile。
+    if let Ok(data_dir) = crate::config::data_dir() {
+        if let Err(e) =
+            crate::agent_hub::migration::migrate_user_claude_md_state(state, &path, &data_dir).await
+        {
+            tracing::warn!("claude_md migrate after reconcile failed: {e}");
+        }
+    }
+
     Ok(())
 }
 

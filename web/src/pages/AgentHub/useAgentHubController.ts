@@ -104,6 +104,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const { t } = useTranslation(['agentHub', 'common']);
   const [searchParams] = useSearchParams();
 
+  const deepLinkAssetId = searchParams.get('assetId');
+  const deepLinkConflictId = searchParams.get('conflictId');
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [stale, setStale] = useState(false);
@@ -114,20 +117,20 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [assets, setAssets] = useState<AgentHubAssetSummary[]>([]);
   const [scopeFilter, setScopeFilter] = useState('');
   const [kindFilter, setKindFilter] = useState('');
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  // deep link 初值在 useState 中完成，避免 effect 同步 setState 级联渲染
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(deepLinkAssetId);
   const [selectedAsset, setSelectedAsset] = useState<AgentHubAssetDetail | null>(null);
   const [preview, setPreview] = useState<AgentHubProjectPreview | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewProjectId, setPreviewProjectId] = useState('');
-  const [conflictDrawerOpen, setConflictDrawerOpen] = useState(false);
+  const [conflictDrawerOpen, setConflictDrawerOpen] = useState(Boolean(deepLinkConflictId));
   const [blocksDrawerOpen, setBlocksDrawerOpen] = useState(false);
 
   const refreshSeqRef = useRef(0);
   const detailSeqRef = useRef(0);
   const mountedRef = useRef(true);
-
-  const deepLinkAssetId = searchParams.get('assetId');
-  const deepLinkConflictId = searchParams.get('conflictId');
+  const filtersBootstrappedRef = useRef(false);
+  const appliedDeepLinkRef = useRef<string | null>(null);
 
   /**
    * Business Logic: 首屏与手动刷新加载 status + assets。
@@ -158,11 +161,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setError(toErrorMessage(reason));
       // 有旧数据时标 stale，保留列表
       setStale((prev) => prev || status !== null || assets.length > 0);
-    } finally {
-      if (!mountedRef.current || seq !== refreshSeqRef.current) return;
-      setLoading(false);
-      setRefreshing(false);
     }
+    if (!mountedRef.current || seq !== refreshSeqRef.current) return;
+    setLoading(false);
+    setRefreshing(false);
   }, [assets.length, kindFilter, scopeFilter, status]);
 
   /**
@@ -183,29 +185,47 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   useEffect(() => {
     mountedRef.current = true;
+    // 挂载拉取外部 status/assets；异步路径内 setState，非同步级联渲染
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount external fetch
     void loadCore(false);
+    // 首屏 deep link：仅异步拉详情，selected/conflict 已由 useState 初值设置
+    if (deepLinkAssetId) {
+      appliedDeepLinkRef.current = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
+      void loadAssetDetail(deepLinkAssetId);
+    }
     return () => {
       mountedRef.current = false;
     };
-    // 仅挂载首载；过滤变化走下方 effect
+    // 仅挂载首载；过滤变化与后续 deep link 走下方 effect
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    // scope/kind 变化重新拉列表（非首屏 loading）
-    if (loading && assets.length === 0 && !status) return;
+    // 跳过 mount 首轮（由挂载 effect 负责）
+    if (!filtersBootstrappedRef.current) {
+      filtersBootstrappedRef.current = true;
+      return;
+    }
+    // 过滤变化触发外部 list 刷新
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- filter change external fetch
     void loadCore(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeFilter, kindFilter]);
 
   useEffect(() => {
-    if (deepLinkAssetId) {
-      setSelectedAssetId(deepLinkAssetId);
-      void loadAssetDetail(deepLinkAssetId);
-      if (deepLinkConflictId) {
-        setConflictDrawerOpen(true);
-      }
+    // URL deep link 后续变化：异步拉详情；仅当 key 变化时同步 selected（事件驱动，非首轮 mount）
+    if (!deepLinkAssetId) return;
+    const key = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
+    if (appliedDeepLinkRef.current === key) return;
+    appliedDeepLinkRef.current = key;
+    // searchParams 变化是外部导航事件，同步选中资产与冲突抽屉
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+    setSelectedAssetId(deepLinkAssetId);
+    if (deepLinkConflictId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+      setConflictDrawerOpen(true);
     }
+    void loadAssetDetail(deepLinkAssetId);
   }, [deepLinkAssetId, deepLinkConflictId, loadAssetDetail]);
 
   const filteredAssets = useMemo(() => {
