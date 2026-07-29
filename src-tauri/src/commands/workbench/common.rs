@@ -1604,6 +1604,7 @@ mod restore_holder_fail_closed_tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
         let config_runtime = Arc::new(ConfigRuntime::new(config, store));
@@ -1642,6 +1643,7 @@ mod restore_holder_fail_closed_tests {
                     crate::storage::AgentLedgerRepo::new(pool.clone()),
                 ),
             ),
+            agent_hub_repo: Arc::new(crate::storage::AgentHubRepo::new(pool.clone())),
             workbench_workspace_layout_repo: Arc::new(layout_repo),
             browser_verification: Arc::new(
                 crate::workbench::browser_verification::BrowserVerificationService::new(
@@ -1677,6 +1679,7 @@ mod restore_holder_fail_closed_tests {
             orchestrator_cancel: Arc::new(Mutex::new(None)),
             orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
             agent_ledger_cancel: Arc::new(Mutex::new(None)),
+            agent_hub_cancel: Arc::new(Mutex::new(None)),
             workbench_claude_session_indexes: Arc::new(RwLock::new(
                 std::collections::HashMap::new(),
             )),

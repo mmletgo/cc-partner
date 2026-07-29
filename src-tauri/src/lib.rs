@@ -12,6 +12,7 @@
 //!     所有命令在 invoke_handler 注册。保留 M0 的 ping。
 
 pub mod agent_cli;
+pub mod agent_hub;
 mod attention;
 pub mod backend;
 pub mod backup;
@@ -69,6 +70,28 @@ pub mod updater;
 mod workbench;
 /// A5：集成 smoke / 外部 crate 测试需要直连浏览器验证服务与 FakeEngine。
 pub use workbench::browser_verification;
+// Gate A Task6：quality_faults 故障注入需要直连 projection scheduler / CAS / repo。
+pub use agent_hub::migration::{
+    migrate_user_claude_md_state_with, ClaudeMdMigrationPreview, MigrationDeps,
+    USER_INSTRUCTION_LOGICAL_KEY, USER_SCOPE_STABLE_ID,
+};
+pub use agent_hub::object_store::{
+    sha256_hex as agent_hub_sha256_hex, ObjectStore as AgentHubObjectStore,
+};
+pub use agent_hub::projection::{
+    AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest, FileWriteRequest,
+    ProjectionRequest, ProjectionScheduler, ProjectionWriteFault,
+};
+pub use agent_hub::{
+    AgentTarget, AssetKind, AssetPolicy, DesiredPresence, NewLogicalAsset, NewScopeNode,
+    NewTargetBinding, ProjectionJobState, ProjectionPayloadKind, RevisionId, ScopeKind,
+};
+pub use models::claude_md::{ClaudeMdRow, CLAUDE_MD_ID};
+pub use storage::AgentHubRepo;
+pub use storage::ClaudeMdRepo;
+pub use storage::DatabaseMaintenanceGate;
+// Gate A Task10 smoke：opt-in mapping 需要公开 upsert 输入类型。
+pub use storage::UpsertAgentHubProjectMapping;
 
 use std::sync::Arc;
 
@@ -78,13 +101,14 @@ use crate::backend::runtime::{
 };
 use crate::backend::ui::{BackendUi, TauriBackendUi};
 use crate::commands::{
-    attention as attention_cmd, backend as backend_cmd, backup as backup_cmd,
-    cc_history as cc_history_cmd, claude_code_assets as claude_code_assets_cmd,
-    claude_md as claude_md_cmd, cloud_sync as cloud_sync_cmd, config as config_cmd,
-    devices as device_cmd, github_trending as github_trending_cmd,
-    gui_bootstrap as gui_bootstrap_cmd, health as health_cmd,
-    lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
-    orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd,
+    agent_hub as agent_hub_cmd, attention as attention_cmd, backend as backend_cmd,
+    backup as backup_cmd, cc_history as cc_history_cmd,
+    claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
+    cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
+    github_trending as github_trending_cmd, gui_bootstrap as gui_bootstrap_cmd,
+    health as health_cmd, lan_firewall_dependency as lan_firewall_dependency_cmd,
+    mobile as mobile_cmd, orchestrator as orchestrator_cmd,
+    orchestrator_adapters as orchestrator_adapters_cmd,
     orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,
     prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd, scratchpad as scratchpad_cmd,
     screenshot as screenshot_cmd, ssh_target as ssh_target_cmd, sync as sync_cmd,
@@ -334,6 +358,16 @@ pub fn run() {
             mobile_cmd::get_mobile_access_info,
             attention_cmd::list_attention_items,
             attention_cmd::list_attention_items_v2,
+            agent_hub_cmd::agent_hub_get_status,
+            agent_hub_cmd::agent_hub_list_assets,
+            agent_hub_cmd::agent_hub_get_asset,
+            agent_hub_cmd::agent_hub_update_instruction,
+            agent_hub_cmd::agent_hub_update_instruction_block,
+            agent_hub_cmd::agent_hub_pair_instruction_variants,
+            agent_hub_cmd::agent_hub_preview_project,
+            agent_hub_cmd::agent_hub_enable_project,
+            agent_hub_cmd::agent_hub_resolve_conflict,
+            agent_hub_cmd::agent_hub_set_target_binding,
             device_cmd::list_devices,
             device_cmd::get_local_device,
             sync_cmd::trigger_sync,

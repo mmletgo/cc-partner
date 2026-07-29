@@ -249,6 +249,7 @@ fn sample_config() -> AppConfig {
         health: HealthConfig::default(),
         orchestrator: OrchestratorAutomationConfig::default(),
         github_trending: GithubTrendingConfig::default(),
+        agent_hub: app_lib::config::AgentHubConfig::default(),
     }
 }
 

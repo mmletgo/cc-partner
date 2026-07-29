@@ -50,6 +50,8 @@ const attentionSourceKindDecoder: Decoder<AttentionSourceKind> = enumDecoder('At
   'agentNeedsInput',
   'agentFailed',
   'experimentNeedsDecision',
+  'agentHubConflict',
+  'agentHubProjectionBlocked',
 ] as const);
 
 const projectKindDecoder = enumDecoder('AttentionProjectKind', ['local', 'remote'] as const);
@@ -104,6 +106,11 @@ export const attentionTargetDecoder: Decoder<AttentionTarget> = unionDecoder<Att
       kind: literalDecoder('experiment'),
       projectId: stringDecoder,
       experimentId: stringDecoder,
+    }),
+    objectDecoder('AttentionTargetAgentHubAsset', {
+      kind: literalDecoder('agentHubAsset'),
+      assetId: stringDecoder,
+      conflictId: optionalDecoder(nullableDecoder(stringDecoder)),
     }),
   ],
 );

@@ -32,8 +32,9 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `E2E-WORKBENCH-001` | `web/tests/workbench.spec.ts` | Workbench stale/offline/files |
 | `E2E-MOBILE-001` | `web/tests/mobile-workbench.spec.ts` | Mobile 390×844 navigation/HTTP write |
 | `E2E-LAN-001` | `web/tests/lan-boundary.spec.ts` | L1 credential-free + simulated boundary reject |
+| `E2E-AGENT-HUB-A-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate A: status card / preview+enable / target matrix / conflict deep link / `/claude-md` redirect (mock only) |
 
-Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY-001`, `E2E-FRONTEND-FOUNDATION-001`, `E2E-SCREENSHOT-OVERLAY-001`.
+Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY-001`, `E2E-FRONTEND-FOUNDATION-001`, `E2E-SCREENSHOT-OVERLAY-001`, `E2E-AGENT-LEDGER-001`.
 
 ### L0 / L2 / L3 anchors
 
@@ -47,6 +48,7 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | `L2-BACKEND-CLI-SMOKE-001` | L2 | `src-tauri/tests/backend_cli_smoke.rs` |
 | `L2-BACKEND-DOCTOR-SMOKE-001` | L2 | `src-tauri/tests/backend_doctor_smoke.rs` |
 | `L2-AGENT-CLI-SMOKE-001` | L2 | `src-tauri/tests/agent_cli_smoke.rs` + `cargo test --locked agent_cli --lib` |
+| `L2-AGENT-HUB-GATE-A-001` | L2 | `src-tauri/tests/agent_hub_gate_a_smoke.rs` — isolated HOME/data-dir Gate A process smoke (opt-in zero-write before enable, nested projection after opt-in, conflict Attention). **Does not** certify real multi-CLI product installs |
 | `L2-PTY-SMOKE-001` | L2 | `src-tauri/tests/pty_smoke.rs` |
 | `L2-TRANSACTIONAL-RUNTIME-001` | L2 | `src-tauri/tests/transactional_runtime_smoke.rs` |
 | `L3-MACOS-GUI-PERMISSIONS-001` | L3 | Packaged macOS GUI + permission grant/deny/retry + screenshot clipboard — **NOT VERIFIED** (canonical aggregate; architecture executions under `macos-aarch64-beta` only) ([real-device-certification.md](real-device-certification.md)) |
@@ -119,6 +121,23 @@ cd web && npm run test:e2e
 # or serial unit + e2e
 cd web && npm run test:all
 ```
+
+### Agent Hub Gate A verification
+
+Focused Gate A commands (instruction foundation only; do **not** claim full multi-CLI skill/MCP/plugin sync):
+
+```bash
+# Rust unit / domain
+cd src-tauri && cargo test --locked agent_hub
+
+# Process smoke (isolated data dir; serialize)
+cd src-tauri && cargo test --locked --test agent_hub_gate_a_smoke -- --test-threads=1
+
+# L1 UI journey (backendHarness mocks)
+cd web && npm run test:e2e -- agent-hub.spec.ts
+```
+
+**NOT VERIFIED by the above:** real Claude / Codex / OpenCode product installs and path writes on macos/windows/ubuntu; Skill / MCP / Plugin surfaces; LAN Hub replication / multi-host Agent Hub state; packaged desktop GUI. Those stay L3 `NOT VERIFIED` rows in `quality-matrix.json` until real-device certification lands.
 
 Playwright browsers (match CI; avoid floating installers):
 

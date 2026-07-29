@@ -423,6 +423,15 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(crate::backend::control_workbench::control_workbench_data)
                 .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
         )
+        // Gate A Task9：Agent Hub owner control（metadata 256 KiB；不进 server_protocol_info）
+        .route(
+            "/api/backend/control/agent-hub",
+            post(crate::backend::control_agent_hub::control_agent_hub).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::backend::control_api::CONTROL_REQUEST_BODY_LIMIT_BYTES,
+                ),
+            ),
+        )
         // A7：Agent-first CLI typed control（query/mutate；loopback+token）
         // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
         .route(
@@ -1564,6 +1573,7 @@ mod tests {
             control_token: "expected-token".to_string(),
             control_schema_version: crate::backend::authority::CONTROL_SCHEMA_VERSION,
             owner_instance_id: Some("owner-test".to_string()),
+            agent_hub_api_version: crate::backend::control::AGENT_HUB_API_VERSION,
         }
     }
 

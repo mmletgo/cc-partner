@@ -118,7 +118,8 @@ export type AttentionActionI18nKey =
   | 'attention:action.viewFailed'
   | 'attention:action.openSettings'
   | 'attention:action.openTerminal'
-  | 'attention:action.openExperiment';
+  | 'attention:action.openExperiment'
+  | 'attention:action.openAgentHub';
 
 export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): AttentionActionI18nKey {
   switch (sourceKind) {
@@ -135,6 +136,9 @@ export function getAttentionActionI18nKey(sourceKind: AttentionSourceKind): Atte
       return 'attention:action.openTerminal';
     case 'experimentNeedsDecision':
       return 'attention:action.openExperiment';
+    case 'agentHubConflict':
+    case 'agentHubProjectionBlocked':
+      return 'attention:action.openAgentHub';
     default: {
       const _exhaustive: never = sourceKind;
       return _exhaustive;
@@ -180,6 +184,12 @@ export function buildDesktopAttentionTargetUrl(target: AttentionTarget): string 
       params.set('projectId', target.projectId);
       params.set('view', 'automation');
       return `/workbench?${params.toString()}`;
+    }
+    case 'agentHubAsset': {
+      const params = new URLSearchParams();
+      params.set('assetId', target.assetId);
+      if (target.conflictId) params.set('conflictId', target.conflictId);
+      return `/agent-hub?${params.toString()}`;
     }
     default: {
       const _exhaustive: never = target;

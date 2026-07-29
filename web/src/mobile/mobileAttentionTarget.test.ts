@@ -101,6 +101,22 @@ describe('mapMobileAttentionTarget', () => {
     });
     expect(getMobileAttentionNavigationPanel(navigation)).toBe('settings');
   });
+
+  test('maps agentHubAsset to attention panel (desktop-first Gate A)', () => {
+    const navigation = mapMobileAttentionTarget({
+      kind: 'agentHubAsset',
+      assetId: 'asset-1',
+      conflictId: 'conflict-1',
+    });
+
+    expect(navigation).toEqual({
+      kind: 'agentHubAsset',
+      assetId: 'asset-1',
+      conflictId: 'conflict-1',
+      panel: 'attention',
+    });
+    expect(getMobileAttentionNavigationPanel(navigation)).toBe('attention');
+  });
 });
 
 describe('resolveMobileAttentionMissingTargetPanel', () => {

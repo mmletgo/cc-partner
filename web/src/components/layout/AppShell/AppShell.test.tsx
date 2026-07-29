@@ -133,8 +133,7 @@ describe('AppShell grouped navigation', () => {
       '/cc-history',
       '/scratchpad',
       '/prompt-optimizer',
-      '/claude-md',
-      '/claude-code',
+      '/agent-hub',
       '/devices',
       '/health',
     ]);
@@ -156,7 +155,7 @@ describe('AppShell grouped navigation', () => {
 
     const nav = screen.getByRole('navigation', { name: '主导航' });
     const links = within(nav).getAllByRole('link');
-    expect(links).toHaveLength(12);
+    expect(links).toHaveLength(11);
 
     for (const link of links) {
       const tabIndex = link.getAttribute('tabindex');

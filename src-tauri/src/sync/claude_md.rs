@@ -9,11 +9,18 @@
 //!        合并后写回 DB 与文件。
 //!
 //! Code Logic（这个模块做什么）:
-//!     - `claude_md_path`：复用 dirs::home_dir，拼 ~/.claude/CLAUDE.md。
+//!     - `claude_md_path`：优先 `CLAUDE_CONFIG_DIR`（与 Agent Hub dual-write / Claude adapter 同一解析），
+//!       否则 home/.claude/CLAUDE.md。
 //!     - `merge_claude_md`：纯函数，复用 vector_clock::merge/compare，决策胜出方（与 merger.rs 同款语义）。
 //!     - `wins_concurrent_cm`：并发时的纯判定（与 merger::wins_concurrent 同款 tie-break，入参为 ClaudeMdRow）。
 //!     - `write_file_if_changed`：仅在内容变化时写文件，避免无谓 IO。
 //!     - `reconcile_from_file`：文件↔DB 对账（DB 无行→初始化；内容一致→no-op；不一致→以文件为准推进时钟）。
+//!
+//! N/N+1 / Agent Hub（Gate A Task10）:
+//!     dual-write 仅把摘要 content 写入 legacy `claude_md` 行（供旧页/P2P），
+//!     **legacy vector_clock 永不裁决 Agent Hub 冲突**（Hub 以 revision DAG 为权威）。
+//!     reconcile 成功后 best-effort 触发 `migrate_user_claude_md_state`（seed Absent 绑定），
+//!     失败只 warn，不得把 Hub 冲突推回本模块。
 
 use crate::error::AppError;
 use crate::models::claude_md::{ClaudeMdRow, CLAUDE_MD_ID};
@@ -23,11 +30,21 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// 返回 user 级 CLAUDE.md 的绝对路径：~/.claude/CLAUDE.md。
+/// 返回 user 级 CLAUDE.md 的绝对路径。
 ///
-/// Business Logic: 该文件是 Claude Code 等工具读取的全局用户记忆，路径固定在 home 下的 .claude 目录。
-/// Code Logic: 复用 dirs::home_dir（与 config.rs 一致），拼 ".claude/CLAUDE.md"。
+/// Business Logic（为什么需要这个函数）:
+///     Claude Code 与 Agent Hub dual-write 都必须落在同一路径；官方允许
+///     `CLAUDE_CONFIG_DIR` 覆盖默认 `~/.claude`，固定 home 路径会把摘要写偏。
+///
+/// Code Logic（这个函数做什么）:
+///     优先非空 `CLAUDE_CONFIG_DIR` + `CLAUDE.md`；否则 home/.claude/CLAUDE.md。
 pub fn claude_md_path() -> PathBuf {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("CLAUDE.md");
+        }
+    }
     dirs::home_dir()
         .expect("无法定位用户 home 目录，环境异常")
         .join(".claude")
@@ -162,6 +179,17 @@ pub async fn reconcile_from_file(state: &crate::state::AppState) -> Result<(), A
             state.claude_md_repo.upsert(&row).await?;
         }
     }
+
+    // Gate A Task10：legacy 对账成功后 best-effort 迁入 Hub；
+    // dual-write 是摘要-only，VC 永不裁决 Hub 冲突；失败不阻断 reconcile。
+    if let Ok(data_dir) = crate::config::data_dir() {
+        if let Err(e) =
+            crate::agent_hub::migration::migrate_user_claude_md_state(state, &path, &data_dir).await
+        {
+            tracing::warn!("claude_md migrate after reconcile failed: {e}");
+        }
+    }
+
     Ok(())
 }
 
@@ -231,6 +259,23 @@ mod tests {
         // 反向传入也一致（对称性）
         let merged2 = merge_claude_md(&remote, &local);
         assert_eq!(merged2.content, "remote");
+    }
+
+    /// CLAUDE_CONFIG_DIR 覆盖默认 ~/.claude/CLAUDE.md。
+    ///
+    /// Business Logic: dual-write / reconcile 必须与 Claude adapter 同一路径。
+    /// Code Logic: 设置 env 后 path 以该目录/CLAUDE.md 结尾，并恢复 env。
+    #[test]
+    fn claude_md_path_respects_claude_config_dir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cfg = tmp.path().join("claude-home");
+        // SAFETY: 仅本串行单测内改 env。
+        std::env::set_var("CLAUDE_CONFIG_DIR", &cfg);
+        let path = claude_md_path();
+        assert_eq!(path, cfg.join("CLAUDE.md"));
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let fallback = claude_md_path();
+        assert!(fallback.ends_with(std::path::Path::new(".claude").join("CLAUDE.md")));
     }
 
     #[test]

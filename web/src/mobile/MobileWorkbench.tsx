@@ -1060,6 +1060,14 @@ export function MobileWorkbench(): ReactElement {
         return;
       }
 
+      if (navigation.kind === 'agentHubAsset') {
+        // Agent Hub 权威界面在桌面 `/agent-hub`；mobile 仅回到 Attention 列表，不执行动作。
+        setAttentionFocusTaskId(null);
+        setAttentionFocusOutboxId(null);
+        setPanel('attention');
+        return;
+      }
+
       const project =
         projectsRef.current.find((entry) => entry.id === navigation.projectId) ?? null;
       if (!project) {

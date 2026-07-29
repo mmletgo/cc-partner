@@ -134,5 +134,18 @@ async fn write_local_claude_md(state: &AppState, content: String) -> Result<Clau
         vector_clock: new_vc,
     };
     state.claude_md_repo.upsert(&row).await?;
+
+    // Gate A Task10：legacy 写成功后 best-effort 迁入 Hub（失败不阻断 update）。
+    // N/N+1 dual-write 仅摘要；legacy VC 永不裁决 Hub 冲突。
+    if let Ok(data_dir) = crate::config::data_dir() {
+        if let Err(e) =
+            crate::agent_hub::migration::migrate_user_claude_md_state(state, &path, &data_dir).await
+        {
+            tracing::warn!("claude_md migrate_user_claude_md_state after write failed: {e}");
+        }
+    } else {
+        tracing::warn!("claude_md migrate skipped: data_dir unavailable");
+    }
+
     Ok(row)
 }

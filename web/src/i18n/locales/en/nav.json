@@ -9,6 +9,7 @@
   "promptOptimizer": "Prompt Optimizer",
   "claudeMd": "CLAUDE.MD",
   "claudeCode": "Claude Plugin",
+  "agentHub": "Agent Hub",
   "orchestrator": "Automation",
   "devices": "Devices",
   "settings": "Settings",

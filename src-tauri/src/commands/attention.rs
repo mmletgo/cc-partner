@@ -2,12 +2,14 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     桌面 Inbox 与 Mobile HTTP 必须消费同一聚合快照；v1 保持旧枚举，v2 增加 Agent 投影。
+//!     Agent Hub conflict/blocked 同时进入 v1 与 v2。
 //!
 //! Code Logic（这个模块做什么）:
-//!     `list_attention_items_for_state` = v1（无 Agent source）；
-//!     `list_attention_items_v2_for_state` 追加 AgentRuntimeAttentionSource；
+//!     `list_attention_items_for_state` = v1（Orchestrator + Dependency + AgentHub）；
+//!     `list_attention_items_v2_for_state` 再追加 AgentRuntime + Experiment；
 //!     Tauri commands 分别暴露。
 
+use crate::attention::agent_hub_source::AgentHubAttentionSource;
 use crate::attention::agent_runtime_source::AgentRuntimeAttentionSource;
 use crate::attention::aggregator::aggregate_attention_sources;
 use crate::attention::experiment_source::ExperimentAttentionSource;
@@ -19,16 +21,18 @@ use crate::state::AppState;
 use tauri::State;
 
 /// Business Logic（为什么需要这个函数）:
-///     Tauri 与 Mobile HTTP v1 必须共享完全相同的 source 集合（无 Agent/Experiment）。
+///     Tauri 与 Mobile HTTP v1 必须共享完全相同的 source 集合（无 Agent/Experiment，含 Agent Hub）。
 ///
 /// Code Logic（这个函数做什么）:
-///     固定注册 Orchestrator + WorkbenchDependency；不含 AgentRuntimeAttentionSource。
+///     固定注册 Orchestrator + WorkbenchDependency + AgentHub；不含 AgentRuntimeAttentionSource。
 pub async fn list_attention_items_for_state(
     state: &AppState,
 ) -> Result<AttentionSnapshotDto, AppError> {
     let orchestrator = OrchestratorAttentionSource;
     let dependency = WorkbenchDependencyAttentionSource;
-    let sources: [&dyn crate::attention::source::AttentionSource; 2] = [&orchestrator, &dependency];
+    let agent_hub = AgentHubAttentionSource;
+    let sources: [&dyn crate::attention::source::AttentionSource; 3] =
+        [&orchestrator, &dependency, &agent_hub];
     aggregate_attention_sources(state, &sources).await
 }
 
@@ -36,7 +40,7 @@ pub async fn list_attention_items_for_state(
 ///     attention.v2 在 v1 源基础上追加 Agent needsInput/failed 与 experiment NeedsDecision。
 ///
 /// Code Logic（这个函数做什么）:
-///     Orchestrator + Dependency + AgentRuntime + Experiment。
+///     Orchestrator + Dependency + AgentRuntime + Experiment + AgentHub。
 pub async fn list_attention_items_v2_for_state(
     state: &AppState,
 ) -> Result<AttentionSnapshotDto, AppError> {
@@ -44,8 +48,9 @@ pub async fn list_attention_items_v2_for_state(
     let dependency = WorkbenchDependencyAttentionSource;
     let agent = AgentRuntimeAttentionSource;
     let experiment = ExperimentAttentionSource;
-    let sources: [&dyn crate::attention::source::AttentionSource; 4] =
-        [&orchestrator, &dependency, &agent, &experiment];
+    let agent_hub = AgentHubAttentionSource;
+    let sources: [&dyn crate::attention::source::AttentionSource; 5] =
+        [&orchestrator, &dependency, &agent, &experiment, &agent_hub];
     aggregate_attention_sources(state, &sources).await
 }
 

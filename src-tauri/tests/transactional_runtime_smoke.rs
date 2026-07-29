@@ -64,6 +64,7 @@ fn sample_config(data_dir: &Path) -> AppConfig {
         health: HealthConfig::default(),
         orchestrator: Default::default(),
         github_trending: Default::default(),
+        agent_hub: app_lib::config::AgentHubConfig::default(),
     }
 }
 

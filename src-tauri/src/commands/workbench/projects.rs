@@ -144,6 +144,16 @@ pub async fn add_local_workbench_project_from_path(
         updated_at: now,
     };
     state.workbench_project_repo.upsert(&row).await?;
+    // Agent Hub：若该项目已 opt-in，刷新 checkout bindings（未 opt-in 时为空且零写入）。
+    if let Err(err) =
+        crate::agent_hub::project_scope::refresh_checkout_bindings(state, &row.id).await
+    {
+        tracing::debug!(
+            project_id = %row.id,
+            error = %err,
+            "agent_hub refresh_checkout_bindings after add project failed"
+        );
+    }
     Ok(row.to_dto())
 }
 
@@ -389,6 +399,16 @@ pub(crate) async fn local_list_workbench_worktrees(
         .workbench_worktree_repo
         .list_by_project(&project_id)
         .await?;
+    // list 对账后幂等刷新 bindings（仅 opted-in 项目生效）。
+    if let Err(err) =
+        crate::agent_hub::project_scope::refresh_checkout_bindings(state, &project_id).await
+    {
+        tracing::debug!(
+            project_id = %project_id,
+            error = %err,
+            "agent_hub refresh_checkout_bindings after list worktrees failed"
+        );
+    }
     Ok(rows.iter().map(worktree_to_dto).collect())
 }
 

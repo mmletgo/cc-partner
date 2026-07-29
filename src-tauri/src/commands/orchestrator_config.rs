@@ -162,6 +162,7 @@ mod tests {
             health: Default::default(),
             orchestrator,
             github_trending: Default::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
         }
     }
 

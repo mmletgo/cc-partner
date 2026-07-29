@@ -16,3 +16,4 @@ export * from './workbench';
 export * from './config';
 export * from './agentRuntime';
 export * from './agentLedger';
+export * from './agentHub';

@@ -13,6 +13,12 @@
 //!     mutation 含 deliver-reviewed / workflow-document validate|save；
 //!     截图快捷键走两阶段补偿（CAS 预检 → OS replace → owner durable commit → 响应丢失对账）。
 
+use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
+use crate::agent_hub::service::{
+    AgentHubAssetDetailDto, AgentHubAssetSummaryDto, AgentHubStatusDto, InstructionBlockDto,
+    ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
+    SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
+};
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
 use crate::backend::control_api::WorkbenchLaunchSummaryDto;
@@ -580,6 +586,7 @@ pub struct BackendControlClient {
     control_token: String,
     owner_instance_id: Option<String>,
     control_schema_version: u32,
+    agent_hub_api_version: u32,
     http: reqwest::Client,
 }
 
@@ -622,6 +629,7 @@ impl BackendControlClient {
             control_token: control.control_token.clone(),
             owner_instance_id: control.owner_instance_id.clone(),
             control_schema_version: control.control_schema_version,
+            agent_hub_api_version: control.agent_hub_api_version,
             http,
         })
     }
@@ -632,7 +640,8 @@ impl BackendControlClient {
     ///     单元/ smoke harness 启动临时 owner HTTP 后，不依赖真实 control 文件路径竞争。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     填充权威 schema 与 owner id，构造无全局 timeout 的 client。
+    ///     填充权威 schema 与 owner id，构造无全局 timeout 的 client；
+    ///     agent_hub_api_version 默认 `AGENT_HUB_API_VERSION`。
     pub fn for_test(
         port: u16,
         control_token: &str,
@@ -646,8 +655,28 @@ impl BackendControlClient {
             control_token: control_token.to_string(),
             owner_instance_id: Some(owner_instance_id.to_string()),
             control_schema_version: CONTROL_SCHEMA_VERSION,
+            agent_hub_api_version: crate::backend::control::AGENT_HUB_API_VERSION,
             http,
         })
+    }
+
+    /// 测试用：注入指定 Agent Hub API 版本。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     握手单测需要模拟旧 backend（0）与更高不兼容 major。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     `for_test` 后覆盖 `agent_hub_api_version`。
+    #[cfg(test)]
+    pub fn for_test_with_agent_hub_version(
+        port: u16,
+        control_token: &str,
+        owner_instance_id: &str,
+        agent_hub_api_version: u32,
+    ) -> Result<Self, AppError> {
+        let mut client = Self::for_test(port, control_token, owner_instance_id)?;
+        client.agent_hub_api_version = agent_hub_api_version;
+        Ok(client)
     }
 
     /// 当前 control 中的 owner 实例 id（若有）。
@@ -672,6 +701,37 @@ impl BackendControlClient {
         self.control_schema_version
     }
 
+    /// 返回 Agent Hub API 主版本（来自 control 文件）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GUI 状态条/只读 gate 需要展示 backend 宣告的 Hub 协议版本。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     返回缓存的 `agent_hub_api_version`（legacy 为 0）。
+    pub fn agent_hub_api_version(&self) -> u32 {
+        self.agent_hub_api_version
+    }
+
+    /// 校验 Agent Hub 写路径兼容性。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧/缺失 `agentHubApiVersion` 允许 status/preview，但 mutation 必须拒绝并提示 upgrade；
+    ///     backend 宣告更高不兼容 major 时同样只读。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     要求 `self.agent_hub_api_version == required_version`；
+    ///     不匹配返回 `AppError::conflict("upgradeRequired")`（稳定 code 供前端分支）。
+    ///     调用方须在**每一个** Agent Hub mutation 路径前调用本 helper。
+    pub fn require_agent_hub_write_compatibility(
+        &self,
+        required_version: u32,
+    ) -> Result<(), AppError> {
+        if self.agent_hub_api_version == required_version {
+            return Ok(());
+        }
+        Err(AppError::conflict("upgradeRequired"))
+    }
+
     /// 比较两个客户端是否绑定同一 control descriptor。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -679,13 +739,14 @@ impl BackendControlClient {
     ///     避免误清后来者新加载的 client。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     比较 port、control_token、owner_instance_id 与 control_schema_version；
-    ///     不打印这些字段，也不比较 http client 句柄。
+    ///     比较 port、control_token、owner_instance_id、control_schema_version 与
+    ///     agent_hub_api_version；不打印这些字段，也不比较 http client 句柄。
     pub fn same_descriptor(&self, other: &Self) -> bool {
         self.port == other.port
             && self.control_token == other.control_token
             && self.owner_instance_id == other.owner_instance_id
             && self.control_schema_version == other.control_schema_version
+            && self.agent_hub_api_version == other.agent_hub_api_version
     }
 
     /// 查询 owner status（安全查询：连接失败可一次性刷新 control file）。
@@ -943,6 +1004,171 @@ impl BackendControlClient {
             )));
         }
         Ok((resp.owner_instance_id, resp.result))
+    }
+
+    /// 经 control API 代理 Agent Hub 操作并反序列化 result。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GuiClient 不得自建 Agent Hub 写路径；全部 op 代理到 sidecar owner。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `/api/backend/control/agent-hub`；body={controlToken,op,payload}；
+    ///     send_once MUTATE_TIMEOUT；解包 result 为 T。
+    pub async fn agent_hub_op<T: DeserializeOwned>(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<T, AppError> {
+        let value = self.agent_hub_op_value(op, payload).await?;
+        serde_json::from_value(value).map_err(|e| {
+            AppError::generic(format!("agent hub control result 解析失败 ({op}): {e}"))
+        })
+    }
+
+    /// 经 control API 代理 Agent Hub 操作，返回原始 JSON result。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     与 workbench_op_value 对齐，供不强制 DTO 的调用方使用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST agent-hub；send_once；校验 ownerInstanceId 非空后返回 result。
+    pub async fn agent_hub_op_value(
+        &self,
+        op: &str,
+        payload: impl Serialize,
+    ) -> Result<serde_json::Value, AppError> {
+        // 与 workbench 共用 {controlToken,op,payload}/{ownerInstanceId,result} 信封。
+        let body = ControlWorkbenchRequestBody {
+            control_token: self.control_token.clone(),
+            op: op.to_string(),
+            payload: serde_json::to_value(payload)
+                .map_err(|e| AppError::generic(format!("序列化 agent hub payload 失败: {e}")))?,
+        };
+        let resp: ControlWorkbenchResponseBody =
+            match self.send_once("agent-hub", &body, MUTATE_TIMEOUT).await {
+                ControlCallOutcome::Ok(v) => v,
+                ControlCallOutcome::Failed(e) => return Err(e),
+                ControlCallOutcome::Uncertain(e) => {
+                    return Err(AppError::unavailable(format!(
+                        "control_response_uncertain: {e}"
+                    )));
+                }
+            };
+        if resp.owner_instance_id.trim().is_empty() {
+            return Err(AppError::generic(
+                "agent hub control 响应缺少 ownerInstanceId",
+            ));
+        }
+        Ok(resp.result)
+    }
+
+    /// Business Logic: 首屏 status。
+    /// Code Logic: agent_hub.get_status 查询（非 mutation）。
+    pub async fn agent_hub_get_status(&self) -> Result<AgentHubStatusDto, AppError> {
+        self.agent_hub_op("agent_hub.get_status", serde_json::json!({}))
+            .await
+    }
+
+    /// Business Logic: 资产列表。
+    /// Code Logic: agent_hub.list_assets。
+    pub async fn agent_hub_list_assets(
+        &self,
+        req: ListAssetsRequest,
+    ) -> Result<Vec<AgentHubAssetSummaryDto>, AppError> {
+        self.agent_hub_op("agent_hub.list_assets", req).await
+    }
+
+    /// Business Logic: 资产详情。
+    /// Code Logic: agent_hub.get_asset。
+    pub async fn agent_hub_get_asset(
+        &self,
+        asset_id: &str,
+    ) -> Result<AgentHubAssetDetailDto, AppError> {
+        self.agent_hub_op(
+            "agent_hub.get_asset",
+            serde_json::json!({ "assetId": asset_id }),
+        )
+        .await
+    }
+
+    /// Business Logic: 保存整份指令（mutation）。
+    /// Code Logic: 调用方须先 require_agent_hub_write_compatibility；再 agent_hub.update_instruction。
+    pub async fn agent_hub_update_instruction(
+        &self,
+        req: UpdateInstructionRequest,
+    ) -> Result<AgentHubAssetDetailDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.update_instruction", req).await
+    }
+
+    /// Business Logic: 更新指令块（mutation）。
+    /// Code Logic: agent_hub.update_instruction_block。
+    pub async fn agent_hub_update_instruction_block(
+        &self,
+        req: UpdateInstructionBlockRequest,
+    ) -> Result<InstructionBlockDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.update_instruction_block", req)
+            .await
+    }
+
+    /// Business Logic: 配对变体（mutation）。
+    /// Code Logic: agent_hub.pair_instruction_variants。
+    pub async fn agent_hub_pair_instruction_variants(
+        &self,
+        req: PairInstructionVariantsRequest,
+    ) -> Result<AgentHubAssetDetailDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.pair_instruction_variants", req)
+            .await
+    }
+
+    /// Business Logic: 项目启用预览（只读）。
+    /// Code Logic: agent_hub.preview_project。
+    pub async fn agent_hub_preview_project(
+        &self,
+        project_id: &str,
+    ) -> Result<AgentHubProjectPreview, AppError> {
+        self.agent_hub_op(
+            "agent_hub.preview_project",
+            serde_json::json!({ "projectId": project_id }),
+        )
+        .await
+    }
+
+    /// Business Logic: 启用项目（mutation）。
+    /// Code Logic: agent_hub.enable_project + confirm。
+    pub async fn agent_hub_enable_project(
+        &self,
+        project_id: &str,
+        confirm: bool,
+    ) -> Result<AgentHubProjectStatus, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op(
+            "agent_hub.enable_project",
+            serde_json::json!({ "projectId": project_id, "confirm": confirm }),
+        )
+        .await
+    }
+
+    /// Business Logic: 解决冲突（mutation）。
+    /// Code Logic: agent_hub.resolve_conflict。
+    pub async fn agent_hub_resolve_conflict(
+        &self,
+        req: ResolveConflictRequest,
+    ) -> Result<AgentHubAssetDetailDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.resolve_conflict", req).await
+    }
+
+    /// Business Logic: 设置 target binding（mutation）。
+    /// Code Logic: agent_hub.set_target_binding。
+    pub async fn agent_hub_set_target_binding(
+        &self,
+        req: SetTargetBindingRequest,
+    ) -> Result<AgentHubAssetSummaryDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.set_target_binding", req).await
     }
 
     /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。
@@ -2404,6 +2630,7 @@ mod tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            agent_hub: crate::config::AgentHubConfig::default(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(initial.clone()));
         let runtime = Arc::new(ConfigRuntime::with_owner(initial, store, owner.into()));
@@ -2918,5 +3145,59 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 旧/缺失 agentHubApiVersion 拒绝 mutation，允许读路径不调用本 helper。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     GUI 较新而后端未宣告写协议时，status/preview 可读，写路径必须 upgradeRequired。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     version=0 的 client 对 required=1 返回 conflict upgradeRequired。
+    #[test]
+    fn agent_hub_write_compat_rejects_missing_or_zero_version() {
+        let client =
+            BackendControlClient::for_test_with_agent_hub_version(1, "tok", "owner", 0).unwrap();
+        let err = client
+            .require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)
+            .unwrap_err();
+        assert_eq!(err.code(), "upgradeRequired");
+        assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
+    }
+
+    /// 同 major v1 写兼容通过。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     新 GUI ↔ v1 backend 必须允许 mutation。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     for_test 默认 AGENT_HUB_API_VERSION=1，require(1) → Ok。
+    #[test]
+    fn agent_hub_write_compat_accepts_matching_v1() {
+        let client = BackendControlClient::for_test(1, "tok", "owner").unwrap();
+        assert_eq!(
+            client.agent_hub_api_version(),
+            crate::backend::control::AGENT_HUB_API_VERSION
+        );
+        client
+            .require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)
+            .unwrap();
+    }
+
+    /// 更高不兼容 major → 只读（upgradeRequired）。
+    ///
+    /// Business Logic（为什么需要这个测试）:
+    ///     backend 宣告更高 major 时，旧 GUI 不得盲目写。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     version=2、required=1 → upgradeRequired。
+    #[test]
+    fn agent_hub_write_compat_rejects_higher_incompatible_major() {
+        let client =
+            BackendControlClient::for_test_with_agent_hub_version(1, "tok", "owner", 2).unwrap();
+        let err = client
+            .require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)
+            .unwrap_err();
+        assert_eq!(err.code(), "upgradeRequired");
     }
 }

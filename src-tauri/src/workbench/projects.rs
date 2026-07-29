@@ -10,6 +10,7 @@
 
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Business Logic（为什么需要这个函数）:
 ///     用户选择目录后，左侧项目卡片需要一个可读名称。
@@ -66,9 +67,103 @@ pub fn resolve_project_path(root: &Path, relative: &str) -> Result<PathBuf, AppE
     Ok(canonical)
 }
 
+/// 规范化 Git remote URL 为可移植 fingerprint。
+///
+/// Business Logic（为什么需要这个函数）:
+///     跨设备按 remote 提议 Hub 项目映射时，需要忽略尾部 `.git`/斜杠与大小写差异。
+///
+/// Code Logic（这个函数做什么）:
+///     trim → 去尾部 `/` → 去尾部不区分大小写的 `.git` → 再去尾部 `/` → 整体 lowercase。
+pub fn normalize_git_remote_fingerprint(url: &str) -> String {
+    let mut s = url.trim().to_string();
+    while s.ends_with('/') {
+        s.pop();
+    }
+    if s.len() >= 4 {
+        let tail = &s[s.len() - 4..];
+        if tail.eq_ignore_ascii_case(".git") {
+            s.truncate(s.len() - 4);
+        }
+    }
+    while s.ends_with('/') {
+        s.pop();
+    }
+    s.make_ascii_lowercase();
+    s
+}
+
+/// 读取仓库 origin（或首个 remote）URL。
+///
+/// Business Logic（为什么需要这个函数）:
+///     project opt-in 需要可选的 Git remote fingerprint 作为跨设备身份提示。
+///
+/// Code Logic（这个函数做什么）:
+///     优先 `git remote get-url origin`；失败则 `git remote` 取第一个名称再 get-url；都失败返回 None。
+pub fn read_git_remote_url(repo_path: &Path) -> Option<String> {
+    if let Some(url) = git_remote_get_url(repo_path, "origin") {
+        return Some(url);
+    }
+    let remotes = git_remote_list(repo_path)?;
+    let first = remotes.into_iter().next()?;
+    git_remote_get_url(repo_path, &first)
+}
+
+/// 执行 `git remote get-url <name>`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     fingerprint 读取需要具体 remote 的 URL。
+///
+/// Code Logic（这个函数做什么）:
+///     成功且 stdout 非空时返回 trim 后的 URL。
+fn git_remote_get_url(repo_path: &Path, name: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", name])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
+/// 列出 remote 名称。
+///
+/// Business Logic（为什么需要这个函数）:
+///     origin 缺失时回退到仓库中第一个 remote。
+///
+/// Code Logic（这个函数做什么）:
+///     `git remote` 按行 trim 非空名称。
+fn git_remote_list(repo_path: &Path) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .args(["remote"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let list = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if list.is_empty() {
+        None
+    } else {
+        Some(list)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_project_path;
+    use super::{normalize_git_remote_fingerprint, resolve_project_path};
     use std::fs;
     use std::path::PathBuf;
 
@@ -100,5 +195,18 @@ mod tests {
         assert!(result.is_err());
         let _ = fs::remove_file(outside);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Hub 跨设备 fingerprint 必须稳定忽略 `.git` 后缀与大小写。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 https URL 规范化结果。
+    #[test]
+    fn fingerprint_normalizes_https_origin() {
+        assert_eq!(
+            normalize_git_remote_fingerprint("https://GitHub.com/Org/Repo.git/"),
+            "https://github.com/org/repo"
+        );
     }
 }
