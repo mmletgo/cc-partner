@@ -1679,6 +1679,7 @@ mod restore_holder_fail_closed_tests {
             orchestrator_cancel: Arc::new(Mutex::new(None)),
             orchestrator_outbox_cancel: Arc::new(Mutex::new(None)),
             agent_ledger_cancel: Arc::new(Mutex::new(None)),
+            agent_hub_cancel: Arc::new(Mutex::new(None)),
             workbench_claude_session_indexes: Arc::new(RwLock::new(
                 std::collections::HashMap::new(),
             )),

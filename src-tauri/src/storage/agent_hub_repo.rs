@@ -1356,6 +1356,26 @@ impl AgentHubRepo {
         row.map(|r| row_to_materialization(&r)).transpose()
     }
 
+    /// 列出全部 materialization（owner scan 用）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     runtime full/dirty scan 需要对照全部目标路径的 rendered/observed hash。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT * FROM agent_hub_materializations ORDER BY updated_at ASC, id ASC。
+    pub async fn list_materializations(&self) -> Result<Vec<Materialization>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, asset_id, target, target_binding_id, native_path,
+                    last_projected_revision_id, rendered_hash, observed_external_hash,
+                    status, last_error, created_at, updated_at
+             FROM agent_hub_materializations
+             ORDER BY updated_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_materialization).collect()
+    }
+
     /// 是否存在未解决的 asset 级（canonical）conflict。
     ///
     /// Business Logic（为什么需要这个函数）:
