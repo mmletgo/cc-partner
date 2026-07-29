@@ -9,6 +9,10 @@
  */
 
 import type {
+  AgentCompletionContract,
+  AgentProviderId,
+  OrchestratorAgentAdapterCatalog,
+  OrchestratorAgentAdapterCatalogItem,
   OrchestratorAttemptPhase,
   OrchestratorEvidence,
   OrchestratorRemoteOutboxItem,
@@ -405,3 +409,60 @@ export const workflowDocumentDecoder: Decoder<WorkflowDocument> = objectDecoder(
     preview: optionalDecoder(nullableDecoder(stringDecoder)),
   },
 );
+
+/**
+ * Business Logic: provider wire 四内置严格解码；未知值 fail-closed（不映射 Claude）。
+ * Code Logic: enumDecoder AgentProviderId。
+ */
+export const agentProviderIdDecoder: Decoder<AgentProviderId> = enumDecoder('AgentProviderId', [
+  'claudeCodeVisible',
+  'codexVisible',
+  'genericTerminal',
+  'openCodeVisible',
+] as const);
+
+/**
+ * Business Logic: completion 合同严格解码。
+ * Code Logic: sentinelLine | hookEvent | manual。
+ */
+export const agentCompletionContractDecoder: Decoder<AgentCompletionContract> = enumDecoder(
+  'AgentCompletionContract',
+  ['sentinelLine', 'hookEvent', 'manual'] as const,
+);
+
+const openCodeBridgeStatusWireDecoder: Decoder<
+  'ready' | 'previewRequired' | 'conflict' | 'unsupported'
+> = enumDecoder('OpenCodeBridgeStatusWire', [
+  'ready',
+  'previewRequired',
+  'conflict',
+  'unsupported',
+] as const);
+
+/**
+ * Business Logic: catalog 条目严格 provider/contract；未知 provider 拒绝整包。
+ * Code Logic: objectDecoder adapter item。
+ */
+export const orchestratorAgentAdapterCatalogItemDecoder: Decoder<OrchestratorAgentAdapterCatalogItem> =
+  objectDecoder('OrchestratorAgentAdapterCatalogItem', {
+    provider: agentProviderIdDecoder,
+    available: booleanDecoder,
+    completionContract: agentCompletionContractDecoder,
+    supportsResume: booleanDecoder,
+    supportsUsage: booleanDecoder,
+    reasonCode: optionalDecoder(nullableDecoder(stringDecoder)),
+    executable: optionalDecoder(nullableDecoder(stringDecoder)),
+    version: optionalDecoder(nullableDecoder(stringDecoder)),
+    supportEvidence: optionalDecoder(nullableDecoder(stringDecoder)),
+    bridgeStatus: optionalDecoder(nullableDecoder(openCodeBridgeStatusWireDecoder)),
+    blockedReason: optionalDecoder(nullableDecoder(stringDecoder)),
+  });
+
+/**
+ * Business Logic: catalog 列表 fail-closed。
+ * Code Logic: objectDecoder adapters array。
+ */
+export const orchestratorAgentAdapterCatalogDecoder: Decoder<OrchestratorAgentAdapterCatalog> =
+  objectDecoder('OrchestratorAgentAdapterCatalog', {
+    adapters: arrayDecoder(orchestratorAgentAdapterCatalogItemDecoder),
+  });

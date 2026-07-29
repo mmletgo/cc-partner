@@ -102,7 +102,8 @@
     "restoreTarget": "恢复",
     "removeTarget": "移除目标",
     "deleteEverywhere": "全部删除",
-    "openCollision": "碰撞预览"
+    "openCollision": "碰撞预览",
+    "openPluginComponents": "Plugin 组件"
   },
   "adoption": {
     "title": "纳管 / 碰撞预览",
@@ -210,5 +211,51 @@
     "stepConfirm": "4. 确认导入",
     "confirmAction": "确认导入",
     "confirmSummary": "已导入 {{assets}} 个资产 · {{revisions}} 个 revision · 计划投影 {{projections}}"
+  },
+  "plugin": {
+    "drawerTitle": "Plugin 组件",
+    "noReport": "尚未加载 Plugin package 报告。",
+    "loadFailed": "加载 Plugin package 报告失败。",
+    "mixedStatusWarning": "Package 未完全同步。混合组件状态不会压缩为绿色已同步。",
+    "activationState": "激活态：{{state}}",
+    "componentsAria": "Plugin 组件列表",
+    "residualsAria": "Plugin residual 列表",
+    "residualsTitle": "Residuals",
+    "residualReason": "Residual：{{reason}}",
+    "residualIncluded": "已包含",
+    "residualOmitted": "已省略",
+    "deletePreviewAria": "Plugin 删除预览",
+    "deletePreviewTitle": "删除预览",
+    "deletePreviewHint": "仅 tombstone 独占且无引用的 component；共享或 standalone 引用会保留。",
+    "tombstoneGroup": "将 tombstone",
+    "preserveGroup": "将保留",
+    "deleteNone": "无",
+    "confirmDelete": "确认删除 package",
+    "ownership": {
+      "packageOwned": "Package 独占",
+      "shared": "共享",
+      "standalone": "Standalone"
+    },
+    "decision": {
+      "tombstoneOwned": "Tombstone 独占",
+      "preserveShared": "保留共享",
+      "preserveStandalone": "保留 standalone"
+    },
+    "componentStatus": {
+      "verified": "已验证",
+      "partial": "部分",
+      "sourceOnly": "仅源端",
+      "activationRequired": "需要激活",
+      "externalCollision": "外部碰撞",
+      "blocked": "阻塞",
+      "missing": "缺少单元格"
+    },
+    "residualKind": {
+      "runtime": "Runtime",
+      "hooks": "Hooks",
+      "assets": "Assets",
+      "npm": "npm",
+      "customTool": "Custom tool"
+    }
   }
 }

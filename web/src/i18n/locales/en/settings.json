@@ -155,7 +155,24 @@
     "agentAdaptersHint": "Owner-local adapter availability (no executable path or credentials).",
     "agentAdaptersAriaLabel": "Agent adapter catalog",
     "adapterAvailable": "available",
-    "adapterUnavailable": "unavailable"
+    "adapterUnavailable": "unavailable",
+    "completionContract": "Completion: {{contract}}",
+    "executable": "Executable: {{path}}",
+    "version": "Version: {{version}}",
+    "supportEvidence": "Evidence: {{evidence}}",
+    "blockedReason": "Blocked: {{reason}}",
+    "provider": {
+      "claudeCodeVisible": "Claude (visible)",
+      "codexVisible": "Codex (visible)",
+      "genericTerminal": "Generic terminal",
+      "openCodeVisible": "OpenCode (visible)"
+    },
+    "bridgeStatus": {
+      "ready": "Bridge ready",
+      "previewRequired": "Project preview required",
+      "conflict": "Bridge path conflict",
+      "unsupported": "Bridge unsupported"
+    }
   },
   "health": {
     "title": "Health reminder",

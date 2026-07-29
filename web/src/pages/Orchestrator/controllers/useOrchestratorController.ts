@@ -909,7 +909,7 @@ export function useOrchestratorController(
         maxParallel: 1,
         candidates: [
           { providerId: 'claudeCodeVisible', strategyLabel: 'baseline' },
-          { providerId: 'claudeCodeVisible', strategyLabel: 'alternative' },
+          { providerId: 'openCodeVisible', strategyLabel: 'opencode-visible' },
         ],
       });
       if (activeProjectIdRef.current !== projectId) return;

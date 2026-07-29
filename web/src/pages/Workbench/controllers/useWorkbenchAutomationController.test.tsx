@@ -22,6 +22,9 @@ import type { WorkbenchAutomationControllerParams } from './useWorkbenchAutomati
 import type { WorkbenchDeepLink } from '../workbenchDeepLink';
 import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import type { WorkbenchFileWorkspaceView } from '../workbenchFiles';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 function buildLocalProject(overrides: Partial<WorkbenchProject> = {}): WorkbenchProject {
   return {
@@ -473,5 +476,29 @@ describe('useWorkbenchAutomationController', () => {
     expect(setAutomationConsoleOpen).toHaveBeenCalledWith(false);
     expect(requestWorkspaceView).toHaveBeenCalledWith('files');
     expect(focusSession).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Business Logic: Gate D Task6 禁止新增第八个 Workbench page controller。
+   * Code Logic: 扫描 controllers 目录仍只有既有 7 个 useWorkbench*Controller。
+   */
+  test('does not introduce an eighth Workbench page controller', () => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const files = fs
+      .readdirSync(here)
+      .filter((name) => /^useWorkbench.*Controller\.ts$/.test(name));
+    expect(files.sort()).toEqual(
+      [
+        'useWorkbenchAutomationController.ts',
+        'useWorkbenchFileController.ts',
+        'useWorkbenchProjectController.ts',
+        'useWorkbenchPromptOptimizerController.ts',
+        'useWorkbenchSessionSearchController.ts',
+        'useWorkbenchTerminalController.ts',
+        'useWorkbenchWorktreeGitController.ts',
+      ].sort(),
+    );
+    expect(files).toHaveLength(7);
+    expect(files.some((name) => /useWorkbenchController\.ts$/.test(name))).toBe(false);
   });
 });

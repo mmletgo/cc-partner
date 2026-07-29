@@ -136,28 +136,81 @@ export function AutomationSettingsPanel({
               className={styles.toggleList}
               aria-label={t('settings:automation.agentAdaptersAriaLabel')}
             >
-              {agentAdapters.map((item) => (
-                <li key={item.provider} className={styles.toggleRow}>
-                  <div className={styles.toggleText}>
-                    <span className={styles.toggleLabel}>{item.provider}</span>
-                    <span className={styles.toggleHelper}>
-                      {item.completionContract}
-                      {item.reasonCode ? ` · ${item.reasonCode}` : ''}
+              {agentAdapters.map((item) => {
+                const isOpenCode = item.provider === 'openCodeVisible';
+                const bridgeStatus = item.bridgeStatus ?? null;
+                const blocked =
+                  item.blockedReason ??
+                  item.reasonCode ??
+                  (isOpenCode && bridgeStatus && bridgeStatus !== 'ready'
+                    ? bridgeStatus
+                    : null);
+                const availableTone =
+                  item.available && (!isOpenCode || bridgeStatus === 'ready')
+                    ? 'success'
+                    : isOpenCode && bridgeStatus === 'previewRequired'
+                      ? 'warn'
+                      : 'neutral';
+                return (
+                  <li
+                    key={item.provider}
+                    className={styles.toggleRow}
+                    data-testid={`agent-adapter-${item.provider}`}
+                    data-provider={item.provider}
+                    data-bridge-status={bridgeStatus ?? undefined}
+                    data-completion={item.completionContract}
+                  >
+                    <div className={styles.toggleText}>
+                      <span className={styles.toggleLabel}>
+                        {t(`settings:automation.provider.${item.provider}`, {
+                          defaultValue: item.provider,
+                        })}
+                      </span>
+                      <span className={styles.toggleHelper}>
+                        {t('settings:automation.completionContract', {
+                          contract: item.completionContract,
+                        })}
+                        {item.executable
+                          ? ` · ${t('settings:automation.executable', {
+                              path: item.executable,
+                            })}`
+                          : ''}
+                        {item.version
+                          ? ` · ${t('settings:automation.version', {
+                              version: item.version,
+                            })}`
+                          : ''}
+                        {item.supportEvidence
+                          ? ` · ${t('settings:automation.supportEvidence', {
+                              evidence: item.supportEvidence,
+                            })}`
+                          : ''}
+                        {isOpenCode && bridgeStatus
+                          ? ` · ${t(`settings:automation.bridgeStatus.${bridgeStatus}`)}`
+                          : ''}
+                        {blocked
+                          ? ` · ${t('settings:automation.blockedReason', {
+                              reason: blocked,
+                            })}`
+                          : ''}
+                      </span>
+                    </div>
+                    <span className={styles.toggleState}>
+                      {item.available && (!isOpenCode || bridgeStatus === 'ready') ? (
+                        <Pill tone={availableTone} dot>
+                          {t('settings:automation.adapterAvailable')}
+                        </Pill>
+                      ) : (
+                        <Pill tone={availableTone} dot>
+                          {isOpenCode && bridgeStatus === 'previewRequired'
+                            ? t('settings:automation.bridgeStatus.previewRequired')
+                            : t('settings:automation.adapterUnavailable')}
+                        </Pill>
+                      )}
                     </span>
-                  </div>
-                  <span className={styles.toggleState}>
-                    {item.available ? (
-                      <Pill tone="success" dot>
-                        {t('settings:automation.adapterAvailable')}
-                      </Pill>
-                    ) : (
-                      <Pill tone="neutral" dot>
-                        {t('settings:automation.adapterUnavailable')}
-                      </Pill>
-                    )}
-                  </span>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           </Card.Body>
         </Card>

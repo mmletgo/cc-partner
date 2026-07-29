@@ -9,6 +9,7 @@
  */
 
 import {
+  orchestratorAgentAdapterCatalogDecoder,
   orchestratorEvidenceListDecoder,
   orchestratorProjectRefreshResultDecoder,
   orchestratorRemoteOutboxItemDecoder,
@@ -775,9 +776,11 @@ export const buildQueueOrchestratorTaskInvokeArgs = buildOrchestratorTaskViewAct
 export async function listOrchestratorAgentAdapters(
   projectId?: string | null,
 ): Promise<OrchestratorAgentAdapterCatalog> {
-  return invoke<OrchestratorAgentAdapterCatalog>('list_orchestrator_agent_adapters', {
-    projectId: projectId ?? null,
-  });
+  return invokeDecoded(
+    'list_orchestrator_agent_adapters',
+    { projectId: projectId ?? null },
+    orchestratorAgentAdapterCatalogDecoder,
+  );
 }
 
 /**

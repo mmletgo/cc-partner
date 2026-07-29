@@ -5,6 +5,9 @@
 import { describe, expect, test } from 'vitest';
 import { ContractDecodeError } from '../runtimeSchema';
 import {
+  agentProviderIdDecoder,
+  orchestratorAgentAdapterCatalogDecoder,
+  orchestratorAgentAdapterCatalogItemDecoder,
   orchestratorEvidenceDecoder,
   orchestratorEvidenceListDecoder,
   orchestratorProjectRefreshResultDecoder,
@@ -192,5 +195,70 @@ describe('orchestrator schemas', () => {
         reviewDigest: 12,
       }),
     ).toThrow(ContractDecodeError);
+  });
+
+  test('decodes four-provider adapter catalog including openCodeVisible', () => {
+    const catalog = {
+      adapters: [
+        {
+          provider: 'claudeCodeVisible',
+          available: true,
+          completionContract: 'sentinelLine',
+          supportsResume: true,
+          supportsUsage: true,
+          reasonCode: null,
+        },
+        {
+          provider: 'codexVisible',
+          available: true,
+          completionContract: 'sentinelLine',
+          supportsResume: true,
+          supportsUsage: false,
+        },
+        {
+          provider: 'genericTerminal',
+          available: false,
+          completionContract: 'manual',
+          supportsResume: false,
+          supportsUsage: false,
+          reasonCode: 'not_configured',
+        },
+        {
+          provider: 'openCodeVisible',
+          available: false,
+          completionContract: 'hookEvent',
+          supportsResume: true,
+          supportsUsage: true,
+          executable: 'opencode',
+          version: '0.1.0',
+          supportEvidence: 'L3-AGENT-HUB-OPENCODE-RUNTIME-001',
+          bridgeStatus: 'previewRequired',
+          blockedReason: 'runtime_bridge_required',
+          reasonCode: 'l3_runtime_evidence_missing',
+        },
+      ],
+    };
+    const decoded = orchestratorAgentAdapterCatalogDecoder.decode(catalog);
+    expect(decoded.adapters).toHaveLength(4);
+    const openCode = decoded.adapters.find((a) => a.provider === 'openCodeVisible');
+    expect(openCode?.completionContract).toBe('hookEvent');
+    expect(openCode?.bridgeStatus).toBe('previewRequired');
+    expect(openCode?.blockedReason).toBe('runtime_bridge_required');
+    expect(openCode?.supportEvidence).toBe('L3-AGENT-HUB-OPENCODE-RUNTIME-001');
+  });
+
+  test('unknown provider wire values remain decoder errors rather than Claude', () => {
+    expect(() => agentProviderIdDecoder.decode('claude')).toThrow(ContractDecodeError);
+    expect(() => agentProviderIdDecoder.decode('openCode')).toThrow(ContractDecodeError);
+    expect(() =>
+      orchestratorAgentAdapterCatalogItemDecoder.decode({
+        provider: 'unknownProviderX',
+        available: true,
+        completionContract: 'sentinelLine',
+        supportsResume: false,
+        supportsUsage: false,
+      }),
+    ).toThrow(ContractDecodeError);
+    expect(agentProviderIdDecoder.decode('openCodeVisible')).toBe('openCodeVisible');
   });
 });

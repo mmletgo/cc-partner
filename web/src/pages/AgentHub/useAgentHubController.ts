@@ -40,6 +40,7 @@ import type {
   AgentHubStatus,
   AgentTarget,
   DesiredPresence,
+  PluginPackageReport,
 } from '@/lib/types/agentHub';
 import type { LanPushPeerOption } from './LanPushDialog';
 
@@ -81,6 +82,11 @@ export interface UseAgentHubControllerResult {
   blocksDrawerOpen: boolean;
   openBlocksDrawer: () => void;
   closeBlocksDrawer: () => void;
+  pluginDrawerOpen: boolean;
+  pluginReport: import('@/lib/types/agentHub').PluginPackageReport | null;
+  openPluginDrawer: (assetId?: string) => void;
+  closePluginDrawer: () => void;
+  loadPluginReport: (assetId: string) => Promise<void>;
   adoptionOpen: boolean;
   adoptionPreview: AgentHubAdoptionPreview | null;
   openAdoptionPreview: (asset: AgentHubAssetSummary, target: AgentTarget) => void;
@@ -205,6 +211,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [previewProjectId, setPreviewProjectId] = useState('');
   const [conflictDrawerOpen, setConflictDrawerOpen] = useState(Boolean(deepLinkConflictId));
   const [blocksDrawerOpen, setBlocksDrawerOpen] = useState(false);
+  const [pluginDrawerOpen, setPluginDrawerOpen] = useState(false);
+  const [pluginReport, setPluginReport] = useState<PluginPackageReport | null>(null);
   const [adoptionOpen, setAdoptionOpen] = useState(false);
   const [adoptionPreview, setAdoptionPreview] = useState<AgentHubAdoptionPreview | null>(null);
   const [deleteEverywhereOpen, setDeleteEverywhereOpen] = useState(false);
@@ -412,6 +420,58 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const closeBlocksDrawer = useCallback(() => {
     if (actionBusy) return;
     setBlocksDrawerOpen(false);
+  }, [actionBusy]);
+
+  /**
+   * Business Logic: 打开 Plugin 组件矩阵；优先 detail.pluginReport，否则 IPC 拉取。
+   * Code Logic: setPluginDrawerOpen + best-effort getPluginPackageReport / detail.pluginReport。
+   */
+  const loadPluginReport = useCallback(
+    async (assetId: string) => {
+      setActionBusy(true);
+      setActionError(null);
+      try {
+        if (selectedAsset?.assetId === assetId && selectedAsset.pluginReport) {
+          setPluginReport(selectedAsset.pluginReport);
+          return;
+        }
+        try {
+          const report = await agentHubApi.getPluginPackageReport(assetId);
+          if (!mountedRef.current) return;
+          setPluginReport(report);
+        } catch {
+          // 后端未挂载时：若 detail 已含 pluginReport 则用；否则尝试 preview delete 组合失败提示。
+          if (selectedAsset?.assetId === assetId && selectedAsset.pluginReport) {
+            setPluginReport(selectedAsset.pluginReport);
+          } else {
+            throw new Error(t('agentHub:plugin.loadFailed'));
+          }
+        }
+      } catch (reason) {
+        if (!mountedRef.current) return;
+        setActionError(toErrorMessage(reason));
+        setPluginReport(null);
+      } finally {
+        if (mountedRef.current) setActionBusy(false);
+      }
+    },
+    [selectedAsset, t],
+  );
+
+  const openPluginDrawer = useCallback(
+    (assetId?: string) => {
+      const id = assetId ?? selectedAssetId;
+      setPluginDrawerOpen(true);
+      if (id) {
+        void loadPluginReport(id);
+      }
+    },
+    [loadPluginReport, selectedAssetId],
+  );
+
+  const closePluginDrawer = useCallback(() => {
+    if (actionBusy) return;
+    setPluginDrawerOpen(false);
   }, [actionBusy]);
 
   const openAdoptionPreview = useCallback(
@@ -927,6 +987,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     blocksDrawerOpen,
     openBlocksDrawer,
     closeBlocksDrawer,
+    pluginDrawerOpen,
+    pluginReport,
+    openPluginDrawer,
+    closePluginDrawer,
+    loadPluginReport,
     adoptionOpen,
     adoptionPreview,
     openAdoptionPreview,

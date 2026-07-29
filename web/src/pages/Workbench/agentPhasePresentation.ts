@@ -90,8 +90,14 @@ export function agentProviderShortLabel(providerId: string): string {
   if (providerId === 'claudeCodeVisible' || providerId === 'claudeCode') {
     return 'Claude';
   }
-  if (providerId === 'codex') {
+  if (providerId === 'codexVisible' || providerId === 'codex') {
     return 'Codex';
+  }
+  if (providerId === 'genericTerminal') {
+    return 'Generic';
+  }
+  if (providerId === 'openCodeVisible' || providerId === 'opencode') {
+    return 'OpenCode';
   }
   if (providerId.length > 16) {
     return `${providerId.slice(0, 14)}…`;
