@@ -46,7 +46,9 @@ export type AttentionSourceKind =
   | 'workbenchDependency'
   | 'agentNeedsInput'
   | 'agentFailed'
-  | 'experimentNeedsDecision';
+  | 'experimentNeedsDecision'
+  | 'agentHubConflict'
+  | 'agentHubProjectionBlocked';
 
 /**
  * Attention 语义化跳转目标。
@@ -56,7 +58,7 @@ export type AttentionSourceKind =
  *
  * Code Logic（这个类型做什么）:
  *   discriminated union：orchestratorTask / remoteOutbox / settings /
- *   agentSession（v2）/ experiment（v2 合同）。
+ *   agentSession（v2）/ experiment（v2）/ agentHubAsset（Agent Hub）。
  */
 export type AttentionTarget =
   | { kind: 'orchestratorTask'; projectId: string; taskId: string }
@@ -69,7 +71,8 @@ export type AttentionTarget =
       terminalSessionId: string;
       agentSessionId: string;
     }
-  | { kind: 'experiment'; projectId: string; experimentId: string };
+  | { kind: 'experiment'; projectId: string; experimentId: string }
+  | { kind: 'agentHubAsset'; assetId: string; conflictId?: string | null };
 
 /**
  * 单条 Attention 条目 DTO。

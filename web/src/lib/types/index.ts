@@ -15,4 +15,5 @@ export * from './orchestrator';
 export * from './attention';
 export * from './agentRuntime';
 export * from './agentLedger';
+export * from './agentHub';
 export * from './lanFleet';

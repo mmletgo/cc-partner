@@ -1,0 +1,124 @@
+{
+  "title": "Agent Hub",
+  "subtitle": "在同一工作区管理 Claude / Codex / OpenCode 的指令投影。",
+  "loading": "正在加载 Agent Hub…",
+  "stale": "状态可能已过期，请刷新重试。",
+  "empty": "当前筛选条件下没有资产。",
+  "listAria": "Agent Hub 资产列表",
+  "upgradeRequired": "后端 Agent Hub API 不兼容写操作。请升级 backend sidecar 后再编辑。",
+  "status": {
+    "enabled": "Hub 已启用",
+    "disabled": "Hub 未启用",
+    "writeOk": "允许写入",
+    "writeBlocked": "写入已阻断",
+    "conflicts": "{{count}} 个冲突",
+    "blocked": "{{count}} 个阻塞投影"
+  },
+  "targets": {
+    "claude": "Claude",
+    "codex": "Codex",
+    "opencode": "OpenCode"
+  },
+  "kinds": {
+    "instruction": "指令",
+    "skill": "Skill",
+    "command": "命令",
+    "agent": "Agent",
+    "mcp": "MCP",
+    "plugin": "Plugin",
+    "hook": "Hook"
+  },
+  "policy": {
+    "shared": "共享",
+    "adapted": "适配",
+    "targetOnly": "仅目标"
+  },
+  "presence": {
+    "present": "应存在",
+    "absent": "应不存在"
+  },
+  "materialization": {
+    "none": "无状态",
+    "synced": "已同步",
+    "pending": "待投影",
+    "blocked": "已阻塞",
+    "drifted": "已漂移",
+    "drift": "已漂移",
+    "detached": "已脱离",
+    "failed": "失败",
+    "writing": "写入中",
+    "conflict": "冲突",
+    "unsupported": "不支持",
+    "activationRequired": "需激活",
+    "externalCollision": "外部碰撞"
+  },
+  "filters": {
+    "scope": "作用域",
+    "kind": "类型",
+    "scopePlaceholder": "按 scope id 筛选",
+    "kindPlaceholder": "按类型筛选（如 instruction）"
+  },
+  "probes": {
+    "title": "CLI 探测",
+    "empty": "暂无 CLI 探测结果。",
+    "unknownVersion": "版本未知",
+    "unknownExecutable": "未找到可执行文件",
+    "unsupportedHint": "该 CLI 不支持完整投影。",
+    "support": {
+      "full": "完整",
+      "partial": "部分",
+      "scanOnly": "仅扫描",
+      "supported": "支持",
+      "unsupported": "不支持"
+    }
+  },
+  "actions": {
+    "previewProject": "预览项目启用",
+    "openBlocks": "指令块",
+    "openConflicts": "冲突",
+    "enableTarget": "启用",
+    "disableTarget": "停用"
+  },
+  "preview": {
+    "title": "项目启用预览",
+    "desc": "预览为零写入。启用只会建立 checkout 映射，不会 commit/push 项目仓库。",
+    "projectId": "Workbench 项目 id",
+    "projectIdPlaceholder": "本机项目 id",
+    "run": "运行预览",
+    "enable": "启用项目",
+    "checkouts": "检出列表",
+    "plannedActions": "计划动作",
+    "noCommitDefault": "cc-partner 不会 commit/push 项目仓库。"
+  },
+  "conflict": {
+    "title": "冲突",
+    "badge": "冲突",
+    "empty": "该资产没有未解决冲突。",
+    "noAsset": "请先选择资产。",
+    "deepLink": "深链冲突：{{id}}",
+    "keepHub": "保留 Hub",
+    "keepExternal": "保留外部"
+  },
+  "blocks": {
+    "title": "指令块",
+    "noAsset": "请先选择指令资产。",
+    "empty": "该资产没有指令块。",
+    "emptyTargetFile": "（该目标为空）",
+    "needsAdaptation": "需人工适配",
+    "promoteShared": "提升为 shared",
+    "pairAdapted": "将所选配对为 adapted",
+    "revertTargetOnly": "退回 targetOnly",
+    "saveBlock": "保存块",
+    "diffPreview": "受影响目标差异",
+    "diffHint": "确认前始终按当前 mode 预览各目标文件。",
+    "mode": {
+      "shared": "shared",
+      "adapted": "adapted",
+      "targetOnly": "targetOnly"
+    }
+  },
+  "errors": {
+    "projectIdRequired": "请填写项目 id。",
+    "assetRequired": "请先选择资产。"
+  }
+}

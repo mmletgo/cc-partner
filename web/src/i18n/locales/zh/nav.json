@@ -9,6 +9,7 @@
   "promptOptimizer": "Prompt优化",
   "claudeMd": "CLAUDE.MD",
   "claudeCode": "Claude Plugin",
+  "agentHub": "Agent Hub",
   "orchestrator": "自动化",
   "devices": "设备",
   "settings": "设置",

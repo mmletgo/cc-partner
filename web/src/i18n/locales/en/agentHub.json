@@ -1,0 +1,124 @@
+{
+  "title": "Agent Hub",
+  "subtitle": "Manage multi-CLI instructions for Claude, Codex, and OpenCode from one workspace.",
+  "loading": "Loading Agent Hub…",
+  "stale": "Status may be out of date. Refresh to reload.",
+  "empty": "No assets match the current filters.",
+  "listAria": "Agent Hub assets",
+  "upgradeRequired": "Backend Agent Hub API is incompatible for writes. Upgrade the backend sidecar to continue editing.",
+  "status": {
+    "enabled": "Hub enabled",
+    "disabled": "Hub disabled",
+    "writeOk": "Writes allowed",
+    "writeBlocked": "Writes blocked",
+    "conflicts": "{{count}} conflicts",
+    "blocked": "{{count}} blocked projections"
+  },
+  "targets": {
+    "claude": "Claude",
+    "codex": "Codex",
+    "opencode": "OpenCode"
+  },
+  "kinds": {
+    "instruction": "Instruction",
+    "skill": "Skill",
+    "command": "Command",
+    "agent": "Agent",
+    "mcp": "MCP",
+    "plugin": "Plugin",
+    "hook": "Hook"
+  },
+  "policy": {
+    "shared": "Shared",
+    "adapted": "Adapted",
+    "targetOnly": "Target only"
+  },
+  "presence": {
+    "present": "Present",
+    "absent": "Absent"
+  },
+  "materialization": {
+    "none": "No status",
+    "synced": "Synced",
+    "pending": "Pending",
+    "blocked": "Blocked",
+    "drifted": "Drifted",
+    "drift": "Drifted",
+    "detached": "Detached",
+    "failed": "Failed",
+    "writing": "Writing",
+    "conflict": "Conflict",
+    "unsupported": "Unsupported",
+    "activationRequired": "Activation required",
+    "externalCollision": "External collision"
+  },
+  "filters": {
+    "scope": "Scope",
+    "kind": "Kind",
+    "scopePlaceholder": "Filter by scope id",
+    "kindPlaceholder": "Filter by kind (e.g. instruction)"
+  },
+  "probes": {
+    "title": "CLI probes",
+    "empty": "No CLI probes reported.",
+    "unknownVersion": "Version unknown",
+    "unknownExecutable": "Executable not found",
+    "unsupportedHint": "This CLI is unsupported for full projection.",
+    "support": {
+      "full": "Full",
+      "partial": "Partial",
+      "scanOnly": "Scan only",
+      "supported": "Supported",
+      "unsupported": "Unsupported"
+    }
+  },
+  "actions": {
+    "previewProject": "Preview project opt-in",
+    "openBlocks": "Instruction blocks",
+    "openConflicts": "Conflicts",
+    "enableTarget": "Enable",
+    "disableTarget": "Disable"
+  },
+  "preview": {
+    "title": "Project enable preview",
+    "desc": "Preview is zero-write. Enabling maps checkouts without committing the project git repo.",
+    "projectId": "Workbench project id",
+    "projectIdPlaceholder": "Local project id",
+    "run": "Run preview",
+    "enable": "Enable project",
+    "checkouts": "Checkouts",
+    "plannedActions": "Planned actions",
+    "noCommitDefault": "cc-partner will not commit or push the project repository."
+  },
+  "conflict": {
+    "title": "Conflicts",
+    "badge": "Conflict",
+    "empty": "No open conflicts for this asset.",
+    "noAsset": "Select an asset first.",
+    "deepLink": "Deep link conflict: {{id}}",
+    "keepHub": "Keep Hub",
+    "keepExternal": "Keep external"
+  },
+  "blocks": {
+    "title": "Instruction blocks",
+    "noAsset": "Select an instruction asset.",
+    "empty": "No blocks on this asset.",
+    "emptyTargetFile": "(empty on this target)",
+    "needsAdaptation": "Needs adaptation",
+    "promoteShared": "Promote to shared",
+    "pairAdapted": "Pair selected as adapted",
+    "revertTargetOnly": "Revert to targetOnly",
+    "saveBlock": "Save block",
+    "diffPreview": "Affected target diffs",
+    "diffHint": "Diff preview always reflects current block modes before confirm.",
+    "mode": {
+      "shared": "shared",
+      "adapted": "adapted",
+      "targetOnly": "targetOnly"
+    }
+  },
+  "errors": {
+    "projectIdRequired": "Project id is required.",
+    "assetRequired": "Select an asset first."
+  }
+}

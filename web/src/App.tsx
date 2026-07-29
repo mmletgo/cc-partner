@@ -60,8 +60,9 @@ const WorkbenchFleetPage = lazyNamed(
 );
 const Scratchpad = lazyNamed(() => import('./pages/Scratchpad'), 'Scratchpad');
 const PromptOptimizer = lazyNamed(() => import('./pages/PromptOptimizer'), 'PromptOptimizer');
-const ClaudeMd = lazyNamed(() => import('./pages/ClaudeMd'), 'ClaudeMd');
-const ClaudeCodeAssets = lazyNamed(() => import('./pages/ClaudeCodeAssets'), 'ClaudeCodeAssets');
+// ClaudeMd / ClaudeCodeAssets page modules retained under pages/ for N/N+1;
+// ownership routes redirect to Agent Hub.
+const AgentHub = lazyNamed(() => import('./pages/AgentHub'), 'AgentHub');
 const Devices = lazyNamed(() => import('./pages/Devices'), 'Devices');
 const Settings = lazyNamed(() => import('./pages/Settings'), 'Settings');
 const Health = lazyNamed(() => import('./pages/Health'), 'Health');
@@ -555,8 +556,9 @@ export default function App() {
             />
             <Route path="/scratchpad" element={<ShellRoute><Scratchpad /></ShellRoute>} />
             <Route path="/prompt-optimizer" element={<ShellRoute><PromptOptimizer /></ShellRoute>} />
-            <Route path="/claude-md" element={<ShellRoute><ClaudeMd /></ShellRoute>} />
-            <Route path="/claude-code" element={<ShellRoute><ClaudeCodeAssets /></ShellRoute>} />
+            <Route path="/agent-hub" element={<ShellRoute><AgentHub /></ShellRoute>} />
+            <Route path="/claude-md" element={<Navigate to="/agent-hub" replace />} />
+            <Route path="/claude-code" element={<Navigate to="/agent-hub" replace />} />
             <Route path="/orchestrator" element={<Navigate to="/workbench" replace />} />
             <Route path="/devices" element={<ShellRoute><Devices /></ShellRoute>} />
             <Route path="/ssh" element={<Navigate to="/devices" replace />} />

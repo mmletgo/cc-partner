@@ -41,7 +41,8 @@
     "viewFailed": "查看失败项",
     "openSettings": "打开设置",
     "openTerminal": "打开终端",
-    "openExperiment": "查看实验"
+    "openExperiment": "查看实验",
+    "openAgentHub": "打开 Agent Hub"
   },
   "nav": {
     "label": "待处理"

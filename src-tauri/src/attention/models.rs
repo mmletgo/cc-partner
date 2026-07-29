@@ -59,10 +59,12 @@ pub enum AttentionFreshness {
 /// Business Logic（为什么需要这个枚举）:
 ///     前端按 sourceKind 映射操作文案与图标，source 投影必须输出稳定字面量。
 ///     `attention.v1` 响应不得包含 Agent/Experiment 变体；仅 `attention.v2` 投影输出新枚举。
+///     Agent Hub conflict / blocked projection 同时进入 v1 与 v2（桌面 Inbox 需要）。
 ///
 /// Code Logic（这个枚举做什么）:
 ///     序列化为 orchestratorHumanReview / orchestratorBlocked / remoteOutboxFailed /
-///     workbenchDependency / agentNeedsInput / agentFailed / experimentNeedsDecision。
+///     workbenchDependency / agentNeedsInput / agentFailed / experimentNeedsDecision /
+///     agentHubConflict / agentHubProjectionBlocked。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AttentionSourceKind {
@@ -76,14 +78,20 @@ pub enum AttentionSourceKind {
     AgentFailed,
     /// A4 合同预留：experiment 需要决策（A2 不查询 repo）
     ExperimentNeedsDecision,
+    /// Agent Hub：未解决 conflict（v1+v2）
+    AgentHubConflict,
+    /// Agent Hub：投影被阻塞（v1+v2）
+    AgentHubProjectionBlocked,
 }
 
 impl AttentionSourceKind {
     /// Business Logic（为什么需要这个函数）:
     ///     v1 响应必须严格排除 Agent/Experiment 变体，避免旧客户端解码失败。
+    ///     Agent Hub 条目必须进入桌面 v1 Inbox，故不算 v2-only。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     Agent*/Experiment* 返回 true。
+    ///     AgentNeedsInput/AgentFailed/ExperimentNeedsDecision 返回 true；
+    ///     AgentHubConflict/AgentHubProjectionBlocked 返回 false。
     pub fn is_v2_only(self) -> bool {
         matches!(
             self,
@@ -142,7 +150,7 @@ pub struct AttentionDeviceRef {
 ///
 /// Code Logic（这个枚举做什么）:
 ///     用内部 tag `kind` 序列化：orchestratorTask / remoteOutbox / settings /
-///     agentSession（v2）/ experiment（v2 合同）。
+///     agentSession（v2）/ experiment（v2 合同）/ agentHubAsset（v1+v2）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AttentionTargetDto {
@@ -178,6 +186,13 @@ pub enum AttentionTargetDto {
         project_id: String,
         #[serde(rename = "experimentId")]
         experiment_id: String,
+    },
+    /// Agent Hub：导航到资产权威界面（conflict 时附 conflictId）。
+    AgentHubAsset {
+        #[serde(rename = "assetId")]
+        asset_id: String,
+        #[serde(rename = "conflictId")]
+        conflict_id: Option<String>,
     },
 }
 
@@ -363,8 +378,18 @@ mod tests {
             serde_json::to_value(AttentionSourceKind::ExperimentNeedsDecision).unwrap(),
             json!("experimentNeedsDecision")
         );
+        assert_eq!(
+            serde_json::to_value(AttentionSourceKind::AgentHubConflict).unwrap(),
+            json!("agentHubConflict")
+        );
+        assert_eq!(
+            serde_json::to_value(AttentionSourceKind::AgentHubProjectionBlocked).unwrap(),
+            json!("agentHubProjectionBlocked")
+        );
         assert!(AttentionSourceKind::AgentNeedsInput.is_v2_only());
         assert!(!AttentionSourceKind::OrchestratorHumanReview.is_v2_only());
+        assert!(!AttentionSourceKind::AgentHubConflict.is_v2_only());
+        assert!(!AttentionSourceKind::AgentHubProjectionBlocked.is_v2_only());
 
         assert_eq!(
             serde_json::to_value(AttentionProjectKind::Local).unwrap(),
@@ -452,6 +477,20 @@ mod tests {
                 "kind": "experiment",
                 "projectId": "p4",
                 "experimentId": "exp-1",
+            })
+        );
+
+        let agent_hub_target = serde_json::to_value(AttentionTargetDto::AgentHubAsset {
+            asset_id: "asset-1".to_string(),
+            conflict_id: Some("conflict-1".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            agent_hub_target,
+            json!({
+                "kind": "agentHubAsset",
+                "assetId": "asset-1",
+                "conflictId": "conflict-1",
             })
         );
 

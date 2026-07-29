@@ -31,7 +31,6 @@ import {
   HistoryIcon,
   ScratchpadIcon,
   ClaudeMdIcon,
-  TerminalIcon,
   DevicesIcon,
   SettingsIcon,
   HealthIcon,
@@ -200,8 +199,7 @@ export function AppShell({ children }: AppShellProps) {
             <NavItem to="/cc-history" label={t('nav:ccHistory')} icon={<HistoryIcon />} />
             <NavItem to="/scratchpad" label={t('nav:scratchpad')} icon={<ScratchpadIcon />} />
             <NavItem to="/prompt-optimizer" label={t('nav:promptOptimizer')} icon={<EditIcon />} />
-            <NavItem to="/claude-md" label={t('nav:claudeMd')} icon={<ClaudeMdIcon />} />
-            <NavItem to="/claude-code" label={t('nav:claudeCode')} icon={<TerminalIcon />} />
+            <NavItem to="/agent-hub" label={t('nav:agentHub')} icon={<ClaudeMdIcon />} />
           </NavGroup>
           <NavGroup id={NAV_GROUP_IDS.connect} label={t('nav:groups.connect')}>
             <NavItem to="/devices" label={t('nav:devices')} icon={<DevicesIcon />} />
