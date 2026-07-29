@@ -166,11 +166,11 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 真实 Claude / Codex / OpenCode 产品安装路径写盘族（`L3-AGENT-HUB-CLAUDE-001` / `L3-AGENT-HUB-CODEX-001` / `L3-AGENT-HUB-OPENCODE-001` **NOT VERIFIED**）
 - **不得**宣称 LAN 身份认证、自动 Git import，或未 pin 的 OpenCode 版本 runtime 已认证
 
-**Program Task 5 residual status（非认证完成；integration after Gate D @ `b1b01d89` + Codex R1 修复中）**：
-- Gate A–D L2/E2E 证据可追溯，**不得**把 L1/L2 或串行-only/`final-only` 替代宣称升格为 Program-wide certification 或 L3
-- 默认并行 `cargo test --lib agent_hub`、`npm run lint`、strict `check:bundle` 在 residual 记录中仍可能红；详见 `docs/development/testing.md` residual 表
-- 完整 Agent Hub L3 NOT VERIFIED inventory 必须与 quality matrix 对齐，并写入 `docs/development/real-device-certification.md`
-- 命令矩阵 / residual 报告：`.superpowers/sdd/reports/program-task-5-report.md`（**不是**完成证书）
+**Program-wide certification（Program Task 5，integration `sdd/agent-hub-2026-07-29` @ `8d1fa0d7` post Codex R6，2026-07-30）**：
+- 已在集成树上复跑 Gate A–D 聚焦 Rust 串行 lib/smoke、前端 unit/build/E2E 与协议/文档门禁；L2/E2E 证据 ID 保持可追溯，**不**把 L1/L2 升格为 L3
+- `cargo test --lib agent_hub` **以 `--test-threads=1` 为认证模式**（默认并行下 importer 全局 fault inject 可 flake）；详见 `docs/development/testing.md` program-wide 表
+- 前端 `npm run lint` 与默认 strict `check:bundle` 在本轮 **未**宣称通过（lint 债务集中于 Agent Hub hooks/React Compiler；bundle 仅 final-only 硬顶可通过）
+- 命令矩阵与完整 NOT VERIFIED 清单：`.superpowers/sdd/reports/program-task-5-report.md`
 
 ### 2.6 设备自动发现与互联
 
