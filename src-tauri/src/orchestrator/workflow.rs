@@ -79,7 +79,7 @@ pub enum WorkflowSource {
 ///
 /// Business Logic（为什么需要这个结构体）:
 ///     项目可以收紧或调整可见 Runner 的安全上限；provider 为内置
-///     `claudeCodeVisible|codexVisible|genericTerminal` 之一。
+///     `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible` 之一。
 ///
 /// Code Logic（这个结构体做什么）:
 ///     保存 Runner provider wire 字符串、最大轮次和 stall timeout，resolver 做边界与 fail-closed 校验。
@@ -832,7 +832,7 @@ fn apply_workflow_section(
 ///     Runner 覆盖项会影响自动化资源消耗，只能允许内置 adapter provider 与受控上限。
 ///
 /// Code Logic（这个函数做什么）:
-///     校验 provider ∈ 内置三枚举，max_turns ∈ 1..=20，stall_timeout_ms ∈ 30s..=30min。
+///     校验 provider ∈ 内置四枚举，max_turns ∈ 1..=20，stall_timeout_ms ∈ 30s..=30min。
 fn apply_runner_section(
     runner: &mut WorkflowRunnerConfig,
     section: RunnerSection,
@@ -1294,13 +1294,18 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     Agent Adapter Platform 要求三个内置 provider 都能被 WORKFLOW parser 接受。
+    ///     Agent Adapter Platform 要求四个内置 provider 都能被 WORKFLOW parser 接受。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     对 claudeCodeVisible/codexVisible/genericTerminal 解析并断言 provider.as_str 一致。
+    ///     对 claudeCodeVisible/codexVisible/genericTerminal/openCodeVisible 解析并断言一致。
     #[test]
     fn workflow_accepts_all_built_in_agent_providers() {
-        for value in ["claudeCodeVisible", "codexVisible", "genericTerminal"] {
+        for value in [
+            "claudeCodeVisible",
+            "codexVisible",
+            "genericTerminal",
+            "openCodeVisible",
+        ] {
             let resolved =
                 parse_project_workflow(&format!("---\nrunner:\n  provider: {value}\n---\nPrompt"))
                     .unwrap_or_else(|e| panic!("provider {value} 应被接受: {e}"));

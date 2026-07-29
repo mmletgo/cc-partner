@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     定义 `AgentProviderId`、`AgentCompletionContract`、`RunnerAttemptPolicy` 与解析/解析函数；
-//!     wire 值固定为 `claudeCodeVisible|codexVisible|genericTerminal`。
+//!     wire 值固定为 `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible`。
 
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -30,7 +30,7 @@ pub const DEFAULT_STALL_TIMEOUT_MS: i64 = 300_000;
 ///     workflow / attempt 快照 / adapter registry 必须共享同一组稳定 provider token，未知值 fail-closed。
 ///
 /// Code Logic（这个枚举做什么）:
-///     三种内置 provider；`as_str`/`parse` 与 wire 字面量双向转换。
+///     四种内置 provider；`as_str`/`parse` 与 wire 字面量双向转换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentProviderId {
@@ -40,6 +40,8 @@ pub enum AgentProviderId {
     CodexVisible,
     /// 受控 generic terminal（owner allowlist）
     GenericTerminal,
+    /// 可见 OpenCode 终端 Runner（依赖 project runtime bridge）
+    OpenCodeVisible,
 }
 
 impl AgentProviderId {
@@ -49,12 +51,13 @@ impl AgentProviderId {
     ///     SQLite / P2P / 前端 DTO 都依赖固定 camelCase token。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     映射枚举到 `claudeCodeVisible|codexVisible|genericTerminal`。
+    ///     映射枚举到 `claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible`。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeCodeVisible => "claudeCodeVisible",
             Self::CodexVisible => "codexVisible",
             Self::GenericTerminal => "genericTerminal",
+            Self::OpenCodeVisible => "openCodeVisible",
         }
     }
 
@@ -64,14 +67,15 @@ impl AgentProviderId {
     ///     WORKFLOW 与 task 覆盖不能静默回退到 Claude。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     trim 后精确匹配三个内置 token；否则返回带 token 的业务错误。
+    ///     trim 后精确匹配四个内置 token；否则返回带 token 的业务错误。
     pub fn parse(value: &str) -> Result<Self, AppError> {
         match value.trim() {
             "claudeCodeVisible" => Ok(Self::ClaudeCodeVisible),
             "codexVisible" => Ok(Self::CodexVisible),
             "genericTerminal" => Ok(Self::GenericTerminal),
+            "openCodeVisible" => Ok(Self::OpenCodeVisible),
             other => Err(AppError::generic(format!(
-                "runner.provider 不支持: {other}（仅允许 claudeCodeVisible|codexVisible|genericTerminal）"
+                "runner.provider 不支持: {other}（仅允许 claudeCodeVisible|codexVisible|genericTerminal|openCodeVisible）"
             ))),
         }
     }
@@ -97,13 +101,15 @@ impl AgentProviderId {
     ///
     /// Code Logic（这个函数做什么）:
     ///     Claude → SentinelLine；Codex → SentinelLine（无 Hook 桥接时 fail-closed，
-    ///     禁止默认 HookEvent 导致永远等不到 Completed）；Generic → Manual。
+    ///     禁止默认 HookEvent 导致永远等不到 Completed）；Generic → Manual；
+    ///     OpenCode → HookEvent（必须配合 project runtime bridge，无 bridge 时 probe 阻断）。
     pub fn default_completion_contract(self) -> AgentCompletionContract {
         match self {
             Self::ClaudeCodeVisible => AgentCompletionContract::SentinelLine,
             // 未安装 cc-partner OSC Hook 桥接前 Codex 不得默认 HookEvent。
             Self::CodexVisible => AgentCompletionContract::SentinelLine,
             Self::GenericTerminal => AgentCompletionContract::Manual,
+            Self::OpenCodeVisible => AgentCompletionContract::HookEvent,
         }
     }
 
@@ -342,13 +348,18 @@ mod tests {
     use super::*;
 
     /// Business Logic（为什么需要这个测试）:
-    ///     三个内置 provider 必须 round-trip，否则 WORKFLOW 与 adapter 会分叉。
+    ///     四个内置 provider 必须 round-trip，否则 WORKFLOW 与 adapter 会分叉。
     ///
     /// Code Logic（这个测试做什么）:
     ///     对每个 wire 值 parse → as_str 再比对。
     #[test]
     fn provider_wire_roundtrip() {
-        for value in ["claudeCodeVisible", "codexVisible", "genericTerminal"] {
+        for value in [
+            "claudeCodeVisible",
+            "codexVisible",
+            "genericTerminal",
+            "openCodeVisible",
+        ] {
             let id = AgentProviderId::parse(value).unwrap();
             assert_eq!(id.as_str(), value);
         }

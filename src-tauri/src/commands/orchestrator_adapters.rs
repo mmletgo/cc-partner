@@ -48,7 +48,7 @@ pub struct OrchestratorAgentAdapterCatalog {
 ///     Tauri 与 P2P 共享同一 redaction 规则。
 ///
 /// Code Logic（这个函数做什么）:
-///     probe 三个内置 adapter，映射到 catalog item。
+///     probe 四个内置 adapter，映射到 catalog item。
 pub fn build_agent_adapter_catalog(
     registry: &AgentAdapterRegistry,
 ) -> Result<OrchestratorAgentAdapterCatalog, AppError> {
@@ -181,7 +181,7 @@ mod tests {
         assert!(!text.contains("executable"));
         assert!(!text.contains("\"env\""));
         assert!(!text.contains("credential"));
-        assert!(catalog.adapters.len() >= 3);
+        assert!(catalog.adapters.len() >= 4);
         for item in &catalog.adapters {
             assert!(!item.provider.is_empty());
         }

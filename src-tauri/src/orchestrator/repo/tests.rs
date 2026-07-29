@@ -3027,6 +3027,135 @@ async fn active_runner_guard_prevents_old_phase_and_runtime_updates() {
     );
 }
 
+/// Business Logic（为什么需要这个测试）:
+///     Fresh resume CAS 命中时 task + running attempt 必须原子指向新 terminal/agent。
+///
+/// Code Logic（这个测试做什么）:
+///     Running task + running attempt → update 成功 → session/agent 更新。
+#[tokio::test]
+async fn update_active_runner_session_and_agent_binds_fresh_ids() {
+    let (_pool, repo) = setup_repo().await;
+    let task = task_row(
+        "task-fresh-bind",
+        "project-1",
+        OrchestratorTaskStatus::Preparing,
+    );
+    repo.create_task(&task).await.unwrap();
+    sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+        .bind(&task.id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+    repo.mark_task_running_attempt(
+        &task.id,
+        "agent/task-fresh-bind",
+        "worktree-1",
+        "session-old",
+        1,
+        "tok",
+        Some("agent-old"),
+        &RunnerAttemptPolicy::claude_default(),
+    )
+    .await
+    .unwrap();
+    repo.add_attempt(
+        &task.id,
+        1,
+        "worktree-1",
+        "session-old",
+        "prompt",
+        &RunnerAttemptPolicy::claude_default(),
+        Some("agent-old"),
+        OrchestratorAttemptStatus::Running,
+    )
+    .await
+    .unwrap();
+
+    let updated = repo
+        .update_active_runner_session_and_agent(&task.id, 1, "session-fresh", Some("agent-fresh"))
+        .await
+        .expect("CAS hit");
+    assert_eq!(updated.session_id.as_deref(), Some("session-fresh"));
+    assert_eq!(updated.agent_session_id.as_deref(), Some("agent-fresh"));
+
+    let attempt = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT session_id, agent_session_id FROM orchestrator_task_attempts \
+         WHERE task_id = ? AND attempt = ?",
+    )
+    .bind(&task.id)
+    .bind(1_i64)
+    .fetch_one(&repo.pool)
+    .await
+    .unwrap();
+    assert_eq!(attempt.0, "session-fresh");
+    assert_eq!(attempt.1.as_deref(), Some("agent-fresh"));
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     非 Running / attempt 不匹配时 CAS 必须 Conflict，旧 session 不得被改写。
+///
+/// Code Logic（这个测试做什么）:
+///     Preparing task 与 Wrong attempt 调用 → Conflict；原 Running session 保持。
+#[tokio::test]
+async fn update_active_runner_session_and_agent_cas_miss_is_conflict() {
+    let (_pool, repo) = setup_repo().await;
+    let task = task_row(
+        "task-fresh-miss",
+        "project-1",
+        OrchestratorTaskStatus::Preparing,
+    );
+    repo.create_task(&task).await.unwrap();
+    // Preparing 未 mark Running：直接 CAS 必须 miss。
+    let err = repo
+        .update_active_runner_session_and_agent(&task.id, 1, "session-x", Some("agent-x"))
+        .await
+        .expect_err("Preparing must CAS miss");
+    assert!(
+        matches!(err, AppError::Conflict(_)),
+        "expected Conflict, got {err:?}"
+    );
+
+    sqlx::query("UPDATE orchestrator_tasks SET prepare_claim_token = 'tok' WHERE id = ?")
+        .bind(&task.id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+    repo.mark_task_running_attempt(
+        &task.id,
+        "agent/task-fresh-miss",
+        "worktree-1",
+        "session-keep",
+        1,
+        "tok",
+        Some("agent-keep"),
+        &RunnerAttemptPolicy::claude_default(),
+    )
+    .await
+    .unwrap();
+    repo.add_attempt(
+        &task.id,
+        1,
+        "worktree-1",
+        "session-keep",
+        "prompt",
+        &RunnerAttemptPolicy::claude_default(),
+        Some("agent-keep"),
+        OrchestratorAttemptStatus::Running,
+    )
+    .await
+    .unwrap();
+
+    // attempt 不匹配 → miss，session 不变。
+    let err = repo
+        .update_active_runner_session_and_agent(&task.id, 2, "session-bad", Some("agent-bad"))
+        .await
+        .expect_err("wrong attempt must CAS miss");
+    assert!(matches!(err, AppError::Conflict(_)));
+    let kept = repo.get_task(&task.id).await.unwrap();
+    assert_eq!(kept.session_id.as_deref(), Some("session-keep"));
+    assert_eq!(kept.agent_session_id.as_deref(), Some("agent-keep"));
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     Claude Code visible runtime 关联成功后，只有当前 active attempt/session 能写入任务详情字段。
 ///
