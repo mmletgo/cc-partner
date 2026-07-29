@@ -768,6 +768,45 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                     }
                 });
             }
+            // Gate C：LAN push abandoned staging GC（24h prepared；保留 verified CAS）
+            {
+                let hub_gc_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // 启动后稍等，与 tombstone GC 错开
+                    tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                    loop {
+                        ticker.tick().await;
+                        let data_dir = match crate::config::data_dir() {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!("agent hub staging GC skip: data_dir: {e}");
+                                continue;
+                            }
+                        };
+                        let ledger = crate::agent_hub::replication::ReplicationLedger::new(
+                            hub_gc_state.agent_hub_repo.pool(),
+                            hub_gc_state.maintenance_gate.clone(),
+                        );
+                        match crate::agent_hub::replication::gc_abandoned_incoming_staging(
+                            &ledger, &data_dir,
+                        )
+                        .await
+                        {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(
+                                    "agent hub abandoned staging GC removed {n} prepared transfers"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("agent hub abandoned staging GC failed: {e}")
+                            }
+                        }
+                    }
+                });
+            }
             start_cancelled_task_once(&state.cc_collector_cancel, "CC 历史采集器", || {
                 crate::cc::collector::start(state.clone())
             });

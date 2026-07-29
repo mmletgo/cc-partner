@@ -19,15 +19,15 @@ use crate::net::lan_guard::{
 };
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
-    attention, browser_verification, cc_history, claude_code_assets, claude_md_sync, health,
-    mobile, orchestrator, scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
+    agent_hub, attention, browser_verification, cc_history, claude_code_assets, claude_md_sync,
+    health, mobile, orchestrator, scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
 };
 use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension};
 use axum::http::{header, HeaderValue, Request, Response, StatusCode};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, post, put};
 use axum::Json;
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -781,6 +781,23 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(transfer::transfer_complete),
         )
         .route("/api/transfer/status/:id", get(transfer::transfer_status))
+        // Agent Hub LAN source-push（capability agent-hub.v1，三路由原子上线）
+        // prepare body ≤32 MiB（manifest 上限）；object chunk ≤8 MiB。
+        // sourceDeviceId/clientRequestId/expected-device 仅为幂等/绑定标签，不是身份认证。
+        .route(
+            "/api/agent-hub/push/prepare",
+            post(agent_hub::agent_hub_push_prepare).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(
+            "/api/agent-hub/push/:transferId/objects/:objectHash",
+            put(agent_hub::agent_hub_push_object).layer(DefaultBodyLimit::max(
+                crate::agent_hub::replication::receiver::AGENT_HUB_MAX_CHUNK_BYTES,
+            )),
+        )
+        .route(
+            "/api/agent-hub/push/:transferId/commit",
+            post(agent_hub::agent_hub_push_commit),
+        )
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
         .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))
         .route("/api/cc-history/sync/push", post(cc_history::cc_sync_push))

@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+pub mod agent_hub;
 pub mod attention;
 pub mod browser_verification;
 pub mod cc_history;
