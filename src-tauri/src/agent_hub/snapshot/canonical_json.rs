@@ -18,51 +18,78 @@ pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 /// Canonical JSON 子集错误。
 ///
 /// Business Logic: 诊断只描述 schema/类型/大小元数据，不回显凭据正文。
-/// Code Logic: Display 文案仅含计数/类型名/键名规则。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Code Logic: 仅存长度/稳定 code；Debug/Display 均不打印 key 或 serde 原文。
+#[derive(Clone, PartialEq, Eq)]
 pub enum CanonicalJsonError {
     /// 含浮点数
     FloatNotAllowed,
-    /// 整数超出安全范围
+    /// 整数超出安全范围（仅存十进制数值文本，不含字段值）
     IntegerOutOfRange { value: String },
-    /// object key 非 ASCII
-    NonAsciiKey { key: String },
-    /// 重复 decoded key
-    DuplicateKey { key: String },
-    /// 输入不是合法 UTF-8 JSON
-    InvalidJson { message: String },
+    /// object key 非 ASCII（仅存键长）
+    NonAsciiKey { key_len: usize },
+    /// 重复 decoded key（仅存键长）
+    DuplicateKey { key_len: usize },
+    /// 输入不是合法 UTF-8 JSON（稳定 code + 可选字节长度）
+    InvalidJson {
+        code: &'static str,
+        byte_len: Option<usize>,
+    },
     /// 数字不能无损表示为安全整数
     NumberNotSafeInteger,
+}
+
+impl fmt::Debug for CanonicalJsonError {
+    /// 诊断 Debug 输出：长度与稳定 code only，永不打印 key/serde 原文。
+    ///
+    /// Business Logic: 日志/断言若用 `{:?}` 也不得泄露凭据。
+    /// Code Logic: 手写 Debug，避免 derive 打印 key 字段。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FloatNotAllowed => write!(f, "FloatNotAllowed"),
+            Self::IntegerOutOfRange { value } => {
+                write!(f, "IntegerOutOfRange {{ value_len: {} }}", value.len())
+            }
+            Self::NonAsciiKey { key_len } => {
+                write!(f, "NonAsciiKey {{ key_len: {key_len} }}")
+            }
+            Self::DuplicateKey { key_len } => {
+                write!(f, "DuplicateKey {{ key_len: {key_len} }}")
+            }
+            Self::InvalidJson { code, byte_len } => {
+                write!(
+                    f,
+                    "InvalidJson {{ code: {code:?}, byte_len: {byte_len:?} }}"
+                )
+            }
+            Self::NumberNotSafeInteger => write!(f, "NumberNotSafeInteger"),
+        }
+    }
 }
 
 impl fmt::Display for CanonicalJsonError {
     /// 稳定、无正文泄露的错误文案。
     ///
     /// Business Logic: 错误可进 log/UI，不得含 credential 原文。
-    /// Code Logic: 仅格式化枚举字段。
+    /// Code Logic: 仅格式化枚举字段（长度/稳定 code）。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FloatNotAllowed => write!(f, "canonical_json: float not allowed"),
             Self::IntegerOutOfRange { value } => {
                 write!(f, "canonical_json: integer out of range ({value})")
             }
-            Self::NonAsciiKey { key } => {
-                write!(
+            Self::NonAsciiKey { key_len } => {
+                write!(f, "canonical_json: non-ASCII object key (len={key_len})")
+            }
+            Self::DuplicateKey { key_len } => {
+                write!(f, "canonical_json: duplicate object key (len={key_len})")
+            }
+            Self::InvalidJson { code, byte_len } => match byte_len {
+                Some(n) => write!(
                     f,
-                    "canonical_json: non-ASCII object key (len={})",
-                    key.len()
-                )
-            }
-            Self::DuplicateKey { key } => {
-                write!(
-                    f,
-                    "canonical_json: duplicate object key (len={})",
-                    key.len()
-                )
-            }
-            Self::InvalidJson { message } => {
-                write!(f, "canonical_json: invalid json ({message})")
-            }
+                    "canonical_json: invalid json (code={code}, byte_len={n})"
+                ),
+                None => write!(f, "canonical_json: invalid json (code={code})"),
+            },
             Self::NumberNotSafeInteger => {
                 write!(f, "canonical_json: number is not a safe integer")
             }
@@ -95,32 +122,35 @@ pub fn canonicalize_value(value: &Value) -> Result<Vec<u8>, CanonicalJsonError> 
 pub fn parse_json_value_strict(input: &str) -> Result<Value, CanonicalJsonError> {
     let mut de = serde_json::Deserializer::from_str(input);
     let value = Value::deserialize_with_duplicate_detection(&mut de).map_err(|e| {
+        // 稳定诊断 only：禁止把 serde 原文（可能嵌字段值/key）写入错误。
         let msg = e.to_string();
-        if msg.contains("duplicate object key") {
-            // 从错误消息中尽量提取 key 长度，不回显 key 原文。
-            CanonicalJsonError::DuplicateKey {
-                key: extract_duplicate_key_hint(&msg),
-            }
+        if let Some(key_len) = extract_duplicate_key_len(&msg) {
+            CanonicalJsonError::DuplicateKey { key_len }
         } else {
-            CanonicalJsonError::InvalidJson { message: msg }
+            CanonicalJsonError::InvalidJson {
+                code: "parse_error",
+                byte_len: Some(input.len()),
+            }
         }
     })?;
-    de.end().map_err(|e| CanonicalJsonError::InvalidJson {
-        message: e.to_string(),
+    de.end().map_err(|_| CanonicalJsonError::InvalidJson {
+        code: "trailing_input",
+        byte_len: Some(input.len()),
     })?;
     Ok(value)
 }
 
-/// 从错误文案抽取 key 提示（长度占位，不存原文）。
+/// 从重复 key 错误文案提取键长度（不返回 key 原文）。
 ///
-/// Business Logic: Display 不得携带可能含 secret 的 key 原文。
-/// Code Logic: 返回空串或截断 token。
-fn extract_duplicate_key_hint(msg: &str) -> String {
-    // 我们自己的错误会构造 "duplicate object key: <key>"；外部错误返回空。
-    if let Some(rest) = msg.strip_prefix("duplicate object key: ") {
-        return rest.to_string();
-    }
-    String::new()
+/// Business Logic: 诊断只能暴露长度，禁止 key 字符串进入错误枚举。
+/// Code Logic: 解析我们自己的 `duplicate object key len=<n>` 标记（serde 可能追加 ` at line …`）。
+fn extract_duplicate_key_len(msg: &str) -> Option<usize> {
+    // 我们自己的 de::Error 构造 "duplicate object key len=<n>"。
+    const MARKER: &str = "duplicate object key len=";
+    let idx = msg.find(MARKER)?;
+    let rest = &msg[idx + MARKER.len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// 递归写出 canonical JSON。
@@ -216,7 +246,7 @@ fn write_object(map: &Map<String, Value>, out: &mut Vec<u8>) -> Result<(), Canon
     let mut ordered: BTreeMap<&str, &Value> = BTreeMap::new();
     for (k, v) in map {
         if !k.is_ascii() {
-            return Err(CanonicalJsonError::NonAsciiKey { key: k.clone() });
+            return Err(CanonicalJsonError::NonAsciiKey { key_len: k.len() });
         }
         ordered.insert(k.as_str(), v);
     }
@@ -317,7 +347,11 @@ impl DeserializeWithDupDetect for Value {
                 let mut values = Map::new();
                 while let Some(key) = map.next_key::<String>()? {
                     if values.contains_key(&key) {
-                        return Err(de::Error::custom(format!("duplicate object key: {key}")));
+                        // 中间错误只携带 key 长度，永不嵌入 key 原文（含 secret-shaped keys）。
+                        return Err(de::Error::custom(format!(
+                            "duplicate object key len={}",
+                            key.len()
+                        )));
                     }
                     let value = map.next_value_seed(ValueSeed)?;
                     values.insert(key, value);
@@ -397,7 +431,9 @@ mod tests {
         let v = json!({"x": 1.5});
         let err = canonicalize_value(&v).unwrap_err();
         assert!(matches!(err, CanonicalJsonError::FloatNotAllowed));
-        assert!(!err.to_string().contains("1.5") || err.to_string().contains("float"));
+        // 严格：Display/Debug 均不得嵌入浮点原文
+        assert!(!err.to_string().contains("1.5"));
+        assert!(!format!("{err:?}").contains("1.5"));
     }
 
     /// Business Logic: 非 ASCII object key 拒绝（子集）。
@@ -407,9 +443,13 @@ mod tests {
         map.insert("键".into(), Value::Bool(true));
         let v = Value::Object(map);
         let err = canonicalize_value(&v).unwrap_err();
-        assert!(matches!(err, CanonicalJsonError::NonAsciiKey { .. }));
-        // Display 只含 len，不含 key 原文
+        assert!(matches!(
+            err,
+            CanonicalJsonError::NonAsciiKey { key_len: 3 }
+        ));
+        // Display/Debug 只含 len，不含 key 原文
         assert!(!err.to_string().contains("键"));
+        assert!(!format!("{err:?}").contains("键"));
     }
 
     /// Business Logic: 重复 decoded key fail-closed。
@@ -417,7 +457,42 @@ mod tests {
     fn duplicate_decoded_keys_are_rejected() {
         let raw = r#"{"a":1,"a":2}"#;
         let err = parse_json_value_strict(raw).unwrap_err();
-        assert!(matches!(err, CanonicalJsonError::DuplicateKey { .. }));
+        assert!(matches!(
+            err,
+            CanonicalJsonError::DuplicateKey { key_len: 1 }
+        ));
+    }
+
+    /// Business Logic: 重复 key 若形似 secret，Display/Debug 均不得回显。
+    #[test]
+    fn duplicate_secret_shaped_key_never_leaks_in_diagnostics() {
+        let secret = "plain-fixture-secret";
+        let raw = format!(r#"{{"{secret}":1,"{secret}":2}}"#);
+        let err = parse_json_value_strict(&raw).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalJsonError::DuplicateKey {
+                key_len
+            } if key_len == secret.len()
+        ));
+        assert!(!err.to_string().contains(secret));
+        assert!(!format!("{err:?}").contains(secret));
+    }
+
+    /// Business Logic: 非法 JSON 诊断只有稳定 code + 长度，无 serde 原文。
+    #[test]
+    fn invalid_json_diagnostics_are_stable_codes_only() {
+        let raw = r#"{"x":"plain-fixture-secret",}"#;
+        let err = parse_json_value_strict(raw).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalJsonError::InvalidJson {
+                code: "parse_error",
+                ..
+            }
+        ));
+        assert!(!err.to_string().contains("plain-fixture-secret"));
+        assert!(!format!("{err:?}").contains("plain-fixture-secret"));
     }
 
     /// Business Logic: 超过 2^53-1 的整数拒绝。

@@ -6,7 +6,7 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     定义 camelCase envelope DTO、limits、canonicalize_without_hash、
-//!     compute_snapshot_hash、validate_snapshot（含 constant-time hash 比较）。
+//!     compute_snapshot_hash、validate_snapshot（含固定 32 字节 digest 的 CT hash 比较）。
 
 use crate::agent_hub::models::{
     AgentTarget, AssetKind, AssetPolicy, RevisionOperation, RevisionOriginKind,
@@ -283,12 +283,12 @@ pub struct SnapshotEnvelopeV1 {
 /// Snapshot 校验/hash 错误（诊断仅含 counts/sizes，无 secret 正文）。
 ///
 /// Business Logic: limit/schema 失败必须稳定可测且不回显凭据。
-/// Code Logic: Display 只输出 code + 数值。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Code Logic: Display/Debug 只输出 code + 数值/长度；手写 Debug 避免嵌套泄漏。
+#[derive(Clone, PartialEq, Eq)]
 pub enum SnapshotError {
     /// canonical JSON 子集错误
     Canonical(CanonicalJsonError),
-    /// schema / 字段错误
+    /// schema / 字段错误（detail 仅类型/长度元数据）
     Schema { code: String, detail: String },
     /// 资源上限
     Limit {
@@ -300,6 +300,41 @@ pub enum SnapshotError {
     HashMismatch,
     /// 引用完整性
     Referential { code: String, detail: String },
+}
+
+impl fmt::Debug for SnapshotError {
+    /// 诊断 Debug：code/counts/sizes only，不打印可能嵌值的原文。
+    ///
+    /// Business Logic: 日志 `{:?}` 也不得泄露 secret。
+    /// Code Logic: 手写 Debug，Canonical 委托其自身安全 Debug。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Canonical(e) => write!(f, "Canonical({e:?})"),
+            Self::Schema { code, detail } => {
+                write!(
+                    f,
+                    "Schema {{ code: {code:?}, detail_len: {} }}",
+                    detail.len()
+                )
+            }
+            Self::Limit {
+                code,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "Limit {{ code: {code:?}, actual: {actual}, limit: {limit} }}"
+            ),
+            Self::HashMismatch => write!(f, "HashMismatch"),
+            Self::Referential { code, detail } => {
+                write!(
+                    f,
+                    "Referential {{ code: {code:?}, detail_len: {} }}",
+                    detail.len()
+                )
+            }
+        }
+    }
 }
 
 impl fmt::Display for SnapshotError {
@@ -339,9 +374,10 @@ impl From<CanonicalJsonError> for SnapshotError {
 /// Business Logic: typed → JSON 的中间层，保证字段名 camelCase。
 /// Code Logic: serde_json::to_value。
 fn envelope_to_value(envelope: &SnapshotEnvelopeV1) -> Result<Value, SnapshotError> {
-    serde_json::to_value(envelope).map_err(|e| SnapshotError::Schema {
+    // 稳定诊断 only：不转发 serde 原文（可能嵌字段值）。
+    serde_json::to_value(envelope).map_err(|_| SnapshotError::Schema {
         code: "serialize_failed".into(),
-        detail: e.to_string(),
+        detail: "type=serde_json".into(),
     })
 }
 
@@ -389,7 +425,8 @@ pub fn compute_snapshot_hash(envelope: &SnapshotEnvelopeV1) -> Result<String, Sn
 ///     导入/LAN prepare 必须 fail-closed：format/hash/limits/引用完整性。
 ///
 /// Code Logic（这个函数做什么）:
-///     严格解析（重复 key）→ typed 反序列化 → schema/limits/referential → constant-time hash 比较。
+///     严格解析（重复 key）→ typed 反序列化 → schema/limits/referential →
+///     规范化 hex 后固定 32 字节 digest 的 CT 比较。
 pub fn validate_snapshot(
     json_text: &str,
     limits: &SnapshotLimits,
@@ -413,10 +450,11 @@ pub fn validate_snapshot(
         });
     }
 
+    // 稳定诊断 only：类型名 + 错误分类，永不转发 serde 可能嵌入字段值的原文。
     let envelope: SnapshotEnvelopeV1 =
         serde_json::from_value(value).map_err(|e| SnapshotError::Schema {
             code: "deserialize_failed".into(),
-            detail: e.to_string(),
+            detail: format!("type=serde_json,category={}", classify_serde_error(&e)),
         })?;
 
     validate_envelope_schema(&envelope)?;
@@ -429,6 +467,24 @@ pub fn validate_snapshot(
     }
 
     Ok(envelope)
+}
+
+/// 将 serde 错误归类为稳定短 token（不含 message 原文）。
+///
+/// Business Logic: deserialize_failed 诊断不得回显字段值。
+/// Code Logic: 只看 error 分类/是否 EOF 等，不使用 `e.to_string()` 全文。
+fn classify_serde_error(err: &serde_json::Error) -> &'static str {
+    if err.is_data() {
+        "data"
+    } else if err.is_syntax() {
+        "syntax"
+    } else if err.is_eof() {
+        "eof"
+    } else if err.is_io() {
+        "io"
+    } else {
+        "other"
+    }
 }
 
 /// 校验 format/version/UUID/RFC3339/排序唯一 ID 等 schema。
@@ -504,10 +560,13 @@ fn validate_envelope_schema(envelope: &SnapshotEnvelopeV1) -> Result<(), Snapsho
     Ok(())
 }
 
-/// 校验硬上限（entries / blob / uncompressed）。
+/// 校验硬上限（entries / blob / uncompressed / chunk 配置 ceiling）。
 ///
 /// Business Logic: 超限必须 stable diagnostic（counts/sizes only）。
-/// Code Logic: 计 selection+集合条目与 object sizes。
+/// Code Logic: 计 selection+集合条目与 object sizes；chunk 校验产品配置上限。
+///
+/// 说明：`max_chunk_bytes` 在此 fail-closed 的是 **limits 配置** 的产品天花板
+/// （0 或 > 8 MiB）。实际 LAN payload 分块大小强制仍由 transport Task 3+ 负责。
 fn validate_limits(
     envelope: &SnapshotEnvelopeV1,
     limits: &SnapshotLimits,
@@ -551,15 +610,12 @@ fn validate_limits(
         });
     }
 
-    // chunk limit is a transport constant; expose validation for callers/tests
-    if limits.max_chunk_bytes > DEFAULT_MAX_CHUNK_BYTES {
-        // allow lower test limits; reject only if configured above hard product max?
-        // Product hard max is 8MiB; tests may lower. Only enforce product max ceiling.
-    }
-    if limits.max_chunk_bytes == 0 {
+    // Product chunk ceiling on limits config (tests may lower; never raise above 8 MiB).
+    // Payload chunk size enforcement remains transport Task 3+.
+    if limits.max_chunk_bytes == 0 || limits.max_chunk_bytes > DEFAULT_MAX_CHUNK_BYTES {
         return Err(SnapshotError::Limit {
             code: "chunk_bytes".into(),
-            actual: 0,
+            actual: limits.max_chunk_bytes,
             limit: DEFAULT_MAX_CHUNK_BYTES,
         });
     }
@@ -589,15 +645,25 @@ fn count_entries(envelope: &SnapshotEnvelopeV1) -> u64 {
     n
 }
 
-/// 校验 heads/parents/payload 引用存在。
+/// 校验 heads/parents/payload/lineage/root 引用存在。
 ///
-/// Business Logic: 半截 ancestry 不得通过 validate。
-/// Code Logic: 建 revision/object/asset 集合后查引用。
+/// Business Logic: 半截 ancestry 不得通过 validate；空 lineages + 非空 revisions 也 fail。
+/// Code Logic: 建 revision/object/asset/lineage 集合后查引用（长度-only detail）。
 fn validate_referential_integrity(envelope: &SnapshotEnvelopeV1) -> Result<(), SnapshotError> {
     let asset_ids: HashSet<&str> = envelope.assets.iter().map(|a| a.id.as_str()).collect();
     let lineage_ids: HashSet<&str> = envelope.lineages.iter().map(|l| l.id.as_str()).collect();
     let revision_ids: HashSet<&str> = envelope.revisions.iter().map(|r| r.id.as_str()).collect();
     let object_hashes: HashSet<&str> = envelope.objects.iter().map(|o| o.hash.as_str()).collect();
+
+    // lineage.root_asset_id 必须指向 assets（lineages 非空时逐条检查）。
+    for lineage in &envelope.lineages {
+        if !asset_ids.contains(lineage.root_asset_id.as_str()) {
+            return Err(SnapshotError::Referential {
+                code: "lineage_unknown_root_asset".into(),
+                detail: format!("root_asset_id_len={}", lineage.root_asset_id.len()),
+            });
+        }
+    }
 
     for (asset_id, heads) in &envelope.asset_heads {
         if !asset_ids.contains(asset_id.as_str()) {
@@ -616,9 +682,10 @@ fn validate_referential_integrity(envelope: &SnapshotEnvelopeV1) -> Result<(), S
         }
     }
 
+    // 只要存在 revision，就必须能在 lineages 中解析 asset_lineage_id
+    // （空 lineages + 非空 revisions 一律失败；不再跳过）。
     for rev in &envelope.revisions {
-        if !lineage_ids.is_empty() && !lineage_ids.contains(rev.asset_lineage_id.as_str()) {
-            // lineages 可空（最小 fixture）；非空时要求引用命中
+        if !lineage_ids.contains(rev.asset_lineage_id.as_str()) {
             return Err(SnapshotError::Referential {
                 code: "revision_unknown_lineage".into(),
                 detail: format!("lineage_id_len={}", rev.asset_lineage_id.len()),
@@ -689,7 +756,6 @@ fn validate_referential_integrity(envelope: &SnapshotEnvelopeV1) -> Result<(), S
         }
     }
 
-    let _ = asset_ids;
     Ok(())
 }
 
@@ -787,25 +853,52 @@ fn hex_encode_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// 规范化 hex 后做 constant-time 比较。
+/// 将 64 hex 字符解码为固定 32 字节 digest（非 CT 校验步骤）。
 ///
-/// Business Logic: 避免 hash 比较计时旁路（习惯性安全）。
-/// Code Logic: 小写化后等长 XOR 累加。
+/// Business Logic: 非法 hex/长度错误在比较前 fail-closed，不进入 CT 循环。
+/// Code Logic: 仅接受恰好 64 个 ASCII hex 位；大小写不敏感。
+fn decode_sha256_hex_digest(hex: &str) -> Option<[u8; 32]> {
+    let bytes = hex.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let hi = from_hex_nibble(bytes[i * 2])?;
+        let lo = from_hex_nibble(bytes[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// 单个 hex nibble → 0..=15；非法返回 None。
+fn from_hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 规范化 hex 后对固定 32 字节 digest 做 constant-time 比较。
+///
+/// Business Logic: 避免 snapshot hash 比较的内容相关 early-exit。
+/// Code Logic:
+///     1) 非 CT 预检：两侧分别 decode 为 32 字节（长度/非法 hex → false）；
+///     2) CT 循环：XOR 全部 32 字节无内容 early-exit，再检查 diff==0。
 fn constant_time_hex_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    if a.len() != b.len() {
+    let Some(da) = decode_sha256_hex_digest(a) else {
         return false;
-    }
+    };
+    let Some(db) = decode_sha256_hex_digest(b) else {
+        return false;
+    };
     let mut diff: u8 = 0;
-    for i in 0..a.len() {
-        let aa = a[i].to_ascii_lowercase();
-        let bb = b[i].to_ascii_lowercase();
-        if !aa.is_ascii_hexdigit() || !bb.is_ascii_hexdigit() {
-            return false;
-        }
-        diff |= aa ^ bb;
+    for i in 0..32 {
+        diff |= da[i] ^ db[i];
     }
+    // 无分支归约：diff==0 为真。
     diff == 0
 }
 
@@ -1088,14 +1181,49 @@ mod tests {
         assert!(!err.to_string().contains(SECRET));
     }
 
-    /// Business Logic: chunk limit 常量存在且为 8MiB。
+    /// Business Logic: chunk 配置上限 8MiB 接受；0 与 8MiB+1 fail-closed。
+    ///
+    /// 说明：本测试校验 limits 配置天花板；LAN payload 分块强制仍属 transport Task 3+。
     #[test]
-    fn default_chunk_limit_is_8mib() {
-        let limits = default_snapshot_limits();
-        assert_eq!(limits.max_chunk_bytes, 8 * 1024 * 1024);
-        // boundary style: product max is fixed
+    fn chunk_limit_boundary_on_limits_config() {
+        let env = sample_envelope();
+        let json = envelope_json_for_validate(&env);
+
+        // limit: default 8 MiB accepted
+        let mut limits = default_snapshot_limits();
+        assert_eq!(limits.max_chunk_bytes, DEFAULT_MAX_CHUNK_BYTES);
         assert_eq!(DEFAULT_MAX_CHUNK_BYTES, 8 * 1024 * 1024);
-        assert_eq!(DEFAULT_MAX_CHUNK_BYTES + 1, 8 * 1024 * 1024 + 1);
+        assert!(validate_snapshot(&json, &limits).is_ok());
+
+        // limit+1: product ceiling rejected with stable Limit diagnostic
+        limits.max_chunk_bytes = DEFAULT_MAX_CHUNK_BYTES + 1;
+        let err = validate_snapshot(&json, &limits).unwrap_err();
+        match &err {
+            SnapshotError::Limit {
+                code,
+                actual,
+                limit,
+            } => {
+                assert_eq!(code, "chunk_bytes");
+                assert_eq!(*actual, DEFAULT_MAX_CHUNK_BYTES + 1);
+                assert_eq!(*limit, DEFAULT_MAX_CHUNK_BYTES);
+            }
+            other => panic!("expected Limit chunk_bytes, got {other:?}"),
+        }
+        assert!(!err.to_string().contains(SECRET));
+        assert!(!format!("{err:?}").contains(SECRET));
+
+        // 0 rejected
+        limits.max_chunk_bytes = 0;
+        let err0 = validate_snapshot(&json, &limits).unwrap_err();
+        assert!(matches!(
+            &err0,
+            SnapshotError::Limit {
+                code,
+                actual: 0,
+                limit,
+            } if code == "chunk_bytes" && *limit == DEFAULT_MAX_CHUNK_BYTES
+        ));
     }
 
     /// Business Logic: 未知 parent 引用拒绝。
@@ -1153,42 +1281,118 @@ mod tests {
         ));
     }
 
-    /// Business Logic: secret 不得出现在任何 SnapshotError Display 中。
+    /// Business Logic: secret 不得出现在任何 SnapshotError Display **与** Debug 中。
     #[test]
     fn diagnostics_never_include_plain_fixture_secret() {
         let env = sample_envelope();
         // force multiple failure modes
         let cases = vec![
-            SnapshotError::HashMismatch.to_string(),
+            SnapshotError::HashMismatch,
             SnapshotError::Limit {
                 code: "entries".into(),
                 actual: 100_001,
                 limit: 100_000,
-            }
-            .to_string(),
+            },
             SnapshotError::Schema {
                 code: "format".into(),
                 detail: "expected cc-partner-agent-hub".into(),
-            }
-            .to_string(),
+            },
             SnapshotError::Referential {
                 code: "revision_unknown_parent".into(),
                 detail: "parent_id_len=36".into(),
-            }
-            .to_string(),
+            },
         ];
-        for s in cases {
-            assert!(!s.contains(SECRET), "leaked in {s}");
+        for err in cases {
+            assert!(!err.to_string().contains(SECRET), "Display leaked");
+            assert!(!format!("{err:?}").contains(SECRET), "Debug leaked");
         }
-        // validate failure path
-        let mut bad = env;
+
+        // hash mismatch path (Display + Debug, no escape hatch)
+        let mut bad = env.clone();
         bad.snapshot_hash = "b".repeat(64);
         let json = envelope_json_for_validate(&bad);
         let err = validate_snapshot(&json, &default_snapshot_limits()).unwrap_err();
         assert!(!err.to_string().contains(SECRET));
+        assert!(!format!("{err:?}").contains(SECRET));
+
+        // secret-shaped wrong-type field → deserialize_failed 不得回显值
+        let mut secret_field = serde_json::to_value(&env).expect("to_value");
+        if let Value::Object(map) = &mut secret_field {
+            map.insert("formatVersion".into(), Value::String(SECRET.to_string()));
+        }
+        let raw = canonicalize_value(&secret_field).expect("canon");
+        let raw_text = String::from_utf8(raw).expect("utf8");
+        assert!(raw_text.contains(SECRET), "fixture must embed secret");
+        let err = validate_snapshot(&raw_text, &default_snapshot_limits()).unwrap_err();
+        assert!(matches!(&err, SnapshotError::Schema { code, .. } if code == "deserialize_failed"));
         assert!(
-            !format!("{err:?}").contains(SECRET) || format!("{err:?}").contains("HashMismatch")
+            !err.to_string().contains(SECRET),
+            "Display leaked secret: {}",
+            err
         );
+        assert!(
+            !format!("{err:?}").contains(SECRET),
+            "Debug leaked secret: {:?}",
+            err
+        );
+
+        // secret-shaped duplicate key path
+        let dup = format!(r#"{{"{SECRET}":1,"{SECRET}":2,"format":"cc-partner-agent-hub"}}"#);
+        let err = validate_snapshot(&dup, &default_snapshot_limits()).unwrap_err();
+        assert!(!err.to_string().contains(SECRET));
+        assert!(!format!("{err:?}").contains(SECRET));
+    }
+
+    /// Business Logic: 未知 lineage id 拒绝（含空 lineages + 非空 revisions）。
+    #[test]
+    fn unknown_lineage_id_rejected() {
+        let mut env = sample_envelope();
+        env.revisions[0].asset_lineage_id = "01900000-0000-7000-8000-0000000000ff".into();
+        env.snapshot_hash = compute_snapshot_hash(&env).unwrap();
+        let json = envelope_json_for_validate(&env);
+        let err = validate_snapshot(&json, &default_snapshot_limits()).unwrap_err();
+        assert!(
+            matches!(&err, SnapshotError::Referential { code, .. } if code == "revision_unknown_lineage")
+        );
+        assert!(!err.to_string().contains(SECRET));
+        assert!(!format!("{err:?}").contains(SECRET));
+
+        // empty lineages + non-empty revisions must fail
+        let mut empty_lin = sample_envelope();
+        empty_lin.lineages.clear();
+        empty_lin.snapshot_hash = compute_snapshot_hash(&empty_lin).unwrap();
+        let json = envelope_json_for_validate(&empty_lin);
+        let err = validate_snapshot(&json, &default_snapshot_limits()).unwrap_err();
+        assert!(
+            matches!(&err, SnapshotError::Referential { code, .. } if code == "revision_unknown_lineage")
+        );
+    }
+
+    /// Business Logic: lineage.root_asset_id 悬空拒绝。
+    #[test]
+    fn dangling_root_asset_id_rejected() {
+        let mut env = sample_envelope();
+        env.lineages[0].root_asset_id = "01900000-0000-7000-8000-0000000000ee".into();
+        env.snapshot_hash = compute_snapshot_hash(&env).unwrap();
+        let json = envelope_json_for_validate(&env);
+        let err = validate_snapshot(&json, &default_snapshot_limits()).unwrap_err();
+        assert!(
+            matches!(&err, SnapshotError::Referential { code, .. } if code == "lineage_unknown_root_asset")
+        );
+        assert!(!err.to_string().contains(SECRET));
+        assert!(!format!("{err:?}").contains(SECRET));
+    }
+
+    /// Business Logic: CT hex 比较在合法 digest 上等价，非法 hex 不走 CT 即 false。
+    #[test]
+    fn constant_time_hex_eq_accepts_equal_digests_only() {
+        let a = "a".repeat(64);
+        let b = "A".repeat(64);
+        assert!(constant_time_hex_eq(&a, &b));
+        let c = "b".repeat(64);
+        assert!(!constant_time_hex_eq(&a, &c));
+        assert!(!constant_time_hex_eq(&a, "zz"));
+        assert!(!constant_time_hex_eq("not-hex", &a));
     }
 
     /// Business Logic: asset_heads key 排序进入 hash。
