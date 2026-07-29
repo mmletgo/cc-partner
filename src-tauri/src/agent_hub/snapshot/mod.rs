@@ -1,15 +1,23 @@
-//! agent_hub/snapshot — SnapshotEnvelope v1 与 canonical JSON 子集
+//! agent_hub/snapshot — SnapshotEnvelope v1、builder 与可读 archive
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     LAN push 与 Git device lane 共用同一可验证 SnapshotEnvelope v1；
-//!     在 builder/archive/importer 之前先固定 envelope 形状、canonical hash 与硬上限。
+//!     builder 从 Hub DAG/CAS 导出确定性 envelope；archive 展开/重打包保持字节稳定。
 //!
 //! Code Logic（这个模块做什么）:
-//!     导出 `canonical_json`（RFC8785 兼容子集）与 `envelope`（typed envelope + validate/hash）。
+//!     导出 `canonical_json`、`envelope`、`builder`、`archive` 公共 API；
+//!     builder 经单读事务冻结身份；build/repack 共用 selection_state_hash 公式。
 
+pub mod archive;
+pub mod builder;
 pub mod canonical_json;
 pub mod envelope;
 
+pub use archive::{expand_readable_archive, repack_readable_archive, ExpandedSnapshot};
+pub use builder::{
+    build_snapshot, hash_selection, hash_selection_state, BuiltSnapshot, SnapshotSelectionMode,
+    SnapshotSelectionRequest,
+};
 pub use canonical_json::{
     canonicalize_value, parse_json_value_strict, CanonicalJsonError, MAX_SAFE_INTEGER,
 };

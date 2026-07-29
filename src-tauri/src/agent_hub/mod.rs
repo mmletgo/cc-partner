@@ -24,6 +24,7 @@
 //!     Gate B Task 6：`packages/adoption` legacy standalone 纳管（激活-before-removal，无双发现）。
 //!     Gate B Task 7：target presence/enabled/detach/delete 语义与聚合状态。
 //!     Gate C Task 1：`snapshot` SnapshotEnvelope v1 + RFC8785 兼容 canonical JSON 子集。
+//!     Gate C Task 2：`snapshot/builder` + `snapshot/archive` 确定性导出与可读 archive 展开/重打包。
 
 pub mod assets;
 pub mod autostart;
