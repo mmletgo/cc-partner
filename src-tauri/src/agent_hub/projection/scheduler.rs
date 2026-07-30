@@ -7,10 +7,8 @@
 //!     ProjectionScheduler::enqueue_projection / run_ready_jobs / recover_on_startup；
 //!     未 opt-in 项目过滤；canonical/target conflict 冻结；atomic write + materialization commit。
 
-use crate::agent_hub::models::{
-    DesiredPresence, MaterializationStatus, NewMaterialization, NewProjectionJob, ProjectionJob,
-    ProjectionJobState, ProjectionPayloadKind, RevisionId,
-};
+use crate::agent_hub::models::{DesiredPresence, MaterializationStatus, NewMaterialization, NewProjectionJob, ProjectionJob,
+    ProjectionJobState, ProjectionPayloadKind, RevisionId, AgentTarget};
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::projection::atomic_writer::{
     AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest, FileWriteRequest,
@@ -251,6 +249,9 @@ pub struct ProjectionScheduler {
     inject_fault: Mutex<Option<ProjectionWriteFault>>,
     #[cfg(any(test, debug_assertions))]
     inject_db_commit_fail: Mutex<bool>,
+    /// test/debug: 跳过 support manifest RenderInstruction 门闸（生产恒 false）
+    #[cfg(any(test, debug_assertions))]
+    inject_support_bypass: Mutex<bool>,
 }
 
 impl ProjectionScheduler {
@@ -271,6 +272,8 @@ impl ProjectionScheduler {
             inject_fault: Mutex::new(None),
             #[cfg(any(test, debug_assertions))]
             inject_db_commit_fail: Mutex::new(false),
+            #[cfg(any(test, debug_assertions))]
+            inject_support_bypass: Mutex::new(false),
         }
     }
 
@@ -292,6 +295,15 @@ impl ProjectionScheduler {
     #[cfg(any(test, debug_assertions))]
     pub async fn inject_db_commit_failure(&self, enabled: bool) {
         *self.inject_db_commit_fail.lock().await = enabled;
+    }
+
+    /// test/debug: 允许在 manifest 仍 block renderInstruction 时验证 writer/CAS 路径。
+    ///
+    /// Business Logic: 生产 fail-closed；单测需隔离 atomic writer 行为。
+    /// Code Logic: 置 inject_support_bypass。
+    #[cfg(any(test, debug_assertions))]
+    pub async fn inject_support_bypass(&self, enabled: bool) {
+        *self.inject_support_bypass.lock().await = enabled;
     }
 
     /// 入队 projection job。
@@ -593,6 +605,37 @@ impl ProjectionScheduler {
         // checkout blocked：预存 AGENTS.md 冲突时禁止 Present 写覆盖
         if job.desired_presence == DesiredPresence::Present {
             if let Some(reason) = self.checkout_write_block_reason(&job).await? {
+                self.repo
+                    .update_projection_job_state(
+                        &job.id,
+                        ProjectionJobState::Blocked,
+                        job.attempt,
+                        Some(&reason),
+                        None,
+                        None,
+                    )
+                    .await?;
+                self.repo
+                    .upsert_materialization(NewMaterialization {
+                        asset_id: job.asset_id.clone(),
+                        target: job.target,
+                        target_binding_id: job.target_binding_id.clone(),
+                        native_path: Some(job.target_path.clone()),
+                        last_projected_revision_id: None,
+                        rendered_hash: Some(job.rendered_hash.clone()),
+                        observed_external_hash: current_target_hash(
+                            Path::new(&job.target_path),
+                            job.payload_kind,
+                            job.managed_paths_json.as_deref(),
+                        )?,
+                        status: MaterializationStatus::Blocked,
+                        last_error: Some(reason),
+                    })
+                    .await?;
+                return Ok(JobExecResult::Skipped);
+            }
+            // 写盘前再次 fail-closed 校验 support manifest（入队后环境可能变化）
+            if let Some(reason) = self.support_render_block_reason(job.target).await {
                 self.repo
                     .update_projection_job_state(
                         &job.id,
@@ -1004,6 +1047,88 @@ impl ProjectionScheduler {
     ///
     /// Code Logic（这个函数做什么）:
     ///     get_target_binding → checkout_binding_id → get_checkout_binding；status=="blocked" → Some(token)。
+        /// 写盘前评估 RenderInstruction support（fail-closed）。
+    ///
+    /// Business Logic: 入队后 CLI 版本/manifest 变化仍不得写盘。
+    /// Code Logic: fresh probe + builtin manifest evaluate。
+    async fn support_render_block_reason(&self, target: AgentTarget) -> Option<String> {
+        #[cfg(any(test, debug_assertions))]
+        {
+            if *self.inject_support_bypass.lock().await {
+                return None;
+            }
+        }
+        use crate::agent_hub::support::{
+            builtin_support_manifest, evaluate_target_support, CapabilitySupport,
+            RuntimeProbeSnapshot, TargetCapability,
+        };
+        use crate::agent_hub::targets::{
+            AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter,
+            OpenCodeInstructionAdapter, TargetEnvironment,
+        };
+        // 与 projection_ops 一致：注入当前 process 的 home/vars/PATH，不改真实 env
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let mut vars = std::collections::BTreeMap::new();
+        for key in [
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "OPENCODE_CONFIG_DIR",
+            "OPENCODE_CONFIG",
+            "XDG_CONFIG_HOME",
+        ] {
+            if let Ok(v) = std::env::var(key) {
+                if !v.trim().is_empty() {
+                    vars.insert(key.to_string(), v);
+                }
+            }
+        }
+        let path_entries = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default();
+        let env = TargetEnvironment {
+            home,
+            vars,
+            path_entries,
+        };
+        let probe = match target {
+            AgentTarget::Claude => ClaudeInstructionAdapter.probe(&env).ok(),
+            AgentTarget::Codex => CodexInstructionAdapter.probe(&env).ok(),
+            AgentTarget::OpenCode => OpenCodeInstructionAdapter.probe(&env).ok(),
+        };
+        let probe = match probe {
+            Some(p) => p,
+            None => {
+                return Some("support_probe_failed".into());
+            }
+        };
+        let snap = RuntimeProbeSnapshot {
+            target: probe.target,
+            executable: probe.executable.clone(),
+            version: probe.version.clone(),
+            config_root: probe.config_root.clone(),
+            fingerprint: probe.fingerprint.clone(),
+            help_fingerprint: None,
+        };
+        let eval = match builtin_support_manifest() {
+            Ok(m) => evaluate_target_support(&m, &snap),
+            Err(_) => return Some("support_manifest_unavailable".into()),
+        };
+        match eval.capability(TargetCapability::RenderInstruction) {
+            CapabilitySupport::Supported | CapabilitySupport::SupportedAfterRestart
+                if eval.write_allowed =>
+            {
+                None
+            }
+            CapabilitySupport::Blocked => Some(
+                eval.reasons
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "render_instruction_blocked".into()),
+            ),
+            other => Some(format!("render_instruction_not_writable:{other:?}")),
+        }
+    }
+
     async fn checkout_write_block_reason(
         &self,
         job: &ProjectionJob,
@@ -1130,6 +1255,8 @@ mod tests {
         let repo = AgentHubRepo::new(pool);
         let store = ObjectStore::open(dir.path().join("objects")).unwrap();
         let sched = ProjectionScheduler::new(repo.clone(), store);
+        // 单测隔离 atomic writer / job 状态机；生产路径仍 fail-closed support manifest
+        sched.inject_support_bypass(true).await;
         (sched, dir, repo)
     }
 

@@ -16,7 +16,14 @@ use crate::agent_hub::models::{
 };
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::projection::{ProjectionRequest, ProjectionScheduler};
-use crate::agent_hub::targets::{InstructionRenderContext, TargetEnvironment, TargetPathResolver};
+use crate::agent_hub::support::{
+    builtin_support_manifest, evaluate_target_support, CapabilitySupport, RuntimeProbeSnapshot,
+    TargetCapability,
+};
+use crate::agent_hub::targets::{
+    ClaudeInstructionAdapter, CodexInstructionAdapter, OpenCodeInstructionAdapter, AssetAdapter,
+    InstructionRenderContext, TargetEnvironment, TargetPathResolver, TargetProbe,
+};
 use crate::config_runtime::update_config_transactionally;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -301,6 +308,24 @@ async fn schedule_one_binding(
                 return Ok(false);
             }
         }
+        // support manifest fail-closed：renderInstruction Blocked/ReadOnly 不得入队写盘 job
+        if let Some(reason) = render_instruction_block_reason(binding.target, env).await {
+            tracing::warn!(
+                asset_id = %asset.id,
+                target = %binding.target.as_str(),
+                reason = %reason,
+                "agent_hub skip Present projection: support manifest blocks renderInstruction"
+            );
+            // 持久化 materialization blocked 状态（Attention 可投影），不创建可执行 job
+            let _ = persist_support_blocked_materialization(
+                state,
+                asset,
+                binding,
+                &reason,
+            )
+            .await;
+            return Ok(false);
+        }
     }
 
     let target_path =
@@ -577,5 +602,146 @@ fn current_target_environment() -> TargetEnvironment {
         home,
         vars,
         path_entries,
+    }
+}
+
+/// 评估 target 是否允许 RenderInstruction 写能力。
+///
+/// Business Logic: Spec §9.7 fail-closed；blocked/read-only 不得写 CLI 文件。
+/// Code Logic: fresh probe + builtin_support_manifest + evaluate_target_support。
+async fn render_instruction_block_reason(
+    target: AgentTarget,
+    env: &TargetEnvironment,
+) -> Option<String> {
+    let probe = probe_target_for_support(target, env);
+    let snap = RuntimeProbeSnapshot {
+        target: probe.target,
+        executable: probe.executable.clone(),
+        version: probe.version.clone(),
+        config_root: probe.config_root.clone(),
+        fingerprint: probe.fingerprint.clone(),
+        help_fingerprint: None,
+    };
+    let eval = match builtin_support_manifest() {
+        Ok(m) => evaluate_target_support(&m, &snap),
+        Err(_) => {
+            return Some("support_manifest_unavailable".into());
+        }
+    };
+    match eval.capability(TargetCapability::RenderInstruction) {
+        CapabilitySupport::Supported | CapabilitySupport::SupportedAfterRestart => {
+            if eval.write_allowed {
+                None
+            } else {
+                Some(
+                    eval.reasons
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "render_instruction_write_disallowed".into()),
+                )
+            }
+        }
+        CapabilitySupport::Blocked => Some(
+            eval.reasons
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "render_instruction_blocked".into()),
+        ),
+        CapabilitySupport::ReadOnly => Some("render_instruction_read_only".into()),
+        CapabilitySupport::ActivationRequired => Some("render_instruction_activation_required".into()),
+    }
+}
+
+fn probe_target_for_support(
+    target: AgentTarget,
+    env: &TargetEnvironment,
+) -> TargetProbe {
+    // 复用 targets adapter probe；失败则 version 空 → evaluate_target_support fail-closed
+    let homes = TargetPathResolver::resolve_all(env);
+    match target {
+        AgentTarget::Claude => ClaudeInstructionAdapter
+            .probe(env)
+            .unwrap_or(TargetProbe {
+                target,
+                executable: None,
+                version: None,
+                config_root: homes.claude.config_root,
+                support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+                fingerprint: String::new(),
+            }),
+        AgentTarget::Codex => CodexInstructionAdapter
+            .probe(env)
+            .unwrap_or(TargetProbe {
+                target,
+                executable: None,
+                version: None,
+                config_root: homes.codex.config_root,
+                support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+                fingerprint: String::new(),
+            }),
+        AgentTarget::OpenCode => OpenCodeInstructionAdapter
+            .probe(env)
+            .unwrap_or(TargetProbe {
+                target,
+                executable: None,
+                version: None,
+                config_root: homes.opencode.config_root,
+                support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+                fingerprint: String::new(),
+            }),
+    }
+}
+
+/// 将 support blocked 持久化为 materialization blocked（不入可执行 job 队列）。
+async fn persist_support_blocked_materialization(
+    state: &AppState,
+    asset: &LogicalAsset,
+    binding: &TargetBinding,
+    reason: &str,
+) -> Result<(), AppError> {
+    use crate::agent_hub::models::{MaterializationStatus, NewMaterialization};
+    if binding.id.is_empty() {
+        return Ok(());
+    }
+    state
+        .agent_hub_repo
+        .upsert_materialization(NewMaterialization {
+            asset_id: asset.id.clone(),
+            target: binding.target,
+            target_binding_id: binding.id.clone(),
+            native_path: None,
+            last_projected_revision_id: asset.current_revision_id.clone(),
+            rendered_hash: None,
+            observed_external_hash: None,
+            status: MaterializationStatus::Blocked,
+            last_error: Some(format!("support_blocked:{reason}")),
+        })
+        .await?;
+    Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_hub::models::AgentTarget;
+    use crate::agent_hub::targets::TargetEnvironment;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    /// Business Logic: 生产 manifest 将 renderInstruction 标 blocked 时不得认为可写。
+    /// Code Logic: 空 version probe + builtin manifest → Some(reason)。
+    #[tokio::test]
+    async fn render_instruction_block_reason_blocks_when_manifest_blocked() {
+        let env = TargetEnvironment {
+            home: PathBuf::from("/tmp"),
+            vars: BTreeMap::new(),
+            path_entries: vec![],
+        };
+        let reason = render_instruction_block_reason(AgentTarget::Claude, &env).await;
+        assert!(
+            reason.is_some(),
+            "expected blocked/read-only for uncertified renderInstruction"
+        );
     }
 }
