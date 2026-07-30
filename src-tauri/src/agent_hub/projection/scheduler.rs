@@ -7,8 +7,10 @@
 //!     ProjectionScheduler::enqueue_projection / run_ready_jobs / recover_on_startup；
 //!     未 opt-in 项目过滤；canonical/target conflict 冻结；atomic write + materialization commit。
 
-use crate::agent_hub::models::{DesiredPresence, MaterializationStatus, NewMaterialization, NewProjectionJob, ProjectionJob,
-    ProjectionJobState, ProjectionPayloadKind, RevisionId, AgentTarget};
+use crate::agent_hub::models::{
+    AgentTarget, DesiredPresence, MaterializationStatus, NewMaterialization, NewProjectionJob,
+    ProjectionJob, ProjectionJobState, ProjectionPayloadKind, RevisionId,
+};
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::projection::atomic_writer::{
     AtomicProjectionWriter, AtomicWriteOutcome, DirectoryWriteRequest, FileWriteRequest,
@@ -1047,7 +1049,7 @@ impl ProjectionScheduler {
     ///
     /// Code Logic（这个函数做什么）:
     ///     get_target_binding → checkout_binding_id → get_checkout_binding；status=="blocked" → Some(token)。
-        /// 写盘前评估 RenderInstruction support（fail-closed）。
+    /// 写盘前评估 RenderInstruction support（fail-closed）。
     ///
     /// Business Logic: 入队后 CLI 版本/manifest 变化仍不得写盘。
     /// Code Logic: fresh probe + builtin manifest evaluate。
