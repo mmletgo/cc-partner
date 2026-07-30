@@ -301,8 +301,8 @@ pub async fn migrate_user_claude_md_state_with(
 ///     **legacy vector_clock 永不裁决 Hub 冲突**（Hub 以 revision DAG 为权威）。
 ///
 /// Code Logic（这个函数做什么）:
-///     解析用户 CLAUDE.md 路径 → 写文件（best-effort 建目录）→ content 与 DB 相等则文件已写后 no-op DB；
-///     否则 upsert content/updated_at/device_id + `increment(device_id)`。
+///     仅 upsert legacy `claude_md` 摘要行（content/updated_at/device_id/vc）；
+///     **不**写磁盘目标文件（projector-only）。内容未变则 no-op。
 pub async fn dual_write_legacy_claude_md_summary(
     state: &AppState,
     content: &str,
@@ -318,17 +318,17 @@ pub async fn dual_write_legacy_claude_md_summary(
 /// Dual-write legacy 摘要（可注入 repo）。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     单测与生产共用摘要 upsert 语义；同时写磁盘文件防止 reconcile 回滚 Hub。
+///     单测与生产共用摘要 upsert 语义；Hub-on 仅更新 legacy 表。
 ///
 /// Code Logic（这个函数做什么）:
-///     见 `dual_write_legacy_claude_md_summary`。
+///     见 `dual_write_legacy_claude_md_summary`（不写目标文件）。
 pub async fn dual_write_legacy_claude_md_summary_with(
     claude_md: &ClaudeMdRepo,
     device_id: &str,
     content: &str,
 ) -> Result<(), AppError> {
-    // 先写文件：与 DB 对齐，阻断 file-wins 用旧正文覆盖 Hub 新摘要
-    write_user_claude_md_file(content)?;
+    // Hub-on 合同：legacy dual-write **仅**更新摘要表；目标文件只允许经 binding/support 检查的 projector 写入。
+    // 禁止在此路径 write ~/.claude/CLAUDE.md（会绕过 Absent/blocked render 门闸）。
     let existing = claude_md.get().await?;
     if let Some(row) = existing.as_ref() {
         if row.content == content {
@@ -377,6 +377,8 @@ pub fn user_claude_md_file_path() -> Result<std::path::PathBuf, AppError> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     ensure parent dir → 写 sibling temp → rename 覆盖（失败回退 fs::write）。
+#[allow(dead_code)] // projector / hub-off dual-write paths may re-enable explicit file write
+#[allow(dead_code)] // projector may re-enable explicit file write
 fn write_user_claude_md_file(content: &str) -> Result<(), AppError> {
     let path = user_claude_md_file_path()?;
     if let Some(parent) = path.parent() {
@@ -1375,23 +1377,22 @@ mod tests {
         assert!(claude.desired_enabled);
     }
 
-    /// Business Logic: dual-write 写文件后，文件内容与摘要一致，不会被旧文件回滚。
-    /// Code Logic: dual_write content B 后 user path 文件内容为 B。
+    /// Business Logic: hub-on dual-write 只更新 legacy 摘要表，不得绕过 projector 写目标文件。
+    /// Code Logic: dual_write 后 DB=content，磁盘文件保持旧值。
     #[tokio::test]
-    async fn dual_write_also_writes_user_claude_file() {
+    async fn dual_write_updates_summary_table_without_target_file() {
         let (_agent_hub, claude_md, _) = setup_repos().await;
         let tmp = TempDir::new().unwrap();
         let claude_home = tmp.path().join(".claude");
         fs::create_dir_all(&claude_home).unwrap();
         let file = claude_home.join("CLAUDE.md");
         fs::write(&file, "old A\n").unwrap();
-        // 通过环境变量指向临时 CLAUDE_CONFIG_DIR
         std::env::set_var("CLAUDE_CONFIG_DIR", claude_home.to_string_lossy().as_ref());
         dual_write_legacy_claude_md_summary_with(&claude_md, "device-test-1", "new B\n")
             .await
             .unwrap();
         let written = fs::read_to_string(user_claude_md_file_path().unwrap()).unwrap();
-        assert_eq!(written, "new B\n");
+        assert_eq!(written, "old A\n", "dual-write must not write target file");
         let row = claude_md.get().await.unwrap().unwrap();
         assert_eq!(row.content, "new B\n");
         std::env::remove_var("CLAUDE_CONFIG_DIR");

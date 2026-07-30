@@ -148,29 +148,22 @@ async fn claude_md_push_impl(state: &AppState, req: ClaudeMdPushReq) -> Result<b
 ///
 /// Business Logic: Hub 是唯一事实源；N-1 peer 不得绕过 revision/CAS 直接改 CLI 文件。
 /// Code Logic: 幂等 ensure user scope/asset → update_instruction（revision CAS + projection）。
-async fn claude_md_push_via_hub(
-    state: &AppState,
-    req: &ClaudeMdPushReq,
-) -> Result<bool, AppError> {
-    use crate::agent_hub::migration::{
-        USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE,
-    };
-    use crate::agent_hub::models::AssetKind;
+async fn claude_md_push_via_hub(state: &AppState, req: &ClaudeMdPushReq) -> Result<bool, AppError> {
+    use crate::agent_hub::instructions::document::{InstructionBlock, InstructionBlockMode};
+    use crate::agent_hub::migration::{USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE};
+    use crate::agent_hub::models::{AgentTarget, AssetKind};
     use crate::agent_hub::object_store::ObjectStore;
 
-    // 幂等 seed user instruction（不依赖磁盘文件路径时用 data_dir 下空路径 + 现有 DB 内容）
+    // 幂等 seed user instruction
     let data_dir = crate::config::data_dir()?;
     let claude_path = crate::agent_hub::migration::user_claude_md_file_path()
         .unwrap_or_else(|_| data_dir.join("legacy-claude-md-missing"));
-    let _ = crate::agent_hub::migration::migrate_user_claude_md_state(
-        state,
-        &claude_path,
-        &data_dir,
-    )
-    .await
-    .map_err(|e| {
-        AppError::generic(format!("agent_hub_legacy_claude_md_migrate_failed:{e}"))
-    })?;
+    let _ =
+        crate::agent_hub::migration::migrate_user_claude_md_state(state, &claude_path, &data_dir)
+            .await
+            .map_err(|e| {
+                AppError::generic(format!("agent_hub_legacy_claude_md_migrate_failed:{e}"))
+            })?;
 
     let scope_id = state
         .agent_hub_repo
@@ -192,28 +185,73 @@ async fn claude_md_push_via_hub(
             AppError::validation("agent_hub_legacy_claude_md_user_asset_missing".to_string())
         })?;
     let before = asset.current_revision_id.clone();
-    // 确保 ObjectStore 根可用（update_instruction 内部会 open）
     let _ = ObjectStore::open(&data_dir)?;
-    // Ui CAS 要求 expected_revision_id；用当前 head 作为 expected
+
+    // 专用幂等 translator：只更新 Claude targetOnly 内容，保留 Shared/Adapted/其他 target variants。
+    // 禁止 update_instruction(from_shared_markdown) 整篇重建为随机 Shared 块。
+    let (mut doc, _) =
+        crate::agent_hub::service::load_instruction_document_for_legacy(&asset, state).await?;
+    let incoming = req.claude_md.content.as_str();
+    let current_summary = crate::agent_hub::migration::claude_summary_markdown_from_document(&doc);
+    if current_summary == incoming {
+        // 内容未变：no-op（不推进 revision、不写文件）
+        return Ok(false);
+    }
+
+    // 更新或插入 Claude targetOnly 块；不动其他块
+    let mut updated = false;
+    for block in &mut doc.blocks {
+        if block.mode != InstructionBlockMode::TargetOnly {
+            continue;
+        }
+        if let Some(existing) = block.variants.get_mut(&AgentTarget::Claude) {
+            if existing.as_str() != incoming {
+                *existing = incoming.to_string();
+                updated = true;
+            } else {
+                updated = true; // 已是 targetOnly Claude
+            }
+        } else if block.source_target == Some(AgentTarget::Claude) || block.variants.is_empty() {
+            block
+                .variants
+                .insert(AgentTarget::Claude, incoming.to_string());
+            updated = true;
+        }
+    }
+    if !updated {
+        // 无 Claude targetOnly 块：追加一个，保留其余块
+        doc.blocks.push(InstructionBlock::target_only(
+            crate::agent_hub::instructions::document::new_block_id(),
+            AgentTarget::Claude,
+            incoming.to_string(),
+            vec![],
+            false,
+        ));
+    }
+
     let expected = before
         .as_ref()
         .map(|r| r.as_str().to_string())
         .ok_or_else(|| {
             AppError::validation("agent_hub_legacy_claude_md_asset_head_missing".to_string())
         })?;
-    crate::agent_hub::service::AgentHubService::update_instruction(
+    crate::agent_hub::service::persist_instruction_document_for_legacy(
         state,
-        crate::agent_hub::service::UpdateInstructionRequest {
-            asset_id: asset.id.clone(),
-            content_markdown: req.claude_md.content.clone(),
-            expected_revision_id: Some(expected),
-        },
+        &asset,
+        &doc,
+        Some(expected.as_str()),
     )
     .await
     .map_err(|e| {
-        // CAS/canonical 失败必须让请求失败（不得回落直接写旧表）
-        AppError::conflict(format!("agent_hub_legacy_claude_md_hub_mutation_failed:{e}"))
+        AppError::conflict(format!(
+            "agent_hub_legacy_claude_md_hub_mutation_failed:{e}"
+        ))
     })?;
+
+    // Hub-on：仅 dual-write legacy 摘要表；目标文件由 projector 经 binding/support 写入。
+    let summary = crate::agent_hub::migration::claude_summary_markdown_from_document(&doc);
+    let _ = crate::agent_hub::migration::dual_write_legacy_claude_md_summary(state, &summary).await;
+
     let after = state
         .agent_hub_repo
         .get_asset(&asset.id)
