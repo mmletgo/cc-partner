@@ -4,8 +4,8 @@
     {
       "target": "claude",
       "adapterSchemaVersion": 1,
-      "minTestedVersion": "1.0.0",
-      "currentTestedVersion": "1.0.0",
+      "minTestedVersion": null,
+      "currentTestedVersion": null,
       "guardedMajor": 1,
       "executableProbe": {
         "commandNames": [
@@ -36,8 +36,8 @@
     {
       "target": "codex",
       "adapterSchemaVersion": 1,
-      "minTestedVersion": "1.0.0",
-      "currentTestedVersion": "1.0.0",
+      "minTestedVersion": null,
+      "currentTestedVersion": null,
       "guardedMajor": 1,
       "executableProbe": {
         "commandNames": [
@@ -68,8 +68,8 @@
     {
       "target": "opencode",
       "adapterSchemaVersion": 1,
-      "minTestedVersion": "1.0.0",
-      "currentTestedVersion": "1.0.0",
+      "minTestedVersion": null,
+      "currentTestedVersion": null,
       "guardedMajor": 1,
       "executableProbe": {
         "commandNames": [

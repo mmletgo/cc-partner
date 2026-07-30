@@ -21,8 +21,8 @@ use crate::agent_hub::support::{
     TargetCapability,
 };
 use crate::agent_hub::targets::{
-    ClaudeInstructionAdapter, CodexInstructionAdapter, OpenCodeInstructionAdapter, AssetAdapter,
-    InstructionRenderContext, TargetEnvironment, TargetPathResolver, TargetProbe,
+    AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, InstructionRenderContext,
+    OpenCodeInstructionAdapter, TargetEnvironment, TargetPathResolver, TargetProbe,
 };
 use crate::config_runtime::update_config_transactionally;
 use crate::error::AppError;
@@ -317,13 +317,7 @@ async fn schedule_one_binding(
                 "agent_hub skip Present projection: support manifest blocks renderInstruction"
             );
             // 持久化 materialization blocked 状态（Attention 可投影），不创建可执行 job
-            let _ = persist_support_blocked_materialization(
-                state,
-                asset,
-                binding,
-                &reason,
-            )
-            .await;
+            let _ = persist_support_blocked_materialization(state, asset, binding, &reason).await;
             return Ok(false);
         }
     }
@@ -648,37 +642,32 @@ async fn render_instruction_block_reason(
                 .unwrap_or_else(|| "render_instruction_blocked".into()),
         ),
         CapabilitySupport::ReadOnly => Some("render_instruction_read_only".into()),
-        CapabilitySupport::ActivationRequired => Some("render_instruction_activation_required".into()),
+        CapabilitySupport::ActivationRequired => {
+            Some("render_instruction_activation_required".into())
+        }
     }
 }
 
-fn probe_target_for_support(
-    target: AgentTarget,
-    env: &TargetEnvironment,
-) -> TargetProbe {
+fn probe_target_for_support(target: AgentTarget, env: &TargetEnvironment) -> TargetProbe {
     // 复用 targets adapter probe；失败则 version 空 → evaluate_target_support fail-closed
     let homes = TargetPathResolver::resolve_all(env);
     match target {
-        AgentTarget::Claude => ClaudeInstructionAdapter
-            .probe(env)
-            .unwrap_or(TargetProbe {
-                target,
-                executable: None,
-                version: None,
-                config_root: homes.claude.config_root,
-                support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
-                fingerprint: String::new(),
-            }),
-        AgentTarget::Codex => CodexInstructionAdapter
-            .probe(env)
-            .unwrap_or(TargetProbe {
-                target,
-                executable: None,
-                version: None,
-                config_root: homes.codex.config_root,
-                support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
-                fingerprint: String::new(),
-            }),
+        AgentTarget::Claude => ClaudeInstructionAdapter.probe(env).unwrap_or(TargetProbe {
+            target,
+            executable: None,
+            version: None,
+            config_root: homes.claude.config_root,
+            support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+            fingerprint: String::new(),
+        }),
+        AgentTarget::Codex => CodexInstructionAdapter.probe(env).unwrap_or(TargetProbe {
+            target,
+            executable: None,
+            version: None,
+            config_root: homes.codex.config_root,
+            support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+            fingerprint: String::new(),
+        }),
         AgentTarget::OpenCode => OpenCodeInstructionAdapter
             .probe(env)
             .unwrap_or(TargetProbe {
@@ -719,7 +708,6 @@ async fn persist_support_blocked_materialization(
         .await?;
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

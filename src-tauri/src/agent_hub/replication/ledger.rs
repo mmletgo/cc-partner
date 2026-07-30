@@ -375,13 +375,9 @@ impl ReplicationLedger {
     ) -> Result<PushRequestRow, AppError> {
         with_shared_write_lease(&self.gate, async {
             let mut tx = self.pool.begin().await?;
-            let row = mark_committed_on_tx(
-                &mut tx,
-                source_device_id,
-                client_request_id,
-                outcome_json,
-            )
-            .await?;
+            let row =
+                mark_committed_on_tx(&mut tx, source_device_id, client_request_id, outcome_json)
+                    .await?;
             tx.commit().await?;
             Ok(row)
         })
@@ -401,7 +397,6 @@ impl ReplicationLedger {
         let _ = self;
         mark_committed_on_tx(tx, source_device_id, client_request_id, outcome_json).await
     }
-
 
     /// 在已开启事务内：领取 prepared 行（CAS prepared→claiming 语义用 rows 锁）。
     ///
@@ -426,7 +421,9 @@ impl ReplicationLedger {
         .fetch_optional(&mut **tx)
         .await?;
         let Some(row) = row else {
-            return Err(AppError::not_found("agent_hub_push_request_missing".to_string()));
+            return Err(AppError::not_found(
+                "agent_hub_push_request_missing".to_string(),
+            ));
         };
         let parsed = row_to_request(row)?;
         if parsed.selection_hash != selection_hash || parsed.snapshot_hash != snapshot_hash {
@@ -443,7 +440,6 @@ impl ReplicationLedger {
     /// 在已开启事务内把 prepared 标记为 committed 并写 outcome。
     ///
     /// Business Logic: 与 import 同 TX，保证幂等键只产生一次副作用。
-
 
     /// 返回 maintenance gate（与 AgentHubRepo 同 lease 时使用）。
     pub fn gate(&self) -> std::sync::Arc<DatabaseMaintenanceGate> {
@@ -797,5 +793,4 @@ mod tests {
             CommitClaim::Claimed(_) => panic!("must replay after committed"),
         }
     }
-
 }

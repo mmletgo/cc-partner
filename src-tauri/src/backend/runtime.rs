@@ -806,6 +806,22 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                                 tracing::warn!("agent hub abandoned staging GC failed: {e}")
                             }
                         }
+                        match crate::agent_hub::replication::gc_committed_incoming_staging(
+                            &hub_gc_state.agent_hub_repo,
+                            &data_dir,
+                        )
+                        .await
+                        {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(
+                                    "agent hub committed staging GC removed {n} residual dirs"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("agent hub committed staging GC failed: {e}")
+                            }
+                        }
                     }
                 });
             }

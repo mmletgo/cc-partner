@@ -287,6 +287,9 @@ git diff --check
 
 **Program Task 5 residual status (honest; NOT certification-complete):**
 
+> Codex adversarial R2 (2026-07-30) fixed High/Medium code paths (legacy targetOnly, import CAS, LAN outbox/cleanup, plugin fan-out atomicity, standalone refs, git pending OID, support uncertified versions). Residual frontend lint/strict bundle and all Agent Hub L3 IDs remain **NOT CERTIFIED**.
+
+
 > Codex adversarial R1 (2026-07-29) found false “certification complete” language while residual gates remain red. This table is a **residual snapshot**, not a Completion Contract pass. Do **not** claim Program-wide certification until the plan’s original commands all exit 0 under default (including parallel) modes and every Agent Hub L3 ID is inventoried with real-device evidence.
 
 | Command | Residual result |

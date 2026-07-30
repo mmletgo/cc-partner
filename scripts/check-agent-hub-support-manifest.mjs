@@ -241,19 +241,25 @@ export function validateSupportManifest(manifest, options = {}) {
       const evidence = Array.isArray(record.evidenceIds)
         ? record.evidenceIds.map((x) => String(x).trim()).filter(Boolean)
         : [];
+      // 无条件校验 evidence ID（即使 capability 为 blocked）：防虚假 inventory / 未来误开写能力
+      if (evidenceIds.size > 0) {
+        for (const id of evidence) {
+          if (!evidenceIds.has(id)) {
+            errors.push(`${target}:evidence_id_missing_in_matrix:${id}`);
+          }
+        }
+      }
+      // gate-d: 非空 min/current 版本必须有 evidence；L3 未证实时应使用 null
+      if (gateD && (!minMissing || !curMissing) && evidence.length === 0) {
+        errors.push(`${target}:version_set_without_evidence`);
+      }
       for (const [cap, level] of Object.entries(caps)) {
         const lvl = String(level);
         if (SUPPORTED_FAMILY.has(lvl)) {
           if (evidence.length === 0) {
             errors.push(`${target}:${cap}:supported_without_evidence`);
-          } else if (evidenceIds.size > 0) {
-            for (const id of evidence) {
-              if (!evidenceIds.has(id)) {
-                errors.push(`${target}:evidence_id_missing_in_matrix:${id}`);
-              }
-            }
           }
-          if (gateB && WRITE_CAPS.has(cap) && evidence.length === 0) {
+          if ((gateB || gateD) && WRITE_CAPS.has(cap) && evidence.length === 0) {
             errors.push(`${target}:${cap}:write_supported_without_evidence`);
           }
         }
@@ -548,7 +554,8 @@ function main() {
     runSelfTest();
     return 0;
   }
-  const gateB = args.includes('--gate-b') || args.includes('--gate-d');
+  // gate-d allows null/uncertified versions until L3; only --gate-b requires exact tested versions.
+  const gateB = args.includes('--gate-b');
   const gateD = args.includes('--gate-d');
   const result = checkRepo(REPO_ROOT, { gateB, gateD });
   if (!result.ok) {
