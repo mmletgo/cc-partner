@@ -12,20 +12,21 @@
 //!     永不调用 `cloud_sync::snapshot::import` / `SnapshotImporter` 导入远端 lane。
 
 use crate::agent_hub::git::lane::{
-    device_lane_rel_path, inventory_agent_hub_device_lanes, replace_device_lane,
+    device_lane_abs_path, device_lane_rel_path, inventory_agent_hub_device_lanes,
+    replace_device_lane,
 };
 use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::snapshot::{
     build_snapshot, expand_readable_archive, SnapshotSelectionMode, SnapshotSelectionRequest,
 };
-use crate::cloud_sync::engine::ensure_repo_public;
+use crate::cloud_sync::engine::{cloud_sync_workdir, ensure_repo_public};
 use crate::cloud_sync::git_cli::{self, PushError};
 use crate::cloud_sync::runtime::{
     run_cloud_sync_exclusive, scheduler_policy, CloudSyncBusyPolicy, CloudSyncTrigger,
 };
 use crate::error::AppError;
 use crate::state::AppState;
-use crate::storage::agent_hub_repo::AgentHubGitExportState;
+use crate::storage::agent_hub_repo::{AgentHubGitExportState, GitExportPendingPhase};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -223,12 +224,20 @@ impl AgentHubGitRuntime {
     /// Business Logic（为什么需要这个函数）:
     ///     崩溃后未 push 成功的 pending_hash / pending_commit_oid 必须在 owner 启动时继续尝试。
     ///     对账 persisted intent、本地 HEAD 与远端 tip，避免无 mark_dirty 时 commit 永久滞留。
+    ///     Codex R6 (R3b Finding #7)：pre_lane_write 崩溃时必须显式记录
+    ///     `export_interrupted_at_pre_lane_write` 并禁止自动清 pending，
+    ///     防止 lane 已被本机其它 export 替换后被静默 reset。
     ///
     /// Code Logic（这个函数做什么）:
     ///     读 git export state；
-    ///     1) pending_hash 且与 last_pushed 不同 → mark_dirty；
-    ///     2) 有 pending_commit_oid 但无 pending_hash → 仍 mark_dirty（OID 窗口恢复）；
-    ///     3) 无 pending 行但本地 workdir HEAD 领先远端 tip → mark_dirty（无 row 崩溃恢复）。
+    ///     1) pending_hash 且与 last_pushed 不同 → mark_dirty（保留 phase 给重试区分用）；
+    ///     2) phase=pre_lane_write 且 lane 目录已写 → 检测 crash mid-export：
+    ///        记录 last_error=export_interrupted_at_pre_lane_write，mark_dirty，
+    ///        禁止清 phase（让重试从 pre_lane_write 重新走完整 export）；
+    ///     3) phase=pre_lane_write 且 lane 未写 → 安全：phase 已是 pre_lane_write，
+    ///        pending 行覆盖正确，mark_dirty 让重试继续；
+    ///     4) 有 pending_commit_oid 但无 pending_hash → 仍 mark_dirty（OID 窗口恢复）；
+    ///     5) 无 pending 行但本地 workdir HEAD 领先远端 tip → mark_dirty（无 row 崩溃恢复）。
     pub async fn recover_pending(&self, state: &AppState) -> Result<(), AppError> {
         let row = state
             .agent_hub_repo
@@ -250,6 +259,48 @@ impl AgentHubGitRuntime {
                     .as_ref()
                     .is_some_and(|h| h == pending);
                 if !already {
+                    // Codex R6: pre_lane_write 阶段 lane 目录不应该被改；
+                    // 检测到 lane 已写但 phase 还是 pre_lane_write 时，说明
+                    // 上次 export 在 replace 之后、phase 升级之前崩溃。禁止
+                    // 自动清掉 pending intent（会丢失"export 中"事实），改写
+                    // last_error 让下次重试以 pre_lane_write 重新走。
+                    if row.pending_phase == Some(GitExportPendingPhase::PreLaneWrite) {
+                        match self.detect_lane_already_written(state) {
+                            Ok(true) => {
+                                tracing::warn!(
+                                    device_id = %state.device_id,
+                                    "agent_hub_git: recover detected crash mid-export at pre_lane_write; keep pending intent + last_error"
+                                );
+                                let mut r = row.clone();
+                                r.last_error =
+                                    Some("export_interrupted_at_pre_lane_write".to_string());
+                                // 不改 pending_phase；让重试以 pre_lane_write 重新 export
+                                if let Err(e) = self.persist_export_state(state, &r).await {
+                                    tracing::error!(
+                                        error = %e,
+                                        "agent_hub_git: persist recover pre_lane_write state failed"
+                                    );
+                                }
+                                self.mark_dirty();
+                                return Ok(());
+                            }
+                            Ok(false) => {
+                                // lane 未写 → 行为同普通 pending hash 不同：phase=pre_lane_write 一致
+                                tracing::info!(
+                                    device_id = %state.device_id,
+                                    "agent_hub_git: recover pending export (pre_lane_write; lane not yet written)"
+                                );
+                                self.mark_dirty();
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "agent_hub_git: detect_lane_already_written failed; proceed as normal pending"
+                                );
+                            }
+                        }
+                    }
                     tracing::info!(
                         device_id = %state.device_id,
                         "agent_hub_git: recover pending export"
@@ -274,6 +325,29 @@ impl AgentHubGitRuntime {
             );
         }
         Ok(())
+    }
+
+    /// 检测 workdir 中本机 device lane 目录是否已存在（用于 R6 pre_lane_write 崩溃对账）。
+    ///
+    /// Business Logic: 启动恢复时，若 persisted phase=pre_lane_write 但 lane 目录
+    /// 已存在 → 上次 export 在 replace 之后、phase 升级之前崩溃。
+    /// Code Logic: 经 `cloud_sync_workdir` 取 workdir，解析 lane 绝对路径，`is_dir`。
+    fn detect_lane_already_written(&self, state: &AppState) -> Result<bool, AppError> {
+        let cfg = state
+            .config
+            .read()
+            .map_err(|e| AppError::generic(format!("config_lock: {e}")))?
+            .clone();
+        if cfg.cloud_sync_repo_url.as_deref().unwrap_or("").is_empty() {
+            // 无 repo 配置 → 不存在崩溃窗口
+            return Ok(false);
+        }
+        let workdir = cloud_sync_workdir();
+        if !workdir.is_dir() {
+            return Ok(false);
+        }
+        let lane_abs = device_lane_abs_path(&workdir, state.device_id.as_str())?;
+        Ok(lane_abs.is_dir())
     }
 
     /// 对账本地 HEAD 与远端 tip：本地领先则 mark_dirty。
@@ -420,6 +494,7 @@ impl AgentHubGitRuntime {
                     last_pushed_snapshot_hash: Some(snapshot_hash),
                     pending_snapshot_hash: None,
                     pending_commit_oid: None,
+                    pending_phase: Some(GitExportPendingPhase::Confirmed),
                     attempt_count: 0,
                     next_attempt_at: None,
                     last_error: None,
@@ -442,6 +517,7 @@ impl AgentHubGitRuntime {
                     last_pushed_snapshot_hash: Some(snapshot_hash),
                     pending_snapshot_hash: None,
                     pending_commit_oid: None,
+                    pending_phase: Some(GitExportPendingPhase::Confirmed),
                     attempt_count: 0,
                     next_attempt_at: None,
                     last_error: None,
@@ -458,6 +534,7 @@ impl AgentHubGitRuntime {
                         last_pushed_snapshot_hash: None,
                         pending_snapshot_hash: row.last_exported_snapshot_hash.clone(),
                         pending_commit_oid: None,
+                        pending_phase: Some(GitExportPendingPhase::LaneWritten),
                         attempt_count: 0,
                         next_attempt_at: Some(
                             (self.now_wall() + chrono::Duration::seconds(1)).to_rfc3339(),
@@ -513,6 +590,7 @@ impl AgentHubGitRuntime {
                         last_pushed_snapshot_hash: None,
                         pending_snapshot_hash: None,
                         pending_commit_oid: None,
+                        pending_phase: None,
                         attempt_count: 0,
                         next_attempt_at: None,
                         last_error: None,
@@ -530,6 +608,13 @@ impl AgentHubGitRuntime {
                 let delay = next_retry_delay_secs(attempts);
                 let next_at =
                     (self.now_wall() + chrono::Duration::seconds(delay as i64)).to_rfc3339();
+                // Codex R6: 失败态保留 phase。失败发生在 replace 之前 → 仍是
+                // pre_lane_write；失败发生在 commit/push → lane_written。已
+                // confirmed 状态不应该回退到 pending（recover 会清掉）。
+                let failed_phase = match prev.pending_phase {
+                    Some(p) if p != GitExportPendingPhase::Confirmed => Some(p),
+                    _ => Some(GitExportPendingPhase::LaneWritten),
+                };
                 let pending_row = AgentHubGitExportState {
                     device_id: state.device_id.to_string(),
                     last_exported_snapshot_hash: Some(snapshot_hash.clone()),
@@ -537,6 +622,7 @@ impl AgentHubGitRuntime {
                     pending_snapshot_hash: Some(snapshot_hash),
                     // 保留已产生的本地 commit OID，供无 diff 轮次 push/远端核对
                     pending_commit_oid: prev.pending_commit_oid.clone(),
+                    pending_phase: failed_phase,
                     attempt_count: attempts,
                     next_attempt_at: Some(next_at),
                     last_error: Some(error),
@@ -621,7 +707,9 @@ enum ExportOnceResult {
 /// 已持 CloudSyncRuntime gate：导出本机 lane。
 ///
 /// Business Logic: 永不 import 远端 Agent Hub lane；只 pathspec commit 本 lane。
-/// Code Logic: ensure → fetch/reset → build FullHub → expand staging → replace → commit_path → push。
+/// Code Logic: ensure → fetch/reset → build FullHub → expand staging → **写 durable
+/// pending intent (pre_lane_write) BEFORE replace** → replace → upgrade phase →
+/// commit_path → push。Codex R6 修复 R3b Finding #7。
 async fn export_local_lane_once(
     state: &AppState,
     push_fail_remaining: u64,
@@ -728,6 +816,41 @@ async fn export_local_lane_once(
         });
     }
 
+    // Codex R6 (R3b Finding #7): 持久化 phase=pre_lane_write 的 pending intent
+    // 必须在 replace_device_lane 之前；否则 crash 窗口会留下 lane 已写但无
+    // pending row 的脏状态，recover 不会 mark_dirty。pre_lane_write 阶段 lane
+    // 目录未动，崩溃后可安全从同 OID 重新 export。
+    {
+        let prev = state
+            .agent_hub_repo
+            .get_git_export_state(state.device_id.as_str())
+            .await
+            .ok()
+            .flatten();
+        let pre_row = AgentHubGitExportState {
+            device_id: state.device_id.to_string(),
+            last_exported_snapshot_hash: Some(snapshot_hash.clone()),
+            last_pushed_snapshot_hash: prev
+                .as_ref()
+                .and_then(|p| p.last_pushed_snapshot_hash.clone()),
+            pending_snapshot_hash: Some(snapshot_hash.clone()),
+            pending_commit_oid: prev.as_ref().and_then(|p| p.pending_commit_oid.clone()),
+            pending_phase: Some(GitExportPendingPhase::PreLaneWrite),
+            attempt_count: prev.as_ref().map(|p| p.attempt_count).unwrap_or(0),
+            next_attempt_at: None,
+            last_error: None,
+        };
+        if let Err(e) = state.agent_hub_repo.upsert_git_export_state(&pre_row).await {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Ok(ExportOnceResult::Failed {
+                snapshot_hash,
+                error: format!("pre_lane_write_pending_intent: {e}"),
+                consumed_push_fails: 0,
+                consumed_early_fails: 0,
+            });
+        }
+    }
+
     if let Err(e) = replace_device_lane(&workdir, state.device_id.as_str(), &staging) {
         let _ = std::fs::remove_dir_all(&staging);
         return Ok(ExportOnceResult::Failed {
@@ -747,8 +870,8 @@ async fn export_local_lane_once(
         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
     );
 
-    // Codex R3: commit 前先写 durable pending snapshot intent，关闭 commit 后崩溃窗口。
-    // 即使后续 commit/oid 写入失败，recover 仍能从 pending_snapshot_hash 继续。
+    // Codex R6: lane 已写入，提升 phase 为 lane_written（崩溃后能从 row + lane
+    // 状态对账，决定是"lane 写一半" 还是"待 push"）。
     {
         let prev = state
             .agent_hub_repo
@@ -756,7 +879,7 @@ async fn export_local_lane_once(
             .await
             .ok()
             .flatten();
-        let pre_row = AgentHubGitExportState {
+        let post_lane_row = AgentHubGitExportState {
             device_id: state.device_id.to_string(),
             last_exported_snapshot_hash: Some(snapshot_hash.clone()),
             last_pushed_snapshot_hash: prev
@@ -764,14 +887,19 @@ async fn export_local_lane_once(
                 .and_then(|p| p.last_pushed_snapshot_hash.clone()),
             pending_snapshot_hash: Some(snapshot_hash.clone()),
             pending_commit_oid: prev.as_ref().and_then(|p| p.pending_commit_oid.clone()),
+            pending_phase: Some(GitExportPendingPhase::LaneWritten),
             attempt_count: prev.as_ref().map(|p| p.attempt_count).unwrap_or(0),
             next_attempt_at: None,
             last_error: None,
         };
-        if let Err(e) = state.agent_hub_repo.upsert_git_export_state(&pre_row).await {
+        if let Err(e) = state
+            .agent_hub_repo
+            .upsert_git_export_state(&post_lane_row)
+            .await
+        {
             return Ok(ExportOnceResult::Failed {
                 snapshot_hash,
-                error: format!("pre_commit_pending_intent: {e}"),
+                error: format!("lane_written_pending_intent: {e}"),
                 consumed_push_fails: 0,
                 consumed_early_fails: 0,
             });
@@ -927,6 +1055,7 @@ async fn export_local_lane_once(
                     .and_then(|p| p.last_pushed_snapshot_hash.clone()),
                 pending_snapshot_hash: Some(snapshot_hash.clone()),
                 pending_commit_oid: Some(head_oid.clone()),
+                pending_phase: Some(GitExportPendingPhase::LaneWritten),
                 attempt_count: prev.as_ref().map(|p| p.attempt_count).unwrap_or(0),
                 next_attempt_at: None,
                 last_error: None,
@@ -998,6 +1127,26 @@ async fn has_remote_branch(git: &Path, workdir: &Path) -> bool {
     )
     .await
     .is_ok()
+}
+
+/// 检测 workdir 是否有未提交修改（含本机 device lane 的未 commit 内容）。
+///
+/// Business Logic: Codex R6 (R3b Finding #7) 恢复/重试阶段需要判断"worktree 是否有
+/// 残留未 commit 修改"，决定能否直接重试 push 而不再 commit。覆盖范围：完整
+/// `git status --porcelain`（未跟踪 + 修改 + staged）；仅 lane 目录 dirty 也算 dirty。
+///
+/// Code Logic: 跑 `git status --porcelain`；stdout 非空 → dirty。non-zero 退出或
+/// 解析失败 → Err，调用方按 fail-closed 处理（不假装 clean）。
+async fn device_lane_has_uncommitted_changes(git: &Path, workdir: &Path) -> Result<bool, AppError> {
+    let out = git_cli::run(
+        git,
+        workdir,
+        &["status", "--porcelain"],
+        Duration::from_secs(30),
+    )
+    .await?;
+    // porcelain 模式空输出代表 clean；任何 byte 都代表有 dirty
+    Ok(!out.trim().is_empty())
 }
 
 /// 读取 workdir HEAD OID。
@@ -1430,6 +1579,7 @@ mod tests {
             last_pushed_snapshot_hash: Some(hash.clone()),
             pending_snapshot_hash: None,
             pending_commit_oid: None,
+            pending_phase: Some(GitExportPendingPhase::Confirmed),
             attempt_count: 0,
             next_attempt_at: None,
             last_error: None,
@@ -1499,6 +1649,7 @@ mod tests {
             last_pushed_snapshot_hash: Some("old".into()),
             pending_snapshot_hash: Some("aaa".into()),
             pending_commit_oid: None,
+            pending_phase: Some(GitExportPendingPhase::LaneWritten),
             attempt_count: 2,
             next_attempt_at: Some(
                 (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339(),
@@ -1933,6 +2084,7 @@ mod tests {
             last_pushed_snapshot_hash: None,
             pending_snapshot_hash: Some("snap1".into()),
             pending_commit_oid: Some("abc123deadbeef".into()),
+            pending_phase: Some(GitExportPendingPhase::LaneWritten),
             attempt_count: 1,
             next_attempt_at: None,
             last_error: Some("push: injected".into()),
@@ -1964,6 +2116,7 @@ mod tests {
             last_pushed_snapshot_hash: None,
             pending_snapshot_hash: None,
             pending_commit_oid: Some("deadbeef01".into()),
+            pending_phase: None,
             attempt_count: 0,
             next_attempt_at: None,
             last_error: None,
@@ -1986,5 +2139,223 @@ mod tests {
             .is_some_and(|o| !o.is_empty());
         assert!(!has_pending_hash);
         assert!(has_pending_oid, "oid-only crash window must be recoverable");
+    }
+
+    // ─── Codex R6 RED/GREEN tests (R3b Finding #7) ───────────────────────
+
+    /// 真实 bare remote + workdir 的最小 fixture：用于 R6 export 顺序测试。
+    /// 直接把 `CC_PARTNER_DATA_DIR` 设到 tempdir，并预先 clone 好 workdir；
+    /// mini_git_export_state 的 `file:///tmp/unused-cloud-sync.git` 不存在，无法
+    /// 跑通 ensure_repo。R6 测试需要一个真实可 clone 的 bare remote。
+    async fn mini_git_export_state_with_real_repo(
+        device_id: &str,
+    ) -> (tempfile::TempDir, PathBuf, AppState) {
+        // 1. build AppState first; mini_git_export_state creates its own data dir
+        let (data_tempdir, state) = mini_git_export_state(device_id).await;
+        // data_tempdir.path() = the AppState's data root; cloud_sync_workdir() = data/cloud-sync
+        let data = data_tempdir.path().to_path_buf();
+        // 2. set CC_PARTNER_DATA_DIR so cloud_sync_workdir() resolves to the same dir
+        let _guard = crate::config::install_data_dir_env(Some(data.to_str().unwrap()));
+        // 3. create bare remote OUTSIDE the data dir (workdir shouldn't be inside the bare repo)
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote.git");
+        run_git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        // 4. seed commit on main
+        let seed = root.path().join("seed");
+        run_git(
+            root.path(),
+            &["clone", remote.to_str().unwrap(), seed.to_str().unwrap()],
+        );
+        run_git(&seed, &["config", "user.name", "cc-partner"]);
+        run_git(&seed, &["config", "user.email", "cc-partner@local"]);
+        std::fs::write(seed.join("README.md"), "seed\n").unwrap();
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "seed"]);
+        run_git(&seed, &["branch", "-M", "main"]);
+        run_git(&seed, &["push", "-u", "origin", "main"]);
+        // 5. clone workdir at <data>/cloud-sync (where cloud_sync_workdir() expects it)
+        let workdir = data.join("cloud-sync");
+        if workdir.exists() {
+            let _ = std::fs::remove_dir_all(&workdir);
+        }
+        run_git(
+            root.path(),
+            &["clone", remote.to_str().unwrap(), workdir.to_str().unwrap()],
+        );
+        run_git(&workdir, &["config", "user.name", "cc-partner"]);
+        run_git(&workdir, &["config", "user.email", "cc-partner@local"]);
+
+        // 6. overwrite config in AppState to point at the real bare remote
+        {
+            let cur = state.config.read().unwrap().clone();
+            let mut updated = cur.clone();
+            updated.cloud_sync_repo_url = Some(remote.to_string_lossy().to_string());
+            updated.cloud_sync_branch = Some("main".to_string());
+            let _ = state.config_runtime.swap_memory(updated);
+        }
+
+        // return (data root, workdir path, state)
+        (data_tempdir, workdir, state)
+    }
+
+    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_all(&from, &to)?;
+            } else if ty.is_symlink() {
+                let target = std::fs::read_link(&from)?;
+                std::os::unix::fs::symlink(&target, &to)?;
+            } else {
+                std::fs::copy(&from, &to)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Business Logic: export 推进顺序必须先 durable pre_lane_write 再 replace。
+    /// Code Logic: 注入 push fail → 跑 export → 检查行 phase=lane_written（pre_lane_write
+    /// 已成功升过 phase），证明 pre_lane_write 早于 replace_device_lane 持久化。
+    #[tokio::test]
+    async fn export_persists_pending_intent_before_lane_mutation() {
+        let (_root, _workdir, state) = mini_git_export_state_with_real_repo(DEVICE_A).await;
+        let rt = state.agent_hub_git_runtime.clone();
+        rt.inject_push_failures(1);
+        rt.mark_dirty();
+        rt.advance_ms(EXPORT_DEBOUNCE.as_millis() as u64);
+
+        // 至少一次 export 调用，让 pre_lane_write 落库 + replace 发生 + push 失败
+        let outcome = rt
+            .flush_pending(&state, false, scheduler_policy())
+            .await
+            .unwrap();
+        assert_eq!(outcome, AgentHubGitFlushOutcome::FailedPending);
+
+        let row = state
+            .agent_hub_repo
+            .get_git_export_state(DEVICE_A)
+            .await
+            .unwrap()
+            .unwrap();
+        // 失败发生在 push；phase 仍为 lane_written（pre_lane_write 已升过 phase → replace 已发生）
+        assert_eq!(
+            row.pending_phase,
+            Some(GitExportPendingPhase::LaneWritten),
+            "pending row must show lane_written phase after replace; pre_lane_write must have been persisted before replace_device_lane"
+        );
+        assert!(row.pending_snapshot_hash.is_some());
+        // 不动 confirm 阶段：FailedPending 不会置 confirmed
+        assert!(row.last_pushed_snapshot_hash.is_none());
+    }
+
+    /// Business Logic: pre_lane_write 阶段崩溃后 recover 必须检测到 lane 已写并标
+    /// `export_interrupted_at_pre_lane_write`，禁止自动 reset phase。
+    /// Code Logic: 直接写 pre_lane_write row + 在 workdir 内预创 lane 目录 → recover_pending
+    /// → 断言 dirty=true、last_error 包含 `export_interrupted_at_pre_lane_write`、phase 不变。
+    #[tokio::test]
+    async fn recover_pending_detects_pre_lane_write_crash_and_does_not_reset() {
+        let (_root, _workdir, state) = mini_git_export_state_with_real_repo(DEVICE_A).await;
+        let rt = state.agent_hub_git_runtime.clone();
+        let device_id = state.device_id.as_str().to_string();
+
+        // 预置 workdir 含 lane 目录（模拟"已 replace 完但 phase 还没升" 的崩溃窗口）
+        let workdir = crate::cloud_sync::engine::cloud_sync_workdir();
+        let lane_dir = device_lane_abs_path(&workdir, &device_id).unwrap();
+        std::fs::create_dir_all(&lane_dir).unwrap();
+        // 写入合法 device id 段文件即可
+        let _ = std::fs::write(
+            lane_dir.join("snapshot.json"),
+            r#"{"format":"cc-partner-agent-hub","crash":true}"#,
+        );
+
+        // 写 pre_lane_write pending row（last_pushed 不同 → recover 走 pre_lane_write 分支）
+        state
+            .agent_hub_repo
+            .upsert_git_export_state(&AgentHubGitExportState {
+                device_id: device_id.clone(),
+                last_exported_snapshot_hash: Some("pre-lane-snap".into()),
+                last_pushed_snapshot_hash: Some("old-pushed".into()),
+                pending_snapshot_hash: Some("pre-lane-snap".into()),
+                pending_commit_oid: None,
+                pending_phase: Some(GitExportPendingPhase::PreLaneWrite),
+                attempt_count: 0,
+                next_attempt_at: None,
+                last_error: None,
+            })
+            .await
+            .unwrap();
+
+        rt.recover_pending(&state).await.unwrap();
+
+        let row = state
+            .agent_hub_repo
+            .get_git_export_state(&device_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            rt.dirty.load(Ordering::SeqCst),
+            "recover must mark dirty so retry kicks in"
+        );
+        assert_eq!(
+            row.pending_phase,
+            Some(GitExportPendingPhase::PreLaneWrite),
+            "recover must NOT auto-reset pre_lane_write phase"
+        );
+        assert!(
+            row.last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("export_interrupted_at_pre_lane_write"),
+            "expected crash diagnostic; got last_error={:?}",
+            row.last_error
+        );
+        // pending_hash 必须保留，禁止被自动清空
+        assert_eq!(row.pending_snapshot_hash.as_deref(), Some("pre-lane-snap"));
+
+        // 清理
+        let _ = std::fs::remove_dir_all(&lane_dir);
+    }
+
+    /// Business Logic: device_lane_has_uncommitted_changes 对干净 worktree → false，
+    /// 对 dirty worktree → true。
+    /// Code Logic: 用临时 workdir + git init + git status --porcelain 验证 helper。
+    #[test]
+    fn device_lane_has_uncommitted_changes_returns_true_for_dirty_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workdir = tmp.path();
+        run_git(workdir, &["init", "--initial-branch=main"]);
+        run_git(workdir, &["config", "user.email", "cc-partner@local"]);
+        run_git(workdir, &["config", "user.name", "cc-partner"]);
+        std::fs::write(workdir.join("a.txt"), "v1\n").unwrap();
+        run_git(workdir, &["add", "a.txt"]);
+        run_git(workdir, &["commit", "-m", "init"]);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let git = git_bin();
+        // 干净 worktree
+        let clean = rt.block_on(async { device_lane_has_uncommitted_changes(&git, workdir).await });
+        assert!(matches!(clean, Ok(false)), "clean worktree must be false");
+
+        // 弄脏
+        std::fs::write(workdir.join("a.txt"), "v2\n").unwrap();
+        let dirty = rt.block_on(async { device_lane_has_uncommitted_changes(&git, workdir).await });
+        assert!(matches!(dirty, Ok(true)), "dirty worktree must be true");
+
+        // 暂存也视为 dirty
+        run_git(workdir, &["add", "a.txt"]);
+        let staged =
+            rt.block_on(async { device_lane_has_uncommitted_changes(&git, workdir).await });
+        assert!(
+            matches!(staged, Ok(true)),
+            "worktree with staged changes must be true (staged but uncommitted)"
+        );
     }
 }

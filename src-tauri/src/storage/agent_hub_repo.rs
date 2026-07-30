@@ -3802,7 +3802,7 @@ impl AgentHubRepo {
     ) -> Result<Option<AgentHubGitExportState>, AppError> {
         let row = sqlx::query(
             "SELECT device_id, last_exported_snapshot_hash, last_pushed_snapshot_hash,
-                    pending_snapshot_hash, pending_commit_oid, attempt_count, next_attempt_at, last_error
+                    pending_snapshot_hash, pending_commit_oid, pending_phase, attempt_count, next_attempt_at, last_error
              FROM agent_hub_git_export_state WHERE device_id = ?",
         )
         .bind(device_id)
@@ -3814,6 +3814,10 @@ impl AgentHubRepo {
             last_pushed_snapshot_hash: r.get("last_pushed_snapshot_hash"),
             pending_snapshot_hash: r.get("pending_snapshot_hash"),
             pending_commit_oid: r.get("pending_commit_oid"),
+            pending_phase: r
+                .get::<Option<String>, _>("pending_phase")
+                .as_deref()
+                .and_then(GitExportPendingPhase::from_str_value),
             attempt_count: r.get::<i64, _>("attempt_count") as u32,
             next_attempt_at: r.get("next_attempt_at"),
             last_error: r.get("last_error"),
@@ -3833,17 +3837,19 @@ impl AgentHubRepo {
     ) -> Result<(), AppError> {
         with_shared_write_lease(&self.gate, async {
             let now = chrono::Utc::now().to_rfc3339();
+            let phase_str = state.pending_phase.as_ref().map(|p| p.as_str());
             sqlx::query(
                 "INSERT INTO agent_hub_git_export_state (
                     device_id, last_exported_snapshot_hash, last_pushed_snapshot_hash,
-                    pending_snapshot_hash, pending_commit_oid, attempt_count, next_attempt_at, last_error,
+                    pending_snapshot_hash, pending_commit_oid, pending_phase, attempt_count, next_attempt_at, last_error,
                     created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(device_id) DO UPDATE SET
                     last_exported_snapshot_hash=excluded.last_exported_snapshot_hash,
                     last_pushed_snapshot_hash=excluded.last_pushed_snapshot_hash,
                     pending_snapshot_hash=excluded.pending_snapshot_hash,
                     pending_commit_oid=excluded.pending_commit_oid,
+                    pending_phase=excluded.pending_phase,
                     attempt_count=excluded.attempt_count,
                     next_attempt_at=excluded.next_attempt_at,
                     last_error=excluded.last_error,
@@ -3854,6 +3860,7 @@ impl AgentHubRepo {
             .bind(&state.last_pushed_snapshot_hash)
             .bind(&state.pending_snapshot_hash)
             .bind(&state.pending_commit_oid)
+            .bind(phase_str)
             .bind(state.attempt_count as i64)
             .bind(&state.next_attempt_at)
             .bind(&state.last_error)
@@ -3864,6 +3871,46 @@ impl AgentHubRepo {
             Ok(())
         })
         .await
+    }
+}
+
+/// Git device-lane 导出 pending 阶段。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     R3b Finding #7：pending intent 必须在 lane 写入前先持久化，否则崩溃窗口
+///     会留下 lane 已写但无 pending row 的脏状态。恢复时根据 phase 区分
+///     "未到 lane 写入就崩溃" 与 "lane 已写待 push"。
+///
+/// Code Logic（这个枚举做什么）:
+///     三态：`PreLaneWrite` → `LaneWritten` → `Confirmed`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitExportPendingPhase {
+    /// 已写入 pending intent，但 lane 目录尚未被 replace；崩溃后未污染 worktree。
+    PreLaneWrite,
+    /// lane 目录已写入，但 push 尚未成功（commit 也可能未完成）。
+    LaneWritten,
+    /// push 成功（终态）。
+    Confirmed,
+}
+
+impl GitExportPendingPhase {
+    /// 稳定字符串序列化（小写 snake_case）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreLaneWrite => "pre_lane_write",
+            Self::LaneWritten => "lane_written",
+            Self::Confirmed => "confirmed",
+        }
+    }
+
+    /// 反序列化：未知值保守视为 `None`，避免老库升级时误判阶段。
+    pub fn from_str_value(s: &str) -> Option<Self> {
+        match s {
+            "pre_lane_write" => Some(Self::PreLaneWrite),
+            "lane_written" => Some(Self::LaneWritten),
+            "confirmed" => Some(Self::Confirmed),
+            _ => None,
+        }
     }
 }
 
@@ -3886,6 +3933,8 @@ pub struct AgentHubGitExportState {
     pub pending_snapshot_hash: Option<String>,
     /// 已本地 commit 但尚未确认远端的 commit OID（防永久 pending）
     pub pending_commit_oid: Option<String>,
+    /// pending 阶段（Codex R6）：区分 intent-only / lane-written / confirmed
+    pub pending_phase: Option<GitExportPendingPhase>,
     /// 连续失败次数
     pub attempt_count: u32,
     /// 下次尝试 RFC3339
@@ -4944,6 +4993,7 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
         last_pushed_snapshot_hash TEXT,
         pending_snapshot_hash TEXT,
         pending_commit_oid TEXT,
+        pending_phase TEXT,
         attempt_count INTEGER NOT NULL DEFAULT 0,
         next_attempt_at TEXT,
         last_error TEXT,
@@ -5112,6 +5162,12 @@ async fn migrate_agent_hub_columns(pool: &SqlitePool) -> Result<(), AppError> {
     let git_cols = table_column_names(pool, "agent_hub_git_export_state").await?;
     if !git_cols.iter().any(|c| c == "pending_commit_oid") {
         sqlx::query("ALTER TABLE agent_hub_git_export_state ADD COLUMN pending_commit_oid TEXT")
+            .execute(pool)
+            .await?;
+    }
+    // Codex R6: git pending_phase 列升级（pre_lane_write / lane_written / confirmed）
+    if !git_cols.iter().any(|c| c == "pending_phase") {
+        sqlx::query("ALTER TABLE agent_hub_git_export_state ADD COLUMN pending_phase TEXT")
             .execute(pool)
             .await?;
     }
