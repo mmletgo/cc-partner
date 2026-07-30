@@ -190,7 +190,7 @@ async fn claude_md_push_via_hub(state: &AppState, req: &ClaudeMdPushReq) -> Resu
         })?;
     // seed 后或 CAS miss 后必须 reload head；禁止用陈旧 None expected 覆盖
     let before = asset.current_revision_id.clone();
-    let _ = seed_outcome;
+    tracing::debug!(outcome = ?seed_outcome, "agent_hub legacy CLAUDE.md seed evaluated");
 
     // 专用幂等 translator：只替换 Claude-owned targetOnly 块集合，保留 Shared/Adapted/其他 target。
     // 多 Claude 块时收敛为单块，避免重复 push 把完整 incoming 写进每个块。
