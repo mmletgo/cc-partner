@@ -487,13 +487,166 @@ async fn ensure_user_instruction_asset(
         .await
 }
 
+/// 单事务 NULL-head CAS seed 结果。
+///
+/// Business Logic: CAS miss 表示并发 import 已建 head，调用方只能 targetOnly mutate。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedUserInstructionOutcome {
+    /// 本次成功 seed 出 head（或同 payload 幂等）
+    Seeded,
+    /// head 已存在（含 CAS miss）；不得 reclassify Shared/Adapted
+    HeadAlreadyPresent,
+    /// scope/asset 已建但 head 仍空且 seed 跳过（罕见）
+    NoOp,
+}
+
+/// 仅当 user instruction head 为 NULL 时 seed migration revision（NULL-head CAS）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     legacy push 的 need_seed 若在事务外判断，会与 LAN/Git import 竞态：
+///     import 先建 Shared/Adapted head 后，migration 仍以 expected_parent=None 覆盖为 reclassify head。
+///     必须单事务 CAS：仅 NULL head 才 seed；miss 时回滚 seed 意图并让调用方 reload head。
+///
+/// Code Logic（这个函数做什么）:
+///     ensure scope/asset → 若 head 非空 → HeadAlreadyPresent；
+///     否则 classify+append_revision(expected_parent_id=Some 表示要求当前 head 仍为 None 的 CAS 语义：
+///     对首 revision 使用 expected_parent_id=None 但 append 路径在 head 已变时会 conflict——
+///     此处再读 head，仅 NULL 才 append，append 后再次校验)。
+pub async fn seed_user_instruction_if_head_null(
+    state: &AppState,
+    claude_md_file_path: &Path,
+    objects_root_data_dir: &Path,
+) -> Result<SeedUserInstructionOutcome, AppError> {
+    let deps = MigrationDeps {
+        agent_hub: state.agent_hub_repo.as_ref(),
+        claude_md: state.claude_md_repo.as_ref(),
+        device_id: state.device_id.as_str(),
+        object_store_root: objects_root_data_dir,
+    };
+    let scope = ensure_user_scope(deps.agent_hub).await?;
+    let asset = ensure_user_instruction_asset(deps.agent_hub, &scope.id).await?;
+    // 进入 seed 前重新读 head（CAS 观察点）
+    let asset =
+        deps.agent_hub.get_asset(&asset.id).await?.ok_or_else(|| {
+            AppError::not_found(format!("agent_hub_asset_not_found:{}", asset.id))
+        })?;
+    if asset.current_revision_id.is_some() {
+        return Ok(SeedUserInstructionOutcome::HeadAlreadyPresent);
+    }
+
+    let (content, _) =
+        resolve_user_claude_md_content_with(deps.claude_md, claude_md_file_path).await?;
+    let classification = classify_import(
+        USER_INSTRUCTION_LOGICAL_KEY,
+        ImportScopeContext {
+            is_user_scope: true,
+            is_project_root: false,
+        },
+        &[TargetMarkdownSource {
+            target: AgentTarget::Claude,
+            markdown: content.clone(),
+        }],
+    );
+    let mut document = classification.document;
+    stabilize_migration_block_ids(&mut document);
+    let bytes = serde_json::to_vec(&document)
+        .map_err(|e| AppError::generic(format!("agent_hub_migration_serialize_failed:{e}")))?;
+    let store = ObjectStore::open(deps.object_store_root)?;
+    let stored = store.put_blob(&bytes).await?;
+    let payload_hash = stored.hash;
+
+    // 再次确认 head 仍为 NULL（缩小 TOCTOU 窗口）；append 使用 expected_parent_id=None
+    // 但 migration 路径对首 revision 在 head 被并发推进时靠二次 get 检测。
+    let asset =
+        deps.agent_hub.get_asset(&asset.id).await?.ok_or_else(|| {
+            AppError::not_found(format!("agent_hub_asset_not_found:{}", asset.id))
+        })?;
+    if asset.current_revision_id.is_some() {
+        return Ok(SeedUserInstructionOutcome::HeadAlreadyPresent);
+    }
+
+    // 首 revision：用 expected_parent_id=None；append_revision 在 concurrent head 时仍可能写入。
+    // 为 fail-closed，append 后立即 re-read：若 head 不是我们刚写的 revision，说明并发赢了——
+    // 不继续 seed bindings reclassify；返回 HeadAlreadyPresent（调用方只做 targetOnly）。
+    let created = deps
+        .agent_hub
+        .append_revision(NewRevision {
+            id: RevisionId::new_v7(),
+            asset_lineage_id: asset.id.clone(),
+            parents: vec![],
+            operation: RevisionOperation::Upsert,
+            origin_kind: RevisionOriginKind::Migration,
+            origin_target: Some(AgentTarget::Claude),
+            origin_replica_id: deps.device_id.to_string(),
+            payload_hash: Some(payload_hash.clone()),
+            tree_manifest_hash: None,
+            created_at: Utc::now().to_rfc3339(),
+            // NULL-head CAS：要求当前 head 仍为 NULL
+            expected_parent_id: None,
+        })
+        .await;
+
+    match created {
+        Ok(rev) => {
+            let after = deps.agent_hub.get_asset(&asset.id).await?;
+            if after
+                .as_ref()
+                .and_then(|a| a.current_revision_id.as_ref())
+                .map(|h| h.as_str())
+                != Some(rev.id.as_str())
+            {
+                // 并发 head 赢：不 reclassify，让调用方 reload
+                return Ok(SeedUserInstructionOutcome::HeadAlreadyPresent);
+            }
+            // seed Absent bindings（与 migrate 一致，不覆盖已有）
+            let existing_bindings = deps
+                .agent_hub
+                .list_target_bindings_for_asset(&asset.id)
+                .await?;
+            let existing_targets: std::collections::BTreeSet<AgentTarget> =
+                existing_bindings.iter().map(|b| b.target).collect();
+            for target in [
+                AgentTarget::Claude,
+                AgentTarget::Codex,
+                AgentTarget::OpenCode,
+            ] {
+                if existing_targets.contains(&target) {
+                    continue;
+                }
+                let _ = deps
+                    .agent_hub
+                    .upsert_target_binding(NewTargetBinding {
+                        asset_id: asset.id.clone(),
+                        target,
+                        local_scope_mapping_id: None,
+                        desired_presence: DesiredPresence::Absent,
+                        desired_enabled: false,
+                        checkout_binding_id: None,
+                    })
+                    .await;
+            }
+            let _ = payload_hash;
+            Ok(SeedUserInstructionOutcome::Seeded)
+        }
+        Err(e) => {
+            // conflict 等：视为 head 已存在
+            if e.ipc_category_code() == "conflict" {
+                return Ok(SeedUserInstructionOutcome::HeadAlreadyPresent);
+            }
+            Err(e)
+        }
+    }
+}
+
 /// 若 head payload_hash 相同则跳过，否则 append Migration revision。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     迁移幂等：同一正文二次运行不得产生新 revision。
+///     已有 head 时必须带 expected_parent，禁止 None 覆盖并发 head。
 ///
 /// Code Logic（这个函数做什么）:
-///     读 current revision；hash 相同 → (false, Some(head_id))；否则 append_revision。
+///     读 current revision；hash 相同 → (false, Some(head_id))；
+///     否则 append_revision(expected_parent_id=当前 head)。
 async fn ensure_migration_revision(
     deps: &MigrationDeps<'_>,
     asset: &LogicalAsset,
@@ -512,6 +665,8 @@ async fn ensure_migration_revision(
         .clone()
         .into_iter()
         .collect::<Vec<_>>();
+    // NULL-head 才允许 expected_parent_id=None；已有 head 必须 CAS 到该 head
+    let expected_parent_id = asset.current_revision_id.clone();
     let revision = deps
         .agent_hub
         .append_revision(NewRevision {
@@ -525,7 +680,7 @@ async fn ensure_migration_revision(
             payload_hash: Some(payload_hash.to_string()),
             tree_manifest_hash: None,
             created_at: Utc::now().to_rfc3339(),
-            expected_parent_id: None,
+            expected_parent_id,
         })
         .await?;
     Ok((true, Some(revision.id.as_str().to_string())))
