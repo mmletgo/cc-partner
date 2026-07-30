@@ -897,6 +897,8 @@ async fn apply_target_intent(
             // Plugin package 必须走 ownership-aware 删除，否则 package-owned component 成孤儿。
             if append_canonical_tombstone || fan_out_absent {
                 if asset.kind == AssetKind::Plugin {
+                    // ownership tombstone + 全部 binding→Absent 已在同一 repo TX 完成；
+                    // 此处仅 durable schedule（可恢复，非权威写）。
                     let store = object_store()?;
                     let delete_result = state
                         .agent_hub_repo
@@ -907,44 +909,15 @@ async fn apply_target_intent(
                             state.device_id.as_str().to_string(),
                         )
                         .await?;
-                    // fan-out package + tombstoned components 的 target bindings → Absent
-                    let mut fan_asset_ids = vec![asset.id.clone()];
+                    let mut schedule_ids = vec![asset.id.clone()];
                     for d in &delete_result.component_decisions {
                         if d.decision
                             == crate::agent_hub::plugins::ownership::ComponentDeleteDecision::TombstoneOwned
                         {
-                            fan_asset_ids.push(d.component_asset_id.clone());
+                            schedule_ids.push(d.component_asset_id.clone());
                         }
                     }
-                    for aid in fan_asset_ids {
-                        let all = state
-                            .agent_hub_repo
-                            .list_target_bindings_for_asset(&aid)
-                            .await?;
-                        let fan_out: Vec<NewTargetBinding> = if all.is_empty() {
-                            vec![NewTargetBinding {
-                                asset_id: aid.clone(),
-                                target,
-                                local_scope_mapping_id: None,
-                                checkout_binding_id: None,
-                                desired_presence: DesiredPresence::Absent,
-                                desired_enabled: false,
-                            }]
-                        } else {
-                            all.into_iter()
-                                .map(|b| NewTargetBinding {
-                                    asset_id: aid.clone(),
-                                    target: b.target,
-                                    local_scope_mapping_id: b.local_scope_mapping_id,
-                                    checkout_binding_id: b.checkout_binding_id,
-                                    desired_presence: DesiredPresence::Absent,
-                                    desired_enabled: false,
-                                })
-                                .collect()
-                        };
-                        for binding in fan_out {
-                            state.agent_hub_repo.upsert_target_binding(binding).await?;
-                        }
+                    for aid in schedule_ids {
                         schedule_after_binding_change(state, &aid).await;
                     }
                 } else {
@@ -1929,7 +1902,7 @@ async fn persist_instruction_document(
         })
         .await?;
 
-    // N/N+1 dual-write：仅用户级 CLAUDE.md 指令摘要写回 legacy 表 + 文件；失败不阻断 Hub。
+    // N/N+1 dual-write：仅用户级 CLAUDE.md 指令摘要写回 legacy 表；目标文件由 projector；失败不阻断 Hub。
     // legacy vector_clock 永不裁决 Hub 冲突。
     if let Err(e) = maybe_dual_write_user_claude_md_summary(state, asset, document).await {
         tracing::warn!("agent_hub dual_write legacy claude_md failed: {e}");
@@ -1957,8 +1930,8 @@ async fn persist_instruction_document(
 ///     `~/.claude/CLAUDE.md`，且不得让 legacy VC 参与 Hub merge。
 ///
 /// Code Logic（这个函数做什么）:
-///     scope=User + Instruction + logical_key=CLAUDE.md → Claude 摘要 → dual_write DB
-///     + `write_file_if_changed` 落盘（失败上抛，由调用方 warn）。
+///     scope=User + Instruction + logical_key=CLAUDE.md → Claude 摘要 → dual_write **仅** legacy 表；
+///     不写 `~/.claude/CLAUDE.md`（projector + binding/support 门闸负责目标文件）。
 async fn maybe_dual_write_user_claude_md_summary(
     state: &AppState,
     asset: &LogicalAsset,
@@ -1977,8 +1950,8 @@ async fn maybe_dual_write_user_claude_md_summary(
         return Ok(());
     }
     let summary = crate::agent_hub::migration::claude_summary_markdown_from_document(document);
+    // 仅 legacy 摘要表；目标文件由 schedule_asset_projections → projector 经 binding/support 写入。
     crate::agent_hub::migration::dual_write_legacy_claude_md_summary(state, &summary).await?;
-    crate::sync::claude_md::write_file_if_changed(&summary).await?;
     Ok(())
 }
 
@@ -2050,6 +2023,31 @@ async fn load_instruction_document(
         InstructionDocument::from_shared_markdown(asset.logical_key.clone(), text),
         Some("payload treated as shared markdown".to_string()),
     ))
+}
+
+/// Legacy push 专用：加载 instruction 文档（不记录正文）。
+///
+/// Business Logic: hub-on legacy translator 只更新 Claude targetOnly，需读现有块结构。
+/// Code Logic: 委托 load_instruction_document。
+pub(crate) async fn load_instruction_document_for_legacy(
+    asset: &LogicalAsset,
+    state: &AppState,
+) -> Result<(InstructionDocument, Option<String>), AppError> {
+    load_instruction_document(state, asset).await
+}
+
+/// Legacy push 专用：在 CAS 下持久化 instruction 文档并调度投影。
+///
+/// Business Logic: 不得绕过 revision CAS / projection；目标文件仅 projector 写入。
+/// Code Logic: ensure_expected_revision → persist_instruction_document。
+pub(crate) async fn persist_instruction_document_for_legacy(
+    state: &AppState,
+    asset: &LogicalAsset,
+    document: &InstructionDocument,
+    expected_revision_id: Option<&str>,
+) -> Result<(), AppError> {
+    ensure_expected_revision(asset, expected_revision_id)?;
+    persist_instruction_document(state, asset, document).await
 }
 
 /// 块 → DTO。

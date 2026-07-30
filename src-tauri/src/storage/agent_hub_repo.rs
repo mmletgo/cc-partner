@@ -34,9 +34,9 @@ use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
-use std::sync::Arc;
 #[cfg(any(test, debug_assertions))]
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 /// Agent Hub SQLite 仓库。
 ///
@@ -1186,6 +1186,13 @@ impl AgentHubRepo {
                 // 同一 TX 内 fresh decide（package head 已 tombstone，exclude 生效）
                 let has_standalone =
                     component_has_standalone_ref_on_tx(&mut tx, &cref.asset_id).await?;
+                // ownership 标签与边表不一致时 fail-closed：禁止误 tombstone 独立资产
+                if cref.ownership == ComponentOwnership::Standalone && !has_standalone {
+                    return Err(AppError::conflict(format!(
+                        "agent_hub_plugin_standalone_ref_missing:{}",
+                        cref.asset_id
+                    )));
+                }
                 let other = count_other_live_package_head_refs_on_tx(
                     &mut tx,
                     &cref.asset_id,
@@ -1234,6 +1241,61 @@ impl AgentHubRepo {
                     &child_created_at,
                 )
                 .await?;
+            }
+
+            // 同 TX fan-out：package + TombstoneOwned components → 全部 binding Absent
+            let mut fan_asset_ids = vec![package_asset_id.to_string()];
+            for d in &component_decisions {
+                if d.decision == ComponentDeleteDecision::TombstoneOwned {
+                    fan_asset_ids.push(d.component_asset_id.clone());
+                }
+            }
+            for aid in fan_asset_ids {
+                let rows = sqlx::query(
+                    "SELECT id, asset_id, target, local_scope_mapping_id, checkout_binding_id,
+                            desired_presence, desired_enabled, created_at, updated_at
+                     FROM agent_hub_target_bindings WHERE asset_id = ?",
+                )
+                .bind(&aid)
+                .fetch_all(&mut *tx)
+                .await?;
+                let bind_now = chrono::Utc::now().to_rfc3339();
+                if rows.is_empty() {
+                    // 无既有 binding 时插入三目标 Absent，保证 scheduler 可见删除意图
+                    for t in [
+                        crate::agent_hub::models::AgentTarget::Claude,
+                        crate::agent_hub::models::AgentTarget::Codex,
+                        crate::agent_hub::models::AgentTarget::OpenCode,
+                    ] {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        sqlx::query(
+                            "INSERT INTO agent_hub_target_bindings
+                             (id, asset_id, target, local_scope_mapping_id, checkout_binding_id,
+                              desired_presence, desired_enabled, created_at, updated_at)
+                             VALUES (?, ?, ?, NULL, NULL, 'absent', 0, ?, ?)",
+                        )
+                        .bind(&id)
+                        .bind(&aid)
+                        .bind(t.as_str())
+                        .bind(&bind_now)
+                        .bind(&bind_now)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                } else {
+                    for row in rows {
+                        let id: String = row.try_get("id")?;
+                        sqlx::query(
+                            "UPDATE agent_hub_target_bindings
+                             SET desired_presence = 'absent', desired_enabled = 0, updated_at = ?
+                             WHERE id = ?",
+                        )
+                        .bind(&bind_now)
+                        .bind(&id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                }
             }
 
             tx.commit().await?;
@@ -3569,6 +3631,103 @@ impl AgentHubRepo {
             .await
     }
 
+    /// 在 import TX 内写入 durable LAN projection intent。
+    ///
+    /// Business Logic: commit 后崩溃窗口不得丢投影；queued 仅当 intent 存在。
+    /// Code Logic: INSERT OR IGNORE (transfer_id, asset_id) status=queued。
+    pub async fn insert_lan_projection_intents_on_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        transfer_id: &str,
+        asset_ids: &[String],
+    ) -> Result<u64, AppError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut n = 0u64;
+        for asset_id in asset_ids {
+            let res = sqlx::query(
+                "INSERT OR IGNORE INTO agent_hub_lan_projection_intents
+                 (transfer_id, asset_id, status, created_at, updated_at)
+                 VALUES (?, ?, 'queued', ?, ?)",
+            )
+            .bind(transfer_id)
+            .bind(asset_id)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut **tx)
+            .await?;
+            n += res.rows_affected();
+        }
+        Ok(n)
+    }
+
+    /// 列出某 transfer 仍为 queued 的 projection intent。
+    ///
+    /// Business Logic: committed 回放必须补偿未完成 intent。
+    /// Code Logic: SELECT asset_id WHERE transfer_id AND status=queued。
+    pub async fn list_queued_lan_projection_intents(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Vec<String>, AppError> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT asset_id FROM agent_hub_lan_projection_intents
+             WHERE transfer_id = ? AND status = 'queued'
+             ORDER BY asset_id ASC",
+        )
+        .bind(transfer_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// 标记 projection intent 已入队/完成。
+    ///
+    /// Business Logic: owner 排水后推进 status，避免重复风暴。
+    /// Code Logic: UPDATE status。
+    pub async fn mark_lan_projection_intent_status(
+        &self,
+        transfer_id: &str,
+        asset_id: &str,
+        status: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "UPDATE agent_hub_lan_projection_intents
+                 SET status = ?, updated_at = ?
+                 WHERE transfer_id = ? AND asset_id = ?",
+            )
+            .bind(status)
+            .bind(&now)
+            .bind(transfer_id)
+            .bind(asset_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 列出已 committed 且仍有 staging 可 GC 的 transfer（cleanup intent）。
+    ///
+    /// Business Logic: 成功 push 不得永久保留 incoming 明文/重复 CAS。
+    /// Code Logic: SELECT transfer_id FROM push_requests WHERE status=committed。
+    pub async fn list_committed_transfer_ids_for_cleanup(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<String>, AppError> {
+        // 表在 replication ledger；经 pool 直接查（同 DB）
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT transfer_id FROM agent_hub_push_requests
+             WHERE status = 'committed'
+             ORDER BY updated_at ASC
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// 读取本机 device-lane Git 导出状态。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -3582,7 +3741,7 @@ impl AgentHubRepo {
     ) -> Result<Option<AgentHubGitExportState>, AppError> {
         let row = sqlx::query(
             "SELECT device_id, last_exported_snapshot_hash, last_pushed_snapshot_hash,
-                    pending_snapshot_hash, attempt_count, next_attempt_at, last_error
+                    pending_snapshot_hash, pending_commit_oid, attempt_count, next_attempt_at, last_error
              FROM agent_hub_git_export_state WHERE device_id = ?",
         )
         .bind(device_id)
@@ -3593,6 +3752,7 @@ impl AgentHubRepo {
             last_exported_snapshot_hash: r.get("last_exported_snapshot_hash"),
             last_pushed_snapshot_hash: r.get("last_pushed_snapshot_hash"),
             pending_snapshot_hash: r.get("pending_snapshot_hash"),
+            pending_commit_oid: r.get("pending_commit_oid"),
             attempt_count: r.get::<i64, _>("attempt_count") as u32,
             next_attempt_at: r.get("next_attempt_at"),
             last_error: r.get("last_error"),
@@ -3615,13 +3775,14 @@ impl AgentHubRepo {
             sqlx::query(
                 "INSERT INTO agent_hub_git_export_state (
                     device_id, last_exported_snapshot_hash, last_pushed_snapshot_hash,
-                    pending_snapshot_hash, attempt_count, next_attempt_at, last_error,
+                    pending_snapshot_hash, pending_commit_oid, attempt_count, next_attempt_at, last_error,
                     created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(device_id) DO UPDATE SET
                     last_exported_snapshot_hash=excluded.last_exported_snapshot_hash,
                     last_pushed_snapshot_hash=excluded.last_pushed_snapshot_hash,
                     pending_snapshot_hash=excluded.pending_snapshot_hash,
+                    pending_commit_oid=excluded.pending_commit_oid,
                     attempt_count=excluded.attempt_count,
                     next_attempt_at=excluded.next_attempt_at,
                     last_error=excluded.last_error,
@@ -3631,6 +3792,7 @@ impl AgentHubRepo {
             .bind(&state.last_exported_snapshot_hash)
             .bind(&state.last_pushed_snapshot_hash)
             .bind(&state.pending_snapshot_hash)
+            .bind(&state.pending_commit_oid)
             .bind(state.attempt_count as i64)
             .bind(&state.next_attempt_at)
             .bind(&state.last_error)
@@ -3661,6 +3823,8 @@ pub struct AgentHubGitExportState {
     pub last_pushed_snapshot_hash: Option<String>,
     /// 待重试的 snapshotHash
     pub pending_snapshot_hash: Option<String>,
+    /// 已本地 commit 但尚未确认远端的 commit OID（防永久 pending）
+    pub pending_commit_oid: Option<String>,
     /// 连续失败次数
     pub attempt_count: u32,
     /// 下次尝试 RFC3339
@@ -4133,7 +4297,54 @@ pub(crate) async fn apply_import_bundle_on_tx(
     // 4b) plugin package component/residual edges（与 package revision 同 TX；幂等）
     restore_plugin_edges_on_tx(tx, bundle).await?;
 
-    // 5) variants
+    // 5) 所有受影响 asset 的 read-set CAS（独立于 new_head）
+    //    Conflict/AlreadyAncestor 的 new_head=None 也必须验证 expected_head，
+    //    禁止规划后本地 head 推进仍写入陈旧 variants/conflicts。
+    {
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut cas_assets: BTreeSet<String> = BTreeSet::new();
+        for d in &bundle.head_decisions {
+            cas_assets.insert(d.asset_id.clone());
+        }
+        for v in &bundle.variants {
+            cas_assets.insert(v.asset_id.clone());
+        }
+        for c in &bundle.conflicts {
+            cas_assets.insert(c.asset_id.clone());
+        }
+        // head_decisions 是权威 expected_head 来源；variants/conflicts 涉及的 asset 必须出现在其中
+        let decision_by_asset: BTreeMap<&str, &ImportHeadDecision> = bundle
+            .head_decisions
+            .iter()
+            .map(|d| (d.asset_id.as_str(), d))
+            .collect();
+        for asset_id in cas_assets {
+            let Some(d) = decision_by_asset.get(asset_id.as_str()) else {
+                return Err(AppError::validation(format!(
+                    "agent_hub_import_missing_head_decision:{asset_id}"
+                )));
+            };
+            let current: Option<String> =
+                sqlx::query_scalar("SELECT current_revision_id FROM agent_hub_assets WHERE id = ?")
+                    .bind(&asset_id)
+                    .fetch_optional(&mut **tx)
+                    .await?
+                    .flatten();
+            let expected = d.expected_head.as_deref();
+            let matches = match (current.as_deref(), expected) {
+                (None, None) => true,
+                (Some(c), Some(e)) => c == e,
+                _ => false,
+            };
+            if !matches {
+                return Err(AppError::conflict(format!(
+                    "agent_hub_import_head_cas_conflict:{asset_id}"
+                )));
+            }
+        }
+    }
+
+    // 6) variants（CAS 通过后才写，避免陈旧 plan 覆盖）
     for v in &bundle.variants {
         sqlx::query("DELETE FROM agent_hub_variants WHERE asset_id = ? AND target = ?")
             .bind(&v.asset_id)
@@ -4155,7 +4366,7 @@ pub(crate) async fn apply_import_bundle_on_tx(
         .await?;
     }
 
-    // 6) conflicts
+    // 7) conflicts
     for c in &bundle.conflicts {
         let exists: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_conflicts WHERE id = ?")
@@ -4184,8 +4395,8 @@ pub(crate) async fn apply_import_bundle_on_tx(
         result.conflicts_opened += 1;
     }
 
-    // 7) head decisions（仅显式 new_head 才推进；None 保留旧 head）
-    //    带 expected_head CAS：规划后并发本地写不得被静默覆盖；rows_affected 必须为 1。
+    // 8) head decisions（仅显式 new_head 才推进；None 保留旧 head）
+    //    expected_head 已在步骤 5 验证；此处再 CAS 更新防止同 TX 内竞态（防御性）。
     for d in &bundle.head_decisions {
         if let Some(head) = &d.new_head {
             // 确认 head revision 存在
@@ -4199,7 +4410,6 @@ pub(crate) async fn apply_import_bundle_on_tx(
                     "agent_hub_import_head_missing:{head}"
                 )));
             }
-            // 资产必须存在（import 先 upsert assets）；expected_head 与当前 head 做 CAS
             let cas = sqlx::query(
                 "UPDATE agent_hub_assets
                  SET current_revision_id = ?, deleted_at = ?, updated_at = ?
@@ -4646,12 +4856,24 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
         last_exported_snapshot_hash TEXT,
         last_pushed_snapshot_hash TEXT,
         pending_snapshot_hash TEXT,
+        pending_commit_oid TEXT,
         attempt_count INTEGER NOT NULL DEFAULT 0,
         next_attempt_at TEXT,
         last_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )",
+    // Codex R2: LAN commit 后 durable projection/cleanup intent（与 import 同 TX）
+    "CREATE TABLE IF NOT EXISTS agent_hub_lan_projection_intents (
+        transfer_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (transfer_id, asset_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_lan_projection_intents_status
+     ON agent_hub_lan_projection_intents(status, updated_at)",
     // Gate D Task 1：PluginPackage 固定 component/residual 引用边表 + standalone 引用
     "CREATE TABLE IF NOT EXISTS agent_hub_plugin_components (
         package_revision_id TEXT NOT NULL,
@@ -4798,6 +5020,14 @@ async fn migrate_agent_hub_columns(pool: &SqlitePool) -> Result<(), AppError> {
     )
     .execute(pool)
     .await?;
+
+    // Codex R2: git pending_commit_oid 列升级
+    let git_cols = table_column_names(pool, "agent_hub_git_export_state").await?;
+    if !git_cols.iter().any(|c| c == "pending_commit_oid") {
+        sqlx::query("ALTER TABLE agent_hub_git_export_state ADD COLUMN pending_commit_oid TEXT")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -5441,6 +5671,21 @@ async fn restore_plugin_edges_on_tx(
         .bind(edge.ownership.as_str())
         .execute(&mut **tx)
         .await?;
+        // Standalone ownership 必须同步重建 agent_hub_component_standalone_refs，
+        // 否则 import 后删除唯一 Plugin 会误判 has_standalone=false 并 tombstone 独立资产。
+        if edge.ownership == ComponentOwnership::Standalone {
+            let now_sa = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT OR IGNORE INTO agent_hub_component_standalone_refs
+                 (component_asset_id, standalone_asset_id, created_at)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(&edge.component_asset_id)
+            .bind(&edge.component_asset_id)
+            .bind(&now_sa)
+            .execute(&mut **tx)
+            .await?;
+        }
     }
 
     for edge in &bundle.plugin_residuals {
@@ -7233,7 +7478,6 @@ mod tests {
         assert!(obj_hashes.contains(residual_blob.hash.as_str()));
     }
 
-
     /// Business Logic: import head 必须 CAS 规划时的 expected head，并发本地写不得静默覆盖。
     /// Code Logic: 准备 asset head H0，bundle expected H0→H1；先把 head 改到 L1，再 apply 应 conflict。
     #[tokio::test]
@@ -7325,4 +7569,237 @@ mod tests {
         );
     }
 
+    /// Business Logic: Conflict plan（new_head=None）也必须 read-set CAS；失败时无 conflict/variant 副作用。
+    /// Code Logic: local head L1、plan expected H0 + conflict/variant → conflict，无新 conflict 行。
+    #[tokio::test]
+    async fn import_conflict_plan_requires_expected_head_cas() {
+        let repo = test_repo().await;
+        let scope = repo
+            .insert_scope(NewScopeNode {
+                id: Some("s-cas-c".into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Instruction,
+                origin_namespace: "ns".into(),
+                logical_key: "k-cas-c".into(),
+                display_name: "n".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let h0 = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "d1".into(),
+                payload_hash: Some("a".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        let l1 = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![h0.id.clone()],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "d1".into(),
+                payload_hash: Some("b".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expected_parent_id: Some(h0.id.clone()),
+            })
+            .await
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let conflict_id = uuid::Uuid::new_v4().to_string();
+        let remote_rev = RevisionId::new_v7();
+        let bundle = ImportBundle {
+            scopes: vec![],
+            assets: vec![],
+            lineages: vec![],
+            revisions: vec![ImportRevisionRow {
+                id: remote_rev.as_str().to_string(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![h0.id.as_str().to_string()],
+                generation: 2,
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Lan,
+                origin_target: None,
+                origin_replica_id: "peer".into(),
+                payload_hash: Some("c".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: now.clone(),
+            }],
+            variants: vec![ImportVariantRow {
+                asset_id: asset.id.clone(),
+                target: crate::agent_hub::models::AgentTarget::Claude,
+                revision_id: remote_rev.as_str().to_string(),
+            }],
+            conflicts: vec![ImportConflictRow {
+                id: conflict_id.clone(),
+                asset_id: asset.id.clone(),
+                target: None,
+                base_revision_id: Some(h0.id.as_str().to_string()),
+                hub_revision_id: Some(l1.id.as_str().to_string()),
+                external_revision_id: Some(remote_rev.as_str().to_string()),
+                detail_json: "{}".into(),
+                created_at: now.clone(),
+            }],
+            head_decisions: vec![ImportHeadDecision {
+                asset_id: asset.id.clone(),
+                expected_head: Some(h0.id.as_str().to_string()),
+                new_head: None,
+                deleted_at: None,
+            }],
+            project_mappings: vec![],
+            plugin_components: vec![],
+            plugin_residuals: vec![],
+        };
+        let err = repo.commit_import_bundle(bundle).await.unwrap_err();
+        assert_eq!(err.ipc_category_code(), "conflict");
+        let head = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(
+            head.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(l1.id.as_str())
+        );
+        // no conflict side effect
+        let c =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_hub_conflicts WHERE id = ?")
+                .bind(&conflict_id)
+                .fetch_one(&repo.pool())
+                .await
+                .unwrap();
+        assert_eq!(c, 0, "stale conflict plan must not insert conflicts");
+        let v = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_hub_variants WHERE asset_id = ? AND revision_id = ?",
+        )
+        .bind(&asset.id)
+        .bind(remote_rev.as_str())
+        .fetch_one(&repo.pool())
+        .await
+        .unwrap();
+        assert_eq!(v, 0, "stale conflict plan must not write variants");
+    }
+
+    /// Business Logic: import 必须重建 Standalone ownership 边，删除唯一 plugin 不得 tombstone 独立 skill。
+    /// Code Logic: 写 plugin edge ownership=Standalone → import → has_standalone_ref true。
+    #[tokio::test]
+    async fn import_restores_standalone_component_refs() {
+        let repo = test_repo().await;
+        let scope = repo
+            .insert_scope(NewScopeNode {
+                id: Some("s-sa".into()),
+                kind: ScopeKind::User,
+                hub_project_id: None,
+                relative_path: None,
+            })
+            .await
+            .unwrap();
+        let pkg = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Plugin,
+                origin_namespace: "ns".into(),
+                logical_key: "plug-sa".into(),
+                display_name: "p".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let skill = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Skill,
+                origin_namespace: "ns".into(),
+                logical_key: "skill-sa".into(),
+                display_name: "s".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let pkg_rev = RevisionId::new_v7();
+        let skill_rev = RevisionId::new_v7();
+        let now = chrono::Utc::now().to_rfc3339();
+        let bundle = ImportBundle {
+            scopes: vec![],
+            assets: vec![],
+            lineages: vec![],
+            revisions: vec![
+                ImportRevisionRow {
+                    id: pkg_rev.as_str().to_string(),
+                    asset_lineage_id: pkg.id.clone(),
+                    parents: vec![],
+                    generation: 0,
+                    operation: RevisionOperation::Upsert,
+                    origin_kind: RevisionOriginKind::Lan,
+                    origin_target: None,
+                    origin_replica_id: "peer".into(),
+                    payload_hash: Some("d".repeat(64)),
+                    tree_manifest_hash: None,
+                    created_at: now.clone(),
+                },
+                ImportRevisionRow {
+                    id: skill_rev.as_str().to_string(),
+                    asset_lineage_id: skill.id.clone(),
+                    parents: vec![],
+                    generation: 0,
+                    operation: RevisionOperation::Upsert,
+                    origin_kind: RevisionOriginKind::Lan,
+                    origin_target: None,
+                    origin_replica_id: "peer".into(),
+                    payload_hash: Some("e".repeat(64)),
+                    tree_manifest_hash: None,
+                    created_at: now.clone(),
+                },
+            ],
+            variants: vec![],
+            conflicts: vec![],
+            head_decisions: vec![
+                ImportHeadDecision {
+                    asset_id: pkg.id.clone(),
+                    expected_head: None,
+                    new_head: Some(pkg_rev.as_str().to_string()),
+                    deleted_at: None,
+                },
+                ImportHeadDecision {
+                    asset_id: skill.id.clone(),
+                    expected_head: None,
+                    new_head: Some(skill_rev.as_str().to_string()),
+                    deleted_at: None,
+                },
+            ],
+            project_mappings: vec![],
+            plugin_components: vec![ImportPluginComponentEdge {
+                package_revision_id: pkg_rev.as_str().to_string(),
+                component_kind: AssetKind::Skill,
+                component_asset_id: skill.id.clone(),
+                component_revision_id: skill_rev.as_str().to_string(),
+                ownership: ComponentOwnership::Standalone,
+            }],
+            plugin_residuals: vec![],
+        };
+        // assets must exist with expected heads for CAS - we already inserted empty assets;
+        // apply expects assets rows exist. head expected None matches.
+        repo.commit_import_bundle(bundle).await.unwrap();
+        assert!(
+            repo.component_has_standalone_ref(&skill.id).await.unwrap(),
+            "standalone ownership must rebuild agent_hub_component_standalone_refs"
+        );
+    }
 }
