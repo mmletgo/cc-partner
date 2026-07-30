@@ -847,9 +847,25 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
             start_cancelled_task_once(&state.agent_hub_cancel, "Agent Hub runtime", || {
                 crate::agent_hub::AgentHubRuntime::start(state.clone())
             });
+            // Codex R3: LAN projection outbox durable drain（启动 + 周期 claim queued intents）
+            // 复用 agent_hub_git_cancel 前先启动 git loop；outbox 与 git 同属 owner 后台，
+            // 单独挂在 agent_hub_cancel 之后：再开一个 once 槽位会改 AppState 签名。
+            // 改为：在 git loop start 内联动启动 outbox（见下方 git start 包装）。
             // Gate C Task6：Agent Hub Git device-lane 备份（recover + debounce/pending flush）
+            // Codex R3：同 cancel 生命周期内启动 LAN projection outbox worker
             start_cancelled_task_once(&state.agent_hub_git_cancel, "Agent Hub git export", || {
-                crate::agent_hub::git::runtime::start_agent_hub_git_export_loop(state.clone())
+                let outbox =
+                    crate::agent_hub::replication::start_lan_projection_outbox_loop(state.clone());
+                let git =
+                    crate::agent_hub::git::runtime::start_agent_hub_git_export_loop(state.clone());
+                let combined = CancellationToken::new();
+                let child = combined.child_token();
+                tauri::async_runtime::spawn(async move {
+                    child.cancelled().await;
+                    outbox.cancel();
+                    git.cancel();
+                });
+                combined
             });
         }
         BackendRuntimeMode::Gui => {

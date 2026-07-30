@@ -1502,15 +1502,27 @@ fn resolve_owner_and_write_compat(state: &AppState) -> (Option<String>, bool) {
     }
 }
 
-/// best-effort 探测三 CLI。
+/// best-effort 探测三 CLI，并经 support manifest 评估展示态。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     status 顶部展示本机 Claude/Codex/OpenCode 可用性。
+///     未认证（null 版本 / 写能力 blocked）不得显示绿色 Supported，必须 scanOnly。
 ///
 /// Code Logic（这个函数做什么）:
-///     home+env 构造 TargetEnvironment；adapter.probe 失败返回 unsupported。
+///     home+env 构造 TargetEnvironment；adapter.probe 后经 evaluate_target_support 映射 support 字段。
 fn probe_all_targets_best_effort() -> Vec<AgentHubProbeDto> {
+    use crate::agent_hub::support::{
+        builtin_support_manifest, evaluate_target_support, EvaluatedSupportMode,
+        RuntimeProbeSnapshot,
+    };
     let env = current_target_environment();
+    let manifest = match builtin_support_manifest() {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::warn!(error = %e, "agent_hub probe: builtin support manifest unavailable");
+            None
+        }
+    };
     let adapters: [(&dyn AssetAdapter, AgentTarget); 3] = [
         (&ClaudeInstructionAdapter, AgentTarget::Claude),
         (&CodexInstructionAdapter, AgentTarget::Codex),
@@ -1519,13 +1531,40 @@ fn probe_all_targets_best_effort() -> Vec<AgentHubProbeDto> {
     adapters
         .into_iter()
         .map(|(adapter, target)| match adapter.probe(&env) {
-            Ok(probe) => AgentHubProbeDto {
-                target: probe.target,
-                executable: probe.executable.map(|p| p.to_string_lossy().into_owned()),
-                version: probe.version,
-                support: probe.support.as_str().to_string(),
-                config_root: Some(probe.config_root.to_string_lossy().into_owned()),
-            },
+            Ok(probe) => {
+                let support = if let Some(manifest) = manifest.as_ref() {
+                    let snap = RuntimeProbeSnapshot {
+                        target: probe.target,
+                        executable: probe.executable.clone(),
+                        version: probe.version.clone(),
+                        config_root: probe.config_root.clone(),
+                        fingerprint: probe.fingerprint.clone(),
+                        help_fingerprint: None,
+                    };
+                    let eval = evaluate_target_support(manifest, &snap);
+                    match &eval.mode {
+                        EvaluatedSupportMode::Certified => {
+                            if eval.write_allowed {
+                                "supported".to_string()
+                            } else {
+                                "scanOnly".to_string()
+                            }
+                        }
+                        EvaluatedSupportMode::ScanOnly { .. } => "scanOnly".to_string(),
+                        EvaluatedSupportMode::Blocked { .. } => "unsupported".to_string(),
+                    }
+                } else {
+                    // fail-closed：manifest 不可用时不得抬升为 Supported
+                    "scanOnly".to_string()
+                };
+                AgentHubProbeDto {
+                    target: probe.target,
+                    executable: probe.executable.map(|p| p.to_string_lossy().into_owned()),
+                    version: probe.version,
+                    support,
+                    config_root: Some(probe.config_root.to_string_lossy().into_owned()),
+                }
+            }
             Err(_) => AgentHubProbeDto {
                 target,
                 executable: None,
@@ -2882,5 +2921,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(still[0].desired_presence, DesiredPresence::Present);
+    }
+
+    /// Business Logic: 未认证 manifest 不得在 status 显示 Supported。
+    /// Code Logic: probe_all_targets_best_effort 在 null 版本下应为 scanOnly/unsupported。
+    #[test]
+    fn status_probe_uses_evaluate_target_support_not_raw_supported() {
+        let probes = probe_all_targets_best_effort();
+        assert_eq!(probes.len(), 3);
+        for p in probes {
+            assert_ne!(
+                p.support.as_str(),
+                "supported",
+                "uncertified target {} must not report Supported",
+                p.target.as_str()
+            );
+            assert!(
+                matches!(p.support.as_str(), "scanOnly" | "unsupported"),
+                "unexpected support={} for {}",
+                p.support,
+                p.target.as_str()
+            );
+        }
     }
 }

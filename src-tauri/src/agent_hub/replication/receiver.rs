@@ -885,10 +885,31 @@ pub async fn gc_committed_incoming_staging(
     for transfer_id in transfers {
         let dir = match transfer_dir(data_dir, &transfer_id) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(_) => {
+                // 路径非法也标记完成，避免永远卡住本批
+                let _ = repo
+                    .mark_committed_transfer_staging_cleaned(&transfer_id)
+                    .await;
+                continue;
+            }
         };
-        if dir.is_dir() {
-            if cleanup_transfer_staging(data_dir, &transfer_id).is_ok() {
+        // 目录不存在或删除成功 → 原子标记 cleanup 完成，推进 keyset
+        if !dir.is_dir() {
+            if repo
+                .mark_committed_transfer_staging_cleaned(&transfer_id)
+                .await
+                .is_ok()
+            {
+                removed += 1;
+            }
+            continue;
+        }
+        if cleanup_transfer_staging(data_dir, &transfer_id).is_ok() {
+            if repo
+                .mark_committed_transfer_staging_cleaned(&transfer_id)
+                .await
+                .is_ok()
+            {
                 removed += 1;
             }
         }

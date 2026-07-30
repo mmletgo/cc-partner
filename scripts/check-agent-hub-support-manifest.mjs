@@ -11,7 +11,8 @@
  *   - 读取 `src-tauri/src/agent_hub/support/support-manifest.json`
  *   - 读取 `docs/development/quality-matrix.json` 收集 evidence ID
  *   - 可选比对 `src-tauri/tests/support/agent_hub_l3_snapshots/*.json` 激活命令指纹
- *   - `--gate-b`：严格拒绝 null/空 min/current、无序版本、缺失 target、未知 Supported* evidence
+ *   - `--gate-b`：fail-closed 合同——允许 null 版本当且仅当全部写能力 blocked 且非 certified；
+ *     拒绝写能力 Supported* 却无 L3 版本证据、无序版本、缺失 target、未知 evidence
  *   - `--gate-d`：在 gate-b 基础上校验 `hookMappings`（可为空）；非空项须有 intent/双端/schema/trust/evidence
  *   - `--self-test`：内存 fixture 覆盖主要失败分支
  *   - 仅 Node 内置模块
@@ -210,21 +211,6 @@ export function validateSupportManifest(manifest, options = {}) {
     const minMissing = minRaw == null || String(minRaw).trim() === '';
     const curMissing = curRaw == null || String(curRaw).trim() === '';
 
-    if (gateB) {
-      if (minMissing) errors.push(`${target}:minTestedVersion_null_or_empty`);
-      if (curMissing) errors.push(`${target}:currentTestedVersion_null_or_empty`);
-    }
-
-    if (!minMissing && !curMissing) {
-      const minV = parseSemverCore(String(minRaw));
-      const curV = parseSemverCore(String(curRaw));
-      if (!minV) errors.push(`${target}:minTestedVersion_malformed:${minRaw}`);
-      if (!curV) errors.push(`${target}:currentTestedVersion_malformed:${curRaw}`);
-      if (minV && curV && cmpSemver(minV, curV) > 0) {
-        errors.push(`${target}:min_greater_than_current`);
-      }
-    }
-
     if (!record.executableProbe || typeof record.executableProbe !== 'object') {
       errors.push(`${target}:executableProbe_missing`);
     } else {
@@ -235,9 +221,12 @@ export function validateSupportManifest(manifest, options = {}) {
     }
 
     const caps = record.capabilities;
+    /** @type {string[]} */
+    let writeLevels = [];
     if (!caps || typeof caps !== 'object') {
       errors.push(`${target}:capabilities_missing`);
     } else {
+      writeLevels = [...WRITE_CAPS].map((cap) => String(caps[cap] ?? ''));
       const evidence = Array.isArray(record.evidenceIds)
         ? record.evidenceIds.map((x) => String(x).trim()).filter(Boolean)
         : [];
@@ -263,6 +252,35 @@ export function validateSupportManifest(manifest, options = {}) {
             errors.push(`${target}:${cap}:write_supported_without_evidence`);
           }
         }
+      }
+    }
+
+    // gate-b fail-closed 合同：
+    // - null/空版本允许，当且仅当全部写能力 blocked（未 L3 认证）
+    // - 若写能力出现 Supported*，则必须提供 min/current 版本证据
+    const allWritesBlocked =
+      writeLevels.length === WRITE_CAPS.size &&
+      writeLevels.every((lvl) => lvl === 'blocked' || lvl === 'readOnly');
+    if (gateB) {
+      const anyWriteSupported = writeLevels.some((lvl) => SUPPORTED_FAMILY.has(lvl));
+      if (anyWriteSupported) {
+        if (minMissing) errors.push(`${target}:minTestedVersion_null_or_empty`);
+        if (curMissing) errors.push(`${target}:currentTestedVersion_null_or_empty`);
+      } else if (!allWritesBlocked && (minMissing || curMissing)) {
+        // 写能力字段残缺且版本 null：仍 fail-closed
+        if (minMissing) errors.push(`${target}:minTestedVersion_null_or_empty`);
+        if (curMissing) errors.push(`${target}:currentTestedVersion_null_or_empty`);
+      }
+      // allWritesBlocked + null 版本：允许（uncertified scan-only 合同）
+    }
+
+    if (!minMissing && !curMissing) {
+      const minV = parseSemverCore(String(minRaw));
+      const curV = parseSemverCore(String(curRaw));
+      if (!minV) errors.push(`${target}:minTestedVersion_malformed:${minRaw}`);
+      if (!curV) errors.push(`${target}:currentTestedVersion_malformed:${curRaw}`);
+      if (minV && curV && cmpSemver(minV, curV) > 0) {
+        errors.push(`${target}:min_greater_than_current`);
       }
     }
 
@@ -391,18 +409,57 @@ export function runSelfTest() {
   let errs = validateSupportManifest(good, { gateB: true, evidenceIds: evidence });
   if (errs.length !== 0) failures.push(`good_should_pass:${errs.join(',')}`);
 
-  // null min rejected in gate-b
-  const nullMin = {
+  // null min + all writes blocked → allowed in gate-b (uncertified contract)
+  const nullMinBlocked = {
     schemaVersion: 1,
     targets: [
-      baseTarget('claude', { minTestedVersion: null }),
+      baseTarget('claude', {
+        minTestedVersion: null,
+        currentTestedVersion: null,
+      }),
+      baseTarget('codex', {
+        minTestedVersion: null,
+        currentTestedVersion: null,
+      }),
+      baseTarget('opencode', {
+        minTestedVersion: null,
+        currentTestedVersion: null,
+      }),
+    ],
+  };
+  errs = validateSupportManifest(nullMinBlocked, { gateB: true, evidenceIds: evidence });
+  if (errs.length !== 0) {
+    failures.push(`null_versions_all_writes_blocked_should_pass:${errs.join(',')}`);
+  }
+
+  // null min + write supported → rejected
+  const nullMinWriteOpen = {
+    schemaVersion: 1,
+    targets: [
+      baseTarget('claude', {
+        minTestedVersion: null,
+        currentTestedVersion: null,
+        capabilities: {
+          scanInstruction: 'readOnly',
+          renderInstruction: 'supported',
+          scanPortableAssets: 'readOnly',
+          renderPortableAssets: 'blocked',
+          activatePackage: 'blocked',
+          deactivatePackage: 'blocked',
+          liveReload: 'blocked',
+        },
+        evidenceIds: ['L3-AGENT-HUB-CLAUDE-001'],
+      }),
       baseTarget('codex'),
       baseTarget('opencode'),
     ],
   };
-  errs = validateSupportManifest(nullMin, { gateB: true, evidenceIds: evidence });
+  errs = validateSupportManifest(nullMinWriteOpen, {
+    gateB: true,
+    evidenceIds: evidence,
+  });
   if (!errs.some((e) => e.includes('minTestedVersion_null'))) {
-    failures.push('null_min_not_detected');
+    failures.push('null_min_with_write_supported_not_detected');
   }
 
   // supported write without evidence

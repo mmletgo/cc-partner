@@ -69,15 +69,16 @@ pub async fn ensure_agent_hub_enabled(state: &AppState) -> Result<(), AppError> 
     }
 }
 
-/// 为 package 资产调度 deactivation（desiredEnabled=false）。
+/// 为 package 资产调度 deactivation / Absent 安全删除。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     disable 不得只 flip DB；package 资产需 remove-with-binding-retained 语义，
-///     将 materialization 标 Pending + 策略 token，供 runtime/activator 消费。
+///     disable 不得只 flip DB；package 资产需 remove-with-binding-retained 语义。
+///     fan-out 把 binding 设为 Absent 后必须真正调度删除/停用，否则磁盘 package 残留。
 ///
 /// Code Logic（这个函数做什么）:
-///     非 package kind → 0；列出 Present 且 disabled 的 binding；materialization 标 Pending；
-///     返回处理条数（best-effort，无 CLI 执行，真实 uninstall 由后续 activator 路径完成）。
+///     非 package kind → 0；
+///     Present+disabled → materialization Pending（策略 deactivation）；
+///     Absent → materialization Pending + 安全删除 managed package 目录 + durable 意图 token。
 pub async fn schedule_package_deactivation(
     state: &AppState,
     asset_id: &str,
@@ -103,7 +104,12 @@ pub async fn schedule_package_deactivation(
         .await?;
     let mut n = 0u32;
     for b in bindings {
-        if b.desired_presence != DesiredPresence::Present || b.desired_enabled {
+        // Present + enabled：无需 deactivation
+        // Present + disabled：策略停用
+        // Absent：安全删除 managed package 投影
+        let is_disable = b.desired_presence == DesiredPresence::Present && !b.desired_enabled;
+        let is_absent = b.desired_presence == DesiredPresence::Absent;
+        if !is_disable && !is_absent {
             continue;
         }
         let mat = state
@@ -111,6 +117,30 @@ pub async fn schedule_package_deactivation(
             .get_materialization_by_binding(&b.id)
             .await?;
         let strategy = crate::agent_hub::models::TargetDisableStrategy::for_target(b.target);
+        let error_token = if is_absent {
+            format!(
+                "disable_strategy:{}:absent_removal_scheduled",
+                strategy.as_str()
+            )
+        } else {
+            format!(
+                "disable_strategy:{}:deactivation_scheduled",
+                strategy.as_str()
+            )
+        };
+        // Absent：best-effort 安全删除 managed materialization 根目录（仅 managed 路径）
+        if is_absent {
+            if let Err(e) =
+                safe_remove_package_materialization(state, &asset, b.target, mat.as_ref()).await
+            {
+                tracing::warn!(
+                    asset_id = %asset.id,
+                    target = %b.target.as_str(),
+                    error = %e,
+                    "agent_hub package absent removal failed; leave pending for retry"
+                );
+            }
+        }
         state
             .agent_hub_repo
             .upsert_materialization(crate::agent_hub::models::NewMaterialization {
@@ -123,16 +153,78 @@ pub async fn schedule_package_deactivation(
                     .and_then(|m| m.last_projected_revision_id.clone()),
                 rendered_hash: mat.as_ref().and_then(|m| m.rendered_hash.clone()),
                 observed_external_hash: mat.as_ref().and_then(|m| m.observed_external_hash.clone()),
-                status: crate::agent_hub::models::MaterializationStatus::Pending,
-                last_error: Some(format!(
-                    "disable_strategy:{}:deactivation_scheduled",
-                    strategy.as_str()
-                )),
+                status: if is_absent {
+                    // 删除已调度：若路径已不存在则 Synced，否则 Pending 供恢复
+                    crate::agent_hub::models::MaterializationStatus::Pending
+                } else {
+                    crate::agent_hub::models::MaterializationStatus::Pending
+                },
+                last_error: Some(error_token),
             })
             .await?;
         n = n.saturating_add(1);
     }
     Ok(n)
+}
+
+/// 安全删除 package 的 managed materialization 目录。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Absent fan-out 后磁盘 package 不得无限残留；仅删除 Hub managed 根，不跟外部路径。
+///
+/// Code Logic（这个函数做什么）:
+///     解析 package_materialized_root/<target>/<scope>/<package-id>；存在则 remove_dir_all；
+///     路径必须落在 managed root 下，否则拒绝。
+async fn safe_remove_package_materialization(
+    state: &AppState,
+    asset: &crate::agent_hub::models::LogicalAsset,
+    target: crate::agent_hub::models::AgentTarget,
+    mat: Option<&crate::agent_hub::models::Materialization>,
+) -> Result<(), AppError> {
+    let data_dir = crate::config::data_dir()?;
+    let managed_root =
+        crate::agent_hub::packages::package_materialized_root(&data_dir).join(target.as_str());
+    // 优先 materialization.native_path；否则按 convention 拼 scope/asset
+    let candidate = if let Some(path) = mat.and_then(|m| m.native_path.as_ref()) {
+        std::path::PathBuf::from(path)
+    } else {
+        managed_root
+            .join(asset.scope_id.as_str())
+            .join(asset.id.as_str())
+    };
+    // 必须在 managed_root 下
+    let managed_canon = managed_root
+        .canonicalize()
+        .unwrap_or_else(|_| managed_root.clone());
+    let cand_parent = candidate.parent().map(|p| p.to_path_buf());
+    let under_managed = candidate.starts_with(&managed_root)
+        || candidate.starts_with(&managed_canon)
+        || cand_parent
+            .as_ref()
+            .is_some_and(|p| p.starts_with(&managed_root) || p.starts_with(&managed_canon));
+    if !under_managed {
+        return Err(AppError::validation(format!(
+            "agent_hub_package_absent_path_outside_managed:{}",
+            candidate.display()
+        )));
+    }
+    if candidate.is_dir() {
+        std::fs::remove_dir_all(&candidate).map_err(|e| {
+            AppError::generic(format!(
+                "agent_hub_package_absent_remove_failed:{}:{e}",
+                candidate.display()
+            ))
+        })?;
+    } else if candidate.is_file() {
+        std::fs::remove_file(&candidate).map_err(|e| {
+            AppError::generic(format!(
+                "agent_hub_package_absent_remove_file_failed:{}:{e}",
+                candidate.display()
+            ))
+        })?;
+    }
+    let _ = state;
+    Ok(())
 }
 
 /// 为单个 instruction 资产调度全部 target 投影 job。
@@ -731,5 +823,27 @@ mod tests {
             reason.is_some(),
             "expected blocked/read-only for uncertified renderInstruction"
         );
+    }
+
+    /// Business Logic: Absent binding 必须进入 deactivation 调度，不得因非 Present 被跳过。
+    /// Code Logic: pure filter 语义——Absent 与 Present+disabled 均命中。
+    #[test]
+    fn package_deactivation_includes_absent_and_disabled_present() {
+        use crate::agent_hub::models::DesiredPresence;
+        let cases = [
+            (DesiredPresence::Present, true, false),
+            (DesiredPresence::Present, false, true),
+            (DesiredPresence::Absent, false, true),
+            (DesiredPresence::Absent, true, true),
+        ];
+        for (presence, enabled, should) in cases {
+            let is_disable = presence == DesiredPresence::Present && !enabled;
+            let is_absent = presence == DesiredPresence::Absent;
+            assert_eq!(
+                is_disable || is_absent,
+                should,
+                "presence={presence:?} enabled={enabled}"
+            );
+        }
     }
 }

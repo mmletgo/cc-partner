@@ -124,7 +124,8 @@ pub async fn agent_hub_push_commit(
         &transfer_id,
         body,
         move |asset_ids| {
-            // 异步 reconcile：协议成功后 best-effort 调度投影
+            // 异步 reconcile：协议成功后 best-effort 调度投影；
+            // 同时触发 durable outbox drain，确保 intent 状态推进。
             let ids: Vec<String> = asset_ids.to_vec();
             tauri::async_runtime::spawn(async move {
                 for id in ids {
@@ -134,11 +135,19 @@ pub async fn agent_hub_push_commit(
                     )
                     .await;
                 }
+                let _ =
+                    crate::agent_hub::replication::drain_lan_projection_intents(&state_for_sched)
+                        .await;
             });
         },
     )
     .await
     .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.push.commit"))?;
+    // commit 返回后立即 best-effort 再排水一次（覆盖 spawn 前崩溃的窗口由 worker 补）
+    let state_for_drain = state.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = crate::agent_hub::replication::drain_lan_projection_intents(&state_for_drain).await;
+    });
     Ok(Json(resp))
 }
 
