@@ -556,10 +556,7 @@ impl AgentHubPushSender {
         if cancel.is_cancelled() {
             return fail("agent_hub_push_cancelled", true, None);
         }
-        if let Err(err) = self
-            .ensure_agent_hub_peer_binding(&base_url, peer_id)
-            .await
-        {
+        if let Err(err) = self.ensure_agent_hub_peer_binding(&base_url, peer_id).await {
             return classify_peer_error(peer_id, peer_label, client_request_id, err, None);
         }
 

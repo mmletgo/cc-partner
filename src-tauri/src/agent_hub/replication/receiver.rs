@@ -641,7 +641,7 @@ pub async fn commit_push(
         ));
     }
 
-    // 已 committed → 回放（无新副作用）
+    // 已 committed → 回放 outcome；补偿未完成 projection intent（不得谎称 queued）
     if row.status == PushRequestStatus::Committed {
         let outcome: SnapshotImportOutcome = row
             .outcome_json
@@ -650,13 +650,27 @@ pub async fn commit_push(
             .ok_or_else(|| {
                 AppError::generic("agent_hub_push_committed_outcome_corrupt".to_string())
             })?;
+        let pending_intents = repo
+            .list_queued_lan_projection_intents(transfer_id)
+            .await
+            .unwrap_or_default();
+        if !pending_intents.is_empty() {
+            enqueue_reconcile(&pending_intents);
+        }
+        // staging cleanup 补偿：committed 后尽量删除 incoming
+        let _ = cleanup_transfer_staging(data_dir, transfer_id);
+        let projection = if pending_intents.is_empty() {
+            "idle".into()
+        } else {
+            "queued".into()
+        };
         return Ok(CommitPushResponse {
             transfer_id: transfer_id.to_string(),
             status: "committed".into(),
             selection_hash: row.selection_hash,
             snapshot_hash: row.snapshot_hash,
             outcome,
-            projection: "queued".into(),
+            projection,
         });
     }
 
@@ -757,12 +771,16 @@ pub async fn commit_push(
                         AppError::generic("agent_hub_push_committed_outcome_corrupt".to_string())
                     })?;
                 drop(tx);
-                return Ok::<SnapshotImportOutcome, AppError>(outcome);
+                return Ok::<(SnapshotImportOutcome, u64), AppError>((outcome, 0));
             }
             CommitClaim::Claimed(_) => {}
         }
 
         let result = repo.apply_import_bundle_in_tx(&mut tx, &bundle).await?;
+        // 与 import/ledger 同 TX 写入 durable projection intent
+        let intent_count = repo
+            .insert_lan_projection_intents_on_tx(&mut tx, transfer_id, &result.imported_asset_ids)
+            .await?;
         let outcome = SnapshotImportOutcome {
             snapshot_id: validated.envelope.snapshot_id.clone(),
             snapshot_hash: validated.envelope.snapshot_hash.clone(),
@@ -780,11 +798,30 @@ pub async fn commit_push(
             .mark_committed_on_tx(&mut tx, source, client_req, &outcome_json)
             .await?;
         tx.commit().await?;
-        Ok(outcome)
+        Ok((outcome, intent_count))
     })
     .await?;
 
-    enqueue_reconcile(&outcome.imported_asset_ids);
+    let (outcome, intent_count) = outcome;
+
+    // 仅当 durable intent 存在时才 claim queued 并 enqueue
+    let projection = if intent_count > 0 || !outcome.imported_asset_ids.is_empty() {
+        let pending = repo
+            .list_queued_lan_projection_intents(transfer_id)
+            .await
+            .unwrap_or_else(|_| outcome.imported_asset_ids.clone());
+        if !pending.is_empty() {
+            enqueue_reconcile(&pending);
+            "queued".into()
+        } else {
+            "idle".into()
+        }
+    } else {
+        "idle".into()
+    };
+
+    // 成功 commit 后幂等删除 staging（失败由 GC 补偿）
+    let _ = cleanup_transfer_staging(data_dir, transfer_id);
 
     Ok(CommitPushResponse {
         transfer_id: transfer_id.to_string(),
@@ -792,14 +829,28 @@ pub async fn commit_push(
         selection_hash: req.selection_hash,
         snapshot_hash: req.snapshot_hash,
         outcome,
-        projection: "queued".into(),
+        projection,
     })
 }
 
-/// GC：删除超过 24h 的 prepared staging（保留 verified CAS，不删 objects/ 下文件）。
+/// 幂等删除 transfer staging 目录。
 ///
-/// Business Logic: 中断传输的未验证 part 可清理；CAS 永不因 GC 删除。
-/// Code Logic: list_stale_prepared → remove_dir_all staging → delete ledger 行。
+/// Business Logic: committed 后不得永久保留 incoming 明文/重复 CAS 数据。
+/// Code Logic: remove_dir_all(incoming/<transferId>)。
+fn cleanup_transfer_staging(data_dir: &Path, transfer_id: &str) -> Result<(), AppError> {
+    let dir = transfer_dir(data_dir, transfer_id)?;
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| AppError::generic(format!("agent_hub_push_staging_cleanup_failed:{e}")))?;
+    }
+    Ok(())
+}
+
+/// GC：删除超过 24h 的 prepared staging + 清理已 committed 残留 staging。
+///
+/// Business Logic: 中断传输的未验证 part 可清理；成功 commit 后残留 incoming 也必须收。
+///     CAS 永不因 GC 删除。
+/// Code Logic: list_stale_prepared + list committed transfers → remove_dir_all staging。
 pub async fn gc_abandoned_incoming_staging(
     ledger: &ReplicationLedger,
     data_dir: &Path,
@@ -817,6 +868,30 @@ pub async fn gc_abandoned_incoming_staging(
         }
         ledger.delete_prepared_transfer(&transfer_id).await?;
         removed += 1;
+    }
+    Ok(removed)
+}
+
+/// GC：清理已 committed 且 CAS 完整的 incoming staging 残留。
+///
+/// Business Logic: 成功 push 后进程崩溃可能留下 staging；周期/启动补偿。
+/// Code Logic: 枚举 committed transfer → cleanup_transfer_staging。
+pub async fn gc_committed_incoming_staging(
+    repo: &AgentHubRepo,
+    data_dir: &Path,
+) -> Result<u32, AppError> {
+    let transfers = repo.list_committed_transfer_ids_for_cleanup(256).await?;
+    let mut removed = 0u32;
+    for transfer_id in transfers {
+        let dir = match transfer_dir(data_dir, &transfer_id) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if dir.is_dir() {
+            if cleanup_transfer_staging(data_dir, &transfer_id).is_ok() {
+                removed += 1;
+            }
+        }
     }
     Ok(removed)
 }
