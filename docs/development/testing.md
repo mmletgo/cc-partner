@@ -245,9 +245,9 @@ cd web && npm exec -- playwright install --with-deps chromium
 
 Do **not** document or use `npx --yes` / ad-hoc single-file runners for CI-shaped checks.
 
-### Agent Hub program-wide certification (Gates A–D integration)
+### Agent Hub program-wide residual status (Gates A–D integration; not certification-complete)
 
-Run on the integrated tree after Gate D merge (Program Task 5). Prefer serial process/smoke tests; record honest FAIL/partials rather than greenwashing.
+Run on the integrated tree after Gate D merge (Program Task 5). Record honest FAIL/partials rather than greenwashing. Serial-only agent_hub runs and final-only bundle ratchet are **not** plan-allowed certification substitutes.
 
 ```bash
 # Rust — prefer --lib for unit filters; serialize smoke/integration
@@ -285,33 +285,34 @@ node scripts/check-agent-hub-support-manifest.mjs --gate-d
 git diff --check
 ```
 
-**Program Task 5 run (integration `sdd/agent-hub-2026-07-29` @ `b1b01d89`, worktree branch `sdd/agent-hub-program-t5`, 2026-07-30):**
+**Program Task 5 residual status (honest; NOT certification-complete):**
 
-| Command | Result |
+> Codex adversarial R1 (2026-07-29) found false “certification complete” language while residual gates remain red. This table is a **residual snapshot**, not a Completion Contract pass. Do **not** claim Program-wide certification until the plan’s original commands all exit 0 under default (including parallel) modes and every Agent Hub L3 ID is inventoried with real-device evidence.
+
+| Command | Residual result |
 | --- | --- |
-| `cargo fmt --check` | PASS |
-| `cargo clippy --all-targets --locked -- -D warnings` | PASS (after local gitignored browser-runtime placeholder) |
-| `cargo test --locked --lib agent_hub -- --test-threads=1` | PASS 363 |
-| same with default/parallel threads | **FAIL flake** (2 importer tests; process-global import fault injection races) — **serial is the certified mode** |
-| `cargo test --locked --lib orchestrator::agent_adapter` | PASS 24 |
-| `agent_hub_replication_smoke` serial | PASS 2 (`L2-AGENT-HUB-C-001` / `L2-AGENT-HUB-C-GIT-001`) |
-| `agent_hub_gate_d_runtime_smoke` serial | PASS 3 (`L2-AGENT-HUB-D-PLUGIN-001` / `L2-AGENT-HUB-D-RUNTIME-001` + honesty NOT VERIFIED guard) |
-| `agent_hub_gate_a_smoke` / `agent_hub_gate_b_smoke` serial | PASS 7 / PASS 5 |
-| `check:css-tokens` / `check:i18n` | PASS |
-| `npm test -- AgentHub attention typeBarrel localeParity` | PASS 109 (20 files); benign jsdom `document is not defined` MutationObserver noise after teardown |
-| `npm run build` | PASS |
-| `npm run test:e2e -- agent-hub.spec.ts` | PASS 8 (`E2E-AGENT-HUB-A-001` / `E2E-AGENT-HUB-B-001` / `E2E-AGENT-HUB-C-001` / `E2E-AGENT-HUB-D-001`) |
-| `npm run lint` | **FAIL** 96 errors / 14 warnings — concentrated in Agent Hub controller/tests (`react-hooks/preserve-manual-memoization` + exhaustive-deps); not claimed green |
-| `npm run check:bundle` strict | **FAIL** baseline ratchet overages; `CC_PARTNER_BUNDLE_RATCHET=final-only` PASS hard ceilings only (local drift; CI strict) |
-| P2P inventory / quality-traceability / docs / support-manifest `--gate-d` / `git diff --check` | PASS |
+| `cargo fmt --check` | historically PASS on integration |
+| `cargo clippy --all-targets --locked -- -D warnings` | historically PASS (local browser-runtime placeholder may be required) |
+| `cargo test --locked --lib agent_hub` (**default parallel**) | residual: may flake without import-fault isolation; post-R1 fix targets green parallel |
+| `cargo test --locked --lib agent_hub -- --test-threads=1` | serial workaround only — **not** a plan-allowed substitute for parallel green |
+| `cargo test --locked --lib orchestrator::agent_adapter` | historically PASS |
+| `agent_hub_replication_smoke` / `agent_hub_gate_*_smoke` serial | L2 smoke historically PASS; not L3 |
+| `npm run lint` | residual **FAIL** (Agent Hub hooks/React Compiler debt) — **not green** |
+| `npm run check:bundle` strict | residual **FAIL** ratchet overages; final-only is not strict certification |
+| E2E `agent-hub.spec.ts` | L1/E2E historically PASS; does not certify L3 |
 
-**Still NOT VERIFIED (do not claim from this program run):**
+**Still NOT VERIFIED (complete Agent Hub L3 inventory; do not claim from CI/L2):**
 
-- `L3-AGENT-HUB-D-OPENCODE-001` / `L3-AGENT-HUB-OPENCODE-RUNTIME-001` — real pinned OpenCode TUI + provider credentials
-- `L3-AGENT-HUB-B-CLI-001` — real Claude/Codex/OpenCode exact-version product writes (`agent_hub_cli_contract` ignored harness)
+- `L3-AGENT-HUB-CLAUDE-001` — real Claude product install write path
+- `L3-AGENT-HUB-CODEX-001` — real Codex product install write path
+- `L3-AGENT-HUB-OPENCODE-001` — real OpenCode product install write path
+- `L3-AGENT-HUB-OPENCODE-RUNTIME-001` — real OpenCode runtime bridge session/permission/completion
+- `L3-AGENT-HUB-B-CLI-001` — real Claude/Codex/OpenCode exact-version product writes
 - `L3-AGENT-HUB-C-LAN-001` — dual-host mDNS `agent-hub.v1` source-push + Git confirm
-- `L3-AGENT-HUB-CLAUDE-001` / `L3-AGENT-HUB-CODEX-001` / `L3-AGENT-HUB-OPENCODE-001` (install-path family) — real multi-CLI product installs
+- `L3-AGENT-HUB-D-OPENCODE-001` — real pinned OpenCode visible TUI + provider credentials
 - Packaged desktop GUI / multi-platform Agent Hub matrix; marketplace activation side effects; N+2 legacy route/table deletion (migration evidence still locked)
+
+Report path: `.superpowers/sdd/reports/program-task-5-report.md` (residual status; not a certification certificate).
 
 ## Local Ubuntu-style quality (Rust + frontend)
 

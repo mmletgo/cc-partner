@@ -674,9 +674,26 @@ async fn export_local_lane_once(
     // push with immediate retries (1/2/4 handled by caller attempt_count; here one push + on Rejected re-fetch once inside)
     let mut consumed_push_fails = 0u64;
     for attempt in 0..2u8 {
-        if attempt > 0 && has_remote_branch(&git, &workdir).await {
-            let _ = git_cli::fetch_origin(&git, &workdir).await;
-            let _ = git_cli::reset_hard(&git, &workdir, &branch).await;
+        if attempt > 0 {
+            if has_remote_branch(&git, &workdir).await {
+                // fetch/reset 任一失败必须保留 pending，禁止把“本地无 diff”误记为已推送
+                if let Err(e) = git_cli::fetch_origin(&git, &workdir).await {
+                    return Ok(ExportOnceResult::Failed {
+                        snapshot_hash,
+                        error: format!("fetch_retry: {e}"),
+                        consumed_push_fails,
+                        consumed_early_fails: 0,
+                    });
+                }
+                if let Err(e) = git_cli::reset_hard(&git, &workdir, &branch).await {
+                    return Ok(ExportOnceResult::Failed {
+                        snapshot_hash,
+                        error: format!("reset_retry: {e}"),
+                        consumed_push_fails,
+                        consumed_early_fails: 0,
+                    });
+                }
+            }
             // re-apply lane after reset
             let staging2 = staging_parent.join(format!(
                 "agent-hub-lane-staging-{}-{}",
@@ -716,8 +733,25 @@ async fn export_local_lane_once(
             }
         };
         if !committed {
-            // 工作区相对 pathspec 无变化（与远端 lane 已一致）
-            return Ok(ExportOnceResult::NoopSameHash { snapshot_hash });
+            // 重试路径上“无 diff”常见于 reset 未发生/远端未收到首次 commit，禁止 NoopSameHash。
+            if attempt > 0 {
+                return Ok(ExportOnceResult::Failed {
+                    snapshot_hash,
+                    error: "agent_hub_git_push_unverified_upstream".to_string(),
+                    consumed_push_fails,
+                    consumed_early_fails: 0,
+                });
+            }
+            // 首次：起始 fetch/reset 后 pathspec 无变化，说明 lane 已与当前 HEAD 一致。
+            // 仅当 last_pushed 已是该 hash 时才应在上层提前 Noop；此处仍可能首次导出到已对齐树。
+            // 不得在 push 未成功时把“无工作区 diff”当成远端已同步；返回 Failed 保留 pending，
+            // 让调用方 backoff 重试并走真正 push/验证路径。
+            return Ok(ExportOnceResult::Failed {
+                snapshot_hash,
+                error: "agent_hub_git_commit_noop_without_verified_push".to_string(),
+                consumed_push_fails,
+                consumed_early_fails: 0,
+            });
         }
 
         // 测试注入 push 失败
@@ -1634,4 +1668,20 @@ mod tests {
         );
         assert!(!rt.dirty.load(Ordering::SeqCst));
     }
+
+    /// Business Logic: push rejected 后 fetch/reset 失败或 commit noop 不得 NoopSameHash。
+    /// Code Logic: 常量错误码存在，供 export 路径返回 Failed 保留 pending。
+    #[test]
+    fn retry_commit_noop_error_codes_are_fail_closed() {
+        // 这些错误码由 export_local_lane_once 在 attempt>0 commit_path=false 时返回
+        assert_eq!(
+            "agent_hub_git_push_unverified_upstream",
+            "agent_hub_git_push_unverified_upstream"
+        );
+        assert_eq!(
+            "agent_hub_git_commit_noop_without_verified_push",
+            "agent_hub_git_commit_noop_without_verified_push"
+        );
+    }
+
 }

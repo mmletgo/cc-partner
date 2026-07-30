@@ -118,15 +118,18 @@ pub async fn claude_md_push(
 /// Business Logic: legacy 摘要路径；不裁决 Hub 冲突、不 GC CAS。
 /// Code Logic: upsert + write_file_if_changed；忽略未知 Hub 表。
 async fn claude_md_push_impl(state: &AppState, req: ClaudeMdPushReq) -> Result<bool, AppError> {
-    // N/N+1：push 不触碰 CAS / 不读未知 Hub schema；Hub 冲突由 revision DAG 裁决。
-    let _ignore_unknown_hub = crate::agent_hub::migration::legacy_facade_policy(
-        state
-            .config
-            .read()
-            .map(|c| c.agent_hub.enabled)
-            .unwrap_or(false),
-    )
-    .ignore_unknown_hub_tables;
+    // Hub on：禁止直接写旧表/目标文件；必须翻译为 canonical mutation（user instruction）。
+    // Hub off：保留 legacy 直接写路径（N/N+1 兼容）。
+    let hub_enabled = state
+        .config
+        .read()
+        .map(|c| c.agent_hub.enabled)
+        .unwrap_or(false);
+    let policy = crate::agent_hub::migration::legacy_facade_policy(hub_enabled);
+    if !policy.allow_direct_target_mutation {
+        return claude_md_push_via_hub(state, &req).await;
+    }
+
     let local = state.claude_md_repo.get().await?;
     // 用 `Option::map_or` 而非 `Option::is_none_or`（后者 1.82 才 stable），
     // 项目 MSRV 是 1.77.2，clippy 的 `-D warnings` 会阻断。
@@ -139,4 +142,82 @@ async fn claude_md_push_impl(state: &AppState, req: ClaudeMdPushReq) -> Result<b
     state.claude_md_repo.upsert(&req.claude_md).await?;
     crate::sync::claude_md::write_file_if_changed(&req.claude_md.content).await?;
     Ok(accepted)
+}
+
+/// Hub 启用时把 legacy CLAUDE.md DTO 翻译为 canonical user instruction mutation。
+///
+/// Business Logic: Hub 是唯一事实源；N-1 peer 不得绕过 revision/CAS 直接改 CLI 文件。
+/// Code Logic: 幂等 ensure user scope/asset → update_instruction（revision CAS + projection）。
+async fn claude_md_push_via_hub(
+    state: &AppState,
+    req: &ClaudeMdPushReq,
+) -> Result<bool, AppError> {
+    use crate::agent_hub::migration::{
+        USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE,
+    };
+    use crate::agent_hub::models::AssetKind;
+    use crate::agent_hub::object_store::ObjectStore;
+
+    // 幂等 seed user instruction（不依赖磁盘文件路径时用 data_dir 下空路径 + 现有 DB 内容）
+    let data_dir = crate::config::data_dir()?;
+    let claude_path = crate::agent_hub::migration::user_claude_md_file_path()
+        .unwrap_or_else(|_| data_dir.join("legacy-claude-md-missing"));
+    let _ = crate::agent_hub::migration::migrate_user_claude_md_state(
+        state,
+        &claude_path,
+        &data_dir,
+    )
+    .await
+    .map_err(|e| {
+        AppError::generic(format!("agent_hub_legacy_claude_md_migrate_failed:{e}"))
+    })?;
+
+    let scope_id = state
+        .agent_hub_repo
+        .resolve_user_scope_id()
+        .await?
+        .ok_or_else(|| {
+            AppError::validation("agent_hub_legacy_claude_md_user_scope_missing".to_string())
+        })?;
+    let asset = state
+        .agent_hub_repo
+        .get_asset_by_unique_key(
+            &scope_id,
+            AssetKind::Instruction,
+            USER_INSTRUCTION_NAMESPACE,
+            USER_INSTRUCTION_LOGICAL_KEY,
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::validation("agent_hub_legacy_claude_md_user_asset_missing".to_string())
+        })?;
+    let before = asset.current_revision_id.clone();
+    // 确保 ObjectStore 根可用（update_instruction 内部会 open）
+    let _ = ObjectStore::open(&data_dir)?;
+    // Ui CAS 要求 expected_revision_id；用当前 head 作为 expected
+    let expected = before
+        .as_ref()
+        .map(|r| r.as_str().to_string())
+        .ok_or_else(|| {
+            AppError::validation("agent_hub_legacy_claude_md_asset_head_missing".to_string())
+        })?;
+    crate::agent_hub::service::AgentHubService::update_instruction(
+        state,
+        crate::agent_hub::service::UpdateInstructionRequest {
+            asset_id: asset.id.clone(),
+            content_markdown: req.claude_md.content.clone(),
+            expected_revision_id: Some(expected),
+        },
+    )
+    .await
+    .map_err(|e| {
+        // CAS/canonical 失败必须让请求失败（不得回落直接写旧表）
+        AppError::conflict(format!("agent_hub_legacy_claude_md_hub_mutation_failed:{e}"))
+    })?;
+    let after = state
+        .agent_hub_repo
+        .get_asset(&asset.id)
+        .await?
+        .and_then(|a| a.current_revision_id);
+    Ok(before != after)
 }

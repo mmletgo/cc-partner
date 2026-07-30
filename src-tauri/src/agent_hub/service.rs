@@ -894,61 +894,115 @@ async fn apply_target_intent(
             fan_out_absent,
         } => {
             // 单 write-lease 事务：tombstone + fan-out，避免中途失败留下半状态。
+            // Plugin package 必须走 ownership-aware 删除，否则 package-owned component 成孤儿。
             if append_canonical_tombstone || fan_out_absent {
-                let parents = asset
-                    .current_revision_id
-                    .clone()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                let expected_parent_id = asset.current_revision_id.clone();
-                let fan_out: Vec<NewTargetBinding> = {
-                    let all = state
+                if asset.kind == AssetKind::Plugin {
+                    let store = object_store()?;
+                    let delete_result = state
                         .agent_hub_repo
-                        .list_target_bindings_for_asset(&asset.id)
+                        .delete_plugin_package_with_ownership(
+                            &asset.id,
+                            &store,
+                            RevisionOriginKind::Ui,
+                            state.device_id.as_str().to_string(),
+                        )
                         .await?;
-                    if all.is_empty() {
-                        vec![NewTargetBinding {
-                            asset_id: asset.id.clone(),
-                            target,
-                            local_scope_mapping_id: None,
-                            checkout_binding_id: None,
-                            desired_presence: DesiredPresence::Absent,
-                            desired_enabled: false,
-                        }]
-                    } else {
-                        all.into_iter()
-                            .map(|b| NewTargetBinding {
-                                asset_id: asset.id.clone(),
-                                target: b.target,
-                                local_scope_mapping_id: b.local_scope_mapping_id,
-                                checkout_binding_id: b.checkout_binding_id,
+                    // fan-out package + tombstoned components 的 target bindings → Absent
+                    let mut fan_asset_ids = vec![asset.id.clone()];
+                    for d in &delete_result.component_decisions {
+                        if d.decision
+                            == crate::agent_hub::plugins::ownership::ComponentDeleteDecision::TombstoneOwned
+                        {
+                            fan_asset_ids.push(d.component_asset_id.clone());
+                        }
+                    }
+                    for aid in fan_asset_ids {
+                        let all = state
+                            .agent_hub_repo
+                            .list_target_bindings_for_asset(&aid)
+                            .await?;
+                        let fan_out: Vec<NewTargetBinding> = if all.is_empty() {
+                            vec![NewTargetBinding {
+                                asset_id: aid.clone(),
+                                target,
+                                local_scope_mapping_id: None,
+                                checkout_binding_id: None,
                                 desired_presence: DesiredPresence::Absent,
                                 desired_enabled: false,
-                            })
-                            .collect()
+                            }]
+                        } else {
+                            all.into_iter()
+                                .map(|b| NewTargetBinding {
+                                    asset_id: aid.clone(),
+                                    target: b.target,
+                                    local_scope_mapping_id: b.local_scope_mapping_id,
+                                    checkout_binding_id: b.checkout_binding_id,
+                                    desired_presence: DesiredPresence::Absent,
+                                    desired_enabled: false,
+                                })
+                                .collect()
+                        };
+                        for binding in fan_out {
+                            state.agent_hub_repo.upsert_target_binding(binding).await?;
+                        }
+                        schedule_after_binding_change(state, &aid).await;
                     }
-                };
-                state
-                    .agent_hub_repo
-                    .delete_asset_everywhere_atomic(
-                        &asset.id,
-                        NewRevision {
-                            id: RevisionId::new_v7(),
-                            asset_lineage_id: asset.id.clone(),
-                            parents,
-                            operation: RevisionOperation::Delete,
-                            origin_kind: RevisionOriginKind::Ui,
-                            origin_target: None,
-                            origin_replica_id: state.device_id.as_str().to_string(),
-                            payload_hash: None,
-                            tree_manifest_hash: None,
-                            created_at: chrono::Utc::now().to_rfc3339(),
-                            expected_parent_id,
-                        },
-                        fan_out,
-                    )
-                    .await?;
-                schedule_after_binding_change(state, &asset.id).await;
+                } else {
+                    let parents = asset
+                        .current_revision_id
+                        .clone()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    let expected_parent_id = asset.current_revision_id.clone();
+                    let fan_out: Vec<NewTargetBinding> = {
+                        let all = state
+                            .agent_hub_repo
+                            .list_target_bindings_for_asset(&asset.id)
+                            .await?;
+                        if all.is_empty() {
+                            vec![NewTargetBinding {
+                                asset_id: asset.id.clone(),
+                                target,
+                                local_scope_mapping_id: None,
+                                checkout_binding_id: None,
+                                desired_presence: DesiredPresence::Absent,
+                                desired_enabled: false,
+                            }]
+                        } else {
+                            all.into_iter()
+                                .map(|b| NewTargetBinding {
+                                    asset_id: asset.id.clone(),
+                                    target: b.target,
+                                    local_scope_mapping_id: b.local_scope_mapping_id,
+                                    checkout_binding_id: b.checkout_binding_id,
+                                    desired_presence: DesiredPresence::Absent,
+                                    desired_enabled: false,
+                                })
+                                .collect()
+                        }
+                    };
+                    state
+                        .agent_hub_repo
+                        .delete_asset_everywhere_atomic(
+                            &asset.id,
+                            NewRevision {
+                                id: RevisionId::new_v7(),
+                                asset_lineage_id: asset.id.clone(),
+                                parents,
+                                operation: RevisionOperation::Delete,
+                                origin_kind: RevisionOriginKind::Ui,
+                                origin_target: None,
+                                origin_replica_id: state.device_id.as_str().to_string(),
+                                payload_hash: None,
+                                tree_manifest_hash: None,
+                                created_at: chrono::Utc::now().to_rfc3339(),
+                                expected_parent_id,
+                            },
+                            fan_out,
+                        )
+                        .await?;
+                    schedule_after_binding_change(state, &asset.id).await;
+                }
             }
         }
         TargetBindingTransition::RejectLastTargetOnlyRequiresEverywhere { code } => {

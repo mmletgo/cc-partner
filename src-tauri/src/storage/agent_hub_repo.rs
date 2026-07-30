@@ -3490,6 +3490,45 @@ impl AgentHubRepo {
         .await
     }
 
+    /// 在调用方已开启的写事务上应用 import bundle（供 LAN ledger 同 TX 提交）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     LAN commit 要求 claim prepared → import → outcome committed 原子完成；
+    ///     若 import 与 ledger 分事务，崩溃重放会重复副作用。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     委托 `apply_import_bundle_on_tx`；不 begin/commit；可选 fault inject 与独立 commit 对齐。
+    pub async fn apply_import_bundle_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        bundle: &ImportBundle,
+    ) -> Result<ImportBundleResult, AppError> {
+        let result = apply_import_bundle_on_tx(tx, bundle).await?;
+        #[cfg(any(test, debug_assertions))]
+        {
+            let fault = self.import_fault.swap(0, Ordering::SeqCst);
+            if fault == AgentHubImportFault::BeforeHeadUpdate.as_u8() {
+                return Err(AppError::generic(
+                    "agent_hub_import_injected_before_head_update".to_string(),
+                ));
+            }
+            if fault == AgentHubImportFault::BeforeTxCommit.as_u8() {
+                return Err(AppError::generic(
+                    "agent_hub_import_injected_before_tx_commit".to_string(),
+                ));
+            }
+        }
+        Ok(result)
+    }
+
+    /// 返回共享 maintenance gate（供 replication 与 import 同 lease 原子提交）。
+    ///
+    /// Business Logic: LAN commit 需与 AgentHubRepo 写路径互斥。
+    /// Code Logic: clone Arc gate。
+    pub fn gate(&self) -> Arc<DatabaseMaintenanceGate> {
+        Arc::clone(&self.gate)
+    }
+
     /// 插入 lineage 映射（幂等）。
     ///
     /// Business Logic: 远端 asset id 作为 lineage alias 挂到本地 logical asset。
@@ -3783,6 +3822,8 @@ pub struct ImportConflictRow {
 pub struct ImportHeadDecision {
     /// 本地 logical asset id
     pub asset_id: String,
+    /// 规划时观测到的 local head（含 NULL）；提交阶段 CAS 必须匹配，防并发本地写被静默覆盖
+    pub expected_head: Option<String>,
     /// 新 current head；None 表示不改 head（仅开 conflict）
     pub new_head: Option<String>,
     /// 是否 tombstone
@@ -3809,7 +3850,7 @@ pub struct ImportBundleResult {
 /// Business Logic: Phase B 核心；失败则整笔回滚。
 /// Code Logic: scopes → assets/lineages → revisions/parents → plugin edges →
 ///     variants → conflicts → heads。
-async fn apply_import_bundle_on_tx(
+pub(crate) async fn apply_import_bundle_on_tx(
     tx: &mut Transaction<'_, Sqlite>,
     bundle: &ImportBundle,
 ) -> Result<ImportBundleResult, AppError> {
@@ -4144,6 +4185,7 @@ async fn apply_import_bundle_on_tx(
     }
 
     // 7) head decisions（仅显式 new_head 才推进；None 保留旧 head）
+    //    带 expected_head CAS：规划后并发本地写不得被静默覆盖；rows_affected 必须为 1。
     for d in &bundle.head_decisions {
         if let Some(head) = &d.new_head {
             // 确认 head revision 存在
@@ -4157,17 +4199,30 @@ async fn apply_import_bundle_on_tx(
                     "agent_hub_import_head_missing:{head}"
                 )));
             }
-            sqlx::query(
+            // 资产必须存在（import 先 upsert assets）；expected_head 与当前 head 做 CAS
+            let cas = sqlx::query(
                 "UPDATE agent_hub_assets
                  SET current_revision_id = ?, deleted_at = ?, updated_at = ?
-                 WHERE id = ?",
+                 WHERE id = ?
+                   AND (
+                     (? IS NULL AND current_revision_id IS NULL)
+                     OR current_revision_id = ?
+                   )",
             )
             .bind(head)
             .bind(&d.deleted_at)
             .bind(&now)
             .bind(&d.asset_id)
+            .bind(&d.expected_head)
+            .bind(&d.expected_head)
             .execute(&mut **tx)
             .await?;
+            if cas.rows_affected() != 1 {
+                return Err(AppError::conflict(format!(
+                    "agent_hub_import_head_cas_conflict:{}",
+                    d.asset_id
+                )));
+            }
             result.heads_advanced += 1;
         }
         imported_assets.insert(d.asset_id.clone());
@@ -7177,4 +7232,97 @@ mod tests {
         // residual blob must be present after tree expansion
         assert!(obj_hashes.contains(residual_blob.hash.as_str()));
     }
+
+
+    /// Business Logic: import head 必须 CAS 规划时的 expected head，并发本地写不得静默覆盖。
+    /// Code Logic: 准备 asset head H0，bundle expected H0→H1；先把 head 改到 L1，再 apply 应 conflict。
+    #[tokio::test]
+    async fn import_head_cas_rejects_stale_expected_head() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: "cas.md".into(),
+                display_name: "cas".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let h0 = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "d1".into(),
+                payload_hash: Some("a".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        let l1 = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![h0.id.clone()],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "d1".into(),
+                payload_hash: Some("b".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expected_parent_id: Some(h0.id.clone()),
+            })
+            .await
+            .unwrap();
+        // remote planned head H_remote based on expected H0, but local already L1
+        let h_remote = RevisionId::new_v7();
+        let now = chrono::Utc::now().to_rfc3339();
+        let bundle = ImportBundle {
+            scopes: vec![],
+            assets: vec![],
+            lineages: vec![],
+            revisions: vec![ImportRevisionRow {
+                id: h_remote.as_str().to_string(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![h0.id.as_str().to_string()],
+                generation: 2,
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Lan,
+                origin_target: None,
+                origin_replica_id: "peer".into(),
+                payload_hash: Some("c".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: now.clone(),
+            }],
+            variants: vec![],
+            conflicts: vec![],
+            head_decisions: vec![ImportHeadDecision {
+                asset_id: asset.id.clone(),
+                expected_head: Some(h0.id.as_str().to_string()),
+                new_head: Some(h_remote.as_str().to_string()),
+                deleted_at: None,
+            }],
+            project_mappings: vec![],
+            plugin_components: vec![],
+            plugin_residuals: vec![],
+        };
+        let err = repo.commit_import_bundle(bundle).await.unwrap_err();
+        assert_eq!(err.ipc_category_code(), "conflict");
+        let head = repo.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(
+            head.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(l1.id.as_str()),
+            "local L1 head must survive failed CAS import"
+        );
+    }
+
 }

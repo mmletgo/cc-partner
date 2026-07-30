@@ -13,7 +13,7 @@ pub mod receiver;
 pub mod sender;
 
 pub use ledger::{
-    PushObjectRow, PushRequestRow, PushRequestStatus, ReplicationLedger, MAX_STAGING_AGE,
+    CommitClaim, PushObjectRow, PushRequestRow, PushRequestStatus, ReplicationLedger, MAX_STAGING_AGE,
 };
 pub use receiver::{
     commit_push, gc_abandoned_incoming_staging, prepare_push, put_object_chunk, AgentHubChunkLimit,
