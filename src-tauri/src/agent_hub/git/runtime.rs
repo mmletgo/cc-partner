@@ -349,6 +349,7 @@ impl AgentHubGitRuntime {
                     last_exported_snapshot_hash: Some(snapshot_hash.clone()),
                     last_pushed_snapshot_hash: Some(snapshot_hash),
                     pending_snapshot_hash: None,
+                    pending_commit_oid: None,
                     attempt_count: 0,
                     next_attempt_at: None,
                     last_error: None,
@@ -370,6 +371,7 @@ impl AgentHubGitRuntime {
                     last_exported_snapshot_hash: Some(snapshot_hash.clone()),
                     last_pushed_snapshot_hash: Some(snapshot_hash),
                     pending_snapshot_hash: None,
+                    pending_commit_oid: None,
                     attempt_count: 0,
                     next_attempt_at: None,
                     last_error: None,
@@ -385,6 +387,7 @@ impl AgentHubGitRuntime {
                         last_exported_snapshot_hash: row.last_exported_snapshot_hash.clone(),
                         last_pushed_snapshot_hash: None,
                         pending_snapshot_hash: row.last_exported_snapshot_hash.clone(),
+                        pending_commit_oid: None,
                         attempt_count: 0,
                         next_attempt_at: Some(
                             (self.now_wall() + chrono::Duration::seconds(1)).to_rfc3339(),
@@ -439,6 +442,7 @@ impl AgentHubGitRuntime {
                         last_exported_snapshot_hash: None,
                         last_pushed_snapshot_hash: None,
                         pending_snapshot_hash: None,
+                        pending_commit_oid: None,
                         attempt_count: 0,
                         next_attempt_at: None,
                         last_error: None,
@@ -461,6 +465,8 @@ impl AgentHubGitRuntime {
                     last_exported_snapshot_hash: Some(snapshot_hash.clone()),
                     last_pushed_snapshot_hash: prev.last_pushed_snapshot_hash,
                     pending_snapshot_hash: Some(snapshot_hash),
+                    // 保留已产生的本地 commit OID，供无 diff 轮次 push/远端核对
+                    pending_commit_oid: prev.pending_commit_oid.clone(),
                     attempt_count: attempts,
                     next_attempt_at: Some(next_at),
                     last_error: Some(error),
@@ -733,25 +739,84 @@ async fn export_local_lane_once(
             }
         };
         if !committed {
-            // 重试路径上“无 diff”常见于 reset 未发生/远端未收到首次 commit，禁止 NoopSameHash。
-            if attempt > 0 {
+            // 无新 diff：仍须 push 既有 HEAD 或核对远端 tip 与 pending_commit_oid，禁止永久 pending。
+            let head_oid = match head_commit_oid(&git, &workdir).await {
+                Ok(o) => o,
+                Err(e) => {
+                    return Ok(ExportOnceResult::Failed {
+                        snapshot_hash,
+                        error: format!("head_oid: {e}"),
+                        consumed_push_fails,
+                        consumed_early_fails: 0,
+                    });
+                }
+            };
+            // 若远端 tip 已是 HEAD，视为已 push 成功（丢 ACK 恢复）
+            let _ = git_cli::fetch_origin(&git, &workdir).await;
+            if let Ok(Some(remote_tip)) = remote_branch_tip_oid(&git, &workdir, &branch).await {
+                if remote_tip == head_oid {
+                    return Ok(ExportOnceResult::Pushed { snapshot_hash });
+                }
+            }
+            // 测试注入 push 失败
+            if push_fail_remaining > 0 {
+                consumed_push_fails += 1;
                 return Ok(ExportOnceResult::Failed {
                     snapshot_hash,
-                    error: "agent_hub_git_push_unverified_upstream".to_string(),
+                    error: "agent_hub_git_push_injected_failure".to_string(),
                     consumed_push_fails,
                     consumed_early_fails: 0,
                 });
             }
-            // 首次：起始 fetch/reset 后 pathspec 无变化，说明 lane 已与当前 HEAD 一致。
-            // 仅当 last_pushed 已是该 hash 时才应在上层提前 Noop；此处仍可能首次导出到已对齐树。
-            // 不得在 push 未成功时把“无工作区 diff”当成远端已同步；返回 Failed 保留 pending，
-            // 让调用方 backoff 重试并走真正 push/验证路径。
-            return Ok(ExportOnceResult::Failed {
-                snapshot_hash,
-                error: "agent_hub_git_commit_noop_without_verified_push".to_string(),
-                consumed_push_fails,
-                consumed_early_fails: 0,
-            });
+            match git_cli::push(&git, &workdir, &branch).await {
+                Ok(()) => {
+                    return Ok(ExportOnceResult::Pushed { snapshot_hash });
+                }
+                Err(PushError::Rejected) if attempt == 0 => {
+                    tracing::warn!("agent_hub_git: push rejected on no-diff path, rebase once");
+                    continue;
+                }
+                Err(PushError::Rejected) => {
+                    return Ok(ExportOnceResult::Failed {
+                        snapshot_hash,
+                        error: "agent_hub_git_push_rejected".to_string(),
+                        consumed_push_fails,
+                        consumed_early_fails: 0,
+                    });
+                }
+                Err(PushError::Other(e)) => {
+                    return Ok(ExportOnceResult::Failed {
+                        snapshot_hash,
+                        error: format!("push_existing_head: {e}"),
+                        consumed_push_fails,
+                        consumed_early_fails: 0,
+                    });
+                }
+            }
+        }
+
+        // 本地 commit 已产生：持久化 pending_commit_oid（失败仍保留 pending）
+        let head_oid = head_commit_oid(&git, &workdir).await.ok();
+        if let Some(oid) = head_oid.as_ref() {
+            let prev = state
+                .agent_hub_repo
+                .get_git_export_state(state.device_id.as_str())
+                .await
+                .ok()
+                .flatten();
+            let row = AgentHubGitExportState {
+                device_id: state.device_id.to_string(),
+                last_exported_snapshot_hash: Some(snapshot_hash.clone()),
+                last_pushed_snapshot_hash: prev
+                    .as_ref()
+                    .and_then(|p| p.last_pushed_snapshot_hash.clone()),
+                pending_snapshot_hash: Some(snapshot_hash.clone()),
+                pending_commit_oid: Some(oid.clone()),
+                attempt_count: prev.as_ref().map(|p| p.attempt_count).unwrap_or(0),
+                next_attempt_at: None,
+                last_error: None,
+            };
+            let _ = state.agent_hub_repo.upsert_git_export_state(&row).await;
         }
 
         // 测试注入 push 失败
@@ -811,6 +876,57 @@ async fn has_remote_branch(git: &Path, workdir: &Path) -> bool {
     )
     .await
     .is_ok()
+}
+
+/// 读取 workdir HEAD OID。
+///
+/// Business Logic: 本地 commit 成功或 no-diff 后需持久化/核对 commit OID，防止永久 pending。
+/// Code Logic: `git rev-parse HEAD`。
+async fn head_commit_oid(git: &Path, workdir: &Path) -> Result<String, AppError> {
+    let out = git_cli::run(
+        git,
+        workdir,
+        &["rev-parse", "HEAD"],
+        Duration::from_secs(30),
+    )
+    .await?;
+    let oid = out.trim().to_string();
+    if oid.is_empty() {
+        return Err(AppError::generic(
+            "agent_hub_git_head_oid_empty".to_string(),
+        ));
+    }
+    Ok(oid)
+}
+
+/// 核对远端分支 tip 是否等于给定 OID。
+///
+/// Business Logic: ACK 丢失后通过 fetch+rev-parse 确认远端已有快照，避免永久 Failed。
+/// Code Logic: `git rev-parse origin/<branch>`。
+async fn remote_branch_tip_oid(
+    git: &Path,
+    workdir: &Path,
+    branch: &str,
+) -> Result<Option<String>, AppError> {
+    let spec = format!("origin/{branch}");
+    match git_cli::run(
+        git,
+        workdir,
+        &["rev-parse", "--verify", &spec],
+        Duration::from_secs(30),
+    )
+    .await
+    {
+        Ok(out) => {
+            let oid = out.trim().to_string();
+            if oid.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(oid))
+            }
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 /// Headless owner：启动 recover + debounce/pending flush 循环。
@@ -1191,6 +1307,7 @@ mod tests {
             last_exported_snapshot_hash: Some(hash.clone()),
             last_pushed_snapshot_hash: Some(hash.clone()),
             pending_snapshot_hash: None,
+            pending_commit_oid: None,
             attempt_count: 0,
             next_attempt_at: None,
             last_error: None,
@@ -1259,6 +1376,7 @@ mod tests {
             last_exported_snapshot_hash: Some("aaa".into()),
             last_pushed_snapshot_hash: Some("old".into()),
             pending_snapshot_hash: Some("aaa".into()),
+            pending_commit_oid: None,
             attempt_count: 2,
             next_attempt_at: Some(
                 (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339(),
@@ -1669,19 +1787,39 @@ mod tests {
         assert!(!rt.dirty.load(Ordering::SeqCst));
     }
 
-    /// Business Logic: push rejected 后 fetch/reset 失败或 commit noop 不得 NoopSameHash。
-    /// Code Logic: 常量错误码存在，供 export 路径返回 Failed 保留 pending。
-    #[test]
-    fn retry_commit_noop_error_codes_are_fail_closed() {
-        // 这些错误码由 export_local_lane_once 在 attempt>0 commit_path=false 时返回
-        assert_eq!(
-            "agent_hub_git_push_unverified_upstream",
-            "agent_hub_git_push_unverified_upstream"
-        );
-        assert_eq!(
-            "agent_hub_git_commit_noop_without_verified_push",
-            "agent_hub_git_commit_noop_without_verified_push"
-        );
+    /// Business Logic: no-diff / 丢 ACK 路径必须能 push 既有 HEAD 或核对远端 tip，禁止永久 pending。
+    /// Code Logic: pending_commit_oid 字段可持久化；失败态保留 oid 供恢复。
+    #[tokio::test]
+    async fn pending_commit_oid_persists_across_failed_state() {
+        let repo = {
+            let options = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
+                .unwrap()
+                .create_if_missing(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .unwrap();
+            crate::storage::AgentHubRepo::ensure_schema(&pool)
+                .await
+                .unwrap();
+            crate::storage::AgentHubRepo::new(pool)
+        };
+        repo.upsert_git_export_state(&AgentHubGitExportState {
+            device_id: "dev-oid".into(),
+            last_exported_snapshot_hash: Some("snap1".into()),
+            last_pushed_snapshot_hash: None,
+            pending_snapshot_hash: Some("snap1".into()),
+            pending_commit_oid: Some("abc123deadbeef".into()),
+            attempt_count: 1,
+            next_attempt_at: None,
+            last_error: Some("push: injected".into()),
+        })
+        .await
+        .unwrap();
+        let row = repo.get_git_export_state("dev-oid").await.unwrap().unwrap();
+        assert_eq!(row.pending_commit_oid.as_deref(), Some("abc123deadbeef"));
+        assert_eq!(row.pending_snapshot_hash.as_deref(), Some("snap1"));
+        assert!(row.last_pushed_snapshot_hash.is_none());
     }
-
 }
