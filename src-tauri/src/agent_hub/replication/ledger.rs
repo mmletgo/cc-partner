@@ -56,6 +56,17 @@ impl PushRequestStatus {
     }
 }
 
+/// commit 路径对 ledger 行的领取结果。
+///
+/// Business Logic: 已 committed 只能回放；prepared 才允许 import 副作用。
+#[derive(Debug, Clone)]
+pub enum CommitClaim {
+    /// 已 committed：回放 outcome，不再 import
+    Replay(PushRequestRow),
+    /// 当前 prepared：调用方在同 TX 内 import + mark_committed
+    Claimed(PushRequestRow),
+}
+
 /// 一条 push 请求 ledger 行。
 ///
 /// Business Logic: 绑定 source/request 与 selection/snapshot hash 及 transfer。
@@ -106,6 +117,51 @@ pub struct PushObjectRow {
 pub struct ReplicationLedger {
     pool: SqlitePool,
     gate: Arc<DatabaseMaintenanceGate>,
+}
+
+/// 在调用方事务内 prepared→committed（同 outcome 幂等）。
+///
+/// Business Logic: LAN import 与 ledger 必须同一 SQLite 写事务。
+/// Code Logic: UPDATE WHERE prepared OR committed+same outcome；rows_affected=0 → conflict。
+async fn mark_committed_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    source_device_id: &str,
+    client_request_id: &str,
+    outcome_json: &str,
+) -> Result<PushRequestRow, AppError> {
+    let now = Utc::now().to_rfc3339();
+    let updated = sqlx::query(
+        "UPDATE agent_hub_push_requests
+         SET status = 'committed', outcome_json = ?, updated_at = ?
+         WHERE source_device_id = ? AND client_request_id = ?
+           AND (status = 'prepared'
+                OR (status = 'committed' AND outcome_json = ?))",
+    )
+    .bind(outcome_json)
+    .bind(&now)
+    .bind(source_device_id)
+    .bind(client_request_id)
+    .bind(outcome_json)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Err(AppError::conflict(
+            "agent_hub_push_commit_state_conflict".to_string(),
+        ));
+    }
+    let row = sqlx::query(
+        "SELECT source_device_id, client_request_id, transfer_id, selection_hash, snapshot_hash,
+                status, envelope_json, outcome_json, created_at, updated_at
+         FROM agent_hub_push_requests
+         WHERE source_device_id = ? AND client_request_id = ?",
+    )
+    .bind(source_device_id)
+    .bind(client_request_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("agent_hub_push_request_missing".to_string()))?;
+    row_to_request(row)
 }
 
 impl ReplicationLedger {
@@ -318,33 +374,80 @@ impl ReplicationLedger {
         outcome_json: &str,
     ) -> Result<PushRequestRow, AppError> {
         with_shared_write_lease(&self.gate, async {
-            let now = Utc::now().to_rfc3339();
-            let updated = sqlx::query(
-                "UPDATE agent_hub_push_requests
-                 SET status = 'committed', outcome_json = ?, updated_at = ?
-                 WHERE source_device_id = ? AND client_request_id = ?
-                   AND (status = 'prepared'
-                        OR (status = 'committed' AND outcome_json = ?))",
+            let mut tx = self.pool.begin().await?;
+            let row = mark_committed_on_tx(
+                &mut tx,
+                source_device_id,
+                client_request_id,
+                outcome_json,
             )
-            .bind(outcome_json)
-            .bind(&now)
-            .bind(source_device_id)
-            .bind(client_request_id)
-            .bind(outcome_json)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-            if updated == 0 {
-                // 已 committed 且 outcome 不同，或行不存在
-                return Err(AppError::conflict(
-                    "agent_hub_push_commit_state_conflict".to_string(),
-                ));
-            }
-            self.get_request(source_device_id, client_request_id)
-                .await?
-                .ok_or_else(|| AppError::not_found("agent_hub_push_request_missing".to_string()))
+            .await?;
+            tx.commit().await?;
+            Ok(row)
         })
         .await
+    }
+    /// 在已开启事务内把 prepared 标记为 committed 并写 outcome。
+    ///
+    /// Business Logic: 与 import 同 TX，保证幂等键只产生一次副作用。
+    /// Code Logic: 委托 free `mark_committed_on_tx`。
+    pub async fn mark_committed_on_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        source_device_id: &str,
+        client_request_id: &str,
+        outcome_json: &str,
+    ) -> Result<PushRequestRow, AppError> {
+        let _ = self;
+        mark_committed_on_tx(tx, source_device_id, client_request_id, outcome_json).await
+    }
+
+
+    /// 在已开启事务内：领取 prepared 行（CAS prepared→claiming 语义用 rows 锁）。
+    ///
+    /// Business Logic: 并发 commit 只能有一方 import；失败者回放已保存 outcome。
+    /// Code Logic: SELECT 行；Committed 返回 Replay；Prepared 返回 Claimed；其它 conflict。
+    pub async fn inspect_commit_claim_on_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        source_device_id: &str,
+        client_request_id: &str,
+        selection_hash: &str,
+        snapshot_hash: &str,
+    ) -> Result<CommitClaim, AppError> {
+        let row = sqlx::query(
+            "SELECT source_device_id, client_request_id, transfer_id, selection_hash, snapshot_hash,
+                    status, envelope_json, outcome_json, created_at, updated_at
+             FROM agent_hub_push_requests
+             WHERE source_device_id = ? AND client_request_id = ?",
+        )
+        .bind(source_device_id)
+        .bind(client_request_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(row) = row else {
+            return Err(AppError::not_found("agent_hub_push_request_missing".to_string()));
+        };
+        let parsed = row_to_request(row)?;
+        if parsed.selection_hash != selection_hash || parsed.snapshot_hash != snapshot_hash {
+            return Err(AppError::conflict(
+                "agent_hub_push_commit_hash_conflict".to_string(),
+            ));
+        }
+        match parsed.status {
+            PushRequestStatus::Committed => Ok(CommitClaim::Replay(parsed)),
+            PushRequestStatus::Prepared => Ok(CommitClaim::Claimed(parsed)),
+        }
+    }
+
+    /// 在已开启事务内把 prepared 标记为 committed 并写 outcome。
+    ///
+    /// Business Logic: 与 import 同 TX，保证幂等键只产生一次副作用。
+
+
+    /// 返回 maintenance gate（与 AgentHubRepo 同 lease 时使用）。
+    pub fn gate(&self) -> std::sync::Arc<DatabaseMaintenanceGate> {
+        std::sync::Arc::clone(&self.gate)
     }
 
     /// 登记/刷新 object 期望 size（prepare 时批量）。
@@ -660,4 +763,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(differ.ipc_category_code(), "conflict");
     }
+
+    /// Business Logic: claim prepared + mark committed 同 TX；并发 claim 只能回放。
+    /// Code Logic: inspect Claimed → mark_committed_on_tx → commit；二次 inspect 得 Replay。
+    #[tokio::test]
+    async fn claim_prepared_then_mark_committed_on_tx_is_atomic() {
+        let ledger = test_ledger().await;
+        ledger
+            .insert_prepared("s", "r-atom", "t", "sel", "snap", "{}")
+            .await
+            .unwrap();
+        let mut tx = ledger.pool().begin().await.unwrap();
+        let claim = ledger
+            .inspect_commit_claim_on_tx(&mut tx, "s", "r-atom", "sel", "snap")
+            .await
+            .unwrap();
+        assert!(matches!(claim, CommitClaim::Claimed(_)));
+        ledger
+            .mark_committed_on_tx(&mut tx, "s", "r-atom", r#"{"once":true}"#)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx2 = ledger.pool().begin().await.unwrap();
+        let claim2 = ledger
+            .inspect_commit_claim_on_tx(&mut tx2, "s", "r-atom", "sel", "snap")
+            .await
+            .unwrap();
+        match claim2 {
+            CommitClaim::Replay(row) => {
+                assert_eq!(row.outcome_json.as_deref(), Some(r#"{"once":true}"#));
+            }
+            CommitClaim::Claimed(_) => panic!("must replay after committed"),
+        }
+    }
+
 }

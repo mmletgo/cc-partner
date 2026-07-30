@@ -607,10 +607,11 @@ fn hash_file(path: &Path) -> Result<String, AppError> {
 /// commit：校验全部 object 可达，import，登记 outcome，enqueue reconcile。
 ///
 /// Business Logic:
-///     半截 import 永不暴露；committed 同 hash 回放；projection 状态独立报告。
+///     半截 import 永不暴露；committed 同 hash 回放；同一幂等键只产生一次 import 副作用。
 ///
 /// Code Logic:
-///     revalidate envelope → 收集 object bytes → SnapshotImporter::commit_import → mark_committed。
+///     收集 object bytes（无 DB 写）→ 同一 SQLite 写事务 claim prepared → import bundle →
+///     mark_committed → commit；竞争失败者只能回放已保存 outcome。
 pub async fn commit_push(
     repo: &AgentHubRepo,
     objects: &ObjectStore,
@@ -640,7 +641,7 @@ pub async fn commit_push(
         ));
     }
 
-    // 已 committed → 回放
+    // 已 committed → 回放（无新副作用）
     if row.status == PushRequestStatus::Committed {
         let outcome: SnapshotImportOutcome = row
             .outcome_json
@@ -674,7 +675,7 @@ pub async fn commit_push(
         ));
     }
 
-    // 收集全部 object bytes（CAS 或 staging verified）
+    // 收集全部 object bytes（CAS 或 staging verified）——仅读，无 ledger/import 写
     let mut object_bytes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let obj_rows = ledger.list_objects(transfer_id).await?;
     let declared: BTreeSet<String> = envelope.objects.iter().map(|o| o.hash.clone()).collect();
@@ -712,23 +713,76 @@ pub async fn commit_push(
         }
         object_bytes.insert(desc.hash.clone(), bytes);
     }
-
-    // parents/objects 可达：validate_snapshot + importer closure 再保证
     let _ = declared;
 
+    // Phase A CAS 写 object store + plan 均在 import TX 外完成（max_connections=1 禁止 TX 内再读 pool）
     let validated = ValidatedSnapshot::from_parts(envelope, object_bytes, Some(limits))?;
     let importer = SnapshotImporter::new(repo.clone(), objects.clone(), data_dir);
-    let outcome = importer
-        .commit_import(validated, ConfirmedImportSelection::default())
+    let staged = importer.stage_objects_for_import(&validated).await?;
+    let plan = importer
+        .plan_import_bundle_public(&validated.envelope, &ConfirmedImportSelection::default())
+        .await?;
+    let projections_scheduled = plan.projections_scheduled;
+    let mut bundle = plan.bundle;
+    importer
+        .enrich_plugin_edges_for_import_public(
+            &mut bundle,
+            &validated.envelope,
+            &validated.object_bytes,
+        )
         .await?;
 
-    let outcome_json = serde_json::to_string(&outcome)
-        .map_err(|e| AppError::generic(format!("agent_hub_push_outcome_serialize:{e}")))?;
+    // 同一写事务：claim prepared → apply import bundle → mark committed
+    // head CAS 会拒绝规划后被本地并发推进的 head；失败后调用方重试可重新 plan。
+    use crate::agent_hub::replication::ledger::CommitClaim;
+    use crate::storage::maintenance_gate::with_shared_write_lease;
+    let outcome = with_shared_write_lease(&repo.gate(), async {
+        let mut tx = repo.pool().begin().await?;
+        match ledger
+            .inspect_commit_claim_on_tx(
+                &mut tx,
+                source,
+                client_req,
+                &req.selection_hash,
+                &req.snapshot_hash,
+            )
+            .await?
+        {
+            CommitClaim::Replay(row) => {
+                let outcome: SnapshotImportOutcome = row
+                    .outcome_json
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .ok_or_else(|| {
+                        AppError::generic("agent_hub_push_committed_outcome_corrupt".to_string())
+                    })?;
+                drop(tx);
+                return Ok::<SnapshotImportOutcome, AppError>(outcome);
+            }
+            CommitClaim::Claimed(_) => {}
+        }
 
-    // 先持久化 outcome，再 enqueue（半 import 已在 importer TX 内；ledger 后失败可重放）
-    ledger
-        .mark_committed(source, client_req, &outcome_json)
-        .await?;
+        let result = repo.apply_import_bundle_in_tx(&mut tx, &bundle).await?;
+        let outcome = SnapshotImportOutcome {
+            snapshot_id: validated.envelope.snapshot_id.clone(),
+            snapshot_hash: validated.envelope.snapshot_hash.clone(),
+            imported_asset_ids: result.imported_asset_ids,
+            inserted_revisions: result.inserted_revisions,
+            deduped_revisions: result.deduped_revisions,
+            heads_advanced: result.heads_advanced,
+            conflicts_opened: result.conflicts_opened,
+            projections_scheduled,
+            imported_object_hashes: staged.clone(),
+        };
+        let outcome_json = serde_json::to_string(&outcome)
+            .map_err(|e| AppError::generic(format!("agent_hub_push_outcome_serialize:{e}")))?;
+        ledger
+            .mark_committed_on_tx(&mut tx, source, client_req, &outcome_json)
+            .await?;
+        tx.commit().await?;
+        Ok(outcome)
+    })
+    .await?;
 
     enqueue_reconcile(&outcome.imported_asset_ids);
 
