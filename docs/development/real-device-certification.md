@@ -219,6 +219,13 @@ The following remain **NOT VERIFIED** until a real-device pass is recorded:
 19. Remote backend stop rejection from a second physical host (valid token still forbidden)
 20. 1GiB file transfer: mid-stream disconnect + process restart + resume from confirmed offset + SHA-256 match across two physical hosts (`L3-DUAL-HOST-LAN-001`, deferred from N5; remains **NOT VERIFIED**)
 21. Physical iOS Safari / Android Chrome mobile workbench
+22. Agent Hub real Claude product install write path (`L3-AGENT-HUB-CLAUDE-001`) — **NOT VERIFIED**
+23. Agent Hub real Codex product install write path (`L3-AGENT-HUB-CODEX-001`) — **NOT VERIFIED**
+24. Agent Hub real OpenCode product install write path (`L3-AGENT-HUB-OPENCODE-001`) — **NOT VERIFIED**
+25. Agent Hub real OpenCode runtime bridge session/permission/completion (`L3-AGENT-HUB-OPENCODE-RUNTIME-001`) — **NOT VERIFIED**
+26. Agent Hub real multi-CLI exact-version product writes (`L3-AGENT-HUB-B-CLI-001`) — **NOT VERIFIED**
+27. Agent Hub dual-host mDNS `agent-hub.v1` source-push + Git confirm (`L3-AGENT-HUB-C-LAN-001`) — **NOT VERIFIED**
+28. Agent Hub real pinned OpenCode visible TUI + provider credentials (`L3-AGENT-HUB-D-OPENCODE-001`) — **NOT VERIFIED**
 
 ## How to re-run L2 automation (not L3)
 
