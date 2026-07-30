@@ -58,10 +58,13 @@ pub async fn drain_lan_projection_intents(state: &AppState) -> Result<u32, AppEr
                             "agent_hub lan projection intent mark done failed"
                         );
                         // mark 失败：requeue 以保留 durable retry
-                        let _ = state
+                        if let Err(mark_error) = state
                             .agent_hub_repo
                             .mark_lan_projection_intent_status(&transfer_id, &asset_id, "queued")
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(transfer_id = %transfer_id, asset_id = %asset_id, error = %mark_error, "agent_hub lan projection intent requeue failed");
+                        }
                     } else {
                         done = done.saturating_add(1);
                     }
@@ -74,10 +77,13 @@ pub async fn drain_lan_projection_intents(state: &AppState) -> Result<u32, AppEr
                         failed = report.failed,
                         "agent_hub lan projection intent incomplete; requeue for retry"
                     );
-                    let _ = state
+                    if let Err(mark_error) = state
                         .agent_hub_repo
                         .mark_lan_projection_intent_status(&transfer_id, &asset_id, "queued")
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(transfer_id = %transfer_id, asset_id = %asset_id, error = %mark_error, "agent_hub lan projection intent requeue failed");
+                    }
                 }
             }
             Err(e) => {
@@ -87,10 +93,18 @@ pub async fn drain_lan_projection_intents(state: &AppState) -> Result<u32, AppEr
                     error = %e,
                     "agent_hub lan projection intent drain schedule failed; requeue for retry"
                 );
-                let _ = state
+                if let Err(mark_error) = state
                     .agent_hub_repo
                     .mark_lan_projection_intent_status(&transfer_id, &asset_id, "queued")
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        transfer_id = %transfer_id,
+                        asset_id = %asset_id,
+                        error = %mark_error,
+                        "agent_hub lan projection intent requeue failed"
+                    );
+                }
             }
         }
     }

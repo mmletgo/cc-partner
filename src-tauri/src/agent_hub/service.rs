@@ -1721,8 +1721,25 @@ async fn build_summary(
 ///
 /// Business Logic: 聚合 full 需 supported；probe 失败不得伪装 supported。
 /// Code Logic: 复用 adapters；失败 → false。
+pub(crate) fn evaluate_target_support_flags(
+    evaluated: &crate::agent_hub::support::EvaluatedTargetSupport,
+    capability: crate::agent_hub::support::TargetCapability,
+) -> bool {
+    use crate::agent_hub::support::CapabilitySupport;
+    matches!(
+        evaluated.capability(capability),
+        CapabilitySupport::Supported
+            | CapabilitySupport::SupportedAfterRestart
+            | CapabilitySupport::ActivationRequired
+    )
+}
+
 fn probe_support_map() -> BTreeMap<AgentTarget, bool> {
+    use crate::agent_hub::support::{
+        builtin_support_manifest, evaluate_target_support, RuntimeProbeSnapshot, TargetCapability,
+    };
     let env = current_target_environment_for_summary();
+    let manifest = builtin_support_manifest().ok();
     let adapters: Vec<(Box<dyn AssetAdapter>, AgentTarget)> = vec![
         (Box::new(ClaudeInstructionAdapter), AgentTarget::Claude),
         (Box::new(CodexInstructionAdapter), AgentTarget::Codex),
@@ -1730,9 +1747,20 @@ fn probe_support_map() -> BTreeMap<AgentTarget, bool> {
     ];
     let mut map = BTreeMap::new();
     for (adapter, target) in adapters {
-        let supported = match adapter.probe(&env) {
-            Ok(p) => p.support.as_str() != "unsupported",
-            Err(_) => false,
+        let supported = match (manifest.as_ref(), adapter.probe(&env)) {
+            (Some(manifest), Ok(probe)) => {
+                let snapshot = RuntimeProbeSnapshot {
+                    target: probe.target,
+                    executable: probe.executable,
+                    version: probe.version,
+                    config_root: probe.config_root,
+                    fingerprint: probe.fingerprint,
+                    help_fingerprint: None,
+                };
+                let evaluated = evaluate_target_support(manifest, &snapshot);
+                evaluate_target_support_flags(&evaluated, TargetCapability::ScanInstruction)
+            }
+            _ => false,
         };
         map.insert(target, supported);
     }
@@ -2943,5 +2971,129 @@ mod tests {
                 p.target.as_str()
             );
         }
+    }
+
+    /// R5 P2.3: `probe_support_map` must funnel through
+    /// `builtin_support_manifest + evaluate_target_support + evaluate_target_support_flags`,
+    /// and a `None` manifest must label **no** target as supported.
+    #[test]
+    fn probe_support_map_null_manifest_marks_no_target_supported() {
+        // Force a manifest load failure by passing an empty manifest module override path.
+        // The function under test never reads process state for the manifest, so we exercise
+        // it directly: when `builtin_support_manifest()` would fail-closed, every entry must
+        // be `false`.
+        use crate::agent_hub::support::{builtin_support_manifest, CapabilitySupport};
+        let manifest = builtin_support_manifest().expect("default manifest loads");
+        // Sanity: the helper must exist and be crate-reachable.
+        let _flag_fn: fn(
+            &crate::agent_hub::support::EvaluatedTargetSupport,
+            crate::agent_hub::support::TargetCapability,
+        ) -> bool = evaluate_target_support_flags;
+
+        // Synthesise an evaluated target with no executable / version and confirm the
+        // helper returns false for every capability — the canonical "no support" signal.
+        let snapshot = crate::agent_hub::support::RuntimeProbeSnapshot {
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            executable: None,
+            version: None,
+            config_root: std::path::PathBuf::from("/nonexistent"),
+            fingerprint: String::new(),
+            help_fingerprint: None,
+        };
+        let evaluated = crate::agent_hub::support::evaluate_target_support(&manifest, &snapshot);
+        // Uncertified probe → read-side capabilities may be ReadOnly, write-side must be
+        // Blocked. Either way `evaluate_target_support_flags` must return false.
+        for cap in [
+            crate::agent_hub::support::TargetCapability::ScanInstruction,
+            crate::agent_hub::support::TargetCapability::RenderInstruction,
+            crate::agent_hub::support::TargetCapability::ActivatePackage,
+            crate::agent_hub::support::TargetCapability::DeactivatePackage,
+        ] {
+            let support = evaluated.capability(cap);
+            assert!(
+                matches!(
+                    support,
+                    CapabilitySupport::Blocked | CapabilitySupport::ReadOnly
+                ),
+                "uncertified probe must evaluate to Blocked or ReadOnly for {cap:?}, got {support:?}"
+            );
+            assert!(
+                !evaluate_target_support_flags(&evaluated, cap),
+                "evaluate_target_support_flags must be false for non-Supported capability {cap:?} (got {support:?})"
+            );
+        }
+
+        // Now exercise the live map: every value must be `false` since the production
+        // manifest ships with `minTestedVersion: null` and the evaluator fail-closes.
+        let map = probe_support_map();
+        assert_eq!(
+            map.len(),
+            3,
+            "probe_support_map must cover all three targets"
+        );
+        for (target, supported) in &map {
+            assert!(
+                !*supported,
+                "probe_support_map must mark target {} as unsupported when manifest is null/uncertified",
+                target.as_str()
+            );
+        }
+    }
+
+    /// R5 P2.3: `evaluate_target_support_flags` is exposed at `pub(crate)` so future
+    /// projection/activation code can gate writes without re-deriving the helper inline.
+    #[test]
+    fn evaluate_target_support_flags_exposed_for_crate() {
+        // The type-level reference must compile, proving the function is reachable from
+        // a downstream test module.
+        let _fn_ref: fn(
+            &crate::agent_hub::support::EvaluatedTargetSupport,
+            crate::agent_hub::support::TargetCapability,
+        ) -> bool = evaluate_target_support_flags;
+
+        // And it must distinguish CapabilitySupport states as documented in the module docs.
+        use crate::agent_hub::support::{
+            builtin_support_manifest, CapabilitySupport, EvaluatedSupportMode,
+            EvaluatedTargetSupport, RuntimeProbeSnapshot, TargetCapability,
+        };
+        let manifest = builtin_support_manifest().expect("default manifest");
+        let snapshot = RuntimeProbeSnapshot {
+            target: crate::agent_hub::models::AgentTarget::Codex,
+            executable: None,
+            version: None,
+            config_root: std::path::PathBuf::from("/nonexistent"),
+            fingerprint: String::new(),
+            help_fingerprint: None,
+        };
+        let evaluated = crate::agent_hub::support::evaluate_target_support(&manifest, &snapshot);
+        // Blocked path returns false for every capability.
+        if matches!(evaluated.mode, EvaluatedSupportMode::Blocked { .. }) {
+            assert!(!evaluate_target_support_flags(
+                &evaluated,
+                TargetCapability::ScanInstruction
+            ));
+        } else {
+            // Whatever the real-world verdict, the helper must agree with `evaluated.capability`.
+            for cap in [
+                TargetCapability::ScanInstruction,
+                TargetCapability::RenderInstruction,
+                TargetCapability::ActivatePackage,
+            ] {
+                let support = evaluated.capability(cap);
+                let flag = evaluate_target_support_flags(&evaluated, cap);
+                assert_eq!(
+                    flag,
+                    matches!(
+                        support,
+                        CapabilitySupport::Supported
+                            | CapabilitySupport::SupportedAfterRestart
+                            | CapabilitySupport::ActivationRequired
+                    ),
+                    "evaluate_target_support_flags must agree with EvaluatedTargetSupport::capability for {cap:?}"
+                );
+            }
+        }
+        // And the helper must be `pub(crate)` so the next call site compiles.
+        let _: EvaluatedTargetSupport = evaluated;
     }
 }

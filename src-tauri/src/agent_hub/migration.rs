@@ -523,6 +523,18 @@ pub async fn seed_user_instruction_if_head_null(
         device_id: state.device_id.as_str(),
         object_store_root: objects_root_data_dir,
     };
+    seed_user_instruction_with_deps(&deps, claude_md_file_path).await
+}
+
+/// Testable core of [`seed_user_instruction_if_head_null`].
+///
+/// Business Logic: same NULL-head CAS as the public shim.
+/// Code Logic: identical control flow, but takes `MigrationDeps` directly so unit
+/// tests can exercise Seeded/HeadAlreadyPresent without spinning up a full `AppState`.
+pub(crate) async fn seed_user_instruction_with_deps(
+    deps: &MigrationDeps<'_>,
+    claude_md_file_path: &Path,
+) -> Result<SeedUserInstructionOutcome, AppError> {
     let scope = ensure_user_scope(deps.agent_hub).await?;
     let asset = ensure_user_instruction_asset(deps.agent_hub, &scope.id).await?;
     // 进入 seed 前重新读 head（CAS 观察点）
@@ -613,8 +625,7 @@ pub async fn seed_user_instruction_if_head_null(
                 if existing_targets.contains(&target) {
                     continue;
                 }
-                let _ = deps
-                    .agent_hub
+                deps.agent_hub
                     .upsert_target_binding(NewTargetBinding {
                         asset_id: asset.id.clone(),
                         target,
@@ -623,9 +634,8 @@ pub async fn seed_user_instruction_if_head_null(
                         desired_enabled: false,
                         checkout_binding_id: None,
                     })
-                    .await;
+                    .await?;
             }
-            let _ = payload_hash;
             Ok(SeedUserInstructionOutcome::Seeded)
         }
         Err(e) => {
@@ -1966,5 +1976,137 @@ mod tests {
         let p2 = legacy_facade_policy(false);
         assert!(p2.allow_direct_target_mutation);
         assert!(p2.ignore_unknown_hub_tables);
+    }
+
+    /// R5 P2.3: green path — first call with empty Hub head returns `Seeded` and creates
+    /// one migration revision with three Absent bindings.
+    #[tokio::test]
+    async fn seed_user_instruction_if_head_null_seeds_when_no_head() {
+        let (agent_hub, claude_md, _) = setup_repos().await;
+        let tmp = TempDir::new().unwrap();
+        let objects_root = tmp.path().join("data");
+        fs::create_dir_all(&objects_root).unwrap();
+        let claude_file = tmp.path().join("CLAUDE.md");
+        fs::write(&claude_file, "always prefer Rust over Python\n").unwrap();
+
+        let outcome = seed_user_instruction_with_deps(
+            &deps(&agent_hub, &claude_md, &objects_root),
+            &claude_file,
+        )
+        .await
+        .expect("seed must succeed");
+        assert_eq!(outcome, SeedUserInstructionOutcome::Seeded);
+
+        // head must now be set and bindings seeded (3 Absent).
+        let scope_id = agent_hub
+            .resolve_user_scope_id()
+            .await
+            .unwrap()
+            .expect("scope present");
+        let asset = agent_hub
+            .get_asset_by_unique_key(
+                &scope_id,
+                crate::agent_hub::models::AssetKind::Instruction,
+                USER_INSTRUCTION_NAMESPACE,
+                USER_INSTRUCTION_LOGICAL_KEY,
+            )
+            .await
+            .unwrap()
+            .expect("asset present");
+        assert!(
+            asset.current_revision_id.is_some(),
+            "head must be populated"
+        );
+        let bindings = agent_hub
+            .list_target_bindings_for_asset(&asset.id)
+            .await
+            .unwrap();
+        assert_eq!(bindings.len(), 3);
+        for b in &bindings {
+            assert_eq!(b.desired_presence, DesiredPresence::Absent);
+            assert!(!b.desired_enabled);
+        }
+    }
+
+    /// R5 P2.3: simulated concurrent-import race — once an external head exists, the
+    /// helper must report `HeadAlreadyPresent` and must **not** append a migration revision
+    /// or re-seed bindings.
+    #[tokio::test]
+    async fn seed_user_instruction_if_head_null_returns_head_already_present_under_simulated_race()
+    {
+        let (agent_hub, claude_md, _) = setup_repos().await;
+        let tmp = TempDir::new().unwrap();
+        let objects_root = tmp.path().join("data");
+        fs::create_dir_all(&objects_root).unwrap();
+        let claude_file = tmp.path().join("CLAUDE.md");
+        fs::write(&claude_file, "concurrent import body\n").unwrap();
+
+        // Step 1: prime the head via a normal Seeded run.
+        let first = seed_user_instruction_with_deps(
+            &deps(&agent_hub, &claude_md, &objects_root),
+            &claude_file,
+        )
+        .await
+        .expect("first seed must succeed");
+        assert_eq!(first, SeedUserInstructionOutcome::Seeded);
+
+        // Step 2: simulate a concurrent import that pushes an unrelated revision on top.
+        let scope_id = agent_hub
+            .resolve_user_scope_id()
+            .await
+            .unwrap()
+            .expect("scope present after first seed");
+        let asset = agent_hub
+            .get_asset_by_unique_key(
+                &scope_id,
+                crate::agent_hub::models::AssetKind::Instruction,
+                USER_INSTRUCTION_NAMESPACE,
+                USER_INSTRUCTION_LOGICAL_KEY,
+            )
+            .await
+            .unwrap()
+            .expect("asset present after first seed");
+
+        let store = ObjectStore::open(&objects_root).unwrap();
+        let pre_bytes = br#"{"blocks":[]}"#;
+        let stored = store.put_blob(pre_bytes).await.unwrap();
+        let concurrent_rev = agent_hub
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: Some(AgentTarget::Claude),
+                origin_replica_id: "concurrent-device".to_string(),
+                payload_hash: Some(stored.hash.clone()),
+                tree_manifest_hash: None,
+                created_at: Utc::now().to_rfc3339(),
+                expected_parent_id: None,
+            })
+            .await
+            .expect("concurrent head append");
+        // Sanity: head is now the concurrent revision.
+        let pre_asset = agent_hub.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(
+            pre_asset.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(concurrent_rev.id.as_str())
+        );
+
+        // Step 3: now run the seed — must return HeadAlreadyPresent without touching the head.
+        let outcome = seed_user_instruction_with_deps(
+            &deps(&agent_hub, &claude_md, &objects_root),
+            &claude_file,
+        )
+        .await
+        .expect("seed must not error under race");
+        assert_eq!(outcome, SeedUserInstructionOutcome::HeadAlreadyPresent);
+
+        let after = agent_hub.get_asset(&asset.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.current_revision_id.as_ref().map(|r| r.as_str()),
+            Some(concurrent_rev.id.as_str()),
+            "concurrent head must not be overwritten by the migration seed"
+        );
     }
 }
