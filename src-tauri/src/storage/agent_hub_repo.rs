@@ -3679,6 +3679,36 @@ impl AgentHubRepo {
         Ok(rows)
     }
 
+    /// 全仓 claim 一批 queued LAN projection intent。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     commit 后 spawn 失败或进程崩溃时，owner 启动/周期 worker 必须跨 transfer 排水，
+    ///     不能只靠 commit endpoint 按 transfer 查询。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     SELECT transfer_id, asset_id WHERE status=queued ORDER BY updated_at LIMIT。
+    pub async fn claim_queued_lan_projection_intents(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>, AppError> {
+        let rows = sqlx::query(
+            "SELECT transfer_id, asset_id FROM agent_hub_lan_projection_intents
+             WHERE status = 'queued'
+             ORDER BY updated_at ASC
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let transfer_id: String = r.try_get("transfer_id")?;
+            let asset_id: String = r.try_get("asset_id")?;
+            out.push((transfer_id, asset_id));
+        }
+        Ok(out)
+    }
+
     /// 标记 projection intent 已入队/完成。
     ///
     /// Business Logic: owner 排水后推进 status，避免重复风暴。
@@ -3707,10 +3737,11 @@ impl AgentHubRepo {
         .await
     }
 
-    /// 列出已 committed 且仍有 staging 可 GC 的 transfer（cleanup intent）。
+    /// 列出已 committed 且 staging 尚未标记清理完成的 transfer。
     ///
-    /// Business Logic: 成功 push 不得永久保留 incoming 明文/重复 CAS。
-    /// Code Logic: SELECT transfer_id FROM push_requests WHERE status=committed。
+    /// Business Logic: 成功 push 不得永久保留 incoming 明文/重复 CAS；
+    ///     超过 256 条后必须可推进，禁止永远扫同一批历史行。
+    /// Code Logic: SELECT transfer_id WHERE status=committed AND staging_cleaned_at IS NULL。
     pub async fn list_committed_transfer_ids_for_cleanup(
         &self,
         limit: i64,
@@ -3719,6 +3750,7 @@ impl AgentHubRepo {
         let rows = sqlx::query_scalar::<_, String>(
             "SELECT transfer_id FROM agent_hub_push_requests
              WHERE status = 'committed'
+               AND (staging_cleaned_at IS NULL OR staging_cleaned_at = '')
              ORDER BY updated_at ASC
              LIMIT ?",
         )
@@ -3726,6 +3758,35 @@ impl AgentHubRepo {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    /// 标记 committed transfer 的 staging 清理已完成。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     GC 成功删除目录或目录本就不存在后，必须原子推进 cleanup 状态，
+    ///     否则第 257 条以后的残留永远饿死。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     UPDATE agent_hub_push_requests SET staging_cleaned_at=now WHERE transfer_id。
+    pub async fn mark_committed_transfer_staging_cleaned(
+        &self,
+        transfer_id: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "UPDATE agent_hub_push_requests
+                 SET staging_cleaned_at = ?, updated_at = ?
+                 WHERE transfer_id = ?",
+            )
+            .bind(&now)
+            .bind(&now)
+            .bind(transfer_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// 读取本机 device-lane Git 导出状态。
@@ -4212,7 +4273,7 @@ pub(crate) async fn apply_import_bundle_on_tx(
         .await?;
     }
 
-    // 4) revisions + parents（幂等 dedupe by id）
+    // 4) revisions + parents（ID 命中时校验全部不可变字段；不一致 → conflict）
     for rev in &bundle.revisions {
         if rev.operation == RevisionOperation::Delete
             && (rev.payload_hash.is_some() || rev.tree_manifest_hash.is_some())
@@ -4234,12 +4295,23 @@ pub(crate) async fn apply_import_bundle_on_tx(
                 )));
             }
         }
-        let existing: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
-                .bind(&rev.id)
-                .fetch_one(&mut **tx)
-                .await?;
-        if existing > 0 {
+        let existing_row = sqlx::query(
+            "SELECT id, asset_lineage_id, generation, operation, origin_kind, origin_target,
+                    origin_replica_id, payload_hash, tree_manifest_hash, created_at
+             FROM agent_hub_revisions WHERE id = ?",
+        )
+        .bind(&rev.id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(row) = existing_row {
+            // 命中已有 ID：逐项比较不可变字段 + 有序 parents
+            let same = revision_immutable_fields_match_on_tx(tx, &row, rev).await?;
+            if !same {
+                return Err(AppError::conflict(format!(
+                    "agent_hub_import_revision_id_content_mismatch:{}",
+                    rev.id
+                )));
+            }
             result.deduped_revisions += 1;
             continue;
         }
@@ -4295,6 +4367,8 @@ pub(crate) async fn apply_import_bundle_on_tx(
     }
 
     // 4b) plugin package component/residual edges（与 package revision 同 TX；幂等）
+    //     边恢复前再次校验 package/component revision lineage 一致，防 ID 复用污染 ownership。
+    verify_plugin_edge_lineage_on_tx(tx, bundle).await?;
     restore_plugin_edges_on_tx(tx, bundle).await?;
 
     // 5) 所有受影响 asset 的 read-set CAS（独立于 new_head）
@@ -4397,18 +4471,30 @@ pub(crate) async fn apply_import_bundle_on_tx(
 
     // 8) head decisions（仅显式 new_head 才推进；None 保留旧 head）
     //    expected_head 已在步骤 5 验证；此处再 CAS 更新防止同 TX 内竞态（防御性）。
+    //    推进前校验 head revision 的 asset_lineage_id 与资产一致，防 ID 复用跨资产污染。
     for d in &bundle.head_decisions {
         if let Some(head) = &d.new_head {
-            // 确认 head revision 存在
-            let exists: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_revisions WHERE id = ?")
+            // 确认 head revision 存在且 lineage 属于该 asset
+            let head_lineage: Option<String> =
+                sqlx::query_scalar("SELECT asset_lineage_id FROM agent_hub_revisions WHERE id = ?")
                     .bind(head)
-                    .fetch_one(&mut **tx)
+                    .fetch_optional(&mut **tx)
                     .await?;
-            if exists == 0 {
+            let Some(head_lineage) = head_lineage else {
                 return Err(AppError::validation(format!(
                     "agent_hub_import_head_missing:{head}"
                 )));
+            };
+            // lineage 通常等于 root asset id；若不等则要求属于该 asset 的 lineage 别名
+            if head_lineage != d.asset_id {
+                let same =
+                    lineages_refer_to_same_asset_on_tx(tx, &head_lineage, &d.asset_id).await?;
+                if !same {
+                    return Err(AppError::conflict(format!(
+                        "agent_hub_import_head_lineage_mismatch:{}:{}",
+                        d.asset_id, head
+                    )));
+                }
             }
             let cas = sqlx::query(
                 "UPDATE agent_hub_assets
@@ -4807,6 +4893,7 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
         status TEXT NOT NULL,
         envelope_json TEXT NOT NULL,
         outcome_json TEXT,
+        staging_cleaned_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (source_device_id, client_request_id)
@@ -5025,6 +5112,13 @@ async fn migrate_agent_hub_columns(pool: &SqlitePool) -> Result<(), AppError> {
     let git_cols = table_column_names(pool, "agent_hub_git_export_state").await?;
     if !git_cols.iter().any(|c| c == "pending_commit_oid") {
         sqlx::query("ALTER TABLE agent_hub_git_export_state ADD COLUMN pending_commit_oid TEXT")
+            .execute(pool)
+            .await?;
+    }
+    // Codex R3: committed staging GC 可推进标记，避免 256 条后饿死
+    let push_cols = table_column_names(pool, "agent_hub_push_requests").await?;
+    if !push_cols.iter().any(|c| c == "staging_cleaned_at") {
+        sqlx::query("ALTER TABLE agent_hub_push_requests ADD COLUMN staging_cleaned_at TEXT")
             .execute(pool)
             .await?;
     }
@@ -5609,6 +5703,219 @@ async fn list_plugin_components_on_tx(
         });
     }
     Ok(out)
+}
+
+/// 比较已存在 revision 行与导入行的不可变字段 + 有序 parents。
+///
+/// Business Logic（为什么需要这个函数）:
+///     仅按 revision UUID 去重会让未经校验的 snapshot 复用已知 ID 污染 DAG。
+///     命中 ID 时必须验证 lineage/payload/operation/origin/parents 完全一致。
+///
+/// Code Logic（这个函数做什么）:
+///     读取 local row 的 immutable 列与 ORDER BY parent_order 的 parents；
+///     与 ImportRevisionRow 逐项比较；任一不等返回 false。
+async fn revision_immutable_fields_match_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    row: &SqliteRow,
+    rev: &ImportRevisionRow,
+) -> Result<bool, AppError> {
+    let lineage: String = row.try_get("asset_lineage_id")?;
+    let operation: String = row.try_get("operation")?;
+    let origin_kind: String = row.try_get("origin_kind")?;
+    let origin_target: Option<String> = row.try_get("origin_target")?;
+    let payload: Option<String> = row.try_get("payload_hash")?;
+    let tree: Option<String> = row.try_get("tree_manifest_hash")?;
+    // generation 在首次插入时可能被 max(parent)+1 校正；用同一规则重算期望值再比。
+    let generation: i64 = row.try_get("generation")?;
+
+    // lineage：直接相等，或双方指向同一本地资产（lineage 表 / assets 表可证明）
+    if lineage != rev.asset_lineage_id {
+        let same_asset =
+            lineages_refer_to_same_asset_on_tx(tx, &lineage, &rev.asset_lineage_id).await?;
+        if !same_asset {
+            return Ok(false);
+        }
+    }
+    if operation != rev.operation.as_str() {
+        return Ok(false);
+    }
+    if origin_kind != rev.origin_kind.as_str() {
+        return Ok(false);
+    }
+    let expected_target = rev.origin_target.map(|t| t.as_str().to_string());
+    if origin_target != expected_target {
+        return Ok(false);
+    }
+    // origin_replica_id / created_at：同 ID 的 payload+parents 一致即可 dedupe；
+    // multi-replica 共用祖先时可能带不同 origin 标签，不得因此阻断合法 merge。
+    // 真正的内容攻击靠 payload/parents/operation 拦截。
+    if payload != rev.payload_hash {
+        return Ok(false);
+    }
+    if tree != rev.tree_manifest_hash {
+        return Ok(false);
+    }
+    let mut max_parent: Option<u64> = None;
+    for parent in &rev.parents {
+        let g: Option<i64> =
+            sqlx::query_scalar("SELECT generation FROM agent_hub_revisions WHERE id = ?")
+                .bind(parent)
+                .fetch_optional(&mut **tx)
+                .await?;
+        if let Some(g) = g {
+            let g = g as u64;
+            max_parent = Some(max_parent.map_or(g, |m| m.max(g)));
+        }
+    }
+    let expected_generation = max_parent
+        .map(|m| m.saturating_add(1))
+        .unwrap_or(rev.generation);
+    if generation as u64 != expected_generation {
+        return Ok(false);
+    }
+
+    let parent_rows = sqlx::query(
+        "SELECT parent_revision_id FROM agent_hub_revision_parents
+         WHERE revision_id = ? ORDER BY parent_order ASC",
+    )
+    .bind(&rev.id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let local_parents: Vec<String> = parent_rows
+        .iter()
+        .map(|r| r.try_get::<String, _>("parent_revision_id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if local_parents != rev.parents {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// 判断两个 lineage/asset id 是否指向同一逻辑资产。
+///
+/// Business Logic: multi-replica identity remap 后，同一 revision 可能带着旧/新 asset id。
+/// Code Logic: 相等、或双方均为某 asset 的 lineage 别名、或一方是另一方的 asset 行。
+async fn lineages_refer_to_same_asset_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    a: &str,
+    b: &str,
+) -> Result<bool, AppError> {
+    if a == b {
+        return Ok(true);
+    }
+    // a 的 lineage 集合是否包含 b，或 b 的集合是否包含 a
+    let a_as_asset: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_assets WHERE id = ?")
+        .bind(a)
+        .fetch_one(&mut **tx)
+        .await?;
+    let b_as_asset: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_hub_assets WHERE id = ?")
+        .bind(b)
+        .fetch_one(&mut **tx)
+        .await?;
+    if a_as_asset > 0 {
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_hub_asset_lineages
+             WHERE asset_id = ? AND lineage_id = ?",
+        )
+        .bind(a)
+        .bind(b)
+        .fetch_one(&mut **tx)
+        .await?;
+        if linked > 0 {
+            return Ok(true);
+        }
+    }
+    if b_as_asset > 0 {
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_hub_asset_lineages
+             WHERE asset_id = ? AND lineage_id = ?",
+        )
+        .bind(b)
+        .bind(a)
+        .fetch_one(&mut **tx)
+        .await?;
+        if linked > 0 {
+            return Ok(true);
+        }
+    }
+    // 双方都作为 lineage_id 挂到同一 asset_id
+    let shared: Option<String> = sqlx::query_scalar(
+        "SELECT a.asset_id FROM agent_hub_asset_lineages a
+         INNER JOIN agent_hub_asset_lineages b ON a.asset_id = b.asset_id
+         WHERE a.lineage_id = ? AND b.lineage_id = ?
+         LIMIT 1",
+    )
+    .bind(a)
+    .bind(b)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(shared.is_some())
+}
+
+/// 恢复 plugin 边前校验 package/component revision lineage 与资产 kind。
+///
+/// Business Logic（为什么需要这个函数）:
+///     head 或 plugin edge 不得指向另一资产/另一内容的本地 revision，破坏 ownership 完整性。
+///
+/// Code Logic（这个函数做什么）:
+///     对每条 component edge：package revision 与 component revision 的 asset_lineage_id
+///     必须分别等于 package/component asset_id；component asset kind 必须匹配。
+async fn verify_plugin_edge_lineage_on_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    bundle: &ImportBundle,
+) -> Result<(), AppError> {
+    for edge in &bundle.plugin_components {
+        let pkg_lineage: Option<String> =
+            sqlx::query_scalar("SELECT asset_lineage_id FROM agent_hub_revisions WHERE id = ?")
+                .bind(&edge.package_revision_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        let Some(pkg_lineage) = pkg_lineage else {
+            return Err(AppError::validation(format!(
+                "agent_hub_import_plugin_package_revision_missing:{}",
+                edge.package_revision_id
+            )));
+        };
+        // package lineage 必须指向某 package asset（通过 bundle.assets 或已有 assets 表）
+        let pkg_asset_kind: Option<String> =
+            sqlx::query_scalar("SELECT kind FROM agent_hub_assets WHERE id = ?")
+                .bind(&pkg_lineage)
+                .fetch_optional(&mut **tx)
+                .await?;
+        if pkg_asset_kind.as_deref() != Some(AssetKind::Plugin.as_str()) {
+            // 若 lineage 本身就是 package asset id 但本批才插入，从 bundle 查
+            let from_bundle = bundle
+                .assets
+                .iter()
+                .find(|a| a.id == pkg_lineage)
+                .map(|a| a.kind);
+            if from_bundle != Some(AssetKind::Plugin) {
+                return Err(AppError::conflict(format!(
+                    "agent_hub_import_plugin_package_lineage_mismatch:{}",
+                    edge.package_revision_id
+                )));
+            }
+        }
+
+        let comp_lineage: Option<String> =
+            sqlx::query_scalar("SELECT asset_lineage_id FROM agent_hub_revisions WHERE id = ?")
+                .bind(&edge.component_revision_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        let Some(comp_lineage) = comp_lineage else {
+            return Err(AppError::validation(format!(
+                "agent_hub_import_plugin_component_revision_missing:{}",
+                edge.component_revision_id
+            )));
+        };
+        if comp_lineage != edge.component_asset_id {
+            return Err(AppError::conflict(format!(
+                "agent_hub_import_plugin_component_lineage_mismatch:{}:{}",
+                edge.component_revision_id, edge.component_asset_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// 在 import TX 内校验并幂等写入 plugin component/residual 边。
@@ -7801,5 +8108,153 @@ mod tests {
             repo.component_has_standalone_ref(&skill.id).await.unwrap(),
             "standalone ownership must rebuild agent_hub_component_standalone_refs"
         );
+    }
+
+    /// Business Logic: 同 revision UUID 但 payload 不同必须 conflict，禁止静默 dedupe。
+    /// Code Logic: 先 append 真 revision，再 import 同 id 不同 payload → content mismatch。
+    #[tokio::test]
+    async fn import_revision_id_content_mismatch_conflicts() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: "mismatch".into(),
+                display_name: "Mismatch".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let rev = repo
+            .append_revision(NewRevision {
+                id: RevisionId::new_v7(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "local".into(),
+                payload_hash: Some("a".repeat(64)),
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T10:00:00Z".into(),
+                expected_parent_id: None,
+            })
+            .await
+            .unwrap();
+        let now = "2026-07-29T11:00:00Z".to_string();
+        let bundle = ImportBundle {
+            scopes: vec![],
+            assets: vec![ImportAssetRow {
+                id: asset.id.clone(),
+                scope_id: scope.id.clone(),
+                kind: AssetKind::Instruction,
+                origin_namespace: "standalone".into(),
+                logical_key: "mismatch".into(),
+                display_name: "Mismatch".into(),
+                policy: AssetPolicy::Shared,
+                deleted_at: None,
+            }],
+            lineages: vec![(asset.id.clone(), asset.id.clone())],
+            revisions: vec![ImportRevisionRow {
+                id: rev.id.as_str().to_string(),
+                asset_lineage_id: asset.id.clone(),
+                parents: vec![],
+                generation: 0,
+                operation: RevisionOperation::Upsert,
+                origin_kind: RevisionOriginKind::Ui,
+                origin_target: None,
+                origin_replica_id: "local".into(),
+                payload_hash: Some("b".repeat(64)), // different payload
+                tree_manifest_hash: None,
+                created_at: "2026-07-29T10:00:00Z".into(),
+            }],
+            variants: vec![],
+            conflicts: vec![],
+            head_decisions: vec![ImportHeadDecision {
+                asset_id: asset.id.clone(),
+                expected_head: Some(rev.id.as_str().to_string()),
+                new_head: None,
+                deleted_at: None,
+            }],
+            project_mappings: vec![],
+            plugin_components: vec![],
+            plugin_residuals: vec![],
+        };
+        let err = repo.commit_import_bundle(bundle).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("agent_hub_import_revision_id_content_mismatch"),
+            "got {err}"
+        );
+        let _ = now;
+    }
+
+    /// Business Logic: staging GC 必须可推进，避免永远扫前 256 条。
+    /// Code Logic: mark cleaned 后 list_committed 不再返回该 transfer。
+    #[tokio::test]
+    async fn staging_cleanup_mark_advances_keyset() {
+        let repo = test_repo().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        // 直接写 push_requests 行（与 ledger 同 schema）
+        for i in 0..3 {
+            sqlx::query(
+                "INSERT INTO agent_hub_push_requests
+                 (source_device_id, client_request_id, transfer_id, selection_hash, snapshot_hash,
+                  status, envelope_json, outcome_json, staging_cleaned_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 'committed', '{}', NULL, NULL, ?, ?)",
+            )
+            .bind("src")
+            .bind(format!("req-{i}"))
+            .bind(format!("xfer-{i}"))
+            .bind("s".repeat(64))
+            .bind("h".repeat(64))
+            .bind(&now)
+            .bind(&now)
+            .execute(&repo.pool())
+            .await
+            .unwrap();
+        }
+        let first = repo
+            .list_committed_transfer_ids_for_cleanup(10)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 3);
+        repo.mark_committed_transfer_staging_cleaned("xfer-0")
+            .await
+            .unwrap();
+        let second = repo
+            .list_committed_transfer_ids_for_cleanup(10)
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(!second.iter().any(|t| t == "xfer-0"));
+    }
+
+    /// Business Logic: outbox worker 需跨 transfer claim queued intents。
+    /// Code Logic: insert_on_tx + claim + mark done。
+    #[tokio::test]
+    async fn lan_projection_intent_claim_and_mark() {
+        let repo = test_repo().await;
+        let mut tx = repo.pool().begin().await.unwrap();
+        let n = repo
+            .insert_lan_projection_intents_on_tx(
+                &mut tx,
+                "xfer-a",
+                &["asset-1".into(), "asset-2".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+        tx.commit().await.unwrap();
+        let claimed = repo.claim_queued_lan_projection_intents(10).await.unwrap();
+        assert_eq!(claimed.len(), 2);
+        repo.mark_lan_projection_intent_status("xfer-a", "asset-1", "done")
+            .await
+            .unwrap();
+        let remaining = repo.claim_queued_lan_projection_intents(10).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].1, "asset-2");
     }
 }

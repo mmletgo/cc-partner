@@ -599,14 +599,18 @@ impl SnapshotImporter {
         lineages.sort();
         lineages.dedup();
 
-        // revisions 拓扑序
+        // revisions 拓扑序；asset_lineage_id 经 identity remap，避免同逻辑资产不同本地 id 误冲突
         let ordered = topological_revisions(&env.revisions)?;
         let mut revisions: Vec<ImportRevisionRow> = Vec::new();
         for r in ordered {
             let gen: u64 = r.generation.parse().unwrap_or(0);
+            let lineage = asset_id_local
+                .get(&r.asset_lineage_id)
+                .cloned()
+                .unwrap_or_else(|| r.asset_lineage_id.clone());
             revisions.push(ImportRevisionRow {
                 id: r.id.clone(),
-                asset_lineage_id: r.asset_lineage_id.clone(),
+                asset_lineage_id: lineage,
                 parents: r.parents.clone(),
                 generation: gen,
                 operation: r.operation,
@@ -714,6 +718,13 @@ impl SnapshotImporter {
             // 每个 remote head 与 local 收敛
             for remote_head in &remote_heads {
                 if remote_head == &local_head {
+                    // equal head：仍写 no-op decision，保证同快照/variant CAS 有 expected_head
+                    head_decisions.push(ImportHeadDecision {
+                        asset_id: local_asset.clone(),
+                        expected_head: Some(local_head.clone()),
+                        new_head: None,
+                        deleted_at: None,
+                    });
                     continue;
                 }
                 // 若 remote 已是 local 祖先（仅在 remote 已在本地库时）
@@ -746,7 +757,13 @@ impl SnapshotImporter {
                         });
                     }
                     ConvergeDecision::AlreadyAncestor => {
-                        // keep local head
+                        // keep local head，但必须产出 no-op decision 供 variant/conflict CAS
+                        head_decisions.push(ImportHeadDecision {
+                            asset_id: local_asset.clone(),
+                            expected_head: Some(local_head.clone()),
+                            new_head: None,
+                            deleted_at: None,
+                        });
                     }
                     ConvergeDecision::Merge {
                         merge_rev,
@@ -793,16 +810,23 @@ impl SnapshotImporter {
 
         // variants：映射 asset id
         let mut variants: Vec<ImportVariantRow> = Vec::new();
+        let mut variant_touched: BTreeSet<String> = BTreeSet::new();
         for v in &env.variants {
             let local_asset = asset_id_local
                 .get(&v.asset_id)
                 .cloned()
                 .unwrap_or_else(|| v.asset_id.clone());
+            variant_touched.insert(local_asset.clone());
             variants.push(ImportVariantRow {
                 asset_id: local_asset,
                 target: v.target,
                 revision_id: v.revision_id.clone(),
             });
+        }
+        // conflicts 触及的 asset 也必须有 head decision
+        let mut conflict_touched: BTreeSet<String> = BTreeSet::new();
+        for c in &conflicts {
+            conflict_touched.insert(c.asset_id.clone());
         }
 
         // projections_scheduled：仅 mapped 且 opted_in 的 project / 全部 user assets
@@ -849,6 +873,29 @@ impl SnapshotImporter {
                 continue;
             }
             head_map.insert(d.asset_id.clone(), d);
+        }
+
+        // variant/conflict 触及但未产出 head decision 的资产：补 no-op expected_head，
+        // 避免 commit 层 agent_hub_import_missing_head_decision。
+        for asset_id in variant_touched.union(&conflict_touched) {
+            if head_map.contains_key(asset_id) {
+                continue;
+            }
+            let local_asset_row = self.repo.get_asset(asset_id).await?;
+            let expected = local_asset_row.and_then(|a| {
+                a.current_revision_id
+                    .as_ref()
+                    .map(|r| r.as_str().to_string())
+            });
+            head_map.insert(
+                asset_id.clone(),
+                ImportHeadDecision {
+                    asset_id: asset_id.clone(),
+                    expected_head: expected,
+                    new_head: None,
+                    deleted_at: None,
+                },
+            );
         }
 
         Ok(PlannedImport {
@@ -1041,7 +1088,7 @@ impl SnapshotImporter {
     /// Code Logic: 优先 RevisionGraph（双方已在库）；否则内存祖先 + payload 比较。
     async fn converge_heads(
         &self,
-        _asset_id: &str,
+        asset_id: &str,
         local_head: &str,
         remote_head: &str,
         env: &SnapshotEnvelopeV1,
@@ -1077,6 +1124,7 @@ impl SnapshotImporter {
                 .await?;
             return self
                 .merge_or_conflict(
+                    asset_id,
                     local_head,
                     remote_head,
                     mcas.iter().map(|r| r.as_str().to_string()).collect(),
@@ -1110,12 +1158,13 @@ impl SnapshotImporter {
             });
         }
         let mcas = maximal_common_ancestors_mem(&parent_index, local_head, remote_head);
-        self.merge_or_conflict(local_head, remote_head, mcas, env, load_doc)
+        self.merge_or_conflict(asset_id, local_head, remote_head, mcas, env, load_doc)
             .await
     }
 
     async fn merge_or_conflict(
         &self,
+        asset_id: &str,
         local_head: &str,
         remote_head: &str,
         mcas: Vec<String>,
@@ -1149,12 +1198,8 @@ impl SnapshotImporter {
             return Ok(ConvergeDecision::Merge {
                 merge_rev: ImportRevisionRow {
                     id: merge_id,
-                    asset_lineage_id: env
-                        .revisions
-                        .iter()
-                        .find(|r| r.id == local_head || r.id == remote_head)
-                        .map(|r| r.asset_lineage_id.clone())
-                        .unwrap_or_default(),
+                    // merge 必须挂在本地 asset id 上，禁止沿用 remote snapshot lineage
+                    asset_lineage_id: asset_id.to_string(),
                     parents,
                     generation: 0,
                     operation: if local_payload.is_delete {
@@ -1219,18 +1264,12 @@ impl SnapshotImporter {
                     AppError::generic(format!("agent_hub_import_merge_serialize:{e}"))
                 })?;
                 let stored = self.objects.put_blob(&bytes).await?;
-                let lineage = env
-                    .revisions
-                    .iter()
-                    .find(|r| r.id == local_head || r.id == remote_head)
-                    .map(|r| r.asset_lineage_id.clone())
-                    .unwrap_or_default();
                 let mut parents = vec![local_head.to_string(), remote_head.to_string()];
                 parents.sort();
                 Ok(ConvergeDecision::Merge {
                     merge_rev: ImportRevisionRow {
                         id: Uuid::now_v7().to_string(),
-                        asset_lineage_id: lineage,
+                        asset_lineage_id: asset_id.to_string(),
                         parents,
                         generation: 0,
                         operation: RevisionOperation::Upsert,
@@ -2046,6 +2085,11 @@ mod tests {
         assert!(
             second.deduped_revisions >= first.inserted_revisions.min(1)
                 || second.inserted_revisions == 0
+        );
+        // equal/AlreadyAncestor 二次导入不得 missing_head_decision
+        assert!(
+            second.heads_advanced == 0 || second.inserted_revisions == 0,
+            "second import of equal snapshot must be idempotent: {second:?}"
         );
     }
 

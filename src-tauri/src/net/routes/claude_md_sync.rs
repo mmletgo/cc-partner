@@ -147,23 +147,46 @@ async fn claude_md_push_impl(state: &AppState, req: ClaudeMdPushReq) -> Result<b
 /// Hub 启用时把 legacy CLAUDE.md DTO 翻译为 canonical user instruction mutation。
 ///
 /// Business Logic: Hub 是唯一事实源；N-1 peer 不得绕过 revision/CAS 直接改 CLI 文件。
-/// Code Logic: 幂等 ensure user scope/asset → update_instruction（revision CAS + projection）。
+///     已有 Hub head 时禁止再跑会 reclassify Shared/Adapted 的 migration seed。
+/// Code Logic: 仅 asset/head 缺失时 CAS seed；否则基于 expected head 只替换 Claude-owned 块集合。
 async fn claude_md_push_via_hub(state: &AppState, req: &ClaudeMdPushReq) -> Result<bool, AppError> {
-    use crate::agent_hub::instructions::document::{InstructionBlock, InstructionBlockMode};
     use crate::agent_hub::migration::{USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE};
-    use crate::agent_hub::models::{AgentTarget, AssetKind};
+    use crate::agent_hub::models::AssetKind;
     use crate::agent_hub::object_store::ObjectStore;
 
-    // 幂等 seed user instruction
     let data_dir = crate::config::data_dir()?;
     let claude_path = crate::agent_hub::migration::user_claude_md_file_path()
         .unwrap_or_else(|_| data_dir.join("legacy-claude-md-missing"));
-    let _ =
-        crate::agent_hub::migration::migrate_user_claude_md_state(state, &claude_path, &data_dir)
-            .await
-            .map_err(|e| {
-                AppError::generic(format!("agent_hub_legacy_claude_md_migrate_failed:{e}"))
-            })?;
+    let _ = ObjectStore::open(&data_dir)?;
+
+    // 仅在 user scope/asset/head 缺失时 seed；已有 head 时绝不 reclassify 现有文档。
+    let need_seed = match state.agent_hub_repo.resolve_user_scope_id().await? {
+        None => true,
+        Some(scope_id) => {
+            match state
+                .agent_hub_repo
+                .get_asset_by_unique_key(
+                    &scope_id,
+                    AssetKind::Instruction,
+                    USER_INSTRUCTION_NAMESPACE,
+                    USER_INSTRUCTION_LOGICAL_KEY,
+                )
+                .await?
+            {
+                None => true,
+                Some(a) => a.current_revision_id.is_none(),
+            }
+        }
+    };
+    if need_seed {
+        let _ = crate::agent_hub::migration::migrate_user_claude_md_state(
+            state,
+            &claude_path,
+            &data_dir,
+        )
+        .await
+        .map_err(|e| AppError::generic(format!("agent_hub_legacy_claude_md_migrate_failed:{e}")))?;
+    }
 
     let scope_id = state
         .agent_hub_repo
@@ -185,10 +208,9 @@ async fn claude_md_push_via_hub(state: &AppState, req: &ClaudeMdPushReq) -> Resu
             AppError::validation("agent_hub_legacy_claude_md_user_asset_missing".to_string())
         })?;
     let before = asset.current_revision_id.clone();
-    let _ = ObjectStore::open(&data_dir)?;
 
-    // 专用幂等 translator：只更新 Claude targetOnly 内容，保留 Shared/Adapted/其他 target variants。
-    // 禁止 update_instruction(from_shared_markdown) 整篇重建为随机 Shared 块。
+    // 专用幂等 translator：只替换 Claude-owned targetOnly 块集合，保留 Shared/Adapted/其他 target。
+    // 多 Claude 块时收敛为单块，避免重复 push 把完整 incoming 写进每个块。
     let (mut doc, _) =
         crate::agent_hub::service::load_instruction_document_for_legacy(&asset, state).await?;
     let incoming = req.claude_md.content.as_str();
@@ -198,36 +220,7 @@ async fn claude_md_push_via_hub(state: &AppState, req: &ClaudeMdPushReq) -> Resu
         return Ok(false);
     }
 
-    // 更新或插入 Claude targetOnly 块；不动其他块
-    let mut updated = false;
-    for block in &mut doc.blocks {
-        if block.mode != InstructionBlockMode::TargetOnly {
-            continue;
-        }
-        if let Some(existing) = block.variants.get_mut(&AgentTarget::Claude) {
-            if existing.as_str() != incoming {
-                *existing = incoming.to_string();
-                updated = true;
-            } else {
-                updated = true; // 已是 targetOnly Claude
-            }
-        } else if block.source_target == Some(AgentTarget::Claude) || block.variants.is_empty() {
-            block
-                .variants
-                .insert(AgentTarget::Claude, incoming.to_string());
-            updated = true;
-        }
-    }
-    if !updated {
-        // 无 Claude targetOnly 块：追加一个，保留其余块
-        doc.blocks.push(InstructionBlock::target_only(
-            crate::agent_hub::instructions::document::new_block_id(),
-            AgentTarget::Claude,
-            incoming.to_string(),
-            vec![],
-            false,
-        ));
-    }
+    apply_claude_owned_blocks_from_legacy_incoming(&mut doc, incoming);
 
     let expected = before
         .as_ref()
@@ -258,4 +251,103 @@ async fn claude_md_push_via_hub(state: &AppState, req: &ClaudeMdPushReq) -> Resu
         .await?
         .and_then(|a| a.current_revision_id);
     Ok(before != after)
+}
+
+/// 用 legacy incoming 替换文档中 Claude-owned targetOnly 块集合。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Hub-on legacy push 只能覆盖 Claude targetOnly 内容；Shared/Adapted/其他 target 必须保留。
+///     多 Claude 块时不得把同一正文重复写入每个块，否则多块文档会膨胀且丢失幂等性。
+///
+/// Code Logic（这个函数做什么）:
+///     1) 删除所有含 Claude variant 的 targetOnly 块；
+///     2) 追加单个 Claude targetOnly 块承载完整 incoming；
+///     3) Shared/Adapted 与非 Claude targetOnly 原样保留。
+fn apply_claude_owned_blocks_from_legacy_incoming(
+    doc: &mut crate::agent_hub::instructions::document::InstructionDocument,
+    incoming: &str,
+) {
+    use crate::agent_hub::instructions::document::{InstructionBlock, InstructionBlockMode};
+    use crate::agent_hub::models::AgentTarget;
+
+    doc.blocks.retain(|block| {
+        if block.mode != InstructionBlockMode::TargetOnly {
+            return true;
+        }
+        // 含 Claude variant 或 source=Claude 的 targetOnly 由本 push 全权替换
+        if block.variants.contains_key(&AgentTarget::Claude)
+            || block.source_target == Some(AgentTarget::Claude)
+        {
+            return false;
+        }
+        true
+    });
+    doc.blocks.push(InstructionBlock::target_only(
+        crate::agent_hub::instructions::document::new_block_id(),
+        AgentTarget::Claude,
+        incoming.to_string(),
+        vec![],
+        false,
+    ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_claude_owned_blocks_from_legacy_incoming;
+    use crate::agent_hub::instructions::document::{
+        InstructionBlock, InstructionBlockMode, InstructionDocument,
+    };
+    use crate::agent_hub::models::AgentTarget;
+
+    /// Business Logic: multi Claude targetOnly 块不得被完整 incoming 重复写爆。
+    /// Code Logic: 替换为单 Claude 块，保留 Shared。
+    #[test]
+    fn legacy_push_replaces_claude_blocks_idempotently() {
+        let mut doc = InstructionDocument {
+            relative_key: String::new(),
+            blocks: vec![
+                InstructionBlock {
+                    id: "shared".into(),
+                    mode: InstructionBlockMode::Shared,
+                    common_markdown: Some("shared body".into()),
+                    structured_intent: None,
+                    variants: Default::default(),
+                    heading_path: vec![],
+                    source_target: None,
+                    needs_adaptation: false,
+                },
+                InstructionBlock::target_only("c1", AgentTarget::Claude, "old1", vec![], false),
+                InstructionBlock::target_only("c2", AgentTarget::Claude, "old2", vec![], false),
+            ],
+        };
+        apply_claude_owned_blocks_from_legacy_incoming(&mut doc, "incoming once");
+        let claude_only: Vec<_> = doc
+            .blocks
+            .iter()
+            .filter(|b| {
+                b.mode == InstructionBlockMode::TargetOnly
+                    && b.variants.contains_key(&AgentTarget::Claude)
+            })
+            .collect();
+        assert_eq!(claude_only.len(), 1);
+        assert_eq!(
+            claude_only[0].variants.get(&AgentTarget::Claude).unwrap(),
+            "incoming once"
+        );
+        assert!(doc
+            .blocks
+            .iter()
+            .any(|b| b.mode == InstructionBlockMode::Shared));
+        // 二次应用仍单块
+        apply_claude_owned_blocks_from_legacy_incoming(&mut doc, "incoming once");
+        let again = doc
+            .blocks
+            .iter()
+            .filter(|b| {
+                b.mode == InstructionBlockMode::TargetOnly
+                    && b.variants.contains_key(&AgentTarget::Claude)
+            })
+            .count();
+        assert_eq!(again, 1);
+    }
 }
