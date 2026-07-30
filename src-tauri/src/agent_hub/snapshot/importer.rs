@@ -300,61 +300,7 @@ impl SnapshotImporter {
         selection: ConfirmedImportSelection,
     ) -> Result<SnapshotImportOutcome, AppError> {
         let env = &snapshot.envelope;
-
-        // ── Phase A: closure + CAS ──────────────────────────────────────
-        validate_revision_closure(env)?;
-        let referenced = collect_referenced_object_hashes(env);
-        let mut imported_object_hashes = Vec::new();
-        for hash in &referenced {
-            // 优先 snapshot 提供的字节；否则尝试本地 CAS
-            if let Some(bytes) = snapshot.object_bytes.get(hash) {
-                let actual = sha256_hex(bytes);
-                if actual != *hash {
-                    return Err(AppError::validation(
-                        "agent_hub_import_corrupt_object:hash_mismatch".to_string(),
-                    ));
-                }
-                self.objects.put_blob(bytes).await?;
-                imported_object_hashes.push(hash.clone());
-            } else {
-                // 本地 CAS 必须存在
-                match self.objects.get_blob(hash).await {
-                    Ok(_) => {
-                        // 已在 CAS，不计入「本次新导入」也可报告为 imported referenced
-                        imported_object_hashes.push(hash.clone());
-                    }
-                    Err(_) => {
-                        return Err(AppError::validation(format!(
-                            "agent_hub_import_object_missing:{hash}"
-                        )));
-                    }
-                }
-            }
-        }
-        // 未引用的 object_bytes 可写入 CAS 供 GC，但不得报告为 imported asset 对象
-        for (hash, bytes) in &snapshot.object_bytes {
-            if referenced.contains(hash) {
-                continue;
-            }
-            let actual = sha256_hex(bytes);
-            if actual == *hash {
-                let _ = self.objects.put_blob(bytes).await;
-            }
-        }
-
-        #[cfg(any(test, debug_assertions))]
-        {
-            // crash after CAS：对象已在 CAS，但 TX 未开
-            if std::env::var("CC_PARTNER_IMPORT_CRASH_AFTER_CAS")
-                .ok()
-                .as_deref()
-                == Some("1")
-            {
-                return Err(AppError::generic(
-                    "agent_hub_import_injected_crash_after_cas".to_string(),
-                ));
-            }
-        }
+        let imported_object_hashes = self.stage_objects_for_import(&snapshot).await?;
 
         // ── Plan Phase B bundle ─────────────────────────────────────────
         let plan = self.plan_import_bundle(env, &selection).await?;
@@ -378,6 +324,89 @@ impl SnapshotImporter {
             projections_scheduled,
             imported_object_hashes,
         })
+    }
+
+    /// Phase A：校验闭包并把 snapshot objects 写入 CAS（幂等）。
+    ///
+    /// Business Logic: LAN commit 在 ledger 同 TX import 前先完成 CAS 落盘；CAS 幂等可重放。
+    /// Code Logic: validate_revision_closure → put_blob / require local CAS → 返回 imported hashes。
+    pub async fn stage_objects_for_import(
+        &self,
+        snapshot: &ValidatedSnapshot,
+    ) -> Result<Vec<String>, AppError> {
+        let env = &snapshot.envelope;
+        validate_revision_closure(env)?;
+        let referenced = collect_referenced_object_hashes(env);
+        let mut imported_object_hashes = Vec::new();
+        for hash in &referenced {
+            if let Some(bytes) = snapshot.object_bytes.get(hash) {
+                let actual = sha256_hex(bytes);
+                if actual != *hash {
+                    return Err(AppError::validation(
+                        "agent_hub_import_corrupt_object:hash_mismatch".to_string(),
+                    ));
+                }
+                self.objects.put_blob(bytes).await?;
+                imported_object_hashes.push(hash.clone());
+            } else {
+                match self.objects.get_blob(hash).await {
+                    Ok(_) => {
+                        imported_object_hashes.push(hash.clone());
+                    }
+                    Err(_) => {
+                        return Err(AppError::validation(format!(
+                            "agent_hub_import_object_missing:{hash}"
+                        )));
+                    }
+                }
+            }
+        }
+        for (hash, bytes) in &snapshot.object_bytes {
+            if referenced.contains(hash) {
+                continue;
+            }
+            let actual = sha256_hex(bytes);
+            if actual == *hash {
+                let _ = self.objects.put_blob(bytes).await;
+            }
+        }
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            if std::env::var("CC_PARTNER_IMPORT_CRASH_AFTER_CAS")
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
+                return Err(AppError::generic(
+                    "agent_hub_import_injected_crash_after_cas".to_string(),
+                ));
+            }
+        }
+        Ok(imported_object_hashes)
+    }
+
+    /// 公开 plan 入口（LAN 原子 commit 复用）。
+    ///
+    /// Business Logic: receiver 在同一 TX 内需要 plan 后再 apply。
+    /// Code Logic: 委托私有 `plan_import_bundle`。
+    pub async fn plan_import_bundle_public(
+        &self,
+        env: &SnapshotEnvelopeV1,
+        selection: &ConfirmedImportSelection,
+    ) -> Result<PlannedImport, AppError> {
+        self.plan_import_bundle(env, selection).await
+    }
+
+    /// 公开 plugin edges 丰富入口（LAN 原子 commit 复用）。
+    pub async fn enrich_plugin_edges_for_import_public(
+        &self,
+        bundle: &mut ImportBundle,
+        env: &SnapshotEnvelopeV1,
+        object_bytes: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), AppError> {
+        self.enrich_plugin_edges_for_import(bundle, env, object_bytes)
+            .await
     }
 
     /// 规划 import bundle：identity 映射 + MCA head 决策。
@@ -650,6 +679,7 @@ impl SnapshotImporter {
                     });
                     head_decisions.push(ImportHeadDecision {
                         asset_id: local_asset.clone(),
+                        expected_head: None,
                         new_head: Some(h.clone()),
                         deleted_at: deleted,
                     });
@@ -659,6 +689,7 @@ impl SnapshotImporter {
                     sorted.sort();
                     head_decisions.push(ImportHeadDecision {
                         asset_id: local_asset.clone(),
+                        expected_head: None,
                         new_head: Some(sorted[0].clone()),
                         deleted_at: None,
                     });
@@ -709,6 +740,7 @@ impl SnapshotImporter {
                     ConvergeDecision::FastForward { head, deleted_at } => {
                         head_decisions.push(ImportHeadDecision {
                             asset_id: local_asset.clone(),
+                            expected_head: Some(local_head.clone()),
                             new_head: Some(head),
                             deleted_at,
                         });
@@ -724,6 +756,7 @@ impl SnapshotImporter {
                         merge_revisions.push(merge_rev);
                         head_decisions.push(ImportHeadDecision {
                             asset_id: local_asset.clone(),
+                            expected_head: Some(local_head.clone()),
                             new_head: Some(merge_id),
                             deleted_at,
                         });
@@ -737,6 +770,7 @@ impl SnapshotImporter {
                         // 不推进 head
                         head_decisions.push(ImportHeadDecision {
                             asset_id: local_asset.clone(),
+                            expected_head: Some(local_head.clone()),
                             new_head: None,
                             deleted_at: None,
                         });
@@ -1216,9 +1250,11 @@ impl SnapshotImporter {
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
-struct PlannedImport {
-    bundle: ImportBundle,
-    projections_scheduled: u64,
+pub struct PlannedImport {
+    /// import 事务载荷
+    pub bundle: ImportBundle,
+    /// 预计调度的 projection 数
+    pub projections_scheduled: u64,
 }
 
 enum ConvergeDecision {
