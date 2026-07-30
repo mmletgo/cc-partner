@@ -17,8 +17,7 @@ use crate::agent_hub::models::{
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::projection::{ProjectionRequest, ProjectionScheduler};
 use crate::agent_hub::support::{
-    builtin_support_manifest, evaluate_target_support, CapabilitySupport, RuntimeProbeSnapshot,
-    TargetCapability,
+    builtin_support_manifest, evaluate_target_support, RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, InstructionRenderContext,
@@ -128,18 +127,63 @@ pub async fn schedule_package_deactivation(
                 strategy.as_str()
             )
         };
-        // Absent：best-effort 安全删除 managed materialization 根目录（仅 managed 路径）
+        // Absent：capability 门闸后只记 durable deactivation job 意图；
+        // 真实 uninstall 由 durable 路径执行，禁止直接 remove_dir_all 绕过 support。
         if is_absent {
-            if let Err(e) =
-                safe_remove_package_materialization(state, &asset, b.target, mat.as_ref()).await
-            {
+            if let Some(reason) = package_deactivate_block_reason(b.target).await {
                 tracing::warn!(
                     asset_id = %asset.id,
                     target = %b.target.as_str(),
-                    error = %e,
-                    "agent_hub package absent removal failed; leave pending for retry"
+                    reason = %reason,
+                    "agent_hub package Absent blocked by support; no destructive delete"
                 );
+                state
+                    .agent_hub_repo
+                    .upsert_materialization(crate::agent_hub::models::NewMaterialization {
+                        asset_id: asset.id.clone(),
+                        target: b.target,
+                        target_binding_id: b.id.clone(),
+                        native_path: mat.as_ref().and_then(|m| m.native_path.clone()),
+                        last_projected_revision_id: mat
+                            .as_ref()
+                            .and_then(|m| m.last_projected_revision_id.clone()),
+                        rendered_hash: mat.as_ref().and_then(|m| m.rendered_hash.clone()),
+                        observed_external_hash: mat
+                            .as_ref()
+                            .and_then(|m| m.observed_external_hash.clone()),
+                        status: crate::agent_hub::models::MaterializationStatus::Blocked,
+                        last_error: Some(format!("support_blocked:{reason}")),
+                    })
+                    .await?;
+                n = n.saturating_add(1);
+                continue;
             }
+            // durable deactivation intent：标记 Pending + deactivate token；
+            // 不立即 remove_dir_all——由 activator/runtime 执行 uninstall 后清理。
+            let error_token = format!(
+                "disable_strategy:{}:absent_deactivation_job_scheduled",
+                strategy.as_str()
+            );
+            state
+                .agent_hub_repo
+                .upsert_materialization(crate::agent_hub::models::NewMaterialization {
+                    asset_id: asset.id.clone(),
+                    target: b.target,
+                    target_binding_id: b.id.clone(),
+                    native_path: mat.as_ref().and_then(|m| m.native_path.clone()),
+                    last_projected_revision_id: mat
+                        .as_ref()
+                        .and_then(|m| m.last_projected_revision_id.clone()),
+                    rendered_hash: mat.as_ref().and_then(|m| m.rendered_hash.clone()),
+                    observed_external_hash: mat
+                        .as_ref()
+                        .and_then(|m| m.observed_external_hash.clone()),
+                    status: crate::agent_hub::models::MaterializationStatus::Pending,
+                    last_error: Some(error_token),
+                })
+                .await?;
+            n = n.saturating_add(1);
+            continue;
         }
         state
             .agent_hub_repo
@@ -153,12 +197,7 @@ pub async fn schedule_package_deactivation(
                     .and_then(|m| m.last_projected_revision_id.clone()),
                 rendered_hash: mat.as_ref().and_then(|m| m.rendered_hash.clone()),
                 observed_external_hash: mat.as_ref().and_then(|m| m.observed_external_hash.clone()),
-                status: if is_absent {
-                    // 删除已调度：若路径已不存在则 Synced，否则 Pending 供恢复
-                    crate::agent_hub::models::MaterializationStatus::Pending
-                } else {
-                    crate::agent_hub::models::MaterializationStatus::Pending
-                },
+                status: crate::agent_hub::models::MaterializationStatus::Pending,
                 last_error: Some(error_token),
             })
             .await?;
@@ -167,64 +206,29 @@ pub async fn schedule_package_deactivation(
     Ok(n)
 }
 
-/// 安全删除 package 的 managed materialization 目录。
+/// package Absent 的 DeactivatePackage capability 阻断原因。
 ///
-/// Business Logic（为什么需要这个函数）:
-///     Absent fan-out 后磁盘 package 不得无限残留；仅删除 Hub managed 根，不跟外部路径。
+/// Business Logic: null/blocked manifest 下不得删除 managed package 目录。
+/// Code Logic: evaluate DeactivatePackage write capability。
+async fn package_deactivate_block_reason(target: AgentTarget) -> Option<String> {
+    let env = current_target_environment();
+    write_capability_block_reason(target, &env, TargetCapability::DeactivatePackage).await
+}
+
+/// 单资产投影调度结果（供 LAN outbox 判定完整成功）。
 ///
-/// Code Logic（这个函数做什么）:
-///     解析 package_materialized_root/<target>/<scope>/<package-id>；存在则 remove_dir_all；
-///     路径必须落在 managed root 下，否则拒绝。
-async fn safe_remove_package_materialization(
-    state: &AppState,
-    asset: &crate::agent_hub::models::LogicalAsset,
-    target: crate::agent_hub::models::AgentTarget,
-    mat: Option<&crate::agent_hub::models::Materialization>,
-) -> Result<(), AppError> {
-    let data_dir = crate::config::data_dir()?;
-    let managed_root =
-        crate::agent_hub::packages::package_materialized_root(&data_dir).join(target.as_str());
-    // 优先 materialization.native_path；否则按 convention 拼 scope/asset
-    let candidate = if let Some(path) = mat.and_then(|m| m.native_path.as_ref()) {
-        std::path::PathBuf::from(path)
-    } else {
-        managed_root
-            .join(asset.scope_id.as_str())
-            .join(asset.id.as_str())
-    };
-    // 必须在 managed_root 下
-    let managed_canon = managed_root
-        .canonicalize()
-        .unwrap_or_else(|_| managed_root.clone());
-    let cand_parent = candidate.parent().map(|p| p.to_path_buf());
-    let under_managed = candidate.starts_with(&managed_root)
-        || candidate.starts_with(&managed_canon)
-        || cand_parent
-            .as_ref()
-            .is_some_and(|p| p.starts_with(&managed_root) || p.starts_with(&managed_canon));
-    if !under_managed {
-        return Err(AppError::validation(format!(
-            "agent_hub_package_absent_path_outside_managed:{}",
-            candidate.display()
-        )));
-    }
-    if candidate.is_dir() {
-        std::fs::remove_dir_all(&candidate).map_err(|e| {
-            AppError::generic(format!(
-                "agent_hub_package_absent_remove_failed:{}:{e}",
-                candidate.display()
-            ))
-        })?;
-    } else if candidate.is_file() {
-        std::fs::remove_file(&candidate).map_err(|e| {
-            AppError::generic(format!(
-                "agent_hub_package_absent_remove_file_failed:{}:{e}",
-                candidate.display()
-            ))
-        })?;
-    }
-    let _ = state;
-    Ok(())
+/// Business Logic: 部分 target 失败不得把 durable intent 标 done。
+/// Code Logic: enqueued + terminal_blocked + failed 计数；complete 当 failed==0 且有 bindings。
+#[derive(Debug, Clone, Default)]
+pub struct ScheduleAssetReport {
+    /// 成功入队可执行 job 数
+    pub enqueued: u32,
+    /// support/checkout 明确 terminal-blocked（已持久化 Blocked，无 job）
+    pub terminal_blocked: u32,
+    /// 临时失败（路径/SQLite/CAS）需重试
+    pub failed: u32,
+    /// 无 binding / 非 instruction 无作业时视为 complete（无可做）
+    pub complete: bool,
 }
 
 /// 为单个 instruction 资产调度全部 target 投影 job。
@@ -233,9 +237,25 @@ async fn safe_remove_package_materialization(
 ///     Hub revision 或 binding 变化后，需按 desired_presence 把当前 head 投影到各 CLI 文件。
 ///
 /// Code Logic（这个函数做什么）:
-///     加载 asset/document/scope/bindings；Present 时 compile_render 并入队；Absent 入队删除；
-///     blocked checkout 跳过 Present；单 target 失败 warn 并继续；返回成功入队数。
+///     委托 `schedule_asset_projections_report`；返回成功入队数（兼容旧调用方）。
 pub async fn schedule_asset_projections(state: &AppState, asset_id: &str) -> Result<u32, AppError> {
+    let report = schedule_asset_projections_report(state, asset_id).await?;
+    Ok(report.enqueued)
+}
+
+/// 为单个资产调度投影并返回完整成功报告。
+///
+/// Business Logic（为什么需要这个函数）:
+///     LAN outbox 必须在「所有 target 已入队或 terminal-blocked」后才 mark done；
+///     Ok(0) 成功计数不得代表完整成功。
+///
+/// Code Logic（这个函数做什么）:
+///     加载 asset/document/scope/bindings；逐 binding schedule_one_binding；
+///     分类 enqueued / terminal_blocked / failed；complete = failed==0。
+pub async fn schedule_asset_projections_report(
+    state: &AppState,
+    asset_id: &str,
+) -> Result<ScheduleAssetReport, AppError> {
     let asset = state
         .agent_hub_repo
         .get_asset(asset_id)
@@ -243,10 +263,21 @@ pub async fn schedule_asset_projections(state: &AppState, asset_id: &str) -> Res
         .ok_or_else(|| AppError::not_found(format!("agent_hub_asset_not_found:{asset_id}")))?;
     if asset.kind != AssetKind::Instruction {
         // package disable 路径走 schedule_package_deactivation；其它 kind 当前 0
-        return schedule_package_deactivation(state, asset_id).await;
+        let n = schedule_package_deactivation(state, asset_id).await?;
+        return Ok(ScheduleAssetReport {
+            enqueued: n,
+            terminal_blocked: 0,
+            failed: 0,
+            complete: true,
+        });
     }
     let Some(rev_id) = asset.current_revision_id.clone() else {
-        return Ok(0);
+        return Ok(ScheduleAssetReport {
+            enqueued: 0,
+            terminal_blocked: 0,
+            failed: 0,
+            complete: true,
+        });
     };
 
     let (document, _) = load_instruction_document(state, &asset).await?;
@@ -263,7 +294,12 @@ pub async fn schedule_asset_projections(state: &AppState, asset_id: &str) -> Res
         .list_target_bindings_for_asset(&asset.id)
         .await?;
     if bindings.is_empty() {
-        return Ok(0);
+        return Ok(ScheduleAssetReport {
+            enqueued: 0,
+            terminal_blocked: 0,
+            failed: 0,
+            complete: true,
+        });
     }
 
     let data_dir = crate::config::data_dir()?;
@@ -276,7 +312,7 @@ pub async fn schedule_asset_projections(state: &AppState, asset_id: &str) -> Res
     };
 
     let env = current_target_environment();
-    let mut successes: u32 = 0;
+    let mut report = ScheduleAssetReport::default();
 
     for binding in bindings {
         match schedule_one_binding(
@@ -292,21 +328,42 @@ pub async fn schedule_asset_projections(state: &AppState, asset_id: &str) -> Res
         )
         .await
         {
-            Ok(true) => successes += 1,
-            Ok(false) => {}
+            Ok(BindingScheduleOutcome::Enqueued) => {
+                report.enqueued = report.enqueued.saturating_add(1);
+            }
+            Ok(BindingScheduleOutcome::TerminalBlocked) => {
+                report.terminal_blocked = report.terminal_blocked.saturating_add(1);
+            }
+            Ok(BindingScheduleOutcome::Skipped) => {
+                // skipped without block (e.g. no path) 视为 terminal no-op
+                report.terminal_blocked = report.terminal_blocked.saturating_add(1);
+            }
             Err(e) => {
+                report.failed = report.failed.saturating_add(1);
                 tracing::warn!(
                     asset_id = %asset.id,
                     target = %binding.target.as_str(),
                     error = %e,
-                    "agent_hub schedule_asset_projections target failed (best-effort)"
+                    "agent_hub schedule_asset_projections target failed (retryable)"
                 );
             }
         }
     }
+    report.complete = report.failed == 0;
     // Gate C Task6：规范变更 best-effort 触发 Git device-lane 备份（不阻塞投影）
     crate::agent_hub::git::runtime::mark_agent_hub_git_dirty(state);
-    Ok(successes)
+    Ok(report)
+}
+
+/// 单 binding 调度结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingScheduleOutcome {
+    /// 已入队可执行 job
+    Enqueued,
+    /// support/checkout blocked：已持久化 Blocked，无 job
+    TerminalBlocked,
+    /// 无害 skip
+    Skipped,
 }
 
 /// 为已 opt-in 的 Workbench 项目调度其下全部 instruction 投影。
@@ -364,11 +421,13 @@ pub async fn schedule_project_projections(
 /// 为单条 binding 构建并入队 projection request。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     每个 target 的路径、blocked 门闸与 rendered hash 独立；Present 需编译，Absent 可安全调度。
+///     每个 target 的路径、blocked 门闸与 rendered hash 独立；Present/Absent 均需 capability 门闸。
+///     blocked support 时只持久化 Blocked，禁止入队可执行 job（含 Absent 删除）。
 ///
 /// Code Logic（这个函数做什么）:
-///     blocked+Present → skip；解析路径 → compile_render(Present) 或空字节(Absent) → enqueue。
-///     成功入队返回 true，skip 返回 false。
+///     Present: checkout blocked / RenderInstruction blocked → TerminalBlocked；
+///     Absent: DeactivatePackage/RenderInstruction 写能力 blocked → TerminalBlocked；
+///     否则 compile/empty → enqueue → Enqueued。
 #[allow(clippy::too_many_arguments)]
 async fn schedule_one_binding(
     state: &AppState,
@@ -380,37 +439,53 @@ async fn schedule_one_binding(
     hub_project_id: Option<&str>,
     rev_id: &crate::agent_hub::models::RevisionId,
     env: &TargetEnvironment,
-) -> Result<bool, AppError> {
+) -> Result<BindingScheduleOutcome, AppError> {
     let checkout = if let Some(cb_id) = binding.checkout_binding_id.as_deref() {
         state.agent_hub_repo.get_checkout_binding(cb_id).await?
     } else {
         None
     };
 
-    // blocked checkout：跳过 Present 写，避免覆盖冲突文件；Absent 仍可安全调度。
-    if binding.desired_presence == DesiredPresence::Present {
-        if let Some(cb) = checkout.as_ref() {
-            if cb.status == "blocked" {
+    // Present 与 Absent 均强制 support capability；blocked → Blocked 状态 only，无 job。
+    match binding.desired_presence {
+        DesiredPresence::Present => {
+            if let Some(cb) = checkout.as_ref() {
+                if cb.status == "blocked" {
+                    tracing::warn!(
+                        asset_id = %asset.id,
+                        target = %binding.target.as_str(),
+                        checkout_id = %cb.id,
+                        "agent_hub skip Present projection: checkout blocked"
+                    );
+                    return Ok(BindingScheduleOutcome::TerminalBlocked);
+                }
+            }
+            // support manifest fail-closed：renderInstruction Blocked/ReadOnly 不得入队写盘 job
+            if let Some(reason) = render_instruction_block_reason(binding.target, env).await {
                 tracing::warn!(
                     asset_id = %asset.id,
                     target = %binding.target.as_str(),
-                    checkout_id = %cb.id,
-                    "agent_hub skip Present projection: checkout blocked"
+                    reason = %reason,
+                    "agent_hub skip Present projection: support manifest blocks renderInstruction"
                 );
-                return Ok(false);
+                let _ =
+                    persist_support_blocked_materialization(state, asset, binding, &reason).await;
+                return Ok(BindingScheduleOutcome::TerminalBlocked);
             }
         }
-        // support manifest fail-closed：renderInstruction Blocked/ReadOnly 不得入队写盘 job
-        if let Some(reason) = render_instruction_block_reason(binding.target, env).await {
-            tracing::warn!(
-                asset_id = %asset.id,
-                target = %binding.target.as_str(),
-                reason = %reason,
-                "agent_hub skip Present projection: support manifest blocks renderInstruction"
-            );
-            // 持久化 materialization blocked 状态（Attention 可投影），不创建可执行 job
-            let _ = persist_support_blocked_materialization(state, asset, binding, &reason).await;
-            return Ok(false);
+        DesiredPresence::Absent => {
+            // Absent 破坏性写同样要求写能力（RenderInstruction 或 DeactivatePackage 族）
+            if let Some(reason) = absent_write_block_reason(binding.target, env).await {
+                tracing::warn!(
+                    asset_id = %asset.id,
+                    target = %binding.target.as_str(),
+                    reason = %reason,
+                    "agent_hub skip Absent projection: support manifest blocks destructive write"
+                );
+                let _ =
+                    persist_support_blocked_materialization(state, asset, binding, &reason).await;
+                return Ok(BindingScheduleOutcome::TerminalBlocked);
+            }
         }
     }
 
@@ -453,7 +528,7 @@ async fn schedule_one_binding(
     };
 
     scheduler.enqueue_projection(request).await?;
-    Ok(true)
+    Ok(BindingScheduleOutcome::Enqueued)
 }
 
 /// 解析目标 CLI 指令文件绝对路径。
@@ -699,6 +774,35 @@ async fn render_instruction_block_reason(
     target: AgentTarget,
     env: &TargetEnvironment,
 ) -> Option<String> {
+    write_capability_block_reason(target, env, TargetCapability::RenderInstruction).await
+}
+
+/// 评估 Absent 破坏性写是否被 support 阻断。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Present 与 Absent 都必须强制写能力；blocked 时只持久化 Blocked，不得删文件。
+///
+/// Code Logic（这个函数做什么）:
+///     DeactivatePackage 或 RenderInstruction 任一允许写 → 放行；否则返回阻断原因。
+async fn absent_write_block_reason(target: AgentTarget, env: &TargetEnvironment) -> Option<String> {
+    if write_capability_block_reason(target, env, TargetCapability::DeactivatePackage)
+        .await
+        .is_none()
+    {
+        return None;
+    }
+    write_capability_block_reason(target, env, TargetCapability::RenderInstruction).await
+}
+
+/// 通用写 capability 阻断原因。
+///
+/// Business Logic: capability 不允许写 → Some(reason)。
+/// Code Logic: probe + evaluate_target_support + allows_write_capability。
+async fn write_capability_block_reason(
+    target: AgentTarget,
+    env: &TargetEnvironment,
+    cap: TargetCapability,
+) -> Option<String> {
     let probe = probe_target_for_support(target, env);
     let snap = RuntimeProbeSnapshot {
         target: probe.target,
@@ -714,30 +818,15 @@ async fn render_instruction_block_reason(
             return Some("support_manifest_unavailable".into());
         }
     };
-    match eval.capability(TargetCapability::RenderInstruction) {
-        CapabilitySupport::Supported | CapabilitySupport::SupportedAfterRestart => {
-            if eval.write_allowed {
-                None
-            } else {
-                Some(
-                    eval.reasons
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "render_instruction_write_disallowed".into()),
-                )
-            }
-        }
-        CapabilitySupport::Blocked => Some(
-            eval.reasons
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "render_instruction_blocked".into()),
-        ),
-        CapabilitySupport::ReadOnly => Some("render_instruction_read_only".into()),
-        CapabilitySupport::ActivationRequired => {
-            Some("render_instruction_activation_required".into())
-        }
+    if eval.allows_write_capability(cap) {
+        return None;
     }
+    Some(
+        eval.reasons
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("{}_blocked", cap.as_str())),
+    )
 }
 
 fn probe_target_for_support(target: AgentTarget, env: &TargetEnvironment) -> TargetProbe {

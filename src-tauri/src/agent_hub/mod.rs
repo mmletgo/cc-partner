@@ -78,12 +78,12 @@ pub use migration::{
     dual_write_legacy_claude_md_summary, legacy_agent_asset_compatibility_status,
     legacy_facade_policy, migrate_user_claude_md_state, migrate_user_claude_md_state_with,
     n_plus_two_removal_allowed, preview_plugin_migration, resolve_user_claude_md_content,
-    version_cmp, ClaudeMdMigrationPreview, DowngradeFacadeSnapshot,
-    LegacyAgentAssetCompatibilityStatus, LegacyFacadePolicy, MigrationDeps,
-    PluginMigrationConfirmResult, PluginMigrationPreview, PluginMigrationPreviewItem,
-    AGENT_HUB_GA_VERSION, EARLIEST_LEGACY_REMOVAL_VERSION, STABLE_MIGRATION_EVIDENCE_ID,
-    USER_INSTRUCTION_DISPLAY_NAME, USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE,
-    USER_SCOPE_STABLE_ID,
+    seed_user_instruction_if_head_null, version_cmp, ClaudeMdMigrationPreview,
+    DowngradeFacadeSnapshot, LegacyAgentAssetCompatibilityStatus, LegacyFacadePolicy,
+    MigrationDeps, PluginMigrationConfirmResult, PluginMigrationPreview,
+    PluginMigrationPreviewItem, SeedUserInstructionOutcome, AGENT_HUB_GA_VERSION,
+    EARLIEST_LEGACY_REMOVAL_VERSION, STABLE_MIGRATION_EVIDENCE_ID, USER_INSTRUCTION_DISPLAY_NAME,
+    USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE, USER_SCOPE_STABLE_ID,
 };
 pub use models::{
     compute_asset_aggregate_status, AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget,

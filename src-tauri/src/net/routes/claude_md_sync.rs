@@ -159,34 +159,15 @@ async fn claude_md_push_via_hub(state: &AppState, req: &ClaudeMdPushReq) -> Resu
         .unwrap_or_else(|_| data_dir.join("legacy-claude-md-missing"));
     let _ = ObjectStore::open(&data_dir)?;
 
-    // 仅在 user scope/asset/head 缺失时 seed；已有 head 时绝不 reclassify 现有文档。
-    let need_seed = match state.agent_hub_repo.resolve_user_scope_id().await? {
-        None => true,
-        Some(scope_id) => {
-            match state
-                .agent_hub_repo
-                .get_asset_by_unique_key(
-                    &scope_id,
-                    AssetKind::Instruction,
-                    USER_INSTRUCTION_NAMESPACE,
-                    USER_INSTRUCTION_LOGICAL_KEY,
-                )
-                .await?
-            {
-                None => true,
-                Some(a) => a.current_revision_id.is_none(),
-            }
-        }
-    };
-    if need_seed {
-        let _ = crate::agent_hub::migration::migrate_user_claude_md_state(
-            state,
-            &claude_path,
-            &data_dir,
-        )
-        .await
-        .map_err(|e| AppError::generic(format!("agent_hub_legacy_claude_md_migrate_failed:{e}")))?;
-    }
+    // Codex R4: 单事务 NULL-head CAS seed；CAS miss 时不 reclassify，仅 targetOnly 带 expected parent。
+    // 禁止事务外 need_seed 判断后 race 覆盖并发 import 建立的 Shared/Adapted head。
+    let seed_outcome = crate::agent_hub::migration::seed_user_instruction_if_head_null(
+        state,
+        &claude_path,
+        &data_dir,
+    )
+    .await
+    .map_err(|e| AppError::generic(format!("agent_hub_legacy_claude_md_seed_failed:{e}")))?;
 
     let scope_id = state
         .agent_hub_repo
@@ -207,7 +188,9 @@ async fn claude_md_push_via_hub(state: &AppState, req: &ClaudeMdPushReq) -> Resu
         .ok_or_else(|| {
             AppError::validation("agent_hub_legacy_claude_md_user_asset_missing".to_string())
         })?;
+    // seed 后或 CAS miss 后必须 reload head；禁止用陈旧 None expected 覆盖
     let before = asset.current_revision_id.clone();
+    let _ = seed_outcome;
 
     // 专用幂等 translator：只替换 Claude-owned targetOnly 块集合，保留 Shared/Adapted/其他 target。
     // 多 Claude 块时收敛为单块，避免重复 push 把完整 incoming 写进每个块。

@@ -24,10 +24,12 @@ const DRAIN_INTERVAL: Duration = Duration::from_secs(5);
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     owner 启动与周期 worker、committed-prepare 补偿共用；投影 job 持久入队后才推进 intent。
+///     部分 target 调度失败时不得 mark done（否则唯一 durable retry 记录被清）。
 ///
 /// Code Logic（这个函数做什么）:
-///     claim_queued → 对每个 asset schedule_asset_projections → mark done；
-///     单条失败 warn 并继续，不推进该 intent status。
+///     claim_queued(CAS) → schedule_asset_projections_report →
+///     全部 enqueued/terminal_blocked 才 mark done；否则 requeue processing→queued。
+///     禁止把 Ok(0) 当完整成功。
 pub async fn drain_lan_projection_intents(state: &AppState) -> Result<u32, AppError> {
     let claimed = state
         .agent_hub_repo
@@ -38,21 +40,44 @@ pub async fn drain_lan_projection_intents(state: &AppState) -> Result<u32, AppEr
     }
     let mut done = 0u32;
     for (transfer_id, asset_id) in claimed {
-        match crate::agent_hub::projection_ops::schedule_asset_projections(state, &asset_id).await {
-            Ok(_) => {
-                if let Err(e) = state
-                    .agent_hub_repo
-                    .mark_lan_projection_intent_status(&transfer_id, &asset_id, "done")
-                    .await
-                {
+        match crate::agent_hub::projection_ops::schedule_asset_projections_report(state, &asset_id)
+            .await
+        {
+            Ok(report) => {
+                // 完整成功：所有 target 已入队或明确 terminal-blocked
+                if report.complete {
+                    if let Err(e) = state
+                        .agent_hub_repo
+                        .mark_lan_projection_intent_status(&transfer_id, &asset_id, "done")
+                        .await
+                    {
+                        tracing::warn!(
+                            transfer_id = %transfer_id,
+                            asset_id = %asset_id,
+                            error = %e,
+                            "agent_hub lan projection intent mark done failed"
+                        );
+                        // mark 失败：requeue 以保留 durable retry
+                        let _ = state
+                            .agent_hub_repo
+                            .mark_lan_projection_intent_status(&transfer_id, &asset_id, "queued")
+                            .await;
+                    } else {
+                        done = done.saturating_add(1);
+                    }
+                } else {
                     tracing::warn!(
                         transfer_id = %transfer_id,
                         asset_id = %asset_id,
-                        error = %e,
-                        "agent_hub lan projection intent mark done failed"
+                        enqueued = report.enqueued,
+                        blocked = report.terminal_blocked,
+                        failed = report.failed,
+                        "agent_hub lan projection intent incomplete; requeue for retry"
                     );
-                } else {
-                    done = done.saturating_add(1);
+                    let _ = state
+                        .agent_hub_repo
+                        .mark_lan_projection_intent_status(&transfer_id, &asset_id, "queued")
+                        .await;
                 }
             }
             Err(e) => {
@@ -60,8 +85,12 @@ pub async fn drain_lan_projection_intents(state: &AppState) -> Result<u32, AppEr
                     transfer_id = %transfer_id,
                     asset_id = %asset_id,
                     error = %e,
-                    "agent_hub lan projection intent drain schedule failed; leave queued for retry"
+                    "agent_hub lan projection intent drain schedule failed; requeue for retry"
                 );
+                let _ = state
+                    .agent_hub_repo
+                    .mark_lan_projection_intent_status(&transfer_id, &asset_id, "queued")
+                    .await;
             }
         }
     }
