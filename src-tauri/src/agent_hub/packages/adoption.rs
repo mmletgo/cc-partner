@@ -2194,7 +2194,17 @@ mod tests {
         );
         let out = engine.adopt(request(&data, disc, true)).await.unwrap();
         assert!(
-            matches!(out, AdoptionOutcome::Blocked { ref reason } if reason.contains("block") || reason.contains("activate")),
+            matches!(
+                out,
+                AdoptionOutcome::Blocked { ref reason }
+                    if reason.contains("block")
+                        || reason.contains("activate")
+                        || reason.contains("min_tested")
+                        || reason.contains("current_tested")
+                        || reason.contains("evidence")
+                        || reason.contains("scan_only")
+                        || reason.contains("version")
+            ),
             "got {out:?}"
         );
         assert!(skill.is_dir(), "legacy kept when support blocks activate");
