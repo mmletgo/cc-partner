@@ -26,7 +26,7 @@ use crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER;
 use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::PeerCallError;
 use crate::net::peer_timeout::PeerTimeoutClass;
-use crate::net::protocol::CAPABILITY_AGENT_HUB_V1;
+use crate::net::protocol::{CAPABILITY_AGENT_HUB_V1, CAPABILITY_DEVICE_REQUEST_BINDING_V1};
 use crate::net::request_context::{new_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
@@ -474,10 +474,50 @@ impl AgentHubPushSender {
         rows.into_iter().map(row_to_target).collect()
     }
 
+    /// Push 前校验对端能力与设备身份绑定。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     发现记录地址复用/过期时，仅 agent-hub.v1 的旧 peer 会忽略 expected-device header；
+    ///     含 MCP 凭据的 Snapshot 不得投递到非用户所选设备并记成功。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     health_info 一次；要求 `agent-hub.v1` + `device.request-binding.v1`；
+    ///     `health.device_id` 精确等于 `peer_id`；任一失败 Unsupported/InvalidResponse。
+    async fn ensure_agent_hub_peer_binding(
+        &self,
+        base_url: &str,
+        peer_id: &str,
+    ) -> Result<(), PeerCallError> {
+        let health = self.peer_client.health_info(base_url).await?;
+        let info = health.protocol_info();
+        if !info.supports(CAPABILITY_AGENT_HUB_V1) {
+            return Err(PeerCallError::Unsupported {
+                url: base_url.to_string(),
+                capability: CAPABILITY_AGENT_HUB_V1,
+            });
+        }
+        if !info.supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1) {
+            return Err(PeerCallError::Unsupported {
+                url: base_url.to_string(),
+                capability: CAPABILITY_DEVICE_REQUEST_BINDING_V1,
+            });
+        }
+        if health.device_id.trim() != peer_id.trim() {
+            return Err(PeerCallError::InvalidResponse {
+                url: base_url.to_string(),
+                reason: format!(
+                    "agent_hub_push_device_id_mismatch:expected={peer_id},got={}",
+                    health.device_id
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// 推送单个目标。
     ///
-    /// Business Logic: capability → prepare → chunk missing → commit；错误分类 retryable。
-    /// Code Logic: PeerClient require_capability 后 HTTP 三阶段。
+    /// Business Logic: capability+device binding → prepare → chunk missing → commit；错误分类 retryable。
+    /// Code Logic: ensure_agent_hub_peer_binding 后 HTTP 三阶段。
     async fn push_one_target(&self, args: PushOneTargetArgs<'_>) -> TargetPushOutcome {
         let PushOneTargetArgs {
             request_id,
@@ -510,13 +550,14 @@ impl AgentHubPushSender {
         }
         let base_url = device.base_url();
 
-        // 1) capability gate — 在任何 push 路由前
+        // 1) capability + device binding gate — 在任何 push 路由前 fail-closed
+        //    必须同时具备 agent-hub.v1 与 device.request-binding.v1，且 health.device_id
+        //    精确等于所选 peer_id；否则凭据快照可能落到错误端点。
         if cancel.is_cancelled() {
             return fail("agent_hub_push_cancelled", true, None);
         }
         if let Err(err) = self
-            .peer_client
-            .require_capability(&base_url, CAPABILITY_AGENT_HUB_V1)
+            .ensure_agent_hub_peer_binding(&base_url, peer_id)
             .await
         {
             return classify_peer_error(peer_id, peer_label, client_request_id, err, None);
@@ -1466,6 +1507,7 @@ mod tests {
                             vec![
                                 "errors.envelope.v1".to_string(),
                                 CAPABILITY_AGENT_HUB_V1.to_string(),
+                                CAPABILITY_DEVICE_REQUEST_BINDING_V1.to_string(),
                             ]
                         };
                         axum::Json(json!({
@@ -1567,6 +1609,237 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    /// Business Logic: 缺 device.request-binding.v1 时不得 prepare（旧 peer 会忽略 device 头）。
+    /// Code Logic: health 仅 agent-hub.v1 → Unsupported；prepare=0。
+    #[tokio::test]
+    async fn never_calls_prepare_without_device_request_binding() {
+        let counters = FakePeerCounters::full_support(vec![]);
+        // 覆盖 health：仅 agent-hub，无 binding
+        let c_health = Arc::clone(&counters);
+        let c_prep = Arc::clone(&counters);
+        let app = Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(move || {
+                    let c = Arc::clone(&c_health);
+                    async move {
+                        c.health.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({
+                            "ok": true,
+                            "device_id": "peer-test",
+                            "device_name": "Peer Test",
+                            "http_port": 0,
+                            "ts": Utc::now().timestamp(),
+                            "protocol_version": 1,
+                            "capabilities": [
+                                "errors.envelope.v1",
+                                CAPABILITY_AGENT_HUB_V1,
+                            ],
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/agent-hub/push/prepare",
+                post(move |_body: axum::Json<PreparePushRequest>| {
+                    let c = Arc::clone(&c_prep);
+                    async move {
+                        c.prepare.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(PreparePushResponse {
+                            transfer_id: "x".into(),
+                            status: "prepared".into(),
+                            selection_hash: "s".into(),
+                            snapshot_hash: "h".into(),
+                            missing_object_hashes: vec![],
+                            missing_revision_ids: vec![],
+                            outcome: None,
+                        })
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let base = format!("http://{addr}");
+        let pool = test_pool().await;
+        let gate = Arc::new(DatabaseMaintenanceGate::new());
+        let dir = tempfile::tempdir().unwrap();
+        let sender = AgentHubPushSender::new(pool, gate, "src-device", dir.path());
+        let without = base.trim_start_matches("http://");
+        let (host, port_s) = without.rsplit_once(':').unwrap();
+        let device = Device {
+            id: "peer-test".into(),
+            name: "Peer Test".into(),
+            host: host.to_string(),
+            port: port_s.parse().unwrap(),
+            last_seen: Utc::now(),
+            online: true,
+            proto_version: 1,
+            capabilities: vec![CAPABILITY_AGENT_HUB_V1.into()],
+        };
+        let built = BuiltSnapshot {
+            envelope: SnapshotEnvelopeV1 {
+                format: FORMAT_NAME.into(),
+                format_version: FORMAT_VERSION,
+                canonicalization: CANONICALIZATION_NAME.into(),
+                snapshot_id: "01900000-0000-7000-8000-0000000000c2".into(),
+                snapshot_hash: "b".repeat(64),
+                source_replica_id: "01900000-0000-7000-8000-0000000000b2".into(),
+                created_at: "2026-07-29T12:00:00Z".into(),
+                selection: SnapshotSelection {
+                    scope_ids: vec![],
+                    asset_ids: vec![],
+                    include_history: true,
+                },
+                asset_heads: BTreeMap::new(),
+                assets: vec![],
+                lineages: vec![],
+                revisions: vec![],
+                variants: vec![],
+                conflicts: vec![],
+                aliases: vec![],
+                objects: vec![],
+            },
+            object_bytes: BTreeMap::new(),
+            selection_hash: "sel".into(),
+            selection_state_hash: "state".into(),
+        };
+        let cancel = CancellationToken::new();
+        let outcome = sender
+            .push_one_target(PushOneTargetArgs {
+                request_id: "req-bind",
+                peer_id: "peer-test",
+                peer_label: "Peer",
+                client_request_id: "req-bind:peer-test",
+                device: Some(&device),
+                built: &built,
+                cancel: &cancel,
+            })
+            .await;
+        assert_eq!(outcome.status, TargetPushStatus::Failed);
+        assert_eq!(counters.prepare.load(Ordering::SeqCst), 0);
+        handle.abort();
+    }
+
+    /// Business Logic: health.device_id 与所选 peer 不一致时 fail-closed，不得 prepare。
+    /// Code Logic: health 返回 other-device → prepare=0。
+    #[tokio::test]
+    async fn never_calls_prepare_when_health_device_mismatches_peer() {
+        let counters = FakePeerCounters::full_support(vec![]);
+        let c_health = Arc::clone(&counters);
+        let c_prep = Arc::clone(&counters);
+        let app = Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(move || {
+                    let c = Arc::clone(&c_health);
+                    async move {
+                        c.health.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({
+                            "ok": true,
+                            "device_id": "other-device",
+                            "device_name": "Other",
+                            "http_port": 0,
+                            "ts": Utc::now().timestamp(),
+                            "protocol_version": 1,
+                            "capabilities": [
+                                "errors.envelope.v1",
+                                CAPABILITY_AGENT_HUB_V1,
+                                CAPABILITY_DEVICE_REQUEST_BINDING_V1,
+                            ],
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/agent-hub/push/prepare",
+                post(move |_body: axum::Json<PreparePushRequest>| {
+                    let c = Arc::clone(&c_prep);
+                    async move {
+                        c.prepare.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(PreparePushResponse {
+                            transfer_id: "x".into(),
+                            status: "prepared".into(),
+                            selection_hash: "s".into(),
+                            snapshot_hash: "h".into(),
+                            missing_object_hashes: vec![],
+                            missing_revision_ids: vec![],
+                            outcome: None,
+                        })
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let base = format!("http://{addr}");
+        let pool = test_pool().await;
+        let gate = Arc::new(DatabaseMaintenanceGate::new());
+        let dir = tempfile::tempdir().unwrap();
+        let sender = AgentHubPushSender::new(pool, gate, "src-device", dir.path());
+        let without = base.trim_start_matches("http://");
+        let (host, port_s) = without.rsplit_once(':').unwrap();
+        let device = Device {
+            id: "peer-test".into(),
+            name: "Peer Test".into(),
+            host: host.to_string(),
+            port: port_s.parse().unwrap(),
+            last_seen: Utc::now(),
+            online: true,
+            proto_version: 1,
+            capabilities: vec![
+                CAPABILITY_AGENT_HUB_V1.into(),
+                CAPABILITY_DEVICE_REQUEST_BINDING_V1.into(),
+            ],
+        };
+        let built = BuiltSnapshot {
+            envelope: SnapshotEnvelopeV1 {
+                format: FORMAT_NAME.into(),
+                format_version: FORMAT_VERSION,
+                canonicalization: CANONICALIZATION_NAME.into(),
+                snapshot_id: "01900000-0000-7000-8000-0000000000c3".into(),
+                snapshot_hash: "c".repeat(64),
+                source_replica_id: "01900000-0000-7000-8000-0000000000b3".into(),
+                created_at: "2026-07-29T12:00:00Z".into(),
+                selection: SnapshotSelection {
+                    scope_ids: vec![],
+                    asset_ids: vec![],
+                    include_history: true,
+                },
+                asset_heads: BTreeMap::new(),
+                assets: vec![],
+                lineages: vec![],
+                revisions: vec![],
+                variants: vec![],
+                conflicts: vec![],
+                aliases: vec![],
+                objects: vec![],
+            },
+            object_bytes: BTreeMap::new(),
+            selection_hash: "sel".into(),
+            selection_state_hash: "state".into(),
+        };
+        let cancel = CancellationToken::new();
+        let outcome = sender
+            .push_one_target(PushOneTargetArgs {
+                request_id: "req-mismatch",
+                peer_id: "peer-test",
+                peer_label: "Peer",
+                client_request_id: "req-mismatch:peer-test",
+                device: Some(&device),
+                built: &built,
+                cancel: &cancel,
+            })
+            .await;
+        assert_eq!(outcome.status, TargetPushStatus::Failed);
+        assert_eq!(counters.prepare.load(Ordering::SeqCst), 0);
+        handle.abort();
+    }
+
     /// Business Logic: 无 agent-hub.v1 时绝不调用 prepare。
     /// Code Logic: fake health 无 capability → prepare 计数 0。
     #[tokio::test]
@@ -1651,7 +1924,10 @@ mod tests {
             last_seen: Utc::now(),
             online: true,
             proto_version: 1,
-            capabilities: vec![CAPABILITY_AGENT_HUB_V1.into()],
+            capabilities: vec![
+                CAPABILITY_AGENT_HUB_V1.into(),
+                CAPABILITY_DEVICE_REQUEST_BINDING_V1.into(),
+            ],
         };
 
         let cancel = CancellationToken::new();
