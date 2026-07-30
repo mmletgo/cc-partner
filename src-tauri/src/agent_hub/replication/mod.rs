@@ -9,6 +9,7 @@
 //!     路由层 `net/routes/agent_hub.rs` 薄封装接收端。
 
 pub mod ledger;
+pub mod outbox_worker;
 pub mod receiver;
 pub mod sender;
 
@@ -16,6 +17,7 @@ pub use ledger::{
     CommitClaim, PushObjectRow, PushRequestRow, PushRequestStatus, ReplicationLedger,
     MAX_STAGING_AGE,
 };
+pub use outbox_worker::{drain_lan_projection_intents, start_lan_projection_outbox_loop};
 pub use receiver::{
     commit_push, gc_abandoned_incoming_staging, gc_committed_incoming_staging, prepare_push,
     put_object_chunk, AgentHubChunkLimit, CommitPushRequest, CommitPushResponse,

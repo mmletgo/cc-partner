@@ -587,8 +587,25 @@ impl AgentHubPushSender {
         let missing = prep.missing_object_hashes.clone();
         let missing_count = missing.len() as u32;
 
-        // 已 committed 幂等回放
+        // 已 committed 幂等回放：仍补调 commit 作为即时补偿（触发 receiver 排水 queued intent）
         if prep.status == "committed" {
+            let commit_body = CommitPushRequest {
+                source_device_id: self.source_device_id.clone(),
+                client_request_id: client_request_id.to_string(),
+                selection_hash: built.selection_hash.clone(),
+                snapshot_hash: built.envelope.snapshot_hash.clone(),
+            };
+            let path = format!("/api/agent-hub/push/{transfer_id}/commit");
+            // best-effort：失败不改写已 committed 终态，留给对端 outbox worker
+            let _ = self
+                .post_json_bound::<CommitPushResponse, _>(
+                    &base_url,
+                    &path,
+                    &commit_body,
+                    peer_id,
+                    PeerTimeoutClass::long_running(Duration::from_secs(60)),
+                )
+                .await;
             return TargetPushOutcome {
                 peer_device_id: peer_id.to_string(),
                 peer_label: peer_label.to_string(),
