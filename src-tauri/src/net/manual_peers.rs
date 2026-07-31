@@ -150,8 +150,15 @@ async fn probe_cycle(state: &AppState, fail_counts: &mut HashMap<String, u32>) {
         return;
     }
 
-    // overlay 信任 = 静态（manual_peers IP ∪ 本机 overlay IP）∪ 在线 cc-partner peer IP。
+    // overlay 信任 = 静态（manual_peers IP ∪ 本机 overlay IP）∪ 全部 Tailscale peer IP ∪ 在线 cc-partner peer IP。
     let mut trusted = static_overlay_ips(state);
+    // Tailscale peer 预信任（Tailnet 成员即受信 overlay）：破解冷启动互锁——否则两端各自只在
+    // 对端 health 成功后才把对方 IP 加进 overlay，而 health 又要求对方门闸先放行自己，互相 403
+    // 死锁、谁也发现不了谁。同 Tailnet 的节点由用户自己加入，视同受信 LAN，预放行其 IP 让双方
+    // probe 能落地、随即互相发现；device 条目仍只在 health 成功（确属 cc-partner 实例）时入表。
+    for (ip, _hostname) in &ts_peers {
+        trusted.insert(*ip);
+    }
 
     for (host, port) in candidates {
         let base_url = format!("http://{host}:{port}");

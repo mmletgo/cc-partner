@@ -51,7 +51,12 @@ has two complementary overlay sources, both health-probed into `state.devices`
 `net::manual_peers::populate_overlay_trusted_ips` seeds
 `AppState.overlay_trusted_ips` with the configured peer IPs **plus** this host's
 own non-default-scope interface IPs (e.g. CGNAT 100.64/10); each probe cycle
-refreshes it to `static ∪ online-cc-partner-peer-IPs`. `lan_socket_gate` and the
+refreshes it to `static ∪ all-Tailscale-peer-IPs ∪ online-cc-partner-peer-IPs`.
+**Tailscale peer IPs are pre-trusted unconditionally** (Tailnet membership =
+trusted overlay): this breaks the cold-start deadlock where two fresh peers each
+only trust the other after a successful health probe, but the probe requires the
+other's gate to already allow them. Device entries are still populated only when
+the peer is a confirmed cc-partner instance (health ok). `lan_socket_gate` and the
 browser Host guard allow an IP **only when it is in that explicit set** (precise
 IP allowlist — not whole CGNAT, not auth). Default empty set = no overlay trust;
 CGNAT stays denied.
