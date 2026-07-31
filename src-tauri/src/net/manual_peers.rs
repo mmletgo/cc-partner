@@ -29,6 +29,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -234,21 +235,68 @@ fn upsert_device(state: &AppState, host: &str, port: u16, health: HealthResponse
 async fn tailscale_peers() -> Vec<(IpAddr, String)> {
     let bin = match resolve_tailscale_binary() {
         Some(p) => p,
-        None => return Vec::new(),
+        None => {
+            tracing::debug!("tailscale 二进制未找到，跳过自动发现");
+            return Vec::new();
+        }
     };
+    // macOS：`/Applications/Tailscale.app/Contents/MacOS/Tailscale` 是 GUI/CLI 双用二进制。
+    // launchd 拉起的 cc-partner 子进程环境里没有 TERM，该二进制会判定为非 CLI 上下文，
+    // 走 GUI 启动路径并失败（stderr: "The Tailscale GUI failed to start. (CLIError error 3.)"），
+    // 导致 `tailscale status --json` 拿不到 peer。显式注入 TERM=dumb 让它进入 CLI 模式、
+    // 连接后台 daemon。Linux `/usr/bin/tailscale` 是纯 CLI，不受影响。
     let output = match tokio::time::timeout(
         Duration::from_secs(TAILSCALE_TIMEOUT_SECS),
-        tokio::process::Command::new(bin)
+        tokio::process::Command::new(&bin)
             .arg("status")
             .arg("--json")
+            .env("TERM", "dumb")
             .output(),
     )
     .await
     {
-        Ok(Ok(o)) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
+        Ok(Ok(o)) if o.status.success() => {
+            TAILSCALE_FAIL_WARNED.store(false, Ordering::SeqCst);
+            o.stdout
+        }
+        Ok(Ok(o)) => {
+            warn_tailscale_failure_once(&bin, || {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                format!(
+                    "exit={:?} stderr={}",
+                    o.status.code(),
+                    stderr.trim().chars().take(200).collect::<String>()
+                )
+            });
+            return Vec::new();
+        }
+        Ok(Err(e)) => {
+            warn_tailscale_failure_once(&bin, || format!("spawn 失败: {e}"));
+            return Vec::new();
+        }
+        Err(_) => {
+            warn_tailscale_failure_once(&bin, || format!("超时 {TAILSCALE_TIMEOUT_SECS}s"));
+            return Vec::new();
+        }
     };
     parse_tailscale_status(&output)
+}
+
+/// 首次 tailscale 调用失败时 WARN 一次（含原因），之后同类失败降级到 DEBUG，避免每 15s 刷屏。
+/// 调用成功会重置标志（`tailscale_peers` 成功路径），故 失败-恢复-再失败 会再次 WARN。
+static TAILSCALE_FAIL_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn warn_tailscale_failure_once<F: FnOnce() -> String>(bin: &std::path::Path, detail: F) {
+    let detail = detail();
+    if !TAILSCALE_FAIL_WARNED.swap(true, Ordering::SeqCst) {
+        tracing::warn!(
+            binary = %bin.display(),
+            detail = %detail,
+            "tailscale status 失败，overlay 自动发现将仅依赖 manual_peers（此后同类失败降为 debug）"
+        );
+    } else {
+        tracing::debug!(binary = %bin.display(), detail = %detail, "tailscale status 再次失败");
+    }
 }
 
 /// 解析 `tailscale status --json` 字节流为 peer 列表（纯函数，便于单测）。
