@@ -693,6 +693,26 @@ fn default_water_interval() -> i64 {
     60 * 60
 }
 
+/// 手动配置的 overlay 对端（跨子网/VPN，如 Tailscale CGNAT）。
+///
+/// Business Logic（为什么需要这个结构）:
+///     mDNS 发现只覆盖同子网 LAN；跨 VPN/不同子网的对端无法自动发现。用户显式配置 host:port
+///     后，`net::manual_peers` 探测循环会定期 health 探测并写入 `state.devices`，使现有 P2P
+///     路径（sync/workbench/agent-cli）零改动识别该对端。同时该对端 IP 会被加入
+///     `AppState.overlay_trusted_ips`，放行 `lan_socket_gate` 与 `browser_request_guard` Host 校验。
+///     这是 opt-in 的最小权限放行（精确 IP），不改默认 CGNAT 拒绝策略，也非身份认证。
+///
+/// Code Logic（这个结构做什么）:
+///     host 为 IP 字面量或主机名；port 为对端实际 http_port。camelCase 序列化对齐前端契约。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualPeerConfig {
+    /// 对端地址（IP 字面量或主机名）。运行时解析为 IP 进入 `overlay_trusted_ips`。
+    pub host: String,
+    /// 对端实际 HTTP 端口（health 返回的 `http_port`）。
+    pub port: u16,
+}
+
 /// 应用全局配置。字段命名与 Python `AppConfig` dataclass 一致（snake_case 用于磁盘持久化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -743,6 +763,10 @@ pub struct AppConfig {
     /// Multi-CLI Agent Hub 开关与登录后台状态。`#[serde(default)]` 兼容旧 config.json。
     #[serde(default)]
     pub agent_hub: AgentHubConfig,
+    /// 手动配置的 overlay 对端列表（跨子网/VPN，如 Tailscale）。`#[serde(default)]` 兼容旧 config.json。
+    /// 默认空 = 仅 mDNS LAN 发现，不改默认信任边界。详见 `ManualPeerConfig`。
+    #[serde(default)]
+    pub manual_peers: Vec<ManualPeerConfig>,
 }
 
 /// Multi-CLI Agent Hub 设备级配置。
@@ -821,6 +845,28 @@ impl AppConfig {
         // 规范化 cloud URL / branch：trim 后空串 → None
         self.cloud_sync_repo_url = normalize_optional_string(self.cloud_sync_repo_url.take());
         self.cloud_sync_branch = normalize_optional_string(self.cloud_sync_branch.take());
+
+        // manual_peers：host 非空、port 非 0、(host,port) 去重；就地 trim host。
+        {
+            let mut seen: std::collections::HashSet<(String, u16)> =
+                std::collections::HashSet::new();
+            for peer in &mut self.manual_peers {
+                let host = peer.host.trim();
+                if host.is_empty() {
+                    return Err(AppError::validation("manual_peers.host 不能为空"));
+                }
+                if peer.port == 0 {
+                    return Err(AppError::validation("manual_peers.port 必须为 1..=65535"));
+                }
+                peer.host = host.to_string();
+                if !seen.insert((peer.host.clone(), peer.port)) {
+                    return Err(AppError::validation(format!(
+                        "manual_peers 存在重复条目: {}:{}",
+                        peer.host, peer.port
+                    )));
+                }
+            }
+        }
 
         // 快捷键：优先 parse_shortcut；插件依赖/单修饰键等解析失败时，只要非空仍允许落盘
         // （真实注册在 hotkey 层再处理；空串一律拒绝）。
@@ -903,6 +949,7 @@ impl AppConfig {
                 orchestrator: OrchestratorAutomationConfig::default(),
                 github_trending: GithubTrendingConfig::default(),
                 agent_hub: AgentHubConfig::default(),
+                manual_peers: Vec::new(),
             };
             store.save_atomic(&cfg)?;
             Ok(cfg)
@@ -1350,6 +1397,7 @@ mod tests {
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             agent_hub: AgentHubConfig::default(),
+            manual_peers: Vec::new(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -1427,6 +1475,7 @@ mod tests {
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             agent_hub: AgentHubConfig::default(),
+            manual_peers: Vec::new(),
         }
     }
 

@@ -15,6 +15,8 @@ pub mod http_server;
 pub mod lan_guard;
 /// S1 Task 6 集成 smoke harness（绑定端口 + injected peer 证据矩阵）。
 pub mod lan_trust_boundary_harness;
+/// 手动配置 overlay 对端探测（跨子网/VPN，绕过 mDNS；opt-in 精确 IP 放行）。
+pub mod manual_peers;
 pub mod peer_client;
 pub mod peer_error;
 pub mod peer_timeout;

@@ -163,6 +163,7 @@ mod tests {
             orchestrator,
             github_trending: Default::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
+            manual_peers: Vec::new(),
         }
     }
 

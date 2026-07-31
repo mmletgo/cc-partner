@@ -32,6 +32,33 @@ cc-partner P2P/Mobile/Workbench/Orchestrator HTTP is **local/LAN only** and has
 - `POST /api/backend/control/stop` is local lifecycle only (loopback + control-file
   token). Business routes never require that token.
 
+### Overlay peers (cross-subnet / VPN, e.g. Tailscale/CGNAT)
+
+Device discovery is mDNS-only (same L2 subnet). To reach peers across a routed
+overlay where mDNS multicast does not traverse (different subnet / VPN), cc-partner
+has two complementary overlay sources, both health-probed into `state.devices`
+(same map as mDNS) so existing sync / Workbench / agent-cli paths work unchanged:
+
+1. **Tailscale auto-discovery (preferred, zero-config)**: `net::manual_peers`
+   runs `tailscale status --json` each cycle and health-probes every Tailnet peer
+   on the default port (**62116**). Peers running cc-partner are auto-discovered
+   with no config; new nodes joining the Tailnet are picked up automatically.
+   Graceful no-op where the `tailscale` binary is absent.
+2. **Manual peers (explicit override)**: `AppConfig.manual_peers: [{ host, port }]`
+   in `~/.cc-partner/config.json` — for non-Tailscale overlays (ZeroTier,
+   cross-subnet LAN) or peers on a non-default port.
+
+`net::manual_peers::populate_overlay_trusted_ips` seeds
+`AppState.overlay_trusted_ips` with the configured peer IPs **plus** this host's
+own non-default-scope interface IPs (e.g. CGNAT 100.64/10); each probe cycle
+refreshes it to `static ∪ online-cc-partner-peer-IPs`. `lan_socket_gate` and the
+browser Host guard allow an IP **only when it is in that explicit set** (precise
+IP allowlist — not whole CGNAT, not auth). Default empty set = no overlay trust;
+CGNAT stays denied.
+
+This is a transport-reachability opt-in; it does **not** add caller identity,
+authentication, pairing, or encryption.
+
 ## Local control plane (not LAN business)
 
 Routes under `/api/backend/control/*` are **local process control**, not LAN peer

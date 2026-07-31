@@ -564,6 +564,8 @@ pub async fn build_app_state_with_role(
         devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
         actual_http_port: Arc::new(AtomicU16::new(0)),
         discovery: Arc::new(Mutex::new(None)),
+        overlay_trusted_ips: Arc::new(RwLock::new(std::collections::HashSet::new())),
+        manual_peer_cancel: Arc::new(Mutex::new(None)),
         peer_client: Arc::new(PeerClient::new()),
         transfers: Arc::new(TransferRegistry::new()),
         ui,
@@ -647,6 +649,16 @@ pub async fn start_backend_services(
     discovery::start_discovery(state, port, advertise, browse)
         .await
         .map_err(AppError::generic)?;
+
+    // 手动 overlay 对端（跨子网/VPN）：填充精确 IP 放行集合 + 启动周期 health 探测写入 devices。
+    // Headless advertise+browse 与 GUI browse-only 都经此入口，sidecar 与 GUI 两进程各自维护 devices。
+    crate::net::manual_peers::populate_overlay_trusted_ips(state);
+    let probe_state = state.clone();
+    start_cancelled_task_once(
+        &state.manual_peer_cancel,
+        "manual_peers 探测",
+        move || crate::net::manual_peers::start_manual_peer_probe(probe_state),
+    );
 
     Ok(port)
 }
@@ -884,6 +896,7 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
 ///     调用 discovery shutdown，逐个 take 并 cancel 可选后台任务令牌，最后调用 `workbench_sessions.shutdown_all()`。
 pub fn shutdown_backend_runtime(state: &AppState) {
     discovery::stop_discovery(state);
+    cancel_runtime_token(&state.manual_peer_cancel, "manual_peers 探测");
     cancel_runtime_token(&state.cc_collector_cancel, "CC 历史采集器");
     cancel_runtime_token(&state.cloud_sync_cancel, "云端同步 scheduler");
     cancel_runtime_token(&state.orchestrator_cancel, "Orchestrator scheduler");

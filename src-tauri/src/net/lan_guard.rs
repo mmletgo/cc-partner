@@ -28,8 +28,10 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderName, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// 客户端声明的期望对端 device_id header（可选绑定，非身份鉴权）。
 ///
@@ -73,6 +75,27 @@ pub fn classify_peer_ip(ip: IpAddr) -> LanPeerScope {
         IpAddr::V6(v6) => classify_ipv6(v6),
     }
 }
+
+/// 判断 IP 是否在用户显式配置的 overlay 信任集合（手动对端 IP ∪ 本机 overlay 接口 IP）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     mDNS 仅覆盖同子网 LAN；跨 VPN/不同子网（如 Tailscale CGNAT 100.64/10）对端需 opt-in。
+///     用户配置 `manual_peers` 后，`AppState.overlay_trusted_ips` 收集精确 IP，本函数据此放行。
+///     这是最小权限的精确 IP 白名单，**非**整段 CGNAT 放开，也**非**身份认证；默认空集合 = 不放行。
+///
+/// Code Logic（这个函数做什么）:
+///     先 `normalize_peer_ip`（IPv4-mapped IPv6 还原），再查集合。
+pub fn is_overlay_trusted(ip: IpAddr, overlay: &HashSet<IpAddr>) -> bool {
+    overlay.contains(&normalize_peer_ip(ip))
+}
+
+/// 请求扩展：overlay 信任 IP 快照（由 `inject_overlay_trust` middleware 注入，供 `lan_socket_gate` 读取）。
+///
+/// Business Logic（为什么走扩展而非 `from_fn_with_state`）:
+///     `lan_socket_gate` 在多处测试 router 里以 `from_fn` 装配；改签名会大面积改测试。
+///     用扩展注入使 gate 保持 `(request, next)` 签名，未注入时（默认/测试）行为不变（无 overlay 放行）。
+#[derive(Debug, Clone)]
+pub struct OverlayTrustSnapshot(pub Arc<HashSet<IpAddr>>);
 
 /// 规范化 peer IP：把 IPv4-mapped IPv6 还原为 IPv4。
 ///
@@ -223,6 +246,15 @@ pub async fn lan_socket_gate(request: Request<Body>, next: Next) -> Response {
     match peer_scope_from_request(&request) {
         LanPeerScope::Loopback | LanPeerScope::Lan => next.run(request).await,
         LanPeerScope::Denied => {
+            // overlay opt-in：peer IP 命中注入的 OverlayTrustSnapshot 时放行（精确 IP 白名单）。
+            // 未注入扩展（默认/测试）时此处不匹配，行为与原先一致（Denied → 403）。
+            if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
+                if let Some(snapshot) = request.extensions().get::<OverlayTrustSnapshot>() {
+                    if is_overlay_trusted(addr.ip(), &snapshot.0) {
+                        return next.run(request).await;
+                    }
+                }
+            }
             let context = request_context_from_request(&request);
             denied_peer_error(&context).into_response()
         }
@@ -243,6 +275,9 @@ pub struct BrowserGuardParams {
     pub actual_http_port: u16,
     /// 当前进程受控 mDNS 主机名（无尾点），形如 `cc-{device_id}.local`。
     pub controlled_mdns_host: String,
+    /// overlay 信任 IP 快照（手动对端 ∪ 本机 overlay 接口 IP，opt-in）。
+    /// 默认空（`browser_guard_params` 构造）= Host 仅允许默认 scope；生产由 `browser_request_guard` 注入。
+    pub overlay_trusted_ips: HashSet<IpAddr>,
 }
 
 /// 构造浏览器门禁参数。
@@ -256,6 +291,7 @@ pub fn browser_guard_params(device_id: &str, actual_http_port: u16) -> BrowserGu
     BrowserGuardParams {
         actual_http_port,
         controlled_mdns_host: controlled_mdns_hostname(device_id),
+        overlay_trusted_ips: HashSet::new(),
     }
 }
 
@@ -573,7 +609,12 @@ pub fn evaluate_browser_request(
     let Some((hostname, port)) = parse_http_host_header(host) else {
         return Err(browser_guard_error("非法 Host", context));
     };
-    if !is_allowed_browser_hostname(&hostname, &params.controlled_mdns_host) {
+    if !is_allowed_browser_hostname(&hostname, &params.controlled_mdns_host)
+        && !hostname
+            .parse::<IpAddr>()
+            .map(|ip| is_overlay_trusted(ip, &params.overlay_trusted_ips))
+            .unwrap_or(false)
+    {
         return Err(browser_guard_error("Host 不在支持范围", context));
     }
     let port_ok = match port {
@@ -730,11 +771,39 @@ pub async fn browser_request_guard(
     next: Next,
 ) -> Response {
     let port = state.actual_http_port.load(Ordering::SeqCst);
-    let params = browser_guard_params(state.device_id.as_str(), port);
+    let mut params = browser_guard_params(state.device_id.as_str(), port);
+    // 注入 overlay 信任 IP 快照，让 Host 头为 CGNAT/overlay IP（手动对端连过来时）也能通过。
+    params.overlay_trusted_ips = state
+        .overlay_trusted_ips
+        .read()
+        .expect("overlay_trusted_ips 读锁中毒")
+        .clone();
     match evaluate_browser_request_from_http(&request, &params) {
         Ok(()) => next.run(request).await,
         Err(err) => err.into_response(),
     }
+}
+
+/// overlay 信任快照注入中间件：把 `state.overlay_trusted_ips` 克隆进请求扩展，
+/// 供内层 `lan_socket_gate`（非 state-aware）在 Denied 分支查阅。
+///
+/// Business Logic（为什么需要单独的注入层）:
+///     `lan_socket_gate` 保持 `(request, next)` 签名以兼容多处测试 router 装配；
+///     生产路径在 gate 外层叠一层本函数即可让 gate 感知 overlay，无需改 gate 签名。
+pub async fn inject_overlay_trust(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    let snapshot = state
+        .overlay_trusted_ips
+        .read()
+        .expect("overlay_trusted_ips 读锁中毒")
+        .clone();
+    request
+        .extensions_mut()
+        .insert(OverlayTrustSnapshot(Arc::new(snapshot)));
+    next.run(request).await
 }
 
 /// 使用显式参数的浏览器门禁中间件（单测/无 AppState 装配）。
@@ -873,6 +942,71 @@ mod tests {
                 "classify_peer_ip({raw}) 期望 {expected:?}"
             );
         }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     overlay 信任是 opt-in 精确 IP 白名单；默认空集合不得放行 CGNAT/overlay，
+    ///     命中集合才放行，且 IPv4-mapped IPv6 必须规范化后匹配。
+    #[test]
+    fn is_overlay_trusted_only_matches_explicit_set() {
+        let empty: HashSet<IpAddr> = HashSet::new();
+        let cgnat: IpAddr = "100.72.52.63".parse().unwrap();
+        // 默认空集合：任何 IP 都不放行（含 CGNAT）。
+        assert!(!is_overlay_trusted(cgnat, &empty));
+        assert!(!is_overlay_trusted("192.168.1.5".parse().unwrap(), &empty));
+
+        let mut set: HashSet<IpAddr> = HashSet::new();
+        set.insert(cgnat);
+        // 命中集合放行精确 IP。
+        assert!(is_overlay_trusted(cgnat, &set));
+        // 其它 CGNAT 仍不放行（最小权限，非整段）。
+        assert!(!is_overlay_trusted("100.72.52.64".parse().unwrap(), &set));
+        // IPv4-mapped IPv6 规范化后匹配同一 IPv4。
+        assert!(is_overlay_trusted(
+            "::ffff:100.72.52.63".parse::<IpAddr>().unwrap(),
+            &set
+        ));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     browser Host 门闸默认拒 CGNAT Host；当 overlay 信任集合含该 Host IP 时必须放行，
+    ///     让手动对端连过来时（Host=本机 CGNAT IP）通过。端口仍须匹配。
+    #[test]
+    fn evaluate_browser_request_allows_overlay_host_ip() {
+        let mut params = browser_guard_params("device-a", 62116);
+        let cgnat: IpAddr = "100.72.52.63".parse().unwrap();
+        let ctx = P2pRequestContext {
+            request_id: "req-overlay".into(),
+        };
+        // 默认（空 overlay）：CGNAT Host 被拒。
+        let err = evaluate_browser_request(
+            &Method::GET,
+            "/api/health",
+            Some("100.72.52.63:62116"),
+            None,
+            None,
+            &params,
+            &ctx,
+        )
+        .unwrap_err();
+        assert_eq!(err.envelope().code, "forbidden");
+
+        // 注入 overlay 集合后：CGNAT Host 通过（端口一致）。
+        params.overlay_trusted_ips = {
+            let mut s = HashSet::new();
+            s.insert(cgnat);
+            s
+        };
+        evaluate_browser_request(
+            &Method::GET,
+            "/api/health",
+            Some("100.72.52.63:62116"),
+            None,
+            None,
+            &params,
+            &ctx,
+        )
+        .expect("overlay Host IP + 正确端口应通过");
     }
 
     /// Business Logic（为什么需要这个测试）:

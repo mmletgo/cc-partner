@@ -980,6 +980,7 @@ mod config_writer_tests {
                 cache_ttl_hours: 24,
             },
             agent_hub: crate::config::AgentHubConfig::default(),
+            manual_peers: Vec::new(),
         }
     }
 

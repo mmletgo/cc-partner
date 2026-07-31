@@ -1605,6 +1605,7 @@ mod restore_holder_fail_closed_tests {
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
+            manual_peers: Vec::new(),
         };
         let store = Arc::new(MemoryConfigStore::with_config(config.clone()));
         let config_runtime = Arc::new(ConfigRuntime::new(config, store));
@@ -1627,6 +1628,8 @@ mod restore_holder_fail_closed_tests {
             devices: Arc::new(RwLock::new(std::collections::HashMap::new())),
             actual_http_port: Arc::new(AtomicU16::new(0)),
             discovery: Arc::new(Mutex::new(None)),
+            overlay_trusted_ips: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            manual_peer_cancel: Arc::new(Mutex::new(None)),
             peer_client: Arc::new(PeerClient::new()),
             transfers: Arc::new(TransferRegistry::new()),
             ui: Arc::new(HeadlessBackendUi::new(std::path::PathBuf::from("/tmp"))),

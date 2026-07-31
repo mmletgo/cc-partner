@@ -39,7 +39,8 @@ use crate::workbench::agent_ledger::AgentLedgerService;
 use mdns_sd::ServiceDaemon;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -72,6 +73,11 @@ pub struct AppState {
     pub actual_http_port: Arc<AtomicU16>,
     /// mDNS 守护句柄（启动后持有，应用关闭时 shutdown）。None 表示未启用发现
     pub discovery: Arc<Mutex<Option<ServiceDaemon>>>,
+    /// overlay 信任 IP 集合（手动对端 IP ∪ 本机 overlay 接口 IP，opt-in）。
+    /// `lan_socket_gate` 与 `browser_request_guard` Host 校验读取；默认空 = 不放行 CGNAT/overlay。
+    pub overlay_trusted_ips: Arc<RwLock<HashSet<IpAddr>>>,
+    /// 手动对端探测循环取消令牌（启动时写入，shutdown 时 cancel）。
+    pub manual_peer_cancel: Arc<Mutex<Option<CancellationToken>>>,
     /// 对端 HTTP 客户端（调对端 /api/health、sync、transfer）
     #[allow(dead_code)]
     pub peer_client: Arc<PeerClient>,

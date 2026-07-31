@@ -704,6 +704,7 @@ mod config_writer_tests {
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
+            manual_peers: Vec::new(),
         }
     }
 

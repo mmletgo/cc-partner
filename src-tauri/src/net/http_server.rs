@@ -15,7 +15,8 @@
 use crate::backend::control::{self, BackendControlFile};
 use crate::net::error_response::{envelope_fallback_middleware, P2pError, P2pErrorCode, P2pResult};
 use crate::net::lan_guard::{
-    browser_request_guard, expected_device_id_guard, lan_socket_gate, require_loopback_peer,
+    browser_request_guard, expected_device_id_guard, inject_overlay_trust, lan_socket_gate,
+    require_loopback_peer,
 };
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
@@ -1386,6 +1387,12 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         // 固定 LAN socket peer 门禁：仅信任 ConnectInfo 真实 peer，忽略代理 header；
         // Denied/缺失 peer 在 handler 前返回 403。放在 request_id 内层，以便拒绝响应可复用 request context。
         .layer(axum::middleware::from_fn(lan_socket_gate))
+        // overlay 信任快照注入：在 lan_socket_gate 之前注入 `OverlayTrustSnapshot` 扩展，
+        // 使 gate 在 Denied 分支可放行用户手动配置的 overlay 对端 IP（精确白名单，opt-in）。
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            inject_overlay_trust,
+        ))
         // P2P/mobile API 请求 ID 边界：所有请求自动获得 X-CC-Request-Id（客户端带入或服务端生成 UUID），
         // 注入 P2pRequestContext 供 handler 使用，并打开带 `request_id` 字段的 tracing span。
         // 放在最外层（相对业务 middleware），使其覆盖全部 /api 路由 + /mobile SPA fallback。
