@@ -8,7 +8,7 @@
  *   pure props 视图：展示 blocks、mode 操作与 diff preview；不 import @/api/*。
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Drawer, Pill, StatusMessage } from '@/components/primitives';
 import type {
@@ -28,6 +28,7 @@ export interface InstructionBlocksDrawerProps {
   writeBlocked?: boolean;
   error?: string | null;
   onClose: () => void;
+  onSaveDocument: (contentMarkdown: string) => void;
   onPromoteShared: (blockId: string, commonMarkdown: string) => void;
   onPairAdapted: (blockIds: string[], commonMarkdown?: string) => void;
   onRevertTargetOnly: (blockId: string, sourceTarget: AgentTarget, markdown: string) => void;
@@ -69,6 +70,7 @@ export function InstructionBlocksDrawer({
   writeBlocked = false,
   error = null,
   onClose,
+  onSaveDocument,
   onPromoteShared,
   onPairAdapted,
   onRevertTargetOnly,
@@ -77,6 +79,26 @@ export function InstructionBlocksDrawer({
   const { t } = useTranslation(['agentHub', 'common']);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [confirmPreview, setConfirmPreview] = useState(false);
+  const [documentDraft, setDocumentDraft] = useState('');
+  // Safe-save 合同：用户每次编辑递增 version，submit 捕获快照；
+  // success 后仅在 version 未变时回填 baseline，busy 时阻止重入。
+  const documentEditVersionRef = useRef(0);
+  const documentSubmittedSnapshotRef = useRef<string | null>(null);
+  // 资产切换或后端返回新 markdown 时，把 draft 同步到最新 baseline，
+  // 覆盖未提交编辑（用户已点保存即触发 onSaveDocument，prop 变更意味着后端已接受）。
+  useEffect(() => {
+    setDocumentDraft(asset?.contentMarkdown ?? '');
+    documentSubmittedSnapshotRef.current = null;
+  }, [asset?.assetId, asset?.contentMarkdown]);
+  const documentBaseline = asset?.contentMarkdown ?? '';
+  const documentDirty = documentDraft !== documentBaseline;
+  const documentSaveDisabled = busy || writeBlocked || !documentDirty;
+  function handleDocumentSave() {
+    if (documentSaveDisabled) return;
+    documentEditVersionRef.current += 1;
+    documentSubmittedSnapshotRef.current = documentDraft;
+    onSaveDocument(documentDraft);
+  }
 
   const blocks = asset?.blocks ?? [];
 
@@ -137,6 +159,37 @@ export function InstructionBlocksDrawer({
             {t('agentHub:upgradeRequired')}
           </StatusMessage>
         ) : null}
+
+        <section className={styles.documentSection} data-testid="instruction-document-section">
+          <header className={styles.documentHeader}>
+            <h3 className={styles.sectionTitle}>{t('agentHub:documentEditor.title')}</h3>
+            <p className={styles.hint}>{t('agentHub:documentEditor.hint')}</p>
+          </header>
+          <textarea
+            className={styles.documentTextarea}
+            data-testid="instruction-document-editor"
+            value={documentDraft}
+            onChange={(event) => setDocumentDraft(event.currentTarget.value)}
+            disabled={busy || writeBlocked}
+            rows={12}
+            aria-label={t('agentHub:documentEditor.ariaLabel')}
+          />
+          <div className={styles.documentActions}>
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={documentSaveDisabled}
+              loading={busy}
+              onClick={handleDocumentSave}
+              data-testid="instruction-document-save"
+            >
+              {t('agentHub:documentEditor.save')}
+            </Button>
+            {documentDirty && !busy ? (
+              <Pill tone="accent">{t('agentHub:documentEditor.unsaved')}</Pill>
+            ) : null}
+          </div>
+        </section>
 
         {blocks.length === 0 ? (
           <p className={styles.emptyInline} data-testid="blocks-empty">

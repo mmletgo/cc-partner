@@ -750,6 +750,39 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                     }
                 });
             }
+            // Agent Hub：启动时把用户级 CLAUDE.md seed 为 Hub user instruction。
+            // 之前只有 legacy update_claude_md 写入与 claude_md sync 收包才 seed，
+            // 而 legacy 编辑入口已重定向到 /agent-hub，导致从未同步过的设备
+            // 在 Agent Hub 列表里根本看不到这条资产。head 非空时直接早退，不做文件/CAS IO。
+            {
+                let seed_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let data_dir = match crate::config::data_dir() {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            tracing::warn!("agent hub user instruction seed skipped: {e}");
+                            return;
+                        }
+                    };
+                    let path = crate::sync::claude_md::claude_md_path();
+                    match crate::agent_hub::migration::seed_user_instruction_if_head_null(
+                        &seed_state,
+                        &path,
+                        &data_dir,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            tracing::debug!("agent hub user instruction seed: {outcome:?}");
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "agent hub user instruction seed failed (non-blocking): {e}"
+                            );
+                        }
+                    }
+                });
+            }
             // A9：Agent Metadata Ledger 保留清理（启动批 + 24h）
             start_cancelled_task_once(&state.agent_ledger_cancel, "Agent ledger retention", || {
                 let cancel = CancellationToken::new();

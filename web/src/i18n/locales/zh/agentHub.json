@@ -160,6 +160,13 @@
       "targetOnly": "targetOnly"
     }
   },
+  "documentEditor": {
+    "title": "完整正文",
+    "hint": "编辑整篇指令文档。保存后会重写所有块与目标投影。",
+    "ariaLabel": "指令正文编辑器",
+    "save": "保存正文",
+    "unsaved": "未保存"
+  },
   "errors": {
     "projectIdRequired": "请填写项目 id。",
     "assetRequired": "请先选择资产。"

@@ -127,6 +127,7 @@ function buildProps(
       hasConflict: true,
       aggregateStatus: 'partial',
       targets: baseTargets(),
+      contentMarkdown: 'original body',
       blocks: [
         {
           id: 'b1',
@@ -312,6 +313,35 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('block-item-b3')).toBeTruthy();
     expect(screen.getByTestId('blocks-diff-preview')).toBeTruthy();
     expect(screen.getByTestId('conflict-c1')).toBeTruthy();
+  });
+
+  test('instruction blocks drawer edits full document and saves via updateInstruction', () => {
+    const updateInstruction = vi.fn(async () => undefined);
+    renderView({ blocksDrawerOpen: true, updateInstruction });
+
+    const editor = screen.getByTestId('instruction-document-editor') as HTMLTextAreaElement;
+    expect(editor.value).toBe('original body');
+
+    fireEvent.change(editor, { target: { value: 'edited body' } });
+    fireEvent.click(screen.getByTestId('instruction-document-save'));
+
+    expect(updateInstruction).toHaveBeenCalledWith({ contentMarkdown: 'edited body' });
+  });
+
+  test('instruction document save is disabled when clean or write blocked', () => {
+    renderView({ blocksDrawerOpen: true });
+    expect(
+      (screen.getByTestId('instruction-document-save') as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    cleanup();
+
+    renderView({ blocksDrawerOpen: true, writeBlocked: true });
+    const editor = screen.getByTestId('instruction-document-editor') as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: 'edited body' } });
+    expect(
+      (screen.getByTestId('instruction-document-save') as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   test('blocked/unsupported probe state is visible', () => {

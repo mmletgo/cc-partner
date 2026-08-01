@@ -131,6 +131,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     reload,
     resolveConflict,
     updateInstructionBlock,
+    updateInstruction,
     pairInstructionVariants,
     setTargetEnabled,
     restoreDetachedTarget,
@@ -618,6 +619,9 @@ export function AgentHubView(props: AgentHubViewProps) {
         writeBlocked={writeBlocked}
         error={actionError}
         onClose={closeBlocksDrawer}
+        onSaveDocument={(contentMarkdown) => {
+          void updateInstruction({ contentMarkdown });
+        }}
         onPromoteShared={(blockId, commonMarkdown) => {
           void updateInstructionBlock({
             blockId,
