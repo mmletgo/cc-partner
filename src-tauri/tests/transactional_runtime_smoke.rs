@@ -65,6 +65,7 @@ fn sample_config(data_dir: &Path) -> AppConfig {
         orchestrator: Default::default(),
         github_trending: Default::default(),
         agent_hub: app_lib::config::AgentHubConfig::default(),
+        manual_peers: Vec::new(),
     }
 }
 

@@ -199,6 +199,7 @@ export function Workbench() {
     isWriteBlocked,
     handleResize,
     handleRefreshTerminalSize,
+    handleSelectPaneAt,
   } = terminalController;
   // R12 M3：history sync 永久失败可订阅状态（hooks 必须在 early return 前）。
   const historySyncFailure = useTerminalHistorySyncFailure(activeSessionId);
@@ -1114,6 +1115,7 @@ export function Workbench() {
               isWriteBlocked={isWriteBlocked}
               handleResize={handleResize}
               handleCursorAnchorChange={handleCursorAnchorChange}
+              handleSelectPaneAt={handleSelectPaneAt}
               focusSession={focusSession}
             />
           </div>

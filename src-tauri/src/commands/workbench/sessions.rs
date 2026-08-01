@@ -811,6 +811,94 @@ pub async fn switch_workbench_pane(
     switch_workbench_pane_for_state(state.inner(), session_id).await
 }
 
+/// 按终端字符格坐标选中 tmux pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在多 pane window 内应能直接点击目标 pane 切换 active pane，而不是反复按循环切换按钮猜位置。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session row 存在后调用 registry 坐标命中；命中并切换时返回 `{ok, sessionId, paneId, changed:true}`，
+///     zoom / 单 pane / 边框 / 已 active 一律返回 `changed:false`。
+pub(crate) async fn local_select_workbench_pane_at(
+    state: &AppState,
+    session_id: String,
+    col: u32,
+    row: u32,
+) -> Result<serde_json::Value, AppError> {
+    state.runtime_role.require_owner()?;
+    let _row = state
+        .workbench_session_repo
+        .get(&session_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
+    let pane_id = state
+        .workbench_sessions
+        .select_pane_at(&session_id, col, row)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "sessionId": session_id,
+        "paneId": pane_id,
+        "changed": pane_id.is_some(),
+    }))
+}
+
+/// 按终端字符格坐标选中 tmux pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 也需要点击切换 pane，真实 select-pane 必须在项目所在设备执行。
+///
+/// Code Logic（这个函数做什么）:
+///     remote sessionId 走远端 select-pane-at；local sessionId 调用本地 helper。
+pub(crate) async fn select_workbench_pane_at_for_state(
+    state: &AppState,
+    session_id: String,
+    col: u32,
+    row: u32,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let base_url = device_base_url(state, &parsed.device_id)?;
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        let remote = RemoteWorkbenchClient::new()
+            .with_expected_device_id(&parsed.device_id)
+            .select_pane_at(&base_url, &inner_session_id, col, row)
+            .await?;
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        return Ok(serde_json::json!({
+            "ok": true,
+            "sessionId": session_id,
+            "paneId": remote.pane_id,
+            "changed": remote.changed,
+        }));
+    }
+    local_select_workbench_pane_at(state, session_id, col, row).await
+}
+
+/// 按终端字符格坐标选中 tmux pane。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端需要在本机或远端 terminal window 内用鼠标点击切换 active pane。
+///
+/// Code Logic（这个命令做什么）:
+///     Tauri command 解包参数后委托 for_state helper。
+#[tauri::command]
+pub async fn select_workbench_pane_at(
+    state: State<'_, AppState>,
+    session_id: String,
+    col: u32,
+    row: u32,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "sessions.select_pane_at",
+        serde_json::json!({ "sessionId": session_id.clone(), "col": col, "row": row }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    select_workbench_pane_at_for_state(state.inner(), session_id, col, row).await
+}
+
 /// 确保当前 tmux active pane 以单 pane 视图显示。
 ///
 /// Business Logic（为什么需要这个函数）:

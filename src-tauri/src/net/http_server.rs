@@ -1041,6 +1041,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::switch_workbench_pane),
         )
         .route(
+            "/api/workbench/sessions/select-pane-at",
+            post(workbench::select_workbench_pane_at),
+        )
+        .route(
             "/api/workbench/sessions/zoom-pane",
             post(workbench::zoom_workbench_pane),
         )

@@ -176,6 +176,11 @@ export interface WorkbenchTerminalControllerResult extends WorkbenchTerminalBrid
   handleSplitPane: (direction: WorkbenchPaneSplitDirection) => Promise<void>;
   handleSwitchPane: () => Promise<void>;
   handleZoomPane: () => Promise<void>;
+  /**
+   * Business Logic（为什么需要这个回调）:
+   *   多 pane 终端的字符格点击交由后端按 tmux 真值布局做命中；changed=true 时刷新 sessions。
+   */
+  handleSelectPaneAt: (sessionId: string, col: number, row: number) => Promise<void>;
   handleClosePane: () => Promise<void>;
   handleCloseSession: (sessionId: string) => Promise<void>;
   handleRenameSession: () => Promise<void>;
@@ -845,6 +850,31 @@ export function useWorkbenchTerminalController(
   }, [activeSession, displayErrorMessage, markRequestFailure, remoteWriteDisabled, t]);
 
   /**
+   * Business Logic: 多 pane 终端内点击目标 pane 时，前端只能提供字符格坐标，由后端按
+   *   tmux 真实布局命中并 select-pane；绝对坐标可重放，与 `.+` 循环不同。
+   *
+   * Code Logic: 守卫 activeSession / 远端离线，写入 sessions.selectPaneAt；
+   *   仅在 changed=true 时刷新 sessions，使 paneCount / 焦点反映新 active pane。
+   */
+  const handleSelectPaneAt = useCallback(
+    async (sessionId: string, col: number, row: number): Promise<void> => {
+      if (remoteWriteDisabled) return;
+      const target = sessions.find((s) => s.id === sessionId) ?? activeSession;
+      if (!target) return;
+      try {
+        const result = await workbenchApi.sessions.selectPaneAt(target.id, col, row);
+        if (result.changed) {
+          await loadSessions();
+        }
+      } catch (error) {
+        markRequestFailure(target.projectId, error);
+        setSessionError(displayErrorMessage(error, t('switchPane')));
+      }
+    },
+    [activeSession, sessions, displayErrorMessage, loadSessions, markRequestFailure, remoteWriteDisabled, t],
+  );
+
+  /**
    * Business Logic（为什么需要这个函数）:
    *   桌面端用户希望以单 pane 视图查看当前 tmux active pane（与移动端一致的入口）。
    */
@@ -1204,6 +1234,7 @@ export function useWorkbenchTerminalController(
     handleSplitPane,
     handleSwitchPane,
     handleZoomPane,
+    handleSelectPaneAt,
     handleClosePane,
     handleCloseSession,
     handleRenameSession,

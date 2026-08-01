@@ -29,7 +29,8 @@ use crate::commands::workbench::{
     local_preview_workbench_html_asset, local_preview_workbench_sqlite,
     local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
     local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
-    local_split_workbench_pane, local_switch_workbench_pane, local_write_workbench_session_input,
+    local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
+    local_write_workbench_session_input,
     local_zoom_workbench_pane, merge_workbench_worktree_for_state, open_workbench_file_for_state,
     owner_local_preflight_for_state, owner_local_safe_attach_for_state,
     push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
@@ -68,7 +69,8 @@ use crate::workbench::remote_protocol::{
     RemoteOpenFileReq, RemotePathInfoReq, RemotePreviewHtmlAssetReq, RemotePreviewSqliteReq,
     RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
     RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
-    RemoteSearchClaudeSessionsReq, RemoteSessionReq, RemoteSplitPaneReq, RemoteWorktreeReq,
+    RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq, RemoteSessionReq, RemoteSplitPaneReq,
+    RemoteWorktreeReq,
     RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
 use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
@@ -1346,6 +1348,28 @@ pub async fn switch_workbench_pane(
     let result = local_switch_workbench_pane(&state, req.session_id)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.switch_pane"))?;
+    Ok(Json(result))
+}
+
+/// 按坐标选中远端设备本机终端的 pane。
+///
+/// Business Logic（为什么需要这个函数）:
+///     remote terminal 的点击切换 pane 必须由项目所在设备的 tmux 做坐标命中并 select-pane。
+///     该操作以绝对坐标定位，重复执行结果一致。
+///
+/// Code Logic（这个函数做什么）:
+///     确认 session 属于本机 local 项目后调用本地 select-pane-at helper。
+pub async fn select_workbench_pane_at(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(req): Json<RemoteSelectPaneAtReq>,
+) -> P2pResult<Json<serde_json::Value>> {
+    ensure_remote_gateway_local_session_id(&state, &req.session_id)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.select_pane_at"))?;
+    let result = local_select_workbench_pane_at(&state, req.session_id, req.col, req.row)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "workbench.sessions.select_pane_at"))?;
     Ok(Json(result))
 }
 

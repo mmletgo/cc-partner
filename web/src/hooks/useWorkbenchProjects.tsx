@@ -16,7 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { workbenchApi } from '@/api/workbench';
 import { configApi } from '@/api/config';
 import type { WorkbenchProject } from '@/lib/types';
-import { insertWorkbenchProjectAtTop } from '@/lib/workbenchRemoteProjects';
+import { upsertWorkbenchProjectInPlace } from '@/lib/workbenchRemoteProjects';
 import {
   projectSessionStats,
   sessionStatsByProject,
@@ -189,7 +189,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       const trimmedPath = path.trim();
       if (!trimmedPath) return null;
       const project = await workbenchApi.projects.add(trimmedPath);
-      setProjects((current) => insertWorkbenchProjectAtTop(current, project));
+      setProjects((current) => upsertWorkbenchProjectInPlace(current, project));
       setActiveProjectId(project.id);
       return project;
     },
@@ -242,7 +242,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
         setProjectBusy(true);
         setProjectError(null);
         const project = await workbenchApi.remote.openProject(deviceId, trimmedPath);
-        setProjects((current) => insertWorkbenchProjectAtTop(current, project));
+        setProjects((current) => upsertWorkbenchProjectInPlace(current, project));
         setActiveProjectId(project.id);
         void refreshProjectSessionStats(project.id);
         return project;
@@ -266,7 +266,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       setActiveProjectId(project.id);
       try {
         const touched = await workbenchApi.projects.touch(project.id);
-        setProjects((current) => insertWorkbenchProjectAtTop(current, touched));
+        setProjects((current) => upsertWorkbenchProjectInPlace(current, touched));
         void refreshProjectSessionStats(touched.id);
         return touched;
       } catch {

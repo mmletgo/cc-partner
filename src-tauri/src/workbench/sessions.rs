@@ -1940,6 +1940,135 @@ fn tmux_select_next_pane_args(target: &str) -> Vec<String> {
     ]
 }
 
+/// tmux window 内单个 pane 的显示矩形。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     用户点击终端某个字符格切换 active pane 时，必须把该坐标映射到真实 tmux pane；
+///     前端不持有也不应猜测 tmux 布局，映射只能由后端读取 tmux 真值完成。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存 pane_id 与该 pane 在 window 内的闭区间边界（列 left..=right、行 top..=bottom）以及 active 标记。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxPaneGeometry {
+    pub pane_id: String,
+    pub left: u32,
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+    pub active: bool,
+}
+
+/// tmux window 的 pane 布局快照。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     zoom 状态下 window 只显示一个 pane，list-panes 的历史布局不再对应屏幕像素，
+///     此时必须整体拒绝坐标命中，避免把点击切到用户根本看不见的 pane。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存全部 pane 几何与该 window 当前是否处于 zoom 状态。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TmuxWindowPaneLayout {
+    pub panes: Vec<TmuxPaneGeometry>,
+    pub zoomed: bool,
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     坐标命中需要 pane 的真实边界与 active/zoom 状态，一次查询取齐可避免多次 tmux 调用之间的布局漂移。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `list-panes -t <target> -F "<pane_id> <left> <top> <right> <bottom> <active> <zoomed>"` 参数列表。
+fn tmux_list_pane_geometry_args(target: &str) -> Vec<String> {
+    vec![
+        "list-panes".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "-F".to_string(),
+        "#{pane_id} #{pane_left} #{pane_top} #{pane_right} #{pane_bottom} #{pane_active} #{window_zoomed_flag}".to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     tmux 是文本协议，字段缺失或非数字时必须整行丢弃而不是 panic 或产生错误命中矩形。
+///
+/// Code Logic（这个函数做什么）:
+///     按空白切分每行，要求恰好 7 段且四个边界可解析为 u32；active/zoomed 以 `1` 判定；
+///     zoomed 取任一有效行的值（同 window 内恒定）。
+fn parse_tmux_pane_geometry(output: &str) -> TmuxWindowPaneLayout {
+    let mut layout = TmuxWindowPaneLayout::default();
+    for line in output.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 7 {
+            continue;
+        }
+        let (Ok(left), Ok(top), Ok(right), Ok(bottom)) = (
+            fields[1].parse::<u32>(),
+            fields[2].parse::<u32>(),
+            fields[3].parse::<u32>(),
+            fields[4].parse::<u32>(),
+        ) else {
+            continue;
+        };
+        if right < left || bottom < top {
+            continue;
+        }
+        layout.panes.push(TmuxPaneGeometry {
+            pane_id: fields[0].to_string(),
+            left,
+            top,
+            right,
+            bottom,
+            active: fields[5] == "1",
+        });
+        if fields[6] == "1" {
+            layout.zoomed = true;
+        }
+    }
+    layout
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     点击落在 pane 之间的分隔边框时不属于任何 pane，必须 no-op 而不是就近吸附到错误 pane。
+///
+/// Code Logic（这个函数做什么）:
+///     返回第一个闭区间同时包含 col 与 row 的 pane；无命中返回 None。
+fn tmux_pane_at_position(
+    panes: &[TmuxPaneGeometry],
+    col: u32,
+    row: u32,
+) -> Option<&TmuxPaneGeometry> {
+    panes.iter().find(|pane| {
+        col >= pane.left && col <= pane.right && row >= pane.top && row <= pane.bottom
+    })
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     坐标命中得到的是绝对 pane_id，必须用绝对 target 选中，不能退化成相对 `.+` 循环。
+///
+/// Code Logic（这个函数做什么）:
+///     构造 `tmux select-pane -t <pane_id>` 参数列表。
+fn tmux_select_pane_args(pane_id: &str) -> Vec<String> {
+    vec![
+        "select-pane".to_string(),
+        "-t".to_string(),
+        pane_id.to_string(),
+    ]
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     命中判定必须基于 tmux 当前真值布局，不能缓存在前端或后端。
+///
+/// Code Logic（这个函数做什么）:
+///     执行 list-panes 几何查询并解析为 TmuxWindowPaneLayout。
+fn tmux_window_pane_layout(
+    tmux: &TmuxCommand,
+    target: &str,
+) -> Result<TmuxWindowPaneLayout, AppError> {
+    let args = tmux_list_pane_geometry_args(target);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run_tmux_command(tmux, &arg_refs)?;
+    Ok(parse_tmux_pane_geometry(&output))
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     移动端需要把当前 active pane 显示为单 pane 视图，但不能改变所属 tmux window。
 ///
@@ -4979,6 +5108,47 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     用户在多 pane window 内应能直接点击目标 pane 切换，而不是反复按循环切换按钮猜位置。
+    ///     与相对 `.+` 循环不同，本操作以绝对坐标定位，重复执行结果一致，可安全重试。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取 tmux 当前 pane 几何；zoom、单 pane、点在边框上或点在已 active pane 内一律 no-op；
+    ///     命中其它 pane 时执行 `select-pane -t <pane_id>` 并返回该 pane_id。
+    pub fn select_pane_at(
+        &self,
+        session_id: &str,
+        col: u32,
+        row: u32,
+    ) -> Result<Option<String>, AppError> {
+        let target = {
+            let handle = self.get_handle(session_id)?;
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            if handle.row.status != "running" {
+                return Err(AppError::generic("工作台会话未运行"));
+            }
+            tmux_window_target_for_row(&handle.row)?
+        };
+        let Some(tmux) = available_tmux_command() else {
+            return Err(AppError::generic("未找到 tmux，无法切换 pane"));
+        };
+        let layout = tmux_window_pane_layout(&tmux, &target)?;
+        if layout.zoomed || layout.panes.len() <= 1 {
+            return Ok(None);
+        }
+        let Some(pane) = tmux_pane_at_position(&layout.panes, col, row) else {
+            return Ok(None);
+        };
+        if pane.active {
+            return Ok(None);
+        }
+        let pane_id = pane.pane_id.clone();
+        let args = tmux_select_pane_args(&pane_id);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_tmux_command(&tmux, &arg_refs)?;
+        Ok(Some(pane_id))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     移动端 pane 操作后应始终只显示当前 active pane，而不是显示 tmux 左右/上下分屏布局。
     ///
     /// Code Logic（这个函数做什么）:
@@ -7534,6 +7704,124 @@ mod tests {
     fn tmux_split_direction_maps_to_tmux_arguments() {
         assert_eq!(PaneSplitDirection::Right.tmux_flag(), "-h");
         assert_eq!(PaneSplitDirection::Down.tmux_flag(), "-v");
+    }
+
+    /// 构造测试用 pane 几何。
+    fn pane_geometry(
+        pane_id: &str,
+        left: u32,
+        top: u32,
+        right: u32,
+        bottom: u32,
+        active: bool,
+    ) -> TmuxPaneGeometry {
+        TmuxPaneGeometry {
+            pane_id: pane_id.to_string(),
+            left,
+            top,
+            right,
+            bottom,
+            active,
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     点击命中依赖 tmux 一次性给出 pane 边界、active 与 zoom 真值，格式漂移会让命中判定整体失效。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 list-panes 参数带 `-F` 且格式串同时含 pane_left/top/right/bottom/active/window_zoomed_flag。
+    #[test]
+    fn tmux_list_pane_geometry_args_request_bounds_active_and_zoom() {
+        let args = tmux_list_pane_geometry_args("cc-partner-project-p1:@2");
+
+        assert_eq!(args[0], "list-panes");
+        assert_eq!(args[1], "-t");
+        assert_eq!(args[2], "cc-partner-project-p1:@2");
+        assert_eq!(args[3], "-F");
+        for field in [
+            "#{pane_id}",
+            "#{pane_left}",
+            "#{pane_top}",
+            "#{pane_right}",
+            "#{pane_bottom}",
+            "#{pane_active}",
+            "#{window_zoomed_flag}",
+        ] {
+            assert!(args[4].contains(field), "格式串缺少 {field}");
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     tmux 输出损坏或字段缺失时必须整行丢弃，不能产生错误命中矩形把点击切到别的 pane。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     混合合法行、字段数不足行、非数字行与 right<left 的反向矩形，断言只保留合法行并解析 zoom。
+    #[test]
+    fn parse_tmux_pane_geometry_skips_malformed_rows() {
+        let output = "%1 0 0 79 23 1 0\n%2 81 0 159 23 0 0\n%3 0 0 79\n%4 x 0 79 23 0 0\n%5 80 0 10 23 0 0\n";
+
+        let layout = parse_tmux_pane_geometry(output);
+
+        assert_eq!(
+            layout.panes,
+            vec![
+                pane_geometry("%1", 0, 0, 79, 23, true),
+                pane_geometry("%2", 81, 0, 159, 23, false),
+            ]
+        );
+        assert!(!layout.zoomed);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     zoom 状态下屏幕只显示一个 pane，历史布局不再对应像素，必须能被识别并整体拒绝命中。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言任一行 window_zoomed_flag 为 1 时 layout.zoomed 为 true。
+    #[test]
+    fn parse_tmux_pane_geometry_detects_zoomed_window() {
+        let layout = parse_tmux_pane_geometry("%1 0 0 79 23 1 1\n%2 81 0 159 23 0 1\n");
+
+        assert!(layout.zoomed);
+        assert_eq!(layout.panes.len(), 2);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     点击必须落到覆盖该字符格的 pane；落在 pane 之间的分隔边框时应 no-op 而不是就近吸附。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     左右分屏布局下断言左区/右区命中对应 pane，边框列与越界行返回 None。
+    #[test]
+    fn tmux_pane_at_position_matches_bounds_and_rejects_borders() {
+        let panes = vec![
+            pane_geometry("%1", 0, 0, 79, 23, true),
+            pane_geometry("%2", 81, 0, 159, 23, false),
+        ];
+
+        assert_eq!(
+            tmux_pane_at_position(&panes, 10, 5).map(|p| p.pane_id.as_str()),
+            Some("%1")
+        );
+        assert_eq!(
+            tmux_pane_at_position(&panes, 120, 23).map(|p| p.pane_id.as_str()),
+            Some("%2")
+        );
+        // 第 80 列是分隔边框，不属于任何 pane。
+        assert!(tmux_pane_at_position(&panes, 80, 5).is_none());
+        // 第 24 行是 tmux status bar，超出 pane 范围。
+        assert!(tmux_pane_at_position(&panes, 10, 24).is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     点击切换是绝对定位操作，必须用 pane_id 选中；退化成相对 `.+` 会切到用户没点的 pane。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     断言 select-pane 参数为 `select-pane -t <pane_id>`，不含 `.+`。
+    #[test]
+    fn tmux_select_pane_args_target_absolute_pane_id() {
+        assert_eq!(
+            tmux_select_pane_args("%7"),
+            vec!["select-pane", "-t", "%7"]
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

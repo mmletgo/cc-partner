@@ -59,6 +59,12 @@ export interface WorkbenchTerminalAreaProps {
   isWriteBlocked: (sessionId: string) => boolean;
   handleResize: (sessionId: string, cols: number, rows: number) => void;
   handleCursorAnchorChange: (anchor: TerminalCursorAnchor | null) => void;
+  /**
+   * Business Logic（为什么需要这个回调）:
+   *   多 pane 终端的字符格点击由 controller 委托给后端做 tmux 真实布局命中。
+   *   已离屏 / 自动化 / browser/files 视图下禁用，避免把点击事件误传到非 pane 视图。
+   */
+  handleSelectPaneAt: (sessionId: string, col: number, row: number) => void;
   focusSession: (sessionId: string) => void;
 }
 
@@ -94,6 +100,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
     isWriteBlocked,
     handleResize,
     handleCursorAnchorChange,
+    handleSelectPaneAt,
     focusSession,
   } = props;
 
@@ -182,6 +189,13 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
                 workspaceView === 'terminal' &&
                 session.id === renderedActiveSessionId
                   ? handleCursorAnchorChange
+                  : undefined
+              }
+              onSelectPaneAt={
+                !automationConsoleOpen &&
+                workspaceView === 'terminal' &&
+                session.id === renderedActiveSessionId
+                  ? handleSelectPaneAt
                   : undefined
               }
             />

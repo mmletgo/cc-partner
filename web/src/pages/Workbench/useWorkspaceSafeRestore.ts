@@ -8,6 +8,12 @@
  * Code Logic（这个模块做什么）:
  *   封装 autosave coordinator、启动 restore、snapshot 对话框状态；
  *   apply 窗口内通过 suppressContextResetRef 禁止 project/worktree effect 清掉 selection。
+ *
+ *   初始 restore 路径会通过 `forceTerminalWorkspaceView` 强制把 `workspaceView` 写为
+ *   `'terminal'`，即使 plan 中保存的是 files / browser；命名 snapshot apply 不传该选项，
+ *   默认尊重快照中的 `workspaceView`。这是「打开项目默认进终端」的产品诉求：
+ *   首次会话内首次打开项目总进终端,之后用户在会话内的手动选择不被回滚,
+ *   命名 snapshot 是用户显式 apply,应当原样还原。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -192,9 +198,12 @@ export function useWorkspaceSafeRestore(
    *
    * Code Logic（这个函数做什么）:
    *   返回绑定当前 controller 的 WorkspaceRestoreBridge 实现。
+   *   当 `forceTerminalWorkspaceView=true` 时,bridge 内的 `setWorkspaceView` 会无视
+   *   入参,固定写入 `'terminal'`——用于初始 restore 路径（打开项目默认进终端）。
+   *   命名 snapshot apply 不传该选项,保持尊重快照中的 `workspaceView`。
    */
   const buildBridge = useCallback(
-    () => ({
+    (options: { forceTerminalWorkspaceView?: boolean } = {}) => ({
       selectProject: async (projectId: string) => {
         await selectProjectFromDeepLink(projectId);
       },
@@ -209,7 +218,10 @@ export function useWorkspaceSafeRestore(
         await focusSession(sessionId);
       },
       setWorkspaceView: (view: WorkspaceView) => {
-        setWorkspaceView(view as WorkbenchFileWorkspaceView);
+        const target: WorkbenchFileWorkspaceView = options.forceTerminalWorkspaceView
+          ? 'terminal'
+          : (view as WorkbenchFileWorkspaceView);
+        setWorkspaceView(target);
       },
       setInspectorTab: (tab: InspectorTab) => {
         setInspectorTab(fromLayoutInspectorTab(tab));
@@ -222,6 +234,8 @@ export function useWorkspaceSafeRestore(
           url,
         );
         setBrowserTargetUrl(url);
+        // browser 目标由用户显式 apply（命名 snapshot 或 restore browserTarget action），
+        // 必须保留 browser view；此处不走 forceTerminalWorkspaceView 强制逻辑。
         setWorkspaceView('browser');
       },
       applySelectionSnapshot: async (snapshot: {
@@ -234,6 +248,8 @@ export function useWorkspaceSafeRestore(
         if (snapshot.projectId) await selectProjectFromDeepLink(snapshot.projectId);
         setActiveWorktreeId(snapshot.worktreeId);
         if (snapshot.sessionId) await focusSession(snapshot.sessionId);
+        // 回滚 previous 时同样保留原始 view,不应用 force-terminal 强制,
+        // 避免异常路径误把 UI 锁在 terminal。
         setWorkspaceView(snapshot.workspaceView as WorkbenchFileWorkspaceView);
         setBrowserTargetUrl(snapshot.browserTargetUrl);
       },
@@ -257,6 +273,8 @@ export function useWorkspaceSafeRestore(
    * Code Logic（这个函数做什么）:
    *   suppress context reset → apply server → merge post-apply actions → UI bridge；
    *   apply 失败则跳过 UI 选择并返回 partial summary。
+   *   `forceTerminalWorkspaceView=true` 时把选项注入 bridge,实现「首次打开项目强制
+   *   terminal」;默认 false 供命名 snapshot apply 保留快照 view。
    */
   const runRestoreWithUi = useCallback(
     async (options: {
@@ -270,8 +288,15 @@ export function useWorkspaceSafeRestore(
         dirtyEditor: boolean;
       };
       loadPlan: () => Promise<WorkspaceRestorePlan>;
+      /**
+       * 初始 restore 路径传 true:bridge 内 setWorkspaceView 强制写入 `'terminal'`,
+       * 与 plan 中保存的 `workspaceView` 解耦。命名 snapshot apply 不传,
+       * 默认尊重快照中的 `workspaceView`。
+       */
+      forceTerminalWorkspaceView?: boolean;
     }): Promise<WorkspaceRestoreSummary | null> => {
       suppressContextResetRef.current = true;
+      const bridgeOptions = { forceTerminalWorkspaceView: options.forceTerminalWorkspaceView };
       try {
         const plan = await options.loadPlan();
         let appliedPlan = plan;
@@ -280,7 +305,7 @@ export function useWorkspaceSafeRestore(
           appliedPlan = mergeAppliedPlan(plan, applied);
         } catch {
           // apply 失败：不得继续 UI selection 触发 list-restore 误路径；回滚 previous
-          await buildBridge().applySelectionSnapshot(options.previous);
+          await buildBridge(bridgeOptions).applySelectionSnapshot(options.previous);
           return {
             restoreId: plan.restoreId,
             status: 'partial',
@@ -294,7 +319,7 @@ export function useWorkspaceSafeRestore(
         return await applyWorkspaceRestorePlan({
           previous: options.previous,
           preflight: async () => appliedPlan,
-          bridge: buildBridge(),
+          bridge: buildBridge(bridgeOptions),
         });
       } finally {
         // 让 deferEffect 中的 project/worktree effect 在 suppress 窗口内完成
@@ -362,6 +387,10 @@ export function useWorkspaceSafeRestore(
         const summary = await runRestoreWithUi({
           previous,
           loadPlan: () => workbenchApi.layout.preflight(),
+          // 首次打开本会话的项目强制进 terminal,即使 plan 中保存的是 files / browser。
+          // 该 effect 在 mount 后 projectsLength > 0 时只跑一次 (restoreRanRef),
+          // 因此「只在首次」语义由 restoreRanRef 守门,这里显式传 true 与产品诉求一一对应。
+          forceTerminalWorkspaceView: true,
         });
         if (summary && !summary.silent) setRestoreSummary(summary);
       } catch {
@@ -424,6 +453,8 @@ export function useWorkspaceSafeRestore(
         dirtyEditor: false,
       };
       try {
+        // 命名 snapshot 是用户显式 apply 的工作现场,必须保留快照中的 workspaceView
+        // (不传 forceTerminalWorkspaceView = 默认 false)。
         const summary = await runRestoreWithUi({
           previous,
           loadPlan: () => workbenchApi.layout.preflight(null, layoutId),

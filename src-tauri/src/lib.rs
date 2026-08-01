@@ -587,6 +587,7 @@ pub fn run() {
             workbench_cmd::get_focused_workbench_session,
             workbench_cmd::split_workbench_pane,
             workbench_cmd::switch_workbench_pane,
+            workbench_cmd::select_workbench_pane_at,
             workbench_cmd::zoom_workbench_pane,
             workbench_cmd::close_workbench_pane,
             workbench_cmd::close_workbench_session,

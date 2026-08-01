@@ -20,6 +20,11 @@ import styles from './Workbench.module.css';
 import { createTerminalLiveWriter, type TerminalLiveWriter } from './terminalLiveWriter';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from './terminalOptions';
 import {
+  shouldSelectPaneOnClick,
+  terminalCellFromPointer,
+  type TerminalCell,
+} from './terminalPaneClick';
+import {
   shouldForwardTerminalInput,
   type TerminalReplayGate,
 } from './terminalReplay';
@@ -32,7 +37,17 @@ export interface WorkbenchTerminalPaneProps {
   onResize: (sessionId: string, cols: number, rows: number) => void;
   resizeRequestKey?: number;
   onCursorAnchorChange?: (anchor: TerminalCursorAnchor | null) => void;
+  /**
+   * Business Logic（为什么需要这个回调）:
+   *   tmux 分栏是同一 xterm 网格上的分区，用户点击某个分栏时前端只能提供字符格坐标，
+   *   由后端读取 tmux 真实布局完成命中并 select-pane。
+   *
+   * Code Logic（这个回调做什么）:
+   *   仅在“未拖拽、无选区、视口在底部、允许写”的左键点击时触发，参数为 0 基 col/row。
+   */
+  onSelectPaneAt?: (sessionId: string, col: number, row: number) => void;
 }
+
 
 export interface TerminalCursorAnchor {
   left: number;
@@ -123,6 +138,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     onResize,
     resizeRequestKey = 0,
     onCursorAnchorChange,
+    onSelectPaneAt,
   } = props;
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -134,6 +150,9 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const cursorAnchorCallbackRef = useRef<WorkbenchTerminalPaneProps['onCursorAnchorChange']>(
     onCursorAnchorChange,
   );
+  const selectPaneCallbackRef = useRef<WorkbenchTerminalPaneProps['onSelectPaneAt']>(onSelectPaneAt);
+  // Business Logic: 区分“点击切换分栏”与“拖拽选中文字”，需要记住 mousedown 落在哪个字符格。
+  const pointerDownCellRef = useRef<TerminalCell | null>(null);
   // Business Logic: resize/theme 后 cell 尺寸会变；缓存 metrics，避免每个 onCursorMove 强制布局。
   const cursorMetricsRef = useRef<TerminalCursorMetrics | null>(null);
   const sessionId = session?.id ?? null;
@@ -148,6 +167,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   }, [onCursorAnchorChange]);
 
   useEffect(() => {
+    selectPaneCallbackRef.current = onSelectPaneAt;
+  }, [onSelectPaneAt]);
+
+  useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || !sessionId) return undefined;
 
@@ -157,6 +180,75 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     terminal.open(viewport);
     fit.fit();
     cursorMetricsRef.current = null;
+    pointerDownCellRef.current = null;
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   xterm 字符网格作为分栏切换的唯一坐标系；必须先消费 mousedown 才允许 mouseup 判定。
+     *
+     * Code Logic（这个函数做什么）:
+     *   读取缓存 metrics，把 clientX/Y 换算为字符格并 clamp；inputEnabled=false 时清缓存返回。
+     */
+    const cellForPointer = (clientX: number, clientY: number): TerminalCell | null => {
+      if (!inputEnabledRef.current) return null;
+      const metrics =
+        cursorMetricsRef.current ?? measureTerminalCursorMetrics(viewport, terminal);
+      cursorMetricsRef.current = metrics;
+      return terminalCellFromPointer(metrics, clientX, clientY, terminal.cols, terminal.rows);
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   xterm 不提供原生的“点击 vs 拖拽”手势判定，需要把 mousedown 落在哪个字符格记下来，
+     *   后续 mouseup 才能区分“纯点击”与“拖拽选中文字”。
+     *
+     * Code Logic（这个函数做什么）:
+     *   读 onSelectPaneAt 与当前 cell，落点为 null 时清空 ref；否则写入 pointerDownCellRef。
+     */
+    const handlePointerDown = (event: PointerEvent): void => {
+      if (!selectPaneCallbackRef.current) {
+        pointerDownCellRef.current = null;
+        return;
+      }
+      if (event.button !== 0) {
+        pointerDownCellRef.current = null;
+        return;
+      }
+      pointerDownCellRef.current = cellForPointer(event.clientX, event.clientY);
+    };
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   只有“未拖拽、无选区、视口在底部、允许写”的左键点击才代表用户想切换分栏。
+     *   其余情况一律让原生 xterm / 浏览器文本选中行为接管。
+     *
+     * Code Logic（这个函数做什么）:
+     *   读取 down/up/hasSelection/atBottom/writeEnabled，统一交给纯函数判定；
+     *   命中时用 ref 调 onSelectPaneAt(sessionId, col, row)。
+     */
+    const handlePointerUp = (event: PointerEvent): void => {
+      const callback = selectPaneCallbackRef.current;
+      const downCell = pointerDownCellRef.current;
+      pointerDownCellRef.current = null;
+      if (!callback) return;
+      if (event.button !== 0) return;
+      const upCell = cellForPointer(event.clientX, event.clientY);
+      // 视口在底部：xterm buffer.viewportY === baseY；其余行不再对应 tmux 屏幕。
+      const buffer = terminal.buffer.active;
+      const atBottom = buffer.viewportY === buffer.baseY;
+      const hasSelection = terminal.getSelection().length > 0;
+      const cell = shouldSelectPaneOnClick({
+        down: downCell,
+        up: upCell,
+        hasSelection,
+        atBottom,
+        writeEnabled: inputEnabledRef.current,
+      });
+      if (cell) callback(sessionId, cell.col, cell.row);
+    };
+
+    viewport.addEventListener('pointerdown', handlePointerDown);
+    viewport.addEventListener('pointerup', handlePointerUp);
     /**
      * Business Logic（为什么需要这个函数）:
      *   Prompt 浮层定位依赖光标锚点，但 inactive pane / 非 terminal 视图不会注册回调；
@@ -239,8 +331,11 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       liveWriterRef.current?.dispose();
       liveWriterRef.current = null;
       observer.disconnect();
+      viewport.removeEventListener('pointerdown', handlePointerDown);
+      viewport.removeEventListener('pointerup', handlePointerUp);
       dataDisposable.dispose();
       cursorDisposable.dispose();
+      pointerDownCellRef.current = null;
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;

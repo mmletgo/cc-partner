@@ -51,14 +51,16 @@ impl WorkbenchProjectRepo {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     工作台最近项目列表需要按最近打开顺序展示项目。
+    ///     侧栏项目列表是用户的空间记忆锚点：选中项目不得让它跳到列表顶部。
+    ///     因此列表顺序固定为「添加时间倒序」（新添加的在最上），与 last_opened_at 解耦；
+    ///     「最近打开」语义只保留给 list_recent（启动摘要「继续工作」）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     查询全部项目，按 last_opened_at DESC 排序，转换为 Row。
+    ///     查询全部项目，按 created_at DESC 排序（同一时间戳按 id ASC 稳定 tie-break），转换为 Row。
     pub async fn list(&self) -> Result<Vec<WorkbenchProjectRow>, AppError> {
         let rows = sqlx::query(
             "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at \
-             FROM workbench_projects ORDER BY last_opened_at DESC",
+             FROM workbench_projects ORDER BY created_at DESC, id ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -203,6 +205,15 @@ mod tests {
     /// Code Logic（这个函数做什么）:
     ///     根据 id 和 last_opened_at 生成完整 WorkbenchProjectRow。
     fn row(id: &str, last_opened_at: &str) -> WorkbenchProjectRow {
+        row_created_at(id, last_opened_at, "2026-06-24T00:00:00Z")
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     列表顺序由 created_at 决定，排序断言必须能独立控制添加时间与最近打开时间。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     根据 id、last_opened_at 和 created_at 生成完整 WorkbenchProjectRow。
+    fn row_created_at(id: &str, last_opened_at: &str, created_at: &str) -> WorkbenchProjectRow {
         WorkbenchProjectRow {
             id: id.to_string(),
             name: format!("Project {id}"),
@@ -211,25 +222,72 @@ mod tests {
             device_name: "MacBook".to_string(),
             path: format!("/tmp/{id}"),
             last_opened_at: last_opened_at.to_string(),
-            created_at: "2026-06-24T00:00:00Z".to_string(),
+            created_at: created_at.to_string(),
             updated_at: "2026-06-24T00:00:00Z".to_string(),
         }
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     最近项目列表必须让用户先看到最后打开的项目。
+    ///     侧栏项目顺序必须稳定：新添加的项目在最上，且选中项目不得置顶。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     插入两条不同 last_opened_at 的记录，并断言 list 返回倒序。
+    ///     插入两条 created_at 不同的记录，断言 list 按 created_at 倒序返回。
     #[tokio::test]
-    async fn list_orders_by_last_opened_desc() {
+    async fn list_orders_by_created_at_desc() {
         let repo = setup_repo().await;
-        repo.upsert(&row("p1", "2026-06-24T01:00:00Z"))
-            .await
-            .unwrap();
-        repo.upsert(&row("p2", "2026-06-24T02:00:00Z"))
-            .await
-            .unwrap();
+        repo.upsert(&row_created_at(
+            "p1",
+            "2026-06-24T01:00:00Z",
+            "2026-06-20T00:00:00Z",
+        ))
+        .await
+        .unwrap();
+        repo.upsert(&row_created_at(
+            "p2",
+            "2026-06-24T02:00:00Z",
+            "2026-06-21T00:00:00Z",
+        ))
+        .await
+        .unwrap();
+
+        let listed = repo.list().await.unwrap();
+
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, "p2");
+        assert_eq!(listed[1].id, "p1");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     touch_workbench_project 只更新 last_opened_at；选中项目后列表顺序必须保持不变。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     插入两条记录后把较旧项目的 last_opened_at 推到最新，断言 list 顺序未变。
+    #[tokio::test]
+    async fn touching_last_opened_at_does_not_reorder_list() {
+        let repo = setup_repo().await;
+        repo.upsert(&row_created_at(
+            "p1",
+            "2026-06-24T01:00:00Z",
+            "2026-06-20T00:00:00Z",
+        ))
+        .await
+        .unwrap();
+        repo.upsert(&row_created_at(
+            "p2",
+            "2026-06-24T02:00:00Z",
+            "2026-06-21T00:00:00Z",
+        ))
+        .await
+        .unwrap();
+
+        // 模拟用户选中较早添加的 p1：只刷新 last_opened_at，created_at 不变。
+        repo.upsert(&row_created_at(
+            "p1",
+            "2026-06-24T09:00:00Z",
+            "2026-06-20T00:00:00Z",
+        ))
+        .await
+        .unwrap();
 
         let listed = repo.list().await.unwrap();
 

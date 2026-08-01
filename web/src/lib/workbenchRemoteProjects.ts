@@ -10,16 +10,22 @@ const REMOTE_WORKBENCH_OFFLINE_ERROR = '远端设备不在线';
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   本机和远端项目都进入同一侧栏最近项目列表，打开远端项目后应立即置顶且不重复。
+ *   侧栏项目列表是用户的空间记忆锚点：选中或重新打开已有项目时不得把它挪到顶部，
+ *   否则用户每次点击都要重新寻找相邻项目。只有真正新增的项目才追加到顶部
+ *   （与后端 list 的 created_at DESC 顺序一致）。
  *
  * Code Logic（这个函数做什么）:
- *   按 project.id 移除旧项，再把最新项目 DTO 插入数组开头；不修改传入数组。
+ *   已存在同 id 时按原索引就地替换为最新 DTO；不存在时插入数组开头。不修改传入数组。
  */
-export function insertWorkbenchProjectAtTop(
+export function upsertWorkbenchProjectInPlace(
   projects: WorkbenchProject[],
   project: WorkbenchProject,
 ): WorkbenchProject[] {
-  return [project, ...projects.filter((item) => item.id !== project.id)];
+  const index = projects.findIndex((item) => item.id === project.id);
+  if (index < 0) return [project, ...projects];
+  const next = [...projects];
+  next[index] = project;
+  return next;
 }
 
 /**

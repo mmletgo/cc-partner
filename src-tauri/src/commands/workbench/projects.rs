@@ -354,7 +354,8 @@ pub async fn remove_workbench_project(
 /// 更新项目最近打开时间。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     用户切换或打开项目时，最近项目列表需要把当前项目提升到顶部。
+///     启动摘要「继续工作」按最近打开顺序展示项目，需要记录用户切换/打开的时间。
+///     注意：侧栏项目列表按 created_at 排序，**不会**因此置顶（见 `WorkbenchProjectRepo::list`）。
 ///
 /// Code Logic（这个函数做什么）:
 ///     读取现有 row，更新 last_opened_at/updated_at 后 upsert，返回最新 DTO。

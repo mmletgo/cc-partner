@@ -6,11 +6,11 @@ import type {
 } from '../../lib/types';
 import {
   canOpenRemoteProjectSelection,
-  insertWorkbenchProjectAtTop,
   isRemoteWorkbenchOfflineError,
   isRemoteWorkbenchProjectOffline,
   remoteParentPath,
   sortRemoteDirectoryEntries,
+  upsertWorkbenchProjectInPlace,
 } from '../../lib/workbenchRemoteProjects';
 
 /**
@@ -38,12 +38,13 @@ const baseProject: WorkbenchProject = {
 
 /**
  * Business Logic（为什么需要这个测试）:
- *   用户打开远端项目后，侧栏项目列表应立即把它放到顶部；重复打开同一项目不能出现重复卡片。
+ *   首次打开远端项目应出现在侧栏顶部；但重新打开已在列表中的项目必须保持原位置，
+ *   否则用户每次点击项目都要重新寻找相邻项目（选中即置顶的空间记忆问题）。
  *
  * Code Logic（这个测试做什么）:
- *   构造一个本地项目和一个远端项目，断言 helper 插入后置顶，并在重复插入时按 id 去重。
+ *   构造一个本地项目和一个远端项目，断言首次插入置顶，再次 upsert 时就地更新且不改变索引。
  */
-function testInsertRemoteProjectMovesToTopWithoutDuplicates(): void {
+function testUpsertRemoteProjectKeepsPositionWithoutDuplicates(): void {
   const remoteProject: WorkbenchProject = {
     ...baseProject,
     id: 'remote:device-a:abc',
@@ -54,19 +55,36 @@ function testInsertRemoteProjectMovesToTopWithoutDuplicates(): void {
     path: '/Users/hans/app',
   };
 
-  const firstInsert = insertWorkbenchProjectAtTop([baseProject], remoteProject);
-  assert(firstInsert[0]?.id === remoteProject.id, 'remote project should be inserted at top');
+  const firstInsert = upsertWorkbenchProjectInPlace([baseProject], remoteProject);
+  assert(firstInsert[0]?.id === remoteProject.id, 'new remote project should be inserted at top');
   assert(firstInsert.length === 2, 'remote project should be added to list');
 
-  const secondInsert = insertWorkbenchProjectAtTop(firstInsert, {
+  // 再插入一个新项目，把 remoteProject 挤到索引 1。
+  const withNewer = upsertWorkbenchProjectInPlace(firstInsert, {
+    ...baseProject,
+    id: 'local-2',
+    name: 'newest',
+    path: '/Users/hans/newest',
+  });
+  assert(withNewer[1]?.id === remoteProject.id, 'existing remote project should shift to index 1');
+
+  const secondUpsert = upsertWorkbenchProjectInPlace(withNewer, {
     ...remoteProject,
     name: 'remote-app-updated',
   });
-  assert(secondInsert[0]?.name === 'remote-app-updated', 'duplicate insert should keep latest project payload');
   assert(
-    secondInsert.filter((project) => project.id === remoteProject.id).length === 1,
+    secondUpsert[1]?.id === remoteProject.id,
+    'reopening an existing project must not move it to the top',
+  );
+  assert(
+    secondUpsert[1]?.name === 'remote-app-updated',
+    'upsert should keep latest project payload',
+  );
+  assert(
+    secondUpsert.filter((project) => project.id === remoteProject.id).length === 1,
     'duplicate remote project should be de-duplicated by id',
   );
+  assert(secondUpsert.length === 3, 'upsert must not change list length for existing project');
 }
 
 /**
@@ -216,8 +234,8 @@ function testRemoteOfflineStateOnlyMatchesCurrentRemoteProject(): void {
  *   逐个执行纯 helper 测试，任一失败会抛出并让进程返回非零状态。
  */
 describe('workbenchRemoteProjects', () => {
-  test('insert, parent path, sort, open gate and offline detection helpers', async () => {
-    testInsertRemoteProjectMovesToTopWithoutDuplicates();
+  test('upsert, parent path, sort, open gate and offline detection helpers', async () => {
+    testUpsertRemoteProjectKeepsPositionWithoutDuplicates();
     testRemoteParentPathHandlesUnixAndWindowsPaths();
     testSortRemoteDirectoryEntriesPutsDirsBeforeFiles();
     testCanOpenRemoteProjectSelectionRequiresCurrentReadableDirectory();

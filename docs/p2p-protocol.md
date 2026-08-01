@@ -293,6 +293,7 @@ the router so the inventory check matches exactly.
 | POST | `/api/workbench/sessions/focused` | `routes/workbench.rs` | none; `tmux display-message` query | read-only | — |
 | POST | `/api/workbench/sessions/split-pane` | `routes/workbench.rs` | `tmux split-window` creates a new pane | requires-idempotency-key | no dedupe key yet; replay creates a second pane |
 | POST | `/api/workbench/sessions/switch-pane` | `routes/workbench.rs` | `tmux select-pane -t .+` cycles to the next pane | no-transport-retry | `switch_to_next_pane` runs a relative `select-pane` cycle; a transport replay after a timeout lands on a *different* pane than the caller intended, so the client must not auto-replay |
+| POST | `/api/workbench/sessions/select-pane-at` | `routes/workbench.rs` | `tmux select-pane -t <pane_id>` after `list-panes` geometric hit-test | naturally-idempotent | absolute pane_id from geometric hit-test; same `(sessionId, col, row)` reproduces the same `select-pane` target, so a replay lands on the same pane |
 | POST | `/api/workbench/sessions/zoom-pane` | `routes/workbench.rs` | `tmux resize-pane -Z` guarded by current zoom flag | naturally-idempotent | `ensure_active_pane_zoomed` checks `#{window_zoomed_flag}` before toggling |
 | POST | `/api/workbench/sessions/close-pane` | `routes/workbench.rs` | `tmux kill-pane`/`kill-window` + row delete | no-transport-retry | destructive |
 | POST | `/api/workbench/sessions/close` | `routes/workbench.rs` | `tmux kill-window`/`kill-session` + row delete | no-transport-retry | destructive |

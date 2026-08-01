@@ -633,6 +633,18 @@ async fn dispatch_workbench_op(
             let session_id = required_string(&payload, "sessionId")?;
             workbench::switch_workbench_pane_for_state(state, session_id).await
         }
+        "sessions.select_pane_at" => {
+            let session_id = required_string(&payload, "sessionId")?;
+            let col = payload
+                .get("col")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| AppError::validation("col 必填"))? as u32;
+            let row = payload
+                .get("row")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| AppError::validation("row 必填"))? as u32;
+            workbench::select_workbench_pane_at_for_state(state, session_id, col, row).await
+        }
         "sessions.zoom" => {
             let session_id = required_string(&payload, "sessionId")?;
             workbench::zoom_workbench_pane_for_state(state, session_id).await

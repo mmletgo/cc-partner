@@ -401,6 +401,37 @@ pub struct RemoteSplitPaneReq {
     pub direction: String,
 }
 
+/// 远端 pane 坐标选中请求体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     remote terminal 也支持点击切换 pane，坐标命中必须在 owning device 的 tmux 上完成。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存远端 local sessionId 与终端字符格坐标（0 基，col 为列、row 为行）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSelectPaneAtReq {
+    pub session_id: String,
+    pub col: u32,
+    pub row: u32,
+}
+
+/// 远端 pane 坐标选中响应体。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     本机需要知道远端是否真的换了 pane，才能区分成功切换与 zoom/边框/已 active 的 no-op。
+///
+/// Code Logic（这个结构体做什么）:
+///     保存被选中的 pane_id（无命中为 None）与 changed 标记；缺省字段前向兼容旧对端。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSelectPaneAtResp {
+    #[serde(default)]
+    pub pane_id: Option<String>,
+    #[serde(default)]
+    pub changed: bool,
+}
+
 /// 远端终端重命名请求体。
 ///
 /// Business Logic（为什么需要这个结构体）:

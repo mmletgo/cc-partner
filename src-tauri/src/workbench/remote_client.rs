@@ -44,7 +44,8 @@ use crate::workbench::remote_protocol::{
     RemotePreviewSqliteReq, RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq,
     RemoteRenamePathReq, RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq,
     RemoteSafeAttachReq, RemoteSaveTextReq, RemoteSearchClaudeSessionsReq, RemoteSessionReq,
-    RemoteSplitPaneReq, RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq,
+    RemoteSelectPaneAtReq, RemoteSelectPaneAtResp, RemoteSplitPaneReq,
+    RemoteWorkbenchBrowserDiscoverReq, RemoteWorkbenchBrowserPreviewReq,
     RemoteWorkspaceRestorePreflightReq, RemoteWorktreeReq, RemoteWriteSessionInputReq,
     ResumeClaudeSessionResult,
 };
@@ -1282,6 +1283,33 @@ impl RemoteWorkbenchClient {
             )
             .await?;
         Ok(())
+    }
+
+    /// 按坐标选中远端 window 内的 pane。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     remote terminal 用户点击某个 pane 时，坐标命中与 select-pane 都必须由 owning device 的 tmux 完成。
+    ///     该操作以绝对坐标定位，重复执行结果一致，与相对 `.+` 循环不同。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     POST `{base_url}/api/workbench/sessions/select-pane-at`，解析对端 `{paneId, changed}` 响应。
+    pub async fn select_pane_at(
+        &self,
+        base_url: &str,
+        session_id: &str,
+        col: u32,
+        row: u32,
+    ) -> Result<RemoteSelectPaneAtResp, AppError> {
+        self.post_json(
+            endpoint_url(base_url, "/api/workbench/sessions/select-pane-at"),
+            &RemoteSelectPaneAtReq {
+                session_id: session_id.to_string(),
+                col,
+                row,
+            },
+            RemoteRequestTimeoutKind::Short,
+        )
+        .await
     }
 
     /// 确保远端当前 active pane 以单 pane 视图显示。

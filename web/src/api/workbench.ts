@@ -476,6 +476,20 @@ export const workbenchApi = {
         sessionId,
       }),
 
+    /**
+     * 按终端字符格坐标选中 tmux pane。
+     *
+     * Business Logic（为什么需要这个方法）:
+     *   桌面用户在多 pane 终端内点击目标 pane 时，前端只能提供 (col, row)，
+     *   由后端读取 tmux 真实 pane 几何完成命中并 select-pane；与相对 `.+` 循环不同，
+     *   绝对坐标结果可重放。
+     */
+    selectPaneAt: (sessionId: string, col: number, row: number) =>
+      invoke<{ ok: boolean; sessionId: string; paneId: string | null; changed: boolean }>(
+        'select_workbench_pane_at',
+        { sessionId, col, row },
+      ),
+
     /** 确保当前 tmux active pane 以单 pane 视图显示。 */
     zoomPane: (sessionId: string) =>
       invoke<{ ok: boolean; sessionId: string }>('zoom_workbench_pane', {
