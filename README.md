@@ -98,13 +98,13 @@ printf '%s' '{"data":"pwd\\n"}' | cargo run --locked --bin cc-partner-cli -- ses
 
 | 系统 | 文件 | 说明 |
 |------|------|------|
-| macOS | 本地统一构建 | 公开 Release 暂不发布未公证包；固定/ad-hoc 签名说明见下方 |
+| macOS (Apple Silicon) | `.dmg` | ad-hoc 签名；首次打开及输入监控授权见下方 |
 | Windows | `.exe`（NSIS） | 安装程序 |
 | Ubuntu / Linux | `.AppImage` / `.deb` / `.rpm` | 直接运行或安装包 |
 
 ### macOS
 
-当前没有 Apple Developer ID，因此公开 Release 暂不发布未公证的 macOS 包。本地构建始终生成统一的 `cc-partner`；固定自签名证书可让 TCC 权限在升级间保持稳定，没有固定签名时输入监控仍可在系统设置中通过列表下方的 `+` 手动添加当前 `.app`。详见 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md)。
+当前没有 Apple Developer ID，因此公开 Release 的 Apple Silicon `.dmg` 使用 ad-hoc 签名且未公证。首次打开需要在 Finder 中右键选择“打开”并确认；输入监控仍可在系统设置的列表下方通过 `+` 手动添加当前 `.app`。固定自签名构建可让 TCC 权限在升级间更稳定，但与公开包不是不同产品版本。详见 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md)。
 
 ### Windows
 

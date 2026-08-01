@@ -98,7 +98,7 @@ cc-partner/
 │   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
 │   └── Cargo.toml
 ├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory / check-quality-traceability / check-docs + 图标源
-├── .github/workflows/            # ci/smoke/docs + 公开 Windows/Linux release + macOS 固定签名手动构建
+├── .github/workflows/            # ci/smoke/docs + 公开 macOS/Windows/Linux release + macOS 固定签名手动构建
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
 │   ├── prd.md
@@ -455,11 +455,11 @@ cd web && npm run build            # tsc -b && vite build（类型检查入口�
 
 ```bash
 node scripts/bump-version.mjs <新版本号>   # 同步 tauri.conf.json + Cargo.toml/lock + web package.json/lock
-git tag v<版本号> && git push origin v<版本号>  # 公开发布仅 Windows/Linux
+git tag v<版本号> && git push origin v<版本号>  # 公开发布 macOS arm64 / Windows / Linux
 ```
 
 - **版本号单一来源**：`src-tauri/tauri.conf.json` 的 `version`
-- **公开 Release 机制**：`release-tauri.yml` 三段式原生 `tauri build`，仅发布 Windows/Linux；**不是** `tauri-apps/tauri-action`，禁止发布 macOS ad-hoc “官方”包
+- **公开 Release 机制**：`release-tauri.yml` 三段式原生 `tauri build`，发布 macOS arm64 ad-hoc DMG/updater/CLI、Windows 与 Linux；**不是** `tauri-apps/tauri-action`
 - **macOS 固定签名构建**：与统一正式版共用 `com.cc-partner.app`，本地运行 `scripts/build-macos-internal.sh`，CI 手动触发 `internal-macos.yml`；文件名与 Environment 名保留为历史基础设施标识，不代表独立产品版本；详见 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md)
 - **跨目录关键陷阱**：repo secret `TAURI_SIGNING_PRIVATE_KEY` 缺失则无 `.sig` / `latest.json` 不完整，应用内更新失败；`plugins.updater.pubkey` 必须与私钥配对；`bundle.createUpdaterArtifacts: true` 必须开启
 - **实现细节、矩阵平台、sidecar、历史弃用原因**：`src-tauri/CLAUDE.md`「M9」节

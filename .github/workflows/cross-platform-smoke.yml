@@ -11,7 +11,7 @@
 #
 # 明确不验证（见 job summary）：
 #   WSL+tmux、GUI/WebView、macOS 权限弹窗、多机 mDNS。
-#   公开 Windows/Linux 包由 release-tauri.yml、macOS 固定签名包由 internal-macos.yml 负责；
+#   公开 macOS arm64/Windows/Linux 包由 release-tauri.yml、macOS 固定签名包由 internal-macos.yml 负责；
 #   二者都不能替代本 smoke 或真机 TCC 验证。
 #
 # 触发：

@@ -41,7 +41,7 @@ Infrastructure (must be in `subjectCommit` before freeze):
 - `.github/workflows/release-tauri-beta.yml` — beta-only evidence-aware publish gate
 - `scripts/prepare-updater-certification-harness.mjs` + `serve-updater-certification.mjs` + `src-tauri/tauri.updater-certification.conf.json`
 
-Stable public Windows/Linux publish remains `.github/workflows/release-tauri.yml`;
+Stable public macOS arm64/Windows/Linux publish remains `.github/workflows/release-tauri.yml`;
 fixed-certificate macOS artifacts for the same `cc-partner` product use the manual
 `.github/workflows/internal-macos.yml`.
 Neither is invoked for this beta profile or substitutes for L3 permission evidence.

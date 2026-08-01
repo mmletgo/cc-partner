@@ -59,9 +59,9 @@ com.cc-partner.app.dev
 - `MACOS_INTERNAL_KEYCHAIN_PASSWORD`
 - `MACOS_INTERNAL_CERT_SHA256`
 
-公开 `release-tauri.yml` 在没有 Apple Developer ID 时不发布未公证的 macOS 包；Windows/Linux 与公开源码仍正常发布。这是分发限制，不是社区版/自用版差异。
+公开 `release-tauri.yml` 在 Apple Silicon GitHub Runner 上构建 ad-hoc 签名的 `.dmg`、updater `app.tar.gz` 与独立 CLI，并发布到与 Windows/Linux 相同的稳定 Release。没有 Apple Developer ID 意味着包未公证：用户首次打开时需要手动确认，输入监控可能需要在系统设置中通过 `+` 添加当前 `.app`。这与固定自签名构建不是不同产品版本。
 
-固定签名 overlay 关闭 macOS updater artifact 生成，但不再覆盖产品名、Bundle ID 或 updater endpoint；这些字段继承统一正式版。当前 macOS 固定签名 artifact 采用手动覆盖安装。将来启用 macOS 自动更新时，必须同时配置 updater minisign key、公开 feed 的 macOS 条目、固定证书签名合同检查与一次升级保权 L3。
+固定签名 overlay 关闭 macOS updater artifact 生成，但不再覆盖产品名、Bundle ID 或 updater endpoint；这些字段继承统一正式版。固定签名 artifact 仍采用手动覆盖安装；公开 ad-hoc 包使用 updater minisign 签名进入稳定 feed。两种代码签名身份之间切换可能需要重新配置 TCC 权限，不得宣称固定签名权限会迁移到公开 ad-hoc 包。
 
 ## 0.8.3 身份迁移与手动授权
 

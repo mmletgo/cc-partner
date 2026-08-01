@@ -16,14 +16,15 @@
 #      Release —— 只要某个平台产出了 .sig 就会进 latest.json，互不影响，彻底绕开 bug。
 #
 # 三个 job 的职责：
-#   - build                  : 按 matrix（Windows / Linux x64 / Linux arm64）各自 tauri build，
-#                              收集产物到 release-assets/。macOS 固定签名包由 internal-macos.yml 负责。
+#   - build                  : 按 matrix（macOS arm64 / Windows / Linux x64 / Linux arm64）各自
+#                              tauri build，收集产物到 release-assets/。
 #   - publish-release        : 合并所有平台的 release-assets/，上传到 GitHub Release。
 #   - assemble-latest-json   : 从 Release 拉取全部 .sig，生成并上传 latest.json 供 updater 用。
 #
 # 注：前端在 web/ 子目录（用 npm 不是 pnpm），tauri 项目在 src-tauri/ 子目录。tauri CLI
 # 经 `cd web && npm ci` 安装到 web/node_modules，从仓库根目录调用 web/node_modules/.bin/tauri
-# （与本地 ./start.sh 一致）。公开 Release 不发布 macOS ad-hoc 包；Windows updater 用 nsis。
+# （与本地 ./start.sh 一致）。macOS 公开包使用 ad-hoc 签名，首次下载需由用户确认打开，
+# 输入监控权限可在系统设置中手动添加；Windows updater 用 nsis。
 
 name: Build & Release (Tauri)
 
@@ -31,13 +32,30 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '补发目标 tag（例如 v0.8.3）'
+        required: true
+        type: string
+      build_scope:
+        description: '补发范围'
+        required: true
+        default: macos-aarch64
+        type: choice
+        options:
+          - macos-aarch64
+          - all
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: write
 
 # 同一 tag 多次推送时取消旧的运行，避免重复发版 / Release 资产冲突
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -50,25 +68,37 @@ jobs:
       # 单个平台失败不阻断其他平台
       fail-fast: false
       matrix:
-        include:
-          # Windows x86_64（nsis + msi；updater 用 nsis 的 .exe）
-          - matrix_id: windows-x86_64
-            platform: 'windows-latest'
-            target: ''
-          # Linux x86_64（AppImage + deb + rpm）
-          - matrix_id: linux-x86_64
-            platform: 'ubuntu-22.04'
-            target: ''
-          # Linux arm64（aarch64；GitHub 原生 arm64 runner）
-          - matrix_id: linux-aarch64
-            platform: 'ubuntu-24.04-arm'
-            target: ''
+        # tag push 构建全部公开平台；workflow_dispatch 默认只补发 macOS arm64。
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.build_scope == 'macos-aarch64' && '[{"matrix_id":"macos-aarch64","platform":"macos-15","target":"aarch64-apple-darwin"}]' || '[{"matrix_id":"macos-aarch64","platform":"macos-15","target":"aarch64-apple-darwin"},{"matrix_id":"windows-x86_64","platform":"windows-latest","target":""},{"matrix_id":"linux-x86_64","platform":"ubuntu-22.04","target":""},{"matrix_id":"linux-aarch64","platform":"ubuntu-24.04-arm","target":""}]') }}
 
     runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Validate release tag and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "❌ 非法 release tag: $RELEASE_TAG" >&2; exit 1;;
+          esac
+          git fetch --force --tags origin
+          tag_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          head_commit=$(git rev-parse HEAD)
+          if [ "$tag_commit" != "$head_commit" ]; then
+            echo "❌ checkout 与 release tag commit 不一致" >&2
+            exit 1
+          fi
+          config_version=$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")
+          if [ "v$config_version" != "$RELEASE_TAG" ]; then
+            echo "❌ tag/version 不一致: $RELEASE_TAG vs $config_version" >&2
+            exit 1
+          fi
 
       - name: Set up Node 22
         uses: actions/setup-node@v5
@@ -185,6 +215,13 @@ jobs:
         # deb/rpm 仅供手动安装，不参与 updater。
         run: web/node_modules/.bin/tauri build --bundles appimage,deb,rpm
 
+      - name: Build Tauri App (macOS arm64)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        # 无 Apple Developer ID 时使用 tauri.conf.json 的 ad-hoc signingIdentity="-"。
+        # createUpdaterArtifacts 同时生成 app.tar.gz + minisign .sig；DMG 供手动安装。
+        run: web/node_modules/.bin/tauri build --target "${{ matrix.target }}"
+
       # ── 收集产物到 release-assets/ ────────────────────────────────────────
       - name: Prepare Windows Assets
         if: startsWith(matrix.platform, 'windows')
@@ -226,6 +263,38 @@ jobs:
           echo "=== release-assets ==="
           ls -la release-assets/
 
+      - name: Prepare macOS Assets
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          BUNDLE_ROOT="src-tauri/target/${{ matrix.target }}/release/bundle"
+          MACOS_DIR="$BUNDLE_ROOT/macos"
+          DMG_DIR="$BUNDLE_ROOT/dmg"
+
+          shopt -s nullglob
+          apps=("$MACOS_DIR"/*.app)
+          app_tars=("$MACOS_DIR"/*.app.tar.gz)
+          app_sigs=("$MACOS_DIR"/*.app.tar.gz.sig)
+          dmgs=("$DMG_DIR"/*.dmg)
+          if [ ${#apps[@]} -ne 1 ] || [ ${#app_tars[@]} -ne 1 ] || [ ${#app_sigs[@]} -ne 1 ] || [ ${#dmgs[@]} -ne 1 ]; then
+            echo "❌ macOS app/DMG/updater 产物数量不符合预期" >&2
+            find "$BUNDLE_ROOT" -maxdepth 3 -type f -print
+            exit 1
+          fi
+
+          codesign --verify --deep --strict "${apps[0]}"
+          bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${apps[0]}/Contents/Info.plist")
+          if [ "$bundle_id" != "com.cc-partner.app" ]; then
+            echo "❌ macOS Bundle ID 漂移: $bundle_id" >&2
+            exit 1
+          fi
+
+          cp "${app_tars[0]}" "${app_sigs[0]}" "${dmgs[0]}" release-assets/
+          echo "=== macOS release-assets (ad-hoc) ==="
+          ls -la release-assets/
+
       - name: Upload release artifacts to workflow
         # 每个 matrix job 一个独立 artifact（v4 不允许同名），publish-release 阶段合并
         uses: actions/upload-artifact@v4
@@ -245,6 +314,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Download all platform artifacts
         # merge-multiple 把所有匹配 release-assets-* 的 artifact 平铺到同一目录
@@ -262,17 +333,18 @@ jobs:
       - name: Create / Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Release ${{ env.RELEASE_TAG }}
           prerelease: false
           generate_release_notes: false
           body: |
-            ## cc-partner ${{ github.ref_name }}
+            ## cc-partner ${{ env.RELEASE_TAG }}
 
             ### 下载
 
             | 平台 | 安装包 |
             | --- | --- |
+            | macOS (Apple Silicon) | `*_aarch64.dmg`（ad-hoc 签名，首次打开需手动确认） |
             | Windows (x86_64) | `*_x64-setup.exe` |
             | Linux (x86_64) | `*_amd64.AppImage` / `.deb` |
             | Linux (ARM64) | `*_aarch64.AppImage` / `.deb` |
@@ -280,7 +352,7 @@ jobs:
             ### 自动更新
 
             已安装旧版本的用户，应用内会自动检查更新（读取本 Release 的 `latest.json`）。
-            Windows 支持应用内自动更新；Linux 需手动下载新版本安装包覆盖。
+            macOS 与 Windows 支持应用内自动更新；Linux 需手动下载新版本安装包覆盖。
           files: release-assets/*
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -292,11 +364,13 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Ensure gh CLI available
         # ubuntu runner 自带 gh，这里仅校验
@@ -330,6 +404,7 @@ jobs:
           base_url="https://github.com/$REPO/releases/download/$TAG"
 
           win_x64_url="";     win_x64_sig=""
+          mac_arm64_url="";   mac_arm64_sig=""
           linux_x64_url="";   linux_x64_sig=""
           linux_arm64_url=""; linux_arm64_sig=""
 
@@ -340,6 +415,8 @@ jobs:
             url="$base_url/$fname"
             sig_content=$(cat "$sig")
             case "$fname" in
+              *_aarch64.app.tar.gz)
+                mac_arm64_url="$url"; mac_arm64_sig="$sig_content";;
               *_x64-setup.exe)
                 win_x64_url="$url"; win_x64_sig="$sig_content";;
               *_amd64.AppImage)
@@ -349,14 +426,16 @@ jobs:
             esac
           done
 
-          # 用 jq 构造公开 platforms 对象；macOS 内部产物不得进入公开 updater 清单。
+          # 用 jq 构造公开 platforms 对象；仅收录本次 Release 实际存在的签名产物。
           # （jq 的 empty 在对象字面量里会吞掉整个对象，不能用 if-then-empty 写法）
           platforms_json=$(jq -n \
             --arg win_url  "$win_x64_url"          --arg win_sig  "$win_x64_sig" \
+            --arg ma_url   "$mac_arm64_url"        --arg ma_sig   "$mac_arm64_sig" \
             --arg lx_url   "$linux_x64_url"        --arg lx_sig   "$linux_x64_sig" \
             --arg la_url   "$linux_arm64_url"      --arg la_sig   "$linux_arm64_sig" \
             '{
               "windows-x86_64": {signature: $win_sig,  url: $win_url},
+              "darwin-aarch64": {signature: $ma_sig,   url: $ma_url},
               "linux-x86_64":   {signature: $lx_sig,   url: $lx_url},
               "linux-aarch64":  {signature: $la_sig,   url: $la_url}
             } | with_entries(select(.value.url | length > 0))')
@@ -382,4 +461,4 @@ jobs:
       - name: Upload latest.json to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$GITHUB_REF_NAME" latest.json --clobber
+        run: gh release upload "$TAG" latest.json --clobber

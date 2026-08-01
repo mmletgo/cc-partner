@@ -388,7 +388,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
   - 触发：`push tags: ['v*']`。
   - 旧的 Python/PyInstaller `release.yml` 已于 M10 删除，现在仓库为纯 Tauri 结构，推 `v*` tag 只跑这一套 Tauri 构建。
   - **三段式 workflow（v0.6.6 起弃用 tauri-apps/tauri-action）**：曾用 `tauri-apps/tauri-action@v0`，但其 latest.json 自动生成有 bug —— 任一平台缺 `.sig` 就打印 "Signature not found, skipping upload" 并整体跳过 latest.json，导致应用内检查更新报 `error sending request for url`（latest.json 返回 404）。改用三段式：
-    1. `build`（matrix 3 平台：Windows x64、Linux x64/arm64）—— 先 `node scripts/prepare-tauri-sidecar.mjs [--target <triple>]`（含 browser-runtime 准备/占位 + backend externalBin），再原生 `tauri build`（**Windows 固定 `--bundles nsis`**；Linux `--bundles appimage,deb,rpm`），签名后收集 updater 产物到 `release-assets/`，缺 `.sig` fail。公开 workflow 不构建、不上传 macOS ad-hoc 包，`latest.json` 也不生成 darwin 平台条目。
+    1. `build`（matrix 4 平台：macOS arm64、Windows x64、Linux x64/arm64）—— 先 `node scripts/prepare-tauri-sidecar.mjs [--target <triple>]`（含 browser-runtime 准备/占位 + backend externalBin），再原生 `tauri build`（macOS arm64 使用 `macos-15` Runner + `aarch64-apple-darwin` ad-hoc 签名；**Windows 固定 `--bundles nsis`**；Linux `--bundles appimage,deb,rpm`），签名后收集 updater 产物和独立 CLI 到 `release-assets/`，缺 `.sig` fail。`workflow_dispatch` 可仅补发指定 tag 的 macOS arm64 资产。
     2. `publish-release`（needs: build）—— `actions/download-artifact` 合并所有平台产物，`softprops/action-gh-release@v2` 上传到 GitHub Release。
     3. `assemble-latest-json`（needs: publish-release）—— `gh release download` 拉所有 `.sig`，bash + jq 按文件名匹配平台生成 `latest.json`（`*_aarch64.app.tar.gz`→darwin-aarch64 等），单平台缺签名只跳过该平台不连坐，`gh release upload --clobber` 上传。
   - `bundle.createUpdaterArtifacts: true` —— tauri.conf.json 必须开启，否则 tauri build 不产出 `.sig`。
@@ -535,7 +535,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 ## 跨平台 Smoke（macOS / Windows）覆盖范围
 
-Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、doctor --json、日志轮转/脱敏、固定 LAN trust boundary 集成 smoke、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。公开 Windows/Linux Release 由 `release-tauri.yml` 负责，macOS 固定签名包由 `internal-macos.yml` 负责，二者都**不能替代本 smoke 或真机 TCC 验证**。
+Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、doctor --json、日志轮转/脱敏、固定 LAN trust boundary 集成 smoke、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。公开 macOS arm64/Windows/Linux Release 由 `release-tauri.yml` 负责，macOS 固定签名包由 `internal-macos.yml` 负责，二者都**不能替代本 smoke 或真机 TCC 验证**。
 
 ### 已验证（Verified）
 
@@ -564,7 +564,7 @@ Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runne
 | 多机 mDNS / 跨主机 P2P / 手机 QR | NOT VERIFIED — hosted runner scope |
 | 真实公网 peer 生产网卡路径 | NOT VERIFIED — injected ConnectInfo/XFF 不是生产证据 |
 | Browser L1 Playwright LAN journey | NOT VERIFIED in S1 — owned by S6 |
-| 发布安装包 | 公开 Windows/Linux 由 `release-tauri.yml`、macOS 固定签名包由 `internal-macos.yml` 负责，**不是**本 smoke 的替代 |
+| 发布安装包 | 公开 macOS arm64/Windows/Linux 由 `release-tauri.yml`、macOS 固定签名包由 `internal-macos.yml` 负责，**不是**本 smoke 的替代 |
 
 ### 本地运行
 
