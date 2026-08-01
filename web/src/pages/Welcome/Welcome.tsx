@@ -2,16 +2,16 @@
  * Welcome 欢迎/权限引导页
  *
  * Business Logic（为什么需要这个页面）:
- *   macOS 等系统要求桌面工具在首次使用前明确申请「屏幕录制 / 输入监控」等
+ *   macOS 等系统要求桌面工具在首次使用前明确申请「屏幕录制 / 辅助功能」等
  *   敏感权限，否则后续功能（截图、健康提醒）会静默失败。Welcome 页在路由层
  *   独立于 AppShell，给首次使用的用户「先授权再用」的引导。开发壳与发布版
  *   使用不同的 onboarding/skip localStorage key。
  *   首轮检查失败必须显示错误与重试，不得永久「检查中」。
  *
- *   macOS 对屏幕录制/辅助功能/输入监控：系统设置里打开开关后，**当前进程**的
+ *   macOS 对屏幕录制/辅助功能：系统设置里打开开关后，**当前进程**的
  *   检测 API 常仍返回未授权。产品目标是「用户在系统里授权后 Welcome 尽量同步
  *   显示已授权」——不自动 relaunch（避免闪白屏/反复重启）。从设置回前台后多轮
- *   recheck；若 sticky 三项仍未齐，进入 needs_reopen，由用户可选点击
+ *   recheck；若 sticky 两项仍未齐，进入 needs_reopen，由用户可选点击
  *   「重新打开应用」才调用 relaunchForPermissions。
  *
  * Code Logic（这个页面做什么）:
@@ -123,7 +123,7 @@ export function Welcome() {
     };
   }, []);
 
-  // 四项齐：相位回 idle
+  // 三项展示权限齐：相位回 idle
   useEffect(() => {
     if (allRequiredGranted) {
       dispatch({ type: 'ALL_REQUIRED_GRANTED' });
@@ -155,7 +155,6 @@ export function Welcome() {
     const deniedSlice = {
       screenCapture: { granted: false },
       accessibility: { granted: false },
-      inputMonitoring: { granted: false },
     };
     try {
       do {
@@ -186,7 +185,6 @@ export function Welcome() {
           lastDenied = {
             screenCapture: slice.screenCapture,
             accessibility: slice.accessibility,
-            inputMonitoring: slice.inputMonitoring,
           };
           if (i < SYNC_DELAYS_MS.length - 1) {
             dispatch({ type: 'SYNC_TICK', status: lastDenied });
@@ -325,7 +323,7 @@ export function Welcome() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   四项已齐时进入主界面，并记「已完成授权」而非「跳过」。
+   *   三项展示权限已齐时进入主界面，并记「已完成授权」而非「跳过」。
    *
    * Code Logic（这个函数做什么）:
    *   写 flavor 专属 onboarded，清 skipped，navigate /。

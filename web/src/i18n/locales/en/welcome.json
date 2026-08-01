@@ -19,12 +19,6 @@
       "title": "Accessibility",
       "description": "Health reminder reads the foreground app"
     },
-    "inputMonitoring": {
-      "title": "Input Monitoring",
-      "description": "Needed for health reminder keyboard activity. Request access to let macOS register the current app",
-      "deniedDescription": "If macOS did not register it: open System Settings, click + below the Input Monitoring list, select the current cc-partner app (cc-partner (Dev) for development), then enable the switch",
-      "unavailableDescription": "macOS cannot confirm Input Monitoring status right now, but you can still add the current app manually and grant access"
-    },
     "notification": {
       "title": "Notifications",
       "description": "Receive notifications like health reminders; if disabled, enable in System Settings → Notifications"

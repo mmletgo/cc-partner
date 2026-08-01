@@ -19,12 +19,6 @@
       "title": "辅助功能",
       "description": "健康提醒读取前台应用需要"
     },
-    "inputMonitoring": {
-      "title": "输入监控",
-      "description": "健康提醒检测键盘活动需要。点击请求授权后，macOS 会尝试登记当前应用",
-      "deniedDescription": "macOS 未自动登记时：打开系统设置，点输入监控列表下方的「+」，选择当前 cc-partner 应用（开发版为「cc-partner (Dev)」），再打开开关",
-      "unavailableDescription": "macOS 暂时无法确认输入监控状态，但仍可手动添加当前应用并授权"
-    },
     "notification": {
       "title": "通知",
       "description": "接收健康提醒等通知；如已关闭，可在「系统设置 → 通知」中开启"

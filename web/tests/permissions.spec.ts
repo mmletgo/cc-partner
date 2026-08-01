@@ -51,6 +51,7 @@ test.describe('E2E-PERM-001 Permissions journey', () => {
     await expect(page.getByText(/屏幕录制/)).toBeVisible({ timeout: 5_000 });
     await expect(page.getByRole('button', { name: '重新检查' })).toBeVisible();
     await expect(page.getByText(/检查权限失败：permission check failed/)).toHaveCount(0);
+    await expect(page.getByLabel('权限列表').getByText('输入监控', { exact: true })).toHaveCount(0);
     // 通知权限卡存在且「暂时跳过」仍可用（notification 探测失败不阻断）
     await expect(page.getByLabel('权限列表')).toBeVisible();
     await expect(page.getByLabel('权限列表').getByText('通知', { exact: true })).toBeVisible();

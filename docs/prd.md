@@ -263,7 +263,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 免打扰时段：可配置不弹通知的时间区间（支持跨午夜）
 - 手动控制：开关监测、暂停/恢复、贪睡、跳过
 - 开机自启：监测启用时注册系统开机自启（macOS LaunchAgent），禁用时移除
-- macOS 权限引导：首次启动引导 Accessibility / 屏幕录制 / 输入监控 / 通知；进入页面只查询，所有 Request、打开系统设置和重新打开应用都必须由用户逐项显式触发；首轮失败可「重新检查」
+- macOS 权限引导：首次启动引导 Accessibility / 屏幕录制 / 通知；输入监控没有独立消费者，不在欢迎页或设置页展示；进入页面只查询，所有 Request、打开系统设置和重新打开应用都必须由用户逐项显式触发；首轮失败可「重新检查」
 - 健康状态页使用可见性感知轮询（页面 hidden 暂停、visible 立即刷新、single-flight），刷新失败保留已有数据
 - 健康提醒页：以状态概览、今日活跃指标、app 使用时长排行图表和 24 小时活跃分布图表展示监控控制台，头部配置入口跳转设置页健康提醒 tab
 - 设置页健康提醒 tab：以「健康提醒 / 免打扰 / 通知与隐私」三个分栏目 Card 展示配置表单
@@ -305,7 +305,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - Settings 资源按组隔离加载：单组失败不得整页失败；失败组展示错误与重试，已成功组继续可用；恢复默认在 defaults 不可用时禁用并提示
 - 常规设置保存失败必须保留脏表单与 isDirty，展示保存错误与重试；不得把 save reject 提升为整页 loadError 卸掉草稿
 - 依赖环境页签展示 macOS 权限管理、Workbench tmux dependency manager 状态和局域网互联依赖；Workbench 依赖支持检测、查看后端/版本/路径、查看安装命令预览、触发安装、取消安装和重新检测；局域网互联依赖展示访问项目所需的实际 P2P HTTP TCP 端口、mDNS UDP 5353、局域网 IP、当前系统平台、端口是否已开放和对应打开方法。应用只读检测系统防火墙状态，不自动修改防火墙；无法读取到明确放行规则时按未开放显示；移动端 Workbench 的局域网访问链接与二维码由全局侧栏左下角手机按钮弹层展示
-- macOS 权限引导与设置页共用 `usePermissions`：首轮检查失败结束 loading 并显示错误 +「重新检查」；刷新失败保留 stale 状态；Request 与 Open Settings 是独立动作。输入监控精确呈现 `granted / denied / notDetermined / unavailable`，固定签名与 ad-hoc `.app` 共用公开 IOHID + CoreGraphics ListenEvent 状态机：CoreGraphics 预检修正 macOS 26 的 IOHID 假 Denied，显式 Request 依次调用 CG 与 IOHID 两条公开 ListenEvent API；当前进程尚未请求时的假 Denied 呈现为 notDetermined，真正请求后仍未授权才呈现 denied。`denied` 或未知 `unavailable` 都提供系统设置入口，指引用户点输入监控列表下方「+」选择当前 `.app` 再打开开关；开发壳由 `start.sh` 统一组装到 `~/Applications/cc-partner (Dev).app`。固定签名只改善升级保权，ad-hoc 重建后可能需要重新添加；禁止私有 TCC、产品内系统 reset、持久 pending marker、运行时重签和自动重启
+- macOS 权限引导与设置页共用 `usePermissions`：首轮检查失败结束 loading 并显示错误 +「重新检查」；刷新失败保留 stale 状态；Request 与 Open Settings 是独立动作。产品只展示屏幕录制、辅助功能和通知，完成条件不包含输入监控；后端继续保留输入监控四态 DTO 与公开探测接口用于协议兼容和诊断，但前端不提供请求或设置入口。开发壳由 `start.sh` 统一组装到 `~/Applications/cc-partner (Dev).app`；禁止私有 TCC、产品内系统 reset、持久 pending marker、运行时重签和自动重启
 - 常规 / 同步 / AI 页签的恢复默认按钮始终可点击；常规恢复为后端按当前设备环境生成的默认设备名、默认接收目录和平台默认截图快捷键，同步和 AI 分别恢复为后端定义的云端同步默认配置与 Claude CLI/AI 默认配置
 - 同步、AI 和关于页签分别管理云端同步、Claude CLI/AI 能力和应用更新；AI 页签中的 CLI 路径与模型供 GitHub 项目解说和 Prompt 优化共用，启用开关与缓存时长仅作用于 GitHub 项目解说；AI 页签同时管理 Workbench Prompt 优化浮层快捷键与自动填入语言，默认轻按 Control、默认填入中文优化版；同步和 AI 的恢复默认只重置表单，仍需用户点击“应用配置”持久化
 - 同步 tab 局域网卡片展示每设备/领域的 `succeeded` / `partial` / `unreachable` / `protocol` / `resource-limit` 与 pulled/pushed/unchanged；仅全成功设备计入成功计数

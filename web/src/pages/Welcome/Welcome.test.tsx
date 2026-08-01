@@ -26,9 +26,9 @@ import {
 import { POST_SETTINGS_SYNC_SCHEDULE_MS, SYNC_DELAYS_MS } from './welcomePermissionFlow';
 
 const requestMock = vi.fn(async () => ({
-  permission: 'inputMonitoring',
+  permission: 'screenCapture',
   operation: 'request' as const,
-  before: 'notDetermined',
+  before: 'denied',
   after: 'denied',
 }));
 const openSettingsMock = vi.fn(async () => ({
@@ -57,8 +57,6 @@ vi.mock('@/api/config', () => ({
   },
 }));
 
-let inputMonitoringState: 'granted' | 'denied' | 'notDetermined' | 'unavailable' = 'denied';
-
 vi.mock('@/hooks/usePermissions', async () => {
   const actual = await vi.importActual<typeof import('@/hooks/usePermissions')>(
     '@/hooks/usePermissions',
@@ -69,10 +67,7 @@ vi.mock('@/hooks/usePermissions', async () => {
       status: {
         screenCapture: { granted: false },
         accessibility: { granted: false },
-        inputMonitoring: {
-          granted: inputMonitoringState === 'granted',
-          state: inputMonitoringState,
-        },
+        inputMonitoring: { granted: false, state: 'denied' as const },
         notification: { granted: false },
       },
       loading: false,
@@ -163,7 +158,6 @@ describe('Welcome', () => {
     relaunchMock.mockClear();
     permissionsMock.mockClear();
     permissionsMock.mockResolvedValue({ ...DENIED_PERMISSIONS });
-    inputMonitoringState = 'denied';
   });
 
   afterEach(() => {
@@ -188,8 +182,7 @@ describe('Welcome', () => {
     expect(localStorage.getItem(PERMISSION_ONBOARDED_KEY)).toBeNull();
   });
 
-  test('input monitoring notDetermined requests without opening settings', async () => {
-    inputMonitoringState = 'notDetermined';
+  test('does not render input monitoring permission interaction', async () => {
     await i18n.changeLanguage('zh');
     render(
       <I18nextProvider i18n={i18n}>
@@ -199,56 +192,10 @@ describe('Welcome', () => {
       </I18nextProvider>,
     );
 
-    const card = screen.getByText('输入监控').closest('[data-granted]');
-    expect(card).not.toBeNull();
-    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '请求授权' }));
-
-    await act(async () => Promise.resolve());
-    expect(requestMock).toHaveBeenCalledWith('inputMonitoring');
-    expect(openSettingsMock).not.toHaveBeenCalled();
-  });
-
-  test('input monitoring denied opens settings without requesting', async () => {
-    inputMonitoringState = 'denied';
-    await i18n.changeLanguage('zh');
-    render(
-      <I18nextProvider i18n={i18n}>
-        <MemoryRouter>
-          <Welcome />
-        </MemoryRouter>
-      </I18nextProvider>,
-    );
-
-    const card = screen.getByText('输入监控').closest('[data-granted]');
-    expect(card).not.toBeNull();
-    expect(card?.textContent).toContain('点输入监控列表下方的「+」');
-    fireEvent.click(
-      within(card as HTMLElement).getByRole('button', { name: '在系统设置中添加' }),
-    );
-
-    await act(async () => Promise.resolve());
-    expect(openSettingsMock).toHaveBeenCalledWith('inputMonitoring');
-    expect(requestMock).not.toHaveBeenCalled();
-  });
-
-  test('input monitoring unavailable still offers manual System Settings setup', async () => {
-    inputMonitoringState = 'unavailable';
-    await i18n.changeLanguage('zh');
-    render(
-      <I18nextProvider i18n={i18n}>
-        <MemoryRouter>
-          <Welcome />
-        </MemoryRouter>
-      </I18nextProvider>,
-    );
-
-    const card = screen.getByText('输入监控').closest('[data-granted]');
-    expect(card).not.toBeNull();
-    expect(card?.textContent).toContain('仍可手动添加当前应用');
-    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '打开系统设置' }));
-
-    expect(requestMock).not.toHaveBeenCalled();
-    expect(openSettingsMock).toHaveBeenCalledWith('inputMonitoring');
+    expect(screen.queryByText('输入监控')).toBeNull();
+    expect(screen.getByText('屏幕录制')).toBeTruthy();
+    expect(screen.getByText('辅助功能')).toBeTruthy();
+    expect(screen.getByText('通知')).toBeTruthy();
   });
 
   test('go settings + scheduled sync never auto-relaunches; reopen button relaunches once', async () => {
@@ -267,16 +214,16 @@ describe('Welcome', () => {
       await Promise.resolve();
     });
 
-    const inputCard = screen.getByText('输入监控').closest('[data-granted]');
+    const screenCaptureCard = screen.getByText('屏幕录制').closest('[data-granted]');
     fireEvent.click(
-      within(inputCard as HTMLElement).getByRole('button', { name: '在系统设置中添加' }),
+      within(screenCaptureCard as HTMLElement).getByRole('button', { name: '请求授权' }),
     );
 
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(openSettingsMock).toHaveBeenCalled();
+    expect(requestMock).toHaveBeenCalledWith('screenCapture');
     expect(relaunchMock).not.toHaveBeenCalled();
 
     // 不依赖 visibility：POST_SETTINGS 调度即可耗尽到 needs_reopen
@@ -335,9 +282,9 @@ describe('Welcome', () => {
       await Promise.resolve();
     });
 
-    const inputCard = screen.getByText('输入监控').closest('[data-granted]');
+    const screenCaptureCard = screen.getByText('屏幕录制').closest('[data-granted]');
     fireEvent.click(
-      within(inputCard as HTMLElement).getByRole('button', { name: '在系统设置中添加' }),
+      within(screenCaptureCard as HTMLElement).getByRole('button', { name: '请求授权' }),
     );
     await act(async () => {
       await Promise.resolve();

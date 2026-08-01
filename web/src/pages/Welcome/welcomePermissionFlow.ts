@@ -8,12 +8,11 @@
 
 export type WelcomePermPhase = 'idle' | 'awaiting' | 'syncing' | 'needs_reopen';
 
-export type StickyPermission = 'screenCapture' | 'accessibility' | 'inputMonitoring';
+export type StickyPermission = 'screenCapture' | 'accessibility';
 
 export const STICKY_PERMISSIONS: ReadonlySet<string> = new Set([
   'screenCapture',
   'accessibility',
-  'inputMonitoring',
 ]);
 
 /** 回前台 / 去设置后多轮 recheck 间隔（可测）。 */
@@ -29,7 +28,6 @@ export const POST_SETTINGS_SYNC_SCHEDULE_MS: readonly number[] = [500, 3000, 700
 export type StickyStatusSlice = {
   screenCapture: { granted: boolean };
   accessibility: { granted: boolean };
-  inputMonitoring: { granted: boolean };
 };
 
 export type WelcomePermEvent =
@@ -48,9 +46,7 @@ export function isStickyPermission(type: string): boolean {
 
 export function hasStickyDenied(status: StickyStatusSlice): boolean {
   return (
-    !status.screenCapture.granted ||
-    !status.accessibility.granted ||
-    !status.inputMonitoring.granted
+    !status.screenCapture.granted || !status.accessibility.granted
   );
 }
 

@@ -116,7 +116,7 @@ export function useSettingsUpdatePermissions(): UseSettingsUpdatePermissionsResu
    * Code Logic（这个函数做什么）:
    *   调用 requestPermissionItem(type)，吞掉 rejection（error 已由 hook 写入）。
    *
-   * @param type 权限类型 screenCapture / accessibility / inputMonitoring / notification
+   * @param type 权限类型 screenCapture / accessibility / notification
    */
   const handleRequestAccess = useCallback(
     (type: PermissionType, action: PermissionEntryAction = 'request') => {

@@ -3,16 +3,16 @@
  *
  * Business Logic（为什么需要这个 hook）:
  *   Welcome 引导页、设置页权限管理与侧栏授权徽标都需要：持续获取屏幕录制/辅助功能/
- *   输入监控/通知权限状态，并在用户点击对应动作时分别 Request 或打开设置。首轮失败必须结束
+ *   通知权限状态，并在用户点击对应动作时分别 Request 或打开设置。首轮失败必须结束
  *   loading 并给出可重试错误，避免永久「检查中」；刷新失败保留旧状态。
  *
  * Code Logic（这个 hook 做什么）:
  *   - 基于 useVisibilityPolling 每 2s 拉取 configApi.permissions（四项含真实通知状态）；
  *     页面隐藏暂停，恢复可见立即刷新，single-flight 防重叠
- *   - stopWhenGranted=true 时，required 四项全部授权后停止轮询（Welcome 用）
+ *   - stopWhenGranted=true 时，产品展示的三项权限全部授权后停止轮询（Welcome 用）
  *   - loading 仅表示从未拿到过首轮结果；refreshing 表示已有状态的后台刷新
  *   - request(type) 只在用户点击时请求，同 type 并发合并；**禁止**挂载时自动 request
- *   - allRequiredGranted / allGranted 看 screenCapture/accessibility/inputMonitoring/notification
+ *   - allRequiredGranted / allGranted 看 screenCapture/accessibility/notification
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -69,17 +69,16 @@ function toErrorMessage(err: unknown): string {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   引导完成条件要求四项权限均已授权：三项 TCC + 通知（健康提醒等依赖通知）。
+ *   引导完成条件只包含产品实际展示的屏幕录制、辅助功能与通知。
  *
  * Code Logic（这个函数做什么）:
- *   当 status 存在且四项 granted 均为 true 时返回 true。
+ *   当 status 存在且三项 granted 均为 true 时返回 true；输入监控字段仅作后端协议兼容。
  */
 function isRequiredGranted(status: PermissionsStatus | null): boolean {
   return (
     !!status &&
     status.screenCapture.granted &&
     status.accessibility.granted &&
-    status.inputMonitoring.granted &&
     status.notification.granted
   );
 }
@@ -95,11 +94,11 @@ export interface UsePermissionsResult {
   /** 正在请求中的权限类型集合 */
   requesting: ReadonlySet<PermissionType>;
   /**
-   * 四项引导权限是否已全部授权（与 allRequiredGranted 同义，保留兼容徽标/旧调用方）。
+   * 三项引导权限是否已全部授权（与 allRequiredGranted 同义，保留兼容徽标/旧调用方）。
    * 含 notification。
    */
   allGranted: boolean;
-  /** 四项引导权限是否已全部授权（TCC 三项 + notification） */
+  /** 三项引导权限是否已全部授权（屏幕录制 + 辅助功能 + 通知） */
   allRequiredGranted: boolean;
   /**
    * 请求单项权限；同 type 并发调用复用同一 Promise。
@@ -207,10 +206,10 @@ export function usePermissions(
    * Business Logic（为什么需要这个函数）:
    *   用户对单项权限点“请求授权”时，只应触发公开 Request，且重复点击不得并行弹多次。
    *   进入 Welcome **不得**自动调用（辅助功能等禁止自动弹系统框）。
-   *   输入监控 Denied 必须走独立 openSettings；这里不得重置 TCC、打开设置或重启。
+   *   这里不得重置 TCC、打开设置或重启。
    *
    * Code Logic（这个函数做什么）:
-   *   同 type 返回 in-flight Promise；四项均走 requestPermission（含 notification）；
+   *   同 type 返回 in-flight Promise；展示权限均走 requestPermission（含 notification）；
    *   结束后 runNow 刷新；请求失败写 error 并 rethrow；成功返回 PermissionActionResult。
    */
   const request = useCallback(

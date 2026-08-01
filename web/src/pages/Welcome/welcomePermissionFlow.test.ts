@@ -10,12 +10,10 @@ import {
 const denied = {
   screenCapture: { granted: false },
   accessibility: { granted: false },
-  inputMonitoring: { granted: false },
 };
 const stickyOk = {
   screenCapture: { granted: true },
   accessibility: { granted: true },
-  inputMonitoring: { granted: true },
 };
 
 describe('welcomePermissionFlow', () => {
@@ -26,7 +24,7 @@ describe('welcomePermissionFlow', () => {
 
   test('GO_SETTINGS on sticky moves idle -> awaiting', () => {
     expect(
-      reduceWelcomePermPhase('idle', { type: 'GO_SETTINGS', permission: 'inputMonitoring' }),
+      reduceWelcomePermPhase('idle', { type: 'GO_SETTINGS', permission: 'accessibility' }),
     ).toBe('awaiting');
   });
 

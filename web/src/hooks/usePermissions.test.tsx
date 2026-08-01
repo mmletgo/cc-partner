@@ -283,12 +283,12 @@ describe('usePermissions', () => {
     expect(result.current.requesting.has('inputMonitoring')).toBe(false);
   });
 
-  test('allRequiredGranted includes notification', async () => {
+  test('allRequiredGranted includes notification but excludes input monitoring', async () => {
     permissionsMock.mockResolvedValue(
       buildStatus({
         screenCapture: true,
         accessibility: true,
-        inputMonitoring: true,
+        inputMonitoring: false,
         notification: false,
       }),
     );
@@ -304,7 +304,7 @@ describe('usePermissions', () => {
       buildStatus({
         screenCapture: true,
         accessibility: true,
-        inputMonitoring: true,
+        inputMonitoring: false,
         notification: true,
       }),
     );
@@ -349,7 +349,7 @@ describe('usePermissions', () => {
       buildStatus({
         screenCapture: true,
         accessibility: true,
-        inputMonitoring: true,
+        inputMonitoring: false,
         notification: true,
       }),
     );
