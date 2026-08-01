@@ -160,6 +160,13 @@
       "targetOnly": "targetOnly"
     }
   },
+  "documentEditor": {
+    "title": "Full document",
+    "hint": "Edit the full instruction document. Saving rewrites every block and target projection.",
+    "ariaLabel": "Instruction document editor",
+    "save": "Save document",
+    "unsaved": "Unsaved changes"
+  },
   "errors": {
     "projectIdRequired": "Project id is required.",
     "assetRequired": "Select an asset first."
