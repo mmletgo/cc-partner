@@ -353,6 +353,11 @@ jobs:
 
             已安装旧版本的用户，应用内会自动检查更新（读取本 Release 的 `latest.json`）。
             macOS 与 Windows 支持应用内自动更新；Linux 需手动下载新版本安装包覆盖。
+
+            ### 独立 CLI
+
+            自动化或无头环境可下载 `cc-partner-cli-macos-aarch64`、
+            `cc-partner-cli-windows-x86_64.exe` 或对应架构的 Linux CLI。
           files: release-assets/*
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -415,7 +420,9 @@ jobs:
             url="$base_url/$fname"
             sig_content=$(cat "$sig")
             case "$fname" in
-              *_aarch64.app.tar.gz)
+              # 原生 arm64 Runner 当前产出 cc-partner.app.tar.gz；显式 target/旧版 Tauri
+              # 也可能带 _aarch64，二者都属于唯一公开的 darwin-aarch64 矩阵。
+              *_aarch64.app.tar.gz|*.app.tar.gz)
                 mac_arm64_url="$url"; mac_arm64_sig="$sig_content";;
               *_x64-setup.exe)
                 win_x64_url="$url"; win_x64_sig="$sig_content";;
@@ -425,6 +432,11 @@ jobs:
                 linux_arm64_url="$url"; linux_arm64_sig="$sig_content";;
             esac
           done
+
+          if [ -z "$mac_arm64_url" ] || [ -z "$mac_arm64_sig" ]; then
+            echo "❌ 稳定 Release 缺少 macOS arm64 updater 产物或签名" >&2
+            exit 1
+          fi
 
           # 用 jq 构造公开 platforms 对象；仅收录本次 Release 实际存在的签名产物。
           # （jq 的 empty 在对象字面量里会吞掉整个对象，不能用 if-then-empty 写法）
