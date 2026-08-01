@@ -501,6 +501,164 @@ describe('workbenchTerminalBuffer', () => {
   });
 });
 
+describe('workbenchTerminalBuffer store — scrollback-aware reset', () => {
+  /**
+   * Business Logic（为什么需要这个用例）:
+   *   远端终端同 authority Gap resync 时，新快照通常是 xterm 已显示内容的滑动延续 + 新尾部。
+   *   reset 必须保 xterm scrollback：不抬 generation、不发 reset 通知，只把差异尾部作为 live delta 投递。
+   */
+  test('same-authority overlapping snapshot appends diff as live delta without reset/clear', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: string[] = [];
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeReset('s1', () => resets.push('s1'));
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+
+    // 首次 baseline（prev 为空 + 绑定 authority）必须 destructive。
+    store.reset('s1', 'aaaaXYZ', 5, 'owner-1');
+    expect(resets).toHaveLength(1);
+    expect(store.getSnapshot('s1').cursor.generation).toBe(1);
+    expect(store.getBuffer('s1')).toBe('aaaaXYZ');
+    resets.length = 0;
+    deltas.length = 0;
+
+    // 同 authority resync：快照 = 重叠前缀 'XYZ' + 新尾部 'bbb'。
+    store.reset('s1', 'XYZbbb', 9, 'owner-1');
+
+    // ADDITIVE：不抬 generation、不通知 reset。
+    expect(resets).toHaveLength(0);
+    expect(store.getSnapshot('s1').cursor.generation).toBe(1);
+    expect(store.getLastSeq('s1')).toBe(9);
+    // 只投递一条 live delta，内容是新尾部 'bbb'（xterm 据此 append，旧 scrollback 'aaaa' 保留）。
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]?.chunk).toBe('bbb');
+    expect(deltas[0]?.generation).toBe(1);
+    expect(deltas[0]?.lastSeq).toBe(9);
+    expect(store.getBuffer('s1')).toBe('XYZbbb');
+  });
+
+  /**
+   * Business Logic（为什么需要这个用例）:
+   *   resync 快照与当前 buffer 完全一致时（无新输出），reset 不得清屏也不得发空 delta。
+   */
+  test('same-authority identical snapshot is a no-op (no reset, no delta)', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: string[] = [];
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeReset('s1', () => resets.push('s1'));
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+
+    store.reset('s1', 'same-content', 5, 'owner-1');
+    resets.length = 0;
+    deltas.length = 0;
+
+    store.reset('s1', 'same-content', 5, 'owner-1');
+
+    expect(resets).toHaveLength(0);
+    expect(deltas).toHaveLength(0);
+    expect(store.getSnapshot('s1').cursor.generation).toBe(1);
+    expect(store.getBuffer('s1')).toBe('same-content');
+  });
+
+  /**
+   * Business Logic（为什么需要这个用例）:
+   *   owner 切换代表全新 stream，必须 destructive clear+replay，不得用旧 stream 的 scrollback 拼接。
+   */
+  test('authority change is destructive even when buffers overlap', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: string[] = [];
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeReset('s1', () => resets.push('s1'));
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+
+    store.reset('s1', 'aaaaXYZ', 5, 'owner-1');
+    resets.length = 0;
+    deltas.length = 0;
+
+    store.reset('s1', 'XYZbbb', 9, 'owner-2');
+
+    expect(resets).toHaveLength(1);
+    expect(store.getSnapshot('s1').cursor.generation).toBe(2);
+    expect(store.getBuffer('s1')).toBe('XYZbbb');
+  });
+
+  /**
+   * Business Logic（为什么需要这个用例）:
+   *   快照与当前 buffer 完全无法对齐时，只能 clear + replay，与旧行为一致。
+   */
+  test('non-overlapping same-authority snapshot is destructive', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: string[] = [];
+    store.subscribeReset('s1', () => resets.push('s1'));
+
+    store.reset('s1', 'aaaaXYZ', 5, 'owner-1');
+    resets.length = 0;
+
+    store.reset('s1', 'QQQQQQ', 9, 'owner-1');
+
+    expect(resets).toHaveLength(1);
+    expect(store.getSnapshot('s1').cursor.generation).toBe(2);
+    expect(store.getBuffer('s1')).toBe('QQQQQQ');
+  });
+
+  /**
+   * Business Logic（为什么需要这个用例）:
+   *   首次 baseline（session 尚无内容）必须 destructive，且不得伪造 live delta，
+   *   否则既有 lastSeq cutover 用例（订阅后断言 deltas 为空）会被破坏。
+   */
+  test('empty previous buffer (first baseline) is destructive with no spurious live delta', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: string[] = [];
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeReset('s1', () => resets.push('s1'));
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+
+    store.reset('s1', 'BASE', 5);
+
+    expect(resets).toHaveLength(1);
+    expect(deltas).toHaveLength(0);
+    expect(store.getBuffer('s1')).toBe('BASE');
+    expect(store.getLastSeq('s1')).toBe(5);
+  });
+
+  /**
+   * Business Logic（为什么需要这个用例）:
+   *   显式清屏（resetBuffer / 新 window）传入空 buffer，必须 destructive 清屏，不得保 scrollback。
+   */
+  test('empty buffer reset (resetBuffer) is destructive', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: string[] = [];
+    store.subscribeReset('s1', () => resets.push('s1'));
+
+    store.reset('s1', 'aaaaXYZ', 5, 'owner-1');
+    resets.length = 0;
+
+    store.reset('s1');
+
+    expect(resets).toHaveLength(1);
+    expect(store.getBuffer('s1')).toBe('');
+    expect(store.getSnapshot('s1').cursor.generation).toBe(2);
+  });
+});
+
 describe('applyTerminalBaselineCutover', () => {
   test('stale baseline lastSeq=N-1 re-applies held live seq=N after reset', () => {
     const frames = createCollectingFrameScheduler();
@@ -575,6 +733,42 @@ describe('applyTerminalBaselineCutover', () => {
     expect(store.getBuffer('s1')).toBe('BASE');
     expect(store.getLastSeq('s1')).toBe(5);
     expect(pruned).toEqual([]);
+  });
+
+  test('same-authority overlapping snapshot preserves scrollback-equivalent state and re-appends held', () => {
+    const frames = createCollectingFrameScheduler();
+    const store = createWorkbenchTerminalBufferStore({
+      frameScheduler: frames.scheduler,
+    });
+    const resets: string[] = [];
+    const deltas: TerminalBufferDelta[] = [];
+    store.subscribeReset('s1', () => resets.push('s1'));
+    store.subscribeLive('s1', (delta) => deltas.push(delta));
+
+    // 绑定 authority 并建立既有屏幕态。
+    store.reset('s1', 'aaaaXYZ', 5, 'owner-1');
+    resets.length = 0;
+    deltas.length = 0;
+
+    const held: HeldLiveTerminalEvent[] = [{ chunk: 'liveZ', seq: 11 }];
+
+    // 同 authority resync：快照 = 重叠前缀 'XYZ' + 新尾部 'bbb'；authorityChanged=false。
+    const pruned = applyTerminalBaselineCutover(
+      store,
+      's1',
+      'XYZbbb',
+      9,
+      held,
+      'owner-1',
+      false,
+    );
+
+    // 保 scrollback：无 reset 通知；快照差异 'bbb' 与 held 'liveZ' 各作为 live delta 投递。
+    expect(resets).toHaveLength(0);
+    expect(deltas.map((delta) => delta.chunk)).toEqual(['bbb', 'liveZ']);
+    expect(store.getBuffer('s1')).toBe('XYZbbbliveZ');
+    expect(store.getLastSeq('s1')).toBe(11);
+    expect(pruned).toEqual([{ chunk: 'liveZ', seq: 11 }]);
   });
 });
 

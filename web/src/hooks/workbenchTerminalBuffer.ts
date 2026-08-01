@@ -1,3 +1,5 @@
+import { planTerminalBufferWrite } from '@/lib/terminalBufferDiff';
+
 export type WorkbenchTerminalBuffers = Record<string, string>;
 
 export const MAX_WORKBENCH_TERMINAL_BUFFER_CHARS = 200_000;
@@ -1227,11 +1229,45 @@ export function createWorkbenchTerminalBufferStore(
     reset(sessionId, buffer = '', lastSeq = 0, authorityId) {
       const session = ensureSession(sessionId);
       cancelScheduledFrame(session);
+      const hasAuthorityArg = typeof authorityId === 'string' && authorityId.length > 0;
+      // Business Logic: owner 切换代表全新 stream，必须 clear+replay，不得用旧 stream scrollback 拼接。
+      const authorityChanged = hasAuthorityArg && session.authorityId !== authorityId;
+      const resolvedLastSeq =
+        typeof lastSeq === 'number' && Number.isFinite(lastSeq) && lastSeq > 0 ? lastSeq : 0;
+
+      // Business Logic: 同 authority 的 resync（远端 Gap 重基线）通常只是「当前屏幕态的滑动延续 + 新尾部」。
+      // 此时 clear() 会摧毁 xterm scrollback（xterm v6 clear 仅保留光标行），改为把差异尾部作为 live delta
+      // 追加，live writer 不 clear，旧 scrollback 保留。仅在 authority 变更/无法对齐/首次 baseline/显式清屏时回退 destructive。
+      if (!authorityChanged) {
+        const previousBuffer = materializeSessionBuffer(session, onMaterializeForTest);
+        const plan = planTerminalBufferWrite(previousBuffer, buffer);
+        if (previousBuffer.length > 0 && plan.mode !== 'replay') {
+          seedSessionBuffer(session, buffer);
+          session.lastSeq = resolvedLastSeq;
+          if (hasAuthorityArg) {
+            session.authorityId = authorityId;
+          }
+          // ADDITIVE：保持 generation 不变，不发 reset 通知；只投递差异尾部 live delta。
+          if (plan.data.length > 0) {
+            session.appendId += 1;
+            notifyLive(sessionId, {
+              sessionId,
+              chunk: plan.data,
+              generation: session.generation,
+              appendId: session.appendId,
+              lastSeq: session.lastSeq,
+            });
+          }
+          scheduleNotify(sessionId, session);
+          return;
+        }
+      }
+
+      // DESTRUCTIVE：authority 变更 / 无重叠 / 首次 baseline / 显式清屏 —— 与旧行为一致。
       session.generation += 1;
       session.appendId = 0;
-      session.lastSeq =
-        typeof lastSeq === 'number' && Number.isFinite(lastSeq) && lastSeq > 0 ? lastSeq : 0;
-      if (typeof authorityId === 'string' && authorityId.length > 0) {
+      session.lastSeq = resolvedLastSeq;
+      if (hasAuthorityArg) {
         session.authorityId = authorityId;
       }
       seedSessionBuffer(session, buffer);
