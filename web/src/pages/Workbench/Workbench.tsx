@@ -131,7 +131,8 @@ export function Workbench() {
   // 仍由 Workbench.tsx 持有；文件域 controller 通过 requestWorkspaceView / requestHideAutomationConsole 回调表达意图。
   const [workspaceView, setWorkspaceView] = useState<WorkbenchFileWorkspaceView>('terminal');
   const [automationConsoleOpen, setAutomationConsoleOpen] = useState<boolean>(false);
-  const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('files');
+  // Business Logic: 右侧栏默认 Git 历史（用户偏好）；持久化 layout 恢复仍优先生效，无记录时才落到此默认。
+  const [inspectorTab, setInspectorTab] = useState<WorkbenchInspectorTab>('history');
   // Business Logic: workspace layout autosave 需要真实 browser target；由 BrowserWorkspace 回写。
   const [browserTargetUrl, setBrowserTargetUrl] = useState<string | null>(null);
   const activeProjectIdRef = useRef<string | null>(null);

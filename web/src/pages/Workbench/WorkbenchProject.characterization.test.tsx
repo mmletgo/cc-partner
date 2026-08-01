@@ -9,7 +9,7 @@
  * disabled 状态、invoke 调用日志，避免触碰实现细节。
  */
 import { describe, expect, test } from 'vitest';
-import { fireEvent, screen } from '@testing-library/react';
+import { screen } from '@testing-library/react';
 
 import {
   buildDependencyContextValue,
@@ -22,6 +22,7 @@ import {
   flushMacrotasks,
   invokeCallsFor,
   renderWorkbench,
+  selectInspectorTab,
   setInvokeHandler,
 } from './testing/workbenchTestHarness';
 import type { WorkbenchWorktree } from '@/lib/types';
@@ -363,8 +364,11 @@ describe('Workbench project domain (characterization)', () => {
     expect(createButton.hasAttribute('disabled')).toBe(true);
 
     // 恢复在线：让后续请求成功，并触发一次远端读命令（Git 历史 tab → list_workbench_git_commits）。
+    // 默认 inspector tab 已是 Git 历史，直接点同 tab 不会触发 loadGitHistory 重载；
+    // 先切到 files 再切回 history，使 inspectorTab 真正变化以重新触发远端 git 读。
     offline = false;
-    fireEvent.click(screen.getByRole('tab', { name: 'Git 历史' }));
+    await selectInspectorTab('files');
+    await selectInspectorTab('history');
     await settle();
 
     // 离线提示消失，写操作恢复可用。

@@ -20,6 +20,7 @@ import {
   createDeferred,
   flushMacrotasks,
   renderWorkbench,
+  selectInspectorTab,
   setInvokeHandler,
   waitFor,
   waitForInvoke,
@@ -93,6 +94,8 @@ describe('Workbench files domain (characterization)', () => {
       buildDependencyContextValue(),
     );
     await waitForInvoke('list_workbench_dir');
+    // inspector 默认 tab 为 Git 历史；文件域测试显式切回 files tab 再驱动文件树/工具条 UI。
+    await selectInspectorTab('files');
 
     // 点击“刷新文件”触发第二次 root 请求（立即返回 freshNodes）。
     fireEvent.click(screen.getByRole('button', { name: '刷新文件' }));
@@ -150,6 +153,8 @@ describe('Workbench files domain (characterization)', () => {
       buildDependencyContextValue(),
     );
     await waitForInvoke('list_workbench_dir');
+    // inspector 默认 tab 为 Git 历史；文件域测试显式切回 files tab 再驱动文件树/工具条 UI。
+    await selectInspectorTab('files');
     // 等待文件树渲染出 README.md 节点。
     await waitFor(() => {
       const treeButton = screen.queryAllByRole('button', { name: 'README.md' });
@@ -216,6 +221,8 @@ describe('Workbench files domain (characterization)', () => {
       buildDependencyContextValue(),
     );
     await waitForInvoke('list_workbench_dir');
+    // inspector 默认 tab 为 Git 历史；文件域测试显式切回 files tab 再驱动文件树/工具条 UI。
+    await selectInspectorTab('files');
     await waitFor(() => {
       if (screen.queryAllByRole('button', { name: 'a.txt' }).length === 0) {
         throw new Error('a.txt not rendered');
@@ -271,6 +278,8 @@ describe('Workbench files domain (characterization)', () => {
       buildDependencyContextValue(),
     );
     await waitForInvoke('list_workbench_dir');
+    // inspector 默认 tab 为 Git 历史；文件域测试显式切回 files tab 再驱动文件树/工具条 UI。
+    await selectInspectorTab('files');
     await waitFor(() => {
       if (screen.queryAllByRole('button', { name: 'README.md' }).length === 0) {
         throw new Error('README.md not rendered');

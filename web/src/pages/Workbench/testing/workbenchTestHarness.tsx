@@ -737,6 +737,26 @@ export function workbenchEventListenerCount(event: string): number {
   return workbenchTestState.eventListeners.get(event)?.size ?? 0;
 }
 
+/**
+ * 点击 inspector tab 切换到 files / history。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   inspector 默认 tab 是产品决策（当前默认 Git 历史），不应被领域 characterization 测试隐式锁定。
+ *   文件域、dirty file tab 等测试显式切到所需 tab，避免默认值变更波及领域行为断言。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 WorkbenchInspector 暴露的稳定 button id（workbench-inspector-tab-<tab>）点击对应 tab。
+ */
+export async function selectInspectorTab(tab: 'files' | 'history'): Promise<void> {
+  await act(async () => {
+    const el = document.getElementById(`workbench-inspector-tab-${tab}`);
+    if (!el) {
+      throw new Error(`inspector tab "${tab}" button not found`);
+    }
+    fireEvent.click(el);
+  });
+}
+
 /* ---------------------------------------------------------------------------
  * Project / dependency context stubs
  * ------------------------------------------------------------------------- */

@@ -11,6 +11,7 @@ use crate::backend::control_client::MutationControlError;
 use crate::error::{AppError, AppErrorCategory};
 use crate::models::device::Device;
 use crate::state::AppState;
+use super::git::path_exists_nofollow;
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchGitStatusDto, WorkbenchPathInfo, WorkbenchProjectDto,
     WorkbenchProjectRow, WorkbenchSessionDto, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
@@ -379,10 +380,16 @@ pub(crate) fn discovered_git_worktree_row(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     项目载入时应把 Git 已知 worktree 同步进工作台元数据，避免只显示主工作区。
+///     项目载入时应把 Git 已知 worktree 同步进工作台元数据，避免只显示主工作区；
+///     同时清理由外部（AI `rm -rf` / `git worktree remove` 等）删除后残留的孤儿 row，
+///     否则 Workbench 会继续展示已不存在的 worktree，并在后续 git/fs 操作上报
+///     `No such file or directory (os error 2)`。
 ///
 /// Code Logic（这个函数做什么）:
-///     调用 `git worktree list --porcelain`，对非主 worktree 按 path 复用/新增 row 并 upsert。
+///     1) `git worktree list --porcelain` 取 Git 已知 worktree；
+///     2) 先删除非主且磁盘路径已不存在的既有 row（含其下 terminal session 元数据）；
+///     3) 再 upsert 磁盘上确实存在的发现项（rm -rf 后 porcelain 可能仍列出 prunable
+///        worktree，必须按磁盘存在性二次过滤，避免把刚删的 row 又加回来）。
 pub(crate) async fn sync_git_worktrees(
     state: &AppState,
     project: &WorkbenchProjectRow,
@@ -406,8 +413,29 @@ pub(crate) async fn sync_git_worktrees(
         .list_by_project(&project.id)
         .await?;
     let now = now_iso();
+
+    // 对账删除：非主 worktree 的磁盘路径已被外部删除时，row 成为孤儿。先于 upsert 删除，
+    // 避免后续 porcelain 仍列出 prunable worktree 时把孤儿重新登记。session 元数据一并清理，
+    // 与 merge/remove 路径保持一致。main worktree 永不在此删除（项目根丢失应走移除项目）。
+    for row in &existing_rows {
+        if row.is_main {
+            continue;
+        }
+        if !path_exists_nofollow(Path::new(&row.path))? {
+            let _ = state
+                .workbench_session_repo
+                .delete_by_worktree(&row.project_id, &row.id)
+                .await;
+            state.workbench_worktree_repo.delete(&row.id).await?;
+        }
+    }
+
     for item in parsed.into_iter().filter(|item| !item.is_main) {
         let item_path = normalize_worktree_path(&item.path);
+        // rm -rf 后 Git 元数据残留，porcelain 可能仍列出该 worktree；磁盘不存在则跳过 upsert。
+        if !path_exists_nofollow(Path::new(&item_path))? {
+            continue;
+        }
         let existing = existing_rows
             .iter()
             .find(|row| normalize_worktree_path(&row.path) == item_path);
@@ -1485,8 +1513,9 @@ pub(crate) async fn remove_local_workbench_project_with_barrier(
 }
 
 #[cfg(test)]
-mod restore_holder_fail_closed_tests {
+pub(super) mod restore_holder_fail_closed_tests {
     //! R17 M1：生产 list/restore 路径故障注入回归。
+    //! 模块与 `build_restore_fail_state` 提升为 `pub(super)`，供同级 worktree 对账测试复用最小 owner AppState fixture。
 
     use super::*;
     use crate::backend::authority::RuntimeRole;
@@ -1526,7 +1555,7 @@ mod restore_holder_fail_closed_tests {
     ///
     /// Code Logic（这个函数做什么）:
     ///     内存 SQLite 建 projects/sessions/worktrees 表，构造 HeadlessOwner AppState。
-    async fn build_restore_fail_state() -> AppState {
+    pub(super) async fn build_restore_fail_state() -> AppState {
         let options = SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
             .create_if_missing(true);
@@ -1945,6 +1974,271 @@ mod restore_holder_fail_closed_tests {
         assert!(
             after.is_empty(),
             "deleted session must not be resurrected by stale restore snapshot"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sync_git_worktrees_external_delete_tests {
+    //! 外部删除 worktree（AI `rm -rf` / `git worktree remove`）后对账回归：
+    //! `sync_git_worktrees` 必须把磁盘路径已不存在的非主 worktree row 删除，并清理其下 terminal session 元数据，
+    //! 否则 Workbench 仍展示孤儿 row，且后续 git/fs 操作在死路径上抛 `No such file or directory (os error 2)`。
+
+    use super::*;
+    use super::restore_holder_fail_closed_tests::build_restore_fail_state;
+    use crate::workbench::models::{
+        WorkbenchProjectRow, WorkbenchSessionRow, WorkbenchWorktreeRow,
+    };
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// 在 cwd 下执行 git，失败即 panic 并打印 stderr。
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("应执行 git");
+        assert!(
+            output.status.success(),
+            "git {:?} 失败: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// 构造指向给定主仓库路径的 project row（id 固定 p1，复用 fixture 已建库）。
+    fn project_row_for(main_path: &Path) -> WorkbenchProjectRow {
+        WorkbenchProjectRow {
+            id: "p1".to_string(),
+            name: "demo".to_string(),
+            kind: "local".to_string(),
+            device_id: "d1".to_string(),
+            device_name: "local".to_string(),
+            path: main_path.to_string_lossy().into_owned(),
+            last_opened_at: "t".to_string(),
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        }
+    }
+
+    async fn seed_feature_worktree_row(state: &AppState, id: &str, path: &str) {
+        state
+            .workbench_worktree_repo
+            .upsert(&WorkbenchWorktreeRow {
+                id: id.to_string(),
+                project_id: "p1".to_string(),
+                name: "feature".to_string(),
+                branch: Some("feature".to_string()),
+                base_branch: Some("main".to_string()),
+                path: path.to_string(),
+                is_main: false,
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn seed_session_for_worktree(state: &AppState, session_id: &str, worktree_id: &str) {
+        state
+            .workbench_session_repo
+            .upsert(&WorkbenchSessionRow {
+                id: session_id.to_string(),
+                project_id: "p1".to_string(),
+                worktree_id: Some(worktree_id.to_string()),
+                name: "term".to_string(),
+                command: "/bin/sh".to_string(),
+                cwd: "/tmp".to_string(),
+                status: "disconnected".to_string(),
+                cols: 80,
+                rows: 24,
+                started_at: "t".to_string(),
+                exited_at: None,
+                exit_code: None,
+                backend: "pty".to_string(),
+                backend_id: None,
+                backend_window_id: None,
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     AI 在 cc-partner 外部 `rm -rf` linked worktree 后，SQLite 里的 row 成为孤儿。
+    ///     `sync_git_worktrees` 必须在下次对账时删掉该 row 及其下 terminal session，
+    ///     且不能因 git porcelain 仍列出 prunable worktree 而重新登记。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     建 main + linked worktree → 登记到 SQLite + 关联 session → rm -rf linked →
+    ///     调 sync_git_worktrees → 断言非主 worktree row 全部消失、关联 session 被清理。
+    #[tokio::test]
+    async fn external_rm_rf_linked_worktree_prunes_row_and_sessions() {
+        let temp = tempfile::tempdir().expect("应创建临时目录");
+        let main: PathBuf = temp.path().join("main");
+        let linked: PathBuf = temp.path().join("linked");
+        std::fs::create_dir_all(&main).expect("应创建主仓库目录");
+        git(&main, &["init"]);
+        git(&main, &["config", "user.name", "Test"]);
+        git(&main, &["config", "user.email", "test@example.com"]);
+        std::fs::write(main.join("README.md"), "base\n").expect("应写入测试文件");
+        git(&main, &["add", "README.md"]);
+        git(&main, &["commit", "-m", "init"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                linked.to_string_lossy().as_ref(),
+            ],
+        );
+
+        let state = build_restore_fail_state().await;
+        let project = project_row_for(&main);
+        seed_feature_worktree_row(&state, "wt-feat", linked.to_string_lossy().as_ref()).await;
+        seed_session_for_worktree(&state, "sess-feat", "wt-feat").await;
+
+        // 模拟 AI 外部删除：直接 rm -rf linked 目录（git 元数据残留，porcelain 可能仍列出）。
+        std::fs::remove_dir_all(&linked).expect("应删除 linked worktree 目录");
+
+        sync_git_worktrees(&state, &project)
+            .await
+            .expect("对账不应失败");
+
+        let remaining: Vec<_> = state
+            .workbench_worktree_repo
+            .list_by_project("p1")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| !row.is_main)
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "外部删除后孤儿 worktree row 必须被对账删除，实际残留: {:?}",
+            remaining
+                .iter()
+                .map(|row| (row.id.clone(), row.path.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        let session = state
+            .workbench_session_repo
+            .get("sess-feat")
+            .await
+            .expect("session 查询不应失败");
+        assert!(
+            session.is_none(),
+            "被删 worktree 下的 terminal session 元数据必须一并清理"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     对账删除必须只针对磁盘已不存在的 worktree；活 worktree 及其 session 不能被误删。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     linked worktree 保持存在 → 调 sync_git_worktrees → 断言 row 仍在（可能复用 wt-feat
+    ///     或被 porcelain 发现项合并，但 project 下必须有指向该路径的非主 row）、session 仍在。
+    #[tokio::test]
+    async fn existing_linked_worktree_is_not_pruned() {
+        let temp = tempfile::tempdir().expect("应创建临时目录");
+        let main: PathBuf = temp.path().join("main");
+        let linked: PathBuf = temp.path().join("linked");
+        std::fs::create_dir_all(&main).expect("应创建主仓库目录");
+        git(&main, &["init"]);
+        git(&main, &["config", "user.name", "Test"]);
+        git(&main, &["config", "user.email", "test@example.com"]);
+        std::fs::write(main.join("README.md"), "base\n").expect("应写入测试文件");
+        git(&main, &["add", "README.md"]);
+        git(&main, &["commit", "-m", "init"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                linked.to_string_lossy().as_ref(),
+            ],
+        );
+
+        let state = build_restore_fail_state().await;
+        let project = project_row_for(&main);
+        seed_feature_worktree_row(&state, "wt-feat", linked.to_string_lossy().as_ref()).await;
+        seed_session_for_worktree(&state, "sess-live", "wt-feat").await;
+
+        // 不删除 linked 目录。
+        sync_git_worktrees(&state, &project)
+            .await
+            .expect("对账不应失败");
+
+        let non_main: Vec<_> = state
+            .workbench_worktree_repo
+            .list_by_project("p1")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| !row.is_main)
+            .collect();
+        assert!(
+            !non_main.is_empty(),
+            "活 worktree 不应被对账清空，实际非主 row: {:?}",
+            non_main
+                .iter()
+                .map(|row| (row.id.clone(), row.path.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            state
+                .workbench_session_repo
+                .get("sess-live")
+                .await
+                .expect("session 查询不应失败")
+                .is_some(),
+            "活 worktree 下的 session 元数据必须保留"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     孤儿 row 指向的路径可能从未存在（历史脏数据 / 路径迁移），对账同样必须清理。
+    ///     此用例与 rm -rf 用例互补：不依赖 porcelain 是否列出，仅靠磁盘存在性判定。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     只建 main 仓库（无 linked worktree）→ 登记一条指向不存在路径的 row →
+    ///     调 sync_git_worktrees → 断言该 row 被删除。
+    #[tokio::test]
+    async fn stale_row_pointing_at_missing_path_is_pruned() {
+        let temp = tempfile::tempdir().expect("应创建临时目录");
+        let main: PathBuf = temp.path().join("main");
+        std::fs::create_dir_all(&main).expect("应创建主仓库目录");
+        git(&main, &["init"]);
+        git(&main, &["config", "user.name", "Test"]);
+        git(&main, &["config", "user.email", "test@example.com"]);
+        std::fs::write(main.join("README.md"), "base\n").expect("应写入测试文件");
+        git(&main, &["add", "README.md"]);
+        git(&main, &["commit", "-m", "init"]);
+
+        let state = build_restore_fail_state().await;
+        let project = project_row_for(&main);
+        let bogus = temp.path().join("never-existed");
+        seed_feature_worktree_row(&state, "wt-bogus", bogus.to_string_lossy().as_ref()).await;
+
+        sync_git_worktrees(&state, &project)
+            .await
+            .expect("对账不应失败");
+
+        assert!(
+            state
+                .workbench_worktree_repo
+                .get("wt-bogus")
+                .await
+                .expect("worktree 查询不应失败")
+                .is_none(),
+            "指向不存在路径的孤儿 row 必须被对账删除"
         );
     }
 }

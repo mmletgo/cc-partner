@@ -20,6 +20,7 @@ import {
   emitWorkbenchEvent,
   flushMacrotasks,
   renderWorkbench,
+  selectInspectorTab,
   setInvokeHandler,
   waitFor,
   waitForInvoke,
@@ -374,6 +375,8 @@ describe('Workbench worktree / Git domain (characterization)', () => {
       buildDependencyContextValue(),
     );
     await waitForInvoke('list_workbench_dir');
+    // inspector 默认 tab 为 Git 历史；本用例需要 dirty file tab，显式切到 files tab 再打开文件。
+    await selectInspectorTab('files');
     await waitFor(() => {
       if (screen.queryAllByRole('button', { name: 'README.md' }).length === 0) {
         throw new Error('README.md not rendered');
