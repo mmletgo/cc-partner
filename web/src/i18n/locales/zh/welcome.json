@@ -22,7 +22,8 @@
     "inputMonitoring": {
       "title": "输入监控",
       "description": "健康提醒检测键盘活动需要。点击请求授权后，macOS 会尝试登记当前应用",
-      "deniedDescription": "macOS 未自动登记时：打开系统设置，点输入监控列表下方的「+」，选择当前 cc-partner 应用（开发版为「cc-partner Internal (Dev)」），再打开开关"
+      "deniedDescription": "macOS 未自动登记时：打开系统设置，点输入监控列表下方的「+」，选择当前 cc-partner 应用（开发版为「cc-partner (Dev)」），再打开开关",
+      "unavailableDescription": "macOS 暂时无法确认输入监控状态，但仍可手动添加当前应用并授权"
     },
     "notification": {
       "title": "通知",
@@ -35,10 +36,8 @@
     "requestAccess": "请求授权",
     "openSettings": "打开系统设置",
     "addInSettings": "在系统设置中添加",
-    "buildHelp": "查看构建说明",
     "requesting": "处理中…"
   },
-  "internalBuildHelp": "当前构建没有稳定的内部代码签名，macOS 无法可靠登记输入监控。请安装并运行内部签名的 cc-partner Internal 应用。",
   "recheck": "重新检查",
   "checkFailed": "检查权限失败：{{error}}",
   "unknownError": "未知错误",

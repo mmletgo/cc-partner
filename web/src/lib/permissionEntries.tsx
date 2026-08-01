@@ -18,7 +18,7 @@ import type { TFunction } from 'i18next';
 import { BellIcon, HealthIcon, InfoIcon, KeyboardIcon } from '@/lib/icons';
 import type { PermissionsStatus, PermissionType } from '@/lib/types';
 
-export type PermissionEntryAction = 'request' | 'openSettings' | 'none' | 'buildHelp';
+export type PermissionEntryAction = 'request' | 'openSettings' | 'none';
 
 /** 单条权限条目的展示格式（供 PermissionCard 渲染） */
 export interface PermissionEntry {
@@ -75,23 +75,23 @@ export function mapPermissions(
       description:
         status.inputMonitoring.state === 'denied'
           ? t('permission.inputMonitoring.deniedDescription')
-          : t('permission.inputMonitoring.description'),
+          : status.inputMonitoring.state === 'unavailable'
+            ? t('permission.inputMonitoring.unavailableDescription')
+            : t('permission.inputMonitoring.description'),
       granted: status.inputMonitoring.granted,
       action:
         status.inputMonitoring.state === 'granted'
           ? 'none'
           : status.inputMonitoring.state === 'notDetermined'
             ? 'request'
-            : status.inputMonitoring.state === 'denied'
-              ? 'openSettings'
-              : 'buildHelp',
+            : 'openSettings',
       actionLabel:
         status.inputMonitoring.state === 'notDetermined'
           ? t('permissionCard.requestAccess')
           : status.inputMonitoring.state === 'denied'
             ? t('permissionCard.addInSettings')
             : status.inputMonitoring.state === 'unavailable'
-              ? t('permissionCard.buildHelp')
+              ? t('permissionCard.openSettings')
               : undefined,
     },
     {

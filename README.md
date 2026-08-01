@@ -98,13 +98,13 @@ printf '%s' '{"data":"pwd\\n"}' | cargo run --locked --bin cc-partner-cli -- ses
 
 | 系统 | 文件 | 说明 |
 |------|------|------|
-| macOS | 内部固定签名构建 | 公开 Release 暂不发布 ad-hoc 包；见下方说明 |
+| macOS | 本地统一构建 | 公开 Release 暂不发布未公证包；固定/ad-hoc 签名说明见下方 |
 | Windows | `.exe`（NSIS） | 安装程序 |
 | Ubuntu / Linux | `.AppImage` / `.deb` / `.rpm` | 直接运行或安装包 |
 
 ### macOS
 
-当前没有 Apple Developer ID，因此公开 Release 不发布会丢失稳定 TCC 身份的 ad-hoc macOS 包。内部使用请按 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md) 创建并信任固定自签名证书，再构建 `cc-partner Internal.app`。社区源码构建仍可开发其它功能，但输入监控会明确显示 unavailable，不会打开没有应用条目的设置列表。
+当前没有 Apple Developer ID，因此公开 Release 暂不发布未公证的 macOS 包。本地构建始终生成统一的 `cc-partner`；固定自签名证书可让 TCC 权限在升级间保持稳定，没有固定签名时输入监控仍可在系统设置中通过列表下方的 `+` 手动添加当前 `.app`。详见 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md)。
 
 ### Windows
 
@@ -134,11 +134,11 @@ cd cc-partner
 
 # 推荐：一键开发（检查 Node/Rust、按需 npm install、预构建 backend sidecar、tauri dev）
 ./start.sh
-# macOS：已安装固定内部签名 identity 时自动启用 Internal Dev；否则使用
-# 固定的 ~/Applications/cc-partner Internal (Dev).app；否则使用社区开发壳
-# （输入监控不可用）。详见 docs/development/macos-internal-signing.md
+# macOS：统一生成 ~/Applications/cc-partner (Dev).app；检测到固定签名
+# identity 时使用固定签名，否则使用可手动配置输入监控的 ad-hoc 签名。
+# 详见 docs/development/macos-internal-signing.md
 
-# 或手动（裸 tauri dev 无稳定 TCC 主体；macOS 输入监控明确 unavailable）
+# 或手动（裸 tauri dev 不是可在系统设置中稳定定位的 `.app`，不适合权限调试）
 cd web && npm install
 ./node_modules/.bin/tauri dev
 ```

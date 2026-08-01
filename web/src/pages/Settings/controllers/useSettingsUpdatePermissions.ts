@@ -40,7 +40,6 @@ export interface UseSettingsUpdatePermissionsResult {
   permRefreshing: boolean;
   permError: string | null;
   permRequesting: ReadonlySet<PermissionType>;
-  permissionBuildHelpVisible: boolean;
   refreshPermissions: () => void | Promise<void>;
   handleRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
   updateResult: UpdateCheckResult | null;
@@ -75,7 +74,6 @@ export function useSettingsUpdatePermissions(): UseSettingsUpdatePermissionsResu
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState<UpdateDownloadStatus | null>(null);
   const [installing, setInstalling] = useState(false);
-  const [permissionBuildHelpVisible, setPermissionBuildHelpVisible] = useState(false);
 
   const {
     status: permStatus,
@@ -122,7 +120,6 @@ export function useSettingsUpdatePermissions(): UseSettingsUpdatePermissionsResu
    */
   const handleRequestAccess = useCallback(
     (type: PermissionType, action: PermissionEntryAction = 'request') => {
-      setPermissionBuildHelpVisible(action === 'buildHelp');
       if (action === 'request') {
         void requestPermissionItem(type).catch(() => undefined);
       } else if (action === 'openSettings') {
@@ -278,7 +275,6 @@ export function useSettingsUpdatePermissions(): UseSettingsUpdatePermissionsResu
     permRefreshing,
     permError,
     permRequesting,
-    permissionBuildHelpVisible,
     refreshPermissions,
     handleRequestAccess,
     updateResult,

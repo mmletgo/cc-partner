@@ -7,25 +7,25 @@ import {
 } from './check-macos-signing-contract.mjs';
 
 test('binds certificate prefix to the codesign long option', () => {
-  assert.deepEqual(certificateExtractionArgs('/tmp/signing/cert', '/Applications/Internal.app'), [
+  assert.deepEqual(certificateExtractionArgs('/tmp/signing/cert', '/Applications/cc-partner.app'), [
     '-d',
     '--extract-certificates=/tmp/signing/cert',
-    '/Applications/Internal.app',
+    '/Applications/cc-partner.app',
   ]);
 });
 
-test('rejects ad-hoc cdhash-only signing', () => {
+test('rejects ad-hoc cdhash-only signing when fixed signing was requested', () => {
   assert.throws(
     () =>
       validateSigningMetadata(
         {
-          identifier: 'com.cc-partner.app.internal',
+          identifier: 'com.cc-partner.app',
           authorities: [],
           requirement: 'designated => cdhash H"ABCDEF"',
           certSha256: 'AA11',
         },
         {
-          expectedIdentifier: 'com.cc-partner.app.internal',
+          expectedIdentifier: 'com.cc-partner.app',
           expectedCertSha256: 'AA11',
         },
       ),
@@ -35,16 +35,16 @@ test('rejects ad-hoc cdhash-only signing', () => {
 
 test('rejects bundle id and certificate fingerprint drift', () => {
   const stable = {
-    identifier: 'com.cc-partner.app.internal.dev',
+    identifier: 'com.cc-partner.app.dev',
     authorities: ['cc-partner Internal Code Signing'],
     requirement:
-      'designated => identifier "com.cc-partner.app.internal.dev" and certificate leaf[subject.CN] = "cc-partner Internal Code Signing"',
+      'designated => identifier "com.cc-partner.app.dev" and certificate leaf[subject.CN] = "cc-partner Internal Code Signing"',
     certSha256: 'AA11',
   };
   assert.throws(
     () =>
       validateSigningMetadata(stable, {
-        expectedIdentifier: 'com.cc-partner.app.internal',
+        expectedIdentifier: 'com.cc-partner.app',
         expectedCertSha256: 'AA11',
       }),
     /Bundle ID/,
@@ -59,21 +59,21 @@ test('rejects bundle id and certificate fingerprint drift', () => {
   );
 });
 
-test('accepts stable certificate requirement and parses codesign output', () => {
-  const parsed = parseCodesignMetadata(`Executable=/Applications/cc-partner Internal.app/Contents/MacOS/cc-partner
-Identifier=com.cc-partner.app.internal
+test('accepts stable certificate requirement for the canonical release identity', () => {
+  const parsed = parseCodesignMetadata(`Executable=/Applications/cc-partner.app/Contents/MacOS/cc-partner
+Identifier=com.cc-partner.app
 Authority=cc-partner Internal Code Signing
 TeamIdentifier=not set`);
   const metadata = {
     ...parsed,
     requirement:
-      'designated => identifier "com.cc-partner.app.internal" and certificate leaf[subject.CN] = "cc-partner Internal Code Signing"',
+      'designated => identifier "com.cc-partner.app" and certificate leaf[subject.CN] = "cc-partner Internal Code Signing"',
     certSha256: 'AA:11',
   };
 
   assert.doesNotThrow(() =>
     validateSigningMetadata(metadata, {
-      expectedIdentifier: 'com.cc-partner.app.internal',
+      expectedIdentifier: 'com.cc-partner.app',
       expectedCertSha256: 'aa11',
     }),
   );

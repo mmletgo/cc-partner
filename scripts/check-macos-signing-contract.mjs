@@ -27,7 +27,7 @@ export function certificateExtractionArgs(prefix, appPath) {
   return ['-d', `--extract-certificates=${prefix}`, appPath];
 }
 
-/** 验证内部签名的稳定身份合同；不读取或输出私钥。 */
+/** 验证固定签名的稳定身份合同；不读取或输出私钥。 */
 export function validateSigningMetadata(metadata, expected) {
   if (metadata.identifier !== expected.expectedIdentifier) {
     throw new Error(
@@ -38,7 +38,7 @@ export function validateSigningMetadata(metadata, expected) {
     metadata.authorities.length === 0 ||
     /designated\s*=>\s*cdhash\b/iu.test(metadata.requirement)
   ) {
-    throw new Error('ad-hoc signing is forbidden for the internal macOS channel');
+    throw new Error('ad-hoc signing is forbidden when fixed macOS signing was requested');
   }
   const actualFingerprint = normalizeFingerprint(metadata.certSha256);
   const expectedFingerprint = normalizeFingerprint(expected.expectedCertSha256);

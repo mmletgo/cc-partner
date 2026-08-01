@@ -10,7 +10,7 @@
 #   - frontend-e2e：Playwright 端到端（chromium），失败上传 artifacts
 # 严格门禁（任一 job 失败阻断合并），不使用 continue-on-error。
 # 公开 Windows/Linux 安装包在 push v* tag 时由 release-tauri.yml 构建；
-# 内部 macOS 固定签名包仅手动触发 internal-macos.yml。
+# macOS 固定签名的统一 cc-partner 包仅手动触发 internal-macos.yml。
 
 name: CI
 

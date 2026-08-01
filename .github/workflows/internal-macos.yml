@@ -1,4 +1,4 @@
-name: Internal macOS Build
+name: macOS Fixed-Signing Build
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install frontend dependencies
         run: cd web && npm ci
-      - name: Import fixed internal code-signing identity
+      - name: Import fixed code-signing identity
         shell: bash
         env:
           P12_BASE64: ${{ secrets.MACOS_INTERNAL_CERTIFICATE_P12_BASE64 }}
@@ -46,12 +46,12 @@ jobs:
           rm -f "$P12"
           echo "CC_PARTNER_INTERNAL_SIGNING_IDENTITY=cc-partner Internal Code Signing" >> "$GITHUB_ENV"
           echo "CC_PARTNER_INTERNAL_CERT_SHA256=$CERT_SHA256" >> "$GITHUB_ENV"
-      - name: Build and verify internal app
+      - name: Build and verify cc-partner app
         run: scripts/build-macos-internal.sh
-      - name: Upload internal app artifacts
+      - name: Upload cc-partner macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cc-partner-internal-macos-${{ github.sha }}
+          name: cc-partner-macos-${{ github.sha }}
           path: |
             src-tauri/target/release/bundle/macos/*.app
             src-tauri/target/release/bundle/dmg/*.dmg

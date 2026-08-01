@@ -98,7 +98,7 @@ cc-partner/
 │   ├── tauri.conf.json           # Tauri 配置 + bundle + updater（版本号单一来源）
 │   └── Cargo.toml
 ├── scripts/                      # bump-version / prepare-tauri-sidecar / check-p2p-route-inventory / check-quality-traceability / check-docs + 图标源
-├── .github/workflows/            # ci/smoke/docs + 公开 Windows/Linux release + 内部 macOS 手动构建
+├── .github/workflows/            # ci/smoke/docs + 公开 Windows/Linux release + macOS 固定签名手动构建
 ├── uiux/                         # 设计稿（参考资源，不参与构建）
 ├── docs/
 │   ├── prd.md
@@ -115,7 +115,7 @@ cc-partner/
 | 设计 token / 组件分层 / 复用 / Hooks 顺序 | 本文 §3–§5；前端细则 `web/CLAUDE.md` |
 | 前端命令、Vitest/Playwright、Workbench controllers、Attention、runtime cache | `web/CLAUDE.md` |
 | P2P 协议 v1 / 错误信封 / 幂等 / 端口 / CLI doctor / smoke / 发版 | `src-tauri/CLAUDE.md` |
-| macOS 固定内部签名 / 输入监控真机验收 | `docs/development/macos-internal-signing.md` |
+| macOS 固定签名 / ad-hoc 手动授权 / 输入监控真机验收 | `docs/development/macos-internal-signing.md` |
 | 用户向启动、防火墙、产品定位 | `README.md` |
 | 持久产品行为 | `docs/prd.md` |
 
@@ -437,8 +437,8 @@ cd src-tauri && cargo test --locked --test backend_doctor_smoke -- --nocapture -
 
 ```bash
 ./start.sh                         # 推荐：自检工具链 + tauri dev
-# macOS 检测到唯一固定内部 identity 时自动组装 cc-partner-internal-dev.app；
-# 未检测到时组装社区 cc-partner-dev.app（输入监控 unavailable），详见内部签名文档
+# macOS 固定组装 ~/Applications/cc-partner (Dev).app；检测到固定 identity 时固定签名，
+# 否则 ad-hoc 签名且输入监控可手动添加授权，详见 macOS 签名文档
 # 或：cd web && npm install && ./node_modules/.bin/tauri dev  # 裸 binary，无开发壳
 ```
 
@@ -460,7 +460,7 @@ git tag v<版本号> && git push origin v<版本号>  # 公开发布仅 Windows/
 
 - **版本号单一来源**：`src-tauri/tauri.conf.json` 的 `version`
 - **公开 Release 机制**：`release-tauri.yml` 三段式原生 `tauri build`，仅发布 Windows/Linux；**不是** `tauri-apps/tauri-action`，禁止发布 macOS ad-hoc “官方”包
-- **内部 macOS**：固定自签名证书 + `com.cc-partner.app.internal`，本地运行 `scripts/build-macos-internal.sh`，CI 手动触发 `internal-macos.yml`；详见 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md)
+- **macOS 固定签名构建**：与统一正式版共用 `com.cc-partner.app`，本地运行 `scripts/build-macos-internal.sh`，CI 手动触发 `internal-macos.yml`；文件名与 Environment 名保留为历史基础设施标识，不代表独立产品版本；详见 [`docs/development/macos-internal-signing.md`](docs/development/macos-internal-signing.md)
 - **跨目录关键陷阱**：repo secret `TAURI_SIGNING_PRIVATE_KEY` 缺失则无 `.sig` / `latest.json` 不完整，应用内更新失败；`plugins.updater.pubkey` 必须与私钥配对；`bundle.createUpdaterArtifacts: true` 必须开启
 - **实现细节、矩阵平台、sidecar、历史弃用原因**：`src-tauri/CLAUDE.md`「M9」节
 
@@ -536,7 +536,7 @@ Rust `app_handle.emit("<event>", payload)`，前端 `listen("<event>", cb)`（�
 | `src-tauri/src/net/*` | P2P HTTP / mDNS / protocol | 高 |
 | `src-tauri/tauri.conf.json` | Tauri 配置 + bundle + updater（版本号单一来源） | 低（发版改） |
 | `docs/p2p-protocol.md` | P2P 路由权威清单 | 中 |
-| `docs/development/macos-internal-signing.md` | 内部 macOS 固定签名与输入监控 L3 手册 | 低 |
+| `docs/development/macos-internal-signing.md` | macOS 固定/ad-hoc 签名与输入监控 L3 手册 | 低 |
 
 ---
 

@@ -2,8 +2,8 @@
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     截图、键鼠活动采样、窗口标题采样和通知分别依赖屏幕录制、输入监控、
-//!     辅助功能与通知权限。macOS 的 TCC 记录绑定应用代码身份，因此输入监控只允许
-//!     固定内部签名通道请求；社区/ad-hoc 构建必须明确报告 unavailable。
+//!     辅助功能与通知权限。macOS 的 TCC 记录绑定应用代码身份；固定签名与 ad-hoc
+//!     构建都可请求输入监控，未自动登记时由用户在系统设置中手动添加当前 `.app`。
 //!
 //! Code Logic（这个模块做什么）:
 //!     查询操作不产生副作用；Request、Open Settings、Reopen 是三条独立入口。
@@ -226,7 +226,7 @@ pub fn check_screen_capture_access() -> bool {
 
 /// 查询输入监控是否已授权；兼容健康采样现有布尔判据。
 pub fn check_input_monitoring_access() -> bool {
-    input_monitoring::check_input_monitoring_state(main_bundle_identifier().as_deref()).granted
+    input_monitoring::check_input_monitoring_state().granted
 }
 
 /// 查询辅助功能权限。
@@ -255,9 +255,7 @@ pub fn check_permissions() -> PermissionsStatus {
         screen_capture: PermissionState {
             granted: check_screen_capture_access(),
         },
-        input_monitoring: input_monitoring::check_input_monitoring_state(
-            main_bundle_identifier().as_deref(),
-        ),
+        input_monitoring: input_monitoring::check_input_monitoring_state(),
         accessibility: PermissionState {
             granted: check_accessibility_access(),
         },
@@ -288,11 +286,9 @@ fn input_state(state: InputMonitoringState) -> &'static str {
 fn permission_state(perm_type: &str) -> String {
     match perm_type {
         "screenCapture" => bool_state(check_screen_capture_access()).to_string(),
-        "inputMonitoring" => input_state(
-            input_monitoring::check_input_monitoring_state(main_bundle_identifier().as_deref())
-                .state,
-        )
-        .to_string(),
+        "inputMonitoring" => {
+            input_state(input_monitoring::check_input_monitoring_state().state).to_string()
+        }
         "accessibility" => bool_state(check_accessibility_access()).to_string(),
         "notification" => bool_state(check_notification_access()).to_string(),
         _ => "unavailable".to_string(),
@@ -320,9 +316,7 @@ pub fn request_permission(perm_type: &str) -> PermissionActionResult {
                 };
             }
             "inputMonitoring" => {
-                let result = input_monitoring::request_input_monitoring_access(
-                    main_bundle_identifier().as_deref(),
-                );
+                let result = input_monitoring::request_input_monitoring_access();
                 return PermissionActionResult {
                     permission: perm_type.to_string(),
                     operation: match result.operation {
@@ -560,10 +554,10 @@ mod tests {
     #[test]
     fn parses_cfbundle_identifier_from_minimal_plist() {
         let xml = r#"<dict><key>CFBundleName</key><string>cc-partner</string>
-<key>CFBundleIdentifier</key><string>com.cc-partner.app.internal</string></dict>"#;
+<key>CFBundleIdentifier</key><string>com.cc-partner.app</string></dict>"#;
         assert_eq!(
             parse_cfbundle_identifier_plist_xml(xml).as_deref(),
-            Some(input_monitoring::INTERNAL_BUNDLE_IDENTIFIER)
+            Some("com.cc-partner.app")
         );
         assert_eq!(parse_cfbundle_identifier_plist_xml("<dict></dict>"), None);
     }

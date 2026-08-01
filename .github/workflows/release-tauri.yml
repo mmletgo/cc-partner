@@ -17,7 +17,7 @@
 #
 # 三个 job 的职责：
 #   - build                  : 按 matrix（Windows / Linux x64 / Linux arm64）各自 tauri build，
-#                              收集产物到 release-assets/。macOS 内部包由 internal-macos.yml 负责。
+#                              收集产物到 release-assets/。macOS 固定签名包由 internal-macos.yml 负责。
 #   - publish-release        : 合并所有平台的 release-assets/，上传到 GitHub Release。
 #   - assemble-latest-json   : 从 Release 拉取全部 .sig，生成并上传 latest.json 供 updater 用。
 #

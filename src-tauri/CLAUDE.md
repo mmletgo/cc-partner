@@ -81,7 +81,7 @@ src/
 ├── transfer/          — 分块传输 + SHA256 + 断点续传 + 幂等 retry/resume claim + sender operation 对账（`transfer.resume.v1`）；`receiver/` 为目录模块（`mod`/`validation`/`chunk_io`/`resume`/`finalize`，公共 API 仍为 `crate::transfer::receiver`）[M5/N5 T2+T3]
 ├── screenshot/        — xcap 抓屏 + 透明选区窗口                  [M6]
 ├── workbench/         — 本机/远端项目工作台：项目记录 + Git worktree + tmux 依赖管理 + 可恢复 PTY/tmux 终端会话 + 安全文件树 + 文件内容/预览 + 远端目录选择 helper、HTTP 网关与事件桥 [已实现]
-├── permissions/       — macOS 权限 FFI（屏幕录制/AX/通知 + IOHID 输入监控四态；内部固定签名主体才允许 Request） [M7 已实现]
+├── permissions/       — macOS 权限 FFI（屏幕录制/AX/通知 + IOHID 输入监控四态；固定/ad-hoc 签名共用 Request 与手动添加路径） [M7 已实现]
 ├── hotkey.rs          — pynput→plugin 快捷键格式转换 + 注册/热更新  [M7 已实现]
 ├── tray.rs            — 系统托盘（Tauri 2 tray API）              [M7 已实现]
 ├── health/            — 久坐监测 daemon（state 状态机 + monitor 采样 + reminder 免打扰） [已实现]
@@ -302,12 +302,12 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 - **macOS 权限 FFI（`permissions/mod.rs` + `permissions/input_monitoring.rs`）**：
   - `check_permissions` 是无副作用查询；输入监控返回 `{granted,state}`，其中 `state ∈ granted|denied|notDetermined|unavailable`。查询先读公开 `IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)`，并用同属 ListenEvent TCC 服务的公开 `CGPreflightListenEventAccess` 修正 macOS 26 的 IOHID 假 Denied；任一公开预检明确 Granted 才为 true，禁止创建 CGEventTap、私有 TCC SPI 或其它信号拼接假绿。IOHID=Denied 且当前进程尚未显式 Request 时视为 `notDetermined`，保证 macOS 26 首次登记入口可达；本进程 Request 后仍未授权才为 `denied`。
-  - 输入监控只接受固定内部主体 `com.cc-partner.app.internal` / `com.cc-partner.app.internal.dev`；公开 `com.cc-partner.app`、社区 Dev 壳、裸二进制和未知 IOHID 值均 fail closed 为 `unavailable`。内部包由固定自签名证书 `cc-partner Internal Code Signing` 签名，构建后必须校验 leaf SHA-256 与 designated requirement；详见 `docs/development/macos-internal-signing.md`。
-  - 输入监控 Request 状态机：仅 `notDetermined` 在 Tauri 主线程依次调用公开 `CGRequestListenEventAccess` 与 `IOHIDRequestAccess`；两条都只请求 ListenEvent，不访问私有 TCC、不打开设置。不能把 Request 返回值解释为系统设置列表已登记；macOS 26 未弹中转框或列表为空时，产品正式兜底是用户显式点“在系统设置中添加”，再从列表下方「+」选择当前 `.app` 并打开开关。只保留进程内“本次已请求”布尔态用于区分 macOS 26 假 Denied，不写文件、不跨重启；`denied`、`granted`、`unavailable` 均 noop。**禁止**产品流程调用 `tccutil reset`、私有 `TCCAccess*`、持久 pending marker、第二实例、运行时 `codesign`、CDHash 旋转和自动重启。
+  - 输入监控不按 Bundle ID 或签名类型设功能门禁：统一 Release `com.cc-partner.app` 与 Dev `com.cc-partner.app.dev`、固定签名与 ad-hoc `.app` 都走同一公开状态机。未知 IOHID 值仍 fail closed 为 `unavailable`，但 UI 提供系统设置手动添加路径。固定自签名构建仍必须校验 leaf SHA-256 与 designated requirement；详见 `docs/development/macos-internal-signing.md`。
+  - 输入监控 Request 状态机：仅 `notDetermined` 在 Tauri 主线程依次调用公开 `CGRequestListenEventAccess` 与 `IOHIDRequestAccess`；两条都只请求 ListenEvent，不访问私有 TCC、不打开设置。不能把 Request 返回值解释为系统设置列表已登记；macOS 26 未弹中转框或列表为空时，产品正式兜底是用户显式点“在系统设置中添加”，再从列表下方「+」选择当前 `.app` 并打开开关。只保留进程内“本次已请求”布尔态用于区分 macOS 26 假 Denied，不写文件、不跨重启；`denied`、`granted`、`unavailable` 均 noop，其中 denied/unavailable 都可由 UI 打开系统设置。**禁止**产品流程调用 `tccutil reset`、私有 `TCCAccess*`、持久 pending marker、第二实例、运行时 `codesign`、CDHash 旋转和自动重启。
   - `request_permission(type)` 与 `open_permission_settings(type)` 是两条独立 IPC：前者只 Request，后者只打开对应设置。返回统一 `{permission,operation,before,after}`，`operation ∈ request|openSettings|noop`；任何 check/visibility 轮询不得夹带副作用。
   - screenCapture 使用 `CGPreflightScreenCaptureAccess` / 显式 `CGRequestScreenCaptureAccess`；accessibility 使用 `AXIsProcessTrusted` / 显式 AX prompt；notification 使用 `UNUserNotificationCenter` 原生桥（禁止 desktop plugin stub）。非 macOS 保持 granted=true。
   - `relaunch_for_permissions` 仅供 Welcome 的显式“重新打开应用”；必须经 LaunchServices `open` 启动 enclosing `.app`，禁止 Request/Open Settings 自动调用，也禁止直接 exec `Contents/MacOS`。
-  - macOS Dev 壳必须由 `scripts/prepare-macos-dev-app.mjs` + `scripts/macos-dev-cargo-runner.sh` 组装并经 LaunchServices 启动。`start.sh` 通过 `scripts/detect-macos-internal-signing.mjs` 自动发现唯一固定 identity，并以用户 signing 目录中的 SHA-256 pin 防止同名证书静默漂移；发现后把内部开发壳固定组装到 `~/Applications/cc-partner Internal (Dev).app`，让输入监控列表下方「+」可稳定定位。未安装 identity 时只在 debug 目录生成社区 `cc-partner-dev.app`（输入监控 unavailable）；检测错误或 pin 漂移必须 fail closed，禁止静默回退 ad-hoc。裸 `target/debug/app` 不属于可授权产品主体。
+  - macOS Dev 壳必须由 `scripts/prepare-macos-dev-app.mjs` + `scripts/macos-dev-cargo-runner.sh` 组装并经 LaunchServices 启动。`start.sh` 通过 `scripts/detect-macos-internal-signing.mjs` 自动发现唯一固定 identity，并以用户 signing 目录中的 SHA-256 pin 防止同名证书静默漂移；固定签名与 ad-hoc 都组装到 `~/Applications/cc-partner (Dev).app`、使用 `com.cc-partner.app.dev`，让输入监控列表下方「+」可稳定定位。固定 identity 缺失是允许的 ad-hoc 模式；检测错误或 pin 漂移仍必须 fail closed，禁止在明确请求固定签名时静默回退。裸 `target/debug/app` 不用于权限调试。
 - **权限命令（`commands/permissions.rs`）**：`check_permissions`（spawn_blocking）；`request_permission(type)` 在主线程执行公开 Request；`open_permission_settings(type)` 独立打开设置；`get_app_identity`；`relaunch_for_permissions` 仅显式 Reopen。命令注册或前端契约变化时必须同步四态测试。
 - **全局快捷键（hotkey.rs + tauri-plugin-global-shortcut 2）**：
   - **格式转换** `hotkey_pynput_to_plugin`：config 存 pynput 格式（`<cmd>+<shift>+s`，macOS；`<ctrl>...` 其他），转插件格式 `CommandOrControl+Shift+S`。`<cmd>/<ctrl>/<win>` → `CommandOrControl`（插件按平台解析 macOS=Command / Win/Linux=Ctrl），`<shift>` → `Shift`，`<alt>/<option>` → `Option`，普通键大写。配 3 个单测。
@@ -372,13 +372,13 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 - **AppState 扩展**：加 `transfer_repo: Arc<TransferRepo>`、`transfers: Arc<TransferRegistry>`；事件统一通过 `AppState.ui: Arc<dyn BackendUi>` 发布，不再在 AppState 保存 mandatory `AppHandle`。
 - **Send 边界注意**：标准 `RwLockReadGuard` 非 Send，跨 await 持有会破坏 `tokio::spawn` 的 Send 约束；`run_send_loop` 取 devices、`handle_init`/`finalize_transfer` 取 config 时，均在 await 前 clone 出字段释放 guard（已踩坑修复）。
 
-## M9 已落地行为约定（公开 Windows/Linux 发版 + 内部 macOS 固定签名通道）
+## M9 已落地行为约定（统一版本发版 + macOS 固定签名构建）
 
 - **bundle 配置（tauri.conf.json）**：
   - `targets: "all"` —— 默认本平台全产物；**CI Windows 显式 `--bundles nsis`**（见下），不打包 MSI。
   - `resources: ["resources/browser-runtime/**/*"]` —— 打包 managed Chromium；`prepare-tauri-sidecar` 在目标无 lock 资产（如 `aarch64-unknown-linux-gnu`）时必须写入 `.platform-unavailable` 占位，否则 Tauri build.rs 因 glob 未匹配失败。
-  - 基础配置的 `macOS.signingIdentity: "-"` 只供社区源码/本地非输入监控开发；该主体在产品内明确为 input monitoring `unavailable`，不得作为官方 macOS Release 发布。
-  - `tauri.internal.conf.json` 覆盖 `productName=cc-partner Internal`、`identifier=com.cc-partner.app.internal` 与固定 `signingIdentity=cc-partner Internal Code Signing`；同时关闭 updater artifact 并隔离到尚未发布的 `internal-macos` 专用 feed，当前只允许手动覆盖安装，禁止消费公开 latest.json。`scripts/build-macos-internal.sh` 构建后校验 nested code、Bundle ID、证书 SHA-256 和 designated requirement，任一漂移 fail closed，禁止 ad-hoc fallback。
+  - 基础配置的 `macOS.signingIdentity: "-"` 允许本地 ad-hoc 构建；输入监控可由用户在系统设置中手动添加，但重建后 TCC 身份可能漂移。没有 Apple Developer ID 时不得把未公证包作为官方 macOS Release 发布。
+  - `tauri.internal.conf.json` 是历史命名的固定签名 overlay，只覆盖 `signingIdentity=cc-partner Internal Code Signing` 并关闭 macOS updater artifact；产品名、Bundle ID 与 updater endpoint 均继承统一正式版。`scripts/build-macos-internal.sh` 产出 `cc-partner.app` 并校验 nested code、canonical Bundle ID、证书 SHA-256 和 designated requirement，任一漂移 fail closed，禁止在固定签名构建中回退 ad-hoc。
   - `windows.wix.language` 仍可配置，但 **stable release CI 不跑 WiX/MSI**（managed Chromium 下 light.exe 失败且无细节日志；历史 v0.6.x 也只发布 nsis）。
   - `publisher: "cc-partner"`、`category: "Productivity"` —— 安装包元数据。
   - `icon` 数组覆盖三平台（32x32.png/128x128.png/128x128@2x.png/icon.icns/icon.ico），无需额外生成。
@@ -394,7 +394,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
   - `bundle.createUpdaterArtifacts: true` —— tauri.conf.json 必须开启，否则 tauri build 不产出 `.sig`。
   - Windows updater / 正式分发均用 nsis（`_x64-setup.exe`，**非 msi**），对齐 `windows.installMode: "passive"`。
 - **签名 secret（用户必配）**：CI 引用 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}`（+ 可选 `${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}`）。用户需把 `~/.tauri/claude-partner.updater.key` 的**内容**配到 repo 的 `TAURI_SIGNING_PRIVATE_KEY` secret（Settings → Secrets and variables → Actions），支持三种格式：原始两行文本 / 整体 base64 包裹 / 纯一行 base64（minisign 私钥文件原样），CI 会自动归一化。当前公钥用 `1ED3DE93` 这对（`~/.tauri/claude-partner.updater.key.pub`，**无密码**——CI 始终注入 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env，无密码时为空字符串，tauri signer 需要这个 env 存在才不报 "incorrect password"）。**未配 secret 时 CI 的「Prepare Tauri signing key」步骤直接 exit 1，CI 红。**
-- **内部 macOS workflow（`.github/workflows/internal-macos.yml`）**：仅 `workflow_dispatch`，绑定受保护 Environment `internal-macos`；从四个 Environment secrets 临时导入固定 P12 到一次性 Keychain，运行 `scripts/build-macos-internal.sh`，上传短期 workflow artifact，always 删除临时 Keychain。证书创建、信任、轮换和 L3 验证见 `docs/development/macos-internal-signing.md`。
+- **macOS 固定签名 workflow（`.github/workflows/internal-macos.yml`）**：文件与 Environment 名保留为历史基础设施标识，不代表独立产品版本；仅 `workflow_dispatch`，绑定受保护 Environment `internal-macos`，从四个 Environment secrets 临时导入固定 P12 到一次性 Keychain，运行 `scripts/build-macos-internal.sh`，上传统一 `cc-partner` 短期 artifact，always 删除临时 Keychain。证书创建、信任、轮换和 L3 验证见 `docs/development/macos-internal-signing.md`。
 - **发版流程**：1) `node scripts/bump-version.mjs <新版本号>`（同步源码清单与锁文件版本）；2) 提交；3) `git tag v<版本号> && git push origin v<版本号>` 触发 CI。
 
 ## Claude Code 历史采集与同步已落地行为约定（src/cc/ + storage/cc_history_repo.rs + commands/cc_history.rs + net/routes/cc_history.rs）
@@ -502,7 +502,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 ## 健康提醒已落地行为约定（src/health/ + storage/health_repo.rs + commands/health.rs）
 
 - **功能定位**：久坐监测 + 工作/休息状态机 + 喝水提醒 + 全屏遮罩 + 系统通知提醒 + 屏幕时长统计。每分钟采样前台键鼠活跃度，连续工作达阈值触发久坐提醒；健康监测启用时久坐/喝水/全屏遮罩均固定启用，系统通知由 `notify_enabled` 单独控制；支持免打扰时段 / 手动暂停 / 贪睡 / 跳过。前端入口「健康提醒」页（状态展示 + 暂停/贪睡/跳过按钮）与设置页健康提醒 tab（配置）。
-- **macOS 权限（input monitoring + accessibility）**：键鼠采样（device_query，底层 IOHIDManager）依赖 **Input Monitoring**；输入监控四态以公开 `IOHIDCheckAccess` 为基础，并用公开 `CGPreflightListenEventAccess` 修正 macOS 26 的 IOHID 假 Denied，显式 Request 固定依次调用 CG 与 IOHID 两条公开 ListenEvent API；系统不自动登记时由用户在列表下方「+」选择固定 Applications 开发壳。只有固定内部 Bundle ID 可 Request，社区/ad-hoc 构建为 unavailable。活动窗口标题采样（active-win-pos-rs，走 AX API）依赖 **Accessibility**（`check_accessibility_access` 仅 `AXIsProcessTrusted` 查询不弹框；禁止 device_query 在启动时主动 prompt，未授权时 health daemon 降级）。前端 Welcome/Settings 按状态分别显示 Request / Add in Settings / Reopen / Build Help，侧栏只导航 Welcome，不批量触发权限副作用。
+- **macOS 权限（input monitoring + accessibility）**：键鼠采样（device_query，底层 IOHIDManager）依赖 **Input Monitoring**；输入监控四态以公开 `IOHIDCheckAccess` 为基础，并用公开 `CGPreflightListenEventAccess` 修正 macOS 26 的 IOHID 假 Denied，显式 Request 固定依次调用 CG 与 IOHID 两条公开 ListenEvent API；系统不自动登记时由用户在列表下方「+」选择当前 Applications 壳。固定签名与 ad-hoc 构建都可 Request，签名只影响升级保权。活动窗口标题采样（active-win-pos-rs，走 AX API）依赖 **Accessibility**（`check_accessibility_access` 仅 `AXIsProcessTrusted` 查询不弹框；禁止 device_query 在启动时主动 prompt，未授权时 health daemon 降级）。前端 Welcome/Settings 按状态分别显示 Request / Add in Settings / Reopen，`unavailable` 也提供系统设置入口；侧栏只导航 Welcome，不批量触发权限副作用。
 - **托盘暂停菜单**：`tray.rs` 主菜单加「暂停/恢复监测」项（id `tray_pause`，toggle），点击切 `state.health.paused` 原子标记（与 `commands::health::toggle_health_paused` 复用同一份运行时标记，不落盘、重启失效）。
 - **架构（双线程 daemon，`health/mod.rs::start_health_daemon`）**：一个 `std::thread` 采样（线程局部持有非 Send 的 `DeviceState`/`DeviceQuerySampler`），跨线程只传 `ActivitySample`（Send 纯数据）；一个 `tauri::async_runtime::spawn` 处理 task（`select!{cancel, rx.recv()}` 范式，复用 cc/collector.rs）。daemon **在 lib.rs setup 同步段调用**（`app.manage` 之后），内部用 `tauri::async_runtime::spawn` 而非 `tokio::spawn`（主线程无 reactor），返回 `CancellationToken` 存 `AppState.health_cancel`，`shutdown_backend_runtime` 时 cancel 优雅停止。
 - **状态机（`health/state.rs::HealthStateMachine`，纯算法）**：每分钟喂 `(active: bool, now_ts: i64, &HealthThresholds)` 推进一拍。相位流转：Idle/Resting + 活跃 → 开新工作窗口；Working + 活跃 → 续 `last_active_ts`；Working + 停歇且距上次活动 ≥ `break_seconds` → 关窗口入 Resting（报告被关闭窗口）；其余保持。提醒判定：仅 Working 态，窗口自然时长 ≥ `work_window_seconds` 且本窗口未提醒过 → `should_remind` + 标记 `reminded`（同窗口去重）。配 7 单测。`StateOutcome.state`/`reminder_closed_window` 供未来统计扩展（当前 daemon 仅消费 `should_remind`，故 struct `#[allow(dead_code)]`）。
@@ -535,7 +535,7 @@ P3 把 P2P 协议从 v0（裸 `{error}` + 无能力探测）升级到 v1（`{pro
 
 ## 跨平台 Smoke（macOS / Windows）覆盖范围
 
-Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、doctor --json、日志轮转/脱敏、固定 LAN trust boundary 集成 smoke、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。公开 Windows/Linux Release 由 `release-tauri.yml` 负责，内部 macOS 包由 `internal-macos.yml` 负责，二者都**不能替代本 smoke 或真机 TCC 验证**。
+Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runner 上验证 **backend CLI 生命周期、data_dir 隔离、原生 PTY echo/exit、doctor --json、日志轮转/脱敏、固定 LAN trust boundary 集成 smoke、清理/可重复性与失败证据**。不依赖 GUI、tmux 或 WSL；结果不得宣称覆盖下方「明确未验证」项。workflow：`.github/workflows/cross-platform-smoke.yml`（name: **Cross-Platform Smoke**）。公开 Windows/Linux Release 由 `release-tauri.yml` 负责，macOS 固定签名包由 `internal-macos.yml` 负责，二者都**不能替代本 smoke 或真机 TCC 验证**。
 
 ### 已验证（Verified）
 
@@ -564,7 +564,7 @@ Phase-1 跨平台 smoke 在真实 `macos-latest` / `windows-latest` hosted runne
 | 多机 mDNS / 跨主机 P2P / 手机 QR | NOT VERIFIED — hosted runner scope |
 | 真实公网 peer 生产网卡路径 | NOT VERIFIED — injected ConnectInfo/XFF 不是生产证据 |
 | Browser L1 Playwright LAN journey | NOT VERIFIED in S1 — owned by S6 |
-| 发布安装包 | 公开 Windows/Linux 由 `release-tauri.yml`、内部 macOS 由 `internal-macos.yml` 独立负责，**不是**本 smoke 的替代 |
+| 发布安装包 | 公开 Windows/Linux 由 `release-tauri.yml`、macOS 固定签名包由 `internal-macos.yml` 负责，**不是**本 smoke 的替代 |
 
 ### 本地运行
 

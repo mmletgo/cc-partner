@@ -58,7 +58,11 @@ describe('permissionEntries', () => {
       'permission.inputMonitoring.deniedDescription',
     );
     assertEqual(entryFor('granted').action, 'none');
-    assertEqual(entryFor('unavailable').action, 'buildHelp');
-    assertEqual(entryFor('unavailable').actionLabel, 'permissionCard.buildHelp');
+    assertEqual(entryFor('unavailable').action, 'openSettings');
+    assertEqual(entryFor('unavailable').actionLabel, 'permissionCard.openSettings');
+    assertEqual(
+      entryFor('unavailable').description,
+      'permission.inputMonitoring.unavailableDescription',
+    );
   });
 });

@@ -231,7 +231,7 @@ describe('Welcome', () => {
     expect(requestMock).not.toHaveBeenCalled();
   });
 
-  test('input monitoring unavailable shows build help without permission IPC', async () => {
+  test('input monitoring unavailable still offers manual System Settings setup', async () => {
     inputMonitoringState = 'unavailable';
     await i18n.changeLanguage('zh');
     render(
@@ -244,11 +244,11 @@ describe('Welcome', () => {
 
     const card = screen.getByText('输入监控').closest('[data-granted]');
     expect(card).not.toBeNull();
-    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '查看构建说明' }));
+    expect(card?.textContent).toContain('仍可手动添加当前应用');
+    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '打开系统设置' }));
 
-    expect(screen.getByRole('status').textContent).toContain('稳定的内部代码签名');
     expect(requestMock).not.toHaveBeenCalled();
-    expect(openSettingsMock).not.toHaveBeenCalled();
+    expect(openSettingsMock).toHaveBeenCalledWith('inputMonitoring');
   });
 
   test('go settings + scheduled sync never auto-relaunches; reopen button relaunches once', async () => {

@@ -1,18 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "cc-partner Internal",
-  "identifier": "com.cc-partner.app.internal",
   "bundle": {
     "createUpdaterArtifacts": false,
     "macOS": {
       "signingIdentity": "cc-partner Internal Code Signing"
-    }
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/mmletgo/cc-partner/releases/download/internal-macos/latest.json"
-      ]
     }
   }
 }

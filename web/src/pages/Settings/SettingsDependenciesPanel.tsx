@@ -37,7 +37,6 @@ export interface SettingsDependenciesPanelProps {
   permRefreshing: boolean;
   permError: string | null;
   permRequesting: ReadonlySet<PermissionType> | Set<PermissionType>;
-  permissionBuildHelpVisible: boolean;
   onRequestAccess: (type: PermissionType, action?: PermissionEntryAction) => void;
   onRefreshPermissions: () => void;
 }
@@ -60,7 +59,6 @@ export function SettingsDependenciesPanel({
   permRefreshing,
   permError,
   permRequesting,
-  permissionBuildHelpVisible,
   onRequestAccess,
   onRefreshPermissions,
 }: SettingsDependenciesPanelProps): ReactElement {
@@ -101,11 +99,6 @@ export function SettingsDependenciesPanel({
         {permError ? (
           <p className={styles.helper} role="alert">
             {t('settings:permission.loadFailed', { error: permError })}
-          </p>
-        ) : null}
-        {permissionBuildHelpVisible ? (
-          <p className={styles.helper} role="status">
-            {tWelcome('internalBuildHelp')}
           </p>
         ) : null}
         {mapPermissions(permStatus, tWelcome).map((p) => (

@@ -925,20 +925,20 @@
     },
     {
       "id": "L3-MACOS-INPUT-MONITORING-INTERNAL-001",
-      "surface": "macos-internal-input-monitoring-stable-identity",
+      "surface": "macos-canonical-input-monitoring-stable-identity",
       "level": "L3",
       "tests": [
         "docs/development/macos-internal-signing.md",
         "docs/development/real-device-certification.md"
       ],
-      "command": "manual: fixed-certificate internal app deny -> grant -> explicit reopen -> upgrade without reauthorization",
+      "command": "manual: canonical fixed-certificate app deny -> grant -> explicit reopen -> upgrade without reauthorization",
       "ciJob": "manual",
       "platforms": [
         "macos"
       ],
       "exclusions": [
         "hosted runner substitute",
-        "ad-hoc or community build substitute",
+        "ad-hoc manual-add validation as a substitute for fixed-certificate upgrade evidence",
         "unit test or browser mock substitute",
         "certificate contract check without a real TCC interaction"
       ],

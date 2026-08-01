@@ -62,10 +62,10 @@ ensure_backend_debug_binary() {
   fi
 }
 
-# macOS 内部开发机自动发现固定代码签名 identity。首次成功发现时，检测脚本会把
+# macOS 开发机自动发现固定代码签名 identity。首次成功发现时，检测脚本会把
 # 非敏感 SHA-256 指纹写入用户 signing 目录作为 pin；后续同名证书漂移会拒绝启动。
-# 没有该 identity 的开源贡献者继续使用社区 Dev 壳，不需要额外配置。
-configure_macos_internal_dev_signing() {
+# 没有该 identity 时使用同一产品身份的 ad-hoc Dev 壳，输入监控可手动添加授权。
+configure_macos_dev_signing() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
     return
   fi
@@ -73,40 +73,41 @@ configure_macos_internal_dev_signing() {
   local identity="${CC_PARTNER_INTERNAL_SIGNING_IDENTITY:-}"
   local fingerprint="${CC_PARTNER_INTERNAL_CERT_SHA256:-}"
   if [[ -n "$identity" && -n "$fingerprint" ]]; then
-    info "macOS 内部开发签名: 使用显式环境变量 (${fingerprint:0:12}...)"
+    info "macOS 固定开发签名: 使用显式环境变量 (${fingerprint:0:12}...)"
     return
   fi
   if [[ -n "$identity" || -n "$fingerprint" ]]; then
-    error "macOS 内部开发签名变量必须成对设置: CC_PARTNER_INTERNAL_SIGNING_IDENTITY + CC_PARTNER_INTERNAL_CERT_SHA256"
+    error "macOS 固定开发签名变量必须成对设置: CC_PARTNER_INTERNAL_SIGNING_IDENTITY + CC_PARTNER_INTERNAL_CERT_SHA256"
     exit 1
   fi
 
   local detected_fingerprint
   if ! detected_fingerprint="$(node scripts/detect-macos-internal-signing.mjs)"; then
-    error "自动检测 macOS 内部开发签名失败；拒绝回退 ad-hoc，以免 TCC 身份漂移。"
+    error "自动检测 macOS 固定开发签名失败；拒绝回退 ad-hoc，以免 TCC 身份漂移。"
     exit 1
   fi
   if [[ -z "$detected_fingerprint" ]]; then
-    info "未检测到固定内部签名 identity，使用社区 Dev 壳（输入监控不可用）。"
+    info "未检测到固定签名 identity，使用 cc-partner (Dev) ad-hoc 壳。"
+    info "输入监控仍可在系统设置中手动添加；重新构建后可能需要再次授权。"
     return
   fi
 
   export CC_PARTNER_INTERNAL_SIGNING_IDENTITY='cc-partner Internal Code Signing'
   export CC_PARTNER_INTERNAL_CERT_SHA256="$detected_fingerprint"
-  info "已自动启用 macOS Internal Dev 签名 (${detected_fingerprint:0:12}...)"
+  info "已自动启用 macOS 固定 Dev 签名 (${detected_fingerprint:0:12}...)"
 }
 
 run_dev() {
   info "启动开发模式 (Tauri dev:Rust 后端 + Vite 前端 + 热重载)..."
   info "首次启动 Rust 编译较慢(数分钟),之后增量编译很快。"
-  configure_macos_internal_dev_signing
+  configure_macos_dev_signing
   # tauri dev 内部只 `cargo run` 默认 binary(app),不会自动构建独立后端 CLI。
   # 但 GUI setup 启动时必须拉起 cc-partner-backend sidecar,缺真 binary 会 panic。
   # 故在此预先构建 cc-partner-backend debug binary(cargo 增量编译,之后很快)。
   ensure_backend_debug_binary
 
-  # macOS：已配置固定 identity 时生成内部开发 .app；否则生成社区开发 .app。
-  # 两者都替换裸 target/debug/app，并使用独立 Bundle ID 与发布版分开。
+  # macOS：固定签名与 ad-hoc 都生成同一个 canonical Dev `.app`；签名只影响授权稳定性。
+  # Dev 使用独立 Bundle ID 与发布版分开。
   # 非 Darwin 仍走默认 cargo runner。
   if [[ "$(uname -s)" == "Darwin" ]]; then
     local runner="$PWD/scripts/macos-dev-cargo-runner.sh"
@@ -114,16 +115,12 @@ run_dev() {
       chmod +x "$runner" 2>/dev/null || true
     fi
     if [[ -x "$runner" ]]; then
-      if [[ -n "${CC_PARTNER_INTERNAL_SIGNING_IDENTITY:-}" ]]; then
-        info "macOS 开发壳: cc-partner Internal (Dev) / com.cc-partner.app.internal.dev"
-        info "固定位置: ~/Applications/cc-partner Internal (Dev).app"
-        info "输入监控将登记到固定内部 Dev 主体，与内部稳定版分开授权。"
-      else
-        info "macOS 开发壳: cc-partner (Dev) / com.cc-partner.app.dev"
-      fi
+      info "macOS 开发壳: cc-partner (Dev) / com.cc-partner.app.dev"
+      info "固定位置: ~/Applications/cc-partner (Dev).app"
+      info "输入监控与正式版分开授权。"
       exec "$TAURI_BIN" dev --runner "$runner"
     fi
-    error "缺少可执行 scripts/macos-dev-cargo-runner.sh，回退裸 binary（输入监控可能 fail-closed）"
+    error "缺少可执行 scripts/macos-dev-cargo-runner.sh，回退裸 binary（无法完成标准 .app 权限授权流程）"
   fi
   exec "$TAURI_BIN" dev
 }
@@ -155,9 +152,8 @@ cc-partner 启动脚本
 
 命令:
   dev       开发模式(默认):Tauri + Vite + 热重载
-            macOS 已安装固定内部签名 identity 时自动生成
-            ~/Applications/cc-partner Internal (Dev).app；未安装时生成社区
-            cc-partner-dev.app（输入监控不可用）
+            macOS 固定生成 ~/Applications/cc-partner (Dev).app；检测到
+            固定签名 identity 时使用固定签名，否则使用可手动授权的 ad-hoc 签名
   build     生产构建(产出 dmg/安装包)
   web       仅前端 Vite(浏览器预览,无 Tauri 外壳)
   clean     清理构建产物

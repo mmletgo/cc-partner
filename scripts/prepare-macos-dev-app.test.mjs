@@ -10,44 +10,35 @@ import {
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-test('uses community unavailable identity when internal signing env is absent', () => {
+test('uses the canonical dev identity when fixed signing is absent', () => {
   assert.deepEqual(resolveDevSigningChannel({}), {
-    appName: 'cc-partner-dev.app',
+    appName: 'cc-partner (Dev).app',
     bundleId: 'com.cc-partner.app.dev',
     displayName: 'cc-partner (Dev)',
     signingIdentity: '-',
-    internal: false,
+    fixedSigning: false,
   });
 });
 
-test('uses fixed internal dev identity without ad-hoc fallback', () => {
+test('fixed signing keeps the same canonical dev product identity', () => {
   assert.deepEqual(
     resolveDevSigningChannel({
       CC_PARTNER_INTERNAL_SIGNING_IDENTITY: 'cc-partner Internal Code Signing',
     }),
     {
-      appName: 'cc-partner Internal (Dev).app',
-      bundleId: 'com.cc-partner.app.internal.dev',
-      displayName: 'cc-partner Internal (Dev)',
+      appName: 'cc-partner (Dev).app',
+      bundleId: 'com.cc-partner.app.dev',
+      displayName: 'cc-partner (Dev)',
       signingIdentity: 'cc-partner Internal Code Signing',
-      internal: true,
+      fixedSigning: true,
     },
   );
 });
 
-test('stages internal dev app at a stable user Applications path', () => {
-  const internalChannel = resolveDevSigningChannel({
-    CC_PARTNER_INTERNAL_SIGNING_IDENTITY: 'cc-partner Internal Code Signing',
-  });
-  const communityChannel = resolveDevSigningChannel({});
-
+test('stages every dev build at the stable Applications path', () => {
   assert.equal(
-    resolveDevAppPath(internalChannel, '/tmp/debug', '/Users/tester'),
-    '/Users/tester/Applications/cc-partner Internal (Dev).app',
-  );
-  assert.equal(
-    resolveDevAppPath(communityChannel, '/tmp/debug', '/Users/tester'),
-    '/tmp/debug/cc-partner-dev.app',
+    resolveDevAppPath('/Users/tester'),
+    '/Users/tester/Applications/cc-partner (Dev).app',
   );
 });
 
@@ -61,17 +52,18 @@ test('runner matches the friendly app path literally instead of as a regular exp
   assert.match(runner, /index\(command, expected " "\) == 1/u);
 });
 
-test('keeps internal stable identity and updater feed isolated from public releases', () => {
+test('fixed macOS signing overlay inherits the canonical product identity and public updater feed', () => {
   const config = JSON.parse(
     readFileSync(join(repoRoot, 'src-tauri', 'tauri.internal.conf.json'), 'utf8'),
   );
-  assert.equal(config.identifier, 'com.cc-partner.app.internal');
+  assert.equal(config.productName, undefined);
+  assert.equal(config.identifier, undefined);
   assert.equal(
     config.bundle.macOS.signingIdentity,
     'cc-partner Internal Code Signing',
   );
   assert.equal(config.bundle.createUpdaterArtifacts, false);
-  assert.match(config.plugins.updater.endpoints[0], /\/internal-macos\/latest\.json$/u);
+  assert.equal(config.plugins, undefined);
 
   const publicRelease = readFileSync(
     join(repoRoot, '.github', 'workflows', 'release-tauri.yml'),

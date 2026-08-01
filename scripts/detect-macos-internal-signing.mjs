@@ -61,10 +61,11 @@ function runSecurity(args) {
 }
 
 /**
- * 自动发现并固定本机内部签名身份。
+ * 自动发现并固定本机 macOS 签名身份。
  *
  * 首次发现唯一 identity 时写入非敏感 SHA-256 pin；以后同名证书发生漂移会 fail closed，
- * 避免开发者无感切换 TCC 主体。没有 identity 时返回 null，供开源贡献者使用社区 Dev 壳。
+ * 避免开发者无感切换 TCC 主体。没有 identity 时返回 null，调用方使用同一产品身份的
+ * ad-hoc Dev 壳并提供手动输入监控授权路径。
  */
 export function detectAndPinInternalSigning({
   platform = process.platform,
@@ -91,7 +92,7 @@ export function detectAndPinInternalSigning({
     const pinned = normalizeFingerprint(readFileSync(pinPath, 'utf8'), 64, '本地证书 pin ');
     if (pinned !== fingerprint) {
       throw new Error(
-        `已安装证书指纹与本地 pin 不一致；如确需轮换证书，请按 macOS 内部签名手册执行 TCC 主体迁移`,
+        `已安装证书指纹与本地 pin 不一致；如确需轮换证书，请按 macOS 签名手册执行 TCC 主体迁移`,
       );
     }
   } else {

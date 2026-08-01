@@ -31,7 +31,7 @@ function securityStub({ identities = identityOutput(), certificates = certificat
   };
 }
 
-test('returns community mode when the fixed identity is absent', () => {
+test('returns ad-hoc mode when the fixed identity is absent', () => {
   const result = detectAndPinInternalSigning({
     platform: 'darwin',
     pinPath: join(mkdtempSync(join(tmpdir(), 'cc-signing-test-')), 'pin'),

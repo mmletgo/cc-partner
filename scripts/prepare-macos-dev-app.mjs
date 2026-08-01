@@ -5,14 +5,14 @@
  * Business Logic（为什么需要这个脚本）:
  *   macOS TCC（输入监控/屏幕录制等）按代码签名身份记账。`tauri dev` 默认跑裸
  *   `target/debug/app`，无稳定 CFBundleIdentifier，系统设置列表名称混乱，且应用内
- *   fail-closed 会恒显示「不可用」。开发版需要独立的 .app 包，使用与稳定版不同的
- *   显示名与 Bundle ID，便于单独授权、互不抢开关；输入监控只允许固定内部签名通道。
+ *   状态与手动授权入口不可靠。开发版需要独立的 .app 包，使用与正式版不同的显示名与
+ *   Bundle ID，便于单独授权、互不抢开关；固定签名只改善重建后的授权稳定性。
  *
  * Code Logic（这个脚本做什么）:
  *   组装开发包：
- *   - 默认社区壳：com.cc-partner.app.dev + ad-hoc，仅开发非输入监控功能
- *   - 显式内部壳：com.cc-partner.app.internal.dev + 固定自签名证书，固定安装到
- *     `~/Applications/cc-partner Internal (Dev).app`，供系统设置「+」手动选择
+ *   - 默认使用 com.cc-partner.app.dev + ad-hoc，输入监控可由用户手动添加授权
+ *   - 检测到固定自签名证书时保持相同产品身份，只替换签名方式
+ *   - 两种签名方式都固定安装到 `~/Applications/cc-partner (Dev).app`
  *   - 将 debug GUI 二进制复制为 Contents/MacOS/cc-partner
  *   - 尽量把 debug backend 也放进 MacOS（便于 sidecar 旁路发现）
  *   - 复制 icon.icns（若有）
@@ -47,16 +47,13 @@ const REPO_ROOT = resolve(__dirname, '..');
 const SRC_TAURI = join(REPO_ROOT, 'src-tauri');
 const DEBUG_DIR = join(SRC_TAURI, 'target', 'debug');
 
-export const DEV_APP_NAME = 'cc-partner-dev.app';
+export const DEV_APP_NAME = 'cc-partner (Dev).app';
 export const DEV_BUNDLE_ID = 'com.cc-partner.app.dev';
 export const DEV_DISPLAY_NAME = 'cc-partner (Dev)';
 export const DEV_EXECUTABLE = 'cc-partner';
-export const INTERNAL_DEV_APP_NAME = 'cc-partner Internal (Dev).app';
-export const INTERNAL_DEV_BUNDLE_ID = 'com.cc-partner.app.internal.dev';
-export const INTERNAL_DEV_DISPLAY_NAME = 'cc-partner Internal (Dev)';
 export const INTERNAL_SIGNING_IDENTITY = 'cc-partner Internal Code Signing';
 
-/** 根据显式环境变量选择社区或内部开发签名通道。 */
+/** 根据显式环境变量选择 ad-hoc 或固定签名，同时保持唯一开发产品身份。 */
 export function resolveDevSigningChannel(env = process.env) {
   const identity = env.CC_PARTNER_INTERNAL_SIGNING_IDENTITY?.trim();
   if (!identity) {
@@ -65,43 +62,37 @@ export function resolveDevSigningChannel(env = process.env) {
       bundleId: DEV_BUNDLE_ID,
       displayName: DEV_DISPLAY_NAME,
       signingIdentity: '-',
-      internal: false,
+      fixedSigning: false,
     };
   }
   if (identity !== INTERNAL_SIGNING_IDENTITY) {
     throw new Error(
-      `内部开发签名 identity 必须固定为 ${INTERNAL_SIGNING_IDENTITY}，实际为 ${identity}`,
+      `macOS 固定签名 identity 必须为 ${INTERNAL_SIGNING_IDENTITY}，实际为 ${identity}`,
     );
   }
   return {
-    appName: INTERNAL_DEV_APP_NAME,
-    bundleId: INTERNAL_DEV_BUNDLE_ID,
-    displayName: INTERNAL_DEV_DISPLAY_NAME,
+    appName: DEV_APP_NAME,
+    bundleId: DEV_BUNDLE_ID,
+    displayName: DEV_DISPLAY_NAME,
     signingIdentity: identity,
-    internal: true,
+    fixedSigning: true,
   };
 }
 
 /**
  * Business Logic（为什么需要这个函数）:
  *   macOS 26 可能不把公开 Input Monitoring Request 自动登记到系统设置列表，用户需要
- *   通过列表下方「+」手动选择应用。内部开发壳必须位于稳定、易找到的 Applications 路径，
- *   不能随 Cargo target 目录漂移。
+ *   通过列表下方「+」手动选择应用。无论是否固定签名，开发壳都必须位于稳定、易找到的
+ *   Applications 路径，不能随 Cargo target 目录漂移。
  *
  * Code Logic（这个函数做什么）:
- *   内部签名通道固定返回用户 Applications 下的开发壳；社区 ad-hoc 壳仍留在 debug 目录，
- *   避免把不可授权构建伪装成可安装应用。
+ *   两种签名方式统一返回用户 Applications 下的 canonical Dev 壳。
  *
- * @param {ReturnType<typeof resolveDevSigningChannel>} channel
- * @param {string} debugDir
  * @param {string} userHome
  * @returns {string}
  */
-export function resolveDevAppPath(channel, debugDir = DEBUG_DIR, userHome = homedir()) {
-  if (channel.internal) {
-    return join(userHome, 'Applications', INTERNAL_DEV_APP_NAME);
-  }
-  return join(debugDir, channel.appName);
+export function resolveDevAppPath(userHome = homedir()) {
+  return join(userHome, 'Applications', DEV_APP_NAME);
 }
 
 /**
@@ -221,7 +212,7 @@ export function prepareMacosDevApp(opts = {}) {
     );
   }
 
-  const appPath = resolveDevAppPath(channel, debugDir);
+  const appPath = resolveDevAppPath();
   const contents = join(appPath, 'Contents');
   const macos = join(contents, 'MacOS');
   const resources = join(contents, 'Resources');
@@ -298,10 +289,10 @@ export function prepareMacosDevApp(opts = {}) {
     );
   }
 
-  if (channel.internal) {
+  if (channel.fixedSigning) {
     const expectedCertSha256 = process.env.CC_PARTNER_INTERNAL_CERT_SHA256?.trim();
     if (!expectedCertSha256) {
-      throw new Error('内部开发签名要求 CC_PARTNER_INTERNAL_CERT_SHA256');
+      throw new Error('macOS 固定签名要求 CC_PARTNER_INTERNAL_CERT_SHA256');
     }
     validateSigningMetadata(inspectSignedApp(appPath), {
       expectedIdentifier: channel.bundleId,

@@ -31,7 +31,7 @@ docs/        → prd + 设计文档；质量证据矩阵 `docs/development/quali
 AGENTS.md    → 根层开发指南（组件清单与跨目录陷阱）
 ```
 
-**一键启动**：`./start.sh`（dev / build / web / help）。macOS `dev` 经 `scripts/macos-dev-cargo-runner.sh` 打成 `cc-partner-dev.app`（显示名 **cc-partner (Dev)**、`com.cc-partner.app.dev`），与发布版 `/Applications/cc-partner.app` 分开展示/授权。
+**一键启动**：`./start.sh`（dev / build / web / help）。macOS `dev` 经 `scripts/macos-dev-cargo-runner.sh` 固定组装到 `~/Applications/cc-partner (Dev).app`（`com.cc-partner.app.dev`），与发布版 `/Applications/cc-partner.app` 分开展示/授权；无固定签名时可在系统设置中手动添加。
 
 ## 核心架构
 

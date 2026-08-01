@@ -69,7 +69,6 @@ export function Welcome() {
   const navigate = useNavigate();
   const [flavor, setFlavor] = useState<AppFlavor>('release');
   const [phase, setPhase] = useState<WelcomePermPhase>('idle');
-  const [buildHelpVisible, setBuildHelpVisible] = useState(false);
   const phaseRef = useRef<WelcomePermPhase>(phase);
   /** 防止 visibility/focus 并发进入多轮 sync */
   const syncInFlightRef = useRef(false);
@@ -254,18 +253,14 @@ export function Welcome() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   四态必须映射为独立动作：notDetermined=Request、Denied=Open Settings、
-   *   Unavailable=构建说明；任何一步都不得自动 relaunch。
+   *   四态必须映射为独立动作：notDetermined=Request、Denied/Unavailable=Open Settings；
+   *   任何一步都不得自动 relaunch。
    *
    * Code Logic（这个函数做什么）:
-   *   buildHelp 只展示说明；request/openSettings 调各自 hook 后刷新，sticky 再进入同步相位。
+   *   request/openSettings 调各自 hook 后刷新，sticky 再进入同步相位。
    */
   const handlePermissionAction = useCallback(
     (type: PermissionType, action: PermissionEntryAction) => {
-      if (action === 'buildHelp') {
-        setBuildHelpVisible(true);
-        return;
-      }
       if (action === 'none') return;
 
       dispatch({ type: 'GO_SETTINGS', permission: type });
@@ -415,12 +410,6 @@ export function Welcome() {
         {error ? (
           <p className={styles.subtitle} role="alert">
             {t('welcome:checkFailed', { error })}
-          </p>
-        ) : null}
-
-        {buildHelpVisible ? (
-          <p className={styles.subtitle} role="status">
-            {t('welcome:internalBuildHelp')}
           </p>
         ) : null}
 

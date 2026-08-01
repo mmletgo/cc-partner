@@ -1,10 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// 内部稳定版 Bundle Identifier；必须与 Tauri internal overlay 完全一致。
-pub const INTERNAL_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app.internal";
-/// 内部开发版 Bundle Identifier；必须与 macOS Dev 壳生成脚本完全一致。
-pub const INTERNAL_DEV_BUNDLE_IDENTIFIER: &str = "com.cc-partner.app.internal.dev";
-
 /// 输入监控授权状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,7 +10,7 @@ pub enum InputMonitoringState {
     Denied,
     /// IOHID 尚未记录决定，或 macOS 26 在本进程请求前返回假 Denied。
     NotDetermined,
-    /// 当前构建不是稳定内部签名主体，或系统返回未知状态。
+    /// 系统返回未知状态；用户仍可尝试在系统设置中手动添加当前应用。
     Unavailable,
 }
 
@@ -25,7 +20,7 @@ pub enum InputMonitoringState {
 pub struct InputMonitoringPermissionState {
     /// 兼容消费方的快速判据；仅 `state=granted` 时为 true。
     pub granted: bool,
-    /// 用于决定 Welcome 显示“请求授权”“打开设置”还是构建说明。
+    /// 用于决定 Welcome 显示“请求授权”还是“打开设置”。
     pub state: InputMonitoringState,
 }
 
@@ -38,23 +33,10 @@ impl From<InputMonitoringState> for InputMonitoringPermissionState {
     }
 }
 
-/// 判断当前进程是否属于可稳定登记的内部 TCC 主体。
-///
-/// 公开源码/ad-hoc 构建故意 fail closed，避免把用户带到没有应用条目的设置页。
-pub(crate) fn is_supported_subject(bundle_id: Option<&str>) -> bool {
-    matches!(
-        bundle_id,
-        Some(INTERNAL_BUNDLE_IDENTIFIER | INTERNAL_DEV_BUNDLE_IDENTIFIER)
-    )
-}
-
 /// 把公开 IOHID 返回值映射为产品四态。
 ///
-/// `supported=false` 或未知系统值一律返回 `Unavailable`，不猜测、不假绿。
-pub(crate) fn state_from_raw(supported: bool, raw: u32) -> InputMonitoringState {
-    if !supported {
-        return InputMonitoringState::Unavailable;
-    }
+/// 未知系统值返回 `Unavailable`，不猜测、不假绿；是否固定签名不参与可用性判断。
+pub(crate) fn state_from_raw(raw: u32) -> InputMonitoringState {
     match raw {
         0 => InputMonitoringState::Granted,
         1 => InputMonitoringState::Denied,
@@ -102,38 +84,26 @@ pub(crate) trait InputMonitoringAccessProvider {
 /// 使用指定 provider 查询输入监控状态，不产生系统副作用。
 pub(crate) fn check_with_provider<P: InputMonitoringAccessProvider>(
     provider: &P,
-    supported: bool,
 ) -> InputMonitoringPermissionState {
-    if !supported {
-        return InputMonitoringState::Unavailable.into();
-    }
     let raw = provider.check();
     if raw == 0 || provider.preflight_listen_event() {
         return InputMonitoringState::Granted.into();
     }
     match raw {
         1 if !provider.requested_in_process() => InputMonitoringState::NotDetermined.into(),
-        _ => state_from_raw(true, raw).into(),
+        _ => state_from_raw(raw).into(),
     }
 }
 
 /// 在指定公开系统 API provider 上执行一次显式 Request 状态机。
 ///
 /// 仅 `NotDetermined` 调 Request；依次调用 CoreGraphics 与 IOHID 两条公开 ListenEvent
-/// 请求路径。Denied/Granted/Unavailable 都是无副作用 noop。
+/// 请求路径。Denied/Granted/Unavailable 都是无副作用 noop。固定签名与 ad-hoc 构建
+/// 共用该状态机；未自动登记时由前端引导用户在系统设置中手动添加当前 `.app`。
 pub(crate) fn request_with_provider<P: InputMonitoringAccessProvider>(
     provider: &P,
-    supported: bool,
 ) -> InputMonitoringRequestResult {
-    if !supported {
-        return InputMonitoringRequestResult {
-            operation: InputMonitoringOperation::Noop,
-            before: InputMonitoringState::Unavailable,
-            after: InputMonitoringState::Unavailable,
-        };
-    }
-
-    let before = check_with_provider(provider, true).state;
+    let before = check_with_provider(provider).state;
     if before != InputMonitoringState::NotDetermined {
         return InputMonitoringRequestResult {
             operation: InputMonitoringOperation::Noop,
@@ -148,7 +118,7 @@ pub(crate) fn request_with_provider<P: InputMonitoringAccessProvider>(
     InputMonitoringRequestResult {
         operation: InputMonitoringOperation::Request,
         before,
-        after: check_with_provider(provider, true).state,
+        after: check_with_provider(provider).state,
     }
 }
 
@@ -205,33 +175,27 @@ impl InputMonitoringAccessProvider for SystemInputMonitoringProvider {
 
 /// 查询当前进程的输入监控四态。
 ///
-/// macOS 仅接受两个内部 Bundle ID；其它平台保持既有跨平台语义，视为已授权。
+/// 固定签名与 ad-hoc `.app` 都可查询；其它平台保持既有跨平台语义，视为已授权。
 #[cfg(target_os = "macos")]
-pub fn check_input_monitoring_state(bundle_id: Option<&str>) -> InputMonitoringPermissionState {
-    check_with_provider(
-        &SystemInputMonitoringProvider,
-        is_supported_subject(bundle_id),
-    )
+pub fn check_input_monitoring_state() -> InputMonitoringPermissionState {
+    check_with_provider(&SystemInputMonitoringProvider)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn check_input_monitoring_state(_bundle_id: Option<&str>) -> InputMonitoringPermissionState {
+pub fn check_input_monitoring_state() -> InputMonitoringPermissionState {
     InputMonitoringState::Granted.into()
 }
 
 /// 显式请求输入监控授权。
 ///
-/// 仅 macOS + 稳定内部主体 + NotDetermined 会调用公开 ListenEvent Request。
+/// macOS 上任何 `.app` 的 NotDetermined 状态都会调用公开 ListenEvent Request。
 #[cfg(target_os = "macos")]
-pub fn request_input_monitoring_access(bundle_id: Option<&str>) -> InputMonitoringRequestResult {
-    request_with_provider(
-        &SystemInputMonitoringProvider,
-        is_supported_subject(bundle_id),
-    )
+pub fn request_input_monitoring_access() -> InputMonitoringRequestResult {
+    request_with_provider(&SystemInputMonitoringProvider)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn request_input_monitoring_access(_bundle_id: Option<&str>) -> InputMonitoringRequestResult {
+pub fn request_input_monitoring_access() -> InputMonitoringRequestResult {
     InputMonitoringRequestResult {
         operation: InputMonitoringOperation::Noop,
         before: InputMonitoringState::Granted,
@@ -244,9 +208,8 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use super::{
-        check_with_provider, is_supported_subject, request_with_provider, state_from_raw,
-        InputMonitoringAccessProvider, InputMonitoringOperation, InputMonitoringState,
-        INTERNAL_BUNDLE_IDENTIFIER, INTERNAL_DEV_BUNDLE_IDENTIFIER,
+        check_with_provider, request_with_provider, state_from_raw, InputMonitoringAccessProvider,
+        InputMonitoringOperation, InputMonitoringState,
     };
 
     struct FakeProvider {
@@ -308,27 +271,11 @@ mod tests {
     /// Code Logic（这个测试做什么）:
     ///     把公开 IOHID API 的三个稳定返回值映射到前端四态；未知值 fail closed。
     #[test]
-    fn maps_iohid_state_only_for_supported_subject() {
-        assert_eq!(state_from_raw(false, 0), InputMonitoringState::Unavailable);
-        assert_eq!(state_from_raw(true, 0), InputMonitoringState::Granted);
-        assert_eq!(state_from_raw(true, 1), InputMonitoringState::Denied);
-        assert_eq!(state_from_raw(true, 2), InputMonitoringState::NotDetermined);
-        assert_eq!(state_from_raw(true, 99), InputMonitoringState::Unavailable);
-    }
-
-    /// Business Logic（为什么需要这个测试）:
-    ///     只有固定内部签名通道才是可稳定登记的 TCC 主体；公开源码/ad-hoc 构建不得假装
-    ///     输入监控可用，否则“去设置”仍会打开一个没有 cc-partner 的空列表。
-    ///
-    /// Code Logic（这个测试做什么）:
-    ///     仅接受内部稳定版和内部开发版两个精确 Bundle ID。
-    #[test]
-    fn accepts_only_internal_bundle_ids() {
-        assert!(is_supported_subject(Some(INTERNAL_BUNDLE_IDENTIFIER)));
-        assert!(is_supported_subject(Some(INTERNAL_DEV_BUNDLE_IDENTIFIER)));
-        assert!(!is_supported_subject(Some("com.cc-partner.app")));
-        assert!(!is_supported_subject(Some("app")));
-        assert!(!is_supported_subject(None));
+    fn maps_iohid_state_for_every_macos_app_subject() {
+        assert_eq!(state_from_raw(0), InputMonitoringState::Granted);
+        assert_eq!(state_from_raw(1), InputMonitoringState::Denied);
+        assert_eq!(state_from_raw(2), InputMonitoringState::NotDetermined);
+        assert_eq!(state_from_raw(99), InputMonitoringState::Unavailable);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -341,7 +288,7 @@ mod tests {
     fn denied_request_is_noop() {
         let provider = FakeProvider::new(1, 0);
         provider.requested_in_process.set(true);
-        let result = request_with_provider(&provider, true);
+        let result = request_with_provider(&provider);
 
         assert_eq!(result.operation, InputMonitoringOperation::Noop);
         assert_eq!(result.before, InputMonitoringState::Denied);
@@ -357,7 +304,7 @@ mod tests {
     #[test]
     fn not_determined_requests_exactly_once_then_rechecks() {
         let provider = FakeProvider::new(2, 1);
-        let result = request_with_provider(&provider, true);
+        let result = request_with_provider(&provider);
 
         assert_eq!(result.operation, InputMonitoringOperation::Request);
         assert_eq!(result.before, InputMonitoringState::NotDetermined);
@@ -376,7 +323,7 @@ mod tests {
     fn not_determined_registers_with_core_graphics_before_iohid_fallback() {
         let provider = FakeProvider::new(2, 1);
 
-        let result = request_with_provider(&provider, true);
+        let result = request_with_provider(&provider);
 
         assert_eq!(result.operation, InputMonitoringOperation::Request);
         assert_eq!(result.before, InputMonitoringState::NotDetermined);
@@ -398,7 +345,7 @@ mod tests {
     fn false_denied_first_request_still_calls_both_public_apis() {
         let provider = FakeProvider::new(1, 1);
 
-        let result = request_with_provider(&provider, true);
+        let result = request_with_provider(&provider);
 
         assert_eq!(result.operation, InputMonitoringOperation::Request);
         assert_eq!(result.before, InputMonitoringState::NotDetermined);
@@ -410,19 +357,20 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     社区/ad-hoc 构建不是稳定 TCC 主体，任何 Request 都只会制造空列表或漂移条目。
+    ///     ad-hoc 构建同样能够使用输入监控；如果 macOS 没有自动登记，用户仍可在系统设置
+    ///     中手动选择当前 `.app`，所以后端不能按签名或 Bundle ID 禁止公开 Request。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     即使底层伪装成 NotDetermined，只要主体不受支持就返回 unavailable/noop。
+    ///     注入 NotDetermined，断言所有 macOS `.app` 都能进入公开 Request 路径。
     #[test]
-    fn unsupported_subject_never_requests() {
+    fn ad_hoc_app_subject_can_request_input_monitoring() {
         let provider = FakeProvider::new(2, 0);
-        let result = request_with_provider(&provider, false);
+        let result = request_with_provider(&provider);
 
-        assert_eq!(result.operation, InputMonitoringOperation::Noop);
-        assert_eq!(result.before, InputMonitoringState::Unavailable);
-        assert_eq!(result.after, InputMonitoringState::Unavailable);
-        assert_eq!(provider.request_calls.get(), 0);
+        assert_eq!(result.operation, InputMonitoringOperation::Request);
+        assert_eq!(result.before, InputMonitoringState::NotDetermined);
+        assert_eq!(result.after, InputMonitoringState::Granted);
+        assert_eq!(provider.request_calls.get(), 1);
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -434,7 +382,7 @@ mod tests {
     #[test]
     fn check_reports_not_determined_as_not_granted() {
         let provider = FakeProvider::new(2, 0);
-        let result = check_with_provider(&provider, true);
+        let result = check_with_provider(&provider);
 
         assert_eq!(result.state, InputMonitoringState::NotDetermined);
         assert!(!result.granted);
@@ -452,7 +400,7 @@ mod tests {
     fn iohid_denied_before_process_request_remains_requestable() {
         let provider = FakeProvider::new(1, 1);
 
-        let result = check_with_provider(&provider, true);
+        let result = check_with_provider(&provider);
 
         assert_eq!(result.state, InputMonitoringState::NotDetermined);
         assert!(!result.granted);
@@ -469,7 +417,7 @@ mod tests {
         let provider = FakeProvider::new(1, 1);
         provider.listen_event_granted.set(true);
 
-        let result = check_with_provider(&provider, true);
+        let result = check_with_provider(&provider);
 
         assert_eq!(result.state, InputMonitoringState::Granted);
         assert!(result.granted);

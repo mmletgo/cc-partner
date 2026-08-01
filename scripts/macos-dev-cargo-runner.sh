@@ -19,13 +19,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEBUG_DIR="$REPO_ROOT/src-tauri/target/debug"
-if [[ -n "${CC_PARTNER_INTERNAL_SIGNING_IDENTITY:-}" ]]; then
-  DEV_APP="${HOME}/Applications/cc-partner Internal (Dev).app"
-  DEV_DISPLAY_NAME="cc-partner Internal (Dev)"
-else
-  DEV_APP="$DEBUG_DIR/cc-partner-dev.app"
-  DEV_DISPLAY_NAME="cc-partner (Dev)"
-fi
+DEV_APP="${HOME}/Applications/cc-partner (Dev).app"
+DEV_DISPLAY_NAME="cc-partner (Dev)"
 DEV_BIN="$DEV_APP/Contents/MacOS/cc-partner"
 PREPARE_JS="$SCRIPT_DIR/prepare-macos-dev-app.mjs"
 LOG_DIR="$DEBUG_DIR"

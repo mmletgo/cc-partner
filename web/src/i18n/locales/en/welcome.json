@@ -22,7 +22,8 @@
     "inputMonitoring": {
       "title": "Input Monitoring",
       "description": "Needed for health reminder keyboard activity. Request access to let macOS register the current app",
-      "deniedDescription": "If macOS did not register it: open System Settings, click + below the Input Monitoring list, select the current cc-partner app (cc-partner Internal (Dev) for development), then enable the switch"
+      "deniedDescription": "If macOS did not register it: open System Settings, click + below the Input Monitoring list, select the current cc-partner app (cc-partner (Dev) for development), then enable the switch",
+      "unavailableDescription": "macOS cannot confirm Input Monitoring status right now, but you can still add the current app manually and grant access"
     },
     "notification": {
       "title": "Notifications",
@@ -35,10 +36,8 @@
     "requestAccess": "Request access",
     "openSettings": "Open System Settings",
     "addInSettings": "Add in System Settings",
-    "buildHelp": "View build requirements",
     "requesting": "Working…"
   },
-  "internalBuildHelp": "This build does not have a stable internal code-signing identity, so macOS cannot register Input Monitoring reliably. Install and run the internally signed cc-partner Internal app.",
   "recheck": "Recheck",
   "checkFailed": "Failed to check permissions: {{error}}",
   "unknownError": "Unknown error",
