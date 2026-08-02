@@ -240,6 +240,7 @@ export function Workbench() {
     worktreeBusy,
     unknownMutationLock,
     worktreeError,
+    hookRepair,
     createWorktreeOpen,
     setCreateWorktreeOpen,
     createWorktreeBranchPrefix,
@@ -261,9 +262,11 @@ export function Workbench() {
     handlePushWorktree,
     handleMergeWorktree,
     handleRemoveWorktree,
+    handleRepairHookFailure,
+    handleRetryAfterRepair,
     clearMergeStagePanel,
   } = worktreeGitController;
-  // Business Logic: 文件工作区域（目录树 + tab + dirty/save/format + create/rename/delete/copy）由独立 controller
+  // 业务逻辑：文件工作区域（目录树 + tab + dirty/save/format + create/rename/delete/copy）由独立 controller
   // 持有，避免在 Workbench.tsx 里散落多处 state/handler/effect；controller 接收窄 API/回调，不复制邻接域 state。
   // workspaceView / automationConsoleOpen 仍由页面持有（跨域共享），controller 通过 request* 回调表达切换意图。
   // Code Logic: translateFileError / translateFileMessage 必须稳定（useCallback），否则 controller 内 useCallback
@@ -1172,14 +1175,10 @@ export function Workbench() {
             remoteWriteDisabled,
             gitCommits,
             gitHistoryLoading,
-            gitHistoryError,
-            worktreeBusy,
-            unknownMutationLock,
-            mergeStages,
-            loadGitHistory,
-            handleCommitWorktree,
-            handlePushWorktree,
-            handleMergeWorktree,
+            gitHistoryError, worktreeBusy, unknownMutationLock,
+            hookRepair, handleRepairHookFailure, handleRetryAfterRepair,
+            mergeStages, loadGitHistory,
+            handleCommitWorktree, handlePushWorktree, handleMergeWorktree,
           }}
         />
       </aside>

@@ -211,6 +211,16 @@ export interface WorkbenchWorktreeGitControllerResult {
   handlePushWorktree: () => Promise<void>;
   handleMergeWorktree: () => Promise<void>;
   handleRemoveWorktree: () => Promise<void>;
+  /**
+   * failedHook 之后用户点「让 AI 修复」时调用：在该 worktree 终端启动 Claude agent 修复钩子根因。
+   * 失败/未设置 hookRepair 时 no-op。
+   */
+  handleRepairHookFailure: () => Promise<void>;
+  /**
+   * 修复完成后用户点「重试 commit/push」：按 hookRepair.kind 复用对应 handler 走 fresh clientOperationId。
+   * 未设置 hookRepair 时 no-op。
+   */
+  handleRetryAfterRepair: () => Promise<void>;
   /** 立即清空 merge 阶段条（取消隐藏计时器、清空追踪 worktree 与阶段列表）。 */
   clearMergeStagePanel: () => void;
 }
@@ -915,6 +925,61 @@ export function useWorkbenchWorktreeGitController(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   failedHook 之后用户点「让 AI 修复」时调用：在该 worktree 终端启动 Claude agent 修复钩子根因。
+   *   修复不消耗原 failedHook 的 clientOperationId（保留供前端「重试」入口），agent 完成后用户手动重试。
+   *
+   * Code Logic（这个函数做什么）:
+   *   校验 active project/worktree + 待修复上下文；调 workbenchApi.worktrees.repairHookFailure；
+   *   成功后聚焦新 terminal session（terminalBridge.focusSession）、保留 hookRepair + 写入 terminalSessionId；
+   *   失败保留 hookRepair 并经 markRequestFailure 上报（让用户可重试 repair）。
+   */
+  const handleRepairHookFailure = useCallback(async (): Promise<void> => {
+    const worktreeId = activeWorktreeIdRef.current;
+    if (!worktreeId) return;
+    if (remoteWriteDisabled) return;
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    if (!hookRepair) return;
+    const settled = beginMutationOperation(projectId, worktreeId);
+    try {
+      setWorktreeBusy('commit');
+      setWorktreeError(null);
+      const repair = await workbenchApi.worktrees.repairHookFailure(
+        worktreeId,
+        hookRepair.hookFailure,
+      );
+      if (!isSettledCurrent(settled)) return;
+      void terminalBridge.focusSession(repair.terminalSessionId);
+      setHookRepair({ ...hookRepair, terminalSessionId: repair.terminalSessionId });
+    } catch (error) {
+      if (!isSettledCurrent(settled)) return;
+      markRequestFailure(projectId, error);
+      setWorktreeError(
+        displayErrorMessage(error, translateError('commitWorktree'), desktopUnavailableMessage),
+      );
+    } finally {
+      if (isSettledCurrent(settled)) {
+        setWorktreeBusy(null);
+      }
+    }
+  }, [
+    activeWorktreeIdRef,
+    activeProjectIdRef,
+    hookRepair,
+    remoteWriteDisabled,
+    terminalBridge,
+    beginMutationOperation,
+    isSettledCurrent,
+    markRequestFailure,
+    displayErrorMessage,
+    translateError,
+    desktopUnavailableMessage,
+    setWorktreeBusy,
+    setWorktreeError,
+  ]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   用户推送当前 worktree 分支到 upstream；推送后刷新 worktree 状态与 Git 历史（如当前在 history tab）。
    *
    * Code Logic（这个函数做什么）:
@@ -973,11 +1038,25 @@ export function useWorkbenchWorktreeGitController(
 
       if (isMutationSucceeded(envelope)) {
         clearUnknownMutationLockForKind('push');
+        // 成功 push 清空待修复上下文。
+        setHookRepair(null);
         invalidateWorktreeListRequests(projectId);
         invalidateGitHistoryRequests(projectId, worktreeId);
         await loadWorktrees(projectId);
         if (!isSettledCurrent(settled)) return;
         if (inspectorTab === 'history') await loadGitHistory();
+        return;
+      }
+
+      if (isMutationFailedHook(envelope)) {
+        // pre-push 钩子失败：保留结构化失败 + 原 id 供前端展示「让 AI 修复」按钮；worktreeError 不覆盖。
+        clearUnknownMutationLockForKind('push');
+        setHookRepair({
+          kind: 'push',
+          hookFailure: envelope.hookFailure,
+          clientOperationId: envelope.clientOperationId,
+        });
+        setWorktreeError(null);
         return;
       }
 
@@ -1037,6 +1116,25 @@ export function useWorkbenchWorktreeGitController(
     translateError,
     unknownMutationLock,
   ]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   修复完成后用户点「重试 commit/push」：清空 hookRepair 并复用对应 handler 走 fresh clientOperationId 路径。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 hookRepair.kind 调 handleCommitWorktree / handlePushWorktree；handler 内部 resolveClientOperationId
+   *   因 hookRepair 已清空而 mint fresh id（除非持有 unknownMutationLock，否则走 ledger Fresh 路径）。
+   */
+  const handleRetryAfterRepair = useCallback(async (): Promise<void> => {
+    if (!hookRepair) return;
+    const kind = hookRepair.kind;
+    setHookRepair(null);
+    if (kind === 'commit') {
+      await handleCommitWorktree();
+    } else {
+      await handlePushWorktree();
+    }
+  }, [hookRepair, handleCommitWorktree, handlePushWorktree]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1435,6 +1533,8 @@ export function useWorkbenchWorktreeGitController(
     handlePushWorktree,
     handleMergeWorktree,
     handleRemoveWorktree,
+    handleRepairHookFailure,
+    handleRetryAfterRepair,
     clearMergeStagePanel,
   };
 }
