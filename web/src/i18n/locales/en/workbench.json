@@ -497,6 +497,22 @@
     "commitPrompt": "Enter commit message",
     "mergeConfirm": "Merge “{{name}}” into the main worktree?",
     "removeConfirm": "Remove worktree “{{name}}”? Make sure this workspace is no longer needed.",
+    "hookRepair": {
+      "title": "Git hook blocked {{action}}",
+      "titleCommit": "pre-commit hook blocked commit",
+      "titlePush": "pre-push hook blocked push",
+      "exitCode": "Exit code {{code}}",
+      "showOutput": "Show hook output",
+      "hideOutput": "Hide hook output",
+      "runButton": "Let AI fix it",
+      "runButtonBusy": "Starting AI fix…",
+      "retryButton": "Retry {{action}}",
+      "retryCommit": "Retry commit",
+      "retryPush": "Retry push",
+      "dismissButton": "Dismiss",
+      "terminalHint": "The fix is running in a new terminal tab. Switch to it to follow along.",
+      "noOutput": "(no output captured)"
+    },
     "status": {
       "clean": "Clean",
       "dirty": "{{count}} change",

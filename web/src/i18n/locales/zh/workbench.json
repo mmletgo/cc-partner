@@ -492,6 +492,22 @@
     "commitPrompt": "输入 commit message",
     "mergeConfirm": "确定把“{{name}}”合并到主工作区？",
     "removeConfirm": "确定移除 worktree“{{name}}”？请先确认不再需要该工作区。",
+    "hookRepair": {
+      "title": "Git 钩子阻止了{{action}}",
+      "titleCommit": "pre-commit 钩子阻止 commit",
+      "titlePush": "pre-push 钩子阻止 push",
+      "exitCode": "退出码 {{code}}",
+      "showOutput": "展开钩子输出",
+      "hideOutput": "收起钩子输出",
+      "runButton": "让 AI 修复",
+      "runButtonBusy": "正在启动 AI 修复…",
+      "retryButton": "重试{{action}}",
+      "retryCommit": "重试 commit",
+      "retryPush": "重试 push",
+      "dismissButton": "忽略",
+      "terminalHint": "修复已在新的终端 tab 里运行，切换过去查看进度。",
+      "noOutput": "（未捕获到输出）"
+    },
     "status": {
       "clean": "Clean",
       "dirty": "{{count}} 处改动",

@@ -10,6 +10,7 @@
  *   - 渲染刷新/commit/push/merge 按钮、merge stage panel 和带 lane 颜色的 commit graph SVG；
  *   - 暴露 WorkbenchGitInspectorProps 类型，所有数据均来自 useWorkbenchWorktreeGitController + Workbench.tsx 跨域共享。
  */
+import * as React from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Pill, StatusMessage } from '@/components/primitives';
@@ -34,6 +35,7 @@ import {
 } from './workbenchWorktrees';
 import type { WorkbenchGitGraphRow } from './workbenchWorktrees';
 import type {
+  WorkbenchHookRepair,
   WorktreeBusyKind,
   WorktreeUnknownMutationLock,
 } from './controllers/useWorkbenchWorktreeGitController';
@@ -79,6 +81,26 @@ function gitGraphX(lane: number): number {
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   pre-commit/pre-push 钩子输出可能很大，前端展示按 stdout+stderr 拼接并保留换行；
+ *   单端空时只展示另一端；两端都空时给一个占位（前端 i18n）。
+ *
+ * Code Logic（这个函数做什么）:
+ *   把 { stdout, stderr } 合并为多行字符串；空 fallback 由调用方 i18n 替换。
+ */
+function formatHookRepairOutput(hookFailure: {
+  stdout: string;
+  stderr: string;
+}): string {
+  const stdout = hookFailure.stdout.trim();
+  const stderr = hookFailure.stderr.trim();
+  if (stdout && stderr) {
+    return `${stdout}\n${stderr}`;
+  }
+  return stdout || stderr;
+}
+
+/**
  * Git 检查器叶子组件的输入 props。
  *
  * Business Logic: 所有数据均由 useWorkbenchWorktreeGitController 派生（除 activeWorktree / activeProjectId /
@@ -94,6 +116,9 @@ export interface WorkbenchGitInspectorProps {
   worktreeBusy: WorktreeBusyKind | null;
   /** unknown 共享锁；can* 禁用 sibling mutation。 */
   unknownMutationLock: WorktreeUnknownMutationLock | null;
+  hookRepair: WorkbenchHookRepair | null;
+  handleRepairHookFailure: () => Promise<void>;
+  handleRetryAfterRepair: () => Promise<void>;
   mergeStages: WorkbenchMergeStage[];
   loadGitHistory: () => Promise<void>;
   handleCommitWorktree: () => Promise<void>;
@@ -111,6 +136,7 @@ export interface WorkbenchGitInspectorProps {
  */
 export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
   const { t } = useTranslation(['workbench']);
+  const [hookOutputExpanded, setHookOutputExpanded] = React.useState(false);
   const {
     activeProjectId,
     activeWorktree,
@@ -120,6 +146,9 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
     gitHistoryError,
     worktreeBusy,
     unknownMutationLock,
+    hookRepair,
+    handleRepairHookFailure,
+    handleRetryAfterRepair,
     mergeStages,
     loadGitHistory,
     handleCommitWorktree,
@@ -265,6 +294,76 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
               </div>
             </div>
           ))}
+        </div>
+      ) : null}
+
+      {hookRepair ? (
+        <div
+          className={styles.hookRepairPanel}
+          role={hookRepair.kind === 'push' ? 'alert' : 'status'}
+          aria-live={hookRepair.kind === 'push' ? 'assertive' : 'polite'}
+          data-testid="workbench-hook-repair-panel"
+        >
+          <div className={styles.hookRepairHeader}>
+            <span className={styles.hookRepairTitle}>
+              {hookRepair.kind === 'commit'
+                ? t('workbench:worktrees.hookRepair.titleCommit')
+                : t('workbench:worktrees.hookRepair.titlePush')}
+            </span>
+            {typeof hookRepair.hookFailure.exitCode === 'number' ? (
+              <span className={styles.hookRepairMeta}>
+                {t('workbench:worktrees.hookRepair.exitCode', {
+                  code: hookRepair.hookFailure.exitCode,
+                })}
+              </span>
+            ) : null}
+          </div>
+          {hookRepair.terminalSessionId ? (
+            <span className={styles.hookRepairHint}>
+              {t('workbench:worktrees.hookRepair.terminalHint')}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className={styles.hookRepairOutputToggle}
+            aria-expanded={hookOutputExpanded}
+            onClick={() => setHookOutputExpanded((v) => !v)}
+          >
+            {hookOutputExpanded
+              ? t('workbench:worktrees.hookRepair.hideOutput')
+              : t('workbench:worktrees.hookRepair.showOutput')}
+          </button>
+          {hookOutputExpanded ? (
+            <pre className={styles.hookRepairOutput}>
+              {formatHookRepairOutput(hookRepair.hookFailure)}
+            </pre>
+          ) : null}
+          <div className={styles.hookRepairActions}>
+            {hookRepair.terminalSessionId ? (
+              <Button
+                size="sm"
+                variant="primary"
+                loading={worktreeBusy === 'commit' && !hookRepair.terminalSessionId}
+                onClick={() => void handleRetryAfterRepair()}
+              >
+                {hookRepair.kind === 'commit'
+                  ? t('workbench:worktrees.hookRepair.retryCommit')
+                  : t('workbench:worktrees.hookRepair.retryPush')}
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="primary"
+                loading={worktreeBusy === 'commit'}
+                disabled={remoteWriteDisabled}
+                onClick={() => void handleRepairHookFailure()}
+              >
+                {worktreeBusy === 'commit'
+                  ? t('workbench:worktrees.hookRepair.runButtonBusy')
+                  : t('workbench:worktrees.hookRepair.runButton')}
+              </Button>
+            )}
+          </div>
         </div>
       ) : null}
 

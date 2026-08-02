@@ -80,14 +80,16 @@ pub use git::{
     __cmd__get_workbench_mutation_operation, __cmd__list_workbench_git_commits,
     __cmd__list_workbench_worktrees, __cmd__merge_workbench_worktree,
     __cmd__push_workbench_worktree, __cmd__remove_workbench_worktree,
-    __tauri_command_name_commit_workbench_worktree, __tauri_command_name_create_workbench_worktree,
+    __cmd__repair_worktree_hook_failure, __tauri_command_name_commit_workbench_worktree,
+    __tauri_command_name_create_workbench_worktree,
     __tauri_command_name_get_workbench_mutation_operation,
     __tauri_command_name_list_workbench_git_commits, __tauri_command_name_list_workbench_worktrees,
     __tauri_command_name_merge_workbench_worktree, __tauri_command_name_push_workbench_worktree,
-    __tauri_command_name_remove_workbench_worktree, commit_workbench_worktree,
+    __tauri_command_name_remove_workbench_worktree,
+    __tauri_command_name_repair_worktree_hook_failure, commit_workbench_worktree,
     create_workbench_worktree, get_workbench_mutation_operation, list_workbench_git_commits,
     list_workbench_worktrees, merge_workbench_worktree, push_workbench_worktree,
-    remove_workbench_worktree,
+    remove_workbench_worktree, repair_worktree_hook_failure,
 };
 
 pub use projects::{
@@ -194,7 +196,7 @@ pub(crate) use git::{
     local_push_workbench_worktree_with_ledger, local_remove_workbench_worktree,
     local_remove_workbench_worktree_with_ledger, merge_workbench_worktree_for_state,
     open_workbench_file_for_state, push_workbench_worktree_for_state,
-    remove_workbench_worktree_for_state,
+    remove_workbench_worktree_for_state, repair_worktree_hook_failure_for_state,
 };
 
 pub(crate) use projects::{

@@ -141,10 +141,93 @@ impl MutationTransportClass {
     }
 }
 
-/// 成功通道 envelope：succeeded | unknown。
+/// 触发 AI 修复的 Git hook 阶段。
 ///
-/// Business Logic: definitive validation/conflict 仍走 AppError；仅 uncertain transport 走 unknown。
-/// Code Logic: tag=kind 的 camelCase 联合；unknown 不携带 intent（intent 由 ledger 查询提供）。
+/// Business Logic（为什么需要这个枚举）:
+///     commit 与 push 各有自己的钩子；修复 prompt 与可重试动作按阶段区分。
+///
+/// Code Logic（这个枚举做什么）:
+///     wire 用稳定小写 token；`hook_name` 返回 `.git/hooks/` 下对应文件名。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkbenchHookStage {
+    PreCommit,
+    PrePush,
+}
+
+impl WorkbenchHookStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreCommit => "preCommit",
+            Self::PrePush => "prePush",
+        }
+    }
+
+    /// `.git/hooks/` 下的钩子脚本文件名。
+    pub fn hook_name(self) -> &'static str {
+        match self {
+            Self::PreCommit => "pre-commit",
+            Self::PrePush => "pre-push",
+        }
+    }
+
+    /// 解析 DB/wire token；非法返回 Validation。
+    pub fn parse(raw: &str) -> Result<Self, AppError> {
+        match raw {
+            "preCommit" => Ok(Self::PreCommit),
+            "prePush" => Ok(Self::PrePush),
+            other => Err(AppError::validation(format!(
+                "未知 workbench hook stage: {other}"
+            ))),
+        }
+    }
+}
+
+/// 结构化的 hook 钩子失败（envelope `failedHook` 载荷，与前端 HookFailure DTO 对齐）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     把钩子的原始 stdout/stderr/退出码原样交给前端与修复 agent，禁止靠文案匹配判业务。
+///
+/// Code Logic（这个结构体做什么）:
+///     camelCase serde；`combined_output` 合并 stderr 优先 stdout 供 prompt 引用。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchHookFailureDto {
+    pub stage: WorkbenchHookStage,
+    pub stdout: String,
+    pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+impl WorkbenchHookFailureDto {
+    /// 合并输出（stderr 优先，非空时只用 stderr；否则用 stdout），用于 prompt 与摘要。
+    pub fn combined_output(&self) -> String {
+        let stderr = self.stderr.trim();
+        if !stderr.is_empty() {
+            stderr.to_string()
+        } else {
+            self.stdout.trim().to_string()
+        }
+    }
+
+    /// 简短摘要（用于 ledger error_message 与前端兜底文案），不包含原始输出正文。
+    pub fn summary(&self) -> String {
+        match self.stage {
+            WorkbenchHookStage::PreCommit => "pre-commit 钩子失败".to_string(),
+            WorkbenchHookStage::PrePush => "pre-push 钩子失败".to_string(),
+        }
+    }
+}
+
+/// 成功通道 envelope：succeeded | unknown | failedHook。
+///
+/// Business Logic: definitive validation/conflict 仍走 AppError；仅 uncertain transport 走 unknown；
+///     本地 commit/push 因 pre-commit/pre-push 钩子失败时走 failedHook，让前端展示「让 AI 修复并重试」
+///     而不是把结构化 hook 输出拍平成 AppError 文案（远端/P2P 路径不产生 failedHook，保持 succeeded|unknown）。
+///
+/// Code Logic: tag=kind 的 camelCase 联合；unknown 不携带 intent（intent 由 ledger 查询提供）；
+///     failedHook 携带结构化 hook 失败 DTO。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum WorkbenchMutationEnvelopeDto<T> {
@@ -160,6 +243,13 @@ pub enum WorkbenchMutationEnvelopeDto<T> {
         client_operation_id: String,
         #[serde(rename = "transportClass", skip_serializing_if = "Option::is_none")]
         transport_class: Option<MutationTransportClass>,
+    },
+    /// 本地 hook 钩子失败（仅 owner 本机 commit/push 产生）：携带结构化输出，供 AI 修复。
+    FailedHook {
+        #[serde(rename = "clientOperationId")]
+        client_operation_id: String,
+        #[serde(rename = "hookFailure")]
+        hook_failure: WorkbenchHookFailureDto,
     },
 }
 
@@ -182,6 +272,18 @@ impl<T> WorkbenchMutationEnvelopeDto<T> {
         Self::Unknown {
             client_operation_id: client_operation_id.into(),
             transport_class,
+        }
+    }
+
+    /// Business Logic: 构造 failedHook envelope（仅本地 commit/push 钩子失败产生）。
+    /// Code Logic: kind=failedHook，携带结构化 hook 输出。
+    pub fn failed_hook(
+        client_operation_id: impl Into<String>,
+        hook_failure: WorkbenchHookFailureDto,
+    ) -> Self {
+        Self::FailedHook {
+            client_operation_id: client_operation_id.into(),
+            hook_failure,
         }
     }
 }
@@ -306,6 +408,29 @@ pub enum ClaimOutcome {
     Conflict {
         existing: WorkbenchMutationOperationDto,
     },
+}
+
+/// mutation 执行闭包的分类错误。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     commit/push 失败需要区分「pre-commit/pre-push 钩子拒绝（可让 AI 修复并重试）」与
+///     「其它确定性失败（如身份未配置、冲突、远端拒绝）」。`run_claimed_mutation_with_hook`
+///     据此决定回 failedHook envelope 还是 AppError。
+///
+/// Code Logic（这个枚举做什么）:
+///     Hook 携带结构化钩子输出；Other 透传 AppError（保持原 run_claimed_mutation 语义）。
+#[derive(Debug)]
+pub enum MutationExecError {
+    /// 本地 pre-commit/pre-push 钩子失败。
+    Hook(WorkbenchHookFailureDto),
+    /// 其它确定性失败。
+    Other(AppError),
+}
+
+impl From<AppError> for MutationExecError {
+    fn from(err: AppError) -> Self {
+        Self::Other(err)
+    }
 }
 
 /// 权威 Git/worktree 状态快照，供纯 confirm 矩阵使用。
@@ -502,6 +627,38 @@ impl WorkbenchMutationLedger {
         )
         .bind(MutationState::Failed.as_str())
         .bind(error_message)
+        .bind(&now)
+        .bind(&id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Business Logic: 本地 commit/push 钩子失败后持久化结构化 outcome，供同 id 回放为 failedHook。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     UPDATE state=failed + outcome_json=hook failure DTO + error_message=summary。
+    ///     复用 Failed 终态（不新增 MutationState variant）；同 id 重放在 with_hook runner 中
+    ///     会把 outcome_json 解码为 failedHook envelope 而不是 Err，因此修复后必须用新 clientOperationId 重试。
+    pub async fn mark_failed_hook(
+        &self,
+        client_operation_id: &str,
+        failure: &WorkbenchHookFailureDto,
+    ) -> Result<(), AppError> {
+        let id = normalize_client_operation_id(client_operation_id)?;
+        let now = Utc::now().to_rfc3339();
+        let outcome_json = serde_json::to_string(failure)
+            .map_err(|e| AppError::generic(format!("序列化 hook failure 失败: {e}")))?;
+        sqlx::query(
+            r#"
+            UPDATE workbench_mutation_operations
+            SET state = ?, outcome_json = ?, error_message = ?, updated_at = ?
+            WHERE client_operation_id = ?
+            "#,
+        )
+        .bind(MutationState::Failed.as_str())
+        .bind(&outcome_json)
+        .bind(failure.summary())
         .bind(&now)
         .bind(&id)
         .execute(&self.pool)
@@ -748,6 +905,118 @@ where
     }
 }
 
+/// 把 ledger 终态行的 outcome_json 解码为 hook failure DTO（用于 with_hook runner 的 Replay 回放）。
+///
+/// Business Logic: 钩子失败的 outcome_json 是 WorkbenchHookFailureDto 的序列化形态；
+///     其它失败/成功行没有合法 hook failure 形态，返回 None。
+///
+/// Code Logic: serde_json::from_value；任意解析失败或 stage 非法均返回 None。
+fn decode_hook_failure_outcome(outcome: &Option<Value>) -> Option<WorkbenchHookFailureDto> {
+    let value = outcome.as_ref()?;
+    let dto: WorkbenchHookFailureDto = serde_json::from_value(value.clone()).ok()?;
+    // 校验 stage 可解析，防止任意 JSON 误判。
+    WorkbenchHookStage::parse(dto.stage.as_str()).ok()?;
+    Some(dto)
+}
+
+/// 与 `run_claimed_mutation` 相同的 claim/replay 语义，但执行闭包返回 `MutationExecError`，
+/// 钩子失败时持久化结构化 outcome 并回 `failedHook` envelope（而非 Err）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     commit/push 钩子失败要让前端展示「让 AI 修复并重试」，必须走成功通道 envelope；
+///     merge/remove 仍用旧 `run_claimed_mutation`（Err→AppError），不受影响。
+///
+/// Code Logic（这个函数做什么）:
+///     Fresh: mark_running → execute → Ok→mark_succeeded/Succeeded；Hook→mark_failed_hook/FailedHook；Other→mark_failed/Err。
+///     Replay 终态: succeeded 回放 value；failed 优先尝试解码 hook failure→FailedHook，否则 Err。
+///     Replay pending / Conflict：与 run_claimed_mutation 一致。
+pub async fn run_claimed_mutation_with_hook<T, F, Fut>(
+    ledger: &WorkbenchMutationLedger,
+    client_operation_id: &str,
+    claim: ClaimOutcome,
+    execute: F,
+) -> Result<WorkbenchMutationEnvelopeDto<T>, AppError>
+where
+    T: Serialize + DeserializeOwned,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, MutationExecError>>,
+{
+    match claim {
+        ClaimOutcome::Conflict { existing } => Err(AppError::conflict(format!(
+            "clientOperationId 已绑定不同 payload（existingHash={}）",
+            existing.payload_hash
+        ))),
+        ClaimOutcome::Replay(existing) => {
+            if existing.state.is_pending() {
+                return Ok(WorkbenchMutationEnvelopeDto::unknown(
+                    existing.client_operation_id,
+                    None,
+                ));
+            }
+            debug_assert!(existing.state.is_terminal());
+            match existing.state {
+                MutationState::Succeeded => {
+                    let value = existing.outcome.ok_or_else(|| {
+                        AppError::generic("mutation ledger succeeded 但缺少 outcome")
+                    })?;
+                    let decoded: T = serde_json::from_value(value).map_err(|e| {
+                        AppError::generic(format!("反序列化 mutation outcome 失败: {e}"))
+                    })?;
+                    Ok(WorkbenchMutationEnvelopeDto::succeeded(
+                        decoded,
+                        existing.client_operation_id,
+                    ))
+                }
+                MutationState::Failed => {
+                    // 钩子失败回放：把结构化 outcome 还原为 failedHook envelope。
+                    if let Some(hook) = decode_hook_failure_outcome(&existing.outcome) {
+                        return Ok(WorkbenchMutationEnvelopeDto::failed_hook(
+                            existing.client_operation_id,
+                            hook,
+                        ));
+                    }
+                    Err(AppError::generic(
+                        existing
+                            .error_message
+                            .unwrap_or_else(|| "mutation 先前已失败".to_string()),
+                    ))
+                }
+                MutationState::Claimed | MutationState::Running => Ok(
+                    WorkbenchMutationEnvelopeDto::unknown(existing.client_operation_id, None),
+                ),
+            }
+        }
+        ClaimOutcome::Fresh(fresh) => {
+            debug_assert_eq!(fresh.kind, fresh.intent.kind());
+            ledger.mark_running(client_operation_id).await?;
+            match execute().await {
+                Ok(value) => {
+                    ledger.mark_succeeded(client_operation_id, &value).await?;
+                    Ok(WorkbenchMutationEnvelopeDto::succeeded(
+                        value,
+                        client_operation_id,
+                    ))
+                }
+                Err(MutationExecError::Hook(hook_failure)) => {
+                    let _ = ledger
+                        .mark_failed_hook(client_operation_id, &hook_failure)
+                        .await;
+                    Ok(WorkbenchMutationEnvelopeDto::failed_hook(
+                        client_operation_id,
+                        hook_failure,
+                    ))
+                }
+                Err(MutationExecError::Other(err)) => {
+                    let _ = ledger
+                        .mark_failed(client_operation_id, &err.to_string())
+                        .await;
+                    Err(err)
+                }
+            }
+        }
+    }
+}
+
 /// Business Logic: 将 SQLite 行映射为 DTO。
 /// Code Logic: 解析 kind/state/intent_json/outcome_json。
 fn map_row(row: SqliteRow) -> Result<WorkbenchMutationOperationDto, AppError> {
@@ -884,6 +1153,66 @@ mod tests {
             }
             other => panic!("expected succeeded replay, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn run_claimed_mutation_with_hook_returns_failed_hook_and_replays() {
+        let ledger = memory_ledger().await;
+        let intent = sample_commit_intent();
+        let claim = ledger
+            .claim("op-hook", MutationKind::Commit, "hh", &intent)
+            .await
+            .expect("claim");
+        let hook_failure = WorkbenchHookFailureDto {
+            stage: WorkbenchHookStage::PreCommit,
+            stdout: String::new(),
+            stderr: "lint: 2 errors".to_string(),
+            exit_code: Some(1),
+        };
+        let hook_for_closure = hook_failure.clone();
+        let env: WorkbenchMutationEnvelopeDto<Value> =
+            run_claimed_mutation_with_hook(&ledger, "op-hook", claim, || async {
+                Err::<Value, _>(MutationExecError::Hook(hook_for_closure))
+            })
+            .await
+            .expect("run hook");
+        match env {
+            WorkbenchMutationEnvelopeDto::FailedHook { hook_failure, .. } => {
+                assert_eq!(hook_failure.stage, WorkbenchHookStage::PreCommit);
+                assert_eq!(hook_failure.exit_code, Some(1));
+            }
+            other => panic!("expected failedHook, got {other:?}"),
+        }
+
+        // 同 id 重放：必须回放为 failedHook（而不是 Err），且不得重新执行闭包。
+        let claim2 = ledger
+            .claim("op-hook", MutationKind::Commit, "hh", &intent)
+            .await
+            .expect("replay claim");
+        let env2: WorkbenchMutationEnvelopeDto<Value> =
+            run_claimed_mutation_with_hook(&ledger, "op-hook", claim2, || async {
+                panic!("must not re-execute on replay");
+                #[allow(unreachable_code)]
+                Ok::<Value, MutationExecError>(Value::Null)
+            })
+            .await
+            .expect("replay");
+        assert!(
+            matches!(env2, WorkbenchMutationEnvelopeDto::FailedHook { .. }),
+            "replay should be failedHook, got {env2:?}"
+        );
+
+        // 其它确定性失败仍走 Err（与旧 run_claimed_mutation 一致）。
+        let claim3 = ledger
+            .claim("op-other", MutationKind::Commit, "ho", &intent)
+            .await
+            .expect("claim other");
+        let res: Result<WorkbenchMutationEnvelopeDto<Value>, AppError> =
+            run_claimed_mutation_with_hook(&ledger, "op-other", claim3, || async {
+                Err::<Value, _>(MutationExecError::Other(AppError::generic("boom")))
+            })
+            .await;
+        assert!(res.is_err(), "non-hook failure must propagate as Err");
     }
 
     #[test]

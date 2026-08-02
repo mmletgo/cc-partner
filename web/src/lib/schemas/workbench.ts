@@ -21,6 +21,8 @@ import type {
   WorkbenchFileCapabilities,
   WorkbenchFileNode,
   WorkbenchGitStatus,
+  WorkbenchHookFailure,
+  WorkbenchHookStage,
   WorkbenchImagePreview,
   WorkbenchMergeResult,
   WorkbenchMergeStage,
@@ -156,11 +158,35 @@ const mutationTransportClassDecoder: Decoder<MutationTransportClass> = enumDecod
 );
 
 /**
+ * pre-commit / pre-push 钩子失败结构化载荷的解码器（与 Rust WorkbenchHookFailureDto 对齐）。
+ *
  * Business Logic（为什么需要这个 decoder）:
- *   mutation 成功通道必须严格区分 succeeded / unknown，损坏 envelope 不得写入 controller。
+ *   failedHook envelope 载荷；损坏 payload 不得进入 controller（防止 hook 输出文本伪装为业务字段）。
  *
  * Code Logic（这个 decoder 做什么）:
- *   tag=kind 联合；succeeded 用 valueDecoder 解 value；unknown 可选 transportClass。
+ *   stage 限枚举；stdout/stderr 字符串；exitCode 可选数字。
+ */
+const hookStageDecoder: Decoder<WorkbenchHookStage> = enumDecoder('WorkbenchHookStage', [
+  'preCommit',
+  'prePush',
+] as const);
+
+export function workbenchHookFailureDecoder(): Decoder<WorkbenchHookFailure> {
+  return objectDecoder<WorkbenchHookFailure>('WorkbenchHookFailure', {
+    stage: hookStageDecoder,
+    stdout: stringDecoder,
+    stderr: stringDecoder,
+    exitCode: optionalDecoder(numberDecoder),
+  });
+}
+
+/**
+ * Business Logic（为什么需要这个 decoder）:
+ *   mutation 成功通道必须严格区分 succeeded / unknown / failedHook，损坏 envelope 不得写入 controller。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   tag=kind 联合；succeeded 用 valueDecoder 解 value；unknown 可选 transportClass；
+ *   failedHook 携带结构化 hook 失败载荷（仅本机 commit/push 产生）。
  */
 export function workbenchMutationEnvelopeDecoder<T>(
   valueDecoder: Decoder<T>,
@@ -175,6 +201,11 @@ export function workbenchMutationEnvelopeDecoder<T>(
       kind: literalDecoder('unknown'),
       clientOperationId: stringDecoder,
       transportClass: optionalDecoder(mutationTransportClassDecoder),
+    }),
+    objectDecoder('WorkbenchMutationEnvelopeFailedHook', {
+      kind: literalDecoder('failedHook'),
+      clientOperationId: stringDecoder,
+      hookFailure: workbenchHookFailureDecoder(),
     }),
   ]);
 }
@@ -242,6 +273,27 @@ export const mutationIntentDecoder: Decoder<MutationIntent> = unionDecoder<Mutat
  * Code Logic（这个 decoder 做什么）:
  *   解码 operation 字段；outcome 允许任意 JSON（unknown）。
  */
+/**
+ * hook 修复启动结果（与 Rust RepairHookFailureDto 对齐）。
+ *
+ * Business Logic（为什么需要这个 decoder）:
+ *   「让 AI 修复」按钮拿到 agent/terminal id 才能聚焦终端并展示「重试」。
+ *
+ * Code Logic（这个 decoder 做什么）:
+ *   四个 camelCase 字符串字段必填；损坏 payload fail-closed。
+ */
+export const workbenchRepairHookFailureDecoder: Decoder<
+  import('../types/workbench').WorkbenchRepairHookFailureDto
+> = objectDecoder(
+  'WorkbenchRepairHookFailure',
+  {
+    agentSessionId: stringDecoder,
+    terminalSessionId: stringDecoder,
+    worktreeId: stringDecoder,
+    projectId: stringDecoder,
+  },
+);
+
 export const workbenchMutationOperationDecoder: Decoder<WorkbenchMutationOperation> = objectDecoder(
   'WorkbenchMutationOperation',
   {

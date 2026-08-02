@@ -581,6 +581,7 @@ pub fn run() {
             workbench_cmd::push_workbench_worktree,
             workbench_cmd::merge_workbench_worktree,
             workbench_cmd::remove_workbench_worktree,
+            workbench_cmd::repair_worktree_hook_failure,
             workbench_cmd::get_workbench_mutation_operation,
             workbench_cmd::list_workbench_git_commits,
             workbench_cmd::get_agent_runtime_snapshot,

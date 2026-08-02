@@ -190,6 +190,77 @@
   line-height: var(--leading-normal);
 }
 
+.hookRepairPanel {
+  border: 1px solid var(--danger-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: color-mix(in oklab, var(--danger) 8%, var(--surface));
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.hookRepairHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.hookRepairTitle {
+  font-weight: var(--weight-semibold);
+  color: var(--danger);
+}
+
+.hookRepairMeta {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--meta);
+  font-size: var(--text-xs);
+}
+
+.hookRepairActions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.hookRepairOutputToggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+  align-self: flex-start;
+}
+
+.hookRepairOutputToggle:hover {
+  background: var(--surface);
+}
+
+.hookRepairOutput {
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--text-xs);
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.hookRepairHint {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
 .noticeBox {
   border: 1px solid color-mix(in oklab, var(--success) 30%, var(--border-soft));
   border-radius: var(--radius-md);

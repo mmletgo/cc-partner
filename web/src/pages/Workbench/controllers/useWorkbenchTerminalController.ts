@@ -270,6 +270,9 @@ export function useWorkbenchTerminalController(
   const knownSessionIdsRef = useRef<Set<string>>(new Set());
   // Business Logic: 用 lastLocalFocusAtRef 抑制本地 focus 操作后 500ms 内的 tmux focus 轮询，避免把焦点抢回。
   const lastLocalFocusAtRef = useRef<number>(0);
+  // Business Logic: 用 localFocusPendingRef 标记本地 focusSession 已发出但后端 focus IPC 尚未确认成功；
+  // 在此期间轮询不得用后端 tmux current 覆盖本地选择（IPC 飞行/失败时后端 tmux 可能仍是旧 window）。
+  const localFocusPendingRef = useRef<string | null>(null);
   // Business Logic: 同一 project 的 session list 可能并发；用单调 request seq 丢弃过期 list，避免 create/close/split 后被慢响应回写旧列表。
   const sessionListRequestSeqRef = useRef<Record<string, number>>({});
   // Business Logic: terminal-status listen 只想在 mount 时注册一次；用 ref 读取最新的 canListenToTauriEvents，
@@ -504,6 +507,12 @@ export function useWorkbenchTerminalController(
     () => mountedTerminalSessions({ sessions }),
     [sessions],
   );
+  // Business Logic: tmux focus 轮询 effect 不再把 scopedSessions 作为依赖（避免 sessions 引用变化
+  // 触发立即查后端、与用户刚点击的本地选择 race）；改为通过 ref 读取最新列表。
+  const scopedSessionsRef = useRef(scopedSessions);
+  useEffect(() => {
+    scopedSessionsRef.current = scopedSessions;
+  }, [scopedSessions]);
   const renderedActiveSessionId = activeSession?.id ?? visibleSessions[0]?.id ?? null;
   const canUsePanes = Boolean(
     activeSession?.supportsPanes && activeSession.status === 'running',
@@ -591,42 +600,65 @@ export function useWorkbenchTerminalController(
    */
   const focusSession = useCallback(async (sessionId: string): Promise<boolean> => {
     lastLocalFocusAtRef.current = Date.now();
+    // 标记本地 focus pending：在后端 focus IPC 确认成功前，禁止轮询用后端 tmux current 覆盖本地选择。
+    localFocusPendingRef.current = sessionId;
     setActiveSessionId(sessionId);
     return true;
   }, []);
 
-  // Business Logic: 与原 Workbench.tsx 行为一致——activeSessionId 变化时通过 focus API 同步后端 tmux current
-  // window；失败时通过项目域 controller 标记离线，并展示 sessionError。
+  // Business Logic: activeSessionId 变化时通过 focus API 同步后端 tmux current window；
+  // 成功确认后清本地 focus pending，允许轮询恢复外部焦点同步；失败时标记离线并展示 sessionError，
+  // pending 保留以持续保护本地用户选择（后端 tmux 仍可能是旧 window）。
   useEffect(() => {
     if (!activeSessionId) return undefined;
     let cancelled = false;
-    void workbenchApi.sessions.focus(activeSessionId).catch((error) => {
-      if (cancelled) return;
-      const projectId = activeProjectIdRef.current;
-      if (projectId) markRequestFailure(projectId, error);
-      setSessionError(displayErrorMessage(error, t('focusSession')));
-    });
+    void workbenchApi.sessions
+      .focus(activeSessionId)
+      .then(() => {
+        if (cancelled) return;
+        // focus 成功确认：清 pending，后续轮询可正常同步外部焦点变化（移动端/tmux status bar 切换）。
+        if (localFocusPendingRef.current === activeSessionId) {
+          localFocusPendingRef.current = null;
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        const projectId = activeProjectIdRef.current;
+        if (projectId) markRequestFailure(projectId, error);
+        setSessionError(displayErrorMessage(error, t('focusSession')));
+      });
     return () => {
       cancelled = true;
     };
   }, [activeSessionId, displayErrorMessage, markRequestFailure, t]);
 
-  // Business Logic: 与原 Workbench.tsx 行为一致——每 TMUX_FOCUS_SYNC_INTERVAL_MS 轮询后端 get_focused_workbench_session，
+  // Business Logic: 每 TMUX_FOCUS_SYNC_INTERVAL_MS 轮询后端 get_focused_workbench_session，
   // 把外部（如另一台设备/移动端）的焦点变化同步到当前 worktree 的 active session。
   // 最近的本地 focus 操作在 LOCAL_FOCUS_GRACE_MS 内抑制轮询，避免与用户刚点击的 tab 冲突。
+  //
+  // 关键：effect 依赖只含 [activeProjectId, activeWorktreeId]，**不**含 scopedSessions。
+  // 否则 terminal-status 事件（setSessions(.map) 产生新数组引用）会让 effect 反复 cleanup+setup，
+  // 每次都立即查 focused()；若此时本地刚 focusSession 而后端 tmux select-window 尚未生效，
+  // 旧的后端 current window 会把用户刚选中的 window 覆盖回去（"切回第一个"race）。
+  // scopedSessions 改为通过 ref 在 syncFocusedSession 内读取最新值。
   useEffect(() => {
-    if (!activeProjectId || !activeWorktreeId || scopedSessions.length === 0) {
+    if (!activeProjectId || !activeWorktreeId) {
       return undefined;
     }
     let cancelled = false;
 
     const syncFocusedSession = () => {
       if (Date.now() - lastLocalFocusAtRef.current < LOCAL_FOCUS_GRACE_MS) return;
+      // focus 飞行保护：本地刚 focusSession 但后端 focus IPC 尚未确认成功时，
+      // 禁止轮询用后端 tmux current 覆盖本地选择（IPC 飞行/失败时后端可能仍是旧 window）。
+      if (localFocusPendingRef.current !== null) return;
+      const currentScoped = scopedSessionsRef.current;
+      if (currentScoped.length === 0) return;
       void workbenchApi.sessions
         .focused(activeProjectId, activeWorktreeId)
         .then(({ sessionId }) => {
           if (cancelled || !sessionId) return;
-          if (!scopedSessions.some((session) => session.id === sessionId)) return;
+          if (!currentScoped.some((session) => session.id === sessionId)) return;
           setActiveSessionId((current) => (current === sessionId ? current : sessionId));
         })
         .catch(() => {
@@ -640,7 +672,7 @@ export function useWorkbenchTerminalController(
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeProjectId, activeWorktreeId, scopedSessions]);
+  }, [activeProjectId, activeWorktreeId]);
 
   /**
    * Business Logic（为什么需要这个函数）:
