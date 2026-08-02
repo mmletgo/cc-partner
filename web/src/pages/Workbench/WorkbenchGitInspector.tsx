@@ -118,6 +118,11 @@ export interface WorkbenchGitInspectorProps {
   unknownMutationLock: WorktreeUnknownMutationLock | null;
   hookRepair: WorkbenchHookRepair | null;
   handleRepairHookFailure: () => Promise<void>;
+  /**
+   * 修复面板上的「忽略」按钮：纯本地动作，清空 hookRepair，不发起任何 IPC。
+   * 与「让 AI 修复 / 重试 commit-push」并列，给用户第三个出口，避免 stale failedHook 面板卡住 UI。
+   */
+  handleDismissHookFailure: () => Promise<void>;
   handleRetryAfterRepair: () => Promise<void>;
   mergeStages: WorkbenchMergeStage[];
   loadGitHistory: () => Promise<void>;
@@ -148,6 +153,7 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
     unknownMutationLock,
     hookRepair,
     handleRepairHookFailure,
+    handleDismissHookFailure,
     handleRetryAfterRepair,
     mergeStages,
     loadGitHistory,
@@ -363,6 +369,19 @@ export function WorkbenchGitInspector(props: WorkbenchGitInspectorProps) {
                   : t('workbench:worktrees.hookRepair.runButton')}
               </Button>
             )}
+            {/*
+              「忽略」出口：与「让 AI 修复 / 重试」并列。纯本地动作（清空 hookRepair），
+              不发起任何 IPC；用户已决定不修也不重试时，主动放弃当前失败上下文。
+              worktreeBusy 不影响 dismiss（dismiss 不调任何 workbenchApi）。
+            */}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => void handleDismissHookFailure()}
+              data-testid="workbench-hook-repair-dismiss"
+            >
+              {t('workbench:worktrees.hookRepair.dismissButton')}
+            </Button>
           </div>
         </div>
       ) : null}

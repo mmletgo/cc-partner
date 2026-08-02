@@ -217,6 +217,11 @@ export interface WorkbenchWorktreeGitControllerResult {
    */
   handleRepairHookFailure: () => Promise<void>;
   /**
+   * failedHook 面板上的「忽略 / Dismiss」按钮：纯本地动作，清空 hookRepair，不触发任何 IPC。
+   * 未设置 hookRepair 时 no-op。user 已决定不修也不重试，主动放弃当前失败上下文。
+   */
+  handleDismissHookFailure: () => Promise<void>;
+  /**
    * 修复完成后用户点「重试 commit/push」：按 hookRepair.kind 复用对应 handler 走 fresh clientOperationId。
    * 未设置 hookRepair 时 no-op。
    */
@@ -302,12 +307,15 @@ export function useWorkbenchWorktreeGitController(
 
   // Business Logic: 用户切换 project/worktree 后，挂起 mutation 的 UI busy/error/unknown 锁不得粘在新上下文。
   // Code Logic: 递增 sequence 使旧 settlement 过期，并清空 worktreeBusy/worktreeError/unknownMutationLock。
-  /* eslint-disable react-hooks/set-state-in-effect -- context 切换时必须同步清空 busy/error/lock，避免旧 UI 粘到新上下文 */
+  // hookRepair 同样属于「上一失败上下文」的产物（clientOperationId + 失败 stage 都绑定旧 worktree）；
+  // 不清会让「让 AI 修复 / 重试 commit-push」按钮在用户已切到其他工作台项目时仍渲染并指向 stale context。
+  /* eslint-disable react-hooks/set-state-in-effect -- context 切换时必须同步清空 busy/error/lock/hookRepair，避免旧 UI 粘到新上下文 */
   useEffect(() => {
     mutationSequenceRef.current = nextOperationSequence(mutationSequenceRef.current);
     setWorktreeBusy(null);
     setWorktreeError(null);
     setUnknownMutationLock(null);
+    setHookRepair(null);
   }, [activeProjectId, activeWorktreeId]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -1119,6 +1127,20 @@ export function useWorkbenchWorktreeGitController(
 
   /**
    * Business Logic（为什么需要这个函数）:
+   *   修复上下文面板给用户三个出口：「让 AI 修复 / 重试 / 忽略」。前两个已有 handler；
+   *   「忽略」是用户已决定不修也不重试的纯本地动作——清空 hookRepair + 不发起任何 IPC。
+   *   避免用户卡在 stale failedHook 面板、又必须强行 commit/push 才能脱离。
+   *
+   * Code Logic（这个函数做什么）:
+   *   hookRepair 已为 null 时 no-op；否则 setHookRepair(null)。不调 workbenchApi、不动 busy/error。
+   */
+  const handleDismissHookFailure = useCallback(async (): Promise<void> => {
+    if (!hookRepair) return;
+    setHookRepair(null);
+  }, [hookRepair]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
    *   修复完成后用户点「重试 commit/push」：清空 hookRepair 并复用对应 handler 走 fresh clientOperationId 路径。
    *
    * Code Logic（这个函数做什么）:
@@ -1534,6 +1556,7 @@ export function useWorkbenchWorktreeGitController(
     handleMergeWorktree,
     handleRemoveWorktree,
     handleRepairHookFailure,
+    handleDismissHookFailure,
     handleRetryAfterRepair,
     clearMergeStagePanel,
   };

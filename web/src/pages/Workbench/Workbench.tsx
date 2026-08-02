@@ -263,6 +263,7 @@ export function Workbench() {
     handleMergeWorktree,
     handleRemoveWorktree,
     handleRepairHookFailure,
+    handleDismissHookFailure,
     handleRetryAfterRepair,
     clearMergeStagePanel,
   } = worktreeGitController;
@@ -1176,7 +1177,7 @@ export function Workbench() {
             gitCommits,
             gitHistoryLoading,
             gitHistoryError, worktreeBusy, unknownMutationLock,
-            hookRepair, handleRepairHookFailure, handleRetryAfterRepair,
+            hookRepair, handleRepairHookFailure, handleDismissHookFailure, handleRetryAfterRepair,
             mergeStages, loadGitHistory,
             handleCommitWorktree, handlePushWorktree, handleMergeWorktree,
           }}

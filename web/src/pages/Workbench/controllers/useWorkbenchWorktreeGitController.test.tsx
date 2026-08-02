@@ -27,6 +27,7 @@ import { useWorkbenchWorktreeGitController } from './useWorkbenchWorktreeGitCont
 import type { WorkbenchWorktreeGitErrorKey } from './useWorkbenchWorktreeGitController';
 import type {
   WorkbenchGitCommit,
+  WorkbenchHookFailure,
   WorkbenchMergeResult,
   WorkbenchProject,
   WorkbenchWorktree,
@@ -47,6 +48,7 @@ interface FakeWorktreesApi {
   merge: ReturnType<typeof vi.fn>;
   remove: ReturnType<typeof vi.fn>;
   getMutationOperation: ReturnType<typeof vi.fn>;
+  repairHookFailure: ReturnType<typeof vi.fn>;
 }
 
 interface FakeGitApi {
@@ -73,6 +75,7 @@ const fakeWorktreesApi = vi.hoisted<FakeWorktreesApi>(() => ({
     succeededEnvelope({ ok: true, worktreeId: 'wt' }),
   ),
   getMutationOperation: vi.fn(async () => null),
+  repairHookFailure: vi.fn(async () => ({ agentSessionId: 'agent-1', terminalSessionId: 'term-1' })),
 }));
 
 const fakeGitApi = vi.hoisted<FakeGitApi>(() => ({
@@ -1871,5 +1874,149 @@ describe('useWorkbenchWorktreeGitController — merge-progress event filtering',
 
     // no listener registered.
     expect(eventListeners.has('workbench:merge-progress')).toBe(false);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * hookRepair — failedHook envelope + context switch + dismiss
+ * ------------------------------------------------------------------------- */
+
+function buildHookFailure(overrides: Partial<WorkbenchHookFailure> = {}): WorkbenchHookFailure {
+  return {
+    stage: 'preCommit',
+    stdout: 'lint failed',
+    stderr: 'error: trailing whitespace',
+    exitCode: 1,
+    ...overrides,
+  };
+}
+
+function failedHookEnvelope(hookFailure: WorkbenchHookFailure, clientOperationId = 'op-hook'): {
+  kind: 'failedHook';
+  clientOperationId: string;
+  hookFailure: WorkbenchHookFailure;
+} {
+  return { kind: 'failedHook', clientOperationId, hookFailure };
+}
+
+describe('useWorkbenchWorktreeGitController — hookRepair', () => {
+  test('failedHook commit envelope sets hookRepair; switching activeProjectId clears it', async () => {
+    const project = buildLocalProject();
+    const hookFailure = buildHookFailure();
+    fakeWorktreesApi.commit.mockResolvedValueOnce(failedHookEnvelope(hookFailure));
+
+    const { result, rerender } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+    });
+
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+
+    // failedHook 后 controller 持有 hookRepair；worktreeError 不被覆盖。
+    expect(result.current.hookRepair).not.toBeNull();
+    expect(result.current.hookRepair?.kind).toBe('commit');
+    expect(result.current.hookRepair?.hookFailure).toEqual(hookFailure);
+    expect(result.current.hookRepair?.clientOperationId).toBe('op-hook');
+    expect(result.current.worktreeError).toBeNull();
+
+    // 切到其他工作台项目：hookRepair 必须清空，避免面板粘到新上下文。
+    rerender(
+      baseControllerProps({
+        activeProjectId: 'project-2',
+        activeWorktreeId: 'wt-main',
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(result.current.hookRepair).toBeNull();
+  });
+
+  test('failedHook commit envelope sets hookRepair; switching activeWorktreeId clears it', async () => {
+    const project = buildLocalProject();
+    const hookFailure = buildHookFailure();
+    fakeWorktreesApi.commit.mockResolvedValueOnce(failedHookEnvelope(hookFailure));
+
+    const { result, rerender } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+    });
+
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.hookRepair).not.toBeNull();
+
+    // 同 project 内切到非主 worktree：stale hookRepair 必须清空。
+    rerender(
+      baseControllerProps({
+        activeProjectId: project.id,
+        activeWorktreeId: 'wt-feat',
+      }),
+    );
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(result.current.hookRepair).toBeNull();
+  });
+
+  test('handleDismissHookFailure clears hookRepair without calling any API', async () => {
+    const project = buildLocalProject();
+    const hookFailure = buildHookFailure();
+    fakeWorktreesApi.commit.mockResolvedValueOnce(failedHookEnvelope(hookFailure));
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: 'wt-main',
+    });
+
+    await act(async () => {
+      await result.current.handleCommitWorktree();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.hookRepair).not.toBeNull();
+
+    const callsBefore = {
+      commit: fakeWorktreesApi.commit.mock.calls.length,
+      push: fakeWorktreesApi.push.mock.calls.length,
+      list: fakeWorktreesApi.list.mock.calls.length,
+      repair: fakeWorktreesApi.repairHookFailure.mock.calls.length,
+    };
+
+    await act(async () => {
+      await result.current.handleDismissHookFailure();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.hookRepair).toBeNull();
+    // dismiss 是纯本地动作，不得触发任何 IPC。
+    expect(fakeWorktreesApi.commit.mock.calls.length).toBe(callsBefore.commit);
+    expect(fakeWorktreesApi.push.mock.calls.length).toBe(callsBefore.push);
+    expect(fakeWorktreesApi.list.mock.calls.length).toBe(callsBefore.list);
+    expect(fakeWorktreesApi.repairHookFailure.mock.calls.length).toBe(callsBefore.repair);
+  });
+
+  test('handleDismissHookFailure is a safe no-op when hookRepair is null', async () => {
+    const { result } = renderController({
+      activeProjectId: 'project-1',
+      activeWorktreeId: 'wt-main',
+    });
+
+    expect(result.current.hookRepair).toBeNull();
+
+    await act(async () => {
+      await result.current.handleDismissHookFailure();
+      await flushMicrotasks();
+    });
+
+    expect(result.current.hookRepair).toBeNull();
   });
 });
