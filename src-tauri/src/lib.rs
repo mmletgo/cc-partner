@@ -66,6 +66,7 @@ mod models;
 mod net;
 pub mod orchestrator;
 mod permissions;
+pub mod provider_manager;
 mod screenshot;
 mod state;
 mod storage;
@@ -131,7 +132,8 @@ use crate::commands::{
     mobile as mobile_cmd, orchestrator as orchestrator_cmd,
     orchestrator_adapters as orchestrator_adapters_cmd,
     orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,
-    prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd, scratchpad as scratchpad_cmd,
+    prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd,
+    provider_manager as provider_manager_cmd, scratchpad as scratchpad_cmd,
     screenshot as screenshot_cmd, ssh_target as ssh_target_cmd, sync as sync_cmd,
     transfer as transfer_cmd, updater as updater_cmd, workbench as workbench_cmd,
     workbench_dependencies as workbench_dependency_cmd,
@@ -354,6 +356,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ping,
+            provider_manager_cmd::provider_manager_status,
+            provider_manager_cmd::provider_manager_list,
+            provider_manager_cmd::provider_manager_switch,
+            provider_manager_cmd::provider_manager_install_cli,
             backend_cmd::get_backend_status,
             backend_cmd::start_backend_process,
             backend_cmd::stop_backend_process,

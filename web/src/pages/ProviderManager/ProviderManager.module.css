@@ -1,0 +1,118 @@
+/* Provider Manager 页样式。颜色/间距/圆角/阴影 100% 取自 tokens.css。 */
+
+.page {
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  padding: var(--space-6);
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  margin: 0;
+  color: var(--fg);
+}
+
+.subtitle {
+  font-size: var(--text-sm);
+  color: var(--fg-muted-readable);
+  margin: var(--space-1) 0 0;
+}
+
+.hint {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+}
+
+.appSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.appHeader {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.appTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin: 0;
+  color: var(--fg-2);
+}
+
+.currentLine {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.currentLabel {
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+}
+
+.currentName {
+  font-size: var(--text-sm);
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.providerGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-3);
+}
+
+.providerCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.providerHead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.providerName {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+  word-break: break-word;
+}
+
+.providerCategory {
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+}
+
+.providerAction {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}

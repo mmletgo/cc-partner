@@ -17,3 +17,4 @@ export * from './agentRuntime';
 export * from './agentLedger';
 export * from './agentHub';
 export * from './lanFleet';
+export * from './providerManager';

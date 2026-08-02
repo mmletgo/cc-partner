@@ -14,6 +14,7 @@
   "devices": "Devices",
   "settings": "Settings",
   "health": "Health",
+  "providerManager": "Provider Manager",
   "primaryNav": "Primary",
   "groups": {
     "explore": "Explore",

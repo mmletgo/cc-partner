@@ -412,3 +412,19 @@ export const MenuIcon = ({ size, ...rest }: IconProps) => (
     <path d="M3 4h10M3 8h10M3 12h10" />
   </svg>
 );
+
+/**
+ * Business Logic（为什么需要）:
+ *   Provider Manager 切换 provider，需要一个"交换/切换"语义的图标。
+ *
+ * Code Logic（做什么）:
+ *   渲染上下两根带箭头的水平线（swap），16x16 stroke，继承通用 icon 规范。
+ */
+export const ProviderManagerIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="M2.5 5.5h7" />
+    <path d="M7.5 3l2 2.5-2 2.5" />
+    <path d="M13.5 10.5h-7" />
+    <path d="M8.5 8l-2 2.5 2 2.5" />
+  </svg>
+);
