@@ -39,6 +39,7 @@ import {
   type WorkbenchOperationKey,
 } from '@/lib/asyncState/operationContext';
 import {
+  isMutationFailedHook,
   isMutationSucceeded,
   isMutationUnknown,
 } from '@/lib/asyncState/mutationOutcome';
@@ -56,6 +57,7 @@ import type {
   WorkbenchMergeStage,
   WorkbenchMergeStageId,
   WorkbenchMutationEnvelope,
+  WorkbenchHookFailure,
   WorkbenchWorktree,
 } from '@/lib/types';
 import {
@@ -86,6 +88,27 @@ export type WorktreeUnknownMutationLock = {
   projectId: string;
   worktreeId: string;
   clientOperationId: string;
+};
+
+/**
+ * failedHook envelope 之后保留的修复上下文。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   commit/push 因 pre-commit/pre-push 钩子失败时，前端展示钩子原始输出与「让 AI 修复」按钮；
+ *   用户点击后启动 Claude agent 在 worktree 终端运行；agent 不直接 commit/push（禁止 --no-verify / git push），
+ *   用户在终端观察后手动点「重试 commit/push」（fresh clientOperationId）。
+ *
+ * Code Logic（字段说明）:
+ *   kind 限定可修复的种类（commit|push）；hookFailure 透传 envelope 载荷供 prompt 与重试用；
+ *   clientOperationId 是原失败动作的 id（修复不消耗它，重试由新 id 走 ledger Fresh 路径）；
+ *   repair 成功后保留 sessionId 直到用户点重试或开始新 commit/push。
+ */
+export type WorkbenchHookRepair = {
+  kind: 'commit' | 'push';
+  hookFailure: WorkbenchHookFailure;
+  clientOperationId: string;
+  /** 修复启动返回的新终端 session id（前端聚焦该终端）。 */
+  terminalSessionId?: string;
 };
 
 /**
@@ -160,6 +183,10 @@ export interface WorkbenchWorktreeGitControllerResult {
    */
   unknownMutationLock: WorktreeUnknownMutationLock | null;
   worktreeError: string | null;
+  /**
+   * failedHook 之后的修复上下文；null 表示无待修复项或用户已开始新一次 commit/push。
+   */
+  hookRepair: WorkbenchHookRepair | null;
   createWorktreeOpen: boolean;
   createWorktreeBranchPrefix: WorktreeBranchPrefix;
   createWorktreeBranchSuffixDraft: string;
@@ -227,6 +254,8 @@ export function useWorkbenchWorktreeGitController(
   const [unknownMutationLock, setUnknownMutationLock] =
     useState<WorktreeUnknownMutationLock | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  // failedHook 修复上下文：commit/push 钩子失败时设置；用户点重试/开始新 commit/push 时清空。
+  const [hookRepair, setHookRepair] = useState<WorkbenchHookRepair | null>(null);
   const [createWorktreeOpen, setCreateWorktreeOpen] = useState<boolean>(false);
   const [createWorktreeBranchPrefix, setCreateWorktreeBranchPrefix] =
     useState<WorktreeBranchPrefix>(DEFAULT_WORKTREE_BRANCH_PREFIX);
@@ -800,11 +829,25 @@ export function useWorkbenchWorktreeGitController(
 
       if (isMutationSucceeded(envelope)) {
         clearUnknownMutationLockForKind('commit');
+        // 成功 commit 清空待修复上下文。
+        setHookRepair(null);
         invalidateWorktreeListRequests(projectId);
         invalidateGitHistoryRequests(projectId, worktreeId);
         await loadWorktrees(projectId);
         if (!isSettledCurrent(settled)) return;
         if (inspectorTab === 'history') await loadGitHistory();
+        return;
+      }
+
+      if (isMutationFailedHook(envelope)) {
+        // pre-commit 钩子失败：保留结构化失败 + 原 id 供前端展示「让 AI 修复」按钮；worktreeError 不覆盖。
+        clearUnknownMutationLockForKind('commit');
+        setHookRepair({
+          kind: 'commit',
+          hookFailure: envelope.hookFailure,
+          clientOperationId: envelope.clientOperationId,
+        });
+        setWorktreeError(null);
         return;
       }
 
@@ -1368,6 +1411,7 @@ export function useWorkbenchWorktreeGitController(
     worktreeBusy,
     unknownMutationLock,
     worktreeError,
+    hookRepair,
     createWorktreeOpen,
     createWorktreeBranchPrefix,
     createWorktreeBranchSuffixDraft,

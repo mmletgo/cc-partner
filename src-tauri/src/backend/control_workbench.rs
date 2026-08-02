@@ -269,6 +269,21 @@ async fn dispatch_workbench_op(
                     .await?;
             Ok(serde_json::to_value(item)?)
         }
+        "worktrees.repairHookFailure" => {
+            // failedHook envelope 之后的「让 AI 修复」入口：GuiClient 经 control 代理到 owner。
+            // no-transport-retry（启动 agent + 写终端，非幂等，不可自动重放）。
+            let worktree_id = required_string(&payload, "worktreeId")?;
+            let hook_failure = payload
+                .get("hookFailure")
+                .ok_or_else(|| AppError::validation("缺少 hookFailure 字段"))?;
+            let hook_failure: crate::workbench::operation_ledger::WorkbenchHookFailureDto =
+                serde_json::from_value(hook_failure.clone())
+                    .map_err(|e| AppError::validation(format!("hookFailure 解析失败: {e}")))?;
+            let item =
+                workbench::repair_worktree_hook_failure_for_state(state, worktree_id, hook_failure)
+                    .await?;
+            Ok(serde_json::to_value(item)?)
+        }
         "git.commits" => {
             let project_id = required_string(&payload, "projectId")?;
             let worktree_id = optional_string(&payload, "worktreeId");

@@ -10,6 +10,9 @@ use crate::claude_cli;
 use crate::error::{AppError, AppErrorCategory};
 use crate::net::protocol::CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1;
 use crate::state::AppState;
+use crate::workbench::hook_repair::{
+    repair_local_worktree_hook_failure, RepairHookFailureDto, RepairHookFailureReq,
+};
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchGitCommitDto, WorkbenchOpenFileDto, WorkbenchProjectRow,
     WorkbenchTextContent, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
@@ -17,8 +20,9 @@ use crate::workbench::models::{
 use crate::workbench::operation_ledger::{
     canonical_commit_payload, canonical_merge_payload, canonical_push_payload,
     canonical_remove_payload, hash_canonical_payload, normalize_client_operation_id,
-    run_claimed_mutation, MutationIntent, MutationKind, MutationTransportClass,
-    WorkbenchMutationEnvelopeDto, WorkbenchMutationLedger, WorkbenchMutationOperationDto,
+    run_claimed_mutation, run_claimed_mutation_with_hook, MutationIntent, MutationKind,
+    MutationTransportClass, WorkbenchHookFailureDto, WorkbenchMutationEnvelopeDto,
+    WorkbenchMutationLedger, WorkbenchMutationOperationDto,
 };
 use crate::workbench::sessions::kill_persisted_backend;
 use crate::workbench::{
@@ -347,6 +351,13 @@ pub(crate) async fn local_commit_workbench_worktree(
         WorkbenchMutationEnvelopeDto::Unknown { .. } => Err(AppError::unavailable(
             "commit 结果未知（兼容路径）".to_string(),
         )),
+        WorkbenchMutationEnvelopeDto::FailedHook { hook_failure, .. } => {
+            Err(AppError::generic(format!(
+                "{}\n{}",
+                hook_failure.summary(),
+                hook_failure.combined_output()
+            )))
+        }
     }
 }
 
@@ -392,7 +403,7 @@ pub(crate) async fn local_commit_workbench_worktree_with_ledger(
         .await?;
     let message_for_exec = message.clone();
     let row_for_exec = row.clone();
-    run_claimed_mutation(&ledger, &op_id, claim, move || {
+    run_claimed_mutation_with_hook(&ledger, &op_id, claim, move || {
         let state = state.clone();
         async move {
             let path = Path::new(&row_for_exec.path);
@@ -405,10 +416,11 @@ pub(crate) async fn local_commit_workbench_worktree_with_ledger(
                 .filter(|value| !value.is_empty())
             {
                 Some(manual_message) => {
-                    workbench_git::commit_staged(path, manual_message)?;
+                    // 钩子失败走 MutationExecError::Hook → failedHook envelope；其它失败透传 AppError。
+                    workbench_git::commit_staged_checked(path, manual_message)?;
                 }
                 None => {
-                    // index 已 stage；只生成 message 并 commit_staged，避免二次 stage 漂移。
+                    // index 已 stage；只生成 message 并 commit_staged_checked，避免二次 stage 漂移。
                     let changes = workbench_git::staged_changes_for_commit_message(path)?;
                     let (cli_path, model, provider_id) = {
                         let cfg = state.config.read().unwrap();
@@ -438,7 +450,7 @@ pub(crate) async fn local_commit_workbench_worktree_with_ledger(
                         )
                         .await?;
                     let msg = workbench_git::sanitize_commit_message(&generated.message)?;
-                    workbench_git::commit_staged(path, &msg)?;
+                    workbench_git::commit_staged_checked(path, &msg)?;
                 }
             }
             Ok(worktree_to_dto(&row_for_exec))
@@ -647,6 +659,13 @@ pub(crate) async fn local_push_workbench_worktree(
         WorkbenchMutationEnvelopeDto::Unknown { .. } => Err(AppError::unavailable(
             "push 结果未知（兼容路径）".to_string(),
         )),
+        WorkbenchMutationEnvelopeDto::FailedHook { hook_failure, .. } => {
+            Err(AppError::generic(format!(
+                "{}\n{}",
+                hook_failure.summary(),
+                hook_failure.combined_output()
+            )))
+        }
     }
 }
 
@@ -691,8 +710,9 @@ pub(crate) async fn local_push_workbench_worktree_with_ledger(
         .await?;
     let row_for_exec = row.clone();
     let branch_for_exec = branch.clone();
-    run_claimed_mutation(&ledger, &op_id, claim, move || async move {
-        workbench_git::push_branch(Path::new(&row_for_exec.path), &branch_for_exec)?;
+    run_claimed_mutation_with_hook(&ledger, &op_id, claim, move || async move {
+        // pre-push 钩子失败 → MutationExecError::Hook → failedHook envelope；远端拒绝/其它失败透传 AppError。
+        workbench_git::push_branch_checked(Path::new(&row_for_exec.path), &branch_for_exec)?;
         Ok(worktree_to_dto(&row_for_exec))
     })
     .await
@@ -789,6 +809,63 @@ pub async fn push_workbench_worktree(
         return Ok(v);
     }
     push_workbench_worktree_for_state(state.inner(), worktree_id, client_operation_id).await
+}
+
+/// 修复 worktree 的 pre-commit/pre-push 钩子失败：在 worktree 终端启动可见 Claude agent。
+///
+/// Business Logic（为什么需要这个函数）:
+///     本机/远端 commit/push 共用入口；V1 只支持本机 worktree，远端返回可操作错误。
+///
+/// Code Logic（这个函数做什么）:
+///     Remote → 错误（V1）；Local → repair_local_worktree_hook_failure。
+pub(crate) async fn repair_worktree_hook_failure_for_state(
+    state: &AppState,
+    worktree_id: String,
+    hook_failure: WorkbenchHookFailureDto,
+) -> Result<RepairHookFailureDto, AppError> {
+    match worktree_command_target(&worktree_id)? {
+        WorktreeCommandTarget::Remote { .. } => Err(AppError::generic(
+            "钩子修复目前仅支持本机 worktree；远端 worktree 请在对端设备执行",
+        )),
+        WorktreeCommandTarget::Local(local_worktree_id) => {
+            repair_local_worktree_hook_failure(
+                state,
+                RepairHookFailureReq {
+                    worktree_id: local_worktree_id,
+                    hook_failure,
+                },
+            )
+            .await
+        }
+    }
+}
+
+/// 修复 pre-commit/pre-push 钩子失败。
+///
+/// Business Logic（为什么需要这个命令）:
+///     桌面端 failedHook envelope 之后「让 AI 修复」按钮触发；在 worktree 可见终端启动 agent。
+///
+/// Code Logic（这个命令做什么）:
+///     GuiClient 经 workbench control 代理；owner 走 for_state。
+#[tauri::command]
+pub async fn repair_worktree_hook_failure(
+    state: State<'_, AppState>,
+    worktree_id: String,
+    hook_failure: WorkbenchHookFailureDto,
+) -> Result<RepairHookFailureDto, AppError> {
+    if let Some(v) = proxy_workbench_if_gui::<RepairHookFailureDto>(
+        state.inner(),
+        "worktrees.repairHookFailure",
+        serde_json::json!({
+            "worktreeId": worktree_id.clone(),
+            "hookFailure": hook_failure,
+        }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    repair_worktree_hook_failure_for_state(state.inner(), worktree_id, hook_failure).await
 }
 
 /// 合并当前 worktree 到主工作区。
@@ -1207,6 +1284,14 @@ fn map_remote_merge_value_envelope(
             client_operation_id,
             transport_class,
         }),
+        // 远端 merge 不会产生 failedHook（merge 走 run_claimed_mutation），防御性透传。
+        WorkbenchMutationEnvelopeDto::FailedHook {
+            client_operation_id,
+            hook_failure,
+        } => Ok(WorkbenchMutationEnvelopeDto::failed_hook(
+            client_operation_id,
+            hook_failure,
+        )),
     }
 }
 
@@ -1761,6 +1846,10 @@ pub(crate) async fn local_remove_workbench_worktree(
         WorkbenchMutationEnvelopeDto::Unknown { .. } => Err(AppError::unavailable(
             "remove 结果未知（兼容路径）".to_string(),
         )),
+        // remove 走 run_claimed_mutation，不会产生 failedHook；防御性 Err。
+        WorkbenchMutationEnvelopeDto::FailedHook { hook_failure, .. } => {
+            Err(AppError::generic(hook_failure.summary()))
+        }
     }
 }
 

@@ -11,6 +11,9 @@ use crate::error::AppError;
 use crate::workbench::models::{
     WorkbenchGitCommitDto, WorkbenchGitRefDto, WorkbenchGitRefKindDto, WorkbenchGitStatusDto,
 };
+use crate::workbench::operation_ledger::{
+    MutationExecError, WorkbenchHookFailureDto, WorkbenchHookStage,
+};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -144,6 +147,192 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, AppError> {
         "Git 命令失败: {}",
         git_failure_message(&output)
     )))
+}
+
+/// `run_git_classified` 的非零退出结果（保留结构化 stdout/stderr/退出码，不拍平成文案）。
+///
+/// Business Logic（为什么需要这个结构体）:
+///     pre-commit/pre-push 钩子失败需要把原始输出交给修复 agent，旧 `run_git` 拍平成字符串后丢失结构。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCommandFailure {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+/// `run_git_classified` 的错误分类。
+#[derive(Debug)]
+pub enum GitRunError {
+    /// git 非零退出（可能含 hook 失败）。
+    NonZero(GitCommandFailure),
+    /// 启动 git 子进程失败等 IO 错误。
+    Io(AppError),
+}
+
+impl From<GitRunError> for AppError {
+    /// 非 hook 场景回退为与旧 `run_git` 一致的 `Git 命令失败: ...` 文案。
+    fn from(err: GitRunError) -> Self {
+        match err {
+            GitRunError::NonZero(failure) => {
+                let detail = if !failure.stderr.trim().is_empty() {
+                    failure.stderr.trim().to_string()
+                } else {
+                    failure.stdout.trim().to_string()
+                };
+                AppError::generic(format!("Git 命令失败: {detail}"))
+            }
+            GitRunError::Io(err) => err,
+        }
+    }
+}
+
+/// 在指定 cwd 下执行 `git <args>`，成功返回 stdout，失败返回结构化 `GitRunError`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     commit/push 想判断是否钩子失败必须保留 stderr/stdout/exit_code；旧 run_git 把它们合并成字符串。
+fn run_git_classified(cwd: &Path, args: &[&str]) -> Result<String, GitRunError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| {
+            GitRunError::Io(AppError::generic(format!(
+                "启动 git 失败（{}）: {e}",
+                args.join(" ")
+            )))
+        })?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+    Err(GitRunError::NonZero(GitCommandFailure {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code(),
+    }))
+}
+
+/// 仓库当前是否安装了指定阶段的钩子脚本（pre-commit / pre-push）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     只有真正安装了钩子的仓库，commit/push 非零退出才有可能是钩子拒绝。
+///
+/// Code Logic（这个函数做什么）:
+///     1) `git rev-parse --git-dir` 取 git 目录（best-effort，失败返回 false）；
+///     2) `<git_dir>/hooks/<hook>` 存在且非 `.sample` 且非空 → true；
+///     3) `git config --get core.hooksPath` 非空时，`<hooksPath>/<hook>` 存在且非空 → true
+///        （覆盖 husky v9 `core.hooksPath=.husky/_` 与 lefthook 自管 hooksPath）。
+///     磁盘 IO 全部 no-follow；任何 git/IO 错误都保守返回 false。
+pub(crate) fn repo_has_hook_installed(path: &Path, stage: WorkbenchHookStage) -> bool {
+    let hook = stage.hook_name();
+    // git-dir 相对 cwd 解析（linked worktree 返回 .git/worktrees/<id>，主仓库返回 .git）。
+    let git_dir = match run_git(path, &["rev-parse", "--git-dir"]) {
+        Ok(s) => PathBuf::from(s.trim()),
+        Err(_) => return false,
+    };
+    let resolved = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        path.join(&git_dir)
+    };
+    let direct = resolved.join("hooks").join(hook);
+    if hook_file_is_real(&direct) {
+        return true;
+    }
+    // core.hooksPath（husky/lefthook 等）：相对 cwd 解析。
+    if let Ok(raw) = run_git(path, &["config", "--get", "core.hooksPath"]) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let hooks_path = if Path::new(trimmed).is_absolute() {
+                PathBuf::from(trimmed)
+            } else {
+                path.join(trimmed)
+            };
+            if hook_file_is_real(&hooks_path.join(hook)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 钩子文件存在、非 `.sample`、且内容非空才视为真实钩子。
+fn hook_file_is_real(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.ends_with(".sample"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    std::fs::metadata(path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// 已知「不是钩子问题」的 git 失败关键词（小写匹配）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户明确要求只修复钩子脚本失败；身份未配置、合并冲突、远端拒绝等必须保持原 AppError 路径，
+///     不能误判为钩子失败让 AI 反复尝试。
+fn is_known_non_hook_git_failure(combined: &str) -> bool {
+    // 内部小写化，调用方无需预处理；marker 一律小写匹配。
+    let haystack = combined.to_lowercase();
+    const MARKERS: &[&str] = &[
+        // commit 身份未配置（应引导用户配置，而非 AI 改全局 git identity）
+        "author identity unknown",
+        "empty ident name",
+        "empty ident email",
+        "committer identity unknown",
+        "please tell me who you are",
+        // 无可提交改动（has_changes gate 应已挡住，保险起见排除）
+        "nothing to commit",
+        "no changes added to commit",
+        // 合并冲突（不是钩子）
+        "merge conflict",
+        "automatic merge failed",
+        // 非仓库 / 路径问题
+        "not a git repository",
+        "does not have a commit checked out",
+        // push 远端拒绝（用户明确要求只修钩子脚本，不修 push 拒绝）
+        "non-fast-forward",
+        "fetch first",
+        "! [rejected]",
+        "[rejected]",
+        "remote rejected",
+        "remote: error",
+        "denied",
+        "could not read from remote repository",
+    ];
+    MARKERS.iter().any(|m| haystack.contains(m))
+}
+
+/// 判定一次 commit/push 的 git 非零退出是否属于钩子失败，并构造结构化 DTO。
+///
+/// Business Logic（为什么需要这个函数）:
+///     满足「安装了对应钩子」+「非已知非钩子失败」即判定为钩子失败；判定为非钩子时返回 None，
+///     调用方按普通 AppError 处理。误判上限由修复尝试次数（前端 3 次）兜底。
+pub(crate) fn detect_hook_failure(
+    stage: WorkbenchHookStage,
+    path: &Path,
+    failure: &GitCommandFailure,
+) -> Option<WorkbenchHookFailureDto> {
+    let combined = format!("{}\n{}", failure.stderr, failure.stdout);
+    if is_known_non_hook_git_failure(&combined) {
+        return None;
+    }
+    if !repo_has_hook_installed(path, stage) {
+        return None;
+    }
+    Some(WorkbenchHookFailureDto {
+        stage,
+        stdout: failure.stdout.clone(),
+        stderr: failure.stderr.clone(),
+        exit_code: failure.exit_code,
+    })
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -769,10 +958,35 @@ pub fn sanitize_commit_message(message: &str) -> Result<String, AppError> {
 ///
 /// Code Logic（这个函数做什么）:
 ///     清洗 message 后执行 `git commit -m <message>`；不再重新 stage，避免 message 与 diff 不一致。
+/// 提交 staged 改动（返回 AppError，不区分钩子失败）。生产 commit 按钮改走 `commit_staged_checked`；
+/// 本函数保留给 `commit_all`（test-only）与未来不需要钩子分类的调用方。
+#[allow(dead_code)]
 pub fn commit_staged(path: &Path, message: &str) -> Result<(), AppError> {
     let cleaned = sanitize_commit_message(message)?;
     run_git(path, &["commit", "-m", &cleaned])?;
     Ok(())
+}
+
+/// 与 `commit_staged` 相同的提交语义，但失败时分类：pre-commit 钩子拒绝 → `MutationExecError::Hook`，
+/// 其它失败 → `MutationExecError::Other(AppError)`。供工作台 commit 按钮走 failedHook 修复路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     工作台 commit 失败要让前端展示「让 AI 修复并重试」，必须区分钩子失败；delivery 等仍用 commit_staged。
+pub fn commit_staged_checked(path: &Path, message: &str) -> Result<(), MutationExecError> {
+    let cleaned = sanitize_commit_message(message)?;
+    match run_git_classified(path, &["commit", "-m", &cleaned]) {
+        Ok(_) => Ok(()),
+        Err(GitRunError::Io(e)) => Err(MutationExecError::Other(e)),
+        Err(GitRunError::NonZero(failure)) => {
+            if let Some(hook) = detect_hook_failure(WorkbenchHookStage::PreCommit, path, &failure) {
+                Err(MutationExecError::Hook(hook))
+            } else {
+                Err(MutationExecError::Other(AppError::from(
+                    GitRunError::NonZero(failure),
+                )))
+            }
+        }
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -1181,6 +1395,61 @@ pub fn push_branch(path: &Path, branch: &str) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+/// 与 `push_branch` 相同的推送语义（upstream/origin 安全规则一致），但失败时分类：
+/// pre-push 钩子拒绝 → `MutationExecError::Hook`；远端拒绝（non-fast-forward 等）/其它失败 → `Other(AppError)`。
+/// 供工作台 push 按钮走 failedHook 修复路径。
+pub fn push_branch_checked(path: &Path, branch: &str) -> Result<(), MutationExecError> {
+    if branch.trim().is_empty() {
+        return Err(MutationExecError::Other(AppError::generic(
+            "当前 worktree 没有可推送的分支",
+        )));
+    }
+    let target = resolve_push_target(path).map_err(MutationExecError::Other)?;
+    let args: Vec<&str> = match target {
+        PushTarget::Upstream => vec!["push"],
+        PushTarget::Remote(remote) => {
+            // remote 是 String，需要借用存活到 run_git_classified 调用结束。
+            // 用单独作用域避免临时值被释放。
+            return push_branch_checked_remote(path, branch, &remote);
+        }
+    };
+    match run_git_classified(path, &args) {
+        Ok(_) => Ok(()),
+        Err(GitRunError::Io(e)) => Err(MutationExecError::Other(e)),
+        Err(GitRunError::NonZero(failure)) => {
+            if let Some(hook) = detect_hook_failure(WorkbenchHookStage::PrePush, path, &failure) {
+                Err(MutationExecError::Hook(hook))
+            } else {
+                Err(MutationExecError::Other(AppError::from(
+                    GitRunError::NonZero(failure),
+                )))
+            }
+        }
+    }
+}
+
+/// `push_branch_checked` 的 `-u <remote> <branch>` 分支（独立函数避免 String 临时值生命周期问题）。
+fn push_branch_checked_remote(
+    path: &Path,
+    branch: &str,
+    remote: &str,
+) -> Result<(), MutationExecError> {
+    let args: [&str; 4] = ["push", "-u", remote, branch];
+    match run_git_classified(path, &args) {
+        Ok(_) => Ok(()),
+        Err(GitRunError::Io(e)) => Err(MutationExecError::Other(e)),
+        Err(GitRunError::NonZero(failure)) => {
+            if let Some(hook) = detect_hook_failure(WorkbenchHookStage::PrePush, path, &failure) {
+                Err(MutationExecError::Hook(hook))
+            } else {
+                Err(MutationExecError::Other(AppError::from(
+                    GitRunError::NonZero(failure),
+                )))
+            }
+        }
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2737,5 +3006,130 @@ UU web/src/App.tsx
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    // ---- hook-failure 检测 ----
+
+    #[test]
+    fn known_non_hook_markers_match_case_insensitively() {
+        // push 远端拒绝必须排除（用户明确要求只修钩子脚本，不修 push 拒绝）。
+        assert!(is_known_non_hook_git_failure("! [rejected] main -> main"));
+        assert!(is_known_non_hook_git_failure(
+            "Updates were rejected: non-fast-forward"
+        ));
+        assert!(is_known_non_hook_git_failure("Please fetch first"));
+        // 身份未配置
+        assert!(is_known_non_hook_git_failure("Author identity unknown"));
+        // 合并冲突
+        assert!(is_known_non_hook_git_failure(
+            "Automatic merge failed; fix conflicts"
+        ));
+        // 普通钩子输出不应被误判为非钩子失败
+        assert!(!is_known_non_hook_git_failure(
+            "Error: eslint found 3 problems"
+        ));
+        assert!(!is_known_non_hook_git_failure("✖ ruff check failed"));
+    }
+
+    #[test]
+    fn hook_failure_dto_summary_and_combined_output() {
+        let with_stderr = WorkbenchHookFailureDto {
+            stage: WorkbenchHookStage::PreCommit,
+            stdout: "stdout noise".to_string(),
+            stderr: "  eslint: 2 errors  ".to_string(),
+            exit_code: Some(1),
+        };
+        assert_eq!(with_stderr.summary(), "pre-commit 钩子失败");
+        // stderr 非空时只用 stderr（trim）。
+        assert_eq!(with_stderr.combined_output(), "eslint: 2 errors");
+        let stderr_empty = WorkbenchHookFailureDto {
+            stage: WorkbenchHookStage::PrePush,
+            stdout: "  build failed  ".to_string(),
+            stderr: String::new(),
+            exit_code: Some(2),
+        };
+        assert_eq!(stderr_empty.summary(), "pre-push 钩子失败");
+        // stderr 空时回退 stdout。
+        assert_eq!(stderr_empty.combined_output(), "build failed");
+    }
+
+    #[test]
+    fn detect_hook_failure_requires_installed_hook_and_ignores_known_markers() {
+        let repo = temp_git_dir("hook-detect");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        git_test_command(&repo, &["init"]);
+        // 没有安装钩子时，任何失败都不判为钩子失败。
+        let failure = GitCommandFailure {
+            stdout: String::new(),
+            stderr: "some error".to_string(),
+            exit_code: Some(1),
+        };
+        assert!(detect_hook_failure(WorkbenchHookStage::PreCommit, &repo, &failure).is_none());
+        // 已知非钩子标记即使安装了钩子也不判为钩子失败。
+        std::fs::write(
+            repo.join(".git").join("hooks").join("pre-commit"),
+            "#!/bin/sh\nexit 1\n",
+        )
+        .expect("write hook");
+        let rejected = GitCommandFailure {
+            stdout: String::new(),
+            stderr: "! [rejected] main -> main (non-fast-forward)".to_string(),
+            exit_code: Some(1),
+        };
+        assert!(detect_hook_failure(WorkbenchHookStage::PreCommit, &repo, &rejected).is_none());
+        // 安装了钩子且非已知标记 → 判为钩子失败。
+        let hook_err = GitCommandFailure {
+            stdout: String::new(),
+            stderr: "lint failed: 2 errors".to_string(),
+            exit_code: Some(1),
+        };
+        let detected =
+            detect_hook_failure(WorkbenchHookStage::PreCommit, &repo, &hook_err).expect("hook");
+        assert_eq!(detected.stage, WorkbenchHookStage::PreCommit);
+        assert_eq!(detected.exit_code, Some(1));
+        assert!(detected.stderr.contains("lint failed"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// 真实 git + 可执行 pre-commit 钩子：commit_staged_checked 必须返回 Hook 分类。
+    /// 仅 Unix（Windows 钩子可执行性语义不同，跨平台 smoke 不覆盖）。
+    #[cfg(unix)]
+    #[test]
+    fn commit_staged_checked_classifies_failing_pre_commit_hook_as_hook() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = temp_git_dir("hook-commit-checked");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        git_test_command(&repo, &["init"]);
+        git_test_command(&repo, &["config", "user.name", "Test"]);
+        git_test_command(&repo, &["config", "user.email", "t@e.com"]);
+        std::fs::write(repo.join("a.txt"), "v1\n").expect("write a");
+        git_test_command(&repo, &["add", "a.txt"]);
+        git_test_command(&repo, &["commit", "-m", "init"]);
+        // 安装一个会失败的 pre-commit 钩子。
+        let hook = repo.join(".git").join("hooks").join("pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho 'format failed: 1 issue' >&2\nexit 1\n",
+        )
+        .expect("write hook");
+        let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook, perms).unwrap();
+        // 制造新改动并 stage。
+        std::fs::write(repo.join("a.txt"), "v2\n").expect("modify a");
+        git_test_command(&repo, &["add", "a.txt"]);
+        match commit_staged_checked(&repo, "second") {
+            Err(MutationExecError::Hook(h)) => {
+                assert_eq!(h.stage, WorkbenchHookStage::PreCommit);
+                assert!(h.stderr.contains("format failed"));
+            }
+            other => panic!("expected Hook, got {:?}", other),
+        }
+        // 移除钩子后同样改动应正常提交（返回 Ok）。
+        let _ = std::fs::remove_file(&hook);
+        std::fs::write(repo.join("a.txt"), "v3\n").expect("modify a again");
+        git_test_command(&repo, &["add", "a.txt"]);
+        commit_staged_checked(&repo, "third").expect("commit without hook");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

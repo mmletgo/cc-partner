@@ -138,10 +138,12 @@ export type MutationTransportClass = 'timeout' | 'network';
  * Workbench mutation 成功通道 envelope（与 Rust WorkbenchMutationEnvelopeDto 对齐）。
  *
  * Business Logic（为什么需要这个类型）:
- *   commit/push/merge/remove 在 uncertain transport 下不能猜成失败或成功，只能 succeeded | unknown。
+ *   commit/push/merge/remove 在 uncertain transport 下不能猜成失败或成功，只能 succeeded | unknown；
+ *   本机 commit/push 因 pre-commit/pre-push 钩子失败时走 failedHook，让前端展示「让 AI 修复并重试」。
  *
  * Code Logic（联合形态）:
- *   succeeded 带权威 value；unknown 仅带 clientOperationId 与可选 transportClass。
+ *   succeeded 带权威 value；unknown 仅带 clientOperationId 与可选 transportClass；
+ *   failedHook 携带结构化 hook 输出（仅本机 commit/push 产生，远端/P2P 不产生）。
  */
 export type WorkbenchMutationEnvelope<T> =
   | { kind: 'succeeded'; value: T; clientOperationId: string }
@@ -149,7 +151,42 @@ export type WorkbenchMutationEnvelope<T> =
       kind: 'unknown';
       clientOperationId: string;
       transportClass?: MutationTransportClass;
+    }
+  | {
+      kind: 'failedHook';
+      clientOperationId: string;
+      hookFailure: WorkbenchHookFailure;
     };
+
+/** pre-commit / pre-push 钩子阶段（与 Rust WorkbenchHookStage 对齐）。 */
+export type WorkbenchHookStage = 'preCommit' | 'prePush';
+
+/**
+ * 结构化的 hook 钩子失败（failedHook envelope 载荷）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   把钩子原始 stdout/stderr/退出码交给前端展示与修复 agent；禁止靠文案匹配判业务。
+ */
+export interface WorkbenchHookFailure {
+  stage: WorkbenchHookStage;
+  stdout: string;
+  stderr: string;
+  exitCode?: number;
+}
+
+/**
+ * 启动 hook 修复 agent 的返回值（与 Rust RepairHookFailureDto 对齐）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   failedHook 之后「让 AI 修复」按钮调 repair_worktree_hook_failure；返回 agent/terminal id
+ *   供前端聚焦终端并展示「重试」入口；projectId 隔离便于 cross-project 调用。
+ */
+export interface WorkbenchRepairHookFailureDto {
+  agentSessionId: string;
+  terminalSessionId: string;
+  worktreeId: string;
+  projectId: string;
+}
 
 /** mutation 种类（ledger / wire 小写 token）。 */
 export type MutationKind = 'commit' | 'push' | 'merge' | 'remove';

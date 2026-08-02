@@ -23,6 +23,7 @@ import {
   workbenchProjectDecoder,
   workbenchProjectsDecoder,
   workbenchRemoveResultDecoder,
+  workbenchRepairHookFailureDecoder,
   workbenchSaveTextResultDecoder,
   sessionSearchResultDecoder,
   workbenchSessionDecoder,
@@ -54,6 +55,7 @@ import type {
   WorkbenchRemoteDirectoryEntry,
   WorkbenchRemotePathInfo,
   WorkbenchRemoteRoot,
+  WorkbenchRepairHookFailureDto,
   WorkbenchSqlitePreview,
   WorkbenchWorktree,
 } from '@/lib/types';
@@ -248,6 +250,25 @@ export const workbenchApi = {
         'get_workbench_mutation_operation',
         { clientOperationId },
         nullableDecoder(workbenchMutationOperationDecoder),
+      ),
+
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   failedHook envelope 之后用户点「让 AI 修复」时调用：在该 worktree 终端启动可见
+     *   Claude agent 修复钩子失败的根因（禁止 --no-verify / git push）。
+     *
+     * Code Logic（这个函数做什么）:
+     *   invokeDecoded repair_worktree_hook_failure → WorkbenchRepairHookFailureDto（agent/terminal id）。
+     *   V1 仅本机 worktree；远端项目返回可操作错误，由调用方降级处理。
+     */
+    repairHookFailure: (
+      worktreeId: string,
+      hookFailure: import('@/lib/types').WorkbenchHookFailure,
+    ): Promise<WorkbenchRepairHookFailureDto> =>
+      invokeDecoded(
+        'repair_worktree_hook_failure',
+        { worktreeId, hookFailure },
+        workbenchRepairHookFailureDecoder,
       ),
   },
 

@@ -10,6 +10,8 @@
  *   定义 WorkbenchMutationEnvelope 与构造/判定 helper，以及 typed unknown Error。
  */
 
+import type { WorkbenchHookFailure } from '@/lib/types';
+
 /**
  * 不确定传输类别（浏览器无法可靠区分 connect/first-byte/not-started）。
  */
@@ -31,6 +33,11 @@ export type WorkbenchMutationEnvelope<T> =
       kind: 'unknown';
       clientOperationId: string;
       transportClass?: MutationTransportClass;
+    }
+  | {
+      kind: 'failedHook';
+      clientOperationId: string;
+      hookFailure: WorkbenchHookFailure;
     };
 
 /** 稳定错误 code：unknown 恢复路径用它判定，禁止依赖本地化 message。 */
@@ -118,6 +125,19 @@ export function isMutationUnknown<T>(
   envelope: WorkbenchMutationEnvelope<T>,
 ): envelope is Extract<WorkbenchMutationEnvelope<T>, { kind: 'unknown' }> {
   return envelope.kind === 'unknown';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   pre-commit/pre-push 钩子失败时控制器需要走「让 AI 修复并重试」分支，typed 区分 succeeded|unknown。
+ *
+ * Code Logic（这个函数做什么）:
+ *   kind === 'failedHook' 时为 true。
+ */
+export function isMutationFailedHook<T>(
+  envelope: WorkbenchMutationEnvelope<T>,
+): envelope is Extract<WorkbenchMutationEnvelope<T>, { kind: 'failedHook' }> {
+  return envelope.kind === 'failedHook';
 }
 
 /**

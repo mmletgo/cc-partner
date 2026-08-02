@@ -418,6 +418,142 @@ describe('useWorkbenchTerminalController — load / focus', () => {
     // focus effect 触发后端 focus_workbench_session 一次。
     expect(fakeSessionsApi.focus).toHaveBeenCalledWith('s2');
   });
+
+  test('focusSession keeps user selection when terminal-status event arrives after grace and backend tmux still on previous window', async () => {
+    // Regression：用户点击第二个 terminal window 后，若 500ms grace 期过后到达一个
+    // terminal-status 事件（使 sessions 生成新数组引用），轮询 effect 重新 setup 并立即查
+    // get_focused_workbench_session；此时后端 tmux select-window 可能尚未生效（仍停在第一个），
+    // 不应把本地用户选择覆盖回第一个 window。
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id });
+    const s2 = buildSession({ id: 's2', worktreeId: worktree.id });
+    fakeSessionsApi.list.mockResolvedValue([s1, s2]);
+    // 后端 tmux current 仍停在 s1（focus IPC 还没让 select-window 生效）
+    fakeSessionsApi.focused.mockResolvedValue({ sessionId: 's1' });
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    // 初始 active 落在第一个 window（scopedSessions 推导）。
+    expect(result.current.activeSessionId).toBe('s1');
+
+    fakeSessionsApi.focus.mockClear();
+    fakeSessionsApi.focused.mockClear();
+
+    // 用户点击第二个 window tab。
+    await act(async () => {
+      result.current.focusSession('s2');
+      await flushMicrotasks();
+    });
+    expect(result.current.activeSessionId).toBe('s2');
+
+    // 推进时间超过本地 focus grace（500ms）——模拟 focus IPC 往返慢/后端 tmux 切换滞后。
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+      await flushMicrotasks();
+    });
+
+    // terminal-status 事件触发 sessions 引用变化 → scopedSessions 新引用 →
+    // 轮询 effect 重新 setup 并立即查 focused()。
+    await act(async () => {
+      emitEvent('workbench:terminal-status', {
+        sessionId: 's1',
+        status: 'running',
+        exitCode: null,
+        ts: Date.now(),
+      });
+      await flushMicrotasks();
+    });
+
+    // 期望：用户刚选择的 s2 不被后端 tmux current(s1) 覆盖切回第一个。
+    expect(result.current.activeSessionId).toBe('s2');
+  });
+
+  test('focusSession keeps user selection while focus IPC in flight and interval polls stale backend window', async () => {
+    // Regression（interval 路径）：用户点击第二个 window 后，本地 focusSession 立即设 active，
+    // 但后端 focus_workbench_session IPC 可能因远端/后端 busy 迟迟未确认；此时 700ms 轮询触发，
+    // 后端 tmux current 仍停在第一个 window。在 focus IPC 未确认成功前，轮询不得覆盖本地选择。
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id });
+    const s2 = buildSession({ id: 's2', worktreeId: worktree.id });
+    fakeSessionsApi.list.mockResolvedValue([s1, s2]);
+    fakeSessionsApi.focused.mockResolvedValue({ sessionId: 's1' });
+
+    // mount 时 activeSessionId null→s1 触发的 focus('s1') 立即 resolve；
+    // 之后用户 focusSession('s2') 触发的 focus('s2') 保持 pending（模拟远端慢/未确认）。
+    const pendingFocusResolvers: Array<(value: { ok: true; sessionId: string }) => void> = [];
+    fakeSessionsApi.focus
+      .mockResolvedValueOnce({ ok: true, sessionId: 's1' })
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            pendingFocusResolvers.push(resolve);
+          }),
+      );
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    expect(result.current.activeSessionId).toBe('s1');
+
+    fakeSessionsApi.focus.mockClear();
+    fakeSessionsApi.focused.mockClear();
+
+    await act(async () => {
+      result.current.focusSession('s2');
+      await flushMicrotasks();
+    });
+    expect(result.current.activeSessionId).toBe('s2');
+
+    // 推进时间超过 grace(500ms) 与 interval(700ms)，触发轮询 syncFocusedSession。
+    await act(async () => {
+      vi.advanceTimersByTime(800);
+      await flushMicrotasks();
+    });
+
+    // focus IPC 仍 pending，后端 tmux current 仍 s1；期望本地 s2 不被覆盖。
+    expect(result.current.activeSessionId).toBe('s2');
+
+    // cleanup：resolve 挂起的 focus promise，避免跨用例泄漏。
+    await act(async () => {
+      pendingFocusResolvers.forEach((fn) => fn({ ok: true, sessionId: 's2' }));
+      await flushMicrotasks();
+    });
+  });
 });
 
 describe('useWorkbenchTerminalController — create / rename / close session', () => {
