@@ -102,6 +102,25 @@
     "testFailed": "Claude CLI 测试失败：{{error}}",
     "applyFailed": "应用 Claude CLI 配置失败"
   },
+  "internalClaude": {
+    "title": "内部 Claude provider",
+    "subtitle": "为 cc-partner 自身的静默调用（commit 信息、合并冲突解决、Prompt 优化、GitHub 解说、verifier）选择一个 cc-switch 的 Claude provider。不会修改 OS 默认的 ~/.claude/settings.json，因此你的交互式 Claude 会话不受影响。",
+    "provider": {
+      "label": "内部调用使用的 provider",
+      "osDefault": "沿用 OS 默认（cc-switch 当前）",
+      "ccSwitchCurrent": "当前",
+      "helper": "仅展示 cc-switch 中已配置的 Claude provider。选择「沿用 OS 默认」可回到你常用的 Claude 配置。",
+      "missing": "缺失的 provider（{{id}}）",
+      "missingNotice": "先前选择的 provider 已不在 cc-switch 中。在重新选择之前，内部调用会回落到 OS 默认。"
+    },
+    "appliedLabel": "已应用",
+    "applied": "内部 provider 已更新。",
+    "apply": "应用",
+    "applying": "应用中…",
+    "recheck": "刷新列表",
+    "loadFailed": "读取内部 Claude provider 配置失败：{{error}}",
+    "saveFailed": "更新内部 Claude provider 失败：{{error}}"
+  },
   "promptOptimizerSettings": {
     "title": "Workbench Prompt 优化",
     "subtitle": "设置工作台终端里的 Prompt 优化浮层快捷键，以及优化完成后一键填入终端时使用的语言。",

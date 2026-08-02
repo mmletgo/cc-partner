@@ -24,6 +24,10 @@ pub use models::{
     ProviderManagerSummary,
 };
 
+// 服务端内部专用：读取指定 claude provider 的 settings_config 片段（用于内部 Claude provider 覆盖）。
+// 不跨 IPC 暴露——仅 crate 内部（internal_claude 模块）使用。
+pub(crate) use store::fetch_claude_settings_config;
+
 use crate::error::AppError;
 
 /// 整体状态快照（供 `provider_manager_status` 命令）。

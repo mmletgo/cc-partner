@@ -580,6 +580,25 @@ impl Default for GithubTrendingConfig {
     }
 }
 
+/// cc-partner 内部 Claude 调用的 provider 覆盖配置。
+///
+/// Business Logic（为什么需要这个结构）:
+///     commit/merge/prompt 优化/GitHub 解说/verifier 等内部 headless Claude 调用默认继承
+///     `~/.claude/settings.json`（cc-switch 维护的 OS 默认 provider）。用户希望这些内部调用
+///     使用一个**不同**的 cc-switch provider，且**不**改动 OS 默认（不与交互式 Claude 会话争用）。
+///     仅记录所选 cc-switch claude provider 的 id；settings_config 在调用时从 cc-switch DB 实时读取，
+///     写入隔离的 `CLAUDE_CONFIG_DIR`，因此本配置**不持久化任何凭据**。
+///
+/// Code Logic（这个结构做什么）:
+///     纯配置载体，落盘在 AppConfig.internal_claude 下，`#[serde(default)]` 兼容旧 config.json。
+///     `provider_id = None` 表示沿用 OS 默认（历史行为）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalClaudeConfig {
+    /// 选中的 cc-switch claude provider id；`None`（或空串）= 沿用 OS 默认 provider。
+    #[serde(default)]
+    pub provider_id: Option<String>,
+}
+
 /// 健康提醒配置(久坐监测 + 喝水提醒)。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -760,6 +779,10 @@ pub struct AppConfig {
     /// GitHub 周热门首页与 Claude CLI 解说配置。`#[serde(default)]` 兼容旧 config.json。
     #[serde(default)]
     pub github_trending: GithubTrendingConfig,
+    /// cc-partner 内部 headless Claude 调用所用 provider 覆盖（读 cc-switch，不影响 OS 默认）。
+    /// `#[serde(default)]` 兼容旧 config.json（缺字段 = 沿用 OS 默认 provider）。
+    #[serde(default)]
+    pub internal_claude: InternalClaudeConfig,
     /// Multi-CLI Agent Hub 开关与登录后台状态。`#[serde(default)]` 兼容旧 config.json。
     #[serde(default)]
     pub agent_hub: AgentHubConfig,
@@ -948,6 +971,7 @@ impl AppConfig {
                 health: HealthConfig::default(),
                 orchestrator: OrchestratorAutomationConfig::default(),
                 github_trending: GithubTrendingConfig::default(),
+                internal_claude: InternalClaudeConfig::default(),
                 agent_hub: AgentHubConfig::default(),
                 manual_peers: Vec::new(),
             };
@@ -1396,6 +1420,7 @@ mod tests {
             },
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: AgentHubConfig::default(),
             manual_peers: Vec::new(),
         };
@@ -1474,6 +1499,7 @@ mod tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: AgentHubConfig::default(),
             manual_peers: Vec::new(),
         }

@@ -396,6 +396,7 @@ pub struct ConfigSnapshot {
     pub health: HealthConfig,
     pub orchestrator: OrchestratorAutomationConfig,
     pub github_trending: GithubTrendingConfig,
+    pub internal_claude: crate::config::InternalClaudeConfig,
 }
 
 impl ConfigSnapshot {
@@ -427,6 +428,7 @@ impl ConfigSnapshot {
             health: config.health.clone(),
             orchestrator: config.orchestrator.clone(),
             github_trending: config.github_trending.clone(),
+            internal_claude: config.internal_claude.clone(),
         }
     }
 
@@ -454,6 +456,7 @@ impl ConfigSnapshot {
         cfg.health = self.health.clone();
         cfg.orchestrator = self.orchestrator.clone();
         cfg.github_trending = self.github_trending.clone();
+        cfg.internal_claude = self.internal_claude.clone();
     }
 }
 
@@ -625,6 +628,8 @@ pub struct RuntimeConfigPatch {
     pub orchestrator: Option<OrchestratorRuntimePatch>,
     #[serde(default)]
     pub github_trending: Option<GithubTrendingRuntimePatch>,
+    #[serde(default)]
+    pub internal_claude: Option<InternalClaudeRuntimePatch>,
 }
 
 impl RuntimeConfigPatch {
@@ -685,6 +690,9 @@ impl RuntimeConfigPatch {
         }
         if let Some(ref trending) = self.github_trending {
             trending.apply_to(&mut cfg.github_trending);
+        }
+        if let Some(ref internal) = self.internal_claude {
+            internal.apply_to(&mut cfg.internal_claude);
         }
         Ok(())
     }
@@ -883,6 +891,37 @@ impl GithubTrendingRuntimePatch {
     }
 }
 
+/// cc-partner 内部 Claude provider 覆盖 patch。
+///
+/// Business Logic（为什么需要这个结构）:
+///     设置页 AI tab 选择「内部 Claude provider」，经 CAS 写入 sidecar 权威配置；
+///     仅 provider_id 一个字段，空串归一为 None（= 沿用 OS 默认）。
+///
+/// Code Logic（这个结构做什么）:
+///     Option 字段 + deny_unknown_fields；apply_to 把空串/None 统一回退为 None。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InternalClaudeRuntimePatch {
+    #[serde(default)]
+    pub provider_id: Option<String>,
+}
+
+impl InternalClaudeRuntimePatch {
+    /// 将 internal_claude patch 应用到 candidate。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     trim 后空串视为 None；非空写入 provider_id。
+    fn apply_to(&self, internal: &mut crate::config::InternalClaudeConfig) {
+        if let Some(ref id) = self.provider_id {
+            internal.provider_id = if id.trim().is_empty() {
+                None
+            } else {
+                Some(id.trim().to_string())
+            };
+        }
+    }
+}
+
 /// 计算非敏感配置 fingerprint。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -909,6 +948,7 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
         "orchestrator_max_concurrent_tasks": config.orchestrator.max_concurrent_tasks,
         "github_trending_ai_enabled": config.github_trending.ai_enabled,
         "github_trending_cache_ttl_hours": config.github_trending.cache_ttl_hours,
+        "internal_claude_provider_id": config.internal_claude.provider_id,
     });
     let encoded = serde_json::to_vec(&payload).unwrap_or_default();
     let digest = Sha256::digest(&encoded);
@@ -944,6 +984,7 @@ mod tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
         }

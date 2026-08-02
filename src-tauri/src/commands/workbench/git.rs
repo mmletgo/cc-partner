@@ -410,19 +410,26 @@ pub(crate) async fn local_commit_workbench_worktree_with_ledger(
                 None => {
                     // index 已 stage；只生成 message 并 commit_staged，避免二次 stage 漂移。
                     let changes = workbench_git::staged_changes_for_commit_message(path)?;
-                    let (cli_path, model) = {
+                    let (cli_path, model, provider_id) = {
                         let cfg = state.config.read().unwrap();
                         (
                             cfg.github_trending.claude_cli_path.clone(),
                             cfg.github_trending.claude_model.clone(),
+                            cfg.internal_claude.provider_id.clone(),
                         )
                     };
+                    let provider_dir =
+                        crate::internal_claude::resolve_internal_provider_config_dir(
+                            provider_id.as_deref(),
+                        )
+                        .await?;
                     let schema = workbench_commit_message_schema();
                     let instruction = build_commit_message_instruction(&changes);
                     let generated =
                         claude_cli::run_structured_json_with_cwd::<WorkbenchCommitMessageResponse>(
                             &cli_path,
                             &model,
+                            provider_dir.as_deref(),
                             &schema.to_string(),
                             &instruction,
                             Some(path),
@@ -1448,18 +1455,23 @@ pub(crate) async fn resolve_merge_conflicts_with_claude(
         return Ok(0);
     }
     let conflict_inputs = read_merge_conflict_files(main_path, &conflict_paths)?;
-    let (cli_path, model) = {
+    let (cli_path, model, provider_id) = {
         let cfg = state.config.read().unwrap();
         (
             cfg.github_trending.claude_cli_path.clone(),
             cfg.github_trending.claude_model.clone(),
+            cfg.internal_claude.provider_id.clone(),
         )
     };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
     let schema = merge_conflict_resolution_schema();
     let instruction = build_merge_conflict_resolution_instruction(&conflict_inputs);
     let response = claude_cli::run_structured_json_with_cwd::<WorkbenchMergeResolutionResponse>(
         &cli_path,
         &model,
+        provider_dir.as_deref(),
         &schema.to_string(),
         &instruction,
         Some(main_path),

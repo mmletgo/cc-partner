@@ -132,13 +132,17 @@ pub async fn optimize_prompt(
     validate_prompt_input(&prompt)?;
     let working_directory = resolve_working_directory(working_directory)?;
     let target_language = PromptOptimizeTargetLanguage::parse(target_language)?;
-    let (cli_path, model) = {
+    let (cli_path, model, provider_id) = {
         let cfg = state.config.read().unwrap();
         (
             cfg.github_trending.claude_cli_path.clone(),
             cfg.github_trending.claude_model.clone(),
+            cfg.internal_claude.provider_id.clone(),
         )
     };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
     let schema = prompt_optimize_schema_for_target(target_language)?;
     let instruction = build_optimize_instruction_for_target(&prompt, target_language);
 
@@ -146,6 +150,7 @@ pub async fn optimize_prompt(
         let result = claude_cli::run_structured_json_with_cwd::<SinglePromptOptimizeResponseDto>(
             &cli_path,
             &model,
+            provider_dir.as_deref(),
             &schema.to_string(),
             &instruction,
             working_directory.as_deref(),
@@ -159,6 +164,7 @@ pub async fn optimize_prompt(
     claude_cli::run_structured_json_with_cwd::<PromptOptimizeResponseDto>(
         &cli_path,
         &model,
+        provider_dir.as_deref(),
         &schema.to_string(),
         &instruction,
         working_directory.as_deref(),
@@ -200,19 +206,24 @@ pub(crate) async fn local_complete_orchestrator_task_prompt(
 ) -> Result<OrchestratorTaskPromptCompletionDto, AppError> {
     validate_prompt_input(&prompt)?;
     let working_directory = resolve_working_directory(working_directory)?;
-    let (cli_path, model) = {
+    let (cli_path, model, provider_id) = {
         let cfg = state.config.read().unwrap();
         (
             cfg.github_trending.claude_cli_path.clone(),
             cfg.github_trending.claude_model.clone(),
+            cfg.internal_claude.provider_id.clone(),
         )
     };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
     let schema = orchestrator_task_prompt_completion_schema();
     let instruction = build_orchestrator_task_prompt_completion_instruction(&prompt);
 
     claude_cli::run_structured_json_with_cwd::<OrchestratorTaskPromptCompletionDto>(
         &cli_path,
         &model,
+        provider_dir.as_deref(),
         &schema.to_string(),
         &instruction,
         working_directory.as_deref(),
@@ -306,13 +317,17 @@ pub(crate) async fn local_stream_optimize_prompt_to_workbench_session(
     }
     let (target_language, _) = parse_required_target_language(target_language)?;
     let working_directory = resolve_working_directory(working_directory)?;
-    let (cli_path, model) = {
+    let (cli_path, model, provider_id) = {
         let cfg = state.config.read().unwrap();
         (
             cfg.github_trending.claude_cli_path.clone(),
             cfg.github_trending.claude_model.clone(),
+            cfg.internal_claude.provider_id.clone(),
         )
     };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
     let instruction = build_streaming_optimize_instruction(&prompt, target_language);
     let sessions = state.workbench_sessions.clone();
     let write_session_id = session_id.clone();
@@ -320,6 +335,7 @@ pub(crate) async fn local_stream_optimize_prompt_to_workbench_session(
     claude_cli::run_streaming_text_with_cwd(
         &cli_path,
         &model,
+        provider_dir.as_deref(),
         &instruction,
         working_directory.as_deref(),
         PROMPT_OPTIMIZE_TIMEOUT_SECS,

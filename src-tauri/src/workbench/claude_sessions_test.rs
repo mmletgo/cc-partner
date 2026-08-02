@@ -1509,6 +1509,7 @@ async fn build_session_index_test_state(data_dir: &Path) -> crate::state::AppSta
         health: HealthConfig::default(),
         orchestrator: OrchestratorAutomationConfig::default(),
         github_trending: GithubTrendingConfig::default(),
+        internal_claude: crate::config::InternalClaudeConfig::default(),
         agent_hub: crate::config::AgentHubConfig::default(),
         manual_peers: Vec::new(),
     };

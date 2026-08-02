@@ -657,6 +657,7 @@
   "sessionStatusTitle": "Current session",
   "sessionNamePlaceholder": "Session name",
   "renameSession": "Rename session",
+  "renameSessionHint": "Double-click to rename",
   "statusDevice": "Device",
   "statusProject": "Project",
   "statusWorktree": "Worktree",

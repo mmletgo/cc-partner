@@ -10,7 +10,7 @@
  */
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import i18n from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { ReactElement } from 'react';
@@ -25,6 +25,9 @@ const resources = {
       terminalTabs: '终端',
       closeTerminal: '关闭',
       newSession: '新建',
+      renameSession: '重命名会话',
+      renameSessionHint: '双击重命名',
+      sessionNamePlaceholder: '会话名称',
       agentPhase: {
         launching: 'Agent 启动中',
         working: 'Agent 工作中',
@@ -117,6 +120,8 @@ function makeAgent(partial: Partial<AgentSessionProjection> = {}): AgentSessionP
 function renderSessionTab(options: {
   agent?: AgentSessionProjection | null;
   onFocusSession?: (id: string) => void;
+  onRenameSession?: (sessionId: string, name: string) => Promise<boolean>;
+  canRename?: boolean;
 }): void {
   const agent = options.agent ?? null;
   render(
@@ -129,6 +134,8 @@ function renderSessionTab(options: {
         onFocusSession={options.onFocusSession ?? vi.fn()}
         onCloseSession={async () => undefined}
         onCreateSession={() => undefined}
+        onRenameSession={options.onRenameSession ?? vi.fn().mockResolvedValue(true)}
+        canRename={options.canRename ?? true}
         resolveAgent={() => agent}
       />,
     ),
@@ -157,5 +164,79 @@ describe('WorkbenchSessionTabs agent projection', () => {
     const status = screen.getByLabelText(/Agent 等待输入/);
     status.click();
     expect(onFocus).toHaveBeenCalledWith('s1');
+  });
+});
+
+describe('WorkbenchSessionTabs inline rename', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  test('double-click name enters edit mode with prefilled value', () => {
+    renderSessionTab({ onRenameSession: vi.fn() });
+    fireEvent.dblClick(screen.getByText('Term 1'));
+    const input = screen.getByLabelText('重命名会话') as HTMLInputElement;
+    expect(input).toBeTruthy();
+    expect(input.value).toBe('Term 1');
+  });
+
+  test('Enter commits the renamed value via onRenameSession exactly once', () => {
+    const onRename = vi.fn().mockResolvedValue(true);
+    renderSessionTab({ onRenameSession: onRename });
+    fireEvent.dblClick(screen.getByText('Term 1'));
+    const input = screen.getByLabelText('重命名会话') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Build' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onRename).toHaveBeenCalledTimes(1);
+    expect(onRename).toHaveBeenCalledWith('s1', 'Build');
+  });
+
+  test('Escape cancels without calling onRenameSession', () => {
+    const onRename = vi.fn();
+    renderSessionTab({ onRenameSession: onRename });
+    fireEvent.dblClick(screen.getByText('Term 1'));
+    const input = screen.getByLabelText('重命名会话') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Build' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(onRename).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText('重命名会话')).toBeNull();
+  });
+
+  test('empty / whitespace name on commit does not call onRenameSession', () => {
+    const onRename = vi.fn();
+    renderSessionTab({ onRenameSession: onRename });
+    fireEvent.dblClick(screen.getByText('Term 1'));
+    const input = screen.getByLabelText('重命名会话') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '   ' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  test('unchanged name does not call onRenameSession', () => {
+    const onRename = vi.fn();
+    renderSessionTab({ onRenameSession: onRename });
+    fireEvent.dblClick(screen.getByText('Term 1'));
+    const input = screen.getByLabelText('重命名会话') as HTMLInputElement;
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  test('canRename=false blocks entering edit mode', () => {
+    const onRename = vi.fn();
+    renderSessionTab({ onRenameSession: onRename, canRename: false });
+    fireEvent.dblClick(screen.getByText('Term 1'));
+    expect(screen.queryByLabelText('重命名会话')).toBeNull();
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  test('blur commits the renamed value', () => {
+    const onRename = vi.fn().mockResolvedValue(true);
+    renderSessionTab({ onRenameSession: onRename });
+    fireEvent.dblClick(screen.getByText('Term 1'));
+    const input = screen.getByLabelText('重命名会话') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Logs' } });
+    fireEvent.blur(input);
+    expect(onRename).toHaveBeenCalledTimes(1);
+    expect(onRename).toHaveBeenCalledWith('s1', 'Logs');
   });
 });

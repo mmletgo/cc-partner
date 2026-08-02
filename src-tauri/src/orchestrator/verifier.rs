@@ -264,13 +264,17 @@ pub async fn run_verifier_claude(
     verification_output: &str,
     diff: &str,
 ) -> Result<VerifierReview, AppError> {
-    let (cli_path, model) = {
+    let (cli_path, model, provider_id) = {
         let config = state.config.read().expect("config 读锁中毒");
         (
             config.github_trending.claude_cli_path.clone(),
             config.github_trending.claude_model.clone(),
+            config.internal_claude.provider_id.clone(),
         )
     };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
     let worktree_path = cwd.to_string_lossy().to_string();
     // 非 Web 任务默认无 preview：记 not_applicable，不阻塞 verifier
     let browser_note = browser_verification_evidence_note(false, None).unwrap_or_default();
@@ -285,6 +289,7 @@ pub async fn run_verifier_claude(
     let review = claude_cli::run_structured_json_with_cwd::<VerifierReview>(
         &cli_path,
         &model,
+        provider_dir.as_deref(),
         VERIFIER_REVIEW_SCHEMA,
         &prompt,
         Some(cwd),

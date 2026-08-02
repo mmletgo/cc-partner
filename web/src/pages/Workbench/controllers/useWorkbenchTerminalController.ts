@@ -183,6 +183,7 @@ export interface WorkbenchTerminalControllerResult extends WorkbenchTerminalBrid
   handleSelectPaneAt: (sessionId: string, col: number, row: number) => Promise<void>;
   handleClosePane: () => Promise<void>;
   handleCloseSession: (sessionId: string) => Promise<void>;
+  renameSessionById: (sessionId: string, name: string) => Promise<boolean>;
   handleRenameSession: () => Promise<void>;
   handleInput: (sessionId: string, data: string) => Promise<void>;
   /**
@@ -990,38 +991,54 @@ export function useWorkbenchTerminalController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   用户在 inspector rename 输入框里改名后提交。
+   *   inspector rename 输入框与终端标签「双击行内编辑」共用同一条改名链路；按 id 重命名任意 session，
+   *   复用既有 stale-guard / 错误处理，避免在两处复制 IPC 与错误文案逻辑。
    *
    * Code Logic（这个函数做什么）:
-   *   1. 仅当 active session 存在、draft 非空、remoteWriteDisabled=false 时执行；
-   *   2. 调用 sessions.rename，把返回的 session 替换到 state。
+   *   1. 守卫：name 非空、remoteWriteDisabled=false、目标 session 属于当前 active project（跨项目 stale 时 no-op）；
+   *   2. 调用 sessions.rename，把返回的 session 替换到 state，返回是否成功。
+   */
+  const renameSessionById = useCallback(
+    async (sessionId: string, name: string): Promise<boolean> => {
+      const trimmed = name.trim();
+      if (!trimmed || remoteWriteDisabled) return false;
+      const target = sessions.find((session) => session.id === sessionId);
+      if (!target || target.projectId !== activeProjectIdRef.current) return false;
+      try {
+        setSessionError(null);
+        const renamed = await workbenchApi.sessions.rename(sessionId, trimmed);
+        invalidateSessionListRequests(target.projectId);
+        setSessions((current) =>
+          current.map((session) => (session.id === renamed.id ? renamed : session)),
+        );
+        return true;
+      } catch (error) {
+        markRequestFailure(target.projectId, error);
+        setSessionError(displayErrorMessage(error, t('renameSession')));
+        return false;
+      }
+    },
+    [
+      displayErrorMessage,
+      invalidateSessionListRequests,
+      markRequestFailure,
+      remoteWriteDisabled,
+      sessions,
+      t,
+    ],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   用户在 inspector rename 输入框里改名后提交（键盘 / 读屏路径）。
+   *
+   * Code Logic（这个函数做什么）:
+   *   委派给 renameSessionById；空 draft / 远端离线由后者短路返回。
    */
   const handleRenameSession = useCallback(async (): Promise<void> => {
-    if (!activeSession || !sessionNameDraft.trim()) return;
-    if (remoteWriteDisabled) return;
-    try {
-      setSessionError(null);
-      const renamed = await workbenchApi.sessions.rename(
-        activeSession.id,
-        sessionNameDraft.trim(),
-      );
-      invalidateSessionListRequests(activeSession.projectId);
-      setSessions((current) =>
-        current.map((session) => (session.id === renamed.id ? renamed : session)),
-      );
-    } catch (error) {
-      markRequestFailure(activeSession.projectId, error);
-      setSessionError(displayErrorMessage(error, t('renameSession')));
-    }
-  }, [
-    activeSession,
-    displayErrorMessage,
-    invalidateSessionListRequests,
-    markRequestFailure,
-    remoteWriteDisabled,
-    sessionNameDraft,
-    t,
-  ]);
+    if (!activeSession) return;
+    await renameSessionById(activeSession.id, sessionNameDraft);
+  }, [activeSession, renameSessionById, sessionNameDraft]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1237,6 +1254,7 @@ export function useWorkbenchTerminalController(
     handleSelectPaneAt,
     handleClosePane,
     handleCloseSession,
+    renameSessionById,
     handleRenameSession,
     handleInput,
     isWriteBlocked,

@@ -102,6 +102,25 @@
     "testFailed": "Claude CLI test failed: {{error}}",
     "applyFailed": "Failed to apply Claude CLI config"
   },
+  "internalClaude": {
+    "title": "Internal Claude provider",
+    "subtitle": "Pick a cc-switch Claude provider for cc-partner's own silent calls (commit messages, merge resolution, Prompt optimizer, GitHub explanations, verifier). This does not modify your OS-default ~/.claude/settings.json, so your interactive Claude sessions are unaffected.",
+    "provider": {
+      "label": "Provider for internal calls",
+      "osDefault": "Use OS default (cc-switch current)",
+      "ccSwitchCurrent": "current",
+      "helper": "Only the listed cc-switch Claude providers are shown. Choose 'OS default' to fall back to your normal Claude config.",
+      "missing": "Missing provider ({{id}})",
+      "missingNotice": "The previously selected provider no longer exists in cc-switch. Internal calls fall back to the OS default until you pick another."
+    },
+    "appliedLabel": "Applied",
+    "applied": "Internal provider updated.",
+    "apply": "Apply",
+    "applying": "Applying…",
+    "recheck": "Refresh list",
+    "loadFailed": "Failed to load internal Claude provider config: {{error}}",
+    "saveFailed": "Failed to update internal Claude provider: {{error}}"
+  },
   "promptOptimizerSettings": {
     "title": "Workbench Prompt optimizer",
     "subtitle": "Configure the floating Prompt optimizer shortcut in Workbench terminals and the language used when filling optimized text into the terminal.",

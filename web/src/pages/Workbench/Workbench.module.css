@@ -154,6 +154,21 @@
   white-space: nowrap;
 }
 
+.sessionNameInput {
+  flex: 1 1 auto;
+  min-width: 6rem;
+  width: 8rem;
+  margin: 0;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  outline: none;
+}
+
 .treeEmpty,
 .terminalPlaceholder {
   display: flex;

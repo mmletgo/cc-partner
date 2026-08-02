@@ -679,6 +679,114 @@ describe('useWorkbenchTerminalController — create / rename / close session', (
     expect(result.current.sessions.find((s) => s.id === 's1')?.name).toBe('new');
   });
 
+  test('renameSessionById renames a non-active session by id and returns true', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', name: 'one', worktreeId: worktree.id });
+    const s2 = buildSession({ id: 's2', name: 'two', worktreeId: worktree.id });
+    fakeSessionsApi.list.mockResolvedValue([s1, s2]);
+    fakeSessionsApi.rename.mockResolvedValueOnce({ ...s2, name: 'two-renamed' });
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.renameSessionById('s2', 'two-renamed');
+      await flushMicrotasks();
+    });
+
+    expect(ok).toBe(true);
+    expect(fakeSessionsApi.rename).toHaveBeenCalledWith('s2', 'two-renamed');
+    expect(result.current.sessions.find((s) => s.id === 's2')?.name).toBe('two-renamed');
+  });
+
+  test('renameSessionById returns false and skips API when remoteWriteDisabled', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id });
+    fakeSessionsApi.list.mockResolvedValue([s1]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: true,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.renameSessionById('s1', 'x');
+      await flushMicrotasks();
+    });
+
+    expect(ok).toBe(false);
+    expect(fakeSessionsApi.rename).not.toHaveBeenCalled();
+  });
+
+  test('renameSessionById returns false for empty / whitespace name', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id });
+    fakeSessionsApi.list.mockResolvedValue([s1]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.renameSessionById('s1', '   ');
+      await flushMicrotasks();
+    });
+
+    expect(ok).toBe(false);
+    expect(fakeSessionsApi.rename).not.toHaveBeenCalled();
+  });
+
   test('handleCloseSession removes the session from state, removes buffer, refreshes stats', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();

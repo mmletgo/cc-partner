@@ -50,6 +50,7 @@ pub use transfer::sender::{
 };
 mod claude_cli;
 mod claude_code_assets;
+mod internal_claude;
 // Gate C N/N+1: mixed_version harness cites Gate B fail-closed by stable production function name.
 #[cfg(test)]
 pub use claude_code_assets::prove_legacy_lossy_placeholder_never_overwrites_canonical_credential;
@@ -128,9 +129,9 @@ use crate::commands::{
     claude_code_assets as claude_code_assets_cmd, claude_md as claude_md_cmd,
     cloud_sync as cloud_sync_cmd, config as config_cmd, devices as device_cmd,
     github_trending as github_trending_cmd, gui_bootstrap as gui_bootstrap_cmd,
-    health as health_cmd, lan_firewall_dependency as lan_firewall_dependency_cmd,
-    mobile as mobile_cmd, orchestrator as orchestrator_cmd,
-    orchestrator_adapters as orchestrator_adapters_cmd,
+    health as health_cmd, internal_claude as internal_claude_cmd,
+    lan_firewall_dependency as lan_firewall_dependency_cmd, mobile as mobile_cmd,
+    orchestrator as orchestrator_cmd, orchestrator_adapters as orchestrator_adapters_cmd,
     orchestrator_config as orchestrator_config_cmd, permissions as permissions_cmd,
     prompt_optimizer as prompt_optimizer_cmd, prompts as prompt_cmd,
     provider_manager as provider_manager_cmd, scratchpad as scratchpad_cmd,
@@ -483,6 +484,9 @@ pub fn run() {
             github_trending_cmd::get_default_github_trending_config,
             github_trending_cmd::update_github_trending_config,
             github_trending_cmd::test_claude_cli,
+            internal_claude_cmd::get_internal_claude_config,
+            internal_claude_cmd::get_default_internal_claude_config,
+            internal_claude_cmd::update_internal_claude_config,
             // Prompt 优化（复用 Claude CLI pure/headless helper，不保存历史）
             prompt_optimizer_cmd::optimize_prompt,
             prompt_optimizer_cmd::complete_orchestrator_task_prompt,

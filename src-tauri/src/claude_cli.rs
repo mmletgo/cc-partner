@@ -175,6 +175,22 @@ pub(crate) fn normalize_model(model: &str) -> String {
     }
 }
 
+/// 把可选的隔离 `CLAUDE_CONFIG_DIR` 注入 Claude CLI spawn。
+///
+/// Business Logic（为什么需要这个函数）:
+///     cc-partner 的内部 headless Claude 调用可选使用一个**不等于 OS 默认**的 cc-switch
+///     provider。经查官方文档：进程 env 会被 settings.json 的 `env` 块覆盖、`--settings` 是
+///     浅层 per-key merge（stale-key 泄露）；唯一无合并/无泄露的机制是 `CLAUDE_CONFIG_DIR`
+///     整体重定位 `~/.claude`，使 claude 只读我们写入的隔离 settings.json，不改写 OS 默认配置。
+///
+/// Code Logic（这个函数做什么）:
+///     `Some(dir)` 时设 `cmd.env("CLAUDE_CONFIG_DIR", dir)`；`None` 时不动（沿用 OS 默认）。
+fn apply_provider_config_dir(cmd: &mut Command, provider_config_dir: Option<&Path>) {
+    if let Some(dir) = provider_config_dir {
+        cmd.env("CLAUDE_CONFIG_DIR", dir);
+    }
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     多个功能（GitHub Trending 解说、Workbench session resume）都需要先确认本机 Claude CLI 可用，
 ///     避免功能启动后才发现 CLI 缺失导致用户体验中断。
@@ -401,6 +417,7 @@ fn assistant_text_from_stream_value(value: &serde_json::Value) -> Option<String>
 pub(crate) async fn run_structured_json<T>(
     cli_path: &str,
     model: &str,
+    provider_config_dir: Option<&Path>,
     schema: &str,
     prompt: &str,
     timeout_secs: u64,
@@ -412,6 +429,7 @@ where
     run_structured_json_with_cwd(
         cli_path,
         model,
+        provider_config_dir,
         schema,
         prompt,
         None,
@@ -430,9 +448,11 @@ where
 /// Code Logic（这个函数做什么）:
 ///     working_directory 为空时使用 pure/bare 参数；非空时设置 Command.current_dir 并使用
 ///     不含 `--bare` 的项目上下文参数，其余 stdin/stdout/stderr/timeout/解析流程保持一致。
+#[allow(clippy::too_many_arguments)] // 内部 helper：cli/model/provider/schema/prompt/cwd/timeout/label 8 段语义独立
 pub(crate) async fn run_structured_json_with_cwd<T>(
     cli_path: &str,
     model: &str,
+    provider_config_dir: Option<&Path>,
     schema: &str,
     prompt: &str,
     working_directory: Option<&Path>,
@@ -455,6 +475,7 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    apply_provider_config_dir(&mut cmd, provider_config_dir);
     if let Some(directory) = working_directory {
         cmd.current_dir(directory);
     }
@@ -500,9 +521,11 @@ where
 /// Code Logic（这个函数做什么）:
 ///     使用 Claude CLI `stream-json` 输出格式，逐行解析 assistant 文本增量并调用 on_chunk；
 ///     working_directory 存在时不加 `--bare`，从而允许 Claude Code 读取项目 CLAUDE.md 上下文。
+#[allow(clippy::too_many_arguments)] // 内部 helper：cli/model/provider/prompt/cwd/timeout/label/on_chunk 8 段语义独立
 pub(crate) async fn run_streaming_text_with_cwd<F>(
     cli_path: &str,
     model: &str,
+    provider_config_dir: Option<&Path>,
     prompt: &str,
     working_directory: Option<&Path>,
     timeout_secs: u64,
@@ -523,6 +546,7 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    apply_provider_config_dir(&mut cmd, provider_config_dir);
     if let Some(directory) = working_directory {
         cmd.current_dir(directory);
     }

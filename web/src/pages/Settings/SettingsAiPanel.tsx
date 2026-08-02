@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next';
 import { Card, Button, Input, Pill } from '@/components/primitives';
 import { CheckIcon, XIcon, KeyboardIcon, InfoIcon } from '@/lib/icons';
 import type { ClaudeCliTestResult, GithubTrendingConfig } from '@/lib/types';
+import { InternalClaudeProviderCard } from '@/components/domain/InternalClaudeProviderCard';
 import { formatShortcutForDisplay } from './shortcutRecorder';
 import type { GithubTrendingForm, PromptOptimizerSettingsForm } from './settingsState';
 import { PROMPT_OPTIMIZER_SHORTCUT_ID } from './useSettingsController';
@@ -289,6 +290,9 @@ export function SettingsAiPanel({
           ) : null}
         </Card.Body>
       </Card>
+
+      {/* Card: 内部 Claude provider 覆盖（自包含 domain 卡，不改 controller） */}
+      <InternalClaudeProviderCard />
 
       {/* Card: Workbench Prompt 优化小组件 */}
       <Card variant="flat" padding="md">

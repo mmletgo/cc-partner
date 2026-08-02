@@ -237,6 +237,19 @@ export interface ClaudeCliTestResult {
 }
 
 /**
+ * cc-partner 内部 Claude 调用所用 provider 覆盖配置。
+ *
+ * Business Logic:
+ *   commit/merge/prompt 优化/GitHub 解说/verifier 等内部 headless Claude 调用可选使用一个
+ *   不等于 OS 默认的 cc-switch provider。`providerId` 为 cc-switch claude provider id，
+ *   `null` 表示沿用 OS 默认。本配置只持久化 id（不含凭据），后端运行时从 cc-switch 读取并写入
+ *   隔离 CLAUDE_CONFIG_DIR，不改写 `~/.claude/settings.json`。
+ */
+export interface InternalClaudeConfig {
+  providerId: string | null;
+}
+
+/**
  * 健康提醒配置（与后端 config.rs::HealthConfig 对齐，camelCase）。
  * 整体覆盖式回写（update_health_config 接收完整对象）。
  */

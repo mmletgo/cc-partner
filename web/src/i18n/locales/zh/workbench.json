@@ -650,6 +650,7 @@
   "sessionStatusTitle": "当前会话",
   "sessionNamePlaceholder": "会话名称",
   "renameSession": "重命名会话",
+  "renameSessionHint": "双击重命名",
   "statusDevice": "设备",
   "statusProject": "项目",
   "statusWorktree": "Worktree",

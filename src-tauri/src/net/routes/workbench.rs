@@ -30,8 +30,8 @@ use crate::commands::workbench::{
     local_push_workbench_worktree, local_remove_workbench_worktree, local_rename_workbench_path,
     local_rename_workbench_session, local_resize_workbench_session, local_save_workbench_text_file,
     local_select_workbench_pane_at, local_split_workbench_pane, local_switch_workbench_pane,
-    local_write_workbench_session_input,
-    local_zoom_workbench_pane, merge_workbench_worktree_for_state, open_workbench_file_for_state,
+    local_write_workbench_session_input, local_zoom_workbench_pane,
+    merge_workbench_worktree_for_state, open_workbench_file_for_state,
     owner_local_preflight_for_state, owner_local_safe_attach_for_state,
     push_workbench_worktree_for_state, remove_workbench_worktree_for_state,
     replay_workbench_session_for_state, resize_workbench_session_for_state,
@@ -70,8 +70,7 @@ use crate::workbench::remote_protocol::{
     RemoteProjectReq, RemotePromptOptimizerReq, RemoteRemoveWorktreeReq, RemoteRenamePathReq,
     RemoteRenameSessionReq, RemoteReplaySessionReq, RemoteResizeSessionReq, RemoteSaveTextReq,
     RemoteSearchClaudeSessionsReq, RemoteSelectPaneAtReq, RemoteSessionReq, RemoteSplitPaneReq,
-    RemoteWorktreeReq,
-    RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
+    RemoteWorktreeReq, RemoteWriteSessionInputReq, ResumeClaudeSessionResult,
 };
 use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRestorePreflightReq};
 use crate::workbench::sessions::WorkbenchSessionReplayDto;

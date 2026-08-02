@@ -18,8 +18,6 @@ import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import '@xterm/xterm/css/xterm.css';
-import { configApi } from '@/api/config';
-import { promptOptimizerApi } from '@/api/promptOptimizer';
 import { tauriWorkbenchTransport } from '@/api/workbenchTransport';
 import { OrchestratorPanel } from '@/pages/Orchestrator';
 import { WorkbenchBrowserWorkspace } from '@/components/domain/WorkbenchBrowserWorkspace';
@@ -40,7 +38,6 @@ import {
   BrowserIcon, EditIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
   RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
 } from '@/lib/icons';
-import type { PromptOptimizerFillLanguage } from '@/lib/types';
 import styles from './Workbench.module.css';
 import { parseWorkbenchDeepLink } from './workbenchDeepLink';
 import {
@@ -51,20 +48,17 @@ import {
 } from './workbenchPageHelpers';
 import { useWorkbenchProjectController } from './controllers/useWorkbenchProjectController';
 import { useWorkbenchTerminalController } from './controllers/useWorkbenchTerminalController';
-import type { WorkbenchTerminalErrorKey } from './controllers/useWorkbenchTerminalController';
 import { useWorkbenchWorktreeGitController } from './controllers/useWorkbenchWorktreeGitController';
-import type { WorkbenchWorktreeGitErrorKey } from './controllers/useWorkbenchWorktreeGitController';
 import { useWorkbenchFileController } from './controllers/useWorkbenchFileController';
-import type { WorkbenchFileErrorKey, WorkbenchFileMessageKey } from './controllers/useWorkbenchFileController';
 import { useWorkbenchAutomationController } from './controllers/useWorkbenchAutomationController';
 import { useWorkbenchPromptOptimizerController } from './controllers/useWorkbenchPromptOptimizerController';
-import type { PromptOptimizerConfigLoadResult } from './controllers/useWorkbenchPromptOptimizerController';
 import { useWorkbenchSessionSearchController } from './controllers/useWorkbenchSessionSearchController';
 import { useAgentRuntime } from '@/hooks/useAgentRuntime';
 import { WorkbenchTerminalArea } from './WorkbenchTerminalArea';
 import { WorkbenchInspector } from './WorkbenchInspector';
 import type { WorkbenchInspectorTab } from './WorkbenchInspector';
 import { WorkbenchSessionTabs } from './WorkbenchSessionTabs';
+import { useWorkbenchPageBridges } from './useWorkbenchPageBridges';
 import { WorkbenchStatusCard } from './WorkbenchStatusCard';
 import { WorkbenchWorktreeBar } from './WorkbenchWorktreeBar';
 import { WorkbenchLaunchSurface } from './WorkbenchLaunchSurface';
@@ -146,12 +140,20 @@ export function Workbench() {
   // 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调，不复制邻接域 state，
   // 也绝不持有终端字节内容（字节内容仍归 WorkbenchTerminalBuffersProvider 所有）。
   const desktopUnavailableMessage = t('workbench:errors.desktopUnavailable');
-  // Business Logic: translateError 必须稳定（useCallback），否则 controller 内 loadSessions 等 useCallback 的依赖
-  // 每次渲染都变，导致 project-switch effect 反复重跑 loadSessions，把 terminal-status 事件更新覆盖回 running。
-  const translateTerminalError = useCallback(
-    (key: WorkbenchTerminalErrorKey): string => t(`workbench:errors.${key}`),
-    [t],
-  );
+  // 错误/消息文案 + Prompt 优化配置/流式写入集中为稳定回调（useWorkbenchPageBridges），避免页面膨胀超 1200 行；
+  // 每个回调 useCallback 稳定，防止下游 controller 依赖抖动反复触发 loadSessions / loadDir 等效应。
+  const {
+    translateTerminalError,
+    translateWorktreeError,
+    translateWorktreeMessage,
+    translateFileError,
+    translateFileMessage,
+    translatePromptFillFailed,
+    translatePromptOptimizeFailed,
+    translatePromptRemoteOffline,
+    loadPromptOptimizerConfig,
+    streamPromptToTerminal,
+  } = useWorkbenchPageBridges(t, activeProject?.deviceName);
   const terminalController = useWorkbenchTerminalController({
     activeProjectId,
     activeWorktreeId,
@@ -196,6 +198,7 @@ export function Workbench() {
     handleClosePane,
     handleCloseSession,
     handleRenameSession,
+    renameSessionById,
     handleInput,
     isWriteBlocked,
     handleResize,
@@ -209,22 +212,6 @@ export function Workbench() {
   // 由独立 controller 持有，避免在 Workbench.tsx 里散落多处 state/effect/handler；controller 接收窄 API/回调 +
   // terminalBridge，不复制邻接域 state。activeWorktreeId 仍由页面持有（终端域 controller / 文件 effect /
   // deep link effect 都读取同一值），controller 通过 setActiveWorktreeId 回写。
-  // Code Logic: translateWorktreeError 必须稳定（useCallback），否则 controller 内 useCallback 依赖每次渲染都变。
-  const translateWorktreeError = useCallback(
-    (key: WorkbenchWorktreeGitErrorKey): string => t(`workbench:errors.${key}`),
-    [t],
-  );
-  const translateWorktreeMessage = useCallback(
-    (
-      key: 'mergeConfirm' | 'removeConfirm' | 'checkSourceMessage',
-      vars?: Record<string, unknown>,
-    ): string => {
-      if (key === 'mergeConfirm') return t('workbench:worktrees.mergeConfirm', vars);
-      if (key === 'removeConfirm') return t('workbench:worktrees.removeConfirm', vars);
-      return t('workbench:mergeStages.messages.checkSource');
-    },
-    [t],
-  );
   const confirmWorktreeAction = useCallback(
     (message: string): boolean => window.confirm(message),
     [],
@@ -280,22 +267,6 @@ export function Workbench() {
   // 持有，避免在 Workbench.tsx 里散落多处 state/handler/effect；controller 接收窄 API/回调，不复制邻接域 state。
   // workspaceView / automationConsoleOpen 仍由页面持有（跨域共享），controller 通过 request* 回调表达切换意图。
   // Code Logic: translateFileError / translateFileMessage 必须稳定（useCallback），否则 controller 内 useCallback
-  // 依赖每次渲染都变，导致项目/worktree 切换 effect 反复重跑 loadDir。
-  const translateFileError = useCallback(
-    (key: WorkbenchFileErrorKey): string => t(`workbench:errors.${key}`),
-    [t],
-  );
-  const translateFileMessage = useCallback(
-    (key: WorkbenchFileMessageKey, vars?: Record<string, unknown>): string => {
-      if (key === 'saved') return t('workbench:fileWorkspace.saved');
-      if (key === 'formatted') return t('workbench:fileWorkspace.formatted');
-      if (key === 'pathCopied') return t('workbench:pathCopied');
-      if (key === 'confirmCloseDirtyFile') return t('workbench:confirmCloseDirtyFile', vars);
-      if (key === 'confirmDeleteDirtyFiles') return t('workbench:confirmDeleteDirtyFiles', vars);
-      return t('workbench:confirmDeletePath', vars);
-    },
-    [t],
-  );
   const requestWorkspaceView = useCallback(
     (view: WorkbenchFileWorkspaceView) => {
       setWorkspaceView(view);
@@ -414,41 +385,6 @@ export function Workbench() {
   // Business Logic: Prompt 优化浮层域（配置加载 + 打开/输入/定位 + Control 单键快捷键 + IME 安全 +
   // 流式写入终端 + 焦点回归 + 重新打开清空）由独立 controller 持有，避免在 Workbench.tsx 里散落
   // 多处 state/effect/handler；controller 接收窄 API/回调 + 共享 refs，不复制邻接域 state。
-  // Code Logic: translateFillFailed / translateOptimizeFailed / loadConfig / streamToTerminal 必须稳定
-  // （useCallback / useCallback 包装），否则 controller 内 runPromptOptimization 的 useCallback 依赖每次渲染都变。
-  const translatePromptFillFailed = useCallback(
-    (): string => t('workbench:promptOptimizer.fillFailed'),
-    [t],
-  );
-  const translatePromptOptimizeFailed = useCallback(
-    (): string => t('workbench:promptOptimizer.optimizeFailed'),
-    [t],
-  );
-  const translatePromptRemoteOffline = useCallback(
-    (): string =>
-      t('workbench:remoteOfflineNotice', {
-        device: activeProject?.deviceName ?? t('workbench:emptyValue'),
-      }),
-    [activeProject?.deviceName, t],
-  );
-  const loadPromptOptimizerConfig = useCallback(async (): Promise<PromptOptimizerConfigLoadResult> => {
-    const config = await configApi.get();
-    return {
-      promptOptimizerHotkey: config.promptOptimizerHotkey,
-      promptOptimizerFillLanguage: config.promptOptimizerFillLanguage,
-    };
-  }, []);
-  const streamPromptToTerminal = useCallback(
-    (
-      prompt: string,
-      options: {
-        workingDirectory?: string | null;
-        targetLanguage: PromptOptimizerFillLanguage;
-        sessionId: string;
-      },
-    ) => promptOptimizerApi.streamToTerminal(prompt, options),
-    [],
-  );
   const promptOptimizerController = useWorkbenchPromptOptimizerController({
     activeSession,
     activeProjectId,
@@ -931,6 +867,8 @@ export function Workbench() {
                   onCreateSession={() => {
                     void handleCreateSession();
                   }}
+                  onRenameSession={renameSessionById}
+                  canRename={!remoteWriteDisabled}
                   resolveAgent={agentRuntime.latestAgentForTerminal}
                 />
               }

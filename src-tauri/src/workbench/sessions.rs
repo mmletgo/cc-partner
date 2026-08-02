@@ -2036,9 +2036,9 @@ fn tmux_pane_at_position(
     col: u32,
     row: u32,
 ) -> Option<&TmuxPaneGeometry> {
-    panes.iter().find(|pane| {
-        col >= pane.left && col <= pane.right && row >= pane.top && row <= pane.bottom
-    })
+    panes
+        .iter()
+        .find(|pane| col >= pane.left && col <= pane.right && row >= pane.top && row <= pane.bottom)
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -7818,10 +7818,7 @@ mod tests {
     ///     断言 select-pane 参数为 `select-pane -t <pane_id>`，不含 `.+`。
     #[test]
     fn tmux_select_pane_args_target_absolute_pane_id() {
-        assert_eq!(
-            tmux_select_pane_args("%7"),
-            vec!["select-pane", "-t", "%7"]
-        );
+        assert_eq!(tmux_select_pane_args("%7"), vec!["select-pane", "-t", "%7"]);
     }
 
     /// Business Logic（为什么需要这个测试）:

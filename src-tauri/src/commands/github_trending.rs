@@ -260,7 +260,16 @@ pub async fn list_github_trending_repos(
     state: State<'_, AppState>,
     force_refresh_ai: Option<bool>,
 ) -> Result<GithubTrendingResponseDto, AppError> {
-    let config = state.config.read().unwrap().github_trending.clone();
+    let (config, provider_id) = {
+        let cfg = state.config.read().unwrap();
+        (
+            cfg.github_trending.clone(),
+            cfg.internal_claude.provider_id.clone(),
+        )
+    };
+    let provider_dir =
+        crate::internal_claude::resolve_internal_provider_config_dir(provider_id.as_deref())
+            .await?;
     let now = Utc::now();
     let key = cache_key(now);
 
@@ -272,10 +281,24 @@ pub async fn list_github_trending_repos(
                 && config.ai_enabled
                 && payload.ai_status == "failed"
             {
-                return refresh_cached_ai_cache(&state.db, &key, &config, payload).await;
+                return refresh_cached_ai_cache(
+                    &state.db,
+                    &key,
+                    &config,
+                    provider_dir.as_deref(),
+                    payload,
+                )
+                .await;
             }
             if should_retry_failed_ai_cache(&payload, &config) {
-                return refresh_cached_ai_cache(&state.db, &key, &config, payload).await;
+                return refresh_cached_ai_cache(
+                    &state.db,
+                    &key,
+                    &config,
+                    provider_dir.as_deref(),
+                    payload,
+                )
+                .await;
             }
             return Ok(payload_to_response(payload, true, false, None));
         }
@@ -297,7 +320,7 @@ pub async fn list_github_trending_repos(
     };
 
     let (repos, ai_status, ai_error) = if config.ai_enabled {
-        match generate_explanations(&config, &repos).await {
+        match generate_explanations(&config, provider_dir.as_deref(), &repos).await {
             Ok(explanations) => (
                 merge_explanations(repos, explanations),
                 "ready".to_string(),
@@ -367,16 +390,18 @@ async fn refresh_cached_ai_cache(
     db: &SqlitePool,
     key: &str,
     config: &GithubTrendingConfig,
+    provider_config_dir: Option<&std::path::Path>,
     payload: GithubTrendingPayload,
 ) -> Result<GithubTrendingResponseDto, AppError> {
-    let (repos, ai_status, ai_error) = match generate_explanations(config, &payload.repos).await {
-        Ok(explanations) => (
-            merge_explanations(payload.repos, explanations),
-            "ready".to_string(),
-            None,
-        ),
-        Err(err) => (payload.repos, "failed".to_string(), Some(err.to_string())),
-    };
+    let (repos, ai_status, ai_error) =
+        match generate_explanations(config, provider_config_dir, &payload.repos).await {
+            Ok(explanations) => (
+                merge_explanations(payload.repos, explanations),
+                "ready".to_string(),
+                None,
+            ),
+            Err(err) => (payload.repos, "failed".to_string(), Some(err.to_string())),
+        };
     let refreshed = GithubTrendingPayload {
         repos,
         fetched_at: payload.fetched_at,
@@ -610,6 +635,7 @@ fn parse_count(text: &str) -> u64 {
 /// 调用 Claude Code CLI 批量生成双语解说。
 async fn generate_explanations(
     config: &GithubTrendingConfig,
+    provider_config_dir: Option<&std::path::Path>,
     repos: &[GithubTrendingRepoDto],
 ) -> Result<HashMap<String, AiRepoExplanation>, AppError> {
     let schema = json!({
@@ -660,6 +686,7 @@ async fn generate_explanations(
     let parsed = claude_cli::run_structured_json::<AiOutput>(
         &config.claude_cli_path,
         &config.claude_model,
+        provider_config_dir,
         &schema.to_string(),
         &prompt,
         CLAUDE_TIMEOUT_SECS,
@@ -979,6 +1006,7 @@ mod config_writer_tests {
                 claude_model: "sonnet".into(),
                 cache_ttl_hours: 24,
             },
+            internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
         }

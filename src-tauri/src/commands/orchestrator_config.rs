@@ -162,6 +162,7 @@ mod tests {
             health: Default::default(),
             orchestrator,
             github_trending: Default::default(),
+            internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
         }

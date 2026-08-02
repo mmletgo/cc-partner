@@ -6,12 +6,12 @@
 //! Code Logic（这个模块做什么）:
 //!     monofile 前部共享定义。
 
+use super::git::path_exists_nofollow;
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control_client::MutationControlError;
 use crate::error::{AppError, AppErrorCategory};
 use crate::models::device::Device;
 use crate::state::AppState;
-use super::git::path_exists_nofollow;
 use crate::workbench::models::{
     WorkbenchDetectedFileType, WorkbenchGitStatusDto, WorkbenchPathInfo, WorkbenchProjectDto,
     WorkbenchProjectRow, WorkbenchSessionDto, WorkbenchWorktreeDto, WorkbenchWorktreeRow,
@@ -1633,6 +1633,7 @@ pub(super) mod restore_holder_fail_closed_tests {
             health: HealthConfig::default(),
             orchestrator: OrchestratorAutomationConfig::default(),
             github_trending: GithubTrendingConfig::default(),
+            internal_claude: crate::config::InternalClaudeConfig::default(),
             agent_hub: crate::config::AgentHubConfig::default(),
             manual_peers: Vec::new(),
         };
@@ -1984,8 +1985,8 @@ mod sync_git_worktrees_external_delete_tests {
     //! `sync_git_worktrees` 必须把磁盘路径已不存在的非主 worktree row 删除，并清理其下 terminal session 元数据，
     //! 否则 Workbench 仍展示孤儿 row，且后续 git/fs 操作在死路径上抛 `No such file or directory (os error 2)`。
 
-    use super::*;
     use super::restore_holder_fail_closed_tests::build_restore_fail_state;
+    use super::*;
     use crate::workbench::models::{
         WorkbenchProjectRow, WorkbenchSessionRow, WorkbenchWorktreeRow,
     };

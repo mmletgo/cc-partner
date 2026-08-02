@@ -111,6 +111,83 @@ pub(super) async fn fetch_all_providers() -> Result<HashMap<String, Vec<Provider
     Ok(grouped)
 }
 
+/// 读取指定 claude provider 的 `settings_config`（即 cc-switch 会写入 `~/.claude/settings.json`
+/// 的完整 JSON 片段）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     cc-partner 的内部 headless Claude 调用需要用一个**不等于 OS 默认**的 cc-switch provider，
+///     且不能改写 `~/.claude/settings.json`。做法是把所选 provider 的 `settings_config` 写入隔离的
+///     `CLAUDE_CONFIG_DIR`。本函数是读取该片段的唯一入口，**仅供服务端内部使用**，
+///     返回的 `Value` 永不跨 IPC 暴露给前端（`ProviderEntry` DTO 仍不含敏感字段）。
+///
+/// Code Logic（这个函数做什么）:
+///     以只读连接查询 `SELECT settings_config FROM providers WHERE app_type='claude' AND id=?`；
+///     数据库缺失/表错误/无匹配行返回 `Ok(None)`（调用方回落 OS 默认），解析失败返回 `Ok(None)` + warn。
+pub(crate) async fn fetch_claude_settings_config(
+    provider_id: &str,
+) -> Result<Option<Value>, AppError> {
+    let trimmed = provider_id.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let path = match cc_switch_db_path() {
+        Some(p) if p.is_file() => p,
+        _ => return Ok(None),
+    };
+    fetch_claude_settings_config_at(&path, trimmed).await
+}
+
+/// 在指定 cc-switch DB 路径上读取 provider 的 `settings_config`（注入入口，便于无 env 单测）。
+///
+/// Code Logic（这个函数做什么）:
+///     以只读连接查询 `SELECT settings_config FROM providers WHERE app_type='claude' AND id=?`；
+///     无匹配行/空内容/解析失败均返回 `Ok(None)`（+ warn），不向上抛错以保持 best-effort。
+pub(crate) async fn fetch_claude_settings_config_at(
+    db_path: &std::path::Path,
+    provider_id: &str,
+) -> Result<Option<Value>, AppError> {
+    if provider_id.is_empty() {
+        return Ok(None);
+    }
+    let opts = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(db_path)
+        .read_only(true);
+    let mut conn = match sqlx::sqlite::SqliteConnection::connect_with(&opts).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("以只读方式打开 cc-switch 数据库失败: {e}");
+            return Ok(None);
+        }
+    };
+    let result = sqlx::query("SELECT settings_config FROM providers WHERE app_type = ? AND id = ?")
+        .bind("claude")
+        .bind(provider_id)
+        .fetch_optional(&mut conn)
+        .await;
+    let _ = conn.close().await;
+    let row = match result {
+        Ok(Some(r)) => r,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            tracing::warn!("读取 cc-switch settings_config 失败: {e}");
+            return Ok(None);
+        }
+    };
+    let text: String = row
+        .try_get::<String, _>("settings_config")
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) => {
+            tracing::warn!("解析 cc-switch settings_config JSON 失败: {e}");
+            Ok(None)
+        }
+    }
+}
+
 /// 计算某 agent 的当前 provider id：settings.json 优先，否则回落 DB `is_current`。
 fn resolve_current_id(
     settings: Option<&Value>,
@@ -253,6 +330,72 @@ mod tests {
         // codex 没有设置 settings.json，回落到 DB is_current='openai'。
         let codex = apps.iter().find(|a| a.app == AgentApp::Codex).unwrap();
         assert_eq!(codex.current_provider_id.as_deref(), Some("openai"));
+    }
+
+    /// 写入带 settings_config 的 provider 行，验证 fetch_claude_settings_config 取回原始片段。
+    async fn seed_db_with_settings_config(dir: &std::path::Path) {
+        let url = format!("sqlite://{}", dir.join("cc-switch.db").to_string_lossy());
+        let opts = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE providers (\
+               id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL, \
+               settings_config TEXT NOT NULL DEFAULT '{}', \
+               category TEXT, sort_index INTEGER, is_current BOOLEAN NOT NULL DEFAULT 0, \
+               PRIMARY KEY (id, app_type))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cfg = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://example.test/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "secret-token"
+            }
+        })
+        .to_string();
+        sqlx::query("INSERT INTO providers (id, app_type, name, settings_config, is_current) VALUES ('p1','claude','P1',?,0)")
+            .bind(cfg)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_settings_config_returns_stored_fragment_and_missing_is_none() {
+        // 经 `_at` 注入入口直接传 DB 路径，不读写 CC_SWITCH_CONFIG_DIR，避免与其它测试并行竞态。
+        let dir = tempfile::tempdir().unwrap();
+        seed_db_with_settings_config(dir.path()).await;
+        let db_path = dir.path().join("cc-switch.db");
+
+        let stored = fetch_claude_settings_config_at(&db_path, "p1")
+            .await
+            .unwrap();
+        let missing = fetch_claude_settings_config_at(&db_path, "does-not-exist")
+            .await
+            .unwrap();
+
+        let stored = stored.expect("应返回 settings_config 片段");
+        assert_eq!(
+            stored["env"]["ANTHROPIC_BASE_URL"],
+            "https://example.test/api/anthropic"
+        );
+        assert_eq!(stored["env"]["ANTHROPIC_AUTH_TOKEN"], "secret-token");
+        assert!(missing.is_none(), "不存在的 provider 应返回 None 而非报错");
+    }
+
+    #[tokio::test]
+    async fn fetch_settings_config_empty_id_returns_none() {
+        // 空 id 在入口即 early-return，不读取 env / DB。
+        assert!(fetch_claude_settings_config("   ").await.unwrap().is_none());
+        assert!(fetch_claude_settings_config("").await.unwrap().is_none());
     }
 
     #[test]
