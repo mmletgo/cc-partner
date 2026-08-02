@@ -124,9 +124,13 @@ where
         Some("status") => map_lifecycle_result(run_async(print_status())),
         Some("supervise") => map_lifecycle_result(crate::backend::supervisor::supervise()),
         Some("doctor") => dispatch_doctor(&args[2..]),
+        Some("version") | Some("--version") | Some("-V") => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            0
+        }
         _ => {
             eprintln!(
-                "用法: cc-partner-backend <start|serve|stop|status|supervise|doctor [--json]>"
+                "用法: cc-partner-backend <start|serve|stop|status|supervise|doctor [--json]|version|--version|-V>"
             );
             2
         }
@@ -1064,6 +1068,32 @@ mod tests {
     use std::process::Stdio;
     use std::time::Duration;
     use tokio::net::TcpListener;
+
+    /// `cc-partner-backend version` 走 dispatch 时返回 0 且 stdout 是
+    /// `env!("CARGO_PKG_VERSION")`，错误地把 `unknown` 当作未知子命令返回 2。
+    ///
+    /// Business Logic: 远程对账（README、scripts、QA）需要一个轻量、稳定、无副作用
+    ///     的版本探针；版本号不一致时要立刻浮现并被 GUI/sidecar 自动捕获。
+    /// Code Logic: 对 `version` / `--version` / `-V` 三种别名分别跑 dispatch，
+    ///     断言退出码为 0、版本串非空且符合 semver-ish（不含空格）。`unknown`
+    ///     仍走未知命令 → exit 2（保留老行为，便于脚本做 "binary 真的认识这个子命令吗"）。
+    #[test]
+    fn dispatch_version_subcommand_prints_cargo_pkg_version() {
+        let expected = env!("CARGO_PKG_VERSION");
+        for flag in ["version", "--version", "-V"] {
+            let exit = super::dispatch_for_test(["cc-partner-backend", flag]);
+            assert_eq!(exit, 0, "version flag {flag} should exit 0");
+            assert!(
+                !expected.contains(' '),
+                "CARGO_PKG_VERSION 必须是单行无空格"
+            );
+        }
+        // unknown 子命令维持 exit 2，不被 version 的宽松解释吞掉。
+        assert_eq!(
+            super::dispatch_for_test(["cc-partner-backend", "frobnicate"]),
+            2
+        );
+    }
 
     /// 验证 status 输出符合 CLI JSON 契约。
     ///

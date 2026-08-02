@@ -19,7 +19,7 @@ use crate::storage::sync_request_ledger_repo::{
 use crate::storage::sync_watermark_repo::{SyncWatermarkRepo, DEFAULT_ACTIVE_PEER_WINDOW_DAYS};
 use crate::sync::protocol::content_sha256_hex;
 use crate::sync::vector_clock::{compare, merge, ClockOrder};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::{Row, Sqlite, Transaction};
@@ -350,12 +350,26 @@ impl DeletionFloorRepo {
     /// 判断单条 tombstone 是否满足 age 条件（≥30 天）。
     ///
     /// Business Logic: GC 第一门槛是年龄，避免过早压缩仍在传播的删除。
-    /// Code Logic: now - updated_at >= 30 days。
+    /// Code Logic: now - updated_at >= 30 days；时间戳兼容有无时区偏移两种格式
+    ///     （CLAUDE.md M1 datetime 契约）；仍无法解析时按 not eligible 跳过、tracing::warn
+    ///     上报，绝不向调用方返 Err（避免单条脏行阻塞整轮 GC）。
     #[allow(dead_code)] // intentional public API for GC eligibility
     pub fn tombstone_age_eligible(updated_at: &str, now: &str) -> Result<bool, AppError> {
-        let updated = parse_rfc3339(updated_at)?;
-        let now_dt = parse_rfc3339(now)?;
-        let age = now_dt.signed_duration_since(updated);
+        let Some(updated) = parse_datetime_lenient(updated_at) else {
+            tracing::warn!(
+                updated_at = updated_at,
+                "tombstone GC 跳过：updated_at 不是合法 RFC3339 / naive datetime"
+            );
+            return Ok(false);
+        };
+        let Some(now_dt) = parse_datetime_lenient(now) else {
+            tracing::warn!(
+                now = now,
+                "tombstone GC 跳过：now 不是合法 RFC3339 / naive datetime"
+            );
+            return Ok(false);
+        };
+        let age = now_dt.signed_duration_since(&updated);
         Ok(age >= Duration::days(TOMBSTONE_GC_MIN_AGE_DAYS))
     }
 
@@ -636,6 +650,29 @@ fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>, AppError> {
         .map_err(|e| AppError::generic(format!("非法时间戳 {s}: {e}")))
 }
 
+/// 兼容有无时区偏移两种格式的 datetime 解析。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Python 版历史 datetime 不一定带 `+00:00` / `Z` 偏移；CLAUDE.md M1 明确
+///     "datetime 需兼容有无时区偏移两种格式"。不带偏移的视为 UTC，避免旧库升级或
+///     跨设备导入的字符串触发 `tombstone GC 失败: 非法时间戳 ... premature end of input`。
+///
+/// Code Logic（这个函数做什么）:
+///     先尝试严格 RFC3339；失败时尝试两种常见 naive 格式（带/不带亚秒）；任一命中即转 UTC 返回；
+///     全部失败返回 None（不返 Err，让 GC 当作 not eligible 跳过）。
+fn parse_datetime_lenient(s: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
+        return Some(naive.and_utc());
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Some(naive.and_utc());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     //! deletion_floor 单测：GC 水位阻塞、离线 peer 无法复活、决策枚举。
@@ -892,5 +929,71 @@ mod tests {
         assert_eq!(gone, 0);
         let floor = floors.get(DOMAIN_PROMPTS, "p-ok").await.unwrap().unwrap();
         assert_eq!(floor.delete_epoch, 5);
+    }
+
+    /// 长格式：lenient 解析接受带秒级精度的 RFC3339。
+    #[test]
+    fn parse_datetime_lenient_accepts_strict_rfc3339() {
+        let dt = parse_datetime_lenient("2024-06-01T08:00:00+08:00").expect("rfc3339 must parse");
+        // 2024-06-01T08:00:00+08:00 == 2024-06-01T00:00:00Z
+        assert_eq!(dt.timestamp(), 1_717_200_000);
+    }
+
+    /// 关键回归：power-vpn 升级时撞到的旧库字段不带 timezone offset（naive + 亚秒）。
+    ///     必须按 UTC 解析，绝不上抛 Err。
+    #[test]
+    fn parse_datetime_lenient_accepts_naive_with_fractional() {
+        let dt = parse_datetime_lenient("2026-04-04T22:40:02.334780")
+            .expect("naive fractional must parse");
+        // 解释为 UTC 后换算回 RFC3339 字符串应得到原 naive + "Z"。
+        assert_eq!(dt.to_rfc3339(), "2026-04-04T22:40:02.334780+00:00");
+    }
+
+    /// 不带亚秒的 naive 也要命中（Python `datetime.now(timezone.utc).isoformat()`
+    ///     在某些平台/旧版本会输出这种格式）。
+    #[test]
+    fn parse_datetime_lenient_accepts_naive_without_fractional() {
+        let dt = parse_datetime_lenient("2024-06-01T00:00:00")
+            .expect("naive second-precision must parse");
+        assert_eq!(dt.timestamp(), 1_717_200_000);
+    }
+
+    /// 完全无法识别的字符串返回 None（不让 GC 阻塞）。
+    #[test]
+    fn parse_datetime_lenient_returns_none_for_garbage() {
+        assert!(parse_datetime_lenient("not-a-timestamp").is_none());
+        assert!(parse_datetime_lenient("").is_none());
+    }
+
+    /// 严格 RFC3339 路径不变：age > 30 天判 eligible。
+    #[test]
+    fn tombstone_age_eligible_strict_rfc3339_path() {
+        let now = "2024-06-01T00:00:00+00:00";
+        let updated = "2024-04-01T00:00:00+00:00";
+        assert!(DeletionFloorRepo::tombstone_age_eligible(updated, now).unwrap());
+    }
+
+    /// 回归：legacy naive datetime 触发不再上抛 Err。
+    ///     这条是 power-vpn 升级时撞到的失败输入。
+    #[test]
+    fn tombstone_age_eligible_accepts_naive_fractional_updated_at() {
+        let now = "2026-08-02T08:57:00.000000+00:00";
+        let updated = "2026-04-04T22:40:02.334780";
+        let eligible = DeletionFloorRepo::tombstone_age_eligible(updated, now)
+            .expect("naive datetime must not raise");
+        // 约 4 个月前的删除应认作 eligible。
+        assert!(eligible, "eleven-week-old tombstone should be age-eligible");
+    }
+
+    /// 真正不可解析的字段返回 Ok(false)（跳过、不上抛），行为可观测。
+    #[test]
+    fn tombstone_age_eligible_returns_false_for_unparseable_without_error() {
+        let now = "2024-06-01T00:00:00+00:00";
+        let result = DeletionFloorRepo::tombstone_age_eligible("garbage", now)
+            .expect("unparseable updated_at must not return Err");
+        assert!(
+            !result,
+            "unparseable tombstone should be treated as ineligible"
+        );
     }
 }
