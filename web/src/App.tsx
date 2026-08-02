@@ -64,6 +64,7 @@ const PromptOptimizer = lazyNamed(() => import('./pages/PromptOptimizer'), 'Prom
 // ownership routes redirect to Agent Hub. Gate D Task 7: old routes stay registered
 // but hidden; only /agent-hub is the new UI entry until N+2 removal evidence lands.
 const AgentHub = lazyNamed(() => import('./pages/AgentHub'), 'AgentHub');
+const ProviderManager = lazyNamed(() => import('./pages/ProviderManager'), 'ProviderManager');
 const Devices = lazyNamed(() => import('./pages/Devices'), 'Devices');
 const Settings = lazyNamed(() => import('./pages/Settings'), 'Settings');
 const Health = lazyNamed(() => import('./pages/Health'), 'Health');
@@ -557,6 +558,14 @@ export default function App() {
             <Route path="/scratchpad" element={<ShellRoute><Scratchpad /></ShellRoute>} />
             <Route path="/prompt-optimizer" element={<ShellRoute><PromptOptimizer /></ShellRoute>} />
             <Route path="/agent-hub" element={<ShellRoute><AgentHub /></ShellRoute>} />
+            <Route
+              path="/provider-manager"
+              element={
+                <ShellRoute>
+                  <ProviderManager />
+                </ShellRoute>
+              }
+            />
             <Route path="/claude-md" element={<Navigate to="/agent-hub" replace />} />
             <Route path="/claude-code" element={<Navigate to="/agent-hub" replace />} />
             <Route path="/orchestrator" element={<Navigate to="/workbench" replace />} />

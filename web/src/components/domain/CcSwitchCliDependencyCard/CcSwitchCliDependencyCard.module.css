@@ -1,0 +1,86 @@
+/* cc-switch CLI 依赖卡样式（tokens only）。 */
+
+.card {
+  width: 100%;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.titleGroup {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin: 0;
+  color: var(--fg);
+}
+
+.subtitle {
+  font-size: var(--text-sm);
+  color: var(--fg-muted-readable);
+  margin: var(--space-1) 0 0;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.notice {
+  font-size: var(--text-sm);
+  color: var(--fg-muted-readable);
+  margin: 0;
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.metaWide {
+  grid-column: 1 / -1;
+}
+
+.metaGrid dt {
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+  margin: 0 0 var(--space-1);
+}
+
+.metaGrid dd {
+  font-size: var(--text-sm);
+  color: var(--fg);
+  margin: 0;
+  word-break: break-all;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.errorBox {
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}

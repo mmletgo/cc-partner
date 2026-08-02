@@ -1,0 +1,46 @@
+{
+  "title": "Provider 管理",
+  "subtitle": "切换每个 agent 在 cc-switch 中已配置的当前 provider。切换由 cc-switch CLI 执行，不会影响你已安装的 cc-switch GUI。",
+  "loadFailed": "加载 provider 状态失败：{{error}}",
+  "noProviders": "未找到已配置的 provider，请先在 cc-switch 中配置 provider。",
+  "actions": {
+    "switch": "切换",
+    "enabled": "已启用",
+    "recheck": "重新检测",
+    "install": "安装 cc-switch CLI",
+    "installing": "安装中…"
+  },
+  "status": {
+    "current": "当前",
+    "cliMissing": "未安装 cc-switch CLI，切换功能已禁用。",
+    "cliMissingHint": "安装 cc-switch CLI 会与你现有的 cc-switch 共享同一份数据，不会影响 GUI。",
+    "dbMissing": "未找到 cc-switch 数据，请先安装 cc-switch 并至少配置一个 provider。",
+    "versionMismatch": "cc-switch GUI v{{guiVersion}} 与 CLI v{{cliVersion}} 版本不一致——请对齐版本，避免切换触发 GUI 无法识别的数据库迁移。",
+    "guiRunning": "cc-switch GUI 已打开。切换是安全的；GUI 窗口可能在刷新前显示旧的当前 provider。",
+    "switchFailed": "切换失败：{{error}}",
+    "installFailed": "安装失败：{{error}}"
+  },
+  "apps": {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "gemini": "Gemini CLI",
+    "opencode": "OpenCode",
+    "hermes": "Hermes",
+    "openclaw": "OpenClaw"
+  },
+  "cli": {
+    "label": "cc-switch CLI",
+    "description": "供 Provider Manager 切换 provider 使用。与你已安装的 cc-switch GUI 共享数据，不会影响 GUI。",
+    "installed": "已安装",
+    "notInstalled": "未安装",
+    "version": "版本",
+    "path": "路径",
+    "recheck": "重新检测",
+    "install": "安装",
+    "installing": "安装中…",
+    "coexistenceNote": "与你已安装的 cc-switch GUI 共享数据，不会影响 GUI。",
+    "manualHint": "自动安装需要 Homebrew（macOS）。其它平台请手动把 cc-switch CLI 安装到不与 GUI 冲突的目录。",
+    "loadFailed": "检测 cc-switch CLI 失败：{{error}}",
+    "installFailed": "安装失败：{{error}}"
+  }
+}

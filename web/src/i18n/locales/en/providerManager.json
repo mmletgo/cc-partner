@@ -1,0 +1,46 @@
+{
+  "title": "Provider Manager",
+  "subtitle": "Switch the active provider for each agent configured in cc-switch. Switching is delegated to the cc-switch CLI; your existing cc-switch GUI keeps working.",
+  "loadFailed": "Failed to load provider status: {{error}}",
+  "noProviders": "No configured providers found. Configure providers in cc-switch first.",
+  "actions": {
+    "switch": "Switch",
+    "enabled": "Enabled",
+    "recheck": "Recheck",
+    "install": "Install cc-switch CLI",
+    "installing": "Installing…"
+  },
+  "status": {
+    "current": "Current",
+    "cliMissing": "cc-switch CLI is not installed, so switching is disabled.",
+    "cliMissingHint": "Installing cc-switch CLI shares data with your existing cc-switch and will not affect the GUI.",
+    "dbMissing": "No cc-switch data found. Install cc-switch and configure at least one provider first.",
+    "versionMismatch": "cc-switch GUI v{{guiVersion}} and CLI v{{cliVersion}} differ — align releases so a switch does not trigger a migration the GUI cannot read.",
+    "guiRunning": "cc-switch GUI is open. Switching is safe; its window may show a stale current until you refresh it.",
+    "switchFailed": "Switch failed: {{error}}",
+    "installFailed": "Install failed: {{error}}"
+  },
+  "apps": {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "gemini": "Gemini CLI",
+    "opencode": "OpenCode",
+    "hermes": "Hermes",
+    "openclaw": "OpenClaw"
+  },
+  "cli": {
+    "label": "cc-switch CLI",
+    "description": "Used by Provider Manager to switch providers. Shares data with your cc-switch GUI and does not affect it.",
+    "installed": "Installed",
+    "notInstalled": "Not installed",
+    "version": "Version",
+    "path": "Path",
+    "recheck": "Recheck",
+    "install": "Install",
+    "installing": "Installing…",
+    "coexistenceNote": "Shares data with your cc-switch GUI; will not affect it.",
+    "manualHint": "Auto-install needs Homebrew (macOS). On other platforms, install cc-switch CLI to a directory that does not conflict with the GUI.",
+    "loadFailed": "Failed to check cc-switch CLI: {{error}}",
+    "installFailed": "Install failed: {{error}}"
+  }
+}

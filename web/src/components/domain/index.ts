@@ -65,3 +65,5 @@ export { WorkbenchDependencyCard } from './WorkbenchDependencyCard';
 export { LanFirewallDependencyCard } from './LanFirewallDependencyCard';
 export type { LanFirewallDependencyCardProps } from './LanFirewallDependencyCard';
 export { RuntimeDiagnosticsCard } from './RuntimeDiagnosticsCard';
+export { CcSwitchCliDependencyCard } from './CcSwitchCliDependencyCard';
+export type { CcSwitchCliDependencyCardProps } from './CcSwitchCliDependencyCard';

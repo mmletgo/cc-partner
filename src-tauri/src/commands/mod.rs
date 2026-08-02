@@ -27,6 +27,7 @@ pub mod orchestrator_config;
 pub mod permissions;
 pub mod prompt_optimizer;
 pub mod prompts;
+pub mod provider_manager;
 pub mod scratchpad;
 pub mod screenshot;
 pub mod ssh_target;

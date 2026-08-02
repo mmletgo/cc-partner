@@ -14,6 +14,7 @@
   "devices": "设备",
   "settings": "设置",
   "health": "健康提醒",
+  "providerManager": "Provider 管理",
   "primaryNav": "主导航",
   "groups": {
     "explore": "探索",

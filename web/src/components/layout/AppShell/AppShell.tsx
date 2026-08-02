@@ -34,6 +34,7 @@ import {
   DevicesIcon,
   SettingsIcon,
   HealthIcon,
+  ProviderManagerIcon,
   AlertIcon,
   SmartphoneIcon,
   XIcon,
@@ -206,6 +207,11 @@ export function AppShell({ children }: AppShellProps) {
           </NavGroup>
           <NavGroup id={NAV_GROUP_IDS.system} label={t('nav:groups.system')}>
             <NavItem to="/health" label={t('nav:health')} icon={<HealthIcon />} />
+            <NavItem
+              to="/provider-manager"
+              label={t('nav:providerManager')}
+              icon={<ProviderManagerIcon />}
+            />
           </NavGroup>
         </nav>
         <PermissionStatusBadge />

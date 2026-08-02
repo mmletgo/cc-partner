@@ -13,6 +13,7 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button } from '@/components/primitives';
 import {
+  CcSwitchCliDependencyCard,
   LanFirewallDependencyCard,
   PermissionCard,
   RuntimeDiagnosticsCard,
@@ -132,6 +133,7 @@ export function SettingsDependenciesPanel({
 <RuntimeDiagnosticsCard />
 <WorkbenchDependencyCard />
 <LanFirewallDependencyCard />
+<CcSwitchCliDependencyCard />
     </>
   );
 }
