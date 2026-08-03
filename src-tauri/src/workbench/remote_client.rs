@@ -60,13 +60,21 @@ const SHORT_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 15;
 const LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 120;
 const VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 420;
 
+/// health/capability 探测专用短超时。
+///
+/// Business Logic（为什么需要这个常量）:
+///     health 响应体极小（<1KiB），实际物理延迟 ~40ms（直连）或 ~200ms（DERP），15s 的 Short
+///     超时对它而言太长：跨境链路瞬时黑洞会让单次探测空等 15s 才失败，再叠加重试退避体感很差。
+///     5s 远超 health 实际需要，主要价值是黑洞时快速失败、尽快交给下一次重试。
+const HEALTH_PROBE_TIMEOUT_SECS: u64 = 5;
+
 /// 远端 health/capability 探测的有界传输层重试上限（含首次尝试）。
 ///
 /// Business Logic（为什么需要这个常量）:
 ///     跨设备 Tailscale/无线链路瞬时丢包会让单次 health GET 在 TCP 握手或 send 阶段失败，
 ///     但下一次请求通常落在好窗口。health 是只读幂等 GET，安全可重试；mutation 路径仍是
 ///     no-transport-retry，本重试通道只覆盖 health/capability 探测，不触碰 post_json。
-const REMOTE_HEALTH_RETRY_MAX_ATTEMPTS: u32 = 3;
+const REMOTE_HEALTH_RETRY_MAX_ATTEMPTS: u32 = 4;
 
 /// 重试退避基数；实际退避 = base * 2^(attempt-1)，即 400ms、800ms。
 const REMOTE_HEALTH_RETRY_BASE_DELAY: Duration = Duration::from_millis(400);
@@ -83,6 +91,9 @@ enum RemoteRequestTimeoutKind {
     Short,
     Long,
     VeryLong,
+    /// health/capability 探测专用短超时，配合 `get_json_with_retry` 在跨境链路瞬时黑洞时
+    /// 快速失败、把总探测窗口缩到合理范围（4 次 × 5s + 退避 ≈ 最坏 23s）。
+    HealthProbe,
 }
 
 /// Workbench 远端 HTTP 客户端。
@@ -738,7 +749,7 @@ impl RemoteWorkbenchClient {
         let info: PeerProtocolInfo = self
             .get_json_with_retry(
                 endpoint_url(base_url, "/api/health"),
-                RemoteRequestTimeoutKind::Short,
+                RemoteRequestTimeoutKind::HealthProbe,
             )
             .await?;
         Ok(info.supports(capability))
@@ -1729,6 +1740,9 @@ fn remote_request_timeout(kind: RemoteRequestTimeoutKind) -> Duration {
         RemoteRequestTimeoutKind::VeryLong => {
             Duration::from_secs(VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS)
         }
+        RemoteRequestTimeoutKind::HealthProbe => {
+            Duration::from_secs(HEALTH_PROBE_TIMEOUT_SECS)
+        }
     }
 }
 
@@ -1861,6 +1875,10 @@ mod tests {
         assert_eq!(
             remote_request_timeout(RemoteRequestTimeoutKind::VeryLong),
             Duration::from_secs(420)
+        );
+        assert_eq!(
+            remote_request_timeout(RemoteRequestTimeoutKind::HealthProbe),
+            Duration::from_secs(5)
         );
     }
 
