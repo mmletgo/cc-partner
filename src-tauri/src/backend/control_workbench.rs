@@ -629,7 +629,11 @@ async fn dispatch_workbench_op(
         }
         "sessions.focus" => {
             let session_id = required_string(&payload, "sessionId")?;
-            workbench::focus_workbench_session_for_state(state, session_id).await
+            if optional_bool(&payload, "streamActive") == Some(false) {
+                workbench::deactivate_workbench_terminal_stream_for_state(state, session_id)
+            } else {
+                workbench::focus_workbench_session_for_state(state, session_id).await
+            }
         }
         "sessions.focused" => {
             let project_id = required_string(&payload, "projectId")?;

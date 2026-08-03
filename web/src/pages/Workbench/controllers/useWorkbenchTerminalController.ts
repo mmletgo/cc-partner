@@ -611,9 +611,10 @@ export function useWorkbenchTerminalController(
   // pending 保留以持续保护本地用户选择（后端 tmux 仍可能是旧 window）。
   useEffect(() => {
     if (!activeSessionId) return undefined;
+    const focusedSessionId = activeSessionId;
     let cancelled = false;
     void workbenchApi.sessions
-      .focus(activeSessionId)
+      .focus(focusedSessionId)
       .then(() => {
         if (cancelled) return;
         // focus 成功确认：清 pending，后续轮询可正常同步外部焦点变化（移动端/tmux status bar 切换）。
@@ -629,6 +630,10 @@ export function useWorkbenchTerminalController(
       });
     return () => {
       cancelled = true;
+      // compare-and-clear：迟到 cleanup 不会清掉随后已聚焦的新窗口。
+      void workbenchApi.sessions.focus(focusedSessionId, false).catch(() => {
+        // cleanup 是带宽收敛的 best-effort；后端 idle/下一次 focus 仍会纠正目标。
+      });
     };
   }, [activeSessionId, displayErrorMessage, markRequestFailure, t]);
 

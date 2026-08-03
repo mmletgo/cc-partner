@@ -61,7 +61,7 @@ use crate::workbench::models::{
     WorkbenchSessionDto, WorkbenchSqlitePreview, WorkbenchWorktreeDto,
 };
 use crate::workbench::remote_directory;
-use crate::workbench::remote_events::encode_workbench_remote_relay_ndjson;
+use crate::workbench::remote_events::encode_workbench_remote_relay_ndjson_filtered;
 use crate::workbench::remote_protocol::{
     RemoteClaudeSessionReq, RemoteCommitWorktreeReq, RemoteCreatePathReq, RemoteCreateSessionReq,
     RemoteCreateWorktreeReq, RemoteDeletePathReq, RemoteFocusedSessionReq,
@@ -934,6 +934,8 @@ pub fn workbench_event_heartbeat_line(sent_at: &str) -> String {
 pub struct WorkbenchEventsQuery {
     pub after_owner_instance_id: Option<String>,
     pub after_sequence: Option<u64>,
+    /// 可选远端原生 terminal session id；存在时只传该窗口正文，轻量事件不受影响。
+    pub terminal_session_id: Option<String>,
 }
 
 /// 订阅本机 Workbench 远端事件流。
@@ -960,24 +962,37 @@ pub async fn workbench_events(
         }),
         _ => None,
     };
+    let terminal_session_filter = query.terminal_session_id;
     let relay = state.workbench_remote_events.open_relay(after.as_ref());
     let relay = Arc::new(Mutex::new(relay));
-    let event_stream = stream::unfold(relay, |relay| async move {
-        let msg = {
-            let mut guard = relay.lock().await;
-            guard.recv().await
-        };
-        match msg {
-            Some(message) => match encode_workbench_remote_relay_ndjson(&message) {
-                Ok(line) => Some((Ok::<String, Infallible>(format!("{line}\n")), relay)),
-                Err(_) => {
-                    tracing::debug!("Workbench 远端事件编码失败，跳过本条（无 body）");
-                    Some((Ok::<String, Infallible>(String::new()), relay))
-                }
-            },
-            None => None,
-        }
-    })
+    let event_stream = stream::unfold(
+        (relay, terminal_session_filter),
+        |(relay, terminal_session_filter)| async move {
+            let msg = {
+                let mut guard = relay.lock().await;
+                guard.recv().await
+            };
+            match msg {
+                Some(message) => match encode_workbench_remote_relay_ndjson_filtered(
+                    &message,
+                    terminal_session_filter.as_deref(),
+                ) {
+                    Ok(line) => Some((
+                        Ok::<String, Infallible>(format!("{line}\n")),
+                        (relay, terminal_session_filter),
+                    )),
+                    Err(_) => {
+                        tracing::debug!("Workbench 远端事件编码失败，跳过本条（无 body）");
+                        Some((
+                            Ok::<String, Infallible>(String::new()),
+                            (relay, terminal_session_filter),
+                        ))
+                    }
+                },
+                None => None,
+            }
+        },
+    )
     .filter(|item| match item {
         Ok(line) => !line.is_empty(),
         Err(_) => true,
@@ -2034,9 +2049,15 @@ pub async fn mobile_focus_workbench_session(
     Extension(ctx): Extension<P2pRequestContext>,
     Json(req): Json<RemoteSessionReq>,
 ) -> P2pResult<Json<Value>> {
-    let value = focus_workbench_session_for_state(&state, req.session_id)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.focus"))?;
+    let value = if req.stream_active == Some(false) {
+        crate::commands::workbench::deactivate_workbench_terminal_stream_for_state(
+            &state,
+            req.session_id,
+        )
+    } else {
+        focus_workbench_session_for_state(&state, req.session_id).await
+    }
+    .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.focus"))?;
     Ok(Json(value))
 }
 

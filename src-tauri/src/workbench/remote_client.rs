@@ -1229,6 +1229,7 @@ impl RemoteWorkbenchClient {
                 endpoint_url(base_url, "/api/workbench/sessions/focus"),
                 &RemoteSessionReq {
                     session_id: session_id.to_string(),
+                    stream_active: None,
                 },
                 RemoteRequestTimeoutKind::Short,
             )
@@ -1301,6 +1302,7 @@ impl RemoteWorkbenchClient {
                 endpoint_url(base_url, "/api/workbench/sessions/switch-pane"),
                 &RemoteSessionReq {
                     session_id: session_id.to_string(),
+                    stream_active: None,
                 },
                 RemoteRequestTimeoutKind::Short,
             )
@@ -1348,6 +1350,7 @@ impl RemoteWorkbenchClient {
                 endpoint_url(base_url, "/api/workbench/sessions/zoom-pane"),
                 &RemoteSessionReq {
                     session_id: session_id.to_string(),
+                    stream_active: None,
                 },
                 RemoteRequestTimeoutKind::Short,
             )
@@ -1368,6 +1371,7 @@ impl RemoteWorkbenchClient {
                 endpoint_url(base_url, "/api/workbench/sessions/close-pane"),
                 &RemoteSessionReq {
                     session_id: session_id.to_string(),
+                    stream_active: None,
                 },
                 RemoteRequestTimeoutKind::Short,
             )
@@ -1391,6 +1395,7 @@ impl RemoteWorkbenchClient {
                 endpoint_url(base_url, "/api/workbench/sessions/close"),
                 &RemoteSessionReq {
                     session_id: session_id.to_string(),
+                    stream_active: None,
                 },
                 RemoteRequestTimeoutKind::Short,
             )

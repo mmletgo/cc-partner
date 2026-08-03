@@ -298,6 +298,15 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
     expect(buildWorkbenchEventsUrl({ ownerInstanceId: 'owner-a', sequence: 0 })).toBe(
       '/api/workbench/events?afterOwnerInstanceId=owner-a&afterSequence=0',
     );
+    expect(buildWorkbenchEventsUrl(null, { terminalSessionId: null })).toBe(
+      '/api/workbench/events?terminalSessionId=__none__',
+    );
+    expect(
+      buildWorkbenchEventsUrl(
+        { ownerInstanceId: 'owner-a', sequence: 9 },
+        { terminalSessionId: 'remote:device-a:session/1' },
+      ),
+    ).toContain('terminalSessionId=remote%3Adevice-a%3Asession%2F1');
 
     // recoveryPending 门闩：无 cursor 时禁止 open；有 recovery cursor（含 seq 0）允许。
     expect(canOpenWorkbenchEventsRequest(null, false)).toBe(true);
@@ -305,6 +314,15 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
     expect(
       canOpenWorkbenchEventsRequest({ ownerInstanceId: 'owner-a', sequence: 0 }, true),
     ).toBe(true);
+  });
+
+  test('parses filtered cursor frames without terminal body', () => {
+    expect(
+      parseWorkbenchNdjsonFrame({
+        type: 'cursor',
+        payload: { ownerInstanceId: 'owner-a', sequence: 12 },
+      }),
+    ).toEqual({ kind: 'cursor', ownerInstanceId: 'owner-a', sequence: 12 });
   });
 
   /**
@@ -416,6 +434,31 @@ describe('workbenchHttpEvents stream cursor helpers', () => {
       }),
     };
     await expect(resyncWorkbenchSessionsAfterGap(store, failing)).rejects.toThrow(/network/);
+  });
+
+  test('filtered gap resync replays only the active terminal window', async () => {
+    const reset = vi.fn();
+    const store = { reset } as unknown as WorkbenchTerminalBufferStore;
+    const sessions = {
+      list: vi.fn(async () => [
+        { id: 'run-1', status: 'running' },
+        { id: 'run-2', status: 'running' },
+      ]),
+      replay: vi.fn(async (sessionId: string) => ({
+        sessionId,
+        buffer: 'active-buffer',
+        truncated: false,
+        lastSeq: 8,
+        ownerInstanceId: 'owner-x',
+      })),
+    };
+
+    await resyncWorkbenchSessionsAfterGap(store, sessions, { activeSessionId: 'run-2' });
+
+    expect(sessions.replay).toHaveBeenCalledTimes(1);
+    expect(sessions.replay).toHaveBeenCalledWith('run-2');
+    expect(reset).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledWith('run-2', 'active-buffer', 8, 'owner-x');
   });
 
   /**

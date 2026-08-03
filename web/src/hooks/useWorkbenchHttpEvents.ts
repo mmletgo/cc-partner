@@ -99,6 +99,7 @@ export type WorkbenchNdjsonFrame =
     }
   | { kind: 'heartbeat'; sentAt: string }
   | { kind: 'gap'; ownerInstanceId: string; oldestAvailable: number; latest: number }
+  | { kind: 'cursor'; ownerInstanceId: string; sequence: number }
   | { kind: 'ignored'; type: string };
 
 /**
@@ -184,6 +185,8 @@ export interface WorkbenchGapInventorySession {
  */
 export interface ResyncWorkbenchSessionsAfterGapOptions {
   onTerminalStatus?: (payload: WorkbenchTerminalStatusEvent) => void;
+  /** 当前可见 terminal；Gap 只 replay 该窗口，null 时不拉任何正文。 */
+  activeSessionId?: string | null;
 }
 
 /**
@@ -200,6 +203,8 @@ export interface ResyncWorkbenchSessionsAfterGapOptions {
 export interface UseWorkbenchHttpEventsOptions {
   store: WorkbenchTerminalBufferStore;
   enabled: boolean;
+  /** 当前可见 terminal；服务端据此过滤高带宽正文。 */
+  terminalSessionId?: string | null;
   reconnectDelayMs?: number;
   watchdogMs?: number;
   /** terminalStatus 实时回调（Mobile tab 状态）。 */
@@ -439,7 +444,11 @@ export function resolveCursorAfterGap(
  */
 export function buildWorkbenchEventsUrl(
   cursor: WorkbenchHttpStreamCursor | null,
-  options?: { recoveryPending?: boolean; recoveryFallback?: WorkbenchHttpStreamCursor | null },
+  options?: {
+    recoveryPending?: boolean;
+    recoveryFallback?: WorkbenchHttpStreamCursor | null;
+    terminalSessionId?: string | null;
+  },
 ): string {
   const effective =
     cursor &&
@@ -460,16 +469,21 @@ export function buildWorkbenchEventsUrl(
           : null
         : null;
 
-  if (!effective) {
+  if (!effective && options?.recoveryPending) {
     // recoveryPending 且仍无有效 after：宁可 delay 重连也不 brand-new。
     // 调用方应保证 recoveryPending 时至少有 recovery cursor；此处仍返回裸 URL 作最后兜底
     // 但 hook 层会在 recoveryPending 时拒绝无 after 的 fetch。
     return '/api/workbench/events';
   }
-  const params = new URLSearchParams({
-    afterOwnerInstanceId: effective.ownerInstanceId,
-    afterSequence: String(effective.sequence),
-  });
+  const params = new URLSearchParams();
+  if (effective) {
+    params.set('afterOwnerInstanceId', effective.ownerInstanceId);
+    params.set('afterSequence', String(effective.sequence));
+  }
+  if (options && 'terminalSessionId' in options) {
+    params.set('terminalSessionId', options.terminalSessionId ?? '__none__');
+  }
+  if (params.size === 0) return '/api/workbench/events';
   return `/api/workbench/events?${params.toString()}`;
 }
 
@@ -744,6 +758,7 @@ export async function resyncWorkbenchSessionsAfterGap(
 
   for (const session of byId.values()) {
     if (session.status !== 'running') continue;
+    if (options && 'activeSessionId' in options && options.activeSessionId !== session.id) continue;
     const replay = await sessions.replay(session.id);
     store.reset(
       session.id,
@@ -784,6 +799,22 @@ export function parseWorkbenchNdjsonFrame(value: unknown): WorkbenchNdjsonFrame 
       ownerInstanceId: value.payload.ownerInstanceId,
       oldestAvailable: value.payload.oldestAvailable,
       latest: value.payload.latest,
+    };
+  }
+
+  if (value.type === 'cursor') {
+    if (
+      !isRecord(value.payload) ||
+      typeof value.payload.ownerInstanceId !== 'string' ||
+      typeof value.payload.sequence !== 'number' ||
+      !Number.isFinite(value.payload.sequence)
+    ) {
+      throw new Error('Workbench HTTP event cursor payload 非法');
+    }
+    return {
+      kind: 'cursor',
+      ownerInstanceId: value.payload.ownerInstanceId,
+      sequence: value.payload.sequence,
     };
   }
 
@@ -950,6 +981,7 @@ export function consumeWorkbenchHttpEvent(
 export function useWorkbenchHttpEvents({
   store,
   enabled,
+  terminalSessionId = null,
   reconnectDelayMs = WORKBENCH_HTTP_EVENT_RECONNECT_DELAY_MS,
   watchdogMs = WORKBENCH_HTTP_EVENT_WATCHDOG_MS,
   onTerminalStatus,
@@ -1088,6 +1120,7 @@ export function useWorkbenchHttpEvents({
         try {
           await resyncWorkbenchSessionsAfterGap(store, sessionsRef.current, {
             onTerminalStatus: onTerminalStatusRef.current,
+            activeSessionId: terminalSessionId,
           });
           resyncSucceeded = true;
         } catch {
@@ -1117,6 +1150,7 @@ export function useWorkbenchHttpEvents({
         const eventsUrl = buildWorkbenchEventsUrl(streamCursor, {
           recoveryPending,
           recoveryFallback: streamCursor,
+          terminalSessionId,
         });
         // 二次守护：recovery 期间 URL 必须含 after。
         if (recoveryPending && !eventsUrl.includes('afterOwnerInstanceId=')) {
@@ -1167,6 +1201,15 @@ export function useWorkbenchHttpEvents({
                 },
                 frame.ownerInstanceId,
               );
+            } else if (frame.kind === 'cursor') {
+              streamCursor = advanceWorkbenchHttpStreamCursor(
+                streamCursor,
+                frame.ownerInstanceId,
+                frame.sequence,
+              );
+              if (streamCursor && streamCursor.sequence > 0) {
+                recoveryPending = false;
+              }
             }
           }
         }
@@ -1200,6 +1243,15 @@ export function useWorkbenchHttpEvents({
                   },
                   frame.ownerInstanceId,
                 );
+              } else if (frame.kind === 'cursor') {
+                streamCursor = advanceWorkbenchHttpStreamCursor(
+                  streamCursor,
+                  frame.ownerInstanceId,
+                  frame.sequence,
+                );
+                if (streamCursor && streamCursor.sequence > 0) {
+                  recoveryPending = false;
+                }
               }
             }
           }
@@ -1231,5 +1283,5 @@ export function useWorkbenchHttpEvents({
       }
       activeConnectionController?.abort();
     };
-  }, [enabled, reconnectDelayMs, store, watchdogMs]);
+  }, [enabled, reconnectDelayMs, store, terminalSessionId, watchdogMs]);
 }

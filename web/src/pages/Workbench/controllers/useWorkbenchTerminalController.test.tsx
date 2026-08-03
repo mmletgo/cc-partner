@@ -386,7 +386,7 @@ describe('useWorkbenchTerminalController — load / focus', () => {
     const s2 = buildSession({ id: 's2', worktreeId: worktree.id });
     fakeSessionsApi.list.mockResolvedValue([s1, s2]);
 
-    const { result } = renderController({
+    const { result, unmount } = renderController({
       activeProjectId: project.id,
       activeWorktreeId: worktree.id,
       remoteWriteDisabled: false,
@@ -417,6 +417,13 @@ describe('useWorkbenchTerminalController — load / focus', () => {
 
     // focus effect 触发后端 focus_workbench_session 一次。
     expect(fakeSessionsApi.focus).toHaveBeenCalledWith('s2');
+    expect(fakeSessionsApi.focus).toHaveBeenCalledWith('s1', false);
+
+    unmount();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(fakeSessionsApi.focus).toHaveBeenCalledWith('s2', false);
   });
 
   test('focusSession keeps user selection when terminal-status event arrives after grace and backend tmux still on previous window', async () => {

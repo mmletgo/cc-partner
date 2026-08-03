@@ -256,9 +256,20 @@ export function MobileWorkbench(): ReactElement {
   useWorkbenchHttpEvents({
     store: terminalBufferStore,
     enabled: true,
+    terminalSessionId: activeSession?.id ?? null,
     onTerminalStatus: handleTerminalStatusEvent,
     onAgentRuntime: handleAgentRuntimeEvent,
   });
+  useEffect(() => {
+    const sessionId = activeSession?.id;
+    if (!sessionId) return undefined;
+    return () => {
+      // compare-and-clear：切换窗口或离开 Mobile Workbench 后停止旧远端窗口正文流。
+      void httpWorkbenchTransport.sessions.focus(sessionId, false).catch(() => {
+        // cleanup best-effort；下一次 focus 会以当前窗口重新建立过滤目标。
+      });
+    };
+  }, [activeSession?.id]);
   const activeProjectRef = useRef<WorkbenchProject | null>(null);
   const activeWorktreeRef = useRef<WorkbenchWorktree | null>(null);
   const worktreeOperationBusyRef = useRef<boolean>(false);

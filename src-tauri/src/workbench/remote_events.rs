@@ -226,6 +226,11 @@ pub enum WorkbenchRemoteRelayMessage {
         oldest_available: u64,
         latest: u64,
     },
+    /// 服务端过滤掉非当前终端正文时，仅推进消费游标，不携带正文。
+    Cursor {
+        owner_instance_id: String,
+        sequence: u64,
+    },
 }
 
 /// wire 解码结果别名（与 relay 消息同形）。
@@ -575,7 +580,63 @@ pub fn encode_workbench_remote_relay_ndjson(
                 "latest": latest,
             }
         })),
+        WorkbenchRemoteRelayMessage::Cursor {
+            owner_instance_id,
+            sequence,
+        } => serde_json::to_string(&json!({
+            "type": "cursor",
+            "payload": {
+                "ownerInstanceId": owner_instance_id,
+                "sequence": sequence,
+            }
+        })),
     }
+}
+
+/// 按当前终端窗口过滤高带宽正文并编码 NDJSON。
+///
+/// Business Logic（为什么需要这个函数）:
+///     远程 Workbench 只应实时下载用户当前查看窗口的正文；状态、merge 与 Agent 事件仍需实时到达。
+///     被过滤事件仍必须推进全局游标，否则重连会重复扫描旧 ring，甚至触发全量 Gap resync。
+///
+/// Code Logic（这个函数做什么）:
+///     filter=None 保持旧客户端完整流；filter=Some 时，非目标 session 的 TerminalOutput/TerminalResync
+///     编码为不含正文的 Cursor 帧，其余事件原样编码。
+pub fn encode_workbench_remote_relay_ndjson_filtered(
+    msg: &WorkbenchRemoteRelayMessage,
+    terminal_session_filter: Option<&str>,
+) -> Result<String, serde_json::Error> {
+    let should_filter = match (msg, terminal_session_filter) {
+        (
+            WorkbenchRemoteRelayMessage::Event {
+                event,
+                owner_instance_id: _,
+                sequence: _,
+            },
+            Some(target),
+        ) => match event.as_ref() {
+            WorkbenchRemoteEvent::TerminalOutput(payload) => payload.session_id != target,
+            WorkbenchRemoteEvent::TerminalResync(payload) => payload.session_id != target,
+            WorkbenchRemoteEvent::TerminalStatus(_)
+            | WorkbenchRemoteEvent::MergeProgress(_)
+            | WorkbenchRemoteEvent::AgentRuntime(_) => false,
+        },
+        _ => false,
+    };
+    if should_filter {
+        if let WorkbenchRemoteRelayMessage::Event {
+            owner_instance_id,
+            sequence,
+            ..
+        } = msg
+        {
+            return encode_workbench_remote_relay_ndjson(&WorkbenchRemoteRelayMessage::Cursor {
+                owner_instance_id: owner_instance_id.clone(),
+                sequence: *sequence,
+            });
+        }
+    }
+    encode_workbench_remote_relay_ndjson(msg)
 }
 
 /// 解码单行 NDJSON：业务 Event / Gap → Some；heartbeat/未知 type → None；非法 JSON → Err。
@@ -626,6 +687,22 @@ pub fn decode_remote_event(line: &str) -> Result<Option<WorkbenchRemoteStreamMes
                 owner_instance_id,
                 oldest_available,
                 latest,
+            }))
+        }
+        "cursor" => {
+            let payload = value.get("payload").cloned().unwrap_or(Value::Null);
+            let owner_instance_id = payload
+                .get("ownerInstanceId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let sequence = payload
+                .get("sequence")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Ok(Some(WorkbenchRemoteStreamMessage::Cursor {
+                owner_instance_id,
+                sequence,
             }))
         }
         // heartbeat 等非业务帧
@@ -1200,6 +1277,8 @@ impl BridgeRuntimeState {
 ///     和 JoinHandle。
 struct RemoteEventBridgeTask {
     base_url: String,
+    /// 远端原生 session id；None 表示只接收轻量事件，不接收任何 terminal 正文。
+    terminal_session_filter: Option<String>,
     project_ids: Arc<RwLock<HashMap<String, String>>>,
     cancel: CancellationToken,
     runtime: Arc<BridgeRuntimeState>,
@@ -1319,6 +1398,7 @@ impl RemoteEventBridgeRegistry {
             let transferred_cursor = existing.runtime.load_after_cursor();
             let transferred_watch_keys = existing.runtime.clone_watch_keys();
             let transferred_project_running = existing.runtime.clone_project_running_sessions();
+            let terminal_session_filter = existing.terminal_session_filter.clone();
             *existing = spawn_bridge_task(
                 device_id,
                 base_url,
@@ -1327,6 +1407,7 @@ impl RemoteEventBridgeRegistry {
                 transferred_cursor,
                 transferred_watch_keys,
                 transferred_project_running,
+                terminal_session_filter,
             );
             return;
         }
@@ -1341,8 +1422,140 @@ impl RemoteEventBridgeRegistry {
             None,
             HashSet::new(),
             HashMap::new(),
+            None,
         );
         tasks.insert(device_id, task);
+    }
+
+    /// 把设备级远端事件流切换为仅传输当前终端窗口正文。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     同一远端设备可能运行多个高输出终端；用户只查看一个窗口时，不应持续下载其它窗口正文。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     找到设备 bridge；目标变化时继承 cursor/watch/project 映射并重启流，新的 GET 带
+    ///     `terminalSessionId`。目标相同则 no-op。session id 必须是远端原生 id。
+    pub fn set_active_terminal_session(
+        &self,
+        device_id: &str,
+        inner_session_id: String,
+        state: AppState,
+    ) -> bool {
+        let mut tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let mut found_target = false;
+        for (current_device_id, existing) in tasks.iter_mut() {
+            let desired_filter = if current_device_id == device_id {
+                found_target = true;
+                Some(inner_session_id.clone())
+            } else {
+                // 全应用同一时刻只有当前 UI 窗口允许传正文；切设备时必须关闭旧设备正文流。
+                None
+            };
+            if existing.terminal_session_filter == desired_filter && !existing.is_finished() {
+                if current_device_id == device_id {
+                    existing.runtime.touch();
+                }
+                continue;
+            }
+
+            existing.cancel.cancel();
+            existing.handle.abort();
+            let base_url = existing.base_url.clone();
+            let project_ids = Arc::clone(&existing.project_ids);
+            let transferred_cursor = existing.runtime.load_after_cursor();
+            let transferred_watch_keys = existing.runtime.clone_watch_keys();
+            let transferred_project_running = existing.runtime.clone_project_running_sessions();
+            *existing = spawn_bridge_task(
+                current_device_id.clone(),
+                base_url,
+                project_ids,
+                state.clone(),
+                transferred_cursor,
+                transferred_watch_keys,
+                transferred_project_running,
+                desired_filter,
+            );
+        }
+        found_target
+    }
+
+    /// 仅当给定窗口仍是当前过滤目标时停止传输终端正文。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户切换项目、关闭 Workbench 或 active tab 变化时，旧窗口不能继续占用带宽；异步 cleanup
+    ///     又可能晚于新 focus 到达，因此必须 compare-and-clear，不能无条件清空新目标。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     目标不匹配时 no-op；匹配时继承 cursor/watch/project 映射并以 filter=None 重启 bridge，
+    ///     新连接会使用 `terminalSessionId=__none__`，只保留轻量事件。
+    pub fn clear_active_terminal_session_if(
+        &self,
+        device_id: &str,
+        expected_inner_session_id: &str,
+        state: AppState,
+    ) -> bool {
+        let mut tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let Some(existing) = tasks.get_mut(device_id) else {
+            return false;
+        };
+        if existing.terminal_session_filter.as_deref() != Some(expected_inner_session_id) {
+            return false;
+        }
+
+        existing.cancel.cancel();
+        existing.handle.abort();
+        let base_url = existing.base_url.clone();
+        let project_ids = Arc::clone(&existing.project_ids);
+        let transferred_cursor = existing.runtime.load_after_cursor();
+        let transferred_watch_keys = existing.runtime.clone_watch_keys();
+        let transferred_project_running = existing.runtime.clone_project_running_sessions();
+        *existing = spawn_bridge_task(
+            device_id.to_string(),
+            base_url,
+            project_ids,
+            state,
+            transferred_cursor,
+            transferred_watch_keys,
+            transferred_project_running,
+            None,
+        );
+        true
+    }
+
+    /// 停止所有远端设备的终端正文流，仅保留轻量状态连接。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     当前窗口切到本机 terminal 时，之前选中的远端设备也必须停止传输正文。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     对 filter 非空或已结束的 task 继承恢复状态并以 filter=None 重启；返回是否改动过。
+    pub fn clear_all_active_terminal_sessions(&self, state: AppState) -> bool {
+        let mut tasks = self.tasks.lock().expect("remote event bridge 锁中毒");
+        let mut changed = false;
+        for (device_id, existing) in tasks.iter_mut() {
+            if existing.terminal_session_filter.is_none() && !existing.is_finished() {
+                continue;
+            }
+            changed = true;
+            existing.cancel.cancel();
+            existing.handle.abort();
+            let base_url = existing.base_url.clone();
+            let project_ids = Arc::clone(&existing.project_ids);
+            let transferred_cursor = existing.runtime.load_after_cursor();
+            let transferred_watch_keys = existing.runtime.clone_watch_keys();
+            let transferred_project_running = existing.runtime.clone_project_running_sessions();
+            *existing = spawn_bridge_task(
+                device_id.clone(),
+                base_url,
+                project_ids,
+                state.clone(),
+                transferred_cursor,
+                transferred_watch_keys,
+                transferred_project_running,
+                None,
+            );
+        }
+        changed
     }
 
     /// 为活跃 remote 查看者增加设备级订阅 lease（测试/兼容 API；生产走 session watch）。
@@ -1700,6 +1913,7 @@ fn spawn_bridge_task(
     initial_after_cursor: Option<BackendRuntimeCursor>,
     initial_watch_keys: HashSet<String>,
     initial_project_running_sessions: HashMap<String, HashSet<String>>,
+    terminal_session_filter: Option<String>,
 ) -> RemoteEventBridgeTask {
     let cancel = CancellationToken::new();
     let runtime = Arc::new(BridgeRuntimeState::new());
@@ -1717,6 +1931,7 @@ fn spawn_bridge_task(
     let task_device_id = device_id;
     let task_base_url = base_url.clone();
     let task_project_ids = Arc::clone(&project_ids);
+    let task_terminal_session_filter = terminal_session_filter.clone();
     let handle = tauri::async_runtime::spawn(async move {
         remote_event_loop(
             task_device_id,
@@ -1725,6 +1940,7 @@ fn spawn_bridge_task(
             task_project_ids,
             loop_cancel,
             loop_runtime.clone(),
+            task_terminal_session_filter,
         )
         .await;
         loop_runtime.finished.store(true, Ordering::SeqCst);
@@ -1740,6 +1956,7 @@ fn spawn_bridge_task(
     });
     RemoteEventBridgeTask {
         base_url,
+        terminal_session_filter,
         project_ids,
         cancel,
         runtime,
@@ -1814,6 +2031,7 @@ async fn remote_event_loop(
     project_ids: Arc<RwLock<HashMap<String, String>>>,
     cancel: CancellationToken,
     runtime: Arc<BridgeRuntimeState>,
+    terminal_session_filter: Option<String>,
 ) {
     // after_cursor 以 runtime 共享状态为权威；本地 mut 仅作循环内缓存，推进后写回。
     loop {
@@ -1838,6 +2056,7 @@ async fn remote_event_loop(
             &cancel,
             &runtime,
             &mut after_cursor,
+            terminal_session_filter.as_deref(),
         )
         .await
         {
@@ -1879,6 +2098,7 @@ async fn remote_event_loop(
                     &base_url,
                     &project_ids,
                     &cancel,
+                    terminal_session_filter.as_deref(),
                 )
                 .await
                 {
@@ -1976,8 +2196,9 @@ async fn read_remote_event_stream(
     cancel: &CancellationToken,
     runtime: &BridgeRuntimeState,
     after_cursor: &mut Option<BackendRuntimeCursor>,
+    terminal_session_filter: Option<&str>,
 ) -> Result<(), EventStreamError> {
-    let url = event_stream_url(base_url, after_cursor.as_ref());
+    let url = event_stream_url(base_url, after_cursor.as_ref(), terminal_session_filter);
     let mut response = tokio::select! {
         _ = cancel.cancelled() => return Err(EventStreamError::Cancelled),
         result = state.peer_client.open_ndjson_stream(&url) => {
@@ -2057,6 +2278,18 @@ async fn read_remote_event_stream(
                                 oldest_available,
                                 latest,
                             });
+                        }
+                        WorkbenchRemoteStreamMessage::Cursor {
+                            owner_instance_id,
+                            sequence,
+                        } => {
+                            if !owner_instance_id.is_empty() && sequence > 0 {
+                                *after_cursor = Some(BackendRuntimeCursor {
+                                    owner_instance_id,
+                                    sequence,
+                                });
+                                runtime.store_after_cursor(after_cursor.clone());
+                            }
                         }
                     }
                 }
@@ -2175,6 +2408,9 @@ fn process_event_chunk_to_messages(
                 Ok(Some(gap @ WorkbenchRemoteStreamMessage::Gap { .. })) => {
                     messages.push(gap);
                 }
+                Ok(Some(cursor @ WorkbenchRemoteStreamMessage::Cursor { .. })) => {
+                    messages.push(cursor);
+                }
                 Ok(None) => {
                     // 未知 type / heartbeat：忽略，不中断 stream
                 }
@@ -2204,7 +2440,8 @@ fn process_event_chunk_to_events(
         .into_iter()
         .filter_map(|msg| match msg {
             WorkbenchRemoteStreamMessage::Event { event, .. } => Some(*event),
-            WorkbenchRemoteStreamMessage::Gap { .. } => None,
+            WorkbenchRemoteStreamMessage::Gap { .. }
+            | WorkbenchRemoteStreamMessage::Cursor { .. } => None,
         })
         .collect())
 }
@@ -2311,6 +2548,21 @@ fn emit_mapped_remote_event(state: &AppState, event: WorkbenchRemoteEvent) {
             );
         }
     };
+}
+
+/// 发布并向 GUI 转发一份远端终端权威回放。
+///
+/// Business Logic（为什么需要这个函数）:
+///     实时流只传当前窗口后，切换窗口必须立即用 replay 恢复完整屏幕；桌面与 Mobile 需要同一份 cutover。
+///
+/// Code Logic（这个函数做什么）:
+///     把 replay 转为 TerminalResync 发布到本机远端事件总线，并以既有 Tauri/owner 事件名转发给 GUI。
+pub(crate) fn emit_remote_terminal_resync(state: &AppState, replay: WorkbenchSessionReplayDto) {
+    publish_workbench_remote_event_from_state(
+        state,
+        WorkbenchRemoteEvent::TerminalResync(WorkbenchTerminalResyncPayload::from_replay(&replay)),
+    );
+    state.emit_event(crate::backend::ui::WORKBENCH_TERMINAL_RESYNC_EVENT, replay);
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -2438,6 +2690,11 @@ fn gap_resync_missing_ids_for_disconnect(
     previous.difference(listed).cloned().collect()
 }
 
+/// 判断 Gap 恢复是否应拉取指定终端正文。
+fn should_replay_terminal_session(active_inner_session_id: Option<&str>, candidate: &str) -> bool {
+    active_inner_session_id == Some(candidate)
+}
+
 /// Business Logic（为什么需要这个函数）:
 ///     远端 ring 截断/owner 重启后 live 事件缺口必须用 sessions.list + sessions.replay
 ///     权威 cutover，再允许 after_cursor 前进；否则 GUI 终端永久停更。
@@ -2462,6 +2719,7 @@ async fn resync_remote_bridge_after_gap(
     base_url: &str,
     project_ids: &Arc<RwLock<HashMap<String, String>>>,
     cancel: &CancellationToken,
+    terminal_session_filter: Option<&str>,
 ) -> Result<(), EventStreamError> {
     if cancel.is_cancelled() {
         return Err(EventStreamError::Cancelled);
@@ -2515,6 +2773,10 @@ async fn resync_remote_bridge_after_gap(
                 continue;
             }
             running_ids.push(remote_session_id.clone());
+            // 生命周期和 watch reconcile 仍覆盖全部 running session；高带宽 replay 仅恢复当前窗口。
+            if !should_replay_terminal_session(terminal_session_filter, &session.id) {
+                continue;
+            }
             let mut replay = client
                 .replay(base_url, &session.id)
                 .await
@@ -2573,17 +2835,28 @@ async fn resync_remote_bridge_after_gap(
 /// Code Logic（这个函数做什么）:
 ///     去掉 base URL 尾部 `/` 后追加 `/api/workbench/events`；
 ///     若有 after 游标则附 `afterOwnerInstanceId` + `afterSequence` 查询（不记录 URL）。
-fn event_stream_url(base_url: &str, after: Option<&BackendRuntimeCursor>) -> String {
+fn event_stream_url(
+    base_url: &str,
+    after: Option<&BackendRuntimeCursor>,
+    terminal_session_filter: Option<&str>,
+) -> String {
     let base = format!("{}/api/workbench/events", base_url.trim_end_matches('/'));
-    match after {
-        Some(cursor) if !cursor.owner_instance_id.is_empty() => {
-            format!(
-                "{base}?afterOwnerInstanceId={}&afterSequence={}",
-                cursor.owner_instance_id, cursor.sequence
-            )
+    let Ok(mut url) = reqwest::Url::parse(&base) else {
+        return base;
+    };
+    {
+        let mut query = url.query_pairs_mut();
+        if let Some(cursor) = after.filter(|cursor| !cursor.owner_instance_id.is_empty()) {
+            query.append_pair("afterOwnerInstanceId", &cursor.owner_instance_id);
+            query.append_pair("afterSequence", &cursor.sequence.to_string());
         }
-        _ => base,
+        // 新 bridge 在尚未选中窗口时传稳定 sentinel；旧调用者不带本参数，仍保持完整流兼容。
+        query.append_pair(
+            "terminalSessionId",
+            terminal_session_filter.unwrap_or("__none__"),
+        );
     }
+    url.into()
 }
 
 #[cfg(test)]
@@ -2907,16 +3180,16 @@ mod tests {
     #[test]
     fn event_stream_url_trims_trailing_slash() {
         assert_eq!(
-            event_stream_url("http://127.0.0.1:1420/", None),
-            "http://127.0.0.1:1420/api/workbench/events"
+            event_stream_url("http://127.0.0.1:1420/", None, None),
+            "http://127.0.0.1:1420/api/workbench/events?terminalSessionId=__none__"
         );
         let after = BackendRuntimeCursor {
             owner_instance_id: "owner-a".into(),
             sequence: 9,
         };
         assert_eq!(
-            event_stream_url("http://127.0.0.1:1420/", Some(&after)),
-            "http://127.0.0.1:1420/api/workbench/events?afterOwnerInstanceId=owner-a&afterSequence=9"
+            event_stream_url("http://127.0.0.1:1420/", Some(&after), Some("session-a")),
+            "http://127.0.0.1:1420/api/workbench/events?afterOwnerInstanceId=owner-a&afterSequence=9&terminalSessionId=session-a"
         );
     }
 
@@ -3057,6 +3330,7 @@ mod tests {
                     break;
                 }
                 Some(WorkbenchRemoteRelayMessage::Event { .. }) => continue,
+                Some(WorkbenchRemoteRelayMessage::Cursor { .. }) => continue,
                 None => break,
             }
         }
@@ -3087,6 +3361,54 @@ mod tests {
             decode_remote_event(r#"{"type":"futureEvent","payload":{}}"#).unwrap(),
             None
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     后台终端正文必须在远端编码前移除，同时游标仍需推进以避免重连 Gap。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     目标 s2 原样编码；后台 s2 对 s1 订阅编码为同 owner/sequence 的 Cursor；无 filter 保持旧流。
+    #[test]
+    fn terminal_output_filter_replaces_background_body_with_cursor() {
+        let message = WorkbenchRemoteRelayMessage::Event {
+            owner_instance_id: "owner-a".to_string(),
+            sequence: 7,
+            event: Box::new(WorkbenchRemoteEvent::TerminalOutput(
+                WorkbenchTerminalOutputPayload {
+                    session_id: "s2".to_string(),
+                    chunk: "large-background-output".to_string(),
+                    seq: 3,
+                    ts: 1000,
+                    owner_instance_id: Some("producer-a".to_string()),
+                },
+            )),
+        };
+
+        let legacy = encode_workbench_remote_relay_ndjson_filtered(&message, None).unwrap();
+        assert!(legacy.contains("large-background-output"));
+        let selected = encode_workbench_remote_relay_ndjson_filtered(&message, Some("s2")).unwrap();
+        assert!(selected.contains("large-background-output"));
+        let filtered = encode_workbench_remote_relay_ndjson_filtered(&message, Some("s1")).unwrap();
+        assert!(!filtered.contains("large-background-output"));
+        assert!(matches!(
+            decode_remote_event(&filtered).unwrap(),
+            Some(WorkbenchRemoteStreamMessage::Cursor {
+                owner_instance_id,
+                sequence: 7,
+            }) if owner_instance_id == "owner-a"
+        ));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     Gap 恢复不得因后台窗口重新下载大段 replay；未选窗口时也不应拉任何正文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     仅 active id 精确匹配时返回 true。
+    #[test]
+    fn gap_replay_only_targets_active_terminal_session() {
+        assert!(should_replay_terminal_session(Some("s1"), "s1"));
+        assert!(!should_replay_terminal_session(Some("s1"), "s2"));
+        assert!(!should_replay_terminal_session(None, "s1"));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -3775,6 +4097,7 @@ mod tests {
                 "device-x".to_string(),
                 RemoteEventBridgeTask {
                     base_url: "http://127.0.0.1:1".to_string(),
+                    terminal_session_filter: None,
                     project_ids: Arc::clone(&project_ids),
                     cancel: CancellationToken::new(),
                     runtime: Arc::new(BridgeRuntimeState::new()),

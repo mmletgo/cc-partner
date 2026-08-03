@@ -863,9 +863,10 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
       }, { policy: { kind: 'mutation' } }),
     replay: (sessionId) =>
       postJson<WorkbenchSessionReplay>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/replay`, { sessionId }, { policy: { kind: 'query' } }),
-    focus: (sessionId) =>
+    focus: (sessionId, streamActive = true) =>
       postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/focus`, {
         sessionId,
+        streamActive,
       }, { policy: { kind: 'mutation' } }),
     focused: (projectId, worktreeId) =>
       postJson<{ sessionId: string | null }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/focused`, {

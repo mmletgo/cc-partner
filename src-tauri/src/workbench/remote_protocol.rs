@@ -345,6 +345,9 @@ pub struct RemoteResizeSessionReq {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteSessionReq {
     pub session_id: String,
+    /// Mobile 本机 gateway 用于 compare-and-clear 正文流；peer session 路由忽略该字段。
+    #[serde(default)]
+    pub stream_active: Option<bool>,
 }
 
 /// 远端终端 replay 请求体。

@@ -572,14 +572,48 @@ pub(crate) async fn focus_workbench_session_for_state(
     if let Some(parsed) = parse_remote_entity_id(&session_id) {
         let base_url = device_base_url(state, &parsed.device_id)?;
         let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        // 本机 active tab 是带宽过滤权威；先切流再同步 tmux focus，focus 失败也不得继续拉旧窗口正文。
+        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        let _ = state
+            .workbench_remote_event_bridges
+            .set_active_terminal_session(
+                &parsed.device_id,
+                inner_session_id.clone(),
+                state.clone(),
+            );
         RemoteWorkbenchClient::new()
             .with_expected_device_id(&parsed.device_id)
             .focus(&base_url, &inner_session_id)
             .await?;
-        ensure_remote_event_bridge_for_device(state, &parsed.device_id, &base_url);
+        // 切换过滤目标后立即发权威屏幕快照；即使新窗口暂时没有增量输出，UI 也能立即恢复内容。
+        let replay = replay_workbench_session_for_state(state, session_id.clone()).await?;
+        crate::workbench::remote_events::emit_remote_terminal_resync(state, replay);
         return Ok(serde_json::json!({ "ok": true, "sessionId": session_id }));
     }
+    let _ = state
+        .workbench_remote_event_bridges
+        .clear_all_active_terminal_sessions(state.clone());
     local_focus_workbench_session(state, session_id).await
+}
+
+/// 释放远端终端窗口的实时正文订阅。
+///
+/// Business Logic（为什么需要这个函数）:
+///     active tab effect cleanup、项目切换和离开 Workbench 后，旧窗口必须立即停止实时正文传输。
+///
+/// Code Logic（这个函数做什么）:
+///     remote id 解析后执行 compare-and-clear；local session 无远程带宽，直接成功。
+pub(crate) fn deactivate_workbench_terminal_stream_for_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(parsed) = parse_remote_entity_id(&session_id) {
+        let inner_session_id = remote_inner_session_id(&parsed.device_id, &session_id)?;
+        let _ = state
+            .workbench_remote_event_bridges
+            .clear_active_terminal_session_if(&parsed.device_id, &inner_session_id, state.clone());
+    }
+    Ok(serde_json::json!({ "ok": true, "sessionId": session_id }))
 }
 
 /// 聚焦工作台终端 window。
@@ -593,15 +627,22 @@ pub(crate) async fn focus_workbench_session_for_state(
 pub async fn focus_workbench_session(
     state: State<'_, AppState>,
     session_id: String,
+    stream_active: Option<bool>,
 ) -> Result<serde_json::Value, AppError> {
     if let Some(v) = proxy_workbench_if_gui(
         state.inner(),
         "sessions.focus",
-        serde_json::json!({ "sessionId": session_id.clone() }),
+        serde_json::json!({
+            "sessionId": session_id.clone(),
+            "streamActive": stream_active.unwrap_or(true),
+        }),
     )
     .await?
     {
         return Ok(v);
+    }
+    if stream_active == Some(false) {
+        return deactivate_workbench_terminal_stream_for_state(state.inner(), session_id);
     }
     focus_workbench_session_for_state(state.inner(), session_id).await
 }

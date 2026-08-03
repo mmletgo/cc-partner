@@ -468,10 +468,11 @@ export const workbenchApi = {
         rows,
       }),
 
-    /** 聚焦 terminal window，并同步切换底层 tmux current window。 */
-    focus: (sessionId: string) =>
+    /** 聚焦 terminal window；streamActive=false 仅 compare-and-clear 该窗口的远程正文流。 */
+    focus: (sessionId: string, streamActive = true) =>
       invoke<{ ok: boolean; sessionId: string }>('focus_workbench_session', {
         sessionId,
+        streamActive,
       }),
 
     /** 读取当前 worktree tmux current window 对应的 terminal session。 */
