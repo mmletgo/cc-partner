@@ -1740,9 +1740,7 @@ fn remote_request_timeout(kind: RemoteRequestTimeoutKind) -> Duration {
         RemoteRequestTimeoutKind::VeryLong => {
             Duration::from_secs(VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS)
         }
-        RemoteRequestTimeoutKind::HealthProbe => {
-            Duration::from_secs(HEALTH_PROBE_TIMEOUT_SECS)
-        }
+        RemoteRequestTimeoutKind::HealthProbe => Duration::from_secs(HEALTH_PROBE_TIMEOUT_SECS),
     }
 }
 

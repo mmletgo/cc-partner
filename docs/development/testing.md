@@ -53,6 +53,7 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | --- | --- | --- |
 | `L0-RUNTIME-SCHEMA-001` | L0 | `web/src/lib/runtimeSchema.test.ts` + `web/src/lib/schemas/*` |
 | `L0-TRANSFER-RECOVERY-001` | L0 | Transfer recovery schema/API/UI matrix + Rust model/repo/sender unit (`phase`/`clientOperationId`/action guards) |
+| `L0-WORKBENCH-BROWSER-GATE-001` | L0 | Workbench preflight `workspace_view != 'browser'` skips `browserTarget` Select action but still keeps normalized URL in `plan.browser_target_url`; Rust `preflight_{skips_browser_when_view_is_terminal_with_url,restores_browser_when_view_is_browser_with_url,skips_browser_for_files_and_automation_views,has_skip_excludes_browser_skipped_for_non_browser_view}` + Web `workspaceRestore.test.ts` `does not invoke restoreBrowserTarget when plan omits browser Select action` |
 | `L2-QUALITY-FAULTS-001` | L2 | `src-tauri/tests/quality_faults.rs` (batch rollback / busy bound / idempotent peer / malformed transfer DTO) — also on Cross-Platform Smoke |
 | `L2-TRANSFER-RECOVERY-001` | L2 | `src-tauri/tests/transfer_recovery_smoke.rs` (idempotent resume/retry claim, resume capability, lost-ACK reconcile without second finalize) |
 | `L2-LAN-TRUST-BOUNDARY-001` | L2 | `src-tauri/tests/lan_trust_boundary_smoke.rs` |

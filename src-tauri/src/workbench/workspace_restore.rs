@@ -66,6 +66,11 @@ pub enum RestoreSkipReason {
     WorktreeNotRequested,
     /// 未指定 browser。
     BrowserNotRequested,
+    /// layout.workspace_view != 'browser'（terminal/files/automation）：
+    /// 即便 browser_target_url 非空，plan 也只 Skip、不下发 action，
+    /// 避免前端 apply 强制把视图切到 browser（2026-08-03 用户反馈根因）。
+    /// 与 BrowserNotRequested 同档「未请求」语义，不计 partial。
+    BrowserSkippedForNonBrowserView,
 }
 
 impl RestoreSkipReason {
@@ -93,6 +98,7 @@ impl RestoreSkipReason {
             Self::SessionNotRequested => "sessionNotRequested",
             Self::WorktreeNotRequested => "worktreeNotRequested",
             Self::BrowserNotRequested => "browserNotRequested",
+            Self::BrowserSkippedForNonBrowserView => "browserSkippedForNonBrowserView",
         }
     }
 }
@@ -532,6 +538,15 @@ pub async fn preflight_workspace_restore(
     });
 
     // 6) browser
+    //
+    // 2026-08-03 用户反馈根因修复：当 layout.workspace_view != 'browser'
+    // （terminal/files/automation）时，即便 browser_target_url 非空也**不**
+    // 下发 browserTarget Select action——只 Skip，理由 BrowserSkippedForNonBrowserView，
+    // 与 BrowserNotRequested 同档「未请求」（不污染 status=Complete）。
+    //
+    // plan.browser_target_url 字段仍保留 normalize 后的 URL，让前端输入框
+    // placeholder 仍可见上次用过的 dev server URL；前端不会 auto-apply 切到 browser，
+    // 只有用户显式切到 browser tab 才走 workflow 自带的 create path。
     match &layout.browser_target_url {
         None => {
             actions.push(WorkspaceRestoreAction {
@@ -544,12 +559,21 @@ pub async fn preflight_workspace_restore(
         Some(url) => match crate::workbench::browser::normalize_browser_target_url(url) {
             Ok(normalized) => {
                 browser_target_url = Some(normalized.clone());
-                actions.push(WorkspaceRestoreAction {
-                    target: "browserTarget".to_string(),
-                    resource_id: Some(normalized),
-                    outcome: WorkspaceRestoreOutcome::Select,
-                    reason: None,
-                });
+                if layout.workspace_view == WorkspaceView::Browser {
+                    actions.push(WorkspaceRestoreAction {
+                        target: "browserTarget".to_string(),
+                        resource_id: Some(normalized),
+                        outcome: WorkspaceRestoreOutcome::Select,
+                        reason: None,
+                    });
+                } else {
+                    actions.push(WorkspaceRestoreAction {
+                        target: "browserTarget".to_string(),
+                        resource_id: Some(normalized),
+                        outcome: WorkspaceRestoreOutcome::Skip,
+                        reason: Some(RestoreSkipReason::BrowserSkippedForNonBrowserView),
+                    });
+                }
             }
             Err(_) => {
                 actions.push(WorkspaceRestoreAction {
@@ -567,6 +591,7 @@ pub async fn preflight_workspace_restore(
             && a.reason != Some(RestoreSkipReason::WorktreeNotRequested)
             && a.reason != Some(RestoreSkipReason::SessionNotRequested)
             && a.reason != Some(RestoreSkipReason::BrowserNotRequested)
+            && a.reason != Some(RestoreSkipReason::BrowserSkippedForNonBrowserView)
     });
     // 仅“未请求”类 skip 仍可算 complete；真正资源缺失为 partial
     let status = if has_skip {
@@ -1774,5 +1799,119 @@ mod tests {
         assert_eq!(fixture.attach_client_count(), 0);
         assert_eq!(fixture.tmux_new_session_count(), 0);
         assert!(!fixture.ctx.state.workbench_sessions.contains("s1"));
+    }
+
+    /// Business Logic（preflight browser gate：为什么需要这个测试）:
+    ///     当 layout.workspace_view != 'browser'（terminal）即便 browser_target_url
+    ///     非空，preflight 也不应发 browserTarget Select action，避免前端 apply 时
+    ///     bridge.restoreBrowserTarget 把视图强制切到 browser（详见 useWorkspaceSafeRestore.ts）。
+    ///     该行为是 2026-08-03 用户反馈「自动进入项目预览界面」根因。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     在 fixture 上设置 browser_target_url = Some('http://127.0.0.1:3000')，
+    ///     workspace_view 保持 Terminal；断言 plan.actions 没有 target='browserTarget'
+    ///     且 outcome=Select 的项；存在一条 Skip action reason=Some(BrowserSkippedForNonBrowserView)；
+    ///     plan.status 仍为 Complete（browser skip 不应拖到 Partial）。
+    #[tokio::test]
+    async fn preflight_skips_browser_when_view_is_terminal_with_url() {
+        let mut fixture = RestoreFixture::base().await;
+        // 清掉 active_session_id 让 preflight 走白名单 SessionNotRequested，
+        // 避免 fixture 未持久化 s1 行产生 SessionMissing skip 把 status 推到 Partial。
+        fixture.layout.active_session_id = None;
+        fixture.layout.browser_target_url = Some("http://127.0.0.1:3000".to_string());
+        let plan = fixture.preflight().await.unwrap();
+        assert!(
+            !plan.actions.iter().any(
+                |a| a.target == "browserTarget" && a.outcome == WorkspaceRestoreOutcome::Select
+            ),
+            "browserTarget Select action must not appear for terminal view"
+        );
+        assert!(
+            plan.actions.iter().any(|a| a.target == "browserTarget"
+                && a.reason == Some(RestoreSkipReason::BrowserSkippedForNonBrowserView)),
+            "expected Skip action with BrowserSkippedForNonBrowserView reason"
+        );
+        assert_eq!(plan.status, RestorePlanStatus::Complete);
+        // URL 仍写入 plan 字段供 UI placeholder 使用，但 action 不再下发。
+        assert!(
+            plan.browser_target_url.is_some(),
+            "plan.browser_target_url should still carry normalized URL for placeholder"
+        );
+    }
+
+    /// Business Logic（回归基线）:
+    ///     当 layout.workspace_view == 'browser' + URL，仍按既有逻辑发 Select action。
+    ///     该用例锁定命名 snapshot 「保存为 browser」路径不被本次改动误伤。
+    #[tokio::test]
+    async fn preflight_restores_browser_when_view_is_browser_with_url() {
+        let mut fixture = RestoreFixture::base().await;
+        fixture.layout.workspace_view = WorkspaceView::Browser;
+        fixture.layout.browser_target_url = Some("http://127.0.0.1:3000".to_string());
+        let plan = fixture.preflight().await.unwrap();
+        assert!(
+            plan.actions.iter().any(
+                |a| a.target == "browserTarget" && a.outcome == WorkspaceRestoreOutcome::Select
+            ),
+            "browser view with URL should still emit Select action"
+        );
+    }
+
+    /// Business Logic（覆盖 Files / Automation 两个非 browser 视图）:
+    ///     WorkspaceView 枚举有四个值：Terminal/Files/Browser/Automation。
+    ///     后三个非 browser 值都不应触发 browser preview 自动恢复。
+    #[tokio::test]
+    async fn preflight_skips_browser_for_files_and_automation_views() {
+        for view in [WorkspaceView::Files, WorkspaceView::Automation] {
+            let mut fixture = RestoreFixture::base().await;
+            // 同上：清掉 session 让 plan 期望 Complete。
+            fixture.layout.active_session_id = None;
+            fixture.layout.workspace_view = view;
+            fixture.layout.browser_target_url = Some("http://127.0.0.1:3000".to_string());
+            let plan = fixture.preflight().await.unwrap();
+            assert!(
+                !plan
+                    .actions
+                    .iter()
+                    .any(|a| a.target == "browserTarget"
+                        && a.outcome == WorkspaceRestoreOutcome::Select),
+                "{view:?} view must not emit browserTarget Select"
+            );
+            assert!(
+                plan.actions.iter().any(|a| a.target == "browserTarget"
+                    && a.reason == Some(RestoreSkipReason::BrowserSkippedForNonBrowserView)),
+                "{view:?} view must emit BrowserSkippedForNonBrowserView"
+            );
+            assert_eq!(
+                plan.status,
+                RestorePlanStatus::Complete,
+                "{view:?} view should keep plan Complete"
+            );
+        }
+    }
+
+    /// Business Logic（has_skip 白名单：为什么需要这个测试）:
+    ///     BrowserSkippedForNonBrowserView 必须与 BrowserNotRequested 同档：
+    ///     「未请求」语义，不污染 status=Partial。否则保存过的 browser URL 会在
+    ///     终端用户每次启动都弹「已恢复 N 项 M 项跳过」提示，污染 UX。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     走 fixture 默认（active_session_id='s1' 未入库 → SessionMissing skip 是
+    ///     partial-triggering skip），所以本测试改用 active_session_id=None 让
+    ///     session 走白名单 skip，断言 browser skip 单独被排除在外。
+    #[tokio::test]
+    async fn has_skip_excludes_browser_skipped_for_non_browser_view() {
+        let mut fixture = RestoreFixture::base().await;
+        fixture.layout.active_session_id = None;
+        fixture.layout.browser_target_url = Some("http://127.0.0.1:3000".to_string());
+        let plan = fixture.preflight().await.unwrap();
+        assert_eq!(plan.status, RestorePlanStatus::Complete);
+        let has_partial_skip = plan.actions.iter().any(|a| {
+            a.outcome == WorkspaceRestoreOutcome::Skip
+                && a.reason != Some(RestoreSkipReason::WorktreeNotRequested)
+                && a.reason != Some(RestoreSkipReason::SessionNotRequested)
+                && a.reason != Some(RestoreSkipReason::BrowserNotRequested)
+                && a.reason != Some(RestoreSkipReason::BrowserSkippedForNonBrowserView)
+        });
+        assert!(!has_partial_skip, "no partial-triggering skip");
     }
 }

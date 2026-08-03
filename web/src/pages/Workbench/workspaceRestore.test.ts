@@ -185,4 +185,61 @@ describe('applyWorkspaceRestorePlan', () => {
     expect(summary).toBeNull();
     expect(bridge.calls).toHaveLength(0);
   });
+
+  /**
+   * 2026-08-03 backend fix：plan 只有当 layout.workspace_view == 'browser'
+   * 时才会包含 target='browserTarget' 且 outcome='select' 的 action。
+   * 若 plan 只发 workspaceView=terminal（典型：用户上次停在 terminal），
+   * apply 阶段绝对不应触发 bridge.restoreBrowserTarget，从而避免把视图
+   * 强制切回 browser。这是 useWorkspaceSafeRestore.ts 的 bridge 注释
+   * 「此处不走 forceTerminalWorkspaceView 强制逻辑」在前端层的护栏。
+   */
+  it('does not invoke restoreBrowserTarget when plan omits browser Select action', async () => {
+    const bridge = bridgeSpy();
+    // 模拟后端 preflight_workspace_restore 的新行为：workspaceView=terminal
+    // 时不发 browserTarget Select；plan.browserTargetUrl 字段仍保留供 UI
+    // placeholder 使用。
+    const terminalOnlyPlan: WorkspaceRestorePlan = {
+      restoreId: 'r2',
+      layoutId: 'L2',
+      layoutRevision: 2,
+      status: 'complete',
+      resolvedProjectId: 'p1',
+      resolvedWorktreeId: 'w1',
+      resolvedSessionId: null,
+      workspaceView: 'terminal',
+      inspectorTab: 'files',
+      browserTargetUrl: 'http://127.0.0.1:3000',
+      actions: [
+        { target: 'project', resourceId: 'p1', outcome: 'select' },
+        { target: 'worktree', resourceId: 'w1', outcome: 'select' },
+        {
+          target: 'workspaceView',
+          resourceId: 'terminal',
+          outcome: 'select',
+        },
+        {
+          target: 'inspectorTab',
+          resourceId: 'files',
+          outcome: 'select',
+        },
+      ],
+    };
+    const summary = await applyWorkspaceRestorePlan({
+      previous: previous(),
+      preflight: async () => terminalOnlyPlan,
+      bridge,
+    });
+    expect(bridge.calls).toEqual([
+      'project:p1',
+      'worktree:w1',
+      'view:terminal',
+      'inspector:files',
+    ]);
+    // plan 含 browserTargetUrl 但不含 browser Select action，
+    // apply 不应调 restoreBrowserTarget（关键护栏）。
+    expect(bridge.calls.some((call) => call.startsWith('browser:'))).toBe(false);
+    expect(summary?.silent).toBe(true);
+    expect(summary?.restoredCount).toBe(4);
+  });
 });
