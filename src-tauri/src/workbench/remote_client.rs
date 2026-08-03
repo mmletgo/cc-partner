@@ -8,7 +8,7 @@
 //!     封装 reqwest::Client，调用 `/api/workbench/...` 远端路由，并把网络、状态码与 JSON
 //!     解析错误统一转换为简洁中文 AppError。
 
-use crate::error::AppError;
+use crate::error::{AppError, AppErrorCategory};
 use crate::net::peer_client::PeerClient;
 use crate::net::peer_error::peer_call_error_to_app_error;
 use crate::net::protocol::CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1;
@@ -53,11 +53,23 @@ use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use std::future::Future;
 use std::time::Duration;
 
 const SHORT_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 15;
 const LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 120;
 const VERY_LONG_REMOTE_WORKBENCH_TIMEOUT_SECS: u64 = 420;
+
+/// 远端 health/capability 探测的有界传输层重试上限（含首次尝试）。
+///
+/// Business Logic（为什么需要这个常量）:
+///     跨设备 Tailscale/无线链路瞬时丢包会让单次 health GET 在 TCP 握手或 send 阶段失败，
+///     但下一次请求通常落在好窗口。health 是只读幂等 GET，安全可重试；mutation 路径仍是
+///     no-transport-retry，本重试通道只覆盖 health/capability 探测，不触碰 post_json。
+const REMOTE_HEALTH_RETRY_MAX_ATTEMPTS: u32 = 3;
+
+/// 重试退避基数；实际退避 = base * 2^(attempt-1)，即 400ms、800ms。
+const REMOTE_HEALTH_RETRY_BASE_DELAY: Duration = Duration::from_millis(400);
 
 /// 远端请求超时类别。
 ///
@@ -724,7 +736,7 @@ impl RemoteWorkbenchClient {
         capability: &str,
     ) -> Result<bool, AppError> {
         let info: PeerProtocolInfo = self
-            .get_json(
+            .get_json_with_retry(
                 endpoint_url(base_url, "/api/health"),
                 RemoteRequestTimeoutKind::Short,
             )
@@ -1529,6 +1541,35 @@ impl RemoteWorkbenchClient {
     }
 
     /// Business Logic（为什么需要这个函数）:
+    ///     `/api/health` 等 health/capability 探测是只读幂等 GET，在跨境/无线链路瞬时抖动下
+    ///     应当退避重试，避免单次传输失败直接变红；mutation 路径不使用本方法，仍单次发送
+    ///     （遵守 P2P 协议的 no-transport-retry）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     把 `get_json` 包一层 `retry_on_transport_error`：业务错误（NotFound/Validation/
+    ///     Conflict/Remote 等）原样上抛，仅 Unavailable/Timeout 退避后重试。`RemoteWorkbenchClient`
+    ///     可 Clone，每次尝试用独立 clone，避免跨 await 持有借用。
+    async fn get_json_with_retry<T>(
+        &self,
+        url: String,
+        timeout_kind: RemoteRequestTimeoutKind,
+    ) -> Result<T, AppError>
+    where
+        T: DeserializeOwned,
+    {
+        retry_on_transport_error(
+            REMOTE_HEALTH_RETRY_MAX_ATTEMPTS,
+            REMOTE_HEALTH_RETRY_BASE_DELAY,
+            || {
+                let client = self.clone();
+                let url = url.clone();
+                async move { client.get_json(url, timeout_kind).await }
+            },
+        )
+        .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
     ///     远端路径类 POST 调用都使用相同的 `{path}` 请求体和响应解析规则。
     ///
     /// Code Logic（这个函数做什么）:
@@ -1614,6 +1655,53 @@ fn map_remote_send_error(error: reqwest::Error) -> AppError {
         // 非超时 send 失败属于传输离线，供 preflight/outbox 按 Unavailable 分支。
         AppError::unavailable(format!("远端 Workbench 请求失败: {error}"))
     }
+}
+
+/// 对幂等操作做有界「传输层错误」重试。
+///
+/// Business Logic（为什么需要这个函数）:
+///     跨境/无线链路瞬时丢包只会让某一次请求失败，紧接着的下一次通常恢复。health/capability
+///     这类只读幂等 GET 在传输层抖动时应退避重试，而不是把瞬时网络错误直接暴露成红色失败；
+///     mutation 路径不使用本函数，遵守 P2P 协议的 no-transport-retry。
+///
+/// Code Logic（这个函数做什么）:
+///     最多调用 `op` `max_attempts` 次：成功立即返回；失败仅当 `classify()` 为 Unavailable/Timeout
+///     （传输层、可重试）才按 base * 2^(attempt-1) 退避后重试，其它业务分类原样上抛；
+///     次数用尽返回最后一次错误。
+async fn retry_on_transport_error<T, F, Fut>(
+    max_attempts: u32,
+    base_delay: Duration,
+    mut op: F,
+) -> Result<T, AppError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, AppError>>,
+{
+    let mut last_err: Option<AppError> = None;
+    for attempt in 1..=max_attempts {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                let retryable = matches!(
+                    err.classify(),
+                    AppErrorCategory::Unavailable | AppErrorCategory::Timeout
+                );
+                if !retryable || attempt == max_attempts {
+                    return Err(err);
+                }
+                let delay = base_delay * 2u32.pow(attempt - 1);
+                tracing::warn!(
+                    attempt,
+                    max_attempts,
+                    delay_ms = delay.as_millis() as u64,
+                    "远端 health 探测传输层失败，退避后重试"
+                );
+                tokio::time::sleep(delay).await;
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| AppError::generic("远端 health 探测重试耗尽")))
 }
 
 impl Default for RemoteWorkbenchClient {
@@ -1774,6 +1862,72 @@ mod tests {
             remote_request_timeout(RemoteRequestTimeoutKind::VeryLong),
             Duration::from_secs(420)
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     health 探测在跨境/无线链路瞬时抖动时应退避重试；前几次传输层失败、之后恢复的链路
+    ///     必须能在上限内成功，而不是把瞬时错误直接暴露成红色失败。
+    #[tokio::test]
+    async fn retry_recovers_when_transport_error_clears_within_attempts() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_closure = attempts.clone();
+        let op = move || {
+            let attempts = attempts_for_closure.clone();
+            async move {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(AppError::timeout("transient transport failure"))
+                } else {
+                    Ok(7u32)
+                }
+            }
+        };
+        let result: Result<u32, AppError> =
+            retry_on_transport_error(3, Duration::from_millis(1), op).await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     业务错误（NotFound/Validation/Conflict 等）不可重试，必须第一次就原样上抛，避免
+    ///     对终态/非幂等错误做无意义重试。
+    #[tokio::test]
+    async fn retry_does_not_retry_non_transport_business_error() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_closure = attempts.clone();
+        let op = move || {
+            let attempts = attempts_for_closure.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<u32, AppError>(AppError::not_found("missing resource"))
+            }
+        };
+        let result: Result<u32, AppError> =
+            retry_on_transport_error(3, Duration::from_millis(1), op).await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     当传输层错误持续不恢复时，重试必须在上限内收敛并返回最后一次错误，而不是无限重试。
+    #[tokio::test]
+    async fn retry_exhausts_attempts_then_returns_last_transport_error() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_for_closure = attempts.clone();
+        let op = move || {
+            let attempts = attempts_for_closure.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<u32, AppError>(AppError::unavailable("still down"))
+            }
+        };
+        let result: Result<u32, AppError> =
+            retry_on_transport_error(3, Duration::from_millis(1), op).await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
 
     /// Business Logic（为什么需要这个测试）:
