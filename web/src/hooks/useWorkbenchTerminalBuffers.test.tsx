@@ -178,7 +178,7 @@ describe('WorkbenchTerminalBuffersProvider authority change (R9 M1)', () => {
     const authorityB = 'localremote-B';
 
     // 首次 launch baseline：A 高 seq
-    listMock.mockResolvedValue([{ id: sessionId }]);
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
     const firstReplay = deferred<ReplayDto>();
     const secondReplay = deferred<ReplayDto>();
     let replayCalls = 0;
@@ -321,6 +321,30 @@ describe('WorkbenchTerminalBuffersProvider first remote bind (R10 M1)', () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
+  test('startup baseline skips disconnected session rows that have no live runtime', async () => {
+    listMock.mockResolvedValue([
+      { id: 'disconnected-s1', status: 'disconnected' },
+      { id: 'running-s1', status: 'running' },
+    ]);
+    replayMock.mockResolvedValue({
+      sessionId: 'running-s1',
+      buffer: 'RUNNING',
+      truncated: false,
+      lastSeq: 1,
+      ownerInstanceId: 'owner-running',
+    });
+
+    const storeRef: {
+      current: ReturnType<typeof useWorkbenchTerminalBufferStore> | null;
+    } = { current: null };
+    renderProvider(storeRef);
+
+    await waitFor(() => {
+      expect(replayMock).toHaveBeenCalledWith('running-s1');
+    });
+    expect(replayMock).not.toHaveBeenCalledWith('disconnected-s1');
+  });
+
   test('startup list local-only then first remote live forces replay and settles history', async () => {
     const localSessionId = 'local-s1';
     const remoteSessionId = 'remote:peer:s-remote';
@@ -329,7 +353,7 @@ describe('WorkbenchTerminalBuffersProvider first remote bind (R10 M1)', () => {
     const remoteAuthority = 'localremote-R1';
 
     // 真实生产合同：启动 list 无 projectId → 仅本机会话
-    listMock.mockResolvedValue([{ id: localSessionId }]);
+    listMock.mockResolvedValue([{ id: localSessionId, status: 'running' }]);
 
     const localBaseline = deferred<ReplayDto>();
     const remoteReplay = deferred<ReplayDto>();
@@ -441,7 +465,7 @@ describe('WorkbenchTerminalBuffersProvider recoverable replay (R10 M2)', () => {
     const authorityA = 'localremote-A';
     const authorityB = 'localremote-B';
 
-    listMock.mockResolvedValue([{ id: sessionId }]);
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
 
     let replayCalls = 0;
     const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
@@ -581,7 +605,7 @@ describe('WorkbenchTerminalBuffersProvider permanent replay errors (R11 M1)', ()
     const authorityA = 'localremote-A';
     const authorityB = 'localremote-B';
 
-    listMock.mockResolvedValue([{ id: sessionId }]);
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
 
     let replayCalls = 0;
     const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
@@ -675,7 +699,7 @@ describe('WorkbenchTerminalBuffersProvider permanent replay errors (R11 M1)', ()
     const authorityA = 'localremote-A';
     const authorityB = 'localremote-B';
 
-    listMock.mockResolvedValue([{ id: sessionId }]);
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
 
     let replayCalls = 0;
     const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
@@ -767,7 +791,7 @@ describe('WorkbenchTerminalBuffersProvider permanent replay errors (R11 M1)', ()
     const authorityA = 'localremote-A';
     const authorityB = 'localremote-B';
 
-    listMock.mockResolvedValue([{ id: sessionId }]);
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
 
     let replayCalls = 0;
     const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
@@ -901,7 +925,7 @@ describe('WorkbenchTerminalBuffersProvider startup baseline (R12 M1/M3)', () => 
   test('startup recoverable failure then success settles buffer', async () => {
     const sessionId = 'local-startup-s1';
     const authority = 'owner-local-1';
-    listMock.mockResolvedValue([{ id: sessionId }]);
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
 
     let replayCalls = 0;
     const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
@@ -962,7 +986,7 @@ describe('WorkbenchTerminalBuffersProvider startup baseline (R12 M1/M3)', () => 
 
   test('startup permanent validation sets observable historySyncFailure', async () => {
     const sessionId = 'local-startup-perm';
-    listMock.mockResolvedValue([{ id: sessionId }]);
+    listMock.mockResolvedValue([{ id: sessionId, status: 'running' }]);
 
     let replayCalls = 0;
     const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
@@ -1038,7 +1062,7 @@ describe('WorkbenchTerminalBuffersProvider startup baseline (R12 M1/M3)', () => 
     const authority = 'owner-live-first';
 
     // list 故意 defer：让 live-first authority replay 先起飞。
-    const listDeferred = deferred<Array<{ id: string }>>();
+    const listDeferred = deferred<Array<{ id: string; status: string }>>();
     listMock.mockImplementation(() => listDeferred.promise);
 
     const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
@@ -1075,7 +1099,7 @@ describe('WorkbenchTerminalBuffersProvider startup baseline (R12 M1/M3)', () => 
 
     // list 完成：beginStartupBaselineReplay 应保留 inFlight，不得再起第二个 flight。
     await act(async () => {
-      listDeferred.resolve([{ id: sessionId }]);
+      listDeferred.resolve([{ id: sessionId, status: 'running' }]);
       await listDeferred.promise;
     });
 
@@ -1172,7 +1196,7 @@ describe('WorkbenchTerminalBuffersProvider startup list recovery (R13 M1)', () =
           normalizeError({ error: 'sidecar unavailable', code: 'unavailable' }),
         );
       }
-      return Promise.resolve([{ id: sessionId }]);
+      return Promise.resolve([{ id: sessionId, status: 'running' }]);
     });
 
     const pendingReplays: Array<ReturnType<typeof deferred<ReplayDto>>> = [];
@@ -1350,7 +1374,7 @@ describe('WorkbenchTerminalBuffersProvider startup list recovery (R13 M1)', () =
     });
 
     // 手动重试：list 恢复后 schedule replay。
-    const retryList = deferred<Array<{ id: string }>>();
+    const retryList = deferred<Array<{ id: string; status: string }>>();
     listMock.mockImplementation(() => {
       listCalls += 1;
       return retryList.promise;
@@ -1359,7 +1383,7 @@ describe('WorkbenchTerminalBuffersProvider startup list recovery (R13 M1)', () =
       (await findByTestId('startup-baseline-retry')).click();
     });
     await act(async () => {
-      retryList.resolve([{ id: sessionId }]);
+      retryList.resolve([{ id: sessionId, status: 'running' }]);
       await retryList.promise;
     });
 

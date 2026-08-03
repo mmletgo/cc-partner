@@ -923,6 +923,9 @@ export function WorkbenchTerminalBuffersProvider({
           if (cancelled) return;
           setStartupBaselineFailure(null);
           for (const session of sessions) {
+            // 持久化的 disconnected tab 没有可 replay 的 PTY/tmux runtime；保留 UI 历史行，
+            // 但不能把预期的 not_found 投影成会话同步故障。
+            if (session.status !== 'running') continue;
             const current = ensureCutoverState(session.id);
             const { state, requestEpoch } = beginStartupBaselineReplay(current);
             cutoverBySessionRef.current.set(session.id, state);

@@ -256,12 +256,12 @@ export function MobileWorkbench(): ReactElement {
   useWorkbenchHttpEvents({
     store: terminalBufferStore,
     enabled: true,
-    terminalSessionId: activeSession?.id ?? null,
+    terminalSessionId: activeSession?.status === 'running' ? activeSession.id : null,
     onTerminalStatus: handleTerminalStatusEvent,
     onAgentRuntime: handleAgentRuntimeEvent,
   });
   useEffect(() => {
-    const sessionId = activeSession?.id;
+    const sessionId = activeSession?.status === 'running' ? activeSession.id : null;
     if (!sessionId) return undefined;
     return () => {
       // compare-and-clear：切换窗口或离开 Mobile Workbench 后停止旧远端窗口正文流。
@@ -269,7 +269,7 @@ export function MobileWorkbench(): ReactElement {
         // cleanup best-effort；下一次 focus 会以当前窗口重新建立过滤目标。
       });
     };
-  }, [activeSession?.id]);
+  }, [activeSession?.id, activeSession?.status]);
   const activeProjectRef = useRef<WorkbenchProject | null>(null);
   const activeWorktreeRef = useRef<WorkbenchWorktree | null>(null);
   const worktreeOperationBusyRef = useRef<boolean>(false);

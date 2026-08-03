@@ -207,8 +207,10 @@ export function MobileTerminalPanel({
   }, [buffer]);
 
   useEffect(() => {
-    inputEnabledRef.current = Boolean(sessionId && !busy);
-  }, [busy, sessionId]);
+    inputEnabledRef.current = Boolean(
+      sessionId && visibleSession?.status === 'running' && !busy,
+    );
+  }, [busy, sessionId, visibleSession?.status]);
 
   useEffect(() => {
     if (!project) {
@@ -287,6 +289,7 @@ export function MobileTerminalPanel({
    */
   const focusSessionAndZoomById = useCallback(
     async (session: WorkbenchSession): Promise<void> => {
+      if (session.status !== 'running') return;
       await focusSessionById(session.id);
       await ensurePaneZoomedById(session);
     },
@@ -306,7 +309,7 @@ export function MobileTerminalPanel({
       }
       return;
     }
-    if (!visibleSession) return;
+    if (!visibleSession || visibleSession.status !== 'running') return;
     queueMicrotask(() => {
       void focusSessionAndZoomById(visibleSession);
     });
@@ -314,7 +317,7 @@ export function MobileTerminalPanel({
 
   useEffect(() => {
     const viewport = viewportRef.current;
-    if (!viewport || !sessionId) return undefined;
+    if (!viewport || !sessionId || visibleSession?.status !== 'running') return undefined;
 
     const terminal = new Terminal(workbenchTerminalOptions());
     const fit = new FitAddon();
@@ -500,7 +503,7 @@ export function MobileTerminalPanel({
       replayGateRef.current = false;
       replayReadyRef.current = false;
     };
-  }, [sessionId, t]);
+  }, [sessionId, t, visibleSession?.status]);
 
   useEffect(() => {
     const applyTheme = (): void => {

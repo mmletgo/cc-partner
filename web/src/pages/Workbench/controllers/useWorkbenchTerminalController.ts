@@ -610,7 +610,8 @@ export function useWorkbenchTerminalController(
   // 成功确认后清本地 focus pending，允许轮询恢复外部焦点同步；失败时标记离线并展示 sessionError，
   // pending 保留以持续保护本地用户选择（后端 tmux 仍可能是旧 window）。
   useEffect(() => {
-    if (!activeSessionId) return undefined;
+    // disconnected/exited 只是持久化历史 tab，不存在可 focus/replay 的运行时。
+    if (!activeSessionId || activeSession?.status !== 'running') return undefined;
     const focusedSessionId = activeSessionId;
     let cancelled = false;
     void workbenchApi.sessions
@@ -635,7 +636,7 @@ export function useWorkbenchTerminalController(
         // cleanup 是带宽收敛的 best-effort；后端 idle/下一次 focus 仍会纠正目标。
       });
     };
-  }, [activeSessionId, displayErrorMessage, markRequestFailure, t]);
+  }, [activeSession?.status, activeSessionId, displayErrorMessage, markRequestFailure, t]);
 
   // Business Logic: 每 TMUX_FOCUS_SYNC_INTERVAL_MS 轮询后端 get_focused_workbench_session，
   // 把外部（如另一台设备/移动端）的焦点变化同步到当前 worktree 的 active session。

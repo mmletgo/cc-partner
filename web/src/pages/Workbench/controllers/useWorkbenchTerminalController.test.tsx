@@ -426,6 +426,40 @@ describe('useWorkbenchTerminalController — load / focus', () => {
     expect(fakeSessionsApi.focus).toHaveBeenCalledWith('s2', false);
   });
 
+  test('disconnected history tab stays visible without focusing a missing runtime session', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const disconnected = buildSession({
+      id: 'disconnected-s1',
+      worktreeId: worktree.id,
+      status: 'disconnected',
+    });
+    fakeSessionsApi.list.mockResolvedValue([disconnected]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    expect(result.current.activeSessionId).toBe(disconnected.id);
+    expect(fakeSessionsApi.focus).not.toHaveBeenCalled();
+    expect(result.current.sessionError).toBeNull();
+  });
+
   test('focusSession keeps user selection when terminal-status event arrives after grace and backend tmux still on previous window', async () => {
     // Regression：用户点击第二个 terminal window 后，若 500ms grace 期过后到达一个
     // terminal-status 事件（使 sessions 生成新数组引用），轮询 effect 重新 setup 并立即查
