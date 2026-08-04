@@ -26,6 +26,37 @@ export interface MobileTerminalInputStreamOptions {
 }
 
 /**
+ * Business Logic（为什么需要这个函数）:
+ *   手机通常通过局域网明文 HTTP 打开 `/mobile`，该环境在部分浏览器中没有仅限安全上下文的
+ *   `crypto.randomUUID()`；终端输入标识只要求进程内低碰撞，不能因此阻断 WebSocket hello。
+ *
+ * Code Logic（这个函数做什么）:
+ *   优先使用 randomUUID；不可用时尝试 getRandomValues，最后用时间与随机数组合生成非安全标识。
+ */
+export function createMobileTerminalInputId(): string {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    try {
+      return cryptoApi.randomUUID();
+    } catch {
+      // 非安全上下文中的浏览器实现可能暴露方法但调用时拒绝，继续使用兼容路径。
+    }
+  }
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    try {
+      const words = new Uint32Array(4);
+      cryptoApi.getRandomValues(words);
+      return Array.from(words, (word) => word.toString(16).padStart(8, '0')).join('-');
+    } catch {
+      // 极旧浏览器或受限 WebView 可能连 getRandomValues 也不可用。
+    }
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+}
+
+/**
  * 移动端终端输入常驻连接。
  *
  * Business Logic（为什么需要这个类）:
@@ -44,7 +75,7 @@ export class MobileTerminalInputStream {
   public constructor(options: MobileTerminalInputStreamOptions) {
     const url = new URL('/api/mobile/workbench/terminal-input-stream', window.location.href);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.createId = options.createId ?? (() => crypto.randomUUID());
+    this.createId = options.createId ?? createMobileTerminalInputId;
     const createSocket = options.createWebSocket ?? ((socketUrl, protocols) => new WebSocket(socketUrl, protocols));
     this.socket = createSocket(url.toString(), TERMINAL_INPUT_SUBPROTOCOL);
     const publish = (next: MobileTerminalInputStreamState): void => {
@@ -53,7 +84,11 @@ export class MobileTerminalInputStream {
     };
     publish(this.state);
     this.socket.addEventListener('open', () => {
-      this.socket.send(JSON.stringify({ type: 'hello', clientId: `mobile-${this.createId()}` }));
+      try {
+        this.socket.send(JSON.stringify({ type: 'hello', clientId: `mobile-${this.createId()}` }));
+      } catch {
+        publish({ status: 'blocked', message: '终端输入连接初始化失败' });
+      }
     });
     this.socket.addEventListener('message', (event: MessageEvent<string>) => {
       this.handleMessage(event.data, publish);

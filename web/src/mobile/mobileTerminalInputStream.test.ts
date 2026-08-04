@@ -35,6 +35,26 @@ class FakeWebSocket extends EventTarget {
 }
 
 describe('MobileTerminalInputStream', () => {
+  test('LAN HTTP 环境缺少 crypto.randomUUID 时仍发送 hello', () => {
+    const socket = new FakeWebSocket();
+    const states: MobileTerminalInputStreamState[] = [];
+    vi.stubGlobal('crypto', {});
+    try {
+      new MobileTerminalInputStream({
+        createWebSocket: () => socket as unknown as WebSocket,
+        onStateChange: (state) => states.push(state),
+      });
+
+      socket.open();
+
+      expect(socket.sent).toHaveLength(1);
+      expect(JSON.parse(socket.sent[0])).toMatchObject({ type: 'hello' });
+      expect(JSON.parse(socket.sent[0]).clientId).toMatch(/^mobile-/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   test('ready 后连续发送不等待 ACK，并维持 per-session seq', () => {
     const socket = new FakeWebSocket();
     const states: MobileTerminalInputStreamState[] = [];
