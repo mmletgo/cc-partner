@@ -28,6 +28,7 @@ export interface TerminalInputPumpOptions {
 
 export interface TerminalInputPump {
   enqueue: (sessionId: string, data: string) => void;
+  blockSession: (sessionId: string) => void;
   disposeSession: (sessionId: string) => void;
   /**
    * Business Logic（为什么需要这个函数）:
@@ -198,6 +199,28 @@ export function createTerminalInputPump(options: TerminalInputPumpOptions): Term
       lanes.set(sessionId, lane);
       lane.pending += data;
       if (!lane.running) void drain(sessionId, lane, lane.generation);
+    },
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   Rust 常驻 WS 在 invoke 已返回后仍可能异步断开；对应 session 必须立即 stop-on-failure。
+     *
+     * Code Logic（这个函数做什么）:
+     *   创建或更新 lane，抬 generation、丢弃 pending 并置 blocked；不重放 in-flight/unknown 字节。
+     */
+    blockSession(sessionId) {
+      if (disposed) return;
+      const lane = lanes.get(sessionId) ?? {
+        generation: 0,
+        pending: '',
+        running: false,
+        blocked: false,
+        idleWaiters: new Set<() => void>(),
+      };
+      lane.generation += 1;
+      lane.pending = '';
+      lane.blocked = true;
+      lanes.set(sessionId, lane);
+      forceSettleIdle(lane);
     },
     /**
      * Business Logic（为什么需要这个函数）:

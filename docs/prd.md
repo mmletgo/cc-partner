@@ -345,6 +345,8 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 终端低延迟（P1，同版本桌面）：正常态由 GUI 经 loopback control **NDJSON stream** 消费真实 PTY 输出（**stream-first**），禁止以固定 250ms catch-up 轮询作为正常路径；catch-up / 慢轮询仅用于 mixed-version stream unsupported 与显式恢复。每 session 最多 1 个 in-flight `writeInput`，失败/不确定批次**永不自动重放**同批输入；live xterm 以 session 外部 store 的 live delta 直写，禁止 live 路径 full-buffer KMP / React effect 背压。后端 replay 有界 120k Unicode scalar 增量 ring，前端 buffer 200k UTF-16 摊销裁剪。Gap/owner change 走显式 resync（含 remote session watch retain-before-release）。**L3 release GUI 性能**（本机 key-to-visible p95≤50ms / p99≤100ms，owner publish→GUI listener p95≤20ms，1000 混合输入零丢失/重复/重排）截至分支 `sdd/p1-workbench-terminal-low-latency` @ `a25f8caa` **尚未在真实 release GUI 上测量**，交付状态为 **`L3 GUI latency: NOT VERIFIED`**；自动化 L0–L2 与 P1 Superpowers 双审通过不得代替 L3 实测。
 - 当前仍不做 Git diff 面板、PR 创建、交互式冲突解决、会话日志持久化归档和批量同步副本；运行期 replay buffer 仅用于移动端首屏和终端重挂载恢复最近输出，不等同于持久会话日志
 
+- 终端输入传输（覆盖上文中“输入走 sessions HTTP routes”的旧描述）：桌面 xterm 与 mobile xterm 的交互输入固定走 `cc-partner.terminal-input.v1` 常驻 WebSocket；桌面 invoke 只等待 GUI Rust 有界队列接纳，mobile 使用同源 `/api/mobile/workbench/terminal-input-stream`，本机到远端 owning device 使用 `/api/workbench/terminal-input-stream`。ACK 仅在 PTY write+flush 后返回且不阻塞下一帧发送；断线时已发送未 ACK 输入结果未知、不得自动重放；两个 xterm 入口不得回退 `/sessions/write`。终端输出继续使用既有 NDJSON/replay/gap 通道。
+
 ### 2.16 Orchestrator 自动编排器
 
 **描述**：在 Workbench 项目之上提供自动编排器，用内部任务队列把需求拆成可排队、可运行、可验证和可交付的项目级任务。

@@ -44,6 +44,10 @@ import {
   type MobileSessionRuntimeState,
 } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
+import {
+  MobileTerminalInputStream,
+  type MobileTerminalInputStreamState,
+} from '../mobileTerminalInputStream';
 
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
@@ -158,6 +162,9 @@ export function MobileTerminalPanel({
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
+  const [inputStreamState, setInputStreamState] = useState<MobileTerminalInputStreamState>({
+    status: 'connecting',
+  });
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -171,6 +178,7 @@ export function MobileTerminalPanel({
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | null>(null);
   const lastFocusedSessionIdRef = useRef<string | null>(null);
   const touchScrollStateRef = useRef<MobileTerminalTouchScrollState | null>(null);
+  const inputStreamRef = useRef<MobileTerminalInputStream | null>(null);
 
   const scopedSessions = useMemo(
     () =>
@@ -208,9 +216,26 @@ export function MobileTerminalPanel({
 
   useEffect(() => {
     inputEnabledRef.current = Boolean(
-      sessionId && visibleSession?.status === 'running' && !busy,
+      sessionId &&
+        visibleSession?.status === 'running' &&
+        !busy &&
+        inputStreamState.status === 'ready',
     );
-  }, [busy, sessionId, visibleSession?.status]);
+  }, [busy, inputStreamState.status, sessionId, visibleSession?.status]);
+
+  useEffect(() => {
+    const stream = new MobileTerminalInputStream({
+      onStateChange: (state) => {
+        setInputStreamState(state);
+        if (state.status === 'blocked') setPanelError(state.message);
+      },
+    });
+    inputStreamRef.current = stream;
+    return () => {
+      inputStreamRef.current = null;
+      stream.close();
+    };
+  }, []);
 
   useEffect(() => {
     if (!project) {
@@ -392,7 +417,9 @@ export function MobileTerminalPanel({
       ) {
         return;
       }
-      void httpWorkbenchTransport.sessions.writeInput(sessionId, data).catch((reason) => {
+      try {
+        inputStreamRef.current?.enqueue(sessionId, data);
+      } catch (reason) {
         if (disposed) return;
         setPanelError(
           `${t('workbench:mobile.terminalPanel.errors.write')}: ${getErrorMessage(
@@ -400,7 +427,7 @@ export function MobileTerminalPanel({
             t('workbench:errors.sessions'),
           )}`,
         );
-      });
+      }
     });
 
     /**

@@ -34,5 +34,6 @@ pub mod remote_protocol;
 pub mod sessions;
 pub mod sqlite_preview;
 pub mod terminal_authority;
+pub mod terminal_input;
 pub mod workspace_layout;
 pub mod workspace_restore;

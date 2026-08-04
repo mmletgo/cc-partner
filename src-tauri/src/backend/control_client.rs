@@ -2562,6 +2562,7 @@ type ControlClientLoader = dyn Fn() -> Result<BackendControlClient, AppError> + 
 pub struct BackendControlClientRuntime {
     cached: std::sync::Mutex<Option<BackendControlClient>>,
     loader: Arc<ControlClientLoader>,
+    terminal_input: crate::backend::terminal_input_client::TerminalInputClientRuntime,
 }
 
 impl BackendControlClientRuntime {
@@ -2589,7 +2590,42 @@ impl BackendControlClientRuntime {
         Self {
             cached: std::sync::Mutex::new(None),
             loader: Arc::new(loader),
+            terminal_input:
+                crate::backend::terminal_input_client::TerminalInputClientRuntime::default(),
         }
+    }
+
+    /// 将桌面终端输入接纳到常驻 control WS 的本机有界队列。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     xterm 输入不能走通用 control HTTP mutation；invoke 只确认本机队列接纳。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取缓存 descriptor，构造不含 token 的 URL 和内部 descriptor key，再委托输入 actor。
+    pub fn enqueue_terminal_input(
+        &self,
+        ui: Arc<dyn crate::backend::ui::BackendUi>,
+        session_id: String,
+        data: String,
+    ) -> Result<(), AppError> {
+        let client = self.client()?;
+        let descriptor_key = format!(
+            "{}:{}",
+            client.port,
+            client.owner_instance_id.as_deref().unwrap_or_default()
+        );
+        let ws_url = format!(
+            "ws://127.0.0.1:{}/api/backend/control/workbench/terminal-input-stream",
+            client.port
+        );
+        self.terminal_input.enqueue(
+            ui,
+            descriptor_key,
+            ws_url,
+            client.control_token.clone(),
+            session_id,
+            data,
+        )
     }
 
     /// 获取可复用的 control client（缓存未命中时加载一次）。

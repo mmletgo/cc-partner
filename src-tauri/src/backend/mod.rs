@@ -20,4 +20,5 @@ pub mod logging;
 pub mod runtime;
 pub mod runtime_metrics;
 pub mod supervisor;
+pub mod terminal_input_client;
 pub mod ui;

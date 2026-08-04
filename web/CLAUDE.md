@@ -2,6 +2,8 @@
 
 > 根层概览、组件清单、token/复用规范见仓库根 `AGENTS.md`。后端协议/端口/CLI 见 `src-tauri/CLAUDE.md`。跨平台 CI / smoke 矩阵见 [`docs/development/testing.md`](../docs/development/testing.md)。
 
+交互式终端输入固定走 `cc-partner.terminal-input.v1` 常驻 WebSocket：桌面 invoke 只等待 GUI Rust 有界队列接纳，mobile 连接同源 `/api/mobile/workbench/terminal-input-stream`，peer 数据阶段不得逐帧 health/HTTP。ACK 仅确认 PTY write+flush，不作为下一帧发送闸门；断线未 ACK 输入不得自动重放，也不得回退 `/sessions/write`。输出继续使用 NDJSON/replay/gap。
+
 ## 概述
 
 基于 React + TypeScript + Vite 的前端界面，宿主为 **Tauri 2**，桌面主界面通过 `invoke()` IPC 调用 Rust 后端命令（`src-tauri/`）。`/mobile` 普通浏览器 SPA 通过同源 HTTP 调用后端移动端/Workbench routes。

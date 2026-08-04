@@ -477,6 +477,29 @@ pub async fn write_workbench_session_input(
     write_workbench_session_input_for_state(state.inner(), session_id, data).await
 }
 
+/// 将桌面交互式终端输入接纳到常驻输入流。
+///
+/// Business Logic（为什么需要这个命令）:
+///     xterm 的按键路径只能等待 GUI 本机有界队列，不能等待 loopback HTTP、远端 RTT 或 PTY ACK。
+///
+/// Code Logic（这个命令做什么）:
+///     GuiClient 委托 BackendControlClientRuntime 的 WS actor；owner 测试/特殊宿主直接写本地 PTY。
+#[tauri::command]
+pub async fn enqueue_workbench_terminal_input(
+    state: State<'_, AppState>,
+    session_id: String,
+    data: String,
+) -> Result<serde_json::Value, AppError> {
+    if state.runtime_role == crate::backend::authority::RuntimeRole::GuiClient {
+        state
+            .backend_control_client_runtime
+            .enqueue_terminal_input(state.ui.clone(), session_id.clone(), data)?;
+        return Ok(serde_json::json!({ "accepted": true, "sessionId": session_id }));
+    }
+    local_write_workbench_session_input(state.inner(), session_id.clone(), data).await?;
+    Ok(serde_json::json!({ "accepted": true, "sessionId": session_id }))
+}
+
 /// 调整工作台终端尺寸。
 ///
 /// Business Logic（为什么需要这个函数）:

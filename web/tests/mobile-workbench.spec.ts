@@ -188,10 +188,6 @@ function registerMobileRoutes(
       lastSeq: 1,
     },
   });
-  harness.route('POST', '/api/mobile/workbench/sessions/write', {
-    kind: 'resolve',
-    value: { ok: true, sessionId: session.id },
-  });
   harness.route('POST', '/api/mobile/workbench/sessions/focus', {
     kind: 'resolve',
     value: { ok: true, sessionId: session.id },
@@ -362,7 +358,7 @@ function invokeCallsFor(harness: PlaywrightBackendHarness, command: string): num
 test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
-  test('nav drawer, terminal replay gate, HTTP write, offline stale', async ({
+  test('nav drawer, terminal replay gate, WebSocket input, offline stale', async ({
     page,
     backendHarness,
   }) => {
@@ -429,7 +425,12 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
     await expect(page.getByText('mobile-shell').first()).toBeVisible({ timeout: 15_000 });
     // replay 仍 deferred：不应有 write
     await page.waitForTimeout(400);
-    expect(fetchCallsFor(backendHarness, '/sessions/write')).toHaveLength(0);
+    expect(
+      await page.evaluate(() =>
+        ((window as unknown as { __ccPartnerTerminalInputFrames?: unknown[] })
+          .__ccPartnerTerminalInputFrames ?? []).length,
+      ),
+    ).toBe(0);
 
     backendHarness.resolveDeferred('mobile-replay', {
       sessionId: session.id,
@@ -456,9 +457,13 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
       await page.keyboard.press('Enter');
     }
     await page.waitForTimeout(500);
-    const writeAfterReady = fetchCallsFor(backendHarness, '/sessions/write');
-    // 不重复输入：同一轮键盘输入不应产生 >1 次 write 风暴（允许 0 若 gate/焦点未就绪）
-    expect(writeAfterReady.length).toBeLessThanOrEqual(2);
+    const inputFrames = await page.evaluate(() =>
+      (window as unknown as { __ccPartnerTerminalInputFrames?: Array<Record<string, unknown>> })
+        .__ccPartnerTerminalInputFrames ?? [],
+    );
+    // replay ready 前无输入；ready 后 xterm 可产生若干 onData frame，但每帧均经常驻 WS 且 seq 递增。
+    expect(inputFrames.length).toBeLessThanOrEqual(16);
+    expect(inputFrames.every((frame) => frame.type === 'input')).toBe(true);
 
     // Files 面板 + HTTP save
     await openNav.click();

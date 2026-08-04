@@ -2,6 +2,8 @@
 
 > 根层概览与验证入口见仓库根 `AGENTS.md`。前端命令/controllers/Attention 见 `web/CLAUDE.md`。操作者向 CLI / 端口 / 日志 / doctor 见 [`docs/development/backend-operations.md`](../docs/development/backend-operations.md)；CI/smoke 矩阵见 [`docs/development/testing.md`](../docs/development/testing.md)。
 
+Workbench 交互式终端输入使用能力 `workbench.terminal-input-stream.v1` 与子协议 `cc-partner.terminal-input.v1`：control/mobile/peer 三条 WebSocket 常驻链路共享帧语义，peer 只在建链时做一次 capability/device 检查；ACK 在 PTY write+flush 后返回但不阻塞下一帧，断线未确认输入不重放，桌面/mobile xterm 不得回退逐键 HTTP。输出 NDJSON 通道保持不变。
+
 ## 概述
 
 cc-partner 的桌面宿主与全部后端逻辑，从 PyQt6 + Python 迁移而来。Tauri 2 主进程用 Rust 实现配置/存储/网络/同步/传输/截图/权限/更新等全部能力；前端复用 `web/` 的 React。GUI 通过 sidecar 复用 `cc-partner-backend`；headless CLI 是远端设备一等公民。

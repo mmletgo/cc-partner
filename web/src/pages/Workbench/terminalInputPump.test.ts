@@ -12,6 +12,30 @@ function deferred(): { promise: Promise<void>; resolve: () => void; reject: (err
 }
 
 describe("terminalInputPump", () => {
+  test("async block discards pending and recover never replays it", async () => {
+    const first = deferred();
+    const writes: string[] = [];
+    const pump = createTerminalInputPump({
+      write: async (_sessionId, data) => {
+        writes.push(data);
+        if (writes.length === 1) await first.promise;
+      },
+    });
+
+    pump.enqueue("s1", "a");
+    pump.enqueue("s1", "b");
+    pump.blockSession("s1");
+    expect(pump.isBlocked("s1")).toBe(true);
+    first.resolve();
+    await pump.whenIdle("s1");
+    expect(writes).toEqual(["a"]);
+
+    pump.recoverSession("s1");
+    pump.enqueue("s1", "c");
+    await pump.whenIdle("s1");
+    expect(writes).toEqual(["a", "c"]);
+  });
+
   test("sends the leading batch immediately and coalesces only while in flight", async () => {
     const first = deferred();
     const writes: Array<[string, string]> = [];

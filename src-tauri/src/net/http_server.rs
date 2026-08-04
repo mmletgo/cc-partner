@@ -598,6 +598,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
                 ),
             ),
         )
+        .route(
+            "/api/backend/control/workbench/terminal-input-stream",
+            get(crate::backend::control_api::control_terminal_input_stream),
+        )
         // N1 fix: Cloud Sync write-path owner control（trigger/test/claude-md-push）
         // 字面路径必须写在本文件，供 check-p2p-route-inventory 提取。
         .route(
@@ -1021,6 +1025,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::write_workbench_session_input),
         )
         .route(
+            "/api/workbench/terminal-input-stream",
+            get(workbench::terminal_input_stream),
+        )
+        .route(
             "/api/workbench/sessions/resize",
             post(workbench::resize_workbench_session),
         )
@@ -1187,8 +1195,8 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             post(workbench::mobile_replay_workbench_session),
         )
         .route(
-            "/api/mobile/workbench/sessions/write",
-            post(workbench::mobile_write_workbench_session_input),
+            "/api/mobile/workbench/terminal-input-stream",
+            get(workbench::mobile_terminal_input_stream),
         )
         .route(
             "/api/mobile/workbench/sessions/resize",

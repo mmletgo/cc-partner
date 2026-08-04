@@ -638,7 +638,7 @@ test.describe('E2E-WORKBENCH-002 terminal live path release-like journey', () =>
       kind: 'resolve',
       value: project,
     });
-    backendHarness.command('write_workbench_session_input', {
+    backendHarness.command('enqueue_workbench_terminal_input', {
       kind: 'defer',
       key: 'write-live-1',
     });
@@ -681,7 +681,7 @@ test.describe('E2E-WORKBENCH-002 terminal live path release-like journey', () =>
       if (!invoke) {
         throw new Error('missing __TAURI_INTERNALS__.invoke');
       }
-      void invoke('write_workbench_session_input', {
+      void invoke('enqueue_workbench_terminal_input', {
         sessionId: 'sLive',
         data: 'abc' + String.fromCharCode(0x7f),
       });
@@ -695,19 +695,19 @@ test.describe('E2E-WORKBENCH-002 terminal live path release-like journey', () =>
             .calls()
             .filter(
               (call) =>
-                call.type === 'invoke' && call.command === 'write_workbench_session_input',
+                call.type === 'invoke' && call.command === 'enqueue_workbench_terminal_input',
             ).length,
         { timeout: 10_000 },
       )
       .toBeGreaterThan(0);
 
     backendHarness.resolveDeferred('write-live-1', {
-      ok: true,
+      accepted: true,
       sessionId: session.id,
     });
-    backendHarness.command('write_workbench_session_input', {
+    backendHarness.command('enqueue_workbench_terminal_input', {
       kind: 'resolve',
-      value: { ok: true, sessionId: session.id },
+      value: { accepted: true, sessionId: session.id },
     });
 
     // emit terminal-output；下一帧前 pane 仍存活（非 wall-clock p95 声明）。

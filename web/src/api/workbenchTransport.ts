@@ -78,10 +78,6 @@ export interface WorkbenchTransport {
       initialSize?: WorkbenchTerminalSize,
       worktreeId?: string | null,
     ) => Promise<WorkbenchSession>;
-    writeInput: (
-      sessionId: string,
-      data: string,
-    ) => Promise<{ ok: boolean; sessionId: string }>;
     resize: (
       sessionId: string,
       cols: number,
@@ -269,7 +265,6 @@ export const tauriWorkbenchTransport: WorkbenchTransport = {
     list: (projectId) => workbenchApi.sessions.list(projectId ?? undefined),
     create: (projectId, initialSize, worktreeId) =>
       workbenchApi.sessions.create(projectId, initialSize, worktreeId),
-    writeInput: (sessionId, data) => workbenchApi.sessions.writeInput(sessionId, data),
     resize: (sessionId, cols, rows) => workbenchApi.sessions.resize(sessionId, cols, rows),
     replay: async (sessionId) => createEmptyDesktopReplay(sessionId),
     focus: (sessionId, streamActive) => workbenchApi.sessions.focus(sessionId, streamActive),

@@ -1239,9 +1239,71 @@ export function createBackendHarness(): PlaywrightBackendHarness {
             __ccPartnerHarnessRuntime?: {
               emit: (event: string, payload: unknown) => void;
             };
+            __ccPartnerTerminalInputFrames?: Array<Record<string, unknown>>;
           };
 
           const win = window as HarnessWindow;
+          win.__ccPartnerTerminalInputFrames = [];
+
+          /**
+           * Business Logic（为什么需要这个测试替身）:
+           *   mobile E2E 在 Vite 页面运行，没有真实后端 WebSocket；测试仍需覆盖 hello/ready/input/ack。
+           *
+           * Code Logic（这个测试替身做什么）:
+           *   仅拦截 terminal-input-stream URL，自动返回 ready/ack，并把 input 帧记录到页内数组；
+           *   其它 URL 继续交给浏览器原生 WebSocket。
+           */
+          const NativeWebSocket = window.WebSocket;
+          class HarnessTerminalWebSocket extends EventTarget {
+            public static readonly CONNECTING = 0;
+            public static readonly OPEN = 1;
+            public static readonly CLOSING = 2;
+            public static readonly CLOSED = 3;
+            public readonly url: string;
+            public readonly protocol = 'cc-partner.terminal-input.v1';
+            public readonly bufferedAmount = 0;
+            public readyState = HarnessTerminalWebSocket.CONNECTING;
+
+            public constructor(url: string | URL) {
+              super();
+              this.url = String(url);
+              queueMicrotask(() => {
+                this.readyState = HarnessTerminalWebSocket.OPEN;
+                this.dispatchEvent(new Event('open'));
+              });
+            }
+
+            public send(data: string): void {
+              const frame = JSON.parse(String(data)) as Record<string, unknown>;
+              if (frame.type === 'hello') {
+                queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', {
+                  data: JSON.stringify({ type: 'ready', deviceId: 'harness-device' }),
+                })));
+                return;
+              }
+              if (frame.type === 'input') {
+                win.__ccPartnerTerminalInputFrames?.push(frame);
+                queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', {
+                  data: JSON.stringify({
+                    type: 'ack', laneId: frame.laneId, sessionId: frame.sessionId, seq: frame.seq,
+                  }),
+                })));
+              }
+            }
+
+            public close(): void {
+              this.readyState = HarnessTerminalWebSocket.CLOSED;
+              this.dispatchEvent(new Event('close'));
+            }
+          }
+          window.WebSocket = class extends NativeWebSocket {
+            public constructor(url: string | URL, protocols?: string | string[]) {
+              if (String(url).includes('/terminal-input-stream')) {
+                return new HarnessTerminalWebSocket(url) as unknown as WebSocket;
+              }
+              super(url, protocols);
+            }
+          };
           const callbacks = new Map<number, (payload: unknown) => void>();
           const eventIdToCallback = new Map<number, number>();
           const eventIdToEvent = new Map<number, string>();

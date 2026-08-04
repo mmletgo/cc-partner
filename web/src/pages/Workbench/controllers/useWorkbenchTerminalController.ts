@@ -32,6 +32,13 @@ import type { TerminalLayoutMode } from '../terminalSizing';
 import { sessionsForWorktree } from '../workbenchWorktrees';
 import { isLatestRequest } from '../workbenchFiles';
 
+interface WorkbenchTerminalInputStateEvent {
+  sessionId: string;
+  status: 'blocked';
+  code: string;
+  message: string;
+}
+
 /**
  * 终端 resize 命令后端接受 u16，前端需要提前 clamp；与原 Workbench 内部常量保持一致。
  */
@@ -325,6 +332,33 @@ export function useWorkbenchTerminalController(
     setWriteBlockedSessionIds(next);
   }, []);
 
+  // Business Logic: GUI Rust 的输入 WS 在 invoke admission 后异步失败时，立即封锁对应前端 lane；
+  // 不等下一次按键才发现断线，也绝不重放 sent-unacked 输入。
+  useEffect(() => {
+    const canListen = canListenToTauriEventsRef.current ?? canListenToTauriEventsDefault;
+    if (!canListen()) return undefined;
+    let registered = true;
+    let unlistenFn: (() => void) | null = null;
+    void listen<WorkbenchTerminalInputStateEvent>(
+      'workbench:terminal-input-state',
+      (event) => {
+        const payload = event.payload;
+        terminalInputPumpRef.current?.blockSession(payload.sessionId);
+        reportWriteErrorRef.current(payload.sessionId, new Error(payload.message));
+      },
+    ).then((fn) => {
+      if (!registered) {
+        fn();
+        return;
+      }
+      unlistenFn = fn;
+    });
+    return () => {
+      registered = false;
+      unlistenFn?.();
+    };
+  }, []);
+
   /**
    * Business Logic（为什么需要这个函数）:
    *   sessions.list 权威刷新成功后，只应对仍真正可写的 session 解除写失败封锁，让用户可再次输入；
@@ -462,7 +496,7 @@ export function useWorkbenchTerminalController(
   // 下次 setup 重建，避免 disposed 泵永久吞掉全部 enqueue。
   useEffect(() => {
     const pump = createTerminalInputPump({
-      write: (sessionId, data) => workbenchApi.sessions.writeInput(sessionId, data),
+      write: (sessionId, data) => workbenchApi.sessions.enqueueInput(sessionId, data),
       onWriteError: (sessionId, error) => reportWriteErrorRef.current(sessionId, error),
     });
     terminalInputPumpRef.current = pump;

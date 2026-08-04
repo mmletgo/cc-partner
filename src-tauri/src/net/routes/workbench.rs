@@ -37,8 +37,7 @@ use crate::commands::workbench::{
     replay_workbench_session_for_state, resize_workbench_session_for_state,
     resume_claude_session_for_state, save_workbench_text_file_for_state,
     search_claude_sessions_for_state, split_workbench_pane_for_state,
-    switch_workbench_pane_for_state, write_workbench_session_input_for_state,
-    zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
+    switch_workbench_pane_for_state, zoom_workbench_pane_for_state, WorkbenchMergeResultDto,
 };
 use crate::error::AppError;
 use crate::net::error_response::{mark_response_as_passthrough, P2pError, P2pResult};
@@ -76,6 +75,7 @@ use crate::workbench::remote_protocol::{RemoteSafeAttachReq, RemoteWorkspaceRest
 use crate::workbench::sessions::WorkbenchSessionReplayDto;
 use crate::workbench::workspace_restore::{SafeAttachResult, WorkspaceRestorePlan};
 use axum::body::Body;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Extension, Path as AxumPath, Query, State};
 use axum::http::header;
 use axum::http::Request;
@@ -93,6 +93,48 @@ use tokio::sync::Mutex;
 use tokio::time::interval;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::StreamExt;
+
+/// 接受 peer owning-device 终端输入 WebSocket。
+///
+/// Business Logic（为什么需要这个函数）:
+///     控制设备需要用一条常驻连接向本机 PTY 连续写入输入，避免逐键 HTTP/health 往返。
+///
+/// Code Logic（这个函数做什么）:
+///     协商 v1 子协议后升级连接，并以 LocalOnly 模式运行共享输入网关，拒绝 remote composite ID。
+pub async fn terminal_input_stream(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.protocols([crate::workbench::terminal_input::TERMINAL_INPUT_SUBPROTOCOL])
+        .on_upgrade(move |socket| {
+            crate::workbench::terminal_input::serve_terminal_input_socket(
+                socket,
+                state,
+                crate::workbench::terminal_input::TerminalInputGatewayMode::LocalOnly,
+            )
+        })
+}
+
+/// 接受 mobile 同源浏览器终端输入 WebSocket。
+///
+/// Business Logic（为什么需要这个函数）:
+///     手机软键盘输入同样不能逐键走 HTTP；本机 backend 需要保持一条 remote-aware 常驻连接。
+///
+/// Code Logic（这个函数做什么）:
+///     协商 v1 子协议后升级连接，以 RemoteAware 模式复用 owner 输入网关。
+pub async fn mobile_terminal_input_stream(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.protocols([crate::workbench::terminal_input::TERMINAL_INPUT_SUBPROTOCOL])
+        .on_upgrade(move |socket| {
+            crate::workbench::terminal_input::serve_terminal_input_socket(
+                socket,
+                state,
+                crate::workbench::terminal_input::TerminalInputGatewayMode::RemoteAware,
+            )
+        })
+}
 
 /// 远端路径请求体。
 ///
@@ -1999,24 +2041,6 @@ pub async fn mobile_replay_workbench_session(
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.replay"))?;
     Ok(Json(replay))
-}
-
-/// 手机端写入本机或远端 terminal 输入。
-///
-/// Business Logic（为什么需要这个函数）:
-///     手机键盘输入需要写入当前项目真实所在设备的 PTY/tmux。
-///
-/// Code Logic（这个函数做什么）:
-///     接收 sessionId/data，委托 commands 层 remote-aware write helper。
-pub async fn mobile_write_workbench_session_input(
-    State(state): State<AppState>,
-    Extension(ctx): Extension<P2pRequestContext>,
-    Json(req): Json<RemoteWriteSessionInputReq>,
-) -> P2pResult<Json<Value>> {
-    let value = write_workbench_session_input_for_state(&state, req.session_id, req.data)
-        .await
-        .map_err(|e| P2pError::from_app_error(e, &ctx, "mobile.sessions.write"))?;
-    Ok(Json(value))
 }
 
 /// 手机端调整本机或远端 terminal 尺寸。

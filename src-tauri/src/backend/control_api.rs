@@ -52,6 +52,7 @@ use crate::state::AppState;
 use crate::storage::RecoveryJobRow;
 use crate::transfer::sender;
 use axum::body::Body;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -792,7 +793,7 @@ pub async fn control_events_stream(
 ///
 /// Code Logic（这个函数做什么）:
 ///     先 `require_loopback_peer`，再读控制文件比较 token；空 token 拒绝。
-fn authorize_control_request(
+pub(crate) fn authorize_control_request(
     peer: SocketAddr,
     context: &P2pRequestContext,
     request_token: &str,
@@ -808,6 +809,39 @@ fn authorize_control_request(
         ));
     }
     Ok(())
+}
+
+/// 接受 GUI Rust 到 sidecar owner 的终端输入 WebSocket。
+///
+/// Business Logic（为什么需要这个函数）:
+///     桌面 GUI 的本地 IPC 只能等待有界队列接纳，实际输入经一条 loopback 常驻连接送到唯一 owner。
+///
+/// Code Logic（这个函数做什么）:
+///     upgrade 前严格执行 loopback→header token 鉴权，再协商 v1 子协议并启动 remote-aware 网关。
+pub async fn control_terminal_input_stream(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Extension(context): Extension<P2pRequestContext>,
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, P2pError> {
+    let token = headers
+        .get(crate::workbench::terminal_input::CONTROL_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    authorize_control_request(peer, &context, token)?;
+    state.runtime_role.require_owner().map_err(|error| {
+        P2pError::from_app_error(error, &context, "control.terminal_input_stream")
+    })?;
+    Ok(ws
+        .protocols([crate::workbench::terminal_input::TERMINAL_INPUT_SUBPROTOCOL])
+        .on_upgrade(move |socket| {
+            crate::workbench::terminal_input::serve_terminal_input_socket(
+                socket,
+                state,
+                crate::workbench::terminal_input::TerminalInputGatewayMode::RemoteAware,
+            )
+        }))
 }
 
 /// 校验请求 token 是否匹配控制文件。

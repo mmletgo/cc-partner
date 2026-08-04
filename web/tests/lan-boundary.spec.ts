@@ -53,7 +53,7 @@ function countBusinessHits(harness: PlaywrightBackendHarness): BusinessHits {
     if (path === '/api/mobile/workbench/files/save-text' && call.method === 'POST') {
       hits.mobileSave += 1;
     }
-    if (path === '/api/mobile/workbench/sessions/write' && call.method === 'POST') {
+    if (path === '/api/mobile/workbench/sessions/resize' && call.method === 'POST') {
       hits.mobileWrite += 1;
     }
     if (path === '/api/orchestrator/task-views/list' && call.method === 'POST') {
@@ -106,7 +106,7 @@ function registerLegalLanRoutes(harness: PlaywrightBackendHarness): void {
       baseModifiedAt: TS,
     },
   });
-  harness.route('POST', '/api/mobile/workbench/sessions/write', {
+  harness.route('POST', '/api/mobile/workbench/sessions/resize', {
     kind: 'resolve',
     value: { ok: true, sessionId: 's1' },
   });
@@ -250,8 +250,8 @@ test.describe('E2E-LAN-001 LAN trust boundary (L1 contract mock)', () => {
 
     const termWrite = await pageFetch(page, {
       method: 'POST',
-      path: '/api/mobile/workbench/sessions/write',
-      body: { sessionId: 's1', data: 'ls\n' },
+      path: '/api/mobile/workbench/sessions/resize',
+      body: { sessionId: 's1', cols: 80, rows: 24 },
     });
     expect(termWrite.ok).toBe(true);
 

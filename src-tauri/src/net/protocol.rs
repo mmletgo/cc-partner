@@ -173,6 +173,16 @@ pub const CAPABILITY_SYNC_MANIFEST_V2: &str = "sync.manifest.v2";
 ///     `server_protocol_info()` 中宣告。
 pub const CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1: &str = "workbench.mutation-outcome.v1";
 
+/// 能力 token：v1 Workbench 交互式终端输入 WebSocket。
+///
+/// Business Logic（为什么需要这个 token）:
+///     控制端只可在对端明确支持常驻输入流时建链；不允许回退逐键 HTTP，否则会重新引入 RTT 卡顿。
+///
+/// Code Logic（这个常量做什么）:
+///     与三条 terminal-input-stream 路由和 v1 帧协议原子上线。
+pub const CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1: &str =
+    "workbench.terminal-input-stream.v1";
+
 /// 能力 token：v2 Workbench Claude session 搜索结果 DTO
 /// （`{items, truncated, diagnostics}` + 混部 dual-decode）。
 ///
@@ -316,6 +326,7 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
             CAPABILITY_WORKBENCH_LAN_FLEET_V1.to_string(),
             CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1.to_string(),
             CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2.to_string(),
+            CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1.to_string(),
             CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1.to_string(),
         ],
     }
@@ -481,6 +492,7 @@ mod tests {
                 "workbench.lan-fleet.v1".to_string(),
                 "workbench.mutation-outcome.v1".to_string(),
                 "workbench.session-search-result.v2".to_string(),
+                "workbench.terminal-input-stream.v1".to_string(),
                 "workbench.workspace-safe-restore.v1".to_string(),
             ]
         );
@@ -498,6 +510,7 @@ mod tests {
         assert!(info.supports(CAPABILITY_WORKBENCH_LAN_FLEET_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_MUTATION_OUTCOME_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_SESSION_SEARCH_RESULT_V2));
+        assert!(info.supports(CAPABILITY_WORKBENCH_TERMINAL_INPUT_STREAM_V1));
         assert!(info.supports(CAPABILITY_WORKBENCH_WORKSPACE_SAFE_RESTORE_V1));
     }
 

@@ -453,9 +453,15 @@ export const workbenchApi = {
         workbenchSessionReplayDecoder,
       ),
 
-    /** 向指定 terminal window 的 PTY attach 写入输入数据。 */
-    writeInput: (sessionId: string, data: string) =>
-      invoke<{ ok: boolean; sessionId: string }>('write_workbench_session_input', {
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   桌面 xterm 输入只等待 GUI 本机有界队列接纳，不能等待远端 RTT。
+     *
+     * Code Logic（这个函数做什么）:
+     *   调用专用 enqueue invoke；实际发送与 ACK 由 Rust 常驻 WebSocket actor 异步处理。
+     */
+    enqueueInput: (sessionId: string, data: string) =>
+      invoke<{ accepted: boolean; sessionId: string }>('enqueue_workbench_terminal_input', {
         sessionId,
         data,
       }),

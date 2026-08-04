@@ -35,7 +35,7 @@ import type {
 interface FakeSessionsApi {
   list: ReturnType<typeof vi.fn>;
   create: ReturnType<typeof vi.fn>;
-  writeInput: ReturnType<typeof vi.fn>;
+  enqueueInput: ReturnType<typeof vi.fn>;
   resize: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   focused: ReturnType<typeof vi.fn>;
@@ -50,7 +50,7 @@ interface FakeSessionsApi {
 const fakeSessionsApi = vi.hoisted<FakeSessionsApi>(() => ({
   list: vi.fn(async () => [] as WorkbenchSession[]),
   create: vi.fn(async () => ({}) as WorkbenchSession),
-  writeInput: vi.fn(async () => ({ ok: true, sessionId: 's' })),
+  enqueueInput: vi.fn(async () => ({ accepted: true, sessionId: 's' })),
   resize: vi.fn(async () => ({ ok: true, sessionId: 's' })),
   focus: vi.fn(async () => ({ ok: true, sessionId: 's' })),
   focused: vi.fn(async () => ({ sessionId: null })),
@@ -1405,7 +1405,7 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
       await result.current.handleInput('s1', 'ls -la');
       await flushMicrotasks();
     });
-    expect(fakeSessionsApi.writeInput).toHaveBeenCalledWith('s1', 'ls -la');
+    expect(fakeSessionsApi.enqueueInput).toHaveBeenCalledWith('s1', 'ls -la');
   });
 
   test('handleInput is suppressed when remoteWriteDisabled is true', async () => {
@@ -1426,12 +1426,12 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
       canListenToTauriEvents: () => true,
     });
 
-    fakeSessionsApi.writeInput.mockClear();
+    fakeSessionsApi.enqueueInput.mockClear();
     await act(async () => {
       await result.current.handleInput('s1', 'data');
       await flushMicrotasks();
     });
-    expect(fakeSessionsApi.writeInput).not.toHaveBeenCalled();
+    expect(fakeSessionsApi.enqueueInput).not.toHaveBeenCalled();
   });
 
   test('handleInput serializes rapid keys per session and coalesces only while in flight', async () => {
@@ -1442,7 +1442,7 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
       resolveFirst = resolve;
     });
     const calls: Array<[string, string]> = [];
-    fakeSessionsApi.writeInput.mockImplementation(async (sessionId: string, data: string) => {
+    fakeSessionsApi.enqueueInput.mockImplementation(async (sessionId: string, data: string) => {
       calls.push([sessionId, data]);
       if (calls.length === 1) {
         await firstWrite;
@@ -1492,7 +1492,7 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
       resolveFirst = resolve;
     });
     const calls: string[] = [];
-    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+    fakeSessionsApi.enqueueInput.mockImplementation(async (_sessionId: string, data: string) => {
       calls.push(data);
       if (calls.length === 1) {
         await firstWrite;
@@ -1546,7 +1546,7 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     const session = buildSession({ id: 's1' });
     fakeSessionsApi.list.mockResolvedValue([session]);
     const calls: string[] = [];
-    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+    fakeSessionsApi.enqueueInput.mockImplementation(async (_sessionId: string, data: string) => {
       calls.push(data);
       if (data === 'bad') {
         throw new Error('write failed');
@@ -1603,7 +1603,7 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     const session = buildSession({ id: 's1' });
     fakeSessionsApi.list.mockResolvedValue([session]);
     const calls: string[] = [];
-    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+    fakeSessionsApi.enqueueInput.mockImplementation(async (_sessionId: string, data: string) => {
       calls.push(data);
       if (data === 'bad') {
         throw new Error('write failed');
@@ -1675,7 +1675,7 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     const session = buildSession({ id: 's1' });
     fakeSessionsApi.list.mockResolvedValue([session]);
     const calls: string[] = [];
-    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+    fakeSessionsApi.enqueueInput.mockImplementation(async (_sessionId: string, data: string) => {
       calls.push(data);
       if (data === 'bad') {
         throw new Error('write failed');
@@ -1741,7 +1741,7 @@ describe('useWorkbenchTerminalController — focus polling, input, resize, fulls
     });
     fakeSessionsApi.list.mockResolvedValue([running]);
     const calls: string[] = [];
-    fakeSessionsApi.writeInput.mockImplementation(async (_sessionId: string, data: string) => {
+    fakeSessionsApi.enqueueInput.mockImplementation(async (_sessionId: string, data: string) => {
       calls.push(data);
       if (data === 'bad') {
         throw new Error('write failed');

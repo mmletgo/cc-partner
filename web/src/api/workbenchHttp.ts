@@ -850,11 +850,6 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
           initialCols: initialSize?.cols ?? null,
           initialRows: initialSize?.rows ?? null,
         }, { policy: { kind: 'mutation' }, decoder: workbenchSessionDecoder }),
-    writeInput: (sessionId, data) =>
-      postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/write`, {
-        sessionId,
-        data,
-      }, { policy: { kind: 'mutation' } }),
     resize: (sessionId, cols, rows) =>
       postJson<{ ok: boolean; sessionId: string }>(`${MOBILE_WORKBENCH_API_PREFIX}/sessions/resize`, {
         sessionId,
