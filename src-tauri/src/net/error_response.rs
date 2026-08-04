@@ -654,7 +654,7 @@ pub fn mark_response_as_passthrough<B>(mut response: Response<B>) -> Response<B>
 ///     `P2pError::into_response`，因此会破坏 health 宣告的 `errors.envelope.v1` 契约。
 ///     本中间件放在 `request_id_middleware` 内层、业务路由外层，统一把这类响应改写为信封。
 ///     透传规则（Finding 1）:
-///     1. 成功响应（2xx）原样透传；
+///     1. 信息响应（1xx，尤其 WebSocket 101）与成功响应（2xx）原样透传；
 ///     2. 带 `BrowserProxyPassthroughMarker` 的响应（Browser Preview 代理透传，含上游 4xx/5xx
 ///        与流式 body）原样透传，不包装为信封——iframe 需看到 dev server 的真实错误页面；
 ///     3. 已经是 P2P 信封的非 2xx 响应原样透传；
@@ -671,7 +671,8 @@ pub async fn envelope_fallback_middleware(
             request_id: String::new(),
         });
     let response = next.run(request).await;
-    if response.status().is_success() {
+    // WebSocket 成功升级是 101，不属于 2xx；若进入信封包装会丢失 Upgrade/Accept 头并断开连接。
+    if response.status().is_informational() || response.status().is_success() {
         return response;
     }
     // Browser Preview 代理透传：上游 4xx/5xx 与流式 body 必须原样到达 iframe，
@@ -1016,6 +1017,58 @@ mod tests {
             serde_json::from_slice(&bytes).expect("fallback 应把 404 包成信封");
         assert_eq!(body.code, "not_found");
         assert!(!body.retryable);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     终端输入使用 WebSocket；成功握手的 101 不是错误响应，错误信封中间件不得吞掉
+    ///     Upgrade / Connection / Sec-WebSocket-Accept 等升级头，否则客户端会立即断开。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造一个带升级头的 101 handler，经过 request-id + envelope middleware 后断言
+    ///     状态、升级头和原 body 均保持不变。
+    #[tokio::test]
+    async fn fallback_middleware_preserves_switching_protocols_response() {
+        use crate::net::request_context::request_id_middleware;
+        use axum::body::to_bytes;
+        use axum::http::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, UPGRADE};
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        async fn websocket_upgrade() -> Response<Body> {
+            Response::builder()
+                .status(StatusCode::SWITCHING_PROTOCOLS)
+                .header(CONNECTION, "upgrade")
+                .header(UPGRADE, "websocket")
+                .header(SEC_WEBSOCKET_ACCEPT, "diagnostic-accept")
+                .body(Body::from("upgrade-body"))
+                .expect("构造 101 响应")
+        }
+
+        let router = axum::Router::new()
+            .route("/ws", get(websocket_upgrade))
+            .layer(axum::middleware::from_fn(envelope_fallback_middleware))
+            .layer(axum::middleware::from_fn(request_id_middleware));
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ws")
+                    .body(Body::empty())
+                    .expect("构造请求"),
+            )
+            .await
+            .expect("执行请求");
+
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(response.headers().get(CONNECTION).unwrap(), "upgrade");
+        assert_eq!(response.headers().get(UPGRADE).unwrap(), "websocket");
+        assert_eq!(
+            response.headers().get(SEC_WEBSOCKET_ACCEPT).unwrap(),
+            "diagnostic-accept"
+        );
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("读取 body");
+        assert_eq!(&body[..], b"upgrade-body");
     }
 
     /// Business Logic（为什么需要这个测试 / Finding 1）:
