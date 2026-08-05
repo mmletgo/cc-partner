@@ -474,6 +474,12 @@
       "offline": "离线",
       "cachedAt": "缓存于 {{time}}",
       "lastError": "最后错误：{{error}}"
+    },
+    "theme": {
+      "title": "外观",
+      "appearance": "主题",
+      "currentLight": "浅色",
+      "currentDark": "深色"
     }
   },
   "worktrees": {

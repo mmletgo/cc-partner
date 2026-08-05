@@ -479,6 +479,12 @@
       "offline": "Offline",
       "cachedAt": "Cached at {{time}}",
       "lastError": "Last error: {{error}}"
+    },
+    "theme": {
+      "title": "Appearance",
+      "appearance": "Theme",
+      "currentLight": "Light",
+      "currentDark": "Dark"
     }
   },
   "worktrees": {

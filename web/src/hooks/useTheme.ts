@@ -33,6 +33,20 @@ function syncDocument(theme: Theme): void {
   document.documentElement.setAttribute('data-theme', theme);
 }
 
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   `/mobile` 独立入口在任何 React 组件挂载前也需要正确的 data-theme，
+ *   否则首屏会以默认浅色 token 闪一下再跳到存储/系统偏好。
+ *
+ * Code Logic（这个函数做什么）:
+ *   读取 localStorage / prefers-color-scheme，写入 documentElement.data-theme，并返回主题。
+ */
+export function bootstrapTheme(): Theme {
+  const theme = readInitialTheme();
+  syncDocument(theme);
+  return theme;
+}
+
 export interface UseThemeResult {
   theme: Theme;
   toggleTheme: () => void;

@@ -376,6 +376,60 @@
   overflow-wrap: anywhere;
 }
 
+/* Settings: 外观主题区块 */
+.settingsSection {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.settingsSectionTitle {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.themeRow {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.themeRowText {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.themeRowTitle {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.themeRowMeta {
+  margin: 0;
+  color: var(--fg-muted-readable);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+}
+
+.themeToggle {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+}
+
 .panelError {
   display: grid;
   gap: var(--space-1);
