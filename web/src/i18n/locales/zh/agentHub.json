@@ -1,16 +1,178 @@
 {
   "title": "Agent Hub",
   "subtitle": "在同一工作区管理 Claude / Codex / OpenCode 的指令与可移植资产投影。",
+  "sections": {
+    "aria": "Agent Hub 工作区",
+    "userInstructions": "用户级指令",
+    "projectInstructions": "项目级指令",
+    "projectInstructionsHint": "预览并启用项目级指令映射；确认前不会写入项目。",
+    "portableAssets": "Skills 与工具",
+    "syncImport": "同步与导入",
+    "diagnostics": "兼容性与诊断"
+  },
+  "userInstructions": {
+    "title": "用户级指令",
+    "subtitle": "统一查看各 Agent 实际读取的文件，并用一份公共内容加少量专属扩展进行管理。",
+    "loading": "正在读取用户级指令…",
+    "refreshedAt": "上次检查：{{time}}",
+    "scanOnlyNotice": "当前后端可读取这些文件，但暂不支持自动写入。你仍可查看、复制和打开实际路径。",
+    "targetsTitle": "各 Agent 的实际生效情况",
+    "targetsDescription": "每张卡只显示一个主状态、实际读取来源以及当前可执行的下一步。",
+    "summary": {
+      "empty": "尚未发现用户级指令。先检查各 Agent 的实际来源，再决定是否开始管理。",
+      "readyToReview": "已发现现有指令，尚未由 Agent Hub 管理。请先核对来源。",
+      "configuredHealthy": "已管理 {{managed}} 个 Agent，当前均已同步。",
+      "configuredActionRequired": "已管理 {{managed}} 个 Agent，其中 {{actions}} 个需要处理。",
+      "configuredBlocked": "已管理 {{managed}} 个 Agent，其中 {{actions}} 个被阻塞。"
+    },
+    "editor": {
+      "title": "统一编辑",
+      "description": "公共内容会投影到已纳管目标；专属扩展只追加到对应 Agent。",
+      "unsaved": "未保存草稿",
+      "characterCount": "{{count}} 个字符",
+      "contentTruncated": "当前规范内容超过安全读取上限，只显示了部分内容。为避免覆盖完整文件，已禁用预览和写入。",
+      "readOnly": "当前为只读发现模式。可以整理本地草稿，但在后端支持自动管理前不能生成或应用写入计划。",
+      "tabsAria": "选择用户级指令编辑区域",
+      "textareaAria": "编辑{{pane}}",
+      "discard": "放弃草稿",
+      "previewApply": "预览变更",
+      "panes": {
+        "common": "公共指令",
+        "claude": "Claude 专属",
+        "codex": "Codex 专属",
+        "opencode": "OpenCode 专属"
+      },
+      "placeholders": {
+        "common": "写下希望所有已纳管 Agent 遵循的指令…",
+        "claude": "仅 Claude 需要的补充指令…",
+        "codex": "仅 Codex 需要的补充指令…",
+        "opencode": "仅 OpenCode 需要的补充指令…"
+      }
+    },
+    "target": {
+      "cliInstalled": "已检测 · {{version}}",
+      "cliNotInstalled": "未检测到 CLI",
+      "effectiveSource": "当前实际读取",
+      "shadowedSources": "存在但未生效",
+      "managedPath": "Agent Hub 管理路径",
+      "sourceResolverUnavailable": "旧版后端未提供来源解析；不会猜测文件路径。",
+      "noEffectiveSource": "未发现有效来源",
+      "pathUnavailable": "路径暂不可用",
+      "reasonCode": "诊断代码：{{code}}",
+      "states": {
+        "unmanaged": "未纳管",
+        "external": "使用外部文件",
+        "fallback": "使用回退来源",
+        "fallbackDisabled": "回退未启用",
+        "paused": "已暂停管理",
+        "inSync": "已同步",
+        "pending": "等待应用",
+        "drift": "外部已修改",
+        "detached": "已脱离管理",
+        "conflict": "内容冲突",
+        "collision": "路径碰撞",
+        "activationRequired": "需要激活",
+        "failed": "应用失败",
+        "blocked": "已阻塞"
+      },
+      "capabilities": {
+        "automatic": "可自动管理；所有写入都先生成逐目标预览。",
+        "scanOnly": "可读取，暂不自动写入。",
+        "scanBlocked": "当前目标无法安全读取或管理，请根据诊断信息处理。"
+      }
+    },
+    "actions": {
+      "create": "创建并设置",
+      "startManaging": "开始管理",
+      "manageTargets": "管理目标",
+      "openFile": "打开文件",
+      "manage": "开始管理",
+      "pause": "暂停管理",
+      "resume": "恢复管理",
+      "stopManaging": "停止管理",
+      "remove": "移除受管文件",
+      "compare": "比较差异",
+      "adopt": "纳管现有文件",
+      "restore": "恢复投影"
+    },
+    "setup": {
+      "title": "设置用户级指令",
+      "description": "为每个 Agent 明确选择由 Agent Hub 管理、保持现状或沿用原生回退。确认前仅生成预览。",
+      "singleSourceTitle": "检测到只有 {{target}} 有内容",
+      "singleSourceDescription": "可先提升为公共指令，再按目标添加专属差异。",
+      "useAsCommon": "作为公共内容",
+      "writable": "支持自动管理",
+      "scanOnly": "仅扫描",
+      "manage": "由 Agent Hub 管理",
+      "leave": "保持现状",
+      "inherit": "沿用原生回退",
+      "scanOnlyReason": "当前后端不会写入此目标。",
+      "preview": "生成逐目标预览"
+    },
+    "plan": {
+      "title": "确认逐目标变更",
+      "description": "核对每个目标的路径、操作、差异、遮蔽/回退影响与生效方式。",
+      "truncated": "预览响应被截断，无法安全确认。请缩小内容或更新后端后重试。",
+      "blocked": "此计划含阻塞项，不能应用。",
+      "willShadow": "应用后将遮蔽：{{paths}}",
+      "willReplaceFallback": "将替代回退来源：{{path}}",
+      "emptyTargetBlocked": "该目标只有专属内容且公共内容为空，已阻止生成空文件。",
+      "activation": "生效方式：{{mode}}",
+      "diffTruncated": "差异内容已截断；为避免误确认，此计划不可应用。",
+      "noDiff": "没有文本差异。",
+      "apply": "应用 {{count}} 个目标",
+      "operations": {
+        "create": "创建",
+        "update": "更新",
+        "delete": "删除",
+        "leave": "保持现状"
+      },
+      "activationModes": {
+        "immediate": "立即生效",
+        "newSession": "新会话生效",
+        "restart": "重启 Agent 后生效",
+        "unknown": "请手动确认"
+      }
+    },
+    "result": {
+      "success": "所有目标均已按计划处理。",
+      "partial": "部分目标未完成。草稿已保留，请查看逐目标结果后重试。",
+      "status": {
+        "queued": "已排队",
+        "applied": "已应用",
+        "noChange": "无需变更",
+        "stalePreview": "预览已过期",
+        "blocked": "已阻塞",
+        "conflict": "发生冲突",
+        "failed": "失败"
+      }
+    },
+    "errors": {
+      "contentTruncated": "当前内容读取不完整，不能生成写入计划。",
+      "backendUnavailable": "当前后端只支持读取用户级指令；自动写入功能不可用。",
+      "previewStale": "文件在预览后已发生变化。草稿已保留，请刷新并重新预览。",
+      "sourceRequired": "找不到可纳管的现有来源。"
+    },
+    "danger": {
+      "title": "危险操作",
+      "description": "删除规范资产会影响所有由 Agent Hub 管理的目标。",
+      "open": "删除规范资产…",
+      "dialogTitle": "预览删除规范资产",
+      "warning": "此操作不会直接执行。输入资产名称后先查看逐目标删除计划。",
+      "confirmLabel": "输入“{{name}}”以继续",
+      "preview": "预览删除"
+    }
+  },
   "loading": "正在加载 Agent Hub…",
   "stale": "状态可能已过期，请刷新重试。",
   "empty": "当前筛选条件下没有资产。",
   "listAria": "Agent Hub 资产列表",
   "upgradeRequired": "后端 Agent Hub API 不兼容写操作。请升级 backend sidecar 后再编辑。",
-  "lanPushGateC": "Use LAN Push to send selected Hub assets to explicit peers. There is no target-side pull.",
+  "lanPushGateC": "使用局域网 Push 将所选 Hub 资产发送给明确选择的对端；目标端不会主动拉取。",
   "status": {
     "enabled": "Hub 已启用",
     "disabled": "Hub 未启用",
-    "writeOk": "允许写入",
+    "writeOk": "后端连接正常",
     "writeBlocked": "写入已阻断",
     "conflicts": "{{count}} 个冲突",
     "blocked": "{{count}} 个阻塞投影"
@@ -54,6 +216,7 @@
     "externalCollision": "外部碰撞"
   },
   "aggregate": {
+    "unconfigured": "未配置",
     "full": "完整",
     "partial": "部分",
     "sourceOnly": "仅源端",
@@ -108,7 +271,7 @@
   "adoption": {
     "title": "纳管 / 碰撞预览",
     "desc": "在做出纳管决策前请先审阅外部碰撞诊断。旧版局域网拉取与直接移动 Skill 目录的入口已从此界面移除。",
-    "lanPushGateC": "Cross-device LAN push is available via the LAN Push dialog on this page.",
+    "lanPushGateC": "可通过本页的局域网 Push 对话框跨设备发送。",
     "logicalKey": "逻辑键",
     "origin": "来源命名空间",
     "target": "目标",

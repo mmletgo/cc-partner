@@ -24,6 +24,7 @@ import { GitImportDrawer } from './GitImportDrawer';
 import { LanPushDialog } from './LanPushDialog';
 import { InstructionBlocksDrawer } from './InstructionBlocksDrawer';
 import { PluginComponentsDrawer } from './PluginComponentsDrawer';
+import { UserInstructionView } from './userInstructions/UserInstructionView';
 import {
   useAgentHubController,
   type UseAgentHubControllerResult,
@@ -53,6 +54,9 @@ function supportTone(support: string): 'success' | 'warn' | 'danger' | 'neutral'
 export function AgentHubView(props: AgentHubViewProps) {
   const {
     t,
+    activeSection,
+    setActiveSection,
+    userInstructions,
     loading,
     refreshing,
     stale,
@@ -200,7 +204,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     return Array.isArray(list) ? list : [];
   }, [preview]);
 
-  if (loading && !status) {
+  if (activeSection !== 'userInstructions' && loading && !status) {
     return (
       <div className={styles.page} data-testid="agent-hub-loading">
         <div className={styles.container}>
@@ -210,7 +214,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     );
   }
 
-  if (error && !status) {
+  if (activeSection !== 'userInstructions' && error && !status) {
     return (
       <div className={styles.page} data-testid="agent-hub-error">
         <div className={styles.container}>
@@ -238,65 +242,95 @@ export function AgentHubView(props: AgentHubViewProps) {
             <p className={styles.subtitle}>{t('agentHub:subtitle')}</p>
           </div>
           <div className={styles.headerActions}>
-            <Button
-              variant="secondary"
-              size="sm"
-              loading={refreshing}
-              onClick={() => void reload()}
-              data-testid="agent-hub-reload"
-            >
-              {t('common:action.refresh')}
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={openPreviewDialog}
-              data-testid="agent-hub-open-preview"
-            >
-              {t('agentHub:actions.previewProject')}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={openLanPushDialog}
-              data-testid="agent-hub-open-lan-push"
-            >
-              {t('agentHub:lanPush.open')}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={openGitImportDrawer}
-              data-testid="agent-hub-open-git-import"
-            >
-              {t('agentHub:gitImport.open')}
-            </Button>
+            {activeSection !== 'userInstructions' ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={refreshing}
+                onClick={() => void reload()}
+                data-testid="agent-hub-reload"
+              >
+                {t('common:action.refresh')}
+              </Button>
+            ) : null}
+            {activeSection === 'projectInstructions' ? (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={openPreviewDialog}
+                data-testid="agent-hub-open-preview"
+              >
+                {t('agentHub:actions.previewProject')}
+              </Button>
+            ) : null}
+            {activeSection === 'syncImport' ? (
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={openLanPushDialog}
+                  data-testid="agent-hub-open-lan-push"
+                >
+                  {t('agentHub:lanPush.open')}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={openGitImportDrawer}
+                  data-testid="agent-hub-open-git-import"
+                >
+                  {t('agentHub:gitImport.open')}
+                </Button>
+              </>
+            ) : null}
           </div>
         </header>
 
-        <StatusMessage tone="info" live="off" data-testid="agent-hub-lan-push-notice">
-          {t('agentHub:lanPushGateC')}
-        </StatusMessage>
+        <nav className={styles.hubSectionNav} aria-label={t('agentHub:sections.aria')}>
+          {(['userInstructions', 'projectInstructions', 'portableAssets', 'syncImport', 'diagnostics'] as const).map((section) => (
+            <Button
+              key={section}
+              variant={activeSection === section ? 'secondary' : 'ghost'}
+              size="sm"
+              role="tab"
+              aria-selected={activeSection === section}
+              onClick={() => setActiveSection(section)}
+              data-testid={`agent-hub-section-${section}`}
+            >
+              {t(`agentHub:sections.${section}`)}
+            </Button>
+          ))}
+        </nav>
 
-        {upgradeRequired || writeBlocked ? (
+        {activeSection === 'userInstructions' ? (
+          <UserInstructionView t={t} manager={userInstructions} />
+        ) : null}
+
+        {activeSection === 'syncImport' ? (
+          <StatusMessage tone="info" live="off" data-testid="agent-hub-lan-push-notice">
+            {t('agentHub:lanPushGateC')}
+          </StatusMessage>
+        ) : null}
+
+        {activeSection !== 'userInstructions' && (upgradeRequired || writeBlocked) ? (
           <StatusMessage tone="warn" data-testid="agent-hub-upgrade-required">
             {t('agentHub:upgradeRequired')}
           </StatusMessage>
         ) : null}
 
-        {stale ? (
+        {activeSection !== 'userInstructions' && stale ? (
           <StatusMessage tone="warn" data-testid="agent-hub-stale">
             {t('agentHub:stale')}
           </StatusMessage>
         ) : null}
 
-        {actionError ? (
+        {activeSection !== 'userInstructions' && actionError ? (
           <StatusMessage tone="danger" data-testid="agent-hub-action-error">
             {actionError}
           </StatusMessage>
         ) : null}
 
-        {status ? (
+        {activeSection === 'diagnostics' && status ? (
           <Card variant="outlined" padding="md" data-testid="agent-hub-status-card">
             <Card.Header>
               <div className={styles.statusHeader}>
@@ -355,7 +389,8 @@ export function AgentHubView(props: AgentHubViewProps) {
           </Card>
         ) : null}
 
-        <section className={styles.filters} data-testid="agent-hub-filters">
+        {activeSection === 'portableAssets' ? (
+          <section className={styles.filters} data-testid="agent-hub-filters">
           <label className={styles.filterField}>
             <span>{t('agentHub:filters.scope')}</span>
             <Input
@@ -374,9 +409,11 @@ export function AgentHubView(props: AgentHubViewProps) {
               data-testid="agent-hub-filter-kind"
             />
           </label>
-        </section>
+          </section>
+        ) : null}
 
-        <section className={styles.list} data-testid="agent-hub-asset-list" aria-label={t('agentHub:listAria')}>
+        {activeSection === 'portableAssets' ? (
+          <section className={styles.list} data-testid="agent-hub-asset-list" aria-label={t('agentHub:listAria')}>
           {filteredAssets.length === 0 ? (
             <p className={styles.empty} data-testid="agent-hub-empty">
               {t('agentHub:empty')}
@@ -405,7 +442,19 @@ export function AgentHubView(props: AgentHubViewProps) {
               />
             ))
           )}
-        </section>
+          </section>
+        ) : null}
+
+        {activeSection === 'projectInstructions' ? (
+          <Card variant="outlined" padding="md">
+            <Card.Header>
+              <span className={styles.sectionTitle}>{t('agentHub:sections.projectInstructions')}</span>
+            </Card.Header>
+            <Card.Body>
+              <p className={styles.hint}>{t('agentHub:sections.projectInstructionsHint')}</p>
+            </Card.Body>
+          </Card>
+        ) : null}
       </div>
 
       <Dialog

@@ -23,10 +23,11 @@ use crate::agent_hub::instructions::{
     classify_import, compile_render, ImportScopeContext, InstructionBlockMode, InstructionDocument,
     TargetMarkdownSource,
 };
+#[cfg(test)]
+use crate::agent_hub::models::NewTargetBinding;
 use crate::agent_hub::models::{
     AgentTarget, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, NewLogicalAsset,
-    NewRevision, NewScopeNode, NewTargetBinding, RevisionId, RevisionOperation, RevisionOriginKind,
-    ScopeKind,
+    NewRevision, NewScopeNode, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
 };
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::plugins::{
@@ -173,12 +174,12 @@ pub async fn resolve_user_claude_md_content_with(
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     旧 CLAUDE.md 编辑/同步路径仍在；Hub 启用后需把同一正文 seed 为 user instruction，
-///     且第二遍同 hash 不重复 revision；投影绑定先 Absent，避免未确认就写 Codex/OpenCode。
+///     且第二遍同 hash 不重复 revision；V2 发现不创建 target binding，等待用户显式选择。
 ///
 /// Code Logic（这个函数做什么）:
 ///     resolve content → ensure user scope/asset → classify_import(Claude) → CAS put →
-///     同 payload_hash 跳过 append → 否则 Migration revision → 三 target Absent 绑定 →
-///     compile_render Codex/OpenCode 全文预览。
+///     同 payload_hash 跳过 append → 否则 Migration revision → 清理无物化/无 ownership 的
+///     legacy Absent 伪绑定 → compile_render Codex/OpenCode 全文预览。
 pub async fn migrate_user_claude_md_state(
     state: &AppState,
     claude_md_file_path: &Path,
@@ -244,32 +245,11 @@ pub async fn migrate_user_claude_md_state_with(
     let (created_revision, revision_id) =
         ensure_migration_revision(deps, &asset, &payload_hash).await?;
 
-    // 三 target 绑定：仅 seed 缺失行为 Absent+disabled；不得覆盖用户已确认 Present/enabled
-    let existing_bindings = deps
-        .agent_hub
-        .list_target_bindings_for_asset(&asset.id)
+    // V2 中“未选择”是中性 unmanaged，不用 Absent+disabled 伪 binding 表示。
+    // 只清理无 mapping/checkout/materialization/ownership 的旧迁移草稿；真实用户选择不动。
+    deps.agent_hub
+        .delete_unmaterialized_absent_user_bindings(&asset.id)
         .await?;
-    let existing_targets: std::collections::BTreeSet<AgentTarget> =
-        existing_bindings.iter().map(|b| b.target).collect();
-    for target in [
-        AgentTarget::Claude,
-        AgentTarget::Codex,
-        AgentTarget::OpenCode,
-    ] {
-        if existing_targets.contains(&target) {
-            continue;
-        }
-        deps.agent_hub
-            .upsert_target_binding(NewTargetBinding {
-                asset_id: asset.id.clone(),
-                target,
-                local_scope_mapping_id: None,
-                checkout_binding_id: None,
-                desired_presence: DesiredPresence::Absent,
-                desired_enabled: false,
-            })
-            .await?;
-    }
 
     // 预览：对空 current bytes 的 compile_render = 完整生成正文
     let empty_ctx = InstructionRenderContext::default();
@@ -610,32 +590,10 @@ pub(crate) async fn seed_user_instruction_with_deps(
                 // 并发 head 赢：不 reclassify，让调用方 reload
                 return Ok(SeedUserInstructionOutcome::HeadAlreadyPresent);
             }
-            // seed Absent bindings（与 migrate 一致，不覆盖已有）
-            let existing_bindings = deps
-                .agent_hub
-                .list_target_bindings_for_asset(&asset.id)
+            // V2 seed 只建立 canonical 草稿；target 保持 unmanaged，等待显式 preview/apply。
+            deps.agent_hub
+                .delete_unmaterialized_absent_user_bindings(&asset.id)
                 .await?;
-            let existing_targets: std::collections::BTreeSet<AgentTarget> =
-                existing_bindings.iter().map(|b| b.target).collect();
-            for target in [
-                AgentTarget::Claude,
-                AgentTarget::Codex,
-                AgentTarget::OpenCode,
-            ] {
-                if existing_targets.contains(&target) {
-                    continue;
-                }
-                deps.agent_hub
-                    .upsert_target_binding(NewTargetBinding {
-                        asset_id: asset.id.clone(),
-                        target,
-                        local_scope_mapping_id: None,
-                        desired_presence: DesiredPresence::Absent,
-                        desired_enabled: false,
-                        checkout_binding_id: None,
-                    })
-                    .await?;
-            }
             Ok(SeedUserInstructionOutcome::Seeded)
         }
         Err(e) => {
@@ -1311,9 +1269,9 @@ mod tests {
         }
     }
 
-    /// 迁移应 seed TargetOnly 资产、1 revision、Absent 绑定，且 diffs 精确等于 compile_render。
+    /// 迁移应 seed TargetOnly 资产与 revision，但未选择目标时不创建伪 Absent binding。
     #[tokio::test]
-    async fn migration_seeds_user_instruction_target_only_and_absent_bindings() {
+    async fn migration_seeds_user_instruction_target_only_without_target_bindings() {
         let (agent_hub, claude_md, _) = setup_repos().await;
         let tmp = TempDir::new().unwrap();
         let objects_root = tmp.path().join("data");
@@ -1364,11 +1322,7 @@ mod tests {
             .list_target_bindings_for_asset(&preview.asset_id)
             .await
             .unwrap();
-        assert_eq!(bindings.len(), 3);
-        for b in &bindings {
-            assert_eq!(b.desired_presence, DesiredPresence::Absent);
-            assert!(!b.desired_enabled);
-        }
+        assert!(bindings.is_empty(), "未选择 target 必须保持 unmanaged");
 
         // Claude targetOnly 不会投影到 Codex/OpenCode：diffs 可能为空，但必须精确等于
         // 从 CAS head 文档再次 compile_render 的结果（exact generated diffs）。
@@ -2021,11 +1975,7 @@ mod tests {
             .list_target_bindings_for_asset(&asset.id)
             .await
             .unwrap();
-        assert_eq!(bindings.len(), 3);
-        for b in &bindings {
-            assert_eq!(b.desired_presence, DesiredPresence::Absent);
-            assert!(!b.desired_enabled);
-        }
+        assert!(bindings.is_empty(), "seed 不得创建 legacy Absent 伪绑定");
     }
 
     /// R5 P2.3: simulated concurrent-import race — once an external head exists, the

@@ -24,6 +24,9 @@ use crate::agent_hub::service::{
     UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
 use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionRequest};
+use crate::agent_hub::user_instructions::{
+    ApplyUserInstructionPlanRequest, PreviewUserInstructionRequest,
+};
 use crate::backend::control::{self, BackendControlFile, AGENT_HUB_API_VERSION};
 use crate::backend::control_api::CONTROL_RESPONSE_BODY_LIMIT_BYTES;
 use crate::error::AppError;
@@ -124,6 +127,34 @@ async fn dispatch_agent_hub_op(
         "agent_hub.get_asset" => {
             let asset_id = required_string(&payload, "assetId")?;
             let dto = AgentHubService::get_asset(state, &asset_id).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.inspect_user_instruction_workspace" => {
+            let dto = AgentHubService::inspect_user_instruction_workspace(state).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.preview_user_instruction_setup" => {
+            let req: PreviewUserInstructionRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("preview_user_instruction_setup payload: {e}"))
+                })?;
+            let dto = AgentHubService::preview_user_instruction_setup(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.preview_user_instruction_update" => {
+            let req: PreviewUserInstructionRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("preview_user_instruction_update payload: {e}"))
+                })?;
+            let dto = AgentHubService::preview_user_instruction_update(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.apply_user_instruction_plan" => {
+            let req: ApplyUserInstructionPlanRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("apply_user_instruction_plan payload: {e}"))
+                })?;
+            let dto = AgentHubService::apply_user_instruction_plan(state, req).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.update_instruction" => {
@@ -314,6 +345,9 @@ fn is_mutation_op(op: &str) -> bool {
     matches!(
         op,
         "agent_hub.update_instruction"
+            | "agent_hub.preview_user_instruction_setup"
+            | "agent_hub.preview_user_instruction_update"
+            | "agent_hub.apply_user_instruction_plan"
             | "agent_hub.update_instruction_block"
             | "agent_hub.pair_instruction_variants"
             | "agent_hub.enable_project"
@@ -478,6 +512,10 @@ mod tests {
             "agent_hub.get_status",
             "agent_hub.list_assets",
             "agent_hub.get_asset",
+            "agent_hub.inspect_user_instruction_workspace",
+            "agent_hub.preview_user_instruction_setup",
+            "agent_hub.preview_user_instruction_update",
+            "agent_hub.apply_user_instruction_plan",
             "agent_hub.update_instruction",
             "agent_hub.update_instruction_block",
             "agent_hub.pair_instruction_variants",
@@ -510,6 +548,9 @@ mod tests {
     #[test]
     fn mutation_ops_cover_write_paths() {
         assert!(is_mutation_op("agent_hub.update_instruction"));
+        assert!(is_mutation_op("agent_hub.preview_user_instruction_setup"));
+        assert!(is_mutation_op("agent_hub.preview_user_instruction_update"));
+        assert!(is_mutation_op("agent_hub.apply_user_instruction_plan"));
         assert!(is_mutation_op("agent_hub.enable_project"));
         assert!(is_mutation_op("agent_hub.set_target_presence"));
         assert!(is_mutation_op("agent_hub.set_target_enabled"));
@@ -520,6 +561,9 @@ mod tests {
         assert!(is_mutation_op("agent_hub.confirm_git_import"));
         assert!(is_mutation_op("agent_hub.confirm_project_mapping"));
         assert!(!is_mutation_op("agent_hub.get_status"));
+        assert!(!is_mutation_op(
+            "agent_hub.inspect_user_instruction_workspace"
+        ));
         assert!(!is_mutation_op("agent_hub.preview_project"));
         assert!(!is_mutation_op("agent_hub.get_push_report"));
         assert!(!is_mutation_op("agent_hub.preview_lan_push"));

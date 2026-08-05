@@ -28,6 +28,10 @@ use crate::agent_hub::service::{
 };
 use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionRequest};
 use crate::agent_hub::snapshot::importer::ResolvedProjectMapping;
+use crate::agent_hub::user_instructions::{
+    ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
+    PreviewUserInstructionRequest, UserInstructionPlanDto, UserInstructionWorkspaceDto,
+};
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control::AGENT_HUB_API_VERSION;
 use crate::backend::control_client::BackendControlClient;
@@ -81,6 +85,69 @@ pub async fn agent_hub_get_asset(
             .await;
     }
     AgentHubService::get_asset(state.inner(), &asset_id).await
+}
+
+/// Business Logic: 用户级指令默认入口展示 sidecar owner 解析的真实 source chain。
+/// Code Logic: owner inspect / GuiClient control query。
+#[tauri::command]
+pub async fn agent_hub_inspect_user_instruction_workspace(
+    state: State<'_, AppState>,
+) -> Result<UserInstructionWorkspaceDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_inspect_user_instruction_workspace()
+            .await;
+    }
+    AgentHubService::inspect_user_instruction_workspace(state.inner()).await
+}
+
+/// Business Logic: 首次设置必须先生成绑定 revision/inventory/hash 的预览计划。
+/// Code Logic: 新 V2 control 合同需要 API 版本一致；不执行目标文件 mutation。
+#[tauri::command]
+pub async fn agent_hub_preview_user_instruction_setup(
+    state: State<'_, AppState>,
+    request: PreviewUserInstructionRequest,
+) -> Result<UserInstructionPlanDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client
+            .agent_hub_preview_user_instruction_setup(request)
+            .await;
+    }
+    AgentHubService::preview_user_instruction_setup(state.inner(), request).await
+}
+
+/// Business Logic: 日常更新与首次设置共享相同的 preview 安全门闩。
+/// Code Logic: owner preview / GuiClient V2 control。
+#[tauri::command]
+pub async fn agent_hub_preview_user_instruction_update(
+    state: State<'_, AppState>,
+    request: PreviewUserInstructionRequest,
+) -> Result<UserInstructionPlanDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client
+            .agent_hub_preview_user_instruction_update(request)
+            .await;
+    }
+    AgentHubService::preview_user_instruction_update(state.inner(), request).await
+}
+
+/// Business Logic: 用户确认后才可应用短期 plan；当前写能力未认证时逐 target blocked。
+/// Code Logic: owner 原子 claim/apply / GuiClient V2 control mutation。
+#[tauri::command]
+pub async fn agent_hub_apply_user_instruction_plan(
+    state: State<'_, AppState>,
+    request: ApplyUserInstructionPlanRequest,
+) -> Result<ApplyUserInstructionPlanResultDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_apply_user_instruction_plan(request).await;
+    }
+    AgentHubService::apply_user_instruction_plan(state.inner(), request).await
 }
 
 /// Business Logic: 保存整份指令。
@@ -602,6 +669,10 @@ mod tests {
             "agent_hub.get_status",
             "agent_hub.list_assets",
             "agent_hub.get_asset",
+            "agent_hub.inspect_user_instruction_workspace",
+            "agent_hub.preview_user_instruction_setup",
+            "agent_hub.preview_user_instruction_update",
+            "agent_hub.apply_user_instruction_plan",
             "agent_hub.update_instruction",
             "agent_hub.update_instruction_block",
             "agent_hub.pair_instruction_variants",

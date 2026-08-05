@@ -477,6 +477,7 @@ fn prefer_status(
             AssetAggregateStatus::ActivationRequired => 3,
             AssetAggregateStatus::SourceOnly => 2,
             AssetAggregateStatus::Partial => 1,
+            AssetAggregateStatus::Unconfigured => 0,
             AssetAggregateStatus::Full => 0,
         }
     };

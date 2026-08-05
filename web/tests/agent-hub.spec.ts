@@ -1,6 +1,7 @@
 /**
- * E2E-AGENT-HUB-A-001 / E2E-AGENT-HUB-B-001 / E2E-AGENT-HUB-C-001 / E2E-AGENT-HUB-D-001 —
- * Agent Hub Gate A + Gate B + Gate C + Gate D UI journeys.
+ * E2E-AGENT-HUB-USER-INSTRUCTION-001 / E2E-AGENT-HUB-A-001 / E2E-AGENT-HUB-B-001 /
+ * E2E-AGENT-HUB-C-001 / E2E-AGENT-HUB-D-001 — Agent Hub 用户级指令 V2 与
+ * Gate A + Gate B + Gate C + Gate D UI journeys。
  *
  * Business Logic（为什么需要这个套件）:
  *   Gate A 交付 Multi-CLI Agent Hub 指令基础：用户必须能看到 CLI probe 状态、
@@ -212,6 +213,83 @@ function makeAssetDetail(): AssetDetail {
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   V2 默认页必须在后端只有 scan evidence 时诚实展示实际来源，并阻止自动写入。
+ *
+ * Code Logic（这个函数做什么）:
+ *   构造三端 readOnly/blocked workspace；路径均来自 mock adapter 事实，不由前端猜测。
+ */
+function makeReadOnlyUserInstructionWorkspace() {
+  const makeTarget = (
+    target: 'claude' | 'codex' | 'opencode',
+    source: { sourceId: string; path: string; role: 'native' | 'override' | 'fallback' },
+  ) => ({
+    target,
+    cli: {
+      installed: true,
+      version: '1.0.0',
+      configRoot: `/tmp/.${target}`,
+    },
+    sources: [
+      {
+        ...source,
+        active: true,
+        exists: true,
+        nonEmpty: true,
+        hash: `${target}-source-hash`,
+        modifiedAt: TS,
+        ownership: 'external',
+      },
+    ],
+    effectiveSourceId: source.sourceId,
+    managedTargetPath: null,
+    managementMode: 'unmanaged',
+    capability: {
+      scan: 'readOnly',
+      write: 'blocked',
+      remove: 'blocked',
+      activate: 'blocked',
+      reasonCode: 'USER_INSTRUCTION_WRITE_EVIDENCE_MISSING',
+      evidenceIds: ['L1-AGENT-HUB-USER-INSTRUCTION-SCAN-ONLY'],
+    },
+    projection: {
+      state: 'none',
+      desiredRevisionId: null,
+      appliedRevisionId: null,
+      observedHash: null,
+      lastErrorCode: null,
+    },
+    availableActions: ['openFile'],
+  });
+
+  return {
+    scopeId: 'agent-hub-scope-user',
+    setupState: 'readyToReview',
+    healthState: 'healthy',
+    canonical: null,
+    targets: [
+      makeTarget('claude', {
+        sourceId: 'claude-native',
+        path: '/Users/e2e/.claude/CLAUDE.md',
+        role: 'native',
+      }),
+      makeTarget('codex', {
+        sourceId: 'codex-override',
+        path: '/Users/e2e/.codex/AGENTS.override.md',
+        role: 'override',
+      }),
+      makeTarget('opencode', {
+        sourceId: 'opencode-fallback',
+        path: '/Users/e2e/.claude/CLAUDE.md',
+        role: 'fallback',
+      }),
+    ],
+    inventorySnapshotHash: 'user-instruction-inventory-e2e-1',
+    refreshedAt: TS,
+  };
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   Agent Hub 页挂载即并行 getStatus/listAssets，preview/enable 走独立命令。
  *
  * Code Logic（这个函数做什么）:
@@ -234,6 +312,10 @@ function registerAgentHubBase(
   harness.command('agent_hub_get_status', { kind: 'resolve', value: status });
   harness.command('agent_hub_list_assets', { kind: 'resolve', value: assets });
   harness.command('agent_hub_get_asset', { kind: 'resolve', value: detail });
+  harness.command('agent_hub_inspect_user_instruction_workspace', {
+    kind: 'resolve',
+    value: makeReadOnlyUserInstructionWorkspace(),
+  });
   harness.command('agent_hub_preview_project', {
     kind: 'resolve',
     value: {
@@ -465,6 +547,42 @@ function registerAgentHubBase(
   });
 }
 
+test.describe('E2E-AGENT-HUB-USER-INSTRUCTION-001 user instruction V2 read-only journey', () => {
+  test('scan-only default page shows effective sources and never invokes preview/apply', async ({
+    page,
+    backendHarness,
+  }) => {
+    await installAppLocalStorage(page);
+    registerAgentHubBase(backendHarness);
+
+    await page.goto('/agent-hub');
+    await expect(page.getByTestId('user-instruction-workspace')).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId('user-instruction-scan-only')).toBeVisible();
+    await expect(page.getByTestId('user-instruction-target-claude')).toContainText(
+      '/Users/e2e/.claude/CLAUDE.md',
+    );
+    await expect(page.getByTestId('user-instruction-target-codex')).toContainText(
+      '/Users/e2e/.codex/AGENTS.override.md',
+    );
+    await expect(page.getByTestId('user-instruction-target-opencode')).toContainText(
+      '/Users/e2e/.claude/CLAUDE.md',
+    );
+    await expect(page.getByTestId('user-instruction-primary-action')).toBeDisabled();
+    await expect(page.getByTestId('user-instruction-preview-draft')).toBeDisabled();
+
+    const writeCalls = backendHarness.calls().filter(
+      (call) =>
+        call.type === 'invoke' &&
+        (call.command === 'agent_hub_preview_user_instruction_setup' ||
+          call.command === 'agent_hub_preview_user_instruction_update' ||
+          call.command === 'agent_hub_apply_user_instruction_plan'),
+    );
+    expect(writeCalls).toHaveLength(0);
+  });
+});
+
 test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
   test('status card, target matrix, preview + enable confirmation', async ({
     page,
@@ -475,12 +593,14 @@ test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
 
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('agent-hub-section-diagnostics').click();
     await expect(page.getByTestId('agent-hub-status-card')).toBeVisible();
     await expect(page.getByTestId('probe-claude')).toBeVisible();
     await expect(page.getByTestId('probe-codex')).toBeVisible();
     await expect(page.getByTestId('probe-opencode')).toBeVisible();
 
     // target matrix cells（AgentAssetRow）
+    await page.getByTestId('agent-hub-section-portableAssets').click();
     await expect(page.getByTestId(`agent-asset-row-${ASSET_ID}`)).toBeVisible();
     await expect(page.getByTestId(`agent-asset-targets-${ASSET_ID}`)).toBeVisible();
     await expect(
@@ -494,6 +614,7 @@ test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
     ).toBeVisible();
 
     // project preview dialog
+    await page.getByTestId('agent-hub-section-projectInstructions').click();
     await page.getByTestId('agent-hub-open-preview').click();
     await expect(page.getByTestId('agent-hub-preview-dialog')).toBeVisible();
     await page.getByTestId('agent-hub-preview-project-id').fill(PROJECT_ID);
@@ -533,6 +654,7 @@ test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
     await page.goto('/claude-md');
     await expect(page).toHaveURL(/\/agent-hub/, { timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('agent-hub-section-diagnostics').click();
     await expect(page.getByTestId('agent-hub-status-card')).toBeVisible();
   });
 
@@ -546,7 +668,9 @@ test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
     await page.goto('/claude-code');
     await expect(page).toHaveURL(/\/agent-hub/, { timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('agent-hub-section-syncImport').click();
     await expect(page.getByTestId('agent-hub-lan-push-notice')).toBeVisible();
+    await page.getByTestId('agent-hub-section-portableAssets').click();
     await expect(page.getByTestId(`agent-asset-aggregate-${ASSET_ID}`)).toBeVisible();
   });
 });
@@ -688,6 +812,7 @@ test.describe('E2E-AGENT-HUB-B-001 Agent Hub Gate B portable matrix', () => {
 
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('agent-hub-section-portableAssets').click();
     await expect(page.getByTestId('agent-hub-filters')).toBeVisible();
     await expect(page.getByTestId(`agent-asset-row-${skill.assetId}`)).toBeVisible();
     await expect(page.getByTestId(`agent-asset-row-${mcp.assetId}`)).toBeVisible();
@@ -765,6 +890,7 @@ test.describe('E2E-AGENT-HUB-B-001 Agent Hub Gate B portable matrix', () => {
     });
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('agent-hub-section-portableAssets').click();
     await expect(page.getByTestId(`agent-target-toggle-${skill.assetId}-claude`)).toBeVisible();
     await page.getByTestId(`agent-target-toggle-${skill.assetId}-claude`).click();
     // still on page after toggle mutation mock
@@ -782,6 +908,7 @@ test.describe('E2E-AGENT-HUB-C-001 Agent Hub Gate C replication UI', () => {
 
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('agent-hub-section-syncImport').click();
     await expect(page.getByTestId('agent-hub-lan-push-notice')).toBeVisible();
     await expect(page.getByTestId('agent-hub-open-lan-push')).toBeVisible();
     await expect(page.getByTestId('agent-hub-open-git-import')).toBeVisible();
@@ -1112,6 +1239,7 @@ test.describe('E2E-AGENT-HUB-D-001 Agent Hub Gate D Plugin + OpenCode UI', () =>
     // --- Plugin components drawer + ownership-aware delete preview ---
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('agent-hub-section-portableAssets').click();
     await expect(page.getByTestId(`agent-asset-row-${PLUGIN_ASSET_ID}`)).toBeVisible();
     await expect(page.getByTestId(`agent-asset-plugin-${PLUGIN_ASSET_ID}`)).toBeVisible();
     await page.getByTestId(`agent-asset-plugin-${PLUGIN_ASSET_ID}`).click();

@@ -25,6 +25,9 @@ import {
   agentHubStatusDecoder,
   instructionBlockDtoDecoder,
   pluginPackageReportDecoder,
+  userInstructionApplyResultDecoder,
+  userInstructionPlanDecoder,
+  userInstructionWorkspaceDecoder,
 } from '@/lib/schemas/agentHub';
 import type {
   AgentHubAssetDetail,
@@ -46,8 +49,15 @@ import type {
   InstructionBlockDto,
   InstructionBlockMode,
   PluginPackageReport,
+  UserInstructionApplyResultDto,
+  UserInstructionPlanDto,
+  UserInstructionPreviewRequest,
+  UserInstructionTargetDto,
+  UserInstructionTargetPreviewRequest,
+  UserInstructionWorkspaceDto,
 } from '@/lib/types/agentHub';
 import { invokeDecoded } from './client';
+import { openPath } from '@tauri-apps/plugin-opener';
 
 /**
  * Tauri 命令名（snake_case）。
@@ -79,7 +89,160 @@ export const AGENT_HUB_COMMANDS = {
   confirmProjectMapping: 'agent_hub_confirm_project_mapping',
   getPluginPackageReport: 'agent_hub_get_plugin_package_report',
   previewPluginDelete: 'agent_hub_preview_plugin_delete',
+  inspectUserInstructionWorkspace: 'agent_hub_inspect_user_instruction_workspace',
+  previewUserInstructionSetup: 'agent_hub_preview_user_instruction_setup',
+  applyUserInstructionPlan: 'agent_hub_apply_user_instruction_plan',
+  previewUserInstructionUpdate: 'agent_hub_preview_user_instruction_update',
+  previewAdoptUserInstructionSource: 'agent_hub_preview_adopt_user_instruction_source',
+  previewPauseUserInstructionTarget: 'agent_hub_preview_pause_user_instruction_target',
+  previewStopManagingUserInstructionTarget:
+    'agent_hub_preview_stop_managing_user_instruction_target',
+  previewRemoveUserInstructionTarget: 'agent_hub_preview_remove_user_instruction_target',
+  previewDeleteUserInstructionAsset: 'agent_hub_preview_delete_user_instruction_asset',
 } as const;
+
+/** 用户级指令 plan apply 请求。 */
+export interface ApplyUserInstructionPlanArgs {
+  planToken: string;
+  clientRequestId: string;
+}
+
+/** 纳管已有 source 的 preview 请求。 */
+export interface PreviewAdoptUserInstructionSourceArgs extends UserInstructionTargetPreviewRequest {
+  sourceId: string;
+  mode: 'targetExtension' | 'common';
+}
+
+/**
+ * Business Logic（为什么需要）:
+ *   新版 UI 可以在旧 sidecar 上展示只读 inventory，但绝不能悄悄回退到 legacy 写操作。
+ *
+ * Code Logic（做什么）:
+ *   只识别稳定 unsupported/not_found code，或包含精确 V2 命令名的 unknown-command 错误。
+ */
+function isUserInstructionV2Unavailable(reason: unknown, command: string): boolean {
+  if (!(reason instanceof Error)) return false;
+  const code = (reason as Error & { code?: unknown }).code;
+  if (code === 'unsupported' || code === 'not_found') return true;
+  return reason.message.includes(command) && /unknown|not found|missing/i.test(reason.message);
+}
+
+/**
+ * Business Logic（为什么需要）:
+ *   V2 mutation 不存在时必须用稳定错误 fail closed，controller 才能保留草稿并解释升级要求。
+ *
+ * Code Logic（做什么）:
+ *   把“命令不存在”归一为 USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE，其它错误原样抛出。
+ */
+function rethrowUserInstructionMutationError(reason: unknown, command: string): never {
+  if (isUserInstructionV2Unavailable(reason, command)) {
+    throw Object.assign(new Error('USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'), {
+      code: 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE',
+    });
+  }
+  throw reason;
+}
+
+/**
+ * Business Logic（为什么需要）:
+ *   旧版 absent binding 不能继续显示为“应不存在/已验证/不支持”；升级期间仍需给用户一个诚实的只读入口。
+ *
+ * Code Logic（做什么）:
+ *   用 legacy status/list/detail 生成最小 V2 workspace；所有 write/remove capability 一律 blocked，
+ *   不猜测原生文件优先级、ownership 或完整路径。
+ */
+async function inspectLegacyUserInstructionWorkspace(): Promise<UserInstructionWorkspaceDto> {
+  const [status, assets] = await Promise.all([
+    invokeDecoded(AGENT_HUB_COMMANDS.getStatus, undefined, agentHubStatusDecoder),
+    invokeDecoded(
+      AGENT_HUB_COMMANDS.listAssets,
+      { scopeId: null, kind: 'instruction' },
+      agentHubAssetSummaryListDecoder,
+    ),
+  ]);
+  const legacy = assets.find(
+    (asset) =>
+      asset.kind === 'instruction' &&
+      (asset.scopeId === 'agent-hub-scope-user' ||
+        asset.scopeId.toLowerCase().includes('user') ||
+        asset.displayName === 'User CLAUDE.md'),
+  );
+  const detail = legacy
+    ? await invokeDecoded(
+        AGENT_HUB_COMMANDS.getAsset,
+        { assetId: legacy.assetId },
+        agentHubAssetDetailDecoder,
+      )
+    : null;
+  const legacyContent = detail?.contentMarkdown ?? '';
+  const canonical = detail
+    ? {
+        assetId: detail.assetId,
+        displayName: detail.displayName,
+        headRevisionId: detail.currentRevisionId ?? null,
+        commonContent: detail.policy === 'shared' ? legacyContent : '',
+        targetExtensions:
+          detail.policy === 'shared' ? {} : ({ claude: legacyContent } as const),
+        deleted: false,
+        contentTruncated: false,
+      }
+    : undefined;
+  const targets: UserInstructionTargetDto[] = (['claude', 'codex', 'opencode'] as const).map(
+    (target) => {
+      const probe = status.probes.find((item) => item.target === target);
+      const cell = legacy?.targets.find((item) => item.target === target);
+      const managementMode =
+        cell?.desiredPresence === 'present'
+          ? cell.desiredEnabled
+            ? 'managedActive'
+            : 'managedPaused'
+          : 'unmanaged';
+      return {
+        target,
+        cli: {
+          installed: Boolean(probe?.executable || probe?.version),
+          version: probe?.version ?? null,
+          configRoot: probe?.configRoot ?? '',
+        },
+        sources: [],
+        effectiveSourceId: null,
+        managedTargetPath: null,
+        managementMode,
+        capability: {
+          scan: probe ? 'readOnly' : 'blocked',
+          write: 'blocked',
+          remove: 'blocked',
+          activate: 'blocked',
+          reasonCode: 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE',
+          evidenceIds: [],
+        },
+        projection: {
+          state:
+            managementMode === 'managedActive' && cell?.materializationStatus === 'synced'
+              ? 'inSync'
+              : managementMode === 'managedActive'
+                ? 'blocked'
+                : 'none',
+          desiredRevisionId: detail?.currentRevisionId ?? null,
+          appliedRevisionId: null,
+          observedHash: null,
+          lastErrorCode: cell?.lastError ?? null,
+        },
+        availableActions: [],
+      };
+    },
+  );
+  const hasManagedTarget = targets.some((target) => target.managementMode !== 'unmanaged');
+  return {
+    scopeId: legacy?.scopeId ?? 'agent-hub-scope-user',
+    setupState: hasManagedTarget ? 'configured' : canonical ? 'readyToReview' : 'unconfigured',
+    healthState: hasManagedTarget ? 'blocked' : 'healthy',
+    canonical: canonical ?? null,
+    targets,
+    inventorySnapshotHash: `legacy-read-only:${status.ownerInstanceId ?? 'unknown'}`,
+    refreshedAt: new Date().toISOString(),
+  };
+}
 
 /**
  * 列表过滤参数。
@@ -481,4 +644,167 @@ export const agentHubApi = {
       { assetId },
       pluginPackageReportDecoder,
     ),
+
+  /**
+   * Business Logic: 首屏只读枚举三个 Agent 的真实来源、路径、优先级与 ownership。
+   * Code Logic: V2 command 不存在时降级为显式 scan-only legacy workspace；绝不回退写操作。
+   */
+  inspectUserInstructionWorkspace: async (): Promise<UserInstructionWorkspaceDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.inspectUserInstructionWorkspace,
+        undefined,
+        userInstructionWorkspaceDecoder,
+      );
+    } catch (reason) {
+      if (!isUserInstructionV2Unavailable(reason, AGENT_HUB_COMMANDS.inspectUserInstructionWorkspace)) {
+        throw reason;
+      }
+      return inspectLegacyUserInstructionWorkspace();
+    }
+  },
+
+  /** 首次设置零写入预览。 */
+  previewUserInstructionSetup: async (
+    request: UserInstructionPreviewRequest,
+  ): Promise<UserInstructionPlanDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.previewUserInstructionSetup,
+        { request },
+        userInstructionPlanDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.previewUserInstructionSetup,
+      );
+    }
+  },
+
+  /** 日常编辑零写入预览。 */
+  previewUserInstructionUpdate: async (
+    request: UserInstructionPreviewRequest,
+  ): Promise<UserInstructionPlanDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.previewUserInstructionUpdate,
+        { request },
+        userInstructionPlanDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.previewUserInstructionUpdate,
+      );
+    }
+  },
+
+  /** 用户确认后应用已绑定 inventory/revision/hash 的 plan。 */
+  applyUserInstructionPlan: async (
+    request: ApplyUserInstructionPlanArgs,
+  ): Promise<UserInstructionApplyResultDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.applyUserInstructionPlan,
+        { request },
+        userInstructionApplyResultDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(reason, AGENT_HUB_COMMANDS.applyUserInstructionPlan);
+    }
+  },
+
+  /** 纳管外部 source 前的 ownership/collision 预览。 */
+  previewAdoptUserInstructionSource: async (
+    request: PreviewAdoptUserInstructionSourceArgs,
+  ): Promise<UserInstructionPlanDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.previewAdoptUserInstructionSource,
+        { request },
+        userInstructionPlanDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.previewAdoptUserInstructionSource,
+      );
+    }
+  },
+
+  /** 暂停单 target 前预览安全删除。 */
+  previewPauseUserInstructionTarget: async (
+    request: UserInstructionTargetPreviewRequest,
+  ): Promise<UserInstructionPlanDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.previewPauseUserInstructionTarget,
+        { request },
+        userInstructionPlanDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.previewPauseUserInstructionTarget,
+      );
+    }
+  },
+
+  /** 停止管理并保留文件前预览。 */
+  previewStopManagingUserInstructionTarget: async (
+    request: UserInstructionTargetPreviewRequest,
+  ): Promise<UserInstructionPlanDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.previewStopManagingUserInstructionTarget,
+        { request },
+        userInstructionPlanDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.previewStopManagingUserInstructionTarget,
+      );
+    }
+  },
+
+  /** 从单 target 移除指令前预览。 */
+  previewRemoveUserInstructionTarget: async (
+    request: UserInstructionTargetPreviewRequest,
+  ): Promise<UserInstructionPlanDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.previewRemoveUserInstructionTarget,
+        { request },
+        userInstructionPlanDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.previewRemoveUserInstructionTarget,
+      );
+    }
+  },
+
+  /** canonical 与所有受管文件危险删除前预览。 */
+  previewDeleteUserInstructionAsset: async (
+    request: Omit<UserInstructionTargetPreviewRequest, 'target'>,
+  ): Promise<UserInstructionPlanDto> => {
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.previewDeleteUserInstructionAsset,
+        { request },
+        userInstructionPlanDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.previewDeleteUserInstructionAsset,
+      );
+    }
+  },
+
+  /** 打开 adapter 返回的真实路径；view 不直接触碰系统 opener。 */
+  openUserInstructionPath: (path: string): Promise<void> => openPath(path),
 };

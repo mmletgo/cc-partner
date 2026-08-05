@@ -74,6 +74,9 @@ function buildProps(
 ): UseAgentHubControllerResult {
   const base: UseAgentHubControllerResult = {
     t: i18n.t.bind(i18n) as unknown as UseAgentHubControllerResult['t'],
+    activeSection: 'portableAssets',
+    setActiveSection: vi.fn(),
+    userInstructions: {} as UseAgentHubControllerResult['userInstructions'],
     loading: false,
     refreshing: false,
     stale: false,
@@ -269,17 +272,21 @@ describe('AgentHub page characterization', () => {
   });
 
   test('renders probe summary, filters, and target cells', () => {
-    renderView();
+    renderView({ activeSection: 'diagnostics' });
     expect(screen.getByTestId('agent-hub-page')).toBeTruthy();
     expect(screen.getByTestId('probe-claude')).toBeTruthy();
     expect(screen.getByTestId('probe-codex')).toBeTruthy();
     expect(screen.getByTestId('probe-opencode')).toBeTruthy();
+    cleanup();
+    renderView({ activeSection: 'portableAssets' });
     expect(screen.getByTestId('agent-hub-filters')).toBeTruthy();
     expect(screen.getByTestId('agent-target-claude')).toBeTruthy();
     expect(screen.getByTestId('agent-target-codex')).toBeTruthy();
     expect(screen.getByTestId('agent-target-opencode')).toBeTruthy();
-    expect(screen.getByTestId('agent-hub-lan-push-notice')).toBeTruthy();
     expect(screen.getByTestId('agent-asset-aggregate-asset-1')).toBeTruthy();
+    cleanup();
+    renderView({ activeSection: 'syncImport' });
+    expect(screen.getByTestId('agent-hub-lan-push-notice')).toBeTruthy();
   });
 
   test('filter inputs call controller setters', () => {
@@ -345,7 +352,7 @@ describe('AgentHub page characterization', () => {
   });
 
   test('blocked/unsupported probe state is visible', () => {
-    renderView();
+    renderView({ activeSection: 'diagnostics' });
     expect(screen.getByTestId('probe-opencode').textContent?.toLowerCase()).toMatch(
       /unsupported|不支持/,
     );

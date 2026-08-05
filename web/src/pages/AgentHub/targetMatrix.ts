@@ -20,6 +20,7 @@ import type {
 export const AGENT_TARGET_ORDER: AgentTarget[] = ['claude', 'codex', 'opencode'];
 
 export const AGGREGATE_STATUSES: AssetAggregateStatus[] = [
+  'unconfigured',
   'full',
   'partial',
   'sourceOnly',
@@ -154,6 +155,8 @@ export function aggregateTone(
   status: AssetAggregateStatus,
 ): 'success' | 'warn' | 'danger' | 'neutral' {
   switch (status) {
+    case 'unconfigured':
+      return 'neutral';
     case 'full':
       return 'success';
     case 'partial':

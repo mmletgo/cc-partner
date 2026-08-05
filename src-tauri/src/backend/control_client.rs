@@ -19,6 +19,10 @@ use crate::agent_hub::service::{
     ListAssetsRequest, PairInstructionVariantsRequest, ResolveConflictRequest,
     SetTargetBindingRequest, UpdateInstructionBlockRequest, UpdateInstructionRequest,
 };
+use crate::agent_hub::user_instructions::{
+    ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
+    PreviewUserInstructionRequest, UserInstructionPlanDto, UserInstructionWorkspaceDto,
+};
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
 use crate::backend::control_api::WorkbenchLaunchSummaryDto;
@@ -1120,6 +1124,51 @@ impl BackendControlClient {
             serde_json::json!({ "assetId": asset_id }),
         )
         .await
+    }
+
+    /// Business Logic: GuiClient 必须读取 sidecar owner 的用户级 source chain。
+    /// Code Logic: agent_hub.inspect_user_instruction_workspace 只读查询。
+    pub async fn agent_hub_inspect_user_instruction_workspace(
+        &self,
+    ) -> Result<UserInstructionWorkspaceDto, AppError> {
+        self.agent_hub_op(
+            "agent_hub.inspect_user_instruction_workspace",
+            serde_json::json!({}),
+        )
+        .await
+    }
+
+    /// Business Logic: 首次设置 preview 属于 V2 合同，旧 sidecar 不得静默降级。
+    /// Code Logic: 版本门闩后调用 setup preview。
+    pub async fn agent_hub_preview_user_instruction_setup(
+        &self,
+        req: PreviewUserInstructionRequest,
+    ) -> Result<UserInstructionPlanDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.preview_user_instruction_setup", req)
+            .await
+    }
+
+    /// Business Logic: 日常更新 preview 也必须由 owner 绑定计划。
+    /// Code Logic: 版本门闩后调用 update preview。
+    pub async fn agent_hub_preview_user_instruction_update(
+        &self,
+        req: PreviewUserInstructionRequest,
+    ) -> Result<UserInstructionPlanDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.preview_user_instruction_update", req)
+            .await
+    }
+
+    /// Business Logic: 应用 plan 是 V2 mutation，必须阻断旧 sidecar。
+    /// Code Logic: 版本门闩后调用 owner 原子 apply。
+    pub async fn agent_hub_apply_user_instruction_plan(
+        &self,
+        req: ApplyUserInstructionPlanRequest,
+    ) -> Result<ApplyUserInstructionPlanResultDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.apply_user_instruction_plan", req)
+            .await
     }
 
     /// Business Logic: 保存整份指令（mutation）。
@@ -3380,15 +3429,15 @@ mod tests {
         assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
     }
 
-    /// 同 major v1 写兼容通过。
+    /// 同 major v2 写兼容通过。
     ///
     /// Business Logic（为什么需要这个测试）:
-    ///     新 GUI ↔ v1 backend 必须允许 mutation。
+    ///     新 GUI ↔ v2 backend 必须允许 mutation。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     for_test 默认 AGENT_HUB_API_VERSION=1，require(1) → Ok。
+    ///     for_test 默认当前 AGENT_HUB_API_VERSION，require(current) → Ok。
     #[test]
-    fn agent_hub_write_compat_accepts_matching_v1() {
+    fn agent_hub_write_compat_accepts_matching_v2() {
         let client = BackendControlClient::for_test(1, "tok", "owner").unwrap();
         assert_eq!(
             client.agent_hub_api_version(),
@@ -3405,11 +3454,11 @@ mod tests {
     ///     backend 宣告更高 major 时，旧 GUI 不得盲目写。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     version=2、required=1 → upgradeRequired。
+    ///     version=3、required=2 → upgradeRequired。
     #[test]
     fn agent_hub_write_compat_rejects_higher_incompatible_major() {
         let client =
-            BackendControlClient::for_test_with_agent_hub_version(1, "tok", "owner", 2).unwrap();
+            BackendControlClient::for_test_with_agent_hub_version(1, "tok", "owner", 3).unwrap();
         let err = client
             .require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)
             .unwrap_err();

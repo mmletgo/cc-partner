@@ -27,6 +27,7 @@ const restoreDetachedTarget = vi.fn();
 const deleteAssetEverywhere = vi.fn();
 const getPluginPackageReport = vi.fn();
 const previewPluginDelete = vi.fn();
+const searchParamsMock = vi.hoisted(() => ({ current: new URLSearchParams() }));
 
 vi.mock('@/api/agentHub', () => ({
   agentHubApi: {
@@ -53,7 +54,7 @@ vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
   return {
     ...actual,
-    useSearchParams: () => [new URLSearchParams(), vi.fn()],
+    useSearchParams: () => [searchParamsMock.current, vi.fn()],
   };
 });
 
@@ -124,6 +125,7 @@ const assetDetail: AgentHubAssetDetail = {
 describe('useAgentHubController', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    searchParamsMock.current = new URLSearchParams();
     getStatus.mockResolvedValue(statusOk);
     listAssets.mockResolvedValue([assetSummary]);
     getAsset.mockResolvedValue(assetDetail);
@@ -139,6 +141,18 @@ describe('useAgentHubController', () => {
     setTargetPresence.mockResolvedValue(assetSummary);
     restoreDetachedTarget.mockResolvedValue(assetSummary);
     deleteAssetEverywhere.mockResolvedValue(assetSummary);
+  });
+
+  test('deep links select the advanced workspace that owns the requested surface', () => {
+    searchParamsMock.current = new URLSearchParams('assetId=asset-1&conflictId=c1');
+    const assetLink = renderHook(() => useAgentHubController());
+    expect(assetLink.result.current.activeSection).toBe('portableAssets');
+    assetLink.unmount();
+
+    searchParamsMock.current = new URLSearchParams('preview=1&projectId=project-1');
+    const projectLink = renderHook(() => useAgentHubController());
+    expect(projectLink.result.current.activeSection).toBe('projectInstructions');
+    projectLink.unmount();
   });
 
   test('first-load error surfaces error without assets', async () => {

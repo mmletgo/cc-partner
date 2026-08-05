@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+const MAX_INSTRUCTION_SCAN_BYTES: u64 = 1024 * 1024;
+
 /// 注入的目标探测环境（永不修改真实 process env）。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -320,10 +322,20 @@ pub fn compute_probe_fingerprint(
 /// 读取文本文件内容（缺失返回 None，非 UTF-8 报错）。
 ///
 /// Business Logic: 指令文件必须 UTF-8；无效编码进入 blocked 前先失败上报。
-/// Code Logic: 不存在 → Ok(None)；存在 → 读字节并 from_utf8。
+/// Code Logic: 不存在 → Ok(None)；超过 1 MiB fail-closed；否则读字节并 from_utf8。
 pub fn read_utf8_file(path: &Path) -> Result<Option<String>, AppError> {
     if !path.exists() {
         return Ok(None);
+    }
+    let metadata = std::fs::metadata(path).map_err(AppError::from)?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    if metadata.len() > MAX_INSTRUCTION_SCAN_BYTES {
+        return Err(AppError::validation(format!(
+            "agent_hub_instruction_too_large:{}",
+            path.display()
+        )));
     }
     let bytes = std::fs::read(path).map_err(AppError::from)?;
     let text = String::from_utf8(bytes).map_err(|e| {

@@ -155,6 +155,44 @@ cd web && npm run test:e2e -- agent-hub.spec.ts
 
 **NOT VERIFIED by the above alone:** real Claude / Codex / OpenCode product installs and path writes on macos/windows/ubuntu; LAN Hub replication / multi-host Agent Hub state; packaged desktop GUI. Those stay L3 `NOT VERIFIED` rows in `quality-matrix.json` until real-device certification lands.
 
+### Agent Hub user-level instruction V2 (scan-only) verification
+
+The V2 workspace intentionally starts with a user-visible inventory rather
+than claiming write support. `inspect_user_instruction_workspace` returns each
+CLI's effective source chain, real target path, management/projection state,
+activation requirement, capability evidence, canonical revision, and
+`inventorySnapshotHash`. Inspection is zero target-side writes.
+
+The preview/apply contract is also fail-closed: preview checks the canonical
+revision and inventory hash, gives a bounded per-target diff, and creates no
+target file. Apply rechecks the stored plan and uses `clientRequestId` replay,
+but, while the support manifest has no L3 write/remove evidence, every
+target-side create/update/delete is returned as
+`USER_INSTRUCTION_TARGET_SCAN_ONLY`. A browser mock or unit test must not
+claim that a Claude, Codex, or OpenCode instruction file was written.
+
+Focused L0 contracts:
+
+```bash
+cd src-tauri && cargo test --locked agent_hub::user_instructions --lib
+cd web && npm test -- useUserInstructionManager
+```
+
+- `L0-AGENT-HUB-USER-INSTRUCTION-BACKEND-001` covers bounded content/diff
+  behavior, Codex base-path selection, and read-only capability preservation.
+  `L0-AGENT-HUB-USER-INSTRUCTION-UI-001` covers the frontend rule that
+  drafts/selections remain local until preview; stale apply preserves the
+  draft.
+- `E2E-AGENT-HUB-USER-INSTRUCTION-001` is the L1 browser-mock journey in
+  `web/tests/agent-hub.spec.ts`: the page renders scan-only facts and does not
+  silently invoke a V2 write command when the backend has not certified it.
+
+Real filesystem create/update/delete and remove across exact supported CLI
+versions are `L3-AGENT-HUB-USER-INSTRUCTION-WRITE-001` and remain **NOT
+VERIFIED**. It is additive to the per-CLI
+`L3-AGENT-HUB-CLAUDE-001` / `L3-AGENT-HUB-CODEX-001` /
+`L3-AGENT-HUB-OPENCODE-001` rows; no L0/L1/L2 result can flip any of them.
+
 ### Agent Hub Gate B verification (portable assets)
 
 Focused Gate B commands (shared Skill/Command/Agent/MCP discovery, managed packages, legacy adoption, config patch isolation). Do **not** claim real CLI write support unless the exact L3 version pin was exercised:

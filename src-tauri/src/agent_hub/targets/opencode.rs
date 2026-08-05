@@ -65,8 +65,8 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
 
     /// 扫描 OpenCode 指令源。
     ///
-    /// Business Logic: 最近本地 AGENTS.md 为 native-active；祖先作为 prelude 依赖返回。
-    /// Code Logic: user 扫 config_root；directory/project 从当前目录向上至 project_root。
+    /// Business Logic: 最近本地 AGENTS.md 为 native-active；用户级原生文件缺失时识别 Claude 兼容回退。
+    /// Code Logic: user 扫 config_root + Claude fallback；directory/project 从当前目录向上至 project_root。
     fn scan_instruction_sources(
         &self,
         scope: &LocalScopeMapping,
@@ -239,29 +239,57 @@ fn scan_mcp_file(
 
 /// 扫描用户级 OpenCode AGENTS.md。
 ///
-/// Business Logic: 用户级配置根下的 AGENTS.md 是唯一用户源。
-/// Code Logic: 缺失返回空。
+/// Business Logic: OpenCode 原生 AGENTS.md 优先；缺失且兼容未禁用时回退到 Claude CLAUDE.md。
+/// Code Logic: 同时列出原生源与可能的 fallback；两个禁用环境变量任一有值即不声称回退生效。
 fn scan_user_scope(
     scope: &LocalScopeMapping,
     env: &TargetEnvironment,
 ) -> Result<Vec<InstructionSource>, AppError> {
     let homes = TargetPathResolver::resolve_all(env);
-    let path = homes.opencode.config_root.join("AGENTS.md");
-    if !path.exists() {
-        return Ok(vec![]);
+    let native_path = homes.opencode.config_root.join("AGENTS.md");
+    let fallback_disabled = env.var("OPENCODE_DISABLE_CLAUDE_CODE").is_some()
+        || env.var("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT").is_some();
+    let fallback_path = homes.claude.config_root.join("CLAUDE.md");
+    let native_exists = native_path.exists();
+    let mut sources = Vec::new();
+
+    if native_exists {
+        sources.push(InstructionSource {
+            target: AgentTarget::OpenCode,
+            path: native_path,
+            scope_kind: ScopeKind::User,
+            role: InstructionSourceRole::NativePrimary,
+            active: true,
+            native_active: true,
+            non_empty: is_non_empty_utf8_file(&homes.opencode.config_root.join("AGENTS.md"))?,
+            relative_path: scope.relative_root.clone(),
+            diagnostics: vec![],
+        });
     }
-    let non_empty = is_non_empty_utf8_file(&path)?;
-    Ok(vec![InstructionSource {
-        target: AgentTarget::OpenCode,
-        path,
-        scope_kind: ScopeKind::User,
-        role: InstructionSourceRole::NativePrimary,
-        active: true,
-        native_active: true,
-        non_empty,
-        relative_path: scope.relative_root.clone(),
-        diagnostics: vec![],
-    }])
+
+    if fallback_path.exists() {
+        let active = !native_exists && !fallback_disabled;
+        let diagnostics = if fallback_disabled {
+            vec!["opencode_claude_fallback_disabled".to_string()]
+        } else if native_exists {
+            vec!["opencode_claude_fallback_shadowed_by_native".to_string()]
+        } else {
+            vec![]
+        };
+        sources.push(InstructionSource {
+            target: AgentTarget::OpenCode,
+            path: fallback_path.clone(),
+            scope_kind: ScopeKind::User,
+            role: InstructionSourceRole::Fallback,
+            active,
+            native_active: false,
+            non_empty: is_non_empty_utf8_file(&fallback_path)?,
+            relative_path: scope.relative_root.clone(),
+            diagnostics,
+        });
+    }
+
+    Ok(sources)
 }
 
 /// 从当前目录向上到项目根扫描 AGENTS.md 链。

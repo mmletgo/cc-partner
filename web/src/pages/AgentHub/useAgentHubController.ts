@@ -43,6 +43,18 @@ import type {
   PluginPackageReport,
 } from '@/lib/types/agentHub';
 import type { LanPushPeerOption } from './LanPushDialog';
+import {
+  useUserInstructionManager,
+  type UseUserInstructionManagerResult,
+} from './userInstructions/useUserInstructionManager';
+
+/** Agent Hub 一级工作区。 */
+export type AgentHubSection =
+  | 'userInstructions'
+  | 'projectInstructions'
+  | 'portableAssets'
+  | 'syncImport'
+  | 'diagnostics';
 
 /**
  * Controller 返回值。
@@ -52,6 +64,9 @@ import type { LanPushPeerOption } from './LanPushDialog';
  */
 export interface UseAgentHubControllerResult {
   t: TFunction<['agentHub', 'common']>;
+  activeSection: AgentHubSection;
+  setActiveSection: (section: AgentHubSection) => void;
+  userInstructions: UseUserInstructionManagerResult;
   loading: boolean;
   refreshing: boolean;
   stale: boolean;
@@ -174,12 +189,17 @@ function toErrorMessage(reason: unknown): string {
 export function useAgentHubController(): UseAgentHubControllerResult {
   const { t } = useTranslation(['agentHub', 'common']);
   const [searchParams] = useSearchParams();
-
   const deepLinkAssetId = searchParams.get('assetId');
   const deepLinkConflictId = searchParams.get('conflictId');
   const deepLinkPreview = searchParams.get('preview');
   const deepLinkProjectId = searchParams.get('projectId');
   const deepLinkBridge = searchParams.get('bridge');
+  const userInstructions = useUserInstructionManager(t);
+  const [activeSection, setActiveSection] = useState<AgentHubSection>(() => {
+    if (deepLinkAssetId || deepLinkConflictId) return 'portableAssets';
+    if (deepLinkPreview || deepLinkProjectId || deepLinkBridge) return 'projectInstructions';
+    return 'userInstructions';
+  });
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -331,6 +351,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   useEffect(() => {
     // URL deep link 后续变化：异步拉详情；仅当 key 变化时同步 selected（事件驱动，非首轮 mount）
+    if (!deepLinkAssetId && !deepLinkConflictId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+    setActiveSection('portableAssets');
     if (!deepLinkAssetId) return;
     const key = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
     if (appliedDeepLinkRef.current === key) return;
@@ -352,6 +375,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     const key = `preview|${deepLinkPreview ?? ''}|${deepLinkProjectId ?? ''}|${deepLinkBridge ?? ''}`;
     if (appliedPreviewDeepLinkRef.current === key) return;
     appliedPreviewDeepLinkRef.current = key;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+    setActiveSection('projectInstructions');
     // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
     setPreviewOpen(true);
     if (deepLinkProjectId?.trim()) {
@@ -998,6 +1023,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   return {
     t,
+    activeSection,
+    setActiveSection,
+    userInstructions,
     loading,
     refreshing,
     stale,

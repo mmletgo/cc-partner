@@ -1099,6 +1099,78 @@ pub struct AdoptionRecord {
     pub updated_at: String,
 }
 
+/// 用户级指令文件所有权记录。
+///
+/// Business Logic: package adoption 与指令文件纳管的恢复/删除合同不同，必须独立持久化。
+/// Code Logic: 按 asset+target 记录用户确认路径、hash、revision 和 plan token。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInstructionOwnershipRecord {
+    /// 逻辑资产
+    pub asset_id: String,
+    /// 目标 CLI
+    pub target: AgentTarget,
+    /// preview/apply 共享的解析绝对路径
+    pub resolved_path: String,
+    /// 纳管时的外部 hash（create 为 None）
+    pub adopted_hash: Option<String>,
+    /// 纳管时 canonical revision
+    pub adopted_revision_id: Option<RevisionId>,
+    /// create/update/adopt 等稳定动作 token
+    pub adoption_operation: String,
+    /// 用户确认的 V2 plan token
+    pub confirmed_plan_token: String,
+    /// 创建时间
+    pub created_at: String,
+    /// 更新时间
+    pub updated_at: String,
+}
+
+/// 用户级指令预览计划持久化记录。
+///
+/// Business Logic: GuiClient 与 sidecar 跨请求 apply 必须使用 owner 持久的短期计划，不信任客户端回传 diff。
+/// Code Logic: token 索引原始计划 JSON，并保留消费/idempotency 结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInstructionPlanRecord {
+    /// 不可猜短期 token
+    pub plan_token: String,
+    /// 当前 OS 用户/配置根指纹
+    pub owner_fingerprint: String,
+    /// 过期时间 RFC3339
+    pub expires_at: String,
+    /// canonical base revision
+    pub base_revision_id: Option<RevisionId>,
+    /// inventory 快照 hash
+    pub inventory_snapshot_hash: String,
+    /// 原始计划 JSON（不记录）
+    pub plan_json: String,
+    /// 首次 apply 幂等键
+    pub client_request_id: Option<String>,
+    /// 原子 claim 时间
+    pub claimed_at: Option<String>,
+    /// 已消费时间
+    pub consumed_at: Option<String>,
+    /// 幂等返回结果 JSON
+    pub result_json: Option<String>,
+    /// 创建时间
+    pub created_at: String,
+}
+
+/// V2 preview plan 原子 claim 结果。
+///
+/// Business Logic: 同 token 只能有一个 apply 执行者，同 id 重试返回 pending/result。
+/// Code Logic: Claimed 携带计划；Pending 表示同 id 执行中；Replay 携带持久化 JSON 结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserInstructionPlanClaim {
+    /// 本请求获得执行权
+    Claimed(UserInstructionPlanRecord),
+    /// 同 id 请求正在执行
+    Pending,
+    /// 同 id 已完成
+    Replay(String),
+}
+
 /// 新建 materialization 输入。
 ///
 /// Business Logic（为什么需要这个结构体）:
@@ -1221,6 +1293,8 @@ impl TargetDisableStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AssetAggregateStatus {
+    /// 尚未选择任何 target；中性状态，不是部分失败
+    Unconfigured,
     /// 每个 requested target 均 supported/present/enabled-as-desired/verified
     Full,
     /// 部分 target 未达标
@@ -1241,6 +1315,7 @@ impl AssetAggregateStatus {
     /// 稳定 wire token。
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Unconfigured => "unconfigured",
             Self::Full => "full",
             Self::Partial => "partial",
             Self::SourceOnly => "sourceOnly",
@@ -1254,6 +1329,7 @@ impl AssetAggregateStatus {
     /// 解析 wire token。
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "unconfigured" => Some(Self::Unconfigured),
             "full" => Some(Self::Full),
             "partial" => Some(Self::Partial),
             "sourceOnly" => Some(Self::SourceOnly),
@@ -1438,7 +1514,7 @@ impl TargetBinding {
 pub fn compute_asset_aggregate_status(targets: &[TargetStatusSnapshot]) -> AssetAggregateStatus {
     let requested: Vec<&TargetStatusSnapshot> = targets.iter().filter(|t| t.requested).collect();
     if requested.is_empty() {
-        return AssetAggregateStatus::Partial;
+        return AssetAggregateStatus::Unconfigured;
     }
 
     let mut any_blocked = false;
@@ -1758,6 +1834,16 @@ mod target_presence_tests {
         assert_eq!(
             compute_asset_aggregate_status(&snaps_ok),
             AssetAggregateStatus::Full
+        );
+    }
+
+    /// Business Logic: 用户尚未选择任何 target 是中性未配置，不是 partial 失败。
+    /// Code Logic: 空 requested 集合返回 Unconfigured。
+    #[test]
+    fn aggregate_without_requested_targets_is_unconfigured() {
+        assert_eq!(
+            compute_asset_aggregate_status(&[]),
+            AssetAggregateStatus::Unconfigured
         );
     }
 

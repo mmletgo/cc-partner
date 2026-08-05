@@ -26,7 +26,7 @@ static SHUTDOWN_NOTIFIER: OnceLock<Mutex<Option<watch::Sender<bool>>>> = OnceLoc
 ///
 /// Code Logic（这个常量做什么）:
 ///     新建控制文件时填入；缺失/0 视为旧 backend，突变需 `upgradeRequired`。
-pub const AGENT_HUB_API_VERSION: u32 = 1;
+pub const AGENT_HUB_API_VERSION: u32 = 2;
 
 /// `/api/health` 响应中后端状态检查需要的字段。
 ///

@@ -1,4 +1,4 @@
-# Agent Hub Support Manifest & Package Absent Deactivation
+# Agent Hub Support Manifest, Package Absent Deactivation & User Instruction V2
 
 > Status: **R5 quality fix (Codex R5)** — the package-Absent deactivation path is
 > gated by `evaluate_target_support_flags`, persists a durable deactivation token,
@@ -91,12 +91,72 @@ projection engine must not delete files blindly. The contract is:
   agrees with `EvaluatedTargetSupport::capability` for every
   `TargetCapability` value.
 
+## User-level instruction V2: inspect is useful before write certification
+
+`agent_hub::user_instructions` owns the V2 workspace for the stable user
+scope `agent-hub-scope-user`. Its first deliverable is a truthful inventory,
+not an optimistic multi-CLI writer. The authoritative read entry point is
+`inspect_user_instruction_workspace` (with the injected-environment variant
+used by tests).
+
+### Read contract
+
+- Inspect reads the Hub asset/revision/binding/materialization records and the
+  three CLI adapters' source chains. It returns canonical revision metadata,
+  the real target path, ordered native/override/fallback/shadowed sources,
+  ownership, projection state, activation requirement, and per-operation
+  capability/evidence. It must not create a binding, materialization,
+  ownership record, or target-side file.
+- `inventorySnapshotHash` is the freshness fence for a later preview. It is
+  derived from the scope, canonical head, target config/version/path,
+  management and capability facts, plus source role/presence/hash/ownership;
+  it intentionally excludes refresh time and unbounded instruction text. A
+  caller must send the current hash and base revision back to preview; an
+  obsolete value is rejected rather than silently rebased.
+- Canonical editor content is bounded for the loopback control response. A
+  truncated value is explicitly marked `contentTruncated`; it is not safe to
+  overwrite, delete, or use as a full diff base. Source hashing is likewise
+  bounded, so a giant external file remains inspectable without turning the
+  control plane into an unbounded content transport.
+
+### Preview / apply safety contract
+
+- Preview may persist a short-lived, owner-local plan, but it performs no
+  canonical or target filesystem mutation. Every plan is tied to its owner,
+  base revision, inventory hash, expected source hash, bounded diff, and
+  expiry. A plan is opaque to the client: apply receives only its token and a
+  stable `clientRequestId`.
+- Apply claims that token atomically and replays the same request result. It
+  rechecks expiry, owner, revision, inventory, source hash, ownership, empty
+  target-only render, and diff truncation before reporting each target result.
+  A stale plan is a per-target `stalePreview`, never an implicit refresh or
+  write.
+- **Current release state is scan-only for target writes/removes.** While the
+  embedded support manifest has no L3-certified target write/remove evidence,
+  any create/update/delete change ends as
+  `USER_INSTRUCTION_TARGET_SCAN_ONLY`. The UI may show source facts, compare
+  and preview intent, but cannot treat a successful inspect or preview as
+  proof that a CLI file was changed. No client-side fallback is allowed for a
+  missing V2 mutation command.
+
+### Evidence boundary
+
+The L0 and browser-mock entry points exercise inventory/decode/draft/preview
+and stale-plan behavior. They do **not** certify a real CLI path write or
+remove. Real user-level write/remove evidence remains the existing
+`L3-AGENT-HUB-CLAUDE-001`, `L3-AGENT-HUB-CODEX-001`, and
+`L3-AGENT-HUB-OPENCODE-001` rows, plus the V2 aggregate row
+`L3-AGENT-HUB-USER-INSTRUCTION-WRITE-001`; all are **NOT VERIFIED** until an
+exact version, commit, platform, date, and expiry are recorded.
+
 ## Residual / out of scope
 
 - L3 (`minTestedVersion: null`) is still unresolved; until the first
   `support-manifest.json` entry gains evidence the manifest reports
   every target as uncertified (ReadOnly / Blocked). The
   `Gate B` / `Gate D` smoke tests are the canonical evidence anchors.
+- User instruction V2 does not weaken that gate. A fixture, browser mock, or
+  source scan cannot be promoted into a target write/remove certification.
 - Multi-target TreeHash precheck for the **deactivate** path is owned by
   the activator, not the projection scheduler. Future L3 evidence may
   require per-target TreeHash for Claude/Codex/OpenCode managed packages.

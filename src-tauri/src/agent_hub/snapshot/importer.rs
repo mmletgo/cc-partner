@@ -829,9 +829,22 @@ impl SnapshotImporter {
             conflict_touched.insert(c.asset_id.clone());
         }
 
-        // projections_scheduled：仅 mapped 且 opted_in 的 project / 全部 user assets
+        // projections_scheduled：只有本机已明确选择 target binding 的资产才可声称将投影；
+        // canonical 导入与本机应用是两个结果，新导入 user asset 默认待配置。
         let mut projections_scheduled = 0u64;
         for a in &env.assets {
+            let local_asset_id = asset_id_local
+                .get(&a.id)
+                .cloned()
+                .unwrap_or_else(|| a.id.clone());
+            if self
+                .repo
+                .list_target_bindings_for_asset(&local_asset_id)
+                .await?
+                .is_empty()
+            {
+                continue;
+            }
             // user scope assets always count if opted global? Gate A: user always projectable
             let is_user = scope_remap
                 .get(&a.scope_id)

@@ -53,6 +53,7 @@ pub mod service;
 pub mod snapshot;
 pub mod support;
 pub mod targets;
+pub mod user_instructions;
 
 pub use assets::{
     canonical_bytes, ensure_kind_matches_payload, from_canonical_bytes, CommandArgument,
@@ -92,7 +93,8 @@ pub use models::{
     NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState, ProjectionPayloadKind,
     Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode,
     TargetBinding, TargetBindingIntent, TargetBindingTransition, TargetDisableStrategy,
-    TargetStatusSnapshot,
+    TargetStatusSnapshot, UserInstructionOwnershipRecord, UserInstructionPlanClaim,
+    UserInstructionPlanRecord,
 };
 pub use object_store::{
     sha256_hex, ObjectStore, PutTreeResult, StoredObject, TreeEntry, TreeEntryDiagnostic,
@@ -168,4 +170,12 @@ pub use targets::{
     OpenCodeHomePaths, OpenCodeInstructionAdapter, PortableAssetOrigin, PortableDiscoveryStatus,
     PortableOriginKind, ProjectedAssetFile, RenderedInstruction, TargetAssetProjection,
     TargetEnvironment, TargetHomePaths, TargetHomes, TargetPathResolver, TargetProbe,
+};
+pub use user_instructions::{
+    apply_user_instruction_plan, inspect_user_instruction_workspace,
+    preview_user_instruction_setup, preview_user_instruction_update,
+    ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
+    PreviewUserInstructionRequest, UserInstructionAction, UserInstructionCanonicalDto,
+    UserInstructionManagementMode, UserInstructionPlanDto, UserInstructionTargetDto,
+    UserInstructionWorkspaceDto,
 };

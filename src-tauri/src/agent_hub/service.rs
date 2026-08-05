@@ -365,6 +365,42 @@ pub enum AgentHubConflictResolution {
 }
 
 impl AgentHubService {
+    /// Business Logic: 用户级指令首页必须展示三个 CLI 的真实 source chain 与管理状态。
+    /// Code Logic: 委托 V2 inventory owner 实现，不读取 GUI 本地空状态。
+    pub async fn inspect_user_instruction_workspace(
+        state: &AppState,
+    ) -> Result<crate::agent_hub::user_instructions::UserInstructionWorkspaceDto, AppError> {
+        crate::agent_hub::user_instructions::inspect_user_instruction_workspace(state).await
+    }
+
+    /// Business Logic: 首次设置在任何 mutation 前生成可审阅、短期有效的计划。
+    /// Code Logic: 委托 V2 setup preview 并持久化 plan token。
+    pub async fn preview_user_instruction_setup(
+        state: &AppState,
+        req: crate::agent_hub::user_instructions::PreviewUserInstructionRequest,
+    ) -> Result<crate::agent_hub::user_instructions::UserInstructionPlanDto, AppError> {
+        crate::agent_hub::user_instructions::preview_user_instruction_setup(state, req).await
+    }
+
+    /// Business Logic: 日常更新也必须经过 revision/inventory/diff 预览。
+    /// Code Logic: 委托 V2 update preview 并持久化 plan token。
+    pub async fn preview_user_instruction_update(
+        state: &AppState,
+        req: crate::agent_hub::user_instructions::PreviewUserInstructionRequest,
+    ) -> Result<crate::agent_hub::user_instructions::UserInstructionPlanDto, AppError> {
+        crate::agent_hub::user_instructions::preview_user_instruction_update(state, req).await
+    }
+
+    /// Business Logic: 仅允许应用已确认且仍新鲜的计划；当前 target 写能力未认证时 fail-closed。
+    /// Code Logic: 委托 V2 apply 的原子 claim/CAS/ownership 验证。
+    pub async fn apply_user_instruction_plan(
+        state: &AppState,
+        req: crate::agent_hub::user_instructions::ApplyUserInstructionPlanRequest,
+    ) -> Result<crate::agent_hub::user_instructions::ApplyUserInstructionPlanResultDto, AppError>
+    {
+        crate::agent_hub::user_instructions::apply_user_instruction_plan(state, req).await
+    }
+
     /// Business Logic: 首屏 status。
     /// Code Logic: config + owner/writeCompatible + probes + counts。
     pub async fn get_status(state: &AppState) -> Result<AgentHubStatusDto, AppError> {
@@ -1628,6 +1664,10 @@ async fn build_summary(
         .list_target_bindings_for_asset(&asset.id)
         .await?;
     let mats = state.agent_hub_repo.list_materializations().await?;
+    let user_instruction_ownership = state
+        .agent_hub_repo
+        .list_user_instruction_ownerships(&asset.id)
+        .await?;
     let mat_by_binding: BTreeMap<String, &Materialization> = mats
         .iter()
         .map(|m| (m.target_binding_id.clone(), m))
@@ -1644,6 +1684,17 @@ async fn build_summary(
         let supported = support_by_target.get(&target).copied().unwrap_or(false);
         if let Some(b) = bindings.iter().find(|b| b.target == target) {
             let mat = mat_by_binding.get(&b.id).copied();
+            let legacy_unselected = asset.scope_id
+                == crate::agent_hub::migration::USER_SCOPE_STABLE_ID
+                && asset.logical_key == crate::agent_hub::migration::USER_INSTRUCTION_LOGICAL_KEY
+                && b.desired_presence == DesiredPresence::Absent
+                && !b.desired_enabled
+                && b.local_scope_mapping_id.is_none()
+                && b.checkout_binding_id.is_none()
+                && mat.is_none()
+                && !user_instruction_ownership
+                    .iter()
+                    .any(|ownership| ownership.target == target);
             let mat_status = mat.map(|m| m.status);
             let source_only = is_source_only_cell(asset, mat_status);
             let verified = is_verified_cell(asset, b, mat);
@@ -1653,20 +1704,22 @@ async fn build_summary(
                 desired_enabled: b.desired_enabled,
                 materialization_status: mat_status.map(|s| s.as_str().to_string()),
                 last_error: mat.and_then(|m| m.last_error.clone()),
-                requested: true,
+                requested: !legacy_unselected,
                 supported,
                 source_only,
                 verified,
             });
-            snaps.push(TargetStatusSnapshot {
-                requested: true,
-                desired_presence: b.desired_presence,
-                desired_enabled: b.desired_enabled,
-                supported,
-                source_only,
-                materialization_status: mat_status,
-                verified,
-            });
+            if !legacy_unselected {
+                snaps.push(TargetStatusSnapshot {
+                    requested: true,
+                    desired_presence: b.desired_presence,
+                    desired_enabled: b.desired_enabled,
+                    supported,
+                    source_only,
+                    materialization_status: mat_status,
+                    verified,
+                });
+            }
         } else {
             targets.push(AgentHubTargetCellDto {
                 target,
@@ -1731,6 +1784,7 @@ pub(crate) fn evaluate_target_support_flags(
         CapabilitySupport::Supported
             | CapabilitySupport::SupportedAfterRestart
             | CapabilitySupport::ActivationRequired
+            | CapabilitySupport::ReadOnly
     )
 }
 
@@ -1795,7 +1849,7 @@ fn is_verified_cell(
     mat: Option<&Materialization>,
 ) -> bool {
     let Some(mat) = mat else {
-        return binding.desired_presence == DesiredPresence::Absent;
+        return false;
     };
     match mat.status {
         MaterializationStatus::Synced => {
@@ -2097,6 +2151,17 @@ async fn load_instruction_document(
 /// Business Logic: hub-on legacy translator 只更新 Claude targetOnly，需读现有块结构。
 /// Code Logic: 委托 load_instruction_document。
 pub(crate) async fn load_instruction_document_for_legacy(
+    asset: &LogicalAsset,
+    state: &AppState,
+) -> Result<(InstructionDocument, Option<String>), AppError> {
+    load_instruction_document(state, asset).await
+}
+
+/// User Instruction V2 专用：加载 canonical 块文档且不记录正文。
+///
+/// Business Logic: inventory/preview 必须复用与 legacy/service 相同的 CAS payload 解析。
+/// Code Logic: 仅委托内部 load_instruction_document。
+pub(crate) async fn load_instruction_document_for_user_v2(
     asset: &LogicalAsset,
     state: &AppState,
 ) -> Result<(InstructionDocument, Option<String>), AppError> {
@@ -3006,7 +3071,7 @@ mod tests {
         };
         let evaluated = crate::agent_hub::support::evaluate_target_support(&manifest, &snapshot);
         // Uncertified probe → read-side capabilities may be ReadOnly, write-side must be
-        // Blocked. Either way `evaluate_target_support_flags` must return false.
+        // Blocked。summary 的 scan 支持必须保留 ReadOnly，不把可发现误报为 unsupported。
         for cap in [
             crate::agent_hub::support::TargetCapability::ScanInstruction,
             crate::agent_hub::support::TargetCapability::RenderInstruction,
@@ -3021,27 +3086,24 @@ mod tests {
                 ),
                 "uncertified probe must evaluate to Blocked or ReadOnly for {cap:?}, got {support:?}"
             );
-            assert!(
-                !evaluate_target_support_flags(&evaluated, cap),
-                "evaluate_target_support_flags must be false for non-Supported capability {cap:?} (got {support:?})"
+            assert_eq!(
+                evaluate_target_support_flags(&evaluated, cap),
+                support == CapabilitySupport::ReadOnly,
+                "ReadOnly should count for scan summary while Blocked remains false for {cap:?}"
             );
         }
 
-        // Now exercise the live map: every value must be `false` since the production
-        // manifest ships with `minTestedVersion: null` and the evaluator fail-closes.
+        // Live map 只表达 scan 可用性；ReadOnly 可以为 true，但不得遗漏 target。
         let map = probe_support_map();
         assert_eq!(
             map.len(),
             3,
             "probe_support_map must cover all three targets"
         );
-        for (target, supported) in &map {
-            assert!(
-                !*supported,
-                "probe_support_map must mark target {} as unsupported when manifest is null/uncertified",
-                target.as_str()
-            );
-        }
+        assert!(map.keys().all(|target| matches!(
+            target,
+            AgentTarget::Claude | AgentTarget::Codex | AgentTarget::OpenCode
+        )));
     }
 
     /// R5 P2.3: `evaluate_target_support_flags` is exposed at `pub(crate)` so future
@@ -3070,12 +3132,13 @@ mod tests {
             help_fingerprint: None,
         };
         let evaluated = crate::agent_hub::support::evaluate_target_support(&manifest, &snapshot);
-        // Blocked path returns false for every capability.
+        // Blocked path returns false；ReadOnly scan mode 则保持可发现。
         if matches!(evaluated.mode, EvaluatedSupportMode::Blocked { .. }) {
-            assert!(!evaluate_target_support_flags(
-                &evaluated,
-                TargetCapability::ScanInstruction
-            ));
+            let scan = evaluated.capability(TargetCapability::ScanInstruction);
+            assert_eq!(
+                evaluate_target_support_flags(&evaluated, TargetCapability::ScanInstruction),
+                scan == CapabilitySupport::ReadOnly
+            );
         } else {
             // Whatever the real-world verdict, the helper must agree with `evaluated.capability`.
             for cap in [
@@ -3092,6 +3155,7 @@ mod tests {
                         CapabilitySupport::Supported
                             | CapabilitySupport::SupportedAfterRestart
                             | CapabilitySupport::ActivationRequired
+                            | CapabilitySupport::ReadOnly
                     ),
                     "evaluate_target_support_flags must agree with EvaluatedTargetSupport::capability for {cap:?}"
                 );

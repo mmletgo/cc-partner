@@ -50,6 +50,23 @@ import type {
   PluginPackageReport,
   PluginResidualKind,
   PluginResidualReport,
+  UserInstructionAction,
+  UserInstructionApplyResultDto,
+  UserInstructionApplyTargetResultDto,
+  UserInstructionCanonicalDto,
+  UserInstructionCapabilityDto,
+  UserInstructionHealthState,
+  UserInstructionManagementMode,
+  UserInstructionPlanChangeDto,
+  UserInstructionPlanDto,
+  UserInstructionProjectionDto,
+  UserInstructionProjectionState,
+  UserInstructionSetupState,
+  UserInstructionSourceDto,
+  UserInstructionSourceOwnership,
+  UserInstructionSourceRole,
+  UserInstructionTargetDto,
+  UserInstructionWorkspaceDto,
 } from '../types/agentHub';
 import {
   arrayDecoder,
@@ -99,6 +116,7 @@ export const instructionBlockModeDecoder: Decoder<InstructionBlockMode> = enumDe
 export const assetAggregateStatusDecoder: Decoder<AssetAggregateStatus> = enumDecoder(
   'AssetAggregateStatus',
   [
+    'unconfigured',
     'full',
     'partial',
     'sourceOnly',
@@ -169,6 +187,246 @@ export const agentHubStatusDecoder: Decoder<AgentHubStatus> = objectDecoder('Age
   conflictCount: numberDecoder,
   blockedMaterializationCount: numberDecoder,
 });
+
+/** User Instruction V2 设置阶段 decoder。 */
+export const userInstructionSetupStateDecoder: Decoder<UserInstructionSetupState> = enumDecoder(
+  'UserInstructionSetupState',
+  ['unconfigured', 'readyToReview', 'configured'] as const,
+);
+
+/** User Instruction V2 健康阶段 decoder。 */
+export const userInstructionHealthStateDecoder: Decoder<UserInstructionHealthState> = enumDecoder(
+  'UserInstructionHealthState',
+  ['healthy', 'actionRequired', 'blocked'] as const,
+);
+
+/** User Instruction source role decoder。 */
+export const userInstructionSourceRoleDecoder: Decoder<UserInstructionSourceRole> = enumDecoder(
+  'UserInstructionSourceRole',
+  ['native', 'override', 'fallback', 'shadowed'] as const,
+);
+
+/** User Instruction ownership decoder。 */
+export const userInstructionSourceOwnershipDecoder: Decoder<UserInstructionSourceOwnership> =
+  enumDecoder('UserInstructionSourceOwnership', ['external', 'hubManaged', 'unknown'] as const);
+
+/** User Instruction management mode decoder。 */
+export const userInstructionManagementModeDecoder: Decoder<UserInstructionManagementMode> =
+  enumDecoder('UserInstructionManagementMode', [
+    'unmanaged',
+    'managedActive',
+    'managedPaused',
+  ] as const);
+
+/** User Instruction projection state decoder。 */
+export const userInstructionProjectionStateDecoder: Decoder<UserInstructionProjectionState> =
+  enumDecoder('UserInstructionProjectionState', [
+    'none',
+    'pending',
+    'inSync',
+    'drift',
+    'detached',
+    'conflict',
+    'collision',
+    'activationRequired',
+    'failed',
+    'blocked',
+  ] as const);
+
+/** User Instruction available action decoder。 */
+export const userInstructionActionDecoder: Decoder<UserInstructionAction> = enumDecoder(
+  'UserInstructionAction',
+  [
+    'manage',
+    'pause',
+    'resume',
+    'stopManaging',
+    'remove',
+    'compare',
+    'adopt',
+    'restore',
+    'deleteAsset',
+    'openFile',
+  ] as const,
+);
+
+/** User Instruction source decoder。 */
+export const userInstructionSourceDecoder: Decoder<UserInstructionSourceDto> = objectDecoder(
+  'UserInstructionSourceDto',
+  {
+    sourceId: stringDecoder,
+    path: stringDecoder,
+    role: userInstructionSourceRoleDecoder,
+    active: booleanDecoder,
+    exists: booleanDecoder,
+    nonEmpty: booleanDecoder,
+    hash: nullableDecoder(stringDecoder),
+    modifiedAt: nullableDecoder(stringDecoder),
+    ownership: userInstructionSourceOwnershipDecoder,
+    reasonCode: optionalDecoder(nullableDecoder(stringDecoder)),
+  },
+);
+
+/** User Instruction capability decoder。 */
+export const userInstructionCapabilityDecoder: Decoder<UserInstructionCapabilityDto> =
+  objectDecoder('UserInstructionCapabilityDto', {
+    scan: enumDecoder('UserInstructionScanCapability', [
+      'supported',
+      'readOnly',
+      'blocked',
+    ] as const),
+    write: enumDecoder('UserInstructionWriteCapability', ['supported', 'blocked'] as const),
+    remove: enumDecoder('UserInstructionRemoveCapability', ['supported', 'blocked'] as const),
+    activate: enumDecoder('UserInstructionActivateCapability', [
+      'immediate',
+      'newSession',
+      'restart',
+      'unknown',
+      'blocked',
+    ] as const),
+    reasonCode: nullableDecoder(stringDecoder),
+    evidenceIds: arrayDecoder(stringDecoder),
+  });
+
+/** User Instruction projection decoder。 */
+export const userInstructionProjectionDecoder: Decoder<UserInstructionProjectionDto> =
+  objectDecoder('UserInstructionProjectionDto', {
+    state: userInstructionProjectionStateDecoder,
+    desiredRevisionId: nullableDecoder(stringDecoder),
+    appliedRevisionId: nullableDecoder(stringDecoder),
+    observedHash: nullableDecoder(stringDecoder),
+    lastErrorCode: nullableDecoder(stringDecoder),
+  });
+
+/** User Instruction target decoder。 */
+export const userInstructionTargetDecoder: Decoder<UserInstructionTargetDto> = objectDecoder(
+  'UserInstructionTargetDto',
+  {
+    target: agentTargetDecoder,
+    cli: objectDecoder('UserInstructionCliDto', {
+      installed: booleanDecoder,
+      version: nullableDecoder(stringDecoder),
+      configRoot: stringDecoder,
+    }),
+    sources: arrayDecoder(userInstructionSourceDecoder),
+    effectiveSourceId: nullableDecoder(stringDecoder),
+    managedTargetPath: nullableDecoder(stringDecoder),
+    managementMode: userInstructionManagementModeDecoder,
+    capability: userInstructionCapabilityDecoder,
+    projection: userInstructionProjectionDecoder,
+    availableActions: arrayDecoder(userInstructionActionDecoder),
+  },
+);
+
+/** Agent target extension map decoder。 */
+const userInstructionTargetExtensionsDecoder: Decoder<
+  Partial<Record<AgentTarget, string>>
+> = objectDecoder('UserInstructionTargetExtensions', {
+  claude: optionalDecoder(stringDecoder),
+  codex: optionalDecoder(stringDecoder),
+  opencode: optionalDecoder(stringDecoder),
+});
+
+/** User Instruction canonical decoder。 */
+export const userInstructionCanonicalDecoder: Decoder<UserInstructionCanonicalDto> =
+  objectDecoder('UserInstructionCanonicalDto', {
+    assetId: stringDecoder,
+    displayName: stringDecoder,
+    headRevisionId: nullableDecoder(stringDecoder),
+    commonContent: stringDecoder,
+    targetExtensions: userInstructionTargetExtensionsDecoder,
+    deleted: booleanDecoder,
+    contentTruncated: booleanDecoder,
+  });
+
+/** User Instruction workspace decoder。 */
+export const userInstructionWorkspaceDecoder: Decoder<UserInstructionWorkspaceDto> =
+  objectDecoder('UserInstructionWorkspaceDto', {
+    scopeId: stringDecoder,
+    setupState: userInstructionSetupStateDecoder,
+    healthState: userInstructionHealthStateDecoder,
+    canonical: nullableDecoder(userInstructionCanonicalDecoder),
+    targets: arrayDecoder(userInstructionTargetDecoder),
+    inventorySnapshotHash: stringDecoder,
+    refreshedAt: stringDecoder,
+  });
+
+/** User Instruction plan target change decoder。 */
+export const userInstructionPlanChangeDecoder: Decoder<UserInstructionPlanChangeDto> =
+  objectDecoder('UserInstructionPlanChangeDto', {
+    target: agentTargetDecoder,
+    path: stringDecoder,
+    operation: enumDecoder('UserInstructionPlanOperation', [
+      'create',
+      'update',
+      'delete',
+      'leave',
+    ] as const),
+    currentHash: nullableDecoder(stringDecoder),
+    expectedHash: nullableDecoder(stringDecoder),
+    renderedHash: nullableDecoder(stringDecoder),
+    unifiedDiff: nullableDecoder(stringDecoder),
+    ownershipRequired: booleanDecoder,
+    willShadowSourcePath: nullableDecoder(stringDecoder),
+    willReplaceFallbackSourcePath: nullableDecoder(stringDecoder),
+    emptyDueToTargetOnly: booleanDecoder,
+    activation: enumDecoder('UserInstructionPlanActivation', [
+      'immediate',
+      'newSession',
+      'restart',
+      'unknown',
+    ] as const),
+    warnings: arrayDecoder(stringDecoder),
+    diffTruncated: optionalDecoder(booleanDecoder),
+  });
+
+/** User Instruction preview plan decoder。 */
+export const userInstructionPlanDecoder: Decoder<UserInstructionPlanDto> = objectDecoder(
+  'UserInstructionPlanDto',
+  {
+    planToken: stringDecoder,
+    expiresAt: stringDecoder,
+    baseRevisionId: nullableDecoder(stringDecoder),
+    inventorySnapshotHash: stringDecoder,
+    changes: arrayDecoder(userInstructionPlanChangeDecoder),
+    blockingReasons: arrayDecoder(stringDecoder),
+    truncated: optionalDecoder(booleanDecoder),
+    warnings: optionalDecoder(arrayDecoder(stringDecoder)),
+  },
+);
+
+/** User Instruction apply per-target decoder。 */
+export const userInstructionApplyTargetResultDecoder: Decoder<UserInstructionApplyTargetResultDto> =
+  objectDecoder('UserInstructionApplyTargetResultDto', {
+    target: agentTargetDecoder,
+    path: stringDecoder,
+    status: enumDecoder('UserInstructionApplyStatus', [
+      'queued',
+      'applied',
+      'noChange',
+      'stalePreview',
+      'blocked',
+      'conflict',
+      'failed',
+    ] as const),
+    errorCode: nullableDecoder(stringDecoder),
+    activation: enumDecoder('UserInstructionApplyActivation', [
+      'immediate',
+      'newSession',
+      'restart',
+      'unknown',
+      'blocked',
+    ] as const),
+  });
+
+/** User Instruction apply result decoder。 */
+export const userInstructionApplyResultDecoder: Decoder<UserInstructionApplyResultDto> =
+  objectDecoder('UserInstructionApplyResultDto', {
+    planToken: stringDecoder,
+    setupState: userInstructionSetupStateDecoder,
+    healthState: userInstructionHealthStateDecoder,
+    targets: arrayDecoder(userInstructionApplyTargetResultDecoder),
+  });
 
 /**
  * Business Logic: 目标单元格 presence 与 Gate B 聚合输入为 required。

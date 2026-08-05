@@ -547,6 +547,90 @@ mod tests {
         assert!(rels.iter().any(|r| r.contains("a/AGENTS.md")));
     }
 
+    /// Business Logic: OpenCode 用户原生规则缺失时会继承 Claude；原生文件出现后必须遮蔽 fallback。
+    /// Code Logic: 隔离 HOME 分别断言 fallback active 与 native-active 优先级。
+    #[test]
+    fn opencode_user_scan_resolves_claude_fallback_and_native_priority() {
+        let root = tempfile::tempdir().unwrap();
+        let opencode_home = root.path().join("opencode-home");
+        let claude_home = root.path().join("claude-home");
+        write_text(&claude_home.join("CLAUDE.md"), "fallback rules\n");
+        let mut env = base_env(root.path(), vec![]);
+        env.vars.insert(
+            "OPENCODE_CONFIG_DIR".into(),
+            opencode_home.to_string_lossy().into(),
+        );
+        env.vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            claude_home.to_string_lossy().into(),
+        );
+        let scope = LocalScopeMapping {
+            scope_kind: ScopeKind::User,
+            absolute_path: root.path().to_path_buf(),
+            project_root: None,
+            relative_root: None,
+            codex_fallback_filenames: vec![],
+        };
+        let inherited = OpenCodeInstructionAdapter
+            .scan_instruction_sources(&scope, &env)
+            .unwrap();
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].role, InstructionSourceRole::Fallback);
+        assert!(inherited[0].active);
+
+        write_text(&opencode_home.join("AGENTS.md"), "native rules\n");
+        let native = OpenCodeInstructionAdapter
+            .scan_instruction_sources(&scope, &env)
+            .unwrap();
+        let active = native.iter().find(|source| source.active).expect("active");
+        assert_eq!(active.role, InstructionSourceRole::NativePrimary);
+        let fallback = native
+            .iter()
+            .find(|source| source.role == InstructionSourceRole::Fallback)
+            .expect("fallback");
+        assert!(!fallback.active);
+        assert!(fallback
+            .diagnostics
+            .iter()
+            .any(|reason| reason == "opencode_claude_fallback_shadowed_by_native"));
+    }
+
+    /// Business Logic: 两个 OpenCode 禁用开关任一存在时都不能声称 Claude fallback 生效。
+    /// Code Logic: 对两个环境变量分别扫描并断言 fallback inactive + 稳定诊断。
+    #[test]
+    fn opencode_user_scan_honors_both_claude_fallback_disable_envs() {
+        for key in [
+            "OPENCODE_DISABLE_CLAUDE_CODE",
+            "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let claude_home = root.path().join("claude-home");
+            write_text(&claude_home.join("CLAUDE.md"), "fallback rules\n");
+            let mut env = base_env(root.path(), vec![]);
+            env.vars.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                claude_home.to_string_lossy().into(),
+            );
+            env.vars.insert(key.into(), "1".into());
+            let scope = LocalScopeMapping {
+                scope_kind: ScopeKind::User,
+                absolute_path: root.path().to_path_buf(),
+                project_root: None,
+                relative_root: None,
+                codex_fallback_filenames: vec![],
+            };
+            let sources = OpenCodeInstructionAdapter
+                .scan_instruction_sources(&scope, &env)
+                .unwrap();
+            let fallback = sources.first().expect("fallback visible");
+            assert!(!fallback.active, "{key} must disable fallback");
+            assert!(fallback
+                .diagnostics
+                .iter()
+                .any(|reason| reason == "opencode_claude_fallback_disabled"));
+        }
+    }
+
     #[test]
     fn claude_keeps_user_and_project_paths_separate() {
         let root = tempfile::tempdir().unwrap();

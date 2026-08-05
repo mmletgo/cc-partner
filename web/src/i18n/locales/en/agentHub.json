@@ -1,6 +1,168 @@
 {
   "title": "Agent Hub",
   "subtitle": "Manage multi-CLI instructions and portable assets for Claude, Codex, and OpenCode from one workspace.",
+  "sections": {
+    "aria": "Agent Hub workspaces",
+    "userInstructions": "User instructions",
+    "projectInstructions": "Project instructions",
+    "projectInstructionsHint": "Preview and enable project instruction mappings. Nothing is written before confirmation.",
+    "portableAssets": "Skills and tools",
+    "syncImport": "Sync and import",
+    "diagnostics": "Compatibility and diagnostics"
+  },
+  "userInstructions": {
+    "title": "User instructions",
+    "subtitle": "See the files each agent actually reads, then manage them as shared content with small agent-specific extensions.",
+    "loading": "Reading user instructions…",
+    "refreshedAt": "Last checked: {{time}}",
+    "scanOnlyNotice": "The current backend can read these files but cannot write them automatically yet. You can still inspect, copy, and open the actual paths.",
+    "targetsTitle": "What each agent actually uses",
+    "targetsDescription": "Each card shows one primary state, the effective source, and the next safe action.",
+    "summary": {
+      "empty": "No user instructions were found. Inspect each agent's effective source before choosing to manage it.",
+      "readyToReview": "Existing instructions were found and are not managed by Agent Hub yet. Review their sources first.",
+      "configuredHealthy": "{{managed}} agents are managed and currently in sync.",
+      "configuredActionRequired": "{{managed}} agents are managed; {{actions}} need attention.",
+      "configuredBlocked": "{{managed}} agents are managed; {{actions}} are blocked."
+    },
+    "editor": {
+      "title": "Unified editor",
+      "description": "Shared content is projected to managed targets; agent extensions are appended only for that agent.",
+      "unsaved": "Unsaved draft",
+      "characterCount": "{{count}} characters",
+      "contentTruncated": "The canonical content exceeds the safe read limit, so only part is shown. Preview and writes are disabled to avoid overwriting the complete file.",
+      "readOnly": "This is read-only discovery mode. You may organize a local draft, but no write plan can be generated or applied until the backend supports automatic management.",
+      "tabsAria": "Choose the user instruction editor pane",
+      "textareaAria": "Edit {{pane}}",
+      "discard": "Discard draft",
+      "previewApply": "Preview changes",
+      "panes": {
+        "common": "Shared instructions",
+        "claude": "Claude extension",
+        "codex": "Codex extension",
+        "opencode": "OpenCode extension"
+      },
+      "placeholders": {
+        "common": "Instructions every managed agent should follow…",
+        "claude": "Extra instructions only Claude needs…",
+        "codex": "Extra instructions only Codex needs…",
+        "opencode": "Extra instructions only OpenCode needs…"
+      }
+    },
+    "target": {
+      "cliInstalled": "Detected · {{version}}",
+      "cliNotInstalled": "CLI not detected",
+      "effectiveSource": "Currently read from",
+      "shadowedSources": "Exists but is not effective",
+      "managedPath": "Agent Hub managed path",
+      "sourceResolverUnavailable": "The older backend does not expose source resolution. Paths are not guessed.",
+      "noEffectiveSource": "No effective source found",
+      "pathUnavailable": "Path unavailable",
+      "reasonCode": "Diagnostic code: {{code}}",
+      "states": {
+        "unmanaged": "Unmanaged",
+        "external": "Using external file",
+        "fallback": "Using fallback source",
+        "fallbackDisabled": "Fallback disabled",
+        "paused": "Management paused",
+        "inSync": "In sync",
+        "pending": "Pending apply",
+        "drift": "Changed externally",
+        "detached": "Detached",
+        "conflict": "Content conflict",
+        "collision": "Path collision",
+        "activationRequired": "Activation required",
+        "failed": "Apply failed",
+        "blocked": "Blocked"
+      },
+      "capabilities": {
+        "automatic": "Automatic management is available. Every write starts with a per-target preview.",
+        "scanOnly": "Readable; automatic writes are not available yet.",
+        "scanBlocked": "This target cannot be read or managed safely. Follow the diagnostic details."
+      }
+    },
+    "actions": {
+      "create": "Create and set up",
+      "startManaging": "Start managing",
+      "manageTargets": "Manage targets",
+      "openFile": "Open file",
+      "manage": "Start managing",
+      "pause": "Pause management",
+      "resume": "Resume management",
+      "stopManaging": "Stop managing",
+      "remove": "Remove managed file",
+      "compare": "Compare changes",
+      "adopt": "Manage existing file",
+      "restore": "Restore projection"
+    },
+    "setup": {
+      "title": "Set up user instructions",
+      "description": "Explicitly choose whether Agent Hub manages each agent, leaves it unchanged, or keeps its native fallback. Confirmation starts with a preview.",
+      "singleSourceTitle": "Only {{target}} currently has content",
+      "singleSourceDescription": "Promote it to shared instructions, then keep only the agent-specific differences as an extension.",
+      "useAsCommon": "Use as shared content",
+      "writable": "Automatic management supported",
+      "scanOnly": "Scan only",
+      "manage": "Manage with Agent Hub",
+      "leave": "Leave unchanged",
+      "inherit": "Keep native fallback",
+      "scanOnlyReason": "The current backend will not write this target.",
+      "preview": "Generate per-target preview"
+    },
+    "plan": {
+      "title": "Confirm per-target changes",
+      "description": "Review each path, operation, diff, shadow/fallback impact, and activation behavior.",
+      "truncated": "The preview response was truncated and cannot be confirmed safely. Reduce the content or update the backend and try again.",
+      "blocked": "This plan contains blocked changes and cannot be applied.",
+      "willShadow": "Will shadow: {{paths}}",
+      "willReplaceFallback": "Will replace fallback source: {{path}}",
+      "emptyTargetBlocked": "This target has only extension content while shared content is empty; creating an empty file was blocked.",
+      "activation": "Activation: {{mode}}",
+      "diffTruncated": "The diff was truncated, so this plan cannot be applied safely.",
+      "noDiff": "No text difference.",
+      "apply": "Apply to {{count}} targets",
+      "operations": {
+        "create": "Create",
+        "update": "Update",
+        "delete": "Delete",
+        "leave": "Leave unchanged"
+      },
+      "activationModes": {
+        "immediate": "Immediate",
+        "newSession": "New session",
+        "restart": "After agent restart",
+        "unknown": "Confirm manually"
+      }
+    },
+    "result": {
+      "success": "Every target was handled as planned.",
+      "partial": "Some targets did not complete. The draft was preserved; review each result before retrying.",
+      "status": {
+        "queued": "Queued",
+        "applied": "Applied",
+        "noChange": "No change",
+        "stalePreview": "Preview is stale",
+        "blocked": "Blocked",
+        "conflict": "Conflict",
+        "failed": "Failed"
+      }
+    },
+    "errors": {
+      "contentTruncated": "The current content was not read in full, so a write plan cannot be generated.",
+      "backendUnavailable": "The current backend supports reading user instructions only; automatic writes are unavailable.",
+      "previewStale": "Files changed after the preview. The draft was preserved; refresh and preview again.",
+      "sourceRequired": "No existing source is available to manage."
+    },
+    "danger": {
+      "title": "Danger zone",
+      "description": "Deleting the canonical asset affects every target managed by Agent Hub.",
+      "open": "Delete canonical asset…",
+      "dialogTitle": "Preview canonical asset deletion",
+      "warning": "This does not execute immediately. Enter the asset name, then review the per-target deletion plan.",
+      "confirmLabel": "Enter “{{name}}” to continue",
+      "preview": "Preview deletion"
+    }
+  },
   "loading": "Loading Agent Hub…",
   "stale": "Status may be out of date. Refresh to reload.",
   "empty": "No assets match the current filters.",
@@ -54,6 +216,7 @@
     "externalCollision": "External collision"
   },
   "aggregate": {
+    "unconfigured": "Not configured",
     "full": "Full",
     "partial": "Partial",
     "sourceOnly": "Source only",

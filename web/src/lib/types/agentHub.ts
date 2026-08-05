@@ -18,6 +18,208 @@
 export type AgentTarget = 'claude' | 'codex' | 'opencode';
 
 /**
+ * 用户级指令 V2 设置阶段。
+ *
+ * Business Logic: 未管理任何目标时必须呈现可执行的首次设置，而不是 legacy partial。
+ * Code Logic: 与 Spec 9.6/10.2 wire token 对齐。
+ */
+export type UserInstructionSetupState = 'unconfigured' | 'readyToReview' | 'configured';
+
+/** 用户级指令 V2 健康阶段。 */
+export type UserInstructionHealthState = 'healthy' | 'actionRequired' | 'blocked';
+
+/** 用户级指令来源角色。 */
+export type UserInstructionSourceRole = 'native' | 'override' | 'fallback' | 'shadowed';
+
+/** 用户级指令来源所有权。 */
+export type UserInstructionSourceOwnership = 'external' | 'hubManaged' | 'unknown';
+
+/** Hub 对单个 Agent 的管理模式。 */
+export type UserInstructionManagementMode = 'unmanaged' | 'managedActive' | 'managedPaused';
+
+/** 用户级指令投影状态。 */
+export type UserInstructionProjectionState =
+  | 'none'
+  | 'pending'
+  | 'inSync'
+  | 'drift'
+  | 'detached'
+  | 'conflict'
+  | 'collision'
+  | 'activationRequired'
+  | 'failed'
+  | 'blocked';
+
+/**
+ * 后端根据 capability/ownership/state 计算的安全动作。
+ *
+ * Business Logic: view 不得从零散布尔字段猜测危险操作是否可用。
+ * Code Logic: 当前 V2 动作闭集；新增动作需同步 schema 与动作矩阵。
+ */
+export type UserInstructionAction =
+  | 'manage'
+  | 'pause'
+  | 'resume'
+  | 'stopManaging'
+  | 'remove'
+  | 'compare'
+  | 'adopt'
+  | 'restore'
+  | 'deleteAsset'
+  | 'openFile';
+
+/** 用户级指令的原生/回退来源。 */
+export interface UserInstructionSourceDto {
+  sourceId: string;
+  path: string;
+  role: UserInstructionSourceRole;
+  active: boolean;
+  exists: boolean;
+  nonEmpty: boolean;
+  hash: string | null;
+  modifiedAt: string | null;
+  ownership: UserInstructionSourceOwnership;
+  /** source resolver 的稳定诊断，例如 fallback 被环境变量禁用或文件过大。 */
+  reasonCode?: string | null;
+}
+
+/** 单 Agent 的动作级能力。 */
+export interface UserInstructionCapabilityDto {
+  scan: 'supported' | 'readOnly' | 'blocked';
+  write: 'supported' | 'blocked';
+  remove: 'supported' | 'blocked';
+  activate: 'immediate' | 'newSession' | 'restart' | 'unknown' | 'blocked';
+  reasonCode: string | null;
+  evidenceIds: string[];
+}
+
+/** 单 Agent 的当前投影事实。 */
+export interface UserInstructionProjectionDto {
+  state: UserInstructionProjectionState;
+  desiredRevisionId: string | null;
+  appliedRevisionId: string | null;
+  observedHash: string | null;
+  lastErrorCode: string | null;
+}
+
+/** 用户级指令 target overview。 */
+export interface UserInstructionTargetDto {
+  target: AgentTarget;
+  cli: {
+    installed: boolean;
+    version: string | null;
+    configRoot: string;
+  };
+  sources: UserInstructionSourceDto[];
+  effectiveSourceId: string | null;
+  managedTargetPath: string | null;
+  managementMode: UserInstructionManagementMode;
+  capability: UserInstructionCapabilityDto;
+  projection: UserInstructionProjectionDto;
+  availableActions: UserInstructionAction[];
+}
+
+/** 用户级指令 canonical 内容。 */
+export interface UserInstructionCanonicalDto {
+  assetId: string;
+  displayName: string;
+  headRevisionId: string | null;
+  commonContent: string;
+  targetExtensions: Partial<Record<AgentTarget, string>>;
+  deleted: boolean;
+  /** 受 256 KiB 内容上限截断时，当前正文不得用于生成覆盖 plan。 */
+  contentTruncated: boolean;
+}
+
+/**
+ * 用户级指令专用工作区 DTO。
+ *
+ * Business Logic: 首屏只消费事实化来源、管理模式、能力和投影状态。
+ * Code Logic: 对齐 Spec 10.2；不携带 portable ledger 内部字段。
+ */
+export interface UserInstructionWorkspaceDto {
+  scopeId: string;
+  setupState: UserInstructionSetupState;
+  healthState: UserInstructionHealthState;
+  canonical: UserInstructionCanonicalDto | null;
+  targets: UserInstructionTargetDto[];
+  inventorySnapshotHash: string;
+  refreshedAt: string;
+}
+
+/** 首次设置/日常更新中用户对 target 的明确选择。 */
+export type UserInstructionTargetSelection = 'managed' | 'unmanaged' | 'inherit';
+
+/** 用户级指令公共与三 Agent 专属草稿。 */
+export interface UserInstructionDraft {
+  commonContent: string;
+  targetExtensions: Partial<Record<AgentTarget, string>>;
+  targetSelections: Record<AgentTarget, UserInstructionTargetSelection>;
+}
+
+/** 生成 setup/update preview 的输入。 */
+export interface UserInstructionPreviewRequest extends UserInstructionDraft {
+  baseRevisionId: string | null;
+  inventorySnapshotHash: string;
+}
+
+/** 用户级指令 plan 中单 target 的路径级变化。 */
+export interface UserInstructionPlanChangeDto {
+  target: AgentTarget;
+  path: string;
+  operation: 'create' | 'update' | 'delete' | 'leave';
+  currentHash: string | null;
+  expectedHash: string | null;
+  renderedHash: string | null;
+  unifiedDiff: string | null;
+  ownershipRequired: boolean;
+  willShadowSourcePath: string | null;
+  willReplaceFallbackSourcePath: string | null;
+  emptyDueToTargetOnly: boolean;
+  activation: 'immediate' | 'newSession' | 'restart' | 'unknown';
+  warnings: string[];
+  /** sidecar 1 MiB response ceiling 下，diff 可被安全截断。 */
+  diffTruncated?: boolean;
+}
+
+/** 用户确认前的零写入 plan。 */
+export interface UserInstructionPlanDto {
+  planToken: string;
+  expiresAt: string;
+  baseRevisionId: string | null;
+  inventorySnapshotHash: string;
+  changes: UserInstructionPlanChangeDto[];
+  blockingReasons: string[];
+  /** 响应接近 sidecar hard limit 时，UI 必须明确提示预览不完整。 */
+  truncated?: boolean;
+  warnings?: string[];
+}
+
+/** plan apply 的单 target 真实结果。 */
+export interface UserInstructionApplyTargetResultDto {
+  target: AgentTarget;
+  path: string;
+  status: 'queued' | 'applied' | 'noChange' | 'stalePreview' | 'blocked' | 'conflict' | 'failed';
+  errorCode: string | null;
+  activation: 'immediate' | 'newSession' | 'restart' | 'unknown' | 'blocked';
+}
+
+/** plan apply 结果，不能压缩成单一 success。 */
+export interface UserInstructionApplyResultDto {
+  planToken: string;
+  setupState: UserInstructionSetupState;
+  healthState: UserInstructionHealthState;
+  targets: UserInstructionApplyTargetResultDto[];
+}
+
+/** target-local preview 的统一请求。 */
+export interface UserInstructionTargetPreviewRequest {
+  target: AgentTarget;
+  baseRevisionId: string | null;
+  inventorySnapshotHash: string;
+}
+
+/**
  * CLI probe 支持级别。
  *
  * Business Logic: UI 需展示 full/partial/scanOnly/unsupported 与后端 supported 等价语义。
@@ -71,10 +273,11 @@ export type MaterializationStatus =
 /**
  * 资产聚合状态（Gate B Task 7/8）。
  *
- * Business Logic: 列表与矩阵汇总 full/partial 与阻塞态，禁止仅凭 package write 推断 full。
+ * Business Logic: 未选择任何目标时必须显示“未配置”，不能误报 partial。
  * Code Logic: 严格 wire token。
  */
 export type AssetAggregateStatus =
+  | 'unconfigured'
   | 'full'
   | 'partial'
   | 'sourceOnly'

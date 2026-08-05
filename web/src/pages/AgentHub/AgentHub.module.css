@@ -142,13 +142,13 @@
 }
 
 .drawerSurface {
-  padding: 0 !important;
+  padding: 0;
   width: min(520px, 100vw);
 }
 
 .dialogSurface {
   width: min(720px, 100vw);
-  padding: 0 !important;
+  padding: 0;
 }
 
 .drawerBody,
@@ -401,7 +401,7 @@
 
 .replicationSectionTitle {
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: var(--weight-medium);
   margin: 0 0 var(--space-2);
 }
 
@@ -472,7 +472,7 @@
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  border: 1px solid var(--border, var(--meta));
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg);
 }
@@ -502,17 +502,17 @@
   min-height: 180px;
   resize: vertical;
   padding: var(--space-2);
-  border: 1px solid var(--border, var(--meta));
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--fg);
-  font-family: var(--font-mono, var(--font-body));
+  font-family: var(--font-mono);
   font-size: var(--text-sm);
   line-height: var(--leading-relaxed);
 }
 
 .documentTextarea:disabled {
-  background: var(--bg-2);
+  background: var(--surface);
   color: var(--muted);
 }
 
@@ -520,4 +520,276 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+/* 用户级指令是 Agent Hub 的默认工作区；portable matrix 保留为次级入口。 */
+.hubSectionNav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.userWorkspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.userHero,
+.userEditorHeader,
+.userSectionHeading,
+.userTargetHeader,
+.userPlanHeader,
+.userDialogHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.userHero {
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.userHeroCopy,
+.userEditorBody,
+.userTargetsSection,
+.userTargetBody,
+.userPathGroup,
+.userDialogBody,
+.userSetupTargets,
+.userPlanChanges,
+.userDangerZone {
+  display: flex;
+  flex-direction: column;
+}
+
+.userHeroCopy,
+.userEditorBody,
+.userTargetsSection,
+.userTargetBody,
+.userDialogBody,
+.userSetupTargets,
+.userPlanChanges,
+.userDangerZone {
+  gap: var(--space-3);
+}
+
+.userHeroActions,
+.userEditorMeta,
+.userEditorTabs,
+.userEditorFooter,
+.userPathRow,
+.userPathActions,
+.userTargetActions,
+.userDialogActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.userSummary {
+  margin: var(--space-2) 0 0;
+  color: var(--fg);
+  font-size: var(--text-md);
+}
+
+.userRefreshTime,
+.userSectionDescription,
+.userTargetCli,
+.userPathEmpty,
+.userTargetReason,
+.userSetupReason,
+.userPlanActivation {
+  margin: 0;
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+}
+
+.userSectionTitle,
+.userTargetName,
+.userDialogTitle {
+  margin: 0;
+  color: var(--fg);
+  font-family: var(--font-display);
+  font-weight: var(--weight-medium);
+}
+
+.userSectionTitle,
+.userDialogTitle {
+  font-size: var(--text-xl);
+}
+
+.userTargetName {
+  font-size: var(--text-lg);
+}
+
+.userTargetGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.userTargetCard {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.userTargetFooter {
+  min-height: var(--space-12);
+}
+
+.userPathGroup {
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.userPathLabel {
+  color: var(--fg-2);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+
+.userPathRow {
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.userPath {
+  min-width: 0;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.userInstructionTextarea,
+.userDiffBlock {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+}
+
+.userInstructionTextarea {
+  min-height: 280px;
+  padding: var(--space-4);
+  resize: vertical;
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.userInstructionTextarea:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
+}
+
+.userInstructionTextarea:disabled {
+  background: var(--surface);
+  color: var(--fg-muted-readable);
+}
+
+.userEditorFooter,
+.userDialogActions {
+  justify-content: flex-end;
+}
+
+.userDialogSurface {
+  width: min(720px, 100vw);
+  padding: 0;
+}
+
+.userPreviewSurface {
+  width: min(900px, 100vw);
+  padding: 0;
+}
+
+.userDialogBody {
+  max-height: min(88vh, 900px);
+  padding: var(--space-5);
+  overflow: auto;
+}
+
+.userSetupSourceChoice,
+.userSetupTarget,
+.userPlanChange,
+.userDangerZone {
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.userSetupTarget,
+.userPlanChange {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.userRadioRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+
+.userRadioRow input {
+  margin-top: var(--space-1);
+}
+
+.userWarningList,
+.userResultList {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+
+.userDiffBlock {
+  max-height: 260px;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.userDeleteField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 900px) {
+  .userTargetGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .userHero,
+  .userEditorHeader,
+  .userSectionHeading,
+  .userTargetHeader,
+  .userDialogHeader {
+    flex-direction: column;
+  }
+
+  .userHeroActions,
+  .userDialogActions {
+    width: 100%;
+  }
 }

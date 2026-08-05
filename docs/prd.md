@@ -172,6 +172,16 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - 前端 `npm run lint` 与默认 strict `check:bundle` 在本轮 **未**宣称通过（lint 债务集中于 Agent Hub hooks/React Compiler；bundle 仅 final-only 硬顶可通过）
 - 命令矩阵与完整 NOT VERIFIED 清单：`.superpowers/sdd/reports/program-task-5-report.md`
 
+**用户级指令管理 V2（scan-only 基线已实施，安全写入待 L3）**：
+- 已交付专用默认工作区、三 Agent inventory/source chain、`unconfigured` 聚合态、公共/专属本地草稿、严格 DTO 解码、旧后端只读降级，以及不调用 preview/apply 的 scan-only L1 旅程；portable assets、同步与诊断保留为独立次级入口
+- 已接通 owner/control/Tauri 的 inspect、setup/update preview 与 apply 合同，并落地短期 plan、CAS snapshot、独立 ownership/幂等存储；当前 apply 对文件 mutation 固定返回 `USER_INSTRUCTION_TARGET_SCAN_ONLY`，不得表述为已写入
+- 用户级 instruction 入口已从通用 asset target matrix 改为专用管理工作区，优先展示三个 Agent 的实际生效来源、文件路径、Hub ownership、写入能力与下一步；旧页面的“应不存在 / 无状态 / 已验证 / 不支持 / partial”组合不是 V2 合法用户状态
+- 首次管理必须遵循“只读 inventory → 选择公共/专属内容与目标 Agent → 路径、优先级影响和精确 diff → 用户确认 → 逐 target 安全投影”；确认前不写 CLI 文件，不把发现等同于纳管
+- Codex 默认持久文件使用 adapter 解析的 `AGENTS.md`，不得静默创建会遮蔽 base 的 `AGENTS.override.md`；OpenCode 必须识别原生 `AGENTS.md`、Claude fallback 及兼容禁用环境变量
+- instruction UI 不直接暴露 `desiredPresence × desiredEnabled`；停止管理并保留文件、暂停使用、单 target 移除与 canonical tombstone 是四个不同操作，覆盖/删除必须校验 ownership 与 expected hash
+- LAN/Git 导入只表示 canonical 已进入 Hub，不自动应用到本机 Agent；真实 CLI 写盘 L3 evidence 未完成前继续 scan-only / fail-closed
+- 权威合同：[`docs/superpowers/specs/2026-08-04-agent-hub-user-instruction-management-v2-design.md`](superpowers/specs/2026-08-04-agent-hub-user-instruction-management-v2-design.md)
+
 ### 2.6 设备自动发现与互联
 
 **描述**：局域网内的 cc-partner 实例自动发现彼此并建立连接。

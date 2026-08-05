@@ -1186,6 +1186,104 @@
       ]
     },
     {
+      "id": "L0-AGENT-HUB-USER-INSTRUCTION-BACKEND-001",
+      "surface": "agent-hub-user-instruction",
+      "level": "L0",
+      "tests": [
+        "src-tauri/src/agent_hub/user_instructions/inventory.rs",
+        "src-tauri/src/agent_hub/user_instructions/plan.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked agent_hub::user_instructions --lib",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode filesystem create/update/delete",
+        "real CLI activation or remove behavior",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/agent-hub/manifest.md"
+      ],
+      "notes": "Read/plan contract only: source/capability inventory, bounded content and diff, stale fences, and Codex base AGENTS.md selection. Current apply is intentionally scan-only, not a target-file writer."
+    },
+    {
+      "id": "L0-AGENT-HUB-USER-INSTRUCTION-UI-001",
+      "surface": "agent-hub-user-instruction",
+      "level": "L0",
+      "tests": [
+        "web/src/pages/AgentHub/userInstructions/useUserInstructionManager.test.tsx"
+      ],
+      "command": "cd web && npm test -- useUserInstructionManager",
+      "ciJob": "frontend-unit",
+      "platforms": [
+        "node-jsdom"
+      ],
+      "exclusions": [
+        "real Tauri IPC host",
+        "real target-file write/remove",
+        "multi-host LAN"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/agent-hub/manifest.md"
+      ],
+      "notes": "Draft and target selection stay local until preview; a stale apply closes only the stale plan and preserves the user's draft."
+    },
+    {
+      "id": "E2E-AGENT-HUB-USER-INSTRUCTION-001",
+      "surface": "agent-hub-user-instruction",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode filesystem projection",
+        "real CLI activation or remove behavior",
+        "packaged desktop GUI",
+        "multi-host LAN"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/agent-hub/manifest.md"
+      ],
+      "notes": "L1 backendHarness mock only: verifies effective Claude/Codex/OpenCode source paths and scan-only UI, with the setup/update-preview and apply commands never invoked. It is not target-file write evidence."
+    },
+    {
+      "id": "L3-AGENT-HUB-USER-INSTRUCTION-WRITE-001",
+      "surface": "agent-hub-user-instruction",
+      "level": "L3",
+      "tests": [
+        "docs/development/real-device-certification.md"
+      ],
+      "command": "manual: exact supported Claude/Codex/OpenCode versions create, update, activate, stale-reject, ownership-protect, and remove user-level instruction files on macos/windows/ubuntu",
+      "ciJob": "manual",
+      "platforms": [
+        "macos",
+        "windows",
+        "ubuntu"
+      ],
+      "exclusions": [
+        "not executed in CI",
+        "L0/L1/L2 scan or preview evidence is not a substitute",
+        "hosted runner substitute"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/development/agent-hub/manifest.md",
+        "docs/development/real-device-certification.md"
+      ],
+      "status": "NOT VERIFIED",
+      "notes": "Aggregate V2 truth row. It remains NOT VERIFIED until each executed target has exact CLI version, commit, platform, date, evidence, and unexpired certification. It does not replace the existing per-CLI Agent Hub L3 rows."
+    },
+    {
       "id": "L0-AGENT-HUB-MIGRATION-001",
       "surface": "agent-hub",
       "level": "L0",

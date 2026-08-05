@@ -20,6 +20,7 @@ use crate::agent_hub::models::{
     NewMaterialization, NewProjectionJob, NewRevision, NewScopeNode, NewTargetBinding,
     ProjectionJob, ProjectionJobState, ProjectionPayloadKind, Revision, RevisionId,
     RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
+    UserInstructionOwnershipRecord, UserInstructionPlanClaim, UserInstructionPlanRecord,
 };
 use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::plugins::ownership::{decide_component_delete, ComponentDeleteDecision};
@@ -1522,6 +1523,40 @@ impl AgentHubRepo {
         .await
     }
 
+    /// 删除 V1 自动生成且从未投影的用户级 absent bindings。
+    ///
+    /// Business Logic: 这些行不是用户选择，V2 必须还原为真正 unmanaged。
+    /// Code Logic: 仅删 absent+disabled+无 mapping/checkout+无 materialization 的行，返回删除数。
+    pub async fn delete_unmaterialized_absent_user_bindings(
+        &self,
+        asset_id: &str,
+    ) -> Result<u64, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let result = sqlx::query(
+                "DELETE FROM agent_hub_target_bindings
+                 WHERE asset_id = ?
+                   AND desired_presence = 'absent'
+                   AND desired_enabled = 0
+                   AND local_scope_mapping_id IS NULL
+                   AND checkout_binding_id IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agent_hub_materializations m
+                       WHERE m.target_binding_id = agent_hub_target_bindings.id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agent_hub_user_instruction_ownership o
+                       WHERE o.asset_id = agent_hub_target_bindings.asset_id
+                         AND o.target = agent_hub_target_bindings.target
+                   )",
+            )
+            .bind(asset_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(result.rows_affected())
+        })
+        .await
+    }
+
     /// 单 write-lease 事务：一条 Delete tombstone + fan-out Absent bindings。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -2794,6 +2829,225 @@ impl AgentHubRepo {
         rows.iter().map(row_to_adoption).collect()
     }
 
+    /// 写入或更新用户级指令 ownership。
+    ///
+    /// Business Logic: 安全 overwrite/delete 必须有与 package adoption 分离的指令所有权记录。
+    /// Code Logic: 按 asset+target upsert，保留首次 created_at。
+    pub async fn upsert_user_instruction_ownership(
+        &self,
+        record: UserInstructionOwnershipRecord,
+    ) -> Result<UserInstructionOwnershipRecord, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO agent_hub_user_instruction_ownership (
+                    asset_id, target, resolved_path, adopted_hash, adopted_revision_id,
+                    adoption_operation, confirmed_plan_token, created_at, updated_at
+                 ) VALUES (?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(asset_id, target) DO UPDATE SET
+                    resolved_path=excluded.resolved_path,
+                    adopted_hash=excluded.adopted_hash,
+                    adopted_revision_id=excluded.adopted_revision_id,
+                    adoption_operation=excluded.adoption_operation,
+                    confirmed_plan_token=excluded.confirmed_plan_token,
+                    updated_at=excluded.updated_at",
+            )
+            .bind(&record.asset_id)
+            .bind(record.target.as_str())
+            .bind(&record.resolved_path)
+            .bind(record.adopted_hash.as_deref())
+            .bind(
+                record
+                    .adopted_revision_id
+                    .as_ref()
+                    .map(|revision| revision.as_str()),
+            )
+            .bind(&record.adoption_operation)
+            .bind(&record.confirmed_plan_token)
+            .bind(&record.created_at)
+            .bind(&record.updated_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(record)
+        })
+        .await
+    }
+
+    /// 读取单 target 用户级指令 ownership。
+    pub async fn get_user_instruction_ownership(
+        &self,
+        asset_id: &str,
+        target: AgentTarget,
+    ) -> Result<Option<UserInstructionOwnershipRecord>, AppError> {
+        let row = sqlx::query(
+            "SELECT asset_id, target, resolved_path, adopted_hash, adopted_revision_id,
+                    adoption_operation, confirmed_plan_token, created_at, updated_at
+             FROM agent_hub_user_instruction_ownership
+             WHERE asset_id = ? AND target = ?",
+        )
+        .bind(asset_id)
+        .bind(target.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row_to_user_instruction_ownership(&row))
+            .transpose()
+    }
+
+    /// 列出资产的用户级指令 ownership。
+    pub async fn list_user_instruction_ownerships(
+        &self,
+        asset_id: &str,
+    ) -> Result<Vec<UserInstructionOwnershipRecord>, AppError> {
+        let rows = sqlx::query(
+            "SELECT asset_id, target, resolved_path, adopted_hash, adopted_revision_id,
+                    adoption_operation, confirmed_plan_token, created_at, updated_at
+             FROM agent_hub_user_instruction_ownership
+             WHERE asset_id = ? ORDER BY target ASC",
+        )
+        .bind(asset_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_user_instruction_ownership).collect()
+    }
+
+    /// 持久化短期 V2 preview plan。
+    ///
+    /// Business Logic: plan 由 owner 管理，GuiClient 只回传不可猜 token。
+    /// Code Logic: token 冲突 fail-closed，不在日志中输出 plan_json。
+    pub async fn insert_user_instruction_plan(
+        &self,
+        record: UserInstructionPlanRecord,
+    ) -> Result<UserInstructionPlanRecord, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO agent_hub_user_instruction_plans (
+                    plan_token, owner_fingerprint, expires_at, base_revision_id,
+                    inventory_snapshot_hash, plan_json, client_request_id, claimed_at,
+                    consumed_at, result_json, created_at
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            )
+            .bind(&record.plan_token)
+            .bind(&record.owner_fingerprint)
+            .bind(&record.expires_at)
+            .bind(
+                record
+                    .base_revision_id
+                    .as_ref()
+                    .map(|revision| revision.as_str()),
+            )
+            .bind(&record.inventory_snapshot_hash)
+            .bind(&record.plan_json)
+            .bind(record.client_request_id.as_deref())
+            .bind(record.claimed_at.as_deref())
+            .bind(record.consumed_at.as_deref())
+            .bind(record.result_json.as_deref())
+            .bind(&record.created_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(record)
+        })
+        .await
+    }
+
+    /// 读取 V2 preview plan。
+    pub async fn get_user_instruction_plan(
+        &self,
+        plan_token: &str,
+    ) -> Result<Option<UserInstructionPlanRecord>, AppError> {
+        let row = sqlx::query(
+            "SELECT plan_token, owner_fingerprint, expires_at, base_revision_id,
+                    inventory_snapshot_hash, plan_json, client_request_id, claimed_at,
+                    consumed_at, result_json, created_at
+             FROM agent_hub_user_instruction_plans WHERE plan_token = ?",
+        )
+        .bind(plan_token)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row_to_user_instruction_plan(&row))
+            .transpose()
+    }
+
+    /// 原子 claim preview plan。
+    ///
+    /// Business Logic: get→write 不能留并发窗口；同 token 同时只有一个文件写执行者。
+    /// Code Logic: 事务内 CAS client_request_id NULL→id，再判定同 id pending/replay 或异 id conflict。
+    pub async fn claim_user_instruction_plan(
+        &self,
+        plan_token: &str,
+        client_request_id: &str,
+    ) -> Result<UserInstructionPlanClaim, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut tx = self.pool.begin().await?;
+            let claimed = sqlx::query(
+                "UPDATE agent_hub_user_instruction_plans
+                 SET client_request_id = ?, claimed_at = ?
+                 WHERE plan_token = ? AND client_request_id IS NULL AND consumed_at IS NULL",
+            )
+            .bind(client_request_id)
+            .bind(&now)
+            .bind(plan_token)
+            .execute(&mut *tx)
+            .await?;
+            let row = sqlx::query(
+                "SELECT plan_token, owner_fingerprint, expires_at, base_revision_id,
+                        inventory_snapshot_hash, plan_json, client_request_id, claimed_at,
+                        consumed_at, result_json, created_at
+                 FROM agent_hub_user_instruction_plans WHERE plan_token = ?",
+            )
+            .bind(plan_token)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(row) = row else {
+                return Err(AppError::not_found("USER_INSTRUCTION_PLAN_NOT_FOUND"));
+            };
+            let record = row_to_user_instruction_plan(&row)?;
+            let outcome = if claimed.rows_affected() == 1 {
+                UserInstructionPlanClaim::Claimed(record)
+            } else if record.client_request_id.as_deref() != Some(client_request_id) {
+                return Err(AppError::conflict(
+                    "USER_INSTRUCTION_PLAN_CLAIMED_BY_ANOTHER_REQUEST",
+                ));
+            } else if let Some(result_json) = record.result_json {
+                UserInstructionPlanClaim::Replay(result_json)
+            } else {
+                UserInstructionPlanClaim::Pending
+            };
+            tx.commit().await?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    /// 完成已 claim 的 preview plan 并持久化幂等结果。
+    pub async fn complete_user_instruction_plan(
+        &self,
+        plan_token: &str,
+        client_request_id: &str,
+        result_json: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let result = sqlx::query(
+                "UPDATE agent_hub_user_instruction_plans
+                 SET consumed_at = ?, result_json = ?
+                 WHERE plan_token = ? AND client_request_id = ? AND consumed_at IS NULL",
+            )
+            .bind(&now)
+            .bind(result_json)
+            .bind(plan_token)
+            .bind(client_request_id)
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "USER_INSTRUCTION_PLAN_COMPLETE_CONFLICT",
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// 列出全部未解决 conflict（Attention 投影用）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -3633,8 +3887,9 @@ impl AgentHubRepo {
 
     /// 在 import TX 内写入 durable LAN projection intent。
     ///
-    /// Business Logic: commit 后崩溃窗口不得丢投影；queued 仅当 intent 存在。
-    /// Code Logic: INSERT OR IGNORE (transfer_id, asset_id) status=queued。
+    /// Business Logic: commit 后崩溃窗口不得丢投影；但仅导入 canonical、尚未选择本机 target
+    ///     的资产不得伪报 queued，必须停留在待本机配置状态。
+    /// Code Logic: 仅当 asset 已有本机 target binding 时 INSERT OR IGNORE queued intent。
     pub async fn insert_lan_projection_intents_on_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -3647,12 +3902,16 @@ impl AgentHubRepo {
             let res = sqlx::query(
                 "INSERT OR IGNORE INTO agent_hub_lan_projection_intents
                  (transfer_id, asset_id, status, created_at, updated_at)
-                 VALUES (?, ?, 'queued', ?, ?)",
+                 SELECT ?, ?, 'queued', ?, ?
+                 WHERE EXISTS (
+                     SELECT 1 FROM agent_hub_target_bindings b WHERE b.asset_id = ?
+                 )",
             )
             .bind(transfer_id)
             .bind(asset_id)
             .bind(&now)
             .bind(&now)
+            .bind(asset_id)
             .execute(&mut **tx)
             .await?;
             n += res.rows_affected();
@@ -4932,6 +5191,35 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
      ON agent_hub_adoptions(state, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_adoptions_origin
      ON agent_hub_adoptions(origin_path)",
+    "CREATE TABLE IF NOT EXISTS agent_hub_user_instruction_ownership (
+        asset_id TEXT NOT NULL,
+        target TEXT NOT NULL,
+        resolved_path TEXT NOT NULL,
+        adopted_hash TEXT,
+        adopted_revision_id TEXT,
+        adoption_operation TEXT NOT NULL,
+        confirmed_plan_token TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (asset_id, target)
+    )",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_user_instruction_ownership_path
+     ON agent_hub_user_instruction_ownership(target, resolved_path)",
+    "CREATE TABLE IF NOT EXISTS agent_hub_user_instruction_plans (
+        plan_token TEXT PRIMARY KEY,
+        owner_fingerprint TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        base_revision_id TEXT,
+        inventory_snapshot_hash TEXT NOT NULL,
+        plan_json TEXT NOT NULL,
+        client_request_id TEXT,
+        claimed_at TEXT,
+        consumed_at TEXT,
+        result_json TEXT,
+        created_at TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_user_instruction_plans_expiry
+     ON agent_hub_user_instruction_plans(expires_at, consumed_at)",
     // Gate C Task 4：LAN push 幂等 ledger（sourceDeviceId+clientRequestId 非认证标签）
     "CREATE TABLE IF NOT EXISTS agent_hub_push_requests (
         source_device_id TEXT NOT NULL,
@@ -5565,6 +5853,45 @@ fn row_to_adoption(row: &SqliteRow) -> Result<AdoptionRecord, AppError> {
         confirmed: confirmed_i != 0,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// 解析用户级指令 ownership 行。
+fn row_to_user_instruction_ownership(
+    row: &SqliteRow,
+) -> Result<UserInstructionOwnershipRecord, AppError> {
+    let target_raw: String = row.try_get("target")?;
+    let target = AgentTarget::parse(&target_raw)
+        .ok_or_else(|| AppError::generic(format!("agent_hub_unknown_agent_target:{target_raw}")))?;
+    let adopted_revision_id: Option<String> = row.try_get("adopted_revision_id")?;
+    Ok(UserInstructionOwnershipRecord {
+        asset_id: row.try_get("asset_id")?,
+        target,
+        resolved_path: row.try_get("resolved_path")?,
+        adopted_hash: row.try_get("adopted_hash")?,
+        adopted_revision_id: adopted_revision_id.map(RevisionId),
+        adoption_operation: row.try_get("adoption_operation")?,
+        confirmed_plan_token: row.try_get("confirmed_plan_token")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// 解析用户级指令 preview plan 行。
+fn row_to_user_instruction_plan(row: &SqliteRow) -> Result<UserInstructionPlanRecord, AppError> {
+    let base_revision_id: Option<String> = row.try_get("base_revision_id")?;
+    Ok(UserInstructionPlanRecord {
+        plan_token: row.try_get("plan_token")?,
+        owner_fingerprint: row.try_get("owner_fingerprint")?,
+        expires_at: row.try_get("expires_at")?,
+        base_revision_id: base_revision_id.map(RevisionId),
+        inventory_snapshot_hash: row.try_get("inventory_snapshot_hash")?,
+        plan_json: row.try_get("plan_json")?,
+        client_request_id: row.try_get("client_request_id")?,
+        claimed_at: row.try_get("claimed_at")?,
+        consumed_at: row.try_get("consumed_at")?,
+        result_json: row.try_get("result_json")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 
@@ -8293,24 +8620,160 @@ mod tests {
     #[tokio::test]
     async fn lan_projection_intent_claim_and_mark() {
         let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let mut asset_ids = Vec::new();
+        for index in 1..=2 {
+            let asset = repo
+                .insert_asset(NewLogicalAsset {
+                    scope_id: scope.id.clone(),
+                    kind: AssetKind::Instruction,
+                    origin_namespace: "test".into(),
+                    logical_key: format!("asset-{index}"),
+                    display_name: format!("Asset {index}"),
+                    policy: AssetPolicy::Shared,
+                })
+                .await
+                .unwrap();
+            repo.upsert_target_binding(NewTargetBinding {
+                asset_id: asset.id.clone(),
+                target: AgentTarget::Claude,
+                local_scope_mapping_id: None,
+                checkout_binding_id: None,
+                desired_presence: DesiredPresence::Present,
+                desired_enabled: true,
+            })
+            .await
+            .unwrap();
+            asset_ids.push(asset.id);
+        }
         let mut tx = repo.pool().begin().await.unwrap();
         let n = repo
-            .insert_lan_projection_intents_on_tx(
-                &mut tx,
-                "xfer-a",
-                &["asset-1".into(), "asset-2".into()],
-            )
+            .insert_lan_projection_intents_on_tx(&mut tx, "xfer-a", &asset_ids)
             .await
             .unwrap();
         assert_eq!(n, 2);
         tx.commit().await.unwrap();
         let claimed = repo.claim_queued_lan_projection_intents(10).await.unwrap();
         assert_eq!(claimed.len(), 2);
-        repo.mark_lan_projection_intent_status("xfer-a", "asset-1", "done")
+        repo.mark_lan_projection_intent_status("xfer-a", &asset_ids[0], "done")
             .await
             .unwrap();
         let remaining = repo.claim_queued_lan_projection_intents(10).await.unwrap();
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].1, "asset-2");
+        assert_eq!(remaining[0].1, asset_ids[1]);
+    }
+
+    /// Business Logic: 仅导入 canonical、未选择本机 target 时不得伪报 projection queued。
+    /// Code Logic: 无 binding 的 asset 不插入 LAN projection intent。
+    #[tokio::test]
+    async fn lan_projection_intent_skips_assets_without_local_target_binding() {
+        let repo = test_repo().await;
+        let scope = user_scope(&repo).await;
+        let asset = repo
+            .insert_asset(NewLogicalAsset {
+                scope_id: scope.id,
+                kind: AssetKind::Instruction,
+                origin_namespace: "test".into(),
+                logical_key: "canonical-only".into(),
+                display_name: "Canonical only".into(),
+                policy: AssetPolicy::Shared,
+            })
+            .await
+            .unwrap();
+        let mut tx = repo.pool().begin().await.unwrap();
+        let inserted = repo
+            .insert_lan_projection_intents_on_tx(&mut tx, "xfer-no-target", &[asset.id])
+            .await
+            .unwrap();
+        assert_eq!(inserted, 0);
+        tx.commit().await.unwrap();
+        assert!(repo
+            .list_queued_lan_projection_intents("xfer-no-target")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Business Logic: preview token 同时只能由一个幂等请求 claim；同 id 完成后必须回放原结果。
+    /// Code Logic: insert → Claimed → Pending → complete → Replay；异 id 返回 conflict。
+    #[tokio::test]
+    async fn user_instruction_plan_claim_is_atomic_and_replayable() {
+        let repo = test_repo().await;
+        let now = chrono::Utc::now();
+        repo.insert_user_instruction_plan(UserInstructionPlanRecord {
+            plan_token: "plan-1".into(),
+            owner_fingerprint: "owner".into(),
+            expires_at: (now + chrono::Duration::minutes(10)).to_rfc3339(),
+            base_revision_id: None,
+            inventory_snapshot_hash: "snapshot".into(),
+            plan_json: "{}".into(),
+            client_request_id: None,
+            claimed_at: None,
+            consumed_at: None,
+            result_json: None,
+            created_at: now.to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            repo.claim_user_instruction_plan("plan-1", "request-a")
+                .await
+                .unwrap(),
+            UserInstructionPlanClaim::Claimed(_)
+        ));
+        assert!(matches!(
+            repo.claim_user_instruction_plan("plan-1", "request-a")
+                .await
+                .unwrap(),
+            UserInstructionPlanClaim::Pending
+        ));
+        let conflict = repo
+            .claim_user_instruction_plan("plan-1", "request-b")
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.ipc_category_code(), "conflict");
+        repo.complete_user_instruction_plan("plan-1", "request-a", "{\"ok\":true}")
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.claim_user_instruction_plan("plan-1", "request-a")
+                .await
+                .unwrap(),
+            UserInstructionPlanClaim::Replay("{\"ok\":true}".into())
+        );
+    }
+
+    /// Business Logic: ownership 必须是独立持久事实，不能从 materialization hash 猜测。
+    /// Code Logic: upsert 后按 asset/target 读取并列出同一记录。
+    #[tokio::test]
+    async fn user_instruction_ownership_round_trip() {
+        let repo = test_repo().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let record = UserInstructionOwnershipRecord {
+            asset_id: "asset-owned".into(),
+            target: AgentTarget::Codex,
+            resolved_path: "/tmp/codex/AGENTS.md".into(),
+            adopted_hash: Some("a".repeat(64)),
+            adopted_revision_id: None,
+            adoption_operation: "adopt".into(),
+            confirmed_plan_token: "plan-owned".into(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        repo.upsert_user_instruction_ownership(record.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_user_instruction_ownership("asset-owned", AgentTarget::Codex)
+                .await
+                .unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            repo.list_user_instruction_ownerships("asset-owned")
+                .await
+                .unwrap(),
+            vec![record]
+        );
     }
 }
