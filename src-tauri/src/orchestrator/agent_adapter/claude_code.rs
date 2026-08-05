@@ -114,7 +114,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
             executable: "claude".into(),
             args: vec![],
             stdin: Some(format!("{}\n", request.prompt.trim_end_matches('\n'))),
-            env: vec![],
+            // 强制不连 IDE：避免 Runner 注入的 `claude` 继承 VS Code active-file 上下文。
+            env: vec![("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into())],
             completion: AgentCompletionContract::SentinelLine,
         })
     }
@@ -131,7 +132,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 executable: "claude".into(),
                 args: vec!["--resume".into(), native.to_string()],
                 stdin: Some(format!("{}\n", request.prompt.trim_end_matches('\n'))),
-                env: vec![],
+                env: vec![("CLAUDE_CODE_AUTO_CONNECT_IDE".into(), "false".into())],
                 completion: AgentCompletionContract::SentinelLine,
             });
         }
@@ -206,7 +207,8 @@ mod tests {
     ///     Claude characterization：可见终端必须保持 `claude` + prompt stdin + SentinelLine。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     build_launch_plan("fix tests") 断言 executable/stdin/completion。
+    ///     build_launch_plan("fix tests") 断言 executable/stdin/completion，
+    ///     以及强制 `CLAUDE_CODE_AUTO_CONNECT_IDE=false`（不连 IDE）。
     #[test]
     fn claude_adapter_keeps_visible_terminal_input() {
         let plan = ClaudeCodeAdapter
@@ -215,7 +217,40 @@ mod tests {
         assert_eq!(plan.executable, "claude");
         assert_eq!(plan.stdin.as_deref(), Some("fix tests\n"));
         assert_eq!(plan.completion, AgentCompletionContract::SentinelLine);
-        assert_eq!(plan.to_terminal_input(), "claude\nfix tests\n");
+        assert!(
+            plan.env
+                .iter()
+                .any(|(k, v)| k == "CLAUDE_CODE_AUTO_CONNECT_IDE" && v == "false"),
+            "launch plan must force IDE disconnect: {:?}",
+            plan.env
+        );
+        // env 前缀 + quoted claude + prompt（render_terminal_command 会 shell-quote）
+        let rendered = plan.to_terminal_input();
+        assert!(
+            rendered.contains("CLAUDE_CODE_AUTO_CONNECT_IDE="),
+            "rendered terminal input should export IDE isolation env: {rendered}"
+        );
+        assert!(
+            rendered.contains("claude") && rendered.contains("fix tests\n"),
+            "rendered should still start claude with prompt: {rendered}"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     resume 路径同样不得连 IDE。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     build_resume_plan 带 native id 时 env 含 AUTO_CONNECT_IDE=false。
+    #[test]
+    fn claude_adapter_resume_also_disables_ide_auto_connect() {
+        let mut req = request("continue");
+        req.native_session_id = Some("sess-abc".into());
+        let plan = ClaudeCodeAdapter.build_resume_plan(&req).unwrap();
+        assert_eq!(plan.args, vec!["--resume".to_string(), "sess-abc".to_string()]);
+        assert!(plan
+            .env
+            .iter()
+            .any(|(k, v)| k == "CLAUDE_CODE_AUTO_CONNECT_IDE" && v == "false"));
     }
 
     /// Business Logic（为什么需要这个测试）:

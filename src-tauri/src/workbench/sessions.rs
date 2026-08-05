@@ -935,12 +935,34 @@ pub struct TerminalAgentContextIds {
     pub agent_session_id: Option<String>,
 }
 
+/// Claude Code 自动连接 IDE 的 env 开关名。
+///
+/// Business Logic（为什么需要这个常量）:
+///     Workbench 内启动的 Claude/Codex 等 agent 不得继承 VS Code 的 active-file 上下文
+///     （状态栏 `in <file>` / `opened_file_in_ide`），否则 Downloads 等无关标签会污染会话。
+const CLAUDE_CODE_AUTO_CONNECT_IDE_ENV: &str = "CLAUDE_CODE_AUTO_CONNECT_IDE";
+
+/// Claude Code IDE SSE bridge 端口 env 名（存在即倾向自动连 IDE）。
+const CLAUDE_CODE_SSE_PORT_ENV: &str = "CLAUDE_CODE_SSE_PORT";
+
 /// Business Logic（为什么需要这个函数）:
-///     cc-partner 是 GUI 应用，父进程可能没有真实终端环境或继承 `TERM=dumb`，会破坏 tmux 客户端协商；
-///     Agent adapter 还需要稳定非敏感 ID 环境变量。
+///     Claude Code 2.1+ 在 `CLAUDE_CODE_AUTO_CONNECT_IDE===false` 时硬禁用自动 IDE 连接，
+///     优先于 settings.autoConnectIde、`--ide` 路径、以及 `CLAUDE_CODE_SSE_PORT` 继承。
+///     同时移除 SSE 端口 env，避免子 shell 继承父进程/IDE 注入的 bridge 状态。
 ///
 /// Code Logic（这个函数做什么）:
-///     设置 xterm TERM/COLORTERM/TERM_PROGRAM，以及可选的四条 `CC_PARTNER_*_ID`（无 token）。
+///     设置 `CLAUDE_CODE_AUTO_CONNECT_IDE=false`；`env_remove(CLAUDE_CODE_SSE_PORT)`。
+fn apply_claude_ide_isolation_env(command: &mut CommandBuilder) {
+    command.env(CLAUDE_CODE_AUTO_CONNECT_IDE_ENV, "false");
+    command.env_remove(CLAUDE_CODE_SSE_PORT_ENV);
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     cc-partner 是 GUI 应用，父进程可能没有真实终端环境或继承 `TERM=dumb`，会破坏 tmux 客户端协商；
+///     Agent adapter 还需要稳定非敏感 ID 环境变量；Workbench agent 必须强制不连 IDE。
+///
+/// Code Logic（这个函数做什么）:
+///     设置 xterm TERM/COLORTERM/TERM_PROGRAM、Claude IDE 隔离 env，以及可选的四条 `CC_PARTNER_*_ID`（无 token）。
 fn apply_workbench_terminal_env(
     command: &mut CommandBuilder,
     agent_ctx: Option<&TerminalAgentContextIds>,
@@ -948,6 +970,7 @@ fn apply_workbench_terminal_env(
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.env("TERM_PROGRAM", "cc-partner");
+    apply_claude_ide_isolation_env(command);
     if let Some(ctx) = agent_ctx {
         apply_agent_context_env(command, ctx);
     }
@@ -977,15 +1000,19 @@ fn apply_agent_context_env(command: &mut CommandBuilder, ctx: &TerminalAgentCont
     }
 }
 
-/// 生成 tmux `new-session` / `new-window` 的 `-e KEY=VAL` 参数（Agent 上下文）。
+/// 生成 tmux `new-session` / `new-window` 的 `-e KEY=VAL` 参数（Agent 上下文 + IDE 隔离）。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     tmux pane 内 shell 继承创建时的 -e 环境；attach 客户端 env 不会进入已有 pane。
+///     必须在 -e 中注入 `CLAUDE_CODE_AUTO_CONNECT_IDE=false`，否则用户在 pane 内启动 claude
+///     仍可能连上本机 VS Code 并注入无关 active file。
 ///
 /// Code Logic（这个函数做什么）:
-///     返回交错的 `-e` / `KEY=VAL` 列表；含四条基础 ID，可选 AGENT_SESSION_ID。
+///     返回交错的 `-e` / `KEY=VAL` 列表；含 IDE 隔离 + 四条基础 ID，可选 AGENT_SESSION_ID。
+///     tmux `-e` 无法 unset 父 env，但 Claude 对 AUTO_CONNECT=false 硬禁用优先于 SSE_PORT。
 fn tmux_agent_context_env_args(ctx: &TerminalAgentContextIds) -> Vec<String> {
     let mut pairs: Vec<(&str, &str)> = vec![
+        (CLAUDE_CODE_AUTO_CONNECT_IDE_ENV, "false"),
         ("CC_PARTNER_PROJECT_ID", ctx.project_id.as_str()),
         ("CC_PARTNER_WORKTREE_ID", ctx.worktree_id.as_str()),
         (
@@ -1499,10 +1526,15 @@ fn create_tmux_window(
             "#{window_id}",
         ]);
     }
+    // 无论是否有 agent_ctx，都必须注入 IDE 隔离 env（claude 在 pane 内启动时不连 VS Code）。
+    // 有 agent_ctx 时由 tmux_agent_context_env_args 一并带上；无 ctx 时单独 -e。
     if let Some(ctx) = agent_ctx {
         for arg in tmux_agent_context_env_args(ctx) {
             command.arg(arg);
         }
+    } else {
+        command.arg("-e");
+        command.arg(format!("{CLAUDE_CODE_AUTO_CONNECT_IDE_ENV}=false"));
     }
     if let Some(shell_command) = tmux.shell_command_for_new_session(shell_command) {
         command.arg(shell_command);
@@ -1912,10 +1944,11 @@ pub fn pane_count_for_row(row: &WorkbenchSessionRow) -> usize {
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     分屏按钮创建的新 pane 必须从项目根目录启动，避免继承当前 pane 中用户 cd 后的位置。
+///     分屏按钮创建的新 pane 必须从项目根目录启动，避免继承当前 pane 中用户 cd 后的位置；
+///     同时强制 Claude 不连 IDE（与 new-window 路径一致）。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造 `tmux split-window <direction> -t <target> -c <cwd>` 参数列表。
+///     构造 `tmux split-window <direction> -t <target> -c <cwd> -e CLAUDE_CODE_AUTO_CONNECT_IDE=false`。
 fn tmux_split_window_args(direction: PaneSplitDirection, target: &str, cwd: &str) -> Vec<String> {
     vec![
         "split-window".to_string(),
@@ -1924,6 +1957,8 @@ fn tmux_split_window_args(direction: PaneSplitDirection, target: &str, cwd: &str
         target.to_string(),
         "-c".to_string(),
         cwd.to_string(),
+        "-e".to_string(),
+        format!("{CLAUDE_CODE_AUTO_CONNECT_IDE_ENV}=false"),
     ]
 }
 
@@ -7351,6 +7386,27 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     Workbench 内 claude 不得自动连 VS Code，否则会注入无关 active-file 上下文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     apply_workbench_terminal_env 强制 AUTO_CONNECT_IDE=false，并移除 SSE_PORT。
+    #[test]
+    fn workbench_terminal_env_forces_claude_ide_disconnect() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        // 模拟父进程/IDE 注入过 SSE 端口；隔离路径必须清掉。
+        command.env(CLAUDE_CODE_SSE_PORT_ENV, "20751");
+        apply_workbench_terminal_env(&mut command, None);
+
+        assert_eq!(
+            command
+                .get_env(CLAUDE_CODE_AUTO_CONNECT_IDE_ENV)
+                .and_then(|v| v.to_str()),
+            Some("false")
+        );
+        assert!(command.get_env(CLAUDE_CODE_SSE_PORT_ENV).is_none());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     Agent Hook 依赖四条非敏感 CC_PARTNER_*_ID；不得注入 control/device token。
     ///
     /// Code Logic（这个测试做什么）:
@@ -7396,17 +7452,29 @@ mod tests {
         assert!(command.get_env("CC_PARTNER_CONTROL_TOKEN").is_none());
         assert!(command.get_env("CC_PARTNER_DEVICE_TOKEN").is_none());
         assert!(command.get_env("CC_PARTNER_AUTH_TOKEN").is_none());
+        assert_eq!(
+            command
+                .get_env(CLAUDE_CODE_AUTO_CONNECT_IDE_ENV)
+                .and_then(|v| v.to_str()),
+            Some("false")
+        );
 
         let tmux_args = tmux_agent_context_env_args(&ctx);
         assert_eq!(tmux_args.len() % 2, 0);
         for pair in tmux_args.chunks(2) {
             assert_eq!(pair[0], "-e");
-            assert!(pair[1].starts_with("CC_PARTNER_"));
+            assert!(
+                pair[1].starts_with("CC_PARTNER_")
+                    || pair[1].starts_with("CLAUDE_CODE_AUTO_CONNECT_IDE=")
+            );
             assert!(!pair[1].contains("TOKEN"));
         }
         assert!(tmux_args
             .iter()
             .any(|a| a == "CC_PARTNER_PROJECT_ID=proj-1"));
+        assert!(tmux_args
+            .iter()
+            .any(|a| a == "CLAUDE_CODE_AUTO_CONNECT_IDE=false"));
         assert!(!tmux_args
             .iter()
             .any(|a| a.starts_with("CC_PARTNER_AGENT_SESSION_ID=")));
@@ -7431,6 +7499,9 @@ mod tests {
         assert!(tmux2
             .iter()
             .any(|a| a == "CC_PARTNER_AGENT_SESSION_ID=agent-prealloc-1"));
+        assert!(tmux2
+            .iter()
+            .any(|a| a == "CLAUDE_CODE_AUTO_CONNECT_IDE=false"));
     }
 
     /// Business Logic（为什么需要这个测试）:
@@ -7822,10 +7893,11 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     通过分屏按钮创建的新 pane 应从项目根目录启动，不能继承当前 pane 里用户 cd 后的目录。
+    ///     通过分屏按钮创建的新 pane 应从项目根目录启动，不能继承当前 pane 里用户 cd 后的目录；
+    ///     同时强制 Claude 不连 IDE。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     断言 split-window 参数包含 `-c <project_root>`，并保留方向与 target 参数。
+    ///     断言 split-window 参数包含 `-c <project_root>`、IDE 隔离 env，并保留方向与 target。
     #[test]
     fn tmux_split_window_args_pin_project_root_cwd() {
         let args = tmux_split_window_args(
@@ -7843,6 +7915,8 @@ mod tests {
                 "cc-partner-project-p1:@2",
                 "-c",
                 "/Users/hans/project",
+                "-e",
+                "CLAUDE_CODE_AUTO_CONNECT_IDE=false",
             ]
         );
     }
