@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, test } from 'vitest';
 import {
   beginMobileTerminalTouchScroll,
@@ -15,6 +16,19 @@ import {
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${String(expected)}, received ${String(actual)}`);
+  }
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   源码合同测试需要确认关键 CSS/接线字符串仍然存在，避免再次回归到“手势被 xterm 原生滚动抢走”。
+ *
+ * Code Logic（这个函数做什么）:
+ *   source 不含 needle 时抛出带 message 的 Error。
+ */
+function assertContains(source: string, needle: string, message: string): void {
+  if (!source.includes(needle)) {
+    throw new Error(message);
   }
 }
 
@@ -58,6 +72,52 @@ describe('mobileTerminalTouchScroll', () => {
       mobileTerminalTouchLineHeight(0, 0, 17.5),
       17.5,
       'touch line height should fall back when viewport rows are unavailable',
+    );
+  });
+
+  test('mobile terminal viewport CSS disables native xterm touch scrolling', () => {
+    const stylesSource = readFileSync(new URL('./MobileWorkbench.module.css', import.meta.url), 'utf8');
+    assertContains(
+      stylesSource,
+      '.mobileTerminalViewport :global(.xterm-viewport)',
+      'CSS must target xterm-viewport so native overflow-y:scroll cannot steal mobile gestures',
+    );
+    assertContains(
+      stylesSource,
+      'overflow-y: hidden !important',
+      'CSS must force-hide xterm-viewport overflow-y scroll for mobile terminal',
+    );
+    assertContains(
+      stylesSource,
+      '.mobileTerminalViewport :global(canvas)',
+      'CSS must set touch-action:none on canvas where fingers actually land',
+    );
+    assertContains(
+      stylesSource,
+      'touch-action: none',
+      'CSS must keep touch-action:none for mobile terminal touch ownership',
+    );
+  });
+
+  test('MobileTerminalPanel owns touch scroll via capture-phase listeners and scrollLines', () => {
+    const panelSource = readFileSync(
+      new URL('./components/MobileTerminalPanel.tsx', import.meta.url),
+      'utf8',
+    );
+    assertContains(
+      panelSource,
+      'capture: true',
+      'touch listeners must use capture so canvas/xterm-viewport cannot consume gestures first',
+    );
+    assertContains(
+      panelSource,
+      'terminal.scrollLines(result.lines)',
+      'touch move must map finger delta into xterm scrollLines',
+    );
+    assertContains(
+      panelSource,
+      'passive: false',
+      'touchmove must be non-passive so preventDefault can cancel native page/xterm scrolling',
     );
   });
 });

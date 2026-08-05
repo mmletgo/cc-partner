@@ -203,6 +203,31 @@
         "zoomPane": "Failed to switch single-pane view",
         "closePane": "Failed to close pane",
         "closeWindow": "Failed to close window"
+      },
+      "extraKeys": {
+        "toolbarAriaLabel": "Terminal extra keys",
+        "esc": "Escape",
+        "tab": "Tab",
+        "ctrl": "Control modifier",
+        "alt": "Alt modifier",
+        "slash": "Slash",
+        "up": "Arrow up",
+        "down": "Arrow down",
+        "left": "Arrow left",
+        "right": "Arrow right",
+        "page1": "Show extra keys page 1",
+        "page2": "Show extra keys page 2",
+        "ctrlC": "Ctrl+C interrupt",
+        "ctrlD": "Ctrl+D end of file",
+        "ctrlZ": "Ctrl+Z suspend",
+        "ctrlL": "Ctrl+L clear screen",
+        "home": "Home",
+        "end": "End",
+        "pageUp": "Page up",
+        "pageDown": "Page down",
+        "cdUp": "Insert cd ..",
+        "lsLa": "Insert ls -la",
+        "clearSnippet": "Insert clear"
       }
     },
     "filesPanel": {
@@ -473,18 +498,18 @@
         "label": "Mobile"
       }
     },
+    "theme": {
+      "title": "Appearance",
+      "appearance": "Theme",
+      "currentLight": "Light",
+      "currentDark": "Dark"
+    },
     "connection": {
       "online": "Online",
       "reconnecting": "Reconnecting…",
       "offline": "Offline",
       "cachedAt": "Cached at {{time}}",
       "lastError": "Last error: {{error}}"
-    },
-    "theme": {
-      "title": "Appearance",
-      "appearance": "Theme",
-      "currentLight": "Light",
-      "currentDark": "Dark"
     }
   },
   "worktrees": {

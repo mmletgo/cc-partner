@@ -48,6 +48,16 @@ import {
   MobileTerminalInputStream,
   type MobileTerminalInputStreamState,
 } from '../mobileTerminalInputStream';
+import {
+  applyStickyModifierToInput,
+  MOBILE_TERMINAL_STICKY_TIMEOUT_MS,
+  resolveMobileTerminalExtraKeyPress,
+  toggleStickyModifier,
+  type MobileTerminalExtraKeyDef,
+  type MobileTerminalExtraKeyPage,
+  type MobileTerminalStickyModifier,
+} from '../mobileTerminalExtraKeys';
+import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
@@ -165,6 +175,8 @@ export function MobileTerminalPanel({
   const [inputStreamState, setInputStreamState] = useState<MobileTerminalInputStreamState>({
     status: 'connecting',
   });
+  const [extraKeysPage, setExtraKeysPage] = useState<MobileTerminalExtraKeyPage>(1);
+  const [stickyModifier, setStickyModifier] = useState<MobileTerminalStickyModifier | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -173,6 +185,8 @@ export function MobileTerminalPanel({
   const replayGateRef = useRef<boolean>(false);
   const replayReadyRef = useRef<boolean>(false);
   const inputEnabledRef = useRef<boolean>(false);
+  const stickyModifierRef = useRef<MobileTerminalStickyModifier | null>(null);
+  const stickyTimeoutRef = useRef<number | null>(null);
   const resizeTimerRef = useRef<number | null>(null);
   const replayRequestIdRef = useRef<number>(0);
   const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | null>(null);
@@ -224,6 +238,82 @@ export function MobileTerminalPanel({
   }, [busy, inputStreamState.status, sessionId, visibleSession?.status]);
 
   useEffect(() => {
+    stickyModifierRef.current = stickyModifier;
+  }, [stickyModifier]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   sticky Ctrl/Alt 武装后若用户忘记再按键，应自动解除，避免后续普通输入被意外改写。
+   *
+   * Code Logic（这个函数做什么）:
+   *   清掉旧 timer；武装时启动 3s timeout 将 sticky 置 null；disarm 只清 timer。
+   */
+  const armStickyModifier = useCallback((modifier: MobileTerminalStickyModifier | null): void => {
+    if (stickyTimeoutRef.current !== null) {
+      window.clearTimeout(stickyTimeoutRef.current);
+      stickyTimeoutRef.current = null;
+    }
+    stickyModifierRef.current = modifier;
+    setStickyModifier(modifier);
+    if (!modifier) return;
+    stickyTimeoutRef.current = window.setTimeout(() => {
+      stickyTimeoutRef.current = null;
+      stickyModifierRef.current = null;
+      setStickyModifier(null);
+    }, MOBILE_TERMINAL_STICKY_TIMEOUT_MS);
+  }, []);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Extra keys 与 xterm onData 共用同一输入流；失败时需要同一错误面板文案。
+   *
+   * Code Logic（这个函数做什么）:
+   *   在 input 可用时 enqueue；捕获异常写入 panelError。
+   */
+  const sendTerminalInput = useCallback(
+    (data: string): void => {
+      if (!sessionId || !inputEnabledRef.current) return;
+      try {
+        inputStreamRef.current?.enqueue(sessionId, data);
+      } catch (reason) {
+        setPanelError(
+          `${t('workbench:mobile.terminalPanel.errors.write')}: ${getErrorMessage(
+            reason,
+            t('workbench:errors.sessions'),
+          )}`,
+        );
+      }
+    },
+    [sessionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   额外键条的 payload/modifier/page 动作需要在面板层统一消化。
+   *
+   * Code Logic（这个函数做什么）:
+   *   resolve 键定义 → send / toggle sticky / 翻页；payload 发送不消耗 sticky（与 Termux 独立宏键一致）。
+   */
+  const handleExtraKeyPress = useCallback(
+    (key: MobileTerminalExtraKeyDef): void => {
+      const action = resolveMobileTerminalExtraKeyPress(key);
+      if (action.type === 'send') {
+        sendTerminalInput(action.data);
+        return;
+      }
+      if (action.type === 'toggleModifier') {
+        const next = toggleStickyModifier(stickyModifierRef.current, action.modifier);
+        armStickyModifier(next.type === 'arm' ? next.modifier : null);
+        return;
+      }
+      if (action.type === 'setPage') {
+        setExtraKeysPage(action.page);
+      }
+    },
+    [armStickyModifier, sendTerminalInput],
+  );
+
+  useEffect(() => {
     const stream = new MobileTerminalInputStream({
       onStateChange: (state) => {
         setInputStreamState(state);
@@ -234,6 +324,10 @@ export function MobileTerminalPanel({
     return () => {
       inputStreamRef.current = null;
       stream.close();
+      if (stickyTimeoutRef.current !== null) {
+        window.clearTimeout(stickyTimeoutRef.current);
+        stickyTimeoutRef.current = null;
+      }
     };
   }, []);
 
@@ -417,8 +511,17 @@ export function MobileTerminalPanel({
       ) {
         return;
       }
+      const stickyResult = applyStickyModifierToInput(stickyModifierRef.current, data);
+      if (stickyResult.consume) {
+        if (stickyTimeoutRef.current !== null) {
+          window.clearTimeout(stickyTimeoutRef.current);
+          stickyTimeoutRef.current = null;
+        }
+        stickyModifierRef.current = null;
+        setStickyModifier(null);
+      }
       try {
-        inputStreamRef.current?.enqueue(sessionId, data);
+        inputStreamRef.current?.enqueue(sessionId, stickyResult.data);
       } catch (reason) {
         if (disposed) return;
         setPanelError(
@@ -433,15 +536,19 @@ export function MobileTerminalPanel({
     /**
      * Business Logic（为什么需要这个函数）:
      *   终端区域的移动端滑动必须留在 xterm 内部，否则浏览器会把它当页面滚动并显示/隐藏地址栏。
+     *   xterm 原生 .xterm-viewport 仍是 overflow scroll，canvas 上的 touch 默认会先驱动它。
      *
      * Code Logic（这个函数做什么）:
-     *   读取当前 viewport 与 xterm rows 得到行高，交给 touch helper 累计像素并调用 terminal.scrollLines。
+     *   在 capture 阶段拦截单指 touchmove，读取 viewport 与 xterm rows 得到行高，
+     *   交给 touch helper 累计像素并调用 terminal.scrollLines；不在 touchstart 上 preventDefault，
+     *   以免阻断 helper textarea 聚焦与软键盘。
      */
     const handleTouchMove = (event: TouchEvent): void => {
       if (event.touches.length !== 1) {
         touchScrollStateRef.current = null;
         return;
       }
+      // 单指滑动一旦开始就必须取消浏览器默认滚动（页面 / xterm-viewport），否则 scrollLines 无效。
       if (event.cancelable) {
         event.preventDefault();
       }
@@ -470,10 +577,24 @@ export function MobileTerminalPanel({
     const resetTouchScroll = (): void => {
       touchScrollStateRef.current = null;
     };
-    viewport.addEventListener('touchstart', handleTouchStart, { passive: true });
-    viewport.addEventListener('touchmove', handleTouchMove, { passive: false });
-    viewport.addEventListener('touchend', resetTouchScroll, { passive: true });
-    viewport.addEventListener('touchcancel', resetTouchScroll, { passive: true });
+    // capture=true：在 canvas / .xterm-viewport 自己消费 touch 前先接管手势。
+    const touchListenerOptions: AddEventListenerOptions = { capture: true };
+    viewport.addEventListener('touchstart', handleTouchStart, {
+      ...touchListenerOptions,
+      passive: true,
+    });
+    viewport.addEventListener('touchmove', handleTouchMove, {
+      ...touchListenerOptions,
+      passive: false,
+    });
+    viewport.addEventListener('touchend', resetTouchScroll, {
+      ...touchListenerOptions,
+      passive: true,
+    });
+    viewport.addEventListener('touchcancel', resetTouchScroll, {
+      ...touchListenerOptions,
+      passive: true,
+    });
 
     const observer = new ResizeObserver(() => {
       if (resizeTimerRef.current !== null) {
@@ -515,10 +636,10 @@ export function MobileTerminalPanel({
       disposed = true;
       observer.disconnect();
       dataDisposable.dispose();
-      viewport.removeEventListener('touchstart', handleTouchStart);
-      viewport.removeEventListener('touchmove', handleTouchMove);
-      viewport.removeEventListener('touchend', resetTouchScroll);
-      viewport.removeEventListener('touchcancel', resetTouchScroll);
+      viewport.removeEventListener('touchstart', handleTouchStart, touchListenerOptions);
+      viewport.removeEventListener('touchmove', handleTouchMove, touchListenerOptions);
+      viewport.removeEventListener('touchend', resetTouchScroll, touchListenerOptions);
+      viewport.removeEventListener('touchcancel', resetTouchScroll, touchListenerOptions);
       touchScrollStateRef.current = null;
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
@@ -591,7 +712,10 @@ export function MobileTerminalPanel({
     setActionBusy('create');
     setPanelError(null);
     try {
-      const initialSize = measureMobileTerminalSize(surfaceRef.current);
+      // Prefer the terminal viewport (excludes extra-keys bar) so initial PTY size matches fit area.
+      const initialSize = measureMobileTerminalSize(
+        viewportRef.current ?? surfaceRef.current,
+      );
       const session = await httpWorkbenchTransport.sessions.create(
         project.id,
         initialSize,
@@ -991,6 +1115,19 @@ export function MobileTerminalPanel({
           >
             <div className={styles.mobileTerminalViewport} ref={viewportRef} />
           </div>
+          {visibleSession ? (
+            <MobileTerminalExtraKeys
+              disabled={
+                !sessionId ||
+                visibleSession.status !== 'running' ||
+                busy ||
+                inputStreamState.status !== 'ready'
+              }
+              page={extraKeysPage}
+              stickyModifier={stickyModifier}
+              onKeyPress={handleExtraKeyPress}
+            />
+          ) : null}
         </div>
       ) : null}
     </section>

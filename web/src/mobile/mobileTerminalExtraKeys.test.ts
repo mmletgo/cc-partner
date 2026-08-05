@@ -1,0 +1,141 @@
+import { describe, test } from 'vitest';
+import {
+  applyStickyModifierToInput,
+  encodeAltKeyInput,
+  encodeCtrlKeyInput,
+  getMobileTerminalExtraKeys,
+  MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS,
+  MOBILE_TERMINAL_STICKY_TIMEOUT_MS,
+  resolveMobileTerminalExtraKeyPress,
+  toggleStickyModifier,
+} from './mobileTerminalExtraKeys';
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   当前 web tsconfig 会编译 src 下测试文件，但未启用 Node 类型；测试断言需要避免依赖 node:assert。
+ *
+ * Code Logic（这个函数做什么）:
+ *   比较 actual 与 expected，不一致时抛出 Error 让用例失败。
+ */
+function assertEqual<T>(actual: T, expected: T, message: string): void {
+  if (actual !== expected) {
+    throw new Error(`${message}: expected ${String(expected)}, received ${String(actual)}`);
+  }
+}
+
+function assertTrue(value: boolean, message: string): void {
+  if (!value) throw new Error(message);
+}
+
+describe('mobileTerminalExtraKeys', () => {
+  test('page 1 and page 2 expose fixed Termux-like key ids', () => {
+    const page1 = getMobileTerminalExtraKeys(1).map((key) => key.id);
+    const page2 = getMobileTerminalExtraKeys(2).map((key) => key.id);
+    assertEqual(page1.join(','), 'esc,tab,ctrl,alt,slash,up,down,left,right,page-2', 'page 1 keys');
+    assertEqual(
+      page2.join(','),
+      'ctrl-c,ctrl-d,ctrl-z,ctrl-l,home,end,pgup,pgdn,cd-up,ls-la,clear-snippet,page-1',
+      'page 2 keys',
+    );
+  });
+
+  test('control and navigation payloads match PTY sequences', () => {
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.esc, '\x1b', 'esc');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab, '\t', 'tab');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.up, '\x1b[A', 'up');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.down, '\x1b[B', 'down');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.right, '\x1b[C', 'right');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.left, '\x1b[D', 'left');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.home, '\x1b[H', 'home');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.end, '\x1b[F', 'end');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.pageUp, '\x1b[5~', 'pgup');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.pageDown, '\x1b[6~', 'pgdn');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlC, '\x03', 'ctrl-c');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlD, '\x04', 'ctrl-d');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlZ, '\x1a', 'ctrl-z');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlL, '\x0c', 'ctrl-l');
+  });
+
+  test('shell snippets insert text without trailing enter', () => {
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.cdUp, 'cd ..', 'cd ..');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.lsLa, 'ls -la', 'ls -la');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.clear, 'clear', 'clear');
+    assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.cdUp.includes('\r'), 'cd .. must not include CR');
+    assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.lsLa.includes('\n'), 'ls -la must not include LF');
+    assertTrue(!MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.clear.endsWith('\r'), 'clear must not auto-enter');
+  });
+
+  test('encodeCtrlKeyInput maps letters and common chords', () => {
+    assertEqual(encodeCtrlKeyInput('c'), '\x03', 'ctrl-c lower');
+    assertEqual(encodeCtrlKeyInput('C'), '\x03', 'ctrl-c upper');
+    assertEqual(encodeCtrlKeyInput('d'), '\x04', 'ctrl-d');
+    assertEqual(encodeCtrlKeyInput('z'), '\x1a', 'ctrl-z');
+    assertEqual(encodeCtrlKeyInput('l'), '\x0c', 'ctrl-l');
+    assertEqual(encodeCtrlKeyInput(' '), '\x00', 'ctrl-space');
+    assertEqual(encodeCtrlKeyInput('ab'), null, 'multi-char rejected');
+  });
+
+  test('encodeAltKeyInput prefixes escape for single chars only', () => {
+    assertEqual(encodeAltKeyInput('a'), '\x1ba', 'alt-a');
+    assertEqual(encodeAltKeyInput('ab'), null, 'multi-char rejected');
+  });
+
+  test('applyStickyModifierToInput consumes sticky even when encoding falls back', () => {
+    assertEqual(applyStickyModifierToInput(null, 'x').consume, false, 'no sticky');
+    assertEqual(applyStickyModifierToInput(null, 'x').data, 'x', 'pass-through');
+
+    const ctrlC = applyStickyModifierToInput('ctrl', 'c');
+    assertEqual(ctrlC.data, '\x03', 'ctrl encodes');
+    assertEqual(ctrlC.consume, true, 'ctrl consumes');
+
+    const altX = applyStickyModifierToInput('alt', 'x');
+    assertEqual(altX.data, '\x1bx', 'alt encodes');
+    assertEqual(altX.consume, true, 'alt consumes');
+
+    // multi-char (paste): still consume sticky once, do not rewrite body
+    const paste = applyStickyModifierToInput('ctrl', 'ab');
+    assertEqual(paste.data, 'ab', 'paste not rewritten');
+    assertEqual(paste.consume, true, 'paste still consumes sticky');
+  });
+
+  test('toggleStickyModifier arms, replaces, and disarms', () => {
+    assertEqual(toggleStickyModifier(null, 'ctrl').type, 'arm', 'arm ctrl');
+    assertEqual(toggleStickyModifier('ctrl', 'ctrl').type, 'disarm', 'disarm ctrl');
+    const replace = toggleStickyModifier('ctrl', 'alt');
+    assertEqual(replace.type, 'arm', 'replace with alt');
+    if (replace.type === 'arm') {
+      assertEqual(replace.modifier, 'alt', 'armed alt');
+    }
+  });
+
+  test('resolveMobileTerminalExtraKeyPress maps defs to actions', () => {
+    const keys = getMobileTerminalExtraKeys(1);
+    const esc = keys.find((key) => key.id === 'esc');
+    const ctrl = keys.find((key) => key.id === 'ctrl');
+    const page2 = keys.find((key) => key.id === 'page-2');
+    assertTrue(Boolean(esc && ctrl && page2), 'required keys present');
+    if (!esc || !ctrl || !page2) return;
+
+    const escResult = resolveMobileTerminalExtraKeyPress(esc);
+    assertEqual(escResult.type, 'send', 'esc sends');
+    if (escResult.type === 'send') {
+      assertEqual(escResult.data, '\x1b', 'esc payload');
+    }
+
+    const ctrlResult = resolveMobileTerminalExtraKeyPress(ctrl);
+    assertEqual(ctrlResult.type, 'toggleModifier', 'ctrl toggles');
+    if (ctrlResult.type === 'toggleModifier') {
+      assertEqual(ctrlResult.modifier, 'ctrl', 'ctrl modifier');
+    }
+
+    const pageResult = resolveMobileTerminalExtraKeyPress(page2);
+    assertEqual(pageResult.type, 'setPage', 'page switch');
+    if (pageResult.type === 'setPage') {
+      assertEqual(pageResult.page, 2, 'target page 2');
+    }
+  });
+
+  test('sticky timeout constant is 3 seconds', () => {
+    assertEqual(MOBILE_TERMINAL_STICKY_TIMEOUT_MS, 3000, 'sticky timeout');
+  });
+});

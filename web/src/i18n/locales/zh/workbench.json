@@ -200,6 +200,31 @@
         "zoomPane": "切换单 pane 视图失败",
         "closePane": "关闭 pane 失败",
         "closeWindow": "关闭窗口失败"
+      },
+      "extraKeys": {
+        "toolbarAriaLabel": "终端快捷键",
+        "esc": "Esc 退出键",
+        "tab": "Tab 制表键",
+        "ctrl": "Ctrl 修饰键",
+        "alt": "Alt 修饰键",
+        "slash": "斜杠 /",
+        "up": "上方向键",
+        "down": "下方向键",
+        "left": "左方向键",
+        "right": "右方向键",
+        "page1": "切换到快捷键第 1 页",
+        "page2": "切换到快捷键第 2 页",
+        "ctrlC": "Ctrl+C 中断",
+        "ctrlD": "Ctrl+D 结束输入",
+        "ctrlZ": "Ctrl+Z 挂起",
+        "ctrlL": "Ctrl+L 清屏",
+        "home": "Home 行首",
+        "end": "End 行尾",
+        "pageUp": "Page Up 上翻页",
+        "pageDown": "Page Down 下翻页",
+        "cdUp": "插入 cd ..",
+        "lsLa": "插入 ls -la",
+        "clearSnippet": "插入 clear"
       }
     },
     "filesPanel": {
@@ -468,18 +493,18 @@
         "label": "移动端"
       }
     },
+    "theme": {
+      "title": "外观",
+      "appearance": "主题",
+      "currentLight": "浅色",
+      "currentDark": "深色"
+    },
     "connection": {
       "online": "已连接",
       "reconnecting": "重新连接中…",
       "offline": "离线",
       "cachedAt": "缓存于 {{time}}",
       "lastError": "最后错误：{{error}}"
-    },
-    "theme": {
-      "title": "外观",
-      "appearance": "主题",
-      "currentLight": "浅色",
-      "currentDark": "深色"
     }
   },
   "worktrees": {

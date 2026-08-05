@@ -1174,6 +1174,8 @@
   min-width: 0;
   min-height: calc(var(--space-24) * 3);
   height: min(62dvh, calc(var(--space-24) * 6));
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   background: var(--terminal-bg);
   border: 1px solid var(--terminal-border);
   border-radius: var(--radius-md);
@@ -1187,11 +1189,67 @@
 }
 
 .mobileTerminalHost {
-  position: absolute;
-  inset: 0;
+  position: relative;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   background: var(--terminal-bg);
+}
+
+.mobileTerminalExtraKeys {
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-1);
+  overflow-x: auto;
+  padding: var(--space-1);
+  background: color-mix(in oklab, var(--terminal-bg) 88%, var(--surface));
+  border-top: 1px solid var(--terminal-border);
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobileTerminalExtraKey {
+  min-width: calc(var(--space-8) + var(--space-2));
+  min-height: calc(var(--space-8) + var(--space-2));
+  padding: 0 var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-normal);
+  font-variant-numeric: tabular-nums;
+  transition: all var(--motion-fast) var(--ease-standard);
+  touch-action: manipulation;
+  user-select: none;
+}
+
+.mobileTerminalExtraKey[data-kind='modifier'][data-pressed='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.mobileTerminalExtraKey[data-kind='page'] {
+  color: var(--muted);
+}
+
+.mobileTerminalExtraKey:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mobileTerminalExtraKey:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+  background: var(--surface-warm);
 }
 
 .mobileTerminalHost[data-hidden='true'] {
@@ -1205,7 +1263,8 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  overscroll-behavior: contain;
+  overscroll-behavior: none;
+  /* 手势必须由我们的 touch → scrollLines 路径独占，不能落到页面或 xterm 原生 viewport 滚动。 */
   touch-action: none;
 }
 
@@ -1213,6 +1272,25 @@
   width: 100%;
   height: 100%;
   touch-action: none;
+}
+
+/*
+ * xterm 默认把 touch/wheel 落到 .xterm-viewport { overflow-y: scroll } 上，而 canvas 又不继承
+ * 外层 touch-action。手机上一指滑动会被原生滚动抢走，scrollLines 看起来“完全不能上下滑”。
+ * 对 viewport 子树统一禁掉默认触控行为，并关闭原生 overflow 滚动，只保留我们的行滚动。
+ */
+.mobileTerminalViewport :global(.xterm-viewport),
+.mobileTerminalViewport :global(.xterm-screen),
+.mobileTerminalViewport :global(canvas),
+.mobileTerminalViewport :global(.xterm-helpers),
+.mobileTerminalViewport :global(.xterm-helper-textarea) {
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+.mobileTerminalViewport :global(.xterm-viewport) {
+  overflow: hidden !important;
+  overflow-y: hidden !important;
 }
 
 .mobileTerminalEmpty {
@@ -1237,6 +1315,7 @@
 .mobileTerminalTabClose:focus-visible,
 .mobileTerminalActionButton:focus-visible,
 .mobileTerminalPrimaryButton:focus-visible,
+.mobileTerminalExtraKey:focus-visible,
 .mobileInput:focus-visible,
 .mobileSelect:focus-visible,
 .mobileTextarea:focus-visible {
