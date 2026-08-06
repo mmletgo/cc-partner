@@ -183,8 +183,25 @@ describe('workbenchWorkspaceSwitch', () => {
   assertOccurrenceCount(
     workbenchSource,
     'data-workbench-responsive-action="true"',
-    9,
+    10,
     'terminal toolbar actions stay responsive after session tabs extraction',
+  );
+  assertContains(
+    workbenchSource,
+    "title={t('workbench:switchPane')}",
+    'terminal toolbar exposes switch-pane action',
+  );
+  assertSubstringOrder(
+    workbenchSource,
+    "title={t('workbench:splitPaneDown')}",
+    "title={t('workbench:switchPane')}",
+    'switch pane follows split-down',
+  );
+  assertSubstringOrder(
+    workbenchSource,
+    "title={t('workbench:switchPane')}",
+    "title={t('workbench:closePane')}",
+    'switch pane precedes close pane',
   );
   assertOccurrenceCount(
     fileWorkspaceSource,

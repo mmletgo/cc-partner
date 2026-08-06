@@ -693,6 +693,7 @@
   },
   "splitPaneRight": "Split right",
   "splitPaneDown": "Split down",
+  "switchPane": "Switch pane",
   "closePane": "Close current pane",
   "fitTerminalSize": "Fit size",
   "terminalEnterFullscreen": "Fullscreen",

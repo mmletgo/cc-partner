@@ -296,6 +296,8 @@ export function MobileTerminalPanel({
    */
   const handleExtraKeyPress = useCallback(
     (key: MobileTerminalExtraKeyDef): void => {
+      // 双保险：即使 pointerdown 未触发 blur，也确保 xterm 失去焦点，系统键盘不因 extra key 重现。
+      terminalRef.current?.blur();
       const action = resolveMobileTerminalExtraKeyPress(key);
       if (action.type === 'send') {
         sendTerminalInput(action.data);

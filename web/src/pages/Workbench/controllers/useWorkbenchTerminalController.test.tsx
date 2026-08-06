@@ -1242,6 +1242,7 @@ describe('useWorkbenchTerminalController — split / switch / zoom / close pane'
       await result.current.loadSessions(project.id);
       await flushMicrotasks();
     });
+    expect(result.current.canSwitchPane).toBe(true);
 
     await act(async () => {
       await result.current.handleSwitchPane();
@@ -1254,6 +1255,34 @@ describe('useWorkbenchTerminalController — split / switch / zoom / close pane'
       await flushMicrotasks();
     });
     expect(fakeSessionsApi.zoomPane).toHaveBeenCalledWith('s1');
+  });
+
+  test('canSwitchPane is false for single-pane running sessions', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id, paneCount: 1 });
+    fakeSessionsApi.list.mockResolvedValue([s1]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+    expect(result.current.canUsePanes).toBe(true);
+    expect(result.current.canSwitchPane).toBe(false);
   });
 
   test('handleClosePane removes session and buffer when result.closedWindow', async () => {

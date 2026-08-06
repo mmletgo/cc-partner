@@ -171,6 +171,8 @@ export interface WorkbenchTerminalControllerResult extends WorkbenchTerminalBrid
   terminalFullscreen: boolean;
   terminalResizeRequestKey: number;
   canUsePanes: boolean;
+  /** 多 pane 时可循环切换到下一个 tmux pane。 */
+  canSwitchPane: boolean;
   canRefreshCurrentTerminalSize: boolean;
   // ---- 派生 actions ----
   setSessionNameDraft: (next: string | ((prev: string) => string)) => void;
@@ -551,6 +553,8 @@ export function useWorkbenchTerminalController(
   const canUsePanes = Boolean(
     activeSession?.supportsPanes && activeSession.status === 'running',
   );
+  // Business Logic: 单 pane window 内循环切换无可见效果；与 mobile canSwitchMobilePane 一致。
+  const canSwitchPane = canUsePanes && (activeSession?.paneCount ?? 0) > 1;
   const canRefreshCurrentTerminalSize = canRefreshTerminalSize(activeSession, remoteWriteDisabled);
 
   /**
@@ -1312,6 +1316,7 @@ export function useWorkbenchTerminalController(
     terminalFullscreen,
     terminalResizeRequestKey,
     canUsePanes,
+    canSwitchPane,
     canRefreshCurrentTerminalSize,
     // 派生 actions
     setSessionNameDraft,

@@ -35,7 +35,7 @@ import {
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { useAttention } from '@/hooks/useAttention';
 import {
-  BrowserIcon, EditIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
+  ArrowRightIcon, BrowserIcon, EditIcon, FileIcon, MaximizeIcon, MinimizeIcon, OrchestratorIcon,
   RefreshIcon, SearchIcon, SplitDownIcon, SplitRightIcon, XIcon,
 } from '@/lib/icons';
 import styles from './Workbench.module.css';
@@ -186,6 +186,7 @@ export function Workbench() {
     terminalFullscreen,
     terminalResizeRequestKey,
     canUsePanes,
+    canSwitchPane,
     canRefreshCurrentTerminalSize,
     setSessionNameDraft,
     setSessionError,
@@ -195,6 +196,7 @@ export function Workbench() {
     focusSession,
     handleCreateSession,
     handleSplitPane,
+    handleSwitchPane,
     handleClosePane,
     handleCloseSession,
     handleRenameSession,
@@ -890,9 +892,7 @@ export function Workbench() {
                       disabled={!activeProject || !activeWorktree}
                       onClick={() => setWorkspaceView('browser')}
                     >
-                      <span data-workbench-responsive-label="true">
-                        {t('workbench:browserPreview.openWorkspace')}
-                      </span>
+                      <span data-workbench-responsive-label="true">{t('workbench:browserPreview.openWorkspace')}</span>
                     </Button>
                   ) : null}
                   {!terminalFullscreen ? (
@@ -907,9 +907,7 @@ export function Workbench() {
                       disabled={!activeProjectId || !activeWorktree}
                       onClick={openSessionSearch}
                     >
-                      <span data-workbench-responsive-label="true">
-                        {t('workbench:sessionSearch.open')}
-                      </span>
+                      <span data-workbench-responsive-label="true">{t('workbench:sessionSearch.open')}</span>
                     </Button>
                   ) : null}
                   <AgentLedgerWorkbenchChrome showTrigger={!terminalFullscreen} disabled={!activeProjectId}
@@ -932,9 +930,7 @@ export function Workbench() {
                       disabled={!activeSession || (remoteWriteDisabled && !promptPanelOpen)}
                       onClick={togglePromptOptimizerPanel}
                     >
-                      <span data-workbench-responsive-label="true">
-                        {t('workbench:promptOptimizer.open')}
-                      </span>
+                      <span data-workbench-responsive-label="true">{t('workbench:promptOptimizer.open')}</span>
                     </Button>
                   ) : null}
                   <Button
@@ -948,9 +944,7 @@ export function Workbench() {
                     disabled={!canRefreshCurrentTerminalSize}
                     onClick={handleRefreshTerminalSize}
                   >
-                    <span data-workbench-responsive-label="true">
-                      {t('workbench:fitTerminalSize')}
-                    </span>
+                    <span data-workbench-responsive-label="true">{t('workbench:fitTerminalSize')}</span>
                   </Button>
                   <Button
                     className={styles.terminalActionButton}
@@ -963,9 +957,7 @@ export function Workbench() {
                     disabled={!canUsePanes || remoteWriteDisabled}
                     onClick={() => void handleSplitPane('right')}
                   >
-                    <span data-workbench-responsive-label="true">
-                      {t('workbench:splitPaneRight')}
-                    </span>
+                    <span data-workbench-responsive-label="true">{t('workbench:splitPaneRight')}</span>
                   </Button>
                   <Button
                     className={styles.terminalActionButton}
@@ -978,9 +970,20 @@ export function Workbench() {
                     disabled={!canUsePanes || remoteWriteDisabled}
                     onClick={() => void handleSplitPane('down')}
                   >
-                    <span data-workbench-responsive-label="true">
-                      {t('workbench:splitPaneDown')}
-                    </span>
+                    <span data-workbench-responsive-label="true">{t('workbench:splitPaneDown')}</span>
+                  </Button>
+                  <Button
+                    className={styles.terminalActionButton}
+                    variant="secondary"
+                    size="sm"
+                    icon={<ArrowRightIcon />}
+                    title={t('workbench:switchPane')}
+                    aria-label={t('workbench:switchPane')}
+                    data-workbench-responsive-action="true"
+                    disabled={!canSwitchPane || remoteWriteDisabled}
+                    onClick={() => void handleSwitchPane()}
+                  >
+                    <span data-workbench-responsive-label="true">{t('workbench:switchPane')}</span>
                   </Button>
                   <Button
                     className={styles.terminalActionButton}
@@ -993,9 +996,7 @@ export function Workbench() {
                     disabled={!canUsePanes || remoteWriteDisabled}
                     onClick={() => void handleClosePane()}
                   >
-                    <span data-workbench-responsive-label="true">
-                      {t('workbench:closePane')}
-                    </span>
+                    <span data-workbench-responsive-label="true">{t('workbench:closePane')}</span>
                   </Button>
                   <Button
                     className={styles.terminalActionButton}
@@ -1006,11 +1007,7 @@ export function Workbench() {
                     aria-label={terminalFullscreenLabel}
                     data-workbench-responsive-action="true"
                     disabled={!terminalFullscreen && !activeSession}
-                    onClick={
-                      terminalFullscreen
-                        ? handleExitTerminalFullscreen
-                        : handleEnterTerminalFullscreen
-                    }
+                    onClick={terminalFullscreen ? handleExitTerminalFullscreen : handleEnterTerminalFullscreen}
                   >
                     <span data-workbench-responsive-label="true">{terminalFullscreenLabel}</span>
                   </Button>
@@ -1026,9 +1023,7 @@ export function Workbench() {
                       disabled={fileTabs.length === 0}
                       onClick={handleReturnToFiles}
                     >
-                      <span data-workbench-responsive-label="true">
-                        {t('workbench:fileWorkspace.openFiles')}
-                      </span>
+                      <span data-workbench-responsive-label="true">{t('workbench:fileWorkspace.openFiles')}</span>
                     </Button>
                   ) : null}
                 </>

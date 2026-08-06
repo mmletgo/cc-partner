@@ -2,10 +2,12 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import {
+  dismissMobileTerminalSoftKeyboard,
   getMobileTerminalExtraKeys,
   type MobileTerminalExtraKeyDef,
   type MobileTerminalExtraKeyPage,
   type MobileTerminalStickyModifier,
+  type SoftKeyboardFocusTarget,
 } from '../mobileTerminalExtraKeys';
 import styles from '../MobileWorkbench.module.css';
 
@@ -82,9 +84,11 @@ function extraKeyAriaLabel(
  *
  * Business Logic（为什么需要这个组件）:
  *   手机软键盘缺少 Esc/Tab/Ctrl/方向与 ^C 等；需要在终端 surface 底部提供 Termux 风格固定键位条。
+ *   按 extra key 时必须收起系统软键盘：键盘只应在用户点击终端输入区后出现。
  *
  * Code Logic（这个组件做什么）:
- *   纯展示：按 page 渲染横向可滚动按钮；modifier 显示 aria-pressed；pointerdown preventDefault 降低抢焦点概率；
+ *   纯展示：按 page 渲染横向可滚动按钮；modifier 显示 aria-pressed；
+ *   pointerdown 先 blur xterm helper textarea 再 preventDefault，避免保留软键盘焦点；
  *   点击结果交给父组件解析并 enqueue。
  */
 export function MobileTerminalExtraKeys({
@@ -120,7 +124,11 @@ export function MobileTerminalExtraKeys({
             title={ariaLabel}
             disabled={disabled}
             onPointerDown={(event) => {
-              // 避免按钮抢走 xterm textarea 焦点导致系统软键盘收起。
+              // Extra keys 不得维持 xterm textarea 焦点，否则已打开过的系统键盘会再次弹出。
+              dismissMobileTerminalSoftKeyboard(
+                document.activeElement as SoftKeyboardFocusTarget | null,
+              );
+              // 同时阻止 button 自身获焦，保持焦点落在非输入控件上。
               event.preventDefault();
             }}
             onClick={() => {

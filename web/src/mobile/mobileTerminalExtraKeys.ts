@@ -234,3 +234,43 @@ export function resolveMobileTerminalExtraKeyPress(
   }
   return { type: 'ignore' };
 }
+
+/**
+ * 可被 extra keys 解除软键盘的焦点目标（xterm helper textarea / 其它可编辑控件）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   单元测试不依赖 jsdom，只要能描述 tag/class 并接收 blur 副作用即可。
+ *
+ * Code Logic（这个类型做什么）:
+ *   覆盖 document.activeElement 上 blur 所需最小字段。
+ */
+export interface SoftKeyboardFocusTarget {
+  tagName: string;
+  isContentEditable?: boolean;
+  classList?: { contains(token: string): boolean };
+  blur(): void;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   用户一旦用系统键盘输入过，xterm helper textarea 会保持焦点；extra keys 若继续保留该焦点，
+ *   手机软键盘会再次弹出，遮挡终端并打断快捷键操作。软键盘只应在用户点击终端输入区时出现。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若 activeElement 是 textarea/input/contentEditable 或带 xterm-helper-textarea class，则 blur 并返回 true；
+ *   其它焦点目标不处理，避免误伤无关控件。
+ */
+export function dismissMobileTerminalSoftKeyboard(
+  activeElement: SoftKeyboardFocusTarget | null | undefined,
+): boolean {
+  if (!activeElement || typeof activeElement.blur !== 'function') return false;
+  const tag = activeElement.tagName.toUpperCase();
+  const isEditable =
+    tag === 'TEXTAREA' ||
+    tag === 'INPUT' ||
+    Boolean(activeElement.isContentEditable) ||
+    Boolean(activeElement.classList?.contains('xterm-helper-textarea'));
+  if (!isEditable) return false;
+  activeElement.blur();
+  return true;
+}

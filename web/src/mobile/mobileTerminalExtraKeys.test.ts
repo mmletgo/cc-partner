@@ -1,6 +1,7 @@
 import { describe, test } from 'vitest';
 import {
   applyStickyModifierToInput,
+  dismissMobileTerminalSoftKeyboard,
   encodeAltKeyInput,
   encodeCtrlKeyInput,
   getMobileTerminalExtraKeys,
@@ -137,5 +138,29 @@ describe('mobileTerminalExtraKeys', () => {
 
   test('sticky timeout constant is 3 seconds', () => {
     assertEqual(MOBILE_TERMINAL_STICKY_TIMEOUT_MS, 3000, 'sticky timeout');
+  });
+
+  test('dismissMobileTerminalSoftKeyboard blurs xterm textarea but ignores non-editable focus', () => {
+    let blurred = false;
+    const textarea = {
+      tagName: 'TEXTAREA',
+      classList: { contains: (token: string) => token === 'xterm-helper-textarea' },
+      blur: () => {
+        blurred = true;
+      },
+    };
+    assertTrue(dismissMobileTerminalSoftKeyboard(textarea), 'textarea dismissed');
+    assertTrue(blurred, 'textarea.blur called');
+
+    blurred = false;
+    const button = {
+      tagName: 'BUTTON',
+      blur: () => {
+        blurred = true;
+      },
+    };
+    assertEqual(dismissMobileTerminalSoftKeyboard(button), false, 'button ignored');
+    assertEqual(blurred, false, 'button not blurred');
+    assertEqual(dismissMobileTerminalSoftKeyboard(null), false, 'null ignored');
   });
 });
