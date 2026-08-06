@@ -50,12 +50,16 @@ import {
 } from '../mobileTerminalInputStream';
 import {
   applyStickyModifierToInput,
+  enterMobileTerminalTypingMode,
+  findMobileTerminalHelperTextarea,
+  leaveMobileTerminalTypingMode,
   MOBILE_TERMINAL_STICKY_TIMEOUT_MS,
   resolveMobileTerminalExtraKeyPress,
   toggleStickyModifier,
   type MobileTerminalExtraKeyDef,
   type MobileTerminalExtraKeyPage,
   type MobileTerminalStickyModifier,
+  type SoftKeyboardFocusTarget,
 } from '../mobileTerminalExtraKeys';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 
@@ -296,7 +300,11 @@ export function MobileTerminalPanel({
    */
   const handleExtraKeyPress = useCallback(
     (key: MobileTerminalExtraKeyDef): void => {
-      // 双保险：即使 pointerdown 未触发 blur，也确保 xterm 失去焦点，系统键盘不因 extra key 重现。
+      // Extra keys 离开打字态：readonly + inputmode=none + blur，系统键盘不得因快捷键重现。
+      leaveMobileTerminalTypingMode(
+        findMobileTerminalHelperTextarea(viewportRef.current ?? document),
+        document.activeElement as SoftKeyboardFocusTarget | null,
+      );
       terminalRef.current?.blur();
       const action = resolveMobileTerminalExtraKeyPress(key);
       if (action.type === 'send') {
@@ -451,6 +459,8 @@ export function MobileTerminalPanel({
     terminal.loadAddon(fit);
     terminal.open(viewport);
     terminalRef.current = terminal;
+    // 默认离开打字态：系统键盘只在用户明确点击终端输入区后出现。
+    leaveMobileTerminalTypingMode(findMobileTerminalHelperTextarea(viewport), null);
 
     /**
      * Business Logic（为什么需要这个函数）:
@@ -542,9 +552,12 @@ export function MobileTerminalPanel({
      *
      * Code Logic（这个函数做什么）:
      *   在 capture 阶段拦截单指 touchmove，读取 viewport 与 xterm rows 得到行高，
-     *   交给 touch helper 累计像素并调用 terminal.scrollLines；不在 touchstart 上 preventDefault，
-     *   以免阻断 helper textarea 聚焦与软键盘。
+     *   交给 touch helper 累计像素并调用 terminal.scrollLines；滑动过程中不进入打字态。
+     *   轻点（未滚动）在 touchend 进入打字态并 focus，系统键盘才出现；shell 会随 visualViewport 上移。
      */
+    let touchMoved = false;
+    let suppressClickAfterScroll = false;
+    let touchStartY = 0;
     const handleTouchMove = (event: TouchEvent): void => {
       if (event.touches.length !== 1) {
         touchScrollStateRef.current = null;
@@ -556,6 +569,9 @@ export function MobileTerminalPanel({
       }
       event.stopPropagation();
       const touch = event.touches[0];
+      if (Math.abs(touch.clientY - touchStartY) > 8) {
+        touchMoved = true;
+      }
       const baseState =
         touchScrollStateRef.current ?? beginMobileTerminalTouchScroll(touch.clientY);
       const fallbackLineHeight =
@@ -567,17 +583,58 @@ export function MobileTerminalPanel({
       );
       touchScrollStateRef.current = result.state;
       if (result.lines !== 0) {
+        touchMoved = true;
         terminal.scrollLines(result.lines);
       }
     };
     const handleTouchStart = (event: TouchEvent): void => {
+      touchMoved = false;
+      suppressClickAfterScroll = false;
+      touchStartY = event.touches.length === 1 ? event.touches[0].clientY : 0;
       touchScrollStateRef.current =
         event.touches.length === 1
           ? beginMobileTerminalTouchScroll(event.touches[0].clientY)
           : null;
     };
-    const resetTouchScroll = (): void => {
+    /**
+     * Business Logic（为什么需要这个函数）:
+     *   系统键盘只应在用户明确点击终端输入区后出现；滑动滚动不得弹出键盘。
+     *
+     * Code Logic（这个函数做什么）:
+     *   去掉 helper readonly/inputmode 并 terminal.focus()。
+     */
+    const enterTypingFromUserGesture = (): void => {
+      if (disposed) return;
+      enterMobileTerminalTypingMode(findMobileTerminalHelperTextarea(viewport));
+      try {
+        terminal.focus();
+      } catch {
+        // xterm 在 dispose 窗口期可能 focus 失败，忽略。
+      }
+    };
+    const handleTouchEnd = (): void => {
+      const wasScroll = touchMoved;
       touchScrollStateRef.current = null;
+      touchMoved = false;
+      // 滑动只滚动；随后合成 click 也必须抑制，避免滚完又弹键盘。
+      if (wasScroll) {
+        suppressClickAfterScroll = true;
+        return;
+      }
+      enterTypingFromUserGesture();
+    };
+    const handleTouchCancel = (): void => {
+      touchScrollStateRef.current = null;
+      touchMoved = false;
+      suppressClickAfterScroll = true;
+    };
+    const handleViewportClick = (): void => {
+      if (suppressClickAfterScroll) {
+        suppressClickAfterScroll = false;
+        return;
+      }
+      // 桌面/无 touch 调试；手机轻点与 touchend 幂等。
+      enterTypingFromUserGesture();
     };
     // capture=true：在 canvas / .xterm-viewport 自己消费 touch 前先接管手势。
     const touchListenerOptions: AddEventListenerOptions = { capture: true };
@@ -589,14 +646,15 @@ export function MobileTerminalPanel({
       ...touchListenerOptions,
       passive: false,
     });
-    viewport.addEventListener('touchend', resetTouchScroll, {
+    viewport.addEventListener('touchend', handleTouchEnd, {
       ...touchListenerOptions,
       passive: true,
     });
-    viewport.addEventListener('touchcancel', resetTouchScroll, {
+    viewport.addEventListener('touchcancel', handleTouchCancel, {
       ...touchListenerOptions,
       passive: true,
     });
+    viewport.addEventListener('click', handleViewportClick);
 
     const observer = new ResizeObserver(() => {
       if (resizeTimerRef.current !== null) {
@@ -640,8 +698,9 @@ export function MobileTerminalPanel({
       dataDisposable.dispose();
       viewport.removeEventListener('touchstart', handleTouchStart, touchListenerOptions);
       viewport.removeEventListener('touchmove', handleTouchMove, touchListenerOptions);
-      viewport.removeEventListener('touchend', resetTouchScroll, touchListenerOptions);
-      viewport.removeEventListener('touchcancel', resetTouchScroll, touchListenerOptions);
+      viewport.removeEventListener('touchend', handleTouchEnd, touchListenerOptions);
+      viewport.removeEventListener('touchcancel', handleTouchCancel, touchListenerOptions);
+      viewport.removeEventListener('click', handleViewportClick);
       touchScrollStateRef.current = null;
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);

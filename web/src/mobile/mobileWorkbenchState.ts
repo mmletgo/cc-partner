@@ -276,10 +276,12 @@ export function computeMobileKeyboardInset(
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   横屏时终端应优先占可视高度；竖屏保留常规比例，并在软键盘弹出后压缩。
+ *   横屏时终端应优先占可视高度；竖屏保留常规比例；软键盘时 shell 高度已是 visualViewport，
+ *   不得再二次扣减 keyboardInset。
  *
  * Code Logic（这个函数做什么）:
- *   基于可用高度（viewportHeight - keyboardInset）与 landscape 计算 terminalMinHeight。
+ *   基于 availableHeight（调用方传入的已是可见高度）与 landscape 计算 terminalMinHeight。
+ *   keyboardInset 参数保留兼容；仅在 availableHeight 仍为 layout 高度时由调用方扣减。
  */
 export function computeMobileTerminalMinHeight(
   viewportWidth: number,
@@ -297,7 +299,8 @@ export function computeMobileTerminalMinHeight(
  *   shell CSS 变量需要一次计算 keyboard inset、shell 高度与终端优先高度，避免组件内散落公式。
  *
  * Code Logic（这个函数做什么）:
- *   组合 visualViewport/layout 尺寸，返回 MobileViewportLayoutHints。
+ *   shellHeight = visualViewport 高度（键盘已从可见区排除）；keyboardInset 仅作 data-keyboard-open
+ *   检测，**不**再从 shellHeight 扣减；terminalMinHeight 基于 shellHeight 直接计算。
  */
 export function computeMobileViewportLayoutHints(
   layoutViewportWidth: number,
@@ -316,10 +319,11 @@ export function computeMobileViewportLayoutHints(
   );
   const shellHeight = Math.max(0, Math.round(vvHeight));
   const landscape = layoutViewportWidth > layoutViewportHeight;
+  // shellHeight 已是 visualViewport：键盘占用已排除，terminalMinHeight 不得二次扣 inset。
   const terminalMinHeight = computeMobileTerminalMinHeight(
     layoutViewportWidth,
     shellHeight,
-    keyboardInset,
+    0,
   );
   return { shellHeight, keyboardInset, landscape, terminalMinHeight };
 }

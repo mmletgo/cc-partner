@@ -292,7 +292,9 @@ describe('mobileWorkbenchState', () => {
     assertEqual(portrait.keyboardInset, 344);
     assertEqual(portrait.shellHeight, 500);
     assertEqual(portrait.landscape, false);
-    assertEqual(portrait.terminalMinHeight, computeMobileTerminalMinHeight(390, 500, 344));
+    // shellHeight 已是 visualViewport，terminalMinHeight 不得再扣 keyboardInset。
+    assertEqual(portrait.terminalMinHeight, computeMobileTerminalMinHeight(390, 500, 0));
+    assertEqual(portrait.terminalMinHeight, Math.max(160, Math.round(500 * 0.48)));
 
     const landscape = computeMobileViewportLayoutHints(844, 390, 390, 0);
     assertEqual(landscape.landscape, true);

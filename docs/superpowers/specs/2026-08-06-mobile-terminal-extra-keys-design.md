@@ -45,7 +45,10 @@ Sticky：武装后下一次 xterm `onData` 的单字符可打印输入转为 Ctr
 - 挂在 `MobileTerminalPanel` 终端 surface 底部，全屏与非全屏均显示
 - 仅 running session 且输入流 ready、非 busy 时启用
 - 触控目标高度 ≥ 44px；横向可滚动
-- 软键盘策略：系统键盘只在用户点击终端输入区时出现；按 extra key 时必须 blur xterm helper textarea（`dismissMobileTerminalSoftKeyboard` + `terminal.blur()`），不得为了“保留输入焦点”而继续维持软键盘
+- 软键盘策略：
+  - 系统键盘只在用户轻点终端输入区时出现（`enterMobileTerminalTypingMode` + `terminal.focus()`）
+  - 默认 / 按 extra key 时离开打字态：`readonly` + `inputmode=none` + blur（`leaveMobileTerminalTypingMode`）
+  - shell 钉在 visualViewport（`position:fixed; top=offsetTop; height=vv.height`），键盘弹出时整体上移/压缩，不把终端挡在键盘下；padding 不叠 keyboard-inset
 - tokens only；文案 i18n
 
 ## Non-goals (v1)

@@ -2,8 +2,9 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import {
-  dismissMobileTerminalSoftKeyboard,
+  findMobileTerminalHelperTextarea,
   getMobileTerminalExtraKeys,
+  leaveMobileTerminalTypingMode,
   type MobileTerminalExtraKeyDef,
   type MobileTerminalExtraKeyPage,
   type MobileTerminalStickyModifier,
@@ -88,7 +89,7 @@ function extraKeyAriaLabel(
  *
  * Code Logic（这个组件做什么）:
  *   纯展示：按 page 渲染横向可滚动按钮；modifier 显示 aria-pressed；
- *   pointerdown 先 blur xterm helper textarea 再 preventDefault，避免保留软键盘焦点；
+ *   pointerdown 进入 leaveTypingMode（readonly + inputmode=none + blur）再 preventDefault；
  *   点击结果交给父组件解析并 enqueue。
  */
 export function MobileTerminalExtraKeys({
@@ -124,15 +125,21 @@ export function MobileTerminalExtraKeys({
             title={ariaLabel}
             disabled={disabled}
             onPointerDown={(event) => {
-              // Extra keys 不得维持 xterm textarea 焦点，否则已打开过的系统键盘会再次弹出。
-              dismissMobileTerminalSoftKeyboard(
+              // 离开打字态：readonly + inputmode=none + blur，比单纯 blur 更能压住 iOS/Android 软键盘。
+              leaveMobileTerminalTypingMode(
+                findMobileTerminalHelperTextarea(document),
                 document.activeElement as SoftKeyboardFocusTarget | null,
               );
-              // 同时阻止 button 自身获焦，保持焦点落在非输入控件上。
+              // 阻止 button 获焦；焦点不得回到 xterm textarea。
               event.preventDefault();
             }}
             onClick={() => {
               if (disabled) return;
+              // click 路径再 leave 一次，覆盖 pointer 事件被吞掉的浏览器。
+              leaveMobileTerminalTypingMode(
+                findMobileTerminalHelperTextarea(document),
+                document.activeElement as SoftKeyboardFocusTarget | null,
+              );
               onKeyPress(key);
             }}
           >

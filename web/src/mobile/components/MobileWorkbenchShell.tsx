@@ -276,13 +276,17 @@ export function MobileWorkbenchShell({
      */
     const applyViewportHints = (): void => {
       const vv = window.visualViewport;
+      const offsetTop = vv?.offsetTop ?? 0;
       const hints = computeMobileViewportLayoutHints(
         window.innerWidth,
         window.innerHeight,
         vv?.height ?? null,
-        vv?.offsetTop ?? 0,
+        offsetTop,
       );
+      // 钉在 visualViewport：键盘弹出时 top/height 同步上移与压缩，内容留在键盘上方。
+      root.style.setProperty('--mobile-shell-offset-top', `${Math.max(0, Math.round(offsetTop))}px`);
       root.style.setProperty('--mobile-shell-height', `${hints.shellHeight}px`);
+      // inset 仅驱动 data-keyboard-open；CSS 不得再把它叠到 padding-bottom。
       root.style.setProperty('--mobile-keyboard-inset', `${hints.keyboardInset}px`);
       root.style.setProperty('--mobile-terminal-min-height', `${hints.terminalMinHeight}px`);
       root.dataset.landscape = hints.landscape ? 'true' : 'false';
@@ -309,6 +313,7 @@ export function MobileWorkbenchShell({
       style={
         {
           // 初始 SSR/首帧回退：真实值由 visualViewport effect 覆盖
+          ['--mobile-shell-offset-top' as string]: '0px',
           ['--mobile-shell-height' as string]: '100dvh',
           ['--mobile-keyboard-inset' as string]: '0px',
           ['--mobile-terminal-min-height' as string]: '48dvh',

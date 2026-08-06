@@ -252,6 +252,21 @@ export interface SoftKeyboardFocusTarget {
 }
 
 /**
+ * xterm helper textarea 的最小可测接口：属性读写 + blur。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   iOS/Android 仅 blur 往往拦不住软键盘重现；需要 readonly + inputmode=none 显式离开输入态。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述 setAttribute/removeAttribute/blur，便于无 jsdom 单测。
+ */
+export interface MobileTerminalHelperTextarea {
+  setAttribute(name: string, value: string): void;
+  removeAttribute(name: string): void;
+  blur(): void;
+}
+
+/**
  * Business Logic（为什么需要这个函数）:
  *   用户一旦用系统键盘输入过，xterm helper textarea 会保持焦点；extra keys 若继续保留该焦点，
  *   手机软键盘会再次弹出，遮挡终端并打断快捷键操作。软键盘只应在用户点击终端输入区时出现。
@@ -273,4 +288,61 @@ export function dismissMobileTerminalSoftKeyboard(
   if (!isEditable) return false;
   activeElement.blur();
   return true;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   进入「可打字」态时才允许系统键盘：用户点击终端输入区后调用。
+ *
+ * Code Logic（这个函数做什么）:
+ *   去掉 helper textarea 的 readonly 与 inputmode=none，返回是否找到控件。
+ */
+export function enterMobileTerminalTypingMode(
+  helperTextarea: MobileTerminalHelperTextarea | null | undefined,
+): boolean {
+  if (!helperTextarea) return false;
+  helperTextarea.removeAttribute('readonly');
+  helperTextarea.removeAttribute('inputmode');
+  return true;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   按 extra keys 或初始化终端时必须离开打字态：系统键盘不得因快捷键重现。
+ *
+ * Code Logic（这个函数做什么）:
+ *   对 helper textarea 设 readonly + inputmode=none 并 blur；再 blur 当前可编辑 activeElement。
+ *   返回是否至少执行了 helper 或 activeElement 其中一侧的 dismiss。
+ */
+export function leaveMobileTerminalTypingMode(
+  helperTextarea: MobileTerminalHelperTextarea | null | undefined,
+  activeElement?: SoftKeyboardFocusTarget | null,
+): boolean {
+  let touched = false;
+  if (helperTextarea) {
+    helperTextarea.setAttribute('readonly', 'true');
+    helperTextarea.setAttribute('inputmode', 'none');
+    helperTextarea.blur();
+    touched = true;
+  }
+  if (dismissMobileTerminalSoftKeyboard(activeElement ?? null)) {
+    touched = true;
+  }
+  return touched;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   面板与 extra keys 需要定位当前终端的 xterm helper textarea。
+ *
+ * Code Logic（这个函数做什么）:
+ *   在 root 内 query `.xterm-helper-textarea`；root 为空则返回 null。
+ */
+export function findMobileTerminalHelperTextarea(
+  root: ParentNode | null | undefined,
+): HTMLTextAreaElement | null {
+  if (!root || typeof (root as ParentNode).querySelector !== 'function') return null;
+  return root.querySelector(
+    'textarea.xterm-helper-textarea, .xterm-helper-textarea',
+  ) as HTMLTextAreaElement | null;
 }

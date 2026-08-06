@@ -4,7 +4,9 @@ import {
   dismissMobileTerminalSoftKeyboard,
   encodeAltKeyInput,
   encodeCtrlKeyInput,
+  enterMobileTerminalTypingMode,
   getMobileTerminalExtraKeys,
+  leaveMobileTerminalTypingMode,
   MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS,
   MOBILE_TERMINAL_STICKY_TIMEOUT_MS,
   resolveMobileTerminalExtraKeyPress,
@@ -162,5 +164,32 @@ describe('mobileTerminalExtraKeys', () => {
     assertEqual(dismissMobileTerminalSoftKeyboard(button), false, 'button ignored');
     assertEqual(blurred, false, 'button not blurred');
     assertEqual(dismissMobileTerminalSoftKeyboard(null), false, 'null ignored');
+  });
+
+  test('typing mode enter/leave toggles readonly and inputmode on helper textarea', () => {
+    const attrs = new Map<string, string>();
+    let blurred = 0;
+    const helper = {
+      setAttribute: (name: string, value: string) => {
+        attrs.set(name, value);
+      },
+      removeAttribute: (name: string) => {
+        attrs.delete(name);
+      },
+      blur: () => {
+        blurred += 1;
+      },
+    };
+
+    assertTrue(leaveMobileTerminalTypingMode(helper, null), 'leave applies helper attrs');
+    assertEqual(attrs.get('readonly'), 'true', 'readonly set');
+    assertEqual(attrs.get('inputmode'), 'none', 'inputmode none');
+    assertEqual(blurred, 1, 'leave blurs helper');
+
+    assertTrue(enterMobileTerminalTypingMode(helper), 'enter clears attrs');
+    assertEqual(attrs.has('readonly'), false, 'readonly removed');
+    assertEqual(attrs.has('inputmode'), false, 'inputmode removed');
+    assertEqual(enterMobileTerminalTypingMode(null), false, 'enter null');
+    assertEqual(leaveMobileTerminalTypingMode(null, null), false, 'leave null');
   });
 });

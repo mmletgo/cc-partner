@@ -3,7 +3,17 @@
 }
 
 .shell {
-  /* visualViewport 驱动的 shell 高度；软键盘弹出时由 JS 写入 --mobile-shell-height */
+  /*
+   * 钉在 visualViewport 上：高度 = vv.height，top = vv.offsetTop。
+   * 软键盘弹出时 shell 整体上移/压缩到键盘上方，内容不被遮挡。
+   * 注意：shellHeight 已排除键盘，padding-bottom 只保留 safe-area，
+   * 禁止再叠加 --mobile-keyboard-inset（会二次压缩并挤飞 extra keys）。
+   */
+  position: fixed;
+  top: var(--mobile-shell-offset-top, 0px);
+  left: 0;
+  right: 0;
+  width: 100%;
   height: var(--mobile-shell-height, 100dvh);
   min-height: 0;
   max-height: var(--mobile-shell-height, 100dvh);
@@ -12,7 +22,7 @@
   display: grid;
   grid-template-rows: auto 1fr;
   overflow: hidden;
-  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--mobile-keyboard-inset, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   box-sizing: border-box;
 }
 
@@ -992,12 +1002,17 @@
 }
 
 .mobileTerminalPanel[data-fullscreen='true'] {
+  /* 全屏同样钉在 visualViewport，避免 100dvh 伸到系统键盘下面 */
   position: fixed;
-  inset: 0;
+  top: var(--mobile-shell-offset-top, 0px);
+  left: 0;
+  right: 0;
+  bottom: auto;
   z-index: var(--z-modal);
   min-width: 0;
-  min-height: 100dvh;
-  height: 100dvh;
+  min-height: var(--mobile-shell-height, 100dvh);
+  height: var(--mobile-shell-height, 100dvh);
+  max-height: var(--mobile-shell-height, 100dvh);
   padding: calc(env(safe-area-inset-top) + var(--space-2)) var(--space-2)
     calc(env(safe-area-inset-bottom) + var(--space-2));
   display: grid;
@@ -1005,6 +1020,7 @@
   align-content: stretch;
   gap: var(--space-2);
   background: var(--bg);
+  box-sizing: border-box;
 }
 
 .mobileTerminalToolbar {
