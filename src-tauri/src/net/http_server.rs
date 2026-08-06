@@ -10,6 +10,7 @@
 //!       优先绑定固定 HTTP 端口，冲突时向上递增，取 local_addr 实际端口回填
 //!       AppState.actual_http_port（AtomicU16），tokio::spawn(axum::serve)。
 //!     - `/mobile` fallback：通过 Tauri asset resolver 读取 frontendDist 嵌入资源，并精确服务 `/assets/*` 构建资源。
+//!     - 开发态可选：fallback 内把 `/mobile` + Vite 模块/HMR WS 反向代理到本机 `5173`（见 `mobile_dev_proxy`）。
 //!     - body limit 覆盖文件传输 chunk 和 Workbench 远端文本保存。
 
 use crate::backend::control::{self, BackendControlFile};
@@ -18,6 +19,7 @@ use crate::net::lan_guard::{
     browser_request_guard, expected_device_id_guard, inject_overlay_trust, lan_socket_gate,
     require_loopback_peer,
 };
+use crate::net::mobile_dev_proxy;
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     agent_hub, attention, browser_verification, cc_history, claude_code_assets, claude_md_sync,
@@ -132,27 +134,67 @@ fn backend_stop_token_matches(
 ///     手机端入口只应接管 `/mobile` shell 与 Vite 生成的 `/assets/*` 资源；P2P API、桌面 Workbench 等其它路径必须维持原路由语义。
 ///
 /// Code Logic（这个函数做什么）:
-///     对 path 做精确前缀判断：`/mobile`、`/mobile/...` 和 `/assets/...` 返回 true，其它路径返回 false。
+///     对 path 做精确前缀判断：`/mobile`、`/mobile/...` 和 `/assets/...` 返回 true。
+///     开发态 Vite 模块路径（`/src/*`、`/@vite/*` 等）不在此集合，由 `mobile_dev_proxy` 单独接管。
 fn is_mobile_spa_path(path: &str) -> bool {
     path == "/mobile" || path.starts_with("/mobile/") || path.starts_with("/assets/")
+}
+
+/// 生产静态资源命名空间（Vite 代理失败时可回落 dist/嵌入）。
+fn is_mobile_static_fallback_path(path: &str) -> bool {
+    is_mobile_spa_path(path)
 }
 
 /// axum fallback service：按 `/mobile` SPA 规则返回 Tauri 静态资源或 404。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     桌面端生成的局域网手机访问 URL 指向 `/mobile`，手机浏览器刷新任意 SPA 子路由时需要回退到
-///     `mobile.html`，但未知非移动端路径不能被错误接管。
+///     `mobile.html`，但未知非移动端路径不能被错误接管。开发态可把同一入口代理到本机 Vite 以支持 HMR。
 ///
 /// Code Logic（这个函数做什么）:
-///     非移动端静态路径直接 404；`/mobile`/`/mobile/` 返回 shell；`/assets/*` 只按 exact asset key 读取，
-///     资源缺失时直接 404；`/mobile/<rest>` 保留 SPA 子路由回退 shell，shell 缺失时返回纯文本 404。
+///     1) 开发态 WebSocket upgrade（非 `/api`）→ Vite HMR 桥接；
+///     2) 开发态 HTTP：`/mobile`/`/assets`/Vite 模块路径优先代理，连接失败回落静态；
+///     3) 非移动端静态路径直接 404；`/mobile` shell + SPA 回落 + exact `/assets/*` 读嵌入/dist。
 async fn serve_mobile_spa(
     state: AppState,
     req: Request<Body>,
 ) -> Result<Response<Body>, Infallible> {
-    let path = req.uri().path();
+    let path = req.uri().path().to_string();
+    let is_ws = mobile_dev_proxy::is_websocket_upgrade(req.headers());
 
-    if !is_mobile_spa_path(path) {
+    // 开发态：fallback 上的 HMR WebSocket（浏览器连 backend 端口）。
+    if is_ws {
+        if mobile_dev_proxy::is_proxy_enabled()
+            && mobile_dev_proxy::is_proxyable_websocket_path(&path)
+        {
+            return Ok(mobile_dev_proxy::proxy_websocket(req).await);
+        }
+        let mut response = Response::new(Body::from("Not Found"));
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        return Ok(response);
+    }
+
+    // 开发态：Vite HTTP 模块与 /mobile shell。
+    if mobile_dev_proxy::is_proxy_enabled() && mobile_dev_proxy::is_proxyable_http_path(&path) {
+        if let Some(response) = mobile_dev_proxy::try_proxy_http(req).await {
+            return Ok(response);
+        }
+        // 上游不可达：仅对生产静态命名空间继续 dist/嵌入回落；纯 Vite 模块路径直接 502。
+        if !is_mobile_static_fallback_path(&path) {
+            let mut response = Response::new(Body::from("vite module unavailable"));
+            *response.status_mut() = StatusCode::BAD_GATEWAY;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            return Ok(response);
+        }
+        // 静态回落：请求体已在 try_proxy_http 中消费；GET shell/assets 不依赖 body。
+    } else if !is_mobile_spa_path(&path) {
         let mut response = Response::new(Body::from("Not Found"));
         *response.status_mut() = StatusCode::NOT_FOUND;
         response.headers_mut().insert(
@@ -167,7 +209,7 @@ async fn serve_mobile_spa(
             return Ok(response);
         }
     } else if path.starts_with("/assets/") {
-        if let Some(response) = mobile_asset_response(&state, path).await {
+        if let Some(response) = mobile_asset_response(&state, &path).await {
             return Ok(response);
         }
 

@@ -10,7 +10,7 @@
 
 ## 开发命令
 
-- `npm run dev` — 启动 Vite 开发服务器（端口 5173）
+- `npm run dev` — 启动 Vite 开发服务器（端口 5173）。**移动端热更新**：debug 后端会把扫码入口 `http://<LAN>:<实际端口>/mobile` 反代到本 Vite（含 HMR WebSocket）；改 `src/mobile/**` 不必 `npm run build`。详见 `docs/development/backend-operations.md`「Mobile `/mobile` hot reload」。环境变量 `CC_PARTNER_MOBILE_DEV_PROXY` / `CC_PARTNER_VITE_DEV_URL`。
 - `npm run build` — 打包到 dist/（`tsc -b` 类型检查 + vite 构建；类型检查入口，**不要**用浮动 `npx tsc`）
 - `npm run lint` — ESLint 检查
 - `npm run check:css-tokens` / `npm run check:tokens` — design token 合同（权威实现 `web/scripts/check-css-tokens.mjs`；根 `scripts/check-css-tokens.mjs` 仅为 thin wrapper）：扫描 `src/**/*.css` 的 `var(--name)`，语义 token 必须在 `styles/tokens.css` 的 `:root` 定义；颜色/阴影类 token 必须浅/深双份；正文语义色对（`fg`/`fg-2`/`muted`/`fg-muted-readable` × `bg`/`surface`）浅/深均 ≥4.5:1；`color: var(--meta)` 仅允许脚本内 `META_COLOR_ALLOWLIST` 的 disabled/decorative/placeholder；运行时结构变量 allowlist 含 `--prompt-panel-left` / `--prompt-panel-top` / `--git-graph-color` 与 mobile shell `--mobile-shell-height` / `--mobile-keyboard-inset` / `--mobile-terminal-min-height`；通过打印 `CSS token contract passed`（exit 0），失败打印 `file:line --token` 或 contrast/meta 诊断（exit 1）。CI quality 在 build 前执行（`check:tokens`）。fixture：`node --test scripts/check-css-tokens.test.mjs`；CLI `node scripts/check-css-tokens.mjs --self-test` 等价。

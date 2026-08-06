@@ -527,7 +527,7 @@ pub fn is_same_origin_with_host(origin: &str, host_header: &str) -> bool {
 ///     preview proxy 的 null-origin 例外不能扩散到其它 `/api/*`。
 ///
 /// Code Logic（这个函数做什么）:
-///     按 desktop/mobile proxy 前缀、`/api/`、`/mobile`、`/assets/` 分类。
+///     按 desktop/mobile proxy 前缀、`/api/`、`/mobile`、`/assets/` 与开发态 Vite 模块路径分类。
 fn classify_request_path(path: &str) -> RequestPathKind {
     let path = path.split('?').next().unwrap_or(path);
     if is_preview_proxy_path(path) {
@@ -538,6 +538,14 @@ fn classify_request_path(path: &str) -> RequestPathKind {
         || path.starts_with("/mobile/")
         || path.starts_with("/assets/")
         || path == "/assets"
+        // 开发态 mobile HMR：Vite 模块路径与 SPA 同源加载，Origin 规则与 /mobile 一致。
+        || path == "/@react-refresh"
+        || path.starts_with("/@vite/")
+        || path.starts_with("/@id/")
+        || path.starts_with("/@fs/")
+        || path.starts_with("/src/")
+        || path.starts_with("/node_modules/")
+        || path.starts_with("/@")
     {
         RequestPathKind::MobileOrStatic
     } else {

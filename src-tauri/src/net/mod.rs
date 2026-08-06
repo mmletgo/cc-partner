@@ -13,6 +13,8 @@ pub mod discovery;
 pub mod error_response;
 pub mod http_server;
 pub mod lan_guard;
+/// 开发态 `/mobile` → 本机 Vite 反向代理（HMR）；生产不启用业务语义。
+pub mod mobile_dev_proxy;
 /// S1 Task 6 集成 smoke harness（绑定端口 + injected peer 证据矩阵）。
 pub mod lan_trust_boundary_harness;
 /// 手动配置 overlay 对端探测（跨子网/VPN，绕过 mDNS；opt-in 精确 IP 放行）。

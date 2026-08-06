@@ -162,6 +162,20 @@ must omit tokens, Prompt/file/terminal content, and remote URL credentials.
 
 Desktop UI talks to Rust via Tauri `invoke` only — **no** local HTTP API port for the desktop frontend. Mobile SPA and peer P2P share the actual HTTP port.
 
+### Mobile `/mobile` hot reload (dev only)
+
+Production always serves the built SPA from Tauri embedded assets / `web/dist` on the backend HTTP port (preferred **62116**). During local development you can keep the **same QR / access URL** (`http://<LAN_IP>:<actual_http_port>/mobile`) while editing `web/src/mobile/**` with Vite HMR—no `npm run build` per change.
+
+| Piece | Behavior |
+| --- | --- |
+| Entry | Phone & desktop browser open **backend** `/mobile` (not Vite `:5173` alone for API-correct mobile). |
+| Proxy | Debug builds default **Auto**: HTTP fallback proxies `/mobile`, `/assets/*`, and Vite module paths (`/src/*`, `/@vite/*`, `/@react-refresh`, …) plus HMR WebSocket to `http://127.0.0.1:5173`. If Vite is down, shell/assets fall back to `web/dist`/embedded. |
+| Release | Default **Off** (no loopback probe). |
+| Env | `CC_PARTNER_MOBILE_DEV_PROXY=1\|0\|on\|off` force on/off. `CC_PARTNER_VITE_DEV_URL` overrides upstream (default `http://127.0.0.1:5173`). |
+| Prerequisites | Vite running (`./start.sh` / Tauri `beforeDevCommand` / `cd web && npm run dev`) **and** backend listening (GUI sidecar after LAN disclosure, or `cc-partner-backend start`). |
+
+Typical loop: start app/dev → open mobile access URL or QR → edit frontend → HMR/reload on device. Force dist-only: `CC_PARTNER_MOBILE_DEV_PROXY=0`.
+
 Discover the actual port:
 
 ```bash
