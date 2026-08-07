@@ -50,13 +50,42 @@ vi.mock('@/api/agentHub', () => ({
   },
 }));
 
+const setSearchParamsMock = vi.hoisted(() => vi.fn());
+
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
   return {
     ...actual,
-    useSearchParams: () => [searchParamsMock.current, vi.fn()],
+    useSearchParams: () => [searchParamsMock.current, setSearchParamsMock],
   };
 });
+
+vi.mock('@/api/portableInventory', () => ({
+  portableAssetApi: {
+    inspect: vi.fn(async () => ({
+      inventorySnapshotHash: 'snap',
+      refreshedAt: '2026-08-07T00:00:00.000Z',
+      stale: false,
+      targets: [],
+      items: [],
+    })),
+    previewAction: vi.fn(),
+    applyAction: vi.fn(),
+    getAction: vi.fn(),
+  },
+  portablePullApi: {
+    listRemoteInventory: vi.fn(),
+    previewPull: vi.fn(),
+    applyPull: vi.fn(),
+    getPull: vi.fn(),
+  },
+}));
+
+vi.mock('@/api/devices', () => ({
+  devicesApi: {
+    list: vi.fn(async () => []),
+  },
+}));
 
 import { useAgentHubController } from './useAgentHubController';
 
@@ -146,13 +175,53 @@ describe('useAgentHubController', () => {
   test('deep links select the advanced workspace that owns the requested surface', () => {
     searchParamsMock.current = new URLSearchParams('assetId=asset-1&conflictId=c1');
     const assetLink = renderHook(() => useAgentHubController());
-    expect(assetLink.result.current.activeSection).toBe('portableAssets');
+    expect(assetLink.result.current.activeSection).toBe('assets');
     assetLink.unmount();
 
     searchParamsMock.current = new URLSearchParams('preview=1&projectId=project-1');
     const projectLink = renderHook(() => useAgentHubController());
     expect(projectLink.result.current.activeSection).toBe('projectInstructions');
     projectLink.unmount();
+  });
+
+  test('section=assets and legacy portableAssets alias restore assets workspace', () => {
+    searchParamsMock.current = new URLSearchParams('section=assets&target=claude&kind=skill');
+    const direct = renderHook(() => useAgentHubController());
+    expect(direct.result.current.activeSection).toBe('assets');
+    expect(direct.result.current.portableInventory.filters.target).toBe('claude');
+    expect(direct.result.current.portableInventory.filters.kind).toBe('skill');
+    direct.unmount();
+
+    searchParamsMock.current = new URLSearchParams('section=portableAssets&target=codex');
+    const alias = renderHook(() => useAgentHubController());
+    expect(alias.result.current.activeSection).toBe('assets');
+    expect(alias.result.current.portableInventory.filters.target).toBe('codex');
+    alias.unmount();
+  });
+
+  test('setActiveSection writes section query without dropping unrelated params', async () => {
+    searchParamsMock.current = new URLSearchParams('conflictId=c1&bridge=/tmp/bridge');
+    setSearchParamsMock.mockImplementation((updater: unknown) => {
+      if (typeof updater === 'function') {
+        const next = (updater as (prev: URLSearchParams) => URLSearchParams)(
+          searchParamsMock.current,
+        );
+        searchParamsMock.current = next;
+      }
+    });
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => {
+      result.current.setActiveSection('assets');
+    });
+    expect(setSearchParamsMock).toHaveBeenCalled();
+    const last = setSearchParamsMock.mock.calls.at(-1)?.[0];
+    if (typeof last === 'function') {
+      const next = last(new URLSearchParams('conflictId=c1&bridge=/tmp/bridge'));
+      expect(next.get('section')).toBe('assets');
+      expect(next.get('conflictId')).toBe('c1');
+      expect(next.get('bridge')).toBe('/tmp/bridge');
+    }
   });
 
   test('first-load error surfaces error without assets', async () => {
@@ -393,5 +462,55 @@ describe('useAgentHubController', () => {
     expect(result.current.adoptionPreview?.diagnostics).toEqual(
       expect.arrayContaining(['collision-path', 'materialization:externalCollision']),
     );
+  });
+});
+
+import {
+  normalizeAgentHubSection,
+  parsePortableFiltersFromSearchParams,
+  writePortableFiltersToSearchParams,
+} from './useAgentHubController';
+import { DEFAULT_PORTABLE_INVENTORY_FILTERS } from './portableAssets';
+
+describe('Agent Hub URL helpers', () => {
+  test('normalizeAgentHubSection maps legacy portableAssets to assets', () => {
+    expect(normalizeAgentHubSection('portableAssets')).toBe('assets');
+    expect(normalizeAgentHubSection('assets')).toBe('assets');
+    expect(normalizeAgentHubSection('nope', 'diagnostics')).toBe('diagnostics');
+  });
+
+  test('parse and write portable filter query contract', () => {
+    const parsed = parsePortableFiltersFromSearchParams(
+      new URLSearchParams(
+        'target=claude&kind=mcp&scope=project&state=problem&management=drifted',
+      ),
+    );
+    expect(parsed).toEqual({
+      target: 'claude',
+      kind: 'mcp',
+      scope: 'project',
+      actualState: 'problem',
+      management: 'drifted',
+    });
+    const written = writePortableFiltersToSearchParams(
+      new URLSearchParams('conflictId=c9'),
+      {
+        ...DEFAULT_PORTABLE_INVENTORY_FILTERS,
+        target: 'claude',
+        kind: 'command',
+        scope: 'user',
+        actualState: 'enabled',
+        management: 'hubManaged',
+      },
+      'item-1',
+    );
+    expect(written.get('section')).toBe('assets');
+    expect(written.get('target')).toBe('claude');
+    expect(written.get('kind')).toBe('command');
+    expect(written.get('scope')).toBe('user');
+    expect(written.get('state')).toBe('enabled');
+    expect(written.get('management')).toBe('hubManaged');
+    expect(written.get('inventoryItemId')).toBe('item-1');
+    expect(written.get('conflictId')).toBe('c9');
   });
 });

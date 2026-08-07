@@ -6,9 +6,10 @@
     "userInstructions": "用户级指令",
     "projectInstructions": "项目级指令",
     "projectInstructionsHint": "预览并启用项目级指令映射；确认前不会写入项目。",
-    "portableAssets": "Skills 与工具",
+    "portableAssets": "Agent 资产",
     "syncImport": "同步与导入",
-    "diagnostics": "兼容性与诊断"
+    "diagnostics": "兼容性与诊断",
+    "assets": "Agent 资产"
   },
   "userInstructions": {
     "title": "用户级指令",
@@ -427,6 +428,218 @@
       "assets": "Assets",
       "npm": "npm",
       "customTool": "Custom tool"
+    },
+    "previewDelete": "预览包删除"
+  },
+  "portable": {
+    "inventory": {
+      "title": "Agent 资产",
+      "subtitle": "跨 Claude / Codex / OpenCode 的 observed 库存。本机 actual 状态是真源。",
+      "loading": "正在加载库存…",
+      "empty": "没有符合当前筛选条件的 portable 资产。",
+      "refresh": "刷新库存",
+      "retry": "重试",
+      "staleBanner": "库存已过期。在成功刷新前禁止变更。",
+      "searchPlaceholder": "搜索名称、native id 或路径",
+      "filterTarget": "目标 Agent",
+      "filterScope": "作用域",
+      "filterActual": "实际状态",
+      "filterManagement": "管理态",
+      "kindCounts": {
+        "skill": "Skill",
+        "command": "Command",
+        "plugin": "Plugin",
+        "mcp": "MCP"
+      },
+      "targetFilter": {
+        "all": "全部目标",
+        "claude": "Claude",
+        "codex": "Codex",
+        "opencode": "OpenCode"
+      },
+      "scopeFilter": {
+        "all": "全部作用域",
+        "user": "用户",
+        "project": "项目"
+      },
+      "actualFilter": {
+        "all": "全部状态",
+        "enabled": "已启用",
+        "disabled": "已禁用",
+        "problem": "异常"
+      },
+      "managementFilter": {
+        "all": "全部管理态",
+        "unmanaged": "外部",
+        "hubManaged": "Hub 管理",
+        "drifted": "漂移",
+        "externalCollision": "冲突",
+        "unsupported": "不支持"
+      },
+      "actual": {
+        "enabled": "已启用",
+        "disabled": "已禁用",
+        "problem": "异常",
+        "unknown": "未知"
+      },
+      "management": {
+        "unmanaged": "外部",
+        "hubManaged": "Hub 管理",
+        "drifted": "漂移",
+        "externalCollision": "冲突",
+        "unsupported": "不支持"
+      },
+      "scope": {
+        "user": "用户",
+        "project": "项目",
+        "directory": "目录"
+      },
+      "sourceOrigin": {
+        "standalone": "独立",
+        "pluginComponent": "插件组件",
+        "nativeConfig": "原生配置"
+      }
+    },
+    "actions": {
+      "adopt": "接管",
+      "enable": "启用",
+      "disable": "禁用",
+      "uninstall": "卸载",
+      "installToSourceTarget": "安装到源目标"
+    },
+    "management": {
+      "unmanaged": "外部",
+      "hubManaged": "Hub 管理",
+      "drifted": "漂移",
+      "externalCollision": "冲突",
+      "unsupported": "不支持"
+    },
+    "details": {
+      "title": "资产详情",
+      "titleWithName": "详情 · {{name}}",
+      "empty": "选择一条库存项以查看详情。",
+      "nativeId": "Native id",
+      "treeHash": "树哈希",
+      "origin": "来源",
+      "invocation": "调用方式",
+      "sourcePath": "源路径",
+      "sourceFile": "源文件",
+      "description": "描述",
+      "compatibility": "兼容性",
+      "transport": "传输",
+      "source": "来源",
+      "credentialPresent": "凭据是否存在",
+      "credentialHash": "凭据哈希",
+      "presentYes": "是",
+      "presentNo": "否",
+      "missing": "—",
+      "none": "无",
+      "actualUnknown": "实际状态未知",
+      "actualEnabled": "磁盘上已启用",
+      "actualDisabled": "磁盘上已禁用",
+      "canonical": "Canonical 修订",
+      "desired": "期望存在性",
+      "materialization": "落盘状态",
+      "package": "包",
+      "activation": "激活",
+      "components": "组件",
+      "residuals": "残留",
+      "deleteGroups": "删除分组",
+      "deleteGroupSummary": "将墓碑 {{tombstone}} · 保留 {{preserve}}",
+      "actionsAria": "安全资产动作",
+      "dangerAria": "危险区",
+      "dangerTitle": "危险区",
+      "dangerHint": "卸载或全局删除必须先预览，再确认写入。",
+      "uninstallBlocked": "该项不可卸载。",
+      "parentPlugin": "所属插件"
+    },
+    "actionDialog": {
+      "title": "预览 {{action}}",
+      "subtitle": "先检查计划再确认。确认前不会写入。",
+      "keepData": "卸载时保留本地数据",
+      "conflictPolicy": "冲突策略",
+      "conflictSkip": "跳过已有",
+      "conflictReplace": "预览后替换",
+      "planToken": "计划令牌",
+      "preview": "预览",
+      "confirm": "确认应用",
+      "reconcile": "核对结果",
+      "fullSuccess": "全部选中项已成功或跳过。",
+      "partial": "部分项失败或被阻止，请查看逐项报告。",
+      "outcomeUnknown": "结果未知。请先核对，再使用新的请求 id 重试。"
+    }
+  },
+  "portablePull": {
+    "title": "从对端 Pull（同类 Agent）",
+    "hint": "选择局域网对端与同类 Agent。目标端固定等于源 Agent，不可跨 Agent。",
+    "lanNoAuthRisk": "同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。",
+    "staleInventory": "远端库存已过期。预览或应用前请先刷新。",
+    "deviceSection": "源设备",
+    "deviceSectionAria": "源设备选择",
+    "deviceLabel": "设备",
+    "noDevices": "没有在线对端",
+    "sourceTargetLabel": "源 Agent",
+    "filters": "筛选",
+    "filtersAria": "远端库存筛选",
+    "filterKind": "类型",
+    "filterScope": "作用域",
+    "filterState": "状态",
+    "searchPlaceholder": "搜索远端资产",
+    "inventory": "远端库存",
+    "inventoryAria": "远端库存列表",
+    "loadInventory": "加载远端库存",
+    "selectVisible": "全选可见",
+    "loadHint": "选择对端与 Agent 后加载远端库存。",
+    "policyAria": "冲突策略",
+    "conflictPolicy": "冲突策略",
+    "preview": "预览计划",
+    "previewAction": "执行预览",
+    "previewSummary": "{{count}} 项变更 · 凭据 {{credentials}}",
+    "conflictDiff": "冲突 {{conflict}} · 跳过 {{skip}} · 替换 {{replace}}",
+    "noCredentials": "本计划不含带凭据资产",
+    "canonicalOnlyHint": "部分项仅导入 canonical，不会在本机原生安装。",
+    "conflictLabel": "冲突",
+    "apply": "应用 Pull",
+    "applyAction": "确认应用",
+    "reconcileAction": "核对 Pull",
+    "progressSummary": "成功 {{succeeded}} · 跳过 {{skipped}} · 失败 {{failed}} · 阻止 {{blocked}} · 未知 {{unknown}} / {{total}}",
+    "states": {
+      "enabled": "已启用",
+      "disabled": "已禁用",
+      "problem": "异常",
+      "all": "全部状态"
+    },
+    "kinds": {
+      "all": "全部类型",
+      "skill": "Skill",
+      "command": "Command",
+      "plugin": "Plugin",
+      "mcp": "MCP"
+    },
+    "scopes": {
+      "all": "全部作用域",
+      "user": "用户",
+      "project": "项目"
+    },
+    "targets": {
+      "claude": "Claude",
+      "codex": "Codex",
+      "opencode": "OpenCode"
+    },
+    "destination": {
+      "sameAsClaude": "目标：Claude（同类 Agent）",
+      "sameAsCodex": "目标：Codex（同类 Agent）",
+      "sameAsOpenCode": "目标：OpenCode（同类 Agent）"
+    },
+    "policy": {
+      "skipExisting": "跳过已有",
+      "replaceAfterPreview": "预览后替换"
+    },
+    "installMode": {
+      "installToTarget": "安装到目标",
+      "importedCanonicalOnly": "仅 canonical",
+      "skipExisting": "跳过已有",
+      "blocked": "已阻止"
     }
   }
 }

@@ -84,6 +84,7 @@ export function PortableAssetDetailsDrawer({
       sourcePath: t('agentHub:portable.details.sourcePath'),
       description: t('agentHub:portable.details.description'),
       missing: t('agentHub:portable.details.missing'),
+      parentPlugin: t('agentHub:portable.details.parentPlugin'),
     }),
     [t],
   );

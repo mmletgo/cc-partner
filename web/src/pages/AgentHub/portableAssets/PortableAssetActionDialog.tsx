@@ -167,7 +167,7 @@ export function PortableAssetActionDialog({
               <span className={styles.mono}>{item.nativeId}</span>
             </div>
             <div>
-              <span className={styles.metaLabel}>{t('agentHub:kinds.' + item.kind)}</span>
+              <span className={styles.metaLabel}>{t(`agentHub:kinds.${item.kind}` as 'agentHub:kinds.skill')}</span>
               <span>{t(`agentHub:targets.${item.target}`)}</span>
             </div>
           </div>

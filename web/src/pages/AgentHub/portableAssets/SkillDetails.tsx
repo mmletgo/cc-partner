@@ -20,6 +20,7 @@ export interface SkillDetailsProps {
     sourcePath: string;
     description: string;
     missing: string;
+    parentPlugin: string;
   };
 }
 
@@ -63,7 +64,7 @@ export function SkillDetails({ item, labels }: SkillDetailsProps) {
         ) : null}
         {item.parentPluginInventoryItemId ? (
           <div data-testid="portable-skill-parent-plugin">
-            <span className={styles.metaLabel}>plugin</span>
+            <span className={styles.metaLabel}>{labels.parentPlugin}</span>
             <span className={styles.mono}>{item.parentPluginInventoryItemId}</span>
           </div>
         ) : null}

@@ -47,14 +47,124 @@ import {
   useUserInstructionManager,
   type UseUserInstructionManagerResult,
 } from './userInstructions/useUserInstructionManager';
+import { portableAssetApi } from '@/api/portableInventory';
+import type {
+  ApplyPortableAssetActionRequest,
+  PortableAssetActionKind,
+  PortableAssetActionPlanDto,
+  PortableAssetActionResultDto,
+  PortableInventoryItemDto,
+  PreviewPortableAssetActionRequest,
+} from '@/lib/types/portableInventory';
+import {
+  DEFAULT_PORTABLE_INVENTORY_FILTERS,
+  usePortableInventoryController,
+  usePortablePullController,
+  type PortableInventoryFilters,
+  type UsePortableInventoryControllerResult,
+  type UsePortablePullControllerResult,
+} from './portableAssets';
 
 /** Agent Hub 一级工作区。 */
 export type AgentHubSection =
   | 'userInstructions'
   | 'projectInstructions'
-  | 'portableAssets'
+  | 'assets'
   | 'syncImport'
   | 'diagnostics';
+
+/** URL 中 section 合法值（含 legacy portableAssets 别名）。 */
+const SECTION_VALUES = new Set<string>([
+  'userInstructions',
+  'projectInstructions',
+  'assets',
+  'portableAssets',
+  'syncImport',
+  'diagnostics',
+]);
+
+const AGENT_TARGETS = new Set(['claude', 'codex', 'opencode']);
+const ASSET_KINDS = new Set(['skill', 'command', 'plugin', 'mcp']);
+const SCOPES = new Set(['user', 'project']);
+const ACTUAL_STATES = new Set(['all', 'enabled', 'disabled', 'problem']);
+const MANAGEMENT_STATES = new Set([
+  'all',
+  'unmanaged',
+  'hubManaged',
+  'drifted',
+  'externalCollision',
+  'unsupported',
+]);
+
+/**
+ * Business Logic: URL section 归一；legacy portableAssets → assets。
+ * Code Logic: 未知值回落 fallback。
+ */
+export function normalizeAgentHubSection(
+  raw: string | null | undefined,
+  fallback: AgentHubSection = 'userInstructions',
+): AgentHubSection {
+  if (!raw || !SECTION_VALUES.has(raw)) return fallback;
+  if (raw === 'portableAssets') return 'assets';
+  return raw as AgentHubSection;
+}
+
+/**
+ * Business Logic: 从 search params 解析 portable inventory 筛选。
+ * Code Logic: 非法枚举忽略，不发明默认以外的值。
+ */
+export function parsePortableFiltersFromSearchParams(
+  params: URLSearchParams,
+): Partial<PortableInventoryFilters> {
+  const patch: Partial<PortableInventoryFilters> = {};
+  const target = params.get('target');
+  if (target === 'all' || (target && AGENT_TARGETS.has(target))) {
+    patch.target = target as PortableInventoryFilters['target'];
+  }
+  const kind = params.get('kind');
+  if (kind && ASSET_KINDS.has(kind)) {
+    patch.kind = kind as PortableInventoryFilters['kind'];
+  }
+  const scope = params.get('scope');
+  if (scope === 'all' || (scope && SCOPES.has(scope))) {
+    patch.scope = scope as PortableInventoryFilters['scope'];
+  }
+  const state = params.get('state');
+  if (state && ACTUAL_STATES.has(state)) {
+    patch.actualState = state as PortableInventoryFilters['actualState'];
+  }
+  const management = params.get('management');
+  if (management && MANAGEMENT_STATES.has(management)) {
+    patch.management = management as PortableInventoryFilters['management'];
+  }
+  return patch;
+}
+
+/**
+ * Business Logic: 把 assets 筛选写回 URL，保留无关 deep link 参数。
+ * Code Logic: 默认值删除 query key，避免噪声。
+ */
+export function writePortableFiltersToSearchParams(
+  params: URLSearchParams,
+  filters: PortableInventoryFilters,
+  inventoryItemId: string | null,
+): URLSearchParams {
+  const next = new URLSearchParams(params);
+  next.set('section', 'assets');
+  if (filters.target === 'all') next.delete('target');
+  else next.set('target', filters.target);
+  if (filters.kind === DEFAULT_PORTABLE_INVENTORY_FILTERS.kind) next.delete('kind');
+  else next.set('kind', filters.kind);
+  if (filters.scope === 'all') next.delete('scope');
+  else next.set('scope', filters.scope);
+  if (filters.actualState === 'all') next.delete('state');
+  else next.set('state', filters.actualState);
+  if (filters.management === 'all') next.delete('management');
+  else next.set('management', filters.management);
+  if (inventoryItemId) next.set('inventoryItemId', inventoryItemId);
+  else next.delete('inventoryItemId');
+  return next;
+}
 
 /**
  * Controller 返回值。
@@ -67,6 +177,29 @@ export interface UseAgentHubControllerResult {
   activeSection: AgentHubSection;
   setActiveSection: (section: AgentHubSection) => void;
   userInstructions: UseUserInstructionManagerResult;
+  /** F2 inventory controller（URL 同步后的包装）。 */
+  portableInventory: UsePortableInventoryControllerResult;
+  /** F3 详情/动作编排。 */
+  portableDetailsOpen: boolean;
+  portableSelectedItem: PortableInventoryItemDto | null;
+  closePortableDetails: () => void;
+  requestPortableAction: (itemId: string, action: PortableAssetActionKind) => void;
+  portableActionOpen: boolean;
+  portableActionKind: PortableAssetActionKind | null;
+  portableActionPlan: PortableAssetActionPlanDto | null;
+  portableActionResult: PortableAssetActionResultDto | null;
+  portableActionBusy: boolean;
+  portableActionError: string | null;
+  portableActionClientRequestId: string | null;
+  previewPortableAction: (request: PreviewPortableAssetActionRequest) => Promise<void>;
+  confirmPortableAction: (planToken: string, clientRequestId: string) => Promise<void>;
+  reconcilePortableAction: (clientRequestId: string) => Promise<void>;
+  closePortableAction: () => void;
+  /** F4 same-agent Pull。 */
+  portablePullOpen: boolean;
+  openPortablePull: () => void;
+  closePortablePull: () => void;
+  portablePull: UsePortablePullControllerResult;
   loading: boolean;
   refreshing: boolean;
   stale: boolean;
@@ -188,18 +321,35 @@ function toErrorMessage(reason: unknown): string {
  */
 export function useAgentHubController(): UseAgentHubControllerResult {
   const { t } = useTranslation(['agentHub', 'common']);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkAssetId = searchParams.get('assetId');
   const deepLinkConflictId = searchParams.get('conflictId');
   const deepLinkPreview = searchParams.get('preview');
   const deepLinkProjectId = searchParams.get('projectId');
   const deepLinkBridge = searchParams.get('bridge');
+  const deepLinkSection = searchParams.get('section');
+  const deepLinkInventoryItemId = searchParams.get('inventoryItemId');
   const userInstructions = useUserInstructionManager(t);
-  const [activeSection, setActiveSection] = useState<AgentHubSection>(() => {
-    if (deepLinkAssetId || deepLinkConflictId) return 'portableAssets';
+  const portableInventoryBase = usePortableInventoryController();
+  const [portablePullOpen, setPortablePullOpen] = useState(false);
+  const portablePull = usePortablePullController({ open: portablePullOpen });
+  const [activeSection, setActiveSectionState] = useState<AgentHubSection>(() => {
+    if (deepLinkAssetId || deepLinkConflictId) return 'assets';
     if (deepLinkPreview || deepLinkProjectId || deepLinkBridge) return 'projectInstructions';
-    return 'userInstructions';
+    return normalizeAgentHubSection(deepLinkSection, 'userInstructions');
   });
+  const [portableActionPlan, setPortableActionPlan] = useState<PortableAssetActionPlanDto | null>(
+    null,
+  );
+  const [portableActionResult, setPortableActionResult] =
+    useState<PortableAssetActionResultDto | null>(null);
+  const [portableActionBusy, setPortableActionBusy] = useState(false);
+  const [portableActionError, setPortableActionError] = useState<string | null>(null);
+  const [portableActionClientRequestId, setPortableActionClientRequestId] = useState<string | null>(
+    null,
+  );
+  const portableFiltersBootRef = useRef(false);
+  const portableUrlSyncSkipRef = useRef(true);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -353,7 +503,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     // URL deep link 后续变化：异步拉详情；仅当 key 变化时同步 selected（事件驱动，非首轮 mount）
     if (!deepLinkAssetId && !deepLinkConflictId) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
-    setActiveSection('portableAssets');
+    setActiveSectionState('assets');
     if (!deepLinkAssetId) return;
     const key = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
     if (appliedDeepLinkRef.current === key) return;
@@ -376,7 +526,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     if (appliedPreviewDeepLinkRef.current === key) return;
     appliedPreviewDeepLinkRef.current = key;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
-    setActiveSection('projectInstructions');
+    setActiveSectionState('projectInstructions');
     // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
     setPreviewOpen(true);
     if (deepLinkProjectId?.trim()) {
@@ -1018,6 +1168,200 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     }
   }, [gitMappingDrafts, gitPreview, gitSelectedAssetIds, loadCore]);
 
+  /**
+   * Business Logic: 一级 section 切换写 URL，离开 assets 时清库存 deep-link 参数。
+   * Code Logic: replace 避免堆 history；保留 conflictId/assetId 等无关参数。
+   */
+  const setActiveSection = useCallback(
+    (section: AgentHubSection) => {
+      setActiveSectionState(section);
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        if (section === 'userInstructions') {
+          next.delete('section');
+        } else {
+          next.set('section', section);
+        }
+        if (section !== 'assets') {
+          next.delete('kind');
+          next.delete('target');
+          next.delete('scope');
+          next.delete('state');
+          next.delete('management');
+          next.delete('inventoryItemId');
+        }
+        return next;
+      }, { replace: true });
+    },
+    [setSearchParams],
+  );
+
+  const portableInventory: UsePortableInventoryControllerResult = portableInventoryBase;
+
+  // URL → initial filters/selection once
+  useEffect(() => {
+    if (portableFiltersBootRef.current) return;
+    portableFiltersBootRef.current = true;
+    const patch = parsePortableFiltersFromSearchParams(searchParams);
+    if (Object.keys(patch).length > 0) {
+      portableInventoryBase.setFilters(patch);
+    }
+    if (deepLinkInventoryItemId) {
+      portableInventoryBase.selectItem(deepLinkInventoryItemId);
+    }
+    if (normalizeAgentHubSection(deepLinkSection) === 'assets' || deepLinkInventoryItemId) {
+      setActiveSectionState('assets');
+    }
+    // 首帧后允许 filters → URL 同步
+    portableUrlSyncSkipRef.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot URL bootstrap
+  }, []);
+
+  // section deep link later changes
+  useEffect(() => {
+    if (!deepLinkSection) return;
+    const next = normalizeAgentHubSection(deepLinkSection, activeSection);
+    if (next !== activeSection) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+      setActiveSectionState(next);
+    }
+  }, [deepLinkSection, activeSection]);
+
+  // filters/selection → URL while on assets
+  useEffect(() => {
+    if (portableUrlSyncSkipRef.current) return;
+    if (activeSection !== 'assets') return;
+    setSearchParams((prev) => {
+      const desired = writePortableFiltersToSearchParams(
+        prev,
+        portableInventoryBase.filters,
+        portableInventoryBase.selectedItemId,
+      );
+      // 避免无变化 set 触发环
+      if (desired.toString() === prev.toString()) return prev;
+      return desired;
+    }, { replace: true });
+  }, [
+    activeSection,
+    portableInventoryBase.filters,
+    portableInventoryBase.selectedItemId,
+    setSearchParams,
+  ]);
+
+  const portableSelectedItem = useMemo(() => {
+    const id = portableInventoryBase.selectedItemId;
+    if (!id || !portableInventoryBase.snapshot) return null;
+    return (
+      portableInventoryBase.snapshot.items.find((item) => item.inventoryItemId === id) ?? null
+    );
+  }, [portableInventoryBase.selectedItemId, portableInventoryBase.snapshot]);
+
+  const closePortableDetails = useCallback(() => {
+    portableInventoryBase.selectItem(null);
+  }, [portableInventoryBase]);
+
+  const requestPortableAction = useCallback(
+    (itemId: string, action: PortableAssetActionKind) => {
+      setPortableActionPlan(null);
+      setPortableActionResult(null);
+      setPortableActionError(null);
+      setPortableActionClientRequestId(null);
+      portableInventoryBase.openAction(itemId, action);
+    },
+    [portableInventoryBase],
+  );
+
+  const portableActionOpen = Boolean(portableInventoryBase.pendingAction);
+  const portableActionKind = portableInventoryBase.pendingAction?.action ?? null;
+
+  const mintClientRequestId = useCallback(() => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `portable-action-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }, []);
+
+  const previewPortableAction = useCallback(
+    async (request: PreviewPortableAssetActionRequest) => {
+      setPortableActionBusy(true);
+      setPortableActionError(null);
+      setPortableActionResult(null);
+      try {
+        const plan = await portableAssetApi.previewAction(request);
+        if (!mountedRef.current) return;
+        setPortableActionPlan(plan);
+        setPortableActionClientRequestId(mintClientRequestId());
+      } catch (reason) {
+        if (!mountedRef.current) return;
+        setPortableActionError(toErrorMessage(reason));
+      } finally {
+        if (mountedRef.current) setPortableActionBusy(false);
+      }
+    },
+    [mintClientRequestId],
+  );
+
+  const confirmPortableAction = useCallback(
+    async (planToken: string, clientRequestId: string) => {
+      const itemId = portableInventoryBase.pendingAction?.itemId;
+      setPortableActionBusy(true);
+      setPortableActionError(null);
+      if (itemId) portableInventoryBase.setItemLocked(itemId, true);
+      try {
+        const applyRequest: ApplyPortableAssetActionRequest = { planToken, clientRequestId };
+        const result = await portableAssetApi.applyAction(applyRequest);
+        if (!mountedRef.current) return;
+        setPortableActionResult(result);
+        setPortableActionClientRequestId(clientRequestId);
+        await portableInventoryBase.refresh();
+      } catch (reason) {
+        if (!mountedRef.current) return;
+        setPortableActionError(toErrorMessage(reason));
+      } finally {
+        if (itemId) portableInventoryBase.setItemLocked(itemId, false);
+        if (mountedRef.current) setPortableActionBusy(false);
+      }
+    },
+    [portableInventoryBase],
+  );
+
+  const reconcilePortableAction = useCallback(
+    async (clientRequestId: string) => {
+      setPortableActionBusy(true);
+      setPortableActionError(null);
+      try {
+        const result = await portableAssetApi.getAction(clientRequestId);
+        if (!mountedRef.current) return;
+        setPortableActionResult(result);
+        await portableInventoryBase.refresh();
+      } catch (reason) {
+        if (!mountedRef.current) return;
+        setPortableActionError(toErrorMessage(reason));
+      } finally {
+        if (mountedRef.current) setPortableActionBusy(false);
+      }
+    },
+    [portableInventoryBase],
+  );
+
+  const closePortableAction = useCallback(() => {
+    if (portableActionBusy) return;
+    portableInventoryBase.clearPendingAction();
+    setPortableActionPlan(null);
+    setPortableActionResult(null);
+    setPortableActionError(null);
+    setPortableActionClientRequestId(null);
+  }, [portableActionBusy, portableInventoryBase]);
+
+  const openPortablePull = useCallback(() => {
+    setPortablePullOpen(true);
+  }, []);
+
+  const closePortablePull = useCallback(() => {
+    if (portablePull.busy) return;
+    setPortablePullOpen(false);
+  }, [portablePull.busy]);
+
   const writeBlocked = Boolean(status && !status.writeCompatible);
   const upgradeRequired = writeBlocked;
 
@@ -1026,6 +1370,26 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     activeSection,
     setActiveSection,
     userInstructions,
+    portableInventory,
+    portableDetailsOpen: Boolean(portableInventoryBase.selectedItemId),
+    portableSelectedItem,
+    closePortableDetails,
+    requestPortableAction,
+    portableActionOpen,
+    portableActionKind,
+    portableActionPlan,
+    portableActionResult,
+    portableActionBusy,
+    portableActionError,
+    portableActionClientRequestId,
+    previewPortableAction,
+    confirmPortableAction,
+    reconcilePortableAction,
+    closePortableAction,
+    portablePullOpen,
+    openPortablePull,
+    closePortablePull,
+    portablePull,
     loading,
     refreshing,
     stale,

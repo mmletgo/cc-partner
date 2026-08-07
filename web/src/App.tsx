@@ -559,7 +559,7 @@ export default function App() {
               }
             />
             <Route path="/claude-md" element={<Navigate to="/agent-hub" replace />} />
-            <Route path="/claude-code" element={<Navigate to="/agent-hub" replace />} />
+            <Route path="/claude-code" element={<Navigate to="/agent-hub?section=assets&target=claude" replace />} />
             <Route path="/orchestrator" element={<Navigate to="/workbench" replace />} />
             <Route path="/devices" element={<ShellRoute><Devices /></ShellRoute>} />
             <Route path="/ssh" element={<Navigate to="/devices" replace />} />

@@ -65,6 +65,10 @@ export interface PortablePullDrawerProps {
   onClose: () => void;
 }
 
+function tr(t: (key: never) => string, key: string): string {
+  return t(key as never);
+}
+
 const KIND_OPTIONS: Array<'all' | PortableAssetKind> = [
   'all',
   'skill',
@@ -209,7 +213,7 @@ export function PortablePullDrawer(props: PortablePullDrawerProps) {
           </label>
 
           <p data-testid="portable-pull-same-target">
-            {t(destinationLabelKey)}
+            {tr(t, destinationLabelKey)}
           </p>
         </section>
 
@@ -416,7 +420,7 @@ export function PortablePullDrawer(props: PortablePullDrawerProps) {
                   <ul className={styles.replicationList}>
                     {canonicalOnly.map((change) => (
                       <li key={change.inventoryItemId}>
-                        {change.displayName} · {t(formatPullInstallModeLabelKey(change.installMode))}
+                        {change.displayName} · {tr(t, formatPullInstallModeLabelKey(change.installMode))}
                       </li>
                     ))}
                   </ul>
@@ -427,7 +431,7 @@ export function PortablePullDrawer(props: PortablePullDrawerProps) {
               <ul className={styles.replicationList}>
                 {plan.changes.map((change) => (
                   <li key={change.inventoryItemId} data-testid={`portable-pull-change-${change.inventoryItemId}`}>
-                    {change.displayName} · {t(formatPullInstallModeLabelKey(change.installMode))}
+                    {change.displayName} · {tr(t, formatPullInstallModeLabelKey(change.installMode))}
                     {change.conflict ? ` · ${t('agentHub:portablePull.conflictLabel')}` : ''}
                     {change.credentialBearing
                       ? ` · ${t('agentHub:replication.credentialLabel')}`
@@ -490,7 +494,7 @@ export function PortablePullDrawer(props: PortablePullDrawerProps) {
                       {' '}
                       {item.inventoryItemId}
                       {item.installMode
-                        ? ` · ${t(formatPullInstallModeLabelKey(item.installMode))}`
+                        ? ` · ${tr(t, formatPullInstallModeLabelKey(item.installMode))}`
                         : ''}
                       {item.errorCode ? ` · ${item.errorCode}` : ''}
                     </span>

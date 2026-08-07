@@ -133,4 +133,10 @@ describe('App lazy routes contract', () => {
     expect(appShellSource).not.toMatch(/to\s*=\s*["']\/discover["']/);
     expect(appShellSource).not.toMatch(/to\s*=\s*["']\/workbench["']\s+label=\{t\(['"]nav:home['"]\)\}/);
   });
+
+  test('legacy /claude-code deep-links to Agent Hub assets with Claude target', () => {
+    expect(appSource).toMatch(
+      /path\s*=\s*["']\/claude-code["']\s+element=\{<Navigate\s+to=["']\/agent-hub\?section=assets&target=claude["']\s+replace\s*\/>\}/,
+    );
+  });
 });

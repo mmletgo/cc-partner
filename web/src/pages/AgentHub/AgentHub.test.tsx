@@ -74,7 +74,7 @@ function buildProps(
 ): UseAgentHubControllerResult {
   const base: UseAgentHubControllerResult = {
     t: i18n.t.bind(i18n) as unknown as UseAgentHubControllerResult['t'],
-    activeSection: 'portableAssets',
+    activeSection: 'assets',
     setActiveSection: vi.fn(),
     userInstructions: {} as UseAgentHubControllerResult['userInstructions'],
     loading: false,
@@ -239,6 +239,81 @@ function buildProps(
     runGitPreview: vi.fn(async () => undefined),
     runGitConfirmMapping: vi.fn(async () => undefined),
     runGitConfirmImport: vi.fn(async () => undefined),
+    portableInventory: {
+      snapshot: null,
+      visibleItems: [],
+      kindCounts: { skill: 0, command: 0, plugin: 0, mcp: 0 },
+      filters: {
+        kind: 'skill',
+        target: 'all',
+        scope: 'all',
+        actualState: 'all',
+        management: 'all',
+        search: '',
+      },
+      setFilters: vi.fn(),
+      loading: false,
+      refreshing: false,
+      stale: false,
+      mutationBlocked: false,
+      error: null,
+      selectedItemId: null,
+      selectItem: vi.fn(),
+      lockedItemIds: new Set(),
+      setItemLocked: vi.fn(),
+      pendingAction: null,
+      openAction: vi.fn(),
+      clearPendingAction: vi.fn(),
+      getPrimaryAction: vi.fn(() => null),
+      refresh: vi.fn(async () => undefined),
+    } as UseAgentHubControllerResult['portableInventory'],
+    portableDetailsOpen: false,
+    portableSelectedItem: null,
+    closePortableDetails: vi.fn(),
+    requestPortableAction: vi.fn(),
+    portableActionOpen: false,
+    portableActionKind: null,
+    portableActionPlan: null,
+    portableActionResult: null,
+    portableActionBusy: false,
+    portableActionError: null,
+    portableActionClientRequestId: null,
+    previewPortableAction: vi.fn(async () => undefined),
+    confirmPortableAction: vi.fn(async () => undefined),
+    reconcilePortableAction: vi.fn(async () => undefined),
+    closePortableAction: vi.fn(),
+    portablePullOpen: false,
+    openPortablePull: vi.fn(),
+    closePortablePull: vi.fn(),
+    portablePull: {
+      devices: [],
+      selectedDeviceId: '',
+      sourceTarget: 'claude',
+      remoteInventory: null,
+      visibleItems: [],
+      selectedItemIds: new Set(),
+      filters: { kind: 'all', scope: 'all', actualState: 'all', search: '' },
+      conflictPolicy: 'skipExisting',
+      plan: null,
+      result: null,
+      clientRequestId: null,
+      busy: false,
+      error: null,
+      mutationBlocked: false,
+      canApply: false,
+      canReconcile: false,
+      loadInventory: vi.fn(async () => undefined),
+      preview: vi.fn(async () => undefined),
+      apply: vi.fn(async () => undefined),
+      reconcile: vi.fn(async () => undefined),
+      selectDevice: vi.fn(),
+      selectSourceTarget: vi.fn(),
+      setFilters: vi.fn(),
+      setConflictPolicy: vi.fn(),
+      toggleItem: vi.fn(),
+      selectVisible: vi.fn(),
+      clearSelection: vi.fn(),
+    } as UseAgentHubControllerResult['portablePull'],
     writeBlocked: false,
     upgradeRequired: false,
     ...overrides,
@@ -278,7 +353,7 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('probe-codex')).toBeTruthy();
     expect(screen.getByTestId('probe-opencode')).toBeTruthy();
     cleanup();
-    renderView({ activeSection: 'portableAssets' });
+    renderView({ activeSection: 'assets' });
     expect(screen.getByTestId('agent-hub-filters')).toBeTruthy();
     expect(screen.getByTestId('agent-target-claude')).toBeTruthy();
     expect(screen.getByTestId('agent-target-codex')).toBeTruthy();
@@ -448,5 +523,17 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('agent-hub-adoption-dialog')).toBeTruthy();
     expect(screen.getByTestId('agent-hub-lan-push-gate-c')).toBeTruthy();
     expect(screen.getByTestId('adoption-canonical').textContent).toContain('User instruction');
+  });
+
+  test('section tabs expose assets workspace and sync opens pull control', () => {
+    const setActiveSection = vi.fn();
+    const openPortablePull = vi.fn();
+    renderView({ setActiveSection, openPortablePull, activeSection: 'syncImport' });
+    expect(screen.getByTestId('agent-hub-section-assets')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-open-portable-pull')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('agent-hub-open-portable-pull'));
+    expect(openPortablePull).toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('agent-hub-section-assets'));
+    expect(setActiveSection).toHaveBeenCalledWith('assets');
   });
 });

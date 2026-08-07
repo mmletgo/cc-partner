@@ -26,6 +26,15 @@ import { InstructionBlocksDrawer } from './InstructionBlocksDrawer';
 import { PluginComponentsDrawer } from './PluginComponentsDrawer';
 import { UserInstructionView } from './userInstructions/UserInstructionView';
 import {
+  PortableAssetActionDialog,
+  PortableAssetDetailsDrawer,
+  PortableInventoryView,
+  PortablePullDrawer,
+  type PortableInventoryViewLabels,
+  type PortablePluginDetailsSummary,
+} from './portableAssets';
+import { summarizeDeletePreview } from './pluginPackagePresentation';
+import {
   useAgentHubController,
   type UseAgentHubControllerResult,
 } from './useAgentHubController';
@@ -57,6 +66,26 @@ export function AgentHubView(props: AgentHubViewProps) {
     activeSection,
     setActiveSection,
     userInstructions,
+    portableInventory,
+    portableDetailsOpen,
+    portableSelectedItem,
+    closePortableDetails,
+    requestPortableAction,
+    portableActionOpen,
+    portableActionKind,
+    portableActionPlan,
+    portableActionResult,
+    portableActionBusy,
+    portableActionError,
+    portableActionClientRequestId,
+    previewPortableAction,
+    confirmPortableAction,
+    reconcilePortableAction,
+    closePortableAction,
+    portablePullOpen,
+    openPortablePull,
+    closePortablePull,
+    portablePull,
     loading,
     refreshing,
     stale,
@@ -204,6 +233,112 @@ export function AgentHubView(props: AgentHubViewProps) {
     return Array.isArray(list) ? list : [];
   }, [preview]);
 
+  const portableInventoryLabels: PortableInventoryViewLabels = useMemo(
+    () => ({
+      title: t('agentHub:portable.inventory.title'),
+      subtitle: t('agentHub:portable.inventory.subtitle'),
+      loading: t('agentHub:portable.inventory.loading'),
+      empty: t('agentHub:portable.inventory.empty'),
+      refresh: t('agentHub:portable.inventory.refresh'),
+      retry: t('agentHub:portable.inventory.retry'),
+      staleBanner: t('agentHub:portable.inventory.staleBanner'),
+      searchPlaceholder: t('agentHub:portable.inventory.searchPlaceholder'),
+      filterTarget: t('agentHub:portable.inventory.filterTarget'),
+      filterScope: t('agentHub:portable.inventory.filterScope'),
+      filterActual: t('agentHub:portable.inventory.filterActual'),
+      filterManagement: t('agentHub:portable.inventory.filterManagement'),
+      kindCounts: {
+        skill: t('agentHub:portable.inventory.kindCounts.skill'),
+        command: t('agentHub:portable.inventory.kindCounts.command'),
+        plugin: t('agentHub:portable.inventory.kindCounts.plugin'),
+        mcp: t('agentHub:portable.inventory.kindCounts.mcp'),
+      },
+      targetFilter: {
+        all: t('agentHub:portable.inventory.targetFilter.all'),
+        claude: t('agentHub:portable.inventory.targetFilter.claude'),
+        codex: t('agentHub:portable.inventory.targetFilter.codex'),
+        opencode: t('agentHub:portable.inventory.targetFilter.opencode'),
+      },
+      scopeFilter: {
+        all: t('agentHub:portable.inventory.scopeFilter.all'),
+        user: t('agentHub:portable.inventory.scopeFilter.user'),
+        project: t('agentHub:portable.inventory.scopeFilter.project'),
+      },
+      actualFilter: {
+        all: t('agentHub:portable.inventory.actualFilter.all'),
+        enabled: t('agentHub:portable.inventory.actualFilter.enabled'),
+        disabled: t('agentHub:portable.inventory.actualFilter.disabled'),
+        problem: t('agentHub:portable.inventory.actualFilter.problem'),
+      },
+      managementFilter: {
+        all: t('agentHub:portable.inventory.managementFilter.all'),
+        unmanaged: t('agentHub:portable.inventory.managementFilter.unmanaged'),
+        hubManaged: t('agentHub:portable.inventory.managementFilter.hubManaged'),
+        drifted: t('agentHub:portable.inventory.managementFilter.drifted'),
+        externalCollision: t('agentHub:portable.inventory.managementFilter.externalCollision'),
+        unsupported: t('agentHub:portable.inventory.managementFilter.unsupported'),
+      },
+      targets: {
+        claude: t('agentHub:targets.claude'),
+        codex: t('agentHub:targets.codex'),
+        opencode: t('agentHub:targets.opencode'),
+      },
+      kinds: {
+        skill: t('agentHub:kinds.skill'),
+        command: t('agentHub:kinds.command'),
+        plugin: t('agentHub:kinds.plugin'),
+        mcp: t('agentHub:kinds.mcp'),
+      },
+      actual: {
+        enabled: t('agentHub:portable.inventory.actual.enabled'),
+        disabled: t('agentHub:portable.inventory.actual.disabled'),
+        problem: t('agentHub:portable.inventory.actual.problem'),
+        unknown: t('agentHub:portable.inventory.actual.unknown'),
+      },
+      management: {
+        unmanaged: t('agentHub:portable.inventory.management.unmanaged'),
+        hubManaged: t('agentHub:portable.inventory.management.hubManaged'),
+        drifted: t('agentHub:portable.inventory.management.drifted'),
+        externalCollision: t('agentHub:portable.inventory.management.externalCollision'),
+        unsupported: t('agentHub:portable.inventory.management.unsupported'),
+      },
+      scope: {
+        user: t('agentHub:portable.inventory.scope.user'),
+        project: t('agentHub:portable.inventory.scope.project'),
+        directory: t('agentHub:portable.inventory.scope.directory'),
+      },
+      actions: {
+        adopt: t('agentHub:portable.actions.adopt'),
+        enable: t('agentHub:portable.actions.enable'),
+        disable: t('agentHub:portable.actions.disable'),
+        uninstall: t('agentHub:portable.actions.uninstall'),
+        installToSourceTarget: t('agentHub:portable.actions.installToSourceTarget'),
+      },
+      sourceOrigin: {
+        standalone: t('agentHub:portable.inventory.sourceOrigin.standalone'),
+        pluginComponent: t('agentHub:portable.inventory.sourceOrigin.pluginComponent'),
+        nativeConfig: t('agentHub:portable.inventory.sourceOrigin.nativeConfig'),
+      },
+    }),
+    [t],
+  );
+
+  const portablePluginSummary: PortablePluginDetailsSummary | null = useMemo(() => {
+    if (!portableSelectedItem || portableSelectedItem.kind !== 'plugin' || !pluginReport) {
+      return null;
+    }
+    const deleteSummary = summarizeDeletePreview(pluginReport.deletePreview ?? null);
+    return {
+      packageDisplayName: pluginReport.packageDisplayName || portableSelectedItem.displayName,
+      activationState: pluginReport.activationState,
+      aggregateStatus: pluginReport.aggregateStatus,
+      componentCount: pluginReport.components.length,
+      residualCount: pluginReport.residuals.length,
+      deleteTombstoneCount: deleteSummary.tombstoneCount,
+      deletePreserveCount: deleteSummary.preserveCount,
+    };
+  }, [portableSelectedItem, pluginReport]);
+
   if (activeSection !== 'userInstructions' && loading && !status) {
     return (
       <div className={styles.page} data-testid="agent-hub-loading">
@@ -281,13 +416,21 @@ export function AgentHubView(props: AgentHubViewProps) {
                 >
                   {t('agentHub:gitImport.open')}
                 </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={openPortablePull}
+                  data-testid="agent-hub-open-portable-pull"
+                >
+                  {t('agentHub:portablePull.title')}
+                </Button>
               </>
             ) : null}
           </div>
         </header>
 
         <nav className={styles.hubSectionNav} aria-label={t('agentHub:sections.aria')}>
-          {(['userInstructions', 'projectInstructions', 'portableAssets', 'syncImport', 'diagnostics'] as const).map((section) => (
+          {(['userInstructions', 'projectInstructions', 'assets', 'syncImport', 'diagnostics'] as const).map((section) => (
             <Button
               key={section}
               variant={activeSection === section ? 'secondary' : 'ghost'}
@@ -389,60 +532,66 @@ export function AgentHubView(props: AgentHubViewProps) {
           </Card>
         ) : null}
 
-        {activeSection === 'portableAssets' ? (
-          <section className={styles.filters} data-testid="agent-hub-filters">
-          <label className={styles.filterField}>
-            <span>{t('agentHub:filters.scope')}</span>
-            <Input
-              value={scopeFilter}
-              onChange={(event) => setScopeFilter(event.currentTarget.value)}
-              placeholder={t('agentHub:filters.scopePlaceholder')}
-              data-testid="agent-hub-filter-scope"
+        {activeSection === 'assets' ? (
+          <div data-testid="agent-hub-assets-section">
+            <PortableInventoryView
+              controller={portableInventory}
+              labels={portableInventoryLabels}
             />
-          </label>
-          <label className={styles.filterField}>
-            <span>{t('agentHub:filters.kind')}</span>
-            <Input
-              value={kindFilter}
-              onChange={(event) => setKindFilter(event.currentTarget.value)}
-              placeholder={t('agentHub:filters.kindPlaceholder')}
-              data-testid="agent-hub-filter-kind"
-            />
-          </label>
-          </section>
-        ) : null}
-
-        {activeSection === 'portableAssets' ? (
-          <section className={styles.list} data-testid="agent-hub-asset-list" aria-label={t('agentHub:listAria')}>
-          {filteredAssets.length === 0 ? (
-            <p className={styles.empty} data-testid="agent-hub-empty">
-              {t('agentHub:empty')}
-            </p>
-          ) : (
-            filteredAssets.map((asset) => (
-              <AgentAssetRow
-                key={asset.assetId}
-                asset={asset}
-                selected={selectedAssetId === asset.assetId}
-                busy={actionBusy}
-                writeBlocked={writeBlocked}
-                onSelect={(item) => selectAsset(item.assetId)}
-                onOpenBlocks={handleOpenBlocks}
-                onOpenPlugin={handleOpenPlugin}
-                onOpenConflicts={handleOpenConflicts}
-                onToggleTarget={handleToggleTarget}
-                onRemoveTarget={(item, target) => {
-                  void removeTarget({ assetId: item.assetId, target });
-                }}
-                onRestoreTarget={(item, target) => {
-                  void restoreDetachedTarget({ assetId: item.assetId, target });
-                }}
-                onOpenCollision={(item, target) => openAdoptionPreview(item, target)}
-                onDeleteEverywhere={(item) => openDeleteEverywhere(item.assetId)}
-              />
-            ))
-          )}
-          </section>
+            {/* Legacy canonical matrix retained for conflict/plugin deep links until F6 cleanup. */}
+            <section className={styles.legacyMatrix} data-testid="agent-hub-legacy-matrix">
+              <div className={styles.filters} data-testid="agent-hub-filters">
+                <label className={styles.filterField}>
+                  <span>{t('agentHub:filters.scope')}</span>
+                  <Input
+                    value={scopeFilter}
+                    onChange={(event) => setScopeFilter(event.currentTarget.value)}
+                    placeholder={t('agentHub:filters.scopePlaceholder')}
+                    data-testid="agent-hub-filter-scope"
+                  />
+                </label>
+                <label className={styles.filterField}>
+                  <span>{t('agentHub:filters.kind')}</span>
+                  <Input
+                    value={kindFilter}
+                    onChange={(event) => setKindFilter(event.currentTarget.value)}
+                    placeholder={t('agentHub:filters.kindPlaceholder')}
+                    data-testid="agent-hub-filter-kind"
+                  />
+                </label>
+              </div>
+              <section className={styles.list} data-testid="agent-hub-asset-list" aria-label={t('agentHub:listAria')}>
+                {filteredAssets.length === 0 ? (
+                  <p className={styles.empty} data-testid="agent-hub-empty">
+                    {t('agentHub:empty')}
+                  </p>
+                ) : (
+                  filteredAssets.map((asset) => (
+                    <AgentAssetRow
+                      key={asset.assetId}
+                      asset={asset}
+                      selected={selectedAssetId === asset.assetId}
+                      busy={actionBusy}
+                      writeBlocked={writeBlocked}
+                      onSelect={(item) => selectAsset(item.assetId)}
+                      onOpenBlocks={handleOpenBlocks}
+                      onOpenPlugin={handleOpenPlugin}
+                      onOpenConflicts={handleOpenConflicts}
+                      onToggleTarget={handleToggleTarget}
+                      onRemoveTarget={(item, target) => {
+                        void removeTarget({ assetId: item.assetId, target });
+                      }}
+                      onRestoreTarget={(item, target) => {
+                        void restoreDetachedTarget({ assetId: item.assetId, target });
+                      }}
+                      onOpenCollision={(item, target) => openAdoptionPreview(item, target)}
+                      onDeleteEverywhere={(item) => openDeleteEverywhere(item.assetId)}
+                    />
+                  ))
+                )}
+              </section>
+            </section>
+          </div>
         ) : null}
 
         {activeSection === 'projectInstructions' ? (
@@ -739,6 +888,86 @@ export function AgentHubView(props: AgentHubViewProps) {
         onConfirmImport={() => void runGitConfirmImport()}
         onClose={closeGitImportDrawer}
       />
+
+      <PortableAssetDetailsDrawer
+        open={portableDetailsOpen}
+        item={portableSelectedItem}
+        pluginReport={portablePluginSummary}
+        busy={portableActionBusy}
+        error={portableActionError}
+        onClose={closePortableDetails}
+        onRequestAction={(action) => {
+          if (!portableSelectedItem) return;
+          requestPortableAction(portableSelectedItem.inventoryItemId, action);
+        }}
+      />
+
+      <PortableAssetActionDialog
+        open={portableActionOpen}
+        item={
+          portableInventory.pendingAction
+            ? portableInventory.snapshot?.items.find(
+                (entry) => entry.inventoryItemId === portableInventory.pendingAction?.itemId,
+              ) ?? portableSelectedItem
+            : null
+        }
+        action={portableActionKind}
+        inventorySnapshotHash={portableInventory.snapshot?.inventorySnapshotHash ?? null}
+        plan={portableActionPlan}
+        result={portableActionResult}
+        busy={portableActionBusy}
+        error={portableActionError}
+        clientRequestId={portableActionClientRequestId}
+        onPreview={(request) => {
+          void previewPortableAction(request);
+        }}
+        onConfirm={(planToken, clientRequestId) => {
+          void confirmPortableAction(planToken, clientRequestId);
+        }}
+        onReconcile={(clientRequestId) => {
+          void reconcilePortableAction(clientRequestId);
+        }}
+        onClose={closePortableAction}
+      />
+
+      <PortablePullDrawer
+        open={portablePullOpen}
+        busy={portablePull.busy}
+        error={portablePull.error}
+        devices={portablePull.devices}
+        selectedDeviceId={portablePull.selectedDeviceId}
+        sourceTarget={portablePull.sourceTarget}
+        remoteInventory={portablePull.remoteInventory}
+        visibleItems={portablePull.visibleItems}
+        selectedItemIds={portablePull.selectedItemIds}
+        filters={portablePull.filters}
+        conflictPolicy={portablePull.conflictPolicy}
+        plan={portablePull.plan}
+        result={portablePull.result}
+        mutationBlocked={portablePull.mutationBlocked}
+        canApply={portablePull.canApply}
+        canReconcile={portablePull.canReconcile}
+        onSelectDevice={(deviceId) => portablePull.selectDevice(deviceId)}
+        onSelectSourceTarget={(target) => portablePull.selectSourceTarget(target)}
+        onSetFilters={(filters) => portablePull.setFilters(filters)}
+        onToggleItem={(id) => portablePull.toggleItem(id)}
+        onSelectVisible={() => portablePull.selectVisible()}
+        onSetConflictPolicy={(policy) => portablePull.setConflictPolicy(policy)}
+        onLoadInventory={() => {
+          void portablePull.loadInventory();
+        }}
+        onPreview={() => {
+          void portablePull.preview();
+        }}
+        onApply={() => {
+          void portablePull.apply();
+        }}
+        onReconcile={() => {
+          void portablePull.reconcile();
+        }}
+        onClose={closePortablePull}
+      />
+
     </div>
   );
 }

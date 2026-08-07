@@ -6,9 +6,10 @@
     "userInstructions": "User instructions",
     "projectInstructions": "Project instructions",
     "projectInstructionsHint": "Preview and enable project instruction mappings. Nothing is written before confirmation.",
-    "portableAssets": "Skills and tools",
+    "portableAssets": "Agent assets",
     "syncImport": "Sync and import",
-    "diagnostics": "Compatibility and diagnostics"
+    "diagnostics": "Compatibility and diagnostics",
+    "assets": "Agent assets"
   },
   "userInstructions": {
     "title": "User instructions",
@@ -427,6 +428,218 @@
       "assets": "Assets",
       "npm": "npm",
       "customTool": "Custom tool"
+    },
+    "previewDelete": "Preview package delete"
+  },
+  "portable": {
+    "inventory": {
+      "title": "Agent assets",
+      "subtitle": "Observed inventory across Claude, Codex, and OpenCode. Actual state is the source of truth.",
+      "loading": "Loading inventory…",
+      "empty": "No portable assets match the current filters.",
+      "refresh": "Refresh inventory",
+      "retry": "Retry",
+      "staleBanner": "Inventory is stale. Mutations are blocked until a successful refresh.",
+      "searchPlaceholder": "Search name, native id, or path",
+      "filterTarget": "Target",
+      "filterScope": "Scope",
+      "filterActual": "Actual state",
+      "filterManagement": "Management",
+      "kindCounts": {
+        "skill": "Skills",
+        "command": "Commands",
+        "plugin": "Plugins",
+        "mcp": "MCP"
+      },
+      "targetFilter": {
+        "all": "All targets",
+        "claude": "Claude",
+        "codex": "Codex",
+        "opencode": "OpenCode"
+      },
+      "scopeFilter": {
+        "all": "All scopes",
+        "user": "User",
+        "project": "Project"
+      },
+      "actualFilter": {
+        "all": "All states",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "problem": "Problem"
+      },
+      "managementFilter": {
+        "all": "All management",
+        "unmanaged": "External",
+        "hubManaged": "Hub managed",
+        "drifted": "Drifted",
+        "externalCollision": "Collision",
+        "unsupported": "Unsupported"
+      },
+      "actual": {
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "problem": "Problem",
+        "unknown": "Unknown"
+      },
+      "management": {
+        "unmanaged": "External",
+        "hubManaged": "Hub managed",
+        "drifted": "Drifted",
+        "externalCollision": "Collision",
+        "unsupported": "Unsupported"
+      },
+      "scope": {
+        "user": "User",
+        "project": "Project",
+        "directory": "Directory"
+      },
+      "sourceOrigin": {
+        "standalone": "Standalone",
+        "pluginComponent": "Plugin component",
+        "nativeConfig": "Native config"
+      }
+    },
+    "actions": {
+      "adopt": "Adopt",
+      "enable": "Enable",
+      "disable": "Disable",
+      "uninstall": "Uninstall",
+      "installToSourceTarget": "Install to source target"
+    },
+    "management": {
+      "unmanaged": "External",
+      "hubManaged": "Hub managed",
+      "drifted": "Drifted",
+      "externalCollision": "Collision",
+      "unsupported": "Unsupported"
+    },
+    "details": {
+      "title": "Asset details",
+      "titleWithName": "Details · {{name}}",
+      "empty": "Select an inventory item to inspect details.",
+      "nativeId": "Native id",
+      "treeHash": "Tree hash",
+      "origin": "Origin",
+      "invocation": "Invocation",
+      "sourcePath": "Source path",
+      "sourceFile": "Source file",
+      "description": "Description",
+      "compatibility": "Compatibility",
+      "transport": "Transport",
+      "source": "Source",
+      "credentialPresent": "Credential present",
+      "credentialHash": "Credential hash",
+      "presentYes": "Yes",
+      "presentNo": "No",
+      "missing": "—",
+      "none": "None",
+      "actualUnknown": "Actual state unknown",
+      "actualEnabled": "Enabled on disk",
+      "actualDisabled": "Disabled on disk",
+      "canonical": "Canonical revision",
+      "desired": "Desired presence",
+      "materialization": "Materialization",
+      "package": "Package",
+      "activation": "Activation",
+      "components": "Components",
+      "residuals": "Residuals",
+      "deleteGroups": "Delete groups",
+      "deleteGroupSummary": "Tombstone {{tombstone}} · preserve {{preserve}}",
+      "actionsAria": "Safe asset actions",
+      "dangerAria": "Danger zone",
+      "dangerTitle": "Danger zone",
+      "dangerHint": "Uninstall or delete-everywhere requires a preview before any write.",
+      "uninstallBlocked": "Uninstall is not available for this item.",
+      "parentPlugin": "Parent plugin"
+    },
+    "actionDialog": {
+      "title": "Preview {{action}}",
+      "subtitle": "Inspect the plan, then confirm. Nothing is written until you confirm.",
+      "keepData": "Keep local data when uninstalling",
+      "conflictPolicy": "Conflict policy",
+      "conflictSkip": "Skip existing",
+      "conflictReplace": "Replace after preview",
+      "planToken": "Plan token",
+      "preview": "Preview",
+      "confirm": "Confirm apply",
+      "reconcile": "Reconcile result",
+      "fullSuccess": "All selected items succeeded or were skipped.",
+      "partial": "Some items failed or were blocked. Review the per-item report.",
+      "outcomeUnknown": "Outcome is unknown. Reconcile before retrying with a new request id."
+    }
+  },
+  "portablePull": {
+    "title": "Pull from peer (same agent)",
+    "hint": "Select a LAN peer and the same agent target. Destination always matches the source agent.",
+    "lanNoAuthRisk": "Any device on the reachable network can read, write, and execute. The system does not verify caller identity.",
+    "staleInventory": "Remote inventory is stale. Refresh before preview or apply.",
+    "deviceSection": "Source device",
+    "deviceSectionAria": "Source device selection",
+    "deviceLabel": "Device",
+    "noDevices": "No online peers",
+    "sourceTargetLabel": "Source agent",
+    "filters": "Filters",
+    "filtersAria": "Remote inventory filters",
+    "filterKind": "Kind",
+    "filterScope": "Scope",
+    "filterState": "State",
+    "searchPlaceholder": "Search remote assets",
+    "inventory": "Remote inventory",
+    "inventoryAria": "Remote inventory list",
+    "loadInventory": "Load remote inventory",
+    "selectVisible": "Select visible",
+    "loadHint": "Choose a peer and agent, then load remote inventory.",
+    "policyAria": "Conflict policy",
+    "conflictPolicy": "Conflict policy",
+    "preview": "Preview plan",
+    "previewAction": "Run preview",
+    "previewSummary": "{{count}} changes · credentials {{credentials}}",
+    "conflictDiff": "Conflicts {{conflict}} · skip {{skip}} · replace {{replace}}",
+    "noCredentials": "No credential-bearing assets in this plan",
+    "canonicalOnlyHint": "Some items import as canonical-only (no local native install).",
+    "conflictLabel": "conflict",
+    "apply": "Apply pull",
+    "applyAction": "Confirm apply",
+    "reconcileAction": "Reconcile pull",
+    "progressSummary": "Done {{succeeded}} · skip {{skipped}} · fail {{failed}} · blocked {{blocked}} · unknown {{unknown}} / {{total}}",
+    "states": {
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "problem": "Problem",
+      "all": "All states"
+    },
+    "kinds": {
+      "all": "All kinds",
+      "skill": "Skill",
+      "command": "Command",
+      "plugin": "Plugin",
+      "mcp": "MCP"
+    },
+    "scopes": {
+      "all": "All scopes",
+      "user": "User",
+      "project": "Project"
+    },
+    "targets": {
+      "claude": "Claude",
+      "codex": "Codex",
+      "opencode": "OpenCode"
+    },
+    "destination": {
+      "sameAsClaude": "Destination: Claude (same agent)",
+      "sameAsCodex": "Destination: Codex (same agent)",
+      "sameAsOpenCode": "Destination: OpenCode (same agent)"
+    },
+    "policy": {
+      "skipExisting": "Skip existing",
+      "replaceAfterPreview": "Replace after preview"
+    },
+    "installMode": {
+      "installToTarget": "Install to target",
+      "importedCanonicalOnly": "Canonical only",
+      "skipExisting": "Skipped existing",
+      "blocked": "Blocked"
     }
   }
 }
