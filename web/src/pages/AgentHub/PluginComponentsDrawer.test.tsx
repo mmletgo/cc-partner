@@ -6,7 +6,7 @@
  * Code Logic: RTL 渲染 pure props。
  */
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { PluginPackageReport } from '@/lib/types/agentHub';
 import { PluginComponentsDrawer } from './PluginComponentsDrawer';
@@ -168,5 +168,36 @@ describe('PluginComponentsDrawer', () => {
     );
     expect(screen.getByTestId('plugin-delete-tombstone').textContent).toContain('Skill A');
     expect(screen.getByTestId('plugin-delete-preserve').textContent).toContain('Hook B');
+  });
+
+  test('delete confirm routes through generic preview action callback without window.confirm', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    const onRequestDeleteAction = vi.fn();
+    render(
+      <PluginComponentsDrawer
+        open
+        report={reportFixture()}
+        onClose={() => undefined}
+        onRequestDeleteAction={onRequestDeleteAction}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('plugin-delete-confirm'));
+    expect(onRequestDeleteAction).toHaveBeenCalledTimes(1);
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  test('legacy onConfirmDelete remains supported for generic action wiring', () => {
+    const onConfirmDelete = vi.fn();
+    render(
+      <PluginComponentsDrawer
+        open
+        report={reportFixture()}
+        onClose={() => undefined}
+        onConfirmDelete={onConfirmDelete}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('plugin-delete-confirm'));
+    expect(onConfirmDelete).toHaveBeenCalledTimes(1);
   });
 });

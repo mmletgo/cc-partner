@@ -152,6 +152,25 @@ export function isPreserveDeleteDecision(decision: PluginComponentDeleteDecision
   return decision === 'preserveShared' || decision === 'preserveStandalone';
 }
 
+/**
+ * Business Logic: portable Plugin 详情需要 tombstone/preserve 计数摘要。
+ * Code Logic: 复用 groupDeletePreview 计数，不发明 ownership 决策。
+ */
+export function summarizeDeletePreview(preview: PluginDeletePreview | null | undefined): {
+  tombstoneCount: number;
+  preserveCount: number;
+  total: number;
+} {
+  const groups = groupDeletePreview(preview);
+  const tombstoneCount = groups.tombstone.length;
+  const preserveCount = groups.preserve.length;
+  return {
+    tombstoneCount,
+    preserveCount,
+    total: tombstoneCount + preserveCount,
+  };
+}
+
 // OpenCode bridge helpers live in shared lib so Settings/Workbench/Orchestrator share fail-closed rules.
 export {
   OPENCODE_RUNTIME_BRIDGE_REL_PATH,
