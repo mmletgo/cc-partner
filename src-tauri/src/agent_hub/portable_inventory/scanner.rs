@@ -27,7 +27,7 @@ use crate::agent_hub::support::{
     RuntimeProbeSnapshot, TargetCapability,
 };
 use crate::agent_hub::targets::portable::{
-    hash_skill_directory, DiscoveredPortableAsset, PortableDiscoveryStatus, PortableOriginKind,
+    DiscoveredPortableAsset, PortableDiscoveryStatus, PortableOriginKind,
 };
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, LocalScopeMapping,
@@ -611,14 +611,9 @@ fn actual_enabled_for(kind: PortableAssetKind, disc: &DiscoveredPortableAsset) -
         PortableDiscoveryStatus::Disabled => Some(false),
         PortableDiscoveryStatus::Blocked => Some(false),
         PortableDiscoveryStatus::Discovered => {
-            // Command 无原生 enable 语义时返回 null
-            if kind == PortableAssetKind::Command
-                && !enable_semantics_supported(kind, disc.origin.target)
-            {
-                None
-            } else {
-                None
-            }
+            // Command 无原生 enable 语义时返回 null；当前 discovery 统一不推断 enabled
+            let _ = (kind, disc.origin.target);
+            None
         }
     }
 }
@@ -1177,8 +1172,4 @@ enabled = false
         v
     }
 
-    #[allow(dead_code)]
-    fn _touch_hash_skill(dir: &Path) {
-        let _ = hash_skill_directory(dir);
     }
-}

@@ -1164,7 +1164,7 @@ pub struct UserInstructionPlanRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserInstructionPlanClaim {
     /// 本请求获得执行权
-    Claimed(UserInstructionPlanRecord),
+    Claimed(Box<UserInstructionPlanRecord>),
     /// 同 id 请求正在执行
     Pending,
     /// 同 id 已完成
@@ -1207,10 +1207,50 @@ pub struct PortableAssetActionPlanRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortableActionClaim {
     /// 本请求获得执行权
-    Claimed(PortableAssetActionPlanRecord),
+    Claimed(Box<PortableAssetActionPlanRecord>),
     /// 同 id 请求正在执行
     Pending,
     /// 同 id 已完成（精确 result JSON）
+    Replay(String),
+}
+
+/// Portable Pull 预览计划持久化记录（与 action ledger 同形）。
+///
+/// Business Logic: owner 重启后仍可 replay clientRequestId；plan 有 TTL。
+/// Code Logic: SQLite `agent_hub_portable_pull_plans` 行。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortablePullPlanRecord {
+    /// 不可猜短期 token
+    pub plan_token: String,
+    /// 过期时间 RFC3339
+    pub expires_at: String,
+    /// 远端 inventory 快照 hash
+    pub remote_inventory_snapshot_hash: String,
+    /// 本机 inventory 快照 hash
+    pub local_inventory_snapshot_hash: String,
+    /// 完整 plan JSON（含 remote_item_ids）
+    pub plan_json: String,
+    /// 首次 apply 幂等键
+    pub client_request_id: Option<String>,
+    /// 原子 claim 时间
+    pub claimed_at: Option<String>,
+    /// 已消费时间
+    pub consumed_at: Option<String>,
+    /// 幂等返回结果 JSON
+    pub result_json: Option<String>,
+    /// 创建时间
+    pub created_at: String,
+}
+
+/// Portable Pull plan 原子 claim 结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortablePullClaim {
+    /// 本请求获得执行权
+    Claimed(Box<PortablePullPlanRecord>),
+    /// 同 id 请求正在执行
+    Pending,
+    /// 同 id 已完成
     Replay(String),
 }
 

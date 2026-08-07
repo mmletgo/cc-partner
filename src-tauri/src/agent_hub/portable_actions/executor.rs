@@ -12,14 +12,14 @@ use super::ledger::{
 };
 use super::models::{
     ApplyPortableAssetActionRequest, PortableAssetActionItemResultDto,
-    PortableAssetActionItemState, PortableAssetActionKind, PortableAssetActionPlanDto,
-    PortableAssetActionResultDto, PortableAssetPlanOperation, StoredPortableAssetActionPlan,
+    PortableAssetActionItemState, PortableAssetActionKind, PortableAssetActionResultDto,
+    PortableAssetPlanOperation, StoredPortableAssetActionPlan,
 };
 use super::targets::{
     executor_for, expected_enabled_after, TargetActionContext, TargetActionRawOutcome,
 };
 use crate::agent_hub::models::PortableActionClaim;
-use crate::agent_hub::packages::activator::{FakeProcessRunner, ProcessRunner};
+use crate::agent_hub::packages::activator::ProcessRunner;
 use crate::agent_hub::portable_inventory::{
     inspect_portable_inventory_with_env, PortableInventoryItemDto, PortableInventorySnapshotDto,
 };
@@ -140,24 +140,68 @@ pub async fn apply_portable_asset_action_with(
 
     match claim {
         PortableActionClaim::Replay(json) => {
-            return serde_json::from_str(&json).map_err(AppError::from);
+            serde_json::from_str(&json).map_err(AppError::from)
         }
         PortableActionClaim::Pending => {
-            // 未完成 claim：诚实 outcomeUnknown，不重放 mutation
+            // 未完成 claim：诚实 outcomeUnknown，尽量 rescan 附加 observed 事实
             let row = deps
                 .repo
                 .get_portable_asset_action_plan(&request.plan_token)
                 .await?
                 .ok_or_else(|| AppError::not_found("PORTABLE_ASSET_ACTION_PLAN_NOT_FOUND"))?;
             let stored = parse_stored_plan(&row.plan_json)?;
-            return Ok(super::ledger::outcome_unknown_result(
+            let mut result = super::ledger::outcome_unknown_result(
                 &request.plan_token,
                 &request.client_request_id,
                 &stored.public,
-            ));
+            );
+            if let Ok(post) = resolve_post_inventory(state, deps).await {
+                let by_id: BTreeMap<_, _> = post
+                    .items
+                    .iter()
+                    .map(|i| (i.inventory_item_id.clone(), i))
+                    .collect();
+                for item in &mut result.items {
+                    if let Some(obs) = by_id.get(&item.inventory_item_id) {
+                        item.message = Some(format!(
+                            "action claimed but not completed; observed enabled={:?}",
+                            obs.actual_enabled
+                        ));
+                    }
+                }
+            }
+            Ok(result)
         }
         PortableActionClaim::Claimed(record) => {
             let stored = parse_stored_plan(&record.plan_json)?;
+            // claim 后立即 revalidate：expiry / owner fingerprint / inventory hash / CLI fingerprints
+            // record 为 Box 以压低 enum size；此处直接用 stored
+            if let Err(block) = revalidate_claimed_plan(state, deps, &stored).await {
+                let items = stored
+                    .public
+                    .changes
+                    .iter()
+                    .map(|c| PortableAssetActionItemResultDto {
+                        inventory_item_id: c.inventory_item_id.clone(),
+                        state: PortableAssetActionItemState::Failed,
+                        error_code: Some(block.clone()),
+                        message: Some("plan revalidation failed at apply".into()),
+                    })
+                    .collect();
+                let result = PortableAssetActionResultDto {
+                    plan_token: request.plan_token.clone(),
+                    client_request_id: request.client_request_id.clone(),
+                    items,
+                };
+                complete_portable_asset_action(
+                    &deps.repo,
+                    &request.plan_token,
+                    &request.client_request_id,
+                    &result,
+                )
+                .await?;
+                return Ok(result);
+            }
             let result = execute_claimed_plan(state, deps, &request, &stored).await?;
             complete_portable_asset_action(
                 &deps.repo,
@@ -169,6 +213,75 @@ pub async fn apply_portable_asset_action_with(
             Ok(result)
         }
     }
+}
+
+/// claim 后、mutation 前 revalidate（expiry + owner + inventory/target fingerprints）。
+async fn revalidate_claimed_plan(
+    state: Option<&AppState>,
+    deps: &PortableActionExecutorDeps,
+    stored: &StoredPortableAssetActionPlan,
+) -> Result<(), String> {
+    use chrono::{DateTime, Utc};
+    let plan = &stored.public;
+    if let Ok(expires) = DateTime::parse_from_rfc3339(&plan.expires_at) {
+        if expires < Utc::now() {
+            return Err("PORTABLE_ASSET_ACTION_PLAN_EXPIRED".into());
+        }
+    } else if plan.expires_at.as_str() < Utc::now().to_rfc3339().as_str() {
+        return Err("PORTABLE_ASSET_ACTION_PLAN_EXPIRED".into());
+    }
+
+    // 重新 inspect inventory 并比对 snapshot hash + target fingerprints
+    let live = match resolve_pre_inventory(state, deps).await {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(format!(
+                "PORTABLE_ASSET_ACTION_INVENTORY_REVALIDATE_FAILED:{e}"
+            ))
+        }
+    };
+    if live.inventory_snapshot_hash != plan.inventory_snapshot_hash {
+        return Err("PORTABLE_ASSET_ACTION_INVENTORY_HASH_MISMATCH".into());
+    }
+    if live.stale {
+        return Err("PORTABLE_ASSET_ACTION_INVENTORY_STALE".into());
+    }
+    let mut live_fps: BTreeMap<String, String> = BTreeMap::new();
+    for t in &live.targets {
+        live_fps.insert(
+            t.target.as_str().to_string(),
+            format!(
+                "{}|{}|{}|{}",
+                t.target.as_str(),
+                t.version.as_deref().unwrap_or(""),
+                t.executable.as_deref().unwrap_or(""),
+                t.config_root
+            ),
+        );
+    }
+    for expected in &stored.target_fingerprints {
+        let target = expected.split('|').next().unwrap_or("");
+        match live_fps.get(target) {
+            Some(actual) if actual == expected => {}
+            _ => return Err("PORTABLE_ASSET_ACTION_TARGET_FINGERPRINT_MISMATCH".into()),
+        }
+    }
+    // owner fingerprint：若可从 state 重算则比对
+    if let Some(state) = state {
+        let roots = live
+            .targets
+            .iter()
+            .map(|t| format!("{}={}", t.target.as_str(), t.config_root))
+            .collect::<Vec<_>>()
+            .join("|");
+        let current = crate::agent_hub::object_store::sha256_hex(
+            format!("{}|{}", state.device_id.as_str(), roots).as_bytes(),
+        );
+        if !stored.owner_fingerprint.is_empty() && current != stored.owner_fingerprint {
+            return Err("PORTABLE_ASSET_ACTION_OWNER_FINGERPRINT_MISMATCH".into());
+        }
+    }
+    Ok(())
 }
 
 async fn execute_claimed_plan(
@@ -300,6 +413,7 @@ async fn execute_claimed_plan(
             .expect("change exists");
         let state = reconcile_item(
             plan.action,
+            plan.keep_data,
             change.kind,
             &raw,
             pre.as_ref(),
@@ -322,6 +436,7 @@ async fn execute_claimed_plan(
 
 fn reconcile_item(
     action: PortableAssetActionKind,
+    keep_data: bool,
     kind: crate::agent_hub::portable_inventory::PortableAssetKind,
     raw: &TargetActionRawOutcome,
     pre: Option<&PortableInventoryItemDto>,
@@ -358,12 +473,18 @@ fn reconcile_item(
                             None,
                             Some("uninstalled verified by rescan".into()),
                         )
-                    } else if post.and_then(|p| p.actual_enabled) == Some(false) {
-                        // keep_data 可能仍可见但 disabled
+                    } else if keep_data && post.and_then(|p| p.actual_enabled) == Some(false) {
+                        // keep_data：允许 residual present+disabled
                         (
                             PortableAssetActionItemState::Succeeded,
                             None,
-                            Some("uninstalled/disabled verified".into()),
+                            Some("uninstalled/disabled verified (keep_data)".into()),
+                        )
+                    } else if !keep_data {
+                        (
+                            PortableAssetActionItemState::Failed,
+                            Some("PORTABLE_ASSET_ACTION_RESCAN_MISMATCH".into()),
+                            Some("item still present after full uninstall".into()),
                         )
                     } else {
                         (
@@ -407,9 +528,10 @@ fn reconcile_item(
                     }
                 }
                 PortableAssetActionKind::Adopt => (
-                    PortableAssetActionItemState::Succeeded,
-                    None,
-                    Some("adopt applied (ownership side-effects deferred to service)".into()),
+                    // 永不假成功：Adopt Applied 若到达这里说明 adapter 未 fail-closed
+                    PortableAssetActionItemState::Failed,
+                    Some("PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into()),
+                    Some("adopt must not succeed without ownership write".into()),
                 ),
                 PortableAssetActionKind::InstallToSourceTarget => {
                     if post.is_some() {
@@ -465,7 +587,7 @@ async fn resolve_post_inventory(
 #[cfg(test)]
 pub fn test_deps_with_runner(
     repo: AgentHubRepo,
-    runner: Arc<FakeProcessRunner>,
+    runner: Arc<crate::agent_hub::packages::activator::FakeProcessRunner>,
 ) -> PortableActionExecutorDeps {
     PortableActionExecutorDeps {
         repo,
@@ -484,7 +606,8 @@ mod tests {
     use crate::agent_hub::models::{AgentTarget, ScopeKind};
     use crate::agent_hub::packages::activator::FakeProcessRunner;
     use crate::agent_hub::portable_actions::models::{
-        PortableAssetActionKind, PortableAssetConflictPolicy, PreviewPortableAssetActionRequest,
+        PortableAssetActionKind, PortableAssetActionPlanDto, PortableAssetConflictPolicy,
+        PreviewPortableAssetActionRequest,
     };
     use crate::agent_hub::portable_actions::planner::preview_portable_asset_action_with_inventory;
     use crate::agent_hub::portable_inventory::{
@@ -493,7 +616,7 @@ mod tests {
         PortableInventoryManagementState, PortableInventoryMutationCapability,
         PortableInventoryScanCapability, PortableInventorySourceOrigin, PortableInventoryTargetDto,
     };
-    use crate::claude_code_assets::portable_content_hash_path;
+    use crate::agent_hub::targets::portable::hash_skill_directory;
     use chrono::Utc;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::str::FromStr;
@@ -671,14 +794,13 @@ mod tests {
     /// Business Logic: Skill disable 必须 move 到 disabled 且零 spawn。
     #[tokio::test]
     async fn skill_disable_moves_to_disabled_with_backup_root() {
-        let _lock = crate::claude_code_assets::claude_assets_env_lock_for_tests();
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().join("claude");
         let data = dir.path().join("data");
         std::fs::create_dir_all(claude.join("skills/my-skill")).unwrap();
         std::fs::write(claude.join("skills/my-skill/SKILL.md"), "# skill\n").unwrap();
         let skill_path = claude.join("skills/my-skill");
-        let hash = portable_content_hash_path(&skill_path).unwrap();
+        let (hash, _, _, _) = hash_skill_directory(&skill_path).unwrap();
 
         let repo = test_repo().await;
         let runner = Arc::new(FakeProcessRunner::new());
@@ -1050,6 +1172,94 @@ mod tests {
         assert_eq!(
             by_id.get(&bad.inventory_item_id),
             Some(&PortableAssetActionItemState::Blocked)
+        );
+    }
+
+    /// Business Logic: Adopt 不得假成功，必须 PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED。
+    #[tokio::test]
+    async fn adopt_fail_closed_without_ownership_write() {
+        let repo = test_repo().await;
+        let runner = Arc::new(FakeProcessRunner::new());
+        let item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            "adopt-me",
+            "/skills/adopt-me",
+            Some(true),
+        );
+        let snap = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+        let plan = preview_action(
+            &repo,
+            &snap,
+            vec![item.inventory_item_id.clone()],
+            PortableAssetActionKind::Adopt,
+            false,
+        )
+        .await;
+        let deps = PortableActionExecutorDeps {
+            repo,
+            runner: runner.clone(),
+            env: None,
+            pre_inventory: Some(snap.clone()),
+            claude_config_dir: None,
+            data_dir: None,
+            rescan_override: Some(snap),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token,
+                client_request_id: "req-adopt-1".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(result.items[0].state, PortableAssetActionItemState::Failed);
+        assert_eq!(
+            result.items[0].error_code.as_deref(),
+            Some("PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED")
+        );
+        assert!(runner.calls().is_empty());
+    }
+
+    /// Business Logic: 过期 plan 在 claim 时 fail-closed。
+    #[tokio::test]
+    async fn expired_plan_rejected_at_claim() {
+        let repo = test_repo().await;
+        let item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Plugin,
+            "p@x",
+            "/p",
+            Some(true),
+        );
+        let snap = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+        let mut plan = preview_action(
+            &repo,
+            &snap,
+            vec![item.inventory_item_id.clone()],
+            PortableAssetActionKind::Disable,
+            false,
+        )
+        .await;
+        // 手工把 expires_at 改到过去并更新 DB
+        plan.expires_at = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        // 直接 update row
+        sqlx::query(
+            "UPDATE agent_hub_portable_asset_action_plans SET expires_at = ? WHERE plan_token = ?",
+        )
+        .bind(&plan.expires_at)
+        .bind(&plan.plan_token)
+        .execute(&repo.pool())
+        .await
+        .unwrap();
+        let err = claim_portable_asset_action(&repo, &plan.plan_token, "req-exp-1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("PORTABLE_ASSET_ACTION_PLAN_EXPIRED")
+                || format!("{err:?}").contains("PORTABLE_ASSET_ACTION_PLAN_EXPIRED")
         );
     }
 

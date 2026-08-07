@@ -432,32 +432,21 @@ async fn l2_agent_hub_portable_parity_001_inventory_and_actions() {
         .unwrap()
         .contains(CREDENTIAL_FIXTURE));
 
-    // ---- Skill disable (B4 executor seam + real FS) ----
-    // Use known content_hash="content-hash" pattern from B4 with rescan_override
-    // and real move via data_dir + claude_config_dir by setting content_hash to path walk
-    // matching unit test: write skill then hash via same approach as B4 by leaving
-    // content_hash as fixed and verifying SOURCE_HASH via override path that exists only
-    // after we copy fixture skill under isolated claude root used by deps.
+    // ---- Skill disable with REAL inventory skill hash domain (SKILL.md-only) ----
     let skill_root = env.home.join(".claude/skills/my-skill");
     write_skill(&env.home.join(".claude/skills"), "my-skill", "disable me");
-    // B4 unit test uses portable_content_hash_path; re-export is private, so use Fake
-    // path: set content_hash to match by computing sha of SKILL.md file only if file path
-    // is used. Disable adapter checks directory hash when path is dir.
-    // Simplest certified path: use Plugin enable/disable/uninstall (CLI argv) + MCP patch
-    // + unopted block + replay — skill disable covered by B4 unit + inventory scan here.
-    // Still exercise skill disable using same synthetic content_hash + rescan_override as B4:
+    let (skill_hash, tree_hash, _, _) =
+        app_lib::agent_hub::targets::portable::hash_skill_directory(&skill_root)
+            .expect("skill hash");
     let mut skill_item = sample_item(
         AgentTarget::Claude,
         PortableAssetKind::Skill,
         "my-skill",
         skill_root.to_str().unwrap(),
         Some(true),
-        Some("content-hash".into()),
+        Some(skill_hash),
     );
-    // Avoid SOURCE_HASH_CHANGED by clearing hash and relying on tree_hash present
-    // (planner requires content OR tree). Executor only checks expected_source_hash when Some.
-    skill_item.content_hash = None;
-    skill_item.tree_hash = Some("tree-hash".into());
+    skill_item.tree_hash = Some(tree_hash);
     let snap_skill = snapshot_from(
         vec![sample_target(AgentTarget::Claude)],
         vec![skill_item.clone()],
@@ -534,17 +523,19 @@ async fn l2_agent_hub_portable_parity_001_inventory_and_actions() {
 }
 "#,
     );
+    // MCP leaf value_content_hash 与 planner/CAS 同域（禁止 clear content_hash 绕过）
     let mut mcp_item = sample_item(
         AgentTarget::Claude,
         PortableAssetKind::Mcp,
         "drop-me",
         cfg.to_str().unwrap(),
         Some(true),
-        Some("content-hash".into()),
+        None,
     );
-    // B4: content_hash None + tree_hash Some for MCP semantic path
-    mcp_item.content_hash = None;
+    // planner 会从 path 读 leaf hash；这里仍放 tree_hash 占位满足 source hash 存在性
     mcp_item.tree_hash = Some("t".into());
+    // content_hash 可选：planner 对 MCP 优先 leaf value hash
+    mcp_item.content_hash = None;
     let snap_mcp = snapshot_from(
         vec![sample_target(AgentTarget::Claude)],
         vec![mcp_item.clone()],

@@ -329,7 +329,7 @@ pub async fn apply_user_instruction_plan(
                 .await?;
             return Ok(result);
         }
-        UserInstructionPlanClaim::Claimed(record) => record,
+        UserInstructionPlanClaim::Claimed(record) => *record,
     };
     let stored: StoredUserInstructionPlan = serde_json::from_str(&record.plan_json)?;
     let workspace = inspect_user_instruction_workspace(state).await?;

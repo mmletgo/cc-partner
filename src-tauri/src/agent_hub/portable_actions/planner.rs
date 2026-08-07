@@ -226,16 +226,17 @@ fn build_change(
         _ => {}
     }
 
-    if item.content_hash.is_none() && item.tree_hash.is_none() {
-        if matches!(
+    if item.content_hash.is_none()
+        && item.tree_hash.is_none()
+        && matches!(
             request.action,
             PortableAssetActionKind::Enable
                 | PortableAssetActionKind::Disable
                 | PortableAssetActionKind::Uninstall
                 | PortableAssetActionKind::Adopt
-        ) {
-            blocking.push("PORTABLE_ASSET_ACTION_SOURCE_HASH_MISSING".into());
-        }
+        )
+    {
+        blocking.push("PORTABLE_ASSET_ACTION_SOURCE_HASH_MISSING".into());
     }
 
     if let Some(expected) = request.expected_canonical_revision_id.as_deref() {
@@ -357,13 +358,20 @@ fn build_change(
         blocking.push("PORTABLE_ASSET_ACTION_UNMANAGED_OWNERSHIP_FORBIDDEN".into());
     }
 
+    // MCP expected_source_hash 必须与 config_patch leaf value_content_hash 同域。
+    // Skill/Command content_hash 已是 inventory 语义（Skill=SKILL.md-only）。
+    let expected_source_hash = match item.kind {
+        PortableAssetKind::Mcp => mcp_expected_leaf_hash(item).or_else(|| item.content_hash.clone()),
+        _ => item.content_hash.clone(),
+    };
+
     let change = PortableAssetActionChangeDto {
         inventory_item_id: item.inventory_item_id.clone(),
         target: item.target,
         kind: item.kind,
         path: item.source_path.clone(),
         operation,
-        expected_source_hash: item.content_hash.clone(),
+        expected_source_hash,
         expected_tree_hash: item.tree_hash.clone(),
         expected_canonical_revision_id: request
             .expected_canonical_revision_id
@@ -376,4 +384,25 @@ fn build_change(
         warnings: item.warnings.clone(),
     };
     Ok((change, blocking))
+}
+
+/// 读取 MCP leaf 的 value_content_hash（与 apply CAS 对齐）。
+///
+/// Business Logic: planner 必须绑定语义 leaf，而非整文件 raw sha。
+/// Code Logic: 读 source_path JSONC/JSON 的 mcpServers[id] → value_content_hash。
+fn mcp_expected_leaf_hash(item: &PortableInventoryItemDto) -> Option<String> {
+    use crate::agent_hub::config_patch::{
+        value_content_hash, JsoncConfigPatcher, SemanticConfigPatcher,
+    };
+    let path = item.source_path.as_deref()?;
+    let bytes = std::fs::read(path).ok()?;
+    let patcher = JsoncConfigPatcher;
+    let owned = patcher
+        .inspect(&bytes, &["mcpServers".into(), item.native_id.clone()])
+        .ok()?;
+    if owned.present {
+        Some(value_content_hash(&owned.value))
+    } else {
+        None
+    }
 }

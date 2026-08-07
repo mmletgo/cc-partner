@@ -1934,6 +1934,10 @@ pub fn portable_set_command_enabled(
 }
 
 /// 稳定 content/tree hash（文件或目录），供 executor changed-source 校验与测试。
+///
+/// 注：portable action 源 hash 已统一到 inventory 域（Skill=SKILL.md-only）；
+/// 本 helper 仍保留给需要整树 walk 的非 portable 路径。
+#[allow(dead_code)]
 pub fn portable_content_hash_path(path: &Path) -> Result<String, AppError> {
     use crate::agent_hub::object_store::sha256_hex;
     use sha2::{Digest, Sha256};
@@ -1959,6 +1963,7 @@ pub fn portable_content_hash_path(path: &Path) -> Result<String, AppError> {
 
 /// 测试串行锁（供 portable_actions executor 测试复用）。
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn claude_assets_env_lock_for_tests() -> std::sync::MutexGuard<'static, ()> {
     claude_assets_env_lock()
 }

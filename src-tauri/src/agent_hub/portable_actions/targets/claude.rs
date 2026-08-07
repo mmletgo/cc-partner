@@ -17,6 +17,9 @@ use crate::agent_hub::portable_actions::models::{
     PortableAssetBackupPolicy,
 };
 use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
+use crate::agent_hub::config_patch::value_content_hash;
+use crate::agent_hub::object_store::sha256_hex;
+use crate::agent_hub::targets::portable::hash_skill_directory;
 use crate::claude_code_assets::{
     portable_backup_path, portable_claude_roots, portable_move_path, portable_remove_path,
     portable_remove_tree_with_backup, portable_set_command_enabled, portable_set_tree_enabled,
@@ -25,6 +28,48 @@ use crate::claude_code_assets::{
 use crate::error::AppError;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// 与 inventory `content_hash` 对齐的源内容 hash（Skill=SKILL.md-only；文件=整文件字节）。
+///
+/// Business Logic: planner 与 apply recheck 必须同一 hash 域，禁止目录 walk hash 误伤 Skill。
+/// Code Logic: Skill 目录走 `hash_skill_directory` 的 skill_md hash；其余文件 sha256 全文。
+fn inventory_content_hash_for_path(kind: PortableAssetKind, path: &Path) -> Result<String, AppError> {
+    match kind {
+        PortableAssetKind::Skill => {
+            let dir = if path.is_dir() {
+                path.to_path_buf()
+            } else {
+                path.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| path.to_path_buf())
+            };
+            let (skill_hash, _, _, _) = hash_skill_directory(&dir)?;
+            Ok(skill_hash)
+        }
+        PortableAssetKind::Command | PortableAssetKind::Plugin => {
+            if path.is_file() {
+                Ok(sha256_hex(&fs::read(path)?))
+            } else if path.is_dir() {
+                // Plugin/command tree：inventory 对 plugin 用 root material；这里至少对文件一致
+                Ok(sha256_hex(path.display().to_string().as_bytes()))
+            } else {
+                Err(AppError::not_found("PORTABLE_ASSET_ACTION_SOURCE_MISSING"))
+            }
+        }
+        PortableAssetKind::Mcp => {
+            // MCP expected_source_hash 存 leaf value_content_hash，不走路径整文件 hash
+            Err(AppError::validation(
+                "PORTABLE_ASSET_ACTION_MCP_HASH_VIA_LEAF",
+            ))
+        }
+    }
+}
+
+/// 读取 MCP leaf 的 CAS hash（与 config_patch `value_content_hash` 一致）。
+fn mcp_leaf_value_hash(config_bytes: &[u8], server_id: &str) -> Result<Option<String>, AppError> {
+    let current = read_mcp_value(config_bytes, server_id)?;
+    Ok(current.as_ref().map(value_content_hash))
+}
 
 /// Claude target executor。
 pub struct ClaudeTargetExecutor;
@@ -48,17 +93,20 @@ impl TargetActionExecutor for ClaudeTargetExecutor {
             });
         }
 
-        // changed-source fail closed（mutation 前）
-        if let Some(expected) = change.expected_source_hash.as_deref() {
-            if let Some(path) = change.path.as_deref() {
-                let p = Path::new(path);
-                if p.exists() {
-                    if let Ok(actual) = crate::claude_code_assets::portable_content_hash_path(p) {
-                        if actual != expected {
-                            return Ok(TargetActionRawOutcome::Failed {
-                                code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
-                                message: "source content changed since preview".into(),
-                            });
+        // changed-source fail closed（mutation 前）：与 inventory content_hash 同一 hash 域
+        // MCP 的 expected_source_hash 是 leaf value hash，在 execute_mcp 内 CAS 校验。
+        if change.kind != PortableAssetKind::Mcp {
+            if let Some(expected) = change.expected_source_hash.as_deref() {
+                if let Some(path) = change.path.as_deref() {
+                    let p = Path::new(path);
+                    if p.exists() {
+                        if let Ok(actual) = inventory_content_hash_for_path(change.kind, p) {
+                            if actual != expected {
+                                return Ok(TargetActionRawOutcome::Failed {
+                                    code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
+                                    message: "source content changed since preview".into(),
+                                });
+                            }
                         }
                     }
                 }
@@ -197,10 +245,13 @@ fn execute_skill(
             }
             Ok(TargetActionRawOutcome::Applied)
         }
-        PortableAssetActionKind::Adopt => Ok(TargetActionRawOutcome::Applied),
+        PortableAssetActionKind::Adopt => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
+            message: "explicit adopt ownership write is not wired; refuse fake success".into(),
+        }),
         PortableAssetActionKind::InstallToSourceTarget => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
-            message: "installToSourceTarget deferred".into(),
+            message: "installToSourceTarget not wired; refuse fake success".into(),
         }),
     }
 }
@@ -246,10 +297,13 @@ fn execute_command(
             )?;
             Ok(TargetActionRawOutcome::Applied)
         }
-        PortableAssetActionKind::Adopt => Ok(TargetActionRawOutcome::Applied),
+        PortableAssetActionKind::Adopt => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
+            message: "explicit adopt ownership write is not wired; refuse fake success".into(),
+        }),
         PortableAssetActionKind::InstallToSourceTarget => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
-            message: "installToSourceTarget deferred".into(),
+            message: "installToSourceTarget not wired; refuse fake success".into(),
         }),
     }
 }
@@ -289,10 +343,16 @@ fn execute_mcp(
                     message: "disabled MCP snapshot missing".into(),
                 });
             };
+            // enable 绑定「当前 leaf 不存在」CAS：存在且 hash 变化则 conflict
+            let current_hash = mcp_leaf_value_hash(&bytes, &id)?;
+            if current_hash.is_some() {
+                return Ok(TargetActionRawOutcome::Skipped);
+            }
             let patches = [ManagedConfigPatch {
                 owner_id: format!("portable:{id}"),
                 path: vec!["mcpServers".into(), id.clone()],
                 value: Some(value),
+                // None means expect absence under check_cas semantics when combined with present=false
                 expected_base_hash: None,
             }];
             let prepared =
@@ -315,6 +375,15 @@ fn execute_mcp(
             let Some(cfg) = current else {
                 return Ok(TargetActionRawOutcome::Skipped);
             };
+            let leaf_hash = value_content_hash(&cfg);
+            if let Some(expected) = change.expected_source_hash.as_deref() {
+                if expected != leaf_hash {
+                    return Ok(TargetActionRawOutcome::Failed {
+                        code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
+                        message: "mcp leaf hash changed since preview".into(),
+                    });
+                }
+            }
             fs::create_dir_all(&roots.disabled_mcp_dir)?;
             let disabled = roots.disabled_mcp_dir.join(format!("{id}.json"));
             if disabled.exists() {
@@ -326,7 +395,7 @@ fn execute_mcp(
                 owner_id: format!("portable:{id}"),
                 path: vec!["mcpServers".into(), id.clone()],
                 value: None,
-                expected_base_hash: change.expected_source_hash.clone(),
+                expected_base_hash: Some(leaf_hash),
             }];
             let prepared =
                 apply_config_patch_atomically(&JsoncConfigPatcher, &config_path, &patches)?;
@@ -349,7 +418,17 @@ fn execute_mcp(
             }
         }
         PortableAssetActionKind::Uninstall => {
-            if let Ok(Some(cfg)) = read_mcp_value(&bytes, &id) {
+            let current = read_mcp_value(&bytes, &id)?;
+            if let Some(cfg) = current.as_ref() {
+                let leaf_hash = value_content_hash(cfg);
+                if let Some(expected) = change.expected_source_hash.as_deref() {
+                    if expected != leaf_hash {
+                        return Ok(TargetActionRawOutcome::Failed {
+                            code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
+                            message: "mcp leaf hash changed since preview".into(),
+                        });
+                    }
+                }
                 fs::create_dir_all(&roots.backup_root)?;
                 let dst = roots
                     .backup_root
@@ -359,13 +438,18 @@ fn execute_mcp(
                 if let Some(parent) = dst.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                fs::write(dst, serde_json::to_vec_pretty(&cfg)?)?;
+                fs::write(dst, serde_json::to_vec_pretty(cfg)?)?;
             }
+            let expected = change.expected_source_hash.clone().or_else(|| {
+                current
+                    .as_ref()
+                    .map(value_content_hash)
+            });
             let patches = [ManagedConfigPatch {
                 owner_id: format!("portable:{id}"),
                 path: vec!["mcpServers".into(), id.clone()],
                 value: None,
-                expected_base_hash: None,
+                expected_base_hash: expected,
             }];
             let prepared =
                 apply_config_patch_atomically(&JsoncConfigPatcher, &config_path, &patches)?;
@@ -382,10 +466,13 @@ fn execute_mcp(
                 })
             }
         }
-        PortableAssetActionKind::Adopt => Ok(TargetActionRawOutcome::Applied),
+        PortableAssetActionKind::Adopt => Ok(TargetActionRawOutcome::Failed {
+            code: "PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED".into(),
+            message: "explicit adopt ownership write is not wired; refuse fake success".into(),
+        }),
         PortableAssetActionKind::InstallToSourceTarget => Ok(TargetActionRawOutcome::Failed {
             code: "PORTABLE_ASSET_ACTION_INSTALL_NOT_WIRED".into(),
-            message: "installToSourceTarget deferred".into(),
+            message: "installToSourceTarget not wired; refuse fake success".into(),
         }),
     }
 }

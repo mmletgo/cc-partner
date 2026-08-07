@@ -18,7 +18,8 @@ use crate::agent_hub::models::{
     AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget, AssetKind, AssetPolicy,
     DesiredPresence, LogicalAsset, Materialization, MaterializationStatus, NewLogicalAsset,
     NewMaterialization, NewProjectionJob, NewRevision, NewScopeNode, NewTargetBinding,
-    PortableActionClaim, PortableAssetActionPlanRecord, ProjectionJob, ProjectionJobState,
+    PortableActionClaim, PortableAssetActionPlanRecord, PortablePullClaim, PortablePullPlanRecord,
+    ProjectionJob, ProjectionJobState,
     ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
     ScopeNode, TargetBinding, UserInstructionOwnershipRecord, UserInstructionPlanClaim,
     UserInstructionPlanRecord,
@@ -3003,7 +3004,7 @@ impl AgentHubRepo {
             };
             let record = row_to_user_instruction_plan(&row)?;
             let outcome = if claimed.rows_affected() == 1 {
-                UserInstructionPlanClaim::Claimed(record)
+                UserInstructionPlanClaim::Claimed(Box::new(record))
             } else if record.client_request_id.as_deref() != Some(client_request_id) {
                 return Err(AppError::conflict(
                     "USER_INSTRUCTION_PLAN_CLAIMED_BY_ANOTHER_REQUEST",
@@ -3121,7 +3122,7 @@ impl AgentHubRepo {
     /// 原子 claim portable 资产动作 plan。
     ///
     /// Business Logic: get→write 不能留并发窗口；同 token 同时只有一个执行者；
-    ///     同一 clientRequestId 不得绑定不同 plan。
+    ///     同一 clientRequestId 不得绑定不同 plan；过期 plan fail-closed。
     /// Code Logic: 事务内 CAS client_request_id NULL→id；唯一索引保证跨 plan 冲突。
     pub async fn claim_portable_asset_action_plan(
         &self,
@@ -3150,14 +3151,35 @@ impl AgentHubRepo {
                 }
             }
 
+            // 预读 plan 校验 expiry（仅对尚未 claim 的 plan 拒绝；已 claim 走 replay/pending）
+            if let Some(pre) = sqlx::query(
+                "SELECT plan_token, owner_fingerprint, expires_at, inventory_snapshot_hash,
+                        plan_json, client_request_id, claimed_at, consumed_at, result_json, created_at
+                 FROM agent_hub_portable_asset_action_plans WHERE plan_token = ?",
+            )
+            .bind(plan_token)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                let pre_rec = row_to_portable_asset_action_plan(&pre)?;
+                if pre_rec.client_request_id.is_none() && pre_rec.expires_at.as_str() < now.as_str()
+                {
+                    return Err(AppError::conflict("PORTABLE_ASSET_ACTION_PLAN_EXPIRED"));
+                }
+            } else {
+                return Err(AppError::not_found("PORTABLE_ASSET_ACTION_PLAN_NOT_FOUND"));
+            }
+
             let claimed = sqlx::query(
                 "UPDATE agent_hub_portable_asset_action_plans
                  SET client_request_id = ?, claimed_at = ?
-                 WHERE plan_token = ? AND client_request_id IS NULL AND consumed_at IS NULL",
+                 WHERE plan_token = ? AND client_request_id IS NULL AND consumed_at IS NULL
+                   AND expires_at >= ?",
             )
             .bind(client_request_id)
             .bind(&now)
             .bind(plan_token)
+            .bind(&now)
             .execute(&mut *tx)
             .await;
 
@@ -3188,7 +3210,7 @@ impl AgentHubRepo {
             };
             let record = row_to_portable_asset_action_plan(&row)?;
             let outcome = if claimed.rows_affected() == 1 {
-                PortableActionClaim::Claimed(record)
+                PortableActionClaim::Claimed(Box::new(record))
             } else if record.client_request_id.as_deref() != Some(client_request_id) {
                 return Err(AppError::conflict(
                     "PORTABLE_ASSET_ACTION_PLAN_CLAIMED_BY_ANOTHER_REQUEST",
@@ -3227,6 +3249,203 @@ impl AgentHubRepo {
             if result.rows_affected() != 1 {
                 return Err(AppError::conflict(
                     "PORTABLE_ASSET_ACTION_PLAN_COMPLETE_CONFLICT",
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 插入 portable pull preview plan。
+    pub async fn insert_portable_pull_plan(
+        &self,
+        record: PortablePullPlanRecord,
+    ) -> Result<PortablePullPlanRecord, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO agent_hub_portable_pull_plans (
+                    plan_token, expires_at, remote_inventory_snapshot_hash,
+                    local_inventory_snapshot_hash, plan_json, client_request_id,
+                    claimed_at, consumed_at, result_json, created_at
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            )
+            .bind(&record.plan_token)
+            .bind(&record.expires_at)
+            .bind(&record.remote_inventory_snapshot_hash)
+            .bind(&record.local_inventory_snapshot_hash)
+            .bind(&record.plan_json)
+            .bind(record.client_request_id.as_deref())
+            .bind(record.claimed_at.as_deref())
+            .bind(record.consumed_at.as_deref())
+            .bind(record.result_json.as_deref())
+            .bind(&record.created_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(record)
+        })
+        .await
+    }
+
+    /// 读取 portable pull plan。
+    pub async fn get_portable_pull_plan(
+        &self,
+        plan_token: &str,
+    ) -> Result<Option<PortablePullPlanRecord>, AppError> {
+        let row = sqlx::query(
+            "SELECT plan_token, expires_at, remote_inventory_snapshot_hash,
+                    local_inventory_snapshot_hash, plan_json, client_request_id,
+                    claimed_at, consumed_at, result_json, created_at
+             FROM agent_hub_portable_pull_plans WHERE plan_token = ?",
+        )
+        .bind(plan_token)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_portable_pull_plan).transpose()
+    }
+
+    /// 按 client_request_id 读取 pull plan。
+    pub async fn get_portable_pull_by_request_id(
+        &self,
+        client_request_id: &str,
+    ) -> Result<Option<PortablePullPlanRecord>, AppError> {
+        let row = sqlx::query(
+            "SELECT plan_token, expires_at, remote_inventory_snapshot_hash,
+                    local_inventory_snapshot_hash, plan_json, client_request_id,
+                    claimed_at, consumed_at, result_json, created_at
+             FROM agent_hub_portable_pull_plans WHERE client_request_id = ?
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(client_request_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_portable_pull_plan).transpose()
+    }
+
+    /// 原子 claim portable pull plan（expiry + unique request + CAS）。
+    pub async fn claim_portable_pull_plan(
+        &self,
+        plan_token: &str,
+        client_request_id: &str,
+    ) -> Result<PortablePullClaim, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut tx = self.pool.begin().await?;
+
+            if let Some(existing) = sqlx::query(
+                "SELECT plan_token, expires_at, remote_inventory_snapshot_hash,
+                        local_inventory_snapshot_hash, plan_json, client_request_id,
+                        claimed_at, consumed_at, result_json, created_at
+                 FROM agent_hub_portable_pull_plans WHERE client_request_id = ?",
+            )
+            .bind(client_request_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                let existing_rec = row_to_portable_pull_plan(&existing)?;
+                if existing_rec.plan_token != plan_token {
+                    return Err(AppError::conflict(
+                        "PORTABLE_PULL_REQUEST_BOUND_TO_OTHER_PLAN",
+                    ));
+                }
+            }
+
+            if let Some(pre) = sqlx::query(
+                "SELECT plan_token, expires_at, remote_inventory_snapshot_hash,
+                        local_inventory_snapshot_hash, plan_json, client_request_id,
+                        claimed_at, consumed_at, result_json, created_at
+                 FROM agent_hub_portable_pull_plans WHERE plan_token = ?",
+            )
+            .bind(plan_token)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                let pre_rec = row_to_portable_pull_plan(&pre)?;
+                if pre_rec.client_request_id.is_none() && pre_rec.expires_at.as_str() < now.as_str() {
+                    return Err(AppError::conflict("PORTABLE_PULL_PLAN_EXPIRED"));
+                }
+            } else {
+                return Err(AppError::not_found("PORTABLE_PULL_PLAN_NOT_FOUND"));
+            }
+
+            let claimed = sqlx::query(
+                "UPDATE agent_hub_portable_pull_plans
+                 SET client_request_id = ?, claimed_at = ?
+                 WHERE plan_token = ? AND client_request_id IS NULL AND consumed_at IS NULL
+                   AND expires_at >= ?",
+            )
+            .bind(client_request_id)
+            .bind(&now)
+            .bind(plan_token)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await;
+
+            let claimed = match claimed {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("UNIQUE") || msg.contains("unique") {
+                        return Err(AppError::conflict(
+                            "PORTABLE_PULL_REQUEST_BOUND_TO_OTHER_PLAN",
+                        ));
+                    }
+                    return Err(AppError::from(e));
+                }
+            };
+
+            let row = sqlx::query(
+                "SELECT plan_token, expires_at, remote_inventory_snapshot_hash,
+                        local_inventory_snapshot_hash, plan_json, client_request_id,
+                        claimed_at, consumed_at, result_json, created_at
+                 FROM agent_hub_portable_pull_plans WHERE plan_token = ?",
+            )
+            .bind(plan_token)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(row) = row else {
+                return Err(AppError::not_found("PORTABLE_PULL_PLAN_NOT_FOUND"));
+            };
+            let record = row_to_portable_pull_plan(&row)?;
+            let outcome = if claimed.rows_affected() == 1 {
+                PortablePullClaim::Claimed(Box::new(record))
+            } else if record.client_request_id.as_deref() != Some(client_request_id) {
+                return Err(AppError::conflict(
+                    "PORTABLE_PULL_PLAN_CLAIMED_BY_ANOTHER_REQUEST",
+                ));
+            } else if let Some(result_json) = record.result_json {
+                PortablePullClaim::Replay(result_json)
+            } else {
+                PortablePullClaim::Pending
+            };
+            tx.commit().await?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    /// 完成已 claim 的 portable pull plan 并持久化结果。
+    pub async fn complete_portable_pull_plan(
+        &self,
+        plan_token: &str,
+        client_request_id: &str,
+        result_json: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let result = sqlx::query(
+                "UPDATE agent_hub_portable_pull_plans
+                 SET consumed_at = ?, result_json = ?
+                 WHERE plan_token = ? AND client_request_id = ? AND consumed_at IS NULL",
+            )
+            .bind(&now)
+            .bind(result_json)
+            .bind(plan_token)
+            .bind(client_request_id)
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "PORTABLE_PULL_PLAN_COMPLETE_CONFLICT",
                 ));
             }
             Ok(())
@@ -5424,6 +5643,24 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_portable_asset_action_plans_request
      ON agent_hub_portable_asset_action_plans(client_request_id)
      WHERE client_request_id IS NOT NULL",
+    // Portable Pull plans + clientRequestId ledger（与 action ledger 同语义）
+    "CREATE TABLE IF NOT EXISTS agent_hub_portable_pull_plans (
+        plan_token TEXT PRIMARY KEY,
+        expires_at TEXT NOT NULL,
+        remote_inventory_snapshot_hash TEXT NOT NULL,
+        local_inventory_snapshot_hash TEXT NOT NULL,
+        plan_json TEXT NOT NULL,
+        client_request_id TEXT,
+        claimed_at TEXT,
+        consumed_at TEXT,
+        result_json TEXT,
+        created_at TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_portable_pull_plans_expiry
+     ON agent_hub_portable_pull_plans(expires_at, consumed_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_portable_pull_plans_request
+     ON agent_hub_portable_pull_plans(client_request_id)
+     WHERE client_request_id IS NOT NULL",
     // Gate C Task 4：LAN push 幂等 ledger（sourceDeviceId+clientRequestId 非认证标签）
     "CREATE TABLE IF NOT EXISTS agent_hub_push_requests (
         source_device_id TEXT NOT NULL,
@@ -6108,6 +6345,22 @@ fn row_to_portable_asset_action_plan(
         owner_fingerprint: row.try_get("owner_fingerprint")?,
         expires_at: row.try_get("expires_at")?,
         inventory_snapshot_hash: row.try_get("inventory_snapshot_hash")?,
+        plan_json: row.try_get("plan_json")?,
+        client_request_id: row.try_get("client_request_id")?,
+        claimed_at: row.try_get("claimed_at")?,
+        consumed_at: row.try_get("consumed_at")?,
+        result_json: row.try_get("result_json")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+/// 解析 portable pull plan 行。
+fn row_to_portable_pull_plan(row: &SqliteRow) -> Result<PortablePullPlanRecord, AppError> {
+    Ok(PortablePullPlanRecord {
+        plan_token: row.try_get("plan_token")?,
+        expires_at: row.try_get("expires_at")?,
+        remote_inventory_snapshot_hash: row.try_get("remote_inventory_snapshot_hash")?,
+        local_inventory_snapshot_hash: row.try_get("local_inventory_snapshot_hash")?,
         plan_json: row.try_get("plan_json")?,
         client_request_id: row.try_get("client_request_id")?,
         claimed_at: row.try_get("claimed_at")?,
