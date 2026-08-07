@@ -185,16 +185,16 @@ fn resolve_action_roots(
     let project_claude_root = source.and_then(infer_project_claude_root).ok_or_else(|| {
         AppError::validation("PORTABLE_ASSET_ACTION_PROJECT_ROOT_UNRESOLVED".to_string())
     })?;
-    // Keep hub-portable disabled/backup under data_dir so Disable remains recoverable;
-    // active dirs point at the project `.claude` tree.
+    // Project disable/enable must stay project-scoped. Scanner inventories
+    // `.claude/disabled/{skills,commands}` under project scope; using global
+    // user_roots.disabled_* would promote the asset into user inventory.
+    // Hub data_dir backup_root remains shared for recoverable uninstall only.
     Ok(PortableClaudeRoots {
         skills_dir: project_claude_root.join("skills"),
         commands_dir: project_claude_root.join("commands"),
-        // Project-local disabled still under project for discoverability if present;
-        // primary hub disabled remains on user_roots for enable recovery.
-        disabled_skills_dir: user_roots.disabled_skills_dir.clone(),
-        disabled_commands_dir: user_roots.disabled_commands_dir.clone(),
-        disabled_mcp_dir: user_roots.disabled_mcp_dir.clone(),
+        disabled_skills_dir: project_claude_root.join("disabled").join("skills"),
+        disabled_commands_dir: project_claude_root.join("disabled").join("commands"),
+        disabled_mcp_dir: project_claude_root.join("disabled").join("mcp"),
         backup_root: user_roots.backup_root.clone(),
         config_dir: project_claude_root.clone(),
         // Project MCP lives under project `.mcp.json` when source is that file;
@@ -263,6 +263,8 @@ fn execute_plugin(
 ) -> Result<TargetActionRawOutcome, AppError> {
     let id = native_id(change, pre_item);
     let scope = scope_arg(pre_item);
+    // Claude resolves --scope project from process cwd; fail-closed if unresolved.
+    let cwd = plugin_process_cwd(pre_item, change)?;
     let program = PathBuf::from("claude");
     let args = match ctx.action {
         PortableAssetActionKind::Enable => {
@@ -303,7 +305,11 @@ fn execute_plugin(
             });
         }
     };
-    match ctx.runner.run(&ProcessSpec { program, args }) {
+    match ctx.runner.run(&ProcessSpec {
+        program,
+        args,
+        cwd,
+    }) {
         Ok(out) => Ok(map_process_outcome(out, "claude plugin")),
         Err(e) if is_outcome_unknown_error(&e) => Ok(TargetActionRawOutcome::OutcomeUnknown {
             code: "PORTABLE_ASSET_ACTION_SPAWN_UNKNOWN".into(),
@@ -314,6 +320,42 @@ fn execute_plugin(
             message: e.to_string(),
         }),
     }
+}
+
+/// Resolve cwd for Claude plugin CLI.
+///
+/// Business Logic: `--scope project` is relative to the observed project root.
+/// Code Logic: project inventory → project root from source_path; user scope → None.
+fn plugin_process_cwd(
+    pre_item: Option<&PortableInventoryItemDto>,
+    change: &PortableAssetActionChangeDto,
+) -> Result<Option<PathBuf>, AppError> {
+    let Some(item) = pre_item else {
+        return Ok(None);
+    };
+    if item.scope_kind != crate::agent_hub::models::ScopeKind::Project {
+        return Ok(None);
+    }
+    if !item.project_opted_in {
+        return Err(AppError::validation(
+            "PORTABLE_ASSET_ACTION_PROJECT_NOT_OPTED_IN".to_string(),
+        ));
+    }
+    let source = item
+        .source_path
+        .as_deref()
+        .or(change.path.as_deref())
+        .map(Path::new);
+    let project_claude = source.and_then(infer_project_claude_root).ok_or_else(|| {
+        AppError::validation("PORTABLE_ASSET_ACTION_PROJECT_ROOT_UNRESOLVED".to_string())
+    })?;
+    let project_root = project_claude
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            AppError::validation("PORTABLE_ASSET_ACTION_PROJECT_ROOT_UNRESOLVED".to_string())
+        })?;
+    Ok(Some(project_root))
 }
 
 fn execute_skill(
@@ -718,8 +760,12 @@ mod tests {
         let roots = resolve_action_roots(&user_roots, Some(&item), &change).unwrap();
         assert_eq!(roots.skills_dir, project_claude.join("skills"));
         assert_ne!(roots.skills_dir, user_roots.skills_dir);
-        // hub disabled stays under data_dir for recovery
-        assert_eq!(roots.disabled_skills_dir, user_roots.disabled_skills_dir);
+        // Project disable stays under project .claude/disabled — never promote to user.
+        assert_eq!(
+            roots.disabled_skills_dir,
+            project_claude.join("disabled").join("skills")
+        );
+        assert_ne!(roots.disabled_skills_dir, user_roots.disabled_skills_dir);
     }
 
     #[test]
@@ -756,5 +802,168 @@ mod tests {
         let p = PathBuf::from("/work/demo/.claude/skills/foo/SKILL.md");
         let root = infer_project_claude_root(&p).unwrap();
         assert_eq!(root, PathBuf::from("/work/demo/.claude"));
+    }
+
+    /// Business Logic: project skill Disable must stay under project .claude/disabled;
+    /// Enable restores the same project skills path (never user hub disabled).
+    #[test]
+    fn project_skill_disable_enable_stays_project_scoped() {
+        use crate::agent_hub::packages::activator::FakeProcessRunner;
+        use crate::agent_hub::portable_actions::targets::{
+            TargetActionContext, TargetActionRawOutcome,
+        };
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let user_claude = tmp.path().join("user-claude");
+        let data = tmp.path().join("data");
+        let project = tmp.path().join("repo");
+        let project_claude = project.join(".claude");
+        let skill = project_claude.join("skills/proj-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "# project skill\n").unwrap();
+        std::fs::create_dir_all(&user_claude).unwrap();
+
+        let item = sample_item(ScopeKind::Project, skill.to_str().unwrap(), true);
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: item.inventory_item_id.clone(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Skill,
+            path: item.source_path.clone(),
+            operation: PortableAssetPlanOperation::Disable,
+            expected_source_hash: None,
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::RecoverableBeforeDelete,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let runner = Arc::new(FakeProcessRunner::new());
+        let disable_ctx = TargetActionContext {
+            action: PortableAssetActionKind::Disable,
+            keep_data: false,
+            runner: runner.clone(),
+            claude_config_dir: Some(user_claude.clone()),
+            data_dir: Some(data.clone()),
+        };
+        let out = ClaudeTargetExecutor
+            .execute_change(&disable_ctx, &dummy_plan(), &change, Some(&item))
+            .unwrap();
+        assert!(matches!(out, TargetActionRawOutcome::Applied));
+
+        let disabled = project_claude.join("disabled/skills/proj-skill");
+        assert!(
+            disabled.is_dir(),
+            "disabled skill should live under project .claude/disabled"
+        );
+        assert!(!skill.exists(), "active project skill path should be empty");
+        let user_disabled = data.join("claude-assets/disabled/skills/proj-skill");
+        assert!(
+            !user_disabled.exists(),
+            "must not promote project disable into user hub disabled"
+        );
+
+        let enable_change = PortableAssetActionChangeDto {
+            operation: PortableAssetPlanOperation::Enable,
+            path: Some(disabled.to_string_lossy().into_owned()),
+            ..change.clone()
+        };
+        let mut disabled_item = item.clone();
+        disabled_item.source_path = Some(disabled.to_string_lossy().into_owned());
+        disabled_item.actual_enabled = Some(false);
+        let enable_ctx = TargetActionContext {
+            action: PortableAssetActionKind::Enable,
+            keep_data: false,
+            runner: runner.clone(),
+            claude_config_dir: Some(user_claude.clone()),
+            data_dir: Some(data.clone()),
+        };
+        let out = ClaudeTargetExecutor
+            .execute_change(
+                &enable_ctx,
+                &dummy_plan(),
+                &enable_change,
+                Some(&disabled_item),
+            )
+            .unwrap();
+        assert!(matches!(out, TargetActionRawOutcome::Applied));
+        assert!(
+            skill.is_dir(),
+            "enable must restore under project skills path"
+        );
+        assert!(
+            skill.join("SKILL.md").is_file(),
+            "project skill content restored"
+        );
+        assert!(!disabled.exists());
+    }
+
+    /// Business Logic: project-scope plugin CLI must run with project root cwd.
+    #[test]
+    fn project_plugin_cli_sets_process_cwd_to_project_root() {
+        use crate::agent_hub::packages::activator::FakeProcessRunner;
+        use crate::agent_hub::portable_actions::targets::TargetActionContext;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("my-repo");
+        let plugin_path = project.join(".claude/plugins/demo");
+        std::fs::create_dir_all(&plugin_path).unwrap();
+        let mut item = sample_item(ScopeKind::Project, plugin_path.to_str().unwrap(), true);
+        item.kind = PortableAssetKind::Plugin;
+        item.native_id = "demo@local".into();
+        item.display_name = "demo".into();
+        item.inventory_item_id = "id-proj-plugin".into();
+
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: item.inventory_item_id.clone(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Plugin,
+            path: item.source_path.clone(),
+            operation: PortableAssetPlanOperation::Disable,
+            expected_source_hash: None,
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::None,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_ok("ok");
+        let ctx = TargetActionContext {
+            action: PortableAssetActionKind::Disable,
+            keep_data: false,
+            runner: runner.clone(),
+            claude_config_dir: None,
+            data_dir: None,
+        };
+        ClaudeTargetExecutor
+            .execute_change(&ctx, &dummy_plan(), &change, Some(&item))
+            .unwrap();
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].cwd.as_ref().map(|p| p.as_path()),
+            Some(project.as_path())
+        );
+        let scope_idx = calls[0].args.iter().position(|a| a == "--scope").unwrap();
+        assert_eq!(calls[0].args[scope_idx + 1], "project");
+    }
+
+    fn dummy_plan() -> PortableAssetActionPlanDto {
+        PortableAssetActionPlanDto {
+            plan_token: "tok".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            action: PortableAssetActionKind::Disable,
+            inventory_snapshot_hash: "h".into(),
+            keep_data: false,
+            conflict_policy: crate::agent_hub::portable_actions::models::PortableAssetConflictPolicy::SkipExisting,
+            changes: vec![],
+            blocking_reasons: vec![],
+        }
     }
 }

@@ -129,6 +129,8 @@ pub struct ProcessSpec {
     pub program: PathBuf,
     /// args
     pub args: Vec<String>,
+    /// optional working directory (project-scope Claude plugin CLI needs project root)
+    pub cwd: Option<PathBuf>,
 }
 
 /// 进程输出。
@@ -427,6 +429,7 @@ impl ManagedPackageActivator for ClaudePackageActivator {
             let out = self.runner.run(&ProcessSpec {
                 program: cmd.program.clone(),
                 args: cmd.args.clone(),
+                cwd: None,
             })?;
             run += 1;
             if out.code != 0 {
@@ -459,6 +462,7 @@ impl ManagedPackageActivator for ClaudePackageActivator {
             let out = self.runner.run(&ProcessSpec {
                 program: cmd.program,
                 args: cmd.args,
+                cwd: None,
             })?;
             truncate(&out.stdout, 512)
         } else {

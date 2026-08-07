@@ -80,18 +80,18 @@ impl ProcessRunner for RealProcessRunner {
         &self,
         spec: &crate::agent_hub::packages::activator::ProcessSpec,
     ) -> Result<crate::agent_hub::packages::activator::ProcessOutcome, AppError> {
-        let output = std::process::Command::new(&spec.program)
-            .args(&spec.args)
-            .output()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound
-                    || e.to_string().contains("No such file")
-                {
-                    AppError::unavailable(format!("spawn failed: {e}"))
-                } else {
-                    AppError::generic(format!("process error: {e}"))
-                }
-            })?;
+        let mut cmd = std::process::Command::new(&spec.program);
+        cmd.args(&spec.args);
+        if let Some(cwd) = spec.cwd.as_ref() {
+            cmd.current_dir(cwd);
+        }
+        let output = cmd.output().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound || e.to_string().contains("No such file") {
+                AppError::unavailable(format!("spawn failed: {e}"))
+            } else {
+                AppError::generic(format!("process error: {e}"))
+            }
+        })?;
         Ok(crate::agent_hub::packages::activator::ProcessOutcome {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

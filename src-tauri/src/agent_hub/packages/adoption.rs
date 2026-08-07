@@ -1551,6 +1551,7 @@ fn apply_plan_with_runner(
         let out = runner.run(&ProcessSpec {
             program: cmd.program.clone(),
             args: cmd.args.clone(),
+            cwd: None,
         })?;
         n += 1;
         if out.code != 0 {
@@ -1624,6 +1625,7 @@ fn post_activate_discovery_gate(
                     .run(&ProcessSpec {
                         program: cmd.program,
                         args: cmd.args,
+                        cwd: None,
                     })
                     .map_err(|e| format!("{e}"))?;
                 let summary = out.stdout;

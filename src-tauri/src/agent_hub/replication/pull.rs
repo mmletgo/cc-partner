@@ -140,6 +140,9 @@ pub struct PortablePullChangeDto {
     pub kind: PortableAssetKind,
     pub native_id: String,
     pub display_name: String,
+    /// Resolved destination scope identity (user / project:<id>); required for conflict + rescan.
+    #[serde(default)]
+    pub scope_id: String,
     pub install_mode: PortablePullInstallMode,
     pub conflict: bool,
     pub legacy_lossy: bool,
@@ -430,6 +433,156 @@ fn destination_mutation_capability(
         .map(|t| t.mutation_capability)
         // 无 target 事实 → 诚实 fail-closed（不得假 Supported）
         .unwrap_or(PortableInventoryMutationCapability::Blocked)
+}
+
+/// Resolve conflict/rescan scope identity for a local inventory item.
+///
+/// Business Logic: user vs project same nativeId are distinct assets.
+/// Code Logic: prefer non-empty scope_id; else project:<id> / user.
+fn resolve_inventory_scope_id(item: &PortableInventoryItemDto) -> String {
+    let trimmed = item.scope_id.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    if let Some(pid) = item.project_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("project:{pid}");
+    }
+    "user".to_string()
+}
+
+/// Resolve conflict/rescan scope identity for a remote inventory item.
+fn resolve_remote_scope_id(item: &RemotePortableInventoryItemDto) -> String {
+    let trimmed = item.scope_id.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    if let Some(pid) = item.project_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("project:{pid}");
+    }
+    "user".to_string()
+}
+
+/// Whether inventory contains target+kind+nativeId under the resolved scope.
+fn inventory_has_scoped_item(
+    snap: &PortableInventorySnapshotDto,
+    target: AgentTarget,
+    kind: PortableAssetKind,
+    native_id: &str,
+    scope_id: &str,
+) -> bool {
+    let want = scope_id.trim();
+    snap.items.iter().any(|i| {
+        i.target == target
+            && i.kind == kind
+            && i.native_id == native_id
+            && resolve_inventory_scope_id(i) == want
+    })
+}
+
+/// Materialize a CAS tree into a fresh temp dir under parent, then atomically replace `dest`.
+///
+/// Business Logic: replaceAfterPreview must not leave stale files from the old tree.
+/// Code Logic: write into `.cc-partner-pull-staging-*`, restore executable bits, rename over dest.
+async fn materialize_tree_atomic_replace(
+    store: &ObjectStore,
+    dest: &Path,
+    manifest: &crate::agent_hub::object_store::TreeManifest,
+) -> Result<(), AppError> {
+    let parent = dest.parent().ok_or_else(|| {
+        AppError::validation("PORTABLE_PULL_INSTALL_DEST_INVALID".to_string())
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(
+        ".cc-partner-pull-staging-{}",
+        Uuid::now_v7()
+    ));
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    let cleanup = |path: &Path| {
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    };
+    if let Err(e) = materialize_tree_into(store, &staging, manifest).await {
+        cleanup(&staging);
+        return Err(e);
+    }
+    // Replace dest: move old aside then rename staging → dest; restore old on failure.
+    let backup = if dest.exists() {
+        let b = parent.join(format!(
+            ".cc-partner-pull-backup-{}",
+            Uuid::now_v7()
+        ));
+        if let Err(e) = std::fs::rename(dest, &b) {
+            cleanup(&staging);
+            return Err(AppError::from(e));
+        }
+        Some(b)
+    } else {
+        None
+    };
+    if let Err(e) = std::fs::rename(&staging, dest) {
+        cleanup(&staging);
+        if let Some(b) = backup.as_ref() {
+            let _ = std::fs::rename(b, dest);
+        }
+        return Err(AppError::from(e));
+    }
+    if let Some(b) = backup {
+        let _ = std::fs::remove_dir_all(b);
+    }
+    Ok(())
+}
+
+/// Write tree entries under `dir` (must be empty/new), restoring executable bits.
+async fn materialize_tree_into(
+    store: &ObjectStore,
+    dir: &Path,
+    manifest: &crate::agent_hub::object_store::TreeManifest,
+) -> Result<(), AppError> {
+    std::fs::create_dir_all(dir)?;
+    for entry in &manifest.entries {
+        let dest = safe_tree_dest(dir, &entry.path)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match entry.entry_type {
+            TreeEntryType::File => {
+                let blob = store.get_blob(&entry.blob_hash).await?;
+                std::fs::write(&dest, blob)?;
+                apply_executable_bit(&dest, entry.executable)?;
+            }
+            TreeEntryType::Symlink => {
+                // 不跟随外链；仅跳过
+                let _ = entry;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Restore Unix +x from TreeManifest.executable; no-op on non-Unix.
+fn apply_executable_bit(path: &Path, executable: bool) -> Result<(), AppError> {
+    if !executable {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path)?;
+        let mut perms = meta.permissions();
+        let mode = perms.mode();
+        // Preserve existing bits; ensure owner/group/other execute when any read is set,
+        // but at minimum owner +x (0o111).
+        perms.set_mode(mode | 0o111);
+        std::fs::set_permissions(path, perms)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// MCP 原生 leaf（无 Hub DTO 字段 key/transport/toolAllow）。
@@ -831,13 +984,24 @@ pub async fn preview_portable_pull(
     }
 
     let local = inspect_portable_inventory(state).await?;
-    let local_by_native: BTreeMap<
-        (AgentTarget, PortableAssetKind, String),
+    // Conflict identity includes resolved scope — user + project same nativeId are distinct.
+    let local_by_identity: BTreeMap<
+        (AgentTarget, PortableAssetKind, String, String),
         &PortableInventoryItemDto,
     > = local
         .items
         .iter()
-        .map(|i| ((i.target, i.kind, i.native_id.clone()), i))
+        .map(|i| {
+            (
+                (
+                    i.target,
+                    i.kind,
+                    i.native_id.clone(),
+                    resolve_inventory_scope_id(i),
+                ),
+                i,
+            )
+        })
         .collect();
 
     let mut changes = Vec::new();
@@ -850,7 +1014,9 @@ pub async fn preview_portable_pull(
     for rem in &remote_selected {
         let mut item_blocking = Vec::new();
         let mut warnings = rem.warnings.clone();
-        let existing = local_by_native.get(&(rem.target, rem.kind, rem.native_id.clone()));
+        let rem_scope = resolve_remote_scope_id(rem);
+        let existing =
+            local_by_identity.get(&(rem.target, rem.kind, rem.native_id.clone(), rem_scope.clone()));
         let unmapped_project = rem.project_id.is_some() && !rem.project_opted_in;
         let local_project_opted = rem.project_id.as_ref().map(|pid| {
             local
@@ -921,6 +1087,7 @@ pub async fn preview_portable_pull(
             kind: rem.kind,
             native_id: rem.native_id.clone(),
             display_name: rem.display_name.clone(),
+            scope_id: rem_scope,
             install_mode,
             conflict: existing.is_some(),
             legacy_lossy,
@@ -1268,12 +1435,15 @@ async fn execute_claimed_pull(
             continue;
         }
         if change.install_mode == PortablePullInstallMode::SkipExisting {
-            // 写时再次确认本地仍存在，避免 preview 后被删仍 skip
-            let still = local_before.items.iter().any(|i| {
-                i.target == stored.public.destination_target
-                    && i.kind == change.kind
-                    && i.native_id == change.native_id
-            });
+            // 写时再次确认本地仍存在（含 scope），避免 preview 后被删仍 skip /
+            // 或被另一 scope 同 nativeId 假命中。
+            let still = inventory_has_scoped_item(
+                &local_before,
+                stored.public.destination_target,
+                change.kind,
+                &change.native_id,
+                &change.scope_id,
+            );
             if still {
                 items.push(PortablePullItemResultDto {
                     inventory_item_id: change.inventory_item_id.clone(),
@@ -1332,11 +1502,13 @@ async fn execute_claimed_pull(
                 match install_change(state, &store, &selection, change).await {
                     Ok(()) => {
                         let post = inspect_portable_inventory(state).await?;
-                        let observed = post.items.iter().any(|i| {
-                            i.target == stored.public.destination_target
-                                && i.kind == change.kind
-                                && i.native_id == change.native_id
-                        });
+                        let observed = inventory_has_scoped_item(
+                            &post,
+                            stored.public.destination_target,
+                            change.kind,
+                            &change.native_id,
+                            &change.scope_id,
+                        );
                         if observed {
                             items.push(PortablePullItemResultDto {
                                 inventory_item_id: change.inventory_item_id.clone(),
@@ -1440,13 +1612,15 @@ async fn execute_claimed_pull(
 
         match install_change(state, &store, &selection, change).await {
             Ok(()) => {
-                // post-install rescan gate
+                // post-install rescan gate — same scope identity as conflict map
                 let post = inspect_portable_inventory(state).await?;
-                let observed = post.items.iter().any(|i| {
-                    i.target == stored.public.destination_target
-                        && i.kind == change.kind
-                        && i.native_id == change.native_id
-                });
+                let observed = inventory_has_scoped_item(
+                    &post,
+                    stored.public.destination_target,
+                    change.kind,
+                    &change.native_id,
+                    &change.scope_id,
+                );
                 if observed {
                     items.push(PortablePullItemResultDto {
                         inventory_item_id: change.inventory_item_id.clone(),
@@ -1862,23 +2036,9 @@ async fn install_payload_to_target(
             if let Ok(payload) = from_canonical_bytes(&bytes) {
                 if let PortableAssetPayload::Skill(skill) = payload {
                     if let Ok(manifest) = store.get_tree(&skill.tree_manifest_hash).await {
-                        std::fs::create_dir_all(&dir)?;
-                        for entry in &manifest.entries {
-                            let dest = safe_tree_dest(&dir, &entry.path)?;
-                            if let Some(parent) = dest.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                            match entry.entry_type {
-                                TreeEntryType::File => {
-                                    let blob = store.get_blob(&entry.blob_hash).await?;
-                                    std::fs::write(&dest, blob)?;
-                                }
-                                TreeEntryType::Symlink => {
-                                    // 不跟随外链；仅写文本占位失败则跳过
-                                    let _ = entry;
-                                }
-                            }
-                        }
+                        // Atomic replace: materialize to temp then rename over dest so
+                        // replaceAfterPreview does not keep stale files from the old tree.
+                        materialize_tree_atomic_replace(store, &dir, &manifest).await?;
                         // 若树未含 SKILL.md，至少写 frontmatter（fail-closed 再检查）
                         if !dir.join("SKILL.md").exists() {
                             return Err(AppError::validation(
@@ -1920,17 +2080,7 @@ async fn install_payload_to_target(
                             "PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE:{tree_hash}"
                         ))
                     })?;
-                    std::fs::create_dir_all(&dir)?;
-                    for entry in &manifest.entries {
-                        let dest = safe_tree_dest(&dir, &entry.path)?;
-                        if let Some(parent) = dest.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        if matches!(entry.entry_type, TreeEntryType::File) {
-                            let blob = store.get_blob(&entry.blob_hash).await?;
-                            std::fs::write(&dest, blob)?;
-                        }
-                    }
+                    materialize_tree_atomic_replace(store, &dir, &manifest).await?;
                     return Ok(());
                 }
                 // 旧 path+hash-only 清单：fail-closed，绝不当 plugin.json 假成功
@@ -2621,5 +2771,157 @@ mod tests {
         );
         let err = staging_insert("huge".into(), huge).unwrap_err();
         assert!(err.to_string().contains("PORTABLE_PULL_STAGING_LIMIT"));
+    }
+
+    /// Business Logic: user + project same nativeId must not collapse for skip/conflict.
+    #[test]
+    fn conflict_and_rescan_identity_includes_scope() {
+        let mut user = sample_local_item(AgentTarget::Claude, "shared");
+        user.scope_id = "user".into();
+        user.scope_kind = ScopeKind::User;
+        user.project_id = None;
+
+        let mut project = sample_local_item(AgentTarget::Claude, "shared");
+        project.inventory_item_id = "id-shared-project".into();
+        project.scope_id = "project:hub-1".into();
+        project.scope_kind = ScopeKind::Project;
+        project.project_id = Some("hub-1".into());
+        project.source_path = Some("/repo/.claude/commands/shared.md".into());
+
+        let snap = PortableInventorySnapshotDto {
+            inventory_snapshot_hash: "h-scope".into(),
+            refreshed_at: "2026-08-08T00:00:00Z".into(),
+            stale: false,
+            targets: vec![],
+            items: vec![user, project],
+        };
+
+        // Same nativeId under user scope hits user only
+        assert!(inventory_has_scoped_item(
+            &snap,
+            AgentTarget::Claude,
+            PortableAssetKind::Command,
+            "shared",
+            "user",
+        ));
+        // Project scope identity is separate — must not false-skip/false-succeed
+        assert!(inventory_has_scoped_item(
+            &snap,
+            AgentTarget::Claude,
+            PortableAssetKind::Command,
+            "shared",
+            "project:hub-1",
+        ));
+        assert!(!inventory_has_scoped_item(
+            &snap,
+            AgentTarget::Claude,
+            PortableAssetKind::Command,
+            "shared",
+            "project:other",
+        ));
+
+        // Map key includes scope so user+project coexist
+        let map: BTreeMap<(AgentTarget, PortableAssetKind, String, String), &PortableInventoryItemDto> =
+            snap.items
+                .iter()
+                .map(|i| {
+                    (
+                        (
+                            i.target,
+                            i.kind,
+                            i.native_id.clone(),
+                            resolve_inventory_scope_id(i),
+                        ),
+                        i,
+                    )
+                })
+                .collect();
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key(&(
+            AgentTarget::Claude,
+            PortableAssetKind::Command,
+            "shared".into(),
+            "user".into()
+        )));
+        assert!(map.contains_key(&(
+            AgentTarget::Claude,
+            PortableAssetKind::Command,
+            "shared".into(),
+            "project:hub-1".into()
+        )));
+    }
+
+    /// Business Logic: replaceAfterPreview materialization must drop stale files from old tree.
+    #[tokio::test]
+    async fn atomic_tree_replace_removes_stale_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ObjectStore::open(tmp.path().join("objects")).unwrap();
+        let dest = tmp.path().join("skills").join("demo");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), b"old skill\n").unwrap();
+        std::fs::write(dest.join("stale.sh"), b"#!/bin/sh\necho stale\n").unwrap();
+
+        let skill_md = store.put_blob(b"# new skill\n").await.unwrap();
+        let run_sh = store.put_blob(b"#!/bin/sh\necho new\n").await.unwrap();
+        let manifest = crate::agent_hub::object_store::TreeManifest {
+            entries: vec![
+                crate::agent_hub::object_store::TreeEntry {
+                    path: "SKILL.md".into(),
+                    blob_hash: skill_md.hash.clone(),
+                    entry_type: TreeEntryType::File,
+                    executable: false,
+                },
+                crate::agent_hub::object_store::TreeEntry {
+                    path: "scripts/run.sh".into(),
+                    blob_hash: run_sh.hash.clone(),
+                    entry_type: TreeEntryType::File,
+                    executable: true,
+                },
+            ],
+        };
+        materialize_tree_atomic_replace(&store, &dest, &manifest)
+            .await
+            .unwrap();
+
+        assert!(dest.join("SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "# new skill\n"
+        );
+        assert!(
+            !dest.join("stale.sh").exists(),
+            "stale file from old tree must be removed by atomic replace"
+        );
+        assert!(dest.join("scripts/run.sh").is_file());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dest.join("scripts/run.sh"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o111, 0, "executable bit restored from TreeManifest");
+        }
+    }
+
+    #[test]
+    fn apply_executable_bit_sets_unix_x() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let f = tmp.path().join("tool.sh");
+            std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+            let before = std::fs::metadata(&f).unwrap().permissions().mode() & 0o111;
+            assert_eq!(before, 0);
+            apply_executable_bit(&f, true).unwrap();
+            let after = std::fs::metadata(&f).unwrap().permissions().mode() & 0o111;
+            assert_ne!(after, 0);
+            apply_executable_bit(&f, false).unwrap();
+            // false is no-op; bit remains
+            let keep = std::fs::metadata(&f).unwrap().permissions().mode() & 0o111;
+            assert_ne!(keep, 0);
+        }
     }
 }
