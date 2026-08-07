@@ -52,6 +52,13 @@ use uuid::Uuid;
 /// CAS 分块上限（与 receiver 一致）。
 pub const PORTABLE_PULL_MAX_CHUNK_BYTES: usize = AGENT_HUB_MAX_CHUNK_BYTES;
 
+/// Destination object reassembly total budget (matches source selection/staging 64 MiB).
+/// LAN peers are unauthenticated; destination must not trust declared sizes or stream unbounded.
+pub const PORTABLE_PULL_DEST_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Stable error when destination transfer budget / chunk body limits are exceeded.
+pub const PORTABLE_PULL_DEST_TRANSFER_LIMIT: &str = "PORTABLE_PULL_DEST_TRANSFER_LIMIT";
+
 /// preview plan TTL（分钟）。
 pub const PULL_PLAN_TTL_MINUTES: i64 = 15;
 
@@ -1331,6 +1338,7 @@ async fn execute_claimed_pull(
     let data_dir = crate::config::data_dir()?;
     let store = ObjectStore::open(&data_dir)?;
     let mut collected: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut collected_total: u64 = 0;
 
     for obj in &selection.envelope.objects {
         // CAS 已有 blob 时仍 rehash 校验（integrity）
@@ -1342,12 +1350,25 @@ async fn execute_claimed_pull(
                     obj.hash
                 )));
             }
+            ensure_dest_transfer_budget(collected_total, existing.len() as u64)?;
+            collected_total = collected_total.saturating_add(existing.len() as u64);
             collected.insert(obj.hash.clone(), existing);
             continue;
         }
-        let size: u64 = obj.size.parse().unwrap_or(0);
+        // Cap declared size before any allocate/fetch (attacker-controlled size string).
+        let size = parse_declared_object_size(&obj.size)?;
+        // size==0 still needs per-chunk growth checks below; pre-check only reserves size>0.
+        if size > 0 {
+            ensure_dest_transfer_budget(collected_total, size)?;
+        }
         let mut offset = 0u64;
-        let mut buf = Vec::new();
+        let mut buf = if size > 0 {
+            Vec::with_capacity(size as usize)
+        } else {
+            Vec::new()
+        };
+        // size==0: allow at most one full-sized chunk, then require terminal small/empty.
+        let mut size_zero_full_chunks: u32 = 0;
         loop {
             let chunk = fetch_object_chunk(
                 &peer,
@@ -1368,15 +1389,31 @@ async fn execute_claimed_pull(
                 }
                 break;
             }
+            ensure_chunk_body_within_limit(chunk.len())?;
             let n = chunk.len() as u64;
+            // Cumulative budget before growing buf (covers size==0 multi-chunk growth).
+            ensure_dest_transfer_budget(
+                collected_total.saturating_add(buf.len() as u64),
+                n,
+            )?;
+            if size > 0 && offset.saturating_add(n) > size {
+                return Err(AppError::validation(
+                    PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string(),
+                ));
+            }
             buf.extend_from_slice(&chunk);
             offset += n;
             if size > 0 && offset >= size {
                 break;
             }
-            // size==0：仅接受一次非空或 empty 结束；禁止无限空转
-            if size == 0 && n < PORTABLE_PULL_MAX_CHUNK_BYTES as u64 {
-                break;
+            // size==0: fail-closed — one terminal small/empty ends; second full chunk rejects.
+            if size == 0 {
+                match size_zero_chunk_action(size_zero_full_chunks, n)? {
+                    SizeZeroChunkAction::Break => break,
+                    SizeZeroChunkAction::ContinueAfterFull => {
+                        size_zero_full_chunks = size_zero_full_chunks.saturating_add(1);
+                    }
+                }
             }
         }
         if bytes_are_legacy_lossy(&buf) {
@@ -1391,7 +1428,9 @@ async fn execute_claimed_pull(
                 )));
             }
             if !buf.is_empty() {
+                ensure_dest_transfer_budget(collected_total, buf.len() as u64)?;
                 store.put_blob(&buf).await?;
+                collected_total = collected_total.saturating_add(buf.len() as u64);
                 collected.insert(obj.hash.clone(), buf);
             }
         }
@@ -1400,6 +1439,8 @@ async fn execute_claimed_pull(
     for obj in &selection.envelope.objects {
         if !collected.contains_key(&obj.hash) {
             if let Ok(b) = store.get_blob(&obj.hash).await {
+                ensure_dest_transfer_budget(collected_total, b.len() as u64)?;
+                collected_total = collected_total.saturating_add(b.len() as u64);
                 collected.insert(obj.hash.clone(), b);
             }
         }
@@ -1804,6 +1845,62 @@ pub async fn get_portable_pull(
 
 // ───────────────────────── helpers ─────────────────────────
 
+/// Parse attacker-controlled declared object size; reject non-numeric / overflow strings.
+fn parse_declared_object_size(raw: &str) -> Result<u64, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed.parse::<u64>().map_err(|_| {
+        AppError::validation(PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string())
+    })
+}
+
+/// Fail-closed when declared size or cumulative collected would exceed dest budget.
+fn ensure_dest_transfer_budget(current: u64, next: u64) -> Result<(), AppError> {
+    if current.saturating_add(next) > PORTABLE_PULL_DEST_MAX_TOTAL_BYTES {
+        return Err(AppError::validation(
+            PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a single chunk response body larger than the wire chunk contract.
+fn ensure_chunk_body_within_limit(len: usize) -> Result<(), AppError> {
+    if len > PORTABLE_PULL_MAX_CHUNK_BYTES {
+        return Err(AppError::validation(
+            PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// size==0 multi-chunk control: one full-sized chunk may continue; second full rejects;
+/// any sub-max (terminal small) ends assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeZeroChunkAction {
+    Break,
+    ContinueAfterFull,
+}
+
+fn size_zero_chunk_action(
+    full_chunks_seen: u32,
+    chunk_len: u64,
+) -> Result<SizeZeroChunkAction, AppError> {
+    let max = PORTABLE_PULL_MAX_CHUNK_BYTES as u64;
+    if chunk_len < max {
+        return Ok(SizeZeroChunkAction::Break);
+    }
+    // full-sized chunk
+    if full_chunks_seen >= 1 {
+        return Err(AppError::validation(
+            PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string(),
+        ));
+    }
+    Ok(SizeZeroChunkAction::ContinueAfterFull)
+}
+
 fn resolve_device(state: &AppState, device_id: &str) -> Result<Device, AppError> {
     let devices = state.devices.read().expect("devices lock");
     devices
@@ -1820,7 +1917,16 @@ fn peer_err(e: PeerCallError) -> AppError {
         PeerCallError::Network { .. } => {
             AppError::unavailable("PORTABLE_PULL_PEER_NETWORK".to_string())
         }
-        PeerCallError::Remote { message, .. } => AppError::generic(message),
+        PeerCallError::Remote { message, .. } => {
+            // Preserve destination transfer limit as Validation + stable code.
+            if message.contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT)
+                || message.contains("PORTABLE_PULL_STAGING_LIMIT")
+            {
+                AppError::validation(PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string())
+            } else {
+                AppError::generic(message)
+            }
+        }
         PeerCallError::InvalidResponse { .. } => {
             AppError::generic("PORTABLE_PULL_INVALID_RESPONSE".to_string())
         }
@@ -1949,10 +2055,60 @@ async fn get_bytes_bound(
             details: serde_json::json!({}),
         });
     }
-    resp.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| PeerCallError::Network { url, source: e })
+    // Reject oversize Content-Length before buffering; stream-read with hard cap.
+    if let Some(len) = resp.content_length() {
+        if len > PORTABLE_PULL_MAX_CHUNK_BYTES as u64 {
+            return Err(PeerCallError::Remote {
+                url,
+                status: 413,
+                code: "portable_pull_object".into(),
+                message: PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string(),
+                request_id: String::new(),
+                retryable: false,
+                legacy: false,
+                details: serde_json::json!({
+                    "reason": "chunk_body_oversize",
+                    "contentLength": len,
+                    "max": PORTABLE_PULL_MAX_CHUNK_BYTES,
+                }),
+            });
+        }
+    }
+    read_response_body_capped(resp, PORTABLE_PULL_MAX_CHUNK_BYTES, &url).await
+}
+
+/// Stream-read response body with a hard max; fail if peer exceeds it (chunked without length).
+async fn read_response_body_capped(
+    resp: reqwest::Response,
+    max_bytes: usize,
+    url: &str,
+) -> Result<Vec<u8>, PeerCallError> {
+    use futures_util::StreamExt;
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(item) = stream.next().await {
+        let chunk = item.map_err(|e| PeerCallError::Network {
+            url: url.to_string(),
+            source: e,
+        })?;
+        if out.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(PeerCallError::Remote {
+                url: url.to_string(),
+                status: 413,
+                code: "portable_pull_object".into(),
+                message: PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string(),
+                request_id: String::new(),
+                retryable: false,
+                legacy: false,
+                details: serde_json::json!({
+                    "reason": "chunk_body_oversize",
+                    "max": max_bytes,
+                }),
+            });
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 async fn import_selection_canonical(
@@ -2245,6 +2401,81 @@ mod tests {
     #[test]
     fn chunk_limit_is_8mib() {
         assert_eq!(PORTABLE_PULL_MAX_CHUNK_BYTES, 8 * 1024 * 1024);
+        assert_eq!(PORTABLE_PULL_DEST_MAX_TOTAL_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn dest_budget_rejects_oversized_declared_size() {
+        let over = PORTABLE_PULL_DEST_MAX_TOTAL_BYTES + 1;
+        let err = ensure_dest_transfer_budget(0, over).unwrap_err();
+        assert!(
+            err.to_string().contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT),
+            "err={err}"
+        );
+        // cumulative: already near cap
+        let almost = PORTABLE_PULL_DEST_MAX_TOTAL_BYTES - 10;
+        let err2 = ensure_dest_transfer_budget(almost, 11).unwrap_err();
+        assert!(err2.to_string().contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT));
+        // exact fit ok
+        ensure_dest_transfer_budget(0, PORTABLE_PULL_DEST_MAX_TOTAL_BYTES).unwrap();
+        ensure_dest_transfer_budget(almost, 10).unwrap();
+    }
+
+    #[test]
+    fn dest_parse_declared_size_rejects_garbage_and_accepts_zero() {
+        assert_eq!(parse_declared_object_size("0").unwrap(), 0);
+        assert_eq!(parse_declared_object_size("").unwrap(), 0);
+        assert_eq!(parse_declared_object_size("42").unwrap(), 42);
+        let err = parse_declared_object_size("not-a-number").unwrap_err();
+        assert!(err.to_string().contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT));
+        // huge but still parseable is ok at parse; budget check rejects later
+        let huge = (PORTABLE_PULL_DEST_MAX_TOTAL_BYTES + 1).to_string();
+        assert_eq!(
+            parse_declared_object_size(&huge).unwrap(),
+            PORTABLE_PULL_DEST_MAX_TOTAL_BYTES + 1
+        );
+        let err_budget = ensure_dest_transfer_budget(0, PORTABLE_PULL_DEST_MAX_TOTAL_BYTES + 1)
+            .unwrap_err();
+        assert!(err_budget
+            .to_string()
+            .contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT));
+    }
+
+    #[test]
+    fn dest_chunk_body_oversize_rejected() {
+        ensure_chunk_body_within_limit(PORTABLE_PULL_MAX_CHUNK_BYTES).unwrap();
+        let err =
+            ensure_chunk_body_within_limit(PORTABLE_PULL_MAX_CHUNK_BYTES + 1).unwrap_err();
+        assert!(err.to_string().contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT));
+    }
+
+    #[test]
+    fn size_zero_loop_rejects_second_full_chunk() {
+        // First full-sized chunk may continue (then must get terminal small/empty).
+        let first = size_zero_chunk_action(0, PORTABLE_PULL_MAX_CHUNK_BYTES as u64).unwrap();
+        assert_eq!(first, SizeZeroChunkAction::ContinueAfterFull);
+        // Second full-sized chunk → fail-closed (no infinite grow).
+        let err = size_zero_chunk_action(1, PORTABLE_PULL_MAX_CHUNK_BYTES as u64).unwrap_err();
+        assert!(err.to_string().contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT));
+        // Terminal small after one full → break
+        let term = size_zero_chunk_action(1, (PORTABLE_PULL_MAX_CHUNK_BYTES as u64) - 1).unwrap();
+        assert_eq!(term, SizeZeroChunkAction::Break);
+        // Immediate small/empty path: n < max → break without requiring prior full
+        let empty_path = size_zero_chunk_action(0, 0).unwrap();
+        assert_eq!(empty_path, SizeZeroChunkAction::Break);
+        let small = size_zero_chunk_action(0, 1).unwrap();
+        assert_eq!(small, SizeZeroChunkAction::Break);
+    }
+
+    #[test]
+    fn dest_transfer_limit_contract_in_source() {
+        let src = include_str!("pull.rs");
+        assert!(src.contains("PORTABLE_PULL_DEST_TRANSFER_LIMIT"));
+        assert!(src.contains("PORTABLE_PULL_DEST_MAX_TOTAL_BYTES"));
+        assert!(src.contains("ensure_dest_transfer_budget"));
+        assert!(src.contains("ensure_chunk_body_within_limit"));
+        assert!(src.contains("size_zero_chunk_action"));
+        assert!(src.contains("read_response_body_capped"));
     }
 
     #[test]
