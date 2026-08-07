@@ -43,6 +43,7 @@ pub mod models;
 pub mod object_store;
 pub mod packages;
 pub mod plugins;
+pub mod portable_inventory;
 pub mod project_scope;
 pub mod projection;
 pub mod projection_ops;
@@ -124,6 +125,14 @@ pub use plugins::{
     PluginDecompositionPreview, PluginPackagePayload, PluginPackageRevision, PluginResidualRef,
     PortableHook, ResidualKind, ResidualPreview, ResidualProjectionReport,
     ResolvedComponentPayload,
+};
+pub use portable_inventory::{
+    inventory_item_id, inventory_snapshot_hash, reconcile_portable_inventory,
+    reconcile_portable_inventory_with_facts, PortableAssetKind, PortableCanonicalFact,
+    PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
+    PortableInventoryManagementState, PortableInventoryMutationCapability,
+    PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
+    PortableInventoryTargetDto, PortableMcpCredentialFactDto,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,
