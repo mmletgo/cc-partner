@@ -113,7 +113,74 @@ pub async fn build_portable_selection_envelope(
                 item.target.as_str()
             )));
         }
-        let packed = pack_inventory_item(item)?;
+
+        // Skill/Plugin 目录先写 CAS tree，plugin 主 payload 用权威 treeManifestHash 指针。
+        let mut cas_tree_hash: Option<String> = None;
+        if matches!(
+            item.kind,
+            PortableAssetKind::Skill | PortableAssetKind::Plugin
+        ) {
+            if let Some(path) = item.source_path.as_deref().map(PathBuf::from) {
+                let is_file = path.is_file();
+                let dir = if path.is_dir() {
+                    path.clone()
+                } else {
+                    path.parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| path.clone())
+                };
+                if dir.is_dir() {
+                    match store.put_tree_from_directory(&dir).await {
+                        Ok(put) => {
+                            let th = put.object.hash.clone();
+                            cas_tree_hash = Some(th.clone());
+                            if !seen_hashes.contains(&th) {
+                                seen_hashes.insert(th.clone());
+                                if let Ok(manifest_bytes) = store.get_blob(&th).await {
+                                    object_bytes.insert(th.clone(), manifest_bytes.clone());
+                                    objects.push(SnapshotObjectDescriptor {
+                                        hash: th.clone(),
+                                        size: manifest_bytes.len().to_string(),
+                                    });
+                                }
+                            }
+                            if let Ok(manifest) = store.get_tree(&put.object.hash).await {
+                                for entry in manifest.entries {
+                                    if !seen_hashes.contains(&entry.blob_hash) {
+                                        if let Ok(b) = store.get_blob(&entry.blob_hash).await {
+                                            seen_hashes.insert(entry.blob_hash.clone());
+                                            object_bytes.insert(entry.blob_hash.clone(), b.clone());
+                                            objects.push(SnapshotObjectDescriptor {
+                                                hash: entry.blob_hash,
+                                                size: b.len().to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) if item.kind == PortableAssetKind::Plugin => {
+                            return Err(AppError::validation(format!(
+                                "PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE:{}:{e}",
+                                item.inventory_item_id
+                            )));
+                        }
+                        Err(_) => {}
+                    }
+                } else if item.kind == PortableAssetKind::Plugin && !is_file {
+                    return Err(AppError::validation(format!(
+                        "PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE:{}",
+                        item.inventory_item_id
+                    )));
+                }
+            }
+        }
+
+        let packed = if item.kind == PortableAssetKind::Plugin {
+            pack_plugin_item(item, cas_tree_hash.as_deref())?
+        } else {
+            pack_inventory_item(item)?
+        };
         let hash = sha256_hex(&packed.bytes);
         let size = packed.bytes.len() as u64;
         if !seen_hashes.contains(&hash) {
@@ -131,51 +198,10 @@ pub async fn build_portable_selection_envelope(
                 .entry(hash.clone())
                 .or_insert_with(|| packed.bytes.clone());
         }
-        // Skill: 同步将目录树写入 CAS，保证 dest install 可还原 SKILL.md body + 支持文件
-        if item.kind == PortableAssetKind::Skill {
-            if let Some(path) = item.source_path.as_deref().map(PathBuf::from) {
-                let dir = if path.is_dir() {
-                    path
-                } else {
-                    path.parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or(path)
-                };
-                if dir.is_dir() {
-                    if let Ok(put) = store.put_tree_from_directory(&dir).await {
-                        let th = put.object.hash.clone();
-                        if !seen_hashes.contains(&th) {
-                            seen_hashes.insert(th.clone());
-                            if let Ok(manifest_bytes) = store.get_blob(&th).await {
-                                object_bytes.insert(th.clone(), manifest_bytes.clone());
-                                objects.push(SnapshotObjectDescriptor {
-                                    hash: th,
-                                    size: manifest_bytes.len().to_string(),
-                                });
-                            }
-                        }
-                        // 也登记树内每个 blob
-                        if let Ok(manifest) = store.get_tree(&put.object.hash).await {
-                            for entry in manifest.entries {
-                                if !seen_hashes.contains(&entry.blob_hash) {
-                                    if let Ok(b) = store.get_blob(&entry.blob_hash).await {
-                                        seen_hashes.insert(entry.blob_hash.clone());
-                                        object_bytes.insert(entry.blob_hash.clone(), b.clone());
-                                        objects.push(SnapshotObjectDescriptor {
-                                            hash: entry.blob_hash,
-                                            size: b.len().to_string(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         let asset_id = stable_asset_id(item);
         let rev_id = format!("{asset_id}-rev1");
+        let tree_manifest_hash = cas_tree_hash.or_else(|| item.tree_hash.clone());
         assets.push(SnapshotAsset {
             id: asset_id.clone(),
             scope_id: item.scope_id.clone(),
@@ -200,7 +226,7 @@ pub async fn build_portable_selection_envelope(
             origin_target: Some(source_target),
             origin_replica_id: source_replica_id.to_string(),
             payload_hash: Some(hash.clone()),
-            tree_manifest_hash: item.tree_hash.clone(),
+            tree_manifest_hash,
             created_at: Utc::now().to_rfc3339(),
         });
         asset_heads.insert(asset_id.clone(), vec![rev_id]);
@@ -255,11 +281,70 @@ pub async fn build_portable_selection_envelope(
 }
 
 /// 打包后的 payload 字节与诊断。
+#[derive(Debug)]
 struct PackedItem {
     bytes: Vec<u8>,
     credential_bearing: bool,
     legacy_lossy: bool,
     warnings: Vec<String>,
+}
+
+/// 打包 Plugin：单文件原文；目录必须有 CAS treeManifestHash 指针（禁止 hash-list 假成功）。
+fn pack_plugin_item(
+    item: &PortableInventoryItemDto,
+    cas_tree_hash: Option<&str>,
+) -> Result<PackedItem, AppError> {
+    let warnings = item.warnings.clone();
+    let path = item
+        .source_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+    let Some(p) = path else {
+        return Err(AppError::validation(format!(
+            "PORTABLE_PULL_SOURCE_PATH_MISSING:{}",
+            item.inventory_item_id
+        )));
+    };
+    if p.is_file() {
+        let bytes = std::fs::read(&p)
+            .map_err(|e| AppError::generic(format!("read plugin {}: {e}", p.display())))?;
+        return Ok(PackedItem {
+            bytes,
+            credential_bearing: false,
+            legacy_lossy: false,
+            warnings,
+        });
+    }
+    if !p.is_dir() {
+        return Err(AppError::not_found(format!(
+            "PORTABLE_PULL_SOURCE_PATH_MISSING:{}",
+            item.inventory_item_id
+        )));
+    }
+    let tree_hash = cas_tree_hash
+        .map(str::to_string)
+        .or_else(|| item.tree_hash.clone())
+        .filter(|h| !h.is_empty());
+    let Some(tree_hash) = tree_hash else {
+        return Err(AppError::validation(format!(
+            "PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE:{}",
+            item.inventory_item_id
+        )));
+    };
+    let pointer = serde_json::json!({
+        "kind": "portablePluginTreeRef",
+        "rootName": p.file_name().and_then(|s| s.to_str()).unwrap_or("plugin"),
+        "treeManifestHash": tree_hash,
+        "nativeId": item.native_id,
+    });
+    let bytes = serde_json::to_vec(&pointer).map_err(AppError::from)?;
+    Ok(PackedItem {
+        bytes,
+        credential_bearing: false,
+        legacy_lossy: false,
+        warnings,
+    })
 }
 
 /// 将 inventory 项读为 canonical payload 字节。
@@ -303,24 +388,8 @@ fn pack_inventory_item(item: &PortableInventoryItemDto) -> Result<PackedItem, Ap
             })
         }
         PortableAssetKind::Plugin => {
-            let Some(p) = path else {
-                return Err(AppError::validation(format!(
-                    "PORTABLE_PULL_SOURCE_PATH_MISSING:{}",
-                    item.inventory_item_id
-                )));
-            };
-            let bytes = if p.is_file() {
-                std::fs::read(&p)
-                    .map_err(|e| AppError::generic(format!("read plugin {}: {e}", p.display())))?
-            } else {
-                pack_directory_bytes(&p)?
-            };
-            Ok(PackedItem {
-                bytes,
-                credential_bearing: false,
-                legacy_lossy: false,
-                warnings,
-            })
+            // Prefer pack_plugin_item from envelope builder (has CAS tree hash).
+            pack_plugin_item(item, None)
         }
         PortableAssetKind::Mcp => {
             let Some(p) = path else {
@@ -538,39 +607,6 @@ fn load_mcp_payload(
     }))
 }
 
-fn pack_directory_bytes(root: &Path) -> Result<Vec<u8>, AppError> {
-    let mut entries: Vec<(String, String)> = Vec::new();
-    fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), AppError> {
-        let rd = std::fs::read_dir(dir)
-            .map_err(|e| AppError::generic(format!("read_dir {}: {e}", dir.display())))?;
-        for ent in rd {
-            let ent = ent.map_err(|e| AppError::generic(format!("dir entry: {e}")))?;
-            let p = ent.path();
-            if p.is_dir() {
-                walk(base, &p, out)?;
-            } else if p.is_file() {
-                let rel = p
-                    .strip_prefix(base)
-                    .unwrap_or(&p)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let bytes = std::fs::read(&p)
-                    .map_err(|e| AppError::generic(format!("read {}: {e}", p.display())))?;
-                out.push((rel, sha256_hex(&bytes)));
-            }
-        }
-        Ok(())
-    }
-    walk(root, root, &mut entries)?;
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let value = serde_json::json!({
-        "kind": "portablePluginTree",
-        "rootName": root.file_name().and_then(|s| s.to_str()).unwrap_or("plugin"),
-        "entries": entries.into_iter().map(|(p,h)| serde_json::json!({"path": p, "hash": h})).collect::<Vec<_>>(),
-    });
-    serde_json::to_vec(&value).map_err(AppError::from)
-}
-
 fn text_contains_credential_keys(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("\"env\"")
@@ -673,6 +709,31 @@ mod tests {
             warnings: vec![],
             mcp_credential: None,
         }
+    }
+
+    #[test]
+    fn plugin_directory_without_tree_hash_fails_closed() {
+        let tmp = tempdir().unwrap();
+        let plugin = tmp.path().join("my-plugin");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("plugin.json"), r#"{"name":"my-plugin"}"#).unwrap();
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Plugin,
+            "my-plugin",
+            Some(plugin.to_str().unwrap()),
+        );
+        item.tree_hash = None;
+        let err = pack_plugin_item(&item, None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE"));
+        // with CAS tree hash pointer succeeds and is not the old hash-list shape
+        let packed = pack_plugin_item(&item, Some("deadbeef")).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&packed.bytes).unwrap();
+        assert_eq!(v["kind"], "portablePluginTreeRef");
+        assert_eq!(v["treeManifestHash"], "deadbeef");
+        assert_ne!(v["kind"], "portablePluginTree");
     }
 
     #[tokio::test]

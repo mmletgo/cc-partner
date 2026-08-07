@@ -19,10 +19,9 @@ use crate::agent_hub::models::{
     DesiredPresence, LogicalAsset, Materialization, MaterializationStatus, NewLogicalAsset,
     NewMaterialization, NewProjectionJob, NewRevision, NewScopeNode, NewTargetBinding,
     PortableActionClaim, PortableAssetActionPlanRecord, PortablePullClaim, PortablePullPlanRecord,
-    ProjectionJob, ProjectionJobState,
-    ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
-    ScopeNode, TargetBinding, UserInstructionOwnershipRecord, UserInstructionPlanClaim,
-    UserInstructionPlanRecord,
+    ProjectionJob, ProjectionJobState, ProjectionPayloadKind, Revision, RevisionId,
+    RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
+    UserInstructionOwnershipRecord, UserInstructionPlanClaim, UserInstructionPlanRecord,
 };
 use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::plugins::ownership::{decide_component_delete, ComponentDeleteDecision};
@@ -3360,7 +3359,8 @@ impl AgentHubRepo {
             .await?
             {
                 let pre_rec = row_to_portable_pull_plan(&pre)?;
-                if pre_rec.client_request_id.is_none() && pre_rec.expires_at.as_str() < now.as_str() {
+                if pre_rec.client_request_id.is_none() && pre_rec.expires_at.as_str() < now.as_str()
+                {
                     return Err(AppError::conflict("PORTABLE_PULL_PLAN_EXPIRED"));
                 }
             } else {
@@ -3444,9 +3444,7 @@ impl AgentHubRepo {
             .execute(&self.pool)
             .await?;
             if result.rows_affected() != 1 {
-                return Err(AppError::conflict(
-                    "PORTABLE_PULL_PLAN_COMPLETE_CONFLICT",
-                ));
+                return Err(AppError::conflict("PORTABLE_PULL_PLAN_COMPLETE_CONFLICT"));
             }
             Ok(())
         })

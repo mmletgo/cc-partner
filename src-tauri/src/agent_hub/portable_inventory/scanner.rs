@@ -648,7 +648,9 @@ fn item_capabilities(
         can_enable,
         can_disable,
         can_uninstall: can_mutate,
-        can_adopt: can_mutate,
+        // Adopt ownership write is not wired (PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED).
+        // Never advertise canAdopt=true — UI prioritizes Adopt as primary action otherwise.
+        can_adopt: false,
         can_install_to_source_target: false,
         reason_code: reason,
         evidence_ids: vec![format!("L2-PORTABLE-{}-SCAN", kind.as_str().to_uppercase())],
@@ -1102,6 +1104,23 @@ enabled = false
             unopted.capabilities.reason_code.as_deref(),
             Some("project_not_opted_in")
         );
+
+        // P1-1: even writable unmanaged user assets must not advertise canAdopt until ownership write exists
+        for item in &items {
+            assert!(
+                !item.capabilities.can_adopt,
+                "canAdopt must stay false until adopt is wired: {}",
+                item.inventory_item_id
+            );
+        }
+    }
+
+    #[test]
+    fn can_adopt_is_always_false_even_when_mutable() {
+        let caps = item_capabilities(PortableAssetKind::Skill, Some(true), true, true, None);
+        assert!(caps.can_disable);
+        assert!(caps.can_uninstall);
+        assert!(!caps.can_adopt);
     }
 
     #[test]
@@ -1177,5 +1196,4 @@ enabled = false
         v.sort();
         v
     }
-
-    }
+}

@@ -144,6 +144,30 @@ impl AssetAdapter for ClaudeInstructionAdapter {
             &base.join("disabled").join("skills"),
             PortableOriginKind::Native,
         )?);
+        // Hub portable executor disables user skills/commands under
+        // <data_dir>/claude-assets/disabled/{skills,commands} — inventory must
+        // observe those paths or rescan after Disable reports "missing".
+        if scope.scope_kind == ScopeKind::User {
+            if let Ok(data) = crate::config::data_dir() {
+                let hub_disabled = data.join("claude-assets").join("disabled");
+                parts.push(scan_disabled_skill_dirs(
+                    AgentTarget::Claude,
+                    scope.scope_kind,
+                    &hub_disabled.join("skills"),
+                    PortableOriginKind::Native,
+                )?);
+                parts.push(scan_disabled_command_markdown_dir(
+                    AgentTarget::Claude,
+                    scope.scope_kind,
+                    &hub_disabled.join("commands"),
+                    PortableOriginKind::Native,
+                )?);
+                parts.push(scan_hub_disabled_mcp_snapshots(
+                    scope.scope_kind,
+                    &hub_disabled.join("mcp"),
+                )?);
+            }
+        }
         parts.push(scan_command_markdown_dir(
             AgentTarget::Claude,
             scope.scope_kind,
@@ -251,6 +275,124 @@ fn scan_claude_user_mcp(
     )
 }
 
+/// 扫描 hub portable 执行器写入的 disabled MCP 快照（单 server JSON 文件）。
+///
+/// Business Logic: Disable 把 leaf 原文落到 data_dir/claude-assets/disabled/mcp；
+///     rescan 必须标 actualEnabled=false，否则 Enable 动作不可达。
+/// Code Logic: 每个 `*.json` 作为独立 disabled MCP discovery。
+fn scan_hub_disabled_mcp_snapshots(
+    scope_kind: ScopeKind,
+    disabled_mcp_dir: &std::path::Path,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    use super::portable::{
+        DiscoveredPortableAsset, PortableAssetOrigin, PortableDiscoveryStatus, PortableOriginKind,
+    };
+    use crate::agent_hub::assets::{McpTransport, PortableAssetPayload, PortableMcpServer};
+    use crate::agent_hub::models::AssetKind;
+    use crate::agent_hub::object_store::sha256_hex;
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    if !disabled_mcp_dir.is_dir() {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    let rd = match fs::read_dir(disabled_mcp_dir) {
+        Ok(r) => r,
+        Err(_) => return Ok(vec![]),
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let key = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mcp")
+            .to_string();
+        let Ok(raw) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        let mut env_map = BTreeMap::new();
+        if let Some(env_obj) = obj.get("env").and_then(|v| v.as_object()) {
+            for (k, v) in env_obj {
+                if let Some(s) = v.as_str() {
+                    env_map.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        let mut headers = BTreeMap::new();
+        if let Some(h) = obj.get("headers").and_then(|v| v.as_object()) {
+            for (k, v) in h {
+                if let Some(s) = v.as_str() {
+                    headers.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        let transport = if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
+            McpTransport::Http {
+                url: url.to_string(),
+                headers,
+            }
+        } else {
+            let command = obj
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("npx")
+                .to_string();
+            let args = obj
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let cwd = obj.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
+            McpTransport::Stdio { command, args, cwd }
+        };
+        let enabled = obj
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        out.push(DiscoveredPortableAsset {
+            kind: AssetKind::Mcp,
+            semantic_name: key.clone(),
+            scope_kind,
+            payload: PortableAssetPayload::Mcp(PortableMcpServer {
+                key: key.clone(),
+                transport,
+                env: env_map,
+                enabled,
+                tool_allow: vec![],
+                tool_deny: vec![],
+                target_extensions: BTreeMap::new(),
+            }),
+            origin: PortableAssetOrigin {
+                target: AgentTarget::Claude,
+                path: path.clone(),
+                origin_kind: PortableOriginKind::Native,
+                native_id: key,
+                content_hash: sha256_hex(&raw),
+                tree_hash: None,
+                status: PortableDiscoveryStatus::Disabled,
+                native_output_candidate: true,
+                parent_plugin_id: None,
+            },
+            diagnostics: vec![],
+        });
+    }
+    Ok(out)
+}
+
 /// 从 JSON 文件读 mcpServers。
 fn scan_mcp_json_file(
     target: AgentTarget,
@@ -302,4 +444,74 @@ pub fn discover_claude_plugin_source(
         scope_id,
         scope_kind,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_hub::targets::portable::PortableDiscoveryStatus;
+    use std::fs;
+    use std::sync::Mutex;
+
+    // Serialize env mutation across tests in this process.
+    static DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn hub_disabled_skill_is_discovered_under_data_dir() {
+        let _guard = DATA_DIR_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let data = tmp.path().join("data");
+        let claude = home.join(".claude");
+        fs::create_dir_all(claude.join("skills")).unwrap();
+        let disabled = data.join("claude-assets/disabled/skills/was-active");
+        fs::create_dir_all(&disabled).unwrap();
+        fs::write(
+            disabled.join("SKILL.md"),
+            "---\nname: was-active\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        // Isolate data_dir via env override used by config::data_dir()
+        let prev = std::env::var_os("CC_PARTNER_DATA_DIR");
+        std::env::set_var("CC_PARTNER_DATA_DIR", &data);
+        let mut vars = std::collections::BTreeMap::new();
+        // Point Claude config at isolated home so user-level scan does not touch real ~/.claude
+        vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            claude.to_string_lossy().into_owned(),
+        );
+        let env = TargetEnvironment {
+            home: home.clone(),
+            vars,
+            path_entries: vec![],
+        };
+        let scope = LocalScopeMapping {
+            scope_kind: ScopeKind::User,
+            absolute_path: home.clone(),
+            project_root: None,
+            relative_root: None,
+            codex_fallback_filenames: vec![],
+        };
+        let found = ClaudeInstructionAdapter
+            .scan_portable_assets(&scope, &env)
+            .expect("scan");
+        if let Some(v) = prev {
+            std::env::set_var("CC_PARTNER_DATA_DIR", v);
+        } else {
+            std::env::remove_var("CC_PARTNER_DATA_DIR");
+        }
+        let skill = found.iter().find(|d| {
+            matches!(
+                d.payload,
+                crate::agent_hub::assets::PortableAssetPayload::Skill(_)
+            ) && d.origin.native_id == "was-active"
+        });
+        let skill = skill.expect("hub disabled skill must be inventoried");
+        assert_eq!(skill.origin.status, PortableDiscoveryStatus::Disabled);
+        assert!(skill
+            .origin
+            .path
+            .to_string_lossy()
+            .contains("claude-assets/disabled/skills/was-active"));
+    }
 }

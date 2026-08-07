@@ -139,9 +139,7 @@ pub async fn apply_portable_asset_action_with(
             .await?;
 
     match claim {
-        PortableActionClaim::Replay(json) => {
-            serde_json::from_str(&json).map_err(AppError::from)
-        }
+        PortableActionClaim::Replay(json) => serde_json::from_str(&json).map_err(AppError::from),
         PortableActionClaim::Pending => {
             // 未完成 claim：诚实 outcomeUnknown，尽量 rescan 附加 observed 事实
             let row = deps
@@ -806,8 +804,9 @@ mod tests {
         std::fs::create_dir_all(plugin_root.join("skills")).unwrap();
         let (content_hash, tree_hash) = hash_plugin_root(&plugin_root).unwrap();
         // 生产 inventory 对有 manifest 的 plugin 用 material hash，不等于 path-string sha
-        let path_string_hash =
-            crate::agent_hub::object_store::sha256_hex(plugin_root.display().to_string().as_bytes());
+        let path_string_hash = crate::agent_hub::object_store::sha256_hex(
+            plugin_root.display().to_string().as_bytes(),
+        );
         assert_ne!(content_hash, path_string_hash);
 
         let repo = test_repo().await;
@@ -1338,7 +1337,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("PORTABLE_ASSET_ACTION_PLAN_EXPIRED")
+            err.to_string()
+                .contains("PORTABLE_ASSET_ACTION_PLAN_EXPIRED")
                 || format!("{err:?}").contains("PORTABLE_ASSET_ACTION_PLAN_EXPIRED")
         );
     }

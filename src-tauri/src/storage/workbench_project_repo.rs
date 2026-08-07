@@ -69,13 +69,16 @@ impl WorkbenchProjectRepo {
         )
         .fetch_all(&self.pool)
         .await?;
-        let projects: Vec<WorkbenchProjectRow> = rows.iter().map(row_to_project).collect::<Result<_, _>>()?;
+        let projects: Vec<WorkbenchProjectRow> =
+            rows.iter().map(row_to_project).collect::<Result<_, _>>()?;
         let order = self.get_order().await?;
         let ordered_ids = order
             .as_ref()
             .map(|doc| doc.ordered_ids.as_slice())
             .unwrap_or(&[]);
-        Ok(apply_project_order(projects, ordered_ids, |p| p.id.as_str()))
+        Ok(apply_project_order(projects, ordered_ids, |p| {
+            p.id.as_str()
+        }))
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -331,7 +334,9 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        WorkbenchProjectRepo::ensure_order_schema(&pool).await.unwrap();
+        WorkbenchProjectRepo::ensure_order_schema(&pool)
+            .await
+            .unwrap();
         WorkbenchProjectRepo::new(pool)
     }
 
@@ -492,15 +497,27 @@ mod tests {
     #[tokio::test]
     async fn list_applies_custom_order_and_tops_missing_local() {
         let repo = setup_repo().await;
-        repo.upsert(&row_created_at("p1", "2026-06-24T01:00:00Z", "2026-06-20T00:00:00Z"))
-            .await
-            .unwrap();
-        repo.upsert(&row_created_at("p2", "2026-06-24T02:00:00Z", "2026-06-21T00:00:00Z"))
-            .await
-            .unwrap();
-        repo.upsert(&row_created_at("p3", "2026-06-24T03:00:00Z", "2026-06-22T00:00:00Z"))
-            .await
-            .unwrap();
+        repo.upsert(&row_created_at(
+            "p1",
+            "2026-06-24T01:00:00Z",
+            "2026-06-20T00:00:00Z",
+        ))
+        .await
+        .unwrap();
+        repo.upsert(&row_created_at(
+            "p2",
+            "2026-06-24T02:00:00Z",
+            "2026-06-21T00:00:00Z",
+        ))
+        .await
+        .unwrap();
+        repo.upsert(&row_created_at(
+            "p3",
+            "2026-06-24T03:00:00Z",
+            "2026-06-22T00:00:00Z",
+        ))
+        .await
+        .unwrap();
 
         repo.set_order(&ProjectOrderDocument {
             ordered_ids: vec!["p1".into(), "p2".into(), "ghost".into()],

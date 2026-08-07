@@ -361,7 +361,9 @@ fn build_change(
     // MCP expected_source_hash 必须与 config_patch leaf value_content_hash 同域。
     // Skill/Command content_hash 已是 inventory 语义（Skill=SKILL.md-only）。
     let expected_source_hash = match item.kind {
-        PortableAssetKind::Mcp => mcp_expected_leaf_hash(item).or_else(|| item.content_hash.clone()),
+        PortableAssetKind::Mcp => {
+            mcp_expected_leaf_hash(item).or_else(|| item.content_hash.clone())
+        }
         _ => item.content_hash.clone(),
     };
 

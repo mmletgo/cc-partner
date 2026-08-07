@@ -381,10 +381,7 @@ async fn proxy_websocket_inner(req: Request<Body>) -> Result<Response<Body>, Str
     let query = req.uri().query();
     let origin = vite_http_origin();
     let ws_origin = http_origin_to_ws_origin(&origin)?;
-    let mut upstream_url = format!(
-        "{ws_origin}{}",
-        if path.is_empty() { "/" } else { path }
-    );
+    let mut upstream_url = format!("{ws_origin}{}", if path.is_empty() { "/" } else { path });
     if let Some(query) = query {
         if !query.is_empty() {
             upstream_url.push('?');
@@ -592,7 +589,9 @@ mod tests {
     fn websocket_proxyable_excludes_api() {
         assert!(is_proxyable_websocket_path("/"));
         assert!(is_proxyable_websocket_path("/vite-hmr"));
-        assert!(!is_proxyable_websocket_path("/api/mobile/workbench/terminal-input-stream"));
+        assert!(!is_proxyable_websocket_path(
+            "/api/mobile/workbench/terminal-input-stream"
+        ));
         assert!(!is_proxyable_websocket_path("/api"));
     }
 

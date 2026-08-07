@@ -33,11 +33,7 @@ pub struct ProjectOrderDocument {
  *   3) 未出现在 ordered_ids 的本地项目按 `default_ids` 顺序接在**前面**；
  *   4) 按收集的 id 序列从索引取回项目。
  */
-pub fn apply_project_order<T, F>(
-    projects: Vec<T>,
-    ordered_ids: &[String],
-    project_id: F,
-) -> Vec<T>
+pub fn apply_project_order<T, F>(projects: Vec<T>, ordered_ids: &[String], project_id: F) -> Vec<T>
 where
     F: Fn(&T) -> &str,
 {
@@ -48,7 +44,8 @@ where
         return projects;
     }
 
-    let mut by_id: std::collections::HashMap<String, T> = std::collections::HashMap::with_capacity(projects.len());
+    let mut by_id: std::collections::HashMap<String, T> =
+        std::collections::HashMap::with_capacity(projects.len());
     let mut default_ids: Vec<String> = Vec::with_capacity(projects.len());
     for project in projects {
         let id = project_id(&project).to_string();
@@ -166,9 +163,7 @@ mod tests {
     }
 
     fn p(id: &str) -> P {
-        P {
-            id: id.to_string(),
-        }
+        P { id: id.to_string() }
     }
 
     #[test]

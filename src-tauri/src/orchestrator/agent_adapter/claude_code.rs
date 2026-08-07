@@ -246,7 +246,10 @@ mod tests {
         let mut req = request("continue");
         req.native_session_id = Some("sess-abc".into());
         let plan = ClaudeCodeAdapter.build_resume_plan(&req).unwrap();
-        assert_eq!(plan.args, vec!["--resume".to_string(), "sess-abc".to_string()]);
+        assert_eq!(
+            plan.args,
+            vec!["--resume".to_string(), "sess-abc".to_string()]
+        );
         assert!(plan
             .env
             .iter()

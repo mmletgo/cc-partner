@@ -11,15 +11,15 @@ use super::{
     is_outcome_unknown_error, map_process_outcome, TargetActionContext, TargetActionExecutor,
     TargetActionRawOutcome,
 };
+use crate::agent_hub::config_patch::{value_content_hash, CAS_EXPECT_ABSENT};
+use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::packages::activator::ProcessSpec;
 use crate::agent_hub::portable_actions::models::{
     PortableAssetActionChangeDto, PortableAssetActionKind, PortableAssetActionPlanDto,
-    PortableAssetBackupPolicy,
+    PortableAssetBackupPolicy, PortableAssetCanonicalEffect, PortableAssetPlanOperation,
 };
-use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
-use crate::agent_hub::config_patch::{value_content_hash, CAS_EXPECT_ABSENT};
-use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::portable_inventory::hash_plugin_root;
+use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
 use crate::agent_hub::targets::portable::hash_skill_directory;
 use crate::claude_code_assets::{
     portable_backup_path, portable_claude_roots, portable_move_path, portable_remove_path,
@@ -35,7 +35,10 @@ use std::path::{Path, PathBuf};
 /// Business Logic: planner 与 apply recheck 必须同一 hash 域；Skill=SKILL.md-only，
 /// Plugin 目录=inventory `hash_plugin_root` material，文件=整文件字节。
 /// Code Logic: 禁止对真实 plugin 根目录使用 path-string sha（生产必 SOURCE_HASH_CHANGED）。
-fn inventory_content_hash_for_path(kind: PortableAssetKind, path: &Path) -> Result<String, AppError> {
+fn inventory_content_hash_for_path(
+    kind: PortableAssetKind,
+    path: &Path,
+) -> Result<String, AppError> {
     match kind {
         PortableAssetKind::Skill => {
             let dir = if path.is_dir() {
@@ -139,8 +142,11 @@ impl TargetActionExecutor for ClaudeTargetExecutor {
             }
         }
 
-        let roots =
+        let user_roots =
             portable_claude_roots(ctx.claude_config_dir.as_deref(), ctx.data_dir.as_deref())?;
+        // Project-scoped inventory items must mutate under observed project roots
+        // (source_path / project mapping), never silent-redirect to user ~/.claude.
+        let roots = resolve_action_roots(&user_roots, pre_item, change)?;
         match change.kind {
             PortableAssetKind::Plugin => execute_plugin(ctx, change, pre_item),
             PortableAssetKind::Skill => execute_skill(ctx, &roots, change, pre_item),
@@ -148,6 +154,106 @@ impl TargetActionExecutor for ClaudeTargetExecutor {
             PortableAssetKind::Mcp => execute_mcp(ctx, &roots, change, pre_item),
         }
     }
+}
+
+/// 根据 inventory item scope 解析实际 mutation 根。
+///
+/// Business Logic: 已 opt-in 的项目级 Skill/Command/MCP 必须改项目路径；
+///     unopted 由上层只读门禁拦截，此处再 fail-closed 一次。
+/// Code Logic: project scope → 从 source_path 回推 .claude 根；否则用 user roots。
+fn resolve_action_roots(
+    user_roots: &PortableClaudeRoots,
+    pre_item: Option<&PortableInventoryItemDto>,
+    change: &PortableAssetActionChangeDto,
+) -> Result<PortableClaudeRoots, AppError> {
+    let Some(item) = pre_item else {
+        return Ok(user_roots.clone());
+    };
+    if item.scope_kind != crate::agent_hub::models::ScopeKind::Project {
+        return Ok(user_roots.clone());
+    }
+    if !item.project_opted_in {
+        return Err(AppError::validation(
+            "PORTABLE_ASSET_ACTION_PROJECT_NOT_OPTED_IN".to_string(),
+        ));
+    }
+    let source = item
+        .source_path
+        .as_deref()
+        .or(change.path.as_deref())
+        .map(Path::new);
+    let project_claude_root = source.and_then(infer_project_claude_root).ok_or_else(|| {
+        AppError::validation("PORTABLE_ASSET_ACTION_PROJECT_ROOT_UNRESOLVED".to_string())
+    })?;
+    // Keep hub-portable disabled/backup under data_dir so Disable remains recoverable;
+    // active dirs point at the project `.claude` tree.
+    Ok(PortableClaudeRoots {
+        skills_dir: project_claude_root.join("skills"),
+        commands_dir: project_claude_root.join("commands"),
+        // Project-local disabled still under project for discoverability if present;
+        // primary hub disabled remains on user_roots for enable recovery.
+        disabled_skills_dir: user_roots.disabled_skills_dir.clone(),
+        disabled_commands_dir: user_roots.disabled_commands_dir.clone(),
+        disabled_mcp_dir: user_roots.disabled_mcp_dir.clone(),
+        backup_root: user_roots.backup_root.clone(),
+        config_dir: project_claude_root.clone(),
+        // Project MCP lives under project `.mcp.json` when source is that file;
+        // default to project-local settings when unresolved later in execute_mcp.
+        claude_json_path: infer_project_mcp_config_path(source, &project_claude_root),
+    })
+}
+
+fn infer_project_claude_root(source: &Path) -> Option<PathBuf> {
+    // Walk up looking for a `.claude` segment or a project root that owns `.claude`.
+    let mut cur = if source.is_file() {
+        source.parent().map(Path::to_path_buf)?
+    } else {
+        source.to_path_buf()
+    };
+    loop {
+        if cur
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n == ".claude")
+        {
+            return Some(cur);
+        }
+        let candidate = cur.join(".claude");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !cur.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn infer_project_mcp_config_path(source: Option<&Path>, project_claude_root: &Path) -> PathBuf {
+    if let Some(p) = source {
+        if p.is_file() {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name == ".mcp.json"
+                || name == "settings.local.json"
+                || name.ends_with(".json")
+                    && p.parent()
+                        .and_then(|parent| parent.file_name())
+                        .and_then(|s| s.to_str())
+                        == Some(".claude")
+            {
+                return p.to_path_buf();
+            }
+        }
+    }
+    // Prefer project-root `.mcp.json` sibling of `.claude`.
+    if let Some(project_root) = project_claude_root.parent() {
+        let mcp = project_root.join(".mcp.json");
+        if mcp.is_file() {
+            return mcp;
+        }
+        return project_claude_root.join("settings.local.json");
+    }
+    project_claude_root.join("settings.local.json")
 }
 
 fn execute_plugin(
@@ -471,11 +577,10 @@ fn execute_mcp(
                 }
                 fs::write(dst, serde_json::to_vec_pretty(cfg)?)?;
             }
-            let expected = change.expected_source_hash.clone().or_else(|| {
-                current
-                    .as_ref()
-                    .map(value_content_hash)
-            });
+            let expected = change
+                .expected_source_hash
+                .clone()
+                .or_else(|| current.as_ref().map(value_content_hash));
             let patches = [ManagedConfigPatch {
                 owner_id: format!("portable:{id}"),
                 path: vec!["mcpServers".into(), id.clone()],
@@ -539,5 +644,117 @@ fn scope_arg(pre_item: Option<&PortableInventoryItemDto>) -> String {
     match pre_item.map(|i| i.scope_kind) {
         Some(crate::agent_hub::models::ScopeKind::Project) => "project".into(),
         _ => "user".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_hub::models::ScopeKind;
+    use crate::agent_hub::portable_inventory::{
+        PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
+        PortableInventorySourceOrigin,
+    };
+
+    fn sample_item(scope_kind: ScopeKind, path: &str, opted: bool) -> PortableInventoryItemDto {
+        PortableInventoryItemDto {
+            inventory_item_id: "id-proj-skill".into(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Skill,
+            native_id: "proj-skill".into(),
+            display_name: "proj-skill".into(),
+            description: None,
+            version: None,
+            scope_id: "project:hub-1".into(),
+            scope_kind,
+            project_id: Some("hub-1".into()),
+            project_opted_in: opted,
+            source_path: Some(path.into()),
+            source_origin: PortableInventorySourceOrigin::Standalone,
+            parent_plugin_inventory_item_id: None,
+            actual_enabled: Some(true),
+            content_hash: Some("h".into()),
+            tree_hash: None,
+            canonical_asset_id: None,
+            canonical_revision_id: None,
+            management_state: PortableInventoryManagementState::Unmanaged,
+            desired_presence: None,
+            desired_enabled: None,
+            materialization_status: None,
+            capabilities: PortableInventoryItemCapabilitiesDto::default(),
+            warnings: vec![],
+            mcp_credential: None,
+        }
+    }
+
+    #[test]
+    fn project_scope_skill_roots_use_project_path_not_user() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_claude = tmp.path().join("user-claude");
+        let data = tmp.path().join("data");
+        let project = tmp.path().join("repo");
+        let project_claude = project.join(".claude");
+        let skill = project_claude.join("skills/proj-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "# p\n").unwrap();
+        std::fs::create_dir_all(&user_claude).unwrap();
+        let user_roots = portable_claude_roots(Some(&user_claude), Some(&data)).unwrap();
+        let item = sample_item(ScopeKind::Project, skill.to_str().unwrap(), true);
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: item.inventory_item_id.clone(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Skill,
+            path: item.source_path.clone(),
+            operation: PortableAssetPlanOperation::Disable,
+            expected_source_hash: item.content_hash.clone(),
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::RecoverableBeforeDelete,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let roots = resolve_action_roots(&user_roots, Some(&item), &change).unwrap();
+        assert_eq!(roots.skills_dir, project_claude.join("skills"));
+        assert_ne!(roots.skills_dir, user_roots.skills_dir);
+        // hub disabled stays under data_dir for recovery
+        assert_eq!(roots.disabled_skills_dir, user_roots.disabled_skills_dir);
+    }
+
+    #[test]
+    fn unopted_project_action_roots_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_claude = tmp.path().join("user-claude");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&user_claude).unwrap();
+        let user_roots = portable_claude_roots(Some(&user_claude), Some(&data)).unwrap();
+        let item = sample_item(ScopeKind::Project, "/tmp/x/.claude/skills/a", false);
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: item.inventory_item_id.clone(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Skill,
+            path: item.source_path.clone(),
+            operation: PortableAssetPlanOperation::Disable,
+            expected_source_hash: None,
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::None,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let err = resolve_action_roots(&user_roots, Some(&item), &change).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("PORTABLE_ASSET_ACTION_PROJECT_NOT_OPTED_IN"));
+    }
+
+    #[test]
+    fn infer_project_claude_root_from_skill_path() {
+        let p = PathBuf::from("/work/demo/.claude/skills/foo/SKILL.md");
+        let root = infer_project_claude_root(&p).unwrap();
+        assert_eq!(root, PathBuf::from("/work/demo/.claude"));
     }
 }

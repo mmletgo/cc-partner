@@ -2204,7 +2204,7 @@ mod tests {
     }
 
     #[allow(dead_code)]
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;

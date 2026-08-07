@@ -30,6 +30,7 @@ use crate::agent_hub::snapshot::portable_builder::{
     build_portable_selection_envelope, bytes_are_legacy_lossy, BuiltPortableSelection,
     PortableSelectionItem,
 };
+use crate::agent_hub::targets::portable::render_mcp_projection;
 use crate::error::AppError;
 use crate::models::device::Device;
 use crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER;
@@ -43,8 +44,9 @@ use crate::storage::agent_hub_repo::AgentHubRepo;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// CAS 分块上限（与 receiver 一致）。
@@ -259,9 +261,214 @@ struct StoredPortablePullPlan {
 
 // ───────────────────────── 源端 object staging（进程内 transfer 缓冲） ─────────────────────────
 
-fn staging() -> &'static Mutex<BTreeMap<String, BuiltPortableSelection>> {
-    static MAP: OnceLock<Mutex<BTreeMap<String, BuiltPortableSelection>>> = OnceLock::new();
+/// Staging 上限：条目数 / 总字节 / TTL。LAN 无鉴权，必须有界。
+const STAGING_MAX_ENTRIES: usize = 8;
+const STAGING_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+const STAGING_TTL: Duration = Duration::from_secs(15 * 60);
+
+struct StagedSelection {
+    built: BuiltPortableSelection,
+    created_at: Instant,
+    total_bytes: u64,
+}
+
+fn staging() -> &'static Mutex<BTreeMap<String, StagedSelection>> {
+    static MAP: OnceLock<Mutex<BTreeMap<String, StagedSelection>>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn staged_total_bytes(built: &BuiltPortableSelection) -> u64 {
+    built.object_bytes.values().map(|b| b.len() as u64).sum()
+}
+
+fn evict_expired_staging(map: &mut BTreeMap<String, StagedSelection>) {
+    let now = Instant::now();
+    map.retain(|_, v| now.duration_since(v.created_at) < STAGING_TTL);
+}
+
+fn staging_insert(transfer_id: String, built: BuiltPortableSelection) -> Result<(), AppError> {
+    let total_bytes = staged_total_bytes(&built);
+    let mut g = staging().lock().expect("staging");
+    evict_expired_staging(&mut g);
+    // 已有同 id 覆盖
+    g.remove(&transfer_id);
+    let current_bytes: u64 = g.values().map(|s| s.total_bytes).sum();
+    if g.len() >= STAGING_MAX_ENTRIES
+        || current_bytes.saturating_add(total_bytes) > STAGING_MAX_TOTAL_BYTES
+    {
+        // 再尝试淘汰最旧
+        if let Some(oldest_key) = g
+            .iter()
+            .min_by_key(|(_, v)| v.created_at)
+            .map(|(k, _)| k.clone())
+        {
+            g.remove(&oldest_key);
+        }
+    }
+    let current_bytes: u64 = g.values().map(|s| s.total_bytes).sum();
+    if g.len() >= STAGING_MAX_ENTRIES
+        || current_bytes.saturating_add(total_bytes) > STAGING_MAX_TOTAL_BYTES
+    {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_STAGING_LIMIT".to_string(),
+        ));
+    }
+    g.insert(
+        transfer_id,
+        StagedSelection {
+            built,
+            created_at: Instant::now(),
+            total_bytes,
+        },
+    );
+    Ok(())
+}
+
+fn staging_remove(transfer_id: &str) {
+    if let Ok(mut g) = staging().lock() {
+        g.remove(transfer_id);
+    }
+}
+
+/// 校验 tree entry 路径安全：相对、无 `..`、无绝对路径，最终仍在 `dir` 下。
+fn safe_tree_dest(dir: &Path, entry_path: &str) -> Result<PathBuf, AppError> {
+    let rel = Path::new(entry_path);
+    if rel.is_absolute() {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_UNSAFE_TREE_PATH".to_string(),
+        ));
+    }
+    for c in rel.components() {
+        match c {
+            Component::Normal(_) => {}
+            Component::CurDir => {}
+            _ => {
+                return Err(AppError::validation(
+                    "PORTABLE_PULL_UNSAFE_TREE_PATH".to_string(),
+                ));
+            }
+        }
+    }
+    if entry_path.contains('\0') {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_UNSAFE_TREE_PATH".to_string(),
+        ));
+    }
+    let dest = dir.join(rel);
+    // 前缀检查：在 create 前用逻辑路径判断（dir 未必已 canonicalize）
+    let dir_norm = dir.components().collect::<Vec<_>>();
+    let dest_norm = dest.components().collect::<Vec<_>>();
+    if dest_norm.len() < dir_norm.len() || dest_norm[..dir_norm.len()] != dir_norm[..] {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_UNSAFE_TREE_PATH".to_string(),
+        ));
+    }
+    Ok(dest)
+}
+
+/// MCP 原生 leaf（无 Hub DTO 字段 key/transport/toolAllow）。
+fn native_mcp_leaf_value(
+    target: AgentTarget,
+    server: &crate::agent_hub::assets::PortableMcpServer,
+) -> Result<serde_json::Value, AppError> {
+    let proj = render_mcp_projection(target, server)?;
+    let bytes = proj
+        .files
+        .first()
+        .map(|f| f.bytes.as_slice())
+        .unwrap_or(b"{}");
+    serde_json::from_slice(bytes)
+        .map_err(|e| AppError::validation(format!("PORTABLE_PULL_MCP_NATIVE_RENDER:{e}")))
+}
+
+/// Claude 用户 MCP 配置权威路径（与 scanner 一致）。
+fn resolve_claude_mcp_config_path() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        PathBuf::from(dir).join(".claude.json")
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".claude.json")
+    }
+}
+
+/// OpenCode MCP 配置权威路径（OPENCODE_CONFIG / jsonc / json）。
+fn resolve_opencode_mcp_config_path(root: &Path) -> PathBuf {
+    if let Some(p) = std::env::var_os("OPENCODE_CONFIG") {
+        return PathBuf::from(p);
+    }
+    let jsonc = root.join("opencode.jsonc");
+    if jsonc.is_file() {
+        return jsonc;
+    }
+    root.join("opencode.json")
+}
+
+/// 解析 InstallToTarget 的 agent 配置根；project scope 走映射项目路径。
+async fn resolve_install_root(
+    state: &AppState,
+    item: &PortableSelectionItem,
+    change: &PortablePullChangeDto,
+) -> Result<PathBuf, AppError> {
+    let _ = change;
+    let env_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    // selection.scope_id 形如 `user` 或 `project:<hub_id>`
+    if item.scope_id.starts_with("project:") {
+        let hub_id = item.scope_id.trim_start_matches("project:");
+        let mapping = state
+            .agent_hub_repo
+            .get_project_mapping_by_hub_project_id(hub_id)
+            .await?;
+        let Some(mapping) = mapping.filter(|m| m.opted_in) else {
+            return Err(AppError::validation(
+                "PORTABLE_PULL_PROJECT_MAPPING_UNAVAILABLE".to_string(),
+            ));
+        };
+        let project_path = mapping
+            .local_absolute_path
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty());
+        let project_path = if let Some(p) = project_path {
+            p
+        } else if let Some(wb) = mapping.local_workbench_project_id.as_ref() {
+            state
+                .workbench_project_repo
+                .get(wb)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| PathBuf::from(p.path))
+                .ok_or_else(|| {
+                    AppError::validation("PORTABLE_PULL_PROJECT_MAPPING_UNAVAILABLE".to_string())
+                })?
+        } else {
+            return Err(AppError::validation(
+                "PORTABLE_PULL_PROJECT_MAPPING_UNAVAILABLE".to_string(),
+            ));
+        };
+        // 项目资产根：Claude `.claude` / Codex 项目 agents / OpenCode 项目 `.opencode`
+        return Ok(match item.target {
+            AgentTarget::Claude => project_path.join(".claude"),
+            AgentTarget::Codex => project_path.join(".agents"),
+            AgentTarget::OpenCode => project_path.join(".opencode"),
+        });
+    }
+    Ok(match item.target {
+        AgentTarget::Claude => std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env_home.join(".claude")),
+        AgentTarget::Codex => std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env_home.join(".codex")),
+        AgentTarget::OpenCode => std::env::var_os("OPENCODE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var_os("XDG_CONFIG_HOME")
+                    .map(|p| PathBuf::from(p).join("opencode"))
+                    .unwrap_or_else(|| env_home.join(".config").join("opencode"))
+            }),
+    })
 }
 
 fn parse_stored_pull_plan(plan_json: &str) -> Result<StoredPortablePullPlan, AppError> {
@@ -390,10 +597,8 @@ pub async fn source_prepare_selection(
         items: built.items.clone(),
         missing_object_hashes: missing,
     };
-    staging()
-        .lock()
-        .expect("staging")
-        .insert(transfer_id, built);
+    // freeze inventory snapshot hash on the envelope source id for apply revalidation
+    staging_insert(transfer_id, built)?;
     Ok(resp)
 }
 
@@ -403,11 +608,13 @@ pub fn source_read_object_chunk(
     object_hash: &str,
     offset: u64,
 ) -> Result<Vec<u8>, AppError> {
-    let g = staging().lock().expect("staging");
-    let built = g
+    let mut g = staging().lock().expect("staging");
+    evict_expired_staging(&mut g);
+    let staged = g
         .get(transfer_id)
         .ok_or_else(|| AppError::not_found("PORTABLE_PULL_TRANSFER_NOT_FOUND".to_string()))?;
-    let bytes = built
+    let bytes = staged
+        .built
         .object_bytes
         .get(object_hash)
         .ok_or_else(|| AppError::not_found("PORTABLE_PULL_OBJECT_NOT_FOUND".to_string()))?;
@@ -415,7 +622,28 @@ pub fn source_read_object_chunk(
         return Ok(Vec::new());
     }
     let end = (offset as usize + PORTABLE_PULL_MAX_CHUNK_BYTES).min(bytes.len());
-    Ok(bytes[offset as usize..end].to_vec())
+    let chunk = bytes[offset as usize..end].to_vec();
+    // 完整读完最后一个对象后清理（best-effort：offset 到末尾）
+    let fully_read = end >= bytes.len();
+    let all_done = fully_read
+        && staged.built.object_bytes.iter().all(|(h, b)| {
+            if h == object_hash {
+                true
+            } else {
+                // 无法精确追踪其它对象；仅在本对象末尾且仅有一个对象时清
+                staged.built.object_bytes.len() == 1 && !b.is_empty()
+            }
+        });
+    drop(g);
+    if all_done {
+        staging_remove(transfer_id);
+    }
+    Ok(chunk)
+}
+
+/// 源端显式释放 transfer staging（完整传输后或 plan 过期）。
+pub fn source_release_transfer(transfer_id: &str) {
+    staging_remove(transfer_id);
 }
 
 async fn build_source_selection_for_items(
@@ -676,9 +904,7 @@ pub async fn apply_portable_pull(
         .await?;
 
     match claim {
-        PortablePullClaim::Replay(json) => {
-            serde_json::from_str(&json).map_err(AppError::from)
-        }
+        PortablePullClaim::Replay(json) => serde_json::from_str(&json).map_err(AppError::from),
         PortablePullClaim::Pending => {
             let row = repo
                 .get_portable_pull_plan(&request.plan_token)
@@ -765,6 +991,33 @@ async fn execute_claimed_pull(
     peer.require_capability(&base_url, CAPABILITY_PORTABLE_PULL_V1)
         .await
         .map_err(peer_err)?;
+
+    // Apply 前重新校验远端 inventory 快照，防止 preview 后远端 MCP/资产漂移仍安装
+    let remote_now = fetch_remote_inventory(
+        &peer,
+        &base_url,
+        &stored.public.source_device_id,
+        stored.public.source_target,
+    )
+    .await?;
+    if remote_now.inventory_snapshot_hash != stored.public.remote_inventory_snapshot_hash {
+        return Err(AppError::conflict(
+            "PORTABLE_PULL_REMOTE_INVENTORY_STALE".to_string(),
+        ));
+    }
+    // selection 必须仍能覆盖 plan 中的 item ids
+    let remote_ids: BTreeSet<&str> = remote_now
+        .items
+        .iter()
+        .map(|i| i.inventory_item_id.as_str())
+        .collect();
+    for id in &stored.remote_item_ids {
+        if !remote_ids.contains(id.as_str()) {
+            return Err(AppError::conflict(
+                "PORTABLE_PULL_REMOTE_INVENTORY_STALE".to_string(),
+            ));
+        }
+    }
 
     let selection = fetch_remote_selection(
         &peer,
@@ -918,7 +1171,9 @@ async fn execute_claimed_pull(
                                 state: PortablePullItemState::Succeeded,
                                 install_mode: Some(PortablePullInstallMode::InstallToTarget),
                                 error_code: None,
-                                message: Some("skipExisting demotion install verified by rescan".into()),
+                                message: Some(
+                                    "skipExisting demotion install verified by rescan".into(),
+                                ),
                             });
                         } else {
                             any_fail = true;
@@ -928,7 +1183,8 @@ async fn execute_claimed_pull(
                                 install_mode: Some(PortablePullInstallMode::InstallToTarget),
                                 error_code: Some("PORTABLE_PULL_RESCAN_MISSING".into()),
                                 message: Some(
-                                    "skipExisting demotion install not observed after rescan".into(),
+                                    "skipExisting demotion install not observed after rescan"
+                                        .into(),
                                 ),
                             });
                         }
@@ -979,7 +1235,11 @@ async fn execute_claimed_pull(
                 error_code: Some("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED".into()),
                 message: Some(format!(
                     "canonical import failed: {}",
-                    import_ok.as_ref().err().map(|e| e.to_string()).unwrap_or_default()
+                    import_ok
+                        .as_ref()
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_default()
                 )),
             });
             continue;
@@ -1270,24 +1530,8 @@ async fn install_payload_to_target(
             "PORTABLE_PULL_LEGACY_LOSSY".to_string(),
         ));
     }
-    // 优先使用 inventory target roots（CLAUDE_CONFIG_DIR 等），避免硬编码 home 旁路
-    let env_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    let root = match item.target {
-        AgentTarget::Claude => std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| env_home.join(".claude")),
-        AgentTarget::Codex => std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| env_home.join(".codex")),
-        AgentTarget::OpenCode => std::env::var_os("OPENCODE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var_os("XDG_CONFIG_HOME")
-                    .map(|p| PathBuf::from(p).join("opencode"))
-                    .unwrap_or_else(|| env_home.join(".config").join("opencode"))
-            }),
-    };
-    let _ = state; // 预留 AppState 路径解析扩展
+    // Project-scoped selection → mapped project asset root; never silent-install into user root.
+    let root = resolve_install_root(state, item, change).await?;
     match item.kind {
         PortableAssetKind::Command => {
             let dir = root.join("commands");
@@ -1329,7 +1573,7 @@ async fn install_payload_to_target(
                     if let Ok(manifest) = store.get_tree(&skill.tree_manifest_hash).await {
                         std::fs::create_dir_all(&dir)?;
                         for entry in &manifest.entries {
-                            let dest = dir.join(&entry.path);
+                            let dest = safe_tree_dest(&dir, &entry.path)?;
                             if let Some(parent) = dest.parent() {
                                 std::fs::create_dir_all(parent)?;
                             }
@@ -1368,14 +1612,70 @@ async fn install_payload_to_target(
             if change.install_mode == PortablePullInstallMode::SkipExisting && dir.exists() {
                 return Ok(());
             }
+            // 目录 Plugin：portablePluginTreeRef + CAS tree 还原；禁止 hash 清单当 plugin.json
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if v.get("kind").and_then(|k| k.as_str()) == Some("portablePluginTreeRef") {
+                    let tree_hash = v
+                        .get("treeManifestHash")
+                        .and_then(|h| h.as_str())
+                        .unwrap_or("");
+                    if tree_hash.is_empty() {
+                        return Err(AppError::validation(
+                            "PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE".to_string(),
+                        ));
+                    }
+                    let manifest = store.get_tree(tree_hash).await.map_err(|_| {
+                        AppError::validation(format!(
+                            "PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE:{tree_hash}"
+                        ))
+                    })?;
+                    std::fs::create_dir_all(&dir)?;
+                    for entry in &manifest.entries {
+                        let dest = safe_tree_dest(&dir, &entry.path)?;
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        if matches!(entry.entry_type, TreeEntryType::File) {
+                            let blob = store.get_blob(&entry.blob_hash).await?;
+                            std::fs::write(&dest, blob)?;
+                        }
+                    }
+                    return Ok(());
+                }
+                // 旧 path+hash-only 清单：fail-closed，绝不当 plugin.json 假成功
+                if v.get("kind").and_then(|k| k.as_str()) == Some("portablePluginTree") {
+                    return Err(AppError::validation(
+                        "PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE".to_string(),
+                    ));
+                }
+            }
+            // 单文件 plugin.json body
             std::fs::create_dir_all(&dir)?;
             std::fs::write(dir.join("plugin.json"), &bytes)?;
         }
         PortableAssetKind::Mcp => {
+            // 权威 MCP 配置路径：Claude 用 home/.claude.json（非 ~/.claude/.claude.json）；
+            // OpenCode 尊重 OPENCODE_CONFIG / jsonc。
             let path = match item.target {
-                AgentTarget::Claude => root.join(".claude.json"),
+                AgentTarget::Claude => {
+                    if item.scope_id.starts_with("project:") {
+                        // 项目 MCP：优先 `.mcp.json` 再 settings.local.json
+                        let project_root = root
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| root.clone());
+                        let mcp = project_root.join(".mcp.json");
+                        if mcp.exists() {
+                            mcp
+                        } else {
+                            root.join("settings.local.json")
+                        }
+                    } else {
+                        resolve_claude_mcp_config_path()
+                    }
+                }
                 AgentTarget::Codex => root.join("config.toml"),
-                AgentTarget::OpenCode => root.join("opencode.json"),
+                AgentTarget::OpenCode => resolve_opencode_mcp_config_path(&root),
             };
             if let Ok(payload) = from_canonical_bytes(&bytes) {
                 if let PortableAssetPayload::Mcp(server) = payload {
@@ -1389,10 +1689,7 @@ async fn install_payload_to_target(
                         let existing = {
                             use crate::agent_hub::config_patch::SemanticConfigPatcher;
                             JsoncConfigPatcher
-                                .inspect(
-                                    &current_bytes,
-                                    &["mcpServers".into(), server.key.clone()],
-                                )
+                                .inspect(&current_bytes, &["mcpServers".into(), server.key.clone()])
                                 .ok()
                         };
                         if change.install_mode == PortablePullInstallMode::SkipExisting
@@ -1400,7 +1697,8 @@ async fn install_payload_to_target(
                         {
                             return Ok(());
                         }
-                        let value = serde_json::to_value(&server).unwrap_or(serde_json::json!({}));
+                        // 原生 CLI shape（command/args/env 或 url/headers），禁止 Hub DTO 直序列化
+                        let value = native_mcp_leaf_value(item.target, &server)?;
                         let expected = existing.and_then(|o| {
                             if o.present {
                                 Some(value_content_hash(&o.value))
@@ -1414,11 +1712,11 @@ async fn install_payload_to_target(
                             value: Some(value),
                             expected_base_hash: expected,
                         }];
-                        let prepared = apply_config_patch_atomically(
-                            &JsoncConfigPatcher,
-                            &path,
-                            &patches,
-                        )?;
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        let prepared =
+                            apply_config_patch_atomically(&JsoncConfigPatcher, &path, &patches)?;
                         if !matches!(
                             prepared.patched.outcome,
                             crate::agent_hub::config_patch::ConfigPatchOutcome::Applied
@@ -1599,9 +1897,13 @@ mod tests {
             partial: false,
             items: vec![],
         };
-        repo.complete_portable_pull_plan("plan-a", "req-1", &serde_json::to_string(&result).unwrap())
-            .await
-            .unwrap();
+        repo.complete_portable_pull_plan(
+            "plan-a",
+            "req-1",
+            &serde_json::to_string(&result).unwrap(),
+        )
+        .await
+        .unwrap();
         let replay = repo
             .claim_portable_pull_plan("plan-a", "req-1")
             .await
@@ -1681,12 +1983,192 @@ mod tests {
         let payload = vec![1u8, 2, 3, 4, 5];
         let hash = sha256_hex(&payload);
         built.object_bytes.insert(hash.clone(), payload.clone());
-        staging().lock().unwrap().insert("tid-resume".into(), built);
+        staging_insert("tid-resume".into(), built).unwrap();
         let c1 = source_read_object_chunk("tid-resume", &hash, 0).unwrap();
         assert_eq!(c1, payload);
-        let c2 = source_read_object_chunk("tid-resume", &hash, 2).unwrap();
+        // full read of single object cleans staging
+        assert!(
+            staging().lock().unwrap().get("tid-resume").is_none(),
+            "staging must drop transfer after full object transfer"
+        );
+        // re-stage for offset resume check
+        let mut built2 = BuiltPortableSelection {
+            envelope: SnapshotEnvelopeV1 {
+                format: "cc-partner-agent-hub".into(),
+                format_version: 1,
+                canonicalization: "RFC8785-JSON".into(),
+                snapshot_id: "s".into(),
+                snapshot_hash: "0".repeat(64),
+                source_replica_id: "d".into(),
+                created_at: "t".into(),
+                selection: SnapshotSelection {
+                    scope_ids: vec![],
+                    asset_ids: vec![],
+                    include_history: false,
+                },
+                asset_heads: BTreeMap::new(),
+                assets: vec![],
+                lineages: vec![],
+                revisions: vec![],
+                variants: vec![],
+                conflicts: vec![],
+                aliases: vec![],
+                objects: vec![],
+            },
+            items: vec![],
+            object_bytes: BTreeMap::new(),
+        };
+        // multi-object keeps staging until explicit release
+        let p2 = vec![9u8, 8, 7];
+        let h2 = sha256_hex(&p2);
+        built2.object_bytes.insert(hash.clone(), payload.clone());
+        built2.object_bytes.insert(h2.clone(), p2.clone());
+        staging_insert("tid-multi".into(), built2).unwrap();
+        let c2 = source_read_object_chunk("tid-multi", &hash, 2).unwrap();
         assert_eq!(c2, payload[2..]);
-        let c3 = source_read_object_chunk("tid-resume", &hash, 100).unwrap();
-        assert!(c3.is_empty());
+        assert!(staging().lock().unwrap().contains_key("tid-multi"));
+        source_release_transfer("tid-multi");
+        assert!(!staging().lock().unwrap().contains_key("tid-multi"));
+        let missing = source_read_object_chunk("tid-resume", &hash, 100);
+        assert!(missing.is_err());
+    }
+
+    #[test]
+    fn safe_tree_dest_rejects_traversal() {
+        let dir = PathBuf::from("/tmp/skill-root");
+        assert!(safe_tree_dest(&dir, "SKILL.md").is_ok());
+        assert!(safe_tree_dest(&dir, "nested/file.txt").is_ok());
+        assert!(safe_tree_dest(&dir, "../escape").is_err());
+        assert!(safe_tree_dest(&dir, "/abs/path").is_err());
+        assert!(safe_tree_dest(&dir, "a/../../b").is_err());
+        let err = safe_tree_dest(&dir, "../x").unwrap_err();
+        assert!(err.to_string().contains("PORTABLE_PULL_UNSAFE_TREE_PATH"));
+    }
+
+    #[test]
+    fn native_mcp_leaf_is_cli_shape_not_hub_dto() {
+        use crate::agent_hub::assets::{McpTransport, PortableMcpServer};
+        use std::collections::BTreeMap;
+        let server = PortableMcpServer {
+            key: "demo".into(),
+            transport: McpTransport::Stdio {
+                command: "uvx".into(),
+                args: vec!["svc".into()],
+                cwd: None,
+            },
+            env: {
+                let mut m = BTreeMap::new();
+                m.insert("TOKEN".into(), "secret-value".into());
+                m
+            },
+            enabled: true,
+            tool_allow: vec!["x".into()],
+            tool_deny: vec![],
+            target_extensions: BTreeMap::new(),
+        };
+        let v = native_mcp_leaf_value(AgentTarget::Claude, &server).unwrap();
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(s.contains("\"command\""));
+        assert!(s.contains("\"args\""));
+        assert!(!s.contains("\"key\""), "must not embed hub key field");
+        assert!(
+            !s.contains("toolAllow") && !s.contains("tool_allow"),
+            "must not embed hub toolAllow"
+        );
+        // credentials preserved in env bytes but never logged by this helper
+        assert_eq!(v["env"]["TOKEN"], "secret-value");
+    }
+
+    #[test]
+    fn claude_mcp_config_path_is_home_dot_claude_json_by_default() {
+        // When CLAUDE_CONFIG_DIR unset, scanner & pull share ~/.claude.json (not ~/.claude/.claude.json)
+        let path = {
+            // isolate: clear env for assertion of default branch via pure logic
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+            if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+                // still must be <CLAUDE_CONFIG_DIR>/.claude.json shape
+                let p = resolve_claude_mcp_config_path();
+                assert!(p.ends_with(".claude.json"));
+                p
+            } else {
+                let p = resolve_claude_mcp_config_path();
+                assert_eq!(p, home.join(".claude.json"));
+                p
+            }
+        };
+        assert!(
+            !path.to_string_lossy().ends_with(".claude/.claude.json")
+                || std::env::var_os("CLAUDE_CONFIG_DIR").is_some(),
+            "default path must not nest under ~/.claude/"
+        );
+    }
+
+    #[test]
+    fn plugin_hash_list_payload_is_rejected_contract() {
+        let src = include_str!("pull.rs");
+        assert!(src.contains("PORTABLE_PULL_PLUGIN_TREE_UNAVAILABLE"));
+        assert!(src.contains("portablePluginTreeRef"));
+        assert!(src.contains("PORTABLE_PULL_UNSAFE_TREE_PATH"));
+        assert!(src.contains("PORTABLE_PULL_STAGING_LIMIT"));
+        assert!(src.contains("PORTABLE_PULL_REMOTE_INVENTORY_STALE"));
+        assert!(src.contains("native_mcp_leaf_value"));
+        assert!(src.contains("resolve_claude_mcp_config_path"));
+    }
+
+    #[test]
+    fn staging_limit_rejects_oversized() {
+        // Construct many tiny staged transfers until limit
+        let make = |id: &str| {
+            let mut built = BuiltPortableSelection {
+                envelope: SnapshotEnvelopeV1 {
+                    format: "cc-partner-agent-hub".into(),
+                    format_version: 1,
+                    canonicalization: "RFC8785-JSON".into(),
+                    snapshot_id: id.into(),
+                    snapshot_hash: "0".repeat(64),
+                    source_replica_id: "d".into(),
+                    created_at: "t".into(),
+                    selection: SnapshotSelection {
+                        scope_ids: vec![],
+                        asset_ids: vec![],
+                        include_history: false,
+                    },
+                    asset_heads: BTreeMap::new(),
+                    assets: vec![],
+                    lineages: vec![],
+                    revisions: vec![],
+                    variants: vec![],
+                    conflicts: vec![],
+                    aliases: vec![],
+                    objects: vec![],
+                },
+                items: vec![],
+                object_bytes: BTreeMap::new(),
+            };
+            built.object_bytes.insert(format!("h-{id}"), vec![1u8; 16]);
+            built
+        };
+        // clear any prior
+        {
+            let mut g = staging().lock().unwrap();
+            g.clear();
+        }
+        for i in 0..STAGING_MAX_ENTRIES {
+            staging_insert(format!("lim-{i}"), make(&format!("lim-{i}"))).unwrap();
+        }
+        // next should still succeed after evicting oldest
+        staging_insert("lim-extra".into(), make("lim-extra")).unwrap();
+        // force hard limit by filling bytes with huge payload after clear
+        {
+            let mut g = staging().lock().unwrap();
+            g.clear();
+        }
+        let mut huge = make("huge");
+        huge.object_bytes.insert(
+            "big".into(),
+            vec![0u8; (STAGING_MAX_TOTAL_BYTES as usize) + 1],
+        );
+        let err = staging_insert("huge".into(), huge).unwrap_err();
+        assert!(err.to_string().contains("PORTABLE_PULL_STAGING_LIMIT"));
     }
 }
