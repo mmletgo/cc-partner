@@ -895,6 +895,8 @@ export function AgentHubView(props: AgentHubViewProps) {
         pluginReport={portablePluginSummary}
         busy={portableActionBusy}
         error={portableActionError}
+        mutationBlocked={portableInventory.mutationBlocked}
+        stale={portableInventory.stale}
         onClose={closePortableDetails}
         onRequestAction={(action) => {
           if (!portableSelectedItem) return;
@@ -918,6 +920,8 @@ export function AgentHubView(props: AgentHubViewProps) {
         busy={portableActionBusy}
         error={portableActionError}
         clientRequestId={portableActionClientRequestId}
+        mutationBlocked={portableInventory.mutationBlocked}
+        stale={portableInventory.stale}
         onPreview={(request) => {
           void previewPortableAction(request);
         }}

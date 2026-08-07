@@ -277,4 +277,42 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     expect(screen.getByTestId('portable-asset-details-drawer')).toBeTruthy();
     expect(screen.getByTestId('portable-asset-details-empty')).toBeTruthy();
   });
+
+  test('mutationBlocked hides mutation affordances', () => {
+    const onRequestAction = vi.fn();
+    const item = baseItem('skill');
+
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        mutationBlocked
+        onClose={() => undefined}
+        onRequestAction={onRequestAction}
+      />,
+    );
+
+    expect(screen.queryByTestId('portable-action-enable')).toBeNull();
+    expect(screen.queryByTestId('portable-action-disable')).toBeNull();
+    expect(screen.queryByTestId('portable-action-uninstall')).toBeNull();
+    expect(screen.getByTestId('portable-action-uninstall-blocked')).toBeTruthy();
+  });
+
+  test('desired enabled uses i18n keys instead of hard-coded English', () => {
+    const item = baseItem('skill', { desiredEnabled: true });
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        onClose={() => undefined}
+        onRequestAction={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId('portable-asset-desired').textContent).toContain(
+      'agentHub:portable.details.desiredEnabled',
+    );
+    expect(screen.getByTestId('portable-asset-desired').textContent).not.toMatch(
+      /\benabled\b|\bdisabled\b/,
+    );
+  });
 });

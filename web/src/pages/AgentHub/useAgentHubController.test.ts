@@ -60,24 +60,29 @@ vi.mock('react-router-dom', async () => {
   };
 });
 
+const portableApiMocks = vi.hoisted(() => ({
+  inspect: vi.fn(),
+  previewAction: vi.fn(),
+  applyAction: vi.fn(),
+  getAction: vi.fn(),
+  listRemoteInventory: vi.fn(),
+  previewPull: vi.fn(),
+  applyPull: vi.fn(),
+  getPull: vi.fn(),
+}));
+
 vi.mock('@/api/portableInventory', () => ({
   portableAssetApi: {
-    inspect: vi.fn(async () => ({
-      inventorySnapshotHash: 'snap',
-      refreshedAt: '2026-08-07T00:00:00.000Z',
-      stale: false,
-      targets: [],
-      items: [],
-    })),
-    previewAction: vi.fn(),
-    applyAction: vi.fn(),
-    getAction: vi.fn(),
+    inspect: (...args: unknown[]) => portableApiMocks.inspect(...args),
+    previewAction: (...args: unknown[]) => portableApiMocks.previewAction(...args),
+    applyAction: (...args: unknown[]) => portableApiMocks.applyAction(...args),
+    getAction: (...args: unknown[]) => portableApiMocks.getAction(...args),
   },
   portablePullApi: {
-    listRemoteInventory: vi.fn(),
-    previewPull: vi.fn(),
-    applyPull: vi.fn(),
-    getPull: vi.fn(),
+    listRemoteInventory: (...args: unknown[]) => portableApiMocks.listRemoteInventory(...args),
+    previewPull: (...args: unknown[]) => portableApiMocks.previewPull(...args),
+    applyPull: (...args: unknown[]) => portableApiMocks.applyPull(...args),
+    getPull: (...args: unknown[]) => portableApiMocks.getPull(...args),
   },
 }));
 
@@ -88,6 +93,94 @@ vi.mock('@/api/devices', () => ({
 }));
 
 import { useAgentHubController } from './useAgentHubController';
+import type {
+  PortableAssetActionPlanDto,
+  PortableInventoryItemDto,
+  PortableInventorySnapshotDto,
+} from '@/lib/types/portableInventory';
+
+function makePortableItem(
+  overrides: Partial<PortableInventoryItemDto> = {},
+): PortableInventoryItemDto {
+  return {
+    inventoryItemId: 'claude-skill-alpha',
+    target: 'claude',
+    kind: 'skill',
+    nativeId: 'alpha',
+    displayName: 'Alpha',
+    description: null,
+    version: null,
+    scopeId: 'user',
+    scopeKind: 'user',
+    projectId: null,
+    projectOptedIn: true,
+    sourcePath: '/tmp/alpha',
+    sourceOrigin: 'standalone',
+    parentPluginInventoryItemId: null,
+    actualEnabled: true,
+    contentHash: 'hash-alpha',
+    treeHash: null,
+    canonicalAssetId: 'canon-alpha',
+    canonicalRevisionId: 'rev-alpha',
+    managementState: 'hubManaged',
+    desiredPresence: 'present',
+    desiredEnabled: true,
+    materializationStatus: 'verified',
+    capabilities: {
+      canEnable: true,
+      canDisable: true,
+      canUninstall: true,
+      canAdopt: false,
+      canInstallToSourceTarget: false,
+      reasonCode: null,
+      evidenceIds: [],
+    },
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function portableSnapshot(
+  items: PortableInventoryItemDto[],
+  stale = false,
+): PortableInventorySnapshotDto {
+  return {
+    inventorySnapshotHash: 'snap-ok',
+    refreshedAt: '2026-08-07T00:00:00.000Z',
+    stale,
+    targets: [],
+    items,
+  };
+}
+
+function portablePlanFixture(): PortableAssetActionPlanDto {
+  return {
+    planToken: 'plan-token-1',
+    expiresAt: '2026-08-07T12:15:00.000Z',
+    inventorySnapshotHash: 'snap-ok',
+    action: 'disable',
+    keepData: false,
+    conflictPolicy: 'skipExisting',
+    changes: [
+      {
+        inventoryItemId: 'claude-skill-alpha',
+        target: 'claude',
+        kind: 'skill',
+        path: '/tmp/alpha',
+        operation: 'disable',
+        expectedSourceHash: 'hash-alpha',
+        expectedTreeHash: null,
+        expectedCanonicalRevisionId: 'rev-alpha',
+        backupPolicy: 'none',
+        createsOwnership: false,
+        canonicalEffect: 'updateDesired',
+        blockingReasons: [],
+        warnings: [],
+      },
+    ],
+    blockingReasons: [],
+  };
+}
 
 const statusOk: AgentHubStatus = {
   enabled: true,
@@ -170,6 +263,32 @@ describe('useAgentHubController', () => {
     setTargetPresence.mockResolvedValue(assetSummary);
     restoreDetachedTarget.mockResolvedValue(assetSummary);
     deleteAssetEverywhere.mockResolvedValue(assetSummary);
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
+    portableApiMocks.previewAction.mockResolvedValue(portablePlanFixture());
+    portableApiMocks.applyAction.mockResolvedValue({
+      planToken: 'plan-token-1',
+      clientRequestId: 'req-1',
+      items: [
+        {
+          inventoryItemId: 'claude-skill-alpha',
+          state: 'succeeded',
+          errorCode: null,
+          message: null,
+        },
+      ],
+    });
+    portableApiMocks.getAction.mockResolvedValue({
+      planToken: 'plan-token-1',
+      clientRequestId: 'req-1',
+      items: [
+        {
+          inventoryItemId: 'claude-skill-alpha',
+          state: 'succeeded',
+          errorCode: null,
+          message: null,
+        },
+      ],
+    });
   });
 
   test('deep links select the advanced workspace that owns the requested surface', () => {
@@ -462,6 +581,163 @@ describe('useAgentHubController', () => {
     expect(result.current.adoptionPreview?.diagnostics).toEqual(
       expect.arrayContaining(['collision-path', 'materialization:externalCollision']),
     );
+  });
+
+  test('H1: preview then inventory refresh fail must not allow applyAction on confirm', async () => {
+    const item = makePortableItem();
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
+
+    act(() => {
+      result.current.requestPortableAction(item.inventoryItemId, 'disable');
+    });
+    expect(result.current.portableActionOpen).toBe(true);
+
+    await act(async () => {
+      await result.current.previewPortableAction({
+        inventorySnapshotHash: 'snap-ok',
+        inventoryItemIds: [item.inventoryItemId],
+        action: 'disable',
+        keepData: false,
+        conflictPolicy: 'skipExisting',
+        expectedCanonicalRevisionId: item.canonicalRevisionId,
+      });
+    });
+    expect(portableApiMocks.previewAction).toHaveBeenCalledTimes(1);
+    expect(result.current.portableActionPlan?.planToken).toBe('plan-token-1');
+    const clientRequestId = result.current.portableActionClientRequestId;
+    expect(clientRequestId).toBeTruthy();
+
+    portableApiMocks.inspect.mockRejectedValueOnce(new Error('inspect failed'));
+    await act(async () => {
+      await result.current.portableInventory.refresh();
+    });
+    expect(result.current.portableInventory.stale).toBe(true);
+    expect(result.current.portableInventory.mutationBlocked).toBe(true);
+
+    await act(async () => {
+      await result.current.confirmPortableAction('plan-token-1', clientRequestId!);
+    });
+
+    expect(portableApiMocks.applyAction).not.toHaveBeenCalled();
+    expect(result.current.portableActionError).toBeTruthy();
+    expect(result.current.portableActionBusy).toBe(false);
+  });
+
+  test('M1: double preview before re-render only starts one previewAction', async () => {
+    const item = makePortableItem();
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
+    let resolvePreview!: (value: PortableAssetActionPlanDto) => void;
+    const previewPromise = new Promise<PortableAssetActionPlanDto>((resolve) => {
+      resolvePreview = resolve;
+    });
+    portableApiMocks.previewAction.mockReturnValueOnce(previewPromise);
+
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
+
+    act(() => {
+      result.current.requestPortableAction(item.inventoryItemId, 'disable');
+    });
+
+    const request = {
+      inventorySnapshotHash: 'snap-ok',
+      inventoryItemIds: [item.inventoryItemId],
+      action: 'disable' as const,
+      keepData: false,
+      conflictPolicy: 'skipExisting' as const,
+      expectedCanonicalRevisionId: item.canonicalRevisionId,
+    };
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = result.current.previewPortableAction(request);
+      second = result.current.previewPortableAction(request);
+      await Promise.resolve();
+    });
+    expect(portableApiMocks.previewAction).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolvePreview(portablePlanFixture());
+      await Promise.all([first, second]);
+    });
+    expect(result.current.portableActionPlan?.planToken).toBe('plan-token-1');
+    expect(result.current.portableActionBusy).toBe(false);
+  });
+
+  test('M1: confirm refuses entry when already busy', async () => {
+    const item = makePortableItem();
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
+    let resolveApply!: (value: {
+      planToken: string;
+      clientRequestId: string;
+      items: Array<{
+        inventoryItemId: string;
+        state: 'succeeded';
+        errorCode: null;
+        message: null;
+      }>;
+    }) => void;
+    const applyPromise = new Promise<{
+      planToken: string;
+      clientRequestId: string;
+      items: Array<{
+        inventoryItemId: string;
+        state: 'succeeded';
+        errorCode: null;
+        message: null;
+      }>;
+    }>((resolve) => {
+      resolveApply = resolve;
+    });
+    portableApiMocks.applyAction.mockReturnValueOnce(applyPromise);
+
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
+
+    act(() => {
+      result.current.requestPortableAction(item.inventoryItemId, 'disable');
+    });
+    await act(async () => {
+      await result.current.previewPortableAction({
+        inventorySnapshotHash: 'snap-ok',
+        inventoryItemIds: [item.inventoryItemId],
+        action: 'disable',
+        keepData: false,
+        conflictPolicy: 'skipExisting',
+        expectedCanonicalRevisionId: item.canonicalRevisionId,
+      });
+    });
+    const clientRequestId = result.current.portableActionClientRequestId!;
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = result.current.confirmPortableAction('plan-token-1', clientRequestId);
+      second = result.current.confirmPortableAction('plan-token-1', clientRequestId);
+      await Promise.resolve();
+    });
+    expect(portableApiMocks.applyAction).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveApply({
+        planToken: 'plan-token-1',
+        clientRequestId,
+        items: [
+          {
+            inventoryItemId: item.inventoryItemId,
+            state: 'succeeded',
+            errorCode: null,
+            message: null,
+          },
+        ],
+      });
+      await Promise.all([first, second]);
+    });
+    expect(portableApiMocks.applyAction).toHaveBeenCalledTimes(1);
   });
 });
 

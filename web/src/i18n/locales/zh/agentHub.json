@@ -539,6 +539,8 @@
       "actualDisabled": "磁盘上已禁用",
       "canonical": "Canonical 修订",
       "desired": "期望存在性",
+      "desiredEnabled": "已启用",
+      "desiredDisabled": "已禁用",
       "materialization": "落盘状态",
       "package": "包",
       "activation": "激活",
@@ -566,7 +568,8 @@
       "reconcile": "核对结果",
       "fullSuccess": "全部选中项已成功或跳过。",
       "partial": "部分项失败或被阻止，请查看逐项报告。",
-      "outcomeUnknown": "结果未知。请先核对，再使用新的请求 id 重试。"
+      "outcomeUnknown": "结果未知。请先核对，再使用新的请求 id 重试。",
+      "mutationBlocked": "库存已过期。成功刷新前禁止预览与应用。"
     }
   },
   "portablePull": {

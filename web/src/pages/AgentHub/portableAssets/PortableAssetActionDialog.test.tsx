@@ -375,4 +375,59 @@ describe('PortableAssetActionDialog state machine', () => {
     );
     expect(screen.getByTestId('portable-action-plan-token').textContent).toContain('plan-token-1');
   });
+
+  test('mutationBlocked / stale disables preview and confirm', () => {
+    const onPreview = vi.fn();
+    const onConfirm = vi.fn();
+    const { rerender } = render(
+      <PortableAssetActionDialog
+        open
+        item={item}
+        action="uninstall"
+        inventorySnapshotHash="snap-hash-3x4"
+        plan={null}
+        result={null}
+        busy={false}
+        error={null}
+        clientRequestId={null}
+        mutationBlocked
+        onPreview={onPreview}
+        onConfirm={onConfirm}
+        onReconcile={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(
+      (screen.getByTestId('portable-action-run-preview') as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByTestId('portable-action-run-preview'));
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(screen.getByTestId('portable-action-stale-banner')).toBeTruthy();
+
+    rerender(
+      <PortableAssetActionDialog
+        open
+        item={item}
+        action="uninstall"
+        inventorySnapshotHash="snap-hash-3x4"
+        plan={planFixture()}
+        result={null}
+        busy={false}
+        error={null}
+        clientRequestId="req-1"
+        stale
+        onPreview={onPreview}
+        onConfirm={onConfirm}
+        onReconcile={() => undefined}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(
+      (screen.getByTestId('portable-action-confirm') as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByTestId('portable-action-confirm'));
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
 });

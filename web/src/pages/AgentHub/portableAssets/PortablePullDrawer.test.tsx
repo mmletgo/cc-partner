@@ -256,7 +256,15 @@ describe('PortablePullDrawer', () => {
     expect(screen.getByTestId('portable-pull-result-remote-mcp-1').textContent).toContain(
       'outcomeUnknown',
     );
-    expect(screen.getByTestId('portable-pull-progress').textContent).toMatch(/partial|outcomeUnknown|1/);
+    const progressText = screen.getByTestId('portable-pull-progress').textContent ?? '';
+    expect(progressText).toContain('agentHub:portablePull.progressSummary');
+    expect(progressText).toContain('"succeeded":1');
+    expect(progressText).toContain('"skipped":0');
+    expect(progressText).toContain('"failed":0');
+    expect(progressText).toContain('"blocked":0');
+    expect(progressText).toContain('"unknown":1');
+    expect(progressText).toContain('"total":2');
+    expect(progressText).not.toContain('outcomeUnknown');
   });
 
   it('disables confirm when mutationBlocked or cannot apply', () => {

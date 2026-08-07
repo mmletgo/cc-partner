@@ -348,6 +348,8 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [portableActionClientRequestId, setPortableActionClientRequestId] = useState<string | null>(
     null,
   );
+  /** 同步 busy 门闩：防止 re-render 前双击启动两次 preview/apply。 */
+  const portableActionBusyRef = useRef(false);
   const portableFiltersBootRef = useRef(false);
   const portableUrlSyncSkipRef = useRef(true);
 
@@ -1283,6 +1285,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   const previewPortableAction = useCallback(
     async (request: PreviewPortableAssetActionRequest) => {
+      // 同步 busy 门闩：双击在 re-render 前不得启动第二次 preview。
+      if (portableActionBusyRef.current) return;
+      // stale 禁止 mutation：preview 也不得在 mutationBlocked 时发出。
+      if (portableInventoryBase.mutationBlocked || portableInventoryBase.stale) {
+        setPortableActionError(t('agentHub:portable.actionDialog.mutationBlocked'));
+        return;
+      }
+      portableActionBusyRef.current = true;
       setPortableActionBusy(true);
       setPortableActionError(null);
       setPortableActionResult(null);
@@ -1295,15 +1305,24 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (!mountedRef.current) return;
         setPortableActionError(toErrorMessage(reason));
       } finally {
+        portableActionBusyRef.current = false;
         if (mountedRef.current) setPortableActionBusy(false);
       }
     },
-    [mintClientRequestId],
+    [mintClientRequestId, portableInventoryBase.mutationBlocked, portableInventoryBase.stale, t],
   );
 
   const confirmPortableAction = useCallback(
     async (planToken: string, clientRequestId: string) => {
+      // 同步 busy 门闩：confirm 在已 busy 时直接拒绝。
+      if (portableActionBusyRef.current) return;
+      // H1: preview 成功后 inventory 变 stale 时禁止 apply。
+      if (portableInventoryBase.mutationBlocked || portableInventoryBase.stale) {
+        setPortableActionError(t('agentHub:portable.actionDialog.mutationBlocked'));
+        return;
+      }
       const itemId = portableInventoryBase.pendingAction?.itemId;
+      portableActionBusyRef.current = true;
       setPortableActionBusy(true);
       setPortableActionError(null);
       if (itemId) portableInventoryBase.setItemLocked(itemId, true);
@@ -1319,14 +1338,18 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         setPortableActionError(toErrorMessage(reason));
       } finally {
         if (itemId) portableInventoryBase.setItemLocked(itemId, false);
+        portableActionBusyRef.current = false;
         if (mountedRef.current) setPortableActionBusy(false);
       }
     },
-    [portableInventoryBase],
+    [portableInventoryBase, t],
   );
 
   const reconcilePortableAction = useCallback(
     async (clientRequestId: string) => {
+      // reconcile 是 getAction 对账（非 apply mutation），但 busy 仍需同步门闩。
+      if (portableActionBusyRef.current) return;
+      portableActionBusyRef.current = true;
       setPortableActionBusy(true);
       setPortableActionError(null);
       try {
@@ -1338,6 +1361,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (!mountedRef.current) return;
         setPortableActionError(toErrorMessage(reason));
       } finally {
+        portableActionBusyRef.current = false;
         if (mountedRef.current) setPortableActionBusy(false);
       }
     },
@@ -1345,7 +1369,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   );
 
   const closePortableAction = useCallback(() => {
-    if (portableActionBusy) return;
+    if (portableActionBusy || portableActionBusyRef.current) return;
     portableInventoryBase.clearPendingAction();
     setPortableActionPlan(null);
     setPortableActionResult(null);

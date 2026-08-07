@@ -38,15 +38,22 @@ export interface PortableAssetDetailsDrawerProps {
   pluginReport?: PortablePluginDetailsSummary | null;
   busy?: boolean;
   error?: string | null;
+  /** inventory stale / mutationBlocked 时不暴露 Enable/Disable/Uninstall 等 mutation。 */
+  mutationBlocked?: boolean;
+  stale?: boolean;
   onClose: () => void;
   onRequestAction: (action: PortableAssetActionKind) => void;
 }
 
 /**
  * Business Logic: unsupported/stale 不暴露 mutation 动作。
- * Code Logic: capabilities + managementState 门闩。
+ * Code Logic: capabilities + managementState + inventory mutationBlocked 门闩。
  */
-function mutationAllowed(item: PortableInventoryItemDto): boolean {
+function mutationAllowed(
+  item: PortableInventoryItemDto,
+  inventoryBlocked: boolean,
+): boolean {
+  if (inventoryBlocked) return false;
   if (item.managementState === 'unsupported') return false;
   if (!item.projectOptedIn && item.scopeKind === 'project') return false;
   return true;
@@ -62,13 +69,19 @@ export function PortableAssetDetailsDrawer({
   pluginReport = null,
   busy = false,
   error = null,
+  mutationBlocked = false,
+  stale = false,
   onClose,
   onRequestAction,
 }: PortableAssetDetailsDrawerProps) {
   const { t } = useTranslation(['agentHub', 'common']);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
-  const canMutate = useMemo(() => (item ? mutationAllowed(item) : false), [item]);
+  const inventoryBlocked = mutationBlocked || stale;
+  const canMutate = useMemo(
+    () => (item ? mutationAllowed(item, inventoryBlocked) : false),
+    [item, inventoryBlocked],
+  );
   const reasonCode = item?.capabilities.reasonCode ?? null;
   const canEnable = Boolean(item?.capabilities.canEnable && canMutate);
   const canDisable = Boolean(item?.capabilities.canDisable && canMutate);
@@ -186,11 +199,15 @@ export function PortableAssetDetailsDrawer({
                   <span className={styles.metaLabel}>
                     {t('agentHub:portable.details.desired')}
                   </span>
-                  <span>
+                  <span data-testid="portable-asset-desired">
                     {item.desiredPresence ?? t('agentHub:portable.details.missing')}
                     {item.desiredEnabled === null
                       ? ''
-                      : ` / ${item.desiredEnabled ? 'enabled' : 'disabled'}`}
+                      : ` / ${
+                          item.desiredEnabled
+                            ? t('agentHub:portable.details.desiredEnabled')
+                            : t('agentHub:portable.details.desiredDisabled')
+                        }`}
                   </span>
                 </div>
                 <div>

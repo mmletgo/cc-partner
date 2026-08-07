@@ -31,6 +31,9 @@ export interface PortableAssetActionDialogProps {
   busy: boolean;
   error: string | null;
   clientRequestId: string | null;
+  /** inventory stale / mutationBlocked 时禁止 preview/confirm。 */
+  mutationBlocked?: boolean;
+  stale?: boolean;
   onPreview: (request: PreviewPortableAssetActionRequest) => void;
   onConfirm: (planToken: string, clientRequestId: string) => void;
   onReconcile: (clientRequestId: string) => void;
@@ -79,6 +82,8 @@ export function PortableAssetActionDialog({
   busy,
   error,
   clientRequestId,
+  mutationBlocked = false,
+  stale = false,
   onPreview,
   onConfirm,
   onReconcile,
@@ -92,21 +97,24 @@ export function PortableAssetActionDialog({
   );
 
   const outcome = useMemo(() => classifyActionOutcome(result), [result]);
+  // Global Constraints: stale 禁止 mutation —— preview 后 inventory 变 stale 也不得 confirm。
+  const inventoryBlocked = mutationBlocked || stale;
   const canConfirm = Boolean(
     plan &&
       clientRequestId &&
       planIsActionable(plan) &&
       !busy &&
+      !inventoryBlocked &&
       outcome === 'none',
   );
-  const canPreview = Boolean(item && action && inventorySnapshotHash && !busy);
+  const canPreview = Boolean(item && action && inventorySnapshotHash && !busy && !inventoryBlocked);
 
   /**
    * Business Logic: preview 必须显式发送 keepData/conflictPolicy/expected revision。
    * Code Logic: 组装 PreviewPortableAssetActionRequest。
    */
   function handlePreview() {
-    if (!item || !action || !inventorySnapshotHash) return;
+    if (!item || !action || !inventorySnapshotHash || !canPreview) return;
     onPreview({
       inventorySnapshotHash,
       inventoryItemIds: [item.inventoryItemId],
@@ -153,6 +161,12 @@ export function PortableAssetActionDialog({
           })}
         </h2>
         <p className={styles.drawerSubtitle}>{t('agentHub:portable.actionDialog.subtitle')}</p>
+
+        {inventoryBlocked ? (
+          <StatusMessage tone="warn" data-testid="portable-action-stale-banner">
+            {t('agentHub:portable.actionDialog.mutationBlocked')}
+          </StatusMessage>
+        ) : null}
 
         {error ? (
           <StatusMessage tone="danger" data-testid="portable-action-error">

@@ -539,6 +539,8 @@
       "actualDisabled": "Disabled on disk",
       "canonical": "Canonical revision",
       "desired": "Desired presence",
+      "desiredEnabled": "enabled",
+      "desiredDisabled": "disabled",
       "materialization": "Materialization",
       "package": "Package",
       "activation": "Activation",
@@ -566,7 +568,8 @@
       "reconcile": "Reconcile result",
       "fullSuccess": "All selected items succeeded or were skipped.",
       "partial": "Some items failed or were blocked. Review the per-item report.",
-      "outcomeUnknown": "Outcome is unknown. Reconcile before retrying with a new request id."
+      "outcomeUnknown": "Outcome is unknown. Reconcile before retrying with a new request id.",
+      "mutationBlocked": "Inventory is stale. Preview and apply are blocked until a successful refresh."
     }
   },
   "portablePull": {

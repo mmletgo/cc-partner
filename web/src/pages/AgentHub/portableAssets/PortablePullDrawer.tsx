@@ -478,9 +478,7 @@ export function PortablePullDrawer(props: PortablePullDrawerProps) {
                   skipped: progress.skipped,
                   failed: progress.failed,
                   blocked: progress.blocked,
-                  importedCanonicalOnly: progress.importedCanonicalOnly,
-                  outcomeUnknown: progress.outcomeUnknown,
-                  partial: progress.partial,
+                  unknown: progress.outcomeUnknown,
                 })}
               </p>
               <ul className={styles.replicationList}>
