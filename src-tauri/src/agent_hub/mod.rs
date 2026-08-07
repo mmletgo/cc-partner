@@ -45,6 +45,7 @@ pub mod packages;
 pub mod plugins;
 pub mod portable_actions;
 pub mod portable_inventory;
+pub mod portable_service;
 pub mod project_scope;
 pub mod projection;
 pub mod projection_ops;
@@ -145,6 +146,7 @@ pub use portable_inventory::{
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
     PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableScanScope,
 };
+pub use portable_service::PortableService;
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,
     AgentHubProjectPreview, AgentHubProjectStatus, EnableAgentHubProjectRequest,

@@ -1397,6 +1397,59 @@ impl BackendControlClient {
             .await
     }
 
+    /// Business Logic: GuiClient 读取 sidecar owner 的本机 portable inventory（只读）。
+    /// Code Logic: agent_hub.inspect_portable_inventory；QUERY_TIMEOUT。
+    pub async fn agent_hub_inspect_portable_inventory(
+        &self,
+    ) -> Result<crate::agent_hub::PortableInventorySnapshotDto, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.inspect_portable_inventory",
+            serde_json::json!({}),
+            QUERY_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Business Logic: preview 属 v3 mutation 合同，旧 sidecar 不得静默降级。
+    /// Code Logic: 写兼容门闩 + agent_hub.preview_portable_asset_action。
+    pub async fn agent_hub_preview_portable_asset_action(
+        &self,
+        req: crate::agent_hub::PreviewPortableAssetActionRequest,
+    ) -> Result<crate::agent_hub::PortableAssetActionPlanDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.preview_portable_asset_action", req)
+            .await
+    }
+
+    /// Business Logic: apply 是长 mutation（目标文件 + rescan），需长超时。
+    /// Code Logic: 写兼容门闩 + agent_hub_op_with_timeout 360s。
+    pub async fn agent_hub_apply_portable_asset_action(
+        &self,
+        req: crate::agent_hub::ApplyPortableAssetActionRequest,
+    ) -> Result<crate::agent_hub::PortableAssetActionResultDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op_with_timeout(
+            "agent_hub.apply_portable_asset_action",
+            req,
+            Duration::from_secs(360),
+        )
+        .await
+    }
+
+    /// Business Logic: 按 clientRequestId 对账 apply 结果（只读）。
+    /// Code Logic: agent_hub.get_portable_asset_action；QUERY_TIMEOUT。
+    pub async fn agent_hub_get_portable_asset_action(
+        &self,
+        client_request_id: &str,
+    ) -> Result<crate::agent_hub::PortableAssetActionResultDto, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.get_portable_asset_action",
+            serde_json::json!({ "clientRequestId": client_request_id }),
+            QUERY_TIMEOUT,
+        )
+        .await
+    }
+
     /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -3429,15 +3482,15 @@ mod tests {
         assert_eq!(err.classify(), crate::error::AppErrorCategory::Conflict);
     }
 
-    /// 同 major v2 写兼容通过。
+    /// 同 major 当前版本写兼容通过。
     ///
     /// Business Logic（为什么需要这个测试）:
-    ///     新 GUI ↔ v2 backend 必须允许 mutation。
+    ///     新 GUI ↔ 当前 backend 必须允许 mutation。
     ///
     /// Code Logic（这个测试做什么）:
     ///     for_test 默认当前 AGENT_HUB_API_VERSION，require(current) → Ok。
     #[test]
-    fn agent_hub_write_compat_accepts_matching_v2() {
+    fn agent_hub_write_compat_accepts_matching_current_version() {
         let client = BackendControlClient::for_test(1, "tok", "owner").unwrap();
         assert_eq!(
             client.agent_hub_api_version(),
@@ -3454,14 +3507,50 @@ mod tests {
     ///     backend 宣告更高 major 时，旧 GUI 不得盲目写。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     version=3、required=2 → upgradeRequired。
+    ///     version=current+1、required=current → upgradeRequired。
     #[test]
     fn agent_hub_write_compat_rejects_higher_incompatible_major() {
+        let higher = crate::backend::control::AGENT_HUB_API_VERSION.saturating_add(1);
         let client =
-            BackendControlClient::for_test_with_agent_hub_version(1, "tok", "owner", 3).unwrap();
+            BackendControlClient::for_test_with_agent_hub_version(1, "tok", "owner", higher)
+                .unwrap();
         let err = client
             .require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)
             .unwrap_err();
         assert_eq!(err.code(), "upgradeRequired");
+    }
+
+    /// Business Logic: portable control client 必须暴露四操作，且超时分层正确。
+    /// Code Logic: 生产 fn 签名；inspect/get 用 QUERY_TIMEOUT；apply 用长 mutation。
+    #[test]
+    fn portable_control_client_methods_and_timeouts() {
+        let src = include_str!("control_client.rs");
+        for sig in [
+            "pub async fn agent_hub_inspect_portable_inventory(",
+            "pub async fn agent_hub_preview_portable_asset_action(",
+            "pub async fn agent_hub_apply_portable_asset_action(",
+            "pub async fn agent_hub_get_portable_asset_action(",
+        ] {
+            assert!(src.contains(sig), "missing client method {sig}");
+        }
+        assert!(src.contains("\"agent_hub.inspect_portable_inventory\""));
+        assert!(src.contains("\"agent_hub.preview_portable_asset_action\""));
+        assert!(src.contains("\"agent_hub.apply_portable_asset_action\""));
+        assert!(src.contains("\"agent_hub.get_portable_asset_action\""));
+        // inspect/get → agent_hub_op_with_timeout(..., QUERY_TIMEOUT)
+        assert!(
+            src.contains(
+                "agent_hub_op_with_timeout(\n            \"agent_hub.inspect_portable_inventory\""
+            ) || src.contains("agent_hub_op_with_timeout(\"agent_hub.inspect_portable_inventory\"")
+                || (src.contains("\"agent_hub.inspect_portable_inventory\"")
+                    && src.contains("QUERY_TIMEOUT")),
+            "inspect should use QUERY_TIMEOUT"
+        );
+        assert!(
+            src.contains("\"agent_hub.apply_portable_asset_action\"")
+                && src.contains("Duration::from_secs(360)"),
+            "apply should use long-mutation timeout"
+        );
+        assert_eq!(crate::backend::control::AGENT_HUB_API_VERSION, 3);
     }
 }

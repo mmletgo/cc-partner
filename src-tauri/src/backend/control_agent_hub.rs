@@ -14,6 +14,10 @@ use crate::agent_hub::git::preview::{
     preview_git_import_for_state, ConfirmGitImportRequest, ConfirmProjectMappingRequest,
 };
 use crate::agent_hub::object_store::ObjectStore;
+use crate::agent_hub::portable_actions::{
+    ApplyPortableAssetActionRequest, PreviewPortableAssetActionRequest,
+};
+use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::replication::sender::{
     get_push_report_for_state, push_selection_for_state, PushAgentHubSelectionRequest,
 };
@@ -328,6 +332,31 @@ async fn dispatch_agent_hub_op(
             let mapping = confirm_project_mapping_for_state(state, req).await?;
             Ok(serde_json::to_value(mapping)?)
         }
+        "agent_hub.inspect_portable_inventory" => {
+            let dto = PortableService::inspect_portable_inventory(state).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.preview_portable_asset_action" => {
+            let req: PreviewPortableAssetActionRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("preview_portable_asset_action payload: {e}"))
+                })?;
+            let dto = PortableService::preview_portable_asset_action(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.apply_portable_asset_action" => {
+            let req: ApplyPortableAssetActionRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("apply_portable_asset_action payload: {e}"))
+                })?;
+            let dto = PortableService::apply_portable_asset_action(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.get_portable_asset_action" => {
+            let client_request_id = required_string(&payload, "clientRequestId")?;
+            let dto = PortableService::get_portable_asset_action(state, &client_request_id).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
         other => Err(AppError::validation(format!(
             "未知 agent hub control op: {other}"
         ))),
@@ -361,6 +390,8 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.start_lan_push"
             | "agent_hub.confirm_git_import"
             | "agent_hub.confirm_project_mapping"
+            | "agent_hub.preview_portable_asset_action"
+            | "agent_hub.apply_portable_asset_action"
     )
 }
 
@@ -536,6 +567,10 @@ mod tests {
             "agent_hub.preview_git_import",
             "agent_hub.confirm_git_import",
             "agent_hub.confirm_project_mapping",
+            "agent_hub.inspect_portable_inventory",
+            "agent_hub.preview_portable_asset_action",
+            "agent_hub.apply_portable_asset_action",
+            "agent_hub.get_portable_asset_action",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
@@ -560,6 +595,8 @@ mod tests {
         assert!(is_mutation_op("agent_hub.start_lan_push"));
         assert!(is_mutation_op("agent_hub.confirm_git_import"));
         assert!(is_mutation_op("agent_hub.confirm_project_mapping"));
+        assert!(is_mutation_op("agent_hub.preview_portable_asset_action"));
+        assert!(is_mutation_op("agent_hub.apply_portable_asset_action"));
         assert!(!is_mutation_op("agent_hub.get_status"));
         assert!(!is_mutation_op(
             "agent_hub.inspect_user_instruction_workspace"
@@ -570,5 +607,51 @@ mod tests {
         assert!(!is_mutation_op("agent_hub.inspect_git_lanes"));
         assert!(!is_mutation_op("agent_hub.preview_git_import"));
         assert!(!is_mutation_op("agent_hub.get_lan_push"));
+        assert!(!is_mutation_op("agent_hub.inspect_portable_inventory"));
+        assert!(!is_mutation_op("agent_hub.get_portable_asset_action"));
+    }
+
+    /// Business Logic: portable preview/apply 属 v3 写路径；inspect/get 只读。
+    /// Code Logic: match 分发到 PortableService，且 mutation 分类正确（生产路径，非测试字面量）。
+    #[test]
+    fn portable_ops_are_dispatched_and_classified() {
+        let src = include_str!("control_agent_hub.rs");
+        // 生产 match arm 形态，避免测试数组字面量自命中
+        assert!(
+            src.contains("\"agent_hub.inspect_portable_inventory\" =>"),
+            "missing dispatch arm for inspect"
+        );
+        assert!(
+            src.contains("\"agent_hub.preview_portable_asset_action\" =>"),
+            "missing dispatch arm for preview"
+        );
+        assert!(
+            src.contains("\"agent_hub.apply_portable_asset_action\" =>"),
+            "missing dispatch arm for apply"
+        );
+        assert!(
+            src.contains("\"agent_hub.get_portable_asset_action\" =>"),
+            "missing dispatch arm for get"
+        );
+        assert!(
+            src.contains("PortableService::inspect_portable_inventory"),
+            "missing PortableService inspect call"
+        );
+        assert!(
+            src.contains("PortableService::preview_portable_asset_action"),
+            "missing PortableService preview call"
+        );
+        assert!(
+            src.contains("PortableService::apply_portable_asset_action"),
+            "missing PortableService apply call"
+        );
+        assert!(
+            src.contains("PortableService::get_portable_asset_action"),
+            "missing PortableService get call"
+        );
+        assert!(is_mutation_op("agent_hub.preview_portable_asset_action"));
+        assert!(is_mutation_op("agent_hub.apply_portable_asset_action"));
+        assert!(!is_mutation_op("agent_hub.inspect_portable_inventory"));
+        assert!(!is_mutation_op("agent_hub.get_portable_asset_action"));
     }
 }

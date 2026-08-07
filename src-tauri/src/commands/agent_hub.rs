@@ -14,6 +14,12 @@ use crate::agent_hub::git::preview::{
     ConfirmProjectMappingRequest, GitImportPreview, GitLaneInspectReport,
 };
 use crate::agent_hub::object_store::ObjectStore;
+use crate::agent_hub::portable_actions::{
+    ApplyPortableAssetActionRequest, PortableAssetActionPlanDto, PortableAssetActionResultDto,
+    PreviewPortableAssetActionRequest,
+};
+use crate::agent_hub::portable_inventory::PortableInventorySnapshotDto;
+use crate::agent_hub::portable_service::PortableService;
 use crate::agent_hub::project_scope::{AgentHubProjectPreview, AgentHubProjectStatus};
 use crate::agent_hub::replication::sender::{
     get_push_report_for_state, push_selection_for_state, MultiTargetPushReport,
@@ -531,6 +537,67 @@ pub async fn agent_hub_confirm_project_mapping(
     confirm_project_mapping_for_state(state.inner(), request).await
 }
 
+/// Business Logic: 本机 portable inventory 是实际状态真相（只读）。
+/// Code Logic: owner PortableService / GuiClient control query。
+#[tauri::command]
+pub async fn agent_hub_inspect_portable_inventory(
+    state: State<'_, AppState>,
+) -> Result<PortableInventorySnapshotDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_inspect_portable_inventory()
+            .await;
+    }
+    PortableService::inspect_portable_inventory(state.inner()).await
+}
+
+/// Business Logic: apply 前必须生成绑定 inventory hash 的短期 plan。
+/// Code Logic: v3 写兼容；owner preview / GuiClient control。
+#[tauri::command]
+pub async fn agent_hub_preview_portable_asset_action(
+    state: State<'_, AppState>,
+    request: PreviewPortableAssetActionRequest,
+) -> Result<PortableAssetActionPlanDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client
+            .agent_hub_preview_portable_asset_action(request)
+            .await;
+    }
+    PortableService::preview_portable_asset_action(state.inner(), request).await
+}
+
+/// Business Logic: 用户确认后 claim/apply；同 clientRequestId 幂等回放。
+/// Code Logic: v3 mutation；owner apply / GuiClient 长超时 control。
+#[tauri::command]
+pub async fn agent_hub_apply_portable_asset_action(
+    state: State<'_, AppState>,
+    request: ApplyPortableAssetActionRequest,
+) -> Result<PortableAssetActionResultDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_apply_portable_asset_action(request).await;
+    }
+    PortableService::apply_portable_asset_action(state.inner(), request).await
+}
+
+/// Business Logic: 对账 apply 结果（含 outcomeUnknown）。
+/// Code Logic: owner get / GuiClient control query。
+#[tauri::command]
+pub async fn agent_hub_get_portable_asset_action(
+    state: State<'_, AppState>,
+    client_request_id: String,
+) -> Result<PortableAssetActionResultDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        return BackendControlClient::from_control_file()?
+            .agent_hub_get_portable_asset_action(&client_request_id)
+            .await;
+    }
+    PortableService::get_portable_asset_action(state.inner(), &client_request_id).await
+}
+
 /// LAN push 预览：build selection 但不传输。
 ///
 /// Business Logic: 用户确认 peers/mode 前看到 asset/revision 计数与 snapshotHash。
@@ -609,15 +676,45 @@ mod tests {
             "agent_hub_preview_git_import",
             "agent_hub_confirm_git_import",
             "agent_hub_confirm_project_mapping",
+            "agent_hub_inspect_portable_inventory",
+            "agent_hub_preview_portable_asset_action",
+            "agent_hub_apply_portable_asset_action",
+            "agent_hub_get_portable_asset_action",
         ] {
             assert!(src.contains(name), "missing command {name}");
         }
         assert!(src.contains("RuntimeRole::GuiClient"));
         assert!(src.contains("BackendControlClient"));
         assert!(src.contains("require_agent_hub_write_compatibility"));
+        assert!(src.contains("PortableService"));
         // 禁止目标侧 pull API（拼接避免自命中）
         let forbidden = format!("{}{}", "agent_hub_", "pull");
         assert!(!src.contains(&forbidden));
+    }
+
+    /// Business Logic: portable inspect 只读可代理；preview/apply 必须写兼容门闩。
+    /// Code Logic: 生产 fn 签名 + owner/GuiClient 分发（避免测试字面量自命中）。
+    #[test]
+    fn portable_commands_authority_and_read_only_fallback() {
+        let src = include_str!("agent_hub.rs");
+        for sig in [
+            "pub async fn agent_hub_inspect_portable_inventory(",
+            "pub async fn agent_hub_preview_portable_asset_action(",
+            "pub async fn agent_hub_apply_portable_asset_action(",
+            "pub async fn agent_hub_get_portable_asset_action(",
+        ] {
+            assert!(src.contains(sig), "missing command signature {sig}");
+        }
+        // HeadlessOwner → PortableService；GuiClient → control client
+        assert!(src.contains("PortableService::inspect_portable_inventory"));
+        assert!(src.contains("PortableService::preview_portable_asset_action"));
+        assert!(src.contains("PortableService::apply_portable_asset_action"));
+        assert!(src.contains("PortableService::get_portable_asset_action"));
+        assert!(src.contains(".agent_hub_inspect_portable_inventory()"));
+        assert!(src.contains(".agent_hub_preview_portable_asset_action("));
+        assert!(src.contains(".agent_hub_apply_portable_asset_action("));
+        assert!(src.contains(".agent_hub_get_portable_asset_action("));
+        assert!(src.contains("require_agent_hub_write_compatibility"));
     }
 
     /// Business Logic: 旧 backend agentHubApiVersion 必须阻断 mutation。
@@ -693,10 +790,21 @@ mod tests {
             "agent_hub.preview_git_import",
             "agent_hub.confirm_git_import",
             "agent_hub.confirm_project_mapping",
+            "agent_hub.inspect_portable_inventory",
+            "agent_hub.preview_portable_asset_action",
+            "agent_hub.apply_portable_asset_action",
+            "agent_hub.get_portable_asset_action",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
         let forbidden_op = format!("{}{}", "agent_hub.", "pull");
         assert!(!src.contains(&forbidden_op));
+    }
+
+    /// Business Logic: Agent Hub API major 必须升到 v3 才承载 portable mutation。
+    /// Code Logic: 常量 == 3。
+    #[test]
+    fn agent_hub_api_version_is_v3_for_portable() {
+        assert_eq!(AGENT_HUB_API_VERSION, 3);
     }
 }
