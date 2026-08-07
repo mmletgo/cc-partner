@@ -24,6 +24,15 @@ import { fleetExceptionCount } from '@/lib/types/lanFleet';
 import type { LanFleetDeviceSummary, LanFleetProjectSummary } from '@/lib/types/lanFleet';
 import { WorkbenchRemoteProjectPicker } from '@/components/domain/WorkbenchRemoteProjectPicker';
 import { moveProjectId, orderProjectsByIds } from '@/lib/workbenchRemoteProjects';
+import {
+  DEVICE_FILTER_ALL,
+  applyVisibleReorderToFullOrder,
+  collectDeviceFilterOptions,
+  filterProjectsByDevice,
+  readStoredDeviceFilterId,
+  resolveDeviceFilterId,
+  writeStoredDeviceFilterId,
+} from '@/lib/workbenchProjectDeviceFilter';
 import styles from './WorkbenchProjectRail.module.css';
 
 /**
@@ -46,6 +55,9 @@ export function WorkbenchProjectRail() {
     position: 'before' | 'after';
   } | null>(null);
   const [previewOrderIds, setPreviewOrderIds] = useState<string[] | null>(null);
+  const [deviceFilterId, setDeviceFilterId] = useState<string>(() => {
+    return resolveDeviceFilterId(readStoredDeviceFilterId(), []);
+  });
   const listRef = useRef<HTMLDivElement | null>(null);
   const draggingProjectIdRef = useRef<string | null>(null);
   const previewOrderIdsRef = useRef<string[] | null>(null);
@@ -86,6 +98,51 @@ export function WorkbenchProjectRail() {
     }
     return map;
   }, [fleetSnapshot]);
+
+  /**
+   * Business Logic（为什么需要这个列表）:
+   *   设备筛选下拉只展示当前项目列表中出现过的设备。
+   *
+   * Code Logic（这个函数做什么）:
+   *   聚合 projects 的 deviceId/deviceName，本机优先。
+   */
+  const deviceFilterOptions = useMemo(
+    () => collectDeviceFilterOptions(projects),
+    [projects],
+  );
+
+  /**
+   * Business Logic（为什么需要这个解析）:
+   *   持久化偏好可能指向已删除设备；UI 与过滤必须用安全回退后的 id。
+   *
+   * Code Logic（这个函数做什么）:
+   *   resolveDeviceFilterId(stored preference, live options)。
+   */
+  const resolvedDeviceFilterId = useMemo(
+    () => resolveDeviceFilterId(deviceFilterId, deviceFilterOptions),
+    [deviceFilterId, deviceFilterOptions],
+  );
+
+  const showDeviceFilter = deviceFilterOptions.length >= 2;
+
+  /**
+   * Business Logic（为什么需要这个回调）:
+   *   用户切换设备筛选后应立即收窄列表并记住偏好。
+   *
+   * Code Logic（这个函数做什么）:
+   *   更新 state + localStorage；切换时清拖拽预览，避免跨筛选脏序。
+   */
+  const handleDeviceFilterChange = useCallback((next: string) => {
+    const value = next.trim() || DEVICE_FILTER_ALL;
+    setDeviceFilterId(value);
+    writeStoredDeviceFilterId(value);
+    draggingProjectIdRef.current = null;
+    previewOrderIdsRef.current = null;
+    pointerIdRef.current = null;
+    setDraggingProjectId(null);
+    setDropIndicator(null);
+    setPreviewOrderIds(null);
+  }, []);
 
   const sectionTitle = t('workbench:projectRail.sectionTitle');
 
@@ -148,10 +205,22 @@ export function WorkbenchProjectRail() {
 
 
 
+  /**
+   * Business Logic（为什么需要这个列表）:
+   *   侧栏展示与拖拽目标只针对当前设备筛选后的项目；active 被滤掉时工作区仍保持打开。
+   *
+   * Code Logic（这个函数做什么）:
+   *   先按 resolvedDeviceFilterId 过滤，再叠加热拖拽 preview 序。
+   */
+  const filteredProjects = useMemo(
+    () => filterProjectsByDevice(projects, resolvedDeviceFilterId),
+    [projects, resolvedDeviceFilterId],
+  );
+
   const displayProjects = useMemo(() => {
-    if (!previewOrderIds) return projects;
-    return orderProjectsByIds(projects, previewOrderIds);
-  }, [previewOrderIds, projects]);
+    if (!previewOrderIds) return filteredProjects;
+    return orderProjectsByIds(filteredProjects, previewOrderIds);
+  }, [filteredProjects, previewOrderIds]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -241,26 +310,34 @@ export function WorkbenchProjectRail() {
       const target = resolveDropTarget(clientY, listEl, sourceId);
       if (!target) return;
       setDropIndicator(target);
-      const base = previewOrderIdsRef.current ?? projects.map((project) => project.id);
+      const base =
+        previewOrderIdsRef.current ?? filteredProjects.map((project) => project.id);
       const next = moveProjectId(base, sourceId, target.projectId, target.position);
       if (next.join('\0') === base.join('\0')) return;
       previewOrderIdsRef.current = next;
       setPreviewOrderIds(next);
     },
-    [projects, resolveDropTarget],
+    [filteredProjects, resolveDropTarget],
   );
 
   const finishPointerReorder = useCallback(() => {
     const sourceId = draggingProjectIdRef.current;
     if (!sourceId) return;
-    const next = previewOrderIdsRef.current ?? projects.map((project) => project.id);
+    const visibleNext =
+      previewOrderIdsRef.current ?? filteredProjects.map((project) => project.id);
     const unchanged =
-      next.length === projects.length && next.every((id, index) => projects[index]?.id === id);
+      visibleNext.length === filteredProjects.length &&
+      visibleNext.every((id, index) => filteredProjects[index]?.id === id);
     clearDragUi();
-    if (!unchanged) {
-      void reorderProjects(next);
-    }
-  }, [clearDragUi, projects, reorderProjects]);
+    if (unchanged) return;
+    // 筛选视图只重排可见子集，再投影回全局 ordered_ids（隐藏设备项目相对位置不变）。
+    const fullOrderIds = projects.map((project) => project.id);
+    const nextFull =
+      resolvedDeviceFilterId === DEVICE_FILTER_ALL
+        ? visibleNext
+        : applyVisibleReorderToFullOrder(fullOrderIds, visibleNext);
+    void reorderProjects(nextFull);
+  }, [clearDragUi, filteredProjects, projects, reorderProjects, resolvedDeviceFilterId]);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -274,7 +351,7 @@ export function WorkbenchProjectRail() {
       if (projectBusy || event.button !== 0) return;
       event.preventDefault();
       event.stopPropagation();
-      const initialOrder = projects.map((project) => project.id);
+      const initialOrder = filteredProjects.map((project) => project.id);
       pointerIdRef.current = event.pointerId;
       draggingProjectIdRef.current = projectId;
       previewOrderIdsRef.current = initialOrder;
@@ -288,7 +365,7 @@ export function WorkbenchProjectRail() {
       }
       applyPointerReorder(event.clientY);
     },
-    [applyPointerReorder, projectBusy, projects],
+    [applyPointerReorder, filteredProjects, projectBusy],
   );
 
   useEffect(() => {
@@ -329,6 +406,23 @@ export function WorkbenchProjectRail() {
     <section className={styles.rail} aria-label={sectionTitle}>
       <div className={styles.header}>
         <h2 className={styles.title}>{sectionTitle}</h2>
+        {showDeviceFilter ? (
+          <select
+            className={styles.deviceFilter}
+            value={resolvedDeviceFilterId}
+            aria-label={t('workbench:projectRail.deviceFilterLabel')}
+            onChange={(event) => handleDeviceFilterChange(event.target.value)}
+          >
+            <option value={DEVICE_FILTER_ALL}>
+              {t('workbench:projectRail.deviceFilterAll')}
+            </option>
+            {deviceFilterOptions.map((option) => (
+              <option key={option.deviceId} value={option.deviceId}>
+                {option.deviceName}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <div className={styles.actions}>
           <Button
             variant="icon"
@@ -384,6 +478,21 @@ export function WorkbenchProjectRail() {
                 {t('workbench:projectRail.addRemoteCta')}
               </button>
             </div>
+          </div>
+        ) : null}
+        {!projectsLoading &&
+        projects.length > 0 &&
+        filteredProjects.length === 0 &&
+        resolvedDeviceFilterId !== DEVICE_FILTER_ALL ? (
+          <div className={styles.filterEmpty}>
+            <span>{t('workbench:projectRail.deviceFilterEmpty')}</span>
+            <button
+              type="button"
+              className={styles.filterEmptyCta}
+              onClick={() => handleDeviceFilterChange(DEVICE_FILTER_ALL)}
+            >
+              {t('workbench:projectRail.deviceFilterShowAll')}
+            </button>
           </div>
         ) : null}
         {displayProjects.map((project) => {

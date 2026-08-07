@@ -14,19 +14,75 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
+  min-width: 0;
 }
 
 .title {
+  flex: 0 1 auto;
+  min-width: 0;
   color: var(--fg-muted-readable);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deviceFilter {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 9.5rem;
+  height: 1.75rem;
+  margin: 0;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  text-overflow: ellipsis;
+}
+
+.deviceFilter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .actions {
   position: relative;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
+}
+
+.filterEmpty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+}
+
+.filterEmptyCta {
+  align-self: flex-start;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.filterEmptyCta:hover {
+  border-color: var(--accent-soft);
+  box-shadow: var(--shadow-xs);
 }
 
 .projectNameRow {

@@ -21,7 +21,11 @@
     "deviceOffline": "设备离线",
     "deviceCached": "使用缓存摘要",
     "deviceUnsupported": "对端不支持 Fleet",
-    "dragHandleAria": "拖动调整顺序"
+    "dragHandleAria": "拖动调整顺序",
+    "deviceFilterLabel": "按设备筛选",
+    "deviceFilterAll": "全部设备",
+    "deviceFilterEmpty": "该设备下暂无项目",
+    "deviceFilterShowAll": "显示全部"
   },
   "fleet": {
     "title": "局域网 Agent Fleet",

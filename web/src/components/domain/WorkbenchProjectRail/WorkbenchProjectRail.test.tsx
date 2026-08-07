@@ -84,6 +84,11 @@ beforeAll(async () => {
 
 afterEach(() => {
   cleanup();
+  try {
+    window.localStorage.removeItem('cp-workbench-project-device-filter');
+  } catch {
+    // ignore
+  }
 });
 
 /**
@@ -282,5 +287,39 @@ describe('WorkbenchProjectRail discovery IA', () => {
       </I18nextProvider>,
     );
     expect(screen.getByLabelText('1 个 Agent 需要处理')).toBeTruthy();
+  });
+
+  test('shows device filter when projects span multiple devices and filters list', () => {
+    const local = buildProject({ id: 'local-1', name: 'local-repo', deviceId: 'local', deviceName: '本机' });
+    const remote = buildProject({
+      id: 'remote-1',
+      name: 'remote-repo',
+      path: '/srv/remote',
+      kind: 'remote',
+      deviceId: 'dev-hk',
+      deviceName: 'HK-Mac',
+    });
+    renderRail({
+      projects: [local, remote],
+      activeProjectId: local.id,
+      activeProject: local,
+    });
+
+    const filter = screen.getByLabelText('按设备筛选') as HTMLSelectElement;
+    expect(filter).toBeTruthy();
+    expect(screen.getByRole('button', { name: /local-repo/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /remote-repo/ })).toBeTruthy();
+
+    fireEvent.change(filter, { target: { value: 'dev-hk' } });
+    expect(screen.queryByRole('button', { name: /local-repo/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /remote-repo/ })).toBeTruthy();
+    expect(window.localStorage.getItem('cp-workbench-project-device-filter')).toBe('dev-hk');
+  });
+
+  test('hides device filter when only one device is present', () => {
+    const a = buildProject({ id: 'a', name: 'a-repo' });
+    const b = buildProject({ id: 'b', name: 'b-repo', path: '/tmp/b' });
+    renderRail({ projects: [a, b] });
+    expect(screen.queryByLabelText('按设备筛选')).toBeNull();
   });
 });

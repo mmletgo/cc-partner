@@ -21,7 +21,11 @@
     "deviceOffline": "Device offline",
     "deviceCached": "Showing cached summary",
     "deviceUnsupported": "Peer lacks Fleet support",
-    "dragHandleAria": "Drag to reorder"
+    "dragHandleAria": "Drag to reorder",
+    "deviceFilterLabel": "Filter by device",
+    "deviceFilterAll": "All devices",
+    "deviceFilterEmpty": "No projects on this device",
+    "deviceFilterShowAll": "Show all"
   },
   "fleet": {
     "title": "LAN Agent Fleet",
