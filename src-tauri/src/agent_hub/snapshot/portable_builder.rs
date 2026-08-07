@@ -38,6 +38,9 @@ pub const LEGACY_LOSSY_PLACEHOLDER: &str = "__REDACTED_BY_CLAUDE_PARTNER__";
 const KNOWN_SKILL_KEYS: &[&str] = &["name", "description"];
 const KNOWN_COMMAND_KEYS: &[&str] = &["name", "description", "argument-hint", "argument_hint"];
 
+/// 源端 selection 构建时累计 object 字节上限（与 pull staging 对齐，读 CAS 前 fail-closed）。
+pub const PORTABLE_SELECTION_MAX_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+
 /// 单条选择项在 envelope 中的冻结描述。
 ///
 /// Business Logic: preview/apply 需绑定 identity、hash、是否 credential-bearing / legacyLossy。
@@ -63,6 +66,12 @@ pub struct PortableSelectionItem {
     pub object_hash: String,
     /// 对象字节数
     pub object_size: u64,
+    /// 构建时冻结的 inventory content_hash（供 destination 绑定 revalidated inventory）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// 构建时冻结的 inventory tree_hash
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_hash: Option<String>,
     /// 是否含 MCP 凭据材料
     pub credential_bearing: bool,
     /// 是否为 legacyLossy 占位（blocked，不得覆盖）
@@ -103,6 +112,7 @@ pub async fn build_portable_selection_envelope(
     let mut items_out = Vec::new();
     let mut object_bytes = BTreeMap::new();
     let mut seen_hashes = BTreeSet::new();
+    let mut projected_object_bytes: u64 = 0;
 
     for item in selected {
         if item.target != source_target {
@@ -137,6 +147,12 @@ pub async fn build_portable_selection_envelope(
                             if !seen_hashes.contains(&th) {
                                 seen_hashes.insert(th.clone());
                                 if let Ok(manifest_bytes) = store.get_blob(&th).await {
+                                    ensure_selection_bytes_budget(
+                                        projected_object_bytes,
+                                        manifest_bytes.len() as u64,
+                                    )?;
+                                    projected_object_bytes = projected_object_bytes
+                                        .saturating_add(manifest_bytes.len() as u64);
                                     object_bytes.insert(th.clone(), manifest_bytes.clone());
                                     objects.push(SnapshotObjectDescriptor {
                                         hash: th.clone(),
@@ -147,7 +163,14 @@ pub async fn build_portable_selection_envelope(
                             if let Ok(manifest) = store.get_tree(&put.object.hash).await {
                                 for entry in manifest.entries {
                                     if !seen_hashes.contains(&entry.blob_hash) {
+                                        // 先读 blob 会瞬时占用内存；在插入前检查 projected 上限。
                                         if let Ok(b) = store.get_blob(&entry.blob_hash).await {
+                                            ensure_selection_bytes_budget(
+                                                projected_object_bytes,
+                                                b.len() as u64,
+                                            )?;
+                                            projected_object_bytes =
+                                                projected_object_bytes.saturating_add(b.len() as u64);
                                             seen_hashes.insert(entry.blob_hash.clone());
                                             object_bytes.insert(entry.blob_hash.clone(), b.clone());
                                             objects.push(SnapshotObjectDescriptor {
@@ -184,9 +207,11 @@ pub async fn build_portable_selection_envelope(
         let hash = sha256_hex(&packed.bytes);
         let size = packed.bytes.len() as u64;
         if !seen_hashes.contains(&hash) {
+            ensure_selection_bytes_budget(projected_object_bytes, size)?;
             if !packed.bytes.is_empty() {
                 store.put_blob(&packed.bytes).await?;
             }
+            projected_object_bytes = projected_object_bytes.saturating_add(size);
             seen_hashes.insert(hash.clone());
             object_bytes.insert(hash.clone(), packed.bytes.clone());
             objects.push(SnapshotObjectDescriptor {
@@ -240,6 +265,8 @@ pub async fn build_portable_selection_envelope(
             scope_id: item.scope_id.clone(),
             object_hash: hash,
             object_size: size,
+            content_hash: item.content_hash.clone(),
+            tree_hash: item.tree_hash.clone(),
             credential_bearing: packed.credential_bearing,
             legacy_lossy: packed.legacy_lossy,
             warnings: packed.warnings,
@@ -278,6 +305,16 @@ pub async fn build_portable_selection_envelope(
         items: items_out,
         object_bytes,
     })
+}
+
+/// 累计 object_bytes 前检查 selection 上限，超限立即拒绝（不得读完再拒）。
+fn ensure_selection_bytes_budget(current: u64, next: u64) -> Result<(), AppError> {
+    if current.saturating_add(next) > PORTABLE_SELECTION_MAX_OBJECT_BYTES {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_STAGING_LIMIT".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// 打包后的 payload 字节与诊断。
@@ -807,5 +844,29 @@ mod tests {
                 .await
                 .unwrap();
         assert!(built.items[0].legacy_lossy);
+    }
+
+    #[tokio::test]
+    async fn builder_aborts_when_object_bytes_would_exceed_staging_limit() {
+        // R2-P1-4：读取/累计过程中超限必须 PORTABLE_PULL_STAGING_LIMIT，不得整包读完再拒。
+        let tmp = tempdir().unwrap();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let oversized = tmp.path().join("huge.md");
+        let body = vec![b'x'; (PORTABLE_SELECTION_MAX_OBJECT_BYTES as usize) + 1];
+        std::fs::write(&oversized, &body).unwrap();
+        let items = vec![sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Command,
+            "huge",
+            Some(oversized.to_str().unwrap()),
+        )];
+        let err =
+            build_portable_selection_envelope(&store, "device-a", AgentTarget::Claude, &items)
+                .await
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("PORTABLE_PULL_STAGING_LIMIT"),
+            "expected staging limit abort, got {err}"
+        );
     }
 }

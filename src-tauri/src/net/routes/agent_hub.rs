@@ -12,7 +12,8 @@ use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::replication::ledger::ReplicationLedger;
 use crate::agent_hub::replication::pull::{
     build_remote_inventory_for_target, source_prepare_selection, source_read_object_chunk,
-    RemoteInventoryQuery, RemoteSelectionQuery, PORTABLE_PULL_MAX_CHUNK_BYTES,
+    source_release_transfer, RemoteInventoryQuery, RemoteSelectionQuery,
+    PORTABLE_PULL_MAX_CHUNK_BYTES,
 };
 use crate::agent_hub::replication::receiver::{
     commit_push, prepare_push, put_object_chunk, CommitPushRequest, CommitPushResponse,
@@ -218,6 +219,19 @@ pub async fn agent_hub_portable_object(
         .into_response())
 }
 
+/// POST /api/agent-hub/portable/transfers/:transferId/release
+///
+/// Business Logic: 目的端在完整 object 传输后显式释放源端 staging（多对象 transfer 双保险）。
+/// Code Logic: source_release_transfer；幂等（不存在也 Ok）。
+pub async fn agent_hub_portable_transfer_release(
+    Extension(ctx): Extension<P2pRequestContext>,
+    Path(transfer_id): Path<String>,
+) -> P2pResult<Json<serde_json::Value>> {
+    let _ = ctx;
+    source_release_transfer(&transfer_id);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// 路由/能力原子性：push 三路由 + portable-pull 三路由同 build 宣告。
 ///
 /// 注意：expected-device / Host / Origin 守卫是协议完整性约束，**不是**身份认证。
@@ -260,6 +274,7 @@ mod tests {
             agent_hub_portable_inventory as *const (),
             agent_hub_portable_selection as *const (),
             agent_hub_portable_object as *const (),
+            agent_hub_portable_transfer_release as *const (),
         );
         assert_eq!(CAPABILITY_AGENT_HUB_V1, "agent-hub.v1");
         assert_eq!(CAPABILITY_PORTABLE_PULL_V1, "agent-hub.portable-pull.v1");

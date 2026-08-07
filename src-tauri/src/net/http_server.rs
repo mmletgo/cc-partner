@@ -855,8 +855,8 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/agent-hub/push/:transferId/commit",
             post(agent_hub::agent_hub_push_commit),
         )
-        // Agent Hub portable pull（capability agent-hub.portable-pull.v1，三路由原子上线）
-        // inventory/selection 仅 metadata/manifest；objects chunk ≤8 MiB。
+        // Agent Hub portable pull（capability agent-hub.portable-pull.v1，路由原子上线）
+        // inventory/selection 仅 metadata/manifest；objects chunk ≤8 MiB；release 释放 staging。
         // expected-device / clientRequestId 仅为绑定与幂等，不是身份认证。
         .route(
             "/api/agent-hub/portable/inventory",
@@ -870,6 +870,10 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/agent-hub/portable/objects/:transferId/:objectHash",
             get(agent_hub::agent_hub_portable_object),
+        )
+        .route(
+            "/api/agent-hub/portable/transfers/:transferId/release",
+            post(agent_hub::agent_hub_portable_transfer_release),
         )
         // Claude Code 历史同步协议（独立链路）：cc-history/sync/{pull,push}，snake_case 互通
         .route("/api/cc-history/sync/pull", post(cc_history::cc_sync_pull))

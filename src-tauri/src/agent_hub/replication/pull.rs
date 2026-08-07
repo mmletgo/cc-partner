@@ -18,8 +18,8 @@ use crate::agent_hub::object_store::{sha256_hex, ObjectStore, TreeEntryType};
 use crate::agent_hub::portable_actions::PortableAssetConflictPolicy;
 use crate::agent_hub::portable_inventory::{
     inspect_portable_inventory, PortableAssetKind, PortableInventoryItemDto,
-    PortableInventoryManagementState, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
-    PortableMcpCredentialFactDto,
+    PortableInventoryManagementState, PortableInventoryMutationCapability,
+    PortableInventorySnapshotDto, PortableInventorySourceOrigin, PortableMcpCredentialFactDto,
 };
 use crate::agent_hub::replication::receiver::AGENT_HUB_MAX_CHUNK_BYTES;
 use crate::agent_hub::snapshot::envelope::SnapshotEnvelopeV1;
@@ -257,6 +257,18 @@ pub struct RemoteSelectionQuery {
 struct StoredPortablePullPlan {
     public: PortablePullPlanDto,
     remote_item_ids: Vec<String>,
+    /// preview 时冻结的 remote item content/tree hash，apply 绑定 selection 用。
+    #[serde(default)]
+    remote_item_bindings: Vec<StoredRemoteItemBinding>,
+}
+
+/// preview 冻结的远端 item content 绑定。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRemoteItemBinding {
+    inventory_item_id: String,
+    content_hash: Option<String>,
+    tree_hash: Option<String>,
 }
 
 // ───────────────────────── 源端 object staging（进程内 transfer 缓冲） ─────────────────────────
@@ -270,6 +282,8 @@ struct StagedSelection {
     built: BuiltPortableSelection,
     created_at: Instant,
     total_bytes: u64,
+    /// 已完整读完的 object hash 集合（多对象 transfer 释放依据）。
+    fully_read_hashes: BTreeSet<String>,
 }
 
 fn staging() -> &'static Mutex<BTreeMap<String, StagedSelection>> {
@@ -319,6 +333,7 @@ fn staging_insert(transfer_id: String, built: BuiltPortableSelection) -> Result<
             built,
             created_at: Instant::now(),
             total_bytes,
+            fully_read_hashes: BTreeSet::new(),
         },
     );
     Ok(())
@@ -330,7 +345,8 @@ fn staging_remove(transfer_id: &str) {
     }
 }
 
-/// 校验 tree entry 路径安全：相对、无 `..`、无绝对路径，最终仍在 `dir` 下。
+/// 校验 tree entry 路径安全：相对、无 `..`、无绝对路径，最终仍在 `dir` 下；
+/// 且 dest 上每一级既有路径组件不得是 symlink（防 dir/assets→/tmp/outside 逃逸）。
 fn safe_tree_dest(dir: &Path, entry_path: &str) -> Result<PathBuf, AppError> {
     let rel = Path::new(entry_path);
     if rel.is_absolute() {
@@ -363,7 +379,57 @@ fn safe_tree_dest(dir: &Path, entry_path: &str) -> Result<PathBuf, AppError> {
             "PORTABLE_PULL_UNSAFE_TREE_PATH".to_string(),
         ));
     }
+    // no-follow：拒绝 dest 路径上任何既有 symlink 组件（含中间目录）
+    refuse_symlink_components_under(dir, rel)?;
     Ok(dest)
+}
+
+/// 从 `dir` 起沿 `rel` 逐级 `symlink_metadata`，任一级已是 symlink → fail-closed。
+fn refuse_symlink_components_under(dir: &Path, rel: &Path) -> Result<(), AppError> {
+    let mut cur = dir.to_path_buf();
+    // 目标根本身若是 symlink，写盘会跟随逃逸
+    if path_is_symlink(&cur) {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_UNSAFE_TREE_PATH".to_string(),
+        ));
+    }
+    for c in rel.components() {
+        let Component::Normal(name) = c else {
+            continue;
+        };
+        cur.push(name);
+        if path_is_symlink(&cur) {
+            return Err(AppError::validation(
+                "PORTABLE_PULL_UNSAFE_TREE_PATH".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn path_is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// 目标 mutation_capability 是否允许 InstallToTarget（仅 Supported 放行；缺证据 fail-closed）。
+fn mutation_allows_install_to_target(cap: PortableInventoryMutationCapability) -> bool {
+    matches!(cap, PortableInventoryMutationCapability::Supported)
+}
+
+/// 从本地 inventory 快照读取 destination target 的 mutation_capability。
+fn destination_mutation_capability(
+    local: &PortableInventorySnapshotDto,
+    destination_target: AgentTarget,
+) -> PortableInventoryMutationCapability {
+    local
+        .targets
+        .iter()
+        .find(|t| t.target == destination_target)
+        .map(|t| t.mutation_capability)
+        // 无 target 事实 → 诚实 fail-closed（不得假 Supported）
+        .unwrap_or(PortableInventoryMutationCapability::Blocked)
 }
 
 /// MCP 原生 leaf（无 Hub DTO 字段 key/transport/toolAllow）。
@@ -611,7 +677,7 @@ pub fn source_read_object_chunk(
     let mut g = staging().lock().expect("staging");
     evict_expired_staging(&mut g);
     let staged = g
-        .get(transfer_id)
+        .get_mut(transfer_id)
         .ok_or_else(|| AppError::not_found("PORTABLE_PULL_TRANSFER_NOT_FOUND".to_string()))?;
     let bytes = staged
         .built
@@ -619,21 +685,32 @@ pub fn source_read_object_chunk(
         .get(object_hash)
         .ok_or_else(|| AppError::not_found("PORTABLE_PULL_OBJECT_NOT_FOUND".to_string()))?;
     if offset as usize >= bytes.len() {
+        // 空对象或已越过末尾：标记该 hash 已消费（size==0 的 blob 也算 fully read）
+        if bytes.is_empty() {
+            staged.fully_read_hashes.insert(object_hash.to_string());
+        }
+        let all_done = staged
+            .built
+            .object_bytes
+            .keys()
+            .all(|h| staged.fully_read_hashes.contains(h));
+        drop(g);
+        if all_done {
+            staging_remove(transfer_id);
+        }
         return Ok(Vec::new());
     }
     let end = (offset as usize + PORTABLE_PULL_MAX_CHUNK_BYTES).min(bytes.len());
     let chunk = bytes[offset as usize..end].to_vec();
-    // 完整读完最后一个对象后清理（best-effort：offset 到末尾）
-    let fully_read = end >= bytes.len();
-    let all_done = fully_read
-        && staged.built.object_bytes.iter().all(|(h, b)| {
-            if h == object_hash {
-                true
-            } else {
-                // 无法精确追踪其它对象；仅在本对象末尾且仅有一个对象时清
-                staged.built.object_bytes.len() == 1 && !b.is_empty()
-            }
-        });
+    // 完整读到本对象末尾 → 记入 fully_read；全部 hash 读完才释放 staging
+    if end >= bytes.len() {
+        staged.fully_read_hashes.insert(object_hash.to_string());
+    }
+    let all_done = staged
+        .built
+        .object_bytes
+        .keys()
+        .all(|h| staged.fully_read_hashes.contains(h));
     drop(g);
     if all_done {
         staging_remove(transfer_id);
@@ -766,6 +843,9 @@ pub async fn preview_portable_pull(
     let mut changes = Vec::new();
     let mut blocking = Vec::new();
     let mut credential_bearing = 0u64;
+    // destination mutation gate：无 L3 写证据时 fail-closed 为 canonical-only
+    let dest_mutation = destination_mutation_capability(&local, request.destination_target);
+    let mutation_install_ok = mutation_allows_install_to_target(dest_mutation);
 
     for rem in &remote_selected {
         let mut item_blocking = Vec::new();
@@ -808,6 +888,12 @@ pub async fn preview_portable_pull(
                         PortablePullInstallMode::Blocked
                     } else if mapping_missing || unmapped_project {
                         PortablePullInstallMode::ImportedCanonicalOnly
+                    } else if !mutation_install_ok {
+                        warnings.push(
+                            "PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED:destination mutation not Supported"
+                                .into(),
+                        );
+                        PortablePullInstallMode::ImportedCanonicalOnly
                     } else {
                         PortablePullInstallMode::InstallToTarget
                     }
@@ -815,6 +901,12 @@ pub async fn preview_portable_pull(
             }
         } else if mapping_missing || unmapped_project {
             warnings.push("project unmapped or not opted-in; canonical only".into());
+            PortablePullInstallMode::ImportedCanonicalOnly
+        } else if !mutation_install_ok {
+            warnings.push(
+                "PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED:destination mutation not Supported"
+                    .into(),
+            );
             PortablePullInstallMode::ImportedCanonicalOnly
         } else {
             PortablePullInstallMode::InstallToTarget
@@ -849,6 +941,14 @@ pub async fn preview_portable_pull(
         .iter()
         .map(|r| r.inventory_item_id.clone())
         .collect();
+    let remote_item_bindings: Vec<StoredRemoteItemBinding> = remote_selected
+        .iter()
+        .map(|r| StoredRemoteItemBinding {
+            inventory_item_id: r.inventory_item_id.clone(),
+            content_hash: r.content_hash.clone(),
+            tree_hash: r.tree_hash.clone(),
+        })
+        .collect();
 
     let public = PortablePullPlanDto {
         plan_token: plan_token.clone(),
@@ -869,6 +969,7 @@ pub async fn preview_portable_pull(
     let stored = StoredPortablePullPlan {
         public: public.clone(),
         remote_item_ids,
+        remote_item_bindings,
     };
     let plan_json = serde_json::to_string(&stored)?;
     let repo = AgentHubRepo::new(state.agent_hub_repo.pool().clone());
@@ -1005,19 +1106,48 @@ async fn execute_claimed_pull(
             "PORTABLE_PULL_REMOTE_INVENTORY_STALE".to_string(),
         ));
     }
-    // selection 必须仍能覆盖 plan 中的 item ids
-    let remote_ids: BTreeSet<&str> = remote_now
+    // selection 必须仍能覆盖 plan 中的 item ids，且 content/tree hash 与 preview 绑定一致
+    let remote_by_id: BTreeMap<&str, &RemotePortableInventoryItemDto> = remote_now
         .items
         .iter()
-        .map(|i| i.inventory_item_id.as_str())
+        .map(|i| (i.inventory_item_id.as_str(), i))
         .collect();
     for id in &stored.remote_item_ids {
-        if !remote_ids.contains(id.as_str()) {
+        if !remote_by_id.contains_key(id.as_str()) {
             return Err(AppError::conflict(
                 "PORTABLE_PULL_REMOTE_INVENTORY_STALE".to_string(),
             ));
         }
     }
+    // 优先使用 plan 冻结的 binding；旧 plan 无 binding 字段时从当前 remote 再冻结一次
+    let bindings: Vec<StoredRemoteItemBinding> = if stored.remote_item_bindings.is_empty() {
+        stored
+            .remote_item_ids
+            .iter()
+            .filter_map(|id| {
+                remote_by_id.get(id.as_str()).map(|rem| StoredRemoteItemBinding {
+                    inventory_item_id: rem.inventory_item_id.clone(),
+                    content_hash: rem.content_hash.clone(),
+                    tree_hash: rem.tree_hash.clone(),
+                })
+            })
+            .collect()
+    } else {
+        // revalidated inventory 必须仍匹配 plan 绑定
+        for b in &stored.remote_item_bindings {
+            let Some(rem) = remote_by_id.get(b.inventory_item_id.as_str()) else {
+                return Err(AppError::conflict(
+                    "PORTABLE_PULL_REMOTE_INVENTORY_STALE".to_string(),
+                ));
+            };
+            if rem.content_hash != b.content_hash || rem.tree_hash != b.tree_hash {
+                return Err(AppError::conflict(
+                    "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
+                ));
+            }
+        }
+        stored.remote_item_bindings.clone()
+    };
 
     let selection = fetch_remote_selection(
         &peer,
@@ -1027,6 +1157,9 @@ async fn execute_claimed_pull(
         &stored.remote_item_ids,
     )
     .await?;
+
+    // selection 必须与 revalidated inventory / plan binding 对齐（同 id 下 content 不得漂移）
+    bind_selection_to_inventory_bindings(&selection, &bindings)?;
 
     let data_dir = crate::config::data_dir()?;
     let store = ObjectStore::open(&data_dir)?;
@@ -1105,8 +1238,21 @@ async fn execute_claimed_pull(
         }
     }
 
+    // 传输完成后 best-effort 释放源端 multi-object staging（源侧 all-read 也会清；双保险）
+    let _ = release_remote_transfer(
+        &peer,
+        &base_url,
+        &stored.public.source_device_id,
+        &selection.transfer_id,
+    )
+    .await;
+
     let import_ok = import_selection_canonical(state, &store, &data_dir, &selection).await;
     let local_before = local_now;
+    // apply 路径 re-check mutation：不得仅信 preview 计划（inventory 可能已变）
+    let dest_mutation_now =
+        destination_mutation_capability(&local_before, stored.public.destination_target);
+    let mutation_install_ok_now = mutation_allows_install_to_target(dest_mutation_now);
 
     let mut items = Vec::new();
     let mut any_fail = false;
@@ -1136,6 +1282,32 @@ async fn execute_claimed_pull(
                     error_code: None,
                     message: Some("skipExisting".into()),
                 });
+            } else if !mutation_install_ok_now {
+                // 降级 install 也必须过 mutation gate
+                if import_ok.is_err() {
+                    any_fail = true;
+                    items.push(PortablePullItemResultDto {
+                        inventory_item_id: change.inventory_item_id.clone(),
+                        state: PortablePullItemState::Failed,
+                        install_mode: Some(PortablePullInstallMode::ImportedCanonicalOnly),
+                        error_code: Some("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED".into()),
+                        message: Some(
+                            "canonical import failed before skipExisting demotion canonical-only"
+                                .into(),
+                        ),
+                    });
+                } else {
+                    items.push(PortablePullItemResultDto {
+                        inventory_item_id: change.inventory_item_id.clone(),
+                        state: PortablePullItemState::ImportedCanonicalOnly,
+                        install_mode: Some(PortablePullInstallMode::ImportedCanonicalOnly),
+                        error_code: Some("PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED".into()),
+                        message: Some(
+                            "skipExisting demotion blocked by destination mutation capability"
+                                .into(),
+                        ),
+                    });
+                }
             } else {
                 // 已不存在：降级为 installToTarget 语义。
                 // 与主 InstallToTarget 一致：import 必成才写目标；成功后 rescan 门禁。
@@ -1203,23 +1375,44 @@ async fn execute_claimed_pull(
             }
             continue;
         }
-        if change.install_mode == PortablePullInstallMode::ImportedCanonicalOnly {
+        // plan 标 InstallToTarget 但 apply 时 mutation 不再 Supported → 降级 canonical-only
+        let effective_mode = if change.install_mode == PortablePullInstallMode::InstallToTarget
+            && !mutation_install_ok_now
+        {
+            PortablePullInstallMode::ImportedCanonicalOnly
+        } else {
+            change.install_mode
+        };
+        if effective_mode == PortablePullInstallMode::ImportedCanonicalOnly {
             if import_ok.is_err() {
                 any_fail = true;
                 items.push(PortablePullItemResultDto {
                     inventory_item_id: change.inventory_item_id.clone(),
                     state: PortablePullItemState::Failed,
-                    install_mode: Some(change.install_mode),
+                    install_mode: Some(PortablePullInstallMode::ImportedCanonicalOnly),
                     error_code: Some("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED".into()),
                     message: Some("canonical import failed".into()),
                 });
             } else {
+                let msg = if change.install_mode == PortablePullInstallMode::InstallToTarget
+                    && !mutation_install_ok_now
+                {
+                    "canonical only; destination mutation not Supported".into()
+                } else {
+                    "canonical only; project unmapped or not opted-in".into()
+                };
                 items.push(PortablePullItemResultDto {
                     inventory_item_id: change.inventory_item_id.clone(),
                     state: PortablePullItemState::ImportedCanonicalOnly,
-                    install_mode: Some(change.install_mode),
-                    error_code: None,
-                    message: Some("canonical only; project unmapped or not opted-in".into()),
+                    install_mode: Some(PortablePullInstallMode::ImportedCanonicalOnly),
+                    error_code: if change.install_mode == PortablePullInstallMode::InstallToTarget
+                        && !mutation_install_ok_now
+                    {
+                        Some("PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED".into())
+                    } else {
+                        None
+                    },
+                    message: Some(msg),
                 });
             }
             continue;
@@ -1303,12 +1496,110 @@ async fn install_change(
     selection: &RemotePortableSelectionResponse,
     change: &PortablePullChangeDto,
 ) -> Result<(), AppError> {
+    // 写盘前再验 mutation：preview 之后 support 可能回落 Blocked/PreviewOnly
+    let live = inspect_portable_inventory(state).await?;
+    let dest_target = selection
+        .items
+        .iter()
+        .find(|s| s.inventory_item_id == change.inventory_item_id)
+        .map(|s| s.target)
+        .unwrap_or(AgentTarget::Claude);
+    let cap = destination_mutation_capability(&live, dest_target);
+    if !mutation_allows_install_to_target(cap) {
+        return Err(AppError::validation(
+            "PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED".to_string(),
+        ));
+    }
     let sel = selection
         .items
         .iter()
         .find(|s| s.inventory_item_id == change.inventory_item_id)
         .ok_or_else(|| AppError::generic("selection item missing after transfer"))?;
     install_payload_to_target(state, store, sel, change).await
+}
+
+/// selection 响应必须绑定 revalidated inventory 的 content/tree hash（同 id 内容漂移 → fail）。
+fn bind_selection_to_inventory_bindings(
+    selection: &RemotePortableSelectionResponse,
+    bindings: &[StoredRemoteItemBinding],
+) -> Result<(), AppError> {
+    let by_id: BTreeMap<&str, &StoredRemoteItemBinding> = bindings
+        .iter()
+        .map(|b| (b.inventory_item_id.as_str(), b))
+        .collect();
+    if selection.items.is_empty() {
+        return Err(AppError::conflict(
+            "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
+        ));
+    }
+    for item in &selection.items {
+        let Some(bound) = by_id.get(item.inventory_item_id.as_str()) else {
+            return Err(AppError::conflict(
+                "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
+            ));
+        };
+        // 优先比对 selection 自带的冻结 hash；缺字段时至少保证 binding 有事实
+        if let Some(sel_ch) = item.content_hash.as_ref() {
+            if bound.content_hash.as_ref() != Some(sel_ch) {
+                return Err(AppError::conflict(
+                    "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
+                ));
+            }
+        } else if bound.content_hash.is_some() {
+            // selection 未回传 content_hash 但 inventory 有 → 无法证明同源，fail-closed
+            return Err(AppError::conflict(
+                "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
+            ));
+        }
+        if let Some(sel_th) = item.tree_hash.as_ref() {
+            if bound.tree_hash.as_ref() != Some(sel_th) {
+                return Err(AppError::conflict(
+                    "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
+                ));
+            }
+        } else if bound.tree_hash.is_some() {
+            return Err(AppError::conflict(
+                "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
+            ));
+        }
+    }
+    // plan 中每一 binding 都必须出现在 selection
+    for b in bindings {
+        if !selection
+            .items
+            .iter()
+            .any(|s| s.inventory_item_id == b.inventory_item_id)
+        {
+            return Err(AppError::conflict(
+                "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// best-effort 通知源端释放 transfer staging（路由可选；失败不阻断 apply）。
+async fn release_remote_transfer(
+    peer: &PeerClient,
+    base_url: &str,
+    expected_device_id: &str,
+    transfer_id: &str,
+) -> Result<(), AppError> {
+    let path = format!("/api/agent-hub/portable/transfers/{transfer_id}/release");
+    let url = format!("{base_url}{path}");
+    let resp = peer
+        .http_client()
+        .post(&url)
+        .timeout(PeerTimeoutClass::Metadata.timeout())
+        .header(REQUEST_ID_HEADER, new_request_id())
+        .header(EXPECTED_DEVICE_ID_HEADER.as_str(), expected_device_id)
+        .send()
+        .await;
+    // 旧 peer 无 release 路由 → 忽略（源侧 all-read 追踪仍会释放）
+    match resp {
+        Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => Ok(()),
+        Ok(_) | Err(_) => Ok(()),
+    }
 }
 
 /// 按 clientRequestId 查询 pull 结果。
@@ -1867,6 +2158,7 @@ mod tests {
                 blocking_reasons: vec![],
             },
             remote_item_ids: vec![],
+            remote_item_bindings: vec![],
         };
         let plan_json = serde_json::to_string(&plan).unwrap();
         repo.insert_portable_pull_plan(PortablePullPlanRecord {
@@ -2018,7 +2310,7 @@ mod tests {
             items: vec![],
             object_bytes: BTreeMap::new(),
         };
-        // multi-object keeps staging until explicit release
+        // multi-object keeps staging until every hash is fully read (or explicit release)
         let p2 = vec![9u8, 8, 7];
         let h2 = sha256_hex(&p2);
         built2.object_bytes.insert(hash.clone(), payload.clone());
@@ -2026,9 +2318,51 @@ mod tests {
         staging_insert("tid-multi".into(), built2).unwrap();
         let c2 = source_read_object_chunk("tid-multi", &hash, 2).unwrap();
         assert_eq!(c2, payload[2..]);
-        assert!(staging().lock().unwrap().contains_key("tid-multi"));
-        source_release_transfer("tid-multi");
-        assert!(!staging().lock().unwrap().contains_key("tid-multi"));
+        // first object fully read (offset 2 of 5 + chunk covers rest) — staging remains
+        assert!(
+            staging().lock().unwrap().contains_key("tid-multi"),
+            "multi-object staging must remain until all hashes fully read"
+        );
+        let c3 = source_read_object_chunk("tid-multi", &h2, 0).unwrap();
+        assert_eq!(c3, p2);
+        assert!(
+            staging().lock().unwrap().get("tid-multi").is_none(),
+            "staging must drop after all object hashes fully transferred"
+        );
+        // explicit release path still works for partial consumption
+        let mut built3 = BuiltPortableSelection {
+            envelope: SnapshotEnvelopeV1 {
+                format: "cc-partner-agent-hub".into(),
+                format_version: 1,
+                canonicalization: "RFC8785-JSON".into(),
+                snapshot_id: "s".into(),
+                snapshot_hash: "0".repeat(64),
+                source_replica_id: "d".into(),
+                created_at: "t".into(),
+                selection: SnapshotSelection {
+                    scope_ids: vec![],
+                    asset_ids: vec![],
+                    include_history: false,
+                },
+                asset_heads: BTreeMap::new(),
+                assets: vec![],
+                lineages: vec![],
+                revisions: vec![],
+                variants: vec![],
+                conflicts: vec![],
+                aliases: vec![],
+                objects: vec![],
+            },
+            items: vec![],
+            object_bytes: BTreeMap::new(),
+        };
+        built3.object_bytes.insert(hash.clone(), payload.clone());
+        built3.object_bytes.insert(h2.clone(), p2.clone());
+        staging_insert("tid-release".into(), built3).unwrap();
+        let _ = source_read_object_chunk("tid-release", &hash, 0).unwrap();
+        assert!(staging().lock().unwrap().contains_key("tid-release"));
+        source_release_transfer("tid-release");
+        assert!(!staging().lock().unwrap().contains_key("tid-release"));
         let missing = source_read_object_chunk("tid-resume", &hash, 100);
         assert!(missing.is_err());
     }
@@ -2043,6 +2377,120 @@ mod tests {
         assert!(safe_tree_dest(&dir, "a/../../b").is_err());
         let err = safe_tree_dest(&dir, "../x").unwrap_err();
         assert!(err.to_string().contains("PORTABLE_PULL_UNSAFE_TREE_PATH"));
+    }
+
+    #[test]
+    fn safe_tree_dest_rejects_existing_symlink_component() {
+        // R2-P1-2：dir/assets -> /tmp/outside 时 entry assets/x 必须 fail-closed
+        let root = tempfile::tempdir().unwrap();
+        let skill = root.path().join("skill-root");
+        std::fs::create_dir_all(&skill).unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = skill.join("assets");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let err = safe_tree_dest(&skill, "assets/x").unwrap_err();
+            assert!(
+                err.to_string().contains("PORTABLE_PULL_UNSAFE_TREE_PATH"),
+                "symlink intermediate must be refused: {err}"
+            );
+            // non-symlink nested path still ok
+            std::fs::create_dir_all(skill.join("nested")).unwrap();
+            assert!(safe_tree_dest(&skill, "nested/file.txt").is_ok());
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (outside, link);
+            // Windows junction coverage is L3; lexical checks still hold
+            assert!(safe_tree_dest(&skill, "nested/file.txt").is_ok());
+        }
+    }
+
+    #[test]
+    fn mutation_gate_forces_canonical_only_when_not_supported() {
+        // R2-P1-1：previewOnly/blocked 不得计划 InstallToTarget
+        assert!(!mutation_allows_install_to_target(
+            PortableInventoryMutationCapability::PreviewOnly
+        ));
+        assert!(!mutation_allows_install_to_target(
+            PortableInventoryMutationCapability::Blocked
+        ));
+        assert!(mutation_allows_install_to_target(
+            PortableInventoryMutationCapability::Supported
+        ));
+        // plan helper: when mutation blocked, install_mode path yields ImportedCanonicalOnly
+        let src = include_str!("pull.rs");
+        assert!(src.contains("PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED"));
+        assert!(src.contains("mutation_allows_install_to_target"));
+        assert!(src.contains("destination_mutation_capability"));
+    }
+
+    #[test]
+    fn selection_binding_rejects_content_hash_drift() {
+        // R2-P1-3：同 inventoryItemId 下 content_hash 漂移 → REMOTE_SELECTION_DRIFT
+        use crate::agent_hub::snapshot::portable_builder::PortableSelectionItem;
+        let selection = RemotePortableSelectionResponse {
+            transfer_id: "t".into(),
+            envelope: SnapshotEnvelopeV1 {
+                format: "cc-partner-agent-hub".into(),
+                format_version: 1,
+                canonicalization: "RFC8785-JSON".into(),
+                snapshot_id: "s".into(),
+                snapshot_hash: "0".repeat(64),
+                source_replica_id: "d".into(),
+                created_at: "t".into(),
+                selection: SnapshotSelection {
+                    scope_ids: vec![],
+                    asset_ids: vec![],
+                    include_history: false,
+                },
+                asset_heads: BTreeMap::new(),
+                assets: vec![],
+                lineages: vec![],
+                revisions: vec![],
+                variants: vec![],
+                conflicts: vec![],
+                aliases: vec![],
+                objects: vec![],
+            },
+            items: vec![PortableSelectionItem {
+                inventory_item_id: "id-a".into(),
+                asset_id: "asset-a".into(),
+                target: AgentTarget::Claude,
+                kind: PortableAssetKind::Command,
+                native_id: "a".into(),
+                display_name: "a".into(),
+                scope_id: "user".into(),
+                object_hash: "obj".into(),
+                object_size: 1,
+                content_hash: Some("hash-new".into()),
+                tree_hash: None,
+                credential_bearing: false,
+                legacy_lossy: false,
+                warnings: vec![],
+            }],
+            missing_object_hashes: vec![],
+        };
+        let bindings = vec![StoredRemoteItemBinding {
+            inventory_item_id: "id-a".into(),
+            content_hash: Some("hash-preview".into()),
+            tree_hash: None,
+        }];
+        let err = bind_selection_to_inventory_bindings(&selection, &bindings).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("PORTABLE_PULL_REMOTE_SELECTION_DRIFT"),
+            "expected drift, got {err}"
+        );
+        // matching hashes pass
+        let ok_bindings = vec![StoredRemoteItemBinding {
+            inventory_item_id: "id-a".into(),
+            content_hash: Some("hash-new".into()),
+            tree_hash: None,
+        }];
+        bind_selection_to_inventory_bindings(&selection, &ok_bindings).unwrap();
     }
 
     #[test]
@@ -2111,6 +2559,9 @@ mod tests {
         assert!(src.contains("PORTABLE_PULL_UNSAFE_TREE_PATH"));
         assert!(src.contains("PORTABLE_PULL_STAGING_LIMIT"));
         assert!(src.contains("PORTABLE_PULL_REMOTE_INVENTORY_STALE"));
+        assert!(src.contains("PORTABLE_PULL_REMOTE_SELECTION_DRIFT"));
+        assert!(src.contains("PORTABLE_PULL_TARGET_MUTATION_NOT_SUPPORTED"));
+        assert!(src.contains("fully_read_hashes"));
         assert!(src.contains("native_mcp_leaf_value"));
         assert!(src.contains("resolve_claude_mcp_config_path"));
     }
