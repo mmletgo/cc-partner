@@ -13,6 +13,7 @@ import {
   listPluginPartialBlockers,
   orderedComponentTargets,
   pluginAggregateTone,
+  summarizeDeletePreview,
 } from './pluginPackagePresentation';
 
 function mixedReport(): PluginPackageReport {
@@ -167,5 +168,14 @@ describe('pluginPackagePresentation', () => {
     const report = mixedReport();
     report.partialBlockers = ['exact:blocker'];
     expect(listPluginPartialBlockers(report)).toEqual(['exact:blocker']);
+  });
+
+  test('summarizeDeletePreview counts tombstone and preserve for portable details', () => {
+    const summary = summarizeDeletePreview(mixedReport().deletePreview);
+    expect(summary).toEqual({
+      tombstoneCount: 1,
+      preserveCount: 2,
+      total: 3,
+    });
   });
 });

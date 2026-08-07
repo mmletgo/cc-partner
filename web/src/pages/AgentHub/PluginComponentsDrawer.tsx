@@ -29,7 +29,16 @@ export interface PluginComponentsDrawerProps {
   busy?: boolean;
   error?: string | null;
   onClose: () => void;
+  /**
+   * Legacy 确认入口：F5/controller 可继续传入。
+   * 新 portable 路径优先 `onRequestDeleteAction`，进入共享 preview/apply Dialog。
+   */
   onConfirmDelete?: () => void;
+  /**
+   * Business Logic: 删除不再是 dead-end 预览；请求进入 generic action preview/confirm。
+   * Code Logic: 与 onConfirmDelete 并存；两者都存在时优先 onRequestDeleteAction。
+   */
+  onRequestDeleteAction?: () => void;
   showDeletePreview?: boolean;
 }
 
@@ -46,6 +55,7 @@ export function PluginComponentsDrawer({
   error = null,
   onClose,
   onConfirmDelete,
+  onRequestDeleteAction,
   showDeletePreview = true,
 }: PluginComponentsDrawerProps) {
   const { t } = useTranslation(['agentHub', 'common']);
@@ -58,6 +68,18 @@ export function PluginComponentsDrawer({
     () => groupDeletePreview(report?.deletePreview ?? null),
     [report],
   );
+
+  /**
+   * Business Logic: 删除确认必须进入 preview/apply 闭环，禁止 window.confirm。
+   * Code Logic: 优先 generic action callback。
+   */
+  function handleDeleteConfirm() {
+    if (onRequestDeleteAction) {
+      onRequestDeleteAction();
+      return;
+    }
+    onConfirmDelete?.();
+  }
 
   return (
     <Drawer
@@ -291,15 +313,17 @@ export function PluginComponentsDrawer({
                     )}
                   </ul>
                 </div>
-                {onConfirmDelete ? (
+                {onRequestDeleteAction || onConfirmDelete ? (
                   <Button
                     variant="danger"
                     size="sm"
                     disabled={busy}
-                    onClick={onConfirmDelete}
+                    onClick={handleDeleteConfirm}
                     data-testid="plugin-delete-confirm"
                   >
-                    {t('agentHub:plugin.confirmDelete')}
+                    {onRequestDeleteAction
+                      ? t('agentHub:plugin.previewDelete')
+                      : t('agentHub:plugin.confirmDelete')}
                   </Button>
                 ) : null}
               </section>
