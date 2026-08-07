@@ -406,42 +406,46 @@ export function WorkbenchProjectRail() {
     <section className={styles.rail} aria-label={sectionTitle}>
       <div className={styles.header}>
         <h2 className={styles.title}>{sectionTitle}</h2>
-        {showDeviceFilter ? (
-          <select
-            className={styles.deviceFilter}
-            value={resolvedDeviceFilterId}
-            aria-label={t('workbench:projectRail.deviceFilterLabel')}
-            onChange={(event) => handleDeviceFilterChange(event.target.value)}
-          >
-            <option value={DEVICE_FILTER_ALL}>
-              {t('workbench:projectRail.deviceFilterAll')}
-            </option>
-            {deviceFilterOptions.map((option) => (
-              <option key={option.deviceId} value={option.deviceId}>
-                {option.deviceName}
+        <div className={styles.toolbar}>
+          {showDeviceFilter ? (
+            <select
+              className={styles.deviceFilter}
+              value={resolvedDeviceFilterId}
+              aria-label={t('workbench:projectRail.deviceFilterLabel')}
+              onChange={(event) => handleDeviceFilterChange(event.target.value)}
+            >
+              <option value={DEVICE_FILTER_ALL}>
+                {t('workbench:projectRail.deviceFilterAll')}
               </option>
-            ))}
-          </select>
-        ) : null}
-        <div className={styles.actions}>
-          <Button
-            variant="icon"
-            icon={<SyncIcon />}
-            title={t('workbench:refresh')}
-            aria-label={t('workbench:refresh')}
-            onClick={() => void loadProjects()}
-          />
-          <Button
-            ref={addProjectButtonRef}
-            variant="icon"
-            icon={<PlusIcon />}
-            title={t('workbench:addProject')}
-            aria-label={t('workbench:addProject')}
-            aria-haspopup="dialog"
-            aria-expanded={sourcePickerOpen || remotePickerOpen}
-            loading={projectBusy}
-            onClick={() => setSourcePickerOpen((open) => !open)}
-          />
+              {deviceFilterOptions.map((option) => (
+                <option key={option.deviceId} value={option.deviceId}>
+                  {option.deviceName}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className={styles.toolbarSpacer} aria-hidden="true" />
+          )}
+          <div className={styles.actions}>
+            <Button
+              variant="icon"
+              icon={<SyncIcon />}
+              title={t('workbench:refresh')}
+              aria-label={t('workbench:refresh')}
+              onClick={() => void loadProjects()}
+            />
+            <Button
+              ref={addProjectButtonRef}
+              variant="icon"
+              icon={<PlusIcon />}
+              title={t('workbench:addProject')}
+              aria-label={t('workbench:addProject')}
+              aria-haspopup="dialog"
+              aria-expanded={sourcePickerOpen || remotePickerOpen}
+              loading={projectBusy}
+              onClick={() => setSourcePickerOpen((open) => !open)}
+            />
+          </div>
         </div>
       </div>
 
