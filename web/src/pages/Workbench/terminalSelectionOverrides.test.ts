@@ -13,7 +13,11 @@ describe('installWorkbenchTerminalSelectionOverrides', () => {
     // Business Logic: Claude/TUI mouse tracking 必须不能清掉/禁止 xterm 文本选区。
     const enable = vi.fn();
     const originalDisable = vi.fn();
-    const originalShouldForce = vi.fn(() => false);
+    // Production signature is (event: MouseEvent) => boolean; restore must keep it.
+    const originalShouldForce = vi.fn((event: MouseEvent) => {
+      void event;
+      return false;
+    });
     const service = {
       shouldForceSelection: originalShouldForce,
       disable: originalDisable,

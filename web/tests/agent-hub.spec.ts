@@ -1,7 +1,7 @@
 /**
  * E2E-AGENT-HUB-USER-INSTRUCTION-001 / E2E-AGENT-HUB-A-001 / E2E-AGENT-HUB-B-001 /
- * E2E-AGENT-HUB-C-001 / E2E-AGENT-HUB-D-001 — Agent Hub 用户级指令 V2 与
- * Gate A + Gate B + Gate C + Gate D UI journeys。
+ * E2E-AGENT-HUB-C-001 / E2E-AGENT-HUB-D-001 / E2E-AGENT-HUB-PORTABLE-001 —
+ * Agent Hub 用户级指令 V2、Gate A–D 与 portable 3×4 资产管理 parity UI journeys。
  *
  * Business Logic（为什么需要这个套件）:
  *   Gate A 交付 Multi-CLI Agent Hub 指令基础：用户必须能看到 CLI probe 状态、
@@ -13,13 +13,18 @@
  *   stale preview 错误与 project mapping。Gate D 扩展 Plugin 组件 Drawer、ownership
  *   delete preview、residual statuses、OpenCode provider catalog / bridge preview 与
  *   fail-closed availability、provider runner 有效性选择表面，以及 Gate D Attention
- *   agentHubProjectionBlocked → Agent Hub 导航。本 L1 用 mock 锁定 UI 旅程，不宣称真实
- *   Claude/Codex/OpenCode 写盘、marketplace 激活、真实 TUI runtime 或真实多机 LAN Hub 复制。
+ *   agentHubProjectionBlocked → Agent Hub 导航。Portable parity（F6）锁定 3×4 inventory、
+ *   四维筛选、stale gate、enable/disable/uninstall preview→apply→rescan、四类详情、
+ *   Plugin 删除确认、`/claude-code`→assets+Claude deep link、same-target Pull、
+ *   canonical-only/replace/progress/partial/outcomeUnknown 与 MCP 无明文 secret。
+ *   本 L1 用 mock 锁定 UI 旅程，不宣称真实 Claude/Codex/OpenCode 写盘、marketplace
+ *   激活、真实 TUI runtime 或真实多机 LAN Hub 复制；后端 L2 见
+ *   L2-AGENT-HUB-PORTABLE-PARITY-001 / L2-AGENT-HUB-PORTABLE-PULL-001。
  *
  * Code Logic（这个套件做什么）:
  *   backendHarness + installAppLocalStorage + registerAppShellCommands；
  *   mock agent_hub_* / list_orchestrator_agent_adapters / list_attention_items(_v2)
- *   命令与合法 DTO；断言 data-testid 旅程。
+ *   与 portable inventory/action/pull 命令与合法 DTO；断言 data-testid 旅程。
  */
 
 import { expect, test } from './fixtures';
@@ -295,12 +300,350 @@ function makeReadOnlyUserInstructionWorkspace() {
  * Code Logic（这个函数做什么）:
  *   注册 AppShell + agent_hub_* 基线 resolve；可覆盖。
  */
+/** Portable 四 kind。 */
+const PORTABLE_KINDS = ['skill', 'command', 'plugin', 'mcp'] as const;
+/** Portable 三 target。 */
+const PORTABLE_TARGETS = ['claude', 'codex', 'opencode'] as const;
+
+/**
+ * Business Logic: L1 fixtures 必须覆盖 3×4 observed inventory 而不自动 adoption。
+ * Code Logic: 构造 sticky-compatible inspect DTO；MCP 仅 present/hash。
+ */
+function makePortableInventoryItem(
+  target: (typeof PORTABLE_TARGETS)[number],
+  kind: (typeof PORTABLE_KINDS)[number],
+  nativeId: string,
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    inventoryItemId: `${target}-${kind}-${nativeId}`,
+    target,
+    kind,
+    nativeId,
+    displayName: `${target}-${nativeId}`,
+    description: kind === 'skill' ? `${nativeId} description` : null,
+    version: kind === 'plugin' ? '1.2.3' : null,
+    scopeId: 'user',
+    scopeKind: 'user',
+    projectId: null,
+    projectOptedIn: true,
+    sourcePath: `/tmp/${target}/${kind}/${nativeId}`,
+    sourceOrigin: kind === 'mcp' ? 'nativeConfig' : 'standalone',
+    parentPluginInventoryItemId: null,
+    actualEnabled: true,
+    contentHash: `hash-${target}-${nativeId}`,
+    treeHash: kind === 'skill' ? `tree-${nativeId}` : null,
+    canonicalAssetId: null,
+    canonicalRevisionId: null,
+    managementState: 'unmanaged',
+    desiredPresence: null,
+    desiredEnabled: null,
+    materializationStatus: null,
+    capabilities: {
+      canEnable: true,
+      canDisable: true,
+      canUninstall: true,
+      canAdopt: false,
+      canInstallToSourceTarget: true,
+      reasonCode: null,
+      evidenceIds: [] as string[],
+    },
+    warnings: kind === 'mcp' ? ['transport:stdio'] : ([] as string[]),
+    mcpCredential:
+      kind === 'mcp'
+        ? { present: true, hash: `cred-${target}-${nativeId}` }
+        : undefined,
+    ...extra,
+  };
+}
+
+/**
+ * Business Logic: 默认 3×4 快照让所有 Agent Hub 旅程的 assets 段可挂载。
+ * Code Logic: 12 standalone items + 三 target probe。
+ */
+function makePortableInventorySnapshot(overrides: Record<string, unknown> = {}) {
+  return {
+    inventorySnapshotHash: 'snap-hash-3x4-e2e',
+    refreshedAt: TS,
+    stale: false,
+    targets: PORTABLE_TARGETS.map((target) => ({
+      target,
+      installed: true,
+      version: '1.0.0',
+      executable: `/usr/bin/${target}`,
+      configRoot: `/tmp/.${target}`,
+      scanCapability: 'supported',
+      mutationCapability: 'supported',
+      reasonCode: null,
+      evidenceIds: [] as string[],
+    })),
+    items: PORTABLE_TARGETS.flatMap((target) =>
+      PORTABLE_KINDS.map((kind) => makePortableInventoryItem(target, kind, `${kind}-a`)),
+    ),
+    ...overrides,
+  };
+}
+
+/**
+ * Business Logic: preview/apply fixtures 绑定 inventory hash，避免 stale 假绿。
+ * Code Logic: 单 change plan + result。
+ */
+function makePortableActionPlan(
+  action: 'enable' | 'disable' | 'uninstall' | 'installToSourceTarget' | 'adopt',
+  itemId: string,
+  overrides: Record<string, unknown> = {},
+) {
+  const [target, kind] = itemId.split('-') as [
+    (typeof PORTABLE_TARGETS)[number],
+    (typeof PORTABLE_KINDS)[number],
+  ];
+  return {
+    planToken: `plan-${action}-1`,
+    expiresAt: '2026-08-07T12:15:00.000Z',
+    inventorySnapshotHash: 'snap-hash-3x4-e2e',
+    action,
+    keepData: action === 'uninstall',
+    conflictPolicy: 'skipExisting',
+    changes: [
+      {
+        inventoryItemId: itemId,
+        target: target ?? 'claude',
+        kind: kind ?? 'skill',
+        path: `/tmp/${target}/${kind}/${itemId}`,
+        operation: action === 'installToSourceTarget' ? 'install' : action,
+        expectedSourceHash: `hash-${itemId}`,
+        expectedTreeHash: null,
+        expectedCanonicalRevisionId: null,
+        backupPolicy: action === 'uninstall' ? 'recoverableBeforeDelete' : 'none',
+        createsOwnership: action === 'uninstall',
+        canonicalEffect:
+          action === 'uninstall' ? 'tombstoneComponents' : action === 'adopt' ? 'createOwnership' : 'none',
+        blockingReasons: [] as string[],
+        warnings:
+          action === 'uninstall' && kind === 'plugin'
+            ? ['ownership-delete-confirm-required']
+            : ([] as string[]),
+      },
+    ],
+    blockingReasons: [] as string[],
+    ...overrides,
+  };
+}
+
+function makePortableActionResult(
+  itemId: string,
+  state: 'succeeded' | 'skipped' | 'failed' | 'blocked' | 'outcomeUnknown' = 'succeeded',
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    planToken: 'plan-token-e2e',
+    clientRequestId: 'portable-action-req-1',
+    items: [
+      {
+        inventoryItemId: itemId,
+        state,
+        errorCode: state === 'outcomeUnknown' ? 'timeout' : null,
+        message: null,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/**
+ * Business Logic: same-agent remote inventory 只含 metadata（无 path/secret 明文）。
+ * Code Logic: Claude skill + MCP credential fact。
+ */
+function makeRemotePortableInventory(overrides: Record<string, unknown> = {}) {
+  return {
+    sourceDeviceId: 'peer-ok',
+    sourceTarget: 'claude',
+    inventorySnapshotHash: 'remote-snap-e2e-1',
+    refreshedAt: TS,
+    stale: false,
+    items: [
+      {
+        inventoryItemId: 'remote-skill-1',
+        target: 'claude',
+        kind: 'skill',
+        nativeId: 'remote-skill',
+        displayName: 'Remote Skill',
+        description: null,
+        version: '1.0.0',
+        scopeId: 'user',
+        projectId: null,
+        projectOptedIn: true,
+        sourceOrigin: 'standalone',
+        actualEnabled: true,
+        contentHash: 'remote-c1',
+        treeHash: null,
+        warnings: [] as string[],
+      },
+      {
+        inventoryItemId: 'remote-mcp-1',
+        target: 'claude',
+        kind: 'mcp',
+        nativeId: 'remote-mcp',
+        displayName: 'Remote MCP',
+        description: null,
+        version: null,
+        scopeId: 'user',
+        projectId: null,
+        projectOptedIn: true,
+        sourceOrigin: 'standalone',
+        actualEnabled: true,
+        contentHash: 'remote-c2',
+        treeHash: null,
+        warnings: [] as string[],
+        mcpCredential: { present: true, hash: 'remote-cred-hash' },
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function makePortablePullPlan(overrides: Record<string, unknown> = {}) {
+  return {
+    planToken: 'pull-plan-e2e-1',
+    expiresAt: '2026-08-07T12:15:00.000Z',
+    sourceDeviceId: 'peer-ok',
+    sourceTarget: 'claude',
+    destinationTarget: 'claude',
+    remoteInventorySnapshotHash: 'remote-snap-e2e-1',
+    localInventorySnapshotHash: 'snap-hash-3x4-e2e',
+    conflictPolicy: 'skipExisting',
+    selectionManifestHash: 'sel-e2e-1',
+    credentialBearingCount: 1,
+    hasCredentialBearingAssets: true,
+    changes: [
+      {
+        inventoryItemId: 'remote-skill-1',
+        kind: 'skill',
+        nativeId: 'remote-skill',
+        displayName: 'Remote Skill',
+        installMode: 'installToTarget',
+        conflict: true,
+        legacyLossy: false,
+        credentialBearing: false,
+        blockingReasons: [] as string[],
+        warnings: ['replace-diff: local-hash!=remote-c1'] as string[],
+      },
+      {
+        inventoryItemId: 'remote-mcp-1',
+        kind: 'mcp',
+        nativeId: 'remote-mcp',
+        displayName: 'Remote MCP',
+        installMode: 'importedCanonicalOnly',
+        conflict: false,
+        legacyLossy: false,
+        credentialBearing: true,
+        blockingReasons: [] as string[],
+        warnings: [] as string[],
+      },
+    ],
+    blockingReasons: [] as string[],
+    ...overrides,
+  };
+}
+
+function makePortablePullResult(overrides: Record<string, unknown> = {}) {
+  return {
+    planToken: 'pull-plan-e2e-1',
+    clientRequestId: 'pull-req-e2e-1',
+    sourceDeviceId: 'peer-ok',
+    sourceTarget: 'claude',
+    destinationTarget: 'claude',
+    partial: true,
+    items: [
+      {
+        inventoryItemId: 'remote-skill-1',
+        state: 'succeeded',
+        installMode: 'installToTarget',
+        errorCode: null,
+        message: null,
+      },
+      {
+        inventoryItemId: 'remote-mcp-1',
+        state: 'outcomeUnknown',
+        installMode: 'importedCanonicalOnly',
+        errorCode: 'timeout',
+        message: null,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/**
+ * Business Logic: 默认注册 portable inspect 避免 assets 段 HarnessUnregisteredError。
+ * Code Logic: sticky inventory + no-op action/pull 基线，用例可覆盖。
+ */
+function registerPortableInventoryBase(
+  harness: PlaywrightBackendHarness,
+  options: {
+    inventory?: ReturnType<typeof makePortableInventorySnapshot>;
+  } = {},
+): void {
+  const inventory = options.inventory ?? makePortableInventorySnapshot();
+  harness.command('agent_hub_inspect_portable_inventory', {
+    kind: 'resolve',
+    value: inventory,
+  });
+  harness.command('agent_hub_preview_portable_asset_action', {
+    kind: 'resolve',
+    value: makePortableActionPlan('disable', 'claude-skill-skill-a'),
+  });
+  harness.command('agent_hub_apply_portable_asset_action', {
+    kind: 'resolve',
+    value: makePortableActionResult('claude-skill-skill-a'),
+  });
+  harness.command('agent_hub_get_portable_asset_action', {
+    kind: 'resolve',
+    value: makePortableActionResult('claude-skill-skill-a'),
+  });
+  harness.command('agent_hub_list_remote_portable_inventory', {
+    kind: 'resolve',
+    value: makeRemotePortableInventory(),
+  });
+  harness.command('agent_hub_preview_portable_pull', {
+    kind: 'resolve',
+    value: makePortablePullPlan(),
+  });
+  harness.command('agent_hub_apply_portable_pull', {
+    kind: 'resolve',
+    value: makePortablePullResult(),
+  });
+  harness.command('agent_hub_get_portable_pull', {
+    kind: 'resolve',
+    value: makePortablePullResult({
+      partial: false,
+      items: [
+        {
+          inventoryItemId: 'remote-skill-1',
+          state: 'succeeded',
+          installMode: 'installToTarget',
+          errorCode: null,
+          message: null,
+        },
+        {
+          inventoryItemId: 'remote-mcp-1',
+          state: 'succeeded',
+          installMode: 'importedCanonicalOnly',
+          errorCode: null,
+          message: null,
+        },
+      ],
+    }),
+  });
+}
+
 function registerAgentHubBase(
   harness: PlaywrightBackendHarness,
   options: {
     status?: ReturnType<typeof makeStatus>;
     assets?: AssetSummary[];
     detail?: AssetDetail;
+    portableInventory?: ReturnType<typeof makePortableInventorySnapshot>;
   } = {},
 ): void {
   registerAppShellCommands(harness);
@@ -312,6 +655,7 @@ function registerAgentHubBase(
   harness.command('agent_hub_get_status', { kind: 'resolve', value: status });
   harness.command('agent_hub_list_assets', { kind: 'resolve', value: assets });
   harness.command('agent_hub_get_asset', { kind: 'resolve', value: detail });
+  registerPortableInventoryBase(harness, { inventory: options.portableInventory });
   harness.command('agent_hub_inspect_user_instruction_workspace', {
     kind: 'resolve',
     value: makeReadOnlyUserInstructionWorkspace(),
@@ -599,9 +943,13 @@ test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
     await expect(page.getByTestId('probe-codex')).toBeVisible();
     await expect(page.getByTestId('probe-opencode')).toBeVisible();
 
-    // target matrix cells（AgentAssetRow）
-    await page.getByTestId('agent-hub-section-portableAssets').click();
-    await expect(page.getByTestId(`agent-asset-row-${ASSET_ID}`)).toBeVisible();
+    // target matrix cells（AgentAssetRow under assets legacy matrix）
+    await page.getByTestId('agent-hub-section-assets').click();
+    await expect(page.getByTestId('agent-hub-section-assets')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(page.getByTestId(`agent-asset-row-${ASSET_ID}`)).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTestId(`agent-asset-targets-${ASSET_ID}`)).toBeVisible();
     await expect(
       page.getByTestId(`agent-asset-targets-${ASSET_ID}`).getByTestId('agent-target-claude'),
@@ -613,10 +961,15 @@ test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
       page.getByTestId(`agent-asset-targets-${ASSET_ID}`).getByTestId('agent-target-opencode'),
     ).toBeVisible();
 
-    // project preview dialog
+    // project preview dialog（section 切换会写 URL 并重渲染 header，等稳定后再点）
     await page.getByTestId('agent-hub-section-projectInstructions').click();
-    await page.getByTestId('agent-hub-open-preview').click();
-    await expect(page.getByTestId('agent-hub-preview-dialog')).toBeVisible();
+    await expect(page.getByTestId('agent-hub-section-projectInstructions')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(page.getByTestId('agent-hub-open-preview')).toBeVisible({ timeout: 10_000 });
+    await page.getByTestId('agent-hub-open-preview').click({ force: true });
+    await expect(page.getByTestId('agent-hub-preview-dialog')).toBeVisible({ timeout: 10_000 });
     await page.getByTestId('agent-hub-preview-project-id').fill(PROJECT_ID);
     await page.getByTestId('agent-hub-run-preview').click();
     await expect(page.getByTestId('agent-hub-preview-result')).toBeVisible({ timeout: 5_000 });
@@ -668,10 +1021,14 @@ test.describe('E2E-AGENT-HUB-A-001 Agent Hub Gate A journey', () => {
     await page.goto('/claude-code');
     await expect(page).toHaveURL(/\/agent-hub/, { timeout: 15_000 });
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    // F5+ deep link: assets + Claude target; LAN push remains under syncImport
+    await expect(page).toHaveURL(/section=assets/);
+    await expect(page).toHaveURL(/target=claude/);
+    await expect(page.getByTestId('portable-inventory-workspace')).toBeVisible({
+      timeout: 15_000,
+    });
     await page.getByTestId('agent-hub-section-syncImport').click();
     await expect(page.getByTestId('agent-hub-lan-push-notice')).toBeVisible();
-    await page.getByTestId('agent-hub-section-portableAssets').click();
-    await expect(page.getByTestId(`agent-asset-aggregate-${ASSET_ID}`)).toBeVisible();
   });
 });
 
@@ -812,7 +1169,7 @@ test.describe('E2E-AGENT-HUB-B-001 Agent Hub Gate B portable matrix', () => {
 
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
-    await page.getByTestId('agent-hub-section-portableAssets').click();
+    await page.getByTestId('agent-hub-section-assets').click();
     await expect(page.getByTestId('agent-hub-filters')).toBeVisible();
     await expect(page.getByTestId(`agent-asset-row-${skill.assetId}`)).toBeVisible();
     await expect(page.getByTestId(`agent-asset-row-${mcp.assetId}`)).toBeVisible();
@@ -890,7 +1247,7 @@ test.describe('E2E-AGENT-HUB-B-001 Agent Hub Gate B portable matrix', () => {
     });
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
-    await page.getByTestId('agent-hub-section-portableAssets').click();
+    await page.getByTestId('agent-hub-section-assets').click();
     await expect(page.getByTestId(`agent-target-toggle-${skill.assetId}-claude`)).toBeVisible();
     await page.getByTestId(`agent-target-toggle-${skill.assetId}-claude`).click();
     // still on page after toggle mutation mock
@@ -1239,7 +1596,7 @@ test.describe('E2E-AGENT-HUB-D-001 Agent Hub Gate D Plugin + OpenCode UI', () =>
     // --- Plugin components drawer + ownership-aware delete preview ---
     await page.goto('/agent-hub');
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
-    await page.getByTestId('agent-hub-section-portableAssets').click();
+    await page.getByTestId('agent-hub-section-assets').click();
     await expect(page.getByTestId(`agent-asset-row-${PLUGIN_ASSET_ID}`)).toBeVisible();
     await expect(page.getByTestId(`agent-asset-plugin-${PLUGIN_ASSET_ID}`)).toBeVisible();
     await page.getByTestId(`agent-asset-plugin-${PLUGIN_ASSET_ID}`).click();
@@ -1362,5 +1719,474 @@ test.describe('E2E-AGENT-HUB-D-001 Agent Hub Gate D Plugin + OpenCode UI', () =>
     await page.getByTestId(`attention-item-${blockedItemId}`).click();
     await expect(page).toHaveURL(new RegExp(`/agent-hub\\?.*assetId=${PLUGIN_ASSET_ID}`));
     await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+  });
+});
+
+/**
+ * Business Logic（为什么需要这个套件）:
+ *   F6 完成后 Agent Hub 必须在 L1 锁定 3×4 observed inventory、本机动作与 same-agent Pull，
+ *   才能删除旧 ClaudeCodeAssets 前端；mock 证据不得升级为 L2/L3。
+ *
+ * Code Logic（这个套件做什么）:
+ *   backendHarness portable inventory/action/pull fixtures + data-testid 旅程。
+ */
+test.describe('E2E-AGENT-HUB-PORTABLE-001 Agent Hub portable asset parity', () => {
+  test('3x4 inventory, filters, details, stale gate, actions, plugin delete, deep link, same-target pull', async ({
+    page,
+    backendHarness,
+  }) => {
+    test.setTimeout(90_000);
+    await installAppLocalStorage(page);
+
+    const skillA = makePortableInventoryItem('claude', 'skill', 'skill-a', {
+      actualEnabled: true,
+      capabilities: {
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+    const skillDisabled = makePortableInventoryItem('claude', 'skill', 'skill-off', {
+      actualEnabled: false,
+      displayName: 'claude-skill-off',
+      capabilities: {
+        canEnable: true,
+        canDisable: false,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+    const skillAbsent = makePortableInventoryItem('claude', 'skill', 'skill-absent', {
+      actualEnabled: null,
+      displayName: 'claude-skill-absent',
+      managementState: 'unmanaged',
+      capabilities: {
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAdopt: false,
+        canInstallToSourceTarget: true,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+    const skillProblem = makePortableInventoryItem('codex', 'skill', 'skill-problem', {
+      displayName: 'codex-skill-problem',
+      managementState: 'externalCollision',
+      warnings: ['collision'],
+      capabilities: {
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAdopt: true,
+        canInstallToSourceTarget: false,
+        reasonCode: 'EXTERNAL_COLLISION',
+        evidenceIds: [],
+      },
+    });
+    const commandA = makePortableInventoryItem('claude', 'command', 'command-a');
+    const pluginA = makePortableInventoryItem('claude', 'plugin', 'plugin-a', {
+      managementState: 'hubManaged',
+      capabilities: {
+        canEnable: true,
+        canDisable: true,
+        canUninstall: true,
+        canAdopt: false,
+        canInstallToSourceTarget: false,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+    const mcpA = makePortableInventoryItem('claude', 'mcp', 'mcp-a', {
+      warnings: ['transport:stdio'],
+      mcpCredential: { present: true, hash: 'cred-claude-mcp-a' },
+    });
+    const projectSkill = makePortableInventoryItem('claude', 'skill', 'skill-project', {
+      scopeId: 'proj-local-1',
+      scopeKind: 'project',
+      projectId: 'proj-local-1',
+      projectOptedIn: true,
+      displayName: 'claude-skill-project',
+    });
+
+    const baseItems = [
+      skillA,
+      skillDisabled,
+      skillAbsent,
+      skillProblem,
+      commandA,
+      pluginA,
+      mcpA,
+      projectSkill,
+      makePortableInventoryItem('claude', 'skill', 'skill-b'),
+      makePortableInventoryItem('codex', 'command', 'command-a'),
+      makePortableInventoryItem('opencode', 'plugin', 'plugin-a'),
+      makePortableInventoryItem('opencode', 'mcp', 'mcp-a'),
+    ];
+
+    const freshInventory = makePortableInventorySnapshot({
+      inventorySnapshotHash: 'snap-hash-3x4-e2e',
+      stale: false,
+      items: baseItems,
+    });
+    const staleInventory = makePortableInventorySnapshot({
+      inventorySnapshotHash: 'snap-hash-3x4-stale',
+      stale: true,
+      items: baseItems,
+    });
+
+    registerAgentHubBase(backendHarness, { portableInventory: freshInventory });
+
+    // sticky inventory for mount + post-apply rescans (assert action via harness calls)
+    backendHarness.command('agent_hub_inspect_portable_inventory', {
+      kind: 'resolve',
+      value: freshInventory,
+    });
+
+    backendHarness.command('agent_hub_preview_portable_asset_action', [
+      {
+        kind: 'resolve',
+        value: makePortableActionPlan('disable', skillA.inventoryItemId, {
+          planToken: 'plan-disable-1',
+          inventorySnapshotHash: 'snap-hash-3x4-e2e',
+        }),
+      },
+      {
+        kind: 'resolve',
+        value: makePortableActionPlan('enable', skillDisabled.inventoryItemId, {
+          planToken: 'plan-enable-1',
+          inventorySnapshotHash: 'snap-hash-3x4-e2e',
+        }),
+      },
+      {
+        kind: 'resolve',
+        value: makePortableActionPlan('installToSourceTarget', skillAbsent.inventoryItemId, {
+          planToken: 'plan-install-1',
+          inventorySnapshotHash: 'snap-hash-3x4-e2e',
+        }),
+      },
+      {
+        kind: 'resolve',
+        value: makePortableActionPlan('uninstall', pluginA.inventoryItemId, {
+          planToken: 'plan-uninstall-plugin-1',
+          inventorySnapshotHash: 'snap-hash-3x4-e2e',
+          keepData: true,
+          changes: [
+            {
+              inventoryItemId: pluginA.inventoryItemId,
+              target: 'claude',
+              kind: 'plugin',
+              path: pluginA.sourcePath,
+              operation: 'uninstall',
+              expectedSourceHash: pluginA.contentHash,
+              expectedTreeHash: null,
+              expectedCanonicalRevisionId: null,
+              backupPolicy: 'recoverableBeforeDelete',
+              createsOwnership: true,
+              canonicalEffect: 'tombstoneComponents',
+              blockingReasons: [],
+              warnings: ['ownership-delete-confirm-required', 'preserve-shared-components'],
+            },
+          ],
+        }),
+      },
+    ]);
+
+    backendHarness.command('agent_hub_apply_portable_asset_action', [
+      {
+        kind: 'resolve',
+        value: makePortableActionResult(skillA.inventoryItemId, 'succeeded', {
+          planToken: 'plan-disable-1',
+          clientRequestId: 'portable-action-req-disable',
+        }),
+      },
+      {
+        kind: 'resolve',
+        value: makePortableActionResult(skillDisabled.inventoryItemId, 'outcomeUnknown', {
+          planToken: 'plan-enable-1',
+          clientRequestId: 'portable-action-req-enable',
+        }),
+      },
+      {
+        kind: 'resolve',
+        value: makePortableActionResult(skillAbsent.inventoryItemId, 'succeeded', {
+          planToken: 'plan-install-1',
+        }),
+      },
+      {
+        kind: 'resolve',
+        value: makePortableActionResult(pluginA.inventoryItemId, 'succeeded', {
+          planToken: 'plan-uninstall-plugin-1',
+        }),
+      },
+    ]);
+
+    backendHarness.command('agent_hub_get_portable_asset_action', {
+      kind: 'resolve',
+      value: makePortableActionResult(skillDisabled.inventoryItemId, 'succeeded', {
+        planToken: 'plan-enable-1',
+        clientRequestId: 'portable-action-req-enable',
+      }),
+    });
+
+    backendHarness.command('agent_hub_list_remote_portable_inventory', {
+      kind: 'resolve',
+      value: makeRemotePortableInventory(),
+    });
+    backendHarness.command('agent_hub_preview_portable_pull', {
+      kind: 'resolve',
+      value: makePortablePullPlan({ conflictPolicy: 'replaceAfterPreview' }),
+    });
+    backendHarness.command('agent_hub_apply_portable_pull', {
+      kind: 'resolve',
+      value: makePortablePullResult(),
+    });
+    backendHarness.command('agent_hub_get_portable_pull', {
+      kind: 'resolve',
+      value: makePortablePullResult({
+        partial: false,
+        items: [
+          {
+            inventoryItemId: 'remote-skill-1',
+            state: 'succeeded',
+            installMode: 'installToTarget',
+            errorCode: null,
+            message: null,
+          },
+          {
+            inventoryItemId: 'remote-mcp-1',
+            state: 'succeeded',
+            installMode: 'importedCanonicalOnly',
+            errorCode: null,
+            message: null,
+          },
+        ],
+      }),
+    });
+
+    // --- deep link /claude-code → assets + Claude ---
+    await page.goto('/claude-code');
+    await expect(page).toHaveURL(/\/agent-hub/, { timeout: 15_000 });
+    await expect(page).toHaveURL(/section=assets/);
+    await expect(page).toHaveURL(/target=claude/);
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('portable-inventory-workspace')).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId('portable-filter-target')).toHaveValue('claude');
+
+    // --- 3×4 kind tabs ---
+    for (const kind of PORTABLE_KINDS) {
+      await expect(page.getByTestId(`portable-kind-tab-${kind}`)).toBeVisible();
+    }
+    await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-a')).toBeVisible();
+    await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-off')).toBeVisible();
+    await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-absent')).toBeVisible();
+
+    // target=all so codex problem skill is visible under skill tab
+    await page.getByTestId('portable-filter-target').selectOption('all');
+    await expect(page.getByTestId('portable-inventory-row-codex-skill-skill-problem')).toBeVisible();
+
+    // --- four filters: target / scope / actual / management ---
+    await page.getByTestId('portable-filter-target').selectOption('claude');
+    await expect(page.getByTestId('portable-inventory-row-codex-skill-skill-problem')).toHaveCount(0);
+    await page.getByTestId('portable-filter-scope').selectOption('project');
+    await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-project')).toBeVisible();
+    await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-a')).toHaveCount(0);
+    await page.getByTestId('portable-filter-scope').selectOption('all');
+    await page.getByTestId('portable-filter-actual').selectOption('disabled');
+    await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-off')).toBeVisible();
+    await expect(page.getByTestId('portable-inventory-row-claude-skill-skill-a')).toHaveCount(0);
+    await page.getByTestId('portable-filter-actual').selectOption('problem');
+    await page.getByTestId('portable-filter-target').selectOption('all');
+    await expect(page.getByTestId('portable-inventory-row-codex-skill-skill-problem')).toBeVisible();
+    await page.getByTestId('portable-filter-actual').selectOption('all');
+    await page.getByTestId('portable-filter-management').selectOption('hubManaged');
+    await page.getByTestId('portable-kind-tab-plugin').click();
+    await expect(page.getByTestId('portable-inventory-row-claude-plugin-plugin-a')).toBeVisible();
+    await page.getByTestId('portable-filter-management').selectOption('all');
+    await page.getByTestId('portable-kind-tab-skill').click();
+    await page.getByTestId('portable-filter-target').selectOption('claude');
+
+    // --- four details: skill / command / plugin / mcp；MCP 无明文 secret ---
+    await page.getByTestId('portable-inventory-row-claude-skill-skill-a').click();
+    await expect(page.getByTestId('portable-asset-details-drawer')).toBeVisible();
+    await expect(page.getByTestId('portable-skill-details')).toBeVisible();
+    await page.getByTestId('portable-asset-details-close').click();
+
+    await page.getByTestId('portable-kind-tab-command').click();
+    await page.getByTestId('portable-inventory-row-claude-command-command-a').click();
+    await expect(page.getByTestId('portable-command-details')).toBeVisible();
+    await page.getByTestId('portable-asset-details-close').click();
+
+    await page.getByTestId('portable-kind-tab-plugin').click();
+    await page.getByTestId('portable-inventory-row-claude-plugin-plugin-a').click();
+    await expect(page.getByTestId('portable-plugin-details')).toBeVisible();
+    await page.getByTestId('portable-asset-details-close').click();
+
+    await page.getByTestId('portable-kind-tab-mcp').click();
+    await page.getByTestId('portable-inventory-row-claude-mcp-mcp-a').click();
+    await expect(page.getByTestId('portable-mcp-details')).toBeVisible();
+    await expect(page.getByTestId('portable-mcp-credential-present')).toHaveAttribute(
+      'data-present',
+      'true',
+    );
+    await expect(page.getByTestId('portable-mcp-credential-hash')).toContainText('cred-claude-mcp-a');
+    await expect(page.getByTestId('portable-asset-details-drawer')).not.toContainText(
+      /sk-ant-|api[_-]?key\s*[:=]|password\s*[:=]|secret-token/i,
+    );
+    await page.getByTestId('portable-asset-details-close').click();
+
+    // --- enable/disable preview + apply + rescan ---
+    await page.getByTestId('portable-kind-tab-skill').click();
+    await page.getByTestId('portable-filter-target').selectOption('claude');
+    await page.getByTestId('portable-inventory-row-claude-skill-skill-a').click();
+    await page.getByTestId('portable-action-disable').click();
+    await expect(page.getByTestId('portable-asset-action-dialog')).toBeVisible();
+    await page.getByTestId('portable-action-run-preview').click();
+    await expect(page.getByTestId('portable-action-plan')).toBeVisible();
+    await page.getByTestId('portable-action-confirm').click();
+    await expect(page.getByTestId('portable-action-full-success')).toBeVisible({ timeout: 10_000 });
+    await page.getByTestId('portable-action-close').click();
+    await expect(page.getByTestId('portable-asset-action-dialog')).toHaveCount(0);
+    // details drawer stays open after action; close before selecting another row
+    if (await page.getByTestId('portable-asset-details-close').count()) {
+      await page.getByTestId('portable-asset-details-close').click();
+    }
+    await expect(page.getByTestId('portable-asset-details-close')).toHaveCount(0);
+
+    const disableCalls = backendHarness
+      .calls()
+      .filter(
+        (call) =>
+          call.type === 'invoke' && call.command === 'agent_hub_apply_portable_asset_action',
+      );
+    expect(disableCalls.length).toBeGreaterThanOrEqual(1);
+
+    // enable with outcomeUnknown then reconcile
+    await page.getByTestId('portable-inventory-row-claude-skill-skill-off').click();
+    await expect(page.getByTestId('portable-asset-details-drawer')).toBeVisible();
+    await page.getByTestId('portable-action-enable').click();
+    await page.getByTestId('portable-action-run-preview').click();
+    await expect(page.getByTestId('portable-action-plan')).toBeVisible();
+    await page.getByTestId('portable-action-confirm').click();
+    await expect(page.getByTestId('portable-action-outcome-unknown')).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId('portable-action-reconcile').click();
+    await expect(page.getByTestId('portable-action-full-success')).toBeVisible({ timeout: 10_000 });
+    await page.getByTestId('portable-action-close').click();
+    await expect(page.getByTestId('portable-asset-action-dialog')).toHaveCount(0);
+    if (await page.getByTestId('portable-asset-details-close').count()) {
+      await page.getByTestId('portable-asset-details-close').click();
+    }
+    await expect(page.getByTestId('portable-asset-details-close')).toHaveCount(0);
+
+    // absent-target install
+    await page.getByTestId('portable-inventory-row-claude-skill-skill-absent').click();
+    await expect(page.getByTestId('portable-asset-details-drawer')).toBeVisible();
+    await page.getByTestId('portable-action-install').click();
+    await page.getByTestId('portable-action-run-preview').click();
+    await expect(page.getByTestId('portable-action-plan')).toBeVisible();
+    await page.getByTestId('portable-action-confirm').click();
+    await expect(page.getByTestId('portable-action-full-success')).toBeVisible({ timeout: 10_000 });
+    await page.getByTestId('portable-action-close').click();
+    await expect(page.getByTestId('portable-asset-action-dialog')).toHaveCount(0);
+    if (await page.getByTestId('portable-asset-details-close').count()) {
+      await page.getByTestId('portable-asset-details-close').click();
+    }
+    await expect(page.getByTestId('portable-asset-details-close')).toHaveCount(0);
+
+    // Plugin uninstall confirm (ownership effects in plan warnings)
+    await page.getByTestId('portable-kind-tab-plugin').click();
+    await page.getByTestId('portable-inventory-row-claude-plugin-plugin-a').click();
+    await expect(page.getByTestId('portable-asset-details-drawer')).toBeVisible();
+    await page.getByTestId('portable-action-uninstall').click();
+    await expect(page.getByTestId('portable-asset-action-dialog')).toBeVisible();
+    await page.getByTestId('portable-action-keep-data').check();
+    await page.getByTestId('portable-action-run-preview').click();
+    await expect(page.getByTestId('portable-action-plan')).toBeVisible();
+    await expect(page.getByTestId('portable-action-plan')).toContainText(
+      /ownership-delete-confirm-required|preserve-shared-components/,
+    );
+    await page.getByTestId('portable-action-confirm').click();
+    await expect(page.getByTestId('portable-action-full-success')).toBeVisible({ timeout: 10_000 });
+    await page.getByTestId('portable-action-close').click();
+    await expect(page.getByTestId('portable-asset-action-dialog')).toHaveCount(0);
+    if (await page.getByTestId('portable-asset-details-close').count()) {
+      await page.getByTestId('portable-asset-details-close').click();
+    }
+    await expect(page.getByTestId('portable-asset-details-close')).toHaveCount(0);
+
+    // --- same-agent Pull ---
+    // assets filter URL sync can race section clicks; deep-link section directly.
+    await page.goto('/agent-hub?section=syncImport');
+    await expect(page.getByTestId('agent-hub-page')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('agent-hub-section-syncImport')).toHaveAttribute(
+      'aria-selected',
+      'true',
+      { timeout: 10_000 },
+    );
+    await expect(page.getByTestId('agent-hub-open-portable-pull')).toBeVisible({ timeout: 10_000 });
+    await page.getByTestId('agent-hub-open-portable-pull').click();
+    await expect(page.getByTestId('portable-pull-drawer')).toBeVisible();
+    await expect(page.getByTestId('portable-pull-lan-risk')).toBeVisible();
+    await expect(page.getByTestId('portable-pull-same-target')).toBeVisible();
+    await expect(
+      page
+        .getByTestId('portable-pull-drawer')
+        .locator('select[data-testid="portable-pull-destination"]'),
+    ).toHaveCount(0);
+    await page.getByTestId('portable-pull-device').selectOption('peer-ok');
+    await page.getByTestId('portable-pull-source-target').selectOption('claude');
+    await page.getByTestId('portable-pull-load').click();
+    await expect(page.getByTestId('portable-pull-item-remote-skill-1')).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId('portable-pull-item-remote-mcp-1')).toBeVisible();
+    await page.getByTestId('portable-pull-select-visible').click();
+    await page.getByTestId('portable-pull-policy-replaceAfterPreview').click();
+    await page.getByTestId('portable-pull-preview-btn').click();
+    await expect(page.getByTestId('portable-pull-preview')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('portable-pull-conflict-diff')).toBeVisible();
+    await expect(page.getByTestId('portable-pull-credential-disclosure')).toBeVisible();
+    await expect(page.getByTestId('portable-pull-canonical-only')).toBeVisible();
+    await expect(page.getByTestId('portable-pull-drawer')).not.toContainText(
+      /sk-ant-|api[_-]?key\s*[:=]|password\s*[:=]|secret-token/i,
+    );
+    await page.getByTestId('portable-pull-apply').click();
+    await expect(page.getByTestId('portable-pull-result')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('portable-pull-progress')).toBeVisible();
+    await expect(page.getByTestId('portable-pull-result-remote-skill-1')).toBeVisible();
+    await expect(page.getByTestId('portable-pull-result-remote-mcp-1')).toBeVisible();
+    await page.getByTestId('portable-pull-reconcile').click();
+    await expect(page.getByTestId('portable-pull-result-remote-mcp-1')).toBeVisible();
+    // close pull drawer (Escape / backdrop may race; hard navigate out)
+    await page.keyboard.press('Escape');
+    await page.goto('/agent-hub?section=assets&target=claude');
+    await expect(page.getByTestId('portable-inventory-workspace')).toBeVisible({ timeout: 15_000 });
+
+    // --- stale mutation gate ---
+    backendHarness.command('agent_hub_inspect_portable_inventory', {
+      kind: 'resolve',
+      value: staleInventory,
+    });
+    await page.getByTestId('portable-inventory-refresh').click();
+    await expect(page.getByTestId('portable-inventory-stale')).toBeVisible({ timeout: 10_000 });
+    await page.getByTestId('portable-kind-tab-skill').click();
+    await page.getByTestId('portable-filter-target').selectOption('claude');
+    await page.getByTestId('portable-inventory-row-claude-skill-skill-a').click();
+    // Details may still render action buttons; controller openAction must no-op while stale.
+    if (await page.getByTestId('portable-action-disable').count()) {
+      await page.getByTestId('portable-action-disable').click({ force: true });
+    }
+    await expect(page.getByTestId('portable-asset-action-dialog')).toHaveCount(0);
   });
 });

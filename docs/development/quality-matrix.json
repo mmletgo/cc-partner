@@ -1765,6 +1765,31 @@
         "docs/prd.md"
       ],
       "notes": "L1 mock: Plugin drawer component matrix + ownership delete preview + residual statuses; OpenCode provider catalog fail-closed without ready bridge + effectively-available runner selection surface (Claude/Codex available, OpenCode/generic blocked); Agent Hub bridge project preview deep link; Attention agentHubProjectionBlocked → /agent-hub?assetId= navigation-only. Not real multi-CLI write, Agent phase runtime, or TUI."
+    },
+    {
+      "id": "E2E-AGENT-HUB-PORTABLE-001",
+      "surface": "agent-hub",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode filesystem projection",
+        "dual-host mDNS / multi-process backend",
+        "packaged desktop GUI",
+        "real product CLI install/uninstall L3"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/prd.md",
+        "docs/superpowers/plans/2026-08-07-agent-hub-portable-asset-ui-parity.md"
+      ],
+      "notes": "L1 backendHarness mock: Agent Hub 3x4 observed inventory, four filters, stale mutation gate, enable/disable/uninstall preview+apply+rescan, four kind details, Plugin ownership delete confirm, /claude-code deep link to assets+Claude, same-agent Pull with canonical-only/replace/progress/partial/outcomeUnknown, no credential plaintext. References backend L2 L2-AGENT-HUB-PORTABLE-PARITY-001 / L2-AGENT-HUB-PORTABLE-PULL-001; multi-host/full-platform L3 NOT VERIFIED."
     }
   ]
 }

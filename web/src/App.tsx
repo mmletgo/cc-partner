@@ -56,7 +56,7 @@ const CcHistory = lazyNamed(() => import('./pages/CcHistory'), 'CcHistory');
 const Workbench = lazyNamed(() => import('./pages/Workbench'), 'Workbench');
 const Scratchpad = lazyNamed(() => import('./pages/Scratchpad'), 'Scratchpad');
 const PromptOptimizer = lazyNamed(() => import('./pages/PromptOptimizer'), 'PromptOptimizer');
-// ClaudeMd / ClaudeCodeAssets page modules retained under pages/ for N/N+1;
+// ClaudeMd page module retained under pages/ for N/N+1; ClaudeCodeAssets frontend deleted after portable parity E2E.
 // ownership routes redirect to Agent Hub. Gate D Task 7: old routes stay registered
 // but hidden; only /agent-hub is the new UI entry until N+2 removal evidence lands.
 const AgentHub = lazyNamed(() => import('./pages/AgentHub'), 'AgentHub');

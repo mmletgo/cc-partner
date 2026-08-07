@@ -24,7 +24,6 @@ import enDevices from './locales/en/devices.json';
 import enScratchpad from './locales/en/scratchpad.json';
 import enPromptOptimizer from './locales/en/promptOptimizer.json';
 import enClaudeMd from './locales/en/claudeMd.json';
-import enClaudeCodeAssets from './locales/en/claudeCodeAssets.json';
 import enWelcome from './locales/en/welcome.json';
 import enSettings from './locales/en/settings.json';
 import enCcHistory from './locales/en/ccHistory.json';
@@ -45,7 +44,6 @@ import zhDevices from './locales/zh/devices.json';
 import zhScratchpad from './locales/zh/scratchpad.json';
 import zhPromptOptimizer from './locales/zh/promptOptimizer.json';
 import zhClaudeMd from './locales/zh/claudeMd.json';
-import zhClaudeCodeAssets from './locales/zh/claudeCodeAssets.json';
 import zhWelcome from './locales/zh/welcome.json';
 import zhSettings from './locales/zh/settings.json';
 import zhCcHistory from './locales/zh/ccHistory.json';
@@ -90,7 +88,6 @@ export const resources = {
     scratchpad: enScratchpad,
     promptOptimizer: enPromptOptimizer,
     claudeMd: enClaudeMd,
-    claudeCodeAssets: enClaudeCodeAssets,
     welcome: enWelcome,
     settings: enSettings,
     ccHistory: enCcHistory,
@@ -112,7 +109,6 @@ export const resources = {
     scratchpad: zhScratchpad,
     promptOptimizer: zhPromptOptimizer,
     claudeMd: zhClaudeMd,
-    claudeCodeAssets: zhClaudeCodeAssets,
     welcome: zhWelcome,
     settings: zhSettings,
     ccHistory: zhCcHistory,

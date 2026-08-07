@@ -284,9 +284,7 @@ function Button({ prompt, onDelete }) { /* ❌ prompt 是业务数据 */ }
 | GithubRepoCard | repo, language, onOpen | GitHub 周热门项目卡片 |
 | MobileAccessCard | compact, className | 局域网移动端 Workbench 访问链接与二维码卡片 |
 | LanFirewallDependencyCard | className | Settings 依赖环境页展示局域网互联防火墙端口/IP、开放状态与系统打开方法 |
-| ClaudeAssetRow | asset, onToggle, onRemove, onSelect | Claude Code 资产行 |
 | AgentAssetRow | asset, onSelect, onOpenBlocks, onOpenConflicts, onToggleTarget | Agent Hub 指令/资产行（Claude/Codex/OpenCode target cells） |
-| RemoteAssetPicker | assets, selectedKeys, kind, search, onSelectMany | 局域网远端资产选择器 |
 | WorkbenchProjectRail | - | 侧栏设置项下方的项目文件夹入口 |
 | WorkbenchRemoteProjectPicker | onProjectOpened, onCancel, openProject | Workbench 局域网远端项目目录选择器 |
 | WorkbenchDependencyCard | compact, className | Workbench tmux 依赖状态与安装引导卡片 |

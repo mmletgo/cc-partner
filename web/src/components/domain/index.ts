@@ -51,14 +51,8 @@ export type { GithubRepoCardProps } from './GithubRepoCard';
 export { MobileAccessCard } from './MobileAccessCard';
 export type { MobileAccessCardProps } from './MobileAccessCard';
 
-export { ClaudeAssetRow } from './ClaudeAssetRow';
-export type { ClaudeAssetRowProps } from './ClaudeAssetRow';
-
 export { AgentAssetRow } from './AgentAssetRow';
 export type { AgentAssetRowProps } from './AgentAssetRow';
-
-export { RemoteAssetPicker, remoteAssetKey } from './RemoteAssetPicker';
-export type { RemoteAssetPickerProps } from './RemoteAssetPicker';
 
 export { WorkbenchProjectRail } from './WorkbenchProjectRail';
 export { WorkbenchDependencyCard } from './WorkbenchDependencyCard';

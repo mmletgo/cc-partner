@@ -117,7 +117,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.5 Multi-CLI Agent Hub（Gate A 指令基础 + Gate B 可移植资产 + Gate C Snapshot 复制/备份 + Gate D Plugin/Runtime）
 
-**描述**：Agent Hub 以 `/agent-hub` 为权威入口，统一管理 Claude / Codex / OpenCode 的指令与可移植资产。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；旧 `/claude-md` / `/claude-code` 仅 N/N+1 重定向。Gate B 在指令基础之上交付 **Skill / Command / Agent / MCP** 的 portable 资产支持（扫描、managed package、legacy adoption、target 矩阵动作）。Gate C 交付 **SnapshotEnvelope v1**、**LAN source-only push**（capability `agent-hub.v1`）与 **Git device-lane 确认式导入**（从不自动 import）。Gate D 交付 **Plugin 分解投影** 与 **OpenCode runtime bridge 合同**（库路径 + L2/E2E；非真实 TUI）。
+**描述**：Agent Hub 以 `/agent-hub` 为权威入口，统一管理 Claude / Codex / OpenCode 的指令与可移植资产。用户级 `~/.claude/CLAUDE.md` 迁移进 Hub，作为 **user instruction（Claude `targetOnly`）** 管理；旧 `/claude-md` 重定向 `/agent-hub`，旧 `/claude-code` 精确重定向 `/agent-hub?section=assets&target=claude`。Gate B 在指令基础之上交付 **Skill / Command / Agent / MCP** 的 portable 资产支持（扫描、managed package、legacy adoption、target 矩阵动作）。Gate C 交付 **SnapshotEnvelope v1**、**LAN source-only push**（capability `agent-hub.v1`）与 **Git device-lane 确认式导入**（从不自动 import）。Gate D 交付 **Plugin 分解投影** 与 **OpenCode runtime bridge 合同**（库路径 + L2/E2E；非真实 TUI）。**Portable asset management parity（UI F1–F6 + backend L2）** 在 Agent Hub 交付三 target × 四 kind observed inventory、本机 preview/apply/rescan 与 same-agent Pull；旧 ClaudeCodeAssets 前端/API/components/helper/types/i18n 已删除，Rust/P2P 旧 `/api/claude-code/assets/*` facade 保留 N/N+1。
 
 **已交付（Gate A）**：
 - Hub 首屏展示 CLI probe 状态、write 兼容性、冲突/阻塞计数
@@ -171,6 +171,15 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - `cargo test --lib agent_hub` **以 `--test-threads=1` 为认证模式**（默认并行下 importer 全局 fault inject 可 flake）；详见 `docs/development/testing.md` program-wide 表
 - 前端 `npm run lint` 与默认 strict `check:bundle` 在本轮 **未**宣称通过（lint 债务集中于 Agent Hub hooks/React Compiler；bundle 仅 final-only 硬顶可通过）
 - 命令矩阵与完整 NOT VERIFIED 清单：`.superpowers/sdd/reports/program-task-5-report.md`
+
+**已交付（Portable asset management parity；UI F1–F6 + backend L2）**：
+- Agent Hub `section=assets` 以 observed inventory 为真源，固定四 kind 分栏（Skill/Command/Plugin/MCP）与 target/scope/actual/management 筛选
+- 本机动作统一 preview → confirm → apply → rescan；stale / blocked / partial / outcomeUnknown 诚实展示；Plugin 删除确认 ownership 影响
+- MCP 详情与 Pull 仅展示 credential present/hash（及 boolean 披露），不渲染 secret 明文
+- same-agent Pull：远端 metadata inventory、选择、冲突/replace preview、progress、canonical-only mapping、per-item report；不提供跨 Agent destination picker
+- `/claude-code` deep-link → `/agent-hub?section=assets&target=claude`；旧 ClaudeCodeAssets 前端已删除
+- L1 证据：`E2E-AGENT-HUB-PORTABLE-001`（`web/tests/agent-hub.spec.ts` backendHarness mock）；后端 L2：`L2-AGENT-HUB-PORTABLE-PARITY-001` / `L2-AGENT-HUB-PORTABLE-PULL-001`
+- 真实多机/全平台 CLI 写盘与 dual-host mDNS 仍 **NOT VERIFIED**（L3）
 
 **用户级指令管理 V2（scan-only 基线已实施，安全写入待 L3）**：
 - 已交付专用默认工作区、三 Agent inventory/source chain、`unconfigured` 聚合态、公共/专属本地草稿、严格 DTO 解码、旧后端只读降级，以及不调用 preview/apply 的 scan-only L1 旅程；portable assets、同步与诊断保留为独立次级入口
@@ -579,8 +588,8 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 | POST | /api/transfer/chunk/{id} | 发送文件块 |
 | POST | /api/transfer/complete/{id} | 显式 finalize 握手（空文件/满 tmp 续传） |
 | GET | /api/transfer/status/{id} | 查询传输状态 |
-| GET | /api/claude-code/assets/inventory | 获取本机 Claude Code assets inventory，供对端选择性拉取 |
-| POST | /api/claude-code/assets/bundle | 按 selectors 打包 Claude Code assets 供对端拉取 |
+| GET | /api/claude-code/assets/inventory | N/N+1 旧 Claude Code assets inventory facade（权威管理已迁 Agent Hub portable inventory；前端已删除） |
+| POST | /api/claude-code/assets/bundle | N/N+1 旧 Claude Code assets bundle facade（same-agent Pull 走 portable pull 命令；前端已删除） |
 | GET/POST | /api/workbench/fs/* | Workbench 远端目录根、目录列表和路径信息 |
 | GET/POST | /api/workbench/projects/* | Workbench P2P 远端项目打开与对端 local 项目访问 |
 | POST | /api/workbench/worktrees/* | Workbench worktree 列表、创建、查询、commit、push、merge、remove |
