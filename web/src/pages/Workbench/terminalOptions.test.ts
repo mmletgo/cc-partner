@@ -1,6 +1,11 @@
-import { describe, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { workbenchTerminalOptions } from './terminalOptions';
+import {
+  resolveCssColorForXterm,
+  withAlphaCssColor,
+  workbenchTerminalOptions,
+  workbenchTerminalTheme,
+} from './terminalOptions';
 
 const TOKENS_CSS_URL = new URL('../../styles/tokens.css', import.meta.url);
 
@@ -69,5 +74,34 @@ describe('terminalOptions', () => {
   test('keeps convertEol disabled and binds terminal tokens to light/dark theme', () => {
     assertConvertEolDisabled();
     assertTerminalTokensFollowTheme();
+  });
+
+  test('selection colors are xterm-parseable rgba, not raw color-mix tokens', () => {
+    // Business Logic: color-mix 会被 xterm 静默丢弃，浅色主题下选区几乎不可见。
+    const theme = workbenchTerminalTheme((name, fallback) => {
+      if (name === '--accent') return '#c96442';
+      if (name === '--terminal-bg') return '#faf9f5';
+      if (name === '--terminal-fg') return '#141413';
+      if (name === '--accent-soft') return 'color-mix(in oklab, #c96442 14%, transparent)';
+      return fallback;
+    });
+    expect(theme.selectionBackground).toMatch(/^rgba\(/);
+    expect(theme.selectionInactiveBackground).toMatch(/^rgba\(/);
+    expect(theme.selectionBackground).not.toContain('color-mix');
+  });
+
+  test('resolveCssColorForXterm keeps hex/rgb and falls back for unresolvable values', () => {
+    expect(resolveCssColorForXterm('#abc', '#000')).toBe('#abc');
+    expect(resolveCssColorForXterm('rgb(1, 2, 3)', '#000')).toBe('rgb(1, 2, 3)');
+    expect(withAlphaCssColor('#c96442', 0.4, 'rgba(0,0,0,0.3)')).toBe('rgba(201, 100, 66, 0.4)');
+    expect(withAlphaCssColor('rgb(10, 20, 30)', 0.5, 'rgba(0,0,0,0.3)')).toBe(
+      'rgba(10, 20, 30, 0.5)',
+    );
+  });
+
+  test('enables macOptionClickForcesSelection so mouse-mode TUIs still allow text selection', () => {
+    const options = workbenchTerminalOptions(() => 'token');
+    expect(options.macOptionClickForcesSelection).toBe(true);
+    expect(options.rightClickSelectsWord).toBe(true);
   });
 });

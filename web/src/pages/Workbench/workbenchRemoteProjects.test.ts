@@ -11,6 +11,8 @@ import {
   remoteParentPath,
   sortRemoteDirectoryEntries,
   upsertWorkbenchProjectInPlace,
+  moveProjectId,
+  orderProjectsByIds,
 } from '../../lib/workbenchRemoteProjects';
 
 /**
@@ -233,6 +235,41 @@ function testRemoteOfflineStateOnlyMatchesCurrentRemoteProject(): void {
  * Code Logic（这个函数做什么）:
  *   逐个执行纯 helper 测试，任一失败会抛出并让进程返回非零状态。
  */
+
+/**
+ * Business Logic（为什么需要这个测试）:
+ *   拖拽排序依赖 source→target before/after 重排，错误插入会破坏用户顺序。
+ */
+function testMoveProjectIdBeforeAndAfter(): void {
+  assert(
+    moveProjectId(['a', 'b', 'c'], 'a', 'c', 'before').join(',') === 'b,a,c',
+    'move before target should insert immediately above target',
+  );
+  assert(
+    moveProjectId(['a', 'b', 'c'], 'a', 'c', 'after').join(',') === 'b,c,a',
+    'move after target should insert immediately below target',
+  );
+  assert(
+    moveProjectId(['a', 'b', 'c'], 'a', 'a', 'after').join(',') === 'a,b,c',
+    'same source/target should keep order',
+  );
+}
+
+/**
+ * Business Logic（为什么需要这个测试）:
+ *   乐观更新需要按 id 列表投影项目对象且不丢项。
+ */
+function testOrderProjectsByIds(): void {
+  const projects = [
+    { ...baseProject, id: 'a', name: 'A' },
+    { ...baseProject, id: 'b', name: 'B' },
+    { ...baseProject, id: 'c', name: 'C' },
+  ];
+  const ordered = orderProjectsByIds(projects, ['c', 'a']);
+  assert(ordered.map((p) => p.id).join(',') === 'c,a,b', 'ordered ids first then remainder');
+}
+
+
 describe('workbenchRemoteProjects', () => {
   test('upsert, parent path, sort, open gate and offline detection helpers', async () => {
     testUpsertRemoteProjectKeepsPositionWithoutDuplicates();
@@ -240,5 +277,7 @@ describe('workbenchRemoteProjects', () => {
     testSortRemoteDirectoryEntriesPutsDirsBeforeFiles();
     testCanOpenRemoteProjectSelectionRequiresCurrentReadableDirectory();
     testRemoteOfflineStateOnlyMatchesCurrentRemoteProject();
+    testMoveProjectIdBeforeAndAfter();
+    testOrderProjectsByIds();
   });
 });

@@ -148,6 +148,12 @@
   min-height: 0;
 }
 
+.projectList[data-dragging='true'] .projectSelectButton,
+.projectList[data-dragging='true'] .projectRemoveButton,
+.projectList[data-dragging='true'] .exceptionBadge {
+  pointer-events: none;
+}
+
 .projectItem {
   position: relative;
   width: 100%;
@@ -156,8 +162,13 @@
   border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--fg);
-  overflow: hidden;
-  transition: all var(--motion-fast) var(--ease-standard);
+  overflow: visible;
+  will-change: transform;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    opacity 160ms var(--ease-standard);
 }
 
 .projectItem:hover {
@@ -383,28 +394,84 @@
 }
 
 
+
 .dragHandle {
   position: absolute;
-  left: var(--space-1);
+  left: 2px;
   top: 50%;
+  z-index: 2;
   transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 36px;
   color: var(--fg-muted-readable);
-  font-size: var(--text-xs);
-  letter-spacing: -1px;
+  font-size: 11px;
+  letter-spacing: -2px;
+  line-height: 1;
   cursor: grab;
   user-select: none;
-  pointer-events: none;
+  border-radius: var(--radius-sm);
+  touch-action: none;
+}
+
+.dragHandle:hover {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--fg) 6%, transparent);
+}
+
+.dragHandle:active,
+.projectItem[data-dragging='true'] .dragHandle {
+  cursor: grabbing;
 }
 
 .projectItem[data-dragging='true'] {
-  opacity: 0.55;
+  opacity: 0.45;
+  box-shadow: var(--shadow-sm);
+  border-color: var(--accent-soft);
+  z-index: 1;
 }
 
-.projectItem[data-drop-target='true'] {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-xs);
+.projectItem[data-drop-before='true']::before,
+.projectItem[data-drop-after='true']::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent);
+  pointer-events: none;
+  z-index: 3;
+  animation: projectDropPulse 240ms var(--ease-standard);
 }
 
-.projectItem[draggable='true'] {
-  cursor: grab;
+.projectItem[data-drop-before='true']::before {
+  top: -4px;
+}
+
+.projectItem[data-drop-after='true']::after {
+  bottom: -4px;
+}
+
+@keyframes projectDropPulse {
+  from {
+    transform: scaleX(0.72);
+    opacity: 0.35;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .projectItem,
+  .projectItem[data-drop-before='true']::before,
+  .projectItem[data-drop-after='true']::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }

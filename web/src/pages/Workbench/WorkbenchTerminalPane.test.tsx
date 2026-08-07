@@ -46,8 +46,9 @@ interface MockTerminal {
   write: (data: string, cb?: () => void) => void;
   clear: () => void;
   refresh: (start: number, end: number) => void;
+  getSelection: () => string;
   dispose: () => void;
-  buffer: { active: { cursorX: number; cursorY: number } };
+  buffer: { active: { cursorX: number; cursorY: number; viewportY: number; baseY: number } };
 }
 
 interface MockFitAddon {
@@ -145,10 +146,14 @@ vi.mock('@xterm/xterm', () => {
     refresh(start: number, end: number) {
       terminalEvents.refreshCalls.push({ start, end, instanceIndex: this.instanceIndex });
     }
+    getSelection() {
+      // Business Logic: 选区保护路径在无选区时继续 refresh/fit；默认空串模拟无选区。
+      return '';
+    }
     dispose() {
       terminalEvents.disposeCount += 1;
     }
-    buffer = { active: { cursorX: 0, cursorY: 0 } };
+    buffer = { active: { cursorX: 0, cursorY: 0, viewportY: 0, baseY: 0 } };
   }
   return { Terminal: TerminalMock };
 });

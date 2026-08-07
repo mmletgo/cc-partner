@@ -324,20 +324,37 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     });
     liveWriterRef.current = writer;
     emitCursorAnchor();
-    const resize = () => {
+    // Business Logic: 仅在真实 cols/rows 变化时回传后端；同尺寸仍 bump 会强制 tmux 整屏重绘，
+    // 并可能重新打开 mouse tracking，从而 clearSelection → “选中立刻消失、无法复制”。
+    // 用户点「适应尺寸」走 force=true，保留原 bump 语义。
+    let lastReportedSize: { cols: number; rows: number } | null = null;
+    const resize = (options?: { force?: boolean }): void => {
       try {
+        const force = options?.force === true;
+        // 有文本选区时 ResizeObserver 的 fit 可能改 rows 并清掉选区；仅 force 路径允许打断。
+        if (!force && terminal.getSelection().length > 0) {
+          return;
+        }
+        const prevCols = terminal.cols;
+        const prevRows = terminal.rows;
         fit.fit();
         // fit 后 cell 尺寸变化，失效缓存；仅 callback 存在时由 emitCursorAnchor 重算。
         cursorMetricsRef.current = null;
-        // 始终把当前 cols/rows 回传：即使与上次相同，后端也会 bump 尺寸强制
-        // tmux/PTY 重绘，避免冷启动 replay 后 status bar 停在历史帧中间。
-        onResize(
-          sessionId,
-          clampU16(terminal.cols, MIN_TERMINAL_COLS),
-          clampU16(terminal.rows, MIN_TERMINAL_ROWS),
-        );
-        // 同步刷新 xterm 视口度量，避免 canvas 与容器错位。
-        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        const cols = clampU16(terminal.cols, MIN_TERMINAL_COLS);
+        const rows = clampU16(terminal.rows, MIN_TERMINAL_ROWS);
+        const sizeChanged =
+          lastReportedSize == null ||
+          lastReportedSize.cols !== cols ||
+          lastReportedSize.rows !== rows ||
+          prevCols !== terminal.cols ||
+          prevRows !== terminal.rows;
+        if (force || sizeChanged) {
+          lastReportedSize = { cols, rows };
+          // force 时即使尺寸相同也回传，后端会 bump 一行强制 SIGWINCH/redraw。
+          onResize(sessionId, cols, rows);
+          // 同步刷新 xterm 视口度量，避免 canvas 与容器错位。
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        }
         emitCursorAnchor();
       } catch {
         // xterm 在容器不可见时 fit 可能失败，下一次 ResizeObserver 会重试。
@@ -347,19 +364,19 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
       }
-      resizeTimerRef.current = window.setTimeout(resize, 80);
+      resizeTimerRef.current = window.setTimeout(() => resize(), 80);
     });
     // 同时观察 host 与 viewport：冷启动后 host 高度从 min-height 撑满时，
     // 仅 observe viewport 偶发不触发，导致长期停在 ~90x24、tmux status 悬空。
     const host = viewport.parentElement;
     observer.observe(viewport);
     if (host) observer.observe(host);
-    forceResizeRef.current = resize;
-    resize();
+    forceResizeRef.current = () => resize({ force: true });
+    resize({ force: true });
     // 布局可能在首帧后才完成（absolute 层 + grid 1fr）；补两次延迟 fit。
     const layoutRaf = window.requestAnimationFrame(() => {
       resize();
-      resizeTimerRef.current = window.setTimeout(resize, 120);
+      resizeTimerRef.current = window.setTimeout(() => resize(), 120);
     });
     terminalRef.current = terminal;
 
@@ -401,15 +418,16 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     /**
      * Business Logic（为什么需要这个函数）:
      *   PC WebView 长时复用隐藏的 xterm DOM 层时，可能在切回后仍合成旧行；
-     *   文字选区会意外触发 xterm 重绘，说明 buffer 正确、仅需主动刷新渲染层。
+     *   需要主动刷新渲染层。有文本选区时禁止整屏 refresh，避免选区视觉被冲掉。
      *
      * Code Logic（这个函数做什么）:
-     *   只在当前 pane 可见且页面未隐藏时失效光标度量缓存，并调用 xterm.refresh 重绘全部行。
+     *   只在当前 pane 可见、页面未隐藏、且无选区时失效光标度量缓存并 refresh 全部行。
      */
     const refreshVisibleTerminal = (): void => {
       if (document.visibilityState === 'hidden') return;
       const terminal = terminalRef.current;
       if (!terminal) return;
+      if (terminal.getSelection().length > 0) return;
       cursorMetricsRef.current = null;
       terminal.refresh(0, Math.max(0, terminal.rows - 1));
     };

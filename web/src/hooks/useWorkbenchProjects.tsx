@@ -314,17 +314,20 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
    */
   const reorderProjects = useCallback(
     async (orderedIds: string[]) => {
-      const previous = projects;
-      const byId = new Map(projects.map((project) => [project.id, project]));
-      const next: WorkbenchProject[] = [];
-      for (const id of orderedIds) {
-        const project = byId.get(id);
-        if (project) next.push(project);
-      }
-      for (const project of projects) {
-        if (!orderedIds.includes(project.id)) next.push(project);
-      }
-      setProjects(next);
+      let previous: WorkbenchProject[] = [];
+      setProjects((current) => {
+        previous = current;
+        const byId = new Map(current.map((project) => [project.id, project]));
+        const next: WorkbenchProject[] = [];
+        for (const id of orderedIds) {
+          const project = byId.get(id);
+          if (project) next.push(project);
+        }
+        for (const project of current) {
+          if (!orderedIds.includes(project.id)) next.push(project);
+        }
+        return next;
+      });
       try {
         const list = await workbenchApi.projects.reorder(orderedIds);
         setProjects(list);
@@ -340,7 +343,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
         );
       }
     },
-    [desktopUnavailableMessage, projects, t],
+    [desktopUnavailableMessage, t],
   );
 
   useEffect(() => {

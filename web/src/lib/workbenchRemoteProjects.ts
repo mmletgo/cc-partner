@@ -30,6 +30,58 @@ export function upsertWorkbenchProjectInPlace(
 
 /**
  * Business Logic（为什么需要这个函数）:
+ *   侧栏拖拽需要把源项目插到目标项目之前或之后，生成新的 id 顺序。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 ids 移除 sourceId，再插入到 target 前（before）或后（after）；id 缺失时返回原数组副本。
+ */
+export function moveProjectId(
+  ids: string[],
+  sourceId: string,
+  targetId: string,
+  position: 'before' | 'after',
+): string[] {
+  if (sourceId === targetId) return [...ids];
+  const from = ids.indexOf(sourceId);
+  const to = ids.indexOf(targetId);
+  if (from < 0 || to < 0) return [...ids];
+  const next = [...ids];
+  next.splice(from, 1);
+  const targetIndex = next.indexOf(targetId);
+  if (targetIndex < 0) return [...ids];
+  next.splice(position === 'before' ? targetIndex : targetIndex + 1, 0, sourceId);
+  return next;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   拖拽乐观更新 / 后端回写需要把 id 顺序投影到项目对象列表。
+ *
+ * Code Logic（这个函数做什么）:
+ *   按 orderedIds 收集存在的项目，再把未出现的项目按原序追加。
+ */
+export function orderProjectsByIds(
+  projects: WorkbenchProject[],
+  orderedIds: string[],
+): WorkbenchProject[] {
+  const byId = new Map(projects.map((project) => [project.id, project]));
+  const next: WorkbenchProject[] = [];
+  const seen = new Set<string>();
+  for (const id of orderedIds) {
+    const project = byId.get(id);
+    if (project && !seen.has(id)) {
+      next.push(project);
+      seen.add(id);
+    }
+  }
+  for (const project of projects) {
+    if (!seen.has(project.id)) next.push(project);
+  }
+  return next;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
  *   远端目录选择器需要提供上一级导航，并兼容 macOS/Linux 与 Windows 设备路径。
  *
  * Code Logic（这个函数做什么）:

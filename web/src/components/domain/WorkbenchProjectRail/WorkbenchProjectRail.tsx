@@ -12,7 +12,7 @@
  *   来源选择与远端项目选择统一走共享 Dialog（portal / focus trap / Escape / backdrop）。
  */
 
-import { useCallback, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog } from '@/components/primitives';
@@ -23,6 +23,7 @@ import { EMPTY_PROJECT_SESSION_STATS } from '@/lib/workbenchProjectStats';
 import { fleetExceptionCount } from '@/lib/types/lanFleet';
 import type { LanFleetDeviceSummary, LanFleetProjectSummary } from '@/lib/types/lanFleet';
 import { WorkbenchRemoteProjectPicker } from '@/components/domain/WorkbenchRemoteProjectPicker';
+import { moveProjectId, orderProjectsByIds } from '@/lib/workbenchRemoteProjects';
 import styles from './WorkbenchProjectRail.module.css';
 
 /**
@@ -40,7 +41,14 @@ export function WorkbenchProjectRail() {
   const [remotePickerOpen, setRemotePickerOpen] = useState<boolean>(false);
   const [remoteOpenBusy, setRemoteOpenBusy] = useState<boolean>(false);
   const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null);
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{
+    projectId: string;
+    position: 'before' | 'after';
+  } | null>(null);
+  const [previewOrderIds, setPreviewOrderIds] = useState<string[] | null>(null);
+  const dragSucceededRef = useRef(false);
+  const itemNodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const itemRectsRef = useRef<Map<string, DOMRect>>(new Map());
   const {
     projects,
     activeProjectId,
@@ -136,48 +144,156 @@ export function WorkbenchProjectRail() {
   }, []);
 
 
+
+  const displayProjects = useMemo(() => {
+    if (!previewOrderIds) return projects;
+    return orderProjectsByIds(projects, previewOrderIds);
+  }, [previewOrderIds, projects]);
+
   /**
    * Business Logic（为什么需要这个函数）:
-   *   侧栏拖拽需要在拖动开始时标记源项目，并在放置时重排 orderedIds。
+   *   列表顺序变化时用 FLIP 补间，让项目卡片滑动到新位置，而不是瞬间跳位。
    *
    * Code Logic（这个函数做什么）:
-   *   HTML5 DnD：start 记 source；over 记 hover target；drop 时按 id 列表重排并调用 reorderProjects。
+   *   layout 前记录旧 rect，layout 后对每个 item 施加 inverse transform 再过渡回 0。
    */
-  const handleProjectDragStart = useCallback((event: DragEvent<HTMLDivElement>, projectId: string) => {
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', projectId);
-    setDraggingProjectId(projectId);
+  useLayoutEffect(() => {
+    const nodes = itemNodeRefs.current;
+    const prev = itemRectsRef.current;
+    const nextRects = new Map<string, DOMRect>();
+    for (const [id, node] of nodes) {
+      nextRects.set(id, node.getBoundingClientRect());
+    }
+    if (prev.size > 0) {
+      for (const [id, node] of nodes) {
+        const oldRect = prev.get(id);
+        const newRect = nextRects.get(id);
+        if (!oldRect || !newRect) continue;
+        const dx = oldRect.left - newRect.left;
+        const dy = oldRect.top - newRect.top;
+        if (dx === 0 && dy === 0) continue;
+        node.style.transition = 'none';
+        node.style.transform = `translate(${dx}px, ${dy}px)`;
+        // force reflow then animate
+        void node.offsetHeight;
+        node.style.transition = 'transform 180ms var(--ease-standard)';
+        node.style.transform = '';
+      }
+    }
+    itemRectsRef.current = nextRects;
+  }, [displayProjects]);
+
+  const captureItemRect = useCallback((projectId: string, node: HTMLDivElement | null) => {
+    if (!node) {
+      itemNodeRefs.current.delete(projectId);
+      return;
+    }
+    itemNodeRefs.current.set(projectId, node);
   }, []);
 
-  const handleProjectDragOver = useCallback((event: DragEvent<HTMLDivElement>, projectId: string) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
-    setDropTargetId(projectId);
-  }, []);
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   仅从手柄开始拖，避免点选/删除与拖拽冲突；并在 list 层处理 over/drop，防止按钮吞掉事件。
+   */
+  const handleHandleDragStart = useCallback(
+    (event: DragEvent<HTMLSpanElement>, projectId: string) => {
+      if (projectBusy) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', projectId);
+      // 自定义拖影略透明，配合列表内预览重排
+      if (event.currentTarget.parentElement) {
+        event.dataTransfer.setDragImage(event.currentTarget.parentElement, 24, 24);
+      }
+      dragSucceededRef.current = false;
+      setDraggingProjectId(projectId);
+      setPreviewOrderIds(projects.map((project) => project.id));
+      setDropIndicator(null);
+    },
+    [projectBusy, projects],
+  );
 
-  const handleProjectDragEnd = useCallback(() => {
-    setDraggingProjectId(null);
-    setDropTargetId(null);
-  }, []);
+  const resolveDropTarget = useCallback(
+    (clientY: number, listEl: HTMLElement) => {
+      const items = Array.from(listEl.querySelectorAll<HTMLElement>('[data-project-id]'));
+      if (items.length === 0) return null;
+      for (const item of items) {
+        const id = item.dataset.projectId;
+        if (!id || id === draggingProjectId) continue;
+        const rect = item.getBoundingClientRect();
+        if (clientY < rect.top || clientY > rect.bottom) continue;
+        const position: 'before' | 'after' =
+          clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+        return { projectId: id, position };
+      }
+      // 落在空白区：按 Y 找最近项
+      let best: { projectId: string; position: 'before' | 'after'; dist: number } | null = null;
+      for (const item of items) {
+        const id = item.dataset.projectId;
+        if (!id || id === draggingProjectId) continue;
+        const rect = item.getBoundingClientRect();
+        const mid = rect.top + rect.height / 2;
+        const dist = Math.abs(clientY - mid);
+        const position: 'before' | 'after' = clientY < mid ? 'before' : 'after';
+        if (!best || dist < best.dist) best = { projectId: id, position, dist };
+      }
+      return best ? { projectId: best.projectId, position: best.position } : null;
+    },
+    [draggingProjectId],
+  );
 
-  const handleProjectDrop = useCallback(
-    (event: DragEvent<HTMLDivElement>, targetProjectId: string) => {
+  const handleListDragOver = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!draggingProjectId) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      const target = resolveDropTarget(event.clientY, event.currentTarget);
+      if (!target) return;
+      setDropIndicator(target);
+      setPreviewOrderIds((current) => {
+        const base = current ?? projects.map((project) => project.id);
+        const next = moveProjectId(base, draggingProjectId, target.projectId, target.position);
+        if (next.join('\0') === base.join('\0')) return current ?? base;
+        return next;
+      });
+    },
+    [draggingProjectId, projects, resolveDropTarget],
+  );
+
+  const handleListDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!draggingProjectId) return;
       event.preventDefault();
       const sourceId = event.dataTransfer.getData('text/plain') || draggingProjectId;
+      const target = resolveDropTarget(event.clientY, event.currentTarget);
+      const base = previewOrderIds ?? projects.map((project) => project.id);
+      const next =
+        target && sourceId
+          ? moveProjectId(base, sourceId, target.projectId, target.position)
+          : base;
+      dragSucceededRef.current = true;
       setDraggingProjectId(null);
-      setDropTargetId(null);
-      if (!sourceId || sourceId === targetProjectId) return;
-      const ids = projects.map((project) => project.id);
-      const from = ids.indexOf(sourceId);
-      const to = ids.indexOf(targetProjectId);
-      if (from < 0 || to < 0) return;
-      const next = [...ids];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      void reorderProjects(next);
+      setDropIndicator(null);
+      setPreviewOrderIds(null);
+      const unchanged =
+        next.length === projects.length && next.every((id, index) => projects[index]?.id === id);
+      if (!unchanged) {
+        void reorderProjects(next);
+      }
     },
-    [draggingProjectId, projects, reorderProjects],
+    [draggingProjectId, previewOrderIds, projects, reorderProjects, resolveDropTarget],
   );
+
+  const handleHandleDragEnd = useCallback(() => {
+    if (!dragSucceededRef.current) {
+      // 取消拖拽：丢弃预览顺序
+      setPreviewOrderIds(null);
+    }
+    setDraggingProjectId(null);
+    setDropIndicator(null);
+  }, []);
 
   return (
     <section className={styles.rail} aria-label={sectionTitle}>
@@ -214,7 +330,12 @@ export function WorkbenchProjectRail() {
 
       {projectError ? <div className={styles.errorBox}>{projectError}</div> : null}
 
-      <div className={styles.projectList}>
+      <div
+        className={styles.projectList}
+        data-dragging={draggingProjectId ? true : undefined}
+        onDragOver={handleListDragOver}
+        onDrop={handleListDrop}
+      >
         {projectsLoading ? <div className={styles.muted}>{t('workbench:loading')}</div> : null}
         {!projectsLoading && projects.length === 0 ? (
           <div className={styles.emptyProject}>
@@ -243,7 +364,7 @@ export function WorkbenchProjectRail() {
             </div>
           </div>
         ) : null}
-        {projects.map((project) => {
+        {displayProjects.map((project) => {
           const stats = projectSessionStats[project.id] ?? EMPTY_PROJECT_SESSION_STATS;
           const windowCountLabel = t('workbench:projectWindowCount', {
             count: stats.windowCount,
@@ -280,21 +401,30 @@ export function WorkbenchProjectRail() {
           return (
             <div
               key={project.id}
+              ref={(node) => captureItemRect(project.id, node)}
               className={styles.projectItem}
+              data-project-id={project.id}
               data-active={isActive || undefined}
               data-dragging={draggingProjectId === project.id || undefined}
-              data-drop-target={
-                dropTargetId === project.id && draggingProjectId !== project.id
+              data-drop-before={
+                dropIndicator?.projectId === project.id && dropIndicator.position === 'before'
                   ? true
                   : undefined
               }
-              draggable={!projectBusy}
-              onDragStart={(event) => handleProjectDragStart(event, project.id)}
-              onDragOver={(event) => handleProjectDragOver(event, project.id)}
-              onDrop={(event) => handleProjectDrop(event, project.id)}
-              onDragEnd={handleProjectDragEnd}
+              data-drop-after={
+                dropIndicator?.projectId === project.id && dropIndicator.position === 'after'
+                  ? true
+                  : undefined
+              }
             >
-              <span className={styles.dragHandle} aria-hidden="true" title={t('workbench:projectRail.dragHandleAria')}>
+              <span
+                className={styles.dragHandle}
+                draggable={!projectBusy}
+                title={t('workbench:projectRail.dragHandleAria')}
+                aria-label={t('workbench:projectRail.dragHandleAria')}
+                onDragStart={(event) => handleHandleDragStart(event, project.id)}
+                onDragEnd={handleHandleDragEnd}
+              >
                 ⋮⋮
               </span>
               <button
