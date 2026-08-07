@@ -7,10 +7,14 @@
 //!
 //! Code Logic（这个模块做什么）:
 //!     远端 inventory 路由（无 secret）；本地 preview plan + apply（CAS 分块 ≤8MiB 续传、
-//!     SnapshotImporter 导入、映射项安装）；clientRequestId 幂等与 partial 报告。
+//!     SnapshotImporter 导入、映射项安装）；SQLite clientRequestId claim/replay 与 partial 报告。
 
-use crate::agent_hub::models::{AgentTarget, ScopeKind};
-use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
+use crate::agent_hub::assets::{from_canonical_bytes, PortableAssetPayload};
+use crate::agent_hub::config_patch::{
+    apply_config_patch_atomically, value_content_hash, JsoncConfigPatcher, ManagedConfigPatch,
+};
+use crate::agent_hub::models::{AgentTarget, PortablePullClaim, PortablePullPlanRecord};
+use crate::agent_hub::object_store::{sha256_hex, ObjectStore, TreeEntryType};
 use crate::agent_hub::portable_actions::PortableAssetConflictPolicy;
 use crate::agent_hub::portable_inventory::{
     inspect_portable_inventory, PortableAssetKind, PortableInventoryItemDto,
@@ -35,6 +39,7 @@ use crate::net::peer_timeout::PeerTimeoutClass;
 use crate::net::protocol::CAPABILITY_PORTABLE_PULL_V1;
 use crate::net::request_context::{new_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
+use crate::storage::agent_hub_repo::AgentHubRepo;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -244,7 +249,7 @@ pub struct RemoteSelectionQuery {
     pub inventory_item_ids: Vec<String>,
 }
 
-/// 内部持久化 plan。
+/// 内部持久化 plan（JSON 存 SQLite）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredPortablePullPlan {
@@ -252,47 +257,41 @@ struct StoredPortablePullPlan {
     remote_item_ids: Vec<String>,
 }
 
-// ───────────────────────── 进程内 plan/result/staging ─────────────────────────
-
-fn plans() -> &'static Mutex<BTreeMap<String, StoredPortablePullPlan>> {
-    static MAP: OnceLock<Mutex<BTreeMap<String, StoredPortablePullPlan>>> = OnceLock::new();
-    MAP.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-fn results() -> &'static Mutex<BTreeMap<String, PortablePullResultDto>> {
-    static MAP: OnceLock<Mutex<BTreeMap<String, PortablePullResultDto>>> = OnceLock::new();
-    MAP.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
+// ───────────────────────── 源端 object staging（进程内 transfer 缓冲） ─────────────────────────
 
 fn staging() -> &'static Mutex<BTreeMap<String, BuiltPortableSelection>> {
     static MAP: OnceLock<Mutex<BTreeMap<String, BuiltPortableSelection>>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn store_plan(plan: StoredPortablePullPlan) {
-    plans()
-        .lock()
-        .expect("pull plans")
-        .insert(plan.public.plan_token.clone(), plan);
+fn parse_stored_pull_plan(plan_json: &str) -> Result<StoredPortablePullPlan, AppError> {
+    serde_json::from_str(plan_json).map_err(AppError::from)
 }
 
-fn load_plan(token: &str) -> Option<StoredPortablePullPlan> {
-    plans().lock().expect("pull plans").get(token).cloned()
-}
-
-fn store_result(result: PortablePullResultDto) {
-    results()
-        .lock()
-        .expect("pull results")
-        .insert(result.client_request_id.clone(), result);
-}
-
-fn load_result(client_request_id: &str) -> Option<PortablePullResultDto> {
-    results()
-        .lock()
-        .expect("pull results")
-        .get(client_request_id)
-        .cloned()
+fn outcome_unknown_pull_result(
+    plan_token: &str,
+    client_request_id: &str,
+    plan: &PortablePullPlanDto,
+) -> PortablePullResultDto {
+    PortablePullResultDto {
+        plan_token: plan_token.to_string(),
+        client_request_id: client_request_id.to_string(),
+        source_device_id: plan.source_device_id.clone(),
+        source_target: plan.source_target,
+        destination_target: plan.destination_target,
+        partial: true,
+        items: plan
+            .changes
+            .iter()
+            .map(|c| PortablePullItemResultDto {
+                inventory_item_id: c.inventory_item_id.clone(),
+                state: PortablePullItemState::OutcomeUnknown,
+                install_mode: Some(c.install_mode),
+                error_code: Some("PORTABLE_PULL_OUTCOME_UNKNOWN".into()),
+                message: Some("pull claimed but not completed".into()),
+            })
+            .collect(),
+    }
 }
 
 // ───────────────────────── 源端 inventory ─────────────────────────
@@ -625,12 +624,12 @@ pub async fn preview_portable_pull(
 
     let public = PortablePullPlanDto {
         plan_token: plan_token.clone(),
-        expires_at,
+        expires_at: expires_at.clone(),
         source_device_id: request.source_device_id.clone(),
         source_target: request.source_target,
         destination_target: request.destination_target,
-        remote_inventory_snapshot_hash: remote.inventory_snapshot_hash,
-        local_inventory_snapshot_hash: local.inventory_snapshot_hash,
+        remote_inventory_snapshot_hash: remote.inventory_snapshot_hash.clone(),
+        local_inventory_snapshot_hash: local.inventory_snapshot_hash.clone(),
         conflict_policy: request.conflict_policy,
         selection_manifest_hash,
         credential_bearing_count: credential_bearing,
@@ -639,14 +638,29 @@ pub async fn preview_portable_pull(
         blocking_reasons: blocking,
     };
 
-    store_plan(StoredPortablePullPlan {
+    let stored = StoredPortablePullPlan {
         public: public.clone(),
         remote_item_ids,
-    });
+    };
+    let plan_json = serde_json::to_string(&stored)?;
+    let repo = AgentHubRepo::new(state.agent_hub_repo.pool().clone());
+    repo.insert_portable_pull_plan(PortablePullPlanRecord {
+        plan_token,
+        expires_at,
+        remote_inventory_snapshot_hash: remote.inventory_snapshot_hash,
+        local_inventory_snapshot_hash: local.inventory_snapshot_hash,
+        plan_json,
+        client_request_id: None,
+        claimed_at: None,
+        consumed_at: None,
+        result_json: None,
+        created_at: Utc::now().to_rfc3339(),
+    })
+    .await?;
     Ok(public)
 }
 
-/// 执行 pull。
+/// 执行 pull（SQLite claim → transfer → import → install → rescan → complete）。
 pub async fn apply_portable_pull(
     state: &AppState,
     request: ApplyPortablePullRequest,
@@ -656,24 +670,92 @@ pub async fn apply_portable_pull(
             "PORTABLE_PULL_APPLY_IDS_REQUIRED".to_string(),
         ));
     }
-    if let Some(existing) = load_result(&request.client_request_id) {
-        if existing.plan_token != request.plan_token {
-            return Err(AppError::conflict(
-                "PORTABLE_PULL_REQUEST_ID_CONFLICT".to_string(),
-            ));
-        }
-        return Ok(existing);
-    }
+    let repo = AgentHubRepo::new(state.agent_hub_repo.pool().clone());
+    let claim = repo
+        .claim_portable_pull_plan(&request.plan_token, &request.client_request_id)
+        .await?;
 
-    let stored = load_plan(&request.plan_token)
-        .ok_or_else(|| AppError::not_found("PORTABLE_PULL_PLAN_NOT_FOUND".to_string()))?;
-    if stored.public.expires_at < Utc::now().to_rfc3339() {
-        return Err(AppError::conflict("PORTABLE_PULL_PLAN_EXPIRED".to_string()));
+    match claim {
+        PortablePullClaim::Replay(json) => {
+            serde_json::from_str(&json).map_err(AppError::from)
+        }
+        PortablePullClaim::Pending => {
+            let row = repo
+                .get_portable_pull_plan(&request.plan_token)
+                .await?
+                .ok_or_else(|| AppError::not_found("PORTABLE_PULL_PLAN_NOT_FOUND".to_string()))?;
+            let stored = parse_stored_pull_plan(&row.plan_json)?;
+            Ok(outcome_unknown_pull_result(
+                &request.plan_token,
+                &request.client_request_id,
+                &stored.public,
+            ))
+        }
+        PortablePullClaim::Claimed(record) => {
+            let stored = parse_stored_pull_plan(&record.plan_json)?;
+            let result = match execute_claimed_pull(state, &stored, &request).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // fail-closed 完成 ledger，避免永远 Pending 假死；调用方可 get 到失败结果
+                    let fail = PortablePullResultDto {
+                        plan_token: request.plan_token.clone(),
+                        client_request_id: request.client_request_id.clone(),
+                        source_device_id: stored.public.source_device_id.clone(),
+                        source_target: stored.public.source_target,
+                        destination_target: stored.public.destination_target,
+                        partial: true,
+                        items: stored
+                            .public
+                            .changes
+                            .iter()
+                            .map(|c| PortablePullItemResultDto {
+                                inventory_item_id: c.inventory_item_id.clone(),
+                                state: PortablePullItemState::Failed,
+                                install_mode: Some(c.install_mode),
+                                error_code: Some("PORTABLE_PULL_APPLY_FAILED".into()),
+                                message: Some(e.to_string()),
+                            })
+                            .collect(),
+                    };
+                    let _ = repo
+                        .complete_portable_pull_plan(
+                            &request.plan_token,
+                            &request.client_request_id,
+                            &serde_json::to_string(&fail)?,
+                        )
+                        .await;
+                    return Ok(fail);
+                }
+            };
+            repo.complete_portable_pull_plan(
+                &request.plan_token,
+                &request.client_request_id,
+                &serde_json::to_string(&result)?,
+            )
+            .await?;
+            Ok(result)
+        }
     }
-    // transfer 前强制同源 target
+}
+
+async fn execute_claimed_pull(
+    state: &AppState,
+    stored: &StoredPortablePullPlan,
+    request: &ApplyPortablePullRequest,
+) -> Result<PortablePullResultDto, AppError> {
+    // transfer 前强制同源 target + 本机 inventory 再验证
     if stored.public.source_target != stored.public.destination_target {
         return Err(AppError::validation(
             "PORTABLE_PULL_TARGET_MISMATCH:source!=destination".to_string(),
+        ));
+    }
+    if stored.public.expires_at.as_str() < Utc::now().to_rfc3339().as_str() {
+        return Err(AppError::conflict("PORTABLE_PULL_PLAN_EXPIRED".to_string()));
+    }
+    let local_now = inspect_portable_inventory(state).await?;
+    if local_now.inventory_snapshot_hash != stored.public.local_inventory_snapshot_hash {
+        return Err(AppError::conflict(
+            "PORTABLE_PULL_LOCAL_INVENTORY_STALE".to_string(),
         ));
     }
 
@@ -698,7 +780,16 @@ pub async fn apply_portable_pull(
     let mut collected: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     for obj in &selection.envelope.objects {
-        if store.get_blob(&obj.hash).await.is_ok() {
+        // CAS 已有 blob 时仍 rehash 校验（integrity）
+        if let Ok(existing) = store.get_blob(&obj.hash).await {
+            let got = sha256_hex(&existing);
+            if got != obj.hash {
+                return Err(AppError::validation(format!(
+                    "PORTABLE_PULL_OBJECT_HASH_MISMATCH:{}",
+                    obj.hash
+                )));
+            }
+            collected.insert(obj.hash.clone(), existing);
             continue;
         }
         let size: u64 = obj.size.parse().unwrap_or(0);
@@ -715,6 +806,13 @@ pub async fn apply_portable_pull(
             )
             .await?;
             if chunk.is_empty() {
+                // size>0 但提前 empty → fail-closed
+                if size > 0 && offset < size {
+                    return Err(AppError::validation(format!(
+                        "PORTABLE_PULL_OBJECT_INCOMPLETE:{}",
+                        obj.hash
+                    )));
+                }
                 break;
             }
             let n = chunk.len() as u64;
@@ -723,27 +821,29 @@ pub async fn apply_portable_pull(
             if size > 0 && offset >= size {
                 break;
             }
-            if size == 0 {
+            // size==0：仅接受一次非空或 empty 结束；禁止无限空转
+            if size == 0 && n < PORTABLE_PULL_MAX_CHUNK_BYTES as u64 {
                 break;
             }
         }
         if bytes_are_legacy_lossy(&buf) {
             continue;
         }
-        if !buf.is_empty() {
+        if !buf.is_empty() || size == 0 {
             let got = sha256_hex(&buf);
-            if got != obj.hash {
+            if size > 0 && got != obj.hash {
                 return Err(AppError::validation(format!(
                     "PORTABLE_PULL_OBJECT_HASH_MISMATCH:{}",
                     obj.hash
                 )));
             }
-            store.put_blob(&buf).await?;
-            collected.insert(obj.hash.clone(), buf);
+            if !buf.is_empty() {
+                store.put_blob(&buf).await?;
+                collected.insert(obj.hash.clone(), buf);
+            }
         }
     }
 
-    // 补齐 object_bytes 供 importer
     for obj in &selection.envelope.objects {
         if !collected.contains_key(&obj.hash) {
             if let Ok(b) = store.get_blob(&obj.hash).await {
@@ -753,6 +853,7 @@ pub async fn apply_portable_pull(
     }
 
     let import_ok = import_selection_canonical(state, &store, &data_dir, &selection).await;
+    let local_before = local_now;
 
     let mut items = Vec::new();
     let mut any_fail = false;
@@ -768,46 +869,119 @@ pub async fn apply_portable_pull(
             continue;
         }
         if change.install_mode == PortablePullInstallMode::SkipExisting {
-            items.push(PortablePullItemResultDto {
-                inventory_item_id: change.inventory_item_id.clone(),
-                state: PortablePullItemState::Skipped,
-                install_mode: Some(change.install_mode),
-                error_code: None,
-                message: Some("skipExisting".into()),
+            // 写时再次确认本地仍存在，避免 preview 后被删仍 skip
+            let still = local_before.items.iter().any(|i| {
+                i.target == stored.public.destination_target
+                    && i.kind == change.kind
+                    && i.native_id == change.native_id
             });
+            if still {
+                items.push(PortablePullItemResultDto {
+                    inventory_item_id: change.inventory_item_id.clone(),
+                    state: PortablePullItemState::Skipped,
+                    install_mode: Some(change.install_mode),
+                    error_code: None,
+                    message: Some("skipExisting".into()),
+                });
+            } else {
+                // 已不存在：降级为 installToTarget 语义
+                match install_change(state, &store, &selection, change).await {
+                    Ok(()) => items.push(PortablePullItemResultDto {
+                        inventory_item_id: change.inventory_item_id.clone(),
+                        state: if import_ok.is_err() {
+                            any_fail = true;
+                            PortablePullItemState::Failed
+                        } else {
+                            PortablePullItemState::Succeeded
+                        },
+                        install_mode: Some(PortablePullInstallMode::InstallToTarget),
+                        error_code: if import_ok.is_err() {
+                            Some("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED".into())
+                        } else {
+                            None
+                        },
+                        message: None,
+                    }),
+                    Err(e) => {
+                        any_fail = true;
+                        items.push(PortablePullItemResultDto {
+                            inventory_item_id: change.inventory_item_id.clone(),
+                            state: PortablePullItemState::Failed,
+                            install_mode: Some(change.install_mode),
+                            error_code: Some("PORTABLE_PULL_INSTALL_FAILED".into()),
+                            message: Some(e.to_string()),
+                        });
+                    }
+                }
+            }
             continue;
         }
         if change.install_mode == PortablePullInstallMode::ImportedCanonicalOnly {
+            if import_ok.is_err() {
+                any_fail = true;
+                items.push(PortablePullItemResultDto {
+                    inventory_item_id: change.inventory_item_id.clone(),
+                    state: PortablePullItemState::Failed,
+                    install_mode: Some(change.install_mode),
+                    error_code: Some("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED".into()),
+                    message: Some("canonical import failed".into()),
+                });
+            } else {
+                items.push(PortablePullItemResultDto {
+                    inventory_item_id: change.inventory_item_id.clone(),
+                    state: PortablePullItemState::ImportedCanonicalOnly,
+                    install_mode: Some(change.install_mode),
+                    error_code: None,
+                    message: Some("canonical only; project unmapped or not opted-in".into()),
+                });
+            }
+            continue;
+        }
+
+        // InstallToTarget：canonical import 必须成功，否则不得标 Succeeded
+        if import_ok.is_err() {
+            any_fail = true;
             items.push(PortablePullItemResultDto {
                 inventory_item_id: change.inventory_item_id.clone(),
-                state: PortablePullItemState::ImportedCanonicalOnly,
+                state: PortablePullItemState::Failed,
                 install_mode: Some(change.install_mode),
-                error_code: None,
-                message: Some("canonical only; project unmapped or not opted-in".into()),
+                error_code: Some("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED".into()),
+                message: Some(format!(
+                    "canonical import failed: {}",
+                    import_ok.as_ref().err().map(|e| e.to_string()).unwrap_or_default()
+                )),
             });
             continue;
         }
-        let sel = selection
-            .items
-            .iter()
-            .find(|s| s.inventory_item_id == change.inventory_item_id);
-        let install_res = if let Some(s) = sel {
-            install_payload_to_target(s).await
-        } else {
-            Err(AppError::generic("selection item missing after transfer"))
-        };
-        match install_res {
-            Ok(()) => items.push(PortablePullItemResultDto {
-                inventory_item_id: change.inventory_item_id.clone(),
-                state: PortablePullItemState::Succeeded,
-                install_mode: Some(change.install_mode),
-                error_code: if import_ok.is_err() {
-                    Some("PORTABLE_PULL_CANONICAL_IMPORT_PARTIAL".into())
+
+        match install_change(state, &store, &selection, change).await {
+            Ok(()) => {
+                // post-install rescan gate
+                let post = inspect_portable_inventory(state).await?;
+                let observed = post.items.iter().any(|i| {
+                    i.target == stored.public.destination_target
+                        && i.kind == change.kind
+                        && i.native_id == change.native_id
+                });
+                if observed {
+                    items.push(PortablePullItemResultDto {
+                        inventory_item_id: change.inventory_item_id.clone(),
+                        state: PortablePullItemState::Succeeded,
+                        install_mode: Some(change.install_mode),
+                        error_code: None,
+                        message: Some("install verified by rescan".into()),
+                    });
                 } else {
-                    None
-                },
-                message: None,
-            }),
+                    any_fail = true;
+                    items.push(PortablePullItemResultDto {
+                        inventory_item_id: change.inventory_item_id.clone(),
+                        state: PortablePullItemState::Failed,
+                        install_mode: Some(change.install_mode),
+                        error_code: Some("PORTABLE_PULL_RESCAN_MISSING".into()),
+                        message: Some("install not observed after rescan".into()),
+                    });
+                }
+            }
             Err(e) => {
                 any_fail = true;
                 items.push(PortablePullItemResultDto {
@@ -821,22 +995,34 @@ pub async fn apply_portable_pull(
         }
     }
 
-    let result = PortablePullResultDto {
-        plan_token: request.plan_token,
-        client_request_id: request.client_request_id,
-        source_device_id: stored.public.source_device_id,
+    Ok(PortablePullResultDto {
+        plan_token: request.plan_token.clone(),
+        client_request_id: request.client_request_id.clone(),
+        source_device_id: stored.public.source_device_id.clone(),
         source_target: stored.public.source_target,
         destination_target: stored.public.destination_target,
         partial: any_fail || import_ok.is_err(),
         items,
-    };
-    store_result(result.clone());
-    Ok(result)
+    })
+}
+
+async fn install_change(
+    state: &AppState,
+    store: &ObjectStore,
+    selection: &RemotePortableSelectionResponse,
+    change: &PortablePullChangeDto,
+) -> Result<(), AppError> {
+    let sel = selection
+        .items
+        .iter()
+        .find(|s| s.inventory_item_id == change.inventory_item_id)
+        .ok_or_else(|| AppError::generic("selection item missing after transfer"))?;
+    install_payload_to_target(state, store, sel, change).await
 }
 
 /// 按 clientRequestId 查询 pull 结果。
 pub async fn get_portable_pull(
-    _state: &AppState,
+    state: &AppState,
     client_request_id: &str,
 ) -> Result<PortablePullResultDto, AppError> {
     if client_request_id.trim().is_empty() {
@@ -844,8 +1030,20 @@ pub async fn get_portable_pull(
             "PORTABLE_PULL_REQUEST_ID_REQUIRED".to_string(),
         ));
     }
-    load_result(client_request_id)
-        .ok_or_else(|| AppError::not_found("PORTABLE_PULL_REQUEST_NOT_FOUND".to_string()))
+    let repo = AgentHubRepo::new(state.agent_hub_repo.pool().clone());
+    let row = repo
+        .get_portable_pull_by_request_id(client_request_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("PORTABLE_PULL_REQUEST_NOT_FOUND".to_string()))?;
+    if let Some(result_json) = row.result_json.as_deref() {
+        return serde_json::from_str(result_json).map_err(AppError::from);
+    }
+    let stored = parse_stored_pull_plan(&row.plan_json)?;
+    Ok(outcome_unknown_pull_result(
+        &row.plan_token,
+        client_request_id,
+        &stored.public,
+    ))
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -1028,31 +1226,61 @@ async fn import_selection_canonical(
     Ok(())
 }
 
-use crate::storage::agent_hub_repo::AgentHubRepo;
-
-async fn install_payload_to_target(item: &PortableSelectionItem) -> Result<(), AppError> {
-    let data_dir = crate::config::data_dir()?;
-    let store = ObjectStore::open(&data_dir)?;
+#[allow(clippy::collapsible_if, clippy::collapsible_match)]
+async fn install_payload_to_target(
+    state: &AppState,
+    store: &ObjectStore,
+    item: &PortableSelectionItem,
+    change: &PortablePullChangeDto,
+) -> Result<(), AppError> {
     let bytes = store.get_blob(&item.object_hash).await?;
     if bytes_are_legacy_lossy(&bytes) {
         return Err(AppError::validation(
             "PORTABLE_PULL_LEGACY_LOSSY".to_string(),
         ));
     }
+    // 优先使用 inventory target roots（CLAUDE_CONFIG_DIR 等），避免硬编码 home 旁路
     let env_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let root = match item.target {
-        AgentTarget::Claude => env_home.join(".claude"),
-        AgentTarget::Codex => env_home.join(".codex"),
-        AgentTarget::OpenCode => env_home.join(".config").join("opencode"),
+        AgentTarget::Claude => std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env_home.join(".claude")),
+        AgentTarget::Codex => std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env_home.join(".codex")),
+        AgentTarget::OpenCode => std::env::var_os("OPENCODE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var_os("XDG_CONFIG_HOME")
+                    .map(|p| PathBuf::from(p).join("opencode"))
+                    .unwrap_or_else(|| env_home.join(".config").join("opencode"))
+            }),
     };
+    let _ = state; // 预留 AppState 路径解析扩展
     match item.kind {
         PortableAssetKind::Command => {
             let dir = root.join("commands");
             std::fs::create_dir_all(&dir)?;
             let path = dir.join(format!("{}.md", item.native_id));
-            if let Ok(payload) = crate::agent_hub::assets::from_canonical_bytes(&bytes) {
-                if let crate::agent_hub::assets::PortableAssetPayload::Command(cmd) = payload {
-                    let text = format!("---\nname: {}\n---\n{}\n", cmd.name, cmd.prompt_template);
+            if change.install_mode == PortablePullInstallMode::SkipExisting && path.exists() {
+                return Ok(());
+            }
+            if path.exists()
+                && matches!(
+                    change.install_mode,
+                    PortablePullInstallMode::InstallToTarget
+                )
+            {
+                // replaceAfterPreview：允许覆盖；skipExisting 已在上分支处理
+            }
+            if let Ok(payload) = from_canonical_bytes(&bytes) {
+                if let PortableAssetPayload::Command(cmd) = payload {
+                    let text = format!(
+                        "---\nname: {}\ndescription: {}\n---\n{}\n",
+                        cmd.name,
+                        cmd.description.as_deref().unwrap_or(""),
+                        cmd.prompt_template
+                    );
                     std::fs::write(&path, text)?;
                     return Ok(());
                 }
@@ -1061,63 +1289,122 @@ async fn install_payload_to_target(item: &PortableSelectionItem) -> Result<(), A
         }
         PortableAssetKind::Skill => {
             let dir = root.join("skills").join(&item.native_id);
-            std::fs::create_dir_all(&dir)?;
-            if let Ok(payload) = crate::agent_hub::assets::from_canonical_bytes(&bytes) {
-                if let crate::agent_hub::assets::PortableAssetPayload::Skill(skill) = payload {
-                    let text = format!(
-                        "---\nname: {}\ndescription: {}\n---\n",
-                        skill.name, skill.description
-                    );
-                    std::fs::write(dir.join("SKILL.md"), text)?;
-                    return Ok(());
+            if change.install_mode == PortablePullInstallMode::SkipExisting && dir.exists() {
+                return Ok(());
+            }
+            // 优先 CAS 树还原完整 body（tree_hash 在 envelope revision / payload）
+            if let Ok(payload) = from_canonical_bytes(&bytes) {
+                if let PortableAssetPayload::Skill(skill) = payload {
+                    if let Ok(manifest) = store.get_tree(&skill.tree_manifest_hash).await {
+                        std::fs::create_dir_all(&dir)?;
+                        for entry in &manifest.entries {
+                            let dest = dir.join(&entry.path);
+                            if let Some(parent) = dest.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            match entry.entry_type {
+                                TreeEntryType::File => {
+                                    let blob = store.get_blob(&entry.blob_hash).await?;
+                                    std::fs::write(&dest, blob)?;
+                                }
+                                TreeEntryType::Symlink => {
+                                    // 不跟随外链；仅写文本占位失败则跳过
+                                    let _ = entry;
+                                }
+                            }
+                        }
+                        // 若树未含 SKILL.md，至少写 frontmatter（fail-closed 再检查）
+                        if !dir.join("SKILL.md").exists() {
+                            return Err(AppError::validation(
+                                "PORTABLE_PULL_SKILL_TREE_MISSING_SKILL_MD".to_string(),
+                            ));
+                        }
+                        return Ok(());
+                    }
+                    // 无树：不得只写 frontmatter 丢 body —— fail-closed
+                    return Err(AppError::validation(format!(
+                        "PORTABLE_PULL_SKILL_TREE_UNAVAILABLE:{}",
+                        skill.tree_manifest_hash
+                    )));
                 }
             }
+            // 非 canonical skill payload：整文件当 SKILL.md（单文件 skill）
+            std::fs::create_dir_all(&dir)?;
             std::fs::write(dir.join("SKILL.md"), &bytes)?;
         }
         PortableAssetKind::Plugin => {
             let dir = root.join("plugins").join(&item.native_id);
+            if change.install_mode == PortablePullInstallMode::SkipExisting && dir.exists() {
+                return Ok(());
+            }
             std::fs::create_dir_all(&dir)?;
             std::fs::write(dir.join("plugin.json"), &bytes)?;
         }
         PortableAssetKind::Mcp => {
             let path = match item.target {
-                AgentTarget::Claude => root.join(".mcp.json"),
+                AgentTarget::Claude => root.join(".claude.json"),
                 AgentTarget::Codex => root.join("config.toml"),
-                AgentTarget::OpenCode => root.join("mcp.json"),
+                AgentTarget::OpenCode => root.join("opencode.json"),
             };
-            if let Ok(payload) = crate::agent_hub::assets::from_canonical_bytes(&bytes) {
-                if let crate::agent_hub::assets::PortableAssetPayload::Mcp(server) = payload {
+            if let Ok(payload) = from_canonical_bytes(&bytes) {
+                if let PortableAssetPayload::Mcp(server) = payload {
                     if matches!(item.target, AgentTarget::Claude | AgentTarget::OpenCode) {
-                        let mut root_val = if path.exists() {
-                            let t = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".into());
-                            serde_json::from_str(&t).unwrap_or(serde_json::json!({}))
+                        // ownership-aware semantic patch；skipExisting 若 leaf 已存在则跳过
+                        let current_bytes = if path.exists() {
+                            std::fs::read(&path)?
                         } else {
-                            serde_json::json!({})
+                            b"{}".to_vec()
                         };
-                        if !root_val.is_object() {
-                            root_val = serde_json::json!({});
+                        let existing = {
+                            use crate::agent_hub::config_patch::SemanticConfigPatcher;
+                            JsoncConfigPatcher
+                                .inspect(
+                                    &current_bytes,
+                                    &["mcpServers".into(), server.key.clone()],
+                                )
+                                .ok()
+                        };
+                        if change.install_mode == PortablePullInstallMode::SkipExisting
+                            && existing.as_ref().map(|o| o.present).unwrap_or(false)
+                        {
+                            return Ok(());
                         }
-                        let map = root_val
-                            .as_object_mut()
-                            .unwrap()
-                            .entry("mcpServers")
-                            .or_insert_with(|| serde_json::json!({}));
-                        if let Some(obj) = map.as_object_mut() {
-                            obj.insert(
-                                server.key.clone(),
-                                serde_json::to_value(&server).unwrap_or(serde_json::json!({})),
-                            );
-                        }
-                        std::fs::write(
+                        let value = serde_json::to_value(&server).unwrap_or(serde_json::json!({}));
+                        let expected = existing.and_then(|o| {
+                            if o.present {
+                                Some(value_content_hash(&o.value))
+                            } else {
+                                None
+                            }
+                        });
+                        let patches = [ManagedConfigPatch {
+                            owner_id: format!("portable-pull:{}", server.key),
+                            path: vec!["mcpServers".into(), server.key.clone()],
+                            value: Some(value),
+                            expected_base_hash: expected,
+                        }];
+                        let prepared = apply_config_patch_atomically(
+                            &JsoncConfigPatcher,
                             &path,
-                            serde_json::to_vec_pretty(&root_val).unwrap_or_default(),
+                            &patches,
                         )?;
+                        if !matches!(
+                            prepared.patched.outcome,
+                            crate::agent_hub::config_patch::ConfigPatchOutcome::Applied
+                        ) {
+                            return Err(AppError::conflict(format!(
+                                "PORTABLE_PULL_MCP_PATCH:{:?}",
+                                prepared.patched.outcome
+                            )));
+                        }
                         return Ok(());
                     }
                 }
             }
-            let side = path.with_extension(format!("pull-{}.json", item.native_id));
-            std::fs::write(side, &bytes)?;
+            // 非 JSON MCP / Codex：fail-closed，禁止 silent side-file 冒充安装成功
+            return Err(AppError::validation(
+                "PORTABLE_PULL_MCP_INSTALL_UNSUPPORTED".to_string(),
+            ));
         }
     }
     Ok(())
@@ -1128,6 +1415,7 @@ async fn install_payload_to_target(item: &PortableSelectionItem) -> Result<(), A
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_hub::models::ScopeKind;
     use crate::agent_hub::portable_inventory::PortableInventoryItemCapabilitiesDto;
     use crate::agent_hub::snapshot::envelope::SnapshotSelection;
 
@@ -1219,9 +1507,59 @@ mod tests {
         assert_ne!(req.source_target, req.destination_target);
     }
 
-    #[test]
-    fn replay_conflict_when_request_id_bound_to_other_plan() {
-        store_result(PortablePullResultDto {
+    #[tokio::test]
+    async fn durable_pull_claim_replay_after_complete() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        AgentHubRepo::ensure_schema(&pool).await.unwrap();
+        let repo = AgentHubRepo::new(pool);
+        let plan = StoredPortablePullPlan {
+            public: PortablePullPlanDto {
+                plan_token: "plan-a".into(),
+                expires_at: (Utc::now() + ChronoDuration::minutes(10)).to_rfc3339(),
+                source_device_id: "d".into(),
+                source_target: AgentTarget::Claude,
+                destination_target: AgentTarget::Claude,
+                remote_inventory_snapshot_hash: "r".into(),
+                local_inventory_snapshot_hash: "l".into(),
+                conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+                selection_manifest_hash: "m".into(),
+                credential_bearing_count: 0,
+                has_credential_bearing_assets: false,
+                changes: vec![],
+                blocking_reasons: vec![],
+            },
+            remote_item_ids: vec![],
+        };
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        repo.insert_portable_pull_plan(PortablePullPlanRecord {
+            plan_token: "plan-a".into(),
+            expires_at: plan.public.expires_at.clone(),
+            remote_inventory_snapshot_hash: "r".into(),
+            local_inventory_snapshot_hash: "l".into(),
+            plan_json,
+            client_request_id: None,
+            claimed_at: None,
+            consumed_at: None,
+            result_json: None,
+            created_at: Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        let claim = repo
+            .claim_portable_pull_plan("plan-a", "req-1")
+            .await
+            .unwrap();
+        assert!(matches!(claim, PortablePullClaim::Claimed(_)));
+        let result = PortablePullResultDto {
             plan_token: "plan-a".into(),
             client_request_id: "req-1".into(),
             source_device_id: "d".into(),
@@ -1229,10 +1567,47 @@ mod tests {
             destination_target: AgentTarget::Claude,
             partial: false,
             items: vec![],
-        });
-        let existing = load_result("req-1").unwrap();
-        assert_eq!(existing.plan_token, "plan-a");
-        assert_ne!(existing.plan_token, "plan-b");
+        };
+        repo.complete_portable_pull_plan("plan-a", "req-1", &serde_json::to_string(&result).unwrap())
+            .await
+            .unwrap();
+        let replay = repo
+            .claim_portable_pull_plan("plan-a", "req-1")
+            .await
+            .unwrap();
+        match replay {
+            PortablePullClaim::Replay(json) => {
+                let back: PortablePullResultDto = serde_json::from_str(&json).unwrap();
+                assert_eq!(back, result);
+            }
+            other => panic!("expected replay, got {other:?}"),
+        }
+        // 同 request 绑不同 plan → conflict
+        repo.insert_portable_pull_plan(PortablePullPlanRecord {
+            plan_token: "plan-b".into(),
+            expires_at: (Utc::now() + ChronoDuration::minutes(10)).to_rfc3339(),
+            remote_inventory_snapshot_hash: "r".into(),
+            local_inventory_snapshot_hash: "l".into(),
+            plan_json: serde_json::to_string(&plan).unwrap(),
+            client_request_id: None,
+            claimed_at: None,
+            consumed_at: None,
+            result_json: None,
+            created_at: Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        let conflict = repo.claim_portable_pull_plan("plan-b", "req-1").await;
+        assert!(conflict.is_err());
+    }
+
+    #[test]
+    fn skill_install_must_not_drop_body_without_tree() {
+        // 契约：canonical Skill 无 tree 时 install 必须 fail-closed，不得只写 frontmatter
+        let src = include_str!("pull.rs");
+        assert!(src.contains("PORTABLE_PULL_SKILL_TREE_UNAVAILABLE"));
+        assert!(src.contains("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED"));
+        assert!(src.contains("install verified by rescan"));
     }
 
     #[test]

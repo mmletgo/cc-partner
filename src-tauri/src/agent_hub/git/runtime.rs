@@ -1137,6 +1137,7 @@ async fn has_remote_branch(git: &Path, workdir: &Path) -> bool {
 ///
 /// Code Logic: 跑 `git status --porcelain`；stdout 非空 → dirty。non-zero 退出或
 /// 解析失败 → Err，调用方按 fail-closed 处理（不假装 clean）。
+#[allow(dead_code)]
 async fn device_lane_has_uncommitted_changes(git: &Path, workdir: &Path) -> Result<bool, AppError> {
     let out = git_cli::run(
         git,
@@ -2202,7 +2203,8 @@ mod tests {
         (data_tempdir, workdir, state)
     }
 
-    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[allow(dead_code)]
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;

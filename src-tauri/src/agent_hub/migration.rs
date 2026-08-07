@@ -358,7 +358,6 @@ pub fn user_claude_md_file_path() -> Result<std::path::PathBuf, AppError> {
 /// Code Logic（这个函数做什么）:
 ///     ensure parent dir → 写 sibling temp → rename 覆盖（失败回退 fs::write）。
 #[allow(dead_code)] // projector / hub-off dual-write paths may re-enable explicit file write
-#[allow(dead_code)] // projector may re-enable explicit file write
 fn write_user_claude_md_file(content: &str) -> Result<(), AppError> {
     let path = user_claude_md_file_path()?;
     if let Some(parent) = path.parent() {

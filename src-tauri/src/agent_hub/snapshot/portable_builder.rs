@@ -131,6 +131,48 @@ pub async fn build_portable_selection_envelope(
                 .entry(hash.clone())
                 .or_insert_with(|| packed.bytes.clone());
         }
+        // Skill: 同步将目录树写入 CAS，保证 dest install 可还原 SKILL.md body + 支持文件
+        if item.kind == PortableAssetKind::Skill {
+            if let Some(path) = item.source_path.as_deref().map(PathBuf::from) {
+                let dir = if path.is_dir() {
+                    path
+                } else {
+                    path.parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or(path)
+                };
+                if dir.is_dir() {
+                    if let Ok(put) = store.put_tree_from_directory(&dir).await {
+                        let th = put.object.hash.clone();
+                        if !seen_hashes.contains(&th) {
+                            seen_hashes.insert(th.clone());
+                            if let Ok(manifest_bytes) = store.get_blob(&th).await {
+                                object_bytes.insert(th.clone(), manifest_bytes.clone());
+                                objects.push(SnapshotObjectDescriptor {
+                                    hash: th,
+                                    size: manifest_bytes.len().to_string(),
+                                });
+                            }
+                        }
+                        // 也登记树内每个 blob
+                        if let Ok(manifest) = store.get_tree(&put.object.hash).await {
+                            for entry in manifest.entries {
+                                if !seen_hashes.contains(&entry.blob_hash) {
+                                    if let Ok(b) = store.get_blob(&entry.blob_hash).await {
+                                        seen_hashes.insert(entry.blob_hash.clone());
+                                        object_bytes.insert(entry.blob_hash.clone(), b.clone());
+                                        objects.push(SnapshotObjectDescriptor {
+                                            hash: entry.blob_hash,
+                                            size: b.len().to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let asset_id = stable_asset_id(item);
         let rev_id = format!("{asset_id}-rev1");

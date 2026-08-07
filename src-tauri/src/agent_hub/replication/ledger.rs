@@ -437,11 +437,9 @@ impl ReplicationLedger {
         }
     }
 
-    /// 在已开启事务内把 prepared 标记为 committed 并写 outcome。
-    ///
-    /// Business Logic: 与 import 同 TX，保证幂等键只产生一次副作用。
-
     /// 返回 maintenance gate（与 AgentHubRepo 同 lease 时使用）。
+    ///
+    /// Business Logic: 与 AgentHubRepo 同 lease 时使用，保证幂等键只产生一次副作用。
     pub fn gate(&self) -> std::sync::Arc<DatabaseMaintenanceGate> {
         std::sync::Arc::clone(&self.gate)
     }

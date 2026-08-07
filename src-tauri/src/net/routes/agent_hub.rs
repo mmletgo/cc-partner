@@ -19,6 +19,8 @@ use crate::agent_hub::replication::receiver::{
     PreparePushRequest, PreparePushResponse, PutObjectResponse, AGENT_HUB_MAX_CHUNK_BYTES,
 };
 use crate::net::error_response::{P2pError, P2pResult};
+// CAPABILITY_* used in tests module for wire-token assertions
+#[cfg(test)]
 use crate::net::protocol::{CAPABILITY_AGENT_HUB_V1, CAPABILITY_PORTABLE_PULL_V1};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
