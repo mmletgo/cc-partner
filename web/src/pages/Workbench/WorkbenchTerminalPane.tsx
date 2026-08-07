@@ -9,7 +9,7 @@
  *   - 暴露 WorkbenchTerminalPane（memo 组件）和 TerminalCursorAnchor / WorkbenchTerminalPaneProps 类型；
  *   - session id 变化时创建/销毁 Terminal；open 后创建 live writer 订阅 store delta；
  *   - 仅 inputEnabled=true 的 active 终端转发 onData；ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端；
- *   - 终端从隐藏切回可见或应用窗口恢复焦点时整屏重绘，避免 WebView 复用旧的终端渲染层。
+ *   - 终端从隐藏切回可见或应用窗口恢复焦点时，下一帧强制 PTY 与 DOM 渲染层重绘。
  */
 import { memo, useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
@@ -131,7 +131,7 @@ function cursorAnchorFromMetrics(
  * Code Logic（这个组件做什么）:
  *   session 变化时创建/销毁 Terminal；open 后挂 live writer 直接写增量；
  *   仅 inputEnabled=true 的 active 终端转发 onData；ResizeObserver 触发 FitAddon.fit 后把 cols/rows clamp 后回传后端；
- *   renderVisible 从 false 变为 true 或应用恢复焦点时刷新全部行，不销毁 xterm 实例。
+ *   renderVisible 从 false 变为 true 或应用恢复焦点时，下一帧强制 fit/PTY 与 DOM 全行重绘，不销毁 xterm 实例。
  */
 export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: WorkbenchTerminalPaneProps) {
   const {
@@ -150,6 +150,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const liveWriterRef = useRef<TerminalLiveWriter | null>(null);
   const replayGateRef = useRef<TerminalReplayGate>({ current: false });
   const inputEnabledRef = useRef<boolean>(inputEnabled);
+  const previousRenderVisibleRef = useRef<boolean>(renderVisible);
   const resizeTimerRef = useRef<number | null>(null);
   const forceResizeRef = useRef<(() => void) | null>(null);
   const cursorAnchorCallbackRef = useRef<WorkbenchTerminalPaneProps['onCursorAnchorChange']>(
@@ -413,31 +414,52 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   }, [resizeRequestKey]);
 
   useEffect(() => {
+    const becameVisible = renderVisible && !previousRenderVisibleRef.current;
+    previousRenderVisibleRef.current = renderVisible;
     if (!renderVisible) return undefined;
+    let recoveryRaf: number | null = null;
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   PC WebView 长时复用隐藏的 xterm DOM 层时，可能在切回后仍合成旧行；
-     *   需要主动刷新渲染层。有文本选区时禁止整屏 refresh，避免选区视觉被冲掉。
+     *   PC WebView 长时复用隐藏的 xterm DOM 层时，普通 refresh 可能仍合成旧行；
+     *   关闭新 window 后旧 window 恢复可见，必须等 CSS 可见状态提交后再强制 PTY 和 DOM 重绘。
      *
      * Code Logic（这个函数做什么）:
-     *   只在当前 pane 可见、页面未隐藏、且无选区时失效光标度量缓存并 refresh 全部行。
+     *   合并同一帧的多次请求；下一帧复查可见性与选区，调用 forceResize 触发
+     *   fit + 后端 SIGWINCH 重绘，再用空 clearSelection 走 xterm DOM renderer 的独立全行失效路径。
      */
-    const refreshVisibleTerminal = (): void => {
+    const scheduleVisibleTerminalRecovery = (): void => {
       if (document.visibilityState === 'hidden') return;
       const terminal = terminalRef.current;
       if (!terminal) return;
       if (terminal.getSelection().length > 0) return;
-      cursorMetricsRef.current = null;
-      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      if (recoveryRaf !== null) {
+        window.cancelAnimationFrame(recoveryRaf);
+      }
+      recoveryRaf = window.requestAnimationFrame(() => {
+        recoveryRaf = null;
+        const currentTerminal = terminalRef.current;
+        if (!currentTerminal || currentTerminal !== terminal) return;
+        if (document.visibilityState === 'hidden') return;
+        if (currentTerminal.getSelection().length > 0) return;
+        cursorMetricsRef.current = null;
+        forceResizeRef.current?.();
+        // xterm 6 DOM renderer 会在 selection 失效时重建全部行；空选区不会改变用户状态。
+        currentTerminal.clearSelection();
+      });
     };
 
-    refreshVisibleTerminal();
-    window.addEventListener('focus', refreshVisibleTerminal);
-    document.addEventListener('visibilitychange', refreshVisibleTerminal);
+    if (becameVisible) {
+      scheduleVisibleTerminalRecovery();
+    }
+    window.addEventListener('focus', scheduleVisibleTerminalRecovery);
+    document.addEventListener('visibilitychange', scheduleVisibleTerminalRecovery);
     return () => {
-      window.removeEventListener('focus', refreshVisibleTerminal);
-      document.removeEventListener('visibilitychange', refreshVisibleTerminal);
+      if (recoveryRaf !== null) {
+        window.cancelAnimationFrame(recoveryRaf);
+      }
+      window.removeEventListener('focus', scheduleVisibleTerminalRecovery);
+      document.removeEventListener('visibilitychange', scheduleVisibleTerminalRecovery);
     };
   }, [renderVisible, sessionId]);
 

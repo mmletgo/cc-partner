@@ -13,7 +13,7 @@
  *   - 用 @testing-library/react 渲染、rerender、fireEvent 触发各种交互并断言。
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import type { ReactElement, ReactNode } from 'react';
 import { useCallback } from 'react';
 
@@ -40,11 +40,14 @@ interface MockTerminal {
   onCursorMove: (cb: () => void) => { dispose: () => void };
   /** 测试用：主动触发已注册的 onCursorMove 回调。 */
   emitCursorMove: () => void;
+  /** 测试用：设置当前文本选区。 */
+  setSelection: (text: string) => void;
   onResize: (cb: () => void) => { dispose: () => void };
   loadAddon: (addon: unknown) => void;
   open: (el: HTMLElement) => void;
   write: (data: string, cb?: () => void) => void;
   clear: () => void;
+  clearSelection: () => void;
   refresh: (start: number, end: number) => void;
   getSelection: () => string;
   dispose: () => void;
@@ -68,6 +71,8 @@ const terminalEvents = vi.hoisted<{
   clearCalls: Array<{ instanceIndex: number }>;
   /** Records every refresh(start, end) call across all instances, in order. */
   refreshCalls: Array<{ start: number; end: number; instanceIndex: number }>;
+  /** Records the empty-selection invalidation used to force the DOM renderer to rebuild rows. */
+  clearSelectionCalls: Array<{ instanceIndex: number }>;
 }>(() => ({
   constructCount: 0,
   disposeCount: 0,
@@ -78,6 +83,7 @@ const terminalEvents = vi.hoisted<{
   writeCalls: [],
   clearCalls: [],
   refreshCalls: [],
+  clearSelectionCalls: [],
 }));
 
 vi.mock('@xterm/xterm', () => {
@@ -88,6 +94,7 @@ vi.mock('@xterm/xterm', () => {
     private dataCb: ((data: string) => void) | null = null;
     private cursorMoveCb: (() => void) | null = null;
     private resizeCb: (() => void) | null = null;
+    private selectionText = '';
     // Business Logic: 记录自己的 instance index，让 write/clear 日志能溯源到具体实例。
     private readonly instanceIndex: number;
 
@@ -143,12 +150,18 @@ vi.mock('@xterm/xterm', () => {
     clear() {
       terminalEvents.clearCalls.push({ instanceIndex: this.instanceIndex });
     }
+    clearSelection() {
+      this.selectionText = '';
+      terminalEvents.clearSelectionCalls.push({ instanceIndex: this.instanceIndex });
+    }
     refresh(start: number, end: number) {
       terminalEvents.refreshCalls.push({ start, end, instanceIndex: this.instanceIndex });
     }
     getSelection() {
-      // Business Logic: 选区保护路径在无选区时继续 refresh/fit；默认空串模拟无选区。
-      return '';
+      return this.selectionText;
+    }
+    setSelection(text: string) {
+      this.selectionText = text;
     }
     dispose() {
       terminalEvents.disposeCount += 1;
@@ -378,6 +391,7 @@ function renderPaneWithRevision() {
   return {
     ...utils,
     store,
+    onResize: stableResize,
     advanceRevision(sessionId: string, buffer: string) {
       store.reset(sessionId, buffer);
     },
@@ -409,6 +423,7 @@ beforeEach(() => {
   terminalEvents.writeCalls.length = 0;
   terminalEvents.clearCalls.length = 0;
   terminalEvents.refreshCalls.length = 0;
+  terminalEvents.clearSelectionCalls.length = 0;
   // jsdom 默认无 ResizeObserver；安装一个调用回调的最小实现，触发 pane 内的 resize 路径。
   if (!window.ResizeObserver) {
     class RO {
@@ -632,16 +647,22 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
 });
 
 describe('WorkbenchTerminalPane — workspace view change does not unmount xterm', () => {
-  test('switching render visibility preserves the Terminal instance and repaints every row when shown again', () => {
-    const { rerenderProps } = renderPaneWithRevision();
+  test('switching render visibility preserves the Terminal instance and forces PTY plus DOM recovery when shown again', async () => {
+    const { onResize, rerenderProps } = renderPaneWithRevision();
     const constructsAfterMount = terminalEvents.constructCount;
     expect(constructsAfterMount).toBe(1);
     const instanceAtMount = terminalEvents.instances[0];
     const refreshesAfterMount = terminalEvents.refreshCalls.length;
+    const resizesAfterMount = onResize.mock.calls.length;
+    const selectionInvalidationsAfterMount = terminalEvents.clearSelectionCalls.length;
 
     rerenderProps({ renderVisible: false });
     expect(terminalEvents.refreshCalls).toHaveLength(refreshesAfterMount);
     rerenderProps({ renderVisible: true });
+
+    await waitFor(() => {
+      expect(onResize).toHaveBeenCalledTimes(resizesAfterMount + 1);
+    });
 
     expect(terminalEvents.constructCount).toBe(1);
     expect(terminalEvents.disposeCount).toBe(0);
@@ -652,6 +673,10 @@ describe('WorkbenchTerminalPane — workspace view change does not unmount xterm
       end: 23,
       instanceIndex: 0,
     });
+    expect(terminalEvents.clearSelectionCalls).toHaveLength(
+      selectionInvalidationsAfterMount + 1,
+    );
+    expect(terminalEvents.clearSelectionCalls.at(-1)).toEqual({ instanceIndex: 0 });
 
     // 可见状态未变时的普通父组件重渲染不应额外 refresh。
     rerenderProps({ renderVisible: true });
@@ -671,20 +696,102 @@ describe('WorkbenchTerminalPane — workspace view change does not unmount xterm
     expect(terminalEvents.instances[0]).toBe(instanceAtMount);
   });
 
-  test('window focus repaints only while this pane is visible', () => {
-    const { rerenderProps } = renderPaneWithRevision();
-    const refreshesAfterMount = terminalEvents.refreshCalls.length;
+  test('window focus recovers only while this pane is visible', async () => {
+    const { onResize, rerenderProps } = renderPaneWithRevision();
+    const resizesAfterMount = onResize.mock.calls.length;
 
     act(() => {
       window.dispatchEvent(new Event('focus'));
     });
-    expect(terminalEvents.refreshCalls).toHaveLength(refreshesAfterMount + 1);
+    await waitFor(() => {
+      expect(onResize).toHaveBeenCalledTimes(resizesAfterMount + 1);
+    });
+    const resizesAfterFocus = onResize.mock.calls.length;
 
     rerenderProps({ renderVisible: false });
     act(() => {
       window.dispatchEvent(new Event('focus'));
     });
-    expect(terminalEvents.refreshCalls).toHaveLength(refreshesAfterMount + 1);
+    expect(onResize).toHaveBeenCalledTimes(resizesAfterFocus);
+  });
+
+  test('visibility recovery preserves an existing text selection', async () => {
+    const { onResize, rerenderProps } = renderPaneWithRevision();
+    latestTerminal().setSelection('copy-me');
+    const resizesBeforeSwitch = onResize.mock.calls.length;
+    const invalidationsBeforeSwitch = terminalEvents.clearSelectionCalls.length;
+
+    rerenderProps({ renderVisible: false });
+    rerenderProps({ renderVisible: true });
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    });
+
+    expect(onResize).toHaveBeenCalledTimes(resizesBeforeSwitch);
+    expect(terminalEvents.clearSelectionCalls).toHaveLength(invalidationsBeforeSwitch);
+    expect(latestTerminal().getSelection()).toBe('copy-me');
+  });
+
+  test('closing a newly created active window recovers the preserved old Terminal', async () => {
+    const store = createStoreFromSnapshots({
+      old: { buffer: 'old-window', revision: 1 },
+      created: { buffer: 'created-window', revision: 1 },
+    });
+    const onResize = vi.fn();
+    const oldSession = buildSession({ id: 'old', startedAt: '2026-07-01T00:00:00.000Z' });
+    const createdSession = buildSession({ id: 'created', startedAt: '2026-07-01T00:01:00.000Z' });
+
+    /**
+     * Business Logic（为什么需要这个组件）:
+     *   用户的稳定复现是“旧 window → 新建 window → 关闭新 window”，需要真实覆盖旧 pane 常驻挂载。
+     *
+     * Code Logic（这个组件做什么）:
+     *   newWindowOpen 时隐藏旧 pane 并挂载新 pane；关闭时卸载新 pane、重新显示原 xterm 实例。
+     */
+    function WindowLifecycleHost(props: { newWindowOpen: boolean }): ReactElement {
+      return (
+        <>
+          <PaneHost
+            session={oldSession}
+            store={store}
+            renderVisible={!props.newWindowOpen}
+            onResize={onResize}
+          />
+          {props.newWindowOpen ? (
+            <PaneHost
+              session={createdSession}
+              store={store}
+              renderVisible={true}
+              onResize={onResize}
+            />
+          ) : null}
+        </>
+      );
+    }
+
+    const utils = render(<WindowLifecycleHost newWindowOpen={false} />);
+    const oldTerminal = terminalEvents.instances[0];
+    utils.rerender(<WindowLifecycleHost newWindowOpen={true} />);
+    const oldResizeCountBeforeClose = onResize.mock.calls.filter(
+      ([sessionId]) => sessionId === 'old',
+    ).length;
+    const oldInvalidationsBeforeClose = terminalEvents.clearSelectionCalls.filter(
+      ({ instanceIndex }) => instanceIndex === 0,
+    ).length;
+
+    utils.rerender(<WindowLifecycleHost newWindowOpen={false} />);
+
+    await waitFor(() => {
+      expect(
+        onResize.mock.calls.filter(([sessionId]) => sessionId === 'old'),
+      ).toHaveLength(oldResizeCountBeforeClose + 1);
+    });
+    expect(terminalEvents.constructCount).toBe(2);
+    expect(terminalEvents.disposeCount).toBe(1);
+    expect(terminalEvents.instances[0]).toBe(oldTerminal);
+    expect(
+      terminalEvents.clearSelectionCalls.filter(({ instanceIndex }) => instanceIndex === 0),
+    ).toHaveLength(oldInvalidationsBeforeClose + 1);
   });
 
   test('Terminal.dispose is not called for sessions that remain mounted while workspace view changes', () => {
