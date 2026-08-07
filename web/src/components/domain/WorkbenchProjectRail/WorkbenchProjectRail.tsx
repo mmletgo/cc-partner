@@ -46,6 +46,9 @@ export function WorkbenchProjectRail() {
     position: 'before' | 'after';
   } | null>(null);
   const [previewOrderIds, setPreviewOrderIds] = useState<string[] | null>(null);
+  /** 同步源 id：HTML5 dragover 必须同步 preventDefault，不能等 setState。 */
+  const draggingProjectIdRef = useRef<string | null>(null);
+  const previewOrderIdsRef = useRef<string[] | null>(null);
   const dragSucceededRef = useRef(false);
   const itemNodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const itemRectsRef = useRef<Map<string, DOMRect>>(new Map());
@@ -155,7 +158,7 @@ export function WorkbenchProjectRail() {
    *   列表顺序变化时用 FLIP 补间，让项目卡片滑动到新位置，而不是瞬间跳位。
    *
    * Code Logic（这个函数做什么）:
-   *   layout 前记录旧 rect，layout 后对每个 item 施加 inverse transform 再过渡回 0。
+   *   layout 前缓存旧 rect，layout 后对每个 item 施加 inverse transform 再过渡回 0。
    */
   useLayoutEffect(() => {
     const nodes = itemNodeRefs.current;
@@ -165,25 +168,30 @@ export function WorkbenchProjectRail() {
       nextRects.set(id, node.getBoundingClientRect());
     }
     if (prev.size > 0) {
+      const reduceMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
       for (const [id, node] of nodes) {
         const oldRect = prev.get(id);
         const newRect = nextRects.get(id);
         if (!oldRect || !newRect) continue;
         const dx = oldRect.left - newRect.left;
         const dy = oldRect.top - newRect.top;
-        if (dx === 0 && dy === 0) continue;
-        node.style.transition = 'none';
-        node.style.transform = `translate(${dx}px, ${dy}px)`;
-        // force reflow then animate
-        void node.offsetHeight;
-        node.style.transition = 'transform 180ms var(--ease-standard)';
-        node.style.transform = '';
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+        if (reduceMotion) continue;
+        node.animate(
+          [
+            { transform: `translate(${dx}px, ${dy}px)` },
+            { transform: 'translate(0, 0)' },
+          ],
+          { duration: 180, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' },
+        );
       }
     }
     itemRectsRef.current = nextRects;
   }, [displayProjects]);
 
-  const captureItemRect = useCallback((projectId: string, node: HTMLDivElement | null) => {
+  const captureItemNode = useCallback((projectId: string, node: HTMLDivElement | null) => {
     if (!node) {
       itemNodeRefs.current.delete(projectId);
       return;
@@ -191,9 +199,20 @@ export function WorkbenchProjectRail() {
     itemNodeRefs.current.set(projectId, node);
   }, []);
 
+  const clearDragUi = useCallback(() => {
+    draggingProjectIdRef.current = null;
+    previewOrderIdsRef.current = null;
+    setDraggingProjectId(null);
+    setDropIndicator(null);
+    setPreviewOrderIds(null);
+  }, []);
+
   /**
    * Business Logic（为什么需要这个函数）:
-   *   仅从手柄开始拖，避免点选/删除与拖拽冲突；并在 list 层处理 over/drop，防止按钮吞掉事件。
+   *   仅从手柄开始拖，避免点选/删除与拖拽冲突；list 层处理 over/drop，防止按钮吞事件。
+   *
+   * Code Logic（这个函数做什么）:
+   *   同步写 ref（保证后续 dragover 立刻 preventDefault），再 setState 驱动 UI。
    */
   const handleHandleDragStart = useCallback(
     (event: DragEvent<HTMLSpanElement>, projectId: string) => {
@@ -201,99 +220,129 @@ export function WorkbenchProjectRail() {
         event.preventDefault();
         return;
       }
+      event.stopPropagation();
       event.dataTransfer.effectAllowed = 'move';
-      event.dataTransfer.setData('text/plain', projectId);
-      // 自定义拖影略透明，配合列表内预览重排
-      if (event.currentTarget.parentElement) {
-        event.dataTransfer.setDragImage(event.currentTarget.parentElement, 24, 24);
+      try {
+        event.dataTransfer.setData('text/plain', projectId);
+        event.dataTransfer.setData('application/x-cc-partner-project-id', projectId);
+      } catch {
+        // 某些 WebView 对 setData 类型更严；text/plain 已尽力写入。
       }
+      const card = event.currentTarget.closest(`.${styles.projectItem}`) as HTMLElement | null;
+      if (card) {
+        try {
+          event.dataTransfer.setDragImage(card, 28, 24);
+        } catch {
+          // setDragImage 在部分环境不可用，忽略。
+        }
+      }
+      const initialOrder = projects.map((project) => project.id);
       dragSucceededRef.current = false;
+      draggingProjectIdRef.current = projectId;
+      previewOrderIdsRef.current = initialOrder;
       setDraggingProjectId(projectId);
-      setPreviewOrderIds(projects.map((project) => project.id));
+      setPreviewOrderIds(initialOrder);
       setDropIndicator(null);
     },
     [projectBusy, projects],
   );
 
-  const resolveDropTarget = useCallback(
-    (clientY: number, listEl: HTMLElement) => {
-      const items = Array.from(listEl.querySelectorAll<HTMLElement>('[data-project-id]'));
-      if (items.length === 0) return null;
-      for (const item of items) {
-        const id = item.dataset.projectId;
-        if (!id || id === draggingProjectId) continue;
-        const rect = item.getBoundingClientRect();
-        if (clientY < rect.top || clientY > rect.bottom) continue;
-        const position: 'before' | 'after' =
-          clientY < rect.top + rect.height / 2 ? 'before' : 'after';
-        return { projectId: id, position };
-      }
-      // 落在空白区：按 Y 找最近项
-      let best: { projectId: string; position: 'before' | 'after'; dist: number } | null = null;
-      for (const item of items) {
-        const id = item.dataset.projectId;
-        if (!id || id === draggingProjectId) continue;
-        const rect = item.getBoundingClientRect();
-        const mid = rect.top + rect.height / 2;
-        const dist = Math.abs(clientY - mid);
-        const position: 'before' | 'after' = clientY < mid ? 'before' : 'after';
-        if (!best || dist < best.dist) best = { projectId: id, position, dist };
-      }
-      return best ? { projectId: best.projectId, position: best.position } : null;
-    },
-    [draggingProjectId],
-  );
+  const resolveDropTarget = useCallback((clientY: number, listEl: HTMLElement, sourceId: string) => {
+    const items = Array.from(listEl.querySelectorAll<HTMLElement>('[data-project-id]'));
+    if (items.length === 0) return null;
+    for (const item of items) {
+      const id = item.dataset.projectId;
+      if (!id || id === sourceId) continue;
+      const rect = item.getBoundingClientRect();
+      if (clientY < rect.top || clientY > rect.bottom) continue;
+      const position: 'before' | 'after' =
+        clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+      return { projectId: id, position };
+    }
+    let best: { projectId: string; position: 'before' | 'after'; dist: number } | null = null;
+    for (const item of items) {
+      const id = item.dataset.projectId;
+      if (!id || id === sourceId) continue;
+      const rect = item.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      const dist = Math.abs(clientY - mid);
+      const position: 'before' | 'after' = clientY < mid ? 'before' : 'after';
+      if (!best || dist < best.dist) best = { projectId: id, position, dist };
+    }
+    return best ? { projectId: best.projectId, position: best.position } : null;
+  }, []);
 
   const handleListDragOver = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
-      if (!draggingProjectId) return;
+      const sourceId = draggingProjectIdRef.current;
+      if (!sourceId) return;
+      // 必须同步 preventDefault，否则浏览器不会触发 drop。
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
-      const target = resolveDropTarget(event.clientY, event.currentTarget);
+      const listEl =
+        (event.currentTarget.closest(`.${styles.projectList}`) as HTMLElement | null) ??
+        event.currentTarget;
+      const target = resolveDropTarget(event.clientY, listEl, sourceId);
       if (!target) return;
       setDropIndicator(target);
-      setPreviewOrderIds((current) => {
-        const base = current ?? projects.map((project) => project.id);
-        const next = moveProjectId(base, draggingProjectId, target.projectId, target.position);
-        if (next.join('\0') === base.join('\0')) return current ?? base;
-        return next;
-      });
+      const base =
+        previewOrderIdsRef.current ?? projects.map((project) => project.id);
+      const next = moveProjectId(base, sourceId, target.projectId, target.position);
+      if (next.join('\0') === base.join('\0')) return;
+      previewOrderIdsRef.current = next;
+      setPreviewOrderIds(next);
     },
-    [draggingProjectId, projects, resolveDropTarget],
+    [projects, resolveDropTarget],
   );
 
   const handleListDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
-      if (!draggingProjectId) return;
+      const sourceFromRef = draggingProjectIdRef.current;
+      if (!sourceFromRef) return;
       event.preventDefault();
-      const sourceId = event.dataTransfer.getData('text/plain') || draggingProjectId;
-      const target = resolveDropTarget(event.clientY, event.currentTarget);
-      const base = previewOrderIds ?? projects.map((project) => project.id);
+      event.stopPropagation();
+      let sourceId = sourceFromRef;
+      try {
+        sourceId =
+          event.dataTransfer.getData('application/x-cc-partner-project-id') ||
+          event.dataTransfer.getData('text/plain') ||
+          sourceFromRef;
+      } catch {
+        sourceId = sourceFromRef;
+      }
+      // drop 可能落在 list 或 item 上；resolve 始终相对整个列表容器。
+      const listEl =
+        (event.currentTarget.closest(`.${styles.projectList}`) as HTMLElement | null) ??
+        event.currentTarget;
+      const target = resolveDropTarget(event.clientY, listEl, sourceId);
+      const base =
+        previewOrderIdsRef.current ?? projects.map((project) => project.id);
       const next =
         target && sourceId
           ? moveProjectId(base, sourceId, target.projectId, target.position)
           : base;
       dragSucceededRef.current = true;
-      setDraggingProjectId(null);
-      setDropIndicator(null);
-      setPreviewOrderIds(null);
+      clearDragUi();
       const unchanged =
-        next.length === projects.length && next.every((id, index) => projects[index]?.id === id);
+        next.length === projects.length &&
+        next.every((id, index) => projects[index]?.id === id);
       if (!unchanged) {
         void reorderProjects(next);
       }
     },
-    [draggingProjectId, previewOrderIds, projects, reorderProjects, resolveDropTarget],
+    [clearDragUi, projects, reorderProjects, resolveDropTarget],
   );
 
   const handleHandleDragEnd = useCallback(() => {
+    // drop 后仍会触发 dragend；成功路径已 clear，这里只处理取消/失败。
     if (!dragSucceededRef.current) {
-      // 取消拖拽：丢弃预览顺序
-      setPreviewOrderIds(null);
+      clearDragUi();
+    } else {
+      draggingProjectIdRef.current = null;
+      setDraggingProjectId(null);
+      setDropIndicator(null);
     }
-    setDraggingProjectId(null);
-    setDropIndicator(null);
-  }, []);
+  }, [clearDragUi]);
 
   return (
     <section className={styles.rail} aria-label={sectionTitle}>
@@ -333,6 +382,9 @@ export function WorkbenchProjectRail() {
       <div
         className={styles.projectList}
         data-dragging={draggingProjectId ? true : undefined}
+        onDragEnter={(event) => {
+          if (draggingProjectIdRef.current) event.preventDefault();
+        }}
         onDragOver={handleListDragOver}
         onDrop={handleListDrop}
       >
@@ -401,7 +453,7 @@ export function WorkbenchProjectRail() {
           return (
             <div
               key={project.id}
-              ref={(node) => captureItemRect(project.id, node)}
+              ref={(node) => captureItemNode(project.id, node)}
               className={styles.projectItem}
               data-project-id={project.id}
               data-active={isActive || undefined}
@@ -416,6 +468,8 @@ export function WorkbenchProjectRail() {
                   ? true
                   : undefined
               }
+              onDragOver={handleListDragOver}
+              onDrop={handleListDrop}
             >
               <span
                 className={styles.dragHandle}

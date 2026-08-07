@@ -393,22 +393,22 @@ pub async fn remove_workbench_project(
 ///
 /// Code Logic（这个函数做什么）:
 ///     GUI 代理 `projects.reorder`；owner 规范化 orderedIds 后 set_order，返回最新 list DTO。
-/// Tauri 参数名使用 camelCase `orderedIds`，与前端 invoke 对齐。
+/// 前端传 camelCase `orderedIds`；Tauri 会转成 snake_case `ordered_ids`（与 projectId→project_id 一致）。
 #[tauri::command]
 pub async fn reorder_workbench_projects(
     state: State<'_, AppState>,
-    #[allow(non_snake_case)] orderedIds: Vec<String>,
+    ordered_ids: Vec<String>,
 ) -> Result<Vec<WorkbenchProjectDto>, AppError> {
     if let Some(v) = proxy_workbench_if_gui(
         state.inner(),
         "projects.reorder",
-        serde_json::json!({ "orderedIds": orderedIds.clone() }),
+        serde_json::json!({ "orderedIds": ordered_ids.clone() }),
     )
     .await?
     {
         return Ok(v);
     }
-    reorder_workbench_projects_for_state(state.inner(), orderedIds).await
+    reorder_workbench_projects_for_state(state.inner(), ordered_ids).await
 }
 
 /// owner 路径：写入顺序文档并返回投影后的项目列表。
