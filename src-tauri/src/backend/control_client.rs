@@ -1450,6 +1450,60 @@ impl BackendControlClient {
         .await
     }
 
+    /// Business Logic: 远端 portable inventory 只读 metadata；capability 缺失时 owner 会 fail closed。
+    /// Code Logic: agent_hub.list_remote_portable_inventory；QUERY_TIMEOUT。
+    pub async fn agent_hub_list_remote_portable_inventory(
+        &self,
+        req: crate::agent_hub::replication::pull::ListRemotePortableInventoryRequest,
+    ) -> Result<crate::agent_hub::replication::pull::RemotePortableInventoryDto, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.list_remote_portable_inventory",
+            req,
+            QUERY_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Business Logic: pull preview 属 v3 mutation 合同（计划绑定），旧 sidecar 不得静默降级。
+    /// Code Logic: 写兼容门闩 + agent_hub.preview_portable_pull。
+    pub async fn agent_hub_preview_portable_pull(
+        &self,
+        req: crate::agent_hub::replication::pull::PreviewPortablePullRequest,
+    ) -> Result<crate::agent_hub::replication::pull::PortablePullPlanDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.preview_portable_pull", req)
+            .await
+    }
+
+    /// Business Logic: apply pull 是长 mutation（objects + import + install）。
+    /// Code Logic: 写兼容门闩 + agent_hub_op_with_timeout 360s。
+    pub async fn agent_hub_apply_portable_pull(
+        &self,
+        req: crate::agent_hub::replication::pull::ApplyPortablePullRequest,
+    ) -> Result<crate::agent_hub::replication::pull::PortablePullResultDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op_with_timeout(
+            "agent_hub.apply_portable_pull",
+            req,
+            Duration::from_secs(360),
+        )
+        .await
+    }
+
+    /// Business Logic: 按 clientRequestId 对账 pull 结果（只读）。
+    /// Code Logic: agent_hub.get_portable_pull；QUERY_TIMEOUT。
+    pub async fn agent_hub_get_portable_pull(
+        &self,
+        client_request_id: &str,
+    ) -> Result<crate::agent_hub::replication::pull::PortablePullResultDto, AppError> {
+        self.agent_hub_op_with_timeout(
+            "agent_hub.get_portable_pull",
+            serde_json::json!({ "clientRequestId": client_request_id }),
+            QUERY_TIMEOUT,
+        )
+        .await
+    }
+
     /// 经 control API 拉取 sidecar Orchestrator runtime snapshot。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -3530,6 +3584,10 @@ mod tests {
             "pub async fn agent_hub_preview_portable_asset_action(",
             "pub async fn agent_hub_apply_portable_asset_action(",
             "pub async fn agent_hub_get_portable_asset_action(",
+            "pub async fn agent_hub_list_remote_portable_inventory(",
+            "pub async fn agent_hub_preview_portable_pull(",
+            "pub async fn agent_hub_apply_portable_pull(",
+            "pub async fn agent_hub_get_portable_pull(",
         ] {
             assert!(src.contains(sig), "missing client method {sig}");
         }
@@ -3537,6 +3595,10 @@ mod tests {
         assert!(src.contains("\"agent_hub.preview_portable_asset_action\""));
         assert!(src.contains("\"agent_hub.apply_portable_asset_action\""));
         assert!(src.contains("\"agent_hub.get_portable_asset_action\""));
+        assert!(src.contains("\"agent_hub.list_remote_portable_inventory\""));
+        assert!(src.contains("\"agent_hub.preview_portable_pull\""));
+        assert!(src.contains("\"agent_hub.apply_portable_pull\""));
+        assert!(src.contains("\"agent_hub.get_portable_pull\""));
         // inspect/get → agent_hub_op_with_timeout(..., QUERY_TIMEOUT)
         assert!(
             src.contains(
@@ -3550,6 +3612,11 @@ mod tests {
             src.contains("\"agent_hub.apply_portable_asset_action\"")
                 && src.contains("Duration::from_secs(360)"),
             "apply should use long-mutation timeout"
+        );
+        assert!(
+            src.contains("\"agent_hub.apply_portable_pull\"")
+                && src.contains("Duration::from_secs(360)"),
+            "apply pull should use long-mutation timeout"
         );
         assert_eq!(crate::backend::control::AGENT_HUB_API_VERSION, 3);
     }

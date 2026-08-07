@@ -17,6 +17,13 @@ use crate::agent_hub::portable_actions::{
 use crate::agent_hub::portable_inventory::{
     inspect_portable_inventory, PortableInventorySnapshotDto,
 };
+use crate::agent_hub::replication::pull::{
+    apply_portable_pull as apply_portable_pull_impl, get_portable_pull as get_portable_pull_impl,
+    list_remote_portable_inventory as list_remote_portable_inventory_impl,
+    preview_portable_pull as preview_portable_pull_impl, ApplyPortablePullRequest,
+    ListRemotePortableInventoryRequest, PortablePullPlanDto, PortablePullResultDto,
+    PreviewPortablePullRequest, RemotePortableInventoryDto,
+};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -92,6 +99,50 @@ impl PortableService {
     ) -> Result<PortableAssetActionResultDto, AppError> {
         get_portable_asset_action_by_request(&state.agent_hub_repo, client_request_id).await
     }
+
+    /// 列出远端同类 Agent portable inventory（metadata only）。
+    ///
+    /// Business Logic: capability 缺失零请求；无 secret 原文。
+    /// Code Logic: 委托 `list_remote_portable_inventory`。
+    pub async fn list_remote_portable_inventory(
+        state: &AppState,
+        request: ListRemotePortableInventoryRequest,
+    ) -> Result<RemotePortableInventoryDto, AppError> {
+        list_remote_portable_inventory_impl(state, request).await
+    }
+
+    /// 预览同类 Agent pull（零目标写入）。
+    ///
+    /// Business Logic: sourceTarget == destinationTarget；映射/opt-in 决定 install 模式。
+    /// Code Logic: 委托 `preview_portable_pull`。
+    pub async fn preview_portable_pull(
+        state: &AppState,
+        request: PreviewPortablePullRequest,
+    ) -> Result<PortablePullPlanDto, AppError> {
+        preview_portable_pull_impl(state, request).await
+    }
+
+    /// 执行 pull（objects → canonical import → 同类 install）。
+    ///
+    /// Business Logic: clientRequestId 幂等；partial 逐项报告。
+    /// Code Logic: 委托 `apply_portable_pull`。
+    pub async fn apply_portable_pull(
+        state: &AppState,
+        request: ApplyPortablePullRequest,
+    ) -> Result<PortablePullResultDto, AppError> {
+        apply_portable_pull_impl(state, request).await
+    }
+
+    /// 按 clientRequestId 查询 pull 结果。
+    ///
+    /// Business Logic: outcomeUnknown/partial 对账入口。
+    /// Code Logic: 委托 `get_portable_pull`。
+    pub async fn get_portable_pull(
+        state: &AppState,
+        client_request_id: &str,
+    ) -> Result<PortablePullResultDto, AppError> {
+        get_portable_pull_impl(state, client_request_id).await
+    }
 }
 
 /// 构造 plan 绑定的 owner fingerprint。
@@ -123,6 +174,10 @@ mod tests {
             "pub async fn preview_portable_asset_action(",
             "pub async fn apply_portable_asset_action(",
             "pub async fn get_portable_asset_action(",
+            "pub async fn list_remote_portable_inventory(",
+            "pub async fn preview_portable_pull(",
+            "pub async fn apply_portable_pull(",
+            "pub async fn get_portable_pull(",
         ] {
             assert!(src.contains(sig), "missing {sig}");
         }
@@ -130,5 +185,9 @@ mod tests {
         assert!(src.contains("preview_portable_asset_action_with_inventory"));
         assert!(src.contains("apply_portable_asset_action(state, request)"));
         assert!(src.contains("get_portable_asset_action_by_request"));
+        assert!(src.contains("list_remote_portable_inventory_impl(state, request)"));
+        assert!(src.contains("preview_portable_pull_impl(state, request)"));
+        assert!(src.contains("apply_portable_pull_impl(state, request)"));
+        assert!(src.contains("get_portable_pull_impl(state, client_request_id)"));
     }
 }

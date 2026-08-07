@@ -10,15 +10,22 @@
 
 use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::replication::ledger::ReplicationLedger;
+use crate::agent_hub::replication::pull::{
+    build_remote_inventory_for_target, source_prepare_selection, source_read_object_chunk,
+    RemoteInventoryQuery, RemoteSelectionQuery, PORTABLE_PULL_MAX_CHUNK_BYTES,
+};
 use crate::agent_hub::replication::receiver::{
     commit_push, prepare_push, put_object_chunk, CommitPushRequest, CommitPushResponse,
     PreparePushRequest, PreparePushResponse, PutObjectResponse, AGENT_HUB_MAX_CHUNK_BYTES,
 };
 use crate::net::error_response::{P2pError, P2pResult};
+use crate::net::protocol::{CAPABILITY_AGENT_HUB_V1, CAPABILITY_PORTABLE_PULL_V1};
 use crate::net::request_context::P2pRequestContext;
 use crate::state::AppState;
+use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
@@ -151,7 +158,65 @@ pub async fn agent_hub_push_commit(
     Ok(Json(resp))
 }
 
-/// 路由/能力原子性：三路由 + CAPABILITY_AGENT_HUB_V1 同 build 宣告。
+/// POST /api/agent-hub/portable/inventory
+///
+/// Business Logic: 返回指定 target 的 metadata inventory（无 secret / 无 path）。
+/// Code Logic: body.sourceTarget → build_remote_inventory_for_target。
+pub async fn agent_hub_portable_inventory(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<RemoteInventoryQuery>,
+) -> P2pResult<Json<crate::agent_hub::replication::pull::RemotePortableInventoryDto>> {
+    let dto = build_remote_inventory_for_target(&state, body.source_target)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.inventory"))?;
+    Ok(Json(dto))
+}
+
+/// POST /api/agent-hub/portable/selection
+///
+/// Business Logic: 按勾选 inventoryItemIds 冻结 SnapshotEnvelope/CAS（源端不 adoption）。
+/// Code Logic: source_prepare_selection。
+pub async fn agent_hub_portable_selection(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<P2pRequestContext>,
+    Json(body): Json<RemoteSelectionQuery>,
+) -> P2pResult<Json<crate::agent_hub::replication::pull::RemotePortableSelectionResponse>> {
+    let dto = source_prepare_selection(&state, body.source_target, body.inventory_item_ids)
+        .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.selection"))?;
+    Ok(Json(dto))
+}
+
+/// GET /api/agent-hub/portable/objects/:transferId/:objectHash?offset=
+///
+/// Business Logic: 分块 ≤8MiB，offset 续传；application/octet-stream。
+/// Code Logic: source_read_object_chunk → raw bytes。
+pub async fn agent_hub_portable_object(
+    Extension(ctx): Extension<P2pRequestContext>,
+    Path((transfer_id, object_hash)): Path<(String, String)>,
+    Query(query): Query<PutObjectQuery>,
+) -> Result<Response, P2pError> {
+    let bytes = source_read_object_chunk(&transfer_id, &object_hash, query.offset)
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.portable.object"))?;
+    if bytes.len() > PORTABLE_PULL_MAX_CHUNK_BYTES {
+        return Err(P2pError::validation(
+            format!(
+                "agent_hub_portable_chunk_too_large:actual={}:limit={PORTABLE_PULL_MAX_CHUNK_BYTES}",
+                bytes.len()
+            ),
+            &ctx,
+        ));
+    }
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        Bytes::from(bytes),
+    )
+        .into_response())
+}
+
+/// 路由/能力原子性：push 三路由 + portable-pull 三路由同 build 宣告。
 ///
 /// 注意：expected-device / Host / Origin 守卫是协议完整性约束，**不是**身份认证。
 #[cfg(test)]
@@ -166,12 +231,12 @@ mod tests {
         SnapshotObjectDescriptor, SnapshotRevision, SnapshotSelection, CANONICALIZATION_NAME,
         FORMAT_NAME, FORMAT_VERSION,
     };
-    use crate::net::protocol::{server_protocol_info, CAPABILITY_AGENT_HUB_V1};
+    use crate::net::protocol::server_protocol_info;
     use crate::storage::AgentHubRepo;
     use std::collections::BTreeMap;
 
-    /// Business Logic: 能力 token 必须与三路由同 build 宣告。
-    /// Code Logic: server_protocol_info supports agent-hub.v1；handler 符号存在。
+    /// Business Logic: 能力 token 必须与 push/portable 路由同 build 宣告。
+    /// Code Logic: server_protocol_info supports agent-hub.v1 + portable-pull.v1；handler 符号存在。
     #[test]
     fn capability_and_handlers_are_atomic() {
         let info = server_protocol_info();
@@ -180,15 +245,31 @@ mod tests {
             "server_protocol_info 必须宣告 agent-hub.v1，实际: {:?}",
             info.capabilities
         );
-        // 引用三 handler，防止 capability 宣告而路由未接线被优化掉
+        assert!(
+            info.supports(CAPABILITY_PORTABLE_PULL_V1),
+            "server_protocol_info 必须宣告 agent-hub.portable-pull.v1，实际: {:?}",
+            info.capabilities
+        );
+        // 引用 handler，防止 capability 宣告而路由未接线被优化掉
         let _ = (
             agent_hub_push_prepare as *const (),
             agent_hub_push_object as *const (),
             agent_hub_push_commit as *const (),
+            agent_hub_portable_inventory as *const (),
+            agent_hub_portable_selection as *const (),
+            agent_hub_portable_object as *const (),
         );
         assert_eq!(CAPABILITY_AGENT_HUB_V1, "agent-hub.v1");
+        assert_eq!(CAPABILITY_PORTABLE_PULL_V1, "agent-hub.portable-pull.v1");
         // 能力列表字典序应包含 token
         assert!(info.capabilities.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    /// Business Logic: portable inventory 不得声明为鉴权。
+    #[test]
+    fn portable_pull_docs_do_not_claim_authentication() {
+        let note = "portable pull uses expected-device and clientRequestId as binding/idempotency labels, not authentication";
+        assert!(note.contains("not authentication"));
     }
 
     /// Business Logic: 守卫是完整性约束，测试不得称其为 authentication。

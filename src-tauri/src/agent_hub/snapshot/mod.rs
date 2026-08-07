@@ -14,6 +14,7 @@ pub mod builder;
 pub mod canonical_json;
 pub mod envelope;
 pub mod importer;
+pub mod portable_builder;
 
 pub use archive::{expand_readable_archive, repack_readable_archive, ExpandedSnapshot};
 pub use builder::{
@@ -33,4 +34,8 @@ pub use importer::{
     ConfirmedImportSelection, ConfirmedProjectMapping, ProjectMappingCandidate,
     ResolvedProjectMapping, SnapshotImportOutcome, SnapshotImportPreview, SnapshotImporter,
     ValidatedSnapshot,
+};
+pub use portable_builder::{
+    build_portable_selection_envelope, bytes_are_legacy_lossy, BuiltPortableSelection,
+    PortableSelectionItem, LEGACY_LOSSY_PLACEHOLDER,
 };

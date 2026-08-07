@@ -10,6 +10,7 @@
 
 pub mod ledger;
 pub mod outbox_worker;
+pub mod pull;
 pub mod receiver;
 pub mod sender;
 
@@ -18,6 +19,15 @@ pub use ledger::{
     MAX_STAGING_AGE,
 };
 pub use outbox_worker::{drain_lan_projection_intents, start_lan_projection_outbox_loop};
+pub use pull::{
+    apply_portable_pull, build_remote_inventory_for_target, get_portable_pull,
+    list_remote_portable_inventory, preview_portable_pull, source_prepare_selection,
+    source_read_object_chunk, ApplyPortablePullRequest, ListRemotePortableInventoryRequest,
+    PortablePullInstallMode, PortablePullItemResultDto, PortablePullItemState, PortablePullPlanDto,
+    PortablePullResultDto, PreviewPortablePullRequest, RemoteInventoryQuery,
+    RemotePortableInventoryDto, RemotePortableInventoryItemDto, RemotePortableSelectionResponse,
+    RemoteSelectionQuery, PORTABLE_PULL_MAX_CHUNK_BYTES, PULL_PLAN_TTL_MINUTES,
+};
 pub use receiver::{
     commit_push, gc_abandoned_incoming_staging, gc_committed_incoming_staging, prepare_push,
     put_object_chunk, AgentHubChunkLimit, CommitPushRequest, CommitPushResponse,

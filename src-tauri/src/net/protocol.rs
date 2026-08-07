@@ -255,6 +255,18 @@ pub const CAPABILITY_WORKBENCH_AGENT_LEDGER_SUMMARY_V1: &str = "workbench.agent-
 ///     字符串常量 `agent-hub.v1`，列入 `server_protocol_info()`（字典序）。
 pub const CAPABILITY_AGENT_HUB_V1: &str = "agent-hub.v1";
 
+/// 能力 token：同类 Agent portable inventory + 选择性 Pull
+/// （`POST /api/agent-hub/portable/inventory|selection`、`GET .../objects/...`）。
+///
+/// Business Logic（为什么需要这个 token）:
+///     客户端在拉远端 inventory / selection objects 前必须确认对端已挂载 portable-pull 路由；
+///     旧 peer 缺失时零请求、不得回退旧 Claude-only bundle 并计为 Hub Pull 成功。
+///     expected-device / clientRequestId 仅为绑定与幂等，**不是**身份认证。
+///
+/// Code Logic（这个常量做什么）:
+///     `agent-hub.portable-pull.v1`，与三条 portable 路由同 build 宣告（字典序）。
+pub const CAPABILITY_PORTABLE_PULL_V1: &str = "agent-hub.portable-pull.v1";
+
 /// P2P 协议元数据：对端互换的协议版本与能力清单。
 ///
 /// Business Logic（为什么需要这个结构）:
@@ -307,6 +319,8 @@ pub fn server_protocol_info() -> PeerProtocolInfo {
     PeerProtocolInfo {
         protocol_version: PROTOCOL_VERSION_V1,
         capabilities: vec![
+            // 字典序：agent-hub.portable-pull.v1 < agent-hub.v1
+            CAPABILITY_PORTABLE_PULL_V1.to_string(),
             CAPABILITY_AGENT_HUB_V1.to_string(),
             CAPABILITY_ATTENTION_V1.to_string(),
             CAPABILITY_ATTENTION_V2.to_string(),
@@ -473,6 +487,7 @@ mod tests {
         assert_eq!(
             info.capabilities,
             vec![
+                "agent-hub.portable-pull.v1".to_string(),
                 "agent-hub.v1".to_string(),
                 "attention.v1".to_string(),
                 "attention.v2".to_string(),
@@ -497,6 +512,7 @@ mod tests {
             ]
         );
         assert!(info.supports(CAPABILITY_AGENT_HUB_V1));
+        assert!(info.supports(CAPABILITY_PORTABLE_PULL_V1));
         assert!(info.supports(CAPABILITY_ATTENTION_V2));
         assert!(info.supports(CAPABILITY_CC_HISTORY_PAGED_SYNC_V1));
         assert!(info.supports(CAPABILITY_DEVICE_REQUEST_BINDING_V1));

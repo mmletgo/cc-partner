@@ -357,6 +357,35 @@ async fn dispatch_agent_hub_op(
             let dto = PortableService::get_portable_asset_action(state, &client_request_id).await?;
             Ok(serde_json::to_value(dto)?)
         }
+        "agent_hub.list_remote_portable_inventory" => {
+            let req: crate::agent_hub::replication::pull::ListRemotePortableInventoryRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("list_remote_portable_inventory payload: {e}"))
+                })?;
+            let dto = PortableService::list_remote_portable_inventory(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.preview_portable_pull" => {
+            let req: crate::agent_hub::replication::pull::PreviewPortablePullRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("preview_portable_pull payload: {e}"))
+                })?;
+            let dto = PortableService::preview_portable_pull(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.apply_portable_pull" => {
+            let req: crate::agent_hub::replication::pull::ApplyPortablePullRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("apply_portable_pull payload: {e}"))
+                })?;
+            let dto = PortableService::apply_portable_pull(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.get_portable_pull" => {
+            let client_request_id = required_string(&payload, "clientRequestId")?;
+            let dto = PortableService::get_portable_pull(state, &client_request_id).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
         other => Err(AppError::validation(format!(
             "未知 agent hub control op: {other}"
         ))),
@@ -392,6 +421,8 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.confirm_project_mapping"
             | "agent_hub.preview_portable_asset_action"
             | "agent_hub.apply_portable_asset_action"
+            | "agent_hub.preview_portable_pull"
+            | "agent_hub.apply_portable_pull"
     )
 }
 
@@ -571,11 +602,13 @@ mod tests {
             "agent_hub.preview_portable_asset_action",
             "agent_hub.apply_portable_asset_action",
             "agent_hub.get_portable_asset_action",
+            "agent_hub.list_remote_portable_inventory",
+            "agent_hub.preview_portable_pull",
+            "agent_hub.apply_portable_pull",
+            "agent_hub.get_portable_pull",
         ] {
             assert!(src.contains(op), "missing op {op}");
         }
-        let forbidden_op = format!("{}{}", "agent_hub.", "pull");
-        assert!(!src.contains(&forbidden_op));
     }
 
     /// Business Logic: mutation 必须在版本不匹配时 upgradeRequired。
@@ -597,6 +630,8 @@ mod tests {
         assert!(is_mutation_op("agent_hub.confirm_project_mapping"));
         assert!(is_mutation_op("agent_hub.preview_portable_asset_action"));
         assert!(is_mutation_op("agent_hub.apply_portable_asset_action"));
+        assert!(is_mutation_op("agent_hub.preview_portable_pull"));
+        assert!(is_mutation_op("agent_hub.apply_portable_pull"));
         assert!(!is_mutation_op("agent_hub.get_status"));
         assert!(!is_mutation_op(
             "agent_hub.inspect_user_instruction_workspace"
@@ -609,6 +644,8 @@ mod tests {
         assert!(!is_mutation_op("agent_hub.get_lan_push"));
         assert!(!is_mutation_op("agent_hub.inspect_portable_inventory"));
         assert!(!is_mutation_op("agent_hub.get_portable_asset_action"));
+        assert!(!is_mutation_op("agent_hub.list_remote_portable_inventory"));
+        assert!(!is_mutation_op("agent_hub.get_portable_pull"));
     }
 
     /// Business Logic: portable preview/apply 属 v3 写路径；inspect/get 只读。
@@ -634,6 +671,22 @@ mod tests {
             "missing dispatch arm for get"
         );
         assert!(
+            src.contains("\"agent_hub.list_remote_portable_inventory\" =>"),
+            "missing dispatch arm for list remote inventory"
+        );
+        assert!(
+            src.contains("\"agent_hub.preview_portable_pull\" =>"),
+            "missing dispatch arm for preview pull"
+        );
+        assert!(
+            src.contains("\"agent_hub.apply_portable_pull\" =>"),
+            "missing dispatch arm for apply pull"
+        );
+        assert!(
+            src.contains("\"agent_hub.get_portable_pull\" =>"),
+            "missing dispatch arm for get pull"
+        );
+        assert!(
             src.contains("PortableService::inspect_portable_inventory"),
             "missing PortableService inspect call"
         );
@@ -649,9 +702,29 @@ mod tests {
             src.contains("PortableService::get_portable_asset_action"),
             "missing PortableService get call"
         );
+        assert!(
+            src.contains("PortableService::list_remote_portable_inventory"),
+            "missing PortableService list remote call"
+        );
+        assert!(
+            src.contains("PortableService::preview_portable_pull"),
+            "missing PortableService preview pull call"
+        );
+        assert!(
+            src.contains("PortableService::apply_portable_pull"),
+            "missing PortableService apply pull call"
+        );
+        assert!(
+            src.contains("PortableService::get_portable_pull"),
+            "missing PortableService get pull call"
+        );
         assert!(is_mutation_op("agent_hub.preview_portable_asset_action"));
         assert!(is_mutation_op("agent_hub.apply_portable_asset_action"));
+        assert!(is_mutation_op("agent_hub.preview_portable_pull"));
+        assert!(is_mutation_op("agent_hub.apply_portable_pull"));
         assert!(!is_mutation_op("agent_hub.inspect_portable_inventory"));
         assert!(!is_mutation_op("agent_hub.get_portable_asset_action"));
+        assert!(!is_mutation_op("agent_hub.list_remote_portable_inventory"));
+        assert!(!is_mutation_op("agent_hub.get_portable_pull"));
     }
 }
