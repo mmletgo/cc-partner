@@ -25,6 +25,7 @@ pub mod html_assets;
 pub mod lan_fleet;
 pub mod models;
 pub mod operation_ledger;
+pub mod project_order;
 pub mod projects;
 pub mod remote_client;
 pub mod remote_directory;

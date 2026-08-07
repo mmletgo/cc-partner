@@ -167,8 +167,10 @@ export default defineConfig({
   },
   server: {
     // 桌面 Tauri devUrl 与 backend 开发态 /mobile 反代共用本端口。
-    // 手机扫码入口仍是 backend 端口（首选 62116）的 /mobile；HMR client
-    // 默认使用页面 location.host/port，经 backend WebSocket 桥接到本 Vite。
+    // 必须同时可被 IPv4 loopback 访问：macOS 上默认只绑 [::1] 时，
+    // backend 代理到 http://127.0.0.1:5173 会失败并静默回落 dist。
+    // host:true → 0.0.0.0（含 127.0.0.1）；手机扫码仍走 backend 端口 /mobile。
+    host: true,
     port: 5173,
     strictPort: true,
   },

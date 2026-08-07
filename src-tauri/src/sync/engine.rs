@@ -466,6 +466,9 @@ async fn sync_device_with_domains(
     // CC 历史独立链路但复用本设备已探测的 protocol；失败不影响 domain 报告
     let _ = crate::cc::engine::cc_sync_with_peer_using_protocol(state, &device, &protocol).await;
 
+    // 工作台项目顺序：best-effort LWW 单例，不进入 settings domain 报告。
+    workbench_project_order_sync_with_peer(state, &base_url).await;
+
     let domains = vec![
         DomainSyncReport {
             domain: DOMAIN_PROMPT.to_string(),
@@ -483,6 +486,55 @@ async fn sync_device_with_domains(
     let report = device_report_from_domains(&device.id, &device.name, domains);
     tracing::info!("与设备 {} 同步结束 status={:?}", device.name, report.status);
     report
+}
+
+/// 工作台项目顺序双向 LWW（best-effort，不计入 SyncRunResult domains）。
+///
+/// Business Logic: 顺序是跨设备偏好；对端旧版本无路由时静默跳过。
+/// Code Logic: pull 远端 → 若远端胜出则 set_order；再若本地胜出/仅本地有则 push。
+async fn workbench_project_order_sync_with_peer(state: &AppState, base_url: &str) {
+    use crate::workbench::project_order::order_document_wins;
+
+    let remote = state
+        .peer_client
+        .workbench_project_order_pull(base_url)
+        .await;
+    let local = match state.workbench_project_repo.get_order().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!("workbench project order local read failed: {e}");
+            return;
+        }
+    };
+
+    match (local.as_ref(), remote.as_ref()) {
+        (Some(local_doc), Some(remote_doc)) => {
+            if order_document_wins(local_doc, remote_doc) {
+                // remote wins → apply
+                if let Err(e) = state.workbench_project_repo.set_order(remote_doc).await {
+                    tracing::debug!("workbench project order apply remote failed: {e}");
+                }
+            } else if local_doc != remote_doc {
+                // local wins or equal-timestamp content differs → push local
+                let _ = state
+                    .peer_client
+                    .workbench_project_order_push(base_url, local_doc)
+                    .await;
+            }
+        }
+        (None, Some(remote_doc)) => {
+            if let Err(e) = state.workbench_project_repo.set_order(remote_doc).await {
+                tracing::debug!("workbench project order adopt remote failed: {e}");
+            }
+        }
+        (Some(local_doc), None) => {
+            let _ = state
+                .peer_client
+                .workbench_project_order_push(base_url, local_doc)
+                .await;
+        }
+        (None, None) => {}
+    }
 }
 
 /// Prompt 领域双向同步（v2 plan 或 typed legacy）。

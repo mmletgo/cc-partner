@@ -102,6 +102,20 @@ struct ClaudeMdPushResp {
     accepted: bool,
 }
 
+/// workbench project order pull 响应。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectOrderPullResp {
+    order: Option<crate::workbench::project_order::ProjectOrderDocument>,
+}
+
+/// workbench project order push 响应。
+#[derive(Debug, serde::Deserialize)]
+struct ProjectOrderPushResp {
+    #[serde(default)]
+    accepted: bool,
+}
+
 /// Claude Code assets inventory 响应体：直接是 DTO 数组。
 type ClaudeAssetsInventoryResp = Vec<crate::claude_code_assets::ClaudeCodeAsset>;
 
@@ -672,6 +686,51 @@ impl PeerClient {
                 crate::net::peer_error::peer_call_error_to_app_error(e, "远端 CLAUDE.md")
             })?;
         Ok(resp.accepted)
+    }
+
+    /// 拉取对端工作台项目顺序文档（可能为 null）。
+    ///
+    /// Business Logic: 跨设备 LWW 需要先读对端顺序再决定是否覆盖本地。
+    /// Code Logic: POST pull，旧对端无路由时返回 None（不阻断同步）。
+    pub async fn workbench_project_order_pull(
+        &self,
+        base_url: &str,
+    ) -> Option<crate::workbench::project_order::ProjectOrderDocument> {
+        let url = format!("{base_url}/api/sync/workbench-project-order/pull");
+        let body = serde_json::json!({});
+        match self
+            .request_post::<ProjectOrderPullResp, _>(&url, &body, PeerTimeoutClass::Metadata)
+            .await
+        {
+            Ok(data) => data.order,
+            Err(e) => {
+                tracing::debug!("workbench_project_order_pull 跳过 ({base_url}): {e}");
+                None
+            }
+        }
+    }
+
+    /// 推送本端工作台项目顺序文档；对端 LWW 判定后可能拒绝。
+    ///
+    /// Business Logic: 本端领先时把整表 orderedIds 推给对端。
+    /// Code Logic: POST push；失败仅 debug，返回 false。
+    pub async fn workbench_project_order_push(
+        &self,
+        base_url: &str,
+        order: &crate::workbench::project_order::ProjectOrderDocument,
+    ) -> bool {
+        let url = format!("{base_url}/api/sync/workbench-project-order/push");
+        let body = serde_json::json!({ "order": order });
+        match self
+            .request_post::<ProjectOrderPushResp, _>(&url, &body, PeerTimeoutClass::Mutation)
+            .await
+        {
+            Ok(data) => data.accepted,
+            Err(e) => {
+                tracing::debug!("workbench_project_order_push 跳过 ({base_url}): {e}");
+                false
+            }
+        }
     }
 
     /// 速记本同步 pull：向对端发送本端页面 summaries，获取对端认为本端需要的页面版本。

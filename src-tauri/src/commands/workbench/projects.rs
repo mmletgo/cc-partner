@@ -30,10 +30,10 @@ use super::common::*;
 /// 列出工作台最近项目。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     工作台左侧项目区需要在应用重启后恢复最近项目列表。
+///     工作台左侧项目区需要在应用重启后恢复最近项目列表，并尊重用户拖拽顺序。
 ///
 /// Code Logic（这个函数做什么）:
-///     从 SQLite workbench_projects 按 last_opened_at 倒序读取，并转换为 camelCase DTO。
+///     从 SQLite workbench_projects 读取（repo.list 已投影自定义顺序），转换为 camelCase DTO。
 #[tauri::command]
 pub async fn list_workbench_projects(
     state: State<'_, AppState>,
@@ -144,6 +144,18 @@ pub async fn add_local_workbench_project_from_path(
         updated_at: now,
     };
     state.workbench_project_repo.upsert(&row).await?;
+    // 新项目置顶顺序文档（best-effort：失败不阻断添加）。
+    if let Err(err) = state
+        .workbench_project_repo
+        .prepend_order_id(&row.id, &row.updated_at, state.device_id.as_str())
+        .await
+    {
+        tracing::warn!(
+            project_id = %row.id,
+            error = %err,
+            "prepend workbench project order after add failed"
+        );
+    }
     // Agent Hub：若该项目已 opt-in，刷新 checkout bindings（未 opt-in 时为空且零写入）。
     if let Err(err) =
         crate::agent_hub::project_scope::refresh_checkout_bindings(state, &row.id).await
@@ -306,6 +318,17 @@ pub async fn open_workbench_remote_project(
         &now,
     );
     state.workbench_project_repo.upsert(&row).await?;
+    if let Err(err) = state
+        .workbench_project_repo
+        .prepend_order_id(&row.id, &row.updated_at, state.device_id.as_str())
+        .await
+    {
+        tracing::warn!(
+            project_id = %row.id,
+            error = %err,
+            "prepend workbench project order after remote open failed"
+        );
+    }
     Ok(row.to_dto())
 }
 
@@ -348,7 +371,63 @@ pub async fn remove_workbench_project(
         &session_index_paths,
     );
 
-    remove_local_workbench_project_with_barrier(state.inner(), &project_id).await
+    let result = remove_local_workbench_project_with_barrier(state.inner(), &project_id).await?;
+    if let Err(err) = state
+        .workbench_project_repo
+        .remove_order_id(&project_id, &now_iso(), state.device_id.as_str())
+        .await
+    {
+        tracing::warn!(
+            project_id = %project_id,
+            error = %err,
+            "remove workbench project order id failed"
+        );
+    }
+    Ok(result)
+}
+
+/// 拖拽重排工作台项目列表顺序。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在桌面侧栏拖拽项目后需要整表持久化顺序，并参与跨设备 LWW 同步。
+///
+/// Code Logic（这个函数做什么）:
+///     GUI 代理 `projects.reorder`；owner 规范化 orderedIds 后 set_order，返回最新 list DTO。
+#[tauri::command]
+pub async fn reorder_workbench_projects(
+    state: State<'_, AppState>,
+    ordered_ids: Vec<String>,
+) -> Result<Vec<WorkbenchProjectDto>, AppError> {
+    if let Some(v) = proxy_workbench_if_gui(
+        state.inner(),
+        "projects.reorder",
+        serde_json::json!({ "orderedIds": ordered_ids.clone() }),
+    )
+    .await?
+    {
+        return Ok(v);
+    }
+    reorder_workbench_projects_for_state(state.inner(), ordered_ids).await
+}
+
+/// owner 路径：写入顺序文档并返回投影后的项目列表。
+pub(crate) async fn reorder_workbench_projects_for_state(
+    state: &AppState,
+    ordered_ids: Vec<String>,
+) -> Result<Vec<WorkbenchProjectDto>, AppError> {
+    use crate::workbench::project_order::{normalize_ordered_ids, ProjectOrderDocument};
+    let ordered_ids = normalize_ordered_ids(ordered_ids);
+    let now = now_iso();
+    state
+        .workbench_project_repo
+        .set_order(&ProjectOrderDocument {
+            ordered_ids,
+            updated_at: now,
+            device_id: state.device_id.as_ref().clone(),
+        })
+        .await?;
+    let rows = state.workbench_project_repo.list().await?;
+    Ok(rows.iter().map(WorkbenchProjectRow::to_dto).collect())
 }
 
 /// 更新项目最近打开时间。

@@ -148,7 +148,20 @@ async fn dispatch_workbench_op(
         "projects.remove" => {
             // R26 M1：desktop / control 共用 project barrier helper。
             let project_id = required_string(&payload, "projectId")?;
-            Ok(workbench::remove_local_workbench_project_with_barrier(state, &project_id).await?)
+            let result =
+                workbench::remove_local_workbench_project_with_barrier(state, &project_id).await?;
+            if let Err(err) = state
+                .workbench_project_repo
+                .remove_order_id(&project_id, &workbench::now_iso(), state.device_id.as_str())
+                .await
+            {
+                tracing::warn!(
+                    project_id = %project_id,
+                    error = %err,
+                    "remove workbench project order id after control remove failed"
+                );
+            }
+            Ok(result)
         }
         "projects.touch" => {
             let project_id = required_string(&payload, "projectId")?;
@@ -158,6 +171,19 @@ async fn dispatch_workbench_op(
             row.updated_at = now;
             state.workbench_project_repo.upsert(&row).await?;
             Ok(serde_json::to_value(row.to_dto())?)
+        }
+        "projects.reorder" => {
+            let ordered_ids = payload
+                .get("orderedIds")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let items = workbench::reorder_workbench_projects_for_state(state, ordered_ids).await?;
+            Ok(serde_json::to_value(items)?)
         }
         "projects.remote_roots" => {
             let device_id = required_string(&payload, "deviceId")?;

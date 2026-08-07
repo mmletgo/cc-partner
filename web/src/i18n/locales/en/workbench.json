@@ -20,7 +20,8 @@
     "agentWorkingHint": "{{count}} agents working",
     "deviceOffline": "Device offline",
     "deviceCached": "Showing cached summary",
-    "deviceUnsupported": "Peer lacks Fleet support"
+    "deviceUnsupported": "Peer lacks Fleet support",
+    "dragHandleAria": "Drag to reorder"
   },
   "fleet": {
     "title": "LAN Agent Fleet",
@@ -773,6 +774,7 @@
     "addProject": "Failed to add project",
     "openRemoteProject": "Failed to open remote project",
     "removeProject": "Failed to remove project",
+    "reorderProjects": "Failed to reorder projects",
     "chooseDir": "Failed to choose folder",
     "worktrees": "Failed to load worktrees",
     "createWorktree": "Failed to create worktree",

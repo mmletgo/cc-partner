@@ -12,7 +12,7 @@
  *   来源选择与远端项目选择统一走共享 Dialog（portal / focus trap / Escape / backdrop）。
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, type DragEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog } from '@/components/primitives';
@@ -39,6 +39,8 @@ export function WorkbenchProjectRail() {
   const [sourcePickerOpen, setSourcePickerOpen] = useState<boolean>(false);
   const [remotePickerOpen, setRemotePickerOpen] = useState<boolean>(false);
   const [remoteOpenBusy, setRemoteOpenBusy] = useState<boolean>(false);
+  const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const {
     projects,
     activeProjectId,
@@ -51,6 +53,7 @@ export function WorkbenchProjectRail() {
     openRemoteProject,
     selectProject,
     removeProject,
+    reorderProjects,
   } = useWorkbenchProjects();
 
   const { projectSummaries, snapshot: fleetSnapshot } = useLanAgentFleet({ enabled: true });
@@ -131,6 +134,50 @@ export function WorkbenchProjectRail() {
     setSourcePickerOpen(false);
     window.setTimeout(() => addProjectButtonRef.current?.focus(), 0);
   }, []);
+
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   侧栏拖拽需要在拖动开始时标记源项目，并在放置时重排 orderedIds。
+   *
+   * Code Logic（这个函数做什么）:
+   *   HTML5 DnD：start 记 source；over 记 hover target；drop 时按 id 列表重排并调用 reorderProjects。
+   */
+  const handleProjectDragStart = useCallback((event: DragEvent<HTMLDivElement>, projectId: string) => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', projectId);
+    setDraggingProjectId(projectId);
+  }, []);
+
+  const handleProjectDragOver = useCallback((event: DragEvent<HTMLDivElement>, projectId: string) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    setDropTargetId(projectId);
+  }, []);
+
+  const handleProjectDragEnd = useCallback(() => {
+    setDraggingProjectId(null);
+    setDropTargetId(null);
+  }, []);
+
+  const handleProjectDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>, targetProjectId: string) => {
+      event.preventDefault();
+      const sourceId = event.dataTransfer.getData('text/plain') || draggingProjectId;
+      setDraggingProjectId(null);
+      setDropTargetId(null);
+      if (!sourceId || sourceId === targetProjectId) return;
+      const ids = projects.map((project) => project.id);
+      const from = ids.indexOf(sourceId);
+      const to = ids.indexOf(targetProjectId);
+      if (from < 0 || to < 0) return;
+      const next = [...ids];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      void reorderProjects(next);
+    },
+    [draggingProjectId, projects, reorderProjects],
+  );
 
   return (
     <section className={styles.rail} aria-label={sectionTitle}>
@@ -235,7 +282,21 @@ export function WorkbenchProjectRail() {
               key={project.id}
               className={styles.projectItem}
               data-active={isActive || undefined}
+              data-dragging={draggingProjectId === project.id || undefined}
+              data-drop-target={
+                dropTargetId === project.id && draggingProjectId !== project.id
+                  ? true
+                  : undefined
+              }
+              draggable={!projectBusy}
+              onDragStart={(event) => handleProjectDragStart(event, project.id)}
+              onDragOver={(event) => handleProjectDragOver(event, project.id)}
+              onDrop={(event) => handleProjectDrop(event, project.id)}
+              onDragEnd={handleProjectDragEnd}
             >
+              <span className={styles.dragHandle} aria-hidden="true" title={t('workbench:projectRail.dragHandleAria')}>
+                ⋮⋮
+              </span>
               <button
                 type="button"
                 className={styles.projectSelectButton}

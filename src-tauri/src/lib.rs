@@ -566,6 +566,7 @@ pub fn run() {
             workbench_cmd::get_workbench_remote_path_info,
             workbench_cmd::open_workbench_remote_project,
             workbench_cmd::remove_workbench_project,
+            workbench_cmd::reorder_workbench_projects,
             workbench_cmd::touch_workbench_project,
             workbench_cmd::discover_workbench_browser_targets,
             workbench_cmd::create_workbench_browser_preview,

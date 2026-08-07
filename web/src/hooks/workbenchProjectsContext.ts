@@ -26,6 +26,8 @@ export interface WorkbenchProjectsContextValue {
   openRemoteProject: (deviceId: string, path: string) => Promise<WorkbenchProject | null>;
   selectProject: (project: WorkbenchProject) => Promise<WorkbenchProject>;
   removeProject: (projectId: string) => Promise<void>;
+  /** 拖拽重排项目 id 列表；乐观更新后调用后端，失败时回滚。 */
+  reorderProjects: (orderedIds: string[]) => Promise<void>;
 }
 
 export const WorkbenchProjectsContext = createContext<WorkbenchProjectsContextValue | null>(null);

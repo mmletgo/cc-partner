@@ -25,6 +25,7 @@ pub mod ssh_target_sync;
 pub mod sync;
 pub mod transfer;
 pub mod workbench;
+pub mod workbench_project_order_sync;
 
 /// HTTP API 错误响应。
 ///

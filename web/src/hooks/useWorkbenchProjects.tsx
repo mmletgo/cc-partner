@@ -305,6 +305,44 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
     [activeProjectId, desktopUnavailableMessage, setActiveProjectId, t],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   桌面侧栏拖拽后应立刻反映顺序，并持久化到后端参与跨设备 LWW。
+   *
+   * Code Logic（这个函数做什么）:
+   *   按 orderedIds 乐观重排本地列表；成功后用后端返回列表覆盖；失败回滚并写 projectError。
+   */
+  const reorderProjects = useCallback(
+    async (orderedIds: string[]) => {
+      const previous = projects;
+      const byId = new Map(projects.map((project) => [project.id, project]));
+      const next: WorkbenchProject[] = [];
+      for (const id of orderedIds) {
+        const project = byId.get(id);
+        if (project) next.push(project);
+      }
+      for (const project of projects) {
+        if (!orderedIds.includes(project.id)) next.push(project);
+      }
+      setProjects(next);
+      try {
+        const list = await workbenchApi.projects.reorder(orderedIds);
+        setProjects(list);
+        setProjectError(null);
+      } catch (error) {
+        setProjects(previous);
+        setProjectError(
+          displayWorkbenchErrorMessage(
+            error,
+            t('workbench:errors.reorderProjects'),
+            desktopUnavailableMessage,
+          ),
+        );
+      }
+    },
+    [desktopUnavailableMessage, projects, t],
+  );
+
   useEffect(() => {
     return deferEffect(() => {
       void loadProjects();
@@ -326,6 +364,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       openRemoteProject,
       selectProject,
       removeProject,
+      reorderProjects,
     }),
     [
       activeProject,
@@ -340,6 +379,7 @@ export function WorkbenchProjectsProvider({ children }: WorkbenchProjectsProvide
       projectsLoading,
       refreshProjectSessionStats,
       removeProject,
+      reorderProjects,
       selectProject,
     ],
   );

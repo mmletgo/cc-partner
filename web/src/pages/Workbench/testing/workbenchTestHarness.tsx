@@ -787,6 +787,7 @@ export function buildProjectsContextValue(
     openRemoteProject: vi.fn(async () => Promise.resolve(null)),
     selectProject: vi.fn(async (project: WorkbenchProject) => Promise.resolve(project)),
     removeProject: vi.fn(async () => Promise.resolve()),
+    reorderProjects: vi.fn(async () => Promise.resolve()),
     ...overrides,
   };
 }

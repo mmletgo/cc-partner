@@ -246,6 +246,14 @@ const WORKBENCH_PROJECT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_pro
     updated_at TEXT NOT NULL
 )";
 
+/// 工作台项目自定义顺序列表（跨设备 LWW 单例偏好）。
+const WORKBENCH_PROJECT_ORDER_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_project_order (
+    id TEXT PRIMARY KEY NOT NULL,
+    ordered_ids_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    device_id TEXT NOT NULL
+)";
+
 /// 工作台 Git worktree 表（项目下多个工作区的持久化元数据）。
 const WORKBENCH_WORKTREE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_worktrees (
     id TEXT PRIMARY KEY,
@@ -369,6 +377,9 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
         .execute(&pool)
         .await?;
     sqlx::query(WORKBENCH_PROJECT_SCHEMA).execute(&pool).await?;
+    sqlx::query(WORKBENCH_PROJECT_ORDER_SCHEMA)
+        .execute(&pool)
+        .await?;
     sqlx::query(WORKBENCH_WORKTREE_SCHEMA)
         .execute(&pool)
         .await?;

@@ -130,6 +130,7 @@ function renderRail(partial: Partial<WorkbenchProjectsContextValue> = {}) {
     openRemoteProject: vi.fn(async () => null),
     selectProject: vi.fn(async (project) => project),
     removeProject: vi.fn(async () => undefined),
+    reorderProjects: vi.fn(async () => undefined),
     ...partial,
   };
 

@@ -99,6 +99,19 @@ export const workbenchApi = {
     /** 更新最近打开时间，并返回最新项目 DTO。 */
     touch: (projectId: string) =>
       invokeDecoded('touch_workbench_project', { projectId }, workbenchProjectDecoder),
+
+    /**
+     * 拖拽重排项目列表顺序。
+     *
+     * Business Logic: 桌面侧栏拖拽后整表持久化；返回投影后的完整列表。
+     * Code Logic: invoke reorder_workbench_projects + projects decoder。
+     */
+    reorder: (orderedIds: string[]) =>
+      invokeDecoded(
+        'reorder_workbench_projects',
+        { orderedIds },
+        workbenchProjectsDecoder,
+      ),
   },
 
   /**

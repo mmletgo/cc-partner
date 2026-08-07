@@ -24,6 +24,7 @@ use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     agent_hub, attention, browser_verification, cc_history, claude_code_assets, claude_md_sync,
     health, mobile, orchestrator, scratchpad_sync, ssh_target_sync, sync, transfer, workbench,
+    workbench_project_order_sync,
 };
 use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
@@ -814,6 +815,15 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
         .route(
             "/api/sync/claude_md/push",
             post(claude_md_sync::claude_md_push),
+        )
+        // 工作台项目顺序 LWW 偏好（单例 orderedIds；不进入 settings domain 报告）
+        .route(
+            "/api/sync/workbench-project-order/pull",
+            post(workbench_project_order_sync::project_order_pull),
+        )
+        .route(
+            "/api/sync/workbench-project-order/push",
+            post(workbench_project_order_sync::project_order_push),
         )
         // P2P 文件传输协议（M5）：init/chunk/complete/status；X-Chunk-Offset + complete 握手
         .route("/api/transfer/init", post(transfer::transfer_init))

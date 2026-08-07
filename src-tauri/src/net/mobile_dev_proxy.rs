@@ -26,6 +26,8 @@ use tokio_tungstenite::tungstenite::handshake::client::Request as TungsteniteReq
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
+/// 优先 IPv4 loopback（与 Vite `server.host: true` / 0.0.0.0 对齐）。
+/// 若仅绑 [::1] 的旧 Vite，调用方可通过 `CC_PARTNER_VITE_DEV_URL=http://[::1]:5173` 覆盖。
 const DEFAULT_VITE_HTTP_ORIGIN: &str = "http://127.0.0.1:5173";
 const PROXY_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// 上游连接失败后的短暂冷却，避免每个静态资源请求都同步打满拒连。

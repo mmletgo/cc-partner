@@ -12,6 +12,10 @@
 use crate::error::AppError;
 use crate::storage::maintenance_gate::{with_shared_write_lease, DatabaseMaintenanceGate};
 use crate::workbench::models::WorkbenchProjectRow;
+use crate::workbench::project_order::{
+    apply_project_order, normalize_ordered_ids, prepend_project_id, remove_project_id,
+    ProjectOrderDocument,
+};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use sqlx::Row;
 use std::sync::Arc;
@@ -52,11 +56,12 @@ impl WorkbenchProjectRepo {
 
     /// Business Logic（为什么需要这个函数）:
     ///     侧栏项目列表是用户的空间记忆锚点：选中项目不得让它跳到列表顶部。
-    ///     因此列表顺序固定为「添加时间倒序」（新添加的在最上），与 last_opened_at 解耦；
+    ///     默认顺序为「添加时间倒序」（新添加的在最上），与 last_opened_at 解耦；
+    ///     若用户拖拽保存了自定义顺序，则按顺序文档投影（未入表的本地项目仍置顶）。
     ///     「最近打开」语义只保留给 list_recent（启动摘要「继续工作」）。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     查询全部项目，按 created_at DESC 排序（同一时间戳按 id ASC 稳定 tie-break），转换为 Row。
+    ///     查询全部项目按 created_at DESC，再读顺序单例并用 `apply_project_order` 投影。
     pub async fn list(&self) -> Result<Vec<WorkbenchProjectRow>, AppError> {
         let rows = sqlx::query(
             "SELECT id, name, kind, device_id, device_name, path, last_opened_at, created_at, updated_at \
@@ -64,7 +69,137 @@ impl WorkbenchProjectRepo {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_to_project).collect()
+        let projects: Vec<WorkbenchProjectRow> = rows.iter().map(row_to_project).collect::<Result<_, _>>()?;
+        let order = self.get_order().await?;
+        let ordered_ids = order
+            .as_ref()
+            .map(|doc| doc.ordered_ids.as_slice())
+            .unwrap_or(&[]);
+        Ok(apply_project_order(projects, ordered_ids, |p| p.id.as_str()))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     旧库升级与测试夹具需要幂等创建顺序单例表，禁止 sqlx::migrate!。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     CREATE TABLE IF NOT EXISTS workbench_project_order（id 固定 'default'）。
+    pub async fn ensure_order_schema(pool: &SqlitePool) -> Result<(), AppError> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workbench_project_order (\
+             id TEXT PRIMARY KEY NOT NULL, \
+             ordered_ids_json TEXT NOT NULL, \
+             updated_at TEXT NOT NULL, \
+             device_id TEXT NOT NULL)",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     list / reorder / 跨设备 LWW 同步都需要读取当前顺序文档。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读取 id='default' 行；缺表/缺行返回 None。
+    pub async fn get_order(&self) -> Result<Option<ProjectOrderDocument>, AppError> {
+        let row = match sqlx::query(
+            "SELECT ordered_ids_json, updated_at, device_id FROM workbench_project_order WHERE id = 'default'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(sqlx::Error::Database(db_err))
+                if db_err.message().contains("no such table") =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let json: String = row.try_get("ordered_ids_json")?;
+        let ordered_ids: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+        Ok(Some(ProjectOrderDocument {
+            ordered_ids: normalize_ordered_ids(ordered_ids),
+            updated_at: row.try_get("updated_at")?,
+            device_id: row.try_get("device_id")?,
+        }))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     拖拽结束与 LWW 同步胜出时需整表覆盖顺序文档。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     ensure schema 后 INSERT OR REPLACE id='default'。
+    pub async fn set_order(&self, doc: &ProjectOrderDocument) -> Result<(), AppError> {
+        let ordered_ids = normalize_ordered_ids(doc.ordered_ids.clone());
+        let json = serde_json::to_string(&ordered_ids)?;
+        with_shared_write_lease(&self.gate, async {
+            Self::ensure_order_schema(&self.pool).await?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO workbench_project_order \
+                 (id, ordered_ids_json, updated_at, device_id) VALUES ('default', ?, ?, ?)",
+            )
+            .bind(&json)
+            .bind(&doc.updated_at)
+            .bind(&doc.device_id)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     新项目默认置顶，并写入顺序文档以便跨设备对齐相对序。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     读现有顺序 → prepend id → set_order（无文档时仅写 [id]）。
+    pub async fn prepend_order_id(
+        &self,
+        project_id: &str,
+        updated_at: &str,
+        device_id: &str,
+    ) -> Result<(), AppError> {
+        let current = self.get_order().await?;
+        let ordered_ids = match current {
+            Some(doc) => prepend_project_id(&doc.ordered_ids, project_id),
+            None => vec![project_id.to_string()],
+        };
+        self.set_order(&ProjectOrderDocument {
+            ordered_ids,
+            updated_at: updated_at.to_string(),
+            device_id: device_id.to_string(),
+        })
+        .await
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     移除项目后清理顺序文档中的 id，避免文档无限膨胀。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     有文档则过滤 id 并写回；无文档 no-op。
+    pub async fn remove_order_id(
+        &self,
+        project_id: &str,
+        updated_at: &str,
+        device_id: &str,
+    ) -> Result<(), AppError> {
+        let Some(doc) = self.get_order().await? else {
+            return Ok(());
+        };
+        let ordered_ids = remove_project_id(&doc.ordered_ids, project_id);
+        if ordered_ids == doc.ordered_ids {
+            return Ok(());
+        }
+        self.set_order(&ProjectOrderDocument {
+            ordered_ids,
+            updated_at: updated_at.to_string(),
+            device_id: device_id.to_string(),
+        })
+        .await
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -196,6 +331,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        WorkbenchProjectRepo::ensure_order_schema(&pool).await.unwrap();
         WorkbenchProjectRepo::new(pool)
     }
 
@@ -349,5 +485,57 @@ mod tests {
         assert_eq!(listed.len(), 5);
         assert_eq!(listed[0].id, "p5");
         assert!(!listed.iter().any(|p| p.id == "p0"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     拖拽保存的顺序必须驱动 list；未知 id 忽略；未入表本地项目置顶。
+    #[tokio::test]
+    async fn list_applies_custom_order_and_tops_missing_local() {
+        let repo = setup_repo().await;
+        repo.upsert(&row_created_at("p1", "2026-06-24T01:00:00Z", "2026-06-20T00:00:00Z"))
+            .await
+            .unwrap();
+        repo.upsert(&row_created_at("p2", "2026-06-24T02:00:00Z", "2026-06-21T00:00:00Z"))
+            .await
+            .unwrap();
+        repo.upsert(&row_created_at("p3", "2026-06-24T03:00:00Z", "2026-06-22T00:00:00Z"))
+            .await
+            .unwrap();
+
+        repo.set_order(&ProjectOrderDocument {
+            ordered_ids: vec!["p1".into(), "p2".into(), "ghost".into()],
+            updated_at: "2026-06-25T00:00:00Z".into(),
+            device_id: "device-1".into(),
+        })
+        .await
+        .unwrap();
+
+        let listed = repo.list().await.unwrap();
+        // default created_at DESC is p3,p2,p1；p3 未入表 → 置顶，其后 p1,p2
+        assert_eq!(
+            listed.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["p3", "p1", "p2"]
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     prepend/remove 必须整表更新顺序文档。
+    #[tokio::test]
+    async fn prepend_and_remove_order_ids() {
+        let repo = setup_repo().await;
+        repo.prepend_order_id("p1", "2026-06-25T00:00:00Z", "d1")
+            .await
+            .unwrap();
+        repo.prepend_order_id("p2", "2026-06-25T00:01:00Z", "d1")
+            .await
+            .unwrap();
+        let doc = repo.get_order().await.unwrap().unwrap();
+        assert_eq!(doc.ordered_ids, vec!["p2".to_string(), "p1".to_string()]);
+
+        repo.remove_order_id("p2", "2026-06-25T00:02:00Z", "d1")
+            .await
+            .unwrap();
+        let doc = repo.get_order().await.unwrap().unwrap();
+        assert_eq!(doc.ordered_ids, vec!["p1".to_string()]);
     }
 }

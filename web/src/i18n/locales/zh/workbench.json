@@ -20,7 +20,8 @@
     "agentWorkingHint": "{{count}} 个 Agent 运行中",
     "deviceOffline": "设备离线",
     "deviceCached": "使用缓存摘要",
-    "deviceUnsupported": "对端不支持 Fleet"
+    "deviceUnsupported": "对端不支持 Fleet",
+    "dragHandleAria": "拖动调整顺序"
   },
   "fleet": {
     "title": "局域网 Agent Fleet",
@@ -766,6 +767,7 @@
     "addProject": "添加项目失败",
     "openRemoteProject": "打开远端项目失败",
     "removeProject": "移除项目失败",
+    "reorderProjects": "调整项目顺序失败",
     "chooseDir": "选择文件夹失败",
     "worktrees": "读取 worktree 失败",
     "createWorktree": "创建 worktree 失败",
