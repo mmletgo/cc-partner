@@ -43,6 +43,7 @@ pub mod models;
 pub mod object_store;
 pub mod packages;
 pub mod plugins;
+pub mod portable_actions;
 pub mod portable_inventory;
 pub mod project_scope;
 pub mod projection;
@@ -91,11 +92,11 @@ pub use models::{
     compute_asset_aggregate_status, AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget,
     AssetAggregateStatus, AssetKind, AssetPolicy, DesiredPresence, LogicalAsset, Materialization,
     MaterializationStatus, NewLogicalAsset, NewMaterialization, NewProjectionJob, NewRevision,
-    NewScopeNode, NewTargetBinding, ProjectionJob, ProjectionJobState, ProjectionPayloadKind,
-    Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode,
-    TargetBinding, TargetBindingIntent, TargetBindingTransition, TargetDisableStrategy,
-    TargetStatusSnapshot, UserInstructionOwnershipRecord, UserInstructionPlanClaim,
-    UserInstructionPlanRecord,
+    NewScopeNode, NewTargetBinding, PortableActionClaim, PortableAssetActionPlanRecord,
+    ProjectionJob, ProjectionJobState, ProjectionPayloadKind, Revision, RevisionId,
+    RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
+    TargetBindingIntent, TargetBindingTransition, TargetDisableStrategy, TargetStatusSnapshot,
+    UserInstructionOwnershipRecord, UserInstructionPlanClaim, UserInstructionPlanRecord,
 };
 pub use object_store::{
     sha256_hex, ObjectStore, PutTreeResult, StoredObject, TreeEntry, TreeEntryDiagnostic,
@@ -125,6 +126,14 @@ pub use plugins::{
     PluginDecompositionPreview, PluginPackagePayload, PluginPackageRevision, PluginResidualRef,
     PortableHook, ResidualKind, ResidualPreview, ResidualProjectionReport,
     ResolvedComponentPayload,
+};
+pub use portable_actions::{
+    claim_portable_asset_action, preview_portable_asset_action,
+    preview_portable_asset_action_with_inventory, ApplyPortableAssetActionRequest,
+    PortableAssetActionChangeDto, PortableAssetActionItemResultDto, PortableAssetActionItemState,
+    PortableAssetActionKind, PortableAssetActionPlanDto, PortableAssetActionResultDto,
+    PortableAssetBackupPolicy, PortableAssetCanonicalEffect, PortableAssetConflictPolicy,
+    PortableAssetPlanOperation, PreviewPortableAssetActionRequest, PLAN_TTL_MINUTES,
 };
 pub use portable_inventory::{
     inspect_portable_inventory, inspect_portable_inventory_with_env, inventory_item_id,
