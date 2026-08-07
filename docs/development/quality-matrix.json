@@ -1472,6 +1472,57 @@
       ]
     },
     {
+      "id": "L2-AGENT-HUB-PORTABLE-PARITY-001",
+      "surface": "agent-hub",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/agent_hub_portable_inventory_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test agent_hub_portable_inventory_smoke -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real Claude/Codex/OpenCode product installs",
+        "pinned multi-version write activation",
+        "dual-host mDNS / multi-process backend",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/p2p-protocol.md",
+        "docs/superpowers/plans/2026-08-07-agent-hub-portable-asset-backend-parity.md"
+      ],
+      "notes": "L2 isolated HOME/data_dir portable inventory + local actions: 3x4 Claude/Codex/OpenCode x Skill/Command/Plugin/MCP scan; MCP credential fact present/hash only (secret fixture not in DTO JSON); FakeProcessRunner skill disable + MCP JSONC semantic patch; plugin enable --scope user; uninstall --keep-data; unopted project preview blocks write; claim_portable_asset_action / get_portable_asset_action_by_request clientRequestId replay. Not real product CLI L3."
+    },
+    {
+      "id": "L2-AGENT-HUB-PORTABLE-PULL-001",
+      "surface": "agent-hub",
+      "level": "L2",
+      "tests": [
+        "src-tauri/tests/agent_hub_portable_pull_smoke.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked --test agent_hub_portable_pull_smoke -- --nocapture --test-threads=1",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "LAN identity authentication",
+        "real dual-host mDNS / multi-process backend",
+        "full dest apply via devices-table resolve_device",
+        "packaged desktop GUI",
+        "durable SQLite pull plan ledger (process-local store)"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/p2p-protocol.md",
+        "docs/superpowers/plans/2026-08-07-agent-hub-portable-asset-backend-parity.md"
+      ],
+      "notes": "L2 dual isolated data_dir + frozen loopback peer: agent-hub.portable-pull.v1 capability health; source build_remote_inventory_for_target metadata-only; selection + object chunk offset resume (>=8 MiB contract); preview cross-target mismatch fails before resolve_device/transfer; install-mode wire tokens installToTarget/importedCanonicalOnly/skipExisting; get_portable_pull miss. Not dual-host mDNS; not full dest apply via private Device inject."
+    },
+    {
       "id": "E2E-AGENT-HUB-B-001",
       "surface": "agent-hub",
       "level": "L1",

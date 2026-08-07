@@ -37,6 +37,8 @@ Docs may only reference registered `E2E-` / `L2-` / `L3-` IDs (`node scripts/che
 | `E2E-AGENT-HUB-C-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate C: LAN source-push selection/progress / unsupported peer / Git inspect+confirm / credential disclosure / stale preview / mapping / Attention deep link (mock only) |
 | `E2E-AGENT-HUB-D-001` | `web/tests/agent-hub.spec.ts` | Agent Hub Gate D: Plugin drawer matrix / ownership delete preview / residual statuses / OpenCode catalog fail-closed + effectively-available runner selection / bridge preview deep link / Attention agentHubProjectionBlocked navigation (mock only) |
 | `L2-AGENT-HUB-B-001` | `src-tauri/tests/agent_hub_gate_b_smoke.rs` | Portable discovery / targetOnly isolation / unmanaged config / adoption recovery / credential redaction |
+| `L2-AGENT-HUB-PORTABLE-PARITY-001` | `src-tauri/tests/agent_hub_portable_inventory_smoke.rs` | Isolated HOME/data_dir 3×4 inventory + enable/disable/uninstall preview→apply→rescan, MCP secret privacy, unopted no-write, action request replay |
+| `L2-AGENT-HUB-PORTABLE-PULL-001` | `src-tauri/tests/agent_hub_portable_pull_smoke.rs` | Same-agent portable pull: metadata inventory, capability routes, same-target fail-before-transfer, chunk offset resume, install-mode wire tokens |
 | `L2-AGENT-HUB-C-001` | `src-tauri/tests/agent_hub_replication_smoke.rs` | Two-owner-style LAN prepare/chunk-resume/commit / idempotency / credential bytes + log redaction / projection-fail-after-commit |
 | `L2-AGENT-HUB-C-GIT-001` | `src-tauri/tests/agent_hub_replication_smoke.rs` | Git device-lane expand → third-env inspect/preview/confirm; map one project leave another unmapped |
 | `L2-AGENT-HUB-D-PLUGIN-001` | `src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs` | Mixed Plugin projection full/partial/sourceOnly + activationRequired via natural ActivationPlan merge + Snapshot residual CAS + package delete preserve shared/standalone |
@@ -61,6 +63,8 @@ Additional L1 extras (also registered): `E2E-ATTENTION-001`, `E2E-CORE-INTEGRITY
 | `L2-BACKEND-DOCTOR-SMOKE-001` | L2 | `src-tauri/tests/backend_doctor_smoke.rs` |
 | `L2-AGENT-CLI-SMOKE-001` | L2 | `src-tauri/tests/agent_cli_smoke.rs` + `cargo test --locked agent_cli --lib` |
 | `L2-AGENT-HUB-GATE-A-001` | L2 | `src-tauri/tests/agent_hub_gate_a_smoke.rs` — isolated HOME/data-dir Gate A process smoke (opt-in zero-write before enable, nested projection after opt-in, conflict Attention). **Does not** certify real multi-CLI product installs |
+| `L2-AGENT-HUB-PORTABLE-PARITY-001` | L2 | `src-tauri/tests/agent_hub_portable_inventory_smoke.rs` — isolated HOME/data_dir portable inventory + local actions (3×4 scan, FakeProcessRunner enable/disable/uninstall, MCP credential fact present/hash only, unopted project no-write, `clientRequestId` action replay). **Does not** certify real product CLI installs |
+| `L2-AGENT-HUB-PORTABLE-PULL-001` | L2 | `src-tauri/tests/agent_hub_portable_pull_smoke.rs` — library-level dual isolated data_dir + frozen loopback peer for `agent-hub.portable-pull.v1` inventory/selection/objects, metadata-only DTO, cross-target fail-before-transfer, 8 MiB chunk resume, install-mode wire tokens. **Does not** certify dual-host mDNS or full dest apply via devices table |
 | `L2-AGENT-HUB-C-001` | L2 | `src-tauri/tests/agent_hub_replication_smoke.rs` — isolated dual-data_dir source-push contracts (chunk resume, idempotency, credential plaintext in CAS + absent from logs, projection failure does not roll back). **Does not** certify dual-host mDNS |
 | `L2-AGENT-HUB-C-GIT-001` | L2 | Same smoke file Git path: export lane archive → third env inspect/confirm; unmapped projects importable without auto path/opt-in. **Never** auto Git import |
 | `L2-AGENT-HUB-D-PLUGIN-001` | L2 | `src-tauri/tests/agent_hub_gate_d_runtime_smoke.rs` — mixed Plugin portable + targetOnly Hook + residual projection, natural ActivationPlan.activation_required merge (not force-flag-only), ownership-aware delete. **Does not** certify real CLI marketplace installs |
@@ -224,6 +228,8 @@ node scripts/check-docs.mjs
 
 Evidence IDs:
 - `L2-AGENT-HUB-B-001` — `src-tauri/tests/agent_hub_gate_b_smoke.rs` (PASS when smoke suite green)
+- `L2-AGENT-HUB-PORTABLE-PARITY-001` — `src-tauri/tests/agent_hub_portable_inventory_smoke.rs` (PASS when inventory/action smoke green; FakeProcessRunner only)
+- `L2-AGENT-HUB-PORTABLE-PULL-001` — `src-tauri/tests/agent_hub_portable_pull_smoke.rs` (PASS when pull smoke green; library + frozen peer, not dual-host mDNS)
 - `E2E-AGENT-HUB-B-001` — `web/tests/agent-hub.spec.ts` Gate B describe (PASS when e2e green; else NOT VERIFIED if Playwright env missing)
 - `L2-AGENT-HUB-C-001` / `L2-AGENT-HUB-C-GIT-001` — `src-tauri/tests/agent_hub_replication_smoke.rs` (PASS when smoke suite green; dual-host mDNS remains L3)
 - `E2E-AGENT-HUB-C-001` — `web/tests/agent-hub.spec.ts` Gate C describe (PASS when e2e green; mock-only, not real multi-host)
@@ -232,6 +238,32 @@ Evidence IDs:
 - `L3-AGENT-HUB-B-CLI-001` — `src-tauri/tests/agent_hub_cli_contract.rs` ignored real-CLI harness; remains **NOT VERIFIED** without pinned local CLI
 - `L3-AGENT-HUB-C-LAN-001` — dual-host agent-hub.v1 + Git confirm; remains **NOT VERIFIED** until real-device certification
 - `L3-AGENT-HUB-D-OPENCODE-001` / `L3-AGENT-HUB-OPENCODE-RUNTIME-001` — exact OpenCode visible TUI + runtime bridge evidence; remain **NOT VERIFIED** until real pinned CLI + provider credentials are exercised
+
+### Agent Hub portable asset management parity (inventory / actions / pull)
+
+Backend parity for same-agent portable asset management (B1–B8). Focused commands:
+
+```bash
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked --lib agent_hub -- --test-threads=1
+cargo test --locked --test agent_hub_portable_inventory_smoke -- --nocapture --test-threads=1
+cargo test --locked --test agent_hub_portable_pull_smoke -- --nocapture --test-threads=1
+
+cd ..
+node scripts/check-p2p-route-inventory.mjs
+node scripts/check-quality-traceability.mjs --self-test
+node scripts/check-quality-traceability.mjs
+node scripts/check-docs.mjs --self-test
+node scripts/check-docs.mjs
+```
+
+Evidence IDs:
+- `L2-AGENT-HUB-PORTABLE-PARITY-001` — inventory + local action smoke (`agent_hub_portable_inventory_smoke`)
+- `L2-AGENT-HUB-PORTABLE-PULL-001` — pull contract smoke (`agent_hub_portable_pull_smoke`)
+- Protocol: capability `agent-hub.portable-pull.v1` + routes in `docs/p2p-protocol.md`
+- L3 product CLI / dual-host mDNS / packaged GUI remain **NOT VERIFIED** (do not flip from L2)
 
 ### Agent Hub Gate D verification (Plugin + OpenCode runtime)
 
