@@ -128,12 +128,13 @@ pub use plugins::{
     ResolvedComponentPayload,
 };
 pub use portable_actions::{
-    claim_portable_asset_action, preview_portable_asset_action,
-    preview_portable_asset_action_with_inventory, ApplyPortableAssetActionRequest,
-    PortableAssetActionChangeDto, PortableAssetActionItemResultDto, PortableAssetActionItemState,
-    PortableAssetActionKind, PortableAssetActionPlanDto, PortableAssetActionResultDto,
-    PortableAssetBackupPolicy, PortableAssetCanonicalEffect, PortableAssetConflictPolicy,
-    PortableAssetPlanOperation, PreviewPortableAssetActionRequest, PLAN_TTL_MINUTES,
+    apply_portable_asset_action, apply_portable_asset_action_with, claim_portable_asset_action,
+    preview_portable_asset_action, preview_portable_asset_action_with_inventory,
+    ApplyPortableAssetActionRequest, PortableActionExecutorDeps, PortableAssetActionChangeDto,
+    PortableAssetActionItemResultDto, PortableAssetActionItemState, PortableAssetActionKind,
+    PortableAssetActionPlanDto, PortableAssetActionResultDto, PortableAssetBackupPolicy,
+    PortableAssetCanonicalEffect, PortableAssetConflictPolicy, PortableAssetPlanOperation,
+    PreviewPortableAssetActionRequest, PLAN_TTL_MINUTES,
 };
 pub use portable_inventory::{
     inspect_portable_inventory, inspect_portable_inventory_with_env, inventory_item_id,

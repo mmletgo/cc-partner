@@ -1760,6 +1760,209 @@ fn incoming_dir() -> PathBuf {
     assets_root().join("incoming")
 }
 
+/// portable executor 使用的 Claude 路径根（可注入，便于单测隔离）。
+///
+/// Business Logic: B4 必须在临时 CLAUDE_CONFIG_DIR / data_dir 下执行，不污染开发者机器。
+/// Code Logic: 汇总 skills/commands/mcp/disabled/backup 路径。
+#[derive(Debug, Clone)]
+pub struct PortableClaudeRoots {
+    /// CLAUDE_CONFIG_DIR 或 ~/.claude
+    #[allow(dead_code)]
+    pub config_dir: PathBuf,
+    /// .claude.json 路径
+    pub claude_json_path: PathBuf,
+    /// skills 启用区
+    pub skills_dir: PathBuf,
+    /// commands 启用区
+    pub commands_dir: PathBuf,
+    /// disabled skills
+    pub disabled_skills_dir: PathBuf,
+    /// disabled commands
+    pub disabled_commands_dir: PathBuf,
+    /// disabled mcp 快照
+    pub disabled_mcp_dir: PathBuf,
+    /// 可恢复备份根
+    pub backup_root: PathBuf,
+}
+
+/// 解析 portable Claude 根（优先注入路径）。
+///
+/// Business Logic: executor 与 legacy 命令共享同一目录语义。
+/// Code Logic: claude_config_dir / data_dir 覆盖环境默认。
+pub fn portable_claude_roots(
+    claude_config_dir: Option<&std::path::Path>,
+    data_dir: Option<&std::path::Path>,
+) -> Result<PortableClaudeRoots, AppError> {
+    let config_dir = claude_config_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(claude_dir);
+    let claude_json_path = if let Some(dir) = claude_config_dir {
+        dir.join(".claude.json")
+    } else {
+        claude_json_path()
+    };
+    let assets = if let Some(data) = data_dir {
+        data.join("claude-assets")
+    } else {
+        assets_root()
+    };
+    Ok(PortableClaudeRoots {
+        skills_dir: config_dir.join("skills"),
+        commands_dir: config_dir.join("commands"),
+        disabled_skills_dir: assets.join("disabled").join("skills"),
+        disabled_commands_dir: assets.join("disabled").join("commands"),
+        disabled_mcp_dir: assets.join("disabled").join("mcp"),
+        backup_root: assets.join("backups"),
+        config_dir,
+        claude_json_path,
+    })
+}
+
+/// crate-visible：安全 move（跨卷 fallback copy+remove）。
+pub fn portable_move_path(src: &Path, dst: &Path) -> Result<(), AppError> {
+    move_path(src, dst)
+}
+
+/// crate-visible：删除文件或目录。
+pub fn portable_remove_path(path: &Path) -> Result<(), AppError> {
+    remove_path(path)
+}
+
+/// crate-visible：备份到 backup_root。
+pub fn portable_backup_path(
+    kind: ClaudeCodeAssetKind,
+    name: &str,
+    src: &Path,
+    backup_root: &Path,
+) -> Result<(), AppError> {
+    let dst = backup_root
+        .join(timestamp_slug())
+        .join(kind.as_str())
+        .join(safe_name_segment(name)?);
+    if src.is_dir() {
+        copy_dir_all(src, &dst)?;
+    } else {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+/// crate-visible：删除前备份（Skill/Command uninstall）。
+pub fn portable_remove_tree_with_backup(
+    kind: ClaudeCodeAssetKind,
+    id: &str,
+    candidates: &[PathBuf],
+    backup_root: &Path,
+) -> Result<(), AppError> {
+    let Some(path) = candidates.iter().find(|p| p.exists()) else {
+        return Err(AppError::not_found("资产不存在"));
+    };
+    portable_backup_path(kind, id, path, backup_root)?;
+    remove_path(path)?;
+    Ok(())
+}
+
+/// crate-visible：Skill 树启停（active ↔ disabled move）。
+pub fn portable_set_tree_enabled(
+    kind: ClaudeCodeAssetKind,
+    id: &str,
+    enabled: bool,
+    active_root: &Path,
+    disabled_root: &Path,
+    backup_root: &Path,
+) -> Result<(), AppError> {
+    let active = active_root.join(id);
+    let disabled = disabled_root.join(id);
+    if enabled {
+        if !disabled.exists() {
+            return Err(AppError::not_found("禁用区中没有该资产"));
+        }
+        if active.exists() {
+            portable_backup_path(kind, id, &active, backup_root)?;
+            remove_path(&active)?;
+        }
+        move_path(&disabled, &active)?;
+    } else {
+        if !active.exists() {
+            return Err(AppError::not_found("启用区中没有该资产"));
+        }
+        fs::create_dir_all(disabled_root)?;
+        if disabled.exists() {
+            portable_backup_path(kind, id, &disabled, backup_root)?;
+            remove_path(&disabled)?;
+        }
+        move_path(&active, &disabled)?;
+    }
+    Ok(())
+}
+
+/// crate-visible：Command 文件启停。
+pub fn portable_set_command_enabled(
+    id: &str,
+    enabled: bool,
+    active_root: &Path,
+    disabled_root: &Path,
+    backup_root: &Path,
+) -> Result<(), AppError> {
+    let filename = format!("{id}.md");
+    let active = active_root.join(&filename);
+    let disabled = disabled_root.join(&filename);
+    if enabled {
+        if active.exists() {
+            return Ok(());
+        }
+        fs::create_dir_all(active_root)?;
+        if !disabled.exists() {
+            return Err(AppError::not_found("禁用区中没有该 command"));
+        }
+        move_path(&disabled, &active)?;
+    } else {
+        fs::create_dir_all(disabled_root)?;
+        if disabled.exists() {
+            portable_backup_path(ClaudeCodeAssetKind::Command, id, &disabled, backup_root)?;
+            remove_path(&disabled)?;
+        }
+        if !active.exists() {
+            return Err(AppError::not_found("启用区中没有该 command"));
+        }
+        move_path(&active, &disabled)?;
+    }
+    Ok(())
+}
+
+/// 稳定 content/tree hash（文件或目录），供 executor changed-source 校验与测试。
+pub fn portable_content_hash_path(path: &Path) -> Result<String, AppError> {
+    use crate::agent_hub::object_store::sha256_hex;
+    use sha2::{Digest, Sha256};
+    if path.is_file() {
+        return Ok(sha256_hex(&fs::read(path)?));
+    }
+    let mut hasher = Sha256::new();
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(path).follow_links(false) {
+        let entry = entry.map_err(|e| AppError::generic(format!("walk: {e}")))?;
+        if entry.file_type().is_file() {
+            entries.push(entry.path().to_path_buf());
+        }
+    }
+    entries.sort();
+    for f in entries {
+        let rel = f.strip_prefix(path).unwrap_or(&f);
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update(fs::read(&f)?);
+    }
+    Ok(sha256_hex(hasher.finalize().as_slice()))
+}
+
+/// 测试串行锁（供 portable_actions executor 测试复用）。
+#[cfg(test)]
+pub fn claude_assets_env_lock_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    claude_assets_env_lock()
+}
+
 /// 串行化依赖 HOME/CLAUDE_CONFIG_DIR 的测试（模块级，供 harness + 单测共用）。
 #[cfg(test)]
 fn claude_assets_env_lock() -> std::sync::MutexGuard<'static, ()> {

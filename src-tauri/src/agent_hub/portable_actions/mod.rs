@@ -5,12 +5,17 @@
 //!     preview 零写入；未纳管启停不创建 ownership；claim 幂等与 outcomeUnknown 对账。
 //!
 //! Code Logic（这个模块做什么）:
-//!     models + planner + ledger；executor 由 B4 实现。
+//!     models + planner + ledger + executor + target adapters。
 
+pub mod executor;
 pub mod ledger;
 pub mod models;
 pub mod planner;
+pub mod targets;
 
+pub use executor::{
+    apply_portable_asset_action, apply_portable_asset_action_with, PortableActionExecutorDeps,
+};
 pub use ledger::{
     claim_portable_asset_action, complete_portable_asset_action,
     get_portable_asset_action_by_request, get_portable_asset_action_plan, outcome_unknown_result,

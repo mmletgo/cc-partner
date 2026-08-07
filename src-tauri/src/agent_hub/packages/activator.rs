@@ -181,6 +181,11 @@ impl FakeProcessRunner {
         }));
     }
 
+    /// 压入 runner 级错误（spawn/transport 不确定）。
+    pub fn push_io_err(&self, err: AppError) {
+        self.responses.lock().unwrap().push_back(Err(err));
+    }
+
     /// 已调用 argv 快照。
     pub fn calls(&self) -> Vec<ProcessSpec> {
         self.calls.lock().unwrap().clone()
