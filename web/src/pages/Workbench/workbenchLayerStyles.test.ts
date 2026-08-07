@@ -69,4 +69,14 @@ describe('workbenchLayerStyles', () => {
   assertContains(css, 'visibility: hidden;', 'hidden layer is not visible');
   assertContains(css, 'pointer-events: none;', 'hidden layer does not intercept input');
   });
+
+  test('inactive terminal windows leave layout while preserving the mounted React pane', () => {
+    const css = readFileSync(new URL('./Workbench.module.css', import.meta.url), 'utf8');
+    if (!/\.terminalPaneFrame\s*\{[\s\S]*?display:\s*none;[\s\S]*?\}/.test(css)) {
+      throw new Error('inactive terminal pane must discard its stale WebView compositing layer');
+    }
+    if (!/\.terminalPaneFrame\[data-active='true'\]\s*\{[\s\S]*?display:\s*grid;[\s\S]*?\}/.test(css)) {
+      throw new Error('active terminal pane must re-enter layout before xterm recovery runs');
+    }
+  });
 });

@@ -867,7 +867,8 @@
   min-width: 0;
   min-height: 0;
   height: 100%;
-  display: grid;
+  /* inactive xterm 仍由 React 常驻挂载，但必须移出布局以丢弃 WebView 的旧文本合成层。 */
+  display: none;
   grid-template-rows: auto minmax(0, 1fr);
   border: 1px solid transparent;
   border-radius: 0;
@@ -880,6 +881,7 @@
 }
 
 .terminalPaneFrame[data-active='true'] {
+  display: grid;
   z-index: 1;
   border-color: color-mix(in oklab, var(--accent) 40%, var(--terminal-border));
   opacity: 1;

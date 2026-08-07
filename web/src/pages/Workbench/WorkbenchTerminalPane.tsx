@@ -150,6 +150,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   const liveWriterRef = useRef<TerminalLiveWriter | null>(null);
   const replayGateRef = useRef<TerminalReplayGate>({ current: false });
   const inputEnabledRef = useRef<boolean>(inputEnabled);
+  const renderVisibleRef = useRef<boolean>(renderVisible);
   const previousRenderVisibleRef = useRef<boolean>(renderVisible);
   const resizeTimerRef = useRef<number | null>(null);
   const forceResizeRef = useRef<(() => void) | null>(null);
@@ -173,6 +174,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
   }, [inputEnabled]);
 
   useEffect(() => {
+    renderVisibleRef.current = renderVisible;
+  }, [renderVisible]);
+
+  useEffect(() => {
     cursorAnchorCallbackRef.current = onCursorAnchorChange;
   }, [onCursorAnchorChange]);
 
@@ -188,7 +193,10 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(viewport);
-    fit.fit();
+    // inactive pane 用 display:none 丢弃 WebView 合成层；此时不得按零尺寸 fit。
+    if (renderVisibleRef.current) {
+      fit.fit();
+    }
     cursorMetricsRef.current = null;
     pointerDownCellRef.current = null;
     pointerDownPointRef.current = null;
@@ -331,6 +339,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     let lastReportedSize: { cols: number; rows: number } | null = null;
     const resize = (options?: { force?: boolean }): void => {
       try {
+        // 隐藏 window 不参与布局；等重新可见后由 recovery 路径强制 fit/resize。
+        if (!renderVisibleRef.current) return;
         const force = options?.force === true;
         // 有文本选区时 ResizeObserver 的 fit 可能改 rows 并清掉选区；仅 force 路径允许打断。
         if (!force && terminal.getSelection().length > 0) {
@@ -437,15 +447,18 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         window.cancelAnimationFrame(recoveryRaf);
       }
       recoveryRaf = window.requestAnimationFrame(() => {
-        recoveryRaf = null;
-        const currentTerminal = terminalRef.current;
-        if (!currentTerminal || currentTerminal !== terminal) return;
-        if (document.visibilityState === 'hidden') return;
-        if (currentTerminal.getSelection().length > 0) return;
-        cursorMetricsRef.current = null;
-        forceResizeRef.current?.();
-        // xterm 6 DOM renderer 会在 selection 失效时重建全部行；空选区不会改变用户状态。
-        currentTerminal.clearSelection();
+        // display:none 恢复后再多等一帧，让 xterm IntersectionObserver 先恢复字符尺寸。
+        recoveryRaf = window.requestAnimationFrame(() => {
+          recoveryRaf = null;
+          const currentTerminal = terminalRef.current;
+          if (!currentTerminal || currentTerminal !== terminal) return;
+          if (document.visibilityState === 'hidden') return;
+          if (currentTerminal.getSelection().length > 0) return;
+          cursorMetricsRef.current = null;
+          forceResizeRef.current?.();
+          // xterm 6 DOM renderer 会在 selection 失效时重建全部行；空选区不会改变用户状态。
+          currentTerminal.clearSelection();
+        });
       });
     };
 

@@ -12,7 +12,7 @@
  *   来源选择与远端项目选择统一走共享 Dialog（portal / focus trap / Escape / backdrop）。
  */
 
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Dialog } from '@/components/primitives';
@@ -46,10 +46,10 @@ export function WorkbenchProjectRail() {
     position: 'before' | 'after';
   } | null>(null);
   const [previewOrderIds, setPreviewOrderIds] = useState<string[] | null>(null);
-  /** 同步源 id：HTML5 dragover 必须同步 preventDefault，不能等 setState。 */
+  const listRef = useRef<HTMLDivElement | null>(null);
   const draggingProjectIdRef = useRef<string | null>(null);
   const previewOrderIdsRef = useRef<string[] | null>(null);
-  const dragSucceededRef = useRef(false);
+  const pointerIdRef = useRef<number | null>(null);
   const itemNodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const itemRectsRef = useRef<Map<string, DOMRect>>(new Map());
   const {
@@ -155,10 +155,10 @@ export function WorkbenchProjectRail() {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   列表顺序变化时用 FLIP 补间，让项目卡片滑动到新位置，而不是瞬间跳位。
+   *   列表顺序变化时用 FLIP 补间，让项目卡片滑动到新位置。
    *
    * Code Logic（这个函数做什么）:
-   *   layout 前缓存旧 rect，layout 后对每个 item 施加 inverse transform 再过渡回 0。
+   *   记录上帧 rect，下一帧用 Web Animations 从旧位置过渡到新位置。
    */
   useLayoutEffect(() => {
     const nodes = itemNodeRefs.current;
@@ -202,50 +202,11 @@ export function WorkbenchProjectRail() {
   const clearDragUi = useCallback(() => {
     draggingProjectIdRef.current = null;
     previewOrderIdsRef.current = null;
+    pointerIdRef.current = null;
     setDraggingProjectId(null);
     setDropIndicator(null);
     setPreviewOrderIds(null);
   }, []);
-
-  /**
-   * Business Logic（为什么需要这个函数）:
-   *   仅从手柄开始拖，避免点选/删除与拖拽冲突；list 层处理 over/drop，防止按钮吞事件。
-   *
-   * Code Logic（这个函数做什么）:
-   *   同步写 ref（保证后续 dragover 立刻 preventDefault），再 setState 驱动 UI。
-   */
-  const handleHandleDragStart = useCallback(
-    (event: DragEvent<HTMLSpanElement>, projectId: string) => {
-      if (projectBusy) {
-        event.preventDefault();
-        return;
-      }
-      event.stopPropagation();
-      event.dataTransfer.effectAllowed = 'move';
-      try {
-        event.dataTransfer.setData('text/plain', projectId);
-        event.dataTransfer.setData('application/x-cc-partner-project-id', projectId);
-      } catch {
-        // 某些 WebView 对 setData 类型更严；text/plain 已尽力写入。
-      }
-      const card = event.currentTarget.closest(`.${styles.projectItem}`) as HTMLElement | null;
-      if (card) {
-        try {
-          event.dataTransfer.setDragImage(card, 28, 24);
-        } catch {
-          // setDragImage 在部分环境不可用，忽略。
-        }
-      }
-      const initialOrder = projects.map((project) => project.id);
-      dragSucceededRef.current = false;
-      draggingProjectIdRef.current = projectId;
-      previewOrderIdsRef.current = initialOrder;
-      setDraggingProjectId(projectId);
-      setPreviewOrderIds(initialOrder);
-      setDropIndicator(null);
-    },
-    [projectBusy, projects],
-  );
 
   const resolveDropTarget = useCallback((clientY: number, listEl: HTMLElement, sourceId: string) => {
     const items = Array.from(listEl.querySelectorAll<HTMLElement>('[data-project-id]'));
@@ -272,21 +233,15 @@ export function WorkbenchProjectRail() {
     return best ? { projectId: best.projectId, position: best.position } : null;
   }, []);
 
-  const handleListDragOver = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
+  const applyPointerReorder = useCallback(
+    (clientY: number) => {
       const sourceId = draggingProjectIdRef.current;
-      if (!sourceId) return;
-      // 必须同步 preventDefault，否则浏览器不会触发 drop。
-      event.preventDefault();
-      event.dataTransfer.dropEffect = 'move';
-      const listEl =
-        (event.currentTarget.closest(`.${styles.projectList}`) as HTMLElement | null) ??
-        event.currentTarget;
-      const target = resolveDropTarget(event.clientY, listEl, sourceId);
+      const listEl = listRef.current;
+      if (!sourceId || !listEl) return;
+      const target = resolveDropTarget(clientY, listEl, sourceId);
       if (!target) return;
       setDropIndicator(target);
-      const base =
-        previewOrderIdsRef.current ?? projects.map((project) => project.id);
+      const base = previewOrderIdsRef.current ?? projects.map((project) => project.id);
       const next = moveProjectId(base, sourceId, target.projectId, target.position);
       if (next.join('\0') === base.join('\0')) return;
       previewOrderIdsRef.current = next;
@@ -295,54 +250,80 @@ export function WorkbenchProjectRail() {
     [projects, resolveDropTarget],
   );
 
-  const handleListDrop = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      const sourceFromRef = draggingProjectIdRef.current;
-      if (!sourceFromRef) return;
+  const finishPointerReorder = useCallback(() => {
+    const sourceId = draggingProjectIdRef.current;
+    if (!sourceId) return;
+    const next = previewOrderIdsRef.current ?? projects.map((project) => project.id);
+    const unchanged =
+      next.length === projects.length && next.every((id, index) => projects[index]?.id === id);
+    clearDragUi();
+    if (!unchanged) {
+      void reorderProjects(next);
+    }
+  }, [clearDragUi, projects, reorderProjects]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   Tauri WebView 上 HTML5 DnD 的 drop 经常不触发；改用 pointer 拖动手柄，行为更稳。
+   *
+   * Code Logic（这个函数做什么）:
+   *   pointerdown 在手柄开始；window pointermove 预览重排；pointerup/cancel 持久化。
+   */
+  const handleHandlePointerDown = useCallback(
+    (event: { button: number; preventDefault: () => void; stopPropagation: () => void; pointerId: number; clientY: number; currentTarget: HTMLSpanElement }, projectId: string) => {
+      if (projectBusy || event.button !== 0) return;
       event.preventDefault();
       event.stopPropagation();
-      let sourceId = sourceFromRef;
+      const initialOrder = projects.map((project) => project.id);
+      pointerIdRef.current = event.pointerId;
+      draggingProjectIdRef.current = projectId;
+      previewOrderIdsRef.current = initialOrder;
+      setDraggingProjectId(projectId);
+      setPreviewOrderIds(initialOrder);
+      setDropIndicator(null);
       try {
-        sourceId =
-          event.dataTransfer.getData('application/x-cc-partner-project-id') ||
-          event.dataTransfer.getData('text/plain') ||
-          sourceFromRef;
+        event.currentTarget.setPointerCapture(event.pointerId);
       } catch {
-        sourceId = sourceFromRef;
+        // capture 失败时仍可用 window 级 move/up。
       }
-      // drop 可能落在 list 或 item 上；resolve 始终相对整个列表容器。
-      const listEl =
-        (event.currentTarget.closest(`.${styles.projectList}`) as HTMLElement | null) ??
-        event.currentTarget;
-      const target = resolveDropTarget(event.clientY, listEl, sourceId);
-      const base =
-        previewOrderIdsRef.current ?? projects.map((project) => project.id);
-      const next =
-        target && sourceId
-          ? moveProjectId(base, sourceId, target.projectId, target.position)
-          : base;
-      dragSucceededRef.current = true;
-      clearDragUi();
-      const unchanged =
-        next.length === projects.length &&
-        next.every((id, index) => projects[index]?.id === id);
-      if (!unchanged) {
-        void reorderProjects(next);
-      }
+      applyPointerReorder(event.clientY);
     },
-    [clearDragUi, projects, reorderProjects, resolveDropTarget],
+    [applyPointerReorder, projectBusy, projects],
   );
 
-  const handleHandleDragEnd = useCallback(() => {
-    // drop 后仍会触发 dragend；成功路径已 clear，这里只处理取消/失败。
-    if (!dragSucceededRef.current) {
-      clearDragUi();
-    } else {
-      draggingProjectIdRef.current = null;
-      setDraggingProjectId(null);
-      setDropIndicator(null);
-    }
-  }, [clearDragUi]);
+  useEffect(() => {
+    if (!draggingProjectId) return;
+
+    const onMove = (event: PointerEvent) => {
+      if (
+        pointerIdRef.current != null &&
+        event.pointerId !== pointerIdRef.current
+      ) {
+        return;
+      }
+      event.preventDefault();
+      applyPointerReorder(event.clientY);
+    };
+
+    const onUp = (event: PointerEvent) => {
+      if (
+        pointerIdRef.current != null &&
+        event.pointerId !== pointerIdRef.current
+      ) {
+        return;
+      }
+      finishPointerReorder();
+    };
+
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [applyPointerReorder, draggingProjectId, finishPointerReorder]);
 
   return (
     <section className={styles.rail} aria-label={sectionTitle}>
@@ -380,13 +361,9 @@ export function WorkbenchProjectRail() {
       {projectError ? <div className={styles.errorBox}>{projectError}</div> : null}
 
       <div
+        ref={listRef}
         className={styles.projectList}
         data-dragging={draggingProjectId ? true : undefined}
-        onDragEnter={(event) => {
-          if (draggingProjectIdRef.current) event.preventDefault();
-        }}
-        onDragOver={handleListDragOver}
-        onDrop={handleListDrop}
       >
         {projectsLoading ? <div className={styles.muted}>{t('workbench:loading')}</div> : null}
         {!projectsLoading && projects.length === 0 ? (
@@ -468,16 +445,14 @@ export function WorkbenchProjectRail() {
                   ? true
                   : undefined
               }
-              onDragOver={handleListDragOver}
-              onDrop={handleListDrop}
             >
               <span
                 className={styles.dragHandle}
-                draggable={!projectBusy}
+                role="button"
+                tabIndex={projectBusy ? -1 : 0}
                 title={t('workbench:projectRail.dragHandleAria')}
                 aria-label={t('workbench:projectRail.dragHandleAria')}
-                onDragStart={(event) => handleHandleDragStart(event, project.id)}
-                onDragEnd={handleHandleDragEnd}
+                onPointerDown={(event) => handleHandlePointerDown(event, project.id)}
               >
                 ⋮⋮
               </span>
