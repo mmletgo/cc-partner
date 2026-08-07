@@ -18,9 +18,10 @@ use crate::agent_hub::models::{
     AdoptionRecord, AdoptionState, AgentHubConflict, AgentTarget, AssetKind, AssetPolicy,
     DesiredPresence, LogicalAsset, Materialization, MaterializationStatus, NewLogicalAsset,
     NewMaterialization, NewProjectionJob, NewRevision, NewScopeNode, NewTargetBinding,
-    ProjectionJob, ProjectionJobState, ProjectionPayloadKind, Revision, RevisionId,
-    RevisionOperation, RevisionOriginKind, ScopeKind, ScopeNode, TargetBinding,
-    UserInstructionOwnershipRecord, UserInstructionPlanClaim, UserInstructionPlanRecord,
+    PortableActionClaim, PortableAssetActionPlanRecord, ProjectionJob, ProjectionJobState,
+    ProjectionPayloadKind, Revision, RevisionId, RevisionOperation, RevisionOriginKind, ScopeKind,
+    ScopeNode, TargetBinding, UserInstructionOwnershipRecord, UserInstructionPlanClaim,
+    UserInstructionPlanRecord,
 };
 use crate::agent_hub::object_store::ObjectStore;
 use crate::agent_hub::plugins::ownership::{decide_component_delete, ComponentDeleteDecision};
@@ -3048,6 +3049,191 @@ impl AgentHubRepo {
         .await
     }
 
+    /// 插入 portable 资产动作 preview plan。
+    ///
+    /// Business Logic: plan 由 owner 管理，GuiClient 只回传不可猜 token。
+    /// Code Logic: token 冲突 fail-closed；不在日志输出 plan_json。
+    pub async fn insert_portable_asset_action_plan(
+        &self,
+        record: PortableAssetActionPlanRecord,
+    ) -> Result<PortableAssetActionPlanRecord, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            sqlx::query(
+                "INSERT INTO agent_hub_portable_asset_action_plans (
+                    plan_token, owner_fingerprint, expires_at, inventory_snapshot_hash,
+                    plan_json, client_request_id, claimed_at, consumed_at, result_json, created_at
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            )
+            .bind(&record.plan_token)
+            .bind(&record.owner_fingerprint)
+            .bind(&record.expires_at)
+            .bind(&record.inventory_snapshot_hash)
+            .bind(&record.plan_json)
+            .bind(record.client_request_id.as_deref())
+            .bind(record.claimed_at.as_deref())
+            .bind(record.consumed_at.as_deref())
+            .bind(record.result_json.as_deref())
+            .bind(&record.created_at)
+            .execute(&self.pool)
+            .await?;
+            Ok(record)
+        })
+        .await
+    }
+
+    /// 读取 portable 资产动作 plan。
+    pub async fn get_portable_asset_action_plan(
+        &self,
+        plan_token: &str,
+    ) -> Result<Option<PortableAssetActionPlanRecord>, AppError> {
+        let row = sqlx::query(
+            "SELECT plan_token, owner_fingerprint, expires_at, inventory_snapshot_hash,
+                    plan_json, client_request_id, claimed_at, consumed_at, result_json, created_at
+             FROM agent_hub_portable_asset_action_plans WHERE plan_token = ?",
+        )
+        .bind(plan_token)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref()
+            .map(row_to_portable_asset_action_plan)
+            .transpose()
+    }
+
+    /// 按 client_request_id 读取动作 plan（outcomeUnknown 对账）。
+    pub async fn get_portable_asset_action_by_request_id(
+        &self,
+        client_request_id: &str,
+    ) -> Result<Option<PortableAssetActionPlanRecord>, AppError> {
+        let row = sqlx::query(
+            "SELECT plan_token, owner_fingerprint, expires_at, inventory_snapshot_hash,
+                    plan_json, client_request_id, claimed_at, consumed_at, result_json, created_at
+             FROM agent_hub_portable_asset_action_plans WHERE client_request_id = ?
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(client_request_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref()
+            .map(row_to_portable_asset_action_plan)
+            .transpose()
+    }
+
+    /// 原子 claim portable 资产动作 plan。
+    ///
+    /// Business Logic: get→write 不能留并发窗口；同 token 同时只有一个执行者；
+    ///     同一 clientRequestId 不得绑定不同 plan。
+    /// Code Logic: 事务内 CAS client_request_id NULL→id；唯一索引保证跨 plan 冲突。
+    pub async fn claim_portable_asset_action_plan(
+        &self,
+        plan_token: &str,
+        client_request_id: &str,
+    ) -> Result<PortableActionClaim, AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut tx = self.pool.begin().await?;
+
+            // 跨 plan 幂等：同 request 已绑定其他 plan → conflict；同 plan 走后续分支
+            if let Some(existing) = sqlx::query(
+                "SELECT plan_token, owner_fingerprint, expires_at, inventory_snapshot_hash,
+                        plan_json, client_request_id, claimed_at, consumed_at, result_json, created_at
+                 FROM agent_hub_portable_asset_action_plans WHERE client_request_id = ?",
+            )
+            .bind(client_request_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                let existing_rec = row_to_portable_asset_action_plan(&existing)?;
+                if existing_rec.plan_token != plan_token {
+                    return Err(AppError::conflict(
+                        "PORTABLE_ASSET_ACTION_REQUEST_BOUND_TO_OTHER_PLAN",
+                    ));
+                }
+            }
+
+            let claimed = sqlx::query(
+                "UPDATE agent_hub_portable_asset_action_plans
+                 SET client_request_id = ?, claimed_at = ?
+                 WHERE plan_token = ? AND client_request_id IS NULL AND consumed_at IS NULL",
+            )
+            .bind(client_request_id)
+            .bind(&now)
+            .bind(plan_token)
+            .execute(&mut *tx)
+            .await;
+
+            let claimed = match claimed {
+                Ok(r) => r,
+                Err(e) => {
+                    // unique index on client_request_id
+                    let msg = e.to_string();
+                    if msg.contains("UNIQUE") || msg.contains("unique") {
+                        return Err(AppError::conflict(
+                            "PORTABLE_ASSET_ACTION_REQUEST_BOUND_TO_OTHER_PLAN",
+                        ));
+                    }
+                    return Err(AppError::from(e));
+                }
+            };
+
+            let row = sqlx::query(
+                "SELECT plan_token, owner_fingerprint, expires_at, inventory_snapshot_hash,
+                        plan_json, client_request_id, claimed_at, consumed_at, result_json, created_at
+                 FROM agent_hub_portable_asset_action_plans WHERE plan_token = ?",
+            )
+            .bind(plan_token)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(row) = row else {
+                return Err(AppError::not_found("PORTABLE_ASSET_ACTION_PLAN_NOT_FOUND"));
+            };
+            let record = row_to_portable_asset_action_plan(&row)?;
+            let outcome = if claimed.rows_affected() == 1 {
+                PortableActionClaim::Claimed(record)
+            } else if record.client_request_id.as_deref() != Some(client_request_id) {
+                return Err(AppError::conflict(
+                    "PORTABLE_ASSET_ACTION_PLAN_CLAIMED_BY_ANOTHER_REQUEST",
+                ));
+            } else if let Some(result_json) = record.result_json {
+                PortableActionClaim::Replay(result_json)
+            } else {
+                PortableActionClaim::Pending
+            };
+            tx.commit().await?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    /// 完成已 claim 的 portable 动作 plan 并持久化幂等结果。
+    pub async fn complete_portable_asset_action_plan(
+        &self,
+        plan_token: &str,
+        client_request_id: &str,
+        result_json: &str,
+    ) -> Result<(), AppError> {
+        with_shared_write_lease(&self.gate, async {
+            let now = chrono::Utc::now().to_rfc3339();
+            let result = sqlx::query(
+                "UPDATE agent_hub_portable_asset_action_plans
+                 SET consumed_at = ?, result_json = ?
+                 WHERE plan_token = ? AND client_request_id = ? AND consumed_at IS NULL",
+            )
+            .bind(&now)
+            .bind(result_json)
+            .bind(plan_token)
+            .bind(client_request_id)
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() != 1 {
+                return Err(AppError::conflict(
+                    "PORTABLE_ASSET_ACTION_PLAN_COMPLETE_CONFLICT",
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// 列出全部未解决 conflict（Attention 投影用）。
     ///
     /// Business Logic（为什么需要这个函数）:
@@ -5220,6 +5406,24 @@ const AGENT_HUB_SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_agent_hub_user_instruction_plans_expiry
      ON agent_hub_user_instruction_plans(expires_at, consumed_at)",
+    // Portable asset action preview plans + clientRequestId ledger
+    "CREATE TABLE IF NOT EXISTS agent_hub_portable_asset_action_plans (
+        plan_token TEXT PRIMARY KEY,
+        owner_fingerprint TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        inventory_snapshot_hash TEXT NOT NULL,
+        plan_json TEXT NOT NULL,
+        client_request_id TEXT,
+        claimed_at TEXT,
+        consumed_at TEXT,
+        result_json TEXT,
+        created_at TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_agent_hub_portable_asset_action_plans_expiry
+     ON agent_hub_portable_asset_action_plans(expires_at, consumed_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_hub_portable_asset_action_plans_request
+     ON agent_hub_portable_asset_action_plans(client_request_id)
+     WHERE client_request_id IS NOT NULL",
     // Gate C Task 4：LAN push 幂等 ledger（sourceDeviceId+clientRequestId 非认证标签）
     "CREATE TABLE IF NOT EXISTS agent_hub_push_requests (
         source_device_id TEXT NOT NULL,
@@ -5885,6 +6089,24 @@ fn row_to_user_instruction_plan(row: &SqliteRow) -> Result<UserInstructionPlanRe
         owner_fingerprint: row.try_get("owner_fingerprint")?,
         expires_at: row.try_get("expires_at")?,
         base_revision_id: base_revision_id.map(RevisionId),
+        inventory_snapshot_hash: row.try_get("inventory_snapshot_hash")?,
+        plan_json: row.try_get("plan_json")?,
+        client_request_id: row.try_get("client_request_id")?,
+        claimed_at: row.try_get("claimed_at")?,
+        consumed_at: row.try_get("consumed_at")?,
+        result_json: row.try_get("result_json")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+/// 解析 portable 资产动作 preview plan 行。
+fn row_to_portable_asset_action_plan(
+    row: &SqliteRow,
+) -> Result<PortableAssetActionPlanRecord, AppError> {
+    Ok(PortableAssetActionPlanRecord {
+        plan_token: row.try_get("plan_token")?,
+        owner_fingerprint: row.try_get("owner_fingerprint")?,
+        expires_at: row.try_get("expires_at")?,
         inventory_snapshot_hash: row.try_get("inventory_snapshot_hash")?,
         plan_json: row.try_get("plan_json")?,
         client_request_id: row.try_get("client_request_id")?,
@@ -8741,6 +8963,69 @@ mod tests {
                 .unwrap(),
             UserInstructionPlanClaim::Replay("{\"ok\":true}".into())
         );
+    }
+
+    /// Business Logic: portable action plan claim 原子且跨 plan 禁止复用同一 clientRequestId。
+    /// Code Logic: insert → Claimed → Pending → complete → Replay；异 plan 同 request → conflict。
+    #[tokio::test]
+    async fn portable_asset_action_plan_claim_is_atomic_and_replayable() {
+        use crate::agent_hub::models::{PortableActionClaim, PortableAssetActionPlanRecord};
+        let repo = test_repo().await;
+        let now = chrono::Utc::now();
+        repo.insert_portable_asset_action_plan(PortableAssetActionPlanRecord {
+            plan_token: "p-plan-1".into(),
+            owner_fingerprint: "owner".into(),
+            expires_at: (now + chrono::Duration::minutes(10)).to_rfc3339(),
+            inventory_snapshot_hash: "snap".into(),
+            plan_json: r#"{"public":{"planToken":"p-plan-1","expiresAt":"x","inventorySnapshotHash":"snap","action":"enable","keepData":false,"conflictPolicy":"skipExisting","changes":[],"blockingReasons":[]},"request":{"inventorySnapshotHash":"snap","inventoryItemIds":[],"action":"enable","keepData":false,"conflictPolicy":"skipExisting"},"ownerFingerprint":"owner","targetFingerprints":[]}"#.into(),
+            client_request_id: None,
+            claimed_at: None,
+            consumed_at: None,
+            result_json: None,
+            created_at: now.to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            repo.claim_portable_asset_action_plan("p-plan-1", "req-a")
+                .await
+                .unwrap(),
+            PortableActionClaim::Claimed(_)
+        ));
+        assert!(matches!(
+            repo.claim_portable_asset_action_plan("p-plan-1", "req-a")
+                .await
+                .unwrap(),
+            PortableActionClaim::Pending
+        ));
+        repo.complete_portable_asset_action_plan("p-plan-1", "req-a", "{\"ok\":true}")
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.claim_portable_asset_action_plan("p-plan-1", "req-a")
+                .await
+                .unwrap(),
+            PortableActionClaim::Replay("{\"ok\":true}".into())
+        );
+        repo.insert_portable_asset_action_plan(PortableAssetActionPlanRecord {
+            plan_token: "p-plan-2".into(),
+            owner_fingerprint: "owner".into(),
+            expires_at: (now + chrono::Duration::minutes(10)).to_rfc3339(),
+            inventory_snapshot_hash: "snap".into(),
+            plan_json: "{}".into(),
+            client_request_id: None,
+            claimed_at: None,
+            consumed_at: None,
+            result_json: None,
+            created_at: now.to_rfc3339(),
+        })
+        .await
+        .unwrap();
+        let conflict = repo
+            .claim_portable_asset_action_plan("p-plan-2", "req-a")
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.ipc_category_code(), "conflict");
     }
 
     /// Business Logic: ownership 必须是独立持久事实，不能从 materialization hash 猜测。

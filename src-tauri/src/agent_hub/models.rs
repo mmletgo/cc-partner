@@ -1171,6 +1171,49 @@ pub enum UserInstructionPlanClaim {
     Replay(String),
 }
 
+/// Portable 资产动作预览计划持久化记录。
+///
+/// Business Logic: owner 持久短期 plan；GuiClient 只回传不可猜 token + clientRequestId。
+/// Code Logic: 与 user_instruction_plans 同形字段；result_json 存精确幂等结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortableAssetActionPlanRecord {
+    /// 不可猜短期 token
+    pub plan_token: String,
+    /// 当前 owner 指纹
+    pub owner_fingerprint: String,
+    /// 过期时间 RFC3339
+    pub expires_at: String,
+    /// inventory 快照 hash
+    pub inventory_snapshot_hash: String,
+    /// 原始计划 JSON
+    pub plan_json: String,
+    /// 首次 apply 幂等键
+    pub client_request_id: Option<String>,
+    /// 原子 claim 时间
+    pub claimed_at: Option<String>,
+    /// 已消费时间
+    pub consumed_at: Option<String>,
+    /// 幂等返回结果 JSON
+    pub result_json: Option<String>,
+    /// 创建时间
+    pub created_at: String,
+}
+
+/// Portable 动作 plan 原子 claim 结果。
+///
+/// Business Logic: 同 token 只能有一个 apply 执行者；同 id 重试 pending/replay。
+/// Code Logic: Claimed/Pending/Replay 三态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortableActionClaim {
+    /// 本请求获得执行权
+    Claimed(PortableAssetActionPlanRecord),
+    /// 同 id 请求正在执行
+    Pending,
+    /// 同 id 已完成（精确 result JSON）
+    Replay(String),
+}
+
 /// 新建 materialization 输入。
 ///
 /// Business Logic（为什么需要这个结构体）:
