@@ -54,10 +54,6 @@ const Transfer = lazyNamed(() => import('./pages/Transfer'), 'Transfer');
 const Prompts = lazyNamed(() => import('./pages/Prompts'), 'Prompts');
 const CcHistory = lazyNamed(() => import('./pages/CcHistory'), 'CcHistory');
 const Workbench = lazyNamed(() => import('./pages/Workbench'), 'Workbench');
-const WorkbenchFleetPage = lazyNamed(
-  () => import('./pages/Workbench/WorkbenchFleetPage'),
-  'WorkbenchFleetPage',
-);
 const Scratchpad = lazyNamed(() => import('./pages/Scratchpad'), 'Scratchpad');
 const PromptOptimizer = lazyNamed(() => import('./pages/PromptOptimizer'), 'PromptOptimizer');
 // ClaudeMd / ClaudeCodeAssets page modules retained under pages/ for N/N+1;
@@ -549,11 +545,7 @@ export default function App() {
             <Route path="/workbench" element={<ShellRoute><Workbench /></ShellRoute>} />
             <Route
               path="/workbench/fleet"
-              element={
-                <ShellRoute>
-                  <WorkbenchFleetPage />
-                </ShellRoute>
-              }
+              element={<Navigate to="/settings?tab=fleet" replace />}
             />
             <Route path="/scratchpad" element={<ShellRoute><Scratchpad /></ShellRoute>} />
             <Route path="/prompt-optimizer" element={<ShellRoute><PromptOptimizer /></ShellRoute>} />

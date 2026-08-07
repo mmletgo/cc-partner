@@ -330,13 +330,6 @@ export function WorkbenchProjectRail() {
       <div className={styles.header}>
         <h2 className={styles.title}>{sectionTitle}</h2>
         <div className={styles.actions}>
-          <Link
-            to="/workbench/fleet"
-            className={styles.fleetLink}
-            aria-label={t('workbench:projectRail.fleetLinkAria')}
-          >
-            {t('workbench:projectRail.fleetLink')}
-          </Link>
           <Button
             variant="icon"
             icon={<SyncIcon />}

@@ -237,7 +237,8 @@ describe('WorkbenchProjectRail discovery IA', () => {
     );
 
     expect(screen.queryByLabelText(/需要处理/)).toBeNull();
-    expect(screen.getByRole('link', { name: /Fleet|局域网 Agent Fleet/ })).toBeTruthy();
+    // Fleet 详情入口已迁到 Settings?tab=fleet；Rail 仅保留异常 badge 数据源
+    expect(screen.queryByRole('link', { name: /Fleet|局域网 Agent Fleet/ })).toBeNull();
 
     fleetMockState.projectSummaries = {
       p1: {

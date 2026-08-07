@@ -89,12 +89,12 @@ remote project ID继续使用`remote:<deviceId>:<inner>`包装；snapshot不得�
 
 - 每project最多显示：Agent状态点、`needsInput/failed`聚合badge、device offline标识。
 - working数量等正常状态不形成红色badge；只在hover/辅助文本展示。
-- Rail header提供“Fleet”二级入口，不新增全局Sidebar项目。
-- 点击project仍进入既有Workbench；点击Attention badge进入`/attention`并定位project。
+- Rail **不**提供 Fleet 入口；点击 project 仍进入既有 Workbench；点击 Attention badge 进入 `/attention` 并定位 project。
+- 只读详情入口在 Settings：`/settings?tab=fleet`（不新增全局 Sidebar 项）。旧 `/workbench/fleet` replace 到该深链。
 
 ### 7.2 Fleet视图
 
-- Workbench内路由/子视图`/workbench/fleet`，按owning device分组。
+- Settings tab `/settings?tab=fleet`，按 owning device 分组。
 - device header显示reachability、global slots和更新时间。
 - project row显示Agent phase counts、Attention、Git clean/dirty/conflict、browser preview和Orchestrator摘要。
 - 所有动作仅导航到既有project/terminal/automation/attention authority。

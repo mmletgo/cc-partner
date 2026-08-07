@@ -25,11 +25,16 @@ export interface WorkbenchFleetViewProps {
   loading?: boolean;
   error?: string | null;
   onRefresh?: () => void;
+  /**
+   * 是否显示「返回工作台」链接。
+   * Settings 嵌入时为 false；独立页/兼容场景可开。
+   */
+  showWorkbenchLink?: boolean;
 }
 
 /**
  * Business Logic（为什么需要这个组件）:
- *   Fleet 是跨项目只读聚合入口。
+ *   Fleet 是跨项目只读聚合入口（现挂 Settings Fleet tab）。
  *
  * Code Logic（这个组件做什么）:
  *   列表 devices → projects；仅 Link 导航，无 mutation 按钮。
@@ -39,6 +44,7 @@ export function WorkbenchFleetView({
   loading = false,
   error = null,
   onRefresh,
+  showWorkbenchLink = false,
 }: WorkbenchFleetViewProps): ReactElement {
   const { t } = useTranslation(['workbench']);
 
@@ -50,9 +56,11 @@ export function WorkbenchFleetView({
           <p className={styles.subtitle}>{t('workbench:fleet.subtitle')}</p>
         </div>
         <div className={styles.headerActions}>
-          <Link className={styles.navLink} to="/workbench">
-            {t('workbench:fleet.backToWorkbench')}
-          </Link>
+          {showWorkbenchLink ? (
+            <Link className={styles.navLink} to="/workbench">
+              {t('workbench:fleet.backToWorkbench')}
+            </Link>
+          ) : null}
           {onRefresh ? (
             <button type="button" className={styles.refreshButton} onClick={onRefresh}>
               {t('workbench:refresh')}

@@ -221,7 +221,7 @@ test.describe('agent metadata ledger', () => {
     backendHarness,
   }) => {
     await installLedgerBackend(page, backendHarness);
-    await page.goto('/workbench/fleet');
+    await page.goto('/settings?tab=fleet');
     await expect(page.getByText(/局域网 Agent Fleet|LAN Agent Fleet/i)).toBeVisible({
       timeout: 15_000,
     });
