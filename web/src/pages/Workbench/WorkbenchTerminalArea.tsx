@@ -106,6 +106,9 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
 
   const cursorAnchorActive =
     !automationConsoleOpen && workspaceView === 'terminal' ? handleCursorAnchorChange : undefined;
+  // Business Logic: fullscreen 终端会覆盖其他 workspace；非 fullscreen 时只有 terminal 视图的 active pane 真正可见。
+  const terminalSurfaceVisible =
+    terminalFullscreen || (!automationConsoleOpen && workspaceView === 'terminal');
 
   return (
     <div className={styles.terminalArea} ref={terminalAreaRef}>
@@ -144,6 +147,7 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
             onInput={handleInput}
             onResize={handleResize}
             resizeRequestKey={0}
+            renderVisible={terminalSurfaceVisible}
             inputEnabled={false}
             onCursorAnchorChange={cursorAnchorActive}
           />
@@ -153,7 +157,13 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
             key={session.id}
             className={styles.terminalPaneFrame}
             data-active={session.id === renderedActiveSessionId || undefined}
-            onClick={() => focusSession(session.id)}
+            onClick={() => {
+              // 已聚焦 window 上的文本选中/复制不得再触发 focusSession；
+              // 否则 remote focus 路径会 resync 并立刻清掉 xterm 选区。
+              if (session.id !== renderedActiveSessionId) {
+                void focusSession(session.id);
+              }
+            }}
           >
             <div className={styles.terminalPaneHeader}>
               <span className={styles.sessionDot} data-status={session.status} />
@@ -175,6 +185,9 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
               onResize={handleResize}
               resizeRequestKey={
                 session.id === renderedActiveSessionId ? terminalResizeRequestKey : 0
+              }
+              renderVisible={
+                terminalSurfaceVisible && session.id === renderedActiveSessionId
               }
               inputEnabled={
                 !automationConsoleOpen &&

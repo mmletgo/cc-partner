@@ -43,7 +43,18 @@ export interface TerminalPaneClickInput {
   atBottom: boolean;
   /** 是否允许写操作（远端离线等情况下必须禁止）。 */
   writeEnabled: boolean;
+  /**
+   * 指针按下到松开的像素位移。
+   * 即使落在同一字符格，拖出超过阈值也视为“拖拽选字”，不得切分栏。
+   */
+  pointerTravelPx?: number;
 }
+
+/**
+ * 拖拽选字与纯点击分栏的像素位移阈值。
+ * 小于等于该值且同格才允许 select-pane；更大位移一律交给 xterm 选区。
+ */
+export const TERMINAL_PANE_CLICK_MAX_TRAVEL_PX = 4;
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -91,15 +102,17 @@ export function isSameTerminalCell(a: TerminalCell | null, b: TerminalCell | nul
  * Business Logic（为什么需要这个函数）:
  *   只有“未拖拽、无选区、视口在底部、允许写”的左键点击才代表用户想切换分栏。
  *   视口滚上去看历史时，屏幕行不再对应 tmux 当前屏幕，坐标会命中错误 pane，必须拒绝。
+ *   拖选文字后若误触发 select-pane，tmux/PTY 重绘或 mouse-mode 切换会立刻清掉 xterm 选区，导致无法复制。
  *
  * Code Logic（这个函数做什么）:
- *   逐条检查 writeEnabled / atBottom / !hasSelection / down 与 up 同格；
+ *   逐条检查 writeEnabled / atBottom / !hasSelection / 像素位移阈值 / down 与 up 同格；
  *   全部满足才返回该字符格，否则返回 null。
  */
 export function shouldSelectPaneOnClick(input: TerminalPaneClickInput): TerminalCell | null {
   if (!input.writeEnabled) return null;
   if (!input.atBottom) return null;
   if (input.hasSelection) return null;
+  if ((input.pointerTravelPx ?? 0) > TERMINAL_PANE_CLICK_MAX_TRAVEL_PX) return null;
   if (!isSameTerminalCell(input.down, input.up)) return null;
   return input.up;
 }

@@ -72,6 +72,17 @@ describe('shouldSelectPaneOnClick', () => {
   });
 
   /**
+   * Business Logic: 同格内仍可拖出几像素形成选区；位移超过阈值时不得切分栏，否则选中立刻被清掉。
+   */
+  it('rejects same-cell gestures with pointer travel beyond the click threshold', () => {
+    expect(shouldSelectPaneOnClick({ ...base, pointerTravelPx: 1 })).toEqual({
+      col: 5,
+      row: 6,
+    });
+    expect(shouldSelectPaneOnClick({ ...base, pointerTravelPx: 5 })).toBeNull();
+  });
+
+  /**
    * Business Logic: 视口滚到历史后屏幕行不对应 tmux 当前屏幕，坐标会命中错误 pane。
    */
   it('rejects clicks while scrolled back in the xterm scrollback', () => {

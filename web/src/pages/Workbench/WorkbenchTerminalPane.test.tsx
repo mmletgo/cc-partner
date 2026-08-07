@@ -5,7 +5,7 @@
  * Business Logic（为什么需要这个测试）:
  *   TerminalPane 从 Workbench.tsx 迁出后必须保持原有可观察契约：xterm 在每个 session identity 上
  *   创建/销毁一次；replay gate 在历史 buffer 写入期间屏蔽 onData；onData/ResizeObserver/resizeRequestKey
- *   转发到外部回调；workspace 视图切换（父组件重渲染）不应导致 xterm 实例重建。
+ *   转发到外部回调；workspace 视图切换不应重建 xterm，但隐藏的 pane 恢复可见时必须整屏重绘。
  *
  * Code Logic（这个测试做什么）:
  *   - 用 vi.mock 接管 @xterm/xterm 与 @xterm/addon-fit，记录每个 Terminal 实例的构造/销毁/onData/onResize；
@@ -45,6 +45,7 @@ interface MockTerminal {
   open: (el: HTMLElement) => void;
   write: (data: string, cb?: () => void) => void;
   clear: () => void;
+  refresh: (start: number, end: number) => void;
   dispose: () => void;
   buffer: { active: { cursorX: number; cursorY: number } };
 }
@@ -64,6 +65,8 @@ const terminalEvents = vi.hoisted<{
   writeCalls: Array<{ data: string; instanceIndex: number }>;
   /** Records every clear() call across all instances, in order. */
   clearCalls: Array<{ instanceIndex: number }>;
+  /** Records every refresh(start, end) call across all instances, in order. */
+  refreshCalls: Array<{ start: number; end: number; instanceIndex: number }>;
 }>(() => ({
   constructCount: 0,
   disposeCount: 0,
@@ -73,6 +76,7 @@ const terminalEvents = vi.hoisted<{
   instances: [],
   writeCalls: [],
   clearCalls: [],
+  refreshCalls: [],
 }));
 
 vi.mock('@xterm/xterm', () => {
@@ -137,6 +141,9 @@ vi.mock('@xterm/xterm', () => {
     }
     clear() {
       terminalEvents.clearCalls.push({ instanceIndex: this.instanceIndex });
+    }
+    refresh(start: number, end: number) {
+      terminalEvents.refreshCalls.push({ start, end, instanceIndex: this.instanceIndex });
     }
     dispose() {
       terminalEvents.disposeCount += 1;
@@ -239,6 +246,7 @@ function buildSession(overrides: Partial<WorkbenchSession> = {}): WorkbenchSessi
 interface PaneHostProps {
   session: WorkbenchSession | null;
   store: ReturnType<typeof createWorkbenchTerminalBufferStore>;
+  renderVisible?: boolean;
   inputEnabled?: boolean;
   resizeRequestKey?: number;
   onInput?: (sessionId: string, data: string) => void;
@@ -257,6 +265,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
   const {
     session,
     store,
+    renderVisible = true,
     inputEnabled = true,
     resizeRequestKey = 0,
     onInput,
@@ -283,6 +292,7 @@ function PaneHost(props: PaneHostProps): ReactElement {
       <WorkbenchTerminalPane
         session={session}
         placeholder={placeholder}
+        renderVisible={renderVisible}
         inputEnabled={inputEnabled}
         onInput={stableInput}
         onResize={stableResize}
@@ -340,11 +350,17 @@ function renderPaneWithRevision() {
   const stableInput = vi.fn();
   const stableResize = vi.fn();
 
-  function Host(props: { session?: WorkbenchSession | null; inputEnabled?: boolean; workspaceView?: string; resizeRequestKey?: number }): ReactElement {
+  function Host(props: {
+    session?: WorkbenchSession | null;
+    inputEnabled?: boolean;
+    renderVisible?: boolean;
+    resizeRequestKey?: number;
+  }): ReactElement {
     return (
       <PaneHost
         session={props.session ?? buildSession()}
         store={store}
+        renderVisible={props.renderVisible}
         inputEnabled={props.inputEnabled}
         resizeRequestKey={props.resizeRequestKey}
         onInput={stableInput}
@@ -360,8 +376,20 @@ function renderPaneWithRevision() {
     advanceRevision(sessionId: string, buffer: string) {
       store.reset(sessionId, buffer);
     },
-    rerenderProps(next: { session?: WorkbenchSession | null; inputEnabled?: boolean; workspaceView?: string; resizeRequestKey?: number }) {
-      utils.rerender(<Host session={next.session ?? buildSession()} inputEnabled={next.inputEnabled} resizeRequestKey={next.resizeRequestKey} />);
+    rerenderProps(next: {
+      session?: WorkbenchSession | null;
+      inputEnabled?: boolean;
+      renderVisible?: boolean;
+      resizeRequestKey?: number;
+    }) {
+      utils.rerender(
+        <Host
+          session={next.session ?? buildSession()}
+          inputEnabled={next.inputEnabled}
+          renderVisible={next.renderVisible}
+          resizeRequestKey={next.resizeRequestKey}
+        />,
+      );
     },
   };
 }
@@ -375,6 +403,7 @@ beforeEach(() => {
   terminalEvents.instances.length = 0;
   terminalEvents.writeCalls.length = 0;
   terminalEvents.clearCalls.length = 0;
+  terminalEvents.refreshCalls.length = 0;
   // jsdom 默认无 ResizeObserver；安装一个调用回调的最小实现，触发 pane 内的 resize 路径。
   if (!window.ResizeObserver) {
     class RO {
@@ -598,23 +627,30 @@ describe('WorkbenchTerminalPane — forwards input / resize / focus', () => {
 });
 
 describe('WorkbenchTerminalPane — workspace view change does not unmount xterm', () => {
-  test('switching workspaceView prop (parent re-render with same session identity) does not create a second Terminal', () => {
+  test('switching render visibility preserves the Terminal instance and repaints every row when shown again', () => {
     const { rerenderProps } = renderPaneWithRevision();
     const constructsAfterMount = terminalEvents.constructCount;
     expect(constructsAfterMount).toBe(1);
-    // Capture the Terminal instance identity at mount; workspace view switches must reuse it.
     const instanceAtMount = terminalEvents.instances[0];
+    const refreshesAfterMount = terminalEvents.refreshCalls.length;
 
-    // 模拟 workspace 视图切换：父组件重渲染（同 session）。
-    rerenderProps({ workspaceView: 'browser' });
-    rerenderProps({ workspaceView: 'files' });
-    rerenderProps({ workspaceView: 'terminal' });
+    rerenderProps({ renderVisible: false });
+    expect(terminalEvents.refreshCalls).toHaveLength(refreshesAfterMount);
+    rerenderProps({ renderVisible: true });
 
     expect(terminalEvents.constructCount).toBe(1);
     expect(terminalEvents.disposeCount).toBe(0);
-    // Strengthen per Codex finding 4: verify the Terminal INSTANCE is preserved (not just count),
-    // so callers can rely on instance identity across workspace switches.
     expect(terminalEvents.instances[0]).toBe(instanceAtMount);
+    expect(terminalEvents.refreshCalls).toHaveLength(refreshesAfterMount + 1);
+    expect(terminalEvents.refreshCalls.at(-1)).toEqual({
+      start: 0,
+      end: 23,
+      instanceIndex: 0,
+    });
+
+    // 可见状态未变时的普通父组件重渲染不应额外 refresh。
+    rerenderProps({ renderVisible: true });
+    expect(terminalEvents.refreshCalls).toHaveLength(refreshesAfterMount + 1);
   });
 
   test('toggling inputEnabled on workspace view change does not recreate Terminal', () => {
@@ -630,17 +666,33 @@ describe('WorkbenchTerminalPane — workspace view change does not unmount xterm
     expect(terminalEvents.instances[0]).toBe(instanceAtMount);
   });
 
+  test('window focus repaints only while this pane is visible', () => {
+    const { rerenderProps } = renderPaneWithRevision();
+    const refreshesAfterMount = terminalEvents.refreshCalls.length;
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(terminalEvents.refreshCalls).toHaveLength(refreshesAfterMount + 1);
+
+    rerenderProps({ renderVisible: false });
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(terminalEvents.refreshCalls).toHaveLength(refreshesAfterMount + 1);
+  });
+
   test('Terminal.dispose is not called for sessions that remain mounted while workspace view changes', () => {
     // Strengthen per Codex finding 4: explicitly assert dispose count across multiple workspace
     // switches to lock in that no intermediate dispose happens (which would force a rebuild).
     const { rerenderProps } = renderPaneWithRevision();
     expect(terminalEvents.disposeCount).toBe(0);
 
-    rerenderProps({ workspaceView: 'browser' });
+    rerenderProps({ renderVisible: false });
     expect(terminalEvents.disposeCount).toBe(0);
-    rerenderProps({ workspaceView: 'files' });
+    rerenderProps({ renderVisible: true });
     expect(terminalEvents.disposeCount).toBe(0);
-    rerenderProps({ workspaceView: 'terminal' });
+    rerenderProps({ renderVisible: false });
     expect(terminalEvents.disposeCount).toBe(0);
     // Final state: same instance alive.
     expect(terminalEvents.instances.length).toBe(1);
