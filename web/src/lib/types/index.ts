@@ -16,5 +16,6 @@ export * from './attention';
 export * from './agentRuntime';
 export * from './agentLedger';
 export * from './agentHub';
+export * from './portableInventory';
 export * from './lanFleet';
 export * from './providerManager';

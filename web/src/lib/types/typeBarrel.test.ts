@@ -20,6 +20,7 @@ import type {
   AttentionSnapshot as BarrelAttentionSnapshot,
   Device as BarrelDevice,
   OrchestratorTask as BarrelOrchestratorTask,
+  PortableInventorySnapshotDto as BarrelPortableInventorySnapshotDto,
   Prompt as BarrelPrompt,
   WorkbenchProject as BarrelWorkbenchProject,
 } from '@/lib/types';
@@ -28,6 +29,7 @@ import type { AppConfig as SettingsAppConfig } from '@/lib/types/settings';
 import type { WorkbenchProject as WorkbenchProjectType } from '@/lib/types/workbench';
 import type { OrchestratorTask as OrchestratorTaskType } from '@/lib/types/orchestrator';
 import type { AttentionSnapshot as AttentionSnapshotType } from '@/lib/types/attention';
+import type { PortableInventorySnapshotDto as PortableInventorySnapshotType } from '@/lib/types/portableInventory';
 
 const typesDir = dirname(fileURLToPath(import.meta.url));
 
@@ -37,6 +39,7 @@ const DOMAIN_MODULES = [
   'workbench.ts',
   'orchestrator.ts',
   'attention.ts',
+  'portableInventory.ts',
   'index.ts',
 ] as const;
 
@@ -88,6 +91,7 @@ describe('type barrel domain split', () => {
     expectTypeOf<BarrelWorkbenchProject>().toEqualTypeOf<WorkbenchProjectType>();
     expectTypeOf<BarrelOrchestratorTask>().toEqualTypeOf<OrchestratorTaskType>();
     expectTypeOf<BarrelAttentionSnapshot>().toEqualTypeOf<AttentionSnapshotType>();
+    expectTypeOf<BarrelPortableInventorySnapshotDto>().toEqualTypeOf<PortableInventorySnapshotType>();
   });
 
   test('domain source files never import the compatibility barrel', () => {
