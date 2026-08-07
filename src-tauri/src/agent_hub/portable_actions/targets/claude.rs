@@ -17,8 +17,9 @@ use crate::agent_hub::portable_actions::models::{
     PortableAssetBackupPolicy,
 };
 use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
-use crate::agent_hub::config_patch::value_content_hash;
+use crate::agent_hub::config_patch::{value_content_hash, CAS_EXPECT_ABSENT};
 use crate::agent_hub::object_store::sha256_hex;
+use crate::agent_hub::portable_inventory::hash_plugin_root;
 use crate::agent_hub::targets::portable::hash_skill_directory;
 use crate::claude_code_assets::{
     portable_backup_path, portable_claude_roots, portable_move_path, portable_remove_path,
@@ -29,10 +30,11 @@ use crate::error::AppError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// 与 inventory `content_hash` 对齐的源内容 hash（Skill=SKILL.md-only；文件=整文件字节）。
+/// 与 inventory `content_hash` 对齐的源内容 hash。
 ///
-/// Business Logic: planner 与 apply recheck 必须同一 hash 域，禁止目录 walk hash 误伤 Skill。
-/// Code Logic: Skill 目录走 `hash_skill_directory` 的 skill_md hash；其余文件 sha256 全文。
+/// Business Logic: planner 与 apply recheck 必须同一 hash 域；Skill=SKILL.md-only，
+/// Plugin 目录=inventory `hash_plugin_root` material，文件=整文件字节。
+/// Code Logic: 禁止对真实 plugin 根目录使用 path-string sha（生产必 SOURCE_HASH_CHANGED）。
 fn inventory_content_hash_for_path(kind: PortableAssetKind, path: &Path) -> Result<String, AppError> {
     match kind {
         PortableAssetKind::Skill => {
@@ -46,12 +48,36 @@ fn inventory_content_hash_for_path(kind: PortableAssetKind, path: &Path) -> Resu
             let (skill_hash, _, _, _) = hash_skill_directory(&dir)?;
             Ok(skill_hash)
         }
-        PortableAssetKind::Command | PortableAssetKind::Plugin => {
+        PortableAssetKind::Plugin => {
+            let dir = if path.is_dir() {
+                path.to_path_buf()
+            } else if path.is_file() {
+                // plugin.json 等文件路径：回落到父根或文件字节
+                path.parent()
+                    .filter(|p| p.is_dir())
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| path.to_path_buf())
+            } else {
+                return Err(AppError::not_found("PORTABLE_ASSET_ACTION_SOURCE_MISSING"));
+            };
+            if dir.is_dir() {
+                let (content_hash, _) = hash_plugin_root(&dir)?;
+                Ok(content_hash)
+            } else if dir.is_file() {
+                Ok(sha256_hex(&fs::read(dir)?))
+            } else {
+                Err(AppError::not_found("PORTABLE_ASSET_ACTION_SOURCE_MISSING"))
+            }
+        }
+        PortableAssetKind::Command => {
             if path.is_file() {
                 Ok(sha256_hex(&fs::read(path)?))
             } else if path.is_dir() {
-                // Plugin/command tree：inventory 对 plugin 用 root material；这里至少对文件一致
-                Ok(sha256_hex(path.display().to_string().as_bytes()))
+                // Command 目录少见；inventory 对 markdown 文件用全文 hash。无统一 tree helper 时
+                // 与文件分支一致 fail-closed，避免 path-string 伪 hash。
+                Err(AppError::validation(
+                    "PORTABLE_ASSET_ACTION_COMMAND_DIR_HASH_UNSUPPORTED",
+                ))
             } else {
                 Err(AppError::not_found("PORTABLE_ASSET_ACTION_SOURCE_MISSING"))
             }
@@ -343,7 +369,7 @@ fn execute_mcp(
                     message: "disabled MCP snapshot missing".into(),
                 });
             };
-            // enable 绑定「当前 leaf 不存在」CAS：存在且 hash 变化则 conflict
+            // enable 绑定「当前 leaf 不存在」：预检 + apply 内 CAS_EXPECT_ABSENT 双重关闭 TOCTOU
             let current_hash = mcp_leaf_value_hash(&bytes, &id)?;
             if current_hash.is_some() {
                 return Ok(TargetActionRawOutcome::Skipped);
@@ -352,22 +378,27 @@ fn execute_mcp(
                 owner_id: format!("portable:{id}"),
                 path: vec!["mcpServers".into(), id.clone()],
                 value: Some(value),
-                // None means expect absence under check_cas semantics when combined with present=false
-                expected_base_hash: None,
+                // apply 时 re-read leaf：若并发插入则 Conflict（check_cas 要求 absence）
+                expected_base_hash: Some(CAS_EXPECT_ABSENT.to_string()),
             }];
             let prepared =
                 apply_config_patch_atomically(&JsoncConfigPatcher, &config_path, &patches)?;
-            if !matches!(
-                prepared.patched.outcome,
-                crate::agent_hub::config_patch::ConfigPatchOutcome::Applied
-            ) {
-                return Ok(TargetActionRawOutcome::Failed {
+            match prepared.patched.outcome {
+                crate::agent_hub::config_patch::ConfigPatchOutcome::Applied => {
+                    let _ = fs::remove_file(disabled);
+                    Ok(TargetActionRawOutcome::Applied)
+                }
+                crate::agent_hub::config_patch::ConfigPatchOutcome::Conflict { .. } => {
+                    Ok(TargetActionRawOutcome::Failed {
+                        code: "PORTABLE_ASSET_ACTION_MCP_CAS_CONFLICT".into(),
+                        message: "mcp enable CAS conflict: leaf appeared before apply".into(),
+                    })
+                }
+                other => Ok(TargetActionRawOutcome::Failed {
                     code: "PORTABLE_ASSET_ACTION_MCP_PATCH_FAILED".into(),
-                    message: format!("{:?}", prepared.patched.outcome),
-                });
+                    message: format!("{other:?}"),
+                }),
             }
-            let _ = fs::remove_file(disabled);
-            Ok(TargetActionRawOutcome::Applied)
         }
         PortableAssetActionKind::Disable => {
             // 读当前值，写 disabled，再 semantic remove

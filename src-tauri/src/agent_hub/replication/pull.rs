@@ -884,24 +884,55 @@ async fn execute_claimed_pull(
                     message: Some("skipExisting".into()),
                 });
             } else {
-                // 已不存在：降级为 installToTarget 语义
-                match install_change(state, &store, &selection, change).await {
-                    Ok(()) => items.push(PortablePullItemResultDto {
+                // 已不存在：降级为 installToTarget 语义。
+                // 与主 InstallToTarget 一致：import 必成才写目标；成功后 rescan 门禁。
+                if import_ok.is_err() {
+                    any_fail = true;
+                    items.push(PortablePullItemResultDto {
                         inventory_item_id: change.inventory_item_id.clone(),
-                        state: if import_ok.is_err() {
-                            any_fail = true;
-                            PortablePullItemState::Failed
-                        } else {
-                            PortablePullItemState::Succeeded
-                        },
+                        state: PortablePullItemState::Failed,
                         install_mode: Some(PortablePullInstallMode::InstallToTarget),
-                        error_code: if import_ok.is_err() {
-                            Some("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED".into())
+                        error_code: Some("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED".into()),
+                        message: Some(format!(
+                            "canonical import failed before skipExisting demotion install: {}",
+                            import_ok
+                                .as_ref()
+                                .err()
+                                .map(|e| e.to_string())
+                                .unwrap_or_default()
+                        )),
+                    });
+                    continue;
+                }
+                match install_change(state, &store, &selection, change).await {
+                    Ok(()) => {
+                        let post = inspect_portable_inventory(state).await?;
+                        let observed = post.items.iter().any(|i| {
+                            i.target == stored.public.destination_target
+                                && i.kind == change.kind
+                                && i.native_id == change.native_id
+                        });
+                        if observed {
+                            items.push(PortablePullItemResultDto {
+                                inventory_item_id: change.inventory_item_id.clone(),
+                                state: PortablePullItemState::Succeeded,
+                                install_mode: Some(PortablePullInstallMode::InstallToTarget),
+                                error_code: None,
+                                message: Some("skipExisting demotion install verified by rescan".into()),
+                            });
                         } else {
-                            None
-                        },
-                        message: None,
-                    }),
+                            any_fail = true;
+                            items.push(PortablePullItemResultDto {
+                                inventory_item_id: change.inventory_item_id.clone(),
+                                state: PortablePullItemState::Failed,
+                                install_mode: Some(PortablePullInstallMode::InstallToTarget),
+                                error_code: Some("PORTABLE_PULL_RESCAN_MISSING".into()),
+                                message: Some(
+                                    "skipExisting demotion install not observed after rescan".into(),
+                                ),
+                            });
+                        }
+                    }
                     Err(e) => {
                         any_fail = true;
                         items.push(PortablePullItemResultDto {
@@ -1608,6 +1639,15 @@ mod tests {
         assert!(src.contains("PORTABLE_PULL_SKILL_TREE_UNAVAILABLE"));
         assert!(src.contains("PORTABLE_PULL_CANONICAL_IMPORT_REQUIRED"));
         assert!(src.contains("install verified by rescan"));
+    }
+
+    #[test]
+    fn skip_existing_demotion_fail_closed_before_install_and_rescan() {
+        // R2-M1 / Spec M5：skipExisting 降级不得在 import 失败后写目标；成功后需 rescan gate
+        let src = include_str!("pull.rs");
+        assert!(src.contains("canonical import failed before skipExisting demotion install"));
+        assert!(src.contains("skipExisting demotion install verified by rescan"));
+        assert!(src.contains("PORTABLE_PULL_RESCAN_MISSING"));
     }
 
     #[test]

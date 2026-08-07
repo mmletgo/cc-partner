@@ -611,7 +611,7 @@ mod tests {
     };
     use crate::agent_hub::portable_actions::planner::preview_portable_asset_action_with_inventory;
     use crate::agent_hub::portable_inventory::{
-        inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
+        hash_plugin_root, inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
         PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
         PortableInventoryManagementState, PortableInventoryMutationCapability,
         PortableInventoryScanCapability, PortableInventorySourceOrigin, PortableInventoryTargetDto,
@@ -789,6 +789,86 @@ mod tests {
         assert_eq!(calls[0].args[1], "enable");
         let scope_idx = calls[0].args.iter().position(|a| a == "--scope").unwrap();
         assert_eq!(calls[0].args[scope_idx + 1], "user");
+    }
+
+    /// Business Logic: 真实 plugin 根 + inventory hash 域 recheck 不得误报 SOURCE_HASH_CHANGED。
+    /// Code Logic: temp plugin root + hash_plugin_root → preview → apply；CLI 必须执行。
+    #[tokio::test]
+    async fn plugin_real_root_hash_domain_passes_recheck() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_root = dir.path().join("plugins").join("demo-plugin");
+        std::fs::create_dir_all(plugin_root.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            plugin_root.join(".claude-plugin/plugin.json"),
+            r#"{"name":"demo-plugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin_root.join("skills")).unwrap();
+        let (content_hash, tree_hash) = hash_plugin_root(&plugin_root).unwrap();
+        // 生产 inventory 对有 manifest 的 plugin 用 material hash，不等于 path-string sha
+        let path_string_hash =
+            crate::agent_hub::object_store::sha256_hex(plugin_root.display().to_string().as_bytes());
+        assert_ne!(content_hash, path_string_hash);
+
+        let repo = test_repo().await;
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_ok("enabled");
+        let mut item = sample_item(
+            AgentTarget::Claude,
+            PortableAssetKind::Plugin,
+            "demo-plugin@local",
+            plugin_root.to_str().unwrap(),
+            Some(false),
+        );
+        item.content_hash = Some(content_hash);
+        item.tree_hash = Some(tree_hash);
+        let snap = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![item.clone()]);
+        let plan = preview_action(
+            &repo,
+            &snap,
+            vec![item.inventory_item_id.clone()],
+            PortableAssetActionKind::Enable,
+            false,
+        )
+        .await;
+        assert_eq!(
+            plan.changes[0].expected_source_hash.as_deref(),
+            item.content_hash.as_deref()
+        );
+
+        let mut post_item = item.clone();
+        post_item.actual_enabled = Some(true);
+        let post = snapshot_from(vec![sample_target(AgentTarget::Claude)], vec![post_item]);
+        let deps = PortableActionExecutorDeps {
+            repo,
+            runner: runner.clone(),
+            env: None,
+            pre_inventory: Some(snap),
+            claude_config_dir: None,
+            data_dir: None,
+            rescan_override: Some(post),
+        };
+        let result = apply_portable_asset_action_with(
+            None,
+            &deps,
+            ApplyPortableAssetActionRequest {
+                plan_token: plan.plan_token,
+                client_request_id: "req-plugin-hash-domain".into(),
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(
+            result.items[0].state,
+            PortableAssetActionItemState::Succeeded,
+            "unchanged real plugin root must not fail source-hash recheck: {:?}",
+            result.items[0].error_code
+        );
+        assert_ne!(
+            result.items[0].error_code.as_deref(),
+            Some("PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED")
+        );
+        assert_eq!(runner.calls().len(), 1);
     }
 
     /// Business Logic: Skill disable 必须 move 到 disabled 且零 spawn。

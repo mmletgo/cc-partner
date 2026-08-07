@@ -278,13 +278,23 @@ pub fn blocked_result(bytes: &[u8], reason: impl Into<String>) -> PatchedConfig 
     }
 }
 
+/// CAS 哨兵：期望目标 leaf **不存在**（enable / insert 路径）。
+///
+/// Business Logic: `expected_base_hash=None` 表示“不校验”；enable 需要显式 absence 绑定，
+/// 否则 apply 重读窗口内并发插入无法被 CAS 挡住。
+/// Code Logic: 非 64-hex 真实 content hash；`check_cas(Some(CAS_EXPECT_ABSENT), current)`
+/// 仅当 `current=None` 通过。
+pub const CAS_EXPECT_ABSENT: &str = "__cas_expect_absent__";
+
 /// 校验单条 patch 的 CAS 期望。
 ///
 /// Business Logic: expected 与 current 不等 → Conflict。
-/// Code Logic: expected=None 始终通过；缺失路径 current=None。
+/// Code Logic: expected=None 始终通过；`CAS_EXPECT_ABSENT` 要求 current 缺失；
+/// 其它 expected 必须等于 current hash。
 pub fn check_cas(expected: Option<&str>, current_hash: Option<&str>) -> bool {
     match expected {
         None => true,
+        Some(exp) if exp == CAS_EXPECT_ABSENT => current_hash.is_none(),
         Some(exp) => current_hash == Some(exp),
     }
 }
@@ -438,6 +448,39 @@ mod tests {
         let a: serde_json::Value = serde_json::json!({"b":1,"a":2});
         let b: serde_json::Value = serde_json::json!({"a":2,"b":1});
         assert_eq!(value_content_hash(&a), value_content_hash(&b));
+    }
+
+    #[test]
+    fn check_cas_absence_sentinel_requires_missing_leaf() {
+        // R2-M2: enable 路径用 CAS_EXPECT_ABSENT 绑定 absence，None 仍表示不校验
+        assert!(check_cas(None, Some("abc")));
+        assert!(check_cas(None, None));
+        assert!(check_cas(Some(CAS_EXPECT_ABSENT), None));
+        assert!(!check_cas(Some(CAS_EXPECT_ABSENT), Some("abc")));
+        assert!(check_cas(Some("abc"), Some("abc")));
+        assert!(!check_cas(Some("abc"), Some("def")));
+        assert!(!check_cas(Some("abc"), None));
+    }
+
+    #[test]
+    fn jsonc_enable_with_absence_cas_conflicts_when_leaf_present() {
+        let patcher = JsoncConfigPatcher;
+        let bytes = br#"{"mcpServers":{"already":{"command":"x"}}}"#;
+        let prepared = prepare_config_projection(
+            &patcher,
+            Some(bytes),
+            &[patch(
+                "portable:already",
+                &["mcpServers", "already"],
+                Some(serde_json::json!({"command":"y"})),
+                Some(CAS_EXPECT_ABSENT),
+            )],
+        )
+        .expect("prepare");
+        assert!(matches!(
+            prepared.patched.outcome,
+            ConfigPatchOutcome::Conflict { .. }
+        ));
     }
 
     #[test]

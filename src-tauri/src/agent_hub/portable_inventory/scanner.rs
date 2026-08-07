@@ -423,7 +423,13 @@ fn plugin_roots_for(
     roots
 }
 
-fn hash_plugin_root(root: &Path) -> Result<(String, String), AppError> {
+/// Plugin 根目录 content_hash + tree_hash（与 inventory 行同源）。
+///
+/// Business Logic: planner `expected_source_hash` 与 apply recheck 必须共享同一 material 域，
+/// 禁止路径字符串 sha 与 manifest 字节 hash 混用导致生产 plugin 永远 SOURCE_HASH_CHANGED。
+/// Code Logic: 优先 manifest 文件字节；无 manifest 才回落 path display（与历史 inventory 一致）；
+/// tree_hash 为根下一层名排序拼接。
+pub fn hash_plugin_root(root: &Path) -> Result<(String, String), AppError> {
     // 优先 manifest 字节 + 目录 tree（不写 CAS）
     let mut hasher_material = Vec::new();
     for rel in [
