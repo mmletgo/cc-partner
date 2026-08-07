@@ -120,29 +120,48 @@ impl AssetAdapter for ClaudeInstructionAdapter {
         scope: &LocalScopeMapping,
         env: &TargetEnvironment,
     ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+        use super::portable::{
+            scan_disabled_command_markdown_dir, scan_disabled_skill_dirs,
+            scan_plugin_components_readonly,
+        };
+        use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
+
         let homes = TargetPathResolver::resolve_all(env);
         let base = match scope.scope_kind {
             ScopeKind::User => homes.claude.config_root.clone(),
             ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".claude"),
         };
-        let skills = scan_skill_dirs(
+        let mut parts: Vec<Vec<DiscoveredPortableAsset>> = Vec::new();
+        parts.push(scan_skill_dirs(
             AgentTarget::Claude,
             scope.scope_kind,
             &base.join("skills"),
             PortableOriginKind::Native,
-        )?;
-        let commands = scan_command_markdown_dir(
+        )?);
+        parts.push(scan_disabled_skill_dirs(
+            AgentTarget::Claude,
+            scope.scope_kind,
+            &base.join("disabled").join("skills"),
+            PortableOriginKind::Native,
+        )?);
+        parts.push(scan_command_markdown_dir(
             AgentTarget::Claude,
             scope.scope_kind,
             &base.join("commands"),
             PortableOriginKind::Native,
-        )?;
-        let agents = scan_agent_markdown_dir(
+        )?);
+        parts.push(scan_disabled_command_markdown_dir(
+            AgentTarget::Claude,
+            scope.scope_kind,
+            &base.join("disabled").join("commands"),
+            PortableOriginKind::Native,
+        )?);
+        parts.push(scan_agent_markdown_dir(
             AgentTarget::Claude,
             scope.scope_kind,
             &base.join("agents"),
             PortableOriginKind::Native,
-        )?;
+        )?);
         let mut mcp = Vec::new();
         if scope.scope_kind == ScopeKind::User {
             mcp = scan_claude_user_mcp(scope.scope_kind, env)?;
@@ -165,7 +184,40 @@ impl AssetAdapter for ClaudeInstructionAdapter {
                 }
             }
         }
-        Ok(merge_discoveries([skills, commands, agents, mcp]))
+        parts.push(mcp);
+
+        // Plugin packages under config_root/plugins/<id>
+        let plugins_root = base.join("plugins");
+        if plugins_root.is_dir() {
+            if let Ok(read) = std::fs::read_dir(&plugins_root) {
+                for entry in read.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let plugin_id = discover_plugin_source_for_target(
+                        AgentTarget::Claude,
+                        &path,
+                        "scan",
+                        scope.scope_kind,
+                    )
+                    .map(|s| s.plugin_id)
+                    .unwrap_or_else(|_| {
+                        path.file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("plugin")
+                            .to_string()
+                    });
+                    parts.push(scan_plugin_components_readonly(
+                        AgentTarget::Claude,
+                        scope.scope_kind,
+                        &path,
+                        &plugin_id,
+                    )?);
+                }
+            }
+        }
+        Ok(merge_discoveries(parts))
     }
 
     /// 渲染 Claude portable 投影。

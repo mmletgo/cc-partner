@@ -117,6 +117,9 @@ pub struct PortableAssetOrigin {
     pub status: PortableDiscoveryStatus,
     /// 是否可作为该 target 的 native 输出候选
     pub native_output_candidate: bool,
+    /// 父 Plugin 原生 ID（component 专用；standalone 为 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_plugin_id: Option<String>,
 }
 
 /// 扫描到的可移植资产（含 payload 与 origin）。
@@ -476,6 +479,7 @@ pub fn scan_skill_dirs(
                 tree_hash: Some(tree_hash),
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
+                parent_plugin_id: None,
             },
             diagnostics: diags,
         });
@@ -552,6 +556,7 @@ pub fn scan_command_markdown_dir(
                 tree_hash: None,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
+                parent_plugin_id: None,
             },
             diagnostics: all_diags,
         });
@@ -681,6 +686,7 @@ pub fn scan_agent_markdown_dir(
                 tree_hash: None,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: origin_kind.is_native_output_candidate(),
+                parent_plugin_id: None,
             },
             diagnostics: all_diags,
         });
@@ -728,6 +734,7 @@ pub fn parse_mcp_servers_json_map(
                             PortableDiscoveryStatus::Disabled
                         },
                         native_output_candidate: origin_kind.is_native_output_candidate(),
+                        parent_plugin_id: None,
                     },
                     diagnostics: diags,
                 });
@@ -916,6 +923,7 @@ pub fn parse_codex_mcp_toml(
         let value = Value::Object(json);
         if let Ok((server, diags)) = mcp_from_json_value(target, key, &value, true) {
             let bytes = serde_json::to_vec(&value).unwrap_or_default();
+            let enabled = server.enabled;
             out.push(DiscoveredPortableAsset {
                 kind: AssetKind::Mcp,
                 semantic_name: key.to_string(),
@@ -928,8 +936,13 @@ pub fn parse_codex_mcp_toml(
                     native_id: key.to_string(),
                     content_hash: sha256_hex(&bytes),
                     tree_hash: None,
-                    status: PortableDiscoveryStatus::Active,
+                    status: if enabled {
+                        PortableDiscoveryStatus::Active
+                    } else {
+                        PortableDiscoveryStatus::Disabled
+                    },
                     native_output_candidate: true,
+                    parent_plugin_id: None,
                 },
                 diagnostics: diags,
             });
@@ -1042,6 +1055,7 @@ pub fn parse_codex_agents_toml(
                 tree_hash: None,
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: true,
+                parent_plugin_id: None,
             },
             diagnostics: diags,
         });
@@ -1276,6 +1290,81 @@ pub fn merge_discoveries(
         out.extend(part);
     }
     out
+}
+
+/// 扫描 disabled 目录下的 skills（actualEnabled=false）。
+///
+/// Business Logic: active/disabled 路径必须映射为真实启用状态。
+/// Code Logic: 复用 scan_skill_dirs 后强制 status=Disabled。
+pub fn scan_disabled_skill_dirs(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    root: &Path,
+    origin_kind: PortableOriginKind,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let mut found = scan_skill_dirs(target, scope_kind, root, origin_kind)?;
+    for d in &mut found {
+        d.origin.status = PortableDiscoveryStatus::Disabled;
+    }
+    Ok(found)
+}
+
+/// 扫描 disabled 目录下的 commands。
+///
+/// Business Logic: disabled command 路径映射 actualEnabled=false。
+/// Code Logic: 复用 scan_command_markdown_dir 后强制 Disabled。
+pub fn scan_disabled_command_markdown_dir(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    root: &Path,
+    origin_kind: PortableOriginKind,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let mut found = scan_command_markdown_dir(target, scope_kind, root, origin_kind)?;
+    for d in &mut found {
+        d.origin.status = PortableDiscoveryStatus::Disabled;
+    }
+    Ok(found)
+}
+
+/// 为 Plugin 目录下组件打 parent_plugin_id。
+///
+/// Business Logic: component 保持独立身份并记录父 package。
+/// Code Logic: 写 origin.parent_plugin_id + origin_kind=Plugin。
+pub fn stamp_parent_plugin(discoveries: &mut [DiscoveredPortableAsset], plugin_id: &str) {
+    for d in discoveries {
+        d.origin.parent_plugin_id = Some(plugin_id.to_string());
+        d.origin.origin_kind = PortableOriginKind::Plugin;
+    }
+}
+
+/// 只读扫描 plugin 根下 skills/commands（不写 CAS）。
+///
+/// Business Logic: inventory 需要 package component 事实，扫描不得 materialize CAS。
+/// Code Logic: scan skills/commands 后 stamp parent。
+pub fn scan_plugin_components_readonly(
+    target: AgentTarget,
+    scope_kind: ScopeKind,
+    plugin_root: &Path,
+    plugin_id: &str,
+) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    let mut parts = Vec::new();
+    let mut skills = scan_skill_dirs(
+        target,
+        scope_kind,
+        &plugin_root.join("skills"),
+        PortableOriginKind::Plugin,
+    )?;
+    stamp_parent_plugin(&mut skills, plugin_id);
+    parts.push(skills);
+    let mut commands = scan_command_markdown_dir(
+        target,
+        scope_kind,
+        &plugin_root.join("commands"),
+        PortableOriginKind::Plugin,
+    )?;
+    stamp_parent_plugin(&mut commands, plugin_id);
+    parts.push(commands);
+    Ok(merge_discoveries(parts))
 }
 
 #[cfg(test)]

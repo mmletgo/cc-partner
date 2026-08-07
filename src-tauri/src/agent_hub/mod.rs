@@ -127,12 +127,13 @@ pub use plugins::{
     ResolvedComponentPayload,
 };
 pub use portable_inventory::{
-    inventory_item_id, inventory_snapshot_hash, reconcile_portable_inventory,
-    reconcile_portable_inventory_with_facts, PortableAssetKind, PortableCanonicalFact,
+    inspect_portable_inventory, inspect_portable_inventory_with_env, inventory_item_id,
+    inventory_snapshot_hash, reconcile_portable_inventory, reconcile_portable_inventory_with_facts,
+    scan_portable_inventory_facts, PortableAssetKind, PortableCanonicalFact,
     PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
     PortableInventoryManagementState, PortableInventoryMutationCapability,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
-    PortableInventoryTargetDto, PortableMcpCredentialFactDto,
+    PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableScanScope,
 };
 pub use project_scope::{
     build_project_enable_preview, enable_project_scope, refresh_checkout_bindings,

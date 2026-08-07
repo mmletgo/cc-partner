@@ -10,6 +10,7 @@
 
 pub mod models;
 pub mod reconcile;
+pub mod scanner;
 
 pub use models::{
     inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
@@ -20,6 +21,10 @@ pub use models::{
 };
 pub use reconcile::{
     reconcile_portable_inventory, reconcile_portable_inventory_with_facts, PortableCanonicalFact,
+};
+pub use scanner::{
+    inspect_portable_inventory, inspect_portable_inventory_with_env, scan_portable_inventory_facts,
+    PortableScanScope,
 };
 
 #[cfg(test)]

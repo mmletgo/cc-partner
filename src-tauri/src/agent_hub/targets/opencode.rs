@@ -112,10 +112,19 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
             ScopeKind::Project | ScopeKind::Directory => scope.absolute_path.join(".opencode"),
         };
 
+        use super::portable::{scan_disabled_skill_dirs, scan_plugin_components_readonly};
+        use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
+
         parts.push(scan_skill_dirs(
             AgentTarget::OpenCode,
             scope.scope_kind,
             &native_root.join("skills"),
+            PortableOriginKind::Native,
+        )?);
+        parts.push(scan_disabled_skill_dirs(
+            AgentTarget::OpenCode,
+            scope.scope_kind,
+            &native_root.join("disabled").join("skills"),
             PortableOriginKind::Native,
         )?);
         parts.push(scan_command_markdown_dir(
@@ -130,6 +139,38 @@ impl AssetAdapter for OpenCodeInstructionAdapter {
             &native_root.join("agents"),
             PortableOriginKind::Native,
         )?);
+
+        // Plugin packages under config_root/plugins
+        let plugins_root = native_root.join("plugins");
+        if plugins_root.is_dir() {
+            if let Ok(read) = std::fs::read_dir(&plugins_root) {
+                for entry in read.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let plugin_id = discover_plugin_source_for_target(
+                        AgentTarget::OpenCode,
+                        &path,
+                        "scan",
+                        scope.scope_kind,
+                    )
+                    .map(|s| s.plugin_id)
+                    .unwrap_or_else(|_| {
+                        path.file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("plugin")
+                            .to_string()
+                    });
+                    parts.push(scan_plugin_components_readonly(
+                        AgentTarget::OpenCode,
+                        scope.scope_kind,
+                        &path,
+                        &plugin_id,
+                    )?);
+                }
+            }
+        }
 
         // MCP from OPENCODE_CONFIG / opencode.json(c)
         if scope.scope_kind == ScopeKind::User {

@@ -189,11 +189,14 @@ impl AssetAdapter for CodexInstructionAdapter {
     }
 }
 
-/// 扫描 Codex plugins 目录下的 skills（若存在）。
+/// 扫描 Codex plugins 目录下的 skills/commands（若存在），并 stamp parent plugin id。
 fn scan_codex_plugin_skills(
     scope_kind: ScopeKind,
     plugins_root: &Path,
 ) -> Result<Vec<DiscoveredPortableAsset>, AppError> {
+    use super::portable::scan_plugin_components_readonly;
+    use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
+
     let mut out = Vec::new();
     let read = match std::fs::read_dir(plugins_root) {
         Ok(r) => r,
@@ -201,15 +204,25 @@ fn scan_codex_plugin_skills(
     };
     for entry in read {
         let entry = entry?;
-        let skills = entry.path().join("skills");
-        if skills.is_dir() {
-            out.extend(scan_skill_dirs(
-                AgentTarget::Codex,
-                scope_kind,
-                &skills,
-                PortableOriginKind::Plugin,
-            )?);
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
         }
+        let plugin_id =
+            discover_plugin_source_for_target(AgentTarget::Codex, &path, "scan", scope_kind)
+                .map(|s| s.plugin_id)
+                .unwrap_or_else(|_| {
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("plugin")
+                        .to_string()
+                });
+        out.extend(scan_plugin_components_readonly(
+            AgentTarget::Codex,
+            scope_kind,
+            &path,
+            &plugin_id,
+        )?);
     }
     Ok(out)
 }

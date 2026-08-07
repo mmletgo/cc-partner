@@ -28,8 +28,9 @@ pub use paths::{
     TargetPathResolver,
 };
 pub use portable::{
-    AssetRenderContext, DiscoveredPortableAsset, PortableAssetOrigin, PortableDiscoveryStatus,
-    PortableOriginKind, ProjectedAssetFile, TargetAssetProjection,
+    scan_disabled_command_markdown_dir, scan_disabled_skill_dirs, scan_plugin_components_readonly,
+    stamp_parent_plugin, AssetRenderContext, DiscoveredPortableAsset, PortableAssetOrigin,
+    PortableDiscoveryStatus, PortableOriginKind, ProjectedAssetFile, TargetAssetProjection,
 };
 
 /// adapter 能力支持级别。

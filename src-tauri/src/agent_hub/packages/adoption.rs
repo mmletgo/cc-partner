@@ -1831,6 +1831,7 @@ fn rec_to_minimal_discovery(rec: &AdoptionRecord, origin: &Path) -> DiscoveredPo
             tree_hash: Some(rec.origin_tree_hash.clone()),
             status: PortableDiscoveryStatus::Active,
             native_output_candidate: false,
+            parent_plugin_id: None,
         },
         diagnostics: vec![],
     }
@@ -1916,6 +1917,7 @@ mod tests {
                 tree_hash: Some(tree),
                 status: PortableDiscoveryStatus::Active,
                 native_output_candidate: false,
+                parent_plugin_id: None,
             },
             diagnostics: diags,
         }
