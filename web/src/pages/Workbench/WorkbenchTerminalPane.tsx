@@ -29,6 +29,7 @@ import {
   shouldForwardTerminalInput,
   type TerminalReplayGate,
 } from './terminalReplay';
+import { installWorkbenchTerminalSelectionOverrides } from './terminalSelectionOverrides';
 
 export interface WorkbenchTerminalPaneProps {
   session: WorkbenchSession | null;
@@ -193,6 +194,8 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(viewport);
+    // open 之后 selectionService 才存在；必须优先于 mouse-mode CSI 落地前装上选区保护。
+    const restoreSelectionOverrides = installWorkbenchTerminalSelectionOverrides(terminal);
     // inactive pane 用 display:none 丢弃 WebView 合成层；此时不得按零尺寸 fit。
     if (renderVisibleRef.current) {
       fit.fit();
@@ -411,6 +414,7 @@ export const WorkbenchTerminalPane = memo(function WorkbenchTerminalPane(props: 
         resizeTimerRef.current = null;
       }
       cursorAnchorCallbackRef.current?.(null);
+      restoreSelectionOverrides();
       terminal.dispose();
       terminalRef.current = null;
       forceResizeRef.current = null;
