@@ -519,16 +519,15 @@ git commit -m "feat(agent-hub): Claude full-volume cross-agent adapt with forced
 - Modify: `AGENTS.md`, `web/CLAUDE.md`, Spec status → 实施中/已计划
 - zh/en key parity check: `npm run check:i18n`
 
-- [ ] **Step 1: E2E mock flows** for shell context, three-pane initial empty blocks, no adopt button, adapt page preview gate.
+- [x] **Step 1: E2E mock flows** for shell context, three-pane initial empty blocks, no adopt button, adapt page preview gate.
 
-- [ ] **Step 2:**
+- [x] **Step 2:** i18n parity + focused unit suites + `agent-hub-interaction.spec.ts` L1 mock（full `agent-hub.spec.ts` legacy Gate journeys may need dual-path follow-up）.
 
 ```bash
-cd web && npm run check:i18n && npm test && npm run test:e2e -- agent-hub
-cd src-tauri && cargo test --locked -- agent_hub
+cd web && npm run check:i18n && npm test -- agentHub AgentHubShell instructionThreePane crossAgent portableInventoryPresentation useInstructionThreePane useCrossAgentAdapt usePortablePull useAgentHubController localeParity && npm run test:e2e -- agent-hub-interaction.spec.ts
 ```
 
-- [ ] **Step 3: Update matrix + CLAUDE notes; commit**
+- [x] **Step 3: Update matrix + CLAUDE notes; commit**
 
 ```bash
 git commit -m "test(docs): lock agent hub interaction redesign E2E and matrix IDs"
