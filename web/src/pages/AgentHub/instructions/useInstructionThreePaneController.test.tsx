@@ -346,4 +346,90 @@ describe('useInstructionThreePaneController', () => {
     await waitFor(() => expect(result.current.state.blocks.length).toBe(2));
     expect(result.current.state.blocks[0]?.title).toBe('Shared rules');
   });
+
+  test('changing deviceId retriggers inspect with peer context', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockImplementation(
+      async (ctx?: { deviceId?: string | null }) => {
+        if (ctx?.deviceId === 'peer-9') {
+          throw Object.assign(new Error('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE'), {
+            code: 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE',
+          });
+        }
+        return workspaceFixture();
+      },
+    );
+
+    const { result, rerender } = renderHook(
+      (props: { context: AgentHubContext }) =>
+        useInstructionThreePaneController({ context: props.context, t }),
+      { initialProps: { context: baseContext } },
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledWith({
+      deviceId: null,
+      projectRef: null,
+    });
+    expect(result.current.workspace).not.toBeNull();
+
+    rerender({
+      context: { ...baseContext, deviceId: 'peer-9' },
+    });
+
+    await waitFor(() => {
+      expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
+    });
+    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledWith({
+      deviceId: 'peer-9',
+      projectRef: null,
+    });
+    expect(result.current.workspace).toBeNull();
+  });
+
+  test('local inspect passes null device context and remote project fails closed', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockImplementation(
+      async (ctx?: { projectRef?: string | null }) => {
+        if (ctx?.projectRef?.startsWith('remote:')) {
+          throw Object.assign(new Error('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE'), {
+            code: 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE',
+          });
+        }
+        return workspaceFixture();
+      },
+    );
+
+    const { result, rerender } = renderHook(
+      (props: { context: AgentHubContext }) =>
+        useInstructionThreePaneController({ context: props.context, t }),
+      {
+        initialProps: {
+          context: {
+            ...baseContext,
+            scope: 'project' as const,
+            projectKey: 'wb-local',
+            deviceId: null,
+          },
+        },
+      },
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(apiMocks.inspectUserInstructionWorkspace).toHaveBeenCalledWith({
+      deviceId: null,
+      projectRef: 'wb-local',
+    });
+
+    rerender({
+      context: {
+        ...baseContext,
+        scope: 'project',
+        projectKey: 'remote:dev1:inner',
+        deviceId: null,
+      },
+    });
+
+    await waitFor(() => {
+      expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
+    });
+  });
 });

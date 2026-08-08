@@ -281,4 +281,59 @@ describe('usePortableInventoryController', () => {
     });
     expect(result.current.pendingAction).toBeNull();
   });
+
+  test('changing deviceId retriggers inspect with new context and clears prior snapshot', async () => {
+    apiMocks.inspect.mockImplementation(async (ctx?: { deviceId?: string | null }) => {
+      if (ctx?.deviceId === 'peer-1') {
+        throw Object.assign(new Error('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE'), {
+          code: 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE',
+        });
+      }
+      return snapshot('snap-local', [alpha]);
+    });
+
+    const { result, rerender } = renderHook(
+      (props: { deviceId: string | null }) =>
+        usePortableInventoryController({ deviceId: props.deviceId, projectRef: null }),
+      { initialProps: { deviceId: null as string | null } },
+    );
+
+    await waitFor(() => expect(result.current.snapshot?.inventorySnapshotHash).toBe('snap-local'));
+    expect(apiMocks.inspect).toHaveBeenCalledWith({ deviceId: null, projectRef: null });
+    const callsAfterLocal = apiMocks.inspect.mock.calls.length;
+
+    rerender({ deviceId: 'peer-1' });
+
+    await waitFor(() => {
+      expect(apiMocks.inspect.mock.calls.length).toBeGreaterThan(callsAfterLocal);
+    });
+    await waitFor(() => {
+      expect(result.current.error).toBe('AGENT_HUB_PEER_CONTEXT_UNAVAILABLE');
+    });
+    expect(apiMocks.inspect).toHaveBeenCalledWith({ deviceId: 'peer-1', projectRef: null });
+    // peer 切换不得保留本机 snapshot 冒充对端
+    expect(result.current.snapshot).toBeNull();
+    expect(result.current.mutationBlocked).toBe(true);
+  });
+
+  test('changing projectRef retriggers inspect', async () => {
+    apiMocks.inspect.mockResolvedValue(snapshot('snap-proj', [alpha]));
+    const { result, rerender } = renderHook(
+      (props: { projectRef: string | null }) =>
+        usePortableInventoryController({ deviceId: null, projectRef: props.projectRef }),
+      { initialProps: { projectRef: null as string | null } },
+    );
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+    const callsAfter = apiMocks.inspect.mock.calls.length;
+
+    rerender({ projectRef: 'wb-local-2' });
+    await waitFor(() => {
+      expect(apiMocks.inspect.mock.calls.length).toBeGreaterThan(callsAfter);
+    });
+    expect(apiMocks.inspect).toHaveBeenCalledWith({
+      deviceId: null,
+      projectRef: 'wb-local-2',
+    });
+    expect(result.current.requestContext.projectRef).toBe('wb-local-2');
+  });
 });

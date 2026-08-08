@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
-import { agentHubApi } from '@/api/agentHub';
+import { agentHubApi, type AgentHubRequestContext } from '@/api/agentHub';
 import type {
   AgentTarget,
   UserInstructionApplyResultDto,
@@ -33,6 +33,9 @@ import {
   type InstructionThreePaneState,
   type SyncBaseline,
 } from './instructionThreePane';
+
+/** peer 上下文稳定错误码（与 api 层常量同字面量；不 import 避免 mock 缺导出）。 */
+const PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE';
 
 export interface UseInstructionThreePaneControllerArgs {
   context: AgentHubContext;
@@ -149,11 +152,13 @@ export function useInstructionThreePaneController(
 ): UseInstructionThreePaneControllerResult {
   const { context, t } = args;
   const agent = context.agent;
-  // device/project 占位：当前 inspect 为本机用户级；peer/project 后续接线
-  const _deviceId = context.deviceId;
-  const _projectKey = context.scope === 'project' ? context.projectKey : null;
-  void _deviceId;
-  void _projectKey;
+  /** 用户级 deviceId；项目级 projectKey 作为 projectRef。 */
+  const requestContext = useMemo((): AgentHubRequestContext => {
+    if (context.scope === 'project') {
+      return { deviceId: null, projectRef: context.projectKey };
+    }
+    return { deviceId: context.deviceId, projectRef: null };
+  }, [context.scope, context.deviceId, context.projectKey]);
 
   const [workspace, setWorkspace] = useState<UserInstructionWorkspaceDto | null>(null);
   const [state, setState] = useState<InstructionThreePaneState>(() =>
@@ -188,7 +193,7 @@ export function useInstructionThreePaneController(
 
   /**
    * Business Logic: 从 inspect 填充 ③，块/预览保持空（除非 apply 后 auto re-parse）。
-   * Code Logic: generation 防竞态；autoReparse 仅一次。
+   * Code Logic: generation 防竞态；autoReparse 仅一次；peer 错误保留稳定 code。
    */
   const loadWorkspace = useCallback(
     async (isRefresh: boolean) => {
@@ -197,7 +202,7 @@ export function useInstructionThreePaneController(
       else setLoading(true);
       setError(null);
       try {
-        const next = await agentHubApi.inspectUserInstructionWorkspace();
+        const next = await agentHubApi.inspectUserInstructionWorkspace(requestContext);
         if (!mountedRef.current || seq !== loadSeqRef.current) return;
         setWorkspace(next);
         const { path, text } = originalFromWorkspace(next, agent);
@@ -210,7 +215,17 @@ export function useInstructionThreePaneController(
         setDualDirtyOpen(false);
       } catch (reason) {
         if (!mountedRef.current || seq !== loadSeqRef.current) return;
-        setError(reason instanceof Error ? reason.message : String(reason));
+        const code = errorCode(reason);
+        // 切换到 peer 时清空本机 workspace，避免 UI 冒充对端内容
+        setWorkspace(null);
+        setState(initialThreePaneFromDisk(null, ''));
+        setError(
+          code === PEER_CONTEXT_UNAVAILABLE
+            ? PEER_CONTEXT_UNAVAILABLE
+            : reason instanceof Error
+              ? reason.message
+              : String(reason),
+        );
       } finally {
         if (mountedRef.current && seq === loadSeqRef.current) {
           setLoading(false);
@@ -218,7 +233,7 @@ export function useInstructionThreePaneController(
         }
       }
     },
-    [agent],
+    [agent, requestContext],
   );
 
   useEffect(() => {
@@ -228,7 +243,7 @@ export function useInstructionThreePaneController(
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [loadWorkspace, context.scope, context.deviceId, context.projectKey]);
+  }, [loadWorkspace, context.scope, context.deviceId, context.projectKey, context.agent]);
 
   const currentTarget = useMemo(
     () => workspace?.targets.find((item) => item.target === agent) ?? null,
@@ -299,7 +314,10 @@ export function useInstructionThreePaneController(
       setApplyResult(null);
       lastSyncBaselineRef.current = baseline;
       try {
-        const request = buildSingleAgentPreviewRequest(workspace, agent, content);
+        const request = {
+          ...buildSingleAgentPreviewRequest(workspace, agent, content),
+          ...requestContext,
+        };
         const targetManaged =
           currentTarget?.managementMode === 'managedActive' ||
           currentTarget?.managementMode === 'managedPaused';
@@ -319,17 +337,19 @@ export function useInstructionThreePaneController(
         if (!mountedRef.current) return;
         const code = errorCode(reason);
         setActionError(
-          code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
-            ? t('agentHub:userInstructions.errors.backendUnavailable')
-            : reason instanceof Error
-              ? reason.message
-              : String(reason),
+          code === PEER_CONTEXT_UNAVAILABLE
+            ? PEER_CONTEXT_UNAVAILABLE
+            : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
+              ? t('agentHub:userInstructions.errors.backendUnavailable')
+              : reason instanceof Error
+                ? reason.message
+                : String(reason),
         );
       } finally {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [agent, currentTarget, t, workspace, writeBlocked, writeBlockedReason],
+    [agent, currentTarget, requestContext, t, workspace, writeBlocked, writeBlockedReason],
   );
 
   const requestSync = useCallback(async () => {
@@ -374,11 +394,12 @@ export function useInstructionThreePaneController(
   const applyPlan = useCallback(async () => {
     if (!plan) return;
     const existing = planRequestIdRef.current;
-    const request =
+    const base =
       existing?.planToken === plan.planToken
         ? existing
         : { planToken: plan.planToken, clientRequestId: createClientRequestId() };
-    planRequestIdRef.current = request;
+    planRequestIdRef.current = base;
+    const request = { ...base, ...requestContext };
     setActionBusy(true);
     setActionError(null);
     try {
@@ -421,17 +442,19 @@ export function useInstructionThreePaneController(
         setActionError(t('agentHub:userInstructions.errors.previewStale'));
       } else {
         setActionError(
-          code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
-            ? t('agentHub:userInstructions.errors.backendUnavailable')
-            : reason instanceof Error
-              ? reason.message
-              : String(reason),
+          code === PEER_CONTEXT_UNAVAILABLE
+            ? PEER_CONTEXT_UNAVAILABLE
+            : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
+              ? t('agentHub:userInstructions.errors.backendUnavailable')
+              : reason instanceof Error
+                ? reason.message
+                : String(reason),
         );
       }
     } finally {
       if (mountedRef.current) setActionBusy(false);
     }
-  }, [loadWorkspace, plan, t]);
+  }, [loadWorkspace, plan, requestContext, t]);
 
   const refresh = useCallback(async () => {
     autoReparseAfterLoadRef.current = false;
