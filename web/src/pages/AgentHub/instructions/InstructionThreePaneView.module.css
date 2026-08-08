@@ -56,8 +56,16 @@
 .panes {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  /* 单行铺满容器高度：三栏随 .panes 的高度一起拉伸，而不是只随各自内容增高 */
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--space-3);
   min-width: 0;
+  /*
+   * 三栏锚定视口高度。AppShell 主区是 100vh 滚动容器、.page 是 min-height 的滚动内容页，
+   * 父链没有确定高度，故用 vh（确定值）而非百分比：占满「视口减去顶部 chrome」，短窗 floor 20rem。
+   * offset 22rem ≈ 页面 padding(32) + AgentHub header + shell chrome + 三栏 toolbar。
+   */
+  min-height: max(20rem, calc(100vh - 22rem));
   overflow-x: auto;
 }
 
