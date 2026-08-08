@@ -41,6 +41,34 @@
     "adapt": "Adapt to other agents…",
     "adaptLocalOnly": "Cross-agent adapt is only available on this device"
   },
+  "instructions": {
+    "threePane": {
+      "blocksTitle": "Blocks",
+      "previewTitle": "Composed preview",
+      "originalTitle": "Original file",
+      "reparseFromOriginal": "Reparse blocks from original",
+      "syncToNative": "Sync to native file…",
+      "emptyBlocks": "No blocks yet. Reparse from the original column or add a block.",
+      "emptyPreview": "Preview stays empty until you reparse or fill blocks.",
+      "emptyOriginal": "No original content found for this agent. You can draft here and sync.",
+      "pathLabel": "Path",
+      "noPath": "No path resolved",
+      "loading": "Loading instructions…",
+      "previewReadOnly": "Read-only",
+      "addBlock": "Add block",
+      "dualDirtyTitle": "Choose a sync baseline",
+      "dualDirtyDescription": "Both the blocks and the original file have unsaved edits with different content. Pick which content to write.",
+      "useBlocksBaseline": "Use composed blocks",
+      "useOriginalBaseline": "Use original file",
+      "blockTitlePlaceholder": "Block title",
+      "blockBodyPlaceholder": "Block body",
+      "refresh": "Rescan",
+      "writeBlocked": "Writes are blocked for this agent. You can still edit the draft, but sync is disabled.",
+      "errors": {
+        "emptySync": "Nothing to sync. Add original content or blocks first."
+      }
+    }
+  },
   "userInstructions": {
     "title": "User instructions",
     "subtitle": "See the files each agent actually reads, then manage them as shared content with small agent-specific extensions.",
