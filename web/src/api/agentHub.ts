@@ -101,6 +101,8 @@ export const AGENT_HUB_COMMANDS = {
   previewDeleteUserInstructionAsset: 'agent_hub_preview_delete_user_instruction_asset',
   previewCrossAgentInstruction: 'agent_hub_preview_cross_agent_instruction',
   applyCrossAgentInstruction: 'agent_hub_apply_cross_agent_instruction',
+  previewCrossAgentFull: 'agent_hub_preview_cross_agent_full',
+  applyCrossAgentFull: 'agent_hub_apply_cross_agent_full',
 } as const;
 
 /**
@@ -917,6 +919,58 @@ export const agentHubApi = {
         sourceMarkdown: request.sourceMarkdown,
         destinationPaths: request.destinationPaths ?? {},
         clientRequestId: request.clientRequestId,
+      },
+    }),
+
+  /**
+   * Business Logic: 全量跨 Agent 适配预览（五类清单 + plan_hash）。
+   * Code Logic: agent_hub_preview_cross_agent_full；始终发送 portableAssets / deviceId 默认。
+   */
+  previewCrossAgentFull: (request: {
+    source: string;
+    destination: string;
+    scope: string;
+    sourceMarkdown: string;
+    portableAssets?: Array<{ kind: string; logicalKey: string; path: string }>;
+    deviceId?: string | null;
+  }): Promise<unknown> =>
+    invoke(AGENT_HUB_COMMANDS.previewCrossAgentFull, {
+      request: {
+        source: request.source,
+        destination: request.destination,
+        scope: request.scope,
+        sourceMarkdown: request.sourceMarkdown,
+        portableAssets: request.portableAssets ?? [],
+        deviceId: request.deviceId ?? null,
+      },
+    }),
+
+  /**
+   * Business Logic: 按 plan_hash 逐项 apply；无 preview 或 hash 不匹配失败。
+   * Code Logic: agent_hub_apply_cross_agent_full。
+   */
+  applyCrossAgentFull: (request: {
+    source: string;
+    destination: string;
+    scope: string;
+    sourceMarkdown: string;
+    planHash: string;
+    clientRequestId: string;
+    items: Array<{ logicalKey: string; included: boolean }>;
+    portableAssets?: Array<{ kind: string; logicalKey: string; path: string }>;
+    deviceId?: string | null;
+  }): Promise<unknown> =>
+    invoke(AGENT_HUB_COMMANDS.applyCrossAgentFull, {
+      request: {
+        source: request.source,
+        destination: request.destination,
+        scope: request.scope,
+        sourceMarkdown: request.sourceMarkdown,
+        planHash: request.planHash,
+        clientRequestId: request.clientRequestId,
+        items: request.items,
+        portableAssets: request.portableAssets ?? [],
+        deviceId: request.deviceId ?? null,
       },
     }),
 };

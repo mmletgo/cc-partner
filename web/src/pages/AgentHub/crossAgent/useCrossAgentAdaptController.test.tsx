@@ -16,12 +16,16 @@ import { useCrossAgentAdaptController } from './useCrossAgentAdaptController';
 
 const previewMock = vi.fn();
 const applyMock = vi.fn();
+const previewFullMock = vi.fn();
+const applyFullMock = vi.fn();
 const inspectMock = vi.fn();
 
 vi.mock('@/api/agentHub', () => ({
   agentHubApi: {
     previewCrossAgentInstruction: (...args: unknown[]) => previewMock(...args),
     applyCrossAgentInstruction: (...args: unknown[]) => applyMock(...args),
+    previewCrossAgentFull: (...args: unknown[]) => previewFullMock(...args),
+    applyCrossAgentFull: (...args: unknown[]) => applyFullMock(...args),
     inspectUserInstructionWorkspace: (...args: unknown[]) => inspectMock(...args),
   },
 }));
@@ -44,6 +48,8 @@ describe('useCrossAgentAdaptController', () => {
   beforeEach(() => {
     previewMock.mockReset();
     applyMock.mockReset();
+    previewFullMock.mockReset();
+    applyFullMock.mockReset();
     inspectMock.mockReset();
     inspectMock.mockResolvedValue({
       targets: [],
@@ -205,5 +211,128 @@ describe('useCrossAgentAdaptController', () => {
       expect(inspectMock).toHaveBeenCalled();
       expect(result.current.sourceMarkdown).toContain('From inspect body');
     });
+  });
+
+  test('full mode: preview required then apply with planHash and include toggles', async () => {
+    previewFullMock.mockResolvedValue({
+      source: 'claude',
+      destination: 'codex',
+      scope: 'user',
+      planHash: 'hash-full-1',
+      generator: 'stub',
+      items: [
+        {
+          kind: 'instruction',
+          logicalKey: 'instruction:user',
+          action: 'create',
+          path: '/tmp/.codex/AGENTS.md',
+          content: 'Always run tests.',
+          residualReason: null,
+          included: true,
+        },
+        {
+          kind: 'skill',
+          logicalKey: 'skill:demo',
+          action: 'skip',
+          path: '/tmp/skill',
+          residualReason: 'stub:skill_copy_not_ready',
+          included: true,
+        },
+        {
+          kind: 'command',
+          logicalKey: 'inventory:empty:command',
+          action: 'skip',
+          path: '',
+          residualReason: 'no_command_on_source',
+          included: false,
+        },
+        {
+          kind: 'mcp',
+          logicalKey: 'inventory:empty:mcp',
+          action: 'skip',
+          path: '',
+          residualReason: 'no_mcp_on_source',
+          included: false,
+        },
+        {
+          kind: 'plugin',
+          logicalKey: 'inventory:empty:plugin',
+          action: 'skip',
+          path: '',
+          residualReason: 'no_plugin_on_source',
+          included: false,
+        },
+      ],
+    });
+    applyFullMock.mockResolvedValue([
+      {
+        kind: 'instruction',
+        logicalKey: 'instruction:user',
+        status: 'applied',
+        path: '/tmp/.codex/AGENTS.md',
+        errorCode: null,
+      },
+    ]);
+
+    const { result } = renderHook(() =>
+      useCrossAgentAdaptController({
+        context: localContext(),
+        t,
+        initialSourceMarkdown: 'Always run tests before commit.',
+      }),
+    );
+
+    act(() => {
+      result.current.setMode('full');
+      result.current.setScopeConfirmed(true);
+    });
+
+    expect(result.current.mode).toBe('full');
+    expect(result.current.fullDestination).toBe('codex');
+    expect(result.current.canApply).toBe(false);
+
+    await act(async () => {
+      await result.current.runPreview();
+    });
+
+    await waitFor(() => {
+      expect(previewFullMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: 'claude',
+          destination: 'codex',
+          scope: 'user',
+          sourceMarkdown: 'Always run tests before commit.',
+        }),
+      );
+      expect(result.current.fullPlan?.planHash).toBe('hash-full-1');
+    });
+
+    expect(result.current.canApply).toBe(true);
+
+    act(() => {
+      result.current.toggleFullItemIncluded('skill:demo');
+    });
+    expect(
+      result.current.fullPlan?.items.find((i) => i.logicalKey === 'skill:demo')?.included,
+    ).toBe(false);
+
+    await act(async () => {
+      await result.current.runApply();
+    });
+
+    await waitFor(() => {
+      expect(applyFullMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          planHash: 'hash-full-1',
+          destination: 'codex',
+          items: expect.arrayContaining([
+            expect.objectContaining({ logicalKey: 'instruction:user', included: true }),
+            expect.objectContaining({ logicalKey: 'skill:demo', included: false }),
+          ]),
+        }),
+      );
+      expect(result.current.fullApplyResults?.[0]?.status).toBe('applied');
+    });
+    expect(applyMock).not.toHaveBeenCalled();
   });
 });

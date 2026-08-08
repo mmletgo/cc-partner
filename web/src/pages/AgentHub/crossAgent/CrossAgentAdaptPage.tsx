@@ -1,12 +1,12 @@
 /**
- * Cross-agent selective adapt independent page.
+ * Cross-agent adapt independent page (selective + full-volume).
  *
  * Business Logic（为什么需要）:
- *   阶段三适配入口必须是独立全页（非一次性 Dialog）：源=当前 agent、多选目标、
- *   scope 确认、内容编辑、规则分类 preview、强制预览后 apply；peer 上下文 blocked。
+ *   阶段三适配入口必须是独立全页：选择性多目标指令适配，或全量单目标五类清单
+ *   强制预览后 apply；peer 上下文 blocked。
  *
  * Code Logic（做什么）:
- *   pure 视图 + 本页 controller；不 import 其它 domain 组件；样式复用 AgentHub tokens。
+ *   pure 视图 + 本页 controller；mode toggle 切换 UI 区块。
  */
 
 import type { JSX } from 'react';
@@ -31,7 +31,7 @@ export interface CrossAgentAdaptPageProps {
 }
 
 /**
- * Business Logic: 渲染选择性适配全页（T9；全量模式留给 T10）。
+ * Business Logic: 渲染适配全页（选择性 + Claude 全量强制预览）。
  * Code Logic: controller 驱动；sections 单滚动。
  */
 export function CrossAgentAdaptPage(props: CrossAgentAdaptPageProps): JSX.Element {
@@ -83,6 +83,45 @@ export function CrossAgentAdaptPage(props: CrossAgentAdaptPageProps): JSX.Elemen
         </StatusMessage>
       ) : null}
 
+      {/* Mode toggle: selective | full */}
+      <Card variant="outlined" padding="md" data-testid="cross-agent-adapt-mode">
+        <Card.Header>
+          <span className={styles.sectionTitle}>{t('agentHub:crossAgent.modeSection')}</span>
+        </Card.Header>
+        <Card.Body>
+          <fieldset className={styles.userTargetGrid} data-testid="cross-agent-adapt-mode-toggle">
+            <legend>{t('agentHub:crossAgent.modeLabel')}</legend>
+            <label className={styles.filterField}>
+              <input
+                type="radio"
+                name="cross-agent-adapt-mode"
+                checked={c.mode === 'selective'}
+                disabled={c.busy || c.peerBlocked}
+                data-testid="cross-agent-adapt-mode-selective"
+                onChange={() => c.setMode('selective')}
+              />
+              <span>{t('agentHub:crossAgent.modeSelective')}</span>
+            </label>
+            <label className={styles.filterField}>
+              <input
+                type="radio"
+                name="cross-agent-adapt-mode"
+                checked={c.mode === 'full'}
+                disabled={c.busy || c.peerBlocked}
+                data-testid="cross-agent-adapt-mode-full"
+                onChange={() => c.setMode('full')}
+              />
+              <span>{t('agentHub:crossAgent.modeFull')}</span>
+            </label>
+          </fieldset>
+          {c.mode === 'full' ? (
+            <p className={styles.hint} data-testid="cross-agent-adapt-full-hint">
+              {t('agentHub:crossAgent.fullModeHint')}
+            </p>
+          ) : null}
+        </Card.Body>
+      </Card>
+
       {/* 1. Source + destinations */}
       <Card variant="outlined" padding="md" data-testid="cross-agent-adapt-targets">
         <Card.Header>
@@ -93,21 +132,40 @@ export function CrossAgentAdaptPage(props: CrossAgentAdaptPageProps): JSX.Elemen
             {t('agentHub:crossAgent.sourceLabel')}:{' '}
             <strong>{t(`agentHub:targets.${c.source}`)}</strong>
           </p>
-          <fieldset className={styles.userTargetGrid} data-testid="cross-agent-adapt-destinations">
-            <legend>{t('agentHub:crossAgent.destinationsLabel')}</legend>
-            {c.destinationOptions.map((target) => (
-              <label key={target} className={styles.filterField}>
-                <input
-                  type="checkbox"
-                  checked={c.destinations.includes(target)}
-                  disabled={c.busy || c.peerBlocked}
-                  data-testid={`cross-agent-adapt-dest-${target}`}
-                  onChange={() => c.toggleDestination(target)}
-                />
-                <span>{t(`agentHub:targets.${target}`)}</span>
-              </label>
-            ))}
-          </fieldset>
+          {c.mode === 'selective' ? (
+            <fieldset className={styles.userTargetGrid} data-testid="cross-agent-adapt-destinations">
+              <legend>{t('agentHub:crossAgent.destinationsLabel')}</legend>
+              {c.destinationOptions.map((target) => (
+                <label key={target} className={styles.filterField}>
+                  <input
+                    type="checkbox"
+                    checked={c.destinations.includes(target)}
+                    disabled={c.busy || c.peerBlocked}
+                    data-testid={`cross-agent-adapt-dest-${target}`}
+                    onChange={() => c.toggleDestination(target)}
+                  />
+                  <span>{t(`agentHub:targets.${target}`)}</span>
+                </label>
+              ))}
+            </fieldset>
+          ) : (
+            <fieldset className={styles.userTargetGrid} data-testid="cross-agent-adapt-full-destination">
+              <legend>{t('agentHub:crossAgent.fullDestinationLabel')}</legend>
+              {c.destinationOptions.map((target) => (
+                <label key={target} className={styles.filterField}>
+                  <input
+                    type="radio"
+                    name="cross-agent-full-destination"
+                    checked={c.fullDestination === target}
+                    disabled={c.busy || c.peerBlocked}
+                    data-testid={`cross-agent-adapt-full-dest-${target}`}
+                    onChange={() => c.setFullDestination(target)}
+                  />
+                  <span>{t(`agentHub:targets.${target}`)}</span>
+                </label>
+              ))}
+            </fieldset>
+          )}
         </Card.Body>
       </Card>
 
@@ -182,14 +240,20 @@ export function CrossAgentAdaptPage(props: CrossAgentAdaptPageProps): JSX.Elemen
               aria-label={t('agentHub:crossAgent.contentLabel')}
             />
           </label>
-          <p className={styles.hint} data-testid="cross-agent-adapt-claude-block-stub">
-            {t('agentHub:crossAgent.claudeBlockStub')}
-          </p>
+          {c.mode === 'selective' ? (
+            <p className={styles.hint} data-testid="cross-agent-adapt-claude-block-stub">
+              {t('agentHub:crossAgent.claudeBlockStub')}
+            </p>
+          ) : (
+            <p className={styles.hint} data-testid="cross-agent-adapt-full-stub-note">
+              {t('agentHub:crossAgent.fullStubNote')}
+            </p>
+          )}
         </Card.Body>
       </Card>
 
-      {/* 4. Preview classification */}
-      {c.preview ? (
+      {/* 4a. Selective preview */}
+      {c.mode === 'selective' && c.preview ? (
         <section
           className={styles.userPlanChanges}
           data-testid="cross-agent-adapt-preview-result"
@@ -241,6 +305,58 @@ export function CrossAgentAdaptPage(props: CrossAgentAdaptPageProps): JSX.Elemen
         </section>
       ) : null}
 
+      {/* 4b. Full plan items with include toggles */}
+      {c.mode === 'full' && c.fullPlan ? (
+        <section
+          className={styles.userPlanChanges}
+          data-testid="cross-agent-adapt-full-plan"
+          aria-label={t('agentHub:crossAgent.fullPreviewAria')}
+        >
+          <p className={styles.hint} data-testid="cross-agent-adapt-full-plan-hash">
+            {t('agentHub:crossAgent.planHash')}: <code>{c.fullPlan.planHash.slice(0, 12)}…</code>
+            {' · '}
+            {t('agentHub:crossAgent.generator')}: {c.fullPlan.generator}
+          </p>
+          {c.fullPlan.items.map((item) => (
+            <article
+              key={item.logicalKey}
+              className={styles.userPlanChange}
+              data-testid={`cross-agent-adapt-full-item-${item.logicalKey}`}
+            >
+              <div className={styles.userPlanHeader}>
+                <div>
+                  <label className={styles.filterField}>
+                    <input
+                      type="checkbox"
+                      checked={item.included}
+                      disabled={c.busy || c.peerBlocked}
+                      data-testid={`cross-agent-adapt-full-include-${item.logicalKey}`}
+                      onChange={() => c.toggleFullItemIncluded(item.logicalKey)}
+                    />
+                    <span className={styles.userTargetName}>
+                      {t(`agentHub:crossAgent.kinds.${item.kind}`, {
+                        defaultValue: item.kind,
+                      })}
+                      {' · '}
+                      {item.logicalKey}
+                    </span>
+                  </label>
+                  <code className={styles.userPath}>{item.path || '—'}</code>
+                </div>
+                <Pill tone={item.residualReason ? 'danger' : item.action === 'skip' ? 'warn' : 'success'}>
+                  {item.action}
+                </Pill>
+              </div>
+              {item.residualReason ? (
+                <p className={styles.hint} data-testid={`cross-agent-adapt-full-residual-${item.logicalKey}`}>
+                  {item.residualReason}
+                </p>
+              ) : null}
+            </article>
+          ))}
+        </section>
+      ) : null}
+
       {c.applyResults ? (
         <StatusMessage
           tone={c.applyResults.some((r) => r.status !== 'applied') ? 'warn' : 'success'}
@@ -250,6 +366,22 @@ export function CrossAgentAdaptPage(props: CrossAgentAdaptPageProps): JSX.Elemen
             {c.applyResults.map((row) => (
               <li key={`${row.destination}-${row.path}`}>
                 {t(`agentHub:targets.${row.destination}`)} · {row.status} · {row.path}
+                {row.errorCode ? ` (${row.errorCode})` : ''}
+              </li>
+            ))}
+          </ul>
+        </StatusMessage>
+      ) : null}
+
+      {c.fullApplyResults ? (
+        <StatusMessage
+          tone={c.fullApplyResults.some((r) => r.status !== 'applied' && r.status !== 'skipped') ? 'warn' : 'success'}
+          data-testid="cross-agent-adapt-full-apply-result"
+        >
+          <ul className={styles.userResultList}>
+            {c.fullApplyResults.map((row) => (
+              <li key={`${row.logicalKey}-${row.path}`}>
+                {row.kind} · {row.logicalKey} · {row.status}
                 {row.errorCode ? ` (${row.errorCode})` : ''}
               </li>
             ))}
@@ -291,7 +423,9 @@ export function CrossAgentAdaptPage(props: CrossAgentAdaptPageProps): JSX.Elemen
           }}
           data-testid="cross-agent-adapt-apply"
         >
-          {t('agentHub:crossAgent.apply', { count: c.applicableCount })}
+          {c.mode === 'full'
+            ? t('agentHub:crossAgent.applyFull', { count: c.applicableCount })
+            : t('agentHub:crossAgent.apply', { count: c.applicableCount })}
         </Button>
       </footer>
     </div>

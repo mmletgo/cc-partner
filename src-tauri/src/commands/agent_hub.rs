@@ -13,6 +13,10 @@ use crate::agent_hub::cross_agent::{
     ApplyCrossAgentInstructionRequest, CrossAgentApplyTargetResult, CrossAgentPreviewReport,
     PreviewCrossAgentInstructionRequest,
 };
+use crate::agent_hub::cross_agent_full::{
+    apply_cross_agent_full_default, preview_cross_agent_full_default, ApplyCrossAgentFullRequest,
+    CrossAgentFullApplyItemResult, CrossAgentFullPlan, PreviewCrossAgentFullRequest,
+};
 use crate::agent_hub::git::preview::{
     confirm_git_import_for_state, confirm_project_mapping_for_state, inspect_git_lanes_for_state,
     preview_git_import_for_state, ConfirmGitImportOutcome, ConfirmGitImportRequest,
@@ -692,6 +696,32 @@ pub async fn agent_hub_apply_cross_agent_instruction(
     }
     let env = TargetEnvironment::from_process();
     apply_cross_agent_instruction(&request, &env)
+}
+
+/// Business Logic: 全量跨 Agent 适配预览（指令 + skill/command/mcp/plugin 五类清单）。
+/// Code Logic: stub FullAdaptRunner.propose；无 skip-preview 直写路径。
+#[tauri::command]
+pub async fn agent_hub_preview_cross_agent_full(
+    request: PreviewCrossAgentFullRequest,
+) -> Result<CrossAgentFullPlan, AppError> {
+    let env = TargetEnvironment::from_process();
+    preview_cross_agent_full_default(&request, &env)
+}
+
+/// Business Logic: 按 preview plan_hash 逐项 apply；hash 不匹配必须失败。
+/// Code Logic: re-propose stub plan → 校验 hash → 指令复用 selective apply。
+#[tauri::command]
+pub async fn agent_hub_apply_cross_agent_full(
+    state: State<'_, AppState>,
+    request: ApplyCrossAgentFullRequest,
+) -> Result<Vec<CrossAgentFullApplyItemResult>, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        // 同机 only：不经 LAN peer。
+    }
+    let env = TargetEnvironment::from_process();
+    apply_cross_agent_full_default(&request, &env)
 }
 
 /// LAN push 预览：build selection 但不传输。

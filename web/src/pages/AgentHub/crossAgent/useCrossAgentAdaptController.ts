@@ -1,13 +1,13 @@
 /**
- * Cross-agent selective adapt page controller.
+ * Cross-agent adapt page controller (selective + full-volume).
  *
  * Business Logic（为什么需要）:
- *   独立全页编排：源=当前 agent、多选目标（不含源）、scope 确认、内容加载、
- *   preview → apply；peer 设备上下文整页 blocked（同机 only）。
+ *   独立全页编排：源=当前 agent；selective 多选目标指令适配；full 单目标五类清单
+ *   强制 preview 后 apply；peer 设备上下文整页 blocked（同机 only）。
  *
  * Code Logic（做什么）:
- *   持有 destinations/scopeConfirmed/markdown/preview/apply/busy；
- *   调用 agentHubApi.preview/applyCrossAgentInstruction；pure view 不 import transport。
+ *   mode 切换清理 plan/preview；selective 走 preview/applyCrossAgentInstruction；
+ *   full 走 preview/applyCrossAgentFull + 项 include 勾选。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -18,16 +18,26 @@ import type { AgentHubContext } from '../context/agentHubContext';
 import { originalFromWorkspace } from '../instructions';
 import {
   canRunCrossAgentApply,
+  canRunCrossAgentFullApply,
+  canRunCrossAgentFullPreview,
   canRunCrossAgentPreview,
   countApplicableDestinations,
+  countApplicableFullItems,
   defaultDestinationsForSource,
+  defaultFullDestination,
   destinationCandidates,
   isPeerContextBlocked,
   parseCrossAgentApplyResults,
+  parseCrossAgentFullApplyResults,
+  parseCrossAgentFullPlan,
   parseCrossAgentPreview,
   sanitizeDestinations,
   toggleDestinationSelection,
+  toggleFullPlanItemIncluded,
+  type CrossAgentAdaptVolumeMode,
   type CrossAgentApplyResult,
+  type CrossAgentFullApplyItemResult,
+  type CrossAgentFullPlan,
   type CrossAgentPreviewReport,
 } from './crossAgentPresentation';
 
@@ -42,9 +52,14 @@ export interface UseCrossAgentAdaptControllerArgs {
 }
 
 export interface UseCrossAgentAdaptControllerResult {
+  mode: CrossAgentAdaptVolumeMode;
+  setMode: (mode: CrossAgentAdaptVolumeMode) => void;
   source: AgentTarget;
   destinations: AgentTarget[];
   destinationOptions: AgentTarget[];
+  /** full 模式单目标 */
+  fullDestination: AgentTarget | null;
+  setFullDestination: (target: AgentTarget) => void;
   scope: AgentHubContext['scope'];
   projectKey: string | null;
   scopeConfirmed: boolean;
@@ -58,6 +73,8 @@ export interface UseCrossAgentAdaptControllerResult {
   error: string | null;
   preview: CrossAgentPreviewReport | null;
   applyResults: CrossAgentApplyResult[] | null;
+  fullPlan: CrossAgentFullPlan | null;
+  fullApplyResults: CrossAgentFullApplyItemResult[] | null;
   applicableCount: number;
   canPreview: boolean;
   canApply: boolean;
@@ -66,6 +83,7 @@ export interface UseCrossAgentAdaptControllerResult {
   /** project scope 但未选项目时提示启用/选择。 */
   projectOptInNeeded: boolean;
   toggleDestination: (target: AgentTarget) => void;
+  toggleFullItemIncluded: (logicalKey: string) => void;
   runPreview: () => Promise<void>;
   runApply: () => Promise<void>;
   refreshSourceContent: () => Promise<void>;
@@ -96,7 +114,7 @@ function formatError(reason: unknown): string {
 }
 
 /**
- * Business Logic: 为 Agent Hub 适配全页提供选择性编排状态机。
+ * Business Logic: 为 Agent Hub 适配全页提供 selective + full 编排状态机。
  * Code Logic: source 跟随 context.agent；peer blocked 时禁止 preview/apply。
  */
 export function useCrossAgentAdaptController(
@@ -106,8 +124,12 @@ export function useCrossAgentAdaptController(
   const source = context.agent;
   const peerBlocked = isPeerContextBlocked(context.deviceId);
 
+  const [mode, setModeState] = useState<CrossAgentAdaptVolumeMode>('selective');
   const [destinations, setDestinations] = useState<AgentTarget[]>(() =>
     defaultDestinationsForSource(source),
+  );
+  const [fullDestination, setFullDestinationState] = useState<AgentTarget | null>(() =>
+    defaultFullDestination(source),
   );
   const [scopeConfirmed, setScopeConfirmedState] = useState(false);
   const [sourceMarkdown, setSourceMarkdownState] = useState(() =>
@@ -121,6 +143,10 @@ export function useCrossAgentAdaptController(
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<CrossAgentPreviewReport | null>(null);
   const [applyResults, setApplyResults] = useState<CrossAgentApplyResult[] | null>(null);
+  const [fullPlan, setFullPlan] = useState<CrossAgentFullPlan | null>(null);
+  const [fullApplyResults, setFullApplyResults] = useState<
+    CrossAgentFullApplyItemResult[] | null
+  >(null);
 
   const mountedRef = useRef(true);
   const contentSeqRef = useRef(0);
@@ -139,8 +165,11 @@ export function useCrossAgentAdaptController(
   // 源 agent 变化：剔除非法 destination 并作废 preview
   useEffect(() => {
     setDestinations((prev) => sanitizeDestinations(source, prev));
+    setFullDestinationState(defaultFullDestination(source));
     setPreview(null);
     setApplyResults(null);
+    setFullPlan(null);
+    setFullApplyResults(null);
     clientRequestIdRef.current = null;
   }, [source]);
 
@@ -172,6 +201,8 @@ export function useCrossAgentAdaptController(
       setSourceMarkdownState(text);
       setPreview(null);
       setApplyResults(null);
+      setFullPlan(null);
+      setFullApplyResults(null);
       clientRequestIdRef.current = null;
     } catch (reason) {
       if (!mountedRef.current || seq !== contentSeqRef.current) return;
@@ -198,39 +229,73 @@ export function useCrossAgentAdaptController(
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount/source load
   }, [peerBlocked, source, refreshSourceContent]);
 
-  const setScopeConfirmed = useCallback((value: boolean) => {
-    setScopeConfirmedState(value);
+  const invalidatePlans = useCallback(() => {
     setPreview(null);
     setApplyResults(null);
+    setFullPlan(null);
+    setFullApplyResults(null);
     clientRequestIdRef.current = null;
   }, []);
 
-  const setSourceMarkdown = useCallback((value: string) => {
-    setSourceMarkdownState(value);
-    setPreview(null);
-    setApplyResults(null);
-    clientRequestIdRef.current = null;
-  }, []);
+  const setMode = useCallback(
+    (next: CrossAgentAdaptVolumeMode) => {
+      setModeState(next);
+      invalidatePlans();
+      setError(null);
+    },
+    [invalidatePlans],
+  );
+
+  const setScopeConfirmed = useCallback(
+    (value: boolean) => {
+      setScopeConfirmedState(value);
+      invalidatePlans();
+    },
+    [invalidatePlans],
+  );
+
+  const setSourceMarkdown = useCallback(
+    (value: string) => {
+      setSourceMarkdownState(value);
+      invalidatePlans();
+    },
+    [invalidatePlans],
+  );
+
+  const setFullDestination = useCallback(
+    (target: AgentTarget) => {
+      if (target === source) return;
+      setFullDestinationState(target);
+      invalidatePlans();
+    },
+    [invalidatePlans, source],
+  );
 
   const toggleDestination = useCallback(
     (target: AgentTarget) => {
       if (target === source) return;
       setDestinations((prev) => toggleDestinationSelection(source, prev, target));
-      setPreview(null);
-      setApplyResults(null);
-      clientRequestIdRef.current = null;
+      invalidatePlans();
     },
-    [source],
+    [invalidatePlans, source],
   );
 
-  const clearPreview = useCallback(() => {
-    setPreview(null);
-    setApplyResults(null);
-    clientRequestIdRef.current = null;
-    setError(null);
+  const toggleFullItemIncluded = useCallback((logicalKey: string) => {
+    setFullPlan((prev) => (prev ? toggleFullPlanItemIncluded(prev, logicalKey) : prev));
+    setFullApplyResults(null);
   }, []);
 
-  const previewGate = useMemo(
+  const clearPreview = useCallback(() => {
+    invalidatePlans();
+    setError(null);
+  }, [invalidatePlans]);
+
+  const scopeWire =
+    context.scope === 'project' && context.projectKey
+      ? context.projectKey
+      : 'user';
+
+  const selectivePreviewGate = useMemo(
     () =>
       canRunCrossAgentPreview({
         deviceId: context.deviceId,
@@ -254,7 +319,31 @@ export function useCrossAgentAdaptController(
     ],
   );
 
-  const applyGate = useMemo(
+  const fullPreviewGate = useMemo(
+    () =>
+      canRunCrossAgentFullPreview({
+        deviceId: context.deviceId,
+        source,
+        destination: fullDestination,
+        sourceMarkdown,
+        busy,
+        scope: context.scope,
+        projectKey: context.projectKey,
+        scopeConfirmed,
+      }),
+    [
+      busy,
+      context.deviceId,
+      context.projectKey,
+      context.scope,
+      fullDestination,
+      scopeConfirmed,
+      source,
+      sourceMarkdown,
+    ],
+  );
+
+  const selectiveApplyGate = useMemo(
     () =>
       canRunCrossAgentApply({
         deviceId: context.deviceId,
@@ -264,6 +353,19 @@ export function useCrossAgentAdaptController(
     [busy, context.deviceId, preview],
   );
 
+  const fullApplyGate = useMemo(
+    () =>
+      canRunCrossAgentFullApply({
+        deviceId: context.deviceId,
+        plan: fullPlan,
+        busy,
+      }),
+    [busy, context.deviceId, fullPlan],
+  );
+
+  const previewGate = mode === 'full' ? fullPreviewGate : selectivePreviewGate;
+  const applyGate = mode === 'full' ? fullApplyGate : selectiveApplyGate;
+
   const previewBlockedReason = useMemo(() => {
     if (previewGate.ok) return null;
     switch (previewGate.reason) {
@@ -272,8 +374,10 @@ export function useCrossAgentAdaptController(
       case 'emptyMarkdown':
         return t('agentHub:crossAgent.errors.emptyMarkdown');
       case 'emptyDestinations':
+      case 'emptyDestination':
         return t('agentHub:crossAgent.errors.emptyDestinations');
       case 'sourceInDestinations':
+      case 'sourceEqualsDestination':
         return t('agentHub:crossAgent.errors.sourceInDestinations');
       case 'scopeUnconfirmed':
         return t('agentHub:crossAgent.errors.scopeUnconfirmed');
@@ -292,6 +396,7 @@ export function useCrossAgentAdaptController(
       case 'peerBlocked':
         return t('agentHub:crossAgent.errors.peerBlocked');
       case 'missingPreview':
+      case 'emptyPlanHash':
         return t('agentHub:crossAgent.errors.previewRequired');
       case 'noApplicable':
         return t('agentHub:crossAgent.errors.noApplicable');
@@ -311,35 +416,66 @@ export function useCrossAgentAdaptController(
     setBusy(true);
     setError(null);
     setApplyResults(null);
+    setFullApplyResults(null);
     try {
-      const raw = await agentHubApi.previewCrossAgentInstruction({
-        source,
-        destinations,
-        sourceMarkdown: sourceMarkdown.trim(),
-        destinationPaths: {},
-      });
-      if (!mountedRef.current || seq !== previewSeqRef.current) return;
-      const parsed = parseCrossAgentPreview(raw);
-      if (!parsed) {
-        setError(t('agentHub:crossAgent.errors.invalidPreview'));
+      if (mode === 'full') {
+        if (!fullDestination) {
+          setError(t('agentHub:crossAgent.errors.emptyDestinations'));
+          return;
+        }
+        const raw = await agentHubApi.previewCrossAgentFull({
+          source,
+          destination: fullDestination,
+          scope: scopeWire,
+          sourceMarkdown: sourceMarkdown.trim(),
+          deviceId: context.deviceId,
+        });
+        if (!mountedRef.current || seq !== previewSeqRef.current) return;
+        const parsed = parseCrossAgentFullPlan(raw);
+        if (!parsed) {
+          setError(t('agentHub:crossAgent.errors.invalidPreview'));
+          setFullPlan(null);
+          return;
+        }
+        setFullPlan(parsed);
         setPreview(null);
-        return;
+        clientRequestIdRef.current = createClientRequestId();
+      } else {
+        const raw = await agentHubApi.previewCrossAgentInstruction({
+          source,
+          destinations,
+          sourceMarkdown: sourceMarkdown.trim(),
+          destinationPaths: {},
+        });
+        if (!mountedRef.current || seq !== previewSeqRef.current) return;
+        const parsed = parseCrossAgentPreview(raw);
+        if (!parsed) {
+          setError(t('agentHub:crossAgent.errors.invalidPreview'));
+          setPreview(null);
+          return;
+        }
+        setPreview(parsed);
+        setFullPlan(null);
+        clientRequestIdRef.current = createClientRequestId();
       }
-      setPreview(parsed);
-      clientRequestIdRef.current = createClientRequestId();
     } catch (reason) {
       if (!mountedRef.current || seq !== previewSeqRef.current) return;
       setError(formatError(reason));
       setPreview(null);
+      setFullPlan(null);
     } finally {
       if (mountedRef.current && seq === previewSeqRef.current) {
         setBusy(false);
       }
     }
   }, [
+    context.deviceId,
     destinations,
+    fullDestination,
+    mode,
     previewBlockedReason,
     previewGate.ok,
+    scopeWire,
     source,
     sourceMarkdown,
     t,
@@ -350,7 +486,6 @@ export function useCrossAgentAdaptController(
       setError(applyBlockedReason ?? t('agentHub:crossAgent.errors.previewRequired'));
       return;
     }
-    const applicable = applyGate.applicableDestinations;
     const seq = ++applySeqRef.current;
     setBusy(true);
     setError(null);
@@ -358,15 +493,44 @@ export function useCrossAgentAdaptController(
       const clientRequestId =
         clientRequestIdRef.current ?? createClientRequestId();
       clientRequestIdRef.current = clientRequestId;
-      const raw = await agentHubApi.applyCrossAgentInstruction({
-        source,
-        destinations: applicable,
-        sourceMarkdown: sourceMarkdown.trim(),
-        destinationPaths: {},
-        clientRequestId,
-      });
-      if (!mountedRef.current || seq !== applySeqRef.current) return;
-      setApplyResults(parseCrossAgentApplyResults(raw));
+
+      if (mode === 'full') {
+        if (!fullPlan || !fullDestination) {
+          setError(t('agentHub:crossAgent.errors.previewRequired'));
+          return;
+        }
+        const raw = await agentHubApi.applyCrossAgentFull({
+          source,
+          destination: fullDestination,
+          scope: scopeWire,
+          sourceMarkdown: sourceMarkdown.trim(),
+          planHash: fullPlan.planHash,
+          clientRequestId,
+          items: fullPlan.items.map((item) => ({
+            logicalKey: item.logicalKey,
+            included: item.included,
+          })),
+          deviceId: context.deviceId,
+        });
+        if (!mountedRef.current || seq !== applySeqRef.current) return;
+        setFullApplyResults(parseCrossAgentFullApplyResults(raw));
+        setApplyResults(null);
+      } else {
+        const applicable =
+          'applicableDestinations' in applyGate
+            ? applyGate.applicableDestinations
+            : [];
+        const raw = await agentHubApi.applyCrossAgentInstruction({
+          source,
+          destinations: applicable,
+          sourceMarkdown: sourceMarkdown.trim(),
+          destinationPaths: {},
+          clientRequestId,
+        });
+        if (!mountedRef.current || seq !== applySeqRef.current) return;
+        setApplyResults(parseCrossAgentApplyResults(raw));
+        setFullApplyResults(null);
+      }
     } catch (reason) {
       if (!mountedRef.current || seq !== applySeqRef.current) return;
       setError(formatError(reason));
@@ -375,16 +539,36 @@ export function useCrossAgentAdaptController(
         setBusy(false);
       }
     }
-  }, [applyBlockedReason, applyGate, source, sourceMarkdown, t]);
+  }, [
+    applyBlockedReason,
+    applyGate,
+    context.deviceId,
+    fullDestination,
+    fullPlan,
+    mode,
+    scopeWire,
+    source,
+    sourceMarkdown,
+    t,
+  ]);
 
   const projectOptInNeeded =
     context.scope === 'project' &&
     !(context.projectKey && context.projectKey.trim().length > 0);
 
+  const applicableCount =
+    mode === 'full'
+      ? countApplicableFullItems(fullPlan)
+      : countApplicableDestinations(preview);
+
   return {
+    mode,
+    setMode,
     source,
     destinations,
     destinationOptions: destinationCandidates(source),
+    fullDestination,
+    setFullDestination,
     scope: context.scope,
     projectKey: context.projectKey,
     scopeConfirmed,
@@ -398,13 +582,16 @@ export function useCrossAgentAdaptController(
     error,
     preview,
     applyResults,
-    applicableCount: countApplicableDestinations(preview),
+    fullPlan,
+    fullApplyResults,
+    applicableCount,
     canPreview: previewGate.ok && !busy,
     canApply: applyGate.ok && !busy,
     previewBlockedReason,
     applyBlockedReason,
     projectOptInNeeded,
     toggleDestination,
+    toggleFullItemIncluded,
     runPreview,
     runApply,
     refreshSourceContent,

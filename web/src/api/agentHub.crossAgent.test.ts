@@ -59,4 +59,50 @@ describe('agentHubApi cross-agent IPC envelope', () => {
       },
     );
   });
+
+  it('previewCrossAgentFull always sends portableAssets and deviceId defaults', async () => {
+    await agentHubApi.previewCrossAgentFull({
+      source: 'claude',
+      destination: 'codex',
+      scope: 'user',
+      sourceMarkdown: 'Always run tests.',
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith(AGENT_HUB_COMMANDS.previewCrossAgentFull, {
+      request: {
+        source: 'claude',
+        destination: 'codex',
+        scope: 'user',
+        sourceMarkdown: 'Always run tests.',
+        portableAssets: [],
+        deviceId: null,
+      },
+    });
+  });
+
+  it('applyCrossAgentFull sends planHash and item selections', async () => {
+    await agentHubApi.applyCrossAgentFull({
+      source: 'claude',
+      destination: 'codex',
+      scope: 'user',
+      sourceMarkdown: 'Always run tests.',
+      planHash: 'abc123',
+      clientRequestId: 'req-full-1',
+      items: [{ logicalKey: 'instruction:user', included: true }],
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith(AGENT_HUB_COMMANDS.applyCrossAgentFull, {
+      request: {
+        source: 'claude',
+        destination: 'codex',
+        scope: 'user',
+        sourceMarkdown: 'Always run tests.',
+        planHash: 'abc123',
+        clientRequestId: 'req-full-1',
+        items: [{ logicalKey: 'instruction:user', included: true }],
+        portableAssets: [],
+        deviceId: null,
+      },
+    });
+  });
 });
