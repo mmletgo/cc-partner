@@ -16,6 +16,7 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   classifyPortableActualState,
+  needsPortableEnsureManagedRefresh,
   portableInventoryProblemWarnings,
   type PortableActualStateClass,
 } from './portableInventoryPresentation';
@@ -29,6 +30,8 @@ export interface PortableInventoryRowLabels {
   scope: Record<'user' | 'project' | 'directory', string>;
   actions: Record<PortableAssetActionKind, string>;
   sourceOrigin: Record<PortableInventoryItemDto['sourceOrigin'], string>;
+  /** 历史 unmanaged：引导刷新纳入（无 Adopt 主按钮）。 */
+  unmanagedRefreshHint?: string;
 }
 
 export interface PortableInventoryRowProps {
@@ -53,6 +56,7 @@ function actualTone(
 function managementTone(
   state: PortableInventoryItemDto['managementState'],
 ): 'success' | 'neutral' | 'warn' | 'danger' {
+  // hubManaged → 一致；drifted/collision → 问题；unsupported → 告警；unmanaged 中性兜底
   if (state === 'hubManaged') return 'success';
   if (state === 'drifted' || state === 'externalCollision') return 'danger';
   if (state === 'unsupported') return 'warn';
@@ -75,6 +79,8 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
   const actual = classifyPortableActualState(item);
   const problemWarnings = portableInventoryProblemWarnings(item);
   const disabledVisual = actual === 'disabled';
+  const showRefreshHint =
+    needsPortableEnsureManagedRefresh(item) && Boolean(labels.unmanagedRefreshHint);
 
   return (
     <article
@@ -84,6 +90,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
       data-disabled={disabledVisual || undefined}
       data-kind={item.kind}
       data-target={item.target}
+      data-management={item.managementState}
       onClick={() => onSelect?.(item)}
     >
       <div className={styles.main}>
@@ -122,6 +129,11 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
           {item.version ? <span>{item.version}</span> : null}
         </div>
         {item.sourcePath ? <div className={styles.path}>{item.sourcePath}</div> : null}
+        {showRefreshHint ? (
+          <p className={styles.refreshHint} data-testid="portable-row-unmanaged-refresh-hint">
+            {labels.unmanagedRefreshHint}
+          </p>
+        ) : null}
         {problemWarnings.length > 0 ? (
           <div className={styles.warnings}>
             {problemWarnings.map((warning) => (

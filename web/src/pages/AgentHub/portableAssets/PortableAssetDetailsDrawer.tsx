@@ -86,8 +86,14 @@ export function PortableAssetDetailsDrawer({
   const canEnable = Boolean(item?.capabilities.canEnable && canMutate);
   const canDisable = Boolean(item?.capabilities.canDisable && canMutate);
   const canUninstall = Boolean(item?.capabilities.canUninstall && canMutate);
-  const canAdopt = Boolean(item?.capabilities.canAdopt && canMutate);
+  // 发现即管理：不在详情暴露 Adopt 主 CTA（历史 canAdopt 能力忽略）。
   const canInstall = Boolean(item?.capabilities.canInstallToSourceTarget && canMutate);
+  const needsRefresh =
+    item?.managementState === 'unmanaged' &&
+    !canEnable &&
+    !canDisable &&
+    !canInstall &&
+    canMutate;
 
   const skillLabels = useMemo(
     () => ({
@@ -290,6 +296,15 @@ export function PortableAssetDetailsDrawer({
               aria-label={t('agentHub:portable.details.actionsAria')}
               data-testid="portable-asset-actions"
             >
+              {needsRefresh ? (
+                <StatusMessage
+                  tone="info"
+                  live="off"
+                  data-testid="portable-action-refresh-hint"
+                >
+                  {t('agentHub:portable.details.unmanagedRefreshHint')}
+                </StatusMessage>
+              ) : null}
               <div className={styles.dialogActions}>
                 {canEnable ? (
                   <Button
@@ -311,17 +326,6 @@ export function PortableAssetDetailsDrawer({
                     data-testid="portable-action-disable"
                   >
                     {t('agentHub:portable.actions.disable')}
-                  </Button>
-                ) : null}
-                {canAdopt ? (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => onRequestAction('adopt')}
-                    data-testid="portable-action-adopt"
-                  >
-                    {t('agentHub:portable.actions.adopt')}
                   </Button>
                 ) : null}
                 {canInstall ? (

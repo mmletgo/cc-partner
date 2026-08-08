@@ -464,7 +464,7 @@
   "portable": {
     "inventory": {
       "title": "Agent assets",
-      "subtitle": "Observed inventory across Claude, Codex, and OpenCode. Actual state is the source of truth.",
+      "subtitle": "Observed inventory for the selected agent. Actual disk state is the source of truth; discovery creates Hub management automatically.",
       "loading": "Loading inventory…",
       "empty": "No portable assets match the current filters.",
       "refresh": "Refresh inventory",
@@ -474,7 +474,8 @@
       "filterTarget": "Target",
       "filterScope": "Scope",
       "filterActual": "Actual state",
-      "filterManagement": "Management",
+      "filterManagement": "Consistency",
+      "unmanagedRefreshHint": "Not managed yet — refresh inventory to bring this asset under Hub management.",
       "kindCounts": {
         "skill": "Skills",
         "command": "Commands",
@@ -499,12 +500,12 @@
         "problem": "Problem"
       },
       "managementFilter": {
-        "all": "All management",
-        "unmanaged": "External",
-        "hubManaged": "Hub managed",
+        "all": "All consistency",
+        "hubManaged": "Consistent",
         "drifted": "Drifted",
-        "externalCollision": "Collision",
-        "unsupported": "Unsupported"
+        "externalCollision": "Conflict",
+        "unsupported": "Unsupported",
+        "unmanaged": "Pending manage"
       },
       "actual": {
         "enabled": "Enabled",
@@ -513,11 +514,11 @@
         "unknown": "Unknown"
       },
       "management": {
-        "unmanaged": "External",
-        "hubManaged": "Hub managed",
+        "hubManaged": "Consistent",
         "drifted": "Drifted",
-        "externalCollision": "Collision",
-        "unsupported": "Unsupported"
+        "externalCollision": "Conflict",
+        "unsupported": "Unsupported",
+        "unmanaged": "Pending manage"
       },
       "scope": {
         "user": "User",
@@ -531,23 +532,24 @@
       }
     },
     "actions": {
-      "adopt": "Adopt",
+      "adopt": "Refresh to manage",
       "enable": "Enable",
       "disable": "Disable",
       "uninstall": "Uninstall",
       "installToSourceTarget": "Install to source target"
     },
     "management": {
-      "unmanaged": "External",
-      "hubManaged": "Hub managed",
+      "hubManaged": "Consistent",
       "drifted": "Drifted",
-      "externalCollision": "Collision",
-      "unsupported": "Unsupported"
+      "externalCollision": "Conflict",
+      "unsupported": "Unsupported",
+      "unmanaged": "Pending manage"
     },
     "details": {
       "title": "Asset details",
       "titleWithName": "Details · {{name}}",
       "empty": "Select an inventory item to inspect details.",
+      "unmanagedRefreshHint": "This asset is not managed yet. Refresh inventory so Hub can create a management record (no separate adopt step).",
       "nativeId": "Native id",
       "treeHash": "Tree hash",
       "origin": "Origin",

@@ -54,12 +54,12 @@ const labels: PortableInventoryViewLabels = {
     problem: 'Problem',
   },
   managementFilter: {
-    all: 'All management',
-    unmanaged: 'External',
-    hubManaged: 'Hub',
+    all: 'All consistency',
+    hubManaged: 'Consistent',
     drifted: 'Drifted',
-    externalCollision: 'Collision',
+    externalCollision: 'Conflict',
     unsupported: 'Unsupported',
+    unmanaged: 'Pending manage',
   },
   targets: { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' },
   kinds: { skill: 'Skill', command: 'Command', plugin: 'Plugin', mcp: 'MCP' },
@@ -70,15 +70,15 @@ const labels: PortableInventoryViewLabels = {
     unknown: 'Unknown',
   },
   management: {
-    unmanaged: 'External',
-    hubManaged: 'Hub',
+    unmanaged: 'Pending manage',
+    hubManaged: 'Consistent',
     drifted: 'Drifted',
-    externalCollision: 'Collision',
+    externalCollision: 'Conflict',
     unsupported: 'Unsupported',
   },
   scope: { user: 'User', project: 'Project', directory: 'Directory' },
   actions: {
-    adopt: 'Adopt',
+    adopt: 'Refresh to manage',
     enable: 'Enable',
     disable: 'Disable',
     uninstall: 'Uninstall',
@@ -89,6 +89,7 @@ const labels: PortableInventoryViewLabels = {
     pluginComponent: 'Plugin component',
     nativeConfig: 'Native config',
   },
+  unmanagedRefreshHint: 'Refresh inventory to manage this asset.',
 };
 
 function item(): PortableInventoryItemDto {

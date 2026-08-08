@@ -464,7 +464,7 @@
   "portable": {
     "inventory": {
       "title": "Agent 资产",
-      "subtitle": "跨 Claude / Codex / OpenCode 的 observed 库存。本机 actual 状态是真源。",
+      "subtitle": "当前 Agent 的 observed 库存。磁盘 actual 状态是真源；扫描发现时自动建立 Hub 管理记录。",
       "loading": "正在加载库存…",
       "empty": "没有符合当前筛选条件的 portable 资产。",
       "refresh": "刷新库存",
@@ -474,7 +474,8 @@
       "filterTarget": "目标 Agent",
       "filterScope": "作用域",
       "filterActual": "实际状态",
-      "filterManagement": "管理态",
+      "filterManagement": "一致性",
+      "unmanagedRefreshHint": "尚未纳入管理 — 请刷新库存，由 Hub 自动建立管理记录。",
       "kindCounts": {
         "skill": "Skill",
         "command": "Command",
@@ -499,12 +500,12 @@
         "problem": "异常"
       },
       "managementFilter": {
-        "all": "全部管理态",
-        "unmanaged": "外部",
-        "hubManaged": "Hub 管理",
+        "all": "全部一致性",
+        "hubManaged": "一致",
         "drifted": "漂移",
         "externalCollision": "冲突",
-        "unsupported": "不支持"
+        "unsupported": "不支持",
+        "unmanaged": "待纳入"
       },
       "actual": {
         "enabled": "已启用",
@@ -513,11 +514,11 @@
         "unknown": "未知"
       },
       "management": {
-        "unmanaged": "外部",
-        "hubManaged": "Hub 管理",
+        "hubManaged": "一致",
         "drifted": "漂移",
         "externalCollision": "冲突",
-        "unsupported": "不支持"
+        "unsupported": "不支持",
+        "unmanaged": "待纳入"
       },
       "scope": {
         "user": "用户",
@@ -531,23 +532,24 @@
       }
     },
     "actions": {
-      "adopt": "接管",
+      "adopt": "刷新以纳入",
       "enable": "启用",
       "disable": "禁用",
       "uninstall": "卸载",
       "installToSourceTarget": "安装到源目标"
     },
     "management": {
-      "unmanaged": "外部",
-      "hubManaged": "Hub 管理",
+      "hubManaged": "一致",
       "drifted": "漂移",
       "externalCollision": "冲突",
-      "unsupported": "不支持"
+      "unsupported": "不支持",
+      "unmanaged": "待纳入"
     },
     "details": {
       "title": "资产详情",
       "titleWithName": "详情 · {{name}}",
       "empty": "选择一条库存项以查看详情。",
+      "unmanagedRefreshHint": "该资产尚未纳入管理。请刷新库存，由 Hub 自动建立管理记录（无需单独接管步骤）。",
       "nativeId": "Native id",
       "treeHash": "树哈希",
       "origin": "来源",

@@ -40,10 +40,14 @@ export interface PortablePrimaryActionContext {
 /** kind tab 计数（排除 pluginComponent）。 */
 export type PortableKindCounts = Record<PortableAssetKind, number>;
 
-/** 默认筛选：Skill tab，其余 all。 */
+/**
+ * 默认筛选：Skill tab + 当前工作台默认 Agent（claude）。
+ * 壳层有 hubContext 时由父层 setFilters({ target: context.agent }) 覆盖；
+ * controller 独立挂载时保持 claude，避免「全部 Agent」成为主心智模型。
+ */
 export const DEFAULT_PORTABLE_INVENTORY_FILTERS: PortableInventoryFilters = {
   kind: 'skill',
-  target: 'all',
+  target: 'claude',
   scope: 'all',
   actualState: 'all',
   management: 'all',
@@ -199,8 +203,24 @@ export function countPortableItemsByKind(
 }
 
 /**
+ * Business Logic: 历史 unmanaged 项（T5 ensure_managed 前残留）应引导刷新纳入，
+ * 而不是走 Adopt 主路径；若后端已给 enable/disable 能力则按 managed 处理。
+ * Code Logic: managementState === 'unmanaged' 且无启停/安装能力 → 需要 refresh。
+ */
+export function needsPortableEnsureManagedRefresh(
+  item: PortableInventoryItemDto,
+): boolean {
+  if (item.managementState !== 'unmanaged') return false;
+  if (isPortableItemReadOnly(item)) return false;
+  const caps = item.capabilities;
+  if (caps.canEnable || caps.canDisable || caps.canInstallToSourceTarget) return false;
+  return true;
+}
+
+/**
  * Business Logic: 行上只暴露一个主动作；stale/未 opt-in/unsupported 不得 mutation。
- * Code Logic: capability 驱动 adopt → enable/disable → installToSourceTarget 优先级。
+ *   发现即管理后 **永不** 以 adopt 作为主动作（可保留 API kind 给遗留 apply）。
+ * Code Logic: capability 驱动 enable/disable → installToSourceTarget；跳过 canAdopt。
  */
 export function resolvePortablePrimaryAction(
   item: PortableInventoryItemDto,
@@ -210,9 +230,11 @@ export function resolvePortablePrimaryAction(
   if (context.lockedItemIds.has(item.inventoryItemId)) return null;
   if (isPortableItemReadOnly(item)) return null;
   if (item.managementState === 'unsupported') return null;
+  // 历史 unmanaged 且尚无启停能力：不伪装 Adopt；父层展示刷新文案。
+  if (needsPortableEnsureManagedRefresh(item)) return null;
 
   const caps = item.capabilities;
-  if (caps.canAdopt) return 'adopt';
+  // 故意不返回 'adopt'：discover-as-managed 已取代纳入主路径。
   if (item.actualEnabled === true && caps.canDisable) return 'disable';
   if (item.actualEnabled === false && caps.canEnable) return 'enable';
   if (item.actualEnabled === null || item.actualEnabled === undefined) {

@@ -25,15 +25,15 @@ const labels: PortableInventoryRowLabels = {
     unknown: 'Unknown',
   },
   management: {
-    unmanaged: 'External',
-    hubManaged: 'Hub',
+    unmanaged: 'Pending manage',
+    hubManaged: 'Consistent',
     drifted: 'Drifted',
-    externalCollision: 'Collision',
+    externalCollision: 'Conflict',
     unsupported: 'Unsupported',
   },
   scope: { user: 'User', project: 'Project', directory: 'Directory' },
   actions: {
-    adopt: 'Adopt',
+    adopt: 'Refresh to manage',
     enable: 'Enable',
     disable: 'Disable',
     uninstall: 'Uninstall',
@@ -44,6 +44,7 @@ const labels: PortableInventoryRowLabels = {
     pluginComponent: 'Plugin component',
     nativeConfig: 'Native config',
   },
+  unmanagedRefreshHint: 'Refresh inventory to manage this asset.',
 };
 
 function item(overrides: Partial<PortableInventoryItemDto> = {}): PortableInventoryItemDto {
@@ -103,7 +104,7 @@ describe('PortableInventoryRow', () => {
     expect(screen.getByText('Alpha Skill')).toBeTruthy();
     expect(screen.getByText('Claude')).toBeTruthy();
     expect(screen.getByText('Enabled')).toBeTruthy();
-    expect(screen.getByText('Hub')).toBeTruthy();
+    expect(screen.getByText('Consistent')).toBeTruthy();
     expect(screen.getByText('/tmp/alpha')).toBeTruthy();
 
     fireEvent.click(screen.getByTestId('portable-inventory-row-claude-skill-alpha'));
@@ -125,6 +126,36 @@ describe('PortableInventoryRow', () => {
     );
     expect(screen.queryByRole('button', { name: 'Disable' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Enable' })).toBeNull();
+  });
+
+  test('historical unmanaged without toggle shows refresh hint, never Adopt primary', () => {
+    render(
+      <PortableInventoryRow
+        item={item({
+          inventoryItemId: 'codex-skill-beta',
+          target: 'codex',
+          actualEnabled: false,
+          managementState: 'unmanaged',
+          capabilities: {
+            canEnable: false,
+            canDisable: false,
+            canUninstall: false,
+            canAdopt: true,
+            canInstallToSourceTarget: false,
+            reasonCode: null,
+            evidenceIds: [],
+          },
+        })}
+        primaryAction={null}
+        labels={labels}
+      />,
+    );
+    expect(screen.getByTestId('portable-row-unmanaged-refresh-hint').textContent).toContain(
+      'Refresh inventory',
+    );
+    expect(screen.queryByRole('button', { name: 'Adopt' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Refresh to manage' })).toBeNull();
+    expect(screen.getByText('Pending manage')).toBeTruthy();
   });
 
   test('keeps portability advisories out of the health row', () => {

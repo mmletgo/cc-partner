@@ -22,13 +22,14 @@ const KIND_TABS: PortableAssetKind[] = ['skill', 'command', 'plugin', 'mcp'];
 const TARGET_OPTIONS = ['all', 'claude', 'codex', 'opencode'] as const;
 const SCOPE_OPTIONS = ['all', 'user', 'project'] as const;
 const ACTUAL_OPTIONS = ['all', 'enabled', 'disabled', 'problem'] as const;
+/** 管理态筛选：主心智 = 一致/漂移/冲突/不支持；unmanaged 置末作历史兜底。 */
 const MANAGEMENT_OPTIONS = [
   'all',
-  'unmanaged',
   'hubManaged',
   'drifted',
   'externalCollision',
   'unsupported',
+  'unmanaged',
 ] as const;
 
 export interface PortableInventoryViewLabels extends PortableInventoryRowLabels {
