@@ -66,6 +66,9 @@ export const healthApi = {
   /** 关闭全部健康提醒全屏遮罩窗口(每屏一个透明置顶窗口) */
   closeOverlay: () => invoke<void>('close_health_overlay'),
 
+  /** 启动「开始休息」全屏遮罩倒计时(后端权威 endTs,多屏同步);返回休息结束时间戳 */
+  startRest: () => invoke<{ endTs: number }>('start_health_rest'),
+
   /** 读取近 N 天习惯统计(饮水 + 休息),供 HabitStatsCard 渲染 */
   getHabitStats: (days?: number) => invoke<HabitStats>('get_habit_stats', { days }),
 

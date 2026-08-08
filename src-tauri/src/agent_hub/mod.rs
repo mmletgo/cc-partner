@@ -82,8 +82,8 @@ pub use cross_agent_full::{
     apply_cross_agent_full, apply_cross_agent_full_default, preview_cross_agent_full,
     preview_cross_agent_full_default, ApplyCrossAgentFullRequest, CrossAgentFullApplyItemResult,
     CrossAgentFullApplySelection, CrossAgentFullPlan, CrossAgentFullPlanItem,
-    CrossAgentFullPortableRef, CrossAgentFullSnapshot, FullAdaptRunner, PreviewCrossAgentFullRequest,
-    StubFullAdaptRunner, FULL_ADAPT_GENERATOR_STUB,
+    CrossAgentFullPortableRef, CrossAgentFullSnapshot, FullAdaptRunner,
+    PreviewCrossAgentFullRequest, StubFullAdaptRunner, FULL_ADAPT_GENERATOR_STUB,
 };
 
 pub use instructions::{

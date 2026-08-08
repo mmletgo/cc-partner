@@ -550,7 +550,7 @@ pub fn run() {
             orchestrator_config_cmd::get_orchestrator_config,
             orchestrator_config_cmd::get_default_orchestrator_config,
             orchestrator_config_cmd::update_orchestrator_config,
-            // M10 健康提醒（18 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/恢复默认 + 习惯统计4）
+            // M10 健康提醒（19 命令：配置/状态/开关/暂停/贪睡/跳过/配置回写/统计/活动明细/喝水/跳过喝水/延迟喝水/全屏遮罩/开始休息/恢复默认 + 习惯统计4）
             health_cmd::get_health_config,
             health_cmd::get_default_health_config,
             health_cmd::get_health_status,
@@ -565,6 +565,7 @@ pub fn run() {
             health_cmd::skip_water_reminder,
             health_cmd::snooze_water_reminder,
             health_cmd::close_health_overlay,
+            health_cmd::start_health_rest,
             health_cmd::add_water_manual,
             health_cmd::delete_water_record,
             health_cmd::record_rest_completed,

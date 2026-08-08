@@ -103,6 +103,7 @@ function buildStatus(overrides: Partial<HealthStatus> = {}): HealthStatus {
     workWindowSeconds: 1800,
     breakSeconds: 300,
     snoozeUntil: null,
+    overlayRestEndTs: null,
     ...overrides,
   };
 }

@@ -300,6 +300,8 @@ export interface HealthStatus {
   breakSeconds: number;
   /** 贪睡到期时间戳（秒），null 表示未贪睡 */
   snoozeUntil: number | null;
+  /** 「开始休息」遮罩倒计时结束时间戳（秒），null 表示未在遮罩休息；多屏共享同一权威值 */
+  overlayRestEndTs: number | null;
 }
 
 /**

@@ -115,6 +115,9 @@ pub struct HealthStatusDto {
     pub break_seconds: i64,
     /// 贪睡到期时间戳（秒）；None 或 <= now 表示未贪睡。
     pub snooze_until: Option<i64>,
+    /// 当前「开始休息」遮罩倒计时的结束时间戳（秒）；None 表示未在遮罩休息。
+    /// 多屏遮罩共享同一权威值，各窗口据此显示同步倒计时。
+    pub overlay_rest_end_ts: Option<i64>,
 }
 
 /// 活跃/闲置统计 DTO（camelCase，对齐前端）。
@@ -213,6 +216,13 @@ pub async fn get_health_status(state: State<'_, AppState>) -> Result<HealthStatu
         work_window_seconds: cfg.work_window_seconds,
         break_seconds: cfg.break_seconds,
         snooze_until: *state.health.snooze_until.lock().unwrap(),
+        overlay_rest_end_ts: state
+            .health
+            .overlay_rest
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.end_ts),
     })
 }
 
@@ -523,15 +533,50 @@ pub async fn snooze_water_reminder(
     apply_snooze_water_reminder_for_runtime(&state.health, now, interval, minutes)
 }
 
-/// 关闭所有全屏健康提醒遮罩窗口(供前端遮罩页「推迟/跳过」按钮调用)。
+/// 关闭所有全屏健康提醒遮罩窗口,并取消进行中的「开始休息」倒计时。
 ///
-/// Business Logic: 用户在全屏遮罩上点击推迟/跳过后需关闭遮罩,恢复正常桌面使用。
-/// Code Logic: 委托 `crate::health::close_health_overlay`,遍历 webview_windows 关闭
-///             label 前缀 `health-overlay-` 的全部窗口。
+/// Business Logic: 用户在遮罩上点击推迟/跳过/已饮水,或在休息中按 ESC 后需关闭全部遮罩恢复
+///     桌面。若此时有进行中的休息倒计时,应一并取消其到点 task——既避免到点重复 record/skip/
+///     close,也保留「中途退出(ESC)不记录完整休息」的原语义(只有自然到 0 才 record)。
+/// Code Logic: 先 `cancel_overlay_rest(&state.health)` 取消休息到点 task 并清会话,再
+///             `close_all_health_overlay_windows(&app)` 关闭全部 `health-overlay-*` 窗口。
 #[tauri::command]
-pub async fn close_health_overlay(app: tauri::AppHandle) -> Result<(), AppError> {
-    crate::health::close_health_overlay(&app);
+pub async fn close_health_overlay(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    crate::health::cancel_overlay_rest(&state.health);
+    crate::health::close_all_health_overlay_windows(&app);
     Ok(())
+}
+
+/// 「开始休息」倒计时启动结果 DTO(camelCase,对齐前端)。
+///
+/// Business Logic: 前端发起窗口点击「开始休息」后立即用 `end_ts` 进入倒计时态(无需等
+///     `health:rest-started` 事件往返);同时后端广播事件让其他屏同步。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestStartDto {
+    /// 休息结束时间戳(Unix 秒);前端据此显示倒计时。
+    pub end_ts: i64,
+}
+
+/// 启动「开始休息」全屏遮罩倒计时(后端权威,多屏同步)。
+///
+/// Business Logic: 多屏每块屏各有一个 reminder 遮罩窗口,在其中一屏点「开始休息」必须让所有
+///     屏同步进入倒计时。后端写入权威 `end_ts` 并广播 `health:rest-started` 事件给全部遮罩
+///     窗口,各窗口基于同一 `end_ts` 显示;到点后端统一 record + skip + 关闭所有窗口。
+/// Code Logic: 读 `config.health.break_seconds` → `now` → `health::start_overlay_rest`
+///             (写会话 + emit + spawn 到点收尾 task) → 返回 `{ end_ts }`。
+#[tauri::command]
+pub async fn start_health_rest(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RestStartDto, AppError> {
+    let break_seconds = state.config.read().unwrap().health.break_seconds;
+    let now = chrono::Utc::now().timestamp();
+    let end_ts = crate::health::start_overlay_rest(&app, &state, now, break_seconds);
+    Ok(RestStartDto { end_ts })
 }
 
 /// Business Logic: 用户在习惯统计卡片点「+1 杯」手动加计饮水,无需等提醒。

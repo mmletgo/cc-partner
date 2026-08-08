@@ -11,8 +11,9 @@
 //!     portable 项在 stub runner 中可 residual/skip（清单仍覆盖五类）。
 
 use crate::agent_hub::cross_agent::{
-    apply_cross_agent_instruction, preview_cross_agent_instruction, preview_cross_agent_plugin_residual,
-    ApplyCrossAgentInstructionRequest, CrossAgentKind, PreviewCrossAgentInstructionRequest,
+    apply_cross_agent_instruction, preview_cross_agent_instruction,
+    preview_cross_agent_plugin_residual, ApplyCrossAgentInstructionRequest, CrossAgentKind,
+    PreviewCrossAgentInstructionRequest,
 };
 use crate::agent_hub::models::{AgentTarget, AssetKind, ScopeKind};
 use crate::agent_hub::object_store::sha256_hex;
@@ -226,12 +227,8 @@ impl FullAdaptRunner for StubFullAdaptRunner {
                         .cloned()
                         .unwrap_or_else(|| "plugin_residual".into())
                 }
-                CrossAgentKind::Skill => {
-                    "stub:skill_copy_not_ready".to_string()
-                }
-                CrossAgentKind::Command => {
-                    "stub:command_copy_not_ready".to_string()
-                }
+                CrossAgentKind::Skill => "stub:skill_copy_not_ready".to_string(),
+                CrossAgentKind::Command => "stub:command_copy_not_ready".to_string(),
                 CrossAgentKind::Mcp => "stub:mcp_copy_not_ready".to_string(),
                 CrossAgentKind::Instruction => continue,
             };
@@ -262,10 +259,7 @@ impl FullAdaptRunner for StubFullAdaptRunner {
                 action: "skip".into(),
                 path: String::new(),
                 content: None,
-                residual_reason: Some(format!(
-                    "no_{}_on_source",
-                    kind_wire(kind)
-                )),
+                residual_reason: Some(format!("no_{}_on_source", kind_wire(kind))),
                 included: false,
             });
             seen_kinds.insert(kind);
@@ -368,9 +362,7 @@ pub fn apply_cross_agent_full(
     };
     let plan = runner.propose(&snapshot, env)?;
     if plan.plan_hash != request.plan_hash {
-        return Err(AppError::validation(
-            "CROSS_AGENT_FULL_PLAN_HASH_MISMATCH",
-        ));
+        return Err(AppError::validation("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH"));
     }
 
     let mut included_map: BTreeMap<String, bool> = BTreeMap::new();
@@ -544,9 +536,7 @@ fn asset_kind_to_cross(kind: AssetKind) -> Option<CrossAgentKind> {
         AssetKind::Command => Some(CrossAgentKind::Command),
         AssetKind::Mcp => Some(CrossAgentKind::Mcp),
         AssetKind::Plugin => Some(CrossAgentKind::Plugin),
-        AssetKind::Instruction
-        | AssetKind::Agent
-        | AssetKind::Hook => None,
+        AssetKind::Instruction | AssetKind::Agent | AssetKind::Hook => None,
     }
 }
 
@@ -661,16 +651,26 @@ mod tests {
             portable_assets: vec![CrossAgentFullPortableRef {
                 kind: CrossAgentKind::Skill,
                 logical_key: "skill:demo".into(),
-                path: tmp.path().join(".claude/skills/demo").to_string_lossy().into(),
+                path: tmp
+                    .path()
+                    .join(".claude/skills/demo")
+                    .to_string_lossy()
+                    .into(),
             }],
         };
         let plan1 = StubFullAdaptRunner.propose(&snapshot, &env).unwrap();
         let plan2 = StubFullAdaptRunner.propose(&snapshot, &env).unwrap();
         assert_eq!(plan1.plan_hash, plan2.plan_hash);
         assert_eq!(plan1.generator, FULL_ADAPT_GENERATOR_STUB);
-        assert!(plan1.items.iter().any(|i| i.kind == CrossAgentKind::Instruction));
+        assert!(plan1
+            .items
+            .iter()
+            .any(|i| i.kind == CrossAgentKind::Instruction));
         assert!(plan1.items.iter().any(|i| i.kind == CrossAgentKind::Skill));
-        assert!(plan1.items.iter().any(|i| i.kind == CrossAgentKind::Command));
+        assert!(plan1
+            .items
+            .iter()
+            .any(|i| i.kind == CrossAgentKind::Command));
         assert!(plan1.items.iter().any(|i| i.kind == CrossAgentKind::Mcp));
         assert!(plan1.items.iter().any(|i| i.kind == CrossAgentKind::Plugin));
         // skill demo is residual skip
@@ -707,7 +707,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("CROSS_AGENT_FULL_PREVIEW_REQUIRED")
+            err.to_string()
+                .contains("CROSS_AGENT_FULL_PREVIEW_REQUIRED")
                 || format!("{err:?}").contains("CROSS_AGENT_FULL_PREVIEW_REQUIRED")
         );
     }
@@ -736,7 +737,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH")
+            err.to_string()
+                .contains("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH")
                 || format!("{err:?}").contains("CROSS_AGENT_FULL_PLAN_HASH_MISMATCH")
         );
     }

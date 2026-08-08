@@ -210,10 +210,7 @@ async fn ensure_one_item(
 
     let (status, rendered_hash, last_projected_revision_id, last_error) =
         if let Some(mat) = existing_mat.as_ref() {
-            let rendered = mat
-                .rendered_hash
-                .clone()
-                .or_else(|| observed.clone());
+            let rendered = mat.rendered_hash.clone().or_else(|| observed.clone());
             let status = match (rendered.as_deref(), observed.as_deref()) {
                 (Some(r), Some(o)) if r != o => MaterializationStatus::Drift,
                 _ => match mat.status {
@@ -226,8 +223,9 @@ async fn ensure_one_item(
                     MaterializationStatus::Conflict => MaterializationStatus::Conflict,
                     MaterializationStatus::Unsupported => MaterializationStatus::Unsupported,
                     // 已在上方跳过
-                    MaterializationStatus::ExternalCollision
-                    | MaterializationStatus::Blocked => mat.status,
+                    MaterializationStatus::ExternalCollision | MaterializationStatus::Blocked => {
+                        mat.status
+                    }
                 },
             };
             (
@@ -293,7 +291,9 @@ async fn ensure_scope_for_item(
             if let Some(s) = repo.get_scope(scope_id).await? {
                 Ok(s.id)
             } else {
-                Err(AppError::generic("agent_hub_ensure_managed_scope_unavailable"))
+                Err(AppError::generic(
+                    "agent_hub_ensure_managed_scope_unavailable",
+                ))
             }
         }
     }
@@ -377,8 +377,8 @@ mod tests {
     };
     use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory;
     use crate::agent_hub::portable_inventory::{
-        scan_portable_inventory_facts, PortableInventoryScanCapability,
-        PortableInventoryMutationCapability, PortableInventoryTargetDto, PortableScanScope,
+        scan_portable_inventory_facts, PortableInventoryMutationCapability,
+        PortableInventoryScanCapability, PortableInventoryTargetDto, PortableScanScope,
     };
     use crate::agent_hub::targets::paths::TargetEnvironment;
     use crate::storage::AgentHubRepo;
@@ -417,11 +417,7 @@ mod tests {
     }
 
     fn sample_item(home: &Path, name: &str, content_hash: &str) -> PortableInventoryItemDto {
-        let source_path = home
-            .join(".claude/skills")
-            .join(name)
-            .display()
-            .to_string();
+        let source_path = home.join(".claude/skills").join(name).display().to_string();
         PortableInventoryItemDto {
             inventory_item_id: inventory_item_id(AgentTarget::Claude, "user", &source_path, name),
             target: AgentTarget::Claude,
@@ -529,9 +525,16 @@ mod tests {
             snap2.items[0].management_state,
             PortableInventoryManagementState::HubManaged
         );
-        assert_eq!(snap2.items[0].canonical_asset_id.as_deref(), Some(asset_id.as_str()));
+        assert_eq!(
+            snap2.items[0].canonical_asset_id.as_deref(),
+            Some(asset_id.as_str())
+        );
         let assets = repo.list_assets(None, None).await.unwrap();
-        assert_eq!(assets.len(), 1, "idempotent ensure must not duplicate assets");
+        assert_eq!(
+            assets.len(),
+            1,
+            "idempotent ensure must not duplicate assets"
+        );
     }
 
     #[tokio::test]

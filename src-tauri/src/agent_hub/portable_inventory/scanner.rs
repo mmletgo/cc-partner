@@ -76,7 +76,8 @@ pub struct PortableScanScope {
 pub async fn inspect_portable_inventory(
     state: &AppState,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
-    if let Some(hit) = crate::agent_hub::portable_inventory::cache::get_cached_portable_inventory() {
+    if let Some(hit) = crate::agent_hub::portable_inventory::cache::get_cached_portable_inventory()
+    {
         return Ok(hit);
     }
     let env = current_target_environment();

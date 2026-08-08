@@ -14,10 +14,11 @@
  * 复用 `health` namespace 的 i18n 文案（reminderTitle/reminderBody/snooze5/snooze10/skip/
  * startRest/resting/escToClose/waterTitle/waterBody/drank/skipWater/snoozeWater5/snoozeWater10）。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { useSearchParams } from 'react-router-dom';
+import { listen } from '@tauri-apps/api/event';
 import { healthApi } from '@/api/health';
 
 type OverlayType = 'reminder' | 'water';
@@ -31,15 +32,22 @@ function formatMmSs(total: number): string {
   return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 }
 
+/** 计算休息剩余秒数（基于后端权威结束时间戳；纯函数，便于单测）。
+ *  nowSec 缺省取当前 Unix 秒；多屏各窗口传入同一 endTs 即可得到视觉一致的倒计时。 */
+export function computeRestLeft(endTs: number, nowSec?: number): number {
+  const now = nowSec ?? Math.floor(Date.now() / 1000);
+  return Math.max(0, endTs - now);
+}
+
 export default function HealthOverlay() {
   const { t } = useTranslation(['health', 'common']);
   const [searchParams] = useSearchParams();
   const type = (searchParams.get('type') as OverlayType | null) ?? 'reminder';
 
-  const [breakSeconds, setBreakSeconds] = useState<number>(0);
   const [mode, setMode] = useState<Mode>('actions');
   const [restLeft, setRestLeft] = useState<number>(0);
-  const restTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 休息结束时间戳（Unix 秒）：后端权威值，多屏共享同一份。null 表示未在遮罩休息。
+  const [restEndTs, setRestEndTs] = useState<number | null>(null);
 
   // onMount 强制透明：覆盖全局 reset.css 的 body 主题底色，使窗口透出真实桌面。
   useEffect(() => {
@@ -47,14 +55,17 @@ export default function HealthOverlay() {
     document.body.style.background = 'transparent';
   }, []);
 
-  // onMount 取 breakSeconds（休息倒计时初始值，来自配置）。
+  // onMount 读健康状态：若后端已在「开始休息」倒计时（overlayRestEndTs），本窗口直接进入
+  // resting 态对齐，覆盖窗口晚加载或 health:rest-started 事件丢失的场景（多屏同步兜底）。
   useEffect(() => {
     let cancelled = false;
     healthApi
       .getStatus()
       .then((st) => {
-        if (!cancelled && typeof st.breakSeconds === 'number') {
-          setBreakSeconds(st.breakSeconds);
+        if (cancelled) return;
+        if (typeof st.overlayRestEndTs === 'number') {
+          setRestEndTs(st.overlayRestEndTs);
+          setMode('resting');
         }
       })
       .catch((e) => console.error('读取健康状态失败', e));
@@ -63,7 +74,32 @@ export default function HealthOverlay() {
     };
   }, []);
 
-  /** 关闭遮罩：业务命令失败也强关，避免困住用户。 */
+  // 监听后端「开始休息」广播：任一屏点击「开始休息」后，所有遮罩窗口同步进入 resting 态，
+  // 并基于同一 endTs 显示倒计时——这是多屏同步的关键。
+  useEffect(() => {
+    let active = true;
+    const unlisten = listen<{ endTs: number }>('health:rest-started', (e) => {
+      if (!active) return;
+      setRestEndTs(e.payload.endTs);
+      setMode('resting');
+    });
+    return () => {
+      active = false;
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // 基于 restEndTs 的倒计时：每秒用 max(0, endTs - now) 刷新显示。各窗口即使 tick 不同步，
+  // 显示都基于同一 endTs，视觉一致；到 0 后由后端到点 task 统一 record + 关闭所有窗口。
+  useEffect(() => {
+    if (mode !== 'resting' || restEndTs == null) return;
+    const tick = () => setRestLeft(computeRestLeft(restEndTs));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [mode, restEndTs]);
+
+  /** 关闭遮罩：业务命令失败也强关，避免困住用户。后端 close 会一并取消进行中的休息 task。 */
   const close = useCallback(async (snoozeMin?: number) => {
     try {
       if (snoozeMin) {
@@ -77,45 +113,18 @@ export default function HealthOverlay() {
     await healthApi.closeOverlay();
   }, []);
 
-  /** 进入休息态：启动每秒倒数，到 0 自动 skip + 关闭遮罩。 */
-  const startRest = useCallback(() => {
-    if (restTimerRef.current) return;
-    setMode('resting');
-    setRestLeft(breakSeconds);
-    restTimerRef.current = setInterval(() => {
-      setRestLeft((n) => {
-        if (n <= 1) {
-          if (restTimerRef.current) {
-            clearInterval(restTimerRef.current);
-            restTimerRef.current = null;
-          }
-          (async () => {
-            try {
-              await healthApi.skip();
-              await healthApi.recordRestCompleted();
-            } catch (e) {
-              console.error('休息结束记录失败', e);
-            }
-            await healthApi.closeOverlay();
-          })();
-          return 0;
-        }
-        return n - 1;
-      });
-    }, 1000);
-  }, [breakSeconds]);
-
-  // 卸载时清理倒计时 interval。
-  useEffect(() => {
-    return () => {
-      if (restTimerRef.current) {
-        clearInterval(restTimerRef.current);
-        restTimerRef.current = null;
-      }
-    };
+  /** 进入休息态：委托后端权威计时（写 end_ts + 广播 health:rest-started 给所有屏 + 到点收尾）。 */
+  const startRest = useCallback(async () => {
+    try {
+      const res = await healthApi.startRest();
+      setRestEndTs(res.endTs);
+      setMode('resting');
+    } catch (e) {
+      console.error('开始休息失败', e);
+    }
   }, []);
 
-  // ESC 键：任意态直接关闭遮罩，不调业务命令。
+  // ESC 键：任意态直接关闭遮罩，不调业务命令（后端取消休息 task，保留中途退出不记录语义）。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
