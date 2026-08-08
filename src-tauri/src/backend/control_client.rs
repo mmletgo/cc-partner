@@ -51,6 +51,8 @@ use std::time::Duration;
 
 /// control 查询超时。
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Portable inventory 会扫描三个 CLI、配置树与项目映射，不能套用轻量查询预算。
+const PORTABLE_INVENTORY_TIMEOUT: Duration = Duration::from_secs(30);
 /// control 事件 NDJSON 单行最大字节（1 MiB）。
 const CONTROL_EVENT_STREAM_MAX_LINE_BYTES: usize = 1024 * 1024;
 /// control mutation 超时（配置落盘可能稍慢）。
@@ -61,6 +63,23 @@ const CLOUD_SYNC_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 const BACKUP_MUTATE_TIMEOUT: Duration = Duration::from_secs(360);
 /// Orchestrator deliver 超时（git commit/push/merge 可能很长）。
 const ORCHESTRATOR_DELIVER_TIMEOUT: Duration = Duration::from_secs(360);
+
+/// 选择 portable read control 操作的响应预算。
+///
+/// Business Logic（为什么需要这个函数）:
+///     inventory 会执行三 Agent 的 CLI/配置树扫描，实测可稳定超过轻量 ledger 查询的 3 秒预算；
+///     本机与远端 inventory 都必须等待扫描完成，get-by-request 则仍应快速失败。
+///
+/// Code Logic（这个函数做什么）:
+///     两个 inventory 操作返回 30 秒预算，其余 portable read 操作返回 QUERY_TIMEOUT。
+fn portable_control_read_timeout(op: &str) -> Duration {
+    match op {
+        "agent_hub.inspect_portable_inventory" | "agent_hub.list_remote_portable_inventory" => {
+            PORTABLE_INVENTORY_TIMEOUT
+        }
+        _ => QUERY_TIMEOUT,
+    }
+}
 
 /// 包装 get-config 响应（与 control_api::ControlConfigResponse 对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1398,14 +1417,14 @@ impl BackendControlClient {
     }
 
     /// Business Logic: GuiClient 读取 sidecar owner 的本机 portable inventory（只读）。
-    /// Code Logic: agent_hub.inspect_portable_inventory；QUERY_TIMEOUT。
+    /// Code Logic: agent_hub.inspect_portable_inventory；PORTABLE_INVENTORY_TIMEOUT。
     pub async fn agent_hub_inspect_portable_inventory(
         &self,
     ) -> Result<crate::agent_hub::PortableInventorySnapshotDto, AppError> {
         self.agent_hub_op_with_timeout(
             "agent_hub.inspect_portable_inventory",
             serde_json::json!({}),
-            QUERY_TIMEOUT,
+            portable_control_read_timeout("agent_hub.inspect_portable_inventory"),
         )
         .await
     }
@@ -1445,13 +1464,13 @@ impl BackendControlClient {
         self.agent_hub_op_with_timeout(
             "agent_hub.get_portable_asset_action",
             serde_json::json!({ "clientRequestId": client_request_id }),
-            QUERY_TIMEOUT,
+            portable_control_read_timeout("agent_hub.get_portable_asset_action"),
         )
         .await
     }
 
     /// Business Logic: 远端 portable inventory 只读 metadata；capability 缺失时 owner 会 fail closed。
-    /// Code Logic: agent_hub.list_remote_portable_inventory；QUERY_TIMEOUT。
+    /// Code Logic: agent_hub.list_remote_portable_inventory；PORTABLE_INVENTORY_TIMEOUT。
     pub async fn agent_hub_list_remote_portable_inventory(
         &self,
         req: crate::agent_hub::replication::pull::ListRemotePortableInventoryRequest,
@@ -1459,7 +1478,7 @@ impl BackendControlClient {
         self.agent_hub_op_with_timeout(
             "agent_hub.list_remote_portable_inventory",
             req,
-            QUERY_TIMEOUT,
+            portable_control_read_timeout("agent_hub.list_remote_portable_inventory"),
         )
         .await
     }
@@ -1499,7 +1518,7 @@ impl BackendControlClient {
         self.agent_hub_op_with_timeout(
             "agent_hub.get_portable_pull",
             serde_json::json!({ "clientRequestId": client_request_id }),
-            QUERY_TIMEOUT,
+            portable_control_read_timeout("agent_hub.get_portable_pull"),
         )
         .await
     }
@@ -3574,8 +3593,8 @@ mod tests {
         assert_eq!(err.code(), "upgradeRequired");
     }
 
-    /// Business Logic: portable control client 必须暴露四操作，且超时分层正确。
-    /// Code Logic: 生产 fn 签名；inspect/get 用 QUERY_TIMEOUT；apply 用长 mutation。
+    /// Business Logic: portable control client 必须给真实库存扫描留出高于轻量查询的预算。
+    /// Code Logic: 生产 fn 签名；inventory 使用独立预算，ledger get 保持 QUERY_TIMEOUT，apply 使用长 mutation。
     #[test]
     fn portable_control_client_methods_and_timeouts() {
         let src = include_str!("control_client.rs");
@@ -3599,14 +3618,23 @@ mod tests {
         assert!(src.contains("\"agent_hub.preview_portable_pull\""));
         assert!(src.contains("\"agent_hub.apply_portable_pull\""));
         assert!(src.contains("\"agent_hub.get_portable_pull\""));
-        // inspect/get → agent_hub_op_with_timeout(..., QUERY_TIMEOUT)
-        assert!(
-            src.contains(
-                "agent_hub_op_with_timeout(\n            \"agent_hub.inspect_portable_inventory\""
-            ) || src.contains("agent_hub_op_with_timeout(\"agent_hub.inspect_portable_inventory\"")
-                || (src.contains("\"agent_hub.inspect_portable_inventory\"")
-                    && src.contains("QUERY_TIMEOUT")),
-            "inspect should use QUERY_TIMEOUT"
+        assert_eq!(PORTABLE_INVENTORY_TIMEOUT, Duration::from_secs(30));
+        assert!(PORTABLE_INVENTORY_TIMEOUT > QUERY_TIMEOUT);
+        assert_eq!(
+            portable_control_read_timeout("agent_hub.inspect_portable_inventory"),
+            PORTABLE_INVENTORY_TIMEOUT
+        );
+        assert_eq!(
+            portable_control_read_timeout("agent_hub.list_remote_portable_inventory"),
+            PORTABLE_INVENTORY_TIMEOUT
+        );
+        assert_eq!(
+            portable_control_read_timeout("agent_hub.get_portable_asset_action"),
+            QUERY_TIMEOUT
+        );
+        assert_eq!(
+            portable_control_read_timeout("agent_hub.get_portable_pull"),
+            QUERY_TIMEOUT
         );
         assert!(
             src.contains("\"agent_hub.apply_portable_asset_action\"")
