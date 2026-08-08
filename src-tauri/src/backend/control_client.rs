@@ -21,7 +21,8 @@ use crate::agent_hub::service::{
 };
 use crate::agent_hub::user_instructions::{
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
-    PreviewUserInstructionRequest, UserInstructionPlanDto, UserInstructionWorkspaceDto,
+    PreviewUserInstructionRequest, SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto,
+    UserInstructionPlanDto, UserInstructionWorkspaceDto,
 };
 use crate::backend::authority::{classify_control_descriptor, CONTROL_SCHEMA_VERSION};
 use crate::backend::control::{self, BackendControlFile};
@@ -1187,6 +1188,17 @@ impl BackendControlClient {
     ) -> Result<ApplyUserInstructionPlanResultDto, AppError> {
         self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
         self.agent_hub_op("agent_hub.apply_user_instruction_plan", req)
+            .await
+    }
+
+    /// Business Logic: 保存块文档是 V2 mutation，必须阻断旧 sidecar（独立于 CLI 写入门禁）。
+    /// Code Logic: 版本门闩后调用 owner canonical CAS。
+    pub async fn agent_hub_save_user_instruction_blocks(
+        &self,
+        req: SaveUserInstructionBlocksRequest,
+    ) -> Result<UserInstructionCanonicalDto, AppError> {
+        self.require_agent_hub_write_compatibility(crate::backend::control::AGENT_HUB_API_VERSION)?;
+        self.agent_hub_op("agent_hub.save_user_instruction_blocks", req)
             .await
     }
 

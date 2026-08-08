@@ -76,7 +76,6 @@ import {
   nullableDecoder,
   objectDecoder,
   optionalDecoder,
-  recordDecoder,
   stringDecoder,
   type Decoder,
 } from '../runtimeSchema';
@@ -107,6 +106,31 @@ export const desiredPresenceDecoder: Decoder<DesiredPresence> = enumDecoder('Des
 export const instructionBlockModeDecoder: Decoder<InstructionBlockMode> = enumDecoder(
   'InstructionBlockMode',
   ['shared', 'adapted', 'targetOnly'] as const,
+);
+
+/** Instruction block per-agent variants decoder（fixed AgentTarget keys，fail-closed）。 */
+const instructionBlockVariantsDecoder: Decoder<Partial<Record<AgentTarget, string>>> =
+  objectDecoder('InstructionBlockVariants', {
+    claude: optionalDecoder(stringDecoder),
+    codex: optionalDecoder(stringDecoder),
+    opencode: optionalDecoder(stringDecoder),
+  });
+
+/**
+ * Business Logic: 指令块 mode 为 required enum；variants 收紧为 per-agent fixed keys。
+ * Code Logic: objectDecoder block；canonical/workspace/assetDetail 共享，故定义于前部避免 TDZ。
+ */
+export const instructionBlockDtoDecoder: Decoder<InstructionBlockDto> = objectDecoder(
+  'InstructionBlockDto',
+  {
+    id: stringDecoder,
+    mode: instructionBlockModeDecoder,
+    commonMarkdown: stringDecoder,
+    variants: optionalDecoder(nullableDecoder(instructionBlockVariantsDecoder)),
+    headingPath: optionalDecoder(nullableDecoder(arrayDecoder(stringDecoder))),
+    sourceTarget: optionalDecoder(nullableDecoder(agentTargetDecoder)),
+    needsAdaptation: optionalDecoder(booleanDecoder),
+  },
 );
 
 /**
@@ -339,6 +363,7 @@ export const userInstructionCanonicalDecoder: Decoder<UserInstructionCanonicalDt
     targetExtensions: userInstructionTargetExtensionsDecoder,
     deleted: booleanDecoder,
     contentTruncated: booleanDecoder,
+    blocks: optionalDecoder(arrayDecoder(instructionBlockDtoDecoder)),
   });
 
 /** User Instruction workspace decoder。 */
@@ -479,23 +504,6 @@ export const agentHubAssetSummaryDecoder: Decoder<AgentHubAssetSummary> = object
  */
 export const agentHubAssetSummaryListDecoder: Decoder<AgentHubAssetSummary[]> = arrayDecoder(
   agentHubAssetSummaryDecoder,
-);
-
-/**
- * Business Logic: 指令块 mode 为 required enum。
- * Code Logic: objectDecoder block。
- */
-export const instructionBlockDtoDecoder: Decoder<InstructionBlockDto> = objectDecoder(
-  'InstructionBlockDto',
-  {
-    id: stringDecoder,
-    mode: instructionBlockModeDecoder,
-    commonMarkdown: stringDecoder,
-    variants: optionalDecoder(nullableDecoder(recordDecoder(stringDecoder))),
-    headingPath: optionalDecoder(nullableDecoder(arrayDecoder(stringDecoder))),
-    sourceTarget: optionalDecoder(nullableDecoder(agentTargetDecoder)),
-    needsAdaptation: optionalDecoder(booleanDecoder),
-  },
 );
 
 /**

@@ -63,6 +63,13 @@
       "blockTitlePlaceholder": "块标题",
       "blockBodyPlaceholder": "块正文",
       "refresh": "重新扫描",
+      "blockMode": "块模式",
+      "blockModeShared": "公共（三 Agent 共用）",
+      "blockModeAdapted": "适配（含各 Agent 变体）",
+      "blockModeTargetOnly": "仅目标 Agent",
+      "commonMarkdown": "公共正文",
+      "variantsTitle": "各 Agent 变体",
+      "saveBlocks": "保存块",
       "writeBlocked": "当前 Agent 禁止写入。仍可编辑草稿，但同步已禁用。",
       "errors": {
         "emptySync": "没有可同步的内容。请先填写原文或块。"

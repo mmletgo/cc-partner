@@ -5,9 +5,13 @@ use super::inventory::{
     UserInstructionCapabilityLevel, UserInstructionManagementMode, UserInstructionOwnership,
     UserInstructionTargetDto, UserInstructionWorkspaceDto,
 };
-use crate::agent_hub::instructions::{compile_render, InstructionBlock, InstructionDocument};
-use crate::agent_hub::models::{AgentTarget, UserInstructionPlanClaim, UserInstructionPlanRecord};
+use crate::agent_hub::instructions::{compile_render, InstructionDocument};
+use crate::agent_hub::migration::{USER_INSTRUCTION_LOGICAL_KEY, USER_INSTRUCTION_NAMESPACE};
+use crate::agent_hub::models::{
+    AgentTarget, AssetKind, UserInstructionPlanClaim, UserInstructionPlanRecord,
+};
 use crate::agent_hub::object_store::sha256_hex;
+use crate::agent_hub::service::load_instruction_document_for_user_v2;
 use crate::agent_hub::targets::InstructionRenderContext;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -223,7 +227,7 @@ async fn preview_user_instruction_plan(
     validate_request_content_size(&request)?;
     let workspace = inspect_user_instruction_workspace(state).await?;
     validate_preview_base(&workspace, &request)?;
-    let document = document_from_request(&request);
+    let document = load_projection_document(state, &workspace).await?;
     let expires_at = (Utc::now() + Duration::minutes(PLAN_TTL_MINUTES)).to_rfc3339();
     let plan_token = uuid::Uuid::new_v4().to_string();
     let mut changes = Vec::with_capacity(workspace.targets.len());
@@ -349,6 +353,9 @@ pub async fn apply_user_instruction_plan(
                 .as_ref()
                 .map(|revision| revision.as_str());
 
+    // 投影基于持久化 head 块文档（含 per-agent variants），而非前端 flat request 合成。
+    let document = load_projection_document(state, &workspace).await?;
+
     let mut targets = Vec::with_capacity(stored.public.changes.len());
     for change in &stored.public.changes {
         let (target_state, error_code) = if global_stale {
@@ -381,7 +388,7 @@ pub async fn apply_user_instruction_plan(
         } else if let Some(code) = plan_blocking_code_for_target(&stored.public, change.target) {
             (UserInstructionTargetApplyState::Blocked, Some(code))
         } else {
-            match apply_user_instruction_change_to_disk(change, &stored.request) {
+            match apply_user_instruction_change_to_disk(change, &document) {
                 Ok(state) => (state, None),
                 Err(code) => (UserInstructionTargetApplyState::Failed, Some(code)),
             }
@@ -451,7 +458,7 @@ fn plan_blocking_code_for_target(
 ///     Delete 仅在 expected_hash 匹配时 unlink；AlreadyRendered → Applied。
 fn apply_user_instruction_change_to_disk(
     change: &UserInstructionPlanChangeDto,
-    request: &PreviewUserInstructionRequest,
+    document: &InstructionDocument,
 ) -> Result<UserInstructionTargetApplyState, String> {
     use crate::agent_hub::projection::{
         AtomicProjectionWriter, AtomicWriteOutcome, FileWriteRequest,
@@ -473,9 +480,8 @@ fn apply_user_instruction_change_to_disk(
             Ok(UserInstructionTargetApplyState::Applied)
         }
         UserInstructionPlanOperation::Create | UserInstructionPlanOperation::Update => {
-            let document = document_from_request(request);
             let compiled = compile_render(
-                &document,
+                document,
                 change.target,
                 &InstructionRenderContext::default(),
             );
@@ -544,39 +550,34 @@ fn validate_preview_base(
     Ok(())
 }
 
-/// 将普通编辑面构造为稳定 block 文档。
-fn document_from_request(request: &PreviewUserInstructionRequest) -> InstructionDocument {
-    let mut blocks = Vec::new();
-    if !request.common_content.is_empty() {
-        blocks.push(InstructionBlock::shared(
-            "user-v2-common",
-            request.common_content.clone(),
-            vec![],
-        ));
+/// 加载持久化 head InstructionDocument 供 preview/apply 投影使用。
+///
+/// Business Logic（为什么需要这个函数）:
+///     preview/apply 必须基于 canonical 真实块结构（含 per-agent variants/mode），而非前端
+///     flat request 合成（后者把 adapted 块摊平为 shared common，丢失 variants）。前端先
+///     save_blocks 推进 head，再 preview/apply；head 即权威投影源。
+///
+/// Code Logic（这个函数做什么）:
+///     workspace → asset → load_instruction_document_for_user_v2（CAS blob，markdown fallback）。
+async fn load_projection_document(
+    state: &AppState,
+    workspace: &UserInstructionWorkspaceDto,
+) -> Result<InstructionDocument, AppError> {
+    if workspace.canonical.is_none() {
+        return Ok(InstructionDocument::default());
     }
-    for target in [
-        AgentTarget::Claude,
-        AgentTarget::Codex,
-        AgentTarget::OpenCode,
-    ] {
-        if let Some(content) = request
-            .target_extensions
-            .get(&target)
-            .filter(|content| !content.is_empty())
-        {
-            blocks.push(InstructionBlock::target_only(
-                format!("user-v2-{}", target.as_str()),
-                target,
-                content.clone(),
-                vec![],
-                false,
-            ));
-        }
-    }
-    InstructionDocument {
-        relative_key: String::new(),
-        blocks,
-    }
+    let asset = state
+        .agent_hub_repo
+        .get_asset_by_unique_key(
+            &workspace.scope_id,
+            AssetKind::Instruction,
+            USER_INSTRUCTION_NAMESPACE,
+            USER_INSTRUCTION_LOGICAL_KEY,
+        )
+        .await?
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_ASSET_MISSING"))?;
+    let (document, _) = load_instruction_document_for_user_v2(&asset, state).await?;
+    Ok(document)
 }
 
 /// 生成单 target 路径/操作/diff/优先级影响。
@@ -1023,14 +1024,8 @@ mod tests {
             warnings: vec![],
             diff_truncated: false,
         };
-        let request = PreviewUserInstructionRequest {
-            base_revision_id: None,
-            inventory_snapshot_hash: "inv".into(),
-            common_content: body.to_string(),
-            target_extensions: BTreeMap::new(),
-            target_selections: BTreeMap::new(),
-        };
-        let state = apply_user_instruction_change_to_disk(&change, &request).expect("write");
+        let document = InstructionDocument::from_shared_markdown(String::new(), body.to_string());
+        let state = apply_user_instruction_change_to_disk(&change, &document).expect("write");
         assert_eq!(state, UserInstructionTargetApplyState::Applied);
         let on_disk = std::fs::read_to_string(&path).expect("read back");
         assert!(on_disk.contains("conventional commits"));

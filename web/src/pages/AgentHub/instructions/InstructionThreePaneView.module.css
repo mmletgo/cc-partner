@@ -172,6 +172,76 @@
   border-color: var(--accent);
 }
 
+.blockModeSelect {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  padding: var(--space-2);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.blockModeSelect:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.blockVariants {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.blockVariantsTitle {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--fg-muted-readable);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+.blockVariantRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.blockVariantTarget {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--fg-2);
+}
+
+.blockVariantInput {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 5rem;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  padding: var(--space-2);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.blockVariantInput:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .previewBody {
   flex: 1;
   min-height: 8rem;

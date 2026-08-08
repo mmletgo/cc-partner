@@ -393,6 +393,7 @@ pub fn run() {
             agent_hub_cmd::agent_hub_preview_user_instruction_setup,
             agent_hub_cmd::agent_hub_preview_user_instruction_update,
             agent_hub_cmd::agent_hub_apply_user_instruction_plan,
+            agent_hub_cmd::agent_hub_save_user_instruction_blocks,
             agent_hub_cmd::agent_hub_update_instruction,
             agent_hub_cmd::agent_hub_update_instruction_block,
             agent_hub_cmd::agent_hub_pair_instruction_variants,

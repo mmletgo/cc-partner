@@ -50,7 +50,8 @@ use crate::agent_hub::snapshot::importer::ResolvedProjectMapping;
 use crate::agent_hub::targets::TargetEnvironment;
 use crate::agent_hub::user_instructions::{
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
-    PreviewUserInstructionRequest, UserInstructionPlanDto, UserInstructionWorkspaceDto,
+    PreviewUserInstructionRequest, SaveUserInstructionBlocksRequest, UserInstructionCanonicalDto,
+    UserInstructionPlanDto, UserInstructionWorkspaceDto,
 };
 use crate::backend::authority::RuntimeRole;
 use crate::backend::control::AGENT_HUB_API_VERSION;
@@ -168,6 +169,21 @@ pub async fn agent_hub_apply_user_instruction_plan(
         return client.agent_hub_apply_user_instruction_plan(request).await;
     }
     AgentHubService::apply_user_instruction_plan(state.inner(), request).await
+}
+
+/// Business Logic: 保存块文档是 cc-partner 内部编辑态，独立于 CLI 写入门禁，但仍受 V2 合同约束。
+/// Code Logic: owner canonical CAS / GuiClient V2 control mutation。
+#[tauri::command]
+pub async fn agent_hub_save_user_instruction_blocks(
+    state: State<'_, AppState>,
+    request: SaveUserInstructionBlocksRequest,
+) -> Result<UserInstructionCanonicalDto, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        return client.agent_hub_save_user_instruction_blocks(request).await;
+    }
+    AgentHubService::save_user_instruction_blocks(state.inner(), request).await
 }
 
 /// Business Logic: 保存整份指令。

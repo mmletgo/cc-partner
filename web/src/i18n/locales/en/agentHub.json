@@ -63,6 +63,13 @@
       "blockTitlePlaceholder": "Block title",
       "blockBodyPlaceholder": "Block body",
       "refresh": "Rescan",
+      "blockMode": "Block mode",
+      "blockModeShared": "Shared (all agents)",
+      "blockModeAdapted": "Adapted (per-agent variants)",
+      "blockModeTargetOnly": "Target only",
+      "commonMarkdown": "Common body",
+      "variantsTitle": "Per-agent variants",
+      "saveBlocks": "Save blocks",
       "writeBlocked": "Writes are blocked for this agent. You can still edit the draft, but sync is disabled.",
       "errors": {
         "emptySync": "Nothing to sync. Add original content or blocks first."

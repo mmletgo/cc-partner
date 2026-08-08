@@ -585,7 +585,10 @@ test.describe('E2E-AGENT-HUB-INSTR-3PANE-001 instruction three-pane empty blocks
     await page.getByTestId('instruction-reparse-from-original').click();
     await expect(page.getByTestId('instruction-blocks-empty')).toHaveCount(0);
     await expect(page.getByTestId('instruction-block-list')).toBeVisible();
-    await expect(page.getByTestId('instruction-preview-body')).toContainText('Shared rules');
+    // preview 由块按 agent 合成（commonMarkdown），不再含 `## 标题`（标题在 headingPath）
+    await expect(page.getByTestId('instruction-preview-body')).toContainText(
+      'Always run tests before commit',
+    );
   });
 });
 

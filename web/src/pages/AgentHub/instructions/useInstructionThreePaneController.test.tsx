@@ -21,6 +21,7 @@ const apiMocks = vi.hoisted(() => ({
   previewUserInstructionSetup: vi.fn(),
   previewUserInstructionUpdate: vi.fn(),
   applyUserInstructionPlan: vi.fn(),
+  saveUserInstructionBlocks: vi.fn(),
 }));
 
 vi.mock('@/api/agentHub', () => ({ agentHubApi: apiMocks }));
@@ -367,8 +368,8 @@ describe('useInstructionThreePaneController', () => {
     });
 
     expect(result.current.state.blocks.length).toBe(2);
-    expect(result.current.state.blocks[0]?.title).toBe('Shared rules');
-    expect(result.current.state.previewText).toContain('## Shared rules');
+    expect(result.current.state.blocks[0]?.headingPath[0]).toBe('Shared rules');
+    expect(result.current.state.previewText).toContain('Always use TypeScript');
     expect(result.current.state.blocksDirty).toBe(false);
   });
 
@@ -413,7 +414,8 @@ describe('useInstructionThreePaneController', () => {
       codex: 'unmanaged',
       opencode: 'unmanaged',
     });
-    expect(previewArg?.commonContent).toContain('## Shared rules');
+    // backend preview 基于持久化 head 投影；前端只传 targetSelections/base/snapshot
+    expect(previewArg?.commonContent).toBe('');
     expect(result.current.previewOpen).toBe(true);
 
     await act(async () => {
@@ -437,7 +439,7 @@ describe('useInstructionThreePaneController', () => {
     });
     apiMocks.inspectUserInstructionWorkspace
       .mockResolvedValueOnce(workspaceFixture())
-      .mockResolvedValueOnce(afterWrite);
+      .mockResolvedValue(afterWrite);
     apiMocks.previewUserInstructionUpdate.mockResolvedValue(planFixture());
     apiMocks.applyUserInstructionPlan.mockResolvedValue(applyFixture());
 
@@ -456,7 +458,7 @@ describe('useInstructionThreePaneController', () => {
     });
 
     await waitFor(() => expect(result.current.state.blocks.length).toBe(2));
-    expect(result.current.state.blocks[0]?.title).toBe('Shared rules');
+    expect(result.current.state.blocks[0]?.headingPath[0]).toBe('Shared rules');
   });
 
   test('changing deviceId retriggers inspect with peer context', async () => {

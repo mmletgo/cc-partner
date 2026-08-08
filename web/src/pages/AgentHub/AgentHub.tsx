@@ -221,6 +221,16 @@ export function AgentHubView(props: AgentHubViewProps) {
       blockTitlePlaceholder: t('agentHub:instructions.threePane.blockTitlePlaceholder'),
       blockBodyPlaceholder: t('agentHub:instructions.threePane.blockBodyPlaceholder'),
       refresh: t('agentHub:instructions.threePane.refresh'),
+      blockMode: t('agentHub:instructions.threePane.blockMode'),
+      blockModeShared: t('agentHub:instructions.threePane.blockModeShared'),
+      blockModeAdapted: t('agentHub:instructions.threePane.blockModeAdapted'),
+      blockModeTargetOnly: t('agentHub:instructions.threePane.blockModeTargetOnly'),
+      commonMarkdown: t('agentHub:instructions.threePane.commonMarkdown'),
+      variantsTitle: t('agentHub:instructions.threePane.variantsTitle'),
+      variantClaude: t('agentHub:targets.claude'),
+      variantCodex: t('agentHub:targets.codex'),
+      variantOpencode: t('agentHub:targets.opencode'),
+      saveBlocks: t('agentHub:instructions.threePane.saveBlocks'),
     }),
     [t],
   );
@@ -567,6 +577,9 @@ export function AgentHubView(props: AgentHubViewProps) {
             onReparse={instructionThreePane.reparseFromOriginal}
             onSync={() => {
               void instructionThreePane.requestSync();
+            }}
+            onSaveBlocks={() => {
+              void instructionThreePane.saveBlocks();
             }}
             onRetry={() => {
               void instructionThreePane.refresh();

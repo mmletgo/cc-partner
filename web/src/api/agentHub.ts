@@ -26,6 +26,7 @@ import {
   instructionBlockDtoDecoder,
   pluginPackageReportDecoder,
   userInstructionApplyResultDecoder,
+  userInstructionCanonicalDecoder,
   userInstructionPlanDecoder,
   userInstructionWorkspaceDecoder,
 } from '@/lib/schemas/agentHub';
@@ -49,7 +50,9 @@ import type {
   InstructionBlockDto,
   InstructionBlockMode,
   PluginPackageReport,
+  SaveUserInstructionBlocksRequest,
   UserInstructionApplyResultDto,
+  UserInstructionCanonicalDto,
   UserInstructionPlanDto,
   UserInstructionPreviewRequest,
   UserInstructionTargetDto,
@@ -92,6 +95,7 @@ export const AGENT_HUB_COMMANDS = {
   inspectUserInstructionWorkspace: 'agent_hub_inspect_user_instruction_workspace',
   previewUserInstructionSetup: 'agent_hub_preview_user_instruction_setup',
   applyUserInstructionPlan: 'agent_hub_apply_user_instruction_plan',
+  saveUserInstructionBlocks: 'agent_hub_save_user_instruction_blocks',
   previewUserInstructionUpdate: 'agent_hub_preview_user_instruction_update',
   previewAdoptUserInstructionSource: 'agent_hub_preview_adopt_user_instruction_source',
   previewPauseUserInstructionTarget: 'agent_hub_preview_pause_user_instruction_target',
@@ -786,6 +790,31 @@ export const agentHubApi = {
       );
     } catch (reason) {
       return rethrowUserInstructionMutationError(reason, AGENT_HUB_COMMANDS.applyUserInstructionPlan);
+    }
+  },
+
+  /**
+   * Business Logic: 保存块文档是 cc-partner 内部编辑态，独立于 CLI 写入门禁。
+   * Code Logic: assertLocal + V2 unavailable 兜底；返回新 canonical（含新 head + blocks）。
+   */
+  saveUserInstructionBlocks: async (
+    request: SaveUserInstructionBlocksRequest & AgentHubRequestContext,
+  ): Promise<UserInstructionCanonicalDto> => {
+    assertLocalAgentHubContext(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
+    try {
+      return await invokeDecoded(
+        AGENT_HUB_COMMANDS.saveUserInstructionBlocks,
+        { request: body },
+        userInstructionCanonicalDecoder,
+      );
+    } catch (reason) {
+      return rethrowUserInstructionMutationError(
+        reason,
+        AGENT_HUB_COMMANDS.saveUserInstructionBlocks,
+      );
     }
   },
 

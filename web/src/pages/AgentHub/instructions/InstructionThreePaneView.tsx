@@ -11,8 +11,25 @@
 
 import type { JSX } from 'react';
 import { Button, StatusMessage } from '@/components/primitives';
+import type { AgentTarget } from '@/lib/types/agentHub';
 import type { InstructionBlockDraft, InstructionThreePaneState } from './instructionThreePane';
 import styles from './InstructionThreePaneView.module.css';
+
+const VARIANT_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
+
+function variantLabel(
+  labels: InstructionThreePaneViewLabels,
+  target: AgentTarget,
+): string {
+  switch (target) {
+    case 'claude':
+      return labels.variantClaude;
+    case 'codex':
+      return labels.variantCodex;
+    case 'opencode':
+      return labels.variantOpencode;
+  }
+}
 
 /** 三栏视图文案。 */
 export interface InstructionThreePaneViewLabels {
@@ -38,6 +55,16 @@ export interface InstructionThreePaneViewLabels {
   blockTitlePlaceholder: string;
   blockBodyPlaceholder: string;
   refresh: string;
+  blockMode: string;
+  blockModeShared: string;
+  blockModeAdapted: string;
+  blockModeTargetOnly: string;
+  commonMarkdown: string;
+  variantsTitle: string;
+  variantClaude: string;
+  variantCodex: string;
+  variantOpencode: string;
+  saveBlocks: string;
 }
 
 export interface InstructionThreePaneViewProps {
@@ -52,6 +79,7 @@ export interface InstructionThreePaneViewProps {
   dualDirtyOpen: boolean;
   onReparse: () => void;
   onSync: () => void;
+  onSaveBlocks: () => void;
   onRetry: () => void;
   onRefresh: () => void;
   onOriginalChange: (text: string) => void;
@@ -78,6 +106,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
     dualDirtyOpen,
     onReparse,
     onSync,
+    onSaveBlocks,
     onRetry,
     onRefresh,
     onOriginalChange,
@@ -134,6 +163,15 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
           </Button>
           <Button
             variant="primary"
+            size="sm"
+            loading={actionBusy}
+            onClick={onSaveBlocks}
+            data-testid="instruction-save-blocks"
+          >
+            {labels.saveBlocks}
+          </Button>
+          <Button
+            variant="secondary"
             size="sm"
             loading={actionBusy}
             disabled={writeBlocked}
@@ -217,24 +255,64 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
                     className={styles.blockCard}
                     data-testid={`instruction-block-${block.id}`}
                   >
-                    <input
-                      className={styles.blockTitleInput}
-                      value={block.title}
-                      placeholder={labels.blockTitlePlaceholder}
-                      aria-label={labels.blockTitlePlaceholder}
+                    <select
+                      className={styles.blockModeSelect}
+                      value={block.mode}
+                      aria-label={labels.blockMode}
+                      data-testid={`instruction-block-mode-${block.id}`}
                       onChange={(event) =>
-                        onBlockChange(block.id, { title: event.currentTarget.value })
+                        onBlockChange(block.id, {
+                          mode: event.currentTarget.value as InstructionBlockDraft['mode'],
+                        })
                       }
-                    />
-                    <textarea
-                      className={styles.blockBodyInput}
-                      value={block.body}
-                      placeholder={labels.blockBodyPlaceholder}
-                      aria-label={labels.blockBodyPlaceholder}
-                      onChange={(event) =>
-                        onBlockChange(block.id, { body: event.currentTarget.value })
-                      }
-                    />
+                    >
+                      <option value="shared">{labels.blockModeShared}</option>
+                      <option value="adapted">{labels.blockModeAdapted}</option>
+                      <option value="targetOnly">{labels.blockModeTargetOnly}</option>
+                    </select>
+                    {block.mode === 'shared' || block.mode === 'adapted' ? (
+                      <textarea
+                        className={styles.blockBodyInput}
+                        value={block.commonMarkdown}
+                        placeholder={labels.blockBodyPlaceholder}
+                        aria-label={labels.commonMarkdown}
+                        data-testid={`instruction-block-common-${block.id}`}
+                        onChange={(event) =>
+                          onBlockChange(block.id, {
+                            commonMarkdown: event.currentTarget.value,
+                          })
+                        }
+                      />
+                    ) : null}
+                    {block.mode === 'adapted' || block.mode === 'targetOnly' ? (
+                      <div
+                        className={styles.blockVariants}
+                        data-testid={`instruction-block-variants-${block.id}`}
+                      >
+                        <span className={styles.blockVariantsTitle}>{labels.variantsTitle}</span>
+                        {VARIANT_TARGETS.map((target) => (
+                          <label key={target} className={styles.blockVariantRow}>
+                            <span className={styles.blockVariantTarget}>
+                              {variantLabel(labels, target)}
+                            </span>
+                            <textarea
+                              className={styles.blockVariantInput}
+                              value={block.variants[target] ?? ''}
+                              placeholder={labels.blockBodyPlaceholder}
+                              aria-label={variantLabel(labels, target)}
+                              onChange={(event) =>
+                                onBlockChange(block.id, {
+                                  variants: {
+                                    ...block.variants,
+                                    [target]: event.currentTarget.value,
+                                  },
+                                })
+                              }
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    ) : null}
                   </article>
                 ))}
               </div>

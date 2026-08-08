@@ -9,7 +9,10 @@ use crate::agent_hub::models::{
     TargetBinding, UserInstructionOwnershipRecord,
 };
 use crate::agent_hub::object_store::sha256_hex;
-use crate::agent_hub::service::load_instruction_document_for_user_v2;
+use crate::agent_hub::service::{
+    block_to_dto, commit_user_instruction_document, instruction_document_from_block_dtos,
+    load_instruction_document_for_user_v2, InstructionBlockDto,
+};
 use crate::agent_hub::support::{
     builtin_support_manifest, evaluate_target_support, find_target_record, CapabilitySupport,
     RuntimeProbeSnapshot, TargetCapability,
@@ -258,6 +261,9 @@ pub struct UserInstructionCanonicalDto {
     /// 超出 control 有界响应预算时输出 true，完整正文应走既有 get_asset。
     #[serde(default)]
     pub content_truncated: bool,
+    /// 块模型（与 commonContent/targetExtensions 同源 InstructionDocument；三栏据此 hydrate）。
+    #[serde(default)]
+    pub blocks: Vec<InstructionBlockDto>,
 }
 
 /// 用户级指令工作区。
@@ -270,6 +276,18 @@ pub struct UserInstructionWorkspaceDto {
     pub canonical: Option<UserInstructionCanonicalDto>,
     pub targets: Vec<UserInstructionTargetDto>,
     pub refreshed_at: String,
+    pub inventory_snapshot_hash: String,
+}
+
+/// 「保存块文档」请求（baseRevisionId head CAS + inventorySnapshotHash 防 stale）。
+///
+/// Business Logic: 三栏编辑块后持久化 canonical，独立于 CLI 写入门禁。
+/// Code Logic: camelCase；blocks 为 InstructionBlockDto 列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveUserInstructionBlocksRequest {
+    pub blocks: Vec<InstructionBlockDto>,
+    pub base_revision_id: Option<String>,
     pub inventory_snapshot_hash: String,
 }
 
@@ -465,6 +483,8 @@ async fn load_canonical(
     };
     let (document, _) = load_instruction_document_for_user_v2(asset, state).await?;
     let (mut common_content, mut target_extensions) = split_document_content(&document);
+    // 块模型随 canonical 暴露给三栏 hydrate；与 common/extensions 同源，不单独裁剪。
+    let blocks = document.blocks.iter().map(block_to_dto).collect::<Vec<_>>();
     let mut content_truncated = false;
     common_content = truncate_utf8(
         &common_content,
@@ -487,7 +507,66 @@ async fn load_canonical(
         target_extensions,
         deleted: asset.deleted_at.is_some(),
         content_truncated,
+        blocks,
     }))
+}
+
+/// 保存块文档（cc-partner 内部编辑态持久化，独立于 CLI 写入门禁）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在三栏编辑块后，块模型应作为权威 canonical 持久化，打开即恢复，无需从原文 parse。
+///     此操作只推进 canonical head（put_blob + append_revision），不写 CLI 原生文件、
+///     不查 support manifest——目标文件投影仍由 apply（受 L3 门禁）独立处理。
+///
+/// Code Logic（这个函数做什么）:
+///     inspect 验证 baseRevisionId/inventorySnapshotHash → blocks round-trip 成 InstructionDocument
+///     → commit_user_instruction_document（head CAS）→ 重新 load_canonical 返回新 head + blocks。
+pub async fn save_user_instruction_blocks(
+    state: &AppState,
+    request: SaveUserInstructionBlocksRequest,
+) -> Result<UserInstructionCanonicalDto, AppError> {
+    if request.inventory_snapshot_hash.trim().is_empty() {
+        return Err(AppError::validation("USER_INSTRUCTION_SNAPSHOT_REQUIRED"));
+    }
+    let workspace = inspect_user_instruction_workspace(state).await?;
+    let canonical = workspace
+        .canonical
+        .as_ref()
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_CANONICAL_MISSING"))?;
+    // head CAS + inventory snapshot 防 stale 覆盖（与 preview/apply 同口径）
+    let current_revision = canonical.head_revision_id.as_deref();
+    if current_revision != request.base_revision_id.as_deref() {
+        return Err(AppError::conflict("USER_INSTRUCTION_REVISION_CHANGED"));
+    }
+    if workspace.inventory_snapshot_hash != request.inventory_snapshot_hash {
+        return Err(AppError::conflict("USER_INSTRUCTION_PREVIEW_STALE"));
+    }
+    let asset = state
+        .agent_hub_repo
+        .get_asset_by_unique_key(
+            &workspace.scope_id,
+            AssetKind::Instruction,
+            USER_INSTRUCTION_NAMESPACE,
+            USER_INSTRUCTION_LOGICAL_KEY,
+        )
+        .await?
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_ASSET_MISSING"))?;
+    let document = instruction_document_from_block_dtos(&request.blocks)?;
+    commit_user_instruction_document(state, &asset, &document).await?;
+    // commit 推进了 DB head；重新读 asset 拿新 current_revision_id 再 load_canonical
+    let refreshed_asset = state
+        .agent_hub_repo
+        .get_asset_by_unique_key(
+            &workspace.scope_id,
+            AssetKind::Instruction,
+            USER_INSTRUCTION_NAMESPACE,
+            USER_INSTRUCTION_LOGICAL_KEY,
+        )
+        .await?
+        .ok_or_else(|| AppError::not_found("USER_INSTRUCTION_ASSET_MISSING"))?;
+    load_canonical(state, Some(&refreshed_asset))
+        .await?
+        .ok_or_else(|| AppError::generic("USER_INSTRUCTION_CANONICAL_MISSING_AFTER_SAVE"))
 }
 
 /// 将块文档转为“公共 + 目标补充”编辑面。
@@ -671,6 +750,7 @@ fn map_source_role(
 ///
 /// Business Logic: inspect 一次读盘即可同时服务 inventory hash 与原始栏加载。
 /// Code Logic: 返回 (hash, size_reason, content, content_truncated)。
+#[allow(clippy::type_complexity)] // 预存：一次读盘返回多值 tuple，调用方就近解构
 fn read_source_file_bounded(
     path: &Path,
     metadata: Option<&std::fs::Metadata>,

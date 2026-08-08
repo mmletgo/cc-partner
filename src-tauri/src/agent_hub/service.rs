@@ -401,6 +401,15 @@ impl AgentHubService {
         crate::agent_hub::user_instructions::apply_user_instruction_plan(state, req).await
     }
 
+    /// Business Logic: 保存块文档是 cc-partner 内部编辑态，独立于 CLI 写入门禁。
+    /// Code Logic: 委托 V2 save_user_instruction_blocks（baseRevisionId CAS + put_blob + append_revision）。
+    pub async fn save_user_instruction_blocks(
+        state: &AppState,
+        req: crate::agent_hub::user_instructions::SaveUserInstructionBlocksRequest,
+    ) -> Result<crate::agent_hub::user_instructions::UserInstructionCanonicalDto, AppError> {
+        crate::agent_hub::user_instructions::save_user_instruction_blocks(state, req).await
+    }
+
     /// Business Logic: 首屏 status。
     /// Code Logic: config + owner/writeCompatible + probes + counts。
     pub async fn get_status(state: &AppState) -> Result<AgentHubStatusDto, AppError> {
@@ -2084,6 +2093,52 @@ async fn persist_instruction_document(
     Ok(())
 }
 
+/// 仅 put_blob + append_revision 推进 canonical head，不触发投影/dual-write/ensure-enabled。
+///
+/// Business Logic（为什么需要这个函数）:
+///     「保存块文档」是 cc-partner 内部编辑态持久化，必须独立于 CLI 原生文件投影
+///     （后者受 support manifest L3 门禁）。此处只推进 revision head，让下次 inspect
+///     读到新块；目标文件投影仍由 apply（受门禁）或 scheduler 独立处理。
+///
+/// Code Logic（这个函数做什么）:
+///     JSON serialize → put_blob → append_revision(Ui, expected_parent=current head CAS)。
+pub(crate) async fn commit_user_instruction_document(
+    state: &AppState,
+    asset: &LogicalAsset,
+    document: &InstructionDocument,
+) -> Result<RevisionId, AppError> {
+    let bytes = serde_json::to_vec(document)
+        .map_err(|e| AppError::generic(format!("agent_hub_serialize_instruction_failed:{e}")))?;
+    let store = object_store()?;
+    let stored = store.put_blob(&bytes).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let parents = asset
+        .current_revision_id
+        .clone()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // 块保存强制 head CAS：expected_parent = 调用前观测到的 current head
+    let expected_parent_id = asset.current_revision_id.clone();
+    let new_id = RevisionId::new_v7();
+    state
+        .agent_hub_repo
+        .append_revision(NewRevision {
+            id: new_id.clone(),
+            asset_lineage_id: asset.id.clone(),
+            parents,
+            operation: RevisionOperation::Upsert,
+            origin_kind: RevisionOriginKind::Ui,
+            origin_target: None,
+            origin_replica_id: state.device_id.as_str().to_string(),
+            payload_hash: Some(stored.hash),
+            tree_manifest_hash: None,
+            created_at: now,
+            expected_parent_id,
+        })
+        .await?;
+    Ok(new_id)
+}
+
 /// 用户级 CLAUDE.md 资产成功写 revision 后 dual-write legacy 摘要 + 文件。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -2222,14 +2277,70 @@ pub(crate) async fn persist_instruction_document_for_legacy(
     persist_instruction_document(state, asset, document).await
 }
 
+/// DTO → 块（block_to_dto 的逆映射）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     「保存块文档」命令需把前端编辑的 blocks round-trip 回权威 InstructionDocument，
+///     保留 id/mode/common/variants/heading_path/source_target/needs_adaptation。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 mode 与 variant target 合法；structured_intent 不可逆，置 None。
+pub(crate) fn block_from_dto(dto: &InstructionBlockDto) -> Result<InstructionBlock, AppError> {
+    let mode = parse_block_mode(&dto.mode)?;
+    let mut variants = BTreeMap::new();
+    if let Some(map) = &dto.variants {
+        for (key, value) in map {
+            let target = AgentTarget::parse(key)
+                .ok_or_else(|| AppError::validation(format!("非法 variant target: {key}")))?;
+            variants.insert(target, value.clone());
+        }
+    }
+    let common_markdown = if dto.common_markdown.is_empty() {
+        None
+    } else {
+        Some(dto.common_markdown.clone())
+    };
+    Ok(InstructionBlock {
+        id: dto.id.clone(),
+        mode,
+        common_markdown,
+        structured_intent: None,
+        variants,
+        heading_path: dto.heading_path.clone().unwrap_or_default(),
+        source_target: dto.source_target,
+        needs_adaptation: dto.needs_adaptation,
+    })
+}
+
+/// 块 DTO 列表 → InstructionDocument。
+///
+/// Business Logic: 「保存块文档」把整份块模型序列化为权威 canonical 文档。
+/// Code Logic: 逐块 reverse；空 id 补 UUIDv7；relative_key 留空（用户级指令不使用）。
+pub(crate) fn instruction_document_from_block_dtos(
+    dtos: &[InstructionBlockDto],
+) -> Result<InstructionDocument, AppError> {
+    let mut blocks = Vec::with_capacity(dtos.len());
+    for dto in dtos {
+        let mut block = block_from_dto(dto)?;
+        if block.id.trim().is_empty() {
+            block.id = crate::agent_hub::instructions::new_block_id();
+        }
+        blocks.push(block);
+    }
+    Ok(InstructionDocument {
+        relative_key: String::new(),
+        blocks,
+    })
+}
+
 /// 块 → DTO。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     UI 需要 mode/common/variants。
+///     UI 需要 mode/common/variants；用户级指令 V2 inspect 也要把 canonical 块暴露给三栏。
 ///
 /// Code Logic（这个函数做什么）:
 ///     common 空串兜底；variants 转 string key map。
-fn block_to_dto(block: &InstructionBlock) -> InstructionBlockDto {
+pub(crate) fn block_to_dto(block: &InstructionBlock) -> InstructionBlockDto {
     let variants = if block.variants.is_empty() {
         None
     } else {
@@ -2263,7 +2374,7 @@ fn block_to_dto(block: &InstructionBlock) -> InstructionBlockDto {
 ///
 /// Code Logic（这个函数做什么）:
 ///     仅匹配合法 token。
-fn parse_block_mode(raw: &str) -> Result<InstructionBlockMode, AppError> {
+pub(crate) fn parse_block_mode(raw: &str) -> Result<InstructionBlockMode, AppError> {
     match raw {
         "shared" => Ok(InstructionBlockMode::Shared),
         "adapted" => Ok(InstructionBlockMode::Adapted),

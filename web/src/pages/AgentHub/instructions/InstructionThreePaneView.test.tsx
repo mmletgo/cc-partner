@@ -11,11 +11,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import type { AgentTarget } from '@/lib/types/agentHub';
 import {
   initialThreePaneFromDisk,
   parseBlocksFromOriginal,
   type InstructionThreePaneState,
 } from './instructionThreePane';
+
+const AGENT: AgentTarget = 'claude';
 import {
   InstructionThreePaneView,
   type InstructionThreePaneViewLabels,
@@ -51,6 +54,16 @@ const labels: InstructionThreePaneViewLabels = {
   blockTitlePlaceholder: 'Title',
   blockBodyPlaceholder: 'Body',
   refresh: 'Rescan',
+  blockMode: 'Block mode',
+  blockModeShared: 'Shared',
+  blockModeAdapted: 'Adapted',
+  blockModeTargetOnly: 'Target only',
+  commonMarkdown: 'Common body',
+  variantsTitle: 'Variants',
+  variantClaude: 'Claude',
+  variantCodex: 'Codex',
+  variantOpencode: 'OpenCode',
+  saveBlocks: 'Save blocks',
 };
 
 const SAMPLE = `## Shared
@@ -85,6 +98,7 @@ function buildProps(
     dualDirtyOpen: false,
     onReparse: vi.fn(),
     onSync: vi.fn(),
+    onSaveBlocks: vi.fn(),
     onRetry: vi.fn(),
     onRefresh: vi.fn(),
     onOriginalChange: vi.fn(),
@@ -165,8 +179,8 @@ describe('InstructionThreePaneView', () => {
   });
 
   test('after reparse, block list reflects state.blocks (view is pure)', () => {
-    const opened = initialThreePaneFromDisk('/p.md', SAMPLE);
-    const parsed = parseBlocksFromOriginal(opened);
+    const opened = initialThreePaneFromDisk('/p.md', SAMPLE, null, AGENT);
+    const parsed = parseBlocksFromOriginal(opened, AGENT);
     render(<InstructionThreePaneView {...buildProps({ state: parsed })} />);
 
     expect(screen.getByTestId('instruction-block-list').children.length).toBe(2);
@@ -174,12 +188,12 @@ describe('InstructionThreePaneView', () => {
   });
 
   test('preview pane is read-only (no textarea for preview body)', () => {
-    const opened = initialThreePaneFromDisk('/p.md', SAMPLE);
-    const parsed = parseBlocksFromOriginal(opened);
+    const opened = initialThreePaneFromDisk('/p.md', SAMPLE, null, AGENT);
+    const parsed = parseBlocksFromOriginal(opened, AGENT);
     render(<InstructionThreePaneView {...buildProps({ state: parsed })} />);
 
     const preview = screen.getByTestId('instruction-pane-preview');
     expect(preview.querySelector('textarea')).toBeNull();
-    expect(screen.getByTestId('instruction-preview-body').textContent).toContain('Shared');
+    expect(screen.getByTestId('instruction-preview-body').textContent).toContain('Rules');
   });
 });

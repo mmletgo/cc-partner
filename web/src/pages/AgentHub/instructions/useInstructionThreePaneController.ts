@@ -24,7 +24,10 @@ import type {
 import type { AgentHubContext } from '../context/agentHubContext';
 import {
   addBlock,
+  dtoToDraft,
+  draftToDto,
   initialThreePaneFromDisk,
+  joinBlocksForTarget,
   parseBlocksFromOriginal,
   resolveSyncContent,
   updateBlock,
@@ -65,6 +68,8 @@ export interface UseInstructionThreePaneControllerResult {
   reparseFromOriginal: () => void;
   requestSync: () => Promise<void>;
   applyPlan: () => Promise<void>;
+  /** 保存块文档到 canonical head（独立于 CLI 写入门禁）。 */
+  saveBlocks: () => Promise<void>;
   closePreview: () => void;
   refresh: () => Promise<void>;
   updateOriginal: (text: string) => void;
@@ -150,7 +155,6 @@ function emptySelections(): Record<AgentTarget, UserInstructionTargetSelection> 
 function buildSingleAgentPreviewRequest(
   workspace: UserInstructionWorkspaceDto,
   agent: AgentTarget,
-  content: string,
 ) {
   const selections = emptySelections();
   const target = workspace.targets.find((item) => item.target === agent) ?? null;
@@ -172,7 +176,9 @@ function buildSingleAgentPreviewRequest(
       }
     : 'managed';
   return {
-    commonContent: content,
+    // backend preview/apply 基于持久化 head InstructionDocument 投影（含 per-agent variants）；
+    // 前端先 saveBlocks 推进 head，commonContent/targetExtensions 不再驱动投影。
+    commonContent: '',
     targetExtensions: {} as Partial<Record<AgentTarget, string>>,
     targetSelections: selections,
     baseRevisionId: workspace.canonical?.headRevisionId ?? null,
@@ -245,10 +251,11 @@ export function useInstructionThreePaneController(
         if (!mountedRef.current || seq !== loadSeqRef.current) return;
         setWorkspace(next);
         const { path, text } = originalFromWorkspace(next, agent);
-        let nextState = initialThreePaneFromDisk(path, text);
-        if (autoReparseAfterLoadRef.current) {
+        const hydrated = next.canonical?.blocks?.map(dtoToDraft) ?? null;
+        let nextState = initialThreePaneFromDisk(path, text, hydrated, agent);
+        if (autoReparseAfterLoadRef.current && nextState.blocks.length === 0) {
           autoReparseAfterLoadRef.current = false;
-          nextState = parseBlocksFromOriginal(nextState);
+          nextState = parseBlocksFromOriginal(nextState, agent);
         }
         setState(nextState);
         setDualDirtyOpen(false);
@@ -327,9 +334,9 @@ export function useInstructionThreePaneController(
   }, [writeBlocked, workspace, currentTarget, sourceContentTruncated, t]);
 
   const reparseFromOriginal = useCallback(() => {
-    setState((current) => parseBlocksFromOriginal(current));
+    setState((current) => parseBlocksFromOriginal(current, agent));
     setActionError(null);
-  }, []);
+  }, [agent]);
 
   const updateOriginal = useCallback((text: string) => {
     setState((current) => updateOriginalText(current, text));
@@ -338,31 +345,37 @@ export function useInstructionThreePaneController(
 
   const changeBlock = useCallback(
     (id: string, patch: Partial<Omit<InstructionBlockDraft, 'id'>>) => {
-      setState((current) => updateBlock(current, id, patch));
+      setState((current) => updateBlock(current, id, patch, agent));
       setActionError(null);
     },
-    [],
+    [agent],
   );
 
   const appendBlock = useCallback(() => {
     setState((current) =>
-      addBlock(current, {
-        id: `block-${Date.now()}`,
-        mode: 'shared',
-        title: '',
-        body: '',
-      }),
+      addBlock(
+        current,
+        {
+          id: `block-${Date.now()}`,
+          mode: 'shared',
+          commonMarkdown: '',
+          variants: {},
+          headingPath: [],
+          sourceTarget: null,
+          needsAdaptation: false,
+        },
+        agent,
+      ),
     );
     setActionError(null);
-  }, []);
+  }, [agent]);
 
   /**
-   * Business Logic: resolve 同步内容并生成单 agent 零写入 plan。
-   * Code Logic: dual_dirty → UI 选择；empty → error；否则 preview setup/update。
+   * Business Logic: 用已保存的最新 head 生成单 agent 投影 plan（写盘受门禁）。
+   * Code Logic: 调用方先 saveBlocks 推进 head，传入 refreshed workspace；preview setup/update。
    */
-  const runPreviewWithContent = useCallback(
-    async (content: string, baseline: SyncBaseline) => {
-      if (!workspace) return;
+  const runPreviewWithBaseline = useCallback(
+    async (baseline: SyncBaseline, ws: UserInstructionWorkspaceDto) => {
       if (writeBlocked) {
         setActionError(writeBlockedReason);
         return;
@@ -373,14 +386,15 @@ export function useInstructionThreePaneController(
       lastSyncBaselineRef.current = baseline;
       try {
         const request = {
-          ...buildSingleAgentPreviewRequest(workspace, agent, content),
+          ...buildSingleAgentPreviewRequest(ws, agent),
           ...requestContext,
         };
+        const target = ws.targets.find((item) => item.target === agent) ?? null;
         const targetManaged =
-          currentTarget?.managementMode === 'managedActive' ||
-          currentTarget?.managementMode === 'managedPaused';
+          target?.managementMode === 'managedActive' ||
+          target?.managementMode === 'managedPaused';
         const nextPlan =
-          workspace.setupState === 'configured' || targetManaged
+          ws.setupState === 'configured' || targetManaged
             ? await agentHubApi.previewUserInstructionUpdate(request)
             : await agentHubApi.previewUserInstructionSetup(request);
         if (!mountedRef.current) return;
@@ -407,11 +421,53 @@ export function useInstructionThreePaneController(
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [agent, currentTarget, requestContext, t, workspace, writeBlocked, writeBlockedReason],
+    [agent, requestContext, t, writeBlocked, writeBlockedReason],
   );
 
+  /**
+   * Business Logic: 保存块文档到 canonical head（cc-partner 内部编辑态，独立于 CLI 写入门禁）。
+   * Code Logic: saveUserInstructionBlocks(baseRevisionId CAS) → rescan 拿新 head/snapshot + hydrate；
+   *   返回新 workspace 供后续 preview/apply 复用最新基线。
+   */
+  const saveBlocks = useCallback(async (): Promise<UserInstructionWorkspaceDto | null> => {
+    if (!workspace) return null;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      await agentHubApi.saveUserInstructionBlocks({
+        blocks: state.blocks.map(draftToDto),
+        baseRevisionId: workspace.canonical?.headRevisionId ?? null,
+        inventorySnapshotHash: workspace.inventorySnapshotHash,
+        ...requestContext,
+      });
+      if (!mountedRef.current) return null;
+      const refreshed = await agentHubApi.inspectUserInstructionWorkspace(requestContext);
+      if (!mountedRef.current) return null;
+      setWorkspace(refreshed);
+      const { path, text } = originalFromWorkspace(refreshed, agent);
+      const hydrated = refreshed.canonical?.blocks?.map(dtoToDraft) ?? null;
+      setState(initialThreePaneFromDisk(path, text, hydrated, agent));
+      return refreshed;
+    } catch (reason) {
+      if (!mountedRef.current) return null;
+      const code = errorCode(reason);
+      setActionError(
+        code === PEER_CONTEXT_UNAVAILABLE
+          ? PEER_CONTEXT_UNAVAILABLE
+          : code === 'USER_INSTRUCTION_V2_BACKEND_UNAVAILABLE'
+            ? t('agentHub:userInstructions.errors.backendUnavailable')
+            : reason instanceof Error
+              ? reason.message
+              : String(reason),
+      );
+      return null;
+    } finally {
+      if (mountedRef.current) setActionBusy(false);
+    }
+  }, [agent, requestContext, state.blocks, t, workspace]);
+
   const requestSync = useCallback(async () => {
-    const resolved = resolveSyncContent(state);
+    const resolved = resolveSyncContent(state, agent);
     if (!resolved.ok) {
       if (resolved.reason === 'dual_dirty_conflict') {
         setDualDirtyOpen(true);
@@ -421,23 +477,29 @@ export function useInstructionThreePaneController(
       setActionError(t('agentHub:instructions.threePane.errors.emptySync'));
       return;
     }
-    await runPreviewWithContent(resolved.content, resolved.baseline);
-  }, [runPreviewWithContent, state, t]);
+    // 先保存块到 canonical head（投影数据源），再用新 head preview/apply
+    const refreshed = await saveBlocks();
+    if (!refreshed) return;
+    await runPreviewWithBaseline(resolved.baseline, refreshed);
+  }, [agent, runPreviewWithBaseline, saveBlocks, state, t]);
 
   const chooseBaseline = useCallback(
     (baseline: SyncBaseline) => {
       const content =
         baseline === 'blocks'
-          ? state.previewText || state.blocks.map((b) => `## ${b.title}\n\n${b.body}`).join('\n\n')
+          ? state.previewText || joinBlocksForTarget(state.blocks, agent)
           : state.originalText;
       if (!content.trim()) {
         setActionError(t('agentHub:instructions.threePane.errors.emptySync'));
         setDualDirtyOpen(false);
         return;
       }
-      void runPreviewWithContent(content, baseline);
+      // dual-dirty 选基线后，同样先 saveBlocks 再 preview
+      void saveBlocks().then((refreshed) => {
+        if (refreshed) void runPreviewWithBaseline(baseline, refreshed);
+      });
     },
-    [runPreviewWithContent, state, t],
+    [agent, runPreviewWithBaseline, saveBlocks, state, t],
   );
 
   const cancelDualDirty = useCallback(() => {
@@ -481,11 +543,8 @@ export function useInstructionThreePaneController(
         // 简化：blocks baseline → 不 auto re-parse（load 会清空块）；
         // 为保留块模型，blocks baseline 时跳过 state 重置中的块清空——在 loadWorkspace 处理。
         await loadWorkspace(true);
-        if (lastSyncBaselineRef.current === 'blocks' && mountedRef.current) {
-          // load 已重置为空块；对 original 文本 reparse 等价于对齐合成内容到块
-          // Spec 说保留当前块模型 — 最小实现：rescan 后按新 ③ reparse 一次也可接受对齐
-          setState((current) => parseBlocksFromOriginal(current));
-        }
+        // load 已 hydrate 持久化 canonical 块（完整 variants）；baseline=blocks 时保留 hydrate，
+        // 不再从原文 reparse（避免 adapted 块退化为 shared）。
       }
     } catch (reason) {
       if (!mountedRef.current) return;
@@ -540,6 +599,9 @@ export function useInstructionThreePaneController(
     reparseFromOriginal,
     requestSync,
     applyPlan,
+    saveBlocks: async () => {
+      await saveBlocks();
+    },
     closePreview,
     refresh,
     updateOriginal,

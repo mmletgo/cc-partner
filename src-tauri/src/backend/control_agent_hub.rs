@@ -30,6 +30,7 @@ use crate::agent_hub::service::{
 use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionRequest};
 use crate::agent_hub::user_instructions::{
     ApplyUserInstructionPlanRequest, PreviewUserInstructionRequest,
+    SaveUserInstructionBlocksRequest,
 };
 use crate::backend::control::{self, BackendControlFile, AGENT_HUB_API_VERSION};
 use crate::backend::control_api::CONTROL_RESPONSE_BODY_LIMIT_BYTES;
@@ -159,6 +160,14 @@ async fn dispatch_agent_hub_op(
                     AppError::validation(format!("apply_user_instruction_plan payload: {e}"))
                 })?;
             let dto = AgentHubService::apply_user_instruction_plan(state, req).await?;
+            Ok(serde_json::to_value(dto)?)
+        }
+        "agent_hub.save_user_instruction_blocks" => {
+            let req: SaveUserInstructionBlocksRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    AppError::validation(format!("save_user_instruction_blocks payload: {e}"))
+                })?;
+            let dto = AgentHubService::save_user_instruction_blocks(state, req).await?;
             Ok(serde_json::to_value(dto)?)
         }
         "agent_hub.update_instruction" => {
@@ -406,6 +415,7 @@ fn is_mutation_op(op: &str) -> bool {
             | "agent_hub.preview_user_instruction_setup"
             | "agent_hub.preview_user_instruction_update"
             | "agent_hub.apply_user_instruction_plan"
+            | "agent_hub.save_user_instruction_blocks"
             | "agent_hub.update_instruction_block"
             | "agent_hub.pair_instruction_variants"
             | "agent_hub.enable_project"
@@ -578,6 +588,7 @@ mod tests {
             "agent_hub.preview_user_instruction_setup",
             "agent_hub.preview_user_instruction_update",
             "agent_hub.apply_user_instruction_plan",
+            "agent_hub.save_user_instruction_blocks",
             "agent_hub.update_instruction",
             "agent_hub.update_instruction_block",
             "agent_hub.pair_instruction_variants",
@@ -619,6 +630,7 @@ mod tests {
         assert!(is_mutation_op("agent_hub.preview_user_instruction_setup"));
         assert!(is_mutation_op("agent_hub.preview_user_instruction_update"));
         assert!(is_mutation_op("agent_hub.apply_user_instruction_plan"));
+        assert!(is_mutation_op("agent_hub.save_user_instruction_blocks"));
         assert!(is_mutation_op("agent_hub.enable_project"));
         assert!(is_mutation_op("agent_hub.set_target_presence"));
         assert!(is_mutation_op("agent_hub.set_target_enabled"));

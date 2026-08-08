@@ -137,6 +137,11 @@ export interface UserInstructionCanonicalDto {
   deleted: boolean;
   /** 受 256 KiB 内容上限截断时，当前正文不得用于生成覆盖 plan。 */
   contentTruncated: boolean;
+  /**
+   * 块模型（与 commonContent/targetExtensions 同源 InstructionDocument）。
+   * Business Logic: 三栏据此 hydrate 块/预览，无需从原文 parse。
+   */
+  blocks?: InstructionBlockDto[];
 }
 
 /**
@@ -179,6 +184,16 @@ export interface UserInstructionDraft {
 
 /** 生成 setup/update preview 的输入。 */
 export interface UserInstructionPreviewRequest extends UserInstructionDraft {
+  baseRevisionId: string | null;
+  inventorySnapshotHash: string;
+}
+
+/**
+ * 保存块文档请求（baseRevisionId head CAS + inventorySnapshotHash 防 stale）。
+ * Business Logic: 三栏编辑块后持久化 canonical，独立于 CLI 写入门禁；返回新 canonical。
+ */
+export interface SaveUserInstructionBlocksRequest {
+  blocks: InstructionBlockDto[];
   baseRevisionId: string | null;
   inventorySnapshotHash: string;
 }

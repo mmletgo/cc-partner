@@ -13,12 +13,12 @@ mod plan;
 
 pub use inventory::{
     inspect_user_instruction_workspace, inspect_user_instruction_workspace_with_env,
-    UserInstructionAction, UserInstructionActivationSupport, UserInstructionCanonicalDto,
-    UserInstructionCapabilityDto, UserInstructionCapabilityLevel, UserInstructionCliDto,
-    UserInstructionHealthState, UserInstructionManagementMode, UserInstructionOwnership,
-    UserInstructionProjectionDto, UserInstructionProjectionState, UserInstructionSetupState,
-    UserInstructionSourceDto, UserInstructionSourceRole, UserInstructionTargetDto,
-    UserInstructionWorkspaceDto,
+    save_user_instruction_blocks, SaveUserInstructionBlocksRequest, UserInstructionAction,
+    UserInstructionActivationSupport, UserInstructionCanonicalDto, UserInstructionCapabilityDto,
+    UserInstructionCapabilityLevel, UserInstructionCliDto, UserInstructionHealthState,
+    UserInstructionManagementMode, UserInstructionOwnership, UserInstructionProjectionDto,
+    UserInstructionProjectionState, UserInstructionSetupState, UserInstructionSourceDto,
+    UserInstructionSourceRole, UserInstructionTargetDto, UserInstructionWorkspaceDto,
 };
 pub use plan::{
     apply_user_instruction_plan, preview_user_instruction_setup, preview_user_instruction_update,
