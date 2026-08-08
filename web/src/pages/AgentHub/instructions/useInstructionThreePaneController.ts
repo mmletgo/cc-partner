@@ -357,11 +357,12 @@ export function useInstructionThreePaneController(
         current,
         {
           id: `block-${Date.now()}`,
-          mode: 'shared',
+          // 新块默认只属于当前 agent（per-agent 独立）
+          mode: 'targetOnly',
           commonMarkdown: '',
-          variants: {},
+          variants: { [agent]: '' },
           headingPath: [],
-          sourceTarget: null,
+          sourceTarget: agent,
           needsAdaptation: false,
         },
         agent,

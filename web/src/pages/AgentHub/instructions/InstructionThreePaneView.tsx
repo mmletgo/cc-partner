@@ -277,12 +277,13 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
                           data-testid={`instruction-block-text-${block.id}`}
                           onChange={(event) => {
                             const text = event.currentTarget.value;
+                            const variants = { ...block.variants, [agent]: text };
+                            // per-agent 独立：编辑只写 variant[agent]，不改 common → 不影响其他 agent。
+                            // shared 块编辑自动转 adapted（common 保留作其他 agent fallback）。
                             if (block.mode === 'shared') {
-                              onBlockChange(block.id, { commonMarkdown: text });
+                              onBlockChange(block.id, { mode: 'adapted', variants });
                             } else {
-                              onBlockChange(block.id, {
-                                variants: { ...block.variants, [agent]: text },
-                              });
+                              onBlockChange(block.id, { variants });
                             }
                           }}
                         />
