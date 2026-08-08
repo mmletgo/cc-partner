@@ -173,8 +173,8 @@ export function usePortableInventoryController(): UsePortableInventoryController
         return;
       }
       const caps = item.capabilities;
+      // discover-as-managed：不再开放 adopt 入口；其余 mutation 仍 capability 门闩。
       const allowed =
-        (action === 'adopt' && caps.canAdopt) ||
         (action === 'enable' && caps.canEnable) ||
         (action === 'disable' && caps.canDisable) ||
         (action === 'uninstall' && caps.canUninstall) ||

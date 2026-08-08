@@ -277,11 +277,11 @@ export function AgentHubView(props: AgentHubViewProps) {
       },
       managementFilter: {
         all: t('agentHub:portable.inventory.managementFilter.all'),
-        unmanaged: t('agentHub:portable.inventory.managementFilter.unmanaged'),
         hubManaged: t('agentHub:portable.inventory.managementFilter.hubManaged'),
         drifted: t('agentHub:portable.inventory.managementFilter.drifted'),
         externalCollision: t('agentHub:portable.inventory.managementFilter.externalCollision'),
         unsupported: t('agentHub:portable.inventory.managementFilter.unsupported'),
+        unmanaged: t('agentHub:portable.inventory.managementFilter.unmanaged'),
       },
       targets: {
         claude: t('agentHub:targets.claude'),
@@ -301,11 +301,11 @@ export function AgentHubView(props: AgentHubViewProps) {
         unknown: t('agentHub:portable.inventory.actual.unknown'),
       },
       management: {
-        unmanaged: t('agentHub:portable.inventory.management.unmanaged'),
         hubManaged: t('agentHub:portable.inventory.management.hubManaged'),
         drifted: t('agentHub:portable.inventory.management.drifted'),
         externalCollision: t('agentHub:portable.inventory.management.externalCollision'),
         unsupported: t('agentHub:portable.inventory.management.unsupported'),
+        unmanaged: t('agentHub:portable.inventory.management.unmanaged'),
       },
       scope: {
         user: t('agentHub:portable.inventory.scope.user'),
@@ -324,6 +324,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         pluginComponent: t('agentHub:portable.inventory.sourceOrigin.pluginComponent'),
         nativeConfig: t('agentHub:portable.inventory.sourceOrigin.nativeConfig'),
       },
+      unmanagedRefreshHint: t('agentHub:portable.inventory.unmanagedRefreshHint'),
     }),
     [t],
   );
