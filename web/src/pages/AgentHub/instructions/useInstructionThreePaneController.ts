@@ -76,24 +76,34 @@ export interface UseInstructionThreePaneControllerResult {
 }
 
 /**
- * Business Logic: 从 workspace 抽出当前 agent 的生效路径与可展示正文。
+ * Business Logic: 从 workspace 抽出当前 agent 的生效路径与可展示/编辑正文。
  * Code Logic: path 优先 effective/active source，再 managedTargetPath；
- *   text = commonContent + 可选 target extension（无磁盘 body API 时的最小路径）。
+ *   text 优先磁盘 source.content（原始栏真源），缺省时回退 canonical common+extension。
  */
 export function originalFromWorkspace(
   workspace: UserInstructionWorkspaceDto,
   agent: AgentTarget,
-): { path: string | null; text: string } {
+): { path: string | null; text: string; contentTruncated: boolean } {
   const target = workspace.targets.find((item) => item.target === agent) ?? null;
   const effective =
     (target?.effectiveSourceId
       ? target.sources.find((source) => source.sourceId === target.effectiveSourceId)
       : null) ??
     target?.sources.find((source) => source.active) ??
+    target?.sources.find((source) => source.exists && typeof source.content === 'string') ??
     null;
   const pathCandidate = effective?.path ?? target?.managedTargetPath ?? null;
   const path =
     pathCandidate && pathCandidate.trim().length > 0 ? pathCandidate : null;
+
+  // 磁盘正文优先：打开即展示本机原始提示词，可直接编辑。
+  if (typeof effective?.content === 'string') {
+    return {
+      path,
+      text: effective.content,
+      contentTruncated: Boolean(effective.contentTruncated),
+    };
+  }
 
   const common = workspace.canonical?.commonContent ?? '';
   const extension = workspace.canonical?.targetExtensions?.[agent] ?? '';
@@ -104,7 +114,11 @@ export function originalFromWorkspace(
         ? `${common.replace(/\s+$/u, '')}\n\n${extension}`
         : extension;
   }
-  return { path, text };
+  return {
+    path,
+    text,
+    contentTruncated: Boolean(workspace.canonical?.contentTruncated),
+  };
 }
 
 /**
@@ -129,7 +143,8 @@ function emptySelections(): Record<AgentTarget, UserInstructionTargetSelection> 
 }
 
 /**
- * Business Logic: 单 agent 同步 — 只把 context.agent 标为 managed。
+ * Business Logic: 单 agent 同步 — 只把 context.agent 标为 managed；
+ *   本机 external/unknown 源写回时必须 adoptExisting，否则 apply 被 OWNERSHIP_REQUIRED 挡住。
  * Code Logic: 其它 target 一律 unmanaged，commonContent = 同步正文。
  */
 function buildSingleAgentPreviewRequest(
@@ -138,7 +153,24 @@ function buildSingleAgentPreviewRequest(
   content: string,
 ) {
   const selections = emptySelections();
-  selections[agent] = 'managed';
+  const target = workspace.targets.find((item) => item.target === agent) ?? null;
+  const effective =
+    (target?.effectiveSourceId
+      ? target.sources.find((source) => source.sourceId === target.effectiveSourceId)
+      : null) ??
+    target?.sources.find((source) => source.active) ??
+    null;
+  const needsAdopt =
+    effective != null &&
+    effective.exists &&
+    (effective.ownership === 'external' || effective.ownership === 'unknown');
+  selections[agent] = needsAdopt
+    ? {
+        managementMode: 'managedActive',
+        adoptExisting: true,
+        manageOverride: false,
+      }
+    : 'managed';
   return {
     commonContent: content,
     targetExtensions: {} as Partial<Record<AgentTarget, string>>,
@@ -271,23 +303,28 @@ export function useInstructionThreePaneController(
     [workspace, agent],
   );
 
+  const sourceContentTruncated = useMemo(() => {
+    if (!workspace) return false;
+    return originalFromWorkspace(workspace, agent).contentTruncated;
+  }, [workspace, agent]);
+
   const writeBlocked = useMemo(() => {
     if (!workspace) return true;
-    if (workspace.canonical?.contentTruncated) return true;
+    if (workspace.canonical?.contentTruncated || sourceContentTruncated) return true;
     if (!currentTarget) return true;
     return currentTarget.capability.write !== 'supported';
-  }, [workspace, currentTarget]);
+  }, [workspace, currentTarget, sourceContentTruncated]);
 
   const writeBlockedReason = useMemo(() => {
     if (!writeBlocked) return null;
-    if (workspace?.canonical?.contentTruncated) {
+    if (workspace?.canonical?.contentTruncated || sourceContentTruncated) {
       return t('agentHub:userInstructions.errors.contentTruncated');
     }
     if (currentTarget?.capability.write !== 'supported') {
       return t('agentHub:instructions.threePane.writeBlocked');
     }
     return t('agentHub:instructions.threePane.writeBlocked');
-  }, [writeBlocked, workspace, currentTarget, t]);
+  }, [writeBlocked, workspace, currentTarget, sourceContentTruncated, t]);
 
   const reparseFromOriginal = useCallback(() => {
     setState((current) => parseBlocksFromOriginal(current));

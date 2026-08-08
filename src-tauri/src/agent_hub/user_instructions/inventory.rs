@@ -181,7 +181,10 @@ pub struct UserInstructionCliDto {
     pub config_root: String,
 }
 
-/// 只读 source metadata，不包含指令正文。
+/// 只读 source 事实：metadata + 可选有界磁盘正文（供原始栏自动加载）。
+///
+/// Business Logic: 打开用户级提示词必须能直接展示/编辑本机已有文件，不能只给 path。
+/// Code Logic: content 仅对 active（或无 active 时的首个现存文件）填充；超限截断并标 content_truncated。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInstructionSourceDto {
@@ -196,6 +199,12 @@ pub struct UserInstructionSourceDto {
     pub ownership: UserInstructionOwnership,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
+    /// 磁盘 UTF-8 正文（有界）；缺失表示未读/过大/非 UTF-8。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// 正文因控制面预算被截断时为 true，不得用截断内容覆盖全文件。
+    #[serde(default)]
+    pub content_truncated: bool,
 }
 
 /// target 分项能力。
@@ -566,7 +575,7 @@ fn add_declared_candidates(
     }
 }
 
-/// 将 adapter source 转换为有界 metadata DTO。
+/// 将 adapter source 转换为有界 DTO（metadata + 可选正文）。
 fn build_source_dtos(
     target: AgentTarget,
     mut sources: Vec<InstructionSource>,
@@ -577,11 +586,26 @@ fn build_source_dtos(
         .iter()
         .find(|source| source.active)
         .map(|source| source.path.clone());
+    // 无 active 时：为首个现存文件附带正文，保证未纳管也能打开编辑。
+    let fallback_body_path = if active_path.is_none() {
+        sources
+            .iter()
+            .find(|source| source.path.is_file())
+            .map(|source| source.path.clone())
+    } else {
+        None
+    };
     let mut out = Vec::with_capacity(sources.len());
     for source in sources {
         let metadata = std::fs::metadata(&source.path).ok();
         let exists = metadata.as_ref().is_some_and(|metadata| metadata.is_file());
-        let (hash, size_reason) = hash_file_bounded(&source.path, metadata.as_ref())?;
+        let include_body = exists
+            && (source.active
+                || fallback_body_path
+                    .as_ref()
+                    .is_some_and(|path| path == &source.path));
+        let (hash, size_reason, content, content_truncated) =
+            read_source_file_bounded(&source.path, metadata.as_ref(), include_body)?;
         let ownership = ownership_for_path(&source.path, exists, ownership);
         let role = map_source_role(target, &source, active_path.as_deref());
         let reason_code = source.diagnostics.first().cloned().or(size_reason);
@@ -599,6 +623,8 @@ fn build_source_dtos(
                 .map(system_time_to_rfc3339),
             ownership,
             reason_code,
+            content,
+            content_truncated,
         });
     }
     Ok(out)
@@ -641,19 +667,42 @@ fn map_source_role(
     }
 }
 
-/// 有界读文件 hash，超限时只返回诊断而不读正文。
-fn hash_file_bounded(
+/// 有界读文件：hash 始终尽力计算；正文仅在 include_body 时填充。
+///
+/// Business Logic: inspect 一次读盘即可同时服务 inventory hash 与原始栏加载。
+/// Code Logic: 返回 (hash, size_reason, content, content_truncated)。
+fn read_source_file_bounded(
     path: &Path,
     metadata: Option<&std::fs::Metadata>,
-) -> Result<(Option<String>, Option<String>), AppError> {
+    include_body: bool,
+) -> Result<(Option<String>, Option<String>, Option<String>, bool), AppError> {
     let Some(metadata) = metadata.filter(|metadata| metadata.is_file()) else {
-        return Ok((None, None));
+        return Ok((None, None, None, false));
     };
     if metadata.len() > MAX_SOURCE_HASH_BYTES {
-        return Ok((None, Some("user_instruction_source_too_large".to_string())));
+        return Ok((
+            None,
+            Some("user_instruction_source_too_large".to_string()),
+            None,
+            false,
+        ));
     }
     let bytes = std::fs::read(path)?;
-    Ok((Some(sha256_hex(&bytes)), None))
+    let hash = Some(sha256_hex(&bytes));
+    if !include_body {
+        return Ok((hash, None, None, false));
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok((
+            hash,
+            Some("user_instruction_source_not_utf8".to_string()),
+            None,
+            false,
+        ));
+    };
+    let mut truncated = false;
+    let content = truncate_utf8(&text, MAX_CANONICAL_CONTENT_BYTES, &mut truncated);
+    Ok((hash, None, Some(content), truncated))
 }
 
 /// 根据 materialization 路径判定 ownership，observed hash 不作为所有权证据。
@@ -1053,5 +1102,73 @@ mod tests {
         assert_eq!(value, "中");
         assert!(truncated);
         assert!(value.len() <= 5);
+    }
+
+    /// Business Logic: 本机已有用户级文件时，inspect source 必须带可编辑正文。
+    /// Code Logic: 临时 CLAUDE.md + active source → content 等于磁盘原文。
+    #[test]
+    fn build_source_dtos_includes_active_disk_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("CLAUDE.md");
+        std::fs::write(&path, "## Rules\n\nAlways test.\n").expect("write");
+        let sources = vec![InstructionSource {
+            target: AgentTarget::Claude,
+            path: path.clone(),
+            scope_kind: crate::agent_hub::models::ScopeKind::User,
+            role: InstructionSourceRole::NativePrimary,
+            active: true,
+            native_active: true,
+            non_empty: true,
+            relative_path: None,
+            diagnostics: vec![],
+        }];
+        let dtos = build_source_dtos(AgentTarget::Claude, sources, None).expect("dto");
+        assert_eq!(dtos.len(), 1);
+        assert_eq!(
+            dtos[0].content.as_deref(),
+            Some("## Rules\n\nAlways test.\n")
+        );
+        assert!(!dtos[0].content_truncated);
+        assert!(dtos[0].hash.is_some());
+    }
+
+    /// Business Logic: 非 active 源默认不附正文，避免 shadow 源撑爆 IPC。
+    /// Code Logic: active=false 且存在 fallback 路径时仅 fallback 带 content。
+    #[test]
+    fn build_source_dtos_skips_inactive_body_when_active_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let active_path = dir.path().join("AGENTS.override.md");
+        let shadow_path = dir.path().join("AGENTS.md");
+        std::fs::write(&active_path, "override body\n").expect("write active");
+        std::fs::write(&shadow_path, "shadow body\n").expect("write shadow");
+        let sources = vec![
+            InstructionSource {
+                target: AgentTarget::Codex,
+                path: active_path,
+                scope_kind: crate::agent_hub::models::ScopeKind::User,
+                role: InstructionSourceRole::ManagedProjection,
+                active: true,
+                native_active: false,
+                non_empty: true,
+                relative_path: None,
+                diagnostics: vec![],
+            },
+            InstructionSource {
+                target: AgentTarget::Codex,
+                path: shadow_path,
+                scope_kind: crate::agent_hub::models::ScopeKind::User,
+                role: InstructionSourceRole::NativePrimary,
+                active: false,
+                native_active: true,
+                non_empty: true,
+                relative_path: None,
+                diagnostics: vec![],
+            },
+        ];
+        let dtos = build_source_dtos(AgentTarget::Codex, sources, None).expect("dto");
+        let active = dtos.iter().find(|s| s.active).expect("active");
+        let shadow = dtos.iter().find(|s| !s.active).expect("shadow");
+        assert_eq!(active.content.as_deref(), Some("override body\n"));
+        assert!(shadow.content.is_none());
     }
 }

@@ -264,6 +264,8 @@ export const userInstructionSourceDecoder: Decoder<UserInstructionSourceDto> = o
     modifiedAt: nullableDecoder(stringDecoder),
     ownership: userInstructionSourceOwnershipDecoder,
     reasonCode: optionalDecoder(nullableDecoder(stringDecoder)),
+    content: optionalDecoder(nullableDecoder(stringDecoder)),
+    contentTruncated: optionalDecoder(booleanDecoder),
   },
 );
 

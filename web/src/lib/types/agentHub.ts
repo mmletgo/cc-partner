@@ -81,6 +81,14 @@ export interface UserInstructionSourceDto {
   ownership: UserInstructionSourceOwnership;
   /** source resolver 的稳定诊断，例如 fallback 被环境变量禁用或文件过大。 */
   reasonCode?: string | null;
+  /**
+   * 磁盘 UTF-8 正文（有界）。
+   * Business Logic: 打开提示词原始栏直接展示本机已有文件。
+   * Code Logic: 仅 active（或无 active 时首个现存）源携带；过大/非 UTF-8 时为 null/undefined。
+   */
+  content?: string | null;
+  /** 正文被截断时不得用于覆盖写回。 */
+  contentTruncated?: boolean;
 }
 
 /** 单 Agent 的动作级能力。 */
@@ -147,8 +155,20 @@ export interface UserInstructionWorkspaceDto {
   refreshedAt: string;
 }
 
-/** 首次设置/日常更新中用户对 target 的明确选择。 */
-export type UserInstructionTargetSelection = 'managed' | 'unmanaged' | 'inherit';
+/** 首次设置/日常更新中用户对 target 的明确选择（简写三态）。 */
+export type UserInstructionTargetSelectionMode = 'managed' | 'unmanaged' | 'inherit';
+
+/**
+ * 用户级 target 选择：简写 mode，或带 adoptExisting 的详细形状。
+ * Business Logic: 编辑本机已有 external 文件并写回时必须 adoptExisting，否则 apply 会 OWNERSHIP_REQUIRED。
+ */
+export type UserInstructionTargetSelection =
+  | UserInstructionTargetSelectionMode
+  | {
+      managementMode: UserInstructionManagementMode;
+      adoptExisting?: boolean;
+      manageOverride?: boolean;
+    };
 
 /** 用户级指令公共与三 Agent 专属草稿。 */
 export interface UserInstructionDraft {

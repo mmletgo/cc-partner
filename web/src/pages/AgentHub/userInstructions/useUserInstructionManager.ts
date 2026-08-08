@@ -42,28 +42,57 @@ const EMPTY_TARGET_SELECTIONS: Record<AgentTarget, UserInstructionTargetSelectio
 
 /**
  * Business Logic（为什么需要）:
- *   首次载入和成功应用后需要把 canonical/management mode 转成用户可编辑草稿。
+ *   首次载入和成功应用后需要把 canonical/management mode 转成用户可编辑草稿；
+ *   未纳管但本机已有文件时，用磁盘正文 seed，避免编辑区空白。
  *
  * Code Logic（做什么）:
- *   common/extension 原样复制；managedActive/managedPaused 都归一为 managed 选择。
+ *   common/extension 优先 canonical；否则按 target 从 active source.content 填 extension；
+ *   managedActive/managedPaused 都归一为 managed 选择。
  */
 export function createUserInstructionDraft(
   workspace: UserInstructionWorkspaceDto,
 ): UserInstructionDraft {
   const selections = { ...EMPTY_TARGET_SELECTIONS };
+  const targetExtensions: Partial<Record<AgentTarget, string>> = {
+    ...(workspace.canonical?.targetExtensions ?? {}),
+  };
+  let commonContent = workspace.canonical?.commonContent ?? '';
+
   for (const target of workspace.targets) {
     if (target.managementMode !== 'unmanaged') {
       selections[target.target] = 'managed';
       continue;
     }
-    const activeSource = target.sources.find((source) => source.active);
-    selections[target.target] = activeSource?.role === 'fallback'
-      ? 'inherit'
-      : 'unmanaged';
+    const activeSource =
+      target.sources.find((source) => source.active) ??
+      target.sources.find((source) => source.exists && typeof source.content === 'string');
+    selections[target.target] = activeSource?.role === 'fallback' ? 'inherit' : 'unmanaged';
+
+    // 无 canonical 时用磁盘正文填充，便于直接编辑（按 target extension 分栏）。
+    if (
+      !workspace.canonical &&
+      typeof activeSource?.content === 'string' &&
+      activeSource.content.length > 0
+    ) {
+      targetExtensions[target.target] = activeSource.content;
+    }
   }
+
+  // 仅单 target 有磁盘正文且无 canonical：放进 common（清空 extensions 避免 apply 双写）。
+  if (!workspace.canonical && !commonContent.trim()) {
+    const filled = (['claude', 'codex', 'opencode'] as const).filter(
+      (key) => typeof targetExtensions[key] === 'string' && targetExtensions[key]!.trim().length > 0,
+    );
+    if (filled.length === 1) {
+      const only = filled[0]!;
+      commonContent = targetExtensions[only] ?? '';
+      delete targetExtensions[only];
+    }
+  }
+
   return {
-    commonContent: workspace.canonical?.commonContent ?? '',
-    targetExtensions: { ...(workspace.canonical?.targetExtensions ?? {}) },
+    commonContent,
+    targetExtensions,
     targetSelections: selections,
   };
 }

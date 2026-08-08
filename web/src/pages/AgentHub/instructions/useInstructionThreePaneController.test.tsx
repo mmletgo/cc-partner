@@ -208,7 +208,42 @@ afterEach(() => {
 });
 
 describe('originalFromWorkspace', () => {
-  test('uses effective source path and common + extension content', () => {
+  test('prefers disk source.content over canonical for original pane', () => {
+    const workspace = workspaceFixture({
+      setupState: 'readyToReview',
+      canonical: null,
+      targets: [
+        {
+          ...workspaceFixture().targets[0]!,
+          managementMode: 'unmanaged',
+          sources: [
+            {
+              sourceId: 'claude-disk',
+              path: '/home/user/.claude/CLAUDE.md',
+              role: 'native',
+              active: true,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-disk',
+              modifiedAt: null,
+              ownership: 'external',
+              content: '## From disk\n\nAlways ship tests.\n',
+              contentTruncated: false,
+            },
+          ],
+          effectiveSourceId: 'claude-disk',
+        },
+        workspaceFixture().targets[1]!,
+        workspaceFixture().targets[2]!,
+      ],
+    });
+    const result = originalFromWorkspace(workspace, 'claude');
+    expect(result.path).toBe('/home/user/.claude/CLAUDE.md');
+    expect(result.text).toBe('## From disk\n\nAlways ship tests.\n');
+    expect(result.contentTruncated).toBe(false);
+  });
+
+  test('falls back to canonical when source has no content field', () => {
     const workspace = workspaceFixture({
       canonical: {
         assetId: 'a',
@@ -224,6 +259,36 @@ describe('originalFromWorkspace', () => {
     expect(result.path).toBe('/home/user/.claude/CLAUDE.md');
     expect(result.text).toContain('## Common');
     expect(result.text).toContain('## Extra');
+  });
+
+  test('disk content wins even when canonical also present', () => {
+    const workspace = workspaceFixture({
+      targets: [
+        {
+          ...workspaceFixture().targets[0]!,
+          sources: [
+            {
+              sourceId: 'claude-managed',
+              path: '/home/user/.claude/CLAUDE.md',
+              role: 'native',
+              active: true,
+              exists: true,
+              nonEmpty: true,
+              hash: 'hash-1',
+              modifiedAt: null,
+              ownership: 'hubManaged',
+              content: '## Live disk\n\nnewer than hub\n',
+              contentTruncated: false,
+            },
+          ],
+        },
+        workspaceFixture().targets[1]!,
+        workspaceFixture().targets[2]!,
+      ],
+    });
+    const result = originalFromWorkspace(workspace, 'claude');
+    expect(result.text).toContain('## Live disk');
+    expect(result.text).not.toContain('## Shared rules');
   });
 });
 
@@ -241,6 +306,53 @@ describe('useInstructionThreePaneController', () => {
     expect(result.current.state.blocks).toEqual([]);
     expect(result.current.state.previewText).toBe('');
     expect(result.current.state.blocksDirty).toBe(false);
+  });
+
+  test('inspect auto-loads unmanaged disk content into editable original pane', async () => {
+    apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(
+      workspaceFixture({
+        setupState: 'readyToReview',
+        canonical: null,
+        targets: [
+          {
+            ...workspaceFixture().targets[0]!,
+            managementMode: 'unmanaged',
+            sources: [
+              {
+                sourceId: 'claude-external',
+                path: '/home/user/.claude/CLAUDE.md',
+                role: 'native',
+                active: true,
+                exists: true,
+                nonEmpty: true,
+                hash: 'hash-ext',
+                modifiedAt: null,
+                ownership: 'external',
+                content: '## Existing machine prompt\n\nDo not invent APIs.\n',
+                contentTruncated: false,
+              },
+            ],
+            effectiveSourceId: 'claude-external',
+            availableActions: ['manage', 'adopt'],
+          },
+          workspaceFixture().targets[1]!,
+          workspaceFixture().targets[2]!,
+        ],
+      }),
+    );
+    const { result } = renderHook(() =>
+      useInstructionThreePaneController({ context: baseContext, t }),
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.state.originalText).toContain('## Existing machine prompt');
+    expect(result.current.writeBlocked).toBe(false);
+
+    act(() => {
+      result.current.updateOriginal('## Existing machine prompt\n\nEdited locally.\n');
+    });
+    expect(result.current.state.originalText).toContain('Edited locally');
+    expect(result.current.state.originalDirty).toBe(true);
   });
 
   test('reparse fills blocks from original', async () => {
