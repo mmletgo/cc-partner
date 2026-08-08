@@ -76,6 +76,17 @@ function buildProps(
     t: i18n.t.bind(i18n) as unknown as UseAgentHubControllerResult['t'],
     activeSection: 'assets',
     setActiveSection: vi.fn(),
+    hubContext: {
+      agent: 'claude',
+      scope: 'user',
+      deviceId: null,
+      projectKey: null,
+      tab: 'skill',
+      adaptView: false,
+    },
+    onContextChange: vi.fn(),
+    shellPeers: [],
+    shellProjects: [],
     userInstructions: {} as UseAgentHubControllerResult['userInstructions'],
     loading: false,
     refreshing: false,
@@ -525,15 +536,30 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('adoption-canonical').textContent).toContain('User instruction');
   });
 
-  test('section tabs expose assets workspace and sync opens pull control', () => {
-    const setActiveSection = vi.fn();
+  test('shell tabs expose assets workspace and toolbar opens pull control', () => {
+    const onContextChange = vi.fn();
     const openPortablePull = vi.fn();
-    renderView({ setActiveSection, openPortablePull, activeSection: 'syncImport' });
-    expect(screen.getByTestId('agent-hub-section-assets')).toBeTruthy();
-    expect(screen.getByTestId('agent-hub-open-portable-pull')).toBeTruthy();
-    fireEvent.click(screen.getByTestId('agent-hub-open-portable-pull'));
+    renderView({
+      onContextChange,
+      openPortablePull,
+      activeSection: 'syncImport',
+      hubContext: {
+        agent: 'claude',
+        scope: 'user',
+        deviceId: null,
+        projectKey: null,
+        tab: 'instructions',
+        adaptView: false,
+      },
+    });
+    expect(screen.getByTestId('agent-hub-shell')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-tab-skill')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-action-pull')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     expect(openPortablePull).toHaveBeenCalled();
-    fireEvent.click(screen.getByTestId('agent-hub-section-assets'));
-    expect(setActiveSection).toHaveBeenCalledWith('assets');
+    fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
+    expect(onContextChange).toHaveBeenCalledWith({ tab: 'skill' });
+    // dual-path: legacy section buttons still present for deep-link tests
+    expect(screen.getByTestId('agent-hub-section-assets')).toBeTruthy();
   });
 });

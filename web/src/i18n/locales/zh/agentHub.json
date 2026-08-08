@@ -11,6 +11,36 @@
     "diagnostics": "兼容性与诊断",
     "assets": "Agent 资产"
   },
+  "shell": {
+    "agentLabel": "Agent",
+    "agentAria": "选择 Agent",
+    "toolbarAria": "Agent Hub 工具栏",
+    "scopeLabel": "范围",
+    "scopeAria": "选择范围",
+    "scopeUser": "用户级",
+    "scopeProject": "项目级",
+    "deviceLabel": "设备",
+    "deviceAria": "选择设备",
+    "localDevice": "本机",
+    "offline": "离线",
+    "projectLabel": "项目",
+    "projectAria": "选择项目",
+    "projectPlaceholder": "选择项目",
+    "projectLocal": "本机",
+    "projectRemote": "远端",
+    "tabsAria": "工作区标签",
+    "tabs": {
+      "instructions": "提示词",
+      "skill": "Skill",
+      "command": "Command",
+      "mcp": "MCP",
+      "plugin": "Plugin"
+    },
+    "pull": "拉取…",
+    "push": "推送…",
+    "adapt": "适配到其他 Agent…",
+    "adaptLocalOnly": "跨 Agent 适配仅可在本机上下文中使用"
+  },
   "userInstructions": {
     "title": "用户级指令",
     "subtitle": "统一查看各 Agent 实际读取的文件，并用一份公共内容加少量专属扩展进行管理。",

@@ -11,6 +11,36 @@
     "diagnostics": "Compatibility and diagnostics",
     "assets": "Agent assets"
   },
+  "shell": {
+    "agentLabel": "Agent",
+    "agentAria": "Select agent",
+    "toolbarAria": "Agent Hub toolbar",
+    "scopeLabel": "Scope",
+    "scopeAria": "Select scope",
+    "scopeUser": "User",
+    "scopeProject": "Project",
+    "deviceLabel": "Device",
+    "deviceAria": "Select device",
+    "localDevice": "This device",
+    "offline": "Offline",
+    "projectLabel": "Project",
+    "projectAria": "Select project",
+    "projectPlaceholder": "Select a project",
+    "projectLocal": "Local",
+    "projectRemote": "Remote",
+    "tabsAria": "Workspace tabs",
+    "tabs": {
+      "instructions": "Instructions",
+      "skill": "Skill",
+      "command": "Command",
+      "mcp": "MCP",
+      "plugin": "Plugin"
+    },
+    "pull": "Pull…",
+    "push": "Push…",
+    "adapt": "Adapt to other agents…",
+    "adaptLocalOnly": "Cross-agent adapt is only available on this device"
+  },
   "userInstructions": {
     "title": "User instructions",
     "subtitle": "See the files each agent actually reads, then manage them as shared content with small agent-specific extensions.",

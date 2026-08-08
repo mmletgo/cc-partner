@@ -1,0 +1,102 @@
+/* Agent Hub 壳层：仅 design tokens */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+}
+
+.chrome {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.rowBetween {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--fg-muted-readable);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.segment {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.select {
+  min-width: 10rem;
+  max-width: 18rem;
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  transition: all var(--motion-fast) var(--ease-standard);
+}
+
+.select:hover {
+  border-color: var(--border-soft);
+}
+
+.select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.adaptHint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+  max-width: 16rem;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
