@@ -709,6 +709,20 @@
     "openButton": "Sync to other agents",
     "title": "Manual same-machine cross-agent sync",
     "description": "Pick a source agent and destinations, preview adaptation (shared / adapted / targetOnly / residual), then confirm a one-shot write. No background cross-agent file writes.",
+    "pageTitle": "Adapt to other agents",
+    "pageDescription": "Selective same-machine adapt: pick destinations, confirm scope, preview shared / adapted / targetOnly / residual, then apply a one-shot write. Full Claude volume mode arrives later.",
+    "back": "Back to workspace",
+    "targetsSection": "Source and destinations",
+    "scopeSection": "Scope confirmation",
+    "scopeUser": "User-level instructions on this machine",
+    "scopeProject": "Project-level · {{project}}",
+    "scopeConfirmLabel": "I confirm writing under this scope",
+    "projectOptInNeeded": "Select a project in the hub shell before project-level adapt. Project must be Hub-enabled (opt-in).",
+    "projectOptInHint": "Target agents write only if this project is already enabled in Agent Hub. Enable from the project workspace if needed.",
+    "contentSection": "Instruction content",
+    "contentLabel": "Source instruction markdown",
+    "reloadContent": "Reload from source agent",
+    "claudeBlockStub": "Block-level “adapt with Claude” is not available yet (full mode ships with the next task). Edit markdown manually for selective adapt.",
     "selectAria": "Cross-agent sync options",
     "sourceLabel": "Source agent",
     "destinationsLabel": "Destination agents (multi-select)",
@@ -725,7 +739,15 @@
       "residual": "Non-portable residual"
     },
     "errors": {
-      "invalidPreview": "Preview response could not be parsed. Retry or update the backend."
+      "invalidPreview": "Preview response could not be parsed. Retry or update the backend.",
+      "peerBlocked": "Cross-agent adapt is only available on this machine. Switch the device selector back to local.",
+      "emptyMarkdown": "Source instruction content is empty. Load or paste markdown first.",
+      "emptyDestinations": "Select at least one destination agent.",
+      "sourceInDestinations": "Destination agents cannot include the source agent.",
+      "scopeUnconfirmed": "Confirm the write scope before preview.",
+      "projectKeyRequired": "Choose a project before project-level adapt.",
+      "previewRequired": "Run adaptation preview before apply.",
+      "noApplicable": "No destination can be written safely from this preview."
     }
   }
 }

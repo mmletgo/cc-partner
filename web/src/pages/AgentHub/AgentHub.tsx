@@ -41,6 +41,7 @@ import {
 } from './portableAssets';
 import { summarizeDeletePreview } from './pluginPackagePresentation';
 import { AgentHubShell } from './shell';
+import { CrossAgentAdaptPage } from './crossAgent';
 import {
   useAgentHubController,
   type UseAgentHubControllerResult,
@@ -399,7 +400,19 @@ export function AgentHubView(props: AgentHubViewProps) {
     [hubContext.deviceId, onContextChange, openLanPushDialog, openPortablePull, t],
   );
 
-  if (activeSection !== 'userInstructions' && loading && !status) {
+  /**
+   * Business Logic: 适配页优先使用三栏当前 original / preview 正文。
+   * Code Logic: original 优先，其次合成 preview；皆空则交 controller inspect。
+   */
+  const adaptInitialMarkdown = useMemo(() => {
+    const state = instructionThreePane?.state;
+    if (!state) return null;
+    if (state.originalText.trim().length > 0) return state.originalText;
+    if (state.previewText.trim().length > 0) return state.previewText;
+    return null;
+  }, [instructionThreePane?.state]);
+
+  if (activeSection !== 'userInstructions' && loading && !status && !hubContext.adaptView) {
     return (
       <div className={styles.page} data-testid="agent-hub-loading">
         <div className={styles.container}>
@@ -409,7 +422,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     );
   }
 
-  if (activeSection !== 'userInstructions' && error && !status) {
+  if (activeSection !== 'userInstructions' && error && !status && !hubContext.adaptView) {
     return (
       <div className={styles.page} data-testid="agent-hub-error">
         <div className={styles.container}>
@@ -423,6 +436,26 @@ export function AgentHubView(props: AgentHubViewProps) {
           >
             {error}
           </StatusMessage>
+        </div>
+      </div>
+    );
+  }
+
+  if (hubContext.adaptView) {
+    return (
+      <div className={styles.page} data-testid="agent-hub-page">
+        <div className={styles.container}>
+          <header className={styles.header}>
+            <div className={styles.titleBlock}>
+              <h1 className={styles.title}>{t('agentHub:title')}</h1>
+              <p className={styles.subtitle}>{t('agentHub:crossAgent.pageTitle')}</p>
+            </div>
+          </header>
+          <CrossAgentAdaptPage
+            context={hubContext}
+            initialSourceMarkdown={adaptInitialMarkdown}
+            onExit={() => onContextChange({ adaptView: false })}
+          />
         </div>
       </div>
     );
