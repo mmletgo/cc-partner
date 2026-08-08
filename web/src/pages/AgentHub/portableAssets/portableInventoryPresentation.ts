@@ -56,6 +56,29 @@ const PROBLEM_MANAGEMENT: ReadonlySet<PortableInventoryManagementState> = new Se
   'unsupported',
 ]);
 
+const PORTABILITY_ADVISORY_CODES: ReadonlySet<string> = new Set([
+  'absolutePath',
+  'targetExecutable',
+  'unsupportedInterpolation',
+  'modelNotPortable',
+  'permissionNotPortable',
+  'unknownSourceField',
+  'materializedAlias',
+  'plugin_has_components',
+]);
+
+/** 判断 warning token 是否只是跨设备/跨 CLI 可移植性提示。 */
+function isPortabilityAdvisory(code: string): boolean {
+  return PORTABILITY_ADVISORY_CODES.has(code) || code.startsWith('transport:');
+}
+
+/** 返回会影响本机健康态的 warning；可移植性提示留在详情，不污染主列表。 */
+export function portableInventoryProblemWarnings(
+  item: PortableInventoryItemDto,
+): string[] {
+  return item.warnings.filter((warning) => !isPortabilityAdvisory(warning));
+}
+
 /**
  * Business Logic: Plugin component 在 standalone 列表中不展示/不计数。
  * Code Logic: sourceOrigin === 'pluginComponent' 即视为 component。
@@ -70,7 +93,7 @@ export function isPortablePluginComponent(item: PortableInventoryItemDto): boole
  */
 export function isPortableInventoryProblem(item: PortableInventoryItemDto): boolean {
   if (PROBLEM_MANAGEMENT.has(item.managementState)) return true;
-  if (item.warnings.length > 0) return true;
+  if (portableInventoryProblemWarnings(item).length > 0) return true;
   return false;
 }
 

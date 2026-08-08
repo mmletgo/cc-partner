@@ -14,6 +14,10 @@ use crate::agent_hub::assets::{McpTransport, PortableAssetPayload};
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
 use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::plugins::decompose::discover_plugin_source_for_target;
+use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
+use crate::agent_hub::portable_actions::targets::{
+    has_direct_local_actions, supports_direct_local_action,
+};
 use crate::agent_hub::portable_inventory::models::{
     inventory_item_id, PortableAssetKind, PortableInventoryItemCapabilitiesDto,
     PortableInventoryItemDto, PortableInventoryManagementState,
@@ -146,7 +150,8 @@ pub fn scan_portable_inventory_facts(
                 }
             };
             // Plugin package roots（package 本体 + 组件 parent 关联）
-            let plugin_packages = scan_plugin_packages(target, scope, env, &homes, &mut seen_ids)?;
+            let plugin_packages =
+                scan_plugin_packages(target, scope, env, &homes, &target_dto, &mut seen_ids)?;
             items.extend(plugin_packages);
 
             for disc in discoveries {
@@ -258,8 +263,10 @@ fn target_dto_from_probe(
             }
         }
     };
-    let mutation_cap = if evaluated.allows_write_capability(TargetCapability::RenderPortableAssets)
-        && evaluated.allows_write_capability(TargetCapability::ActivatePackage)
+    let direct_local_management = installed && has_direct_local_actions(target);
+    let mutation_cap = if direct_local_management
+        || (evaluated.allows_write_capability(TargetCapability::RenderPortableAssets)
+            && evaluated.allows_write_capability(TargetCapability::ActivatePackage))
     {
         PortableInventoryMutationCapability::Supported
     } else if matches!(
@@ -286,6 +293,13 @@ fn target_dto_from_probe(
     if evidence_ids.is_empty() {
         evidence_ids.push("L2-PORTABLE-INVENTORY-001".into());
     }
+    if direct_local_management
+        && !evidence_ids
+            .iter()
+            .any(|id| id == "L2-AGENT-HUB-PORTABLE-PARITY-001")
+    {
+        evidence_ids.push("L2-AGENT-HUB-PORTABLE-PARITY-001".into());
+    }
     Ok(PortableInventoryTargetDto {
         target,
         installed,
@@ -305,6 +319,7 @@ fn scan_plugin_packages(
     scope: &PortableScanScope,
     env: &TargetEnvironment,
     homes: &crate::agent_hub::targets::paths::TargetHomes,
+    target_dto: &PortableInventoryTargetDto,
     seen: &mut BTreeSet<String>,
 ) -> Result<Vec<PortableInventoryItemDto>, AppError> {
     let roots = plugin_roots_for(target, scope, env, homes);
@@ -335,7 +350,16 @@ fn scan_plugin_packages(
         if component_skill.is_dir() {
             warnings.push("plugin_has_components".into());
         }
-        let can_mutate = scope.project_opted_in && scope.scope_kind != ScopeKind::Directory;
+        let can_mutate = scope.project_opted_in
+            && scope.scope_kind != ScopeKind::Directory
+            && target_dto.mutation_capability != PortableInventoryMutationCapability::Blocked;
+        let reason = if !scope.project_opted_in && scope.scope_kind != ScopeKind::User {
+            Some("project_not_opted_in".into())
+        } else if target_dto.mutation_capability == PortableInventoryMutationCapability::Blocked {
+            target_dto.reason_code.clone()
+        } else {
+            None
+        };
         out.push(PortableInventoryItemDto {
             inventory_item_id: inv_id,
             target,
@@ -361,11 +385,12 @@ fn scan_plugin_packages(
             desired_enabled: None,
             materialization_status: None,
             capabilities: item_capabilities(
+                target,
                 PortableAssetKind::Plugin,
                 Some(true),
                 can_mutate,
                 true,
-                None,
+                reason,
             ),
             warnings,
             mcp_credential: None,
@@ -582,6 +607,7 @@ fn discovered_to_item(
         desired_enabled: None,
         materialization_status: None,
         capabilities: item_capabilities(
+            disc.origin.target,
             kind,
             actual_enabled,
             can_mutate_scope && mutation_target_ok,
@@ -635,6 +661,7 @@ fn enable_semantics_supported(kind: PortableAssetKind, target: AgentTarget) -> b
 }
 
 fn item_capabilities(
+    target: AgentTarget,
     kind: PortableAssetKind,
     actual_enabled: Option<bool>,
     can_mutate: bool,
@@ -642,12 +669,17 @@ fn item_capabilities(
     reason: Option<String>,
 ) -> PortableInventoryItemCapabilitiesDto {
     let can_toggle = can_mutate && enable_semantics && actual_enabled.is_some();
-    let can_enable = can_toggle && actual_enabled == Some(false);
-    let can_disable = can_toggle && actual_enabled == Some(true);
+    let can_enable = can_toggle
+        && actual_enabled == Some(false)
+        && supports_direct_local_action(target, kind, PortableAssetActionKind::Enable);
+    let can_disable = can_toggle
+        && actual_enabled == Some(true)
+        && supports_direct_local_action(target, kind, PortableAssetActionKind::Disable);
     PortableInventoryItemCapabilitiesDto {
         can_enable,
         can_disable,
-        can_uninstall: can_mutate,
+        can_uninstall: can_mutate
+            && supports_direct_local_action(target, kind, PortableAssetActionKind::Uninstall),
         // Adopt ownership write is not wired (PORTABLE_ASSET_ACTION_ADOPT_NOT_WIRED).
         // Never advertise canAdopt=true — UI prioritizes Adopt as primary action otherwise.
         can_adopt: false,
@@ -764,7 +796,8 @@ mod tests {
     use super::*;
     use crate::agent_hub::portable_inventory::reconcile::reconcile_portable_inventory_with_facts;
     use crate::agent_hub::targets::{
-        ClaudeInstructionAdapter, CodexInstructionAdapter, OpenCodeInstructionAdapter,
+        AdapterSupportLevel, ClaudeInstructionAdapter, CodexInstructionAdapter,
+        OpenCodeInstructionAdapter,
     };
     use std::collections::BTreeMap as Map;
 
@@ -959,6 +992,52 @@ enabled = false
     }
 
     #[test]
+    fn claude_direct_management_is_not_blocked_by_projection_manifest() {
+        let (_tmp, env) = seed_all_targets_fixture();
+        let probe = TargetProbe {
+            target: AgentTarget::Claude,
+            executable: Some(env.home.join("bin/claude")),
+            version: Some("2.1.207 (Claude Code)".into()),
+            config_root: env.home.join(".claude"),
+            support: AdapterSupportLevel::Supported,
+            fingerprint: "fixture-fingerprint".into(),
+        };
+
+        let target = target_dto_from_probe(AgentTarget::Claude, &probe, &env).unwrap();
+
+        assert_eq!(
+            target.mutation_capability,
+            PortableInventoryMutationCapability::Supported
+        );
+        assert_eq!(target.reason_code, None);
+        assert!(target
+            .evidence_ids
+            .iter()
+            .any(|id| id == "L2-AGENT-HUB-PORTABLE-PARITY-001"));
+    }
+
+    #[test]
+    fn uncertified_target_executors_remain_blocked() {
+        let (_tmp, env) = seed_all_targets_fixture();
+        for target in [AgentTarget::Codex, AgentTarget::OpenCode] {
+            let probe = TargetProbe {
+                target,
+                executable: Some(env.home.join(format!("bin/{}", target.as_str()))),
+                version: Some("1.0.0".into()),
+                config_root: env.home.join(format!(".{}", target.as_str())),
+                support: AdapterSupportLevel::Supported,
+                fingerprint: "fixture-fingerprint".into(),
+            };
+
+            let target_dto = target_dto_from_probe(target, &probe, &env).unwrap();
+            assert_eq!(
+                target_dto.mutation_capability,
+                PortableInventoryMutationCapability::Blocked
+            );
+        }
+    }
+
+    #[test]
     fn scan_finds_four_kinds_per_target_with_enabled_and_plugin_parent() {
         let (_tmp, env) = seed_all_targets_fixture();
         let scopes = user_and_projects(&env.home);
@@ -1117,7 +1196,14 @@ enabled = false
 
     #[test]
     fn can_adopt_is_always_false_even_when_mutable() {
-        let caps = item_capabilities(PortableAssetKind::Skill, Some(true), true, true, None);
+        let caps = item_capabilities(
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            Some(true),
+            true,
+            true,
+            None,
+        );
         assert!(caps.can_disable);
         assert!(caps.can_uninstall);
         assert!(!caps.can_adopt);

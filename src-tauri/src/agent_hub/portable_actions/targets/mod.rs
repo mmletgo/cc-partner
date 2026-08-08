@@ -18,6 +18,7 @@ pub use opencode::OpenCodeTargetExecutor;
 use super::models::{
     PortableAssetActionChangeDto, PortableAssetActionKind, PortableAssetActionPlanDto,
 };
+use crate::agent_hub::models::AgentTarget;
 use crate::agent_hub::packages::activator::{ProcessOutcome, ProcessRunner};
 use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
 use crate::error::AppError;
@@ -87,14 +88,100 @@ pub trait TargetActionExecutor: Send + Sync {
 }
 
 /// 选择 target executor。
-pub fn executor_for(
-    target: crate::agent_hub::models::AgentTarget,
-) -> Box<dyn TargetActionExecutor> {
-    use crate::agent_hub::models::AgentTarget;
+pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
     match target {
         AgentTarget::Claude => Box::new(ClaudeTargetExecutor),
         AgentTarget::Codex => Box::new(CodexTargetExecutor),
         AgentTarget::OpenCode => Box::new(OpenCodeTargetExecutor),
+    }
+}
+
+/// 判断本机直管执行器是否真实覆盖指定动作。
+///
+/// Business Logic（为什么需要）:
+///     本机库存启停/卸载与 canonical package 投影是两套能力；不能因为后者尚未完成
+///     L3 认证，就把旧版已经具备真实执行器和隔离 smoke 的 Claude 本机管理一并禁用。
+///
+/// Code Logic（做什么）:
+///     以 target × kind × action 的显式 allowlist 对齐实际 executor；未实现的 Codex、
+///     OpenCode、Adopt、InstallToSourceTarget 始终 fail-closed。
+pub fn supports_direct_local_action(
+    target: AgentTarget,
+    kind: PortableAssetKind,
+    action: PortableAssetActionKind,
+) -> bool {
+    matches!(target, AgentTarget::Claude)
+        && matches!(
+            kind,
+            PortableAssetKind::Skill
+                | PortableAssetKind::Command
+                | PortableAssetKind::Plugin
+                | PortableAssetKind::Mcp
+        )
+        && matches!(
+            action,
+            PortableAssetActionKind::Enable
+                | PortableAssetActionKind::Disable
+                | PortableAssetActionKind::Uninstall
+        )
+}
+
+/// 判断 target 是否至少具备一个本机直管动作。
+pub fn has_direct_local_actions(target: AgentTarget) -> bool {
+    [
+        PortableAssetKind::Skill,
+        PortableAssetKind::Command,
+        PortableAssetKind::Plugin,
+        PortableAssetKind::Mcp,
+    ]
+    .into_iter()
+    .any(|kind| supports_direct_local_action(target, kind, PortableAssetActionKind::Uninstall))
+}
+
+#[cfg(test)]
+mod direct_action_support_tests {
+    use super::*;
+
+    #[test]
+    fn support_matrix_matches_real_target_executors() {
+        for kind in [
+            PortableAssetKind::Skill,
+            PortableAssetKind::Command,
+            PortableAssetKind::Plugin,
+            PortableAssetKind::Mcp,
+        ] {
+            for action in [
+                PortableAssetActionKind::Enable,
+                PortableAssetActionKind::Disable,
+                PortableAssetActionKind::Uninstall,
+            ] {
+                assert!(supports_direct_local_action(
+                    AgentTarget::Claude,
+                    kind,
+                    action
+                ));
+                assert!(!supports_direct_local_action(
+                    AgentTarget::Codex,
+                    kind,
+                    action
+                ));
+                assert!(!supports_direct_local_action(
+                    AgentTarget::OpenCode,
+                    kind,
+                    action
+                ));
+            }
+            assert!(!supports_direct_local_action(
+                AgentTarget::Claude,
+                kind,
+                PortableAssetActionKind::Adopt,
+            ));
+            assert!(!supports_direct_local_action(
+                AgentTarget::Claude,
+                kind,
+                PortableAssetActionKind::InstallToSourceTarget,
+            ));
+        }
     }
 }
 

@@ -126,4 +126,20 @@ describe('PortableInventoryRow', () => {
     expect(screen.queryByRole('button', { name: 'Disable' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Enable' })).toBeNull();
   });
+
+  test('keeps portability advisories out of the health row', () => {
+    render(
+      <PortableInventoryRow
+        item={item({ warnings: ['targetExecutable', 'unknownSourceField', 'absolutePath'] })}
+        primaryAction="disable"
+        labels={labels}
+      />,
+    );
+
+    expect(screen.getByText('Enabled')).toBeTruthy();
+    expect(screen.queryByText('Problem')).toBeNull();
+    expect(screen.queryByText('targetExecutable')).toBeNull();
+    expect(screen.queryByText('unknownSourceField')).toBeNull();
+    expect(screen.queryByText('absolutePath')).toBeNull();
+  });
 });

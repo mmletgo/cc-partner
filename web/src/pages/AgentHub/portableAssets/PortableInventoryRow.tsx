@@ -16,6 +16,7 @@ import type {
 } from '@/lib/types/portableInventory';
 import {
   classifyPortableActualState,
+  portableInventoryProblemWarnings,
   type PortableActualStateClass,
 } from './portableInventoryPresentation';
 import styles from './PortableInventoryRow.module.css';
@@ -72,6 +73,7 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
     onPrimaryAction,
   } = props;
   const actual = classifyPortableActualState(item);
+  const problemWarnings = portableInventoryProblemWarnings(item);
   const disabledVisual = actual === 'disabled';
 
   return (
@@ -120,9 +122,9 @@ export function PortableInventoryRow(props: PortableInventoryRowProps): JSX.Elem
           {item.version ? <span>{item.version}</span> : null}
         </div>
         {item.sourcePath ? <div className={styles.path}>{item.sourcePath}</div> : null}
-        {item.warnings.length > 0 ? (
+        {problemWarnings.length > 0 ? (
           <div className={styles.warnings}>
-            {item.warnings.map((warning) => (
+            {problemWarnings.map((warning) => (
               <span key={warning} className={styles.warning}>
                 {warning}
               </span>

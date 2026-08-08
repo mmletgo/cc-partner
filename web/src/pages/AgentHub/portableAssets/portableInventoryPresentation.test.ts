@@ -333,6 +333,18 @@ describe('portableInventoryPresentation filters', () => {
     );
   });
 
+  test('portability notes do not mark a healthy local item as problem', () => {
+    const healthyWithNotes = makeItem({
+      inventoryItemId: 'claude-skill-portability-notes',
+      kind: 'skill',
+      nativeId: 'portability-notes',
+      warnings: ['targetExecutable', 'unknownSourceField', 'absolutePath'],
+    });
+
+    expect(isPortableInventoryProblem(healthyWithNotes)).toBe(false);
+    expect(classifyPortableActualState(healthyWithNotes)).toBe('enabled');
+  });
+
   test('projectOptedIn=false is read-only and never exposes mutation primary action', () => {
     const projectItem = catalog.find((i) => i.inventoryItemId === 'claude-skill-project')!;
     expect(isPortableItemReadOnly(projectItem)).toBe(true);
