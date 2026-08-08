@@ -399,9 +399,9 @@
     "credentialLabel": "凭据"
   },
   "lanPush": {
-    "title": "局域网 Push",
+    "title": "局域网 Push（同类 Agent）",
     "open": "局域网 Push",
-    "hint": "仅源侧 push。请显式选择对端与一种选择模式。每个对端独立报告。",
+    "hint": "从当前 Agent Hub 上下文仅源侧、同类 Agent push。请显式选择对端与一种选择模式；每个对端独立报告。此处不可跨 Agent 传输。",
     "peers": "对端",
     "peersAria": "选择局域网对端",
     "noPeers": "未发现在线对端。",
@@ -634,7 +634,7 @@
   },
   "portablePull": {
     "title": "从对端 Pull（同类 Agent）",
-    "hint": "选择局域网对端与同类 Agent。目标端固定等于源 Agent，不可跨 Agent。",
+    "hint": "仅将同类 Agent 资产拉取到本机。源对端默认取自壳层设备上下文（若有）；目标端固定等于源 Agent，不可跨 Agent。",
     "lanNoAuthRisk": "同一可达网络中的任何设备均可读取、写入和执行；系统不验证调用者身份。",
     "staleInventory": "远端库存已过期。预览或应用前请先刷新。",
     "deviceSection": "源设备",
@@ -652,7 +652,7 @@
     "inventoryAria": "远端库存列表",
     "loadInventory": "加载远端库存",
     "selectVisible": "全选可见",
-    "loadHint": "选择对端与 Agent 后加载远端库存。",
+    "loadHint": "确认源对端与 Agent（工具栏上下文可预填）后加载远端库存。",
     "policyAria": "冲突策略",
     "conflictPolicy": "冲突策略",
     "preview": "预览计划",

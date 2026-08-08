@@ -404,7 +404,15 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const userInstructions = useUserInstructionManager(t);
   const portableInventoryBase = usePortableInventoryController(inventoryRequestContext);
   const [portablePullOpen, setPortablePullOpen] = useState(false);
-  const portablePull = usePortablePullController({ open: portablePullOpen });
+  /**
+   * Business Logic: 壳层工具栏 Pull 预填当前 peer（deviceId）与当前 Agent（same-agent）。
+   * Code Logic: hubContext 变化在抽屉 open 时由 pull controller 应用。
+   */
+  const portablePull = usePortablePullController({
+    open: portablePullOpen,
+    initialSourceDeviceId: hubContext.deviceId,
+    initialSourceTarget: hubContext.agent,
+  });
   const [activeSection, setActiveSectionState] = useState<AgentHubSection>(() => {
     if (deepLinkAssetId || deepLinkConflictId) return 'assets';
     if (deepLinkPreview || deepLinkProjectId || deepLinkBridge) return 'projectInstructions';
@@ -1091,19 +1099,39 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, [deleteEverywhereAssetId, loadCore, requireSelectedAssetId, selectedAssetId]);
 
 
+  /**
+   * Business Logic: 壳层工具栏 Push 打开 LAN 对话框，按当前 scope 预填 mode/project。
+   * Code Logic: project scope → mode=project + hub project id；user → userScope。
+   */
   const openLanPushDialog = useCallback(() => {
     setLanPushOpen(true);
     setActionError(null);
     setLanPreview(null);
     setLanReport(null);
+    setLanSelectedPeerIds([]);
+    if (hubContext.scope === 'project') {
+      setLanMode('project');
+      setLanHubProjectIdsText(hubContext.projectKey ?? '');
+      setLanAssetIdsText('');
+    } else {
+      setLanMode('userScope');
+      setLanHubProjectIdsText('');
+      setLanAssetIdsText('');
+    }
     void devicesApi.list().then((list) => {
       if (!mountedRef.current) return;
-      setLanPeers(list.map((d) => ({ deviceId: d.id, name: d.name })));
+      // 仅展示在线对端；排除当前正在查看的 peer（源侧不推自己）
+      const currentDeviceId = hubContext.deviceId;
+      setLanPeers(
+        list
+          .filter((d) => d.status === 'online' && d.id !== currentDeviceId)
+          .map((d) => ({ deviceId: d.id, name: d.name })),
+      );
     }).catch((reason) => {
       if (!mountedRef.current) return;
       setActionError(toErrorMessage(reason));
     });
-  }, []);
+  }, [hubContext.scope, hubContext.projectKey, hubContext.deviceId]);
 
   const closeLanPushDialog = useCallback(() => {
     if (actionBusy) return;
