@@ -1,14 +1,14 @@
-//! portable_inventory/scanner — 三 target 四类资产只读库存扫描
+//! portable_inventory/scanner — 三 target 四类资产库存扫描 + inspect 入口
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     inspect 必须从本机真实路径/配置观测 Skill/Command/Plugin/MCP 事实
-//!     （actualEnabled/origin/parentPlugin/hash/capability），并与 canonical 对账；
-//!     刷新库存只读，不得写 CAS、目标文件或 adoption/binding/revision。
+//!     （actualEnabled/origin/parentPlugin/hash/capability），ensure 管理账本后与 canonical 对账；
+//!     不得静默改目标磁盘资产内容；CAS 原字节与 adoption 移盘不在本路径。
 //!
 //! Code Logic（这个模块做什么）:
 //!     调 AssetAdapter::scan_portable_assets + 只读 Plugin package 发现；
 //!     将 `DiscoveredPortableAsset` 转为 `PortableInventoryItemDto`；
-//!     用户 scope 与已注册 project mapping 一并扫描；unopted 项目只读能力。
+//!     inspect：scan → ensure_managed（ledger）→ reconcile；unopted 项目只读 mutation 能力。
 
 use crate::agent_hub::assets::{McpTransport, PortableAssetPayload};
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
@@ -18,6 +18,7 @@ use crate::agent_hub::portable_actions::models::PortableAssetActionKind;
 use crate::agent_hub::portable_actions::targets::{
     has_direct_local_actions, supports_direct_local_action,
 };
+use crate::agent_hub::portable_inventory::ensure_managed::ensure_discovered_portable_items_managed;
 use crate::agent_hub::portable_inventory::models::{
     inventory_item_id, PortableAssetKind, PortableInventoryItemCapabilitiesDto,
     PortableInventoryItemDto, PortableInventoryManagementState,
@@ -67,10 +68,11 @@ pub struct PortableScanScope {
 /// 使用当前进程环境刷新本机 portable inventory。
 ///
 /// Business Logic（为什么需要这个函数）:
-///     UI/动作 preview 的权威 inspect 入口；只读扫描 + 对账，不写目标文件/CAS/ownership。
+///     UI/动作 preview 的权威 inspect 入口；扫描后 ensure 管理账本再对账。
+///     不写目标磁盘资产内容；不把发现当成 CAS/adoption 移盘。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造 TargetEnvironment → 收集 user + 已映射 project scopes → scan → reconcile。
+///     构造 TargetEnvironment → 收集 user + 已映射 project scopes → scan → ensure → reconcile。
 pub async fn inspect_portable_inventory(
     state: &AppState,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
@@ -80,15 +82,44 @@ pub async fn inspect_portable_inventory(
 
 /// 使用注入环境刷新 portable inventory（可测）。
 ///
-/// Business Logic: 隔离 HOME 与生产扫描共用同一路径/origin 规则。
-/// Code Logic: 组装 scopes → `scan_portable_inventory_facts` → repo 只读 reconcile。
+/// Business Logic: 隔离 HOME 与生产扫描共用同一路径/origin 规则；发现即管理。
+/// Code Logic: scopes → scan → `ensure_discovered_portable_items_managed` → reconcile。
 pub async fn inspect_portable_inventory_with_env(
     state: &AppState,
     env: &TargetEnvironment,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
     let scopes = collect_scan_scopes(state, env).await?;
-    let (targets, discovered) = scan_portable_inventory_facts(env, &scopes)?;
-    reconcile_portable_inventory(&state.agent_hub_repo, targets, discovered).await
+    let (targets, mut discovered) = scan_portable_inventory_facts(env, &scopes)?;
+    let ensure_report =
+        ensure_discovered_portable_items_managed(&state.agent_hub_repo, &mut discovered).await;
+    if !ensure_report.failures.is_empty() {
+        tracing::warn!(
+            target = "agent_hub.portable_inventory",
+            ensured = ensure_report.ensured,
+            skipped = ensure_report.skipped,
+            failures = ensure_report.failures.len(),
+            "portable inventory ensure_managed completed with per-item failures"
+        );
+    }
+    // ensure 失败项已标 unsupported；reconcile 后再贴回，避免被「无 fact → unmanaged」覆盖
+    let failed_ids: std::collections::BTreeMap<String, String> = ensure_report
+        .failures
+        .iter()
+        .map(|f| (f.inventory_item_id.clone(), f.reason.clone()))
+        .collect();
+    let mut snapshot =
+        reconcile_portable_inventory(&state.agent_hub_repo, targets, discovered).await?;
+    for item in &mut snapshot.items {
+        if let Some(reason) = failed_ids.get(&item.inventory_item_id) {
+            item.management_state = PortableInventoryManagementState::Unsupported;
+            item.capabilities.reason_code = Some("ensure_managed_failed".into());
+            let warn = format!("ensure_managed_failed:{reason}");
+            if !item.warnings.iter().any(|w| w == &warn) {
+                item.warnings.push(warn);
+            }
+        }
+    }
+    Ok(snapshot)
 }
 
 /// 只读扫描三 target 事实（不对账、不访问 DB）。

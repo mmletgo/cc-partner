@@ -36,6 +36,12 @@ export interface UsePortablePullControllerOptions {
   open: boolean;
   pullApi?: PortablePullApi;
   listDevices?: () => Promise<Device[]>;
+  /**
+   * Shell hubContext.deviceId when set (user-scope peer view).
+   * Open 时优先选为 source peer；null/缺失或不在线则回退首个在线 peer。
+   */
+  initialSourceDeviceId?: string | null;
+  /** Shell hubContext.agent — same-agent pull 默认源/目标 Agent。 */
   initialSourceTarget?: AgentTarget;
 }
 
@@ -118,7 +124,8 @@ function formatError(reason: unknown): string {
 }
 
 /**
- * Business Logic: open 时加载 devices；destination 恒等于 sourceTarget。
+ * Business Logic: open 时加载 devices 并预填 shell 上下文（device/agent）；
+ * destination 恒等于 sourceTarget（same-agent only）。
  * Code Logic: sequence + mounted ref 防 stale 写入；hooks 全在 early return 前。
  */
 export function usePortablePullController(
@@ -128,6 +135,7 @@ export function usePortablePullController(
     open,
     pullApi = defaultPortablePullApi,
     listDevices = devicesApi.list,
+    initialSourceDeviceId = null,
     initialSourceTarget = 'claude',
   } = options;
 
@@ -178,12 +186,31 @@ export function usePortablePullController(
     filtersRef.current = filters;
   }, [filters]);
 
-  /** open 时加载 devices；关闭时抬 sequence 作废 in-flight inventory。 */
+  /**
+   * Business Logic: 工具栏打开 Pull 时预填 shell 的 peer + agent；关闭抬 sequence。
+   * Code Logic: 每次 open/prefill 变化清 workspace，优先 initialSourceDeviceId（在线时）。
+   */
   useEffect(() => {
     if (!open) {
       inventorySeqRef.current += 1;
       return;
     }
+
+    // same-agent 默认：destination 随 sourceTarget；来自 hubContext.agent
+    setSourceTarget(initialSourceTarget);
+    sourceTargetRef.current = initialSourceTarget;
+    // 新开抽屉以 shell 上下文为准，丢掉上一次 session 的 selection/plan
+    inventorySeqRef.current += 1;
+    previewSeqRef.current += 1;
+    applySeqRef.current += 1;
+    planRequestIdRef.current = null;
+    setRemoteInventory(null);
+    setSelectedItemIds(new Set());
+    setPlan(null);
+    setResult(null);
+    setClientRequestId(null);
+    setError(null);
+
     let cancelled = false;
     void (async () => {
       try {
@@ -191,10 +218,12 @@ export function usePortablePullController(
         if (cancelled || !mountedRef.current) return;
         const peers = list.filter((d) => d.status === 'online');
         setDevices(peers);
-        setSelectedDeviceId((prev) => {
-          if (prev && peers.some((d) => d.id === prev)) return prev;
-          return peers[0]?.id ?? '';
-        });
+        const preferred =
+          initialSourceDeviceId && peers.some((d) => d.id === initialSourceDeviceId)
+            ? initialSourceDeviceId
+            : (peers[0]?.id ?? '');
+        setSelectedDeviceId(preferred);
+        selectedDeviceIdRef.current = preferred;
       } catch (reason) {
         if (cancelled || !mountedRef.current) return;
         setError(formatError(reason));
@@ -203,7 +232,7 @@ export function usePortablePullController(
     return () => {
       cancelled = true;
     };
-  }, [open, listDevices]);
+  }, [open, listDevices, initialSourceDeviceId, initialSourceTarget]);
 
   const visibleItems = useMemo(
     () => filterRemotePortableItems(remoteInventory?.items ?? [], filters),

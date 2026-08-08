@@ -25,6 +25,7 @@ import {
   type AgentHubUpdateInstructionBlockArgs,
 } from '@/api/agentHub';
 import { devicesApi } from '@/api/devices';
+import { workbenchApi } from '@/api/workbench';
 import type {
   AgentHubAdoptionPreview,
   AgentHubAssetDetail,
@@ -64,6 +65,25 @@ import {
   type UsePortableInventoryControllerResult,
   type UsePortablePullControllerResult,
 } from './portableAssets';
+import {
+  parseAgentHubContext,
+  writeAgentHubContext,
+  mapLegacySection,
+  DEFAULT_AGENT_HUB_CONTEXT,
+  type AgentHubContext,
+  type AgentHubTab,
+  type AgentHubScope,
+} from './context/agentHubContext';
+
+export {
+  parseAgentHubContext,
+  writeAgentHubContext,
+  mapLegacySection,
+  DEFAULT_AGENT_HUB_CONTEXT,
+  type AgentHubContext,
+  type AgentHubTab,
+  type AgentHubScope,
+};
 
 /** Agent Hub 一级工作区。 */
 export type AgentHubSection =
@@ -72,6 +92,34 @@ export type AgentHubSection =
   | 'assets'
   | 'syncImport'
   | 'diagnostics';
+
+/**
+ * Business Logic: 将壳层 context 映射到旧五段 section，双路径内容区暂不炸裂。
+ * Code Logic: instructions×user/project → 对应指令区；资产 tab → assets。
+ */
+export function mapContextToSection(ctx: AgentHubContext): AgentHubSection {
+  if (ctx.tab === 'instructions') {
+    return ctx.scope === 'project' ? 'projectInstructions' : 'userInstructions';
+  }
+  return 'assets';
+}
+
+/**
+ * Business Logic: 旧 section 写回壳层 Partial context（工具入口/测试双路径）。
+ * Code Logic: 仅覆盖 scope/tab；不碰 agent/device。
+ */
+export function mapSectionToContextPatch(section: AgentHubSection): Partial<AgentHubContext> {
+  switch (section) {
+    case 'userInstructions':
+      return { scope: 'user', tab: 'instructions' };
+    case 'projectInstructions':
+      return { scope: 'project', tab: 'instructions' };
+    case 'assets':
+      return { tab: 'skill' };
+    default:
+      return {};
+  }
+}
 
 /** URL 中 section 合法值（含 legacy portableAssets 别名）。 */
 const SECTION_VALUES = new Set<string>([
@@ -176,6 +224,14 @@ export interface UseAgentHubControllerResult {
   t: TFunction<['agentHub', 'common']>;
   activeSection: AgentHubSection;
   setActiveSection: (section: AgentHubSection) => void;
+  /** 新 IA 壳层上下文（URL 权威）。 */
+  hubContext: AgentHubContext;
+  /** 壳层 patch → URL write + 双路径 activeSection 同步。 */
+  onContextChange: (patch: Partial<AgentHubContext>) => void;
+  /** 壳层 peer 列表（devicesApi；online 来自 mDNS status）。 */
+  shellPeers: Array<{ deviceId: string; name: string; online: boolean }>;
+  /** 壳层项目列表（workbench 本机 + remote shortcut）。 */
+  shellProjects: Array<{ key: string; label: string; remote: boolean }>;
   userInstructions: UseUserInstructionManagerResult;
   /** F2 inventory controller（URL 同步后的包装）。 */
   portableInventory: UsePortableInventoryControllerResult;
@@ -329,10 +385,34 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const deepLinkBridge = searchParams.get('bridge');
   const deepLinkSection = searchParams.get('section');
   const deepLinkInventoryItemId = searchParams.get('inventoryItemId');
+  /**
+   * Business Logic: URL 权威的壳层上下文，须在子 controller 之前解析以便透传 device/project。
+   * Code Logic: 每次 searchParams 变化 re-parse。
+   */
+  const hubContext = useMemo(
+    () => parseAgentHubContext(searchParams),
+    [searchParams],
+  );
+  /** portable / instruction inspect 用的 device|project 上下文。 */
+  const inventoryRequestContext = useMemo(
+    () =>
+      hubContext.scope === 'project'
+        ? { deviceId: null as string | null, projectRef: hubContext.projectKey }
+        : { deviceId: hubContext.deviceId, projectRef: null as string | null },
+    [hubContext.scope, hubContext.deviceId, hubContext.projectKey],
+  );
   const userInstructions = useUserInstructionManager(t);
-  const portableInventoryBase = usePortableInventoryController();
+  const portableInventoryBase = usePortableInventoryController(inventoryRequestContext);
   const [portablePullOpen, setPortablePullOpen] = useState(false);
-  const portablePull = usePortablePullController({ open: portablePullOpen });
+  /**
+   * Business Logic: 壳层工具栏 Pull 预填当前 peer（deviceId）与当前 Agent（same-agent）。
+   * Code Logic: hubContext 变化在抽屉 open 时由 pull controller 应用。
+   */
+  const portablePull = usePortablePullController({
+    open: portablePullOpen,
+    initialSourceDeviceId: hubContext.deviceId,
+    initialSourceTarget: hubContext.agent,
+  });
   const [activeSection, setActiveSectionState] = useState<AgentHubSection>(() => {
     if (deepLinkAssetId || deepLinkConflictId) return 'assets';
     if (deepLinkPreview || deepLinkProjectId || deepLinkBridge) return 'projectInstructions';
@@ -368,6 +448,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [lanHubProjectIdsText, setLanHubProjectIdsText] = useState('');
   const [lanPreview, setLanPreview] = useState<AgentHubLanPushPreview | null>(null);
   const [lanReport, setLanReport] = useState<AgentHubMultiTargetPushReport | null>(null);
+  /** 壳层设备列表（真实 devicesApi；独立于 LAN Push dialog 的 lanPeers）。 */
+  const [shellPeers, setShellPeers] = useState<
+    Array<{ deviceId: string; name: string; online: boolean }>
+  >([]);
+  /** 壳层项目列表（workbench local + remote shortcuts）。 */
+  const [shellProjects, setShellProjects] = useState<
+    Array<{ key: string; label: string; remote: boolean }>
+  >([]);
   const [gitImportOpen, setGitImportOpen] = useState(false);
   const [gitInspectReport, setGitInspectReport] = useState<AgentHubGitLaneInspectReport | null>(null);
   const [gitSelectedLaneDeviceId, setGitSelectedLaneDeviceId] = useState<string | null>(null);
@@ -484,6 +572,41 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       appliedDeepLinkRef.current = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
       void loadAssetDetail(deepLinkAssetId);
     }
+    // 壳层 peers：真实局域网设备列表（mDNS）；失败时保持空列表不阻断 Hub
+    void devicesApi
+      .list()
+      .then((list) => {
+        if (!mountedRef.current) return;
+        setShellPeers(
+          list.map((device) => ({
+            deviceId: device.id,
+            name: device.name,
+            online: device.status === 'online',
+          })),
+        );
+      })
+      .catch(() => {
+        /* shell peers best-effort */
+      });
+    // 壳层项目：workbench 本机 + remote shortcut
+    void workbenchApi.projects
+      .list()
+      .then((projects) => {
+        if (!mountedRef.current) return;
+        setShellProjects(
+          projects.map((project) => {
+            const remote = project.kind === 'remote';
+            const label =
+              remote && project.deviceName
+                ? `${project.name} · ${project.deviceName}`
+                : project.name;
+            return { key: project.id, label, remote };
+          }),
+        );
+      })
+      .catch(() => {
+        /* shell projects best-effort */
+      });
     return () => {
       mountedRef.current = false;
     };
@@ -976,19 +1099,39 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, [deleteEverywhereAssetId, loadCore, requireSelectedAssetId, selectedAssetId]);
 
 
+  /**
+   * Business Logic: 壳层工具栏 Push 打开 LAN 对话框，按当前 scope 预填 mode/project。
+   * Code Logic: project scope → mode=project + hub project id；user → userScope。
+   */
   const openLanPushDialog = useCallback(() => {
     setLanPushOpen(true);
     setActionError(null);
     setLanPreview(null);
     setLanReport(null);
+    setLanSelectedPeerIds([]);
+    if (hubContext.scope === 'project') {
+      setLanMode('project');
+      setLanHubProjectIdsText(hubContext.projectKey ?? '');
+      setLanAssetIdsText('');
+    } else {
+      setLanMode('userScope');
+      setLanHubProjectIdsText('');
+      setLanAssetIdsText('');
+    }
     void devicesApi.list().then((list) => {
       if (!mountedRef.current) return;
-      setLanPeers(list.map((d) => ({ deviceId: d.id, name: d.name })));
+      // 仅展示在线对端；排除当前正在查看的 peer（源侧不推自己）
+      const currentDeviceId = hubContext.deviceId;
+      setLanPeers(
+        list
+          .filter((d) => d.status === 'online' && d.id !== currentDeviceId)
+          .map((d) => ({ deviceId: d.id, name: d.name })),
+      );
     }).catch((reason) => {
       if (!mountedRef.current) return;
       setActionError(toErrorMessage(reason));
     });
-  }, []);
+  }, [hubContext.scope, hubContext.projectKey, hubContext.deviceId]);
 
   const closeLanPushDialog = useCallback(() => {
     if (actionBusy) return;
@@ -1173,8 +1316,60 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, [gitMappingDrafts, gitPreview, gitSelectedAssetIds, loadCore]);
 
   /**
+   * Business Logic: 壳层 patch 写回 URL，并同步旧 activeSection 双路径内容。
+   * Code Logic: merge + scope 互斥 → writeAgentHubContext；资产 tab 顺带粗同步 kind/target filter。
+   */
+  const onContextChange = useCallback(
+    (patch: Partial<AgentHubContext>) => {
+      setSearchParams((prev) => {
+        const current = parseAgentHubContext(prev);
+        const next: AgentHubContext = { ...current, ...patch };
+        if (next.scope === 'user') {
+          next.projectKey = null;
+        } else {
+          next.deviceId = null;
+        }
+        return writeAgentHubContext(prev, next);
+      }, { replace: true });
+
+      const merged: AgentHubContext = {
+        ...parseAgentHubContext(searchParams),
+        ...patch,
+      };
+      if (merged.scope === 'user') {
+        merged.projectKey = null;
+      } else {
+        merged.deviceId = null;
+      }
+
+      // dual path: keep legacy section content in sync with shell
+      if (merged.adaptView) {
+        // adapt 全页后续任务；暂不改 section
+      } else {
+        setActiveSectionState(mapContextToSection(merged));
+      }
+
+      // 粗映射：资产 tab → portable kind/target 筛选
+      if (
+        merged.tab === 'skill' ||
+        merged.tab === 'command' ||
+        merged.tab === 'mcp' ||
+        merged.tab === 'plugin'
+      ) {
+        portableInventoryBase.setFilters({
+          kind: merged.tab,
+          target: merged.agent,
+          scope: merged.scope,
+        });
+      }
+    },
+    [portableInventoryBase, searchParams, setSearchParams],
+  );
+
+  /**
    * Business Logic: 一级 section 切换写 URL，离开 assets 时清库存 deep-link 参数。
-   * Code Logic: replace 避免堆 history；保留 conflictId/assetId 等无关参数。
+   * Code Logic: replace 避免堆 history；保留 conflictId/assetId 等无关参数；
+   *   同时 patch 新 IA context 键，避免壳层与 section 分叉。
    */
   const setActiveSection = useCallback(
     (section: AgentHubSection) => {
@@ -1189,10 +1384,23 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (section !== 'assets') {
           next.delete('kind');
           next.delete('target');
-          next.delete('scope');
           next.delete('state');
           next.delete('management');
           next.delete('inventoryItemId');
+        }
+        // 双路径：section → context keys；write 会剥离 legacy section，再写回以保 deep link 测试契约
+        const patch = mapSectionToContextPatch(section);
+        if (Object.keys(patch).length > 0) {
+          const ctx = { ...parseAgentHubContext(next), ...patch };
+          if (ctx.scope === 'user') ctx.projectKey = null;
+          else ctx.deviceId = null;
+          const written = writeAgentHubContext(next, ctx);
+          if (section === 'userInstructions') {
+            written.delete('section');
+          } else {
+            written.set('section', section);
+          }
+          return written;
         }
         return next;
       }, { replace: true });
@@ -1300,7 +1508,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setPortableActionError(null);
       setPortableActionResult(null);
       try {
-        const plan = await portableAssetApi.previewAction(request);
+        // 透传壳层 device/project，peer 路径 API fail-closed 不静默本机写
+        const plan = await portableAssetApi.previewAction({
+          ...request,
+          ...portableInventoryBase.requestContext,
+        });
         if (!mountedRef.current) return;
         setPortableActionPlan(plan);
         setPortableActionClientRequestId(mintClientRequestId());
@@ -1312,7 +1524,13 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setPortableActionBusy(false);
       }
     },
-    [mintClientRequestId, portableInventoryBase.mutationBlocked, portableInventoryBase.stale, t],
+    [
+      mintClientRequestId,
+      portableInventoryBase.mutationBlocked,
+      portableInventoryBase.requestContext,
+      portableInventoryBase.stale,
+      t,
+    ],
   );
 
   const confirmPortableAction = useCallback(
@@ -1330,7 +1548,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setPortableActionError(null);
       if (itemId) portableInventoryBase.setItemLocked(itemId, true);
       try {
-        const applyRequest: ApplyPortableAssetActionRequest = { planToken, clientRequestId };
+        const applyRequest: ApplyPortableAssetActionRequest = {
+          planToken,
+          clientRequestId,
+          ...portableInventoryBase.requestContext,
+        };
         const result = await portableAssetApi.applyAction(applyRequest);
         if (!mountedRef.current) return;
         setPortableActionResult(result);
@@ -1396,6 +1618,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     t,
     activeSection,
     setActiveSection,
+    hubContext,
+    onContextChange,
+    shellPeers,
+    shellProjects,
     userInstructions,
     portableInventory,
     portableDetailsOpen: Boolean(portableInventoryBase.selectedItemId),

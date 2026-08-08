@@ -1,7 +1,7 @@
 # Agent Hub 交互全面重设计
 
 - 日期：2026-08-08
-- 状态：待用户审阅 Spec（交互合同已在 brainstorm 中分节确认）
+- 状态：implemented (partial: full adapt stub)
 - 上位 / 并行文档：
   - [`2026-08-08-agent-hub-three-phase-refactor-design.md`](./2026-08-08-agent-hub-three-phase-refactor-design.md)（产品阶段与 D1–D4）
   - [`2026-08-04-agent-hub-user-instruction-management-v2-design.md`](./2026-08-04-agent-hub-user-instruction-management-v2-design.md)

@@ -1,9 +1,10 @@
 /**
- * AssetAdoptionDialog — externalCollision / adoption 预览 pure 视图。
+ * AssetAdoptionDialog — 遗留 externalCollision / adoption 预览 pure 视图。
  *
  * Business Logic（为什么需要这个对话框）:
- *   externalCollision 必须先展示来源与诊断；LAN push 在 Gate C，
- *   本轮不宣称可跨设备推送或静默移动 Skill 目录。
+ *   portable 库存已改为「发现即管理」，不再以 Adopt 为主路径。
+ *   本对话框仅保留给历史矩阵 externalCollision 诊断只读预览；
+ *   无 confirm 时不可发起纳入写操作。
  *
  * Code Logic（这个组件做什么）:
  *   复用 Dialog；纯 props；禁止 import @/api/*。

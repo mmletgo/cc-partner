@@ -37,6 +37,7 @@ pub mod assets;
 pub mod autostart;
 pub mod config_patch;
 pub mod cross_agent;
+pub mod cross_agent_full;
 pub mod git;
 pub mod instructions;
 pub mod migration;
@@ -76,6 +77,13 @@ pub use cross_agent::{
     ApplyCrossAgentInstructionRequest, CrossAgentAdaptMode, CrossAgentApplyTargetResult,
     CrossAgentKind, CrossAgentPreviewReport, CrossAgentTargetPreview,
     PreviewCrossAgentInstructionRequest,
+};
+pub use cross_agent_full::{
+    apply_cross_agent_full, apply_cross_agent_full_default, preview_cross_agent_full,
+    preview_cross_agent_full_default, ApplyCrossAgentFullRequest, CrossAgentFullApplyItemResult,
+    CrossAgentFullApplySelection, CrossAgentFullPlan, CrossAgentFullPlanItem,
+    CrossAgentFullPortableRef, CrossAgentFullSnapshot, FullAdaptRunner, PreviewCrossAgentFullRequest,
+    StubFullAdaptRunner, FULL_ADAPT_GENERATOR_STUB,
 };
 
 pub use instructions::{
@@ -146,10 +154,11 @@ pub use portable_actions::{
     PreviewPortableAssetActionRequest, PLAN_TTL_MINUTES,
 };
 pub use portable_inventory::{
-    inspect_portable_inventory, inspect_portable_inventory_with_env, inventory_item_id,
-    inventory_snapshot_hash, reconcile_portable_inventory, reconcile_portable_inventory_with_facts,
-    scan_portable_inventory_facts, PortableAssetKind, PortableCanonicalFact,
-    PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
+    ensure_discovered_portable_items_managed, inspect_portable_inventory,
+    inspect_portable_inventory_with_env, inventory_item_id, inventory_snapshot_hash,
+    reconcile_portable_inventory, reconcile_portable_inventory_with_facts,
+    scan_portable_inventory_facts, EnsureManagedFailure, EnsureManagedReport, PortableAssetKind,
+    PortableCanonicalFact, PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
     PortableInventoryManagementState, PortableInventoryMutationCapability,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
     PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableScanScope,

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-07-30",
+  "updatedAt": "2026-08-08",
   "description": "Machine-readable quality evidence matrix. Stable IDs must not be renamed without updating docs and scripts/check-quality-traceability.mjs atomically. L1 browser mocks do not prove Tauri WebView, system permissions, real file dialogs, or multi-host LAN. L3 rows stay NOT VERIFIED until real-device certification lands.",
   "entries": [
     {
@@ -1794,6 +1794,123 @@
         "docs/superpowers/plans/2026-08-07-agent-hub-portable-asset-ui-parity.md"
       ],
       "notes": "L1 backendHarness mock: Agent Hub 3x4 observed inventory, four filters, stale mutation gate, enable/disable/uninstall preview+apply+rescan, four kind details, Plugin ownership delete confirm, /claude-code deep link to assets+Claude, same-agent Pull with canonical-only/replace/progress/partial/outcomeUnknown, no credential plaintext. References backend L2 L2-AGENT-HUB-PORTABLE-PARITY-001 / L2-AGENT-HUB-PORTABLE-PULL-001; multi-host/full-platform L3 NOT VERIFIED."
+    },
+    {
+      "id": "E2E-AGENT-HUB-SHELL-001",
+      "surface": "agent-hub",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub-interaction.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub-interaction.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real multi-host mDNS device list",
+        "packaged desktop GUI",
+        "legacy five-section primary nav as authority"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/superpowers/specs/2026-08-08-agent-hub-interaction-redesign-design.md",
+        "docs/superpowers/plans/2026-08-08-agent-hub-interaction-redesign.md"
+      ],
+      "notes": "L1 mock: AgentHubShell shows agent switcher / scope / device|project / five tabs; context clicks update URL dual-path (tab may rewrite to section=assets+kind). Not real peer inventory."
+    },
+    {
+      "id": "E2E-AGENT-HUB-INSTR-3PANE-001",
+      "surface": "agent-hub",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub-interaction.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub-interaction.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real native file write/sync",
+        "automatic parse on open",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/superpowers/specs/2026-08-08-agent-hub-interaction-redesign-design.md"
+      ],
+      "notes": "L1 mock: InstructionThreePaneView blocks empty until reparse-from-original; three panes present; original loads inspect body. Sync/apply write path remains scan-only fail-closed when capability blocked."
+    },
+    {
+      "id": "E2E-AGENT-HUB-DISCOVER-MANAGED-001",
+      "surface": "agent-hub",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub-interaction.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub-interaction.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "real ensure_managed ledger write",
+        "real product CLI install",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/superpowers/specs/2026-08-08-agent-hub-interaction-redesign-design.md"
+      ],
+      "notes": "L1 mock: portable inventory primary action never Adopt even when capabilities.canAdopt=true; unmanaged canAdopt-only rows show refresh hint. Backend ensure_managed L2: L2-AGENT-HUB-ENSURE-MANAGED-001."
+    },
+    {
+      "id": "E2E-AGENT-HUB-ADAPT-FULL-001",
+      "surface": "agent-hub",
+      "level": "L1",
+      "tests": [
+        "web/tests/agent-hub-interaction.spec.ts"
+      ],
+      "command": "cd web && npm run test:e2e -- agent-hub-interaction.spec.ts",
+      "ciJob": "frontend-e2e",
+      "platforms": [
+        "chromium-linux"
+      ],
+      "exclusions": [
+        "non-stub full adapt generator (skill/command/mcp/plugin copy)",
+        "peer-device adapt (local-only)",
+        "real multi-CLI disk write",
+        "packaged desktop GUI"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/superpowers/specs/2026-08-08-agent-hub-interaction-redesign-design.md"
+      ],
+      "notes": "L1 mock: /agent-hub?view=adapt full mode; apply disabled until preview returns plan; stub generator items + forced preview gate. Full adapt is partial/stub for non-instruction kinds."
+    },
+    {
+      "id": "L2-AGENT-HUB-ENSURE-MANAGED-001",
+      "surface": "agent-hub",
+      "level": "L2",
+      "tests": [
+        "src-tauri/src/agent_hub/portable_inventory/ensure_managed.rs"
+      ],
+      "command": "cd src-tauri && cargo test --locked ensure_managed -- --nocapture",
+      "ciJob": "quality",
+      "platforms": [
+        "rust"
+      ],
+      "exclusions": [
+        "real product CLI install/uninstall",
+        "LAN multi-host",
+        "UI adopt-button journeys (see E2E-AGENT-HUB-DISCOVER-MANAGED-001)"
+      ],
+      "docs": [
+        "docs/development/testing.md",
+        "docs/superpowers/plans/2026-08-08-agent-hub-interaction-redesign.md"
+      ],
+      "notes": "Library-level ensure_managed: scan discovery promotes ledger without adopt side-effect; per-item failure isolation; scan fixture roundtrip. Not real multi-CLI L3."
     }
   ]
 }

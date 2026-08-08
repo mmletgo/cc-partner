@@ -11,6 +11,64 @@
     "diagnostics": "Compatibility and diagnostics",
     "assets": "Agent assets"
   },
+  "shell": {
+    "agentLabel": "Agent",
+    "agentAria": "Select agent",
+    "toolbarAria": "Agent Hub toolbar",
+    "scopeLabel": "Scope",
+    "scopeAria": "Select scope",
+    "scopeUser": "User",
+    "scopeProject": "Project",
+    "deviceLabel": "Device",
+    "deviceAria": "Select device",
+    "localDevice": "This device",
+    "offline": "Offline",
+    "projectLabel": "Project",
+    "projectAria": "Select project",
+    "projectPlaceholder": "Select a project",
+    "projectLocal": "Local",
+    "projectRemote": "Remote",
+    "tabsAria": "Workspace tabs",
+    "tabs": {
+      "instructions": "Instructions",
+      "skill": "Skill",
+      "command": "Command",
+      "mcp": "MCP",
+      "plugin": "Plugin"
+    },
+    "pull": "Pull…",
+    "push": "Push…",
+    "adapt": "Adapt to other agents…",
+    "adaptLocalOnly": "Cross-agent adapt is only available on this device"
+  },
+  "instructions": {
+    "threePane": {
+      "blocksTitle": "Blocks",
+      "previewTitle": "Composed preview",
+      "originalTitle": "Original file",
+      "reparseFromOriginal": "Reparse blocks from original",
+      "syncToNative": "Sync to native file…",
+      "emptyBlocks": "No blocks yet. Reparse from the original column or add a block.",
+      "emptyPreview": "Preview stays empty until you reparse or fill blocks.",
+      "emptyOriginal": "No original content found for this agent. You can draft here and sync.",
+      "pathLabel": "Path",
+      "noPath": "No path resolved",
+      "loading": "Loading instructions…",
+      "previewReadOnly": "Read-only",
+      "addBlock": "Add block",
+      "dualDirtyTitle": "Choose a sync baseline",
+      "dualDirtyDescription": "Both the blocks and the original file have unsaved edits with different content. Pick which content to write.",
+      "useBlocksBaseline": "Use composed blocks",
+      "useOriginalBaseline": "Use original file",
+      "blockTitlePlaceholder": "Block title",
+      "blockBodyPlaceholder": "Block body",
+      "refresh": "Rescan",
+      "writeBlocked": "Writes are blocked for this agent. You can still edit the draft, but sync is disabled.",
+      "errors": {
+        "emptySync": "Nothing to sync. Add original content or blocks first."
+      }
+    }
+  },
   "userInstructions": {
     "title": "User instructions",
     "subtitle": "See the files each agent actually reads, then manage them as shared content with small agent-specific extensions.",
@@ -341,9 +399,9 @@
     "credentialLabel": "credential"
   },
   "lanPush": {
-    "title": "LAN Push",
+    "title": "LAN Push (same agent)",
     "open": "LAN Push",
-    "hint": "Source-only push. Select explicit peers and one selection mode. Each peer is reported independently.",
+    "hint": "Source-only same-agent push from the current Agent Hub context. Select explicit peers and one selection mode. Each peer is reported independently. Cross-agent transfer is not available here.",
     "peers": "Peers",
     "peersAria": "Select LAN peers",
     "noPeers": "No online peers discovered.",
@@ -434,7 +492,7 @@
   "portable": {
     "inventory": {
       "title": "Agent assets",
-      "subtitle": "Observed inventory across Claude, Codex, and OpenCode. Actual state is the source of truth.",
+      "subtitle": "Observed inventory for the selected agent. Actual disk state is the source of truth; discovery creates Hub management automatically.",
       "loading": "Loading inventory…",
       "empty": "No portable assets match the current filters.",
       "refresh": "Refresh inventory",
@@ -444,7 +502,8 @@
       "filterTarget": "Target",
       "filterScope": "Scope",
       "filterActual": "Actual state",
-      "filterManagement": "Management",
+      "filterManagement": "Consistency",
+      "unmanagedRefreshHint": "Not managed yet — refresh inventory to bring this asset under Hub management.",
       "kindCounts": {
         "skill": "Skills",
         "command": "Commands",
@@ -469,12 +528,12 @@
         "problem": "Problem"
       },
       "managementFilter": {
-        "all": "All management",
-        "unmanaged": "External",
-        "hubManaged": "Hub managed",
+        "all": "All consistency",
+        "hubManaged": "Consistent",
         "drifted": "Drifted",
-        "externalCollision": "Collision",
-        "unsupported": "Unsupported"
+        "externalCollision": "Conflict",
+        "unsupported": "Unsupported",
+        "unmanaged": "Pending manage"
       },
       "actual": {
         "enabled": "Enabled",
@@ -483,11 +542,11 @@
         "unknown": "Unknown"
       },
       "management": {
-        "unmanaged": "External",
-        "hubManaged": "Hub managed",
+        "hubManaged": "Consistent",
         "drifted": "Drifted",
-        "externalCollision": "Collision",
-        "unsupported": "Unsupported"
+        "externalCollision": "Conflict",
+        "unsupported": "Unsupported",
+        "unmanaged": "Pending manage"
       },
       "scope": {
         "user": "User",
@@ -501,23 +560,24 @@
       }
     },
     "actions": {
-      "adopt": "Adopt",
+      "adopt": "Refresh to manage",
       "enable": "Enable",
       "disable": "Disable",
       "uninstall": "Uninstall",
       "installToSourceTarget": "Install to source target"
     },
     "management": {
-      "unmanaged": "External",
-      "hubManaged": "Hub managed",
+      "hubManaged": "Consistent",
       "drifted": "Drifted",
-      "externalCollision": "Collision",
-      "unsupported": "Unsupported"
+      "externalCollision": "Conflict",
+      "unsupported": "Unsupported",
+      "unmanaged": "Pending manage"
     },
     "details": {
       "title": "Asset details",
       "titleWithName": "Details · {{name}}",
       "empty": "Select an inventory item to inspect details.",
+      "unmanagedRefreshHint": "This asset is not managed yet. Refresh inventory so Hub can create a management record (no separate adopt step).",
       "nativeId": "Native id",
       "treeHash": "Tree hash",
       "origin": "Origin",
@@ -574,7 +634,7 @@
   },
   "portablePull": {
     "title": "Pull from peer (same agent)",
-    "hint": "Select a LAN peer and the same agent target. Destination always matches the source agent.",
+    "hint": "Pull into this device for the current agent only. Source peer defaults from the shell device context when set; destination always matches the source agent (no cross-agent target).",
     "lanNoAuthRisk": "Any device on the reachable network can read, write, and execute. The system does not verify caller identity.",
     "staleInventory": "Remote inventory is stale. Refresh before preview or apply.",
     "deviceSection": "Source device",
@@ -592,7 +652,7 @@
     "inventoryAria": "Remote inventory list",
     "loadInventory": "Load remote inventory",
     "selectVisible": "Select visible",
-    "loadHint": "Choose a peer and agent, then load remote inventory.",
+    "loadHint": "Confirm the source peer and agent (prefilled from the toolbar context when available), then load remote inventory.",
     "policyAria": "Conflict policy",
     "conflictPolicy": "Conflict policy",
     "preview": "Preview plan",
@@ -649,6 +709,37 @@
     "openButton": "Sync to other agents",
     "title": "Manual same-machine cross-agent sync",
     "description": "Pick a source agent and destinations, preview adaptation (shared / adapted / targetOnly / residual), then confirm a one-shot write. No background cross-agent file writes.",
+    "pageTitle": "Adapt to other agents",
+    "pageDescription": "Same-machine adapt: selective multi-target instructions, or full-volume single-target inventory (instructions + skill / command / mcp / plugin). Preview is always required before apply.",
+    "back": "Back to workspace",
+    "modeSection": "Adapt mode",
+    "modeLabel": "Mode",
+    "modeSelective": "Selective (instructions, multi-target)",
+    "modeFull": "Full volume (one destination, five kinds)",
+    "fullModeHint": "Full mode builds a plan for the entire source scope. Portable skill/command/mcp/plugin items may be residual/skip until copy is ready; instruction apply reuses the selective path.",
+    "fullDestinationLabel": "Destination agent (single)",
+    "fullPreviewAria": "Full-volume adaptation plan",
+    "fullStubNote": "Plan generation uses the deterministic stub runner (Claude headless not wired yet). Instruction items still apply via the shared selective writer.",
+    "planHash": "Plan hash",
+    "generator": "Generator",
+    "kinds": {
+      "instruction": "Instruction",
+      "skill": "Skill",
+      "command": "Command",
+      "mcp": "MCP",
+      "plugin": "Plugin"
+    },
+    "targetsSection": "Source and destinations",
+    "scopeSection": "Scope confirmation",
+    "scopeUser": "User-level instructions on this machine",
+    "scopeProject": "Project-level · {{project}}",
+    "scopeConfirmLabel": "I confirm writing under this scope",
+    "projectOptInNeeded": "Select a project in the hub shell before project-level adapt. Project must be Hub-enabled (opt-in).",
+    "projectOptInHint": "Target agents write only if this project is already enabled in Agent Hub. Enable from the project workspace if needed.",
+    "contentSection": "Instruction content",
+    "contentLabel": "Source instruction markdown",
+    "reloadContent": "Reload from source agent",
+    "claudeBlockStub": "Block-level “adapt with Claude” is optional; use Full volume mode for entire-config inventory, or edit markdown here for selective adapt.",
     "selectAria": "Cross-agent sync options",
     "sourceLabel": "Source agent",
     "destinationsLabel": "Destination agents (multi-select)",
@@ -656,6 +747,7 @@
     "previewAria": "Cross-agent adaptation preview",
     "preview": "Preview adaptation",
     "apply": "Apply to {{count}} targets",
+    "applyFull": "Apply {{count}} writable items",
     "needsAdaptation": "Content has CLI-specific terms; some targets may stay targetOnly or need manual edits.",
     "cannotApply": "This target cannot be written safely automatically.",
     "modes": {
@@ -665,7 +757,15 @@
       "residual": "Non-portable residual"
     },
     "errors": {
-      "invalidPreview": "Preview response could not be parsed. Retry or update the backend."
+      "invalidPreview": "Preview response could not be parsed. Retry or update the backend.",
+      "peerBlocked": "Cross-agent adapt is only available on this machine. Switch the device selector back to local.",
+      "emptyMarkdown": "Source instruction content is empty. Load or paste markdown first.",
+      "emptyDestinations": "Select at least one destination agent.",
+      "sourceInDestinations": "Destination agents cannot include the source agent.",
+      "scopeUnconfirmed": "Confirm the write scope before preview.",
+      "projectKeyRequired": "Choose a project before project-level adapt.",
+      "previewRequired": "Run adaptation preview before apply.",
+      "noApplicable": "No destination can be written safely from this preview."
     }
   }
 }

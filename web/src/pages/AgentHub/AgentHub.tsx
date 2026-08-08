@@ -23,8 +23,14 @@ import { AssetAdoptionDialog } from './AssetAdoptionDialog';
 import { GitImportDrawer } from './GitImportDrawer';
 import { LanPushDialog } from './LanPushDialog';
 import { InstructionBlocksDrawer } from './InstructionBlocksDrawer';
+import {
+  InstructionThreePaneView,
+  useInstructionThreePaneController,
+  type InstructionThreePaneViewLabels,
+  type UseInstructionThreePaneControllerResult,
+} from './instructions';
 import { PluginComponentsDrawer } from './PluginComponentsDrawer';
-import { UserInstructionView } from './userInstructions/UserInstructionView';
+import { UserInstructionPreviewDialog } from './userInstructions/UserInstructionPreviewDialog';
 import {
   PortableAssetActionDialog,
   PortableAssetDetailsDrawer,
@@ -34,6 +40,8 @@ import {
   type PortablePluginDetailsSummary,
 } from './portableAssets';
 import { summarizeDeletePreview } from './pluginPackagePresentation';
+import { AgentHubShell } from './shell';
+import { CrossAgentAdaptPage } from './crossAgent';
 import {
   useAgentHubController,
   type UseAgentHubControllerResult,
@@ -42,8 +50,11 @@ import styles from './AgentHub.module.css';
 
 /**
  * pure 视图 props（characterization 测试注入）。
+ * instructionThreePane 在入口 hook 注入；测试可不传。
  */
-export type AgentHubViewProps = UseAgentHubControllerResult;
+export type AgentHubViewProps = UseAgentHubControllerResult & {
+  instructionThreePane?: UseInstructionThreePaneControllerResult | null;
+};
 
 /**
  * Business Logic: probe.support 映射 tone。
@@ -65,7 +76,10 @@ export function AgentHubView(props: AgentHubViewProps) {
     t,
     activeSection,
     setActiveSection,
-    userInstructions,
+    hubContext,
+    onContextChange,
+    shellPeers,
+    shellProjects,
     portableInventory,
     portableDetailsOpen,
     portableSelectedItem,
@@ -172,9 +186,38 @@ export function AgentHubView(props: AgentHubViewProps) {
     openDeleteEverywhere,
     writeBlocked,
     upgradeRequired,
+    instructionThreePane,
   } = props;
 
   const previewFocusRef = useRef<HTMLInputElement | null>(null);
+
+  const instructionThreePaneLabels: InstructionThreePaneViewLabels = useMemo(
+    () => ({
+      blocksTitle: t('agentHub:instructions.threePane.blocksTitle'),
+      previewTitle: t('agentHub:instructions.threePane.previewTitle'),
+      originalTitle: t('agentHub:instructions.threePane.originalTitle'),
+      reparseFromOriginal: t('agentHub:instructions.threePane.reparseFromOriginal'),
+      syncToNative: t('agentHub:instructions.threePane.syncToNative'),
+      emptyBlocks: t('agentHub:instructions.threePane.emptyBlocks'),
+      emptyPreview: t('agentHub:instructions.threePane.emptyPreview'),
+      emptyOriginal: t('agentHub:instructions.threePane.emptyOriginal'),
+      pathLabel: t('agentHub:instructions.threePane.pathLabel'),
+      noPath: t('agentHub:instructions.threePane.noPath'),
+      loading: t('agentHub:instructions.threePane.loading'),
+      retry: t('common:action.retry'),
+      previewReadOnly: t('agentHub:instructions.threePane.previewReadOnly'),
+      addBlock: t('agentHub:instructions.threePane.addBlock'),
+      dualDirtyTitle: t('agentHub:instructions.threePane.dualDirtyTitle'),
+      dualDirtyDescription: t('agentHub:instructions.threePane.dualDirtyDescription'),
+      useBlocksBaseline: t('agentHub:instructions.threePane.useBlocksBaseline'),
+      useOriginalBaseline: t('agentHub:instructions.threePane.useOriginalBaseline'),
+      cancel: t('common:action.cancel'),
+      blockTitlePlaceholder: t('agentHub:instructions.threePane.blockTitlePlaceholder'),
+      blockBodyPlaceholder: t('agentHub:instructions.threePane.blockBodyPlaceholder'),
+      refresh: t('agentHub:instructions.threePane.refresh'),
+    }),
+    [t],
+  );
 
   const probes: AgentHubProbe[] = status?.probes ?? [];
 
@@ -272,11 +315,11 @@ export function AgentHubView(props: AgentHubViewProps) {
       },
       managementFilter: {
         all: t('agentHub:portable.inventory.managementFilter.all'),
-        unmanaged: t('agentHub:portable.inventory.managementFilter.unmanaged'),
         hubManaged: t('agentHub:portable.inventory.managementFilter.hubManaged'),
         drifted: t('agentHub:portable.inventory.managementFilter.drifted'),
         externalCollision: t('agentHub:portable.inventory.managementFilter.externalCollision'),
         unsupported: t('agentHub:portable.inventory.managementFilter.unsupported'),
+        unmanaged: t('agentHub:portable.inventory.managementFilter.unmanaged'),
       },
       targets: {
         claude: t('agentHub:targets.claude'),
@@ -296,11 +339,11 @@ export function AgentHubView(props: AgentHubViewProps) {
         unknown: t('agentHub:portable.inventory.actual.unknown'),
       },
       management: {
-        unmanaged: t('agentHub:portable.inventory.management.unmanaged'),
         hubManaged: t('agentHub:portable.inventory.management.hubManaged'),
         drifted: t('agentHub:portable.inventory.management.drifted'),
         externalCollision: t('agentHub:portable.inventory.management.externalCollision'),
         unsupported: t('agentHub:portable.inventory.management.unsupported'),
+        unmanaged: t('agentHub:portable.inventory.management.unmanaged'),
       },
       scope: {
         user: t('agentHub:portable.inventory.scope.user'),
@@ -319,6 +362,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         pluginComponent: t('agentHub:portable.inventory.sourceOrigin.pluginComponent'),
         nativeConfig: t('agentHub:portable.inventory.sourceOrigin.nativeConfig'),
       },
+      unmanagedRefreshHint: t('agentHub:portable.inventory.unmanagedRefreshHint'),
     }),
     [t],
   );
@@ -339,7 +383,36 @@ export function AgentHubView(props: AgentHubViewProps) {
     };
   }, [portableSelectedItem, pluginReport]);
 
-  if (activeSection !== 'userInstructions' && loading && !status) {
+  /**
+   * Business Logic: 壳层工具栏动作 — 复用现有 Pull/Push 抽屉；Adapt 写 adaptView URL。
+   * Code Logic: peer 设备上下文时禁用 Adapt（同机 only）。
+   */
+  const shellActions = useMemo(
+    () => ({
+      onPull: openPortablePull,
+      onPush: openLanPushDialog,
+      onAdapt: () => {
+        onContextChange({ adaptView: true });
+      },
+      adaptDisabledReason:
+        hubContext.deviceId !== null ? t('agentHub:shell.adaptLocalOnly') : null,
+    }),
+    [hubContext.deviceId, onContextChange, openLanPushDialog, openPortablePull, t],
+  );
+
+  /**
+   * Business Logic: 适配页优先使用三栏当前 original / preview 正文。
+   * Code Logic: original 优先，其次合成 preview；皆空则交 controller inspect。
+   */
+  const adaptInitialMarkdown = useMemo(() => {
+    const state = instructionThreePane?.state;
+    if (!state) return null;
+    if (state.originalText.trim().length > 0) return state.originalText;
+    if (state.previewText.trim().length > 0) return state.previewText;
+    return null;
+  }, [instructionThreePane?.state]);
+
+  if (activeSection !== 'userInstructions' && loading && !status && !hubContext.adaptView) {
     return (
       <div className={styles.page} data-testid="agent-hub-loading">
         <div className={styles.container}>
@@ -349,7 +422,7 @@ export function AgentHubView(props: AgentHubViewProps) {
     );
   }
 
-  if (activeSection !== 'userInstructions' && error && !status) {
+  if (activeSection !== 'userInstructions' && error && !status && !hubContext.adaptView) {
     return (
       <div className={styles.page} data-testid="agent-hub-error">
         <div className={styles.container}>
@@ -363,6 +436,26 @@ export function AgentHubView(props: AgentHubViewProps) {
           >
             {error}
           </StatusMessage>
+        </div>
+      </div>
+    );
+  }
+
+  if (hubContext.adaptView) {
+    return (
+      <div className={styles.page} data-testid="agent-hub-page">
+        <div className={styles.container}>
+          <header className={styles.header}>
+            <div className={styles.titleBlock}>
+              <h1 className={styles.title}>{t('agentHub:title')}</h1>
+              <p className={styles.subtitle}>{t('agentHub:crossAgent.pageTitle')}</p>
+            </div>
+          </header>
+          <CrossAgentAdaptPage
+            context={hubContext}
+            initialSourceMarkdown={adaptInitialMarkdown}
+            onExit={() => onContextChange({ adaptView: false })}
+          />
         </div>
       </div>
     );
@@ -429,7 +522,21 @@ export function AgentHubView(props: AgentHubViewProps) {
           </div>
         </header>
 
-        <nav className={styles.hubSectionNav} aria-label={t('agentHub:sections.aria')}>
+        <AgentHubShell
+          context={hubContext}
+          onContextChange={onContextChange}
+          peers={shellPeers}
+          projects={shellProjects}
+          actions={shellActions}
+        >
+        {/* 双路径：壳层 tab/scope 驱动 activeSection；legacy section 深链仍可落到 diagnostics/syncImport */}
+        {/* 隐藏旧五段 nav，保留 setActiveSection 供 characterization / deep link */}
+        <nav
+          className={styles.legacySectionNav}
+          aria-label={t('agentHub:sections.aria')}
+          data-testid="agent-hub-legacy-section-nav"
+          hidden
+        >
           {(['userInstructions', 'projectInstructions', 'assets', 'syncImport', 'diagnostics'] as const).map((section) => (
             <Button
               key={section}
@@ -445,8 +552,33 @@ export function AgentHubView(props: AgentHubViewProps) {
           ))}
         </nav>
 
-        {activeSection === 'userInstructions' ? (
-          <UserInstructionView t={t} manager={userInstructions} />
+        {hubContext.tab === 'instructions' && instructionThreePane ? (
+          <InstructionThreePaneView
+            labels={instructionThreePaneLabels}
+            state={instructionThreePane.state}
+            loading={instructionThreePane.loading}
+            error={instructionThreePane.error}
+            actionError={instructionThreePane.actionError}
+            actionBusy={instructionThreePane.actionBusy}
+            writeBlocked={instructionThreePane.writeBlocked}
+            writeBlockedReason={instructionThreePane.writeBlockedReason}
+            dualDirtyOpen={instructionThreePane.dualDirtyOpen}
+            onReparse={instructionThreePane.reparseFromOriginal}
+            onSync={() => {
+              void instructionThreePane.requestSync();
+            }}
+            onRetry={() => {
+              void instructionThreePane.refresh();
+            }}
+            onRefresh={() => {
+              void instructionThreePane.refresh();
+            }}
+            onOriginalChange={instructionThreePane.updateOriginal}
+            onBlockChange={instructionThreePane.changeBlock}
+            onAddBlock={instructionThreePane.appendBlock}
+            onChooseBaseline={instructionThreePane.chooseBaseline}
+            onCancelDualDirty={instructionThreePane.cancelDualDirty}
+          />
         ) : null}
 
         {activeSection === 'syncImport' ? (
@@ -594,7 +726,7 @@ export function AgentHubView(props: AgentHubViewProps) {
           </div>
         ) : null}
 
-        {activeSection === 'projectInstructions' ? (
+        {hubContext.tab !== 'instructions' && activeSection === 'projectInstructions' ? (
           <Card variant="outlined" padding="md">
             <Card.Header>
               <span className={styles.sectionTitle}>{t('agentHub:sections.projectInstructions')}</span>
@@ -667,6 +799,7 @@ export function AgentHubView(props: AgentHubViewProps) {
             </Card.Body>
           </Card>
         ) : null}
+        </AgentHubShell>
       </div>
 
       <Dialog
@@ -1035,16 +1168,34 @@ export function AgentHubView(props: AgentHubViewProps) {
         onClose={closePortablePull}
       />
 
+      {instructionThreePane ? (
+        <UserInstructionPreviewDialog
+          t={t}
+          open={instructionThreePane.previewOpen}
+          busy={instructionThreePane.actionBusy}
+          plan={instructionThreePane.plan}
+          error={instructionThreePane.actionError}
+          onClose={instructionThreePane.closePreview}
+          onApply={() => {
+            void instructionThreePane.applyPlan();
+          }}
+        />
+      ) : null}
+
     </div>
   );
 }
 
 /**
- * 页面入口：注入 controller。
+ * 页面入口：注入 hub controller 与提示词三栏 controller（hooks 在 early return 前）。
  */
 export function AgentHub() {
   const controller = useAgentHubController();
-  return <AgentHubView {...controller} />;
+  const instructionThreePane = useInstructionThreePaneController({
+    context: controller.hubContext,
+    t: controller.t,
+  });
+  return <AgentHubView {...controller} instructionThreePane={instructionThreePane} />;
 }
 
 // 避免未使用类型告警（导出供测试）

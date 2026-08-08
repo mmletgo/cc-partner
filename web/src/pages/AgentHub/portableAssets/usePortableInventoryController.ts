@@ -4,6 +4,7 @@
  * Business Logic（为什么需要这个 hook）:
  *   Agent 资产列表必须以 observed inventory 为真源；refresh 失败保留 stale 并禁止 mutation；
  *   与 canonical AgentHub matrix 状态分离，避免塞入巨型 controller。
+ *   T7：deviceId / projectRef 进入 inspect；切换上下文带 sequence 防竞态，peer 不得静默本机。
  *
  * Code Logic（这个 hook 做什么）:
  *   inspect + refresh generation + mounted ref；纯 filter 计算 visibleItems；
@@ -11,7 +12,10 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { portableAssetApi } from '@/api/portableInventory';
+import { portableAssetApi, type AgentHubRequestContext } from '@/api/portableInventory';
+
+/** peer 上下文稳定错误码（与 api 层常量同字面量；不 import 避免 mock 缺导出）。 */
+const PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE';
 import type {
   PortableAssetActionKind,
   PortableInventoryItemDto,
@@ -31,6 +35,9 @@ export interface PortableInventoryPendingAction {
   itemId: string;
   action: PortableAssetActionKind;
 }
+
+/** usePortableInventoryController 入参（壳层 device/project 上下文）。 */
+export type UsePortableInventoryControllerArgs = AgentHubRequestContext;
 
 /** usePortableInventoryController 对 pure view 的返回合同。 */
 export interface UsePortableInventoryControllerResult {
@@ -53,13 +60,25 @@ export interface UsePortableInventoryControllerResult {
   clearPendingAction: () => void;
   getPrimaryAction: (item: PortableInventoryItemDto) => PortableAssetActionKind | null;
   refresh: () => Promise<void>;
+  /** 当前 inspect 使用的上下文（便于页面层 mutation 透传）。 */
+  requestContext: AgentHubRequestContext;
 }
 
 /**
- * Business Logic: 列表/筛选/选择的单一状态源，F5 再挂到 AgentHub composer。
- * Code Logic: 首屏与 refresh 共用 generation；失败保 snapshot + stale。
+ * Business Logic: 列表/筛选/选择的单一状态源；上下文切换 re-inspect。
+ * Code Logic: 首屏与 refresh 共用 generation；失败保 snapshot + stale（同上下文）；
+ *   deviceId/projectRef 变化时清空 snapshot 再拉，避免本机数据冒充 peer。
  */
-export function usePortableInventoryController(): UsePortableInventoryControllerResult {
+export function usePortableInventoryController(
+  context: UsePortableInventoryControllerArgs = {},
+): UsePortableInventoryControllerResult {
+  const deviceId = context.deviceId ?? null;
+  const projectRef = context.projectRef ?? null;
+  const requestContext = useMemo(
+    (): AgentHubRequestContext => ({ deviceId, projectRef }),
+    [deviceId, projectRef],
+  );
+
   const [snapshot, setSnapshot] = useState<PortableInventorySnapshotDto | null>(null);
   const [filters, setFiltersState] = useState<PortableInventoryFilters>(
     DEFAULT_PORTABLE_INVENTORY_FILTERS,
@@ -77,6 +96,7 @@ export function usePortableInventoryController(): UsePortableInventoryController
   const mountedRef = useRef(true);
   const refreshSeqRef = useRef(0);
   const hasSnapshotRef = useRef(false);
+  const contextKeyRef = useRef(`${deviceId ?? ''}\0${projectRef ?? ''}`);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -93,7 +113,7 @@ export function usePortableInventoryController(): UsePortableInventoryController
       setLoading(true);
     }
     try {
-      const next = await portableAssetApi.inspect();
+      const next = await portableAssetApi.inspect(requestContext);
       if (!mountedRef.current || seq !== refreshSeqRef.current) return;
       hasSnapshotRef.current = true;
       setSnapshot(next);
@@ -101,12 +121,18 @@ export function usePortableInventoryController(): UsePortableInventoryController
       setError(null);
     } catch (reason) {
       if (!mountedRef.current || seq !== refreshSeqRef.current) return;
+      const code =
+        reason && typeof reason === 'object' && 'code' in reason
+          ? String((reason as { code?: unknown }).code ?? '')
+          : '';
       const message =
-        reason instanceof Error && reason.message
-          ? reason.message
-          : 'portable inventory refresh failed';
+        code === PEER_CONTEXT_UNAVAILABLE
+          ? PEER_CONTEXT_UNAVAILABLE
+          : reason instanceof Error && reason.message
+            ? reason.message
+            : 'portable inventory refresh failed';
       setError(message);
-      // 保留旧 snapshot；标 stale 并禁止 mutation
+      // 同上下文失败：保留旧 snapshot 并标 stale；跨上下文由 effect 已清空
       setStaleFlag(true);
     } finally {
       if (mountedRef.current && seq === refreshSeqRef.current) {
@@ -114,12 +140,25 @@ export function usePortableInventoryController(): UsePortableInventoryController
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [requestContext]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial inventory load
+    const nextKey = `${deviceId ?? ''}\0${projectRef ?? ''}`;
+    const contextChanged = contextKeyRef.current !== nextKey;
+    contextKeyRef.current = nextKey;
+    if (contextChanged) {
+      // 切换设备/项目：丢弃旧 snapshot，禁止用本机数据冒充 peer
+      hasSnapshotRef.current = false;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- context switch reset
+      setSnapshot(null);
+      setSelectedItemId(null);
+      setPendingAction(null);
+      setStaleFlag(false);
+      setError(null);
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial / context-driven inventory load
     void refresh();
-  }, [refresh]);
+  }, [deviceId, projectRef, refresh]);
 
   const setFilters = useCallback((patch: Partial<PortableInventoryFilters>) => {
     setFiltersState((prev) => ({ ...prev, ...patch }));
@@ -173,8 +212,8 @@ export function usePortableInventoryController(): UsePortableInventoryController
         return;
       }
       const caps = item.capabilities;
+      // discover-as-managed：不再开放 adopt 入口；其余 mutation 仍 capability 门闩。
       const allowed =
-        (action === 'adopt' && caps.canAdopt) ||
         (action === 'enable' && caps.canEnable) ||
         (action === 'disable' && caps.canDisable) ||
         (action === 'uninstall' && caps.canUninstall) ||
@@ -213,6 +252,7 @@ export function usePortableInventoryController(): UsePortableInventoryController
     clearPendingAction,
     getPrimaryAction,
     refresh,
+    requestContext,
   };
 }
 

@@ -23,6 +23,7 @@ import {
   isPortableInventoryProblem,
   isPortableItemReadOnly,
   matchesPortableInventoryItem,
+  needsPortableEnsureManagedRefresh,
   resolvePortablePrimaryAction,
   type PortableInventoryFilters,
   type PortablePrimaryActionContext,
@@ -171,11 +172,17 @@ const catalog: PortableInventoryItemDto[] = [
   }),
 ];
 
+/** 跨 target 断言时显式 target:all；默认 DEFAULT 已是 claude 单 agent。 */
 function filters(patch: Partial<PortableInventoryFilters> = {}): PortableInventoryFilters {
-  return { ...DEFAULT_PORTABLE_INVENTORY_FILTERS, ...patch };
+  return { ...DEFAULT_PORTABLE_INVENTORY_FILTERS, target: 'all', ...patch };
 }
 
 describe('portableInventoryPresentation filters', () => {
+  test('defaults to skill tab + claude target (single-agent workstation)', () => {
+    expect(DEFAULT_PORTABLE_INVENTORY_FILTERS.kind).toBe('skill');
+    expect(DEFAULT_PORTABLE_INVENTORY_FILTERS.target).toBe('claude');
+  });
+
   test('defaults to skill tab and excludes plugin components from standalone list', () => {
     const visible = filterPortableInventoryItems(catalog, filters({ kind: 'skill' }));
     expect(visible.map((item) => item.inventoryItemId)).toEqual([
@@ -365,9 +372,31 @@ describe('portableInventoryPresentation primary action', () => {
     lockedItemIds: new Set(),
   };
 
-  test('prefers adopt, then enable/disable based on actualEnabled', () => {
-    const unmanaged = catalog.find((i) => i.inventoryItemId === 'codex-skill-beta')!;
-    expect(resolvePortablePrimaryAction(unmanaged, healthyCtx)).toBe('adopt');
+  test('never returns adopt; historical unmanaged prefers refresh or enable/disable', () => {
+    const unmanagedAdoptOnly = catalog.find((i) => i.inventoryItemId === 'codex-skill-beta')!;
+    expect(unmanagedAdoptOnly.capabilities.canAdopt).toBe(true);
+    expect(needsPortableEnsureManagedRefresh(unmanagedAdoptOnly)).toBe(true);
+    expect(resolvePortablePrimaryAction(unmanagedAdoptOnly, healthyCtx)).not.toBe('adopt');
+    expect(resolvePortablePrimaryAction(unmanagedAdoptOnly, healthyCtx)).toBeNull();
+
+    // 后端已 ensure_managed 后：unmanaged 残留但具备 enable/disable 时直接启停
+    const unmanagedAlreadyManaged = makeItem({
+      inventoryItemId: 'codex-skill-managed-path',
+      kind: 'skill',
+      nativeId: 'managed-path',
+      target: 'codex',
+      actualEnabled: false,
+      managementState: 'unmanaged',
+      capabilities: {
+        ...baseCapabilities,
+        canAdopt: true,
+        canEnable: true,
+        canDisable: false,
+      },
+    });
+    expect(needsPortableEnsureManagedRefresh(unmanagedAlreadyManaged)).toBe(false);
+    expect(resolvePortablePrimaryAction(unmanagedAlreadyManaged, healthyCtx)).toBe('enable');
+    expect(resolvePortablePrimaryAction(unmanagedAlreadyManaged, healthyCtx)).not.toBe('adopt');
 
     const enabled = catalog.find((i) => i.inventoryItemId === 'claude-skill-alpha')!;
     expect(resolvePortablePrimaryAction(enabled, healthyCtx)).toBe('disable');

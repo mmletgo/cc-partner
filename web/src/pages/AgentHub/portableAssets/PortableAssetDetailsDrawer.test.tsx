@@ -298,6 +298,38 @@ describe('PortableAssetDetailsDrawer four-kind rendering', () => {
     expect(screen.getByTestId('portable-action-uninstall-blocked')).toBeTruthy();
   });
 
+  test('never exposes adopt CTA; historical unmanaged shows refresh hint', () => {
+    const onRequestAction = vi.fn();
+    const item = baseItem('skill', {
+      managementState: 'unmanaged',
+      actualEnabled: false,
+      capabilities: {
+        canEnable: false,
+        canDisable: false,
+        canUninstall: false,
+        canAdopt: true,
+        canInstallToSourceTarget: false,
+        reasonCode: null,
+        evidenceIds: [],
+      },
+    });
+
+    render(
+      <PortableAssetDetailsDrawer
+        open
+        item={item}
+        onClose={() => undefined}
+        onRequestAction={onRequestAction}
+      />,
+    );
+
+    expect(screen.queryByTestId('portable-action-adopt')).toBeNull();
+    expect(screen.getByTestId('portable-action-refresh-hint')).toBeTruthy();
+    expect(screen.getByTestId('portable-asset-management').getAttribute('data-state')).toBe(
+      'unmanaged',
+    );
+  });
+
   test('desired enabled uses i18n keys instead of hard-coded English', () => {
     const item = baseItem('skill', { desiredEnabled: true });
     render(

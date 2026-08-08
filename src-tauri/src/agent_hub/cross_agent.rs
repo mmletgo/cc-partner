@@ -22,7 +22,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// 跨 Agent 资产类型（阶段三最小集）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CrossAgentKind {
     Instruction,

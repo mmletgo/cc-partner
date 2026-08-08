@@ -36,6 +36,73 @@ import type {
 import { invokeDecoded } from './client';
 
 /**
+ * 可选设备 / 项目上下文（T7）。
+ *
+ * Business Logic: 用户级 deviceId=null 本机；项目级 projectRef 为本机或 remote:… 身份。
+ * Code Logic: 仅非空字段参与 peer 判定；与 agentHub API 同形。
+ */
+export interface AgentHubRequestContext {
+  deviceId?: string | null;
+  projectRef?: string | null;
+}
+
+/**
+ * peer / 远端项目上下文尚无后端 inspect/write 路径时的稳定错误码。
+ *
+ * Business Logic: UI 可切换上下文，但不得静默落到本机读写。
+ * Code Logic: Error.message 与 Error.code 同为该常量。
+ */
+export const AGENT_HUB_PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE' as const;
+
+/**
+ * Business Logic: workbench 远端项目 id 形如 `remote:<deviceId>:<inner>`。
+ * Code Logic: 前缀匹配；空串 false。
+ */
+export function isRemoteProjectRef(projectRef: string | null | undefined): boolean {
+  const ref = projectRef?.trim() ?? '';
+  return ref.startsWith('remote:');
+}
+
+/**
+ * Business Logic: peer 设备或远端项目需要 peer 路径；本机 deviceId=null + 本机 project 仍 local。
+ * Code Logic: 非空 deviceId，或 projectRef 以 remote: 开头。
+ */
+export function requiresPeerAgentHubPath(
+  context?: AgentHubRequestContext | null,
+): boolean {
+  const deviceId = context?.deviceId?.trim() ?? '';
+  if (deviceId.length > 0) return true;
+  return isRemoteProjectRef(context?.projectRef);
+}
+
+/**
+ * Business Logic: peer 上下文未接通前 fail-closed，禁止静默本机写/读冒充。
+ * Code Logic: 抛带稳定 code 的 Error。
+ */
+export function assertLocalAgentHubContext(context?: AgentHubRequestContext | null): void {
+  if (!requiresPeerAgentHubPath(context)) return;
+  throw Object.assign(new Error(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE), {
+    code: AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
+  });
+}
+
+/**
+ * Business Logic: 本机调用保持无参兼容旧 sidecar；有本机 projectRef 时可选透传（忽略未知字段风险由调用方控制）。
+ * Code Logic: peer 已在 assert 拦截；仅 local 非空 projectRef 时带 request 信封，否则 undefined。
+ */
+function localInspectInvokeArgs(
+  context?: AgentHubRequestContext | null,
+): Record<string, unknown> | undefined {
+  const projectRef = context?.projectRef?.trim() ?? '';
+  if (projectRef.length === 0 || isRemoteProjectRef(projectRef)) {
+    return undefined;
+  }
+  // 本机 project 身份：可选透传；后端若忽略未知字段则仍成功，未知则由上层测覆盖。
+  // T7 前端优先：实际仍走无参 inspect，避免破坏未声明 request 的旧命令签名。
+  return undefined;
+}
+
+/**
  * Tauri 命令名（snake_case）。
  *
  * Business Logic: 与后端 #[tauri::command] 与 brief 命令清单对齐。
@@ -60,39 +127,48 @@ export const PORTABLE_INVENTORY_COMMANDS = {
  */
 export const portableAssetApi: PortableAssetApi = {
   /**
-   * Business Logic: 本机 inventory 是 actual 状态真源（只读）。
-   * Code Logic: agent_hub_inspect_portable_inventory。
+   * Business Logic: 本机 inventory 是 actual 状态真源（只读）；peer 上下文 fail-closed。
+   * Code Logic: assertLocal → agent_hub_inspect_portable_inventory（本机无参）。
    */
-  inspect(): Promise<PortableInventorySnapshotDto> {
+  inspect(context?: AgentHubRequestContext): Promise<PortableInventorySnapshotDto> {
+    assertLocalAgentHubContext(context);
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.inspect,
-      undefined,
+      localInspectInvokeArgs(context),
       portableInventorySnapshotDecoder,
     );
   },
 
   /**
-   * Business Logic: apply 前必须绑定 inventory hash 的短期 plan。
-   * Code Logic: agent_hub_preview_portable_asset_action。
+   * Business Logic: apply 前必须绑定 inventory hash 的短期 plan；peer 禁止冒充本机 preview。
+   * Code Logic: assertLocal → strip context → agent_hub_preview_portable_asset_action。
    */
   previewAction(
     request: PreviewPortableAssetActionRequest,
   ): Promise<PortableAssetActionPlanDto> {
+    assertLocalAgentHubContext(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.previewAction,
-      { request },
+      { request: body },
       portableAssetActionPlanDecoder,
     );
   },
 
   /**
-   * Business Logic: 用户确认后 claim/apply；同 clientRequestId 幂等回放。
-   * Code Logic: agent_hub_apply_portable_asset_action。
+   * Business Logic: 用户确认后 claim/apply；同 clientRequestId 幂等回放；peer 禁止静默本机写。
+   * Code Logic: assertLocal → strip context → agent_hub_apply_portable_asset_action。
    */
   applyAction(request: ApplyPortableAssetActionRequest): Promise<PortableAssetActionResultDto> {
+    assertLocalAgentHubContext(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
     return invokeDecoded(
       PORTABLE_INVENTORY_COMMANDS.applyAction,
-      { request },
+      { request: body },
       portableAssetActionResultDecoder,
     );
   },

@@ -113,6 +113,13 @@
   line-height: var(--leading-normal);
 }
 
+.refreshHint {
+  margin: 0;
+  color: var(--fg-muted-readable);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
 .actions {
   display: inline-flex;
   align-items: center;
