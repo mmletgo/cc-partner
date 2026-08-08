@@ -34,6 +34,7 @@ import {
   type PortablePluginDetailsSummary,
 } from './portableAssets';
 import { summarizeDeletePreview } from './pluginPackagePresentation';
+import { AgentHubShell } from './shell';
 import {
   useAgentHubController,
   type UseAgentHubControllerResult,
@@ -65,6 +66,10 @@ export function AgentHubView(props: AgentHubViewProps) {
     t,
     activeSection,
     setActiveSection,
+    hubContext,
+    onContextChange,
+    shellPeers,
+    shellProjects,
     userInstructions,
     portableInventory,
     portableDetailsOpen,
@@ -339,6 +344,23 @@ export function AgentHubView(props: AgentHubViewProps) {
     };
   }, [portableSelectedItem, pluginReport]);
 
+  /**
+   * Business Logic: 壳层工具栏动作 — 复用现有 Pull/Push 抽屉；Adapt 写 adaptView URL。
+   * Code Logic: peer 设备上下文时禁用 Adapt（同机 only）。
+   */
+  const shellActions = useMemo(
+    () => ({
+      onPull: openPortablePull,
+      onPush: openLanPushDialog,
+      onAdapt: () => {
+        onContextChange({ adaptView: true });
+      },
+      adaptDisabledReason:
+        hubContext.deviceId !== null ? t('agentHub:shell.adaptLocalOnly') : null,
+    }),
+    [hubContext.deviceId, onContextChange, openLanPushDialog, openPortablePull, t],
+  );
+
   if (activeSection !== 'userInstructions' && loading && !status) {
     return (
       <div className={styles.page} data-testid="agent-hub-loading">
@@ -429,7 +451,21 @@ export function AgentHubView(props: AgentHubViewProps) {
           </div>
         </header>
 
-        <nav className={styles.hubSectionNav} aria-label={t('agentHub:sections.aria')}>
+        <AgentHubShell
+          context={hubContext}
+          onContextChange={onContextChange}
+          peers={shellPeers}
+          projects={shellProjects}
+          actions={shellActions}
+        >
+        {/* 双路径：壳层 tab/scope 驱动 activeSection；legacy section 深链仍可落到 diagnostics/syncImport */}
+        {/* 隐藏旧五段 nav，保留 setActiveSection 供 characterization / deep link */}
+        <nav
+          className={styles.legacySectionNav}
+          aria-label={t('agentHub:sections.aria')}
+          data-testid="agent-hub-legacy-section-nav"
+          hidden
+        >
           {(['userInstructions', 'projectInstructions', 'assets', 'syncImport', 'diagnostics'] as const).map((section) => (
             <Button
               key={section}
@@ -667,6 +703,7 @@ export function AgentHubView(props: AgentHubViewProps) {
             </Card.Body>
           </Card>
         ) : null}
+        </AgentHubShell>
       </div>
 
       <Dialog

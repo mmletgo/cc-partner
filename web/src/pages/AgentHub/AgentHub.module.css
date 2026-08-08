@@ -531,6 +531,11 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* 旧五段导航 dual-path 保留（hidden）；壳层为可见主导航 */
+.legacySectionNav {
+  display: none;
+}
+
 .userWorkspace {
   display: flex;
   flex-direction: column;
