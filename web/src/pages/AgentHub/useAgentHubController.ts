@@ -64,6 +64,15 @@ import {
   type UsePortableInventoryControllerResult,
   type UsePortablePullControllerResult,
 } from './portableAssets';
+/** 新 IA URL 上下文 pure helpers（壳层/深链后续任务消费；本任务不改布局）。 */
+export {
+  parseAgentHubContext,
+  writeAgentHubContext,
+  mapLegacySection,
+  type AgentHubContext,
+  type AgentHubTab,
+  type AgentHubScope,
+} from './context/agentHubContext';
 
 /** Agent Hub 一级工作区。 */
 export type AgentHubSection =
