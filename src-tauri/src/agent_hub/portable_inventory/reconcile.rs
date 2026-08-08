@@ -3,7 +3,8 @@
 //! Business Logic（为什么需要这个模块）:
 //!     扫描结果只描述目标事实；对账输出 unmanaged/hubManaged/drifted/externalCollision/unsupported。
 //!     不得因扫描缺失 tombstone canonical；不得因 desired presence 推断本机文件存在；
-//!     不得静默合并 standalone 与 plugin component；不得写 adoption/binding/revision 表。
+//!     不得静默合并 standalone 与 plugin component；本模块不写 adoption/binding/revision 表
+//!     （写账本由 `ensure_managed` 在 inspect 路径、reconcile 之前完成）。
 //!
 //! Code Logic（这个模块做什么）:
 //!     `reconcile_portable_inventory_with_facts` 纯函数驱动五态；

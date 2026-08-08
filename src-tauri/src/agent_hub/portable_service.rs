@@ -37,13 +37,14 @@ use crate::state::AppState;
 pub struct PortableService;
 
 impl PortableService {
-    /// 扫描并返回本机 portable inventory 快照（只读）。
+    /// 扫描并返回本机 portable inventory 快照（发现即管理账本）。
     ///
     /// Business Logic（为什么需要这个函数）:
-    ///     UI 必须以实际目标状态为真相；inspect 不是 mutation。
+    ///     UI 必须以实际目标状态为真相；inspect 不写目标磁盘内容，但会幂等 ensure
+    ///     Hub asset/binding/materialization，避免稳定 unmanaged。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     委托 `inspect_portable_inventory`（B2 扫描 + B1 对账）。
+    ///     委托 `inspect_portable_inventory`（scan → ensure_managed → reconcile）。
     pub async fn inspect_portable_inventory(
         state: &AppState,
     ) -> Result<PortableInventorySnapshotDto, AppError> {

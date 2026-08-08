@@ -146,10 +146,11 @@ pub use portable_actions::{
     PreviewPortableAssetActionRequest, PLAN_TTL_MINUTES,
 };
 pub use portable_inventory::{
-    inspect_portable_inventory, inspect_portable_inventory_with_env, inventory_item_id,
-    inventory_snapshot_hash, reconcile_portable_inventory, reconcile_portable_inventory_with_facts,
-    scan_portable_inventory_facts, PortableAssetKind, PortableCanonicalFact,
-    PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
+    ensure_discovered_portable_items_managed, inspect_portable_inventory,
+    inspect_portable_inventory_with_env, inventory_item_id, inventory_snapshot_hash,
+    reconcile_portable_inventory, reconcile_portable_inventory_with_facts,
+    scan_portable_inventory_facts, EnsureManagedFailure, EnsureManagedReport, PortableAssetKind,
+    PortableCanonicalFact, PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
     PortableInventoryManagementState, PortableInventoryMutationCapability,
     PortableInventoryScanCapability, PortableInventorySnapshotDto, PortableInventorySourceOrigin,
     PortableInventoryTargetDto, PortableMcpCredentialFactDto, PortableScanScope,
