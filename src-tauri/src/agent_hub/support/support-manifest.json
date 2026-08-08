@@ -4,9 +4,9 @@
     {
       "target": "claude",
       "adapterSchemaVersion": 1,
-      "minTestedVersion": null,
-      "currentTestedVersion": null,
-      "guardedMajor": 1,
+      "minTestedVersion": "2.1.0",
+      "currentTestedVersion": "2.1.207",
+      "guardedMajor": 2,
       "executableProbe": {
         "commandNames": [
           "claude"
@@ -20,24 +20,27 @@
       },
       "activationCommandFingerprints": {},
       "capabilities": {
-        "scanInstruction": "readOnly",
-        "renderInstruction": "blocked",
-        "scanPortableAssets": "readOnly",
-        "renderPortableAssets": "blocked",
-        "activatePackage": "blocked",
-        "deactivatePackage": "blocked",
+        "scanInstruction": "supported",
+        "renderInstruction": "supportedAfterRestart",
+        "scanPortableAssets": "supported",
+        "renderPortableAssets": "supported",
+        "activatePackage": "supported",
+        "deactivatePackage": "supported",
         "liveReload": "blocked"
       },
       "evidenceIds": [
         "L3-AGENT-HUB-CLAUDE-001",
-        "L3-AGENT-HUB-B-CLI-001"
+        "L3-AGENT-HUB-B-CLI-001",
+        "L2-AGENT-HUB-PORTABLE-PARITY-001",
+        "L2-AGENT-HUB-GATE-A-001",
+        "L3-AGENT-HUB-USER-INSTRUCTION-WRITE-001"
       ]
     },
     {
       "target": "codex",
       "adapterSchemaVersion": 1,
-      "minTestedVersion": null,
-      "currentTestedVersion": null,
+      "minTestedVersion": "0.145.0",
+      "currentTestedVersion": "0.145.0",
       "guardedMajor": 1,
       "executableProbe": {
         "commandNames": [
@@ -52,17 +55,20 @@
       },
       "activationCommandFingerprints": {},
       "capabilities": {
-        "scanInstruction": "readOnly",
-        "renderInstruction": "blocked",
-        "scanPortableAssets": "readOnly",
-        "renderPortableAssets": "blocked",
-        "activatePackage": "blocked",
-        "deactivatePackage": "blocked",
+        "scanInstruction": "supported",
+        "renderInstruction": "supportedAfterRestart",
+        "scanPortableAssets": "supported",
+        "renderPortableAssets": "supported",
+        "activatePackage": "supported",
+        "deactivatePackage": "supported",
         "liveReload": "blocked"
       },
       "evidenceIds": [
         "L3-AGENT-HUB-CODEX-001",
-        "L3-AGENT-HUB-B-CLI-001"
+        "L3-AGENT-HUB-B-CLI-001",
+        "L2-AGENT-HUB-PORTABLE-PARITY-001",
+        "L2-AGENT-HUB-GATE-A-001",
+        "L3-AGENT-HUB-USER-INSTRUCTION-WRITE-001"
       ]
     },
     {

@@ -62,20 +62,11 @@ function asset(
 }
 
 function renderRow(summary: AgentHubAssetSummary) {
-  const onToggleTarget = vi.fn(
-    (_asset: AgentHubAssetSummary, _target: 'claude' | 'codex' | 'opencode', _next: boolean) =>
-      undefined,
-  );
-  const onRemoveTarget = vi.fn(
-    (_asset: AgentHubAssetSummary, _target: 'claude' | 'codex' | 'opencode') => undefined,
-  );
-  const onRestoreTarget = vi.fn(
-    (_asset: AgentHubAssetSummary, _target: 'claude' | 'codex' | 'opencode') => undefined,
-  );
-  const onOpenCollision = vi.fn(
-    (_asset: AgentHubAssetSummary, _target: 'claude' | 'codex' | 'opencode') => undefined,
-  );
-  const onDeleteEverywhere = vi.fn((_asset: AgentHubAssetSummary) => undefined);
+  const onToggleTarget = vi.fn(() => undefined);
+  const onRemoveTarget = vi.fn(() => undefined);
+  const onRestoreTarget = vi.fn(() => undefined);
+  const onOpenCollision = vi.fn(() => undefined);
+  const onDeleteEverywhere = vi.fn(() => undefined);
   render(
     <I18nextProvider i18n={i18n}>
       <AgentAssetRow

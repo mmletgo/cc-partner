@@ -66,6 +66,7 @@ fn sample_config(data_dir: &Path) -> AppConfig {
         github_trending: Default::default(),
         agent_hub: app_lib::config::AgentHubConfig::default(),
         manual_peers: Vec::new(),
+        internal_claude: app_lib::config::InternalClaudeConfig::default(),
     }
 }
 

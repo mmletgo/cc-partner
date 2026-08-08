@@ -109,13 +109,15 @@ export function usePortableInventoryController(): UsePortableInventoryController
       // 保留旧 snapshot；标 stale 并禁止 mutation
       setStaleFlag(true);
     } finally {
-      if (!mountedRef.current || seq !== refreshSeqRef.current) return;
-      setLoading(false);
-      setRefreshing(false);
+      if (mountedRef.current && seq === refreshSeqRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial inventory load
     void refresh();
   }, [refresh]);
 

@@ -44,7 +44,7 @@ export function installWorkbenchTerminalSelectionOverrides(terminal: Terminal): 
   const originalShouldForceSelection = service.shouldForceSelection.bind(service);
   const originalDisable = service.disable.bind(service);
 
-  service.shouldForceSelection = (_event: MouseEvent): boolean => true;
+  service.shouldForceSelection = (): boolean => true;
   service.disable = (): void => {
     // intentionally no-op: keep text selection available for copy
   };

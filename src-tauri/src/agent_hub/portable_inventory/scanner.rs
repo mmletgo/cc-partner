@@ -1017,24 +1017,44 @@ enabled = false
     }
 
     #[test]
-    fn uncertified_target_executors_remain_blocked() {
+    fn uncertified_opencode_executor_remains_blocked() {
         let (_tmp, env) = seed_all_targets_fixture();
-        for target in [AgentTarget::Codex, AgentTarget::OpenCode] {
-            let probe = TargetProbe {
-                target,
-                executable: Some(env.home.join(format!("bin/{}", target.as_str()))),
-                version: Some("1.0.0".into()),
-                config_root: env.home.join(format!(".{}", target.as_str())),
-                support: AdapterSupportLevel::Supported,
-                fingerprint: "fixture-fingerprint".into(),
-            };
+        // OpenCode 仍无 min/current pin → evaluate 写能力 fail-closed。
+        let probe = TargetProbe {
+            target: AgentTarget::OpenCode,
+            executable: Some(env.home.join("bin/opencode")),
+            version: Some("1.0.0".into()),
+            config_root: env.home.join(".opencode"),
+            support: AdapterSupportLevel::Supported,
+            fingerprint: "fixture-fingerprint".into(),
+        };
 
-            let target_dto = target_dto_from_probe(target, &probe, &env).unwrap();
-            assert_eq!(
-                target_dto.mutation_capability,
-                PortableInventoryMutationCapability::Blocked
-            );
-        }
+        let target_dto = target_dto_from_probe(AgentTarget::OpenCode, &probe, &env).unwrap();
+        assert_eq!(
+            target_dto.mutation_capability,
+            PortableInventoryMutationCapability::Blocked
+        );
+    }
+
+    #[test]
+    fn codex_mutation_unlocked_when_runtime_meets_pin() {
+        let (_tmp, env) = seed_all_targets_fixture();
+        let probe = TargetProbe {
+            target: AgentTarget::Codex,
+            executable: Some(env.home.join("bin/codex")),
+            // 与 support-manifest currentTestedVersion 同 core
+            version: Some("codex-cli 0.145.0-alpha.4".into()),
+            config_root: env.home.join(".codex"),
+            support: AdapterSupportLevel::Supported,
+            fingerprint: "fixture-fingerprint".into(),
+        };
+
+        let target_dto = target_dto_from_probe(AgentTarget::Codex, &probe, &env).unwrap();
+        assert_eq!(
+            target_dto.mutation_capability,
+            PortableInventoryMutationCapability::Supported,
+            "codex pin should unlock portable mutation capability at inventory layer"
+        );
     }
 
     #[test]

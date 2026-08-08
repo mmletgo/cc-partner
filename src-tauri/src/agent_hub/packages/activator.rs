@@ -800,14 +800,15 @@ mod tests {
 
     #[test]
     fn blocked_support_builds_no_command() {
+        // OpenCode remains write-blocked in phase-1 pin; Codex is certified and may plan.
         let runner = Arc::new(FakeProcessRunner::new());
-        let act = CodexPackageActivator::new(runner.clone());
-        let pkg = sample_package(AgentTarget::Codex);
+        let act = OpenCodePackageActivator::new(runner.clone());
+        let pkg = sample_package(AgentTarget::OpenCode);
         let plan = act
             .build_plan(
                 &pkg,
                 &sample_binding(true),
-                &sample_probe(AgentTarget::Codex),
+                &sample_probe(AgentTarget::OpenCode),
             )
             .unwrap();
         assert!(plan.blocked);

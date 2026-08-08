@@ -3020,25 +3020,36 @@ mod tests {
         assert_eq!(still[0].desired_presence, DesiredPresence::Present);
     }
 
-    /// Business Logic: 未认证 manifest 不得在 status 显示 Supported。
-    /// Code Logic: probe_all_targets_best_effort 在 null 版本下应为 scanOnly/unsupported。
+    /// Business Logic: status probe 必须走 evaluate_target_support，不得硬编码 Supported。
+    /// Code Logic: OpenCode 未 pin 时 scanOnly/unsupported；Claude/Codex 在本机 pin 命中时可 supported。
     #[test]
     fn status_probe_uses_evaluate_target_support_not_raw_supported() {
         let probes = probe_all_targets_best_effort();
         assert_eq!(probes.len(), 3);
         for p in probes {
-            assert_ne!(
-                p.support.as_str(),
-                "supported",
-                "uncertified target {} must not report Supported",
-                p.target.as_str()
-            );
-            assert!(
-                matches!(p.support.as_str(), "scanOnly" | "unsupported"),
-                "unexpected support={} for {}",
-                p.support,
-                p.target.as_str()
-            );
+            match p.target {
+                crate::agent_hub::models::AgentTarget::OpenCode => {
+                    assert_ne!(
+                        p.support.as_str(),
+                        "supported",
+                        "opencode without pin must not report Supported"
+                    );
+                    assert!(
+                        matches!(p.support.as_str(), "scanOnly" | "unsupported"),
+                        "unexpected support={} for opencode",
+                        p.support
+                    );
+                }
+                crate::agent_hub::models::AgentTarget::Claude
+                | crate::agent_hub::models::AgentTarget::Codex => {
+                    assert!(
+                        matches!(p.support.as_str(), "supported" | "scanOnly" | "unsupported"),
+                        "unexpected support={} for {}",
+                        p.support,
+                        p.target.as_str()
+                    );
+                }
+            }
         }
     }
 

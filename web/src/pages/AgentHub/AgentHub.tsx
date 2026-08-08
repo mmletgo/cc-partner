@@ -601,6 +601,69 @@ export function AgentHubView(props: AgentHubViewProps) {
             </Card.Header>
             <Card.Body>
               <p className={styles.hint}>{t('agentHub:sections.projectInstructionsHint')}</p>
+              <p className={styles.hint} data-testid="agent-hub-project-opt-in-guard">
+                {writeBlocked
+                  ? t('agentHub:status.writeBlocked')
+                  : t('agentHub:preview.desc')}
+              </p>
+              <label className={styles.filterField}>
+                <span>{t('agentHub:preview.projectId')}</span>
+                <Input
+                  value={previewProjectId}
+                  onChange={(event) => setPreviewProjectId(event.currentTarget.value)}
+                  placeholder={t('agentHub:preview.projectIdPlaceholder')}
+                  data-testid="agent-hub-project-section-project-id"
+                />
+              </label>
+              <div className={styles.dialogActions}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={actionBusy}
+                  onClick={() => void runPreviewProject()}
+                  data-testid="agent-hub-project-section-preview"
+                >
+                  {t('agentHub:preview.run')}
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={actionBusy}
+                  disabled={writeBlocked}
+                  onClick={() => void runEnableProject()}
+                  data-testid="agent-hub-project-section-enable"
+                >
+                  {t('agentHub:preview.enable')}
+                </Button>
+              </div>
+              {preview ? (
+                <div
+                  className={styles.previewResult}
+                  data-testid="agent-hub-project-section-result"
+                >
+                  <p className={styles.hint}>
+                    {(preview.noCommitNotice as string) || t('agentHub:preview.noCommitDefault')}
+                  </p>
+                  {Array.isArray(preview.warnings) && preview.warnings.length > 0 ? (
+                    <ul className={styles.warningList}>
+                      {(preview.warnings as string[]).map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  <pre className={styles.blockBody} data-testid="agent-hub-project-preview-json">
+                    {JSON.stringify(
+                      {
+                        checkouts: previewCheckouts,
+                        plannedActions: previewActions,
+                        optedIn: preview.optedIn,
+                      },
+                      null,
+                      2,
+                    )}
+                  </pre>
+                </div>
+              ) : null}
             </Card.Body>
           </Card>
         ) : null}

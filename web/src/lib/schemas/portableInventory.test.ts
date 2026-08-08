@@ -235,7 +235,8 @@ describe('portable inventory schemas', () => {
   });
 
   test('rejects missing inventorySnapshotHash', () => {
-    const { inventorySnapshotHash: _drop, ...rest } = validInventorySnapshot;
+    const rest = { ...validInventorySnapshot } as Record<string, unknown>;
+    delete rest.inventorySnapshotHash;
     expect(() => portableInventorySnapshotDecoder.decode(rest)).toThrow(ContractDecodeError);
   });
 
@@ -248,17 +249,20 @@ describe('portable inventory schemas', () => {
   });
 
   test('rejects missing kind on item', () => {
-    const { kind: _k, ...noKind } = makeItem('claude', 'skill', 'x');
+    const noKind = { ...makeItem('claude', 'skill', 'x') } as Record<string, unknown>;
+    delete noKind.kind;
     expect(() => portableInventoryItemDecoder.decode(noKind)).toThrow(ContractDecodeError);
   });
 
   test('rejects missing scanCapability on target', () => {
-    const { scanCapability: _s, ...noCap } = validTargets[0];
+    const noCap = { ...validTargets[0] } as Record<string, unknown>;
+    delete noCap.scanCapability;
     expect(() => portableInventoryTargetDecoder.decode(noCap)).toThrow(ContractDecodeError);
   });
 
   test('rejects missing mutationCapability on target', () => {
-    const { mutationCapability: _m, ...noCap } = validTargets[0];
+    const noCap = { ...validTargets[0] } as Record<string, unknown>;
+    delete noCap.mutationCapability;
     expect(() => portableInventoryTargetDecoder.decode(noCap)).toThrow(ContractDecodeError);
   });
 

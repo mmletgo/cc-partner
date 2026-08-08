@@ -15,8 +15,8 @@ use crate::agent_hub::instructions::{
     InstructionReconcileOutcome, ReconcileInput,
 };
 use crate::agent_hub::models::{
-    DesiredPresence, Materialization, MaterializationStatus, NewMaterialization, NewRevision,
-    ProjectionPayloadKind, RevisionId, RevisionOperation, RevisionOriginKind,
+    AgentTarget, DesiredPresence, Materialization, MaterializationStatus, NewMaterialization,
+    NewRevision, ProjectionPayloadKind, RevisionId, RevisionOperation, RevisionOriginKind,
 };
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::projection::{ProjectionRequest, ProjectionScheduler};
@@ -780,7 +780,9 @@ impl ProductionScanner {
                     .await?;
                 let asset = self.repo.get_asset(&mat.asset_id).await?.unwrap_or(asset);
                 let doc = new_rev.document;
-                self.enqueue_present_projections(&asset, &doc, Some(&rev.id))
+                // Phase-3 D4: external edit on one target must NOT auto-write other agents.
+                // Only re-project the origin target binding; cross-agent is manual only.
+                self.enqueue_present_projections(&asset, &doc, Some(&rev.id), Some(mat.target))
                     .await?;
                 Ok(true)
             }
@@ -892,21 +894,26 @@ impl ProductionScanner {
         ))
     }
 
-    /// 对资产所有 Present 绑定 compile_render 并 enqueue（跳过 unresolved conflict 由 scheduler 处理）。
+    /// 对资产 Present 绑定 compile_render 并 enqueue。
     ///
-    /// Business Logic: 外部编辑推进 head 后需 multi-target 投影收敛。
-    /// Code Logic: list bindings → Present only → compile → enqueue。
+    /// Business Logic: 外部编辑仅允许同 target 投影；跨 Agent 由手动向导触发（only_target=None
+    ///     留给显式用户 apply 路径，若未来接入）。
+    /// Code Logic: list bindings → 可选 only_target 过滤 → Present/Absent → compile → enqueue。
     async fn enqueue_present_projections(
         &self,
         asset: &crate::agent_hub::models::LogicalAsset,
         document: &InstructionDocument,
         revision_id: Option<&RevisionId>,
+        only_target: Option<AgentTarget>,
     ) -> Result<(), AppError> {
         let bindings = self.repo.list_target_bindings_for_asset(&asset.id).await?;
         let scope = self.repo.get_scope(&asset.scope_id).await?;
         let hub_project_id = scope.as_ref().and_then(|s| s.hub_project_id.clone());
         let ctx = InstructionRenderContext::default();
         for binding in bindings {
+            if only_target.is_some_and(|t| t != binding.target) {
+                continue;
+            }
             if binding.desired_presence != DesiredPresence::Present {
                 // Absent 也入队，由 scheduler 安全处理
                 if binding.desired_presence != DesiredPresence::Absent {

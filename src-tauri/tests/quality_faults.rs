@@ -211,6 +211,7 @@ fn sample_settings_config(data_dir: &Path, device_name: &str) -> AppConfig {
         github_trending: Default::default(),
         agent_hub: app_lib::config::AgentHubConfig::default(),
         manual_peers: Vec::new(),
+        internal_claude: app_lib::config::InternalClaudeConfig::default(),
     }
 }
 
@@ -1153,6 +1154,7 @@ fn discovered_legacy(target: AgentTarget, path: &Path) -> DiscoveredPortableAsse
             tree_hash: Some(tree),
             status: PortableDiscoveryStatus::Active,
             native_output_candidate: false,
+            parent_plugin_id: None,
         },
         diagnostics: diags,
     }

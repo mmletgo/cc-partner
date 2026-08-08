@@ -639,6 +639,7 @@ fn discovered_legacy(target: AgentTarget, path: &Path) -> DiscoveredPortableAsse
             tree_hash: Some(tree),
             status: PortableDiscoveryStatus::Active,
             native_output_candidate: false,
+            parent_plugin_id: None,
         },
         diagnostics: diags,
     }

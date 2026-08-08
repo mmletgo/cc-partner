@@ -71,6 +71,8 @@ export function InternalClaudeProviderCard(): React.ReactElement {
   }, [t]);
 
   useEffect(() => {
+    // Initial/config reload path; setState lives inside async load after await.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount load entry
     void load();
   }, [load]);
 

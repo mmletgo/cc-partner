@@ -12,7 +12,7 @@
 | Path component | Authority | Notes |
 | --- | --- | --- |
 | Capability gate | `agent_hub::service::evaluate_target_support_flags` (`pub(crate)`) | Treats `Supported*` (incl. `SupportedAfterRestart` and `ActivationRequired`) as a single Supported-family. `Blocked` and `ReadOnly` both return `false`. |
-| Manifest loader | `agent_hub::support::builtin_support_manifest` | Loads the embedded `support-manifest.json` (currently `minTestedVersion: null` until L3 evidence). Failure is **fail-closed**: callers see `None` and must default to no-Supported. |
+| Manifest loader | `agent_hub::support::builtin_support_manifest` | Loads the embedded `support-manifest.json`. **2026-08-08 phase-1 pin:** Claude `2.1.0`–`2.1.207` and Codex `0.145.0` expose Supported* write caps (except `liveReload`); OpenCode remains `min/current=null` + write blocked until installed and certified. Failure is **fail-closed**. |
 | Evaluator | `agent_hub::support::evaluate_target_support(manifest, snapshot)` | Folds record reasons + runtime snapshot into `EvaluatedTargetSupport { mode, capabilities, write_allowed, reasons }`. |
 | Asset summary top-level | `agent_hub::service::probe_support_map` | Funnels through `builtin_support_manifest + evaluate_target_support + evaluate_target_support_flags` so a `None` manifest labels **no** target as `Supported`. |
 

@@ -421,6 +421,8 @@ pub fn run() {
             agent_hub_cmd::agent_hub_preview_portable_pull,
             agent_hub_cmd::agent_hub_apply_portable_pull,
             agent_hub_cmd::agent_hub_get_portable_pull,
+            agent_hub_cmd::agent_hub_preview_cross_agent_instruction,
+            agent_hub_cmd::agent_hub_apply_cross_agent_instruction,
             device_cmd::list_devices,
             device_cmd::get_local_device,
             sync_cmd::trigger_sync,

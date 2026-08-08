@@ -378,20 +378,25 @@ pub async fn apply_user_instruction_plan(
                 UserInstructionTargetApplyState::Blocked,
                 Some("USER_INSTRUCTION_OWNERSHIP_REQUIRED".to_string()),
             )
+        } else if let Some(code) = plan_blocking_code_for_target(&stored.public, change.target) {
+            (UserInstructionTargetApplyState::Blocked, Some(code))
         } else {
-            // 硬门：直到事务化 canonical+management+ownership+projection job 完整落地前，
-            // 即使未来 manifest 改成 supported 也不开放半安全写路。
-            (
-                UserInstructionTargetApplyState::Blocked,
-                Some("USER_INSTRUCTION_TARGET_SCAN_ONLY".to_string()),
-            )
+            match apply_user_instruction_change_to_disk(change, &stored.request) {
+                Ok(state) => (state, None),
+                Err(code) => (UserInstructionTargetApplyState::Failed, Some(code)),
+            }
         };
         targets.push(UserInstructionTargetApplyResultDto {
             target: change.target,
             status: target_state,
             path: change.path.clone(),
             error_code,
-            activation: if target_state == UserInstructionTargetApplyState::Blocked {
+            activation: if matches!(
+                target_state,
+                UserInstructionTargetApplyState::Blocked
+                    | UserInstructionTargetApplyState::Failed
+                    | UserInstructionTargetApplyState::StalePreview
+            ) {
                 UserInstructionActivationSupport::Blocked
             } else {
                 plan_activation(change.activation)
@@ -414,6 +419,97 @@ pub async fn apply_user_instruction_plan(
         )
         .await?;
     Ok(result)
+}
+
+/// 从 plan 级 blockingReasons 提取该 target 的错误码（若有）。
+///
+/// Business Logic: preview 已判定 scan-only / empty / ownership 时 apply 不得绕过。
+/// Code Logic: reasons 形如 `claude:USER_INSTRUCTION_TARGET_SCAN_ONLY`。
+fn plan_blocking_code_for_target(
+    plan: &UserInstructionPlanDto,
+    target: AgentTarget,
+) -> Option<String> {
+    let prefix = format!("{}:", target.as_str());
+    plan.blocking_reasons.iter().find_map(|reason| {
+        reason
+            .strip_prefix(&prefix)
+            .map(str::to_string)
+            .or_else(|| {
+                if reason == "USER_INSTRUCTION_DIFF_TRUNCATED" {
+                    Some(reason.clone())
+                } else {
+                    None
+                }
+            })
+    })
+}
+
+/// 将单 target plan change 真实写盘（atomic sibling rename）。
+///
+/// Business Logic: 阶段一要求 certified target 的 create/update/delete 落到原生指令文件。
+/// Code Logic: 从 stored request 重编译正文；Create/Update 走 AtomicProjectionWriter；
+///     Delete 仅在 expected_hash 匹配时 unlink；AlreadyRendered → Applied。
+fn apply_user_instruction_change_to_disk(
+    change: &UserInstructionPlanChangeDto,
+    request: &PreviewUserInstructionRequest,
+) -> Result<UserInstructionTargetApplyState, String> {
+    use crate::agent_hub::projection::{
+        AtomicProjectionWriter, AtomicWriteOutcome, FileWriteRequest,
+    };
+
+    let path = Path::new(&change.path);
+    match change.operation {
+        UserInstructionPlanOperation::Leave => Ok(UserInstructionTargetApplyState::NoChange),
+        UserInstructionPlanOperation::Delete => {
+            if !path.exists() {
+                return Ok(UserInstructionTargetApplyState::NoChange);
+            }
+            let current = current_file_hash(path).map_err(|e| e.to_string())?;
+            if current != change.expected_hash {
+                return Ok(UserInstructionTargetApplyState::StalePreview);
+            }
+            std::fs::remove_file(path)
+                .map_err(|e| format!("USER_INSTRUCTION_DELETE_FAILED:{}", e))?;
+            Ok(UserInstructionTargetApplyState::Applied)
+        }
+        UserInstructionPlanOperation::Create | UserInstructionPlanOperation::Update => {
+            let document = document_from_request(request);
+            let compiled = compile_render(
+                &document,
+                change.target,
+                &InstructionRenderContext::default(),
+            );
+            let rendered_hash = change
+                .rendered_hash
+                .as_deref()
+                .ok_or_else(|| "USER_INSTRUCTION_RENDERED_HASH_MISSING".to_string())?;
+            let computed = sha256_hex(&compiled.bytes);
+            if computed != rendered_hash {
+                return Err("USER_INSTRUCTION_RENDER_HASH_MISMATCH".into());
+            }
+            let writer = AtomicProjectionWriter::default();
+            let outcome = writer
+                .write_file(FileWriteRequest {
+                    target: path,
+                    rendered_bytes: &compiled.bytes,
+                    rendered_hash,
+                    expected_external_hash: change.expected_hash.as_deref(),
+                })
+                .map_err(|e| format!("USER_INSTRUCTION_WRITE_FAILED:{}", e))?;
+            match outcome {
+                AtomicWriteOutcome::Replaced { .. }
+                | AtomicWriteOutcome::AlreadyRendered { .. } => {
+                    Ok(UserInstructionTargetApplyState::Applied)
+                }
+                AtomicWriteOutcome::Drift { .. } => {
+                    Ok(UserInstructionTargetApplyState::StalePreview)
+                }
+                AtomicWriteOutcome::DirectoryUnknownFiles { .. } => {
+                    Err("USER_INSTRUCTION_UNEXPECTED_DIRECTORY_OUTCOME".into())
+                }
+            }
+        }
+    }
 }
 
 /// 验证 preview 正文在 control request 256 KiB 限制之下预留信封开销。
@@ -901,5 +997,43 @@ mod tests {
         assert!(value.get("clientRequestId").is_none());
         assert!(value.get("complete").is_none());
         assert!(value["targets"][0].get("state").is_none());
+    }
+
+    /// Business Logic: certified target create/update 必须真实落盘并与 rescan hash 一致。
+    /// Code Logic: 直接调用 apply_user_instruction_change_to_disk 写临时 CLAUDE.md。
+    #[test]
+    fn apply_change_to_disk_creates_instruction_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let body = "# Hub managed\nAlways use conventional commits.\n";
+        let rendered_hash = sha256_hex(body.as_bytes());
+        let change = UserInstructionPlanChangeDto {
+            target: AgentTarget::Claude,
+            path: path.to_string_lossy().into_owned(),
+            operation: UserInstructionPlanOperation::Create,
+            current_hash: None,
+            expected_hash: None,
+            rendered_hash: Some(rendered_hash.clone()),
+            unified_diff: None,
+            ownership_required: false,
+            will_shadow_source_path: None,
+            will_replace_fallback_source_path: None,
+            empty_due_to_target_only: false,
+            activation: UserInstructionActivationSupport::NewSession,
+            warnings: vec![],
+            diff_truncated: false,
+        };
+        let request = PreviewUserInstructionRequest {
+            base_revision_id: None,
+            inventory_snapshot_hash: "inv".into(),
+            common_content: body.to_string(),
+            target_extensions: BTreeMap::new(),
+            target_selections: BTreeMap::new(),
+        };
+        let state = apply_user_instruction_change_to_disk(&change, &request).expect("write");
+        assert_eq!(state, UserInstructionTargetApplyState::Applied);
+        let on_disk = std::fs::read_to_string(&path).expect("read back");
+        assert!(on_disk.contains("conventional commits"));
+        assert_eq!(sha256_hex(on_disk.as_bytes()), rendered_hash);
     }
 }

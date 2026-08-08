@@ -34,4 +34,10 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 node scripts/check-macos-signing-contract.mjs "$APP_PATH" "$EXPECTED_BUNDLE_ID"
+# 打包产物已在 bundle/；释放 release deps/build，避免本机 target 堆积。
+if [[ -f "$REPO_ROOT/scripts/prune-build-artifacts.mjs" ]]; then
+  node "$REPO_ROOT/scripts/prune-build-artifacts.mjs" --mode=release-intermediates || {
+    echo "[build-macos-signed] prune release intermediates 失败（已忽略）" >&2
+  }
+fi
 echo "[build-macos-signed] macOS 固定签名构建完成: $APP_PATH"

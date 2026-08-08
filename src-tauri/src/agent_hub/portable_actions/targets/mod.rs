@@ -103,14 +103,15 @@ pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
 ///     L3 认证，就把旧版已经具备真实执行器和隔离 smoke 的 Claude 本机管理一并禁用。
 ///
 /// Code Logic（做什么）:
-///     以 target × kind × action 的显式 allowlist 对齐实际 executor；未实现的 Codex、
-///     OpenCode、Adopt、InstallToSourceTarget 始终 fail-closed。
+///     以 target × kind × action 的显式 allowlist 对齐实际 executor；
+///     Claude 与 Codex（phase-1 pin）四类 enable/disable/uninstall 已实现；
+///     OpenCode、Adopt、InstallToSourceTarget 仍 fail-closed。
 pub fn supports_direct_local_action(
     target: AgentTarget,
     kind: PortableAssetKind,
     action: PortableAssetActionKind,
 ) -> bool {
-    matches!(target, AgentTarget::Claude)
+    matches!(target, AgentTarget::Claude | AgentTarget::Codex)
         && matches!(
             kind,
             PortableAssetKind::Skill
@@ -136,53 +137,6 @@ pub fn has_direct_local_actions(target: AgentTarget) -> bool {
     ]
     .into_iter()
     .any(|kind| supports_direct_local_action(target, kind, PortableAssetActionKind::Uninstall))
-}
-
-#[cfg(test)]
-mod direct_action_support_tests {
-    use super::*;
-
-    #[test]
-    fn support_matrix_matches_real_target_executors() {
-        for kind in [
-            PortableAssetKind::Skill,
-            PortableAssetKind::Command,
-            PortableAssetKind::Plugin,
-            PortableAssetKind::Mcp,
-        ] {
-            for action in [
-                PortableAssetActionKind::Enable,
-                PortableAssetActionKind::Disable,
-                PortableAssetActionKind::Uninstall,
-            ] {
-                assert!(supports_direct_local_action(
-                    AgentTarget::Claude,
-                    kind,
-                    action
-                ));
-                assert!(!supports_direct_local_action(
-                    AgentTarget::Codex,
-                    kind,
-                    action
-                ));
-                assert!(!supports_direct_local_action(
-                    AgentTarget::OpenCode,
-                    kind,
-                    action
-                ));
-            }
-            assert!(!supports_direct_local_action(
-                AgentTarget::Claude,
-                kind,
-                PortableAssetActionKind::Adopt,
-            ));
-            assert!(!supports_direct_local_action(
-                AgentTarget::Claude,
-                kind,
-                PortableAssetActionKind::InstallToSourceTarget,
-            ));
-        }
-    }
 }
 
 /// 判定 ProcessRunner 错误是否属于 spawn/transport 不确定。
@@ -242,6 +196,53 @@ pub(crate) fn expected_enabled_after(
             } else {
                 previous.or(Some(true))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_action_support_tests {
+    use super::*;
+
+    #[test]
+    fn support_matrix_matches_real_target_executors() {
+        for kind in [
+            PortableAssetKind::Skill,
+            PortableAssetKind::Command,
+            PortableAssetKind::Plugin,
+            PortableAssetKind::Mcp,
+        ] {
+            for action in [
+                PortableAssetActionKind::Enable,
+                PortableAssetActionKind::Disable,
+                PortableAssetActionKind::Uninstall,
+            ] {
+                assert!(supports_direct_local_action(
+                    AgentTarget::Claude,
+                    kind,
+                    action
+                ));
+                assert!(supports_direct_local_action(
+                    AgentTarget::Codex,
+                    kind,
+                    action
+                ));
+                assert!(!supports_direct_local_action(
+                    AgentTarget::OpenCode,
+                    kind,
+                    action
+                ));
+            }
+            assert!(!supports_direct_local_action(
+                AgentTarget::Claude,
+                kind,
+                PortableAssetActionKind::Adopt,
+            ));
+            assert!(!supports_direct_local_action(
+                AgentTarget::Claude,
+                kind,
+                PortableAssetActionKind::InstallToSourceTarget,
+            ));
         }
     }
 }

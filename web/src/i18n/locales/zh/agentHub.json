@@ -644,5 +644,28 @@
       "skipExisting": "跳过已有",
       "blocked": "已阻止"
     }
+  },
+  "crossAgent": {
+    "openButton": "同步到其他 Agent",
+    "title": "同机跨 Agent 手动同步",
+    "description": "选择源 Agent 与目标 Agent，预览适配（shared / adapted / targetOnly / residual）后确认一次性写入。不会后台自动跨 Agent 写盘。",
+    "selectAria": "跨 Agent 同步选项",
+    "sourceLabel": "源 Agent",
+    "destinationsLabel": "目标 Agent（可多选）",
+    "contentChars": "将同步的内容约 {{count}} 个字符",
+    "previewAria": "跨 Agent 适配预览",
+    "preview": "生成适配预览",
+    "apply": "确认写入 {{count}} 个目标",
+    "needsAdaptation": "内容含 CLI 专属术语，部分目标可能仅 targetOnly 或需人工改写。",
+    "cannotApply": "此目标当前不可安全自动写入。",
+    "modes": {
+      "shared": "可共享",
+      "adapted": "需适配",
+      "targetOnly": "仅来源专属",
+      "residual": "不可移植残留"
+    },
+    "errors": {
+      "invalidPreview": "预览响应无法解析，请重试或更新后端。"
+    }
   }
 }

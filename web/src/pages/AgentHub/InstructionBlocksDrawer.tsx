@@ -87,6 +87,8 @@ export function InstructionBlocksDrawer({
   // 资产切换或后端返回新 markdown 时，把 draft 同步到最新 baseline，
   // 覆盖未提交编辑（用户已点保存即触发 onSaveDocument，prop 变更意味着后端已接受）。
   useEffect(() => {
+    // Sync draft to latest baseline when asset identity/content changes (user already saved).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- prop→draft resync contract
     setDocumentDraft(asset?.contentMarkdown ?? '');
     documentSubmittedSnapshotRef.current = null;
   }, [asset?.assetId, asset?.contentMarkdown]);

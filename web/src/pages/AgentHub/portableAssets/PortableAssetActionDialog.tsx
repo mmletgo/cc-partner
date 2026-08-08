@@ -44,6 +44,7 @@ export interface PortableAssetActionDialogProps {
  * Business Logic: 聚合结果 outcome 不得把 partial/unknown 压成全成功。
  * Code Logic: 扫描 item states。
  */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for dialog consumers/tests
 export function classifyActionOutcome(
   result: PortableAssetActionResultDto | null,
 ): 'none' | 'fullSuccess' | 'partial' | 'outcomeUnknown' | 'failed' {

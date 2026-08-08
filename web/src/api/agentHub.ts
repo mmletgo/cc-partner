@@ -56,7 +56,7 @@ import type {
   UserInstructionTargetPreviewRequest,
   UserInstructionWorkspaceDto,
 } from '@/lib/types/agentHub';
-import { invokeDecoded } from './client';
+import { invoke, invokeDecoded } from './client';
 import { openPath } from '@tauri-apps/plugin-opener';
 
 /**
@@ -99,6 +99,8 @@ export const AGENT_HUB_COMMANDS = {
     'agent_hub_preview_stop_managing_user_instruction_target',
   previewRemoveUserInstructionTarget: 'agent_hub_preview_remove_user_instruction_target',
   previewDeleteUserInstructionAsset: 'agent_hub_preview_delete_user_instruction_asset',
+  previewCrossAgentInstruction: 'agent_hub_preview_cross_agent_instruction',
+  applyCrossAgentInstruction: 'agent_hub_apply_cross_agent_instruction',
 } as const;
 
 /** 用户级指令 plan apply 请求。 */
@@ -807,4 +809,44 @@ export const agentHubApi = {
 
   /** 打开 adapter 返回的真实路径；view 不直接触碰系统 opener。 */
   openUserInstructionPath: (path: string): Promise<void> => openPath(path),
+
+  /**
+   * Business Logic: 同机跨 Agent 指令适配预览（手动，非后台）。
+   * Code Logic: agent_hub_preview_cross_agent_instruction；始终发送 destinationPaths（可空）避免 IPC 缺字段。
+   */
+  previewCrossAgentInstruction: (request: {
+    source: string;
+    destinations: string[];
+    sourceMarkdown: string;
+    destinationPaths?: Record<string, string>;
+  }): Promise<unknown> =>
+    invoke(AGENT_HUB_COMMANDS.previewCrossAgentInstruction, {
+      request: {
+        source: request.source,
+        destinations: request.destinations,
+        sourceMarkdown: request.sourceMarkdown,
+        destinationPaths: request.destinationPaths ?? {},
+      },
+    }),
+
+  /**
+   * Business Logic: 一次性写入目标 Agent 指令文件。
+   * Code Logic: agent_hub_apply_cross_agent_instruction；始终发送 destinationPaths（可空）。
+   */
+  applyCrossAgentInstruction: (request: {
+    source: string;
+    destinations: string[];
+    sourceMarkdown: string;
+    destinationPaths?: Record<string, string>;
+    clientRequestId: string;
+  }): Promise<unknown> =>
+    invoke(AGENT_HUB_COMMANDS.applyCrossAgentInstruction, {
+      request: {
+        source: request.source,
+        destinations: request.destinations,
+        sourceMarkdown: request.sourceMarkdown,
+        destinationPaths: request.destinationPaths ?? {},
+        clientRequestId: request.clientRequestId,
+      },
+    }),
 };

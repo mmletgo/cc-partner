@@ -1010,22 +1010,45 @@ mod tests {
         assert!(!id.contains("Bearer"));
     }
 
-    /// Business Logic: 编译期 JSON 与 runtime 解析一致且不可变常量。
+    /// Business Logic: 编译期 JSON 与 runtime 解析一致；phase-1 pin 与 OpenCode fail-closed 合同。
     #[test]
     fn include_str_bytes_are_stable() {
         assert!(SUPPORT_MANIFEST_JSON.contains("\"schemaVersion\""));
         assert!(SUPPORT_MANIFEST_JSON.contains("\"claude\""));
+        assert!(SUPPORT_MANIFEST_JSON.contains("\"2.1.207\""));
+        assert!(SUPPORT_MANIFEST_JSON.contains("\"0.145.0\""));
         let m = builtin_support_manifest().unwrap();
-        // 写能力在仓库基线应保持 blocked，直到 L3/CI 认证
         for t in &m.targets {
-            for (cap, support) in &t.capabilities {
-                if cap.is_write_side() {
-                    assert_eq!(
-                        *support,
-                        CapabilitySupport::Blocked,
-                        "{} write cap not blocked in baseline",
-                        t.target.as_str()
-                    );
+            match t.target {
+                crate::agent_hub::models::AgentTarget::OpenCode => {
+                    for (cap, support) in &t.capabilities {
+                        if cap.is_write_side() {
+                            assert_eq!(
+                                *support,
+                                CapabilitySupport::Blocked,
+                                "opencode write cap must stay blocked until certified"
+                            );
+                        }
+                    }
+                }
+                crate::agent_hub::models::AgentTarget::Claude
+                | crate::agent_hub::models::AgentTarget::Codex => {
+                    assert!(t.min_tested_version.is_some());
+                    assert!(t.current_tested_version.is_some());
+                    for (cap, support) in &t.capabilities {
+                        if *cap == TargetCapability::LiveReload {
+                            assert_eq!(*support, CapabilitySupport::Blocked);
+                            continue;
+                        }
+                        if cap.is_write_side() {
+                            assert!(
+                                support.is_supported_family(),
+                                "{} {:?} should be Supported* after phase-1 pin",
+                                t.target.as_str(),
+                                cap
+                            );
+                        }
+                    }
                 }
             }
         }

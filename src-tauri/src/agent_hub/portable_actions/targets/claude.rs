@@ -954,10 +954,7 @@ mod tests {
             .unwrap();
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(
-            calls[0].cwd.as_ref().map(|p| p.as_path()),
-            Some(project.as_path())
-        );
+        assert_eq!(calls[0].cwd.as_deref(), Some(project.as_path()));
         let scope_idx = calls[0].args.iter().position(|a| a == "--scope").unwrap();
         assert_eq!(calls[0].args[scope_idx + 1], "project");
     }

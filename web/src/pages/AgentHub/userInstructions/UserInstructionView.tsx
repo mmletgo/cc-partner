@@ -1,6 +1,7 @@
-import type { JSX } from 'react';
+import { useState, type JSX } from 'react';
 import { Button, StatusMessage } from '@/components/primitives';
 import type { TFunction } from 'i18next';
+import { CrossAgentSyncDialog } from './CrossAgentSyncDialog';
 import { UserInstructionDangerZone } from './UserInstructionDangerZone';
 import { UserInstructionEditor } from './UserInstructionEditor';
 import { UserInstructionPreviewDialog } from './UserInstructionPreviewDialog';
@@ -64,6 +65,7 @@ export function UserInstructionView(props: UserInstructionViewProps): JSX.Elemen
     closeDeleteDialog,
     previewDeleteAsset,
   } = manager;
+  const [crossAgentOpen, setCrossAgentOpen] = useState(false);
 
   if (loading && !workspace) {
     return <StatusMessage tone="info">{t('agentHub:userInstructions.loading')}</StatusMessage>;
@@ -122,6 +124,15 @@ export function UserInstructionView(props: UserInstructionViewProps): JSX.Elemen
             data-testid="user-instruction-refresh"
           >
             {t('common:action.refresh')}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={!draft.commonContent.trim() && Object.values(draft.targetExtensions).every((v) => !v?.trim())}
+            onClick={() => setCrossAgentOpen(true)}
+            data-testid="user-instruction-cross-agent-sync"
+          >
+            {t('agentHub:crossAgent.openButton')}
           </Button>
           <Button
             variant="primary"
@@ -250,6 +261,19 @@ export function UserInstructionView(props: UserInstructionViewProps): JSX.Elemen
         error={actionError}
         onClose={closePreview}
         onApply={() => void applyPlan()}
+      />
+      <CrossAgentSyncDialog
+        t={t}
+        open={crossAgentOpen}
+        sourceMarkdown={[
+          draft.commonContent,
+          draft.targetExtensions.claude,
+          draft.targetExtensions.codex,
+          draft.targetExtensions.opencode,
+        ]
+          .filter((part) => Boolean(part?.trim()))
+          .join('\n\n')}
+        onClose={() => setCrossAgentOpen(false)}
       />
     </div>
   );

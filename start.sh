@@ -10,6 +10,9 @@
 #
 # 说明:仓库根目录无 package.json,前端依赖与 tauri CLI 均在 web/node_modules 下,
 # 故开发/构建统一通过 web/node_modules/.bin/tauri 调用。
+# 打包/开发会 best-effort 调用 scripts/prune-build-artifacts.mjs：
+#   - dev：清陈旧 incremental + debug 超阈值（默认 20GB）整清
+#   - build：成功后清 release 的 deps/build/incremental（保留 bundle/bin）
 
 set -euo pipefail
 
@@ -97,9 +100,30 @@ configure_macos_dev_signing() {
   info "已自动启用 macOS 固定 Dev 签名 (${detected_fingerprint:0:12}...)"
 }
 
+# 自动修剪过期/超阈值中间产物。失败不阻断主流程（并发 cargo 占用 target 时会 skip）。
+# $1: prune mode（auto|release-intermediates|debug-threshold|stale-incremental）
+prune_build_artifacts() {
+  local mode="${1:-auto}"
+  local prune_js="$PWD/scripts/prune-build-artifacts.mjs"
+  if [[ ! -f "$prune_js" ]]; then
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+  info "修剪构建中间产物 (mode=${mode})..."
+  # dev 启动前不要因 prune 失败而退出；release 打包后同样 best-effort
+  node "$prune_js" "--mode=${mode}" || {
+    error "prune-build-artifacts 未完全成功（已忽略，可稍后 ./start.sh clean）"
+    return 0
+  }
+}
+
 run_dev() {
   info "启动开发模式 (Tauri dev:Rust 后端 + Vite 前端 + 热重载)..."
   info "首次启动 Rust 编译较慢(数分钟),之后增量编译很快。"
+  # 启动前回收：陈旧 incremental + 超阈值 debug（默认 20GB）。不碰 release bundle。
+  prune_build_artifacts auto
   configure_macos_dev_signing
   # tauri dev 内部只 `cargo run` 默认 binary(app),不会自动构建独立后端 CLI。
   # 但 GUI setup 启动时必须拉起 cc-partner-backend sidecar,缺真 binary 会 panic。
@@ -127,7 +151,13 @@ run_dev() {
 
 run_build() {
   info "生产构建 (Tauri build,产出 dmg/安装包)..."
-  exec "$TAURI_BIN" build
+  # 不能 exec：打包成功后还要 prune release 中间层（deps/build），否则 target/release 持续膨胀。
+  # set -e 下用 if 捕获失败，避免 build 失败时脚本提前退出而跳过状态返回。
+  if "$TAURI_BIN" build; then
+    prune_build_artifacts release-intermediates
+    return 0
+  fi
+  return 1
 }
 
 run_web() {
@@ -154,10 +184,15 @@ cc-partner 启动脚本
   dev       开发模式(默认):Tauri + Vite + 热重载
             macOS 固定生成 ~/Applications/cc-partner (Dev).app；检测到
             固定签名 identity 时使用固定签名，否则使用可手动授权的 ad-hoc 签名
-  build     生产构建(产出 dmg/安装包)
+  build     生产构建(产出 dmg/安装包)；成功后自动清 release deps/build
   web       仅前端 Vite(浏览器预览,无 Tauri 外壳)
-  clean     清理构建产物
+  clean     全量清理构建产物(web/dist + cargo target)
   help      显示本帮助
+
+说明:
+  dev 启动前会 best-effort 修剪陈旧 incremental，以及超过
+  CC_PARTNER_DEBUG_TARGET_MAX_GB（默认 20）的 debug target。
+  全量回收磁盘请用 clean。
 EOF
 }
 

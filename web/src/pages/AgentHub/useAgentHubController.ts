@@ -406,8 +406,10 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const appliedPreviewDeepLinkRef = useRef<string | null>(null);
   const scopeFilterRef = useRef(scopeFilter);
   const kindFilterRef = useRef(kindFilter);
-  scopeFilterRef.current = scopeFilter;
-  kindFilterRef.current = kindFilter;
+  useEffect(() => {
+    scopeFilterRef.current = scopeFilter;
+    kindFilterRef.current = kindFilter;
+  }, [scopeFilter, kindFilter]);
 
   /**
    * Business Logic: 首屏与手动刷新加载 status + assets。
@@ -1212,6 +1214,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       portableInventoryBase.selectItem(deepLinkInventoryItemId);
     }
     if (normalizeAgentHubSection(deepLinkSection) === 'assets' || deepLinkInventoryItemId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot deep-link bootstrap
       setActiveSectionState('assets');
     }
     // 首帧后允许 filters → URL 同步

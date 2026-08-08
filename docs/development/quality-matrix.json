@@ -1439,13 +1439,17 @@
       "exclusions": [
         "not executed in default CI",
         "requires pinned CLI installers on runner",
-        "hosted runner may lack Claude/Codex/OpenCode"
+        "hosted runner may lack Claude/Codex/OpenCode",
+        "windows/ubuntu product paths not certified",
+        "OpenCode not pinned (local install missing as of 2026-08-08)"
       ],
       "docs": [
         "docs/development/testing.md",
-        "docs/superpowers/plans/2026-07-29-agent-hub-gate-b-portable-assets.md"
+        "docs/superpowers/plans/2026-07-29-agent-hub-gate-b-portable-assets.md",
+        "docs/superpowers/specs/2026-08-08-agent-hub-three-phase-refactor-design.md"
       ],
-      "status": "NOT VERIFIED"
+      "status": "NOT VERIFIED",
+      "notes": "2026-08-08 phase-1: local macos-aarch64 pin probe passed for Claude 2.1.207 and Codex 0.145.0-alpha.4 (write_allowed=true); support-manifest currentTestedVersion updated. Aggregate multi-platform L3 remains NOT VERIFIED. OpenCode write stays blocked."
     },
     {
       "id": "L2-AGENT-HUB-B-001",

@@ -371,9 +371,9 @@ mod tests {
 
     #[test]
     fn constants_are_sensible() {
-        assert!(FAILURE_THRESHOLD >= 1);
-        assert!(PROBE_INTERVAL_SECS >= 5);
-        assert!(TAILSCALE_PROBE_PORT > 0);
+        const _: () = assert!(FAILURE_THRESHOLD >= 1);
+        const _: () = assert!(PROBE_INTERVAL_SECS >= 5);
+        const _: () = assert!(TAILSCALE_PROBE_PORT > 0);
     }
 
     #[test]

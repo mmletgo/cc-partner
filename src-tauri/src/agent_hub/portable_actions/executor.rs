@@ -1017,19 +1017,22 @@ mod tests {
         assert!(runner.calls().is_empty());
     }
 
-    /// Business Logic: unsupported target 零 spawn 且 blocked。
+    /// Business Logic: OpenCode 仍未认证写能力时零 spawn 且 blocked。
     #[tokio::test]
     async fn unsupported_target_zero_spawn() {
         let repo = test_repo().await;
         let runner = Arc::new(FakeProcessRunner::new());
         let item = sample_item(
-            AgentTarget::Codex,
+            AgentTarget::OpenCode,
             PortableAssetKind::Skill,
             "x",
             "/skills/x",
             Some(true),
         );
-        let snap = snapshot_from(vec![sample_target(AgentTarget::Codex)], vec![item.clone()]);
+        let snap = snapshot_from(
+            vec![sample_target(AgentTarget::OpenCode)],
+            vec![item.clone()],
+        );
         let plan = preview_action(
             &repo,
             &snap,
@@ -1052,7 +1055,7 @@ mod tests {
             &deps,
             ApplyPortableAssetActionRequest {
                 plan_token: plan.plan_token,
-                client_request_id: "req-codex-1".into(),
+                client_request_id: "req-opencode-1".into(),
             },
         )
         .await

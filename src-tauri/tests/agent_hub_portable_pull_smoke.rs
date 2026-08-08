@@ -494,7 +494,7 @@ async fn l2_agent_hub_portable_pull_001_source_and_contract() {
                 .bytes()
                 .await
                 .unwrap();
-            assert!(!bytes.is_empty() || obj.size == "0" || obj.size == "0".to_string());
+            assert!(!bytes.is_empty() || obj.size == "0");
         }
     }
     assert!(peer.hits.load(Ordering::SeqCst) > 0);
@@ -599,5 +599,5 @@ async fn l2_agent_hub_portable_pull_001_chunk_interrupt_resume() {
         offset += n as u64;
     }
     assert_eq!(assembled, full);
-    assert!(PORTABLE_PULL_MAX_CHUNK_BYTES >= 8 * 1024 * 1024);
+    const _: () = assert!(PORTABLE_PULL_MAX_CHUNK_BYTES >= 8 * 1024 * 1024);
 }

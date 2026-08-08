@@ -644,5 +644,28 @@
       "skipExisting": "Skipped existing",
       "blocked": "Blocked"
     }
+  },
+  "crossAgent": {
+    "openButton": "Sync to other agents",
+    "title": "Manual same-machine cross-agent sync",
+    "description": "Pick a source agent and destinations, preview adaptation (shared / adapted / targetOnly / residual), then confirm a one-shot write. No background cross-agent file writes.",
+    "selectAria": "Cross-agent sync options",
+    "sourceLabel": "Source agent",
+    "destinationsLabel": "Destination agents (multi-select)",
+    "contentChars": "About {{count}} characters will be synced",
+    "previewAria": "Cross-agent adaptation preview",
+    "preview": "Preview adaptation",
+    "apply": "Apply to {{count}} targets",
+    "needsAdaptation": "Content has CLI-specific terms; some targets may stay targetOnly or need manual edits.",
+    "cannotApply": "This target cannot be written safely automatically.",
+    "modes": {
+      "shared": "Shared",
+      "adapted": "Adapted",
+      "targetOnly": "Source only",
+      "residual": "Non-portable residual"
+    },
+    "errors": {
+      "invalidPreview": "Preview response could not be parsed. Retry or update the backend."
+    }
   }
 }

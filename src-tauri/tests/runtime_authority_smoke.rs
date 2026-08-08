@@ -251,6 +251,7 @@ fn sample_config() -> AppConfig {
         github_trending: GithubTrendingConfig::default(),
         agent_hub: app_lib::config::AgentHubConfig::default(),
         manual_peers: Vec::new(),
+        internal_claude: app_lib::config::InternalClaudeConfig::default(),
     }
 }
 

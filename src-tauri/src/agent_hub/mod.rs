@@ -36,6 +36,7 @@
 pub mod assets;
 pub mod autostart;
 pub mod config_patch;
+pub mod cross_agent;
 pub mod git;
 pub mod instructions;
 pub mod migration;
@@ -68,6 +69,13 @@ pub use config_patch::{
     serialize_owned_path_meta, value_content_hash, ConfigOwnedPathMeta, ConfigPatchOutcome,
     ConfigPathDiff, JsoncConfigPatcher, ManagedConfigPatch, OwnedConfigValue, PatchedConfig,
     PreparedConfigProjection, SemanticConfigPatcher, TomlConfigPatcher,
+};
+pub use cross_agent::{
+    apply_cross_agent_instruction, preview_cross_agent_instruction,
+    preview_cross_agent_plugin_residual, should_enqueue_cross_target_on_external_edit,
+    ApplyCrossAgentInstructionRequest, CrossAgentAdaptMode, CrossAgentApplyTargetResult,
+    CrossAgentKind, CrossAgentPreviewReport, CrossAgentTargetPreview,
+    PreviewCrossAgentInstructionRequest,
 };
 
 pub use instructions::{

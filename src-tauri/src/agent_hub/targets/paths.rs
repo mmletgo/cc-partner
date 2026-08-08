@@ -49,6 +49,38 @@ impl TargetEnvironment {
             .map(|s| s.as_str())
             .filter(|s| !s.trim().is_empty())
     }
+
+    /// 从当前 process env 构造（生产 IPC / owner 路径）。
+    ///
+    /// Business Logic: 跨 Agent 手动同步与 portable inventory 共用同一解析语义。
+    /// Code Logic: 拷贝关键覆盖键 + PATH 分片 + home。
+    pub fn from_process() -> Self {
+        use std::collections::BTreeMap;
+        use std::env;
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let mut vars = BTreeMap::new();
+        for key in [
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "OPENCODE_CONFIG_DIR",
+            "OPENCODE_CONFIG",
+            "XDG_CONFIG_HOME",
+        ] {
+            if let Ok(v) = env::var(key) {
+                if !v.trim().is_empty() {
+                    vars.insert(key.to_string(), v);
+                }
+            }
+        }
+        let path_entries = env::var_os("PATH")
+            .map(|p| env::split_paths(&p).collect())
+            .unwrap_or_default();
+        Self {
+            home,
+            vars,
+            path_entries,
+        }
+    }
 }
 
 /// 单 target 配置根（及可选兼容 Skill 根）。

@@ -8,6 +8,11 @@
 //!     HeadlessOwner → AgentHubService；GuiClient → BackendControlClient agent_hub_*；
 //!     mutation 前 client 调用 require_agent_hub_write_compatibility。
 
+use crate::agent_hub::cross_agent::{
+    apply_cross_agent_instruction, preview_cross_agent_instruction,
+    ApplyCrossAgentInstructionRequest, CrossAgentApplyTargetResult, CrossAgentPreviewReport,
+    PreviewCrossAgentInstructionRequest,
+};
 use crate::agent_hub::git::preview::{
     confirm_git_import_for_state, confirm_project_mapping_for_state, inspect_git_lanes_for_state,
     preview_git_import_for_state, ConfirmGitImportOutcome, ConfirmGitImportRequest,
@@ -38,6 +43,7 @@ use crate::agent_hub::service::{
 };
 use crate::agent_hub::snapshot::builder::{build_snapshot, SnapshotSelectionRequest};
 use crate::agent_hub::snapshot::importer::ResolvedProjectMapping;
+use crate::agent_hub::targets::TargetEnvironment;
 use crate::agent_hub::user_instructions::{
     ApplyUserInstructionPlanRequest, ApplyUserInstructionPlanResultDto,
     PreviewUserInstructionRequest, UserInstructionPlanDto, UserInstructionWorkspaceDto,
@@ -660,6 +666,32 @@ pub async fn agent_hub_get_portable_pull(
             .await;
     }
     PortableService::get_portable_pull(state.inner(), &client_request_id).await
+}
+
+/// Business Logic: 同机跨 Agent 指令适配预览（手动，非后台）。
+/// Code Logic: 构造 TargetEnvironment → preview_cross_agent_instruction。
+#[tauri::command]
+pub async fn agent_hub_preview_cross_agent_instruction(
+    request: PreviewCrossAgentInstructionRequest,
+) -> Result<CrossAgentPreviewReport, AppError> {
+    let env = TargetEnvironment::from_process();
+    preview_cross_agent_instruction(&request, &env)
+}
+
+/// Business Logic: 一次性把源指令投影到选定目标 Agent 文件。
+/// Code Logic: apply_cross_agent_instruction；不触发其它 target 后台投影。
+#[tauri::command]
+pub async fn agent_hub_apply_cross_agent_instruction(
+    state: State<'_, AppState>,
+    request: ApplyCrossAgentInstructionRequest,
+) -> Result<Vec<CrossAgentApplyTargetResult>, AppError> {
+    if state.runtime_role == RuntimeRole::GuiClient {
+        let client = BackendControlClient::from_control_file()?;
+        client.require_agent_hub_write_compatibility(AGENT_HUB_API_VERSION)?;
+        // GuiClient 仍走本机 apply（同机跨 Agent 只写本机文件，不经 LAN）。
+    }
+    let env = TargetEnvironment::from_process();
+    apply_cross_agent_instruction(&request, &env)
 }
 
 /// LAN push 预览：build selection 但不传输。

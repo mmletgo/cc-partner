@@ -58,23 +58,74 @@ fn support_manifest_compiles_and_lists_three_targets() {
     assert_eq!(names, vec!["claude", "codex", "opencode"]);
 }
 
-/// 编译期烟测：基线写能力必须 blocked（未跑 L3 前）。
+/// 编译期烟测：写能力合同 — 已 pin 的 target 必须带版本+证据；未认证 target 写侧 blocked。
 ///
-/// Business Logic: Gate B 完成前不得把本地未认证版本写成 supported write。
-/// Code Logic: 遍历 capabilities，写侧均为 Blocked。
+/// Business Logic: 2026-08-08 三阶段重构阶段一解锁 Claude/Codex 写能力（本机 probe pin）；
+///     OpenCode 本机未安装时保持 fail-closed。liveReload 全 target 诚实 blocked。
+/// Code Logic: Claude/Codex 写侧 Supported*（除 liveReload）+ 非空 min/current；OpenCode 写侧 Blocked。
 #[test]
-fn baseline_write_capabilities_are_blocked() {
+fn write_capability_contract_matches_phase1_pins() {
     let manifest = builtin_support_manifest().unwrap();
     for record in &manifest.targets {
-        for (cap, support) in &record.capabilities {
-            if cap.is_write_side() {
-                assert_eq!(
-                    *support,
-                    CapabilitySupport::Blocked,
-                    "{} {:?} should be blocked in baseline",
-                    record.target.as_str(),
-                    cap
+        match record.target {
+            AgentTarget::Claude | AgentTarget::Codex => {
+                assert!(
+                    record
+                        .min_tested_version
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .is_some(),
+                    "{} missing minTestedVersion",
+                    record.target.as_str()
                 );
+                assert!(
+                    record
+                        .current_tested_version
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .is_some(),
+                    "{} missing currentTestedVersion",
+                    record.target.as_str()
+                );
+                assert!(
+                    !record.evidence_ids.is_empty(),
+                    "{} needs evidenceIds",
+                    record.target.as_str()
+                );
+                for (cap, support) in &record.capabilities {
+                    if *cap == TargetCapability::LiveReload {
+                        assert_eq!(
+                            *support,
+                            CapabilitySupport::Blocked,
+                            "{} liveReload must stay blocked",
+                            record.target.as_str()
+                        );
+                        continue;
+                    }
+                    if cap.is_write_side() {
+                        assert!(
+                            support.is_supported_family(),
+                            "{} {:?} should be Supported* after phase-1 pin, got {:?}",
+                            record.target.as_str(),
+                            cap,
+                            support
+                        );
+                    }
+                }
+            }
+            AgentTarget::OpenCode => {
+                for (cap, support) in &record.capabilities {
+                    if cap.is_write_side() {
+                        assert_eq!(
+                            *support,
+                            CapabilitySupport::Blocked,
+                            "opencode {:?} should stay blocked until installed+certified",
+                            cap
+                        );
+                    }
+                }
             }
         }
     }
