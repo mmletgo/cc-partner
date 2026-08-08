@@ -24,6 +24,8 @@
  *   - 暴露 loadWorktrees / loadGitHistory / handleOpenCreateWorktree / handleCancelCreateWorktree /
  *     handleCreateWorktree / handleCommitWorktree / handlePushWorktree / handleMergeWorktree /
  *     handleRemoveWorktree / clearMergeStagePanel 操作函数。
+ *   - loadGitHistory 在拉提交前 best-effort 对账 worktree 列表（复用 list → sync_git_worktrees），
+ *     让外部已清理的 worktree 从导航入口消失；对账失败不挡历史刷新。
  *   - 注册 workbench:merge-progress 事件订阅（按当前 project/worktree 过滤）。
  *
  * 不复制邻接 controller 状态：project / session / file / application / prompt optimizer 状态仍归
@@ -202,7 +204,8 @@ export interface WorkbenchWorktreeGitControllerResult {
   setCreateWorktreeBranchSuffixDraft: (next: string) => void;
   setGitCommits: (next: WorkbenchGitCommit[]) => void;
   setGitHistoryError: (next: string | null) => void;
-  loadWorktrees: (projectId: string) => Promise<void>;
+  /** 返回对账后的列表；stale/失败时 null（调用方可忽略返回值）。 */
+  loadWorktrees: (projectId: string) => Promise<WorkbenchWorktree[] | null>;
   loadGitHistory: () => Promise<void>;
   handleOpenCreateWorktree: () => void;
   handleCancelCreateWorktree: () => void;
@@ -376,15 +379,6 @@ export function useWorkbenchWorktreeGitController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   切换项目或刷新时需要重新拉取当前项目的所有 worktree，并按返回结果校正 active worktree。
-   *
-   * Code Logic（这个函数做什么）:
-   *   1. 调用 worktrees.list(projectId)，并通过 isCurrentProject 做 stale guard；
-   *   2. 成功时更新 worktrees、保留仍存在的 active worktree（否则回退到第一个），markRequestSuccess；
-   *   3. 失败时 markRequestFailure + 展示 worktreeError。
-   */
-  /**
-   * Business Logic（为什么需要这个函数）:
    *   create/remove/merge/commit 等 mutation 成功后，旧 worktree list 响应不能覆盖新列表。
    *
    * Code Logic（这个函数做什么）:
@@ -411,8 +405,21 @@ export function useWorkbenchWorktreeGitController(
     [],
   );
 
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   切换项目或刷新时需要重新拉取当前项目的所有 worktree，并按返回结果校正 active worktree。
+   *   调用方（尤其 loadGitHistory）需要知道对账后的列表，以便在 React 尚未把 activeWorktreeId
+   *   同步进 ref 之前，用正确的 worktree 拉提交历史；不得在此同步改写 activeWorktreeIdRef，
+   *   否则会让进行中的 mutation settlement（绑定发起时 worktreeId）误判为 stale。
+   *
+   * Code Logic（这个函数做什么）:
+   *   1. 调用 worktrees.list(projectId)，并通过 isCurrentProject 做 stale guard；
+   *   2. 成功时更新 worktrees、保留仍存在的 active worktree（否则 setActiveWorktreeId 回退到第一个），
+   *      markRequestSuccess，返回 list；
+   *   3. 失败/stale 时返回 null；失败时 markRequestFailure + 展示 worktreeError。
+   */
   const loadWorktrees = useCallback(
-    async (projectId: string): Promise<void> => {
+    async (projectId: string): Promise<WorkbenchWorktree[] | null> => {
       const requestSeq = (worktreeListRequestSeqRef.current[projectId] ?? 0) + 1;
       worktreeListRequestSeqRef.current[projectId] = requestSeq;
       try {
@@ -422,28 +429,30 @@ export function useWorkbenchWorktreeGitController(
           !isCurrentProject(projectId) ||
           !isLatestRequest(worktreeListRequestSeqRef.current[projectId], requestSeq)
         ) {
-          return;
+          return null;
         }
         markRequestSuccess(projectId);
         setWorktrees(list);
         // Business Logic: 保留仍存在的 active worktree；否则回退到第一个。读取 ref 拿到最新 active id，
         // 与原 Workbench.tsx 的 functional setState 行为等价。
+        // 只通过 setter 通知页面；不在此写 activeWorktreeIdRef，避免打断 mutation settlement。
         const currentActive = activeWorktreeIdRef.current;
-        if (currentActive && list.some((worktree) => worktree.id === currentActive)) {
-          return;
+        if (!(currentActive && list.some((worktree) => worktree.id === currentActive))) {
+          setActiveWorktreeId(list[0]?.id ?? null);
         }
-        setActiveWorktreeId(list[0]?.id ?? null);
+        return list;
       } catch (error) {
         if (
           !isCurrentProject(projectId) ||
           !isLatestRequest(worktreeListRequestSeqRef.current[projectId], requestSeq)
         ) {
-          return;
+          return null;
         }
         markRequestFailure(projectId, error);
         setWorktreeError(
           displayErrorMessage(error, translateError('worktrees'), desktopUnavailableMessage),
         );
+        return null;
       }
     },
     [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, setActiveWorktreeId],
@@ -452,11 +461,14 @@ export function useWorkbenchWorktreeGitController(
   /**
    * Business Logic（为什么需要这个函数）:
    *   Git 历史 tab 与 commit/push/merge 完成后需要刷新当前 worktree 的提交历史；多 worktree 场景下旧响应不能覆盖。
+   *   外部清理（rm -rf / git worktree prune）后的孤儿导航入口也应在刷新历史时消失，因此每次刷新先对账 worktree。
    *
    * Code Logic（这个函数做什么）:
    *   1. 无 active project 时清空 commits/error/loading 并返回；
-   *   2. 调用 git.listCommits(projectId, worktreeId, 30)，project/worktree 切换时丢弃响应；
-   *   3. 成功时 setGitCommits + markRequestSuccess；失败时 markRequestFailure + 清空 + 展示 gitHistoryError。
+   *   2. best-effort 调用 loadWorktrees（后端 list 内 sync_git_worktrees 会 prune 磁盘已不存在的非主 worktree）；
+   *      对账失败只走 worktree 既有 error 路径，不中止历史刷新；
+   *   3. 若对账返回 list：active 仍在则用之，否则用 list[0]（与 loadWorktrees 回退一致）；list 为 null 时回退到 ref；
+   *   4. 再 git.listCommits(projectId, worktreeId, 30)；project/worktree 切换时丢弃响应。
    */
   const loadGitHistory = useCallback(async (): Promise<void> => {
     const projectId = activeProjectIdRef.current;
@@ -466,29 +478,56 @@ export function useWorkbenchWorktreeGitController(
       setGitHistoryLoading(false);
       return;
     }
-    const worktreeId = activeWorktreeIdRef.current;
+
+    // Best-effort worktree reconcile: keep navigation honest without blocking history refresh.
+    // loadWorktrees swallows its own errors into worktreeError / markRequestFailure and returns null.
+    const reconciled = await loadWorktrees(projectId);
+    if (!isCurrentProject(projectId) || activeProjectIdRef.current !== projectId) {
+      return;
+    }
+
+    // Prefer still-present active from reconcile result; if pruned, fall back to list[0] for this fetch.
+    // When reconcile failed (null), keep the current ref so history still attempts the active worktree.
+    let worktreeId = activeWorktreeIdRef.current;
+    if (reconciled) {
+      if (!(worktreeId && reconciled.some((worktree) => worktree.id === worktreeId))) {
+        worktreeId = reconciled[0]?.id ?? null;
+      }
+    }
+
     const requestKey = `${projectId}::${worktreeId ?? '__none__'}`;
     const requestSeq = (gitHistoryRequestSeqRef.current[requestKey] ?? 0) + 1;
     gitHistoryRequestSeqRef.current[requestKey] = requestSeq;
+
+    // Accept response when active ref still matches the requested worktree, or when we
+    // intentionally fell back after prune (ref still points at a missing id, request used list[0]).
+    const isHistoryRequestCurrent = (): boolean => {
+      if (!isCurrentProject(projectId)) return false;
+      if (!isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)) return false;
+      const current = activeWorktreeIdRef.current;
+      if (current === worktreeId) return true;
+      if (
+        reconciled
+        && worktreeId === (reconciled[0]?.id ?? null)
+        && current !== null
+        && !reconciled.some((worktree) => worktree.id === current)
+      ) {
+        return true;
+      }
+      return false;
+    };
+
     try {
       setGitHistoryLoading(true);
       setGitHistoryError(null);
       const commits = await workbenchApi.git.listCommits(projectId, worktreeId, 30);
-      if (
-        !isCurrentProject(projectId) ||
-        activeWorktreeIdRef.current !== worktreeId ||
-        !isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)
-      ) {
+      if (!isHistoryRequestCurrent()) {
         return;
       }
       setGitCommits(commits);
       markRequestSuccess(projectId);
     } catch (error) {
-      if (
-        !isCurrentProject(projectId) ||
-        activeWorktreeIdRef.current !== worktreeId ||
-        !isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)
-      ) {
+      if (!isHistoryRequestCurrent()) {
         return;
       }
       markRequestFailure(projectId, error);
@@ -497,15 +536,11 @@ export function useWorkbenchWorktreeGitController(
         displayErrorMessage(error, translateError('gitHistory'), desktopUnavailableMessage),
       );
     } finally {
-      if (
-        isCurrentProject(projectId) &&
-        activeWorktreeIdRef.current === worktreeId &&
-        isLatestRequest(gitHistoryRequestSeqRef.current[requestKey], requestSeq)
-      ) {
+      if (isHistoryRequestCurrent()) {
         setGitHistoryLoading(false);
       }
     }
-  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage]);
+  }, [isCurrentProject, markRequestSuccess, desktopUnavailableMessage, markRequestFailure, translateError, displayErrorMessage, loadWorktrees]);
 
   /**
    * Business Logic（为什么需要这个函数）:
