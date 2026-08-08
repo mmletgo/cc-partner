@@ -709,6 +709,20 @@
     "openButton": "同步到其他 Agent",
     "title": "同机跨 Agent 手动同步",
     "description": "选择源 Agent 与目标 Agent，预览适配（shared / adapted / targetOnly / residual）后确认一次性写入。不会后台自动跨 Agent 写盘。",
+    "pageTitle": "适配到其他 Agent",
+    "pageDescription": "选择性同机适配：选择目标、确认范围、预览 shared / adapted / targetOnly / residual，再一次性写入。Claude 全量模式将在后续任务提供。",
+    "back": "返回工作台",
+    "targetsSection": "源与目标",
+    "scopeSection": "范围确认",
+    "scopeUser": "本机用户级指令",
+    "scopeProject": "项目级 · {{project}}",
+    "scopeConfirmLabel": "我确认在此范围写入",
+    "projectOptInNeeded": "请先在壳层选择项目，再做项目级适配。项目须已在 Agent Hub 启用（opt-in）。",
+    "projectOptInHint": "仅当该项目已在 Agent Hub 启用时，目标 Agent 才会写入。如需启用，请返回项目工作台操作。",
+    "contentSection": "指令内容",
+    "contentLabel": "源指令 Markdown",
+    "reloadContent": "从源 Agent 重新加载",
+    "claudeBlockStub": "块级「用 Claude 适配此块」尚未开放（全量模式见下一任务）。选择性适配请先手改 Markdown。",
     "selectAria": "跨 Agent 同步选项",
     "sourceLabel": "源 Agent",
     "destinationsLabel": "目标 Agent（可多选）",
@@ -725,7 +739,15 @@
       "residual": "不可移植残留"
     },
     "errors": {
-      "invalidPreview": "预览响应无法解析，请重试或更新后端。"
+      "invalidPreview": "预览响应无法解析，请重试或更新后端。",
+      "peerBlocked": "跨 Agent 适配仅限本机。请将设备切换回本机。",
+      "emptyMarkdown": "源指令内容为空，请先加载或粘贴 Markdown。",
+      "emptyDestinations": "请至少选择一个目标 Agent。",
+      "sourceInDestinations": "目标 Agent 不能包含源 Agent。",
+      "scopeUnconfirmed": "生成预览前请确认写入范围。",
+      "projectKeyRequired": "项目级适配前请先选择项目。",
+      "previewRequired": "请先生成适配预览，再确认写入。",
+      "noApplicable": "当前预览下没有可安全写入的目标。"
     }
   }
 }
