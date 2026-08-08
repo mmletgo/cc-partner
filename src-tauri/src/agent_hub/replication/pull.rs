@@ -727,6 +727,38 @@ fn outcome_unknown_pull_result(
     }
 }
 
+/// Best-effort fold of local inventory observations into an OutcomeUnknown pull result.
+///
+/// Business Logic: Pending/incomplete apply must still surface destination facts when
+/// rescan can observe planned native ids (mirror portable_actions Pending rescan).
+/// Code Logic: mutates item.message only; never upgrades OutcomeUnknown → Succeeded.
+fn fold_pending_pull_observations(
+    result: &mut PortablePullResultDto,
+    plan: &PortablePullPlanDto,
+    post: &PortableInventorySnapshotDto,
+) {
+    let by_id: BTreeMap<&str, &PortablePullChangeDto> = plan
+        .changes
+        .iter()
+        .map(|c| (c.inventory_item_id.as_str(), c))
+        .collect();
+    for item in &mut result.items {
+        let Some(change) = by_id.get(item.inventory_item_id.as_str()) else {
+            continue;
+        };
+        let observed = inventory_has_scoped_item(
+            post,
+            plan.destination_target,
+            change.kind,
+            &change.native_id,
+            &change.scope_id,
+        );
+        item.message = Some(format!(
+            "pull claimed but not completed; observed presence={observed}"
+        ));
+    }
+}
+
 // ───────────────────────── 源端 inventory ─────────────────────────
 
 /// 构建脱敏远端 inventory（本机作为源被查询）。
@@ -1181,23 +1213,29 @@ pub async fn apply_portable_pull(
     match claim {
         PortablePullClaim::Replay(json) => serde_json::from_str(&json).map_err(AppError::from),
         PortablePullClaim::Pending => {
+            // 未完成 claim：诚实 OutcomeUnknown，best-effort 本地 inventory rescan 附加观察
             let row = repo
                 .get_portable_pull_plan(&request.plan_token)
                 .await?
                 .ok_or_else(|| AppError::not_found("PORTABLE_PULL_PLAN_NOT_FOUND".to_string()))?;
             let stored = parse_stored_pull_plan(&row.plan_json)?;
-            Ok(outcome_unknown_pull_result(
+            let mut result = outcome_unknown_pull_result(
                 &request.plan_token,
                 &request.client_request_id,
                 &stored.public,
-            ))
+            );
+            if let Ok(post) = inspect_portable_inventory(state).await {
+                fold_pending_pull_observations(&mut result, &stored.public, &post);
+            }
+            Ok(result)
         }
         PortablePullClaim::Claimed(record) => {
             let stored = parse_stored_pull_plan(&record.plan_json)?;
             let result = match execute_claimed_pull(state, &stored, &request).await {
                 Ok(r) => r,
                 Err(e) => {
-                    // fail-closed 完成 ledger，避免永远 Pending 假死；调用方可 get 到失败结果
+                    // fail-closed 完成 ledger，避免永远 Pending 假死；调用方可 get 到失败结果。
+                    // complete 失败必须上抛（不得吞掉），否则行卡 Pending → 重试 OutcomeUnknown。
                     let fail = PortablePullResultDto {
                         plan_token: request.plan_token.clone(),
                         client_request_id: request.client_request_id.clone(),
@@ -1218,13 +1256,12 @@ pub async fn apply_portable_pull(
                             })
                             .collect(),
                     };
-                    let _ = repo
-                        .complete_portable_pull_plan(
-                            &request.plan_token,
-                            &request.client_request_id,
-                            &serde_json::to_string(&fail)?,
-                        )
-                        .await;
+                    repo.complete_portable_pull_plan(
+                        &request.plan_token,
+                        &request.client_request_id,
+                        &serde_json::to_string(&fail)?,
+                    )
+                    .await?;
                     return Ok(fail);
                 }
             };
@@ -1333,7 +1370,12 @@ async fn execute_claimed_pull(
     .await?;
 
     // selection 必须与 revalidated inventory / plan binding 对齐（同 id 下 content 不得漂移）
-    bind_selection_to_inventory_bindings(&selection, &bindings)?;
+    // + selection item.target 必须等于 plan.destination_target（防同 id 伪 target 侧写）
+    bind_selection_to_inventory_bindings(
+        &selection,
+        &bindings,
+        stored.public.destination_target,
+    )?;
 
     let data_dir = crate::config::data_dir()?;
     let store = ObjectStore::open(&data_dir)?;
@@ -1733,10 +1775,12 @@ async fn install_change(
     install_payload_to_target(state, store, sel, change).await
 }
 
-/// selection 响应必须绑定 revalidated inventory 的 content/tree hash（同 id 内容漂移 → fail）。
+/// selection 响应必须绑定 revalidated inventory 的 content/tree hash（同 id 内容漂移 → fail），
+/// 且每条 item.target 必须等于 plan destination_target（同 id 伪 target → mismatch）。
 fn bind_selection_to_inventory_bindings(
     selection: &RemotePortableSelectionResponse,
     bindings: &[StoredRemoteItemBinding],
+    destination_target: AgentTarget,
 ) -> Result<(), AppError> {
     let by_id: BTreeMap<&str, &StoredRemoteItemBinding> = bindings
         .iter()
@@ -1748,6 +1792,12 @@ fn bind_selection_to_inventory_bindings(
         ));
     }
     for item in &selection.items {
+        if item.target != destination_target {
+            return Err(AppError::validation(format!(
+                "PORTABLE_PULL_TARGET_MISMATCH:item={}",
+                item.inventory_item_id
+            )));
+        }
         let Some(bound) = by_id.get(item.inventory_item_id.as_str()) else {
             return Err(AppError::conflict(
                 "PORTABLE_PULL_REMOTE_SELECTION_DRIFT".to_string(),
@@ -1835,12 +1885,17 @@ pub async fn get_portable_pull(
     if let Some(result_json) = row.result_json.as_deref() {
         return serde_json::from_str(result_json).map_err(AppError::from);
     }
+    // incomplete ledger row：OutcomeUnknown + best-effort destination observation rescan
     let stored = parse_stored_pull_plan(&row.plan_json)?;
-    Ok(outcome_unknown_pull_result(
+    let mut result = outcome_unknown_pull_result(
         &row.plan_token,
         client_request_id,
         &stored.public,
-    ))
+    );
+    if let Ok(post) = inspect_portable_inventory(state).await {
+        fold_pending_pull_observations(&mut result, &stored.public, &post);
+    }
+    Ok(result)
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -2859,7 +2914,12 @@ mod tests {
             content_hash: Some("hash-preview".into()),
             tree_hash: None,
         }];
-        let err = bind_selection_to_inventory_bindings(&selection, &bindings).unwrap_err();
+        let err = bind_selection_to_inventory_bindings(
+            &selection,
+            &bindings,
+            AgentTarget::Claude,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("PORTABLE_PULL_REMOTE_SELECTION_DRIFT"),
@@ -2871,7 +2931,187 @@ mod tests {
             content_hash: Some("hash-new".into()),
             tree_hash: None,
         }];
-        bind_selection_to_inventory_bindings(&selection, &ok_bindings).unwrap();
+        bind_selection_to_inventory_bindings(&selection, &ok_bindings, AgentTarget::Claude)
+            .unwrap();
+    }
+
+    /// R5-M7: selection item.target must match plan destination_target before install.
+    #[test]
+    fn selection_binding_rejects_target_mismatch() {
+        use crate::agent_hub::snapshot::portable_builder::PortableSelectionItem;
+        let selection = RemotePortableSelectionResponse {
+            transfer_id: "t".into(),
+            envelope: SnapshotEnvelopeV1 {
+                format: "cc-partner-agent-hub".into(),
+                format_version: 1,
+                canonicalization: "RFC8785-JSON".into(),
+                snapshot_id: "s".into(),
+                snapshot_hash: "0".repeat(64),
+                source_replica_id: "d".into(),
+                created_at: "t".into(),
+                selection: SnapshotSelection {
+                    scope_ids: vec![],
+                    asset_ids: vec![],
+                    include_history: false,
+                },
+                asset_heads: BTreeMap::new(),
+                assets: vec![],
+                lineages: vec![],
+                revisions: vec![],
+                variants: vec![],
+                conflicts: vec![],
+                aliases: vec![],
+                objects: vec![],
+            },
+            items: vec![PortableSelectionItem {
+                inventory_item_id: "id-a".into(),
+                asset_id: "asset-a".into(),
+                // lied target while hashes still match
+                target: AgentTarget::Codex,
+                kind: PortableAssetKind::Command,
+                native_id: "a".into(),
+                display_name: "a".into(),
+                scope_id: "user".into(),
+                object_hash: "obj".into(),
+                object_size: 1,
+                content_hash: Some("hash-ok".into()),
+                tree_hash: None,
+                credential_bearing: false,
+                legacy_lossy: false,
+                warnings: vec![],
+            }],
+            missing_object_hashes: vec![],
+        };
+        let bindings = vec![StoredRemoteItemBinding {
+            inventory_item_id: "id-a".into(),
+            content_hash: Some("hash-ok".into()),
+            tree_hash: None,
+        }];
+        let err = bind_selection_to_inventory_bindings(
+            &selection,
+            &bindings,
+            AgentTarget::Claude,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("PORTABLE_PULL_TARGET_MISMATCH"),
+            "expected target mismatch, got {err}"
+        );
+    }
+
+    /// R5-M2: hard-fail path must propagate complete_portable_pull_plan errors (not swallow).
+    #[test]
+    fn hard_fail_complete_propagates_not_swallowed() {
+        let src = include_str!("pull.rs");
+        // Production apply_portable_pull body ends before #[cfg(test)] module.
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before tests");
+        assert!(prod.contains("PORTABLE_PULL_APPLY_FAILED"));
+        // Forbidden swallow pattern: ignore complete Result with underscore binding.
+        let swallow = format!(
+            "{}{}",
+            "let _ = repo",
+            ".complete_portable_pull_plan"
+        );
+        assert!(
+            !prod.contains(&swallow),
+            "fail path must not discard complete errors with underscore binding"
+        );
+        // Multi-line form of the same swallow
+        assert!(
+            !prod.contains("let _ = repo\n"),
+            "fail path must not use let _ = repo on complete path"
+        );
+        let fail_marker = "error_code: Some(\"PORTABLE_PULL_APPLY_FAILED\".into())";
+        let fail_pos = prod
+            .find(fail_marker)
+            .expect("APPLY_FAILED fail DTO present");
+        let after_fail = &prod[fail_pos..fail_pos + 800.min(prod.len() - fail_pos)];
+        assert!(
+            after_fail.contains("complete_portable_pull_plan"),
+            "fail path must call complete"
+        );
+        assert!(
+            after_fail.contains(".await?"),
+            "fail path complete must propagate via ?"
+        );
+        assert!(
+            !after_fail.contains("let _ ="),
+            "fail path must not swallow complete with let _ ="
+        );
+    }
+
+    /// R5-M3: Pending / incomplete path must attempt destination observation rescan.
+    #[test]
+    fn pending_path_folds_destination_observation_rescan() {
+        let src = include_str!("pull.rs");
+        assert!(src.contains("fold_pending_pull_observations"));
+        assert!(src.contains("pull claimed but not completed; observed presence="));
+        // apply Pending arm and get_portable_pull incomplete both rescan
+        assert!(src.contains("PortablePullClaim::Pending =>"));
+
+        let mut plan = PortablePullPlanDto {
+            plan_token: "p".into(),
+            expires_at: "t".into(),
+            source_device_id: "d".into(),
+            source_target: AgentTarget::Claude,
+            destination_target: AgentTarget::Claude,
+            remote_inventory_snapshot_hash: "r".into(),
+            local_inventory_snapshot_hash: "l".into(),
+            conflict_policy: PortableAssetConflictPolicy::SkipExisting,
+            selection_manifest_hash: "m".into(),
+            credential_bearing_count: 0,
+            has_credential_bearing_assets: false,
+            changes: vec![PortablePullChangeDto {
+                inventory_item_id: "id-shared".into(),
+                kind: PortableAssetKind::Command,
+                native_id: "shared".into(),
+                display_name: "shared".into(),
+                scope_id: "user".into(),
+                install_mode: PortablePullInstallMode::InstallToTarget,
+                conflict: false,
+                legacy_lossy: false,
+                credential_bearing: false,
+                blocking_reasons: vec![],
+                warnings: vec![],
+            }],
+            blocking_reasons: vec![],
+        };
+        let mut result = outcome_unknown_pull_result("p", "req", &plan);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].state, PortablePullItemState::OutcomeUnknown);
+
+        let mut user = sample_local_item(AgentTarget::Claude, "shared");
+        user.scope_id = "user".into();
+        user.scope_kind = ScopeKind::User;
+        user.project_id = None;
+        let post = PortableInventorySnapshotDto {
+            inventory_snapshot_hash: "h".into(),
+            refreshed_at: "2026-08-08T00:00:00Z".into(),
+            stale: false,
+            targets: vec![],
+            items: vec![user],
+        };
+        fold_pending_pull_observations(&mut result, &plan, &post);
+        let msg = result.items[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("observed presence=true"),
+            "pending rescan should mark observed presence, got {msg}"
+        );
+        // still OutcomeUnknown — never upgrade on Pending
+        assert_eq!(result.items[0].state, PortablePullItemState::OutcomeUnknown);
+
+        // missing scope stays false
+        plan.changes[0].scope_id = "project:other".into();
+        let mut result2 = outcome_unknown_pull_result("p", "req", &plan);
+        fold_pending_pull_observations(&mut result2, &plan, &post);
+        let msg2 = result2.items[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg2.contains("observed presence=false"),
+            "missing scope must report presence=false, got {msg2}"
+        );
     }
 
     #[test]

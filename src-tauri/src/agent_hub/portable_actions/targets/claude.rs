@@ -124,16 +124,25 @@ impl TargetActionExecutor for ClaudeTargetExecutor {
 
         // changed-source fail closed（mutation 前）：与 inventory content_hash 同一 hash 域
         // MCP 的 expected_source_hash 是 leaf value hash，在 execute_mcp 内 CAS 校验。
+        // hash 计算失败必须 fail-closed — 不得软跳过 recheck 后继续 mutation。
         if change.kind != PortableAssetKind::Mcp {
             if let Some(expected) = change.expected_source_hash.as_deref() {
                 if let Some(path) = change.path.as_deref() {
                     let p = Path::new(path);
                     if p.exists() {
-                        if let Ok(actual) = inventory_content_hash_for_path(change.kind, p) {
-                            if actual != expected {
+                        match inventory_content_hash_for_path(change.kind, p) {
+                            Ok(actual) => {
+                                if actual != expected {
+                                    return Ok(TargetActionRawOutcome::Failed {
+                                        code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
+                                        message: "source content changed since preview".into(),
+                                    });
+                                }
+                            }
+                            Err(_) => {
                                 return Ok(TargetActionRawOutcome::Failed {
-                                    code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_CHANGED".into(),
-                                    message: "source content changed since preview".into(),
+                                    code: "PORTABLE_ASSET_ACTION_SOURCE_HASH_UNAVAILABLE".into(),
+                                    message: "source content hash unavailable for recheck".into(),
                                 });
                             }
                         }
@@ -965,5 +974,73 @@ mod tests {
             changes: vec![],
             blocking_reasons: vec![],
         }
+    }
+
+    /// R5-M4: source-hash recheck must fail-closed when hash computation errors.
+    #[test]
+    fn source_hash_recheck_fails_closed_when_hash_unavailable() {
+        use crate::agent_hub::packages::activator::FakeProcessRunner;
+        use crate::agent_hub::portable_actions::targets::{
+            TargetActionContext, TargetActionRawOutcome,
+        };
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Directory without SKILL.md → hash_skill_directory Err → must not mutate
+        let skill_dir = tmp.path().join("skills").join("broken-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        // no SKILL.md
+
+        let change = PortableAssetActionChangeDto {
+            inventory_item_id: "id-broken".into(),
+            target: crate::agent_hub::models::AgentTarget::Claude,
+            kind: PortableAssetKind::Skill,
+            path: Some(skill_dir.to_string_lossy().into_owned()),
+            operation: PortableAssetPlanOperation::Disable,
+            expected_source_hash: Some("expected-hash".into()),
+            expected_tree_hash: None,
+            expected_canonical_revision_id: None,
+            backup_policy: PortableAssetBackupPolicy::None,
+            creates_ownership: false,
+            canonical_effect: PortableAssetCanonicalEffect::None,
+            blocking_reasons: vec![],
+            warnings: vec![],
+        };
+        let ctx = TargetActionContext {
+            runner: Arc::new(FakeProcessRunner::default()),
+            claude_config_dir: Some(tmp.path().join("claude")),
+            data_dir: Some(tmp.path().join("data")),
+            keep_data: false,
+            action: PortableAssetActionKind::Disable,
+        };
+        let out = ClaudeTargetExecutor
+            .execute_change(&ctx, &dummy_plan(), &change, None)
+            .unwrap();
+        match out {
+            TargetActionRawOutcome::Failed { code, .. } => {
+                assert_eq!(
+                    code, "PORTABLE_ASSET_ACTION_SOURCE_HASH_UNAVAILABLE",
+                    "hash Err must fail-closed with UNAVAILABLE, got {code}"
+                );
+            }
+            other => panic!("expected Failed(UNAVAILABLE), got {other:?}"),
+        }
+        // Soft-skip contract must not remain in production source (exclude this tests module).
+        let src = include_str!("claude.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before tests");
+        let soft_skip = format!(
+            "{}{}",
+            "if let Ok(actual) = ",
+            "inventory_content_hash_for_path"
+        );
+        assert!(
+            !prod.contains(&soft_skip),
+            "soft Ok-skip of hash recheck must be removed"
+        );
+        assert!(prod.contains("PORTABLE_ASSET_ACTION_SOURCE_HASH_UNAVAILABLE"));
+        assert!(prod.contains("match inventory_content_hash_for_path"));
     }
 }
