@@ -25,6 +25,7 @@ import {
   type AgentHubUpdateInstructionBlockArgs,
 } from '@/api/agentHub';
 import { devicesApi } from '@/api/devices';
+import { workbenchApi } from '@/api/workbench';
 import type {
   AgentHubAdoptionPreview,
   AgentHubAssetDetail,
@@ -227,9 +228,9 @@ export interface UseAgentHubControllerResult {
   hubContext: AgentHubContext;
   /** 壳层 patch → URL write + 双路径 activeSection 同步。 */
   onContextChange: (patch: Partial<AgentHubContext>) => void;
-  /** 壳层 peer 列表（空数组 stub；T7 填实）。 */
+  /** 壳层 peer 列表（devicesApi；online 来自 mDNS status）。 */
   shellPeers: Array<{ deviceId: string; name: string; online: boolean }>;
-  /** 壳层项目列表（空数组 stub；T7 填实）。 */
+  /** 壳层项目列表（workbench 本机 + remote shortcut）。 */
   shellProjects: Array<{ key: string; label: string; remote: boolean }>;
   userInstructions: UseUserInstructionManagerResult;
   /** F2 inventory controller（URL 同步后的包装）。 */
@@ -384,8 +385,24 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const deepLinkBridge = searchParams.get('bridge');
   const deepLinkSection = searchParams.get('section');
   const deepLinkInventoryItemId = searchParams.get('inventoryItemId');
+  /**
+   * Business Logic: URL 权威的壳层上下文，须在子 controller 之前解析以便透传 device/project。
+   * Code Logic: 每次 searchParams 变化 re-parse。
+   */
+  const hubContext = useMemo(
+    () => parseAgentHubContext(searchParams),
+    [searchParams],
+  );
+  /** portable / instruction inspect 用的 device|project 上下文。 */
+  const inventoryRequestContext = useMemo(
+    () =>
+      hubContext.scope === 'project'
+        ? { deviceId: null as string | null, projectRef: hubContext.projectKey }
+        : { deviceId: hubContext.deviceId, projectRef: null as string | null },
+    [hubContext.scope, hubContext.deviceId, hubContext.projectKey],
+  );
   const userInstructions = useUserInstructionManager(t);
-  const portableInventoryBase = usePortableInventoryController();
+  const portableInventoryBase = usePortableInventoryController(inventoryRequestContext);
   const [portablePullOpen, setPortablePullOpen] = useState(false);
   const portablePull = usePortablePullController({ open: portablePullOpen });
   const [activeSection, setActiveSectionState] = useState<AgentHubSection>(() => {
@@ -423,6 +440,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const [lanHubProjectIdsText, setLanHubProjectIdsText] = useState('');
   const [lanPreview, setLanPreview] = useState<AgentHubLanPushPreview | null>(null);
   const [lanReport, setLanReport] = useState<AgentHubMultiTargetPushReport | null>(null);
+  /** 壳层设备列表（真实 devicesApi；独立于 LAN Push dialog 的 lanPeers）。 */
+  const [shellPeers, setShellPeers] = useState<
+    Array<{ deviceId: string; name: string; online: boolean }>
+  >([]);
+  /** 壳层项目列表（workbench local + remote shortcuts）。 */
+  const [shellProjects, setShellProjects] = useState<
+    Array<{ key: string; label: string; remote: boolean }>
+  >([]);
   const [gitImportOpen, setGitImportOpen] = useState(false);
   const [gitInspectReport, setGitInspectReport] = useState<AgentHubGitLaneInspectReport | null>(null);
   const [gitSelectedLaneDeviceId, setGitSelectedLaneDeviceId] = useState<string | null>(null);
@@ -539,6 +564,41 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       appliedDeepLinkRef.current = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
       void loadAssetDetail(deepLinkAssetId);
     }
+    // 壳层 peers：真实局域网设备列表（mDNS）；失败时保持空列表不阻断 Hub
+    void devicesApi
+      .list()
+      .then((list) => {
+        if (!mountedRef.current) return;
+        setShellPeers(
+          list.map((device) => ({
+            deviceId: device.id,
+            name: device.name,
+            online: device.status === 'online',
+          })),
+        );
+      })
+      .catch(() => {
+        /* shell peers best-effort */
+      });
+    // 壳层项目：workbench 本机 + remote shortcut
+    void workbenchApi.projects
+      .list()
+      .then((projects) => {
+        if (!mountedRef.current) return;
+        setShellProjects(
+          projects.map((project) => {
+            const remote = project.kind === 'remote';
+            const label =
+              remote && project.deviceName
+                ? `${project.name} · ${project.deviceName}`
+                : project.name;
+            return { key: project.id, label, remote };
+          }),
+        );
+      })
+      .catch(() => {
+        /* shell projects best-effort */
+      });
     return () => {
       mountedRef.current = false;
     };
@@ -1228,15 +1288,6 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, [gitMappingDrafts, gitPreview, gitSelectedAssetIds, loadCore]);
 
   /**
-   * Business Logic: URL 权威的壳层上下文。
-   * Code Logic: 每次 searchParams 变化 re-parse。
-   */
-  const hubContext = useMemo(
-    () => parseAgentHubContext(searchParams),
-    [searchParams],
-  );
-
-  /**
    * Business Logic: 壳层 patch 写回 URL，并同步旧 activeSection 双路径内容。
    * Code Logic: merge + scope 互斥 → writeAgentHubContext；资产 tab 顺带粗同步 kind/target filter。
    */
@@ -1327,23 +1378,6 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       }, { replace: true });
     },
     [setSearchParams],
-  );
-
-  /** 壳层 peers stub：复用 lanPeers 名；online 暂 true（T7 接真状态）。 */
-  const shellPeers = useMemo(
-    () =>
-      lanPeers.map((peer) => ({
-        deviceId: peer.deviceId,
-        name: peer.name,
-        online: true,
-      })),
-    [lanPeers],
-  );
-
-  /** 壳层项目 stub：T7 接 workbench 本机/远端项目。 */
-  const shellProjects = useMemo(
-    () => [] as Array<{ key: string; label: string; remote: boolean }>,
-    [],
   );
 
   const portableInventory: UsePortableInventoryControllerResult = portableInventoryBase;
@@ -1446,7 +1480,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setPortableActionError(null);
       setPortableActionResult(null);
       try {
-        const plan = await portableAssetApi.previewAction(request);
+        // 透传壳层 device/project，peer 路径 API fail-closed 不静默本机写
+        const plan = await portableAssetApi.previewAction({
+          ...request,
+          ...portableInventoryBase.requestContext,
+        });
         if (!mountedRef.current) return;
         setPortableActionPlan(plan);
         setPortableActionClientRequestId(mintClientRequestId());
@@ -1458,7 +1496,13 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setPortableActionBusy(false);
       }
     },
-    [mintClientRequestId, portableInventoryBase.mutationBlocked, portableInventoryBase.stale, t],
+    [
+      mintClientRequestId,
+      portableInventoryBase.mutationBlocked,
+      portableInventoryBase.requestContext,
+      portableInventoryBase.stale,
+      t,
+    ],
   );
 
   const confirmPortableAction = useCallback(
@@ -1476,7 +1520,11 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       setPortableActionError(null);
       if (itemId) portableInventoryBase.setItemLocked(itemId, true);
       try {
-        const applyRequest: ApplyPortableAssetActionRequest = { planToken, clientRequestId };
+        const applyRequest: ApplyPortableAssetActionRequest = {
+          planToken,
+          clientRequestId,
+          ...portableInventoryBase.requestContext,
+        };
         const result = await portableAssetApi.applyAction(applyRequest);
         if (!mountedRef.current) return;
         setPortableActionResult(result);

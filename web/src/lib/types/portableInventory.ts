@@ -171,6 +171,10 @@ export interface PreviewPortableAssetActionRequest {
   keepData: boolean;
   conflictPolicy: PortableAssetConflictPolicy;
   expectedCanonicalRevisionId: string | null;
+  /** 用户级设备上下文：null/缺省=本机；非空=peer（T7 前端 fail-closed）。 */
+  deviceId?: string | null;
+  /** 项目级身份：本机 workbench id 或 remote:…（T7 远端 fail-closed）。 */
+  projectRef?: string | null;
 }
 
 /** 单条 preview 变更。 */
@@ -206,6 +210,10 @@ export interface PortableAssetActionPlanDto {
 export interface ApplyPortableAssetActionRequest {
   planToken: string;
   clientRequestId: string;
+  /** 用户级设备上下文：null/缺省=本机；非空=peer（T7 前端 fail-closed）。 */
+  deviceId?: string | null;
+  /** 项目级身份：本机 workbench id 或 remote:…（T7 远端 fail-closed）。 */
+  projectRef?: string | null;
 }
 
 /** 单条 apply 结果。 */
@@ -326,9 +334,15 @@ export interface PortablePullResultDto {
   items: PortablePullItemResultDto[];
 }
 
+/** inspect / mutation 可选设备与项目上下文。 */
+export interface PortableInventoryRequestContext {
+  deviceId?: string | null;
+  projectRef?: string | null;
+}
+
 /** 本机 portable 资产 API 形状（controller 消费）。 */
 export interface PortableAssetApi {
-  inspect(): Promise<PortableInventorySnapshotDto>;
+  inspect(context?: PortableInventoryRequestContext): Promise<PortableInventorySnapshotDto>;
   previewAction(request: PreviewPortableAssetActionRequest): Promise<PortableAssetActionPlanDto>;
   applyAction(request: ApplyPortableAssetActionRequest): Promise<PortableAssetActionResultDto>;
   getAction(clientRequestId: string): Promise<PortableAssetActionResultDto>;

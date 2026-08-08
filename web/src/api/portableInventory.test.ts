@@ -43,9 +43,11 @@ vi.mock('./client', () => ({
 }));
 
 import {
+  AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
   PORTABLE_INVENTORY_COMMANDS,
   portableAssetApi,
   portablePullApi,
+  requiresPeerAgentHubPath,
 } from './portableInventory';
 
 const validActionPlan = {
@@ -191,6 +193,59 @@ describe('portable inventory API', () => {
     expect(result.items).toHaveLength(12);
   });
 
+  test('inspect with local null context still uses no-arg invoke', async () => {
+    mockInvoke.mockResolvedValueOnce(validInventorySnapshot);
+    await portableAssetApi.inspect({ deviceId: null, projectRef: null });
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'agent_hub_inspect_portable_inventory',
+      undefined,
+    );
+  });
+
+  test('inspect with local projectRef stays on local path (no peer throw)', async () => {
+    mockInvoke.mockResolvedValueOnce(validInventorySnapshot);
+    await portableAssetApi.inspect({ deviceId: null, projectRef: 'wb-local-1' });
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'agent_hub_inspect_portable_inventory',
+      undefined,
+    );
+  });
+
+  test('inspect with peer deviceId fails closed without invoke', async () => {
+    let thrown: unknown;
+    try {
+      await portableAssetApi.inspect({ deviceId: 'peer-1', projectRef: null });
+    } catch (reason) {
+      thrown = reason;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  test('inspect with remote projectRef fails closed without invoke', async () => {
+    let thrown: unknown;
+    try {
+      await portableAssetApi.inspect({
+        deviceId: null,
+        projectRef: 'remote:dev-a:/path/to/repo',
+      });
+    } catch (reason) {
+      thrown = reason;
+    }
+    expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  test('requiresPeerAgentHubPath classifies local vs peer context', () => {
+    expect(requiresPeerAgentHubPath(undefined)).toBe(false);
+    expect(requiresPeerAgentHubPath({ deviceId: null, projectRef: null })).toBe(false);
+    expect(requiresPeerAgentHubPath({ deviceId: '', projectRef: 'local-proj' })).toBe(false);
+    expect(requiresPeerAgentHubPath({ deviceId: 'peer-x' })).toBe(true);
+    expect(requiresPeerAgentHubPath({ projectRef: 'remote:p:inner' })).toBe(true);
+  });
+
   test('previewAction passes request object and decodes plan', async () => {
     mockInvoke.mockResolvedValueOnce(validActionPlan);
     const request = {
@@ -209,6 +264,49 @@ describe('portable inventory API', () => {
     expect(result.planToken).toBe('plan-token-1');
   });
 
+  test('previewAction strips optional context fields before invoke', async () => {
+    mockInvoke.mockResolvedValueOnce(validActionPlan);
+    await portableAssetApi.previewAction({
+      inventorySnapshotHash: 'snap-hash-3x4',
+      inventoryItemIds: ['claude-skill-skill-a'],
+      action: 'enable',
+      keepData: false,
+      conflictPolicy: 'skipExisting',
+      expectedCanonicalRevisionId: null,
+      deviceId: null,
+      projectRef: 'wb-local',
+    });
+    expect(mockInvoke).toHaveBeenCalledWith('agent_hub_preview_portable_asset_action', {
+      request: {
+        inventorySnapshotHash: 'snap-hash-3x4',
+        inventoryItemIds: ['claude-skill-skill-a'],
+        action: 'enable',
+        keepData: false,
+        conflictPolicy: 'skipExisting',
+        expectedCanonicalRevisionId: null,
+      },
+    });
+  });
+
+  test('previewAction with peer deviceId fails closed without invoke', async () => {
+    let thrown: unknown;
+    try {
+      await portableAssetApi.previewAction({
+        inventorySnapshotHash: 'snap-hash-3x4',
+        inventoryItemIds: ['claude-skill-skill-a'],
+        action: 'enable',
+        keepData: false,
+        conflictPolicy: 'skipExisting',
+        expectedCanonicalRevisionId: null,
+        deviceId: 'peer-1',
+      });
+    } catch (reason) {
+      thrown = reason;
+    }
+    expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
   test('applyAction and getAction use planToken/clientRequestId shapes', async () => {
     mockInvoke.mockResolvedValueOnce(validActionResult);
     await portableAssetApi.applyAction({
@@ -224,6 +322,21 @@ describe('portable inventory API', () => {
     expect(mockInvoke).toHaveBeenCalledWith('agent_hub_get_portable_asset_action', {
       clientRequestId: 'req-1',
     });
+  });
+
+  test('applyAction with peer deviceId fails closed without local write', async () => {
+    let thrown: unknown;
+    try {
+      await portableAssetApi.applyAction({
+        planToken: 'plan-token-1',
+        clientRequestId: 'req-1',
+        deviceId: 'peer-1',
+      });
+    } catch (reason) {
+      thrown = reason;
+    }
+    expect((thrown as Error & { code?: string }).code).toBe(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE);
+    expect(mockInvoke).not.toHaveBeenCalled();
   });
 
   test('pull API list/preview/apply/get command wiring', async () => {

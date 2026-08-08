@@ -86,9 +86,47 @@ vi.mock('@/api/portableInventory', () => ({
   },
 }));
 
+const devicesListMock = vi.hoisted(() =>
+  vi.fn(async () => [
+    { id: 'peer-online', name: 'Peer Online', status: 'online' as const },
+    { id: 'peer-offline', name: 'Peer Offline', status: 'offline' as const },
+  ]),
+);
+
 vi.mock('@/api/devices', () => ({
   devicesApi: {
-    list: vi.fn(async () => []),
+    list: (...args: unknown[]) => devicesListMock(...args),
+  },
+}));
+
+const workbenchProjectsListMock = vi.hoisted(() =>
+  vi.fn(async () => [
+    {
+      id: 'local-1',
+      name: 'Local Repo',
+      kind: 'local',
+      deviceId: 'self',
+      deviceName: 'This Mac',
+      path: '/tmp/local',
+      lastOpenedAt: '2026-08-08T00:00:00.000Z',
+    },
+    {
+      id: 'remote:dev-hk:inner',
+      name: 'Remote Repo',
+      kind: 'remote',
+      deviceId: 'dev-hk',
+      deviceName: 'HK Peer',
+      path: '/remote/repo',
+      lastOpenedAt: '2026-08-08T00:00:00.000Z',
+    },
+  ]),
+);
+
+vi.mock('@/api/workbench', () => ({
+  workbenchApi: {
+    projects: {
+      list: (...args: unknown[]) => workbenchProjectsListMock(...args),
+    },
   },
 }));
 
@@ -248,6 +286,30 @@ describe('useAgentHubController', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     searchParamsMock.current = new URLSearchParams();
+    devicesListMock.mockResolvedValue([
+      { id: 'peer-online', name: 'Peer Online', status: 'online' as const },
+      { id: 'peer-offline', name: 'Peer Offline', status: 'offline' as const },
+    ]);
+    workbenchProjectsListMock.mockResolvedValue([
+      {
+        id: 'local-1',
+        name: 'Local Repo',
+        kind: 'local',
+        deviceId: 'self',
+        deviceName: 'This Mac',
+        path: '/tmp/local',
+        lastOpenedAt: '2026-08-08T00:00:00.000Z',
+      },
+      {
+        id: 'remote:dev-hk:inner',
+        name: 'Remote Repo',
+        kind: 'remote',
+        deviceId: 'dev-hk',
+        deviceName: 'HK Peer',
+        path: '/remote/repo',
+        lastOpenedAt: '2026-08-08T00:00:00.000Z',
+      },
+    ]);
     getStatus.mockResolvedValue(statusOk);
     listAssets.mockResolvedValue([assetSummary]);
     getAsset.mockResolvedValue(assetDetail);
@@ -289,6 +351,35 @@ describe('useAgentHubController', () => {
         },
       ],
     });
+  });
+
+  test('shell peers and projects load from devices and workbench APIs', async () => {
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.shellPeers.length).toBe(2));
+    expect(result.current.shellPeers).toEqual([
+      { deviceId: 'peer-online', name: 'Peer Online', online: true },
+      { deviceId: 'peer-offline', name: 'Peer Offline', online: false },
+    ]);
+    await waitFor(() => expect(result.current.shellProjects.length).toBe(2));
+    expect(result.current.shellProjects).toEqual([
+      { key: 'local-1', label: 'Local Repo', remote: false },
+      { key: 'remote:dev-hk:inner', label: 'Remote Repo · HK Peer', remote: true },
+    ]);
+  });
+
+  test('deviceId in URL is passed into portable inventory inspect context', async () => {
+    searchParamsMock.current = new URLSearchParams('deviceId=peer-online');
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() =>
+      expect(portableApiMocks.inspect).toHaveBeenCalledWith({
+        deviceId: 'peer-online',
+        projectRef: null,
+      }),
+    );
+    expect(result.current.hubContext.deviceId).toBe('peer-online');
+    expect(result.current.portableInventory.requestContext.deviceId).toBe('peer-online');
   });
 
   test('deep links select the advanced workspace that owns the requested surface', () => {

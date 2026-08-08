@@ -103,10 +103,65 @@ export const AGENT_HUB_COMMANDS = {
   applyCrossAgentInstruction: 'agent_hub_apply_cross_agent_instruction',
 } as const;
 
+/**
+ * 可选设备 / 项目上下文（T7）。
+ *
+ * Business Logic: 用户级 deviceId；项目级 projectRef；与 portableInventory 同形。
+ * Code Logic: 仅非空字段参与 peer 判定。
+ */
+export interface AgentHubRequestContext {
+  deviceId?: string | null;
+  projectRef?: string | null;
+}
+
+/**
+ * peer / 远端项目上下文尚无后端路径时的稳定错误码。
+ *
+ * Business Logic: UI 可切换上下文，禁止静默本机读写。
+ * Code Logic: message 与 code 同为该常量。
+ */
+export const AGENT_HUB_PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE' as const;
+
+/**
+ * Business Logic: workbench 远端项目 id 形如 `remote:<deviceId>:<inner>`。
+ * Code Logic: 前缀匹配。
+ */
+export function isRemoteProjectRef(projectRef: string | null | undefined): boolean {
+  const ref = projectRef?.trim() ?? '';
+  return ref.startsWith('remote:');
+}
+
+/**
+ * Business Logic: 非空 deviceId 或 remote projectRef 需要 peer 路径。
+ * Code Logic: trim 后判定。
+ */
+export function requiresPeerAgentHubPath(
+  context?: AgentHubRequestContext | null,
+): boolean {
+  const deviceId = context?.deviceId?.trim() ?? '';
+  if (deviceId.length > 0) return true;
+  return isRemoteProjectRef(context?.projectRef);
+}
+
+/**
+ * Business Logic: peer 未接通前 fail-closed。
+ * Code Logic: 抛带稳定 code 的 Error。
+ */
+export function assertLocalAgentHubContext(context?: AgentHubRequestContext | null): void {
+  if (!requiresPeerAgentHubPath(context)) return;
+  throw Object.assign(new Error(AGENT_HUB_PEER_CONTEXT_UNAVAILABLE), {
+    code: AGENT_HUB_PEER_CONTEXT_UNAVAILABLE,
+  });
+}
+
 /** 用户级指令 plan apply 请求。 */
 export interface ApplyUserInstructionPlanArgs {
   planToken: string;
   clientRequestId: string;
+  /** 用户级设备上下文：null/缺省=本机；非空=peer（T7 fail-closed）。 */
+  deviceId?: string | null;
+  /** 项目级身份（T7 远端 fail-closed）。 */
+  projectRef?: string | null;
 }
 
 /** 纳管已有 source 的 preview 请求。 */
@@ -649,9 +704,12 @@ export const agentHubApi = {
 
   /**
    * Business Logic: 首屏只读枚举三个 Agent 的真实来源、路径、优先级与 ownership。
-   * Code Logic: V2 command 不存在时降级为显式 scan-only legacy workspace；绝不回退写操作。
+   * Code Logic: peer/远端 project 先 assertLocal；V2 不存在时降级 legacy workspace；绝不回退写操作。
    */
-  inspectUserInstructionWorkspace: async (): Promise<UserInstructionWorkspaceDto> => {
+  inspectUserInstructionWorkspace: async (
+    context?: AgentHubRequestContext,
+  ): Promise<UserInstructionWorkspaceDto> => {
+    assertLocalAgentHubContext(context);
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.inspectUserInstructionWorkspace,
@@ -668,12 +726,16 @@ export const agentHubApi = {
 
   /** 首次设置零写入预览。 */
   previewUserInstructionSetup: async (
-    request: UserInstructionPreviewRequest,
+    request: UserInstructionPreviewRequest & AgentHubRequestContext,
   ): Promise<UserInstructionPlanDto> => {
+    assertLocalAgentHubContext(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.previewUserInstructionSetup,
-        { request },
+        { request: body },
         userInstructionPlanDecoder,
       );
     } catch (reason) {
@@ -686,12 +748,16 @@ export const agentHubApi = {
 
   /** 日常编辑零写入预览。 */
   previewUserInstructionUpdate: async (
-    request: UserInstructionPreviewRequest,
+    request: UserInstructionPreviewRequest & AgentHubRequestContext,
   ): Promise<UserInstructionPlanDto> => {
+    assertLocalAgentHubContext(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.previewUserInstructionUpdate,
-        { request },
+        { request: body },
         userInstructionPlanDecoder,
       );
     } catch (reason) {
@@ -706,10 +772,14 @@ export const agentHubApi = {
   applyUserInstructionPlan: async (
     request: ApplyUserInstructionPlanArgs,
   ): Promise<UserInstructionApplyResultDto> => {
+    assertLocalAgentHubContext(request);
+    const { deviceId: _deviceId, projectRef: _projectRef, ...body } = request;
+    void _deviceId;
+    void _projectRef;
     try {
       return await invokeDecoded(
         AGENT_HUB_COMMANDS.applyUserInstructionPlan,
-        { request },
+        { request: body },
         userInstructionApplyResultDecoder,
       );
     } catch (reason) {
