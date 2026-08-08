@@ -1,17 +1,22 @@
-//! agent_hub/portable_inventory — 四类资产真实库存 read model
+//! agent_hub/portable_inventory — 四类资产真实库存 + 发现即管理
 //!
 //! Business Logic（为什么需要这个模块）:
 //!     Agent Hub Portable Assets 需要展示本机实际 Skill/Command/Plugin/MCP 库存，
 //!     并与 Hub canonical/binding/materialization 对账；扫描事实不得冒充 desired 状态。
+//!     inspect/refresh 在返回前对可管理发现项幂等 ensure 管理账本（不写目标磁盘内容）。
 //!
 //! Code Logic（这个模块做什么）:
 //!     定义库存 DTO、稳定 inventory_item_id、确定性 inventory_snapshot_hash，
-//!     以及只读 reconcile（不写 canonical/revision/binding/ownership/目标文件）。
+//!     ensure_managed（ledger only）+ 只读 reconcile；不写目标文件/CAS 原字节。
 
+pub mod ensure_managed;
 pub mod models;
 pub mod reconcile;
 pub mod scanner;
 
+pub use ensure_managed::{
+    ensure_discovered_portable_items_managed, EnsureManagedFailure, EnsureManagedReport,
+};
 pub use models::{
     inventory_item_id, inventory_snapshot_hash, PortableAssetKind,
     PortableInventoryItemCapabilitiesDto, PortableInventoryItemDto,
