@@ -41,6 +41,34 @@
     "adapt": "适配到其他 Agent…",
     "adaptLocalOnly": "跨 Agent 适配仅可在本机上下文中使用"
   },
+  "instructions": {
+    "threePane": {
+      "blocksTitle": "块",
+      "previewTitle": "合成预览",
+      "originalTitle": "原始文件",
+      "reparseFromOriginal": "从原始重新解析块",
+      "syncToNative": "同步到原生文件…",
+      "emptyBlocks": "尚无块。请在原始栏重新解析，或手动添加块。",
+      "emptyPreview": "在重新解析或填写块之前，预览保持为空。",
+      "emptyOriginal": "未找到该 Agent 的原始内容。可在此起草并同步。",
+      "pathLabel": "路径",
+      "noPath": "未解析到路径",
+      "loading": "正在加载提示词…",
+      "previewReadOnly": "只读",
+      "addBlock": "添加块",
+      "dualDirtyTitle": "选择同步基线",
+      "dualDirtyDescription": "块与原始文件均已修改且内容不一致。请选择写入哪一侧。",
+      "useBlocksBaseline": "以块合成为准",
+      "useOriginalBaseline": "以原始文件为准",
+      "blockTitlePlaceholder": "块标题",
+      "blockBodyPlaceholder": "块正文",
+      "refresh": "重新扫描",
+      "writeBlocked": "当前 Agent 禁止写入。仍可编辑草稿，但同步已禁用。",
+      "errors": {
+        "emptySync": "没有可同步的内容。请先填写原文或块。"
+      }
+    }
+  },
   "userInstructions": {
     "title": "用户级指令",
     "subtitle": "统一查看各 Agent 实际读取的文件，并用一份公共内容加少量专属扩展进行管理。",
