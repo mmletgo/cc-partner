@@ -116,3 +116,24 @@ serde_json = "1.0"
 # backup_restore_smoke：手工构造 ZIP + SHA256 校验坏/好包。
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
+
+# dev profile 调优：缩短每次 Rust 变更的重链 + .app 复制时间。
+# macOS dev 经 scripts/macos-dev-cargo-runner.sh 每次变更都 cargo build → 重组
+# ~/Applications/cc-partner (Dev).app（copyFile ≈191M GUI binary）→ 重启全应用；
+# 顶层 libapp_lib.a ≈1.3G、app ≈191M，瓶颈在 debug 信息体积。
+# - debug = "line-tables-only"：自身代码只留行表（panic 栈仍能定位文件/行号），去变量级信息；
+# - package."*" debug = false：依赖 crate 完全不生成 debug info（收益大头）。
+# 不设 split-debuginfo：macOS 在有 debug info 时默认已是 "unpacked"，显式写无效。
+# 代价：lldb 单步看不到局部变量值。需要完整调试时用 cargo build --profile debugging
+# （产物在 target/debugging/，首次会独立全量编译一次）。
+# 注意：改 profile 会让 fingerprint 失效，下次 ./start.sh dev 会全量重编依赖一次（一次性）。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# 完整变量级调试档（按需）：继承 dev 的其余设置，仅恢复完整 debug info。
+[profile.debugging]
+inherits = "dev"
+debug = true
