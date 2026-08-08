@@ -155,6 +155,42 @@ afterEach(() => {
 });
 
 describe('usePortablePullController', () => {
+  test('prefers initialSourceDeviceId and initialSourceTarget from hub shell context when opening', async () => {
+    const pullApi = createPullApi();
+    const listDevices = vi.fn(async () => devices);
+    const { result } = renderHook(() =>
+      usePortablePullController({
+        open: true,
+        pullApi,
+        listDevices,
+        initialSourceDeviceId: 'device-b',
+        initialSourceTarget: 'codex',
+      }),
+    );
+
+    await waitFor(() => expect(result.current.devices).toHaveLength(2));
+    // shell context device=peer → default source peer for same-agent pull
+    expect(result.current.selectedDeviceId).toBe('device-b');
+    expect(result.current.sourceTarget).toBe('codex');
+  });
+
+  test('falls back to first online peer when initialSourceDeviceId is unset or offline', async () => {
+    const pullApi = createPullApi();
+    const listDevices = vi.fn(async () => devices);
+    const { result } = renderHook(() =>
+      usePortablePullController({
+        open: true,
+        pullApi,
+        listDevices,
+        initialSourceDeviceId: 'offline-peer',
+        initialSourceTarget: 'claude',
+      }),
+    );
+
+    await waitFor(() => expect(result.current.devices).toHaveLength(2));
+    expect(result.current.selectedDeviceId).toBe('device-a');
+  });
+
   test('loads devices and remote inventory for selected device/target with destination fixed to source', async () => {
     const pullApi = createPullApi();
     const listDevices = vi.fn(async () => devices);

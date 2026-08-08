@@ -399,9 +399,9 @@
     "credentialLabel": "credential"
   },
   "lanPush": {
-    "title": "LAN Push",
+    "title": "LAN Push (same agent)",
     "open": "LAN Push",
-    "hint": "Source-only push. Select explicit peers and one selection mode. Each peer is reported independently.",
+    "hint": "Source-only same-agent push from the current Agent Hub context. Select explicit peers and one selection mode. Each peer is reported independently. Cross-agent transfer is not available here.",
     "peers": "Peers",
     "peersAria": "Select LAN peers",
     "noPeers": "No online peers discovered.",
@@ -634,7 +634,7 @@
   },
   "portablePull": {
     "title": "Pull from peer (same agent)",
-    "hint": "Select a LAN peer and the same agent target. Destination always matches the source agent.",
+    "hint": "Pull into this device for the current agent only. Source peer defaults from the shell device context when set; destination always matches the source agent (no cross-agent target).",
     "lanNoAuthRisk": "Any device on the reachable network can read, write, and execute. The system does not verify caller identity.",
     "staleInventory": "Remote inventory is stale. Refresh before preview or apply.",
     "deviceSection": "Source device",
@@ -652,7 +652,7 @@
     "inventoryAria": "Remote inventory list",
     "loadInventory": "Load remote inventory",
     "selectVisible": "Select visible",
-    "loadHint": "Choose a peer and agent, then load remote inventory.",
+    "loadHint": "Confirm the source peer and agent (prefilled from the toolbar context when available), then load remote inventory.",
     "policyAria": "Conflict policy",
     "conflictPolicy": "Conflict policy",
     "preview": "Preview plan",

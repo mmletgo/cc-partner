@@ -536,12 +536,14 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('adoption-canonical').textContent).toContain('User instruction');
   });
 
-  test('shell tabs expose assets workspace and toolbar opens pull control', () => {
+  test('shell tabs expose assets workspace and toolbar opens pull/push controls', () => {
     const onContextChange = vi.fn();
     const openPortablePull = vi.fn();
+    const openLanPushDialog = vi.fn();
     renderView({
       onContextChange,
       openPortablePull,
+      openLanPushDialog,
       activeSection: 'syncImport',
       hubContext: {
         agent: 'claude',
@@ -555,8 +557,11 @@ describe('AgentHub page characterization', () => {
     expect(screen.getByTestId('agent-hub-shell')).toBeTruthy();
     expect(screen.getByTestId('agent-hub-tab-skill')).toBeTruthy();
     expect(screen.getByTestId('agent-hub-action-pull')).toBeTruthy();
+    expect(screen.getByTestId('agent-hub-action-push')).toBeTruthy();
     fireEvent.click(screen.getByTestId('agent-hub-action-pull'));
     expect(openPortablePull).toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('agent-hub-action-push'));
+    expect(openLanPushDialog).toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('agent-hub-tab-skill'));
     expect(onContextChange).toHaveBeenCalledWith({ tab: 'skill' });
     // dual-path: legacy section buttons still present for deep-link tests
