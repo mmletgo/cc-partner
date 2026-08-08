@@ -4,7 +4,7 @@
  * Business Logic（为什么需要这个 hook）:
  *   Agent 资产列表必须以 observed inventory 为真源；refresh 失败保留 stale 并禁止 mutation；
  *   与 canonical AgentHub matrix 状态分离，避免塞入巨型 controller。
- *   T7：deviceId / projectRef 进入 inspect；切换上下文带 sequence 防竞态，peer 不得静默本机。
+ *   按需加载：仅 enabled 时 inspect；enabled=false 时 retain 同 contextKey 的 snapshot。
  *
  * Code Logic（这个 hook 做什么）:
  *   inspect + refresh generation + mounted ref；纯 filter 计算 visibleItems；
@@ -30,14 +30,25 @@ import {
   type PortableKindCounts,
 } from './portableInventoryPresentation';
 
+/** 同 contextKey 下 skill↔instructions 回切免 re-inspect 的 soft TTL（ms）。 */
+export const PORTABLE_INVENTORY_SOFT_TTL_MS = 60_000;
+
 /** Controller 打开动作的待确认状态（F3 Dialog 消费；F2 仅持有）。 */
 export interface PortableInventoryPendingAction {
   itemId: string;
   action: PortableAssetActionKind;
 }
 
-/** usePortableInventoryController 入参（壳层 device/project 上下文）。 */
-export type UsePortableInventoryControllerArgs = AgentHubRequestContext;
+/**
+ * usePortableInventoryController 入参。
+ *
+ * Business Logic: device/project 来自壳层；enabled 由父层 portableLaneActive 驱动。
+ * Code Logic: enabled 默认 false，避免 Hub mount 就全量扫盘。
+ */
+export type UsePortableInventoryControllerArgs = AgentHubRequestContext & {
+  /** 为 true 时才 inspect；false 时 retain 同 key snapshot。 */
+  enabled?: boolean;
+};
 
 /** usePortableInventoryController 对 pure view 的返回合同。 */
 export interface UsePortableInventoryControllerResult {
@@ -65,15 +76,16 @@ export interface UsePortableInventoryControllerResult {
 }
 
 /**
- * Business Logic: 列表/筛选/选择的单一状态源；上下文切换 re-inspect。
+ * Business Logic: 列表/筛选/选择的单一状态源；仅 enabled 时拉库存；上下文切换防 peer 污染。
  * Code Logic: 首屏与 refresh 共用 generation；失败保 snapshot + stale（同上下文）；
- *   deviceId/projectRef 变化时清空 snapshot 再拉，避免本机数据冒充 peer。
+ *   deviceId/projectRef 变化时清空 snapshot；enabled=false 不 inspect 且 loading=false。
  */
 export function usePortableInventoryController(
   context: UsePortableInventoryControllerArgs = {},
 ): UsePortableInventoryControllerResult {
   const deviceId = context.deviceId ?? null;
   const projectRef = context.projectRef ?? null;
+  const enabled = context.enabled === true;
   const requestContext = useMemo(
     (): AgentHubRequestContext => ({ deviceId, projectRef }),
     [deviceId, projectRef],
@@ -83,7 +95,8 @@ export function usePortableInventoryController(
   const [filters, setFiltersState] = useState<PortableInventoryFilters>(
     DEFAULT_PORTABLE_INVENTORY_FILTERS,
   );
-  const [loading, setLoading] = useState(true);
+  // enabled 默认 false：初值 loading 必须 false，禁止停在 true
+  const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [staleFlag, setStaleFlag] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +110,7 @@ export function usePortableInventoryController(
   const refreshSeqRef = useRef(0);
   const hasSnapshotRef = useRef(false);
   const contextKeyRef = useRef(`${deviceId ?? ''}\0${projectRef ?? ''}`);
+  const snapshotFetchedAtRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -105,6 +119,10 @@ export function usePortableInventoryController(
     };
   }, []);
 
+  /**
+   * Business Logic: 手动/自动刷新 observed inventory。
+   * Code Logic: generation 丢弃过期响应；有 snapshot 时用 refreshing 而非整区 loading。
+   */
   const refresh = useCallback(async () => {
     const seq = ++refreshSeqRef.current;
     if (hasSnapshotRef.current) {
@@ -116,6 +134,7 @@ export function usePortableInventoryController(
       const next = await portableAssetApi.inspect(requestContext);
       if (!mountedRef.current || seq !== refreshSeqRef.current) return;
       hasSnapshotRef.current = true;
+      snapshotFetchedAtRef.current = Date.now();
       setSnapshot(next);
       setStaleFlag(Boolean(next.stale));
       setError(null);
@@ -149,16 +168,39 @@ export function usePortableInventoryController(
     if (contextChanged) {
       // 切换设备/项目：丢弃旧 snapshot，禁止用本机数据冒充 peer
       hasSnapshotRef.current = false;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- context switch reset
+      snapshotFetchedAtRef.current = 0;
+       
       setSnapshot(null);
       setSelectedItemId(null);
       setPendingAction(null);
       setStaleFlag(false);
       setError(null);
+      setLoading(false);
+      setRefreshing(false);
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial / context-driven inventory load
+
+    if (!enabled) {
+      // R1: 不 inspect；retain 同 key snapshot；loading 保持 false
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- disable lane flags
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
+
+    // R3/R4: enabled 且（无 snapshot 或 TTL 过期或 context 刚变）→ inspect
+    const age = Date.now() - snapshotFetchedAtRef.current;
+    const softFresh =
+      hasSnapshotRef.current &&
+      !contextChanged &&
+      age >= 0 &&
+      age < PORTABLE_INVENTORY_SOFT_TTL_MS;
+    if (softFresh) {
+      setLoading(false);
+      return;
+    }
+     
     void refresh();
-  }, [deviceId, projectRef, refresh]);
+  }, [deviceId, projectRef, enabled, refresh]);
 
   const setFilters = useCallback((patch: Partial<PortableInventoryFilters>) => {
     setFiltersState((prev) => ({ ...prev, ...patch }));

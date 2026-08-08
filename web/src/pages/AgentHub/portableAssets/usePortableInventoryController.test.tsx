@@ -149,7 +149,7 @@ describe('usePortableInventoryController', () => {
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
 
-    const { result } = renderHook(() => usePortableInventoryController());
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
 
     await act(async () => {
       // mount triggers first refresh; kick second while first is pending
@@ -172,7 +172,7 @@ describe('usePortableInventoryController', () => {
 
   test('refresh rejection keeps old snapshot, marks stale and blocks mutation', async () => {
     apiMocks.inspect.mockResolvedValueOnce(snapshot('snap-ok', [alpha]));
-    const { result } = renderHook(() => usePortableInventoryController());
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
     await waitFor(() => expect(result.current.snapshot?.inventorySnapshotHash).toBe('snap-ok'));
     expect(result.current.mutationBlocked).toBe(false);
 
@@ -199,7 +199,7 @@ describe('usePortableInventoryController', () => {
       capabilities: { ...baseCapabilities, canEnable: true, canDisable: false },
     });
     apiMocks.inspect.mockResolvedValue(snapshot('snap-lock', [alpha, beta]));
-    const { result } = renderHook(() => usePortableInventoryController());
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
     await waitFor(() => expect(result.current.snapshot).not.toBeNull());
 
     expect(result.current.getPrimaryAction(alpha)).toBe('disable');
@@ -218,7 +218,7 @@ describe('usePortableInventoryController', () => {
     apiMocks.inspect.mockResolvedValue(
       snapshot('snap-readonly', [alpha, projectItem, unsupported], true),
     );
-    const { result } = renderHook(() => usePortableInventoryController());
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
     await waitFor(() => expect(result.current.snapshot).not.toBeNull());
 
     expect(result.current.stale).toBe(true);
@@ -246,7 +246,7 @@ describe('usePortableInventoryController', () => {
       },
     });
     apiMocks.inspect.mockResolvedValue(snapshot('snap-filter', [alpha, command]));
-    const { result } = renderHook(() => usePortableInventoryController());
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
     await waitFor(() => expect(result.current.snapshot).not.toBeNull());
     const callsAfterLoad = apiMocks.inspect.mock.calls.length;
 
@@ -265,7 +265,7 @@ describe('usePortableInventoryController', () => {
 
   test('openAction records pending action only when mutation is allowed', async () => {
     apiMocks.inspect.mockResolvedValue(snapshot('snap-action', [alpha]));
-    const { result } = renderHook(() => usePortableInventoryController());
+    const { result } = renderHook(() => usePortableInventoryController({ enabled: true }));
     await waitFor(() => expect(result.current.snapshot).not.toBeNull());
 
     act(() => {
@@ -294,7 +294,7 @@ describe('usePortableInventoryController', () => {
 
     const { result, rerender } = renderHook(
       (props: { deviceId: string | null }) =>
-        usePortableInventoryController({ deviceId: props.deviceId, projectRef: null }),
+        usePortableInventoryController({ enabled: true,  deviceId: props.deviceId, projectRef: null }),
       { initialProps: { deviceId: null as string | null } },
     );
 
@@ -320,7 +320,7 @@ describe('usePortableInventoryController', () => {
     apiMocks.inspect.mockResolvedValue(snapshot('snap-proj', [alpha]));
     const { result, rerender } = renderHook(
       (props: { projectRef: string | null }) =>
-        usePortableInventoryController({ deviceId: null, projectRef: props.projectRef }),
+        usePortableInventoryController({ enabled: true,  deviceId: null, projectRef: props.projectRef }),
       { initialProps: { projectRef: null as string | null } },
     );
     await waitFor(() => expect(result.current.snapshot).not.toBeNull());

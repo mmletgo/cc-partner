@@ -108,6 +108,13 @@ function buildProps(
       conflictCount: 1,
       blockedMaterializationCount: 1,
     },
+    statusLoading: false,
+    legacyLoadedOnce: true,
+    legacyMatrixExpanded: true,
+    expandLegacyMatrix: vi.fn(),
+    instructionsLaneActive: false,
+    portableLaneActive: true,
+    setInstructionRefresh: vi.fn(),
     assets: [],
     filteredAssets: [
       {
@@ -277,6 +284,7 @@ function buildProps(
       clearPendingAction: vi.fn(),
       getPrimaryAction: vi.fn(() => null),
       refresh: vi.fn(async () => undefined),
+      requestContext: { deviceId: null, projectRef: null },
     } as UseAgentHubControllerResult['portableInventory'],
     portableDetailsOpen: false,
     portableSelectedItem: null,

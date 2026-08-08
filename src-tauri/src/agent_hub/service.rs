@@ -1252,18 +1252,14 @@ pub async fn get_status_for_state(state: &AppState) -> Result<AgentHubStatusDto,
 ///     Hub 列表按 scope/kind 过滤。
 ///
 /// Code Logic（这个函数做什么）:
-///     repo.list_assets + build_summary。
+///     repo.list_assets + **一次** shared probe/mats/conflicts 批量化 build_summary。
 pub async fn list_assets_for_state(
     state: &AppState,
     scope_id: Option<&str>,
     kind: Option<AssetKind>,
 ) -> Result<Vec<AgentHubAssetSummaryDto>, AppError> {
     let assets = state.agent_hub_repo.list_assets(scope_id, kind).await?;
-    let mut out = Vec::with_capacity(assets.len());
-    for asset in assets {
-        out.push(build_summary(state, &asset).await?);
-    }
-    Ok(out)
+    build_summaries_for_assets(state, &assets).await
 }
 
 /// 读取资产详情。
@@ -1648,32 +1644,93 @@ fn current_target_environment() -> TargetEnvironment {
     }
 }
 
+/// list/detail 共用的 summary 共享输入（mats/probe/conflicts 只拉一次）。
+struct SummarySharedContext {
+    mats: Vec<Materialization>,
+    support_by_target: BTreeMap<AgentTarget, bool>,
+    /// asset_id 存在未解决 conflict（canonical 或任意 target）。
+    conflict_asset_ids: std::collections::HashSet<String>,
+}
+
+/**
+ * Business Logic: 批量 list 时禁止 N 次全表 mats + N×3 CLI probe + N×4 conflict。
+ * Code Logic: 一次 list_materializations + 一次 probe_support_map + 一次 unresolved conflicts。
+ */
+async fn load_summary_shared_context(state: &AppState) -> Result<SummarySharedContext, AppError> {
+    let mats = state.agent_hub_repo.list_materializations().await?;
+    let support_by_target = probe_support_map();
+    let conflicts = state.agent_hub_repo.list_unresolved_conflicts().await?;
+    let conflict_asset_ids = conflicts.into_iter().map(|c| c.asset_id).collect();
+    Ok(SummarySharedContext {
+        mats,
+        support_by_target,
+        conflict_asset_ids,
+    })
+}
+
+/**
+ * Business Logic: 列表路径对 N 条 asset 共享 probe/mats/conflicts。
+ * Code Logic: 预载 shared → 逐条 bindings（仍 per-asset）+ build_summary_with_shared。
+ */
+async fn build_summaries_for_assets(
+    state: &AppState,
+    assets: &[LogicalAsset],
+) -> Result<Vec<AgentHubAssetSummaryDto>, AppError> {
+    if assets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let shared = load_summary_shared_context(state).await?;
+    let mut out = Vec::with_capacity(assets.len());
+    for asset in assets {
+        out.push(build_summary_with_shared(state, asset, &shared).await?);
+    }
+    Ok(out)
+}
+
 /// 构建资产摘要。
 ///
 /// Business Logic（为什么需要这个函数）:
 ///     列表/详情/set_binding 共用 summary。
 ///
 /// Code Logic（这个函数做什么）:
-///     固定三 target 单元格 + has_conflict 查询。
+///     单条路径加载 shared 后委托 build_summary_with_shared（与批量字段一致）。
 async fn build_summary(
     state: &AppState,
     asset: &LogicalAsset,
+) -> Result<AgentHubAssetSummaryDto, AppError> {
+    let shared = load_summary_shared_context(state).await?;
+    build_summary_with_shared(state, asset, &shared).await
+}
+
+/**
+ * Business Logic: 固定三 target 单元格 + has_conflict（来自 shared 集合）。
+ * Code Logic: bindings/ownership 仍按 asset 查询；mats/probe/conflicts 用 shared。
+ */
+async fn build_summary_with_shared(
+    state: &AppState,
+    asset: &LogicalAsset,
+    shared: &SummarySharedContext,
 ) -> Result<AgentHubAssetSummaryDto, AppError> {
     let bindings = state
         .agent_hub_repo
         .list_target_bindings_for_asset(&asset.id)
         .await?;
-    let mats = state.agent_hub_repo.list_materializations().await?;
-    let user_instruction_ownership = state
-        .agent_hub_repo
-        .list_user_instruction_ownerships(&asset.id)
-        .await?;
-    let mat_by_binding: BTreeMap<String, &Materialization> = mats
+    let needs_ownership = asset.scope_id == crate::agent_hub::migration::USER_SCOPE_STABLE_ID
+        && asset.logical_key == crate::agent_hub::migration::USER_INSTRUCTION_LOGICAL_KEY;
+    let user_instruction_ownership = if needs_ownership {
+        state
+            .agent_hub_repo
+            .list_user_instruction_ownerships(&asset.id)
+            .await?
+    } else {
+        Vec::new()
+    };
+    let mat_by_binding: BTreeMap<String, &Materialization> = shared
+        .mats
         .iter()
         .map(|m| (m.target_binding_id.clone(), m))
         .collect();
-    // probe 一次，三 target 共享 support 输入
-    let support_by_target = probe_support_map();
+    let support_by_target = &shared.support_by_target;
     let mut targets = Vec::new();
     let mut snaps = Vec::new();
     for target in [
@@ -1684,9 +1741,7 @@ async fn build_summary(
         let supported = support_by_target.get(&target).copied().unwrap_or(false);
         if let Some(b) = bindings.iter().find(|b| b.target == target) {
             let mat = mat_by_binding.get(&b.id).copied();
-            let legacy_unselected = asset.scope_id
-                == crate::agent_hub::migration::USER_SCOPE_STABLE_ID
-                && asset.logical_key == crate::agent_hub::migration::USER_INSTRUCTION_LOGICAL_KEY
+            let legacy_unselected = needs_ownership
                 && b.desired_presence == DesiredPresence::Absent
                 && !b.desired_enabled
                 && b.local_scope_mapping_id.is_none()
@@ -1736,22 +1791,7 @@ async fn build_summary(
         }
     }
     let aggregate_status = compute_asset_aggregate_status(&snaps).as_str().to_string();
-    let has_conflict = state
-        .agent_hub_repo
-        .has_unresolved_canonical_conflict(&asset.id)
-        .await?
-        || state
-            .agent_hub_repo
-            .has_unresolved_target_conflict(&asset.id, AgentTarget::Claude)
-            .await?
-        || state
-            .agent_hub_repo
-            .has_unresolved_target_conflict(&asset.id, AgentTarget::Codex)
-            .await?
-        || state
-            .agent_hub_repo
-            .has_unresolved_target_conflict(&asset.id, AgentTarget::OpenCode)
-            .await?;
+    let has_conflict = shared.conflict_asset_ids.contains(&asset.id);
     Ok(AgentHubAssetSummaryDto {
         asset_id: asset.id.clone(),
         scope_id: asset.scope_id.clone(),

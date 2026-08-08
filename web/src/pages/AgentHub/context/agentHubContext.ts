@@ -177,10 +177,18 @@ function isAgentHubScope(value: string): value is AgentHubScope {
   return SCOPES.has(value as AgentHubScope);
 }
 
-function isAgentHubTab(value: string): value is AgentHubTab {
+/**
+ * Business Logic: 校验 URL/用户输入是否为合法五 Tab 之一。
+ * Code Logic: 对照 TABS 集合。
+ */
+export function isAgentHubTab(value: string): value is AgentHubTab {
   return TABS.has(value as AgentHubTab);
 }
 
-function isAssetKindTab(value: string): value is AgentHubTab {
+/**
+ * Business Logic: skill/command/mcp/plugin 为 portable 资产 tab（非 instructions）。
+ * Code Logic: 对照 ASSET_KIND_TABS；供 lane 激活与 bootstrap 共用。
+ */
+export function isAssetKindTab(value: string): value is AgentHubTab {
   return ASSET_KIND_TABS.has(value as AgentHubTab);
 }

@@ -161,11 +161,16 @@ export interface UseUserInstructionManagerResult {
  * Code Logic（做什么）:
  *   inspect 有 stale guard；草稿用 ref 防刷新覆盖；preview/apply 共享 plan 与稳定幂等键。
  */
+/**
+ * Business Logic: 旧 V2 用户指令编排；主 UI 已切三栏，默认不 auto-load。
+ * Code Logic: 类型与 refresh 保留供测试/F6 cleanup；mount 不发 inspect。
+ */
 export function useUserInstructionManager(
   t: TFunction<['agentHub', 'common']>,
 ): UseUserInstructionManagerResult {
   const [workspace, setWorkspace] = useState<UserInstructionWorkspaceDto | null>(null);
-  const [loading, setLoading] = useState(true);
+  // PR1 按需：默认不 auto-load，loading 初值 false
+  const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -228,14 +233,11 @@ export function useUserInstructionManager(
 
   useEffect(() => {
     mountedRef.current = true;
-    const timeoutId = window.setTimeout(() => {
-      void loadWorkspace(false);
-    }, 0);
+    // 主路径由 three-pane 负责 inspect；V2 manager 仅保留手动 refresh 能力
     return () => {
-      window.clearTimeout(timeoutId);
       mountedRef.current = false;
     };
-  }, [loadWorkspace]);
+  }, []);
 
   /** 更新公共或专属正文，只修改本地草稿。 */
   const updateDraftContent = useCallback((pane: UserInstructionEditorPane, value: string) => {

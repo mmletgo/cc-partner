@@ -3,10 +3,10 @@
  *
  * Business Logic（为什么需要这个 hook）:
  *   Agent Hub 持有 status/assets/选中详情/预览/冲突与块抽屉状态；
- *   把 IPC 与 request sequence 从纯视图拆出，保证 hooks 在 early return 前。
+ *   按需加载：默认只跑当前 tab lane，不在 mount 全量 listAssets/portable inspect。
  *
  * Code Logic（这个 hook 做什么）:
- *   首屏加载 status+assets；scope/kind 过滤；stale sequence 防切换覆盖；
+ *   lane 激活布尔 + status/legacy 懒加载；scope/kind 过滤；stale sequence 防切换覆盖；
  *   暴露 preview/enable/resolve/update/pair/binding/presence/restore/everywhere 动作。
  */
 
@@ -70,6 +70,7 @@ import {
   writeAgentHubContext,
   mapLegacySection,
   DEFAULT_AGENT_HUB_CONTEXT,
+  isAssetKindTab,
   type AgentHubContext,
   type AgentHubTab,
   type AgentHubScope,
@@ -80,6 +81,7 @@ export {
   writeAgentHubContext,
   mapLegacySection,
   DEFAULT_AGENT_HUB_CONTEXT,
+  isAssetKindTab,
   type AgentHubContext,
   type AgentHubTab,
   type AgentHubScope,
@@ -102,6 +104,60 @@ export function mapContextToSection(ctx: AgentHubContext): AgentHubSection {
     return ctx.scope === 'project' ? 'projectInstructions' : 'userInstructions';
   }
   return 'assets';
+}
+
+/**
+ * Business Logic: 冷 URL / deep link 时把 tab 与 section 对齐，避免 ?tab=skill 空主体。
+ * Code Logic: asset/conflict/preview 优先；section 次之；最后 mapContextToSection(hubContext)。
+ */
+export function resolveInitialSection(
+  params: {
+    assetId?: string | null;
+    conflictId?: string | null;
+    preview?: string | null;
+    projectId?: string | null;
+    bridge?: string | null;
+    section?: string | null;
+    inventoryItemId?: string | null;
+  },
+  hubContext: AgentHubContext,
+): AgentHubSection {
+  if (params.assetId || params.conflictId || params.inventoryItemId) return 'assets';
+  if (params.preview || params.projectId || params.bridge) return 'projectInstructions';
+  if (params.section) return normalizeAgentHubSection(params.section);
+  return mapContextToSection(hubContext);
+}
+
+/**
+ * Business Logic: portable 资产 tab 或需要库存的 deep link / Pull。
+ * Code Logic: skill|command|mcp|plugin 或 inventory/asset deep link 或 pull 打开。
+ */
+export function computePortableLaneActive(
+  hubContext: AgentHubContext,
+  opts: {
+    inventoryItemId?: string | null;
+    assetId?: string | null;
+    conflictId?: string | null;
+    portablePullOpen?: boolean;
+  },
+): boolean {
+  if (isAssetKindTab(hubContext.tab)) return true;
+  if (opts.inventoryItemId || opts.assetId || opts.conflictId) return true;
+  if (opts.portablePullOpen) return true;
+  return false;
+}
+
+/**
+ * Business Logic: 提示词 tab 才跑三栏 inspect；adapt 且无父级 markdown 时可自拉。
+ * Code Logic: tab===instructions 或 adaptView。
+ */
+export function computeInstructionsLaneActive(
+  hubContext: AgentHubContext,
+  opts?: { hasAdaptMarkdown?: boolean },
+): boolean {
+  if (hubContext.tab === 'instructions') return true;
+  if (hubContext.adaptView && !opts?.hasAdaptMarkdown) return true;
+  return false;
 }
 
 /**
@@ -256,6 +312,7 @@ export interface UseAgentHubControllerResult {
   openPortablePull: () => void;
   closePortablePull: () => void;
   portablePull: UsePortablePullControllerResult;
+  /** 当前 lane 是否忙碌（header refresh 绑定）；legacy 未加载时为 false。 */
   loading: boolean;
   refreshing: boolean;
   stale: boolean;
@@ -263,8 +320,24 @@ export interface UseAgentHubControllerResult {
   actionError: string | null;
   actionBusy: boolean;
   status: AgentHubStatus | null;
+  /** status lane 加载中（diagnostics）。 */
+  statusLoading: boolean;
+  /** legacy matrix 是否至少成功加载过一次。 */
+  legacyLoadedOnce: boolean;
+  /** 用户展开或 deep link 强制的 legacy 矩阵。 */
+  legacyMatrixExpanded: boolean;
+  expandLegacyMatrix: () => void;
   assets: AgentHubAssetSummary[];
   filteredAssets: AgentHubAssetSummary[];
+  /** 三栏 / 页面入口用：是否激活 L-instructions。 */
+  instructionsLaneActive: boolean;
+  /** portable controller 用：是否激活 L-portable。 */
+  portableLaneActive: boolean;
+  /**
+   * Business Logic: 页面把 three-pane.refresh 注入后，header reload 在 instructions 可刷新。
+   * Code Logic: AgentHub 入口 setInstructionRefresh。
+   */
+  setInstructionRefresh: (fn: (() => Promise<void>) | null) => void;
   scopeFilter: string;
   kindFilter: string;
   setScopeFilter: (value: string) => void;
@@ -402,8 +475,39 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     [hubContext.scope, hubContext.deviceId, hubContext.projectKey],
   );
   const userInstructions = useUserInstructionManager(t);
-  const portableInventoryBase = usePortableInventoryController(inventoryRequestContext);
   const [portablePullOpen, setPortablePullOpen] = useState(false);
+  /**
+   * Business Logic: 仅资产 tab / deep link / Pull 打开时拉 portable inventory。
+   * Code Logic: 见 computePortableLaneActive。
+   */
+  const portableLaneActive = useMemo(
+    () =>
+      computePortableLaneActive(hubContext, {
+        inventoryItemId: deepLinkInventoryItemId,
+        assetId: deepLinkAssetId,
+        conflictId: deepLinkConflictId,
+        portablePullOpen,
+      }),
+    [
+      hubContext,
+      deepLinkInventoryItemId,
+      deepLinkAssetId,
+      deepLinkConflictId,
+      portablePullOpen,
+    ],
+  );
+  /**
+   * Business Logic: 仅提示词 tab（或 adapt 需自拉）时 inspect 指令。
+   * Code Logic: 资产 tab 切换 agent 不得触发 instruction inspect。
+   */
+  const instructionsLaneActive = useMemo(
+    () => computeInstructionsLaneActive(hubContext),
+    [hubContext],
+  );
+  const portableInventoryBase = usePortableInventoryController({
+    ...inventoryRequestContext,
+    enabled: portableLaneActive,
+  });
   /**
    * Business Logic: 壳层工具栏 Pull 预填当前 peer（deviceId）与当前 Agent（same-agent）。
    * Code Logic: hubContext 变化在抽屉 open 时由 pull controller 应用。
@@ -413,11 +517,20 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     initialSourceDeviceId: hubContext.deviceId,
     initialSourceTarget: hubContext.agent,
   });
-  const [activeSection, setActiveSectionState] = useState<AgentHubSection>(() => {
-    if (deepLinkAssetId || deepLinkConflictId) return 'assets';
-    if (deepLinkPreview || deepLinkProjectId || deepLinkBridge) return 'projectInstructions';
-    return normalizeAgentHubSection(deepLinkSection, 'userInstructions');
-  });
+  const [activeSection, setActiveSectionState] = useState<AgentHubSection>(() =>
+    resolveInitialSection(
+      {
+        assetId: deepLinkAssetId,
+        conflictId: deepLinkConflictId,
+        preview: deepLinkPreview,
+        projectId: deepLinkProjectId,
+        bridge: deepLinkBridge,
+        section: deepLinkSection,
+        inventoryItemId: deepLinkInventoryItemId,
+      },
+      hubContext,
+    ),
+  );
   const [portableActionPlan, setPortableActionPlan] = useState<PortableAssetActionPlanDto | null>(
     null,
   );
@@ -433,12 +546,22 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   const portableFiltersBootRef = useRef(false);
   const portableUrlSyncSkipRef = useRef(true);
 
-  const [loading, setLoading] = useState(true);
+  // 按需加载：legacy/status 初值 false；不再 mount 全量 loadCore
+  const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [legacyLoadedOnce, setLegacyLoadedOnce] = useState(false);
+  const [legacyMatrixExpanded, setLegacyMatrixExpanded] = useState(
+    () => Boolean(deepLinkAssetId || deepLinkConflictId),
+  );
   const [stale, setStale] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const instructionRefreshRef = useRef<(() => Promise<void>) | null>(null);
+  const setInstructionRefresh = useCallback((fn: (() => Promise<void>) | null) => {
+    instructionRefreshRef.current = fn;
+  }, []);
   // Gate C LAN push / Git import UI state
   const [lanPushOpen, setLanPushOpen] = useState(false);
   const [lanPeers, setLanPeers] = useState<LanPushPeerOption[]>([]);
@@ -500,30 +623,45 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, [scopeFilter, kindFilter]);
 
   /**
-   * Business Logic: 首屏与手动刷新加载 status + assets。
-   * Code Logic: 递增 refreshSeq + scopeCursor；过期/错 scope 响应不写入。
+   * Business Logic: 仅 diagnostics / 显式需要时拉 status。
+   * Code Logic: 独立 statusLoading；不碰 assets。
    */
-  const loadCore = useCallback(async (isRefresh: boolean) => {
+  const loadStatus = useCallback(async (_isRefresh = false) => {
+    void _isRefresh;
+    setStatusLoading(true);
+    try {
+      const nextStatus = await agentHubApi.getStatus();
+      if (!mountedRef.current) return;
+      setStatus(nextStatus);
+    } catch (reason) {
+      if (!mountedRef.current) return;
+      setError(toErrorMessage(reason));
+    } finally {
+      if (mountedRef.current) setStatusLoading(false);
+    }
+  }, []);
+
+  /**
+   * Business Logic: 懒加载 legacy canonical matrix（N+1 重，禁止默认 mount）。
+   * Code Logic: refreshSeq + scopeCursor；成功后 legacyLoadedOnce。
+   */
+  const loadLegacyAssets = useCallback(async (isRefresh: boolean) => {
     const seq = ++refreshSeqRef.current;
     const scopeCursor = ++scopeCursorRef.current;
     const scopeAtRequest = scopeFilterRef.current;
     const kindAtRequest = kindFilterRef.current;
-    if (isRefresh) {
+    if (isRefresh && legacyLoadedOnce) {
       setRefreshing(true);
     } else {
       setLoading(true);
     }
     setError(null);
     try {
-      const [nextStatus, nextAssets] = await Promise.all([
-        agentHubApi.getStatus(),
-        agentHubApi.listAssets({
-          scopeId: scopeAtRequest.trim() || null,
-          kind: kindAtRequest.trim() || null,
-        }),
-      ]);
+      const nextAssets = await agentHubApi.listAssets({
+        scopeId: scopeAtRequest.trim() || null,
+        kind: kindAtRequest.trim() || null,
+      });
       if (!mountedRef.current || seq !== refreshSeqRef.current) return;
-      // 快速切换 scope/kind 时，旧响应不得覆盖新 filter 的列表
       if (scopeCursor !== scopeCursorRef.current) return;
       if (
         scopeAtRequest !== scopeFilterRef.current ||
@@ -531,20 +669,38 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       ) {
         return;
       }
-      setStatus(nextStatus);
       setAssets(nextAssets);
+      setLegacyLoadedOnce(true);
       setStale(false);
     } catch (reason) {
       if (!mountedRef.current || seq !== refreshSeqRef.current) return;
       if (scopeCursor !== scopeCursorRef.current) return;
       setError(toErrorMessage(reason));
-      // 有旧数据时标 stale，保留列表
-      setStale((prev) => prev || status !== null || assets.length > 0);
+      setStale((prev) => prev || assets.length > 0);
+    } finally {
+      if (mountedRef.current && seq === refreshSeqRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-    if (!mountedRef.current || seq !== refreshSeqRef.current) return;
-    setLoading(false);
-    setRefreshing(false);
-  }, [assets.length, status]);
+  }, [assets.length, legacyLoadedOnce]);
+
+  /**
+   * Business Logic: legacy mutation 后刷新 matrix；冷路径无 matrix 时也拉一次以便后续一致。
+   * Code Logic: 始终 loadLegacyAssets；仅当已有 status 时刷新 L-status。
+   */
+  const invalidateLegacyLanes = useCallback(async () => {
+    const tasks: Promise<void>[] = [loadLegacyAssets(true)];
+    if (status !== null) {
+      tasks.push(loadStatus(true));
+    }
+    await Promise.all(tasks);
+  }, [loadLegacyAssets, loadStatus, status]);
+
+  const expandLegacyMatrix = useCallback(() => {
+    setLegacyMatrixExpanded(true);
+    void loadLegacyAssets(legacyLoadedOnce);
+  }, [legacyLoadedOnce, loadLegacyAssets]);
 
   /**
    * Business Logic: 选中资产后加载详情。
@@ -564,13 +720,17 @@ export function useAgentHubController(): UseAgentHubControllerResult {
 
   useEffect(() => {
     mountedRef.current = true;
-    // 挂载拉取外部 status/assets；异步路径内 setState，非同步级联渲染
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount external fetch
-    void loadCore(false);
-    // 首屏 deep link：仅异步拉详情，selected/conflict 已由 useState 初值设置
-    if (deepLinkAssetId) {
-      appliedDeepLinkRef.current = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
-      void loadAssetDetail(deepLinkAssetId);
+    // 按需：mount 仅 shell；禁止默认 loadCore / getStatus / listAssets
+    // deep link asset → 展开 legacy + 详情；diagnostics → status only
+    if (deepLinkAssetId || deepLinkConflictId) {
+      appliedDeepLinkRef.current = `${deepLinkAssetId ?? ''}|${deepLinkConflictId ?? ''}`;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link legacy bootstrap
+      setLegacyMatrixExpanded(true);
+      void loadLegacyAssets(false);
+      if (deepLinkAssetId) void loadAssetDetail(deepLinkAssetId);
+    }
+    if (normalizeAgentHubSection(deepLinkSection) === 'diagnostics') {
+      void loadStatus(false);
     }
     // 壳层 peers：真实局域网设备列表（mDNS）；失败时保持空列表不阻断 Hub
     void devicesApi
@@ -615,35 +775,61 @@ export function useAgentHubController(): UseAgentHubControllerResult {
   }, []);
 
   useEffect(() => {
-    // 跳过 mount 首轮（由挂载 effect 负责）
+    // 跳过 mount 首轮；仅 legacy 已加载时 filter 变化才 listAssets
     if (!filtersBootstrappedRef.current) {
       filtersBootstrappedRef.current = true;
       return;
     }
-    // 过滤变化触发外部 list 刷新
+    if (!legacyLoadedOnce && !legacyMatrixExpanded) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- filter change external fetch
-    void loadCore(true);
+    void loadLegacyAssets(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeFilter, kindFilter]);
 
   useEffect(() => {
-    // URL deep link 后续变化：异步拉详情；仅当 key 变化时同步 selected（事件驱动，非首轮 mount）
+    // URL deep link 后续变化：异步拉详情；仅当 key 变化时同步 selected
     if (!deepLinkAssetId && !deepLinkConflictId) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
     setActiveSectionState('assets');
-    if (!deepLinkAssetId) return;
+     
+    setLegacyMatrixExpanded(true);
+    if (!deepLinkAssetId) {
+      void loadLegacyAssets(true);
+      return;
+    }
     const key = `${deepLinkAssetId}|${deepLinkConflictId ?? ''}`;
     if (appliedDeepLinkRef.current === key) return;
     appliedDeepLinkRef.current = key;
-    // searchParams 变化是外部导航事件，同步选中资产与冲突抽屉
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+     
     setSelectedAssetId(deepLinkAssetId);
     if (deepLinkConflictId) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+       
       setConflictDrawerOpen(true);
     }
+    void loadLegacyAssets(true);
     void loadAssetDetail(deepLinkAssetId);
-  }, [deepLinkAssetId, deepLinkConflictId, loadAssetDetail]);
+  }, [deepLinkAssetId, deepLinkConflictId, loadAssetDetail, loadLegacyAssets]);
+
+  // hubContext.tab 与 activeSection 持续同步（含冷 ?tab=skill 后 setSearchParams）
+  useEffect(() => {
+    if (hubContext.adaptView) return;
+    const mapped = mapContextToSection(hubContext);
+    if (mapped !== activeSection && !deepLinkSection) {
+      // 现代 URL 以 tab 为准；legacy section= 仍由下方 effect 处理
+      if (isAssetKindTab(hubContext.tab) || hubContext.tab === 'instructions') {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- tab→section dual-path
+        setActiveSectionState(mapped);
+      }
+    }
+  }, [hubContext, activeSection, deepLinkSection]);
+
+  // diagnostics section 懒加载 status
+  useEffect(() => {
+    if (activeSection !== 'diagnostics') return;
+    if (status !== null || statusLoading) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- diagnostics lane
+    void loadStatus(false);
+  }, [activeSection, status, statusLoading, loadStatus]);
 
   useEffect(() => {
     // OpenCode bridge / project preview deep link：打开既有 preview dialog，不 enable。
@@ -652,9 +838,9 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     const key = `preview|${deepLinkPreview ?? ''}|${deepLinkProjectId ?? ''}|${deepLinkBridge ?? ''}`;
     if (appliedPreviewDeepLinkRef.current === key) return;
     appliedPreviewDeepLinkRef.current = key;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+     
     setActiveSectionState('projectInstructions');
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
+     
     setPreviewOpen(true);
     if (deepLinkProjectId?.trim()) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link navigation
@@ -726,14 +912,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       await agentHubApi.enableProject(projectId);
       if (!mountedRef.current) return;
       setPreviewOpen(false);
-      await loadCore(true);
+      await invalidateLegacyLanes();
     } catch (reason) {
       if (!mountedRef.current) return;
       setActionError(toErrorMessage(reason));
     } finally {
       if (mountedRef.current) setActionBusy(false);
     }
-  }, [loadCore, previewProjectId, t]);
+  }, [invalidateLegacyLanes, previewProjectId, t]);
 
   const openConflictDrawer = useCallback(() => setConflictDrawerOpen(true), []);
   const closeConflictDrawer = useCallback(() => {
@@ -858,12 +1044,42 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     setDeleteEverywhereAssetId(null);
   }, [actionBusy]);
 
+  /**
+   * Business Logic: header 刷新只打当前 lane，禁止无脑 listAssets。
+   * Code Logic: diagnostics→status；instructions→three-pane；assets→portable（+ legacy 若已展开）。
+   */
   const reload = useCallback(async () => {
-    await loadCore(true);
-    if (selectedAssetId) {
-      await loadAssetDetail(selectedAssetId);
+    if (hubContext.adaptView) return;
+    if (activeSection === 'diagnostics') {
+      await loadStatus(true);
+      return;
     }
-  }, [loadAssetDetail, loadCore, selectedAssetId]);
+    if (hubContext.tab === 'instructions') {
+      const refreshInstructions = instructionRefreshRef.current;
+      if (refreshInstructions) await refreshInstructions();
+      return;
+    }
+    if (isAssetKindTab(hubContext.tab) || activeSection === 'assets') {
+      await portableInventoryBase.refresh();
+      if (legacyMatrixExpanded || legacyLoadedOnce || selectedAssetId) {
+        await loadLegacyAssets(true);
+        if (selectedAssetId) await loadAssetDetail(selectedAssetId);
+      }
+      return;
+    }
+    if (activeSection === 'syncImport') return;
+  }, [
+    activeSection,
+    hubContext.adaptView,
+    hubContext.tab,
+    legacyLoadedOnce,
+    legacyMatrixExpanded,
+    loadAssetDetail,
+    loadLegacyAssets,
+    loadStatus,
+    portableInventoryBase,
+    selectedAssetId,
+  ]);
 
   const requireSelectedAssetId = useCallback((): string | null => {
     if (!selectedAssetId) {
@@ -883,7 +1099,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         const detail = await agentHubApi.resolveConflict({ ...args, assetId });
         if (!mountedRef.current) return;
         setSelectedAsset(detail);
-        await loadCore(true);
+        await invalidateLegacyLanes();
       } catch (reason) {
         if (!mountedRef.current) return;
         setActionError(toErrorMessage(reason));
@@ -891,7 +1107,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [loadCore, requireSelectedAssetId],
+    [invalidateLegacyLanes, requireSelectedAssetId],
   );
 
   /**
@@ -917,7 +1133,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         });
         if (!mountedRef.current) return;
         setSelectedAsset(detail);
-        await loadCore(true);
+        await invalidateLegacyLanes();
       } catch (reason) {
         if (!mountedRef.current) return;
         setActionError(toErrorMessage(reason));
@@ -925,7 +1141,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [expectedRevisionFromSelection, loadCore, requireSelectedAssetId],
+    [expectedRevisionFromSelection, invalidateLegacyLanes, requireSelectedAssetId],
   );
 
   const updateInstructionBlock = useCallback(
@@ -942,7 +1158,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         });
         if (!mountedRef.current) return;
         await loadAssetDetail(assetId);
-        await loadCore(true);
+        await invalidateLegacyLanes();
       } catch (reason) {
         if (!mountedRef.current) return;
         setActionError(toErrorMessage(reason));
@@ -950,7 +1166,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [expectedRevisionFromSelection, loadAssetDetail, loadCore, requireSelectedAssetId],
+    [expectedRevisionFromSelection, loadAssetDetail, invalidateLegacyLanes, requireSelectedAssetId],
   );
 
   const pairInstructionVariants = useCallback(
@@ -967,7 +1183,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         });
         if (!mountedRef.current) return;
         setSelectedAsset(detail);
-        await loadCore(true);
+        await invalidateLegacyLanes();
       } catch (reason) {
         if (!mountedRef.current) return;
         setActionError(toErrorMessage(reason));
@@ -975,7 +1191,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [expectedRevisionFromSelection, loadCore, requireSelectedAssetId],
+    [expectedRevisionFromSelection, invalidateLegacyLanes, requireSelectedAssetId],
   );
 
   const applySummaryMutation = useCallback(
@@ -987,7 +1203,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         await mutate();
         if (!mountedRef.current) return;
         if (cursorBefore !== scopeCursorRef.current) return;
-        await loadCore(true);
+        await invalidateLegacyLanes();
         if (selectedAssetId === assetId) {
           await loadAssetDetail(assetId);
         }
@@ -998,7 +1214,7 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         if (mountedRef.current) setActionBusy(false);
       }
     },
-    [loadAssetDetail, loadCore, selectedAssetId],
+    [loadAssetDetail, invalidateLegacyLanes, selectedAssetId],
   );
 
   const setTargetBinding = useCallback(
@@ -1089,14 +1305,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
         setSelectedAssetId(null);
         setSelectedAsset(null);
       }
-      await loadCore(true);
+      await invalidateLegacyLanes();
     } catch (reason) {
       if (!mountedRef.current) return;
       setActionError(toErrorMessage(reason));
     } finally {
       if (mountedRef.current) setActionBusy(false);
     }
-  }, [deleteEverywhereAssetId, loadCore, requireSelectedAssetId, selectedAssetId]);
+  }, [deleteEverywhereAssetId, invalidateLegacyLanes, requireSelectedAssetId, selectedAssetId]);
 
 
   /**
@@ -1306,14 +1522,14 @@ export function useAgentHubController(): UseAgentHubControllerResult {
       });
       if (!mountedRef.current) return;
       setGitConfirmOutcome(outcome);
-      await loadCore(true);
+      await invalidateLegacyLanes();
     } catch (reason) {
       if (!mountedRef.current) return;
       setActionError(toErrorMessage(reason));
     } finally {
       if (mountedRef.current) setActionBusy(false);
     }
-  }, [gitMappingDrafts, gitPreview, gitSelectedAssetIds, loadCore]);
+  }, [gitMappingDrafts, gitPreview, gitSelectedAssetIds, invalidateLegacyLanes]);
 
   /**
    * Business Logic: 壳层 patch 写回 URL，并同步旧 activeSection 双路径内容。
@@ -1421,7 +1637,19 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     if (deepLinkInventoryItemId) {
       portableInventoryBase.selectItem(deepLinkInventoryItemId);
     }
-    if (normalizeAgentHubSection(deepLinkSection) === 'assets' || deepLinkInventoryItemId) {
+    const bootSection = resolveInitialSection(
+      {
+        assetId: deepLinkAssetId,
+        conflictId: deepLinkConflictId,
+        preview: deepLinkPreview,
+        projectId: deepLinkProjectId,
+        bridge: deepLinkBridge,
+        section: deepLinkSection,
+        inventoryItemId: deepLinkInventoryItemId,
+      },
+      parseAgentHubContext(searchParams),
+    );
+    if (bootSection === 'assets' || deepLinkInventoryItemId || isAssetKindTab(hubContext.tab)) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot deep-link bootstrap
       setActiveSectionState('assets');
     }
@@ -1650,8 +1878,15 @@ export function useAgentHubController(): UseAgentHubControllerResult {
     actionError,
     actionBusy,
     status,
+    statusLoading,
+    legacyLoadedOnce,
+    legacyMatrixExpanded,
+    expandLegacyMatrix,
     assets,
     filteredAssets,
+    instructionsLaneActive,
+    portableLaneActive,
+    setInstructionRefresh,
     scopeFilter,
     kindFilter,
     setScopeFilter,

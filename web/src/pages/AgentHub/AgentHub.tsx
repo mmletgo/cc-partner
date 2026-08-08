@@ -8,7 +8,7 @@
  *   controller 持有数据/动作；AgentHubView 为 pure 视图（禁止 @/api/*）。
  */
 
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { AgentAssetRow } from '@/components/domain/AgentAssetRow';
 import { Button, Card, Dialog, Drawer, Input, Pill, StatusMessage } from '@/components/primitives';
 import type {
@@ -43,6 +43,7 @@ import { summarizeDeletePreview } from './pluginPackagePresentation';
 import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
 import {
+  isAssetKindTab,
   useAgentHubController,
   type UseAgentHubControllerResult,
 } from './useAgentHubController';
@@ -107,7 +108,12 @@ export function AgentHubView(props: AgentHubViewProps) {
     actionError,
     actionBusy,
     status,
+    statusLoading,
+    legacyLoadedOnce,
+    legacyMatrixExpanded,
+    expandLegacyMatrix,
     filteredAssets,
+    setInstructionRefresh,
     scopeFilter,
     kindFilter,
     setScopeFilter,
@@ -412,34 +418,23 @@ export function AgentHubView(props: AgentHubViewProps) {
     return null;
   }, [instructionThreePane?.state]);
 
-  if (activeSection !== 'userInstructions' && loading && !status && !hubContext.adaptView) {
-    return (
-      <div className={styles.page} data-testid="agent-hub-loading">
-        <div className={styles.container}>
-          <StatusMessage tone="info">{t('agentHub:loading')}</StatusMessage>
-        </div>
-      </div>
-    );
-  }
+  const isAssetTab = isAssetKindTab(hubContext.tab);
 
-  if (activeSection !== 'userInstructions' && error && !status && !hubContext.adaptView) {
-    return (
-      <div className={styles.page} data-testid="agent-hub-error">
-        <div className={styles.container}>
-          <StatusMessage
-            tone="danger"
-            action={
-              <Button size="sm" onClick={() => void reload()}>
-                {t('common:action.retry')}
-              </Button>
-            }
-          >
-            {error}
-          </StatusMessage>
-        </div>
-      </div>
-    );
-  }
+  /**
+   * Business Logic: 把三栏 refresh 注入 hub controller，供 header reload 分发。
+   * Code Logic: mount/update 写 ref；卸载清空。
+   */
+  useEffect(() => {
+    if (!instructionThreePane) {
+      setInstructionRefresh(null);
+      return;
+    }
+    const refresh = (): Promise<void> => instructionThreePane.refresh();
+    setInstructionRefresh(refresh);
+    return () => setInstructionRefresh(null);
+  }, [instructionThreePane, setInstructionRefresh]);
+
+  // 按需加载：禁止整页 loading/error 闸门挡住 shell 与 portable tab
 
   if (hubContext.adaptView) {
     return (
@@ -470,17 +465,23 @@ export function AgentHubView(props: AgentHubViewProps) {
             <p className={styles.subtitle}>{t('agentHub:subtitle')}</p>
           </div>
           <div className={styles.headerActions}>
-            {activeSection !== 'userInstructions' ? (
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={refreshing}
-                onClick={() => void reload()}
-                data-testid="agent-hub-reload"
-              >
-                {t('common:action.refresh')}
-              </Button>
-            ) : null}
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={
+                hubContext.tab === 'instructions'
+                  ? Boolean(instructionThreePane?.refreshing)
+                  : isAssetTab
+                    ? portableInventory.refreshing || refreshing
+                    : activeSection === 'diagnostics'
+                      ? statusLoading
+                      : refreshing
+              }
+              onClick={() => void reload()}
+              data-testid="agent-hub-reload"
+            >
+              {t('common:action.refresh')}
+            </Button>
             {activeSection === 'projectInstructions' ? (
               <Button
                 variant="primary"
@@ -605,6 +606,26 @@ export function AgentHubView(props: AgentHubViewProps) {
           </StatusMessage>
         ) : null}
 
+        {activeSection === 'diagnostics' && statusLoading && !status ? (
+          <StatusMessage tone="info" data-testid="agent-hub-status-loading">
+            {t('agentHub:loading')}
+          </StatusMessage>
+        ) : null}
+
+        {activeSection !== 'userInstructions' && error && legacyMatrixExpanded ? (
+          <StatusMessage
+            tone="danger"
+            data-testid="agent-hub-legacy-error"
+            action={
+              <Button size="sm" onClick={() => void expandLegacyMatrix()}>
+                {t('common:action.retry')}
+              </Button>
+            }
+          >
+            {error}
+          </StatusMessage>
+        ) : null}
+
         {activeSection === 'diagnostics' && status ? (
           <Card variant="outlined" padding="md" data-testid="agent-hub-status-card">
             <Card.Header>
@@ -670,59 +691,78 @@ export function AgentHubView(props: AgentHubViewProps) {
               controller={portableInventory}
               labels={portableInventoryLabels}
             />
-            {/* Legacy canonical matrix retained for conflict/plugin deep links until F6 cleanup. */}
-            <section className={styles.legacyMatrix} data-testid="agent-hub-legacy-matrix">
-              <div className={styles.filters} data-testid="agent-hub-filters">
-                <label className={styles.filterField}>
-                  <span>{t('agentHub:filters.scope')}</span>
-                  <Input
-                    value={scopeFilter}
-                    onChange={(event) => setScopeFilter(event.currentTarget.value)}
-                    placeholder={t('agentHub:filters.scopePlaceholder')}
-                    data-testid="agent-hub-filter-scope"
-                  />
-                </label>
-                <label className={styles.filterField}>
-                  <span>{t('agentHub:filters.kind')}</span>
-                  <Input
-                    value={kindFilter}
-                    onChange={(event) => setKindFilter(event.currentTarget.value)}
-                    placeholder={t('agentHub:filters.kindPlaceholder')}
-                    data-testid="agent-hub-filter-kind"
-                  />
-                </label>
-              </div>
-              <section className={styles.list} data-testid="agent-hub-asset-list" aria-label={t('agentHub:listAria')}>
-                {filteredAssets.length === 0 ? (
-                  <p className={styles.empty} data-testid="agent-hub-empty">
-                    {t('agentHub:empty')}
-                  </p>
-                ) : (
-                  filteredAssets.map((asset) => (
-                    <AgentAssetRow
-                      key={asset.assetId}
-                      asset={asset}
-                      selected={selectedAssetId === asset.assetId}
-                      busy={actionBusy}
-                      writeBlocked={writeBlocked}
-                      onSelect={(item) => selectAsset(item.assetId)}
-                      onOpenBlocks={handleOpenBlocks}
-                      onOpenPlugin={handleOpenPlugin}
-                      onOpenConflicts={handleOpenConflicts}
-                      onToggleTarget={handleToggleTarget}
-                      onRemoveTarget={(item, target) => {
-                        void removeTarget({ assetId: item.assetId, target });
-                      }}
-                      onRestoreTarget={(item, target) => {
-                        void restoreDetachedTarget({ assetId: item.assetId, target });
-                      }}
-                      onOpenCollision={(item, target) => openAdoptionPreview(item, target)}
-                      onDeleteEverywhere={(item) => openDeleteEverywhere(item.assetId)}
-                    />
-                  ))
-                )}
+            {/* Legacy canonical matrix：默认折叠，避免冷路径 N+1 listAssets。 */}
+            {!legacyMatrixExpanded && !legacyLoadedOnce ? (
+              <section className={styles.legacyMatrix} data-testid="agent-hub-legacy-matrix-collapsed">
+                <p className={styles.hint}>{t('agentHub:sections.assets')}</p>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => expandLegacyMatrix()}
+                  data-testid="agent-hub-expand-legacy-matrix"
+                >
+                  {t('common:action.refresh')}
+                </Button>
               </section>
-            </section>
+            ) : (
+              <section className={styles.legacyMatrix} data-testid="agent-hub-legacy-matrix">
+                {loading && !legacyLoadedOnce ? (
+                  <StatusMessage tone="info" data-testid="agent-hub-legacy-loading">
+                    {t('agentHub:loading')}
+                  </StatusMessage>
+                ) : null}
+                <div className={styles.filters} data-testid="agent-hub-filters">
+                  <label className={styles.filterField}>
+                    <span>{t('agentHub:filters.scope')}</span>
+                    <Input
+                      value={scopeFilter}
+                      onChange={(event) => setScopeFilter(event.currentTarget.value)}
+                      placeholder={t('agentHub:filters.scopePlaceholder')}
+                      data-testid="agent-hub-filter-scope"
+                    />
+                  </label>
+                  <label className={styles.filterField}>
+                    <span>{t('agentHub:filters.kind')}</span>
+                    <Input
+                      value={kindFilter}
+                      onChange={(event) => setKindFilter(event.currentTarget.value)}
+                      placeholder={t('agentHub:filters.kindPlaceholder')}
+                      data-testid="agent-hub-filter-kind"
+                    />
+                  </label>
+                </div>
+                <section className={styles.list} data-testid="agent-hub-asset-list" aria-label={t('agentHub:listAria')}>
+                  {legacyLoadedOnce && filteredAssets.length === 0 ? (
+                    <p className={styles.empty} data-testid="agent-hub-empty">
+                      {t('agentHub:empty')}
+                    </p>
+                  ) : (
+                    filteredAssets.map((asset) => (
+                      <AgentAssetRow
+                        key={asset.assetId}
+                        asset={asset}
+                        selected={selectedAssetId === asset.assetId}
+                        busy={actionBusy}
+                        writeBlocked={writeBlocked}
+                        onSelect={(item) => selectAsset(item.assetId)}
+                        onOpenBlocks={handleOpenBlocks}
+                        onOpenPlugin={handleOpenPlugin}
+                        onOpenConflicts={handleOpenConflicts}
+                        onToggleTarget={handleToggleTarget}
+                        onRemoveTarget={(item, target) => {
+                          void removeTarget({ assetId: item.assetId, target });
+                        }}
+                        onRestoreTarget={(item, target) => {
+                          void restoreDetachedTarget({ assetId: item.assetId, target });
+                        }}
+                        onOpenCollision={(item, target) => openAdoptionPreview(item, target)}
+                        onDeleteEverywhere={(item) => openDeleteEverywhere(item.assetId)}
+                      />
+                    ))
+                  )}
+                </section>
+              </section>
+            )}
           </div>
         ) : null}
 
@@ -1194,6 +1234,7 @@ export function AgentHub() {
   const instructionThreePane = useInstructionThreePaneController({
     context: controller.hubContext,
     t: controller.t,
+    enabled: controller.instructionsLaneActive,
   });
   return <AgentHubView {...controller} instructionThreePane={instructionThreePane} />;
 }

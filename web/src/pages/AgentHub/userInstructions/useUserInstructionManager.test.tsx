@@ -102,6 +102,9 @@ describe('useUserInstructionManager', () => {
     apiMocks.inspectUserInstructionWorkspace.mockResolvedValue(workspaceFixture());
     apiMocks.previewUserInstructionSetup.mockResolvedValue(planFixture());
     const { result } = renderHook(() => useUserInstructionManager(t));
+    await act(async () => {
+      await result.current.refresh();
+    });
     await waitFor(() => expect(result.current.workspace).not.toBeNull());
 
     act(() => {
@@ -126,6 +129,9 @@ describe('useUserInstructionManager', () => {
       Object.assign(new Error('stale'), { code: 'USER_INSTRUCTION_PREVIEW_STALE' }),
     );
     const { result } = renderHook(() => useUserInstructionManager(t));
+    await act(async () => {
+      await result.current.refresh();
+    });
     await waitFor(() => expect(result.current.workspace).not.toBeNull());
     act(() => {
       result.current.updateDraftContent('common', 'keep this draft');

@@ -95,7 +95,7 @@ const devicesListMock = vi.hoisted(() =>
 
 vi.mock('@/api/devices', () => ({
   devicesApi: {
-    list: (...args: unknown[]) => devicesListMock(...args),
+    list: () => devicesListMock(),
   },
 }));
 
@@ -125,7 +125,7 @@ const workbenchProjectsListMock = vi.hoisted(() =>
 vi.mock('@/api/workbench', () => ({
   workbenchApi: {
     projects: {
-      list: (...args: unknown[]) => workbenchProjectsListMock(...args),
+      list: () => workbenchProjectsListMock(),
     },
   },
 }));
@@ -367,19 +367,42 @@ describe('useAgentHubController', () => {
     ]);
   });
 
-  test('deviceId in URL is passed into portable inventory inspect context', async () => {
+  test('deviceId alone on instructions does not portable inspect (T2)', async () => {
     searchParamsMock.current = new URLSearchParams('deviceId=peer-online');
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.hubContext.deviceId).toBe('peer-online');
+    expect(result.current.portableInventory.requestContext.deviceId).toBe('peer-online');
+    expect(portableApiMocks.inspect).not.toHaveBeenCalled();
+    expect(listAssets).not.toHaveBeenCalled();
+    expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  test('tab=skill activates portable inspect with peer context (T3)', async () => {
+    searchParamsMock.current = new URLSearchParams('tab=skill&deviceId=peer-online');
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
+    const { result } = renderHook(() => useAgentHubController());
+    expect(result.current.activeSection).toBe('assets');
+    expect(result.current.portableLaneActive).toBe(true);
     await waitFor(() =>
       expect(portableApiMocks.inspect).toHaveBeenCalledWith({
         deviceId: 'peer-online',
         projectRef: null,
       }),
     );
-    expect(result.current.hubContext.deviceId).toBe('peer-online');
-    expect(result.current.portableInventory.requestContext.deviceId).toBe('peer-online');
+    expect(listAssets).not.toHaveBeenCalled();
+  });
+
+  test('cold default instructions skips listAssets and status (T1)', async () => {
+    searchParamsMock.current = new URLSearchParams();
+    const { result } = renderHook(() => useAgentHubController());
+    await waitFor(() => expect(result.current.shellPeers.length).toBeGreaterThan(0));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.legacyLoadedOnce).toBe(false);
+    expect(listAssets).not.toHaveBeenCalled();
+    expect(getStatus).not.toHaveBeenCalled();
+    expect(portableApiMocks.inspect).not.toHaveBeenCalled();
   });
 
   test('openPortablePull prefills source device and agent from hubContext (toolbar pull)', async () => {
@@ -473,19 +496,25 @@ describe('useAgentHubController', () => {
   });
 
   test('first-load error surfaces error without assets', async () => {
-    getStatus.mockRejectedValueOnce(new Error('status boom'));
     listAssets.mockRejectedValueOnce(new Error('status boom'));
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.error).toContain('status boom');
+    await act(async () => {
+      result.current.expandLegacyMatrix();
+    });
+    await waitFor(() => expect(result.current.error).toContain('status boom'));
     expect(result.current.assets).toEqual([]);
   });
 
   test('stale refresh keeps previous assets when later load fails', async () => {
+    searchParamsMock.current = new URLSearchParams('tab=skill');
+    portableApiMocks.inspect.mockResolvedValue(portableSnapshot([makePortableItem()]));
     const { result } = renderHook(() => useAgentHubController());
+    await act(async () => {
+      result.current.expandLegacyMatrix();
+    });
     await waitFor(() => expect(result.current.assets).toHaveLength(1));
 
-    getStatus.mockRejectedValueOnce(new Error('network'));
     listAssets.mockRejectedValueOnce(new Error('network'));
     await act(async () => {
       await result.current.reload();
@@ -651,6 +680,12 @@ describe('useAgentHubController', () => {
   test('rapid scope switching drops stale list responses', async () => {
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
+    // 先展开 legacy 一次，后续 filter 才会触发 listAssets
+    await act(async () => {
+      result.current.expandLegacyMatrix();
+    });
+    await waitFor(() => expect(result.current.legacyLoadedOnce).toBe(true));
+    listAssets.mockClear();
 
     let resolveSlow: (value: AgentHubAssetSummary[]) => void = () => undefined;
     const slow = new Promise<AgentHubAssetSummary[]>((resolve) => {
@@ -673,7 +708,7 @@ describe('useAgentHubController', () => {
       result.current.setScopeFilter('project-b');
     });
 
-    await waitFor(() => expect(listAssets).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(listAssets).toHaveBeenCalledTimes(2));
 
     await act(async () => {
       resolveSlow([{ ...assetSummary, assetId: 'asset-scope-a', scopeId: 'project-a' }]);
@@ -715,6 +750,7 @@ describe('useAgentHubController', () => {
   test('H1: preview then inventory refresh fail must not allow applyAction on confirm', async () => {
     const item = makePortableItem();
     portableApiMocks.inspect.mockResolvedValue(portableSnapshot([item]));
+    searchParamsMock.current = new URLSearchParams('tab=skill');
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
@@ -764,6 +800,7 @@ describe('useAgentHubController', () => {
     });
     portableApiMocks.previewAction.mockReturnValueOnce(previewPromise);
 
+    searchParamsMock.current = new URLSearchParams('tab=skill');
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
 
@@ -824,6 +861,7 @@ describe('useAgentHubController', () => {
     });
     portableApiMocks.applyAction.mockReturnValueOnce(applyPromise);
 
+    searchParamsMock.current = new URLSearchParams('tab=skill');
     const { result } = renderHook(() => useAgentHubController());
     await waitFor(() => expect(result.current.portableInventory.snapshot).not.toBeNull());
 

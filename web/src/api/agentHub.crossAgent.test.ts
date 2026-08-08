@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const invokeMock = vi.fn(async () => ({}));
 
 vi.mock('./client', () => ({
-  invoke: (...args: unknown[]) => invokeMock(...args),
+  invoke: (...args: unknown[]) => invokeMock(...(args as [])),
   invokeDecoded: vi.fn(),
 }));
 

@@ -9,11 +9,13 @@
 //!     定义库存 DTO、稳定 inventory_item_id、确定性 inventory_snapshot_hash，
 //!     ensure_managed（ledger only）+ 只读 reconcile；不写目标文件/CAS 原字节。
 
+pub mod cache;
 pub mod ensure_managed;
 pub mod models;
 pub mod reconcile;
 pub mod scanner;
 
+pub use cache::invalidate_portable_inventory_cache;
 pub use ensure_managed::{
     ensure_discovered_portable_items_managed, EnsureManagedFailure, EnsureManagedReport,
 };

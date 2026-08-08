@@ -72,12 +72,17 @@ pub struct PortableScanScope {
 ///     不写目标磁盘资产内容；不把发现当成 CAS/adoption 移盘。
 ///
 /// Code Logic（这个函数做什么）:
-///     构造 TargetEnvironment → 收集 user + 已映射 project scopes → scan → ensure → reconcile。
+///     进程级 soft-TTL cache → miss 时构造 TargetEnvironment → scan → ensure → reconcile → store。
 pub async fn inspect_portable_inventory(
     state: &AppState,
 ) -> Result<PortableInventorySnapshotDto, AppError> {
+    if let Some(hit) = crate::agent_hub::portable_inventory::cache::get_cached_portable_inventory() {
+        return Ok(hit);
+    }
     let env = current_target_environment();
-    inspect_portable_inventory_with_env(state, &env).await
+    let snapshot = inspect_portable_inventory_with_env(state, &env).await?;
+    crate::agent_hub::portable_inventory::cache::store_cached_portable_inventory(snapshot.clone());
+    Ok(snapshot)
 }
 
 /// 使用注入环境刷新 portable inventory（可测）。

@@ -40,6 +40,11 @@ const PEER_CONTEXT_UNAVAILABLE = 'AGENT_HUB_PEER_CONTEXT_UNAVAILABLE';
 export interface UseInstructionThreePaneControllerArgs {
   context: AgentHubContext;
   t: TFunction<['agentHub', 'common']>;
+  /**
+   * Business Logic: 仅 instructions（或 adapt 需自拉）时为 true，资产 tab 禁止 inspect。
+   * Code Logic: false 时不 loadWorkspace，loading=false，可 retain 已有草稿。
+   */
+  enabled?: boolean;
 }
 
 /** Controller 对 pure view / 预览 Dialog 的返回合同。 */
@@ -151,6 +156,8 @@ export function useInstructionThreePaneController(
   args: UseInstructionThreePaneControllerArgs,
 ): UseInstructionThreePaneControllerResult {
   const { context, t } = args;
+  /** 默认 true 兼容单测；页面入口必须显式传 instructionsLaneActive。 */
+  const enabled = args.enabled !== false;
   const agent = context.agent;
   /** 用户级 deviceId；项目级 projectKey 作为 projectRef。 */
   const requestContext = useMemo((): AgentHubRequestContext => {
@@ -164,7 +171,7 @@ export function useInstructionThreePaneController(
   const [state, setState] = useState<InstructionThreePaneState>(() =>
     initialThreePaneFromDisk(null, ''),
   );
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => enabled);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -237,13 +244,27 @@ export function useInstructionThreePaneController(
   );
 
   useEffect(() => {
+    if (!enabled) {
+      // 资产 tab：禁止 instruction inspect；不清草稿，loading=false
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- disable lane
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
     const timeoutId = window.setTimeout(() => {
       void loadWorkspace(false);
     }, 0);
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [loadWorkspace, context.scope, context.deviceId, context.projectKey, context.agent]);
+  }, [
+    enabled,
+    loadWorkspace,
+    context.scope,
+    context.deviceId,
+    context.projectKey,
+    context.agent,
+  ]);
 
   const currentTarget = useMemo(
     () => workspace?.targets.find((item) => item.target === agent) ?? null,

@@ -160,6 +160,7 @@ function controller(
     clearPendingAction: vi.fn(),
     getPrimaryAction: () => 'disable',
     refresh: vi.fn(async () => undefined),
+    requestContext: { deviceId: null, projectRef: null },
     ...patch,
   };
 }

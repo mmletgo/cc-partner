@@ -84,7 +84,11 @@ impl PortableService {
         state: &AppState,
         request: ApplyPortableAssetActionRequest,
     ) -> Result<PortableAssetActionResultDto, AppError> {
-        apply_portable_asset_action(state, request).await
+        // mutation 前失效，避免 apply 过程中并发 inspect 命中脏缓存
+        crate::agent_hub::portable_inventory::invalidate_portable_inventory_cache();
+        let result = apply_portable_asset_action(state, request).await;
+        crate::agent_hub::portable_inventory::invalidate_portable_inventory_cache();
+        result
     }
 
     /// 按 clientRequestId 读取动作结果（含 outcomeUnknown）。
@@ -131,7 +135,10 @@ impl PortableService {
         state: &AppState,
         request: ApplyPortablePullRequest,
     ) -> Result<PortablePullResultDto, AppError> {
-        apply_portable_pull_impl(state, request).await
+        crate::agent_hub::portable_inventory::invalidate_portable_inventory_cache();
+        let result = apply_portable_pull_impl(state, request).await;
+        crate::agent_hub::portable_inventory::invalidate_portable_inventory_cache();
+        result
     }
 
     /// 按 clientRequestId 查询 pull 结果。
