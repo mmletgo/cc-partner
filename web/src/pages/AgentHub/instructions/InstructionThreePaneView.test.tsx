@@ -89,6 +89,7 @@ function buildProps(
   return {
     labels,
     state,
+    agent: AGENT,
     loading: false,
     error: null,
     actionError: null,

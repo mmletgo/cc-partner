@@ -567,6 +567,7 @@ export function AgentHubView(props: AgentHubViewProps) {
           <InstructionThreePaneView
             labels={instructionThreePaneLabels}
             state={instructionThreePane.state}
+            agent={hubContext.agent}
             loading={instructionThreePane.loading}
             error={instructionThreePane.error}
             actionError={instructionThreePane.actionError}

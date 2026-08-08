@@ -12,24 +12,12 @@
 import type { JSX } from 'react';
 import { Button, StatusMessage } from '@/components/primitives';
 import type { AgentTarget } from '@/lib/types/agentHub';
-import type { InstructionBlockDraft, InstructionThreePaneState } from './instructionThreePane';
+import {
+  resolveBlockText,
+  type InstructionBlockDraft,
+  type InstructionThreePaneState,
+} from './instructionThreePane';
 import styles from './InstructionThreePaneView.module.css';
-
-const VARIANT_TARGETS: AgentTarget[] = ['claude', 'codex', 'opencode'];
-
-function variantLabel(
-  labels: InstructionThreePaneViewLabels,
-  target: AgentTarget,
-): string {
-  switch (target) {
-    case 'claude':
-      return labels.variantClaude;
-    case 'codex':
-      return labels.variantCodex;
-    case 'opencode':
-      return labels.variantOpencode;
-  }
-}
 
 /** 三栏视图文案。 */
 export interface InstructionThreePaneViewLabels {
@@ -70,6 +58,8 @@ export interface InstructionThreePaneViewLabels {
 export interface InstructionThreePaneViewProps {
   labels: InstructionThreePaneViewLabels;
   state: InstructionThreePaneState;
+  /** 当前 agent 视角:①块栏按此过滤+投影，编辑映射回 common/variant[agent]。 */
+  agent: AgentTarget;
   loading: boolean;
   error: string | null;
   actionError: string | null;
@@ -97,6 +87,7 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
   const {
     labels,
     state,
+    agent,
     loading,
     error,
     actionError,
@@ -243,78 +234,61 @@ export function InstructionThreePaneView(props: InstructionThreePaneViewProps): 
             </Button>
           </header>
           <div className={styles.paneBody}>
-            {state.blocks.length === 0 ? (
+            {state.blocks.filter((block) => resolveBlockText(block, agent) !== null)
+              .length === 0 ? (
               <p className={styles.empty} data-testid="instruction-blocks-empty">
                 {labels.emptyBlocks}
               </p>
             ) : (
               <div className={styles.blockList} data-testid="instruction-block-list">
-                {state.blocks.map((block) => (
-                  <article
-                    key={block.id}
-                    className={styles.blockCard}
-                    data-testid={`instruction-block-${block.id}`}
-                  >
-                    <select
-                      className={styles.blockModeSelect}
-                      value={block.mode}
-                      aria-label={labels.blockMode}
-                      data-testid={`instruction-block-mode-${block.id}`}
-                      onChange={(event) =>
-                        onBlockChange(block.id, {
-                          mode: event.currentTarget.value as InstructionBlockDraft['mode'],
-                        })
-                      }
-                    >
-                      <option value="shared">{labels.blockModeShared}</option>
-                      <option value="adapted">{labels.blockModeAdapted}</option>
-                      <option value="targetOnly">{labels.blockModeTargetOnly}</option>
-                    </select>
-                    {block.mode === 'shared' || block.mode === 'adapted' ? (
-                      <textarea
-                        className={styles.blockBodyInput}
-                        value={block.commonMarkdown}
-                        placeholder={labels.blockBodyPlaceholder}
-                        aria-label={labels.commonMarkdown}
-                        data-testid={`instruction-block-common-${block.id}`}
-                        onChange={(event) =>
-                          onBlockChange(block.id, {
-                            commonMarkdown: event.currentTarget.value,
-                          })
-                        }
-                      />
-                    ) : null}
-                    {block.mode === 'adapted' || block.mode === 'targetOnly' ? (
-                      <div
-                        className={styles.blockVariants}
-                        data-testid={`instruction-block-variants-${block.id}`}
+                {state.blocks
+                  .filter((block) => resolveBlockText(block, agent) !== null)
+                  .map((block) => {
+                    const blockText = resolveBlockText(block, agent) ?? '';
+                    return (
+                      <article
+                        key={block.id}
+                        className={styles.blockCard}
+                        data-testid={`instruction-block-${block.id}`}
                       >
-                        <span className={styles.blockVariantsTitle}>{labels.variantsTitle}</span>
-                        {VARIANT_TARGETS.map((target) => (
-                          <label key={target} className={styles.blockVariantRow}>
-                            <span className={styles.blockVariantTarget}>
-                              {variantLabel(labels, target)}
-                            </span>
-                            <textarea
-                              className={styles.blockVariantInput}
-                              value={block.variants[target] ?? ''}
-                              placeholder={labels.blockBodyPlaceholder}
-                              aria-label={variantLabel(labels, target)}
-                              onChange={(event) =>
-                                onBlockChange(block.id, {
-                                  variants: {
-                                    ...block.variants,
-                                    [target]: event.currentTarget.value,
-                                  },
-                                })
-                              }
-                            />
-                          </label>
-                        ))}
-                      </div>
-                    ) : null}
-                  </article>
-                ))}
+                        <select
+                          className={styles.blockModeSelect}
+                          value={block.mode}
+                          aria-label={labels.blockMode}
+                          data-testid={`instruction-block-mode-${block.id}`}
+                          onChange={(event) => {
+                            const mode = event.currentTarget
+                              .value as InstructionBlockDraft['mode'];
+                            onBlockChange(block.id, {
+                              mode,
+                              sourceTarget: mode === 'targetOnly' ? agent : null,
+                            });
+                          }}
+                        >
+                          <option value="shared">{labels.blockModeShared}</option>
+                          <option value="adapted">{labels.blockModeAdapted}</option>
+                          <option value="targetOnly">{labels.blockModeTargetOnly}</option>
+                        </select>
+                        <textarea
+                          className={styles.blockBodyInput}
+                          value={blockText}
+                          placeholder={labels.blockBodyPlaceholder}
+                          aria-label={labels.commonMarkdown}
+                          data-testid={`instruction-block-text-${block.id}`}
+                          onChange={(event) => {
+                            const text = event.currentTarget.value;
+                            if (block.mode === 'shared') {
+                              onBlockChange(block.id, { commonMarkdown: text });
+                            } else {
+                              onBlockChange(block.id, {
+                                variants: { ...block.variants, [agent]: text },
+                              });
+                            }
+                          }}
+                        />
+                      </article>
+                    );
+                  })}
               </div>
             )}
           </div>
