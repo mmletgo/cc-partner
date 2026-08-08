@@ -904,14 +904,13 @@ pub async fn gc_committed_incoming_staging(
             }
             continue;
         }
-        if cleanup_transfer_staging(data_dir, &transfer_id).is_ok() {
-            if repo
+        if cleanup_transfer_staging(data_dir, &transfer_id).is_ok()
+            && repo
                 .mark_committed_transfer_staging_cleaned(&transfer_id)
                 .await
                 .is_ok()
-            {
-                removed += 1;
-            }
+        {
+            removed += 1;
         }
     }
     Ok(removed)

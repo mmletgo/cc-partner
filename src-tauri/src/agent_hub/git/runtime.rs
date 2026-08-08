@@ -1025,11 +1025,7 @@ async fn export_local_lane_once(
         }
 
         // 本地 commit 已产生：必须可靠持久化 pending_commit_oid；写失败则本轮失败可恢复
-        let head_oid = head_commit_oid(&git, &workdir).await.map_err(|e| {
-            // 转为 ExportOnceResult 风格：调用方在 match 外已用 Result
-            e
-        });
-        let head_oid = match head_oid {
+        let head_oid = match head_commit_oid(&git, &workdir).await {
             Ok(o) => o,
             Err(e) => {
                 return Ok(ExportOnceResult::Failed {

@@ -369,7 +369,7 @@ impl DeletionFloorRepo {
             );
             return Ok(false);
         };
-        let age = now_dt.signed_duration_since(&updated);
+        let age = now_dt.signed_duration_since(updated);
         Ok(age >= Duration::days(TOMBSTONE_GC_MIN_AGE_DAYS))
     }
 

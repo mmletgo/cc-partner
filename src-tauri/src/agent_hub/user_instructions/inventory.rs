@@ -572,7 +572,7 @@ fn build_source_dtos(
     mut sources: Vec<InstructionSource>,
     ownership: Option<&UserInstructionOwnershipRecord>,
 ) -> Result<Vec<UserInstructionSourceDto>, AppError> {
-    sources.sort_by(|a, b| source_sort_key(a).cmp(&source_sort_key(b)));
+    sources.sort_by_key(source_sort_key);
     let active_path = sources
         .iter()
         .find(|source| source.active)

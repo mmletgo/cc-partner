@@ -528,10 +528,11 @@ fn build_change(
         }
         UserInstructionManagementMode::ManagedActive => UserInstructionPlanOperation::Update,
     };
+    // map_or：None → true；MSRV 1.77 无 is_none_or（1.82+）
     let ownership_required = matches!(
         operation,
         UserInstructionPlanOperation::Update | UserInstructionPlanOperation::Delete
-    ) && current_source.is_none_or(|source| {
+    ) && current_source.map_or(true, |source| {
         source.ownership != UserInstructionOwnership::HubManaged && !selection.adopt_existing()
     });
     let (unified_diff, diff_truncated) = if matches!(

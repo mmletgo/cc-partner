@@ -451,7 +451,12 @@ fn resolve_inventory_scope_id(item: &PortableInventoryItemDto) -> String {
     if !trimmed.is_empty() {
         return trimmed.to_string();
     }
-    if let Some(pid) = item.project_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(pid) = item
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return format!("project:{pid}");
     }
     "user".to_string()
@@ -463,7 +468,12 @@ fn resolve_remote_scope_id(item: &RemotePortableInventoryItemDto) -> String {
     if !trimmed.is_empty() {
         return trimmed.to_string();
     }
-    if let Some(pid) = item.project_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(pid) = item
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return format!("project:{pid}");
     }
     "user".to_string()
@@ -495,14 +505,11 @@ async fn materialize_tree_atomic_replace(
     dest: &Path,
     manifest: &crate::agent_hub::object_store::TreeManifest,
 ) -> Result<(), AppError> {
-    let parent = dest.parent().ok_or_else(|| {
-        AppError::validation("PORTABLE_PULL_INSTALL_DEST_INVALID".to_string())
-    })?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| AppError::validation("PORTABLE_PULL_INSTALL_DEST_INVALID".to_string()))?;
     std::fs::create_dir_all(parent)?;
-    let staging = parent.join(format!(
-        ".cc-partner-pull-staging-{}",
-        Uuid::now_v7()
-    ));
+    let staging = parent.join(format!(".cc-partner-pull-staging-{}", Uuid::now_v7()));
     if staging.exists() {
         let _ = std::fs::remove_dir_all(&staging);
     }
@@ -517,10 +524,7 @@ async fn materialize_tree_atomic_replace(
     }
     // Replace dest: move old aside then rename staging → dest; restore old on failure.
     let backup = if dest.exists() {
-        let b = parent.join(format!(
-            ".cc-partner-pull-backup-{}",
-            Uuid::now_v7()
-        ));
+        let b = parent.join(format!(".cc-partner-pull-backup-{}", Uuid::now_v7()));
         if let Err(e) = std::fs::rename(dest, &b) {
             cleanup(&staging);
             return Err(AppError::from(e));
@@ -1054,8 +1058,12 @@ pub async fn preview_portable_pull(
         let mut item_blocking = Vec::new();
         let mut warnings = rem.warnings.clone();
         let rem_scope = resolve_remote_scope_id(rem);
-        let existing =
-            local_by_identity.get(&(rem.target, rem.kind, rem.native_id.clone(), rem_scope.clone()));
+        let existing = local_by_identity.get(&(
+            rem.target,
+            rem.kind,
+            rem.native_id.clone(),
+            rem_scope.clone(),
+        ));
         let unmapped_project = rem.project_id.is_some() && !rem.project_opted_in;
         let local_project_opted = rem.project_id.as_ref().map(|pid| {
             local
@@ -1336,11 +1344,13 @@ async fn execute_claimed_pull(
             .remote_item_ids
             .iter()
             .filter_map(|id| {
-                remote_by_id.get(id.as_str()).map(|rem| StoredRemoteItemBinding {
-                    inventory_item_id: rem.inventory_item_id.clone(),
-                    content_hash: rem.content_hash.clone(),
-                    tree_hash: rem.tree_hash.clone(),
-                })
+                remote_by_id
+                    .get(id.as_str())
+                    .map(|rem| StoredRemoteItemBinding {
+                        inventory_item_id: rem.inventory_item_id.clone(),
+                        content_hash: rem.content_hash.clone(),
+                        tree_hash: rem.tree_hash.clone(),
+                    })
             })
             .collect()
     } else {
@@ -1371,11 +1381,7 @@ async fn execute_claimed_pull(
 
     // selection 必须与 revalidated inventory / plan binding 对齐（同 id 下 content 不得漂移）
     // + selection item.target 必须等于 plan.destination_target（防同 id 伪 target 侧写）
-    bind_selection_to_inventory_bindings(
-        &selection,
-        &bindings,
-        stored.public.destination_target,
-    )?;
+    bind_selection_to_inventory_bindings(&selection, &bindings, stored.public.destination_target)?;
 
     let data_dir = crate::config::data_dir()?;
     let store = ObjectStore::open(&data_dir)?;
@@ -1434,10 +1440,7 @@ async fn execute_claimed_pull(
             ensure_chunk_body_within_limit(chunk.len())?;
             let n = chunk.len() as u64;
             // Cumulative budget before growing buf (covers size==0 multi-chunk growth).
-            ensure_dest_transfer_budget(
-                collected_total.saturating_add(buf.len() as u64),
-                n,
-            )?;
+            ensure_dest_transfer_budget(collected_total.saturating_add(buf.len() as u64), n)?;
             if size > 0 && offset.saturating_add(n) > size {
                 return Err(AppError::validation(
                     PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string(),
@@ -1887,11 +1890,8 @@ pub async fn get_portable_pull(
     }
     // incomplete ledger row：OutcomeUnknown + best-effort destination observation rescan
     let stored = parse_stored_pull_plan(&row.plan_json)?;
-    let mut result = outcome_unknown_pull_result(
-        &row.plan_token,
-        client_request_id,
-        &stored.public,
-    );
+    let mut result =
+        outcome_unknown_pull_result(&row.plan_token, client_request_id, &stored.public);
     if let Ok(post) = inspect_portable_inventory(state).await {
         fold_pending_pull_observations(&mut result, &stored.public, &post);
     }
@@ -1906,9 +1906,9 @@ fn parse_declared_object_size(raw: &str) -> Result<u64, AppError> {
     if trimmed.is_empty() {
         return Ok(0);
     }
-    trimmed.parse::<u64>().map_err(|_| {
-        AppError::validation(PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string())
-    })
+    trimmed
+        .parse::<u64>()
+        .map_err(|_| AppError::validation(PORTABLE_PULL_DEST_TRANSFER_LIMIT.to_string()))
 }
 
 /// Fail-closed when declared size or cumulative collected would exceed dest budget.
@@ -2489,8 +2489,8 @@ mod tests {
             parse_declared_object_size(&huge).unwrap(),
             PORTABLE_PULL_DEST_MAX_TOTAL_BYTES + 1
         );
-        let err_budget = ensure_dest_transfer_budget(0, PORTABLE_PULL_DEST_MAX_TOTAL_BYTES + 1)
-            .unwrap_err();
+        let err_budget =
+            ensure_dest_transfer_budget(0, PORTABLE_PULL_DEST_MAX_TOTAL_BYTES + 1).unwrap_err();
         assert!(err_budget
             .to_string()
             .contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT));
@@ -2499,8 +2499,7 @@ mod tests {
     #[test]
     fn dest_chunk_body_oversize_rejected() {
         ensure_chunk_body_within_limit(PORTABLE_PULL_MAX_CHUNK_BYTES).unwrap();
-        let err =
-            ensure_chunk_body_within_limit(PORTABLE_PULL_MAX_CHUNK_BYTES + 1).unwrap_err();
+        let err = ensure_chunk_body_within_limit(PORTABLE_PULL_MAX_CHUNK_BYTES + 1).unwrap_err();
         assert!(err.to_string().contains(PORTABLE_PULL_DEST_TRANSFER_LIMIT));
     }
 
@@ -2914,12 +2913,8 @@ mod tests {
             content_hash: Some("hash-preview".into()),
             tree_hash: None,
         }];
-        let err = bind_selection_to_inventory_bindings(
-            &selection,
-            &bindings,
-            AgentTarget::Claude,
-        )
-        .unwrap_err();
+        let err = bind_selection_to_inventory_bindings(&selection, &bindings, AgentTarget::Claude)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("PORTABLE_PULL_REMOTE_SELECTION_DRIFT"),
@@ -2987,12 +2982,8 @@ mod tests {
             content_hash: Some("hash-ok".into()),
             tree_hash: None,
         }];
-        let err = bind_selection_to_inventory_bindings(
-            &selection,
-            &bindings,
-            AgentTarget::Claude,
-        )
-        .unwrap_err();
+        let err = bind_selection_to_inventory_bindings(&selection, &bindings, AgentTarget::Claude)
+            .unwrap_err();
         assert!(
             err.to_string().contains("PORTABLE_PULL_TARGET_MISMATCH"),
             "expected target mismatch, got {err}"
@@ -3010,11 +3001,7 @@ mod tests {
             .expect("production source before tests");
         assert!(prod.contains("PORTABLE_PULL_APPLY_FAILED"));
         // Forbidden swallow pattern: ignore complete Result with underscore binding.
-        let swallow = format!(
-            "{}{}",
-            "let _ = repo",
-            ".complete_portable_pull_plan"
-        );
+        let swallow = format!("{}{}", "let _ = repo", ".complete_portable_pull_plan");
         assert!(
             !prod.contains(&swallow),
             "fail path must not discard complete errors with underscore binding"
@@ -3292,21 +3279,24 @@ mod tests {
         ));
 
         // Map key includes scope so user+project coexist
-        let map: BTreeMap<(AgentTarget, PortableAssetKind, String, String), &PortableInventoryItemDto> =
-            snap.items
-                .iter()
-                .map(|i| {
+        let map: BTreeMap<
+            (AgentTarget, PortableAssetKind, String, String),
+            &PortableInventoryItemDto,
+        > = snap
+            .items
+            .iter()
+            .map(|i| {
+                (
                     (
-                        (
-                            i.target,
-                            i.kind,
-                            i.native_id.clone(),
-                            resolve_inventory_scope_id(i),
-                        ),
-                        i,
-                    )
-                })
-                .collect();
+                        i.target,
+                        i.kind,
+                        i.native_id.clone(),
+                        resolve_inventory_scope_id(i),
+                    ),
+                    i,
+                )
+            })
+            .collect();
         assert_eq!(map.len(), 2);
         assert!(map.contains_key(&(
             AgentTarget::Claude,

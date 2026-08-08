@@ -16,7 +16,7 @@ use crate::agent_hub::object_store::sha256_hex;
 use crate::agent_hub::packages::activator::ProcessSpec;
 use crate::agent_hub::portable_actions::models::{
     PortableAssetActionChangeDto, PortableAssetActionKind, PortableAssetActionPlanDto,
-    PortableAssetBackupPolicy, PortableAssetCanonicalEffect, PortableAssetPlanOperation,
+    PortableAssetBackupPolicy,
 };
 use crate::agent_hub::portable_inventory::hash_plugin_root;
 use crate::agent_hub::portable_inventory::{PortableAssetKind, PortableInventoryItemDto};
@@ -314,11 +314,7 @@ fn execute_plugin(
             });
         }
     };
-    match ctx.runner.run(&ProcessSpec {
-        program,
-        args,
-        cwd,
-    }) {
+    match ctx.runner.run(&ProcessSpec { program, args, cwd }) {
         Ok(out) => Ok(map_process_outcome(out, "claude plugin")),
         Err(e) if is_outcome_unknown_error(&e) => Ok(TargetActionRawOutcome::OutcomeUnknown {
             code: "PORTABLE_ASSET_ACTION_SPAWN_UNKNOWN".into(),
@@ -702,6 +698,9 @@ fn scope_arg(pre_item: Option<&PortableInventoryItemDto>) -> String {
 mod tests {
     use super::*;
     use crate::agent_hub::models::ScopeKind;
+    use crate::agent_hub::portable_actions::models::{
+        PortableAssetCanonicalEffect, PortableAssetPlanOperation,
+    };
     use crate::agent_hub::portable_inventory::{
         PortableInventoryItemCapabilitiesDto, PortableInventoryManagementState,
         PortableInventorySourceOrigin,
@@ -1033,8 +1032,7 @@ mod tests {
             .expect("production source before tests");
         let soft_skip = format!(
             "{}{}",
-            "if let Ok(actual) = ",
-            "inventory_content_hash_for_path"
+            "if let Ok(actual) = ", "inventory_content_hash_for_path"
         );
         assert!(
             !prod.contains(&soft_skip),

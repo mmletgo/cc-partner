@@ -1905,6 +1905,7 @@ impl RemoteEventBridgeRegistry {
 /// Code Logic（这个函数做什么）:
 ///     创建 cancel/runtime（seed cursor + watch_keys + project_running_sessions）并 spawn
 ///     remote_event_loop；结束后置 finished。
+#[allow(clippy::too_many_arguments)] // bridge spawn needs cursor/watch/project seed + filter
 fn spawn_bridge_task(
     device_id: String,
     base_url: String,
@@ -2188,6 +2189,7 @@ async fn remote_event_loop(
 /// Code Logic（这个函数做什么）:
 ///     复用 `PeerClient::open_ndjson_stream` 并带 after 游标；错误 body 只读 8 KiB 前缀；
 ///     chunk 解析受 1 MiB 限制；Event 推进 after_cursor；Gap 清空 buffer 并返回 StreamGap。
+#[allow(clippy::too_many_arguments)] // stream reader needs state/ids/cancel/cursor/filter
 async fn read_remote_event_stream(
     state: &AppState,
     device_id: &str,

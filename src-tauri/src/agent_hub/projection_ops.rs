@@ -779,13 +779,13 @@ async fn render_instruction_block_reason(
 /// Code Logic（这个函数做什么）:
 ///     DeactivatePackage 或 RenderInstruction 任一允许写 → 放行；否则返回阻断原因。
 async fn absent_write_block_reason(target: AgentTarget, env: &TargetEnvironment) -> Option<String> {
-    if write_capability_block_reason(target, env, TargetCapability::DeactivatePackage)
-        .await
-        .is_none()
-    {
-        return None;
+    // Deactivate 允许写则放行；否则看 RenderInstruction（任一允许 → None）。
+    match write_capability_block_reason(target, env, TargetCapability::DeactivatePackage).await {
+        None => None,
+        Some(_) => {
+            write_capability_block_reason(target, env, TargetCapability::RenderInstruction).await
+        }
     }
-    write_capability_block_reason(target, env, TargetCapability::RenderInstruction).await
 }
 
 /// 通用写 capability 阻断原因。

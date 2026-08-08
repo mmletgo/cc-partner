@@ -169,8 +169,8 @@ pub async fn build_portable_selection_envelope(
                                                 projected_object_bytes,
                                                 b.len() as u64,
                                             )?;
-                                            projected_object_bytes =
-                                                projected_object_bytes.saturating_add(b.len() as u64);
+                                            projected_object_bytes = projected_object_bytes
+                                                .saturating_add(b.len() as u64);
                                             seen_hashes.insert(entry.blob_hash.clone());
                                             object_bytes.insert(entry.blob_hash.clone(), b.clone());
                                             objects.push(SnapshotObjectDescriptor {
