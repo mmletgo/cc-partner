@@ -316,3 +316,275 @@ export function toggleDestinationSelection(
 export function defaultDestinationsForSource(source: AgentTarget): AgentTarget[] {
   return destinationCandidates(source);
 }
+
+// ── Full-volume mode (T10) ─────────────────────────────────────────
+
+/** 适配模式：选择性（多目标指令）| 全量（单目标五类）。 */
+export type CrossAgentAdaptVolumeMode = 'selective' | 'full';
+
+/** 五类 kind wire token。 */
+export type CrossAgentFullKind =
+  | 'instruction'
+  | 'skill'
+  | 'command'
+  | 'mcp'
+  | 'plugin';
+
+/** 全量 plan 单项。 */
+export interface CrossAgentFullPlanItem {
+  kind: CrossAgentFullKind;
+  logicalKey: string;
+  action: string;
+  path: string;
+  content?: string | null;
+  residualReason?: string | null;
+  included: boolean;
+}
+
+/** 全量适配方案。 */
+export interface CrossAgentFullPlan {
+  source: AgentTarget;
+  destination: AgentTarget;
+  scope: string;
+  items: CrossAgentFullPlanItem[];
+  planHash: string;
+  generator: string;
+}
+
+/** 全量 apply 单项结果。 */
+export interface CrossAgentFullApplyItemResult {
+  kind: CrossAgentFullKind;
+  logicalKey: string;
+  status: string;
+  path: string;
+  errorCode?: string | null;
+}
+
+/** 全量预览闸门输入。 */
+export interface CrossAgentFullPreviewGateInput {
+  deviceId: string | null;
+  source: AgentTarget;
+  destination: AgentTarget | null;
+  sourceMarkdown: string;
+  busy: boolean;
+  scope: AgentHubScope;
+  projectKey: string | null;
+  scopeConfirmed: boolean;
+}
+
+/** 全量预览闸门结果。 */
+export interface CrossAgentFullPreviewGate {
+  ok: boolean;
+  reason:
+    | 'ok'
+    | 'peerBlocked'
+    | 'busy'
+    | 'emptyMarkdown'
+    | 'emptyDestination'
+    | 'sourceEqualsDestination'
+    | 'scopeUnconfirmed'
+    | 'projectKeyRequired';
+}
+
+/** 全量 apply 闸门输入。 */
+export interface CrossAgentFullApplyGateInput {
+  deviceId: string | null;
+  plan: CrossAgentFullPlan | null;
+  busy: boolean;
+}
+
+/** 全量 apply 闸门结果。 */
+export interface CrossAgentFullApplyGate {
+  ok: boolean;
+  reason: 'ok' | 'peerBlocked' | 'busy' | 'missingPreview' | 'noApplicable' | 'emptyPlanHash';
+  includedCount: number;
+}
+
+const FULL_KINDS: CrossAgentFullKind[] = [
+  'instruction',
+  'skill',
+  'command',
+  'mcp',
+  'plugin',
+];
+
+/**
+ * Business Logic: 规范化 full kind；未知 → skill 保守。
+ * Code Logic: 字面量匹配。
+ */
+export function normalizeFullKind(value: unknown): CrossAgentFullKind {
+  if (
+    value === 'instruction' ||
+    value === 'skill' ||
+    value === 'command' ||
+    value === 'mcp' ||
+    value === 'plugin'
+  ) {
+    return value;
+  }
+  return 'skill';
+}
+
+/**
+ * Business Logic: 解析全量 plan IPC。
+ * Code Logic: 结构守卫；items 行级容错；planHash 必填。
+ */
+export function parseCrossAgentFullPlan(raw: unknown): CrossAgentFullPlan | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  if (!isAgentTarget(obj.source) || !isAgentTarget(obj.destination)) return null;
+  if (typeof obj.planHash !== 'string' || obj.planHash.trim().length === 0) return null;
+  if (typeof obj.scope !== 'string') return null;
+  if (!Array.isArray(obj.items)) return null;
+  const items: CrossAgentFullPlanItem[] = [];
+  for (const row of obj.items) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    if (typeof r.logicalKey !== 'string' || typeof r.path !== 'string') continue;
+    items.push({
+      kind: normalizeFullKind(r.kind),
+      logicalKey: r.logicalKey,
+      action: typeof r.action === 'string' ? r.action : 'skip',
+      path: r.path,
+      content: typeof r.content === 'string' ? r.content : null,
+      residualReason: typeof r.residualReason === 'string' ? r.residualReason : null,
+      included: r.included !== false,
+    });
+  }
+  return {
+    source: obj.source,
+    destination: obj.destination,
+    scope: obj.scope,
+    items,
+    planHash: obj.planHash,
+    generator: typeof obj.generator === 'string' ? obj.generator : 'stub',
+  };
+}
+
+/**
+ * Business Logic: 解析全量 apply 结果。
+ * Code Logic: 行级容错。
+ */
+export function parseCrossAgentFullApplyResults(
+  raw: unknown,
+): CrossAgentFullApplyItemResult[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CrossAgentFullApplyItemResult[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    if (typeof r.logicalKey !== 'string' || typeof r.path !== 'string') continue;
+    out.push({
+      kind: normalizeFullKind(r.kind),
+      logicalKey: r.logicalKey,
+      status: typeof r.status === 'string' ? r.status : 'failed',
+      path: r.path,
+      errorCode: typeof r.errorCode === 'string' ? r.errorCode : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Business Logic: 可 apply 的全量项 = included 且 action≠skip 且无 residual。
+ * Code Logic: filter。
+ */
+export function countApplicableFullItems(plan: CrossAgentFullPlan | null | undefined): number {
+  if (!plan) return 0;
+  return plan.items.filter(
+    (item) => item.included && item.action !== 'skip' && !item.residualReason,
+  ).length;
+}
+
+/**
+ * Business Logic: 全量 preview 硬门闩（单目标）。
+ * Code Logic: 按优先级短路。
+ */
+export function canRunCrossAgentFullPreview(
+  input: CrossAgentFullPreviewGateInput,
+): CrossAgentFullPreviewGate {
+  if (isPeerContextBlocked(input.deviceId)) {
+    return { ok: false, reason: 'peerBlocked' };
+  }
+  if (input.busy) {
+    return { ok: false, reason: 'busy' };
+  }
+  if (input.sourceMarkdown.trim().length === 0) {
+    return { ok: false, reason: 'emptyMarkdown' };
+  }
+  if (!input.destination) {
+    return { ok: false, reason: 'emptyDestination' };
+  }
+  if (input.destination === input.source) {
+    return { ok: false, reason: 'sourceEqualsDestination' };
+  }
+  if (!input.scopeConfirmed) {
+    return { ok: false, reason: 'scopeUnconfirmed' };
+  }
+  if (input.scope === 'project' && !(input.projectKey && input.projectKey.trim().length > 0)) {
+    return { ok: false, reason: 'projectKeyRequired' };
+  }
+  return { ok: true, reason: 'ok' };
+}
+
+/**
+ * Business Logic: 必须先有 plan_hash 与至少一项可写 included。
+ * Code Logic: 短路。
+ */
+export function canRunCrossAgentFullApply(
+  input: CrossAgentFullApplyGateInput,
+): CrossAgentFullApplyGate {
+  if (isPeerContextBlocked(input.deviceId)) {
+    return { ok: false, reason: 'peerBlocked', includedCount: 0 };
+  }
+  if (input.busy) {
+    return { ok: false, reason: 'busy', includedCount: 0 };
+  }
+  if (!input.plan) {
+    return { ok: false, reason: 'missingPreview', includedCount: 0 };
+  }
+  if (!input.plan.planHash.trim()) {
+    return { ok: false, reason: 'emptyPlanHash', includedCount: 0 };
+  }
+  const includedCount = countApplicableFullItems(input.plan);
+  // 允许仅勾选 residual 项时也点 apply（结果全 skipped）；至少要有一项 included=true
+  const anyIncluded = input.plan.items.some((i) => i.included);
+  if (!anyIncluded) {
+    return { ok: false, reason: 'noApplicable', includedCount: 0 };
+  }
+  return { ok: true, reason: 'ok', includedCount };
+}
+
+/**
+ * Business Logic: 切换 plan 项 included 后返回新 plan（浅拷贝 items）。
+ * Code Logic: map by logicalKey。
+ */
+export function toggleFullPlanItemIncluded(
+  plan: CrossAgentFullPlan,
+  logicalKey: string,
+): CrossAgentFullPlan {
+  return {
+    ...plan,
+    items: plan.items.map((item) =>
+      item.logicalKey === logicalKey ? { ...item, included: !item.included } : item,
+    ),
+  };
+}
+
+/**
+ * Business Logic: 全量模式默认单目标 = 第一个候选。
+ * Code Logic: destinationCandidates[0]。
+ */
+export function defaultFullDestination(source: AgentTarget): AgentTarget | null {
+  return destinationCandidates(source)[0] ?? null;
+}
+
+/**
+ * Business Logic: UI 展示五类是否齐全（调试/空态）。
+ * Code Logic: Set of kinds。
+ */
+export function fullPlanHasAllKinds(plan: CrossAgentFullPlan | null | undefined): boolean {
+  if (!plan) return false;
+  const kinds = new Set(plan.items.map((i) => i.kind));
+  return FULL_KINDS.every((k) => kinds.has(k));
+}

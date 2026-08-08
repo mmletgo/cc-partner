@@ -15,12 +15,16 @@ import { CrossAgentAdaptPage } from './CrossAgentAdaptPage';
 
 const previewMock = vi.fn();
 const applyMock = vi.fn();
+const previewFullMock = vi.fn();
+const applyFullMock = vi.fn();
 const inspectMock = vi.fn();
 
 vi.mock('@/api/agentHub', () => ({
   agentHubApi: {
     previewCrossAgentInstruction: (...args: unknown[]) => previewMock(...args),
     applyCrossAgentInstruction: (...args: unknown[]) => applyMock(...args),
+    previewCrossAgentFull: (...args: unknown[]) => previewFullMock(...args),
+    applyCrossAgentFull: (...args: unknown[]) => applyFullMock(...args),
     inspectUserInstructionWorkspace: (...args: unknown[]) => inspectMock(...args),
   },
 }));
@@ -32,6 +36,8 @@ beforeAll(async () => {
 beforeEach(() => {
   previewMock.mockReset();
   applyMock.mockReset();
+  previewFullMock.mockReset();
+  applyFullMock.mockReset();
   inspectMock.mockReset();
   inspectMock.mockResolvedValue({
     targets: [],
@@ -93,5 +99,25 @@ describe('CrossAgentAdaptPage', () => {
     expect((screen.getByTestId('cross-agent-adapt-preview') as HTMLButtonElement).disabled).toBe(
       true,
     );
+  });
+
+  test('mode toggle switches to full single-destination UI', async () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <CrossAgentAdaptPage
+          context={{ ...DEFAULT_AGENT_HUB_CONTEXT, adaptView: true }}
+          initialSourceMarkdown="Always run tests."
+          onExit={() => undefined}
+        />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByTestId('cross-agent-adapt-mode-selective')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('cross-agent-adapt-mode-full'));
+    await waitFor(() => {
+      expect(screen.getByTestId('cross-agent-adapt-full-destination')).toBeTruthy();
+      expect(screen.getByTestId('cross-agent-adapt-full-dest-codex')).toBeTruthy();
+    });
+    expect(screen.queryByTestId('cross-agent-adapt-destinations')).toBeNull();
   });
 });

@@ -12,17 +12,25 @@ import { describe, expect, test } from 'vitest';
 import {
   adaptModeTone,
   canRunCrossAgentApply,
+  canRunCrossAgentFullApply,
+  canRunCrossAgentFullPreview,
   canRunCrossAgentPreview,
   canSelectDestination,
   countApplicableDestinations,
+  countApplicableFullItems,
   defaultDestinationsForSource,
+  defaultFullDestination,
   destinationCandidates,
+  fullPlanHasAllKinds,
   isPeerContextBlocked,
   normalizeAdaptMode,
   parseCrossAgentApplyResults,
+  parseCrossAgentFullPlan,
   parseCrossAgentPreview,
   sanitizeDestinations,
   toggleDestinationSelection,
+  toggleFullPlanItemIncluded,
+  type CrossAgentFullPlan,
   type CrossAgentPreviewReport,
 } from './crossAgentPresentation';
 
@@ -216,5 +224,106 @@ describe('parse preview/apply', () => {
     expect(countApplicableDestinations(preview)).toBe(1);
     expect(adaptModeTone('shared')).toBe('success');
     expect(adaptModeTone('residual')).toBe('danger');
+  });
+
+  test('full mode: single destination gates and plan parse/toggle', () => {
+    expect(defaultFullDestination('claude')).toBe('codex');
+    expect(
+      canRunCrossAgentFullPreview({
+        deviceId: null,
+        source: 'claude',
+        destination: 'codex',
+        sourceMarkdown: 'hi',
+        busy: false,
+        scope: 'user',
+        projectKey: null,
+        scopeConfirmed: true,
+      }).ok,
+    ).toBe(true);
+    expect(
+      canRunCrossAgentFullPreview({
+        deviceId: null,
+        source: 'claude',
+        destination: null,
+        sourceMarkdown: 'hi',
+        busy: false,
+        scope: 'user',
+        projectKey: null,
+        scopeConfirmed: true,
+      }).reason,
+    ).toBe('emptyDestination');
+    expect(
+      canRunCrossAgentFullPreview({
+        deviceId: 'peer',
+        source: 'claude',
+        destination: 'codex',
+        sourceMarkdown: 'hi',
+        busy: false,
+        scope: 'user',
+        projectKey: null,
+        scopeConfirmed: true,
+      }).reason,
+    ).toBe('peerBlocked');
+
+    const plan = parseCrossAgentFullPlan({
+      source: 'claude',
+      destination: 'codex',
+      scope: 'user',
+      planHash: 'abc',
+      generator: 'stub',
+      items: [
+        {
+          kind: 'instruction',
+          logicalKey: 'instruction:user',
+          action: 'create',
+          path: '/tmp/AGENTS.md',
+          included: true,
+        },
+        {
+          kind: 'skill',
+          logicalKey: 'skill:demo',
+          action: 'skip',
+          path: '/tmp/skill',
+          residualReason: 'stub',
+          included: true,
+        },
+        {
+          kind: 'command',
+          logicalKey: 'inventory:empty:command',
+          action: 'skip',
+          path: '',
+          residualReason: 'none',
+          included: false,
+        },
+        {
+          kind: 'mcp',
+          logicalKey: 'inventory:empty:mcp',
+          action: 'skip',
+          path: '',
+          residualReason: 'none',
+          included: false,
+        },
+        {
+          kind: 'plugin',
+          logicalKey: 'inventory:empty:plugin',
+          action: 'skip',
+          path: '',
+          residualReason: 'none',
+          included: false,
+        },
+      ],
+    }) as CrossAgentFullPlan;
+    expect(fullPlanHasAllKinds(plan)).toBe(true);
+    expect(countApplicableFullItems(plan)).toBe(1);
+    expect(canRunCrossAgentFullApply({ deviceId: null, plan, busy: false }).ok).toBe(true);
+    expect(
+      canRunCrossAgentFullApply({ deviceId: null, plan: null, busy: false }).reason,
+    ).toBe('missingPreview');
+
+    const toggled = toggleFullPlanItemIncluded(plan, 'instruction:user');
+    expect(toggled.items[0]?.included).toBe(false);
+    expect(
+      canRunCrossAgentFullApply({ deviceId: null, plan: toggled, busy: false }).reason,
+    ).toBe('ok'); // skill still included (even if residual)
   });
 });
