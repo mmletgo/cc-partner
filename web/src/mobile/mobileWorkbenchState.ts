@@ -18,26 +18,39 @@ export type MobileWorkbenchPanel =
   | 'provider';
 
 /**
+ * 移动端主导航模式。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   项目绑定入口（终端/文件/Git 等）应像桌面一样收进「某项目工作台」；
+ *   无项目时顶层只保留全局入口，进入项目后再切换为项目内导航。
+ *
+ * Code Logic（联合形态）:
+ *   global=项目列表与全局工具；project=当前项目工作台 + 全局快捷入口。
+ */
+export type MobileWorkbenchNavMode = 'global' | 'project';
+
+/**
  * 移动端主导航任务分组 id。
  *
  * Business Logic（为什么需要这个类型）:
- *   十个扁平 panel 增加导航负担；按任务分组后仍映射既有 MobileWorkbenchPanel，不引入第二套路由。
+ *   双模式导航按任务分组渲染；global 与 project 使用不同分组集合。
  *
  * Code Logic（联合形态）:
- *   projects/attention/work/automation/more 五个稳定分组 id。
+ *   global: projects/inbox/tools/system；project: work/shortcuts。
  */
 export type MobileWorkbenchNavGroupId =
   | 'projects'
-  | 'attention'
+  | 'inbox'
+  | 'tools'
+  | 'system'
   | 'work'
-  | 'automation'
-  | 'more';
+  | 'shortcuts';
 
 /**
  * 移动端主导航分组。
  *
  * Business Logic（为什么需要这个接口）:
- *   Drawer/rail 需要按组渲染 section + 组内 panel 入口，并保证每个 panel 恰好出现一次。
+ *   Drawer/rail 需要按组渲染 section + 组内 panel 入口。
  *
  * Code Logic（字段说明）:
  *   id 为分组；panels 为该组包含的 MobileWorkbenchPanel 只读列表。
@@ -63,18 +76,50 @@ export interface MobileViewportLayoutHints {
   terminalMinHeight: number;
 }
 
-/** 设计合同：Projects / Attention / Work / Automation / More 映射，每个 panel 恰好一次。 */
-const MOBILE_WORKBENCH_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
-  { id: 'projects', panels: ['projects', 'worktrees'] },
-  { id: 'attention', panels: ['attention'] },
-  { id: 'work', panels: ['terminal', 'browser', 'files', 'git', 'prompt'] },
-  { id: 'automation', panels: ['automation'] },
-  { id: 'more', panels: ['settings', 'provider'] },
+/** 必须绑定 active project 才有意义的面板（进入项目工作台后才出现在主导航）。 */
+const MOBILE_PROJECT_BOUND_PANELS: readonly MobileWorkbenchPanel[] = [
+  'terminal',
+  'browser',
+  'files',
+  'git',
+  'worktrees',
+  'automation',
 ];
 
-/** 由分组扁平化得到的 panel 顺序，保证与分组合同一致。 */
-const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] =
-  MOBILE_WORKBENCH_NAV_GROUPS.flatMap((group) => group.panels);
+/** 全局模式：与桌面侧栏一致，不暴露项目内工具。 */
+const MOBILE_GLOBAL_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
+  { id: 'projects', panels: ['projects'] },
+  { id: 'inbox', panels: ['attention'] },
+  { id: 'tools', panels: ['prompt'] },
+  { id: 'system', panels: ['settings', 'provider'] },
+];
+
+/**
+ * 项目模式：项目内工具 + 底部全局快捷（待处理/Prompt/设置）。
+ * Provider 仅全局模式可达，避免项目工作台噪音。
+ */
+const MOBILE_PROJECT_NAV_GROUPS: readonly MobileWorkbenchNavGroup[] = [
+  {
+    id: 'work',
+    panels: ['terminal', 'browser', 'files', 'git', 'worktrees', 'automation'],
+  },
+  { id: 'shortcuts', panels: ['attention', 'prompt', 'settings'] },
+];
+
+/** 全量 panel 枚举（去重后），供测试与「存在性」合同使用。 */
+const MOBILE_WORKBENCH_PANEL_ORDER: readonly MobileWorkbenchPanel[] = [
+  'projects',
+  'attention',
+  'prompt',
+  'settings',
+  'provider',
+  'terminal',
+  'browser',
+  'files',
+  'git',
+  'worktrees',
+  'automation',
+];
 
 export type MobileWorktreeStatusKind = 'clean' | 'dirty' | 'conflict';
 
@@ -220,10 +265,38 @@ export function getInitialMobileWorkbenchPanel(): MobileWorkbenchPanel {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   移动端 Workbench 的 shell 导航、测试和后续面板扩展需要共享同一份项目级面板顺序，避免自动化入口被误放到 worktree 快捷切换器。
+ *   终端/文件/Git 等入口必须绑定具体项目；导航与深链需要统一判定。
  *
  * Code Logic（这个函数做什么）:
- *   返回由导航分组扁平化得到的只读主面板顺序；每个 panel 恰好出现一次。
+ *   panel 属于 MOBILE_PROJECT_BOUND_PANELS 时返回 true。
+ */
+export function isMobileProjectBoundPanel(panel: MobileWorkbenchPanel): boolean {
+  return (MOBILE_PROJECT_BOUND_PANELS as readonly string[]).includes(panel);
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Drawer/rail 在「全局壳」与「项目工作台」之间切换展示，需要稳定可测的 mode 解析。
+ *
+ * Code Logic（这个函数做什么）:
+ *   无 active project → global；panel 为 projects/provider → global；
+ *   其余（含 attention/prompt/settings 与项目绑定面板）在有项目时 → project。
+ */
+export function resolveMobileNavMode(
+  panel: MobileWorkbenchPanel,
+  hasActiveProject: boolean,
+): MobileWorkbenchNavMode {
+  if (!hasActiveProject) return 'global';
+  if (panel === 'projects' || panel === 'provider') return 'global';
+  return 'project';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   移动端 Workbench 的 shell 导航、测试和后续面板扩展需要共享同一份 panel 全集顺序。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回只读 panel 全集；每个 panel 恰好出现一次（跨两种导航模式的并集）。
  */
 export function getMobileWorkbenchPanelOrder(): readonly MobileWorkbenchPanel[] {
   return MOBILE_WORKBENCH_PANEL_ORDER;
@@ -231,13 +304,15 @@ export function getMobileWorkbenchPanelOrder(): readonly MobileWorkbenchPanel[] 
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   Drawer/rail 需要按任务分组渲染导航，降低十个扁平入口的扫描成本。
+ *   Drawer/rail 按当前导航模式渲染分组，避免无项目时展示终端/文件等无意义入口。
  *
  * Code Logic（这个函数做什么）:
- *   返回固定的 Projects/Attention/Work/Automation/More 分组合同（只读）。
+ *   mode=global 返回全局四组；mode=project 返回 work + shortcuts。
  */
-export function getMobileWorkbenchNavGroups(): readonly MobileWorkbenchNavGroup[] {
-  return MOBILE_WORKBENCH_NAV_GROUPS;
+export function getMobileWorkbenchNavGroups(
+  mode: MobileWorkbenchNavMode = 'global',
+): readonly MobileWorkbenchNavGroup[] {
+  return mode === 'project' ? MOBILE_PROJECT_NAV_GROUPS : MOBILE_GLOBAL_NAV_GROUPS;
 }
 
 /**
@@ -245,17 +320,18 @@ export function getMobileWorkbenchNavGroups(): readonly MobileWorkbenchNavGroup[
  *   选中 panel 时要高亮所属分组，且深链/测试需要从 panel 反查 group。
  *
  * Code Logic（这个函数做什么）:
- *   遍历分组表，返回包含该 panel 的 group id；未命中时抛错（合同完整性守卫）。
+ *   在指定 mode 的分组表中查找 panel；未命中时抛错（合同完整性守卫）。
  */
 export function getMobileNavGroupIdForPanel(
   panel: MobileWorkbenchPanel,
+  mode: MobileWorkbenchNavMode = 'global',
 ): MobileWorkbenchNavGroupId {
-  for (const group of MOBILE_WORKBENCH_NAV_GROUPS) {
+  for (const group of getMobileWorkbenchNavGroups(mode)) {
     if (group.panels.includes(panel)) {
       return group.id;
     }
   }
-  throw new Error(`Panel ${panel} is not mapped to any mobile nav group`);
+  throw new Error(`Panel ${panel} is not mapped to mobile nav mode ${mode}`);
 }
 
 /**
@@ -413,16 +489,19 @@ export function canSelectMobileProject(project: WorkbenchProject): boolean {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   远端快捷方式在移动端已复用 Workbench 二级代理链路，导航行为需要与本机项目保持一致。
+ *   项目绑定面板在无 active project 时不可进入，应回到项目列表引导用户选择。
+ *   本机与远端快捷方式共享同一套导航规则。
  *
  * Code Logic（这个函数做什么）:
- *   接收当前项目和目标面板；当前 local/remote 都直接返回目标面板，project 参数保留给后续扩展。
+ *   若 next 为项目绑定面板且 project 为空，返回 projects；否则返回 next。
  */
 export function selectMobilePanelForProject(
   project: WorkbenchProject | null,
   next: MobileWorkbenchPanel,
 ): MobileWorkbenchPanel {
-  void project;
+  if (isMobileProjectBoundPanel(next) && !project) {
+    return 'projects';
+  }
   return next;
 }
 

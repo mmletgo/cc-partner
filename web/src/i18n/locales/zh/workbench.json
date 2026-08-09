@@ -472,14 +472,16 @@
       "prompt": "Prompt",
       "automation": "自动化",
       "settings": "设置",
-      "provider": "Provider"
+      "provider": "Provider",
+      "backToProjects": "返回项目"
     },
     "navGroups": {
       "projects": "项目",
-      "attention": "待处理",
-      "work": "工作",
-      "automation": "自动化",
-      "more": "更多"
+      "inbox": "收件箱",
+      "tools": "工具",
+      "system": "系统",
+      "work": "工作台",
+      "shortcuts": "快捷"
     },
     "placeholders": {
       "projects": {

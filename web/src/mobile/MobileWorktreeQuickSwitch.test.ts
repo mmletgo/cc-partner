@@ -18,9 +18,11 @@ type TestableMobileWorkbenchShellProps = {
   project: string | null;
   worktree: string | null;
   session: string | null;
+  hasActiveProject?: boolean;
   worktreeStatusDisabled?: boolean;
   onWorktreeStatusClick?: () => void;
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
+  onBackToProjects?: () => void;
   children?: ReactNode;
 };
 
@@ -236,9 +238,11 @@ describe('MobileWorktreeQuickSwitch', () => {
             project: 'cc-partner',
             worktree: 'feature/mobile',
             session: 'shell',
+            hasActiveProject: true,
             worktreeStatusDisabled: true,
             onWorktreeStatusClick: () => undefined,
             onPanelChange: () => undefined,
+            onBackToProjects: () => undefined,
           },
           createElement('section', null, 'panel'),
         ),
@@ -257,7 +261,12 @@ describe('MobileWorktreeQuickSwitch', () => {
       assertIncludes(
         shellMarkup,
         '自动化',
-        'mobile shell navigation should expose automation as a panel',
+        'project-mode shell navigation should expose automation as a panel',
+      );
+      assertIncludes(
+        shellMarkup,
+        'data-nav-mode="project"',
+        'terminal panel with active project should use project nav mode',
       );
     },
     20_000,

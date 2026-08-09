@@ -477,14 +477,16 @@
       "automation": "Automation",
       "settings": "Settings",
       "attention": "Attention",
-      "provider": "Provider"
+      "provider": "Provider",
+      "backToProjects": "Back to projects"
     },
     "navGroups": {
       "projects": "Projects",
-      "attention": "Attention",
-      "work": "Work",
-      "automation": "Automation",
-      "more": "More"
+      "inbox": "Inbox",
+      "tools": "Tools",
+      "system": "System",
+      "work": "Workbench",
+      "shortcuts": "Shortcuts"
     },
     "placeholders": {
       "projects": {

@@ -626,7 +626,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 - Attention 列表每行仅一个 tab stop（单 button，动作文案为 span）
 - 侧栏按 Explore/Work/Knowledge/Connect/System 分组；`/` 仍是 GitHub Trending；Workbench 在 Work 组；短窗口侧栏 content 可滚、footer 不覆盖
 - GUI 首次启动 LAN listener 前必须完成风险披露确认（首选 TCP 62116 / 端口递增 / mDNS UDP 5353 / 无身份校验）；确认写入 `gui-bootstrap.json`，不是可切换 LAN 模式
-- Workbench 无项目时仅聚焦空态 CTA（添加本机/连接远端/检查 tmux）；有项目未选中时展示“继续工作”启动页；Mobile 导航固定五组（Projects/Attention/Work/Automation/More）
+- Workbench 无项目时仅聚焦空态 CTA（添加本机/连接远端/检查 tmux）；有项目未选中时展示“继续工作”启动页；Mobile 导航双模式：global=Projects/Inbox/Tools/System，project=Workbench 工具 + Shortcuts（Prompt 全局，项目绑定入口仅 project 模式）
 - 侧栏 `WorkbenchProjectRail` 为项目导航权威入口；添加来源/远端选择走共享 Dialog
 - 固定布局回归 viewport：1024×768、1280×720、390×844、844×390；断言无横向溢出、关键入口键盘可达，命名截图供人工评审（本轮不宣称像素 baseline）
 - 验证：`npm run check:css-tokens && npm run check:i18n && npm run lint && npm run build && npm run check:bundle && npm test && npm run test:e2e`；E2E foundation 冒烟 `frontend-foundation.spec.ts`；手动 VoiceOver/NVDA 覆盖 Dialog/Drawer/Attention/终端 tabs

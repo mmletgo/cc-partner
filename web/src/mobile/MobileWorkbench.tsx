@@ -731,7 +731,7 @@ export function MobileWorkbench(): ReactElement {
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   远端快捷方式在移动端当前只支持自动化代理链路，导航点击本机专属面板时需要回到可用面板。
+   *   项目绑定面板在无 active project 时回落到项目列表；有项目时进入对应工作台面板。
    *
    * Code Logic（这个函数做什么）:
    *   复用 selectMobilePanelForProject 按当前 activeProject 规整目标面板，然后写入 panel state。
@@ -742,6 +742,17 @@ export function MobileWorkbench(): ReactElement {
     },
     [activeProject],
   );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   项目工作台导航需要一键回到全局项目列表，与桌面离开当前工作台上下文对齐。
+   *
+   * Code Logic（这个函数做什么）:
+   *   将 panel 置为 projects（导航模式随之切回 global）。
+   */
+  const handleBackToProjects = useCallback((): void => {
+    setPanel('projects');
+  }, []);
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -1359,10 +1370,12 @@ export function MobileWorkbench(): ReactElement {
       project={activeProject?.name ?? null}
       worktree={activeWorktree?.name ?? null}
       session={activeSession?.name ?? null}
+      hasActiveProject={activeProject != null && canSelectMobileProject(activeProject)}
       worktreeStatusDisabled={!canOpenMobileWorktreeSwitcher(activeProject, worktreeControlsBusy)}
       worktreeStatusExpanded={worktreeSwitcherOpen}
       onWorktreeStatusClick={handleOpenWorktreeSwitcher}
       onPanelChange={handlePanelChange}
+      onBackToProjects={handleBackToProjects}
       attentionTotal={attentionTotal}
       connectionState={connectionState}
       connectionCachedAt={connectionCachedAt}

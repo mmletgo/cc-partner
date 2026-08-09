@@ -7,6 +7,7 @@ import {
   BellIcon,
   BrowserIcon,
   ChevronDownIcon,
+  ChevronLeftIcon,
   FileIcon,
   FolderIcon,
   ForkIcon,
@@ -25,9 +26,11 @@ import {
   getInitialMobileNavOpen,
   getMobileWorkbenchNavGroups,
   openMobileNav,
+  resolveMobileNavMode,
   selectMobilePanel,
   type MobileConnectionState,
   type MobileWorkbenchNavGroupId,
+  type MobileWorkbenchNavMode,
   type MobileWorkbenchPanel,
 } from '../mobileWorkbenchState';
 import styles from '../MobileWorkbench.module.css';
@@ -53,10 +56,11 @@ const MOBILE_NAV_ICONS: Record<MobileWorkbenchPanel, MobileNavIcon> = {
 
 const MOBILE_NAV_GROUP_TITLE_IDS: Record<MobileWorkbenchNavGroupId, string> = {
   projects: 'mobile-nav-group-projects',
-  attention: 'mobile-nav-group-attention',
+  inbox: 'mobile-nav-group-inbox',
+  tools: 'mobile-nav-group-tools',
+  system: 'mobile-nav-group-system',
   work: 'mobile-nav-group-work',
-  automation: 'mobile-nav-group-automation',
-  more: 'mobile-nav-group-more',
+  shortcuts: 'mobile-nav-group-shortcuts',
 };
 
 export interface MobileWorkbenchShellProps {
@@ -64,10 +68,14 @@ export interface MobileWorkbenchShellProps {
   project: string | null;
   worktree: string | null;
   session: string | null;
+  /** 是否已选中可进入工作台的项目；驱动 global/project 导航模式。 */
+  hasActiveProject?: boolean;
   worktreeStatusDisabled?: boolean;
   worktreeStatusExpanded?: boolean;
   onWorktreeStatusClick?: () => void;
   onPanelChange: (panel: MobileWorkbenchPanel) => void;
+  /** 项目工作台导航中的「返回项目列表」；未传则不渲染返回按钮。 */
+  onBackToProjects?: () => void;
   /** Attention 总数；0/null 不显示 badge，规则与桌面 formatAttentionBadgeCount 一致。 */
   attentionTotal?: number | null;
   /** 弱网连接态；offline/reconnecting 时展示缓存时间。 */
@@ -79,23 +87,30 @@ export interface MobileWorkbenchShellProps {
 
 interface MobilePanelNavProps {
   activePanel: MobileWorkbenchPanel;
+  navMode: MobileWorkbenchNavMode;
   onSelect: (panel: MobileWorkbenchPanel) => void;
+  onBackToProjects?: () => void;
   attentionBadge: string | null;
+  projectLabel: string | null;
 }
 
 /**
  * MobilePanelNav（移动端工作台分组导航）
  *
  * Business Logic（为什么需要这个组件）:
- *   移动端抽屉和宽屏固定 rail 需要按任务分组共享同一组面板入口，降低扁平十项的导航负担。
+ *   全局壳只展示项目/待处理/Prompt/设置；进入项目后切换为项目内工具 + 全局快捷，
+ *   与桌面「先选项目再进工作台」一致。
  *
  * Code Logic（这个组件做什么）:
- *   遍历 getMobileWorkbenchNavGroups 渲染 section + panel 按钮；根据 activePanel 标记当前项。
+ *   按 navMode 取 getMobileWorkbenchNavGroups 渲染 section + panel；project 模式顶部提供返回项目。
  */
 function MobilePanelNav({
   activePanel,
+  navMode,
   onSelect,
+  onBackToProjects,
   attentionBadge,
+  projectLabel,
 }: MobilePanelNavProps): ReactElement {
   const { t } = useTranslation(['workbench', 'attention']);
   const labels: Record<MobileWorkbenchPanel, string> = {
@@ -113,15 +128,38 @@ function MobilePanelNav({
   };
   const groupLabels: Record<MobileWorkbenchNavGroupId, string> = {
     projects: t('workbench:mobile.navGroups.projects'),
-    attention: t('workbench:mobile.navGroups.attention'),
+    inbox: t('workbench:mobile.navGroups.inbox'),
+    tools: t('workbench:mobile.navGroups.tools'),
+    system: t('workbench:mobile.navGroups.system'),
     work: t('workbench:mobile.navGroups.work'),
-    automation: t('workbench:mobile.navGroups.automation'),
-    more: t('workbench:mobile.navGroups.more'),
+    shortcuts: t('workbench:mobile.navGroups.shortcuts'),
   };
 
   return (
-    <nav className={styles.navList} aria-label={t('workbench:mobile.navAriaLabel')}>
-      {getMobileWorkbenchNavGroups().map((group) => {
+    <nav
+      className={styles.navList}
+      aria-label={t('workbench:mobile.navAriaLabel')}
+      data-nav-mode={navMode}
+    >
+      {navMode === 'project' && onBackToProjects ? (
+        <button
+          type="button"
+          className={styles.navBackButton}
+          data-testid="mobile-nav-back-to-projects"
+          onClick={onBackToProjects}
+        >
+          <ChevronLeftIcon size={16} aria-hidden="true" />
+          <span className={styles.navBackText}>
+            <span className={styles.navBackLabel}>
+              {t('workbench:mobile.nav.backToProjects')}
+            </span>
+            {projectLabel ? (
+              <span className={styles.navBackProject}>{projectLabel}</span>
+            ) : null}
+          </span>
+        </button>
+      ) : null}
+      {getMobileWorkbenchNavGroups(navMode).map((group) => {
         const titleId = MOBILE_NAV_GROUP_TITLE_IDS[group.id];
         return (
           <section
@@ -187,10 +225,12 @@ export function MobileWorkbenchShell({
   project,
   worktree,
   session,
+  hasActiveProject = false,
   worktreeStatusDisabled = false,
   worktreeStatusExpanded = false,
   onWorktreeStatusClick,
   onPanelChange,
+  onBackToProjects,
   attentionTotal = null,
   connectionState = null,
   connectionCachedAt = null,
@@ -200,6 +240,7 @@ export function MobileWorkbenchShell({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const { t } = useTranslation(['workbench']);
+  const navMode = resolveMobileNavMode(panel, hasActiveProject);
   const worktreeStatusLabel = worktree ?? t('workbench:mobile.status.worktree');
   const attentionBadge =
     attentionTotal == null ? null : formatAttentionBadgeCount(attentionTotal);
@@ -258,6 +299,19 @@ export function MobileWorkbenchShell({
     },
     [onPanelChange, panel],
   );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   项目工作台内需要一键回到全局项目列表，与桌面离开当前项目上下文对齐。
+   *
+   * Code Logic（这个函数做什么）:
+   *   调用 onBackToProjects（通常切到 projects 面板）并关闭抽屉。
+   */
+  const handleBackToProjects = useCallback((): void => {
+    if (!onBackToProjects) return;
+    onBackToProjects();
+    setIsNavOpen(closeMobileNav());
+  }, [onBackToProjects]);
 
   /**
    * Business Logic（为什么需要这个 effect）:
@@ -367,8 +421,11 @@ export function MobileWorkbenchShell({
         </div>
         <MobilePanelNav
           activePanel={panel}
+          navMode={navMode}
           onSelect={handleSelectPanel}
+          onBackToProjects={onBackToProjects ? handleBackToProjects : undefined}
           attentionBadge={attentionBadge}
+          projectLabel={project}
         />
       </Drawer>
 
@@ -379,8 +436,11 @@ export function MobileWorkbenchShell({
         </div>
         <MobilePanelNav
           activePanel={panel}
+          navMode={navMode}
           onSelect={handleSelectPanel}
+          onBackToProjects={onBackToProjects ? handleBackToProjects : undefined}
           attentionBadge={attentionBadge}
+          projectLabel={project}
         />
       </aside>
 

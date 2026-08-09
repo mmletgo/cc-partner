@@ -193,6 +193,19 @@ export const ChevronRightIcon = ({ size, ...rest }: IconProps) => (
 
 /**
  * Business Logic（为什么需要）:
+ *   移动端项目工作台导航需要「返回项目列表」入口，与右向 chevron 对称。
+ *
+ * Code Logic（做什么）:
+ *   渲染向左 chevron 的 16x16 stroke SVG。
+ */
+export const ChevronLeftIcon = ({ size, ...rest }: IconProps) => (
+  <svg {...baseProps(size)} {...rest}>
+    <path d="m10 4-4 4 4 4" />
+  </svg>
+);
+
+/**
+ * Business Logic（为什么需要）:
  *   移动端 Workbench 顶部 worktree pill 需要下拉提示图标，表明可打开快速切换 sheet。
  *
  * Code Logic（做什么）:

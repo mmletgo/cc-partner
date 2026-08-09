@@ -396,18 +396,21 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
     await expect(drawer).toHaveCount(0);
     await expect(openNav).toBeFocused();
 
-    // 分组导航：Projects/Attention/Work/Automation/More；每个 panel 入口仍可点
+    // 全局壳导航：Projects/Inbox/Tools/System；无项目时不暴露 work 组
     await openNav.click();
     const drawerOpen = page.getByRole('dialog');
-    await expect(drawerOpen.getByText('工作', { exact: true })).toBeVisible();
-    await expect(drawerOpen.getByText('更多', { exact: true })).toBeVisible();
+    await expect(drawerOpen.getByText('收件箱', { exact: true })).toBeVisible();
+    await expect(drawerOpen.getByText('工具', { exact: true })).toBeVisible();
+    await expect(drawerOpen.getByText('系统', { exact: true })).toBeVisible();
     await expect(drawerOpen.locator('[data-nav-group="projects"]')).toBeVisible();
-    await expect(drawerOpen.locator('[data-nav-group="work"]')).toBeVisible();
-    await expect(drawerOpen.locator('[data-nav-group="more"]')).toBeVisible();
+    await expect(drawerOpen.locator('[data-nav-group="inbox"]')).toBeVisible();
+    await expect(drawerOpen.locator('[data-nav-group="tools"]')).toBeVisible();
+    await expect(drawerOpen.locator('[data-nav-group="system"]')).toBeVisible();
+    await expect(drawerOpen.locator('[data-nav-group="work"]')).toHaveCount(0);
     // 无 bottom nav
     await expect(page.locator('[data-testid="mobile-bottom-nav"]')).toHaveCount(0);
 
-    // Projects → Attention → Terminal → Files → Automation
+    // Projects → Attention → 选项目进入 Terminal
     await drawerOpen.getByRole('button', { name: /^项目/ }).click();
     const projectCard = page.getByRole('button', { name: /mobile-demo/ });
     await expect(projectCard).toBeVisible({ timeout: 10_000 });
@@ -416,13 +419,19 @@ test.describe('E2E-MOBILE-001 Mobile Workbench journey', () => {
     await page.getByRole('dialog').getByRole('button', { name: /待处理/ }).click();
     await expect(page.getByText('Review delivery')).toBeVisible({ timeout: 10_000 });
 
-    // 选项目进入 terminal（默认 nextPanel terminal）
+    // 选项目进入 terminal（默认 nextPanel terminal）并切到 project 导航
     await openNav.click();
     await page.getByRole('dialog').getByRole('button', { name: /^项目/ }).click();
     await projectCard.click();
 
     // Terminal 面板（session pill 或标题）
     await expect(page.getByText('mobile-shell').first()).toBeVisible({ timeout: 15_000 });
+    await openNav.click();
+    const projectDrawer = page.getByRole('dialog');
+    await expect(projectDrawer.locator('[data-nav-group="work"]')).toBeVisible();
+    await expect(projectDrawer.locator('[data-nav-group="shortcuts"]')).toBeVisible();
+    await expect(projectDrawer.getByTestId('mobile-nav-back-to-projects')).toBeVisible();
+    await projectDrawer.getByRole('button', { name: /终端/ }).click();
     // replay 仍 deferred：不应有 write
     await page.waitForTimeout(400);
     expect(

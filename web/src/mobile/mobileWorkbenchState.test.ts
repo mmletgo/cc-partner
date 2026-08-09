@@ -19,11 +19,13 @@ import {
   getInitialMobileWorkbenchPanel,
   getInitialMobileNavOpen,
   getMobileWorktreeStatusKind,
+  isMobileProjectBoundPanel,
   markMobileConnectionOffline,
   markMobileConnectionOnline,
   markMobileConnectionReconnecting,
   openMobileNav,
   reduceMobileSessionRuntime,
+  resolveMobileNavMode,
   seedMobileSessionRuntimeFromSessions,
   selectMobileWorktreeWorkspacePanel,
   selectMobilePanelForProject,
@@ -164,10 +166,11 @@ describe('mobileWorkbenchState', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   远端项目在移动端需要与本机项目一样进入终端、文件、Git、worktree、Prompt 和自动化面板。
+   *   远端项目在移动端需要与本机项目一样进入终端、文件、Git、worktree 和自动化面板；
+   *   Prompt 为全局入口，无项目也可进入；无项目时项目绑定面板必须回落到 projects。
    *
    * Code Logic（这个测试做什么）:
-   *   构造 local 与 remote 项目，断言面板选择 helper 不再把 remote 项目的本机专属面板回落到 automation。
+   *   构造 local/remote/null，断言 selectMobilePanelForProject 与 isMobileProjectBoundPanel。
    */
   test('selectMobilePanelForProject keeps requested panel for remote projects', () => {
     const localProject = createProject({ id: 'local', name: 'local-app', kind: 'local' });
@@ -182,83 +185,97 @@ describe('mobileWorkbenchState', () => {
     assertEqual(selectMobilePanelForProject(remoteProject, 'projects'), 'projects');
     assertEqual(selectMobilePanelForProject(remoteProject, 'settings'), 'settings');
     assertEqual(selectMobilePanelForProject(remoteProject, 'automation'), 'automation');
+    assertEqual(selectMobilePanelForProject(null, 'terminal'), 'projects');
+    assertEqual(selectMobilePanelForProject(null, 'automation'), 'projects');
+    assertEqual(selectMobilePanelForProject(null, 'prompt'), 'prompt');
+    assertEqual(selectMobilePanelForProject(null, 'attention'), 'attention');
+    assertEqual(isMobileProjectBoundPanel('terminal'), true);
+    assertEqual(isMobileProjectBoundPanel('prompt'), false);
   });
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   设计合同要求固定五组映射，且每个既有 panel 恰好出现一次，避免第二套路由或重复入口。
+   *   双模式导航：全局壳不暴露项目内工具；项目工作台收纳绑定面板并保留全局快捷。
    *
    * Code Logic（这个测试做什么）:
-   *   断言 Projects/Attention/Work/Automation/More 精确 panel 列表，并校验扁平顺序无重复覆盖全部 panel。
+   *   断言 global/project 分组精确 panel 列表，全集无重复，以及 group 反查。
    */
   test('mobile nav groups map every panel exactly once', () => {
-    const groups = getMobileWorkbenchNavGroups();
+    const globalGroups = getMobileWorkbenchNavGroups('global');
     assertArrayEqual(
-      groups.map((group) => group.id),
-      ['projects', 'attention', 'work', 'automation', 'more'],
+      globalGroups.map((group) => group.id),
+      ['projects', 'inbox', 'tools', 'system'],
     );
-    assertArrayEqual(groups[0]?.panels ?? [], ['projects', 'worktrees']);
-    assertArrayEqual(groups[1]?.panels ?? [], ['attention']);
-    assertArrayEqual(groups[2]?.panels ?? [], [
+    assertArrayEqual(globalGroups[0]?.panels ?? [], ['projects']);
+    assertArrayEqual(globalGroups[1]?.panels ?? [], ['attention']);
+    assertArrayEqual(globalGroups[2]?.panels ?? [], ['prompt']);
+    assertArrayEqual(globalGroups[3]?.panels ?? [], ['settings', 'provider']);
+
+    const projectGroups = getMobileWorkbenchNavGroups('project');
+    assertArrayEqual(
+      projectGroups.map((group) => group.id),
+      ['work', 'shortcuts'],
+    );
+    assertArrayEqual(projectGroups[0]?.panels ?? [], [
       'terminal',
       'browser',
       'files',
       'git',
-      'prompt',
+      'worktrees',
+      'automation',
     ]);
-    assertArrayEqual(groups[3]?.panels ?? [], ['automation']);
-    assertArrayEqual(groups[4]?.panels ?? [], ['settings', 'provider']);
+    assertArrayEqual(projectGroups[1]?.panels ?? [], ['attention', 'prompt', 'settings']);
 
     const flat = getMobileWorkbenchPanelOrder();
     assertArrayEqual(flat, [
       'projects',
-      'worktrees',
       'attention',
+      'prompt',
+      'settings',
+      'provider',
       'terminal',
       'browser',
       'files',
       'git',
-      'prompt',
+      'worktrees',
       'automation',
-      'settings',
-      'provider',
     ]);
     assertEqual(new Set(flat).size, flat.length);
-    assertEqual(getMobileNavGroupIdForPanel('worktrees'), 'projects');
-    assertEqual(getMobileNavGroupIdForPanel('git'), 'work');
-    assertEqual(getMobileNavGroupIdForPanel('settings'), 'more');
-    assertEqual(getMobileNavGroupIdForPanel('provider'), 'more');
+    assertEqual(getMobileNavGroupIdForPanel('worktrees', 'project'), 'work');
+    assertEqual(getMobileNavGroupIdForPanel('git', 'project'), 'work');
+    assertEqual(getMobileNavGroupIdForPanel('settings', 'global'), 'system');
+    assertEqual(getMobileNavGroupIdForPanel('provider', 'global'), 'system');
+    assertEqual(getMobileNavGroupIdForPanel('prompt', 'global'), 'tools');
     assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
   });
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   自动化是移动端 Workbench 的项目级同级面板，不能被塞进 worktree quick switch 这类 worktree 附属入口。
+   *   自动化是项目工作台内一等面板，不能塞进 worktree quick switch 附属入口。
    *
    * Code Logic（这个测试做什么）:
-   *   调用移动端面板顺序 helper，断言 automation 出现在主导航顺序中，且位于 Work 组之后的独立 Automation 组。
+   *   断言 automation 在 project 模式 work 组，且全集顺序中位于 git 之后。
    */
   test('automation panel is a first-class mobile panel after the work group', () => {
     const panels = getMobileWorkbenchPanelOrder();
 
     assertEqual(panels.includes('automation'), true);
-    assertEqual(panels.indexOf('prompt') < panels.indexOf('automation'), true);
-    assertEqual(panels.indexOf('automation') < panels.indexOf('settings'), true);
-    assertEqual(getMobileNavGroupIdForPanel('automation'), 'automation');
+    assertEqual(panels.indexOf('worktrees') < panels.indexOf('automation'), true);
+    assertEqual(getMobileNavGroupIdForPanel('automation', 'project'), 'work');
   });
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   全局 Inbox 在移动端必须是独立 Attention 分组，默认首屏仍是 projects。
+   *   全局 Inbox 在全局壳中独立成组；默认首屏仍是 projects。
    *
    * Code Logic（这个测试做什么）:
-   *   断言初始面板为 projects，Attention 分组仅含 attention，且 attention 不是默认面板。
+   *   断言初始面板为 projects，global 第二组为 inbox/attention。
    */
   test('attention is second nav group and never the default panel', () => {
-    const groups = getMobileWorkbenchNavGroups();
+    const groups = getMobileWorkbenchNavGroups('global');
 
     assertEqual(getInitialMobileWorkbenchPanel(), 'projects');
-    assertEqual(groups[1]?.id, 'attention');
+    assertEqual(groups[1]?.id, 'inbox');
     assertArrayEqual(groups[1]?.panels ?? [], ['attention']);
     assertEqual(getMobileWorkbenchPanelOrder().includes('attention'), true);
     assertEqual(getInitialMobileWorkbenchPanel() === 'attention', false);
@@ -266,16 +283,34 @@ describe('mobileWorkbenchState', () => {
 
   /**
    * Business Logic（为什么需要这个测试）:
-   *   Browser preview 是移动端 Workbench 的一等面板，必须固定在 Work 组内 terminal 后、files 前。
+   *   Browser preview 是项目工作台一等面板，固定在 terminal 后、files 前。
    *
    * Code Logic（这个测试做什么）:
-   *   读取分组扁平顺序，断言 browser 位于 terminal 与 files 之间。
+   *   读取 project 模式 work 组顺序，断言 browser 位置。
    */
   test('mobile workbench panel order includes browser preview in work group', () => {
-    const panels = getMobileWorkbenchPanelOrder();
-    assertEqual(panels.indexOf('terminal') + 1, panels.indexOf('browser'));
-    assertEqual(panels.indexOf('browser') + 1, panels.indexOf('files'));
-    assertEqual(getMobileNavGroupIdForPanel('browser'), 'work');
+    const workPanels = getMobileWorkbenchNavGroups('project')[0]?.panels ?? [];
+    assertEqual(workPanels.indexOf('terminal') + 1, workPanels.indexOf('browser'));
+    assertEqual(workPanels.indexOf('browser') + 1, workPanels.indexOf('files'));
+    assertEqual(getMobileNavGroupIdForPanel('browser', 'project'), 'work');
+  });
+
+  /**
+   * Business Logic（为什么需要这个测试）:
+   *   有 active project 时项目绑定面板进入 project 模式；projects/provider 与无项目保持 global。
+   *
+   * Code Logic（这个测试做什么）:
+   *   枚举 resolveMobileNavMode 关键组合。
+   */
+  test('resolveMobileNavMode switches between global shell and project workbench', () => {
+    assertEqual(resolveMobileNavMode('projects', false), 'global');
+    assertEqual(resolveMobileNavMode('terminal', false), 'global');
+    assertEqual(resolveMobileNavMode('terminal', true), 'project');
+    assertEqual(resolveMobileNavMode('attention', true), 'project');
+    assertEqual(resolveMobileNavMode('prompt', true), 'project');
+    assertEqual(resolveMobileNavMode('settings', true), 'project');
+    assertEqual(resolveMobileNavMode('projects', true), 'global');
+    assertEqual(resolveMobileNavMode('provider', true), 'global');
   });
 
   /**
