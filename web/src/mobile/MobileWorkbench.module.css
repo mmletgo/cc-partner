@@ -4,15 +4,13 @@
 
 .shell {
   /*
-   * 钉在 visualViewport/layout viewport 上：高度 = min(layout, vv)，top = vv.offsetTop。
-   * 软键盘弹出时 shell 整体上移/压缩到键盘上方，内容不被遮挡。
-   * mobile.html 声明 interactive-widget=resizes-content，Android Chrome 键盘弹出会缩 layout
-   * viewport 并触发 window.resize；shellHeight 取 layout/visual 较小值兼容两种键盘模式。
-   * 注意：shellHeight 已排除键盘，padding-bottom 只保留 safe-area，
-   * 禁止再叠加 --mobile-keyboard-inset（会二次压缩并挤飞 extra keys）。
+   * shell 高度保持全屏（不压缩）：软键盘弹出时整体上移 keyboardInset，把 terminal 与底部
+   * extra keys 一起平移到键盘上方（terminal 大小不变，顶部菜单会移出屏幕顶部，键盘收起后恢复）。
+   * keyboardInset = layoutViewportHeight - visualViewportHeight，由 visualViewport.resize 驱动。
+   * 注意：padding-bottom 只保留 safe-area，禁止再叠加 --mobile-keyboard-inset（会二次偏移）。
    */
   position: fixed;
-  top: var(--mobile-shell-offset-top, 0px);
+  top: calc(0px - var(--mobile-keyboard-inset, 0px));
   left: 0;
   right: 0;
   width: 100%;

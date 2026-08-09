@@ -292,19 +292,18 @@ describe('mobileWorkbenchState', () => {
 
     const portrait = computeMobileViewportLayoutHints(390, 844, 500, 0);
     assertEqual(portrait.keyboardInset, 344);
-    assertEqual(portrait.shellHeight, 500);
+    // shell 保持全屏高度（不压缩）：键盘弹出时由 shell top=-keyboardInset 整体上移让出空间，
+    // shellHeight 始终 = layoutViewportHeight，terminal 大小不变。
+    assertEqual(portrait.shellHeight, 844);
     assertEqual(portrait.landscape, false);
-    // shellHeight 取 layout/visual 较小值，terminalMinHeight 不得再扣 keyboardInset。
-    assertEqual(portrait.terminalMinHeight, computeMobileTerminalMinHeight(390, 500, 0));
-    assertEqual(portrait.terminalMinHeight, Math.max(160, Math.round(500 * 0.48)));
+    // shell 全屏，terminalMinHeight 基于 layoutViewportHeight（844）。
+    assertEqual(portrait.terminalMinHeight, computeMobileTerminalMinHeight(390, 844, 0));
+    assertEqual(portrait.terminalMinHeight, Math.max(160, Math.round(844 * 0.48)));
 
-    // Android Chrome interactive-widget=resizes-content：键盘弹出时 layout viewport 也缩小，
-    // shellHeight 取 layout/visual 较小值，两者都缩小到键盘上方。
-    const resizesContent = computeMobileViewportLayoutHints(390, 500, 500, 0);
-    assertEqual(resizesContent.shellHeight, 500);
-    // 兜底：layout 比 visual 更小时（layout 已缩、visual 尚未更新），取 layout。
-    const layoutSmaller = computeMobileViewportLayoutHints(390, 400, 500, 0);
-    assertEqual(layoutSmaller.shellHeight, 400);
+    // 非键盘状态：vvHeight = layoutHeight，keyboardInset = 0，shell 不上移、不压缩。
+    const idle = computeMobileViewportLayoutHints(390, 844, 844, 0);
+    assertEqual(idle.shellHeight, 844);
+    assertEqual(idle.keyboardInset, 0);
 
     const landscape = computeMobileViewportLayoutHints(844, 390, 390, 0);
     assertEqual(landscape.landscape, true);

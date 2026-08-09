@@ -300,10 +300,10 @@ export function computeMobileTerminalMinHeight(
  *   shell CSS 变量需要一次计算 keyboard inset、shell 高度与终端优先高度，避免组件内散落公式。
  *
  * Code Logic（这个函数做什么）:
- *   shellHeight = min(layoutViewportHeight, visualViewportHeight)：layout 与 visual 取较小值，
- *   兼容 Android Chrome 两种键盘模式（interactive-widget=resizes-content 缩 layout、默认 resizes-visual
- *   缩 visual），任一缩小都能让 shell 压缩到键盘上方；keyboardInset 仅作 data-keyboard-open 检测，
- *   不从 shellHeight 扣减；terminalMinHeight 基于 shellHeight 直接计算。
+ *   shellHeight = layoutViewportHeight：shell 保持全屏高度不压缩，软键盘弹出时改由 shell 整体上移
+ *   （top = -keyboardInset）把内容平移到键盘上方，terminal 大小不变；keyboardInset =
+ *   layoutViewportHeight - visualViewportHeight（依赖 visualViewport.resize），既驱动 shell 上移
+ *   也作 data-keyboard-open 检测；terminalMinHeight 基于 layoutViewportHeight 计算。
  */
 export function computeMobileViewportLayoutHints(
   layoutViewportWidth: number,
@@ -320,10 +320,11 @@ export function computeMobileViewportLayoutHints(
     vvHeight,
     visualViewportOffsetTop,
   );
-  // layout 与 visual 取较小值：兼容 resizes-content（layout 缩）与 resizes-visual（visual 缩）。
-  const shellHeight = Math.max(0, Math.round(Math.min(layoutViewportHeight, vvHeight)));
+  // shell 保持全屏高度：软键盘弹出时由 shell 整体上移（top=-keyboardInset）而非压缩高度，
+  // terminal 大小不变；shell 上移量由 keyboardInset 驱动。
+  const shellHeight = Math.max(0, Math.round(layoutViewportHeight));
   const landscape = layoutViewportWidth > layoutViewportHeight;
-  // shellHeight 已排除键盘占用，terminalMinHeight 不得二次扣 inset。
+  // shell 全屏不压缩，terminalMinHeight 基于 layoutViewportHeight。
   const terminalMinHeight = computeMobileTerminalMinHeight(
     layoutViewportWidth,
     shellHeight,
