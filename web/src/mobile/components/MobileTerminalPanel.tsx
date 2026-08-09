@@ -12,10 +12,7 @@ import {
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { ArrowRightIcon, EditIcon, MaximizeIcon, MinimizeIcon, PlusIcon, PromptsIcon, XIcon } from '@/lib/icons';
 import type { Prompt, WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
-import {
-  planTerminalBufferWrite,
-  writeTerminalReplay,
-} from '@/pages/Workbench/terminalReplay';
+import { writeTerminalReplay } from '@/pages/Workbench/terminalReplay';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
 import {
   agentFreshnessI18nKey,
@@ -756,20 +753,25 @@ export function MobileTerminalPanel({
     const terminal = terminalRef.current;
     if (!terminal || !sessionId || !replayReadyRef.current) return;
 
-    const plan = planTerminalBufferWrite(writtenBufferRef.current, buffer);
-    if (plan.mode === 'replay') {
-      // 空 next buffer 的 replay 只会 clear 掉已有 scrollback（打开页后短暂空 store 竞态），
-      // 没有可写内容时不得清屏。
-      if (plan.data.length === 0) return;
-      terminal.clear();
-      writeTerminalReplay(terminal, plan.data, replayGateRef);
-      writtenBufferRef.current = buffer;
+    const previous = writtenBufferRef.current;
+    const next = buffer;
+    if (next === previous) return;
+
+    // 首屏 HTTP replay 已把完整历史写入 xterm（含 scrollback）。之后只允许「严格前缀扩展」
+    // 追加 live 增量。xterm.clear() 会把 scrollback 整段清掉（官方语义：仅保留光标行），
+    // 任何 store 不对齐/短 live/Gap 短快照都不得再 clear+重放，否则表现为：
+    // - 无法上滚（scrollback 被清空）；
+    // - 上滚只剩打开时最后一屏的重复帧（TUI 重绘被 clear 后只留最后一屏）。
+    if (next.startsWith(previous)) {
+      const tail = next.slice(previous.length);
+      if (tail.length > 0) {
+        terminal.write(tail);
+      }
+      writtenBufferRef.current = next;
       return;
     }
-    if (plan.mode === 'append') {
-      terminal.write(plan.data);
-      writtenBufferRef.current = buffer;
-    }
+
+    // store 变短或与 xterm 已写内容不对齐：忽略本次绘制，保留现有 scrollback。
   }, [buffer, revision, sessionId]);
 
   /**

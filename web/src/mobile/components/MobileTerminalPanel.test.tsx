@@ -344,4 +344,56 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     expect(store.getBuffer('s1')).not.toContain('window-two-only');
     expect(store.getBuffer('s2')).toContain('window-two-only');
   });
+
+  test('misaligned short store snapshot never clears scrollback after replay', async () => {
+    // 用户现象：上滚只剩打开时最后一屏，或完全不能上滚。
+    // 根因：replay 写入完整历史后，store 又来一段与 written 不对齐/更短的内容，
+    // 旧路径 plan.mode=replay → terminal.clear() 清掉 xterm scrollback。
+    const fullHistory = `${'history line\n'.repeat(40)}recent-tail\n`;
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: fullHistory,
+      truncated: false,
+      lastSeq: 80,
+      ownerInstanceId: 'owner-1',
+    };
+
+    const store = createWorkbenchTerminalBufferStore();
+    const session = buildSession();
+
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(
+        terminalEvents.writeCalls.some((call) => call.data.includes('history line')),
+      ).toBe(true);
+    });
+
+    // 模拟 store 被短快照覆盖（与 written 不对齐）：旧逻辑会 clear，新逻辑必须忽略。
+    act(() => {
+      store.reset('s1', 'recent-tail\n', 80, 'owner-1');
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(terminalEvents.clearCalls.length).toBe(0);
+    // 历史 write 仍应保留在调用记录中（xterm 侧未被 clear 后重写）。
+    expect(
+      terminalEvents.writeCalls.some((call) => call.data.includes('history line')),
+    ).toBe(true);
+  });
 });
