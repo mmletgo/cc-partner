@@ -61,3 +61,58 @@ export function updateMobileTerminalTouchScroll(
     },
   };
 }
+
+export type MobileTerminalBufferType = 'normal' | 'alternate';
+
+export type MobileTerminalScrollMode = 'scrollback' | 'tuiWheel';
+
+/** 单次 touchmove 最多向 PTY 注入的滚轮事件数，防止高速滑动打爆输入流。 */
+export const MOBILE_TERMINAL_TUI_WHEEL_EVENTS_CAP = 8;
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   PC 端 xterm 在 TUI（alternate buffer / 无 scrollback）时，滚轮不会 scrollLines：
+ *   开启 mouse tracking 时发 SGR 滚轮报告（button 64/65），TUI 自己滚内部历史。
+ *   移动端若一律 scrollLines 或误发方向键，Claude Code 会变成「上下选择」而非滚动。
+ *
+ * Code Logic（这个函数做什么）:
+ *   alternate → tuiWheel；normal 且 baseY>0 → scrollback；否则 tuiWheel。
+ */
+export function resolveMobileTerminalScrollMode(
+  bufferType: MobileTerminalBufferType,
+  baseY: number,
+): MobileTerminalScrollMode {
+  if (bufferType === 'alternate') return 'tuiWheel';
+  if (Number.isFinite(baseY) && baseY > 0) return 'scrollback';
+  return 'tuiWheel';
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   Claude Code 等 TUI 在 PC 上靠「鼠标滚轮」滚 transcript，不是方向键（方向键是列表导航）。
+ *   移动端手指滑动必须编码成与 xterm mouse tracking 相同的 SGR wheel 报告。
+ *
+ * Code Logic（这个函数做什么）:
+ *   SGR：`CSI < Pb ; Px ; Py M`，wheel up Pb=64、wheel down Pb=65（xterm CoreMouseService）。
+ *   lines>0（上滑）→ 65（看更新内容）；lines<0（下滑）→ 64（看更旧历史）。
+ *   col/row 为 1-based 字符格；|lines| 截断到 cap。
+ */
+export function encodeMobileTerminalWheelReports(
+  lines: number,
+  col = 1,
+  row = 1,
+  maxEvents: number = MOBILE_TERMINAL_TUI_WHEEL_EVENTS_CAP,
+): string {
+  if (!Number.isFinite(lines) || lines === 0) return '';
+  const cap =
+    Number.isFinite(maxEvents) && maxEvents > 0
+      ? Math.floor(maxEvents)
+      : MOBILE_TERMINAL_TUI_WHEEL_EVENTS_CAP;
+  const count = Math.min(Math.abs(Math.trunc(lines)), cap);
+  if (count === 0) return '';
+  const safeCol = Number.isFinite(col) && col >= 1 ? Math.floor(col) : 1;
+  const safeRow = Number.isFinite(row) && row >= 1 ? Math.floor(row) : 1;
+  // 上滑 lines>0 → wheel down 65；下滑 lines<0 → wheel up 64。
+  const button = lines > 0 ? 65 : 64;
+  return `\x1b[<${button};${safeCol};${safeRow}M`.repeat(count);
+}

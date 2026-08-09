@@ -26,7 +26,9 @@ import {
 } from '../mobileTerminalReplay';
 import {
   beginMobileTerminalTouchScroll,
+  encodeMobileTerminalWheelReports,
   mobileTerminalTouchLineHeight,
+  resolveMobileTerminalScrollMode,
   updateMobileTerminalTouchScroll,
   type MobileTerminalTouchScrollState,
 } from '../mobileTerminalTouchScroll';
@@ -599,9 +601,37 @@ export function MobileTerminalPanel({
         mobileTerminalTouchLineHeight(viewport.clientHeight, terminal.rows, fallbackLineHeight),
       );
       touchScrollStateRef.current = result.state;
-      if (result.lines !== 0) {
-        touchMoved = true;
+      if (result.lines === 0) return;
+      touchMoved = true;
+      // PC：有本地 scrollback → scrollLines；TUI alternate 开启 mouse tracking 时滚轮发 SGR 64/65。
+      // 禁止发方向键——Claude Code 会把它当列表导航，而不是 transcript 滚动。
+      const activeBuffer = terminal.buffer.active;
+      const scrollMode = resolveMobileTerminalScrollMode(activeBuffer.type, activeBuffer.baseY);
+      if (scrollMode === 'scrollback') {
         terminal.scrollLines(result.lines);
+        return;
+      }
+      if (!inputEnabledRef.current) return;
+      // 触点换算为 1-based 字符格，贴近桌面滚轮落点；失败回落 1,1。
+      const rect = viewport.getBoundingClientRect();
+      const cellW = rect.width / Math.max(terminal.cols, 1);
+      const cellH = rect.height / Math.max(terminal.rows, 1);
+      const col =
+        cellW > 0 ? Math.min(terminal.cols, Math.max(1, Math.floor((touch.clientX - rect.left) / cellW) + 1)) : 1;
+      const row =
+        cellH > 0 ? Math.min(terminal.rows, Math.max(1, Math.floor((touch.clientY - rect.top) / cellH) + 1)) : 1;
+      const wheel = encodeMobileTerminalWheelReports(result.lines, col, row);
+      if (!wheel) return;
+      try {
+        inputStreamRef.current?.enqueue(sessionId, wheel);
+      } catch (reason) {
+        if (disposed) return;
+        setPanelError(
+          `${t('workbench:mobile.terminalPanel.errors.write')}: ${getErrorMessage(
+            reason,
+            t('workbench:errors.sessions'),
+          )}`,
+        );
       }
     };
     const handleTouchStart = (event: TouchEvent): void => {

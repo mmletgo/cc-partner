@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs';
 import { describe, test } from 'vitest';
 import {
   beginMobileTerminalTouchScroll,
+  encodeMobileTerminalWheelReports,
   mobileTerminalTouchLineHeight,
+  resolveMobileTerminalScrollMode,
   updateMobileTerminalTouchScroll,
 } from './mobileTerminalTouchScroll';
 
@@ -75,6 +77,53 @@ describe('mobileTerminalTouchScroll', () => {
     );
   });
 
+  test('resolveMobileTerminalScrollMode matches desktop TUI vs normal buffer branch', () => {
+    assertEqual(
+      resolveMobileTerminalScrollMode('alternate', 0),
+      'tuiWheel',
+      'alternate buffer (Claude Code TUI) must use mouse-wheel reports like PC',
+    );
+    assertEqual(
+      resolveMobileTerminalScrollMode('alternate', 50),
+      'tuiWheel',
+      'alternate buffer never uses local scrollLines',
+    );
+    assertEqual(
+      resolveMobileTerminalScrollMode('normal', 0),
+      'tuiWheel',
+      'normal buffer without local scrollback falls back to wheel reports',
+    );
+    assertEqual(
+      resolveMobileTerminalScrollMode('normal', 12),
+      'scrollback',
+      'normal buffer with baseY>0 uses local xterm scrollback',
+    );
+  });
+
+  test('encodeMobileTerminalWheelReports maps swipe to SGR wheel 64/65 not arrow keys', () => {
+    assertEqual(
+      encodeMobileTerminalWheelReports(2, 10, 5),
+      '\x1b[<65;10;5M\x1b[<65;10;5M',
+      'swipe up must send SGR wheel-down (65), not Down arrow',
+    );
+    assertEqual(
+      encodeMobileTerminalWheelReports(-1, 3, 7),
+      '\x1b[<64;3;7M',
+      'swipe down must send SGR wheel-up (64), not Up arrow',
+    );
+    assertEqual(
+      encodeMobileTerminalWheelReports(100, 1, 1, 8).split('M').length - 1,
+      8,
+      'wheel injection must be capped per touchmove',
+    );
+    assertEqual(encodeMobileTerminalWheelReports(0), '', 'zero lines produce no reports');
+    // 防止回归：绝不能变成方向键导航。
+    const payload = encodeMobileTerminalWheelReports(3, 1, 1);
+    if (payload.includes('\x1b[A') || payload.includes('\x1b[B') || payload.includes('\x1bOA')) {
+      throw new Error('wheel reports must not encode CSI/SS3 arrow keys');
+    }
+  });
+
   test('mobile terminal viewport CSS disables native xterm touch scrolling', () => {
     const stylesSource = readFileSync(new URL('./MobileWorkbench.module.css', import.meta.url), 'utf8');
     assertContains(
@@ -99,7 +148,7 @@ describe('mobileTerminalTouchScroll', () => {
     );
   });
 
-  test('MobileTerminalPanel owns touch scroll via capture-phase listeners and scrollLines', () => {
+  test('MobileTerminalPanel branches scrollback vs SGR wheel like desktop', () => {
     const panelSource = readFileSync(
       new URL('./components/MobileTerminalPanel.tsx', import.meta.url),
       'utf8',
@@ -111,9 +160,22 @@ describe('mobileTerminalTouchScroll', () => {
     );
     assertContains(
       panelSource,
-      'terminal.scrollLines(result.lines)',
-      'touch move must map finger delta into xterm scrollLines',
+      'resolveMobileTerminalScrollMode',
+      'panel must branch on buffer type like desktop wheel path',
     );
+    assertContains(
+      panelSource,
+      'terminal.scrollLines(result.lines)',
+      'normal buffer with scrollback still uses local scrollLines',
+    );
+    assertContains(
+      panelSource,
+      'encodeMobileTerminalWheelReports',
+      'TUI/alternate buffer must encode SGR wheel reports into PTY input stream',
+    );
+    if (panelSource.includes('encodeMobileTerminalTuiScrollKeys')) {
+      throw new Error('must not fall back to arrow-key encoding for TUI scroll');
+    }
     assertContains(
       panelSource,
       'passive: false',
