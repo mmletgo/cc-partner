@@ -212,7 +212,6 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
           busy={false}
           onSessionsChange={() => undefined}
           onActiveSessionChange={() => undefined}
-          onNavigateToPromptOptimizer={() => undefined}
         />
       </BuffersProvider>,
     );

@@ -62,6 +62,7 @@ import {
 } from '../mobileTerminalExtraKeys';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 import { MobileFavoriteQuickInput } from './MobileFavoriteQuickInput';
+import { MobilePromptOptimizerSheet } from './MobilePromptOptimizerSheet';
 import { PointerPrimaryButton } from './PointerPrimaryButton';
 
 const MIN_TERMINAL_COLS = 20;
@@ -79,8 +80,6 @@ export interface MobileTerminalPanelProps {
   onSessionsChange: (next: WorkbenchSession[]) => void;
   onActiveSessionChange: (session: WorkbenchSession | null) => void;
   onRefreshSessions?: () => Promise<void> | void;
-  /** 点击终端右下角悬浮的 Prompt 优化入口：跳转到 Prompt 优化面板。 */
-  onNavigateToPromptOptimizer: () => void;
 }
 
 /**
@@ -173,7 +172,6 @@ export function MobileTerminalPanel({
   onSessionsChange,
   onActiveSessionChange,
   onRefreshSessions,
-  onNavigateToPromptOptimizer,
 }: MobileTerminalPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const { resetBuffer, removeBuffer } = useWorkbenchTerminalBuffers();
@@ -187,6 +185,7 @@ export function MobileTerminalPanel({
   const [extraKeysPage, setExtraKeysPage] = useState<MobileTerminalExtraKeyPage>(1);
   const [stickyModifier, setStickyModifier] = useState<MobileTerminalStickyModifier | null>(null);
   const [favoriteSheetOpen, setFavoriteSheetOpen] = useState<boolean>(false);
+  const [promptOptimizerSheetOpen, setPromptOptimizerSheetOpen] = useState<boolean>(false);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -1199,7 +1198,7 @@ export function MobileTerminalPanel({
                   disabled={!canOpenFavoriteQuickInput}
                   aria-label={t('workbench:promptOptimizer.open')}
                   title={t('workbench:promptOptimizer.open')}
-                  onPrimary={onNavigateToPromptOptimizer}
+                  onPrimary={() => setPromptOptimizerSheetOpen(true)}
                 >
                   <EditIcon size={18} aria-hidden="true" />
                 </PointerPrimaryButton>
@@ -1235,6 +1234,12 @@ export function MobileTerminalPanel({
         open={favoriteSheetOpen}
         onClose={() => setFavoriteSheetOpen(false)}
         onSelectPrompt={handleSelectFavoritePrompt}
+      />
+      <MobilePromptOptimizerSheet
+        open={promptOptimizerSheetOpen}
+        onClose={() => setPromptOptimizerSheetOpen(false)}
+        worktree={worktree}
+        session={activeSession}
       />
     </section>
   );

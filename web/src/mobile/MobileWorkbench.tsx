@@ -1328,7 +1328,6 @@ export function MobileWorkbench(): ReactElement {
           onSessionsChange={handleSessionsChange}
           onActiveSessionChange={setActiveSession}
           onRefreshSessions={refreshSessions}
-          onNavigateToPromptOptimizer={() => setPanel('prompt')}
         />
       </Suspense>
     ) : (
