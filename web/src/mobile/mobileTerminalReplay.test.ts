@@ -45,7 +45,24 @@ describe('mobileTerminalReplay', () => {
     assertEqual(
       appendedLive.writtenBuffer,
       'screen-a-tail',
-      'aligned live buffer should become written baseline',
+      'aligned live buffer baseline must equal bytes written to xterm',
+    );
+
+    // live 仅为 replay 后缀（NDJSON 重建后只有近期增量）：必须仍以完整 replay 为 baseline，
+    // 否则 store.reset(短 live) 后 buffer effect 可能 clear 掉 xterm scrollback。
+    const suffixLive = prepareInitialReplayBuffer(
+      'history-line-1\nhistory-line-2\nrecent-tail',
+      'recent-tail',
+    );
+    assertEqual(
+      suffixLive.data,
+      'history-line-1\nhistory-line-2\nrecent-tail',
+      'suffix live must still write full replay history into xterm',
+    );
+    assertEqual(
+      suffixLive.writtenBuffer,
+      suffixLive.data,
+      'writtenBuffer must equal full written data, not the short live suffix',
     );
 
     const unalignedLive = prepareInitialReplayBuffer('replay-history', 'fresh-live-window');

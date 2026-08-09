@@ -238,4 +238,64 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     // 关键断言：scrollback（replay 历史）不得被 terminal.clear() 清空。
     expect(terminalEvents.clearCalls.length).toBe(0);
   });
+
+  test('pre-existing short live suffix does not become store baseline or clear scrollback', async () => {
+    // 刷新后 NDJSON store 只含近期后缀，HTTP replay 才有完整历史。
+    // 若 writtenBuffer/store baseline 错误地取 short live，后续 diff 会 clear 掉 scrollback。
+    const fullHistory = `${'history line\n'.repeat(40)}recent-tail\n`;
+    const shortLive = 'recent-tail\n';
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: fullHistory,
+      truncated: false,
+      lastSeq: 50,
+      ownerInstanceId: 'owner-1',
+    };
+
+    const store = createWorkbenchTerminalBufferStore();
+    // 模拟页面打开前 NDJSON 已写入的短 live 后缀（不含更早历史）。
+    act(() => {
+      store.append('s1', shortLive, 50, 'owner-1');
+    });
+    const session = buildSession();
+
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(
+        terminalEvents.writeCalls.some((call) => call.data.includes('history line')),
+      ).toBe(true);
+    });
+
+    // store baseline 必须是完整历史，不能只剩 short live。
+    await waitFor(() => {
+      expect(store.getBuffer('s1')).toBe(fullHistory);
+    });
+
+    act(() => {
+      store.append('s1', 'post-open-chunk\n', 51, 'owner-1');
+    });
+
+    await waitFor(() => {
+      expect(
+        terminalEvents.writeCalls.some((call) => call.data.includes('post-open-chunk')),
+      ).toBe(true);
+    });
+
+    expect(terminalEvents.clearCalls.length).toBe(0);
+    expect(store.getBuffer('s1')).toContain('history line');
+    expect(store.getBuffer('s1')).toContain('post-open-chunk');
+  });
 });

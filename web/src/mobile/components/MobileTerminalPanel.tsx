@@ -691,11 +691,11 @@ export function MobileTerminalPanel({
         if (disposed || replayRequestIdRef.current !== requestId) return;
         const initial = prepareInitialReplayBuffer(replay.buffer, bufferRef.current);
         writeTerminalReplay(terminal, initial.data, replayGateRef);
+        // writtenBuffer 必须等于实际写入 xterm 的完整历史（见 prepareInitialReplayBuffer），
+        // 不能是 NDJSON 的短 live 后缀；否则 store baseline 过短，后续 diff 可能 clear scrollback。
         writtenBufferRef.current = initial.writtenBuffer;
         replayReadyRef.current = true;
-        // 刷新后外部 buffer store 重建只含 NDJSON live（不含 replay 历史），与 writtenBuffer 字符串
-        // diff 失败会触发 terminal.clear() 清空 scrollback（老内容丢失、无法上滚）。以 replay 为 store
-        // baseline 后，后续 live（seq > lastSeq、同 owner）走 append，scrollback 保留。
+        // 以完整 written 内容作 store baseline；后续 live（seq > lastSeq、同 owner）走 append。
         store.reset(sessionId, initial.writtenBuffer, replay.lastSeq, replay.ownerInstanceId);
       })
       .catch((reason) => {
@@ -757,6 +757,9 @@ export function MobileTerminalPanel({
 
     const plan = planTerminalBufferWrite(writtenBufferRef.current, buffer);
     if (plan.mode === 'replay') {
+      // 空 next buffer 的 replay 只会 clear 掉已有 scrollback（打开页后短暂空 store 竞态），
+      // 没有可写内容时不得清屏。
+      if (plan.data.length === 0) return;
       terminal.clear();
       writeTerminalReplay(terminal, plan.data, replayGateRef);
       writtenBufferRef.current = buffer;
