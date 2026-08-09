@@ -4,8 +4,10 @@
 
 .shell {
   /*
-   * 钉在 visualViewport 上：高度 = vv.height，top = vv.offsetTop。
+   * 钉在 visualViewport/layout viewport 上：高度 = min(layout, vv)，top = vv.offsetTop。
    * 软键盘弹出时 shell 整体上移/压缩到键盘上方，内容不被遮挡。
+   * mobile.html 声明 interactive-widget=resizes-content，Android Chrome 键盘弹出会缩 layout
+   * viewport 并触发 window.resize；shellHeight 取 layout/visual 较小值兼容两种键盘模式。
    * 注意：shellHeight 已排除键盘，padding-bottom 只保留 safe-area，
    * 禁止再叠加 --mobile-keyboard-inset（会二次压缩并挤飞 extra keys）。
    */

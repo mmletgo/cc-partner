@@ -294,9 +294,17 @@ describe('mobileWorkbenchState', () => {
     assertEqual(portrait.keyboardInset, 344);
     assertEqual(portrait.shellHeight, 500);
     assertEqual(portrait.landscape, false);
-    // shellHeight 已是 visualViewport，terminalMinHeight 不得再扣 keyboardInset。
+    // shellHeight 取 layout/visual 较小值，terminalMinHeight 不得再扣 keyboardInset。
     assertEqual(portrait.terminalMinHeight, computeMobileTerminalMinHeight(390, 500, 0));
     assertEqual(portrait.terminalMinHeight, Math.max(160, Math.round(500 * 0.48)));
+
+    // Android Chrome interactive-widget=resizes-content：键盘弹出时 layout viewport 也缩小，
+    // shellHeight 取 layout/visual 较小值，两者都缩小到键盘上方。
+    const resizesContent = computeMobileViewportLayoutHints(390, 500, 500, 0);
+    assertEqual(resizesContent.shellHeight, 500);
+    // 兜底：layout 比 visual 更小时（layout 已缩、visual 尚未更新），取 layout。
+    const layoutSmaller = computeMobileViewportLayoutHints(390, 400, 500, 0);
+    assertEqual(layoutSmaller.shellHeight, 400);
 
     const landscape = computeMobileViewportLayoutHints(844, 390, 390, 0);
     assertEqual(landscape.landscape, true);

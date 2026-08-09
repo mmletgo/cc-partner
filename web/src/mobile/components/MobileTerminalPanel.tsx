@@ -59,7 +59,6 @@ import {
   type MobileTerminalExtraKeyDef,
   type MobileTerminalExtraKeyPage,
   type MobileTerminalStickyModifier,
-  type SoftKeyboardFocusTarget,
 } from '../mobileTerminalExtraKeys';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
 import { PointerPrimaryButton } from './PointerPrimaryButton';
@@ -302,12 +301,8 @@ export function MobileTerminalPanel({
    */
   const handleExtraKeyPress = useCallback(
     (key: MobileTerminalExtraKeyDef): void => {
-      // Extra keys 离开打字态：readonly + inputmode=none + blur，系统键盘不得因快捷键重现。
-      leaveMobileTerminalTypingMode(
-        findMobileTerminalHelperTextarea(viewportRef.current ?? document),
-        document.activeElement as SoftKeyboardFocusTarget | null,
-      );
-      terminalRef.current?.blur();
+      // 按 extra key 只发送按键，不 blur 终端 helper textarea：避免输入态下打乱 xterm 输入追踪
+      // （已输入内容被重复发送）。焦点保持在终端，软键盘由用户点击终端外区域收起。
       const action = resolveMobileTerminalExtraKeyPress(key);
       if (action.type === 'send') {
         sendTerminalInput(action.data);

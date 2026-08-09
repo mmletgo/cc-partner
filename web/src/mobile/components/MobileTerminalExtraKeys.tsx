@@ -2,13 +2,10 @@ import type { ReactElement } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import {
-  findMobileTerminalHelperTextarea,
   getMobileTerminalExtraKeys,
-  leaveMobileTerminalTypingMode,
   type MobileTerminalExtraKeyDef,
   type MobileTerminalExtraKeyPage,
   type MobileTerminalStickyModifier,
-  type SoftKeyboardFocusTarget,
 } from '../mobileTerminalExtraKeys';
 import styles from '../MobileWorkbench.module.css';
 import { PointerPrimaryButton } from './PointerPrimaryButton';
@@ -90,12 +87,13 @@ function extraKeyAriaLabel(
  *
  * Business Logic（为什么需要这个组件）:
  *   手机软键盘缺少 Esc/Tab/Ctrl/方向与 ^C 等；需要在终端 surface 底部提供 Termux 风格固定键位条。
- *   按 extra key 时必须收起系统软键盘：键盘只应在用户点击终端输入区后出现。
+ *   按 extra key 只发送按键，不主动收起软键盘——避免在输入法/输入态下 blur 终端 helper textarea
+ *   打乱 xterm 输入追踪（已输入内容被重复发送）。软键盘由用户点击终端外区域收起。
  *
  * Code Logic（这个组件做什么）:
  *   纯展示：按 page 渲染横向可滚动按钮；modifier 显示 aria-pressed；
- *   pointerdown 进入 leaveTypingMode（readonly + inputmode=none + blur）再 preventDefault；
- *   点击结果交给父组件解析并 enqueue。
+ *   pointerdown 经 PointerPrimaryButton 触发 onKeyPress 并 preventDefault 阻止按钮抢焦，
+ *   焦点保持在终端 helper textarea，软键盘自然不收；点击结果交给父组件解析并 enqueue。
  */
 export function MobileTerminalExtraKeys({
   disabled,
@@ -130,13 +128,6 @@ export function MobileTerminalExtraKeys({
             title={ariaLabel}
             disabled={disabled}
             onPrimary={() => onKeyPress(key)}
-            // 离开打字态：readonly + inputmode=none + blur，比单纯 blur 更能压住 iOS/Android 软键盘。
-            beforePointerDown={() =>
-              leaveMobileTerminalTypingMode(
-                findMobileTerminalHelperTextarea(document),
-                document.activeElement as SoftKeyboardFocusTarget | null,
-              )
-            }
           >
             <span aria-hidden="true">{key.label}</span>
           </PointerPrimaryButton>
