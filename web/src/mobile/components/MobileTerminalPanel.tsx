@@ -10,7 +10,7 @@ import {
   useWorkbenchTerminalBufferStore,
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
-import { ArrowRightIcon, MaximizeIcon, MinimizeIcon, PlusIcon, PromptsIcon, XIcon } from '@/lib/icons';
+import { ArrowRightIcon, EditIcon, MaximizeIcon, MinimizeIcon, PlusIcon, PromptsIcon, XIcon } from '@/lib/icons';
 import type { Prompt, WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import {
   planTerminalBufferWrite,
@@ -79,6 +79,8 @@ export interface MobileTerminalPanelProps {
   onSessionsChange: (next: WorkbenchSession[]) => void;
   onActiveSessionChange: (session: WorkbenchSession | null) => void;
   onRefreshSessions?: () => Promise<void> | void;
+  /** 点击终端右下角悬浮的 Prompt 优化入口：跳转到 Prompt 优化面板。 */
+  onNavigateToPromptOptimizer: () => void;
 }
 
 /**
@@ -171,6 +173,7 @@ export function MobileTerminalPanel({
   onSessionsChange,
   onActiveSessionChange,
   onRefreshSessions,
+  onNavigateToPromptOptimizer,
 }: MobileTerminalPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const { resetBuffer, removeBuffer } = useWorkbenchTerminalBuffers();
@@ -1161,17 +1164,6 @@ export function MobileTerminalPanel({
               <TerminalFullscreenIcon size={16} aria-hidden="true" />
               <span>{terminalFullscreenLabel}</span>
             </PointerPrimaryButton>
-            <PointerPrimaryButton
-              type="button"
-              className={styles.mobileTerminalActionButton}
-              disabled={!canOpenFavoriteQuickInput}
-              aria-label={t('workbench:mobile.favoriteQuickInput.openButton')}
-              title={t('workbench:mobile.favoriteQuickInput.openButton')}
-              onPrimary={() => setFavoriteSheetOpen(true)}
-            >
-              <PromptsIcon size={16} aria-hidden="true" />
-              <span>{t('workbench:mobile.favoriteQuickInput.openButton')}</span>
-            </PointerPrimaryButton>
           </div>
         ) : null}
       </div>
@@ -1199,6 +1191,30 @@ export function MobileTerminalPanel({
             aria-hidden={!visibleSession}
           >
             <div className={styles.mobileTerminalViewport} ref={viewportRef} />
+            {visibleSession ? (
+              <div className={styles.mobileTerminalFabGroup}>
+                <PointerPrimaryButton
+                  type="button"
+                  className={styles.mobileTerminalFab}
+                  disabled={!canOpenFavoriteQuickInput}
+                  aria-label={t('workbench:promptOptimizer.open')}
+                  title={t('workbench:promptOptimizer.open')}
+                  onPrimary={onNavigateToPromptOptimizer}
+                >
+                  <EditIcon size={18} aria-hidden="true" />
+                </PointerPrimaryButton>
+                <PointerPrimaryButton
+                  type="button"
+                  className={styles.mobileTerminalFab}
+                  disabled={!canOpenFavoriteQuickInput}
+                  aria-label={t('workbench:mobile.favoriteQuickInput.openButton')}
+                  title={t('workbench:mobile.favoriteQuickInput.openButton')}
+                  onPrimary={() => setFavoriteSheetOpen(true)}
+                >
+                  <PromptsIcon size={18} aria-hidden="true" />
+                </PointerPrimaryButton>
+              </div>
+            ) : null}
           </div>
           {visibleSession ? (
             <MobileTerminalExtraKeys

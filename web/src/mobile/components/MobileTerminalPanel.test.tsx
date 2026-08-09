@@ -99,6 +99,7 @@ vi.mock('../mobileTerminalInputStream', () => ({
 
 vi.mock('@/lib/icons', () => ({
   ArrowRightIcon: (): null => null,
+  EditIcon: (): null => null,
   MaximizeIcon: (): null => null,
   MinimizeIcon: (): null => null,
   PlusIcon: (): null => null,
@@ -211,6 +212,7 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
           busy={false}
           onSessionsChange={() => undefined}
           onActiveSessionChange={() => undefined}
+          onNavigateToPromptOptimizer={() => undefined}
         />
       </BuffersProvider>,
     );
