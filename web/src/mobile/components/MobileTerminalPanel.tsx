@@ -6,13 +6,19 @@ import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import {
-  useWorkbenchTerminalBuffer,
   useWorkbenchTerminalBufferStore,
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
+import {
+  MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
+  type TerminalBufferDelta,
+} from '@/hooks/workbenchTerminalBuffer';
 import { ArrowRightIcon, EditIcon, MaximizeIcon, MinimizeIcon, PlusIcon, PromptsIcon, XIcon } from '@/lib/icons';
 import type { Prompt, WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
-import { writeTerminalReplay } from '@/pages/Workbench/terminalReplay';
+import {
+  createTerminalLiveWriter,
+  type TerminalLiveWriter,
+} from '@/pages/Workbench/terminalLiveWriter';
 import { workbenchTerminalOptions, workbenchTerminalTheme } from '@/pages/Workbench/terminalOptions';
 import {
   agentFreshnessI18nKey,
@@ -21,7 +27,7 @@ import {
   agentStatusAriaLabel,
 } from '@/pages/Workbench/agentPhasePresentation';
 import {
-  prepareInitialReplayBuffer,
+  appendHeldLiveAfterReplay,
   shouldForwardMobileTerminalInput,
 } from '../mobileTerminalReplay';
 import {
@@ -189,8 +195,6 @@ export function MobileTerminalPanel({
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const bufferRef = useRef<string>('');
-  const writtenBufferRef = useRef<string>('');
   const replayGateRef = useRef<boolean>(false);
   const replayReadyRef = useRef<boolean>(false);
   const inputEnabledRef = useRef<boolean>(false);
@@ -222,7 +226,6 @@ export function MobileTerminalPanel({
     [activeSession, scopedSessions],
   );
   const sessionId = visibleSession?.id ?? null;
-  const { buffer, revision } = useWorkbenchTerminalBuffer(sessionId);
   const isActionDisabled = busy || actionBusy !== null;
   const canUsePaneActions = canRunMobilePaneMutation(visibleSession, isActionDisabled);
   const canSwitchPane = canSwitchMobilePane(visibleSession, isActionDisabled);
@@ -235,10 +238,6 @@ export function MobileTerminalPanel({
   const terminalFullscreenLabel = terminalChrome.exitFullscreen
     ? t('workbench:mobile.terminalPanel.exitFullscreen')
     : t('workbench:mobile.terminalPanel.enterFullscreen');
-
-  useEffect(() => {
-    bufferRef.current = buffer;
-  }, [buffer]);
 
   useEffect(() => {
     inputEnabledRef.current = Boolean(
@@ -485,9 +484,9 @@ export function MobileTerminalPanel({
     const fit = new FitAddon();
     const requestId = replayRequestIdRef.current + 1;
     let disposed = false;
+    let liveWriter: TerminalLiveWriter | null = null;
     replayRequestIdRef.current = requestId;
     replayReadyRef.current = false;
-    writtenBufferRef.current = '';
     replayGateRef.current = false;
     terminal.loadAddon(fit);
     terminal.open(viewport);
@@ -612,6 +611,8 @@ export function MobileTerminalPanel({
         return;
       }
       if (!inputEnabledRef.current) return;
+      // 未开启 mouse tracking 时裸 SGR 会被 shell/readline 当普通输入；只有 TUI 明确协商后才注入滚轮。
+      if (terminal.modes.mouseTrackingMode === 'none') return;
       // 触点换算为 1-based 字符格，贴近桌面滚轮落点；失败回落 1,1。
       const rect = viewport.getBoundingClientRect();
       const cellW = rect.width / Math.max(terminal.cols, 1);
@@ -712,27 +713,59 @@ export function MobileTerminalPanel({
     observer.observe(viewport);
     resizeTerminal();
 
+    // listener-first：HTTP replay 网络往返期间到达的 exact live delta 必须暂存；event stream cursor
+    // 已推进后后端不会保证再次发送，cutover 时只能按 owner/seq 去重后接到 replay 尾部。
+    const heldLive: TerminalBufferDelta[] = [];
+    let heldLiveChars = 0;
+    let heldLiveOverflow = false;
+    const unsubscribeHeldLive = store.subscribeLive(sessionId, (delta) => {
+      if (liveWriter || heldLiveOverflow) return;
+      heldLiveChars += delta.chunk.length;
+      if (heldLiveChars > MAX_WORKBENCH_TERMINAL_BUFFER_CHARS) {
+        heldLive.length = 0;
+        heldLiveOverflow = true;
+        return;
+      }
+      heldLive.push(delta);
+    });
+
     void httpWorkbenchTransport.sessions
       .replay(sessionId)
       .then((replay) => {
         if (disposed || replayRequestIdRef.current !== requestId) return;
-        // 只读当前 session 的 store 快照，禁止用 bufferRef（可能短暂滞后或跨 tab 切换串味）。
-        const liveForSession = store.getBuffer(sessionId);
-        const initial = prepareInitialReplayBuffer(replay.buffer, liveForSession);
-        writeTerminalReplay(terminal, initial.data, replayGateRef);
-        // writtenBuffer 必须等于实际写入 xterm 的完整历史（见 prepareInitialReplayBuffer）。
-        writtenBufferRef.current = initial.writtenBuffer;
+        const initial = heldLiveOverflow
+          ? { buffer: replay.buffer, lastSeq: replay.lastSeq }
+          : appendHeldLiveAfterReplay(
+              replay.buffer,
+              replay.lastSeq,
+              replay.ownerInstanceId,
+              heldLive,
+            );
+        // 先把完整 HTTP replay 设为 store baseline，再创建 listener-first live writer：writer 会先订阅
+        // exact delta 再读 snapshot，因此不会在 reset 与订阅之间漏掉 NDJSON 增量。
+        store.reset(sessionId, initial.buffer, initial.lastSeq, replay.ownerInstanceId);
+        liveWriter = createTerminalLiveWriter({
+          terminal,
+          source: store,
+          sessionId,
+          gate: replayGateRef,
+          resetStrategy: 'preserveScrollback',
+        });
+        unsubscribeHeldLive();
         replayReadyRef.current = true;
-        // 以完整 written 内容作本 session baseline；后续 live（seq > lastSeq、同 owner）走 append。
-        store.reset(sessionId, initial.writtenBuffer, replay.lastSeq, replay.ownerInstanceId);
       })
       .catch((reason) => {
         if (disposed || replayRequestIdRef.current !== requestId) return;
-        const liveForSession = store.getBuffer(sessionId);
-        if (liveForSession) {
-          writeTerminalReplay(terminal, liveForSession, replayGateRef);
-          writtenBufferRef.current = liveForSession;
-        }
+        // replay 失败仍从 listener-first store snapshot 启动，后续 exact live delta 可继续显示；
+        // 不把完整 buffer 放进 React diff，也不 clear 已有 scrollback。
+        liveWriter = createTerminalLiveWriter({
+          terminal,
+          source: store,
+          sessionId,
+          gate: replayGateRef,
+          resetStrategy: 'preserveScrollback',
+        });
+        unsubscribeHeldLive();
         replayReadyRef.current = true;
         setPanelError(
           `${t('workbench:mobile.terminalPanel.errors.replay')}: ${getErrorMessage(
@@ -756,9 +789,10 @@ export function MobileTerminalPanel({
         window.clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
       }
+      unsubscribeHeldLive();
+      liveWriter?.dispose();
       terminal.dispose();
       terminalRef.current = null;
-      writtenBufferRef.current = '';
       replayGateRef.current = false;
       replayReadyRef.current = false;
     };
@@ -778,31 +812,6 @@ export function MobileTerminalPanel({
       window.removeEventListener('storage', applyTheme);
     };
   }, []);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal || !sessionId || !replayReadyRef.current) return;
-
-    const previous = writtenBufferRef.current;
-    const next = buffer;
-    if (next === previous) return;
-
-    // 首屏 HTTP replay 已把完整历史写入 xterm（含 scrollback）。之后只允许「严格前缀扩展」
-    // 追加 live 增量。xterm.clear() 会把 scrollback 整段清掉（官方语义：仅保留光标行），
-    // 任何 store 不对齐/短 live/Gap 短快照都不得再 clear+重放，否则表现为：
-    // - 无法上滚（scrollback 被清空）；
-    // - 上滚只剩打开时最后一屏的重复帧（TUI 重绘被 clear 后只留最后一屏）。
-    if (next.startsWith(previous)) {
-      const tail = next.slice(previous.length);
-      if (tail.length > 0) {
-        terminal.write(tail);
-      }
-      writtenBufferRef.current = next;
-      return;
-    }
-
-    // store 变短或与 xterm 已写内容不对齐：忽略本次绘制，保留现有 scrollback。
-  }, [buffer, revision, sessionId]);
 
   /**
    * Business Logic（为什么需要这个函数）:

@@ -1,6 +1,7 @@
 import type {
   TerminalBufferCursor,
   TerminalBufferDelta,
+  TerminalBufferResetEvent,
   TerminalBufferSnapshot,
 } from '@/hooks/workbenchTerminalBuffer';
 import { MAX_WORKBENCH_TERMINAL_BUFFER_CHARS } from '@/hooks/workbenchTerminalBuffer';
@@ -34,7 +35,10 @@ export interface TerminalLiveSource {
     sessionId: string,
     listener: (delta: TerminalBufferDelta) => void,
   ) => () => void;
-  subscribeReset: (sessionId: string, listener: () => void) => () => void;
+  subscribeReset: (
+    sessionId: string,
+    listener: (event: TerminalBufferResetEvent) => void,
+  ) => () => void;
 }
 
 /**
@@ -56,6 +60,11 @@ export interface CreateTerminalLiveWriterOptions {
   gate?: TerminalReplayGate;
   /** pendingChunk 硬上限（UTF-16 code units），默认对齐 200k ring */
   maxPendingChars?: number;
+  /**
+   * 移动端已经把 HTTP replay 写入 xterm scrollback；后续短 Gap/reset 不应 clear 掉历史。
+   * preserve 模式只切换 store cursor，后续真实 live delta 仍逐字节追加。
+   */
+  resetStrategy?: 'replay' | 'preserveScrollback';
 }
 
 /**
@@ -120,6 +129,7 @@ export function createTerminalLiveWriter(
     sessionId,
     gate,
     maxPendingChars = MAX_WORKBENCH_TERMINAL_BUFFER_CHARS,
+    resetStrategy = 'replay',
   } = options;
   let disposed = false;
   let writeEpoch = 0;
@@ -131,6 +141,8 @@ export function createTerminalLiveWriter(
   /** 超限或 generation 变化时，在当前 write 完成后 clear+replay 最新 snapshot。 */
   let needsSnapshot = false;
   let clearBeforeSnapshot = false;
+  /** preserveScrollback reset 在旧 write 完成后提交的新 generation cursor。 */
+  let preservedResetCursor: TerminalBufferCursor | null = null;
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -153,6 +165,21 @@ export function createTerminalLiveWriter(
       pendingChunk = '';
       pendingCursor = null;
     }
+  };
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   移动端 reset 可能在旧 xterm.write 尚未完成时到达；必须等旧写入落盘后再切换
+   *   generation cursor，同时保留 reset 后已经排队的真实 live delta。
+   *
+   * Code Logic（这个函数做什么）:
+   *   若存在待提交 reset cursor，则覆写 appliedCursor、清标记并丢弃不新于该 cursor 的 pending。
+   */
+  const commitPreservedResetCursor = (): void => {
+    if (!preservedResetCursor) return;
+    appliedCursor = preservedResetCursor;
+    preservedResetCursor = null;
+    dropStalePending();
   };
 
   /**
@@ -189,6 +216,7 @@ export function createTerminalLiveWriter(
     writeSnapshotWithOptionalGate(terminal, snapshot.buffer, gate, () => {
       if (!isCurrent(epoch)) return;
       writing = false;
+      commitPreservedResetCursor();
       if (needsSnapshot) {
         const clear = clearBeforeSnapshot;
         needsSnapshot = false;
@@ -236,6 +264,7 @@ export function createTerminalLiveWriter(
       if (!isCurrent(epoch)) return;
       writing = false;
       appliedCursor = { generation: last.generation, appendId: last.appendId };
+      commitPreservedResetCursor();
       if (needsSnapshot) {
         const clear = clearBeforeSnapshot;
         needsSnapshot = false;
@@ -295,10 +324,20 @@ export function createTerminalLiveWriter(
    * Code Logic（这个函数做什么）:
    *   清空 pending 并请求 clear+replay 最新 snapshot（串行到 writing=false）。
    */
-  const onReset = (): void => {
+  const onReset = (event: TerminalBufferResetEvent): void => {
     if (disposed) return;
     pendingChunk = '';
     pendingCursor = null;
+    if (resetStrategy === 'preserveScrollback' && event.reason === 'snapshotReplace') {
+      const snapshot = source.getSnapshot(sessionId);
+      if (writing) {
+        preservedResetCursor = snapshot.cursor;
+      } else {
+        appliedCursor = snapshot.cursor;
+        preservedResetCursor = null;
+      }
+      return;
+    }
     replaySnapshot(true);
   };
 
@@ -324,6 +363,7 @@ export function createTerminalLiveWriter(
       pendingCursor = null;
       needsSnapshot = false;
       clearBeforeSnapshot = false;
+      preservedResetCursor = null;
       unsubscribeLive();
       unsubscribeReset();
     },

@@ -2,46 +2,41 @@ import {
   shouldForwardTerminalInput,
   type TerminalReplayGate,
 } from '@/pages/Workbench/terminalReplay';
+import type { TerminalBufferDelta } from '@/hooks/workbenchTerminalBuffer';
 
-export interface InitialReplayBuffer {
-  data: string;
-  writtenBuffer: string;
+export interface ReplayWithHeldLive {
+  buffer: string;
+  lastSeq: number;
 }
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   移动端首次打开终端时会同时拥有 HTTP replay 快照和 NDJSON 增量缓存。
- *   两段流必须严格按「同一 session 的前后缀关系」对齐；不能用模糊 KMP 重叠拼接，
- *   否则另一 terminal window 的 live 缓存一旦误入 bufferRef，会被拼进当前 xterm/store，
- *   表现为「两个窗口历史混在一起」。
- *   writtenBuffer 必须等于实际写入 xterm 的字节，作为后续 store baseline。
+ *   HTTP replay 在网络往返期间，NDJSON 可能已经收到更高 seq 的终端输出。若 cutover 只 reset
+ *   replay 快照，这些已经推进 event cursor 的字节会永久丢失；若按字符串模糊拼接又会重复 TUI 帧。
  *
  * Code Logic（这个函数做什么）:
- *   - live 空：写 replay
- *   - replay 空：写 live
- *   - live 以 replay 为严格前缀：写 live（真延续）
- *   - replay 以 live 为严格后缀：写完整 replay（NDJSON 仅有近期尾）
- *   - 其它：只写 replay，绝不拼接（含跨 session / 无关字符串的部分重叠）
+ *   从 replay 的 owner/lastSeq 起步，只按到达顺序追加同 owner 且 seq 更高的 exact live delta，
+ *   重复/旧 seq no-op，返回真实纳入后的 buffer 与 lastSeq baseline。
  */
-export function prepareInitialReplayBuffer(
+export function appendHeldLiveAfterReplay(
   replayBuffer: string,
-  liveBuffer: string,
-): InitialReplayBuffer {
-  if (!liveBuffer) return { data: replayBuffer, writtenBuffer: replayBuffer };
-  if (!replayBuffer) return { data: liveBuffer, writtenBuffer: liveBuffer };
+  replayLastSeq: number,
+  replayOwnerInstanceId: string | null | undefined,
+  heldLive: readonly TerminalBufferDelta[],
+): ReplayWithHeldLive {
+  const owner = replayOwnerInstanceId ?? null;
+  let buffer = replayBuffer;
+  let lastSeq = replayLastSeq;
 
-  // 真延续：live 已包含完整 replay 并可能更长。
-  if (liveBuffer.startsWith(replayBuffer)) {
-    return { data: liveBuffer, writtenBuffer: liveBuffer };
+  for (const delta of heldLive) {
+    if ((delta.authorityId ?? null) !== owner) continue;
+    const seq = delta.lastSeq;
+    if (typeof seq !== 'number' || !Number.isFinite(seq) || seq <= lastSeq) continue;
+    buffer += delta.chunk;
+    lastSeq = seq;
   }
 
-  // NDJSON 重建后往往只有近期后缀；完整历史在 HTTP replay。
-  if (replayBuffer.endsWith(liveBuffer)) {
-    return { data: replayBuffer, writtenBuffer: replayBuffer };
-  }
-
-  // 无法严格对齐：禁止模糊拼接（避免跨 window 历史混合）。
-  return { data: replayBuffer, writtenBuffer: replayBuffer };
+  return { buffer, lastSeq };
 }
 
 /**

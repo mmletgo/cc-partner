@@ -35,6 +35,7 @@ const terminalEvents = vi.hoisted(() => ({
   clearCalls: [] as Array<{ instance: number }>,
   writeCalls: [] as Array<{ data: string; instance: number }>,
   replayResult: null as WorkbenchSessionReplay | null,
+  replayPromise: null as Promise<WorkbenchSessionReplay | null> | null,
   instances: [] as MockTerminalInstance[],
 }));
 
@@ -78,7 +79,9 @@ vi.mock('@xterm/addon-fit', () => ({
 vi.mock('@/api/workbenchHttp', () => ({
   httpWorkbenchTransport: {
     sessions: {
-      replay: vi.fn(() => Promise.resolve(terminalEvents.replayResult)),
+      replay: vi.fn(() =>
+        terminalEvents.replayPromise ?? Promise.resolve(terminalEvents.replayResult),
+      ),
       focus: vi.fn(() => Promise.resolve()),
       zoomPane: vi.fn(() => Promise.resolve()),
       resize: vi.fn(() => Promise.resolve()),
@@ -176,6 +179,7 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     terminalEvents.writeCalls.length = 0;
     terminalEvents.instances.length = 0;
     terminalEvents.replayResult = null;
+    terminalEvents.replayPromise = null;
     // jsdom 没有 ResizeObserver；terminal effect 依赖它做 fit。
     global.ResizeObserver = class {
       observe(): void {}
@@ -237,6 +241,97 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
 
     // 关键断言：scrollback（replay 历史）不得被 terminal.clear() 清空。
     expect(terminalEvents.clearCalls.length).toBe(0);
+  });
+
+  test('continues rendering exact live deltas after the bounded store trims to identical text', async () => {
+    // TUI 重绘常会连续产生相同字节；ring buffer 达上限后，append 前后的物化字符串可能完全相同。
+    // 若移动端只比较 React buffer 字符串，就会把真实新 delta 当成 no-op，终端从这里开始“卡死”。
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'AAAA',
+      truncated: false,
+      lastSeq: 10,
+      ownerInstanceId: 'owner-1',
+    };
+
+    const store = createWorkbenchTerminalBufferStore({ maxChars: 4 });
+    const session = buildSession();
+
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(terminalEvents.writeCalls.some((call) => call.data === 'AAAA')).toBe(true);
+    });
+
+    act(() => {
+      store.append('s1', 'A', 11, 'owner-1');
+    });
+
+    await waitFor(() => {
+      expect(terminalEvents.writeCalls.filter((call) => call.data === 'A')).toHaveLength(1);
+    });
+    expect(store.getBuffer('s1')).toBe('AAAA');
+    expect(terminalEvents.clearCalls).toHaveLength(0);
+  });
+
+  test('keeps exact live output that arrives while HTTP replay is in flight', async () => {
+    let resolveReplay: ((value: WorkbenchSessionReplay) => void) | null = null;
+    terminalEvents.replayPromise = new Promise<WorkbenchSessionReplay>((resolve) => {
+      resolveReplay = resolve;
+    });
+
+    const store = createWorkbenchTerminalBufferStore();
+    const session = buildSession();
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    // 该 delta 与 replay 没有字符串前后缀关系；只能靠 listener-first owner/seq 握手保住。
+    act(() => {
+      store.append('s1', '\u001b[2Jfresh-tui-frame', 11, 'owner-1');
+    });
+    await act(async () => {
+      resolveReplay?.({
+        sessionId: 's1',
+        buffer: 'history',
+        truncated: false,
+        lastSeq: 10,
+        ownerInstanceId: 'owner-1',
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(
+        terminalEvents.writeCalls.some(
+          (call) => call.data === 'history\u001b[2Jfresh-tui-frame',
+        ),
+      ).toBe(true);
+    });
+    expect(store.getBuffer('s1')).toBe('history\u001b[2Jfresh-tui-frame');
+    expect(store.getLastSeq('s1')).toBe(11);
   });
 
   test('pre-existing short live suffix does not become store baseline or clear scrollback', async () => {

@@ -173,6 +173,11 @@ describe('mobileTerminalTouchScroll', () => {
       'encodeMobileTerminalWheelReports',
       'TUI/alternate buffer must encode SGR wheel reports into PTY input stream',
     );
+    assertContains(
+      panelSource,
+      "terminal.modes.mouseTrackingMode === 'none'",
+      'panel must not inject raw SGR wheel bytes before the TUI enables mouse tracking',
+    );
     if (panelSource.includes('encodeMobileTerminalTuiScrollKeys')) {
       throw new Error('must not fall back to arrow-key encoding for TUI scroll');
     }

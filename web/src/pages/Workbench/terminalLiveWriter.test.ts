@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import type {
   TerminalBufferCursor,
   TerminalBufferDelta,
+  TerminalBufferResetEvent,
   TerminalBufferSnapshot,
 } from '@/hooks/workbenchTerminalBuffer';
 import {
@@ -68,7 +69,7 @@ class FakeTerminalLiveSource implements TerminalLiveSource {
   private buffer: string;
   private cursor: TerminalBufferCursor;
   private readonly liveListeners = new Set<(delta: TerminalBufferDelta) => void>();
-  private readonly resetListeners = new Set<() => void>();
+  private readonly resetListeners = new Set<(event: TerminalBufferResetEvent) => void>();
 
   constructor(buffer: string, cursor: TerminalBufferCursor) {
     this.buffer = buffer;
@@ -116,7 +117,10 @@ class FakeTerminalLiveSource implements TerminalLiveSource {
    * Code Logic（这个函数做什么）:
    *   注册 reset listener 并返回 unsubscribe。
    */
-  subscribeReset(sessionId: string, listener: () => void): () => void {
+  subscribeReset(
+    sessionId: string,
+    listener: (event: TerminalBufferResetEvent) => void,
+  ): () => void {
     void sessionId;
     this.resetListeners.add(listener);
     return () => {
@@ -142,10 +146,14 @@ class FakeTerminalLiveSource implements TerminalLiveSource {
    * Code Logic（这个函数做什么）:
    *   更新 buffer/cursor 并同步通知 reset listeners。
    */
-  replace(buffer: string, cursor: TerminalBufferCursor): void {
+  replace(
+    buffer: string,
+    cursor: TerminalBufferCursor,
+    reason: TerminalBufferResetEvent['reason'] = 'snapshotReplace',
+  ): void {
     this.buffer = buffer;
     this.cursor = cursor;
-    this.resetListeners.forEach((listener) => listener());
+    this.resetListeners.forEach((listener) => listener({ sessionId: 's1', reason }));
   }
 }
 
@@ -168,7 +176,7 @@ describe('terminalLiveWriter', () => {
     const source = new FakeTerminalLiveSource('old', { generation: 0, appendId: 1 });
     createTerminalLiveWriter({ terminal, source, sessionId: 's1' });
     // snapshot write still in flight when reset arrives
-    source.replace('new', { generation: 1, appendId: 0 });
+    source.replace('new', { generation: 1, appendId: 0 }, 'authorityChange');
     // clear must not run until old write completes
     expect(terminal.clearCalls).toBe(0);
     expect(terminal.writes).toEqual(['old']);
@@ -179,6 +187,48 @@ describe('terminalLiveWriter', () => {
     terminal.completeWrite(1);
     terminal.completeWrite(2);
     expect(terminal.writes).toEqual(['old', 'new', '!']);
+  });
+
+  test('preserveScrollback reset keeps history and drains only new-generation deltas', () => {
+    const terminal = new FakeTerminalWriter();
+    const source = new FakeTerminalLiveSource('history', { generation: 0, appendId: 1 });
+    createTerminalLiveWriter({
+      terminal,
+      source,
+      sessionId: 's1',
+      resetStrategy: 'preserveScrollback',
+    });
+
+    // 初始历史仍在 write 中时发生短快照 reset；移动端不能 clear 已有 scrollback。
+    source.replace('short-snapshot', { generation: 1, appendId: 0 });
+    source.emit({ sessionId: 's1', generation: 1, appendId: 1, chunk: 'fresh' });
+    terminal.completeWrite(0);
+
+    expect(terminal.clearCalls).toBe(0);
+    expect(terminal.writes).toEqual(['history', 'fresh']);
+    terminal.completeWrite(1);
+  });
+
+  test('preserveScrollback still replaces the screen when terminal authority changes', () => {
+    const terminal = new FakeTerminalWriter();
+    const source = new FakeTerminalLiveSource('owner-a', { generation: 0, appendId: 1 });
+    createTerminalLiveWriter({
+      terminal,
+      source,
+      sessionId: 's1',
+      resetStrategy: 'preserveScrollback',
+    });
+
+    source.replace(
+      'owner-b',
+      { generation: 1, appendId: 0 },
+      'authorityChange',
+    );
+    terminal.completeWrite(0);
+
+    expect(terminal.clearCalls).toBe(1);
+    expect(terminal.writes).toEqual(['owner-a', 'owner-b']);
+    terminal.completeWrite(1);
   });
 
   test('coalesces high-rate deltas into a single next batch while writing', () => {

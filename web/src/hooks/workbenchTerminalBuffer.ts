@@ -9,7 +9,20 @@ const COMPACT_HEAD_THRESHOLD = 1_024;
 
 type WorkbenchTerminalBufferListener = () => void;
 type WorkbenchTerminalLiveListener = (delta: TerminalBufferDelta) => void;
-type WorkbenchTerminalResetListener = () => void;
+type WorkbenchTerminalResetListener = (event: TerminalBufferResetEvent) => void;
+
+/**
+ * Business Logic（为什么需要这个接口）:
+ *   移动端要保留同 owner 的历史 scrollback，但 owner 切换或显式清屏必须应用权威新快照；
+ *   reset 监听不能再把三种语义都压成无参数通知。
+ *
+ * Code Logic（这个接口做什么）:
+ *   标记 reset 的 session 与原因，供 live writer 选择 preserve cursor 或 clear + replay。
+ */
+export interface TerminalBufferResetEvent {
+  sessionId: string;
+  reason: 'authorityChange' | 'snapshotReplace' | 'explicitClear';
+}
 
 /**
  * Business Logic（为什么需要这个接口）:
@@ -66,6 +79,8 @@ export interface TerminalBufferSnapshot {
 export interface TerminalBufferDelta extends TerminalBufferCursor {
   sessionId: string;
   chunk: string;
+  /** 产生该 exact delta 的后端 stream owner；用于移动 replay cutover 去重。 */
+  authorityId?: string | null;
 }
 
 /**
@@ -1035,10 +1050,10 @@ export function createWorkbenchTerminalBufferStore(
    * Code Logic（这个函数做什么）:
    *   同步调用该 session 的 reset listeners。
    */
-  const notifyReset = (sessionId: string): void => {
+  const notifyReset = (sessionId: string, event: TerminalBufferResetEvent): void => {
     const listeners = resetListenersBySession.get(sessionId);
     if (!listeners) return;
-    listeners.forEach((listener) => listener());
+    listeners.forEach((listener) => listener(event));
   };
 
   /**
@@ -1223,6 +1238,7 @@ export function createWorkbenchTerminalBufferStore(
         generation: session.generation,
         appendId: session.appendId,
         lastSeq: session.lastSeq,
+        authorityId: session.authorityId,
       });
       scheduleNotify(sessionId, session);
     },
@@ -1256,6 +1272,7 @@ export function createWorkbenchTerminalBufferStore(
               generation: session.generation,
               appendId: session.appendId,
               lastSeq: session.lastSeq,
+              authorityId: session.authorityId,
             });
           }
           scheduleNotify(sessionId, session);
@@ -1272,7 +1289,14 @@ export function createWorkbenchTerminalBufferStore(
       }
       seedSessionBuffer(session, buffer);
       // reset 本身不伪造 live delta；只同步通知 reset listeners 再立即 bump revision
-      notifyReset(sessionId);
+      notifyReset(sessionId, {
+        sessionId,
+        reason: authorityChanged
+          ? 'authorityChange'
+          : hasAuthorityArg
+            ? 'snapshotReplace'
+            : 'explicitClear',
+      });
       session.revision += 1;
       notify(sessionId);
     },
@@ -1284,7 +1308,7 @@ export function createWorkbenchTerminalBufferStore(
       existing.appendId = 0;
       existing.lastSeq = 0;
       existing.authorityId = null;
-      notifyReset(sessionId);
+      notifyReset(sessionId, { sessionId, reason: 'explicitClear' });
       sessions.set(sessionId, {
         chunks: [],
         headIndex: 0,
