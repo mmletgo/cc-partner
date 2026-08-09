@@ -1,17 +1,17 @@
 /**
- * CcHistory 页面 - Claude 历史会话用户输入 Prompt 浏览
+ * CcHistory 页面 - Prompt 历史（Claude Code / Codex / OpenCode）浏览
  *
  * Business Logic（为什么需要这个页面）:
- *   Claude Code 在本地 ~/.claude/projects 下沉淀了用户输入的 prompt 历史，
- *   这些是宝贵的"真实使用记录"。本页面把它们按项目(cwd)分组、以时间线呈现，
- *   让用户搜索 / 复制 / 一键转存为正式 Prompt / 删除，并可手动刷新采集、跨设备同步。
+ *   本机 Claude Code / Codex / OpenCode 会话中的用户输入 prompt 经采集入库后，
+ *   本页面按项目(cwd)分组、以时间线呈现，支持按设备与来源筛选、搜索 / 复制 /
+ *   一键转存为正式 Prompt / 删除，并可手动刷新采集、跨设备同步。
  *   项目切换与搜索词变更会并发请求；必须丢弃逆序响应，且刷新/同步失败不得静默。
  *
  * Code Logic（这个页面做什么）:
  *   - 顶部 page header（eyebrow/title/lead）
- *   - 工具栏：所属设备筛选（默认本机）+「刷新采集」+「同步」
+ *   - 工具栏：所属设备筛选（默认本机）+ 来源筛选 +「刷新采集」+「同步」
  *   - 主体双栏 grid：左栏项目筛选器、项目搜索与列表，右栏 Prompt 搜索框 + 时间线
- *   - 数据流：loadDevices → 默认本机 → loadProjects；设备/项目/search 变化 → loadPrompts
+ *   - 数据流：loadDevices → 默认本机 → loadProjects(source)；设备/来源/项目/search → loadPrompts
  *   - 使用独立 projectGuard / promptGuard（createLatestRequestGuard）在 success/catch/finally
  *     写状态前校验 token+context；selectedProject 变为 null 时 invalidate promptGuard
  *   - 复制/转存：成功后顶部 toast 提示；刷新/同步失败同样 toast（非阻塞）
@@ -28,7 +28,7 @@ import { Button, Card, Dialog, Input, StatusMessage } from '@/components/primiti
 import { CcHistoryCard } from '@/components/domain';
 import { ccHistoryApi } from '@/api/ccHistory';
 import { promptsApi } from '@/api/prompts';
-import type { CcHistoryDevice, CcProject, CcHistoryItem } from '@/lib/types';
+import type { CcHistoryDevice, CcHistorySource, CcProject, CcHistoryItem } from '@/lib/types';
 import { SearchIcon, SyncIcon, TrashIcon, HistoryIcon } from '@/lib/icons';
 import { debounce, formatRelativeTime } from '@/lib/format';
 import {
@@ -54,6 +54,9 @@ export function CcHistory() {
   // ── 所属设备（默认本机）──
   const [devices, setDevices] = useState<CcHistoryDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+
+  // ── 来源筛选（全部 / claude / codex / opencode）──
+  const [sourceFilter, setSourceFilter] = useState<'' | CcHistorySource>('');
 
   // ── 项目列表 ──
   const [projects, setProjects] = useState<CcProject[]>([]);
@@ -122,26 +125,31 @@ export function CcHistory() {
    *   begin projectGuard → listProjects；仅 isCurrent 时写 projects/error/loadState；
    *   成功后若当前选中失效则回落到列表首项。
    */
-  const loadProjects = useCallback(async (deviceId: string) => {
-    const token = projectGuardRef.current.begin(deviceId);
-    setProjectsLoadState('loading');
-    try {
-      const data = await ccHistoryApi.listProjects(deviceId);
-      if (!projectGuardRef.current.isCurrent(token, deviceId)) return;
-      const list = Array.isArray(data) ? data : [];
-      setProjects(list);
-      setProjectsLoadState('success');
-      setProjectsError(null);
-      setSelectedProjectPath((prev) => {
-        if (prev && list.some((p) => p.projectPath === prev)) return prev;
-        return list.length > 0 ? list[0].projectPath : null;
-      });
-    } catch (err) {
-      if (!projectGuardRef.current.isCurrent(token, deviceId)) return;
-      setProjectsLoadState('error');
-      setProjectsError(err instanceof Error ? err.message : t('ccHistory:loadFailedGeneric'));
-    }
-  }, [t]);
+  const loadProjects = useCallback(
+    async (deviceId: string, source?: CcHistorySource | '') => {
+      const sourceKey = source || '';
+      const guardContext = `${deviceId}\0${sourceKey}`;
+      const token = projectGuardRef.current.begin(guardContext);
+      setProjectsLoadState('loading');
+      try {
+        const data = await ccHistoryApi.listProjects(deviceId, source || undefined);
+        if (!projectGuardRef.current.isCurrent(token, guardContext)) return;
+        const list = Array.isArray(data) ? data : [];
+        setProjects(list);
+        setProjectsLoadState('success');
+        setProjectsError(null);
+        setSelectedProjectPath((prev) => {
+          if (prev && list.some((p) => p.projectPath === prev)) return prev;
+          return list.length > 0 ? list[0].projectPath : null;
+        });
+      } catch (err) {
+        if (!projectGuardRef.current.isCurrent(token, guardContext)) return;
+        setProjectsLoadState('error');
+        setProjectsError(err instanceof Error ? err.message : t('ccHistory:loadFailedGeneric'));
+      }
+    },
+    [t],
+  );
 
   /* eslint-disable react-hooks/set-state-in-effect -- 合法 fetch-in-effect，setState 在 await 后异步执行 */
   useEffect(() => {
@@ -155,8 +163,8 @@ export function CcHistory() {
       setSelectedProjectPath(null);
       return;
     }
-    void loadProjects(selectedDeviceId);
-  }, [loadProjects, selectedDeviceId]);
+    void loadProjects(selectedDeviceId, sourceFilter);
+  }, [loadProjects, selectedDeviceId, sourceFilter]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
@@ -164,16 +172,27 @@ export function CcHistory() {
    *   选中项目或搜索词变化后，右栏必须只展示该上下文的 prompt，旧请求不得覆盖。
    *
    * Code Logic（这个函数做什么）:
-   *   以 buildCcHistoryPromptContext 作 context begin promptGuard；listPrompts 后
+   *   以 device+source+buildCcHistoryPromptContext 作 context begin promptGuard；listPrompts 后
    *   在 success/catch 写状态前 isCurrent 校验。
    */
   const loadPrompts = useCallback(
-    async (projectPath: string, deviceId: string, searchTerm?: string) => {
-      const context = `${deviceId}\0${buildCcHistoryPromptContext(projectPath, searchTerm)}`;
+    async (
+      projectPath: string,
+      deviceId: string,
+      searchTerm?: string,
+      source?: CcHistorySource | '',
+    ) => {
+      const sourceKey = source || '';
+      const context = `${deviceId}\0${sourceKey}\0${buildCcHistoryPromptContext(projectPath, searchTerm)}`;
       const token = promptGuardRef.current.begin(context);
       setPromptsLoadState('loading');
       try {
-        const data = await ccHistoryApi.listPrompts(projectPath, searchTerm, deviceId);
+        const data = await ccHistoryApi.listPrompts(
+          projectPath,
+          searchTerm,
+          deviceId,
+          source || undefined,
+        );
         if (!promptGuardRef.current.isCurrent(token, context)) return;
         setPrompts(Array.isArray(data) ? data : []);
         setPromptsLoadState('success');
@@ -196,8 +215,13 @@ export function CcHistory() {
       setPromptsError(null);
       return;
     }
-    void loadPrompts(selectedProjectPath, selectedDeviceId, search || undefined);
-  }, [selectedProjectPath, selectedDeviceId, search, loadPrompts]);
+    void loadPrompts(
+      selectedProjectPath,
+      selectedDeviceId,
+      search || undefined,
+      sourceFilter,
+    );
+  }, [selectedProjectPath, selectedDeviceId, search, sourceFilter, loadPrompts]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ── 搜索 300ms debounce ──
@@ -259,10 +283,15 @@ export function CcHistory() {
       // 采集完成后刷新项目 + 当前选中项目的 prompt（复用带守卫的 loader）
       await loadDevices();
       if (selectedDeviceId) {
-        await loadProjects(selectedDeviceId);
+        await loadProjects(selectedDeviceId, sourceFilter);
       }
       if (selectedProjectPath && selectedDeviceId) {
-        await loadPrompts(selectedProjectPath, selectedDeviceId, search || undefined);
+        await loadPrompts(
+          selectedProjectPath,
+          selectedDeviceId,
+          search || undefined,
+          sourceFilter,
+        );
       }
       if (res?.ok) {
         showToast(t('ccHistory:refreshDone', { count: res.collected }));
@@ -280,6 +309,7 @@ export function CcHistory() {
     selectedProjectPath,
     selectedDeviceId,
     search,
+    sourceFilter,
     showToast,
     t,
   ]);
@@ -296,10 +326,15 @@ export function CcHistory() {
       await promptsApi.sync();
       await loadDevices();
       if (selectedDeviceId) {
-        await loadProjects(selectedDeviceId);
+        await loadProjects(selectedDeviceId, sourceFilter);
       }
       if (selectedProjectPath && selectedDeviceId) {
-        await loadPrompts(selectedProjectPath, selectedDeviceId, search || undefined);
+        await loadPrompts(
+          selectedProjectPath,
+          selectedDeviceId,
+          search || undefined,
+          sourceFilter,
+        );
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : t('ccHistory:syncFailedGeneric');
@@ -312,6 +347,7 @@ export function CcHistory() {
     selectedProjectPath,
     selectedDeviceId,
     search,
+    sourceFilter,
     showToast,
     t,
   ]);
@@ -525,6 +561,30 @@ export function CcHistory() {
             </span>
           </label>
         ) : null}
+        <label className={[styles.filterField, styles.deviceFilter].join(' ')}>
+          <span className={styles.filterLabel}>{t('ccHistory:sourceFilterLabel')}</span>
+          <span className={styles.selectWrap}>
+            <select
+              className={styles.projectSelect}
+              value={sourceFilter}
+              onChange={(event) => {
+                setSourceFilter(event.target.value as '' | CcHistorySource);
+                setProjects([]);
+                setSelectedProjectPath(null);
+                setPrompts([]);
+              }}
+              aria-label={t('ccHistory:sourceFilterAriaLabel')}
+            >
+              <option value="">{t('ccHistory:sourceAll')}</option>
+              <option value="claude">{t('ccHistory:sourceClaude')}</option>
+              <option value="codex">{t('ccHistory:sourceCodex')}</option>
+              <option value="opencode">{t('ccHistory:sourceOpenCode')}</option>
+            </select>
+            <span className={styles.selectArrow} aria-hidden="true">
+              ▾
+            </span>
+          </span>
+        </label>
         <div className={styles.toolbarActions}>
           <Button
             variant="secondary"

@@ -122,6 +122,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00+00:00".to_string(),
             updated_at: updated_at.to_string(),
             deleted,
+            source: crate::cc::models::SOURCE_CLAUDE.to_string(),
         }
     }
 

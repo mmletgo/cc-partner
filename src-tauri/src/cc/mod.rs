@@ -19,3 +19,4 @@ pub mod merger;
 pub mod mixed_version_harness;
 pub mod models;
 pub mod project_identity;
+pub mod sources;

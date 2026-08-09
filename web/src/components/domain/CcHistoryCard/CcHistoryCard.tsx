@@ -97,6 +97,13 @@ function CcHistoryCardInner({
           {formatTimestamp(item.occurredAt)}
         </time>
         <div className={styles.meta}>
+          <Tag size="sm" color="default">
+            {item.source === 'codex'
+              ? t('ccHistory:sourceCodex')
+              : item.source === 'opencode'
+                ? t('ccHistory:sourceOpenCode')
+                : t('ccHistory:sourceClaude')}
+          </Tag>
           {item.gitBranch ? (
             <Tag size="sm" color="accent">
               {item.gitBranch}

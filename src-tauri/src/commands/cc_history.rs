@@ -57,10 +57,11 @@ pub async fn list_cc_history_devices(
 pub async fn list_cc_projects(
     state: State<'_, AppState>,
     device_id: String,
+    source: Option<String>,
 ) -> Result<Vec<CcProjectDto>, AppError> {
     state
         .cc_history_repo
-        .list_projects(state.device_id.as_ref(), &device_id)
+        .list_projects(state.device_id.as_ref(), &device_id, source.as_deref())
         .await
 }
 
@@ -71,6 +72,7 @@ pub async fn list_cc_prompts(
     project_path: String,
     search: Option<String>,
     device_id: String,
+    source: Option<String>,
 ) -> Result<Vec<ClaudeHistoryDto>, AppError> {
     let rows = state
         .cc_history_repo
@@ -79,6 +81,7 @@ pub async fn list_cc_prompts(
             search.as_deref(),
             state.device_id.as_ref(),
             &device_id,
+            source.as_deref(),
         )
         .await?;
     Ok(rows.iter().map(|r| r.to_dto()).collect())
@@ -93,7 +96,7 @@ pub async fn get_cc_prompt(
     let row = state.cc_history_repo.get(&id).await?;
     match row {
         Some(r) if !r.deleted => Ok(r.to_dto()),
-        _ => Err(AppError::not_found("CC 历史不存在")),
+        _ => Err(AppError::not_found("Prompt 历史不存在")),
     }
 }
 
@@ -121,7 +124,7 @@ pub async fn delete_cc_prompt(
         .cc_history_repo
         .get(&id)
         .await?
-        .ok_or_else(|| AppError::not_found("CC 历史不存在"))?;
+        .ok_or_else(|| AppError::not_found("Prompt 历史不存在"))?;
     // 推进 vector_clock（CRDT 删除）
     let counter = row.vector_clock.entry(device_id).or_insert(0);
     *counter += 1;

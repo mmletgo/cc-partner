@@ -51,7 +51,7 @@
     },
     "enabled": {
       "label": "Enable cloud sync",
-      "helper": "Sync Prompts, CC history, and SSH settings to the GitHub repository. CLAUDE.md is manual push only."
+      "helper": "Sync Prompts, Prompt history, and SSH settings to the GitHub repository. CLAUDE.md is manual push only."
     },
     "auto": {
       "label": "Auto sync on a schedule",
@@ -440,7 +440,7 @@
     "cancel": "Cancel",
     "domain": {
       "prompts": "Prompt",
-      "ccHistory": "Claude history",
+      "ccHistory": "Prompt history",
       "scratchpad": "Scratchpad",
       "sshTargets": "SSH targets",
       "claudeMd": "CLAUDE.md",

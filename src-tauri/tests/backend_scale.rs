@@ -671,7 +671,7 @@ async fn ensure_scale_aux_tables(pool: &SqlitePool) {
          id TEXT PRIMARY KEY, project_path TEXT NOT NULL, project_name TEXT NOT NULL, \
          session_id TEXT NOT NULL, content TEXT NOT NULL, git_branch TEXT, cc_version TEXT, \
          occurred_at TEXT NOT NULL, device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, \
-         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0, source TEXT NOT NULL DEFAULT 'claude')",
     )
     .execute(pool)
     .await
@@ -1291,6 +1291,7 @@ async fn scale_safety_no_partial_batch_after_injected_failure() {
             created_at: "t".into(),
             updated_at: "t".into(),
             deleted: false,
+            source: "claude".to_string(),
         });
     }
     let err = repo

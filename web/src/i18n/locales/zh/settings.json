@@ -51,7 +51,7 @@
     },
     "enabled": {
       "label": "启用云端同步",
-      "helper": "将 Prompt、CC 历史与 SSH 配置同步到 GitHub 仓库；CLAUDE.md 仅支持手动推送。"
+      "helper": "将 Prompt、Prompt 历史与 SSH 配置同步到 GitHub 仓库；CLAUDE.md 仅支持手动推送。"
     },
     "auto": {
       "label": "自动定时同步",
@@ -440,7 +440,7 @@
     "cancel": "取消",
     "domain": {
       "prompts": "Prompt",
-      "ccHistory": "Claude 历史",
+      "ccHistory": "Prompt 历史",
       "scratchpad": "速记本",
       "sshTargets": "SSH 目标",
       "claudeMd": "CLAUDE.md",

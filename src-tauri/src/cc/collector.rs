@@ -274,10 +274,32 @@ fn extracted_to_row_with_project_path(
         created_at: now.to_string(),
         updated_at: now.to_string(),
         deleted: false,
+        source: crate::cc::models::SOURCE_CLAUDE.to_string(),
     }
 }
 
-/// 执行一次完整扫描：枚举 projects 目录、增量解析变化文件、入库新 prompt。
+/// 执行一次完整扫描：Claude Code + Codex + OpenCode。
+///
+/// Business Logic: 定时器与启动/手动刷新共用；各源失败不阻断其它源。
+/// Code Logic: 顺序汇总三源新插入条数。
+pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
+    let mut total = 0usize;
+    match scan_claude(state).await {
+        Ok(n) => total += n,
+        Err(e) => tracing::error!("Claude Prompt 扫描失败: {e}"),
+    }
+    match crate::cc::sources::codex::scan(state).await {
+        Ok(n) => total += n,
+        Err(e) => tracing::error!("Codex Prompt 扫描失败: {e}"),
+    }
+    match crate::cc::sources::opencode::scan(state).await {
+        Ok(n) => total += n,
+        Err(e) => tracing::error!("OpenCode Prompt 扫描失败: {e}"),
+    }
+    Ok(total)
+}
+
+/// 扫描 Claude Code projects jsonl。
 ///
 /// Business Logic: 定时器与启动时各调一次。只处理 mtime 或 size 变化的 jsonl 文件，
 ///     用 INSERT OR IGNORE 入库（绝不覆盖已存在行），返回本次新插入总条数。
@@ -292,11 +314,11 @@ fn extracted_to_row_with_project_path(
 ///        - 过滤出 Extracted，转 Row，收集待入库；
 ///     4. await 前 clone device_id（Arc<String>）；
 ///     5. bulk_ingest 入库；逐个变化文件 update_scan_state；返回新插入总数。
-pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
+async fn scan_claude(state: &AppState) -> Result<usize, AppError> {
     let projects_dir = match claude_projects_dir() {
         Some(p) => p,
         None => {
-            tracing::debug!("无法获取 home 目录，跳过 CC 历史采集");
+            tracing::debug!("无法获取 home 目录，跳过 Claude Prompt 采集");
             return Ok(0);
         }
     };

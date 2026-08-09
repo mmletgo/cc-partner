@@ -60,11 +60,44 @@ impl ClaudeHistoryRepo {
         Self { db, gate }
     }
 
+    /// 幂等补齐 `source` 列与索引（旧库升级）。
+    ///
+    /// Business Logic: 多 Agent 采集需要区分来源；旧库无列时不得启动失败。
+    /// Code Logic: PRAGMA table_info 缺 source 则 ALTER DEFAULT claude；再建 source 索引。
+    pub async fn ensure_schema(pool: &SqlitePool) -> Result<(), AppError> {
+        let columns = sqlx::query("PRAGMA table_info(claude_history)")
+            .fetch_all(pool)
+            .await?;
+        let mut has_source = false;
+        for col in &columns {
+            let name: String = col.try_get("name")?;
+            if name == "source" {
+                has_source = true;
+                break;
+            }
+        }
+        if !has_source {
+            sqlx::query(
+                "ALTER TABLE claude_history ADD COLUMN source TEXT NOT NULL DEFAULT 'claude'",
+            )
+            .execute(pool)
+            .await?;
+        }
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_ch_source ON claude_history(source)")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+
     /// 将数据库一行映射为 ClaudeHistoryRow（vector_clock JSON 反序列化、deleted int→bool）。
     fn row_to_claude_history(row: &SqliteRow) -> Result<ClaudeHistoryRow, AppError> {
         let vc_text: String = row.try_get("vector_clock")?;
         let deleted_int: i64 = row.try_get("deleted")?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
+        let source: String = row
+            .try_get::<String, _>("source")
+            .unwrap_or_else(|_| crate::cc::models::SOURCE_CLAUDE.to_string());
         Ok(ClaudeHistoryRow {
             id: row.try_get("id")?,
             project_path: row.try_get("project_path")?,
@@ -79,6 +112,7 @@ impl ClaudeHistoryRepo {
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
             deleted: deleted_int != 0,
+            source,
         })
     }
 
@@ -164,19 +198,35 @@ impl ClaudeHistoryRepo {
         &self,
         local_device_id: &str,
         owner_device_id: &str,
+        source: Option<&str>,
     ) -> Result<Vec<CcProjectDto>, AppError> {
         self.normalize_project_paths(local_device_id).await?;
-        let rows = sqlx::query(
-            "SELECT h.project_path AS project_path, MAX(h.project_name) AS project_name, \
-                    COUNT(*) AS cnt, MAX(h.occurred_at) AS last_at \
-             FROM claude_history h \
-             WHERE h.deleted = 0 AND h.device_id = ? \
-             GROUP BY h.project_path \
-             ORDER BY last_at DESC",
-        )
-        .bind(owner_device_id)
-        .fetch_all(&self.db)
-        .await?;
+        let rows = if let Some(src) = source {
+            sqlx::query(
+                "SELECT h.project_path AS project_path, MAX(h.project_name) AS project_name, \
+                        COUNT(*) AS cnt, MAX(h.occurred_at) AS last_at \
+                 FROM claude_history h \
+                 WHERE h.deleted = 0 AND h.device_id = ? AND h.source = ? \
+                 GROUP BY h.project_path \
+                 ORDER BY last_at DESC",
+            )
+            .bind(owner_device_id)
+            .bind(src)
+            .fetch_all(&self.db)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT h.project_path AS project_path, MAX(h.project_name) AS project_name, \
+                        COUNT(*) AS cnt, MAX(h.occurred_at) AS last_at \
+                 FROM claude_history h \
+                 WHERE h.deleted = 0 AND h.device_id = ? \
+                 GROUP BY h.project_path \
+                 ORDER BY last_at DESC",
+            )
+            .bind(owner_device_id)
+            .fetch_all(&self.db)
+            .await?
+        };
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             let cnt: i64 = r.try_get("cnt")?;
@@ -227,36 +277,73 @@ impl ClaudeHistoryRepo {
         search: Option<&str>,
         local_device_id: &str,
         owner_device_id: &str,
+        source: Option<&str>,
     ) -> Result<Vec<ClaudeHistoryRow>, AppError> {
         self.normalize_project_paths(local_device_id).await?;
-        let rows = if let Some(kw) = search {
-            let pattern = format!("%{}%", kw);
-            sqlx::query(
-                "SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
-                        h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
-                        h.created_at, h.updated_at, h.deleted \
-                 FROM claude_history h \
-                 WHERE h.project_path = ? AND h.device_id = ? AND h.deleted = 0 AND h.content LIKE ? \
-                 ORDER BY h.occurred_at DESC LIMIT 500",
-            )
-            .bind(project_path)
-            .bind(owner_device_id)
-            .bind(&pattern)
-            .fetch_all(&self.db)
-            .await?
-        } else {
-            sqlx::query(
-                "SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
-                        h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
-                        h.created_at, h.updated_at, h.deleted \
-                 FROM claude_history h \
-                 WHERE h.project_path = ? AND h.device_id = ? AND h.deleted = 0 \
-                 ORDER BY h.occurred_at DESC LIMIT 500",
-            )
-            .bind(project_path)
-            .bind(owner_device_id)
-            .fetch_all(&self.db)
-            .await?
+        let rows = match (search, source) {
+            (Some(kw), Some(src)) => {
+                let pattern = format!("%{}%", kw);
+                sqlx::query(
+                    "SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
+                            h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
+                            h.created_at, h.updated_at, h.deleted, h.source \
+                     FROM claude_history h \
+                     WHERE h.project_path = ? AND h.device_id = ? AND h.deleted = 0 \
+                       AND h.source = ? AND h.content LIKE ? \
+                     ORDER BY h.occurred_at DESC LIMIT 500",
+                )
+                .bind(project_path)
+                .bind(owner_device_id)
+                .bind(src)
+                .bind(&pattern)
+                .fetch_all(&self.db)
+                .await?
+            }
+            (Some(kw), None) => {
+                let pattern = format!("%{}%", kw);
+                sqlx::query(
+                    "SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
+                            h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
+                            h.created_at, h.updated_at, h.deleted, h.source \
+                     FROM claude_history h \
+                     WHERE h.project_path = ? AND h.device_id = ? AND h.deleted = 0 AND h.content LIKE ? \
+                     ORDER BY h.occurred_at DESC LIMIT 500",
+                )
+                .bind(project_path)
+                .bind(owner_device_id)
+                .bind(&pattern)
+                .fetch_all(&self.db)
+                .await?
+            }
+            (None, Some(src)) => {
+                sqlx::query(
+                    "SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
+                            h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
+                            h.created_at, h.updated_at, h.deleted, h.source \
+                     FROM claude_history h \
+                     WHERE h.project_path = ? AND h.device_id = ? AND h.deleted = 0 AND h.source = ? \
+                     ORDER BY h.occurred_at DESC LIMIT 500",
+                )
+                .bind(project_path)
+                .bind(owner_device_id)
+                .bind(src)
+                .fetch_all(&self.db)
+                .await?
+            }
+            (None, None) => {
+                sqlx::query(
+                    "SELECT h.id, h.project_path, h.project_name, h.session_id, h.content, \
+                            h.git_branch, h.cc_version, h.occurred_at, h.device_id, h.vector_clock, \
+                            h.created_at, h.updated_at, h.deleted, h.source \
+                     FROM claude_history h \
+                     WHERE h.project_path = ? AND h.device_id = ? AND h.deleted = 0 \
+                     ORDER BY h.occurred_at DESC LIMIT 500",
+                )
+                .bind(project_path)
+                .bind(owner_device_id)
+                .fetch_all(&self.db)
+                .await?
+            }
         };
         rows.iter().map(Self::row_to_claude_history).collect()
     }
@@ -265,7 +352,7 @@ impl ClaudeHistoryRepo {
     pub async fn get(&self, id: &str) -> Result<Option<ClaudeHistoryRow>, AppError> {
         let row = sqlx::query(
             "SELECT id, project_path, project_name, session_id, content, git_branch, cc_version, \
-             occurred_at, device_id, vector_clock, created_at, updated_at, deleted \
+             occurred_at, device_id, vector_clock, created_at, updated_at, deleted, source \
              FROM claude_history WHERE id = ?",
         )
         .bind(id)
@@ -284,7 +371,7 @@ impl ClaudeHistoryRepo {
     pub async fn get_all_for_sync(&self) -> Result<Vec<ClaudeHistoryRow>, AppError> {
         let rows = sqlx::query(
             "SELECT id, project_path, project_name, session_id, content, git_branch, cc_version, \
-             occurred_at, device_id, vector_clock, created_at, updated_at, deleted \
+             occurred_at, device_id, vector_clock, created_at, updated_at, deleted, source \
              FROM claude_history",
         )
         .fetch_all(&self.db)
@@ -307,8 +394,8 @@ impl ClaudeHistoryRepo {
                 sqlx::query(
                     "INSERT OR REPLACE INTO claude_history \
                      (id, project_path, project_name, session_id, content, git_branch, cc_version, \
-                      occurred_at, device_id, vector_clock, created_at, updated_at, deleted) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      occurred_at, device_id, vector_clock, created_at, updated_at, deleted, source) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&p.id)
                 .bind(&p.project_path)
@@ -323,6 +410,7 @@ impl ClaudeHistoryRepo {
                 .bind(&p.created_at)
                 .bind(&p.updated_at)
                 .bind(p.deleted as i64)
+                .bind(&p.source)
                 .execute(&self.db)
                 .await?;
             }
@@ -363,8 +451,8 @@ impl ClaudeHistoryRepo {
             let res = sqlx::query(
                 "INSERT OR IGNORE INTO claude_history \
                  (id, project_path, project_name, session_id, content, git_branch, cc_version, \
-                  occurred_at, device_id, vector_clock, created_at, updated_at, deleted) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      occurred_at, device_id, vector_clock, created_at, updated_at, deleted, source) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&p.id)
             .bind(&p.project_path)
@@ -379,6 +467,7 @@ impl ClaudeHistoryRepo {
             .bind(&p.created_at)
             .bind(&p.updated_at)
             .bind(p.deleted as i64)
+            .bind(&p.source)
             .execute(&mut *tx)
             .await?;
             inserted += res.rows_affected() as usize;
@@ -462,7 +551,7 @@ impl ClaudeHistoryRepo {
         let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT id, project_path, project_name, session_id, content, git_branch, cc_version, \
-             occurred_at, device_id, vector_clock, created_at, updated_at, deleted \
+             occurred_at, device_id, vector_clock, created_at, updated_at, deleted, source \
              FROM claude_history WHERE id IN ({placeholders})"
         );
         let mut query = sqlx::query(&sql);
@@ -543,8 +632,8 @@ impl ClaudeHistoryRepo {
             sqlx::query(
                 "INSERT OR REPLACE INTO claude_history \
                  (id, project_path, project_name, session_id, content, git_branch, cc_version, \
-                  occurred_at, device_id, vector_clock, created_at, updated_at, deleted) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      occurred_at, device_id, vector_clock, created_at, updated_at, deleted, source) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&p.id)
             .bind(&p.project_path)
@@ -559,6 +648,7 @@ impl ClaudeHistoryRepo {
             .bind(&p.created_at)
             .bind(&p.updated_at)
             .bind(p.deleted as i64)
+            .bind(&p.source)
             .execute(&mut *tx)
             .await?;
             written += 1;
@@ -713,7 +803,8 @@ mod tests {
              id TEXT PRIMARY KEY, project_path TEXT NOT NULL, project_name TEXT NOT NULL, \
              session_id TEXT NOT NULL, content TEXT NOT NULL, git_branch TEXT, cc_version TEXT, \
              occurred_at TEXT NOT NULL, device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, \
-             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
+             source TEXT NOT NULL DEFAULT 'claude')",
         )
         .execute(&pool)
         .await
@@ -747,6 +838,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00+00:00".to_string(),
             updated_at: "2024-01-01T00:00:00+00:00".to_string(),
             deleted: false,
+            source: crate::cc::models::SOURCE_CLAUDE.to_string(),
         }
     }
 
@@ -847,7 +939,7 @@ mod tests {
         ])
         .await
         .unwrap();
-        let projects = repo.list_projects("d1", "d1").await.unwrap();
+        let projects = repo.list_projects("d1", "d1", None).await.unwrap();
         // 两个项目
         assert_eq!(projects.len(), 2);
         // 找到 p1 的聚合 count=2
@@ -869,17 +961,17 @@ mod tests {
         let device_ids = repo.list_device_ids().await.unwrap();
         assert_eq!(device_ids, vec!["d1", "d2"]);
 
-        let local_projects = repo.list_projects("d1", "d1").await.unwrap();
-        let remote_projects = repo.list_projects("d1", "d2").await.unwrap();
+        let local_projects = repo.list_projects("d1", "d1", None).await.unwrap();
+        let remote_projects = repo.list_projects("d1", "d2", None).await.unwrap();
         assert_eq!(local_projects[0].count, 1);
         assert_eq!(remote_projects[0].count, 1);
 
         let local_prompts = repo
-            .list_by_project("/shared", None, "d1", "d1")
+            .list_by_project("/shared", None, "d1", "d1", None)
             .await
             .unwrap();
         let remote_prompts = repo
-            .list_by_project("/shared", None, "d1", "d2")
+            .list_by_project("/shared", None, "d1", "d2", None)
             .await
             .unwrap();
         assert_eq!(local_prompts[0].id, "local");
@@ -899,7 +991,7 @@ mod tests {
         .await
         .unwrap();
 
-        let projects = repo.list_projects("d1", "d1").await.unwrap();
+        let projects = repo.list_projects("d1", "d1", None).await.unwrap();
 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].project_path, main);
@@ -924,7 +1016,7 @@ mod tests {
         .await
         .unwrap();
 
-        let projects = repo.list_projects("d1", "d1").await.unwrap();
+        let projects = repo.list_projects("d1", "d1", None).await.unwrap();
         let migrated = repo.get("removed-worktree").await.unwrap().unwrap();
 
         assert_eq!(projects.len(), 2);
@@ -945,11 +1037,11 @@ mod tests {
         .await
         .unwrap();
         // 无搜索：2 条
-        let all = repo.list_by_project("/p", None, "d1", "d1").await.unwrap();
+        let all = repo.list_by_project("/p", None, "d1", "d1", None).await.unwrap();
         assert_eq!(all.len(), 2);
         // 搜索 hello：1 条
         let filtered = repo
-            .list_by_project("/p", Some("hello"), "d1", "d1")
+            .list_by_project("/p", Some("hello"), "d1", "d1", None)
             .await
             .unwrap();
         assert_eq!(filtered.len(), 1);
@@ -970,9 +1062,9 @@ mod tests {
         .await
         .unwrap();
 
-        let all = repo.list_by_project(&main, None, "d1", "d1").await.unwrap();
+        let all = repo.list_by_project(&main, None, "d1", "d1", None).await.unwrap();
         let filtered = repo
-            .list_by_project(&main, Some("shared"), "d1", "d1")
+            .list_by_project(&main, Some("shared"), "d1", "d1", None)
             .await
             .unwrap();
 
@@ -1002,7 +1094,7 @@ mod tests {
         let got = repo.get("a").await.unwrap().unwrap();
         assert!(got.deleted);
         assert_eq!(got.vector_clock.get("d1"), Some(&2));
-        let listed = repo.list_by_project("/p", None, "d1", "d1").await.unwrap();
+        let listed = repo.list_by_project("/p", None, "d1", "d1", None).await.unwrap();
         assert!(listed.is_empty());
         // get_all_for_sync 仍含已删除（同步需传播删除）
         let synced = repo.get_all_for_sync().await.unwrap();

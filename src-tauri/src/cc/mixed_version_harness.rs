@@ -279,6 +279,7 @@ fn sample_row(id: &str, device: &str, content: &str, vc: u64) -> ClaudeHistoryRo
         created_at: "2024-01-01T00:00:00Z".into(),
         updated_at: "2024-01-01T00:00:00Z".into(),
         deleted: false,
+        source: crate::cc::models::SOURCE_CLAUDE.to_string(),
     }
 }
 
@@ -305,7 +306,8 @@ async fn build_local_state(device_id: &str) -> AppState {
             vector_clock TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            deleted INTEGER DEFAULT 0
+            deleted INTEGER DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'claude'
         )",
     )
     .execute(&pool)

@@ -464,8 +464,8 @@ impl BackupRestoreService {
                 sqlx::query(
                     "INSERT OR REPLACE INTO claude_history
                      (id, project_path, project_name, session_id, content, git_branch, cc_version,
-                      occurred_at, device_id, vector_clock, created_at, updated_at, deleted)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      occurred_at, device_id, vector_clock, created_at, updated_at, deleted, source)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&item.id)
                 .bind(&item.project_path)
@@ -480,6 +480,7 @@ impl BackupRestoreService {
                 .bind(&item.created_at)
                 .bind(&item.updated_at)
                 .bind(item.deleted as i64)
+                .bind(&item.source)
                 .execute(&mut *tx)
                 .await?;
             }

@@ -453,8 +453,11 @@ export interface CcHistoryDevice {
   isSelf: boolean;
 }
 
+/** Prompt 历史采集来源（与后端 claude_history.source 对齐） */
+export type CcHistorySource = 'claude' | 'codex' | 'opencode';
+
 /**
- * Claude 历史采集——单条用户输入 prompt
+ * Prompt 历史采集——单条用户输入 prompt
  * 字段与 Rust 后端 list_cc_prompts / get_cc_prompt 命令返回对齐（camelCase）。
  */
 export interface CcHistoryItem {
@@ -464,13 +467,13 @@ export interface CcHistoryItem {
   projectPath: string;
   /** 项目名（cwd 末段目录名） */
   projectName: string;
-  /** Claude 会话 id */
+  /** 会话 id */
   sessionId: string;
   /** 用户输入的 prompt 正文 */
   content: string;
   /** 采集时的 git 分支（可能为空） */
   gitBranch?: string;
-  /** 采集时的 Claude Code 版本（可能为空） */
+  /** 采集时的工具版本（可能为空） */
   ccVersion?: string;
   /** prompt 发生时间（ISO） */
   occurredAt: string;
@@ -480,6 +483,8 @@ export interface CcHistoryItem {
   createdAt: string;
   /** 软删除标记 */
   deleted: boolean;
+  /** 采集来源；旧后端缺字段时前端按 claude 兜底 */
+  source?: CcHistorySource | string;
 }
 
 /**

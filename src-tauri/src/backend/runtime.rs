@@ -152,7 +152,8 @@ const CC_HISTORY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_history (
     vector_clock TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    deleted INTEGER DEFAULT 0
+    deleted INTEGER DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'claude'
 )";
 
 /// CC 历史采集扫描状态表（增量去重：记录每个 jsonl 文件的 mtime/size，未变则跳过）。
@@ -335,6 +336,7 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     // N5 transfer recovery：幂等补列 + client_operation_id 部分唯一索引
     crate::storage::TransferRepo::ensure_schema(&pool).await?;
     sqlx::query(CC_HISTORY_SCHEMA).execute(&pool).await?;
+    crate::storage::ClaudeHistoryRepo::ensure_schema(&pool).await?;
     sqlx::query(CC_SCAN_STATE_SCHEMA).execute(&pool).await?;
     for stmt in CC_INDEXES.split(';') {
         let s = stmt.trim();

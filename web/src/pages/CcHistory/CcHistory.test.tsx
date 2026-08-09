@@ -177,15 +177,16 @@ describe('CcHistory stale response guards', () => {
     renderPage();
 
     const deviceFilter = await screen.findByRole('combobox', {
-      name: '按所属设备筛选 Claude 历史',
+      name: '按所属设备筛选 Prompt 历史',
     });
     expect((deviceFilter as HTMLSelectElement).value).toBe('dev-1');
     await waitFor(() => {
-      expect(fakeCcHistoryApi.listProjects).toHaveBeenCalledWith('dev-1');
+      expect(fakeCcHistoryApi.listProjects).toHaveBeenCalledWith('dev-1', undefined);
       expect(fakeCcHistoryApi.listPrompts).toHaveBeenCalledWith(
         '/projects/local',
         undefined,
         'dev-1',
+        undefined,
       );
       expect(screen.getByText('LOCAL-DEVICE-PROMPT')).toBeTruthy();
       expect(screen.queryByText('RemoteProject')).toBeNull();
@@ -194,11 +195,12 @@ describe('CcHistory stale response guards', () => {
     fireEvent.change(deviceFilter, { target: { value: 'dev-2' } });
 
     await waitFor(() => {
-      expect(fakeCcHistoryApi.listProjects).toHaveBeenCalledWith('dev-2');
+      expect(fakeCcHistoryApi.listProjects).toHaveBeenCalledWith('dev-2', undefined);
       expect(fakeCcHistoryApi.listPrompts).toHaveBeenCalledWith(
         '/projects/remote',
         undefined,
         'dev-2',
+        undefined,
       );
       expect(screen.getByText('REMOTE-DEVICE-PROMPT')).toBeTruthy();
       expect(screen.queryByText('LocalProject')).toBeNull();
@@ -226,9 +228,9 @@ describe('CcHistory stale response guards', () => {
 
     renderPage();
 
-    const projectSidebar = await screen.findByLabelText('Claude 项目列表');
+    const projectSidebar = await screen.findByLabelText('Prompt 历史项目列表');
     const projectFilter = await within(projectSidebar).findByRole('combobox', {
-      name: '按项目筛选 Claude 历史',
+      name: '按项目筛选 Prompt 历史',
     });
     expect((projectFilter as HTMLSelectElement).value).toBe('/projects/A');
     expect(screen.getByRole('option', { name: 'ProjectB · /projects/B' })).toBeTruthy();
@@ -240,6 +242,7 @@ describe('CcHistory stale response guards', () => {
         '/projects/B',
         undefined,
         'dev-1',
+        undefined,
       );
       expect(screen.getByText('PROJECT-B-PROMPT')).toBeTruthy();
     });
@@ -361,7 +364,7 @@ describe('CcHistory stale response guards', () => {
       expect(screen.getByText('BASE-PROMPT')).toBeTruthy();
     });
 
-    const searchInput = screen.getByLabelText('搜索 Claude 历史 Prompt');
+    const searchInput = screen.getByLabelText('搜索 Prompt 历史内容');
     fireEvent.change(searchInput, { target: { value: 'a' } });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);

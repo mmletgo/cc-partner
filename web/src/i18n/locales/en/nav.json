@@ -4,7 +4,7 @@
   "attention": "Inbox",
   "transfer": "Transfer",
   "prompts": "Prompts",
-  "ccHistory": "Claude History",
+  "ccHistory": "Prompt History",
   "scratchpad": "Scratchpad",
   "promptOptimizer": "Prompt Optimizer",
   "claudeMd": "CLAUDE.MD",

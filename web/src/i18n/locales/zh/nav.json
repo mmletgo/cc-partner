@@ -4,7 +4,7 @@
   "attention": "待处理",
   "transfer": "文件传输",
   "prompts": "Prompt库",
-  "ccHistory": "Claude历史",
+  "ccHistory": "Prompt历史",
   "scratchpad": "速记本",
   "promptOptimizer": "Prompt优化",
   "claudeMd": "CLAUDE.MD",
