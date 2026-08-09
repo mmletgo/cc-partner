@@ -33,8 +33,12 @@ function extraKeyAriaLabel(
   switch (key.ariaKey) {
     case 'esc':
       return t('workbench:mobile.terminalPanel.extraKeys.esc');
+    case 'enter':
+      return t('workbench:mobile.terminalPanel.extraKeys.enter');
     case 'tab':
       return t('workbench:mobile.terminalPanel.extraKeys.tab');
+    case 'shiftTab':
+      return t('workbench:mobile.terminalPanel.extraKeys.shiftTab');
     case 'ctrl':
       return t('workbench:mobile.terminalPanel.extraKeys.ctrl');
     case 'alt':

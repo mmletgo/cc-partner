@@ -34,10 +34,14 @@ describe('mobileTerminalExtraKeys', () => {
   test('page 1 and page 2 expose fixed Termux-like key ids', () => {
     const page1 = getMobileTerminalExtraKeys(1).map((key) => key.id);
     const page2 = getMobileTerminalExtraKeys(2).map((key) => key.id);
-    assertEqual(page1.join(','), 'esc,tab,ctrl,alt,slash,up,down,left,right,page-2', 'page 1 keys');
+    assertEqual(
+      page1.join(','),
+      'esc,enter,shift-tab,slash,up,down,left,right,page-2',
+      'page 1 keys',
+    );
     assertEqual(
       page2.join(','),
-      'ctrl-c,ctrl-d,ctrl-z,ctrl-l,home,end,pgup,pgdn,cd-up,ls-la,clear-snippet,page-1',
+      'ctrl,alt,tab,ctrl-c,ctrl-d,ctrl-z,ctrl-l,home,end,pgup,pgdn,cd-up,ls-la,clear-snippet,page-1',
       'page 2 keys',
     );
   });
@@ -45,6 +49,8 @@ describe('mobileTerminalExtraKeys', () => {
   test('control and navigation payloads match PTY sequences', () => {
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.esc, '\x1b', 'esc');
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab, '\t', 'tab');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.shiftTab, '\x1b[Z', 'shift+tab');
+    assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.enter, '\r', 'enter');
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.up, '\x1b[A', 'up');
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.down, '\x1b[B', 'down');
     assertEqual(MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.right, '\x1b[C', 'right');
@@ -112,17 +118,25 @@ describe('mobileTerminalExtraKeys', () => {
   });
 
   test('resolveMobileTerminalExtraKeyPress maps defs to actions', () => {
-    const keys = getMobileTerminalExtraKeys(1);
-    const esc = keys.find((key) => key.id === 'esc');
-    const ctrl = keys.find((key) => key.id === 'ctrl');
-    const page2 = keys.find((key) => key.id === 'page-2');
-    assertTrue(Boolean(esc && ctrl && page2), 'required keys present');
-    if (!esc || !ctrl || !page2) return;
+    const page1 = getMobileTerminalExtraKeys(1);
+    const page2 = getMobileTerminalExtraKeys(2);
+    const esc = page1.find((key) => key.id === 'esc');
+    const enter = page1.find((key) => key.id === 'enter');
+    const ctrl = page2.find((key) => key.id === 'ctrl');
+    const page2Key = page1.find((key) => key.id === 'page-2');
+    assertTrue(Boolean(esc && enter && ctrl && page2Key), 'required keys present');
+    if (!esc || !enter || !ctrl || !page2Key) return;
 
     const escResult = resolveMobileTerminalExtraKeyPress(esc);
     assertEqual(escResult.type, 'send', 'esc sends');
     if (escResult.type === 'send') {
       assertEqual(escResult.data, '\x1b', 'esc payload');
+    }
+
+    const enterResult = resolveMobileTerminalExtraKeyPress(enter);
+    assertEqual(enterResult.type, 'send', 'enter sends');
+    if (enterResult.type === 'send') {
+      assertEqual(enterResult.data, '\r', 'enter payload');
     }
 
     const ctrlResult = resolveMobileTerminalExtraKeyPress(ctrl);
@@ -131,7 +145,7 @@ describe('mobileTerminalExtraKeys', () => {
       assertEqual(ctrlResult.modifier, 'ctrl', 'ctrl modifier');
     }
 
-    const pageResult = resolveMobileTerminalExtraKeyPress(page2);
+    const pageResult = resolveMobileTerminalExtraKeyPress(page2Key);
     assertEqual(pageResult.type, 'setPage', 'page switch');
     if (pageResult.type === 'setPage') {
       assertEqual(pageResult.page, 2, 'target page 2');

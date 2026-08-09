@@ -46,6 +46,10 @@ const CSI = '\x1b[';
 export const MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS = {
   esc: '\x1b',
   tab: '\t',
+  // Shift+Tab 的标准 xterm 反向制表序列（CSI Z）；Claude Code 用它切换模式 / 补全列表反向选择。
+  shiftTab: `${CSI}Z`,
+  // 终端 Enter 发送 CR（回车）；Claude Code 用它确认 / 发送消息。
+  enter: '\r',
   slash: '/',
   up: `${CSI}A`,
   down: `${CSI}B`,
@@ -66,9 +70,14 @@ export const MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS = {
 
 const PAGE_1_KEYS: MobileTerminalExtraKeyDef[] = [
   { id: 'esc', kind: 'payload', label: 'Esc', ariaKey: 'esc', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.esc },
-  { id: 'tab', kind: 'payload', label: 'Tab', ariaKey: 'tab', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab },
-  { id: 'ctrl', kind: 'modifier', label: 'Ctrl', ariaKey: 'ctrl', modifier: 'ctrl' },
-  { id: 'alt', kind: 'modifier', label: 'Alt', ariaKey: 'alt', modifier: 'alt' },
+  { id: 'enter', kind: 'payload', label: '⏎', ariaKey: 'enter', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.enter },
+  {
+    id: 'shift-tab',
+    kind: 'payload',
+    label: '⇧Tab',
+    ariaKey: 'shiftTab',
+    payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.shiftTab,
+  },
   { id: 'slash', kind: 'payload', label: '/', ariaKey: 'slash', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.slash },
   { id: 'up', kind: 'payload', label: '↑', ariaKey: 'up', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.up },
   { id: 'down', kind: 'payload', label: '↓', ariaKey: 'down', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.down },
@@ -78,6 +87,9 @@ const PAGE_1_KEYS: MobileTerminalExtraKeyDef[] = [
 ];
 
 const PAGE_2_KEYS: MobileTerminalExtraKeyDef[] = [
+  { id: 'ctrl', kind: 'modifier', label: 'Ctrl', ariaKey: 'ctrl', modifier: 'ctrl' },
+  { id: 'alt', kind: 'modifier', label: 'Alt', ariaKey: 'alt', modifier: 'alt' },
+  { id: 'tab', kind: 'payload', label: 'Tab', ariaKey: 'tab', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.tab },
   { id: 'ctrl-c', kind: 'payload', label: '^C', ariaKey: 'ctrlC', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlC },
   { id: 'ctrl-d', kind: 'payload', label: '^D', ariaKey: 'ctrlD', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlD },
   { id: 'ctrl-z', kind: 'payload', label: '^Z', ariaKey: 'ctrlZ', payload: MOBILE_TERMINAL_EXTRA_KEY_PAYLOADS.ctrlZ },
