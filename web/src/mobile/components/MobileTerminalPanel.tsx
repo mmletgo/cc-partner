@@ -7,6 +7,7 @@ import '@xterm/xterm/css/xterm.css';
 import { httpWorkbenchTransport } from '@/api/workbenchHttp';
 import {
   useWorkbenchTerminalBuffer,
+  useWorkbenchTerminalBufferStore,
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
 import { ArrowRightIcon, MaximizeIcon, MinimizeIcon, PlusIcon, XIcon } from '@/lib/icons';
@@ -23,7 +24,6 @@ import {
   agentStatusAriaLabel,
 } from '@/pages/Workbench/agentPhasePresentation';
 import {
-  planMobileReplayReadyBufferWrite,
   prepareInitialReplayBuffer,
   shouldForwardMobileTerminalInput,
 } from '../mobileTerminalReplay';
@@ -174,6 +174,7 @@ export function MobileTerminalPanel({
 }: MobileTerminalPanelProps): ReactElement {
   const { t } = useTranslation(['workbench']);
   const { resetBuffer, removeBuffer } = useWorkbenchTerminalBuffers();
+  const store = useWorkbenchTerminalBufferStore();
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState<boolean>(false);
@@ -477,27 +478,6 @@ export function MobileTerminalPanel({
 
     /**
      * Business Logic（为什么需要这个函数）:
-     *   HTTP replay ready 前可能已有 NDJSON live buffer，replay 完成后必须立即补写，避免终端停在旧屏。
-     *
-     * Code Logic（这个函数做什么）:
-     *   对 writtenBuffer 与当前 live buffer 计算 diff；append 直接写入，replay 则清屏后重放最新 buffer。
-     */
-    const flushLiveBufferAfterReplay = (): void => {
-      if (disposed) return;
-      const plan = planMobileReplayReadyBufferWrite(writtenBufferRef.current, bufferRef.current);
-      if (plan.mode === 'none') return;
-      if (plan.mode === 'replay') {
-        terminal.clear();
-        writeTerminalReplay(terminal, plan.data, replayGateRef);
-        writtenBufferRef.current = bufferRef.current;
-        return;
-      }
-      terminal.write(plan.data);
-      writtenBufferRef.current = bufferRef.current;
-    };
-
-    /**
-     * Business Logic（为什么需要这个函数）:
      *   手机旋转、地址栏收缩或分屏后需要同步 xterm 与后端 PTY 尺寸。
      *
      * Code Logic（这个函数做什么）:
@@ -686,7 +666,10 @@ export function MobileTerminalPanel({
         writeTerminalReplay(terminal, initial.data, replayGateRef);
         writtenBufferRef.current = initial.writtenBuffer;
         replayReadyRef.current = true;
-        flushLiveBufferAfterReplay();
+        // 刷新后外部 buffer store 重建只含 NDJSON live（不含 replay 历史），与 writtenBuffer 字符串
+        // diff 失败会触发 terminal.clear() 清空 scrollback（老内容丢失、无法上滚）。以 replay 为 store
+        // baseline 后，后续 live（seq > lastSeq、同 owner）走 append，scrollback 保留。
+        store.reset(sessionId, initial.writtenBuffer, replay.lastSeq, replay.ownerInstanceId);
       })
       .catch((reason) => {
         if (disposed || replayRequestIdRef.current !== requestId) return;
@@ -696,7 +679,6 @@ export function MobileTerminalPanel({
           writtenBufferRef.current = liveBuffer;
         }
         replayReadyRef.current = true;
-        flushLiveBufferAfterReplay();
         setPanelError(
           `${t('workbench:mobile.terminalPanel.errors.replay')}: ${getErrorMessage(
             reason,
@@ -725,7 +707,7 @@ export function MobileTerminalPanel({
       replayGateRef.current = false;
       replayReadyRef.current = false;
     };
-  }, [sessionId, t, visibleSession?.status]);
+  }, [sessionId, store, t, visibleSession?.status]);
 
   useEffect(() => {
     const applyTheme = (): void => {

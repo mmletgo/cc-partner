@@ -913,7 +913,9 @@ export function useWorkbenchTerminalController(
 
   /**
    * Business Logic（为什么需要这个函数）:
-   *   桌面端用户切换到当前 tmux window 的下一个 pane（与移动端一致的入口）。
+   *   桌面端用户切换到当前 tmux window 的下一个 pane（与移动端一致的入口与视觉:
+   *   切换后立即 zoom,只显示当前 active pane,避免未 zoom 的 window 把所有 pane 并排渲染、
+   *   active 边框逐个循环移动）。
    */
   const handleSwitchPane = useCallback(async (): Promise<void> => {
     if (!activeSession) return;
@@ -923,6 +925,15 @@ export function useWorkbenchTerminalController(
     } catch (error) {
       markRequestFailure(activeSession.projectId, error);
       setSessionError(displayErrorMessage(error, t('switchPane')));
+      return;
+    }
+    // 与移动端 ensurePaneZoomedById 一致:切换成功后立即把当前 active pane zoom 成单 pane 视图。
+    // zoomPane 后端幂等（pane 数 <=1 或已 zoom 时 no-op）；失败单独报错，不影响已完成的切换。
+    try {
+      await workbenchApi.sessions.zoomPane(activeSession.id);
+    } catch (error) {
+      markRequestFailure(activeSession.projectId, error);
+      setSessionError(displayErrorMessage(error, t('zoomPane')));
     }
   }, [activeSession, displayErrorMessage, markRequestFailure, remoteWriteDisabled, t]);
 

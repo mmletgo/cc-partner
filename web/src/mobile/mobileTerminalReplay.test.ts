@@ -1,6 +1,5 @@
 import { describe, test } from 'vitest';
 import {
-  planMobileReplayReadyBufferWrite,
   prepareInitialReplayBuffer,
   shouldForwardMobileTerminalInput,
 } from './mobileTerminalReplay';
@@ -80,15 +79,5 @@ describe('mobileTerminalReplay', () => {
       false,
       'mobile terminal input should stay blocked while replay gate is active',
     );
-  });
-
-  test('planMobileReplayReadyBufferWrite appends only new live tail', () => {
-    const readyPlan = planMobileReplayReadyBufferWrite('screen-a', 'screen-a-tail');
-    assertEqual(
-      readyPlan.mode,
-      'append',
-      'replay-ready live buffer should be reconciled immediately',
-    );
-    assertEqual(readyPlan.data, '-tail', 'replay-ready live buffer should append only new tail');
   });
 });

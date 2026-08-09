@@ -1257,6 +1257,46 @@ describe('useWorkbenchTerminalController — split / switch / zoom / close pane'
     expect(fakeSessionsApi.zoomPane).toHaveBeenCalledWith('s1');
   });
 
+  test('handleSwitchPane zooms the active pane afterwards to mirror mobile single-pane view', async () => {
+    const project = buildLocalProject();
+    const worktree = buildWorktree();
+    const s1 = buildSession({ id: 's1', worktreeId: worktree.id, paneCount: 2 });
+    fakeSessionsApi.list.mockResolvedValue([s1]);
+
+    const { result } = renderController({
+      activeProjectId: project.id,
+      activeWorktreeId: worktree.id,
+      remoteWriteDisabled: false,
+      terminalPanelRef: { current: null },
+      resetBuffer: vi.fn(),
+      removeBuffer: vi.fn(),
+      refreshProjectSessionStats: vi.fn(),
+      markRequestFailure: vi.fn(),
+      markRequestSuccess: vi.fn(),
+      isCurrentProject: () => true,
+      canListenToTauriEvents: () => true,
+    });
+
+    await act(async () => {
+      await result.current.loadSessions(project.id);
+      await flushMicrotasks();
+    });
+
+    fakeSessionsApi.switchPane.mockClear();
+    fakeSessionsApi.zoomPane.mockClear();
+
+    await act(async () => {
+      await result.current.handleSwitchPane();
+      await flushMicrotasks();
+    });
+
+    expect(fakeSessionsApi.switchPane).toHaveBeenCalledTimes(1);
+    expect(fakeSessionsApi.switchPane).toHaveBeenCalledWith('s1');
+    // 与移动端一致:切到下一个 pane 后立即 zoom,tmux window 只显示当前 active pane。
+    expect(fakeSessionsApi.zoomPane).toHaveBeenCalledTimes(1);
+    expect(fakeSessionsApi.zoomPane).toHaveBeenCalledWith('s1');
+  });
+
   test('canSwitchPane is false for single-pane running sessions', async () => {
     const project = buildLocalProject();
     const worktree = buildWorktree();

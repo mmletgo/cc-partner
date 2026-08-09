@@ -1,7 +1,6 @@
 import {
   planTerminalBufferWrite,
   shouldForwardTerminalInput,
-  type TerminalBufferWritePlan,
   type TerminalReplayGate,
 } from '@/pages/Workbench/terminalReplay';
 
@@ -49,18 +48,4 @@ export function shouldForwardMobileTerminalInput(
   inputEnabled: boolean,
 ): boolean {
   return replayReady && shouldForwardTerminalInput(gate, inputEnabled);
-}
-
-/**
- * Business Logic（为什么需要这个函数）:
- *   replay 期间可能已经收到 NDJSON live buffer；replay ready 后需要立即补写，而不是等下一条输出。
- *
- * Code Logic（这个函数做什么）:
- *   复用桌面 terminal buffer diff 规则，计算当前已写入 buffer 到最新 live buffer 的写入计划。
- */
-export function planMobileReplayReadyBufferWrite(
-  writtenBuffer: string,
-  liveBuffer: string,
-): TerminalBufferWritePlan {
-  return planTerminalBufferWrite(writtenBuffer, liveBuffer);
 }
