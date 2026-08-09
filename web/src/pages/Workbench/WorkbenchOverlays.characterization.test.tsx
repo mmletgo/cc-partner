@@ -123,7 +123,8 @@ describe('Workbench overlay domain (characterization)', () => {
         case 'list_workbench_worktrees':
           return [worktree];
         case 'list_workbench_sessions':
-          return [session];
+          // resume 后新 session 进入列表：focusSession 改为 state 驱动，effect 仅在 activeSession running 时才 invoke focus_workbench_session。
+          return [session, { ...session, id: 'resumed-session', status: 'running' as const }];
         case 'list_workbench_git_commits':
           return [];
         case 'list_workbench_dir':

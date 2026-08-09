@@ -16,6 +16,7 @@ import {
   findForbiddenDiagnosticsKeys,
   formatDiagnosticsForCopy,
 } from '@/api/runtimeDiagnostics';
+import { MemoryRouter } from 'react-router-dom';
 
 /**
  * Business Logic（为什么需要这个函数）:
@@ -381,6 +382,7 @@ vi.mock('@/components/domain', () => {
     LanFirewallDependencyCard: () => <div data-testid="lan-card" />,
     PermissionCard: () => <div data-testid="perm-card" />,
     WorkbenchDependencyCard: () => <div data-testid="wb-card" />,
+    CcSwitchCliDependencyCard: () => <div data-testid="cc-switch-card" />,
     RuntimeDiagnosticsCard: RuntimeDiagnosticsCardStub,
   };
 });
@@ -455,7 +457,7 @@ import { Settings } from './Settings';
  *   直接 render Settings。
  */
 function renderSettings(): ReturnType<typeof render> {
-  return render(<Settings />);
+  return render(<MemoryRouter><Settings /></MemoryRouter>);
 }
 
 beforeEach(() => {

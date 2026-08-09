@@ -5,7 +5,7 @@
  *   Settings 之外的自动化表面也必须展示 OpenCode bridge/completion/blocked，且 fail-closed。
  *
  * Code Logic（这个组件做什么）:
- *   只收 catalog props + optional preview navigate callback；无 @/api/*。
+ *   只收 catalog props + optional preview navigate callback；纯展示，不直接调用 API 模块。
  */
 
 import type { ReactElement } from 'react';

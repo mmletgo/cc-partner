@@ -45,6 +45,7 @@ vi.mock('@/api/workbenchHttp', () => ({
     },
     sessions: {
       list: (...args: unknown[]) => listSessionsMock(...args),
+      focus: vi.fn(async () => ({ ok: true, sessionId: '' })),
     },
     git: {
       listCommits: vi.fn(async () => []),
