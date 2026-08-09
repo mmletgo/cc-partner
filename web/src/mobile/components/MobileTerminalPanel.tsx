@@ -10,8 +10,8 @@ import {
   useWorkbenchTerminalBufferStore,
   useWorkbenchTerminalBuffers,
 } from '@/hooks/workbenchTerminalBuffersContext';
-import { ArrowRightIcon, MaximizeIcon, MinimizeIcon, PlusIcon, XIcon } from '@/lib/icons';
-import type { WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
+import { ArrowRightIcon, MaximizeIcon, MinimizeIcon, PlusIcon, PromptsIcon, XIcon } from '@/lib/icons';
+import type { Prompt, WorkbenchProject, WorkbenchSession, WorkbenchWorktree } from '@/lib/types';
 import {
   planTerminalBufferWrite,
   writeTerminalReplay,
@@ -61,6 +61,7 @@ import {
   type MobileTerminalStickyModifier,
 } from '../mobileTerminalExtraKeys';
 import { MobileTerminalExtraKeys } from './MobileTerminalExtraKeys';
+import { MobileFavoriteQuickInput } from './MobileFavoriteQuickInput';
 import { PointerPrimaryButton } from './PointerPrimaryButton';
 
 const MIN_TERMINAL_COLS = 20;
@@ -182,6 +183,7 @@ export function MobileTerminalPanel({
   });
   const [extraKeysPage, setExtraKeysPage] = useState<MobileTerminalExtraKeyPage>(1);
   const [stickyModifier, setStickyModifier] = useState<MobileTerminalStickyModifier | null>(null);
+  const [favoriteSheetOpen, setFavoriteSheetOpen] = useState<boolean>(false);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -222,6 +224,9 @@ export function MobileTerminalPanel({
   const isActionDisabled = busy || actionBusy !== null;
   const canUsePaneActions = canRunMobilePaneMutation(visibleSession, isActionDisabled);
   const canSwitchPane = canSwitchMobilePane(visibleSession, isActionDisabled);
+  // 收藏 Prompt 快捷输入按钮需要写终端输入流：session running 且 input stream ready 才启用。
+  const canOpenFavoriteQuickInput =
+    canUsePaneActions && inputStreamState.status === 'ready';
   const isTerminalFullscreen = terminalFullscreen && visibleSession !== null;
   const terminalChrome = getMobileTerminalChromeVisibility(isTerminalFullscreen);
   const TerminalFullscreenIcon = terminalChrome.exitFullscreen ? MinimizeIcon : MaximizeIcon;
@@ -290,6 +295,23 @@ export function MobileTerminalPanel({
       }
     },
     [sessionId, t],
+  );
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   收藏 Prompt 面板选中条目后，需要把 prompt 内容写入当前终端输入行（不回车），
+   *   与桌面端快捷键浮层语义一致，让用户接着编辑或自行 Enter。
+   *
+   * Code Logic（这个函数做什么）:
+   *   有 active sessionId 时复用 sendTerminalInput（自带 inputEnabled 门闩），
+   *   不拼 \r；写入失败由 sendTerminalInput 统一投影 panelError。
+   */
+  const handleSelectFavoritePrompt = useCallback(
+    (prompt: Prompt): void => {
+      if (!sessionId) return;
+      sendTerminalInput(prompt.content);
+    },
+    [sendTerminalInput, sessionId],
   );
 
   /**
@@ -1139,6 +1161,17 @@ export function MobileTerminalPanel({
               <TerminalFullscreenIcon size={16} aria-hidden="true" />
               <span>{terminalFullscreenLabel}</span>
             </PointerPrimaryButton>
+            <PointerPrimaryButton
+              type="button"
+              className={styles.mobileTerminalActionButton}
+              disabled={!canOpenFavoriteQuickInput}
+              aria-label={t('workbench:mobile.favoriteQuickInput.openButton')}
+              title={t('workbench:mobile.favoriteQuickInput.openButton')}
+              onPrimary={() => setFavoriteSheetOpen(true)}
+            >
+              <PromptsIcon size={16} aria-hidden="true" />
+              <span>{t('workbench:mobile.favoriteQuickInput.openButton')}</span>
+            </PointerPrimaryButton>
           </div>
         ) : null}
       </div>
@@ -1182,6 +1215,11 @@ export function MobileTerminalPanel({
           ) : null}
         </div>
       ) : null}
+      <MobileFavoriteQuickInput
+        open={favoriteSheetOpen}
+        onClose={() => setFavoriteSheetOpen(false)}
+        onSelectPrompt={handleSelectFavoritePrompt}
+      />
     </section>
   );
 }

@@ -1,0 +1,189 @@
+/* 收藏快捷输入浮层：定位参考 promptOptimizerPanel，但用绝对定位固定在终端区右上角 */
+
+.panel {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  width: 320px;
+  max-width: calc(100% - var(--space-4));
+  max-height: 60%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: var(--z-overlay);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+}
+
+.closeBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted-readable);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.closeBtn:hover {
+  color: var(--fg);
+}
+
+.searchWrap {
+  flex: 0 0 auto;
+}
+
+.search {
+  width: 100%;
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.chipActive,
+.chipActive:hover {
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: var(--accent);
+}
+
+.chipCount {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 60px;
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.item:hover {
+  border-color: var(--accent);
+}
+
+.itemHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.itemTitle {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.itemStar {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.itemContent {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+  line-height: var(--leading-relaxed);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.empty {
+  padding: var(--space-3);
+  text-align: center;
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.emptyHint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--fg-muted-readable);
+}
+
+.loading {
+  margin: 0;
+  padding: var(--space-3);
+  text-align: center;
+  color: var(--fg-muted-readable);
+  font-size: var(--text-sm);
+}
+
+.error {
+  margin: 0;
+  padding: var(--space-2);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+}

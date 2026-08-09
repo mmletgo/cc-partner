@@ -38,6 +38,12 @@ pub struct PromptRow {
     /// 本域删除序号（tombstone 水位/GC 用；未删除为 0；旧 JSON 缺省 0）
     #[serde(default)]
     pub delete_epoch: u64,
+    /// 是否收藏（用户级星标；跟随整行 vector_clock + LWW 跨设备同步）
+    ///
+    /// Business Logic: 收藏是 PromptRow 的元数据字段，与 title/content/tags 一起参与
+    ///     整行 CRDT 同步；旧 JSON 缺省视为未收藏。移动端只读消费，本期不做 toggle。
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 /// Prompt 前端 DTO（camelCase，对照前端 types.ts）。
@@ -58,6 +64,9 @@ pub struct PromptDto {
     pub device_id: String,
     pub vector_clock: HashMap<String, u64>,
     pub deleted: bool,
+    /// 是否收藏（前端星标状态；与 Row.favorite 同步）
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 impl PromptRow {
@@ -76,6 +85,7 @@ impl PromptRow {
             device_id: self.device_id.clone(),
             vector_clock: self.vector_clock.clone(),
             deleted: self.deleted,
+            favorite: self.favorite,
         }
     }
 }

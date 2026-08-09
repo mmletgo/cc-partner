@@ -388,6 +388,8 @@ pub struct ConfigSnapshot {
     pub screenshot_hotkey: String,
     pub prompt_optimizer_hotkey: String,
     pub prompt_optimizer_fill_language: String,
+    /// Prompt 库 Quick Input 面板快捷键（pynput 风格；窗口级，不走 GlobalShortcut）。
+    pub prompt_quick_input_hotkey: String,
     pub cloud_sync_repo_url: Option<String>,
     pub cloud_sync_enabled: bool,
     pub cloud_sync_auto: bool,
@@ -420,6 +422,7 @@ impl ConfigSnapshot {
             prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
                 &config.prompt_optimizer_fill_language,
             ),
+            prompt_quick_input_hotkey: config.prompt_quick_input_hotkey.clone(),
             cloud_sync_repo_url: config.cloud_sync_repo_url.clone(),
             cloud_sync_enabled: config.cloud_sync_enabled,
             cloud_sync_auto: config.cloud_sync_auto,
@@ -448,6 +451,7 @@ impl ConfigSnapshot {
         cfg.prompt_optimizer_hotkey = self.prompt_optimizer_hotkey.clone();
         cfg.prompt_optimizer_fill_language =
             normalize_prompt_optimizer_fill_language(&self.prompt_optimizer_fill_language);
+        cfg.prompt_quick_input_hotkey = self.prompt_quick_input_hotkey.clone();
         cfg.cloud_sync_repo_url = self.cloud_sync_repo_url.clone();
         cfg.cloud_sync_enabled = self.cloud_sync_enabled;
         cfg.cloud_sync_auto = self.cloud_sync_auto;
@@ -612,6 +616,9 @@ pub struct RuntimeConfigPatch {
     pub prompt_optimizer_hotkey: Option<String>,
     #[serde(default)]
     pub prompt_optimizer_fill_language: Option<String>,
+    /// Prompt 库 Quick Input 面板快捷键（窗口级 keydown，不走 GlobalShortcut/hotkey.rs）。
+    #[serde(default)]
+    pub prompt_quick_input_hotkey: Option<String>,
     #[serde(default)]
     pub cloud_sync_repo_url: Option<String>,
     #[serde(default)]
@@ -658,6 +665,9 @@ impl RuntimeConfigPatch {
         }
         if let Some(ref language) = self.prompt_optimizer_fill_language {
             cfg.prompt_optimizer_fill_language = normalize_prompt_optimizer_fill_language(language);
+        }
+        if let Some(ref hotkey) = self.prompt_quick_input_hotkey {
+            cfg.prompt_quick_input_hotkey = hotkey.clone();
         }
         if let Some(ref url) = self.cloud_sync_repo_url {
             cfg.cloud_sync_repo_url = if url.trim().is_empty() {
@@ -938,6 +948,7 @@ pub fn config_fingerprint(config: &AppConfig) -> String {
         "screenshot_hotkey": config.screenshot_hotkey,
         "prompt_optimizer_hotkey": config.prompt_optimizer_hotkey,
         "prompt_optimizer_fill_language": config.prompt_optimizer_fill_language,
+        "prompt_quick_input_hotkey": config.prompt_quick_input_hotkey,
         "cloud_sync_enabled": config.cloud_sync_enabled,
         "cloud_sync_auto": config.cloud_sync_auto,
         "cloud_sync_interval_secs": config.cloud_sync_interval_secs,
@@ -976,6 +987,7 @@ mod tests {
             screenshot_hotkey: "<ctrl>+<shift>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "zh".into(),
+            prompt_quick_input_hotkey: "<ctrl>+/".into(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
             cloud_sync_auto: false,

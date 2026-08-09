@@ -38,10 +38,12 @@ import {
   CheckIcon,
   EditIcon,
   HistoryIcon,
+  StarIcon,
 } from '@/lib/icons';
 import { debounce } from '@/lib/format';
 import styles from './Prompts.module.css';
 import {
+  applyFavoriteToggle,
   applyOptimisticPromptMutation,
   commitPromptMutation,
   deriveTagsFromPrompts,
@@ -112,6 +114,8 @@ export function Prompts() {
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [activeTag, setActiveTag] = useState<string>('all');
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [favoriteError, setFavoriteError] = useState<string | null>(null);
 
   // ── 编辑 / 新建 / 删除 ──
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -230,6 +234,7 @@ export function Prompts() {
   const filtered = useMemo(() => {
     const lower = search.trim().toLowerCase();
     return prompts.filter((p) => {
+      if (showFavoritesOnly && !p.favorite) return false;
       if (activeTag !== 'all') {
         const promptTags = p.tags && p.tags.length > 0 ? p.tags : p.tag ? [p.tag] : [];
         if (!promptTags.includes(activeTag)) return false;
@@ -240,7 +245,7 @@ export function Prompts() {
         p.content.toLowerCase().includes(lower)
       );
     });
-  }, [prompts, search, activeTag]);
+  }, [prompts, search, activeTag, showFavoritesOnly]);
 
   // ── 各标签计数（用于 chip 上的数字角标） ──
   const tagCounts = useMemo(() => {
@@ -253,6 +258,36 @@ export function Prompts() {
     }
     return counts;
   }, [prompts]);
+
+  /**
+   * Business Logic（为什么需要这个函数）:
+   *   收藏是高频一键操作，用户点击星标后必须立即看到翻转，不能等网络往返；
+   *   失败时回滚并把错误呈现为可被用户重新尝试的提示。
+   *
+   * Code Logic（这个函数做什么）:
+   *   乐观 toggle（applyFavoriteToggle）→ 调 toggle_prompt_favorite → 成功用服务端 DTO 校准；
+   *   失败 flip 回滚并写入 favoriteError。独立于 runMutation 事务，避免与编辑/删除 pending 互相阻塞。
+   */
+  const handleToggleFavorite = useCallback(
+    async (prompt: Prompt) => {
+      setPrompts((prev) => applyFavoriteToggle(prev, prompt.id));
+      setFavoriteError(null);
+      try {
+        const updated = await promptsApi.toggleFavorite(prompt.id);
+        setPrompts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      } catch (err) {
+        setPrompts((prev) => applyFavoriteToggle(prev, prompt.id));
+        setFavoriteError(errorMessage(err, t('prompts:favoriteToggleFailed')));
+      }
+    },
+    [t],
+  );
+
+  /** 收藏总数（用于「仅看收藏」chip 角标，与其他 chip 计数一致） */
+  const favoriteCount = useMemo(
+    () => prompts.filter((p) => p.favorite).length,
+    [prompts],
+  );
 
   /**
    * Business Logic（为什么需要这个函数）:
@@ -722,6 +757,12 @@ export function Prompts() {
             active={activeTag === 'all'}
             onClick={() => setActiveTag('all')}
           />
+          <FilterChip
+            label={t('prompts:favoritesOnly')}
+            count={favoriteCount}
+            active={showFavoritesOnly}
+            onClick={() => setShowFavoritesOnly((v) => !v)}
+          />
           {allTags.map((tag) => (
             <FilterChip
               key={tag}
@@ -770,6 +811,15 @@ export function Prompts() {
           >
             {t('common:action.retry')}
           </Button>
+        </div>
+      ) : null}
+
+      {/* 收藏切换失败（回滚后提示，用户重新点击星标即重试） */}
+      {favoriteError ? (
+        <div className={styles.noticeBanner} data-testid="prompt-favorite-error" role="alert">
+          <p className={styles.noticeText}>
+            {t('prompts:favoriteToggleFailed', { error: favoriteError })}
+          </p>
         </div>
       ) : null}
 
@@ -836,6 +886,9 @@ export function Prompts() {
                     onDelete={() => {
                       if (pendingEntityIdsRef.current.has(p.id)) return;
                       setPendingDeleteId(p.id);
+                    }}
+                    onToggleFavorite={() => {
+                      void handleToggleFavorite(p);
                     }}
                   />
                 </li>
@@ -944,6 +997,7 @@ function PromptCardView({
   onEdit,
   onHistory,
   onDelete,
+  onToggleFavorite,
 }: {
   prompt: Prompt;
   actionsDisabled: boolean;
@@ -951,6 +1005,7 @@ function PromptCardView({
   onEdit: () => void;
   onHistory: () => void;
   onDelete: () => void;
+  onToggleFavorite: () => void;
 }) {
   const { t } = useTranslation(['prompts', 'common']);
   return (
@@ -969,6 +1024,22 @@ function PromptCardView({
           ) : null}
         </div>
         <div className={styles.promptActions}>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<StarIcon />}
+            onClick={onToggleFavorite}
+            disabled={actionsDisabled}
+            aria-label={
+              prompt.favorite ? t('prompts:unfavorite') : t('prompts:favorite')
+            }
+            title={
+              prompt.favorite ? t('prompts:unfavorite') : t('prompts:favorite')
+            }
+            className={prompt.favorite ? styles.favoriteActive : undefined}
+            data-testid={`prompt-favorite-toggle-${prompt.id}`}
+            data-active={prompt.favorite || undefined}
+          />
           <Button
             variant="ghost"
             size="sm"

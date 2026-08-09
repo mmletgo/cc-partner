@@ -102,6 +102,10 @@ vi.mock('@/lib/icons', () => ({
   MaximizeIcon: (): null => null,
   MinimizeIcon: (): null => null,
   PlusIcon: (): null => null,
+  PromptsIcon: (): null => null,
+  RefreshIcon: (): null => null,
+  SearchIcon: (): null => null,
+  StarIcon: (): null => null,
   XIcon: (): null => null,
 }));
 

@@ -42,6 +42,7 @@ export const appConfigDecoder: Decoder<AppConfig> = objectDecoder('AppConfig', {
   screenshotHotkey: stringDecoder,
   promptOptimizerHotkey: stringDecoder,
   promptOptimizerFillLanguage: fillLanguageDecoder,
+  promptQuickInputHotkey: stringDecoder,
   httpPort: numberDecoder,
 });
 

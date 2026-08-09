@@ -38,6 +38,8 @@ pub struct ConfigDto {
     pub screenshot_hotkey: String,
     pub prompt_optimizer_hotkey: String,
     pub prompt_optimizer_fill_language: String,
+    /// Prompt 库 Quick Input 面板快捷键（窗口级 keydown，不走 GlobalShortcut）。
+    pub prompt_quick_input_hotkey: String,
     /// HTTP 端口（M1 未实际监听，暂返回配置值；M3 接入真实监听端口后更新）
     pub http_port: i64,
 }
@@ -59,6 +61,7 @@ fn config_to_dto(cfg: &AppConfig) -> ConfigDto {
         prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
             &cfg.prompt_optimizer_fill_language,
         ),
+        prompt_quick_input_hotkey: cfg.prompt_quick_input_hotkey.clone(),
         http_port: cfg.http_port,
     }
 }
@@ -112,6 +115,7 @@ fn snapshot_to_config_dto(snap: &ConfigSnapshot, device_id: &str) -> ConfigDto {
         prompt_optimizer_fill_language: normalize_prompt_optimizer_fill_language(
             &snap.prompt_optimizer_fill_language,
         ),
+        prompt_quick_input_hotkey: snap.prompt_quick_input_hotkey.clone(),
         http_port: snap.http_port,
     }
 }
@@ -129,6 +133,7 @@ fn build_preference_patch(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_quick_input_hotkey: Option<String>,
 ) -> RuntimeConfigPatch {
     RuntimeConfigPatch {
         device_name,
@@ -136,6 +141,7 @@ fn build_preference_patch(
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_quick_input_hotkey,
         ..Default::default()
     }
 }
@@ -154,6 +160,7 @@ async fn update_config_via_owner(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     let client = BackendControlClient::from_control_file()?;
     let resp: ConfigUpdateResponse = client
@@ -163,6 +170,7 @@ async fn update_config_via_owner(
             screenshot_hotkey,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
+            prompt_quick_input_hotkey,
         ))
         .await?;
     refresh_local_from_snapshot(state, &resp.snapshot)?;
@@ -179,6 +187,7 @@ async fn update_config_via_owner(
 ///
 /// Code Logic（这个函数做什么）:
 ///     control client `update_config_with_hotkey_compensation` → 刷新本地 → DTO。
+#[allow(clippy::too_many_arguments)]
 async fn update_config_via_owner_with_hotkey(
     state: &AppState,
     backend: &mut dyn GlobalShortcutBackend,
@@ -187,6 +196,7 @@ async fn update_config_via_owner_with_hotkey(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     let client = BackendControlClient::from_control_file()?;
     let resp = client
@@ -198,6 +208,7 @@ async fn update_config_via_owner_with_hotkey(
                 screenshot_hotkey,
                 prompt_optimizer_hotkey,
                 prompt_optimizer_fill_language,
+                prompt_quick_input_hotkey,
             ),
         )
         .await?;
@@ -222,6 +233,7 @@ pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto,
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_quick_input_hotkey,
     ) = default_preference_values();
     Ok(ConfigDto {
         device_id: cfg.device_id.clone(),
@@ -230,6 +242,7 @@ pub async fn get_default_config(state: State<'_, AppState>) -> Result<ConfigDto,
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_quick_input_hotkey,
         http_port: cfg.http_port,
     })
 }
@@ -249,6 +262,7 @@ fn apply_config_patch(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_quick_input_hotkey: Option<String>,
 ) {
     if let Some(n) = device_name {
         cfg.device_name = n;
@@ -264,6 +278,9 @@ fn apply_config_patch(
     }
     if let Some(language) = prompt_optimizer_fill_language {
         cfg.prompt_optimizer_fill_language = normalize_prompt_optimizer_fill_language(&language);
+    }
+    if let Some(h) = prompt_quick_input_hotkey {
+        cfg.prompt_quick_input_hotkey = h;
     }
 }
 
@@ -282,6 +299,7 @@ pub async fn update_config_for_runtime(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     let (_committed, dto) = update_config_transactionally(runtime, |cfg| {
         apply_config_patch(
@@ -291,6 +309,7 @@ pub async fn update_config_for_runtime(
             screenshot_hotkey,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
+            prompt_quick_input_hotkey,
         );
         Ok(config_to_dto(cfg))
     })
@@ -308,6 +327,7 @@ pub async fn update_config_for_runtime(
 /// Code Logic（这个函数做什么）:
 ///     持 `lock_for_update` → clone candidate → OS replace → mutate/validate →
 ///     spawn_blocking save_atomic → 成功 swap 内存；失败同临界区 OS 补偿。
+#[allow(clippy::too_many_arguments)]
 pub async fn update_config_with_hotkey_backend(
     runtime: &ConfigRuntime,
     backend: &mut dyn GlobalShortcutBackend,
@@ -316,6 +336,7 @@ pub async fn update_config_with_hotkey_backend(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     let _guard = runtime.lock_for_update().await;
 
@@ -339,6 +360,7 @@ pub async fn update_config_with_hotkey_backend(
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_quick_input_hotkey,
     );
 
     if let Err(e) = candidate.validate() {
@@ -376,6 +398,7 @@ pub async fn update_config_with_hotkey_backend(
 /// Code Logic: GUI 经 BackendControlClient 提交 allowlist patch；截图快捷键走两阶段补偿；
 ///     成功后刷新本地缓存 DTO。无本地 ConfigRuntime mutation fallback。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_config(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -384,6 +407,7 @@ pub async fn update_config(
     screenshot_hotkey: Option<String>,
     prompt_optimizer_hotkey: Option<String>,
     prompt_optimizer_fill_language: Option<String>,
+    prompt_quick_input_hotkey: Option<String>,
 ) -> Result<ConfigDto, AppError> {
     if screenshot_hotkey.is_none() {
         return update_config_via_owner(
@@ -393,6 +417,7 @@ pub async fn update_config(
             None,
             prompt_optimizer_hotkey,
             prompt_optimizer_fill_language,
+            prompt_quick_input_hotkey,
         )
         .await;
     }
@@ -406,6 +431,7 @@ pub async fn update_config(
         screenshot_hotkey,
         prompt_optimizer_hotkey,
         prompt_optimizer_fill_language,
+        prompt_quick_input_hotkey,
     )
     .await
 }
@@ -456,6 +482,7 @@ mod tests {
             screenshot_hotkey: "<ctrl>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "zh".into(),
+            prompt_quick_input_hotkey: "<ctrl>+/".into(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
             cloud_sync_auto: false,
@@ -481,6 +508,7 @@ mod tests {
         let err = update_config_for_runtime(
             &runtime,
             Some("mutated-name".into()),
+            None,
             None,
             None,
             None,
@@ -516,6 +544,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("update");
@@ -545,6 +574,7 @@ mod tests {
             None,
             None,
             Some("<ctrl>+<shift>+s".into()),
+            None,
             None,
             None,
         )
@@ -581,6 +611,7 @@ mod tests {
             Some("after".into()),
             None,
             Some("<ctrl>+<shift>+s".into()),
+            None,
             None,
             None,
         )

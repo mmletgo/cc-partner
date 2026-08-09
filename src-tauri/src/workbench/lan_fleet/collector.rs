@@ -1086,7 +1086,7 @@ mod tests {
              id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, \
              tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
              device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
-             delete_epoch INTEGER NOT NULL DEFAULT 0)",
+             delete_epoch INTEGER NOT NULL DEFAULT 0, favorite INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
@@ -1121,6 +1121,7 @@ mod tests {
             screenshot_hotkey: "<cmd>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "zh".into(),
+            prompt_quick_input_hotkey: "<ctrl>+/".into(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
             cloud_sync_auto: false,

@@ -83,3 +83,15 @@
   font-variant-numeric: tabular-nums;
   flex: 0 0 auto;
 }
+
+/* 收藏角标：仅展示态星标（交互在页面层），复用品牌色保持与激活态一致 */
+.favoriteMark {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.favoriteMark svg {
+  fill: var(--accent);
+}

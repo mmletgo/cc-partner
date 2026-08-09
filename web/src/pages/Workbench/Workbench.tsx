@@ -53,6 +53,7 @@ import { useWorkbenchFileController } from './controllers/useWorkbenchFileContro
 import { useWorkbenchAutomationController } from './controllers/useWorkbenchAutomationController';
 import { useWorkbenchPromptOptimizerController } from './controllers/useWorkbenchPromptOptimizerController';
 import { useWorkbenchSessionSearchController } from './controllers/useWorkbenchSessionSearchController';
+import { useWorkbenchFavoriteQuickInput } from './hooks/useWorkbenchFavoriteQuickInput';
 import { useAgentRuntime } from '@/hooks/useAgentRuntime';
 import { WorkbenchTerminalArea } from './WorkbenchTerminalArea';
 import { WorkbenchInspector } from './WorkbenchInspector';
@@ -421,6 +422,7 @@ export function Workbench() {
     handleCursorAnchorChange,
     handlePromptInputKeyDown,
   } = promptOptimizerController;
+  const favoriteQuickInput = useWorkbenchFavoriteQuickInput({ activeSessionId, terminalPanelRef, handleInput });
   // Business Logic: Session 搜索浮层域（⌘K/Ctrl+K 开/关 + resume 成功刷新 sessions/focus 新 session/关闭浮层）
   // 由独立 controller 持有，避免在 Workbench.tsx 里散落 open state 与 keydown 监听；controller 只持有 open 状态
   // 与 resume 编排，搜索结果数据（query/hits/preview）仍归 WorkbenchSessionSearch 组件所有。
@@ -1055,6 +1057,8 @@ export function Workbench() {
               handleCursorAnchorChange={handleCursorAnchorChange}
               handleSelectPaneAt={handleSelectPaneAt}
               focusSession={focusSession}
+              favoriteQuickInput={favoriteQuickInput}
+              activeSessionId={activeSessionId}
             />
           </div>
 

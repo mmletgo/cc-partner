@@ -94,3 +94,38 @@ pub async fn ensure_domain_delete_epoch_columns(
     }
     Ok(())
 }
+
+/// 为 prompts 表确保 `favorite INTEGER NOT NULL DEFAULT 0` 列。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Prompt 收藏(favorite)是跟随整行 vector_clock + LWW 同步的元数据字段；旧库无该列时
+///     必须幂等补齐，否则新代码读写 favorite 会失败。模式与 `ensure_domain_delete_epoch_columns`
+///     对齐，仅作用于 prompts 单表。
+///
+/// Code Logic（这个函数做什么）:
+///     `PRAGMA table_info(prompts)` 检查列名；缺失则
+///     `ALTER TABLE prompts ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0`；
+///     表不存在时 PRAGMA 返回空集，跳过避免 ALTER 失败（单测/局部 schema 场景）。
+pub async fn ensure_prompts_favorite_column(
+    pool: &sqlx::sqlite::SqlitePool,
+) -> Result<(), crate::error::AppError> {
+    let columns = sqlx::query("PRAGMA table_info(prompts)")
+        .fetch_all(pool)
+        .await?;
+    // 表不存在时 PRAGMA 返回空集：单测/局部 schema 场景跳过，避免 ALTER 失败。
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let has_col = columns.iter().any(|row| {
+        use sqlx::Row;
+        row.try_get::<String, _>("name")
+            .map(|name| name == "favorite")
+            .unwrap_or(false)
+    });
+    if !has_col {
+        sqlx::query("ALTER TABLE prompts ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}

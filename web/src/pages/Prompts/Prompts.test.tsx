@@ -45,6 +45,7 @@ function buildPrompt(overrides: Partial<Prompt> = {}): Prompt {
     title: 'Alpha title',
     content: 'Alpha content body',
     tags: ['work'],
+    favorite: false,
     updatedAt: '2026-07-13T10:00:00.000Z',
     ...overrides,
   };

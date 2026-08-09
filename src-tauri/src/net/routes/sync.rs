@@ -773,7 +773,8 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS prompts (\
              id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, \
              tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
-             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, delete_epoch INTEGER NOT NULL DEFAULT 0)",
+             device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
+             delete_epoch INTEGER NOT NULL DEFAULT 0, favorite INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
@@ -801,6 +802,7 @@ mod tests {
             vector_clock,
             deleted: false,
             delete_epoch: 0,
+            favorite: false,
         }
     }
 

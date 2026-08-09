@@ -16,6 +16,7 @@
     "pause": "Pause",
     "resume": "Resume"
   },
+  "favorite": "Favorite",
   "status": {
     "device": {
       "online": "Online",

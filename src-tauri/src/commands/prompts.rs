@@ -167,6 +167,7 @@ async fn snapshot_prompt_history(
 /// 列出 Prompt：可选关键词搜索或单标签筛选。
 ///
 /// Business Logic: 前端列表页传 search 或 tag 查询参数；对应 GET /api/prompts?search=&tag=。
+///     favorite 过滤仅由移动端路由使用，桌面 invoke 不暴露该参数（始终 None 表示不过滤）。
 #[tauri::command]
 pub async fn list_prompts(
     state: State<'_, AppState>,
@@ -175,7 +176,7 @@ pub async fn list_prompts(
 ) -> Result<Vec<PromptDto>, AppError> {
     let rows = state
         .prompt_repo
-        .list(search.as_deref(), tag.as_deref())
+        .list(search.as_deref(), tag.as_deref(), None)
         .await?;
     Ok(rows.iter().map(PromptRow::to_dto).collect())
 }
@@ -221,6 +222,7 @@ pub async fn create_prompt(
         vector_clock: vc,
         deleted: false,
         delete_epoch: 0,
+        favorite: false,
     };
     state.prompt_repo.create(&row).await?;
     Ok(row.to_dto())
@@ -301,6 +303,39 @@ pub async fn delete_prompt(
         .soft_delete(&id, &now, &row.vector_clock)
         .await?;
     Ok(serde_json::json!({ "ok": true, "id": id }))
+}
+
+/// 切换 Prompt 收藏状态（用户星标）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     用户在 Prompt 库点击星标收藏/取消收藏；favorite 作为 PromptRow 元数据字段，
+///     必须推进本机 vector_clock 让对端感知，并随整行 LWW 跨设备同步。收藏是元数据变更，
+///     不产生内容版本（不写 content_versions history），区别于 `update_prompt`。
+///
+/// Code Logic（这个函数做什么）:
+///     加载旧行 → flip favorite → 推进 vector_clock[device_id] += 1 → 更新 updated_at →
+///     repo.update 落库；返回更新后的 PromptDto。不存在或已删除返回 NotFound。
+#[tauri::command]
+pub async fn toggle_prompt_favorite(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<PromptDto, AppError> {
+    let device_id = state.device_id.as_ref().clone();
+    let mut row = state
+        .prompt_repo
+        .get(&id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Prompt 不存在"))?;
+    // 收藏切换只翻转 favorite，不触碰 title/content/tags
+    row.favorite = !row.favorite;
+    // 推进本端计数器（CRDT：元数据变更产生新版本，使对端感知）
+    let counter = row.vector_clock.entry(device_id.clone()).or_insert(0);
+    *counter += 1;
+    row.updated_at = now_iso();
+    row.device_id = device_id;
+    // 仅元数据变更，不写 content_versions history（区别于 update_prompt）
+    state.prompt_repo.update(&row).await?;
+    Ok(row.to_dto())
 }
 
 /// 列出所有去重标签。对照 Python list_tags handler。

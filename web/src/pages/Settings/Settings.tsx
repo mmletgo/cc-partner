@@ -420,6 +420,12 @@ export function Settings(): ReactElement {
               onPatchPromptOptimizer={ctrl.patchPromptOptimizerForm}
               onResetPromptOptimizerDefaults={ctrl.handleResetPromptOptimizerSettingsDefaults}
               onApplyPromptOptimizer={() => void ctrl.handleApplyPromptOptimizerSettings()}
+              promptQuickInputForm={ctrl.promptQuickInputForm}
+              applyingPromptQuickInput={ctrl.applyingPromptQuickInput}
+              promptQuickInputSettingsError={ctrl.promptQuickInputSettingsError}
+              canResetPromptQuickInputDefaults={ctrl.canResetPromptQuickInputDefaults}
+              onResetPromptQuickInputDefaults={ctrl.handleResetPromptQuickInputDefaults}
+              onApplyPromptQuickInput={() => void ctrl.handleApplyPromptQuickInputSettings()}
               recordingShortcutId={ctrl.recordingShortcutId}
               onShortcutFocus={ctrl.handleShortcutFocus}
               onShortcutBlur={ctrl.handleShortcutBlur}

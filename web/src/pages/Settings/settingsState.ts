@@ -47,6 +47,11 @@ export interface PromptOptimizerSettingsForm {
   fillLanguage: PromptOptimizerFillLanguage;
 }
 
+/** Workbench「收藏快捷输入」浮层快捷键设置表单。 */
+export interface PromptQuickInputSettingsForm {
+  hotkey: string;
+}
+
 /** 健康提醒 tab 的受控表单值;与 HealthConfig 同构,直接整体提交给 update_health_config。 */
 export type HealthForm = HealthConfig;
 
@@ -126,6 +131,11 @@ export interface PromptOptimizerSettingsUpdate {
   promptOptimizerFillLanguage: PromptOptimizerFillLanguage;
 }
 
+/** Workbench「收藏快捷输入」快捷键设置提交 payload。 */
+export interface PromptQuickInputSettingsUpdate {
+  promptQuickInputHotkey: string;
+}
+
 /** 云端同步表单加载前占位值；真实默认值由后端 get_default_cloud_sync_config 覆盖。 */
 export const PENDING_CLOUD_SYNC_FORM: CloudSyncForm = {
   repoUrl: '',
@@ -147,6 +157,11 @@ export const PENDING_GITHUB_TRENDING_FORM: GithubTrendingForm = {
 export const PENDING_PROMPT_OPTIMIZER_SETTINGS_FORM: PromptOptimizerSettingsForm = {
   hotkey: '<ctrl>',
   fillLanguage: 'zh',
+};
+
+/** 收藏快捷输入设置加载前占位值；真实默认值由后端 get_default_config 覆盖（默认 "<ctrl>+/"）。 */
+export const PENDING_PROMPT_QUICK_INPUT_SETTINGS_FORM: PromptQuickInputSettingsForm = {
+  hotkey: '<ctrl>+/',
 };
 
 /** 健康表单加载前占位值;真实值由后端 get_health_config / get_default_health_config 覆盖。 */
@@ -313,6 +328,42 @@ export function promptOptimizerSettingsFormToUpdate(
   return {
     promptOptimizerHotkey: form.hotkey.trim(),
     promptOptimizerFillLanguage: form.fillLanguage === 'en' ? 'en' : 'zh',
+  };
+}
+
+/**
+ * 将后端 AppConfig 映射为「收藏快捷输入」快捷键设置表单。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   工作台收藏快捷输入浮层的触发快捷键由应用配置持久化，设置页 AI tab 需要独立编辑它，
+ *   与 Prompt 优化快捷键并列在同一 Card。
+ *
+ * Code Logic（这个函数做什么）:
+ *   从 AppConfig 读取 promptQuickInputHotkey，缺失或异常时回退默认 "<ctrl>+/"。
+ */
+export function promptQuickInputSettingsConfigToForm(
+  config: AppConfig | null,
+): PromptQuickInputSettingsForm {
+  if (!config) return { ...PENDING_PROMPT_QUICK_INPUT_SETTINGS_FORM };
+  return {
+    hotkey: config.promptQuickInputHotkey || '<ctrl>+/',
+  };
+}
+
+/**
+ * 将「收藏快捷输入」设置表单映射为 update_config payload。
+ *
+ * Business Logic（为什么需要这个函数）:
+ *   设置页保存收藏快捷输入偏好时，只应提交后端认识的一个配置字段。
+ *
+ * Code Logic（这个函数做什么）:
+ *   hotkey trim 后保留空字符串（表示禁用快捷键）。
+ */
+export function promptQuickInputSettingsFormToUpdate(
+  form: PromptQuickInputSettingsForm,
+): PromptQuickInputSettingsUpdate {
+  return {
+    promptQuickInputHotkey: form.hotkey.trim(),
   };
 }
 

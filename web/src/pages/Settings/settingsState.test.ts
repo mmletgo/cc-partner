@@ -50,6 +50,7 @@ function configFixture(partial: Partial<AppConfig> = {}): AppConfig {
     screenshotHotkey: '<cmd>+<shift>+s',
     promptOptimizerHotkey: '<ctrl>',
     promptOptimizerFillLanguage: 'zh',
+    promptQuickInputHotkey: '<ctrl>+/',
     httpPort: 0,
     ...partial,
   };

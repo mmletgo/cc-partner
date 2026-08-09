@@ -28,6 +28,7 @@ import type {
   WorkbenchWorktree,
   PromptOptimizerFillLanguage,
   AgentRuntimeSnapshot,
+  Prompt,
 } from '@/lib/types';
 import type { LanFleetSnapshot } from '@/lib/types/lanFleet';
 
@@ -192,6 +193,21 @@ export interface WorkbenchTransport {
    */
   lanFleet?: {
     getSnapshot: () => Promise<LanFleetSnapshot>;
+  };
+  /**
+   * 收藏 Prompt 快捷输入（可选：仅移动端 HTTP 实现）。
+   *
+   * Business Logic（为什么需要这个分组）:
+   *   移动端 `/mobile` 终端工具栏需要拉取收藏 Prompt 列表，供用户点选后把内容插入当前终端输入行（不回车）。
+   *   桌面端经快捷键浮层直接走 invoke，不经 transport；本分组为移动端只读消费。
+   *
+   * Code Logic（字段说明）:
+   *   list 按 search/tag/favorite 过滤；返回 camelCase PromptDto[]（含 favorite:boolean）。
+   */
+  prompts?: {
+    list: (
+      params?: { search?: string; tag?: string; favorite?: boolean },
+    ) => Promise<Prompt[]>;
   };
 }
 

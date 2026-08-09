@@ -27,6 +27,7 @@ import type {
   WorkbenchSession,
   WorkbenchSessionReplay,
   WorkbenchWorktree,
+  Prompt,
 } from '@/lib/types';
 import type { Decoder } from '@/lib/runtimeSchema';
 import { ContractDecodeError, nullableDecoder } from '@/lib/runtimeSchema';
@@ -1004,6 +1005,31 @@ export const httpWorkbenchTransport: WorkbenchTransport = {
         {},
         { policy: { kind: 'query' }, decoder: lanFleetSnapshotDecoder },
       ),
+  },
+  prompts: {
+    /**
+     * Business Logic（为什么需要这个方法）:
+     *   移动端终端工具栏「收藏 Prompt 快捷输入」面板需要拉取收藏 Prompt 列表，
+     *   供用户按 search/tag 客户端二次过滤后点选插入当前终端（不回车）。
+     *
+     * Code Logic（这个函数做什么）:
+     *   GET `/api/mobile/prompts`，按非空参数拼 query string（favorite 序列化为 'true'/'false'）；
+     *   kind:'query' 默认 15s timeout + 有界重试；返回 camelCase PromptDto[]（含 favorite:boolean）。
+     */
+    list: (params?: { search?: string; tag?: string; favorite?: boolean }): Promise<Prompt[]> => {
+      const paramsRecord: Record<string, string> = {};
+      const search = params?.search?.trim();
+      if (search) paramsRecord.search = search;
+      const tag = params?.tag?.trim();
+      if (tag) paramsRecord.tag = tag;
+      if (typeof params?.favorite === 'boolean') {
+        paramsRecord.favorite = String(params.favorite);
+      }
+      const searchParams = new URLSearchParams(paramsRecord);
+      const query = searchParams.toString();
+      const path = query ? `/api/mobile/prompts?${query}` : '/api/mobile/prompts';
+      return getJson<Prompt[]>(path, { policy: { kind: 'query' } });
+    },
   },
 };
 

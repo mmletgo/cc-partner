@@ -18,6 +18,8 @@ export interface AppConfig {
   screenshotHotkey: string;
   promptOptimizerHotkey: string;
   promptOptimizerFillLanguage: PromptOptimizerFillLanguage;
+  /** 工作台「收藏快捷输入」浮层触发快捷键（pynput 风格，默认 "<ctrl>+/"） */
+  promptQuickInputHotkey: string;
   httpPort: number;
 }
 

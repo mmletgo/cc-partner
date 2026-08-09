@@ -22,12 +22,25 @@ export const promptsApi = {
   create: (data: { title: string; content: string; tags?: string[] }) =>
     invoke<Prompt>('create_prompt', data),
 
-  /** 更新 Prompt（展开 title?/content?/tags?） */
+  /** 更新 Prompt（展开 title?/content?/tags?/favorite?） */
   update: (id: string, data: Partial<Prompt>) =>
     invoke<Prompt>('update_prompt', { id, ...data }),
 
   /** 软删除 Prompt */
   remove: (id: string) => invoke<void>('delete_prompt', { id }),
+
+  /**
+   * 切换 Prompt 收藏状态（bump clock + flip，不写 history）。
+   *
+   * Business Logic（为什么需要这个方法）:
+   *   用户在 Prompt 库或工作台收藏快捷输入里一键标记常用 Prompt，
+   *   收藏状态需跨设备同步且不污染版本历史，因此走独立命令而非通用 update。
+   *
+   * Code Logic（这个方法做什么）:
+   *   调用 toggle_prompt_favorite，返回更新后的 Prompt DTO（favorite 已翻转）。
+   */
+  toggleFavorite: (id: string) =>
+    invoke<Prompt>('toggle_prompt_favorite', { id }),
 
   /** 触发跨设备同步（后端 M4 实现，调用会 reject） */
   sync: () => invoke<{ synced: number }>('trigger_sync'),

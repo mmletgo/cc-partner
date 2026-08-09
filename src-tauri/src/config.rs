@@ -400,6 +400,15 @@ fn default_prompt_optimizer_hotkey() -> String {
     "<ctrl>".to_string()
 }
 
+/// Prompt 库 Quick Input 面板默认快捷键：Control + 斜杠。
+///
+/// Business Logic: 用户在桌面 Prompt 库按该快捷键唤起 Quick Input 输入面板；
+///     该快捷键是窗口级 keydown（前端监听），不走 GlobalShortcut/hotkey.rs，
+///     所以这里只存 pynput 风格字符串作为前后端共识格式，不需要 hotkey.rs 转换。
+fn default_prompt_quick_input_hotkey() -> String {
+    "<ctrl>+/".to_string()
+}
+
 /// Workbench Prompt 优化默认填入语言：中文优化版。
 fn default_prompt_optimizer_fill_language() -> String {
     "zh".to_string()
@@ -437,9 +446,9 @@ fn default_device_name() -> String {
 ///
 /// Code Logic（这个函数做什么）:
 ///     调用现有默认值函数，返回 `(device_name, receive_dir, screenshot_hotkey,
-///     prompt_optimizer_hotkey, prompt_optimizer_fill_language)`；
+///     prompt_optimizer_hotkey, prompt_optimizer_fill_language, prompt_quick_input_hotkey)`；
 ///     receive_dir 转成字符串以便命令层直接组装 DTO。
-pub(crate) fn default_preference_values() -> (String, String, String, String, String) {
+pub(crate) fn default_preference_values() -> (String, String, String, String, String, String) {
     let receive = default_receive_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "cc-partner-files".to_string());
@@ -449,6 +458,7 @@ pub(crate) fn default_preference_values() -> (String, String, String, String, St
         default_screenshot_hotkey(),
         default_prompt_optimizer_hotkey(),
         default_prompt_optimizer_fill_language(),
+        default_prompt_quick_input_hotkey(),
     )
 }
 
@@ -753,6 +763,10 @@ pub struct AppConfig {
     /// Workbench Prompt 优化结果自动填入语言：`zh` 或 `en`。
     #[serde(default = "default_prompt_optimizer_fill_language")]
     pub prompt_optimizer_fill_language: String,
+    /// Prompt 库 Quick Input 面板快捷键（pynput 风格字符串，如 `<ctrl>+/`）。
+    /// 窗口级 keydown（前端监听），不走 GlobalShortcut/hotkey.rs，故无 OS 全局副作用。
+    #[serde(default = "default_prompt_quick_input_hotkey")]
+    pub prompt_quick_input_hotkey: String,
     /// 云端同步（GitHub 私有仓库）的远端仓库 URL（如 git@github.com:user/repo.git）。
     /// None 表示未配置云端同步；配置后 scheduler 才会真正 clone/fetch/push。
     #[serde(default)]
@@ -895,6 +909,7 @@ impl AppConfig {
         // （真实注册在 hotkey 层再处理；空串一律拒绝）。
         validate_hotkey_field("screenshot_hotkey", &self.screenshot_hotkey)?;
         validate_hotkey_field("prompt_optimizer_hotkey", &self.prompt_optimizer_hotkey)?;
+        validate_hotkey_field("prompt_quick_input_hotkey", &self.prompt_quick_input_hotkey)?;
 
         // data_dir isolation：override 生效时 db_path 必须在根内
         if std::env::var_os(DATA_DIR_ENV).is_some() {
@@ -963,6 +978,7 @@ impl AppConfig {
                 screenshot_hotkey: default_screenshot_hotkey(),
                 prompt_optimizer_hotkey: default_prompt_optimizer_hotkey(),
                 prompt_optimizer_fill_language: default_prompt_optimizer_fill_language(),
+                prompt_quick_input_hotkey: default_prompt_quick_input_hotkey(),
                 cloud_sync_repo_url: None,
                 cloud_sync_enabled: false,
                 cloud_sync_auto: false,
@@ -1400,6 +1416,7 @@ mod tests {
             screenshot_hotkey: "<cmd>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "en".into(),
+            prompt_quick_input_hotkey: default_prompt_quick_input_hotkey(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
             cloud_sync_auto: false,
@@ -1491,6 +1508,7 @@ mod tests {
             screenshot_hotkey: "<cmd>+<shift>+s".into(),
             prompt_optimizer_hotkey: "<ctrl>".into(),
             prompt_optimizer_fill_language: "zh".into(),
+            prompt_quick_input_hotkey: default_prompt_quick_input_hotkey(),
             cloud_sync_repo_url: None,
             cloud_sync_enabled: false,
             cloud_sync_auto: false,

@@ -37,6 +37,7 @@ export type ConfigUpdate = Pick<
   | 'screenshotHotkey'
   | 'promptOptimizerHotkey'
   | 'promptOptimizerFillLanguage'
+  | 'promptQuickInputHotkey'
 >;
 
 /** 云端同步可更新字段（对齐 Rust update_cloud_sync_cmd 参数，全部可选部分更新） */

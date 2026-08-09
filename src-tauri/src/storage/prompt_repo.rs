@@ -60,7 +60,8 @@ impl PromptRepo {
     /// 将数据库一行映射为 PromptRow（JSON 字段反序列化、deleted int→bool）。
     ///
     /// Business Logic: 同步与列表都需要从 SQLite 行还原完整 Prompt 实体。
-    /// Code Logic: tags/vector_clock 反序列化；delete_epoch 缺列或读失败时默认 0。
+    /// Code Logic: tags/vector_clock 反序列化；delete_epoch 缺列或读失败时默认 0；
+    ///     favorite 缺列或读失败时默认 false（兼容旧库未迁移行）。
     fn row_to_prompt(row: &sqlx::sqlite::SqliteRow) -> Result<PromptRow, AppError> {
         let tags_text: String = row.try_get("tags")?;
         let vc_text: String = row.try_get("vector_clock")?;
@@ -68,6 +69,8 @@ impl PromptRepo {
         let tags: Vec<String> = serde_json::from_str(&tags_text)?;
         let vector_clock: HashMap<String, u64> = serde_json::from_str(&vc_text)?;
         let delete_epoch = row.try_get::<i64, _>("delete_epoch").unwrap_or(0).max(0) as u64;
+        // favorite 列在旧库上由 ensure_prompts_favorite_column 幂等补齐；这里仍兜底缺列/读失败。
+        let favorite = row.try_get::<i64, _>("favorite").unwrap_or(0) != 0;
         Ok(PromptRow {
             id: row.try_get("id")?,
             title: row.try_get("title")?,
@@ -79,58 +82,83 @@ impl PromptRepo {
             vector_clock,
             deleted: deleted_int != 0,
             delete_epoch,
+            favorite,
         })
     }
 
-    /// 列表查询：可选关键词搜索 / 单标签筛选，默认排除已删除，按 updated_at 降序。
+    /// 列表查询：可选关键词搜索 / 单标签筛选 / 收藏过滤，默认排除已删除，按 updated_at 降序。
     ///
-    /// Business Logic: 前端列表页传 search 或 tag；无参数则返回全部未删除 Prompt。
-    /// Code Logic: 对照 prompt_repo.py 的 get_all / search / filter_by_tags 三条路径分支。
+    /// Business Logic: 前端列表页传 search 或 tag；移动端与桌面可传 favorite=Some 过滤收藏。
+    ///     无参数则返回全部未删除 Prompt。favorite 与 search/tag 可叠加（AND）。
+    /// Code Logic: 对照 prompt_repo.py 的 get_all / search / filter_by_tags 三条路径分支，
+    ///     取出结果后再按 favorite 在内存 retain 过滤（与 search/tag 叠加为 AND 语义）。
     pub async fn list(
         &self,
         search: Option<&str>,
         tag: Option<&str>,
+        favorite: Option<bool>,
     ) -> Result<Vec<PromptRow>, AppError> {
         // 三种查询分支，分别对应 Python get_all / search / filter_by_tags
         if let Some(kw) = search {
             // search: title/content LIKE '%kw%'，排除已删除，updated_at DESC
             let pattern = format!("%{}%", kw);
             let rows = sqlx::query(
-                "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
+                "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch, favorite \
                  FROM prompts WHERE deleted = 0 AND (title LIKE ? OR content LIKE ?) ORDER BY updated_at DESC",
             )
             .bind(&pattern)
             .bind(&pattern)
             .fetch_all(&self.db)
             .await?;
-            rows.iter().map(Self::row_to_prompt).collect()
+            let mut out: Vec<PromptRow> = rows
+                .iter()
+                .map(Self::row_to_prompt)
+                .collect::<Result<_, _>>()?;
+            if let Some(fav) = favorite {
+                out.retain(|p| p.favorite == fav);
+            }
+            Ok(out)
         } else if let Some(t) = tag {
             // tag: json_each 展开 tags，与给定标签交集匹配，DISTINCT 去重
             let rows = sqlx::query(
-                "SELECT DISTINCT p.id, p.title, p.content, p.tags, p.created_at, p.updated_at, p.device_id, p.vector_clock, p.deleted, p.delete_epoch \
+                "SELECT DISTINCT p.id, p.title, p.content, p.tags, p.created_at, p.updated_at, p.device_id, p.vector_clock, p.deleted, p.delete_epoch, p.favorite \
                  FROM prompts p, json_each(p.tags) AS t \
                  WHERE p.deleted = 0 AND t.value = ? ORDER BY p.updated_at DESC",
             )
             .bind(t)
             .fetch_all(&self.db)
             .await?;
-            rows.iter().map(Self::row_to_prompt).collect()
+            let mut out: Vec<PromptRow> = rows
+                .iter()
+                .map(Self::row_to_prompt)
+                .collect::<Result<_, _>>()?;
+            if let Some(fav) = favorite {
+                out.retain(|p| p.favorite == fav);
+            }
+            Ok(out)
         } else {
             // 无参数：全部未删除，updated_at DESC
             let rows = sqlx::query(
-                "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
+                "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch, favorite \
                  FROM prompts WHERE deleted = 0 ORDER BY updated_at DESC",
             )
             .fetch_all(&self.db)
             .await?;
-            rows.iter().map(Self::row_to_prompt).collect()
+            let mut out: Vec<PromptRow> = rows
+                .iter()
+                .map(Self::row_to_prompt)
+                .collect::<Result<_, _>>()?;
+            if let Some(fav) = favorite {
+                out.retain(|p| p.favorite == fav);
+            }
+            Ok(out)
         }
     }
 
     /// 按主键查询单条 Prompt（含已删除记录，与 Python get_by_id 一致）。
     pub async fn get(&self, id: &str) -> Result<Option<PromptRow>, AppError> {
         let row = sqlx::query(
-            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
+            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch, favorite \
              FROM prompts WHERE id = ?",
         )
         .bind(id)
@@ -155,7 +183,7 @@ impl PromptRepo {
         id: &str,
     ) -> Result<Option<PromptRow>, AppError> {
         let row = sqlx::query(
-            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
+            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch, favorite \
              FROM prompts WHERE id = ?",
         )
         .bind(id)
@@ -176,8 +204,8 @@ impl PromptRepo {
         let vc_text = serde_json::to_string(&p.vector_clock)?;
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
-                "INSERT INTO prompts (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO prompts (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch, favorite) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&p.id)
             .bind(&p.title)
@@ -189,6 +217,7 @@ impl PromptRepo {
             .bind(vc_text)
             .bind(p.deleted as i64)
             .bind(p.delete_epoch as i64)
+            .bind(p.favorite as i64)
             .execute(&self.db)
             .await?;
             Ok::<(), AppError>(())
@@ -205,7 +234,7 @@ impl PromptRepo {
         let vc_text = serde_json::to_string(&p.vector_clock)?;
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
-                "UPDATE prompts SET title = ?, content = ?, tags = ?, updated_at = ?, device_id = ?, vector_clock = ?, deleted = ?, delete_epoch = ? WHERE id = ?",
+                "UPDATE prompts SET title = ?, content = ?, tags = ?, updated_at = ?, device_id = ?, vector_clock = ?, deleted = ?, delete_epoch = ?, favorite = ? WHERE id = ?",
             )
             .bind(&p.title)
             .bind(&p.content)
@@ -215,6 +244,7 @@ impl PromptRepo {
             .bind(vc_text)
             .bind(p.deleted as i64)
             .bind(p.delete_epoch as i64)
+            .bind(p.favorite as i64)
             .bind(&p.id)
             .execute(&self.db)
             .await?;
@@ -263,7 +293,7 @@ impl PromptRepo {
     /// Code Logic: SELECT 全字段（无 deleted 过滤），不排序（同步用，顺序无关）。
     pub async fn get_all_for_sync(&self) -> Result<Vec<PromptRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch \
+            "SELECT id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch, favorite \
              FROM prompts",
         )
         .fetch_all(&self.db)
@@ -341,8 +371,8 @@ impl PromptRepo {
             let vc_text = serde_json::to_string(&p.vector_clock)?;
             sqlx::query(
                 "INSERT OR REPLACE INTO prompts \
-                 (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (id, title, content, tags, created_at, updated_at, device_id, vector_clock, deleted, delete_epoch, favorite) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&p.id)
             .bind(&p.title)
@@ -354,6 +384,7 @@ impl PromptRepo {
             .bind(vc_text)
             .bind(p.deleted as i64)
             .bind(p.delete_epoch as i64)
+            .bind(p.favorite as i64)
             .execute(&mut **tx)
             .await?;
         }
@@ -411,7 +442,7 @@ mod tests {
              id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, \
              tags TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
              device_id TEXT NOT NULL, vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
-             delete_epoch INTEGER NOT NULL DEFAULT 0)",
+             delete_epoch INTEGER NOT NULL DEFAULT 0, favorite INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await
@@ -435,6 +466,7 @@ mod tests {
             vector_clock,
             deleted: false,
             delete_epoch: 0,
+            favorite: false,
         }
     }
 
@@ -471,5 +503,39 @@ mod tests {
         repo.bulk_upsert(&[prompt("a"), prompt("b")]).await.unwrap();
         let all = repo.get_all_for_sync().await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    /// favorite 字段应能持久化并通过 list(get_all_for_sync) 读回；
+    /// favorite 过滤分支应只返回收藏行。
+    #[tokio::test]
+    async fn favorite_roundtrips_and_filters() {
+        let repo = setup_repo().await;
+        let mut fav = prompt("fav1");
+        fav.favorite = true;
+        repo.create(&fav).await.unwrap();
+        repo.create(&prompt("plain")).await.unwrap();
+
+        // 读回保留 favorite 状态
+        let got = repo.get("fav1").await.unwrap().unwrap();
+        assert!(got.favorite);
+        let got_plain = repo.get("plain").await.unwrap().unwrap();
+        assert!(!got_plain.favorite);
+
+        // get_all_for_sync 同样读回 favorite
+        let all = repo.get_all_for_sync().await.unwrap();
+        let fav_row = all.iter().find(|p| p.id == "fav1").unwrap();
+        assert!(fav_row.favorite);
+
+        // list 不带 favorite 过滤：两条都返回
+        let none_filter = repo.list(None, None, None).await.unwrap();
+        assert_eq!(none_filter.len(), 2);
+        // list favorite=Some(true)：只返回收藏行
+        let only_fav = repo.list(None, None, Some(true)).await.unwrap();
+        assert_eq!(only_fav.len(), 1);
+        assert_eq!(only_fav[0].id, "fav1");
+        // list favorite=Some(false)：只返回非收藏行
+        let only_plain = repo.list(None, None, Some(false)).await.unwrap();
+        assert_eq!(only_plain.len(), 1);
+        assert_eq!(only_plain[0].id, "plain");
     }
 }

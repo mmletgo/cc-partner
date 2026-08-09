@@ -69,6 +69,7 @@ export function applyOptimisticPromptMutation(
         title: mutation.draft.title,
         content: mutation.draft.content,
         tags: [...mutation.draft.tags],
+        favorite: false,
         updatedAt: nowIso,
       };
       return [optimistic, ...prompts];
@@ -193,4 +194,29 @@ export function deriveTagsFromPrompts(prompts: readonly Prompt[]): string[] {
     }
   }
   return Array.from(tags).sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   收藏是高频一键操作，用户点击星标后必须立即看到翻转结果，不能等网络往返；
+ *   失败时由调用方再 flip 回滚。收藏独立于 create/update/delete mutation 事务，
+ *   不应走 runMutation 的 pending 门闩（避免与正在进行的编辑冲突）。
+ *
+ * Code Logic（这个函数做什么）:
+ *   返回新数组，命中 id 的行翻转 favorite 字段，其余行原样保留；不修改其他字段。
+ *   未命中 id 时返回原数组引用（无变化）。
+ *
+ * @param prompts 当前列表（只读）
+ * @param id 待翻转收藏的 Prompt id
+ * @returns 翻转后的新列表；未命中时返回原引用
+ */
+export function applyFavoriteToggle(
+  prompts: readonly Prompt[],
+  id: string,
+): Prompt[] {
+  const target = prompts.find((p) => p.id === id);
+  if (!target) return prompts as Prompt[];
+  return prompts.map((prompt) =>
+    prompt.id === id ? { ...prompt, favorite: !prompt.favorite } : prompt,
+  );
 }

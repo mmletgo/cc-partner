@@ -169,6 +169,24 @@
       "manage": "Manage",
       "close": "Close"
     },
+    "favoriteQuickInput": {
+      "kicker": "Favorite prompts",
+      "title": "Favorite Prompts",
+      "openButton": "Favorite prompts",
+      "refresh": "Refresh",
+      "retry": "Retry",
+      "close": "Close",
+      "searchPlaceholder": "Search favorite prompts…",
+      "searchAriaLabel": "Search favorite prompts",
+      "filterByTagAriaLabel": "Filter favorite prompts by tag",
+      "allTag": "All",
+      "empty": "No favorite prompts yet",
+      "emptyHint": "Mark prompts with the star in the Prompt library to list them here.",
+      "emptyFiltered": "No favorite prompts match",
+      "loading": "Loading…",
+      "loadFailed": "Failed to load favorites: {{error}}",
+      "itemAriaLabel": "Insert prompt: {{title}}"
+    },
     "projectPanel": {
       "title": "Projects",
       "error": "Load failed",
@@ -596,6 +614,22 @@
     "filled": "Filled into the active terminal",
     "optimizeFailed": "Failed to optimize prompt",
     "fillFailed": "Failed to fill terminal"
+  },
+  "favoriteQuickInput": {
+    "open": "Favorites quick input",
+    "close": "Close favorites quick input",
+    "title": "Favorite prompts",
+    "panelAriaLabel": "Favorites quick input panel",
+    "searchPlaceholder": "Search favorite prompts…",
+    "searchAriaLabel": "Search favorite prompts",
+    "filterByTagAriaLabel": "Filter favorite prompts by tag",
+    "allTag": "All",
+    "empty": "No favorite prompts yet",
+    "emptyHint": "Star a prompt in the Prompt library to list it here for quick access.",
+    "emptyFiltered": "No matching favorite prompts",
+    "loading": "Loading…",
+    "loadFailed": "Failed to load favorites: {{error}}",
+    "itemAriaLabel": "Insert prompt: {{title}}"
   },
   "sessionSearch": {
     "open": "Search session",

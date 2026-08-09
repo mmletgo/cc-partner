@@ -139,6 +139,15 @@
     "applying": "应用中…",
     "applyFailed": "应用 Prompt 优化设置失败"
   },
+  "promptQuickInputSettings": {
+    "hotkey": {
+      "label": "收藏快捷输入快捷键",
+      "helper": "在工作台终端区域按下快捷键唤出收藏的 Prompt 列表，选中后插入当前会话输入行（不回车）。"
+    },
+    "apply": "应用",
+    "applying": "应用中…",
+    "applyFailed": "应用收藏快捷输入设置失败"
+  },
   "automation": {
     "title": "自动化",
     "description": "配置 Orchestrator 自动领取任务、验证命令和 full-auto 交付策略。这些设置会作为当前设备的全局策略保存。",

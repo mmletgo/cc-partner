@@ -35,6 +35,7 @@ import type {
   GithubTrendingForm,
   HealthForm,
   PromptOptimizerSettingsForm,
+  PromptQuickInputSettingsForm,
   SettingsState,
 } from './settingsState';
 import type { AutomationSettingsForm } from './automationSettingsState';
@@ -63,6 +64,7 @@ import { formatShortcutForDisplay } from './shortcutRecorder';
 import {
   SETTINGS_TABS,
   PROMPT_OPTIMIZER_SHORTCUT_ID,
+  PROMPT_QUICK_INPUT_SHORTCUT_ID,
   buildUpdateHint,
   formatTime,
   formatSize,
@@ -76,6 +78,7 @@ export type { SettingsTab };
 export {
   SETTINGS_TABS,
   PROMPT_OPTIMIZER_SHORTCUT_ID,
+  PROMPT_QUICK_INPUT_SHORTCUT_ID,
   buildUpdateHint,
   formatTime,
   formatSize,
@@ -228,6 +231,17 @@ export interface UseSettingsControllerResult {
   handleApplyPromptOptimizerSettings: () => Promise<void>;
   promptOptimizerShortcutId: typeof PROMPT_OPTIMIZER_SHORTCUT_ID;
   formatShortcutForDisplay: typeof formatShortcutForDisplay;
+
+  // prompt quick input（收藏快捷输入浮层快捷键）
+  promptQuickInputForm: PromptQuickInputSettingsForm;
+  promptQuickInputConfig: PromptQuickInputSettingsForm | null;
+  applyingPromptQuickInput: boolean;
+  promptQuickInputSettingsError: string | null;
+  canResetPromptQuickInputDefaults: boolean;
+  patchPromptQuickInputForm: (partial: Partial<PromptQuickInputSettingsForm>) => void;
+  handleResetPromptQuickInputDefaults: () => void;
+  handleApplyPromptQuickInputSettings: () => Promise<void>;
+  promptQuickInputShortcutId: typeof PROMPT_QUICK_INPUT_SHORTCUT_ID;
 
   // automation
   automationForm: AutomationSettingsForm;
@@ -608,6 +622,16 @@ export function useSettingsController(): UseSettingsControllerResult {
     handleApplyPromptOptimizerSettings: form.handleApplyPromptOptimizerSettings,
     promptOptimizerShortcutId: form.promptOptimizerShortcutId,
     formatShortcutForDisplay: form.formatShortcutForDisplay,
+
+    promptQuickInputForm: form.promptQuickInputForm,
+    promptQuickInputConfig: form.promptQuickInputConfig,
+    applyingPromptQuickInput: form.applyingPromptQuickInput,
+    promptQuickInputSettingsError: form.promptQuickInputSettingsError,
+    canResetPromptQuickInputDefaults: resources.canResetCoreDefaults,
+    patchPromptQuickInputForm: form.patchPromptQuickInputForm,
+    handleResetPromptQuickInputDefaults: form.handleResetPromptQuickInputDefaults,
+    handleApplyPromptQuickInputSettings: form.handleApplyPromptQuickInputSettings,
+    promptQuickInputShortcutId: form.promptQuickInputShortcutId,
 
     automationForm: form.automationForm,
     defaultAutomationForm: form.defaultAutomationForm,

@@ -33,6 +33,9 @@ export const SETTINGS_TABS: SettingsTab[] = [
 /** Workbench Prompt 优化快捷键录制控件 id */
 export const PROMPT_OPTIMIZER_SHORTCUT_ID = 'promptOptimizer';
 
+/** Workbench「收藏快捷输入」浮层快捷键录制控件 id */
+export const PROMPT_QUICK_INPUT_SHORTCUT_ID = 'promptQuickInput';
+
 /**
  * 计算更新检查结果的提示文本
  *

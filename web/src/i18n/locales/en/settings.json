@@ -139,6 +139,15 @@
     "applying": "Applying…",
     "applyFailed": "Failed to apply Prompt optimizer settings"
   },
+  "promptQuickInputSettings": {
+    "hotkey": {
+      "label": "Favorites quick input shortcut",
+      "helper": "Press this shortcut inside a Workbench terminal to open the favorite prompts list; selecting one inserts it into the active session input line without submitting."
+    },
+    "apply": "Apply",
+    "applying": "Applying…",
+    "applyFailed": "Failed to apply favorites quick input settings"
+  },
   "automation": {
     "title": "Automation",
     "description": "Configure Orchestrator automatic task pickup, verification commands, and full-auto delivery. These settings are saved as this device's global policy.",

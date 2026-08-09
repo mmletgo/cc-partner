@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS prompts (
     updated_at TEXT NOT NULL,
     device_id TEXT NOT NULL,
     vector_clock TEXT NOT NULL,
-    deleted INTEGER DEFAULT 0
+    deleted INTEGER DEFAULT 0,
+    favorite INTEGER NOT NULL DEFAULT 0
 );
 
 -- transfer_history 表：文件传输历史记录（M5 完整使用；N5 增加 recovery 字段）

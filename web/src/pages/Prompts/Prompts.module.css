@@ -402,3 +402,9 @@
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* 收藏星标激活态：空心星填充为品牌色，与 chipActive 视觉一致 */
+.favoriteActive svg {
+  fill: var(--accent);
+  color: var(--accent);
+}

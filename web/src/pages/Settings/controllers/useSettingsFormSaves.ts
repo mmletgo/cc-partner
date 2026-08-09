@@ -37,6 +37,7 @@ import type {
   GithubTrendingForm,
   HealthForm,
   PromptOptimizerSettingsForm,
+  PromptQuickInputSettingsForm,
   SettingsState,
 } from '../settingsState';
 import type { AutomationSettingsForm } from '../automationSettingsState';
@@ -58,6 +59,7 @@ import type {
 } from '@/api/sync';
 import {
   PROMPT_OPTIMIZER_SHORTCUT_ID,
+  PROMPT_QUICK_INPUT_SHORTCUT_ID,
   type ApplyGroupOptions,
 } from '../settingsControllerShared';
 import { formatShortcutForDisplay } from '../shortcutRecorder';
@@ -166,6 +168,15 @@ export interface UseSettingsFormSavesResult {
   handleApplyPromptOptimizerSettings: () => Promise<void>;
   promptOptimizerShortcutId: typeof PROMPT_OPTIMIZER_SHORTCUT_ID;
   formatShortcutForDisplay: typeof formatShortcutForDisplay;
+
+  promptQuickInputForm: PromptQuickInputSettingsForm;
+  promptQuickInputConfig: PromptQuickInputSettingsForm | null;
+  applyingPromptQuickInput: boolean;
+  promptQuickInputSettingsError: string | null;
+  patchPromptQuickInputForm: (partial: Partial<PromptQuickInputSettingsForm>) => void;
+  handleResetPromptQuickInputDefaults: () => void;
+  handleApplyPromptQuickInputSettings: () => Promise<void>;
+  promptQuickInputShortcutId: typeof PROMPT_QUICK_INPUT_SHORTCUT_ID;
 
   automationForm: AutomationSettingsForm;
   defaultAutomationForm: AutomationSettingsForm;
@@ -281,6 +292,7 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
       e.stopPropagation();
       const result = resolveShortcutRecording(e, {
         allowModifierOnly: id === PROMPT_OPTIMIZER_SHORTCUT_ID,
+        allowBareKey: id === PROMPT_QUICK_INPUT_SHORTCUT_ID,
       });
       if (result.type === 'pending') return;
       if (result.type === 'cancel') {
@@ -290,13 +302,19 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
       }
       if (id === PROMPT_OPTIMIZER_SHORTCUT_ID) {
         secondary.handlePromptOptimizerShortcutChange(result.value);
+      } else if (id === PROMPT_QUICK_INPUT_SHORTCUT_ID) {
+        secondary.handlePromptQuickInputShortcutChange(result.value);
       } else {
         handleShortcutChange(id, result.value);
       }
       setRecordingShortcutId(null);
       e.currentTarget.blur();
     },
-    [handleShortcutChange, secondary.handlePromptOptimizerShortcutChange],
+    [
+      handleShortcutChange,
+      secondary.handlePromptOptimizerShortcutChange,
+      secondary.handlePromptQuickInputShortcutChange,
+    ],
   );
 
   const handleResetDefaults = () => {
@@ -417,6 +435,7 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
           }
           setInitialState(loaded);
           secondary.applyCorePromptOptimizer(config, rewrite);
+          secondary.applyCorePromptQuickInput(config, rewrite);
         }
         return;
       }
@@ -425,6 +444,7 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
         if (isResourceReady(result)) {
           setDefaultState(settingsStateFromConfig(result.value));
           secondary.applyDefaultsPromptOptimizer(result.value);
+          secondary.applyDefaultsPromptQuickInput(result.value);
         }
         return;
       }
@@ -461,7 +481,9 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
       state,
       secondary.applyAutomationGroup,
       secondary.applyCorePromptOptimizer,
+      secondary.applyCorePromptQuickInput,
       secondary.applyDefaultsPromptOptimizer,
+      secondary.applyDefaultsPromptQuickInput,
       secondary.applyGithubGroup,
       secondary.applyHealthGroup,
       syncBackup.applyGroup,
@@ -560,6 +582,15 @@ export function useSettingsFormSaves(): UseSettingsFormSavesResult {
     handleApplyPromptOptimizerSettings: secondary.handleApplyPromptOptimizerSettings,
     promptOptimizerShortcutId: secondary.promptOptimizerShortcutId,
     formatShortcutForDisplay: secondary.formatShortcutForDisplay,
+
+    promptQuickInputForm: secondary.promptQuickInputForm,
+    promptQuickInputConfig: secondary.promptQuickInputConfig,
+    applyingPromptQuickInput: secondary.applyingPromptQuickInput,
+    promptQuickInputSettingsError: secondary.promptQuickInputSettingsError,
+    patchPromptQuickInputForm: secondary.patchPromptQuickInputForm,
+    handleResetPromptQuickInputDefaults: secondary.handleResetPromptQuickInputDefaults,
+    handleApplyPromptQuickInputSettings: secondary.handleApplyPromptQuickInputSettings,
+    promptQuickInputShortcutId: secondary.promptQuickInputShortcutId,
 
     automationForm: secondary.automationForm,
     defaultAutomationForm: secondary.defaultAutomationForm,

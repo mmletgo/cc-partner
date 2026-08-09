@@ -17,6 +17,7 @@ const validConfig = {
   screenshotHotkey: '<cmd>+s',
   promptOptimizerHotkey: '<ctrl>',
   promptOptimizerFillLanguage: 'zh',
+  promptQuickInputHotkey: '<ctrl>+/',
   httpPort: 0,
 };
 

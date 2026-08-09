@@ -375,6 +375,7 @@ pub fn run() {
             prompt_cmd::create_prompt,
             prompt_cmd::update_prompt,
             prompt_cmd::delete_prompt,
+            prompt_cmd::toggle_prompt_favorite,
             prompt_cmd::list_tags,
             prompt_cmd::list_prompt_versions,
             prompt_cmd::restore_prompt_version,

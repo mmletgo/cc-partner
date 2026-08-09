@@ -14,6 +14,15 @@ export type ShortcutRecordingResult =
 
 export interface ShortcutRecordingOptions {
   allowModifierOnly?: boolean;
+  /**
+   * 是否允许无修饰键的单键作为快捷键（如纯 Tab、单字符）。
+   *
+   * Business Logic（为什么需要这个 option）:
+   *   截图等系统级快捷键必须强制至少一个修饰键，避免误触普通按键；
+   *   但工作台「收藏快捷输入」浮层允许用户配成纯 Tab 这类窗口内单键，
+   *   录制时不应拒绝无修饰键的主键。
+   */
+  allowBareKey?: boolean;
 }
 
 const MODIFIER_KEYS = new Set(['Alt', 'AltGraph', 'Control', 'Meta', 'OS', 'Shift', 'Super']);
@@ -122,7 +131,9 @@ function shortcutModifierParts(event: ShortcutKeyboardLike): string[] {
  *
  * Code Logic（做什么）:
  *   将 KeyboardEvent 的修饰键和主键转换为后端可保存的 pynput 字符串；
- *   修饰键单独按下或无修饰键的普通按键返回 pending，调用方继续等待。
+ *   默认要求至少一个修饰键（截图等系统级快捷键）；
+ *   allowBareKey=true 时允许无修饰键的单键（如纯 Tab），供窗口内浮层快捷键使用；
+ *   修饰键单独按下且 allowModifierOnly=true 时记录单独修饰键。
  */
 export function resolveShortcutRecording(
   event: ShortcutKeyboardLike,
@@ -138,7 +149,9 @@ export function resolveShortcutRecording(
 
   const key = normalizeShortcutKey(event.key);
   const modifiers = shortcutModifierParts(event);
-  if (!key || modifiers.length === 0) return { type: 'pending' };
+  if (!key) return { type: 'pending' };
+  // 默认要求至少一个修饰键；allowBareKey 放行无修饰键的单键（如纯 Tab）
+  if (modifiers.length === 0 && !options.allowBareKey) return { type: 'pending' };
 
   return { type: 'record', value: [...modifiers, key].join('+') };
 }

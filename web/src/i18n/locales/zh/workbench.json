@@ -167,6 +167,24 @@
       "manage": "完整管理",
       "close": "关闭"
     },
+    "favoriteQuickInput": {
+      "kicker": "收藏 Prompt",
+      "title": "收藏的 Prompt",
+      "openButton": "收藏 Prompt",
+      "refresh": "刷新",
+      "retry": "重试",
+      "close": "关闭",
+      "searchPlaceholder": "搜索收藏的 Prompt…",
+      "searchAriaLabel": "搜索收藏的 Prompt",
+      "filterByTagAriaLabel": "按标签筛选收藏 Prompt",
+      "allTag": "全部",
+      "empty": "还没有收藏的 Prompt",
+      "emptyHint": "在 Prompt 库点击星标即可收藏，这里会列出常用的指令。",
+      "emptyFiltered": "没有匹配的收藏 Prompt",
+      "loading": "加载中…",
+      "loadFailed": "加载收藏失败：{{error}}",
+      "itemAriaLabel": "插入 Prompt：{{title}}"
+    },
     "projectPanel": {
       "title": "项目",
       "error": "加载失败",
@@ -589,6 +607,22 @@
     "filled": "已填入当前终端",
     "optimizeFailed": "Prompt 优化失败",
     "fillFailed": "填入终端失败"
+  },
+  "favoriteQuickInput": {
+    "open": "收藏快捷输入",
+    "close": "关闭收藏快捷输入",
+    "title": "收藏的 Prompt",
+    "panelAriaLabel": "收藏快捷输入面板",
+    "searchPlaceholder": "搜索收藏的 Prompt…",
+    "searchAriaLabel": "搜索收藏的 Prompt",
+    "filterByTagAriaLabel": "按标签筛选收藏 Prompt",
+    "allTag": "全部",
+    "empty": "还没有收藏的 Prompt",
+    "emptyHint": "在 Prompt 库点击星标即可收藏，这里会列出常用的指令。",
+    "emptyFiltered": "没有匹配的收藏 Prompt",
+    "loading": "加载中…",
+    "loadFailed": "加载收藏失败：{{error}}",
+    "itemAriaLabel": "插入 Prompt：{{title}}"
   },
   "sessionSearch": {
     "open": "搜索 session",

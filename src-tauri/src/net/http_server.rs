@@ -23,8 +23,8 @@ use crate::net::mobile_dev_proxy;
 use crate::net::request_context::{request_id_middleware, P2pRequestContext};
 use crate::net::routes::{
     agent_hub, attention, browser_verification, cc_history, claude_code_assets, claude_md_sync,
-    health, mobile, orchestrator, provider_manager, scratchpad_sync, ssh_target_sync, sync,
-    transfer, workbench, workbench_project_order_sync,
+    health, mobile, orchestrator, prompts, provider_manager, scratchpad_sync, ssh_target_sync,
+    sync, transfer, workbench, workbench_project_order_sync,
 };
 use crate::state::AppState;
 use crate::transfer::CHUNK_SIZE;
@@ -779,6 +779,8 @@ pub async fn start_http_server(state: AppState) -> Result<u16, std::io::Error> {
             "/api/mobile/attention/v2",
             get(attention::list_attention_v2),
         )
+        // Mobile Prompt 库只读入口：复用 PromptRepo::list（含 favorite），移动端不 toggle
+        .route("/api/mobile/prompts", get(prompts::list_mobile_prompts))
         // P2P 同步协议（M4）：对端调 pull/push，字段对照 Python protocol.py
         .route("/api/sync/pull", post(sync::sync_pull))
         .route("/api/sync/push", post(sync::sync_push))

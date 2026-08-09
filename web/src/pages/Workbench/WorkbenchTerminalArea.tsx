@@ -13,10 +13,14 @@
  */
 import type { CSSProperties, RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Button } from '@/components/primitives';
+import { StarIcon } from '@/lib/icons';
 import type { WorkbenchSession } from '@/lib/types';
 import styles from './Workbench.module.css';
 import { WorkbenchTerminalPane } from './WorkbenchTerminalPane';
 import type { TerminalCursorAnchor } from './WorkbenchTerminalPane';
+import { WorkbenchFavoriteQuickInput } from './WorkbenchFavoriteQuickInput';
+import type { UseWorkbenchFavoriteQuickInputResult } from './hooks/useWorkbenchFavoriteQuickInput';
 
 /**
  * 终端区域叶子组件的输入 props。
@@ -66,6 +70,10 @@ export interface WorkbenchTerminalAreaProps {
    */
   handleSelectPaneAt: (sessionId: string, col: number, row: number) => void;
   focusSession: (sessionId: string) => void;
+
+  /** 收藏快捷输入浮层状态与回调（由 useWorkbenchFavoriteQuickInput 叶子 hook 持有）。 */
+  favoriteQuickInput: UseWorkbenchFavoriteQuickInputResult;
+  activeSessionId: string | null;
 }
 
 /**
@@ -102,6 +110,8 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
     handleCursorAnchorChange,
     handleSelectPaneAt,
     focusSession,
+    favoriteQuickInput,
+    activeSessionId,
   } = props;
 
   const cursorAnchorActive =
@@ -129,6 +139,38 @@ export function WorkbenchTerminalArea(props: WorkbenchTerminalAreaProps) {
             disabled={promptOptimizing || remoteWriteDisabled}
           />
         </aside>
+      ) : null}
+
+      {/* 收藏快捷输入：工具栏入口（下沉到终端区，避免 Workbench.tsx 超 1200 行） */}
+      {!terminalFullscreen ? (
+        <Button
+          className={styles.favoriteQuickInputToggle}
+          variant="secondary"
+          size="sm"
+          icon={<StarIcon />}
+          title={t('workbench:favoriteQuickInput.open')}
+          aria-label={t('workbench:favoriteQuickInput.open')}
+          data-workbench-responsive-action="true"
+          data-active={favoriteQuickInput.open || undefined}
+          disabled={!activeSessionId || (remoteWriteDisabled && !favoriteQuickInput.open)}
+          onClick={favoriteQuickInput.onToggle}
+        />
+      ) : null}
+
+      {/* 收藏快捷输入浮层（与 prompt 优化浮层相互独立，可共存） */}
+      {!terminalFullscreen ? (
+        <WorkbenchFavoriteQuickInput
+          open={favoriteQuickInput.open}
+          selectedTag={favoriteQuickInput.selectedTag}
+          query={favoriteQuickInput.query}
+          favoritePrompts={favoriteQuickInput.favoritePrompts}
+          loading={favoriteQuickInput.loading}
+          loadError={favoriteQuickInput.loadError}
+          onSelectTag={favoriteQuickInput.onSelectTag}
+          onQueryChange={favoriteQuickInput.onQueryChange}
+          onSelectPrompt={favoriteQuickInput.onSelectPrompt}
+          onClose={favoriteQuickInput.onClose}
+        />
       ) : null}
 
       <section

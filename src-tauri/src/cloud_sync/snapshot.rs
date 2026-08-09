@@ -186,6 +186,7 @@ fn prompt_changed(merged: &PromptRow, local: &PromptRow) -> bool {
         || merged.content != local.content
         || merged.title != local.title
         || merged.deleted != local.deleted
+        || merged.favorite != local.favorite
 }
 
 /// 判断两条 ClaudeHistoryRow 是否在同步相关字段上有差异。

@@ -686,7 +686,8 @@ async fn ensure_scale_aux_tables(pool: &SqlitePool) {
         "CREATE TABLE IF NOT EXISTS prompts (\
          id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL, \
          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, device_id TEXT NOT NULL, \
-         vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0)",
+         vector_clock TEXT NOT NULL, deleted INTEGER DEFAULT 0, \
+         favorite INTEGER NOT NULL DEFAULT 0)",
     )
     .execute(pool)
     .await

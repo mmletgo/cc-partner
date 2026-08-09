@@ -181,7 +181,7 @@ export function createPromptOptimizerShortcutState(): PromptOptimizerShortcutSta
  * Code Logic（这个函数做什么）:
  *   把键盘事件转换为 `<ctrl>+p` 这类持久化格式；无法表达的键返回空字符串。
  */
-function shortcutValueFromEvent(event: PromptOptimizerShortcutEvent): string {
+export function shortcutValueFromEvent(event: PromptOptimizerShortcutEvent): string {
   const modifierOnly = MODIFIER_SHORTCUT_BY_KEY[event.key];
   if (modifierOnly) return modifierOnly;
 

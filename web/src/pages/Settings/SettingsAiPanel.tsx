@@ -15,8 +15,15 @@ import { CheckIcon, XIcon, KeyboardIcon, InfoIcon } from '@/lib/icons';
 import type { ClaudeCliTestResult, GithubTrendingConfig } from '@/lib/types';
 import { InternalClaudeProviderCard } from '@/components/domain/InternalClaudeProviderCard';
 import { formatShortcutForDisplay } from './shortcutRecorder';
-import type { GithubTrendingForm, PromptOptimizerSettingsForm } from './settingsState';
-import { PROMPT_OPTIMIZER_SHORTCUT_ID } from './useSettingsController';
+import type {
+  GithubTrendingForm,
+  PromptOptimizerSettingsForm,
+  PromptQuickInputSettingsForm,
+} from './settingsState';
+import {
+  PROMPT_OPTIMIZER_SHORTCUT_ID,
+  PROMPT_QUICK_INPUT_SHORTCUT_ID,
+} from './useSettingsController';
 import styles from './Settings.module.css';
 
 /**
@@ -52,6 +59,13 @@ export interface SettingsAiPanelProps {
   onPatchPromptOptimizer: (partial: Partial<PromptOptimizerSettingsForm>) => void;
   onResetPromptOptimizerDefaults: () => void;
   onApplyPromptOptimizer: () => void;
+
+  promptQuickInputForm: PromptQuickInputSettingsForm;
+  applyingPromptQuickInput: boolean;
+  promptQuickInputSettingsError: string | null;
+  canResetPromptQuickInputDefaults: boolean;
+  onResetPromptQuickInputDefaults: () => void;
+  onApplyPromptQuickInput: () => void;
 
   recordingShortcutId: string | null;
   onShortcutFocus: (id: string) => void;
@@ -94,6 +108,12 @@ export function SettingsAiPanel({
   onPatchPromptOptimizer,
   onResetPromptOptimizerDefaults,
   onApplyPromptOptimizer,
+  promptQuickInputForm,
+  applyingPromptQuickInput,
+  promptQuickInputSettingsError,
+  canResetPromptQuickInputDefaults,
+  onResetPromptQuickInputDefaults,
+  onApplyPromptQuickInput,
   recordingShortcutId,
   onShortcutFocus,
   onShortcutBlur,
@@ -344,6 +364,77 @@ export function SettingsAiPanel({
               </div>
             </div>
           </div>
+
+          <div className={styles.shortcutList}>
+            <div className={styles.shortcutRow}>
+              <div className={styles.shortcutText}>
+                <span className={styles.shortcutLabel}>
+                  {t('settings:promptQuickInputSettings.hotkey.label')}
+                </span>
+                <span className={styles.shortcutHelper}>
+                  {recordingShortcutId === PROMPT_QUICK_INPUT_SHORTCUT_ID
+                    ? t('settings:shortcut.recordingHelper')
+                    : t('settings:promptQuickInputSettings.hotkey.helper')}
+                </span>
+              </div>
+              <div className={styles.shortcutInput}>
+                <Input
+                  id="settings-prompt-quick-input-hotkey"
+                  type="text"
+                  value={
+                    recordingShortcutId === PROMPT_QUICK_INPUT_SHORTCUT_ID
+                      ? t('settings:shortcut.recording')
+                      : formatShortcutForDisplay(promptQuickInputForm.hotkey)
+                  }
+                  placeholder={t('settings:shortcut.placeholder')}
+                  onChange={() => undefined}
+                  onFocus={() => onShortcutFocus(PROMPT_QUICK_INPUT_SHORTCUT_ID)}
+                  onClick={() => onShortcutFocus(PROMPT_QUICK_INPUT_SHORTCUT_ID)}
+                  onBlur={() => onShortcutBlur(PROMPT_QUICK_INPUT_SHORTCUT_ID)}
+                  onKeyDown={(e) => onShortcutKeyDown(e, PROMPT_QUICK_INPUT_SHORTCUT_ID)}
+                  icon={<KeyboardIcon />}
+                  className={
+                    recordingShortcutId === PROMPT_QUICK_INPUT_SHORTCUT_ID
+                      ? styles.shortcutRecorderActive
+                      : undefined
+                  }
+                  aria-label={t('settings:promptQuickInputSettings.hotkey.label')}
+                  readOnly
+                  mono
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className={styles.aboutActions}>
+            <Button
+              variant="ghost"
+              size="md"
+              onClick={onResetPromptQuickInputDefaults}
+              disabled={!canResetPromptQuickInputDefaults}
+              title={
+                canResetPromptQuickInputDefaults
+                  ? undefined
+                  : t('settings:resource.defaultsUnavailable')
+              }
+            >
+              {t('settings:action.resetDefault')}
+            </Button>
+            <Button
+              variant="primary"
+              size="md"
+              onClick={onApplyPromptQuickInput}
+              disabled={applyingPromptQuickInput}
+            >
+              {applyingPromptQuickInput
+                ? t('settings:promptQuickInputSettings.applying')
+                : t('settings:promptQuickInputSettings.apply')}
+            </Button>
+          </div>
+
+          {promptQuickInputSettingsError ? (
+            <span className={styles.updateError}>{promptQuickInputSettingsError}</span>
+          ) : null}
 
           <div className={styles.toggleList}>
             <button

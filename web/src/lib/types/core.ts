@@ -16,6 +16,8 @@ export interface Prompt {
   tags: string[];
   /** @deprecated 使用 tags 字段代替 */
   tag?: string;
+  /** 是否收藏（对齐 Rust PromptDto.favorite，#[serde(default)] 旧值默认 false） */
+  favorite: boolean;
   updatedAt: string;
   vectorClock?: Record<string, number>;
 }

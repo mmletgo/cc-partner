@@ -107,7 +107,8 @@ const PROMPTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS prompts (
     updated_at TEXT NOT NULL,
     device_id TEXT NOT NULL,
     vector_clock TEXT NOT NULL,
-    deleted INTEGER DEFAULT 0
+    deleted INTEGER DEFAULT 0,
+    favorite INTEGER NOT NULL DEFAULT 0
 )";
 
 /// transfer_history 建表（文档 + 新库基线）。N5 recovery 列由 CREATE 声明；
@@ -353,6 +354,8 @@ pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError>
     crate::storage::SyncDeleteSequenceRepo::ensure_schema(&pool).await?;
     crate::storage::DeletionFloorRepo::ensure_schema(&pool).await?;
     crate::storage::ensure_domain_delete_epoch_columns(&pool).await?;
+    // Prompt 收藏(favorite)字段：旧库幂等补齐favorite 列
+    crate::storage::ensure_prompts_favorite_column(&pool).await?;
     // N2 recovery_jobs 状态机（导出/恢复）
     crate::storage::RecoveryJobRepo::ensure_schema(&pool).await?;
     sqlx::query(HEALTH_SCHEMA).execute(&pool).await?;

@@ -297,6 +297,7 @@ mod tests {
             vector_clock,
             deleted,
             delete_epoch: 0,
+            favorite: false,
         }
     }
 

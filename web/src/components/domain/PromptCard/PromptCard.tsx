@@ -18,7 +18,7 @@ import { memo, useCallback } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Card, Tag } from '@/components/primitives';
-import { CopyIcon, EditIcon, TrashIcon } from '@/lib/icons';
+import { CopyIcon, EditIcon, TrashIcon, StarIcon } from '@/lib/icons';
 import styles from './PromptCard.module.css';
 
 /** 单条 Prompt 数据模型（与后端字段保持一致） */
@@ -29,6 +29,8 @@ export interface PromptCardPrompt {
   tags?: string[];
   /** @deprecated 使用 tags 字段代替 */
   tag?: string;
+  /** 是否收藏；首页 Trending 等复用场景可缺省，缺省视为未收藏 */
+  favorite?: boolean;
   /** ISO 时间字符串 */
   updatedAt: string;
   vectorClock?: Record<string, number>;
@@ -80,6 +82,15 @@ function PromptCardInner({ prompt, onEdit, onDelete, onCopy, className, style }:
     <Card variant="elevated" className={[styles.card, className].filter(Boolean).join(' ')} style={style}>
       <Card.Header className={styles.header}>
         <h4 className={styles.title}>{prompt.title}</h4>
+        {prompt.favorite ? (
+          <span
+            className={styles.favoriteMark}
+            aria-label={t('common:favorite')}
+            title={t('common:favorite')}
+          >
+            <StarIcon size={14} />
+          </span>
+        ) : null}
         {prompt.tags && prompt.tags.length > 0 ? (
           <div className={styles.tagList}>
             {prompt.tags.map((t) => <Tag key={t} size="sm">{t}</Tag>)}
