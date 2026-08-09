@@ -519,6 +519,9 @@ struct JsonlLine {
     git_branch: Option<String>,
     #[serde(default, rename = "lastPrompt")]
     last_prompt: Option<String>,
+    /// Claude Code 自动生成的对话标题（`type=ai-title` 的 `aiTitle`）。
+    #[serde(default, rename = "aiTitle")]
+    ai_title: Option<String>,
 }
 
 /// message 字段的宽松结构（仅关心 role 与 content）。
@@ -623,6 +626,7 @@ pub fn build_session_index_with_budget(
     let start = Instant::now();
 
     let mut last_prompt: Option<String> = None;
+    let mut ai_title: Option<String> = None;
     let mut first_user_text: Option<String> = None;
     let mut user_parts: Vec<String> = Vec::new();
     let mut assistant_parts: Vec<String> = Vec::new();
@@ -674,7 +678,18 @@ pub fn build_session_index_with_budget(
             git_branch = Some(b.to_string());
         }
 
-        // last-prompt 行：取最后一条作 title 来源
+        // ai-title：Claude 自动生成的对话标题，优先于 last-prompt / first user。
+        if parsed.kind == "ai-title" {
+            if let Some(title) = parsed.ai_title.as_deref() {
+                let trimmed = title.trim();
+                if !trimmed.is_empty() {
+                    ai_title = Some(trimmed.to_string());
+                }
+            }
+            continue;
+        }
+
+        // last-prompt 行：取最后一条作 title 兜底来源
         if parsed.kind == "last-prompt" {
             if let Some(lp) = parsed.last_prompt.as_deref() {
                 let trimmed = lp.trim();
@@ -739,7 +754,11 @@ pub fn build_session_index_with_budget(
         }
     }
 
-    let title = last_prompt.or(first_user_text).unwrap_or_default();
+    // 标题优先级：ai-title（Claude 自动生成）> last-prompt > 首条 user 文本。
+    let title = ai_title
+        .or(last_prompt)
+        .or(first_user_text)
+        .unwrap_or_default();
     let message_count = messages.len() as u32;
 
     // recent_messages：按 timestamp 升序取尾部 20 条（空字符串视为最早）
@@ -1818,6 +1837,27 @@ async fn scan_test_hooks_wait_before_scan() {
     scan_test_hooks::wait_before_scan().await;
 }
 
+/// Business Logic（为什么需要这个函数）:
+///     索引刷新后应把 Claude ai-title 同步到绑定终端 window 名（best-effort）。
+///
+/// Code Logic（这个函数做什么）:
+///     读共享索引全部 session，对非空 title 调用 `try_auto_rename_from_claude_index`。
+fn maybe_auto_title_from_index(state: &AppState, shared: &SharedWorktreeSessionIndex) {
+    let sessions: Vec<ClaudeSessionIndex> = match shared.read() {
+        Ok(guard) => guard.sessions.values().cloned().collect(),
+        Err(err) => {
+            tracing::debug!("auto-title 读索引锁失败: {err}");
+            return;
+        }
+    };
+    for index in sessions {
+        if index.title.trim().is_empty() {
+            continue;
+        }
+        crate::workbench::auto_title::try_auto_rename_from_claude_index(state, &index);
+    }
+}
+
 /// 为指定 worktree 启动 notify 文件监听。
 ///
 ///
@@ -1853,6 +1893,8 @@ fn spawn_session_watcher(
     let index_handle = Arc::clone(shared);
     let watch_dir_for_cb = watch_dir.clone();
     let worktree_canonical_owned = worktree_canonical.to_path_buf();
+    // Clone AppState into watcher callbacks for best-effort auto-title rename.
+    let state_for_cb = state.clone();
 
     let cancel = CancellationToken::new();
     let last_refresh = Arc::new(Mutex::new(
@@ -1902,11 +1944,13 @@ fn spawn_session_watcher(
                 let worktree = worktree_canonical_owned.clone();
                 let cancel_task = cancel_cb.clone();
                 let scans = Arc::clone(&pending_scans_cb);
+                let state_task = state_for_cb.clone();
                 let handle = tauri::async_runtime::spawn_blocking(move || {
                     if cancel_task.is_cancelled() {
                         return;
                     }
                     apply_session_watch_plan(&index_for_task, &worktree, &dir, plan);
+                    maybe_auto_title_from_index(&state_task, &index_for_task);
                 });
                 if let Ok(mut list) = scans.lock() {
                     // tauri JoinHandle 无 is_finished；dispose 时统一 abort，此处只登记。
@@ -1943,11 +1987,13 @@ fn spawn_session_watcher(
                 let worktree = worktree_canonical_owned.clone();
                 let cancel_task = cancel_cb.clone();
                 let scans = Arc::clone(&pending_scans_cb);
+                let state_task = state_for_cb.clone();
                 let handle = tauri::async_runtime::spawn_blocking(move || {
                     if cancel_task.is_cancelled() {
                         return;
                     }
                     apply_session_watch_plan(&index_for_task, &worktree, &dir, plan);
+                    maybe_auto_title_from_index(&state_task, &index_for_task);
                 });
                 if let Ok(mut list) = scans.lock() {
                     list.push(handle);
@@ -1970,6 +2016,7 @@ fn spawn_session_watcher(
                 let pending_clone = Arc::clone(&pending_trailing_cb);
                 let cancel_task = cancel_cb.clone();
                 let scans = Arc::clone(&pending_scans_cb);
+                let state_task = state_for_cb.clone();
                 // trailing 统一有界 rescan，保证窗口内 delete+create 混合事件最终一致
                 let trailing_plan = SessionWatchPlan::BoundedRescan;
                 let handle = tauri::async_runtime::spawn(async move {
@@ -1994,6 +2041,7 @@ fn spawn_session_watcher(
                             &dir_clone,
                             trailing_plan,
                         );
+                        maybe_auto_title_from_index(&state_task, &index_clone);
                     });
                     if let Ok(mut list) = scans.lock() {
                         list.push(scan_handle);

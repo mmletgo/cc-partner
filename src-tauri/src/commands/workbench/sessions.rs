@@ -1273,6 +1273,8 @@ pub(crate) async fn local_rename_workbench_session(
             row.name = name.trim().to_string();
             row.updated_at = now_iso();
             state.workbench_session_repo.upsert(&row).await?;
+            // 用户手改（含仅持久化行）必须挡后续 agent 自动标题。
+            crate::workbench::sessions::mark_session_name_manual(&session_id);
             Ok(row.to_dto())
         }
         Err(error) => Err(error),

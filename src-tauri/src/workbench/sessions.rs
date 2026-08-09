@@ -41,6 +41,67 @@ use std::time::Duration;
 ///     terminal_session_id → agent_session_id；create_with_ids 写入，spawn 读取，完成后清除。
 static PREALLOCATED_AGENT_SESSION_IDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
+/// 终端 window 名来源（进程内；MVP 不落库）。
+///
+/// Business Logic（为什么需要这个枚举）:
+///     用户手改名后不得被 agent 自动标题覆盖；自动改名与创建默认名要可区分。
+///
+/// Code Logic（这个枚举做什么）:
+///     Default=创建默认；Auto=系统按 agent 标题写入；Manual=用户 rename。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionNameSource {
+    #[default]
+    Default,
+    Auto,
+    Manual,
+}
+
+/// session_id → 名称来源（Manual 优先，跨 close 保留到进程退出）。
+///
+/// Business Logic（为什么需要这个 map）:
+///     WorkbenchSessionRow 尚未持久化 name_source 列；进程内 map 保证手改不被 auto 覆盖。
+///
+/// Code Logic（这个 map 做什么）:
+///     rename 用户路径写 Manual；try_auto_rename 写 Auto；close 不清除 Manual（同 id 重建极少）。
+static SESSION_NAME_SOURCES: OnceLock<Mutex<HashMap<String, SessionNameSource>>> = OnceLock::new();
+
+/// Business Logic（为什么需要这个函数）:
+///     auto-title 与 rename 需要读取当前名称来源。
+///
+/// Code Logic（这个函数做什么）:
+///     查 map，缺失视为 Default。
+pub fn session_name_source(session_id: &str) -> SessionNameSource {
+    SESSION_NAME_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|g| g.get(session_id).copied())
+        .unwrap_or(SessionNameSource::Default)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     用户 rename 或自动改名后需要更新来源门禁。
+///
+/// Code Logic（这个函数做什么）:
+///     insert/overwrite map。
+fn set_session_name_source(session_id: &str, source: SessionNameSource) {
+    if let Ok(mut guard) = SESSION_NAME_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        guard.insert(session_id.to_string(), source);
+    }
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     持久化-only rename（session 不在 registry）也必须标记 Manual，防止稍后 auto 覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     `set_session_name_source(session_id, Manual)`。
+pub fn mark_session_name_manual(session_id: &str) {
+    set_session_name_source(session_id, SessionNameSource::Manual);
+}
+
 /// 记录预分配 agent session id。
 ///
 /// Business Logic（为什么需要这个函数）:
@@ -5573,8 +5634,22 @@ impl WorkbenchSessionRegistry {
     ///     用户可以给多个终端会话改名，以区分不同工作流。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     查找会话并更新 row name，返回更新后的 row；缺失会话返回错误。
+    ///     查找会话并更新 row name，标记 name_source=Manual，返回更新后的 row；缺失会话返回错误。
     pub fn rename(&self, session_id: &str, name: &str) -> Result<WorkbenchSessionRow, AppError> {
+        self.rename_with_source(session_id, name, SessionNameSource::Manual)
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     用户 rename 与 agent 自动标题共用改名实现，但来源门禁不同。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     trim 名称 → tmux rename-window（best-effort）→ 更新 row → 记录 name_source。
+    pub fn rename_with_source(
+        &self,
+        session_id: &str,
+        name: &str,
+        source: SessionNameSource,
+    ) -> Result<WorkbenchSessionRow, AppError> {
         let handle = self.get_handle(session_id)?;
         let mut handle = handle.lock().expect("workbench session 锁中毒");
         let next_name = name.trim().to_string();
@@ -5591,7 +5666,71 @@ impl WorkbenchSessionRegistry {
         }
         handle.row.name = next_name;
         handle.row.updated_at = chrono::Utc::now().to_rfc3339();
+        set_session_name_source(session_id, source);
         Ok(handle.row.clone())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     Claude ai-title 等自动标题只能覆盖 default/auto，且不得无意义重写同名。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     Manual → Ok(None)；同名 → Ok(None)；否则 rename_with_source(Auto) → Some(row)。
+    pub fn try_auto_rename(
+        &self,
+        session_id: &str,
+        title: &str,
+    ) -> Result<Option<WorkbenchSessionRow>, AppError> {
+        let handle = self.get_handle(session_id)?;
+        let current = {
+            let handle = handle.lock().expect("workbench session 锁中毒");
+            (handle.row.name.clone(), session_name_source(session_id))
+        };
+        if !crate::workbench::auto_title::should_apply_auto_title(
+            &current.0,
+            current.1,
+            title,
+        ) {
+            return Ok(None);
+        }
+        let Some(clean) = crate::workbench::auto_title::sanitize_auto_title(title) else {
+            return Ok(None);
+        };
+        Ok(Some(self.rename_with_source(
+            session_id,
+            &clean,
+            SessionNameSource::Auto,
+        )?))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     自动标题绑定需要当前 live 会话的 cwd/id 列表，且不暴露 DTO/pane 细节。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     锁 sessions，克隆所有 Ready 句柄的 row。
+    pub fn list_live_session_rows(&self) -> Vec<WorkbenchSessionRow> {
+        let sessions = self.sessions.lock().expect("workbench sessions 锁中毒");
+        sessions
+            .values()
+            .filter_map(|handle| {
+                let handle = handle.lock().ok()?;
+                if handle.durability == SessionDurability::Ready {
+                    Some(handle.row.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     多 pane 时 MVP 禁止自动改 window 名（无法保证 first pane 归属）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查 live row 后委托 pane_count_for_row；缺失会话返回 None。
+    pub fn pane_count_for_session(&self, session_id: &str) -> Option<usize> {
+        let handle = self.get_handle(session_id).ok()?;
+        let row = handle.lock().ok()?.row.clone();
+        Some(pane_count_for_row(&row))
     }
 
     /// Business Logic（为什么需要这个函数）:

@@ -69,7 +69,7 @@ fn encode_uses_shared_helper() {
 }
 
 /// Business Logic（为什么需要这个测试）:
-///     session 标题应取 lastPrompt（最后一条 last-prompt 行），让用户看到最近一次输入的摘要。
+///     无 ai-title 时 session 标题应取 lastPrompt（最后一条 last-prompt 行）。
 ///
 /// Code Logic（这个测试做什么）:
 ///     构造含两条 last-prompt 行的 jsonl，断言 title = 最后一条 lastPrompt。
@@ -87,6 +87,28 @@ fn parse_extracts_last_prompt_as_title() {
     );
     let index = build_session_index(&path).expect("应解析成功");
     assert_eq!(index.title, "final summary");
+}
+
+/// Business Logic（为什么需要这个测试）:
+///     Claude Code 写入的 `ai-title` 应优先于 last-prompt / first user，作为对话自动标题。
+///
+/// Code Logic（这个测试做什么）:
+///     同时存在 user、last-prompt、ai-title 时断言 title = 最后一条 aiTitle。
+#[test]
+fn parse_prefers_ai_title_over_last_prompt_and_user() {
+    let tmp = unique_temp_dir("parse_prefers_ai_title_over_last_prompt_and_user");
+    let path = write_jsonl(
+        &tmp,
+        "sess-ai-title",
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"first user text"},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            r#"{"type":"last-prompt","lastPrompt":"last prompt text"}"#,
+            r#"{"type":"ai-title","aiTitle":"刷新时清理失效 worktree","sessionId":"sess-ai-title"}"#,
+            r#"{"type":"ai-title","aiTitle":"最终自动标题","sessionId":"sess-ai-title"}"#,
+        ],
+    );
+    let index = build_session_index(&path).expect("应解析成功");
+    assert_eq!(index.title, "最终自动标题");
 }
 
 /// Business Logic（为什么需要这个测试）:
