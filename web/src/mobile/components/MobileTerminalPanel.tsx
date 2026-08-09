@@ -50,6 +50,7 @@ import {
 } from '../mobileTerminalInputStream';
 import {
   applyStickyModifierToInput,
+  clearMobileTerminalHelperTextareaAfterCommit,
   enterMobileTerminalTypingMode,
   findMobileTerminalHelperTextarea,
   leaveMobileTerminalTypingMode,
@@ -553,6 +554,13 @@ export function MobileTerminalPanel({
             reason,
             t('workbench:errors.sessions'),
           )}`,
+        );
+      } finally {
+        // xterm 6 在移动端中文 IME（尤其全角括号）提交后不会清空 helper textarea；
+        // 残留 value 会在下次 composition/input 时被再次 substring 发出，造成「已输入内容重复」。
+        // onData 触发时 xterm 已读完本次提交，此时清空安全。
+        clearMobileTerminalHelperTextareaAfterCommit(
+          findMobileTerminalHelperTextarea(viewport),
         );
       }
     });

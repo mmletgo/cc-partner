@@ -1,6 +1,7 @@
 import { describe, test } from 'vitest';
 import {
   applyStickyModifierToInput,
+  clearMobileTerminalHelperTextareaAfterCommit,
   dismissMobileTerminalSoftKeyboard,
   encodeAltKeyInput,
   encodeCtrlKeyInput,
@@ -205,5 +206,47 @@ describe('mobileTerminalExtraKeys', () => {
     assertEqual(attrs.has('inputmode'), false, 'inputmode removed');
     assertEqual(enterMobileTerminalTypingMode(null), false, 'enter null');
     assertEqual(leaveMobileTerminalTypingMode(null, null), false, 'leave null');
+  });
+
+  test('clearMobileTerminalHelperTextareaAfterCommit drops residual IME text after commit', () => {
+    let selection: [number, number] | null = null;
+    const helper = {
+      value: '你好（',
+      setSelectionRange: (start: number, end: number) => {
+        selection = [start, end];
+      },
+    };
+
+    assertTrue(
+      clearMobileTerminalHelperTextareaAfterCommit(helper),
+      'clears non-empty residual after Chinese parentheses commit',
+    );
+    assertEqual(helper.value, '', 'value emptied');
+    assertEqual(selection?.[0], 0, 'selection start zeroed');
+    assertEqual(selection?.[1], 0, 'selection end zeroed');
+
+    assertEqual(
+      clearMobileTerminalHelperTextareaAfterCommit(helper),
+      false,
+      'already-empty returns false',
+    );
+    assertEqual(
+      clearMobileTerminalHelperTextareaAfterCommit(null),
+      false,
+      'null helper returns false',
+    );
+
+    // setSelectionRange 抛错时仍必须清空 value（部分宿主未聚焦时会 throw）。
+    const flakyHelper = {
+      value: '旧内容）',
+      setSelectionRange: () => {
+        throw new Error('not focused');
+      },
+    };
+    assertTrue(
+      clearMobileTerminalHelperTextareaAfterCommit(flakyHelper),
+      'still clears when setSelectionRange throws',
+    );
+    assertEqual(flakyHelper.value, '', 'value cleared despite selection error');
   });
 });

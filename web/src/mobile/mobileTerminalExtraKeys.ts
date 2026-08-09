@@ -358,3 +358,41 @@ export function findMobileTerminalHelperTextarea(
     'textarea.xterm-helper-textarea, .xterm-helper-textarea',
   ) as HTMLTextAreaElement | null;
 }
+
+/**
+ * xterm helper textarea 的 value 读写面（提交后清空用）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   移动端中文 IME 提交后 xterm 6 往往不把 helper textarea 清成空串；残留内容会在下一次
+ *   composition/input 时被再次 substring 发出，表现为「输入过中文括号后再次输入会重复旧内容」。
+ *
+ * Code Logic（这个类型做什么）:
+ *   描述 value + 可选 setSelectionRange，便于无 jsdom 单测。
+ */
+export interface MobileTerminalHelperTextareaValue {
+  value: string;
+  setSelectionRange?(start: number, end: number): void;
+}
+
+/**
+ * Business Logic（为什么需要这个函数）:
+ *   xterm 只在 blur 或 Ctrl+C/Enter 时清空 helper textarea；手机软键盘中文输入（尤其全角括号）
+ *   走 composition / insertText，不会触发清空，导致已提交文本残留并在下次输入被重复转发。
+ *
+ * Code Logic（这个函数做什么）:
+ *   若 helper 存在且 value 非空，则置为空串并尽量把选区归零；空值/缺失返回 false。
+ *   必须在 xterm 已从 textarea 读完本次提交（即 onData 已触发）之后调用。
+ */
+export function clearMobileTerminalHelperTextareaAfterCommit(
+  helperTextarea: MobileTerminalHelperTextareaValue | null | undefined,
+): boolean {
+  if (!helperTextarea) return false;
+  if (helperTextarea.value.length === 0) return false;
+  helperTextarea.value = '';
+  try {
+    helperTextarea.setSelectionRange?.(0, 0);
+  } catch {
+    // 未聚焦或宿主不支持选区时忽略，value 清空已足够打断重复发送。
+  }
+  return true;
+}
