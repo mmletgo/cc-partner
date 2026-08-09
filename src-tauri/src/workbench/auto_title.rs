@@ -73,13 +73,34 @@ pub fn should_apply_auto_title(
 
 /// Business Logic（为什么需要这个函数）:
 ///     历史 MVP：多 pane 时无法可靠知道 agent 在哪个 pane，仅单 pane 自动改名。
-///     现网已改用 title-owner pane_id 交接；本函数保留作纯判定/测试辅助。
+///     现网已改用 title-owner pane_id 交接 + agent pane 绑定；本函数保留作纯判定/测试辅助。
 ///
 /// Code Logic（这个函数做什么）:
 ///     pane_count <= 1 视为可自动改名（first pane only 的保守近似）。
 #[allow(dead_code)]
 pub fn window_allows_auto_title(pane_count: usize) -> bool {
     pane_count <= 1
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     多 pane window 上，只有运行在 title-owner pane 内的 agent 可改 window 名；
+///     其它 pane 的 Claude/Codex/OpenCode 不得抢标题。
+///
+/// Code Logic（这个函数做什么）:
+///     pane_count<=1 → 放行；多 pane 时 agent_pane 与 owner 均非空且相等才放行；
+///     缺绑定或 owner 时 fail-closed。
+pub fn agent_may_auto_title_window(
+    pane_count: usize,
+    title_owner_pane: Option<&str>,
+    agent_pane: Option<&str>,
+) -> bool {
+    if pane_count <= 1 {
+        return true;
+    }
+    match (title_owner_pane, agent_pane) {
+        (Some(owner), Some(agent)) if !owner.is_empty() && owner == agent => true,
+        _ => false,
+    }
 }
 
 /// 规范化路径用于 cwd 比较（失败则返回原字符串 trim）。
@@ -180,8 +201,32 @@ pub fn try_auto_rename_bound_title(
         return false;
     };
 
-    // seed / 校验 title-owner pane（first pane；关闭后交接）
-    let _owner = registry.ensure_title_owner_pane(&terminal_id);
+    // seed title-owner；多 pane 时仅 owner pane 上的 agent 可改名。
+    let owner = registry.ensure_title_owner_pane(&terminal_id);
+    let pane_count = registry.pane_count_for_session(&terminal_id).unwrap_or(1);
+    let agent_pane = registry.agent_title_pane_for(&terminal_id, native_session_id);
+    // 若 native 已知但尚未 bind pane，尝试用 terminal 绑定回填 native map。
+    if agent_pane.is_none() {
+        if let Some(n) = native_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = registry.bind_native_title_pane(&terminal_id, n);
+        }
+    }
+    let agent_pane = registry.agent_title_pane_for(&terminal_id, native_session_id);
+    if !agent_may_auto_title_window(
+        pane_count,
+        owner.as_deref(),
+        agent_pane.as_deref(),
+    ) {
+        tracing::debug!(
+            terminal_id = %terminal_id,
+            pane_count,
+            owner = ?owner,
+            agent_pane = ?agent_pane,
+            source = source_label,
+            "跳过自动标题：agent 不在 title-owner pane"
+        );
+        return false;
+    }
 
     match registry.try_auto_rename(&terminal_id, &title) {
         Ok(Some(row)) => {
@@ -266,6 +311,39 @@ pub fn find_terminal_by_native_session(
     rows.into_iter()
         .find(|row| row.native_session_id.as_deref() == Some(native_owned.as_str()))
         .map(|row| row.terminal_session_id)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Agent 启动（Runner / hook repair）时记录其宿主 pane，供后续 auto-title 门禁。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 registry.bind_agent_title_pane；失败仅 debug。
+pub fn bind_agent_title_pane_for_state(
+    state: &AppState,
+    terminal_session_id: &str,
+    agent_session_id: Option<&str>,
+    native_session_id: Option<&str>,
+) {
+    match state.workbench_sessions.bind_agent_title_pane(
+        terminal_session_id,
+        agent_session_id,
+        native_session_id,
+    ) {
+        Some(pane) => {
+            tracing::debug!(
+                terminal_session_id = %terminal_session_id,
+                agent_session_id = ?agent_session_id,
+                pane = %pane,
+                "已绑定 agent title pane"
+            );
+        }
+        None => {
+            tracing::debug!(
+                terminal_session_id = %terminal_session_id,
+                "绑定 agent title pane 失败（无 live session 或 pane 列表）"
+            );
+        }
+    }
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -369,6 +447,21 @@ mod tests {
         assert!(window_allows_auto_title(0));
         assert!(window_allows_auto_title(1));
         assert!(!window_allows_auto_title(2));
+    }
+
+    #[test]
+    fn agent_may_title_single_pane_always() {
+        assert!(agent_may_auto_title_window(1, None, None));
+        assert!(agent_may_auto_title_window(0, Some("%1"), Some("%2")));
+    }
+
+    #[test]
+    fn agent_may_title_multi_pane_requires_owner_match() {
+        assert!(!agent_may_auto_title_window(2, None, Some("%1")));
+        assert!(!agent_may_auto_title_window(2, Some("%1"), None));
+        assert!(!agent_may_auto_title_window(2, Some("%1"), Some("%2")));
+        assert!(agent_may_auto_title_window(2, Some("%1"), Some("%1")));
+        assert!(agent_may_auto_title_window(3, Some("%3"), Some("%3")));
     }
 
     #[test]

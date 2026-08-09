@@ -80,6 +80,12 @@ impl SessionNameSource {
 static TITLE_OWNER_PANES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 /// window → 最近一次成功应用的自动标题（pane 交接后可重贴）。
 static LAST_AUTO_TITLES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+/// terminal_session_id → agent 启动时所在 pane_id（多 pane 时仅此 pane 可 auto-rename）。
+static AGENT_PANE_BY_TERMINAL: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+/// native_session_id → agent 所在 pane_id。
+static AGENT_PANE_BY_NATIVE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+/// agent_session_id → agent 所在 pane_id。
+static AGENT_PANE_BY_AGENT: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 fn title_owner_map() -> &'static Mutex<HashMap<String, String>> {
     TITLE_OWNER_PANES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -87,6 +93,18 @@ fn title_owner_map() -> &'static Mutex<HashMap<String, String>> {
 
 fn last_auto_title_map() -> &'static Mutex<HashMap<String, String>> {
     LAST_AUTO_TITLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn agent_pane_by_terminal_map() -> &'static Mutex<HashMap<String, String>> {
+    AGENT_PANE_BY_TERMINAL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn agent_pane_by_native_map() -> &'static Mutex<HashMap<String, String>> {
+    AGENT_PANE_BY_NATIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn agent_pane_by_agent_map() -> &'static Mutex<HashMap<String, String>> {
+    AGENT_PANE_BY_AGENT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -5886,7 +5904,7 @@ impl WorkbenchSessionRegistry {
         Some((next, last_title))
     }
 
-    /// 关闭 session 时清理 title owner / last auto title 缓存。
+    /// 关闭 session 时清理 title owner / last auto title / agent pane 缓存。
     pub fn clear_title_owner_state(&self, session_id: &str) {
         if let Ok(mut map) = title_owner_map().lock() {
             map.remove(session_id);
@@ -5894,6 +5912,102 @@ impl WorkbenchSessionRegistry {
         if let Ok(mut map) = last_auto_title_map().lock() {
             map.remove(session_id);
         }
+        // terminal 键直接移除；native/agent 键在下次 bind 时覆盖，进程生命周期短可残留。
+        if let Ok(mut map) = agent_pane_by_terminal_map().lock() {
+            map.remove(session_id);
+        }
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     agent 启动瞬间的 active pane 即其宿主；之后自动标题只允许该 pane 驱动 window 名。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     查询当前 active pane_id（raw→%raw）；写入 terminal/agent/native 三张 map。
+    pub fn bind_agent_title_pane(
+        &self,
+        terminal_session_id: &str,
+        agent_session_id: Option<&str>,
+        native_session_id: Option<&str>,
+    ) -> Option<String> {
+        let pane = self.active_pane_id_for_session(terminal_session_id)?;
+        if let Ok(mut map) = agent_pane_by_terminal_map().lock() {
+            map.insert(terminal_session_id.to_string(), pane.clone());
+        }
+        if let Some(aid) = agent_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Ok(mut map) = agent_pane_by_agent_map().lock() {
+                map.insert(aid.to_string(), pane.clone());
+            }
+        }
+        if let Some(nid) = native_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Ok(mut map) = agent_pane_by_native_map().lock() {
+                map.insert(nid.to_string(), pane.clone());
+            }
+        }
+        Some(pane)
+    }
+
+    /// 将已绑定 terminal 的 pane 关联到 native_session_id（OSC 回填时调用）。
+    pub fn bind_native_title_pane(
+        &self,
+        terminal_session_id: &str,
+        native_session_id: &str,
+    ) -> Option<String> {
+        let native = native_session_id.trim();
+        if native.is_empty() {
+            return None;
+        }
+        let pane = agent_pane_by_terminal_map()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(terminal_session_id).cloned())
+            .or_else(|| self.active_pane_id_for_session(terminal_session_id))?;
+        if let Ok(mut map) = agent_pane_by_native_map().lock() {
+            map.insert(native.to_string(), pane.clone());
+        }
+        if let Ok(mut map) = agent_pane_by_terminal_map().lock() {
+            map.entry(terminal_session_id.to_string())
+                .or_insert_with(|| pane.clone());
+        }
+        Some(pane)
+    }
+
+    /// 查找 agent 绑定的 pane：native 优先，否则 terminal。
+    pub fn agent_title_pane_for(
+        &self,
+        terminal_session_id: &str,
+        native_session_id: Option<&str>,
+    ) -> Option<String> {
+        if let Some(n) = native_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Ok(map) = agent_pane_by_native_map().lock() {
+                if let Some(p) = map.get(n) {
+                    return Some(p.clone());
+                }
+            }
+        }
+        agent_pane_by_terminal_map()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(terminal_session_id).cloned())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     绑定与门禁需要知道 window 当前 active pane（agent 启动时落点）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     raw → `%raw`；tmux list-panes 几何中 `active=true` 的 pane_id；无则 list 第一项。
+    pub fn active_pane_id_for_session(&self, session_id: &str) -> Option<String> {
+        let handle = self.get_handle(session_id).ok()?;
+        let row = handle.lock().ok()?.row.clone();
+        if row.backend != TMUX_BACKEND {
+            return Some("%raw".to_string());
+        }
+        let tmux = available_tmux_command()?;
+        let target = tmux_window_target_for_row(&row).ok()?;
+        let layout = tmux_window_pane_layout(&tmux, &target).ok()?;
+        if let Some(active) = layout.panes.iter().find(|p| p.active) {
+            return Some(active.pane_id.clone());
+        }
+        layout.panes.first().map(|p| p.pane_id.clone())
     }
 
     /// Business Logic（为什么需要这个函数）:

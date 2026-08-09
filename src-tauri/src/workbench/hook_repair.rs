@@ -117,6 +117,12 @@ pub(crate) async fn repair_local_worktree_hook_failure(
     }
     emit_agent_runtime_changed(state, &outcome.active, None);
     let agent_session_id = outcome.active.id.clone();
+    crate::workbench::auto_title::bind_agent_title_pane_for_state(
+        state,
+        &session.id,
+        Some(agent_session_id.as_str()),
+        None,
+    );
 
     // 3) probe adapter（fail-closed）：CLI 不可用时不注入 prompt，给出可操作错误。
     let adapter_registry = {

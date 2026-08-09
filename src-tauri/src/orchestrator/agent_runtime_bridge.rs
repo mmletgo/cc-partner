@@ -217,6 +217,13 @@ pub async fn create_launching_agent_for_runner_with_provider_and_id(
     }
     // 新 active 通常 Launching；无 previous phase
     emit_agent_runtime_changed(state, &outcome.active, None);
+    // 记录 agent 启动时的 active pane，供自动标题 first-pane 门禁。
+    crate::workbench::auto_title::bind_agent_title_pane_for_state(
+        state,
+        terminal_session_id,
+        Some(outcome.active.id.as_str()),
+        outcome.active.native_session_id.as_deref(),
+    );
     Ok(outcome.active)
 }
 

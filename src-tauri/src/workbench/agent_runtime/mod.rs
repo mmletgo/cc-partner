@@ -232,6 +232,26 @@ pub async fn spawn_owner_agent_runtime_worker(state: crate::state::AppState) {
                     version = row.version,
                     "agent runtime mutation applied"
                 );
+                // native_session_id 回填时挂上 title-pane 绑定，供 Codex/Claude 索引按 native 命中 owner pane。
+                if let Some(native) = row.native_session_id.as_deref() {
+                    let _ = state.workbench_sessions.bind_native_title_pane(
+                        &row.terminal_session_id,
+                        native,
+                    );
+                    // 若启动时未 bind terminal（极少），用当前 active 再 seed agent/terminal 映射。
+                    if state
+                        .workbench_sessions
+                        .agent_title_pane_for(&row.terminal_session_id, Some(native))
+                        .is_none()
+                    {
+                        crate::workbench::auto_title::bind_agent_title_pane_for_state(
+                            &state,
+                            &row.terminal_session_id,
+                            Some(row.id.as_str()),
+                            Some(native),
+                        );
+                    }
+                }
                 emit_agent_runtime_changed(&state, &row, Some(previous_phase));
                 // A9：首次终态旁路写 Ledger；失败隔离，不阻断 runtime 完成路径。
                 if row.phase.is_terminal() {
