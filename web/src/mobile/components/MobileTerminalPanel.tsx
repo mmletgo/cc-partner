@@ -323,15 +323,27 @@ export function MobileTerminalPanel({
     [armStickyModifier, sendTerminalInput],
   );
 
+  // 终端输入常驻 WebSocket 在面板挂载时建立一次(依赖 [])。StrictMode(dev)会双调用本 effect:
+  // 首个 stream 在 CONNECTING 阶段就被 cleanup 的 stream.close() 中止,浏览器对中止未完成的
+  // upgrade 会触发 error 事件;若放任其 onStateChange 继续 setState,会污染随后 ready stream
+  // 的展示(残留"终端输入连接失败")。用 active 标志守卫:cleanup 后被废弃 stream 的事件不再写 state。
   useEffect(() => {
+    let active = true;
     const stream = new MobileTerminalInputStream({
       onStateChange: (state) => {
+        if (!active) return;
         setInputStreamState(state);
-        if (state.status === 'blocked') setPanelError(state.message);
+        if (state.status === 'blocked') {
+          setPanelError(state.message);
+        } else if (state.status === 'ready') {
+          // 连接(重)建立后清掉历史 blocked 错误,避免 ready 后仍显示"终端输入连接失败"。
+          setPanelError(null);
+        }
       },
     });
     inputStreamRef.current = stream;
     return () => {
+      active = false;
       inputStreamRef.current = null;
       stream.close();
       if (stickyTimeoutRef.current !== null) {

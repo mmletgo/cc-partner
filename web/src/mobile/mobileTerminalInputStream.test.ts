@@ -101,4 +101,21 @@ describe('MobileTerminalInputStream', () => {
     expect(socket.sent).toHaveLength(sentBeforeClose);
     expect(() => stream.enqueue('session-1', 'later')).toThrow('尚未就绪');
   });
+
+  test('握手前连接被中止触发 error 时报告 blocked(dev StrictMode cleanup 场景)', () => {
+    // dev StrictMode 双调用 inputStream effect:首个 stream 在 CONNECTING 阶段被 cleanup 的
+    // close() 中止,浏览器对中止未完成的 upgrade 会先 dispatch error 再 close。该 stream 的
+    // onStateChange 仍会报告 blocked「终端输入连接失败」;MobileTerminalPanel 须用 active 守卫
+    // 忽略被废弃 stream 的事件,并在 ready 时清除历史 blocked 错误,否则 ready 后仍显示该错误。
+    const socket = new FakeWebSocket();
+    const states: MobileTerminalInputStreamState[] = [];
+    new MobileTerminalInputStream({
+      createWebSocket: () => socket as unknown as WebSocket,
+      onStateChange: (state) => states.push(state),
+    });
+
+    socket.dispatchEvent(new Event('error'));
+
+    expect(states).toContainEqual({ status: 'blocked', message: '终端输入连接失败' });
+  });
 });
