@@ -298,4 +298,50 @@ describe('MobileTerminalPanel — refresh scrollback', () => {
     expect(store.getBuffer('s1')).toContain('history line');
     expect(store.getBuffer('s1')).toContain('post-open-chunk');
   });
+
+  test('does not mix another session live buffer into current window replay', async () => {
+    // 全局 store 同时缓存两个 window；打开 s1 时只能写入 s1 的 HTTP replay，
+    // 不得把 s2 的 live 内容拼进 s1 的 xterm / store baseline。
+    terminalEvents.replayResult = {
+      sessionId: 's1',
+      buffer: 'window-one-history\n$ ls\none.txt\n',
+      truncated: false,
+      lastSeq: 10,
+      ownerInstanceId: 'owner-1',
+    };
+
+    const store = createWorkbenchTerminalBufferStore();
+    act(() => {
+      store.append('s1', 'one.txt\n', 10, 'owner-1');
+      store.append('s2', 'window-two-only\n$ pwd\n/tmp/two\n', 20, 'owner-1');
+    });
+    const session = buildSession();
+
+    render(
+      <BuffersProvider store={store}>
+        <MobileTerminalPanel
+          project={buildProject()}
+          worktree={null}
+          sessions={[session]}
+          activeSession={session}
+          busy={false}
+          onSessionsChange={() => undefined}
+          onActiveSessionChange={() => undefined}
+        />
+      </BuffersProvider>,
+    );
+
+    await waitFor(() => {
+      expect(
+        terminalEvents.writeCalls.some((call) => call.data.includes('window-one-history')),
+      ).toBe(true);
+    });
+
+    const mixedIntoXterm = terminalEvents.writeCalls.some((call) =>
+      call.data.includes('window-two-only'),
+    );
+    expect(mixedIntoXterm).toBe(false);
+    expect(store.getBuffer('s1')).not.toContain('window-two-only');
+    expect(store.getBuffer('s2')).toContain('window-two-only');
+  });
 });

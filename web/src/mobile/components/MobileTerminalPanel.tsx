@@ -689,21 +689,22 @@ export function MobileTerminalPanel({
       .replay(sessionId)
       .then((replay) => {
         if (disposed || replayRequestIdRef.current !== requestId) return;
-        const initial = prepareInitialReplayBuffer(replay.buffer, bufferRef.current);
+        // 只读当前 session 的 store 快照，禁止用 bufferRef（可能短暂滞后或跨 tab 切换串味）。
+        const liveForSession = store.getBuffer(sessionId);
+        const initial = prepareInitialReplayBuffer(replay.buffer, liveForSession);
         writeTerminalReplay(terminal, initial.data, replayGateRef);
-        // writtenBuffer 必须等于实际写入 xterm 的完整历史（见 prepareInitialReplayBuffer），
-        // 不能是 NDJSON 的短 live 后缀；否则 store baseline 过短，后续 diff 可能 clear scrollback。
+        // writtenBuffer 必须等于实际写入 xterm 的完整历史（见 prepareInitialReplayBuffer）。
         writtenBufferRef.current = initial.writtenBuffer;
         replayReadyRef.current = true;
-        // 以完整 written 内容作 store baseline；后续 live（seq > lastSeq、同 owner）走 append。
+        // 以完整 written 内容作本 session baseline；后续 live（seq > lastSeq、同 owner）走 append。
         store.reset(sessionId, initial.writtenBuffer, replay.lastSeq, replay.ownerInstanceId);
       })
       .catch((reason) => {
         if (disposed || replayRequestIdRef.current !== requestId) return;
-        const liveBuffer = bufferRef.current;
-        if (liveBuffer) {
-          writeTerminalReplay(terminal, liveBuffer, replayGateRef);
-          writtenBufferRef.current = liveBuffer;
+        const liveForSession = store.getBuffer(sessionId);
+        if (liveForSession) {
+          writeTerminalReplay(terminal, liveForSession, replayGateRef);
+          writtenBufferRef.current = liveForSession;
         }
         replayReadyRef.current = true;
         setPanelError(

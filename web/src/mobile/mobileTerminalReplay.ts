@@ -1,5 +1,4 @@
 import {
-  planTerminalBufferWrite,
   shouldForwardTerminalInput,
   type TerminalReplayGate,
 } from '@/pages/Workbench/terminalReplay';
@@ -11,14 +10,18 @@ export interface InitialReplayBuffer {
 
 /**
  * Business Logic（为什么需要这个函数）:
- *   移动端首次打开终端时会同时拥有 HTTP replay 快照和 NDJSON 增量缓存；当两段 PTY 流无法对齐时，
- *   不能在同一次初始写入里拼接它们，否则可能重复历史输出或污染 xterm 状态。
- *   writtenBuffer 必须等于实际写入 xterm 的字节，否则后续 store baseline / buffer effect
- *   会把「只有 live 尾部」当真相，触发 clear 丢掉 scrollback，页面上只能看到打开后的输出。
+ *   移动端首次打开终端时会同时拥有 HTTP replay 快照和 NDJSON 增量缓存。
+ *   两段流必须严格按「同一 session 的前后缀关系」对齐；不能用模糊 KMP 重叠拼接，
+ *   否则另一 terminal window 的 live 缓存一旦误入 bufferRef，会被拼进当前 xterm/store，
+ *   表现为「两个窗口历史混在一起」。
+ *   writtenBuffer 必须等于实际写入 xterm 的字节，作为后续 store baseline。
  *
  * Code Logic（这个函数做什么）:
- *   用桌面端 replay diff helper 判断 live buffer 是否是 replay 的延续；可安全 append 时写 replay+tail，
- *   无法对齐时只写 replay。无论哪条分支，writtenBuffer 一律等于 data（真正写入 xterm 的内容）。
+ *   - live 空：写 replay
+ *   - replay 空：写 live
+ *   - live 以 replay 为严格前缀：写 live（真延续）
+ *   - replay 以 live 为严格后缀：写完整 replay（NDJSON 仅有近期尾）
+ *   - 其它：只写 replay，绝不拼接（含跨 session / 无关字符串的部分重叠）
  */
 export function prepareInitialReplayBuffer(
   replayBuffer: string,
@@ -27,16 +30,17 @@ export function prepareInitialReplayBuffer(
   if (!liveBuffer) return { data: replayBuffer, writtenBuffer: replayBuffer };
   if (!replayBuffer) return { data: liveBuffer, writtenBuffer: liveBuffer };
 
-  const plan = planTerminalBufferWrite(replayBuffer, liveBuffer);
-  if (plan.mode === 'append') {
-    // live 可能是 replay 的严格后缀（overlap 后 plan.data 为空）或延续尾部。
-    // 无论哪种，xterm 写入的是完整历史（+ 可选新尾），baseline 必须跟它一致，不能退回短 live。
-    const data = `${replayBuffer}${plan.data}`;
-    return { data, writtenBuffer: data };
+  // 真延续：live 已包含完整 replay 并可能更长。
+  if (liveBuffer.startsWith(replayBuffer)) {
+    return { data: liveBuffer, writtenBuffer: liveBuffer };
   }
-  if (plan.mode === 'none') {
+
+  // NDJSON 重建后往往只有近期后缀；完整历史在 HTTP replay。
+  if (replayBuffer.endsWith(liveBuffer)) {
     return { data: replayBuffer, writtenBuffer: replayBuffer };
   }
+
+  // 无法严格对齐：禁止模糊拼接（避免跨 window 历史混合）。
   return { data: replayBuffer, writtenBuffer: replayBuffer };
 }
 

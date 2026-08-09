@@ -76,6 +76,34 @@ describe('mobileTerminalReplay', () => {
       'replay-history',
       'unaligned live buffer should keep replay as safe baseline',
     );
+
+    // 另一 window 的 live 与当前 replay 仅有短字符串偶然重叠时，旧 KMP 会拼出混合历史。
+    // 严格前后缀对齐后必须只保留当前 session 的 HTTP replay。
+    const otherWindowLive = prepareInitialReplayBuffer(
+      'window-a-session\nprompt$ ls\nfile-a\n',
+      'window-b-session\nprompt$ pwd\n/tmp/b\n',
+    );
+    assertEqual(
+      otherWindowLive.data,
+      'window-a-session\nprompt$ ls\nfile-a\n',
+      'foreign session live must not be mixed into current replay',
+    );
+    assertEqual(
+      otherWindowLive.writtenBuffer.includes('window-b-session'),
+      false,
+      'written baseline must not contain the other window history',
+    );
+
+    // 部分字符重叠（如共同 prompt 前缀）也不得触发拼接。
+    const partialOverlap = prepareInitialReplayBuffer(
+      'long-history-for-window-one\n$ ',
+      'unrelated-output-from-window-two\n$ ',
+    );
+    assertEqual(
+      partialOverlap.data,
+      'long-history-for-window-one\n$ ',
+      'partial string overlap must not concatenate foreign live into replay',
+    );
   });
 
   test('shouldForwardMobileTerminalInput respects replay readiness and gate', () => {
