@@ -12,7 +12,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use crate::workbench::claude_sessions::ClaudeSessionIndex;
 use crate::workbench::models::WorkbenchSessionRow;
-use crate::workbench::sessions::SessionNameSource;
+use crate::workbench::sessions::{emit_session_updated, SessionNameSource};
 use std::path::{Component, Path};
 
 /// 自动标题最大字符数（Unicode scalar），超出截断并加省略号。
@@ -72,10 +72,12 @@ pub fn should_apply_auto_title(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     多 pane 时无法可靠知道 agent 在哪个 pane；MVP 仅单 pane window 自动改名。
+///     历史 MVP：多 pane 时无法可靠知道 agent 在哪个 pane，仅单 pane 自动改名。
+///     现网已改用 title-owner pane_id 交接；本函数保留作纯判定/测试辅助。
 ///
 /// Code Logic（这个函数做什么）:
 ///     pane_count <= 1 视为可自动改名（first pane only 的保守近似）。
+#[allow(dead_code)]
 pub fn window_allows_auto_title(pane_count: usize) -> bool {
     pane_count <= 1
 }
@@ -149,44 +151,40 @@ pub fn pick_terminal_for_claude_session(
 }
 
 /// Business Logic（为什么需要这个函数）:
-///     Claude 索引刷新后应 best-effort 把 ai-title 写到绑定终端 window 名。
+///     Claude / Codex / OpenCode 共用：绑定 terminal 后做 first-pane 门禁与 auto rename。
 ///
 /// Code Logic（这个函数做什么）:
-///     清洗 title → 列 live sessions → cwd 绑定 → first-pane 门禁 → registry.try_auto_rename。
-///     失败只 debug，不向上抛（索引路径不得因 rename 失败中断）。
-pub fn try_auto_rename_from_claude_index(state: &AppState, index: &ClaudeSessionIndex) {
-    let Some(title) = sanitize_auto_title(&index.title) else {
-        return;
+///     清洗 title → 解析 terminal（native 优先，cwd 兜底）→ pane 门禁 → try_auto_rename + 异步 upsert。
+///     返回是否实际改名；失败只 debug。
+pub fn try_auto_rename_bound_title(
+    state: &AppState,
+    title_raw: &str,
+    native_session_id: Option<&str>,
+    cwd: Option<&str>,
+    source_label: &str,
+) -> bool {
+    let Some(title) = sanitize_auto_title(title_raw) else {
+        return false;
     };
     let registry = &state.workbench_sessions;
     let live = registry.list_live_session_rows();
     if live.is_empty() {
-        return;
+        return false;
     }
 
-    // 优先：agent runtime native_session_id == Claude session_id
-    let bound_by_native = find_terminal_by_native_session(state, &index.session_id);
-
-    let terminal_id = bound_by_native
-        .or_else(|| pick_terminal_for_claude_session(&live, index.cwd.as_deref()));
+    let terminal_id = native_session_id
+        .and_then(|n| find_terminal_by_native_session(state, n))
+        .or_else(|| pick_terminal_for_claude_session(&live, cwd));
 
     let Some(terminal_id) = terminal_id else {
-        return;
+        return false;
     };
 
-    let pane_count = registry.pane_count_for_session(&terminal_id).unwrap_or(1);
-    if !window_allows_auto_title(pane_count) {
-        tracing::debug!(
-            terminal_id = %terminal_id,
-            pane_count,
-            "跳过自动标题：多 pane window（仅 first/single pane）"
-        );
-        return;
-    }
+    // seed / 校验 title-owner pane（first pane；关闭后交接）
+    let _owner = registry.ensure_title_owner_pane(&terminal_id);
 
     match registry.try_auto_rename(&terminal_id, &title) {
         Ok(Some(row)) => {
-            // best-effort 持久化；失败不影响运行期名
             let repo = state.workbench_session_repo.clone();
             let row_clone = row.clone();
             tauri::async_runtime::spawn(async move {
@@ -194,42 +192,101 @@ pub fn try_auto_rename_from_claude_index(state: &AppState, index: &ClaudeSession
                     tracing::debug!("自动标题持久化失败: {err}");
                 }
             });
+            emit_session_updated(state, &row);
             tracing::debug!(
                 terminal_id = %terminal_id,
                 title = %title,
-                "已按 Claude ai-title 自动重命名 window"
+                source = source_label,
+                "已按 agent 自动标题重命名 window"
             );
+            true
         }
-        Ok(None) => {}
+        Ok(None) => false,
         Err(err) => {
-            tracing::debug!(terminal_id = %terminal_id, "自动标题 rename 失败: {err}");
+            tracing::debug!(
+                terminal_id = %terminal_id,
+                source = source_label,
+                "自动标题 rename 失败: {err}"
+            );
+            false
         }
     }
 }
 
-/// 在 agent session 表中按 native_session_id 查 terminal_session_id（同步阻塞短查询不可用时返回 None）。
+/// Business Logic（为什么需要这个函数）:
+///     Claude 索引刷新后应 best-effort 把 ai-title 写到绑定终端 window 名。
+///
+/// Code Logic（这个函数做什么）:
+///     委托 `try_auto_rename_bound_title`（native_session_id + cwd）。
+pub fn try_auto_rename_from_claude_index(state: &AppState, index: &ClaudeSessionIndex) {
+    let _ = try_auto_rename_bound_title(
+        state,
+        &index.title,
+        Some(index.session_id.as_str()),
+        index.cwd.as_deref(),
+        "claude.ai-title",
+    );
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Codex/OpenCode 只靠 native session id 绑定时复用同一入口。
+///
+/// Code Logic（这个函数做什么）:
+///     `try_auto_rename_bound_title(..., Some(native), cwd, label)`。
+pub fn try_auto_rename_by_native_session(
+    state: &AppState,
+    native_session_id: &str,
+    title: &str,
+    cwd: Option<&str>,
+    source_label: &str,
+) -> bool {
+    try_auto_rename_bound_title(state, title, Some(native_session_id), cwd, source_label)
+}
+
+/// 在 agent session 表中按 native_session_id 查 terminal_session_id。
 ///
 /// Business Logic: 绑定优先走 runtime 真值，避免 cwd 多终端歧义。
-/// Code Logic: 使用 try_read 风格不可行；spawn_blocking 太重。此处用 block_in_place 仅当在 async 上下文；
-///     watcher 已在 spawn_blocking，可 block_on 短查询。
-fn find_terminal_by_native_session(state: &AppState, native_session_id: &str) -> Option<String> {
+/// Code Logic: 有 runtime handle 时 block_on list_active；否则返回 None。
+pub fn find_terminal_by_native_session(
+    state: &AppState,
+    native_session_id: &str,
+) -> Option<String> {
     let native = native_session_id.trim();
     if native.is_empty() {
         return None;
     }
-    // workbench_agent_session_repo 无按 native 索引的公开 API 时，扫 list_active。
     let repo = state.workbench_agent_session_repo.clone();
     let native_owned = native.to_string();
-    // 当前线程已在 blocking 上下文（watcher/scan），直接用 handle.block_on 风险较低。
     let rt = tokio::runtime::Handle::try_current().ok();
     let rows = if let Some(handle) = rt {
-        handle.block_on(async move { repo.list_active(None, 200).await.ok() })
+        handle.block_on(async move { repo.list_active(None, 500).await.ok() })
     } else {
         None
     }?;
     rows.into_iter()
         .find(|row| row.native_session_id.as_deref() == Some(native_owned.as_str()))
         .map(|row| row.terminal_session_id)
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     Codex/OpenCode 轮询任务需要在 headless owner 生命周期内运行并可 cancel。
+///
+/// Code Logic（这个函数做什么）:
+///     spawn 两个子任务：codex session_index 轮询 + opencode sqlite 轮询；监听 cancel。
+pub fn start_provider_title_pollers(
+    state: AppState,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let codex_state = state.clone();
+    let codex_cancel = cancel.child_token();
+    tauri::async_runtime::spawn(async move {
+        crate::workbench::auto_title_codex::run_codex_title_poller(codex_state, codex_cancel).await;
+    });
+    let oc_state = state;
+    let oc_cancel = cancel.child_token();
+    tauri::async_runtime::spawn(async move {
+        crate::workbench::auto_title_opencode::run_opencode_title_poller(oc_state, oc_cancel).await;
+    });
 }
 
 /// 供测试与调用方构造 rename 错误时使用。
@@ -249,6 +306,7 @@ mod tests {
             project_id: "p".into(),
             worktree_id: None,
             name: "Terminal".into(),
+            name_source: "default".to_string(),
             command: "/bin/zsh".into(),
             cwd: cwd.into(),
             status: "running".into(),

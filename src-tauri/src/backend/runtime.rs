@@ -274,6 +274,7 @@ const WORKBENCH_SESSION_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS workbench_ses
     project_id TEXT NOT NULL,
     worktree_id TEXT,
     name TEXT NOT NULL,
+    name_source TEXT NOT NULL DEFAULT 'default',
     command TEXT NOT NULL,
     cwd TEXT,
     status TEXT NOT NULL,
@@ -798,6 +799,7 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                 });
             }
             // A9：Agent Metadata Ledger 保留清理（启动批 + 24h）
+            // 同生命周期挂 Codex/OpenCode 自动标题轮询（不新增 AppState cancel 槽）。
             start_cancelled_task_once(&state.agent_ledger_cancel, "Agent ledger retention", || {
                 let cancel = CancellationToken::new();
                 let child = cancel.child_token();
@@ -806,6 +808,10 @@ pub fn start_background_tasks(state: &AppState, mode: BackendRuntimeMode) {
                     repo,
                     child,
                     std::time::Duration::from_secs(24 * 3600),
+                );
+                crate::workbench::auto_title::start_provider_title_pollers(
+                    state.clone(),
+                    cancel.child_token(),
                 );
                 cancel
             });

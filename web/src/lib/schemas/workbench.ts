@@ -358,6 +358,8 @@ export const workbenchSessionDecoder: Decoder<WorkbenchSession> = objectDecoder(
     projectId: stringDecoder,
     worktreeId: nullableDecoder(stringDecoder),
     name: stringDecoder,
+    // 可选：旧后端/远端未宣告时缺字段不 fail closed
+    nameSource: optionalDecoder(stringDecoder),
     command: stringDecoder,
     cwd: stringDecoder,
     status: stringDecoder,

@@ -41,7 +41,7 @@ use std::time::Duration;
 ///     terminal_session_id → agent_session_id；create_with_ids 写入，spawn 读取，完成后清除。
 static PREALLOCATED_AGENT_SESSION_IDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
-/// 终端 window 名来源（进程内；MVP 不落库）。
+/// 终端 window 名来源。
 ///
 /// Business Logic（为什么需要这个枚举）:
 ///     用户手改名后不得被 agent 自动标题覆盖；自动改名与创建默认名要可区分。
@@ -56,50 +56,57 @@ pub enum SessionNameSource {
     Manual,
 }
 
-/// session_id → 名称来源（Manual 优先，跨 close 保留到进程退出）。
-///
-/// Business Logic（为什么需要这个 map）:
-///     WorkbenchSessionRow 尚未持久化 name_source 列；进程内 map 保证手改不被 auto 覆盖。
-///
-/// Code Logic（这个 map 做什么）:
-///     rename 用户路径写 Manual；try_auto_rename 写 Auto；close 不清除 Manual（同 id 重建极少）。
-static SESSION_NAME_SOURCES: OnceLock<Mutex<HashMap<String, SessionNameSource>>> = OnceLock::new();
+impl SessionNameSource {
+    /// wire / SQLite 字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
 
-/// Business Logic（为什么需要这个函数）:
-///     auto-title 与 rename 需要读取当前名称来源。
-///
-/// Code Logic（这个函数做什么）:
-///     查 map，缺失视为 Default。
-pub fn session_name_source(session_id: &str) -> SessionNameSource {
-    SESSION_NAME_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .ok()
-        .and_then(|g| g.get(session_id).copied())
-        .unwrap_or(SessionNameSource::Default)
+    /// 从持久化/wire 解析；未知回落 Default。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Self::Auto,
+            "manual" => Self::Manual,
+            _ => Self::Default,
+        }
+    }
 }
 
-/// Business Logic（为什么需要这个函数）:
-///     用户 rename 或自动改名后需要更新来源门禁。
-///
-/// Code Logic（这个函数做什么）:
-///     insert/overwrite map。
-fn set_session_name_source(session_id: &str, source: SessionNameSource) {
-    if let Ok(mut guard) = SESSION_NAME_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-    {
-        guard.insert(session_id.to_string(), source);
-    }
+/// window → 当前拥有「自动标题权」的 tmux pane_id（first pane；关闭后交接）。
+static TITLE_OWNER_PANES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+/// window → 最近一次成功应用的自动标题（pane 交接后可重贴）。
+static LAST_AUTO_TITLES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn title_owner_map() -> &'static Mutex<HashMap<String, String>> {
+    TITLE_OWNER_PANES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn last_auto_title_map() -> &'static Mutex<HashMap<String, String>> {
+    LAST_AUTO_TITLES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Business Logic（为什么需要这个函数）:
 ///     持久化-only rename（session 不在 registry）也必须标记 Manual，防止稍后 auto 覆盖。
 ///
 /// Code Logic（这个函数做什么）:
-///     `set_session_name_source(session_id, Manual)`。
-pub fn mark_session_name_manual(session_id: &str) {
-    set_session_name_source(session_id, SessionNameSource::Manual);
+///     no-op 于进程 map（权威在 row.name_source）；保留 API 兼容命令层调用。
+pub fn mark_session_name_manual(_session_id: &str) {
+    // name_source 写在 row / SQLite；此函数仅兼容旧调用点。
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     rename 后前端应立即刷新 tab 名，不必等下一次 list。
+///
+/// Code Logic（这个函数做什么）:
+///     emit `workbench:session-updated`，payload 为完整 session DTO（含 paneCount）。
+pub fn emit_session_updated(state: &AppState, row: &WorkbenchSessionRow) {
+    let pane_count = pane_count_for_row(row);
+    let dto = row.to_dto_with_pane_count(pane_count);
+    state.emit_event("workbench:session-updated", dto);
 }
 
 /// 记录预分配 agent session id。
@@ -189,7 +196,10 @@ enum PaneClosePlan {
 ///     `SessionCloseCleanup`，须在 kill_persisted_backend + SQLite delete 后再 `finish_cleanup`。
 #[allow(clippy::large_enum_variant)]
 pub enum PaneCloseOutcome {
-    PaneClosed,
+    /// 仅关闭 pane；若 title-owner 交接后重贴了 auto 标题，附带更新后的 row 供命令层 persist + emit。
+    PaneClosed {
+        renamed: Option<WorkbenchSessionRow>,
+    },
     WindowClosed(SessionCloseCleanup),
 }
 
@@ -1986,6 +1996,21 @@ fn run_tmux_command(tmux: &TmuxCommand, args: &[&str]) -> Result<String, AppErro
 fn tmux_pane_count(tmux: &TmuxCommand, target: &str) -> Result<usize, AppError> {
     let output = run_tmux_command(tmux, &["list-panes", "-t", target, "-F", "#{pane_id}"])?;
     Ok(pane_count_from_tmux_output(&output))
+}
+
+/// Business Logic（为什么需要这个函数）:
+///     first-pane / title-owner 交接需要有序 pane_id 列表。
+///
+/// Code Logic（这个函数做什么）:
+///     `list-panes -F #{pane_id}`，保留 tmux 输出顺序，过滤空行。
+fn tmux_list_pane_ids(tmux: &TmuxCommand, target: &str) -> Result<Vec<String>, AppError> {
+    let output = run_tmux_command(tmux, &["list-panes", "-t", target, "-F", "#{pane_id}"])?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Business Logic（为什么需要这个函数）:
@@ -4334,6 +4359,7 @@ impl WorkbenchSessionRegistry {
             project_id: project.id.clone(),
             worktree_id,
             name: project.name.clone(),
+            name_source: SessionNameSource::Default.as_str().to_string(),
             command,
             cwd: cwd.clone(),
             status: "running".to_string(),
@@ -4379,6 +4405,8 @@ impl WorkbenchSessionRegistry {
         if let Some(guard) = tmux_create_guard.as_mut() {
             guard.commit();
         }
+        // first-pane title owner：创建后 seed list-panes 第一行，供 agent 自动标题归属。
+        let _ = self.ensure_title_owner_pane(&session_id);
         Ok(spawned)
     }
 
@@ -5294,10 +5322,33 @@ impl WorkbenchSessionRegistry {
         match pane_close_plan(pane_count) {
             PaneClosePlan::KillPane => {
                 run_tmux_command(&tmux, &["kill-pane", "-t", &target])?;
-                Ok(PaneCloseOutcome::PaneClosed)
+                // title-owner 若被关掉：交接给剩余第一 pane；最近 auto 标题可重贴。
+                let mut renamed = None;
+                if let Some((_owner, last_title)) =
+                    self.reassign_title_owner_after_pane_close(session_id)
+                {
+                    if let Some(title) = last_title {
+                        let source = {
+                            let handle = self.get_handle(session_id)?;
+                            let handle = handle.lock().expect("workbench session 锁中毒");
+                            SessionNameSource::parse(&handle.row.name_source)
+                        };
+                        if !matches!(source, SessionNameSource::Manual) {
+                            if let Ok(row) = self.rename_with_source(
+                                session_id,
+                                &title,
+                                SessionNameSource::Auto,
+                            ) {
+                                renamed = Some(row);
+                            }
+                        }
+                    }
+                }
+                Ok(PaneCloseOutcome::PaneClosed { renamed })
             }
             PaneClosePlan::CloseWindow => {
                 let cleanup = self.close(session_id)?;
+                self.clear_title_owner_state(session_id);
                 Ok(PaneCloseOutcome::WindowClosed(cleanup))
             }
         }
@@ -5354,7 +5405,9 @@ impl WorkbenchSessionRegistry {
     /// Code Logic（这个函数做什么）:
     ///     委托 close_inner(None)，返回 SessionCloseCleanup。
     pub fn close(&self, session_id: &str) -> Result<SessionCloseCleanup, AppError> {
-        self.close_inner(session_id, None)
+        let cleanup = self.close_inner(session_id, None)?;
+        self.clear_title_owner_state(session_id);
+        Ok(cleanup)
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -5643,7 +5696,7 @@ impl WorkbenchSessionRegistry {
     ///     用户 rename 与 agent 自动标题共用改名实现，但来源门禁不同。
     ///
     /// Code Logic（这个函数做什么）:
-    ///     trim 名称 → tmux rename-window（best-effort）→ 更新 row → 记录 name_source。
+    ///     trim 名称 → tmux rename-window（best-effort）→ 更新 row.name + name_source。
     pub fn rename_with_source(
         &self,
         session_id: &str,
@@ -5665,8 +5718,13 @@ impl WorkbenchSessionRegistry {
             }
         }
         handle.row.name = next_name;
+        handle.row.name_source = source.as_str().to_string();
         handle.row.updated_at = chrono::Utc::now().to_rfc3339();
-        set_session_name_source(session_id, source);
+        if matches!(source, SessionNameSource::Auto) {
+            if let Ok(mut titles) = last_auto_title_map().lock() {
+                titles.insert(session_id.to_string(), handle.row.name.clone());
+            }
+        }
         Ok(handle.row.clone())
     }
 
@@ -5683,7 +5741,10 @@ impl WorkbenchSessionRegistry {
         let handle = self.get_handle(session_id)?;
         let current = {
             let handle = handle.lock().expect("workbench session 锁中毒");
-            (handle.row.name.clone(), session_name_source(session_id))
+            (
+                handle.row.name.clone(),
+                SessionNameSource::parse(&handle.row.name_source),
+            )
         };
         if !crate::workbench::auto_title::should_apply_auto_title(
             &current.0,
@@ -5695,6 +5756,8 @@ impl WorkbenchSessionRegistry {
         let Some(clean) = crate::workbench::auto_title::sanitize_auto_title(title) else {
             return Ok(None);
         };
+        // 确保 title owner pane 已 seed（单 pane / 首个 list-panes 行）。
+        let _ = self.ensure_title_owner_pane(session_id);
         Ok(Some(self.rename_with_source(
             session_id,
             &clean,
@@ -5723,7 +5786,7 @@ impl WorkbenchSessionRegistry {
     }
 
     /// Business Logic（为什么需要这个函数）:
-    ///     多 pane 时 MVP 禁止自动改 window 名（无法保证 first pane 归属）。
+    ///     多 pane 时仅 title-owner pane 上的 agent 可改 window 名。
     ///
     /// Code Logic（这个函数做什么）:
     ///     查 live row 后委托 pane_count_for_row；缺失会话返回 None。
@@ -5731,6 +5794,106 @@ impl WorkbenchSessionRegistry {
         let handle = self.get_handle(session_id).ok()?;
         let row = handle.lock().ok()?.row.clone();
         Some(pane_count_for_row(&row))
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     创建 window 时 seed first pane 为 title owner，之后 agent 标题只由该 pane 驱动。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     已有 owner 且仍在 pane 列表中则保留；否则取 list-panes 第一行 pane_id。
+    pub fn ensure_title_owner_pane(&self, session_id: &str) -> Option<String> {
+        let handle = self.get_handle(session_id).ok()?;
+        let row = handle.lock().ok()?.row.clone();
+        if row.backend != TMUX_BACKEND {
+            // raw PTY：无 pane 概念，用固定哨兵表示可自动标题。
+            let owner = "%raw".to_string();
+            if let Ok(mut map) = title_owner_map().lock() {
+                map.insert(session_id.to_string(), owner.clone());
+            }
+            return Some(owner);
+        }
+        let tmux = available_tmux_command()?;
+        let target = tmux_window_target_for_row(&row).ok()?;
+        let panes = tmux_list_pane_ids(&tmux, &target).ok()?;
+        if panes.is_empty() {
+            return None;
+        }
+        if let Ok(map) = title_owner_map().lock() {
+            if let Some(existing) = map.get(session_id) {
+                if panes.iter().any(|p| p == existing) {
+                    return Some(existing.clone());
+                }
+            }
+        }
+        let first = panes[0].clone();
+        if let Ok(mut map) = title_owner_map().lock() {
+            map.insert(session_id.to_string(), first.clone());
+        }
+        Some(first)
+    }
+
+    /// 当前 title-owner pane_id（若有）。
+    pub fn title_owner_pane_id(&self, session_id: &str) -> Option<String> {
+        title_owner_map()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned())
+    }
+
+    /// Business Logic（为什么需要这个函数）:
+    ///     关闭 title-owner pane 后，自动标题权应交接给 window 内下一 pane，并可用最近自动标题刷新 window 名。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     kill-pane 后 list panes；若 owner 已消失则取列表第一 pane；返回交接后的 owner 与可选 last auto title。
+    pub fn reassign_title_owner_after_pane_close(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, Option<String>)> {
+        let handle = self.get_handle(session_id).ok()?;
+        let row = handle.lock().ok()?.row.clone();
+        if row.backend != TMUX_BACKEND {
+            return None;
+        }
+        let tmux = available_tmux_command()?;
+        let target = tmux_window_target_for_row(&row).ok()?;
+        let panes = tmux_list_pane_ids(&tmux, &target).ok()?;
+        if panes.is_empty() {
+            if let Ok(mut map) = title_owner_map().lock() {
+                map.remove(session_id);
+            }
+            return None;
+        }
+        let current = title_owner_map()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned());
+        let next = if let Some(cur) = current {
+            if panes.iter().any(|p| p == &cur) {
+                cur
+            } else {
+                panes[0].clone()
+            }
+        } else {
+            panes[0].clone()
+        };
+        if let Ok(mut map) = title_owner_map().lock() {
+            map.insert(session_id.to_string(), next.clone());
+        }
+        let last_title = last_auto_title_map()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned());
+        Some((next, last_title))
+    }
+
+    /// 关闭 session 时清理 title owner / last auto title 缓存。
+    pub fn clear_title_owner_state(&self, session_id: &str) {
+        if let Ok(mut map) = title_owner_map().lock() {
+            map.remove(session_id);
+        }
+        if let Ok(mut map) = last_auto_title_map().lock() {
+            map.remove(session_id);
+        }
     }
 
     /// Business Logic（为什么需要这个函数）:
@@ -5810,6 +5973,7 @@ impl WorkbenchSessionRegistry {
             project_id: project_id.to_string(),
             worktree_id: None,
             name: format!("session-{session_id}"),
+            name_source: "default".to_string(),
             command: default_terminal_command_from_env(Some("/bin/sh".into())),
             cwd: "/tmp/project".to_string(),
             status: "running".to_string(),
@@ -6946,6 +7110,7 @@ mod tests {
             project_id: project_id.to_string(),
             worktree_id: worktree_id.map(str::to_string),
             name: session_id.to_string(),
+            name_source: "default".to_string(),
             command: "/bin/sh".to_string(),
             cwd: "/tmp/project".to_string(),
             status: "running".to_string(),
@@ -8251,6 +8416,7 @@ mod tests {
             project_id: "p1".to_string(),
             worktree_id: None,
             name: "Terminal".to_string(),
+            name_source: "default".to_string(),
             command: "/bin/zsh".to_string(),
             cwd: "/tmp/project".to_string(),
             status: "running".to_string(),
@@ -9848,6 +10014,7 @@ mod tests {
                 project_id: "p1".into(),
                 worktree_id: None,
                 name: "n".into(),
+                name_source: "default".to_string(),
                 command: "/bin/sh".into(),
                 cwd: "/tmp".into(),
                 status: "running".into(),
@@ -9900,6 +10067,7 @@ mod tests {
             project_id: "p1".into(),
             worktree_id: None,
             name: "n".into(),
+            name_source: "default".to_string(),
             command: "/bin/sh".into(),
             cwd: "/tmp".into(),
             status: "running".into(),
@@ -9929,6 +10097,7 @@ mod tests {
                 project_id: "p1".into(),
                 worktree_id: None,
                 name: "n".into(),
+                name_source: "default".to_string(),
                 command: "/bin/sh".into(),
                 cwd: "/tmp".into(),
                 status: "running".into(),
@@ -10069,6 +10238,7 @@ mod tests {
             project_id: "p1".into(),
             worktree_id: None,
             name: "n".into(),
+            name_source: "default".to_string(),
             command: "/bin/sh".into(),
             cwd: "/tmp".into(),
             status: "disconnected".into(),
@@ -10121,6 +10291,7 @@ mod tests {
             project_id: "p1".into(),
             worktree_id: None,
             name: "n".into(),
+            name_source: "default".to_string(),
             command: "/bin/sh".into(),
             cwd: "/tmp".into(),
             status: "running".into(),
@@ -10162,6 +10333,7 @@ mod tests {
                 project_id: "p1".into(),
                 worktree_id: None,
                 name: "n".into(),
+                name_source: "default".to_string(),
                 command: "/bin/sh".into(),
                 cwd: "/tmp".into(),
                 status: "running".into(),
@@ -10229,6 +10401,7 @@ mod tests {
                 project_id: "p1".into(),
                 worktree_id: None,
                 name: "n".into(),
+                name_source: "default".to_string(),
                 command: "/bin/sh".into(),
                 cwd: "/tmp".into(),
                 status: "running".into(),
@@ -10411,6 +10584,7 @@ mod tests {
                 project_id: "p1".into(),
                 worktree_id: None,
                 name: "n".into(),
+                name_source: "default".to_string(),
                 command: "/bin/sh".into(),
                 cwd: "/tmp".into(),
                 status: "running".into(),
@@ -10463,6 +10637,7 @@ mod tests {
             project_id: "p1".into(),
             worktree_id: None,
             name: "n".into(),
+            name_source: "default".to_string(),
             command: "/bin/sh".into(),
             cwd: "/tmp".into(),
             status: "running".into(),
@@ -10507,6 +10682,7 @@ mod tests {
                 project_id: "p1".into(),
                 worktree_id: None,
                 name: "n".into(),
+                name_source: "default".to_string(),
                 command: "/bin/sh".into(),
                 cwd: "/tmp".into(),
                 status: "running".into(),
@@ -10578,6 +10754,7 @@ mod tests {
                 project_id: "p-r27-h4".into(),
                 worktree_id: None,
                 name: "n".into(),
+                name_source: "default".to_string(),
                 command: "/bin/sh".into(),
                 cwd: "/tmp".into(),
                 status: "running".into(),
@@ -10691,6 +10868,7 @@ mod tests {
                         project_id: "p1".into(),
                         worktree_id: None,
                         name: "n".into(),
+                        name_source: "default".to_string(),
                         command: "/bin/sh".into(),
                         cwd: "/tmp".into(),
                         status: "running".into(),
@@ -10769,6 +10947,7 @@ mod tests {
             project_id: "p1".into(),
             worktree_id: None,
             name: "n".into(),
+            name_source: "default".to_string(),
             command: "/bin/sh".into(),
             cwd: "/tmp".into(),
             status: "running".into(),

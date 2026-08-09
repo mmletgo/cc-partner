@@ -21,7 +21,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import type { WorkbenchTerminalStatusEvent, WorkbenchSession } from '@/lib/types';
+import type {
+  WorkbenchTerminalStatusEvent,
+  WorkbenchSession,
+  WorkbenchSessionUpdatedEvent,
+} from '@/lib/types';
 import { workbenchApi } from '@/api/workbench';
 import type { WorkbenchPaneSplitDirection } from '@/api/workbench';
 import { createTerminalInputPump } from '../terminalInputPump';
@@ -1288,6 +1292,40 @@ export function useWorkbenchTerminalController(
     ).then((fn) => {
       if (!registered) {
         // 注册期间组件已卸载；立即释放。
+        fn();
+        return;
+      }
+      unlistenFn = fn;
+    });
+    return () => {
+      registered = false;
+      unlistenFn?.();
+    };
+  }, []);
+
+  // Business Logic: agent 自动标题 / 用户 rename 后后端 emit 完整 session DTO；
+  // 立即合并到 sessions，避免 tab 名等到下一次 list 才刷新。
+  // activeSession?.name 的 draft 同步由上方 defer effect 负责；未知 id 静默忽略。
+  useEffect(() => {
+    const canListen = canListenToTauriEventsRef.current ?? canListenToTauriEventsDefault;
+    if (!canListen()) return undefined;
+    let registered = true;
+    let unlistenFn: (() => void) | null = null;
+    void listen<WorkbenchSessionUpdatedEvent>(
+      'workbench:session-updated',
+      (event) => {
+        const payload = event.payload;
+        if (!payload?.id) return;
+        setSessions((current) => {
+          const exists = current.some((session) => session.id === payload.id);
+          if (!exists) return current;
+          return current.map((session) =>
+            session.id === payload.id ? { ...session, ...payload } : session,
+          );
+        });
+      },
+    ).then((fn) => {
+      if (!registered) {
         fn();
         return;
       }

@@ -10,6 +10,8 @@
 pub mod agent_ledger;
 pub mod agent_runtime;
 pub mod auto_title;
+pub mod auto_title_codex;
+pub mod auto_title_opencode;
 pub mod browser;
 pub mod browser_models;
 pub mod browser_proxy;

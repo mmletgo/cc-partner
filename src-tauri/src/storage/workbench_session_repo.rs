@@ -127,6 +127,13 @@ impl WorkbenchSessionRepo {
                 .execute(&self.pool)
                 .await?;
         }
+        if !names.iter().any(|name| name == "name_source") {
+            sqlx::query(
+                "ALTER TABLE workbench_sessions ADD COLUMN name_source TEXT NOT NULL DEFAULT 'default'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 
@@ -144,7 +151,7 @@ impl WorkbenchSessionRepo {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, \
+            "SELECT id, project_id, worktree_id, name, name_source, command, cwd, status, cols, rows, started_at, exited_at, \
              exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
              FROM workbench_sessions WHERE status = 'running' ORDER BY started_at DESC LIMIT ?",
         )
@@ -165,7 +172,7 @@ impl WorkbenchSessionRepo {
     ) -> Result<Vec<WorkbenchSessionRow>, AppError> {
         let rows = if let Some(project_id) = project_id {
             sqlx::query(
-                "SELECT id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, \
+                "SELECT id, project_id, worktree_id, name, name_source, command, cwd, status, cols, rows, started_at, exited_at, \
                  exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
                  FROM workbench_sessions WHERE project_id = ? ORDER BY started_at ASC",
             )
@@ -174,7 +181,7 @@ impl WorkbenchSessionRepo {
             .await?
         } else {
             sqlx::query(
-                "SELECT id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, \
+                "SELECT id, project_id, worktree_id, name, name_source, command, cwd, status, cols, rows, started_at, exited_at, \
                  exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
                  FROM workbench_sessions ORDER BY started_at ASC",
             )
@@ -195,7 +202,7 @@ impl WorkbenchSessionRepo {
         worktree_id: &str,
     ) -> Result<Vec<WorkbenchSessionRow>, AppError> {
         let rows = sqlx::query(
-            "SELECT id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, \
+            "SELECT id, project_id, worktree_id, name, name_source, command, cwd, status, cols, rows, started_at, exited_at, \
              exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
              FROM workbench_sessions WHERE project_id = ? AND worktree_id = ? ORDER BY started_at ASC",
         )
@@ -213,7 +220,7 @@ impl WorkbenchSessionRepo {
     ///     按 id 查询单条记录，不存在返回 None。
     pub async fn get(&self, id: &str) -> Result<Option<WorkbenchSessionRow>, AppError> {
         let row = sqlx::query(
-            "SELECT id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, \
+            "SELECT id, project_id, worktree_id, name, name_source, command, cwd, status, cols, rows, started_at, exited_at, \
              exit_code, backend, backend_id, backend_window_id, created_at, updated_at \
              FROM workbench_sessions WHERE id = ?",
         )
@@ -238,14 +245,15 @@ impl WorkbenchSessionRepo {
         with_shared_write_lease(&self.gate, async {
             sqlx::query(
                 "INSERT OR REPLACE INTO workbench_sessions \
-                 (id, project_id, worktree_id, name, command, cwd, status, cols, rows, started_at, exited_at, exit_code, \
+                 (id, project_id, worktree_id, name, name_source, command, cwd, status, cols, rows, started_at, exited_at, exit_code, \
                   backend, backend_id, backend_window_id, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&row.id)
             .bind(&row.project_id)
             .bind(&row.worktree_id)
             .bind(&row.name)
+            .bind(crate::workbench::models::normalize_name_source_wire(&row.name_source))
             .bind(&row.command)
             .bind(&row.cwd)
             .bind(&row.status)
@@ -328,11 +336,17 @@ impl WorkbenchSessionRepo {
 fn row_to_session(row: &SqliteRow) -> Result<WorkbenchSessionRow, AppError> {
     let cols: i64 = row.try_get("cols")?;
     let rows: i64 = row.try_get("rows")?;
+    let name_source: String = row
+        .try_get::<Option<String>, _>("name_source")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "default".to_string());
     Ok(WorkbenchSessionRow {
         id: row.try_get("id")?,
         project_id: row.try_get("project_id")?,
         worktree_id: row.try_get("worktree_id")?,
         name: row.try_get("name")?,
+        name_source: crate::workbench::models::normalize_name_source_wire(&name_source),
         command: row.try_get("command")?,
         cwd: row.try_get::<Option<String>, _>("cwd")?.unwrap_or_default(),
         status: row.try_get("status")?,
@@ -371,7 +385,7 @@ mod tests {
             .unwrap();
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS workbench_sessions (\
-             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL, command TEXT NOT NULL, \
+             id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT, name TEXT NOT NULL, name_source TEXT NOT NULL DEFAULT 'default', command TEXT NOT NULL, \
              cwd TEXT, status TEXT NOT NULL, cols INTEGER NOT NULL, rows INTEGER NOT NULL, started_at TEXT NOT NULL, \
              exited_at TEXT, exit_code INTEGER, backend TEXT NOT NULL, backend_id TEXT, \
              backend_window_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -393,6 +407,7 @@ mod tests {
             project_id: project_id.to_string(),
             worktree_id: None,
             name: format!("Terminal {id}"),
+            name_source: "default".to_string(),
             command: "/bin/zsh".to_string(),
             cwd: "/tmp/project".to_string(),
             status: "running".to_string(),

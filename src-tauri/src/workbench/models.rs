@@ -275,6 +275,9 @@ pub struct WorkbenchSessionDto {
     pub project_id: String,
     pub worktree_id: Option<String>,
     pub name: String,
+    /// 名称来源：`default` | `auto` | `manual`（前端可选消费；缺省兼容旧对端）。
+    #[serde(default = "default_name_source_wire")]
+    pub name_source: String,
     pub command: String,
     pub cwd: String,
     pub status: String,
@@ -285,6 +288,10 @@ pub struct WorkbenchSessionDto {
     pub exit_code: Option<i32>,
     pub supports_panes: bool,
     pub pane_count: usize,
+}
+
+fn default_name_source_wire() -> String {
+    "default".to_string()
 }
 
 /// 工作台 terminal window 数据库行模型。
@@ -301,6 +308,8 @@ pub struct WorkbenchSessionRow {
     pub project_id: String,
     pub worktree_id: Option<String>,
     pub name: String,
+    /// `default` | `auto` | `manual`（持久化；用户手改后禁止 agent 覆盖）。
+    pub name_source: String,
     pub command: String,
     pub cwd: String,
     pub status: String,
@@ -337,6 +346,7 @@ impl WorkbenchSessionRow {
             project_id: self.project_id.clone(),
             worktree_id: self.worktree_id.clone(),
             name: self.name.clone(),
+            name_source: normalize_name_source_wire(&self.name_source),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
             status: self.status.clone(),
@@ -348,6 +358,15 @@ impl WorkbenchSessionRow {
             supports_panes: self.backend == "tmux" && self.backend_window_id.is_some(),
             pane_count,
         }
+    }
+}
+
+/// 归一化 name_source 持久化/wire 值。
+pub fn normalize_name_source_wire(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => "auto".to_string(),
+        "manual" => "manual".to_string(),
+        _ => "default".to_string(),
     }
 }
 

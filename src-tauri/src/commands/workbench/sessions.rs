@@ -1061,7 +1061,14 @@ pub(crate) async fn local_close_workbench_pane(
 ) -> Result<serde_json::Value, AppError> {
     state.runtime_role.require_owner()?;
     match state.workbench_sessions.close_active_pane(&session_id)? {
-        PaneCloseOutcome::PaneClosed => {
+        PaneCloseOutcome::PaneClosed { renamed } => {
+            // title-owner 交接后若重贴了 auto 标题，立即持久化并推送 session-updated。
+            if let Some(row) = renamed {
+                if let Err(err) = state.workbench_session_repo.upsert(&row).await {
+                    tracing::debug!("pane 交接后自动标题持久化失败: {err}");
+                }
+                crate::workbench::sessions::emit_session_updated(state, &row);
+            }
             Ok(serde_json::json!({ "ok": true, "sessionId": session_id, "closedWindow": false }))
         }
         PaneCloseOutcome::WindowClosed(cleanup) => {
@@ -1262,7 +1269,10 @@ pub(crate) async fn local_rename_workbench_session(
     match state.workbench_sessions.rename(&session_id, &name) {
         Ok(row) => {
             state.workbench_session_repo.upsert(&row).await?;
-            Ok(row.to_dto())
+            crate::workbench::sessions::emit_session_updated(state, &row);
+            Ok(row.to_dto_with_pane_count(
+                crate::workbench::sessions::pane_count_for_row(&row),
+            ))
         }
         Err(AppError::NotFound(_)) => {
             let mut row = state
@@ -1271,10 +1281,11 @@ pub(crate) async fn local_rename_workbench_session(
                 .await?
                 .ok_or_else(|| AppError::not_found("工作台会话不存在"))?;
             row.name = name.trim().to_string();
+            row.name_source = "manual".to_string();
             row.updated_at = now_iso();
             state.workbench_session_repo.upsert(&row).await?;
-            // 用户手改（含仅持久化行）必须挡后续 agent 自动标题。
             crate::workbench::sessions::mark_session_name_manual(&session_id);
+            crate::workbench::sessions::emit_session_updated(state, &row);
             Ok(row.to_dto())
         }
         Err(error) => Err(error),

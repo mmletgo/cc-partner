@@ -2465,6 +2465,7 @@ mod tests {
                             project_id: "inner-project".to_string(),
                             worktree_id: Some("inner-worktree".to_string()),
                             name: "Remote App".to_string(),
+                            name_source: "default".to_string(),
                             command: "/bin/zsh".to_string(),
                             cwd: "/repo".to_string(),
                             status: "running".to_string(),

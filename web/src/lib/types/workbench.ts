@@ -546,6 +546,8 @@ export interface WorkbenchSession {
   projectId: string;
   worktreeId: string | null;
   name: string;
+  /** 名称来源：default | auto | manual；缺省兼容旧后端。 */
+  nameSource?: 'default' | 'auto' | 'manual' | string;
   command: string;
   cwd: string;
   status: WorkbenchSessionStatus;
@@ -737,6 +739,17 @@ export interface WorkbenchTerminalStatusEvent {
   exitCode: number | null;
   ts: number;
 }
+
+/**
+ * 工作台 session 元数据更新事件（listen('workbench:session-updated')）。
+ *
+ * Business Logic（为什么需要这个类型）:
+ *   agent 自动标题 / 用户 rename 后后端主动推送完整 session DTO，前端无需等下一次 list。
+ *
+ * Code Logic（字段说明）:
+ *   对齐 WorkbenchSession（camelCase）；nameSource 可选以兼容旧后端。
+ */
+export type WorkbenchSessionUpdatedEvent = WorkbenchSession;
 
 /**
  * Workbench HTTP Agent runtime 事件 payload。
